@@ -42,7 +42,7 @@ export default function LoginPage() {
         <div style={logosRowStyle}>
           <img src={logoA3C} alt="A3C Conseil" style={logoLeftStyle} />
 
-          <div style={middleTextStyle}>pour le compte de</div>
+          <div style={middleTextStyle}></div>
 
           <img src={logoCegeclim} alt="Cegeclim Énergies" style={logoRightStyle} />
         </div>
@@ -111,10 +111,10 @@ const logosRowStyle: React.CSSProperties = {
 }
 
 const logoLeftStyle: React.CSSProperties = {
-  maxWidth: 360,
-  maxHeight: 180,
+  maxWidth: 72,
+  maxHeight: 36,
   objectFit: 'contain',
-  justifySelf: 'center',
+  justifySelf: 'left',
 }
 
 const logoRightStyle: React.CSSProperties = {

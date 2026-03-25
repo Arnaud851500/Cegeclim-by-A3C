@@ -15,9 +15,11 @@ export default function LoginPage() {
   const logoA3C =
     'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Logo%20et%20images/A3C_conseil_logo.svg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJMb2dvIGV0IGltYWdlcy9BM0NfY29uc2VpbF9sb2dvLnN2ZyIsImlhdCI6MTc3NDM4NDU5MywiZXhwIjo0ODk2NDQ4NTkzfQ.LRJdkDHMYsQW7-odB29ewButNKwI2cXK1wl5y82gMLY'
   const logoCegeclim =
-    'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Logo%20et%20images/Cegeclim.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJMb2dvIGV0IGltYWdlcy9DZWdlY2xpbS5wbmciLCJpYXQiOjE3NzQzODQ2MjgsImV4cCI6NDg5NjQ0ODYyOH0.TeMYJJWCzmXPRP_5zDzeBqUspJDeT_uxjys7Ahps_6E'
+    'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/cegecilm%20officiel.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL2NlZ2VjaWxtIG9mZmljaWVsLmpwZyIsImlhdCI6MTc3NDQ2NDE3NCwiZXhwIjo0ODk2NTI4MTc0fQ.g5XD3gFp4jxV1llUgHV0lpWnmU2Yz-2s0EIeDqXdlzs'
 
-  const handleLogin = async () => {
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault()
     setErrorMsg('')
     setLoading(true)
 
@@ -33,21 +35,21 @@ export default function LoginPage() {
       return
     }
 
-    router.replace('/dashboard')
+    router.replace('/territoire')
   }
 
   return (
     <div style={pageStyle}>
       <div style={cardStyle}>
-        <div style={logosRowStyle}>
-          <img src={logoA3C} alt="A3C Conseil" style={logoLeftStyle} />
-
-          <div style={middleTextStyle}>pour le compte de</div>
-
-          <img src={logoCegeclim} alt="Cegeclim Énergies" style={logoRightStyle} />
+        <div style={topLogoWrapperStyle}>
+          <img
+            src={logoCegeclim}
+            alt="Cegeclim"
+            style={topLogoStyle}
+          />
         </div>
 
-        <div style={formWrapperStyle}>
+        <form onSubmit={handleLogin} style={formWrapperStyle}>
           <div style={formGridStyle}>
             <label style={labelStyle}>User</label>
             <input
@@ -55,6 +57,7 @@ export default function LoginPage() {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               style={inputStyle}
+              autoComplete="username"
             />
 
             <label style={labelStyle}>Mot de passe</label>
@@ -63,20 +66,24 @@ export default function LoginPage() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               style={inputStyle}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') handleLogin()
-              }}
+              autoComplete="current-password"
             />
           </div>
 
           <div style={buttonRowStyle}>
-            <button onClick={handleLogin} style={buttonStyle} disabled={loading}>
+            <button type="submit" style={buttonStyle} disabled={loading}>
               {loading ? 'Connexion...' : 'Connexion'}
             </button>
           </div>
 
-          {errorMsg && <p style={errorStyle}>{errorMsg}</p>}
-        </div>
+          {errorMsg ? <div style={errorStyle}>{errorMsg}</div> : null}
+        </form>
+
+        <img
+          src={logoA3C}
+          alt="A3C Conseil"
+          style={bottomLogoStyle}
+        />
       </div>
     </div>
   )
@@ -84,103 +91,104 @@ export default function LoginPage() {
 
 const pageStyle: React.CSSProperties = {
   minHeight: '100vh',
+  background: 'rgb(124, 163, 197)',
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'center',
-  background: '#5f6c89',
   padding: 24,
   boxSizing: 'border-box',
 }
 
 const cardStyle: React.CSSProperties = {
-  width: '100%',
-  maxWidth: 980,
+  position: 'relative',
+  width: '80%',
+  maxWidth: 1350,
+  minHeight: 660,
   background: '#ffffff',
-  border: '1px solid #d0d7de',
-  borderRadius: 18,
-  padding: '40px 48px 50px',
+  borderRadius: 26,
+  border: '1px solid rgba(16,24,40,0.10)',
+  boxShadow: '0 6px 18px rgba(15,23,42,0.10)',
+  padding: '70px 90px',
   boxSizing: 'border-box',
 }
 
-const logosRowStyle: React.CSSProperties = {
-  display: 'grid',
-  gridTemplateColumns: '1fr auto 1fr',
-  alignItems: 'center',
-  gap: 24,
-  marginBottom: 56,
+const topLogoWrapperStyle: React.CSSProperties = {
+  display: 'flex',
+  justifyContent: 'center',
+  marginBottom: 90,
 }
 
-const logoLeftStyle: React.CSSProperties = {
-  maxWidth: 360,
-  maxHeight: 180,
+const topLogoStyle: React.CSSProperties = {
+  width: 620,
+  maxWidth: '100%',
+  height: 'auto',
   objectFit: 'contain',
-  justifySelf: 'center',
-}
-
-const logoRightStyle: React.CSSProperties = {
-  maxWidth: 360,
-  maxHeight: 180,
-  objectFit: 'contain',
-  justifySelf: 'center',
-}
-
-const middleTextStyle: React.CSSProperties = {
-  fontSize: 16,
-  color: '#101828',
-  whiteSpace: 'nowrap',
 }
 
 const formWrapperStyle: React.CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  alignItems: 'center',
+  width: '100%',
+  maxWidth: 760,
+  margin: '0 auto',
 }
 
 const formGridStyle: React.CSSProperties = {
   display: 'grid',
-  gridTemplateColumns: '160px 280px',
-  gap: '14px 18px',
+  gridTemplateColumns: '220px 1fr',
   alignItems: 'center',
+  columnGap: 60,
+  rowGap: 22,
 }
 
 const labelStyle: React.CSSProperties = {
-  fontSize: 18,
-  color: '#101828',
+  fontSize: 28,
+  fontWeight: 500,
+  color: '#111827',
   textAlign: 'left',
 }
 
 const inputStyle: React.CSSProperties = {
   width: '100%',
-  height: 42,
-  borderRadius: 10,
-  border: '2px solid #16324a',
-  padding: '0 12px',
-  fontSize: 16,
-  boxSizing: 'border-box',
+  height: 68,
+  borderRadius: 20,
+  border: '4px solid #17395a',
+  background: '#f7f7f7',
+  padding: '0 20px',
+  fontSize: 24,
+  color: '#111827',
   outline: 'none',
+  boxSizing: 'border-box',
 }
 
 const buttonRowStyle: React.CSSProperties = {
-  marginTop: 18,
-  width: 100,
-  display: 'flex',
-  justifyContent: 'left',
+  marginTop: 36,
+  marginLeft: 280,
 }
 
 const buttonStyle: React.CSSProperties = {
-  height: 42,
-  padding: '0 18px',
-  borderRadius: 10,
-  border: '2px solid #16324a',
-  background: '#ffffff',
-  color: '#101828',
-  fontSize: 16,
-  fontWeight: 600,
+  minWidth: 230,
+  height: 66,
+  borderRadius: 20,
+  border: '4px solid #17395a',
+  background: '#f7f7f7',
+  color: '#111827',
+  fontSize: 24,
+  fontWeight: 700,
   cursor: 'pointer',
 }
 
 const errorStyle: React.CSSProperties = {
-  marginTop: 18,
+  marginTop: 20,
+  marginLeft: 280,
   color: '#b42318',
-  textAlign: 'center',
+  fontSize: 16,
+  fontWeight: 600,
+}
+
+const bottomLogoStyle: React.CSSProperties = {
+  position: 'absolute',
+  right: 38,
+  bottom: 28,
+  width: 130,
+  height: 'auto',
+  objectFit: 'contain',
 }

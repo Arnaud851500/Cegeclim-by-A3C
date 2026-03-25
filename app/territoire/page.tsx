@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { useRouter } from 'next/navigation'
+import { useSocieteFilter } from '@/components/SocieteFilterContext'
 import {
   BarChart,
   Bar,
@@ -85,6 +86,29 @@ function normalizeRegion(region: string | null | undefined) {
   return (region || '').trim()
 }
 
+function normalizeSociete(societe: string | null | undefined) {
+  return (societe || '').trim().toLowerCase()
+}
+
+function isSocieteMatch(
+  rowSociete: string | null | undefined,
+  societeFilter: 'Global' | 'Cegeclim' | 'CVC PdL'
+) {
+  if (societeFilter === 'Global') return true
+
+  const value = normalizeSociete(rowSociete)
+
+  if (societeFilter === 'Cegeclim') {
+    return value === 'cegeclim'
+  }
+
+  if (societeFilter === 'CVC PdL') {
+    return value === 'cvc' || value === 'cvc pdl' || value === 'cvc pdl' || value === 'cvc pdl'
+  }
+
+  return true
+}
+
 function buildRegionSummaries(rows: Territory[]): RegionSummary[] {
   const summariesByRegion = REGION_ORDER.map((regionLabel) => {
     const regionRows = rows.filter(
@@ -138,6 +162,7 @@ function isValidUrl(value: string | null | undefined) {
 
 export default function TerritoirePage() {
   const router = useRouter()
+  const { societeFilter } = useSocieteFilter()
 
   const [loading, setLoading] = useState(true)
   const [rows, setRows] = useState<Territory[]>([])
@@ -340,10 +365,14 @@ export default function TerritoirePage() {
     setErrorMsg('')
   }
 
+  const rowsAfterGlobalFilter = useMemo(() => {
+    return rows.filter((row) => isSocieteMatch(row.societe, societeFilter))
+  }, [rows, societeFilter])
+
   const filteredRows = useMemo(() => {
     const q = search.trim().toLowerCase()
 
-    const filtered = rows.filter((row) => {
+    const filtered = rowsAfterGlobalFilter.filter((row) => {
       if (!q) return true
       return (
         (row.code_dep || '').toLowerCase().includes(q) ||
@@ -371,7 +400,7 @@ export default function TerritoirePage() {
       if (as > bs) return sortAsc ? 1 : -1
       return 0
     })
-  }, [rows, search, sortKey, sortAsc])
+  }, [rowsAfterGlobalFilter, search, sortKey, sortAsc])
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -386,7 +415,7 @@ export default function TerritoirePage() {
     const nb = filteredRows.length
     const population = filteredRows.reduce((sum, r) => sum + (r.population || 0), 0)
     const potentiel = filteredRows.reduce((sum, r) => sum + (r.potentiel_total || 0), 0)
-   
+
     const scores = filteredRows
       .map((r) => r.score_attractivite)
       .filter((v): v is number => v != null)
@@ -411,8 +440,8 @@ export default function TerritoirePage() {
   }, [filteredRows])
 
   const regionSummaries = useMemo(() => {
-    return buildRegionSummaries(rows)
-  }, [rows])
+    return buildRegionSummaries(rowsAfterGlobalFilter)
+  }, [rowsAfterGlobalFilter])
 
   const chartData = useMemo(() => {
     return [...filteredRows]
@@ -433,6 +462,9 @@ export default function TerritoirePage() {
   return (
     <>
       <h1 style={{ marginBottom: 18 }}>Territoire</h1>
+      <div style={{ marginBottom: 16, color: '#334155', fontSize: 14, fontWeight: 600 }}>
+        Vision active : {societeFilter}
+      </div>
 
       <div style={sectionCardStyle}>
         <h2 style={{ marginTop: 0, marginBottom: 16 }}>Synthèse par région</h2>
@@ -502,7 +534,8 @@ export default function TerritoirePage() {
                 </div>
               ))}
             </div>
-                        <div style={regionSummaryMetricColStyle}>
+
+            <div style={regionSummaryMetricColStyle}>
               <div style={regionSummaryMetricHeaderStyle}>ATTRACTIVITÉ MOYENNE</div>
               {regionSummaries.map((item) => (
                 <div
@@ -528,8 +561,6 @@ export default function TerritoirePage() {
         <MetricCard title="Score attrac. moyen" value={fmtNumber(indicators.scoreMoyen, 1)} />
         <MetricCard title="CA théorique (€)" value={fmtNumber(indicators.ca, 1)} />
       </div>
-
-      
 
       <div style={sectionCardStyle}>
         <div style={sectionHeaderStyle}>
@@ -655,10 +686,12 @@ export default function TerritoirePage() {
                   <button onClick={() => setIsEditing(true)}>Modifier</button>
                 ) : (
                   <>
-                    <button onClick={() => {
-                      setIsEditing(false)
-                      setEditForm(selected)
-                    }}>
+                    <button
+                      onClick={() => {
+                        setIsEditing(false)
+                        setEditForm(selected)
+                      }}
+                    >
                       Annuler
                     </button>
                     <button onClick={handleSaveEdit}>Enregistrer</button>
@@ -926,7 +959,7 @@ export default function TerritoirePage() {
         </div>
       )}
     </>
-    )
+  )
 }
 
 function MetricCard({ title, value }: { title: string; value: string }) {
@@ -934,21 +967,6 @@ function MetricCard({ title, value }: { title: string; value: string }) {
     <div style={metricCardStyle}>
       <div style={metricTitleStyle}>{title}</div>
       <div style={metricValueStyle}>{value}</div>
-    </div>
-  )
-}
-
-function DetailItem({
-  label,
-  value,
-}: {
-  label: string
-  value: string | null | undefined
-}) {
-  return (
-    <div style={detailItemStyle}>
-      <div style={detailLabelStyle}>{label}</div>
-      <div style={detailValueStyle}>{value || ''}</div>
     </div>
   )
 }

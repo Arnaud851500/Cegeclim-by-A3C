@@ -48,8 +48,8 @@ export default function Page() {
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/Pau.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL1BhdS5wbmciLCJpYXQiOjE3NzQzOTM5NTMsImV4cCI6NDg5NjQ1Nzk1M30.Th6AGuZFySKCgeF5Lw61mip2wl2daj5M-xwMWLZEEWs',
       detailImageUrl:
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/Plan%20Pau.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvUGxhbiBQYXUuanBnIiwiaWF0IjoxNzc0MzkzOTMyLCJleHAiOjQ4OTY0NTc5MzJ9.BAGOJl1TGbUltd-aj2MplszBrRi31ViZvREtL4AsJW0',
-      top: '90%',
-      left: '56%',
+      top: '90.5%',
+      left: '56.3%',
       width: '20px',
       height: '20px',
     },
@@ -89,8 +89,8 @@ export default function Page() {
       shortText: 'Cliquez pour afficher le détail de FMS.',
       description:
         'Cette zone correspond à l’agence de Bayonne. Tu peux afficher ici les informations détaillées, KPI, responsables, potentiel ou commentaires.',
-      logoUrl: '',
-      detailImageUrl: '',
+      logoUrl: 'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/FMS.jpeg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL0ZNUy5qcGVnIiwiaWF0IjoxNzc0NDY0NDIxLCJleHAiOjQ4OTY1Mjg0MjF9.ew2RLNIZp6_HGngPsi710FpvbIrc0fEHOYV5TMCdAgg',
+      detailImageUrl: 'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/FMS.jpeg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL0ZNUy5qcGVnIiwiaWF0IjoxNzc0NDY0NDIxLCJleHAiOjQ4OTY1Mjg0MjF9.ew2RLNIZp6_HGngPsi710FpvbIrc0fEHOYV5TMCdAgg',
       top: '85%',
       left: '48%',
       width: '20px',
@@ -103,7 +103,7 @@ export default function Page() {
       description:
         'Cette zone correspond à l’agence de Bayonne. Tu peux afficher ici les informations détaillées, KPI, responsables, potentiel ou commentaires.',
       logoUrl:
-        'https://YOUR-PROJECT.supabase.co/storage/v1/object/public/site-images/logo-a3c.png',
+        'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/Arcachon.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL0FyY2FjaG9uLnBuZyIsImlhdCI6MTc3NDQ2NDI5MSwiZXhwIjo0ODk2NTI4MjkxfQ.n4xCe38aBiVR5Btbt74uf43hyiQkNmd2q0TiCV5CPZ0',
       detailImageUrl:
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/Plan%20Arcachon.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvUGxhbiBBcmNhY2hvbi5qcGciLCJpYXQiOjE3NzQzOTM4MzMsImV4cCI6NDg5NjQ1NzgzM30.u76ivUsVORC-D1yBGh55LchYmpNbMWge-wxjX7DYcMI',
       top: '72%',
@@ -121,8 +121,8 @@ export default function Page() {
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/Marmande.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL01hcm1hbmRlLnBuZyIsImlhdCI6MTc3NDM5MDk4NCwiZXhwIjo0ODk2NDU0OTg0fQ.IJO3b5I4VDG0Vo_9nG5sHtfESoVc_YhVTS9ZNPdhkGo',
       detailImageUrl:
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/Plan%20Marmande.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvUGxhbiBNYXJtYW5kZS5qcGciLCJpYXQiOjE3NzQzOTEwMzgsImV4cCI6NDg5NjQ1NTAzOH0.6ihq0VQqjON92pdoEPa1_JSrkP7eNr8nmcBaIv_9Nuw',
-      top: '74.5%',
-      left: '61%',
+      top: '74.7%',
+      left: '61.5%',
       width: '20px',
       height: '20px',
     },
@@ -152,7 +152,7 @@ export default function Page() {
       detailImageUrl:
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/Plan%20Artigue.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvUGxhbiBBcnRpZ3VlLmpwZyIsImlhdCI6MTc3NDM5Mzg1MCwiZXhwIjo0ODk2NDU3ODUwfQ.iRSdAcNqaYtfvA7umvAkkjDhT--f0XxlEU8t5p9zAdk',
       top: '68%',
-      left: '55%',
+      left: '55.2%',
       width: '20px',
       height: '20px',
     },
@@ -196,8 +196,8 @@ export default function Page() {
         'https://YOUR-PROJECT.supabase.co/storage/v1/object/public/site-images/logo-a3c.png',
       detailImageUrl:
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/Plan%20La%20Rochelle.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvUGxhbiBMYSBSb2NoZWxsZS5qcGciLCJpYXQiOjE3NzQzOTM5MDQsImV4cCI6NDg5NjQ1NzkwNH0.L0m9ds_p3GfP19ee90Zel-gvBQht_BaYc426e63hSWI',
-      top: '48.5%',
-      left: '48%',
+      top: '48.7%',
+      left: '48.5%',
       width: '20px',
       height: '20px',
     },
@@ -211,7 +211,7 @@ export default function Page() {
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/Angers.webp?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL0FuZ2Vycy53ZWJwIiwiaWF0IjoxNzc0Mzk0MDYyLCJleHAiOjQ4OTY0NTgwNjJ9.dmQEj6gUQyNKVMzbOwnr_SBKzdaGLTSGs_yJc7QkcTA',
       detailImageUrl:
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/Plan%20Angers.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvUGxhbiBBbmdlcnMucG5nIiwiaWF0IjoxNzc0Mzk1NzI3LCJleHAiOjQ4OTY0NTk3Mjd9.9RF-lrT4vQNJF5dqKSjanTuvksKGNh3tegtvr--OKjo',
-      top: '28%',
+      top: '28.5%',
       left: '55%',
       width: '20px',
       height: '20px',
@@ -226,7 +226,7 @@ export default function Page() {
         'https://YOUR-PROJECT.supabase.co/storage/v1/object/public/site-images/logo-a3c.png',
       detailImageUrl: '',
       top: '18%',
-      left: '42.5%',
+      left: '43%',
       width: '20px',
       height: '20px',
     },

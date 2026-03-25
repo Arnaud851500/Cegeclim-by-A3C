@@ -2,22 +2,28 @@
 
 import { usePathname, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
+import {
+  SocieteFilterProvider,
+  useSocieteFilter,
+  type SocieteFilter,
+} from '@/components/SocieteFilterContext'
 
-export default function RootLayout({
+function AppShell({
   children,
 }: {
   children: React.ReactNode
 }) {
   const router = useRouter()
   const pathname = usePathname()
+  const { societeFilter, setSocieteFilter } = useSocieteFilter()
 
   const menu = [
-    { label: 'Dashboard (WIP)', path: '/dashboard' },
     { label: 'Territoire', path: '/territoire' },
     { label: 'Agences', path: '/agences' },
     { label: 'Cartographie', path: '/cartographie' },
     { label: 'Clients (WIP)', path: '/clients' },
-    { label: 'Produits - Offre (WIP)', path: '/produits' },  
+    { label: 'Produits - Offre (WIP)', path: '/produits' },
+    { label: 'Dashboard (WIP)', path: '/dashboard' },
     { label: 'Activités - CA (WIP)', path: '/activites' },
     { label: 'Stocks et Flux log (WIP)', path: '/stocks' },
     { label: 'Paramétrage (WIP)', path: '/parametrage' },
@@ -39,69 +45,87 @@ export default function RootLayout({
 
   if (isLoginPage) {
     return (
-      <html lang="fr">
-        <body style={{ margin: 0, fontFamily: 'Arial, sans-serif', background: '#f5f7fa' }}>
-          {children}
-        </body>
-      </html>
+      <div style={{ margin: 0, fontFamily: 'Arial, sans-serif', background: '#f5f7fa' }}>
+        {children}
+      </div>
     )
   }
 
   return (
-    <html lang="fr">
-      <body style={{ margin: 0, fontFamily: 'Arial, sans-serif' }}>
-        <div style={appShellStyle}>
-          <aside style={sidebarStyle}>
-            <div style={logoBlockStyle}>
-              <div style={logoCircleStyle}>A3C</div>
-              <div>
-                <div style={brandTitleStyle}>Intranet</div>
-                <div style={brandSubStyle}>V1.secure</div>
-                <div style={brandSubStyle}>CEGECLIM</div>
-              </div>
-            </div>
-
-            <div style={{ marginTop: 18 }}>
-              <div style={sectionTitleStyle}>VISION</div>
-              <select style={selectStyle} defaultValue="Globale">
-                <option>Globale</option>
-              </select>
-            </div>
-
-            <div style={{ marginTop: 18, flex: 1, overflowY: 'auto' }}>
-              <div style={sectionTitleStyle}>NAVIGATION</div>
-
-              {menu.map((item) => {
-                const isActive = pathname === item.path
-
-                return (
-                  <button
-                    key={item.path}
-                    onClick={() => router.push(item.path)}
-                    style={{
-                      ...menuButtonStyle,
-                      background: isActive ? '#4a5878' : '#5f6c89',
-                      border: isActive ? '1px solid #aab6cf' : '1px solid rgba(255,255,255,0.08)',
-                    }}
-                  >
-                    {item.label}
-                  </button>
-                )
-              })}
-            </div>
-          </aside>
-
-          <div style={contentWrapperStyle}>
-            <header style={topBarStyle}>
-              <div style={topBarTitleStyle}>{getPageTitle()}</div>
-
-              <button onClick={handleLogout} style={logoutButtonStyle}>
-                Déconnexion
-              </button>
-            </header>
-            <main style={contentStyle}>{children}</main>
+    <div style={appShellStyle}>
+      <aside style={sidebarStyle}>
+        <div style={logoBlockStyle}>
+          <div style={logoCircleStyle}>A3C</div>
+          <div>
+            <div style={brandTitleStyle}>Intranet</div>
+            <div style={brandSubStyle}>V1.secure</div>
+            <div style={brandSubStyle}>CEGECLIM</div>
           </div>
         </div>
+
+        <div style={{ marginTop: 18 }}>
+          <div style={sectionTitleStyle}>VISION</div>
+          <select
+            style={selectStyle}
+            value={societeFilter}
+            onChange={(e) => setSocieteFilter(e.target.value as SocieteFilter)}
+          >
+            <option value="Global">Global</option>
+            <option value="Cegeclim">Cegeclim</option>
+            <option value="CVC PdL">CVC PdL</option>
+          </select>
+        </div>
+
+        <div style={{ marginTop: 18, flex: 1, overflowY: 'auto' }}>
+          <div style={sectionTitleStyle}>NAVIGATION</div>
+
+          {menu.map((item) => {
+            const isActive = pathname === item.path
+
+            return (
+              <button
+                key={item.path}
+                onClick={() => router.push(item.path)}
+                style={{
+                  ...menuButtonStyle,
+                  background: isActive ? '#4a5878' : '#5f6c89',
+                  border: isActive
+                    ? '1px solid #aab6cf'
+                    : '1px solid rgba(255,255,255,0.08)',
+                }}
+              >
+                {item.label}
+              </button>
+            )
+          })}
+        </div>
+      </aside>
+
+      <div style={contentWrapperStyle}>
+        <header style={topBarStyle}>
+          <div style={topBarTitleStyle}>{getPageTitle()}</div>
+
+          <button onClick={handleLogout} style={logoutButtonStyle}>
+            Déconnexion
+          </button>
+        </header>
+        <main style={contentStyle}>{children}</main>
+      </div>
+    </div>
+  )
+}
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode
+}) {
+  return (
+    <html lang="fr">
+      <body style={{ margin: 0, fontFamily: 'Arial, sans-serif' }}>
+        <SocieteFilterProvider>
+          <AppShell>{children}</AppShell>
+        </SocieteFilterProvider>
       </body>
     </html>
   )

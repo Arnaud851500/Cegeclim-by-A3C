@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
+import { useSocieteFilter } from '@/components/SocieteFilterContext'
 
 type Agence = {
   id: string
@@ -44,6 +45,13 @@ const REGIONS = [
   'Normandie',
 ] as const
 
+const REGIONS_SYNTHSE = [
+  'Nouvelle-Aquitaine',
+  'Pays de Loire',
+  'Bretagne',
+  'Normandie',
+] as const
+
 const emptyString = (v: string | null | undefined) => v ?? ''
 const emptyNumber = (v: number | null | undefined) => v ?? 0
 
@@ -67,6 +75,8 @@ function getGoogleMapsLink(address: string | null | undefined) {
 }
 
 export default function AgencesPage() {
+  const { societeFilter } = useSocieteFilter()
+
   const [agences, setAgences] = useState<Agence[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -120,26 +130,36 @@ export default function AgencesPage() {
     setSortDirection('asc')
   }
 
+  function matchesGlobalSocieteFilter(a: Agence) {
+    if (societeFilter === 'Global') return true
+    if (societeFilter === 'Cegeclim') return a.societe === 'Cegeclim'
+    if (societeFilter === 'CVC PdL') return a.societe === 'CVC'
+    return true
+  }
+
+  const agencesApresFiltreGlobal = useMemo(() => {
+    return agences.filter(matchesGlobalSocieteFilter)
+  }, [agences, societeFilter])
+
   const filteredAgences = useMemo(() => {
     const q = search.trim().toLowerCase()
 
-    return agences.filter((a) => {
-      const searchable =
-        [
-          a.agence,
-          a.region,
-          a.societe,
-          a.type,
-          a.departement,
-          a.rattachement_pf,
-          a.resp_agence,
-          a.statut,
-          a.adresse,
-          a.commentaire,
-        ]
-          .filter(Boolean)
-          .join(' ')
-          .toLowerCase()
+    return agencesApresFiltreGlobal.filter((a) => {
+      const searchable = [
+        a.agence,
+        a.region,
+        a.societe,
+        a.type,
+        a.departement,
+        a.rattachement_pf,
+        a.resp_agence,
+        a.statut,
+        a.adresse,
+        a.commentaire,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
 
       const matchesSearch = !q || searchable.includes(q)
       const matchesRegion = filterRegion === 'Toutes' || a.region === filterRegion
@@ -149,7 +169,14 @@ export default function AgencesPage() {
 
       return matchesSearch && matchesRegion && matchesSociete && matchesType && matchesStatut
     })
-  }, [agences, search, filterRegion, filterSociete, filterType, filterStatut])
+  }, [
+    agencesApresFiltreGlobal,
+    search,
+    filterRegion,
+    filterSociete,
+    filterType,
+    filterStatut,
+  ])
 
   const sortedAgences = useMemo(() => {
     const items = [...filteredAgences]
@@ -165,7 +192,10 @@ export default function AgencesPage() {
         return sortDirection === 'asc' ? aVal - bVal : bVal - aVal
       }
 
-      const res = String(aVal).localeCompare(String(bVal), 'fr', { numeric: true, sensitivity: 'base' })
+      const res = String(aVal).localeCompare(String(bVal), 'fr', {
+        numeric: true,
+        sensitivity: 'base',
+      })
       return sortDirection === 'asc' ? res : -res
     })
 
@@ -173,8 +203,8 @@ export default function AgencesPage() {
   }, [filteredAgences, sortKey, sortDirection])
 
   const syntheseParRegion = useMemo(() => {
-    return REGIONS.map((region) => {
-      const items = agences.filter((a) => a.region === region)
+    return REGIONS_SYNTHSE.map((region) => {
+      const items = agencesApresFiltreGlobal.filter((a) => a.region === region)
 
       return {
         region,
@@ -185,7 +215,7 @@ export default function AgencesPage() {
         effectif: items.reduce((sum, a) => sum + emptyNumber(a.effectif_total), 0),
       }
     })
-  }, [agences])
+  }, [agencesApresFiltreGlobal])
 
   function openView(agence: Agence) {
     setSelectedAgence(agence)
@@ -278,7 +308,7 @@ export default function AgencesPage() {
   }
 
   const totalGeneral = useMemo(() => {
-    return agences.reduce(
+    return agencesApresFiltreGlobal.reduce(
       (acc, a) => {
         acc.nbAgences += 1
         acc.caKe += emptyNumber(a.ca_ke)
@@ -295,15 +325,20 @@ export default function AgencesPage() {
         effectif: 0,
       }
     )
-  }, [agences])
+  }, [agencesApresFiltreGlobal])
 
   return (
     <main style={{ minHeight: '100vh', background: '#f8fafc', padding: 24 }}>
       <div style={{ maxWidth: 1500, margin: '0 auto' }}>
         <div style={{ marginBottom: 24 }}>
-          <h1 style={{ margin: 0, fontSize: 36, fontWeight: 800, color: '#0f172a' }}>Agences</h1>
+          <h1 style={{ margin: 0, fontSize: 36, fontWeight: 800, color: '#0f172a' }}>
+            Agences
+          </h1>
           <p style={{ marginTop: 8, color: '#64748b', fontSize: 15 }}>
             Synthèse par région et détail des agences / plateformes
+          </p>
+          <p style={{ marginTop: 8, color: '#334155', fontSize: 14, fontWeight: 600 }}>
+            Vision active : {societeFilter}
           </p>
         </div>
 
@@ -320,7 +355,7 @@ export default function AgencesPage() {
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+              gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
               gap: 16,
               marginBottom: 16,
             }}
@@ -335,7 +370,9 @@ export default function AgencesPage() {
             </div>
             <div style={summaryGlobalCardStyle}>
               <div style={summaryLabelStyle}>Surface totale</div>
-              <div style={summaryValueStyle}>{formatNumber(totalGeneral.surfaceTotale, 0)} m²</div>
+              <div style={summaryValueStyle}>
+                {formatNumber(totalGeneral.surfaceTotale, 0)} m²
+              </div>
             </div>
             <div style={summaryGlobalCardStyle}>
               <div style={summaryLabelStyle}>Stock total</div>
@@ -354,7 +391,7 @@ export default function AgencesPage() {
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+              gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
               gap: 16,
             }}
           >
@@ -420,7 +457,7 @@ export default function AgencesPage() {
 
             <select value={filterRegion} onChange={(e) => setFilterRegion(e.target.value)} style={inputStyle}>
               <option>Toutes</option>
-              {REGIONS.map((region) => (
+              {REGIONS.filter((region) => region !== 'Centre Val de Loire').map((region) => (
                 <option key={region} value={region}>
                   {region}
                 </option>
@@ -517,385 +554,367 @@ export default function AgencesPage() {
       </div>
 
       {selectedAgence && draftAgence && (
-        <div
-          onClick={closeModal}
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(15,23,42,0.55)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: 24,
-            zIndex: 1000,
-          }}
-        >
+        <div onClick={closeModal} style={modalOverlayStyle}>
           <div
             onClick={(e) => e.stopPropagation()}
-            style={{
-              width: '100%',
-              maxWidth: 1400,
-              maxHeight: '92vh',
-              overflow: 'auto',
-              background: '#ffffff',
-              borderRadius: 24,
-              boxShadow: '0 30px 80px rgba(15,23,42,0.28)',
-              display: 'grid',
-              gridTemplateColumns: '1.1fr 1fr',
-              gap: 0,
-            }}
+            style={modalContainerStyle}
           >
-            <div style={{ background: '#e2e8f0', minHeight: 500 }}>
+            <div style={modalMediaColumnStyle}>
               {draftAgence.image ? (
-                <img
-                  src={draftAgence.image}
-                  alt={draftAgence.agence}
-                  style={{
-                    width: '100%',
-                    height: '100%',
-                    minHeight: 500,
-                    objectFit: 'cover',
-                    display: 'block',
-                  }}
-                />
+                <>
+                  <div
+                    style={{
+                      ...modalMediaBackgroundStyle,
+                      backgroundImage: `url(${draftAgence.image})`,
+                    }}
+                  />
+                  <div style={modalMediaInnerStyle}>
+                    <img
+                      src={draftAgence.image}
+                      alt={draftAgence.agence}
+                      style={modalImageStyle}
+                    />
+                  </div>
+                </>
               ) : (
-                <div
-                  style={{
-                    minHeight: 500,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    color: '#64748b',
-                  }}
-                >
+                <div style={modalNoImageStyle}>
                   Aucune photo disponible
                 </div>
               )}
             </div>
 
-            <div style={{ padding: 24 }}>
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'flex-start',
-                  gap: 16,
-                  marginBottom: 20,
-                }}
-              >
+            <div style={modalContentColumnStyle}>
+              <div style={modalHeaderStickyStyle}>
                 <div>
-                  <h2 style={{ margin: 0, fontSize: 28, fontWeight: 800, color: '#0f172a' }}>
-                    {draftAgence.agence}
-                  </h2>
-                  <div style={{ marginTop: 6, color: '#64748b', fontSize: 15 }}>
-                    {draftAgence.type} · {draftAgence.societe} · {draftAgence.region}
+                  <h2 style={modalTitleStyle}>{draftAgence.agence}</h2>
+
+                  <div style={modalSubtitleRowStyle}>
+                    <span style={pillStyle}>{draftAgence.type}</span>
+                    <span style={pillStyle}>{draftAgence.societe}</span>
+                    <span style={pillStyle}>{draftAgence.region}</span>
                   </div>
                 </div>
 
-                <div style={{ display: 'flex', gap: 8 }}>
+                <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
                   {!isEditing ? (
-                    <button type="button" onClick={() => setIsEditing(true)} style={editButtonStyle}>
+                    <button
+                      type="button"
+                      onClick={() => setIsEditing(true)}
+                      style={editButtonStyle}
+                    >
                       Mettre à jour
                     </button>
                   ) : (
-                    <button type="button" onClick={handleSave} disabled={saving} style={saveButtonStyle}>
+                    <button
+                      type="button"
+                      onClick={handleSave}
+                      disabled={saving}
+                      style={saveButtonStyle}
+                    >
                       {saving ? 'Enregistrement...' : 'Enregistrer'}
                     </button>
                   )}
+
                   <button type="button" onClick={closeModal} style={closeButtonStyle}>
                     Fermer
                   </button>
                 </div>
               </div>
 
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: '1fr 1fr',
-                  gap: 14,
-                }}
-              >
-                <Field label="Type">
-                  {isEditing ? (
-                    <select
-                      value={draftAgence.type}
-                      onChange={(e) => updateDraft('type', e.target.value as Agence['type'])}
-                      style={inputStyle}
-                    >
-                      <option value="Agence">Agence</option>
-                      <option value="Plateforme">Plateforme</option>
-                    </select>
-                  ) : (
-                    <Value>{draftAgence.type}</Value>
-                  )}
-                </Field>
+              <div style={modalBodyStyle}>
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '1fr 1fr',
+                    gap: 14,
+                  }}
+                >
+                  <Field label="Type">
+                    {isEditing ? (
+                      <select
+                        value={draftAgence.type}
+                        onChange={(e) => updateDraft('type', e.target.value as Agence['type'])}
+                        style={inputStyle}
+                      >
+                        <option value="Agence">Agence</option>
+                        <option value="Plateforme">Plateforme</option>
+                      </select>
+                    ) : (
+                      <Value>{draftAgence.type}</Value>
+                    )}
+                  </Field>
 
-                <Field label="Département">
-                  {isEditing ? (
-                    <input
-                      value={emptyString(draftAgence.departement)}
-                      onChange={(e) => updateDraft('departement', e.target.value)}
-                      style={inputStyle}
-                    />
-                  ) : (
-                    <Value>{draftAgence.departement}</Value>
-                  )}
-                </Field>
+                  <Field label="Département">
+                    {isEditing ? (
+                      <input
+                        value={emptyString(draftAgence.departement)}
+                        onChange={(e) => updateDraft('departement', e.target.value)}
+                        style={inputStyle}
+                      />
+                    ) : (
+                      <Value>{draftAgence.departement}</Value>
+                    )}
+                  </Field>
 
-                <Field label="Société">
-                  {isEditing ? (
-                    <select
-                      value={draftAgence.societe}
-                      onChange={(e) => updateDraft('societe', e.target.value as Agence['societe'])}
-                      style={inputStyle}
-                    >
-                      <option value="Cegeclim">Cegeclim</option>
-                      <option value="CVC">CVC</option>
-                    </select>
-                  ) : (
-                    <Value>{draftAgence.societe}</Value>
-                  )}
-                </Field>
+                  <Field label="Société">
+                    {isEditing ? (
+                      <select
+                        value={draftAgence.societe}
+                        onChange={(e) => updateDraft('societe', e.target.value as Agence['societe'])}
+                        style={inputStyle}
+                      >
+                        <option value="Cegeclim">Cegeclim</option>
+                        <option value="CVC">CVC</option>
+                      </select>
+                    ) : (
+                      <Value>{draftAgence.societe}</Value>
+                    )}
+                  </Field>
 
-                <Field label="Agence">
-                  {isEditing ? (
-                    <input
-                      value={emptyString(draftAgence.agence)}
-                      onChange={(e) => updateDraft('agence', e.target.value)}
-                      style={inputStyle}
-                    />
-                  ) : (
-                    <Value>{draftAgence.agence}</Value>
-                  )}
-                </Field>
+                  <Field label="Agence">
+                    {isEditing ? (
+                      <input
+                        value={emptyString(draftAgence.agence)}
+                        onChange={(e) => updateDraft('agence', e.target.value)}
+                        style={inputStyle}
+                      />
+                    ) : (
+                      <Value>{draftAgence.agence}</Value>
+                    )}
+                  </Field>
 
-                <Field label="Rattachement PF">
-                  {isEditing ? (
-                    <input
-                      value={emptyString(draftAgence.rattachement_pf)}
-                      onChange={(e) => updateDraft('rattachement_pf', e.target.value)}
-                      style={inputStyle}
-                    />
-                  ) : (
-                    <Value>{draftAgence.rattachement_pf || '-'}</Value>
-                  )}
-                </Field>
+                  <Field label="Rattachement PF">
+                    {isEditing ? (
+                      <input
+                        value={emptyString(draftAgence.rattachement_pf)}
+                        onChange={(e) => updateDraft('rattachement_pf', e.target.value)}
+                        style={inputStyle}
+                      />
+                    ) : (
+                      <Value>{draftAgence.rattachement_pf || '-'}</Value>
+                    )}
+                  </Field>
 
-                <Field label="Région">
-                  {isEditing ? (
-                    <select
-                      value={draftAgence.region}
-                      onChange={(e) => updateDraft('region', e.target.value as Agence['region'])}
-                      style={inputStyle}
-                    >
-                      {REGIONS.map((region) => (
-                        <option key={region} value={region}>
-                          {region}
-                        </option>
-                      ))}
-                    </select>
-                  ) : (
-                    <Value>{draftAgence.region}</Value>
-                  )}
-                </Field>
+                  <Field label="Région">
+                    {isEditing ? (
+                      <select
+                        value={draftAgence.region}
+                        onChange={(e) => updateDraft('region', e.target.value as Agence['region'])}
+                        style={inputStyle}
+                      >
+                        {REGIONS.map((region) => (
+                          <option key={region} value={region}>
+                            {region}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <Value>{draftAgence.region}</Value>
+                    )}
+                  </Field>
 
-                <Field label="Resp. Agence">
-                  {isEditing ? (
-                    <input
-                      value={emptyString(draftAgence.resp_agence)}
-                      onChange={(e) => updateDraft('resp_agence', e.target.value)}
-                      style={inputStyle}
-                    />
-                  ) : (
-                    <Value>{draftAgence.resp_agence || '-'}</Value>
-                  )}
-                </Field>
+                  <Field label="Resp. Agence">
+                    {isEditing ? (
+                      <input
+                        value={emptyString(draftAgence.resp_agence)}
+                        onChange={(e) => updateDraft('resp_agence', e.target.value)}
+                        style={inputStyle}
+                      />
+                    ) : (
+                      <Value>{draftAgence.resp_agence || '-'}</Value>
+                    )}
+                  </Field>
 
-                <Field label="Statut">
-                  {isEditing ? (
-                    <select
-                      value={draftAgence.statut}
-                      onChange={(e) => updateDraft('statut', e.target.value as Agence['statut'])}
-                      style={inputStyle}
-                    >
-                      <option value="Ouvert">Ouvert</option>
-                      <option value="Fermé">Fermé</option>
-                    </select>
-                  ) : (
-                    <Value>{draftAgence.statut}</Value>
-                  )}
-                </Field>
+                  <Field label="Statut">
+                    {isEditing ? (
+                      <select
+                        value={draftAgence.statut}
+                        onChange={(e) => updateDraft('statut', e.target.value as Agence['statut'])}
+                        style={inputStyle}
+                      >
+                        <option value="Ouvert">Ouvert</option>
+                        <option value="Fermé">Fermé</option>
+                      </select>
+                    ) : (
+                      <Value>{draftAgence.statut}</Value>
+                    )}
+                  </Field>
 
-                <Field label="Nb TCI">
-                  {isEditing ? (
-                    <input
-                      type="number"
-                      value={draftAgence.nb_tci ?? 0}
-                      onChange={(e) => updateDraft('nb_tci', Number(e.target.value))}
-                      style={inputStyle}
-                    />
-                  ) : (
-                    <Value>{formatNumber(draftAgence.nb_tci)}</Value>
-                  )}
-                </Field>
+                  <Field label="Nb TCI">
+                    {isEditing ? (
+                      <input
+                        type="number"
+                        value={draftAgence.nb_tci ?? 0}
+                        onChange={(e) => updateDraft('nb_tci', Number(e.target.value))}
+                        style={inputStyle}
+                      />
+                    ) : (
+                      <Value>{formatNumber(draftAgence.nb_tci)}</Value>
+                    )}
+                  </Field>
 
-                <Field label="Nb TCS">
-                  {isEditing ? (
-                    <input
-                      type="number"
-                      value={draftAgence.nb_tcs ?? 0}
-                      onChange={(e) => updateDraft('nb_tcs', Number(e.target.value))}
-                      style={inputStyle}
-                    />
-                  ) : (
-                    <Value>{formatNumber(draftAgence.nb_tcs)}</Value>
-                  )}
-                </Field>
+                  <Field label="Nb TCS">
+                    {isEditing ? (
+                      <input
+                        type="number"
+                        value={draftAgence.nb_tcs ?? 0}
+                        onChange={(e) => updateDraft('nb_tcs', Number(e.target.value))}
+                        style={inputStyle}
+                      />
+                    ) : (
+                      <Value>{formatNumber(draftAgence.nb_tcs)}</Value>
+                    )}
+                  </Field>
 
-                <Field label="Nb Hotliner">
-                  {isEditing ? (
-                    <input
-                      type="number"
-                      value={draftAgence.nb_hotliner ?? 0}
-                      onChange={(e) => updateDraft('nb_hotliner', Number(e.target.value))}
-                      style={inputStyle}
-                    />
-                  ) : (
-                    <Value>{formatNumber(draftAgence.nb_hotliner)}</Value>
-                  )}
-                </Field>
+                  <Field label="Nb Hotliner">
+                    {isEditing ? (
+                      <input
+                        type="number"
+                        value={draftAgence.nb_hotliner ?? 0}
+                        onChange={(e) => updateDraft('nb_hotliner', Number(e.target.value))}
+                        style={inputStyle}
+                      />
+                    ) : (
+                      <Value>{formatNumber(draftAgence.nb_hotliner)}</Value>
+                    )}
+                  </Field>
 
-                <Field label="Effectif total">
-                  {isEditing ? (
-                    <input
-                      type="number"
-                      value={draftAgence.effectif_total ?? 0}
-                      onChange={(e) => updateDraft('effectif_total', Number(e.target.value))}
-                      style={inputStyle}
-                    />
-                  ) : (
-                    <Value>{formatNumber(draftAgence.effectif_total)}</Value>
-                  )}
-                </Field>
+                  <Field label="Effectif total">
+                    {isEditing ? (
+                      <input
+                        type="number"
+                        value={draftAgence.effectif_total ?? 0}
+                        onChange={(e) => updateDraft('effectif_total', Number(e.target.value))}
+                        style={inputStyle}
+                      />
+                    ) : (
+                      <Value>{formatNumber(draftAgence.effectif_total)}</Value>
+                    )}
+                  </Field>
 
-                <Field label="CA K€">
-                  {isEditing ? (
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={draftAgence.ca_ke ?? 0}
-                      onChange={(e) => updateDraft('ca_ke', Number(e.target.value))}
-                      style={inputStyle}
-                    />
-                  ) : (
-                    <Value>{formatNumber(draftAgence.ca_ke, 0)}</Value>
-                  )}
-                </Field>
+                  <Field label="CA K€">
+                    {isEditing ? (
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={draftAgence.ca_ke ?? 0}
+                        onChange={(e) => updateDraft('ca_ke', Number(e.target.value))}
+                        style={inputStyle}
+                      />
+                    ) : (
+                      <Value>{formatNumber(draftAgence.ca_ke, 0)}</Value>
+                    )}
+                  </Field>
 
-                <Field label="Stock K€">
-                  {isEditing ? (
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={draftAgence.stock_ke ?? 0}
-                      onChange={(e) => updateDraft('stock_ke', Number(e.target.value))}
-                      style={inputStyle}
-                    />
-                  ) : (
-                    <Value>{formatNumber(draftAgence.stock_ke, 0)}</Value>
-                  )}
-                </Field>
+                  <Field label="Stock K€">
+                    {isEditing ? (
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={draftAgence.stock_ke ?? 0}
+                        onChange={(e) => updateDraft('stock_ke', Number(e.target.value))}
+                        style={inputStyle}
+                      />
+                    ) : (
+                      <Value>{formatNumber(draftAgence.stock_ke, 0)}</Value>
+                    )}
+                  </Field>
 
-                <Field label="Surface totale">
-                  {isEditing ? (
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={draftAgence.surface_totale ?? 0}
-                      onChange={(e) => updateDraft('surface_totale', Number(e.target.value))}
-                      style={inputStyle}
-                    />
-                  ) : (
-                    <Value>{formatNumber(draftAgence.surface_totale, 0)} m²</Value>
-                  )}
-                </Field>
+                  <Field label="Surface totale">
+                    {isEditing ? (
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={draftAgence.surface_totale ?? 0}
+                        onChange={(e) => updateDraft('surface_totale', Number(e.target.value))}
+                        style={inputStyle}
+                      />
+                    ) : (
+                      <Value>{formatNumber(draftAgence.surface_totale, 0)} m²</Value>
+                    )}
+                  </Field>
 
-                <Field label="Surface stockage">
-                  {isEditing ? (
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={draftAgence.surface_stockage ?? 0}
-                      onChange={(e) => updateDraft('surface_stockage', Number(e.target.value))}
-                      style={inputStyle}
-                    />
-                  ) : (
-                    <Value>{formatNumber(draftAgence.surface_stockage, 0)} m²</Value>
-                  )}
-                </Field>
+                  <Field label="Surface stockage">
+                    {isEditing ? (
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={draftAgence.surface_stockage ?? 0}
+                        onChange={(e) => updateDraft('surface_stockage', Number(e.target.value))}
+                        style={inputStyle}
+                      />
+                    ) : (
+                      <Value>{formatNumber(draftAgence.surface_stockage, 0)} m²</Value>
+                    )}
+                  </Field>
 
-                <Field label="Adresse / Google Maps" fullWidth>
-                  {isEditing ? (
-                    <input
-                      value={emptyString(draftAgence.adresse)}
-                      onChange={(e) => updateDraft('adresse', e.target.value)}
-                      style={inputStyle}
-                    />
-                  ) : getGoogleMapsLink(draftAgence.adresse) ? (
-                    <a
-                      href={getGoogleMapsLink(draftAgence.adresse)}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ color: '#2563eb', textDecoration: 'underline', wordBreak: 'break-word' }}
-                    >
-                      {draftAgence.adresse}
-                    </a>
-                  ) : (
-                    <Value>-</Value>
-                  )}
-                </Field>
+                  <Field label="Adresse / Google Maps" fullWidth>
+                    {isEditing ? (
+                      <input
+                        value={emptyString(draftAgence.adresse)}
+                        onChange={(e) => updateDraft('adresse', e.target.value)}
+                        style={inputStyle}
+                      />
+                    ) : getGoogleMapsLink(draftAgence.adresse) ? (
+                      <a
+                        href={getGoogleMapsLink(draftAgence.adresse)}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{
+                          color: '#2563eb',
+                          textDecoration: 'underline',
+                          wordBreak: 'break-word',
+                        }}
+                      >
+                        {draftAgence.adresse}
+                      </a>
+                    ) : (
+                      <Value>-</Value>
+                    )}
+                  </Field>
 
-                <Field label="Lien image" fullWidth>
-                  {isEditing ? (
-                    <input
-                      value={emptyString(draftAgence.image)}
-                      onChange={(e) => updateDraft('image', e.target.value)}
-                      style={inputStyle}
-                    />
-                  ) : (
-                    <Value>{draftAgence.image || '-'}</Value>
-                  )}
-                </Field>
+                  <Field label="Lien image" fullWidth>
+                    {isEditing ? (
+                      <input
+                        value={emptyString(draftAgence.image)}
+                        onChange={(e) => updateDraft('image', e.target.value)}
+                        style={inputStyle}
+                      />
+                    ) : (
+                      <Value>{draftAgence.image || '-'}</Value>
+                    )}
+                  </Field>
 
-                <Field label="Commentaire" fullWidth>
-                  {isEditing ? (
-                    <textarea
-                      value={emptyString(draftAgence.commentaire)}
-                      onChange={(e) => updateDraft('commentaire', e.target.value)}
-                      rows={5}
-                      style={{ ...inputStyle, resize: 'vertical' }}
-                    />
-                  ) : (
-                    <div
-                      style={{
-                        minHeight: 110,
-                        padding: '12px 14px',
-                        borderRadius: 12,
-                        background: '#f8fafc',
-                        border: '1px solid #e2e8f0',
-                        color: '#334155',
-                        whiteSpace: 'pre-line',
-                        lineHeight: 1.6,
-                      }}
-                    >
-                      {draftAgence.commentaire || '-'}
-                    </div>
-                  )}
-                </Field>
+                  <Field label="Commentaire" fullWidth>
+                    {isEditing ? (
+                      <textarea
+                        value={emptyString(draftAgence.commentaire)}
+                        onChange={(e) => updateDraft('commentaire', e.target.value)}
+                        rows={5}
+                        style={{ ...inputStyle, resize: 'vertical' }}
+                      />
+                    ) : (
+                      <div
+                        style={{
+                          minHeight: 110,
+                          padding: '12px 14px',
+                          borderRadius: 12,
+                          background: '#f8fafc',
+                          border: '1px solid #e2e8f0',
+                          color: '#334155',
+                          whiteSpace: 'pre-line',
+                          lineHeight: 1.6,
+                        }}
+                      >
+                        {draftAgence.commentaire || '-'}
+                      </div>
+                    )}
+                  </Field>
 
-                <Field label="ID" fullWidth>
-                  <Value>{draftAgence.id}</Value>
-                </Field>
+                  <Field label="ID" fullWidth>
+                    <Value>{draftAgence.id}</Value>
+                  </Field>
+                </div>
               </div>
             </div>
           </div>
@@ -956,7 +975,9 @@ function Field({
 }) {
   return (
     <div style={{ gridColumn: fullWidth ? '1 / -1' : 'auto' }}>
-      <div style={{ fontSize: 13, color: '#64748b', marginBottom: 6, fontWeight: 600 }}>{label}</div>
+      <div style={{ fontSize: 13, color: '#64748b', marginBottom: 6, fontWeight: 600 }}>
+        {label}
+      </div>
       {children}
     </div>
   )
@@ -986,6 +1007,7 @@ const summaryGlobalCardStyle: React.CSSProperties = {
   border: '1px solid #e2e8f0',
   borderRadius: 16,
   padding: 16,
+  minWidth: 0,
 }
 
 const summaryLabelStyle: React.CSSProperties = {
@@ -999,6 +1021,7 @@ const summaryValueStyle: React.CSSProperties = {
   fontSize: 28,
   fontWeight: 800,
   color: '#0f172a',
+  whiteSpace: 'nowrap',
 }
 
 const regionCardStyle: React.CSSProperties = {
@@ -1029,6 +1052,7 @@ const inputStyle: React.CSSProperties = {
   fontSize: 14,
   color: '#0f172a',
   outline: 'none',
+  boxSizing: 'border-box',
 }
 
 const thStyle: React.CSSProperties = {
@@ -1095,5 +1119,133 @@ const closeButtonStyle: React.CSSProperties = {
   background: '#ffffff',
   color: '#334155',
   cursor: 'pointer',
+  fontWeight: 700,
+}
+
+const modalOverlayStyle: React.CSSProperties = {
+  position: 'fixed',
+  inset: 0,
+  background: 'rgba(15, 23, 42, 0.48)',
+  backdropFilter: 'blur(6px)',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  padding: 24,
+  zIndex: 1000,
+}
+
+const modalContainerStyle: React.CSSProperties = {
+  width: '100%',
+  maxWidth: 1480,
+  height: '92vh',
+  background: '#ffffff',
+  borderRadius: 28,
+  overflow: 'hidden',
+  boxShadow: '0 30px 80px rgba(15,23,42,0.28)',
+  display: 'grid',
+  gridTemplateColumns: '1.1fr 0.9fr',
+}
+
+const modalMediaColumnStyle: React.CSSProperties = {
+  position: 'relative',
+  background: '#e5e7eb',
+  overflow: 'hidden',
+  display: 'flex',
+  alignItems: 'stretch',
+  justifyContent: 'stretch',
+}
+
+const modalMediaBackgroundStyle: React.CSSProperties = {
+  position: 'absolute',
+  inset: 0,
+  backgroundPosition: 'center',
+  backgroundSize: 'cover',
+  filter: 'blur(26px)',
+  transform: 'scale(1.08)',
+  opacity: 0.35,
+}
+
+const modalMediaInnerStyle: React.CSSProperties = {
+  position: 'relative',
+  zIndex: 1,
+  width: '100%',
+  height: '100%',
+  display: 'flex',
+  alignItems: 'flex-start',
+  justifyContent: 'center',
+  padding: 20,
+  boxSizing: 'border-box',
+}
+
+const modalImageStyle: React.CSSProperties = {
+  width: '100%',
+  height: '100%',
+  objectFit: 'contain',
+  objectPosition: 'top center',
+  display: 'block',
+  transition: 'transform 0.35s ease',
+}
+
+const modalNoImageStyle: React.CSSProperties = {
+  width: '100%',
+  height: '100%',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  color: '#64748b',
+  fontSize: 16,
+  background: 'linear-gradient(180deg, #f8fafc 0%, #e2e8f0 100%)',
+}
+
+const modalContentColumnStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  minWidth: 0,
+  background: '#ffffff',
+}
+
+const modalHeaderStickyStyle: React.CSSProperties = {
+  position: 'sticky',
+  top: 0,
+  zIndex: 2,
+  background: 'rgba(255,255,255,0.96)',
+  backdropFilter: 'blur(8px)',
+  borderBottom: '1px solid #e2e8f0',
+  padding: 24,
+  display: 'flex',
+  alignItems: 'flex-start',
+  justifyContent: 'space-between',
+  gap: 16,
+}
+
+const modalBodyStyle: React.CSSProperties = {
+  padding: 24,
+  overflowY: 'auto',
+}
+
+const modalTitleStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: 42,
+  lineHeight: 1.05,
+  fontWeight: 800,
+  color: '#0f172a',
+}
+
+const modalSubtitleRowStyle: React.CSSProperties = {
+  display: 'flex',
+  flexWrap: 'wrap',
+  gap: 8,
+  marginTop: 12,
+}
+
+const pillStyle: React.CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  padding: '7px 12px',
+  borderRadius: 999,
+  background: '#f8fafc',
+  border: '1px solid #e2e8f0',
+  color: '#475569',
+  fontSize: 13,
   fontWeight: 700,
 }
