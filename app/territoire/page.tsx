@@ -252,71 +252,63 @@ export default function TerritoirePage() {
       societe: editForm.societe?.toString().trim() || null,
       rattachement_agence: editForm.rattachement_agence?.toString().trim() || null,
       population:
-        editForm.population != null && editForm.population !== ''
+        editForm.population != null
           ? Number(editForm.population)
           : null,
       superficie:
-        editForm.superficie != null && editForm.superficie !== ''
+        editForm.superficie != null
           ? Number(editForm.superficie)
           : null,
       logements_2022:
-        editForm.logements_2022 != null && editForm.logements_2022 !== ''
+        editForm.logements_2022 != null
           ? Number(editForm.logements_2022)
           : null,
       part_res_principales_2022:
-        editForm.part_res_principales_2022 != null &&
-        editForm.part_res_principales_2022 !== ''
+        editForm.part_res_principales_2022 != null
           ? Number(editForm.part_res_principales_2022)
           : null,
       revenu_median_2021:
-        editForm.revenu_median_2021 != null && editForm.revenu_median_2021 !== ''
+        editForm.revenu_median_2021 != null
           ? Number(editForm.revenu_median_2021)
           : null,
       logements_commences_2025_estimes:
-        editForm.logements_commences_2025_estimes != null &&
-        editForm.logements_commences_2025_estimes !== ''
+        editForm.logements_commences_2025_estimes != null
           ? Number(editForm.logements_commences_2025_estimes)
           : null,
       logements_commences_2023_ref_admin:
-        editForm.logements_commences_2023_ref_admin != null &&
-        editForm.logements_commences_2023_ref_admin !== ''
+        editForm.logements_commences_2023_ref_admin != null
           ? Number(editForm.logements_commences_2023_ref_admin)
           : null,
       potentiel_remplacement_pac_an:
-        editForm.potentiel_remplacement_pac_an != null &&
-        editForm.potentiel_remplacement_pac_an !== ''
+        editForm.potentiel_remplacement_pac_an != null
           ? Number(editForm.potentiel_remplacement_pac_an)
           : null,
       potentiel_neuf_pac_an:
-        editForm.potentiel_neuf_pac_an != null &&
-        editForm.potentiel_neuf_pac_an !== ''
+        editForm.potentiel_neuf_pac_an != null
           ? Number(editForm.potentiel_neuf_pac_an)
           : null,
       potentiel_total:
-        editForm.potentiel_total != null && editForm.potentiel_total !== ''
+        editForm.potentiel_total != null
           ? Number(editForm.potentiel_total)
           : null,
       marche_theorique_eur:
-        editForm.marche_theorique_eur != null &&
-        editForm.marche_theorique_eur !== ''
+        editForm.marche_theorique_eur != null
           ? Number(editForm.marche_theorique_eur)
           : null,
       indice_potentiel_100:
-        editForm.indice_potentiel_100 != null &&
-        editForm.indice_potentiel_100 !== ''
+        editForm.indice_potentiel_100 != null
           ? Number(editForm.indice_potentiel_100)
           : null,
       indice_revenu_100:
-        editForm.indice_revenu_100 != null && editForm.indice_revenu_100 !== ''
+        editForm.indice_revenu_100 != null
           ? Number(editForm.indice_revenu_100)
           : null,
       score_attractivite:
-        editForm.score_attractivite != null &&
-        editForm.score_attractivite !== ''
+        editForm.score_attractivite != null
           ? Number(editForm.score_attractivite)
           : null,
       rang:
-        editForm.rang != null && editForm.rang !== ''
+        editForm.rang != null
           ? Number(editForm.rang)
           : null,
       source_population: editForm.source_population?.toString().trim() || null,
