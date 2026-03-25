@@ -23,10 +23,10 @@ export default function Page() {
   const [selectedMap, setSelectedMap] = useState<MapView>('cartographie')
 
   const mainImageUrl =
-    'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/France%20Departement.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvRnJhbmNlIERlcGFydGVtZW50LmpwZyIsImlhdCI6MTc3NDM4NzEyNywiZXhwIjo0ODk2NDUxMTI3fQ.ItGxAJmJsPnEBTL9JiS8pjqocjDjSGiteD6gk_asVrk'
+    'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/Carte%20principale%20(1).png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvQ2FydGUgcHJpbmNpcGFsZSAoMSkucG5nIiwiaWF0IjoxNzc0NDI5MjExLCJleHAiOjQ4OTY0OTMyMTF9.IcsMF44gh3OTl7lNIvfmZWVqvSRcoOQbwELUmZ7ZwOY'
 
   const densitePopulationImageUrl =
-    'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/Densite%20pop%20Nv%20Aq.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvRGVuc2l0ZSBwb3AgTnYgQXEucG5nIiwiaWF0IjoxNzc0Mzk5NzI4LCJleHAiOjQ4OTY0NjM3Mjh9.HJOEDxfYg_YXDyz7rvZGkEzMFJJyWKxG_u-WBfbfaNM'
+    'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/Densite%20pop%20Nv%20Aq.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvRGVuc2l0ZSBwb3AgTnYgQXEucG5nIiwiaWF0IjoxNzc0NDI5Njg4LCJleHAiOjQ4OTY0OTM2ODh9.JgudcNUXlibQNgA9-i-eAwMgPIWSX5vA91eUuP-CaNg'
 
   const isochrone30ImageUrl =
     'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/Plan%20densemble%20Isochrone.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvUGxhbiBkZW5zZW1ibGUgSXNvY2hyb25lLmpwZyIsImlhdCI6MTc3NDM5OTE4NiwiZXhwIjo0ODk2NDYzMTg2fQ.ubCPjSiShouzc1FoVIveAjw7fKv5c4JYjfePFA-5x0g'
@@ -48,8 +48,8 @@ export default function Page() {
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/Pau.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL1BhdS5wbmciLCJpYXQiOjE3NzQzOTM5NTMsImV4cCI6NDg5NjQ1Nzk1M30.Th6AGuZFySKCgeF5Lw61mip2wl2daj5M-xwMWLZEEWs',
       detailImageUrl:
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/Plan%20Pau.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvUGxhbiBQYXUuanBnIiwiaWF0IjoxNzc0MzkzOTMyLCJleHAiOjQ4OTY0NTc5MzJ9.BAGOJl1TGbUltd-aj2MplszBrRi31ViZvREtL4AsJW0',
-      top: '89%',
-      left: '53%',
+      top: '90%',
+      left: '56%',
       width: '20px',
       height: '20px',
     },
@@ -63,8 +63,8 @@ export default function Page() {
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/Anglet.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL0FuZ2xldC5wbmciLCJpYXQiOjE3NzQzOTQ2MDMsImV4cCI6NDg5NjQ1ODYwM30.rmbTKAbkytDasRDDEAHut3GKiz9gImE3o5cnQl8Qmso',
       detailImageUrl:
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/Plan%20Anglet.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvUGxhbiBBbmdsZXQuanBnIiwiaWF0IjoxNzc0Mzk1MzI2LCJleHAiOjQ4OTY0NTkzMjZ9.D6f9lBnczjPFDP_pSpRsw9FMeWY82lPIAOLbn6QM2uY',
-      top: '86%',
-      left: '43%',
+      top: '88%',
+      left: '45%',
       width: '20px',
       height: '20px',
     },
@@ -78,8 +78,8 @@ export default function Page() {
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/Dax.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL0RheC5wbmciLCJpYXQiOjE3NzQzOTU0MDUsImV4cCI6NDg5NjQ1OTQwNX0.LZFnKgk5EkEFkmFS4r1zZuLvSg7YoXlKQ74Qw3zezCY',
       detailImageUrl:
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/Plan%20Dax.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvUGxhbiBEYXguanBnIiwiaWF0IjoxNzc0MzkzODgyLCJleHAiOjQ4OTY0NTc4ODJ9.W8vhYUwjar0e2RWNrA_ahO0XYLNm98LUznRBS_jgqfQ',
-      top: '84%',
-      left: '46%',
+      top: '85%',
+      left: '49%',
       width: '20px',
       height: '20px',
     },
@@ -91,8 +91,8 @@ export default function Page() {
         'Cette zone correspond à l’agence de Bayonne. Tu peux afficher ici les informations détaillées, KPI, responsables, potentiel ou commentaires.',
       logoUrl: '',
       detailImageUrl: '',
-      top: '84%',
-      left: '47%',
+      top: '85%',
+      left: '48%',
       width: '20px',
       height: '20px',
     },
@@ -107,7 +107,7 @@ export default function Page() {
       detailImageUrl:
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/Plan%20Arcachon.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvUGxhbiBBcmNhY2hvbi5qcGciLCJpYXQiOjE3NzQzOTM4MzMsImV4cCI6NDg5NjQ1NzgzM30.u76ivUsVORC-D1yBGh55LchYmpNbMWge-wxjX7DYcMI',
       top: '72%',
-      left: '46%',
+      left: '49%',
       width: '20px',
       height: '20px',
     },
@@ -121,8 +121,8 @@ export default function Page() {
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/Marmande.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL01hcm1hbmRlLnBuZyIsImlhdCI6MTc3NDM5MDk4NCwiZXhwIjo0ODk2NDU0OTg0fQ.IJO3b5I4VDG0Vo_9nG5sHtfESoVc_YhVTS9ZNPdhkGo',
       detailImageUrl:
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/Plan%20Marmande.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvUGxhbiBNYXJtYW5kZS5qcGciLCJpYXQiOjE3NzQzOTEwMzgsImV4cCI6NDg5NjQ1NTAzOH0.6ihq0VQqjON92pdoEPa1_JSrkP7eNr8nmcBaIv_9Nuw',
-      top: '74%',
-      left: '57%',
+      top: '74.5%',
+      left: '61%',
       width: '20px',
       height: '20px',
     },
@@ -136,8 +136,8 @@ export default function Page() {
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/Merignac.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL01lcmlnbmFjLmpwZyIsImlhdCI6MTc3NDM5NDc2NSwiZXhwIjo0ODk2NDU4NzY1fQ.og9QRWewamLg7YqY8B8uv5N9nhpRuYiAK5FDPy176XM',
       detailImageUrl:
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/Pan%20Merignac.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvUGFuIE1lcmlnbmFjLmpwZyIsImlhdCI6MTc3NDM5Mzc2NywiZXhwIjo0ODk2NDU3NzY3fQ.PqNU5P5sRgPVoHOsZFtsiXcpOKaqPW8XfhT-xXnfNRQ',
-      top: '69%',
-      left: '50%',
+      top: '68.5%',
+      left: '53%',
       width: '20px',
       height: '20px',
     },
@@ -152,7 +152,7 @@ export default function Page() {
       detailImageUrl:
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/Plan%20Artigue.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvUGxhbiBBcnRpZ3VlLmpwZyIsImlhdCI6MTc3NDM5Mzg1MCwiZXhwIjo0ODk2NDU3ODUwfQ.iRSdAcNqaYtfvA7umvAkkjDhT--f0XxlEU8t5p9zAdk',
       top: '68%',
-      left: '52%',
+      left: '55%',
       width: '20px',
       height: '20px',
     },
@@ -167,7 +167,7 @@ export default function Page() {
       detailImageUrl:
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/Plan%20Brive.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvUGxhbiBCcml2ZS5qcGciLCJpYXQiOjE3NzQzOTM4NjksImV4cCI6NDg5NjQ1Nzg2OX0.ZjfFqk8Ij7rcXpEbVPD4dFs5yImX6v3RXfPUmnGqxFM',
       top: '64%',
-      left: '70%',
+      left: '75%',
       width: '20px',
       height: '20px',
     },
@@ -181,8 +181,8 @@ export default function Page() {
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/Angouleme.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL0FuZ291bGVtZS5wbmciLCJpYXQiOjE3NzQzOTQ4MjcsImV4cCI6NDg5NjQ1ODgyN30.p-7VoCARRbXFWIVhOL1Ck7YMpM-aUvAlmnkNPDihYZ8',
       detailImageUrl:
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/Plan%20Angouleme.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvUGxhbiBBbmdvdWxlbWUuanBnIiwiaWF0IjoxNzc0MzkzODE0LCJleHAiOjQ4OTY0NTc4MTR9._dwrjs31KoxQ-tSOPx7UWubTMk81KwJOLY1cCjvnaqI',
-      top: '58%',
-      left: '58%',
+      top: '56%',
+      left: '62%',
       width: '20px',
       height: '20px',
     },
@@ -196,8 +196,8 @@ export default function Page() {
         'https://YOUR-PROJECT.supabase.co/storage/v1/object/public/site-images/logo-a3c.png',
       detailImageUrl:
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/Plan%20La%20Rochelle.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvUGxhbiBMYSBSb2NoZWxsZS5qcGciLCJpYXQiOjE3NzQzOTM5MDQsImV4cCI6NDg5NjQ1NzkwNH0.L0m9ds_p3GfP19ee90Zel-gvBQht_BaYc426e63hSWI',
-      top: '51%',
-      left: '46%',
+      top: '48.5%',
+      left: '48%',
       width: '20px',
       height: '20px',
     },
@@ -211,8 +211,8 @@ export default function Page() {
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/Angers.webp?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL0FuZ2Vycy53ZWJwIiwiaWF0IjoxNzc0Mzk0MDYyLCJleHAiOjQ4OTY0NTgwNjJ9.dmQEj6gUQyNKVMzbOwnr_SBKzdaGLTSGs_yJc7QkcTA',
       detailImageUrl:
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/Plan%20Angers.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvUGxhbiBBbmdlcnMucG5nIiwiaWF0IjoxNzc0Mzk1NzI3LCJleHAiOjQ4OTY0NTk3Mjd9.9RF-lrT4vQNJF5dqKSjanTuvksKGNh3tegtvr--OKjo',
-      top: '33%',
-      left: '52%',
+      top: '28%',
+      left: '55%',
       width: '20px',
       height: '20px',
     },
@@ -225,8 +225,8 @@ export default function Page() {
       logoUrl:
         'https://YOUR-PROJECT.supabase.co/storage/v1/object/public/site-images/logo-a3c.png',
       detailImageUrl: '',
-      top: '24%',
-      left: '41%',
+      top: '18%',
+      left: '42.5%',
       width: '20px',
       height: '20px',
     },
@@ -342,6 +342,48 @@ export default function Page() {
           }}
         />
 
+        {selectedMap === 'cartographie' && (
+          <div
+            style={{
+              position: 'absolute',
+              top: 20,
+              left: 20,
+              maxWidth: 420,
+              background: 'rgba(255,255,255,0.95)',
+              border: '1px solid #e2e8f0',
+              borderRadius: 18,
+              padding: '18px 20px',
+              boxShadow: '0 20px 40px rgba(0,0,0,0.16)',
+              zIndex: 25,
+              lineHeight: 1.5,
+              backdropFilter: 'blur(6px)',
+            }}
+          >
+            <div
+              style={{
+                fontSize: 22,
+                fontWeight: 800,
+                color: '#0f172a',
+                marginBottom: 10,
+                lineHeight: 1.2,
+              }}
+            >
+              Carte interactive
+            </div>
+
+            <div
+              style={{
+                fontSize: 15,
+                color: '#334155',
+                lineHeight: 1.7,
+              }}
+            >
+              <div>• Passer la souris sur les agences =&gt; popup synthèse</div>
+              <div>• Cliquer sur l’agence =&gt; fenêtre détail qui s’ouvre</div>
+            </div>
+          </div>
+        )}
+
         {selectedMap === 'cartographie' &&
           zones.map((zone) => (
             <button
@@ -359,9 +401,9 @@ export default function Page() {
                 left: zone.left,
                 width: zone.width,
                 height: zone.height,
-                border: 'none',
-                background: 'transparent',
-                borderRadius: 12,
+                border: '1px solid red',
+                background: '#1c8671',
+                borderRadius: 24,
                 zIndex: 20,
                 cursor: 'pointer',
               }}
@@ -397,6 +439,7 @@ export default function Page() {
               padding: 16,
               boxShadow: '0 20px 40px rgba(0,0,0,0.18)',
               zIndex: 30,
+              lineHeight: 1.4,
             }}
           >
             <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
