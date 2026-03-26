@@ -94,7 +94,7 @@ type SortKey =
   | 'distance'
 
 const MAX_AGE_DAYS = 365 * 50
-const CLIENTS_PAGE_SIZE = 250
+const CLIENTS_PAGE_SIZE = 200
 
 function normalizeSiret(value: unknown): string {
   return String(value ?? '').replace(/\D/g, '').trim()
@@ -237,8 +237,8 @@ function translateNaf(nafCode: string | null): string {
 
 function getSectorColor(sector: string | null | undefined) {
   const s = (sector || '').toLowerCase()
-  if (s.includes('chauffagiste') || s.includes('cvc')) return '#b27e7e'
-  if (s.includes('enr')) return '#57764e'
+  if (s.includes('chauffagiste') || s.includes('cvc')) return '#f3c7c7'
+  if (s.includes('enr')) return '#cfecc7'
   if (s.includes('cmi')) return '#f4d3a8'
   if (s.includes('bâtiment')) return '#bdd4f6'
   return '#d9d9d9'
@@ -333,6 +333,7 @@ export default function ClientsPage() {
   const [mode, setMode] = useState<ScreenMode>('clients')
 
   const [clients, setClients] = useState<ClientRow[]>([])
+  const [clientsTotalCount, setClientsTotalCount] = useState<number>(0)
   const [cegeclimAbsents, setCegeclimAbsents] = useState<CegeclimAbsentRow[]>([])
   const [agences, setAgences] = useState<AgenceRow[]>([])
   const [lastImport, setLastImport] = useState<ImportRow | null>(null)
@@ -398,7 +399,8 @@ export default function ClientsPage() {
     try {
       const clientsPromise = supabase
         .from('clients')
-        .select(`
+        .select(
+          `
           id,
           siret,
           raison_sociale_affichee,
@@ -417,7 +419,9 @@ export default function ClientsPage() {
           adresse_complete,
           trancheEffectifsEtablissement,
           date_import
-        `)
+        `,
+          { count: 'exact' }
+        )
 
       const agencesPromise = supabase
         .from('agences')
@@ -460,6 +464,7 @@ export default function ClientsPage() {
       }
 
       setClients((clientsRes.data || []) as ClientRow[])
+      setClientsTotalCount(clientsRes.count || 0)
       setAgences((agencesRes.data || []) as AgenceRow[])
       setCegeclimAbsents((cegeclimRes.data || []) as CegeclimAbsentRow[])
       setLastImport((importRes.data?.[0] || null) as ImportRow | null)
@@ -1018,104 +1023,84 @@ export default function ClientsPage() {
           <h1 style={pageTitleStyle}>Clients</h1>
         </section>
 
-        <section style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: '1fr 1fr',
-              gap: '28px',
-              alignItems: 'start',
-            }}
-          >
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-                <div style={kpiCardStyle}>
-                  <div style={kpiTitleStyle}>Entreprises base Clients</div>
-                  <div style={kpiValueStyle}>{clients.length}</div>
-                </div>
-
-                <div style={kpiCardStyle}>
-                  <div style={kpiTitleStyle}>Entreprise base CEGECLIM</div>
-                  <div style={kpiValueStyle}>{totalCegeclimBase}</div>
-                </div>
-
-                <div style={kpiCardStyle}>
-                  <div style={kpiTitleStyle}>
-                    Clients CEGECLIM absent
-                    <br />
-                    base Clients
-                  </div>
-                  <div style={kpiValueStyle}>{cegeclimAbsents.length}</div>
-                </div>
-              </div>
-
-              <div style={groupCaptionStyle}>Données relatives à la selection</div>
+        <section style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={kpiGridStyle}>
+            <div style={kpiCardStyle}>
+              <div style={kpiTitleStyle}>Entreprises base Clients</div>
+              <div style={kpiValueStyle}>{clientsTotalCount}</div>
             </div>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-                <div style={kpiCardStyle}>
-                  <div style={kpiTitleStyle}>
-                    Nombre entreprise
-                    <br />
-                    selectionnées
-                  </div>
-                  <div style={kpiValueStyle}>{totalSelection}</div>
-                </div>
+            <div style={kpiCardStyle}>
+              <div style={kpiTitleStyle}>Entreprise base CEGECLIM</div>
+              <div style={kpiValueStyle}>{totalCegeclimBase}</div>
+            </div>
 
-                <div style={kpiCardStyle}>
-                  <div style={kpiTitleStyle}>
-                    Nb départements
-                    <br />
-                    selectionnées
-                  </div>
-                  <div style={kpiValueStyle}>{totalSelectedDepartments}</div>
-                </div>
-
-                <div style={kpiCardStyle}>
-                  <div style={kpiTitleStyle}>Nb de code APE différent</div>
-                  <div style={kpiValueStyle}>{totalSelectedNaf}</div>
-                </div>
+            <div style={kpiCardStyle}>
+              <div style={kpiTitleStyle}>
+                Clients CEGECLIM absent
+                <br />
+                base Clients
               </div>
+              <div style={kpiValueStyle}>{cegeclimAbsents.length}</div>
+            </div>
+
+            <div style={kpiCardStyle}>
+              <div style={kpiTitleStyle}>
+                Nombre entreprise
+                <br />
+                selectionnées
+              </div>
+              <div style={kpiValueStyle}>{totalSelection}</div>
+            </div>
+
+            <div style={kpiCardStyle}>
+              <div style={kpiTitleStyle}>
+                Nb départements
+                <br />
+                selectionnées
+              </div>
+              <div style={kpiValueStyle}>{totalSelectedDepartments}</div>
+            </div>
+
+            <div style={kpiCardStyle}>
+              <div style={kpiTitleStyle}>Nb de code APE différent</div>
+              <div style={kpiValueStyle}>{totalSelectedNaf}</div>
+            </div>
+
+            <div style={kpiCardStyle}>
+              <div style={kpiTitleStyle}>Date</div>
+              <div style={kpiValueStyle}>
+                {lastImport?.date_import
+                  ? new Date(lastImport.date_import).toLocaleDateString('fr-FR', {
+                      day: '2-digit',
+                      month: '2-digit',
+                    })
+                  : 'NC'}
+              </div>
+            </div>
+
+            <div style={kpiCardStyle}>
+              <div style={kpiTitleStyle}>
+                Nb entreprises insérée
+                <br />
+                dernier import (hors ND)
+              </div>
+              <div style={kpiValueStyle}>{lastImport?.nb_importees || 0}</div>
+            </div>
+
+            <div style={kpiCardStyle}>
+              <div style={kpiTitleStyle}>
+                Nb entreprises rejetées
+                <br />
+                dernier import
+              </div>
+              <div style={kpiValueStyle}>{lastImport?.nb_rejets || 0}</div>
             </div>
           </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-              <div style={kpiCardStyle}>
-                <div style={kpiTitleStyle}>Date</div>
-                <div style={kpiValueStyle}>
-                  {lastImport?.date_import
-                    ? new Date(lastImport.date_import).toLocaleDateString('fr-FR', {
-                        day: '2-digit',
-                        month: '2-digit',
-                      })
-                    : 'NC'}
-                </div>
-              </div>
-
-              <div style={kpiCardStyle}>
-                <div style={kpiTitleStyle}>
-                  Nb entreprises insérée
-                  <br />
-                  dernier import (hors ND)
-                </div>
-                <div style={kpiValueStyle}>{lastImport?.nb_importees || 0}</div>
-              </div>
-
-              <div style={kpiCardStyle}>
-                <div style={kpiTitleStyle}>
-                  Nb entreprises rejetées
-                  <br />
-                  dernier import
-                </div>
-                <div style={kpiValueStyle}>{lastImport?.nb_rejets || 0}</div>
-              </div>
-            </div>
-
-            <div style={groupCaptionStyle}>
-              Données relatives à la dernière importation du fichier
-            </div>
+          <div style={captionRowStyle}>
+            <div style={groupCaptionStyle}>Données relatives à la selection</div>
+            <div style={groupCaptionStyle}>Données relatives à la dernière importation du fichier</div>
           </div>
         </section>
 
@@ -1147,13 +1132,13 @@ export default function ClientsPage() {
         </section>
 
         <section style={filtersGridStyle}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={filterRowStyle}>
               <div style={filterLabelCellStyle}>Recherche</div>
               <input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Raison social, SIRET, ..."
+                placeholder="Raison sociale, SIRET, ..."
                 style={inputStyle}
               />
             </div>
@@ -1168,7 +1153,7 @@ export default function ClientsPage() {
               />
             </div>
 
-            <div style={{ marginLeft: 232, maxWidth: '430px' }}>
+            <div style={{ marginLeft: 192, maxWidth: '420px' }}>
               <MultiSelectHorizontal
                 label="Département (choix multiple)"
                 options={departmentOptions}
@@ -1177,7 +1162,7 @@ export default function ClientsPage() {
               />
             </div>
 
-            <div style={{ marginLeft: 232, maxWidth: '430px' }}>
+            <div style={{ marginLeft: 192, maxWidth: '420px' }}>
               <MultiSelectHorizontal
                 label="Secteur d'activité (choix multiple)"
                 options={sectorOptions}
@@ -1186,7 +1171,7 @@ export default function ClientsPage() {
               />
             </div>
 
-            <div style={{ marginLeft: 232, maxWidth: '430px' }}>
+            <div style={{ marginLeft: 192, maxWidth: '420px' }}>
               <MultiSelectHorizontal
                 label="Code NAF (choix multiple)"
                 options={nafOptions}
@@ -1213,16 +1198,7 @@ export default function ClientsPage() {
 
             <div style={filterRowStyle}>
               <div style={filterLabelCellStyle}>Distance max (actif si agence)</div>
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: '1fr 140px',
-                  gap: 12,
-                  alignItems: 'center',
-                  width: '100%',
-                  maxWidth: '430px',
-                }}
-              >
+              <div style={distanceRowStyle}>
                 <input
                   type="range"
                   min={1}
@@ -1236,7 +1212,7 @@ export default function ClientsPage() {
             </div>
           </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 16, paddingTop: 8 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14, paddingTop: 6 }}>
             <label style={checkboxLabelStyle}>
               <input
                 type="checkbox"
@@ -1287,12 +1263,12 @@ export default function ClientsPage() {
               Exclure date de création dans le futur
             </label>
 
-            <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <div style={{ fontSize: 15 }}>
-                Jage non linéaire (très précise proche d'aujourd'hui)
+            <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div style={{ fontSize: 14 }}>
+                Jauge non linéaire (très précise proche d'aujourd'hui)
               </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '150px 1fr', gap: 12, alignItems: 'center' }}>
+              <div style={ageRowStyle}>
                 <div style={ageLabelStyle}>Ancienneté min</div>
                 <input
                   type="range"
@@ -1303,9 +1279,9 @@ export default function ClientsPage() {
                   onChange={(e) => setAgeSliderMin(Number(e.target.value))}
                 />
               </div>
-              <div style={{ fontSize: 15 }}>{formatAgePrecise(ageDaysMin)}</div>
+              <div style={{ fontSize: 14 }}>{formatAgePrecise(ageDaysMin)}</div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '150px 1fr', gap: 12, alignItems: 'center' }}>
+              <div style={ageRowStyle}>
                 <div style={ageLabelStyle}>Ancienneté max</div>
                 <input
                   type="range"
@@ -1316,7 +1292,7 @@ export default function ClientsPage() {
                   onChange={(e) => setAgeSliderMax(Number(e.target.value))}
                 />
               </div>
-              <div style={{ fontSize: 15 }}>{formatAgePrecise(ageDaysMax)}</div>
+              <div style={{ fontSize: 14 }}>{formatAgePrecise(ageDaysMax)}</div>
 
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                 {[
@@ -1349,7 +1325,7 @@ export default function ClientsPage() {
         {mode === 'clients' && (
           <>
             <section style={{ width: '100%', overflowX: 'auto' }}>
-              <table style={{ width: 'max-content', minWidth: '100%', borderCollapse: 'collapse', fontSize: 16 }}>
+              <table style={{ width: 'max-content', minWidth: '100%', borderCollapse: 'collapse', fontSize: 15 }}>
                 <thead>
                   <tr>
                     <th style={{ ...summaryHeaderCellStyle, textAlign: 'left', minWidth: 260 }}>NAF DESIGNATION</th>
@@ -1362,7 +1338,7 @@ export default function ClientsPage() {
                 <tbody>
                   {summarySectorRows.map((row) => (
                     <tr key={row.sector} style={{ background: getSectorColor(row.sector) }}>
-                      <td style={{ ...summaryBodyCellStyle, textAlign: 'left' }}>43.: {row.sector}</td>
+                      <td style={{ ...summaryBodyCellStyle, textAlign: 'left' }}>{row.sector}</td>
                       <td style={summaryBodyCellStyleBold}>{row.total}</td>
                       {summaryDepartments.map((dep) => (
                         <td key={dep} style={summaryBodyCellStyleBold}>{row.byDept[dep] || 0}</td>
@@ -1392,7 +1368,7 @@ export default function ClientsPage() {
             <section style={sectionTitleStyle}>
               <div>
                 <h2 style={sectionTitleTextStyle}>Liste des entreprises</h2>
-                <div style={{ marginTop: 6, fontSize: 16 }}>
+                <div style={{ marginTop: 6, fontSize: 15 }}>
                   {sortedFilteredClients.length} entreprise(s) affichées
                 </div>
               </div>
@@ -1402,18 +1378,18 @@ export default function ClientsPage() {
               <table style={{ width: 'max-content', minWidth: '100%', borderCollapse: 'collapse', fontSize: 12, lineHeight: 1.15 }}>
                 <thead>
                   <tr style={{ borderBottom: '2px solid #111' }}>
-                    <th onClick={() => toggleSort('designation')} style={{ ...listHeaderStyle, width: 340 }}>Désignation<SortIndicator active={sortKey === 'designation'} direction={sortDirection} /></th>
-                    <th onClick={() => toggleSort('siret')} style={{ ...listHeaderStyle, width: 135 }}>Siret<SortIndicator active={sortKey === 'siret'} direction={sortDirection} /></th>
+                    <th onClick={() => toggleSort('designation')} style={{ ...listHeaderStyle, width: 300 }}>Désignation<SortIndicator active={sortKey === 'designation'} direction={sortDirection} /></th>
+                    <th onClick={() => toggleSort('siret')} style={{ ...listHeaderStyle, width: 125 }}>Siret<SortIndicator active={sortKey === 'siret'} direction={sortDirection} /></th>
                     <th onClick={() => toggleSort('departement')} style={{ ...listHeaderStyle, width: 55 }}>Dépt.<SortIndicator active={sortKey === 'departement'} direction={sortDirection} /></th>
-                    <th onClick={() => toggleSort('ville')} style={{ ...listHeaderStyle, width: 150 }}>Ville<SortIndicator active={sortKey === 'ville'} direction={sortDirection} /></th>
-                    <th onClick={() => toggleSort('codePostal')} style={{ ...listHeaderStyle, width: 95 }}>Code postal<SortIndicator active={sortKey === 'codePostal'} direction={sortDirection} /></th>
+                    <th onClick={() => toggleSort('ville')} style={{ ...listHeaderStyle, width: 145 }}>Ville<SortIndicator active={sortKey === 'ville'} direction={sortDirection} /></th>
+                    <th onClick={() => toggleSort('codePostal')} style={{ ...listHeaderStyle, width: 90 }}>Code postal<SortIndicator active={sortKey === 'codePostal'} direction={sortDirection} /></th>
                     <th onClick={() => toggleSort('naf')} style={{ ...listHeaderStyle, width: 80 }}>APE/NAF<SortIndicator active={sortKey === 'naf'} direction={sortDirection} /></th>
-                    <th onClick={() => toggleSort('secteur')} style={{ ...listHeaderStyle, width: 150 }}>Secteur d'activité<SortIndicator active={sortKey === 'secteur'} direction={sortDirection} /></th>
+                    <th onClick={() => toggleSort('secteur')} style={{ ...listHeaderStyle, width: 145 }}>Secteur d'activité<SortIndicator active={sortKey === 'secteur'} direction={sortDirection} /></th>
                     <th onClick={() => toggleSort('creation')} style={{ ...listHeaderStyle, width: 90 }}>Création<SortIndicator active={sortKey === 'creation'} direction={sortDirection} /></th>
                     <th onClick={() => toggleSort('anciennete')} style={{ ...listHeaderStyle, width: 105 }}>Ancienneté<SortIndicator active={sortKey === 'anciennete'} direction={sortDirection} /></th>
                     <th onClick={() => toggleSort('telephone')} style={{ ...listHeaderStyle, width: 55 }}>Tel<SortIndicator active={sortKey === 'telephone'} direction={sortDirection} /></th>
                     <th onClick={() => toggleSort('email')} style={{ ...listHeaderStyle, width: 55 }}>Mail<SortIndicator active={sortKey === 'email'} direction={sortDirection} /></th>
-                    <th onClick={() => toggleSort('distance')} style={{ ...listHeaderStyle, width: 105 }}>Distance<SortIndicator active={sortKey === 'distance'} direction={sortDirection} /></th>
+                    <th onClick={() => toggleSort('distance')} style={{ ...listHeaderStyle, width: 95 }}>Distance<SortIndicator active={sortKey === 'distance'} direction={sortDirection} /></th>
                     <th style={{ ...listHeaderStyle, width: 60 }}>Action</th>
                   </tr>
                 </thead>
@@ -1638,16 +1614,21 @@ const pageTitleStyle: React.CSSProperties = {
 
 const sectionTitleTextStyle: React.CSSProperties = {
   margin: 0,
-  fontSize: '26px',
+  fontSize: '24px',
   fontWeight: 800,
+}
+
+const kpiGridStyle: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(3, 1fr)',
+  gap: '16px',
 }
 
 const kpiCardStyle: React.CSSProperties = {
   background: '#e9eaec',
   border: '1px solid #bfc3c9',
   borderRadius: '14px',
-  width: '310px',
-  height: '112px',
+  minHeight: '108px',
   padding: '14px 18px',
   boxShadow: '0 2px 8px rgba(0,0,0,0.12)',
   display: 'flex',
@@ -1656,22 +1637,27 @@ const kpiCardStyle: React.CSSProperties = {
 }
 
 const kpiTitleStyle: React.CSSProperties = {
-  fontSize: '16px',
+  fontSize: '15px',
   fontWeight: 700,
   lineHeight: 1.15,
   color: '#111',
 }
 
 const kpiValueStyle: React.CSSProperties = {
-  fontSize: '26px',
+  fontSize: '24px',
   fontWeight: 800,
   color: '#000',
   lineHeight: 1,
 }
 
+const captionRowStyle: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: '1fr 1fr',
+  gap: '16px',
+}
+
 const groupCaptionStyle: React.CSSProperties = {
-  marginTop: 10,
-  marginLeft: 4,
+  marginLeft: '4px',
   fontSize: '13px',
   fontWeight: 700,
   color: '#333',
@@ -1689,14 +1675,14 @@ const uploadWrapStyle: React.CSSProperties = {
 const filtersGridStyle: React.CSSProperties = {
   display: 'grid',
   gridTemplateColumns: '1fr 1fr',
-  gap: '28px',
+  gap: '24px',
   alignItems: 'start',
   width: '100%',
 }
 
 const filterRowStyle: React.CSSProperties = {
   display: 'grid',
-  gridTemplateColumns: '220px 1fr',
+  gridTemplateColumns: '180px 1fr',
   gap: '12px',
   alignItems: 'center',
 }
@@ -1715,7 +1701,7 @@ const filterLabelStyle: React.CSSProperties = {
 const inputStyle: React.CSSProperties = {
   height: '38px',
   width: '100%',
-  maxWidth: '430px',
+  maxWidth: '420px',
   borderRadius: '9px',
   border: '1px solid #6aa0ff',
   background: '#fff',
@@ -1727,7 +1713,7 @@ const inputStyle: React.CSSProperties = {
 const selectLikeStyle: React.CSSProperties = {
   height: '38px',
   width: '100%',
-  maxWidth: '430px',
+  maxWidth: '420px',
   borderRadius: '9px',
   border: '1px solid #6aa0ff',
   background: '#fff',
@@ -1743,8 +1729,8 @@ const multiPanelStyle: React.CSSProperties = {
   position: 'absolute',
   zIndex: 30,
   marginTop: '8px',
-  width: '430px',
-  maxWidth: '45vw',
+  width: '420px',
+  maxWidth: '44vw',
   borderRadius: '10px',
   border: '1px solid #c7c7c7',
   background: '#fff',
@@ -1761,17 +1747,26 @@ const miniButtonStyle: React.CSSProperties = {
   cursor: 'pointer',
 }
 
+const distanceRowStyle: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: '1fr 130px',
+  gap: '12px',
+  alignItems: 'center',
+  width: '100%',
+  maxWidth: '420px',
+}
+
 const distanceBoxStyle: React.CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'center',
-  height: '42px',
+  height: '40px',
   borderRadius: '10px',
   border: '1px solid #6aa0ff',
   background: '#fff',
-  fontSize: '16px',
+  fontSize: '15px',
   boxShadow: '0 1px 3px rgba(0,0,0,0.10)',
-  width: '140px',
+  width: '130px',
 }
 
 const checkboxLabelStyle: React.CSSProperties = {
@@ -1783,8 +1778,15 @@ const checkboxLabelStyle: React.CSSProperties = {
 }
 
 const checkboxStyle: React.CSSProperties = {
-  width: '22px',
-  height: '22px',
+  width: '20px',
+  height: '20px',
+}
+
+const ageRowStyle: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: '140px 1fr',
+  gap: '12px',
+  alignItems: 'center',
 }
 
 const ageLabelStyle: React.CSSProperties = {
@@ -1795,17 +1797,17 @@ const ageLabelStyle: React.CSSProperties = {
 const summaryHeaderCellStyle: React.CSSProperties = {
   borderBottom: '1px solid #666',
   borderLeft: '1px solid #c8c8c8',
-  padding: '6px 14px',
+  padding: '6px 12px',
   textAlign: 'center',
-  fontSize: '22px',
+  fontSize: '18px',
   fontWeight: 800,
 }
 
 const summaryBodyCellStyle: React.CSSProperties = {
   borderLeft: '1px solid #c8c8c8',
-  padding: '10px 14px',
+  padding: '8px 12px',
   textAlign: 'center',
-  fontSize: '18px',
+  fontSize: '14px',
 }
 
 const summaryBodyCellStyleBold: React.CSSProperties = {
@@ -1815,9 +1817,9 @@ const summaryBodyCellStyleBold: React.CSSProperties = {
 
 const summaryTotalStyle: React.CSSProperties = {
   borderLeft: '1px solid #c8c8c8',
-  padding: '18px 14px',
+  padding: '12px 12px',
   textAlign: 'center',
-  fontSize: '18px',
+  fontSize: '15px',
   fontWeight: 800,
 }
 
@@ -1826,7 +1828,7 @@ const toolbarButtonStyle: React.CSSProperties = {
   background: '#fff',
   borderRadius: '4px',
   padding: '7px 12px',
-  fontSize: '16px',
+  fontSize: '15px',
   cursor: 'pointer',
 }
 
