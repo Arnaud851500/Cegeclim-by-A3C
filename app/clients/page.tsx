@@ -239,9 +239,9 @@ function translateNaf(activitePrincipaleEtablissement: string | null): string {
 
 function getSectorColor(sector: string | null | undefined) {
   const s = (sector || '').toLowerCase()
-  if (s.includes('installateur') || s.includes('cvc')) return '#cebfbf'
+  if (s.includes('installateur') || s.includes('cvc')) return '#8ba9be'
   if (s.includes('enr')) return '#a2cc88'
-  if (s.includes('plomberie')) return '#9bc391'
+  if (s.includes('plomberie')) return '#c3b691'
   if (s.includes('cmi')) return '#e0a961'
   if (s.includes('bâtiment')) return '#8e9db3'
   return '#d9d9d9'
