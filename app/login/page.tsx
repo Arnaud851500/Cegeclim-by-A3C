@@ -91,7 +91,7 @@ export default function LoginPage() {
 
 const pageStyle: React.CSSProperties = {
   minHeight: '100vh',
-  background: 'rgb(124, 163, 197)',
+  background: 'rgb(41, 59, 86)',
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'center',
@@ -127,8 +127,8 @@ const topLogoStyle: React.CSSProperties = {
 
 const formWrapperStyle: React.CSSProperties = {
   width: '100%',
-  maxWidth: 760,
-  margin: '0 auto',
+  maxWidth: 550 ,
+  margin: '10 auto',
 }
 
 const formGridStyle: React.CSSProperties = {
@@ -140,7 +140,7 @@ const formGridStyle: React.CSSProperties = {
 }
 
 const labelStyle: React.CSSProperties = {
-  fontSize: 28,
+  fontSize: 24,
   fontWeight: 500,
   color: '#111827',
   textAlign: 'left',
