@@ -11,7 +11,7 @@ type ClientRow = {
   id: string
   siret: string | null
   raison_sociale_affichee: string | null
-  naf_code: string | null
+  activitePrincipaleEtablissement: string | null
   naf_libelle_traduit: string | null
   dateCreationEtablissement: string | null
   codePostalEtablissement: string | null
@@ -95,6 +95,7 @@ type SortKey =
 
 const MAX_AGE_DAYS = 365 * 50
 const CLIENTS_PAGE_SIZE = 200
+const SUPABASE_FETCH_BATCH = 1000
 
 function normalizeSiret(value: unknown): string {
   return String(value ?? '').replace(/\D/g, '').trim()
@@ -225,11 +226,12 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return out
 }
 
-function translateNaf(nafCode: string | null): string {
-  const code = (nafCode || '').replace(/\s/g, '').toUpperCase()
+function translateNaf(activitePrincipaleEtablissement: string | null): string {
+  const code = (activitePrincipaleEtablissement || '').replace(/\s/g, '').toUpperCase()
   if (!code) return 'AUTRES'
-  if (code.startsWith('43.22') || code.startsWith('4322')) return 'Chauffagiste / CVC'
-  if (code.startsWith('43.21') || code.startsWith('4321')) return 'ENR'
+  if (code.startsWith('43.22B') || code.startsWith('4322B')) return 'Installateur CVC'
+  if (code.startsWith('43.22A') || code.startsWith('4322A')) return 'Plomberie'
+  if (code.startsWith('43.21') || code.startsWith('4321')) return 'Electricité ENR'
   if (code.startsWith('41.20') || code.startsWith('4120')) return 'CMI'
   if (code.startsWith('43.99') || code.startsWith('4399')) return 'Bâtiment'
   return 'AUTRES'
@@ -237,10 +239,11 @@ function translateNaf(nafCode: string | null): string {
 
 function getSectorColor(sector: string | null | undefined) {
   const s = (sector || '').toLowerCase()
-  if (s.includes('chauffagiste') || s.includes('cvc')) return '#f3c7c7'
-  if (s.includes('enr')) return '#cfecc7'
-  if (s.includes('cmi')) return '#f4d3a8'
-  if (s.includes('bâtiment')) return '#bdd4f6'
+  if (s.includes('installateur') || s.includes('cvc')) return '#cebfbf'
+  if (s.includes('enr')) return '#a2cc88'
+  if (s.includes('plomberie')) return '#9bc391'
+  if (s.includes('cmi')) return '#e0a961'
+  if (s.includes('bâtiment')) return '#8e9db3'
   return '#d9d9d9'
 }
 
@@ -250,6 +253,56 @@ function compactSelectionLabel(values: string[], fallback = 'TOUS') {
   return `${values.length} sélectionnés`
 }
 
+async function fetchAllClients(): Promise<{ rows: ClientRow[]; totalCount: number }> {
+  const allRows: ClientRow[] = []
+  let from = 0
+  let totalCount = 0
+
+  while (true) {
+    const { data, error, count } = await supabase
+      .from('clients')
+      .select(
+        `
+        id,
+        siret,
+        raison_sociale_affichee,
+        activitePrincipaleEtablissement,
+        naf_libelle_traduit,
+        dateCreationEtablissement,
+        codePostalEtablissement,
+        libelleCommuneEtablissement,
+        departement,
+        coordonneeLambertAbscisseEtablissement,
+        coordonneeLambertOrdonneeEtablissement,
+        telephone,
+        email,
+        present_dans_cegeclim,
+        contactable,
+        adresse_complete,
+        trancheEffectifsEtablissement,
+        date_import
+      `,
+        { count: 'exact' }
+      )
+      .range(from, from + SUPABASE_FETCH_BATCH - 1)
+
+    if (error) throw error
+
+    if (from === 0) {
+      totalCount = count || 0
+    }
+
+    const batch = (data || []) as ClientRow[]
+    allRows.push(...batch)
+
+    if (batch.length < SUPABASE_FETCH_BATCH) break
+
+    from += SUPABASE_FETCH_BATCH
+  }
+
+  return { rows: allRows, totalCount }
+}
+
 function SortIndicator({
   active,
   direction,
@@ -257,7 +310,11 @@ function SortIndicator({
   active: boolean
   direction: SortDirection
 }) {
-  return <span style={{ marginLeft: 6, color: active ? '#111' : '#888' }}>{active ? (direction === 'asc' ? '▲' : '▼') : '↕'}</span>
+  return (
+    <span style={{ marginLeft: 6, color: active ? '#111' : '#888' }}>
+      {active ? (direction === 'asc' ? '▲' : '▼') : '↕'}
+    </span>
+  )
 }
 
 function MultiSelectHorizontal({
@@ -313,7 +370,10 @@ function MultiSelectHorizontal({
 
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px 18px' }}>
             {options.map((option) => (
-              <label key={option} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+              <label
+                key={option}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13 }}
+              >
                 <input
                   type="checkbox"
                   checked={selected.includes(option)}
@@ -397,31 +457,7 @@ export default function ClientsPage() {
   async function loadAll() {
     setLoading(true)
     try {
-      const clientsPromise = supabase
-        .from('clients')
-        .select(
-          `
-          id,
-          siret,
-          raison_sociale_affichee,
-          naf_code,
-          naf_libelle_traduit,
-          dateCreationEtablissement,
-          codePostalEtablissement,
-          libelleCommuneEtablissement,
-          departement,
-          coordonneeLambertAbscisseEtablissement,
-          coordonneeLambertOrdonneeEtablissement,
-          telephone,
-          email,
-          present_dans_cegeclim,
-          contactable,
-          adresse_complete,
-          trancheEffectifsEtablissement,
-          date_import
-        `,
-          { count: 'exact' }
-        )
+      const clientsPromise = fetchAllClients()
 
       const agencesPromise = supabase
         .from('agences')
@@ -429,7 +465,9 @@ export default function ClientsPage() {
 
       const cegeclimAbsentsPromise = supabase
         .from('vw_clients_cegeclim_absents_clients')
-        .select('id, siret, date_creation_client, agence_rattachement, code_postal, contact, telephone, email, ca_2026')
+        .select(
+          'id, siret, date_creation_client, agence_rattachement, code_postal, contact, telephone, email, ca_2026'
+        )
 
       const importPromise = supabase
         .from('imports_clients')
@@ -445,7 +483,6 @@ export default function ClientsPage() {
         importPromise,
       ])
 
-      if (clientsRes.error) throw clientsRes.error
       if (agencesRes.error) throw agencesRes.error
       if (cegeclimRes.error) throw cegeclimRes.error
       if (importRes.error) throw importRes.error
@@ -463,8 +500,8 @@ export default function ClientsPage() {
         rejectsRows = (rejectsData || []) as RejectRow[]
       }
 
-      setClients((clientsRes.data || []) as ClientRow[])
-      setClientsTotalCount(clientsRes.count || 0)
+      setClients(clientsRes.rows)
+      setClientsTotalCount(clientsRes.totalCount)
       setAgences((agencesRes.data || []) as AgenceRow[])
       setCegeclimAbsents((cegeclimRes.data || []) as CegeclimAbsentRow[])
       setLastImport((importRes.data?.[0] || null) as ImportRow | null)
@@ -500,15 +537,17 @@ export default function ClientsPage() {
   const sectorOptions = useMemo(() => {
     return Array.from(
       new Set(
-        clients.map((r) => r.naf_libelle_traduit || translateNaf(r.naf_code)).filter(Boolean) as string[]
+        clients
+          .map((r) => r.naf_libelle_traduit || translateNaf(r.activitePrincipaleEtablissement))
+          .filter(Boolean) as string[]
       )
     ).sort((a, b) => a.localeCompare(b, 'fr'))
   }, [clients])
 
   const nafOptions = useMemo(() => {
-    return Array.from(new Set(clients.map((r) => r.naf_code).filter(Boolean) as string[])).sort((a, b) =>
-      a.localeCompare(b, 'fr')
-    )
+    return Array.from(
+      new Set(clients.map((r) => r.activitePrincipaleEtablissement).filter(Boolean) as string[])
+    ).sort((a, b) => a.localeCompare(b, 'fr'))
   }, [clients])
 
   const agenceOptions = useMemo(() => {
@@ -527,7 +566,7 @@ export default function ClientsPage() {
     const designationQ = designationSearch.trim().toLowerCase()
 
     return clients.filter((row) => {
-      const sector = row.naf_libelle_traduit || translateNaf(row.naf_code)
+      const sector = row.naf_libelle_traduit || translateNaf(row.activitePrincipaleEtablissement)
       const department = getDepartmentFromPostalCode(row.codePostalEtablissement) || row.departement || ''
       const ageDays = diffDaysFromToday(row.dateCreationEtablissement)
 
@@ -548,7 +587,11 @@ export default function ClientsPage() {
 
       if (selectedDepartments.length > 0 && !selectedDepartments.includes(department)) return false
       if (selectedSectors.length > 0 && !selectedSectors.includes(sector)) return false
-      if (selectedNafCodes.length > 0 && !selectedNafCodes.includes(row.naf_code || '')) return false
+      if (
+        selectedNafCodes.length > 0 &&
+        !selectedNafCodes.includes(row.activitePrincipaleEtablissement || '')
+      )
+        return false
       if (excludeDesignationND && isDesignationND) return false
       if (excludeFutureCreation && isFutureDate(row.dateCreationEtablissement)) return false
       if (onlyContactable && !(row.telephone || row.email || row.contactable)) return false
@@ -579,7 +622,7 @@ export default function ClientsPage() {
           department,
           row.libelleCommuneEtablissement,
           row.codePostalEtablissement,
-          row.naf_code,
+          row.activitePrincipaleEtablissement,
           sector,
           row.telephone,
           row.email,
@@ -615,8 +658,8 @@ export default function ClientsPage() {
     const rows = [...filteredClients]
 
     rows.sort((a, b) => {
-      const sectorA = a.naf_libelle_traduit || translateNaf(a.naf_code)
-      const sectorB = b.naf_libelle_traduit || translateNaf(b.naf_code)
+      const sectorA = a.naf_libelle_traduit || translateNaf(a.activitePrincipaleEtablissement)
+      const sectorB = b.naf_libelle_traduit || translateNaf(b.activitePrincipaleEtablissement)
 
       const distanceA = selectedAgenceRow
         ? distanceKmLambert(
@@ -661,8 +704,8 @@ export default function ClientsPage() {
           bv = b.codePostalEtablissement || ''
           break
         case 'naf':
-          av = a.naf_code || ''
-          bv = b.naf_code || ''
+          av = a.activitePrincipaleEtablissement || ''
+          bv = b.activitePrincipaleEtablissement || ''
           break
         case 'secteur':
           av = sectorA
@@ -713,7 +756,11 @@ export default function ClientsPage() {
 
   const summarySectorRows = useMemo(() => {
     const sectors = Array.from(
-      new Set(sortedFilteredClients.map((r) => r.naf_libelle_traduit || translateNaf(r.naf_code)))
+      new Set(
+        sortedFilteredClients.map(
+          (r) => r.naf_libelle_traduit || translateNaf(r.activitePrincipaleEtablissement)
+        )
+      )
     )
 
     return sectors
@@ -724,7 +771,7 @@ export default function ClientsPage() {
         summaryDepartments.forEach((dep) => {
           const count = sortedFilteredClients.filter((r) => {
             const d = getDepartmentFromPostalCode(r.codePostalEtablissement) || r.departement
-            const s = r.naf_libelle_traduit || translateNaf(r.naf_code)
+            const s = r.naf_libelle_traduit || translateNaf(r.activitePrincipaleEtablissement)
             return d === dep && s === sector
           }).length
           byDept[dep] = count
@@ -818,7 +865,6 @@ export default function ClientsPage() {
         seenInFile.add(siret)
 
         const nafCodeValue =
-          String(row.activitePrincipaleNAF25Etablissement ?? '').trim() ||
           String(row.activitePrincipaleEtablissement ?? '').trim() ||
           String(row.activitePrincipaleUniteLegale ?? '').trim() ||
           null
@@ -836,19 +882,25 @@ export default function ClientsPage() {
           nic: String(row.nic ?? '').trim() || null,
           siret,
           dateCreationEtablissement: dateCreation,
-          trancheEffectifsEtablissement: String(row.trancheEffectifsEtablissement ?? '').trim() || null,
+          trancheEffectifsEtablissement:
+            String(row.trancheEffectifsEtablissement ?? '').trim() || null,
           denominationUniteLegale: String(row.denominationUniteLegale ?? '').trim() || null,
           nomUniteLegale: String(row.nomUniteLegale ?? '').trim() || null,
           prenom1UniteLegale: String(row.prenom1UniteLegale ?? '').trim() || null,
-          denominationUsuelleEtablissement: String(row.denominationUsuelleEtablissement ?? '').trim() || null,
-          complementAdresseEtablissement: String(row.complementAdresseEtablissement ?? '').trim() || null,
+          denominationUsuelleEtablissement:
+            String(row.denominationUsuelleEtablissement ?? '').trim() || null,
+          complementAdresseEtablissement:
+            String(row.complementAdresseEtablissement ?? '').trim() || null,
           numeroVoieEtablissement: String(row.numeroVoieEtablissement ?? '').trim() || null,
           typeVoieEtablissement: String(row.typeVoieEtablissement ?? '').trim() || null,
           libelleVoieEtablissement: String(row.libelleVoieEtablissement ?? '').trim() || null,
           codePostalEtablissement: String(row.codePostalEtablissement ?? '').trim() || null,
-          libelleCommuneEtablissement: String(row.libelleCommuneEtablissement ?? '').trim() || null,
-          activitePrincipaleUniteLegale: String(row.activitePrincipaleUniteLegale ?? '').trim() || null,
-          activitePrincipaleEtablissement: String(row.activitePrincipaleEtablissement ?? '').trim() || null,
+          libelleCommuneEtablissement:
+            String(row.libelleCommuneEtablissement ?? '').trim() || null,
+          activitePrincipaleUniteLegale:
+            String(row.activitePrincipaleUniteLegale ?? '').trim() || null,
+          activitePrincipaleEtablissement:
+            String(row.activitePrincipaleEtablissement ?? '').trim() || null,
           activitePrincipaleNAF25Etablissement:
             String(row.activitePrincipaleNAF25Etablissement ?? '').trim() || null,
           raison_sociale_affichee: buildRaisonSociale(row),
@@ -857,8 +909,12 @@ export default function ClientsPage() {
           naf_code: nafCodeValue,
           naf_libelle_traduit: translateNaf(nafCodeValue),
           anciennete_annees: ancienneteAnnees,
-          coordonneeLambertAbscisseEtablissement: parseNumeric(row.coordonneeLambertAbscisseEtablissement),
-          coordonneeLambertOrdonneeEtablissement: parseNumeric(row.coordonneeLambertOrdonneeEtablissement),
+          coordonneeLambertAbscisseEtablissement: parseNumeric(
+            row.coordonneeLambertAbscisseEtablissement
+          ),
+          coordonneeLambertOrdonneeEtablissement: parseNumeric(
+            row.coordonneeLambertOrdonneeEtablissement
+          ),
           telephone,
           email,
           contactable: Boolean(telephone || email),
@@ -939,8 +995,9 @@ export default function ClientsPage() {
         Dépt: getDepartmentFromPostalCode(row.codePostalEtablissement) || row.departement || 'ND',
         Ville: row.libelleCommuneEtablissement || 'ND',
         'Code postal': row.codePostalEtablissement || 'ND',
-        'APE/NAF': row.naf_code || 'ND',
-        "Secteur d'activité": row.naf_libelle_traduit || translateNaf(row.naf_code),
+        'APE/NAF': row.activitePrincipaleEtablissement || 'ND',
+        "Secteur d'activité":
+          row.naf_libelle_traduit || translateNaf(row.activitePrincipaleEtablissement),
         Création: formatDateFr(row.dateCreationEtablissement),
         Ancienneté: formatAgePrecise(diffDaysFromToday(row.dateCreationEtablissement)),
         Tel: row.telephone || '',
@@ -986,8 +1043,8 @@ export default function ClientsPage() {
           getDepartmentFromPostalCode(row.codePostalEtablissement) || row.departement || 'ND',
           row.libelleCommuneEtablissement || 'ND',
           row.codePostalEtablissement || 'ND',
-          row.naf_code || 'ND',
-          row.naf_libelle_traduit || translateNaf(row.naf_code),
+          row.activitePrincipaleEtablissement || 'ND',
+          row.naf_libelle_traduit || translateNaf(row.activitePrincipaleEtablissement),
           formatDateFr(row.dateCreationEtablissement),
           formatAgePrecise(diffDaysFromToday(row.dateCreationEtablissement)),
           distance != null ? `${distance} km` : '',
@@ -1009,7 +1066,7 @@ export default function ClientsPage() {
   const totalSelection = sortedFilteredClients.length
   const totalSelectedDepartments = summaryDepartments.length
   const totalSelectedNaf = Array.from(
-    new Set(sortedFilteredClients.map((r) => r.naf_code).filter(Boolean))
+    new Set(sortedFilteredClients.map((r) => r.activitePrincipaleEtablissement).filter(Boolean))
   ).length
 
   if (loading) {
@@ -1023,7 +1080,7 @@ export default function ClientsPage() {
           <h1 style={pageTitleStyle}>Clients</h1>
         </section>
 
-        <section style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <section style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <div style={kpiGridStyle}>
             <div style={kpiCardStyle}>
               <div style={kpiTitleStyle}>Entreprises base Clients</div>
@@ -1036,29 +1093,24 @@ export default function ClientsPage() {
             </div>
 
             <div style={kpiCardStyle}>
-              <div style={kpiTitleStyle}>
-                Clients CEGECLIM absent
-                <br />
-                base Clients
-              </div>
+              <div style={kpiTitleStyle}>Clients CEGECLIM absent base Clients</div>
               <div style={kpiValueStyle}>{cegeclimAbsents.length}</div>
             </div>
+          </div>
+        </section>
 
+        <section style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={captionRowStyle}>
+            <div style={groupCaptionStyle}>Données relatives à la selection</div>
+          </div>
+          <div style={kpiGridStyle}>
             <div style={kpiCardStyle}>
-              <div style={kpiTitleStyle}>
-                Nombre entreprise
-                <br />
-                selectionnées
-              </div>
+              <div style={kpiTitleStyle}>Nombre entreprise selectionnées</div>
               <div style={kpiValueStyle}>{totalSelection}</div>
             </div>
 
             <div style={kpiCardStyle}>
-              <div style={kpiTitleStyle}>
-                Nb départements
-                <br />
-                selectionnées
-              </div>
+              <div style={kpiTitleStyle}>Nb départements selectionnées</div>
               <div style={kpiValueStyle}>{totalSelectedDepartments}</div>
             </div>
 
@@ -1066,9 +1118,16 @@ export default function ClientsPage() {
               <div style={kpiTitleStyle}>Nb de code APE différent</div>
               <div style={kpiValueStyle}>{totalSelectedNaf}</div>
             </div>
+          </div>
+        </section>
 
+        <section style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={captionRowStyle}>
+            <div style={groupCaptionStyle}>Données relatives à la dernière importation du fichier</div>
+          </div>
+          <div style={kpiGridStyle}>
             <div style={kpiCardStyle}>
-              <div style={kpiTitleStyle}>Date</div>
+              <div style={kpiTitleStyle}>Date dernier import</div>
               <div style={kpiValueStyle}>
                 {lastImport?.date_import
                   ? new Date(lastImport.date_import).toLocaleDateString('fr-FR', {
@@ -1080,27 +1139,14 @@ export default function ClientsPage() {
             </div>
 
             <div style={kpiCardStyle}>
-              <div style={kpiTitleStyle}>
-                Nb entreprises insérée
-                <br />
-                dernier import (hors ND)
-              </div>
+              <div style={kpiTitleStyle}>Nb enreg. insérée dernier import (hors ND)</div>
               <div style={kpiValueStyle}>{lastImport?.nb_importees || 0}</div>
             </div>
 
             <div style={kpiCardStyle}>
-              <div style={kpiTitleStyle}>
-                Nb entreprises rejetées
-                <br />
-                dernier import
-              </div>
+              <div style={kpiTitleStyle}>Nb enreg. rejetées dernier import</div>
               <div style={kpiValueStyle}>{lastImport?.nb_rejets || 0}</div>
             </div>
-          </div>
-
-          <div style={captionRowStyle}>
-            <div style={groupCaptionStyle}>Données relatives à la selection</div>
-            <div style={groupCaptionStyle}>Données relatives à la dernière importation du fichier</div>
           </div>
         </section>
 
@@ -1155,7 +1201,7 @@ export default function ClientsPage() {
 
             <div style={{ marginLeft: 192, maxWidth: '420px' }}>
               <MultiSelectHorizontal
-                label="Département (choix multiple)"
+                label="Département(s)"
                 options={departmentOptions}
                 selected={selectedDepartments}
                 onChange={setSelectedDepartments}
@@ -1164,7 +1210,7 @@ export default function ClientsPage() {
 
             <div style={{ marginLeft: 192, maxWidth: '420px' }}>
               <MultiSelectHorizontal
-                label="Secteur d'activité (choix multiple)"
+                label="Secteur d'activité(s)"
                 options={sectorOptions}
                 selected={selectedSectors}
                 onChange={setSelectedSectors}
@@ -1173,7 +1219,7 @@ export default function ClientsPage() {
 
             <div style={{ marginLeft: 192, maxWidth: '420px' }}>
               <MultiSelectHorizontal
-                label="Code NAF (choix multiple)"
+                label="Code NAF(s)"
                 options={nafOptions}
                 selected={selectedNafCodes}
                 onChange={setSelectedNafCodes}
@@ -1328,10 +1374,14 @@ export default function ClientsPage() {
               <table style={{ width: 'max-content', minWidth: '100%', borderCollapse: 'collapse', fontSize: 15 }}>
                 <thead>
                   <tr>
-                    <th style={{ ...summaryHeaderCellStyle, textAlign: 'left', minWidth: 260 }}>NAF DESIGNATION</th>
+                    <th style={{ ...summaryHeaderCellStyle, textAlign: 'left', minWidth: 260 }}>
+                      NAF DESIGNATION
+                    </th>
                     <th style={summaryHeaderCellStyle}>TOTAL</th>
                     {summaryDepartments.map((dep) => (
-                      <th key={dep} style={summaryHeaderCellStyle}>{dep}</th>
+                      <th key={dep} style={summaryHeaderCellStyle}>
+                        {dep}
+                      </th>
                     ))}
                   </tr>
                 </thead>
@@ -1341,7 +1391,9 @@ export default function ClientsPage() {
                       <td style={{ ...summaryBodyCellStyle, textAlign: 'left' }}>{row.sector}</td>
                       <td style={summaryBodyCellStyleBold}>{row.total}</td>
                       {summaryDepartments.map((dep) => (
-                        <td key={dep} style={summaryBodyCellStyleBold}>{row.byDept[dep] || 0}</td>
+                        <td key={dep} style={summaryBodyCellStyleBold}>
+                          {row.byDept[dep] || 0}
+                        </td>
                       ))}
                     </tr>
                   ))}
@@ -1349,7 +1401,9 @@ export default function ClientsPage() {
                     <td style={{ ...summaryTotalStyle, textAlign: 'left' }}>TOTAL</td>
                     <td style={summaryTotalStyle}>{sortedFilteredClients.length}</td>
                     {summaryDepartments.map((dep) => (
-                      <td key={dep} style={summaryTotalStyle}>{summaryDeptTotals[dep] || 0}</td>
+                      <td key={dep} style={summaryTotalStyle}>
+                        {summaryDeptTotals[dep] || 0}
+                      </td>
                     ))}
                   </tr>
                 </tbody>
@@ -1375,27 +1429,59 @@ export default function ClientsPage() {
             </section>
 
             <section style={{ width: '100%', overflowX: 'auto' }}>
-              <table style={{ width: 'max-content', minWidth: '100%', borderCollapse: 'collapse', fontSize: 12, lineHeight: 1.15 }}>
+              <table
+                style={{
+                  width: 'max-content',
+                  minWidth: '100%',
+                  borderCollapse: 'collapse',
+                  fontSize: 12,
+                  lineHeight: 1.15,
+                }}
+              >
                 <thead>
                   <tr style={{ borderBottom: '2px solid #111' }}>
-                    <th onClick={() => toggleSort('designation')} style={{ ...listHeaderStyle, width: 300 }}>Désignation<SortIndicator active={sortKey === 'designation'} direction={sortDirection} /></th>
-                    <th onClick={() => toggleSort('siret')} style={{ ...listHeaderStyle, width: 125 }}>Siret<SortIndicator active={sortKey === 'siret'} direction={sortDirection} /></th>
-                    <th onClick={() => toggleSort('departement')} style={{ ...listHeaderStyle, width: 55 }}>Dépt.<SortIndicator active={sortKey === 'departement'} direction={sortDirection} /></th>
-                    <th onClick={() => toggleSort('ville')} style={{ ...listHeaderStyle, width: 145 }}>Ville<SortIndicator active={sortKey === 'ville'} direction={sortDirection} /></th>
-                    <th onClick={() => toggleSort('codePostal')} style={{ ...listHeaderStyle, width: 90 }}>Code postal<SortIndicator active={sortKey === 'codePostal'} direction={sortDirection} /></th>
-                    <th onClick={() => toggleSort('naf')} style={{ ...listHeaderStyle, width: 80 }}>APE/NAF<SortIndicator active={sortKey === 'naf'} direction={sortDirection} /></th>
-                    <th onClick={() => toggleSort('secteur')} style={{ ...listHeaderStyle, width: 145 }}>Secteur d'activité<SortIndicator active={sortKey === 'secteur'} direction={sortDirection} /></th>
-                    <th onClick={() => toggleSort('creation')} style={{ ...listHeaderStyle, width: 90 }}>Création<SortIndicator active={sortKey === 'creation'} direction={sortDirection} /></th>
-                    <th onClick={() => toggleSort('anciennete')} style={{ ...listHeaderStyle, width: 105 }}>Ancienneté<SortIndicator active={sortKey === 'anciennete'} direction={sortDirection} /></th>
-                    <th onClick={() => toggleSort('telephone')} style={{ ...listHeaderStyle, width: 55 }}>Tel<SortIndicator active={sortKey === 'telephone'} direction={sortDirection} /></th>
-                    <th onClick={() => toggleSort('email')} style={{ ...listHeaderStyle, width: 55 }}>Mail<SortIndicator active={sortKey === 'email'} direction={sortDirection} /></th>
-                    <th onClick={() => toggleSort('distance')} style={{ ...listHeaderStyle, width: 95 }}>Distance<SortIndicator active={sortKey === 'distance'} direction={sortDirection} /></th>
+                    <th onClick={() => toggleSort('designation')} style={{ ...listHeaderStyle, width: 125 }}>
+                      Désignation<SortIndicator active={sortKey === 'designation'} direction={sortDirection} />
+                    </th>
+                    <th onClick={() => toggleSort('siret')} style={{ ...listHeaderStyle, width: 125 }}>
+                      Siret<SortIndicator active={sortKey === 'siret'} direction={sortDirection} />
+                    </th>
+                    <th onClick={() => toggleSort('departement')} style={{ ...listHeaderStyle, width: 55 }}>
+                      Dépt.<SortIndicator active={sortKey === 'departement'} direction={sortDirection} />
+                    </th>
+                    <th onClick={() => toggleSort('ville')} style={{ ...listHeaderStyle, width: 145 }}>
+                      Ville<SortIndicator active={sortKey === 'ville'} direction={sortDirection} />
+                    </th>
+                    <th onClick={() => toggleSort('codePostal')} style={{ ...listHeaderStyle, width: 90 }}>
+                      Code postal<SortIndicator active={sortKey === 'codePostal'} direction={sortDirection} />
+                    </th>
+                    <th onClick={() => toggleSort('naf')} style={{ ...listHeaderStyle, width: 80 }}>
+                      APE/NAF<SortIndicator active={sortKey === 'naf'} direction={sortDirection} />
+                    </th>
+                    <th onClick={() => toggleSort('secteur')} style={{ ...listHeaderStyle, width: 145 }}>
+                      Secteur d'activité<SortIndicator active={sortKey === 'secteur'} direction={sortDirection} />
+                    </th>
+                    <th onClick={() => toggleSort('creation')} style={{ ...listHeaderStyle, width: 90 }}>
+                      Création<SortIndicator active={sortKey === 'creation'} direction={sortDirection} />
+                    </th>
+                    <th onClick={() => toggleSort('anciennete')} style={{ ...listHeaderStyle, width: 105 }}>
+                      Ancienneté<SortIndicator active={sortKey === 'anciennete'} direction={sortDirection} />
+                    </th>
+                    <th onClick={() => toggleSort('telephone')} style={{ ...listHeaderStyle, width: 55 }}>
+                      Tel<SortIndicator active={sortKey === 'telephone'} direction={sortDirection} />
+                    </th>
+                    <th onClick={() => toggleSort('email')} style={{ ...listHeaderStyle, width: 55 }}>
+                      Mail<SortIndicator active={sortKey === 'email'} direction={sortDirection} />
+                    </th>
+                    <th onClick={() => toggleSort('distance')} style={{ ...listHeaderStyle, width: 95 }}>
+                      Distance<SortIndicator active={sortKey === 'distance'} direction={sortDirection} />
+                    </th>
                     <th style={{ ...listHeaderStyle, width: 60 }}>Action</th>
                   </tr>
                 </thead>
                 <tbody>
                   {paginatedClients.map((row) => {
-                    const sector = row.naf_libelle_traduit || translateNaf(row.naf_code)
+                    const sector = row.naf_libelle_traduit || translateNaf(row.activitePrincipaleEtablissement)
                     const distance = selectedAgenceRow
                       ? distanceKmLambert(
                           row.coordonneeLambertAbscisseEtablissement,
@@ -1406,13 +1492,18 @@ export default function ClientsPage() {
                       : null
 
                     return (
-                      <tr key={row.id} style={{ background: getSectorColor(sector), borderBottom: '1px solid #d6d6d6' }}>
+                      <tr
+                        key={row.id}
+                        style={{ background: getSectorColor(sector), borderBottom: '1px solid #d6d6d6' }}
+                      >
                         <td style={listCellStyle}>{row.raison_sociale_affichee || 'ND'}</td>
                         <td style={listCellStyle}>{row.siret || 'ND'}</td>
-                        <td style={listCellStyle}>{getDepartmentFromPostalCode(row.codePostalEtablissement) || row.departement || 'ND'}</td>
+                        <td style={listCellStyle}>
+                          {getDepartmentFromPostalCode(row.codePostalEtablissement) || row.departement || 'ND'}
+                        </td>
                         <td style={listCellStyle}>{row.libelleCommuneEtablissement || 'ND'}</td>
                         <td style={listCellStyle}>{row.codePostalEtablissement || 'ND'}</td>
-                        <td style={listCellStyle}>{row.naf_code || 'ND'}</td>
+                        <td style={listCellStyle}>{row.activitePrincipaleEtablissement || 'ND'}</td>
                         <td style={listCellStyle}>{sector}</td>
                         <td style={listCellStyle}>{formatDateFr(row.dateCreationEtablissement)}</td>
                         <td style={listCellStyle}>{formatAgePrecise(diffDaysFromToday(row.dateCreationEtablissement))}</td>
@@ -1422,7 +1513,9 @@ export default function ClientsPage() {
                           {selectedAgenceRow ? (distance != null ? `${distance} km` : '—') : 'Choisir agence'}
                         </td>
                         <td style={listCellStyle}>
-                          <button onClick={() => setSelectedClient(row)} style={linkButtonStyle}>Voir</button>
+                          <button onClick={() => setSelectedClient(row)} style={linkButtonStyle}>
+                            Voir
+                          </button>
                         </td>
                       </tr>
                     )
@@ -1506,8 +1599,12 @@ export default function ClientsPage() {
             <div style={modalStyle}>
               <div style={modalHeaderStyle}>
                 <div>
-                  <h3 style={{ margin: 0, fontSize: 22 }}>{selectedClient.raison_sociale_affichee || 'Entreprise'}</h3>
-                  <p style={{ margin: '6px 0 0 0', fontSize: 14 }}>SIRET : {selectedClient.siret || 'NC'}</p>
+                  <h3 style={{ margin: 0, fontSize: 22 }}>
+                    {selectedClient.raison_sociale_affichee || 'Entreprise'}
+                  </h3>
+                  <p style={{ margin: '6px 0 0 0', fontSize: 14 }}>
+                    SIRET : {selectedClient.siret || 'NC'}
+                  </p>
                 </div>
                 <button onClick={() => setSelectedClient(null)} style={toolbarButtonStyle}>
                   Fermer
@@ -1519,7 +1616,10 @@ export default function ClientsPage() {
                   <div><b>Adresse :</b> {selectedClient.adresse_complete || 'NC'}</div>
                   <div><b>Ville :</b> {selectedClient.libelleCommuneEtablissement || 'NC'}</div>
                   <div><b>Code postal :</b> {selectedClient.codePostalEtablissement || 'NC'}</div>
-                  <div><b>Département :</b> {getDepartmentFromPostalCode(selectedClient.codePostalEtablissement) || selectedClient.departement || 'NC'}</div>
+                  <div>
+                    <b>Département :</b>{' '}
+                    {getDepartmentFromPostalCode(selectedClient.codePostalEtablissement) || selectedClient.departement || 'NC'}
+                  </div>
                   <div><b>Date création :</b> {formatDateFr(selectedClient.dateCreationEtablissement)}</div>
                   <div><b>Ancienneté :</b> {formatAgePrecise(diffDaysFromToday(selectedClient.dateCreationEtablissement))}</div>
                   <div><b>Téléphone :</b> {selectedClient.telephone || 'NC'}</div>
@@ -1527,8 +1627,11 @@ export default function ClientsPage() {
                 </div>
 
                 <div style={detailBoxStyle}>
-                  <div><b>Code NAF :</b> {selectedClient.naf_code || 'NC'}</div>
-                  <div><b>Secteur :</b> {selectedClient.naf_libelle_traduit || translateNaf(selectedClient.naf_code)}</div>
+                  <div><b>Code NAF :</b> {selectedClient.activitePrincipaleEtablissement || 'NC'}</div>
+                  <div>
+                    <b>Secteur :</b>{' '}
+                    {selectedClient.naf_libelle_traduit || translateNaf(selectedClient.activitePrincipaleEtablissement)}
+                  </div>
                   <div><b>Effectifs :</b> {selectedClient.trancheEffectifsEtablissement || 'NC'}</div>
                   <div><b>Présent base CEGECLIM :</b> {selectedClient.present_dans_cegeclim ? 'Oui' : 'Non'}</div>
                   <div><b>Coordonnée X :</b> {selectedClient.coordonneeLambertAbscisseEtablissement ?? 'NC'}</div>
@@ -1628,7 +1731,7 @@ const kpiCardStyle: React.CSSProperties = {
   background: '#e9eaec',
   border: '1px solid #bfc3c9',
   borderRadius: '14px',
-  minHeight: '108px',
+  minHeight: '48px',
   padding: '14px 18px',
   boxShadow: '0 2px 8px rgba(0,0,0,0.12)',
   display: 'flex',
@@ -1637,7 +1740,7 @@ const kpiCardStyle: React.CSSProperties = {
 }
 
 const kpiTitleStyle: React.CSSProperties = {
-  fontSize: '15px',
+  fontSize: '12px',
   fontWeight: 700,
   lineHeight: 1.15,
   color: '#111',
@@ -1701,7 +1804,7 @@ const filterLabelStyle: React.CSSProperties = {
 const inputStyle: React.CSSProperties = {
   height: '38px',
   width: '100%',
-  maxWidth: '420px',
+  maxWidth: '320px',
   borderRadius: '9px',
   border: '1px solid #6aa0ff',
   background: '#fff',
@@ -1713,7 +1816,7 @@ const inputStyle: React.CSSProperties = {
 const selectLikeStyle: React.CSSProperties = {
   height: '38px',
   width: '100%',
-  maxWidth: '420px',
+  maxWidth: '320px',
   borderRadius: '9px',
   border: '1px solid #6aa0ff',
   background: '#fff',
