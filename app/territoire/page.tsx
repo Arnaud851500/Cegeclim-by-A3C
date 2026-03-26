@@ -63,7 +63,7 @@ type RegionSummary = {
 
 const REGION_ORDER = [
   'Nouvelle-Aquitaine',
-  'Pays de la Loire',
+  'Pays de Loire',
   'Bretagne',
   'Normandie',
 ]
