@@ -60,7 +60,7 @@ export default function Page() {
       description:
         'Cette zone correspond à l’agence de Bordeaux. Tu peux ajouter ici la description, l’activité, la couverture géographique ou les données clés.',
       logoUrl:
-        'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/Anglet.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL0FuZ2xldC5wbmciLCJpYXQiOjE3NzQzOTQ2MDMsImV4cCI6NDg5NjQ1ODYwM30.rmbTKAbkytDasRDDEAHut3GKiz9gImE3o5cnQl8Qmso',
+        'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/Anglet.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL0FuZ2xldC5wbmciLCJpYXQiOjE3NzQzOTQ2NjMsImV4cCI6NDg5NjQ1ODY2M30.Ak60FimDbPQ9elLvSoOhRXogX3e8ys21XwsHJfEkHH8',
       detailImageUrl:
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/Plan%20Anglet.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvUGxhbiBBbmdsZXQuanBnIiwiaWF0IjoxNzc0Mzk1MzI2LCJleHAiOjQ4OTY0NTkzMjZ9.D6f9lBnczjPFDP_pSpRsw9FMeWY82lPIAOLbn6QM2uY',
       top: '88%',
@@ -148,7 +148,7 @@ export default function Page() {
       description:
         'Cette zone correspond à l’agence de Bayonne. Tu peux afficher ici les informations détaillées, KPI, responsables, potentiel ou commentaires.',
       logoUrl:
-        'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/Anglet.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL0FuZ2xldC5wbmciLCJpYXQiOjE3NzQzOTQ2NjMsImV4cCI6NDg5NjQ1ODY2M30.Ak60FimDbPQ9elLvSoOhRXogX3e8ys21XwsHJfEkHH8',
+        'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/Artigues.png?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL0FydGlndWVzLnBuZyIsImlhdCI6MTc3NDU0NjUxNywiZXhwIjo0ODk2NjEwNTE3fQ._hpGLqMLE0KuElshxCFEvvUlHdxFNv4y_6DXoz2064Y',
       detailImageUrl:
         'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Cartes/Plan%20Artigue.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJDYXJ0ZXMvUGxhbiBBcnRpZ3VlLmpwZyIsImlhdCI6MTc3NDM5Mzg1MCwiZXhwIjo0ODk2NDU3ODUwfQ.iRSdAcNqaYtfvA7umvAkkjDhT--f0XxlEU8t5p9zAdk',
       top: '68%',

@@ -21,6 +21,8 @@ type Agence = {
   nb_tci: number | null
   nb_tcs: number | null
   nb_hotliner: number | null
+  nb_log: number | null
+  nb_autres: number | null
   effectif_total: number | null
   ca_ke: number | null
   stock_ke: number | null
@@ -252,6 +254,8 @@ export default function AgencesPage() {
       nb_tci: draftAgence.nb_tci,
       nb_tcs: draftAgence.nb_tcs,
       nb_hotliner: draftAgence.nb_hotliner,
+      nb_log: draftAgence.nb_log,
+      nb_autres: draftAgence.nb_autres,
       effectif_total: draftAgence.effectif_total,
       ca_ke: draftAgence.ca_ke,
       stock_ke: draftAgence.stock_ke,
@@ -776,6 +780,32 @@ export default function AgencesPage() {
                       />
                     ) : (
                       <Value>{formatNumber(draftAgence.nb_hotliner)}</Value>
+                    )}
+                  </Field>
+
+                  <Field label="Nb Log">
+                    {isEditing ? (
+                      <input
+                        type="number"
+                        value={draftAgence.nb_log ?? 0}
+                        onChange={(e) => updateDraft('nb_log', Number(e.target.value))}
+                        style={inputStyle}
+                      />
+                    ) : (
+                      <Value>{formatNumber(draftAgence.nb_log)}</Value>
+                    )}
+                  </Field>
+
+                  <Field label="Nb Autres">
+                    {isEditing ? (
+                      <input
+                        type="number"
+                        value={draftAgence.nb_autres ?? 0}
+                        onChange={(e) => updateDraft('nb_autres', Number(e.target.value))}
+                        style={inputStyle}
+                      />
+                    ) : (
+                      <Value>{formatNumber(draftAgence.nb_autres)}</Value>
                     )}
                   </Field>
 

@@ -419,7 +419,7 @@ export default function ClientsPage() {
   const [excludeDesignationND, setExcludeDesignationND] = useState(true)
   const [excludeFutureCreation, setExcludeFutureCreation] = useState(true)
 
-  const [distanceMax, setDistanceMax] = useState(74)
+  const [distanceMax, setDistanceMax] = useState(200)
 
   const [ageSliderMin, setAgeSliderMin] = useState(0)
   const [ageSliderMax, setAgeSliderMax] = useState(daysToSlider(365 * 13))
@@ -1164,9 +1164,17 @@ export default function ClientsPage() {
               }}
             />
           </label>
-
+          <p>
+          <a
+            href="https://annuaire-entreprises.data.gouv.fr/export-sirene"
+            target="_blank"
+            rel="noopener noreferrer"
+           >
+               .    https://annuaire-entreprises.data.gouv.fr/export-sirene
+          </a>
+          </p>
           {importStats && (
-            <div style={{ marginTop: 8, fontSize: 13 }}>
+            <div style={{ marginTop: 8, fontSize: 11 }}>
               Import terminé • {importStats.total} lignes lues • {importStats.inserted} insertions •{' '}
               {importStats.updated} mises à jour • {importStats.rejected} rejets
             </div>
@@ -1198,17 +1206,17 @@ export default function ClientsPage() {
                 style={inputStyle}
               />
             </div>
-
-            <div style={{ marginLeft: 192, maxWidth: '420px' }}>
+            
+            <div style={{ marginLeft: 192, maxWidth: '320px' }}>
               <MultiSelectHorizontal
-                label="Département(s)"
+                label="Departement(s)"
                 options={departmentOptions}
                 selected={selectedDepartments}
                 onChange={setSelectedDepartments}
               />
             </div>
 
-            <div style={{ marginLeft: 192, maxWidth: '420px' }}>
+            <div style={{ marginLeft: 192, maxWidth: '320px' }}>
               <MultiSelectHorizontal
                 label="Secteur d'activité(s)"
                 options={sectorOptions}
@@ -1217,7 +1225,7 @@ export default function ClientsPage() {
               />
             </div>
 
-            <div style={{ marginLeft: 192, maxWidth: '420px' }}>
+            <div style={{ marginLeft: 192, maxWidth: '320px' }}>
               <MultiSelectHorizontal
                 label="Code NAF(s)"
                 options={nafOptions}
