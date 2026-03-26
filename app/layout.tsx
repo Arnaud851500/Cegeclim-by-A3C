@@ -21,7 +21,7 @@ function AppShell({
     { label: 'Territoire', path: '/territoire' },
     { label: 'Agences', path: '/agences' },
     { label: 'Cartographie', path: '/cartographie' },
-    { label: 'Clients (WIP)', path: '/clients' },
+    { label: 'Clients', path: '/clients' },
     { label: 'Produits - Offre (WIP)', path: '/produits' },
     { label: 'Dashboard (WIP)', path: '/dashboard' },
     { label: 'Activités - CA (WIP)', path: '/activites' },
