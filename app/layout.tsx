@@ -3,7 +3,7 @@
 import { useEffect, useMemo } from 'react'
 import { usePathname, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
-import { AccessProvider, useAccess } from '@/components/AccessContext'
+import { AccessProvider, useAccess, type AccessRights } from '@/components/AccessContext'
 
 import {
   SocieteFilterProvider,
@@ -11,14 +11,12 @@ import {
   type SocieteFilter,
 } from '@/components/SocieteFilterContext'
 
+type MenuAccessKey = Exclude<keyof AccessRights, 'allowed_scopes' | 'can_change_scope'>
+
 type MenuItem = {
   label: string
   path: string
-  accessKey?:
-    | 'can_clients'
-    | 'can_territoire'
-    | 'can_cartographie'
-    | 'can_agences'
+  accessKey?: MenuAccessKey
 }
 
 function AppShell({ children }: { children: React.ReactNode }) {
@@ -28,48 +26,47 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const { loading: accessLoading, rights, email } = useAccess()
 
   const menu: MenuItem[] = [
+    { label: 'Dashboard', path: '/dashboard', accessKey: 'can_dashboard' },
     { label: 'Territoire', path: '/territoire', accessKey: 'can_territoire' },
     { label: 'Agences', path: '/agences', accessKey: 'can_agences' },
     { label: 'Cartographie', path: '/cartographie', accessKey: 'can_cartographie' },
     { label: 'Clients', path: '/clients', accessKey: 'can_clients' },
-    { label: 'Produits - Offre (WIP)', path: '/produits' },
-    { label: 'Activités - CA (WIP)', path: '/activites' },
-    { label: 'Stocks et Flux log (WIP)', path: '/stocks' },
-    { label: 'Paramétrage (WIP)', path: '/parametrage' },
+    { label: 'Autorisation', path: '/autorisation', accessKey: 'can_autorisation' },
+    { label: 'Activités - CA (WIP)', path: '/activites', accessKey: 'can_activites' },
+    { label: 'Stocks et Flux log (WIP)', path: '/stocks', accessKey: 'can_stocks' },
+    { label: 'Paramétrage (WIP)', path: '/parametrage', accessKey: 'can_parametrage' },
   ]
 
-  // 🔹 Filtrer le menu selon droits
   const visibleMenu = useMemo(() => {
     if (accessLoading) return []
 
     return menu.filter((item) => {
       if (!item.accessKey) return false
-      return rights[item.accessKey]
+      return !!rights[item.accessKey]
     })
   }, [accessLoading, rights])
 
-  // 🔐 BLOQUER accès URL direct
   useEffect(() => {
-  if (accessLoading) return
+    if (accessLoading) return
 
-  const publicPaths = ['/login']
-  const neutralPaths = ['/unauthorized']
+    const publicPaths = ['/login']
+    const neutralPaths = ['/unauthorized']
 
-  if (publicPaths.includes(pathname) || neutralPaths.includes(pathname)) {
-    return
-  }
+    if (publicPaths.includes(pathname) || neutralPaths.includes(pathname)) {
+      return
+    }
 
-  if (!email) {
-    router.replace('/login')
-    return
-  }
+    if (!email) {
+      router.replace('/login')
+      return
+    }
 
-  const current = menu.find((item) => item.path === pathname)
+    const current = menu.find((item) => item.path === pathname)
 
-  if (current?.accessKey && !rights[current.accessKey]) {
-    router.replace('/unauthorized')
-  }
-}, [accessLoading, pathname, rights, email, router])
+    if (current?.accessKey && !rights[current.accessKey]) {
+      router.replace('/unauthorized')
+    }
+  }, [accessLoading, pathname, rights, email, router])
 
   const getPageTitle = () => {
     const found = menu.find((item) => item.path === pathname)
@@ -80,9 +77,9 @@ function AppShell({ children }: { children: React.ReactNode }) {
   }
 
   const handleLogout = async () => {
-  await supabase.auth.signOut()
-  window.location.href = '/login'
-}
+    await supabase.auth.signOut()
+    window.location.href = '/login'
+  }
 
   const isLoginPage = pathname === '/login'
 
@@ -106,7 +103,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         </div>
 
-        {/* 🔐 FILTRE SOCIETE */}
         <div style={{ marginTop: 18 }}>
           <div style={sectionTitleStyle}>VISION</div>
 
@@ -124,7 +120,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
           </select>
         </div>
 
-        {/* 🔹 MENU */}
         <div style={{ marginTop: 18, flex: 1, overflowY: 'auto' }}>
           <div style={sectionTitleStyle}>NAVIGATION</div>
 
@@ -260,11 +255,9 @@ const menuButtonStyle: React.CSSProperties = {
   borderRadius: 10,
   color: '#fff',
   cursor: 'pointer',
-
-  fontWeight: 700,        // 🔥 GRAS
-  textAlign: 'left',      // 🔥 ALIGNÉ À GAUCHE
+  fontWeight: 700,
+  textAlign: 'left',
   fontSize: 14,
-
   display: 'flex',
   alignItems: 'center',
 }
