@@ -1,45 +1,88 @@
 'use client'
 
+import { useEffect, useMemo } from 'react'
 import { usePathname, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
+import { AccessProvider, useAccess } from '@/components/AccessContext'
+
 import {
   SocieteFilterProvider,
   useSocieteFilter,
   type SocieteFilter,
 } from '@/components/SocieteFilterContext'
 
-function AppShell({
-  children,
-}: {
-  children: React.ReactNode
-}) {
+type MenuItem = {
+  label: string
+  path: string
+  accessKey?:
+    | 'can_clients'
+    | 'can_territoire'
+    | 'can_cartographie'
+    | 'can_agences'
+}
+
+function AppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter()
   const pathname = usePathname()
   const { societeFilter, setSocieteFilter } = useSocieteFilter()
+  const { loading: accessLoading, rights, email } = useAccess()
 
-  const menu = [
-    { label: 'Territoire', path: '/territoire' },
-    { label: 'Agences', path: '/agences' },
-    { label: 'Cartographie', path: '/cartographie' },
-    { label: 'Clients', path: '/clients' },
+  const menu: MenuItem[] = [
+    { label: 'Territoire', path: '/territoire', accessKey: 'can_territoire' },
+    { label: 'Agences', path: '/agences', accessKey: 'can_agences' },
+    { label: 'Cartographie', path: '/cartographie', accessKey: 'can_cartographie' },
+    { label: 'Clients', path: '/clients', accessKey: 'can_clients' },
     { label: 'Produits - Offre (WIP)', path: '/produits' },
-    { label: 'Dashboard (WIP)', path: '/dashboard' },
     { label: 'Activités - CA (WIP)', path: '/activites' },
     { label: 'Stocks et Flux log (WIP)', path: '/stocks' },
     { label: 'Paramétrage (WIP)', path: '/parametrage' },
   ]
 
+  // 🔹 Filtrer le menu selon droits
+  const visibleMenu = useMemo(() => {
+    if (accessLoading) return []
+
+    return menu.filter((item) => {
+      if (!item.accessKey) return false
+      return rights[item.accessKey]
+    })
+  }, [accessLoading, rights])
+
+  // 🔐 BLOQUER accès URL direct
+  useEffect(() => {
+  if (accessLoading) return
+
+  const publicPaths = ['/login']
+  const neutralPaths = ['/unauthorized']
+
+  if (publicPaths.includes(pathname) || neutralPaths.includes(pathname)) {
+    return
+  }
+
+  if (!email) {
+    router.replace('/login')
+    return
+  }
+
+  const current = menu.find((item) => item.path === pathname)
+
+  if (current?.accessKey && !rights[current.accessKey]) {
+    router.replace('/unauthorized')
+  }
+}, [accessLoading, pathname, rights, email, router])
+
   const getPageTitle = () => {
     const found = menu.find((item) => item.path === pathname)
     if (found) return found.label
     if (pathname === '/login') return 'Connexion'
+    if (pathname === '/unauthorized') return 'Accès refusé'
     return 'Intranet'
   }
 
   const handleLogout = async () => {
-    await supabase.auth.signOut()
-    router.replace('/login')
-  }
+  await supabase.auth.signOut()
+  window.location.href = '/login'
+}
 
   const isLoginPage = pathname === '/login'
 
@@ -63,41 +106,53 @@ function AppShell({
           </div>
         </div>
 
+        {/* 🔐 FILTRE SOCIETE */}
         <div style={{ marginTop: 18 }}>
           <div style={sectionTitleStyle}>VISION</div>
+
           <select
             style={selectStyle}
             value={societeFilter}
+            disabled={!rights.can_change_scope}
             onChange={(e) => setSocieteFilter(e.target.value as SocieteFilter)}
           >
-            <option value="Global">Global</option>
-            <option value="Cegeclim">Cegeclim</option>
-            <option value="CVC PdL">CVC PdL</option>
+            {(rights.allowed_scopes || ['Global']).map((scope) => (
+              <option key={scope} value={scope}>
+                {scope}
+              </option>
+            ))}
           </select>
         </div>
 
+        {/* 🔹 MENU */}
         <div style={{ marginTop: 18, flex: 1, overflowY: 'auto' }}>
           <div style={sectionTitleStyle}>NAVIGATION</div>
 
-          {menu.map((item) => {
-            const isActive = pathname === item.path
+          {accessLoading ? (
+            <div style={loadingNavStyle}>Chargement des accès...</div>
+          ) : visibleMenu.length === 0 ? (
+            <div style={loadingNavStyle}>Aucune page autorisée</div>
+          ) : (
+            visibleMenu.map((item) => {
+              const isActive = pathname === item.path
 
-            return (
-              <button
-                key={item.path}
-                onClick={() => router.push(item.path)}
-                style={{
-                  ...menuButtonStyle,
-                  background: isActive ? '#4a5878' : '#5f6c89',
-                  border: isActive
-                    ? '1px solid #aab6cf'
-                    : '1px solid rgba(255,255,255,0.08)',
-                }}
-              >
-                {item.label}
-              </button>
-            )
-          })}
+              return (
+                <button
+                  key={item.path}
+                  onClick={() => router.push(item.path)}
+                  style={{
+                    ...menuButtonStyle,
+                    background: isActive ? '#4a5878' : '#5f6c89',
+                    border: isActive
+                      ? '1px solid #aab6cf'
+                      : '1px solid rgba(255,255,255,0.08)',
+                  }}
+                >
+                  {item.label}
+                </button>
+              )
+            })
+          )}
         </div>
       </aside>
 
@@ -109,6 +164,7 @@ function AppShell({
             Déconnexion
           </button>
         </header>
+
         <main style={contentStyle}>{children}</main>
       </div>
     </div>
@@ -123,13 +179,17 @@ export default function RootLayout({
   return (
     <html lang="fr">
       <body style={{ margin: 0, fontFamily: 'Arial, sans-serif' }}>
-        <SocieteFilterProvider>
-          <AppShell>{children}</AppShell>
-        </SocieteFilterProvider>
+        <AccessProvider>
+          <SocieteFilterProvider>
+            <AppShell>{children}</AppShell>
+          </SocieteFilterProvider>
+        </AccessProvider>
       </body>
     </html>
   )
 }
+
+/* ===================== STYLES ===================== */
 
 const appShellStyle: React.CSSProperties = {
   display: 'flex',
@@ -166,59 +226,58 @@ const logoCircleStyle: React.CSSProperties = {
   fontWeight: 800,
   fontSize: 24,
   color: '#ffffff',
-  flexShrink: 0,
 }
 
 const brandTitleStyle: React.CSSProperties = {
   fontSize: 22,
   fontWeight: 800,
-  lineHeight: 1.1,
 }
 
 const brandSubStyle: React.CSSProperties = {
   fontSize: 12,
   opacity: 0.85,
-  lineHeight: 1.3,
 }
 
 const sectionTitleStyle: React.CSSProperties = {
-  fontSize: 11,
+  fontSize: 12,
   fontWeight: 700,
-  letterSpacing: 0.6,
   opacity: 0.75,
   marginBottom: 8,
 }
 
 const selectStyle: React.CSSProperties = {
   width: '100%',
-  padding: '10px 12px',
-  borderRadius: 12,
-  border: '1px solid rgba(255,255,255,0.15)',
+  padding: '10px',
+  borderRadius: 10,
   background: '#3b4a6a',
-  color: '#ffffff',
-  outline: 'none',
-  boxSizing: 'border-box',
+  color: '#fff',
 }
 
 const menuButtonStyle: React.CSSProperties = {
   width: '100%',
-  padding: '10px 12px',
+  padding: '10px',
   marginBottom: 8,
   borderRadius: 10,
-  color: '#ffffff',
+  color: '#fff',
   cursor: 'pointer',
-  textAlign: 'left',
-  fontWeight: 700,
+
+  fontWeight: 700,        // 🔥 GRAS
+  textAlign: 'left',      // 🔥 ALIGNÉ À GAUCHE
+  fontSize: 14,
+
+  display: 'flex',
+  alignItems: 'center',
+}
+
+const loadingNavStyle: React.CSSProperties = {
   fontSize: 13,
-  boxSizing: 'border-box',
+  color: 'rgba(255,255,255,0.75)',
 }
 
 const contentWrapperStyle: React.CSSProperties = {
   flex: 1,
   display: 'flex',
   flexDirection: 'column',
-  minWidth: 0,
-  background: '#f5f7fa',
 }
 
 const topBarStyle: React.CSSProperties = {
@@ -228,30 +287,21 @@ const topBarStyle: React.CSSProperties = {
   justifyContent: 'space-between',
   padding: '0 24px',
   background: '#ffffff',
-  borderBottom: '1px solid #d0d7de',
-  boxSizing: 'border-box',
 }
 
 const topBarTitleStyle: React.CSSProperties = {
   fontSize: 28,
   fontWeight: 800,
-  color: '#101828',
 }
 
 const logoutButtonStyle: React.CSSProperties = {
-  padding: '10px 14px',
+  padding: '10px',
   borderRadius: 10,
-  border: '1px solid #d0d7de',
-  background: '#ffffff',
-  color: '#101828',
   cursor: 'pointer',
-  fontWeight: 700,
-  fontSize: 14,
 }
 
 const contentStyle: React.CSSProperties = {
   flex: 1,
   padding: 24,
   overflow: 'auto',
-  boxSizing: 'border-box',
 }
