@@ -19,8 +19,8 @@ export default function LoginPage() {
     'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/cegecilm%20officiel.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL2NlZ2VjaWxtIG9mZmljaWVsLmpwZyIsImlhdCI6MTc3NDYxMTg3NCwiZXhwIjo0ODk2Njc1ODc0fQ.pPDT4pQCeBFiTlDLHWrtzBzVHtZzXDghj8Ee6jlnrPw'
 
 
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault()
+  const handleLogin = async (e?: React.FormEvent) => {
+    e?.preventDefault()
     setLoading(true)
     setErrorMsg('')
 
