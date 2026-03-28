@@ -92,7 +92,7 @@ function normalizeSociete(societe: string | null | undefined) {
 
 function isSocieteMatch(
   rowSociete: string | null | undefined,
-  societeFilter: 'Global' | 'Cegeclim' | 'CVC PdL'
+  societeFilter: string
 ) {
   if (societeFilter === 'Global') return true
 
