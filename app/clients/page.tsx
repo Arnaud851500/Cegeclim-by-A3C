@@ -6,6 +6,7 @@ import * as XLSX from 'xlsx'
 import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
 import { supabase } from '@/lib/supabaseClient'
+import { useSocieteFilter } from '@/components/SocieteFilterContext'
 
 type ClientRow = {
   id: string
@@ -65,8 +66,14 @@ type RejectRow = {
 type AgenceRow = {
   id: string
   agence: string | null
+  societe: string | null
   coord_x_lambert: number | null
   coord_y_lambert: number | null
+}
+
+type TerritoryRow = {
+  code_dep: string | null
+  societe: string | null
 }
 
 type ImportStats = {
@@ -253,6 +260,26 @@ function compactSelectionLabel(values: string[], fallback = 'TOUS') {
   return `${values.length} sélectionnés`
 }
 
+function normalizeScopeValue(value: string | null | undefined): string {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+}
+
+function getClientDepartment(row: ClientRow): string {
+  return (
+    getDepartmentFromPostalCode(row.codePostalEtablissement) ||
+    String(row.departement || '').trim()
+  )
+}
+
+function getAbsentDepartment(row: CegeclimAbsentRow): string {
+  return getDepartmentFromPostalCode(row.code_postal) || ''
+}
+
 async function fetchAllClients(): Promise<{ rows: ClientRow[]; totalCount: number }> {
   const allRows: ClientRow[] = []
   let from = 0
@@ -296,7 +323,6 @@ async function fetchAllClients(): Promise<{ rows: ClientRow[]; totalCount: numbe
     allRows.push(...batch)
 
     if (batch.length < SUPABASE_FETCH_BATCH) break
-
     from += SUPABASE_FETCH_BATCH
   }
 
@@ -390,12 +416,15 @@ function MultiSelectHorizontal({
 }
 
 export default function ClientsPage() {
+  const { societeFilter } = useSocieteFilter()
+
   const [mode, setMode] = useState<ScreenMode>('clients')
 
   const [clients, setClients] = useState<ClientRow[]>([])
   const [clientsTotalCount, setClientsTotalCount] = useState<number>(0)
   const [cegeclimAbsents, setCegeclimAbsents] = useState<CegeclimAbsentRow[]>([])
   const [agences, setAgences] = useState<AgenceRow[]>([])
+  const [territories, setTerritories] = useState<TerritoryRow[]>([])
   const [lastImport, setLastImport] = useState<ImportRow | null>(null)
   const [rejects, setRejects] = useState<RejectRow[]>([])
 
@@ -436,6 +465,7 @@ export default function ClientsPage() {
   useEffect(() => {
     setCurrentPage(1)
   }, [
+    societeFilter,
     search,
     designationSearch,
     selectedDepartments,
@@ -461,7 +491,11 @@ export default function ClientsPage() {
 
       const agencesPromise = supabase
         .from('agences')
-        .select('id, agence, coord_x_lambert, coord_y_lambert')
+        .select('id, agence, societe, coord_x_lambert, coord_y_lambert')
+
+      const territoriesPromise = supabase
+        .from('territories')
+        .select('code_dep, societe')
 
       const cegeclimAbsentsPromise = supabase
         .from('vw_clients_cegeclim_absents_clients')
@@ -476,14 +510,16 @@ export default function ClientsPage() {
         .order('date_import', { ascending: false })
         .limit(1)
 
-      const [clientsRes, agencesRes, cegeclimRes, importRes] = await Promise.all([
+      const [clientsRes, agencesRes, territoriesRes, cegeclimRes, importRes] = await Promise.all([
         clientsPromise,
         agencesPromise,
+        territoriesPromise,
         cegeclimAbsentsPromise,
         importPromise,
       ])
 
       if (agencesRes.error) throw agencesRes.error
+      if (territoriesRes.error) throw territoriesRes.error
       if (cegeclimRes.error) throw cegeclimRes.error
       if (importRes.error) throw importRes.error
 
@@ -503,6 +539,7 @@ export default function ClientsPage() {
       setClients(clientsRes.rows)
       setClientsTotalCount(clientsRes.totalCount)
       setAgences((agencesRes.data || []) as AgenceRow[])
+      setTerritories((territoriesRes.data || []) as TerritoryRow[])
       setCegeclimAbsents((cegeclimRes.data || []) as CegeclimAbsentRow[])
       setLastImport((importRes.data?.[0] || null) as ImportRow | null)
       setRejects(rejectsRows)
@@ -513,6 +550,57 @@ export default function ClientsPage() {
       setLoading(false)
     }
   }
+
+  const normalizedSocieteFilter = useMemo(
+    () => normalizeScopeValue(societeFilter),
+    [societeFilter]
+  )
+
+  const allowedDepartments = useMemo(() => {
+    if (normalizedSocieteFilter === 'global') return []
+
+    return Array.from(
+      new Set(
+        territories
+          .filter(
+            (row) => normalizeScopeValue(row.societe) === normalizedSocieteFilter
+          )
+          .map((row) => String(row.code_dep || '').trim())
+          .filter(Boolean)
+      )
+    ).sort((a, b) => a.localeCompare(b, 'fr'))
+  }, [territories, normalizedSocieteFilter])
+
+  const allowedDepartmentSet = useMemo(() => {
+    return new Set(allowedDepartments)
+  }, [allowedDepartments])
+
+  const scopedClients = useMemo(() => {
+    if (normalizedSocieteFilter === 'global') return clients
+
+    return clients.filter((row) => {
+      const dep = getClientDepartment(row)
+      return dep && allowedDepartmentSet.has(dep)
+    })
+  }, [clients, normalizedSocieteFilter, allowedDepartmentSet])
+
+  const scopedCegeclimAbsents = useMemo(() => {
+    if (normalizedSocieteFilter === 'global') return cegeclimAbsents
+
+    return cegeclimAbsents.filter((row) => {
+      const dep = getAbsentDepartment(row)
+      return dep && allowedDepartmentSet.has(dep)
+    })
+  }, [cegeclimAbsents, normalizedSocieteFilter, allowedDepartmentSet])
+
+  const scopedAgences = useMemo(() => {
+    if (normalizedSocieteFilter === 'global') return agences
+
+    return agences.filter((a) => {
+      const soc = normalizeScopeValue(a.societe)
+      return soc === normalizedSocieteFilter
+    })
+  }, [agences, normalizedSocieteFilter])
 
   const ageDaysMin = useMemo(
     () => Math.min(sliderToDays(ageSliderMin), sliderToDays(ageSliderMax)),
@@ -527,47 +615,60 @@ export default function ClientsPage() {
   const departmentOptions = useMemo(() => {
     return Array.from(
       new Set(
-        clients
-          .map((r) => getDepartmentFromPostalCode(r.codePostalEtablissement) || r.departement)
+        scopedClients
+          .map((r) => getClientDepartment(r))
           .filter(Boolean) as string[]
       )
     ).sort((a, b) => a.localeCompare(b, 'fr'))
-  }, [clients])
+  }, [scopedClients])
+
+  useEffect(() => {
+    setSelectedDepartments((prev) =>
+      prev.filter((dep) => departmentOptions.includes(dep))
+    )
+  }, [departmentOptions])
 
   const sectorOptions = useMemo(() => {
     return Array.from(
       new Set(
-        clients
+        scopedClients
           .map((r) => r.naf_libelle_traduit || translateNaf(r.activitePrincipaleEtablissement))
           .filter(Boolean) as string[]
       )
     ).sort((a, b) => a.localeCompare(b, 'fr'))
-  }, [clients])
+  }, [scopedClients])
 
   const nafOptions = useMemo(() => {
     return Array.from(
-      new Set(clients.map((r) => r.activitePrincipaleEtablissement).filter(Boolean) as string[])
+      new Set(scopedClients.map((r) => r.activitePrincipaleEtablissement).filter(Boolean) as string[])
     ).sort((a, b) => a.localeCompare(b, 'fr'))
-  }, [clients])
+  }, [scopedClients])
 
   const agenceOptions = useMemo(() => {
-    return Array.from(new Set(agences.map((a) => a.agence).filter(Boolean) as string[])).sort((a, b) =>
-      a.localeCompare(b, 'fr')
-    )
-  }, [agences])
+    return Array.from(
+      new Set(scopedAgences.map((a) => a.agence).filter(Boolean) as string[])
+    ).sort((a, b) => a.localeCompare(b, 'fr'))
+  }, [scopedAgences])
+
+  useEffect(() => {
+    if (selectedAgence === 'TOUS') return
+    if (!agenceOptions.includes(selectedAgence)) {
+      setSelectedAgence('TOUS')
+    }
+  }, [agenceOptions, selectedAgence])
 
   const selectedAgenceRow = useMemo(() => {
     if (selectedAgence === 'TOUS') return null
-    return agences.find((a) => a.agence === selectedAgence) || null
-  }, [agences, selectedAgence])
+    return scopedAgences.find((a) => a.agence === selectedAgence) || null
+  }, [scopedAgences, selectedAgence])
 
   const filteredClients = useMemo(() => {
     const q = search.trim().toLowerCase()
     const designationQ = designationSearch.trim().toLowerCase()
 
-    return clients.filter((row) => {
+    return scopedClients.filter((row) => {
       const sector = row.naf_libelle_traduit || translateNaf(row.activitePrincipaleEtablissement)
-      const department = getDepartmentFromPostalCode(row.codePostalEtablissement) || row.departement || ''
+      const department = getClientDepartment(row)
       const ageDays = diffDaysFromToday(row.dateCreationEtablissement)
 
       const designationRaw = String(row.raison_sociale_affichee ?? '').trim()
@@ -590,8 +691,9 @@ export default function ClientsPage() {
       if (
         selectedNafCodes.length > 0 &&
         !selectedNafCodes.includes(row.activitePrincipaleEtablissement || '')
-      )
+      ) {
         return false
+      }
       if (excludeDesignationND && isDesignationND) return false
       if (excludeFutureCreation && isFutureDate(row.dateCreationEtablissement)) return false
       if (onlyContactable && !(row.telephone || row.email || row.contactable)) return false
@@ -637,7 +739,7 @@ export default function ClientsPage() {
       return true
     })
   }, [
-    clients,
+    scopedClients,
     search,
     designationSearch,
     selectedDepartments,
@@ -692,8 +794,8 @@ export default function ClientsPage() {
           bv = b.siret || ''
           break
         case 'departement':
-          av = getDepartmentFromPostalCode(a.codePostalEtablissement) || a.departement || ''
-          bv = getDepartmentFromPostalCode(b.codePostalEtablissement) || b.departement || ''
+          av = getClientDepartment(a) || ''
+          bv = getClientDepartment(b) || ''
           break
         case 'ville':
           av = a.libelleCommuneEtablissement || ''
@@ -748,7 +850,7 @@ export default function ClientsPage() {
     return Array.from(
       new Set(
         sortedFilteredClients
-          .map((r) => getDepartmentFromPostalCode(r.codePostalEtablissement) || r.departement)
+          .map((r) => getClientDepartment(r))
           .filter(Boolean) as string[]
       )
     ).sort((a, b) => a.localeCompare(b, 'fr'))
@@ -770,7 +872,7 @@ export default function ClientsPage() {
 
         summaryDepartments.forEach((dep) => {
           const count = sortedFilteredClients.filter((r) => {
-            const d = getDepartmentFromPostalCode(r.codePostalEtablissement) || r.departement
+            const d = getClientDepartment(r)
             const s = r.naf_libelle_traduit || translateNaf(r.activitePrincipaleEtablissement)
             return d === dep && s === sector
           }).length
@@ -787,7 +889,7 @@ export default function ClientsPage() {
     const out: Record<string, number> = {}
     summaryDepartments.forEach((dep) => {
       out[dep] = sortedFilteredClients.filter((r) => {
-        const d = getDepartmentFromPostalCode(r.codePostalEtablissement) || r.departement
+        const d = getClientDepartment(r)
         return d === dep
       }).length
     })
@@ -992,7 +1094,7 @@ export default function ClientsPage() {
       return {
         Désignation: row.raison_sociale_affichee || 'ND',
         Siret: row.siret || 'ND',
-        Dépt: getDepartmentFromPostalCode(row.codePostalEtablissement) || row.departement || 'ND',
+        Dépt: getClientDepartment(row) || 'ND',
         Ville: row.libelleCommuneEtablissement || 'ND',
         'Code postal': row.codePostalEtablissement || 'ND',
         'APE/NAF': row.activitePrincipaleEtablissement || 'ND',
@@ -1040,7 +1142,7 @@ export default function ClientsPage() {
         return [
           row.raison_sociale_affichee || 'ND',
           row.siret || 'ND',
-          getDepartmentFromPostalCode(row.codePostalEtablissement) || row.departement || 'ND',
+          getClientDepartment(row) || 'ND',
           row.libelleCommuneEtablissement || 'ND',
           row.codePostalEtablissement || 'ND',
           row.activitePrincipaleEtablissement || 'ND',
@@ -1061,10 +1163,16 @@ export default function ClientsPage() {
     window.print()
   }
 
+  const totalClientsBaseForScope =
+    normalizedSocieteFilter === 'global' ? clientsTotalCount : scopedClients.length
+
   const totalCegeclimBase =
-    cegeclimAbsents.length + clients.filter((x) => x.present_dans_cegeclim).length
+    scopedCegeclimAbsents.length + scopedClients.filter((x) => x.present_dans_cegeclim).length
+
   const totalSelection = sortedFilteredClients.length
+
   const totalSelectedDepartments = summaryDepartments.length
+
   const totalSelectedNaf = Array.from(
     new Set(sortedFilteredClients.map((r) => r.activitePrincipaleEtablissement).filter(Boolean))
   ).length
@@ -1084,7 +1192,7 @@ export default function ClientsPage() {
           <div style={kpiGridStyle}>
             <div style={kpiCardStyle}>
               <div style={kpiTitleStyle}>Entreprises base Clients</div>
-              <div style={kpiValueStyle}>{clientsTotalCount}</div>
+              <div style={kpiValueStyle}>{totalClientsBaseForScope}</div>
             </div>
 
             <div style={kpiCardStyle}>
@@ -1094,14 +1202,17 @@ export default function ClientsPage() {
 
             <div style={kpiCardStyle}>
               <div style={kpiTitleStyle}>Clients CEGECLIM absent base Clients</div>
-              <div style={kpiValueStyle}>{cegeclimAbsents.length}</div>
+              <div style={kpiValueStyle}>{scopedCegeclimAbsents.length}</div>
             </div>
           </div>
         </section>
 
         <section style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <div style={captionRowStyle}>
-            <div style={groupCaptionStyle}>Données relatives à la selection</div>
+            <div style={groupCaptionStyle}>
+              Données relatives à la selection
+              {normalizedSocieteFilter !== 'global' ? ` • périmètre ${societeFilter}` : ''}
+            </div>
           </div>
           <div style={kpiGridStyle}>
             <div style={kpiCardStyle}>
@@ -1165,13 +1276,13 @@ export default function ClientsPage() {
             />
           </label>
           <p>
-          <a
-            href="https://annuaire-entreprises.data.gouv.fr/export-sirene"
-            target="_blank"
-            rel="noopener noreferrer"
-           >
-               .    https://annuaire-entreprises.data.gouv.fr/export-sirene
-          </a>
+            <a
+              href="https://annuaire-entreprises.data.gouv.fr/export-sirene"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              . https://annuaire-entreprises.data.gouv.fr/export-sirene
+            </a>
           </p>
           {importStats && (
             <div style={{ marginTop: 8, fontSize: 11 }}>
@@ -1206,7 +1317,7 @@ export default function ClientsPage() {
                 style={inputStyle}
               />
             </div>
-            
+
             <div style={{ marginLeft: 192, maxWidth: '320px' }}>
               <MultiSelectHorizontal
                 label="Departement(s)"
@@ -1506,9 +1617,7 @@ export default function ClientsPage() {
                       >
                         <td style={listCellStyle}>{row.raison_sociale_affichee || 'ND'}</td>
                         <td style={listCellStyle}>{row.siret || 'ND'}</td>
-                        <td style={listCellStyle}>
-                          {getDepartmentFromPostalCode(row.codePostalEtablissement) || row.departement || 'ND'}
-                        </td>
+                        <td style={listCellStyle}>{getClientDepartment(row) || 'ND'}</td>
                         <td style={listCellStyle}>{row.libelleCommuneEtablissement || 'ND'}</td>
                         <td style={listCellStyle}>{row.codePostalEtablissement || 'ND'}</td>
                         <td style={listCellStyle}>{row.activitePrincipaleEtablissement || 'ND'}</td>
@@ -1570,7 +1679,7 @@ export default function ClientsPage() {
                 </tr>
               </thead>
               <tbody>
-                {cegeclimAbsents.map((row) => (
+                {scopedCegeclimAbsents.map((row) => (
                   <tr key={row.id}>
                     <td style={simpleCellStyle}>{row.siret || 'NC'}</td>
                     <td style={simpleCellStyle}>{formatDateFr(row.date_creation_client)}</td>
@@ -1624,10 +1733,7 @@ export default function ClientsPage() {
                   <div><b>Adresse :</b> {selectedClient.adresse_complete || 'NC'}</div>
                   <div><b>Ville :</b> {selectedClient.libelleCommuneEtablissement || 'NC'}</div>
                   <div><b>Code postal :</b> {selectedClient.codePostalEtablissement || 'NC'}</div>
-                  <div>
-                    <b>Département :</b>{' '}
-                    {getDepartmentFromPostalCode(selectedClient.codePostalEtablissement) || selectedClient.departement || 'NC'}
-                  </div>
+                  <div><b>Département :</b> {getClientDepartment(selectedClient) || 'NC'}</div>
                   <div><b>Date création :</b> {formatDateFr(selectedClient.dateCreationEtablissement)}</div>
                   <div><b>Ancienneté :</b> {formatAgePrecise(diffDaysFromToday(selectedClient.dateCreationEtablissement))}</div>
                   <div><b>Téléphone :</b> {selectedClient.telephone || 'NC'}</div>
