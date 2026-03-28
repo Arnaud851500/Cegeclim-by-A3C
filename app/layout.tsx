@@ -4,6 +4,7 @@ import { useEffect, useMemo } from 'react'
 import { usePathname, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { AccessProvider, useAccess, type AccessRights } from '@/components/AccessContext'
+import { Analytics } from "@vercel/analytics/next"
 
 import {
   SocieteFilterProvider,

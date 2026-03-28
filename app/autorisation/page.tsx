@@ -509,7 +509,7 @@ export default function AutorisationPage() {
                           {row.email}
                         </div>
                         <div className="mt-1 text-xs text-slate-500">
-                          Clé d’accès utilisée
+                          
                         </div>
                       </td>
 
