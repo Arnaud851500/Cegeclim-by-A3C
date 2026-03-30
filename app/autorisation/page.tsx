@@ -11,7 +11,7 @@ type UserPageAccess = {
   can_clients: boolean
   can_agences: boolean
   can_autorisation: boolean
-  can_parametrage: boolean
+  can_documents: boolean
   can_stocks: boolean
   can_activites: boolean
   can_change_scope: boolean
@@ -28,7 +28,7 @@ const defaultNewRow: UserPageAccess = {
   can_clients: false,
   can_agences: false,
   can_autorisation: false,
-  can_parametrage: false,
+  can_documents: false,
   can_stocks: false,
   can_activites: false,
   can_change_scope: false,
@@ -60,7 +60,7 @@ export default function AutorisationPage() {
         can_clients,
         can_agences,
         can_autorisation,
-        can_parametrage,
+        can_documents,
         can_stocks,
         can_activites,
         can_change_scope,
@@ -84,7 +84,7 @@ export default function AutorisationPage() {
         can_clients: !!item.can_clients,
         can_agences: !!item.can_agences,
         can_autorisation: !!item.can_autorisation,
-        can_parametrage: !!item.can_parametrage,
+        can_documents: !!item.can_documents,
         can_stocks: !!item.can_stocks,
         can_activites: !!item.can_activites,
         can_change_scope: !!item.can_change_scope,
@@ -168,7 +168,7 @@ export default function AutorisationPage() {
         can_clients: row.can_clients,
         can_agences: row.can_agences,
         can_autorisation: row.can_autorisation,
-        can_parametrage: row.can_parametrage,
+        can_documents: row.can_documents,
         can_stocks: row.can_stocks,
         can_activites: row.can_activites,
         can_change_scope: row.can_change_scope,
@@ -208,7 +208,7 @@ export default function AutorisationPage() {
       can_clients: newRow.can_clients,
       can_agences: newRow.can_agences,
       can_autorisation: newRow.can_autorisation,
-      can_parametrage: newRow.can_parametrage,
+      can_documents: newRow.can_documents,
       can_stocks: newRow.can_stocks,
       can_activites: newRow.can_activites,
       can_change_scope: newRow.can_change_scope,
@@ -241,7 +241,7 @@ export default function AutorisationPage() {
               can_clients: value,
               can_agences: value,
               can_autorisation: value,
-              can_parametrage: value,
+              can_documents: value,
               can_stocks: value,
               can_activites: value,
             }
@@ -259,7 +259,7 @@ export default function AutorisationPage() {
       can_clients: value,
       can_agences: value,
       can_autorisation: value,
-      can_parametrage: value,
+      can_documents: value,
       can_stocks: value,
       can_activites: value,
     }))
@@ -386,9 +386,9 @@ export default function AutorisationPage() {
                 onChange={(checked) => updateNewRowValue('can_autorisation', checked)}
               />
               <CreateCheckbox
-                label="Paramétrage"
-                checked={newRow.can_parametrage}
-                onChange={(checked) => updateNewRowValue('can_parametrage', checked)}
+                label="Documents"
+                checked={newRow.can_documents}
+                onChange={(checked) => updateNewRowValue('can_documents', checked)}
               />
               <CreateCheckbox
                 label="Stocks"
@@ -468,7 +468,7 @@ export default function AutorisationPage() {
                     Auto
                   </th>
                   <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
-                    Param
+                    Documents
                   </th>
                   <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Stocks
@@ -519,7 +519,7 @@ export default function AutorisationPage() {
                       <PermissionCell checked={row.can_clients} onChange={(checked) => updateLocalValue(row.email, 'can_clients', checked)} />
                       <PermissionCell checked={row.can_agences} onChange={(checked) => updateLocalValue(row.email, 'can_agences', checked)} />
                       <PermissionCell checked={row.can_autorisation} onChange={(checked) => updateLocalValue(row.email, 'can_autorisation', checked)} />
-                      <PermissionCell checked={row.can_parametrage} onChange={(checked) => updateLocalValue(row.email, 'can_parametrage', checked)} />
+                      <PermissionCell checked={row.can_documents} onChange={(checked) => updateLocalValue(row.email, 'can_documents', checked)} />
                       <PermissionCell checked={row.can_stocks} onChange={(checked) => updateLocalValue(row.email, 'can_stocks', checked)} />
                       <PermissionCell checked={row.can_activites} onChange={(checked) => updateLocalValue(row.email, 'can_activites', checked)} />
                       <PermissionCell checked={row.can_change_scope} onChange={(checked) => updateLocalValue(row.email, 'can_change_scope', checked)} />

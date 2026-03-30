@@ -6,7 +6,7 @@ import { useSocieteFilter } from '@/components/SocieteFilterContext'
 import { useRouter } from 'next/navigation'
 import { useAccess } from '@/components/AccessContext'
 
-
+    
 
 type Agence = {
   id: string

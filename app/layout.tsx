@@ -32,10 +32,11 @@ function AppShell({ children }: { children: React.ReactNode }) {
     { label: 'Agences', path: '/agences', accessKey: 'can_agences' },
     { label: 'Cartographie', path: '/cartographie', accessKey: 'can_cartographie' },
     { label: 'Clients', path: '/clients', accessKey: 'can_clients' },
+    { label: 'Documents', path: '/documents', accessKey: 'can_documents' },
     { label: 'Autorisation', path: '/autorisation', accessKey: 'can_autorisation' },
     { label: 'Activités - CA (WIP)', path: '/activites', accessKey: 'can_activites' },
     { label: 'Stocks et Flux log (WIP)', path: '/stocks', accessKey: 'can_stocks' },
-    { label: 'Paramétrage (WIP)', path: '/parametrage', accessKey: 'can_parametrage' },
+  
   ]
 
   const visibleMenu = useMemo(() => {

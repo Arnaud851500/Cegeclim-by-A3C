@@ -10,7 +10,7 @@ export type AccessRights = {
   can_clients: boolean
   can_agences: boolean
   can_autorisation: boolean
-  can_parametrage: boolean
+  can_documents: boolean
   can_stocks: boolean
   can_activites: boolean
   can_change_scope: boolean
@@ -31,7 +31,7 @@ const defaultRights: AccessRights = {
   can_clients: false,
   can_agences: false,
   can_autorisation: false,
-  can_parametrage: false,
+  can_documents: false,
   can_stocks: false,
   can_activites: false,
   can_change_scope: false,
@@ -53,7 +53,7 @@ export function getFirstAllowedPath(rights: AccessRights) {
   if (rights.can_agences) return '/agences'
   if (rights.can_autorisation) return '/autorisation'
   if (rights.can_activites) return '/activites'
-  if (rights.can_parametrage) return '/parametrage'
+  if (rights.can_documents) return '/documents'
   if (rights.can_stocks) return '/stocks'
   return '/unauthorized'
 }
@@ -86,7 +86,7 @@ async function fetchAccess() {
         can_clients,
         can_agences,
         can_autorisation,
-        can_parametrage,
+        can_documents,
         can_stocks,
         can_activites,
         can_change_scope,
@@ -112,7 +112,7 @@ async function fetchAccess() {
         can_clients: !!data.can_clients,
         can_agences: !!data.can_agences,
         can_autorisation: !!data.can_autorisation,
-        can_parametrage: !!data.can_parametrage,
+        can_documents: !!data.can_documents,
         can_stocks: !!data.can_stocks,
         can_activites: !!data.can_activites,
         can_change_scope: !!data.can_change_scope,
