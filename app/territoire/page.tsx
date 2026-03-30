@@ -466,6 +466,10 @@ export default function TerritoirePage() {
         Vision active : {societeFilter}
       </div>
 
+      <div className="bg-red-500 text-white p-4 rounded-xl">
+       TEST TAILWIND
+      </div>
+
       <div style={sectionCardStyle}>
         <h2 style={{ marginTop: 0, marginBottom: 16 }}>Synthèse par région</h2>
 
