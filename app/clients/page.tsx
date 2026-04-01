@@ -153,9 +153,9 @@ type SireneParamsForm = {
 
 const MAX_AGE_DAYS = 365 * 50
 const CLIENTS_PAGE_SIZE = 200
-const SUPABASE_FETCH_BATCH = 1000
-const INITIAL_CLIENTS_BATCH = 250
-const MAX_BATCH_ENRICH = 100
+const SUPABASE_FETCH_BATCH = 50000
+const INITIAL_CLIENTS_BATCH = 50000
+const MAX_BATCH_ENRICH = 1000
 
 function normalizeSiret(value: unknown): string {
   return String(value ?? '').replace(/\D/g, '').trim()
