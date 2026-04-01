@@ -290,14 +290,19 @@ const topBarTitleStyle: React.CSSProperties = {
   fontWeight: 800,
 }
 
-const logoutButtonStyle: React.CSSProperties = {
-  padding: '10px',
-  borderRadius: 10,
-  cursor: 'pointer',
-}
 
 const contentStyle: React.CSSProperties = {
   flex: 1,
   padding: 24,
   overflow: 'auto',
+}
+
+const logoutButtonStyle: React.CSSProperties = {
+  background: '#7c7777',
+  color: '#fff',
+  border: 'none',
+  padding: '8px 14px',
+  borderRadius: '8px',
+  fontWeight: 600,
+  cursor: 'pointer',
 }

@@ -16,9 +16,25 @@ type UserPageAccess = {
   can_activites: boolean
   can_change_scope: boolean
   allowed_scopes: string[]
+  allowed_agences: string[]
+  allowed_departements: string[]
 }
 
 const EMPTY_MESSAGE = ''
+
+const ALL_DEPARTEMENTS = [
+  '01', '02', '03', '04', '05', '06', '07', '08', '09',
+  '10', '11', '12', '13', '14', '15', '16', '17', '18', '19',
+  '21', '22', '23', '24', '25', '26', '27', '28', '29',
+  '30', '31', '32', '33', '34', '35', '36', '37', '38', '39',
+  '40', '41', '42', '43', '44', '45', '46', '47', '48', '49',
+  '50', '51', '52', '53', '54', '55', '56', '57', '58', '59',
+  '60', '61', '62', '63', '64', '65', '66', '67', '68', '69',
+  '70', '71', '72', '73', '74', '75', '76', '77', '78', '79',
+  '80', '81', '82', '83', '84', '85', '86', '87', '88', '89',
+  '90', '91', '92', '93', '94', '95',
+  '971', '972', '973', '974', '975', '976', '977', '978'
+]
 
 const defaultNewRow: UserPageAccess = {
   email: '',
@@ -33,6 +49,8 @@ const defaultNewRow: UserPageAccess = {
   can_activites: false,
   can_change_scope: false,
   allowed_scopes: ['Global'],
+  allowed_agences: [],
+  allowed_departements: [],
 }
 
 export default function AutorisationPage() {
@@ -44,6 +62,7 @@ export default function AutorisationPage() {
   const [message, setMessage] = useState(EMPTY_MESSAGE)
   const [errorMessage, setErrorMessage] = useState(EMPTY_MESSAGE)
   const [newRow, setNewRow] = useState<UserPageAccess>(defaultNewRow)
+  const [selectedDeptUserEmail, setSelectedDeptUserEmail] = useState<string | null>(null)
 
   async function loadData() {
     setLoading(true)
@@ -64,7 +83,9 @@ export default function AutorisationPage() {
         can_stocks,
         can_activites,
         can_change_scope,
-        allowed_scopes
+        allowed_scopes,
+        allowed_agences,
+        allowed_departements
       `)
       .order('email', { ascending: true })
 
@@ -75,25 +96,43 @@ export default function AutorisationPage() {
       return
     }
 
-    setRows(
-      (data || []).map((item) => ({
-        email: String(item.email || '').toLowerCase().trim(),
-        can_dashboard: !!item.can_dashboard,
-        can_territoire: !!item.can_territoire,
-        can_cartographie: !!item.can_cartographie,
-        can_clients: !!item.can_clients,
-        can_agences: !!item.can_agences,
-        can_autorisation: !!item.can_autorisation,
-        can_documents: !!item.can_documents,
-        can_stocks: !!item.can_stocks,
-        can_activites: !!item.can_activites,
-        can_change_scope: !!item.can_change_scope,
-        allowed_scopes:
-          Array.isArray(item.allowed_scopes) && item.allowed_scopes.length > 0
-            ? item.allowed_scopes
-            : ['Global'],
-      }))
-    )
+    const formattedRows = (data || []).map((item) => ({
+      email: String(item.email || '').toLowerCase().trim(),
+      can_dashboard: !!item.can_dashboard,
+      can_territoire: !!item.can_territoire,
+      can_cartographie: !!item.can_cartographie,
+      can_clients: !!item.can_clients,
+      can_agences: !!item.can_agences,
+      can_autorisation: !!item.can_autorisation,
+      can_documents: !!item.can_documents,
+      can_stocks: !!item.can_stocks,
+      can_activites: !!item.can_activites,
+      can_change_scope: !!item.can_change_scope,
+      allowed_scopes:
+        Array.isArray(item.allowed_scopes) && item.allowed_scopes.length > 0
+          ? item.allowed_scopes
+          : ['Global'],
+      allowed_agences:
+        Array.isArray(item.allowed_agences) && item.allowed_agences.length > 0
+          ? item.allowed_agences
+          : [],
+      allowed_departements:
+        Array.isArray(item.allowed_departements) && item.allowed_departements.length > 0
+          ? item.allowed_departements
+          : [],
+    }))
+
+    setRows(formattedRows)
+
+    if (formattedRows.length > 0) {
+      setSelectedDeptUserEmail((prev) =>
+        prev && formattedRows.some((row) => row.email === prev)
+          ? prev
+          : formattedRows[0].email
+      )
+    } else {
+      setSelectedDeptUserEmail(null)
+    }
 
     setLoading(false)
   }
@@ -104,7 +143,7 @@ export default function AutorisationPage() {
 
   function updateLocalValue(
     email: string,
-    field: keyof Omit<UserPageAccess, 'email' | 'allowed_scopes'>,
+    field: keyof Omit<UserPageAccess, 'email' | 'allowed_scopes' | 'allowed_agences' | 'allowed_departements'>,
     value: boolean
   ) {
     const normalizedEmail = email.toLowerCase().trim()
@@ -133,8 +172,57 @@ export default function AutorisationPage() {
     )
   }
 
+  function updateAllowedAgences(email: string, value: string) {
+    const normalizedEmail = email.toLowerCase().trim()
+
+    const agences = value
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+
+    setRows((prev) =>
+      prev.map((row) =>
+        row.email === normalizedEmail
+          ? { ...row, allowed_agences: agences }
+          : row
+      )
+    )
+  }
+
+  function updateAllowedDepartements(email: string, nextDepartements: string[]) {
+    const normalizedEmail = email.toLowerCase().trim()
+
+    setRows((prev) =>
+      prev.map((row) =>
+        row.email === normalizedEmail
+          ? { ...row, allowed_departements: nextDepartements }
+          : row
+      )
+    )
+  }
+
+  function toggleDepartementForUser(email: string, dep: string) {
+    const row = rows.find((r) => r.email === email)
+    if (!row) return
+
+    const exists = row.allowed_departements.includes(dep)
+    const next = exists
+      ? row.allowed_departements.filter((d) => d !== dep)
+      : [...row.allowed_departements, dep].sort((a, b) => a.localeCompare(b, 'fr'))
+
+    updateAllowedDepartements(email, next)
+  }
+
+  function allowAllDepartementsForUser(email: string) {
+    updateAllowedDepartements(email, [])
+  }
+
+  function denyAllDepartementsForUser(email: string) {
+    updateAllowedDepartements(email, [...ALL_DEPARTEMENTS])
+  }
+
   function updateNewRowValue(
-    field: keyof Omit<UserPageAccess, 'email' | 'allowed_scopes'>,
+    field: keyof Omit<UserPageAccess, 'email' | 'allowed_scopes' | 'allowed_agences' | 'allowed_departements'>,
     value: boolean
   ) {
     setNewRow((prev) => ({ ...prev, [field]: value }))
@@ -149,6 +237,18 @@ export default function AutorisationPage() {
     setNewRow((prev) => ({
       ...prev,
       allowed_scopes: scopes.length ? scopes : ['Global'],
+    }))
+  }
+
+  function updateNewRowAllowedAgences(value: string) {
+    const agences = value
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+
+    setNewRow((prev) => ({
+      ...prev,
+      allowed_agences: agences,
     }))
   }
 
@@ -173,6 +273,8 @@ export default function AutorisationPage() {
         can_activites: row.can_activites,
         can_change_scope: row.can_change_scope,
         allowed_scopes: row.allowed_scopes,
+        allowed_agences: row.allowed_agences,
+        allowed_departements: row.allowed_departements,
       })
       .eq('email', normalizedEmail)
 
@@ -213,6 +315,8 @@ export default function AutorisationPage() {
       can_activites: newRow.can_activites,
       can_change_scope: newRow.can_change_scope,
       allowed_scopes: newRow.allowed_scopes,
+      allowed_agences: newRow.allowed_agences,
+      allowed_departements: newRow.allowed_departements,
     })
 
     if (error) {
@@ -244,6 +348,7 @@ export default function AutorisationPage() {
               can_documents: value,
               can_stocks: value,
               can_activites: value,
+              can_change_scope: value,
             }
           : row
       )
@@ -262,6 +367,7 @@ export default function AutorisationPage() {
       can_documents: value,
       can_stocks: value,
       can_activites: value,
+      can_change_scope: value,
     }))
   }
 
@@ -270,6 +376,12 @@ export default function AutorisationPage() {
     if (!term) return rows
     return rows.filter((row) => row.email.includes(term))
   }, [rows, search])
+
+  const selectedDeptUser = useMemo(() => {
+    return filteredRows.find((row) => row.email === selectedDeptUserEmail)
+      || rows.find((row) => row.email === selectedDeptUserEmail)
+      || null
+  }, [filteredRows, rows, selectedDeptUserEmail])
 
   return (
     <div className="min-h-screen bg-slate-50 p-6">
@@ -281,7 +393,7 @@ export default function AutorisationPage() {
                 Gestion des autorisations
               </h1>
               <p className="mt-1 text-sm text-slate-600">
-                Lecture, création et mise à jour des droits par email.
+                Gestion des pages, scopes autorisés, agences autorisées et départements visibles.
               </p>
             </div>
 
@@ -318,7 +430,7 @@ export default function AutorisationPage() {
 
             <div className="rounded-xl bg-slate-100 p-4">
               <div className="text-sm text-slate-500">Droits pilotés</div>
-              <div className="mt-1 text-2xl font-bold text-slate-900">10</div>
+              <div className="mt-1 text-2xl font-bold text-slate-900">13</div>
             </div>
           </div>
 
@@ -355,56 +467,16 @@ export default function AutorisationPage() {
             />
 
             <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
-              <CreateCheckbox
-                label="Dashboard"
-                checked={newRow.can_dashboard}
-                onChange={(checked) => updateNewRowValue('can_dashboard', checked)}
-              />
-              <CreateCheckbox
-                label="Territoire"
-                checked={newRow.can_territoire}
-                onChange={(checked) => updateNewRowValue('can_territoire', checked)}
-              />
-              <CreateCheckbox
-                label="Cartographie"
-                checked={newRow.can_cartographie}
-                onChange={(checked) => updateNewRowValue('can_cartographie', checked)}
-              />
-              <CreateCheckbox
-                label="Clients"
-                checked={newRow.can_clients}
-                onChange={(checked) => updateNewRowValue('can_clients', checked)}
-              />
-              <CreateCheckbox
-                label="Agences"
-                checked={newRow.can_agences}
-                onChange={(checked) => updateNewRowValue('can_agences', checked)}
-              />
-              <CreateCheckbox
-                label="Autorisation"
-                checked={newRow.can_autorisation}
-                onChange={(checked) => updateNewRowValue('can_autorisation', checked)}
-              />
-              <CreateCheckbox
-                label="Documents"
-                checked={newRow.can_documents}
-                onChange={(checked) => updateNewRowValue('can_documents', checked)}
-              />
-              <CreateCheckbox
-                label="Stocks"
-                checked={newRow.can_stocks}
-                onChange={(checked) => updateNewRowValue('can_stocks', checked)}
-              />
-              <CreateCheckbox
-                label="Activités"
-                checked={newRow.can_activites}
-                onChange={(checked) => updateNewRowValue('can_activites', checked)}
-              />
-              <CreateCheckbox
-                label="Change scope"
-                checked={newRow.can_change_scope}
-                onChange={(checked) => updateNewRowValue('can_change_scope', checked)}
-              />
+              <CreateCheckbox label="Dashboard" checked={newRow.can_dashboard} onChange={(checked) => updateNewRowValue('can_dashboard', checked)} />
+              <CreateCheckbox label="Territoire" checked={newRow.can_territoire} onChange={(checked) => updateNewRowValue('can_territoire', checked)} />
+              <CreateCheckbox label="Cartographie" checked={newRow.can_cartographie} onChange={(checked) => updateNewRowValue('can_cartographie', checked)} />
+              <CreateCheckbox label="Clients" checked={newRow.can_clients} onChange={(checked) => updateNewRowValue('can_clients', checked)} />
+              <CreateCheckbox label="Agences" checked={newRow.can_agences} onChange={(checked) => updateNewRowValue('can_agences', checked)} />
+              <CreateCheckbox label="Autorisation" checked={newRow.can_autorisation} onChange={(checked) => updateNewRowValue('can_autorisation', checked)} />
+              <CreateCheckbox label="Documents" checked={newRow.can_documents} onChange={(checked) => updateNewRowValue('can_documents', checked)} />
+              <CreateCheckbox label="Stocks" checked={newRow.can_stocks} onChange={(checked) => updateNewRowValue('can_stocks', checked)} />
+              <CreateCheckbox label="Activités" checked={newRow.can_activites} onChange={(checked) => updateNewRowValue('can_activites', checked)} />
+              <CreateCheckbox label="Change scope" checked={newRow.can_change_scope} onChange={(checked) => updateNewRowValue('can_change_scope', checked)} />
             </div>
 
             <input
@@ -414,6 +486,89 @@ export default function AutorisationPage() {
               placeholder="Global, Cegeclim, CVC"
               className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
             />
+
+            <input
+              type="text"
+              value={(newRow.allowed_agences ?? []).join(', ')}
+              onChange={(e) => updateNewRowAllowedAgences(e.target.value)}
+              placeholder="Agences autorisées séparées par des virgules"
+              className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
+            />
+
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <div className="mb-2 text-sm font-semibold text-slate-800">
+                Départements visibles
+              </div>
+              <div className="mb-3 text-xs text-slate-500">
+                Si aucun département n’est sélectionné, tous les départements seront visibles.
+              </div>
+
+              <div className="mb-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setNewRow((prev) => ({ ...prev, allowed_departements: [] }))
+                  }
+                  className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-white"
+                >
+                  Tous visibles
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    setNewRow((prev) => ({
+                      ...prev,
+                      allowed_departements: [...ALL_DEPARTEMENTS],
+                    }))
+                  }
+                  className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-white"
+                >
+                  Tout masquer
+                </button>
+              </div>
+
+              <div className="grid grid-cols-4 gap-2 sm:grid-cols-6 md:grid-cols-8 xl:grid-cols-12">
+                {ALL_DEPARTEMENTS.map((dep) => {
+                  const checked = newRow.allowed_departements.length === 0
+                    ? true
+                    : newRow.allowed_departements.includes(dep)
+
+                  return (
+                    <label
+                      key={dep}
+                      className={`flex items-center justify-center rounded-lg border px-2 py-2 text-xs font-medium ${
+                        checked
+                          ? 'border-slate-900 bg-slate-900 text-white'
+                          : 'border-slate-300 bg-white text-slate-700'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        className="hidden"
+                        checked={checked}
+                        onChange={() => {
+                          const current =
+                            newRow.allowed_departements.length === 0
+                              ? [...ALL_DEPARTEMENTS]
+                              : [...newRow.allowed_departements]
+
+                          const next = current.includes(dep)
+                            ? current.filter((d) => d !== dep)
+                            : [...current, dep].sort((a, b) => a.localeCompare(b, 'fr'))
+
+                          setNewRow((prev) => ({
+                            ...prev,
+                            allowed_departements: next.length === ALL_DEPARTEMENTS.length ? [...ALL_DEPARTEMENTS] : next,
+                          }))
+                        }}
+                      />
+                      {dep}
+                    </label>
+                  )
+                })}
+              </div>
+            </div>
 
             <div className="flex flex-wrap gap-3">
               <button
@@ -443,10 +598,10 @@ export default function AutorisationPage() {
 
         <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
           <div className="overflow-x-auto">
-            <table className="min-w-full border-collapse">
+            <table className="min-w-full table-auto border-collapse">
               <thead className="bg-slate-100">
                 <tr>
-                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Utilisateur
                   </th>
                   <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
@@ -482,7 +637,10 @@ export default function AutorisationPage() {
                   <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Allowed scopes
                   </th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
+                    Allowed agences
+                  </th>
+                  <th className="min-w-[290px] whitespace-nowrap px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Actions
                   </th>
                 </tr>
@@ -491,25 +649,22 @@ export default function AutorisationPage() {
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={13} className="px-4 py-10 text-center text-sm text-slate-500">
+                    <td colSpan={14} className="px-4 py-10 text-center text-sm text-slate-500">
                       Chargement des autorisations...
                     </td>
                   </tr>
                 ) : filteredRows.length === 0 ? (
                   <tr>
-                    <td colSpan={13} className="px-4 py-10 text-center text-sm text-slate-500">
+                    <td colSpan={14} className="px-4 py-10 text-center text-sm text-slate-500">
                       Aucun utilisateur trouvé.
                     </td>
                   </tr>
                 ) : (
                   filteredRows.map((row) => (
                     <tr key={row.email} className="border-t border-slate-200 hover:bg-slate-50">
-                      <td className="px-4 py-4 align-top">
-                        <div className="max-w-[280px] break-all text-sm font-medium text-slate-900">
+                      <td className="whitespace-nowrap px-4 py-4 align-top">
+                        <div className="min-w-fit text-sm font-medium text-slate-900">
                           {row.email}
-                        </div>
-                        <div className="mt-1 text-xs text-slate-500">
-                          
                         </div>
                       </td>
 
@@ -533,8 +688,30 @@ export default function AutorisationPage() {
                         />
                       </td>
 
-                      <td className="px-4 py-4">
-                        <div className="flex flex-col gap-2">
+                      <td className="px-4 py-4 align-top">
+                        <input
+                          type="text"
+                          value={(row.allowed_agences ?? []).join(', ')}
+                          onChange={(e) => updateAllowedAgences(row.email, e.target.value)}
+                          className="w-56 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-500"
+                          placeholder="Toutes si vide"
+                        />
+                      </td>
+
+                      <td className="min-w-[290px] px-4 py-4 align-top">
+                        <div className="flex flex-nowrap items-center gap-2 whitespace-nowrap">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedDeptUserEmail(row.email)}
+                            className={`rounded-lg px-3 py-2 text-xs font-semibold ${
+                              selectedDeptUserEmail === row.email
+                                ? 'bg-blue-600 text-white'
+                                : 'border border-slate-300 bg-white text-slate-700 hover:bg-slate-100'
+                            }`}
+                          >
+                            Départements
+                          </button>
+
                           <button
                             onClick={() => setAllForRow(row.email, true)}
                             className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 transition hover:bg-slate-100"
@@ -564,6 +741,99 @@ export default function AutorisationPage() {
               </tbody>
             </table>
           </div>
+        </div>
+
+        <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-900">
+                Départements visibles par utilisateur
+              </h2>
+              <p className="mt-1 text-sm text-slate-600">
+                Si un département est décoché, les sociétés dont l’adresse est dans ce département ne seront pas visibles.
+                Si aucun département n’est restreint, alors tous les départements restent visibles.
+              </p>
+            </div>
+
+            <select
+              value={selectedDeptUserEmail || ''}
+              onChange={(e) => setSelectedDeptUserEmail(e.target.value)}
+              className="rounded-xl border border-slate-300 px-4 py-2 text-sm outline-none focus:border-slate-500"
+            >
+              {rows.map((row) => (
+                <option key={row.email} value={row.email}>
+                  {row.email}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {selectedDeptUser ? (
+            <div className="mt-5">
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                <div className="rounded-lg bg-slate-100 px-3 py-2 text-sm font-medium text-slate-800">
+                  Utilisateur : {selectedDeptUser.email}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => allowAllDepartementsForUser(selectedDeptUser.email)}
+                  className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                >
+                  Tous visibles
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => denyAllDepartementsForUser(selectedDeptUser.email)}
+                  className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                >
+                  Tout masquer
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => saveRow(selectedDeptUser)}
+                  disabled={savingEmail === selectedDeptUser.email}
+                  className="rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {savingEmail === selectedDeptUser.email ? 'Enregistrement...' : 'Enregistrer les départements'}
+                </button>
+              </div>
+
+              <div className="grid grid-cols-4 gap-2 sm:grid-cols-6 md:grid-cols-8 xl:grid-cols-12">
+                {ALL_DEPARTEMENTS.map((dep) => {
+                  const checked =
+                    selectedDeptUser.allowed_departements.length === 0
+                      ? true
+                      : selectedDeptUser.allowed_departements.includes(dep)
+
+                  return (
+                    <label
+                      key={dep}
+                      className={`flex cursor-pointer items-center justify-center rounded-lg border px-2 py-2 text-xs font-medium ${
+                        checked
+                          ? 'border-slate-900 bg-slate-900 text-white'
+                          : 'border-slate-300 bg-white text-slate-700'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        className="hidden"
+                        checked={checked}
+                        onChange={() => toggleDepartementForUser(selectedDeptUser.email, dep)}
+                      />
+                      {dep}
+                    </label>
+                  )
+                })}
+              </div>
+            </div>
+          ) : (
+            <div className="mt-4 text-sm text-slate-500">
+              Aucun utilisateur sélectionné.
+            </div>
+          )}
         </div>
       </div>
     </div>

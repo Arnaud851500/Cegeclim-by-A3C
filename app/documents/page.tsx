@@ -1,11 +1,13 @@
 'use client'
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 
 type DocType = 'folder' | 'file'
 type ScopeType = 'Global' | 'Societe' | 'Agence'
 type SocieteType = 'Cegeclim' | 'CVC' | null
+type VisionType = 'Global' | 'Cegeclim' | 'CVC'
 
 type DocItem = {
   id: string
@@ -20,12 +22,15 @@ type DocItem = {
   scope_type: ScopeType | null
   societe: SocieteType
   agence: string | null
-  linked_entity_type: string | null
-  linked_entity_id: string | null
+  linked_entity_type?: string | null
+  linked_entity_id?: string | null
 }
 
-type TreeNode = DocItem & {
-  children: TreeNode[]
+type UserDocumentAccess = {
+  email: string
+  can_documents: boolean
+  allowed_scopes: string[]
+  allowed_agences: string[]
 }
 
 type SortOption =
@@ -37,16 +42,28 @@ type SortOption =
   | 'size-asc'
 
 const BUCKET_NAME = 'documents'
+const EMPTY_MESSAGE = ''
+
+const LIST_GRID_CLASS =
+  'grid grid-cols-[minmax(260px,3fr)_110px_130px_170px_minmax(260px,1.8fr)] gap-4 xl:grid-cols-[minmax(320px,3.4fr)_120px_140px_180px_minmax(300px,2fr)]'
 
 export default function DocumentsPage() {
+  const router = useRouter()
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+
   const [items, setItems] = useState<DocItem[]>([])
   const [loading, setLoading] = useState(true)
   const [uploading, setUploading] = useState(false)
+  const [authLoading, setAuthLoading] = useState(true)
+
+  const [access, setAccess] = useState<UserDocumentAccess | null>(null)
 
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null)
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null)
 
-  const [message, setMessage] = useState<string | null>(null)
+  const [message, setMessage] = useState(EMPTY_MESSAGE)
+  const [errorMessage, setErrorMessage] = useState(EMPTY_MESSAGE)
+
   const [search, setSearch] = useState('')
   const [sortBy, setSortBy] = useState<SortOption>('date-desc')
 
@@ -63,15 +80,13 @@ export default function DocumentsPage() {
   const [previewLoading, setPreviewLoading] = useState(false)
   const [previewScale, setPreviewScale] = useState(100)
 
-  const [visionScope, setVisionScope] = useState<'Global' | 'Cegeclim' | 'CVC'>('Global')
+  const [visionScope, setVisionScope] = useState<VisionType>('Global')
   const [filterAgence, setFilterAgence] = useState<string>('all')
 
   const [dragActive, setDragActive] = useState(false)
 
-  const fileInputRef = useRef<HTMLInputElement | null>(null)
-
   useEffect(() => {
-    loadDocuments()
+    void initializePage()
   }, [])
 
   useEffect(() => {
@@ -86,12 +101,82 @@ export default function DocumentsPage() {
       return
     }
 
-    loadPreviewUrl(item)
+    void loadPreviewUrl(item)
   }, [selectedItemId, items])
 
-  async function loadDocuments() {
+  async function initializePage() {
     setLoading(true)
-    setMessage(null)
+    setAuthLoading(true)
+    setMessage(EMPTY_MESSAGE)
+    setErrorMessage(EMPTY_MESSAGE)
+
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser()
+
+    if (userError || !user?.email) {
+      router.replace('/login')
+      return
+    }
+
+    const normalizedEmail = user.email.toLowerCase().trim()
+
+    const { data: accessRow, error: accessError } = await supabase
+      .from('user_page_access')
+      .select('email, can_documents, allowed_scopes, allowed_agences')
+      .eq('email', normalizedEmail)
+      .maybeSingle()
+
+    if (accessError) {
+      setErrorMessage(`Erreur lecture des droits : ${accessError.message}`)
+      setLoading(false)
+      setAuthLoading(false)
+      return
+    }
+
+    if (!accessRow || !accessRow.can_documents) {
+      router.replace('/unauthorized')
+      return
+    }
+
+    const accessData: UserDocumentAccess = {
+      email: normalizedEmail,
+      can_documents: !!accessRow.can_documents,
+      allowed_scopes:
+        Array.isArray(accessRow.allowed_scopes) && accessRow.allowed_scopes.length > 0
+          ? accessRow.allowed_scopes
+          : ['Global'],
+      allowed_agences:
+        Array.isArray(accessRow.allowed_agences) && accessRow.allowed_agences.length > 0
+          ? accessRow.allowed_agences
+          : [],
+    }
+
+    setAccess(accessData)
+    setAuthLoading(false)
+
+    const preferredVision = getDefaultVision(accessData)
+    setVisionScope(preferredVision)
+
+    await loadDocuments(accessData)
+  }
+
+  async function handleLogout() {
+    await supabase.auth.signOut()
+    router.replace('/login')
+  }
+
+  async function loadDocuments(currentAccess?: UserDocumentAccess) {
+    setLoading(true)
+    setMessage(EMPTY_MESSAGE)
+    setErrorMessage(EMPTY_MESSAGE)
+
+    const activeAccess = currentAccess ?? access
+    if (!activeAccess) {
+      setLoading(false)
+      return
+    }
 
     const { data, error } = await supabase
       .from('documents')
@@ -100,8 +185,8 @@ export default function DocumentsPage() {
       .order('updated_at', { ascending: false })
 
     if (error) {
-      console.error(error)
-      setMessage(`Erreur chargement documents : ${error.message}`)
+      setErrorMessage(`Erreur chargement documents : ${error.message}`)
+      setItems([])
       setLoading(false)
       return
     }
@@ -111,18 +196,18 @@ export default function DocumentsPage() {
       scope_type: row.scope_type ?? 'Global',
       societe: row.societe ?? null,
       agence: row.agence ?? null,
-      linked_entity_type: row.linked_entity_type ?? null,
-      linked_entity_id: row.linked_entity_id ?? null,
       updated_at: row.updated_at ?? row.created_at ?? null,
     }))
 
-    setItems(rows)
+    const securedRows = rows.filter((item) => isDocumentAllowedForUser(item, activeAccess))
 
-    if (selectedItemId && !rows.some((x) => x.id === selectedItemId)) {
+    setItems(securedRows)
+
+    if (selectedItemId && !securedRows.some((x) => x.id === selectedItemId)) {
       setSelectedItemId(null)
     }
 
-    if (currentFolderId && !rows.some((x) => x.id === currentFolderId)) {
+    if (currentFolderId && !securedRows.some((x) => x.id === currentFolderId)) {
       setCurrentFolderId(null)
     }
 
@@ -152,23 +237,60 @@ export default function DocumentsPage() {
     setPreviewLoading(false)
   }
 
+  const authorizedVisionOptions = useMemo(() => {
+    if (!access) return ['Global'] as VisionType[]
+
+    const options: VisionType[] = ['Global']
+
+    if (access.allowed_scopes.includes('Global') || access.allowed_scopes.includes('Cegeclim')) {
+      options.push('Cegeclim')
+    }
+
+    if (access.allowed_scopes.includes('Global') || access.allowed_scopes.includes('CVC')) {
+      options.push('CVC')
+    }
+
+    return Array.from(new Set(options))
+  }, [access])
+
   const agencesDisponibles = useMemo(() => {
     const values = items
       .map((x) => x.agence)
       .filter((x): x is string => Boolean(x && x.trim()))
+      .filter((agence) => {
+        if (!access) return false
+        if (access.allowed_agences.length === 0) return true
+        return access.allowed_agences.includes(agence)
+      })
       .sort((a, b) => a.localeCompare(b, 'fr'))
 
     return Array.from(new Set(values))
-  }, [items])
+  }, [items, access])
 
-  const visibleItems = useMemo(() => {
-    return items.filter((item) => isItemVisibleForVision(item, visionScope, filterAgence))
+  const uiFilteredItems = useMemo(() => {
+    return items.filter((item) => {
+      if (visionScope === 'Cegeclim') {
+        if (item.scope_type === 'Societe' && item.societe !== 'Cegeclim') return false
+        if (item.scope_type === 'Agence' && item.societe !== 'Cegeclim') return false
+      }
+
+      if (visionScope === 'CVC') {
+        if (item.scope_type === 'Societe' && item.societe !== 'CVC') return false
+        if (item.scope_type === 'Agence' && item.societe !== 'CVC') return false
+      }
+
+      if (filterAgence !== 'all') {
+        return item.agence === filterAgence
+      }
+
+      return true
+    })
   }, [items, visionScope, filterAgence])
 
   const itemsByParent = useMemo(() => {
     const map = new Map<string | null, DocItem[]>()
 
-    for (const item of visibleItems) {
+    for (const item of uiFilteredItems) {
       const key = item.parent_id ?? null
       const arr = map.get(key) || []
       arr.push(item)
@@ -183,14 +305,14 @@ export default function DocumentsPage() {
     }
 
     return map
-  }, [visibleItems])
+  }, [uiFilteredItems])
 
-  const currentFolders = useMemo(() => {
-    return (itemsByParent.get(null) || []).filter((x) => x.type === 'folder')
-  }, [itemsByParent])
+  const topFolders = useMemo(() => {
+    return (itemsByParent.get(currentFolderId ?? null) || []).filter((x) => x.type === 'folder')
+  }, [itemsByParent, currentFolderId])
 
   const currentFolderChildren = useMemo(() => {
-    let children = [...(itemsByParent.get(currentFolderId) || [])]
+    let children = [...(itemsByParent.get(currentFolderId ?? null) || [])]
 
     if (search.trim()) {
       const q = search.toLowerCase()
@@ -206,15 +328,21 @@ export default function DocumentsPage() {
         case 'name-desc':
           return b.name.localeCompare(a.name, 'fr')
         case 'date-desc':
-          return new Date(b.updated_at || b.created_at || 0).getTime() - new Date(a.updated_at || a.created_at || 0).getTime()
+          return (
+            new Date(b.updated_at || b.created_at || 0).getTime() -
+            new Date(a.updated_at || a.created_at || 0).getTime()
+          )
         case 'date-asc':
-          return new Date(a.updated_at || a.created_at || 0).getTime() - new Date(b.updated_at || b.created_at || 0).getTime()
+          return (
+            new Date(a.updated_at || a.created_at || 0).getTime() -
+            new Date(b.updated_at || b.created_at || 0).getTime()
+          )
         case 'size-desc':
           return (b.size || 0) - (a.size || 0)
         case 'size-asc':
           return (a.size || 0) - (b.size || 0)
         default:
-          return a.name.localeCompare(b.name, 'fr')
+          return 0
       }
     })
 
@@ -222,35 +350,42 @@ export default function DocumentsPage() {
   }, [itemsByParent, currentFolderId, search, sortBy])
 
   const selectedItem = useMemo(() => {
-    return visibleItems.find((item) => item.id === selectedItemId) || null
-  }, [visibleItems, selectedItemId])
+    return uiFilteredItems.find((item) => item.id === selectedItemId) || null
+  }, [uiFilteredItems, selectedItemId])
 
   const currentFolder = useMemo(() => {
-    return visibleItems.find((x) => x.id === currentFolderId) || null
-  }, [visibleItems, currentFolderId])
+    return uiFilteredItems.find((x) => x.id === currentFolderId) || null
+  }, [uiFilteredItems, currentFolderId])
 
   const breadcrumb = useMemo(() => {
     const result: DocItem[] = []
-    let cursor = visibleItems.find((i) => i.id === currentFolderId) || null
+    let cursor = uiFilteredItems.find((i) => i.id === currentFolderId) || null
 
     while (cursor) {
       result.unshift(cursor)
-      cursor = visibleItems.find((i) => i.id === cursor?.parent_id) || null
+      cursor = uiFilteredItems.find((i) => i.id === cursor?.parent_id) || null
     }
 
     return result
-  }, [visibleItems, currentFolderId])
+  }, [uiFilteredItems, currentFolderId])
 
   const moveTargetOptions = useMemo(() => {
-    return visibleItems
+    return uiFilteredItems
       .filter(
         (x) =>
           x.type === 'folder' &&
           x.id !== movingItemId &&
-          !isDescendantFolder(movingItemId, x.id, visibleItems)
+          !isDescendantFolder(movingItemId, x.id, uiFilteredItems)
       )
       .sort((a, b) => a.name.localeCompare(b.name, 'fr'))
-  }, [visibleItems, movingItemId])
+  }, [uiFilteredItems, movingItemId])
+
+  function getDefaultVision(currentAccess: UserDocumentAccess): VisionType {
+    if (currentAccess.allowed_scopes.includes('Global')) return 'Global'
+    if (currentAccess.allowed_scopes.includes('Cegeclim')) return 'Cegeclim'
+    if (currentAccess.allowed_scopes.includes('CVC')) return 'CVC'
+    return 'Global'
+  }
 
   function sanitizeName(value: string) {
     return value.trim().replace(/[\/\\]+/g, '-').replace(/\s+/g, ' ')
@@ -281,7 +416,7 @@ export default function DocumentsPage() {
   }
 
   function getFileIcon(item: DocItem) {
-    if (item.type === 'folder') return '📁'
+    if (item.type === 'folder') return '🗂️'
     const ext = item.name.split('.').pop()?.toLowerCase()
 
     if (ext === 'pdf') return '📕'
@@ -289,7 +424,6 @@ export default function DocumentsPage() {
     if (['doc', 'docx', 'ppt', 'pptx'].includes(ext || '')) return '📘'
     if (['png', 'jpg', 'jpeg', 'webp', 'gif', 'heic'].includes(ext || '')) return '🖼️'
     if (['zip', 'rar', '7z'].includes(ext || '')) return '🗜️'
-    if (['html', 'htm'].includes(ext || '')) return '🌐'
     return '📄'
   }
 
@@ -313,54 +447,141 @@ export default function DocumentsPage() {
     return segments.join('/')
   }
 
-  function isPreviewable(item: DocItem | null) {
-    if (!item || item.type !== 'file') return false
-    const mime = item.mime_type || ''
-    const ext = item.name.split('.').pop()?.toLowerCase() || ''
-    return mime.includes('image') || mime.includes('pdf') || ['png', 'jpg', 'jpeg', 'webp', 'gif', 'pdf', 'heic'].includes(ext)
-  }
-
   function scopeLabel(item: DocItem) {
     if (item.scope_type === 'Agence') return item.agence ? `Agence • ${item.agence}` : 'Agence'
     if (item.scope_type === 'Societe') return item.societe ? `Société • ${item.societe}` : 'Société'
     return 'Global'
   }
 
-  function isItemVisibleForVision(
-    item: DocItem,
-    vision: 'Global' | 'Cegeclim' | 'CVC',
-    agenceFilter: string
-  ) {
-    const scope = item.scope_type || 'Global'
-
-    if (scope === 'Global') {
-      return agenceFilter === 'all' ? true : item.agence === agenceFilter
-    }
-
-    if (scope === 'Societe') {
-      if (vision === 'Global') return agenceFilter === 'all' ? true : item.agence === agenceFilter
-      if (item.societe !== vision) return false
-      return agenceFilter === 'all' ? true : item.agence === agenceFilter
-    }
-
-    if (scope === 'Agence') {
-      if (agenceFilter !== 'all' && item.agence !== agenceFilter) return false
-      if (vision === 'Global') return true
-      return item.societe === vision
-    }
-
-    return true
+  function isPreviewable(item: DocItem | null) {
+    if (!item || item.type !== 'file') return false
+    const mime = item.mime_type || ''
+    const ext = item.name.split('.').pop()?.toLowerCase() || ''
+    return (
+      mime.includes('image') ||
+      mime.includes('pdf') ||
+      ['png', 'jpg', 'jpeg', 'webp', 'gif', 'pdf', 'heic'].includes(ext)
+    )
   }
 
-  function isDescendantFolder(sourceId: string | null, candidateTargetId: string, allItems: DocItem[]) {
+  function isDocumentAllowedForUser(item: DocItem, userAccess: UserDocumentAccess) {
+    if (!userAccess.can_documents) return false
+
+    const hasGlobal = userAccess.allowed_scopes.includes('Global')
+    const allowedScopes = userAccess.allowed_scopes
+    const allowedAgences = userAccess.allowed_agences
+
+    if (item.scope_type === 'Global' || !item.scope_type) {
+      return true
+    }
+
+    if (item.scope_type === 'Societe') {
+      if (hasGlobal) return true
+      return !!item.societe && allowedScopes.includes(item.societe)
+    }
+
+    if (item.scope_type === 'Agence') {
+      const companyOk = hasGlobal || (!!item.societe && allowedScopes.includes(item.societe))
+      if (!companyOk) return false
+
+      if (!item.agence) return true
+      if (allowedAgences.length === 0) return true
+      return allowedAgences.includes(item.agence)
+    }
+
+    return false
+  }
+
+  function canUseScope(scope: VisionType) {
+    if (!access) return false
+    if (scope === 'Global') return true
+    if (access.allowed_scopes.includes('Global')) return true
+    return access.allowed_scopes.includes(scope)
+  }
+
+  function canAssignDocumentContext(
+    scopeType: ScopeType,
+    societe: SocieteType,
+    agence: string | null
+  ) {
+    if (!access) return false
+
+    if (scopeType === 'Global') return true
+
+    if (scopeType === 'Societe') {
+      if (!societe) return false
+      return access.allowed_scopes.includes('Global') || access.allowed_scopes.includes(societe)
+    }
+
+    if (scopeType === 'Agence') {
+      if (!societe) return false
+
+      const companyOk =
+        access.allowed_scopes.includes('Global') || access.allowed_scopes.includes(societe)
+
+      if (!companyOk) return false
+
+      if (!agence) return false
+      if (access.allowed_agences.length === 0) return true
+      return access.allowed_agences.includes(agence)
+    }
+
+    return false
+  }
+
+  function inferCurrentContext(): {
+    scope_type: ScopeType
+    societe: SocieteType
+    agence: string | null
+  } {
+    const parentFolder = items.find((x) => x.id === currentFolderId) || null
+
+    if (parentFolder) {
+      return {
+        scope_type: parentFolder.scope_type ?? 'Global',
+        societe: parentFolder.societe ?? null,
+        agence: parentFolder.agence ?? null,
+      }
+    }
+
+    if (filterAgence !== 'all') {
+      return {
+        scope_type: 'Agence',
+        societe: visionScope === 'Global' ? null : visionScope,
+        agence: filterAgence,
+      }
+    }
+
+    if (visionScope === 'Cegeclim' || visionScope === 'CVC') {
+      return {
+        scope_type: 'Societe',
+        societe: visionScope,
+        agence: null,
+      }
+    }
+
+    return {
+      scope_type: 'Global',
+      societe: null,
+      agence: null,
+    }
+  }
+
+  function isDescendantFolder(
+    sourceId: string | null,
+    candidateTargetId: string,
+    allItems: DocItem[]
+  ) {
     if (!sourceId) return false
     if (sourceId === candidateTargetId) return true
 
     let cursor = allItems.find((x) => x.id === candidateTargetId) || null
+
     while (cursor) {
       if (cursor.parent_id === sourceId) return true
       cursor = allItems.find((x) => x.id === cursor?.parent_id) || null
     }
+
     return false
   }
 
@@ -388,7 +609,7 @@ export default function DocumentsPage() {
     const folderName = sanitizeName(newFolderName)
 
     if (!folderName) {
-      setMessage('Merci de saisir un nom de dossier.')
+      setErrorMessage('Merci de saisir un nom de dossier.')
       return
     }
 
@@ -400,11 +621,16 @@ export default function DocumentsPage() {
     )
 
     if (duplicate) {
-      setMessage('Un dossier avec ce nom existe déjà à cet emplacement.')
+      setErrorMessage('Un dossier avec ce nom existe déjà à cet emplacement.')
       return
     }
 
-    const parentFolder = items.find((x) => x.id === currentFolderId) || null
+    const context = inferCurrentContext()
+
+    if (!canAssignDocumentContext(context.scope_type, context.societe, context.agence)) {
+      setErrorMessage("Vous n'avez pas les droits pour créer un dossier dans ce périmètre.")
+      return
+    }
 
     const { error } = await supabase.from('documents').insert({
       name: folderName,
@@ -413,23 +639,21 @@ export default function DocumentsPage() {
       storage_path: null,
       size: null,
       mime_type: null,
-      scope_type: parentFolder?.scope_type ?? 'Global',
-      societe: parentFolder?.societe ?? (visionScope === 'Global' ? null : visionScope),
-      agence: parentFolder?.agence ?? (filterAgence === 'all' ? null : filterAgence),
-      linked_entity_type: null,
-      linked_entity_id: null,
+      scope_type: context.scope_type,
+      societe: context.societe,
+      agence: context.agence,
       updated_at: new Date().toISOString(),
     })
 
     if (error) {
-      console.error(error)
-      setMessage(`Erreur création dossier : ${error.message}`)
+      setErrorMessage(`Erreur création dossier : ${error.message}`)
       return
     }
 
     setCreatingFolder(false)
     setNewFolderName('')
     setMessage('Dossier créé avec succès.')
+    setErrorMessage(EMPTY_MESSAGE)
     await loadDocuments()
   }
 
@@ -437,10 +661,17 @@ export default function DocumentsPage() {
     if (!files || files.length === 0) return
 
     setUploading(true)
-    setMessage(null)
+    setMessage(EMPTY_MESSAGE)
+    setErrorMessage(EMPTY_MESSAGE)
 
     try {
-      const parentFolder = items.find((x) => x.id === currentFolderId) || null
+      const context = inferCurrentContext()
+
+      if (!canAssignDocumentContext(context.scope_type, context.societe, context.agence)) {
+        setErrorMessage("Vous n'avez pas les droits pour ajouter des fichiers dans ce périmètre.")
+        return
+      }
+
       const folderPath = getFolderPath(currentFolderId)
 
       for (const file of Array.from(files)) {
@@ -457,8 +688,7 @@ export default function DocumentsPage() {
           })
 
         if (uploadError) {
-          console.error(uploadError)
-          setMessage(`Erreur upload "${file.name}" : ${uploadError.message}`)
+          setErrorMessage(`Erreur upload "${file.name}" : ${uploadError.message}`)
           continue
         }
 
@@ -469,19 +699,15 @@ export default function DocumentsPage() {
           storage_path: storagePath,
           size: file.size,
           mime_type: file.type || null,
-          scope_type: parentFolder?.scope_type ?? 'Global',
-          societe: parentFolder?.societe ?? (visionScope === 'Global' ? null : visionScope),
-          agence: parentFolder?.agence ?? (filterAgence === 'all' ? null : filterAgence),
-          linked_entity_type: null,
-          linked_entity_id: null,
+          scope_type: context.scope_type,
+          societe: context.societe,
+          agence: context.agence,
           updated_at: new Date().toISOString(),
         })
 
         if (insertError) {
-          console.error(insertError)
-          setMessage(`Fichier uploadé mais non enregistré en base : ${insertError.message}`)
           await supabase.storage.from(BUCKET_NAME).remove([storagePath])
-          continue
+          setErrorMessage(`Fichier uploadé mais non enregistré : ${insertError.message}`)
         }
       }
 
@@ -501,8 +727,7 @@ export default function DocumentsPage() {
       .createSignedUrl(item.storage_path, 60)
 
     if (error || !data?.signedUrl) {
-      console.error(error)
-      setMessage(`Impossible de générer le lien : ${error?.message ?? 'erreur inconnue'}`)
+      setErrorMessage(`Impossible de générer le lien : ${error?.message ?? 'erreur inconnue'}`)
       return
     }
 
@@ -513,7 +738,7 @@ export default function DocumentsPage() {
     const clean = sanitizeName(renameValue)
 
     if (!clean) {
-      setMessage('Le nom ne peut pas être vide.')
+      setErrorMessage('Le nom ne peut pas être vide.')
       return
     }
 
@@ -525,7 +750,7 @@ export default function DocumentsPage() {
     )
 
     if (duplicate) {
-      setMessage('Un élément avec ce nom existe déjà dans ce dossier.')
+      setErrorMessage('Un élément avec ce nom existe déjà dans ce dossier.')
       return
     }
 
@@ -538,40 +763,49 @@ export default function DocumentsPage() {
       .eq('id', item.id)
 
     if (error) {
-      console.error(error)
-      setMessage(`Erreur renommage : ${error.message}`)
+      setErrorMessage(`Erreur renommage : ${error.message}`)
       return
     }
 
     setRenamingItemId(null)
     setRenameValue('')
     setMessage('Nom mis à jour.')
+    setErrorMessage(EMPTY_MESSAGE)
     await loadDocuments()
   }
 
   async function handleMove(item: DocItem, targetFolderId: string | null) {
     const targetFolder = targetFolderId ? items.find((x) => x.id === targetFolderId) || null : null
 
+    const nextScopeType = (targetFolder?.scope_type ?? item.scope_type ?? 'Global') as ScopeType
+    const nextSociete = (targetFolder?.societe ?? item.societe ?? null) as SocieteType
+    const nextAgence = targetFolder?.agence ?? item.agence ?? null
+
+    if (!canAssignDocumentContext(nextScopeType, nextSociete, nextAgence)) {
+      setErrorMessage("Vous n'avez pas les droits pour déplacer cet élément vers ce périmètre.")
+      return
+    }
+
     const { error } = await supabase
       .from('documents')
       .update({
         parent_id: targetFolderId,
-        scope_type: targetFolder?.scope_type ?? item.scope_type ?? 'Global',
-        societe: targetFolder?.societe ?? item.societe,
-        agence: targetFolder?.agence ?? item.agence,
+        scope_type: nextScopeType,
+        societe: nextSociete,
+        agence: nextAgence,
         updated_at: new Date().toISOString(),
       })
       .eq('id', item.id)
 
     if (error) {
-      console.error(error)
-      setMessage(`Erreur déplacement : ${error.message}`)
+      setErrorMessage(`Erreur déplacement : ${error.message}`)
       return
     }
 
     setMovingItemId(null)
     setMoveTargetFolderId('ROOT')
     setMessage('Élément déplacé.')
+    setErrorMessage(EMPTY_MESSAGE)
     await loadDocuments()
   }
 
@@ -591,19 +825,14 @@ export default function DocumentsPage() {
         .map((d) => d.storage_path as string)
 
       if (filesToDelete.length > 0) {
-        const { error: storageError } = await supabase.storage
-          .from(BUCKET_NAME)
-          .remove(filesToDelete)
-
-        if (storageError) console.error(storageError)
+        await supabase.storage.from(BUCKET_NAME).remove(filesToDelete)
       }
 
       const idsToDelete = [item.id, ...descendants.map((d) => d.id)]
       const { error } = await supabase.from('documents').delete().in('id', idsToDelete)
 
       if (error) {
-        console.error(error)
-        setMessage(`Erreur suppression dossier : ${error.message}`)
+        setErrorMessage(`Erreur suppression dossier : ${error.message}`)
         return
       }
 
@@ -611,6 +840,7 @@ export default function DocumentsPage() {
       if (selectedItemId && idsToDelete.includes(selectedItemId)) setSelectedItemId(null)
 
       setMessage('Dossier supprimé.')
+      setErrorMessage(EMPTY_MESSAGE)
       await loadDocuments()
       return
     }
@@ -621,8 +851,7 @@ export default function DocumentsPage() {
         .remove([item.storage_path])
 
       if (storageError) {
-        console.error(storageError)
-        setMessage(`Erreur suppression storage : ${storageError.message}`)
+        setErrorMessage(`Erreur suppression storage : ${storageError.message}`)
         return
       }
     }
@@ -630,13 +859,13 @@ export default function DocumentsPage() {
     const { error } = await supabase.from('documents').delete().eq('id', item.id)
 
     if (error) {
-      console.error(error)
-      setMessage(`Erreur suppression fichier : ${error.message}`)
+      setErrorMessage(`Erreur suppression fichier : ${error.message}`)
       return
     }
 
     if (selectedItemId === item.id) setSelectedItemId(null)
     setMessage('Fichier supprimé.')
+    setErrorMessage(EMPTY_MESSAGE)
     await loadDocuments()
   }
 
@@ -647,21 +876,32 @@ export default function DocumentsPage() {
     !selectedItem.name.toLowerCase().endsWith('.pdf') &&
     !(selectedItem.mime_type || '').includes('pdf')
 
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-slate-100 p-6">
+        <div className="mx-auto max-w-7xl rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
+          Chargement des droits...
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-screen bg-slate-100 p-4 md:p-6">
       <div className="mx-auto max-w-[1800px]">
-        <div className="mb-4 flex items-center justify-between">
-          <h1 className="text-3xl font-bold text-slate-900">Documents</h1>
-        </div>
-
         {message && (
-          <div className="mb-4 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 shadow-sm">
+          <div className="mb-4 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
             {message}
           </div>
         )}
 
+        {errorMessage && (
+          <div className="mb-4 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            {errorMessage}
+          </div>
+        )}
+
         <div className="grid h-[calc(100vh-140px)] grid-rows-[32%_68%] gap-4">
-          {/* BULLE HAUTE : DOSSIERS */}
           <section className="rounded-[32px] border border-slate-200 bg-white p-5 shadow-sm">
             <div className="mb-4 flex flex-wrap items-center gap-3">
               <button
@@ -688,15 +928,19 @@ export default function DocumentsPage() {
                 <select
                   value={visionScope}
                   onChange={(e) => {
-                    setVisionScope(e.target.value as 'Global' | 'Cegeclim' | 'CVC')
+                    const nextValue = e.target.value as VisionType
+                    if (!canUseScope(nextValue)) return
+                    setVisionScope(nextValue)
                     setCurrentFolderId(null)
                     setSelectedItemId(null)
                   }}
                   className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none"
                 >
-                  <option value="Global">Global</option>
-                  <option value="Cegeclim">Cegeclim</option>
-                  <option value="CVC">CVC</option>
+                  {authorizedVisionOptions.map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
                 </select>
 
                 <select
@@ -728,7 +972,7 @@ export default function DocumentsPage() {
                 />
                 <button
                   type="button"
-                  onClick={handleCreateFolder}
+                  onClick={() => void handleCreateFolder()}
                   className="rounded-xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white"
                 >
                   Créer
@@ -747,8 +991,8 @@ export default function DocumentsPage() {
             )}
 
             <div className="grid h-[calc(100%-72px)] grid-cols-2 gap-4 overflow-auto pr-1 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-7 2xl:grid-cols-8">
-              {currentFolders.length > 0 ? (
-                currentFolders.map((folder) => (
+              {topFolders.length > 0 ? (
+                topFolders.map((folder) => (
                   <button
                     key={folder.id}
                     type="button"
@@ -759,7 +1003,7 @@ export default function DocumentsPage() {
                         : 'border-slate-200 bg-slate-50 hover:bg-slate-100'
                     }`}
                   >
-                    <div className="text-6xl">📁</div>
+                    <div className="text-6xl">🗂️</div>
                     <div className="mt-3 line-clamp-2 text-sm font-medium text-slate-700">
                       {folder.name}
                     </div>
@@ -773,9 +1017,7 @@ export default function DocumentsPage() {
             </div>
           </section>
 
-          {/* BAS : 2 BULLES */}
-          <div className="grid min-h-0 grid-cols-1 gap-4 xl:grid-cols-[52%_48%]">
-            {/* BULLE BAS GAUCHE : FICHIERS */}
+          <div className="grid min-h-0 grid-cols-1 gap-4 xl:grid-cols-[40%_60%]">
             <section className="flex min-h-0 flex-col rounded-[32px] border border-slate-200 bg-white p-5 shadow-sm">
               <div className="mb-4 flex flex-wrap items-center gap-2">
                 <div className="text-lg font-semibold text-slate-900">
@@ -829,12 +1071,12 @@ export default function DocumentsPage() {
               </div>
 
               <div className="min-h-0 flex-1 overflow-hidden rounded-3xl border border-slate-200">
-                <div className="grid grid-cols-[minmax(0,1.8fr)_100px_120px_170px_220px] gap-2 border-b border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-500">
-                  <div>Nom</div>
-                  <div>Taille</div>
-                  <div>Type</div>
-                  <div>Date</div>
-                  <div>Actions</div>
+                <div className={`${LIST_GRID_CLASS} border-b border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-500`}>
+                  <div className="min-w-0">Nom</div>
+                  <div className="text-left">Taille</div>
+                  <div className="text-left">Type</div>
+                  <div className="text-left">Date</div>
+                  <div className="min-w-0 text-left">Actions</div>
                 </div>
 
                 <div className="h-[calc(100%-49px)] overflow-auto">
@@ -849,22 +1091,22 @@ export default function DocumentsPage() {
                       return (
                         <div
                           key={item.id}
-                          className={`grid grid-cols-[minmax(0,1.8fr)_100px_120px_170px_220px] gap-2 border-b border-slate-100 px-4 py-3 text-sm ${
+                          className={`${LIST_GRID_CLASS} border-b border-slate-100 px-4 py-3 text-sm ${
                             selectedItemId === item.id ? 'bg-blue-50' : 'hover:bg-slate-50'
                           }`}
                         >
                           <div className="min-w-0">
                             {isRenaming ? (
-                              <div className="flex gap-2">
+                              <div className="flex min-w-0 gap-2">
                                 <input
                                   value={renameValue}
                                   onChange={(e) => setRenameValue(e.target.value)}
-                                  className="w-full rounded border border-slate-300 px-2 py-1"
+                                  className="w-full min-w-0 rounded border border-slate-300 px-2 py-1"
                                 />
                                 <button
                                   type="button"
-                                  onClick={() => handleRename(item)}
-                                  className="rounded bg-slate-900 px-2 py-1 text-white"
+                                  onClick={() => void handleRename(item)}
+                                  className="shrink-0 rounded bg-slate-900 px-2 py-1 text-white"
                                 >
                                   OK
                                 </button>
@@ -872,72 +1114,95 @@ export default function DocumentsPage() {
                             ) : (
                               <button
                                 type="button"
-                                onClick={() => {
-                                  if (item.type === 'folder') {
+                                    onClick={() => {
+                                    if (item.type === 'folder') {
                                     setCurrentFolderId(item.id)
                                     setSelectedItemId(null)
-                                  } else {
+                                    } else {
                                     setSelectedItemId(item.id)
-                                  }
-                                }}
-                                className="flex min-w-0 items-center gap-2 text-left"
+                                    }
+                                    }}
+                                    onDoubleClick={() => {
+                                    if (item.type === 'folder') {
+                                    setCurrentFolderId(item.id)
+                                    setSelectedItemId(null)
+                                    } else {
+                                    void handleDownload(item)
+                                    }
+                                    }}
+                                className="flex w-full min-w-0 items-center gap-2 text-left"
                               >
-                                <span>{getFileIcon(item)}</span>
-                                <span className="truncate text-slate-800">{item.name}</span>
+                                <span className="shrink-0 text-base">{getFileIcon(item)}</span>
+                                <span
+                                  className="block min-w-0 truncate font-medium text-slate-800"
+                                  title={item.name}
+                                >
+                                  {item.name}
+                                </span>
                               </button>
                             )}
                           </div>
 
-                          <div className="text-slate-500">{item.type === 'folder' ? '-' : formatSize(item.size)}</div>
-                          <div className="text-slate-500">{getFileTypeLabel(item)}</div>
-                          <div className="text-slate-500">{formatDateShort(item.updated_at || item.created_at)}</div>
+                          <div className="min-w-0 whitespace-nowrap text-xs text-slate-500 sm:text-sm">
+                            {item.type === 'folder' ? '-' : formatSize(item.size)}
+                          </div>
 
-                          <div className="flex flex-wrap gap-1">
-                            {item.type === 'file' && (
+                          <div className="min-w-0 truncate text-xs text-slate-500 sm:text-sm">
+                            {getFileTypeLabel(item)}
+                          </div>
+
+                          <div className="min-w-0 whitespace-nowrap text-xs text-slate-500 sm:text-sm">
+                            {formatDateShort(item.updated_at || item.created_at)}
+                          </div>
+
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap gap-1.5">
+                              {item.type === 'file' && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedItemId(item.id)
+                                    void handleDownload(item)
+                                  }}
+                                  className="rounded-lg bg-blue-50 px-2 py-1 text-xs text-blue-700"
+                                >
+                                  Télécharger
+                                </button>
+                              )}
+
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setRenamingItemId(item.id)
+                                  setRenameValue(item.name)
+                                }}
+                                className="rounded-lg bg-slate-100 px-2 py-1 text-xs text-slate-700"
+                              >
+                                Renommer
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setMovingItemId(item.id)
+                                  setMoveTargetFolderId('ROOT')
+                                }}
+                                className="rounded-lg bg-slate-100 px-2 py-1 text-xs text-slate-700"
+                              >
+                                Déplacer
+                              </button>
+
                               <button
                                 type="button"
                                 onClick={() => {
                                   setSelectedItemId(item.id)
-                                  handleDownload(item)
+                                  void handleDelete(item)
                                 }}
-                                className="rounded-lg bg-blue-50 px-2 py-1 text-xs text-blue-700"
+                                className="rounded-lg bg-red-50 px-2 py-1 text-xs text-red-700"
                               >
-                                Télécharger
+                                Supprimer
                               </button>
-                            )}
-
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setRenamingItemId(item.id)
-                                setRenameValue(item.name)
-                              }}
-                              className="rounded-lg bg-slate-100 px-2 py-1 text-xs text-slate-700"
-                            >
-                              Renommer
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setMovingItemId(item.id)
-                                setMoveTargetFolderId('ROOT')
-                              }}
-                              className="rounded-lg bg-slate-100 px-2 py-1 text-xs text-slate-700"
-                            >
-                              Déplacer
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSelectedItemId(item.id)
-                                handleDelete(item)
-                              }}
-                              className="rounded-lg bg-red-50 px-2 py-1 text-xs text-red-700"
-                            >
-                              Supprimer
-                            </button>
+                            </div>
                           </div>
                         </div>
                       )
@@ -966,7 +1231,7 @@ export default function DocumentsPage() {
                     onClick={() => {
                       const item = items.find((x) => x.id === movingItemId)
                       if (!item) return
-                      handleMove(item, moveTargetFolderId === 'ROOT' ? null : moveTargetFolderId)
+                      void handleMove(item, moveTargetFolderId === 'ROOT' ? null : moveTargetFolderId)
                     }}
                     className="rounded-xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white"
                   >
@@ -998,7 +1263,7 @@ export default function DocumentsPage() {
                 onDrop={(e) => {
                   e.preventDefault()
                   setDragActive(false)
-                  handleFilesSelected(e.dataTransfer.files)
+                  void handleFilesSelected(e.dataTransfer.files)
                 }}
               >
                 <div className="mb-3 text-sm text-slate-600">
@@ -1010,7 +1275,7 @@ export default function DocumentsPage() {
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
                     disabled={uploading}
-                    className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-800"
+                    className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-800 shadow-sm hover:bg-slate-50 disabled:opacity-50"
                   >
                     ⬆ Ajouter des fichiers
                   </button>
@@ -1020,7 +1285,7 @@ export default function DocumentsPage() {
                     type="file"
                     multiple
                     className="hidden"
-                    onChange={(e) => handleFilesSelected(e.target.files)}
+                    onChange={(e) => void handleFilesSelected(e.target.files)}
                   />
 
                   <span className="text-sm text-slate-500">
@@ -1030,7 +1295,6 @@ export default function DocumentsPage() {
               </div>
             </section>
 
-            {/* BULLE BAS DROITE : PREVIEW */}
             <section className="flex min-h-0 flex-col rounded-[32px] border border-slate-200 bg-white p-5 shadow-sm">
               <div className="mb-4 flex items-center justify-between gap-3">
                 <h2 className="text-2xl font-semibold text-slate-900">Preview</h2>
@@ -1058,7 +1322,9 @@ export default function DocumentsPage() {
               ) : (
                 <>
                   <div className="mb-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                    <div className="text-lg font-semibold text-slate-900">{selectedItem.name}</div>
+                    <div className="break-words text-lg font-semibold text-slate-900">
+                      {selectedItem.name}
+                    </div>
                     <div className="mt-1 text-sm text-slate-500">
                       {selectedItem.type === 'folder' ? 'Dossier' : 'Fichier'} • {scopeLabel(selectedItem)}
                     </div>
@@ -1068,7 +1334,7 @@ export default function DocumentsPage() {
                     <div className="flex h-full items-center justify-center overflow-auto p-4">
                       {selectedItem.type === 'folder' ? (
                         <div className="text-center text-slate-500">
-                          <div className="text-7xl">📁</div>
+                          <div className="text-7xl">🗂️</div>
                           <div className="mt-3">Aperçu non disponible pour un dossier</div>
                         </div>
                       ) : previewLoading ? (
@@ -1101,8 +1367,14 @@ export default function DocumentsPage() {
                   <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
                     <DetailRow label="Nom" value={selectedItem.name} />
                     <DetailRow label="Type" value={getFileTypeLabel(selectedItem)} />
-                    <DetailRow label="Taille" value={selectedItem.type === 'folder' ? '-' : formatSize(selectedItem.size)} />
-                    <DetailRow label="Date" value={formatDate(selectedItem.updated_at || selectedItem.created_at)} />
+                    <DetailRow
+                      label="Taille"
+                      value={selectedItem.type === 'folder' ? '-' : formatSize(selectedItem.size)}
+                    />
+                    <DetailRow
+                      label="Date"
+                      value={formatDate(selectedItem.updated_at || selectedItem.created_at)}
+                    />
                   </div>
                 </>
               )}

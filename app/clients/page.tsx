@@ -22,11 +22,32 @@ type ClientRow = {
   coordonneeLambertOrdonneeEtablissement: number | null
   telephone: string | null
   email: string | null
+  site_web: string | null
+  nom_dirigeant: string | null
+  effectif_estime: number | null
+  ca_estime: number | null
+  pappers_ca: number | null
+  pappers_resultat: number | null
+  rge: boolean | null
+  potentiel_score: number | null
+  enrichment_status: string | null
+  last_enrichment_at: string | null
+  enrichment_source: string | null
+  enrichment_error: string | null
+  google_maps_url: string | null
+  google_rating: number | null
+  google_user_ratings_total: number | null
   present_dans_cegeclim: boolean | null
   contactable: boolean | null
   adresse_complete: string | null
   trancheEffectifsEtablissement: string | null
   date_import: string | null
+  prospect_status: string | null
+  assigned_to: string | null
+  last_contact_at: string | null
+  next_action_at: string | null
+  next_action_label: string | null
+  prospect_comment: string | null
 }
 
 type CegeclimAbsentRow = {
@@ -76,6 +97,24 @@ type TerritoryRow = {
   societe: string | null
 }
 
+type SireneImportParamRow = {
+  id: string
+  codes_ape: string[] | null
+  departements: string[] | null
+  date_creation_min: string | null
+  date_creation_max: string | null
+  date_modification_min: string | null
+  date_modification_max: string | null
+  last_import_at: string | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+type UserDepartmentAccessRow = {
+  email: string
+  allowed_departements: string[] | null
+}
+
 type ImportStats = {
   total: number
   inserted: number
@@ -99,10 +138,24 @@ type SortKey =
   | 'telephone'
   | 'email'
   | 'distance'
+  | 'score'
+  | 'completeness'
+  | 'enrichment'
+
+type SireneParamsForm = {
+  codesApe: string
+  departements: string
+  dateCreationMin: string
+  dateCreationMax: string
+  dateMajMin: string
+  dateMajMax: string
+}
 
 const MAX_AGE_DAYS = 365 * 50
 const CLIENTS_PAGE_SIZE = 200
 const SUPABASE_FETCH_BATCH = 1000
+const INITIAL_CLIENTS_BATCH = 250
+const MAX_BATCH_ENRICH = 100
 
 function normalizeSiret(value: unknown): string {
   return String(value ?? '').replace(/\D/g, '').trim()
@@ -227,6 +280,22 @@ function formatDateFr(dateStr: string | null | undefined): string {
   return d.toLocaleDateString('fr-FR')
 }
 
+function formatDateTimeFr(dateStr: string | null | undefined): string {
+  if (!dateStr) return 'NC'
+  const d = new Date(dateStr)
+  if (Number.isNaN(d.getTime())) return 'NC'
+  return d.toLocaleString('fr-FR')
+}
+
+function formatCurrency(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(Number(value))) return 'NC'
+  return new Intl.NumberFormat('fr-FR', {
+    style: 'currency',
+    currency: 'EUR',
+    maximumFractionDigits: 0,
+  }).format(Number(value))
+}
+
 function chunkArray<T>(arr: T[], size: number): T[][] {
   const out: T[][] = []
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
@@ -270,14 +339,71 @@ function normalizeScopeValue(value: string | null | undefined): string {
 }
 
 function getClientDepartment(row: ClientRow): string {
-  return (
-    getDepartmentFromPostalCode(row.codePostalEtablissement) ||
-    String(row.departement || '').trim()
-  )
+  return getDepartmentFromPostalCode(row.codePostalEtablissement) || String(row.departement || '').trim()
 }
 
 function getAbsentDepartment(row: CegeclimAbsentRow): string {
   return getDepartmentFromPostalCode(row.code_postal) || ''
+}
+
+function getCompletenessPercent(row: ClientRow): number {
+  const checks = [
+    Boolean(row.telephone),
+    Boolean(row.email),
+    Boolean(row.site_web),
+    Boolean(row.nom_dirigeant),
+    row.effectif_estime != null || Boolean(row.trancheEffectifsEtablissement),
+    row.ca_estime != null || row.pappers_ca != null,
+    row.rge != null,
+    row.potentiel_score != null,
+  ]
+  const filled = checks.filter(Boolean).length
+  return Math.round((filled / checks.length) * 100)
+}
+
+function getScoreColor(score: number | null | undefined): string {
+  if (score == null) return '#9ca3af'
+  if (score >= 80) return '#15803d'
+  if (score >= 60) return '#65a30d'
+  if (score >= 40) return '#d97706'
+  return '#b91c1c'
+}
+
+function getCompletenessColor(percent: number): string {
+  if (percent >= 80) return '#15803d'
+  if (percent >= 60) return '#65a30d'
+  if (percent >= 40) return '#d97706'
+  return '#b91c1c'
+}
+
+function getEnrichmentBadge(status: string | null | undefined) {
+  const normalized = String(status || '').toLowerCase().trim()
+  if (normalized === 'ok') return { label: 'OK', bg: '#166534', color: '#fff' }
+  if (normalized === 'en_cours') return { label: 'En cours', bg: '#92400e', color: '#fff' }
+  if (normalized === 'erreur') return { label: 'Erreur', bg: '#991b1b', color: '#fff' }
+  return { label: 'À faire', bg: '#475569', color: '#fff' }
+}
+
+function formatDateInput(value: string | null | undefined): string {
+  if (!value) return ''
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value
+    return ''
+  }
+  return d.toISOString().slice(0, 10)
+}
+
+function buildDefaultSireneParams(lastImport: ImportRow | null): SireneParamsForm {
+  const defaultMin = lastImport?.date_import ? formatDateInput(lastImport.date_import) : ''
+  return {
+    codesApe: '',
+    departements: '',
+    dateCreationMin: '',
+    dateCreationMax: '',
+    dateMajMin: '',
+    dateMajMax: '',
+  }
 }
 
 async function fetchAllClients(): Promise<{ rows: ClientRow[]; totalCount: number }> {
@@ -303,11 +429,32 @@ async function fetchAllClients(): Promise<{ rows: ClientRow[]; totalCount: numbe
         coordonneeLambertOrdonneeEtablissement,
         telephone,
         email,
+        site_web,
+        nom_dirigeant,
+        effectif_estime,
+        ca_estime,
+        pappers_ca,
+        pappers_resultat,
+        rge,
+        potentiel_score,
+        enrichment_status,
+        last_enrichment_at,
+        enrichment_source,
+        enrichment_error,
+        google_maps_url,
+        google_rating,
+        google_user_ratings_total,
         present_dans_cegeclim,
         contactable,
         adresse_complete,
         trancheEffectifsEtablissement,
-        date_import
+        date_import,
+        prospect_status,
+        assigned_to,
+        last_contact_at,
+        next_action_at,
+        next_action_label,
+        prospect_comment
       `,
         { count: 'exact' }
       )
@@ -315,9 +462,7 @@ async function fetchAllClients(): Promise<{ rows: ClientRow[]; totalCount: numbe
 
     if (error) throw error
 
-    if (from === 0) {
-      totalCount = count || 0
-    }
+    if (from === 0) totalCount = count || 0
 
     const batch = (data || []) as ClientRow[]
     allRows.push(...batch)
@@ -327,6 +472,136 @@ async function fetchAllClients(): Promise<{ rows: ClientRow[]; totalCount: numbe
   }
 
   return { rows: allRows, totalCount }
+}
+
+async function fetchClientsInitialBatch(): Promise<{ rows: ClientRow[]; totalCount: number }> {
+  const { data, error, count } = await supabase
+    .from('clients')
+    .select(
+      `
+      id,
+      siret,
+      raison_sociale_affichee,
+      activitePrincipaleEtablissement,
+      naf_libelle_traduit,
+      dateCreationEtablissement,
+      codePostalEtablissement,
+      libelleCommuneEtablissement,
+      departement,
+      coordonneeLambertAbscisseEtablissement,
+      coordonneeLambertOrdonneeEtablissement,
+      telephone,
+      email,
+      site_web,
+      nom_dirigeant,
+      effectif_estime,
+      ca_estime,
+      pappers_ca,
+      pappers_resultat,
+      rge,
+      potentiel_score,
+      enrichment_status,
+      last_enrichment_at,
+      enrichment_source,
+      enrichment_error,
+      google_maps_url,
+      google_rating,
+      google_user_ratings_total,
+      present_dans_cegeclim,
+      contactable,
+      adresse_complete,
+      trancheEffectifsEtablissement,
+      date_import,
+      prospect_status,
+      assigned_to,
+      last_contact_at,
+      next_action_at,
+      next_action_label,
+      prospect_comment
+    `,
+      { count: 'exact' }
+    )
+    .range(0, INITIAL_CLIENTS_BATCH - 1)
+
+  if (error) throw error
+
+  return {
+    rows: (data || []) as ClientRow[],
+    totalCount: count || 0,
+  }
+}
+
+async function fetchCegeclimAbsentsRows(): Promise<CegeclimAbsentRow[]> {
+  const { data, error } = await supabase
+    .from('vw_clients_cegeclim_absents_clients')
+    .select('id, siret, date_creation_client, agence_rattachement, code_postal, contact, telephone, email, ca_2026')
+
+  if (error) throw error
+  return (data || []) as CegeclimAbsentRow[]
+}
+
+async function fetchRejectRows(importId: string): Promise<RejectRow[]> {
+  const { data, error } = await supabase
+    .from('imports_clients_rejets')
+    .select('id, import_id, ligne_numero, siret, motif_rejet, donnees_source_json, created_at')
+    .eq('import_id', importId)
+    .order('ligne_numero', { ascending: true })
+
+  if (error) throw error
+  return (data || []) as RejectRow[]
+}
+
+async function fetchClientBySiret(siret: string): Promise<ClientRow | null> {
+  const { data, error } = await supabase
+    .from('clients')
+    .select(
+      `
+      id,
+      siret,
+      raison_sociale_affichee,
+      activitePrincipaleEtablissement,
+      naf_libelle_traduit,
+      dateCreationEtablissement,
+      codePostalEtablissement,
+      libelleCommuneEtablissement,
+      departement,
+      coordonneeLambertAbscisseEtablissement,
+      coordonneeLambertOrdonneeEtablissement,
+      telephone,
+      email,
+      site_web,
+      nom_dirigeant,
+      effectif_estime,
+      ca_estime,
+      pappers_ca,
+      pappers_resultat,
+      rge,
+      potentiel_score,
+      enrichment_status,
+      last_enrichment_at,
+      enrichment_source,
+      enrichment_error,
+      google_maps_url,
+      google_rating,
+      google_user_ratings_total,
+      present_dans_cegeclim,
+      contactable,
+      adresse_complete,
+      trancheEffectifsEtablissement,
+      date_import,
+      prospect_status,
+      assigned_to,
+      last_contact_at,
+      next_action_at,
+      next_action_label,
+      prospect_comment
+    `
+    )
+    .eq('siret', siret)
+    .single()
+
+  if (error || !data) return null
+  return data as ClientRow
 }
 
 function SortIndicator({
@@ -374,11 +649,7 @@ function MultiSelectHorizontal({
   return (
     <div style={{ position: 'relative' }} ref={ref}>
       <div style={filterLabelStyle}>{label}</div>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        style={selectLikeStyle}
-      >
+      <button type="button" onClick={() => setOpen((v) => !v)} style={selectLikeStyle}>
         <span>{compactSelectionLabel(selected)}</span>
         <span>▼</span>
       </button>
@@ -427,13 +698,62 @@ export default function ClientsPage() {
   const [territories, setTerritories] = useState<TerritoryRow[]>([])
   const [lastImport, setLastImport] = useState<ImportRow | null>(null)
   const [rejects, setRejects] = useState<RejectRow[]>([])
+  const [sireneConfigId, setSireneConfigId] = useState<string | null>(null)
+  const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(null)
+  const [allowedDepartements, setAllowedDepartements] = useState<string[]>([])
 
   const [loading, setLoading] = useState(true)
   const [importing, setImporting] = useState(false)
+
+  async function launchImportSirene() {
+    setImporting(true)
+
+    try {
+      const res = await fetch('/api/import-sirene', {
+        method: 'POST',
+      })
+
+      const text = await res.text()
+
+      let data: any
+      try {
+        data = JSON.parse(text)
+      } catch {
+        throw new Error(text)
+      }
+
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || 'Erreur import SIRENE')
+      }
+
+      
+    alert(
+  `Import terminé : ${data.total || 0} lignes\n` +
+  `Pages lues : ${data.pages || 0}\n` +
+  `Enregistrements parcourus : ${data.fetched || 0}\n` +
+  `Total API : ${data.api_total || 0}`
+
+)
+      await loadAll()
+    } catch (error: any) {
+      console.error(error)
+      alert('Erreur import : ' + (error?.message || String(error)))
+    } finally {
+      setImporting(false)
+    }
+  }
+
+
   const [importStats, setImportStats] = useState<ImportStats | null>(null)
+  const [savingSireneParams, setSavingSireneParams] = useState(false)
 
   const [selectedClient, setSelectedClient] = useState<ClientRow | null>(null)
   const [showRejects, setShowRejects] = useState(false)
+
+  const [showClientsSection, setShowClientsSection] = useState(true)
+  const [showImportsSection, setShowImportsSection] = useState(true)
+
+  const [sireneParams, setSireneParams] = useState<SireneParamsForm>(buildDefaultSireneParams(null))
 
   const [search, setSearch] = useState('')
   const [designationSearch, setDesignationSearch] = useState('')
@@ -447,6 +767,7 @@ export default function ClientsPage() {
   const [onlyNotInCegeclim, setOnlyNotInCegeclim] = useState(false)
   const [excludeDesignationND, setExcludeDesignationND] = useState(true)
   const [excludeFutureCreation, setExcludeFutureCreation] = useState(true)
+  const [onlyToEnrich, setOnlyToEnrich] = useState(false)
 
   const [distanceMax, setDistanceMax] = useState(200)
 
@@ -457,6 +778,13 @@ export default function ClientsPage() {
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
 
   const [currentPage, setCurrentPage] = useState(1)
+  const [enrichingSirets, setEnrichingSirets] = useState<string[]>([])
+  const [batchEnriching, setBatchEnriching] = useState(false)
+  const [backgroundHydratingClients, setBackgroundHydratingClients] = useState(false)
+  const [cegeclimAbsentsLoaded, setCegeclimAbsentsLoaded] = useState(false)
+  const [rejectsLoaded, setRejectsLoaded] = useState(false)
+
+  const latestLoadTokenRef = useRef(0)
 
   useEffect(() => {
     void loadAll()
@@ -477,6 +805,7 @@ export default function ClientsPage() {
     onlyNotInCegeclim,
     excludeDesignationND,
     excludeFutureCreation,
+    onlyToEnrich,
     distanceMax,
     ageSliderMin,
     ageSliderMax,
@@ -484,70 +813,262 @@ export default function ClientsPage() {
     sortDirection,
   ])
 
+
+  useEffect(() => {
+    if (mode !== 'cegeclim_absents' || cegeclimAbsentsLoaded) return
+
+    void (async () => {
+      try {
+        const rows = await fetchCegeclimAbsentsRows()
+        setCegeclimAbsents(rows)
+        setCegeclimAbsentsLoaded(true)
+      } catch (error) {
+        console.error(error)
+      }
+    })()
+  }, [mode, cegeclimAbsentsLoaded])
+
+  useEffect(() => {
+    if (!showRejects || !lastImport?.id || rejectsLoaded) return
+
+    void (async () => {
+      try {
+        const rows = await fetchRejectRows(lastImport.id)
+        setRejects(rows)
+        setRejectsLoaded(true)
+      } catch (error) {
+        console.error(error)
+      }
+    })()
+  }, [showRejects, lastImport?.id, rejectsLoaded])
+
+  async function hydrateAllClientsInBackground(loadToken: number) {
+  if (latestLoadTokenRef.current === loadToken) {
+    setBackgroundHydratingClients(false)
+  }
+}
+
+
   async function loadAll() {
     setLoading(true)
-    try {
-      const clientsPromise = fetchAllClients()
+    const loadToken = Date.now()
+    latestLoadTokenRef.current = loadToken
 
+    try {
+      const authPromise = supabase.auth.getUser()
+      const clientsPromise = fetchClientsInitialBatch()
       const agencesPromise = supabase
         .from('agences')
         .select('id, agence, societe, coord_x_lambert, coord_y_lambert')
-
-      const territoriesPromise = supabase
-        .from('territories')
-        .select('code_dep, societe')
-
-      const cegeclimAbsentsPromise = supabase
-        .from('vw_clients_cegeclim_absents_clients')
-        .select(
-          'id, siret, date_creation_client, agence_rattachement, code_postal, contact, telephone, email, ca_2026'
-        )
-
+      const territoriesPromise = supabase.from('territories').select('code_dep, societe')
       const importPromise = supabase
         .from('imports_clients')
         .select('*')
-        .eq('type_import', 'entreprise_france')
+        .in('type_import', ['entreprise_france', 'api_sirene'])
         .order('date_import', { ascending: false })
         .limit(1)
+      const sireneParamsPromise = supabase
+        .from('import_sirene_params')
+        .select('*')
+        .order('updated_at', { ascending: false })
+        .limit(1)
 
-      const [clientsRes, agencesRes, territoriesRes, cegeclimRes, importRes] = await Promise.all([
-        clientsPromise,
-        agencesPromise,
-        territoriesPromise,
-        cegeclimAbsentsPromise,
-        importPromise,
-      ])
+      const [authRes, clientsRes, agencesRes, territoriesRes, importRes, sireneParamsRes] =
+        await Promise.all([
+          authPromise,
+          clientsPromise,
+          agencesPromise,
+          territoriesPromise,
+          importPromise,
+          sireneParamsPromise,
+        ])
 
       if (agencesRes.error) throw agencesRes.error
       if (territoriesRes.error) throw territoriesRes.error
-      if (cegeclimRes.error) throw cegeclimRes.error
       if (importRes.error) throw importRes.error
+      if (sireneParamsRes.error) throw sireneParamsRes.error
 
-      let rejectsRows: RejectRow[] = []
+      const userEmail = authRes.data.user?.email?.toLowerCase().trim() || null
+      setCurrentUserEmail(userEmail)
 
-      if (importRes.data?.[0]?.id) {
-        const { data: rejectsData, error: rejectsError } = await supabase
-          .from('imports_clients_rejets')
-          .select('id, import_id, ligne_numero, siret, motif_rejet, donnees_source_json, created_at')
-          .eq('import_id', importRes.data[0].id)
-          .order('ligne_numero', { ascending: true })
+      if (userEmail) {
+        const { data: userAccessData, error: userAccessError } = await supabase
+          .from('user_page_access')
+          .select('email, allowed_departements')
+          .eq('email', userEmail)
+          .maybeSingle()
 
-        if (rejectsError) throw rejectsError
-        rejectsRows = (rejectsData || []) as RejectRow[]
+        if (userAccessError) throw userAccessError
+
+        const userAccess = userAccessData as UserDepartmentAccessRow | null
+        setAllowedDepartements(
+          Array.isArray(userAccess?.allowed_departements)
+            ? userAccess!.allowed_departements.map((d) => String(d || '').trim()).filter(Boolean)
+            : []
+        )
+      } else {
+        setAllowedDepartements([])
       }
+
+      const latestImport = (importRes.data?.[0] || null) as ImportRow | null
+      const sireneConfig = (sireneParamsRes.data?.[0] || null) as SireneImportParamRow | null
 
       setClients(clientsRes.rows)
       setClientsTotalCount(clientsRes.totalCount)
       setAgences((agencesRes.data || []) as AgenceRow[])
       setTerritories((territoriesRes.data || []) as TerritoryRow[])
-      setCegeclimAbsents((cegeclimRes.data || []) as CegeclimAbsentRow[])
-      setLastImport((importRes.data?.[0] || null) as ImportRow | null)
-      setRejects(rejectsRows)
+      setLastImport(latestImport)
+      setRejects([])
+      setRejectsLoaded(false)
+      setCegeclimAbsents([])
+      setCegeclimAbsentsLoaded(false)
+
+      if (sireneConfig) {
+        setSireneConfigId(sireneConfig.id)
+        setSireneParams({
+          codesApe: (sireneConfig.codes_ape || []).join(', '),
+          departements: (sireneConfig.departements || []).join(', '),
+          dateCreationMin: formatDateInput(sireneConfig.date_creation_min),
+          dateCreationMax: formatDateInput(sireneConfig.date_creation_max),
+          dateMajMin: formatDateInput(sireneConfig.date_modification_min),
+          dateMajMax: formatDateInput(sireneConfig.date_modification_max),
+        })
+      } else {
+        setSireneConfigId(null)
+        setSireneParams(buildDefaultSireneParams(latestImport))
+      }
+
+      if (clientsRes.totalCount > clientsRes.rows.length) {
+        
+      } else {
+        setBackgroundHydratingClients(false)
+      }
     } catch (error) {
       console.error(error)
       alert("Erreur lors du chargement de l'écran Clients.")
     } finally {
       setLoading(false)
+    }
+  }
+
+  async function saveSireneParams() {
+    setSavingSireneParams(true)
+    try {
+      const payload = {
+        codes_ape: sireneParams.codesApe
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean),
+        date_creation_min: sireneParams.dateCreationMin || null,
+        date_creation_max: sireneParams.dateCreationMax || null,
+        date_modification_min: sireneParams.dateMajMin || null,
+        date_modification_max: sireneParams.dateMajMax || null,
+        last_import_at: lastImport?.date_import || null,
+        updated_at: new Date().toISOString(),
+      }
+
+      if (sireneConfigId) {
+        const { error } = await supabase.from('import_sirene_params').update(payload).eq('id', sireneConfigId)
+        if (error) throw error
+      } else {
+        const { data, error } = await supabase
+          .from('import_sirene_params')
+          .insert(payload)
+          .select('id')
+          .single()
+        if (error) throw error
+        setSireneConfigId(data.id as string)
+      }
+
+      alert('Paramètres API Sirene enregistrés.')
+    } catch (error) {
+      console.error(error)
+      alert('Erreur lors de la sauvegarde des paramètres API Sirene.')
+    } finally {
+      setSavingSireneParams(false)
+    }
+  }
+
+  async function enrichClientBySiret(siret: string) {
+    if (!siret) return
+    setEnrichingSirets((prev) => [...prev, siret])
+
+    try {
+      const res = await fetch('/api/enrich-client', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ siret }),
+      })
+
+      const data = await res.json()
+
+      if (!res.ok || !data.success) {
+        throw new Error(data?.error || 'Erreur enrichissement')
+      }
+
+      await loadAll()
+
+      const refreshed = await fetchClientBySiret(siret)
+      if (refreshed) setSelectedClient(refreshed)
+    } catch (err) {
+      console.error(err)
+      alert(`Erreur enrichissement pour ${siret}`)
+    } finally {
+      setEnrichingSirets((prev) => prev.filter((x) => x !== siret))
+    }
+  }
+
+  async function enrichBatch(rows: ClientRow[]) {
+    const targets = rows.filter((row) => row.siret).slice(0, MAX_BATCH_ENRICH)
+
+    if (targets.length === 0) {
+      alert('Aucune fiche à enrichir.')
+      return
+    }
+
+    setBatchEnriching(true)
+
+    let okCount = 0
+    let partialCount = 0
+    let errorCount = 0
+
+    try {
+      for (const row of targets) {
+        const siret = row.siret as string
+        setEnrichingSirets((prev) => [...prev, siret])
+
+        try {
+          const res = await fetch('/api/enrich-client', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ siret }),
+          })
+
+          const data = await res.json()
+
+          if (res.ok && data?.success) {
+            if (data?.warning) partialCount += 1
+            else okCount += 1
+          } else {
+            errorCount += 1
+          }
+        } catch {
+          errorCount += 1
+        } finally {
+          setEnrichingSirets((prev) => prev.filter((x) => x !== siret))
+        }
+      }
+
+      await loadAll()
+
+      alert(
+        `Enrichissement terminé.\n` +
+          `OK : ${okCount}\n` +
+          `Partiel : ${partialCount}\n` +
+          `Erreur : ${errorCount}`
+      )
+    } finally {
+      setBatchEnriching(false)
     }
   }
 
@@ -558,48 +1079,63 @@ export default function ClientsPage() {
 
   const allowedDepartments = useMemo(() => {
     if (normalizedSocieteFilter === 'global') return []
-
     return Array.from(
       new Set(
         territories
-          .filter(
-            (row) => normalizeScopeValue(row.societe) === normalizedSocieteFilter
-          )
+          .filter((row) => normalizeScopeValue(row.societe) === normalizedSocieteFilter)
           .map((row) => String(row.code_dep || '').trim())
           .filter(Boolean)
       )
     ).sort((a, b) => a.localeCompare(b, 'fr'))
   }, [territories, normalizedSocieteFilter])
 
-  const allowedDepartmentSet = useMemo(() => {
-    return new Set(allowedDepartments)
-  }, [allowedDepartments])
+  const allowedDepartmentSet = useMemo(() => new Set(allowedDepartments), [allowedDepartments])
 
   const scopedClients = useMemo(() => {
-    if (normalizedSocieteFilter === 'global') return clients
+    let result = clients
 
-    return clients.filter((row) => {
-      const dep = getClientDepartment(row)
-      return dep && allowedDepartmentSet.has(dep)
-    })
-  }, [clients, normalizedSocieteFilter, allowedDepartmentSet])
+    if (normalizedSocieteFilter !== 'global') {
+      result = result.filter((row) => {
+        const dep = getClientDepartment(row)
+        return dep && allowedDepartmentSet.has(dep)
+      })
+    }
+
+    if (allowedDepartements.length > 0) {
+      const allowedDepartementsSet = new Set(allowedDepartements)
+      result = result.filter((row) => {
+        const dep = getClientDepartment(row)
+        return dep && allowedDepartementsSet.has(dep)
+      })
+    }
+
+    return result
+  }, [clients, normalizedSocieteFilter, allowedDepartmentSet, allowedDepartements])
 
   const scopedCegeclimAbsents = useMemo(() => {
-    if (normalizedSocieteFilter === 'global') return cegeclimAbsents
+    let result = cegeclimAbsents
 
-    return cegeclimAbsents.filter((row) => {
-      const dep = getAbsentDepartment(row)
-      return dep && allowedDepartmentSet.has(dep)
-    })
-  }, [cegeclimAbsents, normalizedSocieteFilter, allowedDepartmentSet])
+    if (normalizedSocieteFilter !== 'global') {
+      result = result.filter((row) => {
+        const dep = getAbsentDepartment(row)
+        return dep && allowedDepartmentSet.has(dep)
+      })
+    }
+
+    if (allowedDepartements.length > 0) {
+      const allowedDepartementsSet = new Set(allowedDepartements)
+      result = result.filter((row) => {
+        const dep = getAbsentDepartment(row)
+        return dep && allowedDepartementsSet.has(dep)
+      })
+    }
+
+    return result
+  }, [cegeclimAbsents, normalizedSocieteFilter, allowedDepartmentSet, allowedDepartements])
 
   const scopedAgences = useMemo(() => {
     if (normalizedSocieteFilter === 'global') return agences
-
-    return agences.filter((a) => {
-      const soc = normalizeScopeValue(a.societe)
-      return soc === normalizedSocieteFilter
-    })
+    return agences.filter((a) => normalizeScopeValue(a.societe) === normalizedSocieteFilter)
   }, [agences, normalizedSocieteFilter])
 
   const ageDaysMin = useMemo(
@@ -614,18 +1150,12 @@ export default function ClientsPage() {
 
   const departmentOptions = useMemo(() => {
     return Array.from(
-      new Set(
-        scopedClients
-          .map((r) => getClientDepartment(r))
-          .filter(Boolean) as string[]
-      )
+      new Set(scopedClients.map((r) => getClientDepartment(r)).filter(Boolean) as string[])
     ).sort((a, b) => a.localeCompare(b, 'fr'))
   }, [scopedClients])
 
   useEffect(() => {
-    setSelectedDepartments((prev) =>
-      prev.filter((dep) => departmentOptions.includes(dep))
-    )
+    setSelectedDepartments((prev) => prev.filter((dep) => departmentOptions.includes(dep)))
   }, [departmentOptions])
 
   const sectorOptions = useMemo(() => {
@@ -645,16 +1175,14 @@ export default function ClientsPage() {
   }, [scopedClients])
 
   const agenceOptions = useMemo(() => {
-    return Array.from(
-      new Set(scopedAgences.map((a) => a.agence).filter(Boolean) as string[])
-    ).sort((a, b) => a.localeCompare(b, 'fr'))
+    return Array.from(new Set(scopedAgences.map((a) => a.agence).filter(Boolean) as string[])).sort(
+      (a, b) => a.localeCompare(b, 'fr')
+    )
   }, [scopedAgences])
 
   useEffect(() => {
     if (selectedAgence === 'TOUS') return
-    if (!agenceOptions.includes(selectedAgence)) {
-      setSelectedAgence('TOUS')
-    }
+    if (!agenceOptions.includes(selectedAgence)) setSelectedAgence('TOUS')
   }, [agenceOptions, selectedAgence])
 
   const selectedAgenceRow = useMemo(() => {
@@ -670,6 +1198,7 @@ export default function ClientsPage() {
       const sector = row.naf_libelle_traduit || translateNaf(row.activitePrincipaleEtablissement)
       const department = getClientDepartment(row)
       const ageDays = diffDaysFromToday(row.dateCreationEtablissement)
+      const completeness = getCompletenessPercent(row)
 
       const designationRaw = String(row.raison_sociale_affichee ?? '').trim()
       const designationNormalized = designationRaw.toLowerCase()
@@ -698,6 +1227,7 @@ export default function ClientsPage() {
       if (excludeFutureCreation && isFutureDate(row.dateCreationEtablissement)) return false
       if (onlyContactable && !(row.telephone || row.email || row.contactable)) return false
       if (onlyNotInCegeclim && row.present_dans_cegeclim) return false
+      if (onlyToEnrich && completeness >= 100 && row.enrichment_status === 'ok') return false
 
       if (ageDays === null || ageDays < 0) {
         if (!(ageDays !== null && ageDays < 0 && !excludeFutureCreation)) return false
@@ -728,6 +1258,8 @@ export default function ClientsPage() {
           sector,
           row.telephone,
           row.email,
+          row.nom_dirigeant,
+          row.site_web,
         ]
           .filter(Boolean)
           .join(' ')
@@ -751,6 +1283,7 @@ export default function ClientsPage() {
     onlyNotInCegeclim,
     excludeDesignationND,
     excludeFutureCreation,
+    onlyToEnrich,
     ageDaysMin,
     ageDaysMax,
     distanceMax,
@@ -833,6 +1366,18 @@ export default function ClientsPage() {
           av = distanceA ?? 999999
           bv = distanceB ?? 999999
           break
+        case 'score':
+          av = a.potentiel_score ?? -1
+          bv = b.potentiel_score ?? -1
+          break
+        case 'completeness':
+          av = getCompletenessPercent(a)
+          bv = getCompletenessPercent(b)
+          break
+        case 'enrichment':
+          av = a.enrichment_status || ''
+          bv = b.enrichment_status || ''
+          break
       }
 
       const cmp =
@@ -848,11 +1393,7 @@ export default function ClientsPage() {
 
   const summaryDepartments = useMemo(() => {
     return Array.from(
-      new Set(
-        sortedFilteredClients
-          .map((r) => getClientDepartment(r))
-          .filter(Boolean) as string[]
-      )
+      new Set(sortedFilteredClients.map((r) => getClientDepartment(r)).filter(Boolean) as string[])
     ).sort((a, b) => a.localeCompare(b, 'fr'))
   }, [sortedFilteredClients])
 
@@ -888,10 +1429,7 @@ export default function ClientsPage() {
   const summaryDeptTotals = useMemo(() => {
     const out: Record<string, number> = {}
     summaryDepartments.forEach((dep) => {
-      out[dep] = sortedFilteredClients.filter((r) => {
-        const d = getClientDepartment(r)
-        return d === dep
-      }).length
+      out[dep] = sortedFilteredClients.filter((r) => getClientDepartment(r) === dep).length
     })
     return out
   }, [sortedFilteredClients, summaryDepartments])
@@ -1024,6 +1562,7 @@ export default function ClientsPage() {
           nom_fichier_import: file.name,
           date_import: new Date().toISOString(),
           updated_at: new Date().toISOString(),
+          enrichment_status: 'a_faire',
         }
 
         payloads.push(payload)
@@ -1104,6 +1643,11 @@ export default function ClientsPage() {
         Ancienneté: formatAgePrecise(diffDaysFromToday(row.dateCreationEtablissement)),
         Tel: row.telephone || '',
         Mail: row.email || '',
+        Site: row.site_web || '',
+        Dirigeant: row.nom_dirigeant || '',
+        Score: row.potentiel_score ?? '',
+        Complétude: `${getCompletenessPercent(row)} %`,
+        Statut: row.enrichment_status || 'a_faire',
         Distance: distance != null ? `${distance} km` : '',
       }
     })
@@ -1127,6 +1671,8 @@ export default function ClientsPage() {
         "Secteur d'activité",
         'Création',
         'Ancienneté',
+        'Score',
+        'Complétude',
         'Distance',
       ]],
       body: sortedFilteredClients.map((row) => {
@@ -1149,6 +1695,8 @@ export default function ClientsPage() {
           row.naf_libelle_traduit || translateNaf(row.activitePrincipaleEtablissement),
           formatDateFr(row.dateCreationEtablissement),
           formatAgePrecise(diffDaysFromToday(row.dateCreationEtablissement)),
+          row.potentiel_score ?? 'NC',
+          `${getCompletenessPercent(row)} %`,
           distance != null ? `${distance} km` : '',
         ]
       }),
@@ -1170,12 +1718,31 @@ export default function ClientsPage() {
     scopedCegeclimAbsents.length + scopedClients.filter((x) => x.present_dans_cegeclim).length
 
   const totalSelection = sortedFilteredClients.length
-
   const totalSelectedDepartments = summaryDepartments.length
-
   const totalSelectedNaf = Array.from(
     new Set(sortedFilteredClients.map((r) => r.activitePrincipaleEtablissement).filter(Boolean))
   ).length
+
+  const avgCompleteness =
+    sortedFilteredClients.length === 0
+      ? 0
+      : Math.round(
+          sortedFilteredClients.reduce((sum, row) => sum + getCompletenessPercent(row), 0) /
+            sortedFilteredClients.length
+        )
+
+  const avgScore =
+    sortedFilteredClients.length === 0
+      ? 0
+      : Math.round(
+          sortedFilteredClients.reduce((sum, row) => sum + (row.potentiel_score || 0), 0) /
+            sortedFilteredClients.length
+        )
+
+  const enrichableSelection = sortedFilteredClients.filter((row) => {
+    const completeness = getCompletenessPercent(row)
+    return completeness < 100 || row.enrichment_status !== 'ok'
+  })
 
   if (loading) {
     return <div style={{ padding: 24, fontSize: 14 }}>Chargement de l’écran Clients...</div>
@@ -1188,569 +1755,971 @@ export default function ClientsPage() {
           <h1 style={pageTitleStyle}>Clients</h1>
         </section>
 
-        <section style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <div style={kpiGridStyle}>
-            <div style={kpiCardStyle}>
-              <div style={kpiTitleStyle}>Entreprises base Clients</div>
-              <div style={kpiValueStyle}>{totalClientsBaseForScope}</div>
-            </div>
-
-            <div style={kpiCardStyle}>
-              <div style={kpiTitleStyle}>Entreprise base CEGECLIM</div>
-              <div style={kpiValueStyle}>{totalCegeclimBase}</div>
-            </div>
-
-            <div style={kpiCardStyle}>
-              <div style={kpiTitleStyle}>Clients CEGECLIM absent base Clients</div>
-              <div style={kpiValueStyle}>{scopedCegeclimAbsents.length}</div>
-            </div>
+        {allowedDepartements.length > 0 && (
+          <div style={{ fontSize: 13, color: '#334155', marginTop: -6 }}>
+            Départements visibles selon votre profil : {allowedDepartements.join(', ')}
+            {currentUserEmail ? ` • ${currentUserEmail}` : ''}
           </div>
+        )}
+
+        <section style={topToggleGridStyle}>
+          <button
+            type="button"
+            onClick={() => setShowClientsSection((v) => !v)}
+            style={showClientsSection ? sectionToggleActiveStyle : sectionToggleStyle}
+          >
+            <span>Clients</span>
+            <span>{showClientsSection ? 'Réduire' : 'Développer'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowImportsSection((v) => !v)}
+            style={showImportsSection ? sectionToggleActiveStyle : sectionToggleStyle}
+          >
+            <span>Imports</span>
+            <span>{showImportsSection ? 'Réduire' : 'Développer'}</span>
+          </button>
         </section>
 
-        <section style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <div style={captionRowStyle}>
-            <div style={groupCaptionStyle}>
-              Données relatives à la selection
-              {normalizedSocieteFilter !== 'global' ? ` • périmètre ${societeFilter}` : ''}
-            </div>
-          </div>
-          <div style={kpiGridStyle}>
-            <div style={kpiCardStyle}>
-              <div style={kpiTitleStyle}>Nombre entreprise selectionnées</div>
-              <div style={kpiValueStyle}>{totalSelection}</div>
-            </div>
-
-            <div style={kpiCardStyle}>
-              <div style={kpiTitleStyle}>Nb départements selectionnées</div>
-              <div style={kpiValueStyle}>{totalSelectedDepartments}</div>
-            </div>
-
-            <div style={kpiCardStyle}>
-              <div style={kpiTitleStyle}>Nb de code APE différent</div>
-              <div style={kpiValueStyle}>{totalSelectedNaf}</div>
-            </div>
-          </div>
-        </section>
-
-        <section style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <div style={captionRowStyle}>
-            <div style={groupCaptionStyle}>Données relatives à la dernière importation du fichier</div>
-          </div>
-          <div style={kpiGridStyle}>
-            <div style={kpiCardStyle}>
-              <div style={kpiTitleStyle}>Date dernier import</div>
-              <div style={kpiValueStyle}>
-                {lastImport?.date_import
-                  ? new Date(lastImport.date_import).toLocaleDateString('fr-FR', {
-                      day: '2-digit',
-                      month: '2-digit',
-                    })
-                  : 'NC'}
-              </div>
-            </div>
-
-            <div style={kpiCardStyle}>
-              <div style={kpiTitleStyle}>Nb enreg. insérée dernier import (hors ND)</div>
-              <div style={kpiValueStyle}>{lastImport?.nb_importees || 0}</div>
-            </div>
-
-            <div style={kpiCardStyle}>
-              <div style={kpiTitleStyle}>Nb enreg. rejetées dernier import</div>
-              <div style={kpiValueStyle}>{lastImport?.nb_rejets || 0}</div>
-            </div>
-          </div>
-        </section>
-
-        <section>
-          <label style={uploadWrapStyle}>
-            <span>Importer un CSV Entreprise France</span>
-            <input
-              type="file"
-              accept=".csv,text/csv"
-              disabled={importing}
-              onChange={(e) => {
-                const file = e.target.files?.[0]
-                if (file) void handleImportCsv(file)
-                e.currentTarget.value = ''
-              }}
-            />
-          </label>
-          <p>
-            <a
-              href="https://annuaire-entreprises.data.gouv.fr/export-sirene"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              . https://annuaire-entreprises.data.gouv.fr/export-sirene
-            </a>
-          </p>
-          {importStats && (
-            <div style={{ marginTop: 8, fontSize: 11 }}>
-              Import terminé • {importStats.total} lignes lues • {importStats.inserted} insertions •{' '}
-              {importStats.updated} mises à jour • {importStats.rejected} rejets
-            </div>
-          )}
-        </section>
-
-        <section style={sectionTitleStyle}>
-          <h2 style={sectionTitleTextStyle}>Filtres</h2>
-        </section>
-
-        <section style={filtersGridStyle}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <div style={filterRowStyle}>
-              <div style={filterLabelCellStyle}>Recherche</div>
-              <input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Raison sociale, SIRET, ..."
-                style={inputStyle}
-              />
-            </div>
-
-            <div style={filterRowStyle}>
-              <div style={filterLabelCellStyle}>Désignation</div>
-              <input
-                value={designationSearch}
-                onChange={(e) => setDesignationSearch(e.target.value)}
-                placeholder="Filtrer la désignation"
-                style={inputStyle}
-              />
-            </div>
-
-            <div style={{ marginLeft: 192, maxWidth: '320px' }}>
-              <MultiSelectHorizontal
-                label="Departement(s)"
-                options={departmentOptions}
-                selected={selectedDepartments}
-                onChange={setSelectedDepartments}
-              />
-            </div>
-
-            <div style={{ marginLeft: 192, maxWidth: '320px' }}>
-              <MultiSelectHorizontal
-                label="Secteur d'activité(s)"
-                options={sectorOptions}
-                selected={selectedSectors}
-                onChange={setSelectedSectors}
-              />
-            </div>
-
-            <div style={{ marginLeft: 192, maxWidth: '320px' }}>
-              <MultiSelectHorizontal
-                label="Code NAF(s)"
-                options={nafOptions}
-                selected={selectedNafCodes}
-                onChange={setSelectedNafCodes}
-              />
-            </div>
-
-            <div style={filterRowStyle}>
-              <div style={filterLabelCellStyle}>Agence (choix unique)</div>
-              <select
-                value={selectedAgence}
-                onChange={(e) => setSelectedAgence(e.target.value)}
-                style={selectLikeStyle}
-              >
-                <option value="TOUS">TOUS</option>
-                {agenceOptions.map((agence) => (
-                  <option key={agence} value={agence}>
-                    {agence}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div style={filterRowStyle}>
-              <div style={filterLabelCellStyle}>Distance max (actif si agence)</div>
-              <div style={distanceRowStyle}>
-                <input
-                  type="range"
-                  min={1}
-                  max={200}
-                  step={1}
-                  value={distanceMax}
-                  onChange={(e) => setDistanceMax(Number(e.target.value))}
-                />
-                <div style={distanceBoxStyle}>{distanceMax} Km</div>
-              </div>
-            </div>
-          </div>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 14, paddingTop: 6 }}>
-            <label style={checkboxLabelStyle}>
-              <input
-                type="checkbox"
-                checked={includeNoDistance}
-                onChange={(e) => setIncludeNoDistance(e.target.checked)}
-                style={checkboxStyle}
-              />
-              Inclure les lignes sans distance calculée
-            </label>
-
-            <label style={checkboxLabelStyle}>
-              <input
-                type="checkbox"
-                checked={onlyContactable}
-                onChange={(e) => setOnlyContactable(e.target.checked)}
-                style={checkboxStyle}
-              />
-              Seulement entreprises contactables
-            </label>
-
-            <label style={checkboxLabelStyle}>
-              <input
-                type="checkbox"
-                checked={onlyNotInCegeclim}
-                onChange={(e) => setOnlyNotInCegeclim(e.target.checked)}
-                style={checkboxStyle}
-              />
-              Seulement non présents dans base clients Cegeclim
-            </label>
-
-            <label style={checkboxLabelStyle}>
-              <input
-                type="checkbox"
-                checked={excludeDesignationND}
-                onChange={(e) => setExcludeDesignationND(e.target.checked)}
-                style={checkboxStyle}
-              />
-              Exclure désignation commerciale "ND"
-            </label>
-
-            <label style={checkboxLabelStyle}>
-              <input
-                type="checkbox"
-                checked={excludeFutureCreation}
-                onChange={(e) => setExcludeFutureCreation(e.target.checked)}
-                style={checkboxStyle}
-              />
-              Exclure date de création dans le futur
-            </label>
-
-            <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <div style={{ fontSize: 14 }}>
-                Jauge non linéaire (très précise proche d'aujourd'hui)
-              </div>
-
-              <div style={ageRowStyle}>
-                <div style={ageLabelStyle}>Ancienneté min</div>
-                <input
-                  type="range"
-                  min={0}
-                  max={100}
-                  step={1}
-                  value={ageSliderMin}
-                  onChange={(e) => setAgeSliderMin(Number(e.target.value))}
-                />
-              </div>
-              <div style={{ fontSize: 14 }}>{formatAgePrecise(ageDaysMin)}</div>
-
-              <div style={ageRowStyle}>
-                <div style={ageLabelStyle}>Ancienneté max</div>
-                <input
-                  type="range"
-                  min={0}
-                  max={100}
-                  step={1}
-                  value={ageSliderMax}
-                  onChange={(e) => setAgeSliderMax(Number(e.target.value))}
-                />
-              </div>
-              <div style={{ fontSize: 14 }}>{formatAgePrecise(ageDaysMax)}</div>
-
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                {[
-                  { label: '≤ 2 semaines', days: 14 },
-                  { label: '≤ 4 semaines', days: 28 },
-                  { label: '≤ 3 mois', days: 90 },
-                  { label: '≤ 12 mois', days: 365 },
-                ].map((item) => (
-                  <button
-                    key={item.label}
-                    type="button"
-                    onClick={() => {
-                      setAgeSliderMin(daysToSlider(0))
-                      setAgeSliderMax(daysToSlider(item.days))
-                    }}
-                    style={miniButtonStyle}
-                  >
-                    {item.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section style={sectionTitleStyle}>
-          <h2 style={sectionTitleTextStyle}>Synthèse de la sélection</h2>
-        </section>
-
-        {mode === 'clients' && (
+        {showClientsSection && (
           <>
-            <section style={{ width: '100%', overflowX: 'auto' }}>
-              <table style={{ width: 'max-content', minWidth: '100%', borderCollapse: 'collapse', fontSize: 15 }}>
-                <thead>
-                  <tr>
-                    <th style={{ ...summaryHeaderCellStyle, textAlign: 'left', minWidth: 260 }}>
-                      NAF DESIGNATION
-                    </th>
-                    <th style={summaryHeaderCellStyle}>TOTAL</th>
-                    {summaryDepartments.map((dep) => (
-                      <th key={dep} style={summaryHeaderCellStyle}>
-                        {dep}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {summarySectorRows.map((row) => (
-                    <tr key={row.sector} style={{ background: getSectorColor(row.sector) }}>
-                      <td style={{ ...summaryBodyCellStyle, textAlign: 'left' }}>{row.sector}</td>
-                      <td style={summaryBodyCellStyleBold}>{row.total}</td>
-                      {summaryDepartments.map((dep) => (
-                        <td key={dep} style={summaryBodyCellStyleBold}>
-                          {row.byDept[dep] || 0}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                  <tr>
-                    <td style={{ ...summaryTotalStyle, textAlign: 'left' }}>TOTAL</td>
-                    <td style={summaryTotalStyle}>{sortedFilteredClients.length}</td>
-                    {summaryDepartments.map((dep) => (
-                      <td key={dep} style={summaryTotalStyle}>
-                        {summaryDeptTotals[dep] || 0}
-                      </td>
-                    ))}
-                  </tr>
-                </tbody>
-              </table>
-            </section>
+            {backgroundHydratingClients && (
+              <div style={{ marginBottom: 12, padding: '10px 14px', background: '#eff6ff', border: '1px solid #bfdbfe', color: '#1d4ed8', borderRadius: 12, fontSize: 14 }}>
+                Chargement rapide effectué. La liste complète continue à se charger en arrière-plan…
+              </div>
+            )}
+            <section style={sectionCardStyle}>
+              <div style={sectionHeaderRowStyle}>
+                <h2 style={sectionBlockTitleStyle}>Section Clients</h2>
+                <button
+                  type="button"
+                  onClick={() => setShowClientsSection(false)}
+                  style={toolbarButtonStyle}
+                >
+                  Réduire
+                </button>
+              </div>
 
-            <section style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-              <button onClick={exportExcel} style={toolbarButtonStyle}>Export Excel</button>
-              <button onClick={exportPdf} style={toolbarButtonStyle}>Créer PDF</button>
-              <button onClick={handlePrint} style={toolbarButtonStyle}>Imprimer</button>
-              <button onClick={() => setShowRejects(true)} style={toolbarButtonStyle}>
-                Voir les rejets ({rejects.length})
-              </button>
-            </section>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div style={kpiGridStyle}>
+                  <div style={kpiCardStyle}>
+                    <div style={kpiTitleStyle}>Entreprises base Clients</div>
+                    <div style={kpiValueStyle}>{totalClientsBaseForScope}</div>
+                  </div>
 
-            <section style={sectionTitleStyle}>
-              <div>
-                <h2 style={sectionTitleTextStyle}>Liste des entreprises</h2>
-                <div style={{ marginTop: 6, fontSize: 15 }}>
-                  {sortedFilteredClients.length} entreprise(s) affichées
+                  <div style={kpiCardStyle}>
+                    <div style={kpiTitleStyle}>Entreprise base CEGECLIM</div>
+                    <div style={kpiValueStyle}>{totalCegeclimBase}</div>
+                  </div>
+
+                  <div style={kpiCardStyle}>
+                    <div style={kpiTitleStyle}>Clients CEGECLIM absent base Clients</div>
+                    <div style={kpiValueStyle}>{scopedCegeclimAbsents.length}</div>
+                  </div>
                 </div>
               </div>
-            </section>
 
-            <section style={{ width: '100%', overflowX: 'auto' }}>
-              <table
-                style={{
-                  width: 'max-content',
-                  minWidth: '100%',
-                  borderCollapse: 'collapse',
-                  fontSize: 12,
-                  lineHeight: 1.15,
-                }}
-              >
-                <thead>
-                  <tr style={{ borderBottom: '2px solid #111' }}>
-                    <th onClick={() => toggleSort('designation')} style={{ ...listHeaderStyle, width: 125 }}>
-                      Désignation<SortIndicator active={sortKey === 'designation'} direction={sortDirection} />
-                    </th>
-                    <th onClick={() => toggleSort('siret')} style={{ ...listHeaderStyle, width: 125 }}>
-                      Siret<SortIndicator active={sortKey === 'siret'} direction={sortDirection} />
-                    </th>
-                    <th onClick={() => toggleSort('departement')} style={{ ...listHeaderStyle, width: 55 }}>
-                      Dépt.<SortIndicator active={sortKey === 'departement'} direction={sortDirection} />
-                    </th>
-                    <th onClick={() => toggleSort('ville')} style={{ ...listHeaderStyle, width: 145 }}>
-                      Ville<SortIndicator active={sortKey === 'ville'} direction={sortDirection} />
-                    </th>
-                    <th onClick={() => toggleSort('codePostal')} style={{ ...listHeaderStyle, width: 90 }}>
-                      Code postal<SortIndicator active={sortKey === 'codePostal'} direction={sortDirection} />
-                    </th>
-                    <th onClick={() => toggleSort('naf')} style={{ ...listHeaderStyle, width: 80 }}>
-                      APE/NAF<SortIndicator active={sortKey === 'naf'} direction={sortDirection} />
-                    </th>
-                    <th onClick={() => toggleSort('secteur')} style={{ ...listHeaderStyle, width: 145 }}>
-                      Secteur d'activité<SortIndicator active={sortKey === 'secteur'} direction={sortDirection} />
-                    </th>
-                    <th onClick={() => toggleSort('creation')} style={{ ...listHeaderStyle, width: 90 }}>
-                      Création<SortIndicator active={sortKey === 'creation'} direction={sortDirection} />
-                    </th>
-                    <th onClick={() => toggleSort('anciennete')} style={{ ...listHeaderStyle, width: 105 }}>
-                      Ancienneté<SortIndicator active={sortKey === 'anciennete'} direction={sortDirection} />
-                    </th>
-                    <th onClick={() => toggleSort('telephone')} style={{ ...listHeaderStyle, width: 55 }}>
-                      Tel<SortIndicator active={sortKey === 'telephone'} direction={sortDirection} />
-                    </th>
-                    <th onClick={() => toggleSort('email')} style={{ ...listHeaderStyle, width: 55 }}>
-                      Mail<SortIndicator active={sortKey === 'email'} direction={sortDirection} />
-                    </th>
-                    <th onClick={() => toggleSort('distance')} style={{ ...listHeaderStyle, width: 95 }}>
-                      Distance<SortIndicator active={sortKey === 'distance'} direction={sortDirection} />
-                    </th>
-                    <th style={{ ...listHeaderStyle, width: 60 }}>Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {paginatedClients.map((row) => {
-                    const sector = row.naf_libelle_traduit || translateNaf(row.activitePrincipaleEtablissement)
-                    const distance = selectedAgenceRow
-                      ? distanceKmLambert(
-                          row.coordonneeLambertAbscisseEtablissement,
-                          row.coordonneeLambertOrdonneeEtablissement,
-                          selectedAgenceRow.coord_x_lambert,
-                          selectedAgenceRow.coord_y_lambert
-                        )
-                      : null
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div style={captionRowStyle}>
+                  <div style={groupCaptionStyle}>
+                    Données relatives à la sélection
+                    {normalizedSocieteFilter !== 'global' ? ` • périmètre ${societeFilter}` : ''}
+                  </div>
+                </div>
+                <div style={kpiGridStyle}>
+                  <div style={kpiCardStyle}>
+                    <div style={kpiTitleStyle}>Nombre entreprise sélectionnées</div>
+                    <div style={kpiValueStyle}>{totalSelection}</div>
+                  </div>
 
-                    return (
-                      <tr
-                        key={row.id}
-                        style={{ background: getSectorColor(sector), borderBottom: '1px solid #d6d6d6' }}
-                      >
-                        <td style={listCellStyle}>{row.raison_sociale_affichee || 'ND'}</td>
-                        <td style={listCellStyle}>{row.siret || 'ND'}</td>
-                        <td style={listCellStyle}>{getClientDepartment(row) || 'ND'}</td>
-                        <td style={listCellStyle}>{row.libelleCommuneEtablissement || 'ND'}</td>
-                        <td style={listCellStyle}>{row.codePostalEtablissement || 'ND'}</td>
-                        <td style={listCellStyle}>{row.activitePrincipaleEtablissement || 'ND'}</td>
-                        <td style={listCellStyle}>{sector}</td>
-                        <td style={listCellStyle}>{formatDateFr(row.dateCreationEtablissement)}</td>
-                        <td style={listCellStyle}>{formatAgePrecise(diffDaysFromToday(row.dateCreationEtablissement))}</td>
-                        <td style={listCellStyle}>{row.telephone || '—'}</td>
-                        <td style={listCellStyle}>{row.email || '—'}</td>
-                        <td style={listCellStyle}>
-                          {selectedAgenceRow ? (distance != null ? `${distance} km` : '—') : 'Choisir agence'}
-                        </td>
-                        <td style={listCellStyle}>
-                          <button onClick={() => setSelectedClient(row)} style={linkButtonStyle}>
-                            Voir
-                          </button>
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
+                  <div style={kpiCardStyle}>
+                    <div style={kpiTitleStyle}>Nb départements sélectionnés</div>
+                    <div style={kpiValueStyle}>{totalSelectedDepartments}</div>
+                  </div>
 
-              <div style={paginationWrapStyle}>
-                <button
-                  style={paginationButtonStyle}
-                  disabled={currentPage === 1}
-                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-                >
-                  Précédent
-                </button>
-                <span style={{ fontSize: 14 }}>
-                  Page {currentPage} / {totalPages}
-                </span>
-                <button
-                  style={paginationButtonStyle}
-                  disabled={currentPage === totalPages}
-                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-                >
-                  Suivant
-                </button>
+                  <div style={kpiCardStyle}>
+                    <div style={kpiTitleStyle}>Nb de code APE différent</div>
+                    <div style={kpiValueStyle}>{totalSelectedNaf}</div>
+                  </div>
+                </div>
               </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div style={captionRowStyle}>
+                  <div style={groupCaptionStyle}>Prospection / enrichissement</div>
+                </div>
+                <div style={kpiGridStyle}>
+                  <div style={kpiCardStyle}>
+                    <div style={kpiTitleStyle}>Complétude moyenne</div>
+                    <div style={kpiValueStyle}>{avgCompleteness}%</div>
+                  </div>
+
+                  <div style={kpiCardStyle}>
+                    <div style={kpiTitleStyle}>Score potentiel moyen</div>
+                    <div style={kpiValueStyle}>{avgScore}</div>
+                  </div>
+
+                  <div style={kpiCardStyle}>
+                    <div style={kpiTitleStyle}>Fiches à enrichir</div>
+                    <div style={kpiValueStyle}>{enrichableSelection.length}</div>
+                  </div>
+                </div>
+              </div>
+
+              <section style={sectionTitleStyle}>
+                <h2 style={sectionTitleTextStyle}>Filtres</h2>
+              </section>
+
+              <section style={filtersGridStyle}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <div style={filterRowStyle}>
+                    <div style={filterLabelCellStyle}>Recherche</div>
+                    <input
+                      value={search}
+                      onChange={(e) => setSearch(e.target.value)}
+                      placeholder="Raison sociale, SIRET, dirigeant..."
+                      style={inputStyle}
+                    />
+                  </div>
+
+                  <div style={filterRowStyle}>
+                    <div style={filterLabelCellStyle}>Désignation</div>
+                    <input
+                      value={designationSearch}
+                      onChange={(e) => setDesignationSearch(e.target.value)}
+                      placeholder="Filtrer la désignation"
+                      style={inputStyle}
+                    />
+                  </div>
+
+                  <div style={{ marginLeft: 192, maxWidth: '320px' }}>
+                    <MultiSelectHorizontal
+                      label="Departement(s)"
+                      options={departmentOptions}
+                      selected={selectedDepartments}
+                      onChange={setSelectedDepartments}
+                    />
+                  </div>
+
+                  <div style={{ marginLeft: 192, maxWidth: '320px' }}>
+                    <MultiSelectHorizontal
+                      label="Secteur d'activité(s)"
+                      options={sectorOptions}
+                      selected={selectedSectors}
+                      onChange={setSelectedSectors}
+                    />
+                  </div>
+
+                  <div style={{ marginLeft: 192, maxWidth: '320px' }}>
+                    <MultiSelectHorizontal
+                      label="Code NAF(s)"
+                      options={nafOptions}
+                      selected={selectedNafCodes}
+                      onChange={setSelectedNafCodes}
+                    />
+                  </div>
+
+                  <div style={filterRowStyle}>
+                    <div style={filterLabelCellStyle}>Agence (choix unique)</div>
+                    <select
+                      value={selectedAgence}
+                      onChange={(e) => setSelectedAgence(e.target.value)}
+                      style={selectLikeStyle}
+                    >
+                      <option value="TOUS">TOUS</option>
+                      {agenceOptions.map((agence) => (
+                        <option key={agence} value={agence}>
+                          {agence}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div style={filterRowStyle}>
+                    <div style={filterLabelCellStyle}>Distance max (actif si agence)</div>
+                    <div style={distanceRowStyle}>
+                      <input
+                        type="range"
+                        min={1}
+                        max={200}
+                        step={1}
+                        value={distanceMax}
+                        onChange={(e) => setDistanceMax(Number(e.target.value))}
+                      />
+                      <div style={distanceBoxStyle}>{distanceMax} Km</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 14, paddingTop: 6 }}>
+                  <label style={checkboxLabelStyle}>
+                    <input
+                      type="checkbox"
+                      checked={includeNoDistance}
+                      onChange={(e) => setIncludeNoDistance(e.target.checked)}
+                      style={checkboxStyle}
+                    />
+                    Inclure les lignes sans distance calculée
+                  </label>
+
+                  <label style={checkboxLabelStyle}>
+                    <input
+                      type="checkbox"
+                      checked={onlyContactable}
+                      onChange={(e) => setOnlyContactable(e.target.checked)}
+                      style={checkboxStyle}
+                    />
+                    Seulement entreprises contactables
+                  </label>
+
+                  <label style={checkboxLabelStyle}>
+                    <input
+                      type="checkbox"
+                      checked={onlyNotInCegeclim}
+                      onChange={(e) => setOnlyNotInCegeclim(e.target.checked)}
+                      style={checkboxStyle}
+                    />
+                    Seulement non présents dans base clients Cegeclim
+                  </label>
+
+                  <label style={checkboxLabelStyle}>
+                    <input
+                      type="checkbox"
+                      checked={onlyToEnrich}
+                      onChange={(e) => setOnlyToEnrich(e.target.checked)}
+                      style={checkboxStyle}
+                    />
+                    Seulement fiches à enrichir
+                  </label>
+
+                  <label style={checkboxLabelStyle}>
+                    <input
+                      type="checkbox"
+                      checked={excludeDesignationND}
+                      onChange={(e) => setExcludeDesignationND(e.target.checked)}
+                      style={checkboxStyle}
+                    />
+                    Exclure désignation commerciale "ND"
+                  </label>
+
+                  <label style={checkboxLabelStyle}>
+                    <input
+                      type="checkbox"
+                      checked={excludeFutureCreation}
+                      onChange={(e) => setExcludeFutureCreation(e.target.checked)}
+                      style={checkboxStyle}
+                    />
+                    Exclure date de création dans le futur
+                  </label>
+
+                  <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    <div style={{ fontSize: 14 }}>Jauge non linéaire (très précise proche d'aujourd'hui)</div>
+
+                    <div style={ageRowStyle}>
+                      <div style={ageLabelStyle}>Ancienneté min</div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        step={1}
+                        value={ageSliderMin}
+                        onChange={(e) => setAgeSliderMin(Number(e.target.value))}
+                      />
+                    </div>
+                    <div style={{ fontSize: 14 }}>{formatAgePrecise(ageDaysMin)}</div>
+
+                    <div style={ageRowStyle}>
+                      <div style={ageLabelStyle}>Ancienneté max</div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        step={1}
+                        value={ageSliderMax}
+                        onChange={(e) => setAgeSliderMax(Number(e.target.value))}
+                      />
+                    </div>
+                    <div style={{ fontSize: 14 }}>{formatAgePrecise(ageDaysMax)}</div>
+
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                      {[
+                        { label: '≤ 2 semaines', days: 14 },
+                        { label: '≤ 4 semaines', days: 28 },
+                        { label: '≤ 3 mois', days: 90 },
+                        { label: '≤ 12 mois', days: 365 },
+                      ].map((item) => (
+                        <button
+                          key={item.label}
+                          type="button"
+                          onClick={() => {
+                            setAgeSliderMin(daysToSlider(0))
+                            setAgeSliderMax(daysToSlider(item.days))
+                          }}
+                          style={miniButtonStyle}
+                        >
+                          {item.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section style={sectionTitleStyle}>
+                <h2 style={sectionTitleTextStyle}>Synthèse de la sélection</h2>
+              </section>
+
+              {mode === 'clients' && (
+                <>
+                  <section style={{ width: '100%', overflowX: 'auto' }}>
+                    <table
+                      style={{
+                        width: 'max-content',
+                        minWidth: '100%',
+                        borderCollapse: 'collapse',
+                        fontSize: 15,
+                      }}
+                    >
+                      <thead>
+                        <tr>
+                          <th style={{ ...summaryHeaderCellStyle, textAlign: 'left', minWidth: 260 }}>
+                            NAF DESIGNATION
+                          </th>
+                          <th style={summaryHeaderCellStyle}>TOTAL</th>
+                          {summaryDepartments.map((dep) => (
+                            <th key={dep} style={summaryHeaderCellStyle}>
+                              {dep}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {summarySectorRows.map((row) => (
+                          <tr key={row.sector} style={{ background: getSectorColor(row.sector) }}>
+                            <td style={{ ...summaryBodyCellStyle, textAlign: 'left' }}>{row.sector}</td>
+                            <td style={summaryBodyCellStyleBold}>{row.total}</td>
+                            {summaryDepartments.map((dep) => (
+                              <td key={dep} style={summaryBodyCellStyleBold}>
+                                {row.byDept[dep] || 0}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                        <tr>
+                          <td style={{ ...summaryTotalStyle, textAlign: 'left' }}>TOTAL</td>
+                          <td style={summaryTotalStyle}>{sortedFilteredClients.length}</td>
+                          {summaryDepartments.map((dep) => (
+                            <td key={dep} style={summaryTotalStyle}>
+                              {summaryDeptTotals[dep] || 0}
+                            </td>
+                          ))}
+                        </tr>
+                      </tbody>
+                    </table>
+                  </section>
+
+                  <section style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                    <button onClick={exportExcel} style={toolbarButtonStyle}>Export Excel</button>
+                    <button onClick={exportPdf} style={toolbarButtonStyle}>Créer PDF</button>
+                    <button onClick={handlePrint} style={toolbarButtonStyle}>Imprimer</button>
+                    <button
+                      onClick={() => void enrichBatch(enrichableSelection)}
+                      style={primaryButtonStyle}
+                      disabled={batchEnriching || enrichableSelection.length === 0}
+                    >
+                      {batchEnriching
+                        ? 'Enrichissement en cours...'
+                        : `Enrichir la sélection (${Math.min(enrichableSelection.length, MAX_BATCH_ENRICH)})`}
+                    </button>
+                    <button onClick={() => setShowRejects(true)} style={toolbarButtonStyle}>
+                      Voir les rejets ({rejects.length})
+                    </button>
+                  </section>
+
+                  <section style={sectionTitleStyle}>
+                    <div>
+                      <h2 style={sectionTitleTextStyle}>Liste des entreprises</h2>
+                      <div style={{ marginTop: 6, fontSize: 15 }}>
+                        {sortedFilteredClients.length} entreprise(s) affichées
+                      </div>
+                    </div>
+                  </section>
+
+                  <section style={{ width: '100%', overflowX: 'auto' }}>
+                    <table
+                      style={{
+                        width: 'max-content',
+                        minWidth: '100%',
+                        borderCollapse: 'collapse',
+                        fontSize: 12,
+                        lineHeight: 1.15,
+                      }}
+                    >
+                      <thead>
+                        <tr style={{ borderBottom: '2px solid #111' }}>
+                          <th onClick={() => toggleSort('designation')} style={{ ...listHeaderStyle, width: 145 }}>
+                            Désignation<SortIndicator active={sortKey === 'designation'} direction={sortDirection} />
+                          </th>
+                          <th onClick={() => toggleSort('siret')} style={{ ...listHeaderStyle, width: 125 }}>
+                            Siret<SortIndicator active={sortKey === 'siret'} direction={sortDirection} />
+                          </th>
+                          <th onClick={() => toggleSort('departement')} style={{ ...listHeaderStyle, width: 55 }}>
+                            Dépt.<SortIndicator active={sortKey === 'departement'} direction={sortDirection} />
+                          </th>
+                          <th onClick={() => toggleSort('ville')} style={{ ...listHeaderStyle, width: 145 }}>
+                            Ville<SortIndicator active={sortKey === 'ville'} direction={sortDirection} />
+                          </th>
+                          <th onClick={() => toggleSort('codePostal')} style={{ ...listHeaderStyle, width: 90 }}>
+                            Code postal<SortIndicator active={sortKey === 'codePostal'} direction={sortDirection} />
+                          </th>
+                          <th onClick={() => toggleSort('naf')} style={{ ...listHeaderStyle, width: 80 }}>
+                            APE/NAF<SortIndicator active={sortKey === 'naf'} direction={sortDirection} />
+                          </th>
+                          <th onClick={() => toggleSort('secteur')} style={{ ...listHeaderStyle, width: 145 }}>
+                            Secteur d'activité<SortIndicator active={sortKey === 'secteur'} direction={sortDirection} />
+                          </th>
+                          <th onClick={() => toggleSort('creation')} style={{ ...listHeaderStyle, width: 90 }}>
+                            Création<SortIndicator active={sortKey === 'creation'} direction={sortDirection} />
+                          </th>
+                          <th onClick={() => toggleSort('anciennete')} style={{ ...listHeaderStyle, width: 105 }}>
+                            Ancienneté<SortIndicator active={sortKey === 'anciennete'} direction={sortDirection} />
+                          </th>
+                          <th onClick={() => toggleSort('telephone')} style={{ ...listHeaderStyle, width: 70 }}>
+                            Tel<SortIndicator active={sortKey === 'telephone'} direction={sortDirection} />
+                          </th>
+                          <th onClick={() => toggleSort('email')} style={{ ...listHeaderStyle, width: 70 }}>
+                            Mail<SortIndicator active={sortKey === 'email'} direction={sortDirection} />
+                          </th>
+                          <th onClick={() => toggleSort('score')} style={{ ...listHeaderStyle, width: 75 }}>
+                            Score<SortIndicator active={sortKey === 'score'} direction={sortDirection} />
+                          </th>
+                          <th onClick={() => toggleSort('completeness')} style={{ ...listHeaderStyle, width: 95 }}>
+                            Complétude<SortIndicator active={sortKey === 'completeness'} direction={sortDirection} />
+                          </th>
+                          <th onClick={() => toggleSort('enrichment')} style={{ ...listHeaderStyle, width: 105 }}>
+                            Enrichissement<SortIndicator active={sortKey === 'enrichment'} direction={sortDirection} />
+                          </th>
+                          <th onClick={() => toggleSort('distance')} style={{ ...listHeaderStyle, width: 95 }}>
+                            Distance<SortIndicator active={sortKey === 'distance'} direction={sortDirection} />
+                          </th>
+                          <th style={{ ...listHeaderStyle, width: 120 }}>Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {paginatedClients.map((row) => {
+                          const sector = row.naf_libelle_traduit || translateNaf(row.activitePrincipaleEtablissement)
+                          const distance = selectedAgenceRow
+                            ? distanceKmLambert(
+                                row.coordonneeLambertAbscisseEtablissement,
+                                row.coordonneeLambertOrdonneeEtablissement,
+                                selectedAgenceRow.coord_x_lambert,
+                                selectedAgenceRow.coord_y_lambert
+                              )
+                            : null
+                          const completeness = getCompletenessPercent(row)
+                          const scoreBadgeColor = getScoreColor(row.potentiel_score)
+                          const completenessColor = getCompletenessColor(completeness)
+                          const enrichBadge = getEnrichmentBadge(row.enrichment_status)
+                          const siret = row.siret || ''
+                          const isEnriching = enrichingSirets.includes(siret)
+
+                          return (
+                            <tr
+                              key={`${row.siret}-${row.id}` }
+                              style={{ background: getSectorColor(sector), borderBottom: '1px solid #b3a4a4' }}
+                            >
+                              <td style={listCellStyle}>{row.raison_sociale_affichee || 'ND'}</td>
+                              <td style={listCellStyle}>{row.siret || 'ND'}</td>
+                              <td style={listCellStyle}>{getClientDepartment(row) || 'ND'}</td>
+                              <td style={listCellStyle}>{row.libelleCommuneEtablissement || 'ND'}</td>
+                              <td style={listCellStyle}>{row.codePostalEtablissement || 'ND'}</td>
+                              <td style={listCellStyle}>{row.activitePrincipaleEtablissement || 'ND'}</td>
+                              <td style={listCellStyle}>{sector}</td>
+                              <td style={listCellStyle}>{formatDateFr(row.dateCreationEtablissement)}</td>
+                              <td style={listCellStyle}>{formatAgePrecise(diffDaysFromToday(row.dateCreationEtablissement))}</td>
+                              <td style={listCellStyle}>{row.telephone || '—'}</td>
+                              <td style={listCellStyle}>{row.email || '—'}</td>
+                              <td style={listCellStyle}>
+                                <span style={{ ...pillStyle, background: scoreBadgeColor }}>
+                                  {row.potentiel_score ?? 'NC'}
+                                </span>
+                              </td>
+                              <td style={listCellStyle}>
+                                <span style={{ ...pillStyle, background: completenessColor }}>
+                                  {completeness}%
+                                </span>
+                              </td>
+                              <td style={listCellStyle}>
+                                <span style={{ ...pillStyle, background: enrichBadge.bg, color: enrichBadge.color }}>
+                                  {enrichBadge.label}
+                                </span>
+                              </td>
+                              <td style={listCellStyle}>
+                                {selectedAgenceRow ? (distance != null ? `${distance} km` : '—') : 'Choisir agence'}
+                              </td>
+                              <td style={listCellStyle}>
+                                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                  <button onClick={() => setSelectedClient(row)} style={linkButtonStyle}>
+                                    Voir
+                                  </button>
+                                  <button
+                                    onClick={() => void enrichClientBySiret(siret)}
+                                    style={tinyPrimaryButtonStyle}
+                                    disabled={!siret || isEnriching}
+                                  >
+                                    {isEnriching ? '...' : 'Enrichir'}
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+
+                    <div style={paginationWrapStyle}>
+                      <button
+                        style={paginationButtonStyle}
+                        disabled={currentPage === 1}
+                        onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                      >
+                        Précédent
+                      </button>
+                      <span style={{ fontSize: 14 }}>
+                        Page {currentPage} / {totalPages}
+                      </span>
+                      <button
+                        style={paginationButtonStyle}
+                        disabled={currentPage === totalPages}
+                        onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                      >
+                        Suivant
+                      </button>
+                    </div>
+                  </section>
+                </>
+              )}
+
+              {mode === 'cegeclim_absents' && (
+                <section style={{ overflowX: 'auto', background: '#fff', border: '1px solid #ccc' }}>
+                  <table style={{ minWidth: '100%', fontSize: 14, borderCollapse: 'collapse' }}>
+                    <thead style={{ background: '#eee' }}>
+                      <tr>
+                        <th style={simpleHeadStyle}>SIRET</th>
+                        <th style={simpleHeadStyle}>Date création client</th>
+                        <th style={simpleHeadStyle}>Agence</th>
+                        <th style={simpleHeadStyle}>Code postal</th>
+                        <th style={simpleHeadStyle}>Contact</th>
+                        <th style={simpleHeadStyle}>Téléphone</th>
+                        <th style={simpleHeadStyle}>Email</th>
+                        <th style={simpleHeadStyle}>CA 2026</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {scopedCegeclimAbsents.map((row) => (
+                        <tr key={row.id}>
+                          <td style={simpleCellStyle}>{row.siret || 'NC'}</td>
+                          <td style={simpleCellStyle}>{formatDateFr(row.date_creation_client)}</td>
+                          <td style={simpleCellStyle}>{row.agence_rattachement || 'NC'}</td>
+                          <td style={simpleCellStyle}>{row.code_postal || 'NC'}</td>
+                          <td style={simpleCellStyle}>{row.contact || '—'}</td>
+                          <td style={simpleCellStyle}>{row.telephone || '—'}</td>
+                          <td style={simpleCellStyle}>{row.email || '—'}</td>
+                          <td style={simpleCellStyle}>{row.ca_2026 ?? '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </section>
+              )}
+
+              <section style={{ display: 'flex', gap: 8 }}>
+                <button
+                  onClick={() => setMode('clients')}
+                  style={mode === 'clients' ? activeTabStyle : tabStyle}
+                >
+                  Clients
+                </button>
+                <button
+                  onClick={() => setMode('cegeclim_absents')}
+                  style={mode === 'cegeclim_absents' ? activeTabStyle : tabStyle}
+                >
+                  Ecart CEGECLIM
+                </button>
+              </section>
             </section>
           </>
         )}
 
-        {mode === 'cegeclim_absents' && (
-          <section style={{ overflowX: 'auto', background: '#fff', border: '1px solid #ccc' }}>
-            <table style={{ minWidth: '100%', fontSize: 14, borderCollapse: 'collapse' }}>
-              <thead style={{ background: '#eee' }}>
-                <tr>
-                  <th style={simpleHeadStyle}>SIRET</th>
-                  <th style={simpleHeadStyle}>Date création client</th>
-                  <th style={simpleHeadStyle}>Agence</th>
-                  <th style={simpleHeadStyle}>Code postal</th>
-                  <th style={simpleHeadStyle}>Contact</th>
-                  <th style={simpleHeadStyle}>Téléphone</th>
-                  <th style={simpleHeadStyle}>Email</th>
-                  <th style={simpleHeadStyle}>CA 2026</th>
-                </tr>
-              </thead>
-              <tbody>
-                {scopedCegeclimAbsents.map((row) => (
-                  <tr key={row.id}>
-                    <td style={simpleCellStyle}>{row.siret || 'NC'}</td>
-                    <td style={simpleCellStyle}>{formatDateFr(row.date_creation_client)}</td>
-                    <td style={simpleCellStyle}>{row.agence_rattachement || 'NC'}</td>
-                    <td style={simpleCellStyle}>{row.code_postal || 'NC'}</td>
-                    <td style={simpleCellStyle}>{row.contact || '—'}</td>
-                    <td style={simpleCellStyle}>{row.telephone || '—'}</td>
-                    <td style={simpleCellStyle}>{row.email || '—'}</td>
-                    <td style={simpleCellStyle}>{row.ca_2026 ?? '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        {showImportsSection && (
+          <section style={sectionCardStyle}>
+            <div style={sectionHeaderRowStyle}>
+              <h2 style={sectionBlockTitleStyle}>Section Imports</h2>
+              <button
+                type="button"
+                onClick={() => setShowImportsSection(false)}
+                style={toolbarButtonStyle}
+              >
+                Réduire
+              </button>
+            </div>
+
+            <section style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div style={captionRowStyle}>
+                <div style={groupCaptionStyle}>Données relatives à la dernière importation du fichier</div>
+              </div>
+              <div style={kpiGridStyle}>
+                <div style={kpiCardStyle}>
+                  <div style={kpiTitleStyle}>Date dernier import</div>
+                  <div style={kpiValueStyle}>
+                    {lastImport?.date_import
+                      ? new Date(lastImport.date_import).toLocaleDateString('fr-FR', {
+                          day: '2-digit',
+                          month: '2-digit',
+                        })
+                      : 'NC'}
+                  </div>
+                </div>
+
+                <div style={kpiCardStyle}>
+                  <div style={kpiTitleStyle}>Nb enreg. insérées dernier import</div>
+                  <div style={kpiValueStyle}>{lastImport?.nb_importees || 0}</div>
+                </div>
+
+                <div style={kpiCardStyle}>
+                  <div style={kpiTitleStyle}>Nb enreg. rejetées dernier import</div>
+                  <div style={kpiValueStyle}>{lastImport?.nb_rejets || 0}</div>
+                </div>
+              </div>
+            </section>
+
+            <section style={importBlocksGridStyle}>
+              <div style={importCardStyle}>
+                <div style={importCardHeaderStyle}>
+                  <h3 style={importCardTitleStyle}>Import automatique via API Sirene</h3>
+                  <div style={importCardSubtitleStyle}>
+                    Prépare les paramètres à stocker en base avant de brancher l’API.
+                  </div>
+                </div>
+
+                <div style={importFormGridStyle}>
+                  
+
+
+                  <div style={formFieldStyle}>
+                    <label style={fieldLabelStyle}>Date création min</label>
+                    <input
+                      type="date"
+                      value={sireneParams.dateCreationMin}
+                      onChange={(e) =>
+                        setSireneParams((prev) => ({ ...prev, dateCreationMin: e.target.value }))
+                      }
+                      style={inputStyleFull}
+                    />
+                  </div>
+
+                  <div style={formFieldStyle}>
+                    <label style={fieldLabelStyle}>Date création max</label>
+                    <input
+                      type="date"
+                      value={sireneParams.dateCreationMax}
+                      onChange={(e) =>
+                        setSireneParams((prev) => ({ ...prev, dateCreationMax: e.target.value }))
+                      }
+                      style={inputStyleFull}
+                    />
+                  </div>
+
+                  <div style={formFieldStyle}>
+                    <label style={fieldLabelStyle}>Date modification min</label>
+                    <input
+                      type="date"
+                      value={sireneParams.dateMajMin}
+                      onChange={(e) =>
+                        setSireneParams((prev) => ({ ...prev, dateMajMin: e.target.value }))
+                      }
+                      style={inputStyleFull}
+                    />
+                  </div>
+
+                  <div style={formFieldStyle}>
+                    <label style={fieldLabelStyle}>Date modification max</label>
+                    <input
+                      type="date"
+                      value={sireneParams.dateMajMax}
+                      onChange={(e) =>
+                        setSireneParams((prev) => ({ ...prev, dateMajMax: e.target.value }))
+                      }
+                      style={inputStyleFull}
+                    />
+                  </div>
+
+                  <div style={formFieldStyle}>
+                    <label style={fieldLabelStyle}>Codes APE</label>
+                    <input
+                      value={sireneParams.codesApe}
+                      onChange={(e) =>
+                        setSireneParams((prev) => ({ ...prev, codesApe: e.target.value }))
+                      }
+                      placeholder="4322A, 4321A, 4120A"
+                      style={inputStyleFull}
+                    />
+                    <div style={fieldHintStyle}>Valeurs séparées par des virgules.</div>
+                  </div>
+
+                </div>
+
+                <div style={importActionsRowStyle}>
+                  <button
+                    type="button"
+                    onClick={() => void saveSireneParams()}
+                    style={primaryButtonStyle}
+                    disabled={savingSireneParams}
+                  >
+                    {savingSireneParams ? 'Enregistrement...' : 'Enregistrer les paramètres'}
+                  </button>
+
+                  <button
+                    type="button"
+                    style={toolbarButtonStyle}
+                    onClick={launchImportSirene}
+                  >
+                    Lancer import API
+                  </button>
+                </div>
+              </div>
+
+              <div style={importCardStyle}>
+                <div style={importCardHeaderStyle}>
+                  <h3 style={importCardTitleStyle}>Import manuel via CSV</h3>
+                  <div style={importCardSubtitleStyle}>
+                    Conserve le fonctionnement actuel pour alimenter la table clients.
+                  </div>
+                </div>
+
+                <label style={uploadWrapStyle}>
+                  <span>Importer un CSV Entreprise France</span>
+
+                  <input
+                    type="file"
+                    accept=".csv,text/csv"
+                    disabled={importing}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0]
+                      if (file) void handleImportCsv(file)
+                      e.currentTarget.value = ''
+                    }}
+                    style={{ display: 'none' }}
+                    id="file-upload"
+                  />
+
+                  <label htmlFor="file-upload" style={primaryButtonStyle}>
+                    {importing ? 'Import...' : 'Choisir un fichier'}
+                  </label>
+                </label>
+
+                <p style={{ margin: 0 }}>
+                  <a
+                    href="https://annuaire-entreprises.data.gouv.fr/export-sirene"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    https://annuaire-entreprises.data.gouv.fr/export-sirene
+                  </a>
+                </p>
+
+                {importStats && (
+                  <div style={{ marginTop: 8, fontSize: 11 }}>
+                    Import terminé • {importStats.total} lignes lues • {importStats.inserted} insertions •{' '}
+                    {importStats.updated} mises à jour • {importStats.rejected} rejets
+                  </div>
+                )}
+              </div>
+            </section>
           </section>
         )}
 
-        <section style={{ display: 'flex', gap: 8 }}>
-          <button
-            onClick={() => setMode('clients')}
-            style={mode === 'clients' ? activeTabStyle : tabStyle}
-          >
-            Clients
-          </button>
-          <button
-            onClick={() => setMode('cegeclim_absents')}
-            style={mode === 'cegeclim_absents' ? activeTabStyle : tabStyle}
-          >
-            Ecart CEGECLIM
-          </button>
-        </section>
-
         {selectedClient && (
           <div style={modalOverlayStyle}>
-            <div style={modalStyle}>
-              <div style={modalHeaderStyle}>
+            <div style={clientModalStyle}>
+              <div style={clientModalHeaderStyle}>
                 <div>
-                  <h3 style={{ margin: 0, fontSize: 22 }}>
+                  <h3 style={clientModalTitleStyle}>
                     {selectedClient.raison_sociale_affichee || 'Entreprise'}
                   </h3>
-                  <p style={{ margin: '6px 0 0 0', fontSize: 14 }}>
+                  <div style={clientModalSubtitleStyle}>
                     SIRET : {selectedClient.siret || 'NC'}
-                  </p>
+                  </div>
                 </div>
-                <button onClick={() => setSelectedClient(null)} style={toolbarButtonStyle}>
-                  Fermer
-                </button>
+
+                <div style={clientHeaderBadgesWrapStyle}>
+                  <span
+                    style={{
+                      ...headerBadgeStyle,
+                      background: getScoreColor(selectedClient.potentiel_score),
+                    }}
+                  >
+                    Score : {selectedClient.potentiel_score ?? 'NC'}
+                  </span>
+
+                  <span
+                    style={{
+                      ...headerBadgeStyle,
+                      background: getCompletenessColor(getCompletenessPercent(selectedClient)),
+                    }}
+                  >
+                    Complétude : {getCompletenessPercent(selectedClient)}%
+                  </span>
+
+                  <span
+                    style={{
+                      ...headerBadgeStyle,
+                      background: getEnrichmentBadge(selectedClient.enrichment_status).bg,
+                      color: '#fff',
+                    }}
+                  >
+                    {getEnrichmentBadge(selectedClient.enrichment_status).label}
+                  </span>
+
+                  <button
+                    onClick={() => {
+                      if (selectedClient.siret) void enrichClientBySiret(selectedClient.siret)
+                    }}
+                    style={primaryButtonStyle}
+                    disabled={
+                      !selectedClient.siret ||
+                      enrichingSirets.includes(selectedClient.siret)
+                    }
+                  >
+                    {selectedClient.siret && enrichingSirets.includes(selectedClient.siret)
+                      ? 'Enrichissement...'
+                      : 'Enrichir la fiche'}
+                  </button>
+
+                  <button onClick={() => setSelectedClient(null)} style={toolbarButtonStyle}>
+                    Fermer
+                  </button>
+                </div>
               </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, padding: 24 }}>
-                <div style={detailBoxStyle}>
-                  <div><b>Adresse :</b> {selectedClient.adresse_complete || 'NC'}</div>
-                  <div><b>Ville :</b> {selectedClient.libelleCommuneEtablissement || 'NC'}</div>
-                  <div><b>Code postal :</b> {selectedClient.codePostalEtablissement || 'NC'}</div>
-                  <div><b>Département :</b> {getClientDepartment(selectedClient) || 'NC'}</div>
-                  <div><b>Date création :</b> {formatDateFr(selectedClient.dateCreationEtablissement)}</div>
-                  <div><b>Ancienneté :</b> {formatAgePrecise(diffDaysFromToday(selectedClient.dateCreationEtablissement))}</div>
-                  <div><b>Téléphone :</b> {selectedClient.telephone || 'NC'}</div>
-                  <div><b>Email :</b> {selectedClient.email || 'NC'}</div>
-                </div>
-
-                <div style={detailBoxStyle}>
-                  <div><b>Code NAF :</b> {selectedClient.activitePrincipaleEtablissement || 'NC'}</div>
-                  <div>
-                    <b>Secteur :</b>{' '}
-                    {selectedClient.naf_libelle_traduit || translateNaf(selectedClient.activitePrincipaleEtablissement)}
+              <div style={clientModalBodyStyle}>
+                <div style={clientBlocksGridStyle}>
+                  <div style={clientBlockStyle}>
+                    <div style={clientBlockTitleStyle}>Identité</div>
+                    <div style={clientBlockContentStyle}>
+                      <div><b>Raison sociale :</b> {selectedClient.raison_sociale_affichee || 'NC'}</div>
+                      <div><b>SIRET :</b> {selectedClient.siret || 'NC'}</div>
+                      <div><b>Code NAF :</b> {selectedClient.activitePrincipaleEtablissement || 'NC'}</div>
+                      <div>
+                        <b>Secteur :</b>{' '}
+                        {selectedClient.naf_libelle_traduit ||
+                          translateNaf(selectedClient.activitePrincipaleEtablissement)}
+                      </div>
+                      <div><b>Date création :</b> {formatDateFr(selectedClient.dateCreationEtablissement)}</div>
+                      <div>
+                        <b>Ancienneté :</b>{' '}
+                        {formatAgePrecise(diffDaysFromToday(selectedClient.dateCreationEtablissement))}
+                      </div>
+                    </div>
                   </div>
-                  <div><b>Effectifs :</b> {selectedClient.trancheEffectifsEtablissement || 'NC'}</div>
-                  <div><b>Présent base CEGECLIM :</b> {selectedClient.present_dans_cegeclim ? 'Oui' : 'Non'}</div>
-                  <div><b>Coordonnée X :</b> {selectedClient.coordonneeLambertAbscisseEtablissement ?? 'NC'}</div>
-                  <div><b>Coordonnée Y :</b> {selectedClient.coordonneeLambertOrdonneeEtablissement ?? 'NC'}</div>
-                  <div><b>Dernier import :</b> {formatDateFr(selectedClient.date_import)}</div>
+
+                  <div style={clientBlockStyle}>
+                    <div style={clientBlockTitleStyle}>Localisation</div>
+                    <div style={clientBlockContentStyle}>
+                      <div><b>Adresse :</b> {selectedClient.adresse_complete || 'NC'}</div>
+                      <div><b>Ville :</b> {selectedClient.libelleCommuneEtablissement || 'NC'}</div>
+                      <div><b>Code postal :</b> {selectedClient.codePostalEtablissement || 'NC'}</div>
+                      <div><b>Département :</b> {getClientDepartment(selectedClient) || 'NC'}</div>
+                      <div><b>Coordonnée X :</b> {selectedClient.coordonneeLambertAbscisseEtablissement ?? 'NC'}</div>
+                      <div><b>Coordonnée Y :</b> {selectedClient.coordonneeLambertOrdonneeEtablissement ?? 'NC'}</div>
+                      {selectedClient.google_maps_url ? (
+                        <div>
+                          <b>Google Maps :</b>{' '}
+                          <a href={selectedClient.google_maps_url} target="_blank" rel="noreferrer">
+                            Ouvrir
+                          </a>
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  <div style={clientBlockStyle}>
+                    <div style={clientBlockTitleStyle}>Contact</div>
+                    <div style={clientBlockContentStyle}>
+                      <div><b>Téléphone :</b> {selectedClient.telephone || 'NC'}</div>
+                      <div><b>Email :</b> {selectedClient.email || 'NC'}</div>
+                      <div><b>Site web :</b> {selectedClient.site_web || 'NC'}</div>
+                      <div><b>Dirigeant :</b> {selectedClient.nom_dirigeant || 'NC'}</div>
+                      <div>
+                        <b>Contactable :</b>{' '}
+                        {selectedClient.telephone || selectedClient.email || selectedClient.contactable
+                          ? 'Oui'
+                          : 'Non'}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={clientBlockStyle}>
+                    <div style={clientBlockTitleStyle}>Business / qualification</div>
+                    <div style={clientBlockContentStyle}>
+                      <div><b>Effectifs SIRENE :</b> {selectedClient.trancheEffectifsEtablissement || 'NC'}</div>
+                      <div><b>Effectif estimé :</b> {selectedClient.effectif_estime ?? 'NC'}</div>
+                      <div><b>CA estimé :</b> {formatCurrency(selectedClient.ca_estime ?? selectedClient.pappers_ca ?? null)}</div>
+                      <div>
+                        <b>RGE :</b>{' '}
+                        {selectedClient.rge == null ? 'NC' : selectedClient.rge ? 'Oui' : 'Non'}
+                      </div>
+                      <div><b>Présent base CEGECLIM :</b> {selectedClient.present_dans_cegeclim ? 'Oui' : 'Non'}</div>
+                      <div>
+                        <b>Score potentiel :</b>{' '}
+                        <span
+                          style={{
+                            ...inlineBadgeStyle,
+                            background: getScoreColor(selectedClient.potentiel_score),
+                          }}
+                        >
+                          {selectedClient.potentiel_score ?? 'NC'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={clientBlockStyle}>
+                    <div style={clientBlockTitleStyle}>Enrichissement API</div>
+                    <div style={clientBlockContentStyle}>
+                      <div>
+                        <b>Statut :</b>{' '}
+                        <span
+                          style={{
+                            ...inlineBadgeStyle,
+                            background: getEnrichmentBadge(selectedClient.enrichment_status).bg,
+                            color: '#fff',
+                          }}
+                        >
+                          {getEnrichmentBadge(selectedClient.enrichment_status).label}
+                        </span>
+                      </div>
+                      <div><b>Dernier enrichissement :</b> {formatDateTimeFr(selectedClient.last_enrichment_at)}</div>
+                      <div><b>Source :</b> {selectedClient.enrichment_source || 'NC'}</div>
+                      <div><b>Erreur :</b> {selectedClient.enrichment_error || 'Aucune'}</div>
+                      <div><b>Note Google :</b> {selectedClient.google_rating ?? 'NC'}</div>
+                      <div><b>Nb avis Google :</b> {selectedClient.google_user_ratings_total ?? 'NC'}</div>
+                    </div>
+                  </div>
+
+                  <div style={clientBlockStyle}>
+                    <div style={clientBlockTitleStyle}>Suivi commercial</div>
+                    <div style={clientBlockContentStyle}>
+                      <div><b>Statut prospect :</b> {selectedClient.prospect_status || 'NC'}</div>
+                      <div><b>Assigné à :</b> {selectedClient.assigned_to || 'NC'}</div>
+                      <div><b>Dernier contact :</b> {formatDateTimeFr(selectedClient.last_contact_at)}</div>
+                      <div><b>Prochaine action :</b> {selectedClient.next_action_label || 'NC'}</div>
+                      <div><b>Date prochaine action :</b> {formatDateTimeFr(selectedClient.next_action_at)}</div>
+                      <div><b>Commentaire :</b> {selectedClient.prospect_comment || 'NC'}</div>
+                      <div><b>Dernier import :</b> {formatDateFr(selectedClient.date_import)}</div>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1810,7 +2779,7 @@ const pageStyle: React.CSSProperties = {
 
 const containerStyle: React.CSSProperties = {
   width: '100%',
-  maxWidth: '1380px',
+  maxWidth: '1480px',
   margin: '0 auto',
   display: 'flex',
   flexDirection: 'column',
@@ -1832,6 +2801,55 @@ const pageTitleStyle: React.CSSProperties = {
 const sectionTitleTextStyle: React.CSSProperties = {
   margin: 0,
   fontSize: '24px',
+  fontWeight: 800,
+}
+
+const topToggleGridStyle: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: '1fr 1fr',
+  gap: '16px',
+}
+
+const sectionToggleStyle: React.CSSProperties = {
+  border: '1px solid #bfc3c9',
+  background: '#fff',
+  borderRadius: '14px',
+  padding: '14px 16px',
+  cursor: 'pointer',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  fontSize: '16px',
+  fontWeight: 800,
+  boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+}
+
+const sectionToggleActiveStyle: React.CSSProperties = {
+  ...sectionToggleStyle,
+  background: '#e9eaec',
+}
+
+const sectionCardStyle: React.CSSProperties = {
+  background: '#ffffff',
+  borderRadius: '18px',
+  border: '1px solid #d6d9de',
+  boxShadow: '0 4px 14px rgba(0,0,0,0.08)',
+  padding: '18px',
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '18px',
+}
+
+const sectionHeaderRowStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: '12px',
+}
+
+const sectionBlockTitleStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: '22px',
   fontWeight: 800,
 }
 
@@ -1887,6 +2905,7 @@ const uploadWrapStyle: React.CSSProperties = {
   background: '#eeeeee',
   padding: '8px 12px',
   fontSize: '16px',
+  flexWrap: 'wrap',
 }
 
 const filtersGridStyle: React.CSSProperties = {
@@ -1919,6 +2938,17 @@ const inputStyle: React.CSSProperties = {
   height: '38px',
   width: '100%',
   maxWidth: '320px',
+  borderRadius: '9px',
+  border: '1px solid #6aa0ff',
+  background: '#fff',
+  padding: '0 14px',
+  fontSize: '14px',
+  boxShadow: '0 1px 3px rgba(0,0,0,0.10)',
+}
+
+const inputStyleFull: React.CSSProperties = {
+  height: '42px',
+  width: '100%',
   borderRadius: '9px',
   border: '1px solid #6aa0ff',
   background: '#fff',
@@ -2049,6 +3079,38 @@ const toolbarButtonStyle: React.CSSProperties = {
   cursor: 'pointer',
 }
 
+const primaryButtonStyle: React.CSSProperties = {
+  border: '1px solid #1d4ed8',
+  background: '#828386',
+  color: '#fff',
+  borderRadius: '4px',
+  padding: '7px 12px',
+  fontSize: '15px',
+  cursor: 'pointer',
+}
+
+const tinyPrimaryButtonStyle: React.CSSProperties = {
+  border: '1px solid #1d4ed8',
+  background: '#2563eb',
+  color: '#fff',
+  borderRadius: '4px',
+  padding: '4px 8px',
+  fontSize: '11px',
+  cursor: 'pointer',
+}
+
+const pillStyle: React.CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  minWidth: '44px',
+  padding: '4px 8px',
+  borderRadius: '999px',
+  color: '#fff',
+  fontWeight: 700,
+  fontSize: '11px',
+}
+
 const listHeaderStyle: React.CSSProperties = {
   cursor: 'pointer',
   textAlign: 'left',
@@ -2150,16 +3212,6 @@ const modalHeaderStyle: React.CSSProperties = {
   justifyContent: 'space-between',
 }
 
-const detailBoxStyle: React.CSSProperties = {
-  background: '#f6f6f6',
-  borderRadius: '16px',
-  padding: '16px',
-  display: 'flex',
-  flexDirection: 'column',
-  gap: '10px',
-  fontSize: '14px',
-}
-
 const preStyle: React.CSSProperties = {
   background: '#f7f7f7',
   padding: '10px',
@@ -2167,4 +3219,181 @@ const preStyle: React.CSSProperties = {
   overflow: 'auto',
   fontSize: '12px',
   maxWidth: '700px',
+}
+
+const clientModalStyle: React.CSSProperties = {
+  width: '100%',
+  maxWidth: '1220px',
+  maxHeight: '92vh',
+  overflow: 'auto',
+  background: '#ffffff',
+  borderRadius: '22px',
+  boxShadow: '0 18px 50px rgba(0,0,0,0.28)',
+}
+
+const clientModalHeaderStyle: React.CSSProperties = {
+  position: 'sticky',
+  top: 0,
+  zIndex: 5,
+  background: '#fff',
+  borderBottom: '1px solid #d9d9d9',
+  padding: '18px 24px',
+  display: 'flex',
+  alignItems: 'flex-start',
+  justifyContent: 'space-between',
+  gap: '16px',
+}
+
+const clientModalTitleStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: '20px',
+  fontWeight: 800,
+  lineHeight: 1.2,
+}
+
+const clientModalSubtitleStyle: React.CSSProperties = {
+  marginTop: '8px',
+  fontSize: '14px',
+  color: '#374151',
+  fontWeight: 600,
+}
+
+const clientHeaderBadgesWrapStyle: React.CSSProperties = {
+  display: 'flex',
+  flexWrap: 'wrap',
+  justifyContent: 'flex-end',
+  alignItems: 'center',
+  gap: '10px',
+}
+
+const headerBadgeStyle: React.CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  minHeight: '38px',
+  padding: '0 14px',
+  borderRadius: '999px',
+  color: '#fff',
+  fontSize: '13px',
+  fontWeight: 800,
+}
+
+const clientModalBodyStyle: React.CSSProperties = {
+  padding: '24px',
+}
+
+const clientBlocksGridStyle: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+  gap: '18px',
+  alignItems: 'start',
+}
+
+const clientBlockStyle: React.CSSProperties = {
+  background: '#f3f4f6',
+  borderRadius: '18px',
+  overflow: 'hidden',
+  minHeight: '250px',
+  border: '1px solid #e5e7eb',
+}
+
+const clientBlockTitleStyle: React.CSSProperties = {
+  padding: '12px 16px',
+  fontSize: '14px',
+  fontWeight: 800,
+  color: '#111827',
+  background: '#e5e7eb',
+  borderBottom: '1px solid #d1d5db',
+}
+
+const clientBlockContentStyle: React.CSSProperties = {
+  padding: '16px',
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '12px',
+  fontSize: '14px',
+  lineHeight: 1.45,
+  color: '#111827',
+}
+
+const inlineBadgeStyle: React.CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  minWidth: '44px',
+  padding: '4px 10px',
+  borderRadius: '999px',
+  color: '#fff',
+  fontWeight: 700,
+  fontSize: '12px',
+}
+
+const importBlocksGridStyle: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: '1fr 1fr',
+  gap: '20px',
+  alignItems: 'start',
+}
+
+const importCardStyle: React.CSSProperties = {
+  background: '#f8f9fb',
+  border: '1px solid #d6d9de',
+  borderRadius: '16px',
+  padding: '18px',
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '16px',
+  minHeight: '100%',
+}
+
+const importCardHeaderStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '6px',
+}
+
+const importCardTitleStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: '18px',
+  fontWeight: 800,
+}
+
+const importCardSubtitleStyle: React.CSSProperties = {
+  fontSize: '13px',
+  color: '#4b5563',
+}
+
+const importFormGridStyle: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: '1fr 1fr',
+  gap: '14px 16px',
+}
+
+const formFieldStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '6px',
+}
+
+const fieldLabelStyle: React.CSSProperties = {
+  fontSize: '13px',
+  fontWeight: 700,
+  color: '#111827',
+}
+
+const fieldHintStyle: React.CSSProperties = {
+  fontSize: '12px',
+  color: '#6b7280',
+}
+
+const importActionsRowStyle: React.CSSProperties = {
+  display: 'flex',
+  flexWrap: 'wrap',
+  gap: '10px',
+}
+
+const fileInputStyle: React.CSSProperties = {
+  fontSize: '14px',
+  padding: '6px',
+  cursor: 'pointer',
 }
