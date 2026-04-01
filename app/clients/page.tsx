@@ -138,7 +138,6 @@ type SortKey =
   | 'telephone'
   | 'email'
   | 'distance'
-  | 'score'
   | 'completeness'
   | 'enrichment'
 
@@ -349,25 +348,15 @@ function getAbsentDepartment(row: CegeclimAbsentRow): string {
 function getCompletenessPercent(row: ClientRow): number {
   const checks = [
     Boolean(row.telephone),
-    Boolean(row.email),
     Boolean(row.site_web),
-    Boolean(row.nom_dirigeant),
-    row.effectif_estime != null || Boolean(row.trancheEffectifsEtablissement),
-    row.ca_estime != null || row.pappers_ca != null,
-    row.rge != null,
-    row.potentiel_score != null,
+    Boolean(row.google_maps_url),
+    row.google_rating != null,
+    row.google_user_ratings_total != null,
   ]
   const filled = checks.filter(Boolean).length
   return Math.round((filled / checks.length) * 100)
 }
 
-function getScoreColor(score: number | null | undefined): string {
-  if (score == null) return '#9ca3af'
-  if (score >= 80) return '#15803d'
-  if (score >= 60) return '#65a30d'
-  if (score >= 40) return '#d97706'
-  return '#b91c1c'
-}
 
 function getCompletenessColor(percent: number): string {
   if (percent >= 80) return '#15803d'
@@ -772,7 +761,7 @@ export default function ClientsPage() {
   const [distanceMax, setDistanceMax] = useState(200)
 
   const [ageSliderMin, setAgeSliderMin] = useState(0)
-  const [ageSliderMax, setAgeSliderMax] = useState(daysToSlider(365 * 13))
+  const [ageSliderMax, setAgeSliderMax] = useState(daysToSlider(365 * 50))
 
   const [sortKey, setSortKey] = useState<SortKey>('designation')
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
@@ -1062,7 +1051,7 @@ export default function ClientsPage() {
       await loadAll()
 
       alert(
-        `Enrichissement terminé.\n` +
+        `Enrichissement Google terminé.\n` +
           `OK : ${okCount}\n` +
           `Partiel : ${partialCount}\n` +
           `Erreur : ${errorCount}`
@@ -1366,10 +1355,6 @@ export default function ClientsPage() {
           av = distanceA ?? 999999
           bv = distanceB ?? 999999
           break
-        case 'score':
-          av = a.potentiel_score ?? -1
-          bv = b.potentiel_score ?? -1
-          break
         case 'completeness':
           av = getCompletenessPercent(a)
           bv = getCompletenessPercent(b)
@@ -1619,63 +1604,15 @@ export default function ClientsPage() {
     }
   }
 
-  function exportExcel() {
-    const exportRows = sortedFilteredClients.map((row) => {
-      const distance = selectedAgenceRow
-        ? distanceKmLambert(
-            row.coordonneeLambertAbscisseEtablissement,
-            row.coordonneeLambertOrdonneeEtablissement,
-            selectedAgenceRow.coord_x_lambert,
-            selectedAgenceRow.coord_y_lambert
-          )
-        : null
-
-      return {
-        Désignation: row.raison_sociale_affichee || 'ND',
-        Siret: row.siret || 'ND',
-        Dépt: getClientDepartment(row) || 'ND',
-        Ville: row.libelleCommuneEtablissement || 'ND',
-        'Code postal': row.codePostalEtablissement || 'ND',
-        'APE/NAF': row.activitePrincipaleEtablissement || 'ND',
-        "Secteur d'activité":
-          row.naf_libelle_traduit || translateNaf(row.activitePrincipaleEtablissement),
-        Création: formatDateFr(row.dateCreationEtablissement),
-        Ancienneté: formatAgePrecise(diffDaysFromToday(row.dateCreationEtablissement)),
-        Tel: row.telephone || '',
-        Mail: row.email || '',
-        Site: row.site_web || '',
-        Dirigeant: row.nom_dirigeant || '',
-        Score: row.potentiel_score ?? '',
-        Complétude: `${getCompletenessPercent(row)} %`,
-        Statut: row.enrichment_status || 'a_faire',
-        Distance: distance != null ? `${distance} km` : '',
-      }
-    })
-
-    const wb = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(exportRows), 'Liste entreprises')
-    XLSX.writeFile(wb, `clients_selection_${new Date().toISOString().slice(0, 10)}.xlsx`)
-  }
-
-  function exportPdf() {
-    const doc = new jsPDF('l', 'mm', 'a4')
-
-    autoTable(doc, {
-      head: [[
-        'Désignation',
-        'Siret',
-        'Dépt.',
-        'Ville',
-        'Code postal',
-        'APE/NAF',
-        "Secteur d'activité",
-        'Création',
-        'Ancienneté',
-        'Score',
-        'Complétude',
-        'Distance',
-      ]],
-      body: sortedFilteredClients.map((row) => {
+  function buildExportRows() {
+    return [...sortedFilteredClients]
+      .sort((a, b) => {
+        const depA = getClientDepartment(a) || 'ZZ'
+        const depB = getClientDepartment(b) || 'ZZ'
+        if (depA !== depB) return depA.localeCompare(depB, 'fr', { numeric: true })
+        return (a.raison_sociale_affichee || '').localeCompare(b.raison_sociale_affichee || '', 'fr')
+      })
+      .map((row) => {
         const distance = selectedAgenceRow
           ? distanceKmLambert(
               row.coordonneeLambertAbscisseEtablissement,
@@ -1685,23 +1622,315 @@ export default function ClientsPage() {
             )
           : null
 
-        return [
-          row.raison_sociale_affichee || 'ND',
-          row.siret || 'ND',
-          getClientDepartment(row) || 'ND',
-          row.libelleCommuneEtablissement || 'ND',
-          row.codePostalEtablissement || 'ND',
-          row.activitePrincipaleEtablissement || 'ND',
-          row.naf_libelle_traduit || translateNaf(row.activitePrincipaleEtablissement),
-          formatDateFr(row.dateCreationEtablissement),
-          formatAgePrecise(diffDaysFromToday(row.dateCreationEtablissement)),
-          row.potentiel_score ?? 'NC',
-          `${getCompletenessPercent(row)} %`,
-          distance != null ? `${distance} km` : '',
-        ]
-      }),
-      styles: { fontSize: 7 },
-      theme: 'grid',
+        return {
+          designation: row.raison_sociale_affichee || 'ND',
+          siret: row.siret || 'ND',
+          presentCegeclim: row.present_dans_cegeclim ? 'OUI' : 'NON',
+          apeNaf: row.activitePrincipaleEtablissement || 'ND',
+          secteur: row.naf_libelle_traduit || translateNaf(row.activitePrincipaleEtablissement),
+          creation: formatDateFr(row.dateCreationEtablissement),
+          departement: getClientDepartment(row) || 'ND',
+          ville: row.libelleCommuneEtablissement || 'ND',
+          codePostal: row.codePostalEtablissement || 'ND',
+          adresse: row.adresse_complete || 'ND',
+          distance: distance != null ? `${distance} km` : '',
+          googleMapsLabel: row.google_maps_url ? 'ouvrir' : '',
+          googleMapsUrl: row.google_maps_url || '',
+          telephone: row.telephone || '',
+          email: row.email || '',
+          site: row.site_web || '',
+          dirigeant: row.nom_dirigeant || '',
+          noteGoogle: row.google_rating != null ? String(row.google_rating) : '',
+          nbNotes: row.google_user_ratings_total != null ? String(row.google_user_ratings_total) : '',
+        }
+      })
+  }
+
+  function exportExcel() {
+    const exportRows = buildExportRows()
+    const aoa: (string | number)[][] = [
+      ['Identité', '', '', '', '', '', 'Localisation', '', '', '', '', '', 'Contact', '', '', '', '', ''],
+      [
+        'Raison sociale',
+        'Siret',
+        'Présent base Cegeclim',
+        'APE/NAF',
+        "Secteur d'activité",
+        'Création',
+        'Dépt',
+        'Ville',
+        'Code postal',
+        'Adresse',
+        'Distance',
+        'Google maps',
+        'Tel',
+        'Mail',
+        'Site',
+        'Dirigeant',
+        'Note Google',
+        'Nb Note',
+      ],
+      ...exportRows.map((row) => [
+        row.designation,
+        row.siret,
+        row.presentCegeclim,
+        row.apeNaf,
+        row.secteur,
+        row.creation,
+        row.departement,
+        row.ville,
+        row.codePostal,
+        row.adresse,
+        row.distance,
+        row.googleMapsLabel,
+        row.telephone,
+        row.email,
+        row.site,
+        row.dirigeant,
+        row.noteGoogle,
+        row.nbNotes,
+      ]),
+    ]
+
+    const ws = XLSX.utils.aoa_to_sheet(aoa)
+    ws['!merges'] = [
+      XLSX.utils.decode_range('A1:F1'),
+      XLSX.utils.decode_range('G1:L1'),
+      XLSX.utils.decode_range('M1:R1'),
+    ]
+    ws['!cols'] = [
+      { wch: 23 },
+      { wch: 16 },
+      { wch: 12 },
+      { wch: 10 },
+      { wch: 18 },
+      { wch: 11 },
+      { wch: 6 },
+      { wch: 20 },
+      { wch: 11 },
+      { wch: 28 },
+      { wch: 10 },
+      { wch: 12 },
+      { wch: 16 },
+      { wch: 24 },
+      { wch: 26 },
+      { wch: 18 },
+      { wch: 10 },
+      { wch: 9 },
+    ]
+    ws['!autofilter'] = { ref: 'A2:R2' }
+    ws['!freeze'] = { xSplit: 0, ySplit: 2, topLeftCell: 'A3', activePane: 'bottomLeft', state: 'frozen' }
+    ws['!rows'] = aoa.map((_, index) => ({ hpt: index < 2 ? 22 : 18 }))
+    ws['!pageMargins'] = { left: 0.7, right: 0.7, top: 0.75, bottom: 0.75, header: 0.3, footer: 0.3 }
+    ws['!pageSetup'] = {
+      orientation: 'landscape',
+      paperSize: 9,
+      fitToWidth: 1,
+      fitToHeight: 0,
+      scale: 53,
+    }
+
+    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:R2')
+    for (let rowIndex = 2; rowIndex <= range.e.r; rowIndex += 1) {
+      const excelRow = rowIndex + 1
+      const linkCellRef = `L${excelRow}`
+      const siteCellRef = `O${excelRow}`
+      const googleUrl = exportRows[rowIndex - 2]?.googleMapsUrl
+      const siteUrl = exportRows[rowIndex - 2]?.site
+
+      if (googleUrl) {
+        ws[linkCellRef] = {
+          t: 's',
+          v: 'ouvrir',
+          l: { Target: googleUrl, Tooltip: 'Ouvrir dans Google Maps' },
+          s: { font: { color: { rgb: '0563C1' }, underline: true } },
+        }
+      }
+
+      if (siteUrl) {
+        ws[siteCellRef] = {
+          t: 's',
+          v: siteUrl,
+          l: { Target: siteUrl, Tooltip: 'Ouvrir le site web' },
+          s: { font: { color: { rgb: '0563C1' }, underline: true } },
+        }
+      }
+    }
+
+    const departmentBreaks: number[] = []
+    let previousDepartment = ''
+    exportRows.forEach((row, index) => {
+      const currentRowNumber = index + 3
+      if (index > 0 && row.departement !== previousDepartment) departmentBreaks.push(currentRowNumber - 1)
+      previousDepartment = row.departement
+    })
+    if (departmentBreaks.length > 0) {
+      ;(ws as any)['!rowBreaks'] = departmentBreaks.map((id) => ({ id, man: 1 }))
+    }
+
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, 'Liste entreprises')
+    if (!wb.Workbook) wb.Workbook = { Names: [] }
+    if (!wb.Workbook.Names) wb.Workbook.Names = []
+    wb.Workbook.Names.push({ Sheet: 0, Name: '_xlnm.Print_Titles', Ref: "'Liste entreprises'!$1:$2" })
+    wb.Workbook.Names.push({ Sheet: 0, Name: '_xlnm.Print_Area', Ref: `'Liste entreprises'!$A$1:$R$${exportRows.length + 2}` })
+
+    XLSX.writeFile(wb, `clients_selection_${new Date().toISOString().slice(0, 10)}.xlsx`)
+  }
+
+  function exportPdf() {
+    const doc = new jsPDF('landscape', 'mm', 'a4')
+    const exportRows = buildExportRows()
+    const groupedRows = exportRows.reduce<Record<string, typeof exportRows>>((acc, row) => {
+      const key = row.departement || 'ND'
+      if (!acc[key]) acc[key] = []
+      acc[key].push(row)
+      return acc
+    }, {})
+
+    const departments = Object.keys(groupedRows).sort((a, b) => a.localeCompare(b, 'fr', { numeric: true }))
+    const head = [
+      [
+        { content: 'Identité', colSpan: 6, styles: { halign: 'center', fillColor: [217, 217, 217], textColor: 0 } },
+        { content: 'Localisation', colSpan: 6, styles: { halign: 'center', fillColor: [191, 222, 185], textColor: 0 } },
+        { content: 'Contact', colSpan: 6, styles: { halign: 'center', fillColor: [180, 198, 231], textColor: 0 } },
+      ],
+      [
+        'Raison sociale',
+        'Siret',
+        'Présent base Cegeclim',
+        'APE/NAF',
+        "Secteur d'activité",
+        'Création',
+        'Dépt',
+        'Ville',
+        'Code postal',
+        'Adresse',
+        'Distance',
+        'Google maps',
+        'Tel',
+        'Mail',
+        'Site',
+        'Dirigeant',
+        'Note Google',
+        'Nb Note',
+      ],
+    ]
+
+    const columnStyles = {
+      0: { cellWidth: 28 },
+      1: { cellWidth: 20 },
+      2: { cellWidth: 13, halign: 'center' as const },
+      3: { cellWidth: 12, halign: 'center' as const },
+      4: { cellWidth: 20 },
+      5: { cellWidth: 13, halign: 'center' as const },
+      6: { cellWidth: 8, halign: 'center' as const },
+      7: { cellWidth: 19 },
+      8: { cellWidth: 12, halign: 'center' as const },
+      9: { cellWidth: 28 },
+      10: { cellWidth: 11, halign: 'center' as const },
+      11: { cellWidth: 12, halign: 'center' as const },
+      12: { cellWidth: 15 },
+      13: { cellWidth: 21 },
+      14: { cellWidth: 20 },
+      15: { cellWidth: 17 },
+      16: { cellWidth: 10, halign: 'center' as const },
+      17: { cellWidth: 9, halign: 'center' as const },
+    }
+
+    departments.forEach((department, departmentIndex) => {
+      if (departmentIndex > 0) doc.addPage('a4', 'landscape')
+      doc.setFont('helvetica', 'bold')
+      doc.setFontSize(11)
+      doc.text(`Département ${department}`, 8, 10)
+
+      autoTable(doc, {
+        startY: 14,
+        head,
+        body: groupedRows[department].map((row) => [
+          row.designation,
+          row.siret,
+          row.presentCegeclim,
+          row.apeNaf,
+          row.secteur,
+          row.creation,
+          row.departement,
+          row.ville,
+          row.codePostal,
+          row.adresse,
+          row.distance,
+          row.googleMapsLabel,
+          row.telephone,
+          row.email,
+          row.site,
+          row.dirigeant,
+          row.noteGoogle,
+          row.nbNotes,
+        ]),
+        theme: 'grid',
+        margin: { top: 14, right: 6, bottom: 8, left: 6 },
+        styles: {
+          fontSize: 6.3,
+          cellPadding: 1.3,
+          lineColor: [160, 160, 160],
+          lineWidth: 0.1,
+          overflow: 'linebreak',
+          valign: 'middle',
+          textColor: 20,
+        },
+        headStyles: {
+          fillColor: [242, 242, 242],
+          textColor: 20,
+          fontStyle: 'bold',
+          halign: 'center',
+          valign: 'middle',
+          lineColor: [120, 120, 120],
+          lineWidth: 0.15,
+        },
+        bodyStyles: { valign: 'middle' },
+        columnStyles,
+        rowPageBreak: 'avoid',
+        didParseCell: (data) => {
+          if (data.section === 'head' && data.row.index === 1) {
+            if (data.column.index <= 5) data.cell.styles.fillColor = [217, 217, 217]
+            else if (data.column.index <= 11) data.cell.styles.fillColor = [191, 222, 185]
+            else data.cell.styles.fillColor = [180, 198, 231]
+            data.cell.styles.textColor = 0
+          }
+        },
+        didDrawCell: (data) => {
+          if (data.section !== 'body') return
+          const row = groupedRows[department][data.row.index]
+          if (!row) return
+
+          if (data.column.index === 11 && row.googleMapsUrl) {
+            doc.setTextColor(5, 99, 193)
+            doc.textWithLink('ouvrir', data.cell.x + 1.2, data.cell.y + data.cell.height / 2 + 1.6, {
+              url: row.googleMapsUrl,
+            })
+            doc.setTextColor(20, 20, 20)
+          }
+
+          if (data.column.index === 14 && row.site) {
+            const displaySite = row.site.length > 28 ? `${row.site.slice(0, 28)}...` : row.site
+            doc.setTextColor(5, 99, 193)
+            doc.textWithLink(displaySite, data.cell.x + 1.2, data.cell.y + data.cell.height / 2 + 1.6, {
+              url: row.site,
+            })
+            doc.setTextColor(20, 20, 20)
+          }
+        },
+        didDrawPage: () => {
+          doc.setFontSize(8)
+          doc.setTextColor(90)
+          doc.text(
+            `Extraction Clients - ${new Date().toLocaleDateString('fr-FR')} - Page ${doc.getNumberOfPages()}`,
+            doc.internal.pageSize.getWidth() - 8,
+            doc.internal.pageSize.getHeight() - 4,
+            { align: 'right' }
+          )
+        },
+      })
     })
 
     doc.save(`clients_selection_${new Date().toISOString().slice(0, 10)}.pdf`)
@@ -1722,22 +1951,6 @@ export default function ClientsPage() {
   const totalSelectedNaf = Array.from(
     new Set(sortedFilteredClients.map((r) => r.activitePrincipaleEtablissement).filter(Boolean))
   ).length
-
-  const avgCompleteness =
-    sortedFilteredClients.length === 0
-      ? 0
-      : Math.round(
-          sortedFilteredClients.reduce((sum, row) => sum + getCompletenessPercent(row), 0) /
-            sortedFilteredClients.length
-        )
-
-  const avgScore =
-    sortedFilteredClients.length === 0
-      ? 0
-      : Math.round(
-          sortedFilteredClients.reduce((sum, row) => sum + (row.potentiel_score || 0), 0) /
-            sortedFilteredClients.length
-        )
 
   const enrichableSelection = sortedFilteredClients.filter((row) => {
     const completeness = getCompletenessPercent(row)
@@ -1841,28 +2054,6 @@ export default function ClientsPage() {
                   <div style={kpiCardStyle}>
                     <div style={kpiTitleStyle}>Nb de code APE différent</div>
                     <div style={kpiValueStyle}>{totalSelectedNaf}</div>
-                  </div>
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <div style={captionRowStyle}>
-                  <div style={groupCaptionStyle}>Prospection / enrichissement</div>
-                </div>
-                <div style={kpiGridStyle}>
-                  <div style={kpiCardStyle}>
-                    <div style={kpiTitleStyle}>Complétude moyenne</div>
-                    <div style={kpiValueStyle}>{avgCompleteness}%</div>
-                  </div>
-
-                  <div style={kpiCardStyle}>
-                    <div style={kpiTitleStyle}>Score potentiel moyen</div>
-                    <div style={kpiValueStyle}>{avgScore}</div>
-                  </div>
-
-                  <div style={kpiCardStyle}>
-                    <div style={kpiTitleStyle}>Fiches à enrichir</div>
-                    <div style={kpiValueStyle}>{enrichableSelection.length}</div>
                   </div>
                 </div>
               </div>
@@ -2129,8 +2320,8 @@ export default function ClientsPage() {
                       disabled={batchEnriching || enrichableSelection.length === 0}
                     >
                       {batchEnriching
-                        ? 'Enrichissement en cours...'
-                        : `Enrichir la sélection (${Math.min(enrichableSelection.length, MAX_BATCH_ENRICH)})`}
+                        ? 'Enrichissement Google en cours...'
+                        : `Enrichir via Google (${Math.min(enrichableSelection.length, MAX_BATCH_ENRICH)})`}
                     </button>
                     <button onClick={() => setShowRejects(true)} style={toolbarButtonStyle}>
                       Voir les rejets ({rejects.length})
@@ -2191,9 +2382,6 @@ export default function ClientsPage() {
                           <th onClick={() => toggleSort('email')} style={{ ...listHeaderStyle, width: 70 }}>
                             Mail<SortIndicator active={sortKey === 'email'} direction={sortDirection} />
                           </th>
-                          <th onClick={() => toggleSort('score')} style={{ ...listHeaderStyle, width: 75 }}>
-                            Score<SortIndicator active={sortKey === 'score'} direction={sortDirection} />
-                          </th>
                           <th onClick={() => toggleSort('completeness')} style={{ ...listHeaderStyle, width: 95 }}>
                             Complétude<SortIndicator active={sortKey === 'completeness'} direction={sortDirection} />
                           </th>
@@ -2218,7 +2406,6 @@ export default function ClientsPage() {
                               )
                             : null
                           const completeness = getCompletenessPercent(row)
-                          const scoreBadgeColor = getScoreColor(row.potentiel_score)
                           const completenessColor = getCompletenessColor(completeness)
                           const enrichBadge = getEnrichmentBadge(row.enrichment_status)
                           const siret = row.siret || ''
@@ -2240,11 +2427,6 @@ export default function ClientsPage() {
                               <td style={listCellStyle}>{formatAgePrecise(diffDaysFromToday(row.dateCreationEtablissement))}</td>
                               <td style={listCellStyle}>{row.telephone || '—'}</td>
                               <td style={listCellStyle}>{row.email || '—'}</td>
-                              <td style={listCellStyle}>
-                                <span style={{ ...pillStyle, background: scoreBadgeColor }}>
-                                  {row.potentiel_score ?? 'NC'}
-                                </span>
-                              </td>
                               <td style={listCellStyle}>
                                 <span style={{ ...pillStyle, background: completenessColor }}>
                                   {completeness}%
@@ -2554,14 +2736,6 @@ export default function ClientsPage() {
                 </div>
 
                 <div style={clientHeaderBadgesWrapStyle}>
-                  <span
-                    style={{
-                      ...headerBadgeStyle,
-                      background: getScoreColor(selectedClient.potentiel_score),
-                    }}
-                  >
-                    Score : {selectedClient.potentiel_score ?? 'NC'}
-                  </span>
 
                   <span
                     style={{
@@ -2661,32 +2835,16 @@ export default function ClientsPage() {
                   </div>
 
                   <div style={clientBlockStyle}>
-                    <div style={clientBlockTitleStyle}>Business / qualification</div>
+                    <div style={clientBlockTitleStyle}>Données SIRENE</div>
                     <div style={clientBlockContentStyle}>
                       <div><b>Effectifs SIRENE :</b> {selectedClient.trancheEffectifsEtablissement || 'NC'}</div>
                       <div><b>Effectif estimé :</b> {selectedClient.effectif_estime ?? 'NC'}</div>
-                      <div><b>CA estimé :</b> {formatCurrency(selectedClient.ca_estime ?? selectedClient.pappers_ca ?? null)}</div>
-                      <div>
-                        <b>RGE :</b>{' '}
-                        {selectedClient.rge == null ? 'NC' : selectedClient.rge ? 'Oui' : 'Non'}
-                      </div>
                       <div><b>Présent base CEGECLIM :</b> {selectedClient.present_dans_cegeclim ? 'Oui' : 'Non'}</div>
-                      <div>
-                        <b>Score potentiel :</b>{' '}
-                        <span
-                          style={{
-                            ...inlineBadgeStyle,
-                            background: getScoreColor(selectedClient.potentiel_score),
-                          }}
-                        >
-                          {selectedClient.potentiel_score ?? 'NC'}
-                        </span>
-                      </div>
                     </div>
                   </div>
 
                   <div style={clientBlockStyle}>
-                    <div style={clientBlockTitleStyle}>Enrichissement API</div>
+                    <div style={clientBlockTitleStyle}>Enrichissement Google</div>
                     <div style={clientBlockContentStyle}>
                       <div>
                         <b>Statut :</b>{' '}
@@ -2701,7 +2859,7 @@ export default function ClientsPage() {
                         </span>
                       </div>
                       <div><b>Dernier enrichissement :</b> {formatDateTimeFr(selectedClient.last_enrichment_at)}</div>
-                      <div><b>Source :</b> {selectedClient.enrichment_source || 'NC'}</div>
+                      <div><b>Source Google :</b> {selectedClient.enrichment_source || 'NC'}</div>
                       <div><b>Erreur :</b> {selectedClient.enrichment_error || 'Aucune'}</div>
                       <div><b>Note Google :</b> {selectedClient.google_rating ?? 'NC'}</div>
                       <div><b>Nb avis Google :</b> {selectedClient.google_user_ratings_total ?? 'NC'}</div>
