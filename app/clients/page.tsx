@@ -1788,12 +1788,21 @@ export default function ClientsPage() {
       return acc
     }, {})
 
+    const COLOR_IDENTITY: [number, number, number] = [217, 217, 217]
+    const COLOR_LOCATION: [number, number, number] = [191, 222, 185]
+    const COLOR_CONTACT: [number, number, number] = [180, 198, 231]
+    const COLOR_HEAD_DEFAULT: [number, number, number] = [242, 242, 242]
+    const COLOR_GRID: [number, number, number] = [160, 160, 160]
+    const COLOR_HEAD_GRID: [number, number, number] = [120, 120, 120]
+    const COLOR_LINK: [number, number, number] = [5, 99, 193]
+    const COLOR_TEXT: [number, number, number] = [20, 20, 20]
+
     const departments = Object.keys(groupedRows).sort((a, b) => a.localeCompare(b, 'fr', { numeric: true }))
     const head = [
       [
-        { content: 'Identité', colSpan: 6, styles: { halign: 'center', fillColor: [217, 217, 217], textColor: 0 } },
-        { content: 'Localisation', colSpan: 6, styles: { halign: 'center', fillColor: [191, 222, 185], textColor: 0 } },
-        { content: 'Contact', colSpan: 6, styles: { halign: 'center', fillColor: [180, 198, 231], textColor: 0 } },
+        { content: 'Identité', colSpan: 6, styles: { halign: 'center', fillColor: COLOR_IDENTITY, textColor: 0 } },
+        { content: 'Localisation', colSpan: 6, styles: { halign: 'center', fillColor: COLOR_LOCATION, textColor: 0 } },
+        { content: 'Contact', colSpan: 6, styles: { halign: 'center', fillColor: COLOR_CONTACT, textColor: 0 } },
       ],
       [
         'Raison sociale',
@@ -1818,24 +1827,24 @@ export default function ClientsPage() {
     ]
 
     const columnStyles = {
-      0: { cellWidth: 28 },
-      1: { cellWidth: 20 },
-      2: { cellWidth: 13, halign: 'center' as const },
-      3: { cellWidth: 12, halign: 'center' as const },
-      4: { cellWidth: 20 },
-      5: { cellWidth: 13, halign: 'center' as const },
-      6: { cellWidth: 8, halign: 'center' as const },
-      7: { cellWidth: 19 },
-      8: { cellWidth: 12, halign: 'center' as const },
-      9: { cellWidth: 28 },
-      10: { cellWidth: 11, halign: 'center' as const },
-      11: { cellWidth: 12, halign: 'center' as const },
-      12: { cellWidth: 15 },
-      13: { cellWidth: 21 },
-      14: { cellWidth: 20 },
-      15: { cellWidth: 17 },
-      16: { cellWidth: 10, halign: 'center' as const },
-      17: { cellWidth: 9, halign: 'center' as const },
+      0: { cellWidth: 26 },
+      1: { cellWidth: 18 },
+      2: { cellWidth: 11, halign: 'center' as const },
+      3: { cellWidth: 10, halign: 'center' as const },
+      4: { cellWidth: 16 },
+      5: { cellWidth: 16, halign: 'center' as const, overflow: 'hidden' as const },
+      6: { cellWidth: 7, halign: 'center' as const },
+      7: { cellWidth: 17 },
+      8: { cellWidth: 10, halign: 'center' as const },
+      9: { cellWidth: 25 },
+      10: { cellWidth: 9, halign: 'center' as const },
+      11: { cellWidth: 10, halign: 'center' as const },
+      12: { cellWidth: 18, overflow: 'hidden' as const },
+      13: { cellWidth: 18 },
+      14: { cellWidth: 14, halign: 'center' as const },
+      15: { cellWidth: 14 },
+      16: { cellWidth: 9, halign: 'center' as const },
+      17: { cellWidth: 7, halign: 'center' as const },
     }
 
     departments.forEach((department, departmentIndex) => {
@@ -1859,10 +1868,10 @@ export default function ClientsPage() {
           row.codePostal,
           row.adresse,
           row.distance,
-          row.googleMapsLabel,
+          '',
           row.telephone,
           row.email,
-          row.site,
+          '',
           row.dirigeant,
           row.noteGoogle,
           row.nbNotes,
@@ -1870,21 +1879,21 @@ export default function ClientsPage() {
         theme: 'grid',
         margin: { top: 14, right: 6, bottom: 8, left: 6 },
         styles: {
-          fontSize: 6.3,
-          cellPadding: 1.3,
-          lineColor: [160, 160, 160],
+          fontSize: 5.6,
+          cellPadding: 1.15,
+          lineColor: COLOR_GRID,
           lineWidth: 0.1,
           overflow: 'linebreak',
           valign: 'middle',
           textColor: 20,
         },
         headStyles: {
-          fillColor: [242, 242, 242],
+          fillColor: COLOR_HEAD_DEFAULT,
           textColor: 20,
           fontStyle: 'bold',
           halign: 'center',
           valign: 'middle',
-          lineColor: [120, 120, 120],
+          lineColor: COLOR_HEAD_GRID,
           lineWidth: 0.15,
         },
         bodyStyles: { valign: 'middle' },
@@ -1892,10 +1901,19 @@ export default function ClientsPage() {
         rowPageBreak: 'avoid',
         didParseCell: (data) => {
           if (data.section === 'head' && data.row.index === 1) {
-            if (data.column.index <= 5) data.cell.styles.fillColor = [217, 217, 217]
-            else if (data.column.index <= 11) data.cell.styles.fillColor = [191, 222, 185]
-            else data.cell.styles.fillColor = [180, 198, 231]
+            if (data.column.index <= 5) data.cell.styles.fillColor = COLOR_IDENTITY
+            else if (data.column.index <= 11) data.cell.styles.fillColor = COLOR_LOCATION
+            else data.cell.styles.fillColor = COLOR_CONTACT
             data.cell.styles.textColor = 0
+          }
+
+          if (data.section === 'body') {
+            if (data.column.index === 11 || data.column.index === 14) {
+              data.cell.text = ['']
+            }
+            if (data.column.index === 5 || data.column.index === 12) {
+              data.cell.styles.overflow = 'hidden'
+            }
           }
         },
         didDrawCell: (data) => {
@@ -1904,20 +1922,21 @@ export default function ClientsPage() {
           if (!row) return
 
           if (data.column.index === 11 && row.googleMapsUrl) {
-            doc.setTextColor(5, 99, 193)
-            doc.textWithLink('ouvrir', data.cell.x + 1.2, data.cell.y + data.cell.height / 2 + 1.6, {
+            doc.setFontSize(5.6)
+            doc.setTextColor(...COLOR_LINK)
+            doc.textWithLink('ouvrir', data.cell.x + 1.1, data.cell.y + data.cell.height / 2 + 1.3, {
               url: row.googleMapsUrl,
             })
-            doc.setTextColor(20, 20, 20)
+            doc.setTextColor(...COLOR_TEXT)
           }
 
           if (data.column.index === 14 && row.site) {
-            const displaySite = row.site.length > 28 ? `${row.site.slice(0, 28)}...` : row.site
-            doc.setTextColor(5, 99, 193)
-            doc.textWithLink(displaySite, data.cell.x + 1.2, data.cell.y + data.cell.height / 2 + 1.6, {
+            doc.setFontSize(5.6)
+            doc.setTextColor(...COLOR_LINK)
+            doc.textWithLink('ouvrir', data.cell.x + 1.1, data.cell.y + data.cell.height / 2 + 1.3, {
               url: row.site,
             })
-            doc.setTextColor(20, 20, 20)
+            doc.setTextColor(...COLOR_TEXT)
           }
         },
         didDrawPage: () => {
@@ -1929,6 +1948,7 @@ export default function ClientsPage() {
             doc.internal.pageSize.getHeight() - 4,
             { align: 'right' }
           )
+          doc.setTextColor(...COLOR_TEXT)
         },
       })
     })
