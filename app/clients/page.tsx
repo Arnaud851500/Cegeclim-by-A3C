@@ -1799,32 +1799,47 @@ export default function ClientsPage() {
 
     const departments = Object.keys(groupedRows).sort((a, b) => a.localeCompare(b, 'fr', { numeric: true }))
     const head = [
-      [
-        { content: 'Identité', colSpan: 6, styles: { halign: 'center', fillColor: COLOR_IDENTITY, textColor: 0 } },
-        { content: 'Localisation', colSpan: 6, styles: { halign: 'center', fillColor: COLOR_LOCATION, textColor: 0 } },
-        { content: 'Contact', colSpan: 6, styles: { halign: 'center', fillColor: COLOR_CONTACT, textColor: 0 } },
-      ],
-      [
-        'Raison sociale',
-        'Siret',
-        'Présent base Cegeclim',
-        'APE/NAF',
-        "Secteur d'activité",
-        'Création',
-        'Dépt',
-        'Ville',
-        'Code postal',
-        'Adresse',
-        'Distance',
-        'Google maps',
-        'Tel',
-        'Mail',
-        'Site',
-        'Dirigeant',
-        'Note Google',
-        'Nb Note',
-      ],
-    ]
+  [
+    'Identité',
+    '',
+    '',
+    '',
+    '',
+    '',
+    'Localisation',
+    '',
+    '',
+    '',
+    '',
+    '',
+    'Contact',
+    '',
+    '',
+    '',
+    '',
+    '',
+  ],
+  [
+    'Raison sociale',
+    'Siret',
+    'Présent base Cegeclim',
+    'APE/NAF',
+    "Secteur d'activité",
+    'Création',
+    'Dépt',
+    'Ville',
+    'Code postal',
+    'Adresse',
+    'Distance',
+    'Google maps',
+    'Tel',
+    'Mail',
+    'Site',
+    'Dirigeant',
+    'Note Google',
+    'Nb Note',
+  ],
+] as const
 
     const columnStyles = {
       0: { cellWidth: 26 },
@@ -1900,22 +1915,45 @@ export default function ClientsPage() {
         columnStyles,
         rowPageBreak: 'avoid',
         didParseCell: (data) => {
-          if (data.section === 'head' && data.row.index === 1) {
-            if (data.column.index <= 5) data.cell.styles.fillColor = COLOR_IDENTITY
-            else if (data.column.index <= 11) data.cell.styles.fillColor = COLOR_LOCATION
-            else data.cell.styles.fillColor = COLOR_CONTACT
-            data.cell.styles.textColor = 0
-          }
+  if (data.section === 'head') {
+    if (data.row.index === 0) {
+      if (data.column.index <= 5) data.cell.styles.fillColor = [217, 217, 217]
+      else if (data.column.index <= 11) data.cell.styles.fillColor = [191, 222, 185]
+      else data.cell.styles.fillColor = [180, 198, 231]
 
-          if (data.section === 'body') {
-            if (data.column.index === 11 || data.column.index === 14) {
-              data.cell.text = ['']
-            }
-            if (data.column.index === 5 || data.column.index === 12) {
-              data.cell.styles.overflow = 'hidden'
-            }
-          }
-        },
+      data.cell.styles.textColor = 0
+      data.cell.styles.halign = 'center'
+      data.cell.styles.fontStyle = 'bold'
+
+      if (data.column.index === 0) data.cell.colSpan = 6
+      if (data.column.index === 6) data.cell.colSpan = 6
+      if (data.column.index === 12) data.cell.colSpan = 6
+
+      if (![0, 6, 12].includes(data.column.index)) {
+        data.cell.text = ['']
+      }
+    }
+
+    if (data.row.index === 1) {
+      if (data.column.index <= 5) data.cell.styles.fillColor = [217, 217, 217]
+      else if (data.column.index <= 11) data.cell.styles.fillColor = [191, 222, 185]
+      else data.cell.styles.fillColor = [180, 198, 231]
+
+      data.cell.styles.textColor = 0
+      data.cell.styles.halign = 'center'
+      data.cell.styles.fontStyle = 'bold'
+    }
+  }
+
+  if (data.section === 'body') {
+    if (data.column.index === 5 || data.column.index === 12) {
+      data.cell.styles.overflow = 'visible'
+    }
+    if (data.column.index === 11 || data.column.index === 14) {
+      data.cell.styles.textColor = [5, 99, 193]
+    }
+  }
+},
         didDrawCell: (data) => {
           if (data.section !== 'body') return
           const row = groupedRows[department][data.row.index]
