@@ -306,6 +306,11 @@ function formatCurrency(value: number | null | undefined): string {
     maximumFractionDigits: 0,
   }).format(Number(value))
 }
+function truncateText(value: string | null | undefined, max = 25): string {
+  const text = String(value || '').trim()
+  if (!text) return 'ND'
+  return text.length > max ? text.slice(0, max) + '…' : text
+}
 
 function chunkArray<T>(arr: T[], size: number): T[][] {
   const out: T[][] = []
@@ -2560,7 +2565,23 @@ export default function ClientsPage() {
 
                   <section style={sectionTitleStyle}>
                     <div>
-                      <h2 style={sectionTitleTextStyle}>Liste des entreprises</h2>
+                      <h2 style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: 20, fontWeight: 600 }}>
+  <span>Liste des entreprises</span>
+
+  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: '#555' }}>
+    <span
+      style={{
+        color: '#facc15',
+        fontSize: 14,
+        lineHeight: 1,
+        textShadow: '0 0 1px #a16207',
+      }}
+    >
+      ★
+    </span>
+    <span>Clients CEGECLIM</span>
+  </span>
+</h2>
                       <div style={{ marginTop: 6, fontSize: 15 }}>
                         {sortedFilteredClients.length} entreprise(s) affichées
                       </div>
@@ -2652,7 +2673,27 @@ export default function ClientsPage() {
                                 cursor: 'pointer',
                               }}
                             >
-                              <td style={listCellStyle}>{row.raison_sociale_affichee || 'ND'}</td>
+                              <td style={listCellStyle}>
+  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+    {isPresentInCegeclim ? (
+      <span
+        title="Client présent dans CEGECLIM"
+        style={{
+          color: '#facc15',
+          fontSize: 14,
+          lineHeight: 1,
+          textShadow: '0 0 1px #a16207',
+        }}
+      >
+        ★
+      </span>
+    ) : null}
+
+    <span title={row.raison_sociale_affichee || ''}>
+      {truncateText(row.raison_sociale_affichee, 25)}
+    </span>
+  </span>
+</td>
                               <td style={listCellStyle}>{row.siret || 'ND'}</td>
                               <td style={listCellStyle}>{getClientDepartment(row) || 'ND'}</td>
                               <td style={listCellStyle}>{row.libelleCommuneEtablissement || 'ND'}</td>
