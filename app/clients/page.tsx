@@ -1798,7 +1798,7 @@ export default function ClientsPage() {
     const COLOR_TEXT: [number, number, number] = [20, 20, 20]
 
     const departments = Object.keys(groupedRows).sort((a, b) => a.localeCompare(b, 'fr', { numeric: true }))
-    const head = [
+    const head: string[][] = [
   [
     'Identité',
     '',
@@ -1839,7 +1839,7 @@ export default function ClientsPage() {
     'Note Google',
     'Nb Note',
   ],
-] as const
+]
 
     const columnStyles = {
       0: { cellWidth: 26 },
