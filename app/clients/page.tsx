@@ -37,7 +37,7 @@ type ClientRow = {
   google_maps_url: string | null
   google_rating: number | null
   google_user_ratings_total: number | null
-  present_dans_cegeclim: boolean | null
+  present_dans_cegeclim: string | null
   contactable: boolean | null
   adresse_complete: string | null
   trancheEffectifsEtablissement: string | null
@@ -60,6 +60,15 @@ type CegeclimAbsentRow = {
   telephone: string | null
   email: string | null
   ca_2026: number | null
+}
+
+type CegeclimClientRow = {
+  id: string
+  siret: string | null
+  numero_client_sage: string | null
+  cp_sage: string | null
+  agence: string | null
+  designation_commerciale: string | null
 }
 
 type ImportRow = {
@@ -345,6 +354,15 @@ function getAbsentDepartment(row: CegeclimAbsentRow): string {
   return getDepartmentFromPostalCode(row.code_postal) || ''
 }
 
+function getCegeclimDepartment(row: CegeclimClientRow): string {
+  return getDepartmentFromPostalCode(row.cp_sage) || ''
+}
+
+function hasCegeclimMatch(value: string | null | undefined): boolean {
+  const normalized = String(value ?? '').trim().toLowerCase()
+  return Boolean(normalized) && normalized !== 'non' && normalized !== 'false' && normalized !== '0'
+}
+
 function getCompletenessPercent(row: ClientRow): number {
   const checks = [
     Boolean(row.telephone),
@@ -520,6 +538,15 @@ async function fetchClientsInitialBatch(): Promise<{ rows: ClientRow[]; totalCou
   }
 }
 
+async function fetchCegeclimClientsRows(): Promise<CegeclimClientRow[]> {
+  const { data, error } = await supabase
+    .from('clients_cegeclim')
+    .select('id, siret, numero_client_sage, cp_sage, agence, designation_commerciale')
+
+  if (error) throw error
+  return (data || []) as CegeclimClientRow[]
+}
+
 async function fetchCegeclimAbsentsRows(): Promise<CegeclimAbsentRow[]> {
   const { data, error } = await supabase
     .from('vw_clients_cegeclim_absents_clients')
@@ -591,6 +618,17 @@ async function fetchClientBySiret(siret: string): Promise<ClientRow | null> {
 
   if (error || !data) return null
   return data as ClientRow
+}
+
+async function syncClientsCegeclimPresence(rows: Array<{ id: string; present_dans_cegeclim: string }>) {
+  if (rows.length === 0) return
+
+  const chunks = chunkArray(rows, 500)
+
+  for (const chunk of chunks) {
+    const { error } = await supabase.from('clients').upsert(chunk, { onConflict: 'id' })
+    if (error) throw error
+  }
 }
 
 function SortIndicator({
@@ -683,6 +721,7 @@ export default function ClientsPage() {
   const [clients, setClients] = useState<ClientRow[]>([])
   const [clientsTotalCount, setClientsTotalCount] = useState<number>(0)
   const [cegeclimAbsents, setCegeclimAbsents] = useState<CegeclimAbsentRow[]>([])
+  const [cegeclimClients, setCegeclimClients] = useState<CegeclimClientRow[]>([])
   const [agences, setAgences] = useState<AgenceRow[]>([])
   const [territories, setTerritories] = useState<TerritoryRow[]>([])
   const [lastImport, setLastImport] = useState<ImportRow | null>(null)
@@ -754,6 +793,7 @@ export default function ClientsPage() {
   const [includeNoDistance, setIncludeNoDistance] = useState(true)
   const [onlyContactable, setOnlyContactable] = useState(false)
   const [onlyNotInCegeclim, setOnlyNotInCegeclim] = useState(false)
+  const [onlyInCegeclim, setOnlyInCegeclim] = useState(false)
   const [excludeDesignationND, setExcludeDesignationND] = useState(true)
   const [excludeFutureCreation, setExcludeFutureCreation] = useState(true)
   const [onlyToEnrich, setOnlyToEnrich] = useState(false)
@@ -792,6 +832,7 @@ export default function ClientsPage() {
     includeNoDistance,
     onlyContactable,
     onlyNotInCegeclim,
+    onlyInCegeclim,
     excludeDesignationND,
     excludeFutureCreation,
     onlyToEnrich,
@@ -846,6 +887,7 @@ export default function ClientsPage() {
     try {
       const authPromise = supabase.auth.getUser()
       const clientsPromise = fetchClientsInitialBatch()
+      const cegeclimClientsPromise = fetchCegeclimClientsRows()
       const agencesPromise = supabase
         .from('agences')
         .select('id, agence, societe, coord_x_lambert, coord_y_lambert')
@@ -862,10 +904,11 @@ export default function ClientsPage() {
         .order('updated_at', { ascending: false })
         .limit(1)
 
-      const [authRes, clientsRes, agencesRes, territoriesRes, importRes, sireneParamsRes] =
+      const [authRes, clientsRes, cegeclimClientsRes, agencesRes, territoriesRes, importRes, sireneParamsRes] =
         await Promise.all([
           authPromise,
           clientsPromise,
+          cegeclimClientsPromise,
           agencesPromise,
           territoriesPromise,
           importPromise,
@@ -901,8 +944,34 @@ export default function ClientsPage() {
 
       const latestImport = (importRes.data?.[0] || null) as ImportRow | null
       const sireneConfig = (sireneParamsRes.data?.[0] || null) as SireneImportParamRow | null
+      const cegeclimRows = cegeclimClientsRes || []
 
-      setClients(clientsRes.rows)
+      const cegeclimBySiret = new Map<string, CegeclimClientRow>()
+      for (const row of cegeclimRows) {
+        const normalizedSiret = normalizeSiret(row.siret)
+        if (normalizedSiret && !cegeclimBySiret.has(normalizedSiret)) {
+          cegeclimBySiret.set(normalizedSiret, row)
+        }
+      }
+
+      const reconciledClients = clientsRes.rows.map((row) => {
+        const match = cegeclimBySiret.get(normalizeSiret(row.siret))
+        const desiredValue = match?.numero_client_sage?.trim() || 'NON'
+        return {
+          ...row,
+          present_dans_cegeclim: desiredValue,
+        }
+      })
+
+      const rowsToSync = reconciledClients
+        .filter((row, index) => (clientsRes.rows[index]?.present_dans_cegeclim || 'NON') !== row.present_dans_cegeclim)
+        .map((row) => ({
+          id: row.id,
+          present_dans_cegeclim: row.present_dans_cegeclim || 'NON',
+        }))
+
+      setClients(reconciledClients)
+      setCegeclimClients(cegeclimRows)
       setClientsTotalCount(clientsRes.totalCount)
       setAgences((agencesRes.data || []) as AgenceRow[])
       setTerritories((territoriesRes.data || []) as TerritoryRow[])
@@ -911,6 +980,12 @@ export default function ClientsPage() {
       setRejectsLoaded(false)
       setCegeclimAbsents([])
       setCegeclimAbsentsLoaded(false)
+
+      if (rowsToSync.length > 0) {
+        void syncClientsCegeclimPresence(rowsToSync).catch((error) => {
+          console.error('Erreur sync presence CEGECLIM:', error)
+        })
+      }
 
       if (sireneConfig) {
         setSireneConfigId(sireneConfig.id)
@@ -1101,6 +1176,27 @@ export default function ClientsPage() {
     return result
   }, [clients, normalizedSocieteFilter, allowedDepartmentSet, allowedDepartements])
 
+  const scopedCegeclimClients = useMemo(() => {
+    let result = cegeclimClients
+
+    if (normalizedSocieteFilter !== 'global') {
+      result = result.filter((row) => {
+        const dep = getCegeclimDepartment(row)
+        return dep && allowedDepartmentSet.has(dep)
+      })
+    }
+
+    if (allowedDepartements.length > 0) {
+      const allowedDepartementsSet = new Set(allowedDepartements)
+      result = result.filter((row) => {
+        const dep = getCegeclimDepartment(row)
+        return dep && allowedDepartementsSet.has(dep)
+      })
+    }
+
+    return result
+  }, [cegeclimClients, normalizedSocieteFilter, allowedDepartmentSet, allowedDepartements])
+
   const scopedCegeclimAbsents = useMemo(() => {
     let result = cegeclimAbsents
 
@@ -1179,6 +1275,26 @@ export default function ClientsPage() {
     return scopedAgences.find((a) => a.agence === selectedAgence) || null
   }, [scopedAgences, selectedAgence])
 
+
+  const cegeclimClientBySiret = useMemo(() => {
+    const map = new Map<string, CegeclimClientRow>()
+    for (const row of scopedCegeclimClients) {
+      const normalizedSiret = normalizeSiret(row.siret)
+      if (normalizedSiret && !map.has(normalizedSiret)) {
+        map.set(normalizedSiret, row)
+      }
+    }
+    return map
+  }, [scopedCegeclimClients])
+
+  const clientSiretSetForScope = useMemo(() => {
+    return new Set(
+      scopedClients
+        .map((row) => normalizeSiret(row.siret))
+        .filter(Boolean)
+    )
+  }, [scopedClients])
+
   const filteredClients = useMemo(() => {
     const q = search.trim().toLowerCase()
     const designationQ = designationSearch.trim().toLowerCase()
@@ -1215,7 +1331,10 @@ export default function ClientsPage() {
       if (excludeDesignationND && isDesignationND) return false
       if (excludeFutureCreation && isFutureDate(row.dateCreationEtablissement)) return false
       if (onlyContactable && !(row.telephone || row.email || row.contactable)) return false
-      if (onlyNotInCegeclim && row.present_dans_cegeclim) return false
+      const isInCegeclim = hasCegeclimMatch(row.present_dans_cegeclim)
+
+      if (onlyNotInCegeclim && isInCegeclim) return false
+      if (onlyInCegeclim && !isInCegeclim) return false
       if (onlyToEnrich && completeness >= 100 && row.enrichment_status === 'ok') return false
 
       if (ageDays === null || ageDays < 0) {
@@ -1625,7 +1744,7 @@ export default function ClientsPage() {
         return {
           designation: row.raison_sociale_affichee || 'ND',
           siret: row.siret || 'ND',
-          presentCegeclim: row.present_dans_cegeclim ? 'OUI' : 'NON',
+          presentCegeclim: row.present_dans_cegeclim || 'NON',
           apeNaf: row.activitePrincipaleEtablissement || 'ND',
           secteur: row.naf_libelle_traduit || translateNaf(row.activitePrincipaleEtablissement),
           creation: formatDateFr(row.dateCreationEtablissement),
@@ -1999,10 +2118,15 @@ export default function ClientsPage() {
   }
 
   const totalClientsBaseForScope =
-    normalizedSocieteFilter === 'global' ? clientsTotalCount : scopedClients.length
+    normalizedSocieteFilter === 'global' && allowedDepartements.length === 0
+      ? clientsTotalCount
+      : scopedClients.length
 
-  const totalCegeclimBase =
-    scopedCegeclimAbsents.length + scopedClients.filter((x) => x.present_dans_cegeclim).length
+  const totalCegeclimBase = scopedCegeclimClients.length
+
+  const totalCegeclimAbsentBaseClients = scopedCegeclimClients.filter(
+    (row) => !clientSiretSetForScope.has(normalizeSiret(row.siret))
+  ).length
 
   const totalSelection = sortedFilteredClients.length
   const totalSelectedDepartments = summaryDepartments.length
@@ -2086,7 +2210,7 @@ export default function ClientsPage() {
 
                   <div style={kpiCardStyle}>
                     <div style={kpiTitleStyle}>Clients CEGECLIM absent base Clients</div>
-                    <div style={kpiValueStyle}>{scopedCegeclimAbsents.length}</div>
+                    <div style={kpiValueStyle}>{totalCegeclimAbsentBaseClients}</div>
                   </div>
                 </div>
               </div>
@@ -2227,10 +2351,28 @@ export default function ClientsPage() {
                     <input
                       type="checkbox"
                       checked={onlyNotInCegeclim}
-                      onChange={(e) => setOnlyNotInCegeclim(e.target.checked)}
+                      onChange={(e) => {
+                        const checked = e.target.checked
+                        setOnlyNotInCegeclim(checked)
+                        if (checked) setOnlyInCegeclim(false)
+                      }}
                       style={checkboxStyle}
                     />
                     Seulement non présents dans base clients Cegeclim
+                  </label>
+
+                  <label style={checkboxLabelStyle}>
+                    <input
+                      type="checkbox"
+                      checked={onlyInCegeclim}
+                      onChange={(e) => {
+                        const checked = e.target.checked
+                        setOnlyInCegeclim(checked)
+                        if (checked) setOnlyNotInCegeclim(false)
+                      }}
+                      style={checkboxStyle}
+                    />
+                    Uniquement les clients présents dans la base Cegeclim
                   </label>
 
                   <label style={checkboxLabelStyle}>
@@ -2898,7 +3040,7 @@ export default function ClientsPage() {
                     <div style={clientBlockContentStyle}>
                       <div><b>Effectifs SIRENE :</b> {selectedClient.trancheEffectifsEtablissement || 'NC'}</div>
                       <div><b>Effectif estimé :</b> {selectedClient.effectif_estime ?? 'NC'}</div>
-                      <div><b>Présent base CEGECLIM :</b> {selectedClient.present_dans_cegeclim ? 'Oui' : 'Non'}</div>
+                      <div><b>Présent base CEGECLIM :</b> {selectedClient.present_dans_cegeclim || 'NON'}</div>
                     </div>
                   </div>
 
