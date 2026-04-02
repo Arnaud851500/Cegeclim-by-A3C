@@ -2078,6 +2078,7 @@ export default function ClientsPage() {
                 </div>
               </div>
 
+
               <section style={sectionTitleStyle}>
                 <h2 style={sectionTitleTextStyle}>Filtres</h2>
               </section>
