@@ -9,30 +9,31 @@ import { supabase } from '@/lib/supabaseClient'
 import { useSocieteFilter } from '@/components/SocieteFilterContext'
 import dynamic from 'next/dynamic'
 
-const MapContainer = dynamic(
+const MapContainer: any = dynamic(
   () => import('react-leaflet').then((mod) => mod.MapContainer),
   { ssr: false }
 )
 
-const TileLayer = dynamic(
+const TileLayer: any = dynamic(
   () => import('react-leaflet').then((mod) => mod.TileLayer),
   { ssr: false }
 )
 
-const CircleMarker = dynamic(
+const CircleMarker: any = dynamic(
   () => import('react-leaflet').then((mod) => mod.CircleMarker),
   { ssr: false }
 )
 
-const Tooltip = dynamic(
+const Tooltip: any = dynamic(
   () => import('react-leaflet').then((mod) => mod.Tooltip),
   { ssr: false }
 )
 
-const Popup = dynamic(
+const Popup: any = dynamic(
   () => import('react-leaflet').then((mod) => mod.Popup),
   { ssr: false }
 )
+
 
 type ClientRow = {
   id: string
