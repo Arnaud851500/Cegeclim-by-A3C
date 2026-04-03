@@ -9,28 +9,28 @@ import { supabase } from '@/lib/supabaseClient'
 import { useSocieteFilter } from '@/components/SocieteFilterContext'
 import dynamic from 'next/dynamic'
 
-const MapContainer = dynamic(
-  () => import('react-leaflet').then((mod) => mod.MapContainer),
+const MapContainer: any = dynamic(
+  () => import('react-leaflet').then((mod) => mod.MapContainer as any),
   { ssr: false }
 )
 
-const TileLayer = dynamic(
-  () => import('react-leaflet').then((mod) => mod.TileLayer),
+const TileLayer: any = dynamic(
+  () => import('react-leaflet').then((mod) => mod.TileLayer as any),
   { ssr: false }
 )
 
-const CircleMarker = dynamic(
-  () => import('react-leaflet').then((mod) => mod.CircleMarker),
+const CircleMarker: any = dynamic(
+  () => import('react-leaflet').then((mod) => mod.CircleMarker as any),
   { ssr: false }
 )
 
-const Tooltip = dynamic(
-  () => import('react-leaflet').then((mod) => mod.Tooltip),
+const Tooltip: any = dynamic(
+  () => import('react-leaflet').then((mod) => mod.Tooltip as any),
   { ssr: false }
 )
 
-const Popup = dynamic(
-  () => import('react-leaflet').then((mod) => mod.Popup),
+const Popup: any = dynamic(
+  () => import('react-leaflet').then((mod) => mod.Popup as any),
   { ssr: false }
 )
 
@@ -3253,12 +3253,12 @@ useEffect(() => {
         }}
       >
         <MapContainer
-          center={[46.603354, 1.888334]}
-          zoom={6}
-          style={{ height: '100%', width: '100%', minHeight: 500 }}
-          ref={(mapInstance) => {
-          if (mapInstance) leafletMapRef.current = mapInstance
-          }}
+        center={[46.603354, 1.888334] as any}
+        zoom={6}
+        style={{ height: '100%', width: '100%', minHeight: 500 }}
+        ref={(mapInstance: any) => {
+        if (mapInstance) leafletMapRef.current = mapInstance
+         }}
         >
           <TileLayer
             attribution="&copy; OpenStreetMap contributors"
