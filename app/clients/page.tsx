@@ -7,6 +7,32 @@ import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
 import { supabase } from '@/lib/supabaseClient'
 import { useSocieteFilter } from '@/components/SocieteFilterContext'
+import dynamic from 'next/dynamic'
+
+const MapContainer = dynamic(
+  () => import('react-leaflet').then((mod) => mod.MapContainer),
+  { ssr: false }
+)
+
+const TileLayer = dynamic(
+  () => import('react-leaflet').then((mod) => mod.TileLayer),
+  { ssr: false }
+)
+
+const CircleMarker = dynamic(
+  () => import('react-leaflet').then((mod) => mod.CircleMarker),
+  { ssr: false }
+)
+
+const Tooltip = dynamic(
+  () => import('react-leaflet').then((mod) => mod.Tooltip),
+  { ssr: false }
+)
+
+const Popup = dynamic(
+  () => import('react-leaflet').then((mod) => mod.Popup),
+  { ssr: false }
+)
 
 type ClientRow = {
   id: string
@@ -20,6 +46,8 @@ type ClientRow = {
   departement: string | null
   coordonneeLambertAbscisseEtablissement: number | null
   coordonneeLambertOrdonneeEtablissement: number | null
+  latitude: number | null
+  longitude: number | null
   telephone: string | null
   email: string | null
   site_web: string | null
@@ -409,6 +437,21 @@ function getClientCegeclimRow(
   return cegeclimDetailsBySiret.get(normalizedSiret) || null
 }
 
+function hasGeographicCoordinates(row: Pick<ClientRow, 'latitude' | 'longitude'> | null | undefined): boolean {
+  return (
+    typeof row?.latitude === 'number' &&
+    typeof row?.longitude === 'number' &&
+    Number.isFinite(row.latitude) &&
+    Number.isFinite(row.longitude)
+  )
+}
+
+function buildGoogleMapsSearchUrl(latitude: number | null | undefined, longitude: number | null | undefined): string | null {
+  if (typeof latitude !== 'number' || typeof longitude !== 'number') return null
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null
+  return `https://www.google.com/maps/search/?api=1&query=${latitude},${longitude}`
+}
+
 function getCompletenessPercent(row: ClientRow): number {
   const checks = [
     Boolean(row.telephone),
@@ -480,6 +523,8 @@ async function fetchAllClients(): Promise<{ rows: ClientRow[]; totalCount: numbe
         departement,
         coordonneeLambertAbscisseEtablissement,
         coordonneeLambertOrdonneeEtablissement,
+        latitude,
+        longitude,
         telephone,
         email,
         site_web,
@@ -543,6 +588,8 @@ async function fetchClientsInitialBatch(): Promise<{ rows: ClientRow[]; totalCou
       departement,
       coordonneeLambertAbscisseEtablissement,
       coordonneeLambertOrdonneeEtablissement,
+      latitude,
+      longitude,
       telephone,
       email,
       site_web,
@@ -653,6 +700,8 @@ async function fetchClientBySiret(siret: string): Promise<ClientRow | null> {
       departement,
       coordonneeLambertAbscisseEtablissement,
       coordonneeLambertOrdonneeEtablissement,
+      latitude,
+      longitude,
       telephone,
       email,
       site_web,
@@ -791,6 +840,13 @@ export default function ClientsPage() {
 
   const [loading, setLoading] = useState(true)
   const [importing, setImporting] = useState(false)
+  const [mapOpen, setMapOpen] = useState(false)
+  const [mapLoading, setMapLoading] = useState(false)
+  const [mapClients, setMapClients] = useState<ClientRow[]>([])
+  const leafletMapRef = useRef<any>(null)
+  const [mapTitle, setMapTitle] = useState('')
+  const [showMapCegeclim, setShowMapCegeclim] = useState(true)
+  const [showMapProspects, setShowMapProspects] = useState(true)
 
   async function launchImportSirene() {
     setImporting(true)
@@ -871,6 +927,7 @@ export default function ClientsPage() {
   const [backgroundHydratingClients, setBackgroundHydratingClients] = useState(false)
   const [cegeclimAbsentsLoaded, setCegeclimAbsentsLoaded] = useState(false)
   const [rejectsLoaded, setRejectsLoaded] = useState(false)
+
 
   const latestLoadTokenRef = useRef(0)
 
@@ -1051,7 +1108,92 @@ export default function ClientsPage() {
       setLoading(false)
     }
   }
+async function openMapFromCell(secteur: string, departement: string | null) {
+  setMapOpen(true)
+  setMapLoading(true)
+  setMapClients([])
 
+  setMapTitle(
+    departement
+      ? `Carte - ${secteur} - Département ${departement}`
+      : secteur === 'TOUS'
+        ? 'Carte - Tous secteurs'
+        : `Carte - ${secteur} - Global`
+  )
+
+  try {
+    let query = supabase
+      .from('clients')
+      .select(`
+        id,
+        siret,
+        raison_sociale_affichee,
+        activitePrincipaleEtablissement,
+        naf_libelle_traduit,
+        dateCreationEtablissement,
+        codePostalEtablissement,
+        libelleCommuneEtablissement,
+        departement,
+        coordonneeLambertAbscisseEtablissement,
+        coordonneeLambertOrdonneeEtablissement,
+        latitude,
+        longitude,
+        telephone,
+        email,
+        site_web,
+        nom_dirigeant,
+        effectif_estime,
+        ca_estime,
+        pappers_ca,
+        pappers_resultat,
+        rge,
+        potentiel_score,
+        enrichment_status,
+        last_enrichment_at,
+        enrichment_source,
+        enrichment_error,
+        google_maps_url,
+        google_rating,
+        google_user_ratings_total,
+        present_dans_cegeclim,
+        contactable,
+        adresse_complete,
+        trancheEffectifsEtablissement,
+        date_import,
+        prospect_status,
+        assigned_to,
+        last_contact_at,
+        next_action_at,
+        next_action_label,
+        prospect_comment
+      `)
+      .not('latitude', 'is', null)
+      .not('longitude', 'is', null)
+
+    if (departement) {
+      query = query.eq('departement', departement)
+    }
+
+    const { data, error } = await query.limit(5000)
+
+    if (error) throw error
+
+    let rows = (data || []) as ClientRow[]
+
+    if (secteur !== 'TOUS') {
+      rows = rows.filter(
+        (row) => translateNaf(row.activitePrincipaleEtablissement) === secteur
+      )
+    }
+
+    setMapClients(rows)
+  } catch (err) {
+    console.error(err)
+    alert('Erreur chargement carte')
+  } finally {
+    setMapLoading(false)
+  }
+}
   async function saveSireneParams() {
     setSavingSireneParams(true)
     try {
@@ -1262,6 +1404,231 @@ export default function ClientsPage() {
   const selectedClientCegeclim = useMemo(() => {
     return getClientCegeclimRow(selectedClient, cegeclimDetailsBySiret)
   }, [selectedClient, cegeclimDetailsBySiret])
+
+
+  const mapClientsWithCoords = useMemo(() => {
+    return mapClients.filter((client) => hasGeographicCoordinates(client))
+  }, [mapClients])
+
+  function matchesMapProspectFilters(row: ClientRow) {
+    const days = diffDaysFromToday(row.dateCreationEtablissement)
+    const minDays = sliderToDays(ageSliderMin)
+    const maxDays = sliderToDays(ageSliderMax)
+
+    const agenceCoords =
+      selectedAgence === 'TOUS'
+        ? null
+        : agences.find((a) => a.agence === selectedAgence) || null
+
+    const distance = agenceCoords
+      ? distanceKmLambert(
+          row.coordonneeLambertAbscisseEtablissement,
+          row.coordonneeLambertOrdonneeEtablissement,
+          agenceCoords.coord_x_lambert,
+          agenceCoords.coord_y_lambert
+        )
+      : null
+
+    if (search.trim()) {
+      const q = search.trim().toLowerCase()
+      const haystack = [
+        row.siret,
+        row.raison_sociale_affichee,
+        row.naf_libelle_traduit,
+        row.libelleCommuneEtablissement,
+        row.codePostalEtablissement,
+        row.telephone,
+        row.email,
+      ]
+        .join(' ')
+        .toLowerCase()
+
+      if (!haystack.includes(q)) return false
+    }
+
+    if (designationSearch.trim()) {
+      const q = designationSearch.trim().toLowerCase()
+      if (!String(row.raison_sociale_affichee || '').toLowerCase().includes(q)) return false
+    }
+
+    if (selectedDepartments.length > 0) {
+      const dep = getClientDepartment(row)
+      if (!selectedDepartments.includes(dep)) return false
+    }
+
+    if (selectedSectors.length > 0) {
+      const sector = translateNaf(row.activitePrincipaleEtablissement)
+      if (!selectedSectors.includes(sector)) return false
+    }
+
+    if (selectedNafCodes.length > 0) {
+      const naf = String(row.activitePrincipaleEtablissement || '').trim()
+      if (!selectedNafCodes.includes(naf)) return false
+    }
+
+    if (onlyContactable && !row.contactable) return false
+
+    if (excludeDesignationND) {
+      const designation = String(row.raison_sociale_affichee || '').trim().toLowerCase()
+      if (!designation || designation === 'nd') return false
+    }
+
+    if (excludeFutureCreation && isFutureDate(row.dateCreationEtablissement)) return false
+
+    if (onlyToEnrich) {
+      const badge = getEnrichmentBadge(row.enrichment_status)
+      if (badge.label === 'OK') return false
+    }
+
+    if (days !== null) {
+      if (days < minDays || days > maxDays) return false
+    }
+
+    if (selectedAgence !== 'TOUS') {
+      if (distance == null) {
+        if (!includeNoDistance) return false
+      } else if (distance > distanceMax) {
+        return false
+      }
+    }
+
+    return true
+  }
+
+  const mapCegeclimPoints = useMemo(() => {
+    return mapClientsWithCoords.filter((client) =>
+      isClientPresentInCegeclim(client, cegeclimBySiret)
+    )
+  }, [mapClientsWithCoords, cegeclimBySiret])
+
+  const mapProspectPoints = useMemo(() => {
+    return mapClientsWithCoords.filter(
+      (client) =>
+        !isClientPresentInCegeclim(client, cegeclimBySiret) &&
+        matchesMapProspectFilters(client)
+    )
+  }, [
+    mapClientsWithCoords,
+    cegeclimBySiret,
+    search,
+    designationSearch,
+    selectedDepartments,
+    selectedSectors,
+    selectedNafCodes,
+    selectedAgence,
+    includeNoDistance,
+    onlyContactable,
+    excludeDesignationND,
+    excludeFutureCreation,
+    onlyToEnrich,
+    distanceMax,
+    ageSliderMin,
+    ageSliderMax,
+    agences,
+  ])
+
+  const visibleMapPoints = useMemo(() => {
+    return [
+      ...(showMapCegeclim ? mapCegeclimPoints : []),
+      ...(showMapProspects ? mapProspectPoints : []),
+    ]
+  }, [showMapCegeclim, showMapProspects, mapCegeclimPoints, mapProspectPoints])
+
+  useEffect(() => {
+    if (!mapOpen) return
+    if (!leafletMapRef.current) return
+    if (!visibleMapPoints.length) return
+
+    const map = leafletMapRef.current
+
+    setTimeout(() => {
+      map.invalidateSize()
+
+      if (visibleMapPoints.length === 1) {
+        map.setView(
+          [visibleMapPoints[0].latitude as number, visibleMapPoints[0].longitude as number],
+          12
+        )
+        return
+      }
+
+      const bounds = visibleMapPoints.map((client) => [
+        client.latitude as number,
+        client.longitude as number,
+      ])
+
+      map.fitBounds(bounds, { padding: [30, 30] })
+    }, 200)
+  }, [mapOpen, visibleMapPoints])
+
+  const selectedClientMapInfo = useMemo(() => {
+    if (!selectedClient) return null
+
+    const hasCoords = hasGeographicCoordinates(selectedClient)
+    const isCegeclim = isClientPresentInCegeclim(selectedClient, cegeclimBySiret)
+    const mapsUrl =
+      buildGoogleMapsSearchUrl(selectedClient.latitude, selectedClient.longitude) ||
+      selectedClient.google_maps_url ||
+      null
+
+    if (!hasCoords) {
+      return {
+        visible: false,
+        label: 'Non visible sur la carte',
+        color: '#991b1b',
+        reason: selectedClient.adresse_complete
+          ? 'Adresse présente mais coordonnées géographiques absentes'
+          : 'Coordonnées géographiques absentes',
+        mapsUrl,
+      }
+    }
+
+    if (isCegeclim) {
+      return {
+        visible: true,
+        label: 'Visible sur la carte',
+        color: '#166534',
+        reason: 'Client CEGECLIM (si la couche CEGECLIM est cochée)',
+        mapsUrl,
+      }
+    }
+
+    if (matchesMapProspectFilters(selectedClient)) {
+      return {
+        visible: true,
+        label: 'Visible sur la carte',
+        color: '#166534',
+        reason: 'Prospect répondant aux filtres actifs (si la couche Prospects est cochée)',
+        mapsUrl,
+      }
+    }
+
+    return {
+      visible: false,
+      label: 'Non visible sur la carte',
+      color: '#991b1b',
+      reason: 'Prospect hors filtres actifs de prospection',
+      mapsUrl,
+    }
+  }, [
+    selectedClient,
+    cegeclimBySiret,
+    search,
+    designationSearch,
+    selectedDepartments,
+    selectedSectors,
+    selectedNafCodes,
+    selectedAgence,
+    includeNoDistance,
+    onlyContactable,
+    excludeDesignationND,
+    excludeFutureCreation,
+    onlyToEnrich,
+    distanceMax,
+    ageSliderMin,
+    ageSliderMax,
+    agences,
+  ])
 
   const scopedClientSiretSet = useMemo(
     () => new Set(scopedClients.map((row) => normalizeSiret(row.siret)).filter(Boolean)),
@@ -2524,17 +2891,57 @@ export default function ClientsPage() {
                         {summarySectorRows.map((row) => (
                           <tr key={row.sector} style={{ background: getSectorColor(row.sector) }}>
                             <td style={{ ...summaryBodyCellStyle, textAlign: 'left' }}>{row.sector}</td>
-                            <td style={summaryBodyCellStyleBold}>{row.total}</td>
+                            <td style={summaryBodyCellStyleBold}>
+  <button
+    onClick={() => openMapFromCell(row.sector, null)}
+    style={{
+      width: '100%',
+      height: '100%',
+      fontWeight: 700,
+      cursor: 'pointer',
+      background: 'transparent',
+      border: 'none',
+    }}
+  >
+    {row.total}
+  </button>
+</td>
                             {summaryDepartments.map((dep) => (
                               <td key={dep} style={summaryBodyCellStyleBold}>
-                                {row.byDept[dep] || 0}
-                              </td>
+  <button
+    onClick={() => openMapFromCell(row.sector, dep)}
+    style={{
+      width: '100%',
+      height: '100%',
+      fontWeight: 700,
+      cursor: 'pointer',
+      background: 'transparent',
+      border: 'none',
+    }}
+  >
+    {row.byDept[dep] || 0}
+  </button>
+</td>
                             ))}
                           </tr>
                         ))}
                         <tr>
                           <td style={{ ...summaryTotalStyle, textAlign: 'left' }}>TOTAL</td>
-                          <td style={summaryTotalStyle}>{sortedFilteredClients.length}</td>
+                          <td style={summaryTotalStyle}>
+  <button
+    onClick={() => openMapFromCell('TOUS', null)}
+    style={{
+      width: '100%',
+      height: '100%',
+      fontWeight: 700,
+      cursor: 'pointer',
+      background: 'transparent',
+      border: 'none',
+    }}
+  >
+    {sortedFilteredClients.length}
+  </button>
+</td>
                           {summaryDepartments.map((dep) => (
                             <td key={dep} style={summaryTotalStyle}>
                               {summaryDeptTotals[dep] || 0}
@@ -2544,6 +2951,7 @@ export default function ClientsPage() {
                       </tbody>
                     </table>
                   </section>
+
 
                   <section style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                     <button onClick={exportExcel} style={toolbarButtonStyle}>Export Excel</button>
@@ -2808,6 +3216,209 @@ export default function ClientsPage() {
                 </button>
               </section>
             </section>
+            {mapOpen && (
+  <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 999 }}>
+    <div style={{ background: '#fff', margin: '3% auto', padding: 20, width: '90%', maxWidth: 1600, borderRadius: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16, marginBottom: 16 }}>
+        <h2 style={{ margin: 0 }}>{mapTitle}</h2>
+        <button onClick={() => setMapOpen(false)} style={toolbarButtonStyle}>Fermer</button>
+      </div>
+
+      <div
+        style={{
+          flex: 1,
+          padding: 24,
+          overflow: 'hidden',
+          background: '#f8fafc',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 16,
+          borderRadius: 12,
+        }}
+      >
+        {mapLoading ? (
+          <div
+            style={{
+              flex: 1,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: '#475569',
+              fontSize: 18,
+              fontWeight: 600,
+              minHeight: 500,
+            }}
+          >
+            Chargement...
+          </div>
+        ) : visibleMapPoints.length === 0 ? (
+          <div
+            style={{
+              flex: 1,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: '#475569',
+              fontSize: 18,
+              fontWeight: 600,
+              minHeight: 500,
+            }}
+          >
+            Aucun point visible avec les couches et filtres actuels
+          </div>
+        ) : (
+          <>
+            <div
+              style={{
+                display: 'flex',
+                gap: 18,
+                alignItems: 'center',
+                flexWrap: 'wrap',
+                padding: '0 2px',
+                fontSize: 14,
+                color: '#334155',
+              }}
+            >
+              <div>
+                <strong>{visibleMapPoints.length}</strong> entreprises visibles
+              </div>
+
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={showMapCegeclim}
+                  onChange={(e) => setShowMapCegeclim(e.target.checked)}
+                />
+                <span
+                  style={{
+                    width: 12,
+                    height: 12,
+                    borderRadius: '50%',
+                    background: '#facc15',
+                    border: '1px solid #a16207',
+                    display: 'inline-block',
+                  }}
+                />
+                Clients CEGECLIM ({mapCegeclimPoints.length})
+              </label>
+
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={showMapProspects}
+                  onChange={(e) => setShowMapProspects(e.target.checked)}
+                />
+                <span
+                  style={{
+                    width: 12,
+                    height: 12,
+                    borderRadius: '50%',
+                    background: '#60a5fa',
+                    border: '1px solid #1d4ed8',
+                    display: 'inline-block',
+                  }}
+                />
+                Prospects filtrés ({mapProspectPoints.length})
+              </label>
+            </div>
+
+            <div
+              style={{
+                flex: 1,
+                borderRadius: 16,
+                overflow: 'hidden',
+                border: '1px solid #cbd5e1',
+                background: '#fff',
+                minHeight: 500,
+              }}
+            >
+              <MapContainer
+                center={[46.603354, 1.888334]}
+                zoom={6}
+                style={{ height: '100%', width: '100%', minHeight: 500 }}
+                ref={(mapInstance) => {
+                  if (mapInstance) leafletMapRef.current = mapInstance
+                }}
+              >
+                <TileLayer
+                  attribution="&copy; OpenStreetMap contributors"
+                  url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                />
+
+                {visibleMapPoints.map((client) => {
+                  const isCegeclim = isClientPresentInCegeclim(client, cegeclimBySiret)
+
+                  return (
+                    <CircleMarker
+                      key={client.id}
+                      center={[client.latitude as number, client.longitude as number]}
+                      radius={6}
+                      pathOptions={{
+                        color: isCegeclim ? '#a16207' : '#1d4ed8',
+                        fillColor: isCegeclim ? '#facc15' : '#60a5fa',
+                        fillOpacity: 0.9,
+                        weight: 1.5,
+                      }}
+                    >
+                      <Tooltip direction="top" offset={[0, -8]} opacity={1} sticky>
+                        <div style={{ fontSize: 13, lineHeight: 1.45 }}>
+                          <div style={{ fontWeight: 700 }}>
+                            {client.raison_sociale_affichee || 'Sans nom'}
+                          </div>
+                          <div>{translateNaf(client.activitePrincipaleEtablissement)}</div>
+                          <div>Création : {formatDateFr(client.dateCreationEtablissement)}</div>
+                          <div>Tél : {client.telephone || '—'}</div>
+                        </div>
+                      </Tooltip>
+
+                      <Popup>
+                        <div style={{ fontSize: 13, lineHeight: 1.5, minWidth: 220 }}>
+                          <div style={{ fontWeight: 700, marginBottom: 6 }}>
+                            {client.raison_sociale_affichee || 'Sans nom'}
+                          </div>
+                          <div>
+                            <strong>Activité :</strong>{' '}
+                            {translateNaf(client.activitePrincipaleEtablissement)}
+                          </div>
+                          <div>
+                            <strong>Date de création :</strong>{' '}
+                            {formatDateFr(client.dateCreationEtablissement)}
+                          </div>
+                          <div>
+                            <strong>Téléphone :</strong> {client.telephone || '—'}
+                          </div>
+                          <div>
+                            <strong>Statut :</strong>{' '}
+                            {isCegeclim ? 'Client CEGECLIM' : 'Prospect filtré'}
+                          </div>
+                          <div>
+                            <strong>Latitude :</strong> {client.latitude ?? 'NC'}
+                          </div>
+                          <div>
+                            <strong>Longitude :</strong> {client.longitude ?? 'NC'}
+                          </div>
+                          <div style={{ marginTop: 8 }}>
+                            <a
+                              href={buildGoogleMapsSearchUrl(client.latitude, client.longitude) || '#'}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              Ouvrir dans Google Maps
+                            </a>
+                          </div>
+                        </div>
+                      </Popup>
+                    </CircleMarker>
+                  )
+                })}
+              </MapContainer>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  </div>
+)}
           </>
         )}
 
@@ -3084,10 +3695,30 @@ export default function ClientsPage() {
                       <div><b>Département :</b> {getClientDepartment(selectedClient) || 'NC'}</div>
                       <div><b>Coordonnée X :</b> {selectedClient.coordonneeLambertAbscisseEtablissement ?? 'NC'}</div>
                       <div><b>Coordonnée Y :</b> {selectedClient.coordonneeLambertOrdonneeEtablissement ?? 'NC'}</div>
-                      {selectedClient.google_maps_url ? (
+                      <div><b>Latitude :</b> {selectedClient.latitude ?? 'NC'}</div>
+                      <div><b>Longitude :</b> {selectedClient.longitude ?? 'NC'}</div>
+                      <div>
+                        <b>Statut carte :</b>{' '}
+                        <span
+                          style={{
+                            ...inlineBadgeStyle,
+                            background: selectedClientMapInfo?.color || '#475569',
+                            color: '#fff',
+                          }}
+                        >
+                          {selectedClientMapInfo?.label || 'NC'}
+                        </span>
+                      </div>
+                      <div><b>Raison :</b> {selectedClientMapInfo?.reason || 'NC'}</div>
+                      {!hasGeographicCoordinates(selectedClient) && selectedClient.adresse_complete ? (
+                        <div style={{ color: '#92400e' }}>
+                          <b>Info :</b> une adresse est présente, mais aucune coordonnée n'est encore disponible pour la carte.
+                        </div>
+                      ) : null}
+                      {(selectedClientMapInfo?.mapsUrl || selectedClient.google_maps_url) ? (
                         <div>
                           <b>Google Maps :</b>{' '}
-                          <a href={selectedClient.google_maps_url} target="_blank" rel="noreferrer">
+                          <a href={selectedClientMapInfo?.mapsUrl || selectedClient.google_maps_url || '#'} target="_blank" rel="noreferrer">
                             Ouvrir
                           </a>
                         </div>
