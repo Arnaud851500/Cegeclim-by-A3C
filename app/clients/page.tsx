@@ -832,6 +832,16 @@ export default function ClientsPage() {
   const [mapTitle, setMapTitle] = useState('')
   const [showMapCegeclim, setShowMapCegeclim] = useState(true)
   const [showMapProspects, setShowMapProspects] = useState(true)
+  
+  function openPreviousClient() {
+  if (!previousClient) return
+  setSelectedClient(previousClient)
+}
+
+function openNextClient() {
+  if (!nextClient) return
+  setSelectedClient(nextClient)
+}
 
   async function launchImportSirene() {
     setImporting(true)
@@ -861,7 +871,11 @@ export default function ClientsPage() {
   `Enregistrements parcourus : ${data.fetched || 0}\n` +
   `Total API : ${data.api_total || 0}`
 
+  
+
 )
+
+
       await loadAll()
     } catch (error: any) {
       console.error(error)
@@ -986,7 +1000,7 @@ export default function ClientsPage() {
     latestLoadTokenRef.current = loadToken
 
     try {
-      const authPromise = supabase.auth.getUser()
+      const authPromise = supabase.auth.getSession()
       const clientsPromise = fetchClientsInitialBatch()
       const clientsCegeclimPromise = fetchClientsCegeclimRows()
       const agencesPromise = supabase
@@ -1021,7 +1035,11 @@ export default function ClientsPage() {
       if (importRes.error) throw importRes.error
       if (sireneParamsRes.error) throw sireneParamsRes.error
 
-      const userEmail = authRes.data.user?.email?.toLowerCase().trim() || null
+      const {
+      data: { session },
+      } = await supabase.auth.getSession()
+
+      const userEmail = session?.user?.email?.toLowerCase().trim() || null
       setCurrentUserEmail(userEmail)
 
       if (userEmail) {
@@ -1515,31 +1533,71 @@ const visibleMapPoints = useMemo(() => {
 
 useEffect(() => {
   if (!mapOpen) return
-  if (!leafletMapRef.current) return
   if (!visibleMapPoints.length) return
 
-  const map = leafletMapRef.current
+  let cancelled = false
+  let attempts = 0
 
-  const timeout = setTimeout(() => {
-    map.invalidateSize()
+  const runFit = () => {
+    if (cancelled) return
 
-    if (visibleMapPoints.length === 1) {
-      map.setView(
-        [visibleMapPoints[0].latitude as number, visibleMapPoints[0].longitude as number],
-        12
-      )
+    const map = leafletMapRef.current
+    if (!map || typeof map.invalidateSize !== 'function') {
+      if (attempts < 10) {
+        attempts += 1
+        window.setTimeout(runFit, 120)
+      }
       return
     }
 
-    const bounds = visibleMapPoints.map((client) => [
-      client.latitude as number,
-      client.longitude as number,
-    ])
+    try {
+      map.invalidateSize()
 
-    map.fitBounds(bounds, { padding: [30, 30] })
-  }, 200)
+      const container =
+        typeof map.getContainer === 'function' ? map.getContainer() : null
 
-  return () => clearTimeout(timeout)
+      const width = container?.clientWidth || 0
+      const height = container?.clientHeight || 0
+
+      if (width < 100 || height < 100) {
+        if (attempts < 10) {
+          attempts += 1
+          window.setTimeout(runFit, 120)
+        }
+        return
+      }
+
+      if (visibleMapPoints.length === 1) {
+        map.setView(
+          [
+            visibleMapPoints[0].latitude as number,
+            visibleMapPoints[0].longitude as number,
+          ],
+          12
+        )
+        return
+      }
+
+      const bounds = visibleMapPoints.map((client) => [
+        client.latitude as number,
+        client.longitude as number,
+      ])
+
+      map.fitBounds(bounds, { padding: [30, 30] })
+    } catch (e) {
+      if (attempts < 10) {
+        attempts += 1
+        window.setTimeout(runFit, 120)
+      }
+    }
+  }
+
+  const timeout = window.setTimeout(runFit, 180)
+
+  return () => {
+    cancelled = true
+    window.clearTimeout(timeout)
+  }
 }, [mapOpen, visibleMapPoints])
 
   const cegeclimDetailsBySiret = useMemo(() => {
@@ -1877,6 +1935,51 @@ useEffect(() => {
     const start = (currentPage - 1) * CLIENTS_PAGE_SIZE
     return sortedFilteredClients.slice(start, start + CLIENTS_PAGE_SIZE)
   }, [sortedFilteredClients, currentPage])
+
+  const selectedClientIndex = useMemo(() => {
+  if (!selectedClient) return -1
+  return sortedFilteredClients.findIndex((client) => client.id === selectedClient.id)
+}, [selectedClient, sortedFilteredClients])
+
+const previousClient = useMemo(() => {
+  if (selectedClientIndex <= 0) return null
+  return sortedFilteredClients[selectedClientIndex - 1] || null
+}, [selectedClientIndex, sortedFilteredClients])
+
+const nextClient = useMemo(() => {
+  if (selectedClientIndex < 0 || selectedClientIndex >= sortedFilteredClients.length - 1) return null
+  return sortedFilteredClients[selectedClientIndex + 1] || null
+}, [selectedClientIndex, sortedFilteredClients])
+
+const selectedClientVisibleOnMap = useMemo(() => {
+  if (!selectedClient) return false
+  return (
+    typeof selectedClient.latitude === 'number' &&
+    typeof selectedClient.longitude === 'number' &&
+    Number.isFinite(selectedClient.latitude) &&
+    Number.isFinite(selectedClient.longitude)
+  )
+}, [selectedClient])
+
+const selectedClientMapReason = useMemo(() => {
+  if (!selectedClient) return ''
+  if (selectedClientVisibleOnMap) {
+    return 'Présent sur la carte'
+  }
+
+  const hasAddress = Boolean(
+    String(selectedClient.adresse_complete || '').trim() ||
+      String(selectedClient.codePostalEtablissement || '').trim() ||
+      String(selectedClient.libelleCommuneEtablissement || '').trim()
+  )
+
+  if (hasAddress) {
+    return 'Adresse présente mais coordonnées absentes'
+  }
+
+  return 'Adresse insuffisante pour la carte'
+}, [selectedClient, selectedClientVisibleOnMap])
+
 
   function toggleSort(key: SortKey) {
     if (sortKey === key) setSortDirection((v) => (v === 'asc' ? 'desc' : 'asc'))
@@ -2786,7 +2889,7 @@ useEffect(() => {
               </section>
 
               <section style={sectionTitleStyle}>
-                <h2 style={sectionTitleTextStyle}>Synthèse de la sélection</h2>
+                <h2 style={sectionTitleTextStyle}>Synthèse de la sélection (cliquer sur une case pour ouvrir la carte)</h2>
               </section>
 
               {mode === 'clients' && (
@@ -3261,70 +3364,43 @@ useEffect(() => {
          }}
         >
           <TileLayer
-            attribution="&copy; OpenStreetMap contributors"
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          attribution='&copy; OpenStreetMap contributors'
+          url="https://api.thunderforest.com/neighbourhood/{z}/{x}/{y}.png?apikey=3750cd83dca34199969e6b9e2dcdca40"
           />
 
           {visibleMapPoints.map((client) => {
-            const isCegeclim = isClientPresentInCegeclim(client, cegeclimBySiret)
+  const isCegeclim = isClientPresentInCegeclim(client, cegeclimBySiret)
 
-            return (
-              <CircleMarker
-                key={client.id}
-                center={[client.latitude as number, client.longitude as number]}
-                radius={6}
-                pathOptions={{
-                  color: isCegeclim ? '#a16207' : '#1d4ed8',
-                  fillColor: isCegeclim ? '#facc15' : '#60a5fa',
-                  fillOpacity: 0.9,
-                  weight: 1.5,
-                }}
-              >
-                <Tooltip direction="top" offset={[0, -8]} opacity={1} sticky>
-                  <div style={{ fontSize: 13, lineHeight: 1.45 }}>
-                    <div style={{ fontWeight: 700 }}>
-                      {client.raison_sociale_affichee || 'Sans nom'}
-                    </div>
-                    <div>{translateNaf(client.activitePrincipaleEtablissement)}</div>
-                    <div>Création : {formatDateFr(client.dateCreationEtablissement)}</div>
-                    <div>Tél : {client.telephone || '—'}</div>
-                  </div>
-                </Tooltip>
-
-                <Popup>
-                  <div style={{ fontSize: 13, lineHeight: 1.5, minWidth: 220 }}>
-                    <div style={{ fontWeight: 700, marginBottom: 6 }}>
-                      {client.raison_sociale_affichee || 'Sans nom'}
-                    </div>
-                    <div>
-                      <strong>Activité :</strong>{' '}
-                      {translateNaf(client.activitePrincipaleEtablissement)}
-                    </div>
-                    <div>
-                      <strong>Date de création :</strong>{' '}
-                      {formatDateFr(client.dateCreationEtablissement)}
-                    </div>
-                    <div>
-                      <strong>Téléphone :</strong> {client.telephone || '—'}
-                    </div>
-                    <div>
-                      <strong>Statut :</strong>{' '}
-                      {isCegeclim ? 'Client CEGECLIM' : 'Prospect'}
-                    </div>
-                    <div style={{ marginTop: 8 }}>
-                      <a
-                        href={`https://www.google.com/maps/search/?api=1&query=${client.latitude},${client.longitude}`}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        Ouvrir dans Google Maps
-                      </a>
-                    </div>
-                  </div>
-                </Popup>
-              </CircleMarker>
-            )
-          })}
+  return (
+    <CircleMarker
+      key={client.id}
+      center={[client.latitude as number, client.longitude as number]}
+      radius={6}
+      pathOptions={{
+        color: isCegeclim ? '#a16207' : '#1d4ed8',
+        fillColor: isCegeclim ? '#facc15' : '#60a5fa',
+        fillOpacity: 0.9,
+        weight: 1.5,
+      }}
+      eventHandlers={{
+        click: () => {
+          setSelectedClient(client)
+        },
+      }}
+    >
+      <Tooltip direction="top" offset={[0, -8]} opacity={1} sticky>
+        <div style={{ fontSize: 13, lineHeight: 1.45 }}>
+          <div style={{ fontWeight: 700 }}>
+            {client.raison_sociale_affichee || 'Sans nom'}
+          </div>
+          <div>{translateNaf(client.activitePrincipaleEtablissement)}</div>
+          <div>Création : {formatDateFr(client.dateCreationEtablissement)}</div>
+          <div>Tél : {client.telephone || '—'}</div>
+        </div>
+      </Tooltip>
+    </CircleMarker>
+  )
+})}
         </MapContainer>
       </div>
     </>
@@ -3530,14 +3606,55 @@ useEffect(() => {
           <div style={modalOverlayStyle}>
             <div style={clientModalStyle}>
               <div style={clientModalHeaderStyle}>
-                <div>
-                  <h3 style={clientModalTitleStyle}>
-                    {selectedClient.raison_sociale_affichee || 'Entreprise'}
-                  </h3>
-                  <div style={clientModalSubtitleStyle}>
-                    SIRET : {selectedClient.siret || 'NC'}
-                  </div>
-                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+  {/* Flèche gauche */}
+  <button
+    onClick={openPreviousClient}
+    disabled={!previousClient}
+    style={{
+      width: 36,
+      height: 36,
+      borderRadius: 8,
+      border: '1px solid #cbd5e1',
+      background: previousClient ? '#fff' : '#f1f5f9',
+      cursor: previousClient ? 'pointer' : 'not-allowed',
+      fontSize: 18,
+      fontWeight: 700,
+    }}
+    title="Client précédent"
+  >
+    ←
+  </button>
+
+  {/* Flèche droite */}
+  <button
+    onClick={openNextClient}
+    disabled={!nextClient}
+    style={{
+      width: 36,
+      height: 36,
+      borderRadius: 8,
+      border: '1px solid #cbd5e1',
+      background: nextClient ? '#fff' : '#f1f5f9',
+      cursor: nextClient ? 'pointer' : 'not-allowed',
+      fontSize: 18,
+      fontWeight: 700,
+    }}
+    title="Client suivant"
+  >
+    →
+  </button>
+
+  {/* Titre */}
+  <div>
+    <h3 style={clientModalTitleStyle}>
+      {selectedClient.raison_sociale_affichee || 'Entreprise'}
+    </h3>
+    <div style={clientModalSubtitleStyle}>
+      SIRET : {selectedClient.siret || 'NC'}
+    </div>
+  </div>
+</div>
 
                 <div style={clientHeaderBadgesWrapStyle}>
 
@@ -3574,7 +3691,7 @@ useEffect(() => {
                       ? 'Enrichissement...'
                       : 'Enrichir la fiche'}
                   </button>
-
+                  
                   <button onClick={() => setSelectedClient(null)} style={toolbarButtonStyle}>
                     Fermer
                   </button>
@@ -3603,7 +3720,35 @@ useEffect(() => {
                   </div>
 
                   <div style={clientBlockStyle}>
-                    <div style={clientBlockTitleStyle}>Localisation</div>
+          
+                    <div
+  style={{
+    ...clientBlockTitleStyle,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  }}
+>
+  <span>Localisation</span>
+
+  <span
+    style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      padding: '6px 12px',
+      borderRadius: 999,
+      fontSize: 13,
+      fontWeight: 700,
+      whiteSpace: 'nowrap',
+      background: selectedClientVisibleOnMap ? '#166534' : '#991b1b',
+      color: '#fff',
+    }}
+    title={selectedClientMapReason}
+  >
+    {selectedClientVisibleOnMap ? 'Présent sur la carte' : 'Absent de la carte'}
+  </span>
+</div>
                     <div style={clientBlockContentStyle}>
                       <div><b>Adresse :</b> {selectedClient.adresse_complete || 'NC'}</div>
                       <div><b>Ville :</b> {selectedClient.libelleCommuneEtablissement || 'NC'}</div>
@@ -3611,6 +3756,9 @@ useEffect(() => {
                       <div><b>Département :</b> {getClientDepartment(selectedClient) || 'NC'}</div>
                       <div><b>Coordonnée X :</b> {selectedClient.coordonneeLambertAbscisseEtablissement ?? 'NC'}</div>
                       <div><b>Coordonnée Y :</b> {selectedClient.coordonneeLambertOrdonneeEtablissement ?? 'NC'}</div>
+                      <div style={{ marginTop: 10 }}>
+  <strong>Raison :</strong> {selectedClientMapReason}
+</div>
                       {selectedClient.google_maps_url ? (
                         <div>
                           <b>Google Maps :</b>{' '}
@@ -4150,8 +4298,8 @@ const modalOverlayStyle: React.CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'center',
-  padding: '16px',
-  zIndex: 50,
+  padding: '24px',
+  zIndex: 20000,
 }
 
 const modalStyle: React.CSSProperties = {
