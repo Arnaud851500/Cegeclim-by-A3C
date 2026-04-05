@@ -33,6 +33,31 @@ const Popup: any = dynamic(
   () => import('react-leaflet').then((mod) => mod.Popup as any),
   { ssr: false }
 )
+type ClientMapRow = {
+  id: string
+  siret: string | null
+  raison_sociale_affichee: string | null
+  naf_libelle_traduit: string | null
+  dateCreationEtablissement: string | null
+  codePostalEtablissement: string | null
+  libelleCommuneEtablissement: string | null
+  coordonneeLambertAbscisseEtablissement: number | null
+  coordonneeLambertOrdonneeEtablissement: number | null
+  latitude: number | null
+  longitude: number | null
+
+  is_client_cegeclim: boolean
+  statut_carte: 'CLIENT_CEGECLIM' | 'PROSPECT'
+
+  numero_client_sage: string | null
+  designation_commerciale: string | null
+  representant: string | null
+  date_creation: string | null
+  agence: string | null
+  cp_sage: string | null
+  ville_sage: string | null
+  remarque: string | null
+}
 
 type ClientRow = {
   id: string
@@ -312,6 +337,71 @@ function distanceKmLambert(
   return Math.round((meters / 1000) * 10) / 10
 }
 
+function lambert93ToWgs84(
+  x: number | null | undefined,
+  y: number | null | undefined
+): { latitude: number; longitude: number } | null {
+  if (x == null || y == null) return null
+  const X = Number(x)
+  const Y = Number(y)
+  if (!Number.isFinite(X) || !Number.isFinite(Y)) return null
+
+  const n = 0.725607765053267
+  const C = 11754255.426096
+  const xs = 700000
+  const ys = 12655612.049876
+  const lon0 = (3 * Math.PI) / 180
+  const e = 0.0818191910428158
+
+  const dx = X - xs
+  const dy = Y - ys
+  const R = Math.sqrt(dx * dx + dy * dy)
+  if (!Number.isFinite(R) || R === 0) return null
+
+  const gamma = Math.atan(dx / (ys - Y))
+  const lonRad = lon0 + gamma / n
+  const latIso = -Math.log(Math.abs(R / C)) / n
+
+  let latRad = 2 * Math.atan(Math.exp(latIso)) - Math.PI / 2
+  for (let i = 0; i < 6; i += 1) {
+    latRad =
+      2 *
+        Math.atan(
+          Math.pow((1 + e * Math.sin(latRad)) / (1 - e * Math.sin(latRad)), e / 2) *
+            Math.exp(latIso)
+        ) -
+      Math.PI / 2
+  }
+
+  return {
+    latitude: (latRad * 180) / Math.PI,
+    longitude: (lonRad * 180) / Math.PI,
+  }
+}
+
+function ensureClientCoordinates<T extends ClientRow>(row: T): T {
+  const hasLatLon =
+    typeof row.latitude === 'number' &&
+    Number.isFinite(row.latitude) &&
+    typeof row.longitude === 'number' &&
+    Number.isFinite(row.longitude)
+
+  if (hasLatLon) return row
+
+  const converted = lambert93ToWgs84(
+    row.coordonneeLambertAbscisseEtablissement,
+    row.coordonneeLambertOrdonneeEtablissement
+  )
+
+  if (!converted) return row
+
+  return {
+    ...row,
+    latitude: converted.latitude,
+    longitude: converted.longitude,
+  }
+}
+
 function formatDateFr(dateStr: string | null | undefined): string {
   if (!dateStr) return 'ND'
   const d = new Date(dateStr)
@@ -494,7 +584,7 @@ async function fetchAllClients(): Promise<{ rows: ClientRow[]; totalCount: numbe
 
   while (true) {
     const { data, error, count } = await supabase
-      .from('clients')
+      .from('vw_clients_map')
       .select(
         `
         id,
@@ -830,6 +920,7 @@ export default function ClientsPage() {
   const [mapClients, setMapClients] = useState<ClientRow[]>([])
   const leafletMapRef = useRef<any>(null)
   const [mapTitle, setMapTitle] = useState('')
+  const [mapInstanceKey, setMapInstanceKey] = useState(0)
   const [showMapCegeclim, setShowMapCegeclim] = useState(true)
   const [showMapProspects, setShowMapProspects] = useState(true)
   
@@ -1117,6 +1208,7 @@ async function openMapFromCell(secteur: string, departement: string | null) {
   setMapClients([])
   setShowMapCegeclim(true)
   setShowMapProspects(true)
+  setMapInstanceKey((prev) => prev + 1)
 
   setMapTitle(
     departement
@@ -1127,68 +1219,17 @@ async function openMapFromCell(secteur: string, departement: string | null) {
   )
 
   try {
-    let query = supabase
-      .from('clients')
-      .select(`
-        id,
-        siret,
-        raison_sociale_affichee,
-        activitePrincipaleEtablissement,
-        naf_libelle_traduit,
-        dateCreationEtablissement,
-        codePostalEtablissement,
-        libelleCommuneEtablissement,
-        departement,
-        coordonneeLambertAbscisseEtablissement,
-        coordonneeLambertOrdonneeEtablissement,
-        latitude,
-        longitude,
-        telephone,
-        email,
-        site_web,
-        nom_dirigeant,
-        effectif_estime,
-        ca_estime,
-        pappers_ca,
-        pappers_resultat,
-        rge,
-        potentiel_score,
-        enrichment_status,
-        last_enrichment_at,
-        enrichment_source,
-        enrichment_error,
-        google_maps_url,
-        google_rating,
-        google_user_ratings_total,
-        present_dans_cegeclim,
-        contactable,
-        adresse_complete,
-        trancheEffectifsEtablissement,
-        date_import,
-        prospect_status,
-        assigned_to,
-        last_contact_at,
-        next_action_at,
-        next_action_label,
-        prospect_comment
-      `)
-      .not('latitude', 'is', null)
-      .not('longitude', 'is', null)
+    let rows = scopedClients.map(ensureClientCoordinates)
 
     if (departement) {
-      query = query.eq('departement', departement)
+      rows = rows.filter((row) => getClientDepartment(row) === departement)
     }
 
-    const { data, error } = await query.limit(5000)
-
-    if (error) throw error
-
-    let rows = (data || []) as ClientRow[]
-
     if (secteur !== 'TOUS') {
-      rows = rows.filter(
-        (row) => translateNaf(row.activitePrincipaleEtablissement) === secteur
-      )
+      rows = rows.filter((row) => {
+        const sector = row.naf_libelle_traduit || translateNaf(row.activitePrincipaleEtablissement)
+        return sector === secteur
+      })
     }
 
     setMapClients(rows)
@@ -1407,11 +1448,7 @@ const mapClientsWithCoords = useMemo(() => {
   )
 }, [mapClients])
 
-function matchesMapProspectFilters(row: ClientRow) {
-  const days = diffDaysFromToday(row.dateCreationEtablissement)
-  const minDays = sliderToDays(ageSliderMin)
-  const maxDays = sliderToDays(ageSliderMax)
-
+function matchesMapCommonFilters(row: ClientRow) {
   const agenceCoords =
     selectedAgence === 'TOUS'
       ? null
@@ -1477,10 +1514,6 @@ function matchesMapProspectFilters(row: ClientRow) {
     if (badge.label === 'OK') return false
   }
 
-  if (days !== null) {
-    if (days < minDays || days > maxDays) return false
-  }
-
   if (selectedAgence !== 'TOUS') {
     if (distance == null) {
       if (!includeNoDistance) return false
@@ -1492,11 +1525,43 @@ function matchesMapProspectFilters(row: ClientRow) {
   return true
 }
 
+function matchesMapProspectFilters(row: ClientRow) {
+  const days = diffDaysFromToday(row.dateCreationEtablissement)
+  const minDays = Math.min(sliderToDays(ageSliderMin), sliderToDays(ageSliderMax))
+  const maxDays = Math.max(sliderToDays(ageSliderMin), sliderToDays(ageSliderMax))
+
+  if (!matchesMapCommonFilters(row)) return false
+
+  if (days !== null) {
+    if (days < minDays || days > maxDays) return false
+  }
+
+  return true
+}
+
 const mapCegeclimPoints = useMemo(() => {
-  return mapClientsWithCoords.filter((client) =>
-    isClientPresentInCegeclim(client, cegeclimBySiret)
+  return mapClientsWithCoords.filter(
+    (client) =>
+      isClientPresentInCegeclim(client, cegeclimBySiret) &&
+      matchesMapCommonFilters(client)
   )
-}, [mapClientsWithCoords, cegeclimBySiret])
+}, [
+  mapClientsWithCoords,
+  cegeclimBySiret,
+  search,
+  designationSearch,
+  selectedDepartments,
+  selectedSectors,
+  selectedNafCodes,
+  selectedAgence,
+  includeNoDistance,
+  onlyContactable,
+  excludeDesignationND,
+  excludeFutureCreation,
+  onlyToEnrich,
+  distanceMax,
+  agences,
+])
 
 const mapProspectPoints = useMemo(() => {
   return mapClientsWithCoords.filter(
@@ -1599,6 +1664,18 @@ useEffect(() => {
     window.clearTimeout(timeout)
   }
 }, [mapOpen, visibleMapPoints])
+
+useEffect(() => {
+  if (mapOpen) return
+
+  if (leafletMapRef.current && typeof leafletMapRef.current.remove === 'function') {
+    try {
+      leafletMapRef.current.remove()
+    } catch {}
+  }
+
+  leafletMapRef.current = null
+}, [mapOpen, mapInstanceKey])
 
   const cegeclimDetailsBySiret = useMemo(() => {
     const map = new Map<string, ClientCegeclimRow>()
@@ -3322,7 +3399,7 @@ const selectedClientMapReason = useMemo(() => {
         display: 'inline-block',
       }}
     />
-    Clients CEGECLIM ({mapCegeclimPoints.length})
+    Clients CEGECLIM géolocalisés ({mapCegeclimPoints.length})
   </label>
 
   <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
@@ -3341,7 +3418,7 @@ const selectedClientMapReason = useMemo(() => {
         display: 'inline-block',
       }}
     />
-    Prospects filtrés ({mapProspectPoints.length})
+    Prospects géolocalisés ({mapProspectPoints.length})
   </label>
 </div>
 
@@ -3356,12 +3433,13 @@ const selectedClientMapReason = useMemo(() => {
         }}
       >
         <MapContainer
+        key={`map-${mapInstanceKey}-${mapTitle}`}
         center={[46.603354, 1.888334] as any}
         zoom={6}
         style={{ height: '100%', width: '100%', minHeight: 500 }}
         ref={(mapInstance: any) => {
-        if (mapInstance) leafletMapRef.current = mapInstance
-         }}
+          if (mapInstance) leafletMapRef.current = mapInstance
+        }}
         >
           <TileLayer
           attribution='&copy; OpenStreetMap contributors'
