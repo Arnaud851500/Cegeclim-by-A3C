@@ -497,7 +497,7 @@ function normalizeScopeValue(value: string | null | undefined): string {
     .toLowerCase()
 }
 
-function getClientDepartment(row: ClientRow): string {
+function getClientDepartment(row: Pick<ClientRow, 'codePostalEtablissement' | 'departement'>): string {
   return getDepartmentFromPostalCode(row.codePostalEtablissement) || String(row.departement || '').trim()
 }
 
@@ -1304,7 +1304,7 @@ async function openMapFromCell(secteur: string, departement: string | null) {
     })
 
     if (departement) {
-      rows = rows.filter((row) => getClientDepartment(row as ClientRow) === departement)
+      rows = rows.filter((row) => getClientDepartment(row) === departement)
     }
 
     if (secteur !== 'TOUS') {
