@@ -3461,7 +3461,7 @@ const selectedClientMapReason = useMemo(() => {
                 height: 14,
                 borderRadius: '50%',
                 background: '#cbd5e1',
-                border: '3px solid #e10a0a',
+                border: '3px solid #facc15',
                 display: 'inline-block',
                 boxSizing: 'border-box',
               }}
@@ -3580,10 +3580,10 @@ const selectedClientMapReason = useMemo(() => {
       center={[client.latitude as number, client.longitude as number]}
       radius={6}
       pathOptions={{
-        color: isCegeclim ? '#fa1515' : '#475569',
+        color: isCegeclim ? '#facc15' : '#475569',
         fillColor: sectorColor,
         fillOpacity: 0.9,
-        weight: isCegeclim ? 2 : 1.75,
+        weight: isCegeclim ? 3 : 1.75,
       }}
       eventHandlers={{
         click: () => {
