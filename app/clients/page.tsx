@@ -762,15 +762,18 @@ async function fetchClientsCegeclimRows(): Promise<ClientCegeclimRow[]> {
       (row) => Boolean(normalizeSiret(row.siret))
     )
   } catch (error: any) {
-    console.error('Erreur inattendue clients_cegeclim:', {
-      message: error?.message,
-      details: error?.details,
-      hint: error?.hint,
-      code: error?.code,
-      raw: error,
-    })
-    return []
-  }
+  console.error('Erreur loadAll brute:', error)
+  console.error('Type erreur:', typeof error)
+  console.error('Keys erreur:', error ? Object.keys(error) : [])
+  console.error('Erreur loadAll détaillée JSON:', JSON.stringify(error, null, 2))
+
+  alert(
+    "Erreur lors du chargement de l'écran Clients : " +
+      (error?.message || error?.toString?.() || JSON.stringify(error))
+  )
+} finally {
+  setLoading(false)
+  
 }
 
 async function fetchRejectRows(importId: string): Promise<RejectRow[]> {
@@ -1245,10 +1248,58 @@ async function openMapFromCell(secteur: string, departement: string | null) {
   )
 
   try {
-    let rows = scopedClients.map(ensureClientCoordinates)
+    let rows: ClientMapRow[] = scopedClients.map((client) => {
+      const normalized = ensureClientCoordinates(client)
+      const cegeclimRow = getClientCegeclimRow(client, cegeclimDetailsBySiret)
+      const isCegeclim = isClientPresentInCegeclim(client, cegeclimBySiret)
+
+      return {
+        id: normalized.id,
+        siret: normalized.siret,
+        raison_sociale_affichee: normalized.raison_sociale_affichee,
+        activitePrincipaleEtablissement: normalized.activitePrincipaleEtablissement,
+        naf_libelle_traduit: normalized.naf_libelle_traduit,
+        dateCreationEtablissement: normalized.dateCreationEtablissement,
+        codePostalEtablissement: normalized.codePostalEtablissement,
+        libelleCommuneEtablissement: normalized.libelleCommuneEtablissement,
+        departement: normalized.departement,
+        coordonneeLambertAbscisseEtablissement: normalized.coordonneeLambertAbscisseEtablissement,
+        coordonneeLambertOrdonneeEtablissement: normalized.coordonneeLambertOrdonneeEtablissement,
+        latitude: normalized.latitude,
+        longitude: normalized.longitude,
+        telephone: normalized.telephone,
+        email: normalized.email,
+        site_web: normalized.site_web,
+        contactable: normalized.contactable,
+        enrichment_status: normalized.enrichment_status,
+        google_maps_url: normalized.google_maps_url,
+        google_rating: normalized.google_rating,
+        google_user_ratings_total: normalized.google_user_ratings_total,
+        adresse_complete: normalized.adresse_complete,
+        trancheEffectifsEtablissement: normalized.trancheEffectifsEtablissement,
+        date_import: normalized.date_import,
+        prospect_status: normalized.prospect_status,
+        assigned_to: normalized.assigned_to,
+        last_contact_at: normalized.last_contact_at,
+        next_action_at: normalized.next_action_at,
+        next_action_label: normalized.next_action_label,
+        prospect_comment: normalized.prospect_comment,
+        present_dans_cegeclim: isCegeclim ? 'OUI' : 'NON',
+        is_client_cegeclim: isCegeclim,
+        statut_carte: isCegeclim ? 'CLIENT_CEGECLIM' : 'PROSPECT',
+        numero_client_sage: cegeclimRow?.numero_client_sage ?? null,
+        designation_commerciale: cegeclimRow?.designation_commerciale ?? null,
+        representant: cegeclimRow?.representant ?? null,
+        date_creation: cegeclimRow?.date_creation ?? null,
+        agence: cegeclimRow?.agence ?? null,
+        cp_sage: cegeclimRow?.cp_sage ?? null,
+        ville_sage: cegeclimRow?.ville_sage ?? null,
+        remarque: cegeclimRow?.remarque ?? null,
+      }
+    })
 
     if (departement) {
-      rows = rows.filter((row) => getClientDepartment(row) === departement)
+      rows = rows.filter((row) => getClientDepartment(row as ClientRow) === departement)
     }
 
     if (secteur !== 'TOUS') {
@@ -3461,7 +3512,7 @@ const selectedClientMapReason = useMemo(() => {
                 height: 14,
                 borderRadius: '50%',
                 background: '#cbd5e1',
-                border: '3px solid #e10a0a',
+                border: '3px solid #facc15',
                 display: 'inline-block',
                 boxSizing: 'border-box',
               }}
@@ -3580,10 +3631,10 @@ const selectedClientMapReason = useMemo(() => {
       center={[client.latitude as number, client.longitude as number]}
       radius={6}
       pathOptions={{
-        color: isCegeclim ? '#fa1515' : '#475569',
+        color: isCegeclim ? '#facc15' : '#475569',
         fillColor: sectorColor,
         fillOpacity: 0.9,
-        weight: isCegeclim ? 2 : 1.75,
+        weight: isCegeclim ? 3 : 1.75,
       }}
       eventHandlers={{
         click: () => {
