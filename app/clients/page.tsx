@@ -37,34 +37,14 @@ type ClientMapRow = {
   id: string
   siret: string | null
   raison_sociale_affichee: string | null
-  activitePrincipaleEtablissement: string | null
   naf_libelle_traduit: string | null
   dateCreationEtablissement: string | null
   codePostalEtablissement: string | null
   libelleCommuneEtablissement: string | null
-  departement: string | null
   coordonneeLambertAbscisseEtablissement: number | null
   coordonneeLambertOrdonneeEtablissement: number | null
   latitude: number | null
   longitude: number | null
-  telephone: string | null
-  email: string | null
-  site_web: string | null
-  contactable: boolean | null
-  enrichment_status: string | null
-  google_maps_url: string | null
-  google_rating: number | null
-  google_user_ratings_total: number | null
-  adresse_complete: string | null
-  trancheEffectifsEtablissement: string | null
-  date_import: string | null
-  prospect_status: string | null
-  assigned_to: string | null
-  last_contact_at: string | null
-  next_action_at: string | null
-  next_action_label: string | null
-  prospect_comment: string | null
-  present_dans_cegeclim: string | boolean | null
 
   is_client_cegeclim: boolean
   statut_carte: 'CLIENT_CEGECLIM' | 'PROSPECT'
@@ -477,11 +457,6 @@ function getSectorColor(sector: string | null | undefined) {
   return '#d9d9d9'
 }
 
-
-function getClientSectorLabel(row: Pick<ClientRow, 'naf_libelle_traduit' | 'activitePrincipaleEtablissement'>): string {
-  return row.naf_libelle_traduit || translateNaf(row.activitePrincipaleEtablissement)
-}
-
 function compactSelectionLabel(values: string[], fallback = 'TOUS') {
   if (values.length === 0) return fallback
   if (values.length <= 2) return values.join(', ')
@@ -497,7 +472,7 @@ function normalizeScopeValue(value: string | null | undefined): string {
     .toLowerCase()
 }
 
-function getClientDepartment(row: Pick<ClientRow, 'codePostalEtablissement' | 'departement'>): string {
+function getClientDepartment(row: ClientRow): string {
   return getDepartmentFromPostalCode(row.codePostalEtablissement) || String(row.departement || '').trim()
 }
 
@@ -505,6 +480,12 @@ function getAbsentDepartment(row: CegeclimAbsentRow): string {
   return getDepartmentFromPostalCode(row.code_postal) || ''
 }
 
+
+function getClientSectorLabel(
+  row: Pick<ClientRow, 'naf_libelle_traduit' | 'activitePrincipaleEtablissement'>
+): string {
+  return row.naf_libelle_traduit || translateNaf(row.activitePrincipaleEtablissement)
+}
 
 function getCegeclimPresenceValue(value: unknown): string {
   const raw = String(value ?? '').trim()
@@ -942,7 +923,7 @@ export default function ClientsPage() {
   const [importing, setImporting] = useState(false)
   const [mapOpen, setMapOpen] = useState(false)
   const [mapLoading, setMapLoading] = useState(false)
-  const [mapClients, setMapClients] = useState<ClientMapRow[]>([])
+  const [mapClients, setMapClients] = useState<ClientRow[]>([])
   const leafletMapRef = useRef<any>(null)
   const [mapTitle, setMapTitle] = useState('')
   const [mapInstanceKey, setMapInstanceKey] = useState(0)
@@ -1213,14 +1194,6 @@ function openNextClient() {
         setBackgroundHydratingClients(false)
       }
     } catch (error: any) {
-      console.error('Erreur loadAll brute:', error)
-      console.error('Type erreur loadAll:', typeof error)
-      console.error('Keys erreur loadAll:', error ? Object.keys(error) : [])
-      try {
-        console.error('Erreur loadAll détaillée JSON:', JSON.stringify(error, null, 2))
-      } catch (jsonErr) {
-        console.error('Erreur loadAll JSON stringify impossible:', jsonErr)
-      }
       console.error('Erreur loadAll détaillée:', {
         message: error?.message,
         details: error?.details,
@@ -1230,7 +1203,7 @@ function openNextClient() {
       })
       alert(
         "Erreur lors du chargement de l'écran Clients : " +
-          (error?.message || error?.toString?.() || JSON.stringify(error))
+          (error?.message || JSON.stringify(error))
       )
     } finally {
       setLoading(false)
@@ -1253,55 +1226,7 @@ async function openMapFromCell(secteur: string, departement: string | null) {
   )
 
   try {
-    let rows: ClientMapRow[] = scopedClients.map((client) => {
-      const normalized = ensureClientCoordinates(client)
-      const cegeclimRow = getClientCegeclimRow(client, cegeclimDetailsBySiret)
-      const isCegeclim = isClientPresentInCegeclim(client, cegeclimBySiret)
-
-      return {
-        id: normalized.id,
-        siret: normalized.siret,
-        raison_sociale_affichee: normalized.raison_sociale_affichee,
-        activitePrincipaleEtablissement: normalized.activitePrincipaleEtablissement,
-        naf_libelle_traduit: normalized.naf_libelle_traduit,
-        dateCreationEtablissement: normalized.dateCreationEtablissement,
-        codePostalEtablissement: normalized.codePostalEtablissement,
-        libelleCommuneEtablissement: normalized.libelleCommuneEtablissement,
-        departement: normalized.departement,
-        coordonneeLambertAbscisseEtablissement: normalized.coordonneeLambertAbscisseEtablissement,
-        coordonneeLambertOrdonneeEtablissement: normalized.coordonneeLambertOrdonneeEtablissement,
-        latitude: normalized.latitude,
-        longitude: normalized.longitude,
-        telephone: normalized.telephone,
-        email: normalized.email,
-        site_web: normalized.site_web,
-        contactable: normalized.contactable,
-        enrichment_status: normalized.enrichment_status,
-        google_maps_url: normalized.google_maps_url,
-        google_rating: normalized.google_rating,
-        google_user_ratings_total: normalized.google_user_ratings_total,
-        adresse_complete: normalized.adresse_complete,
-        trancheEffectifsEtablissement: normalized.trancheEffectifsEtablissement,
-        date_import: normalized.date_import,
-        prospect_status: normalized.prospect_status,
-        assigned_to: normalized.assigned_to,
-        last_contact_at: normalized.last_contact_at,
-        next_action_at: normalized.next_action_at,
-        next_action_label: normalized.next_action_label,
-        prospect_comment: normalized.prospect_comment,
-        present_dans_cegeclim: isCegeclim ? 'OUI' : 'NON',
-        is_client_cegeclim: isCegeclim,
-        statut_carte: isCegeclim ? 'CLIENT_CEGECLIM' : 'PROSPECT',
-        numero_client_sage: cegeclimRow?.numero_client_sage ?? null,
-        designation_commerciale: cegeclimRow?.designation_commerciale ?? null,
-        representant: cegeclimRow?.representant ?? null,
-        date_creation: cegeclimRow?.date_creation ?? null,
-        agence: cegeclimRow?.agence ?? null,
-        cp_sage: cegeclimRow?.cp_sage ?? null,
-        ville_sage: cegeclimRow?.ville_sage ?? null,
-        remarque: cegeclimRow?.remarque ?? null,
-      }
-    })
+    let rows = scopedClients.map(ensureClientCoordinates)
 
     if (departement) {
       rows = rows.filter((row) => getClientDepartment(row) === departement)
@@ -1314,11 +1239,9 @@ async function openMapFromCell(secteur: string, departement: string | null) {
       })
     }
 
-    const nextSectorVisibility = rows.reduce<Record<string, boolean>>((acc, row) => {
-      const sectorLabel = getClientSectorLabel(row)
-      acc[sectorLabel] = true
-      return acc
-    }, {})
+    const nextSectorVisibility = Object.fromEntries(
+      Array.from(new Set(rows.map((row) => getClientSectorLabel(row)).filter(Boolean))).map((sector) => [sector, true])
+    ) as Record<string, boolean>
 
     setMapSectorVisibility(nextSectorVisibility)
     setMapClients(rows)
@@ -1394,6 +1317,19 @@ async function openMapFromCell(secteur: string, departement: string | null) {
     } finally {
       setEnrichingSirets((prev) => prev.filter((x) => x !== siret))
     }
+  }
+
+  async function openClientFromMap(client: ClientRow) {
+    const siret = normalizeSiret(client.siret)
+    if (!siret) return
+
+    const refreshed = await fetchClientBySiret(siret)
+    if (refreshed) {
+      setSelectedClient(refreshed)
+      return
+    }
+
+    setSelectedClient(client)
   }
 
   async function enrichBatch(rows: ClientRow[]) {
@@ -1537,7 +1473,7 @@ const mapClientsWithCoords = useMemo(() => {
   )
 }, [mapClients])
 
-function matchesMapCommonFilters(row: ClientRow | ClientMapRow) {
+function matchesMapCommonFilters(row: ClientRow) {
   const agenceCoords =
     selectedAgence === 'TOUS'
       ? null
@@ -1614,7 +1550,7 @@ function matchesMapCommonFilters(row: ClientRow | ClientMapRow) {
   return true
 }
 
-function matchesMapProspectFilters(row: ClientRow | ClientMapRow) {
+function matchesMapProspectFilters(row: ClientRow) {
   const days = diffDaysFromToday(row.dateCreationEtablissement)
   const minDays = Math.min(sliderToDays(ageSliderMin), sliderToDays(ageSliderMax))
   const maxDays = Math.max(sliderToDays(ageSliderMin), sliderToDays(ageSliderMax))
@@ -1628,29 +1564,11 @@ function matchesMapProspectFilters(row: ClientRow | ClientMapRow) {
   return true
 }
 
-const mapLegendSectors = useMemo(() => {
-  return Array.from(
-    new Set(mapClientsWithCoords.map((client) => getClientSectorLabel(client)).filter(Boolean))
-  ).sort((a, b) => a.localeCompare(b, 'fr'))
-}, [mapClientsWithCoords])
-
-useEffect(() => {
-  if (!mapLegendSectors.length) return
-  setMapSectorVisibility((prev) => {
-    const next: Record<string, boolean> = {}
-    for (const sector of mapLegendSectors) {
-      next[sector] = prev[sector] ?? true
-    }
-    return next
-  })
-}, [mapLegendSectors])
-
 const mapCegeclimPoints = useMemo(() => {
   return mapClientsWithCoords.filter(
     (client) =>
       isClientPresentInCegeclim(client, cegeclimBySiret) &&
-      matchesMapCommonFilters(client) &&
-      mapSectorVisibility[getClientSectorLabel(client)] !== false
+      matchesMapCommonFilters(client)
   )
 }, [
   mapClientsWithCoords,
@@ -1668,15 +1586,13 @@ const mapCegeclimPoints = useMemo(() => {
   onlyToEnrich,
   distanceMax,
   agences,
-  mapSectorVisibility,
 ])
 
 const mapProspectPoints = useMemo(() => {
   return mapClientsWithCoords.filter(
     (client) =>
       !isClientPresentInCegeclim(client, cegeclimBySiret) &&
-      matchesMapProspectFilters(client) &&
-      mapSectorVisibility[getClientSectorLabel(client)] !== false
+      matchesMapProspectFilters(client)
   )
 }, [
   mapClientsWithCoords,
@@ -1696,15 +1612,47 @@ const mapProspectPoints = useMemo(() => {
   ageSliderMin,
   ageSliderMax,
   agences,
-  mapSectorVisibility,
 ])
+
+const mapLegendSectors = useMemo(() => {
+  return Array.from(
+    new Set(
+      [...mapCegeclimPoints, ...mapProspectPoints]
+        .map((client) => getClientSectorLabel(client))
+        .filter(Boolean)
+    )
+  ).sort((a, b) => a.localeCompare(b, 'fr'))
+}, [mapCegeclimPoints, mapProspectPoints])
 
 const visibleMapPoints = useMemo(() => {
   return [
     ...(showMapCegeclim ? mapCegeclimPoints : []),
     ...(showMapProspects ? mapProspectPoints : []),
-  ]
-}, [showMapCegeclim, showMapProspects, mapCegeclimPoints, mapProspectPoints])
+  ].filter((client) => mapSectorVisibility[getClientSectorLabel(client)] !== false)
+}, [showMapCegeclim, showMapProspects, mapCegeclimPoints, mapProspectPoints, mapSectorVisibility])
+
+useEffect(() => {
+  setMapSectorVisibility((prev) => {
+    const next = { ...prev }
+    let changed = false
+
+    for (const sector of mapLegendSectors) {
+      if (!(sector in next)) {
+        next[sector] = true
+        changed = true
+      }
+    }
+
+    for (const key of Object.keys(next)) {
+      if (!mapLegendSectors.includes(key)) {
+        delete next[key]
+        changed = true
+      }
+    }
+
+    return changed ? next : prev
+  })
+}, [mapLegendSectors])
 
 useEffect(() => {
   if (!mapOpen) return
@@ -3493,113 +3441,86 @@ const selectedClientMapReason = useMemo(() => {
       <div
         style={{
           display: 'flex',
-          flexDirection: 'column',
-          gap: 12,
+          gap: 18,
+          alignItems: 'center',
+          flexWrap: 'wrap',
           padding: '0 2px',
           fontSize: 14,
           color: '#334155',
         }}
       >
-        <div style={{ display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap' }}>
-          <div>
-            <strong>{visibleMapPoints.length}</strong> entreprises visibles
-          </div>
+  <div>
+    <strong>{visibleMapPoints.length}</strong> entreprises visibles
+  </div>
 
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-            <input
-              type="checkbox"
-              checked={showMapCegeclim}
-              onChange={(e) => setShowMapCegeclim(e.target.checked)}
-            />
-            <span
-              style={{
-                width: 14,
-                height: 14,
-                borderRadius: '50%',
-                background: '#cbd5e1',
-                border: '3px solid #facc15',
-                display: 'inline-block',
-                boxSizing: 'border-box',
-              }}
-            />
-            Clients CEGECLIM ({mapCegeclimPoints.length})
-          </label>
+  <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+    <input
+      type="checkbox"
+      checked={showMapCegeclim}
+      onChange={(e) => setShowMapCegeclim(e.target.checked)}
+    />
+    <span
+      style={{
+        width: 12,
+        height: 12,
+        borderRadius: '50%',
+        background: '#94a3b8',
+        border: '3px solid #facc15',
+        display: 'inline-block',
+        boxSizing: 'border-box',
+      }}
+    />
+    Clients CEGECLIM géolocalisés ({mapCegeclimPoints.length})
+  </label>
 
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-            <input
-              type="checkbox"
-              checked={showMapProspects}
-              onChange={(e) => setShowMapProspects(e.target.checked)}
-            />
-            <span
-              style={{
-                width: 14,
-                height: 14,
-                borderRadius: '50%',
-                background: '#cbd5e1',
-                border: '2px solid #475569',
-                display: 'inline-block',
-                boxSizing: 'border-box',
-              }}
-            />
-            Prospects ({mapProspectPoints.length})
-          </label>
+  <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+    <input
+      type="checkbox"
+      checked={showMapProspects}
+      onChange={(e) => setShowMapProspects(e.target.checked)}
+    />
+    <span
+      style={{
+        width: 12,
+        height: 12,
+        borderRadius: '50%',
+        background: '#94a3b8',
+        border: '1px solid #334155',
+        display: 'inline-block',
+      }}
+    />
+    Prospects géolocalisés ({mapProspectPoints.length})
+  </label>
 
-          <span style={{ fontSize: 12, color: '#64748b' }}>
-            Le contour jaune identifie les clients CEGECLIM.
-          </span>
-        </div>
-
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-          {mapLegendSectors.map((sector) => {
-            const color = getSectorColor(sector)
-            const sectorCount = mapClientsWithCoords.filter(
-              (client) => getClientSectorLabel(client) === sector
-            ).length
-            const checked = mapSectorVisibility[sector] !== false
-
-            return (
-              <label
-                key={sector}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  cursor: 'pointer',
-                  border: '1px solid #cbd5e1',
-                  borderRadius: 999,
-                  padding: '6px 10px',
-                  background: checked ? '#fff' : '#f8fafc',
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  onChange={(e) =>
-                    setMapSectorVisibility((prev) => ({
-                      ...prev,
-                      [sector]: e.target.checked,
-                    }))
-                  }
-                />
-                <span
-                  style={{
-                    width: 14,
-                    height: 14,
-                    borderRadius: '50%',
-                    background: color,
-                    border: '2px solid #475569',
-                    display: 'inline-block',
-                    boxSizing: 'border-box',
-                  }}
-                />
-                <span>{sector}</span>
-                <span style={{ color: '#64748b' }}>({sectorCount})</span>
-              </label>
-            )
-          })}
-        </div>
-      </div>
+  {mapLegendSectors.map((sector) => (
+    <label
+      key={sector}
+      style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}
+    >
+      <input
+        type="checkbox"
+        checked={mapSectorVisibility[sector] !== false}
+        onChange={(e) =>
+          setMapSectorVisibility((prev) => ({
+            ...prev,
+            [sector]: e.target.checked,
+          }))
+        }
+      />
+      <span
+        style={{
+          width: 12,
+          height: 12,
+          borderRadius: '50%',
+          background: getSectorColor(sector),
+          border: '1px solid #475569',
+          display: 'inline-block',
+        }}
+      />
+      {sector}
+    </label>
+  ))}
+</div>
 
       <div
         style={{
@@ -3628,7 +3549,7 @@ const selectedClientMapReason = useMemo(() => {
           {visibleMapPoints.map((client) => {
   const isCegeclim = isClientPresentInCegeclim(client, cegeclimBySiret)
   const sectorLabel = getClientSectorLabel(client)
-  const sectorColor = getSectorColor(sectorLabel)
+  const markerColor = getSectorColor(sectorLabel)
 
   return (
     <CircleMarker
@@ -3636,14 +3557,14 @@ const selectedClientMapReason = useMemo(() => {
       center={[client.latitude as number, client.longitude as number]}
       radius={6}
       pathOptions={{
-        color: isCegeclim ? '#facc15' : '#475569',
-        fillColor: sectorColor,
-        fillOpacity: 0.9,
-        weight: isCegeclim ? 3 : 1.75,
+        color: isCegeclim ? '#facc15' : '#334155',
+        fillColor: markerColor,
+        fillOpacity: 0.95,
+        weight: isCegeclim ? 3 : 1.5,
       }}
       eventHandlers={{
         click: () => {
-          setSelectedClient(client)
+          void openClientFromMap(client)
         },
       }}
     >
@@ -3652,8 +3573,7 @@ const selectedClientMapReason = useMemo(() => {
           <div style={{ fontWeight: 700 }}>
             {client.raison_sociale_affichee || 'Sans nom'}
           </div>
-          <div>{sectorLabel}</div>
-          <div>{isCegeclim ? 'Client CEGECLIM' : 'Prospect'}</div>
+          <div>{getClientSectorLabel(client)}</div>
           <div>Création : {formatDateFr(client.dateCreationEtablissement)}</div>
           <div>Tél : {client.telephone || '—'}</div>
         </div>
