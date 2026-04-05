@@ -1537,7 +1537,7 @@ const mapClientsWithCoords = useMemo(() => {
   )
 }, [mapClients])
 
-function matchesMapCommonFilters(row: ClientRow) {
+function matchesMapCommonFilters(row: ClientRow | ClientMapRow) {
   const agenceCoords =
     selectedAgence === 'TOUS'
       ? null
@@ -1614,7 +1614,7 @@ function matchesMapCommonFilters(row: ClientRow) {
   return true
 }
 
-function matchesMapProspectFilters(row: ClientRow) {
+function matchesMapProspectFilters(row: ClientRow | ClientMapRow) {
   const days = diffDaysFromToday(row.dateCreationEtablissement)
   const minDays = Math.min(sliderToDays(ageSliderMin), sliderToDays(ageSliderMax))
   const maxDays = Math.max(sliderToDays(ageSliderMin), sliderToDays(ageSliderMax))
