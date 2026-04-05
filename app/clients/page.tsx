@@ -762,18 +762,15 @@ async function fetchClientsCegeclimRows(): Promise<ClientCegeclimRow[]> {
       (row) => Boolean(normalizeSiret(row.siret))
     )
   } catch (error: any) {
-  console.error('Erreur loadAll brute:', error)
-  console.error('Type erreur:', typeof error)
-  console.error('Keys erreur:', error ? Object.keys(error) : [])
-  console.error('Erreur loadAll détaillée JSON:', JSON.stringify(error, null, 2))
-
-  alert(
-    "Erreur lors du chargement de l'écran Clients : " +
-      (error?.message || error?.toString?.() || JSON.stringify(error))
-  )
-} finally {
-  setLoading(false)
-  
+    console.error('Erreur inattendue clients_cegeclim:', {
+      message: error?.message,
+      details: error?.details,
+      hint: error?.hint,
+      code: error?.code,
+      raw: error,
+    })
+    return []
+  }
 }
 
 async function fetchRejectRows(importId: string): Promise<RejectRow[]> {
@@ -1216,6 +1213,14 @@ function openNextClient() {
         setBackgroundHydratingClients(false)
       }
     } catch (error: any) {
+      console.error('Erreur loadAll brute:', error)
+      console.error('Type erreur loadAll:', typeof error)
+      console.error('Keys erreur loadAll:', error ? Object.keys(error) : [])
+      try {
+        console.error('Erreur loadAll détaillée JSON:', JSON.stringify(error, null, 2))
+      } catch (jsonErr) {
+        console.error('Erreur loadAll JSON stringify impossible:', jsonErr)
+      }
       console.error('Erreur loadAll détaillée:', {
         message: error?.message,
         details: error?.details,
@@ -1225,7 +1230,7 @@ function openNextClient() {
       })
       alert(
         "Erreur lors du chargement de l'écran Clients : " +
-          (error?.message || JSON.stringify(error))
+          (error?.message || error?.toString?.() || JSON.stringify(error))
       )
     } finally {
       setLoading(false)
