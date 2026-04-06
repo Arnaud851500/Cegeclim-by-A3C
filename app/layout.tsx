@@ -1,10 +1,10 @@
 'use client'
 
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { usePathname, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { AccessProvider, useAccess, type AccessRights } from '@/components/AccessContext'
-import { Analytics } from "@vercel/analytics/next"
+import { Analytics } from '@vercel/analytics/next'
 import './globals.css'
 
 import {
@@ -21,162 +21,175 @@ type MenuItem = {
   accessKey?: MenuAccessKey
 }
 
+type MenuGroup = {
+  label: string
+  items: MenuItem[]
+}
+
+
+
 function AppShell({ children }: { children: React.ReactNode }) {
+  
   const router = useRouter()
   const pathname = usePathname()
   const { societeFilter, setSocieteFilter } = useSocieteFilter()
   const { loading: accessLoading, rights, email } = useAccess()
 
-  const menu: MenuItem[] = [
-    { label: 'Dashboard', path: '/dashboard', accessKey: 'can_dashboard' },
-    { label: 'Territoire', path: '/territoire', accessKey: 'can_territoire' },
-    { label: 'Agences', path: '/agences', accessKey: 'can_agences' },
-    { label: 'Cartographie', path: '/cartographie', accessKey: 'can_cartographie' },
-    { label: 'Clients', path: '/clients', accessKey: 'can_clients' },
-    { label: 'Documents', path: '/documents', accessKey: 'can_documents' },
-    { label: 'Autorisation', path: '/autorisation', accessKey: 'can_autorisation' },
-    { label: 'Activités - CA (WIP)', path: '/activites', accessKey: 'can_activites' },
-    { label: 'Stocks et Flux log (WIP)', path: '/stocks', accessKey: 'can_stocks' },
-  
+  const [openGroup, setOpenGroup] = useState<string | null>(null)
+  const [hoverTimeout, setHoverTimeout] = useState<NodeJS.Timeout | null>(null)
+  const isLoginPage = pathname === '/login'
+  const isGroupActive = (group: MenuGroup) =>
+  group.items.some((item) => pathname === item.path)
+
+if (isLoginPage) {
+  return (
+    <div style={{ margin: 0, fontFamily: 'Arial, sans-serif', background: '#f5f7fa' }}>
+      {children}
+      <Analytics />
+    </div>
+  )
+}
+  const backgroundImageUrl =
+    'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Logo%20et%20images/Image%20site%20CEGECLIM%20maison.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJMb2dvIGV0IGltYWdlcy9JbWFnZSBzaXRlIENFR0VDTElNIG1haXNvbi5qcGciLCJpYXQiOjE3NzU1MDYyNTEsImV4cCI6NDg5NzU3MDI1MX0.d1YT7_-xD44QOm2LFbZIfpkjh9kiIGjpJiEuJxV0rMM'
+
+  const menuGroups: MenuGroup[] = [
+    {
+      label: 'Accueil',
+      items: [{ label: 'Accueil', path: '/accueil' }],
+    },
+    {
+      label: 'Base clients',
+      items: [{ label: 'Liste globale', path: '/clients', accessKey: 'can_clients' }],
+    },
+    {
+      label: 'Territoire',
+      items: [
+        { label: 'Territoire', path: '/territoire', accessKey: 'can_territoire' },
+        { label: 'Agences', path: '/agences', accessKey: 'can_agences' },
+        { label: 'Cartographie', path: '/cartographie', accessKey: 'can_cartographie' },
+      ],
+    },
+    {
+      label: 'Documents',
+      items: [{ label: 'Documents', path: '/documents', accessKey: 'can_documents' }],
+    },
+    {
+      label: 'Activité',
+      items: [{ label: 'Activités - CA (WIP)', path: '/activites', accessKey: 'can_activites' },]
+    },
+    {
+      label: 'Autorisations',
+      items: [{ label: 'Autorisations', path: '/autorisation', accessKey: 'can_autorisation' }]
+    },
+    
   ]
-
-  const visibleMenu = useMemo(() => {
-    if (accessLoading) return []
-
-    return menu.filter((item) => {
-      if (!item.accessKey) return false
-      return !!rights[item.accessKey]
-    })
-  }, [accessLoading, rights])
-
-  useEffect(() => {
-    if (accessLoading) return
-
-    const publicPaths = ['/login']
-    const neutralPaths = ['/unauthorized']
-
-    if (publicPaths.includes(pathname) || neutralPaths.includes(pathname)) {
-      return
-    }
-
-    if (!email) {
-      router.replace('/login')
-      return
-    }
-
-    const current = menu.find((item) => item.path === pathname)
-
-    if (current?.accessKey && !rights[current.accessKey]) {
-      router.replace('/unauthorized')
-    }
-  }, [accessLoading, pathname, rights, email, router])
-
-  const getPageTitle = () => {
-    const found = menu.find((item) => item.path === pathname)
-    if (found) return found.label
-    if (pathname === '/login') return 'Connexion'
-    if (pathname === '/unauthorized') return 'Accès refusé'
-    return 'Intranet'
-  }
 
   const handleLogout = async () => {
     await supabase.auth.signOut()
     window.location.href = '/login'
   }
 
-  const isLoginPage = pathname === '/login'
-
-  if (isLoginPage) {
-    return (
-      <div style={{ margin: 0, fontFamily: 'Arial, sans-serif', background: '#f5f7fa' }}>
-        {children}
-      </div>
-    )
-  }
-
   return (
-    <div style={appShellStyle}>
-      <aside style={sidebarStyle}>
-        <div style={logoBlockStyle}>
-          <div style={logoCircleStyle}>A3C</div>
-          <div>
-            <div style={brandTitleStyle}>Intranet</div>
-            <div style={brandSubStyle}>V1.secure</div>
-            <div style={brandSubStyle}>CEGECLIM</div>
+    <div
+      style={{
+        ...styles.app,
+        backgroundImage: `linear-gradient(rgba(255,255,255,0.75), rgba(255,255,255,0.92)), url("${backgroundImageUrl}")`,
+      }}
+    >
+      <div style={styles.overlay}>
+        {/* HEADER */}
+        <header style={styles.header}>
+          <div style={styles.top}>
+            <div style={styles.left}>
+              <img
+                src="https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/cegecilm%20officiel.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL2NlZ2VjaWxtIG9mZmljaWVsLmpwZyIsImlhdCI6MTc3NDY1MTM3OSwiZXhwIjo0ODk2NzE1Mzc5fQ.ePcMFHir7RsvdR-cR7nwh83H03S8oihNKwVgK2eCmy0"
+                style={styles.logo}
+              />
+              <div>
+                <div style={styles.subtitle}>
+                  Concessionnaire agréé de Bosch Home Comfort Group
+                </div>
+                <div style={styles.title}>Hitachi Cooling & Heating</div>
+              </div>
+            </div>
+
+            <div style={styles.center}>
+              PROSPECTION NOUVEAUX CLIENTS
+            </div>
+
+            <div style={styles.right}>
+              <select
+                value={societeFilter}
+                onChange={(e) => setSocieteFilter(e.target.value as SocieteFilter)}
+                style={styles.select}
+              >
+                {(rights.allowed_scopes || ['Global']).map((s) => (
+                  <option key={s}>{s}</option>
+                ))}
+              </select>
+
+              <button onClick={handleLogout} style={styles.logout}>
+                Déconnexion
+              </button>
+            </div>
           </div>
-        </div>
 
-        <div style={{ marginTop: 18 }}>
-          <div style={sectionTitleStyle}>VISION</div>
-
-          <select
-            style={selectStyle}
-            value={societeFilter}
-            disabled={!rights.can_change_scope}
-            onChange={(e) => setSocieteFilter(e.target.value as SocieteFilter)}
-          >
-            {(rights.allowed_scopes || ['Global']).map((scope) => (
-              <option key={scope} value={scope}>
-                {scope}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div style={{ marginTop: 18, flex: 1, overflowY: 'auto' }}>
-          <div style={sectionTitleStyle}>NAVIGATION</div>
-
-          {accessLoading ? (
-            <div style={loadingNavStyle}>Chargement des accès...</div>
-          ) : visibleMenu.length === 0 ? (
-            <div style={loadingNavStyle}>Aucune page autorisée</div>
-          ) : (
-            visibleMenu.map((item) => {
-              const isActive = pathname === item.path
-
-              return (
+          {/* NAV */}
+          <div style={styles.nav}>
+            
+            {menuGroups.map((group) => (
+              <div
+                key={group.label}
+                style={styles.menuWrapper}
+                onMouseEnter={() => {
+                  if (hoverTimeout) clearTimeout(hoverTimeout)
+                  setOpenGroup(group.label)
+                }}
+                onMouseLeave={() => {
+                  const t = setTimeout(() => setOpenGroup(null), 150)
+                  setHoverTimeout(t)
+                }}
+              >
                 <button
-                  key={item.path}
-                  onClick={() => router.push(item.path)}
-                  style={{
-                    ...menuButtonStyle,
-                    background: isActive ? '#4a5878' : '#5f6c89',
-                    border: isActive
-                      ? '1px solid #aab6cf'
-                      : '1px solid rgba(255,255,255,0.08)',
-                  }}
+                style={{
+                ...styles.navBtn,
+                ...(isGroupActive(group) ? styles.navBtnActive : {}),
+                }}
                 >
-                  {item.label}
+                {group.label} ▼
                 </button>
-              )
-            })
-          )}
-        </div>
-      </aside>
 
-      <div style={contentWrapperStyle}>
-        <header style={topBarStyle}>
-          <div style={topBarTitleStyle}>{getPageTitle()}</div>
-
-          <button onClick={handleLogout} style={logoutButtonStyle}>
-            Déconnexion
-          </button>
+                {openGroup === group.label && (
+                  <div style={styles.dropdown}>
+                    {group.items.map((item) => (
+                      <div
+                        key={item.path}
+                        style={styles.dropdownItem}
+                        onClick={() => router.push(item.path)}
+                      >
+                        {item.label}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
         </header>
 
-        <main style={contentStyle}>{children}</main>
+        {/* CONTENT */}
+        <main style={styles.content}>{children}</main>
       </div>
+
+      <Analytics />
     </div>
   )
 }
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode
-}) {
+export default function RootLayout({ children }: any) {
   return (
-    <html lang="fr">
-      <body style={{ margin: 0, fontFamily: 'Arial, sans-serif' }}>
+    <html>
+      <body>
         <AccessProvider>
           <SocieteFilterProvider>
             <AppShell>{children}</AppShell>
@@ -187,122 +200,112 @@ export default function RootLayout({
   )
 }
 
-/* ===================== STYLES ===================== */
+const styles: any = {
+  app: {
+    minHeight: '100vh',
+    backgroundSize: 'cover',
+  },
 
-const appShellStyle: React.CSSProperties = {
-  display: 'flex',
-  height: '100vh',
-  background: '#f5f7fa',
-}
+  overlay: {
+    backdropFilter: 'blur(3px)',
+    minHeight: '100vh',
+  },
 
-const sidebarStyle: React.CSSProperties = {
-  width: 240,
-  background: '#1f2d4d',
-  color: '#ffffff',
-  padding: 14,
-  display: 'flex',
-  flexDirection: 'column',
-  boxSizing: 'border-box',
-  borderRight: '1px solid rgba(255,255,255,0.08)',
-}
+  header: {
+    background: 'rgba(255,255,255,0.7)',
+    backdropFilter: 'blur(14px)',
+    boxShadow: '0 6px 20px rgba(0,0,0,0.08)',
+  },
 
-const logoBlockStyle: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 12,
-  marginBottom: 8,
-}
+  top: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    padding: '8px 20px',
+    alignItems: 'center',
+  },
 
-const logoCircleStyle: React.CSSProperties = {
-  width: 54,
-  height: 54,
-  borderRadius: 18,
-  background: 'linear-gradient(135deg, #39527d 0%, #8da87d 100%)',
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  fontWeight: 800,
-  fontSize: 24,
-  color: '#ffffff',
-}
+  left: {
+    display: 'flex',
+    gap: 12,
+    alignItems: 'center',
+  },
 
-const brandTitleStyle: React.CSSProperties = {
-  fontSize: 22,
-  fontWeight: 800,
-}
+  logo: {
+    width: 110,
+  },
 
-const brandSubStyle: React.CSSProperties = {
-  fontSize: 12,
-  opacity: 0.85,
-}
+  subtitle: {
+    fontSize: 14,
+  },
 
-const sectionTitleStyle: React.CSSProperties = {
-  fontSize: 12,
-  fontWeight: 700,
-  opacity: 0.75,
-  marginBottom: 8,
-}
+  title: {
+    fontSize: 18,
+    fontWeight: 800,
+  },
 
-const selectStyle: React.CSSProperties = {
-  width: '100%',
-  padding: '10px',
-  borderRadius: 10,
-  background: '#3b4a6a',
-  color: '#fff',
-}
+  center: {
+    fontWeight: 800,
+    fontSize: 20,
+    color: '#17344d',
+  },
 
-const menuButtonStyle: React.CSSProperties = {
-  width: '100%',
-  padding: '10px',
-  marginBottom: 8,
-  borderRadius: 10,
-  color: '#fff',
-  cursor: 'pointer',
-  fontWeight: 700,
-  textAlign: 'left',
-  fontSize: 14,
-  display: 'flex',
-  alignItems: 'center',
-}
+  right: {
+    display: 'flex',
+    gap: 10,
+  },
 
-const loadingNavStyle: React.CSSProperties = {
-  fontSize: 13,
-  color: 'rgba(255,255,255,0.75)',
-}
+  select: {
+    padding: 6,
+    borderRadius: 8,
+  },
+  navBtnActive: {
+    color: '#5ea7c3',
+    background: 'rgba(238,247,251,0.95)',
+    borderRadius: 12,
+    padding: '6px 12px',
+  },
+  logout: {
+    background: '#fff',
+    borderRadius: 8,
+    padding: '6px 10px',
+    cursor: 'pointer',
+  },
 
-const contentWrapperStyle: React.CSSProperties = {
-  flex: 1,
-  display: 'flex',
-  flexDirection: 'column',
-}
+  nav: {
+    display: 'flex',
+    justifyContent: 'center',
+    gap: 20,
+    padding: '4px 0',
+  },
 
-const topBarStyle: React.CSSProperties = {
-  height: 64,
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'space-between',
-  padding: '0 24px',
-  background: '#ffffff',
-}
+  navBtn: {
+    background: 'transparent',
+    border: 'none',
+    fontWeight: 700,
+    cursor: 'pointer',
+  },
 
-const topBarTitleStyle: React.CSSProperties = {
-  fontSize: 28,
-  fontWeight: 800,
-}
+  menuWrapper: {
+    position: 'relative',
+    paddingBottom: 10,
+  },
 
+  dropdown: {
+    position: 'absolute',
+    top: 36,
+    left: 0,
+    background: 'white',
+    borderRadius: 12,
+    boxShadow: '0 10px 25px rgba(0,0,0,0.1)',
+    animation: 'fadeIn 0.15s ease',
+  },
 
-const contentStyle: React.CSSProperties = {
-  flex: 1,
-  padding: 24,
-  overflow: 'auto',
-}
+  dropdownItem: {
+    padding: 10,
+    cursor: 'pointer',
+  },
 
-const logoutButtonStyle: React.CSSProperties = {
-  background: '#7c7777',
-  color: '#fff',
-  border: 'none',
-  padding: '8px 14px',
-  borderRadius: '8px',
-  fontWeight: 600,
-  cursor: 'pointer',
+  content: {
+    padding: 20,
+  },
 }
