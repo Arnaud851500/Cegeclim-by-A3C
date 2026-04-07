@@ -262,15 +262,15 @@ const styles: any = {
   },
 
   logo: {
-    width: 110,
+    width: 130,
   },
 
   subtitle: {
-    fontSize: 14,
+    fontSize: 16,
   },
 
   title: {
-    fontSize: 18,
+    fontSize: 22,
     fontWeight: 800,
   },
 
