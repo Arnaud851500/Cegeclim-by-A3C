@@ -332,7 +332,7 @@ function TodoSection({
               <Th>Pour le :</Th>
               <Th>Statut</Th>
               <Th>Commentaire - avancement</Th>
-              <Th></Th>
+              <Th>Suppr.</Th>
             </tr>
           </thead>
 
