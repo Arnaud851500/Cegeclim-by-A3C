@@ -9,6 +9,7 @@ export type AccessRights = {
   can_cartographie: boolean
   can_clients: boolean
   can_carte: boolean,
+  can_todo: boolean,
   can_clients_cegeclim : boolean,
   can_suivi_prospects : boolean,
   can_agences: boolean
@@ -33,6 +34,7 @@ const defaultRights: AccessRights = {
   can_cartographie: false,
   can_clients: false,
   can_carte: false,
+  can_todo: false,
   can_clients_cegeclim : false,
   can_suivi_prospects : false,
   can_agences: false,
@@ -56,6 +58,7 @@ export function getFirstAllowedPath(rights: AccessRights) {
   if (rights.can_territoire) return '/territoire'
   if (rights.can_cartographie) return '/cartographie'
   if (rights.can_clients) return '/clients'
+  if (rights.can_todo) return '/todo'
   if (rights.can_carte) return '/carte'
   if (rights.can_clients_cegeclim) return '/clients_cegeclim'
   if (rights.can_suivi_prospects) return '/suivi_prospects'
@@ -93,6 +96,7 @@ async function fetchAccess() {
         can_territoire,
         can_cartographie,
         can_clients,
+        can_todo,
         can_carte,
         can_clients_cegeclim,
         can_suivi_prospects,
@@ -123,6 +127,7 @@ async function fetchAccess() {
         can_cartographie: !!data.can_cartographie,
         can_clients: !!data.can_clients,
         can_carte: !!data.can_carte,
+        can_todo: !!data.can_todo,
         can_clients_cegeclim: !!data.can_clients_cegeclim,
         can_suivi_prospects: !!data.can_suivi_prospects,
         can_agences: !!data.can_agences,

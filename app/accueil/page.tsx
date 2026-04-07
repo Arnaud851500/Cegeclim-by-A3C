@@ -110,6 +110,13 @@ export default function AccueilPage() {
               'Accéder aux documents, dossiers et pièces partagées selon les droits attribués.',
           },
                     {
+            label: 'Todo List',
+            path: '/todo',
+            accessKey: 'can_todo',
+            description:
+              'Créer, suivre, et mettre à jour des taches',
+          },
+                    {
             label: 'Activités - CA',
             path: '/activites',
             accessKey: 'can_activites',

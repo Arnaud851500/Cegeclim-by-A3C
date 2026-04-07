@@ -74,6 +74,10 @@ function AppShell({ children }: { children: React.ReactNode }) {
       items: [{ label: 'Documents', path: '/documents', accessKey: 'can_documents' }],
     },
     {
+      label: 'Todo List',
+      items: [{ label: 'Todo List', path: '/todo', accessKey: 'can_todo' }],
+    },
+    {
       label: 'Activité',
       items: [{ label: 'Activités - CA (WIP)', path: '/activite', accessKey: 'can_activites' },]
     },
