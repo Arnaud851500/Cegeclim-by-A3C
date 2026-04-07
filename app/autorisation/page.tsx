@@ -10,6 +10,7 @@ type UserPageAccess = {
   can_cartographie: boolean
   can_clients: boolean
   can_carte: boolean
+  can_todo: boolean
   can_suivi_prospects: boolean
   can_clients_cegeclim: boolean
   can_agences: boolean
@@ -18,6 +19,7 @@ type UserPageAccess = {
   can_stocks: boolean
   can_activites: boolean
   can_change_scope: boolean
+  display_name : string[]
   allowed_scopes: string[]
   allowed_agences: string[]
   allowed_departements: string[]
@@ -46,6 +48,7 @@ const defaultNewRow: UserPageAccess = {
   can_cartographie: false,
   can_clients: false,
   can_carte: false,
+  can_todo: true,
   can_suivi_prospects: false,
   can_clients_cegeclim: false,
   can_agences: false,
@@ -54,6 +57,7 @@ const defaultNewRow: UserPageAccess = {
   can_stocks: false,
   can_activites: false,
   can_change_scope: false,
+  display_name :[],
   allowed_scopes: ['Global'],
   allowed_agences: [],
   allowed_departements: [],
@@ -84,6 +88,7 @@ export default function AutorisationPage() {
         can_cartographie,
         can_clients,
         can_carte,
+        can_todo,
         can_suivi_prospects,
         can_clients_cegeclim,
         can_agences,
@@ -92,6 +97,7 @@ export default function AutorisationPage() {
         can_stocks,
         can_activites,
         can_change_scope,
+        display_name,
         allowed_scopes,
         allowed_agences,
         allowed_departements
@@ -112,6 +118,7 @@ export default function AutorisationPage() {
       can_cartographie: !!item.can_cartographie,
       can_clients: !!item.can_clients,
       can_carte: !!item.can_carte,
+      can_todo: !!item.can_todo,
       can_clients_cegeclim: !!item.can_clients_cegeclim,
       can_suivi_prospects: !!item.can_suivi_prospects,
       can_agences: !!item.can_agences,
@@ -120,6 +127,10 @@ export default function AutorisationPage() {
       can_stocks: !!item.can_stocks,
       can_activites: !!item.can_activites,
       can_change_scope: !!item.can_change_scope,
+      display_name:
+        Array.isArray(item.display_name) && item.display_name.length > 0
+          ? item.display_name
+          : [],
       allowed_scopes:
         Array.isArray(item.allowed_scopes) && item.allowed_scopes.length > 0
           ? item.allowed_scopes
@@ -155,7 +166,7 @@ export default function AutorisationPage() {
 
   function updateLocalValue(
     email: string,
-    field: keyof Omit<UserPageAccess, 'email' | 'allowed_scopes' | 'allowed_agences' | 'allowed_departements'>,
+    field: keyof Omit<UserPageAccess, 'email' | 'display_name' |'allowed_scopes' | 'allowed_agences' | 'allowed_departements'>,
     value: boolean
   ) {
     const normalizedEmail = email.toLowerCase().trim()
@@ -179,6 +190,22 @@ export default function AutorisationPage() {
       prev.map((row) =>
         row.email === normalizedEmail
           ? { ...row, allowed_scopes: scopes.length ? scopes : ['Global'] }
+          : row
+      )
+    )
+  }
+function updateDisplay_name(email: string, value: string) {
+    const normalizedEmail = email.toLowerCase().trim()
+
+    const display_name = value
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+
+    setRows((prev) =>
+      prev.map((row) =>
+        row.email === normalizedEmail
+          ? { ...row, display_name : display_name }
           : row
       )
     )
@@ -234,7 +261,7 @@ export default function AutorisationPage() {
   }
 
   function updateNewRowValue(
-    field: keyof Omit<UserPageAccess, 'email' | 'allowed_scopes' | 'allowed_agences' | 'allowed_departements'>,
+    field: keyof Omit<UserPageAccess, 'email' | 'display_name' | 'allowed_scopes' | 'allowed_agences' | 'allowed_departements'>,
     value: boolean
   ) {
     setNewRow((prev) => ({ ...prev, [field]: value }))
@@ -279,6 +306,7 @@ export default function AutorisationPage() {
         can_cartographie: row.can_cartographie,
         can_clients: row.can_clients,
         can_carte: row.can_carte,
+        can_todo: row.can_todo,
         can_clients_cegeclim: row.can_clients_cegeclim,
         can_suivi_prospects: row.can_suivi_prospects,
         can_agences: row.can_agences,
@@ -287,6 +315,7 @@ export default function AutorisationPage() {
         can_stocks: row.can_stocks,
         can_activites: row.can_activites,
         can_change_scope: row.can_change_scope,
+        display_name: row.display_name,
         allowed_scopes: row.allowed_scopes,
         allowed_agences: row.allowed_agences,
         allowed_departements: row.allowed_departements,
@@ -324,6 +353,7 @@ export default function AutorisationPage() {
       can_cartographie: newRow.can_cartographie,
       can_clients: newRow.can_clients,
       can_carte: newRow.can_carte,
+      can_todo: newRow.can_todo,
       can_clients_cegclim: newRow.can_clients_cegeclim,
       can_suivi_prospects: newRow.can_suivi_prospects,
       can_agences: newRow.can_agences,
@@ -332,6 +362,7 @@ export default function AutorisationPage() {
       can_stocks: newRow.can_stocks,
       can_activites: newRow.can_activites,
       can_change_scope: newRow.can_change_scope,
+      display_name: newRow.display_name,
       allowed_scopes: newRow.allowed_scopes,
       allowed_agences: newRow.allowed_agences,
       allowed_departements: newRow.allowed_departements,
@@ -362,14 +393,17 @@ export default function AutorisationPage() {
               can_cartographie: value,
               can_clients: value,
               can_carte: value,
+              can_todo: value,
               can_clients_cegeclim: value,
               can_suivi_prospects: value,
               can_agences: value,
               can_autorisation: value,
               can_documents: value,
               can_stocks: value,
+              can_display_name : value,
               can_activites: value,
               can_change_scope: value,
+
             }
           : row
       )
@@ -384,12 +418,14 @@ export default function AutorisationPage() {
       can_cartographie: value,
       can_clients: value,
       can_carte: value,
+      can_todo: value,
       can_clients_cegeclim: value,
       can_suivi_prospects: value,
       can_agences: value,
       can_autorisation: value,
       can_documents: value,
       can_stocks: value,
+      can_display_name : value,
       can_activites: value,
       can_change_scope: value,
     }))
@@ -497,6 +533,7 @@ export default function AutorisationPage() {
               <CreateCheckbox label="Liste globale" checked={newRow.can_clients} onChange={(checked) => updateNewRowValue('can_clients', checked)} />
               <CreateCheckbox label="Agences" checked={newRow.can_agences} onChange={(checked) => updateNewRowValue('can_agences', checked)} />
               <CreateCheckbox label="Carte" checked={newRow.can_carte} onChange={(checked) => updateNewRowValue('can_carte', checked)} />
+              <CreateCheckbox label="Todo" checked={newRow.can_todo} onChange={(checked) => updateNewRowValue('can_todo', checked)} />
               <CreateCheckbox label="Clients Cegeclim" checked={newRow.can_clients_cegeclim} onChange={(checked) => updateNewRowValue('can_clients_cegeclim', checked)} />
               <CreateCheckbox label="Suivi Prospects" checked={newRow.can_suivi_prospects} onChange={(checked) => updateNewRowValue('can_suivi_prospects', checked)} />
               <CreateCheckbox label="Autorisation" checked={newRow.can_autorisation} onChange={(checked) => updateNewRowValue('can_autorisation', checked)} />
@@ -631,6 +668,9 @@ export default function AutorisationPage() {
                   <th className="whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Utilisateur
                   </th>
+                  <th className="whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
+                    Nom
+                  </th>
                   <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
                     KPI
                   </th>
@@ -645,6 +685,9 @@ export default function AutorisationPage() {
                   </th>
                   <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Carte
+                  </th>
+                  <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
+                    Todo
                   </th>
                   <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Cegeclim
@@ -703,12 +746,20 @@ export default function AutorisationPage() {
                           {row.email}
                         </div>
                       </td>
-
+                      <td className="px-4 py-4 align-top">
+                        <input
+                          type="text"
+                          value={(row.display_name ?? []).join(', ')}
+                          onChange={(e) => updateDisplay_name(row.email, e.target.value)}
+                          className="w-56 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-500"
+                        />
+                      </td>
                       <PermissionCell checked={row.can_dashboard} onChange={(checked) => updateLocalValue(row.email, 'can_dashboard', checked)} />
                       <PermissionCell checked={row.can_territoire} onChange={(checked) => updateLocalValue(row.email, 'can_territoire', checked)} />
                       <PermissionCell checked={row.can_cartographie} onChange={(checked) => updateLocalValue(row.email, 'can_cartographie', checked)} />
                       <PermissionCell checked={row.can_clients} onChange={(checked) => updateLocalValue(row.email, 'can_clients', checked)} />
                       <PermissionCell checked={row.can_carte} onChange={(checked) => updateLocalValue(row.email, 'can_carte', checked)} />
+                      <PermissionCell checked={row.can_todo} onChange={(checked) => updateLocalValue(row.email, 'can_todo', checked)} />
                       <PermissionCell checked={row.can_clients_cegeclim} onChange={(checked) => updateLocalValue(row.email, 'can_clients_cegeclim', checked)} />
                       <PermissionCell checked={row.can_suivi_prospects} onChange={(checked) => updateLocalValue(row.email, 'can_suivi_prospects', checked)} />      
                       <PermissionCell checked={row.can_agences} onChange={(checked) => updateLocalValue(row.email, 'can_agences', checked)} />
