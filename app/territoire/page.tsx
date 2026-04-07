@@ -196,6 +196,12 @@ export default function TerritoirePage() {
   }
 
   useEffect(() => {
+    if (selected) {
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    }
+  }, [selected])
+
+  useEffect(() => {
     const init = async () => {
       const { data, error } = await supabase.auth.getUser()
 
@@ -262,6 +268,7 @@ export default function TerritoirePage() {
   }
 
   const handleOpenDetail = (row: Territory) => {
+    window.scrollTo({ top: 0, behavior: 'smooth' })
     setSelected(row)
     setIsEditing(false)
     setEditForm(row)
@@ -461,7 +468,7 @@ export default function TerritoirePage() {
 
   return (
     <>
-      <h1 style={{ marginBottom: 18 }}>Territoire</h1>
+      <h1 style={{ marginBottom: 18 }}>Regions-Départements</h1>
       <div style={{ marginBottom: 16, color: '#334155', fontSize: 14, fontWeight: 600 }}>
         Vision active : {societeFilter}
       </div>
@@ -472,7 +479,7 @@ export default function TerritoirePage() {
         <div style={{ overflowX: 'auto' }}>
           <div style={regionSummaryWrapperStyle}>
             <div style={regionSummaryLeftColStyle}>
-              <div style={regionSummaryCornerStyle}>Territoire</div>
+              <div style={regionSummaryCornerStyle}>REGIONS</div>
               {regionSummaries.map((item) => (
                 <div
                   key={item.label}
@@ -554,13 +561,6 @@ export default function TerritoirePage() {
         </div>
       </div>
 
-      <div style={cardsGridStyle}>
-        <MetricCard title="Départements" value={fmtNumber(indicators.nb)} />
-        <MetricCard title="Population cumulée" value={fmtNumber(indicators.population)} />
-        <MetricCard title="Potentiel PAC/an" value={fmtNumber(indicators.potentiel)} />
-        <MetricCard title="Score attrac. moyen" value={fmtNumber(indicators.scoreMoyen, 1)} />
-        <MetricCard title="CA théorique (€)" value={fmtNumber(indicators.ca, 1)} />
-      </div>
 
       <div style={sectionCardStyle}>
         <div style={sectionHeaderStyle}>
@@ -644,7 +644,11 @@ export default function TerritoirePage() {
                 </tr>
               ) : (
                 filteredRows.map((row) => (
-                  <tr key={row.id}>
+                  <tr
+                    key={row.id}
+                    onClick={() => handleOpenDetail(row)}
+                    style={{ cursor: 'pointer' }}
+                  >
                     <td style={tdStyle}>{row.code_dep ?? ''}</td>
                     <td style={tdStyle}>{row.nom ?? ''}</td>
                     <td style={tdStyle}>{row.region ?? ''}</td>
@@ -654,10 +658,24 @@ export default function TerritoirePage() {
                     <td style={tdStyle}>{fmtNumber(row.score_attractivite, 1)}</td>
                     <td style={tdStyle}>{fmtNumber(row.rang)}</td>
                     <td style={tdStyle}>
-                      <button onClick={() => handleOpenDetail(row)}>Voir</button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          handleOpenDetail(row)
+                        }}
+                      >
+                        Voir
+                      </button>
                     </td>
                     <td style={tdStyle}>
-                      <button onClick={() => handleDelete(row.id)}>Supprimer</button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          handleDelete(row.id)
+                        }}
+                      >
+                        Supprimer
+                      </button>
                     </td>
                   </tr>
                 ))
@@ -1144,27 +1162,32 @@ const tdStyle: React.CSSProperties = {
   padding: '12px 14px',
   borderBottom: '1px solid #e5e7eb',
   fontSize: 14,
+  verticalAlign: 'middle',
 }
 
 const overlayStyle: React.CSSProperties = {
   position: 'fixed',
   inset: 0,
-  background: 'rgba(0,0,0,0.35)',
+  background: 'rgba(15, 23, 42, 0.42)',
   display: 'flex',
-  alignItems: 'center',
+  alignItems: 'flex-start',
   justifyContent: 'center',
   zIndex: 9999,
-  padding: 20,
+  padding: '2vh 12px',
+  overflowY: 'auto',
+  boxSizing: 'border-box',
 }
 
 const modalStyle: React.CSSProperties = {
-  width: 'min(1100px, 100%)',
-  maxHeight: '90vh',
+  width: '96vw',
+  maxWidth: '1700px',
+  maxHeight: '94vh',
   overflowY: 'auto',
   background: '#fff',
-  borderRadius: 16,
+  borderRadius: 18,
   padding: 22,
-  boxShadow: '0 20px 60px rgba(0,0,0,0.2)',
+  boxShadow: '0 20px 60px rgba(0,0,0,0.22)',
+  boxSizing: 'border-box',
 }
 
 const modalHeaderStyle: React.CSSProperties = {
@@ -1178,8 +1201,9 @@ const modalHeaderStyle: React.CSSProperties = {
 
 const detailGridStyle: React.CSSProperties = {
   display: 'grid',
-  gridTemplateColumns: 'repeat(2, minmax(280px, 1fr))',
+  gridTemplateColumns: 'repeat(3, minmax(260px, 1fr))',
   gap: 14,
+  alignItems: 'start',
 }
 
 const detailItemStyle: React.CSSProperties = {

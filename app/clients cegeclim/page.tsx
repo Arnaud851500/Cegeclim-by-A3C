@@ -1033,18 +1033,6 @@ function openNextClient() {
   }, [])
 
   useEffect(() => {
-    if (mapOpen) {
-      window.scrollTo({ top: 0, behavior: 'smooth' })
-    }
-  }, [mapOpen])
-
-  useEffect(() => {
-    if (selectedClient) {
-      window.scrollTo({ top: 0, behavior: 'smooth' })
-    }
-  }, [selectedClient])
-
-  useEffect(() => {
     setCurrentPage(1)
   }, [
     societeFilter,
@@ -1222,7 +1210,6 @@ function openNextClient() {
     }
   }
 async function openMapFromCell(secteur: string, departement: string | null) {
-  window.scrollTo({ top: 0, behavior: 'smooth' })
   setMapOpen(true)
   setMapLoading(true)
   setMapClients([])
@@ -1333,7 +1320,6 @@ async function openMapFromCell(secteur: string, departement: string | null) {
   }
 
   async function openClientFromMap(client: ClientRow) {
-    window.scrollTo({ top: 0, behavior: 'smooth' })
     const siret = normalizeSiret(client.siret)
     if (!siret) return
 
@@ -3264,10 +3250,7 @@ const selectedClientMapReason = useMemo(() => {
                           return (
                             <tr
                               key={`${row.siret}-${row.id}` }
-                              onClick={() => {
-                                window.scrollTo({ top: 0, behavior: 'smooth' })
-                                setSelectedClient(row)
-                              }}
+                              onClick={() => setSelectedClient(row)}
                               style={{
                                 background: getSectorColor(sector),
                                 borderBottom: '1px solid #b3a4a4',
@@ -3320,7 +3303,7 @@ const selectedClientMapReason = useMemo(() => {
                               </td>
                               <td style={listCellStyle}>
                                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                                  <button onClick={(e) => { e.stopPropagation(); window.scrollTo({ top: 0, behavior: 'smooth' }); setSelectedClient(row) }} style={linkButtonStyle}>
+                                  <button onClick={(e) => { e.stopPropagation(); setSelectedClient(row) }} style={linkButtonStyle}>
                                     Voir
                                   </button>
                                   <button
@@ -3410,20 +3393,19 @@ const selectedClientMapReason = useMemo(() => {
               </section>
             </section>
             {mapOpen && (
-  <div style={mapOverlayStyle}>
-    <div style={mapModalStyle}>
-      <h2 style={{ margin: 0 }}>{mapTitle}</h2>
+  <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 999 }}>
+    <div style={{ background: '#fff', margin: '5% auto', padding: 20, width: '80%' }}>
+      <h2>{mapTitle}</h2>
 
       <div
   style={{
     flex: 1,
-    padding: 12,
+    padding: 24,
     overflow: 'hidden',
     background: '#f8fafc',
     display: 'flex',
     flexDirection: 'column',
-    gap: 12,
-    minHeight: 0,
+    gap: 16,
   }}
 >
   {mapLoading ? (
@@ -3547,14 +3529,14 @@ const selectedClientMapReason = useMemo(() => {
           overflow: 'hidden',
           border: '1px solid #cbd5e1',
           background: '#fff',
-          minHeight: 620,
+          minHeight: 500,
         }}
       >
         <MapContainer
         key={`map-${mapInstanceKey}-${mapTitle}`}
         center={[46.603354, 1.888334] as any}
         zoom={6}
-        style={{ height: '100%', width: '100%', minHeight: 620 }}
+        style={{ height: '100%', width: '100%', minHeight: 500 }}
         ref={(mapInstance: any) => {
           if (mapInstance) leafletMapRef.current = mapInstance
         }}
@@ -4037,7 +4019,7 @@ const selectedClientMapReason = useMemo(() => {
 
         {showRejects && (
           <div style={modalOverlayStyle}>
-            <div style={{ ...modalStyle, maxWidth: 1600 }}>
+            <div style={{ ...modalStyle, maxWidth: 1400 }}>
               <div style={modalHeaderStyle}>
                 <div>
                   <h3 style={{ margin: 0, fontSize: 22 }}>Rejets du dernier import</h3>
@@ -4082,19 +4064,17 @@ const selectedClientMapReason = useMemo(() => {
 
 const pageStyle: React.CSSProperties = {
   minHeight: '100vh',
-  width: '100%',
   background: '#f3f3f3',
-  padding: '8px',
-  boxSizing: 'border-box',
+  padding: '12px',
 }
 
 const containerStyle: React.CSSProperties = {
   width: '100%',
-  maxWidth: 'none',
-  margin: 0,
+  maxWidth: '1480px',
+  margin: '0 auto',
   display: 'flex',
   flexDirection: 'column',
-  gap: '16px',
+  gap: '18px',
 }
 
 const sectionTitleStyle: React.CSSProperties = {
@@ -4491,41 +4471,14 @@ const activeTabStyle: React.CSSProperties = {
   color: '#fff',
 }
 
-const mapOverlayStyle: React.CSSProperties = {
-  position: 'fixed',
-  inset: 0,
-  background: 'rgba(15,23,42,0.5)',
-  zIndex: 19000,
-  padding: '2vh 2vw',
-  boxSizing: 'border-box',
-  overflow: 'auto',
-}
-
-const mapModalStyle: React.CSSProperties = {
-  background: '#fff',
-  margin: '0 auto',
-  padding: 16,
-  width: '96vw',
-  maxWidth: '1700px',
-  height: '92vh',
-  borderRadius: 18,
-  boxSizing: 'border-box',
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 12,
-  boxShadow: '0 20px 60px rgba(0,0,0,0.25)',
-}
-
 const modalOverlayStyle: React.CSSProperties = {
   position: 'fixed',
   inset: 0,
-  background: 'rgba(15,23,42,0.45)',
+  background: 'rgba(0,0,0,0.4)',
   display: 'flex',
-  alignItems: 'flex-start',
+  alignItems: 'center',
   justifyContent: 'center',
-  padding: '2vh 12px',
-  overflowY: 'auto',
-  boxSizing: 'border-box',
+  padding: '24px',
   zIndex: 20000,
 }
 
@@ -4560,9 +4513,9 @@ const preStyle: React.CSSProperties = {
 }
 
 const clientModalStyle: React.CSSProperties = {
-  width: '96vw',
-  maxWidth: '1680px',
-  maxHeight: '94vh',
+  width: '100%',
+  maxWidth: '1220px',
+  maxHeight: '92vh',
   overflow: 'auto',
   background: '#ffffff',
   borderRadius: '22px',

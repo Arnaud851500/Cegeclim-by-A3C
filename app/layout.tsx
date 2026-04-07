@@ -41,14 +41,9 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const isGroupActive = (group: MenuGroup) =>
   group.items.some((item) => pathname === item.path)
 
-if (isLoginPage) {
-  return (
-    <div style={{ margin: 0, fontFamily: 'Arial, sans-serif', background: '#f5f7fa' }}>
-      {children}
-      <Analytics />
-    </div>
-  )
-}
+
+
+
   const backgroundImageUrl =
     'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Logo%20et%20images/Image%20site%20CEGECLIM%20maison.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJMb2dvIGV0IGltYWdlcy9JbWFnZSBzaXRlIENFR0VDTElNIG1haXNvbi5qcGciLCJpYXQiOjE3NzU1MDYyNTEsImV4cCI6NDg5NzU3MDI1MX0.d1YT7_-xD44QOm2LFbZIfpkjh9kiIGjpJiEuJxV0rMM'
 
@@ -59,12 +54,17 @@ if (isLoginPage) {
     },
     {
       label: 'Base clients',
-      items: [{ label: 'Liste globale', path: '/clients', accessKey: 'can_clients' }],
+      items: [
+        { label: 'Liste globale', path: '/clients', accessKey: 'can_clients' },
+        { label: 'Carte', path: '/carte', accessKey: 'can_carte' },
+        { label: 'Clients Cegeclim', path: '/clients_cegeclim', accessKey: 'can_clients_cegeclim' },
+        { label: 'Suivi Prospects', path: '/suivi_prospects', accessKey: 'can_suivi_prospects' },
+      ],
     },
     {
       label: 'Territoire',
       items: [
-        { label: 'Territoire', path: '/territoire', accessKey: 'can_territoire' },
+        { label: 'Région-Dépt.', path: '/territoire', accessKey: 'can_territoire' },
         { label: 'Agences', path: '/agences', accessKey: 'can_agences' },
         { label: 'Cartographie', path: '/cartographie', accessKey: 'can_cartographie' },
       ],
@@ -75,7 +75,11 @@ if (isLoginPage) {
     },
     {
       label: 'Activité',
-      items: [{ label: 'Activités - CA (WIP)', path: '/activites', accessKey: 'can_activites' },]
+      items: [{ label: 'Activités - CA (WIP)', path: '/activite', accessKey: 'can_activites' },]
+    },
+    {
+      label: 'Indicateurs',
+      items: [{ label: 'Indicateurs', path: '/indicateurs', accessKey: 'can_dashboard' },]
     },
     {
       label: 'Autorisations',
@@ -83,6 +87,27 @@ if (isLoginPage) {
     },
     
   ]
+
+  useEffect(() => {
+  if (accessLoading) return
+
+  const currentPage = menuGroups
+    .flatMap(g => g.items)
+    .find(item => item.path === pathname)
+
+  if (currentPage?.accessKey && !rights[currentPage.accessKey]) {
+    router.replace('/unauthorized')
+  }
+}, [accessLoading, pathname, rights])
+
+if (isLoginPage) {
+  return (
+    <div style={{ margin: 0, fontFamily: 'Arial, sans-serif', background: '#f5f7fa' }}>
+      {children}
+      <Analytics />
+    </div>
+  )
+}
 
   const handleLogout = async () => {
     await supabase.auth.signOut()
@@ -161,7 +186,9 @@ if (isLoginPage) {
 
                 {openGroup === group.label && (
                   <div style={styles.dropdown}>
-                    {group.items.map((item) => (
+                    {group.items
+                    .filter((item) => !item.accessKey || rights[item.accessKey])
+                    .map((item) => (
                       <div
                         key={item.path}
                         style={styles.dropdownItem}
@@ -275,7 +302,7 @@ const styles: any = {
     display: 'flex',
     justifyContent: 'center',
     gap: 20,
-    padding: '4px 0',
+    padding: '6px 0',
   },
 
   navBtn: {
@@ -294,15 +321,18 @@ const styles: any = {
     position: 'absolute',
     top: 36,
     left: 0,
-    background: 'white',
+    background: '#d8dadf',
     borderRadius: 12,
     boxShadow: '0 10px 25px rgba(0,0,0,0.1)',
     animation: 'fadeIn 0.15s ease',
+    whiteSpace: 'nowrap',       // 🔥 empêche retour à la ligne
+    minWidth: 'max-content',    // 🔥 s’adapte à la largeur du texte
   },
 
   dropdownItem: {
     padding: 10,
     cursor: 'pointer',
+    whiteSpace: 'nowrap', // 🔥 sécurité
   },
 
   content: {

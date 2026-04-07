@@ -8,6 +8,9 @@ export type AccessRights = {
   can_territoire: boolean
   can_cartographie: boolean
   can_clients: boolean
+  can_carte: boolean,
+  can_clients_cegeclim : boolean,
+  can_suivi_prospects : boolean,
   can_agences: boolean
   can_autorisation: boolean
   can_documents: boolean
@@ -29,6 +32,9 @@ const defaultRights: AccessRights = {
   can_territoire: false,
   can_cartographie: false,
   can_clients: false,
+  can_carte: false,
+  can_clients_cegeclim : false,
+  can_suivi_prospects : false,
   can_agences: false,
   can_autorisation: false,
   can_documents: false,
@@ -46,10 +52,13 @@ const AccessContext = createContext<AccessContextType>({
 })
 
 export function getFirstAllowedPath(rights: AccessRights) {
-  if (rights.can_dashboard) return '/dashboard'
+  if (rights.can_dashboard) return '/indicateurs'
   if (rights.can_territoire) return '/territoire'
   if (rights.can_cartographie) return '/cartographie'
   if (rights.can_clients) return '/clients'
+  if (rights.can_carte) return '/carte'
+  if (rights.can_clients_cegeclim) return '/clients_cegeclim'
+  if (rights.can_suivi_prospects) return '/suivi_prospects'
   if (rights.can_agences) return '/agences'
   if (rights.can_autorisation) return '/autorisation'
   if (rights.can_activites) return '/activites'
@@ -84,6 +93,9 @@ async function fetchAccess() {
         can_territoire,
         can_cartographie,
         can_clients,
+        can_carte,
+        can_clients_cegeclim,
+        can_suivi_prospects,
         can_agences,
         can_autorisation,
         can_documents,
@@ -110,6 +122,9 @@ async function fetchAccess() {
         can_territoire: !!data.can_territoire,
         can_cartographie: !!data.can_cartographie,
         can_clients: !!data.can_clients,
+        can_carte: !!data.can_carte,
+        can_clients_cegeclim: !!data.can_clients_cegeclim,
+        can_suivi_prospects: !!data.can_suivi_prospects,
         can_agences: !!data.can_agences,
         can_autorisation: !!data.can_autorisation,
         can_documents: !!data.can_documents,
@@ -123,7 +138,7 @@ async function fetchAccess() {
       },
     }
   } catch (err) {
-    console.error('ACCESS - erreur inattendue', err)
+    console.error('TEST ACCESS - erreur inattendue', err)
     return { email: null, rights: defaultRights }
   }
 }

@@ -20,130 +20,194 @@ type QuickLink = {
   description: string
 }
 
+type QuickLinkSection = {
+  title: string
+  subtitle?: string
+  columns?: number
+  items: QuickLink[]
+}
+
 export default function AccueilPage() {
   const router = useRouter()
-  const { rights, email } = useAccess()
+  const { rights } = useAccess()
   const { societeFilter } = useSocieteFilter()
 
-  const quickLinks = useMemo<QuickLink[]>(() => {
-    const links: QuickLink[] = [
+  const quickLinkSections = useMemo<QuickLinkSection[]>(() => {
+    const sections: QuickLinkSection[] = [
       {
-        label: 'Liste globale',
-        path: '/clients',
-        accessKey: 'can_clients',
-        description: 'Consulter et filtrer la base clients et prospects.',
+        title: 'Base clients',
+        subtitle: 'Accès aux écrans de consultation, cartographie et suivi commercial.',
+        columns: 4,
+        items: [
+          {
+            label: 'Liste globale',
+            path: '/clients',
+            accessKey: 'can_clients',
+            description:
+              'Consulter et filtrer la base clients et prospects. Accéder aux informations utiles comme l’adresse, le site web et le téléphone.',
+          },
+          {
+            label: 'Carte',
+            path: '/carte',
+            accessKey: 'can_carte',
+            description:
+              'Visualiser les clients et prospects sur une carte pour faciliter les analyses géographiques.',
+          },
+          {
+            label: 'Clients CEGECLIM',
+            path: '/clients_cegeclim',
+            accessKey: 'can_clients_cegeclim',
+            description:
+              'Afficher les clients présents dans la base CEGECLIM et naviguer dans les informations de rattachement.',
+          },
+          {
+            label: 'Suivi prospects',
+            path: '/suivi_prospects',
+            accessKey: 'can_suivi_prospects',
+            description:
+              'Piloter l’avancement des prospects et les prochaines actions commerciales.',
+          },
+        ],
       },
       {
-        label: 'Territoire',
-        path: '/territoire',
-        accessKey: 'can_territoire',
-        description: 'Analyser les territoires, potentiels PAC et attractivité.',
+        title: 'Territoire',
+        subtitle: 'Vision géographique, structure réseau et pilotage territorial.',
+        columns: 4,
+        items: [
+          {
+            label: 'Territoire',
+            path: '/territoire',
+            accessKey: 'can_territoire',
+            description:
+              'Analyser les territoires, les potentiels PAC et l’attractivité par département et par région.',
+          },
+          {
+            label: 'Agences',
+            path: '/agences',
+            accessKey: 'can_agences',
+            description:
+              'Visualiser les agences, leurs effectifs, surfaces, rattachements et caractéristiques principales.',
+          },
+          {
+            label: 'Cartographie',
+            path: '/cartographie',
+            accessKey: 'can_cartographie',
+            description:
+              'Explorer la représentation géographique des données sur fond de carte.',
+          },
+        ],
       },
       {
-        label: 'Agences',
-        path: '/agences',
-        accessKey: 'can_agences',
-        description: 'Visualiser les agences, effectifs, surfaces et rattachements.',
-      },
-      {
-        label: 'Cartographie',
-        path: '/cartographie',
-        accessKey: 'can_cartographie',
-        description: 'Explorer la représentation géographique des données.',
-      },
-      {
-        label: 'Documents',
-        path: '/documents',
-        accessKey: 'can_documents',
-        description: 'Accéder aux documents, dossiers et pièces partagées.',
-      },
-      {
-        label: 'Autorisations',
-        path: '/autorisation',
-        accessKey: 'can_autorisation',
-        description: 'Gérer les accès utilisateurs et les droits de visibilité.',
-      },
-      {
-        label: 'Activités - CA',
-        path: '/activites',
-        accessKey: 'can_activites',
-        description: 'Suivre les activités et indicateurs de chiffre d’affaires.',
-      },
-      {
-        label: 'Stocks et flux log',
-        path: '/stocks',
-        accessKey: 'can_stocks',
-        description: 'Piloter les flux logistiques et les stocks.',
+        title: 'Pilotage & administration',
+        subtitle: 'Fonctions support, droits d’accès et outils de gestion transverses.',
+        columns: 4,
+        items: [
+          {
+            label: 'Documents',
+            path: '/documents',
+            accessKey: 'can_documents',
+            description:
+              'Accéder aux documents, dossiers et pièces partagées selon les droits attribués.',
+          },
+                    {
+            label: 'Activités - CA',
+            path: '/activites',
+            accessKey: 'can_activites',
+            description:
+              'Suivre les activités et les indicateurs de chiffre d’affaires.',
+          },
+                              {
+            label: 'Indicateurs',
+            path: '/indicateurs',
+            accessKey: 'can_dashboard',
+            description:
+              'Principaux indicateurs de performances (Commerce / Services / Coûts / Stocks/ ).',
+          },
+          {
+            label: 'Autorisations',
+            path: '/autorisation',
+            accessKey: 'can_autorisation',
+            description:
+              'Gérer les accès utilisateurs, les scopes, agences autorisées et départements visibles.',
+          },
+
+          {
+            label: 'Stocks et flux log',
+            path: '/stocks',
+            accessKey: 'can_stocks',
+            description:
+              'Piloter les flux logistiques et les stocks.',
+          },
+        ],
       },
     ]
 
-    return links.filter((item) => !item.accessKey || !!rights[item.accessKey])
+    return sections
+      .map((section) => ({
+        ...section,
+        items: section.items.filter((item) => !item.accessKey || !!rights[item.accessKey]),
+      }))
+      .filter((section) => section.items.length > 0)
   }, [rights])
 
-  const nbRubriques = quickLinks.length
-  const allowedScopes = rights?.allowed_scopes?.length || 1
+  const nbRubriques = quickLinkSections.reduce((sum, section) => sum + section.items.length, 0)
 
   return (
     <div className={montserrat.className} style={styles.page}>
       <div style={styles.hero}>
         <div style={styles.overlay}>
           <div style={styles.topBlock}>
-            <div>
-              <div style={styles.kicker}>Accueil intranet</div>
-              <h1 style={styles.title}>Bienvenue sur l’environnement CEGECLIM</h1>
-              <p style={styles.subtitle}>
-                Accédez rapidement à vos écrans autorisés depuis cette page d’entrée.
-              </p>
-            </div>
-          </div>
-
-          <div style={styles.kpiGrid}>
-            <div style={styles.kpiCard}>
-              <div style={styles.kpiLabel}>Utilisateur connecté</div>
-              <div style={styles.kpiValueSmall}>{email || '—'}</div>
-            </div>
-
-            <div style={styles.kpiCard}>
-              <div style={styles.kpiLabel}>Vision active</div>
-              <div style={styles.kpiValue}>{societeFilter || 'Global'}</div>
-            </div>
-
-            <div style={styles.kpiCard}>
-              <div style={styles.kpiLabel}>Rubriques accessibles</div>
-              <div style={styles.kpiValue}>{nbRubriques}</div>
-            </div>
-
-            <div style={styles.kpiCard}>
-              <div style={styles.kpiLabel}>Scopes autorisés</div>
-              <div style={styles.kpiValue}>{allowedScopes}</div>
-            </div>
+            <div style={styles.kicker}>Accueil intranet</div>
+            <h1 style={styles.title}>Bienvenue sur l’environnement CEGECLIM</h1>
+            <p style={styles.subtitle}>
+              Accédez rapidement à vos écrans autorisés depuis cette page d’entrée, également
+              disponibles via le bandeau supérieur.
+            </p>
           </div>
 
           <div style={styles.mainPanel}>
             <div style={styles.panelHeader}>
               <div style={styles.panelTitle}>Accès rapide</div>
               <div style={styles.panelSubtitle}>
-                Cliquez sur une rubrique pour ouvrir directement l’écran correspondant.
+
               </div>
+              <div style={styles.counterPill}>{nbRubriques} écran(s) accessible(s)</div>
             </div>
 
-            <div style={styles.linksGrid}>
-              {quickLinks.map((item) => (
-                <button
-                  key={item.path}
-                  onClick={() => router.push(item.path)}
-                  style={styles.linkCard}
-                >
-                  <div style={styles.linkTitle}>{item.label}</div>
-                  <div style={styles.linkDescription}>{item.description}</div>
-                  <div style={styles.linkCta}>Ouvrir</div>
-                </button>
+            <div style={styles.sectionsWrapper}>
+              {quickLinkSections.map((section) => (
+                <div key={section.title} style={styles.sectionBlock}>
+                  <div style={styles.sectionHeader}>
+                    <div style={styles.sectionTitle}>{section.title}</div>
+                    {section.subtitle ? (
+                      <div style={styles.sectionSubtitle}>{section.subtitle}</div>
+                    ) : null}
+                  </div>
+
+                  <div
+                    style={{
+                      ...styles.linksGrid,
+                      gridTemplateColumns: `repeat(${section.columns || 4}, minmax(0, 1fr))`,
+                    }}
+                  >
+                    {section.items.map((item) => (
+                      <button
+                        key={item.path}
+                        onClick={() => router.push(item.path)}
+                        style={styles.linkCard}
+                      >
+                        <div style={styles.linkTopRow}>
+                          <div style={styles.linkTitle}>{item.label}</div>
+                          <div style={styles.linkCta}>OUVRIR</div>
+                        </div>
+
+                        <div style={styles.linkDescription}>{item.description}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
               ))}
             </div>
-          </div>
-
-          <div style={styles.bottomInfo}>
-            La navigation haute reprend les mêmes regroupements que les rubriques métier.
           </div>
         </div>
       </div>
@@ -201,48 +265,20 @@ const styles: Record<string, React.CSSProperties> = {
     margin: '10px 0 0 0',
     fontSize: 17,
     color: '#475467',
-    maxWidth: 820,
+    maxWidth: 1520,
     lineHeight: 1.5,
   },
 
-  kpiGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
-    gap: 16,
-    marginBottom: 22,
-  },
-
-  kpiCard: {
-    background: 'rgba(255,255,255,0.93)',
+  contextBadge: {
+    display: 'inline-flex',
+    marginTop: 14,
+    padding: '8px 12px',
+    borderRadius: 999,
+    background: 'rgba(255,255,255,0.75)',
     border: '1px solid #dbe4ea',
-    borderRadius: 18,
-    padding: '18px 18px 16px',
-    boxShadow: '0 8px 22px rgba(16,24,40,0.06)',
-  },
-
-  kpiLabel: {
-    fontSize: 12,
-    fontWeight: 800,
-    color: '#667085',
-    textTransform: 'uppercase',
-    letterSpacing: '0.06em',
-    marginBottom: 10,
-  },
-
-  kpiValue: {
-    fontSize: 34,
-    fontWeight: 800,
-    color: '#101828',
-    letterSpacing: '-0.03em',
-    lineHeight: 1,
-  },
-
-  kpiValueSmall: {
-    fontSize: 20,
-    fontWeight: 800,
-    color: '#101828',
-    lineHeight: 1.2,
-    wordBreak: 'break-word',
+    color: '#17344d',
+    fontSize: 13,
+    fontWeight: 700,
   },
 
   mainPanel: {
@@ -258,7 +294,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   panelTitle: {
-    fontSize: 24,
+    fontSize: 20,
     fontWeight: 800,
     color: '#17344d',
     letterSpacing: '-0.02em',
@@ -268,55 +304,103 @@ const styles: Record<string, React.CSSProperties> = {
     marginTop: 6,
     fontSize: 14,
     color: '#667085',
+    lineHeight: 1.45,
+    maxWidth: 980,
+  },
+
+  counterPill: {
+    display: 'inline-flex',
+    marginTop: 12,
+    padding: '8px 12px',
+    borderRadius: 999,
+    background: '#eef7fb',
+    border: '1px solid #cfe4ed',
+    color: '#17344d',
+    fontSize: 13,
+    fontWeight: 800,
+  },
+
+  sectionsWrapper: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 10,
+  },
+
+  sectionBlock: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 12,
+  },
+
+  sectionHeader: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+  },
+
+  sectionTitle: {
+    fontSize: 20,
+    fontWeight: 800,
+    color: '#17344d',
+    letterSpacing: '-0.02em',
+  },
+
+  sectionSubtitle: {
+    fontSize: 14,
+    color: '#667085',
+    lineHeight: 1.4,
   },
 
   linksGrid: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
-    gap: 16,
+    gap: 12,
   },
 
   linkCard: {
     textAlign: 'left',
     border: '1px solid #dbe4ea',
     background: '#ffffff',
-    borderRadius: 18,
-    padding: 18,
+    borderRadius: 28,
+    padding: '22px 22px 18px',
     cursor: 'pointer',
-    boxShadow: '0 4px 16px rgba(16,24,40,0.04)',
+    boxShadow: '0 2px 10px rgba(16,24,40,0.04)',
+    minHeight: 100,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 10,
+  },
+
+  linkTopRow: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 10,
   },
 
   linkTitle: {
     fontSize: 20,
     fontWeight: 800,
     color: '#17344d',
-    marginBottom: 8,
+    lineHeight: 1.05,
+    letterSpacing: '-0.02em',
+    maxWidth: '75%',
   },
 
   linkDescription: {
-    fontSize: 14,
+    fontSize: 12,
     lineHeight: 1.45,
     color: '#475467',
-    minHeight: 58,
+    marginTop: 2,
   },
 
   linkCta: {
-    marginTop: 16,
     fontSize: 13,
     fontWeight: 800,
     color: '#5ea7c3',
     textTransform: 'uppercase',
     letterSpacing: '0.06em',
-  },
-
-  bottomInfo: {
-    marginTop: 18,
-    background: 'rgba(23,52,77,0.92)',
-    color: '#ffffff',
-    borderRadius: 16,
-    padding: '14px 18px',
-    fontSize: 14,
-    fontWeight: 600,
-    maxWidth: 760,
+    whiteSpace: 'nowrap',
+    flexShrink: 0,
+    paddingTop: 2,
   },
 }
