@@ -3070,56 +3070,56 @@ const selectedClientMapReason = useMemo(() => {
                           <tr key={row.sector} style={{ background: getSectorColor(row.sector) }}>
                             <td style={{ ...summaryBodyCellStyle, textAlign: 'left' }}>{row.sector}</td>
                             <td style={summaryBodyCellStyleBold}>
-  <button
-    onClick={() => openMapFromCell(row.sector, null)}
-    style={{
-      width: '100%',
-      height: '100%',
-      fontWeight: 700,
-      cursor: 'pointer',
-      background: 'transparent',
-      border: 'none',
-    }}
-  >
-    {row.total}
-  </button>
-</td>
+                              <button
+                                onClick={() => openMapFromCell(row.sector, null)}
+                                style={{
+                                  width: '100%',
+                                  height: '100%',
+                                  fontWeight: 700,
+                                  cursor: 'pointer',
+                                  background: 'transparent',
+                                  border: 'none',
+                                }}
+                              >
+                                {row.total}
+                              </button>
+                            </td>
                             {summaryDepartments.map((dep) => (
                               <td key={dep} style={summaryBodyCellStyleBold}>
-  <button
-    onClick={() => openMapFromCell(row.sector, dep)}
-    style={{
-      width: '100%',
-      height: '100%',
-      fontWeight: 700,
-      cursor: 'pointer',
-      background: 'transparent',
-      border: 'none',
-    }}
-  >
-    {row.byDept[dep] || 0}
-  </button>
-</td>
+                            <button
+                              onClick={() => openMapFromCell(row.sector, dep)}
+                              style={{
+                                width: '100%',
+                                height: '100%',
+                                fontWeight: 700,
+                                cursor: 'pointer',
+                                background: 'transparent',
+                                border: 'none',
+                              }}
+                            >
+                              {row.byDept[dep] || 0}
+                            </button>
+                          </td>
                             ))}
                           </tr>
                         ))}
                         <tr>
                           <td style={{ ...summaryTotalStyle, textAlign: 'left' }}>TOTAL</td>
                           <td style={summaryTotalStyle}>
-  <button
-    onClick={() => openMapFromCell('TOUS', null)}
-    style={{
-      width: '100%',
-      height: '100%',
-      fontWeight: 700,
-      cursor: 'pointer',
-      background: 'transparent',
-      border: 'none',
-    }}
-  >
-    {sortedFilteredClients.length}
-  </button>
-</td>
+                          <button
+                            onClick={() => openMapFromCell('TOUS', null)}
+                            style={{
+                              width: '100%',
+                              height: '100%',
+                              fontWeight: 700,
+                              cursor: 'pointer',
+                              background: 'transparent',
+                              border: 'none',
+                            }}
+                          >
+                            {sortedFilteredClients.length}
+                          </button>
+                        </td>
                           {summaryDepartments.map((dep) => (
                             <td key={dep} style={summaryTotalStyle}>
                               <button
@@ -3164,22 +3164,22 @@ const selectedClientMapReason = useMemo(() => {
                   <section style={sectionTitleStyle}>
                     <div>
                       <h2 style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: 20, fontWeight: 600 }}>
-  <span>Liste des entreprises</span>
+                  <span>Liste des entreprises</span>
 
-  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: '#555' }}>
-    <span
-      style={{
-        color: '#facc15',
-        fontSize: 14,
-        lineHeight: 1,
-        textShadow: '0 0 1px #a16207',
-      }}
-    >
-      ★
-    </span>
-    <span>Clients CEGECLIM</span>
-  </span>
-</h2>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: '#555' }}>
+                    <span
+                      style={{
+                        color: '#facc15',
+                        fontSize: 14,
+                        lineHeight: 1,
+                        textShadow: '0 0 1px #a16207',
+                        }}
+                     >
+                      ★
+                      </span>
+                      <span>Clients CEGECLIM</span>
+                      </span>
+                      </h2>
                       <div style={{ marginTop: 6, fontSize: 15 }}>
                         {sortedFilteredClients.length} entreprise(s) affichées
                       </div>

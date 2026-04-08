@@ -56,7 +56,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       label: 'Base clients',
       items: [
         { label: 'Liste globale', path: '/clients', accessKey: 'can_clients' },
-        { label: 'Carte', path: '/carte', accessKey: 'can_carte' },
+        { label: 'Liste par Agence', path: '/carte', accessKey: 'can_carte' },
         { label: 'Clients Cegeclim', path: '/clients_cegeclim', accessKey: 'can_clients_cegeclim' },
         { label: 'Suivi Prospects', path: '/suivi_prospects', accessKey: 'can_suivi_prospects' },
       ],
