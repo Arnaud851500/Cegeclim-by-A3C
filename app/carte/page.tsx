@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import Papa from 'papaparse'
 import * as XLSX from 'xlsx-js-style'
 import jsPDF from 'jspdf'
-import autoTable from 'jspdf-autotable'
+import autoTable, { Row } from 'jspdf-autotable'
 import { supabase } from '@/lib/supabaseClient'
 import { useSocieteFilter } from '@/components/SocieteFilterContext'
 import dynamic from 'next/dynamic'
@@ -2010,6 +2010,7 @@ const ageDaysMax = useMemo(
     search,
     designationSearch,
     selectedDepartments,
+    selectedClientScope,
     selectedSectors,
     selectedNafCodes,
     selectedAgenceRow,
