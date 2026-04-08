@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Papa from 'papaparse'
-import * as XLSX from 'xlsx'
+import * as XLSX from 'xlsx-js-style'
 import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
 import { supabase } from '@/lib/supabaseClient'
@@ -57,6 +57,9 @@ type ClientMapRow = {
   cp_sage: string | null
   ville_sage: string | null
   remarque: string | null
+  ca_2023: number | null
+  ca_2024: number | null
+  ca_2025: number | null
 }
 
 type ClientRow = {
@@ -101,6 +104,7 @@ type ClientRow = {
   next_action_at: string | null
   next_action_label: string | null
   prospect_comment: string | null
+  client_a_suivre: boolean | null
 }
 
 type CegeclimAbsentRow = {
@@ -125,6 +129,9 @@ type ClientCegeclimRow = {
   cp_sage: string | null
   ville_sage: string | null
   remarque: string | null
+  ca_2023: number | null
+  ca_2024: number | null
+  ca_2025: number | null
 }
 
 type ImportRow = {
@@ -633,7 +640,8 @@ async function fetchAllClients(): Promise<{ rows: ClientRow[]; totalCount: numbe
         last_contact_at,
         next_action_at,
         next_action_label,
-        prospect_comment
+        prospect_comment,
+        client_a_suivre
       `,
         { count: 'exact' }
       )
@@ -698,7 +706,8 @@ async function fetchClientsInitialBatch(): Promise<{ rows: ClientRow[]; totalCou
       last_contact_at,
       next_action_at,
       next_action_label,
-      prospect_comment
+      prospect_comment,
+      client_a_suivre
     `,
       { count: 'exact' }
     )
@@ -726,7 +735,7 @@ async function fetchClientsCegeclimRows(): Promise<ClientCegeclimRow[]> {
     const { data, error } = await supabase
       .from('clients_cegeclim')
       .select(
-        'siret, numero_client_sage, designation_commerciale, representant, date_creation, agence, cp_sage, ville_sage, remarque'
+        'siret, numero_client_sage, designation_commerciale, representant, date_creation, agence, cp_sage, ville_sage, remarque, ca_2023, ca_2024, ca_2025'
       )
 
     if (error) {
@@ -810,7 +819,8 @@ async function fetchClientBySiret(siret: string): Promise<ClientRow | null> {
       last_contact_at,
       next_action_at,
       next_action_label,
-      prospect_comment
+      prospect_comment,
+      client_a_suivre
     `
     )
     .eq('siret', siret)
@@ -943,6 +953,27 @@ function openNextClient() {
   setSelectedClient(nextClient)
 }
 
+async function saveSelectedClientField(field: 'prospect_comment' | 'client_a_suivre', value: string | boolean) {
+  if (!selectedClient?.id) return
+
+  const currentId = selectedClient.id
+
+  setSelectedClient((prev) => (prev ? ({ ...prev, [field]: value } as ClientRow) : prev))
+  setClients((prev) => prev.map((row) => (row.id === currentId ? ({ ...row, [field]: value } as ClientRow) : row)))
+  setMapClients((prev) => prev.map((row) => (row.id === currentId ? ({ ...row, [field]: value } as ClientRow) : row)))
+
+  const { error } = await supabase
+    .from('clients')
+    .update({ [field]: value })
+    .eq('id', currentId)
+
+  if (error) {
+    console.error(error)
+    alert("Erreur lors de l'enregistrement de la fiche client.")
+    await loadAll()
+  }
+}
+
   async function launchImportSirene() {
     setImporting(true)
 
@@ -1004,6 +1035,7 @@ function openNextClient() {
   const [selectedNafCodes, setSelectedNafCodes] = useState<string[]>([])
   const [selectedAgence, setSelectedAgence] = useState('TOUS')
   const [selectedClientScope, setSelectedClientScope] = useState<'Tous' | 'Cegeclim' | 'Prospects'>('Tous')
+  const [selectedClientASuivre, setSelectedClientASuivre] = useState<'Tous' | 'Oui' | 'Non'>('Tous')
 
   const [includeNoDistance, setIncludeNoDistance] = useState(true)
   const [onlyContactable, setOnlyContactable] = useState(false)
@@ -1058,6 +1090,7 @@ function openNextClient() {
     selectedNafCodes,
     selectedAgence,
     selectedClientScope,
+    selectedClientASuivre,
     includeNoDistance,
     onlyContactable,
     onlyNotInCegeclim,
@@ -1551,6 +1584,9 @@ function matchesMapCommonFilters(row: ClientRow) {
 
   if (onlyContactable && !row.contactable) return false
 
+  if (selectedClientASuivre === 'Oui' && !row.client_a_suivre) return false
+  if (selectedClientASuivre === 'Non' && row.client_a_suivre) return false
+
   if (excludeDesignationND) {
     const designation = String(row.raison_sociale_affichee || '').trim().toLowerCase()
     if (!designation || designation === 'nd') return false
@@ -1596,6 +1632,7 @@ const mapCegeclimPoints = useMemo(() => {
   selectedAgence,
   includeNoDistance,
   onlyContactable,
+  selectedClientASuivre,
   excludeDesignationND,
   excludeFutureCreation,
   onlyToEnrich,
@@ -1919,6 +1956,8 @@ const ageDaysMax = useMemo(
         return false
       }
       if (excludeDesignationND && isDesignationND) return false
+      if (selectedClientASuivre === 'Oui' && !row.client_a_suivre) return false
+      if (selectedClientASuivre === 'Non' && row.client_a_suivre) return false
       if (excludeFutureCreation && isFutureDate(row.dateCreationEtablissement)) return false
       if (onlyContactable && !(row.telephone || row.email || row.contactable)) return false
       if (onlyNotInCegeclim && isCegeclim) return false
@@ -1985,6 +2024,7 @@ const ageDaysMax = useMemo(
     ageDaysMax,
     distanceMax,
     cegeclimBySiret,
+    selectedClientASuivre,
   ])
 
   const sortedFilteredClients = useMemo(() => {
@@ -2397,6 +2437,8 @@ const selectedClientMapReason = useMemo(() => {
             )
           : null
 
+        const cege = getClientCegeclimRow(row, cegeclimDetailsBySiret)
+
         return {
           designation: row.raison_sociale_affichee || 'ND',
           siret: row.siret || 'ND',
@@ -2417,141 +2459,268 @@ const selectedClientMapReason = useMemo(() => {
           dirigeant: row.nom_dirigeant || '',
           noteGoogle: row.google_rating != null ? String(row.google_rating) : '',
           nbNotes: row.google_user_ratings_total != null ? String(row.google_user_ratings_total) : '',
+          prospectRemarque: row.prospect_comment || '',
+          clientASuivre: row.client_a_suivre ? 'Oui' : 'Non',
+          ca2023: cege?.ca_2023 != null ? String(cege.ca_2023) : '',
+          ca2024: cege?.ca_2024 != null ? String(cege.ca_2024) : '',
+          ca2025: cege?.ca_2025 != null ? String(cege.ca_2025) : '',
         }
       })
   }
 
   function exportExcel() {
-    const exportRows = buildExportRows()
-    const aoa: (string | number)[][] = [
-      ['Identité', '', '', '', '', '', 'Localisation', '', '', '', '', '', 'Contact', '', '', '', '', ''],
-      [
-        'Raison sociale',
-        'Siret',
-        'Présent base Cegeclim',
-        'APE/NAF',
-        "Secteur d'activité",
-        'Création',
-        'Dépt',
-        'Ville',
-        'Code postal',
-        'Adresse',
-        'Distance',
-        'Google maps',
-        'Tel',
-        'Mail',
-        'Site',
-        'Dirigeant',
-        'Note Google',
-        'Nb Note',
-      ],
-      ...exportRows.map((row) => [
-        row.designation,
-        row.siret,
-        row.presentCegeclim,
-        row.apeNaf,
-        row.secteur,
-        row.creation,
-        row.departement,
-        row.ville,
-        row.codePostal,
-        row.adresse,
-        row.distance,
-        row.googleMapsLabel,
-        row.telephone,
-        row.email,
-        row.site,
-        row.dirigeant,
-        row.noteGoogle,
-        row.nbNotes,
-      ]),
-    ]
+  const exportRows = buildExportRows()
 
-    const ws = XLSX.utils.aoa_to_sheet(aoa)
-    ws['!merges'] = [
-      XLSX.utils.decode_range('A1:F1'),
-      XLSX.utils.decode_range('G1:L1'),
-      XLSX.utils.decode_range('M1:R1'),
-    ]
-    ws['!cols'] = [
-      { wch: 23 },
-      { wch: 16 },
-      { wch: 12 },
-      { wch: 10 },
-      { wch: 18 },
-      { wch: 11 },
-      { wch: 6 },
-      { wch: 20 },
-      { wch: 11 },
-      { wch: 28 },
-      { wch: 10 },
-      { wch: 12 },
-      { wch: 16 },
-      { wch: 24 },
-      { wch: 26 },
-      { wch: 18 },
-      { wch: 10 },
-      { wch: 9 },
-    ]
-    ws['!autofilter'] = { ref: 'A2:R2' }
-    ws['!freeze'] = { xSplit: 0, ySplit: 2, topLeftCell: 'A3', activePane: 'bottomLeft', state: 'frozen' }
-    ws['!rows'] = aoa.map((_, index) => ({ hpt: index < 2 ? 22 : 18 }))
-    ws['!pageMargins'] = { left: 0.7, right: 0.7, top: 0.75, bottom: 0.75, header: 0.3, footer: 0.3 }
-    ws['!pageSetup'] = {
-      orientation: 'landscape',
-      paperSize: 9,
-      fitToWidth: 1,
-      fitToHeight: 0,
-      scale: 53,
-    }
+  const aoa: (string | number)[][] = [
+    ['Identité', '', '', '', '', '', 'Localisation', '', '', '', '', '', 'Contact', '', '', '', '', '', 'Remarque', '', '', '', ''],
+    [
+      'Raison sociale',
+      'Siret',
+      'Présent base',
+      'APE/NAF',
+      "Secteur d'activité",
+      'Création',
+      'Dépt',
+      'Ville',
+      'Code postal',
+      'Adresse',
+      'Distance',
+      'Google maps',
+      'Tel',
+      'Mail',
+      'Site',
+      'Dirigeant',
+      'Note Google',
+      'Nb Note',
+      'Client à suivre',
+      'Prospect / Remarque',
+      'CA 2023',
+      'CA 2024',
+      'CA 2025',
+    ],
+    ...exportRows.map((row) => [
+      row.designation,
+      row.siret,
+      row.presentCegeclim,
+      row.apeNaf,
+      row.secteur,
+      row.creation,
+      row.departement,
+      row.ville,
+      row.codePostal,
+      row.adresse,
+      row.distance,
+      row.googleMapsLabel,
+      row.telephone,
+      row.email,
+      row.site,
+      row.dirigeant,
+      row.noteGoogle,
+      row.nbNotes,
+      row.clientASuivre,
+      row.prospectRemarque,
+      row.ca2023,
+      row.ca2024,
+      row.ca2025,
+    ]),
+  ]
 
-    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:R2')
-    for (let rowIndex = 2; rowIndex <= range.e.r; rowIndex += 1) {
-      const excelRow = rowIndex + 1
-      const linkCellRef = `L${excelRow}`
-      const siteCellRef = `O${excelRow}`
-      const googleUrl = exportRows[rowIndex - 2]?.googleMapsUrl
-      const siteUrl = exportRows[rowIndex - 2]?.site
+  const ws = XLSX.utils.aoa_to_sheet(aoa)
 
-      if (googleUrl) {
-        ws[linkCellRef] = {
-          t: 's',
-          v: 'ouvrir',
-          l: { Target: googleUrl, Tooltip: 'Ouvrir dans Google Maps' },
-          s: { font: { color: { rgb: '0563C1' }, underline: true } },
-        }
-      }
+  ws['!merges'] = [
+    XLSX.utils.decode_range('A1:F1'),
+    XLSX.utils.decode_range('G1:L1'),
+    XLSX.utils.decode_range('M1:R1'),
+    XLSX.utils.decode_range('S1:W1'),
+  ]
 
-      if (siteUrl) {
-        ws[siteCellRef] = {
-          t: 's',
-          v: siteUrl,
-          l: { Target: siteUrl, Tooltip: 'Ouvrir le site web' },
-          s: { font: { color: { rgb: '0563C1' }, underline: true } },
-        }
-      }
-    }
+  ws['!cols'] = [
+    { wch: 23 },
+    { wch: 16 },
+    { wch: 12 },
+    { wch: 10 },
+    { wch: 18 },
+    { wch: 11 },
+    { wch: 6 },
+    { wch: 20 },
+    { wch: 11 },
+    { wch: 28 },
+    { wch: 10 },
+    { wch: 12 },
+    { wch: 16 },
+    { wch: 24 },
+    { wch: 26 },
+    { wch: 18 },
+    { wch: 10 },
+    { wch: 9 },
+    { wch: 12 },
+    { wch: 34 },
+    { wch: 11 },
+    { wch: 11 },
+    { wch: 11 },
+  ]
 
-    const departmentBreaks: number[] = []
-    let previousDepartment = ''
-    exportRows.forEach((row, index) => {
-      const currentRowNumber = index + 3
-      if (index > 0 && row.departement !== previousDepartment) departmentBreaks.push(currentRowNumber - 1)
-      previousDepartment = row.departement
-    })
-    if (departmentBreaks.length > 0) {
-      ;(ws as any)['!rowBreaks'] = departmentBreaks.map((id) => ({ id, man: 1 }))
-    }
+  ws['!autofilter'] = { ref: 'A2:W2' }
 
-    const wb = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(wb, ws, 'Liste entreprises')
-    if (!wb.Workbook) wb.Workbook = { Names: [] }
-    if (!wb.Workbook.Names) wb.Workbook.Names = []
-    wb.Workbook.Names.push({ Sheet: 0, Name: '_xlnm.Print_Titles', Ref: "'Liste entreprises'!$1:$2" })
-    wb.Workbook.Names.push({ Sheet: 0, Name: '_xlnm.Print_Area', Ref: `'Liste entreprises'!$A$1:$R$${exportRows.length + 2}` })
-
-    XLSX.writeFile(wb, `clients_selection_${new Date().toISOString().slice(0, 10)}.xlsx`)
+  ws['!freeze'] = {
+    xSplit: 2,
+    ySplit: 2,
+    topLeftCell: 'C3',
+    activePane: 'bottomRight',
+    state: 'frozen',
   }
+
+  ws['!rows'] = aoa.map((_, index) => ({ hpt: index < 2 ? 22 : 18 }))
+
+  ws['!pageMargins'] = {
+    left: 0.7,
+    right: 0.7,
+    top: 0.75,
+    bottom: 0.75,
+    header: 0.3,
+    footer: 0.3,
+  }
+
+  ws['!pageSetup'] = {
+    orientation: 'landscape',
+    paperSize: 9,
+    fitToWidth: 1,
+    fitToHeight: 0,
+    scale: 53,
+  }
+
+  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:W2')
+
+  const GREY = 'D9D9D9'
+  const GREEN = 'C4D79B'
+  const BLUE = 'B8CCE4'
+  const BEIGE = 'DDD9C3'
+  const BORDER = '000000'
+
+  function getGroupFill(colIndex: number) {
+    if (colIndex <= 5) return GREY
+    if (colIndex <= 11) return GREEN
+    if (colIndex <= 17) return BLUE
+    return BEIGE
+  }
+
+  function ensureCell(ref: string) {
+    if (!ws[ref]) ws[ref] = { t: 's', v: '' }
+    if (!(ws[ref] as any).s) (ws[ref] as any).s = {}
+    return ws[ref] as any
+  }
+
+  function setBorder(cell: any) {
+    cell.s = cell.s || {}
+    cell.s.border = {
+      top: { style: 'thin', color: { rgb: BORDER } },
+      bottom: { style: 'thin', color: { rgb: BORDER } },
+      left: { style: 'thin', color: { rgb: BORDER } },
+      right: { style: 'thin', color: { rgb: BORDER } },
+    }
+  }
+
+  for (let r = 0; r <= range.e.r; r += 1) {
+    for (let c = 0; c <= 22; c += 1) {
+      const ref = XLSX.utils.encode_cell({ r, c })
+      const cell = ensureCell(ref)
+
+      setBorder(cell)
+
+      if (r === 0 || r === 1) {
+        cell.s.font = { bold: true, color: { rgb: '000000' } }
+        cell.s.fill = {
+          patternType: 'solid',
+          fgColor: { rgb: getGroupFill(c) },
+        }
+        cell.s.alignment = {
+          vertical: 'center',
+          horizontal: r === 0 ? 'center' : 'left',
+          wrapText: true,
+        }
+      } else {
+        cell.s.alignment = {
+          vertical: 'center',
+          horizontal: c === 10 || c === 16 || c === 17 || c >= 20 ? 'center' : 'left',
+          wrapText: true,
+        }
+      }
+    }
+  }
+
+  for (let c = 0; c <= 22; c += 1) {
+    const ref = XLSX.utils.encode_cell({ r: 0, c })
+    const cell = ensureCell(ref)
+    cell.s.alignment = {
+      vertical: 'center',
+      horizontal: 'center',
+      wrapText: true,
+    }
+  }
+
+  for (let rowIndex = 2; rowIndex <= range.e.r; rowIndex += 1) {
+    const excelRow = rowIndex + 1
+    const linkCellRef = `L${excelRow}`
+    const siteCellRef = `O${excelRow}`
+    const googleUrl = exportRows[rowIndex - 2]?.googleMapsUrl
+    const siteUrl = exportRows[rowIndex - 2]?.site
+
+    if (googleUrl) {
+      ws[linkCellRef] = {
+        t: 's',
+        v: 'ouvrir',
+        l: { Target: googleUrl, Tooltip: 'Ouvrir dans Google Maps' },
+        s: {
+          font: { color: { rgb: '0563C1' }, underline: true },
+          border: {
+            top: { style: 'thin', color: { rgb: BORDER } },
+            bottom: { style: 'thin', color: { rgb: BORDER } },
+            left: { style: 'thin', color: { rgb: BORDER } },
+            right: { style: 'thin', color: { rgb: BORDER } },
+          },
+          alignment: { horizontal: 'center', vertical: 'center' },
+        },
+      }
+    }
+
+    if (siteUrl) {
+      ws[siteCellRef] = {
+        t: 's',
+        v: siteUrl,
+        l: { Target: siteUrl, Tooltip: 'Ouvrir le site web' },
+        s: {
+          font: { color: { rgb: '0563C1' }, underline: true },
+          border: {
+            top: { style: 'thin', color: { rgb: BORDER } },
+            bottom: { style: 'thin', color: { rgb: BORDER } },
+            left: { style: 'thin', color: { rgb: BORDER } },
+            right: { style: 'thin', color: { rgb: BORDER } },
+          },
+        },
+      }
+    }
+  }
+
+  const wb = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(wb, ws, 'Liste entreprises')
+
+  if (!wb.Workbook) wb.Workbook = { Names: [] }
+  if (!wb.Workbook.Names) wb.Workbook.Names = []
+
+  wb.Workbook.Names.push({
+    Sheet: 0,
+    Name: '_xlnm.Print_Titles',
+    Ref: "'Liste entreprises'!$1:$2",
+  })
+
+  wb.Workbook.Names.push({
+    Sheet: 0,
+    Name: '_xlnm.Print_Area',
+    Ref: `'Liste entreprises'!$A$1:$W$${exportRows.length + 2}`,
+  })
+
+  XLSX.writeFile(wb, `clients_selection_${new Date().toISOString().slice(0, 10)}.xlsx`)
+}
 
   function exportPdf() {
     const doc = new jsPDF('landscape', 'mm', 'a4')
@@ -2593,6 +2762,9 @@ const selectedClientMapReason = useMemo(() => {
     '',
     '',
     '',
+    'Remarque',
+    '',
+    ''
   ],
   [
     'Raison sociale',
@@ -2613,6 +2785,8 @@ const selectedClientMapReason = useMemo(() => {
     'Dirigeant',
     'Note Google',
     'Nb Note',
+    'Client à suivre',
+    'Prospect / Remarque',
   ],
 ]
 
@@ -2635,6 +2809,8 @@ const selectedClientMapReason = useMemo(() => {
       15: { cellWidth: 14 },
       16: { cellWidth: 9, halign: 'center' as const },
       17: { cellWidth: 7, halign: 'center' as const },
+      18: { cellWidth: 10, halign: 'center' as const },
+      19: { cellWidth: 22 },
     }
 
     departments.forEach((department, departmentIndex) => {
@@ -2665,6 +2841,8 @@ const selectedClientMapReason = useMemo(() => {
           row.dirigeant,
           row.noteGoogle,
           row.nbNotes,
+          row.clientASuivre,
+          row.prospectRemarque,
         ]),
         theme: 'grid',
         margin: { top: 14, right: 6, bottom: 8, left: 6 },
@@ -2694,7 +2872,8 @@ const selectedClientMapReason = useMemo(() => {
     if (data.row.index === 0) {
       if (data.column.index <= 5) data.cell.styles.fillColor = [217, 217, 217]
       else if (data.column.index <= 11) data.cell.styles.fillColor = [191, 222, 185]
-      else data.cell.styles.fillColor = [180, 198, 231]
+      else if (data.column.index <= 17) data.cell.styles.fillColor = [180, 198, 231]
+      else data.cell.styles.fillColor = [242, 229, 188]
 
       data.cell.styles.textColor = 0
       data.cell.styles.halign = 'center'
@@ -2703,8 +2882,9 @@ const selectedClientMapReason = useMemo(() => {
       if (data.column.index === 0) data.cell.colSpan = 6
       if (data.column.index === 6) data.cell.colSpan = 6
       if (data.column.index === 12) data.cell.colSpan = 6
+      if (data.column.index === 18) data.cell.colSpan = 5
 
-      if (![0, 6, 12].includes(data.column.index)) {
+      if (![0, 6, 12, 18].includes(data.column.index)) {
         data.cell.text = ['']
       }
     }
@@ -2712,7 +2892,8 @@ const selectedClientMapReason = useMemo(() => {
     if (data.row.index === 1) {
       if (data.column.index <= 5) data.cell.styles.fillColor = [217, 217, 217]
       else if (data.column.index <= 11) data.cell.styles.fillColor = [191, 222, 185]
-      else data.cell.styles.fillColor = [180, 198, 231]
+      else if (data.column.index <= 17) data.cell.styles.fillColor = [180, 198, 231]
+      else data.cell.styles.fillColor = [242, 229, 188]
 
       data.cell.styles.textColor = 0
       data.cell.styles.halign = 'center'
@@ -2773,8 +2954,7 @@ const selectedClientMapReason = useMemo(() => {
     window.print()
   }
   
-  const totalClientsBaseForScope =
-    normalizedSocieteFilter === 'global' ? clientsTotalCount : scopedClients.length
+  const totalClientsBaseForScope = scopedClients.length
 
   const totalCegeclimBase = scopedClientsCegeclim.length
 
@@ -2797,7 +2977,24 @@ const selectedClientMapReason = useMemo(() => {
     <div style={pageStyle}>
       <div style={containerStyle}>
         <section style={sectionTitleStyle}>
-          <h1 style={pageTitleStyle}>Clients :</h1>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 14, flexWrap: 'wrap' }}>
+  <h1 style={sectionTitleTextStyle}>Clients :</h1>
+
+  <span style={{ fontSize: 18, fontWeight: 500, color: '#475569' }}>
+    dernière mise à jour le :{' '}
+    {lastImport?.date_import
+      ? `${new Date(lastImport.date_import).toLocaleDateString('fr-FR', {
+          day: '2-digit',
+          month: '2-digit',
+          year: 'numeric',
+        })} à ${new Date(lastImport.date_import).toLocaleTimeString('fr-FR', {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        })}`
+      : 'NC'}
+  </span>
+</div>
         </section>
 
         {allowedDepartements.length > 0 && (
@@ -2960,7 +3157,7 @@ const selectedClientMapReason = useMemo(() => {
                       gap: 12,
                     }}
                   >
-                    <div style={{ width: 300 }}>
+                    <div style={{ width: 200 }}>
                       <div style={filterLabelStyle}>Recherche libre</div>
                       <input
                         value={search}
@@ -2983,6 +3180,19 @@ const selectedClientMapReason = useMemo(() => {
                         <option value="Prospects">Prospects</option>
                     </select>
                     </div>
+                    <div style={{ minWidth: 150 }}>
+                      <div style={filterLabelStyle}>Client à suivre :</div>
+                      <select
+                        value={selectedClientASuivre}
+                        onChange={(e) => setSelectedClientASuivre(e.target.value as 'Tous' | 'Oui' | 'Non')}
+                        style={selectLikeStyle}
+                      >
+                        <option value="Tous">Tous</option>
+                        <option value="Oui">Oui</option>
+                        <option value="Non">Non</option>
+                      </select>
+                    </div>
+
                     <div style={{ width: 220 }}>
                       <MultiSelectHorizontal
                         label="Activité :"
@@ -3010,7 +3220,7 @@ const selectedClientMapReason = useMemo(() => {
                       />
                     </div>
 
-                    <div style={{ width: 520, marginLeft: 24 }}>
+                    <div style={{ width: 380, marginLeft: 24 }}>
                       <div style={filterLabelStyle}>Ancienneté de l'entreprise</div>
                       <div style={{ position: 'relative', height: 34, marginTop: 8 }}>
                         <div
@@ -3742,6 +3952,15 @@ const selectedClientMapReason = useMemo(() => {
                     {getEnrichmentBadge(selectedClient.enrichment_status).label}
                   </span>
 
+                  <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 700 }}>
+                    <span>Client à suivre</span>
+                    <input
+                      type="checkbox"
+                      checked={!!selectedClient.client_a_suivre}
+                      onChange={(e) => void saveSelectedClientField('client_a_suivre', e.target.checked)}
+                    />
+                  </label>
+
                   <button
                     onClick={() => {
                       if (selectedClient.siret) void enrichClientBySiret(selectedClient.siret)
@@ -3768,52 +3987,54 @@ const selectedClientMapReason = useMemo(() => {
                   <div style={clientBlockStyle}>
                     <div style={clientBlockTitleStyle}>Identité</div>
                     <div style={clientBlockContentStyle}>
-                      <div><b>Raison sociale :</b> {selectedClient.raison_sociale_affichee || 'NC'}</div>
+                      <div><b>Téléphone :</b> {selectedClient.telephone || 'NC'}</div>             
                       <div><b>SIRET :</b> {selectedClient.siret || 'NC'}</div>
                       <div><b>Code NAF :</b> {selectedClient.activitePrincipaleEtablissement || 'NC'}</div>
                       <div>
-                        <b>Secteur :</b>{' '}
-                        {selectedClient.naf_libelle_traduit ||
-                          translateNaf(selectedClient.activitePrincipaleEtablissement)}
+                          <b>Secteur :</b>{' '}
+                          {selectedClient.naf_libelle_traduit ||
+                            translateNaf(selectedClient.activitePrincipaleEtablissement)}
                       </div>
                       <div><b>Date création :</b> {formatDateFr(selectedClient.dateCreationEtablissement)}</div>
                       <div>
-                        <b>Ancienneté :</b>{' '}
-                        {formatAgePrecise(diffDaysFromToday(selectedClient.dateCreationEtablissement))}
+                          <b>Ancienneté :</b>{' '}
+                          {formatAgePrecise(diffDaysFromToday(selectedClient.dateCreationEtablissement))}
                       </div>
+                      <div><b>Effectifs SIRENE :</b> {selectedClient.trancheEffectifsEtablissement || 'NC'}</div>
+                      <div><b>Effectif estimé :</b> {selectedClient.effectif_estime ?? 'NC'}</div>
+                      <div><b>Présent base CEGECLIM :</b> {isClientPresentInCegeclim(selectedClient, cegeclimBySiret) ? getClientCegeclimCode(selectedClient, cegeclimBySiret) : 'NON'}</div>
                     </div>
                   </div>
 
                   <div style={clientBlockStyle}>
-          
                     <div
-                    style={{
-                      ...clientBlockTitleStyle,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      gap: 12,
-                    }}
-                      >
-                    <span>Localisation</span>
-
-                    <span
                       style={{
-                        display: 'inline-flex',
+                        ...clientBlockTitleStyle,
+                        display: 'flex',
                         alignItems: 'center',
-                        padding: '6px 12px',
-                        borderRadius: 999,
-                        fontSize: 13,
-                        fontWeight: 700,
-                        whiteSpace: 'nowrap',
-                        background: selectedClientVisibleOnMap ? '#166534' : '#991b1b',
-                        color: '#fff',
+                        justifyContent: 'space-between',
+                        gap: 14,
                       }}
-                      title={selectedClientMapReason}
                     >
-                      {selectedClientVisibleOnMap ? 'Présent sur la carte' : 'Absent de la carte'}
-                    </span>
-                  </div>
+                      <span>Localisation</span>
+
+                      <span
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          padding: '5px 8px',
+                          borderRadius: 999,
+                          fontSize: 13,
+                          fontWeight: 700,
+                          whiteSpace: 'nowrap',
+                          background: selectedClientVisibleOnMap ? '#166534' : '#991b1b',
+                          color: '#fff',
+                        }}
+                        title={selectedClientMapReason}
+                      >
+                        {selectedClientVisibleOnMap ? 'Présent sur la carte' : 'Absent de la carte'}
+                      </span>
+                    </div>
                     <div style={clientBlockContentStyle}>
                       <div><b>Adresse :</b> {selectedClient.adresse_complete || 'NC'}</div>
                       <div><b>Ville :</b> {selectedClient.libelleCommuneEtablissement || 'NC'}</div>
@@ -3822,7 +4043,7 @@ const selectedClientMapReason = useMemo(() => {
                       <div><b>Coordonnée X :</b> {selectedClient.coordonneeLambertAbscisseEtablissement ?? 'NC'}</div>
                       <div><b>Coordonnée Y :</b> {selectedClient.coordonneeLambertOrdonneeEtablissement ?? 'NC'}</div>
                       <div style={{ marginTop: 10 }}>
-                      <strong>Raison :</strong> {selectedClientMapReason}
+                        <strong>Raison :</strong> {selectedClientMapReason}
                       </div>
                       {selectedClient.google_maps_url ? (
                         <div>
@@ -3832,6 +4053,33 @@ const selectedClientMapReason = useMemo(() => {
                           </a>
                         </div>
                       ) : null}
+                    </div>
+                  </div>
+
+                  <div style={clientBlockStyle}>
+                    <div style={clientBlockTitleStyle}>Prospect / Remarque</div>
+                    <div style={clientBlockContentStyle}>
+                      <textarea
+                        defaultValue={selectedClient.prospect_comment || ''}
+                        onBlur={(e) => {
+                          const nextValue = e.target.value
+                          if (nextValue !== (selectedClient.prospect_comment || '')) {
+                            void saveSelectedClientField('prospect_comment', nextValue)
+                          }
+                        }}
+                        placeholder="Vous pouvez saisir du texte"
+                        style={{
+                          width: '100%',
+                          minHeight: 260,
+                          resize: 'vertical',
+                          border: '1px solid #cbd5e1',
+                          borderRadius: 12,
+                          padding: 12,
+                          fontFamily: 'inherit',
+                          fontSize: 14,
+                          background: '#fff',
+                        }}
+                      />
                     </div>
                   </div>
 
@@ -3848,15 +4096,6 @@ const selectedClientMapReason = useMemo(() => {
                           ? 'Oui'
                           : 'Non'}
                       </div>
-                    </div>
-                  </div>
-
-                  <div style={clientBlockStyle}>
-                    <div style={clientBlockTitleStyle}>Données SIRENE</div>
-                    <div style={clientBlockContentStyle}>
-                      <div><b>Effectifs SIRENE :</b> {selectedClient.trancheEffectifsEtablissement || 'NC'}</div>
-                      <div><b>Effectif estimé :</b> {selectedClient.effectif_estime ?? 'NC'}</div>
-                      <div><b>Présent base CEGECLIM :</b> {isClientPresentInCegeclim(selectedClient, cegeclimBySiret) ? getClientCegeclimCode(selectedClient, cegeclimBySiret) : 'NON'}</div>
                     </div>
                   </div>
 
@@ -3890,9 +4129,9 @@ const selectedClientMapReason = useMemo(() => {
                       <div><b>Désignation commerciale :</b> {selectedClientCegeclim?.designation_commerciale || 'NC'}</div>
                       <div><b>Représentant :</b> {selectedClientCegeclim?.representant || 'NC'}</div>
                       <div><b>Date de création :</b> {formatDateFr(selectedClientCegeclim?.date_creation || null)}</div>
-                      <div><b>AGENCE :</b> {selectedClientCegeclim?.agence || 'NC'}</div>
-                      <div><b>CP SAGE :</b> {selectedClientCegeclim?.cp_sage || 'NC'}</div>
-                      <div><b>VILLE SAGE :</b> {selectedClientCegeclim?.ville_sage || 'NC'}</div>
+                      <div><b>CA 2023 :</b> {formatCurrency(selectedClientCegeclim?.ca_2023)}</div>
+                      <div><b>CA 2024 :</b> {formatCurrency(selectedClientCegeclim?.ca_2024)}</div>
+                      <div><b>CA 2025 :</b> {formatCurrency(selectedClientCegeclim?.ca_2025)}</div>
                       <div><b>Remarque :</b> {selectedClientCegeclim?.remarque || 'NC'}</div>
                     </div>
                   </div>
