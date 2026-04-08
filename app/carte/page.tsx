@@ -1921,8 +1921,8 @@ const ageDaysMax = useMemo(
       if (excludeDesignationND && isDesignationND) return false
       if (excludeFutureCreation && isFutureDate(row.dateCreationEtablissement)) return false
       if (onlyContactable && !(row.telephone || row.email || row.contactable)) return false
-      if (onlyNotInCegeclim && isPresentInCegeclim) return false
-      if (onlyPresentInCegeclim && !isPresentInCegeclim) return false
+      if (onlyNotInCegeclim && isCegeclim) return false
+      if (onlyPresentInCegeclim && !isCegeclim) return false
       if (onlyToEnrich && completeness >= 100 && row.enrichment_status === 'ok') return false
 
       if (ageDays === null || ageDays < 0) {
