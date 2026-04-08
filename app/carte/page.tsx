@@ -2175,6 +2175,12 @@ const ageDaysMax = useMemo(
     return out
   }, [sortedFilteredClients, summaryDepartments])
 
+  const [prospectCommentDraft, setProspectCommentDraft] = useState('')
+
+  useEffect(() => {
+  setProspectCommentDraft(selectedClient?.prospect_comment || '')
+}, [selectedClient?.id, selectedClient?.prospect_comment])
+
   const summaryDeptCegeclimTotals = useMemo(() => {
     const out: Record<string, number> = {}
     summaryDepartments.forEach((dep) => {
@@ -3862,7 +3868,7 @@ const selectedClientMapReason = useMemo(() => {
                                       {client.libelleCommuneEtablissement || '—'}
                                     </div>
 
-                                    <div>{client.codePostalEtablissement || '—'}</div>
+                                    <div>{client.dateCreationEtablissement || '—'}</div>
                                   </div>
                                 </button>
                               )
@@ -4061,26 +4067,26 @@ const selectedClientMapReason = useMemo(() => {
                     <div style={clientBlockTitleStyle}>Prospect / Remarque</div>
                     <div style={clientBlockContentStyle}>
                       <textarea
-                        defaultValue={selectedClient.prospect_comment || ''}
-                        onBlur={(e) => {
-                          const nextValue = e.target.value
-                          if (nextValue !== (selectedClient.prospect_comment || '')) {
-                            void saveSelectedClientField('prospect_comment', nextValue)
-                          }
-                        }}
-                        placeholder="Vous pouvez saisir du texte"
-                        style={{
-                          width: '100%',
-                          minHeight: 260,
-                          resize: 'vertical',
-                          border: '1px solid #cbd5e1',
-                          borderRadius: 12,
-                          padding: 12,
-                          fontFamily: 'inherit',
-                          fontSize: 14,
-                          background: '#fff',
-                        }}
-                      />
+                          value={prospectCommentDraft}
+                          onChange={(e) => setProspectCommentDraft(e.target.value)}
+                          onBlur={() => {
+                            if (prospectCommentDraft !== (selectedClient?.prospect_comment || '')) {
+                              void saveSelectedClientField('prospect_comment', prospectCommentDraft)
+                            }
+                          }}
+                          placeholder="Vous pouvez saisir du texte"
+                          style={{
+                            width: '100%',
+                            minHeight: 260,
+                            resize: 'vertical',
+                            border: '1px solid #cbd5e1',
+                            borderRadius: 12,
+                            padding: 12,
+                            fontFamily: 'inherit',
+                            fontSize: 14,
+                            background: '#fff',
+                          }}
+                        />
                     </div>
                   </div>
 
