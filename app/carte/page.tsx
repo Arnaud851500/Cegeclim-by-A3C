@@ -1230,8 +1230,10 @@ async function openMapFromCell(secteur: string, departement: string | null) {
   setMapOpen(true)
   setMapLoading(true)
   setMapClients([])
-  setShowMapCegeclim(true)
+  setShowMapCegeclim(false)
   setShowMapProspects(true)
+  setMapAgeSliderMin(ageSliderMin)
+  setMapAgeSliderMax(ageSliderMax)
   setMapInstanceKey((prev) => prev + 1)
 
   setMapTitle(
@@ -1573,16 +1575,7 @@ function matchesMapCommonFilters(row: ClientRow) {
 }
 
 function matchesMapProspectFilters(row: ClientRow) {
-  const days = diffDaysFromToday(row.dateCreationEtablissement)
-  const minDays = Math.min(sliderToDays(ageSliderMin), sliderToDays(ageSliderMax))
-  const maxDays = Math.max(sliderToDays(ageSliderMin), sliderToDays(ageSliderMax))
-
   if (!matchesMapCommonFilters(row)) return false
-
-  if (days !== null) {
-    if (days < minDays || days > maxDays) return false
-  }
-
   return true
 }
 
@@ -1669,11 +1662,15 @@ const visibleMapPoints = useMemo(() => {
     ...(showMapProspects ? mapProspectPoints : []),
   ].filter((client) => {
     const sector = getClientSectorLabel(client)
-    const ageDays = diffDaysFromToday(client.dateCreationEtablissement)
+    const isCegeclim = isClientPresentInCegeclim(client, cegeclimBySiret)
 
     if (mapSectorVisibility[sector] === false) return false
-    if (ageDays === null) return false
-    if (ageDays < mapAgeDaysMin || ageDays > mapAgeDaysMax) return false
+
+    if (!isCegeclim) {
+      const ageDays = diffDaysFromToday(client.dateCreationEtablissement)
+      if (ageDays === null) return false
+      if (ageDays < mapAgeDaysMin || ageDays > mapAgeDaysMax) return false
+    }
 
     return true
   })
@@ -1685,6 +1682,7 @@ const visibleMapPoints = useMemo(() => {
   mapSectorVisibility,
   mapAgeDaysMin,
   mapAgeDaysMax,
+  cegeclimBySiret,
 ])
 
 const visibleMapRows = useMemo(() => {
@@ -1923,8 +1921,8 @@ const ageDaysMax = useMemo(
       if (excludeDesignationND && isDesignationND) return false
       if (excludeFutureCreation && isFutureDate(row.dateCreationEtablissement)) return false
       if (onlyContactable && !(row.telephone || row.email || row.contactable)) return false
-      if (onlyNotInCegeclim && isCegeclim) return false
-      if (onlyPresentInCegeclim && !isCegeclim) return false
+      if (onlyNotInCegeclim && isPresentInCegeclim) return false
+      if (onlyPresentInCegeclim && !isPresentInCegeclim) return false
       if (onlyToEnrich && completeness >= 100 && row.enrichment_status === 'ok') return false
 
       if (ageDays === null || ageDays < 0) {
@@ -1987,7 +1985,6 @@ const ageDaysMax = useMemo(
     ageDaysMax,
     distanceMax,
     cegeclimBySiret,
-    selectedClientScope,
   ])
 
   const sortedFilteredClients = useMemo(() => {
@@ -2776,14 +2773,13 @@ const selectedClientMapReason = useMemo(() => {
     window.print()
   }
   
-  const totalClientsBaseForScope = scopedClients.length
+  const totalClientsBaseForScope =
+    normalizedSocieteFilter === 'global' ? clientsTotalCount : scopedClients.length
 
-  const totalCegeclimBase = scopedClients.filter((row) => isClientPresentInCegeclim(row, cegeclimBySiret)).length
+  const totalCegeclimBase = scopedClientsCegeclim.length
 
   const totalSelection = sortedFilteredClients.length
-  const totalSelectedDepartments = allowedDepartements.length > 0
-    ? allowedDepartements.length
-    : Array.from(new Set(scopedClients.map((r) => getClientDepartment(r)).filter(Boolean))).length
+  const totalSelectedDepartments = summaryDepartments.length
   const totalSelectedNaf = Array.from(
     new Set(sortedFilteredClients.map((r) => r.activitePrincipaleEtablissement).filter(Boolean))
   ).length
@@ -2846,6 +2842,7 @@ const selectedClientMapReason = useMemo(() => {
 
 
               <section>
+                <h2 style={sectionTitleTextStyle}>.</h2>
                 <h2 style={sectionTitleTextStyle}>Synthèse de la sélection (cliquer sur une case pour ouvrir la carte)</h2>
               </section>
 
@@ -3543,7 +3540,7 @@ const selectedClientMapReason = useMemo(() => {
                                       </div>
                                       <div>{getClientSectorLabel(client)}</div>
                                       <div>
-                                        {client.libelleCommuneEtablissement || '—'} {client.dateCreationEtablissement || ''}
+                                        {client.libelleCommuneEtablissement || '—'} {client.codePostalEtablissement || ''}
                                       </div>
                                     </div>
                                   </Tooltip>
@@ -3588,7 +3585,7 @@ const selectedClientMapReason = useMemo(() => {
                             >
                               <div>Désignation</div>
                               <div>Ville</div>
-                              <div>Créée depuis</div>
+                              <div>Code postal</div>
                             </div>
                           </div>
 
@@ -3654,7 +3651,7 @@ const selectedClientMapReason = useMemo(() => {
                                       {client.libelleCommuneEtablissement || '—'}
                                     </div>
 
-                                    <div>{client.dateCreationEtablissement || '—'}</div>
+                                    <div>{client.codePostalEtablissement || '—'}</div>
                                   </div>
                                 </button>
                               )

@@ -4,16 +4,34 @@ import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { Montserrat } from 'next/font/google'
 import { supabase } from '@/lib/supabaseClient'
-import { useAccess, getFirstAllowedPath } from '@/components/AccessContext'
+import { useAccess } from '@/components/AccessContext'
 
 const montserrat = Montserrat({
   subsets: ['latin'],
   weight: ['400', '500', '600', '700', '800'],
 })
 
+const DEFAULT_LANDING_PAGE = '/accueil'
+
+async function getUserLandingPage(email: string | null | undefined) {
+  const normalizedEmail = String(email || '').toLowerCase().trim()
+  if (!normalizedEmail) return DEFAULT_LANDING_PAGE
+
+  const { data, error } = await supabase
+    .from('user_page_access')
+    .select('default_landing_page')
+    .eq('email', normalizedEmail)
+    .maybeSingle()
+
+  if (error) return DEFAULT_LANDING_PAGE
+
+  const page = String(data?.default_landing_page || '').trim()
+  return page || DEFAULT_LANDING_PAGE
+}
+
 export default function LoginPage() {
   const router = useRouter()
-  const { loading: accessLoading, rights, email: sessionEmail } = useAccess()
+  const { loading: accessLoading, email: sessionEmail } = useAccess()
 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -32,18 +50,22 @@ export default function LoginPage() {
     if (accessLoading) return
 
     if (sessionEmail) {
-      const path = getFirstAllowedPath(rights)
-      router.replace('/accueil')
+      void (async () => {
+        const landingPage = await getUserLandingPage(sessionEmail)
+        router.replace(landingPage)
+      })()
     }
-  }, [accessLoading, sessionEmail, rights, router])
+  }, [accessLoading, sessionEmail, router])
 
   const handleLogin = async (e?: React.FormEvent) => {
     e?.preventDefault()
     setLoading(true)
     setErrorMsg('')
 
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
+    const normalizedEmail = email.toLowerCase().trim()
+
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: normalizedEmail,
       password,
     })
 
@@ -53,7 +75,9 @@ export default function LoginPage() {
       return
     }
 
+    const landingPage = await getUserLandingPage(data.user?.email || normalizedEmail)
     setLoading(false)
+    router.replace(landingPage)
   }
 
   return (

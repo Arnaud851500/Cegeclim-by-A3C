@@ -23,6 +23,7 @@ type UserPageAccess = {
   allowed_scopes: string[]
   allowed_agences: string[]
   allowed_departements: string[]
+  default_landing_page: string
 }
 
 const EMPTY_MESSAGE = ''
@@ -61,6 +62,7 @@ const defaultNewRow: UserPageAccess = {
   allowed_scopes: ['Global'],
   allowed_agences: [],
   allowed_departements: [],
+  default_landing_page: '/accueil',
 }
 
 export default function AutorisationPage() {
@@ -100,7 +102,8 @@ export default function AutorisationPage() {
         display_name,
         allowed_scopes,
         allowed_agences,
-        allowed_departements
+        allowed_departements,
+        default_landing_page
       `)
       .order('email', { ascending: true })
 
@@ -143,6 +146,10 @@ export default function AutorisationPage() {
         Array.isArray(item.allowed_departements) && item.allowed_departements.length > 0
           ? item.allowed_departements
           : [],
+      default_landing_page:
+        typeof item.default_landing_page === 'string' && item.default_landing_page.trim()
+          ? item.default_landing_page.trim()
+          : '/accueil',
     }))
 
     setRows(formattedRows)
@@ -166,7 +173,7 @@ export default function AutorisationPage() {
 
   function updateLocalValue(
     email: string,
-    field: keyof Omit<UserPageAccess, 'email' | 'display_name' |'allowed_scopes' | 'allowed_agences' | 'allowed_departements'>,
+    field: keyof Omit<UserPageAccess, 'email' | 'display_name' | 'allowed_scopes' | 'allowed_agences' | 'allowed_departements' | 'default_landing_page'>,
     value: boolean
   ) {
     const normalizedEmail = email.toLowerCase().trim()
@@ -240,6 +247,18 @@ function updateDisplay_name(email: string, value: string) {
     )
   }
 
+  function updateDefaultLandingPage(email: string, value: string) {
+    const normalizedEmail = email.toLowerCase().trim()
+
+    setRows((prev) =>
+      prev.map((row) =>
+        row.email === normalizedEmail
+          ? { ...row, default_landing_page: value || '/accueil' }
+          : row
+      )
+    )
+  }
+
   function toggleDepartementForUser(email: string, dep: string) {
     const row = rows.find((r) => r.email === email)
     if (!row) return
@@ -261,7 +280,7 @@ function updateDisplay_name(email: string, value: string) {
   }
 
   function updateNewRowValue(
-    field: keyof Omit<UserPageAccess, 'email' | 'display_name' | 'allowed_scopes' | 'allowed_agences' | 'allowed_departements'>,
+    field: keyof Omit<UserPageAccess, 'email' | 'display_name' | 'allowed_scopes' | 'allowed_agences' | 'allowed_departements' | 'default_landing_page'>,
     value: boolean
   ) {
     setNewRow((prev) => ({ ...prev, [field]: value }))
@@ -288,6 +307,13 @@ function updateDisplay_name(email: string, value: string) {
     setNewRow((prev) => ({
       ...prev,
       allowed_agences: agences,
+    }))
+  }
+
+  function updateNewRowDefaultLandingPage(value: string) {
+    setNewRow((prev) => ({
+      ...prev,
+      default_landing_page: value || '/accueil',
     }))
   }
 
@@ -319,6 +345,7 @@ function updateDisplay_name(email: string, value: string) {
         allowed_scopes: row.allowed_scopes,
         allowed_agences: row.allowed_agences,
         allowed_departements: row.allowed_departements,
+        default_landing_page: row.default_landing_page || '/accueil',
       })
       .eq('email', normalizedEmail)
 
@@ -354,7 +381,7 @@ function updateDisplay_name(email: string, value: string) {
       can_clients: newRow.can_clients,
       can_carte: newRow.can_carte,
       can_todo: newRow.can_todo,
-      can_clients_cegclim: newRow.can_clients_cegeclim,
+      can_clients_cegeclim: newRow.can_clients_cegeclim,
       can_suivi_prospects: newRow.can_suivi_prospects,
       can_agences: newRow.can_agences,
       can_autorisation: newRow.can_autorisation,
@@ -366,6 +393,7 @@ function updateDisplay_name(email: string, value: string) {
       allowed_scopes: newRow.allowed_scopes,
       allowed_agences: newRow.allowed_agences,
       allowed_departements: newRow.allowed_departements,
+      default_landing_page: newRow.default_landing_page || '/accueil',
     })
 
     if (error) {
@@ -400,7 +428,6 @@ function updateDisplay_name(email: string, value: string) {
               can_autorisation: value,
               can_documents: value,
               can_stocks: value,
-              can_display_name : value,
               can_activites: value,
               can_change_scope: value,
 
@@ -425,7 +452,6 @@ function updateDisplay_name(email: string, value: string) {
       can_autorisation: value,
       can_documents: value,
       can_stocks: value,
-      can_display_name : value,
       can_activites: value,
       can_change_scope: value,
     }))
@@ -453,7 +479,7 @@ function updateDisplay_name(email: string, value: string) {
                 Gestion des autorisations
               </h1>
               <p className="mt-1 text-sm text-slate-600">
-                Gestion des pages, scopes autorisés, agences autorisées et départements visibles.
+                Gestion des pages, scopes autorisés, agences autorisées, départements visibles et page d’ouverture après login.
               </p>
             </div>
 
@@ -490,7 +516,7 @@ function updateDisplay_name(email: string, value: string) {
 
             <div className="rounded-xl bg-slate-100 p-4">
               <div className="text-sm text-slate-500">Droits pilotés</div>
-              <div className="mt-1 text-2xl font-bold text-slate-900">13</div>
+              <div className="mt-1 text-2xl font-bold text-slate-900">14</div>
             </div>
           </div>
 
@@ -558,6 +584,26 @@ function updateDisplay_name(email: string, value: string) {
               placeholder="Agences autorisées séparées par des virgules"
               className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
             />
+
+            <select
+              value={newRow.default_landing_page}
+              onChange={(e) => updateNewRowDefaultLandingPage(e.target.value)}
+              className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
+            >
+              <option value="/accueil">/accueil</option>
+              <option value="/dashboard">/dashboard</option>
+              <option value="/territoire">/territoire</option>
+              <option value="/cartographie">/cartographie</option>
+              <option value="/clients">/clients</option>
+              <option value="/carte">/carte</option>
+              <option value="/agences">/agences</option>
+              <option value="/todo">/todo</option>
+              <option value="/suivi_prospects">/suivi_prospects</option>
+              <option value="/documents">/documents</option>
+              <option value="/stocks">/stocks</option>
+              <option value="/activites">/activites</option>
+              <option value="/autorisation">/autorisation</option>
+            </select>
 
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
               <div className="mb-2 text-sm font-semibold text-slate-800">
@@ -719,6 +765,9 @@ function updateDisplay_name(email: string, value: string) {
                   <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Allowed agences
                   </th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
+                    Écran d'ouverture
+                  </th>
                   <th className="min-w-[290px] whitespace-nowrap px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Actions
                   </th>
@@ -728,13 +777,13 @@ function updateDisplay_name(email: string, value: string) {
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={14} className="px-4 py-10 text-center text-sm text-slate-500">
+                    <td colSpan={19} className="px-4 py-10 text-center text-sm text-slate-500">
                       Chargement des autorisations...
                     </td>
                   </tr>
                 ) : filteredRows.length === 0 ? (
                   <tr>
-                    <td colSpan={14} className="px-4 py-10 text-center text-sm text-slate-500">
+                    <td colSpan={19} className="px-4 py-10 text-center text-sm text-slate-500">
                       Aucun utilisateur trouvé.
                     </td>
                   </tr>
@@ -786,6 +835,28 @@ function updateDisplay_name(email: string, value: string) {
                           className="w-56 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-500"
                           placeholder="Toutes si vide"
                         />
+                      </td>
+
+                      <td className="px-4 py-4 align-top">
+                        <select
+                          value={row.default_landing_page || '/accueil'}
+                          onChange={(e) => updateDefaultLandingPage(row.email, e.target.value)}
+                          className="w-48 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-500"
+                        >
+                          <option value="/accueil">/accueil</option>
+                          <option value="/dashboard">/dashboard</option>
+                          <option value="/territoire">/territoire</option>
+                          <option value="/cartographie">/cartographie</option>
+                          <option value="/clients">/clients</option>
+                          <option value="/carte">/carte</option>
+                          <option value="/agences">/agences</option>
+                          <option value="/todo">/todo</option>
+                          <option value="/suivi_prospects">/suivi_prospects</option>
+                          <option value="/documents">/documents</option>
+                          <option value="/stocks">/stocks</option>
+                          <option value="/activites">/activites</option>
+                          <option value="/autorisation">/autorisation</option>
+                        </select>
                       </td>
 
                       <td className="min-w-[290px] px-4 py-4 align-top">
