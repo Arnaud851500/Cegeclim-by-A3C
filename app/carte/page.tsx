@@ -3540,7 +3540,7 @@ const selectedClientMapReason = useMemo(() => {
                                       </div>
                                       <div>{getClientSectorLabel(client)}</div>
                                       <div>
-                                        {client.libelleCommuneEtablissement || '—'} {client.codePostalEtablissement || ''}
+                                        {client.libelleCommuneEtablissement || '—'} {client.dateCreationEtablissement || ''}
                                       </div>
                                     </div>
                                   </Tooltip>
@@ -3585,7 +3585,7 @@ const selectedClientMapReason = useMemo(() => {
                             >
                               <div>Désignation</div>
                               <div>Ville</div>
-                              <div>Code postal</div>
+                              <div>Créée le</div>
                             </div>
                           </div>
 
