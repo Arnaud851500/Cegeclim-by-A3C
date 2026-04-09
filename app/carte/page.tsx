@@ -107,6 +107,16 @@ type ClientRow = {
   client_a_suivre: boolean | null
 }
 
+type ProspectStatusValue =
+  | ''
+  | '1 : A contacter'
+  | '2 : A relancer'
+  | '3 : Rdv pris'
+  | '4 : Proposition faite'
+  | '5 : Client non intéressé'
+  | '6 : Ne pas poursuivre'
+  | '7 : Abandon'
+
 type CegeclimAbsentRow = {
   id: string
   siret: string | null
@@ -227,6 +237,16 @@ const CLIENTS_PAGE_SIZE = 200
 const SUPABASE_FETCH_BATCH = 50000
 const INITIAL_CLIENTS_BATCH = 50000
 const MAX_BATCH_ENRICH = 1000
+
+const PROSPECT_STATUS_OPTIONS: ProspectStatusValue[] = [
+  '1 : A contacter',
+  '2 : A relancer',
+  '3 : Rdv pris',
+  '4 : Proposition faite',
+  '5 : Client non intéressé',
+  '6 : Ne pas poursuivre',
+  '7 : Abandon',
+]
 
 function normalizeSiret(value: unknown): string {
   return String(value ?? '').replace(/\D/g, '').trim()
@@ -464,6 +484,22 @@ function getSectorColor(sector: string | null | undefined) {
   return '#d9d9d9'
 }
 
+function getPresencePercentColor(percent: number): string {
+  if (percent >= 15) return '#15803d'
+  if (percent >= 12) return '#65a30d'
+  if (percent >= 8) return '#eab308'
+  if (percent >= 4) return '#f97316'
+  return '#dc2626'
+}
+
+function getPresenceBarHeight(percent: number): number {
+  return Math.max(15, Math.round((Math.max(0, Math.min(100, percent)) / 100) * 200))
+}
+
+function formatPercent(value: number): string {
+  return `${Math.round(value)}%`
+}
+
 function compactSelectionLabel(values: string[], fallback = 'TOUS') {
   if (values.length === 0) return fallback
   if (values.length <= 2) return values.join(', ')
@@ -566,6 +602,28 @@ function getEnrichmentBadge(status: string | null | undefined) {
   if (normalized === 'en_cours') return { label: 'En cours', bg: '#92400e', color: '#fff' }
   if (normalized === 'erreur') return { label: 'Erreur', bg: '#991b1b', color: '#fff' }
   return { label: 'À faire', bg: '#475569', color: '#fff' }
+}
+
+function normalizeProspectStatus(value: unknown): ProspectStatusValue {
+  const raw = String(value ?? '').trim() as ProspectStatusValue
+  if (PROSPECT_STATUS_OPTIONS.includes(raw)) return raw
+  return ''
+}
+
+function getProspectStatusColors(value: ProspectStatusValue) {
+  if (value === '1 : A contacter' || value === '2 : A relancer') {
+    return { background: '#fed7aa', color: '#9a3412', borderColor: '#fdba74' }
+  }
+
+  if (value === '3 : Rdv pris' || value === '4 : Proposition faite') {
+    return { background: '#bbf7d0', color: '#166534', borderColor: '#86efac' }
+  }
+
+  if (value === '5 : Client non intéressé' || value === '6 : Ne pas poursuivre' || value === '7 : Abandon') {
+    return { background: '#e5e7eb', color: '#374151', borderColor: '#cbd5e1' }
+  }
+
+  return { background: '#ffffff', color: '#475569', borderColor: '#cbd5e1' }
 }
 
 function formatDateInput(value: string | null | undefined): string {
@@ -942,6 +1000,7 @@ export default function ClientsPage() {
   const [mapSectorVisibility, setMapSectorVisibility] = useState<Record<string, boolean>>({})
   const [mapAgeSliderMin, setMapAgeSliderMin] = useState(daysToSlider(0))
   const [mapAgeSliderMax, setMapAgeSliderMax] = useState(daysToSlider(MAX_AGE_DAYS))
+  const [showCegeclimPresenceModal, setShowCegeclimPresenceModal] = useState(false)
   
   function openPreviousClient() {
   if (!previousClient) return
@@ -953,18 +1012,20 @@ function openNextClient() {
   setSelectedClient(nextClient)
 }
 
-async function saveSelectedClientField(field: 'prospect_comment' | 'client_a_suivre', value: string | boolean) {
+async function saveSelectedClientField(field: 'prospect_comment' | 'prospect_status', value: string) {
   if (!selectedClient?.id) return
 
   const currentId = selectedClient.id
 
-  setSelectedClient((prev) => (prev ? ({ ...prev, [field]: value } as ClientRow) : prev))
-  setClients((prev) => prev.map((row) => (row.id === currentId ? ({ ...row, [field]: value } as ClientRow) : row)))
-  setMapClients((prev) => prev.map((row) => (row.id === currentId ? ({ ...row, [field]: value } as ClientRow) : row)))
+  const normalizedValue = field === 'prospect_status' ? normalizeProspectStatus(value) || null : value
+
+  setSelectedClient((prev) => (prev ? ({ ...prev, [field]: normalizedValue } as ClientRow) : prev))
+  setClients((prev) => prev.map((row) => (row.id === currentId ? ({ ...row, [field]: normalizedValue } as ClientRow) : row)))
+  setMapClients((prev) => prev.map((row) => (row.id === currentId ? ({ ...row, [field]: normalizedValue } as ClientRow) : row)))
 
   const { error } = await supabase
     .from('clients')
-    .update({ [field]: value })
+    .update({ [field]: normalizedValue })
     .eq('id', currentId)
 
   if (error) {
@@ -1035,7 +1096,7 @@ async function saveSelectedClientField(field: 'prospect_comment' | 'client_a_sui
   const [selectedNafCodes, setSelectedNafCodes] = useState<string[]>([])
   const [selectedAgence, setSelectedAgence] = useState('TOUS')
   const [selectedClientScope, setSelectedClientScope] = useState<'Tous' | 'Cegeclim' | 'Prospects'>('Tous')
-  const [selectedClientASuivre, setSelectedClientASuivre] = useState<'Tous' | 'Oui' | 'Non'>('Tous')
+  const [selectedProspectStatuses, setSelectedProspectStatuses] = useState<ProspectStatusValue[]>([])
 
   const [includeNoDistance, setIncludeNoDistance] = useState(true)
   const [onlyContactable, setOnlyContactable] = useState(false)
@@ -1090,7 +1151,7 @@ async function saveSelectedClientField(field: 'prospect_comment' | 'client_a_sui
     selectedNafCodes,
     selectedAgence,
     selectedClientScope,
-    selectedClientASuivre,
+    selectedProspectStatuses,
     includeNoDistance,
     onlyContactable,
     onlyNotInCegeclim,
@@ -1584,8 +1645,10 @@ function matchesMapCommonFilters(row: ClientRow) {
 
   if (onlyContactable && !row.contactable) return false
 
-  if (selectedClientASuivre === 'Oui' && !row.client_a_suivre) return false
-  if (selectedClientASuivre === 'Non' && row.client_a_suivre) return false
+  if (selectedProspectStatuses.length > 0) {
+    const prospectStatus = normalizeProspectStatus(row.prospect_status)
+    if (!selectedProspectStatuses.includes(prospectStatus)) return false
+  }
 
   if (excludeDesignationND) {
     const designation = String(row.raison_sociale_affichee || '').trim().toLowerCase()
@@ -1632,7 +1695,7 @@ const mapCegeclimPoints = useMemo(() => {
   selectedAgence,
   includeNoDistance,
   onlyContactable,
-  selectedClientASuivre,
+  selectedProspectStatuses,
   excludeDesignationND,
   excludeFutureCreation,
   onlyToEnrich,
@@ -1902,6 +1965,18 @@ const ageDaysMax = useMemo(
     ).sort((a, b) => a.localeCompare(b, 'fr'))
   }, [scopedClients])
 
+  const prospectStatusOptions = useMemo(() => {
+    return PROSPECT_STATUS_OPTIONS.filter((status) =>
+      scopedClients.some((row) => normalizeProspectStatus(row.prospect_status) === status)
+    )
+  }, [scopedClients])
+
+  useEffect(() => {
+    setSelectedProspectStatuses((prev) =>
+      prev.filter((status) => prospectStatusOptions.includes(status))
+    )
+  }, [prospectStatusOptions])
+
   const agenceOptions = useMemo(() => {
     return Array.from(new Set(scopedAgences.map((a) => a.agence).filter(Boolean) as string[])).sort(
       (a, b) => a.localeCompare(b, 'fr')
@@ -1956,8 +2031,10 @@ const ageDaysMax = useMemo(
         return false
       }
       if (excludeDesignationND && isDesignationND) return false
-      if (selectedClientASuivre === 'Oui' && !row.client_a_suivre) return false
-      if (selectedClientASuivre === 'Non' && row.client_a_suivre) return false
+      if (selectedProspectStatuses.length > 0) {
+        const prospectStatus = normalizeProspectStatus(row.prospect_status)
+        if (!selectedProspectStatuses.includes(prospectStatus)) return false
+      }
       if (excludeFutureCreation && isFutureDate(row.dateCreationEtablissement)) return false
       if (onlyContactable && !(row.telephone || row.email || row.contactable)) return false
       if (onlyNotInCegeclim && isCegeclim) return false
@@ -2025,7 +2102,7 @@ const ageDaysMax = useMemo(
     ageDaysMax,
     distanceMax,
     cegeclimBySiret,
-    selectedClientASuivre,
+    selectedProspectStatuses,
   ])
 
   const sortedFilteredClients = useMemo(() => {
@@ -2195,6 +2272,22 @@ const ageDaysMax = useMemo(
     () => sortedFilteredClients.filter((r) => isClientPresentInCegeclim(r, cegeclimBySiret)).length,
     [sortedFilteredClients, cegeclimBySiret]
   )
+
+  const cegeclimPresenceRows = useMemo(() => {
+    const topSectors = ['Electricité ENR', 'Plomberie', 'Installateur CVC', 'CMI']
+    return topSectors
+      .map((sector) => {
+        const baseRow = summarySectorRows.find((row) => row.sector === sector)
+        return {
+          sector,
+          total: baseRow?.total || 0,
+          totalCegeclim: baseRow?.totalCegeclim || 0,
+          byDept: baseRow?.byDept || {},
+          byDeptCegeclim: baseRow?.byDeptCegeclim || {},
+        }
+      })
+      .filter((row) => row.total > 0)
+  }, [summarySectorRows])
 
   const totalPages = Math.max(1, Math.ceil(sortedFilteredClients.length / CLIENTS_PAGE_SIZE))
 
@@ -2466,8 +2559,8 @@ const selectedClientMapReason = useMemo(() => {
           dirigeant: row.nom_dirigeant || '',
           noteGoogle: row.google_rating != null ? String(row.google_rating) : '',
           nbNotes: row.google_user_ratings_total != null ? String(row.google_user_ratings_total) : '',
+          suiviProspect: normalizeProspectStatus(row.prospect_status),
           prospectRemarque: row.prospect_comment || '',
-          clientASuivre: row.client_a_suivre ? 'Oui' : 'Non',
           ca2023: cege?.ca_2023 != null ? String(cege.ca_2023) : '',
           ca2024: cege?.ca_2024 != null ? String(cege.ca_2024) : '',
           ca2025: cege?.ca_2025 != null ? String(cege.ca_2025) : '',
@@ -2499,7 +2592,7 @@ const selectedClientMapReason = useMemo(() => {
       'Dirigeant',
       'Note Google',
       'Nb Note',
-      'Client à suivre',
+      'Suivi prospect',
       'Prospect / Remarque',
       'CA 2023',
       'CA 2024',
@@ -2524,7 +2617,7 @@ const selectedClientMapReason = useMemo(() => {
       row.dirigeant,
       row.noteGoogle,
       row.nbNotes,
-      row.clientASuivre,
+      row.suiviProspect,
       row.prospectRemarque,
       row.ca2023,
       row.ca2024,
@@ -2792,7 +2885,7 @@ const selectedClientMapReason = useMemo(() => {
     'Dirigeant',
     'Note Google',
     'Nb Note',
-    'Client à suivre',
+    'Suivi prospect',
     'Prospect / Remarque',
   ],
 ]
@@ -2848,7 +2941,7 @@ const selectedClientMapReason = useMemo(() => {
           row.dirigeant,
           row.noteGoogle,
           row.nbNotes,
-          row.clientASuivre,
+          row.suiviProspect,
           row.prospectRemarque,
         ]),
         theme: 'grid',
@@ -3047,7 +3140,14 @@ const selectedClientMapReason = useMemo(() => {
 
               <section>
                 <h2 style={sectionTitleTextStyle}>.</h2>
-                <h2 style={sectionTitleTextStyle}>Synthèse de la sélection (cliquer sur une case pour ouvrir la carte)</h2>
+                <h2 style={sectionTitleTextStyle}>Synthèse par département</h2>
+                  <div className="border-t border-slate-200 px-5 py-4 text-sm text-slate-700">
+                 <span className="font-semibold text-slate-900">Lecture :</span> nombre total
+                  d’entreprises dans la cellule.&nbsp;&nbsp;
+                <span className="font-semibold text-slate-900">Valeur entre parenthèses :</span>
+                 nombre de clients CEGECLIM.&nbsp;&nbsp;
+                <span className="font-semibold text-slate-900">Accès carte :</span> cliquer sur une case pour pour faire apparaitre les entreprises sur une carte géo.
+               </div>
               </section>
 
               {mode === 'clients' && (
@@ -3187,17 +3287,13 @@ const selectedClientMapReason = useMemo(() => {
                         <option value="Prospects">Prospects</option>
                     </select>
                     </div>
-                    <div style={{ minWidth: 150 }}>
-                      <div style={filterLabelStyle}>Client à suivre :</div>
-                      <select
-                        value={selectedClientASuivre}
-                        onChange={(e) => setSelectedClientASuivre(e.target.value as 'Tous' | 'Oui' | 'Non')}
-                        style={selectLikeStyle}
-                      >
-                        <option value="Tous">Tous</option>
-                        <option value="Oui">Oui</option>
-                        <option value="Non">Non</option>
-                      </select>
+                    <div style={{ width: 230 }}>
+                      <MultiSelectHorizontal
+                        label="Suivi Prospect :"
+                        options={prospectStatusOptions}
+                        selected={selectedProspectStatuses}
+                        onChange={(next) => setSelectedProspectStatuses(next as ProspectStatusValue[])}
+                      />
                     </div>
 
                     <div style={{ width: 220 }}>
@@ -3278,6 +3374,17 @@ const selectedClientMapReason = useMemo(() => {
                         ? 'Enrichissement Google en cours...'
                         : `Enrichir via Google (${Math.min(enrichableSelection.length, MAX_BATCH_ENRICH)})`}
                     </button>
+                    <button
+                      onClick={() => setShowCegeclimPresenceModal(true)}
+                      style={{
+                        ...toolbarButtonStyle,
+                        fontWeight: 700,
+                        borderColor: '#94a3b8',
+                        background: '#fff',
+                      }}
+                    >
+                      Présence Cegeclim (%)
+                    </button>
                   </section>
 
                   <section style={{ ...sectionTitleStyle, marginTop: 28 }}>
@@ -3357,8 +3464,8 @@ const selectedClientMapReason = useMemo(() => {
                           <th onClick={() => toggleSort('email')} style={{ ...listHeaderStyle, width: 70 }}>
                             Mail<SortIndicator active={sortKey === 'email'} direction={sortDirection} />
                           </th>
-                          <th onClick={() => toggleSort('completeness')} style={{ ...listHeaderStyle, width: 95 }}>
-                            Complétude<SortIndicator active={sortKey === 'completeness'} direction={sortDirection} />
+                          <th style={{ ...listHeaderStyle, width: 250 }}>
+                            Actions / Suivi prospect
                           </th>
                         </tr>
                       </thead>
@@ -3373,10 +3480,9 @@ const selectedClientMapReason = useMemo(() => {
                                 selectedAgenceRow.coord_y_lambert
                               )
                             : null
-                          const completeness = getCompletenessPercent(row)
       const isPresentInCegeclim = isClientPresentInCegeclim(row, cegeclimBySiret)
-                          const completenessColor = getCompletenessColor(completeness)
-                          const enrichBadge = getEnrichmentBadge(row.enrichment_status)
+                          const prospectStatus = normalizeProspectStatus(row.prospect_status)
+                          const prospectStatusColors = getProspectStatusColors(prospectStatus)
                           const siret = row.siret || ''
                           const isEnriching = enrichingSirets.includes(siret)
 
@@ -3425,13 +3531,7 @@ const selectedClientMapReason = useMemo(() => {
                               <td style={listCellStyle}>{row.telephone || '—'}</td>
                               <td style={listCellStyle}>{row.email || '—'}</td>
                               <td style={listCellStyle}>
-                                <span style={{ ...pillStyle, background: completenessColor }}>
-                                  {completeness}%
-                                </span>
-                              </td>
-                              
-                              <td style={listCellStyle}>
-                                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                                   <button onClick={(e) => { e.stopPropagation(); window.scrollTo({ top: 0, behavior: 'smooth' }); setSelectedClient(row) }} style={linkButtonStyle}>
                                     Voir
                                   </button>
@@ -3442,7 +3542,22 @@ const selectedClientMapReason = useMemo(() => {
                                   >
                                     {isEnriching ? '...' : 'Enrichir'}
                                   </button>
+                                  <span
+                                    style={{
+                                      ...pillStyle,
+                                      background: prospectStatusColors.background,
+                                      color: prospectStatusColors.color,
+                                      border: `1px solid ${prospectStatusColors.borderColor}`,
+                                    }}
+                                  >
+                                    {prospectStatus || '—'}
+                                  </span>
                                 </div>
+                                {row.prospect_comment ? (
+                                  <div style={{ marginTop: 6, color: '#334155', maxWidth: 220 }}>
+                                    {truncateText(row.prospect_comment, 60)}
+                                  </div>
+                                ) : null}
                               </td>
                             </tr>
                           )
@@ -3939,33 +4054,35 @@ const selectedClientMapReason = useMemo(() => {
                 </div>
 
                 <div style={clientHeaderBadgesWrapStyle}>
-
-                  <span
+                  <label
                     style={{
-                      ...headerBadgeStyle,
-                      background: getCompletenessColor(getCompletenessPercent(selectedClient)),
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      fontSize: 13,
+                      fontWeight: 700,
                     }}
                   >
-                    Complétude : {getCompletenessPercent(selectedClient)}%
-                  </span>
-
-                  <span
-                    style={{
-                      ...headerBadgeStyle,
-                      background: getEnrichmentBadge(selectedClient.enrichment_status).bg,
-                      color: '#fff',
-                    }}
-                  >
-                    {getEnrichmentBadge(selectedClient.enrichment_status).label}
-                  </span>
-
-                  <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 700 }}>
-                    <span>Client à suivre</span>
-                    <input
-                      type="checkbox"
-                      checked={!!selectedClient.client_a_suivre}
-                      onChange={(e) => void saveSelectedClientField('client_a_suivre', e.target.checked)}
-                    />
+                    <span>Action prospect :</span>
+                    <select
+                      value={normalizeProspectStatus(selectedClient.prospect_status)}
+                      onChange={(e) => void saveSelectedClientField('prospect_status', e.target.value)}
+                      style={{
+                        ...selectLikeStyle,
+                        minWidth: 220,
+                        background: getProspectStatusColors(normalizeProspectStatus(selectedClient.prospect_status)).background,
+                        color: getProspectStatusColors(normalizeProspectStatus(selectedClient.prospect_status)).color,
+                        borderColor: getProspectStatusColors(normalizeProspectStatus(selectedClient.prospect_status)).borderColor,
+                        fontWeight: 700,
+                      }}
+                    >
+                      <option value="">Vide</option>
+                      {PROSPECT_STATUS_OPTIONS.map((status) => (
+                        <option key={status} value={status}>
+                          {status}
+                        </option>
+                      ))}
+                    </select>
                   </label>
 
                   <button
@@ -3982,7 +4099,7 @@ const selectedClientMapReason = useMemo(() => {
                       ? 'Enrichissement...'
                       : 'Enrichir la fiche'}
                   </button>
-                  
+
                   <button onClick={() => setSelectedClient(null)} style={toolbarButtonStyle}>
                     Fermer
                   </button>
@@ -4066,6 +4183,19 @@ const selectedClientMapReason = useMemo(() => {
                   <div style={clientBlockStyle}>
                     <div style={clientBlockTitleStyle}>Prospect / Remarque</div>
                     <div style={clientBlockContentStyle}>
+                      <div style={{ marginBottom: 12 }}>
+                        <b>Action prospect :</b>{' '}
+                        <span
+                          style={{
+                            ...inlineBadgeStyle,
+                            background: getProspectStatusColors(normalizeProspectStatus(selectedClient.prospect_status)).background,
+                            color: getProspectStatusColors(normalizeProspectStatus(selectedClient.prospect_status)).color,
+                            border: `1px solid ${getProspectStatusColors(normalizeProspectStatus(selectedClient.prospect_status)).borderColor}`,
+                          }}
+                        >
+                          {normalizeProspectStatus(selectedClient.prospect_status) || 'Vide'}
+                        </span>
+                      </div>
                       <textarea
                           value={prospectCommentDraft}
                           onChange={(e) => setProspectCommentDraft(e.target.value)}
@@ -4147,6 +4277,156 @@ const selectedClientMapReason = useMemo(() => {
             </div>
           </div>
         )}
+          </div>
+        )}
+
+        {showCegeclimPresenceModal && (
+          <div style={modalOverlayStyle}>
+            <div style={{ ...modalStyle, maxWidth: 'calc(100vw - 32px)', width: 'calc(100vw - 32px)' }}>
+              <div style={modalHeaderStyle}>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: 24 }}>Présence Cegeclim (%)</h3>
+                  <p style={{ margin: '6px 0 0 0', fontSize: 14, color: '#475569' }}>
+                    4 activités principales • nombre de clients CEGECLIM + taux de pénétration par département
+                  </p>
+                </div>
+                <button onClick={() => setShowCegeclimPresenceModal(false)} style={toolbarButtonStyle}>
+                  Fermer
+                </button>
+              </div>
+
+              <div style={{ padding: 24 }}>
+                <div style={{ marginBottom: 14, display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 13, color: '#334155' }}>
+                  <span><b>Lecture :</b> nombre CEGECLIM en gras</span>
+                  <span><b>Barre :</b> taux CEGECLIM / total</span>
+                  <span><b>Couleurs :</b> rouge faible • vert fort</span>
+                </div>
+
+                <div style={{ width: '100%', overflowX: 'auto', border: '1px solid #e2e8f0', borderRadius: 16 }}>
+                  <table
+                    style={{
+                      width: 'max-content',
+                      minWidth: '100%',
+                      borderCollapse: 'collapse',
+                      fontSize: 15,
+                      background: '#fff',
+                    }}
+                  >
+                    <thead>
+                      <tr>
+                        <th style={{ ...summaryHeaderCellStyle, textAlign: 'left', minWidth: 240 }}>NAF DESIGNATION</th>
+                        <th style={summaryHeaderCellStyle}>TOTAL</th>
+                        {summaryDepartments.map((dep) => (
+                          <th key={`presence-head-${dep}`} style={summaryHeaderCellStyle}>
+                            {dep}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {cegeclimPresenceRows.map((row) => {
+                        const totalPercent = row.total > 0 ? (row.totalCegeclim / row.total) * 100 : 0
+                        return (
+                          <tr key={`presence-row-${row.sector}`} style={{ background: getSectorColor(row.sector) }}>
+                            <td style={{ ...summaryBodyCellStyle, textAlign: 'left', fontWeight: 700 }}>{row.sector}</td>
+                            <td style={{ ...summaryBodyCellStyleBold, minWidth: 120 }}>
+                              <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'center', gap: 10, minHeight: 54 }}>
+                                <span style={{ fontWeight: 800, fontSize: 20 }}>{row.totalCegeclim}</span>
+                                <div title={formatPercent(totalPercent)} style={{ display: 'flex', alignItems: 'flex-end', height: 42 }}>
+                                  <div
+                                    style={{
+                                      width: 14,
+                                      height: getPresenceBarHeight(totalPercent),
+                                      borderRadius: 6,
+                                      background: getPresencePercentColor(totalPercent),
+                                      boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.35)',
+                                    }}
+                                  />
+                                </div>
+                              </div>
+                              <div style={{ marginTop: 4, fontSize: 15, opacity: 0.85 }}>{formatPercent(totalPercent)}</div>
+                            </td>
+                            {summaryDepartments.map((dep) => {
+                              const cegeclimCount = row.byDeptCegeclim[dep] || 0
+                              const totalCount = row.byDept[dep] || 0
+                              const percent = totalCount > 0 ? (cegeclimCount / totalCount) * 100 : 0
+                              return (
+                                <td key={`presence-${row.sector}-${dep}`} style={{ ...summaryBodyCellStyleBold, minWidth: 92 }}>
+                                  <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'center', gap: 10, minHeight: 54 }}>
+                                    <span style={{ fontWeight: 800, fontSize: 20 }}>{cegeclimCount}</span>
+                                    <div title={`${cegeclimCount} / ${totalCount} • ${formatPercent(percent)}`} style={{ display: 'flex', alignItems: 'flex-end', height: 42 }}>
+                                      <div
+                                        style={{
+                                          width: 14,
+                                          height: getPresenceBarHeight(percent),
+                                          borderRadius: 6,
+                                          background: getPresencePercentColor(percent),
+                                          boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.35)',
+                                        }}
+                                      />
+                                    </div>
+                                  </div>
+                                  <div style={{ marginTop: 4, fontSize: 15, opacity: 0.85 }}>{formatPercent(percent)}</div>
+                                </td>
+                              )
+                            })}
+                          </tr>
+                        )
+                      })}
+                      <tr>
+                        <td style={{ ...summaryTotalStyle, textAlign: 'left' }}>TOTAL</td>
+                        <td style={{ ...summaryTotalStyle, minWidth: 120 }}>
+                          <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'center', gap: 10, minHeight: 54 }}>
+                            <span style={{ fontWeight: 800, fontSize: 20 }}>{summaryTotalCegeclim}</span>
+                            <div
+                              title={formatPercent(sortedFilteredClients.length > 0 ? (summaryTotalCegeclim / sortedFilteredClients.length) * 100 : 0)}
+                              style={{ display: 'flex', alignItems: 'flex-end', height: 42 }}
+                            >
+                              <div
+                                style={{
+                                  width: 14,
+                                  height: getPresenceBarHeight(sortedFilteredClients.length > 0 ? (summaryTotalCegeclim / sortedFilteredClients.length) * 100 : 0),
+                                  borderRadius: 6,
+                                  background: getPresencePercentColor(sortedFilteredClients.length > 0 ? (summaryTotalCegeclim / sortedFilteredClients.length) * 100 : 0),
+                                  boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.35)',
+                                }}
+                              />
+                            </div>
+                          </div>
+                          <div style={{ marginTop: 4, fontSize: 15, opacity: 0.85 }}>
+                            {formatPercent(sortedFilteredClients.length > 0 ? (summaryTotalCegeclim / sortedFilteredClients.length) * 100 : 0)}
+                          </div>
+                        </td>
+                        {summaryDepartments.map((dep) => {
+                          const cegeclimCount = summaryDeptCegeclimTotals[dep] || 0
+                          const totalCount = summaryDeptTotals[dep] || 0
+                          const percent = totalCount > 0 ? (cegeclimCount / totalCount) * 100 : 0
+                          return (
+                            <td key={`presence-total-${dep}`} style={{ ...summaryTotalStyle, minWidth: 92 }}>
+                              <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'center', gap: 10, minHeight: 54 }}>
+                                <span style={{ fontWeight: 800, fontSize: 20 }}>{cegeclimCount}</span>
+                                <div title={`${cegeclimCount} / ${totalCount} • ${formatPercent(percent)}`} style={{ display: 'flex', alignItems: 'flex-end', height: 42 }}>
+                                  <div
+                                    style={{
+                                      width: 14,
+                                      height: getPresenceBarHeight(percent),
+                                      borderRadius: 6,
+                                      background: getPresencePercentColor(percent),
+                                      boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.35)',
+                                    }}
+                                  />
+                                </div>
+                              </div>
+                              <div style={{ marginTop: 4, fontSize: 15, opacity: 0.85 }}>{formatPercent(percent)}</div>
+                            </td>
+                          )
+                        })}
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
           </div>
         )}
 
