@@ -25,12 +25,46 @@ type TodoRow = {
   sort_order: number
 }
 
+type SortKey =
+  | 'created_by_name'
+  | 'mission_project'
+  | 'description_action'
+  | 'assigned_to'
+  | 'due_date'
+  | 'status'
+  | 'comment_progress'
+
+type SortConfig = {
+  key: SortKey
+  direction: 'asc' | 'desc'
+}
+
+type TextFilters = {
+  created_by_name: string
+  mission_project: string
+  description_action: string
+  assigned_to: string
+  due_date: string
+  status: string
+  comment_progress: string
+}
+
 const STATUS_OPTIONS: TodoRow['status'][] = [
   'Non débuté',
   'En cours',
   'Terminé',
   'Annulé',
 ]
+
+const DEFAULT_FILTERS: TextFilters = {
+  created_by_name: '',
+  mission_project: '',
+  description_action: '',
+  assigned_to: '',
+  due_date: '',
+  status: '',
+  comment_progress: '',
+}
 
 export default function TodoPage() {
   const router = useRouter()
@@ -44,6 +78,19 @@ export default function TodoPage() {
   const [canTodo, setCanTodo] = useState(false)
   const [assignees, setAssignees] = useState<string[]>([])
   const [rows, setRows] = useState<TodoRow[]>([])
+
+  const [activeSortConfig, setActiveSortConfig] = useState<SortConfig>({
+    key: 'due_date',
+    direction: 'asc',
+  })
+
+  const [closedSortConfig, setClosedSortConfig] = useState<SortConfig>({
+    key: 'due_date',
+    direction: 'asc',
+  })
+
+  const [activeFilters, setActiveFilters] = useState<TextFilters>(DEFAULT_FILTERS)
+  const [closedFilters, setClosedFilters] = useState<TextFilters>(DEFAULT_FILTERS)
 
   const autosaveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
 
@@ -93,15 +140,23 @@ export default function TodoPage() {
 
     setAssignees(Array.from(new Set(assigneeNames)))
 
-    await loadRows()
+    await loadRows(email, displayName)
 
     setLoading(false)
   }
 
-  async function loadRows() {
+  async function loadRows(emailParam?: string, displayNameParam?: string) {
+    const email = emailParam || currentEmail
+    const displayName = displayNameParam || currentDisplayName
+
+    if (!email) return
+
     const { data, error } = await supabase
       .from('todo_actions')
       .select('*')
+      .or(
+        `created_by_email.eq.${escapeSupabaseValue(email)},assigned_to.eq.${escapeSupabaseValue(displayName)}`
+      )
       .order('status', { ascending: true })
       .order('due_date', { ascending: true, nullsFirst: false })
       .order('sort_order', { ascending: true })
@@ -115,7 +170,27 @@ export default function TodoPage() {
     setRows((data || []) as TodoRow[])
   }
 
-  function sortRows(list: TodoRow[]) {
+  function escapeSupabaseValue(value: string) {
+    return String(value || '').replace(/,/g, '\\,')
+  }
+
+  function normalize(value: string | null | undefined) {
+    return (value || '').toString().trim().toLowerCase()
+  }
+
+  function includesText(value: string | null | undefined, search: string) {
+    if (!search.trim()) return true
+    return normalize(value).includes(search.trim().toLowerCase())
+  }
+
+  function formatDateFr(dateStr: string | null | undefined) {
+    if (!dateStr) return ''
+    const [y, m, d] = dateStr.split('-')
+    if (!y || !m || !d) return dateStr || ''
+    return `${d}/${m}/${y}`
+  }
+
+  function baseSortRows(list: TodoRow[]) {
     return [...list].sort((a, b) => {
       const aDone = a.status === 'Terminé' || a.status === 'Annulé'
       const bDone = b.status === 'Terminé' || b.status === 'Annulé'
@@ -130,15 +205,127 @@ export default function TodoPage() {
     })
   }
 
-  const activeRows = useMemo(
-    () => sortRows(rows.filter(r => r.status !== 'Terminé' && r.status !== 'Annulé')),
-    [rows]
-  )
+  function applyTextFilters(list: TodoRow[], filters: TextFilters) {
+    return list.filter(row => {
+      const dueDateMatches =
+        includesText(row.due_date, filters.due_date) ||
+        includesText(formatDateFr(row.due_date), filters.due_date)
 
-  const closedRows = useMemo(
-    () => sortRows(rows.filter(r => r.status === 'Terminé' || r.status === 'Annulé')),
-    [rows]
-  )
+      const statusMatches = filters.status
+        ? normalize(row.status) === normalize(filters.status)
+        : true
+
+      return (
+        includesText(row.created_by_name, filters.created_by_name) &&
+        includesText(row.mission_project, filters.mission_project) &&
+        includesText(row.description_action, filters.description_action) &&
+        includesText(row.assigned_to, filters.assigned_to) &&
+        dueDateMatches &&
+        statusMatches &&
+        includesText(row.comment_progress, filters.comment_progress)
+      )
+    })
+  }
+
+  function applyColumnSort(list: TodoRow[], sortConfig: SortConfig) {
+    const sorted = [...list]
+
+    sorted.sort((a, b) => {
+      let av = ''
+      let bv = ''
+
+      switch (sortConfig.key) {
+        case 'created_by_name':
+          av = a.created_by_name || ''
+          bv = b.created_by_name || ''
+          break
+        case 'mission_project':
+          av = a.mission_project || ''
+          bv = b.mission_project || ''
+          break
+        case 'description_action':
+          av = a.description_action || ''
+          bv = b.description_action || ''
+          break
+        case 'assigned_to':
+          av = a.assigned_to || ''
+          bv = b.assigned_to || ''
+          break
+        case 'due_date':
+          av = a.due_date || '9999-12-31'
+          bv = b.due_date || '9999-12-31'
+          break
+        case 'status':
+          av = a.status || ''
+          bv = b.status || ''
+          break
+        case 'comment_progress':
+          av = a.comment_progress || ''
+          bv = b.comment_progress || ''
+          break
+      }
+
+      const result = av.localeCompare(bv, 'fr', { numeric: true, sensitivity: 'base' })
+      return sortConfig.direction === 'asc' ? result : -result
+    })
+
+    return sorted
+  }
+
+  const visibleRows = useMemo(() => {
+    return rows.filter(row => {
+      const isCreator = normalize(row.created_by_email) === normalize(currentEmail)
+      const isAssignee = normalize(row.assigned_to) === normalize(currentDisplayName)
+      return isCreator || isAssignee
+    })
+  }, [rows, currentEmail, currentDisplayName])
+
+  const activeRows = useMemo(() => {
+    const subset = visibleRows.filter(r => r.status !== 'Terminé' && r.status !== 'Annulé')
+    return baseSortRows(applyColumnSort(applyTextFilters(subset, activeFilters), activeSortConfig))
+  }, [visibleRows, activeFilters, activeSortConfig])
+
+  const closedRows = useMemo(() => {
+    const subset = visibleRows.filter(r => r.status === 'Terminé' || r.status === 'Annulé')
+    return baseSortRows(applyColumnSort(applyTextFilters(subset, closedFilters), closedSortConfig))
+  }, [visibleRows, closedFilters, closedSortConfig])
+
+  function toggleSort(
+    key: SortKey,
+    section: 'active' | 'closed'
+  ) {
+    const setter = section === 'active' ? setActiveSortConfig : setClosedSortConfig
+
+    setter(prev => {
+      if (prev.key === key) {
+        return {
+          key,
+          direction: prev.direction === 'asc' ? 'desc' : 'asc',
+        }
+      }
+      return {
+        key,
+        direction: 'asc',
+      }
+    })
+  }
+
+  function setSectionFilter(
+    section: 'active' | 'closed',
+    key: keyof TextFilters,
+    value: string
+  ) {
+    const setter = section === 'active' ? setActiveFilters : setClosedFilters
+    setter(prev => ({ ...prev, [key]: value }))
+  }
+
+  function resetSectionFilters(section: 'active' | 'closed') {
+    if (section === 'active') {
+      setActiveFilters(DEFAULT_FILTERS)
+      return
+    }
+    setClosedFilters(DEFAULT_FILTERS)
+  }
 
   async function addRow() {
     if (!canTodo) return
@@ -150,7 +337,7 @@ export default function TodoPage() {
       created_by_name: currentDisplayName,
       mission_project: '',
       description_action: '',
-      assigned_to: '',
+      assigned_to: currentDisplayName,
       due_date: null,
       status: 'Non débuté' as TodoRow['status'],
       comment_progress: '',
@@ -169,7 +356,7 @@ export default function TodoPage() {
       return
     }
 
-    setRows(prev => sortRows([data as TodoRow, ...prev]))
+    setRows(prev => baseSortRows([data as TodoRow, ...prev]))
   }
 
   async function deleteRow(id: string) {
@@ -187,9 +374,7 @@ export default function TodoPage() {
   }
 
   function updateLocal(id: string, patch: Partial<TodoRow>) {
-    setRows(prev =>
-      prev.map(r => (r.id === id ? { ...r, ...patch } : r))
-    )
+    setRows(prev => prev.map(r => (r.id === id ? { ...r, ...patch } : r)))
   }
 
   function queueSave(id: string, patch: Partial<TodoRow>) {
@@ -260,6 +445,7 @@ export default function TodoPage() {
 
         <div className="p-4 md:p-6">
           <TodoSection
+            sectionKey="active"
             title="TODO LIST (tâches non terminées)"
             rows={activeRows}
             assignees={assignees}
@@ -267,11 +453,17 @@ export default function TodoPage() {
             queueSave={queueSave}
             deleteRow={deleteRow}
             autoResize={autoResize}
+            sortConfig={activeSortConfig}
+            filters={activeFilters}
+            toggleSort={toggleSort}
+            setFilter={setSectionFilter}
+            resetFilters={resetSectionFilters}
           />
 
           <div className="h-8" />
 
           <TodoSection
+            sectionKey="closed"
             title="Liste des tâches terminées ou annulées"
             rows={closedRows}
             assignees={assignees}
@@ -279,6 +471,11 @@ export default function TodoPage() {
             queueSave={queueSave}
             deleteRow={deleteRow}
             autoResize={autoResize}
+            sortConfig={closedSortConfig}
+            filters={closedFilters}
+            toggleSort={toggleSort}
+            setFilter={setSectionFilter}
+            resetFilters={resetSectionFilters}
           />
         </div>
       </div>
@@ -287,6 +484,7 @@ export default function TodoPage() {
 }
 
 function TodoSection({
+  sectionKey,
   title,
   rows,
   assignees,
@@ -294,7 +492,13 @@ function TodoSection({
   queueSave,
   deleteRow,
   autoResize,
+  sortConfig,
+  filters,
+  toggleSort,
+  setFilter,
+  resetFilters,
 }: {
+  sectionKey: 'active' | 'closed'
   title: string
   rows: TodoRow[]
   assignees: string[]
@@ -302,15 +506,29 @@ function TodoSection({
   queueSave: (id: string, patch: Partial<TodoRow>) => void
   deleteRow: (id: string) => void
   autoResize: (el: HTMLTextAreaElement) => void
+  sortConfig: SortConfig
+  filters: TextFilters
+  toggleSort: (key: SortKey, section: 'active' | 'closed') => void
+  setFilter: (section: 'active' | 'closed', key: keyof TextFilters, value: string) => void
+  resetFilters: (section: 'active' | 'closed') => void
 }) {
   return (
     <section>
-      <div className="mb-3 flex items-center justify-between">
+      <div className="mb-3 flex items-center justify-between gap-3">
         <h2 className="text-base font-bold">{title}</h2>
-        <div className="text-xs text-slate-500">{rows.length} tâche(s)</div>
+        <div className="flex items-center gap-3">
+          <div className="text-xs text-slate-500">{rows.length} tâche(s)</div>
+          <button
+            type="button"
+            onClick={() => resetFilters(sectionKey)}
+            className="rounded-lg border px-3 py-1 text-xs hover:bg-slate-50"
+          >
+            Réinitialiser filtres
+          </button>
+        </div>
       </div>
 
-      <div className="overflow-x-auto rounded-2xl border">
+      <div className="max-h-[520px] overflow-auto rounded-2xl border">
         <table className="min-w-[1500px] w-full border-collapse text-sm">
           <colgroup>
             <col style={{ width: '140px' }} />
@@ -323,16 +541,111 @@ function TodoSection({
             <col style={{ width: '90px' }} />
           </colgroup>
 
-          <thead className="bg-slate-100">
-            <tr>
-              <Th>Créée par</Th>
-              <Th>Mission / Projet</Th>
-              <Th>Description action</Th>
-              <Th>Assignée à</Th>
-              <Th>Pour le :</Th>
-              <Th>Statut</Th>
-              <Th>Commentaire - avancement</Th>
-              <Th>Suppr.</Th>
+          <thead>
+            <tr className="sticky top-0 z-20 bg-slate-100 shadow-sm">
+              <SortableTh
+                label="Créée par"
+                active={sortConfig.key === 'created_by_name'}
+                direction={sortConfig.direction}
+                onClick={() => toggleSort('created_by_name', sectionKey)}
+              />
+              <SortableTh
+                label="Mission / Projet"
+                active={sortConfig.key === 'mission_project'}
+                direction={sortConfig.direction}
+                onClick={() => toggleSort('mission_project', sectionKey)}
+              />
+              <SortableTh
+                label="Description action"
+                active={sortConfig.key === 'description_action'}
+                direction={sortConfig.direction}
+                onClick={() => toggleSort('description_action', sectionKey)}
+              />
+              <SortableTh
+                label="Assignée à"
+                active={sortConfig.key === 'assigned_to'}
+                direction={sortConfig.direction}
+                onClick={() => toggleSort('assigned_to', sectionKey)}
+              />
+              <SortableTh
+                label="Pour le :"
+                active={sortConfig.key === 'due_date'}
+                direction={sortConfig.direction}
+                onClick={() => toggleSort('due_date', sectionKey)}
+              />
+              <SortableTh
+                label="Statut"
+                active={sortConfig.key === 'status'}
+                direction={sortConfig.direction}
+                onClick={() => toggleSort('status', sectionKey)}
+              />
+              <SortableTh
+                label="Commentaire - avancement"
+                active={sortConfig.key === 'comment_progress'}
+                direction={sortConfig.direction}
+                onClick={() => toggleSort('comment_progress', sectionKey)}
+              />
+              <Th stickyTop="top-[41px]">Suppr.</Th>
+            </tr>
+
+            <tr className="sticky top-[41px] z-10 bg-white shadow-sm">
+              <FilterTh>
+                <FilterInput
+                  value={filters.created_by_name}
+                  onChange={v => setFilter(sectionKey, 'created_by_name', v)}
+                  placeholder="Filtrer..."
+                />
+              </FilterTh>
+              <FilterTh>
+                <FilterInput
+                  value={filters.mission_project}
+                  onChange={v => setFilter(sectionKey, 'mission_project', v)}
+                  placeholder="Filtrer..."
+                />
+              </FilterTh>
+              <FilterTh>
+                <FilterInput
+                  value={filters.description_action}
+                  onChange={v => setFilter(sectionKey, 'description_action', v)}
+                  placeholder="Filtrer..."
+                />
+              </FilterTh>
+              <FilterTh>
+                <FilterInput
+                  value={filters.assigned_to}
+                  onChange={v => setFilter(sectionKey, 'assigned_to', v)}
+                  placeholder="Filtrer..."
+                />
+              </FilterTh>
+              <FilterTh>
+                <FilterInput
+                  value={filters.due_date}
+                  onChange={v => setFilter(sectionKey, 'due_date', v)}
+                  placeholder="JJ/MM/AAAA"
+                />
+              </FilterTh>
+              <FilterTh>
+                <select
+                  value={filters.status}
+                  onChange={e => setFilter(sectionKey, 'status', e.target.value)}
+                  className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs outline-none focus:border-slate-400"
+                >
+                  <option value="">Tous</option>
+                  {STATUS_OPTIONS.map(status => (
+                    <option key={status} value={status}>
+                      {status}
+                    </option>
+                  ))}
+                </select>
+              </FilterTh>
+              <FilterTh>
+                <FilterInput
+                  value={filters.comment_progress}
+                  onChange={v => setFilter(sectionKey, 'comment_progress', v)}
+                  placeholder="Filtrer..."
+                />
+              </FilterTh>
+              <FilterTh />
             </tr>
           </thead>
 
@@ -459,9 +772,69 @@ function TodoSection({
   )
 }
 
-function Th({ children }: { children: React.ReactNode }) {
+function SortableTh({
+  label,
+  active,
+  direction,
+  onClick,
+}: {
+  label: string
+  active: boolean
+  direction: 'asc' | 'desc'
+  onClick: () => void
+}) {
   return (
-    <th className="border-b border-r px-3 py-3 text-left font-bold last:border-r-0">
+    <th className="border-b border-r bg-slate-100 px-3 py-2 text-left font-bold last:border-r-0">
+      <button
+        type="button"
+        onClick={onClick}
+        className="flex w-full items-center gap-2 text-left hover:text-slate-700"
+      >
+        <span>{label}</span>
+        <span className="text-xs text-slate-400">
+          {active ? (direction === 'asc' ? '▲' : '▼') : '↕'}
+        </span>
+      </button>
+    </th>
+  )
+}
+
+function FilterTh({ children }: { children?: React.ReactNode }) {
+  return <th className="border-b border-r bg-white px-2 py-2 last:border-r-0">{children}</th>
+}
+
+function FilterInput({
+  value,
+  onChange,
+  placeholder,
+}: {
+  value: string
+  onChange: (value: string) => void
+  placeholder?: string
+}) {
+  return (
+    <input
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      placeholder={placeholder}
+      className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs outline-none focus:border-slate-400"
+    />
+  )
+}
+
+function Th({
+  children,
+  stickyTop,
+}: {
+  children: React.ReactNode
+  stickyTop?: string
+}) {
+  return (
+    <th
+      className={`border-b border-r px-3 py-3 text-left font-bold last:border-r-0 ${
+        stickyTop ? `sticky z-20 bg-slate-100 ${stickyTop}` : ''
+      }`}
+    >
       {children}
     </th>
   )
