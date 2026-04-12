@@ -916,6 +916,7 @@ export default function ClientsPage() {
   const [lastImport, setLastImport] = useState<ImportRow | null>(null)
   const [rejects, setRejects] = useState<RejectRow[]>([])
   const [sireneConfigId, setSireneConfigId] = useState<string | null>(null)
+  const [lastApiImportAt, setLastApiImportAt] = useState<string | null>(null)
   const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(null)
   const [allowedDepartements, setAllowedDepartements] = useState<string[]>([])
 
@@ -941,10 +942,67 @@ function openNextClient() {
   setSelectedClient(nextClient)
 }
 
+  async function persistSireneParams(params: SireneParamsForm, forcedLastImportAt?: string | null) {
+    const payload = {
+      codes_ape: params.codesApe
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+      departements: params.departements
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+      date_creation_min: params.dateCreationMin || null,
+      date_creation_max: params.dateCreationMax || null,
+      date_modification_min: params.dateMajMin || null,
+      date_modification_max: params.dateMajMax || null,
+      last_import_at: forcedLastImportAt ?? lastApiImportAt ?? null,
+      updated_at: new Date().toISOString(),
+    }
+
+    if (sireneConfigId) {
+      const { error } = await supabase
+        .from('import_sirene_params')
+        .update(payload)
+        .eq('id', sireneConfigId)
+      if (error) throw error
+    } else {
+      const { data, error } = await supabase
+        .from('import_sirene_params')
+        .insert(payload)
+        .select('id')
+        .single()
+      if (error) throw error
+      setSireneConfigId(data.id as string)
+    }
+  }
+
+  async function finalizeSireneParamsAfterApiImport(importDate: string, sourceParams: SireneParamsForm) {
+    const nextSireneParams: SireneParamsForm = {
+      ...sourceParams,
+      dateCreationMin: importDate,
+      dateCreationMax: importDate,
+    }
+
+    await persistSireneParams(nextSireneParams, importDate)
+    setLastApiImportAt(importDate)
+    setSireneParams(nextSireneParams)
+  }
+
   async function launchImportSirene() {
     setImporting(true)
+    setSavingSireneParams(true)
 
     try {
+      const today = new Date().toISOString().slice(0, 10)
+      const paramsBeforeImport: SireneParamsForm = {
+        ...sireneParams,
+        dateCreationMax: sireneParams.dateCreationMax || today,
+      }
+
+      setSireneParams(paramsBeforeImport)
+      await persistSireneParams(paramsBeforeImport)
+
       const res = await fetch('/api/import-sirene', {
         method: 'POST',
       })
@@ -974,11 +1032,13 @@ function openNextClient() {
 )
 
 
+      await finalizeSireneParamsAfterApiImport(new Date().toISOString().slice(0, 10), paramsBeforeImport)
       await loadAll()
     } catch (error: any) {
       console.error(error)
       alert('Erreur import : ' + (error?.message || String(error)))
     } finally {
+      setSavingSireneParams(false)
       setImporting(false)
     }
   }
@@ -990,7 +1050,7 @@ function openNextClient() {
   const [selectedClient, setSelectedClient] = useState<ClientRow | null>(null)
   const [showRejects, setShowRejects] = useState(false)
 
-  const [showClientsSection, setShowClientsSection] = useState(true)
+  const [showClientsSection, setShowClientsSection] = useState(false)
   const [showImportsSection, setShowImportsSection] = useState(true)
 
   const [sireneParams, setSireneParams] = useState<SireneParamsForm>(buildDefaultSireneParams(null))
@@ -1173,6 +1233,9 @@ function openNextClient() {
 
       const latestImport = (importRes.data?.[0] || null) as ImportRow | null
       const sireneConfig = (sireneParamsRes.data?.[0] || null) as SireneImportParamRow | null
+      const latestApiImportAt =
+        formatDateInput(sireneConfig?.last_import_at) ||
+        (latestImport?.type_import === 'api_sirene' ? formatDateInput(latestImport.date_import) : '')
 
       setClients(clientsRes.rows)
       setClientsCegeclim(clientsCegeclimRes)
@@ -1180,24 +1243,32 @@ function openNextClient() {
       setAgences((agencesRes.data || []) as AgenceRow[])
       setTerritories((territoriesRes.data || []) as TerritoryRow[])
       setLastImport(latestImport)
+      setLastApiImportAt(latestApiImportAt || null)
       setRejects([])
       setRejectsLoaded(false)
       setCegeclimAbsents([])
       setCegeclimAbsentsLoaded(false)
 
       if (sireneConfig) {
+        const today = new Date().toISOString().slice(0, 10)
+        const storedMax = formatDateInput(sireneConfig.date_creation_max)
         setSireneConfigId(sireneConfig.id)
         setSireneParams({
           codesApe: (sireneConfig.codes_ape || []).join(', '),
           departements: (sireneConfig.departements || []).join(', '),
-          dateCreationMin: formatDateInput(sireneConfig.date_creation_min),
-          dateCreationMax: formatDateInput(sireneConfig.date_creation_max),
+          dateCreationMin: latestApiImportAt || formatDateInput(sireneConfig.date_creation_min),
+          dateCreationMax: storedMax || today,
           dateMajMin: formatDateInput(sireneConfig.date_modification_min),
           dateMajMax: formatDateInput(sireneConfig.date_modification_max),
         })
       } else {
+        const today = new Date().toISOString().slice(0, 10)
         setSireneConfigId(null)
-        setSireneParams(buildDefaultSireneParams(latestImport))
+        setSireneParams({
+          ...buildDefaultSireneParams(latestImport),
+          dateCreationMin: latestApiImportAt || '',
+          dateCreationMax: today,
+        })
       }
 
       if (clientsRes.totalCount > clientsRes.rows.length) {
@@ -1273,11 +1344,15 @@ async function openMapFromCell(secteur: string, departement: string | null) {
           .split(',')
           .map((s) => s.trim())
           .filter(Boolean),
+        departements: sireneParams.departements
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean),
         date_creation_min: sireneParams.dateCreationMin || null,
         date_creation_max: sireneParams.dateCreationMax || null,
         date_modification_min: sireneParams.dateMajMin || null,
         date_modification_max: sireneParams.dateMajMax || null,
-        last_import_at: lastImport?.date_import || null,
+        last_import_at: lastApiImportAt || null,
         updated_at: new Date().toISOString(),
       }
 
@@ -2726,7 +2801,7 @@ const selectedClientMapReason = useMemo(() => {
     <div style={pageStyle}>
       <div style={containerStyle}>
         <section style={sectionTitleStyle}>
-          <h1 style={pageTitleStyle}>Clients</h1>
+          <h1 style={pageTitleStyle}>Mise à jour Base Clients</h1>
         </section>
 
         {allowedDepartements.length > 0 && (
@@ -2736,24 +2811,43 @@ const selectedClientMapReason = useMemo(() => {
           </div>
         )}
 
-        <section style={topToggleGridStyle}>
-          <button
-            type="button"
-            onClick={() => setShowClientsSection((v) => !v)}
-            style={showClientsSection ? sectionToggleActiveStyle : sectionToggleStyle}
-          >
-            <span>Clients</span>
-            <span>{showClientsSection ? 'Réduire' : 'Développer'}</span>
-          </button>
+        <section style={sectionCardStyle}>
+          <div style={sectionHeaderRowStyle}>
+            <h2 style={sectionBlockTitleStyle}>Synthèse</h2>
+          </div>
 
-          <button
-            type="button"
-            onClick={() => setShowImportsSection((v) => !v)}
-            style={showImportsSection ? sectionToggleActiveStyle : sectionToggleStyle}
-          >
-            <span>Imports</span>
-            <span>{showImportsSection ? 'Réduire' : 'Développer'}</span>
-          </button>
+          {backgroundHydratingClients && (
+            <div
+              style={{
+                marginBottom: 12,
+                padding: '10px 14px',
+                background: '#eff6ff',
+                border: '1px solid #bfdbfe',
+                color: '#1d4ed8',
+                borderRadius: 12,
+                fontSize: 14,
+              }}
+            >
+              Chargement rapide effectué. La base complète continue à se charger en arrière-plan…
+            </div>
+          )}
+
+          <div style={kpiGridStyle}>
+            <div style={kpiCardStyle}>
+              <div style={kpiTitleStyle}>Entreprises base Clients</div>
+              <div style={kpiValueStyle}>{totalClientsBaseForScope}</div>
+            </div>
+
+            <div style={kpiCardStyle}>
+              <div style={kpiTitleStyle}>Entreprise base CEGECLIM</div>
+              <div style={kpiValueStyle}>{totalCegeclimBase}</div>
+            </div>
+
+            <div style={kpiCardStyle}>
+              <div style={kpiTitleStyle}>Clients CEGECLIM absent base Clients</div>
+              <div style={kpiValueStyle}>{scopedCegeclimMissingInClients.length}</div>
+            </div>
+          </div>
         </section>
 
         {showClientsSection && (
@@ -3657,7 +3751,7 @@ const selectedClientMapReason = useMemo(() => {
             <section style={importBlocksGridStyle}>
               <div style={importCardStyle}>
                 <div style={importCardHeaderStyle}>
-                  <h3 style={importCardTitleStyle}>Import automatique via API Sirene</h3>
+                  <h3 style={importCardTitleStyle}>Option 1 : Import automatique via API Sirene</h3>
                   <div style={importCardSubtitleStyle}>
                     Prépare les paramètres à stocker en base avant de brancher l’API.
                   </div>
@@ -3752,7 +3846,7 @@ const selectedClientMapReason = useMemo(() => {
 
               <div style={importCardStyle}>
                 <div style={importCardHeaderStyle}>
-                  <h3 style={importCardTitleStyle}>Import manuel via CSV</h3>
+                  <h3 style={importCardTitleStyle}>Option 2 : Import manuel via CSV</h3>
                   <div style={importCardSubtitleStyle}>
                     Conserve le fonctionnement actuel pour alimenter la table clients.
                   </div>

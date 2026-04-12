@@ -55,8 +55,8 @@ function AppShell({ children }: { children: React.ReactNode }) {
     {
       label: 'Base clients',
       items: [
-        { label: 'Liste globale', path: '/clients', accessKey: 'can_clients' },
-        { label: 'Liste par Agence', path: '/carte', accessKey: 'can_carte' },
+        { label: 'MAJ Base', path: '/clients', accessKey: 'can_clients' },
+        { label: 'Liste clients', path: '/carte', accessKey: 'can_carte' },
         { label: 'Clients Cegeclim', path: '/clients_cegeclim', accessKey: 'can_clients_cegeclim' },
         { label: 'Suivi Prospects', path: '/suivi_prospects', accessKey: 'can_suivi_prospects' },
       ],
@@ -146,20 +146,24 @@ if (isLoginPage) {
               PROSPECTION NOUVEAUX CLIENTS
             </div>
 
-            <div style={styles.right}>
-              <select
-                value={societeFilter}
-                onChange={(e) => setSocieteFilter(e.target.value as SocieteFilter)}
-                style={styles.select}
-              >
-                {(rights.allowed_scopes || ['Global']).map((s) => (
-                  <option key={s}>{s}</option>
-                ))}
-              </select>
+           <div style={styles.right}>
+              <div style={styles.rightUserBlock}>
+                <select
+                  value={societeFilter}
+                  onChange={(e) => setSocieteFilter(e.target.value as SocieteFilter)}
+                  style={styles.select}
+                >
+                  {(rights.allowed_scopes || ['Global']).map((s) => (
+                    <option key={s}>{s}</option>
+                  ))}
+                </select>
 
-              <button onClick={handleLogout} style={styles.logout}>
-                Déconnexion
-              </button>
+                <button onClick={handleLogout} style={styles.logout}>
+                  Déconnexion
+                </button>
+
+                {email && <div style={styles.userEmail}>{email}</div>}
+              </div>
             </div>
           </div>
 

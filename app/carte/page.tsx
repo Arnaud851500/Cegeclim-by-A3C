@@ -3142,10 +3142,10 @@ const selectedClientMapReason = useMemo(() => {
                 <h2 style={sectionTitleTextStyle}>.</h2>
                 <h2 style={sectionTitleTextStyle}>Synthèse par département</h2>
                   <div className="border-t border-slate-200 px-5 py-4 text-sm text-slate-700">
-                 <span className="font-semibold text-slate-900">Lecture :</span> nombre total
+                 <span className="font-semibold text-slate-900">Valeur en gras : </span>  nombre total
                   d’entreprises dans la cellule.&nbsp;&nbsp;
-                <span className="font-semibold text-slate-900">Valeur entre parenthèses :</span>
-                 nombre de clients CEGECLIM.&nbsp;&nbsp;
+                <span className="font-semibold text-slate-900">Valeur entre parenthèses : </span>
+                  nombre de clients CEGECLIM.&nbsp;&nbsp;
                 <span className="font-semibold text-slate-900">Accès carte :</span> cliquer sur une case pour pour faire apparaitre les entreprises sur une carte géo.
                </div>
               </section>
@@ -3190,7 +3190,7 @@ const selectedClientMapReason = useMemo(() => {
       border: 'none',
     }}
   >
-    {row.total} <span style={{ fontSize: 11, fontWeight: 500, opacity: 0.75 }}>({row.totalCegeclim})</span>
+    {row.total} <span style={{ fontSize: 13, fontWeight: 500, opacity: 0.75 }}>({row.totalCegeclim})</span>
   </button>
 </td>
                             {summaryDepartments.map((dep) => (
@@ -3206,7 +3206,7 @@ const selectedClientMapReason = useMemo(() => {
       border: 'none',
     }}
   >
-    {row.byDept[dep] || 0} <span style={{ fontSize: 11, fontWeight: 500, opacity: 0.75 }}>({row.byDeptCegeclim[dep] || 0})</span>
+    {row.byDept[dep] || 0} <span style={{ fontSize: 13, fontWeight: 500, opacity: 0.75 }}>({row.byDeptCegeclim[dep] || 0})</span>
   </button>
 </td>
                             ))}
@@ -3226,7 +3226,7 @@ const selectedClientMapReason = useMemo(() => {
       border: 'none',
     }}
   >
-    {sortedFilteredClients.length} <span style={{ fontSize: 11, fontWeight: 500, opacity: 0.75 }}>({summaryTotalCegeclim})</span>
+    {sortedFilteredClients.length} <span style={{ fontSize: 13, fontWeight: 500, opacity: 0.75 }}>({summaryTotalCegeclim})</span>
   </button>
 </td>
                           {summaryDepartments.map((dep) => (

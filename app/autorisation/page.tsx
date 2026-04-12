@@ -19,7 +19,7 @@ type UserPageAccess = {
   can_stocks: boolean
   can_activites: boolean
   can_change_scope: boolean
-  display_name : string[]
+  display_name: string
   allowed_scopes: string[]
   allowed_agences: string[]
   allowed_departements: string[]
@@ -58,7 +58,7 @@ const defaultNewRow: UserPageAccess = {
   can_stocks: false,
   can_activites: false,
   can_change_scope: false,
-  display_name :[],
+  display_name: '',
   allowed_scopes: ['Global'],
   allowed_agences: [],
   allowed_departements: [],
@@ -131,9 +131,11 @@ export default function AutorisationPage() {
       can_activites: !!item.can_activites,
       can_change_scope: !!item.can_change_scope,
       display_name:
-        Array.isArray(item.display_name) && item.display_name.length > 0
+        typeof item.display_name === 'string'
           ? item.display_name
-          : [],
+          : Array.isArray(item.display_name)
+            ? item.display_name.join(', ').trim()
+            : '',
       allowed_scopes:
         Array.isArray(item.allowed_scopes) && item.allowed_scopes.length > 0
           ? item.allowed_scopes
@@ -201,18 +203,13 @@ export default function AutorisationPage() {
       )
     )
   }
-function updateDisplay_name(email: string, value: string) {
+  function updateDisplayName(email: string, value: string) {
     const normalizedEmail = email.toLowerCase().trim()
-
-    const display_name = value
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
 
     setRows((prev) =>
       prev.map((row) =>
         row.email === normalizedEmail
-          ? { ...row, display_name : display_name }
+          ? { ...row, display_name: value }
           : row
       )
     )
@@ -341,7 +338,7 @@ function updateDisplay_name(email: string, value: string) {
         can_stocks: row.can_stocks,
         can_activites: row.can_activites,
         can_change_scope: row.can_change_scope,
-        display_name: row.display_name,
+        display_name: row.display_name.trim(),
         allowed_scopes: row.allowed_scopes,
         allowed_agences: row.allowed_agences,
         allowed_departements: row.allowed_departements,
@@ -389,7 +386,7 @@ function updateDisplay_name(email: string, value: string) {
       can_stocks: newRow.can_stocks,
       can_activites: newRow.can_activites,
       can_change_scope: newRow.can_change_scope,
-      display_name: newRow.display_name,
+      display_name: newRow.display_name.trim(),
       allowed_scopes: newRow.allowed_scopes,
       allowed_agences: newRow.allowed_agences,
       allowed_departements: newRow.allowed_departements,
@@ -539,20 +536,35 @@ function updateDisplay_name(email: string, value: string) {
           </h2>
 
           <div className="mt-4 grid grid-cols-1 gap-4">
-            <input
-              type="email"
-              value={newRow.email}
-              onChange={(e) =>
-                setNewRow((prev) => ({
-                  ...prev,
-                  email: e.target.value.toLowerCase().trim(),
-                }))
-              }
-              placeholder="email@exemple.com"
-              className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
-            />
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1.2fr_1fr]">
+              <input
+                type="email"
+                value={newRow.email}
+                onChange={(e) =>
+                  setNewRow((prev) => ({
+                    ...prev,
+                    email: e.target.value.toLowerCase().trim(),
+                  }))
+                }
+                placeholder="email@exemple.com"
+                className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
+              />
 
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
+              <input
+                type="text"
+                value={newRow.display_name}
+                onChange={(e) =>
+                  setNewRow((prev) => ({
+                    ...prev,
+                    display_name: e.target.value,
+                  }))
+                }
+                placeholder="Nom affiché"
+                className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-7">
               <CreateCheckbox label="Indicateurs" checked={newRow.can_dashboard} onChange={(checked) => updateNewRowValue('can_dashboard', checked)} />
               <CreateCheckbox label="Territoire" checked={newRow.can_territoire} onChange={(checked) => updateNewRowValue('can_territoire', checked)} />
               <CreateCheckbox label="Cartographie" checked={newRow.can_cartographie} onChange={(checked) => updateNewRowValue('can_cartographie', checked)} />
@@ -638,7 +650,7 @@ function updateDisplay_name(email: string, value: string) {
                 </button>
               </div>
 
-              <div className="grid grid-cols-4 gap-2 sm:grid-cols-6 md:grid-cols-8 xl:grid-cols-12">
+              <div className="grid grid-cols-4 gap-2 sm:grid-cols-6 md:grid-cols-8 xl:grid-cols-16">
                 {ALL_DEPARTEMENTS.map((dep) => {
                   const checked = newRow.allowed_departements.length === 0
                     ? true
@@ -706,15 +718,15 @@ function updateDisplay_name(email: string, value: string) {
           </div>
         </div>
 
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white shadow-sm">
           <div className="overflow-x-auto">
-            <table className="w-full table-auto border-collapse">
+            <table className="w-max min-w-full table-auto border-collapse">
               <thead className="bg-slate-100">
                 <tr>
-                  <th className="whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="sticky left-0 z-30 min-w-[280px] whitespace-nowrap border-r border-slate-200 bg-slate-100 px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-600">
                     Utilisateur
                   </th>
-                  <th className="whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="sticky left-[280px] z-30 min-w-[220px] whitespace-nowrap border-r border-slate-200 bg-slate-100 px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-600">
                     Nom
                   </th>
                   <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
@@ -777,30 +789,30 @@ function updateDisplay_name(email: string, value: string) {
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={19} className="px-4 py-10 text-center text-sm text-slate-500">
+                    <td colSpan={20} className="px-4 py-10 text-center text-sm text-slate-500">
                       Chargement des autorisations...
                     </td>
                   </tr>
                 ) : filteredRows.length === 0 ? (
                   <tr>
-                    <td colSpan={19} className="px-4 py-10 text-center text-sm text-slate-500">
+                    <td colSpan={20} className="px-4 py-10 text-center text-sm text-slate-500">
                       Aucun utilisateur trouvé.
                     </td>
                   </tr>
                 ) : (
                   filteredRows.map((row) => (
-                    <tr key={row.email} className="border-t border-slate-200 hover:bg-slate-50">
-                      <td className="whitespace-nowrap px-4 py-4 align-top">
-                        <div className="min-w-fit text-sm font-medium text-slate-900">
+                    <tr key={row.email} className="border-t border-slate-200 hover:bg-slate-50/80">
+                      <td className="sticky left-0 z-20 whitespace-nowrap border-r border-slate-200 bg-white px-3 py-2 align-top">
+                        <div className="min-w-fit text-sm font-medium leading-5 text-slate-900">
                           {row.email}
                         </div>
                       </td>
-                      <td className="px-4 py-4 align-top">
+                      <td className="sticky left-[280px] z-20 border-r border-slate-200 bg-white px-3 py-2 align-top">
                         <input
                           type="text"
-                          value={(row.display_name ?? []).join(', ')}
-                          onChange={(e) => updateDisplay_name(row.email, e.target.value)}
-                          className="w-56 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-500"
+                          value={row.display_name || ''}
+                          onChange={(e) => updateDisplayName(row.email, e.target.value)}
+                          className="w-52 rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-slate-500"
                         />
                       </td>
                       <PermissionCell checked={row.can_dashboard} onChange={(checked) => updateLocalValue(row.email, 'can_dashboard', checked)} />
@@ -823,7 +835,7 @@ function updateDisplay_name(email: string, value: string) {
                           type="text"
                           value={row.allowed_scopes.join(', ')}
                           onChange={(e) => updateAllowedScopes(row.email, e.target.value)}
-                          className="w-56 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-500"
+                          className="w-52 rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-slate-500"
                         />
                       </td>
 
@@ -832,7 +844,7 @@ function updateDisplay_name(email: string, value: string) {
                           type="text"
                           value={(row.allowed_agences ?? []).join(', ')}
                           onChange={(e) => updateAllowedAgences(row.email, e.target.value)}
-                          className="w-56 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-500"
+                          className="w-52 rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-slate-500"
                           placeholder="Toutes si vide"
                         />
                       </td>
@@ -841,7 +853,7 @@ function updateDisplay_name(email: string, value: string) {
                         <select
                           value={row.default_landing_page || '/accueil'}
                           onChange={(e) => updateDefaultLandingPage(row.email, e.target.value)}
-                          className="w-48 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-500"
+                          className="w-44 rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-slate-500"
                         >
                           <option value="/accueil">/accueil</option>
                           <option value="/dashboard">/dashboard</option>
@@ -859,12 +871,12 @@ function updateDisplay_name(email: string, value: string) {
                         </select>
                       </td>
 
-                      <td className="min-w-[290px] px-4 py-4 align-top">
+                      <td className="min-w-[290px] px-3 py-2 align-top">
                         <div className="flex flex-nowrap items-center gap-2 whitespace-nowrap">
                           <button
                             type="button"
                             onClick={() => setSelectedDeptUserEmail(row.email)}
-                            className={`rounded-lg px-3 py-2 text-xs font-semibold ${
+                            className={`rounded-lg px-2.5 py-1.5 text-[11px] font-semibold ${
                               selectedDeptUserEmail === row.email
                                 ? 'bg-blue-600 text-white'
                                 : 'border border-slate-300 bg-white text-slate-700 hover:bg-slate-100'
@@ -875,14 +887,14 @@ function updateDisplay_name(email: string, value: string) {
 
                           <button
                             onClick={() => setAllForRow(row.email, true)}
-                            className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 transition hover:bg-slate-100"
+                            className="rounded-lg border border-slate-300 px-2.5 py-1.5 text-[11px] font-medium text-slate-700 transition hover:bg-slate-100"
                           >
                             Tout cocher
                           </button>
 
                           <button
                             onClick={() => setAllForRow(row.email, false)}
-                            className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 transition hover:bg-slate-100"
+                            className="rounded-lg border border-slate-300 px-2.5 py-1.5 text-[11px] font-medium text-slate-700 transition hover:bg-slate-100"
                           >
                             Tout décocher
                           </button>
@@ -890,7 +902,7 @@ function updateDisplay_name(email: string, value: string) {
                           <button
                             onClick={() => saveRow(row)}
                             disabled={savingEmail === row.email}
-                            className="rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                            className="rounded-lg bg-slate-900 px-2.5 py-1.5 text-[11px] font-semibold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
                           >
                             {savingEmail === row.email ? 'Enregistrement...' : 'Enregistrer'}
                           </button>
@@ -962,7 +974,7 @@ function updateDisplay_name(email: string, value: string) {
                 </button>
               </div>
 
-              <div className="grid grid-cols-4 gap-2 sm:grid-cols-6 md:grid-cols-8 xl:grid-cols-12">
+              <div className="grid grid-cols-4 gap-2 sm:grid-cols-6 md:grid-cols-8 xl:grid-cols-16">
                 {ALL_DEPARTEMENTS.map((dep) => {
                   const checked =
                     selectedDeptUser.allowed_departements.length === 0
@@ -1009,13 +1021,13 @@ function PermissionCell({
   onChange: (checked: boolean) => void
 }) {
   return (
-    <td className="px-4 py-4 text-center align-middle">
+    <td className="px-3 py-2 text-center align-middle">
       <label className="inline-flex cursor-pointer items-center justify-center">
         <input
           type="checkbox"
           checked={checked}
           onChange={(e) => onChange(e.target.checked)}
-          className="h-5 w-5 rounded border-slate-300"
+          className="h-4 w-4 rounded border-slate-300"
         />
       </label>
     </td>
@@ -1032,7 +1044,7 @@ function CreateCheckbox({
   onChange: (checked: boolean) => void
 }) {
   return (
-    <label className="flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+    <label className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
       <input
         type="checkbox"
         checked={checked}
