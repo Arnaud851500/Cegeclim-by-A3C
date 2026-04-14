@@ -3089,6 +3089,200 @@ const selectedClientMapReason = useMemo(() => {
     doc.save(`clients_selection_${new Date().toISOString().slice(0, 10)}.pdf`)
   }
 
+
+  function exportClientSheetsPdf() {
+    if (!sortedFilteredClients.length) {
+      alert('Aucune entreprise à imprimer.')
+      return
+    }
+
+    const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' })
+    const pageWidth = doc.internal.pageSize.getWidth()
+    const pageHeight = doc.internal.pageSize.getHeight()
+
+    const COLOR_BG: [number, number, number] = [245, 247, 251]
+    const COLOR_PANEL: [number, number, number] = [255, 255, 255]
+    const COLOR_BORDER: [number, number, number] = [203, 213, 225]
+    const COLOR_TITLE_BG: [number, number, number] = [241, 245, 249]
+    const COLOR_TEXT: [number, number, number] = [15, 23, 42]
+    const COLOR_MUTED: [number, number, number] = [71, 85, 105]
+    const COLOR_SUCCESS: [number, number, number] = [22, 101, 52]
+    const COLOR_DANGER: [number, number, number] = [153, 27, 27]
+
+    function pdfText(value: unknown, fallback = 'NC') {
+      const v = String(value ?? '').trim()
+      return v || fallback
+    }
+
+    function getClientMapReasonForPdf(client: ClientRow) {
+      const visible =
+        typeof client.latitude === 'number' &&
+        typeof client.longitude === 'number' &&
+        Number.isFinite(client.latitude) &&
+        Number.isFinite(client.longitude)
+
+      if (visible) return 'Présent sur la carte'
+
+      const hasAddress = Boolean(
+        String(client.adresse_complete || '').trim() ||
+          String(client.codePostalEtablissement || '').trim() ||
+          String(client.libelleCommuneEtablissement || '').trim()
+      )
+
+      if (hasAddress) return 'Adresse présente mais coordonnées absentes'
+      return 'Adresse insuffisante pour la carte'
+    }
+
+    function drawWrappedText(lines: string[], x: number, y: number, maxWidth: number, lineHeight = 5.1) {
+      let cursorY = y
+      lines.forEach((line) => {
+        const split = doc.splitTextToSize(line, maxWidth) as string[]
+        split.forEach((part) => {
+          doc.text(part, x, cursorY)
+          cursorY += lineHeight
+        })
+      })
+      return cursorY
+    }
+
+    function drawPanel(title: string, x: number, y: number, w: number, h: number, lines: string[], options?: { badgeText?: string; badgeColor?: [number, number, number] }) {
+      doc.setDrawColor(...COLOR_BORDER)
+      doc.setFillColor(...COLOR_PANEL)
+      doc.roundedRect(x, y, w, h, 4, 4, 'FD')
+
+      doc.setFillColor(...COLOR_TITLE_BG)
+      doc.roundedRect(x, y, w, 12, 4, 4, 'F')
+      doc.rect(x, y + 8, w, 4, 'F')
+
+      doc.setTextColor(...COLOR_TEXT)
+      doc.setFont('helvetica', 'bold')
+      doc.setFontSize(11)
+      doc.text(title, x + 4, y + 7.6)
+
+      if (options?.badgeText) {
+        const badgeW = Math.max(26, doc.getTextWidth(options.badgeText) + 8)
+        doc.setFillColor(...(options.badgeColor || COLOR_DANGER))
+        doc.roundedRect(x + w - badgeW - 4, y + 2.2, badgeW, 7, 3, 3, 'F')
+        doc.setTextColor(255, 255, 255)
+        doc.setFontSize(8.5)
+        doc.text(options.badgeText, x + w - badgeW / 2 - 4, y + 6.9, { align: 'center' })
+      }
+
+      doc.setTextColor(...COLOR_TEXT)
+      doc.setFont('helvetica', 'normal')
+      doc.setFontSize(9.4)
+      drawWrappedText(lines, x + 4, y + 18, w - 8)
+    }
+
+    sortedFilteredClients.forEach((client, index) => {
+      if (index > 0) doc.addPage('a4', 'landscape')
+
+      const cegeclimDetails = getClientCegeclimRow(client, cegeclimDetailsBySiret)
+      const clientOnMap =
+        typeof client.latitude === 'number' &&
+        typeof client.longitude === 'number' &&
+        Number.isFinite(client.latitude) &&
+        Number.isFinite(client.longitude)
+
+      doc.setFillColor(...COLOR_BG)
+      doc.rect(0, 0, pageWidth, pageHeight, 'F')
+
+      doc.setTextColor(...COLOR_TEXT)
+      doc.setFont('helvetica', 'bold')
+      doc.setFontSize(20)
+      doc.text(pdfText(client.raison_sociale_affichee, 'Entreprise'), 14, 16)
+
+      doc.setFontSize(11)
+      doc.text(`SIRET : ${pdfText(client.siret)}`, 14, 24)
+
+      doc.setFont('helvetica', 'normal')
+      doc.setTextColor(...COLOR_MUTED)
+      doc.setFontSize(9)
+      doc.text(
+        `Feuille client • ${index + 1}/${sortedFilteredClients.length} • édité le ${new Date().toLocaleDateString('fr-FR')}`,
+        pageWidth - 14,
+        16,
+        { align: 'right' }
+      )
+
+      const panelYTop = 30
+      const panelH = 62
+      const gap = 8
+      const left = 14
+      const usableW = pageWidth - 28
+      const colW = (usableW - gap * 2) / 3
+
+      drawPanel('Identité', left, panelYTop, colW, panelH, [
+        `Téléphone : ${pdfText(client.telephone)}`,
+        `SIRET : ${pdfText(client.siret)}`,
+        `Code NAF : ${pdfText(client.activitePrincipaleEtablissement)}`,
+        `Secteur : ${pdfText(client.naf_libelle_traduit || translateNaf(client.activitePrincipaleEtablissement), 'NC')}`,
+        `Date création : ${formatDateFr(client.dateCreationEtablissement)}`,
+        `Ancienneté : ${formatAgePrecise(diffDaysFromToday(client.dateCreationEtablissement))}`,
+        `Effectifs SIRENE : ${pdfText(client.trancheEffectifsEtablissement)}`,
+        `Effectif estimé : ${client.effectif_estime ?? 'NC'}`,
+        `Présent base CEGECLIM : ${isClientPresentInCegeclim(client, activeCegeclimBySiret) ? getClientCegeclimCode(client, activeCegeclimBySiret) : 'NON'}`,
+      ])
+
+      drawPanel('Localisation', left + colW + gap, panelYTop, colW, panelH, [
+        `Adresse : ${pdfText(client.adresse_complete)}`,
+        `Ville : ${pdfText(client.libelleCommuneEtablissement)}`,
+        `Code postal : ${pdfText(client.codePostalEtablissement)}`,
+        `Département : ${pdfText(getClientDepartment(client), 'NC')}`,
+        `Coordonnée X : ${client.coordonneeLambertAbscisseEtablissement ?? 'NC'}`,
+        `Coordonnée Y : ${client.coordonneeLambertOrdonneeEtablissement ?? 'NC'}`,
+        `Raison : ${getClientMapReasonForPdf(client)}`,
+       
+      ], {
+        badgeText: clientOnMap ? 'Présent sur la carte' : 'Absent de la carte',
+        badgeColor: clientOnMap ? COLOR_SUCCESS : COLOR_DANGER,
+      })
+
+      drawPanel('Prospect / Remarque', left + (colW + gap) * 2, panelYTop, colW, panelH, [
+        `Action prospect : ${normalizeProspectStatus(client.prospect_status) || 'Vide'}`,
+        '',
+        pdfText(client.prospect_comment, 'Aucun commentaire'),
+      ])
+
+      drawPanel('Contact', left, panelYTop + panelH + gap, colW, panelH, [
+        `Téléphone : ${pdfText(client.telephone)}`,
+        `Email : ${pdfText(client.email)}`,
+        `Site web : ${pdfText(client.site_web)}`,
+        `Dirigeant : ${pdfText(client.nom_dirigeant)}`,
+        `Contactable : ${client.telephone || client.email || client.contactable ? 'Oui' : 'Non'}`,
+      ])
+
+      drawPanel('Enrichissement Google', left + colW + gap, panelYTop + panelH + gap, colW, panelH, [
+        `Statut : ${getEnrichmentBadge(client.enrichment_status).label}`,
+        `Dernier enrichissement : ${formatDateTimeFr(client.last_enrichment_at)}`,
+        `Source Google : ${pdfText(client.enrichment_source)}`,
+        `Erreur : ${pdfText(client.enrichment_error, 'Aucune')}`,
+        `Note Google : ${client.google_rating ?? 'NC'}`,
+        `Nb avis Google : ${client.google_user_ratings_total ?? 'NC'}`,
+      ])
+
+      drawPanel('Client CEGECLIM', left + (colW + gap) * 2, panelYTop + panelH + gap, colW, panelH, [
+        `Numero de client SAGE : ${pdfText(cegeclimDetails?.numero_client_sage)}`,
+        `Désignation commerciale : ${pdfText(cegeclimDetails?.designation_commerciale)}`,
+        `Représentant : ${pdfText(cegeclimDetails?.representant)}`,
+        `Date de création : ${formatDateFr(cegeclimDetails?.date_creation || null)}`,
+        `CA 2023 : ${formatCurrency(cegeclimDetails?.ca_2023)}`,
+        `CA 2024 : ${formatCurrency(cegeclimDetails?.ca_2024)}`,
+        `CA 2025 : ${formatCurrency(cegeclimDetails?.ca_2025)}`,
+        `Statut : ${pdfText(cegeclimDetails?.statut)}`,
+      ])
+
+      doc.setDrawColor(...COLOR_BORDER)
+      doc.line(14, pageHeight - 12, pageWidth - 14, pageHeight - 12)
+      doc.setTextColor(...COLOR_MUTED)
+      doc.setFontSize(8.5)
+      doc.text(`Extraction feuille client - ${new Date().toLocaleDateString('fr-FR')}`, 14, pageHeight - 7)
+      doc.text(`Page ${index + 1}/${sortedFilteredClients.length}`, pageWidth - 14, pageHeight - 7, { align: 'right' })
+    })
+
+    doc.save(`feuilles_clients_${new Date().toISOString().slice(0, 10)}.pdf`)
+  }
+
   function handlePrint() {
     window.print()
   }
@@ -3404,6 +3598,7 @@ const selectedClientMapReason = useMemo(() => {
                   <section style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 24 }}>
                     <button onClick={exportExcel} style={toolbarButtonStyle}>Export Excel</button>
                     <button onClick={exportPdf} style={toolbarButtonStyle}>Créer PDF</button>
+                    <button onClick={exportClientSheetsPdf} style={toolbarButtonStyle}>Imprimer feuille client PDF</button>
                     <button
                       onClick={() => void enrichBatch(enrichableSelection)}
                       style={primaryButtonStyle}
