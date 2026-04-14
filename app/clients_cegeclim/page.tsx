@@ -230,7 +230,7 @@ function MultiSelectButtonFilter({
 
       {open && (
         <div style={multiPanelStyle}>
-          <div style={{ display: 'flex', gap: 3, marginBottom: 5 }}>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
             <button type="button" onClick={() => onChange([])} style={miniButtonStyle}>
               Tout effacer
             </button>
@@ -292,7 +292,7 @@ function SingleSelectButtonFilter({
 
       {open && (
         <div style={multiPanelStyle}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <button type="button" onClick={() => { onChange('TOUS'); setOpen(false) }} style={miniButtonStyle}>
               Tous
             </button>
@@ -331,6 +331,7 @@ function DetailModal({
   const keys = Array.from(new Set([...orderedKeys, ...Object.keys(draft).sort((a, b) => a.localeCompare(b, 'fr'))]))
 
   async function handleSave() {
+    if (!draft) return
     setSaving(true)
     try {
       await onSave(draft)
@@ -361,7 +362,7 @@ function DetailModal({
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(260px, 1fr))', gap: 14, padding: 20 }}>
           {keys.map((key) => {
-            const value = draft[key]
+            const value = (draft as Record<string, unknown>)[key]
             const stringValue = value == null ? '' : String(value)
 
             return (
@@ -794,7 +795,11 @@ export default function ClientsCegeclimPage() {
 
   const sortedDetailRows = useMemo(() => {
     const rows = [...filteredRows]
-    rows.sort((a, b) => compareValues(a[detailSortKey], b[detailSortKey], detailSortDirection))
+    rows.sort((a, b) => {
+      const valueA = (a as Record<string, unknown>)[detailSortKey]
+      const valueB = (b as Record<string, unknown>)[detailSortKey]
+      return compareValues(valueA, valueB, detailSortDirection)
+    })
     return rows
   }, [filteredRows, detailSortKey, detailSortDirection])
 
@@ -878,7 +883,7 @@ export default function ClientsCegeclimPage() {
         />
 
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
-          
+         
           <button type="button" style={{ ...filterButtonStyle, minWidth: 110, textAlign: 'left' }}>
             <span style={{ display: 'block', fontSize: 11, color: '#64748b', marginBottom: 2 }}>Recherche libre</span>
             <input
@@ -924,12 +929,12 @@ export default function ClientsCegeclimPage() {
             options={['OUI', 'NON']}
             onChange={(next) => setSelectedCaPositive(next as YesNoFilter)}
           />
-          <ToggleButtonGroup
+           <ToggleButtonGroup
             value={axisMode}
             onChange={setAxisMode}
             options={[
-              { value: 'DEPARTEMENT', label: 'Dpt' },
-              { value: 'AGENCE', label: 'Agence' },
+              { value: 'DEPARTEMENT', label: 'Par Dpt' },
+              { value: 'AGENCE', label: 'Par Agence' },
             ]}
           />
           <ToggleButtonGroup
@@ -993,7 +998,7 @@ export default function ClientsCegeclimPage() {
               {sortedDetailRows.map((row, rowIndex) => (
                 <tr key={`${row.id ?? row.siret ?? rowIndex}`}>
                   {DISPLAY_COLUMNS.map((column, index) => {
-                    const raw = row[column]
+                    const raw = (row as Record<string, unknown>)[column]
                     const display =
                       column === 'present_base_client'
                         ? String(raw ?? 'NON')
@@ -1185,7 +1190,7 @@ const headerButtonStyle: React.CSSProperties = {
 }
 
 const filterButtonStyle: React.CSSProperties = {
-  minWidth: 115,
+  minWidth: 110,
   height: 56,
   border: '1px solid #cbd5e1',
   background: '#fff',
