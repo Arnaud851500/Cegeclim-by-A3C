@@ -58,7 +58,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
         { label: 'MAJ Base', path: '/clients', accessKey: 'can_clients' },
         { label: 'Liste clients', path: '/carte', accessKey: 'can_carte' },
         { label: 'Clients Cegeclim', path: '/clients_cegeclim', accessKey: 'can_clients_cegeclim' },
-        { label: 'Suivi Prospects', path: '/suivi_prospects', accessKey: 'can_suivi_prospects' },
+        { label: 'Suivi Prospects', path: '/suivi prospects', accessKey: 'can_suivi_prospects' },
       ],
     },
     {
