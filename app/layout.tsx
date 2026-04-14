@@ -1,8 +1,9 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { usePathname, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
+import { logUserEvent } from '@/lib/audit'
 import { AccessProvider, useAccess, type AccessRights } from '@/components/AccessContext'
 import { Analytics } from '@vercel/analytics/next'
 import AutoLogout from '@/components/autologout'
@@ -37,6 +38,8 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const [hoverTimeout, setHoverTimeout] = useState<ReturnType<typeof setTimeout> | null>(null)
   const [sessionChecked, setSessionChecked] = useState(false)
   const [hasSession, setHasSession] = useState(false)
+
+  const lastLoggedPathRef = useRef<string | null>(null)
 
   const isLoginPage = pathname === '/login'
   const isUnauthorizedPage = pathname === '/unauthorized'
@@ -141,6 +144,22 @@ function AppShell({ children }: { children: React.ReactNode }) {
       router.replace('/unauthorized')
     }
   }, [sessionChecked, hasSession, accessLoading, pathname, rights, router, isLoginPage, isUnauthorizedPage])
+
+  useEffect(() => {
+    if (!sessionChecked || !hasSession) return
+    if (!email) return
+    if (!pathname) return
+    if (pathname === '/login' || pathname === '/unauthorized') return
+    if (lastLoggedPathRef.current === pathname) return
+
+    lastLoggedPathRef.current = pathname
+
+    void logUserEvent({
+      user_email: email,
+      event_type: 'page_view',
+      pathname,
+    })
+  }, [sessionChecked, hasSession, email, pathname])
 
   if (isLoginPage) {
     return (

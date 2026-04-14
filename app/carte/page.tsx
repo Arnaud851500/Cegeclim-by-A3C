@@ -8,6 +8,8 @@ import autoTable, { Row } from 'jspdf-autotable'
 import { supabase } from '@/lib/supabaseClient'
 import { useSocieteFilter } from '@/components/SocieteFilterContext'
 import dynamic from 'next/dynamic'
+import { logRecordDiff } from '@/lib/audit'
+import { usePathname } from 'next/navigation'
 
 const MapContainer: any = dynamic(
   () => import('react-leaflet').then((mod) => mod.MapContainer as any),
@@ -988,6 +990,7 @@ function MultiSelectHorizontal({
 
 export default function ClientsPage() {
   const { societeFilter } = useSocieteFilter()
+  const pathname = usePathname()
 
   const [mode, setMode] = useState<ScreenMode>('clients')
 
@@ -1032,10 +1035,16 @@ async function saveSelectedClientField(field: 'prospect_comment' | 'prospect_sta
   if (!selectedClient?.id) return
 
   const currentId = selectedClient.id
+  const beforeRow = { ...selectedClient }
 
   const normalizedValue = field === 'prospect_status' ? normalizeProspectStatus(value) || null : value
 
-  setSelectedClient((prev) => (prev ? ({ ...prev, [field]: normalizedValue } as ClientRow) : prev))
+  const afterRow = {
+    ...selectedClient,
+    [field]: normalizedValue,
+  } as ClientRow
+
+  setSelectedClient(afterRow)
   setClients((prev) => prev.map((row) => (row.id === currentId ? ({ ...row, [field]: normalizedValue } as ClientRow) : row)))
   setMapClients((prev) => prev.map((row) => (row.id === currentId ? ({ ...row, [field]: normalizedValue } as ClientRow) : row)))
 
@@ -1048,7 +1057,20 @@ async function saveSelectedClientField(field: 'prospect_comment' | 'prospect_sta
     console.error(error)
     alert("Erreur lors de l'enregistrement de la fiche client.")
     await loadAll()
+    return
   }
+
+  await logRecordDiff({
+    user_email: currentUserEmail,
+    pathname,
+    event_type: 'client_update',
+    entity_type: 'clients',
+    entity_id: String(selectedClient.siret || selectedClient.id),
+    entity_label: String(selectedClient.raison_sociale_affichee || ''),
+    before: beforeRow as Record<string, unknown>,
+    after: afterRow as Record<string, unknown>,
+    trackedFields: [field],
+  })
 }
 
   async function launchImportSirene() {

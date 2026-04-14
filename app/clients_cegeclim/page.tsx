@@ -1,7 +1,9 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { usePathname } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
+import { logRecordDiff } from '@/lib/audit'
 import { useSocieteFilter } from '@/components/SocieteFilterContext'
 
 type SortDirection = 'asc' | 'desc'
@@ -544,6 +546,7 @@ const DISPLAY_COLUMNS = [
 
 export default function ClientsCegeclimPage() {
   const { societeFilter } = useSocieteFilter()
+  const pathname = usePathname()
   void societeFilter
 
   const [loading, setLoading] = useState(true)
@@ -609,10 +612,28 @@ export default function ClientsCegeclimPage() {
   async function saveRow(next: ClientsCegeclimRow) {
     setSaving(true)
     try {
-      const payload = { ...next }
-      delete payload.id
-      delete payload.present_base_client
-      delete payload.departement_calcule
+      const beforeRow =
+        clientsCegeclim.find((row) => {
+          if (next.id != null && row.id != null) return row.id === next.id
+          return normalizeSiret(row.siret) === normalizeSiret(next.siret)
+        }) || null
+
+        const payload = {
+        siret: next.siret ?? null,
+        numero_client_sage: next.numero_client_sage ?? null,
+        designation_commerciale: next.designation_commerciale ?? null,
+        representant: next.representant ?? null,
+        date_creation: next.date_creation ?? null,
+        agence: next.agence ?? null,
+        cp_sage: next.cp_sage ?? null,
+        ville_sage: next.ville_sage ?? null,
+        remarque: next.remarque ?? null,
+        ca_2023: next.ca_2023 ?? null,
+        ca_2024: next.ca_2024 ?? null,
+        ca_2025: next.ca_2025 ?? null,
+        statut: next.statut ?? null,
+        activite_principale_unite_legale: next.activite_principale_unite_legale ?? null,
+      }
 
       let query = supabase.from('clients_cegeclim').update(payload)
 
@@ -635,6 +656,19 @@ export default function ClientsCegeclimPage() {
           return same ? next : row
         })
       )
+
+      if (beforeRow) {
+        await logRecordDiff({
+          user_email: currentUserEmail,
+          pathname,
+          event_type: 'client_cegeclim_update',
+          entity_type: 'clients_cegeclim',
+          entity_id: String(next.siret || next.id || ''),
+          entity_label: String(next.designation_commerciale || ''),
+          before: beforeRow as Record<string, unknown>,
+          after: next as Record<string, unknown>,
+        })
+      }
 
       alert('Client CEGECLIM mis à jour.')
     } catch (error: any) {

@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { Montserrat } from 'next/font/google'
 import { supabase } from '@/lib/supabaseClient'
 import { useAccess } from '@/components/AccessContext'
+import { logUserEvent } from '@/lib/audit'
 
 const montserrat = Montserrat({
   subsets: ['latin'],
@@ -74,7 +75,12 @@ export default function LoginPage() {
       setLoading(false)
       return
     }
-
+    await logUserEvent({
+      user_email: data.user?.email ?? email,
+      event_type: 'login',
+      pathname: '/login',
+      metadata: { result: 'success' },
+    })
     const landingPage = await getUserLandingPage(data.user?.email || normalizedEmail)
     setLoading(false)
     router.replace(landingPage)
