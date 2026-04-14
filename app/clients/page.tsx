@@ -726,7 +726,7 @@ async function fetchClientsCegeclimRows(): Promise<ClientCegeclimRow[]> {
     const { data, error } = await supabase
       .from('clients_cegeclim')
       .select(
-        'siret, numero_client_sage, designation_commerciale, representant, date_creation, agence, cp_sage, ville_sage, remarque'
+        'siret, numero_client_sage, designation_commerciale, representant, statut, date_creation, agence, cp_sage, ville_sage, remarque'
       )
 
     if (error) {
