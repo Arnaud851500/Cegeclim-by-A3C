@@ -1,10 +1,11 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { usePathname, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { AccessProvider, useAccess, type AccessRights } from '@/components/AccessContext'
 import { Analytics } from '@vercel/analytics/next'
+import AutoLogout from '@/components/autologout'
 import './globals.css'
 
 import {
@@ -26,23 +27,22 @@ type MenuGroup = {
   items: MenuItem[]
 }
 
-
-
 function AppShell({ children }: { children: React.ReactNode }) {
-  
   const router = useRouter()
   const pathname = usePathname()
   const { societeFilter, setSocieteFilter } = useSocieteFilter()
   const { loading: accessLoading, rights, email } = useAccess()
 
   const [openGroup, setOpenGroup] = useState<string | null>(null)
-  const [hoverTimeout, setHoverTimeout] = useState<NodeJS.Timeout | null>(null)
+  const [hoverTimeout, setHoverTimeout] = useState<ReturnType<typeof setTimeout> | null>(null)
+  const [sessionChecked, setSessionChecked] = useState(false)
+  const [hasSession, setHasSession] = useState(false)
+
   const isLoginPage = pathname === '/login'
+  const isUnauthorizedPage = pathname === '/unauthorized'
+
   const isGroupActive = (group: MenuGroup) =>
-  group.items.some((item) => pathname === item.path)
-
-
-
+    group.items.some((item) => pathname === item.path)
 
   const backgroundImageUrl =
     'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Logo%20et%20images/Image%20site%20CEGECLIM%20maison.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJMb2dvIGV0IGltYWdlcy9JbWFnZSBzaXRlIENFR0VDTElNIG1haXNvbi5qcGciLCJpYXQiOjE3NzU1MDYyNTEsImV4cCI6NDg5NzU3MDI1MX0.d1YT7_-xD44QOm2LFbZIfpkjh9kiIGjpJiEuJxV0rMM'
@@ -79,43 +79,82 @@ function AppShell({ children }: { children: React.ReactNode }) {
     },
     {
       label: 'Activité',
-      items: [{ label: 'Activités - CA (WIP)', path: '/activite', accessKey: 'can_activites' },]
+      items: [{ label: 'Activités - CA (WIP)', path: '/activite', accessKey: 'can_activites' }],
     },
     {
       label: 'Indicateurs',
-      items: [{ label: 'Indicateurs', path: '/indicateurs', accessKey: 'can_dashboard' },]
+      items: [{ label: 'Indicateurs', path: '/indicateurs', accessKey: 'can_dashboard' }],
     },
     {
       label: 'Autorisations',
-      items: [{ label: 'Autorisations', path: '/autorisation', accessKey: 'can_autorisation' }]
+      items: [{ label: 'Autorisations', path: '/autorisation', accessKey: 'can_autorisation' }],
     },
-    
   ]
 
   useEffect(() => {
-  if (accessLoading) return
+    let isMounted = true
 
-  const currentPage = menuGroups
-    .flatMap(g => g.items)
-    .find(item => item.path === pathname)
+    async function initSession() {
+      const { data } = await supabase.auth.getSession()
+      if (!isMounted) return
 
-  if (currentPage?.accessKey && !rights[currentPage.accessKey]) {
-    router.replace('/unauthorized')
+      const exists = Boolean(data.session)
+      setHasSession(exists)
+      setSessionChecked(true)
+
+      if (!exists && !isLoginPage) {
+        router.replace('/login')
+      }
+    }
+
+    void initSession()
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      const exists = Boolean(session)
+      setHasSession(exists)
+      setSessionChecked(true)
+
+      if (!exists && !isLoginPage) {
+        router.replace('/login')
+      }
+    })
+
+    return () => {
+      isMounted = false
+      subscription.unsubscribe()
+    }
+  }, [router, isLoginPage])
+
+  useEffect(() => {
+    if (!sessionChecked) return
+    if (accessLoading) return
+    if (!hasSession) return
+    if (isLoginPage || isUnauthorizedPage) return
+
+    const currentPage = menuGroups
+      .flatMap((g) => g.items)
+      .find((item) => item.path === pathname)
+
+    if (currentPage?.accessKey && !rights[currentPage.accessKey]) {
+      router.replace('/unauthorized')
+    }
+  }, [sessionChecked, hasSession, accessLoading, pathname, rights, router, isLoginPage, isUnauthorizedPage])
+
+  if (isLoginPage) {
+    return (
+      <div style={{ margin: 0, fontFamily: 'Arial, sans-serif', background: '#f5f7fa' }}>
+        {children}
+        <Analytics />
+      </div>
+    )
   }
-}, [accessLoading, pathname, rights])
-
-if (isLoginPage) {
-  return (
-    <div style={{ margin: 0, fontFamily: 'Arial, sans-serif', background: '#f5f7fa' }}>
-      {children}
-      <Analytics />
-    </div>
-  )
-}
 
   const handleLogout = async () => {
+    localStorage.removeItem('cegeclim_last_activity_at')
     await supabase.auth.signOut()
-    window.location.href = '/login'
+    router.replace('/login')
   }
 
   return (
@@ -125,8 +164,9 @@ if (isLoginPage) {
         backgroundImage: `linear-gradient(rgba(255,255,255,0.75), rgba(255,255,255,0.92)), url("${backgroundImageUrl}")`,
       }}
     >
+      <AutoLogout />
+
       <div style={styles.overlay}>
-        {/* HEADER */}
         <header style={styles.header}>
           <div style={styles.top}>
             <div style={styles.left}>
@@ -146,7 +186,7 @@ if (isLoginPage) {
               PROSPECTION NOUVEAUX CLIENTS
             </div>
 
-           <div style={styles.right}>
+            <div style={styles.right}>
               <div style={styles.rightUserBlock}>
                 <select
                   value={societeFilter}
@@ -167,9 +207,7 @@ if (isLoginPage) {
             </div>
           </div>
 
-          {/* NAV */}
           <div style={styles.nav}>
-            
             {menuGroups.map((group) => (
               <div
                 key={group.label}
@@ -184,27 +222,27 @@ if (isLoginPage) {
                 }}
               >
                 <button
-                style={{
-                ...styles.navBtn,
-                ...(isGroupActive(group) ? styles.navBtnActive : {}),
-                }}
+                  style={{
+                    ...styles.navBtn,
+                    ...(isGroupActive(group) ? styles.navBtnActive : {}),
+                  }}
                 >
-                {group.label} ▼
+                  {group.label} ▼
                 </button>
 
                 {openGroup === group.label && (
                   <div style={styles.dropdown}>
                     {group.items
-                    .filter((item) => !item.accessKey || rights[item.accessKey])
-                    .map((item) => (
-                      <div
-                        key={item.path}
-                        style={styles.dropdownItem}
-                        onClick={() => router.push(item.path)}
-                      >
-                        {item.label}
-                      </div>
-                    ))}
+                      .filter((item) => !item.accessKey || rights[item.accessKey])
+                      .map((item) => (
+                        <div
+                          key={item.path}
+                          style={styles.dropdownItem}
+                          onClick={() => router.push(item.path)}
+                        >
+                          {item.label}
+                        </div>
+                      ))}
                   </div>
                 )}
               </div>
@@ -212,7 +250,6 @@ if (isLoginPage) {
           </div>
         </header>
 
-        {/* CONTENT */}
         <main style={styles.content}>{children}</main>
       </div>
 
@@ -221,7 +258,7 @@ if (isLoginPage) {
   )
 }
 
-export default function RootLayout({ children }: any) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html>
       <body>
@@ -235,7 +272,7 @@ export default function RootLayout({ children }: any) {
   )
 }
 
-const styles: any = {
+const styles: Record<string, React.CSSProperties> = {
   app: {
     minHeight: '100vh',
     backgroundSize: 'cover',
@@ -289,21 +326,36 @@ const styles: any = {
     gap: 10,
   },
 
+  rightUserBlock: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'flex-end',
+    gap: 6,
+  },
+
+  userEmail: {
+    fontSize: 13,
+    color: '#17344d',
+  },
+
   select: {
     padding: 6,
     borderRadius: 8,
   },
+
   navBtnActive: {
     color: '#5ea7c3',
     background: 'rgba(238,247,251,0.95)',
     borderRadius: 12,
     padding: '6px 12px',
   },
+
   logout: {
     background: '#fff',
     borderRadius: 8,
     padding: '6px 10px',
     cursor: 'pointer',
+    border: '1px solid #d0d7de',
   },
 
   nav: {
@@ -332,15 +384,15 @@ const styles: any = {
     background: '#d8dadf',
     borderRadius: 12,
     boxShadow: '0 10px 25px rgba(0,0,0,0.1)',
-    animation: 'fadeIn 0.15s ease',
-    whiteSpace: 'nowrap',       // 🔥 empêche retour à la ligne
-    minWidth: 'max-content',    // 🔥 s’adapte à la largeur du texte
+    whiteSpace: 'nowrap',
+    minWidth: 'max-content',
+    zIndex: 20,
   },
 
   dropdownItem: {
     padding: 10,
     cursor: 'pointer',
-    whiteSpace: 'nowrap', // 🔥 sécurité
+    whiteSpace: 'nowrap',
   },
 
   content: {
