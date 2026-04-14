@@ -5,7 +5,7 @@ import { usePathname, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 
 const INACTIVITY_LIMIT_MS = 10 * 60 * 1000
-const CHECK_INTERVAL_MS = 15 * 1000
+const CHECK_INTERVAL_MS = 60 * 1000
 const STORAGE_KEY = 'cegeclim_last_activity_at'
 
 export default function AutoLogout() {

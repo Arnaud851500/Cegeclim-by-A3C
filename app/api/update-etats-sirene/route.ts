@@ -6,28 +6,24 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
-
 function normalizeSiret(value: unknown): string {
   return String(value ?? '').replace(/\D/g, '').trim()
 }
 
 export async function POST() {
   try {
-    const batchSize = 5
-    
+    const batchSize = 500
 
     const { data: clients, error: clientsError } = await supabase
       .from('clients')
       .select('id, siret')
-      .eq('siret', '81132207200026')
       .not('siret', 'is', null)
-      .or('etatAdministratifUniteLegale.is.null,etatAdministratifEtablissement.is.null')
+      .is('sirene_etat_sync_attempted_at', null)
       .limit(batchSize)
 
     if (clientsError) {
       throw clientsError
     }
-    
 
     const apiKey = process.env.INSEE_API_KEY
     if (!apiKey) {
@@ -36,10 +32,32 @@ export async function POST() {
 
     let updated = 0
     let errors = 0
+    let skipped = 0
 
     for (const client of clients || []) {
       const siret = normalizeSiret(client.siret)
-      if (!siret || siret.length !== 14) continue
+
+      if (!siret || siret.length !== 14) {
+        skipped += 1
+
+        await supabase
+          .from('clients')
+          .update({
+            sirene_etat_sync_attempted_at: new Date().toISOString(),
+            sirene_etat_sync_error: 'SIRET invalide',
+          })
+          .eq('id', client.id)
+
+        continue
+      }
+
+      await supabase
+        .from('clients')
+        .update({
+          sirene_etat_sync_attempted_at: new Date().toISOString(),
+          sirene_etat_sync_error: null,
+        })
+        .eq('id', client.id)
 
       try {
         const response = await fetch(`https://api.insee.fr/api-sirene/3.11/siret/${siret}`, {
@@ -51,6 +69,14 @@ export async function POST() {
 
         if (!response.ok) {
           errors += 1
+
+          await supabase
+            .from('clients')
+            .update({
+              sirene_etat_sync_error: `HTTP ${response.status}`,
+            })
+            .eq('id', client.id)
+
           continue
         }
 
@@ -68,25 +94,50 @@ export async function POST() {
           .update({
             etatAdministratifUniteLegale,
             etatAdministratifEtablissement,
+            sirene_etat_sync_success_at: new Date().toISOString(),
+            sirene_etat_sync_error: null,
           })
           .eq('id', client.id)
 
         if (updateError) {
           errors += 1
+
+          await supabase
+            .from('clients')
+            .update({
+              sirene_etat_sync_error: updateError.message,
+            })
+            .eq('id', client.id)
+
           continue
         }
 
         updated += 1
-      } catch {
+      } catch (error: any) {
         errors += 1
+
+        await supabase
+          .from('clients')
+          .update({
+            sirene_etat_sync_error: error?.message || 'Erreur inconnue',
+          })
+          .eq('id', client.id)
       }
     }
+
+    const { count: remaining } = await supabase
+      .from('clients')
+      .select('*', { count: 'exact', head: true })
+      .not('siret', 'is', null)
+      .is('sirene_etat_sync_attempted_at', null)
 
     return NextResponse.json({
       success: true,
       processed: clients?.length || 0,
       updated,
       errors,
+      skipped,
+      remaining: remaining || 0,
     })
   } catch (error: any) {
     return NextResponse.json(

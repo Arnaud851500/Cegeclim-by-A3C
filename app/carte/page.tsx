@@ -1149,7 +1149,7 @@ async function saveSelectedClientField(field: 'prospect_comment' | 'prospect_sta
   const [distanceMax, setDistanceMax] = useState(200)
 
   const [ageSliderMin, setAgeSliderMin] = useState(0)
-  const [ageSliderMax, setAgeSliderMax] = useState(daysToSlider(365 * 50))
+  const [ageSliderMax, setAgeSliderMax] = useState(daysToSlider(7))
 
   const [sortKey, setSortKey] = useState<SortKey>('designation')
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc')

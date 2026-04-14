@@ -1,8 +1,16 @@
 import { NextResponse } from 'next/server'
+import { createClient } from '@supabase/supabase-js'
 
 const INSEE_SIRENE_URL = 'https://api.insee.fr/api-sirene/3.11/siret'
 const PAGE_SIZE = 20000
 const MAX_PAGES = 200
+const DB_CHUNK_SIZE = 500
+const REJECTS_CHUNK_SIZE = 500
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+)
 
 function normalizeArray(value: any): string[] {
   if (!Array.isArray(value)) return []
@@ -22,13 +30,6 @@ function parseLambert(value: unknown): number | null {
   if (value === null || value === undefined || value === '') return null
   const n = Number(String(value).replace(',', '.'))
   return Number.isFinite(n) ? n : null
-}
-
-function boolFromOorN(value: unknown): boolean | null {
-  const v = String(value || '').trim().toUpperCase()
-  if (v === 'O') return true
-  if (v === 'N') return false
-  return null
 }
 
 function translateNaf(activitePrincipaleEtablissement: string | null) {
@@ -64,25 +65,16 @@ function getDepartmentFromPostalCode(codePostal: string | null) {
   return codePostal.slice(0, 2)
 }
 
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = []
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
+  return out
+}
+
 function buildQuery(params: any) {
-  const apeCodes = normalizeArray(params.codes_ape)
-
-  const apePart =
-    apeCodes.length > 0
-      ? '(' +
-        apeCodes
-          .map((code) => `activitePrincipaleUniteLegale:${String(code).trim().toUpperCase()}`)
-          .join(' OR ') +
-        ')'
-      : ''
-
   const minDate = params.date_creation_min || '*'
   const maxDate = params.date_creation_max || '*'
-  const datePart = `dateCreationEtablissement:[${minDate} TO ${maxDate}]`
-
-  const parts = [apePart, datePart].filter(Boolean)
-
-  return parts.join(' AND ')
+  return `dateCreationEtablissement:[${minDate} TO ${maxDate}]`
 }
 
 function filterRowsByDepartments(etablissements: any[], params: any) {
@@ -118,16 +110,16 @@ async function fetchSirenePage(apiKey: string, q: string, cursor?: string | null
   const text = await res.text()
 
   if (res.status === 404) {
-  return {
-    etablissements: [],
-    nextCursor: null,
-    total: 0,
+    return {
+      etablissements: [],
+      nextCursor: null,
+      total: 0,
+    }
   }
-}
 
-if (!res.ok) {
-  throw new Error(`Erreur SIRENE: ${text}`)
-}
+  if (!res.ok) {
+    throw new Error(`Erreur SIRENE: ${text}`)
+  }
 
   let data: any
   try {
@@ -145,11 +137,9 @@ if (!res.ok) {
 
 export async function POST() {
   try {
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
     const inseeApiKey = (process.env.INSEE_API_KEY || '').trim()
 
-    if (!supabaseUrl || !serviceRoleKey) {
+    if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
       throw new Error('NEXT_PUBLIC_SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY manquant')
     }
 
@@ -157,32 +147,15 @@ export async function POST() {
       throw new Error('INSEE_API_KEY manquant dans .env.local')
     }
 
-    const paramsRes = await fetch(
-      `${supabaseUrl}/rest/v1/import_sirene_params?select=*&order=updated_at.desc.nullslast&limit=1`,
-      {
-        headers: {
-          apikey: serviceRoleKey,
-          Authorization: `Bearer ${serviceRoleKey}`,
-          Accept: 'application/json',
-        },
-        cache: 'no-store',
-      }
-    )
+    const { data: paramsRows, error: paramsError } = await supabase
+      .from('import_sirene_params')
+      .select('*')
+      .order('updated_at', { ascending: false })
+      .limit(1)
 
-    const paramsText = await paramsRes.text()
+    if (paramsError) throw paramsError
 
-    if (!paramsRes.ok) {
-      throw new Error(`Erreur lecture paramètres Supabase: ${paramsText}`)
-    }
-
-    let paramsJson: any[]
-    try {
-      paramsJson = JSON.parse(paramsText)
-    } catch {
-      throw new Error(`Réponse paramètres non JSON: ${paramsText}`)
-    }
-
-    const params = paramsJson?.[0]
+    const params = paramsRows?.[0]
     if (!params) {
       throw new Error('Aucun paramètre trouvé dans import_sirene_params')
     }
@@ -214,191 +187,221 @@ export async function POST() {
 
     const etablissementsFiltres = filterRowsByDepartments(Array.from(allMap.values()), params)
 
-    const rows = etablissementsFiltres
-      .map((e: any) => {
-        const adresse = e.adresseEtablissement || {}
-        const uniteLegale = e.uniteLegale || {}
+    const allowedApeCodes = new Set(
+      normalizeArray(params.codes_ape).map((code) => String(code).trim().toUpperCase())
+    )
 
-        const raisonSociale =
-          firstNonEmpty(
-            uniteLegale.denominationUniteLegale,
-            e.denominationUsuelleEtablissement,
-            [uniteLegale.nomUniteLegale, uniteLegale.prenom1UniteLegale]
-              .filter(Boolean)
-              .join(' ')
-          ) || null
+    const candidates = etablissementsFiltres.map((e: any) => {
+      const adresse = e.adresseEtablissement || {}
+      const uniteLegale = e.uniteLegale || {}
 
-        const codePostal = firstNonEmpty(adresse.codePostalEtablissement)
-        const departement = getDepartmentFromPostalCode(codePostal)
-
-        const apeEtablissement = firstNonEmpty(
-          e.activitePrincipaleEtablissement,
-          e.periodesEtablissement?.[0]?.activitePrincipaleEtablissement
-        )
-
-        const apeUniteLegale = firstNonEmpty(uniteLegale.activitePrincipaleUniteLegale)
-        const apeFinal = firstNonEmpty(apeEtablissement, apeUniteLegale)
-
-        const nomDirigeant = firstNonEmpty(
-          [uniteLegale.prenom1UniteLegale, uniteLegale.nomUniteLegale]
+      const raisonSociale =
+        firstNonEmpty(
+          uniteLegale.denominationUniteLegale,
+          e.denominationUsuelleEtablissement,
+          [uniteLegale.nomUniteLegale, uniteLegale.prenom1UniteLegale]
             .filter(Boolean)
             .join(' ')
-        )
+        ) || null
 
-        return {
-          siret: firstNonEmpty(e.siret),
-          raison_sociale_affichee: raisonSociale,
+      const codePostal = firstNonEmpty(adresse.codePostalEtablissement)
+      const departement = getDepartmentFromPostalCode(codePostal)
 
-          activitePrincipaleEtablissement: apeFinal,
-          naf_libelle_traduit: apeFinal ? translateNaf(apeFinal) : null,
+      const apeEtablissement = firstNonEmpty(
+        e.activitePrincipaleEtablissement,
+        e.periodesEtablissement?.[0]?.activitePrincipaleEtablissement
+      )
 
-          dateCreationEtablissement: firstNonEmpty(e.dateCreationEtablissement),
-          codePostalEtablissement: codePostal,
-          libelleCommuneEtablissement: firstNonEmpty(adresse.libelleCommuneEtablissement),
-          departement,
-          adresse_complete: buildAdresseComplete(adresse),
+      const apeUniteLegale = firstNonEmpty(uniteLegale.activitePrincipaleUniteLegale)
+      const apeFinal = firstNonEmpty(apeEtablissement, apeUniteLegale)
 
-          coordonneeLambertAbscisseEtablissement: parseLambert(
-            adresse.coordonneeLambertAbscisseEtablissement
-          ),
-          coordonneeLambertOrdonneeEtablissement: parseLambert(
-            adresse.coordonneeLambertOrdonneeEtablissement
-          ),
+      const nomDirigeant = firstNonEmpty(
+        [uniteLegale.prenom1UniteLegale, uniteLegale.nomUniteLegale]
+          .filter(Boolean)
+          .join(' ')
+      )
 
-          trancheEffectifsEtablissement: firstNonEmpty(e.trancheEffectifsEtablissement),
-
-          nom_dirigeant: nomDirigeant,
-          contactable: false,
-          enrichment_status: 'a_faire',
-          date_import: new Date().toISOString(),
-          source_import: 'api_sirene',
-
-          // champs présents dans la table, laissés vides si non fournis par l'API
-          telephone: null,
-          email: null,
-          site_web: null,
-          effectif_estime: null,
-          ca_estime: null,
-          pappers_ca: null,
-          pappers_resultat: null,
-          rge: null,
-          potentiel_score: null,
-          enrichment_source: 'api_sirene',
-          enrichment_error: null,
-          google_maps_url: null,
-          google_rating: null,
-          google_user_ratings_total: null,
-          present_dans_cegeclim: null,
-          prospect_status: null,
-          assigned_to: null,
-          last_contact_at: null,
-          next_action_at: null,
-          next_action_label: null,
-          prospect_comment: null,
-        }
-      })
-       .filter((row: any) => {
-  const ape = String(row.activitePrincipaleEtablissement || '').trim().toUpperCase()
-  const allowed = new Set(
-    normalizeArray(params.codes_ape).map((code) => String(code).trim().toUpperCase())
-  )
-
-  const rs = String(row.raison_sociale_affichee || '').trim().toUpperCase()
-
-  return (
-    row.siret &&
-    rs !== '' &&
-    rs !== 'ND' &&
-    rs !== '[ND]' &&
-    (allowed.size === 0 || allowed.has(ape))
-  )
-})
-
-    if (rows.length === 0) {
-      const importHeaderRes = await fetch(`${supabaseUrl}/rest/v1/imports_clients`, {
-        method: 'POST',
-        headers: {
-          apikey: serviceRoleKey,
-          Authorization: `Bearer ${serviceRoleKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          nom_fichier: 'import_api_sirene',
-          type_import: 'api_sirene',
-          nb_lignes_source: totalFetched,
-          nb_importees: 0,
-          nb_mises_a_jour: 0,
-          nb_rejets: 0,
-          date_import: new Date().toISOString(),
-          commentaire: `Import API SIRENE - q=${q} - Aucun établissement trouvé`,
-        }),
-      })
-
-      const importHeaderText = await importHeaderRes.text()
-      if (!importHeaderRes.ok) {
-        console.error('Erreur création import header:', importHeaderText)
+      const row = {
+        siret: firstNonEmpty(e.siret),
+        raison_sociale_affichee: raisonSociale,
+        activitePrincipaleEtablissement: apeFinal,
+        naf_libelle_traduit: apeFinal ? translateNaf(apeFinal) : null,
+        dateCreationEtablissement: firstNonEmpty(e.dateCreationEtablissement),
+        codePostalEtablissement: codePostal,
+        libelleCommuneEtablissement: firstNonEmpty(adresse.libelleCommuneEtablissement),
+        departement,
+        adresse_complete: buildAdresseComplete(adresse),
+        coordonneeLambertAbscisseEtablissement: parseLambert(
+          adresse.coordonneeLambertAbscisseEtablissement
+        ),
+        coordonneeLambertOrdonneeEtablissement: parseLambert(
+          adresse.coordonneeLambertOrdonneeEtablissement
+        ),
+        trancheEffectifsEtablissement: firstNonEmpty(e.trancheEffectifsEtablissement),
+        nom_dirigeant: nomDirigeant,
+        contactable: false,
+        enrichment_status: 'a_faire',
+        date_import: new Date().toISOString(),
+        source_import: 'api_sirene',
+        telephone: null,
+        email: null,
+        site_web: null,
+        effectif_estime: null,
+        ca_estime: null,
+        pappers_ca: null,
+        pappers_resultat: null,
+        rge: null,
+        potentiel_score: null,
+        enrichment_source: 'api_sirene',
+        enrichment_error: null,
+        google_maps_url: null,
+        google_rating: null,
+        google_user_ratings_total: null,
+        present_dans_cegeclim: null,
+        prospect_status: null,
+        assigned_to: null,
+        last_contact_at: null,
+        next_action_at: null,
+        next_action_label: null,
+        prospect_comment: null,
       }
 
-      return NextResponse.json({
-        success: true,
-        total: 0,
-        fetched: totalFetched,
-        pages: pageCount,
-        api_total: totalAvailable,
-        q,
-        message: 'Aucun établissement trouvé',
-      })
-    }
+      const ape = String(row.activitePrincipaleEtablissement || '').trim().toUpperCase()
+      const rs = String(row.raison_sociale_affichee || '').trim().toUpperCase()
 
-    const insertRes = await fetch(`${supabaseUrl}/rest/v1/clients?on_conflict=siret`, {
-      method: 'POST',
-      headers: {
-        apikey: serviceRoleKey,
-        Authorization: `Bearer ${serviceRoleKey}`,
-        'Content-Type': 'application/json',
-        Prefer: 'resolution=merge-duplicates,return=representation',
-      },
-      body: JSON.stringify(rows),
+      let rejectReason: string | null = null
+
+      if (!row.siret) {
+        rejectReason = 'SIRET absent'
+      } else if (rs === '' || rs === 'ND' || rs === '[ND]') {
+        rejectReason = 'Raison sociale absente ou ND'
+      } else if (allowedApeCodes.size > 0 && !allowedApeCodes.has(ape)) {
+        rejectReason = `Code APE hors périmètre (${ape || 'vide'})`
+      }
+
+      return {
+        row,
+        raw: e,
+        rejectReason,
+      }
     })
 
-    const insertText = await insertRes.text()
+    const rejectedByFilter = candidates.filter((x) => x.rejectReason)
+    const validRows = candidates.filter((x) => !x.rejectReason).map((x) => x.row)
 
-    if (!insertRes.ok) {
-      throw new Error(`Erreur insertion clients: ${insertText}`)
-    }
-
-    const importHeaderRes = await fetch(`${supabaseUrl}/rest/v1/imports_clients`, {
-      method: 'POST',
-      headers: {
-        apikey: serviceRoleKey,
-        Authorization: `Bearer ${serviceRoleKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
+    const { data: importHeader, error: importHeaderError } = await supabase
+      .from('imports_clients')
+      .insert({
         nom_fichier: 'import_api_sirene',
         type_import: 'api_sirene',
         nb_lignes_source: totalFetched,
-        nb_importees: rows.length,
+        nb_importees: 0,
         nb_mises_a_jour: 0,
         nb_rejets: 0,
         date_import: new Date().toISOString(),
         commentaire: `Import API SIRENE - q=${q}`,
-      }),
-    })
+      })
+      .select('id')
+      .single()
 
-    const importHeaderText = await importHeaderRes.text()
+    if (importHeaderError) {
+      throw importHeaderError
+    }
 
-    if (!importHeaderRes.ok) {
-      console.error('Erreur création import header:', importHeaderText)
+    const importId = importHeader.id
+
+    const existingSirets = new Set<string>()
+    const validSirets = validRows
+      .map((row) => String(row.siret || '').trim())
+      .filter(Boolean)
+
+    for (const chunk of chunkArray(validSirets, DB_CHUNK_SIZE)) {
+      const { data: existingRows, error: existingError } = await supabase
+        .from('clients')
+        .select('siret')
+        .in('siret', chunk)
+
+      if (existingError) throw existingError
+
+      for (const existing of existingRows || []) {
+        if (existing?.siret) existingSirets.add(String(existing.siret))
+      }
+    }
+
+    const rowsToInsert = validRows.filter((row) => !existingSirets.has(String(row.siret)))
+    const alreadyPresentRows = validRows.filter((row) => existingSirets.has(String(row.siret)))
+
+    if (rowsToInsert.length > 0) {
+      const { error: insertError } = await supabase
+        .from('clients')
+        .upsert(rowsToInsert, { onConflict: 'siret' })
+
+      if (insertError) {
+        throw insertError
+      }
+    }
+
+    const rejectRows = [
+      ...rejectedByFilter.map((item, index) => ({
+        import_id: importId,
+        ligne_numero: index + 1,
+        siret: item.row.siret,
+        motif_rejet: item.rejectReason,
+        donnees_source_json: item.raw,
+        created_at: new Date().toISOString(),
+      })),
+      ...alreadyPresentRows.map((row, index) => ({
+        import_id: importId,
+        ligne_numero: rejectedByFilter.length + index + 1,
+        siret: row.siret,
+        motif_rejet: 'Déjà présent en base (call API)',
+        donnees_source_json: row,
+        created_at: new Date().toISOString(),
+      })),
+    ]
+
+    if (rejectRows.length > 0) {
+      for (const chunk of chunkArray(rejectRows, REJECTS_CHUNK_SIZE)) {
+        const { error: rejectInsertError } = await supabase
+          .from('imports_clients_rejets')
+          .insert(chunk)
+
+        if (rejectInsertError) {
+          console.error('Erreur insert imports_clients_rejets:', rejectInsertError)
+        }
+      }
+    }
+
+    const { error: updateImportError } = await supabase
+      .from('imports_clients')
+      .update({
+        nb_lignes_source: totalFetched,
+        nb_importees: rowsToInsert.length,
+        nb_mises_a_jour: 0,
+        nb_rejets: rejectRows.length,
+        commentaire:
+          `Import API SIRENE - q=${q}` +
+          ` - présents=${alreadyPresentRows.length}` +
+          ` - filtres=${rejectedByFilter.length}`,
+      })
+      .eq('id', importId)
+
+    if (updateImportError) {
+      console.error('Erreur update imports_clients:', updateImportError)
     }
 
     return NextResponse.json({
       success: true,
-      total: rows.length,
+      total_api_after_department_filter: etablissementsFiltres.length,
       fetched: totalFetched,
       pages: pageCount,
       api_total: totalAvailable,
       q,
+      imported: rowsToInsert.length,
+      already_present: alreadyPresentRows.length,
+      rejected_by_filter: rejectedByFilter.length,
+      rejected_total: rejectRows.length,
+      import_id: importId,
     })
   } catch (error: any) {
     console.error('IMPORT SIRENE ERROR:', error)
