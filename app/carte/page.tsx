@@ -750,6 +750,8 @@ async function fetchClientsInitialBatch(): Promise<{ rows: ClientRow[]; totalCou
       dateCreationEtablissement,
       codePostalEtablissement,
       libelleCommuneEtablissement,
+      etatAdministratifUniteLegale,
+      etatAdministratifEtablissement,
       departement,
       coordonneeLambertAbscisseEtablissement,
       coordonneeLambertOrdonneeEtablissement,
