@@ -1149,7 +1149,7 @@ async function saveSelectedClientField(field: 'prospect_comment' | 'prospect_sta
   const [distanceMax, setDistanceMax] = useState(200)
 
   const [ageSliderMin, setAgeSliderMin] = useState(0)
-  const [ageSliderMax, setAgeSliderMax] = useState(daysToSlider(7))
+  const [ageSliderMax, setAgeSliderMax] = useState(daysToSlider(90))
 
   const [sortKey, setSortKey] = useState<SortKey>('designation')
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
@@ -3396,8 +3396,7 @@ const selectedClientMapReason = useMemo(() => {
 
 
               <section>
-                <h2 style={sectionTitleTextStyle}>.</h2>
-                <h2 style={sectionTitleTextStyle}>Synthèse par département</h2>
+                <h2 style={sectionTitleTextStyle}>Synthèse par département (affiche par défaut les entreprises créées ces 3 derniers mois)</h2>
                   <div className="border-t border-slate-200 px-5 py-4 text-sm text-slate-700">
                  <span className="font-semibold text-slate-900">Valeur en gras : </span>  nombre total
                   d’entreprises dans la cellule.&nbsp;&nbsp;
