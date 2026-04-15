@@ -338,13 +338,13 @@ export default function ClientsPage() {
       if (sireneConfig) {
         setSireneConfigId(sireneConfig.id)
         setSireneParams({
-          codesApe: (sireneConfig.codes_ape || []).join(', '),
-          departements: (sireneConfig.departements || []).join(', '),
-          dateCreationMin: latestApiImport || formatDateInput(sireneConfig.date_creation_min),
-          dateCreationMax: formatDateInput(sireneConfig.date_creation_max) || new Date().toISOString().slice(0, 10),
-          dateMajMin: formatDateInput(sireneConfig.date_modification_min),
-          dateMajMax: formatDateInput(sireneConfig.date_modification_max),
-        })
+        codesApe: (sireneConfig.codes_ape || []).join(', '),
+        departements: (sireneConfig.departements || []).join(', '),
+        dateCreationMin: latestApiImport || formatDateInput(sireneConfig.date_creation_min),
+        dateCreationMax: formatDateInput(sireneConfig.date_creation_max),
+        dateMajMin: formatDateInput(sireneConfig.date_modification_min),
+        dateMajMax: formatDateInput(sireneConfig.date_modification_max),
+})
       } else {
         setSireneConfigId(null)
         setSireneParams(buildDefaultSireneParams(latestImport))
@@ -400,26 +400,25 @@ export default function ClientsPage() {
   }
 
   async function finalizeSireneParamsAfterApiImport(importDate: string, sourceParams: SireneParamsForm) {
-    const nextParams: SireneParamsForm = {
-      ...sourceParams,
-      dateCreationMin: importDate,
-      dateCreationMax: importDate,
-    }
-    await persistSireneParams(nextParams, importDate)
-    setLastApiImportAt(importDate)
-    setSireneParams(nextParams)
+  const nextParams: SireneParamsForm = {
+    ...sourceParams,
+    dateCreationMin: importDate,
+    dateCreationMax: '',
   }
+
+  await persistSireneParams(nextParams, importDate)
+  setLastApiImportAt(importDate)
+  setSireneParams(nextParams)
+}
 
   async function launchImportSirene() {
     setImportingApi(true)
     setSavingSireneParams(true)
 
     try {
-      const today = new Date().toISOString().slice(0, 10)
       const paramsBeforeImport: SireneParamsForm = {
-        ...sireneParams,
-        dateCreationMax: sireneParams.dateCreationMax || today,
-      }
+  ...sireneParams,
+}
 
       setSireneParams(paramsBeforeImport)
       await persistSireneParams(paramsBeforeImport)
