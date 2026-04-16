@@ -197,9 +197,10 @@ type SireneImportParamRow = {
   updated_at: string | null
 }
 
-type UserDepartmentAccessRow = {
+type UserGeographicAccessRow = {
   email: string
   allowed_departements: string[] | null
+  allowed_codes_postaux: string[] | null
 }
 
 type ImportStats = {
@@ -1007,6 +1008,7 @@ export default function ClientsPage() {
   const [sireneConfigId, setSireneConfigId] = useState<string | null>(null)
   const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(null)
   const [allowedDepartements, setAllowedDepartements] = useState<string[]>([])
+  const [allowedCodesPostaux, setAllowedCodesPostaux] = useState<string[]>([])
 
   const [loading, setLoading] = useState(true)
   const [importing, setImporting] = useState(false)
@@ -1293,20 +1295,26 @@ async function saveSelectedClientField(field: 'prospect_comment' | 'prospect_sta
       if (userEmail) {
         const { data: userAccessData, error: userAccessError } = await supabase
           .from('user_page_access')
-          .select('email, allowed_departements')
+          .select('email, allowed_departements, allowed_codes_postaux')
           .eq('email', userEmail)
           .maybeSingle()
 
         if (userAccessError) throw userAccessError
 
-        const userAccess = userAccessData as UserDepartmentAccessRow | null
+        const userAccess = userAccessData as UserGeographicAccessRow | null
         setAllowedDepartements(
           Array.isArray(userAccess?.allowed_departements)
             ? userAccess!.allowed_departements.map((d) => String(d || '').trim()).filter(Boolean)
             : []
         )
+        setAllowedCodesPostaux(
+          Array.isArray(userAccess?.allowed_codes_postaux)
+            ? userAccess!.allowed_codes_postaux.map((cp) => String(cp || '').trim()).filter(Boolean)
+            : []
+        )
       } else {
         setAllowedDepartements([])
+        setAllowedCodesPostaux([])
       }
 
       const latestImport = (importRes.data?.[0] || null) as ImportRow | null
@@ -1559,6 +1567,33 @@ async function openMapFromCell(secteur: string, departement: string | null) {
 
   const allowedDepartmentSet = useMemo(() => new Set(allowedDepartments), [allowedDepartments])
 
+  const allowedDepartementsSet = useMemo(() => new Set(allowedDepartements), [allowedDepartements])
+  const allowedCodesPostauxSet = useMemo(() => new Set(allowedCodesPostaux), [allowedCodesPostaux])
+
+  function isRowAllowedByUserGeography(row: Pick<ClientRow, 'codePostalEtablissement' | 'departement'>): boolean {
+    const codePostal = String(row.codePostalEtablissement || '').trim()
+    if (allowedCodesPostauxSet.size > 0) return allowedCodesPostauxSet.has(codePostal)
+
+    if (allowedDepartementsSet.size > 0) {
+      const dep = getDepartmentFromPostalCode(codePostal) || String(row.departement || '').trim()
+      return !!dep && allowedDepartementsSet.has(dep)
+    }
+
+    return true
+  }
+
+  function isAbsentRowAllowedByUserGeography(row: Pick<CegeclimAbsentRow, 'code_postal'>): boolean {
+    const codePostal = String(row.code_postal || '').trim()
+    if (allowedCodesPostauxSet.size > 0) return allowedCodesPostauxSet.has(codePostal)
+
+    if (allowedDepartementsSet.size > 0) {
+      const dep = getDepartmentFromPostalCode(codePostal) || ''
+      return !!dep && allowedDepartementsSet.has(dep)
+    }
+
+    return true
+  }
+
   const scopedClients = useMemo(() => {
     let result = clients
 
@@ -1569,16 +1604,10 @@ async function openMapFromCell(secteur: string, departement: string | null) {
       })
     }
 
-    if (allowedDepartements.length > 0) {
-      const allowedDepartementsSet = new Set(allowedDepartements)
-      result = result.filter((row) => {
-        const dep = getClientDepartment(row)
-        return dep && allowedDepartementsSet.has(dep)
-      })
-    }
+    result = result.filter((row) => isRowAllowedByUserGeography(row))
 
     return result
-  }, [clients, normalizedSocieteFilter, allowedDepartmentSet, allowedDepartements])
+  }, [clients, normalizedSocieteFilter, allowedDepartmentSet, allowedDepartementsSet, allowedCodesPostauxSet])
 
   const scopedCegeclimAbsents = useMemo(() => {
     let result = cegeclimAbsents
@@ -1590,16 +1619,10 @@ async function openMapFromCell(secteur: string, departement: string | null) {
       })
     }
 
-    if (allowedDepartements.length > 0) {
-      const allowedDepartementsSet = new Set(allowedDepartements)
-      result = result.filter((row) => {
-        const dep = getAbsentDepartment(row)
-        return dep && allowedDepartementsSet.has(dep)
-      })
-    }
+    result = result.filter((row) => isAbsentRowAllowedByUserGeography(row))
 
     return result
-  }, [cegeclimAbsents, normalizedSocieteFilter, allowedDepartmentSet, allowedDepartements])
+  }, [cegeclimAbsents, normalizedSocieteFilter, allowedDepartmentSet, allowedDepartementsSet, allowedCodesPostauxSet])
 
   const scopedClientsBase = useMemo(() => {
     return scopedClients.filter((row) => !isClientClosedAdministratively(row))
@@ -3389,7 +3412,7 @@ const selectedClientMapReason = useMemo(() => {
 
                   <div style={kpiCardStyle}>
                     <div style={kpiTitleStyle}>Nb de départements</div>
-                    <div style={kpiValueStyle}>{allowedDepartements.length > 0 ? allowedDepartements.length : Array.from(new Set(scopedClientsBase.map((r) => getClientDepartment(r)).filter(Boolean))).length}</div>
+                    <div style={kpiValueStyle}>{Array.from(new Set(scopedClientsBase.map((r) => getClientDepartment(r)).filter(Boolean))).length}</div>
                   </div>
                 </div>
               </div>

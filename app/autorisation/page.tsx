@@ -23,6 +23,7 @@ type UserPageAccess = {
   allowed_scopes: string[]
   allowed_agences: string[]
   allowed_departements: string[]
+  allowed_codes_postaux: string[]
   default_landing_page: string
 }
 
@@ -62,6 +63,7 @@ const defaultNewRow: UserPageAccess = {
   allowed_scopes: ['Global'],
   allowed_agences: [],
   allowed_departements: [],
+  allowed_codes_postaux: [],
   default_landing_page: '/accueil',
 }
 
@@ -103,6 +105,7 @@ export default function AutorisationPage() {
         allowed_scopes,
         allowed_agences,
         allowed_departements,
+        allowed_codes_postaux,
         default_landing_page
       `)
       .order('email', { ascending: true })
@@ -148,6 +151,10 @@ export default function AutorisationPage() {
         Array.isArray(item.allowed_departements) && item.allowed_departements.length > 0
           ? item.allowed_departements
           : [],
+      allowed_codes_postaux:
+        Array.isArray(item.allowed_codes_postaux) && item.allowed_codes_postaux.length > 0
+          ? item.allowed_codes_postaux.map((cp) => String(cp || '').trim()).filter(Boolean)
+          : [],
       default_landing_page:
         typeof item.default_landing_page === 'string' && item.default_landing_page.trim()
           ? item.default_landing_page.trim()
@@ -175,7 +182,7 @@ export default function AutorisationPage() {
 
   function updateLocalValue(
     email: string,
-    field: keyof Omit<UserPageAccess, 'email' | 'display_name' | 'allowed_scopes' | 'allowed_agences' | 'allowed_departements' | 'default_landing_page'>,
+    field: keyof Omit<UserPageAccess, 'email' | 'display_name' | 'allowed_scopes' | 'allowed_agences' | 'allowed_departements' | 'allowed_codes_postaux' | 'default_landing_page'>,
     value: boolean
   ) {
     const normalizedEmail = email.toLowerCase().trim()
@@ -232,6 +239,23 @@ export default function AutorisationPage() {
     )
   }
 
+  function updateAllowedCodesPostaux(email: string, value: string) {
+    const normalizedEmail = email.toLowerCase().trim()
+
+    const codesPostaux = value
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+
+    setRows((prev) =>
+      prev.map((row) =>
+        row.email === normalizedEmail
+          ? { ...row, allowed_codes_postaux: codesPostaux }
+          : row
+      )
+    )
+  }
+
   function updateAllowedDepartements(email: string, nextDepartements: string[]) {
     const normalizedEmail = email.toLowerCase().trim()
 
@@ -277,7 +301,7 @@ export default function AutorisationPage() {
   }
 
   function updateNewRowValue(
-    field: keyof Omit<UserPageAccess, 'email' | 'display_name' | 'allowed_scopes' | 'allowed_agences' | 'allowed_departements' | 'default_landing_page'>,
+    field: keyof Omit<UserPageAccess, 'email' | 'display_name' | 'allowed_scopes' | 'allowed_agences' | 'allowed_departements' | 'allowed_codes_postaux' | 'default_landing_page'>,
     value: boolean
   ) {
     setNewRow((prev) => ({ ...prev, [field]: value }))
@@ -304,6 +328,18 @@ export default function AutorisationPage() {
     setNewRow((prev) => ({
       ...prev,
       allowed_agences: agences,
+    }))
+  }
+
+  function updateNewRowAllowedCodesPostaux(value: string) {
+    const codesPostaux = value
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+
+    setNewRow((prev) => ({
+      ...prev,
+      allowed_codes_postaux: codesPostaux,
     }))
   }
 
@@ -342,6 +378,7 @@ export default function AutorisationPage() {
         allowed_scopes: row.allowed_scopes,
         allowed_agences: row.allowed_agences,
         allowed_departements: row.allowed_departements,
+        allowed_codes_postaux: row.allowed_codes_postaux,
         default_landing_page: row.default_landing_page || '/accueil',
       })
       .eq('email', normalizedEmail)
@@ -390,6 +427,7 @@ export default function AutorisationPage() {
       allowed_scopes: newRow.allowed_scopes,
       allowed_agences: newRow.allowed_agences,
       allowed_departements: newRow.allowed_departements,
+      allowed_codes_postaux: newRow.allowed_codes_postaux,
       default_landing_page: newRow.default_landing_page || '/accueil',
     })
 
@@ -597,6 +635,14 @@ export default function AutorisationPage() {
               className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
             />
 
+            <input
+              type="text"
+              value={(newRow.allowed_codes_postaux ?? []).join(', ')}
+              onChange={(e) => updateNewRowAllowedCodesPostaux(e.target.value)}
+              placeholder="Codes postaux autorisés séparés par des virgules (prioritaires sur les départements)"
+              className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
+            />
+
             <select
               value={newRow.default_landing_page}
               onChange={(e) => updateNewRowDefaultLandingPage(e.target.value)}
@@ -618,6 +664,9 @@ export default function AutorisationPage() {
             </select>
 
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                Les codes postaux autorisés, s’ils sont renseignés, seront prioritaires sur les départements dans la page Carte.
+              </div>
               <div className="mb-2 text-sm font-semibold text-slate-800">
                 Départements visibles
               </div>
@@ -972,6 +1021,22 @@ export default function AutorisationPage() {
                 >
                   {savingEmail === selectedDeptUser.email ? 'Enregistrement...' : 'Enregistrer les départements'}
                 </button>
+              </div>
+
+              <div className="mb-4">
+                <label className="mb-2 block text-sm font-semibold text-slate-800">
+                  Codes postaux autorisés
+                </label>
+                <input
+                  type="text"
+                  value={(selectedDeptUser.allowed_codes_postaux ?? []).join(', ')}
+                  onChange={(e) => updateAllowedCodesPostaux(selectedDeptUser.email, e.target.value)}
+                  placeholder="Ex : 75001, 75008, 85100"
+                  className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
+                />
+                <p className="mt-2 text-xs text-slate-500">
+                  Si au moins un code postal est renseigné, il devient prioritaire sur les départements pour la page Carte.
+                </p>
               </div>
 
               <div className="grid grid-cols-4 gap-2 sm:grid-cols-6 md:grid-cols-8 xl:grid-cols-16">

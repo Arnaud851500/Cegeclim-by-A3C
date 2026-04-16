@@ -19,6 +19,8 @@ export type AccessRights = {
   can_activites: boolean
   can_change_scope: boolean
   allowed_scopes: string[]
+  allowed_departements: string[]
+  allowed_codes_postaux: string[]
 }
 
 type AccessContextType = {
@@ -44,6 +46,8 @@ const defaultRights: AccessRights = {
   can_activites: false,
   can_change_scope: false,
   allowed_scopes: ['Global'],
+  allowed_departements: [],
+  allowed_codes_postaux: [],
 }
 
 const AccessContext = createContext<AccessContextType>({
@@ -106,7 +110,9 @@ async function fetchAccess() {
         can_stocks,
         can_activites,
         can_change_scope,
-        allowed_scopes
+        allowed_scopes,
+        allowed_departements,
+        allowed_codes_postaux
       `)
       .eq('email', normalizedEmail)
       .maybeSingle()
@@ -140,6 +146,14 @@ async function fetchAccess() {
           Array.isArray(data.allowed_scopes) && data.allowed_scopes.length > 0
             ? data.allowed_scopes
             : ['Global'],
+        allowed_departements:
+          Array.isArray(data.allowed_departements) && data.allowed_departements.length > 0
+            ? data.allowed_departements
+            : [],
+        allowed_codes_postaux:
+          Array.isArray(data.allowed_codes_postaux) && data.allowed_codes_postaux.length > 0
+            ? data.allowed_codes_postaux.map((cp: unknown) => String(cp || '').trim()).filter(Boolean)
+            : [],
       },
     }
   } catch (err) {
