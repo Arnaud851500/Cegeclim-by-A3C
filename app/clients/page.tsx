@@ -257,6 +257,7 @@ export default function ClientsPage() {
   const [importingApi, setImportingApi] = useState(false)
   const [savingSireneParams, setSavingSireneParams] = useState(false)
   const [uploadingCsv, setUploadingCsv] = useState(false)
+  const [refreshingRge, setRefreshingRge] = useState(false)
 
   const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(null)
   const [allowedDepartements, setAllowedDepartements] = useState<string[]>([])
@@ -438,13 +439,16 @@ export default function ClientsPage() {
       }
 
       alert(
-        `Import terminé\n` +
-          `Importés : ${data.imported ?? data.total ?? 0}\n` +
-          `Déjà présents : ${data.already_present ?? 0}\n` +
-          `Rejets : ${data.rejected_total ?? data.rejected_by_filter ?? 0}\n` +
-          `Pages lues : ${data.pages || 0}\n` +
-          `Enregistrements parcourus : ${data.fetched || 0}`
-      )
+  `Import terminé\n` +
+  `Importés : ${data.imported ?? 0}\n` +
+  `Déjà présents : ${data.already_present ?? 0}\n` +
+  `Rejets filtres : ${data.rejected_by_filter ?? 0}\n` +
+  `Rejets totaux : ${data.rejected_total ?? 0}\n` +
+  `Pages lues : ${data.pages ?? 0}\n` +
+  `Parcourus API : ${data.fetched ?? 0}\n` +
+  `Total API annoncé : ${data.api_total ?? 'n/a'}\n` +
+  `Après filtre départements : ${data.total_api_after_department_filter ?? 0}`
+)
 
       await finalizeSireneParamsAfterApiImport(new Date().toISOString().slice(0, 10), paramsBeforeImport)
       await loadPage()
@@ -454,6 +458,36 @@ export default function ClientsPage() {
     } finally {
       setSavingSireneParams(false)
       setImportingApi(false)
+    }
+  }
+
+
+  async function launchRgeRefresh() {
+    setRefreshingRge(true)
+    try {
+      const res = await fetch('/api/rge-refresh', { method: 'POST' })
+      const data = await res.json().catch(() => null)
+
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || 'Erreur lors de la mise à jour RGE')
+      }
+
+      alert(
+        `Mise à jour RGE terminée\n` +
+          `Lignes source : ${data.stats?.sourceRows ?? 0}\n` +
+          `SIRET RGE agrégés : ${data.stats?.cacheRows ?? 0}\n` +
+          `Nouveaux cache : ${data.stats?.cacheInserted ?? 0}\n` +
+          `Cache déjà existant : ${data.stats?.cacheUpdated ?? 0}\n` +
+          `Cache supprimé : ${data.stats?.cacheDeleted ?? 0}\n` +
+          `Clients mis à jour : ${data.stats?.clientsUpdated ?? 0}`
+      )
+
+      await loadPage()
+    } catch (error: any) {
+      console.error(error)
+      alert('Erreur MAJ RGE : ' + (error?.message || String(error)))
+    } finally {
+      setRefreshingRge(false)
     }
   }
 
@@ -818,6 +852,24 @@ export default function ClientsPage() {
 
                 <div style={{ marginTop: 18 }}>
                   https://annuaire-entreprises.data.gouv.fr/export-sirene
+                </div>
+              </div>
+
+              <div style={{ ...styles.importBox, gridColumn: '1 / span 2' }}>
+                <h3 style={styles.optionTitle}>Option 3 : MAJ RGE</h3>
+                <div style={styles.optionText}>
+                  Télécharge le référentiel RGE ADEME, alimente la table cache RGE puis met à jour les champs RGE de la table clients.
+                </div>
+
+                <div style={styles.buttonRow}>
+                  <button
+                    type="button"
+                    onClick={launchRgeRefresh}
+                    style={styles.primaryButton}
+                    disabled={refreshingRge}
+                  >
+                    {refreshingRge ? 'MAJ RGE en cours...' : 'MAJ RGE'}
+                  </button>
                 </div>
               </div>
             </div>

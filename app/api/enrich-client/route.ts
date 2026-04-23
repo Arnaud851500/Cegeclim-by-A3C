@@ -18,12 +18,70 @@ type GooglePlaceDetails = {
   googleMapsUri?: string
 }
 
+type InpiFormalityContent = {
+  content?: {
+    personneMorale?: {
+      identite?: {
+        description?: {
+          montantCapital?: number | string | null
+          deviseCapital?: string | null
+        }
+      }
+      composition?: {
+        pouvoirs?: Array<{
+          individu?: {
+            descriptionPersonne?: {
+              nom?: string | null
+              prenoms?: string[] | null
+            }
+          } | null
+          representant?: {
+            descriptionPersonne?: {
+              nom?: string | null
+              prenoms?: string[] | null
+            }
+          } | null
+          roleEntreprise?: string | null
+          secondRoleEntreprise?: string | null
+        }>
+      }
+    } | null
+  }
+}
+
+type InpiLoginResponse = {
+  token?: string
+}
+
+type InpiCompanyResponse = InpiFormalityContent & {
+  siren?: string
+  updatedAt?: string
+  id?: number | string
+  nombreRepresentantsActifs?: number
+  nombreEtablissementsOuverts?: number
+  formality?: InpiFormalityContent | null
+}
+
+let inpiTokenCache: { token: string; expiresAt: number } | null = null
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 function normalizeText(value: string | null | undefined) {
   return String(value || '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .trim()
+}
+
+function normalizeSiret(value: string | null | undefined) {
+  return String(value || '').replace(/\D/g, '').trim()
+}
+
+function sirenFromSiret(siret: string) {
+  return normalizeSiret(siret).slice(0, 9)
 }
 
 function isGoodGoogleMatch(params: {
@@ -92,62 +150,199 @@ async function getGooglePlaceDetails(placeId: string) {
   return (await response.json()) as GooglePlaceDetails
 }
 
-async function getPappersCompany(siret: string) {
-  const url = new URL('https://api.pappers.fr/v2/entreprise')
-  url.searchParams.set('api_token', process.env.PAPPERS_API_KEY!)
-  url.searchParams.set('siret', siret)
-
-  const response = await fetch(url.toString(), {
-    method: 'GET',
-    headers: {
-      Accept: 'application/json',
-    },
-  })
-
-  if (!response.ok) {
-    const errorText = await response.text()
-    throw new Error(`Pappers: ${errorText}`)
-  }
-
-  return await response.json()
+function getInpiBaseUrl() {
+  return (process.env.INPI_BASE_URL || 'https://registre-national-entreprises.inpi.fr').replace(
+    /\/$/,
+    ''
+  )
 }
 
-function extractPappersData(pappers: any) {
-  const representant = Array.isArray(pappers?.representants) ? pappers.representants[0] : null
+async function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs = 15000) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
 
-  const nomDirigeant = representant
-    ? `${representant.prenom || ''} ${representant.nom || ''}`.trim() || null
-    : null
-
-  const pappersCa =
-    pappers?.finances?.chiffre_affaires ??
-    pappers?.chiffre_affaires ??
-    pappers?.ca ??
-    null
-
-  const pappersResultat =
-    pappers?.finances?.resultat_net ??
-    pappers?.resultat_net ??
-    null
-
-  const effectifEstime =
-    pappers?.effectif ??
-    pappers?.effectif_min ??
-    null
-
-  return {
-    nomDirigeant,
-    pappersCa:
-      pappersCa != null && Number.isFinite(Number(pappersCa)) ? Number(pappersCa) : null,
-    pappersResultat:
-      pappersResultat != null && Number.isFinite(Number(pappersResultat))
-        ? Number(pappersResultat)
-        : null,
-    effectifEstime:
-      effectifEstime != null && Number.isFinite(Number(effectifEstime))
-        ? Number(effectifEstime)
-        : null,
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+      cache: 'no-store',
+    })
+  } finally {
+    clearTimeout(timeout)
   }
+}
+
+async function getInpiToken(forceRefresh = false) {
+  const username = process.env.INPI_USERNAME
+  const password = process.env.INPI_PASSWORD
+  const baseUrl = getInpiBaseUrl()
+  const loginUrl = `${baseUrl}/api/sso/login`
+
+  if (!username || !password) {
+    throw new Error('Variables INPI_USERNAME / INPI_PASSWORD manquantes')
+  }
+
+  const now = Date.now()
+
+  if (!forceRefresh && inpiTokenCache && inpiTokenCache.expiresAt > now) {
+    console.log('[INPI] token cache hit')
+    return inpiTokenCache.token
+  }
+
+  let lastError: any = null
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      console.log(`[INPI] login URL = ${loginUrl} (attempt ${attempt}/3)`)
+
+      const response = await fetchWithTimeout(
+        loginUrl,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify({
+            username,
+            password,
+          }),
+        },
+        15000
+      )
+
+      const rawText = await response.text()
+
+      if (!response.ok) {
+        throw new Error(`INPI login HTTP ${response.status}: ${rawText}`)
+      }
+
+      let json: InpiLoginResponse
+      try {
+        json = JSON.parse(rawText)
+      } catch {
+        throw new Error(`INPI login JSON invalide: ${rawText}`)
+      }
+
+      if (!json?.token) {
+        throw new Error(`INPI login: token absent. Réponse = ${rawText}`)
+      }
+
+      inpiTokenCache = {
+        token: json.token,
+        expiresAt: Date.now() + 10 * 60 * 1000,
+      }
+
+      console.log('[INPI] token cached for 10 minutes')
+      return json.token
+    } catch (error: any) {
+      lastError = error
+      console.error('[INPI] login error:', error)
+      console.error('[INPI] login cause:', error?.cause)
+
+      if (attempt < 3) {
+        await sleep(400 * attempt)
+      }
+    }
+  }
+
+  throw new Error(`INPI login failed: ${lastError?.message || 'unknown error'}`)
+}
+
+async function getInpiCompanyBySiren(siren: string) {
+  const baseUrl = getInpiBaseUrl()
+  const companyUrl = `${baseUrl}/api/companies/${encodeURIComponent(siren)}`
+
+  async function doFetch(token: string) {
+    const response = await fetchWithTimeout(
+      companyUrl,
+      {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+      },
+      15000
+    )
+
+    const rawText = await response.text()
+
+    if (!response.ok) {
+      throw new Error(`INPI company HTTP ${response.status}: ${rawText}`)
+    }
+
+    try {
+      return JSON.parse(rawText) as InpiCompanyResponse
+    } catch {
+      throw new Error(`INPI company JSON invalide: ${rawText}`)
+    }
+  }
+
+  try {
+    console.log('[INPI] company URL =', companyUrl)
+    console.log('[INPI] siren used =', siren)
+
+    const token = await getInpiToken(false)
+    return await doFetch(token)
+  } catch (error: any) {
+    console.error('[INPI] company error:', error)
+    console.error('[INPI] company cause:', error?.cause)
+
+    const message = String(error?.message || '')
+    if (message.includes('401') || message.includes('403')) {
+      console.log('[INPI] retry with forced token refresh')
+      const freshToken = await getInpiToken(true)
+      return await doFetch(freshToken)
+    }
+
+    throw new Error(`INPI company failed: ${error?.message || 'unknown error'}`)
+  }
+}
+
+function getInpiPayload(company: InpiCompanyResponse): InpiFormalityContent | null {
+  if (company?.content) return company
+  if (company?.formality?.content) return company.formality
+  return null
+}
+
+function buildFullName(person: { nom?: string | null; prenoms?: string[] | null } | null | undefined) {
+  if (!person) return null
+  const prenoms = Array.isArray(person.prenoms) ? person.prenoms.filter(Boolean).join(' ') : ''
+  const nom = person.nom || ''
+  const full = `${prenoms} ${nom}`.trim()
+  return full || null
+}
+
+function extractInpiDirigeant(company: InpiCompanyResponse) {
+  const payload = getInpiPayload(company)
+  const pouvoirs = payload?.content?.personneMorale?.composition?.pouvoirs
+
+  if (!Array.isArray(pouvoirs)) return null
+
+  for (const pouvoir of pouvoirs) {
+    const fromIndividu = buildFullName(pouvoir?.individu?.descriptionPersonne)
+    if (fromIndividu) return fromIndividu
+
+    const fromRepresentant = buildFullName(pouvoir?.representant?.descriptionPersonne)
+    if (fromRepresentant) return fromRepresentant
+  }
+
+  return null
+}
+
+function extractInpiCapital(company: InpiCompanyResponse) {
+  const payload = getInpiPayload(company)
+  const description = payload?.content?.personneMorale?.identite?.description
+  const montant = description?.montantCapital
+  const devise = description?.deviseCapital
+
+  if (montant == null || String(montant).trim() === '') return null
+  return devise ? `${montant} ${devise}` : String(montant)
+}
+
+function extractInpiEffectif(_company: InpiCompanyResponse) {
+  return null
 }
 
 function computePotentialScore(data: {
@@ -155,7 +350,6 @@ function computePotentialScore(data: {
   rating: number | null
   userRatingCount: number | null
   contactable: boolean
-  pappersCa: number | null
   effectifEstime: number | null
 }) {
   let score = 0
@@ -179,13 +373,6 @@ function computePotentialScore(data: {
     else if (data.userRatingCount >= 5) score += 3
   }
 
-  if (data.pappersCa != null) {
-    if (data.pappersCa >= 2_000_000) score += 28
-    else if (data.pappersCa >= 1_000_000) score += 22
-    else if (data.pappersCa >= 500_000) score += 16
-    else if (data.pappersCa >= 100_000) score += 8
-  }
-
   if (data.effectifEstime != null) {
     if (data.effectifEstime >= 20) score += 15
     else if (data.effectifEstime >= 10) score += 10
@@ -201,17 +388,21 @@ export async function POST(req: NextRequest) {
   try {
     const { siret } = await req.json()
 
-    if (!siret) {
+    const cleanSiret = normalizeSiret(siret)
+
+    if (!cleanSiret || cleanSiret.length !== 14) {
       return NextResponse.json(
-        { success: false, error: 'SIRET manquant' },
+        { success: false, error: 'SIRET manquant ou invalide' },
         { status: 400 }
       )
     }
 
+    const siren = sirenFromSiret(cleanSiret)
+
     const { data: client, error: clientError } = await supabaseAdmin
       .from('clients')
       .select('*')
-      .eq('siret', siret)
+      .eq('siret', cleanSiret)
       .single()
 
     if (clientError || !client) {
@@ -227,7 +418,7 @@ export async function POST(req: NextRequest) {
         enrichment_status: 'en_cours',
         enrichment_error: null,
       })
-      .eq('siret', siret)
+      .eq('siret', cleanSiret)
 
     let googleDetails: GooglePlaceDetails | null = null
     let googlePlaceId: string | null = null
@@ -269,28 +460,45 @@ export async function POST(req: NextRequest) {
       console.error('Erreur Google:', googleErrorMessage)
     }
 
-    let pappersData = {
+    let inpiData = {
       nomDirigeant: null as string | null,
-      pappersCa: null as number | null,
-      pappersResultat: null as number | null,
+      capitalSocial: null as string | null,
       effectifEstime: null as number | null,
     }
 
-    let pappersErrorMessage: string | null = null
+    let inpiErrorMessage: string | null = null
 
     try {
-      const pappers = await getPappersCompany(siret)
-      pappersData = extractPappersData(pappers)
-    } catch (pappersError) {
-      pappersErrorMessage =
-        pappersError instanceof Error ? pappersError.message : 'Erreur Pappers inconnue'
-      console.error('Erreur Pappers:', pappersErrorMessage)
+      const inpiCompany = await getInpiCompanyBySiren(siren)
+      const inpiPayload = getInpiPayload(inpiCompany)
+
+      console.log('[INPI] raw company response keys =', Object.keys(inpiCompany || {}))
+      console.log('[INPI] has root content =', Boolean(inpiCompany?.content))
+      console.log('[INPI] has formality =', Boolean(inpiCompany?.formality))
+      console.log(
+        '[INPI] has payload.content.personneMorale =',
+        Boolean(inpiPayload?.content?.personneMorale)
+      )
+
+      inpiData = {
+        nomDirigeant: extractInpiDirigeant(inpiCompany),
+        capitalSocial: extractInpiCapital(inpiCompany),
+        effectifEstime: extractInpiEffectif(inpiCompany),
+      }
+
+      console.log('[INPI] dirigeant extrait =', inpiData.nomDirigeant)
+      console.log('[INPI] capital extrait =', inpiData.capitalSocial)
+    } catch (inpiError) {
+      inpiErrorMessage =
+        inpiError instanceof Error ? inpiError.message : 'Erreur INPI inconnue'
+      console.error('Erreur INPI:', inpiErrorMessage)
     }
 
     const finalPhone = googleDetails?.nationalPhoneNumber || client.telephone || null
     const finalWebsite = googleDetails?.websiteUri || client.site_web || null
-    const finalDirigeant = pappersData.nomDirigeant || client.nom_dirigeant || null
-    const finalEffectif = pappersData.effectifEstime || client.effectif_estime || null
+    const finalDirigeant = inpiData.nomDirigeant || client.nom_dirigeant || null
+    const finalEffectif = inpiData.effectifEstime || client.effectif_estime || null
+    const finalCapitalSocial = inpiData.capitalSocial || client.capital_social || null
     const finalContactable = Boolean(finalPhone || client.email)
 
     const potentielScore = computePotentialScore({
@@ -298,35 +506,30 @@ export async function POST(req: NextRequest) {
       rating: googleDetails?.rating || null,
       userRatingCount: googleDetails?.userRatingCount || null,
       contactable: finalContactable,
-      pappersCa: pappersData.pappersCa,
       effectifEstime: finalEffectif,
     })
 
     const sources = [
       googleDetails ? 'google_places' : null,
-      pappersData.nomDirigeant || pappersData.pappersCa || pappersData.pappersResultat
-        ? 'pappers'
-        : null,
+      inpiData.nomDirigeant || inpiData.capitalSocial ? 'inpi' : null,
     ]
       .filter(Boolean)
       .join(',')
 
-    const errors = [googleErrorMessage, pappersErrorMessage].filter(Boolean).join(' | ') || null
+    const errors = [googleErrorMessage, inpiErrorMessage].filter(Boolean).join(' | ') || null
 
     const hasAnyEnrichment =
       Boolean(googleDetails) ||
-      Boolean(pappersData.nomDirigeant) ||
-      pappersData.pappersCa != null ||
-      pappersData.pappersResultat != null ||
-      pappersData.effectifEstime != null
+      Boolean(inpiData.nomDirigeant) ||
+      Boolean(inpiData.capitalSocial) ||
+      inpiData.effectifEstime != null
 
-    const updatePayload = {
+    const updatePayload: Record<string, any> = {
       telephone: finalPhone,
       site_web: finalWebsite,
       nom_dirigeant: finalDirigeant,
       effectif_estime: finalEffectif,
-      pappers_ca: pappersData.pappersCa,
-      pappers_resultat: pappersData.pappersResultat,
+      capital_social: finalCapitalSocial,
       google_place_id: googleDetails?.id || googlePlaceId,
       google_rating: googleDetails?.rating || null,
       google_user_ratings_total: googleDetails?.userRatingCount || null,
@@ -342,7 +545,7 @@ export async function POST(req: NextRequest) {
     const { data: updated, error: updateError } = await supabaseAdmin
       .from('clients')
       .update(updatePayload)
-      .eq('siret', siret)
+      .eq('siret', cleanSiret)
       .select()
       .single()
 
@@ -354,20 +557,24 @@ export async function POST(req: NextRequest) {
       success: hasAnyEnrichment,
       data: updated,
       warning: errors,
+      siren_used_for_inpi: siren,
+      inpi_preview: inpiData,
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Erreur inconnue'
 
     try {
       const body = await req.clone().json()
-      if (body?.siret) {
+      const cleanSiret = normalizeSiret(body?.siret)
+
+      if (cleanSiret) {
         await supabaseAdmin
           .from('clients')
           .update({
             enrichment_status: 'erreur',
             enrichment_error: message,
           })
-          .eq('siret', body.siret)
+          .eq('siret', cleanSiret)
       }
     } catch {
       // rien

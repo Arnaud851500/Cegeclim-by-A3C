@@ -122,7 +122,7 @@ export default function LoginPage() {
       >
         <div style={styles.formCard} className="loginCard">
           <div style={styles.formTitle} className="loginCardTitle">
-            ACCES INTRANET
+            PROSPECTION NOUVEAUX CLIENTS
           </div>
 
           <form onSubmit={handleLogin} style={styles.form}>

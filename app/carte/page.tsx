@@ -109,6 +109,63 @@ type ClientRow = {
   next_action_label: string | null
   prospect_comment: string | null
   client_a_suivre: boolean | null
+  capital_social: string | null
+  rge_domaines_travaux : string | null
+}
+type CapitalSocialFilterOption =
+  | 'NC'
+  | '<= 1 000€'
+  | '>1 000€'
+  | '>5000€'
+  | '>9999€'
+
+const CAPITAL_SOCIAL_FILTER_OPTIONS: CapitalSocialFilterOption[] = [
+  'NC',
+  '<= 1 000€',
+  '>1 000€',
+  '>5000€',
+  '>9999€',
+]
+
+function parseCapitalSocialNumber(value: string | null | undefined): number | null {
+  const raw = String(value || '').trim().toUpperCase()
+  if (!raw) return null
+
+  const cleaned = raw
+    .replace('EUR', '')
+    .replace(/\s/g, '')
+    .replace(',', '.')
+    .trim()
+
+  const amount = Number(cleaned)
+  return Number.isFinite(amount) ? amount : null
+}
+
+function matchesCapitalSocialFilters(
+  capitalSocial: string | null | undefined,
+  selectedFilters: CapitalSocialFilterOption[]
+): boolean {
+  if (!selectedFilters || selectedFilters.length === 0) return true
+
+  const amount = parseCapitalSocialNumber(capitalSocial)
+  const isNc = amount == null
+
+  return selectedFilters.some((filter) => {
+    switch (filter) {
+      case 'NC':
+        return isNc
+      case '<= 1 000€':
+        return amount != null && amount <= 1000
+      case '>1 000€':
+        return amount != null && amount > 1000
+      case '>5000€':
+        return amount != null && amount > 5000
+      case '>9999€':
+        return amount != null && amount > 9999
+      default:
+        return true
+    }
+  })
 }
 
 type ProspectStatusValue =
@@ -242,7 +299,7 @@ const MAX_AGE_DAYS = 365 * 50
 const CLIENTS_PAGE_SIZE = 200
 const SUPABASE_FETCH_BATCH = 50000
 const INITIAL_CLIENTS_BATCH = 50000
-const MAX_BATCH_ENRICH = 1000
+const MAX_BATCH_ENRICH = 5000
 
 const PROSPECT_STATUS_OPTIONS: ProspectStatusValue[] = [
   '1 : A contacter',
@@ -472,10 +529,10 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
 function translateNaf(activitePrincipaleEtablissement: string | null): string {
   const code = (activitePrincipaleEtablissement || '').replace(/\s/g, '').toUpperCase()
   if (!code) return 'AUTRES'
-  if (code.startsWith('43.22B') || code.startsWith('4322B')) return 'Installateur CVC'
-  if (code.startsWith('43.22A') || code.startsWith('4322A')) return 'Plomberie'
-  if (code.startsWith('43.21') || code.startsWith('4321')) return 'Electricité ENR'
-  if (code.startsWith('41.20') || code.startsWith('4120')) return 'CMI'
+  if (code.startsWith('43.22B') || code.startsWith('4322B')) return 'Installateur CVC (43.22B)'
+  if (code.startsWith('43.22A') || code.startsWith('4322A')) return 'Plomberie (43.22A)'
+  if (code.startsWith('43.21') || code.startsWith('4321')) return 'Electricité ENR (43.21A)'
+  if (code.startsWith('41.20') || code.startsWith('4120')) return 'CMI (41.20A)'
   if (code.startsWith('43.99') || code.startsWith('4399')) return 'Bâtiment'
   return 'AUTRES'
 }
@@ -718,7 +775,9 @@ async function fetchAllClients(): Promise<{ rows: ClientRow[]; totalCount: numbe
         next_action_at,
         next_action_label,
         prospect_comment,
-        client_a_suivre
+        client_a_suivre,
+        capital_social,
+        rge_domaines_travaux
       `,
         { count: 'exact' }
       )
@@ -786,7 +845,9 @@ async function fetchClientsInitialBatch(): Promise<{ rows: ClientRow[]; totalCou
       next_action_at,
       next_action_label,
       prospect_comment,
-      client_a_suivre
+      client_a_suivre,
+      capital_social,
+      rge_domaines_travaux
     `,
       { count: 'exact' }
     )
@@ -899,7 +960,9 @@ async function fetchClientBySiret(siret: string): Promise<ClientRow | null> {
       next_action_at,
       next_action_label,
       prospect_comment,
-      client_a_suivre
+      client_a_suivre,
+      capital_social,
+      rge_domaines_travaux
     `
     )
     .eq('siret', siret)
@@ -952,7 +1015,7 @@ function MultiSelectHorizontal({
   }
 
   return (
-    <div style={{ position: 'relative' }} ref={ref}>
+    <div style={{ position: 'relative', zIndex: open ? 22000 : 1, overflow: 'visible' }} ref={ref}>
       <div style={filterLabelStyle}>{label}</div>
       <button type="button" onClick={() => setOpen((v) => !v)} style={selectLikeStyle}>
         <span>{compactSelectionLabel(selected)}</span>
@@ -1139,6 +1202,9 @@ async function saveSelectedClientField(field: 'prospect_comment' | 'prospect_sta
   const [selectedAgence, setSelectedAgence] = useState('TOUS')
   const [selectedClientScope, setSelectedClientScope] = useState<'Tous' | 'Cegeclim' | 'Prospects'>('Tous')
   const [selectedProspectStatuses, setSelectedProspectStatuses] = useState<ProspectStatusValue[]>([])
+  const [selectedRgeFilter, setSelectedRgeFilter] = useState<'TOUS' | 'OUI' | 'NON'>('TOUS')
+  const [selectedCapitalSocialFilters, setSelectedCapitalSocialFilters] =
+  useState<CapitalSocialFilterOption[]>([])
 
   const [includeNoDistance, setIncludeNoDistance] = useState(true)
   const [onlyContactable, setOnlyContactable] = useState(false)
@@ -1194,6 +1260,8 @@ async function saveSelectedClientField(field: 'prospect_comment' | 'prospect_sta
     selectedAgence,
     selectedClientScope,
     selectedProspectStatuses,
+    selectedRgeFilter,
+    selectedCapitalSocialFilters,
     includeNoDistance,
     onlyContactable,
     onlyNotInCegeclim,
@@ -1493,7 +1561,12 @@ async function openMapFromCell(secteur: string, departement: string | null) {
 
     setSelectedClient(client)
   }
+function isRowRge(row: any) {
+  if (row?.rge === true) return true
 
+  const domaines = String(row?.rge_domaines_travaux || '').trim()
+  return domaines.length > 0
+}
   async function enrichBatch(rows: ClientRow[]) {
     const targets = rows.filter((row) => row.siret).slice(0, MAX_BATCH_ENRICH)
 
@@ -1727,6 +1800,11 @@ function matchesMapCommonFilters(row: ClientRow) {
     if (!selectedProspectStatuses.includes(prospectStatus)) return false
   }
 
+  const rowIsRge = isRowRge(row)
+  if (selectedRgeFilter === 'OUI' && !rowIsRge) return false
+  if (selectedRgeFilter === 'NON' && rowIsRge) return false
+  if (!matchesCapitalSocialFilters(row.capital_social, selectedCapitalSocialFilters)) return false
+
   if (excludeDesignationND) {
     const designation = String(row.raison_sociale_affichee || '').trim().toLowerCase()
     if (!designation || designation === 'nd') return false
@@ -1773,6 +1851,8 @@ const mapCegeclimPoints = useMemo(() => {
   includeNoDistance,
   onlyContactable,
   selectedProspectStatuses,
+  selectedRgeFilter,
+  selectedCapitalSocialFilters,
   excludeDesignationND,
   excludeFutureCreation,
   onlyToEnrich,
@@ -1797,6 +1877,9 @@ const mapProspectPoints = useMemo(() => {
   selectedAgence,
   includeNoDistance,
   onlyContactable,
+  selectedProspectStatuses,
+  selectedRgeFilter,
+  selectedCapitalSocialFilters,
   excludeDesignationND,
   excludeFutureCreation,
   onlyToEnrich,
@@ -1831,6 +1914,22 @@ const mapLegendSectors = useMemo(() => {
   const mapAgeRangeLabel = useMemo(
     () => `${formatAgePrecise(mapAgeDaysMin)} → ${formatAgePrecise(mapAgeDaysMax)}`,
     [mapAgeDaysMin, mapAgeDaysMax]
+  )
+
+  const mapMinSliderStyle = useMemo<React.CSSProperties>(
+    () => ({
+      ...dualRangeStyle,
+      zIndex: mapAgeSliderMin >= mapAgeSliderMax - 1 ? 5 : 3,
+    }),
+    [mapAgeSliderMin, mapAgeSliderMax]
+  )
+
+  const mapMaxSliderStyle = useMemo<React.CSSProperties>(
+    () => ({
+      ...dualRangeStyle,
+      zIndex: 4,
+    }),
+    []
   )
 
 const visibleMapPoints = useMemo(() => {
@@ -2022,6 +2121,26 @@ const ageDaysMax = useMemo(
   [ageSliderMin, ageSliderMax]
 )
 
+const minSliderStyle = useMemo<React.CSSProperties>(
+  () => ({
+    ...dualRangeStyle,
+    zIndex: ageSliderMin >= ageSliderMax - 1 ? 5 : 3,
+  }),
+  [ageSliderMin, ageSliderMax]
+)
+
+const maxSliderStyle = useMemo<React.CSSProperties>(
+  () => ({
+    ...dualRangeStyle,
+    zIndex: 4,
+  }),
+  []
+)
+
+const ageRangeTitle = useMemo(
+  () => ({ minLabel: formatAgePrecise(ageDaysMin), maxLabel: formatAgePrecise(ageDaysMax) }),
+  [ageDaysMin, ageDaysMax]
+)
 
   const departmentOptions = useMemo(() => {
     return Array.from(
@@ -2061,6 +2180,35 @@ const ageDaysMax = useMemo(
     )
   }, [prospectStatusOptions])
 
+  const capitalSocialFilterOptions = useMemo(() => {
+  const available = new Set<CapitalSocialFilterOption>()
+
+  for (const row of scopedClientsBase) {
+    const amount = parseCapitalSocialNumber(row.capital_social)
+
+    if (amount == null) {
+      available.add('NC')
+      continue
+    }
+
+    if (amount <= 1000) available.add('<= 1 000€')
+    if (amount > 1000) available.add('>1 000€')
+    if (amount > 5000) available.add('>5000€')
+    if (amount > 9999) available.add('>9999€')
+  }
+
+  return CAPITAL_SOCIAL_FILTER_OPTIONS.filter((option) =>
+    available.has(option)
+  ) as CapitalSocialFilterOption[]
+}, [scopedClientsBase])
+
+  useEffect(() => {
+    setSelectedCapitalSocialFilters((prev) =>
+      prev.filter((option) => capitalSocialFilterOptions.includes(option))
+    )
+  }, [capitalSocialFilterOptions])
+
+
   const agenceOptions = useMemo(() => {
     return Array.from(new Set(scopedAgences.map((a) => a.agence).filter(Boolean) as string[])).sort(
       (a, b) => a.localeCompare(b, 'fr')
@@ -2086,9 +2234,10 @@ const ageDaysMax = useMemo(
       const department = getClientDepartment(row)
       const ageDays = diffDaysFromToday(row.dateCreationEtablissement)
       const completeness = getCompletenessPercent(row)
-    const isCegeclim = isClientPresentInCegeclim(row, activeCegeclimBySiret)
+      const isCegeclim = isClientPresentInCegeclim(row, activeCegeclimBySiret)
+      const rowIsRge = isRowRge(row)
 
-    if (selectedClientScope === 'Cegeclim' && !isCegeclim) return false
+      if (selectedClientScope === 'Cegeclim' && !isCegeclim) return false
     if (selectedClientScope === 'Prospects' && isCegeclim) return false
 
       const designationRaw = String(row.raison_sociale_affichee ?? '').trim()
@@ -2119,6 +2268,9 @@ const ageDaysMax = useMemo(
         const prospectStatus = normalizeProspectStatus(row.prospect_status)
         if (!selectedProspectStatuses.includes(prospectStatus)) return false
       }
+      if (selectedRgeFilter === 'OUI' && !rowIsRge) return false
+      if (selectedRgeFilter === 'NON' && rowIsRge) return false
+      if (!matchesCapitalSocialFilters(row.capital_social, selectedCapitalSocialFilters)) return false
       if (excludeFutureCreation && isFutureDate(row.dateCreationEtablissement)) return false
       if (onlyContactable && !(row.telephone || row.email || row.contactable)) return false
       if (onlyNotInCegeclim && isCegeclim) return false
@@ -2187,6 +2339,8 @@ const ageDaysMax = useMemo(
     distanceMax,
     activeCegeclimBySiret,
     selectedProspectStatuses,
+    selectedRgeFilter,
+    selectedCapitalSocialFilters,
   ])
 
   const sortedFilteredClients = useMemo(() => {
@@ -2640,6 +2794,8 @@ const selectedClientMapReason = useMemo(() => {
           telephone: row.telephone || '',
           email: row.email || '',
           site: row.site_web || '',
+          capital_social : row.capital_social || '',
+          rge : row.rge || '',
           dirigeant: row.nom_dirigeant || '',
           noteGoogle: row.google_rating != null ? String(row.google_rating) : '',
           nbNotes: row.google_user_ratings_total != null ? String(row.google_user_ratings_total) : '',
@@ -2683,6 +2839,7 @@ const selectedClientMapReason = useMemo(() => {
       'CA 2024',
       'CA 2025',
       'Statut',
+      'Capital Social',
     ],
     ...exportRows.map((row) => [
       row.designation,
@@ -2708,6 +2865,7 @@ const selectedClientMapReason = useMemo(() => {
       row.ca2023,
       row.ca2024,
       row.ca2025,
+      row.capital_social,
     ]),
   ]
 
@@ -2741,6 +2899,7 @@ const selectedClientMapReason = useMemo(() => {
     { wch: 9 },
     { wch: 12 },
     { wch: 34 },
+    { wch: 11 },
     { wch: 11 },
     { wch: 11 },
     { wch: 11 },
@@ -3267,7 +3426,8 @@ const selectedClientMapReason = useMemo(() => {
         `Date création : ${formatDateFr(client.dateCreationEtablissement)}`,
         `Ancienneté : ${formatAgePrecise(diffDaysFromToday(client.dateCreationEtablissement))}`,
         `Effectifs SIRENE : ${pdfText(client.trancheEffectifsEtablissement)}`,
-        `Effectif estimé : ${client.effectif_estime ?? 'NC'}`,
+        `Capital Social : ${pdfText(client.capital_social)}`,
+        `RGE : ${pdfText(client.rge_domaines_travaux)}`,
         `Présent base CEGECLIM : ${isClientPresentInCegeclim(client, activeCegeclimBySiret) ? getClientCegeclimCode(client, activeCegeclimBySiret) : 'NON'}`,
       ])
 
@@ -3333,10 +3493,24 @@ const selectedClientMapReason = useMemo(() => {
   function handlePrint() {
     window.print()
   }
-  
-  const totalClientsBaseForScope = scopedClientsBase.length
 
-  const totalCegeclimBase = scopedClientsCegeclim.filter((row) => isCegeclimActiveRow(row)).length
+  const kpiBaseRows = useMemo(() => {
+    return scopedClientsBase.filter((row) => {
+      const designationRaw = String(row.raison_sociale_affichee ?? '').trim()
+      const designationNormalized = designationRaw.toLowerCase()
+      const isDesignationND =
+        !designationRaw || designationNormalized === 'nd' || designationNormalized === '[nd]'
+
+      if (isDesignationND) return false
+      if (isFutureDate(row.dateCreationEtablissement)) return false
+
+      return true
+    })
+  }, [scopedClientsBase])
+  
+  const totalClientsBaseForScope = kpiBaseRows.length
+
+  const totalCegeclimBase = kpiBaseRows.filter((row) => isClientPresentInCegeclim(row, activeCegeclimBySiret)).length
 
   const totalSelection = sortedFilteredClients.length
   const totalSelectedDepartments = summaryDepartments.length
@@ -3356,81 +3530,89 @@ const selectedClientMapReason = useMemo(() => {
   return (
     <div style={pageStyle}>
       <div style={containerStyle}>
-        <section style={sectionTitleStyle}>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 14, flexWrap: 'wrap' }}>
-  <h1 style={sectionTitleTextStyle}>Clients :</h1>
-
-  <span style={{ fontSize: 18, fontWeight: 500, color: '#475569' }}>
-    dernière mise à jour le :{' '}
-    {lastImport?.date_import
-      ? `${new Date(lastImport.date_import).toLocaleDateString('fr-FR', {
-          day: '2-digit',
-          month: '2-digit',
-          year: 'numeric',
-        })} à ${new Date(lastImport.date_import).toLocaleTimeString('fr-FR', {
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit',
-        })}`
-      : 'NC'}
-  </span>
-</div>
-        </section>
-
-        {allowedDepartements.length > 0 && (
-          <div style={{ fontSize: 13, color: '#334155', marginTop: -6 }}>
-            Départements visibles selon votre profil : {allowedDepartements.join(', ')}
-            {currentUserEmail ? ` • ${currentUserEmail}` : ''}
-          </div>
-        )}
-
-
-
-        {showClientsSection && (
-          <div>
+          {showClientsSection && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
             {backgroundHydratingClients && (
               <div style={{ marginBottom: 12, padding: '10px 14px', background: '#eff6ff', border: '1px solid #bfdbfe', color: '#1d4ed8', borderRadius: 12, fontSize: 14 }}>
                 Chargement rapide effectué. La liste complète continue à se charger en arrière-plan…
               </div>
             )}
-            <section style={sectionTitleStyle}>
-              <div style={sectionHeaderRowStyle}>
-
-              </div>
-
+            <section style={sectionCardStyle}>
+              <div style={cardSectionTitleWrapStyle}>
+            <h1 style={cardSectionTitleStyle}>Listes des entreprises actives (4 codes NAF) & clients CEGECLIM :</h1>
+            <span style={{ fontSize: 18, fontWeight: 500, color: '#475569' }}>
+             dernière mise à jour le :{' '}
+              {lastImport?.date_import
+              ? `${new Date(lastImport.date_import).toLocaleDateString('fr-FR', {
+                day: '2-digit',
+                month: '2-digit',
+                year: 'numeric',
+              })} à ${new Date(lastImport.date_import).toLocaleTimeString('fr-FR', {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+              })}`
+              : 'NC'}
+            </span>
+          </div>
+          {allowedDepartements.length > 0 && (
+          <div style={{ fontSize: 15, color: '#334155', marginTop: -6 }}>
+            Départements visibles selon votre profil : {allowedDepartements.join(', ')}
+            {currentUserEmail ? ` • ${currentUserEmail}` : ''}
+          </div>
+        )}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                 <div style={kpiGridStyle}>
-                  <div style={kpiCardStyle}>
-                    <div style={kpiTitleStyle}>Entreprises actives base Clients</div>
-                    <div style={kpiValueStyle}>{totalClientsBaseForScope}</div>
+                  <div style={kpiGroupStyle}>
+                    <div style={kpiTitleStyle}>
+                      Entreprises actives
+                      <span style={kpiTitleSmallStyle}>(sur les 4 activités principales)</span>
+                    </div>
+                    <div style={kpiCardStyle}>
+                      <div style={kpiValueStyle}>{totalClientsBaseForScope}</div>
+                    </div>
                   </div>
 
-                  <div style={kpiCardStyle}>
-                    <div style={kpiTitleStyle}>dont CEGECLIM actifs</div>
-                    <div style={kpiValueStyle}>{totalCegeclimBase}</div>
+                  <div style={kpiGroupStyle}>
+                    <div style={kpiTitleStyle}>
+                      Clients Cegeclim
+                      <span style={kpiTitleSmallStyle}>(actifs)</span>
+                    </div>
+                    <div style={kpiCardStyle}>
+                      <div style={kpiValueStyle}>{totalCegeclimBase}</div>
+                    </div>
                   </div>
 
-                  <div style={kpiCardStyle}>
-                    <div style={kpiTitleStyle}>Nb de départements</div>
-                    <div style={kpiValueStyle}>{Array.from(new Set(scopedClientsBase.map((r) => getClientDepartment(r)).filter(Boolean))).length}</div>
+                  <div style={kpiGroupStyle}>
+                    <div style={kpiTitleStyle}>Départements</div>
+                    <div style={kpiCardStyle}>
+                      <div style={kpiValueStyle}>{Array.from(new Set(scopedClientsBase.map((r) => getClientDepartment(r)).filter(Boolean))).length}</div>
+                    </div>
                   </div>
                 </div>
               </div>
 
 
-              <section>
-                <h2 style={sectionTitleTextStyle}>Synthèse par département (affiche par défaut les entreprises créées ces 3 derniers mois)</h2>
-                  <div className="border-t border-slate-200 px-5 py-4 text-sm text-slate-700">
-                 <span className="font-semibold text-slate-900">Valeur en gras : </span>  nombre total
-                  d’entreprises dans la cellule.&nbsp;&nbsp;
-                <span className="font-semibold text-slate-900">Valeur entre parenthèses : </span>
-                  nombre de clients CEGECLIM.&nbsp;&nbsp;
-                <span className="font-semibold text-slate-900">Accès carte :</span> cliquer sur une case pour pour faire apparaitre les entreprises sur une carte géo.
-               </div>
-              </section>
+            </section>
 
               {mode === 'clients' && (
-                <>
+                <> 
+                  <section style={sectionCardStyle}>
+                    <div style={cardSectionTitleWrapStyle}>
+                      <h2 style={cardSectionTitleStyle}>
+                        <span style={cardSectionTitleMainStyle}>Répartition par département / activité :</span>{' '}
+                        <span style={summaryTitleBodyStyle}>entreprises créées entre </span>
+                        <span style={summaryTitleRangeStyle}>{ageRangeTitle.minLabel}</span>{' '}
+                        <span style={summaryTitleBodyStyle}>et</span>{' '}
+                        <span style={summaryTitleRangeStyle}>{ageRangeTitle.maxLabel}</span>{' '}
+                        <span style={summaryTitleBodyStyle}>(modifiable en utilisant les filtres)</span>
+                      </h2>
+                    </div>
+                    <div style={summaryLegendStyle}>
+                        <span style={{ fontWeight: 800, color: '#0f172a' }}>Valeur en gras :</span> &nbsp;nombre total d’entreprises dans la cellule.&nbsp;&nbsp;
+                        <span style={{ fontWeight: 800, color: '#0f172a' }}>Valeur entre parenthèses :</span> &nbsp;nombre de clients CEGECLIM.&nbsp;&nbsp;
+                        <span style={{ fontWeight: 800, color: '#0f172a' }}>Accès carte :</span> cliquer sur une case pour faire apparaitre les entreprises sur une carte géo.
+                      </div>
                   <section style={{ width: '100%', overflowX: 'auto' }}>
                     <table
                       style={{
@@ -3469,7 +3651,7 @@ const selectedClientMapReason = useMemo(() => {
       border: 'none',
     }}
   >
-    {row.total} <span style={{ fontSize: 13, fontWeight: 500, opacity: 0.75 }}>({row.totalCegeclim})</span>
+    {row.total} <span style={{ fontSize: 16, fontWeight: 500, opacity: 0.75 }}>({row.totalCegeclim})</span>
   </button>
 </td>
                             {summaryDepartments.map((dep) => (
@@ -3485,7 +3667,7 @@ const selectedClientMapReason = useMemo(() => {
       border: 'none',
     }}
   >
-    {row.byDept[dep] || 0} <span style={{ fontSize: 13, fontWeight: 500, opacity: 0.75 }}>({row.byDeptCegeclim[dep] || 0})</span>
+    {row.byDept[dep] || 0} <span style={{ fontSize: 16, fontWeight: 500, opacity: 0.75 }}>({row.byDeptCegeclim[dep] || 0})</span>
   </button>
 </td>
                             ))}
@@ -3505,7 +3687,7 @@ const selectedClientMapReason = useMemo(() => {
       border: 'none',
     }}
   >
-    {sortedFilteredClients.length} <span style={{ fontSize: 13, fontWeight: 500, opacity: 0.75 }}>({summaryTotalCegeclim})</span>
+    {sortedFilteredClients.length} <span style={{ fontSize: 16, fontWeight: 500, opacity: 0.75 }}>({summaryTotalCegeclim})</span>
   </button>
 </td>
                           {summaryDepartments.map((dep) => (
@@ -3521,7 +3703,7 @@ const selectedClientMapReason = useMemo(() => {
                                   border: 'none',
                                 }}
                               >
-                                {summaryDeptTotals[dep] || 0} <span style={{ fontSize: 11, fontWeight: 500, opacity: 0.75 }}>({summaryDeptCegeclimTotals[dep] || 0})</span>
+                                {summaryDeptTotals[dep] || 0} <span style={{ fontSize: 16, fontWeight: 500, opacity: 0.75 }}>({summaryDeptCegeclimTotals[dep] || 0})</span>
                               </button>
                             </td>
                           ))}
@@ -3531,11 +3713,11 @@ const selectedClientMapReason = useMemo(() => {
                   </section>
 
 
-                  <section style={{ ...sectionTitleStyle, marginTop: 18 }}>
-                    <h2 style={sectionTitleTextStyle}>Filtres :</h2>
-                  </section>
-
-                  <section
+                  
+                <div style={cardSubsectionTitleWrapStyle}>
+                  <h3 style={cardSubsectionTitleStyle}>Filtres :</h3>
+                </div>
+                <section
                     style={{
                       display: 'flex',
                       alignItems: 'flex-end',
@@ -3543,6 +3725,7 @@ const selectedClientMapReason = useMemo(() => {
                       gap: 12,
                     }}
                   >
+                    
                     <div style={{ width: 200 }}>
                       <div style={filterLabelStyle}>Recherche libre</div>
                       <input
@@ -3566,7 +3749,7 @@ const selectedClientMapReason = useMemo(() => {
                         <option value="Prospects">Prospects</option>
                     </select>
                     </div>
-                    <div style={{ width: 230 }}>
+                    <div style={{ width: 180 }}>
                       <MultiSelectHorizontal
                         label="Suivi Prospect :"
                         options={prospectStatusOptions}
@@ -3590,6 +3773,28 @@ const selectedClientMapReason = useMemo(() => {
                         options={departmentOptions}
                         selected={selectedDepartments}
                         onChange={setSelectedDepartments}
+                      />
+                    </div>
+
+                    <div style={{ minWidth: 120 }}>
+                      <div style={filterLabelStyle}>RGE :</div>
+                      <select
+                        value={selectedRgeFilter}
+                        onChange={(e) => setSelectedRgeFilter(e.target.value as 'TOUS' | 'OUI' | 'NON')}
+                        style={selectLikeStyle}
+                      >
+                        <option value="TOUS">TOUS</option>
+                        <option value="OUI">OUI</option>
+                        <option value="NON">NON</option>
+                      </select>
+                    </div>
+
+                    <div style={{ width: 180 }}>
+                      <MultiSelectHorizontal
+                        label="Capital Social :"
+                        options={capitalSocialFilterOptions}
+                        selected={selectedCapitalSocialFilters}
+                        onChange={(next) => setSelectedCapitalSocialFilters(next as CapitalSocialFilterOption[])}
                       />
                     </div>
 
@@ -3623,7 +3828,7 @@ const selectedClientMapReason = useMemo(() => {
                           step={1}
                           value={ageSliderMin}
                           onChange={(e) => setAgeSliderMin(Math.min(Number(e.target.value), ageSliderMax))}
-                          style={dualRangeStyle}
+                          style={minSliderStyle}
                         />
                         <input
                           type="range"
@@ -3632,7 +3837,7 @@ const selectedClientMapReason = useMemo(() => {
                           step={1}
                           value={ageSliderMax}
                           onChange={(e) => setAgeSliderMax(Math.max(Number(e.target.value), ageSliderMin))}
-                          style={dualRangeStyle}
+                          style={maxSliderStyle}
                         />
                       </div>
                       <div style={{ marginTop: 8, fontSize: 13, color: '#334155', fontWeight: 600 }}>
@@ -3652,7 +3857,7 @@ const selectedClientMapReason = useMemo(() => {
                     >
                       {batchEnriching
                         ? 'Enrichissement Google en cours...'
-                        : `Enrichir via Google (${Math.min(enrichableSelection.length, MAX_BATCH_ENRICH)})`}
+                        : `Enrichir (Google / INPI ) (${Math.min(enrichableSelection.length, MAX_BATCH_ENRICH)})`}
                     </button>
                     <button
                       onClick={() => setShowCegeclimPresenceModal(true)}
@@ -3667,18 +3872,21 @@ const selectedClientMapReason = useMemo(() => {
                     </button>
                   </section>
 
-                  <section style={{ ...sectionTitleStyle, marginTop: 28 }}>
-  <div>
+                  </section>
+
+                  <section style={sectionCardStyle}>
+  <div style={cardSectionTitleWrapStyle}>
     <h2
       style={{
-        ...sectionTitleTextStyle,
+        ...cardSectionTitleStyle,
         display: 'flex',
         alignItems: 'center',
         gap: 8,
         margin: 0,
+        flexWrap: 'wrap',
       }}
     >
-      <span>Liste des entreprises :</span>
+      <span>Liste des entreprises filtrées :</span>
       <span
         style={{
           color: '#facc15',
@@ -3712,7 +3920,6 @@ const selectedClientMapReason = useMemo(() => {
       {sortedFilteredClients.length} entreprise(s) affichées
     </div>
   </div>
-</section>
                   <section style={{ width: '100%', overflowX: 'auto' }}>
                     <table
                       style={{
@@ -3774,7 +3981,7 @@ const selectedClientMapReason = useMemo(() => {
                                 selectedAgenceRow.coord_y_lambert
                               )
                             : null
-      const isPresentInCegeclim = isClientPresentInCegeclim(row, activeCegeclimBySiret)
+                          const isPresentInCegeclim = isClientPresentInCegeclim(row, activeCegeclimBySiret)
                           const cegeclimSommeilRow = getClientCegeclimRow(row, sommeilCegeclimBySiret)
                           const isCegeclimSommeil = Boolean(cegeclimSommeilRow)
                           const prospectStatus = normalizeProspectStatus(row.prospect_status)
@@ -3893,6 +4100,7 @@ const selectedClientMapReason = useMemo(() => {
                       </button>
                     </div>
                   </section>
+                  </section>
                 </>
               )}
 
@@ -3930,7 +4138,6 @@ const selectedClientMapReason = useMemo(() => {
               )}
 
 
-            </section>
             {mapOpen && (
               <div style={mapOverlayStyle}>
                 <div style={mapModalStyle}>
@@ -4030,6 +4237,28 @@ const selectedClientMapReason = useMemo(() => {
                       </div>
                     </div>
 
+                    <div style={{ minWidth: 120 }}>
+                      <div style={filterLabelStyle}>RGE :</div>
+                      <select
+                        value={selectedRgeFilter}
+                        onChange={(e) => setSelectedRgeFilter(e.target.value as 'TOUS' | 'OUI' | 'NON')}
+                        style={selectLikeStyle}
+                      >
+                        <option value="TOUS">TOUS</option>
+                        <option value="OUI">OUI</option>
+                        <option value="NON">NON</option>
+                      </select>
+                    </div>
+
+                    <div style={{ width: 180 }}>
+                      <MultiSelectHorizontal
+                        label="Capital Social :"
+                        options={capitalSocialFilterOptions}
+                        selected={selectedCapitalSocialFilters}
+                        onChange={(next) => setSelectedCapitalSocialFilters(next as CapitalSocialFilterOption[])}
+                      />
+                    </div>
+
                     <div style={{ width: 320, minWidth: 320 }}>
                       <div style={{ fontWeight: 800, marginBottom: 8 }}>Ancienneté min / max</div>
 
@@ -4055,7 +4284,7 @@ const selectedClientMapReason = useMemo(() => {
                           onChange={(e) =>
                             setMapAgeSliderMin(Math.min(Number(e.target.value), mapAgeSliderMax))
                           }
-                          style={dualRangeStyle}
+                          style={mapMinSliderStyle}
                         />
 
                         <input
@@ -4067,7 +4296,7 @@ const selectedClientMapReason = useMemo(() => {
                           onChange={(e) =>
                             setMapAgeSliderMax(Math.max(Number(e.target.value), mapAgeSliderMin))
                           }
-                          style={dualRangeStyle}
+                          style={mapMaxSliderStyle}
                         />
                       </div>
 
@@ -4174,7 +4403,7 @@ const selectedClientMapReason = useMemo(() => {
                                   }}
                                 >
                                   <Tooltip direction="top" offset={[0, -8]} opacity={1} sticky>
-                                    <div style={{ fontSize: 13, lineHeight: 1.45 }}>
+                                    <div style={{ fontSize: 13, lineHeight: 1.45, minWidth: 240 }}>
                                       <div style={{ fontWeight: 700 }}>
                                         {client.raison_sociale_affichee || 'Sans nom'}
                                       </div>
@@ -4182,6 +4411,10 @@ const selectedClientMapReason = useMemo(() => {
                                       <div>
                                         {client.libelleCommuneEtablissement || '—'} {client.dateCreationEtablissement || ''}
                                       </div>
+                                      <div><b>RGE :</b> {client.rge == null ? 'NC' : client.rge ? 'OUI' : 'NON'}</div>
+                                      <div><b>Tél :</b> {client.telephone || 'NC'}</div>
+                                      <div><b>Capital social :</b> {client.capital_social || 'NC'}</div>
+                                      <div><b>Dirigeant :</b> {client.nom_dirigeant || 'NC'}</div>
                                     </div>
                                   </Tooltip>
                                 </CircleMarker>
@@ -4433,7 +4666,8 @@ const selectedClientMapReason = useMemo(() => {
                           {formatAgePrecise(diffDaysFromToday(selectedClient.dateCreationEtablissement))}
                       </div>
                       <div><b>Effectifs SIRENE :</b> {selectedClient.trancheEffectifsEtablissement || 'NC'}</div>
-                      <div><b>Effectif estimé :</b> {selectedClient.effectif_estime ?? 'NC'}</div>
+                      <div><b>Capital Social :</b> {selectedClient.capital_social ?? 'NC'}</div>
+                      <div><b>RGE :</b> {selectedClient.rge_domaines_travaux ?? 'NC'}</div>
                       <div><b>Présent base CEGECLIM :</b> {isClientPresentInCegeclim(selectedClient, activeCegeclimBySiret) ? getClientCegeclimCode(selectedClient, activeCegeclimBySiret) : selectedClientCegeclimSommeil ? 'SOMMEIL' : 'NON'}</div>
                     </div>
                   </div>
@@ -4778,7 +5012,43 @@ const selectedClientMapReason = useMemo(() => {
             </div>
           </div>
         )}
-    </div>
+        <style jsx global>{`
+          input[type='range']::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 18px;
+            height: 18px;
+            border-radius: 999px;
+            background: #1d4ed8;
+            border: 2px solid #ffffff;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.24);
+            cursor: pointer;
+            pointer-events: auto;
+            margin-top: -6px;
+          }
+
+          input[type='range']::-moz-range-thumb {
+            width: 18px;
+            height: 18px;
+            border-radius: 999px;
+            background: #1d4ed8;
+            border: 2px solid #ffffff;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.24);
+            cursor: pointer;
+            pointer-events: auto;
+          }
+
+          input[type='range']::-webkit-slider-runnable-track {
+            height: 6px;
+            background: transparent;
+          }
+
+          input[type='range']::-moz-range-track {
+            height: 6px;
+            background: transparent;
+          }
+        `}</style>
+      </div>
     </div>
   )
 }
@@ -4786,7 +5056,7 @@ const selectedClientMapReason = useMemo(() => {
 const pageStyle: React.CSSProperties = {
   minHeight: '100vh',
   width: '100%',
-  background: '#f3f3f3',
+  background: '#ffffff',
   padding: '8px',
   boxSizing: 'border-box',
 }
@@ -4814,8 +5084,9 @@ const pageTitleStyle: React.CSSProperties = {
 
 const sectionTitleTextStyle: React.CSSProperties = {
   margin: 0,
-  fontSize: '24px',
-  fontWeight: 800,
+  fontSize: '26px',
+  fontWeight: 900,
+  lineHeight: 1.15,
 }
 
 const topToggleGridStyle: React.CSSProperties = {
@@ -4844,11 +5115,11 @@ const sectionToggleActiveStyle: React.CSSProperties = {
 }
 
 const sectionCardStyle: React.CSSProperties = {
-  background: '#ffffff',
+  background: '#e7e8e8',
   borderRadius: '18px',
   border: '1px solid #d6d9de',
   boxShadow: '0 4px 14px rgba(0,0,0,0.08)',
-  padding: '18px',
+  padding: '22px',
   display: 'flex',
   flexDirection: 'column',
   gap: '18px',
@@ -4867,36 +5138,113 @@ const sectionBlockTitleStyle: React.CSSProperties = {
   fontWeight: 800,
 }
 
+const cardSectionTitleWrapStyle: React.CSSProperties = {
+  borderBottom: '2px solid #111',
+  paddingBottom: '8px',
+  marginBottom: '10px',
+}
+
+const cardSectionTitleStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: '26px',
+  fontWeight: 900,
+  lineHeight: 1.15,
+  color: '#0f172a',
+}
+
+const cardSectionTitleMainStyle: React.CSSProperties = {
+  fontWeight: 900,
+  color: '#0f172a',
+}
+
+const cardSubsectionTitleWrapStyle: React.CSSProperties = {
+  borderBottom: '2px solid #111',
+  paddingBottom: '6px',
+  marginTop: '8px',
+  marginBottom: '12px',
+}
+
+const cardSubsectionTitleStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: '22px',
+  fontWeight: 900,
+  lineHeight: 1.1,
+  color: '#0f172a',
+}
+
 const kpiGridStyle: React.CSSProperties = {
   display: 'grid',
-  gridTemplateColumns: 'repeat(3, 1fr)',
-  gap: '16px',
+  gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+  gap: '18px',
+}
+
+const kpiGroupStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '8px',
 }
 
 const kpiCardStyle: React.CSSProperties = {
-  background: '#e9eaec',
-  border: '1px solid #bfc3c9',
-  borderRadius: '14px',
-  minHeight: '48px',
-  padding: '14px 18px',
-  boxShadow: '0 2px 8px rgba(0,0,0,0.12)',
+  background: '#eef0f2',
+  border: '1px solid #d2d7dd',
+  borderRadius: '16px',
+  minHeight: '64px',
+  padding: '14px 18px 10px',
+  boxShadow: '0 2px 8px rgba(0,0,0,0.10)',
   display: 'flex',
   flexDirection: 'column',
-  justifyContent: 'space-between',
+  alignItems: 'center',
+  justifyContent: 'center',
+  textAlign: 'center',
 }
 
 const kpiTitleStyle: React.CSSProperties = {
-  fontSize: '12px',
+  fontSize: '20px',
+  fontWeight: 900,
+  lineHeight: 1.05,
+  color: '#000',
+  textAlign: 'center',
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  justifyContent: 'center',
+  minHeight: '44px',
+}
+
+const kpiTitleSmallStyle: React.CSSProperties = {
+  fontSize: '13px',
   fontWeight: 700,
-  lineHeight: 1.15,
-  color: '#111',
+  lineHeight: 1.1,
+  marginTop: '2px',
 }
 
 const kpiValueStyle: React.CSSProperties = {
-  fontSize: '24px',
-  fontWeight: 800,
+  fontSize: '42px',
+  fontWeight: 900,
   color: '#000',
   lineHeight: 1,
+}
+
+const summaryTitleStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: '26px',
+  lineHeight: 1.15,
+}
+
+const summaryTitlePrefixStyle: React.CSSProperties = {
+  fontWeight: 900,
+  color: '#0f172a',
+}
+
+const summaryTitleBodyStyle: React.CSSProperties = {
+  fontSize: '16px',
+  fontWeight: 700,
+  color: '#666b73',
+}
+
+const summaryTitleRangeStyle: React.CSSProperties = {
+  fontWeight: 900,
+  color: '#cd2626',
 }
 
 const captionRowStyle: React.CSSProperties = {
@@ -4988,7 +5336,7 @@ const selectLikeStyle: React.CSSProperties = {
 
 const multiPanelStyle: React.CSSProperties = {
   position: 'absolute',
-  zIndex: 30,
+  zIndex: 22000,
   marginTop: '8px',
   width: '420px',
   maxWidth: '44vw',
@@ -5061,38 +5409,49 @@ const dualRangeStyle: React.CSSProperties = {
   top: 0,
   width: '100%',
   height: '34px',
+  margin: 0,
   background: 'transparent',
-  pointerEvents: 'auto',
+  pointerEvents: 'none',
+  WebkitAppearance: 'none',
+  appearance: 'none',
 }
 
 const summaryHeaderCellStyle: React.CSSProperties = {
-  borderBottom: '1px solid #666',
-  borderLeft: '1px solid #c8c8c8',
-  padding: '6px 12px',
+  borderBottom: '1px solid #cfd8e3',
+  borderLeft: '1px solid #d6dde6',
+  padding: '10px 12px',
   textAlign: 'center',
-  fontSize: '18px',
+  fontSize: '17px',
   fontWeight: 800,
+  color: '#1f2937',
 }
 
 const summaryBodyCellStyle: React.CSSProperties = {
   borderLeft: '1px solid #c8c8c8',
   padding: '8px 12px',
   textAlign: 'center',
-  fontSize: '14px',
+  fontSize: '24px',
 }
 
 const summaryBodyCellStyleBold: React.CSSProperties = {
   ...summaryBodyCellStyle,
-  fontWeight: 700,
+  fontWeight: 800,
 }
 
 const summaryTotalStyle: React.CSSProperties = {
-  borderLeft: '1px solid #c8c8c8',
-  padding: '12px 12px',
+  borderLeft: '1px solid #d6dde6',
+  padding: '8px 8px',
   textAlign: 'center',
-  fontSize: '15px',
-  fontWeight: 800,
+  fontSize: '24px',
+  fontWeight: 900,
 }
+
+const summaryLegendStyle: React.CSSProperties = {
+  padding: '10px 6px 12px',
+  fontSize: '14px',
+  color: '#475569',
+}
+
 
 const toolbarButtonStyle: React.CSSProperties = {
   border: '1px solid #999',
@@ -5104,9 +5463,9 @@ const toolbarButtonStyle: React.CSSProperties = {
 }
 
 const primaryButtonStyle: React.CSSProperties = {
-  border: '1px solid #1d4ed8',
-  background: '#828386',
-  color: '#fff',
+  border: '1px solid #808287',
+  background: '#ffffff',
+  color: '#010101',
   borderRadius: '4px',
   padding: '7px 12px',
   fontSize: '15px',
@@ -5226,6 +5585,7 @@ const mapModalStyle: React.CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
   gap: 12,
+  overflow: 'visible',
   boxShadow: '0 20px 60px rgba(0,0,0,0.25)',
 }
 
@@ -5286,7 +5646,7 @@ const clientModalHeaderStyle: React.CSSProperties = {
   position: 'sticky',
   top: 0,
   zIndex: 5,
-  background: '#fff',
+  background: '#d1dbd2',
   borderBottom: '1px solid #d9d9d9',
   padding: '18px 24px',
   display: 'flex',
@@ -5341,7 +5701,7 @@ const clientBlocksGridStyle: React.CSSProperties = {
 }
 
 const clientBlockStyle: React.CSSProperties = {
-  background: '#f3f4f6',
+  background: '#d0d1d4',
   borderRadius: '18px',
   overflow: 'hidden',
   minHeight: '250px',

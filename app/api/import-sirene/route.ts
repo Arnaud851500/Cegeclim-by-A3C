@@ -73,8 +73,8 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
 
 function buildQuery(params: any) {
   const minDate = params.date_creation_min || '*'
-  const maxDate = params.date_creation_max || '*'
-  return `dateCreationEtablissement:[${minDate} TO ${maxDate}]`
+  const maxDate = params.date_creation_max || toYmd(new Date())
+  return { minDate, maxDate }
 }
 
 function filterRowsByDepartments(etablissements: any[], params: any) {
@@ -90,11 +90,11 @@ function filterRowsByDepartments(etablissements: any[], params: any) {
   })
 }
 
-async function fetchSirenePage(apiKey: string, q: string, cursor?: string | null) {
+async function fetchSirenePage(apiKey: string, q: string, debut = 0) {
   const body = new URLSearchParams()
   body.set('q', q)
-  body.set('nombre', String(PAGE_SIZE))
-  if (cursor) body.set('curseur', cursor)
+  body.set('nombre', '1000')
+  body.set('debut', String(debut))
 
   const res = await fetch(INSEE_SIRENE_URL, {
     method: 'POST',
@@ -112,8 +112,9 @@ async function fetchSirenePage(apiKey: string, q: string, cursor?: string | null
   if (res.status === 404) {
     return {
       etablissements: [],
-      nextCursor: null,
       total: 0,
+      debut,
+      nombre: 0,
     }
   }
 
@@ -130,11 +131,46 @@ async function fetchSirenePage(apiKey: string, q: string, cursor?: string | null
 
   return {
     etablissements: Array.isArray(data?.etablissements) ? data.etablissements : [],
-    nextCursor: data?.header?.curseurSuivant || null,
-    total: data?.header?.total ?? null,
+    total: Number(data?.header?.total ?? 0),
+    debut: Number(data?.header?.debut ?? debut),
+    nombre: Number(data?.header?.nombre ?? 0),
   }
 }
+function toYmd(date: Date) {
+  return date.toISOString().slice(0, 10)
+}
 
+function addDays(date: Date, days: number) {
+  const d = new Date(date)
+  d.setDate(d.getDate() + days)
+  return d
+}
+
+function buildDailyRanges(minDate: string, maxDate: string) {
+  const ranges: Array<{ min: string; max: string }> = []
+
+  let current = new Date(minDate)
+  const end = new Date(maxDate)
+
+  while (current <= end) {
+    const ymd = toYmd(current)
+    ranges.push({ min: ymd, max: ymd })
+    current = addDays(current, 1)
+  }
+
+  return ranges
+}
+
+function buildQueryFromDates(minDate: string, maxDate: string) {
+  return `dateCreationEtablissement:[${minDate} TO ${maxDate}]`
+}
+
+function normalizeApe(code: string | null | undefined) {
+  return String(code || '')
+    .replace(/\s/g, '')
+    .replace(/\./g, '')
+    .toUpperCase()
+}
 export async function POST() {
   try {
     const inseeApiKey = (process.env.INSEE_API_KEY || '').trim()
@@ -160,30 +196,96 @@ export async function POST() {
       throw new Error('Aucun paramètre trouvé dans import_sirene_params')
     }
 
-    const q = buildQuery(params)
-    console.log('Q SIRENE =', q)
+  const { minDate, maxDate } = buildQuery(params)
 
-    const allMap = new Map<string, any>()
-    let cursor: string | null = null
-    let pageCount = 0
-    let totalFetched = 0
-    let totalAvailable: number | null = null
+console.log('Q SIRENE RANGE =', { minDate, maxDate })
 
-    while (pageCount < MAX_PAGES) {
-      const page = await fetchSirenePage(inseeApiKey, q, cursor)
+const allMap = new Map<string, any>()
+let pageCount = 0
+let totalFetched = 0
+let totalAvailable = 0
 
-      if (totalAvailable === null) totalAvailable = page.total
+const dailyRanges =
+  minDate === '*'
+    ? [{ min: toYmd(new Date()), max: toYmd(new Date()) }]
+    : buildDailyRanges(minDate, maxDate === '*' ? toYmd(new Date()) : maxDate)
 
-      for (const e of page.etablissements) {
-        if (e?.siret) allMap.set(String(e.siret), e)
-      }
+for (const range of dailyRanges) {
+  const q = buildQueryFromDates(range.min, range.max)
+  let debut = 0
+  let fetchedForRange = 0
+  let totalForRange: number | null = null
 
-      totalFetched += page.etablissements.length
-      pageCount += 1
+  console.log('SIRENE DAILY RANGE START', {
+    min: range.min,
+    max: range.max,
+    q,
+  })
 
-      if (!page.nextCursor || page.etablissements.length === 0) break
-      cursor = page.nextCursor
+  while (pageCount < MAX_PAGES) {
+    if (debut > 10000) {
+      throw new Error(
+        `Pagination SIRENE bloquée pour la plage ${range.min} -> ${range.max} : ` +
+          `debut=${debut} dépasse la limite API de 10000`
+      )
     }
+
+    const page = await fetchSirenePage(inseeApiKey, q, debut)
+
+    console.log('PAGE SIRENE', {
+      pageNumber: pageCount + 1,
+      rangeMin: range.min,
+      rangeMax: range.max,
+      received: page.etablissements.length,
+      total: page.total,
+      debutSent: debut,
+      debutReturned: page.debut,
+      nombreReturned: page.nombre,
+    })
+
+    if (totalForRange === null) totalForRange = page.total
+
+    for (const e of page.etablissements) {
+      if (e?.siret) allMap.set(String(e.siret), e)
+    }
+
+    totalFetched += page.etablissements.length
+    fetchedForRange += page.etablissements.length
+    pageCount += 1
+
+    if (page.etablissements.length === 0) break
+
+    debut += page.nombre || page.etablissements.length
+
+    if (totalForRange !== null && debut >= totalForRange) break
+  }
+
+  totalAvailable += totalForRange ?? 0
+
+  if ((totalForRange ?? 0) > fetchedForRange) {
+    console.warn('Pagination potentiellement incomplète sur la plage', {
+      rangeMin: range.min,
+      rangeMax: range.max,
+      totalForRange,
+      fetchedForRange,
+      nextDebut: debut,
+    })
+  }
+
+  console.log('SIRENE DAILY RANGE SUMMARY', {
+    rangeMin: range.min,
+    rangeMax: range.max,
+    totalForRange,
+    fetchedForRange,
+  })
+}
+
+console.log('IMPORT SUMMARY', {
+  totalFetched,
+  uniqueSirets: allMap.size,
+  totalAvailable,
+  pageCount,
+})
 
     const etablissementsFiltres = filterRowsByDepartments(Array.from(allMap.values()), params)
 
@@ -299,7 +401,7 @@ export async function POST() {
         nb_mises_a_jour: 0,
         nb_rejets: 0,
         date_import: new Date().toISOString(),
-        commentaire: `Import API SIRENE - q=${q}`,
+        commentaire: `Import API SIRENE - période=${minDate}→${maxDate}`,
       })
       .select('id')
       .single()
@@ -380,7 +482,10 @@ export async function POST() {
         nb_mises_a_jour: 0,
         nb_rejets: rejectRows.length,
         commentaire:
-          `Import API SIRENE - q=${q}` +
+          `Import API SIRENE - période=${minDate}→${maxDate}` +
+          ` - pages=${pageCount}` +
+          ` - fetched=${totalFetched}` +
+          ` - unique=${allMap.size}` +
           ` - présents=${alreadyPresentRows.length}` +
           ` - filtres=${rejectedByFilter.length}`,
       })
@@ -396,7 +501,6 @@ export async function POST() {
       fetched: totalFetched,
       pages: pageCount,
       api_total: totalAvailable,
-      q,
       imported: rowsToInsert.length,
       already_present: alreadyPresentRows.length,
       rejected_by_filter: rejectedByFilter.length,

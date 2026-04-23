@@ -44,8 +44,31 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const isLoginPage = pathname === '/login'
   const isUnauthorizedPage = pathname === '/unauthorized'
 
+  const hasAnyMenuAccess =
+    rights.can_dashboard ||
+    rights.can_territoire ||
+    rights.can_cartographie ||
+    rights.can_clients ||
+    rights.can_carte ||
+    rights.can_todo ||
+    rights.can_clients_cegeclim ||
+    rights.can_suivi_prospects ||
+    rights.can_agences ||
+    rights.can_autorisation ||
+    rights.can_documents ||
+    rights.can_stocks ||
+    rights.can_activites
+
+  const getVisibleItems = (group: MenuGroup) =>
+    group.items.filter((item) => {
+      if (item.path === '/accueil') return hasAnyMenuAccess
+      return !item.accessKey || rights[item.accessKey]
+    })
+
+  const isGroupVisible = (group: MenuGroup) => getVisibleItems(group).length > 0
+
   const isGroupActive = (group: MenuGroup) =>
-    group.items.some((item) => pathname === item.path)
+    getVisibleItems(group).some((item) => pathname === item.path)
 
   const backgroundImageUrl =
     'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Logo%20et%20images/Image%20site%20CEGECLIM%20maison.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJMb2dvIGV0IGltYWdlcy9JbWFnZSBzaXRlIENFR0VDTElNIG1haXNvbi5qcGciLCJpYXQiOjE3NzU1MDYyNTEsImV4cCI6NDg5NzU3MDI1MX0.d1YT7_-xD44QOm2LFbZIfpkjh9kiIGjpJiEuJxV0rMM'
@@ -226,47 +249,51 @@ function AppShell({ children }: { children: React.ReactNode }) {
             </div>
           </div>
 
-          <div style={styles.nav}>
-            {menuGroups.map((group) => (
-              <div
-                key={group.label}
-                style={styles.menuWrapper}
-                onMouseEnter={() => {
-                  if (hoverTimeout) clearTimeout(hoverTimeout)
-                  setOpenGroup(group.label)
-                }}
-                onMouseLeave={() => {
-                  const t = setTimeout(() => setOpenGroup(null), 150)
-                  setHoverTimeout(t)
-                }}
-              >
-                <button
-                  style={{
-                    ...styles.navBtn,
-                    ...(isGroupActive(group) ? styles.navBtnActive : {}),
-                  }}
-                >
-                  {group.label} ▼
-                </button>
+          {menuGroups.some(isGroupVisible) && (
+            <div style={styles.nav}>
+              {menuGroups.filter(isGroupVisible).map((group) => {
+                const visibleItems = getVisibleItems(group)
 
-                {openGroup === group.label && (
-                  <div style={styles.dropdown}>
-                    {group.items
-                      .filter((item) => !item.accessKey || rights[item.accessKey])
-                      .map((item) => (
-                        <div
-                          key={item.path}
-                          style={styles.dropdownItem}
-                          onClick={() => router.push(item.path)}
-                        >
-                          {item.label}
-                        </div>
-                      ))}
+                return (
+                  <div
+                    key={group.label}
+                    style={styles.menuWrapper}
+                    onMouseEnter={() => {
+                      if (hoverTimeout) clearTimeout(hoverTimeout)
+                      setOpenGroup(group.label)
+                    }}
+                    onMouseLeave={() => {
+                      const t = setTimeout(() => setOpenGroup(null), 150)
+                      setHoverTimeout(t)
+                    }}
+                  >
+                    <button
+                      style={{
+                        ...styles.navBtn,
+                        ...(isGroupActive(group) ? styles.navBtnActive : {}),
+                      }}
+                    >
+                      {group.label} ▼
+                    </button>
+
+                    {openGroup === group.label && (
+                      <div style={styles.dropdown}>
+                        {visibleItems.map((item) => (
+                          <div
+                            key={item.path}
+                            style={styles.dropdownItem}
+                            onClick={() => router.push(item.path)}
+                          >
+                            {item.label}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
-            ))}
-          </div>
+                )
+              })}
+            </div>
+          )}
         </header>
 
         <main style={styles.content}>{children}</main>
