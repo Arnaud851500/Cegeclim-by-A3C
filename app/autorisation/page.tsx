@@ -649,7 +649,7 @@ export default function AutorisationPage() {
               className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
             >
               <option value="/accueil">/accueil</option>
-              <option value="/dashboard">/dashboard</option>
+              <option value="/Indicateurs">/Indicateurs</option>
               <option value="/territoire">/territoire</option>
               <option value="/cartographie">/cartographie</option>
               <option value="/clients">/clients</option>
@@ -905,7 +905,7 @@ export default function AutorisationPage() {
                           className="w-44 rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-slate-500"
                         >
                           <option value="/accueil">/accueil</option>
-                          <option value="/dashboard">/dashboard</option>
+                          <option value="/Indicateurs">/Indicateurs</option>
                           <option value="/territoire">/territoire</option>
                           <option value="/cartographie">/cartographie</option>
                           <option value="/clients">/clients</option>
