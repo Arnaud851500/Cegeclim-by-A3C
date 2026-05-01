@@ -110,13 +110,13 @@ function AppShell({ children }: { children: React.ReactNode }) {
     {
       label: 'Indicateurs',
       items: [
-        { label: 'Indicateurs', path: '/Indicateurs', accessKey: 'can_dashboard' },
-        { label: 'Import Données', path: '/Import', accessKey: 'can_dashboard' }
-      ],
+        { label: 'Indicateurs', path: '/Indicateurs', accessKey: 'can_dashboard' }],
     },
     {
       label: 'Autorisations',
-      items: [{ label: 'Autorisations', path: '/autorisation', accessKey: 'can_autorisation' }],
+      items: [{ label: 'Autorisations', path: '/autorisation', accessKey: 'can_autorisation' },
+                { label: 'Import Données', path: '/Import', accessKey: 'can_autorisation' }
+      ],
     },
   ]
 

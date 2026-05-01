@@ -19,8 +19,8 @@ import { supabase } from '@/lib/supabaseClient'
 
 type RawAggRow = Record<string, any>
 type SourceType = 'facture' | 'activite'
-type ActivityType = 'FACTURE' | 'BL mois' | 'BL frigo' | 'PL' | 'CDC' | 'BR'
-type ActivityFilterOption = 'NON' | 'ACTIVITE_MOIS' | 'PL_FUTUR' | 'CDC_MOIS' | 'CDC_FUTUR' | 'TOUS'
+type ActivityType = 'FACTURE' | 'BL' | 'BL M-x' | 'BL mois' | 'BL frigo' | 'PL' | 'CDC' | 'BR'
+type ActivityFilterOption = 'BL_MX' | 'BL_M' | 'BR' | 'PL' | 'CDC'
 type TableMode = 'collaborateur' | 'agence'
 type DetailMode = 'tiers' | 'documents' | 'agregats'
 type ChartMetric = 'ca' | 'margePct'
@@ -53,7 +53,7 @@ type Filters = {
   agencesCollaborateurs: string[]
   tiers: string[]
   famillesMacro: string[]
-  activityOption: ActivityFilterOption
+  activityOptions: ActivityFilterOption[]
   horsStatistique: 'non' | 'oui' | 'tous'
 }
 
@@ -150,18 +150,19 @@ const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet'
 const CURRENT_DATE = new Date()
 const CURRENT_YEAR = CURRENT_DATE.getFullYear()
 const CURRENT_MONTH = CURRENT_DATE.getMonth() + 1
+const CURRENT_DAY = CURRENT_DATE.getDate()
+const DEFAULT_ANALYSIS_MONTH = CURRENT_DAY <= 6 ? (CURRENT_MONTH === 1 ? 12 : CURRENT_MONTH - 1) : CURRENT_MONTH
 const CURRENT_MONTH_KEY = CURRENT_YEAR * 100 + CURRENT_MONTH
 
 const AGG_TABLE_NAME = 'indicateur_factures_mensuel'
 const ACTIVITY_AGG_TABLE_NAME = 'indicateur_activite_mensuel'
 
 const ACTIVITY_FILTERS: Array<{ value: ActivityFilterOption; label: string; helper: string }> = [
-  { value: 'NON', label: 'NON', helper: 'Factures uniquement.' },
-  { value: 'ACTIVITE_MOIS', label: 'BL, BR, PL mois en cours', helper: 'Factures + BL mois, BL frigo, BR et PL non futur.' },
-  { value: 'PL_FUTUR', label: 'PL Liv futur', helper: 'Factures + PL avec date de livraison supérieure au mois en cours.' },
-  { value: 'CDC_MOIS', label: 'CDC mois en cours', helper: 'Factures + CDC positionnées sur le mois en cours.' },
-  { value: 'CDC_FUTUR', label: 'CDC futur', helper: 'Factures + CDC avec date supérieure au mois en cours.' },
-  { value: 'TOUS', label: 'TOUS', helper: 'Factures + toutes les activités agrégées.' },
+  { value: 'BL_MX', label: 'BL M-x', helper: 'Bons de livraison antérieurs repositionnés sur le mois d’analyse.' },
+  { value: 'BL_M', label: 'BL M', helper: 'Bons de livraison du mois d’analyse.' },
+  { value: 'BR', label: 'BR', helper: 'Bons de retour, montants en négatif.' },
+  { value: 'PL', label: 'PL', helper: 'Préparations de livraison.' },
+  { value: 'CDC', label: 'CDC', helper: 'Bons de commande.' },
 ]
 
 const COLOR_N = '#16a34a'
@@ -193,9 +194,17 @@ function safeBool(value: any) {
 }
 
 function normalizeActivityType(value: any): ActivityType {
-  const normalized = safeText(value, 'FACTURE').toUpperCase().replace(/\s+/g, ' ')
-  if (normalized === 'BL FRIGO') return 'BL frigo'
-  if (normalized === 'BL MOIS' || normalized === 'BL') return 'BL mois'
+  const normalized = safeText(value, 'FACTURE')
+    .toUpperCase()
+    .replace(/\s+/g, ' ')
+    .replace('–', '-')
+    .replace('—', '-')
+    .trim()
+
+  // Nouveaux libellés issus de l'agrégat.
+  if (normalized === 'BL M-X' || normalized === 'BL MX' || normalized === 'BL FRIGO') return 'BL M-x'
+  if (normalized === 'BL' || normalized === 'BL MOIS' || normalized === 'BL M') return 'BL'
+
   if (normalized === 'PL') return 'PL'
   if (normalized === 'CDC') return 'CDC'
   if (normalized === 'BR') return 'BR'
@@ -277,6 +286,19 @@ function sumRows(rows: AggRow[]) {
   return { ca, marge, margePct: ca ? (marge / ca) * 100 : 0, nbLignes }
 }
 
+function buildCaBreakdown(rows: AggRow[]) {
+  const items = [
+    { label: 'Factures', value: rows.filter((r) => r.source === 'facture').reduce((s, r) => s + r.ca_ht, 0) },
+    { label: 'BL M-x', value: rows.filter((r) => r.source === 'activite' && isBlMx(r)).reduce((s, r) => s + r.ca_ht, 0) },
+    { label: 'BL M', value: rows.filter((r) => r.source === 'activite' && isBlM(r)).reduce((s, r) => s + r.ca_ht, 0) },
+    { label: 'BR', value: rows.filter((r) => r.source === 'activite' && r.type_document === 'BR').reduce((s, r) => s + r.ca_ht, 0) },
+    { label: 'PL', value: rows.filter((r) => r.source === 'activite' && r.type_document === 'PL').reduce((s, r) => s + r.ca_ht, 0) },
+    { label: 'CDC', value: rows.filter((r) => r.source === 'activite' && r.type_document === 'CDC').reduce((s, r) => s + r.ca_ht, 0) },
+  ]
+
+  return items.filter((item) => Math.abs(item.value) >= 0.5)
+}
+
 function makeRecap(currentRows: AggRow[], previousRows: AggRow[]): RecapValue {
   const current = sumRows(currentRows)
   const previous = sumRows(previousRows)
@@ -323,39 +345,42 @@ function dateKey(row: AggRow) {
   return row.annee * 100 + row.mois
 }
 
-function activityMatches(option: ActivityFilterOption, row: AggRow) {
-  if (row.source !== 'activite') return true
-  const key = dateKey(row)
+function isBlMx(row: AggRow) {
+  return row.type_document === 'BL M-x' || row.type_document === 'BL frigo'
+}
 
-  switch (option) {
-    case 'NON':
-      return false
-    case 'ACTIVITE_MOIS':
-      return row.type_document === 'BL mois'
-        || row.type_document === 'BL frigo'
-        || row.type_document === 'BR'
-        || (row.type_document === 'PL' && key <= CURRENT_MONTH_KEY)
-    case 'PL_FUTUR':
-      return row.type_document === 'PL' && key > CURRENT_MONTH_KEY
-    case 'CDC_MOIS':
-      return row.type_document === 'CDC' && key === CURRENT_MONTH_KEY
-    case 'CDC_FUTUR':
-      return row.type_document === 'CDC' && key > CURRENT_MONTH_KEY
-    case 'TOUS':
-      return true
-    default:
-      return false
-  }
+function isBlM(row: AggRow) {
+  return row.type_document === 'BL' || row.type_document === 'BL mois'
+}
+
+// Mapping entre le type_document de l'agrégat et les cases à cocher du filtre activité.
+function activityTypeToFilterValue(typeDocument: ActivityType): ActivityFilterOption | null {
+  if (typeDocument === 'BL M-x' || typeDocument === 'BL frigo') return 'BL_MX'
+  if (typeDocument === 'BL' || typeDocument === 'BL mois') return 'BL_M'
+  if (typeDocument === 'BR') return 'BR'
+  if (typeDocument === 'PL') return 'PL'
+  if (typeDocument === 'CDC') return 'CDC'
+  return null
+}
+
+function activityMatches(options: ActivityFilterOption[], row: AggRow) {
+  if (row.source !== 'activite') return true
+  const filterValue = activityTypeToFilterValue(row.type_document)
+  return Boolean(filterValue && options.includes(filterValue))
 }
 
 function activityLabel(option: ActivityFilterOption) {
   return ACTIVITY_FILTERS.find((a) => a.value === option)?.label || option
 }
 
-function activitySummary(option: ActivityFilterOption) {
-  if (option === 'NON') return 'Prise en compte des factures uniquement.'
-  const helper = ACTIVITY_FILTERS.find((a) => a.value === option)?.helper || ''
-  return `Prise en compte des factures mais aussi de l’activité non facturée : ${helper}`
+function activityLabels(options: ActivityFilterOption[]) {
+  if (!options.length) return 'Aucune activité'
+  return options.map(activityLabel).join(', ')
+}
+
+function activitySummary(options: ActivityFilterOption[]) {
+  if (!options.length) return 'Factures uniquement.'
+  return `Factures + ${activityLabels(options)}.`
 }
 
 function maxUpdatedAt(rows: AggRow[]) {
@@ -571,10 +596,15 @@ function MultiSelectFilter({
   )
 }
 
-function ActivityFilter({ selected, onChange }: { selected: ActivityFilterOption; onChange: (value: ActivityFilterOption) => void }) {
+function ActivityFilter({ selected, onChange }: { selected: ActivityFilterOption[]; onChange: (value: ActivityFilterOption[]) => void }) {
   const [open, setOpen] = useState(false)
   const ref = useCloseOnOutside(open, () => setOpen(false))
-  const selectedLabel = activityLabel(selected)
+  const selectedLabel = selected.length ? activityLabels(selected) : 'Factures uniquement'
+
+  function toggle(value: ActivityFilterOption) {
+    if (selected.includes(value)) onChange(selected.filter((v) => v !== value))
+    else onChange([...selected, value])
+  }
 
   return (
     <div ref={ref} className="relative">
@@ -585,11 +615,14 @@ function ActivityFilter({ selected, onChange }: { selected: ActivityFilterOption
 
       {open && (
         <div className="absolute left-0 top-14 z-50 w-[30rem] rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl">
-          <div className="mb-3 text-sm font-black text-slate-700">Activité non facturée</div>
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div className="text-sm font-black text-slate-700">Activité non facturée</div>
+            <button type="button" onClick={() => onChange([])} className="text-xs font-bold text-slate-500 hover:text-slate-900">Factures seules</button>
+          </div>
           <div className="space-y-3">
             {ACTIVITY_FILTERS.map((option) => (
               <label key={option.value} className="flex cursor-pointer items-start gap-3 rounded-xl px-2 py-1.5 hover:bg-slate-50">
-                <input type="radio" name="activity-filter" checked={selected === option.value} onChange={() => onChange(option.value)} className="mt-1" />
+                <input type="checkbox" checked={selected.includes(option.value)} onChange={() => toggle(option.value)} className="mt-1" />
                 <span>
                   <span className="block text-sm font-black text-slate-900">{option.label}</span>
                   <span className="block text-xs font-semibold text-slate-500">{option.helper}</span>
@@ -600,6 +633,24 @@ function ActivityFilter({ selected, onChange }: { selected: ActivityFilterOption
         </div>
       )}
     </div>
+  )
+}
+
+
+function AnalysisMonthSelect({ value, onChange }: { value: number; onChange: (value: number) => void }) {
+  return (
+    <label className="flex h-12 items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 text-sm font-extrabold text-slate-800 shadow-sm">
+      <span className="whitespace-nowrap">Mois affiché</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="min-w-0 flex-1 bg-transparent text-right outline-none"
+      >
+        {MONTHS.map((month, index) => (
+          <option key={month} value={index + 1}>{String(index + 1).padStart(2, '0')} - {month}</option>
+        ))}
+      </select>
+    </label>
   )
 }
 
@@ -831,12 +882,13 @@ export default function IndicateursCaMargePage() {
     agencesCollaborateurs: [],
     tiers: [],
     famillesMacro: [],
-    activityOption: 'ACTIVITE_MOIS',
+    activityOptions: ['BL_MX', 'BL_M', 'BR'],
     horsStatistique: 'non',
   })
 
   const [chartMetric, setChartMetric] = useState<ChartMetric>('ca')
-  const [chartVision, setChartVision] = useState<ChartVision>('cumul')
+  const [chartVision, setChartVision] = useState<ChartVision>('mensuel')
+  const [analysisMonthOverride, setAnalysisMonthOverride] = useState<number>(DEFAULT_ANALYSIS_MONTH)
   const [bridgeAgencyVision, setBridgeAgencyVision] = useState<BridgeVision>('mois')
   const [bridgeFamilyVision, setBridgeFamilyVision] = useState<BridgeVision>('mois')
   const [tableMode, setTableMode] = useState<TableMode>('collaborateur')
@@ -844,7 +896,7 @@ export default function IndicateursCaMargePage() {
   const [detailContext, setDetailContext] = useState<DetailContext | null>(null)
   const [detailSort, setDetailSort] = useState<DetailSort>({ key: 'ca_ht', direction: 'desc' })
 
-  const activityEnabled = filters.activityOption !== 'NON'
+  const activityEnabled = filters.activityOptions.length > 0
 
   async function loadData() {
     setLoading(true)
@@ -922,9 +974,9 @@ export default function IndicateursCaMargePage() {
   const rowsAllowedByActivity = useMemo(() => {
     return rows.filter((row) => {
       if (row.source === 'facture') return true
-      return activityMatches(filters.activityOption, row)
+      return activityMatches(filters.activityOptions, row)
     })
-  }, [rows, filters.activityOption])
+  }, [rows, filters.activityOptions])
 
   const baseFilteredRows = useMemo(() => {
     return rowsAllowedByActivity.filter((row) => {
@@ -956,14 +1008,7 @@ export default function IndicateursCaMargePage() {
     }
   }, [selectedYears])
 
-  const analysisMonth = useMemo(() => {
-    const selectedMonths = filters.periodes
-      .map((periode) => Number(String(periode).slice(5, 7)))
-      .filter(Boolean)
-
-    if (selectedMonths.length) return Math.max(...selectedMonths)
-    return CURRENT_MONTH
-  }, [filters.periodes])
+  const analysisMonth = analysisMonthOverride
 
   const analysisMonthLabel = String(analysisMonth).padStart(2, '0')
   const ytdLabel = `01-${analysisMonthLabel}`
@@ -974,13 +1019,12 @@ export default function IndicateursCaMargePage() {
   }, [filteredRows])
 
   const documentScopeSummaryText = useMemo(() => {
-    if (filters.activityOption === 'NON') return 'Prise en compte des documents factures uniquement.'
-    if (filters.activityOption === 'TOUS') return 'Prise en compte des documents factures + documents BL, BR, PL et CDC.'
-    return `Prise en compte des documents factures + ${activityLabel(filters.activityOption)}.`
-  }, [filters.activityOption])
+    if (!filters.activityOptions.length) return 'Prise en compte des documents factures uniquement.'
+    return `Prise en compte des documents factures + ${activityLabels(filters.activityOptions)}.`
+  }, [filters.activityOptions])
 
   const activeFilterSummaryText = useMemo(() => {
-    const parts: string[] = []
+    const parts: string[] = [`Mois affiché : ${analysisMonthLabel} / Période analysée : 01-${analysisMonthLabel}`]
     if (filters.agencesCollaborateurs.length) parts.push(`Agence : ${filters.agencesCollaborateurs.join(', ')}`)
     if (filters.collaborateurs.length) parts.push(`Collaborateur : ${filters.collaborateurs.join(', ')}`)
     if (filters.tiers.length) parts.push(`Tiers : ${filters.tiers.slice(0, 4).join(', ')}${filters.tiers.length > 4 ? '…' : ''}`)
@@ -988,7 +1032,7 @@ export default function IndicateursCaMargePage() {
     if (filters.periodes.length) parts.push(`Période : ${filters.periodes.join(', ')}`)
     parts.push(`Article hors statistique : ${filters.horsStatistique === 'non' ? 'Non' : filters.horsStatistique === 'oui' ? 'Oui uniquement' : 'Tous'}`)
     return parts.join(' / ')
-  }, [filters])
+  }, [filters, analysisMonthLabel])
 
   const headerDateText = useMemo(() => {
     const factures = rows.filter((r) => r.source === 'facture')
@@ -1013,11 +1057,20 @@ export default function IndicateursCaMargePage() {
     ]
 
     return periods.map((period) => {
-      const current = sumRows(rowsForPeriod(years.n, period.key))
+      const currentRows = rowsForPeriod(years.n, period.key)
+      const current = sumRows(currentRows)
       const previous = sumRows(rowsForPeriod(years.n1, period.key))
       const deltaCa = current.ca - previous.ca
       const deltaMargePts = current.ca && previous.ca ? current.margePct - previous.margePct : null
-      return { period, current, previous, deltaCa, deltaMargePts, evoCaPct: calcEvolution(current.ca, previous.ca) }
+      return {
+        period,
+        current,
+        previous,
+        breakdown: buildCaBreakdown(currentRows),
+        deltaCa,
+        deltaMargePts,
+        evoCaPct: calcEvolution(current.ca, previous.ca),
+      }
     })
   }, [baseFilteredRows, years.n, years.n1, analysisMonth, analysisMonthLabel, ytdLabel])
 
@@ -1037,8 +1090,8 @@ export default function IndicateursCaMargePage() {
         item[`marge_${year}`] = yearTotal.marge
         item[`margePct_${year}`] = yearTotal.margePct
         item[`caFacture_${year}`] = factTotal.ca
-        item[`caBLMois_${year}`] = sumRows(activityRows.filter((r) => r.type_document === 'BL mois')).ca
-        item[`caBLFrigo_${year}`] = sumRows(activityRows.filter((r) => r.type_document === 'BL frigo')).ca
+        item[`caBLMois_${year}`] = sumRows(activityRows.filter((r) => isBlM(r))).ca
+        item[`caBLFrigo_${year}`] = sumRows(activityRows.filter((r) => isBlMx(r))).ca
         item[`caPL_${year}`] = sumRows(activityRows.filter((r) => r.type_document === 'PL')).ca
         item[`caCDC_${year}`] = sumRows(activityRows.filter((r) => r.type_document === 'CDC')).ca
         item[`caBR_${year}`] = sumRows(activityRows.filter((r) => r.type_document === 'BR')).ca
@@ -1344,7 +1397,6 @@ export default function IndicateursCaMargePage() {
 
   function ExecutiveSummaryCard() {
     const previous = executiveSummary.map((x) => x.previous)
-    const current = executiveSummary.map((x) => x.current)
 
     return (
       <section className="rounded-[2.5rem] border-[3px] border-[#0b3140] bg-white p-6 shadow-sm">
@@ -1369,10 +1421,24 @@ export default function IndicateursCaMargePage() {
           ))}
 
           <div className="flex items-center justify-center rounded-xl bg-[#1f6f89] px-4 py-5 text-3xl font-black text-white">{years.n}</div>
-          {current.map((item, idx) => (
-            <div key={`curr-${idx}`} className="flex min-h-24 flex-col items-center justify-center rounded-2xl border border-orange-300 bg-slate-200 px-3 py-4 text-center">
-              <div className="whitespace-nowrap text-2xl font-black">{formatKEur(item.ca)}</div>
-              <div className="mt-1 whitespace-nowrap text-xl font-black">{formatRate(item.margePct)}</div>
+          {executiveSummary.map((item) => (
+            <div key={`curr-${item.period.key}`} className="group relative flex min-h-24 flex-col items-center justify-center rounded-2xl border border-orange-300 bg-slate-200 px-3 py-4 text-center">
+              <div className="whitespace-nowrap text-2xl font-black">{formatKEur(item.current.ca)}</div>
+              <div className="mt-1 whitespace-nowrap text-xl font-black">{formatRate(item.current.margePct)}</div>
+
+              <div className="pointer-events-none absolute left-1/2 top-full z-50 mt-2 hidden w-72 -translate-x-1/2 rounded-2xl border border-slate-200 bg-white p-4 text-left shadow-2xl group-hover:block">
+                <div className="mb-2 text-sm font-black text-slate-900">{formatKEur(item.current.ca)} dont</div>
+                <div className="space-y-1">
+                  {item.breakdown.length ? item.breakdown.map((line) => (
+                    <div key={line.label} className="flex items-center justify-between gap-4 text-sm">
+                      <span className="font-bold text-slate-600">{line.label}</span>
+                      <span className="font-black text-slate-900">{formatKEur(line.value)}</span>
+                    </div>
+                  )) : (
+                    <div className="text-sm font-semibold text-slate-500">Aucune donnée sur cette période.</div>
+                  )}
+                </div>
+              </div>
             </div>
           ))}
 
@@ -1445,8 +1511,8 @@ export default function IndicateursCaMargePage() {
                     {activityEnabled ? (
                       <>
                         <Bar dataKey={`caFacture_${years.n}`} name={`${years.n} facturé`} stackId="n" fill={COLOR_N} />
-                        <Bar dataKey={`caBLFrigo_${years.n}`} name="BL frigo" stackId="n" fill={COLOR_ACT_BL_FRIGO} />
-                        <Bar dataKey={`caBLMois_${years.n}`} name="BL mois" stackId="n" fill={COLOR_ACT_BL_MOIS} />
+                        <Bar dataKey={`caBLFrigo_${years.n}`} name="BL M-x" stackId="n" fill={COLOR_ACT_BL_FRIGO} />
+                        <Bar dataKey={`caBLMois_${years.n}`} name="BL M" stackId="n" fill={COLOR_ACT_BL_MOIS} />
                         <Bar dataKey={`caBR_${years.n}`} name="BR" stackId="n" fill={COLOR_ACT_BR} />
                         <Bar dataKey={`caPL_${years.n}`} name="PL" stackId="n" fill={COLOR_ACT_PL} />
                         <Bar dataKey={`caCDC_${years.n}`} name="CDC" stackId="n" fill={COLOR_ACT_CDC} />
@@ -1538,13 +1604,14 @@ export default function IndicateursCaMargePage() {
             </div>
           </div>
 
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-7">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-8">
             <MultiSelectFilter label="Mois / année" values={availableFilters.periodes} selected={filters.periodes} onChange={(v) => updateFilter('periodes', v)} />
+            <AnalysisMonthSelect value={analysisMonthOverride} onChange={setAnalysisMonthOverride} />
             <MultiSelectFilter label="Agence collaborateur" values={availableFilters.agencesCollaborateurs} selected={filters.agencesCollaborateurs} onChange={(v) => updateFilter('agencesCollaborateurs', v)} />
             <MultiSelectFilter label="Collaborateur" values={availableFilters.collaborateurs} selected={filters.collaborateurs} onChange={(v) => updateFilter('collaborateurs', v)} />
             <MultiSelectFilter label="Tiers" values={availableFilters.tiers} selected={filters.tiers} onChange={(v) => updateFilter('tiers', v)} />
             <MultiSelectFilter label="Famille macro" values={availableFilters.famillesMacro} selected={filters.famillesMacro} onChange={(v) => updateFilter('famillesMacro', v)} />
-            <ActivityFilter selected={filters.activityOption} onChange={(v) => updateFilter('activityOption', v)} />
+            <ActivityFilter selected={filters.activityOptions} onChange={(v) => updateFilter('activityOptions', v)} />
             <select value={filters.horsStatistique} onChange={(e) => updateFilter('horsStatistique', e.target.value as Filters['horsStatistique'])} className="h-12 rounded-xl border border-slate-300 bg-white px-3 text-sm font-extrabold">
               <option value="non">Hors statistique : NON</option>
               <option value="oui">Hors statistique : OUI</option>

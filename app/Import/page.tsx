@@ -142,10 +142,13 @@ const TABLES: TableConfig[] = [
     key: 'ref_familles',
     label: 'Familles',
     primaryKey: 'famille',
-    description: 'Référentiel familles articles / tiers.',
+    description: 'Référentiel familles articles / tiers. Le fichier Excel peut ne contenir que famille et famille_macro ; les autres champs restent optionnels.',
     columns: [
-      { db: 'famille', label: 'Famille', required: true },
-      { db: 'famille_macro', label: 'Famille macro' },
+      { db: 'famille', label: 'Famille', required: true, aliases: ['Code famille', 'Famille article'] },
+      { db: 'famille_macro', label: 'Famille macro', aliases: ['Macro famille', 'Famille macro article'] },
+      { db: 'libelle_famille', label: 'Libellé famille', aliases: ['Libelle_famille', 'Libelle famille', 'Libellé_famille', 'Libellé de famille'] },
+      { db: 'pert_qte', label: 'Pert. qté', type: 'boolean', aliases: ['Pert_qte', 'Pert qte', 'Pertinence quantité', 'Pertinence qte', 'Pert QTE'] },
+      { db: 'split', label: 'Split', aliases: ['Split famille', 'Groupe split'] },
     ],
   },
   {
@@ -296,7 +299,6 @@ const TABLES: TableConfig[] = [
     description: 'Table centrale : une ligne par ligne de facture.',
     columns: [
       { db: 'ligne_hash', label: 'Clé ligne', readonly: true },
-      { db: 'ligne_hash_metier', label: 'Clé métier', readonly: true },
       { db: 'type_document', label: 'Type' },
       { db: 'numero_piece', label: 'N° pièce', required: true },
       { db: 'date_facture', label: 'Date facture', type: 'date' },
@@ -399,7 +401,23 @@ const TABLES: TableConfig[] = [
 ]
 
 const EXTRA_HEADER_ALIASES: Record<TableKey, Record<string, string>> = {
-  ref_familles: {},
+  ref_familles: {
+    famille: 'famille',
+    code_famille: 'famille',
+    famille_article: 'famille',
+    famille_macro: 'famille_macro',
+    macro_famille: 'famille_macro',
+    famille_macro_article: 'famille_macro',
+    libelle_famille: 'libelle_famille',
+    libelle_de_famille: 'libelle_famille',
+    pert_qte: 'pert_qte',
+    pert_qte_: 'pert_qte',
+    pertinence_quantite: 'pert_qte',
+    pertinence_qte: 'pert_qte',
+    split: 'split',
+    split_famille: 'split',
+    groupe_split: 'split',
+  },
   ref_code_naf: {},
   ref_collaborateurs: {},
   ref_articles: {},
@@ -680,27 +698,6 @@ function buildLineHash(row: GenericRow, tableKey: TableKey, index: number) {
   ].join('|')
 
   return stableHash(base)
-}
-
-function buildFactureBusinessHashBase(row: GenericRow) {
-  const upperTrim = (value: any) => String(value ?? '').trim().toUpperCase()
-  const dateText = (value: any) => String(value ?? '').trim().slice(0, 10)
-  const numericText = (value: any, decimals: number) => {
-    const n = Number(value ?? 0)
-    if (!Number.isFinite(n)) return Number(0).toFixed(decimals)
-    return n.toFixed(decimals)
-  }
-  return [upperTrim(row.numero_piece), dateText(row.date_facture), upperTrim(row.numero_tiers_entete), upperTrim(row.reference_article), numericText(row.quantite, 4), numericText(row.montant_ht, 2), numericText(row.marge_valeur, 2)].join('|')
-}
-function md5Hex(input: string) {
-  // Hash court stable côté navigateur. Le contrôle de doublon d'import ne dépend pas de ce hash,
-  // il compare aussi la clé métier reconstruite à partir des champs de ligne.
-  return stableHash(input)
-}
-async function addFactureBusinessHashes(rows: GenericRow[]) {
-  for (const row of rows) {
-    if (!row.ligne_hash_metier) row.ligne_hash_metier = md5Hex(buildFactureBusinessHashBase(row))
-  }
 }
 
 function formatDateTime(value: string | null) {
@@ -1068,10 +1065,10 @@ export default function ImportsParametragePage() {
           { primary: 'refresh_facture_entetes_cache' },
           // Nom réel de la table : indicateur_factures_mensuel, donc fonction principale sans "s".
           // Le fallback garde la compatibilité si l'ancien alias existe encore côté Supabase.
-          { primary: 'rebuild_indicateur_factures_mensuel', fallback: 'refresh_indicateur_factures_mensuel' },
+          { primary: 'refresh_indicateur_factures_mensuel', fallback: 'refresh_indicateur_factures_mensuels' },
         ]
       : [
-          { primary: 'rebuild_indicateur_activite_mensuel', fallback: 'refresh_indicateur_activite_mensuel' },
+          { primary: 'refresh_indicateur_activite_mensuels', fallback: 'refresh_indicateur_activite_mensuel' },
         ]
 
     const messages: string[] = []
@@ -1136,160 +1133,6 @@ export default function ImportsParametragePage() {
     }
 
     return String(data || `${enabled ? 'Triggers réactivés' : 'Triggers désactivés'} sur ${config.key}.`)
-  }
-
-  async function deleteAllRowsFromTable(tableName: string) {
-    const { error: deleteError } = await supabase.from(tableName).delete().not('id', 'is', null)
-    if (deleteError) throw new Error(`Vidage de la table ${tableName} impossible : ${deleteError.message}`)
-  }
-  async function clearActivityImportTables() {
-    await deleteAllRowsFromTable('activite_lignes')
-    await deleteAllRowsFromTable('indicateur_activite_mensuel')
-  }
-  async function ensureReferenceRowsForLineImport(rows: GenericRow[], config: TableConfig) {
-    if (!isLineTableKey(config.key) || !rows.length) return { articlesCreated: 0, tiersCreated: 0 }
-
-    const nowIso = new Date().toISOString()
-    const queryChunkSize = 500
-
-    const articleByRef = new Map<string, GenericRow>()
-    rows.forEach((row) => {
-      const reference = String(row.reference_article ?? '').trim()
-      if (!reference || articleByRef.has(reference)) return
-      articleByRef.set(reference, {
-        reference_article: reference,
-        designation: row.designation ? String(row.designation).trim() : null,
-        updated_at: nowIso,
-      })
-    })
-
-    let articlesCreated = 0
-    const articleRefs = Array.from(articleByRef.keys())
-
-    for (let i = 0; i < articleRefs.length; i += queryChunkSize) {
-      const chunk = articleRefs.slice(i, i + queryChunkSize)
-      const { data, error } = await supabase
-        .from('ref_articles')
-        .select('reference_article')
-        .in('reference_article', chunk)
-
-      if (error) {
-        throw new Error('Contrôle référentiel articles impossible : ' + error.message)
-      }
-
-      const existing = new Set((data || []).map((row: GenericRow) => String(row.reference_article ?? '').trim()))
-      const missingRows = chunk
-        .filter((reference) => !existing.has(reference))
-        .map((reference) => articleByRef.get(reference))
-        .filter(Boolean) as GenericRow[]
-
-      if (missingRows.length) {
-        const { error: upsertError } = await supabase
-          .from('ref_articles')
-          .upsert(missingRows, { onConflict: 'reference_article' })
-
-        if (upsertError) {
-          throw new Error('Création automatique des articles manquants impossible : ' + upsertError.message)
-        }
-
-        articlesCreated += missingRows.length
-      }
-    }
-
-    const tiersByNumero = new Map<string, GenericRow>()
-    rows.forEach((row) => {
-      const numero = String(row.numero_tiers_entete ?? '').trim()
-      if (!numero || tiersByNumero.has(numero)) return
-      tiersByNumero.set(numero, {
-        numero,
-        intitule: row.intitule_tiers_entete ? String(row.intitule_tiers_entete).trim() : null,
-        updated_at: nowIso,
-      })
-    })
-
-    let tiersCreated = 0
-    const tiersNumeros = Array.from(tiersByNumero.keys())
-
-    for (let i = 0; i < tiersNumeros.length; i += queryChunkSize) {
-      const chunk = tiersNumeros.slice(i, i + queryChunkSize)
-      const { data, error } = await supabase
-        .from('ref_tiers')
-        .select('numero')
-        .in('numero', chunk)
-
-      if (error) {
-        throw new Error('Contrôle référentiel tiers impossible : ' + error.message)
-      }
-
-      const existing = new Set((data || []).map((row: GenericRow) => String(row.numero ?? '').trim()))
-      const missingRows = chunk
-        .filter((numero) => !existing.has(numero))
-        .map((numero) => tiersByNumero.get(numero))
-        .filter(Boolean) as GenericRow[]
-
-      if (missingRows.length) {
-        const { error: upsertError } = await supabase
-          .from('ref_tiers')
-          .upsert(missingRows, { onConflict: 'numero' })
-
-        if (upsertError) {
-          throw new Error('Création automatique des tiers manquants impossible : ' + upsertError.message)
-        }
-
-        tiersCreated += missingRows.length
-      }
-    }
-
-    return { articlesCreated, tiersCreated }
-  }
-  async function rejectFactureRowsAlreadyImported(rows: GenericRow[]) {
-    if (!rows.length) return { rowsToKeep: rows, rejectedRows: [] as ImportRejectRow[] }
-
-    const pieces = Array.from(new Set(rows.map((row) => String(row.numero_piece ?? '').trim()).filter(Boolean)))
-    if (!pieces.length) return { rowsToKeep: rows, rejectedRows: [] as ImportRejectRow[] }
-
-    const existingBusinessKeys = new Set<string>()
-    const existingHashes = new Set<string>()
-    const queryChunkSize = 500
-
-    for (let i = 0; i < pieces.length; i += queryChunkSize) {
-      const chunk = pieces.slice(i, i + queryChunkSize)
-      const { data, error: existingError } = await supabase
-        .from('facture_lignes')
-        .select('ligne_hash_metier,numero_piece,date_facture,numero_tiers_entete,reference_article,quantite,montant_ht,marge_valeur')
-        .in('numero_piece', chunk)
-
-      if (existingError) {
-        throw new Error('Contrôle doublon métier impossible sur facture_lignes : ' + existingError.message)
-      }
-
-      ;(data || []).forEach((existing: GenericRow) => {
-        existingBusinessKeys.add(buildFactureBusinessHashBase(existing))
-        const hash = String(existing.ligne_hash_metier ?? '').trim()
-        if (hash) existingHashes.add(hash)
-      })
-    }
-
-    const rowsToKeep: GenericRow[] = []
-    const rejectedRows: ImportRejectRow[] = []
-
-    rows.forEach((row, index) => {
-      const businessKey = buildFactureBusinessHashBase(row)
-      const hash = String(row.ligne_hash_metier ?? '').trim()
-      const alreadyImported = existingBusinessKeys.has(businessKey) || (hash ? existingHashes.has(hash) : false)
-
-      if (alreadyImported) {
-        rejectedRows.push({
-          type: 'Doublon import',
-          message: 'Ligne ' + (index + 2) + ' rejetée : ligne métier déjà présente en base avant import (numero_piece=' + (row.numero_piece || '—') + ', date_facture=' + (row.date_facture || '—') + ', tiers=' + (row.numero_tiers_entete || '—') + ', article=' + (row.reference_article || '—') + ').',
-        })
-        return
-      }
-
-      rowsToKeep.push(row)
-    })
-
-    return { rowsToKeep, rejectedRows }
   }
 
   async function filterRowsThatReallyNeedUpsert(rows: GenericRow[], config: TableConfig) {
@@ -1401,7 +1244,6 @@ export default function ImportsParametragePage() {
       setImportProgress(`${shouldPilotTriggers ? 'Étape 2/6' : 'Étape 1/3'} : lecture et contrôle du fichier Excel…`)
 
       const parsedRows = await parseExcelRows(file, config)
-      if (config.key === 'facture_lignes') await addFactureBusinessHashes(parsedRows)
       const parseErrors = parsedRows.flatMap((row) => Array.isArray(row.__errors) ? row.__errors : [])
       const cleanedRows = parsedRows.map(({ __errors, ...row }) => row)
       const { valid, errors } = validateRows(cleanedRows, config)
@@ -1419,45 +1261,35 @@ export default function ImportsParametragePage() {
         throw new Error(errors.slice(0, 10).join('\n') || 'Aucune ligne valide à importer.')
       }
 
-      updateImportStep('check_existing', 'running', config.key === 'activite_lignes' ? 'Vidage de activite_lignes et indicateur_activite_mensuel…' : 'Contrôle des clés déjà présentes en base…')
-      setImportProgress(config.key === 'activite_lignes' ? 'Étape 3/6 : vidage de activite_lignes et indicateur_activite_mensuel…' : (shouldPilotTriggers ? 'Étape 3/6' : 'Étape 2/3') + ' : vérification des lignes déjà présentes…')
-
-      let candidateRows = deduplicatedRows
-      let businessRejectedRows: ImportRejectRow[] = []
-
-      if (config.key === 'activite_lignes') {
-        await clearActivityImportTables()
-        const refs = await ensureReferenceRowsForLineImport(candidateRows, config)
-        updateImportStep('check_existing', 'done', 'activite_lignes et indicateur_activite_mensuel vidées. Aucun contrôle doublon appliqué sur l’activité. Référentiels complétés : ' + refs.articlesCreated + ' article(s), ' + refs.tiersCreated + ' tiers.')
-      } else if (config.key === 'facture_lignes') {
-        const businessCheck = await rejectFactureRowsAlreadyImported(deduplicatedRows)
-        candidateRows = businessCheck.rowsToKeep
-        businessRejectedRows = businessCheck.rejectedRows
-        const refs = await ensureReferenceRowsForLineImport(candidateRows, config)
-        updateImportStep('check_existing', 'done', deduplicatedRows.length + ' ligne(s) contrôlée(s). ' + businessRejectedRows.length + ' ligne(s) rejetée(s) car déjà présentes dans un import précédent. Référentiels complétés : ' + refs.articlesCreated + ' article(s), ' + refs.tiersCreated + ' tiers.')
-      } else {
-        updateImportStep('check_existing', 'done', 'Contrôle standard terminé.')
-      }
+      updateImportStep('check_existing', 'running', 'Contrôle des clés déjà présentes en base…')
+      setImportProgress(`${shouldPilotTriggers ? 'Étape 3/6' : 'Étape 2/3'} : vérification des lignes déjà présentes…`)
 
       const chunkSize = getUpsertChunkSize(config.key)
       const chunksToWrite: Array<{ rows: GenericRow[], from: number }> = []
       let skippedUnchangedTotal = 0
       let checkedRows = 0
 
-      for (let i = 0; i < candidateRows.length; i += chunkSize) {
-        const chunk = candidateRows.slice(i, i + chunkSize)
+      for (let i = 0; i < deduplicatedRows.length; i += chunkSize) {
+        const chunk = deduplicatedRows.slice(i, i + chunkSize)
         const from = i + 1
-        const to = Math.min(i + chunk.length, candidateRows.length)
-        setImportProgress((shouldPilotTriggers ? 'Étape 3/6' : 'Étape 2/3') + ' : analyse lignes ' + from + ' à ' + to + ' / ' + candidateRows.length)
-        const { rowsToUpsert, skippedUnchanged } = config.key === 'activite_lignes' ? { rowsToUpsert: chunk, skippedUnchanged: 0 } : await filterRowsThatReallyNeedUpsert(chunk, config)
+        const to = Math.min(i + chunk.length, deduplicatedRows.length)
+
+        setImportProgress(
+          `${shouldPilotTriggers ? 'Étape 3/6' : 'Étape 2/3'} : analyse lignes ${from} à ${to} / ${deduplicatedRows.length}`
+        )
+
+        const { rowsToUpsert, skippedUnchanged } = await filterRowsThatReallyNeedUpsert(chunk, config)
         skippedUnchangedTotal += skippedUnchanged
         checkedRows += chunk.length
+
         if (rowsToUpsert.length) chunksToWrite.push({ rows: rowsToUpsert, from })
       }
 
-      if (config.key !== 'facture_lignes' && config.key !== 'activite_lignes') {
-        updateImportStep('check_existing', 'done', checkedRows + ' ligne(s) contrôlée(s). ' + skippedUnchangedTotal + ' ligne(s) déjà identique(s) ignorée(s).')
-      }
+      updateImportStep(
+        'check_existing',
+        'done',
+        `${checkedRows} ligne(s) contrôlée(s). ${skippedUnchangedTotal} ligne(s) déjà identique(s) ignorée(s).`
+      )
 
       updateImportStep('upsert', 'running', 'Écriture dans la table principale…')
       setImportProgress(`${shouldPilotTriggers ? 'Étape 4/6' : 'Étape 3/3'} : import dans ${config.label}…`)
@@ -1470,34 +1302,29 @@ export default function ImportsParametragePage() {
       updateImportStep('upsert', 'done', `${imported} ligne(s) nouvelle(s) ou modifiée(s) écrite(s).`)
 
       if (shouldPilotTriggers) {
-        updateImportStep('refresh_caches', 'running', 'Rafraîchissement des agrégats/cache…')
-        setImportProgress('Étape 5/6 : mise à jour des agrégats/cache avec triggers désactivés…')
-        const refreshMessages = await refreshLineCaches(config.key, { silentMissingFunctions: true })
-        updateImportStep('refresh_caches', 'done', refreshMessages.join(' '))
-
         updateImportStep('enable_triggers', 'running', 'Réactivation en cours…')
-        setImportProgress('Étape 6/6 : réactivation des triggers…')
+        setImportProgress('Étape 5/6 : réactivation des triggers…')
         const triggerMessage = await setImportUserTriggers(config, true)
         triggersDisabled = false
         updateImportStep('enable_triggers', 'done', triggerMessage)
+
+        updateImportStep('refresh_caches', 'running', 'Rafraîchissement des agrégats/cache…')
+        setImportProgress('Étape 6/6 : mise à jour des agrégats/cache…')
+        const refreshMessages = await refreshLineCaches(config.key, { silentMissingFunctions: true })
+        updateImportStep('refresh_caches', 'done', refreshMessages.join(' '))
       }
 
       const technicalMessages = [...parseErrors, ...errors, ...duplicates]
-      const importRejectRows = [
-        ...technicalMessages.map((message) => ({ type: 'Information import', message })),
-        ...businessRejectedRows,
-      ]
-      setLastRejects(importRejectRows)
+      setLastRejects(technicalMessages.map((message) => ({ type: 'Information import', message })))
 
       finalMessage =
-        imported + ' ligne(s) nouvelle(s) ou modifiée(s) écrite(s) dans ' + config.label + '. ' +
-        skippedUnchangedTotal + ' ligne(s) déjà identique(s) ignorée(s). ' +
-        (errors.length + businessRejectedRows.length) + ' rejet(s), dont ' + businessRejectedRows.length +
-        ' doublon(s) d\'import métier. ' + duplicates.length + ' doublon(s) dans le fichier.' +
-        (shouldPilotTriggers ? ' Agrégats/cache mis à jour et triggers réactivés.' : '')
+        `${imported} ligne(s) nouvelle(s) ou modifiée(s) écrite(s) dans ${config.label}. ` +
+        `${skippedUnchangedTotal} ligne(s) déjà identique(s) ignorée(s). ` +
+        `${errors.length} rejet(s). ${duplicates.length} doublon(s) dans le fichier.` +
+        (shouldPilotTriggers ? ' Triggers réactivés et agrégats/cache mis à jour.' : '')
 
       setMessage(finalMessage)
-      if (importRejectRows.length) setError(importRejectRows.slice(0, 20).map((reject) => reject.message).join('\n'))
+      if (technicalMessages.length) setError(technicalMessages.slice(0, 20).join('\n'))
       importSucceeded = true
 
       await loadStats()
