@@ -81,7 +81,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
     {
       label: 'Base clients',
       items: [
-        { label: 'MAJ Base', path: '/clients', accessKey: 'can_clients' },
         { label: 'Liste clients', path: '/carte', accessKey: 'can_carte' },
         { label: 'Clients Cegeclim', path: '/clients_cegeclim', accessKey: 'can_clients_cegeclim' },
         { label: 'Suivi Prospects', path: '/suivi prospects', accessKey: 'can_suivi_prospects' },
@@ -113,9 +112,10 @@ function AppShell({ children }: { children: React.ReactNode }) {
         { label: 'Indicateurs', path: '/Indicateurs', accessKey: 'can_dashboard' }],
     },
     {
-      label: 'Autorisations',
+      label: 'Parametrage & MAJ',
       items: [{ label: 'Autorisations', path: '/autorisation', accessKey: 'can_autorisation' },
-                { label: 'Import Données', path: '/Import', accessKey: 'can_autorisation' }
+                { label: 'MAJ Base clients', path: '/clients', accessKey: 'can_clients' },
+                { label: 'MAJ Données Activité', path: '/Import', accessKey: 'can_autorisation' }
       ],
     },
   ]
@@ -228,7 +228,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
             </div>
 
             <div style={styles.center}>
-              PROSPECTION NOUVEAUX CLIENTS
+              SUIVI COMMERCIAL & PROSPECT
             </div>
 
             <div style={styles.right}>

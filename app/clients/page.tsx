@@ -258,6 +258,7 @@ export default function ClientsPage() {
   const [savingSireneParams, setSavingSireneParams] = useState(false)
   const [uploadingCsv, setUploadingCsv] = useState(false)
   const [refreshingRge, setRefreshingRge] = useState(false)
+  const [refreshingCapacite, setRefreshingCapacite] = useState(false)
 
   const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(null)
   const [allowedDepartements, setAllowedDepartements] = useState<string[]>([])
@@ -488,6 +489,36 @@ export default function ClientsPage() {
       alert('Erreur MAJ RGE : ' + (error?.message || String(error)))
     } finally {
       setRefreshingRge(false)
+    }
+  }
+
+
+  async function launchCapaciteRefresh() {
+    setRefreshingCapacite(true)
+    try {
+      const res = await fetch('/api/capacite', { method: 'POST' })
+      const data = await res.json().catch(() => null)
+
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || 'Erreur lors de la mise à jour capacité ADEME')
+      }
+
+      alert(
+        `Mise à jour capacité froid/clim ADEME terminée\n` +
+          `Lignes source : ${data.nb_rows_source ?? 0}\n` +
+          `Lignes cible froid/clim : ${data.nb_rows_target ?? 0}\n` +
+          `Lignes cache agrégées : ${data.nb_rows_imported ?? 0}\n` +
+          `Clients mis à jour : ${data.nb_rows_updated ?? 0}\n` +
+          `Lignes avec date délivrance : ${data.nb_target_rows_with_date_delivrance ?? 0}\n` +
+          `Lignes avec date fin validité : ${data.nb_target_rows_with_date_fin_validite ?? 0}`
+      )
+
+      await loadPage()
+    } catch (error: any) {
+      console.error(error)
+      alert('Erreur MAJ capacité ADEME : ' + (error?.message || String(error)))
+    } finally {
+      setRefreshingCapacite(false)
     }
   }
 
@@ -869,6 +900,25 @@ export default function ClientsPage() {
                     disabled={refreshingRge}
                   >
                     {refreshingRge ? 'MAJ RGE en cours...' : 'MAJ RGE'}
+                  </button>
+                </div>
+              </div>
+
+
+              <div style={{ ...styles.importBox, gridColumn: '1 / span 2' }}>
+                <h3 style={styles.optionTitle}>Option 4 : MAJ capacité froid/clim ADEME</h3>
+                <div style={styles.optionText}>
+                  Télécharge le référentiel ADEME des opérateurs attestés gaz fluorés, filtre le secteur froid et climatisation, alimente la table cache capacité puis met à jour les champs capacité de la table clients.
+                </div>
+
+                <div style={styles.buttonRow}>
+                  <button
+                    type="button"
+                    onClick={launchCapaciteRefresh}
+                    style={styles.primaryButton}
+                    disabled={refreshingCapacite}
+                  >
+                    {refreshingCapacite ? 'MAJ capacité en cours...' : 'MAJ capacité'}
                   </button>
                 </div>
               </div>

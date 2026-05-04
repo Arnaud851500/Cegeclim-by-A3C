@@ -34,6 +34,29 @@ function normalizeSiret(value: unknown): string {
   return String(value ?? '').replace(/\D/g, '').trim()
 }
 
+function normalizeText(value: unknown): string {
+  return String(value ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+}
+
+function isPlausibleFranceLatLng(lat: number, lng: number) {
+  return lat >= 41 && lat <= 52 && lng >= -6 && lng <= 10
+}
+
+function isAddressCoherentWithClient(row: ClientRow, formattedAddress: string | null) {
+  const address = normalizeText(formattedAddress)
+  const cp = String(row.codePostalEtablissement || '').trim()
+  const city = normalizeText(row.libelleCommuneEtablissement)
+
+  const cpOk = cp.length > 0 && address.includes(cp)
+  const cityOk = city.length > 0 && address.includes(city)
+
+  return cpOk && cityOk
+}
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -314,6 +337,34 @@ export async function POST(request: Request) {
 
         const lat = geocoded.result.lat
         const lng = geocoded.result.lng
+
+        if (!isPlausibleFranceLatLng(lat, lng)) {
+          results.push({
+            id: row.id,
+            siret: row.siret,
+            name: row.raison_sociale_affichee,
+            status: 'error',
+            usedAddress: geocoded.usedAddress,
+            latitude: lat,
+            longitude: lng,
+            error: 'Coordonnées rejetées : hors plage France métropolitaine',
+          })
+          continue
+        }
+
+        if (!isAddressCoherentWithClient(row, geocoded.result.formattedAddress)) {
+          results.push({
+            id: row.id,
+            siret: row.siret,
+            name: row.raison_sociale_affichee,
+            status: 'error',
+            usedAddress: geocoded.usedAddress,
+            latitude: lat,
+            longitude: lng,
+            error: `Coordonnées rejetées : adresse Google incohérente avec ${row.codePostalEtablissement || ''} ${row.libelleCommuneEtablissement || ''}`.trim(),
+          })
+          continue
+        }
 
         const { error: updateError } = await supabase
           .from('clients')

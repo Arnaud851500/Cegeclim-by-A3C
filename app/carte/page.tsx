@@ -110,7 +110,13 @@ type ClientRow = {
   prospect_comment: string | null
   client_a_suivre: boolean | null
   capital_social: string | null
-  rge_domaines_travaux : string | null
+  rge_domaines_travaux: string | null
+  capacite_gaz: boolean | null
+  capacite_gaz_numero: string | null
+  capacite_gaz_type: string | null
+  capacite_gaz_date_delivrance: string | null
+  capacite_gaz_date_fin_validite: string | null
+  capacite_gaz_last_check_at: string | null
 }
 type CapitalSocialFilterOption =
   | 'NC'
@@ -777,7 +783,13 @@ async function fetchAllClients(): Promise<{ rows: ClientRow[]; totalCount: numbe
         prospect_comment,
         client_a_suivre,
         capital_social,
-        rge_domaines_travaux
+        rge_domaines_travaux,
+        capacite_gaz,
+        capacite_gaz_numero,
+        capacite_gaz_type,
+        capacite_gaz_date_delivrance,
+        capacite_gaz_date_fin_validite,
+        capacite_gaz_last_check_at
       `,
         { count: 'exact' }
       )
@@ -847,7 +859,13 @@ async function fetchClientsInitialBatch(): Promise<{ rows: ClientRow[]; totalCou
       prospect_comment,
       client_a_suivre,
       capital_social,
-      rge_domaines_travaux
+      rge_domaines_travaux,
+      capacite_gaz,
+      capacite_gaz_numero,
+      capacite_gaz_type,
+      capacite_gaz_date_delivrance,
+      capacite_gaz_date_fin_validite,
+      capacite_gaz_last_check_at
     `,
       { count: 'exact' }
     )
@@ -962,7 +980,13 @@ async function fetchClientBySiret(siret: string): Promise<ClientRow | null> {
       prospect_comment,
       client_a_suivre,
       capital_social,
-      rge_domaines_travaux
+      rge_domaines_travaux,
+      capacite_gaz,
+      capacite_gaz_numero,
+      capacite_gaz_type,
+      capacite_gaz_date_delivrance,
+      capacite_gaz_date_fin_validite,
+      capacite_gaz_last_check_at
     `
     )
     .eq('siret', siret)
@@ -1203,6 +1227,7 @@ async function saveSelectedClientField(field: 'prospect_comment' | 'prospect_sta
   const [selectedClientScope, setSelectedClientScope] = useState<'Tous' | 'Cegeclim' | 'Prospects'>('Tous')
   const [selectedProspectStatuses, setSelectedProspectStatuses] = useState<ProspectStatusValue[]>([])
   const [selectedRgeFilter, setSelectedRgeFilter] = useState<'TOUS' | 'OUI' | 'NON'>('TOUS')
+  const [selectedCapaciteGazFilter, setSelectedCapaciteGazFilter] = useState<'TOUS' | 'OUI' | 'NON'>('TOUS')
   const [selectedCapitalSocialFilters, setSelectedCapitalSocialFilters] =
   useState<CapitalSocialFilterOption[]>([])
 
@@ -1261,6 +1286,7 @@ async function saveSelectedClientField(field: 'prospect_comment' | 'prospect_sta
     selectedClientScope,
     selectedProspectStatuses,
     selectedRgeFilter,
+    selectedCapaciteGazFilter,
     selectedCapitalSocialFilters,
     includeNoDistance,
     onlyContactable,
@@ -1567,6 +1593,14 @@ function isRowRge(row: any) {
   const domaines = String(row?.rge_domaines_travaux || '').trim()
   return domaines.length > 0
 }
+
+function isRowCapaciteGaz(row: any) {
+  if (row?.capacite_gaz === true) return true
+
+  const numero = String(row?.capacite_gaz_numero || '').trim()
+  const type = String(row?.capacite_gaz_type || '').trim()
+  return numero.length > 0 || type.length > 0
+}
   async function enrichBatch(rows: ClientRow[]) {
     const targets = rows.filter((row) => row.siret).slice(0, MAX_BATCH_ENRICH)
 
@@ -1801,8 +1835,12 @@ function matchesMapCommonFilters(row: ClientRow) {
   }
 
   const rowIsRge = isRowRge(row)
+  const rowHasCapaciteGaz = isRowCapaciteGaz(row)
+
   if (selectedRgeFilter === 'OUI' && !rowIsRge) return false
   if (selectedRgeFilter === 'NON' && rowIsRge) return false
+  if (selectedCapaciteGazFilter === 'OUI' && !rowHasCapaciteGaz) return false
+  if (selectedCapaciteGazFilter === 'NON' && rowHasCapaciteGaz) return false
   if (!matchesCapitalSocialFilters(row.capital_social, selectedCapitalSocialFilters)) return false
 
   if (excludeDesignationND) {
@@ -1852,6 +1890,7 @@ const mapCegeclimPoints = useMemo(() => {
   onlyContactable,
   selectedProspectStatuses,
   selectedRgeFilter,
+  selectedCapaciteGazFilter,
   selectedCapitalSocialFilters,
   excludeDesignationND,
   excludeFutureCreation,
@@ -1879,6 +1918,7 @@ const mapProspectPoints = useMemo(() => {
   onlyContactable,
   selectedProspectStatuses,
   selectedRgeFilter,
+  selectedCapaciteGazFilter,
   selectedCapitalSocialFilters,
   excludeDesignationND,
   excludeFutureCreation,
@@ -2236,6 +2276,7 @@ const ageRangeTitle = useMemo(
       const completeness = getCompletenessPercent(row)
       const isCegeclim = isClientPresentInCegeclim(row, activeCegeclimBySiret)
       const rowIsRge = isRowRge(row)
+      const rowHasCapaciteGaz = isRowCapaciteGaz(row)
 
       if (selectedClientScope === 'Cegeclim' && !isCegeclim) return false
     if (selectedClientScope === 'Prospects' && isCegeclim) return false
@@ -2270,6 +2311,8 @@ const ageRangeTitle = useMemo(
       }
       if (selectedRgeFilter === 'OUI' && !rowIsRge) return false
       if (selectedRgeFilter === 'NON' && rowIsRge) return false
+      if (selectedCapaciteGazFilter === 'OUI' && !rowHasCapaciteGaz) return false
+      if (selectedCapaciteGazFilter === 'NON' && rowHasCapaciteGaz) return false
       if (!matchesCapitalSocialFilters(row.capital_social, selectedCapitalSocialFilters)) return false
       if (excludeFutureCreation && isFutureDate(row.dateCreationEtablissement)) return false
       if (onlyContactable && !(row.telephone || row.email || row.contactable)) return false
@@ -2340,6 +2383,7 @@ const ageRangeTitle = useMemo(
     activeCegeclimBySiret,
     selectedProspectStatuses,
     selectedRgeFilter,
+    selectedCapaciteGazFilter,
     selectedCapitalSocialFilters,
   ])
 
@@ -3428,6 +3472,11 @@ const selectedClientMapReason = useMemo(() => {
         `Effectifs SIRENE : ${pdfText(client.trancheEffectifsEtablissement)}`,
         `Capital Social : ${pdfText(client.capital_social)}`,
         `RGE : ${pdfText(client.rge_domaines_travaux)}`,
+        `Capacité froid/clim : ${isRowCapaciteGaz(client) ? 'OUI' : 'NON'}`,
+        `N° capacité : ${pdfText(client.capacite_gaz_numero)}`,
+        `Type capacité : ${pdfText(client.capacite_gaz_type)}`,
+        `Date délivrance capacité : ${formatDateFr(client.capacite_gaz_date_delivrance)}`,
+        `Date fin validité capacité : ${formatDateFr(client.capacite_gaz_date_fin_validite)}`,
         `Présent base CEGECLIM : ${isClientPresentInCegeclim(client, activeCegeclimBySiret) ? getClientCegeclimCode(client, activeCegeclimBySiret) : 'NON'}`,
       ])
 
@@ -3781,6 +3830,19 @@ const selectedClientMapReason = useMemo(() => {
                       <select
                         value={selectedRgeFilter}
                         onChange={(e) => setSelectedRgeFilter(e.target.value as 'TOUS' | 'OUI' | 'NON')}
+                        style={selectLikeStyle}
+                      >
+                        <option value="TOUS">TOUS</option>
+                        <option value="OUI">OUI</option>
+                        <option value="NON">NON</option>
+                      </select>
+                    </div>
+
+                    <div style={{ minWidth: 170 }}>
+                      <div style={filterLabelStyle}>Capacité froid/clim :</div>
+                      <select
+                        value={selectedCapaciteGazFilter}
+                        onChange={(e) => setSelectedCapaciteGazFilter(e.target.value as 'TOUS' | 'OUI' | 'NON')}
                         style={selectLikeStyle}
                       >
                         <option value="TOUS">TOUS</option>
@@ -4250,6 +4312,19 @@ const selectedClientMapReason = useMemo(() => {
                       </select>
                     </div>
 
+                    <div style={{ minWidth: 170 }}>
+                      <div style={filterLabelStyle}>Capacité froid/clim :</div>
+                      <select
+                        value={selectedCapaciteGazFilter}
+                        onChange={(e) => setSelectedCapaciteGazFilter(e.target.value as 'TOUS' | 'OUI' | 'NON')}
+                        style={selectLikeStyle}
+                      >
+                        <option value="TOUS">TOUS</option>
+                        <option value="OUI">OUI</option>
+                        <option value="NON">NON</option>
+                      </select>
+                    </div>
+
                     <div style={{ width: 180 }}>
                       <MultiSelectHorizontal
                         label="Capital Social :"
@@ -4411,7 +4486,8 @@ const selectedClientMapReason = useMemo(() => {
                                       <div>
                                         {client.libelleCommuneEtablissement || '—'} {client.dateCreationEtablissement || ''}
                                       </div>
-                                      <div><b>RGE :</b> {client.rge == null ? 'NC' : client.rge ? 'OUI' : 'NON'}</div>
+                                      <div><b>RGE :</b> {isRowRge(client) ? 'OUI' : 'NON'}</div>
+                                      <div><b>Capacité froid/clim :</b> {isRowCapaciteGaz(client) ? 'OUI' : 'NON'}</div>
                                       <div><b>Tél :</b> {client.telephone || 'NC'}</div>
                                       <div><b>Capital social :</b> {client.capital_social || 'NC'}</div>
                                       <div><b>Dirigeant :</b> {client.nom_dirigeant || 'NC'}</div>
@@ -4668,6 +4744,11 @@ const selectedClientMapReason = useMemo(() => {
                       <div><b>Effectifs SIRENE :</b> {selectedClient.trancheEffectifsEtablissement || 'NC'}</div>
                       <div><b>Capital Social :</b> {selectedClient.capital_social ?? 'NC'}</div>
                       <div><b>RGE :</b> {selectedClient.rge_domaines_travaux ?? 'NC'}</div>
+                      <div><b>Capacité froid/clim :</b> {isRowCapaciteGaz(selectedClient) ? 'OUI' : 'NON'}</div>
+                      <div><b>N° capacité :</b> {selectedClient.capacite_gaz_numero ?? 'NC'}</div>
+                      <div><b>Type capacité :</b> {selectedClient.capacite_gaz_type ?? 'NC'}</div>
+                      <div><b>Date délivrance capacité :</b> {formatDateFr(selectedClient.capacite_gaz_date_delivrance)}</div>
+                      <div><b>Date fin validité capacité :</b> {formatDateFr(selectedClient.capacite_gaz_date_fin_validite)}</div>
                       <div><b>Présent base CEGECLIM :</b> {isClientPresentInCegeclim(selectedClient, activeCegeclimBySiret) ? getClientCegeclimCode(selectedClient, activeCegeclimBySiret) : selectedClientCegeclimSommeil ? 'SOMMEIL' : 'NON'}</div>
                     </div>
                   </div>

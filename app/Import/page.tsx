@@ -91,6 +91,9 @@ const DEFAULT_UPSERT_CHUNK_SIZE = 250
 // Passage à 25 pour les grosses tables : évite les requêtes trop longues et facilite le diagnostic.
 const LINE_UPSERT_CHUNK_SIZE = 25
 
+const RGE_REFRESH_ENDPOINTS = ['/api/rge/refresh', '/api/rge_refrech', '/api/rge-refresh', '/api/rge']
+const CAPACITE_REFRESH_ENDPOINTS = ['/api/capacite']
+
 function isLineTableKey(key: TableKey) {
   return LINE_TABLE_KEYS.includes(key)
 }
@@ -751,6 +754,7 @@ export default function ImportsParametragePage() {
   const [importProgress, setImportProgress] = useState<string | null>(null)
   const [importSteps, setImportSteps] = useState<ImportStep[]>([])
   const [refreshingCaches, setRefreshingCaches] = useState(false)
+  const [refreshingExternalRefs, setRefreshingExternalRefs] = useState(false)
 
   const selectedConfig = useMemo(
     () => TABLES.find((t) => t.key === selectedTableKey) || TABLES[0],
@@ -1099,6 +1103,67 @@ export default function ImportsParametragePage() {
       setError(e?.message || String(e))
     } finally {
       setRefreshingCaches(false)
+    }
+  }
+
+  async function postFirstAvailable(endpoints: string[], label: string) {
+    let lastError: Error | null = null
+
+    for (const endpoint of endpoints) {
+      try {
+        const response = await fetch(endpoint, { method: 'POST' })
+        const rawText = await response.text()
+
+        let payload: any = null
+        try {
+          payload = rawText ? JSON.parse(rawText) : null
+        } catch {
+          payload = { raw: rawText }
+        }
+
+        if ((response.status === 404 || response.status === 405) && endpoint !== endpoints[endpoints.length - 1]) {
+          lastError = new Error(`${label} : endpoint ${endpoint} indisponible`)
+          continue
+        }
+
+        if (!response.ok || payload?.success === false) {
+          throw new Error(payload?.error || payload?.message || `${label} : erreur HTTP ${response.status}`)
+        }
+
+        return { endpoint, payload }
+      } catch (e: any) {
+        lastError = e instanceof Error ? e : new Error(String(e))
+        if (endpoint !== endpoints[endpoints.length - 1]) continue
+      }
+    }
+
+    throw lastError || new Error(`${label} : endpoint introuvable`)
+  }
+
+  async function handleRefreshExternalReferentials() {
+    setRefreshingExternalRefs(true)
+    setMessage(null)
+    setError(null)
+    setLastRejects([])
+    setImportProgress('Mise à jour ADEME RGE + capacité froid/clim en cours…')
+
+    try {
+      const rgeResult = await postFirstAvailable(RGE_REFRESH_ENDPOINTS, 'RGE ADEME')
+      const capaciteResult = await postFirstAvailable(CAPACITE_REFRESH_ENDPOINTS, 'Capacité ADEME')
+
+      const rgeUpdated = rgeResult.payload?.nb_rows_updated ?? rgeResult.payload?.nb_rows_imported ?? 'NC'
+      const capaciteUpdated = capaciteResult.payload?.nb_rows_updated ?? capaciteResult.payload?.nb_rows_imported ?? 'NC'
+
+      setMessage(
+        `Mise à jour terminée. RGE : ${rgeUpdated} lignes. Capacité froid/clim : ${capaciteUpdated} lignes.`
+      )
+      await loadStats()
+      await loadRows(selectedConfig)
+    } catch (e: any) {
+      setError(e?.message || String(e))
+    } finally {
+      setImportProgress(null)
+      setRefreshingExternalRefs(false)
     }
   }
 
@@ -1495,6 +1560,14 @@ export default function ImportsParametragePage() {
                 className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold hover:bg-slate-100"
               >
                 Actualiser
+              </button>
+              <button
+                type="button"
+                onClick={handleRefreshExternalReferentials}
+                disabled={refreshingExternalRefs || importing}
+                className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800 hover:bg-emerald-100 disabled:opacity-50"
+              >
+                {refreshingExternalRefs ? 'MAJ ADEME…' : 'MAJ RGE + capacité ADEME'}
               </button>
               {isLineTableKey(selectedConfig.key) && (
                 <button

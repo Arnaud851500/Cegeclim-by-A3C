@@ -1,10 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabaseAdmin'
 
+type GoogleLatLng = {
+  latitude?: number
+  longitude?: number
+}
+
 type GoogleSearchPlace = {
   id?: string
   displayName?: { text?: string }
   formattedAddress?: string
+  location?: GoogleLatLng
 }
 
 type GooglePlaceDetails = {
@@ -16,6 +22,7 @@ type GooglePlaceDetails = {
   rating?: number
   userRatingCount?: number
   googleMapsUri?: string
+  location?: GoogleLatLng
 }
 
 type InpiFormalityContent = {
@@ -97,15 +104,60 @@ function isGoodGoogleMatch(params: {
   const googleName = normalizeText(params.googleName)
   const googleAddress = normalizeText(params.googleAddress)
 
+  const cityOk = clientCity.length > 0 && googleAddress.includes(clientCity)
+  const postalOk = clientPostalCode.length > 0 && googleAddress.includes(clientPostalCode)
+
+  // Sécurité importante : ne jamais accepter un résultat Google uniquement sur le nom.
+  // Plusieurs sociétés peuvent avoir le même nom dans des villes différentes.
+  // Pour éviter les points à plusieurs centaines de km, on exige le CP + la ville.
+  if (!(cityOk && postalOk)) return false
+
   const nameOk =
     clientName.length > 0 &&
     googleName.length > 0 &&
     (googleName.includes(clientName) || clientName.includes(googleName))
 
-  const cityOk = clientCity.length > 0 && googleAddress.includes(clientCity)
-  const postalOk = clientPostalCode.length > 0 && googleAddress.includes(clientPostalCode)
+  // Le nom est un plus, mais le couple CP + ville est la vraie barrière de sécurité.
+  return nameOk || true
+}
 
-  return nameOk || (cityOk && postalOk)
+function buildGoogleSearchQueries(client: any) {
+  const name = String(client?.raison_sociale_affichee || '').trim()
+  const address = String(client?.adresse_complete || '').trim()
+  const postalCode = String(client?.codePostalEtablissement || '').trim()
+  const city = String(client?.libelleCommuneEtablissement || '').trim()
+
+  return Array.from(
+    new Set(
+      [
+        [name, address, postalCode, city, 'France'],
+        [address, postalCode, city, 'France'],
+        [name, postalCode, city, 'France'],
+        [name, city, postalCode, 'France'],
+      ]
+        .map((parts) => parts.filter(Boolean).join(' ').trim())
+        .filter(Boolean)
+    )
+  )
+}
+
+function extractGoogleLatLng(place: GoogleSearchPlace | GooglePlaceDetails | null | undefined) {
+  const latitude = place?.location?.latitude
+  const longitude = place?.location?.longitude
+
+  if (typeof latitude !== 'number' || typeof longitude !== 'number') return null
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null
+
+  return { latitude, longitude }
+}
+
+function isPlausibleFranceLatLng(latLng: { latitude: number; longitude: number }) {
+  return (
+    latLng.latitude >= 41 &&
+    latLng.latitude <= 52 &&
+    latLng.longitude >= -6 &&
+    latLng.longitude <= 10
+  )
 }
 
 async function searchGooglePlace(textQuery: string) {
@@ -114,7 +166,7 @@ async function searchGooglePlace(textQuery: string) {
     headers: {
       'Content-Type': 'application/json',
       'X-Goog-Api-Key': process.env.GOOGLE_MAPS_API_KEY!,
-      'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress',
+      'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.location',
     },
     body: JSON.stringify({
       textQuery,
@@ -138,7 +190,7 @@ async function getGooglePlaceDetails(placeId: string) {
     headers: {
       'X-Goog-Api-Key': process.env.GOOGLE_MAPS_API_KEY!,
       'X-Goog-FieldMask':
-        'id,displayName,formattedAddress,nationalPhoneNumber,websiteUri,rating,userRatingCount,googleMapsUri',
+        'id,displayName,formattedAddress,nationalPhoneNumber,websiteUri,rating,userRatingCount,googleMapsUri,location',
     },
   })
 
@@ -422,21 +474,17 @@ export async function POST(req: NextRequest) {
 
     let googleDetails: GooglePlaceDetails | null = null
     let googlePlaceId: string | null = null
+    let googleAcceptedLatLng: { latitude: number; longitude: number } | null = null
     let googleErrorMessage: string | null = null
 
-    const textQuery = [
-      client.raison_sociale_affichee,
-      client.codePostalEtablissement,
-      client.libelleCommuneEtablissement,
-    ]
-      .filter(Boolean)
-      .join(' ')
-
     try {
-      const candidates = await searchGooglePlace(textQuery)
+      const queries = buildGoogleSearchQueries(client)
+      let bestCandidate: GoogleSearchPlace | null = null
 
-      if (candidates.length > 0) {
-        const bestCandidate =
+      for (const textQuery of queries) {
+        const candidates = await searchGooglePlace(textQuery)
+
+        bestCandidate =
           candidates.find((candidate) =>
             isGoodGoogleMatch({
               clientName: client.raison_sociale_affichee,
@@ -445,14 +493,34 @@ export async function POST(req: NextRequest) {
               googleName: candidate.displayName?.text,
               googleAddress: candidate.formattedAddress,
             })
-          ) || candidates[0]
+          ) || null
 
-        if (bestCandidate.id) {
-          googlePlaceId = bestCandidate.id
-          googleDetails = await getGooglePlaceDetails(bestCandidate.id)
+        if (bestCandidate) break
+      }
+
+      if (bestCandidate?.id) {
+        googlePlaceId = bestCandidate.id
+        googleDetails = await getGooglePlaceDetails(bestCandidate.id)
+
+        const latLng = extractGoogleLatLng(googleDetails) || extractGoogleLatLng(bestCandidate)
+
+        const detailsAddressOk = isGoodGoogleMatch({
+          clientName: client.raison_sociale_affichee,
+          clientCity: client.libelleCommuneEtablissement,
+          clientPostalCode: client.codePostalEtablissement,
+          googleName: googleDetails?.displayName?.text || bestCandidate.displayName?.text,
+          googleAddress: googleDetails?.formattedAddress || bestCandidate.formattedAddress,
+        })
+
+        if (latLng && detailsAddressOk && isPlausibleFranceLatLng(latLng)) {
+          googleAcceptedLatLng = latLng
+        } else if (latLng && !detailsAddressOk) {
+          googleErrorMessage = `Coordonnées Google rejetées : CP/ville incohérents avec ${client.codePostalEtablissement || ''} ${client.libelleCommuneEtablissement || ''}`.trim()
+        } else if (latLng && !isPlausibleFranceLatLng(latLng)) {
+          googleErrorMessage = 'Coordonnées Google rejetées : coordonnées hors France métropolitaine'
         }
       } else {
-        googleErrorMessage = 'Aucun résultat Google Maps'
+        googleErrorMessage = 'Aucun résultat Google Maps fiable avec le même code postal et la même ville'
       }
     } catch (googleError) {
       googleErrorMessage =
@@ -533,13 +601,20 @@ export async function POST(req: NextRequest) {
       google_place_id: googleDetails?.id || googlePlaceId,
       google_rating: googleDetails?.rating || null,
       google_user_ratings_total: googleDetails?.userRatingCount || null,
-      google_maps_url: googleDetails?.googleMapsUri || null,
+      google_maps_url: googleDetails?.googleMapsUri || client.google_maps_url || null,
       potentiel_score: potentielScore,
       enrichment_status: hasAnyEnrichment ? 'ok' : 'erreur',
       last_enrichment_at: new Date().toISOString(),
       enrichment_source: sources || null,
       enrichment_error: errors,
       contactable: finalContactable,
+    }
+
+    // Les coordonnées utilisées par la carte ne sont mises à jour que si Google
+    // renvoie une localisation strictement cohérente avec le CP + la ville du client.
+    if (googleAcceptedLatLng) {
+      updatePayload.latitude = googleAcceptedLatLng.latitude
+      updatePayload.longitude = googleAcceptedLatLng.longitude
     }
 
     const { data: updated, error: updateError } = await supabaseAdmin
@@ -559,6 +634,8 @@ export async function POST(req: NextRequest) {
       warning: errors,
       siren_used_for_inpi: siren,
       inpi_preview: inpiData,
+      google_location_updated: Boolean(googleAcceptedLatLng),
+      google_location_preview: googleAcceptedLatLng,
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Erreur inconnue'
