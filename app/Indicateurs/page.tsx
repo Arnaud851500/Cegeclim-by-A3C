@@ -26,6 +26,7 @@ type DetailMode = 'tiers' | 'documents' | 'agregats'
 type ChartMetric = 'ca' | 'margePct'
 type ChartVision = 'mensuel' | 'cumul'
 type BridgeVision = 'mois' | 'ytd'
+type BridgeMetric = 'valeur' | 'pourcentage'
 
 type AggRow = {
   source: SourceType
@@ -135,6 +136,7 @@ type BridgeData = {
   previousTotal: number
   currentTotal: number
   items: BridgeItem[]
+  valueType?: 'currency' | 'percent'
 }
 
 type WaterfallPoint = {
@@ -245,6 +247,11 @@ function formatCurrency(value: number) {
 
 function formatKEur(value: number) {
   return `${new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 0 }).format(Math.round((value || 0) / 1000))} K€`
+}
+
+function formatBridgeValue(value: number, valueType: BridgeData['valueType']) {
+  if (valueType === 'percent') return `${new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 1 }).format(value || 0)} %`
+  return formatKEur(value)
 }
 
 function formatNumber(value: number) {
@@ -726,6 +733,18 @@ function PeriodToggle({ value, onChange, monthLabel }: { value: BridgeVision; on
   )
 }
 
+function BridgeMetricToggle({ value, onChange }: { value: BridgeMetric; onChange: (v: BridgeMetric) => void }) {
+  return (
+    <div>
+      <SelectHint title="Cliquer pour changer l'indicateur" />
+      <div className="flex gap-2">
+        <button type="button" onClick={(e) => { e.preventDefault(); e.stopPropagation(); onChange('pourcentage'); e.currentTarget.blur() }} className={`rounded-lg border px-5 py-2 text-sm font-black ${value === 'pourcentage' ? 'border-[#0b3140] bg-[#1f6f89] text-white' : 'border-[#0b3140] bg-white text-slate-900'}`}>Marge %</button>
+        <button type="button" onClick={(e) => { e.preventDefault(); e.stopPropagation(); onChange('valeur'); e.currentTarget.blur() }} className={`rounded-lg border px-5 py-2 text-sm font-black ${value === 'valeur' ? 'border-[#0b3140] bg-[#1f6f89] text-white' : 'border-[#0b3140] bg-white text-slate-900'}`}>Marge €</button>
+      </div>
+    </div>
+  )
+}
+
 function WaterfallChart({ data, angledLabels = false }: { data: BridgeData; angledLabels?: boolean }) {
   let cumulative = data.previousTotal
 
@@ -743,7 +762,7 @@ function WaterfallChart({ data, angledLabels = false }: { data: BridgeData; angl
       name: data.startLabel,
       start: 0,
       end: Math.max(data.previousTotal, 0),
-      labelValue: formatKEur(data.previousTotal),
+      labelValue: formatBridgeValue(data.previousTotal, data.valueType),
       fill: COLOR_TOTAL,
       isTotal: true,
     },
@@ -758,7 +777,7 @@ function WaterfallChart({ data, angledLabels = false }: { data: BridgeData; angl
       name: shortenLabel(item.label.toUpperCase(), angledLabels ? 12 : 16),
       start: before,
       end: after,
-      labelValue: `${item.delta >= 0 ? '+' : ''}${formatKEur(item.delta)}`,
+      labelValue: `${item.delta >= 0 ? '+' : ''}${formatBridgeValue(item.delta, data.valueType)}`,
       fill: item.delta >= 0 ? COLOR_POSITIVE : COLOR_NEGATIVE,
     })
 
@@ -770,13 +789,16 @@ function WaterfallChart({ data, angledLabels = false }: { data: BridgeData; angl
     name: data.endLabel,
     start: 0,
     end: Math.max(data.currentTotal, 0),
-    labelValue: formatKEur(data.currentTotal),
+    labelValue: formatBridgeValue(data.currentTotal, data.valueType),
     fill: COLOR_TOTAL,
     isTotal: true,
   })
 
-  const yMin = Math.max(0, data.previousTotal * 0.6)
-  const yMax = Math.max(...cumulatives, data.previousTotal, data.currentTotal) * 1.08
+  const rawMin = Math.min(...cumulatives, data.previousTotal, data.currentTotal, 0)
+  const rawMax = Math.max(...cumulatives, data.previousTotal, data.currentTotal, 0)
+  const amplitude = Math.max(1, rawMax - rawMin)
+  const yMin = data.valueType === 'percent' ? Math.min(0, rawMin - amplitude * 0.18) : Math.max(0, rawMin - amplitude * 0.18)
+  const yMax = rawMax + amplitude * 0.18
   const ticks = Array.from({ length: 5 }, (_, index) => yMin + ((yMax - yMin) / 4) * index)
 
   const width = 1000
@@ -807,7 +829,7 @@ function WaterfallChart({ data, angledLabels = false }: { data: BridgeData; angl
             <g key={`tick-${tick}`}>
               <line x1={margin.left} x2={width - margin.right} y1={yy} y2={yy} stroke={COLOR_GRID} strokeDasharray="5 5" />
               <text x={margin.left - 10} y={yy + 4} textAnchor="end" className="fill-slate-500 text-[12px] font-black">
-                {formatKEur(tick).replace(' K€', 'k€')}
+                {data.valueType === 'percent' ? `${Number(tick).toFixed(1).replace('.', ',')}%` : formatKEur(tick).replace(' K€', 'k€')}
               </text>
             </g>
           )
@@ -891,6 +913,9 @@ export default function IndicateursCaMargePage() {
   const [analysisMonthOverride, setAnalysisMonthOverride] = useState<number>(DEFAULT_ANALYSIS_MONTH)
   const [bridgeAgencyVision, setBridgeAgencyVision] = useState<BridgeVision>('mois')
   const [bridgeFamilyVision, setBridgeFamilyVision] = useState<BridgeVision>('mois')
+  const [bridgeMarginAgencyVision, setBridgeMarginAgencyVision] = useState<BridgeVision>('mois')
+  const [bridgeMarginFamilyVision, setBridgeMarginFamilyVision] = useState<BridgeVision>('mois')
+  const [bridgeMarginMetric, setBridgeMarginMetric] = useState<BridgeMetric>('pourcentage')
   const [tableMode, setTableMode] = useState<TableMode>('collaborateur')
   const [detailMode, setDetailMode] = useState<DetailMode>('tiers')
   const [detailContext, setDetailContext] = useState<DetailContext | null>(null)
@@ -1151,11 +1176,68 @@ export default function IndicateursCaMargePage() {
       previousTotal: previousRows.reduce((s, r) => s + r.ca_ht, 0),
       currentTotal: currentRows.reduce((s, r) => s + r.ca_ht, 0),
       items,
+      valueType: 'currency',
     }
   }
 
-  const bridgeAgencyData = useMemo(() => buildBridge('agence_collaborateur', bridgeAgencyVision), [baseFilteredRows, years.n, years.n1, analysisMonth, ytdLabel, bridgeAgencyVision])
-  const bridgeFamilyData = useMemo(() => buildBridge('famille_macro', bridgeFamilyVision), [baseFilteredRows, years.n, years.n1, analysisMonth, ytdLabel, bridgeFamilyVision])
+  function buildMarginBridge(groupKey: keyof Pick<AggRow, 'agence_collaborateur' | 'famille_macro'>, vision: BridgeVision, metric: BridgeMetric): BridgeData {
+    const currentRows = baseFilteredRows.filter((r) => r.annee === years.n && (vision === 'mois' ? r.mois === analysisMonth : r.mois <= analysisMonth))
+    const previousRows = baseFilteredRows.filter((r) => r.annee === years.n1 && (vision === 'mois' ? r.mois === analysisMonth : r.mois <= analysisMonth))
+
+    const currentTotal = sumRows(currentRows)
+    const previousTotal = sumRows(previousRows)
+
+    const currentByGroup = new Map<string, { marge: number; ca: number }>()
+    const previousByGroup = new Map<string, { marge: number; ca: number }>()
+
+    currentRows.forEach((row) => {
+      const key = String(row[groupKey] || 'NON RENSEIGNE')
+      const existing = currentByGroup.get(key) || { marge: 0, ca: 0 }
+      existing.marge += row.marge_valeur
+      existing.ca += row.ca_ht
+      currentByGroup.set(key, existing)
+    })
+
+    previousRows.forEach((row) => {
+      const key = String(row[groupKey] || 'NON RENSEIGNE')
+      const existing = previousByGroup.get(key) || { marge: 0, ca: 0 }
+      existing.marge += row.marge_valeur
+      existing.ca += row.ca_ht
+      previousByGroup.set(key, existing)
+    })
+
+    const keys = Array.from(new Set([...currentByGroup.keys(), ...previousByGroup.keys()]))
+    const items = keys.map((key) => {
+      const previous = previousByGroup.get(key) || { marge: 0, ca: 0 }
+      const current = currentByGroup.get(key) || { marge: 0, ca: 0 }
+
+      if (metric === 'pourcentage') {
+        const previousContribution = previousTotal.ca ? (previous.marge / previousTotal.ca) * 100 : 0
+        const currentContribution = currentTotal.ca ? (current.marge / currentTotal.ca) * 100 : 0
+        return { key, label: key, previous: previousContribution, current: currentContribution, delta: currentContribution - previousContribution }
+      }
+
+      return { key, label: key, previous: previous.marge, current: current.marge, delta: current.marge - previous.marge }
+    }).filter((item) => Math.abs(item.delta) >= (metric === 'pourcentage' ? 0.01 : 1))
+
+    const periodLabel = vision === 'mois' ? analysisMonthLabel : ytdLabel
+    const groupLabel = groupKey === 'agence_collaborateur' ? 'AGENCE' : 'FAMILLE MACRO'
+
+    return {
+      title: `${periodLabel} : BRIDGE MARGE ${metric === 'pourcentage' ? '%' : '€'} PAR ${groupLabel} N-1 => N`,
+      startLabel: `${metric === 'pourcentage' ? 'MARGE %' : 'MARGE'} ${years.n1}`,
+      endLabel: `${metric === 'pourcentage' ? 'MARGE %' : 'MARGE'} ${years.n}`,
+      previousTotal: metric === 'pourcentage' ? previousTotal.margePct : previousTotal.marge,
+      currentTotal: metric === 'pourcentage' ? currentTotal.margePct : currentTotal.marge,
+      items,
+      valueType: metric === 'pourcentage' ? 'percent' : 'currency',
+    }
+  }
+
+  const bridgeAgencyData = useMemo(() => buildBridge('agence_collaborateur', bridgeAgencyVision), [baseFilteredRows, years.n, years.n1, analysisMonth, analysisMonthLabel, ytdLabel, bridgeAgencyVision])
+  const bridgeFamilyData = useMemo(() => buildBridge('famille_macro', bridgeFamilyVision), [baseFilteredRows, years.n, years.n1, analysisMonth, analysisMonthLabel, ytdLabel, bridgeFamilyVision])
+  const bridgeMarginAgencyData = useMemo(() => buildMarginBridge('agence_collaborateur', bridgeMarginAgencyVision, bridgeMarginMetric), [baseFilteredRows, years.n, years.n1, analysisMonth, analysisMonthLabel, ytdLabel, bridgeMarginAgencyVision, bridgeMarginMetric])
+  const bridgeMarginFamilyData = useMemo(() => buildMarginBridge('famille_macro', bridgeMarginFamilyVision, bridgeMarginMetric), [baseFilteredRows, years.n, years.n1, analysisMonth, analysisMonthLabel, ytdLabel, bridgeMarginFamilyVision, bridgeMarginMetric])
 
   const recap = useMemo(() => {
     const selectedCollaborateurs = filters.collaborateurs.length ? filters.collaborateurs : availableFilters.collaborateurs
@@ -1547,17 +1629,22 @@ export default function IndicateursCaMargePage() {
     vision,
     setVision,
     angledLabels = false,
+    metricControl,
   }: {
     title: string
     data: BridgeData
     vision: BridgeVision
     setVision: (v: BridgeVision) => void
     angledLabels?: boolean
+    metricControl?: ReactNode
   }) {
     return (
       <section className="rounded-[2.5rem] border-[3px] border-[#0b3140] bg-white p-3 shadow-sm">
         <div className="mb-1 flex flex-wrap items-start justify-between gap-3">
-          <PeriodToggle value={vision} onChange={setVision} monthLabel={analysisMonthLabel} />
+          <div className="flex flex-wrap gap-3">
+            <PeriodToggle value={vision} onChange={setVision} monthLabel={analysisMonthLabel} />
+            {metricControl}
+          </div>
           <div className="rounded-lg border-2 border-[#0b3140] bg-white px-6 py-2 text-center text-sm font-black uppercase text-slate-900">{title}</div>
         </div>
         <WaterfallChart data={data} angledLabels={angledLabels} />
@@ -1636,6 +1723,21 @@ export default function IndicateursCaMargePage() {
           <MainChartCard />
           <BridgeCard title={bridgeAgencyData.title} data={bridgeAgencyData} vision={bridgeAgencyVision} setVision={setBridgeAgencyVision} angledLabels />
           <BridgeCard title={bridgeFamilyData.title} data={bridgeFamilyData} vision={bridgeFamilyVision} setVision={setBridgeFamilyVision} />
+          <BridgeCard
+            title={bridgeMarginAgencyData.title}
+            data={bridgeMarginAgencyData}
+            vision={bridgeMarginAgencyVision}
+            setVision={setBridgeMarginAgencyVision}
+            angledLabels
+            metricControl={<BridgeMetricToggle value={bridgeMarginMetric} onChange={setBridgeMarginMetric} />}
+          />
+          <BridgeCard
+            title={bridgeMarginFamilyData.title}
+            data={bridgeMarginFamilyData}
+            vision={bridgeMarginFamilyVision}
+            setVision={setBridgeMarginFamilyVision}
+            metricControl={<BridgeMetricToggle value={bridgeMarginMetric} onChange={setBridgeMarginMetric} />}
+          />
         </section>
 
         <section className="rounded-[2.5rem] border-[3px] border-[#0b3140] bg-white p-6 shadow-sm">
