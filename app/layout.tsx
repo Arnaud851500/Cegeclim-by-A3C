@@ -109,7 +109,9 @@ function AppShell({ children }: { children: React.ReactNode }) {
     {
       label: 'Indicateurs',
       items: [
-        { label: 'Indicateurs', path: '/Indicateurs', accessKey: 'can_dashboard' }],
+        { label: 'Indicateurs', path: '/Indicateurs', accessKey: 'can_dashboard' },
+        { label: 'Atelier Analyse', path: '/atelier-analyse', accessKey: 'can_autorisation' }
+      ],
     },
     {
       label: 'Parametrage & MAJ',

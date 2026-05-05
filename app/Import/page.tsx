@@ -1,4 +1,3 @@
-
 'use client'
 
 import { ChangeEvent, useEffect, useMemo, useState } from 'react'
@@ -57,101 +56,41 @@ type ImportResult = {
   errors: string[]
 }
 
-type ImportStepStatus = 'waiting' | 'running' | 'done' | 'error'
+type ImportStepStatus = 'pending' | 'running' | 'done' | 'error'
 
 type ImportStep = {
-  id: string
+  key: string
   label: string
   status: ImportStepStatus
   detail?: string
 }
 
-const LINE_IMPORT_STEP_TEMPLATE: ImportStep[] = [
-  { id: 'disable_triggers', label: '1. Désactivation temporaire des triggers', status: 'waiting' },
-  { id: 'read_file', label: '2. Lecture et contrôle du fichier Excel', status: 'waiting' },
-  { id: 'check_existing', label: '3. Vérification des lignes déjà présentes', status: 'waiting' },
-  { id: 'upsert', label: '4. Import des données dans la table principale', status: 'waiting' },
-  { id: 'enable_triggers', label: '5. Réactivation des triggers', status: 'waiting' },
-  { id: 'refresh_caches', label: '6. Mise à jour des agrégats/cache', status: 'waiting' },
+const PREVIEW_LIMIT = 100
+const DUPLICATE_LOOKUP_CHUNK_SIZE = 50
+const LINE_INSERT_CHUNK_SIZE = 10
+const REF_INSERT_CHUNK_SIZE = 250
+
+const IMPORT_STEP_TEMPLATES: ImportStep[] = [
+  { key: 'read', label: 'Lecture du fichier Excel', status: 'pending' },
+  { key: 'normalize', label: 'Normalisation et mapping des colonnes', status: 'pending' },
+  { key: 'validate', label: 'Validation des champs obligatoires', status: 'pending' },
+  { key: 'reset', label: 'Nettoyage préalable des tables activité', status: 'pending' },
+  { key: 'tiers', label: 'Mise à jour automatique du référentiel tiers', status: 'pending' },
+  { key: 'duplicates', label: 'Contrôle des doublons déjà présents en base', status: 'pending' },
+  { key: 'insert', label: 'Insertion des lignes nouvelles', status: 'pending' },
+  { key: 'refresh', label: 'Mise à jour cache / agrégats', status: 'pending' },
+  { key: 'reload', label: 'Actualisation de l’écran', status: 'pending' },
 ]
-
-const STANDARD_IMPORT_STEP_TEMPLATE: ImportStep[] = [
-  { id: 'read_file', label: '1. Lecture et contrôle du fichier Excel', status: 'waiting' },
-  { id: 'check_existing', label: '2. Vérification des lignes déjà présentes', status: 'waiting' },
-  { id: 'upsert', label: '3. Import des données dans la table principale', status: 'waiting' },
-]
-
-
-const LINE_TABLE_KEYS: TableKey[] = ['facture_lignes', 'activite_lignes']
-
-// Lots volontairement petits pour éviter les timeouts Supabase/PostgreSQL sur les grosses tables.
-// Les lignes de factures / activité déclenchent plus de contrôles : clé unique, FK tiers/articles,
-// et parfois triggers d'agrégats. 75 est un bon compromis stabilité / vitesse.
-const DEFAULT_UPSERT_CHUNK_SIZE = 250
-// Passage à 25 pour les grosses tables : évite les requêtes trop longues et facilite le diagnostic.
-const LINE_UPSERT_CHUNK_SIZE = 25
-
-const RGE_REFRESH_ENDPOINTS = ['/api/rge/refresh', '/api/rge_refrech', '/api/rge-refresh', '/api/rge']
-const CAPACITE_REFRESH_ENDPOINTS = ['/api/capacite']
-
-function isLineTableKey(key: TableKey) {
-  return LINE_TABLE_KEYS.includes(key)
-}
-
-function getUpsertChunkSize(key: TableKey) {
-  return isLineTableKey(key) ? LINE_UPSERT_CHUNK_SIZE : DEFAULT_UPSERT_CHUNK_SIZE
-}
-
-function isMissingFunctionError(error: any) {
-  const message = String(error?.message || '').toLowerCase()
-  const details = String(error?.details || '').toLowerCase()
-  const hint = String(error?.hint || '').toLowerCase()
-  const all = `${message} ${details} ${hint}`
-
-  return (
-    error?.code === '42883' ||
-    (all.includes('function') && all.includes('does not exist')) ||
-    (all.includes('could not find') && all.includes('function')) ||
-    (all.includes('schema cache') && all.includes('function'))
-  )
-}
-
-function isStatementTimeoutError(error: any) {
-  const message = String(error?.message || '').toLowerCase()
-  return error?.code === '57014' || message.includes('statement timeout') || message.includes('canceling statement due to statement timeout')
-}
-
-function comparableValue(value: any) {
-  if (value === null || value === undefined) return ''
-  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : ''
-  if (typeof value === 'boolean') return value ? 'true' : 'false'
-
-  const text = String(value).trim()
-  if (/^\\d{4}-\\d{2}-\\d{2}/.test(text)) return text.slice(0, 10)
-  return text
-}
-
-function hasBusinessDifference(nextRow: GenericRow, existingRow: GenericRow | undefined, config: TableConfig) {
-  if (!existingRow) return true
-
-  return config.columns.some((column) => {
-    const key = column.db
-    return comparableValue(nextRow[key]) !== comparableValue(existingRow[key])
-  })
-}
 
 const TABLES: TableConfig[] = [
   {
     key: 'ref_familles',
     label: 'Familles',
     primaryKey: 'famille',
-    description: 'Référentiel familles articles / tiers. Le fichier Excel peut ne contenir que famille et famille_macro ; les autres champs restent optionnels.',
+    description: 'Référentiel familles articles / tiers.',
     columns: [
-      { db: 'famille', label: 'Famille', required: true, aliases: ['Code famille', 'Famille article'] },
-      { db: 'famille_macro', label: 'Famille macro', aliases: ['Macro famille', 'Famille macro article'] },
-      { db: 'libelle_famille', label: 'Libellé famille', aliases: ['Libelle_famille', 'Libelle famille', 'Libellé_famille', 'Libellé de famille'] },
-      { db: 'pert_qte', label: 'Pert. qté', type: 'boolean', aliases: ['Pert_qte', 'Pert qte', 'Pertinence quantité', 'Pertinence qte', 'Pert QTE'] },
-      { db: 'split', label: 'Split', aliases: ['Split famille', 'Groupe split'] },
+      { db: 'famille', label: 'Famille', required: true },
+      { db: 'famille_macro', label: 'Famille macro' },
     ],
   },
   {
@@ -302,6 +241,7 @@ const TABLES: TableConfig[] = [
     description: 'Table centrale : une ligne par ligne de facture.',
     columns: [
       { db: 'ligne_hash', label: 'Clé ligne', readonly: true },
+      { db: 'ligne_hash_metier', label: 'Clé métier', readonly: true },
       { db: 'type_document', label: 'Type' },
       { db: 'numero_piece', label: 'N° pièce', required: true },
       { db: 'date_facture', label: 'Date facture', type: 'date' },
@@ -321,14 +261,27 @@ const TABLES: TableConfig[] = [
       { db: 'reference_client', label: 'Référence client' },
       { db: 'designation', label: 'Désignation' },
       { db: 'complement', label: 'Complément' },
+      { db: 'reference', label: 'Référence' },
+      { db: 'gamme_1', label: 'Gamme 1' },
+      { db: 'gamme_2', label: 'Gamme 2' },
+      { db: 'numero_serie_lot', label: 'N° série / lot' },
+      { db: 'complement_serie_lot', label: 'Complément série / lot' },
       { db: 'quantite', label: 'Quantité', type: 'number', aliases: ['Qté', 'Quantité facturée', 'Qté facturée'] },
+      { db: 'qte_ressource', label: 'Qté ressource', type: 'number' },
+      { db: 'qte_colisee', label: 'Qté colisée', type: 'number' },
+      { db: 'conditionnement', label: 'Conditionnement' },
+      { db: 'qte_devis', label: 'Qté devis', type: 'number' },
+      { db: 'qte_commandee', label: 'Qté commandée', type: 'number' },
       { db: 'qte_preparee', label: 'Qté préparée', type: 'number', aliases: ['Qté prépar', 'Qté préparée', 'Qte preparee'] },
       { db: 'qte_livree', label: 'Qté livrée', type: 'number', aliases: ['Qté livrée', 'Qte livree'] },
-      { db: 'poids_net_glc', label: 'Poids net GLC', type: 'number', aliases: ['Poids net g', 'Poids net', 'Poids net GLC'] },
-      { db: 'poids_brut_gl', label: 'Poids brut GL', type: 'number', aliases: ['Poids brut g', 'Poids brut', 'Poids brut GL'] },
+      { db: 'poids_net_global', label: 'Poids net global', type: 'number', aliases: ['Poids net g', 'Poids net', 'Poids net GLC', 'Poids net global'] },
+      { db: 'poids_brut_global', label: 'Poids brut global', type: 'number', aliases: ['Poids brut g', 'Poids brut', 'Poids brut GL', 'Poids brut global'] },
       { db: 'date_livraison', label: 'Date livraison', type: 'date', aliases: ['Date livraison', 'Date livrai'] },
       { db: 'pu_ht', label: 'PU HT', type: 'number', aliases: ['P.U. HT', 'PU HT'] },
       { db: 'pu_ttc', label: 'PU TTC', type: 'number', aliases: ['P.U. TTC', 'PU TTC'] },
+      { db: 'pu_devise', label: 'PU devise', type: 'number' },
+      { db: 'pu_bon_commande', label: 'PU bon commande', type: 'number' },
+      { db: 'ressource', label: 'Ressource' },
       { db: 'remise', label: 'Remise', type: 'number', numberFormat: 'percent_ratio', aliases: ['Remise %', '% remise'] },
       { db: 'pu_net', label: 'PU net', type: 'number', aliases: ['P.U. net', 'PU net'] },
       { db: 'pu_net_ttc', label: 'PU net TTC', type: 'number', aliases: ['P.U. net TTC', 'PU net TTC'] },
@@ -348,6 +301,8 @@ const TABLES: TableConfig[] = [
       { db: 'collaborateur', label: 'Collaborateur' },
       { db: 'depot', label: 'Dépôt' },
       { db: 'affaire', label: 'Affaire' },
+      { db: 'date_peremption', label: 'Date péremption', type: 'date' },
+      { db: 'date_fabrication', label: 'Date fabrication', type: 'date' },
       { db: 'projet', label: 'Projet' },
     ],
   },
@@ -375,8 +330,8 @@ const TABLES: TableConfig[] = [
       { db: 'quantite', label: 'Quantité', type: 'number', aliases: ['Qté', 'Quantité facturée', 'Qté facturée'] },
       { db: 'qte_preparee', label: 'Qté préparée', type: 'number', aliases: ['Qté prépar', 'Qté préparée', 'Qte preparee'] },
       { db: 'qte_livree', label: 'Qté livrée', type: 'number', aliases: ['Qté livrée', 'Qte livree'] },
-      { db: 'poids_net_glc', label: 'Poids net GLC', type: 'number', aliases: ['Poids net g', 'Poids net', 'Poids net GLC'] },
-      { db: 'poids_brut_gl', label: 'Poids brut GL', type: 'number', aliases: ['Poids brut g', 'Poids brut', 'Poids brut GL'] },
+      { db: 'poids_net_global', label: 'Poids net global', type: 'number', aliases: ['Poids net g', 'Poids net', 'Poids net GLC', 'Poids net global'] },
+      { db: 'poids_brut_global', label: 'Poids brut global', type: 'number', aliases: ['Poids brut g', 'Poids brut', 'Poids brut GL', 'Poids brut global'] },
       { db: 'date_livraison', label: 'Date livraison', type: 'date', aliases: ['Date livraison', 'Date livrai'] },
       { db: 'pu_ht', label: 'PU HT', type: 'number', aliases: ['P.U. HT', 'PU HT'] },
       { db: 'pu_ttc', label: 'PU TTC', type: 'number', aliases: ['P.U. TTC', 'PU TTC'] },
@@ -403,24 +358,15 @@ const TABLES: TableConfig[] = [
   },
 ]
 
+
+const LINE_TABLE_KEYS: TableKey[] = ['facture_lignes', 'activite_lignes']
+
+function isLineTableKey(key: TableKey) {
+  return LINE_TABLE_KEYS.includes(key)
+}
+
 const EXTRA_HEADER_ALIASES: Record<TableKey, Record<string, string>> = {
-  ref_familles: {
-    famille: 'famille',
-    code_famille: 'famille',
-    famille_article: 'famille',
-    famille_macro: 'famille_macro',
-    macro_famille: 'famille_macro',
-    famille_macro_article: 'famille_macro',
-    libelle_famille: 'libelle_famille',
-    libelle_de_famille: 'libelle_famille',
-    pert_qte: 'pert_qte',
-    pert_qte_: 'pert_qte',
-    pertinence_quantite: 'pert_qte',
-    pertinence_qte: 'pert_qte',
-    split: 'split',
-    split_famille: 'split',
-    groupe_split: 'split',
-  },
+  ref_familles: {},
   ref_code_naf: {},
   ref_collaborateurs: {},
   ref_articles: {},
@@ -446,10 +392,10 @@ const EXTRA_HEADER_ALIASES: Record<TableKey, Record<string, string>> = {
     qte_prepare: 'qte_preparee',
     qte_preparee: 'qte_preparee',
     qte_livree: 'qte_livree',
-    poids_net_g: 'poids_net_glc',
-    poids_net_glc: 'poids_net_glc',
-    poids_brut_g: 'poids_brut_gl',
-    poids_brut_gl: 'poids_brut_gl',
+    poids_net_g: 'poids_net_global',
+    poids_net_glc: 'poids_net_global',
+    poids_brut_g: 'poids_brut_global',
+    poids_brut_gl: 'poids_brut_global',
     date_livrai: 'date_livraison',
     date_livraison: 'date_livraison',
     p_u_net: 'pu_net',
@@ -497,10 +443,10 @@ const EXTRA_HEADER_ALIASES: Record<TableKey, Record<string, string>> = {
     qte_prepare: 'qte_preparee',
     qte_preparee: 'qte_preparee',
     qte_livree: 'qte_livree',
-    poids_net_g: 'poids_net_glc',
-    poids_net_glc: 'poids_net_glc',
-    poids_brut_g: 'poids_brut_gl',
-    poids_brut_gl: 'poids_brut_gl',
+    poids_net_g: 'poids_net_global',
+    poids_net_glc: 'poids_net_global',
+    poids_brut_g: 'poids_brut_global',
+    poids_brut_gl: 'poids_brut_global',
     date_livrai: 'date_livraison',
     date_livraison: 'date_livraison',
     p_u_net: 'pu_net',
@@ -603,66 +549,67 @@ function normalizeBoolean(value: any) {
 function normalizeDate(value: any) {
   if (value === undefined || value === null || value === '') return null
 
+  const pad2 = (n: number) => String(n).padStart(2, '0')
+
+  // IMPORTANT : ne jamais utiliser toISOString() pour une date métier Excel.
+  // Excel fournit des dates sans notion de fuseau horaire. toISOString() convertit en UTC
+  // et peut donc retirer 1 jour en France selon l'heure/fuseau du navigateur.
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return value.toISOString().slice(0, 10)
+    return `${value.getFullYear()}-${pad2(value.getMonth() + 1)}-${pad2(value.getDate())}`
   }
 
-  if (typeof value === 'number') {
+  // Cas Excel serial number, ex : 46142.
+  // XLSX.SSF.parse_date_code renvoie directement y/m/d sans conversion timezone.
+  if (typeof value === 'number' && Number.isFinite(value)) {
     const parsed = XLSX.SSF.parse_date_code(value)
     if (!parsed) return null
-    const yyyy = parsed.y
-    const mm = String(parsed.m).padStart(2, '0')
-    const dd = String(parsed.d).padStart(2, '0')
-    return yyyy + '-' + mm + '-' + dd
+    return `${parsed.y}-${pad2(parsed.m)}-${pad2(parsed.d)}`
   }
 
   const text = String(value).trim()
   if (!text) return null
 
+  // Format ISO ou pseudo ISO : YYYY-MM-DD, éventuellement suivi d'une heure.
+  // On extrait uniquement la partie date, sans passer par new Date().
+  const isoLike = text.match(/^(\d{4})[\/.-](\d{1,2})[\/.-](\d{1,2})/)
+  if (isoLike) {
+    const yyyy = isoLike[1]
+    const mm = Number(isoLike[2])
+    const dd = Number(isoLike[3])
+    if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+      return `${yyyy}-${pad2(mm)}-${pad2(dd)}`
+    }
+    return null
+  }
+
+  // Format français ou ambigu : DD/MM/YYYY ou DD-MM-YYYY.
   const frOrUs = text.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})$/)
   if (frOrUs) {
     const part1 = Number(frOrUs[1])
     const part2 = Number(frOrUs[2])
-    const yyyy = frOrUs[3].length === 2 ? '20' + frOrUs[3] : frOrUs[3]
+    const yyyy = frOrUs[3].length === 2 ? `20${frOrUs[3]}` : frOrUs[3]
 
     let dd = part1
     let mm = part2
 
+    // Si le 2e morceau > 12, c'est nécessairement MM/DD/YYYY.
     if (part2 > 12 && part1 <= 12) {
       dd = part2
       mm = part1
     }
 
     if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
-      return yyyy + '-' + String(mm).padStart(2, '0') + '-' + String(dd).padStart(2, '0')
+      return `${yyyy}-${pad2(mm)}-${pad2(dd)}`
     }
 
     return null
   }
 
-  const isoLike = text.match(/^(\d{4})[\/.-](\d{1,2})[\/.-](\d{1,2})$/)
-  if (isoLike) {
-    const yyyy = isoLike[1]
-    const part2 = Number(isoLike[2])
-    const part3 = Number(isoLike[3])
-
-    let mm = part2
-    let dd = part3
-
-    if (part2 > 12 && part3 <= 12) {
-      dd = part2
-      mm = part3
-    }
-
-    if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
-      return yyyy + '-' + String(mm).padStart(2, '0') + '-' + String(dd).padStart(2, '0')
-    }
-
-    return null
-  }
-
+  // Dernier recours : parsing JS, mais lecture en local, jamais toISOString().
   const parsed = new Date(text)
-  if (!Number.isNaN(parsed.getTime())) return parsed.toISOString().slice(0, 10)
+  if (!Number.isNaN(parsed.getTime())) {
+    return `${parsed.getFullYear()}-${pad2(parsed.getMonth() + 1)}-${pad2(parsed.getDate())}`
+  }
 
   return null
 }
@@ -685,22 +632,139 @@ function stableHash(input: string) {
   return Math.abs(hash).toString(36)
 }
 
-function buildLineHash(row: GenericRow, tableKey: TableKey, index: number) {
-  const base = [
-    tableKey,
-    row.numero_piece || '',
-    row.date_facture || row.date_piece || '',
-    row.numero_tiers_entete || '',
-    row.reference_article || '',
-    row.designation || '',
-    row.quantite ?? '',
-    row.montant_ht ?? '',
-    row.prix_revient_total ?? '',
-    row.numero_piece_bl || '',
-    index,
-  ].join('|')
+function hashText(value: any) {
+  if (value === null || value === undefined) return ''
 
-  return stableHash(base)
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return ''
+    return Number(value.toFixed(6)).toString()
+  }
+
+  const text = String(value).trim()
+  if (!text) return ''
+
+  const normalizedNumber = Number(text.replace(',', '.'))
+  if (Number.isFinite(normalizedNumber) && /^-?\d+(?:[\s.,]\d+)?$/.test(text.replace(/\s/g, ''))) {
+    return Number(normalizedNumber.toFixed(6)).toString()
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}/.test(text)) return text.slice(0, 10)
+
+  return text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .toUpperCase()
+}
+
+function buildLineBusinessSignature(row: GenericRow, tableKey: TableKey) {
+  const documentDate = tableKey === 'facture_lignes' ? row.date_facture : row.date_piece
+
+  // Clé métier volontairement stable : aucune donnée variable d'import ne doit entrer ici.
+  // Ne pas inclure : id, source_import, imported_at, updated_at, nom de fichier, index brut de ligne Excel.
+  const parts = [
+    tableKey,
+    row.type_document,
+    row.numero_piece,
+    documentDate,
+    row.numero_tiers_entete,
+    row.intitule_tiers_entete,
+    row.numero_tiers_ligne,
+    row.intitule_tiers_ligne,
+    row.numero_piece_devis,
+    row.numero_piece_bc,
+    row.numero_piece_pl,
+    row.numero_piece_bl,
+    row.date_devis,
+    row.date_bc,
+    row.date_pl,
+    row.date_bl,
+    row.reference_article,
+    row.reference_client,
+    row.designation,
+    row.complement,
+    row.reference,
+    row.gamme_1,
+    row.gamme_2,
+    row.numero_serie_lot,
+    row.complement_serie_lot,
+    row.pu_ht,
+    row.pu_ttc,
+    row.pu_devise,
+    row.pu_bon_commande,
+    row.ressource,
+    row.qte_ressource,
+    row.quantite,
+    row.qte_colisee,
+    row.conditionnement,
+    row.qte_devis,
+    row.qte_commandee,
+    row.qte_preparee,
+    row.qte_livree,
+    row.poids_net_global,
+    row.poids_brut_global,
+    row.date_livraison,
+    row.remise,
+    row.pu_net,
+    row.pu_net_ttc,
+    row.pu_net_devise,
+    row.prix_revient_unitaire,
+    row.cmup,
+    row.montant_ht,
+    row.montant_ht_devise,
+    row.taxe_1,
+    row.taxe_2,
+    row.taxe_3,
+    row.prix_revient_total,
+    row.montant_ttc,
+    row.collaborateur,
+    row.depot,
+    row.affaire,
+    row.date_peremption,
+    row.date_fabrication,
+    row.base_calcul_marge,
+    row.marge_valeur,
+    row.marge_pourcent,
+    row.projet,
+  ]
+
+  return parts.map(hashText).join('|')
+}
+
+function buildLineHashFromBusinessSignature(signature: string, occurrence: number) {
+  return stableHash(`${signature}|occurrence:${occurrence}`)
+}
+
+function assignStableLineHashes(rows: GenericRow[], config: TableConfig) {
+  if (!isLineTableKey(config.key)) return rows
+
+  const occurrenceBySignature = new Map<string, number>()
+
+  return rows.map((row) => {
+    const signature = buildLineBusinessSignature(row, config.key)
+    const occurrence = (occurrenceBySignature.get(signature) || 0) + 1
+    occurrenceBySignature.set(signature, occurrence)
+
+    const stableLineHash = buildLineHashFromBusinessSignature(signature, occurrence)
+
+    return {
+      ...row,
+      ligne_hash: stableLineHash,
+      ...(config.key === 'facture_lignes' ? { ligne_hash_metier: stableLineHash } : {}),
+      __business_signature: signature,
+      __business_occurrence: occurrence,
+    }
+  })
+}
+
+function buildLineHash(row: GenericRow, tableKey: TableKey, index: number) {
+  const signature = buildLineBusinessSignature(row, tableKey)
+  return buildLineHashFromBusinessSignature(signature, index || 1)
+}
+
+function stripTechnicalImportFields(row: GenericRow) {
+  const { __errors, __business_signature, __business_occurrence, ...clean } = row
+  return clean
 }
 
 function formatDateTime(value: string | null) {
@@ -737,6 +801,119 @@ function tableReactKey(row: GenericRow, config: TableConfig, index: number) {
   return `${config.key}-row-${index}`
 }
 
+
+function previewOrderColumn(config: TableConfig) {
+  if (isLineTableKey(config.key)) return 'imported_at'
+  if (config.columns.some((c) => c.db === 'updated_at')) return 'updated_at'
+  return config.primaryKey
+}
+
+function uniqueStrings(values: any[]) {
+  return Array.from(new Set(values.map((v) => String(v || '').trim()).filter(Boolean)))
+}
+
+const FACTURE_LIGNES_DB_COLUMNS = [
+  'id',
+  'ligne_hash',
+  'ligne_hash_metier',
+  'type_document',
+  'numero_piece',
+  'numero_tiers_entete',
+  'intitule_tiers_entete',
+  'numero_tiers_ligne',
+  'intitule_tiers_ligne',
+  'numero_piece_devis',
+  'numero_piece_bc',
+  'numero_piece_pl',
+  'numero_piece_bl',
+  'date_facture',
+  'date_devis',
+  'date_bc',
+  'date_pl',
+  'date_bl',
+  'reference_article',
+  'reference_client',
+  'designation',
+  'complement',
+  'reference',
+  'gamme_1',
+  'gamme_2',
+  'numero_serie_lot',
+  'complement_serie_lot',
+  'pu_ht',
+  'pu_ttc',
+  'pu_devise',
+  'pu_bon_commande',
+  'ressource',
+  'qte_ressource',
+  'quantite',
+  'qte_colisee',
+  'conditionnement',
+  'qte_devis',
+  'qte_commandee',
+  'qte_preparee',
+  'qte_livree',
+  'poids_net_global',
+  'poids_brut_global',
+  'date_livraison',
+  'remise',
+  'pu_net',
+  'pu_net_ttc',
+  'pu_net_devise',
+  'prix_revient_unitaire',
+  'cmup',
+  'montant_ht',
+  'montant_ht_devise',
+  'taxe_1',
+  'taxe_2',
+  'taxe_3',
+  'prix_revient_total',
+  'montant_ttc',
+  'collaborateur',
+  'depot',
+  'affaire',
+  'date_peremption',
+  'date_fabrication',
+  'base_calcul_marge',
+  'marge_valeur',
+  'marge_pourcent',
+  'projet',
+  'source_import',
+  'imported_at',
+  'updated_at',
+]
+
+function lookupColumnsForDuplicateSignature(config: TableConfig) {
+  if (config.key === 'facture_lignes') return FACTURE_LIGNES_DB_COLUMNS.join(',')
+
+  return Array.from(
+    new Set([
+      ...config.columns
+        .map((col) => col.db)
+        .filter((db) => db && !db.startsWith('__')),
+      'source_import',
+      'imported_at',
+    ])
+  ).join(',')
+}
+
+function chunkArray<T>(values: T[], chunkSize: number) {
+  const chunks: T[][] = []
+  for (let i = 0; i < values.length; i += chunkSize) chunks.push(values.slice(i, i + chunkSize))
+  return chunks
+}
+
+function toErrorMessage(error: any) {
+  if (!error) return 'Erreur inconnue'
+  if (error?.message) return String(error.message)
+  if (typeof error === 'string') return error
+  try {
+    return JSON.stringify(error)
+  } catch {
+    return String(error)
+  }
+}
+
 export default function ImportsParametragePage() {
   const [selectedTableKey, setSelectedTableKey] = useState<TableKey>('facture_lignes')
   const [stats, setStats] = useState<Record<TableKey, TableStats>>({} as Record<TableKey, TableStats>)
@@ -751,10 +928,7 @@ export default function ImportsParametragePage() {
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc')
   const [editingRow, setEditingRow] = useState<GenericRow | null>(null)
   const [lastRejects, setLastRejects] = useState<ImportRejectRow[]>([])
-  const [importProgress, setImportProgress] = useState<string | null>(null)
   const [importSteps, setImportSteps] = useState<ImportStep[]>([])
-  const [refreshingCaches, setRefreshingCaches] = useState(false)
-  const [refreshingExternalRefs, setRefreshingExternalRefs] = useState(false)
 
   const selectedConfig = useMemo(
     () => TABLES.find((t) => t.key === selectedTableKey) || TABLES[0],
@@ -840,23 +1014,28 @@ export default function ImportsParametragePage() {
     setLoading(true)
     setError(null)
 
-    const orderColumn = config.columns.some((c) => c.db === 'updated_at') ? 'updated_at' : config.primaryKey
+    const orderColumn = previewOrderColumn(config)
 
-    const { data, error: loadError } = await supabase
-      .from(config.key)
-      .select('*')
-      .order(orderColumn, { ascending: false })
-      .limit(300)
+    try {
+      const { data, error: loadError } = await supabase
+        .from(config.key)
+        .select('*')
+        .order(orderColumn, { ascending: false, nullsFirst: false })
+        .range(0, PREVIEW_LIMIT - 1)
 
-    if (loadError) {
-      setError(loadError.message)
-      setRows([])
-    } else {
+      if (loadError) throw loadError
       setRows(data || [])
+    } catch (e: any) {
+      setError(
+        `Chargement aperçu impossible : ${toErrorMessage(e)}\n` +
+          `La page n'affiche que les ${PREVIEW_LIMIT} dernières lignes. Si l'erreur persiste, vérifier l'index sur ${orderColumn}.`
+      )
+      setRows([])
+    } finally {
+      setLoading(false)
     }
-
-    setLoading(false)
   }
+
 
   useEffect(() => {
     loadStats()
@@ -951,9 +1130,6 @@ export default function ImportsParametragePage() {
             const isLineTable = isLineTableKey(config.key)
 
             if (isLineTable) {
-              if (!targetRow.ligne_hash) {
-                targetRow.ligne_hash = buildLineHash(targetRow, config.key, index)
-              }
               targetRow.imported_at = nowIso
               targetRow.source_import = file.name
             }
@@ -963,14 +1139,17 @@ export default function ImportsParametragePage() {
             return targetRow
           })
 
-          if (ignoredHeaders.length && normalizedRows[0]) {
-            normalizedRows[0].__errors = [
-              ...(Array.isArray(normalizedRows[0].__errors) ? normalizedRows[0].__errors : []),
+          const rowsWithStableHashes = assignStableLineHashes(normalizedRows, config)
+
+          if (ignoredHeaders.length && rowsWithStableHashes[0]) {
+            const firstRow = rowsWithStableHashes[0] as GenericRow
+            firstRow.__errors = [
+              ...(Array.isArray(firstRow.__errors) ? firstRow.__errors : []),
               `Colonnes Excel ignorées car non reconnues : ${ignoredHeaders.join(', ')}`,
             ]
           }
 
-          resolve(normalizedRows)
+          resolve(rowsWithStableHashes)
         } catch (e: any) {
           reject(e)
         }
@@ -1031,251 +1210,355 @@ export default function ImportsParametragePage() {
     }
   }
 
-  async function callRpcWithOptionalFallback(
-    primaryRpcName: string,
-    fallbackRpcName?: string,
-    options?: { silentMissingFunctions?: boolean }
+  function countByBusinessSignature(rows: GenericRow[]) {
+    const counts = new Map<string, number>()
+
+    rows.forEach((row) => {
+      const signature = String(row.__business_signature || '').trim()
+      if (!signature) return
+      counts.set(signature, (counts.get(signature) || 0) + 1)
+    })
+
+    return counts
+  }
+
+
+  function collectReferencedTiers(rows: GenericRow[]) {
+    const tiersByNumero = new Map<string, GenericRow>()
+
+    function addTier(numeroValue: any, intituleValue: any) {
+      const numero = String(numeroValue ?? '').trim()
+      if (!numero) return
+
+      const intitule = String(intituleValue ?? '').trim() || numero
+      const existing = tiersByNumero.get(numero)
+
+      // On conserve le libellé le plus informatif si la même référence tiers apparaît plusieurs fois.
+      if (!existing || (intitule && intitule.length > String(existing.intitule || '').length)) {
+        tiersByNumero.set(numero, {
+          numero,
+          intitule,
+        })
+      }
+    }
+
+    rows.forEach((row) => {
+      addTier(row.numero_tiers_entete, row.intitule_tiers_entete)
+      addTier(row.numero_tiers_ligne, row.intitule_tiers_ligne)
+    })
+
+    return Array.from(tiersByNumero.values())
+  }
+
+
+  async function resetActivityTablesBeforeImport(onProgress?: (detail: string) => void) {
+    onProgress?.('Vidage de activite_lignes et indicateur_activite_mensuel avant chargement')
+
+    const { error } = await supabase.rpc('reset_import_activite_tables')
+
+    if (error) {
+      throw new Error(
+        `Nettoyage préalable activité impossible : ${error.message}. ` +
+          `Crée ou vérifie la fonction SQL public.reset_import_activite_tables().`
+      )
+    }
+
+    return { ok: true }
+  }
+
+  async function runPostImportRefresh(config: TableConfig, onProgress?: (detail: string) => void) {
+    if (config.key === 'facture_lignes') {
+      onProgress?.('Rafraîchissement facture_entetes_cache')
+      const { error: cacheError } = await supabase.rpc('refresh_facture_entetes_cache')
+      if (cacheError) throw new Error(`refresh_facture_entetes_cache : ${cacheError.message}`)
+
+      onProgress?.('Rebuild indicateur_factures_mensuel')
+      const { error: factureAggError } = await supabase.rpc('rebuild_indicateur_factures_mensuel')
+      if (factureAggError) throw new Error(`rebuild_indicateur_factures_mensuel : ${factureAggError.message}`)
+
+      return 'Cache factures et indicateur factures recalculés'
+    }
+
+    if (config.key === 'activite_lignes') {
+      onProgress?.('Rebuild indicateur_activite_mensuel')
+      const { error: activiteAggError } = await supabase.rpc('rebuild_indicateur_activite_mensuel')
+      if (activiteAggError) throw new Error(`rebuild_indicateur_activite_mensuel : ${activiteAggError.message}`)
+
+      return 'Indicateur activité recalculé'
+    }
+
+    return 'Aucun refresh automatique requis pour cette table'
+  }
+
+  async function ensureReferencedTiers(
+    rows: GenericRow[],
+    config: TableConfig,
+    onProgress?: (detail: string) => void
   ) {
-    const primaryResult = await supabase.rpc(primaryRpcName)
-
-    if (!primaryResult.error) {
-      return `${primaryRpcName} exécutée.`
+    if (!isLineTableKey(config.key) || !rows.length) {
+      return { upserted: 0, skipped: true }
     }
 
-    if (fallbackRpcName && isMissingFunctionError(primaryResult.error)) {
-      const fallbackResult = await supabase.rpc(fallbackRpcName)
+    const tiers = collectReferencedTiers(rows)
+    if (!tiers.length) {
+      onProgress?.('Aucun tiers à synchroniser')
+      return { upserted: 0, skipped: false }
+    }
 
-      if (!fallbackResult.error) {
-        return `${primaryRpcName} absente, ${fallbackRpcName} exécutée.`
+    const chunks = chunkArray(tiers, REF_INSERT_CHUNK_SIZE)
+    let upserted = 0
+
+    for (let i = 0; i < chunks.length; i += 1) {
+      const chunk = chunks[i]
+      onProgress?.(`Synchronisation tiers ${i + 1}/${chunks.length} (${chunk.length} tiers)`)
+
+      const { error } = await supabase
+        .from('ref_tiers')
+        .upsert(chunk, { onConflict: 'numero', ignoreDuplicates: true })
+
+      if (error) {
+        throw new Error(
+          `Mise à jour automatique du référentiel tiers impossible : ${error.message}. ` +
+            `Vérifie que ref_tiers contient les colonnes numero et intitule, et que numero est unique.`
+        )
       }
 
-      if (options?.silentMissingFunctions && isMissingFunctionError(fallbackResult.error)) {
-        return `${primaryRpcName} / ${fallbackRpcName} ignorées : fonctions absentes.`
-      }
-
-      throw new Error(`${fallbackRpcName} : ${fallbackResult.error.message}`)
+      upserted += chunk.length
     }
 
-    if (options?.silentMissingFunctions && isMissingFunctionError(primaryResult.error)) {
-      return `${primaryRpcName} ignorée : fonction absente.`
-    }
-
-    throw new Error(`${primaryRpcName} : ${primaryResult.error.message}`)
+    return { upserted, skipped: false }
   }
 
-  async function refreshLineCaches(tableKey: TableKey, options?: { silentMissingFunctions?: boolean }) {
-    const rpcCalls = tableKey === 'facture_lignes'
-      ? [
-          { primary: 'refresh_facture_entetes_cache' },
-          // Nom réel de la table : indicateur_factures_mensuel, donc fonction principale sans "s".
-          // Le fallback garde la compatibilité si l'ancien alias existe encore côté Supabase.
-          { primary: 'refresh_indicateur_factures_mensuel', fallback: 'refresh_indicateur_factures_mensuels' },
-        ]
-      : [
-          { primary: 'refresh_indicateur_activite_mensuels', fallback: 'refresh_indicateur_activite_mensuel' },
-        ]
-
-    const messages: string[] = []
-
-    for (const rpcCall of rpcCalls) {
-      const message = await callRpcWithOptionalFallback(rpcCall.primary, rpcCall.fallback, options)
-      messages.push(message)
+  async function findExistingLineDuplicates(
+    importRows: GenericRow[],
+    config: TableConfig,
+    onProgress?: (detail: string) => void
+  ) {
+    if (!isLineTableKey(config.key) || !importRows.length) {
+      return { rowsToInsert: importRows, duplicateRejects: [] as string[] }
     }
 
-    return messages
-  }
+    const importedHashes = uniqueStrings(importRows.flatMap((row) => [row.ligne_hash_metier, row.ligne_hash]))
+    const existingHashRows: GenericRow[] = []
+    const hashChunks = chunkArray(importedHashes, DUPLICATE_LOOKUP_CHUNK_SIZE)
 
-  async function handleManualCacheRefresh() {
-    if (!isLineTableKey(selectedConfig.key)) return
+    for (let i = 0; i < hashChunks.length; i += 1) {
+      const hashChunk = hashChunks[i]
+      onProgress?.(`Recherche hash ${i + 1}/${hashChunks.length} (${hashChunk.length} clés)`)
 
-    setRefreshingCaches(true)
-    setMessage(null)
-    setError(null)
-    setLastRejects([])
-    setImportProgress(null)
+      const selectCols = config.key === 'facture_lignes'
+        ? 'ligne_hash,ligne_hash_metier,numero_piece,date_facture,reference_article,source_import,imported_at'
+        : 'ligne_hash,numero_piece,date_piece,reference_article,source_import,imported_at'
 
-    try {
-      const refreshMessages = await refreshLineCaches(selectedConfig.key, { silentMissingFunctions: true })
-      setMessage(`Rafraîchissement terminé. ${refreshMessages.join(' ')}`)
-      await loadStats()
-      await loadRows(selectedConfig)
-    } catch (e: any) {
-      setError(e?.message || String(e))
-    } finally {
-      setRefreshingCaches(false)
-    }
-  }
+      // Important : les anciennes lignes peuvent avoir seulement ligne_hash renseigné,
+      // alors que les nouvelles lignes utilisent aussi ligne_hash_metier.
+      // On contrôle donc les deux colonnes pour éviter une erreur unique constraint à l'insertion.
+      const { data: existingByTechnicalHash, error: technicalHashError } = await supabase
+        .from(config.key)
+        .select(selectCols)
+        .in('ligne_hash', hashChunk)
+        .limit(10000)
 
-  async function postFirstAvailable(endpoints: string[], label: string) {
-    let lastError: Error | null = null
+      if (technicalHashError) throw new Error(`Contrôle doublons par ligne_hash impossible : ${technicalHashError.message}`)
+      if (existingByTechnicalHash?.length) existingHashRows.push(...(existingByTechnicalHash as GenericRow[]))
 
-    for (const endpoint of endpoints) {
-      try {
-        const response = await fetch(endpoint, { method: 'POST' })
-        const rawText = await response.text()
+      if (config.key === 'facture_lignes') {
+        const { data: existingByBusinessHash, error: businessHashError } = await supabase
+          .from(config.key)
+          .select(selectCols)
+          .in('ligne_hash_metier', hashChunk)
+          .limit(10000)
 
-        let payload: any = null
-        try {
-          payload = rawText ? JSON.parse(rawText) : null
-        } catch {
-          payload = { raw: rawText }
-        }
-
-        if ((response.status === 404 || response.status === 405) && endpoint !== endpoints[endpoints.length - 1]) {
-          lastError = new Error(`${label} : endpoint ${endpoint} indisponible`)
-          continue
-        }
-
-        if (!response.ok || payload?.success === false) {
-          throw new Error(payload?.error || payload?.message || `${label} : erreur HTTP ${response.status}`)
-        }
-
-        return { endpoint, payload }
-      } catch (e: any) {
-        lastError = e instanceof Error ? e : new Error(String(e))
-        if (endpoint !== endpoints[endpoints.length - 1]) continue
+        if (businessHashError) throw new Error(`Contrôle doublons par ligne_hash_metier impossible : ${businessHashError.message}`)
+        if (existingByBusinessHash?.length) existingHashRows.push(...(existingByBusinessHash as GenericRow[]))
       }
     }
 
-    throw lastError || new Error(`${label} : endpoint introuvable`)
-  }
-
-  async function handleRefreshExternalReferentials() {
-    setRefreshingExternalRefs(true)
-    setMessage(null)
-    setError(null)
-    setLastRejects([])
-    setImportProgress('Mise à jour ADEME RGE + capacité froid/clim en cours…')
-
-    try {
-      const rgeResult = await postFirstAvailable(RGE_REFRESH_ENDPOINTS, 'RGE ADEME')
-      const capaciteResult = await postFirstAvailable(CAPACITE_REFRESH_ENDPOINTS, 'Capacité ADEME')
-
-      const rgeUpdated = rgeResult.payload?.nb_rows_updated ?? rgeResult.payload?.nb_rows_imported ?? 'NC'
-      const capaciteUpdated = capaciteResult.payload?.nb_rows_updated ?? capaciteResult.payload?.nb_rows_imported ?? 'NC'
-
-      setMessage(
-        `Mise à jour terminée. RGE : ${rgeUpdated} lignes. Capacité froid/clim : ${capaciteUpdated} lignes.`
-      )
-      await loadStats()
-      await loadRows(selectedConfig)
-    } catch (e: any) {
-      setError(e?.message || String(e))
-    } finally {
-      setImportProgress(null)
-      setRefreshingExternalRefs(false)
-    }
-  }
-
-  function initImportSteps(config: TableConfig) {
-    const template = isLineTableKey(config.key) ? LINE_IMPORT_STEP_TEMPLATE : STANDARD_IMPORT_STEP_TEMPLATE
-    setImportSteps(template.map((step) => ({ ...step })))
-  }
-
-  function updateImportStep(id: string, status: ImportStepStatus, detail?: string) {
-    setImportSteps((previous) =>
-      previous.map((step) =>
-        step.id === id
-          ? { ...step, status, detail: detail ?? step.detail }
-          : step
-      )
+    const existingHashes = new Set(
+      existingHashRows
+        .map((row) => String(config.key === 'facture_lignes' ? row.ligne_hash_metier || row.ligne_hash : row.ligne_hash || '').trim())
+        .filter(Boolean)
     )
+
+    // Fallback sécurisé : si des anciennes lignes n'ont pas encore de ligne_hash_metier,
+    // on contrôle seulement les numéros de pièces du fichier, par petits lots, avec les colonnes minimales.
+    const missingHashRows = importRows.filter((row) => {
+      const hash = String(config.key === 'facture_lignes' ? row.ligne_hash_metier || row.ligne_hash : row.ligne_hash || '').trim()
+      return !hash || !existingHashes.has(hash)
+    })
+
+    const invoiceNumbers = uniqueStrings(missingHashRows.map((row) => row.numero_piece))
+    const existingCounts = new Map<string, number>()
+    const existingInfoBySignature = new Map<string, GenericRow>()
+
+    const invoiceChunks = chunkArray(invoiceNumbers, DUPLICATE_LOOKUP_CHUNK_SIZE)
+    const selectColsForSignature = lookupColumnsForDuplicateSignature(config)
+
+    for (let i = 0; i < invoiceChunks.length; i += 1) {
+      const invoiceChunk = invoiceChunks[i]
+      if (!invoiceChunk.length) continue
+      onProgress?.(`Recherche anciennes lignes sans hash métier ${i + 1}/${invoiceChunks.length} (${invoiceChunk.length} factures)`)
+
+      const { data, error } = await supabase
+        .from(config.key)
+        .select(selectColsForSignature)
+        .in('numero_piece', invoiceChunk)
+        .limit(10000)
+
+      if (error) throw new Error(`Contrôle doublons par facture impossible : ${error.message}`)
+
+      ;((data || []) as GenericRow[]).forEach((existing) => {
+        const businessSignature = buildLineBusinessSignature(existing, config.key)
+        existingCounts.set(businessSignature, (existingCounts.get(businessSignature) || 0) + 1)
+        if (!existingInfoBySignature.has(businessSignature)) existingInfoBySignature.set(businessSignature, existing)
+      })
+    }
+
+    const seenInCurrentImport = new Map<string, number>()
+    const rowsToInsert: GenericRow[] = []
+    const duplicateRejects: string[] = []
+
+    importRows.forEach((row, index) => {
+      const signature = String(row.__business_signature || '').trim()
+      const currentOccurrence = (seenInCurrentImport.get(signature) || 0) + 1
+      seenInCurrentImport.set(signature, currentOccurrence)
+
+      const metierHash = String(config.key === 'facture_lignes' ? row.ligne_hash_metier || row.ligne_hash : row.ligne_hash || '').trim()
+      const alreadyExistsByHash = metierHash ? existingHashes.has(metierHash) : false
+      const existingCount = existingCounts.get(signature) || 0
+
+      if (alreadyExistsByHash || currentOccurrence <= existingCount) {
+        const existing = existingInfoBySignature.get(signature) || existingHashRows.find((r) => {
+          const existingHash = String(config.key === 'facture_lignes' ? r.ligne_hash_metier || r.ligne_hash : r.ligne_hash || '').trim()
+          return existingHash && existingHash === metierHash
+        })
+
+        duplicateRejects.push(
+          `Ligne ${index + 2} rejetée : document déjà présent en base ` +
+            `(N° ${row.numero_piece || 'NC'}, date ${row.date_facture || row.date_piece || 'NC'}, article ${row.reference_article || 'NC'}). ` +
+            `Import existant : ${existing?.source_import || 'source inconnue'}${existing?.imported_at ? ` le ${existing.imported_at}` : ''}.`
+        )
+      } else {
+        rowsToInsert.push(row)
+      }
+    })
+
+    return { rowsToInsert, duplicateRejects }
   }
 
-  async function setImportUserTriggers(config: TableConfig, enabled: boolean) {
-    if (!isLineTableKey(config.key)) return `${config.label} : pas de trigger à piloter.`
 
-    const { data, error: rpcError } = await supabase.rpc('set_import_user_triggers', {
+  async function writeChunk(rows: GenericRow[], config: TableConfig) {
+    const cleanRows = rows.map(stripTechnicalImportFields)
+
+    if (isLineTableKey(config.key)) {
+      const { error: insertError } = await supabase
+        .from(config.key)
+        .insert(cleanRows)
+
+      if (insertError) throw insertError
+      return cleanRows.length
+    }
+
+    const { error: upsertError } = await supabase
+      .from(config.key)
+      .upsert(cleanRows, { onConflict: config.primaryKey })
+
+    if (upsertError) throw upsertError
+    return cleanRows.length
+  }
+
+
+
+  async function setImportTriggersEnabled(config: TableConfig, enabled: boolean) {
+    if (!isLineTableKey(config.key)) return { ok: true, message: 'Pas de trigger à piloter pour cette table' }
+
+    const { error } = await supabase.rpc('set_import_user_triggers', {
       p_table_name: config.key,
       p_enabled: enabled,
     })
 
-    if (rpcError) {
+    if (error) {
       throw new Error(
-        `${enabled ? 'Réactivation' : 'Désactivation'} des triggers impossible : ${rpcError.message}. ` +
-          'Crée d’abord la fonction SQL public.set_import_user_triggers fournie avec ce fichier.'
+        `Pilotage des triggers impossible sur ${config.key} : ${error.message}. ` +
+          `Crée ou vérifie la fonction SQL public.set_import_user_triggers(text, boolean).`
       )
     }
 
-    return String(data || `${enabled ? 'Triggers réactivés' : 'Triggers désactivés'} sur ${config.key}.`)
-  }
-
-  async function filterRowsThatReallyNeedUpsert(rows: GenericRow[], config: TableConfig) {
-    // Pour les grosses tables lignes, un upsert met à jour même les lignes strictement identiques.
-    // Avec des triggers, cela peut provoquer un recalcul inutile et déclencher un statement timeout.
-    // On lit donc les lignes déjà présentes dans le lot et on n'envoie à Supabase que les lignes nouvelles ou réellement modifiées.
-    if (!isLineTableKey(config.key) || !rows.length) {
-      return { rowsToUpsert: rows, skippedUnchanged: 0 }
-    }
-
-    const keys = rows
-      .map((row) => String(row[config.primaryKey] ?? '').trim())
-      .filter(Boolean)
-
-    if (!keys.length) return { rowsToUpsert: rows, skippedUnchanged: 0 }
-
-    const selectColumns = Array.from(
-      new Set([config.primaryKey, ...config.columns.map((column) => column.db)])
-    ).join(',')
-
-    const { data, error } = await supabase
-      .from(config.key)
-      .select(selectColumns)
-      .in(config.primaryKey, keys)
-
-    // Si la lecture échoue, on ne bloque pas l'import : on revient au comportement classique.
-    if (error) return { rowsToUpsert: rows, skippedUnchanged: 0 }
-
-    const existingByKey = new Map<string, GenericRow>()
-    ;(data || []).forEach((existing: GenericRow) => {
-      existingByKey.set(String(existing[config.primaryKey] ?? '').trim(), existing)
-    })
-
-    const rowsToUpsert = rows.filter((row) => {
-      const key = String(row[config.primaryKey] ?? '').trim()
-      return hasBusinessDifference(row, existingByKey.get(key), config)
-    })
-
     return {
-      rowsToUpsert,
-      skippedUnchanged: rows.length - rowsToUpsert.length,
+      ok: true,
+      message: enabled ? `Triggers réactivés sur ${config.key}` : `Triggers désactivés sur ${config.key}`,
     }
   }
 
-  async function upsertChunkWithTimeoutFallback(
-    rows: GenericRow[],
+  function isTimeoutError(error: any) {
+    const message = toErrorMessage(error).toLowerCase()
+    return message.includes('statement timeout') || message.includes('failed to fetch') || message.includes('timeout')
+  }
+
+  function isUniqueConstraintError(error: any) {
+    const message = toErrorMessage(error).toLowerCase()
+    return (
+      message.includes('duplicate key value') ||
+      message.includes('unique constraint') ||
+      message.includes('23505') ||
+      message.includes('facture_lignes_ligne_hash_key')
+    )
+  }
+
+  async function writeRowsWithRetry(
+    rowsToWrite: GenericRow[],
     config: TableConfig,
-    absoluteFrom: number,
-    totalRows: number
+    onProgress?: (detail: string) => void
   ): Promise<number> {
-    if (!rows.length) return 0
+    if (!rowsToWrite.length) return 0
 
-    const absoluteTo = absoluteFrom + rows.length - 1
-    setImportProgress(
-      `Import ${config.label} : écriture lignes ${absoluteFrom} à ${absoluteTo} / ${totalRows}`
-    )
+    try {
+      return await writeChunk(rowsToWrite, config)
+    } catch (e: any) {
+      const isRecoverableLineError = isLineTableKey(config.key) && (isTimeoutError(e) || isUniqueConstraintError(e))
 
-    const { error: upsertError } = await supabase
-      .from(config.key)
-      .upsert(rows, { onConflict: config.primaryKey })
+      if (!isRecoverableLineError) {
+        throw e
+      }
 
-    if (!upsertError) return rows.length
+      if (rowsToWrite.length <= 1) {
+        const row = rowsToWrite[0] || {}
+        if (isUniqueConstraintError(e)) {
+          onProgress?.(
+            `Ligne ignorée car déjà présente via contrainte technique ligne_hash ` +
+              `(N° ${row.numero_piece || 'NC'}, date ${row.date_facture || row.date_piece || 'NC'}, article ${row.reference_article || 'NC'})`
+          )
+          return 0
+        }
+        throw e
+      }
 
-    // En cas de timeout, on découpe automatiquement le lot pour éviter qu'un lot complet bloque.
-    // Si même une seule ligne bloque, le problème est quasiment certain côté base : trigger, FK, index ou verrou.
-    if (isStatementTimeoutError(upsertError) && rows.length > 1) {
-      const mid = Math.ceil(rows.length / 2)
-      const left = rows.slice(0, mid)
-      const right = rows.slice(mid)
+      const middle = Math.ceil(rowsToWrite.length / 2)
+      const left = rowsToWrite.slice(0, middle)
+      const right = rowsToWrite.slice(middle)
+      onProgress?.(
+        `Lot de ${rowsToWrite.length} ligne(s) refusé ou trop long : découpage automatique en ${left.length} + ${right.length}`
+      )
 
-      const leftCount = await upsertChunkWithTimeoutFallback(left, config, absoluteFrom, totalRows)
-      const rightCount = await upsertChunkWithTimeoutFallback(right, config, absoluteFrom + left.length, totalRows)
-      return leftCount + rightCount
+      const insertedLeft = await writeRowsWithRetry(left, config, onProgress)
+      const insertedRight = await writeRowsWithRetry(right, config, onProgress)
+      return insertedLeft + insertedRight
     }
+  }
 
-    throw new Error(
-      `Erreur import ${config.label}, lot ${absoluteFrom}-${absoluteTo} / ${totalRows} : ${upsertError.message}`
-    )
+  function resetImportProgress() {
+    setImportSteps(IMPORT_STEP_TEMPLATES.map((step) => ({ ...step })))
+  }
+
+  function updateImportStep(key: string, status: ImportStepStatus, detail?: string) {
+    setImportSteps((prev) => {
+      const base = prev.length ? prev : IMPORT_STEP_TEMPLATES.map((step) => ({ ...step }))
+      return base.map((step) =>
+        step.key === key
+          ? { ...step, status, detail: detail ?? step.detail }
+          : step
+      )
+    })
   }
 
   async function handleFileImport(event: ChangeEvent<HTMLInputElement>) {
@@ -1283,148 +1566,143 @@ export default function ImportsParametragePage() {
     event.target.value = ''
     if (!file) return
 
-    const config = selectedConfig
-    const shouldPilotTriggers = isLineTableKey(config.key)
-    let triggersDisabled = false
-    let importSucceeded = false
-    let finalMessage = ''
-
     setImporting(true)
     setMessage(null)
     setError(null)
     setLastRejects([])
-    setImportProgress(null)
-    initImportSteps(config)
+    resetImportProgress()
 
     try {
-      if (shouldPilotTriggers) {
-        updateImportStep('disable_triggers', 'running', 'Désactivation en cours…')
-        setImportProgress('Étape 1/6 : désactivation temporaire des triggers…')
-        const triggerMessage = await setImportUserTriggers(config, false)
-        triggersDisabled = true
-        updateImportStep('disable_triggers', 'done', triggerMessage)
-      }
+      updateImportStep('read', 'running', `${file.name} — lecture en cours`)
+      const parsedRows = await parseExcelRows(file, selectedConfig)
+      updateImportStep('read', 'done', `${parsedRows.length} ligne(s) lue(s)`)
 
-      updateImportStep('read_file', 'running', 'Lecture du fichier Excel…')
-      setImportProgress(`${shouldPilotTriggers ? 'Étape 2/6' : 'Étape 1/3'} : lecture et contrôle du fichier Excel…`)
-
-      const parsedRows = await parseExcelRows(file, config)
+      updateImportStep('normalize', 'running', 'Analyse des colonnes et conversion des dates/nombres')
       const parseErrors = parsedRows.flatMap((row) => Array.isArray(row.__errors) ? row.__errors : [])
       const cleanedRows = parsedRows.map(({ __errors, ...row }) => row)
-      const { valid, errors } = validateRows(cleanedRows, config)
-      const { rows: deduplicatedRows, duplicates } = deduplicateRows(valid, config)
+      updateImportStep('normalize', 'done', `${parseErrors.length} avertissement(s) de mapping/conversion`)
 
-      updateImportStep(
-        'read_file',
-        'done',
-        `${parsedRows.length} ligne(s) lue(s), ${errors.length} rejet(s), ${duplicates.length} doublon(s) fichier.`
-      )
+      updateImportStep('validate', 'running', 'Contrôle des champs obligatoires')
+      const { valid, errors } = validateRows(cleanedRows, selectedConfig)
+      const { rows: deduplicatedRows, duplicates } = deduplicateRows(valid, selectedConfig)
+      updateImportStep('validate', 'done', `${valid.length} ligne(s) valide(s), ${errors.length} rejet(s), ${duplicates.length} doublon(s) dans le fichier`)
 
       if (!deduplicatedRows.length) {
-        updateImportStep('check_existing', 'error', 'Aucune ligne valide à importer.')
+        updateImportStep('reset', 'done', 'Aucun nettoyage requis')
+        updateImportStep('tiers', 'done', 'Aucun tiers à synchroniser')
+        updateImportStep('duplicates', 'done', 'Aucune ligne à contrôler')
+        updateImportStep('insert', 'done', 'Aucune ligne à insérer')
         setLastRejects([...parseErrors, ...errors].map((message) => ({ type: 'Erreur', message })))
-        throw new Error(errors.slice(0, 10).join('\n') || 'Aucune ligne valide à importer.')
+        setError(errors.slice(0, 10).join('\n') || 'Aucune ligne valide à importer.')
+        setImporting(false)
+        return
       }
 
-      updateImportStep('check_existing', 'running', 'Contrôle des clés déjà présentes en base…')
-      setImportProgress(`${shouldPilotTriggers ? 'Étape 3/6' : 'Étape 2/3'} : vérification des lignes déjà présentes…`)
-
-      const chunkSize = getUpsertChunkSize(config.key)
-      const chunksToWrite: Array<{ rows: GenericRow[], from: number }> = []
-      let skippedUnchangedTotal = 0
-      let checkedRows = 0
-
-      for (let i = 0; i < deduplicatedRows.length; i += chunkSize) {
-        const chunk = deduplicatedRows.slice(i, i + chunkSize)
-        const from = i + 1
-        const to = Math.min(i + chunk.length, deduplicatedRows.length)
-
-        setImportProgress(
-          `${shouldPilotTriggers ? 'Étape 3/6' : 'Étape 2/3'} : analyse lignes ${from} à ${to} / ${deduplicatedRows.length}`
-        )
-
-        const { rowsToUpsert, skippedUnchanged } = await filterRowsThatReallyNeedUpsert(chunk, config)
-        skippedUnchangedTotal += skippedUnchanged
-        checkedRows += chunk.length
-
-        if (rowsToUpsert.length) chunksToWrite.push({ rows: rowsToUpsert, from })
+      if (selectedConfig.key === 'activite_lignes') {
+        updateImportStep('reset', 'running', 'Vidage activité avant rechargement complet')
+        await resetActivityTablesBeforeImport((detail) => updateImportStep('reset', 'running', detail))
+        updateImportStep('reset', 'done', 'activite_lignes et indicateur_activite_mensuel vidées')
+      } else {
+        updateImportStep('reset', 'done', 'Étape non requise pour cette table')
       }
 
+      updateImportStep('tiers', 'running', 'Synchronisation des tiers utilisés par le fichier avant insertion')
+      const tiersResult = await ensureReferencedTiers(
+        deduplicatedRows,
+        selectedConfig,
+        (detail) => updateImportStep('tiers', 'running', detail)
+      )
       updateImportStep(
-        'check_existing',
+        'tiers',
         'done',
-        `${checkedRows} ligne(s) contrôlée(s). ${skippedUnchangedTotal} ligne(s) déjà identique(s) ignorée(s).`
+        tiersResult.skipped
+          ? 'Étape non requise pour cette table'
+          : `${tiersResult.upserted} tiers synchronisé(s) dans ref_tiers`
       )
 
-      updateImportStep('upsert', 'running', 'Écriture dans la table principale…')
-      setImportProgress(`${shouldPilotTriggers ? 'Étape 4/6' : 'Étape 3/3'} : import dans ${config.label}…`)
+      updateImportStep('duplicates', 'running', 'Recherche des lignes déjà présentes en base')
+      const { rowsToInsert, duplicateRejects } = await findExistingLineDuplicates(
+        deduplicatedRows,
+        selectedConfig,
+        (detail) => updateImportStep('duplicates', 'running', detail)
+      )
+      updateImportStep('duplicates', 'done', `${duplicateRejects.length} ligne(s) déjà présente(s) rejetée(s), ${rowsToInsert.length} ligne(s) à importer`)
 
+      if (!rowsToInsert.length) {
+        const technicalMessages = [...parseErrors, ...errors, ...duplicates, ...duplicateRejects]
+        setLastRejects(technicalMessages.map((message) => ({ type: 'Rejet import', message })))
+        setMessage(`0 ligne importée dans ${selectedConfig.label}. Toutes les lignes valides étaient déjà présentes en base.`)
+        if (technicalMessages.length) setError(technicalMessages.slice(0, 30).join('\n'))
+        updateImportStep('insert', 'done', '0 ligne insérée')
+        updateImportStep('refresh', 'done', 'Aucun refresh nécessaire')
+        updateImportStep('reload', 'running', 'Actualisation des statistiques et de l’aperçu')
+        await loadStats()
+        await loadRows(selectedConfig)
+        updateImportStep('reload', 'done', 'Écran actualisé')
+        setImporting(false)
+        return
+      }
+
+      const chunkSize = isLineTableKey(selectedConfig.key) ? LINE_INSERT_CHUNK_SIZE : REF_INSERT_CHUNK_SIZE
+      const chunks = chunkArray(rowsToInsert, chunkSize)
       let imported = 0
-      for (const chunk of chunksToWrite) {
-        imported += await upsertChunkWithTimeoutFallback(chunk.rows, config, chunk.from, deduplicatedRows.length)
-      }
+      let triggersDisabled = false
 
-      updateImportStep('upsert', 'done', `${imported} ligne(s) nouvelle(s) ou modifiée(s) écrite(s).`)
+      updateImportStep('insert', 'running', `Préparation insertion : ${rowsToInsert.length} ligne(s), lots de ${chunkSize}`)
 
-      if (shouldPilotTriggers) {
-        updateImportStep('enable_triggers', 'running', 'Réactivation en cours…')
-        setImportProgress('Étape 5/6 : réactivation des triggers…')
-        const triggerMessage = await setImportUserTriggers(config, true)
-        triggersDisabled = false
-        updateImportStep('enable_triggers', 'done', triggerMessage)
+      try {
+        if (isLineTableKey(selectedConfig.key)) {
+          updateImportStep('insert', 'running', `Désactivation temporaire des triggers sur ${selectedConfig.key}`)
+          await setImportTriggersEnabled(selectedConfig, false)
+          triggersDisabled = true
+        }
 
-        updateImportStep('refresh_caches', 'running', 'Rafraîchissement des agrégats/cache…')
-        setImportProgress('Étape 6/6 : mise à jour des agrégats/cache…')
-        const refreshMessages = await refreshLineCaches(config.key, { silentMissingFunctions: true })
-        updateImportStep('refresh_caches', 'done', refreshMessages.join(' '))
-      }
-
-      const technicalMessages = [...parseErrors, ...errors, ...duplicates]
-      setLastRejects(technicalMessages.map((message) => ({ type: 'Information import', message })))
-
-      finalMessage =
-        `${imported} ligne(s) nouvelle(s) ou modifiée(s) écrite(s) dans ${config.label}. ` +
-        `${skippedUnchangedTotal} ligne(s) déjà identique(s) ignorée(s). ` +
-        `${errors.length} rejet(s). ${duplicates.length} doublon(s) dans le fichier.` +
-        (shouldPilotTriggers ? ' Triggers réactivés et agrégats/cache mis à jour.' : '')
-
-      setMessage(finalMessage)
-      if (technicalMessages.length) setError(technicalMessages.slice(0, 20).join('\n'))
-      importSucceeded = true
-
-      await loadStats()
-      await loadRows(config)
-    } catch (e: any) {
-      const rawMessage = e?.message || String(e)
-      setError(rawMessage)
-      setImportSteps((previous) => {
-        const running = previous.find((step) => step.status === 'running')
-        if (!running) return previous
-        return previous.map((step) => step.id === running.id ? { ...step, status: 'error', detail: rawMessage } : step)
-      })
-    } finally {
-      if (shouldPilotTriggers && triggersDisabled) {
-        try {
-          updateImportStep('enable_triggers', 'running', 'Réactivation de sécurité après erreur…')
-          setImportProgress('Réactivation de sécurité des triggers après erreur…')
-          const triggerMessage = await setImportUserTriggers(config, true)
-          updateImportStep('enable_triggers', 'done', triggerMessage)
-        } catch (enableError: any) {
-          updateImportStep('enable_triggers', 'error', enableError?.message || String(enableError))
-          setError((previous) =>
-            `${previous ? previous + '\n\n' : ''}Attention : les triggers n'ont pas pu être réactivés automatiquement. ${enableError?.message || String(enableError)}`
-          )
+        updateImportStep('insert', 'running', `0/${rowsToInsert.length} ligne(s) insérée(s)`)
+        for (let i = 0; i < chunks.length; i += 1) {
+          const chunk = chunks[i]
+          imported += await writeRowsWithRetry(chunk, selectedConfig, (detail) => {
+            updateImportStep('insert', 'running', `${imported}/${rowsToInsert.length} — ${detail}`)
+          })
+          updateImportStep('insert', 'running', `${imported}/${rowsToInsert.length} ligne(s) insérée(s) — lot ${i + 1}/${chunks.length}`)
+        }
+      } finally {
+        if (triggersDisabled) {
+          updateImportStep('insert', 'running', `Réactivation des triggers sur ${selectedConfig.key}`)
+          await setImportTriggersEnabled(selectedConfig, true)
         }
       }
 
-      setImportProgress(null)
-      setImporting(false)
+      updateImportStep('insert', 'done', `${imported} ligne(s) insérée(s). Triggers réactivés.`)
 
-      if (importSucceeded && finalMessage) {
-        setMessage(finalMessage)
-      }
+      updateImportStep('refresh', 'running', 'Mise à jour des caches et agrégats')
+      const refreshMessage = await runPostImportRefresh(selectedConfig, (detail) => updateImportStep('refresh', 'running', detail))
+      updateImportStep('refresh', 'done', refreshMessage)
+
+      const technicalMessages = [...parseErrors, ...errors, ...duplicates, ...duplicateRejects]
+      setLastRejects(technicalMessages.map((message) => ({ type: 'Information import', message })))
+
+      setMessage(
+        `${imported} ligne(s) importée(s) dans ${selectedConfig.label}. ` +
+          `${errors.length + duplicateRejects.length} rejet(s). ${duplicates.length} doublon(s) dans le fichier. ` +
+          `${duplicateRejects.length} ligne(s) déjà présente(s) en base rejetée(s).`
+      )
+      if (technicalMessages.length) setError(technicalMessages.slice(0, 20).join('\n'))
+
+      updateImportStep('reload', 'running', 'Actualisation des statistiques et de l’aperçu')
+      await loadStats()
+      await loadRows(selectedConfig)
+      updateImportStep('reload', 'done', 'Écran actualisé')
+    } catch (e: any) {
+      const msg = toErrorMessage(e)
+      setError(msg)
+      setImportSteps((prev) =>
+        prev.map((step) => step.status === 'running' ? { ...step, status: 'error', detail: msg } : step)
+      )
+    } finally {
+      setImporting(false)
     }
   }
+
 
   function exportRejectsExcel() {
     if (!lastRejects.length) return
@@ -1465,7 +1743,6 @@ export default function ImportsParametragePage() {
     setMessage(null)
     setError(null)
     setLastRejects([])
-    setImportProgress(null)
 
     try {
       const rowToSave: GenericRow = { ...editingRow }
@@ -1476,7 +1753,10 @@ export default function ImportsParametragePage() {
       }
 
       if (isLineTableKey(selectedConfig.key) && !rowToSave.ligne_hash) {
-        rowToSave.ligne_hash = buildLineHash(rowToSave, selectedConfig.key, Date.now())
+        rowToSave.ligne_hash = buildLineHash(rowToSave, selectedConfig.key, 1)
+      }
+      if (selectedConfig.key === 'facture_lignes' && !rowToSave.ligne_hash_metier) {
+        rowToSave.ligne_hash_metier = rowToSave.ligne_hash
       }
 
       rowToSave.updated_at = new Date().toISOString()
@@ -1491,15 +1771,15 @@ export default function ImportsParametragePage() {
 
       const { error: saveError } = await supabase
         .from(selectedConfig.key)
-        .upsert(rowToSave, { onConflict: selectedConfig.primaryKey })
+        .upsert(stripTechnicalImportFields(rowToSave), { onConflict: selectedConfig.primaryKey })
 
       if (saveError) throw saveError
 
-      const cacheMessage = isLineTableKey(selectedConfig.key)
-        ? ' Rafraîchissement des agrégats/cache non lancé automatiquement.'
-        : ''
+      if (selectedConfig.key === 'facture_lignes') {
+        await supabase.rpc('refresh_facture_entetes_cache')
+      }
 
-      setMessage(`Enregistrement sauvegardé.${cacheMessage}`)
+      setMessage('Enregistrement sauvegardé.')
       setEditingRow(null)
       await loadStats()
       await loadRows(selectedConfig)
@@ -1561,24 +1841,6 @@ export default function ImportsParametragePage() {
               >
                 Actualiser
               </button>
-              <button
-                type="button"
-                onClick={handleRefreshExternalReferentials}
-                disabled={refreshingExternalRefs || importing}
-                className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800 hover:bg-emerald-100 disabled:opacity-50"
-              >
-                {refreshingExternalRefs ? 'MAJ ADEME…' : 'MAJ RGE + capacité ADEME'}
-              </button>
-              {isLineTableKey(selectedConfig.key) && (
-                <button
-                  type="button"
-                  onClick={handleManualCacheRefresh}
-                  disabled={refreshingCaches || importing}
-                  className="rounded-xl border border-blue-300 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-800 hover:bg-blue-100 disabled:opacity-50"
-                >
-                  {refreshingCaches ? 'Rafraîchissement…' : 'Rafraîchir agrégats/cache'}
-                </button>
-              )}
               {lastRejects.length > 0 && (
                 <button
                   type="button"
@@ -1651,11 +1913,6 @@ export default function ImportsParametragePage() {
               <div>
                 <h2 className="text-lg font-bold">{selectedConfig.label}</h2>
                 <p className="text-sm text-slate-500">{selectedConfig.description}</p>
-                {isLineTableKey(selectedConfig.key) && (
-                  <p className="mt-1 text-xs text-blue-700">
-                    Import automatique sécurisé : désactivation temporaire des triggers, contrôle des lignes existantes, import, réactivation des triggers, puis mise à jour des agrégats/cache.
-                  </p>
-                )}
               </div>
 
               <input
@@ -1667,35 +1924,40 @@ export default function ImportsParametragePage() {
             </div>
 
             {message && <div className="mt-4 rounded-xl bg-emerald-50 p-3 text-sm text-emerald-800">{message}</div>}
-            {importProgress && <div className="mt-4 rounded-xl bg-blue-50 p-3 text-sm font-semibold text-blue-800">{importProgress}</div>}
+            {error && <pre className="mt-4 whitespace-pre-wrap rounded-xl bg-red-50 p-3 text-sm text-red-700">{error}</pre>}
+
             {importSteps.length > 0 && (
-              <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm">
-                <div className="mb-2 font-bold text-slate-800">Suivi de l’import</div>
-                <div className="space-y-2">
+              <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-black uppercase tracking-wide text-slate-700">Contrôle temps réel du chargement</h3>
+                    <p className="text-xs text-slate-500">Suivi des étapes : lecture, contrôle doublons, insertion, refresh et actualisation.</p>
+                  </div>
+                  {importing && <span className="rounded-full bg-blue-100 px-3 py-1 text-xs font-bold text-blue-700">Import en cours</span>}
+                </div>
+                <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
                   {importSteps.map((step) => (
-                    <div key={step.id} className="flex flex-col gap-1 rounded-lg bg-white px-3 py-2 shadow-sm sm:flex-row sm:items-center sm:justify-between">
-                      <div className="font-semibold text-slate-800">{step.label}</div>
-                      <div className={`text-xs font-semibold ${
-                        step.status === 'done'
-                          ? 'text-emerald-700'
-                          : step.status === 'running'
-                            ? 'text-blue-700'
-                            : step.status === 'error'
-                              ? 'text-red-700'
-                              : 'text-slate-400'
-                      }`}>
-                        {step.status === 'done' && 'Terminé'}
-                        {step.status === 'running' && 'En cours'}
-                        {step.status === 'error' && 'Erreur'}
-                        {step.status === 'waiting' && 'En attente'}
+                    <div key={step.key} className="rounded-xl border border-slate-200 bg-white p-3">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`h-2.5 w-2.5 rounded-full ${
+                            step.status === 'done'
+                              ? 'bg-emerald-500'
+                              : step.status === 'running'
+                                ? 'bg-blue-500'
+                                : step.status === 'error'
+                                  ? 'bg-red-500'
+                                  : 'bg-slate-300'
+                          }`}
+                        />
+                        <span className="text-xs font-bold text-slate-800">{step.label}</span>
                       </div>
-                      {step.detail && <div className="text-xs text-slate-500 sm:w-full">{step.detail}</div>}
+                      {step.detail && <div className="mt-1 text-xs text-slate-500">{step.detail}</div>}
                     </div>
                   ))}
                 </div>
               </div>
             )}
-            {error && <pre className="mt-4 whitespace-pre-wrap rounded-xl bg-red-50 p-3 text-sm text-red-700">{error}</pre>}
 
             <div className="mt-4 overflow-auto rounded-xl border border-slate-200">
               <table className="min-w-full border-collapse text-sm">
@@ -1752,7 +2014,7 @@ export default function ImportsParametragePage() {
             </div>
 
             <div className="mt-3 text-xs text-slate-500">
-              Affichage limité aux 300 dernières lignes pour garder une page rapide. L’import traite le fichier complet.
+              Affichage limité aux {PREVIEW_LIMIT} dernières lignes pour garder une page rapide. L’import traite le fichier complet.
             </div>
           </section>
         </section>

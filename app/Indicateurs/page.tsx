@@ -391,14 +391,17 @@ function activitySummary(options: ActivityFilterOption[]) {
 }
 
 function maxUpdatedAt(rows: AggRow[]) {
-  const values = rows
-    .map((r) => r.updated_at)
-    .filter(Boolean)
-    .map((v) => new Date(String(v)).getTime())
-    .filter((v) => Number.isFinite(v))
+  let maxTimestamp: number | null = null
 
-  if (!values.length) return 'XX/XX/XXXX'
-  return new Intl.DateTimeFormat('fr-FR', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(Math.max(...values)))
+  for (const row of rows) {
+    if (!row.updated_at) continue
+    const timestamp = new Date(String(row.updated_at)).getTime()
+    if (!Number.isFinite(timestamp)) continue
+    if (maxTimestamp === null || timestamp > maxTimestamp) maxTimestamp = timestamp
+  }
+
+  if (maxTimestamp === null) return 'XX/XX/XXXX'
+  return new Intl.DateTimeFormat('fr-FR', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(maxTimestamp))
 }
 
 function downloadCsv(filename: string, rows: Array<Record<string, any>>) {
