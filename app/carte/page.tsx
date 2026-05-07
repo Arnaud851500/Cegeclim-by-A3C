@@ -62,6 +62,7 @@ type ClientMapRow = {
   ca_2023: number | null
   ca_2024: number | null
   ca_2025: number | null
+  ca_2026: number | null
   statut: string | null
 }
 
@@ -198,18 +199,35 @@ type CegeclimAbsentRow = {
 
 type ClientCegeclimRow = {
   siret: string | null
-  numero_client_sage: string | null
-  designation_commerciale: string | null
+  numero: string | null
+  intitule: string | null
   representant: string | null
   date_creation: string | null
   agence: string | null
+  code_postal: string | null
+  ville: string | null
+  remarque: string | null
+  mise_en_sommeil: string | boolean | null
+  attestation_capacite: string | boolean | null
+  capacite_expiration: string | null
+  rge: string | boolean | null
+
+  // Alias conservés pour limiter les impacts dans le reste de la page.
+  numero_client_sage: string | null
+  designation_commerciale: string | null
   cp_sage: string | null
   ville_sage: string | null
-  remarque: string | null
   ca_2023: number | null
   ca_2024: number | null
   ca_2025: number | null
+  ca_2026: number | null
   statut: string | null
+}
+
+type FactureEnteteCacheCaRow = {
+  numero_tiers_entete: string | null
+  date_facture: string | null
+  montant_ht_total: number | null
 }
 
 type ImportRow = {
@@ -359,6 +377,19 @@ function parseNumeric(value: unknown): number | null {
   if (value === null || value === undefined || value === '') return null
   const n = Number(String(value).replace(',', '.'))
   return Number.isFinite(n) ? n : null
+}
+
+function firstNonEmptyValue(...values: unknown[]): string | null {
+  for (const value of values) {
+    const text = String(value ?? '').trim()
+    if (text) return text
+  }
+  return null
+}
+
+function firstTextOrBooleanValue(value: unknown): string | boolean | null {
+  if (typeof value === 'boolean') return value
+  return firstNonEmptyValue(value)
 }
 
 function getDepartmentFromPostalCode(cp: string | null | undefined): string | null {
@@ -649,12 +680,44 @@ function isClientClosedAdministratively(row: Pick<ClientRow, 'etatAdministratifU
   return String(row.etatAdministratifUniteLegale || '').trim().toUpperCase() === 'C'
 }
 
+function isOuiValue(value: unknown): boolean {
+  if (value === true) return true
+  const normalized = String(value ?? '')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .trim()
+    .toLowerCase()
+
+  return ['oui', 'o', 'yes', 'true', '1'].includes(normalized)
+}
+
+function hasPositiveBusinessValue(value: unknown): boolean {
+  if (value === true) return true
+  const normalized = String(value ?? '')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .trim()
+    .toLowerCase()
+
+  if (!normalized) return false
+  return !['non', 'no', 'false', '0', 'nc', 'nd', 'null', 'undefined'].includes(normalized)
+}
+
 function isCegeclimSommeilStatus(status: string | null | undefined): boolean {
   return String(status || '').trim().toLowerCase() === 'sommeil'
 }
 
+function isCegeclimSommeilRow(row: ClientCegeclimRow | null | undefined): boolean {
+  return Boolean(row) && (isOuiValue(row?.mise_en_sommeil) || isCegeclimSommeilStatus(row?.statut))
+}
+
 function isCegeclimActiveRow(row: ClientCegeclimRow | null | undefined): boolean {
-  return Boolean(row) && !isCegeclimSommeilStatus(row?.statut)
+  return Boolean(row) && !isCegeclimSommeilRow(row)
+}
+
+function getCegeclimStatusLabel(row: ClientCegeclimRow | null | undefined): string {
+  if (!row) return 'NC'
+  return isCegeclimSommeilRow(row) ? 'Sommeil' : 'Actif'
 }
 
 function getCompletenessPercent(row: ClientRow): number {
@@ -888,16 +951,96 @@ async function fetchCegeclimAbsentsRows(): Promise<CegeclimAbsentRow[]> {
   return (data || []) as CegeclimAbsentRow[]
 }
 
+async function fetchCaCegeclimByNumeroTiers(
+  numerosTiers: string[]
+): Promise<Map<string, { ca_2023: number; ca_2024: number; ca_2025: number; ca_2026: number }>> {
+  type CaByYear = { ca_2023: number; ca_2024: number; ca_2025: number; ca_2026: number }
+  const emptyCa = (): CaByYear => ({ ca_2023: 0, ca_2024: 0, ca_2025: 0, ca_2026: 0 })
+  const out = new Map<string, CaByYear>()
+  const normalizedNumeros = Array.from(
+    new Set(numerosTiers.map((n) => String(n || '').trim()).filter(Boolean))
+  )
+
+  for (const numero of normalizedNumeros) {
+    out.set(numero, emptyCa())
+  }
+
+  if (normalizedNumeros.length === 0) return out
+
+  const PAGE_SIZE_CA = 50000
+
+  for (const numeroBatch of chunkArray(normalizedNumeros, 500)) {
+    let from = 0
+
+    while (true) {
+      const { data, error } = await supabase
+        .from('facture_entetes_cache')
+        .select('numero_tiers_entete, date_facture, montant_ht_total')
+        .in('numero_tiers_entete', numeroBatch)
+        .gte('date_facture', '2023-01-01')
+        .lte('date_facture', '2026-12-31')
+        .range(from, from + PAGE_SIZE_CA - 1)
+
+      if (error) {
+        console.error('Erreur chargement CA facture_entetes_cache:', {
+          message: error.message,
+          details: error.details,
+          hint: error.hint,
+          code: error.code,
+        })
+        break
+      }
+
+      const rows = (data || []) as FactureEnteteCacheCaRow[]
+
+      for (const row of rows) {
+        const numero = String(row.numero_tiers_entete || '').trim()
+        if (!numero) continue
+
+        const year = row.date_facture ? new Date(row.date_facture).getFullYear() : null
+        if (year !== 2023 && year !== 2024 && year !== 2025 && year !== 2026) continue
+
+        const current = out.get(numero) || emptyCa()
+        const amount = Number(row.montant_ht_total || 0)
+        if (!Number.isFinite(amount)) continue
+
+        if (year === 2023) current.ca_2023 += amount
+        if (year === 2024) current.ca_2024 += amount
+        if (year === 2025) current.ca_2025 += amount
+        if (year === 2026) current.ca_2026 += amount
+
+        out.set(numero, current)
+      }
+
+      if (rows.length < PAGE_SIZE_CA) break
+      from += PAGE_SIZE_CA
+    }
+  }
+
+  return out
+}
+
 async function fetchClientsCegeclimRows(): Promise<ClientCegeclimRow[]> {
   try {
     const { data, error } = await supabase
-      .from('clients_cegeclim')
-      .select(
-        'siret, numero_client_sage, designation_commerciale, representant, date_creation, agence, cp_sage, ville_sage, statut, remarque, ca_2023, ca_2024, ca_2025'
-      )
+      .from('ref_tiers')
+      .select(`
+        siret,
+        numero,
+        intitule,
+        representant,
+        date_creation,
+        depot_rattachement,
+        code_postal,
+        ville,
+        mise_en_sommeil,
+        attestation_capacite,
+        capacite_expiration,
+        rge
+      `)
 
     if (error) {
-      console.error('Erreur chargement clients_cegeclim:', {
+      console.error('Erreur chargement ref_tiers:', {
         message: error.message,
         details: error.details,
         hint: error.hint,
@@ -906,11 +1049,99 @@ async function fetchClientsCegeclimRows(): Promise<ClientCegeclimRow[]> {
       return []
     }
 
-    return ((data || []) as ClientCegeclimRow[]).filter(
-      (row) => Boolean(normalizeSiret(row.siret))
+    const rawRows: Array<{
+      siret: string | null
+      numero: string | null
+      intitule: string | null
+      representant: string | null
+      date_creation: string | null
+      agence: string | null
+      code_postal: string | null
+      ville: string | null
+      remarque: string | null
+      mise_en_sommeil: string | boolean | null
+      attestation_capacite: string | boolean | null
+      capacite_expiration: string | null
+      rge: string | boolean | null
+    }> = ((data || []) as Record<string, unknown>[])
+      .map((row) => {
+        const siret = normalizeSiret(row.siret)
+        const numero = firstNonEmptyValue(
+          row.numero,
+          row.numero_tiers,
+          row.code_tiers,
+          row.code_client,
+          row['Numéro'],
+          row['Numero']
+        )
+        const intitule = firstNonEmptyValue(
+          row.intitule,
+          row.intitule_tiers,
+          row.designation_commerciale,
+          row.raison_sociale,
+          row.nom,
+          row['Intitulé'],
+          row['Intitule']
+        )
+        const codePostal = firstNonEmptyValue(row.code_postal, row.cp_sage, row.cp, row.code_postal_tiers)
+        const ville = firstNonEmptyValue(row.ville, row.ville_sage, row.ville_tiers)
+
+        return {
+          siret,
+          numero,
+          intitule,
+          representant: firstNonEmptyValue(row.representant, row['représentant'], row.commercial),
+          date_creation: firstNonEmptyValue(row.date_creation, row.date_creation_client, row.created_at),
+          agence: firstNonEmptyValue(row.depot_rattachement, row.agence, row.agence_rattachement),
+          code_postal: codePostal,
+          ville,
+          remarque: firstNonEmptyValue(row.remarque, row.remarques, row.commentaire),
+          mise_en_sommeil: firstTextOrBooleanValue(row.mise_en_sommeil),
+          attestation_capacite: firstTextOrBooleanValue(row.attestation_capacite),
+          capacite_expiration: firstNonEmptyValue(row.capacite_expiration, row.capacite_date_expiration),
+          rge: firstTextOrBooleanValue(row.rge),
+        }
+      })
+      .filter((row) => Boolean(normalizeSiret(row.siret)))
+
+    const caByNumeroTiers = await fetchCaCegeclimByNumeroTiers(
+      rawRows.map((row) => String(row.numero || '').trim()).filter(Boolean)
     )
+
+    return rawRows.map((row) => {
+      const numero = String(row.numero || '').trim() || null
+      const ca = numero ? caByNumeroTiers.get(numero) : null
+      const miseEnSommeil = row.mise_en_sommeil ?? null
+      const statut = isOuiValue(miseEnSommeil) ? 'Sommeil' : 'Actif'
+
+      return {
+        siret: row.siret || null,
+        numero,
+        intitule: row.intitule || null,
+        representant: row.representant || null,
+        date_creation: row.date_creation || null,
+        agence: row.agence || null,
+        code_postal: row.code_postal || null,
+        ville: row.ville || null,
+        remarque: row.remarque || null,
+        mise_en_sommeil: miseEnSommeil,
+        attestation_capacite: row.attestation_capacite ?? null,
+        capacite_expiration: row.capacite_expiration || null,
+        rge: row.rge ?? null,
+
+        numero_client_sage: numero,
+        designation_commerciale: row.intitule || null,
+        cp_sage: row.code_postal || null,
+        ville_sage: row.ville || null,
+        ca_2023: ca?.ca_2023 ?? null,
+        ca_2024: ca?.ca_2024 ?? null,
+        ca_2025: ca?.ca_2025 ?? null,
+        ca_2026: ca?.ca_2026 ?? null,
+        statut,
+      }
+    })
   } catch (error: any) {
-    console.error('Erreur inattendue clients_cegeclim:', {
+    console.error('Erreur inattendue ref_tiers:', {
       message: error?.message,
       details: error?.details,
       hint: error?.hint,
@@ -1106,6 +1337,7 @@ export default function ClientsPage() {
   const [mapTitle, setMapTitle] = useState('')
   const [mapInstanceKey, setMapInstanceKey] = useState(0)
   const [showMapCegeclim, setShowMapCegeclim] = useState(true)
+  const [showMapCegeclimSommeil, setShowMapCegeclimSommeil] = useState(true)
   const [showMapProspects, setShowMapProspects] = useState(true)
   const [mapSectorVisibility, setMapSectorVisibility] = useState<Record<string, boolean>>({})
   const [mapAgeSliderMin, setMapAgeSliderMin] = useState(daysToSlider(0))
@@ -1224,7 +1456,7 @@ async function saveSelectedClientField(field: 'prospect_comment' | 'prospect_sta
   const [selectedSectors, setSelectedSectors] = useState<string[]>([])
   const [selectedNafCodes, setSelectedNafCodes] = useState<string[]>([])
   const [selectedAgence, setSelectedAgence] = useState('TOUS')
-  const [selectedClientScope, setSelectedClientScope] = useState<'Tous' | 'Cegeclim' | 'Prospects'>('Tous')
+  const [selectedClientScope, setSelectedClientScope] = useState<'Tous' | 'Cegeclim' | 'CegeclimSommeil' | 'Prospects'>('Tous')
   const [selectedProspectStatuses, setSelectedProspectStatuses] = useState<ProspectStatusValue[]>([])
   const [selectedRgeFilter, setSelectedRgeFilter] = useState<'TOUS' | 'OUI' | 'NON'>('TOUS')
   const [selectedCapaciteGazFilter, setSelectedCapaciteGazFilter] = useState<'TOUS' | 'OUI' | 'NON'>('TOUS')
@@ -1467,6 +1699,7 @@ async function openMapFromCell(secteur: string, departement: string | null) {
   setMapLoading(true)
   setMapClients([])
   setShowMapCegeclim(false)
+  setShowMapCegeclimSommeil(false)
   setShowMapProspects(true)
   setMapAgeSliderMin(ageSliderMin)
   setMapAgeSliderMax(ageSliderMax)
@@ -1669,7 +1902,7 @@ function isRowCapaciteGaz(row: any) {
           .map((row) => String(row.code_dep || '').trim())
           .filter(Boolean)
       )
-    ).sort((a, b) => a.localeCompare(b, 'fr'))
+    ).sort((a, b) => String(a).localeCompare(String(b), 'fr'))
   }, [territories, normalizedSocieteFilter])
 
   const allowedDepartmentSet = useMemo(() => new Set(allowedDepartments), [allowedDepartments])
@@ -1745,6 +1978,9 @@ function isRowCapaciteGaz(row: any) {
 
   const activeCegeclimBySiret = useMemo(() => {
     const map = new Map<string, string>()
+
+    // En cas de doublon ref_tiers sur un même SIRET, le statut actif est prioritaire.
+    // Donc un SIRET ayant au moins une ligne active doit rester affiché en jaune.
     for (const row of clientsCegeclim) {
       const siret = normalizeSiret(row.siret)
       if (!siret || !isCegeclimActiveRow(row)) continue
@@ -1756,13 +1992,79 @@ function isRowCapaciteGaz(row: any) {
 
   const sommeilCegeclimBySiret = useMemo(() => {
     const map = new Map<string, ClientCegeclimRow>()
+    const activeSirets = new Set<string>()
+
     for (const row of clientsCegeclim) {
       const siret = normalizeSiret(row.siret)
-      if (!siret || !isCegeclimSommeilStatus(row.statut)) continue
+      if (siret && isCegeclimActiveRow(row)) activeSirets.add(siret)
+    }
+
+    for (const row of clientsCegeclim) {
+      const siret = normalizeSiret(row.siret)
+      if (!siret || activeSirets.has(siret) || !isCegeclimSommeilRow(row)) continue
       map.set(siret, row)
     }
     return map
   }, [clientsCegeclim])
+
+  const cegeclimDetailsBySiret = useMemo(() => {
+    const map = new Map<string, ClientCegeclimRow>()
+    for (const row of clientsCegeclim) {
+      const siret = normalizeSiret(row.siret)
+      if (!siret || !isCegeclimActiveRow(row)) continue
+      map.set(siret, row)
+    }
+    return map
+  }, [clientsCegeclim])
+
+  const allCegeclimDetailsBySiret = useMemo(() => {
+    const map = new Map<string, ClientCegeclimRow>()
+    for (const row of clientsCegeclim) {
+      const siret = normalizeSiret(row.siret)
+      if (!siret) continue
+
+      const existing = map.get(siret)
+      // En cas de doublon ref_tiers sur un même SIRET, garder en priorité la ligne active.
+      if (!existing || (isCegeclimActiveRow(row) && !isCegeclimActiveRow(existing))) {
+        map.set(siret, row)
+      }
+    }
+    return map
+  }, [clientsCegeclim])
+
+  function isClientInCegeclimSommeil(row: Pick<ClientRow, 'siret'>): boolean {
+    const normalizedSiret = normalizeSiret(row.siret)
+    return Boolean(normalizedSiret && sommeilCegeclimBySiret.has(normalizedSiret))
+  }
+
+  function isClientInCegeclimAny(row: Pick<ClientRow, 'siret' | 'present_dans_cegeclim'>): boolean {
+    return isClientPresentInCegeclim(row, activeCegeclimBySiret) || isClientInCegeclimSommeil(row)
+  }
+
+  function getClientCegeclimAnyRow(row: Pick<ClientRow, 'siret'>): ClientCegeclimRow | null {
+    return getClientCegeclimRow(row, allCegeclimDetailsBySiret)
+  }
+
+  function isClientRgeCombined(row: ClientRow): boolean {
+    const tier = getClientCegeclimAnyRow(row)
+    return isRowRge(row) || hasPositiveBusinessValue(tier?.rge)
+  }
+
+  function isClientCapaciteGazCombined(row: ClientRow): boolean {
+    const tier = getClientCegeclimAnyRow(row)
+    return isRowCapaciteGaz(row) || hasPositiveBusinessValue(tier?.attestation_capacite)
+  }
+
+  function getClientCegeclimDisplayCode(row: Pick<ClientRow, 'siret' | 'present_dans_cegeclim'>): string {
+    const activeCode = getClientCegeclimCode(row, activeCegeclimBySiret)
+    if (activeCode !== 'NON') return activeCode
+
+    const normalizedSiret = normalizeSiret(row.siret)
+    const sommeilRow = normalizedSiret ? sommeilCegeclimBySiret.get(normalizedSiret) : null
+    if (sommeilRow) return sommeilRow.numero_client_sage || 'SOMMEIL'
+
+    return 'NON'
+  }
 
 
 const mapClientsWithCoords = useMemo(() => {
@@ -1834,8 +2136,8 @@ function matchesMapCommonFilters(row: ClientRow) {
     if (!selectedProspectStatuses.includes(prospectStatus)) return false
   }
 
-  const rowIsRge = isRowRge(row)
-  const rowHasCapaciteGaz = isRowCapaciteGaz(row)
+  const rowIsRge = isClientRgeCombined(row)
+  const rowHasCapaciteGaz = isClientCapaciteGazCombined(row)
 
   if (selectedRgeFilter === 'OUI' && !rowIsRge) return false
   if (selectedRgeFilter === 'NON' && rowIsRge) return false
@@ -1880,6 +2182,7 @@ const mapCegeclimPoints = useMemo(() => {
 }, [
   mapClientsWithCoords,
   activeCegeclimBySiret,
+  sommeilCegeclimBySiret,
   search,
   designationSearch,
   selectedDepartments,
@@ -1897,17 +2200,48 @@ const mapCegeclimPoints = useMemo(() => {
   onlyToEnrich,
   distanceMax,
   agences,
+  clientsCegeclim,
+])
+
+const mapCegeclimSommeilPoints = useMemo(() => {
+  return mapClientsWithCoords.filter(
+    (client) =>
+      isClientInCegeclimSommeil(client) &&
+      matchesMapCommonFilters(client)
+  )
+}, [
+  mapClientsWithCoords,
+  sommeilCegeclimBySiret,
+  search,
+  designationSearch,
+  selectedDepartments,
+  selectedSectors,
+  selectedNafCodes,
+  selectedAgence,
+  includeNoDistance,
+  onlyContactable,
+  selectedProspectStatuses,
+  selectedRgeFilter,
+  selectedCapaciteGazFilter,
+  selectedCapitalSocialFilters,
+  excludeDesignationND,
+  excludeFutureCreation,
+  onlyToEnrich,
+  distanceMax,
+  agences,
+  clientsCegeclim,
 ])
 
 const mapProspectPoints = useMemo(() => {
   return mapClientsWithCoords.filter(
     (client) =>
-      !isClientPresentInCegeclim(client, activeCegeclimBySiret) &&
+      !isClientInCegeclimAny(client) &&
       matchesMapProspectFilters(client)
   )
 }, [
   mapClientsWithCoords,
   activeCegeclimBySiret,
+  sommeilCegeclimBySiret,
   search,
   designationSearch,
   selectedDepartments,
@@ -1927,17 +2261,18 @@ const mapProspectPoints = useMemo(() => {
   ageSliderMin,
   ageSliderMax,
   agences,
+  clientsCegeclim,
 ])
 
 const mapLegendSectors = useMemo(() => {
   return Array.from(
     new Set(
-      [...mapCegeclimPoints, ...mapProspectPoints]
+      [...mapCegeclimPoints, ...mapCegeclimSommeilPoints, ...mapProspectPoints]
         .map((client) => getClientSectorLabel(client))
         .filter(Boolean)
     )
   ).sort((a, b) => a.localeCompare(b, 'fr'))
-}, [mapCegeclimPoints, mapProspectPoints])
+}, [mapCegeclimPoints, mapCegeclimSommeilPoints, mapProspectPoints])
 
 
 
@@ -1975,14 +2310,15 @@ const mapLegendSectors = useMemo(() => {
 const visibleMapPoints = useMemo(() => {
   return [
     ...(showMapCegeclim ? mapCegeclimPoints : []),
+    ...(showMapCegeclimSommeil ? mapCegeclimSommeilPoints : []),
     ...(showMapProspects ? mapProspectPoints : []),
   ].filter((client) => {
     const sector = getClientSectorLabel(client)
-    const isCegeclim = isClientPresentInCegeclim(client, activeCegeclimBySiret)
+    const isCegeclimAny = isClientInCegeclimAny(client)
 
     if (mapSectorVisibility[sector] === false) return false
 
-    if (!isCegeclim) {
+    if (!isCegeclimAny) {
       const ageDays = diffDaysFromToday(client.dateCreationEtablissement)
       if (ageDays === null) return false
       if (ageDays < mapAgeDaysMin || ageDays > mapAgeDaysMax) return false
@@ -1992,13 +2328,16 @@ const visibleMapPoints = useMemo(() => {
   })
 }, [
   showMapCegeclim,
+  showMapCegeclimSommeil,
   showMapProspects,
   mapCegeclimPoints,
+  mapCegeclimSommeilPoints,
   mapProspectPoints,
   mapSectorVisibility,
   mapAgeDaysMin,
   mapAgeDaysMax,
   activeCegeclimBySiret,
+  sommeilCegeclimBySiret,
 ])
 
 const visibleMapRows = useMemo(() => {
@@ -2111,16 +2450,6 @@ useEffect(() => {
   leafletMapRef.current = null
 }, [mapOpen, mapInstanceKey])
 
-  const cegeclimDetailsBySiret = useMemo(() => {
-    const map = new Map<string, ClientCegeclimRow>()
-    for (const row of clientsCegeclim) {
-      const siret = normalizeSiret(row.siret)
-      if (!siret || !isCegeclimActiveRow(row)) continue
-      map.set(siret, row)
-    }
-    return map
-  }, [clientsCegeclim])
-
   const selectedClientCegeclim = useMemo(() => {
     return getClientCegeclimRow(selectedClient, cegeclimDetailsBySiret)
   }, [selectedClient, cegeclimDetailsBySiret])
@@ -2131,6 +2460,8 @@ useEffect(() => {
     if (!normalizedSiret) return null
     return sommeilCegeclimBySiret.get(normalizedSiret) || null
   }, [selectedClient, sommeilCegeclimBySiret])
+
+  const selectedClientCegeclimInfo = selectedClientCegeclim || selectedClientCegeclimSommeil
 
   const scopedClientSiretSet = useMemo(
     () => new Set(scopedClientsBase.map((row) => normalizeSiret(row.siret)).filter(Boolean)),
@@ -2275,11 +2606,14 @@ const ageRangeTitle = useMemo(
       const ageDays = diffDaysFromToday(row.dateCreationEtablissement)
       const completeness = getCompletenessPercent(row)
       const isCegeclim = isClientPresentInCegeclim(row, activeCegeclimBySiret)
-      const rowIsRge = isRowRge(row)
-      const rowHasCapaciteGaz = isRowCapaciteGaz(row)
+      const isCegeclimSommeil = isClientInCegeclimSommeil(row)
+      const isCegeclimAny = isCegeclim || isCegeclimSommeil
+      const rowIsRge = isClientRgeCombined(row)
+      const rowHasCapaciteGaz = isClientCapaciteGazCombined(row)
 
       if (selectedClientScope === 'Cegeclim' && !isCegeclim) return false
-    if (selectedClientScope === 'Prospects' && isCegeclim) return false
+      if (selectedClientScope === 'CegeclimSommeil' && !isCegeclimSommeil) return false
+      if (selectedClientScope === 'Prospects' && isCegeclimAny) return false
 
       const designationRaw = String(row.raison_sociale_affichee ?? '').trim()
       const designationNormalized = designationRaw.toLowerCase()
@@ -2316,8 +2650,8 @@ const ageRangeTitle = useMemo(
       if (!matchesCapitalSocialFilters(row.capital_social, selectedCapitalSocialFilters)) return false
       if (excludeFutureCreation && isFutureDate(row.dateCreationEtablissement)) return false
       if (onlyContactable && !(row.telephone || row.email || row.contactable)) return false
-      if (onlyNotInCegeclim && isCegeclim) return false
-      if (onlyPresentInCegeclim && !isCegeclim) return false
+      if (onlyNotInCegeclim && isCegeclimAny) return false
+      if (onlyPresentInCegeclim && !isCegeclimAny) return false
       if (onlyToEnrich && completeness >= 100 && row.enrichment_status === 'ok') return false
 
       if (ageDays === null || ageDays < 0) {
@@ -2819,12 +3153,12 @@ const selectedClientMapReason = useMemo(() => {
             )
           : null
 
-        const cege = getClientCegeclimRow(row, cegeclimDetailsBySiret)
+        const cege = getClientCegeclimRow(row, allCegeclimDetailsBySiret)
 
         return {
           designation: row.raison_sociale_affichee || 'ND',
           siret: row.siret || 'ND',
-          presentCegeclim: getClientCegeclimCode(row, activeCegeclimBySiret),
+          presentCegeclim: getClientCegeclimDisplayCode(row),
           apeNaf: row.activitePrincipaleEtablissement || 'ND',
           secteur: row.naf_libelle_traduit || translateNaf(row.activitePrincipaleEtablissement),
           creation: formatDateFr(row.dateCreationEtablissement),
@@ -2848,7 +3182,8 @@ const selectedClientMapReason = useMemo(() => {
           ca2023: cege?.ca_2023 != null ? String(cege.ca_2023) : '',
           ca2024: cege?.ca_2024 != null ? String(cege.ca_2024) : '',
           ca2025: cege?.ca_2025 != null ? String(cege.ca_2025) : '',
-          statut: cege?.statut != null ? String(cege.statut) : '',
+          ca2026: cege?.ca_2026 != null ? String(cege.ca_2026) : '',
+          statut: cege ? getCegeclimStatusLabel(cege) : '',
         }
       })
   }
@@ -2857,7 +3192,7 @@ const selectedClientMapReason = useMemo(() => {
   const exportRows = buildExportRows()
 
   const aoa: (string | number)[][] = [
-    ['Identité', '', '', '', '', '', 'Localisation', '', '', '', '', '', 'Contact', '', '', '', '', '', 'Remarque', '', '', '', ''],
+    ['Identité', '', '', '', '', '', 'Localisation', '', '', '', '', '', 'Contact', '', '', '', '', '', 'Remarque', '', '', '', '', '', '', ''],
     [
       'Raison sociale',
       'Siret',
@@ -2882,6 +3217,7 @@ const selectedClientMapReason = useMemo(() => {
       'CA 2023',
       'CA 2024',
       'CA 2025',
+      'CA 2026',
       'Statut',
       'Capital Social',
     ],
@@ -2909,6 +3245,8 @@ const selectedClientMapReason = useMemo(() => {
       row.ca2023,
       row.ca2024,
       row.ca2025,
+      row.ca2026,
+      row.statut,
       row.capital_social,
     ]),
   ]
@@ -2919,7 +3257,7 @@ const selectedClientMapReason = useMemo(() => {
     XLSX.utils.decode_range('A1:F1'),
     XLSX.utils.decode_range('G1:L1'),
     XLSX.utils.decode_range('M1:R1'),
-    XLSX.utils.decode_range('S1:W1'),
+    XLSX.utils.decode_range('S1:Z1'),
   ]
 
   ws['!cols'] = [
@@ -2947,9 +3285,11 @@ const selectedClientMapReason = useMemo(() => {
     { wch: 11 },
     { wch: 11 },
     { wch: 11 },
+    { wch: 12 },
+    { wch: 15 },
   ]
 
-  ws['!autofilter'] = { ref: 'A2:W2' }
+  ws['!autofilter'] = { ref: 'A2:Z2' }
 
   ws['!freeze'] = {
     xSplit: 2,
@@ -2978,7 +3318,7 @@ const selectedClientMapReason = useMemo(() => {
     scale: 53,
   }
 
-  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:W2')
+  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:Z2')
 
   const GREY = 'D9D9D9'
   const GREEN = 'C4D79B'
@@ -3427,7 +3767,7 @@ const selectedClientMapReason = useMemo(() => {
     sortedFilteredClients.forEach((client, index) => {
       if (index > 0) doc.addPage('a4', 'landscape')
 
-      const cegeclimDetails = getClientCegeclimRow(client, cegeclimDetailsBySiret)
+      const cegeclimDetails = getClientCegeclimRow(client, allCegeclimDetailsBySiret)
       const clientOnMap =
         typeof client.latitude === 'number' &&
         typeof client.longitude === 'number' &&
@@ -3472,12 +3812,12 @@ const selectedClientMapReason = useMemo(() => {
         `Effectifs SIRENE : ${pdfText(client.trancheEffectifsEtablissement)}`,
         `Capital Social : ${pdfText(client.capital_social)}`,
         `RGE : ${pdfText(client.rge_domaines_travaux)}`,
-        `Capacité froid/clim : ${isRowCapaciteGaz(client) ? 'OUI' : 'NON'}`,
+        `Capacité froid/clim : ${isClientCapaciteGazCombined(client) ? 'OUI' : 'NON'}`,
         `N° capacité : ${pdfText(client.capacite_gaz_numero)}`,
         `Type capacité : ${pdfText(client.capacite_gaz_type)}`,
         `Date délivrance capacité : ${formatDateFr(client.capacite_gaz_date_delivrance)}`,
         `Date fin validité capacité : ${formatDateFr(client.capacite_gaz_date_fin_validite)}`,
-        `Présent base CEGECLIM : ${isClientPresentInCegeclim(client, activeCegeclimBySiret) ? getClientCegeclimCode(client, activeCegeclimBySiret) : 'NON'}`,
+        `Présent base CEGECLIM : ${getClientCegeclimDisplayCode(client)}`,
       ])
 
       drawPanel('Localisation', left + colW + gap, panelYTop, colW, panelH, [
@@ -3525,7 +3865,11 @@ const selectedClientMapReason = useMemo(() => {
         `CA 2023 : ${formatCurrency(cegeclimDetails?.ca_2023)}`,
         `CA 2024 : ${formatCurrency(cegeclimDetails?.ca_2024)}`,
         `CA 2025 : ${formatCurrency(cegeclimDetails?.ca_2025)}`,
-        `Statut : ${pdfText(cegeclimDetails?.statut)}`,
+        `CA 2026 : ${formatCurrency(cegeclimDetails?.ca_2026)}`,
+        `Statut : ${cegeclimDetails ? getCegeclimStatusLabel(cegeclimDetails) : 'NC'}`,
+        `Attestation capacité : ${pdfText(cegeclimDetails?.attestation_capacite as any)}`,
+        `Expiration capacité : ${formatDateFr(cegeclimDetails?.capacite_expiration || null)}`,
+        `RGE ref_tiers : ${pdfText(cegeclimDetails?.rge as any)}`,
       ])
 
       doc.setDrawColor(...COLOR_BORDER)
@@ -3789,12 +4133,13 @@ const selectedClientMapReason = useMemo(() => {
                     <select
                         value={selectedClientScope}
                         onChange={(e) =>
-                        setSelectedClientScope(e.target.value as 'Tous' | 'Cegeclim' | 'Prospects')
+                        setSelectedClientScope(e.target.value as 'Tous' | 'Cegeclim' | 'CegeclimSommeil' | 'Prospects')
                         }
                         style={selectLikeStyle}
                     >
                         <option value="Tous">Tous</option>
                         <option value="Cegeclim">Cegeclim actif</option>
+                        <option value="CegeclimSommeil">CEGECLIM Sommeil</option>
                         <option value="Prospects">Prospects</option>
                     </select>
                     </div>
@@ -4066,19 +4411,7 @@ const selectedClientMapReason = useMemo(() => {
                             >
                               <td style={listCellStyle}>
   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-    {isPresentInCegeclim ? (
-      <span
-        title="Client CEGECLIM actif"
-        style={{
-          color: '#facc15',
-          fontSize: 14,
-          lineHeight: 1,
-          textShadow: '0 0 1px #a16207',
-        }}
-      >
-        ★
-      </span>
-    ) : isCegeclimSommeil ? (
+    {isCegeclimSommeil ? (
       <span
         title="Client CEGECLIM sommeil"
         style={{
@@ -4086,6 +4419,18 @@ const selectedClientMapReason = useMemo(() => {
           fontSize: 14,
           lineHeight: 1,
           textShadow: '0 0 1px #7f1d1d',
+        }}
+      >
+        ★
+      </span>
+    ) : isPresentInCegeclim ? (
+      <span
+        title="Client CEGECLIM actif"
+        style={{
+          color: '#facc15',
+          fontSize: 14,
+          lineHeight: 1,
+          textShadow: '0 0 1px #a16207',
         }}
       >
         ★
@@ -4262,6 +4607,26 @@ const selectedClientMapReason = useMemo(() => {
                             }}
                           />
                           Clients CEGECLIM géolocalisés ({mapCegeclimPoints.length})
+                        </label>
+
+                        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                          <input
+                            type="checkbox"
+                            checked={showMapCegeclimSommeil}
+                            onChange={(e) => setShowMapCegeclimSommeil(e.target.checked)}
+                          />
+                          <span
+                            style={{
+                              width: 12,
+                              height: 12,
+                              borderRadius: '50%',
+                              background: '#94a3b8',
+                              border: '3px solid #dc2626',
+                              display: 'inline-block',
+                              boxSizing: 'border-box',
+                            }}
+                          />
+                          CEGECLIM Sommeil géolocalisés ({mapCegeclimSommeilPoints.length})
                         </label>
 
                         {mapLegendSectors.map((sector) => (
@@ -4457,8 +4822,11 @@ const selectedClientMapReason = useMemo(() => {
 
                             {visibleMapPoints.map((client) => {
                               const isCegeclim = isClientPresentInCegeclim(client, activeCegeclimBySiret)
+                              const isCegeclimSommeil = isClientInCegeclimSommeil(client)
                               const sectorLabel = getClientSectorLabel(client)
                               const markerColor = getSectorColor(sectorLabel)
+                              const markerBorderColor = isCegeclim ? '#facc15' : isCegeclimSommeil ? '#dc2626' : '#334155'
+                              const markerWeight = isCegeclim || isCegeclimSommeil ? 3 : 1.5
 
                               return (
                                 <CircleMarker
@@ -4466,10 +4834,10 @@ const selectedClientMapReason = useMemo(() => {
                                   center={[client.latitude as number, client.longitude as number]}
                                   radius={6}
                                   pathOptions={{
-                                    color: isCegeclim ? '#facc15' : '#334155',
+                                    color: markerBorderColor,
                                     fillColor: markerColor,
                                     fillOpacity: 0.95,
-                                    weight: isCegeclim ? 3 : 1.5,
+                                    weight: markerWeight,
                                   }}
                                   eventHandlers={{
                                     click: () => {
@@ -4486,8 +4854,8 @@ const selectedClientMapReason = useMemo(() => {
                                       <div>
                                         {client.libelleCommuneEtablissement || '—'} {client.dateCreationEtablissement || ''}
                                       </div>
-                                      <div><b>RGE :</b> {isRowRge(client) ? 'OUI' : 'NON'}</div>
-                                      <div><b>Capacité froid/clim :</b> {isRowCapaciteGaz(client) ? 'OUI' : 'NON'}</div>
+                                      <div><b>RGE :</b> {isClientRgeCombined(client) ? 'OUI' : 'NON'}</div>
+                                      <div><b>Capacité froid/clim :</b> {isClientCapaciteGazCombined(client) ? 'OUI' : 'NON'}</div>
                                       <div><b>Tél :</b> {client.telephone || 'NC'}</div>
                                       <div><b>Capital social :</b> {client.capital_social || 'NC'}</div>
                                       <div><b>Dirigeant :</b> {client.nom_dirigeant || 'NC'}</div>
@@ -4541,7 +4909,9 @@ const selectedClientMapReason = useMemo(() => {
                           <div style={{ overflowY: 'auto', flex: 1 }}>
                             {visibleMapRows.map((client) => {
                               const isCegeclim = isClientPresentInCegeclim(client, activeCegeclimBySiret)
+                              const isCegeclimSommeil = isClientInCegeclimSommeil(client)
                               const sectorLabel = getClientSectorLabel(client)
+                              const markerBorder = isCegeclim ? '2px solid #facc15' : isCegeclimSommeil ? '2px solid #dc2626' : '2px solid #64748b'
 
                               return (
                                 <button
@@ -4574,7 +4944,7 @@ const selectedClientMapReason = useMemo(() => {
                                           height: 10,
                                           borderRadius: '50%',
                                           background: getSectorColor(sectorLabel),
-                                          border: isCegeclim ? '2px solid #facc15' : '2px solid #64748b',
+                                          border: markerBorder,
                                           flexShrink: 0,
                                         }}
                                       />
@@ -4744,12 +5114,12 @@ const selectedClientMapReason = useMemo(() => {
                       <div><b>Effectifs SIRENE :</b> {selectedClient.trancheEffectifsEtablissement || 'NC'}</div>
                       <div><b>Capital Social :</b> {selectedClient.capital_social ?? 'NC'}</div>
                       <div><b>RGE :</b> {selectedClient.rge_domaines_travaux ?? 'NC'}</div>
-                      <div><b>Capacité froid/clim :</b> {isRowCapaciteGaz(selectedClient) ? 'OUI' : 'NON'}</div>
+                      <div><b>Capacité froid/clim :</b> {isClientCapaciteGazCombined(selectedClient) ? 'OUI' : 'NON'}</div>
                       <div><b>N° capacité :</b> {selectedClient.capacite_gaz_numero ?? 'NC'}</div>
                       <div><b>Type capacité :</b> {selectedClient.capacite_gaz_type ?? 'NC'}</div>
                       <div><b>Date délivrance capacité :</b> {formatDateFr(selectedClient.capacite_gaz_date_delivrance)}</div>
                       <div><b>Date fin validité capacité :</b> {formatDateFr(selectedClient.capacite_gaz_date_fin_validite)}</div>
-                      <div><b>Présent base CEGECLIM :</b> {isClientPresentInCegeclim(selectedClient, activeCegeclimBySiret) ? getClientCegeclimCode(selectedClient, activeCegeclimBySiret) : selectedClientCegeclimSommeil ? 'SOMMEIL' : 'NON'}</div>
+                      <div><b>Présent base CEGECLIM :</b> {getClientCegeclimDisplayCode(selectedClient)}</div>
                     </div>
                   </div>
 
@@ -4885,14 +5255,18 @@ const selectedClientMapReason = useMemo(() => {
                   <div style={clientBlockStyle}>
                     <div style={clientBlockTitleStyle}>Client CEGECLIM</div>
                     <div style={clientBlockContentStyle}>
-                      <div><b>Numero de client SAGE :</b> {selectedClientCegeclim?.numero_client_sage || 'NC'}</div>
-                      <div><b>Désignation commerciale :</b> {selectedClientCegeclim?.designation_commerciale || 'NC'}</div>
-                      <div><b>Représentant :</b> {selectedClientCegeclim?.representant || 'NC'}</div>
-                      <div><b>Date de création :</b> {formatDateFr(selectedClientCegeclim?.date_creation || null)}</div>
-                      <div><b>CA 2023 :</b> {formatCurrency(selectedClientCegeclim?.ca_2023)}</div>
-                      <div><b>CA 2024 :</b> {formatCurrency(selectedClientCegeclim?.ca_2024)}</div>
-                      <div><b>CA 2025 :</b> {formatCurrency(selectedClientCegeclim?.ca_2025)}</div>
-                      <div><b>Statut :</b> {selectedClientCegeclim?.statut || selectedClientCegeclimSommeil?.statut || 'NC'}</div>
+                      <div><b>Numero de client SAGE :</b> {selectedClientCegeclimInfo?.numero_client_sage || 'NC'}</div>
+                      <div><b>Désignation commerciale :</b> {selectedClientCegeclimInfo?.designation_commerciale || 'NC'}</div>
+                      <div><b>Représentant :</b> {selectedClientCegeclimInfo?.representant || 'NC'}</div>
+                      <div><b>Date de création :</b> {formatDateFr(selectedClientCegeclimInfo?.date_creation || null)}</div>
+                      <div><b>CA 2023 :</b> {formatCurrency(selectedClientCegeclimInfo?.ca_2023)}</div>
+                      <div><b>CA 2024 :</b> {formatCurrency(selectedClientCegeclimInfo?.ca_2024)}</div>
+                      <div><b>CA 2025 :</b> {formatCurrency(selectedClientCegeclimInfo?.ca_2025)}</div>
+                      <div><b>CA 2026 :</b> {formatCurrency(selectedClientCegeclimInfo?.ca_2026)}</div>
+                      <div><b>Statut :</b> {getCegeclimStatusLabel(selectedClientCegeclimInfo)}</div>
+                      <div><b>Attestation capacité :</b> {selectedClientCegeclimInfo?.attestation_capacite ?? 'NC'}</div>
+                      <div><b>Expiration capacité :</b> {formatDateFr(selectedClientCegeclimInfo?.capacite_expiration || null)}</div>
+                      <div><b>RGE ref_tiers :</b> {selectedClientCegeclimInfo?.rge ?? 'NC'}</div>
                     </div>
                   </div>
                 </div>
