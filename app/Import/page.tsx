@@ -65,6 +65,33 @@ type ImportStep = {
   detail?: string
 }
 
+type FieldDifference = {
+  db: string
+  label: string
+  currentValue: any
+  importedValue: any
+}
+
+type ReferentialConflict = {
+  tableKey: TableKey
+  primaryKeyValue: string
+  displayLabel: string
+  existingRow: GenericRow
+  importedRow: GenericRow
+  differences: FieldDifference[]
+  selected: boolean
+}
+
+type PendingReferentialImport = {
+  configKey: TableKey
+  configLabel: string
+  fileName: string
+  rowsWithoutConflicts: GenericRow[]
+  conflicts: ReferentialConflict[]
+  technicalMessages: string[]
+  identicalIgnored: number
+}
+
 const PREVIEW_LIMIT = 100
 const DUPLICATE_LOOKUP_CHUNK_SIZE = 50
 const LINE_INSERT_CHUNK_SIZE = 10
@@ -76,6 +103,7 @@ const IMPORT_STEP_TEMPLATES: ImportStep[] = [
   { key: 'validate', label: 'Validation des champs obligatoires', status: 'pending' },
   { key: 'reset', label: 'Nettoyage préalable des tables activité', status: 'pending' },
   { key: 'tiers', label: 'Mise à jour automatique du référentiel tiers', status: 'pending' },
+  { key: 'articles', label: 'Mise à jour automatique du référentiel articles', status: 'pending' },
   { key: 'duplicates', label: 'Contrôle des doublons déjà présents en base', status: 'pending' },
   { key: 'insert', label: 'Insertion des lignes nouvelles', status: 'pending' },
   { key: 'refresh', label: 'Mise à jour cache / agrégats', status: 'pending' },
@@ -360,9 +388,22 @@ const TABLES: TableConfig[] = [
 
 
 const LINE_TABLE_KEYS: TableKey[] = ['facture_lignes', 'activite_lignes']
+const REFERENTIAL_REVIEW_TABLE_KEYS: TableKey[] = ['ref_tiers', 'ref_articles', 'ref_collaborateurs']
+
+const FILE_NAME_RULES: Partial<Record<TableKey, { keywords: string[]; expectedLabel: string }>> = {
+  activite_lignes: { keywords: ['activite', 'activité'], expectedLabel: 'activite ou activité' },
+  facture_lignes: { keywords: ['facture', 'facturation'], expectedLabel: 'facture ou facturation' },
+  ref_tiers: { keywords: ['tiers'], expectedLabel: 'tiers' },
+  ref_articles: { keywords: ['article'], expectedLabel: 'article' },
+  ref_collaborateurs: { keywords: ['collaborateur', 'collaborateurs', 'collab'], expectedLabel: 'collaborateur ou collaborateurs' },
+}
 
 function isLineTableKey(key: TableKey) {
   return LINE_TABLE_KEYS.includes(key)
+}
+
+function shouldReviewExistingRecords(key: TableKey) {
+  return REFERENTIAL_REVIEW_TABLE_KEYS.includes(key)
 }
 
 const EXTRA_HEADER_ALIASES: Record<TableKey, Record<string, string>> = {
@@ -496,6 +537,25 @@ function normalizeText(value: any) {
   return text === '' ? null : text
 }
 
+function normalizeCodeNaf(value: any) {
+  const text = normalizeText(value)
+  if (!text) return null
+
+  const normalized = text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, '')
+    .replace(/[._\-/]/g, '')
+
+  if (!normalized || ['NC', 'ND', 'NA', 'N/A', 'NULL', 'AUCUN', 'AUCUNE'].includes(normalized)) {
+    return null
+  }
+
+  return normalized
+}
+
 function normalizeNumber(value: any) {
   if (value === undefined || value === null || value === '') return null
   if (typeof value === 'number') return Number.isFinite(value) ? value : null
@@ -615,6 +675,7 @@ function normalizeDate(value: any) {
 }
 
 function normalizeValue(value: any, type: ColumnType = 'text', column?: ColumnConfig) {
+  if (column?.db === 'code_naf') return normalizeCodeNaf(value)
   if (type === 'number') {
     return column?.numberFormat === 'percent_ratio' ? normalizePercentRatio(value) : normalizeNumber(value)
   }
@@ -812,6 +873,166 @@ function uniqueStrings(values: any[]) {
   return Array.from(new Set(values.map((v) => String(v || '').trim()).filter(Boolean)))
 }
 
+function formatCellValue(value: any, column?: ColumnConfig) {
+  if (value === undefined || value === null || value === '') return '—'
+  if (column?.type === 'boolean') return normalizeBoolean(value) ? 'Oui' : 'Non'
+  if (column?.type === 'date') return normalizeDate(value) || String(value)
+  return String(value)
+}
+
+function compactTextLength(value: any) {
+  const text = normalizeText(value)
+  if (!text) return 0
+
+  const digitsOnly = text.replace(/\D/g, '')
+  if (digitsOnly) return digitsOnly.length
+
+  return text.replace(/\s+/g, '').length
+}
+
+function hasCompleteExistingSiret(value: any) {
+  const text = normalizeText(value)
+  if (!text) return false
+
+  const digitsOnly = text.replace(/\D/g, '')
+
+  // SIRET français standard = 14 chiffres. Certains exports Sage peuvent contenir un caractère de plus.
+  return digitsOnly.length >= 14 || text.replace(/\s+/g, '').length >= 15
+}
+
+function hasShortImportedSiret(value: any) {
+  return compactTextLength(value) < 10
+}
+
+function shouldPreserveExistingRefTiersValue(existingRow: GenericRow, importedRow: GenericRow, column: ColumnConfig) {
+  if (column.db === 'code_naf') return true
+
+  if (column.db === 'siret') {
+    return hasCompleteExistingSiret(existingRow.siret) && hasShortImportedSiret(importedRow.siret)
+  }
+
+  return false
+}
+
+function buildImportedRowForExistingRecord(importedRow: GenericRow, existingRow: GenericRow, config: TableConfig) {
+  if (config.key !== 'ref_tiers') return importedRow
+
+  const protectedRow = { ...importedRow }
+
+  for (const column of config.columns) {
+    if (!Object.prototype.hasOwnProperty.call(protectedRow, column.db)) continue
+    if (!shouldPreserveExistingRefTiersValue(existingRow, protectedRow, column)) continue
+    protectedRow[column.db] = existingRow[column.db] ?? null
+  }
+
+  return protectedRow
+}
+
+function shouldIgnoreDifferenceForExistingRecord(
+  currentValue: any,
+  importedValue: any,
+  column: ColumnConfig,
+  existingRow: GenericRow,
+  importedRow: GenericRow,
+  config: TableConfig
+) {
+  if (config.key !== 'ref_tiers') return false
+
+  if (column.db === 'code_naf') {
+    // Pour un tiers déjà existant, le code NAF ne doit ni générer un écart ni écraser la valeur en base.
+    return true
+  }
+
+  if (column.db === 'siret') {
+    // Ne pas écraser un SIRET complet par une valeur courte issue du fichier.
+    return hasCompleteExistingSiret(currentValue) && hasShortImportedSiret(importedValue)
+  }
+
+  return false
+}
+
+function valuesAreEquivalentForImport(currentValue: any, importedValue: any, column: ColumnConfig) {
+  if (column.db === 'code_naf') {
+    return normalizeCodeNaf(currentValue) === normalizeCodeNaf(importedValue)
+  }
+
+  if (column.type === 'number') {
+    const current = column.numberFormat === 'percent_ratio' ? normalizePercentRatio(currentValue) : normalizeNumber(currentValue)
+    const imported = column.numberFormat === 'percent_ratio' ? normalizePercentRatio(importedValue) : normalizeNumber(importedValue)
+    if (current === null && imported === null) return true
+    if (current === null || imported === null) return false
+    return Math.abs(current - imported) < 0.000001
+  }
+
+  if (column.type === 'boolean') {
+    return normalizeBoolean(currentValue) === normalizeBoolean(importedValue)
+  }
+
+  if (column.type === 'date') {
+    return normalizeDate(currentValue) === normalizeDate(importedValue)
+  }
+
+  return normalizeText(currentValue) === normalizeText(importedValue)
+}
+
+function getImportedDifferences(importedRow: GenericRow, existingRow: GenericRow, config: TableConfig) {
+  const differences: FieldDifference[] = []
+
+  for (const column of config.columns) {
+    if (column.readonly) continue
+    if (column.db === config.primaryKey) continue
+    if (!Object.prototype.hasOwnProperty.call(importedRow, column.db)) continue
+
+    const currentValue = existingRow[column.db]
+    const importedValue = importedRow[column.db]
+
+    if (shouldIgnoreDifferenceForExistingRecord(currentValue, importedValue, column, existingRow, importedRow, config)) {
+      continue
+    }
+
+    if (!valuesAreEquivalentForImport(currentValue, importedValue, column)) {
+      differences.push({
+        db: column.db,
+        label: column.label,
+        currentValue,
+        importedValue,
+      })
+    }
+  }
+
+  return differences
+}
+
+function displayLabelForImportedRow(row: GenericRow, config: TableConfig) {
+  const candidates = [
+    row.intitule,
+    row.designation,
+    row.nom && row.prenom ? `${row.nom} ${row.prenom}` : null,
+    row.nom,
+    row.reference_article,
+    row.numero,
+    row[config.primaryKey],
+  ]
+
+  return String(candidates.find((value) => value !== undefined && value !== null && String(value).trim() !== '') || '—')
+}
+
+function confirmFileNameMatchesImport(file: File, config: TableConfig) {
+  const rule = FILE_NAME_RULES[config.key]
+  if (!rule) return true
+
+  const normalizedFileName = normalizeHeader(file.name)
+  const hasExpectedKeyword = rule.keywords.some((keyword) => normalizedFileName.includes(normalizeHeader(keyword)))
+  if (hasExpectedKeyword) return true
+
+  return window.confirm(
+    `Attention : le nom du fichier sélectionné ne contient pas « ${rule.expectedLabel} ».\n\n` +
+      `Fichier : ${file.name}\n` +
+      `Import sélectionné : ${config.label}\n\n` +
+      `Annuler pour choisir un autre fichier, ou Continuer pour importer quand même.`
+  )
+}
+
 const FACTURE_LIGNES_DB_COLUMNS = [
   'id',
   'ligne_hash',
@@ -929,6 +1150,7 @@ export default function ImportsParametragePage() {
   const [editingRow, setEditingRow] = useState<GenericRow | null>(null)
   const [lastRejects, setLastRejects] = useState<ImportRejectRow[]>([])
   const [importSteps, setImportSteps] = useState<ImportStep[]>([])
+  const [pendingReferentialImport, setPendingReferentialImport] = useState<PendingReferentialImport | null>(null)
 
   const selectedConfig = useMemo(
     () => TABLES.find((t) => t.key === selectedTableKey) || TABLES[0],
@@ -1046,6 +1268,7 @@ export default function ImportsParametragePage() {
     setFilter('')
     setSortColumn('')
     setEditingRow(null)
+    setPendingReferentialImport(null)
   }, [selectedConfig.key])
 
   function buildHeaderMap(headers: string[], config: TableConfig) {
@@ -1329,6 +1552,201 @@ export default function ImportsParametragePage() {
     return { upserted, skipped: false }
   }
 
+
+  function collectReferencedArticles(rows: GenericRow[]) {
+    const articlesByReference = new Map<string, GenericRow>()
+
+    rows.forEach((row) => {
+      const referenceArticle = String(row.reference_article ?? '').trim()
+
+      // Important : une chaîne vide n'est pas NULL pour Postgres.
+      // On force donc les références vides à NULL pour éviter une violation de FK sur ''.
+      row.reference_article = referenceArticle || null
+
+      if (!referenceArticle) return
+
+      const designation = String(row.designation ?? '').trim() || referenceArticle
+      const existing = articlesByReference.get(referenceArticle)
+
+      // On conserve la désignation la plus informative si la même référence apparaît plusieurs fois.
+      if (!existing || designation.length > String(existing.designation || '').length) {
+        articlesByReference.set(referenceArticle, {
+          reference_article: referenceArticle,
+          designation,
+          famille: null,
+          hors_statistique: false,
+        })
+      }
+    })
+
+    return Array.from(articlesByReference.values())
+  }
+
+
+  async function ensureReferencedArticles(
+    rows: GenericRow[],
+    config: TableConfig,
+    onProgress?: (detail: string) => void
+  ) {
+    if (!isLineTableKey(config.key) || !rows.length) {
+      return { checked: 0, created: 0, skipped: true }
+    }
+
+    const articles = collectReferencedArticles(rows)
+    if (!articles.length) {
+      onProgress?.('Aucun article à synchroniser')
+      return { checked: 0, created: 0, skipped: false }
+    }
+
+    const existingRefs = new Set<string>()
+    const referenceChunks = chunkArray(
+      articles.map((article) => String(article.reference_article || '').trim()).filter(Boolean),
+      REF_INSERT_CHUNK_SIZE
+    )
+
+    for (let i = 0; i < referenceChunks.length; i += 1) {
+      const chunk = referenceChunks[i]
+      onProgress?.(`Contrôle articles ${i + 1}/${referenceChunks.length} (${chunk.length} référence(s))`)
+
+      const { data, error } = await supabase
+        .from('ref_articles')
+        .select('reference_article')
+        .in('reference_article', chunk)
+        .limit(10000)
+
+      if (error) {
+        throw new Error(`Contrôle du référentiel articles impossible : ${error.message}`)
+      }
+
+      ;((data || []) as GenericRow[]).forEach((article) => {
+        const referenceArticle = String(article.reference_article ?? '').trim()
+        if (referenceArticle) existingRefs.add(referenceArticle)
+      })
+    }
+
+    const missingArticles = articles.filter((article) => {
+      const referenceArticle = String(article.reference_article ?? '').trim()
+      return referenceArticle && !existingRefs.has(referenceArticle)
+    })
+
+    if (!missingArticles.length) {
+      return { checked: articles.length, created: 0, skipped: false }
+    }
+
+    const chunks = chunkArray(missingArticles, REF_INSERT_CHUNK_SIZE)
+    let created = 0
+
+    for (let i = 0; i < chunks.length; i += 1) {
+      const chunk = chunks[i]
+      onProgress?.(`Création articles manquants ${i + 1}/${chunks.length} (${chunk.length} article(s))`)
+
+      const { error } = await supabase
+        .from('ref_articles')
+        .upsert(chunk, { onConflict: 'reference_article', ignoreDuplicates: true })
+
+      if (error) {
+        throw new Error(
+          `Création automatique des articles manquants impossible : ${error.message}. ` +
+            `Vérifie que ref_articles contient les colonnes reference_article, designation, famille et hors_statistique, ` +
+            `et que reference_article est unique.`
+        )
+      }
+
+      created += chunk.length
+    }
+
+    return { checked: articles.length, created, skipped: false }
+  }
+
+
+
+  function collectReferencedCodeNaf(rows: GenericRow[]) {
+    const codes = new Set<string>()
+
+    rows.forEach((row) => {
+      const normalizedCodeNaf = normalizeCodeNaf(row.code_naf)
+      row.code_naf = normalizedCodeNaf
+      if (normalizedCodeNaf) codes.add(normalizedCodeNaf)
+    })
+
+    return Array.from(codes)
+  }
+
+  async function ensureReferencedCodeNaf(
+    rows: GenericRow[],
+    config: TableConfig,
+    onProgress?: (detail: string) => void
+  ) {
+    if (config.key !== 'ref_tiers' || !rows.length) {
+      return { upserted: 0, skipped: true, checked: 0 }
+    }
+
+    const codesNaf = collectReferencedCodeNaf(rows)
+    if (!codesNaf.length) {
+      onProgress?.('Aucun code NAF à contrôler')
+      return { upserted: 0, skipped: false, checked: 0 }
+    }
+
+    const existingCodes = new Set<string>()
+    const chunks = chunkArray(codesNaf, REF_INSERT_CHUNK_SIZE)
+
+    for (let i = 0; i < chunks.length; i += 1) {
+      const chunk = chunks[i]
+      onProgress?.(`Contrôle codes NAF ${i + 1}/${chunks.length} (${chunk.length} code(s))`)
+
+      const { data, error } = await supabase
+        .from('ref_code_naf')
+        .select('code_naf')
+        .in('code_naf', chunk)
+        .limit(10000)
+
+      if (error) {
+        throw new Error(`Contrôle du référentiel codes NAF impossible : ${error.message}`)
+      }
+
+      ;((data || []) as GenericRow[]).forEach((row) => {
+        const code = normalizeCodeNaf(row.code_naf)
+        if (code) existingCodes.add(code)
+      })
+    }
+
+    const missingCodes = codesNaf.filter((code) => !existingCodes.has(code))
+    if (!missingCodes.length) {
+      return { upserted: 0, skipped: false, checked: codesNaf.length }
+    }
+
+    const nowIso = new Date().toISOString()
+    const rowsToCreate = missingCodes.map((code) => ({
+      code_naf: code,
+      libelle_naf: `Code NAF ${code}`,
+      contenu_correspondance: null,
+      updated_at: nowIso,
+    }))
+
+    const createChunks = chunkArray(rowsToCreate, REF_INSERT_CHUNK_SIZE)
+    let upserted = 0
+
+    for (let i = 0; i < createChunks.length; i += 1) {
+      const chunk = createChunks[i]
+      onProgress?.(`Création codes NAF manquants ${i + 1}/${createChunks.length} (${chunk.length} code(s))`)
+
+      const { error } = await supabase
+        .from('ref_code_naf')
+        .upsert(chunk, { onConflict: 'code_naf', ignoreDuplicates: true })
+
+      if (error) {
+        throw new Error(
+          `Création automatique des codes NAF manquants impossible : ${error.message}. ` +
+            `Charge d'abord le référentiel Codes NAF ou vérifie les colonnes code_naf/libelle_naf dans ref_code_naf.`
+        )
+      }
+
+      upserted += chunk.length
+    }
+
+    return { upserted, skipped: false, checked: codesNaf.length }
+  }
+
   async function findExistingLineDuplicates(
     importRows: GenericRow[],
     config: TableConfig,
@@ -1474,7 +1892,7 @@ export default function ImportsParametragePage() {
 
     const { error } = await supabase.rpc('set_import_user_triggers', {
       p_table_name: config.key,
-      p_enabled: enabled,
+      p_enable: enabled,
     })
 
     if (error) {
@@ -1561,15 +1979,344 @@ export default function ImportsParametragePage() {
     })
   }
 
+  async function prepareReferentialImportReview(
+    importRows: GenericRow[],
+    config: TableConfig,
+    onProgress?: (detail: string) => void
+  ) {
+    if (!shouldReviewExistingRecords(config.key) || !importRows.length) {
+      return {
+        rowsWithoutConflicts: importRows,
+        conflicts: [] as ReferentialConflict[],
+        identicalIgnored: 0,
+      }
+    }
+
+    const keys = uniqueStrings(importRows.map((row) => row[config.primaryKey]))
+    const existingByKey = new Map<string, GenericRow>()
+    const chunks = chunkArray(keys, REF_INSERT_CHUNK_SIZE)
+
+    for (let i = 0; i < chunks.length; i += 1) {
+      const chunk = chunks[i]
+      onProgress?.(`Recherche existants ${i + 1}/${chunks.length} (${chunk.length} clé(s))`)
+
+      const { data, error } = await supabase
+        .from(config.key)
+        .select('*')
+        .in(config.primaryKey, chunk)
+        .limit(10000)
+
+      if (error) {
+        throw new Error(`Contrôle des enregistrements existants impossible sur ${config.label} : ${error.message}`)
+      }
+
+      ;((data || []) as GenericRow[]).forEach((row) => {
+        const key = String(row[config.primaryKey] ?? '').trim()
+        if (key) existingByKey.set(key, row)
+      })
+    }
+
+    const rowsWithoutConflicts: GenericRow[] = []
+    const conflicts: ReferentialConflict[] = []
+    let identicalIgnored = 0
+
+    importRows.forEach((row) => {
+      const primaryKeyValue = String(row[config.primaryKey] ?? '').trim()
+      const existing = existingByKey.get(primaryKeyValue)
+
+      if (!existing) {
+        rowsWithoutConflicts.push(row)
+        return
+      }
+
+      const rowForImport = buildImportedRowForExistingRecord(row, existing, config)
+      const differences = getImportedDifferences(rowForImport, existing, config)
+
+      if (!differences.length) {
+        identicalIgnored += 1
+        return
+      }
+
+      conflicts.push({
+        tableKey: config.key,
+        primaryKeyValue,
+        displayLabel: displayLabelForImportedRow(rowForImport, config),
+        existingRow: existing,
+        importedRow: rowForImport,
+        differences,
+        selected: false,
+      })
+    })
+
+    return { rowsWithoutConflicts, conflicts, identicalIgnored }
+  }
+
+  async function executeValidatedImportRows(
+    config: TableConfig,
+    rowsReadyToImport: GenericRow[],
+    technicalMessages: string[],
+    options?: {
+      identicalIgnored?: number
+      conflictsIgnored?: number
+      conflictsOverwritten?: number
+    }
+  ) {
+    const inputRows = rowsReadyToImport
+
+    if (!inputRows.length) {
+      updateImportStep('reset', 'done', 'Aucun nettoyage requis')
+      updateImportStep('tiers', 'done', 'Aucun tiers à synchroniser')
+      updateImportStep('articles', 'done', 'Aucun article à synchroniser')
+      updateImportStep('duplicates', 'done', 'Aucune ligne à contrôler')
+      updateImportStep('insert', 'done', 'Aucune ligne à insérer')
+      updateImportStep('refresh', 'done', 'Aucun refresh nécessaire')
+      updateImportStep('reload', 'running', 'Actualisation des statistiques et de l’aperçu')
+      await loadStats()
+      await loadRows(config)
+      updateImportStep('reload', 'done', 'Écran actualisé')
+
+      setLastRejects(technicalMessages.map((message) => ({ type: 'Information import', message })))
+      setMessage(
+        `0 ligne importée dans ${config.label}. ` +
+          `${options?.identicalIgnored || 0} enregistrement(s) identique(s) ignoré(s). ` +
+          `${options?.conflictsIgnored || 0} conflit(s) ignoré(s).`
+      )
+      if (technicalMessages.length) setError(technicalMessages.slice(0, 30).join('\n'))
+      return
+    }
+
+    if (config.key === 'activite_lignes') {
+      updateImportStep('reset', 'running', 'Vidage activité avant rechargement complet')
+      await resetActivityTablesBeforeImport((detail) => updateImportStep('reset', 'running', detail))
+      updateImportStep('reset', 'done', 'activite_lignes et indicateur_activite_mensuel vidées')
+    } else {
+      updateImportStep('reset', 'done', 'Étape non requise pour cette table')
+    }
+
+    updateImportStep(
+      'tiers',
+      'running',
+      config.key === 'ref_tiers'
+        ? 'Contrôle des codes NAF référencés avant insertion'
+        : 'Synchronisation des tiers utilisés par le fichier avant insertion'
+    )
+    const tiersResult = await ensureReferencedTiers(
+      inputRows,
+      config,
+      (detail) => updateImportStep('tiers', 'running', detail)
+    )
+    const codeNafResult = await ensureReferencedCodeNaf(
+      inputRows,
+      config,
+      (detail) => updateImportStep('tiers', 'running', detail)
+    )
+
+    const referenceMessages = [
+      !tiersResult.skipped ? `${tiersResult.upserted} tiers synchronisé(s) dans ref_tiers` : null,
+      !codeNafResult.skipped
+        ? `${codeNafResult.checked} code(s) NAF contrôlé(s), ${codeNafResult.upserted} créé(s) dans ref_code_naf`
+        : null,
+    ].filter(Boolean)
+
+    updateImportStep(
+      'tiers',
+      'done',
+      referenceMessages.length ? referenceMessages.join(' / ') : 'Étape non requise pour cette table'
+    )
+
+    updateImportStep(
+      'articles',
+      'running',
+      isLineTableKey(config.key)
+        ? 'Synchronisation des articles utilisés par le fichier avant insertion'
+        : 'Étape non requise pour cette table'
+    )
+    const articlesResult = await ensureReferencedArticles(
+      inputRows,
+      config,
+      (detail) => updateImportStep('articles', 'running', detail)
+    )
+    updateImportStep(
+      'articles',
+      'done',
+      !articlesResult.skipped
+        ? `${articlesResult.checked} article(s) contrôlé(s), ${articlesResult.created} créé(s) dans ref_articles`
+        : 'Étape non requise pour cette table'
+    )
+
+    let rowsToInsert = inputRows
+    let duplicateRejects: string[] = []
+
+    if (config.key === 'activite_lignes') {
+      updateImportStep(
+        'duplicates',
+        'done',
+        'Contrôle des doublons en base ignoré : l’import activité vide activite_lignes et indicateur_activite_mensuel avant chargement'
+      )
+    } else {
+      updateImportStep('duplicates', 'running', 'Recherche des lignes déjà présentes en base')
+      const duplicateResult = await findExistingLineDuplicates(
+        inputRows,
+        config,
+        (detail) => updateImportStep('duplicates', 'running', detail)
+      )
+      rowsToInsert = duplicateResult.rowsToInsert
+      duplicateRejects = duplicateResult.duplicateRejects
+      updateImportStep('duplicates', 'done', `${duplicateRejects.length} ligne(s) déjà présente(s) rejetée(s), ${rowsToInsert.length} ligne(s) à importer`)
+    }
+
+    if (!rowsToInsert.length) {
+      const allMessages = [...technicalMessages, ...duplicateRejects]
+      setLastRejects(allMessages.map((message) => ({ type: 'Rejet import', message })))
+      setMessage(`0 ligne importée dans ${config.label}. Toutes les lignes valides étaient déjà présentes en base ou ont été ignorées.`)
+      if (allMessages.length) setError(allMessages.slice(0, 30).join('\n'))
+      updateImportStep('insert', 'done', '0 ligne insérée')
+      updateImportStep('refresh', 'done', 'Aucun refresh nécessaire')
+      updateImportStep('reload', 'running', 'Actualisation des statistiques et de l’aperçu')
+      await loadStats()
+      await loadRows(config)
+      updateImportStep('reload', 'done', 'Écran actualisé')
+      return
+    }
+
+    const chunkSize = isLineTableKey(config.key) ? LINE_INSERT_CHUNK_SIZE : REF_INSERT_CHUNK_SIZE
+    const chunks = chunkArray(rowsToInsert, chunkSize)
+    let imported = 0
+    let triggersDisabled = false
+
+    updateImportStep('insert', 'running', `Préparation insertion : ${rowsToInsert.length} ligne(s), lots de ${chunkSize}`)
+
+    try {
+      if (isLineTableKey(config.key)) {
+        updateImportStep('insert', 'running', `Désactivation temporaire des triggers sur ${config.key}`)
+        await setImportTriggersEnabled(config, false)
+        triggersDisabled = true
+      }
+
+      updateImportStep('insert', 'running', `0/${rowsToInsert.length} ligne(s) insérée(s)`)
+      for (let i = 0; i < chunks.length; i += 1) {
+        const chunk = chunks[i]
+        imported += await writeRowsWithRetry(chunk, config, (detail) => {
+          updateImportStep('insert', 'running', `${imported}/${rowsToInsert.length} — ${detail}`)
+        })
+        updateImportStep('insert', 'running', `${imported}/${rowsToInsert.length} ligne(s) insérée(s) — lot ${i + 1}/${chunks.length}`)
+      }
+    } finally {
+      if (triggersDisabled) {
+        updateImportStep('insert', 'running', `Réactivation des triggers sur ${config.key}`)
+        await setImportTriggersEnabled(config, true)
+      }
+    }
+
+    updateImportStep('insert', 'done', `${imported} ligne(s) insérée(s).${isLineTableKey(config.key) ? ' Triggers réactivés.' : ''}`)
+
+    updateImportStep('refresh', 'running', 'Mise à jour des caches et agrégats')
+    const refreshMessage = await runPostImportRefresh(config, (detail) => updateImportStep('refresh', 'running', detail))
+    updateImportStep('refresh', 'done', refreshMessage)
+
+    const allMessages = [...technicalMessages, ...duplicateRejects]
+    setLastRejects(allMessages.map((message) => ({ type: 'Information import', message })))
+
+    const extraSummary = [
+      options?.identicalIgnored ? `${options.identicalIgnored} identique(s) ignoré(s)` : null,
+      options?.conflictsOverwritten ? `${options.conflictsOverwritten} conflit(s) écrasé(s)` : null,
+      options?.conflictsIgnored ? `${options.conflictsIgnored} conflit(s) ignoré(s)` : null,
+    ].filter(Boolean).join('. ')
+
+    setMessage(
+      `${imported} ligne(s) importée(s) dans ${config.label}. ` +
+        `${duplicateRejects.length} ligne(s) déjà présente(s) en base rejetée(s).` +
+        (extraSummary ? ` ${extraSummary}.` : '')
+    )
+    if (allMessages.length) setError(allMessages.slice(0, 20).join('\n'))
+
+    updateImportStep('reload', 'running', 'Actualisation des statistiques et de l’aperçu')
+    await loadStats()
+    await loadRows(config)
+    updateImportStep('reload', 'done', 'Écran actualisé')
+  }
+
+  function togglePendingConflict(primaryKeyValue: string, selected: boolean) {
+    setPendingReferentialImport((prev) => {
+      if (!prev) return prev
+      return {
+        ...prev,
+        conflicts: prev.conflicts.map((conflict) =>
+          conflict.primaryKeyValue === primaryKeyValue ? { ...conflict, selected } : conflict
+        ),
+      }
+    })
+  }
+
+  function setAllPendingConflicts(selected: boolean) {
+    setPendingReferentialImport((prev) => {
+      if (!prev) return prev
+      return {
+        ...prev,
+        conflicts: prev.conflicts.map((conflict) => ({ ...conflict, selected })),
+      }
+    })
+  }
+
+  async function confirmPendingReferentialImport() {
+    if (!pendingReferentialImport) return
+
+    const pending = pendingReferentialImport
+    const config = TABLES.find((table) => table.key === pending.configKey)
+    if (!config) return
+
+    const selectedConflicts = pending.conflicts.filter((conflict) => conflict.selected)
+    const ignoredConflicts = pending.conflicts.length - selectedConflicts.length
+    const rowsToImport = [
+      ...pending.rowsWithoutConflicts,
+      ...selectedConflicts.map((conflict) => conflict.importedRow),
+    ]
+
+    setPendingReferentialImport(null)
+    setImporting(true)
+    setMessage(null)
+    setError(null)
+    setLastRejects([])
+    resetImportProgress()
+
+    try {
+      updateImportStep('read', 'done', `${pending.fileName} — fichier déjà analysé`)
+      updateImportStep('normalize', 'done', 'Mapping déjà effectué')
+      updateImportStep('validate', 'done', `${rowsToImport.length} ligne(s) à importer après arbitrage`)
+
+      await executeValidatedImportRows(config, rowsToImport, pending.technicalMessages, {
+        identicalIgnored: pending.identicalIgnored,
+        conflictsIgnored: ignoredConflicts,
+        conflictsOverwritten: selectedConflicts.length,
+      })
+    } catch (e: any) {
+      const msg = toErrorMessage(e)
+      setError(msg)
+      setImportSteps((prev) =>
+        prev.map((step) => step.status === 'running' ? { ...step, status: 'error', detail: msg } : step)
+      )
+    } finally {
+      setImporting(false)
+    }
+  }
+
   async function handleFileImport(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]
     event.target.value = ''
     if (!file) return
 
+    if (!confirmFileNameMatchesImport(file, selectedConfig)) {
+      setMessage(null)
+      setPendingReferentialImport(null)
+      setError(`Import annulé : le nom du fichier « ${file.name} » ne correspond pas à l’import ${selectedConfig.label}.`)
+      return
+    }
+
     setImporting(true)
     setMessage(null)
     setError(null)
     setLastRejects([])
+    setPendingReferentialImport(null)
     resetImportProgress()
 
     try {
@@ -1587,111 +2334,62 @@ export default function ImportsParametragePage() {
       const { rows: deduplicatedRows, duplicates } = deduplicateRows(valid, selectedConfig)
       updateImportStep('validate', 'done', `${valid.length} ligne(s) valide(s), ${errors.length} rejet(s), ${duplicates.length} doublon(s) dans le fichier`)
 
+      const technicalMessages = [...parseErrors, ...errors, ...duplicates]
+
       if (!deduplicatedRows.length) {
-        updateImportStep('reset', 'done', 'Aucun nettoyage requis')
-        updateImportStep('tiers', 'done', 'Aucun tiers à synchroniser')
-        updateImportStep('duplicates', 'done', 'Aucune ligne à contrôler')
-        updateImportStep('insert', 'done', 'Aucune ligne à insérer')
-        setLastRejects([...parseErrors, ...errors].map((message) => ({ type: 'Erreur', message })))
+        await executeValidatedImportRows(selectedConfig, [], technicalMessages)
         setError(errors.slice(0, 10).join('\n') || 'Aucune ligne valide à importer.')
-        setImporting(false)
         return
       }
 
-      if (selectedConfig.key === 'activite_lignes') {
-        updateImportStep('reset', 'running', 'Vidage activité avant rechargement complet')
-        await resetActivityTablesBeforeImport((detail) => updateImportStep('reset', 'running', detail))
-        updateImportStep('reset', 'done', 'activite_lignes et indicateur_activite_mensuel vidées')
-      } else {
-        updateImportStep('reset', 'done', 'Étape non requise pour cette table')
-      }
+      if (shouldReviewExistingRecords(selectedConfig.key)) {
+        updateImportStep('duplicates', 'running', 'Contrôle des enregistrements existants et des différences de champs')
+        const review = await prepareReferentialImportReview(
+          deduplicatedRows,
+          selectedConfig,
+          (detail) => updateImportStep('duplicates', 'running', detail)
+        )
 
-      updateImportStep('tiers', 'running', 'Synchronisation des tiers utilisés par le fichier avant insertion')
-      const tiersResult = await ensureReferencedTiers(
-        deduplicatedRows,
-        selectedConfig,
-        (detail) => updateImportStep('tiers', 'running', detail)
-      )
-      updateImportStep(
-        'tiers',
-        'done',
-        tiersResult.skipped
-          ? 'Étape non requise pour cette table'
-          : `${tiersResult.upserted} tiers synchronisé(s) dans ref_tiers`
-      )
+        if (review.conflicts.length) {
+          updateImportStep(
+            'duplicates',
+            'done',
+            `${review.conflicts.length} enregistrement(s) existant(s) avec différences à arbitrer, ${review.identicalIgnored} identique(s) ignoré(s)`
+          )
+          updateImportStep('insert', 'pending', 'Import en attente de validation utilisateur')
 
-      updateImportStep('duplicates', 'running', 'Recherche des lignes déjà présentes en base')
-      const { rowsToInsert, duplicateRejects } = await findExistingLineDuplicates(
-        deduplicatedRows,
-        selectedConfig,
-        (detail) => updateImportStep('duplicates', 'running', detail)
-      )
-      updateImportStep('duplicates', 'done', `${duplicateRejects.length} ligne(s) déjà présente(s) rejetée(s), ${rowsToInsert.length} ligne(s) à importer`)
-
-      if (!rowsToInsert.length) {
-        const technicalMessages = [...parseErrors, ...errors, ...duplicates, ...duplicateRejects]
-        setLastRejects(technicalMessages.map((message) => ({ type: 'Rejet import', message })))
-        setMessage(`0 ligne importée dans ${selectedConfig.label}. Toutes les lignes valides étaient déjà présentes en base.`)
-        if (technicalMessages.length) setError(technicalMessages.slice(0, 30).join('\n'))
-        updateImportStep('insert', 'done', '0 ligne insérée')
-        updateImportStep('refresh', 'done', 'Aucun refresh nécessaire')
-        updateImportStep('reload', 'running', 'Actualisation des statistiques et de l’aperçu')
-        await loadStats()
-        await loadRows(selectedConfig)
-        updateImportStep('reload', 'done', 'Écran actualisé')
-        setImporting(false)
-        return
-      }
-
-      const chunkSize = isLineTableKey(selectedConfig.key) ? LINE_INSERT_CHUNK_SIZE : REF_INSERT_CHUNK_SIZE
-      const chunks = chunkArray(rowsToInsert, chunkSize)
-      let imported = 0
-      let triggersDisabled = false
-
-      updateImportStep('insert', 'running', `Préparation insertion : ${rowsToInsert.length} ligne(s), lots de ${chunkSize}`)
-
-      try {
-        if (isLineTableKey(selectedConfig.key)) {
-          updateImportStep('insert', 'running', `Désactivation temporaire des triggers sur ${selectedConfig.key}`)
-          await setImportTriggersEnabled(selectedConfig, false)
-          triggersDisabled = true
-        }
-
-        updateImportStep('insert', 'running', `0/${rowsToInsert.length} ligne(s) insérée(s)`)
-        for (let i = 0; i < chunks.length; i += 1) {
-          const chunk = chunks[i]
-          imported += await writeRowsWithRetry(chunk, selectedConfig, (detail) => {
-            updateImportStep('insert', 'running', `${imported}/${rowsToInsert.length} — ${detail}`)
+          setPendingReferentialImport({
+            configKey: selectedConfig.key,
+            configLabel: selectedConfig.label,
+            fileName: file.name,
+            rowsWithoutConflicts: review.rowsWithoutConflicts,
+            conflicts: review.conflicts,
+            technicalMessages,
+            identicalIgnored: review.identicalIgnored,
           })
-          updateImportStep('insert', 'running', `${imported}/${rowsToInsert.length} ligne(s) insérée(s) — lot ${i + 1}/${chunks.length}`)
+
+          setMessage(
+            `${review.rowsWithoutConflicts.length} nouvel(aux) enregistrement(s) prêt(s) à importer. ` +
+              `${review.conflicts.length} conflit(s) à arbitrer ci-dessous. ` +
+              `${review.identicalIgnored} enregistrement(s) strictement identique(s) ignoré(s).`
+          )
+          if (technicalMessages.length) setError(technicalMessages.slice(0, 20).join('\n'))
+          return
         }
-      } finally {
-        if (triggersDisabled) {
-          updateImportStep('insert', 'running', `Réactivation des triggers sur ${selectedConfig.key}`)
-          await setImportTriggersEnabled(selectedConfig, true)
-        }
+
+        updateImportStep(
+          'duplicates',
+          'done',
+          `${review.identicalIgnored} enregistrement(s) identique(s) ignoré(s), aucun conflit à arbitrer`
+        )
+
+        await executeValidatedImportRows(selectedConfig, review.rowsWithoutConflicts, technicalMessages, {
+          identicalIgnored: review.identicalIgnored,
+        })
+        return
       }
 
-      updateImportStep('insert', 'done', `${imported} ligne(s) insérée(s). Triggers réactivés.`)
-
-      updateImportStep('refresh', 'running', 'Mise à jour des caches et agrégats')
-      const refreshMessage = await runPostImportRefresh(selectedConfig, (detail) => updateImportStep('refresh', 'running', detail))
-      updateImportStep('refresh', 'done', refreshMessage)
-
-      const technicalMessages = [...parseErrors, ...errors, ...duplicates, ...duplicateRejects]
-      setLastRejects(technicalMessages.map((message) => ({ type: 'Information import', message })))
-
-      setMessage(
-        `${imported} ligne(s) importée(s) dans ${selectedConfig.label}. ` +
-          `${errors.length + duplicateRejects.length} rejet(s). ${duplicates.length} doublon(s) dans le fichier. ` +
-          `${duplicateRejects.length} ligne(s) déjà présente(s) en base rejetée(s).`
-      )
-      if (technicalMessages.length) setError(technicalMessages.slice(0, 20).join('\n'))
-
-      updateImportStep('reload', 'running', 'Actualisation des statistiques et de l’aperçu')
-      await loadStats()
-      await loadRows(selectedConfig)
-      updateImportStep('reload', 'done', 'Écran actualisé')
+      await executeValidatedImportRows(selectedConfig, deduplicatedRows, technicalMessages)
     } catch (e: any) {
       const msg = toErrorMessage(e)
       setError(msg)
@@ -1925,6 +2623,110 @@ export default function ImportsParametragePage() {
 
             {message && <div className="mt-4 rounded-xl bg-emerald-50 p-3 text-sm text-emerald-800">{message}</div>}
             {error && <pre className="mt-4 whitespace-pre-wrap rounded-xl bg-red-50 p-3 text-sm text-red-700">{error}</pre>}
+
+            {pendingReferentialImport && (
+              <div className="mt-4 rounded-2xl border border-amber-300 bg-amber-50 p-4">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div>
+                    <h3 className="text-sm font-black uppercase tracking-wide text-amber-900">
+                      Arbitrage avant import — {pendingReferentialImport.configLabel}
+                    </h3>
+                    <p className="mt-1 text-sm text-amber-900">
+                      Les lignes ci-dessous existent déjà en base mais contiennent au moins un champ différent.
+                      Coche les lignes à importer pour écraser les valeurs en base par celles du fichier.
+                    </p>
+                    <p className="mt-1 text-xs text-amber-800">
+                      Nouveaux enregistrements prêts à importer : {pendingReferentialImport.rowsWithoutConflicts.length}.
+                      Identiques ignorés : {pendingReferentialImport.identicalIgnored}.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setAllPendingConflicts(true)}
+                      className="rounded-xl border border-amber-400 bg-white px-3 py-2 text-xs font-bold text-amber-900 hover:bg-amber-100"
+                    >
+                      Tout importer
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAllPendingConflicts(false)}
+                      className="rounded-xl border border-amber-400 bg-white px-3 py-2 text-xs font-bold text-amber-900 hover:bg-amber-100"
+                    >
+                      Tout ignorer
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPendingReferentialImport(null)
+                        setMessage('Import annulé avant écrasement des enregistrements existants.')
+                      }}
+                      className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-100"
+                    >
+                      Annuler
+                    </button>
+                    <button
+                      type="button"
+                      onClick={confirmPendingReferentialImport}
+                      disabled={importing}
+                      className="rounded-xl bg-slate-900 px-3 py-2 text-xs font-bold text-white hover:bg-slate-800 disabled:opacity-50"
+                    >
+                      Importer la sélection
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mt-4 max-h-[420px] overflow-auto rounded-xl border border-amber-200 bg-white">
+                  <table className="min-w-full border-collapse text-xs">
+                    <thead className="sticky top-0 bg-amber-100 text-amber-950">
+                      <tr>
+                        <th className="border-b border-amber-200 px-3 py-2 text-left">Importer</th>
+                        <th className="border-b border-amber-200 px-3 py-2 text-left">Clé</th>
+                        <th className="border-b border-amber-200 px-3 py-2 text-left">Client / libellé</th>
+                        <th className="border-b border-amber-200 px-3 py-2 text-left">Champs différents — valeur base → valeur fichier</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pendingReferentialImport.conflicts.map((conflict) => (
+                        <tr key={conflict.primaryKeyValue} className="align-top hover:bg-amber-50">
+                          <td className="border-b border-amber-100 px-3 py-2">
+                            <input
+                              type="checkbox"
+                              checked={conflict.selected}
+                              onChange={(e) => togglePendingConflict(conflict.primaryKeyValue, e.target.checked)}
+                            />
+                          </td>
+                          <td className="whitespace-nowrap border-b border-amber-100 px-3 py-2 font-bold">
+                            {conflict.primaryKeyValue}
+                          </td>
+                          <td className="border-b border-amber-100 px-3 py-2 font-semibold">
+                            {conflict.displayLabel}
+                          </td>
+                          <td className="border-b border-amber-100 px-3 py-2">
+                            <div className="flex flex-wrap gap-1.5">
+                              {conflict.differences.map((diff) => {
+                                const column = TABLES
+                                  .find((table) => table.key === conflict.tableKey)
+                                  ?.columns.find((col) => col.db === diff.db)
+                                return (
+                                  <span
+                                    key={diff.db}
+                                    className="rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 text-amber-950"
+                                    title={`${diff.label} : ${formatCellValue(diff.currentValue, column)} → ${formatCellValue(diff.importedValue, column)}`}
+                                  >
+                                    <strong>{diff.label}</strong> : {formatCellValue(diff.currentValue, column)} → {formatCellValue(diff.importedValue, column)}
+                                  </span>
+                                )
+                              })}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
 
             {importSteps.length > 0 && (
               <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">

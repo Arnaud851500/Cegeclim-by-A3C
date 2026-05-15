@@ -19,9 +19,11 @@ import {
   YAxis,
 } from 'recharts'
 import { supabase } from '@/lib/supabaseClient'
+// @ts-ignore - xlsx-js-style est utilisé pour conserver les styles Excel côté export.
+import * as XLSX from 'xlsx-js-style'
 
 type DataSource = 'factures' | 'activite' | 'mixte'
-type WidgetType = 'kpi' | 'histogramme' | 'histogramme_empile' | 'courbe' | 'bridge' | 'tableau' | 'camembert'
+type WidgetType = 'kpi' | 'histogramme' | 'histogramme_empile' | 'courbe' | 'bridge' | 'tableau' | 'camembert' | 'synthese'
 type MeasureKey = 'ca_ht' | 'marge_valeur' | 'marge_pct' | 'quantite' | 'nb_lignes'
 type DimensionKey =
   | 'annee'
@@ -40,6 +42,7 @@ type SortMode = 'label_asc' | 'value_desc' | 'value_asc'
 type EvolutionMode = 'none' | 'value' | 'percent' | 'both'
 type CompareMode = 'year' | 'month' | 'dimension'
 type PeriodMode = 'mois' | 'cumul'
+type ClientFilterMode = 'include' | 'exclude'
 
 type StudioRow = {
   source: Exclude<DataSource, 'mixte'>
@@ -67,6 +70,8 @@ type GlobalFilters = {
   collaborateurs: string[]
   famillesMacro: string[]
   typesDocument: string[]
+  clientMode: ClientFilterMode
+  clients: string[]
   horsStatistique: 'non' | 'oui' | 'tous'
 }
 
@@ -77,6 +82,8 @@ type WidgetFilters = Partial<{
   collaborateurs: string[]
   famillesMacro: string[]
   typesDocument: string[]
+  clientMode: ClientFilterMode
+  clients: string[]
   horsStatistique: 'non' | 'oui' | 'tous'
 }>
 
@@ -137,14 +144,20 @@ type ChartDatum = {
 const FACTURES_TABLE = 'indicateur_factures_mensuel'
 const ACTIVITE_TABLE = 'indicateur_activite_mensuel'
 const VIEW_TABLE = 'analyse_widget_views'
+const ATELIER_FRONT_VERSION = 'V2026-05-15-EXCEL-TCD-CLIENTS-04'
 
 const MONTHS = ['Janv.', 'Févr.', 'Mars', 'Avr.', 'Mai', 'Juin', 'Juil.', 'Août', 'Sept.', 'Oct.', 'Nov.', 'Déc.']
 const CURRENT_YEAR = new Date().getFullYear()
 const CURRENT_MONTH = new Date().getMonth() + 1
 
 const COLOR_N = '#16a34a'
-const COLOR_N1 = '#64748b'
-const COLOR_N2 = '#f59e0b'
+const COLOR_N1 = '#eab308'
+const COLOR_N2 = '#f97316'
+const COLOR_N3 = '#64748b'
+const COLOR_N_LIGHT = '#86efac'
+const COLOR_N1_LIGHT = '#fef08a'
+const COLOR_N2_LIGHT = '#fed7aa'
+const COLOR_N3_LIGHT = '#cbd5e1'
 const COLOR_BLUE = '#2563eb'
 const COLOR_RED = '#ef4444'
 const COLOR_POSITIVE = '#22c55e'
@@ -182,6 +195,8 @@ const DEFAULT_FILTERS: GlobalFilters = {
   collaborateurs: [],
   famillesMacro: [],
   typesDocument: [],
+  clientMode: 'include',
+  clients: [],
   horsStatistique: 'non',
 }
 
@@ -206,6 +221,10 @@ function safeBool(value: any) {
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(value || 0)
+}
+
+function formatKCurrency(value: number) {
+  return `${formatNumber(Math.round((value || 0) / 1000))} K€`
 }
 
 function formatNumber(value: number) {
@@ -300,6 +319,12 @@ function getCompositeDimensionValue(row: StudioRow, dim1: DimensionKey, dim2?: D
   return `${first} › ${second}`
 }
 
+function clientKey(row: StudioRow) {
+  const numero = safeText(row.numero_tiers, 'NC')
+  const nom = safeText(row.intitule_tiers, 'NON RENSEIGNE')
+  return `${numero} — ${nom}`
+}
+
 function evolutionText(current: number, previous: number, mode: EvolutionMode, measure: MeasureKey) {
   if (mode === 'none') return null
   const delta = current - previous
@@ -343,6 +368,10 @@ function applyGlobalFilters(rows: StudioRow[], filters: GlobalFilters) {
     if (filters.collaborateurs.length && !filters.collaborateurs.includes(row.collaborateur)) return false
     if (filters.famillesMacro.length && !filters.famillesMacro.includes(row.famille_macro)) return false
     if (filters.typesDocument.length && !filters.typesDocument.includes(row.type_document)) return false
+    if (filters.clients?.length) {
+      const selected = filters.clients.includes(clientKey(row))
+      if (filters.clientMode === 'exclude' ? selected : !selected) return false
+    }
     if (filters.horsStatistique === 'non' && row.hors_statistique) return false
     if (filters.horsStatistique === 'oui' && !row.hors_statistique) return false
     return true
@@ -362,6 +391,10 @@ function applyWidgetFilters(rows: StudioRow[], widget: WidgetConfig, globalFilte
     if (lf.collaborateurs?.length && !lf.collaborateurs.includes(row.collaborateur)) return false
     if (lf.famillesMacro?.length && !lf.famillesMacro.includes(row.famille_macro)) return false
     if (lf.typesDocument?.length && !lf.typesDocument.includes(row.type_document)) return false
+    if (lf.clients?.length) {
+      const selected = lf.clients.includes(clientKey(row))
+      if ((lf.clientMode || 'include') === 'exclude' ? selected : !selected) return false
+    }
     if (lf.horsStatistique === 'non' && row.hors_statistique) return false
     if (lf.horsStatistique === 'oui' && !row.hors_statistique) return false
     return true
@@ -390,9 +423,9 @@ function buildDefaultWidget(type: WidgetType, availableYears: number[]): WidgetC
   const base: WidgetConfig = {
     id: uid(),
     type,
-    title: type === 'bridge' ? 'Bridge CA N-1 ⇒ N par agence' : type === 'tableau' ? 'Tableau croisé' : type === 'kpi' ? 'Indicateur clé' : type === 'histogramme_empile' ? 'Histogramme empilé' : type === 'camembert' ? 'Répartition' : 'Nouveau graphique',
+    title: type === 'bridge' ? 'Bridge CA N-1 ⇒ N par agence' : type === 'synthese' ? 'Suivi du CA et marge' : type === 'tableau' ? 'Tableau croisé' : type === 'kpi' ? 'Indicateur clé' : type === 'histogramme_empile' ? 'Histogramme empilé' : type === 'camembert' ? 'Répartition' : 'Nouveau graphique',
     source: 'factures',
-    size: type === 'kpi' || type === 'histogramme_empile' ? 'small' : type === 'tableau' ? 'full' : type === 'camembert' ? 'medium' : 'medium',
+    size: type === 'kpi' || type === 'histogramme_empile' ? 'small' : type === 'tableau' || type === 'synthese' ? 'full' : type === 'camembert' ? 'medium' : 'medium',
     useGlobalFilters: true,
     localFilters: {},
     measure: type === 'bridge' ? 'ca_ht' : 'ca_ht',
@@ -421,9 +454,70 @@ function buildDefaultWidget(type: WidgetType, availableYears: number[]): WidgetC
   if (type === 'histogramme') base.title = 'Histogramme CA par mois'
   if (type === 'histogramme_empile') { base.title = 'CA empilé par année / famille'; base.dimension = 'annee'; base.seriesDimension = 'famille_macro' }
   if (type === 'camembert') { base.title = 'Répartition par famille macro'; base.dimension = 'famille_macro'; base.seriesDimension = '' }
+  if (type === 'synthese') { base.title = 'Suivi du CA et marge'; base.measure = 'ca_ht'; base.secondMeasure = 'marge_pct'; base.tableMeasures = ['ca_ht', 'marge_pct']; base.periodMode = 'cumul'; base.size = 'full' }
   return base
 }
 
+function relevantDocumentTypes(source: DataSource, allTypes: string[]) {
+  const sorted = uniqueSorted(allTypes)
+  if (source === 'factures') return sorted.filter((type) => type === 'FACTURE' || type.toUpperCase().includes('FACTURE'))
+  if (source === 'activite') return sorted.filter((type) => type !== 'FACTURE' && !type.toUpperCase().includes('FACTURE'))
+  return sorted
+}
+
+function getChartSeriesLabel(row: StudioRow, widget: WidgetConfig, seriesKey: string) {
+  if (!seriesKey) return getMeasureLabel(widget.measure)
+  const base = getDimensionValue(row, seriesKey as DimensionKey)
+
+  // Règle métier : quand on suit des années, les types de documents sélectionnés
+  // s'additionnent dans l'année. On ne crée donc pas une série par type document.
+  // En vision mensuelle mixte, on distingue seulement Factures / Activité pour
+  // pouvoir empiler l'activité avec une couleur plus claire dans la barre de l'année.
+  const splitMixedSourceForMonthlyBars =
+    widget.source === 'mixte' &&
+    seriesKey === 'annee' &&
+    widget.periodMode === 'mois' &&
+    (widget.type === 'histogramme' || widget.type === 'histogramme_empile')
+
+  if (splitMixedSourceForMonthlyBars) {
+    return `${base} · ${row.source === 'factures' ? 'Factures' : 'Activité'}`
+  }
+
+  return base
+}
+
+function extractYearFromSeries(series: string) {
+  const match = String(series).match(/\b(19|20)\d{2}\b/)
+  return match ? Number(match[0]) : null
+}
+
+function sourceRankFromSeries(series: string) {
+  if (String(series).includes('Factures')) return 0
+  if (String(series).includes('Activité')) return 1
+  return 0
+}
+
+function yearRankColor(year: number, referenceYear: number, lighter = false) {
+  const rank = referenceYear - year
+  const dark = [COLOR_N, COLOR_N1, COLOR_N2, COLOR_N3]
+  const light = [COLOR_N_LIGHT, COLOR_N1_LIGHT, COLOR_N2_LIGHT, COLOR_N3_LIGHT]
+  if (rank >= 0 && rank <= 3) return lighter ? light[rank] : dark[rank]
+  return lighter ? '#e2e8f0' : '#94a3b8'
+}
+
+function chartReferenceYear(seriesNames: string[], widget: WidgetConfig) {
+  const years = seriesNames.map(extractYearFromSeries).filter((year): year is number => !!year)
+  if (widget.yearN && years.includes(widget.yearN)) return widget.yearN
+  return years.length ? Math.max(...years) : (widget.yearN || CURRENT_YEAR)
+}
+
+function chartSeriesColor(series: string, index: number, widget: WidgetConfig, referenceYear?: number) {
+  const year = extractYearFromSeries(series)
+  if (year) return yearRankColor(year, referenceYear || widget.yearN || CURRENT_YEAR, String(series).includes('Activité'))
+  if (String(series).includes('Activité')) return '#93c5fd'
+  if (String(series).includes('Factures')) return '#2563eb'
+  return PALETTE[index % PALETTE.length]
+}
 function MultiSelect({
   label,
   values,
@@ -504,7 +598,7 @@ function SelectField({ label, value, onChange, options }: { label: string; value
 function WidgetShell({
   widget,
   selected,
-  onSelect,
+  onConfigure,
   onRemove,
   onDuplicate,
   onMove,
@@ -512,7 +606,7 @@ function WidgetShell({
 }: {
   widget: WidgetConfig
   selected: boolean
-  onSelect: () => void
+  onConfigure: (event: any) => void
   onRemove: () => void
   onDuplicate: () => void
   onMove: (direction: -1 | 1) => void
@@ -522,7 +616,6 @@ function WidgetShell({
   const sizeClass = widget.size === 'small' ? 'xl:col-span-1' : widget.size === 'medium' ? 'xl:col-span-2' : widget.size === 'large' ? 'xl:col-span-3' : 'xl:col-span-4'
   return (
     <section
-      onClick={onSelect}
       className={`${sizeClass} rounded-2xl border bg-white p-4 shadow-sm transition ${selected ? 'border-blue-500 ring-2 ring-blue-100' : 'border-slate-200 hover:border-blue-300'}`}
     >
       <div className="mb-3 flex items-start justify-between gap-3">
@@ -530,7 +623,8 @@ function WidgetShell({
           <h3 className="text-sm font-black text-slate-900">{widget.title}</h3>
           <p className="text-xs text-slate-500">{widget.source === 'mixte' ? 'Factures + activité' : widget.source === 'factures' ? 'Factures' : 'Activité'} · {getMeasureLabel(widget.measure)}</p>
         </div>
-        <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center gap-1">
+          <button title="Configurer le widget" type="button" onClick={onConfigure} className="rounded-lg border border-blue-200 bg-blue-50 px-2 py-1 text-xs font-bold text-blue-700 hover:bg-blue-100">⚙</button>
           <button type="button" onClick={() => onMove(-1)} className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-bold hover:bg-slate-50">↑</button>
           <button type="button" onClick={() => onMove(1)} className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-bold hover:bg-slate-50">↓</button>
           <button type="button" onClick={onDuplicate} className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-bold hover:bg-slate-50">Dupliquer</button>
@@ -611,13 +705,13 @@ function StackedValueLabel(props: any) {
   )
 }
 
-function ChartWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetConfig }) {
+function ChartWidget({ rows, widget, onUpdate }: { rows: StudioRow[]; widget: WidgetConfig; onUpdate?: (patch: Partial<WidgetConfig>) => void }) {
   const chartData = useMemo(() => {
     const xMap = new Map<string, Map<string, AggregatedValue>>()
     const seriesKey = widget.seriesDimension || ''
     rows.forEach((row) => {
       const xLabel = getDimensionValue(row, widget.dimension)
-      const sLabel = seriesKey ? getDimensionValue(row, seriesKey as DimensionKey) : getMeasureLabel(widget.measure)
+      const sLabel = getChartSeriesLabel(row, widget, seriesKey)
       if (!xMap.has(xLabel)) xMap.set(xLabel, new Map())
       const sMap = xMap.get(xLabel)!
       if (!sMap.has(sLabel)) sMap.set(sLabel, emptyAgg())
@@ -643,8 +737,25 @@ function ChartWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetConfig
     } else {
       sorted = sortItems(items, widget.sortMode)
     }
-    const limited = sorted.slice(0, Math.max(1, widget.topN || 12))
-    if (widget.type === 'histogramme_empile' && widget.stacked100) {
+
+    let limited = sorted.slice(0, Math.max(1, widget.topN || 12))
+
+    if (widget.dimension === 'mois' && widget.periodMode === 'cumul') {
+      const running: Record<string, number> = {}
+      limited = limited.map((row) => {
+        const next: ChartDatum = { ...row, __total: 0, value: 0 }
+        Object.keys(row).forEach((key) => {
+          if (key === 'label' || key === '__total' || key === 'value') return
+          running[key] = (running[key] || 0) + Number(row[key] || 0)
+          next[key] = running[key]
+          next.__total += running[key]
+          next.value = next.__total
+        })
+        return next
+      })
+    }
+
+    if (widget.type === 'histogramme_empile' && widget.stacked100 && widget.periodMode !== 'cumul') {
       return limited.map((row) => {
         const total = Object.keys(row).filter((key) => key !== 'label' && key !== '__total' && key !== 'value').reduce((sum, key) => sum + Number(row[key] || 0), 0)
         const next: ChartDatum = { ...row }
@@ -666,62 +777,100 @@ function ChartWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetConfig
       })
     })
     const result = Array.from(names)
-    if (widget.seriesDimension === 'annee') result.sort((a, b) => Number(a) - Number(b))
-    else result.sort((a, b) => a.localeCompare(b, 'fr', { numeric: true }))
+    if (widget.seriesDimension === 'annee') {
+      // Tri demandé : N-3, N-2, N-1, puis N en dernier.
+      // Si Factures + Activité sont empilés, Factures passe avant Activité dans la même année.
+      result.sort((a, b) => {
+        const ya = extractYearFromSeries(a) || 0
+        const yb = extractYearFromSeries(b) || 0
+        if (ya !== yb) return ya - yb
+        const sourceDiff = sourceRankFromSeries(a) - sourceRankFromSeries(b)
+        if (sourceDiff !== 0) return sourceDiff
+        return a.localeCompare(b, 'fr', { numeric: true })
+      })
+    } else result.sort((a, b) => a.localeCompare(b, 'fr', { numeric: true }))
     return result
   }, [chartData, widget.seriesDimension])
 
   if (!chartData.length) return <div className="rounded-xl bg-slate-50 p-8 text-center text-sm font-semibold text-slate-500">Aucune donnée avec les filtres sélectionnés.</div>
 
-  if (widget.type === 'courbe') {
-    return (
-      <div className="h-[340px]">
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={chartData} margin={{ top: 20, right: 20, left: 10, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" />
-            <XAxis dataKey="label" tick={{ fontSize: 11 }} />
-            <YAxis tickFormatter={(v) => widget.measure === 'marge_pct' ? `${Number(v).toFixed(0)}%` : `${Math.round(Number(v) / 1000)}k`} />
-            <Tooltip content={<CustomTooltip />} />
-            <Legend />
-            {seriesNames.map((series, index) => (
-              <Line key={series} type="monotone" dataKey={series} name={series} stroke={PALETTE[index % PALETTE.length]} strokeWidth={3} dot={false} />
-            ))}
-          </LineChart>
-        </ResponsiveContainer>
-      </div>
-    )
+  const quickControls = (widget.type === 'courbe' || widget.type === 'histogramme' || widget.type === 'histogramme_empile') && onUpdate
+  const chartAsLine = widget.type === 'courbe' || ((widget.type === 'histogramme' || widget.type === 'histogramme_empile') && widget.periodMode === 'cumul')
+  const referenceYear = chartReferenceYear(seriesNames, widget)
+  const mixedYearStack = widget.source === 'mixte' && widget.seriesDimension === 'annee' && widget.dimension === 'mois' && !chartAsLine
+
+  function stackIdForSeries(series: string) {
+    if (mixedYearStack) {
+      const year = extractYearFromSeries(series)
+      return year ? `year-${year}` : undefined
+    }
+    return widget.type === 'histogramme_empile' ? 'stack' : undefined
   }
 
   return (
-    <div className="h-[340px]">
-      <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={chartData} margin={{ top: 20, right: 20, left: 10, bottom: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" />
-          <XAxis dataKey="label" tick={{ fontSize: 11 }} interval={0} angle={chartData.length > 8 ? -25 : 0} textAnchor={chartData.length > 8 ? 'end' : 'middle'} height={chartData.length > 8 ? 65 : 35} />
-          <YAxis tickFormatter={(v) => widget.stacked100 || widget.measure === 'marge_pct' ? `${Number(v).toFixed(0)}%` : `${Math.round(Number(v) / 1000)}k`} />
-          <Tooltip content={<CustomTooltip />} />
-          <Legend />
-          {seriesNames.map((series, index) => (
-            <Bar
-              key={series}
-              dataKey={series}
-              name={series}
-              stackId={widget.type === 'histogramme_empile' ? 'stack' : undefined}
-              maxBarSize={widget.type === 'histogramme_empile' ? 42 : undefined}
-              fill={series === String(widget.yearN) ? COLOR_N : series === String(widget.yearN1) ? COLOR_N1 : PALETTE[index % PALETTE.length]}
-            >
-              {widget.type === 'histogramme_empile' && widget.showValues && (
-                <LabelList dataKey={series} content={(props: any) => <StackedValueLabel {...props} dataKey={series} measure={widget.measure} stacked100={widget.stacked100} />} />
-              )}
-            </Bar>
-          ))}
-        </BarChart>
-      </ResponsiveContainer>
+    <div>
+      {quickControls && (
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+          <div>
+            <div className="text-xs font-black uppercase tracking-wide text-slate-500">Cliquer pour modifier l'affichage</div>
+            <div className="mt-1 text-sm font-black text-slate-900">{widget.periodMode === 'cumul' ? `${getMeasureLabel(widget.measure)} cumulé` : `${getMeasureLabel(widget.measure)} mensuel`}</div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={() => onUpdate({ measure: 'ca_ht' })} className={`rounded-xl border px-3 py-2 text-xs font-black ${widget.measure === 'ca_ht' ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white text-slate-800'}`}>CA</button>
+            <button type="button" onClick={() => onUpdate({ measure: 'marge_pct' })} className={`rounded-xl border px-3 py-2 text-xs font-black ${widget.measure === 'marge_pct' ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white text-slate-800'}`}>Marge %</button>
+            <button type="button" onClick={() => onUpdate({ periodMode: 'mois' })} className={`rounded-xl border px-3 py-2 text-xs font-black ${widget.periodMode === 'mois' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300 bg-white text-slate-800'}`}>Mensuel</button>
+            <button type="button" onClick={() => onUpdate({ periodMode: 'cumul' })} className={`rounded-xl border px-3 py-2 text-xs font-black ${widget.periodMode === 'cumul' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300 bg-white text-slate-800'}`}>Cumul</button>
+          </div>
+        </div>
+      )}
+
+      {chartAsLine ? (
+        <div className="h-[340px]">
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={chartData} margin={{ top: 20, right: 20, left: 10, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="label" tick={{ fontSize: 11 }} />
+              <YAxis tickFormatter={(v) => widget.measure === 'marge_pct' ? `${Number(v).toFixed(0)}%` : `${Math.round(Number(v) / 1000)}k`} />
+              <Tooltip content={<CustomTooltip />} />
+              <Legend />
+              {seriesNames.map((series, index) => (
+                <Line key={series} type="monotone" dataKey={series} name={series} stroke={chartSeriesColor(series, index, widget, referenceYear)} strokeWidth={3} dot={{ r: 3 }} />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      ) : (
+        <div className="h-[340px]">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={chartData} margin={{ top: 20, right: 20, left: 10, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="label" tick={{ fontSize: 11 }} interval={0} angle={chartData.length > 8 ? -25 : 0} textAnchor={chartData.length > 8 ? 'end' : 'middle'} height={chartData.length > 8 ? 65 : 35} />
+              <YAxis tickFormatter={(v) => widget.stacked100 || widget.measure === 'marge_pct' ? `${Number(v).toFixed(0)}%` : `${Math.round(Number(v) / 1000)}k`} />
+              <Tooltip content={<CustomTooltip />} />
+              <Legend />
+              {seriesNames.map((series, index) => (
+                <Bar
+                  key={series}
+                  dataKey={series}
+                  name={series}
+                  stackId={stackIdForSeries(series)}
+                  maxBarSize={(widget.type === 'histogramme_empile' || mixedYearStack) ? 42 : undefined}
+                  fill={chartSeriesColor(series, index, widget, referenceYear)}
+                >
+                  {widget.type === 'histogramme_empile' && widget.showValues && (
+                    <LabelList dataKey={series} content={(props: any) => <StackedValueLabel {...props} dataKey={series} measure={widget.measure} stacked100={widget.stacked100} />} />
+                  )}
+                </Bar>
+              ))}
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
     </div>
   )
 }
 
-function BridgeWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetConfig }) {
+function BridgeWidget({ rows, widget, onUpdate }: { rows: StudioRow[]; widget: WidgetConfig; onUpdate?: (patch: Partial<WidgetConfig>) => void }) {
   const bridgeData = useMemo(() => {
     const yearN = widget.yearN || CURRENT_YEAR
     const yearN1 = widget.yearN1 || yearN - 1
@@ -786,10 +935,18 @@ function BridgeWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetConfi
 
   return (
     <div>
-      <div className="mb-3 flex flex-wrap items-center gap-2 text-xs font-bold text-slate-500">
-        <span className="rounded-full bg-slate-100 px-3 py-1">{widget.periodMode === 'cumul' ? `01-${String(bridgeData.monthLimit).padStart(2, '0')}` : monthLabel(bridgeData.monthLimit)}</span>
-        <span>Départ {bridgeData.yearN1} → Arrivée {bridgeData.yearN}</span>
-        {widget.measure === 'marge_pct' && <span className="rounded-full bg-amber-100 px-3 py-1 text-amber-700">Marge % : écarts en points par dimension</span>}
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3 text-xs font-bold text-slate-500">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="rounded-full bg-slate-100 px-3 py-1">{widget.periodMode === 'cumul' ? `01-${String(bridgeData.monthLimit).padStart(2, '0')}` : monthLabel(bridgeData.monthLimit)}</span>
+          <span>Départ {bridgeData.yearN1} → Arrivée {bridgeData.yearN}</span>
+          {widget.measure === 'marge_pct' && <span className="rounded-full bg-amber-100 px-3 py-1 text-amber-700">Marge % : écarts en points par dimension</span>}
+        </div>
+        {onUpdate && (
+          <div className="flex gap-2">
+            <button type="button" onClick={() => onUpdate({ periodMode: 'mois' })} className={`rounded-xl border px-3 py-2 text-xs font-black ${widget.periodMode === 'mois' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300 bg-white text-slate-800'}`}>Mois</button>
+            <button type="button" onClick={() => onUpdate({ periodMode: 'cumul' })} className={`rounded-xl border px-3 py-2 text-xs font-black ${widget.periodMode === 'cumul' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300 bg-white text-slate-800'}`}>01-M</button>
+          </div>
+        )}
       </div>
       <div className="h-[340px]">
         <ResponsiveContainer width="100%" height="100%">
@@ -825,6 +982,48 @@ function BridgeTooltip({ active, payload, label, measure }: any) {
       </div>
     </div>
   )
+}
+
+
+function sanitizeExcelSheetName(name: string) {
+  const clean = String(name || 'Feuille').replace(/[\\/?*\[\]:]/g, ' ').trim()
+  return clean.slice(0, 31) || 'Feuille'
+}
+
+function excelSafeFileName(name: string) {
+  return String(name || 'export').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 80) || 'export'
+}
+
+function excelCellAddress(row: number, col: number) {
+  return XLSX.utils.encode_cell({ r: row, c: col })
+}
+
+function excelHeaderStyle(fill = 'DDE5F1') {
+  return {
+    font: { bold: true, color: { rgb: '0F172A' } },
+    alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+    fill: { fgColor: { rgb: fill } },
+    border: {
+      top: { style: 'thin', color: { rgb: 'CBD5E1' } },
+      bottom: { style: 'thin', color: { rgb: 'CBD5E1' } },
+      left: { style: 'thin', color: { rgb: 'CBD5E1' } },
+      right: { style: 'thin', color: { rgb: 'CBD5E1' } },
+    },
+  }
+}
+
+function excelBodyStyle(fill = 'FFFFFF', bold = false) {
+  return {
+    font: { bold, color: { rgb: '0F172A' } },
+    alignment: { vertical: 'center', wrapText: true },
+    fill: { fgColor: { rgb: fill } },
+    border: {
+      top: { style: 'thin', color: { rgb: 'E2E8F0' } },
+      bottom: { style: 'thin', color: { rgb: 'E2E8F0' } },
+      left: { style: 'thin', color: { rgb: 'E2E8F0' } },
+      right: { style: 'thin', color: { rgb: 'E2E8F0' } },
+    },
+  }
 }
 
 function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetConfig }) {
@@ -928,6 +1127,136 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
     return measureValue(prevAgg, measure)
   }
 
+
+  function exportPivotToExcel(includeDetail: boolean) {
+    const wb = XLSX.utils.book_new()
+    const aoa: any[][] = []
+    const merges: any[] = []
+
+    aoa.push([widget.title || 'Tableau croisé'])
+    aoa.push([`${widget.source === 'mixte' ? 'Factures + activité' : widget.source === 'factures' ? 'Factures' : 'Activité'} · ${measures.map(getMeasureLabel).join(' / ')}`])
+    aoa.push([])
+
+    const startHeaderRow = aoa.length
+    const rowHeader = `${getDimensionLabel(widget.rowDimension)}${widget.rowDimension2 ? ' / ' + getDimensionLabel(widget.rowDimension2) : ''}`
+    const totalHeader = `TOTAL ${widget.periodMode === 'cumul' ? `01-${String(monthLimit).padStart(2, '0')}` : monthLabel(monthLimit)} ${yearN}`
+    const header1 = [rowHeader]
+    const header2 = ['']
+
+    header1.push(totalHeader, ...Array(Math.max(0, measures.length - 1)).fill(''))
+    header2.push(...measures.map(getMeasureLabel))
+    if (measures.length > 1) merges.push({ s: { r: startHeaderRow, c: 1 }, e: { r: startHeaderRow, c: measures.length } })
+
+    pivot.columns.forEach((column, idx) => {
+      const startCol = 1 + measures.length + idx * measures.length
+      header1.push(column, ...Array(Math.max(0, measures.length - 1)).fill(''))
+      header2.push(...measures.map(getMeasureLabel))
+      if (measures.length > 1) merges.push({ s: { r: startHeaderRow, c: startCol }, e: { r: startHeaderRow, c: startCol + measures.length - 1 } })
+    })
+
+    aoa.push(header1)
+    aoa.push(header2)
+
+    pivot.rows.forEach((row) => {
+      const line: any[] = [row.label]
+      measures.forEach((measure) => line.push(measureValue(row.total, measure)))
+      pivot.columns.forEach((column) => {
+        const agg = row.colMap.get(column) || emptyAgg()
+        measures.forEach((measure) => line.push(measureValue(agg, measure)))
+      })
+      aoa.push(line)
+    })
+
+    const totalLine: any[] = ['TOTAL']
+    const currentGrand = aggregateTotal(currentPeriodRows)
+    measures.forEach((measure) => totalLine.push(measureValue(currentGrand, measure)))
+    pivot.columns.forEach((column) => {
+      const agg = emptyAgg()
+      rows.filter((r) => getCompositeDimensionValue(r, widget.columnDimension, widget.columnDimension2) === column).forEach((r) => addToAgg(agg, r))
+      measures.forEach((measure) => totalLine.push(measureValue(agg, measure)))
+    })
+    aoa.push(totalLine)
+
+    const ws = XLSX.utils.aoa_to_sheet(aoa)
+    ws['!merges'] = merges
+    ws['!freeze'] = { xSplit: 1, ySplit: startHeaderRow + 2 }
+    ws['!cols'] = [{ wch: 28 }, ...Array(Math.max(0, header1.length - 1)).fill({ wch: 16 })]
+
+    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:A1')
+    for (let r = range.s.r; r <= range.e.r; r += 1) {
+      for (let c = range.s.c; c <= range.e.c; c += 1) {
+        const addr = excelCellAddress(r, c)
+        const cell = ws[addr]
+        if (!cell) continue
+        if (r === 0) {
+          cell.s = { font: { bold: true, sz: 16, color: { rgb: '0F172A' } } }
+        } else if (r === 1) {
+          cell.s = { font: { bold: true, color: { rgb: '64748B' } } }
+        } else if (r === startHeaderRow || r === startHeaderRow + 1) {
+          cell.s = excelHeaderStyle(r === startHeaderRow ? 'DDE5F1' : 'F1F5F9')
+        } else if (r === range.e.r || c === 0) {
+          cell.s = excelBodyStyle(r === range.e.r ? 'E2E8F0' : 'FFFFFF', true)
+        } else {
+          cell.s = excelBodyStyle('FFFFFF', false)
+        }
+        if (r > startHeaderRow + 1 && c > 0) {
+          const measureIndex = (c - 1) % measures.length
+          const measure = measures[measureIndex]
+          if (measure === 'marge_pct') {
+            cell.z = '0.0%'
+            if (typeof cell.v === 'number') cell.v = cell.v / 100
+          } else if (measure === 'ca_ht' || measure === 'marge_valeur') cell.z = '#,##0 €'
+          else cell.z = '#,##0'
+        }
+      }
+    }
+
+    XLSX.utils.book_append_sheet(wb, ws, sanitizeExcelSheetName('Tableau croisé'))
+
+    if (includeDetail) {
+      const detail = rows.map((r) => ({
+        Source: r.source === 'factures' ? 'Factures' : 'Activité',
+        Année: r.annee,
+        Mois: r.mois,
+        'Type document': r.type_document,
+        Agence: r.agence_collaborateur,
+        Collaborateur: r.collaborateur,
+        'Numéro tiers': r.numero_tiers,
+        'Nom tiers': r.intitule_tiers,
+        Famille: r.famille,
+        'Famille macro': r.famille_macro,
+        'Hors statistique': r.hors_statistique ? 'Oui' : 'Non',
+        'Nb lignes': r.nb_lignes,
+        Quantité: r.quantite,
+        'CA HT': r.ca_ht,
+        'Marge €': r.marge_valeur,
+        'Marge %': r.ca_ht ? r.marge_valeur / r.ca_ht : 0,
+      }))
+      const wsDetail = XLSX.utils.json_to_sheet(detail)
+      wsDetail['!cols'] = [
+        { wch: 12 }, { wch: 8 }, { wch: 8 }, { wch: 18 }, { wch: 18 }, { wch: 24 },
+        { wch: 18 }, { wch: 36 }, { wch: 18 }, { wch: 18 }, { wch: 16 }, { wch: 10 },
+        { wch: 10 }, { wch: 14 }, { wch: 14 }, { wch: 10 },
+      ]
+      const detailRange = XLSX.utils.decode_range(wsDetail['!ref'] || 'A1:A1')
+      for (let c = detailRange.s.c; c <= detailRange.e.c; c += 1) {
+        const cell = wsDetail[excelCellAddress(0, c)]
+        if (cell) cell.s = excelHeaderStyle('DDE5F1')
+      }
+      for (let r = 1; r <= detailRange.e.r; r += 1) {
+        ;[13, 14].forEach((c) => {
+          const cell = wsDetail[excelCellAddress(r, c)]
+          if (cell) cell.z = '#,##0 €'
+        })
+        const pct = wsDetail[excelCellAddress(r, 15)]
+        if (pct) pct.z = '0.0%'
+      }
+      XLSX.utils.book_append_sheet(wb, wsDetail, sanitizeExcelSheetName('Détail'))
+    }
+
+    XLSX.writeFile(wb, `${excelSafeFileName(widget.title || 'tableau_croise')}${includeDetail ? '_avec_detail' : ''}.xlsx`)
+  }
+
   function CellValue({ value, previous, measure }: { value: number; previous: number; measure: MeasureKey }) {
     return (
       <div className="min-w-[92px]">
@@ -942,7 +1271,15 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
   }
 
   return (
-    <div className="overflow-auto rounded-xl border border-slate-200">
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-blue-100 bg-blue-50 p-3">
+        <div className="text-xs font-black uppercase tracking-wide text-blue-700">Export du tableau croisé</div>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={() => exportPivotToExcel(false)} className="rounded-xl bg-emerald-600 px-3 py-2 text-xs font-black text-white shadow-sm hover:bg-emerald-700">Exporter Excel</button>
+          <button type="button" onClick={() => exportPivotToExcel(true)} className="rounded-xl bg-blue-600 px-3 py-2 text-xs font-black text-white shadow-sm hover:bg-blue-700">Excel + feuille détail</button>
+        </div>
+      </div>
+      <div className="overflow-auto rounded-xl border border-slate-200">
       <table className="min-w-full border-collapse text-xs">
         <thead>
           <tr className="bg-slate-100">
@@ -1003,6 +1340,7 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
           </tr>
         </tbody>
       </table>
+      </div>
     </div>
   )
 }
@@ -1037,12 +1375,123 @@ function PieWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetConfig }
   )
 }
 
-function WidgetRenderer({ rows, widget }: { rows: StudioRow[]; widget: WidgetConfig }) {
+function SummaryMatrixWidget({ rows, widget, onUpdate }: { rows: StudioRow[]; widget: WidgetConfig; onUpdate?: (patch: Partial<WidgetConfig>) => void }) {
+  const yearN = widget.yearN || CURRENT_YEAR
+  const rawYearN1 = widget.yearN1 || yearN - 1
+  const yearN1 = rawYearN1 === yearN ? yearN - 1 : rawYearN1
+  const monthLimit = widget.bridgeMonth || CURRENT_MONTH
+  const compact = widget.size === 'medium' || widget.size === 'small'
+
+  const columns = [
+    { key: 'mois', label: String(monthLimit).padStart(2, '0'), helper: monthLabel(monthLimit), filter: (row: StudioRow) => row.mois === monthLimit },
+    { key: 'cumul', label: `01-${String(monthLimit).padStart(2, '0')}`, helper: 'Cumul année', filter: (row: StudioRow) => row.mois <= monthLimit },
+    { key: 'total', label: 'Total', helper: 'Année complète chargée', filter: (_row: StudioRow) => true },
+  ]
+
+  const yearRows = Array.from(new Set([yearN1, yearN])).filter((year) => Number.isFinite(year))
+
+  function valuesFor(year: number, column: typeof columns[number]) {
+    const agg = aggregateTotal(rows.filter((row) => row.annee === year && column.filter(row)))
+    return {
+      ca: measureValue(agg, 'ca_ht'),
+      margePct: measureValue(agg, 'marge_pct'),
+    }
+  }
+
+  function DeltaBadge({ value, type }: { value: number; type: 'currency' | 'points' | 'percent' }) {
+    const positive = value >= 0
+    return (
+      <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-black ${positive ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
+        {type === 'currency' ? `${positive ? '+' : ''}${formatKCurrency(value)}` : type === 'percent' ? `${positive ? '+' : ''}${value.toFixed(1).replace('.', ',')} %` : `${positive ? '+' : ''}${value.toFixed(1).replace('.', ',')} pts`}
+      </span>
+    )
+  }
+
+  const valueFontSize = compact ? 'clamp(1.05rem, 2vw, 1.75rem)' : 'clamp(1.5rem, 2.4vw, 2.25rem)'
+  const rateFontSize = compact ? 'clamp(0.95rem, 1.6vw, 1.35rem)' : 'clamp(1.25rem, 2vw, 1.8rem)'
+  const labelFontSize = compact ? 'clamp(1.15rem, 2vw, 1.8rem)' : 'clamp(1.6rem, 2.5vw, 2.5rem)'
+  const cellPadding = compact ? 'px-3 py-4' : 'px-5 py-5'
+  const gridTemplateColumns = compact
+    ? 'minmax(88px, 0.65fr) repeat(3, minmax(112px, 1fr))'
+    : 'minmax(140px, 0.7fr) repeat(3, minmax(180px, 1fr))'
+
+  return (
+    <div className={`rounded-[2rem] border-4 border-slate-900 bg-white ${compact ? 'p-4' : 'p-6'} shadow-sm overflow-hidden`}>
+      <div className={`${compact ? 'mb-4' : 'mb-6'} flex flex-wrap items-start justify-between gap-4`}>
+        <div>
+          <h3 className={`${compact ? 'text-xl' : 'text-2xl'} font-black uppercase tracking-tight text-slate-900`}>Suivi du CA et marge</h3>
+          <p className="mt-1 text-sm font-semibold text-slate-600">Facturation + activité selon les filtres et types de documents sélectionnés.</p>
+        </div>
+        {onUpdate && (
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={() => onUpdate({ bridgeMonth: Math.max(1, monthLimit - 1) })} className="rounded-xl border border-slate-300 px-3 py-2 text-xs font-black hover:bg-slate-50">Mois -</button>
+            <button type="button" onClick={() => onUpdate({ bridgeMonth: Math.min(12, monthLimit + 1) })} className="rounded-xl border border-slate-300 px-3 py-2 text-xs font-black hover:bg-slate-50">Mois +</button>
+          </div>
+        )}
+      </div>
+
+      <div className={`grid ${compact ? 'gap-3' : 'gap-4'}`} style={{ gridTemplateColumns }}>
+        <div />
+        {columns.map((column) => (
+          <div key={column.key} className={`rounded-2xl bg-cyan-700 ${compact ? 'px-3 py-3' : 'px-5 py-4'} text-center font-black text-white`}>
+            <div style={{ fontSize: labelFontSize, lineHeight: 1.05 }}>{column.label}</div>
+            <div className="mt-1 text-[10px] font-bold uppercase tracking-wide text-cyan-100">{column.helper}</div>
+          </div>
+        ))}
+
+        {yearRows.map((year) => (
+          <div key={`row-${year}`} className="contents">
+            <div className={`flex items-center justify-center rounded-2xl bg-cyan-700 ${compact ? 'px-3 py-4' : 'px-5 py-6'} font-black text-white`} style={{ fontSize: labelFontSize, lineHeight: 1 }}>
+              {year}
+            </div>
+            {columns.map((column) => {
+              const values = valuesFor(year, column)
+              return (
+                <div key={`${year}-${column.key}`} className={`min-w-0 rounded-2xl border border-orange-300 bg-slate-100 ${cellPadding} text-center`}>
+                  <div className="truncate font-black text-slate-900" style={{ fontSize: valueFontSize, lineHeight: 1.05 }}>{formatKCurrency(values.ca)}</div>
+                  <div className="mt-2 truncate font-black text-slate-900" style={{ fontSize: rateFontSize, lineHeight: 1.05 }}>{formatRate(values.margePct)}</div>
+                </div>
+              )
+            })}
+          </div>
+        ))}
+
+        <div className={`flex items-center justify-center rounded-2xl bg-cyan-700 ${compact ? 'px-3 py-3 text-base' : 'px-5 py-4 text-lg'} font-black text-white`}>CA vs N-1</div>
+        {columns.map((column) => {
+          const current = valuesFor(yearN, column)
+          const previous = valuesFor(yearN1, column)
+          const delta = current.ca - previous.ca
+          const pct = previous.ca ? (delta / Math.abs(previous.ca)) * 100 : 0
+          return (
+            <div key={`delta-ca-${column.key}`} className={`min-w-0 flex flex-wrap items-center justify-center gap-2 rounded-2xl border border-orange-300 bg-orange-50 ${compact ? 'px-3 py-3 text-base' : 'px-5 py-4 text-xl'} font-black text-slate-900`}>
+              <span className="truncate">{formatKCurrency(delta)}</span>
+              <DeltaBadge value={pct} type="percent" />
+            </div>
+          )
+        })}
+
+        <div className={`flex items-center justify-center rounded-2xl bg-cyan-700 ${compact ? 'px-3 py-3 text-base' : 'px-5 py-4 text-lg'} font-black text-white`}>Marge vs N-1</div>
+        {columns.map((column) => {
+          const current = valuesFor(yearN, column)
+          const previous = valuesFor(yearN1, column)
+          return (
+            <div key={`delta-marge-${column.key}`} className={`flex items-center justify-center rounded-2xl border border-orange-300 bg-orange-50 ${compact ? 'px-3 py-3' : 'px-5 py-4'}`}>
+              <DeltaBadge value={current.margePct - previous.margePct} type="points" />
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function WidgetRenderer({ rows, widget, onUpdate }: { rows: StudioRow[]; widget: WidgetConfig; onUpdate?: (patch: Partial<WidgetConfig>) => void }) {
   if (widget.type === 'kpi') return <KpiWidget rows={rows} widget={widget} />
-  if (widget.type === 'bridge') return <BridgeWidget rows={rows} widget={widget} />
+  if (widget.type === 'bridge') return <BridgeWidget rows={rows} widget={widget} onUpdate={onUpdate} />
   if (widget.type === 'tableau') return <PivotTableWidget rows={rows} widget={widget} />
+  if (widget.type === 'synthese') return <SummaryMatrixWidget rows={rows} widget={widget} onUpdate={onUpdate} />
   if (widget.type === 'camembert') return <PieWidget rows={rows} widget={widget} />
-  return <ChartWidget rows={rows} widget={widget} />
+  return <ChartWidget rows={rows} widget={widget} onUpdate={onUpdate} />
 }
 
 export default function AtelierAnalysePage() {
@@ -1056,6 +1505,8 @@ export default function AtelierAnalysePage() {
   const [currentViewId, setCurrentViewId] = useState<string | null>(null)
   const [viewName, setViewName] = useState('Vue Direction')
   const [saveMessage, setSaveMessage] = useState<string | null>(null)
+  const [addMenuOpen, setAddMenuOpen] = useState(false)
+  const [configPanelTop, setConfigPanelTop] = useState(120)
 
   async function loadData() {
     setLoading(true)
@@ -1104,6 +1555,7 @@ export default function AtelierAnalysePage() {
       collaborateurs: uniqueSorted(rows.map((r) => r.collaborateur)),
       famillesMacro: uniqueSorted(rows.map((r) => r.famille_macro)),
       typesDocument: uniqueSorted(rows.map((r) => r.type_document)),
+      clients: uniqueSorted(rows.map((r) => clientKey(r))),
     }
   }, [rows])
 
@@ -1117,6 +1569,8 @@ export default function AtelierAnalysePage() {
     const widget = buildDefaultWidget(type, available.years)
     setWidgets((prev) => [...prev, widget])
     setSelectedWidgetId(widget.id)
+    setAddMenuOpen(false)
+    setConfigPanelTop(120)
   }
 
   function removeWidget(id: string) {
@@ -1171,7 +1625,7 @@ export default function AtelierAnalysePage() {
   function loadView(view: SavedView) {
     setCurrentViewId(view.id)
     setViewName(view.name)
-    setGlobalFilters(view.global_filters || DEFAULT_FILTERS)
+    setGlobalFilters({ ...DEFAULT_FILTERS, ...(view.global_filters || {}) })
     setWidgets(view.widgets || [])
     // À l'ouverture d'une vue enregistrée, on ferme le panneau de configuration
     // pour maximiser l'espace de lecture du dashboard.
@@ -1187,6 +1641,26 @@ export default function AtelierAnalysePage() {
     setSaveMessage('Vue dupliquée. Modifiez les filtres ou widgets puis cliquez sur Enregistrer la vue.')
   }
 
+  const widgetCatalog: Array<[WidgetType, string, string]> = [
+    ['kpi', 'KPI', 'Indicateur simple'],
+    ['histogramme', 'Histogramme', 'Barres verticales'],
+    ['histogramme_empile', 'Histogramme empilé', 'Valeur ou base 100'],
+    ['courbe', 'Courbe', 'Évolution mensuelle ou cumulée'],
+    ['bridge', 'Bridge', 'Écart N-1 ⇒ N'],
+    ['tableau', 'Tableau croisé', 'Lignes / colonnes / valeurs'],
+    ['synthese', 'Tableau synthèse', 'Mois + cumul + total'],
+    ['camembert', 'Camembert', 'Répartition'],
+  ]
+
+  function openWidgetConfig(widgetId: string, event: any) {
+    const section = event?.currentTarget?.closest?.('section') as HTMLElement | null
+    const rect = section?.getBoundingClientRect?.()
+    const top = rect ? Math.min(Math.max(16, rect.top), Math.max(16, window.innerHeight - 260)) : 120
+    setConfigPanelTop(top)
+    setSelectedWidgetId(widgetId)
+  }
+
+
   return (
     <main className="min-h-screen bg-slate-50 p-6 text-slate-900">
       <div className="mx-auto max-w-[2100px] space-y-5">
@@ -1195,6 +1669,7 @@ export default function AtelierAnalysePage() {
             <div>
               <h1 className="text-3xl font-black tracking-tight">Atelier d’analyse</h1>
               <p className="mt-2 text-sm text-slate-600">Créez vos propres widgets à partir des indicateurs factures et activité.</p>
+              <div className="mt-2 inline-flex rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-black text-blue-700">Version front : {ATELIER_FRONT_VERSION}</div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <input value={viewName} onChange={(e) => setViewName(e.target.value)} className="h-11 rounded-xl border border-slate-200 px-3 text-sm font-bold outline-none focus:border-blue-500" />
@@ -1208,13 +1683,14 @@ export default function AtelierAnalysePage() {
           {error && <div className="mt-4 rounded-xl bg-red-50 p-3 text-sm font-bold text-red-700">{error}</div>}
         </section>
 
-        <section className="grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm md:grid-cols-2 xl:grid-cols-7">
+        <section className="grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm md:grid-cols-2 xl:grid-cols-8">
           <MultiSelect label="Source" values={['factures', 'activite', 'mixte']} selected={globalFilters.sources} onChange={(v) => setGlobalFilters((p) => ({ ...p, sources: v as DataSource[] }))} />
           <MultiSelect label="Année" values={available.years.map(String)} selected={globalFilters.years.map(String)} onChange={(v) => setGlobalFilters((p) => ({ ...p, years: v.map(Number) }))} />
           <MultiSelect label="Mois" values={available.months.map((m) => `${m} - ${monthLabel(m)}`)} selected={globalFilters.months.map((m) => `${m} - ${monthLabel(m)}`)} onChange={(v) => setGlobalFilters((p) => ({ ...p, months: v.map((x) => Number(x.split(' - ')[0])) }))} />
           <MultiSelect label="Agence" values={available.agences} selected={globalFilters.agences} onChange={(v) => setGlobalFilters((p) => ({ ...p, agences: v }))} />
           <MultiSelect label="Collaborateur" values={available.collaborateurs} selected={globalFilters.collaborateurs} onChange={(v) => setGlobalFilters((p) => ({ ...p, collaborateurs: v }))} />
           <MultiSelect label="Famille macro" values={available.famillesMacro} selected={globalFilters.famillesMacro} onChange={(v) => setGlobalFilters((p) => ({ ...p, famillesMacro: v }))} />
+          <MultiSelect label="Type document" values={relevantDocumentTypes(globalFilters.sources.includes('mixte') || globalFilters.sources.length !== 1 ? 'mixte' : globalFilters.sources[0], available.typesDocument)} selected={globalFilters.typesDocument} onChange={(v) => setGlobalFilters((p) => ({ ...p, typesDocument: v }))} />
           <label className="block">
             <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Hors statistique</span>
             <select value={globalFilters.horsStatistique} onChange={(e) => setGlobalFilters((p) => ({ ...p, horsStatistique: e.target.value as GlobalFilters['horsStatistique'] }))} className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-bold">
@@ -1225,221 +1701,247 @@ export default function AtelierAnalysePage() {
           </label>
         </section>
 
-        <div className={`grid gap-5 ${selectedWidget ? 'xl:grid-cols-[300px_minmax(0,1fr)_380px]' : 'xl:grid-cols-[300px_minmax(0,1fr)]'}`}>
-          <aside className="space-y-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div>
-              <h2 className="text-lg font-black">Bibliothèque</h2>
-              <p className="text-sm text-slate-500">Ajoutez un widget puis configurez-le.</p>
+        <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="grid gap-3 md:grid-cols-[220px_1fr]">
+            <label className="block">
+              <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Filtre clients / tiers</span>
+              <select value={globalFilters.clientMode} onChange={(e) => setGlobalFilters((p) => ({ ...p, clientMode: e.target.value as ClientFilterMode }))} className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-bold">
+                <option value="include">Sélectionner uniquement</option>
+                <option value="exclude">Exclure les clients</option>
+              </select>
+            </label>
+            <MultiSelect label="Numéro tiers / nom client" values={available.clients} selected={globalFilters.clients || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, clients: v }))} />
+          </div>
+          <p className="mt-2 text-xs font-semibold text-slate-500">Laissez vide pour afficher tous les clients. Utilisez la recherche pour sélectionner ou exclure plusieurs clients.</p>
+        </section>
+
+        <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+            <div className="relative">
+              <button type="button" onClick={() => setAddMenuOpen((v) => !v)} className="rounded-xl bg-slate-900 px-4 py-3 text-sm font-black text-white shadow-sm hover:bg-slate-800">+ Ajouter un widget</button>
+              {addMenuOpen && (
+                <div className="absolute left-0 top-14 z-50 w-80 rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl">
+                  <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Bibliothèque de widgets</div>
+                  <div className="space-y-2">
+                    {widgetCatalog.map(([type, label, helper]) => (
+                      <button key={type} type="button" onClick={() => addWidget(type)} className="flex w-full items-center justify-between rounded-xl border border-slate-200 bg-white p-3 text-left hover:border-blue-300 hover:bg-blue-50">
+                        <span><span className="block text-sm font-black text-slate-900">+ {label}</span><span className="block text-xs text-slate-500">{helper}</span></span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
-            <div>
-              <h3 className="mb-2 text-xs font-black uppercase text-slate-500">Vues enregistrées</h3>
+
+            <div className="min-w-0 flex-1">
+              <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Vues enregistrées</div>
               <div className="flex gap-2 overflow-x-auto pb-1">
-                {savedViews.length === 0 && <div className="whitespace-nowrap rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-500">Aucune vue</div>}
+                {savedViews.length === 0 && <div className="whitespace-nowrap rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-500">Aucune vue enregistrée</div>}
                 {savedViews.map((view) => (
-                  <button key={view.id} type="button" onClick={() => loadView(view)} className={`min-w-[120px] rounded-xl border px-3 py-2 text-left text-xs hover:bg-slate-50 ${currentViewId === view.id ? 'border-blue-500 bg-blue-50' : 'border-slate-200'}`}>
+                  <button key={view.id} type="button" onClick={() => loadView(view)} className={`min-w-[150px] rounded-xl border px-3 py-2 text-left text-xs hover:bg-slate-50 ${currentViewId === view.id ? 'border-blue-500 bg-blue-50' : 'border-slate-200'}`}>
                     <span className="block truncate font-black">{view.name}</span>
                     <span className="block truncate text-[10px] text-slate-500">{view.updated_at ? new Date(view.updated_at).toLocaleDateString('fr-FR') : ''}</span>
                   </button>
                 ))}
               </div>
             </div>
-            <div className="space-y-2">
-              {([
-                ['kpi', 'KPI', 'Indicateur simple'],
-                ['histogramme', 'Histogramme', 'Barres verticales'],
-                ['histogramme_empile', 'Histogramme empilé', 'Valeur ou base 100'],
-                ['courbe', 'Courbe', 'Évolution mensuelle'],
-                ['bridge', 'Bridge', 'Écart N-1 ⇒ N'],
-                ['tableau', 'Tableau croisé', 'Lignes / colonnes / valeurs'],
-                ['camembert', 'Camembert', 'Répartition'],
-              ] as Array<[WidgetType, string, string]>).map(([type, label, helper]) => (
-                <button key={type} type="button" onClick={() => addWidget(type)} className="flex w-full items-center justify-between rounded-xl border border-slate-200 bg-white p-3 text-left hover:border-blue-300 hover:bg-blue-50">
-                  <span><span className="block text-sm font-black text-slate-900">+ {label}</span><span className="block text-xs text-slate-500">{helper}</span></span>
-                </button>
-              ))}
+          </div>
+        </section>
+
+        <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-black">Ma page</h2>
+              <p className="text-sm text-slate-500">{loading ? 'Chargement des données…' : `${formatNumber(rows.length)} lignes agrégées chargées`}</p>
             </div>
-          </aside>
-
-          <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div className="mb-4 flex items-center justify-between gap-3">
-              <div>
-                <h2 className="text-lg font-black">Ma page</h2>
-                <p className="text-sm text-slate-500">{loading ? 'Chargement des données…' : `${formatNumber(rows.length)} lignes agrégées chargées`}</p>
-              </div>
-              <div className="text-xs font-bold text-slate-500">Cliquez sur un widget pour le configurer</div>
+            <div className="text-xs font-bold text-slate-500">Cliquez sur la roue dentée d’un widget pour le configurer.</div>
+          </div>
+          {widgets.length === 0 ? (
+            <div className="rounded-2xl border-2 border-dashed border-slate-300 p-12 text-center">
+              <div className="text-xl font-black text-slate-700">Ajoutez votre premier widget</div>
+              <p className="mt-2 text-sm text-slate-500">Utilisez le bouton « Ajouter un widget » au-dessus de la page.</p>
             </div>
-            {widgets.length === 0 ? (
-              <div className="rounded-2xl border-2 border-dashed border-slate-300 p-12 text-center">
-                <div className="text-xl font-black text-slate-700">Ajoutez votre premier widget</div>
-                <p className="mt-2 text-sm text-slate-500">Utilisez la bibliothèque à gauche pour démarrer.</p>
+          ) : (
+            <div className="grid grid-cols-1 gap-4 xl:grid-cols-4">
+              {widgets.map((widget) => {
+                const widgetRows = applyWidgetFilters(rows, widget, globalFilters)
+                return (
+                  <WidgetShell
+                    key={widget.id}
+                    widget={widget}
+                    selected={selectedWidget?.id === widget.id}
+                    onConfigure={(event) => openWidgetConfig(widget.id, event)}
+                    onRemove={() => removeWidget(widget.id)}
+                    onDuplicate={() => duplicateWidget(widget)}
+                    onMove={(direction) => moveWidget(widget.id, direction)}
+                  >
+                    <WidgetRenderer rows={widgetRows} widget={widget} onUpdate={(patch) => updateWidget(widget.id, patch)} />
+                  </WidgetShell>
+                )
+              })}
+            </div>
+          )}
+        </section>
+
+        {selectedWidget && (
+          <aside
+            className="fixed right-6 z-50 w-[390px] overflow-auto rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl"
+            style={{ top: `${configPanelTop}px`, maxHeight: `calc(100vh - ${configPanelTop + 24}px)` }}
+          >
+            <div className="space-y-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-black">Configurer le widget</h2>
+                  <p className="text-xs text-slate-500">{selectedWidget.title}</p>
+                </div>
+                <button type="button" onClick={() => setSelectedWidgetId(null)} className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-black hover:bg-slate-50">×</button>
               </div>
-            ) : (
-              <div className="grid grid-cols-1 gap-4 xl:grid-cols-4">
-                {widgets.map((widget) => {
-                  const widgetRows = applyWidgetFilters(rows, widget, globalFilters)
-                  return (
-                    <WidgetShell
-                      key={widget.id}
-                      widget={widget}
-                      selected={selectedWidget?.id === widget.id}
-                      onSelect={() => setSelectedWidgetId(widget.id)}
-                      onRemove={() => removeWidget(widget.id)}
-                      onDuplicate={() => duplicateWidget(widget)}
-                      onMove={(direction) => moveWidget(widget.id, direction)}
-                    >
-                      <WidgetRenderer rows={widgetRows} widget={widget} />
-                    </WidgetShell>
-                  )
-                })}
+
+              <label className="block">
+                <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Titre</span>
+                <input value={selectedWidget.title} onChange={(e) => updateWidget(selectedWidget.id, { title: e.target.value })} className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-semibold outline-none focus:border-blue-500" />
+              </label>
+
+              <div className="grid grid-cols-2 gap-3">
+                <SelectField label="Type" value={selectedWidget.type} onChange={(v) => updateWidget(selectedWidget.id, { type: v as WidgetType })} options={widgetCatalog.map(([value, label]) => ({ value, label }))} />
+                <SelectField label="Taille" value={selectedWidget.size} onChange={(v) => updateWidget(selectedWidget.id, { size: v as SizeKey })} options={[
+                  { value: 'small', label: 'Petit' },
+                  { value: 'medium', label: 'Moyen' },
+                  { value: 'large', label: 'Large' },
+                  { value: 'full', label: 'Pleine largeur' },
+                ]} />
               </div>
-            )}
-          </section>
 
-          {selectedWidget && (
-          <aside className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-              <div className="space-y-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <h2 className="text-lg font-black">Configurer le widget</h2>
-                    <p className="text-xs text-slate-500">{selectedWidget.id}</p>
-                  </div>
-                  <button type="button" onClick={() => setSelectedWidgetId(null)} className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-black hover:bg-slate-50">×</button>
+              <div className="grid grid-cols-2 gap-3">
+                <SelectField label="Source" value={selectedWidget.source} onChange={(v) => updateWidget(selectedWidget.id, { source: v as DataSource, localFilters: { ...selectedWidget.localFilters, typesDocument: [] } })} options={[
+                  { value: 'factures', label: 'Factures' },
+                  { value: 'activite', label: 'Activité' },
+                  { value: 'mixte', label: 'Mixte' },
+                ]} />
+                <SelectField label="Valeur" value={selectedWidget.measure} onChange={(v) => updateWidget(selectedWidget.id, { measure: v as MeasureKey })} options={MEASURES.map((m) => ({ value: m.key, label: m.label }))} />
+              </div>
+
+              <div className="rounded-xl border border-slate-200 p-3">
+                <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Types de documents pris en compte</div>
+                <MultiSelect
+                  label="Documents"
+                  values={relevantDocumentTypes(selectedWidget.source, available.typesDocument)}
+                  selected={selectedWidget.localFilters.typesDocument || []}
+                  onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, typesDocument: v } })}
+                />
+                <p className="mt-2 text-[11px] font-semibold text-slate-500">Laissez vide pour garder tous les documents pertinents de la source. En mixte, décochez par exemple CDC ou BR pour les exclure de la valeur.</p>
+              </div>
+
+              <div className="rounded-xl border border-slate-200 p-3">
+                <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Filtre clients propre au widget</div>
+                <div className="grid gap-3">
+                  <SelectField label="Mode client" value={selectedWidget.localFilters.clientMode || 'include'} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, clientMode: v as ClientFilterMode } })} options={[{ value: 'include', label: 'Sélectionner uniquement' }, { value: 'exclude', label: 'Exclure les clients' }]} />
+                  <MultiSelect label="Numéro tiers / nom client" values={available.clients} selected={selectedWidget.localFilters.clients || []} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, clients: v } })} />
                 </div>
+                <p className="mt-2 text-[11px] font-semibold text-slate-500">Ce filtre s’ajoute aux filtres globaux lorsque le widget utilise les filtres globaux.</p>
+              </div>
 
-                <label className="block">
-                  <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Titre</span>
-                  <input value={selectedWidget.title} onChange={(e) => updateWidget(selectedWidget.id, { title: e.target.value })} className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-semibold outline-none focus:border-blue-500" />
-                </label>
+              <div className="grid grid-cols-2 gap-3">
+                <SelectField label="Mesure comparaison" value={selectedWidget.secondMeasure || selectedWidget.measure} onChange={(v) => updateWidget(selectedWidget.id, { secondMeasure: v as MeasureKey })} options={MEASURES.map((m) => ({ value: m.key, label: m.label }))} />
+                <SelectField label="Évolution" value={selectedWidget.evolutionMode} onChange={(v) => updateWidget(selectedWidget.id, { evolutionMode: v as EvolutionMode })} options={[{ value: 'none', label: 'Aucune' }, { value: 'percent', label: 'Évolution %' }, { value: 'value', label: 'Évolution valeur' }, { value: 'both', label: 'Valeur + %' }]} />
+              </div>
 
+              {selectedWidget.type !== 'kpi' && selectedWidget.type !== 'tableau' && selectedWidget.type !== 'synthese' && (
+                <>
+                  <SelectField label={selectedWidget.type === 'bridge' ? 'Dimension écart' : 'Axe X'} value={selectedWidget.dimension} onChange={(v) => updateWidget(selectedWidget.id, { dimension: v as DimensionKey })} options={DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))} />
+                  {selectedWidget.type !== 'bridge' && selectedWidget.type !== 'camembert' && (
+                    <SelectField label="Série" value={selectedWidget.seriesDimension || ''} onChange={(v) => updateWidget(selectedWidget.id, { seriesDimension: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
+                  )}
+                </>
+              )}
+
+              {(['bridge', 'kpi', 'tableau', 'synthese', 'courbe', 'histogramme', 'histogramme_empile'] as WidgetType[]).includes(selectedWidget.type) && (
+                <div className="grid grid-cols-2 gap-3 rounded-xl border border-slate-200 p-3">
+                  <div className="col-span-2 text-xs font-black uppercase tracking-wide text-slate-500">Période de calcul / base de comparaison</div>
+                  <SelectField label="Période" value={selectedWidget.periodMode} onChange={(v) => updateWidget(selectedWidget.id, { periodMode: v as PeriodMode })} options={[{ value: 'mois', label: 'Mois seul' }, { value: 'cumul', label: 'Cumul 01-M' }]} />
+                  <SelectField label="Mois" value={selectedWidget.bridgeMonth} onChange={(v) => updateWidget(selectedWidget.id, { bridgeMonth: Number(v) })} options={available.months.map((m) => ({ value: m, label: `${String(m).padStart(2, '0')} - ${monthLabel(m)}` }))} />
+                  <SelectField label="Année N" value={selectedWidget.yearN || available.years[0] || CURRENT_YEAR} onChange={(v) => updateWidget(selectedWidget.id, { yearN: Number(v) })} options={available.years.map((y) => ({ value: y, label: String(y) }))} />
+                  <SelectField label="Année N-1" value={selectedWidget.yearN1 || (selectedWidget.yearN || CURRENT_YEAR) - 1} onChange={(v) => updateWidget(selectedWidget.id, { yearN1: Number(v) })} options={available.years.map((y) => ({ value: y, label: String(y) }))} />
+                </div>
+              )}
+
+              {selectedWidget.type === 'tableau' && (
                 <div className="grid grid-cols-2 gap-3">
-                  <SelectField label="Type" value={selectedWidget.type} onChange={(v) => updateWidget(selectedWidget.id, { type: v as WidgetType })} options={[
-                    { value: 'kpi', label: 'KPI' },
-                    { value: 'histogramme', label: 'Histogramme' },
-                    { value: 'histogramme_empile', label: 'Histogramme empilé' },
-                    { value: 'courbe', label: 'Courbe' },
-                    { value: 'bridge', label: 'Bridge' },
-                    { value: 'tableau', label: 'Tableau' },
-                    { value: 'camembert', label: 'Camembert' },
-                  ]} />
-                  <SelectField label="Taille" value={selectedWidget.size} onChange={(v) => updateWidget(selectedWidget.id, { size: v as SizeKey })} options={[
-                    { value: 'small', label: 'Petit' },
-                    { value: 'medium', label: 'Moyen' },
-                    { value: 'large', label: 'Large' },
-                    { value: 'full', label: 'Pleine largeur' },
-                  ]} />
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <SelectField label="Source" value={selectedWidget.source} onChange={(v) => updateWidget(selectedWidget.id, { source: v as DataSource })} options={[
-                    { value: 'factures', label: 'Factures' },
-                    { value: 'activite', label: 'Activité' },
-                    { value: 'mixte', label: 'Mixte' },
-                  ]} />
-                  <SelectField label="Valeur" value={selectedWidget.measure} onChange={(v) => updateWidget(selectedWidget.id, { measure: v as MeasureKey })} options={MEASURES.map((m) => ({ value: m.key, label: m.label }))} />
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <SelectField label="Mesure comparaison" value={selectedWidget.secondMeasure || selectedWidget.measure} onChange={(v) => updateWidget(selectedWidget.id, { secondMeasure: v as MeasureKey })} options={MEASURES.map((m) => ({ value: m.key, label: m.label }))} />
-                  <SelectField label="Évolution" value={selectedWidget.evolutionMode} onChange={(v) => updateWidget(selectedWidget.id, { evolutionMode: v as EvolutionMode })} options={[{ value: 'none', label: 'Aucune' }, { value: 'percent', label: 'Évolution %' }, { value: 'value', label: 'Évolution valeur' }, { value: 'both', label: 'Valeur + %' }]} />
-                </div>
-
-                {selectedWidget.type !== 'kpi' && selectedWidget.type !== 'tableau' && (
-                  <>
-                    <SelectField label={selectedWidget.type === 'bridge' ? 'Dimension écart' : 'Axe X'} value={selectedWidget.dimension} onChange={(v) => updateWidget(selectedWidget.id, { dimension: v as DimensionKey })} options={DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))} />
-                    {selectedWidget.type !== 'bridge' && selectedWidget.type !== 'camembert' && (
-                      <SelectField label="Série" value={selectedWidget.seriesDimension || ''} onChange={(v) => updateWidget(selectedWidget.id, { seriesDimension: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
-                    )}
-                  </>
-                )}
-
-                {(['bridge', 'kpi', 'tableau'] as WidgetType[]).includes(selectedWidget.type) && (
-                  <div className="grid grid-cols-2 gap-3 rounded-xl border border-slate-200 p-3">
-                    <div className="col-span-2 text-xs font-black uppercase tracking-wide text-slate-500">Période de calcul / base de comparaison</div>
-                    <SelectField label="Période" value={selectedWidget.periodMode} onChange={(v) => updateWidget(selectedWidget.id, { periodMode: v as PeriodMode })} options={[{ value: 'mois', label: 'Mois seul' }, { value: 'cumul', label: 'Cumul 01-M' }]} />
-                    <SelectField label="Mois" value={selectedWidget.bridgeMonth} onChange={(v) => updateWidget(selectedWidget.id, { bridgeMonth: Number(v) })} options={available.months.map((m) => ({ value: m, label: `${String(m).padStart(2, '0')} - ${monthLabel(m)}` }))} />
-                    <SelectField label="Année N" value={selectedWidget.yearN || available.years[0] || CURRENT_YEAR} onChange={(v) => updateWidget(selectedWidget.id, { yearN: Number(v) })} options={available.years.map((y) => ({ value: y, label: String(y) }))} />
-                    <SelectField label="Année N-1" value={selectedWidget.yearN1 || (selectedWidget.yearN || CURRENT_YEAR) - 1} onChange={(v) => updateWidget(selectedWidget.id, { yearN1: Number(v) })} options={available.years.map((y) => ({ value: y, label: String(y) }))} />
-                  </div>
-                )}
-
-                {selectedWidget.type === 'tableau' && (
-                  <div className="grid grid-cols-2 gap-3">
-                    <SelectField label="Lignes 1" value={selectedWidget.rowDimension} onChange={(v) => updateWidget(selectedWidget.id, { rowDimension: v as DimensionKey })} options={DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))} />
-                    <SelectField label="Lignes 2" value={selectedWidget.rowDimension2 || ''} onChange={(v) => updateWidget(selectedWidget.id, { rowDimension2: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
-                    <SelectField label="Colonnes 1" value={selectedWidget.columnDimension} onChange={(v) => updateWidget(selectedWidget.id, { columnDimension: v as DimensionKey })} options={DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))} />
-                    <SelectField label="Colonnes 2" value={selectedWidget.columnDimension2 || ''} onChange={(v) => updateWidget(selectedWidget.id, { columnDimension2: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
-                    <div className="col-span-2 rounded-xl border border-slate-200 p-3">
-                      <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Valeurs affichées dans chaque colonne</div>
-                      <div className="grid grid-cols-2 gap-2">
-                        {MEASURES.map((measure) => {
-                          const selected = (selectedWidget.tableMeasures || [selectedWidget.measure]).includes(measure.key)
-                          return (
-                            <label key={measure.key} className="flex items-center gap-2 rounded-lg bg-slate-50 px-2 py-1 text-xs font-bold text-slate-700">
-                              <input
-                                type="checkbox"
-                                checked={selected}
-                                onChange={(e) => {
-                                  const current = selectedWidget.tableMeasures || [selectedWidget.measure]
-                                  const next = e.target.checked ? Array.from(new Set([...current, measure.key])) : current.filter((m) => m !== measure.key)
-                                  updateWidget(selectedWidget.id, { tableMeasures: next.length ? next : [selectedWidget.measure] })
-                                }}
-                              />
-                              {measure.label}
-                            </label>
-                          )
-                        })}
-                      </div>
+                  <SelectField label="Lignes 1" value={selectedWidget.rowDimension} onChange={(v) => updateWidget(selectedWidget.id, { rowDimension: v as DimensionKey })} options={DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))} />
+                  <SelectField label="Lignes 2" value={selectedWidget.rowDimension2 || ''} onChange={(v) => updateWidget(selectedWidget.id, { rowDimension2: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
+                  <SelectField label="Colonnes 1" value={selectedWidget.columnDimension} onChange={(v) => updateWidget(selectedWidget.id, { columnDimension: v as DimensionKey })} options={DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))} />
+                  <SelectField label="Colonnes 2" value={selectedWidget.columnDimension2 || ''} onChange={(v) => updateWidget(selectedWidget.id, { columnDimension2: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
+                  <div className="col-span-2 rounded-xl border border-slate-200 p-3">
+                    <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Valeurs affichées dans chaque colonne</div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {MEASURES.map((measure) => {
+                        const selected = (selectedWidget.tableMeasures || [selectedWidget.measure]).includes(measure.key)
+                        return (
+                          <label key={measure.key} className="flex items-center gap-2 rounded-lg bg-slate-50 px-2 py-1 text-xs font-bold text-slate-700">
+                            <input
+                              type="checkbox"
+                              checked={selected}
+                              onChange={(e) => {
+                                const current = selectedWidget.tableMeasures || [selectedWidget.measure]
+                                const next = e.target.checked ? Array.from(new Set([...current, measure.key])) : current.filter((m) => m !== measure.key)
+                                updateWidget(selectedWidget.id, { tableMeasures: next.length ? next : [selectedWidget.measure] })
+                              }}
+                            />
+                            {measure.label}
+                          </label>
+                        )
+                      })}
                     </div>
                   </div>
-                )}
-
-                <div className="grid grid-cols-2 gap-3">
-                  <SelectField label="Tri" value={selectedWidget.sortMode} onChange={(v) => updateWidget(selectedWidget.id, { sortMode: v as SortMode })} options={[
-                    { value: 'value_desc', label: 'Valeur décroissante' },
-                    { value: 'value_asc', label: 'Valeur croissante' },
-                    { value: 'label_asc', label: 'Libellé A-Z' },
-                  ]} />
-                  <label className="block">
-                    <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Top N</span>
-                    <input type="number" min={1} max={100} value={selectedWidget.topN} onChange={(e) => updateWidget(selectedWidget.id, { topN: Number(e.target.value || 10) })} className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-semibold outline-none focus:border-blue-500" />
-                  </label>
                 </div>
+              )}
 
-                <div className="grid grid-cols-2 gap-3">
-                  <SelectField label="Mode comparaison" value={selectedWidget.compareMode} onChange={(v) => updateWidget(selectedWidget.id, { compareMode: v as CompareMode })} options={[{ value: 'year', label: 'Année / période' }, { value: 'month', label: 'Mois' }, { value: 'dimension', label: 'Autre dimension' }]} />
-                  <SelectField label="Dimension comparaison" value={selectedWidget.compareDimension || ''} onChange={(v) => updateWidget(selectedWidget.id, { compareDimension: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
-                  <label className="block col-span-2">
-                    <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Valeur comparaison dimension</span>
-                    <input value={selectedWidget.compareValue || ''} onChange={(e) => updateWidget(selectedWidget.id, { compareValue: e.target.value })} placeholder="Ex : ANGLET, PV, 2025..." className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-semibold outline-none focus:border-blue-500" />
-                  </label>
-                  {selectedWidget.type === 'histogramme_empile' && (
-                    <label className="col-span-2 flex items-center gap-2 rounded-xl bg-slate-50 p-3 text-sm font-bold text-slate-700">
-                      <input type="checkbox" checked={selectedWidget.stacked100} onChange={(e) => updateWidget(selectedWidget.id, { stacked100: e.target.checked })} />
-                      Afficher en base 100
-                    </label>
-                  )}
-                </div>
-
-                <label className="flex items-center gap-2 rounded-xl bg-slate-50 p-3 text-sm font-bold text-slate-700">
-                  <input type="checkbox" checked={selectedWidget.useGlobalFilters} onChange={(e) => updateWidget(selectedWidget.id, { useGlobalFilters: e.target.checked })} />
-                  Utiliser les filtres globaux
+              <div className="grid grid-cols-2 gap-3">
+                <SelectField label="Tri" value={selectedWidget.sortMode} onChange={(v) => updateWidget(selectedWidget.id, { sortMode: v as SortMode })} options={[
+                  { value: 'value_desc', label: 'Valeur décroissante' },
+                  { value: 'value_asc', label: 'Valeur croissante' },
+                  { value: 'label_asc', label: 'Libellé A-Z' },
+                ]} />
+                <label className="block">
+                  <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Top N</span>
+                  <input type="number" min={1} max={100} value={selectedWidget.topN} onChange={(e) => updateWidget(selectedWidget.id, { topN: Number(e.target.value || 10) })} className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-semibold outline-none focus:border-blue-500" />
                 </label>
+              </div>
 
-                <div className="rounded-xl border border-slate-200 p-3">
-                  <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Filtres propres au widget</div>
-                  <div className="grid gap-2">
-                    <MultiSelect label="Année" values={available.years.map(String)} selected={(selectedWidget.localFilters.years || []).map(String)} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, years: v.map(Number) } })} />
-                    <MultiSelect label="Mois" values={available.months.map((m) => `${m} - ${monthLabel(m)}`)} selected={(selectedWidget.localFilters.months || []).map((m) => `${m} - ${monthLabel(m)}`)} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, months: v.map((x) => Number(x.split(' - ')[0])) } })} />
-                    <MultiSelect label="Agence" values={available.agences} selected={selectedWidget.localFilters.agences || []} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, agences: v } })} />
-                    <MultiSelect label="Famille macro" values={available.famillesMacro} selected={selectedWidget.localFilters.famillesMacro || []} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, famillesMacro: v } })} />
-                    <MultiSelect label="Type document" values={available.typesDocument} selected={selectedWidget.localFilters.typesDocument || []} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, typesDocument: v } })} />
-                  </div>
+              <div className="grid grid-cols-2 gap-3">
+                <SelectField label="Mode comparaison" value={selectedWidget.compareMode} onChange={(v) => updateWidget(selectedWidget.id, { compareMode: v as CompareMode })} options={[{ value: 'year', label: 'Année / période' }, { value: 'month', label: 'Mois' }, { value: 'dimension', label: 'Autre dimension' }]} />
+                <SelectField label="Dimension comparaison" value={selectedWidget.compareDimension || ''} onChange={(v) => updateWidget(selectedWidget.id, { compareDimension: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
+                <label className="block col-span-2">
+                  <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Valeur comparaison dimension</span>
+                  <input value={selectedWidget.compareValue || ''} onChange={(e) => updateWidget(selectedWidget.id, { compareValue: e.target.value })} placeholder="Ex : ANGLET, PV, 2025..." className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-semibold outline-none focus:border-blue-500" />
+                </label>
+                {selectedWidget.type === 'histogramme_empile' && (
+                  <label className="col-span-2 flex items-center gap-2 rounded-xl bg-slate-50 p-3 text-sm font-bold text-slate-700">
+                    <input type="checkbox" checked={selectedWidget.stacked100} onChange={(e) => updateWidget(selectedWidget.id, { stacked100: e.target.checked })} />
+                    Afficher en base 100
+                  </label>
+                )}
+              </div>
+
+              <label className="flex items-center gap-2 rounded-xl bg-slate-50 p-3 text-sm font-bold text-slate-700">
+                <input type="checkbox" checked={selectedWidget.useGlobalFilters} onChange={(e) => updateWidget(selectedWidget.id, { useGlobalFilters: e.target.checked })} />
+                Utiliser les filtres globaux
+              </label>
+
+              <div className="rounded-xl border border-slate-200 p-3">
+                <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Filtres propres au widget</div>
+                <div className="grid gap-2">
+                  <MultiSelect label="Année" values={available.years.map(String)} selected={(selectedWidget.localFilters.years || []).map(String)} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, years: v.map(Number) } })} />
+                  <MultiSelect label="Mois" values={available.months.map((m) => `${m} - ${monthLabel(m)}`)} selected={(selectedWidget.localFilters.months || []).map((m) => `${m} - ${monthLabel(m)}`)} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, months: v.map((x) => Number(x.split(' - ')[0])) } })} />
+                  <MultiSelect label="Agence" values={available.agences} selected={selectedWidget.localFilters.agences || []} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, agences: v } })} />
+                  <MultiSelect label="Famille macro" values={available.famillesMacro} selected={selectedWidget.localFilters.famillesMacro || []} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, famillesMacro: v } })} />
                 </div>
               </div>
+            </div>
           </aside>
-          )}
-        </div>
+        )}
       </div>
     </main>
   )
 }
+
