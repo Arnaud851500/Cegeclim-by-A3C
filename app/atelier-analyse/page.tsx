@@ -118,6 +118,11 @@ type WidgetConfig = {
   showValues: boolean
 }
 
+type AiWidgetProposal = Partial<WidgetConfig> & {
+  rationale?: string
+  confidence?: string | number
+}
+
 type SavedView = {
   id: string
   name: string
@@ -144,7 +149,8 @@ type ChartDatum = {
 const FACTURES_TABLE = 'indicateur_factures_mensuel'
 const ACTIVITE_TABLE = 'indicateur_activite_mensuel'
 const VIEW_TABLE = 'analyse_widget_views'
-const ATELIER_FRONT_VERSION = 'V2026-05-15-EXCEL-TCD-CLIENTS-04'
+const ATELIER_FRONT_VERSION = 'V2026-05-18-IA-CONTEXTE-FILTRES-01'
+const ATELIER_AI_VERSION = 'STEP-3-WIDGET-BUILDER-02'
 
 const MONTHS = ['Janv.', 'Févr.', 'Mars', 'Avr.', 'Mai', 'Juin', 'Juil.', 'Août', 'Sept.', 'Oct.', 'Nov.', 'Déc.']
 const CURRENT_YEAR = new Date().getFullYear()
@@ -542,6 +548,7 @@ function MultiSelect({
     else onChange([...selected, value])
   }
 
+
   return (
     <div className="relative">
       <button
@@ -676,6 +683,7 @@ function KpiWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetConfig }
   const evo = evolutionText(value, previousValue, widget.evolutionMode, widget.measure)
   const periodText = widget.periodMode === 'cumul' ? `01-${String(monthLimit).padStart(2, '0')}` : monthLabel(monthLimit)
 
+
   return (
     <div className="rounded-2xl bg-slate-50 p-4">
       <div className="flex items-start justify-between gap-3">
@@ -807,6 +815,7 @@ function ChartWidget({ rows, widget, onUpdate }: { rows: StudioRow[]; widget: Wi
     return widget.type === 'histogramme_empile' ? 'stack' : undefined
   }
 
+
   return (
     <div>
       {quickControls && (
@@ -834,7 +843,16 @@ function ChartWidget({ rows, widget, onUpdate }: { rows: StudioRow[]; widget: Wi
               <Tooltip content={<CustomTooltip />} />
               <Legend />
               {seriesNames.map((series, index) => (
-                <Line key={series} type="monotone" dataKey={series} name={series} stroke={chartSeriesColor(series, index, widget, referenceYear)} strokeWidth={3} dot={{ r: 3 }} />
+                <Line
+                  key={series}
+                  type="monotone"
+                  dataKey={series}
+                  name={series}
+                  stroke={chartSeriesColor(series, index, widget, referenceYear)}
+                  strokeWidth={3}
+                  dot={{ r: 3 }}
+                  isAnimationActive={false}
+                />
               ))}
             </LineChart>
           </ResponsiveContainer>
@@ -856,6 +874,7 @@ function ChartWidget({ rows, widget, onUpdate }: { rows: StudioRow[]; widget: Wi
                   stackId={stackIdForSeries(series)}
                   maxBarSize={(widget.type === 'histogramme_empile' || mixedYearStack) ? 42 : undefined}
                   fill={chartSeriesColor(series, index, widget, referenceYear)}
+                  isAnimationActive={false}
                 >
                   {widget.type === 'histogramme_empile' && widget.showValues && (
                     <LabelList dataKey={series} content={(props: any) => <StackedValueLabel {...props} dataKey={series} measure={widget.measure} stacked100={widget.stacked100} />} />
@@ -933,6 +952,7 @@ function BridgeWidget({ rows, widget, onUpdate }: { rows: StudioRow[]; widget: W
     return points
   }, [bridgeData, widget.measure])
 
+
   return (
     <div>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3 text-xs font-bold text-slate-500">
@@ -955,8 +975,8 @@ function BridgeWidget({ rows, widget, onUpdate }: { rows: StudioRow[]; widget: W
             <XAxis dataKey="name" angle={-25} textAnchor="end" interval={0} tick={{ fontSize: 10 }} height={75} />
             <YAxis tickFormatter={(v) => widget.measure === 'marge_pct' ? `${Number(v).toFixed(0)}%` : `${Math.round(Number(v) / 1000)}k`} />
             <Tooltip content={<BridgeTooltip measure={widget.measure} />} />
-            <Bar dataKey="base" stackId="a" fill="#ffffff" fillOpacity={0} />
-            <Bar dataKey="value" stackId="a">
+            <Bar dataKey="base" stackId="a" fill="#ffffff" fillOpacity={0} isAnimationActive={false} />
+            <Bar dataKey="value" stackId="a" isAnimationActive={false}>
               <LabelList dataKey="label" position="top" style={{ fontSize: 10, fontWeight: 800, fill: '#0f172a' }} />
               {waterfallData.map((entry, index) => <Cell key={`cell-${index}`} fill={entry.fill} />)}
             </Bar>
@@ -973,6 +993,7 @@ function BridgeTooltip({ active, payload, label, measure }: any) {
   const valueItem = payload.find((item: any) => item?.dataKey === 'value')
   const row = valueItem?.payload || payload[0]?.payload || {}
   const rawValue = Number(row.value || 0)
+
 
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-3 text-sm shadow-xl">
@@ -1028,15 +1049,113 @@ function excelBodyStyle(fill = 'FFFFFF', bold = false) {
 
 function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetConfig }) {
   const [sortCell, setSortCell] = useState<{ column: string; measure: MeasureKey | 'total'; dir: 'asc' | 'desc' } | null>(null)
+  const [rowSorts, setRowSorts] = useState<Array<{ partIndex: number; dir: 'asc' | 'desc' }>>([])
+  const [rowDetailExpanded, setRowDetailExpanded] = useState(true)
+  const [columnDetailExpanded, setColumnDetailExpanded] = useState(true)
+
   const measures = widget.tableMeasures?.length ? widget.tableMeasures : [widget.measure]
   const yearN = widget.yearN || CURRENT_YEAR
   const yearN1 = widget.yearN1 || yearN - 1
   const monthLimit = widget.bridgeMonth || CURRENT_MONTH
   const inSelectedPeriod = (row: StudioRow) => widget.periodMode === 'cumul' ? row.mois <= monthLimit : row.mois === monthLimit
+  const periodRows = rows.filter((row) => inSelectedPeriod(row))
   const currentPeriodRows = rows.filter((row) => row.annee === yearN && inSelectedPeriod(row))
   const previousPeriodRows = rows.filter((row) => row.annee === yearN1 && inSelectedPeriod(row))
 
+  const configuredRowDimensions = [widget.rowDimension, widget.rowDimension2].filter(Boolean) as DimensionKey[]
+  const configuredColumnDimensions = [widget.columnDimension, widget.columnDimension2].filter(Boolean) as DimensionKey[]
+  const rowDimensions = configuredRowDimensions.length > 1 && !rowDetailExpanded
+    ? [configuredRowDimensions[0]]
+    : configuredRowDimensions
+  const columnDimensions = configuredColumnDimensions.length > 1 && !columnDetailExpanded
+    ? [configuredColumnDimensions[0]]
+    : configuredColumnDimensions
+  const hasRowDrill = configuredRowDimensions.length > 1
+  const hasColumnDrill = configuredColumnDimensions.length > 1
+  const headerRowCount = columnDimensions.length > 1 ? 3 : 2
+  const ROW_JOIN = '§ROW§'
+  const COL_JOIN = '§COL§'
+  const rowWidths = rowDimensions.length > 1 ? ['120px', '180px'] : ['220px']
+
+  type PivotColumn = { key: string; parts: string[] }
+  type PivotRow = {
+    key: string
+    parts: string[]
+    colMap: Map<string, AggregatedValue>
+    total: AggregatedValue
+    totalPrev: AggregatedValue
+    value: number
+    isSubtotal?: boolean
+    subtotalFor?: string
+  }
+
+  function rowKey(parts: string[]) {
+    return parts.join(ROW_JOIN)
+  }
+
+  function columnKey(parts: string[]) {
+    return parts.join(COL_JOIN)
+  }
+
+  function rowPartsFor(row: StudioRow, dimensions = rowDimensions) {
+    return dimensions.map((dimension) => getDimensionValue(row, dimension))
+  }
+
+  function columnPartsFor(row: StudioRow, dimensions = columnDimensions) {
+    return dimensions.map((dimension) => getDimensionValue(row, dimension))
+  }
+
+  function compareDimensionPart(a: string, b: string, dimension: DimensionKey) {
+    if (dimension === 'mois') return MONTHS.indexOf(a) - MONTHS.indexOf(b)
+    if (dimension === 'annee') return Number(a) - Number(b)
+    return a.localeCompare(b, 'fr', { numeric: true, sensitivity: 'base' })
+  }
+
+  function compareRowParts(a: string[], b: string[], criteria: Array<{ partIndex: number; dir: 'asc' | 'desc' }>) {
+    const normalizedCriteria = [...criteria]
+
+    // Quand deux dimensions de lignes sont affichées, on garde toujours la dimension 1 comme groupe.
+    // Exemple : tri Famille macro puis tri Année => 2025 avec familles A→Z, puis 2026 avec familles A→Z.
+    if (rowDimensions.length > 1 && !normalizedCriteria.some((criterion) => criterion.partIndex === 0)) {
+      normalizedCriteria.unshift({ partIndex: 0, dir: 'asc' })
+    }
+
+    // On complète toujours avec les dimensions non encore triées.
+    // Ainsi, si l'utilisateur trie seulement Année, les familles restent triées de façon stable à l'intérieur de chaque année.
+    rowDimensions.forEach((_dimension, index) => {
+      if (!normalizedCriteria.some((criterion) => criterion.partIndex === index)) {
+        normalizedCriteria.push({ partIndex: index, dir: 'asc' })
+      }
+    })
+
+    const fallbackCriteria = normalizedCriteria.length
+      ? normalizedCriteria
+      : rowDimensions.map((_dimension, index) => ({ partIndex: index, dir: 'asc' as const }))
+
+    for (const criterion of fallbackCriteria) {
+      const dimension = rowDimensions[criterion.partIndex]
+      if (!dimension) continue
+      const result = compareDimensionPart(a[criterion.partIndex] || '', b[criterion.partIndex] || '', dimension)
+      if (result !== 0) return criterion.dir === 'asc' ? result : -result
+    }
+
+    return rowKey(a).localeCompare(rowKey(b), 'fr', { numeric: true })
+  }
+
+  function toggleRowSort(partIndex: number) {
+    setSortCell(null)
+    setRowSorts((prev) => {
+      const existing = prev.find((criterion) => criterion.partIndex === partIndex)
+      const remaining = prev.filter((criterion) => criterion.partIndex !== partIndex)
+      const nextDir = existing && prev[0]?.partIndex === partIndex
+        ? existing.dir === 'asc' ? 'desc' : 'asc'
+        : existing?.dir || 'asc'
+      return [{ partIndex, dir: nextDir }, ...remaining]
+    })
+  }
+
   function toggleSort(column: string, measure: MeasureKey | 'total') {
+    setRowSorts([])
     setSortCell((prev) => {
       if (prev?.column === column && prev.measure === measure) return { column, measure, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
       return { column, measure, dir: 'desc' }
@@ -1045,38 +1164,51 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
 
   const pivot = useMemo(() => {
     const map = new Map<string, Map<string, AggregatedValue>>()
-    rows.forEach((row) => {
-      const rowLabel = getCompositeDimensionValue(row, widget.rowDimension, widget.rowDimension2)
-      const colLabel = getCompositeDimensionValue(row, widget.columnDimension, widget.columnDimension2)
-      if (!map.has(rowLabel)) map.set(rowLabel, new Map())
-      const colMap = map.get(rowLabel)!
-      if (!colMap.has(colLabel)) colMap.set(colLabel, emptyAgg())
-      addToAgg(colMap.get(colLabel)!, row)
+    const rowMeta = new Map<string, string[]>()
+    const columnMeta = new Map<string, string[]>()
+
+    periodRows.forEach((row) => {
+      const rParts = rowPartsFor(row)
+      const cParts = columnPartsFor(row)
+      const rKey = rowKey(rParts)
+      const cKey = columnKey(cParts)
+
+      if (!map.has(rKey)) map.set(rKey, new Map())
+      if (!rowMeta.has(rKey)) rowMeta.set(rKey, rParts)
+      if (!columnMeta.has(cKey)) columnMeta.set(cKey, cParts)
+
+      const colMap = map.get(rKey)!
+      if (!colMap.has(cKey)) colMap.set(cKey, emptyAgg())
+      addToAgg(colMap.get(cKey)!, row)
     })
 
-    const allCols = new Set<string>()
-    map.forEach((colMap) => colMap.forEach((_value, col) => allCols.add(col)))
-    let columns = Array.from(allCols)
-    if (widget.columnDimension === 'mois') columns = columns.sort((a, b) => MONTHS.indexOf(a.split(' › ')[0]) - MONTHS.indexOf(b.split(' › ')[0]))
-    else columns = columns.sort((a, b) => a.localeCompare(b, 'fr', { numeric: true }))
+    let columns = Array.from(columnMeta.entries()).map(([key, parts]) => ({ key, parts }))
+    columns.sort((a, b) => {
+      for (let i = 0; i < columnDimensions.length; i += 1) {
+        const result = compareDimensionPart(a.parts[i] || '', b.parts[i] || '', columnDimensions[i])
+        if (result !== 0) return result
+      }
+      return a.key.localeCompare(b.key, 'fr', { numeric: true })
+    })
     columns = columns.slice(0, 18)
 
-    const rowItems = Array.from(map.entries()).map(([label, colMap]) => {
+    const rowItems: PivotRow[] = Array.from(map.entries()).map(([key, colMap]) => {
+      const parts = rowMeta.get(key) || [key]
       const total = emptyAgg()
       const totalPrev = emptyAgg()
 
-      currentPeriodRows
-        .filter((r) => getCompositeDimensionValue(r, widget.rowDimension, widget.rowDimension2) === label)
+      periodRows
+        .filter((r) => rowKey(rowPartsFor(r)) === key)
         .forEach((r) => addToAgg(total, r))
 
       previousPeriodRows
-        .filter((r) => getCompositeDimensionValue(r, widget.rowDimension, widget.rowDimension2) === label)
+        .filter((r) => rowKey(rowPartsFor(r)) === key)
         .forEach((r) => addToAgg(totalPrev, r))
 
-      return { label, colMap, value: measureValue(total, widget.measure), total, totalPrev }
+      return { key, parts, colMap, value: measureValue(total, widget.measure), total, totalPrev }
     })
 
-    const sortedRows = [...rowItems]
+    let sortedRows = [...rowItems]
     if (sortCell) {
       sortedRows.sort((a, b) => {
         const aggA = sortCell.column === '__total__' ? a.total : a.colMap.get(sortCell.column) || emptyAgg()
@@ -1086,103 +1218,200 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
         const vb = measureValue(aggB, measure)
         return sortCell.dir === 'asc' ? va - vb : vb - va
       })
+    } else if (rowSorts.length) {
+      sortedRows.sort((a, b) => compareRowParts(a.parts, b.parts, rowSorts))
+    } else if (rowDimensions.length > 1 && rowDetailExpanded) {
+      // Important : avec des sous-totaux, les lignes doivent rester groupées par dimension 1.
+      // Sinon, un tri par valeur peut alterner 2024/2025/2026 et générer un total répété à chaque changement de groupe.
+      sortedRows.sort((a, b) => compareRowParts(a.parts, b.parts, []))
+    } else if (widget.sortMode === 'value_desc' || widget.sortMode === 'value_asc') {
+      sortedRows.sort((a, b) => widget.sortMode === 'value_desc' ? b.value - a.value : a.value - b.value)
     } else {
-      sortedRows.sort((a, b) => {
-        if (widget.sortMode === 'value_desc') return b.value - a.value
-        if (widget.sortMode === 'value_asc') return a.value - b.value
-        return a.label.localeCompare(b.label, 'fr', { numeric: true })
+      sortedRows.sort((a, b) => compareRowParts(a.parts, b.parts, []))
+    }
+
+    sortedRows = sortedRows.slice(0, Math.max(1, widget.topN || 25))
+
+    const rowsWithSubtotals: PivotRow[] = []
+    if (rowDimensions.length > 1 && rowDetailExpanded && !sortCell) {
+      let currentGroup = ''
+      let subtotal: PivotRow | null = null
+
+      function flushSubtotal() {
+        if (subtotal) rowsWithSubtotals.push(subtotal)
+        subtotal = null
+      }
+
+      sortedRows.forEach((row) => {
+        const group = row.parts[0] || '—'
+        if (currentGroup && group !== currentGroup) flushSubtotal()
+        if (!currentGroup || group !== currentGroup) {
+          currentGroup = group
+          const subtotalColMap = new Map<string, AggregatedValue>()
+          subtotal = {
+            key: `__subtotal__${ROW_JOIN}${group}`,
+            parts: [group, `TOTAL ${group}`],
+            colMap: subtotalColMap,
+            total: emptyAgg(),
+            totalPrev: emptyAgg(),
+            value: 0,
+            isSubtotal: true,
+            subtotalFor: group,
+          }
+        }
+
+        rowsWithSubtotals.push(row)
+
+        if (subtotal) {
+          ;(Object.keys(subtotal.total) as Array<keyof AggregatedValue>).forEach((key) => {
+            subtotal!.total[key] += row.total[key]
+            subtotal!.totalPrev[key] += row.totalPrev[key]
+          })
+          row.colMap.forEach((agg, colKey) => {
+            if (!subtotal!.colMap.has(colKey)) subtotal!.colMap.set(colKey, emptyAgg())
+            const target = subtotal!.colMap.get(colKey)!
+            ;(Object.keys(target) as Array<keyof AggregatedValue>).forEach((key) => {
+              target[key] += agg[key]
+            })
+          })
+          subtotal.value = measureValue(subtotal.total, widget.measure)
+        }
       })
+      flushSubtotal()
+    } else {
+      rowsWithSubtotals.push(...sortedRows)
+    }
+
+    const columnGroups: Array<{ label: string; columns: PivotColumn[] }> = []
+    if (columnDimensions.length > 1) {
+      columns.forEach((column) => {
+        const label = column.parts[0] || '—'
+        const current = columnGroups[columnGroups.length - 1]
+        if (!current || current.label !== label) columnGroups.push({ label, columns: [column] })
+        else current.columns.push(column)
+      })
+    } else {
+      columnGroups.push({ label: '', columns })
     }
 
     return {
       columns,
-      rows: sortedRows.slice(0, Math.max(1, widget.topN || 25)),
+      columnGroups,
+      rows: rowsWithSubtotals,
     }
-  }, [rows, widget, sortCell, measures, currentPeriodRows, previousPeriodRows])
+  }, [periodRows, rows, widget, sortCell, rowSorts, measures, currentPeriodRows, previousPeriodRows, rowDetailExpanded, columnDetailExpanded, rowDimensions, columnDimensions])
 
-  function comparisonColumnLabel(column: string) {
-    if (widget.columnDimension === 'annee' || widget.columnDimension2 === 'annee') {
-      return column.replace(new RegExp(`\\b${yearN}\\b`, 'g'), String(yearN1))
+  function comparisonColumnKey(column: PivotColumn) {
+    if (columnDimensions.includes('annee')) {
+      return columnKey(column.parts.map((part, index) => columnDimensions[index] === 'annee' && part === String(yearN) ? String(yearN1) : part))
     }
-    return column
+    return column.key
   }
 
-  function comparisonValue(rowLabel: string, column: string, measure: MeasureKey) {
-    if (widget.evolutionMode === 'none') return 0
+  function comparisonValue(rowKeyValue: string, column: PivotColumn, measure: MeasureKey) {
+    if (widget.evolutionMode === 'none' || rowKeyValue.startsWith('__subtotal__')) return 0
     const prevAgg = emptyAgg()
-    const prevColumn = comparisonColumnLabel(column)
+    const prevColumnKey = comparisonColumnKey(column)
     previousPeriodRows
-      .filter((r) => getCompositeDimensionValue(r, widget.rowDimension, widget.rowDimension2) === rowLabel)
-      .filter((r) => getCompositeDimensionValue(r, widget.columnDimension, widget.columnDimension2) === prevColumn)
+      .filter((r) => rowKey(rowPartsFor(r)) === rowKeyValue)
+      .filter((r) => columnKey(columnPartsFor(r)) === prevColumnKey)
       .forEach((r) => addToAgg(prevAgg, r))
     return measureValue(prevAgg, measure)
   }
 
-  function totalComparisonValue(rowLabel: string, measure: MeasureKey) {
+  function totalComparisonValue(row: PivotRow, measure: MeasureKey) {
     if (widget.evolutionMode === 'none') return 0
-    const prevAgg = emptyAgg()
-    previousPeriodRows
-      .filter((r) => getCompositeDimensionValue(r, widget.rowDimension, widget.rowDimension2) === rowLabel)
-      .forEach((r) => addToAgg(prevAgg, r))
-    return measureValue(prevAgg, measure)
+    if (row.isSubtotal) return measureValue(row.totalPrev, measure)
+    return measureValue(row.totalPrev, measure)
   }
-
 
   function exportPivotToExcel(includeDetail: boolean) {
     const wb = XLSX.utils.book_new()
     const aoa: any[][] = []
     const merges: any[] = []
+    const rowHeaderCount = rowDimensions.length
+    const totalHeader = `TOTAL ${widget.periodMode === 'cumul' ? `01-${String(monthLimit).padStart(2, '0')}` : monthLabel(monthLimit)}`
 
     aoa.push([widget.title || 'Tableau croisé'])
     aoa.push([`${widget.source === 'mixte' ? 'Factures + activité' : widget.source === 'factures' ? 'Factures' : 'Activité'} · ${measures.map(getMeasureLabel).join(' / ')}`])
     aoa.push([])
 
     const startHeaderRow = aoa.length
-    const rowHeader = `${getDimensionLabel(widget.rowDimension)}${widget.rowDimension2 ? ' / ' + getDimensionLabel(widget.rowDimension2) : ''}`
-    const totalHeader = `TOTAL ${widget.periodMode === 'cumul' ? `01-${String(monthLimit).padStart(2, '0')}` : monthLabel(monthLimit)} ${yearN}`
-    const header1 = [rowHeader]
-    const header2 = ['']
+    const headerRows: any[][] = []
 
-    header1.push(totalHeader, ...Array(Math.max(0, measures.length - 1)).fill(''))
-    header2.push(...measures.map(getMeasureLabel))
-    if (measures.length > 1) merges.push({ s: { r: startHeaderRow, c: 1 }, e: { r: startHeaderRow, c: measures.length } })
+    if (columnDimensions.length > 1) {
+      const h1 = rowDimensions.map(getDimensionLabel)
+      const h2 = Array(rowHeaderCount).fill('')
+      const h3 = Array(rowHeaderCount).fill('')
 
-    pivot.columns.forEach((column, idx) => {
-      const startCol = 1 + measures.length + idx * measures.length
-      header1.push(column, ...Array(Math.max(0, measures.length - 1)).fill(''))
-      header2.push(...measures.map(getMeasureLabel))
-      if (measures.length > 1) merges.push({ s: { r: startHeaderRow, c: startCol }, e: { r: startHeaderRow, c: startCol + measures.length - 1 } })
-    })
+      h1.push(totalHeader, ...Array(Math.max(0, measures.length - 1)).fill(''))
+      h2.push(...Array(measures.length).fill(''))
+      h3.push(...measures.map(getMeasureLabel))
+      merges.push({ s: { r: startHeaderRow, c: rowHeaderCount }, e: { r: startHeaderRow + 1, c: rowHeaderCount + measures.length - 1 } })
 
-    aoa.push(header1)
-    aoa.push(header2)
+      let cursor = rowHeaderCount + measures.length
+      pivot.columnGroups.forEach((group) => {
+        const span = group.columns.length * measures.length
+        h1.push(group.label, ...Array(Math.max(0, span - 1)).fill(''))
+        merges.push({ s: { r: startHeaderRow, c: cursor }, e: { r: startHeaderRow, c: cursor + span - 1 } })
+        group.columns.forEach((column) => {
+          h2.push(column.parts[1] || '—', ...Array(Math.max(0, measures.length - 1)).fill(''))
+          if (measures.length > 1) merges.push({ s: { r: startHeaderRow + 1, c: cursor }, e: { r: startHeaderRow + 1, c: cursor + measures.length - 1 } })
+          h3.push(...measures.map(getMeasureLabel))
+          cursor += measures.length
+        })
+      })
+      rowDimensions.forEach((_dimension, index) => merges.push({ s: { r: startHeaderRow, c: index }, e: { r: startHeaderRow + 2, c: index } }))
+      headerRows.push(h1, h2, h3)
+    } else {
+      const h1 = rowDimensions.map(getDimensionLabel)
+      const h2 = Array(rowHeaderCount).fill('')
+      h1.push(totalHeader, ...Array(Math.max(0, measures.length - 1)).fill(''))
+      h2.push(...measures.map(getMeasureLabel))
+      if (measures.length > 1) merges.push({ s: { r: startHeaderRow, c: rowHeaderCount }, e: { r: startHeaderRow, c: rowHeaderCount + measures.length - 1 } })
+      let cursor = rowHeaderCount + measures.length
+      pivot.columns.forEach((column) => {
+        h1.push(column.parts[0] || '—', ...Array(Math.max(0, measures.length - 1)).fill(''))
+        h2.push(...measures.map(getMeasureLabel))
+        if (measures.length > 1) merges.push({ s: { r: startHeaderRow, c: cursor }, e: { r: startHeaderRow, c: cursor + measures.length - 1 } })
+        cursor += measures.length
+      })
+      rowDimensions.forEach((_dimension, index) => merges.push({ s: { r: startHeaderRow, c: index }, e: { r: startHeaderRow + 1, c: index } }))
+      headerRows.push(h1, h2)
+    }
+
+    aoa.push(...headerRows)
 
     pivot.rows.forEach((row) => {
-      const line: any[] = [row.label]
+      const line: any[] = [...row.parts]
       measures.forEach((measure) => line.push(measureValue(row.total, measure)))
       pivot.columns.forEach((column) => {
-        const agg = row.colMap.get(column) || emptyAgg()
+        const agg = row.colMap.get(column.key) || emptyAgg()
         measures.forEach((measure) => line.push(measureValue(agg, measure)))
       })
       aoa.push(line)
     })
 
-    const totalLine: any[] = ['TOTAL']
-    const currentGrand = aggregateTotal(currentPeriodRows)
+    const totalLine: any[] = ['TOTAL', ...Array(Math.max(0, rowHeaderCount - 1)).fill('')]
+    const currentGrand = aggregateTotal(periodRows)
     measures.forEach((measure) => totalLine.push(measureValue(currentGrand, measure)))
     pivot.columns.forEach((column) => {
       const agg = emptyAgg()
-      rows.filter((r) => getCompositeDimensionValue(r, widget.columnDimension, widget.columnDimension2) === column).forEach((r) => addToAgg(agg, r))
+      periodRows.filter((r) => columnKey(columnPartsFor(r)) === column.key).forEach((r) => addToAgg(agg, r))
       measures.forEach((measure) => totalLine.push(measureValue(agg, measure)))
     })
     aoa.push(totalLine)
 
     const ws = XLSX.utils.aoa_to_sheet(aoa)
     ws['!merges'] = merges
-    ws['!freeze'] = { xSplit: 1, ySplit: startHeaderRow + 2 }
-    ws['!cols'] = [{ wch: 28 }, ...Array(Math.max(0, header1.length - 1)).fill({ wch: 16 })]
+    ws['!freeze'] = { xSplit: rowHeaderCount, ySplit: startHeaderRow + headerRows.length }
+    ws['!cols'] = [
+      ...rowDimensions.map((_dimension, index) => ({ wch: index === 0 ? 14 : 24 })),
+      ...Array(Math.max(0, (aoa[startHeaderRow]?.length || 0) - rowHeaderCount)).fill({ wch: 16 }),
+    ]
 
     const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:A1')
+    const lastHeaderRow = startHeaderRow + headerRows.length - 1
     for (let r = range.s.r; r <= range.e.r; r += 1) {
       for (let c = range.s.c; c <= range.e.c; c += 1) {
         const addr = excelCellAddress(r, c)
@@ -1192,15 +1421,15 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
           cell.s = { font: { bold: true, sz: 16, color: { rgb: '0F172A' } } }
         } else if (r === 1) {
           cell.s = { font: { bold: true, color: { rgb: '64748B' } } }
-        } else if (r === startHeaderRow || r === startHeaderRow + 1) {
+        } else if (r >= startHeaderRow && r <= lastHeaderRow) {
           cell.s = excelHeaderStyle(r === startHeaderRow ? 'DDE5F1' : 'F1F5F9')
-        } else if (r === range.e.r || c === 0) {
-          cell.s = excelBodyStyle(r === range.e.r ? 'E2E8F0' : 'FFFFFF', true)
+        } else if (r === range.e.r || c < rowHeaderCount || String(aoa[r]?.[Math.max(0, rowHeaderCount - 1)] || '').startsWith('TOTAL')) {
+          cell.s = excelBodyStyle(r === range.e.r ? 'E2E8F0' : 'EEF4FA', true)
         } else {
           cell.s = excelBodyStyle('FFFFFF', false)
         }
-        if (r > startHeaderRow + 1 && c > 0) {
-          const measureIndex = (c - 1) % measures.length
+        if (r > lastHeaderRow && c >= rowHeaderCount) {
+          const measureIndex = (c - rowHeaderCount) % measures.length
           const measure = measures[measureIndex]
           if (measure === 'marge_pct') {
             cell.z = '0.0%'
@@ -1270,81 +1499,147 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
     )
   }
 
+  const rowHeaderStyle = (index: number) => ({
+    left: index === 0 ? 0 : `calc(${rowWidths.slice(0, index).join(' + ')})`,
+    minWidth: rowWidths[index] || '160px',
+  })
+
+  const rowSortIndicator = (index: number) => {
+    const rank = rowSorts.findIndex((criterion) => criterion.partIndex === index)
+    if (rank < 0) return ''
+    const criterion = rowSorts[rank]
+    return `${criterion.dir === 'asc' ? '▲' : '▼'}${rank > 0 ? rank + 1 : ''}`
+  }
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-blue-100 bg-blue-50 p-3">
-        <div className="text-xs font-black uppercase tracking-wide text-blue-700">Export du tableau croisé</div>
+        <div>
+          <div className="text-xs font-black uppercase tracking-wide text-blue-700">Export du tableau croisé</div>
+          <div className="mt-1 text-xs font-semibold text-slate-600">Les dimensions de lignes et de colonnes sont exportées dans des colonnes / lignes séparées.</div>
+        </div>
         <div className="flex flex-wrap gap-2">
+          {hasRowDrill && (
+            <button type="button" onClick={() => setRowDetailExpanded((v) => !v)} className="rounded-xl border border-blue-200 bg-white px-3 py-2 text-xs font-black text-blue-700 hover:bg-blue-50">
+              {rowDetailExpanded ? `Réduire lignes : ${getDimensionLabel(configuredRowDimensions[1])}` : `Développer lignes : ${getDimensionLabel(configuredRowDimensions[1])}`}
+            </button>
+          )}
+          {hasColumnDrill && (
+            <button type="button" onClick={() => setColumnDetailExpanded((v) => !v)} className="rounded-xl border border-blue-200 bg-white px-3 py-2 text-xs font-black text-blue-700 hover:bg-blue-50">
+              {columnDetailExpanded ? `Réduire colonnes : ${getDimensionLabel(configuredColumnDimensions[1])}` : `Développer colonnes : ${getDimensionLabel(configuredColumnDimensions[1])}`}
+            </button>
+          )}
           <button type="button" onClick={() => exportPivotToExcel(false)} className="rounded-xl bg-emerald-600 px-3 py-2 text-xs font-black text-white shadow-sm hover:bg-emerald-700">Exporter Excel</button>
           <button type="button" onClick={() => exportPivotToExcel(true)} className="rounded-xl bg-blue-600 px-3 py-2 text-xs font-black text-white shadow-sm hover:bg-blue-700">Excel + feuille détail</button>
         </div>
       </div>
       <div className="overflow-auto rounded-xl border border-slate-200">
-      <table className="min-w-full border-collapse text-xs">
-        <thead>
-          <tr className="bg-slate-100">
-            <th rowSpan={2} className="sticky left-0 z-20 border border-slate-200 bg-slate-100 px-3 py-2 text-left font-black">
-              {`${getDimensionLabel(widget.rowDimension)}${widget.rowDimension2 ? ' / ' + getDimensionLabel(widget.rowDimension2) : ''}`}
-            </th>
-            <th colSpan={measures.length} className="border border-slate-200 bg-slate-200 px-3 py-2 text-center font-black">TOTAL {widget.periodMode === 'cumul' ? `01-${String(monthLimit).padStart(2, '0')}` : monthLabel(monthLimit)} {yearN}</th>
-            {pivot.columns.map((column) => <th key={column} colSpan={measures.length} className="border border-slate-200 px-3 py-2 text-center font-black">{column}</th>)}
-          </tr>
-          <tr className="bg-slate-50">
-            {measures.map((measure) => (
-              <th key={`total-${measure}`} onClick={() => toggleSort('__total__', measure)} className="cursor-pointer border border-slate-200 bg-slate-200 px-3 py-2 text-right font-black hover:bg-blue-100">
-                {getMeasureLabel(measure)} {sortCell?.column === '__total__' && sortCell.measure === measure ? (sortCell.dir === 'asc' ? '▲' : '▼') : ''}
+        <table className="min-w-full border-collapse text-xs">
+          <thead>
+            <tr className="bg-slate-100">
+              {rowDimensions.map((dimension, index) => (
+                <th
+                  key={`row-head-${dimension}-${index}`}
+                  rowSpan={headerRowCount}
+                  onClick={() => toggleRowSort(index)}
+                  style={rowHeaderStyle(index)}
+                  className="sticky z-30 cursor-pointer border border-slate-200 bg-slate-100 px-3 py-2 text-left font-black hover:bg-blue-100"
+                >
+                  <span>{getDimensionLabel(dimension)}</span>
+                  <span className="ml-1 text-blue-700">{rowSortIndicator(index)}</span>
+                </th>
+              ))}
+              <th rowSpan={columnDimensions.length > 1 ? 2 : 1} colSpan={measures.length} className="border border-slate-200 bg-slate-200 px-3 py-2 text-center font-black">
+                TOTAL {widget.periodMode === 'cumul' ? `01-${String(monthLimit).padStart(2, '0')}` : monthLabel(monthLimit)}
               </th>
+              {columnDimensions.length > 1
+                ? pivot.columnGroups.map((group) => (
+                    <th key={`group-${group.label}`} colSpan={group.columns.length * measures.length} className="border border-slate-200 px-3 py-2 text-center font-black">
+                      {group.label}
+                    </th>
+                  ))
+                : pivot.columns.map((column) => (
+                    <th key={column.key} colSpan={measures.length} className="border border-slate-200 px-3 py-2 text-center font-black">
+                      {column.parts[0] || '—'}
+                    </th>
+                  ))}
+            </tr>
+            {columnDimensions.length > 1 && (
+              <tr className="bg-slate-50">
+                {pivot.columns.map((column) => (
+                  <th key={`sub-${column.key}`} colSpan={measures.length} className="border border-slate-200 px-3 py-2 text-center font-black">
+                    {column.parts[1] || '—'}
+                  </th>
+                ))}
+              </tr>
+            )}
+            <tr className="bg-slate-50">
+              {measures.map((measure) => (
+                <th key={`total-${measure}`} onClick={() => toggleSort('__total__', measure)} className="cursor-pointer border border-slate-200 bg-slate-200 px-3 py-2 text-right font-black hover:bg-blue-100">
+                  {getMeasureLabel(measure)} {sortCell?.column === '__total__' && sortCell.measure === measure ? (sortCell.dir === 'asc' ? '▲' : '▼') : ''}
+                </th>
+              ))}
+              {pivot.columns.flatMap((column) => measures.map((measure) => (
+                <th key={`${column.key}-${measure}`} onClick={() => toggleSort(column.key, measure)} className="cursor-pointer border border-slate-200 px-3 py-2 text-right font-black hover:bg-blue-50">
+                  {getMeasureLabel(measure)} {sortCell?.column === column.key && sortCell.measure === measure ? (sortCell.dir === 'asc' ? '▲' : '▼') : ''}
+                </th>
+              )))}
+            </tr>
+          </thead>
+          <tbody>
+            {pivot.rows.map((row) => (
+              <tr key={row.key} className={row.isSubtotal ? 'bg-slate-100 font-black' : 'hover:bg-slate-50'}>
+                {rowDimensions.map((_dimension, index) => (
+                  <td
+                    key={`${row.key}-part-${index}`}
+                    style={rowHeaderStyle(index)}
+                    className={`sticky z-20 border border-slate-200 px-3 py-2 font-bold ${row.isSubtotal ? 'bg-slate-100' : 'bg-white'}`}
+                  >
+                    {row.parts[index] || (row.isSubtotal && index > 0 ? 'TOTAL' : '—')}
+                  </td>
+                ))}
+                {measures.map((measure) => {
+                  const value = measureValue(row.total, measure)
+                  const previous = totalComparisonValue(row, measure)
+                  return <td key={`${row.key}-total-${measure}`} className={`border border-slate-200 px-3 py-2 text-right ${row.isSubtotal ? 'bg-slate-100' : 'bg-slate-50'}`}><CellValue value={value} previous={previous} measure={measure} /></td>
+                })}
+                {pivot.columns.flatMap((column) => {
+                  const agg = row.colMap.get(column.key) || emptyAgg()
+                  return measures.map((measure) => {
+                    const value = measureValue(agg, measure)
+                    const previous = row.isSubtotal ? 0 : comparisonValue(row.key, column, measure)
+                    return (
+                      <td key={`${row.key}-${column.key}-${measure}`} className={`border border-slate-200 px-3 py-2 text-right ${row.isSubtotal ? 'bg-slate-100' : ''}`}>
+                        <CellValue value={value} previous={previous} measure={measure} />
+                      </td>
+                    )
+                  })
+                })}
+              </tr>
             ))}
-            {pivot.columns.flatMap((column) => measures.map((measure) => (
-              <th key={`${column}-${measure}`} onClick={() => toggleSort(column, measure)} className="cursor-pointer border border-slate-200 px-3 py-2 text-right font-black hover:bg-blue-50">
-                {getMeasureLabel(measure)} {sortCell?.column === column && sortCell.measure === measure ? (sortCell.dir === 'asc' ? '▲' : '▼') : ''}
-              </th>
-            )))}
-          </tr>
-        </thead>
-        <tbody>
-          {pivot.rows.map((row) => (
-            <tr key={row.label} className="hover:bg-slate-50">
-              <td className="sticky left-0 z-10 border border-slate-200 bg-white px-3 py-2 font-bold">{row.label}</td>
+            <tr className="bg-slate-200 font-black">
+              {rowDimensions.map((_dimension, index) => (
+                <td key={`grand-row-${index}`} style={rowHeaderStyle(index)} className="sticky z-20 border border-slate-200 bg-slate-200 px-3 py-2">
+                  {index === 0 ? 'TOTAL GÉNÉRAL' : ''}
+                </td>
+              ))}
               {measures.map((measure) => {
-                const value = measureValue(row.total, measure)
-                const previous = totalComparisonValue(row.label, measure)
-                return <td key={`${row.label}-total-${measure}`} className="border border-slate-200 bg-slate-50 px-3 py-2 text-right"><CellValue value={value} previous={previous} measure={measure} /></td>
+                const currentGrand = aggregateTotal(periodRows)
+                const previousGrand = aggregateTotal(previousPeriodRows)
+                return <td key={`grand-total-${measure}`} className="border border-slate-200 bg-slate-200 px-3 py-2 text-right"><CellValue value={measureValue(currentGrand, measure)} previous={measureValue(previousGrand, measure)} measure={measure} /></td>
               })}
               {pivot.columns.flatMap((column) => {
-                const agg = row.colMap.get(column) || emptyAgg()
-                return measures.map((measure) => {
-                  const value = measureValue(agg, measure)
-                  const previous = comparisonValue(row.label, column, measure)
-                  return (
-                    <td key={`${row.label}-${column}-${measure}`} className="border border-slate-200 px-3 py-2 text-right">
-                      <CellValue value={value} previous={previous} measure={measure} />
-                    </td>
-                  )
-                })
+                const agg = emptyAgg()
+                periodRows.filter((r) => columnKey(columnPartsFor(r)) === column.key).forEach((r) => addToAgg(agg, r))
+                return measures.map((measure) => <td key={`grand-${column.key}-${measure}`} className="border border-slate-200 bg-slate-200 px-3 py-2 text-right">{formatMeasure(measureValue(agg, measure), measure)}</td>)
               })}
             </tr>
-          ))}
-          <tr className="bg-slate-100 font-black">
-            <td className="sticky left-0 z-10 border border-slate-200 bg-slate-100 px-3 py-2">TOTAL</td>
-            {measures.map((measure) => {
-              const currentGrand = aggregateTotal(currentPeriodRows)
-              const previousGrand = aggregateTotal(previousPeriodRows)
-              return <td key={`grand-total-${measure}`} className="border border-slate-200 bg-slate-200 px-3 py-2 text-right"><CellValue value={measureValue(currentGrand, measure)} previous={measureValue(previousGrand, measure)} measure={measure} /></td>
-            })}
-            {pivot.columns.flatMap((column) => {
-              const agg = emptyAgg()
-              rows.filter((r) => getCompositeDimensionValue(r, widget.columnDimension, widget.columnDimension2) === column).forEach((r) => addToAgg(agg, r))
-              return measures.map((measure) => <td key={`grand-${column}-${measure}`} className="border border-slate-200 px-3 py-2 text-right">{formatMeasure(measureValue(agg, measure), measure)}</td>)
-            })}
-          </tr>
-        </tbody>
-      </table>
+          </tbody>
+        </table>
       </div>
     </div>
   )
 }
-
 
 function PieWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetConfig }) {
   const data = useMemo(() => {
@@ -1360,13 +1655,14 @@ function PieWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetConfig }
 
   if (!data.length) return <div className="rounded-xl bg-slate-50 p-8 text-center text-sm font-semibold text-slate-500">Aucune donnée.</div>
 
+
   return (
     <div className="h-[340px]">
       <ResponsiveContainer width="100%" height="100%">
         <PieChart>
           <Tooltip content={<CustomTooltip />} />
           <Legend />
-          <Pie data={data} dataKey="value" nameKey="label" outerRadius={115} label={(entry: any) => `${entry.label}`}> 
+          <Pie data={data} dataKey="value" nameKey="label" outerRadius={115} label={(entry: any) => `${entry.label}`} isAnimationActive={false}> 
             {data.map((_entry, index) => <Cell key={`pie-${index}`} fill={PALETTE[index % PALETTE.length]} />)}
           </Pie>
         </PieChart>
@@ -1414,6 +1710,7 @@ function SummaryMatrixWidget({ rows, widget, onUpdate }: { rows: StudioRow[]; wi
   const gridTemplateColumns = compact
     ? 'minmax(88px, 0.65fr) repeat(3, minmax(112px, 1fr))'
     : 'minmax(140px, 0.7fr) repeat(3, minmax(180px, 1fr))'
+
 
   return (
     <div className={`rounded-[2rem] border-4 border-slate-900 bg-white ${compact ? 'p-4' : 'p-6'} shadow-sm overflow-hidden`}>
@@ -1507,6 +1804,13 @@ export default function AtelierAnalysePage() {
   const [saveMessage, setSaveMessage] = useState<string | null>(null)
   const [addMenuOpen, setAddMenuOpen] = useState(false)
   const [configPanelTop, setConfigPanelTop] = useState(120)
+  const [aiQuestion, setAiQuestion] = useState('')
+  const [aiAnswer, setAiAnswer] = useState<string | null>(null)
+  const [aiError, setAiError] = useState<string | null>(null)
+  const [aiLoading, setAiLoading] = useState(false)
+  const [aiWidgetProposals, setAiWidgetProposals] = useState<AiWidgetProposal[]>([])
+  const [showClientFilters, setShowClientFilters] = useState(false)
+  const [showAiPanel, setShowAiPanel] = useState(false)
 
   async function loadData() {
     setLoading(true)
@@ -1660,6 +1964,261 @@ export default function AtelierAnalysePage() {
     setSelectedWidgetId(widgetId)
   }
 
+  function isWidgetType(value: any): value is WidgetType {
+    return widgetCatalog.some(([type]) => type === value)
+  }
+
+  function isMeasureKey(value: any): value is MeasureKey {
+    return MEASURES.some((measure) => measure.key === value)
+  }
+
+  function isDimensionKey(value: any): value is DimensionKey {
+    return DIMENSIONS.some((dimension) => dimension.key === value)
+  }
+
+  function isDataSource(value: any): value is DataSource {
+    return value === 'factures' || value === 'activite' || value === 'mixte'
+  }
+
+  function isSizeKey(value: any): value is SizeKey {
+    return value === 'small' || value === 'medium' || value === 'large' || value === 'full'
+  }
+
+  function isPeriodMode(value: any): value is PeriodMode {
+    return value === 'mois' || value === 'cumul'
+  }
+
+  function isCompareMode(value: any): value is CompareMode {
+    return value === 'year' || value === 'month' || value === 'dimension'
+  }
+
+  function isEvolutionMode(value: any): value is EvolutionMode {
+    return value === 'none' || value === 'value' || value === 'percent' || value === 'both'
+  }
+
+  function isSortMode(value: any): value is SortMode {
+    return value === 'label_asc' || value === 'value_desc' || value === 'value_asc'
+  }
+
+  function sanitizeWidgetFilters(value: any): WidgetFilters {
+    const input = value && typeof value === 'object' ? value : {}
+    const filters: WidgetFilters = {}
+
+    if (Array.isArray(input.years)) filters.years = input.years.map(Number).filter((v: number) => Number.isFinite(v))
+    if (Array.isArray(input.months)) filters.months = input.months.map(Number).filter((v: number) => Number.isFinite(v) && v >= 1 && v <= 12)
+    if (Array.isArray(input.agences)) filters.agences = input.agences.map((v: any) => String(v || '').trim()).filter(Boolean)
+    if (Array.isArray(input.collaborateurs)) filters.collaborateurs = input.collaborateurs.map((v: any) => String(v || '').trim()).filter(Boolean)
+    if (Array.isArray(input.famillesMacro)) filters.famillesMacro = input.famillesMacro.map((v: any) => String(v || '').trim()).filter(Boolean)
+    if (Array.isArray(input.typesDocument)) filters.typesDocument = input.typesDocument.map((v: any) => String(v || '').trim()).filter(Boolean)
+    if (Array.isArray(input.clients)) filters.clients = input.clients.map((v: any) => String(v || '').trim()).filter(Boolean)
+    if (input.clientMode === 'include' || input.clientMode === 'exclude') filters.clientMode = input.clientMode
+    if (input.horsStatistique === 'non' || input.horsStatistique === 'oui' || input.horsStatistique === 'tous') filters.horsStatistique = input.horsStatistique
+
+    return filters
+  }
+
+  function getActiveTemporalContext() {
+    const selectedYears = (globalFilters.years || [])
+      .map(Number)
+      .filter((value) => Number.isFinite(value))
+      .sort((a, b) => a - b)
+    const selectedMonths = (globalFilters.months || [])
+      .map(Number)
+      .filter((value) => Number.isFinite(value) && value >= 1 && value <= 12)
+      .sort((a, b) => a - b)
+
+    const fallbackYearN = selectedWidget?.yearN || available.years[0] || CURRENT_YEAR
+    const yearN = selectedYears.length ? selectedYears[selectedYears.length - 1] : fallbackYearN
+    const yearN1 = selectedYears.length >= 2 ? selectedYears[selectedYears.length - 2] : (selectedWidget?.yearN1 || yearN - 1)
+    const bridgeMonth = selectedMonths.length
+      ? Math.max(...selectedMonths)
+      : (selectedWidget?.bridgeMonth || Math.max(1, Math.min(12, CURRENT_MONTH)))
+    const periodMode: PeriodMode = selectedMonths.length === 1 ? 'mois' : (selectedMonths.length > 1 ? 'cumul' : (selectedWidget?.periodMode || 'cumul'))
+
+    return {
+      selectedYears,
+      selectedMonths,
+      yearN,
+      yearN1,
+      bridgeMonth,
+      periodMode,
+      periodLabel: periodMode === 'cumul' ? `01-${String(bridgeMonth).padStart(2, '0')}` : monthLabel(bridgeMonth),
+    }
+  }
+
+  function applyActiveTemporalContextToAiWidget(widget: WidgetConfig): WidgetConfig {
+    const context = getActiveTemporalContext()
+    const localFilters = { ...(widget.localFilters || {}) }
+
+    // La période et les années doivent venir des filtres globaux de la vue active.
+    // On retire donc d'éventuels filtres temporels locaux proposés par l'IA qui pourraient contredire la sélection écran.
+    delete localFilters.years
+    delete localFilters.months
+
+    return {
+      ...widget,
+      localFilters,
+      yearN: context.yearN,
+      yearN1: context.yearN1,
+      bridgeMonth: context.bridgeMonth,
+      periodMode: context.periodMode,
+    }
+  }
+
+  function buildWidgetFromAiProposal(proposal: AiWidgetProposal): WidgetConfig {
+    const type = isWidgetType(proposal?.type) ? proposal.type : 'tableau'
+    const base = buildDefaultWidget(type, available.years)
+    let next: WidgetConfig = {
+      ...base,
+      id: uid(),
+      title: String(proposal?.title || base.title || 'Widget IA').slice(0, 90),
+    }
+
+    if (isDataSource(proposal?.source)) next.source = proposal.source
+    if (isSizeKey(proposal?.size)) next.size = proposal.size
+    if (typeof proposal?.useGlobalFilters === 'boolean') next.useGlobalFilters = proposal.useGlobalFilters
+    if (isMeasureKey(proposal?.measure)) next.measure = proposal.measure
+    if (isMeasureKey(proposal?.secondMeasure)) next.secondMeasure = proposal.secondMeasure
+
+    if (Array.isArray(proposal?.tableMeasures)) {
+      const measures = proposal.tableMeasures.filter(isMeasureKey)
+      if (measures.length) next.tableMeasures = measures
+    }
+
+    if (isDimensionKey(proposal?.dimension)) next.dimension = proposal.dimension
+    if (proposal?.seriesDimension === '' || isDimensionKey(proposal?.seriesDimension)) next.seriesDimension = proposal.seriesDimension
+    if (isDimensionKey(proposal?.rowDimension)) next.rowDimension = proposal.rowDimension
+    if (proposal?.rowDimension2 === '' || isDimensionKey(proposal?.rowDimension2)) next.rowDimension2 = proposal.rowDimension2
+    if (isDimensionKey(proposal?.columnDimension)) next.columnDimension = proposal.columnDimension
+    if (proposal?.columnDimension2 === '' || isDimensionKey(proposal?.columnDimension2)) next.columnDimension2 = proposal.columnDimension2
+    if (isPeriodMode(proposal?.periodMode)) next.periodMode = proposal.periodMode
+
+    const bridgeMonth = Number(proposal?.bridgeMonth)
+    if (Number.isFinite(bridgeMonth)) next.bridgeMonth = Math.max(1, Math.min(12, bridgeMonth))
+
+    const yearN = Number(proposal?.yearN)
+    const yearN1 = Number(proposal?.yearN1)
+    if (Number.isFinite(yearN)) next.yearN = yearN
+    if (Number.isFinite(yearN1)) next.yearN1 = yearN1
+    if (isCompareMode(proposal?.compareMode)) next.compareMode = proposal.compareMode
+    if (proposal?.compareDimension === '' || isDimensionKey(proposal?.compareDimension)) next.compareDimension = proposal.compareDimension
+    if (typeof proposal?.compareValue === 'string') next.compareValue = proposal.compareValue
+    if (isEvolutionMode(proposal?.evolutionMode)) next.evolutionMode = proposal.evolutionMode
+    if (typeof proposal?.stacked100 === 'boolean') next.stacked100 = proposal.stacked100
+
+    const topN = Number(proposal?.topN)
+    if (Number.isFinite(topN)) next.topN = Math.max(1, Math.min(50, Math.round(topN)))
+    if (isSortMode(proposal?.sortMode)) next.sortMode = proposal.sortMode
+    if (typeof proposal?.showValues === 'boolean') next.showValues = proposal.showValues
+
+    const localFilters = sanitizeWidgetFilters(proposal?.localFilters)
+    if (Object.keys(localFilters).length) next.localFilters = localFilters
+
+    // Les widgets proposés par l'IA doivent hériter de la période active de la vue.
+    // Exemple : filtres globaux 01-04 + années 2025/2026 => bridge 01-04, N-1=2025, N=2026.
+    next = applyActiveTemporalContextToAiWidget(next)
+
+    return next
+  }
+
+  function applyAiWidgetProposal(proposal: AiWidgetProposal) {
+    const widget = buildWidgetFromAiProposal(proposal)
+    setWidgets((prev) => [...prev, widget])
+    setSelectedWidgetId(widget.id)
+    setSaveMessage(`Widget IA ajouté : ${widget.title}`)
+  }
+
+  function applyAllAiWidgetProposals() {
+    if (!aiWidgetProposals.length) return
+    const nextWidgets = aiWidgetProposals.map((proposal) => buildWidgetFromAiProposal(proposal))
+    setWidgets((prev) => [...prev, ...nextWidgets])
+    setSelectedWidgetId(nextWidgets[0]?.id || null)
+    setSaveMessage(`${nextWidgets.length} widget(s) IA ajouté(s). Pense à enregistrer la vue.`)
+  }
+
+  async function askAtelierAi(presetQuestion?: string) {
+    const question = String(presetQuestion ?? aiQuestion ?? '').trim()
+
+    if (!question) {
+      setAiError('Saisis une question pour l’assistant IA.')
+      return
+    }
+
+    setAiLoading(true)
+    setAiError(null)
+    setAiAnswer(null)
+    setAiWidgetProposals([])
+
+    try {
+      const payload = {
+        question,
+        currentViewName: viewName,
+        globalFilters,
+        selectedWidget,
+        widgets: widgets.map((widget) => ({
+          id: widget.id,
+          title: widget.title,
+          type: widget.type,
+          source: widget.source,
+          measure: widget.measure,
+          secondMeasure: widget.secondMeasure,
+          tableMeasures: widget.tableMeasures,
+          dimension: widget.dimension,
+          seriesDimension: widget.seriesDimension,
+          rowDimension: widget.rowDimension,
+          rowDimension2: widget.rowDimension2,
+          columnDimension: widget.columnDimension,
+          columnDimension2: widget.columnDimension2,
+          periodMode: widget.periodMode,
+          bridgeMonth: widget.bridgeMonth,
+          yearN: widget.yearN,
+          yearN1: widget.yearN1,
+          compareMode: widget.compareMode,
+          evolutionMode: widget.evolutionMode,
+          localFilters: widget.localFilters,
+          useGlobalFilters: widget.useGlobalFilters,
+        })),
+        dataContext: {
+          rowCount: rows.length,
+          years: available.years,
+          months: available.months,
+          activeTemporalContext: getActiveTemporalContext(),
+          agencesCount: available.agences.length,
+          collaborateursCount: available.collaborateurs.length,
+          famillesMacroCount: available.famillesMacro.length,
+          typesDocument: available.typesDocument,
+          clientsCount: available.clients.length,
+        },
+        versions: {
+          front: ATELIER_FRONT_VERSION,
+          ai: ATELIER_AI_VERSION,
+        },
+      }
+
+      const response = await fetch('/api/atelier-ai', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+
+      const data = await response.json().catch(() => ({}))
+
+      if (!response.ok) {
+        throw new Error(data?.error || `Erreur API Atelier IA (${response.status})`)
+      }
+
+      setAiQuestion(question)
+      setAiAnswer(data?.answer || 'Réponse vide.')
+      const proposals = Array.isArray(data?.proposed_widgets) ? data.proposed_widgets : Array.isArray(data?.proposedWidgets) ? data.proposedWidgets : []
+      setAiWidgetProposals(proposals)
+    } catch (e: any) {
+      setAiError(e?.message || String(e))
+    } finally {
+      setAiLoading(false)
+    }
+  }
+
+
 
   return (
     <main className="min-h-screen bg-slate-50 p-6 text-slate-900">
@@ -1683,7 +2242,7 @@ export default function AtelierAnalysePage() {
           {error && <div className="mt-4 rounded-xl bg-red-50 p-3 text-sm font-bold text-red-700">{error}</div>}
         </section>
 
-        <section className="grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm md:grid-cols-2 xl:grid-cols-8">
+        <section className="grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm md:grid-cols-2 xl:grid-cols-10">
           <MultiSelect label="Source" values={['factures', 'activite', 'mixte']} selected={globalFilters.sources} onChange={(v) => setGlobalFilters((p) => ({ ...p, sources: v as DataSource[] }))} />
           <MultiSelect label="Année" values={available.years.map(String)} selected={globalFilters.years.map(String)} onChange={(v) => setGlobalFilters((p) => ({ ...p, years: v.map(Number) }))} />
           <MultiSelect label="Mois" values={available.months.map((m) => `${m} - ${monthLabel(m)}`)} selected={globalFilters.months.map((m) => `${m} - ${monthLabel(m)}`)} onChange={(v) => setGlobalFilters((p) => ({ ...p, months: v.map((x) => Number(x.split(' - ')[0])) }))} />
@@ -1699,20 +2258,112 @@ export default function AtelierAnalysePage() {
               <option value="tous">Tous</option>
             </select>
           </label>
-        </section>
 
-        <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="grid gap-3 md:grid-cols-[220px_1fr]">
-            <label className="block">
-              <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Filtre clients / tiers</span>
-              <select value={globalFilters.clientMode} onChange={(e) => setGlobalFilters((p) => ({ ...p, clientMode: e.target.value as ClientFilterMode }))} className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-bold">
-                <option value="include">Sélectionner uniquement</option>
-                <option value="exclude">Exclure les clients</option>
-              </select>
-            </label>
-            <MultiSelect label="Numéro tiers / nom client" values={available.clients} selected={globalFilters.clients || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, clients: v }))} />
-          </div>
-          <p className="mt-2 text-xs font-semibold text-slate-500">Laissez vide pour afficher tous les clients. Utilisez la recherche pour sélectionner ou exclure plusieurs clients.</p>
+          <button
+            type="button"
+            onClick={() => setShowClientFilters((value) => !value)}
+            className={`mt-5 flex h-11 items-center justify-between rounded-xl border px-3 text-sm font-black shadow-sm ${showClientFilters ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'}`}
+          >
+            <span>Tiers {globalFilters.clients?.length ? `(${globalFilters.clients.length})` : ''}</span>
+            <span>{showClientFilters ? '▲' : '▼'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowAiPanel((value) => !value)}
+            className={`mt-5 flex h-11 items-center justify-between rounded-xl border px-3 text-sm font-black shadow-sm ${showAiPanel ? 'border-indigo-500 bg-indigo-50 text-indigo-700' : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'}`}
+          >
+            <span>Contexte IA {aiWidgetProposals.length ? `(${aiWidgetProposals.length})` : ''}</span>
+            <span>{showAiPanel ? '▲' : '▼'}</span>
+          </button>
+
+          {showClientFilters && (
+            <div className="md:col-span-2 xl:col-span-10 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+              <div className="grid gap-3 md:grid-cols-[220px_1fr]">
+                <label className="block">
+                  <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Filtre clients / tiers</span>
+                  <select value={globalFilters.clientMode} onChange={(e) => setGlobalFilters((p) => ({ ...p, clientMode: e.target.value as ClientFilterMode }))} className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-bold">
+                    <option value="include">Sélectionner uniquement</option>
+                    <option value="exclude">Exclure les clients</option>
+                  </select>
+                </label>
+                <MultiSelect label="Numéro tiers / nom client" values={available.clients} selected={globalFilters.clients || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, clients: v }))} />
+              </div>
+              <p className="mt-2 text-xs font-semibold text-slate-500">Laissez vide pour afficher tous les clients. Utilisez la recherche pour sélectionner ou exclure plusieurs clients.</p>
+            </div>
+          )}
+
+          {showAiPanel && (
+            <div className="md:col-span-2 xl:col-span-10 rounded-2xl border border-indigo-200 bg-indigo-50/40 p-3">
+              <div className="flex flex-col gap-3 xl:flex-row xl:items-start">
+                <div className="xl:w-72">
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-base font-black text-slate-900">Assistant IA Atelier</h2>
+                    <span className="rounded-full bg-white px-2 py-1 text-[10px] font-black text-indigo-700">{ATELIER_AI_VERSION}</span>
+                  </div>
+                  <p className="mt-1 text-xs leading-5 text-slate-600">
+                    Les widgets proposés héritent maintenant de la période active : {getActiveTemporalContext().periodLabel} · {getActiveTemporalContext().yearN1} → {getActiveTemporalContext().yearN}.
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button type="button" onClick={() => askAtelierAi('Analyse la vue active et dis-moi les points d’attention à regarder en priorité.')} className="rounded-full border border-indigo-200 bg-white px-3 py-1.5 text-xs font-black text-indigo-700 hover:bg-indigo-100">Analyser la vue</button>
+                    <button type="button" onClick={() => askAtelierAi('Explique les filtres actuellement appliqués et leur impact probable sur les widgets.')} className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-black text-slate-700 hover:bg-slate-50">Expliquer les filtres</button>
+                    <button type="button" onClick={() => askAtelierAi('Propose 2 ou 3 widgets complémentaires applicables pour mieux comprendre cette vue.')} className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-black text-slate-700 hover:bg-slate-50">Proposer des widgets</button>
+                  </div>
+                </div>
+
+                <div className="flex-1 space-y-3">
+                  <textarea
+                    value={aiQuestion}
+                    onChange={(e) => setAiQuestion(e.target.value)}
+                    placeholder="Ex : Pourquoi le CA baisse-t-il par rapport à N-1 ? Quels widgets ajouter pour expliquer l’écart ?"
+                    className="min-h-[72px] w-full rounded-xl border border-slate-200 bg-white p-3 text-sm font-semibold outline-none focus:border-indigo-500"
+                  />
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button type="button" onClick={() => askAtelierAi()} disabled={aiLoading} className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-black text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60">
+                      {aiLoading ? 'Analyse en cours…' : 'Envoyer à l’assistant IA'}
+                    </button>
+                    <button type="button" onClick={() => { setAiQuestion(''); setAiAnswer(null); setAiError(null); setAiWidgetProposals([]) }} className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-black text-slate-700 hover:bg-slate-50">Effacer</button>
+                    <span className="text-xs font-semibold text-slate-500">Contexte transmis : vue, filtres, widgets + période active.</span>
+                  </div>
+                  {aiError && <div className="rounded-xl bg-red-50 p-3 text-sm font-bold text-red-700">{aiError}</div>}
+                  {aiAnswer && (
+                    <div className="rounded-xl border border-indigo-100 bg-white p-3">
+                      <div className="mb-1 text-xs font-black uppercase tracking-wide text-indigo-700">Réponse de l’assistant</div>
+                      <div className="whitespace-pre-wrap text-sm leading-6 text-slate-800">{aiAnswer}</div>
+                    </div>
+                  )}
+                  {aiWidgetProposals.length > 0 && (
+                    <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3">
+                      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                        <div>
+                          <div className="text-xs font-black uppercase tracking-wide text-emerald-700">Widgets proposés par l’IA</div>
+                          <p className="mt-1 text-xs font-semibold text-emerald-800">Application avec période active : {getActiveTemporalContext().periodLabel} · {getActiveTemporalContext().yearN1} → {getActiveTemporalContext().yearN}.</p>
+                        </div>
+                        <button type="button" onClick={applyAllAiWidgetProposals} className="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-black text-white shadow-sm hover:bg-emerald-700">
+                          Appliquer toutes les propositions
+                        </button>
+                      </div>
+
+                      <div className="mt-3 grid gap-3 lg:grid-cols-3">
+                        {aiWidgetProposals.map((proposal, index) => (
+                          <div key={`${proposal.title || 'proposal'}-${index}`} className="rounded-xl border border-emerald-200 bg-white p-3 shadow-sm">
+                            <div className="text-sm font-black text-slate-900">{proposal.title || `Widget proposé ${index + 1}`}</div>
+                            <div className="mt-1 text-xs font-semibold text-slate-500">
+                              {proposal.type || 'tableau'} · {proposal.source || 'factures'} · {proposal.measure || 'ca_ht'} · {getActiveTemporalContext().periodLabel}
+                            </div>
+                            {proposal.rationale && <div className="mt-2 text-xs leading-5 text-slate-600">{proposal.rationale}</div>}
+                            <button type="button" onClick={() => applyAiWidgetProposal(proposal)} className="mt-3 rounded-lg bg-slate-900 px-3 py-2 text-xs font-black text-white hover:bg-slate-800">
+                              Ajouter ce widget
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
         </section>
 
         <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
