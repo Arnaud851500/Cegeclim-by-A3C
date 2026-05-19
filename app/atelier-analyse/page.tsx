@@ -23,7 +23,7 @@ import { supabase } from '@/lib/supabaseClient'
 import * as XLSX from 'xlsx-js-style'
 
 type DataSource = 'factures' | 'activite' | 'mixte'
-type WidgetType = 'kpi' | 'histogramme' | 'histogramme_empile' | 'courbe' | 'bridge' | 'tableau' | 'camembert' | 'synthese'
+type WidgetType = 'kpi' | 'histogramme' | 'histogramme_empile' | 'courbe' | 'bridge' | 'double_bridge' | 'tableau' | 'camembert' | 'synthese'
 type MeasureKey = 'ca_ht' | 'marge_valeur' | 'marge_pct' | 'quantite' | 'nb_lignes'
 type DimensionKey =
   | 'annee'
@@ -149,7 +149,7 @@ type ChartDatum = {
 const FACTURES_TABLE = 'indicateur_factures_mensuel'
 const ACTIVITE_TABLE = 'indicateur_activite_mensuel'
 const VIEW_TABLE = 'analyse_widget_views'
-const ATELIER_FRONT_VERSION = 'V2026-05-18-IA-CONTEXTE-FILTRES-01'
+const ATELIER_FRONT_VERSION = 'V2026-05-19-DOUBLE-BRIDGE-MIX-PERF-01'
 const ATELIER_AI_VERSION = 'STEP-3-WIDGET-BUILDER-02'
 
 const MONTHS = ['Janv.', 'Févr.', 'Mars', 'Avr.', 'Mai', 'Juin', 'Juil.', 'Août', 'Sept.', 'Oct.', 'Nov.', 'Déc.']
@@ -170,6 +170,9 @@ const COLOR_POSITIVE = '#22c55e'
 const COLOR_NEGATIVE = '#ef4444'
 const COLOR_TOTAL = '#0f172a'
 const COLOR_BRIDGE_TOTAL = '#bfdbfe'
+const COLOR_BRIDGE_INTERMEDIATE = '#cbd5e1'
+const COLOR_MIX = '#f59e0b'
+const COLOR_PERF = '#8b5cf6'
 const PALETTE = ['#2563eb', '#64748b', '#f59e0b', '#16a34a', '#9333ea', '#ef4444', '#0ea5e9', '#84cc16']
 
 const MEASURES: Array<{ key: MeasureKey; label: string; kind: 'currency' | 'percent' | 'number' }> = [
@@ -429,15 +432,15 @@ function buildDefaultWidget(type: WidgetType, availableYears: number[]): WidgetC
   const base: WidgetConfig = {
     id: uid(),
     type,
-    title: type === 'bridge' ? 'Bridge CA N-1 ⇒ N par agence' : type === 'synthese' ? 'Suivi du CA et marge' : type === 'tableau' ? 'Tableau croisé' : type === 'kpi' ? 'Indicateur clé' : type === 'histogramme_empile' ? 'Histogramme empilé' : type === 'camembert' ? 'Répartition' : 'Nouveau graphique',
+    title: type === 'bridge' ? 'Bridge CA N-1 ⇒ N par agence' : type === 'double_bridge' ? 'Double bridge mix / performance' : type === 'synthese' ? 'Suivi du CA et marge' : type === 'tableau' ? 'Tableau croisé' : type === 'kpi' ? 'Indicateur clé' : type === 'histogramme_empile' ? 'Histogramme empilé' : type === 'camembert' ? 'Répartition' : 'Nouveau graphique',
     source: 'factures',
-    size: type === 'kpi' || type === 'histogramme_empile' ? 'small' : type === 'tableau' || type === 'synthese' ? 'full' : type === 'camembert' ? 'medium' : 'medium',
+    size: type === 'double_bridge' ? 'full' : type === 'kpi' || type === 'histogramme_empile' ? 'small' : type === 'tableau' || type === 'synthese' ? 'full' : type === 'camembert' ? 'medium' : 'medium',
     useGlobalFilters: true,
     localFilters: {},
-    measure: type === 'bridge' ? 'ca_ht' : 'ca_ht',
+    measure: type === 'double_bridge' ? 'marge_pct' : type === 'bridge' ? 'ca_ht' : 'ca_ht',
     secondMeasure: 'ca_ht',
     tableMeasures: ['ca_ht', 'marge_valeur'],
-    dimension: type === 'bridge' ? 'agence_collaborateur' : 'mois',
+    dimension: type === 'bridge' || type === 'double_bridge' ? 'famille_macro' : 'mois',
     seriesDimension: type === 'histogramme' || type === 'histogramme_empile' || type === 'courbe' ? 'annee' : '',
     rowDimension: 'agence_collaborateur',
     rowDimension2: '',
@@ -460,6 +463,7 @@ function buildDefaultWidget(type: WidgetType, availableYears: number[]): WidgetC
   if (type === 'histogramme') base.title = 'Histogramme CA par mois'
   if (type === 'histogramme_empile') { base.title = 'CA empilé par année / famille'; base.dimension = 'annee'; base.seriesDimension = 'famille_macro' }
   if (type === 'camembert') { base.title = 'Répartition par famille macro'; base.dimension = 'famille_macro'; base.seriesDimension = '' }
+  if (type === 'double_bridge') { base.title = 'Double bridge marge % mix / performance'; base.dimension = 'famille_macro'; base.periodMode = 'cumul'; base.compareMode = 'year'; base.topN = 10; base.showValues = true }
   if (type === 'synthese') { base.title = 'Suivi du CA et marge'; base.measure = 'ca_ht'; base.secondMeasure = 'marge_pct'; base.tableMeasures = ['ca_ht', 'marge_pct']; base.periodMode = 'cumul'; base.size = 'full' }
   return base
 }
@@ -560,7 +564,7 @@ function MultiSelect({
         <span className="text-slate-400">▼</span>
       </button>
       {open && (
-        <div className="absolute left-0 top-12 z-50 w-80 rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl">
+        <div onMouseLeave={() => setOpen(false)} className="absolute left-0 top-12 z-50 w-80 rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl">
           <div className="mb-2 flex items-center justify-between gap-2">
             <div className="text-sm font-black text-slate-800">{label}</div>
             <button type="button" onClick={() => onChange([])} className="text-xs font-bold text-blue-600 hover:text-blue-800">Tout afficher</button>
@@ -599,6 +603,21 @@ function SelectField({ label, value, onChange, options }: { label: string; value
         ))}
       </select>
     </label>
+  )
+}
+
+function FilterSelect({ label, value, onChange, options }: { label: string; value: string | number; onChange: (v: string) => void; options: Array<{ value: string | number; label: string }> }) {
+  return (
+    <select
+      aria-label={label}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-800 shadow-sm outline-none hover:bg-slate-50 focus:border-blue-500"
+    >
+      {options.map((option) => (
+        <option key={String(option.value)} value={option.value}>{label} : {option.label}</option>
+      ))}
+    </select>
   )
 }
 
@@ -1006,6 +1025,308 @@ function BridgeTooltip({ active, payload, label, measure }: any) {
 }
 
 
+type DoubleBridgePoint = {
+  name: string
+  base: number
+  value: number
+  signedValue: number
+  label: string
+  fill: string
+  phase: 'depart' | 'mix' | 'intermediaire' | 'perf' | 'arrivee'
+  detail?: string
+}
+
+type DoubleBridgeDetail = {
+  label: string
+  startValue: number
+  endValue: number
+  effectMix: number
+  effectPerf: number
+  value: number
+}
+
+function signedLabel(value: number, measure: MeasureKey) {
+  const sign = value > 0 ? '+' : ''
+  return `${sign}${formatMeasure(value, measure)}`
+}
+
+function formatDoubleBridgeValue(value: number, measure: MeasureKey) {
+  return measure === 'marge_pct' ? formatRate(value) : formatMeasure(value, measure)
+}
+
+function periodLabelForBridge(periodMode: PeriodMode, month: number) {
+  return periodMode === 'cumul' ? `01-${String(month).padStart(2, '0')}` : monthLabel(month)
+}
+
+function rowsForPeriod(rows: StudioRow[], year: number, month: number, periodMode: PeriodMode) {
+  return rows.filter((row) => row.annee === year && (periodMode === 'cumul' ? row.mois <= month : row.mois === month))
+}
+
+function nextMonthPeriod(year: number, month: number) {
+  if (month >= 12) return { year: year + 1, month: 1 }
+  return { year, month: month + 1 }
+}
+
+function measureValueForDoubleBridge(agg: AggregatedValue, measure: MeasureKey) {
+  if (measure === 'marge_pct') return agg.ca_ht ? (agg.marge_valeur / agg.ca_ht) * 100 : 0
+  return measureValue(agg, measure)
+}
+
+function DoubleBridgeTooltip({ active, payload, label, measure }: any) {
+  if (!active || !payload?.length) return null
+  const valueItem = payload.find((item: any) => item?.dataKey === 'value')
+  const row = valueItem?.payload || payload[0]?.payload || {}
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-3 text-xs shadow-xl">
+      <div className="mb-1 font-black text-slate-900">{row.name || label}</div>
+      <div className="font-semibold text-slate-600">{row.detail || row.label}</div>
+      {row.phase === 'mix' && <div className="mt-1 text-slate-500">Effet mix : changement de poids de la dimension.</div>}
+      {row.phase === 'perf' && <div className="mt-1 text-slate-500">Effet performance : changement du taux / de la contribution propre.</div>}
+    </div>
+  )
+}
+
+function DoubleBridgeWidget({ rows, widget, onUpdate }: { rows: StudioRow[]; widget: WidgetConfig; onUpdate?: (patch: Partial<WidgetConfig>) => void }) {
+  const data = useMemo(() => {
+    const baseYear = widget.yearN || CURRENT_YEAR
+    const baseMonth = Math.max(1, Math.min(12, widget.bridgeMonth || CURRENT_MONTH))
+    const compareToNextMonth = widget.compareMode === 'month'
+    const startYear = compareToNextMonth ? baseYear : (widget.yearN1 || baseYear - 1)
+    const startMonth = baseMonth
+    const next = nextMonthPeriod(baseYear, baseMonth)
+    const endYear = compareToNextMonth ? next.year : baseYear
+    const endMonth = compareToNextMonth ? next.month : baseMonth
+
+    const startRows = rowsForPeriod(rows, startYear, startMonth, widget.periodMode)
+    const endRows = rowsForPeriod(rows, endYear, endMonth, widget.periodMode)
+    const startAgg = aggregateTotal(startRows)
+    const endAgg = aggregateTotal(endRows)
+    const startValue = measureValueForDoubleBridge(startAgg, widget.measure)
+    const endValue = measureValueForDoubleBridge(endAgg, widget.measure)
+
+    const dimKeys = new Set<string>()
+    startRows.forEach((row) => dimKeys.add(getDimensionValue(row, widget.dimension)))
+    endRows.forEach((row) => dimKeys.add(getDimensionValue(row, widget.dimension)))
+
+    const rawDetails: DoubleBridgeDetail[] = Array.from(dimKeys).map((dimensionLabel) => {
+      const startDimRows = startRows.filter((row) => getDimensionValue(row, widget.dimension) === dimensionLabel)
+      const endDimRows = endRows.filter((row) => getDimensionValue(row, widget.dimension) === dimensionLabel)
+      const startDimAgg = aggregateTotal(startDimRows)
+      const endDimAgg = aggregateTotal(endDimRows)
+      const startDimValue = measureValueForDoubleBridge(startDimAgg, widget.measure)
+      const endDimValue = measureValueForDoubleBridge(endDimAgg, widget.measure)
+
+      if (widget.measure === 'marge_pct') {
+        const mixStart = startAgg.ca_ht ? startDimAgg.ca_ht / startAgg.ca_ht : 0
+        const mixEnd = endAgg.ca_ht ? endDimAgg.ca_ht / endAgg.ca_ht : 0
+        const perfStart = startDimAgg.ca_ht ? startDimAgg.marge_valeur / startDimAgg.ca_ht : 0
+        const perfEnd = endDimAgg.ca_ht ? endDimAgg.marge_valeur / endDimAgg.ca_ht : 0
+        const effectMix = 0.5 * (mixEnd - mixStart) * (perfStart + perfEnd) * 100
+        const effectPerf = 0.5 * (mixStart + mixEnd) * (perfEnd - perfStart) * 100
+        return {
+          label: dimensionLabel,
+          startValue: mixStart * perfStart * 100,
+          endValue: mixEnd * perfEnd * 100,
+          effectMix,
+          effectPerf,
+          value: Math.abs(effectMix) + Math.abs(effectPerf),
+        }
+      }
+
+      const startShare = startValue ? startDimValue / startValue : 0
+      const endShare = endValue ? endDimValue / endValue : 0
+      const effectMix = 0.5 * (endShare - startShare) * (startValue + endValue)
+      const rawDelta = endDimValue - startDimValue
+      const effectPerf = rawDelta - effectMix
+      return {
+        label: dimensionLabel,
+        startValue: startDimValue,
+        endValue: endDimValue,
+        effectMix,
+        effectPerf,
+        value: Math.abs(effectMix) + Math.abs(effectPerf),
+      }
+    })
+
+    const sorted = [...rawDetails].sort((a, b) => b.value - a.value)
+    const topN = Math.max(1, widget.topN || 10)
+    const displayed = sorted.slice(0, topN)
+    const remaining = sorted.slice(topN)
+    const details = remaining.length
+      ? [
+          ...displayed,
+          {
+            label: 'Autres',
+            startValue: remaining.reduce((sum, item) => sum + item.startValue, 0),
+            endValue: remaining.reduce((sum, item) => sum + item.endValue, 0),
+            effectMix: remaining.reduce((sum, item) => sum + item.effectMix, 0),
+            effectPerf: remaining.reduce((sum, item) => sum + item.effectPerf, 0),
+            value: remaining.reduce((sum, item) => sum + item.value, 0),
+          },
+        ]
+      : displayed
+
+    const totalMixEffect = details.reduce((sum, item) => sum + item.effectMix, 0)
+    const totalPerfEffect = details.reduce((sum, item) => sum + item.effectPerf, 0)
+    const intermediateValue = startValue + totalMixEffect
+
+    let cursor = startValue
+    const points: DoubleBridgePoint[] = [
+      {
+        name: `Départ ${periodLabelForBridge(widget.periodMode, startMonth)} ${startYear}`,
+        base: 0,
+        value: startValue,
+        signedValue: startValue,
+        label: formatDoubleBridgeValue(startValue, widget.measure),
+        fill: COLOR_BRIDGE_TOTAL,
+        phase: 'depart',
+        detail: `Valeur de départ : ${formatDoubleBridgeValue(startValue, widget.measure)}`,
+      },
+    ]
+
+    details.forEach((item) => {
+      const nextCursor = cursor + item.effectMix
+      points.push({
+        name: `Mix ${item.label}`,
+        base: Math.min(cursor, nextCursor),
+        value: Math.abs(item.effectMix),
+        signedValue: item.effectMix,
+        label: signedLabel(item.effectMix, widget.measure),
+        fill: item.effectMix >= 0 ? COLOR_POSITIVE : COLOR_NEGATIVE,
+        phase: 'mix',
+        detail: `${item.label} · effet mix : ${signedLabel(item.effectMix, widget.measure)}`,
+      })
+      cursor = nextCursor
+    })
+
+    points.push({
+      name: 'Intermédiaire après mix',
+      base: 0,
+      value: intermediateValue,
+      signedValue: intermediateValue,
+      label: formatDoubleBridgeValue(intermediateValue, widget.measure),
+      fill: COLOR_BRIDGE_INTERMEDIATE,
+      phase: 'intermediaire',
+      detail: `Départ + effet mix : ${formatDoubleBridgeValue(intermediateValue, widget.measure)}`,
+    })
+
+    cursor = intermediateValue
+    details.forEach((item) => {
+      const nextCursor = cursor + item.effectPerf
+      points.push({
+        name: `Perf ${item.label}`,
+        base: Math.min(cursor, nextCursor),
+        value: Math.abs(item.effectPerf),
+        signedValue: item.effectPerf,
+        label: signedLabel(item.effectPerf, widget.measure),
+        fill: item.effectPerf >= 0 ? COLOR_POSITIVE : COLOR_NEGATIVE,
+        phase: 'perf',
+        detail: `${item.label} · effet performance : ${signedLabel(item.effectPerf, widget.measure)}`,
+      })
+      cursor = nextCursor
+    })
+
+    points.push({
+      name: `Arrivée ${periodLabelForBridge(widget.periodMode, endMonth)} ${endYear}`,
+      base: 0,
+      value: endValue,
+      signedValue: endValue,
+      label: formatDoubleBridgeValue(endValue, widget.measure),
+      fill: COLOR_BRIDGE_TOTAL,
+      phase: 'arrivee',
+      detail: `Valeur d'arrivée : ${formatDoubleBridgeValue(endValue, widget.measure)}`,
+    })
+
+    return {
+      startYear,
+      startMonth,
+      endYear,
+      endMonth,
+      startValue,
+      endValue,
+      totalMixEffect,
+      totalPerfEffect,
+      intermediateValue,
+      details,
+      points,
+    }
+  }, [rows, widget])
+
+  if (!rows.length) return <div className="rounded-xl bg-slate-50 p-8 text-center text-sm font-semibold text-slate-500">Aucune donnée avec les filtres sélectionnés.</div>
+
+  return (
+    <div>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3 text-xs font-bold text-slate-500">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="rounded-full bg-slate-100 px-3 py-1">{periodLabelForBridge(widget.periodMode, data.startMonth)} {data.startYear} → {periodLabelForBridge(widget.periodMode, data.endMonth)} {data.endYear}</span>
+          <span className="rounded-full bg-amber-50 px-3 py-1 text-amber-700">Mix : 0,5 × Δpoids × (perf départ + perf arrivée)</span>
+          <span className="rounded-full bg-violet-50 px-3 py-1 text-violet-700">Perf : 0,5 × (poids départ + poids arrivée) × Δperf</span>
+        </div>
+        {onUpdate && (
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={() => onUpdate({ measure: 'ca_ht' })} className={`rounded-xl border px-3 py-2 text-xs font-black ${widget.measure === 'ca_ht' ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white text-slate-800'}`}>CA</button>
+            <button type="button" onClick={() => onUpdate({ measure: 'marge_valeur' })} className={`rounded-xl border px-3 py-2 text-xs font-black ${widget.measure === 'marge_valeur' ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white text-slate-800'}`}>Marge €</button>
+            <button type="button" onClick={() => onUpdate({ measure: 'marge_pct' })} className={`rounded-xl border px-3 py-2 text-xs font-black ${widget.measure === 'marge_pct' ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white text-slate-800'}`}>Marge %</button>
+            <button type="button" onClick={() => onUpdate({ periodMode: 'mois' })} className={`rounded-xl border px-3 py-2 text-xs font-black ${widget.periodMode === 'mois' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300 bg-white text-slate-800'}`}>Mois</button>
+            <button type="button" onClick={() => onUpdate({ periodMode: 'cumul' })} className={`rounded-xl border px-3 py-2 text-xs font-black ${widget.periodMode === 'cumul' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300 bg-white text-slate-800'}`}>01-M</button>
+            <button type="button" onClick={() => onUpdate({ compareMode: 'month' })} className={`rounded-xl border px-3 py-2 text-xs font-black ${widget.compareMode === 'month' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300 bg-white text-slate-800'}`}>M→M+1</button>
+            <button type="button" onClick={() => onUpdate({ compareMode: 'year' })} className={`rounded-xl border px-3 py-2 text-xs font-black ${widget.compareMode !== 'month' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300 bg-white text-slate-800'}`}>N-1→N</button>
+          </div>
+        )}
+      </div>
+
+      <div className="mb-3 grid gap-3 md:grid-cols-4">
+        <div className="rounded-xl bg-slate-50 p-3"><div className="text-[10px] font-black uppercase text-slate-500">Départ</div><div className="text-lg font-black text-slate-900">{formatDoubleBridgeValue(data.startValue, widget.measure)}</div></div>
+        <div className="rounded-xl bg-amber-50 p-3"><div className="text-[10px] font-black uppercase text-amber-700">Effet mix</div><div className="text-lg font-black text-slate-900">{signedLabel(data.totalMixEffect, widget.measure)}</div></div>
+        <div className="rounded-xl bg-violet-50 p-3"><div className="text-[10px] font-black uppercase text-violet-700">Effet performance</div><div className="text-lg font-black text-slate-900">{signedLabel(data.totalPerfEffect, widget.measure)}</div></div>
+        <div className="rounded-xl bg-slate-50 p-3"><div className="text-[10px] font-black uppercase text-slate-500">Arrivée</div><div className="text-lg font-black text-slate-900">{formatDoubleBridgeValue(data.endValue, widget.measure)}</div></div>
+      </div>
+
+      <div className="h-[430px]">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={data.points} margin={{ top: 30, right: 20, left: 10, bottom: 95 }}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="name" angle={-30} textAnchor="end" interval={0} tick={{ fontSize: 10 }} height={105} />
+            <YAxis tickFormatter={(v) => widget.measure === 'marge_pct' ? `${Number(v).toFixed(1)}%` : `${Math.round(Number(v) / 1000)}k`} />
+            <Tooltip content={<DoubleBridgeTooltip measure={widget.measure} />} />
+            <Bar dataKey="base" stackId="a" fill="#ffffff" fillOpacity={0} isAnimationActive={false} />
+            <Bar dataKey="value" stackId="a" isAnimationActive={false}>
+              <LabelList dataKey="label" position="top" style={{ fontSize: 10, fontWeight: 800, fill: '#0f172a' }} />
+              {data.points.map((entry, index) => <Cell key={`double-bridge-cell-${index}`} fill={entry.fill} />)}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      <div className="mt-3 overflow-x-auto rounded-xl border border-slate-200">
+        <table className="min-w-full text-xs">
+          <thead className="bg-slate-50 text-slate-600">
+            <tr>
+              <th className="px-3 py-2 text-left font-black">Dimension</th>
+              <th className="px-3 py-2 text-right font-black">Départ</th>
+              <th className="px-3 py-2 text-right font-black">Effet mix</th>
+              <th className="px-3 py-2 text-right font-black">Effet perf</th>
+              <th className="px-3 py-2 text-right font-black">Arrivée</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.details.map((item) => (
+              <tr key={item.label} className="border-t border-slate-100">
+                <td className="px-3 py-2 font-bold text-slate-800">{item.label}</td>
+                <td className="px-3 py-2 text-right font-semibold">{formatDoubleBridgeValue(item.startValue, widget.measure)}</td>
+                <td className={`px-3 py-2 text-right font-bold ${item.effectMix >= 0 ? 'text-emerald-700' : 'text-red-700'}`}>{signedLabel(item.effectMix, widget.measure)}</td>
+                <td className={`px-3 py-2 text-right font-bold ${item.effectPerf >= 0 ? 'text-emerald-700' : 'text-red-700'}`}>{signedLabel(item.effectPerf, widget.measure)}</td>
+                <td className="px-3 py-2 text-right font-semibold">{formatDoubleBridgeValue(item.endValue, widget.measure)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+
 function sanitizeExcelSheetName(name: string) {
   const clean = String(name || 'Feuille').replace(/[\\/?*\[\]:]/g, ' ').trim()
   return clean.slice(0, 31) || 'Feuille'
@@ -1190,7 +1511,9 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
       }
       return a.key.localeCompare(b.key, 'fr', { numeric: true })
     })
-    columns = columns.slice(0, 18)
+    // Ne pas limiter les colonnes du tableau croisé :
+    // le TOP N du widget pilote les lignes affichées, mais les colonnes doivent toutes rester visibles
+    // avec le scroll horizontal, comme dans l'export Excel.
 
     const rowItems: PivotRow[] = Array.from(map.entries()).map(([key, colMap]) => {
       const parts = rowMeta.get(key) || [key]
@@ -1785,6 +2108,7 @@ function SummaryMatrixWidget({ rows, widget, onUpdate }: { rows: StudioRow[]; wi
 function WidgetRenderer({ rows, widget, onUpdate }: { rows: StudioRow[]; widget: WidgetConfig; onUpdate?: (patch: Partial<WidgetConfig>) => void }) {
   if (widget.type === 'kpi') return <KpiWidget rows={rows} widget={widget} />
   if (widget.type === 'bridge') return <BridgeWidget rows={rows} widget={widget} onUpdate={onUpdate} />
+  if (widget.type === 'double_bridge') return <DoubleBridgeWidget rows={rows} widget={widget} onUpdate={onUpdate} />
   if (widget.type === 'tableau') return <PivotTableWidget rows={rows} widget={widget} />
   if (widget.type === 'synthese') return <SummaryMatrixWidget rows={rows} widget={widget} onUpdate={onUpdate} />
   if (widget.type === 'camembert') return <PieWidget rows={rows} widget={widget} />
@@ -1951,6 +2275,7 @@ export default function AtelierAnalysePage() {
     ['histogramme_empile', 'Histogramme empilé', 'Valeur ou base 100'],
     ['courbe', 'Courbe', 'Évolution mensuelle ou cumulée'],
     ['bridge', 'Bridge', 'Écart N-1 ⇒ N'],
+    ['double_bridge', 'Double bridge', 'Mix puis performance'],
     ['tableau', 'Tableau croisé', 'Lignes / colonnes / valeurs'],
     ['synthese', 'Tableau synthèse', 'Mois + cumul + total'],
     ['camembert', 'Camembert', 'Répartition'],
@@ -2226,9 +2551,11 @@ export default function AtelierAnalysePage() {
         <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
           <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
             <div>
-              <h1 className="text-3xl font-black tracking-tight">Atelier d’analyse</h1>
+              <div className="flex flex-wrap items-center gap-3">
+                <h1 className="text-3xl font-black tracking-tight">Atelier d’analyse</h1>
+                <span className="inline-flex rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-black text-blue-700">Version front : {ATELIER_FRONT_VERSION}</span>
+              </div>
               <p className="mt-2 text-sm text-slate-600">Créez vos propres widgets à partir des indicateurs factures et activité.</p>
-              <div className="mt-2 inline-flex rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-black text-blue-700">Version front : {ATELIER_FRONT_VERSION}</div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <input value={viewName} onChange={(e) => setViewName(e.target.value)} className="h-11 rounded-xl border border-slate-200 px-3 text-sm font-bold outline-none focus:border-blue-500" />
@@ -2250,19 +2577,17 @@ export default function AtelierAnalysePage() {
           <MultiSelect label="Collaborateur" values={available.collaborateurs} selected={globalFilters.collaborateurs} onChange={(v) => setGlobalFilters((p) => ({ ...p, collaborateurs: v }))} />
           <MultiSelect label="Famille macro" values={available.famillesMacro} selected={globalFilters.famillesMacro} onChange={(v) => setGlobalFilters((p) => ({ ...p, famillesMacro: v }))} />
           <MultiSelect label="Type document" values={relevantDocumentTypes(globalFilters.sources.includes('mixte') || globalFilters.sources.length !== 1 ? 'mixte' : globalFilters.sources[0], available.typesDocument)} selected={globalFilters.typesDocument} onChange={(v) => setGlobalFilters((p) => ({ ...p, typesDocument: v }))} />
-          <label className="block">
-            <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Hors statistique</span>
-            <select value={globalFilters.horsStatistique} onChange={(e) => setGlobalFilters((p) => ({ ...p, horsStatistique: e.target.value as GlobalFilters['horsStatistique'] }))} className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-bold">
-              <option value="non">Exclu</option>
-              <option value="oui">Uniquement</option>
-              <option value="tous">Tous</option>
-            </select>
-          </label>
+          <FilterSelect
+            label="Hors statistique"
+            value={globalFilters.horsStatistique}
+            onChange={(v) => setGlobalFilters((p) => ({ ...p, horsStatistique: v as GlobalFilters['horsStatistique'] }))}
+            options={[{ value: 'non', label: 'Exclu' }, { value: 'oui', label: 'Uniquement' }, { value: 'tous', label: 'Tous' }]}
+          />
 
           <button
             type="button"
             onClick={() => setShowClientFilters((value) => !value)}
-            className={`mt-5 flex h-11 items-center justify-between rounded-xl border px-3 text-sm font-black shadow-sm ${showClientFilters ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'}`}
+            className={`flex h-11 items-center justify-between rounded-xl border px-3 text-sm font-black shadow-sm ${showClientFilters ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'}`}
           >
             <span>Tiers {globalFilters.clients?.length ? `(${globalFilters.clients.length})` : ''}</span>
             <span>{showClientFilters ? '▲' : '▼'}</span>
@@ -2271,7 +2596,7 @@ export default function AtelierAnalysePage() {
           <button
             type="button"
             onClick={() => setShowAiPanel((value) => !value)}
-            className={`mt-5 flex h-11 items-center justify-between rounded-xl border px-3 text-sm font-black shadow-sm ${showAiPanel ? 'border-indigo-500 bg-indigo-50 text-indigo-700' : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'}`}
+            className={`flex h-11 items-center justify-between rounded-xl border px-3 text-sm font-black shadow-sm ${showAiPanel ? 'border-indigo-500 bg-indigo-50 text-indigo-700' : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'}`}
           >
             <span>Contexte IA {aiWidgetProposals.length ? `(${aiWidgetProposals.length})` : ''}</span>
             <span>{showAiPanel ? '▲' : '▼'}</span>
@@ -2402,7 +2727,7 @@ export default function AtelierAnalysePage() {
         <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="mb-4 flex items-center justify-between gap-3">
             <div>
-              <h2 className="text-lg font-black">Ma page</h2>
+              <h2 className="max-w-[900px] truncate text-lg font-black">{viewName?.trim() || 'Vue sans nom'}</h2>
               <p className="text-sm text-slate-500">{loading ? 'Chargement des données…' : `${formatNumber(rows.length)} lignes agrégées chargées`}</p>
             </div>
             <div className="text-xs font-bold text-slate-500">Cliquez sur la roue dentée d’un widget pour le configurer.</div>
@@ -2469,7 +2794,12 @@ export default function AtelierAnalysePage() {
                   { value: 'activite', label: 'Activité' },
                   { value: 'mixte', label: 'Mixte' },
                 ]} />
-                <SelectField label="Valeur" value={selectedWidget.measure} onChange={(v) => updateWidget(selectedWidget.id, { measure: v as MeasureKey })} options={MEASURES.map((m) => ({ value: m.key, label: m.label }))} />
+                <SelectField
+                  label="Valeur"
+                  value={selectedWidget.measure}
+                  onChange={(v) => updateWidget(selectedWidget.id, { measure: v as MeasureKey })}
+                  options={(selectedWidget.type === 'double_bridge' ? MEASURES.filter((m) => ['ca_ht', 'marge_valeur', 'marge_pct'].includes(m.key)) : MEASURES).map((m) => ({ value: m.key, label: m.label }))}
+                />
               </div>
 
               <div className="rounded-xl border border-slate-200 p-3">
@@ -2499,14 +2829,14 @@ export default function AtelierAnalysePage() {
 
               {selectedWidget.type !== 'kpi' && selectedWidget.type !== 'tableau' && selectedWidget.type !== 'synthese' && (
                 <>
-                  <SelectField label={selectedWidget.type === 'bridge' ? 'Dimension écart' : 'Axe X'} value={selectedWidget.dimension} onChange={(v) => updateWidget(selectedWidget.id, { dimension: v as DimensionKey })} options={DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))} />
-                  {selectedWidget.type !== 'bridge' && selectedWidget.type !== 'camembert' && (
+                  <SelectField label={selectedWidget.type === 'bridge' || selectedWidget.type === 'double_bridge' ? 'Dimension écart' : 'Axe X'} value={selectedWidget.dimension} onChange={(v) => updateWidget(selectedWidget.id, { dimension: v as DimensionKey })} options={DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))} />
+                  {selectedWidget.type !== 'bridge' && selectedWidget.type !== 'double_bridge' && selectedWidget.type !== 'camembert' && (
                     <SelectField label="Série" value={selectedWidget.seriesDimension || ''} onChange={(v) => updateWidget(selectedWidget.id, { seriesDimension: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
                   )}
                 </>
               )}
 
-              {(['bridge', 'kpi', 'tableau', 'synthese', 'courbe', 'histogramme', 'histogramme_empile'] as WidgetType[]).includes(selectedWidget.type) && (
+              {(['bridge', 'double_bridge', 'kpi', 'tableau', 'synthese', 'courbe', 'histogramme', 'histogramme_empile'] as WidgetType[]).includes(selectedWidget.type) && (
                 <div className="grid grid-cols-2 gap-3 rounded-xl border border-slate-200 p-3">
                   <div className="col-span-2 text-xs font-black uppercase tracking-wide text-slate-500">Période de calcul / base de comparaison</div>
                   <SelectField label="Période" value={selectedWidget.periodMode} onChange={(v) => updateWidget(selectedWidget.id, { periodMode: v as PeriodMode })} options={[{ value: 'mois', label: 'Mois seul' }, { value: 'cumul', label: 'Cumul 01-M' }]} />
@@ -2560,12 +2890,23 @@ export default function AtelierAnalysePage() {
               </div>
 
               <div className="grid grid-cols-2 gap-3">
-                <SelectField label="Mode comparaison" value={selectedWidget.compareMode} onChange={(v) => updateWidget(selectedWidget.id, { compareMode: v as CompareMode })} options={[{ value: 'year', label: 'Année / période' }, { value: 'month', label: 'Mois' }, { value: 'dimension', label: 'Autre dimension' }]} />
-                <SelectField label="Dimension comparaison" value={selectedWidget.compareDimension || ''} onChange={(v) => updateWidget(selectedWidget.id, { compareDimension: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
-                <label className="block col-span-2">
-                  <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Valeur comparaison dimension</span>
-                  <input value={selectedWidget.compareValue || ''} onChange={(e) => updateWidget(selectedWidget.id, { compareValue: e.target.value })} placeholder="Ex : ANGLET, PV, 2025..." className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-semibold outline-none focus:border-blue-500" />
-                </label>
+                <SelectField
+                  label="Mode comparaison"
+                  value={selectedWidget.compareMode === 'dimension' && selectedWidget.type === 'double_bridge' ? 'year' : selectedWidget.compareMode}
+                  onChange={(v) => updateWidget(selectedWidget.id, { compareMode: v as CompareMode })}
+                  options={selectedWidget.type === 'double_bridge'
+                    ? [{ value: 'year', label: 'Année précédente → année N' }, { value: 'month', label: 'Mois M → mois M+1' }]
+                    : [{ value: 'year', label: 'Année / période' }, { value: 'month', label: 'Mois' }, { value: 'dimension', label: 'Autre dimension' }]}
+                />
+                {selectedWidget.type !== 'double_bridge' && (
+                  <>
+                    <SelectField label="Dimension comparaison" value={selectedWidget.compareDimension || ''} onChange={(v) => updateWidget(selectedWidget.id, { compareDimension: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
+                    <label className="block col-span-2">
+                      <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Valeur comparaison dimension</span>
+                      <input value={selectedWidget.compareValue || ''} onChange={(e) => updateWidget(selectedWidget.id, { compareValue: e.target.value })} placeholder="Ex : ANGLET, PV, 2025..." className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-semibold outline-none focus:border-blue-500" />
+                    </label>
+                  </>
+                )}
                 {selectedWidget.type === 'histogramme_empile' && (
                   <label className="col-span-2 flex items-center gap-2 rounded-xl bg-slate-50 p-3 text-sm font-bold text-slate-700">
                     <input type="checkbox" checked={selectedWidget.stacked100} onChange={(e) => updateWidget(selectedWidget.id, { stacked100: e.target.checked })} />

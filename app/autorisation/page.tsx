@@ -910,6 +910,7 @@ export default function AutorisationPage() {
                           <option value="/cartographie">/cartographie</option>
                           <option value="/clients">/clients</option>
                           <option value="/carte">/carte</option>
+                          <option value="/atelier-analyse">/atelier-analyse</option>
                           <option value="/agences">/agences</option>
                           <option value="/todo">/todo</option>
                           <option value="/suivi_prospects">/suivi_prospects</option>

@@ -85,11 +85,17 @@ type DetailRow = {
   source: SourceType
   type_piece: string
   periode: string
+  numero_document: string
+  date_document: string
+  date_document_sort: string
   numero_tiers: string
   intitule_tiers: string
   collaborateur: string
   agence: string
+  agence_collaborateur_liee: string
+  famille: string
   famille_macro: string
+  hors_statistique: boolean
   quantite: number
   ca_ht: number
   marge_valeur: number
@@ -105,9 +111,12 @@ type DetailRow = {
 type DetailSortKey =
   | 'niveau'
   | 'type_piece'
+  | 'numero_document'
+  | 'date_document'
   | 'tiers'
   | 'collaborateur'
   | 'agence'
+  | 'agence_collaborateur_liee'
   | 'famille_macro'
   | 'nb_lignes'
   | 'quantite'
@@ -158,6 +167,7 @@ const CURRENT_MONTH_KEY = CURRENT_YEAR * 100 + CURRENT_MONTH
 
 const AGG_TABLE_NAME = 'indicateur_factures_mensuel'
 const ACTIVITY_AGG_TABLE_NAME = 'indicateur_activite_mensuel'
+const FACTURE_DETAIL_TABLE_NAME = 'facture_lignes'
 
 const ACTIVITY_FILTERS: Array<{ value: ActivityFilterOption; label: string; helper: string }> = [
   { value: 'BL_MX', label: 'BL M-x', helper: 'Bons de livraison antérieurs repositionnés sur le mois d’analyse.' },
@@ -193,6 +203,151 @@ function safeText(value: any, fallback = 'NON RENSEIGNE') {
 
 function safeBool(value: any) {
   return value === true || String(value).toLowerCase() === 'true'
+}
+
+function rawValue(row: RawAggRow, keys: string[]) {
+  for (const key of keys) {
+    if (row[key] !== null && row[key] !== undefined && row[key] !== '') return row[key]
+  }
+  return null
+}
+
+function parseLooseDate(value: any): Date | null {
+  if (value === null || value === undefined || value === '') return null
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    // Excel serial date support, useful when the source table was loaded from Excel.
+    if (value > 20000 && value < 80000) {
+      const ms = Math.round((value - 25569) * 86400 * 1000)
+      const date = new Date(ms)
+      return Number.isNaN(date.getTime()) ? null : date
+    }
+  }
+
+  const text = String(value).trim()
+  if (!text) return null
+
+  const iso = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/)
+  if (iso) {
+    const date = new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]))
+    return Number.isNaN(date.getTime()) ? null : date
+  }
+
+  const fr = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})/)
+  if (fr) {
+    const date = new Date(Number(fr[3]), Number(fr[2]) - 1, Number(fr[1]))
+    return Number.isNaN(date.getTime()) ? null : date
+  }
+
+  const parsed = new Date(text)
+  return Number.isNaN(parsed.getTime()) ? null : parsed
+}
+
+function isoDate(date: Date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+
+function monthStartIso(year: number, month: number) {
+  return isoDate(new Date(year, month - 1, 1))
+}
+
+function nextMonthStartIso(year: number, month: number) {
+  return isoDate(new Date(year, month, 1))
+}
+
+function normalizeDocumentDate(value: any) {
+  const date = parseLooseDate(value)
+  if (!date) {
+    const text = safeText(value, '')
+    return { label: text, sort: text, year: 0, month: 0, periode: '' }
+  }
+  const sort = isoDate(date)
+  return {
+    label: new Intl.DateTimeFormat('fr-FR').format(date),
+    sort,
+    year: date.getFullYear(),
+    month: date.getMonth() + 1,
+    periode: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`,
+  }
+}
+
+function normalizeFactureDetailRow(row: RawAggRow, index: number): DetailRow | null {
+  const dateInfo = normalizeDocumentDate(rawValue(row, ['date_facture', 'date_piece', 'date_document', 'date', 'created_at']))
+  const annee = safeNumber(row.annee || row.year || row.exercice || dateInfo.year)
+  const mois = safeNumber(row.mois || row.month || dateInfo.month)
+  const periode = safeText(row.periode || row.annee_mois || row.mois_annee || dateInfo.periode || (annee && mois ? `${annee}-${String(mois).padStart(2, '0')}` : ''), '')
+  if (!annee || !mois) return null
+
+  const caHt = safeNumber(rawValue(row, ['ca_ht', 'montant_ht', 'montant_net_ht', 'montant_ligne_ht', 'ca', 'ca_facture', 'net_ht']))
+  const marge = safeNumber(rawValue(row, ['marge_valeur', 'marge', 'marge_stat', 'marge_ht', 'montant_marge', 'marge_brute']))
+  const numeroDocument = safeText(rawValue(row, ['numero_piece', 'num_piece', 'numero_facture', 'facture', 'piece', 'document', 'document_no', 'no_document']), 'SANS NUMERO')
+  const numeroTiers = safeText(rawValue(row, ['numero_tiers', 'numero_tiers_entete', 'code_tiers', 'tiers', 'client_code']), 'NON RENSEIGNE')
+  const intituleTiers = safeText(rawValue(row, ['intitule_tiers', 'intitule_tiers_entete', 'nom_tiers', 'libelle_tiers', 'tiers_libelle', 'client', 'raison_sociale']), numeroTiers)
+  const famille = safeText(rawValue(row, ['famille', 'famille_article', 'code_famille']), 'NON RENSEIGNE')
+  const familleMacro = safeText(rawValue(row, ['famille_macro', 'macro_famille', 'libelle_famille_macro']), famille || 'NON RENSEIGNE')
+  const agenceDocument = safeText(rawValue(row, ['agence', 'depot', 'site']), safeText(rawValue(row, ['agence_collaborateur']), 'NON AFFECTE'))
+  const agenceCollaborateurLiee = safeText(rawValue(row, ['agence_collaborateur', 'agence_collaborateur_liee', 'agence_representant']), agenceDocument)
+
+  return {
+    id: `facture-detail-${numeroDocument}-${numeroTiers}-${familleMacro}-${index}`,
+    niveau: 'Ligne facture',
+    source: 'facture',
+    type_piece: 'Facture',
+    periode,
+    numero_document: numeroDocument,
+    date_document: dateInfo.label || periode,
+    date_document_sort: dateInfo.sort || periode,
+    numero_tiers: numeroTiers,
+    intitule_tiers: intituleTiers,
+    collaborateur: safeText(rawValue(row, ['collaborateur', 'representant', 'commercial']), 'NON AFFECTE'),
+    agence: agenceDocument,
+    agence_collaborateur_liee: agenceCollaborateurLiee,
+    famille,
+    famille_macro: familleMacro,
+    hors_statistique: safeBool(rawValue(row, ['hors_statistique', 'hors_stats', 'hors_stat'])),
+    quantite: safeNumber(rawValue(row, ['quantite', 'qte', 'quantite_facturee'])),
+    ca_ht: caHt,
+    marge_valeur: marge,
+    marge_pct: caHt ? (marge / caHt) * 100 : 0,
+    nb_lignes: 1,
+  }
+}
+
+async function fetchFactureDetailRows(startDate: string, endDate: string, chunkSize = 10000) {
+  const dateColumns = ['date_facture', 'date_piece', 'date_document', 'date']
+  let lastError: any = null
+
+  for (const dateColumn of dateColumns) {
+    const allRows: RawAggRow[] = []
+    let from = 0
+    let columnWorked = true
+
+    while (true) {
+      const to = from + chunkSize - 1
+      const { data, error } = await supabase
+        .from(FACTURE_DETAIL_TABLE_NAME)
+        .select('*')
+        .gte(dateColumn, startDate)
+        .lt(dateColumn, endDate)
+        .range(from, to)
+
+      if (error) {
+        lastError = error
+        columnWorked = false
+        break
+      }
+
+      const rows = (data || []) as RawAggRow[]
+      allRows.push(...rows)
+      if (rows.length < chunkSize) break
+      from += chunkSize
+    }
+
+    if (columnWorked) return allRows
+  }
+
+  throw lastError || new Error(`Impossible de lire ${FACTURE_DETAIL_TABLE_NAME}.`)
 }
 
 function normalizeActivityType(value: any): ActivityType {
@@ -256,6 +411,15 @@ function formatBridgeValue(value: number, valueType: BridgeData['valueType']) {
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 0 }).format(value || 0)
+}
+
+function formatNumber2(value: number) {
+  return new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value || 0)
+}
+
+function formatCsvDecimal(value: number | null | undefined, decimals = 2) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return ''
+  return Number(value).toFixed(decimals).replace('.', ',')
 }
 
 function formatRate(value: number) {
@@ -436,6 +600,15 @@ function normalizeAgenceKey(value: string) {
     .replace(/[\u0300-\u036f]/g, '')
 }
 
+function normalizeCollaborateurKey(value: string) {
+  return String(value || '')
+    .trim()
+    .toUpperCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+}
+
 function extractAllowedAgences(value: any): string[] {
   if (value === null || value === undefined) return []
 
@@ -510,7 +683,7 @@ async function fetchAllowedAgencesForCurrentUser() {
 }
 
 
-async function fetchAllFromTable(tableName: string, chunkSize = 1000) {
+async function fetchAllFromTable(tableName: string, chunkSize = 10000) {
   const allRows: RawAggRow[] = []
   let from = 0
 
@@ -706,6 +879,8 @@ function CustomTooltip({ active, payload, label, mode = 'currency' }: any) {
 
 function detailSortValue(row: DetailRow, key: DetailSortKey) {
   switch (key) {
+    case 'numero_document': return row.numero_document
+    case 'date_document': return row.date_document_sort || row.date_document
     case 'tiers': return `${row.numero_tiers} ${row.intitule_tiers}`
     case 'nb_lignes': return row.nb_lignes
     case 'quantite': return row.quantite
@@ -896,6 +1071,9 @@ function WaterfallChart({ data, angledLabels = false }: { data: BridgeData; angl
 export default function IndicateursCaMargePage() {
   const [rawFactureRows, setRawFactureRows] = useState<RawAggRow[]>([])
   const [rawActivityRows, setRawActivityRows] = useState<RawAggRow[]>([])
+  const [rawFactureDetailRows, setRawFactureDetailRows] = useState<RawAggRow[]>([])
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState<string | null>(null)
   const [rows, setRows] = useState<AggRow[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -945,8 +1123,8 @@ export default function IndicateursCaMargePage() {
       setRawActivityRows(activiteData)
       setRows(normalizedRows)
 
-      const allowedAgences = await fetchAllowedAgencesForCurrentUser()
-      const availableAgences = getUnique(normalizedRows.map((r) => r.agence_collaborateur))
+      const allowedAgences = await fetchAllowedAgencesForCurrentUser() as string[]
+      const availableAgences = getUnique(normalizedRows.map((r) => r.agence_collaborateur)) as string[]
       const matchedAgences = resolveAllowedAgences(allowedAgences, availableAgences)
 
       if (matchedAgences.length) {
@@ -974,6 +1152,42 @@ export default function IndicateursCaMargePage() {
   useEffect(() => {
     loadData()
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadDetailDocuments() {
+      if (!detailContext || detailMode !== 'documents') {
+        setRawFactureDetailRows([])
+        setDetailError(null)
+        setDetailLoading(false)
+        return
+      }
+
+      const startMonth = detailContext.month || 1
+      const endMonth = detailContext.month || analysisMonthOverride
+      const startDate = monthStartIso(detailContext.year, startMonth)
+      const endDate = nextMonthStartIso(detailContext.year, endMonth)
+
+      setDetailLoading(true)
+      setDetailError(null)
+
+      try {
+        const data = await fetchFactureDetailRows(startDate, endDate)
+        if (!cancelled) setRawFactureDetailRows(data)
+      } catch (e: any) {
+        if (!cancelled) {
+          setRawFactureDetailRows([])
+          setDetailError(e?.message || String(e))
+        }
+      } finally {
+        if (!cancelled) setDetailLoading(false)
+      }
+    }
+
+    loadDetailDocuments()
+    return () => { cancelled = true }
+  }, [detailContext, detailMode, analysisMonthOverride])
 
   function updateFilter<K extends keyof Filters>(key: K, value: Filters[K]) {
     setFilters((prev) => ({ ...prev, [key]: value }))
@@ -1289,6 +1503,33 @@ export default function IndicateursCaMargePage() {
     })
   }
 
+  const agenceCollaborateurLieeByCollaborateur = useMemo(() => {
+    const scores = new Map<string, Map<string, number>>()
+
+    rows.forEach((row) => {
+      const collaborateur = safeText(row.collaborateur, '')
+      const agence = safeText(row.agence_collaborateur, '')
+      if (!collaborateur || !agence || collaborateur === 'NON AFFECTE' || agence === 'NON AFFECTE') return
+
+      const collaborateurKey = normalizeCollaborateurKey(collaborateur)
+      if (!scores.has(collaborateurKey)) scores.set(collaborateurKey, new Map<string, number>())
+      const agenceScores = scores.get(collaborateurKey)!
+      const poids = Math.max(1, Math.abs(row.ca_ht || 0), row.nb_lignes || 0)
+      agenceScores.set(agence, (agenceScores.get(agence) || 0) + poids)
+    })
+
+    const result = new Map<string, string>()
+    scores.forEach((agenceScores, collaborateurKey) => {
+      const best = Array.from(agenceScores.entries()).sort((a, b) => b[1] - a[1])[0]
+      if (best) result.set(collaborateurKey, best[0])
+    })
+    return result
+  }, [rows])
+
+  function agenceLieeDuCollaborateur(collaborateur: string, fallback = 'NON AFFECTE') {
+    return agenceCollaborateurLieeByCollaborateur.get(normalizeCollaborateurKey(collaborateur)) || fallback || 'NON AFFECTE'
+  }
+
   const rawDetailRows = useMemo<DetailRow[]>(() => {
     if (!detailContext) return []
     return rowsForDetail(detailContext, detailContext.year).map((row, index) => ({
@@ -1297,11 +1538,17 @@ export default function IndicateursCaMargePage() {
       source: row.source,
       type_piece: row.source === 'facture' ? 'Factures' : row.type_document,
       periode: row.periode,
+      numero_document: '',
+      date_document: row.periode,
+      date_document_sort: row.periode,
       numero_tiers: row.numero_tiers,
       intitule_tiers: row.intitule_tiers,
       collaborateur: row.collaborateur,
       agence: row.agence_collaborateur,
+      agence_collaborateur_liee: row.agence_collaborateur,
+      famille: row.famille,
       famille_macro: row.famille_macro,
+      hors_statistique: row.hors_statistique,
       quantite: row.quantite,
       ca_ht: row.ca_ht,
       marge_valeur: row.marge_valeur,
@@ -1318,11 +1565,17 @@ export default function IndicateursCaMargePage() {
       source: row.source,
       type_piece: row.source === 'facture' ? 'Factures' : row.type_document,
       periode: row.periode,
+      numero_document: '',
+      date_document: row.periode,
+      date_document_sort: row.periode,
       numero_tiers: row.numero_tiers,
       intitule_tiers: row.intitule_tiers,
       collaborateur: row.collaborateur,
       agence: row.agence_collaborateur,
+      agence_collaborateur_liee: row.agence_collaborateur,
+      famille: row.famille,
       famille_macro: row.famille_macro,
+      hors_statistique: row.hors_statistique,
       quantite: row.quantite,
       ca_ht: row.ca_ht,
       marge_valeur: row.marge_valeur,
@@ -1331,14 +1584,70 @@ export default function IndicateursCaMargePage() {
     }))
   }, [detailContext, baseFilteredRows, analysisMonth])
 
+  const familleMacroByDetailKey = useMemo(() => {
+    const map = new Map<string, string>()
+    rawDetailRows.forEach((row) => {
+      const key = `${row.periode}|${row.numero_tiers}|${row.collaborateur}|${row.agence_collaborateur_liee || row.agence}|${row.famille}`
+      if (!map.has(key)) map.set(key, row.famille_macro)
+    })
+    return map
+  }, [rawDetailRows])
+
+  const factureDocumentDetailRows = useMemo<DetailRow[]>(() => {
+    if (!detailContext || detailMode !== 'documents') return []
+
+    return rawFactureDetailRows
+      .map((raw, index) => {
+        const row = normalizeFactureDetailRow(raw, index)
+        if (!row) return null
+        const agenceCollaborateurLiee = agenceLieeDuCollaborateur(row.collaborateur, row.agence_collaborateur_liee || row.agence)
+        const key = `${row.periode}|${row.numero_tiers}|${row.collaborateur}|${agenceCollaborateurLiee}|${row.famille}`
+        const familleMacro = familleMacroByDetailKey.get(key)
+        return {
+          ...row,
+          agence_collaborateur_liee: agenceCollaborateurLiee,
+          famille_macro: familleMacro || row.famille_macro,
+        }
+      })
+      .filter((row): row is DetailRow => Boolean(row))
+      .filter((row) => {
+        const annee = Number(row.periode.slice(0, 4))
+        const mois = Number(row.periode.slice(5, 7))
+        const tiersLabel = row.intitule_tiers || row.numero_tiers || ''
+
+        if (annee !== detailContext.year) return false
+        if (detailContext.month && mois !== detailContext.month) return false
+        if (!detailContext.month && mois > analysisMonth) return false
+        if (detailContext.collaborateur && row.collaborateur !== detailContext.collaborateur) return false
+        if (detailContext.agence && (row.agence_collaborateur_liee || row.agence) !== detailContext.agence) return false
+        if (filters.periodes.length && !filters.periodes.includes(row.periode)) return false
+        if (filters.collaborateurs.length && !filters.collaborateurs.includes(row.collaborateur)) return false
+        if (filters.agencesCollaborateurs.length && !filters.agencesCollaborateurs.includes(row.agence_collaborateur_liee || row.agence)) return false
+        if (filters.tiers.length && !filters.tiers.includes(tiersLabel)) return false
+        if (filters.famillesMacro.length && !filters.famillesMacro.includes(row.famille_macro)) return false
+        if (filters.horsStatistique === 'non' && row.hors_statistique) return false
+        if (filters.horsStatistique === 'oui' && !row.hors_statistique) return false
+        return true
+      })
+  }, [rawFactureDetailRows, detailContext, detailMode, filters, analysisMonth, familleMacroByDetailKey])
+
+  const documentDetailSourceRows = useMemo(() => {
+    if (detailMode !== 'documents') return rawDetailRows
+    if (!factureDocumentDetailRows.length) return rawDetailRows
+    const activityRows = rawDetailRows.filter((row) => row.source === 'activite')
+    return [...factureDocumentDetailRows, ...activityRows]
+  }, [detailMode, rawDetailRows, factureDocumentDetailRows])
+
   function aggregateDetail(source: DetailRow[]) {
-    if (detailMode === 'agregats') return source.slice(0, 1000)
+    if (detailMode === 'agregats') return source.slice(0, 10000)
     const map = new Map<string, DetailRow>()
 
     source.forEach((row) => {
       const key = detailMode === 'tiers'
         ? `${row.numero_tiers}|${row.intitule_tiers}`
-        : `${row.source}|${row.type_piece}|${row.periode}|${row.numero_tiers}|${row.collaborateur}|${row.agence}`
+        : detailMode === 'documents'
+          ? `${row.source}|${row.type_piece}|${row.numero_document}|${row.date_document_sort || row.date_document}|${row.numero_tiers}|${row.intitule_tiers}|${row.collaborateur}|${row.agence_collaborateur_liee || row.agence}|${row.agence}|${row.famille_macro}`
+          : `${row.source}|${row.type_piece}|${row.periode}|${row.numero_tiers}|${row.collaborateur}|${row.agence_collaborateur_liee || row.agence}|${row.agence}|${row.famille_macro}`
 
       const existing = map.get(key)
       if (existing) {
@@ -1356,8 +1665,8 @@ export default function IndicateursCaMargePage() {
   }
 
   const detailRows = useMemo(() => {
-    const currentRows = aggregateDetail(rawDetailRows)
-    const previousRows = aggregateDetail(rawPreviousDetailRows)
+    const currentRows = aggregateDetail(detailMode === 'documents' ? documentDetailSourceRows : rawDetailRows)
+    const previousRows = detailMode === 'tiers' ? aggregateDetail(rawPreviousDetailRows) : []
     const previousByTiers = new Map(previousRows.map((row) => [`${row.numero_tiers}|${row.intitule_tiers}`, row]))
 
     const enriched = currentRows.map((row) => {
@@ -1382,11 +1691,12 @@ export default function IndicateursCaMargePage() {
       const direction = detailSort.direction === 'asc' ? 1 : -1
       if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * direction
       return String(av).localeCompare(String(bv), 'fr') * direction
-    }).slice(0, 1000)
-  }, [rawDetailRows, rawPreviousDetailRows, detailMode, detailSort])
+    }).slice(0, 10000)
+  }, [rawDetailRows, rawPreviousDetailRows, documentDetailSourceRows, detailMode, detailSort])
 
-  const detailNbClients = useMemo(() => new Set(rawDetailRows.map((row) => `${row.numero_tiers}|${row.intitule_tiers}`)).size, [rawDetailRows])
-  const detailNbDocuments = useMemo(() => new Set(rawDetailRows.map((row) => `${row.source}|${row.type_piece}|${row.periode}|${row.numero_tiers}`)).size, [rawDetailRows])
+  const detailSourceRowsForCounts = detailMode === 'documents' ? documentDetailSourceRows : rawDetailRows
+  const detailNbClients = useMemo(() => new Set(detailSourceRowsForCounts.map((row) => `${row.numero_tiers}|${row.intitule_tiers}`)).size, [detailSourceRowsForCounts])
+  const detailNbDocuments = useMemo(() => new Set(detailSourceRowsForCounts.map((row) => `${row.source}|${row.type_piece}|${row.numero_document || row.periode}|${row.numero_tiers}`)).size, [detailSourceRowsForCounts])
 
   function openDetail(context: DetailContext) {
     setDetailContext(context)
@@ -1449,27 +1759,50 @@ export default function IndicateursCaMargePage() {
   }
 
   function exportDetail() {
-    const rows = detailRows.map((row) => ({
-      niveau: row.niveau,
-      source: row.source,
-      type_piece: row.type_piece,
-      periode: row.periode,
-      numero_tiers: row.numero_tiers,
-      intitule_tiers: row.intitule_tiers,
-      collaborateur: row.collaborateur,
-      agence: row.agence,
-      famille_macro: row.famille_macro,
-      lignes: row.nb_lignes,
-      quantite: row.quantite,
-      ca_ht: row.ca_ht,
-      marge_valeur: row.marge_valeur,
-      marge_pct: row.marge_pct,
-      ca_ht_n1: row.ca_ht_n1 ?? '',
-      marge_pct_n1: row.marge_pct_n1 ?? '',
-      evo_ca_pct_n1: row.evo_ca_pct_n1 ?? '',
-      evo_marge_points_n1: row.evo_marge_points_n1 ?? '',
-    }))
-    downloadCsv('indicateur_detail.csv', rows)
+    const rows = detailRows.map((row) => {
+      if (detailMode === 'documents') {
+        return {
+          famille_macro: row.famille_macro,
+          facture: row.numero_document,
+          date: row.date_document,
+          numero_tiers: row.numero_tiers,
+          tiers: row.intitule_tiers,
+          agence: row.agence,
+          collaborateur: row.collaborateur,
+          agence_collaborateur_liee: row.agence_collaborateur_liee,
+          montant_ht: formatCsvDecimal(row.ca_ht, 2),
+          marge_valeur: formatCsvDecimal(row.marge_valeur, 2),
+          marge_pct: formatCsvDecimal(row.marge_pct, 2),
+          quantite: formatCsvDecimal(row.quantite, 2),
+          lignes: row.nb_lignes,
+          source: row.source,
+          type_piece: row.type_piece,
+        }
+      }
+
+      return {
+        niveau: row.niveau,
+        source: row.source,
+        type_piece: row.type_piece,
+        periode: row.periode,
+        numero_tiers: row.numero_tiers,
+        intitule_tiers: row.intitule_tiers,
+        collaborateur: row.collaborateur,
+        agence: row.agence,
+        agence_collaborateur_liee: row.agence_collaborateur_liee,
+        famille_macro: row.famille_macro,
+        lignes: row.nb_lignes,
+        quantite: row.quantite,
+        ca_ht: formatCsvDecimal(row.ca_ht, 2),
+        marge_valeur: formatCsvDecimal(row.marge_valeur, 2),
+        marge_pct: formatCsvDecimal(row.marge_pct, 2),
+        ca_ht_n1: row.ca_ht_n1 === undefined ? '' : formatCsvDecimal(row.ca_ht_n1, 2),
+        marge_pct_n1: row.marge_pct_n1 === undefined ? '' : formatCsvDecimal(row.marge_pct_n1, 2),
+        evo_ca_pct_n1: row.evo_ca_pct_n1 ?? '',
+        evo_marge_points_n1: row.evo_marge_points_n1 ?? '',
+      }
+    })
+    downloadCsv(detailMode === 'documents' ? 'indicateur_detail_documents.csv' : 'indicateur_detail.csv', rows)
   }
 
   function ToggleButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
@@ -1824,7 +2157,8 @@ export default function IndicateursCaMargePage() {
               <div>
                 <h2 className="text-xl font-black">Détail : {detailContext.label}</h2>
                 <p className="text-sm font-semibold text-slate-500">
-                  {detailMode === 'tiers' ? 'Regroupé par tiers/client' : detailMode === 'documents' ? 'Regroupé par documents/source' : 'Détail des agrégats'} · {formatNumber(rawDetailRows.reduce((s, row) => s + row.nb_lignes, 0))} lignes source lues / Nb de client : {formatNumber(detailNbClients)} / Nb de document : {formatNumber(detailNbDocuments)}
+                  {detailMode === 'tiers' ? 'Regroupé par tiers/client' : detailMode === 'documents' ? 'Regroupé par famille macro / facture / date / tiers / agence / collaborateur' : 'Détail des agrégats'} · {formatNumber(detailSourceRowsForCounts.reduce((s, row) => s + row.nb_lignes, 0))} lignes source lues / Nb de client : {formatNumber(detailNbClients)} / Nb de document : {formatNumber(detailNbDocuments)}
+                  {detailMode === 'documents' && detailLoading ? ' / Chargement des lignes factures…' : ''}
                 </p>
               </div>
               <div className="flex flex-wrap items-end gap-2">
@@ -1841,15 +2175,24 @@ export default function IndicateursCaMargePage() {
               </div>
             </div>
 
+            {detailMode === 'documents' && detailError && (
+              <div className="mb-3 rounded-xl bg-amber-50 px-4 py-3 text-sm font-bold text-amber-800">
+                Impossible de lire le détail des factures dans la table {FACTURE_DETAIL_TABLE_NAME}. Affichage de secours depuis les agrégats mensuels : {detailError}
+              </div>
+            )}
+
             <div className="overflow-auto rounded-xl border border-slate-200">
               <table className="min-w-full border-collapse text-xs">
                 <thead className="bg-slate-100">
                   <tr>
                     <SortableTh label="Niveau" sortKey="niveau" />
                     {detailMode !== 'tiers' && <SortableTh label="Source / type" sortKey="type_piece" />}
+                    {detailMode === 'documents' && <SortableTh label="Facture / document" sortKey="numero_document" />}
+                    {detailMode === 'documents' && <SortableTh label="Date" sortKey="date_document" />}
                     <SortableTh label="Tiers" sortKey="tiers" />
                     <SortableTh label="Collaborateur" sortKey="collaborateur" />
-                    <SortableTh label="Agence" sortKey="agence" />
+                    <SortableTh label="Agence liée collaborateur" sortKey="agence_collaborateur_liee" />
+                    <SortableTh label="Agence document" sortKey="agence" />
                     {detailMode !== 'tiers' && <SortableTh label="Famille macro" sortKey="famille_macro" />}
                     <SortableTh label="Lignes" sortKey="nb_lignes" align="right" />
                     <SortableTh label="Quantité" sortKey="quantite" align="right" />
@@ -1867,14 +2210,17 @@ export default function IndicateursCaMargePage() {
                     <tr key={row.id} className="hover:bg-slate-50">
                       <td className="border border-slate-200 px-3 py-2 font-bold">{row.niveau}</td>
                       {detailMode !== 'tiers' && <td className="border border-slate-200 px-3 py-2">{row.type_piece}</td>}
+                      {detailMode === 'documents' && <td className="border border-slate-200 px-3 py-2 font-black">{row.numero_document || '—'}</td>}
+                      {detailMode === 'documents' && <td className="border border-slate-200 px-3 py-2">{row.date_document || row.periode}</td>}
                       <td className="border border-slate-200 px-3 py-2">{row.numero_tiers} · {row.intitule_tiers}</td>
                       <td className="border border-slate-200 px-3 py-2">{row.collaborateur}</td>
+                      <td className="border border-slate-200 px-3 py-2">{row.agence_collaborateur_liee || row.agence}</td>
                       <td className="border border-slate-200 px-3 py-2">{row.agence}</td>
                       {detailMode !== 'tiers' && <td className="border border-slate-200 px-3 py-2">{row.famille_macro}</td>}
                       <td className="border border-slate-200 px-3 py-2 text-right">{formatNumber(row.nb_lignes)}</td>
                       <td className="border border-slate-200 px-3 py-2 text-right">{formatNumber(row.quantite)}</td>
-                      <td className="border border-slate-200 px-3 py-2 text-right font-black">{formatNumber(row.ca_ht)}</td>
-                      <td className="border border-slate-200 px-3 py-2 text-right">{formatNumber(row.marge_valeur)}</td>
+                      <td className="border border-slate-200 px-3 py-2 text-right font-black">{formatNumber2(row.ca_ht)}</td>
+                      <td className="border border-slate-200 px-3 py-2 text-right">{formatNumber2(row.marge_valeur)}</td>
                       <td className="border border-slate-200 px-3 py-2 text-right">{formatRate(row.marge_pct)}</td>
                       {detailMode === 'tiers' && <td className="border border-slate-200 px-3 py-2 text-right">{formatNumber(row.ca_ht_n1 || 0)}</td>}
                       {detailMode === 'tiers' && <td className="border border-slate-200 px-3 py-2 text-right">{formatRate(row.marge_pct_n1 || 0)}</td>}
@@ -1883,7 +2229,7 @@ export default function IndicateursCaMargePage() {
                     </tr>
                   ))}
                   <tr className="bg-slate-100 font-black">
-                    <td colSpan={detailMode === 'tiers' ? 5 : 7} className="border border-slate-200 px-3 py-2">TOTAL AFFICHÉ</td>
+                    <td colSpan={detailMode === 'tiers' ? 5 : detailMode === 'documents' ? 9 : 7} className="border border-slate-200 px-3 py-2">TOTAL AFFICHÉ</td>
                     <td className="border border-slate-200 px-3 py-2 text-right">{formatNumber(detailTotal.lignes)}</td>
                     <td className="border border-slate-200 px-3 py-2 text-right">{formatNumber(detailTotal.quantite)}</td>
                     <td className="border border-slate-200 px-3 py-2 text-right">{formatNumber(detailTotal.ca)}</td>
