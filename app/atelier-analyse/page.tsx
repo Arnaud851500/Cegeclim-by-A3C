@@ -24,13 +24,25 @@ import * as XLSX from 'xlsx-js-style'
 
 type DataSource = 'factures' | 'activite' | 'mixte'
 type WidgetType = 'kpi' | 'histogramme' | 'histogramme_empile' | 'courbe' | 'bridge' | 'double_bridge' | 'tableau' | 'camembert' | 'synthese'
-type MeasureKey = 'ca_ht' | 'marge_valeur' | 'marge_pct' | 'quantite' | 'nb_lignes'
+type MeasureKey =
+  | 'ca_ht'
+  | 'marge_valeur'
+  | 'marge_pct'
+  | 'quantite'
+  | 'nb_lignes'
+  | 'population_departement'
+  | 'superficie_departement'
+  | 'ca_par_population'
+  | 'ca_par_superficie'
 type DimensionKey =
   | 'annee'
   | 'mois'
   | 'type_document'
   | 'agence_collaborateur'
   | 'collaborateur'
+  | 'collaborateur_facture'
+  | 'collaborateur_tiers'
+  | 'departement_tiers'
   | 'famille_macro'
   | 'famille'
   | 'intitule_tiers'
@@ -49,8 +61,13 @@ type StudioRow = {
   annee: number
   mois: number
   type_document: string
-  collaborateur: string
+  collaborateur: string // compatibilité vues existantes : correspond au collaborateur facture
+  collaborateur_facture: string
+  collaborateur_tiers: string
   agence_collaborateur: string
+  departement_tiers: string
+  population_departement: number
+  superficie_departement: number
   numero_tiers: string
   intitule_tiers: string
   famille: string
@@ -67,7 +84,10 @@ type GlobalFilters = {
   years: number[]
   months: number[]
   agences: string[]
-  collaborateurs: string[]
+  collaborateurs: string[] // compatibilité anciennes vues : collaborateur facture
+  collaborateursFacture: string[]
+  collaborateursTiers: string[]
+  departementsTiers: string[]
   famillesMacro: string[]
   typesDocument: string[]
   clientMode: ClientFilterMode
@@ -79,7 +99,10 @@ type WidgetFilters = Partial<{
   years: number[]
   months: number[]
   agences: string[]
-  collaborateurs: string[]
+  collaborateurs: string[] // compatibilité anciennes vues : collaborateur facture
+  collaborateursFacture: string[]
+  collaborateursTiers: string[]
+  departementsTiers: string[]
   famillesMacro: string[]
   typesDocument: string[]
   clientMode: ClientFilterMode
@@ -137,6 +160,9 @@ type AggregatedValue = {
   marge_valeur: number
   quantite: number
   nb_lignes: number
+  population_departement: number
+  superficie_departement: number
+  __territoires: Record<string, { population: number; superficie: number }>
 }
 
 type ChartDatum = {
@@ -181,6 +207,10 @@ const MEASURES: Array<{ key: MeasureKey; label: string; kind: 'currency' | 'perc
   { key: 'marge_pct', label: 'Marge %', kind: 'percent' },
   { key: 'quantite', label: 'Quantité', kind: 'number' },
   { key: 'nb_lignes', label: 'Nb lignes', kind: 'number' },
+  { key: 'population_departement', label: 'Population dépt.', kind: 'number' },
+  { key: 'superficie_departement', label: 'Superficie dépt. km²', kind: 'number' },
+  { key: 'ca_par_population', label: 'CA / habitant', kind: 'currency' },
+  { key: 'ca_par_superficie', label: 'CA / km²', kind: 'currency' },
 ]
 
 const DIMENSIONS: Array<{ key: DimensionKey; label: string }> = [
@@ -189,7 +219,10 @@ const DIMENSIONS: Array<{ key: DimensionKey; label: string }> = [
   { key: 'source', label: 'Source' },
   { key: 'type_document', label: 'Type document' },
   { key: 'agence_collaborateur', label: 'Agence' },
-  { key: 'collaborateur', label: 'Collaborateur' },
+  { key: 'collaborateur_facture', label: 'Collaborateur facture' },
+  { key: 'collaborateur_tiers', label: 'Collaborateur tiers' },
+  { key: 'collaborateur', label: 'Collaborateur (historique)' },
+  { key: 'departement_tiers', label: 'Département tiers' },
   { key: 'famille_macro', label: 'Famille macro' },
   { key: 'famille', label: 'Famille' },
   { key: 'intitule_tiers', label: 'Tiers' },
@@ -202,6 +235,9 @@ const DEFAULT_FILTERS: GlobalFilters = {
   months: [],
   agences: [],
   collaborateurs: [],
+  collaborateursFacture: [],
+  collaborateursTiers: [],
+  departementsTiers: [],
   famillesMacro: [],
   typesDocument: [],
   clientMode: 'include',
@@ -279,8 +315,13 @@ function normalizeAggRow(row: Record<string, any>, source: Exclude<DataSource, '
     annee,
     mois,
     type_document: source === 'factures' ? 'FACTURE' : safeText(row.type_document, 'NON RENSEIGNE'),
-    collaborateur: safeText(row.collaborateur, 'NON AFFECTE'),
+    collaborateur: safeText(row.collaborateur_facture || row.collaborateur, 'NON AFFECTE'),
+    collaborateur_facture: safeText(row.collaborateur_facture || row.collaborateur, 'NON AFFECTE'),
+    collaborateur_tiers: safeText(row.collaborateur_tiers, 'NON AFFECTE'),
     agence_collaborateur: safeText(row.agence_collaborateur || row.agence, 'NON AFFECTE'),
+    departement_tiers: safeText(row.departement_tiers, 'NON RENSEIGNE'),
+    population_departement: safeNumber(row.population_departement || row.population || row.population_territoire),
+    superficie_departement: safeNumber(row.superficie_departement || row.superficie || row.superficie_km2),
     numero_tiers: safeText(row.numero_tiers || row.code_tiers, 'NON RENSEIGNE'),
     intitule_tiers: safeText(row.intitule_tiers || row.tiers, 'NON RENSEIGNE'),
     famille: safeText(row.famille, 'NON RENSEIGNE'),
@@ -350,7 +391,38 @@ function evolutionClass(current: number, previous: number) {
 }
 
 function emptyAgg(): AggregatedValue {
-  return { ca_ht: 0, marge_valeur: 0, quantite: 0, nb_lignes: 0 }
+  return {
+    ca_ht: 0,
+    marge_valeur: 0,
+    quantite: 0,
+    nb_lignes: 0,
+    population_departement: 0,
+    superficie_departement: 0,
+    __territoires: {},
+  }
+}
+
+function recomputeTerritoireTotals(target: AggregatedValue) {
+  const territoires = Object.values(target.__territoires || {})
+  target.population_departement = territoires.reduce((sum, item) => sum + safeNumber(item.population), 0)
+  target.superficie_departement = territoires.reduce((sum, item) => sum + safeNumber(item.superficie), 0)
+}
+
+function mergeAgg(target: AggregatedValue, source: AggregatedValue) {
+  target.ca_ht += source.ca_ht
+  target.marge_valeur += source.marge_valeur
+  target.quantite += source.quantite
+  target.nb_lignes += source.nb_lignes
+
+  Object.entries(source.__territoires || {}).forEach(([departement, territoire]) => {
+    if (!departement || departement === 'NON RENSEIGNE') return
+    target.__territoires[departement] = {
+      population: safeNumber(territoire.population),
+      superficie: safeNumber(territoire.superficie),
+    }
+  })
+
+  recomputeTerritoireTotals(target)
 }
 
 function addToAgg(target: AggregatedValue, row: StudioRow) {
@@ -358,10 +430,23 @@ function addToAgg(target: AggregatedValue, row: StudioRow) {
   target.marge_valeur += row.marge_valeur
   target.quantite += row.quantite
   target.nb_lignes += row.nb_lignes
+
+  // Les données territoire sont portées par les lignes agrégées mais ne doivent pas être additionnées plusieurs fois
+  // quand un même département est présent sur plusieurs familles, clients ou types de document.
+  const departement = safeText(row.departement_tiers, '')
+  if (departement && departement !== 'NON RENSEIGNE') {
+    target.__territoires[departement] = {
+      population: safeNumber(row.population_departement),
+      superficie: safeNumber(row.superficie_departement),
+    }
+    recomputeTerritoireTotals(target)
+  }
 }
 
 function measureValue(agg: AggregatedValue, measure: MeasureKey) {
   if (measure === 'marge_pct') return agg.ca_ht ? (agg.marge_valeur / agg.ca_ht) * 100 : 0
+  if (measure === 'ca_par_population') return agg.population_departement ? agg.ca_ht / agg.population_departement : 0
+  if (measure === 'ca_par_superficie') return agg.superficie_departement ? agg.ca_ht / agg.superficie_departement : 0
   return agg[measure]
 }
 
@@ -374,7 +459,10 @@ function applyGlobalFilters(rows: StudioRow[], filters: GlobalFilters) {
     if (filters.years.length && !filters.years.includes(row.annee)) return false
     if (filters.months.length && !filters.months.includes(row.mois)) return false
     if (filters.agences.length && !filters.agences.includes(row.agence_collaborateur)) return false
-    if (filters.collaborateurs.length && !filters.collaborateurs.includes(row.collaborateur)) return false
+    if (filters.collaborateurs.length && !filters.collaborateurs.includes(row.collaborateur_facture || row.collaborateur)) return false
+    if ((filters.collaborateursFacture || []).length && !filters.collaborateursFacture.includes(row.collaborateur_facture)) return false
+    if ((filters.collaborateursTiers || []).length && !filters.collaborateursTiers.includes(row.collaborateur_tiers)) return false
+    if ((filters.departementsTiers || []).length && !filters.departementsTiers.includes(row.departement_tiers)) return false
     if (filters.famillesMacro.length && !filters.famillesMacro.includes(row.famille_macro)) return false
     if (filters.typesDocument.length && !filters.typesDocument.includes(row.type_document)) return false
     if (filters.clients?.length) {
@@ -397,7 +485,10 @@ function applyWidgetFilters(rows: StudioRow[], widget: WidgetConfig, globalFilte
     if (lf.years?.length && !lf.years.includes(row.annee)) return false
     if (lf.months?.length && !lf.months.includes(row.mois)) return false
     if (lf.agences?.length && !lf.agences.includes(row.agence_collaborateur)) return false
-    if (lf.collaborateurs?.length && !lf.collaborateurs.includes(row.collaborateur)) return false
+    if (lf.collaborateurs?.length && !lf.collaborateurs.includes(row.collaborateur_facture || row.collaborateur)) return false
+    if (lf.collaborateursFacture?.length && !lf.collaborateursFacture.includes(row.collaborateur_facture)) return false
+    if (lf.collaborateursTiers?.length && !lf.collaborateursTiers.includes(row.collaborateur_tiers)) return false
+    if (lf.departementsTiers?.length && !lf.departementsTiers.includes(row.departement_tiers)) return false
     if (lf.famillesMacro?.length && !lf.famillesMacro.includes(row.famille_macro)) return false
     if (lf.typesDocument?.length && !lf.typesDocument.includes(row.type_document)) return false
     if (lf.clients?.length) {
@@ -1586,16 +1677,12 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
         rowsWithSubtotals.push(row)
 
         if (subtotal) {
-          ;(Object.keys(subtotal.total) as Array<keyof AggregatedValue>).forEach((key) => {
-            subtotal!.total[key] += row.total[key]
-            subtotal!.totalPrev[key] += row.totalPrev[key]
-          })
+          mergeAgg(subtotal.total, row.total)
+          mergeAgg(subtotal.totalPrev, row.totalPrev)
           row.colMap.forEach((agg, colKey) => {
             if (!subtotal!.colMap.has(colKey)) subtotal!.colMap.set(colKey, emptyAgg())
             const target = subtotal!.colMap.get(colKey)!
-            ;(Object.keys(target) as Array<keyof AggregatedValue>).forEach((key) => {
-              target[key] += agg[key]
-            })
+            mergeAgg(target, agg)
           })
           subtotal.value = measureValue(subtotal.total, widget.measure)
         }
@@ -1772,6 +1859,11 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
         Mois: r.mois,
         'Type document': r.type_document,
         Agence: r.agence_collaborateur,
+        'Collaborateur facture': r.collaborateur_facture,
+        'Collaborateur tiers': r.collaborateur_tiers,
+        'Département tiers': r.departement_tiers,
+        Population: r.population_departement,
+        'Superficie km²': r.superficie_departement,
         Collaborateur: r.collaborateur,
         'Numéro tiers': r.numero_tiers,
         'Nom tiers': r.intitule_tiers,
@@ -1787,6 +1879,7 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
       const wsDetail = XLSX.utils.json_to_sheet(detail)
       wsDetail['!cols'] = [
         { wch: 12 }, { wch: 8 }, { wch: 8 }, { wch: 18 }, { wch: 18 }, { wch: 24 },
+        { wch: 24 }, { wch: 24 }, { wch: 12 }, { wch: 14 }, { wch: 14 },
         { wch: 18 }, { wch: 36 }, { wch: 18 }, { wch: 18 }, { wch: 16 }, { wch: 10 },
         { wch: 10 }, { wch: 14 }, { wch: 14 }, { wch: 10 },
       ]
@@ -1796,11 +1889,15 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
         if (cell) cell.s = excelHeaderStyle('DDE5F1')
       }
       for (let r = 1; r <= detailRange.e.r; r += 1) {
-        ;[13, 14].forEach((c) => {
+        ;[8, 9, 16, 17].forEach((c) => {
+          const cell = wsDetail[excelCellAddress(r, c)]
+          if (cell) cell.z = '#,##0'
+        })
+        ;[18, 19].forEach((c) => {
           const cell = wsDetail[excelCellAddress(r, c)]
           if (cell) cell.z = '#,##0 €'
         })
-        const pct = wsDetail[excelCellAddress(r, 15)]
+        const pct = wsDetail[excelCellAddress(r, 20)]
         if (pct) pct.z = '0.0%'
       }
       XLSX.utils.book_append_sheet(wb, wsDetail, sanitizeExcelSheetName('Détail'))
@@ -2180,7 +2277,10 @@ export default function AtelierAnalysePage() {
       years: uniqueSorted(rows.map((r) => r.annee)).sort((a, b) => Number(b) - Number(a)).map(Number),
       months: Array.from({ length: 12 }, (_v, i) => i + 1),
       agences: uniqueSorted(rows.map((r) => r.agence_collaborateur)),
-      collaborateurs: uniqueSorted(rows.map((r) => r.collaborateur)),
+      collaborateurs: uniqueSorted(rows.map((r) => r.collaborateur_facture || r.collaborateur)),
+      collaborateursFacture: uniqueSorted(rows.map((r) => r.collaborateur_facture)),
+      collaborateursTiers: uniqueSorted(rows.map((r) => r.collaborateur_tiers)),
+      departementsTiers: uniqueSorted(rows.map((r) => r.departement_tiers)),
       famillesMacro: uniqueSorted(rows.map((r) => r.famille_macro)),
       typesDocument: uniqueSorted(rows.map((r) => r.type_document)),
       clients: uniqueSorted(rows.map((r) => clientKey(r))),
@@ -2333,6 +2433,9 @@ export default function AtelierAnalysePage() {
     if (Array.isArray(input.months)) filters.months = input.months.map(Number).filter((v: number) => Number.isFinite(v) && v >= 1 && v <= 12)
     if (Array.isArray(input.agences)) filters.agences = input.agences.map((v: any) => String(v || '').trim()).filter(Boolean)
     if (Array.isArray(input.collaborateurs)) filters.collaborateurs = input.collaborateurs.map((v: any) => String(v || '').trim()).filter(Boolean)
+    if (Array.isArray(input.collaborateursFacture)) filters.collaborateursFacture = input.collaborateursFacture.map((v: any) => String(v || '').trim()).filter(Boolean)
+    if (Array.isArray(input.collaborateursTiers)) filters.collaborateursTiers = input.collaborateursTiers.map((v: any) => String(v || '').trim()).filter(Boolean)
+    if (Array.isArray(input.departementsTiers)) filters.departementsTiers = input.departementsTiers.map((v: any) => String(v || '').trim()).filter(Boolean)
     if (Array.isArray(input.famillesMacro)) filters.famillesMacro = input.famillesMacro.map((v: any) => String(v || '').trim()).filter(Boolean)
     if (Array.isArray(input.typesDocument)) filters.typesDocument = input.typesDocument.map((v: any) => String(v || '').trim()).filter(Boolean)
     if (Array.isArray(input.clients)) filters.clients = input.clients.map((v: any) => String(v || '').trim()).filter(Boolean)
@@ -2510,6 +2613,9 @@ export default function AtelierAnalysePage() {
           activeTemporalContext: getActiveTemporalContext(),
           agencesCount: available.agences.length,
           collaborateursCount: available.collaborateurs.length,
+          collaborateursFactureCount: available.collaborateursFacture.length,
+          collaborateursTiersCount: available.collaborateursTiers.length,
+          departementsTiers: available.departementsTiers,
           famillesMacroCount: available.famillesMacro.length,
           typesDocument: available.typesDocument,
           clientsCount: available.clients.length,
@@ -2574,7 +2680,9 @@ export default function AtelierAnalysePage() {
           <MultiSelect label="Année" values={available.years.map(String)} selected={globalFilters.years.map(String)} onChange={(v) => setGlobalFilters((p) => ({ ...p, years: v.map(Number) }))} />
           <MultiSelect label="Mois" values={available.months.map((m) => `${m} - ${monthLabel(m)}`)} selected={globalFilters.months.map((m) => `${m} - ${monthLabel(m)}`)} onChange={(v) => setGlobalFilters((p) => ({ ...p, months: v.map((x) => Number(x.split(' - ')[0])) }))} />
           <MultiSelect label="Agence" values={available.agences} selected={globalFilters.agences} onChange={(v) => setGlobalFilters((p) => ({ ...p, agences: v }))} />
-          <MultiSelect label="Collaborateur" values={available.collaborateurs} selected={globalFilters.collaborateurs} onChange={(v) => setGlobalFilters((p) => ({ ...p, collaborateurs: v }))} />
+          <MultiSelect label="Collab. facture" values={available.collaborateursFacture} selected={globalFilters.collaborateursFacture || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, collaborateursFacture: v, collaborateurs: v }))} />
+          <MultiSelect label="Collab. tiers" values={available.collaborateursTiers} selected={globalFilters.collaborateursTiers || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, collaborateursTiers: v }))} />
+          <MultiSelect label="Dépt tiers" values={available.departementsTiers} selected={globalFilters.departementsTiers || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, departementsTiers: v }))} />
           <MultiSelect label="Famille macro" values={available.famillesMacro} selected={globalFilters.famillesMacro} onChange={(v) => setGlobalFilters((p) => ({ ...p, famillesMacro: v }))} />
           <MultiSelect label="Type document" values={relevantDocumentTypes(globalFilters.sources.includes('mixte') || globalFilters.sources.length !== 1 ? 'mixte' : globalFilters.sources[0], available.typesDocument)} selected={globalFilters.typesDocument} onChange={(v) => setGlobalFilters((p) => ({ ...p, typesDocument: v }))} />
           <FilterSelect
@@ -2926,6 +3034,9 @@ export default function AtelierAnalysePage() {
                   <MultiSelect label="Année" values={available.years.map(String)} selected={(selectedWidget.localFilters.years || []).map(String)} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, years: v.map(Number) } })} />
                   <MultiSelect label="Mois" values={available.months.map((m) => `${m} - ${monthLabel(m)}`)} selected={(selectedWidget.localFilters.months || []).map((m) => `${m} - ${monthLabel(m)}`)} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, months: v.map((x) => Number(x.split(' - ')[0])) } })} />
                   <MultiSelect label="Agence" values={available.agences} selected={selectedWidget.localFilters.agences || []} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, agences: v } })} />
+                  <MultiSelect label="Collab. facture" values={available.collaborateursFacture} selected={selectedWidget.localFilters.collaborateursFacture || selectedWidget.localFilters.collaborateurs || []} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, collaborateursFacture: v, collaborateurs: v } })} />
+                  <MultiSelect label="Collab. tiers" values={available.collaborateursTiers} selected={selectedWidget.localFilters.collaborateursTiers || []} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, collaborateursTiers: v } })} />
+                  <MultiSelect label="Dépt tiers" values={available.departementsTiers} selected={selectedWidget.localFilters.departementsTiers || []} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, departementsTiers: v } })} />
                   <MultiSelect label="Famille macro" values={available.famillesMacro} selected={selectedWidget.localFilters.famillesMacro || []} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, famillesMacro: v } })} />
                 </div>
               </div>
