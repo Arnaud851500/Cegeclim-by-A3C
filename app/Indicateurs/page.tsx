@@ -36,6 +36,7 @@ type AggRow = {
   periode: string
   collaborateur: string
   agence_collaborateur: string
+  depot: string
   numero_tiers: string
   intitule_tiers: string
   famille: string
@@ -52,6 +53,7 @@ type Filters = {
   periodes: string[]
   collaborateurs: string[]
   agencesCollaborateurs: string[]
+  depots: string[]
   tiers: string[]
   famillesMacro: string[]
   activityOptions: ActivityFilterOption[]
@@ -383,6 +385,7 @@ function normalizeAggRow(row: RawAggRow, source: SourceType): AggRow {
     periode: periodeRaw || `${annee}-${String(mois).padStart(2, '0')}`,
     collaborateur: safeText(row.collaborateur, 'NON AFFECTE'),
     agence_collaborateur: safeText(row.agence_collaborateur || row.agence, 'NON AFFECTE'),
+    depot: safeText(row.depot, 'NON RENSEIGNE'),
     numero_tiers: safeText(row.numero_tiers || row.numero_tiers_entete || row.code_tiers, 'NON RENSEIGNE'),
     intitule_tiers: safeText(row.intitule_tiers || row.intitule_tiers_entete || row.tiers, 'NON RENSEIGNE'),
     famille: safeText(row.famille, 'NON RENSEIGNE'),
@@ -1083,6 +1086,7 @@ export default function IndicateursCaMargePage() {
     periodes: [],
     collaborateurs: [],
     agencesCollaborateurs: [],
+    depots: [],
     tiers: [],
     famillesMacro: [],
     activityOptions: ['BL_MX', 'BL_M', 'BR'],
@@ -1208,6 +1212,7 @@ export default function IndicateursCaMargePage() {
       periodes: getUnique(rows.map((r) => r.periode)).sort(),
       collaborateurs: getUnique(rows.map((r) => r.collaborateur)),
       agencesCollaborateurs: getUnique(rows.map((r) => r.agence_collaborateur)),
+      depots: getUnique(rows.map((r) => r.depot)),
       tiers: getUnique(rows.map((r) => r.intitule_tiers || r.numero_tiers)),
       famillesMacro: getUnique(rows.map((r) => r.famille_macro)),
     }
@@ -1226,6 +1231,7 @@ export default function IndicateursCaMargePage() {
       if (filters.periodes.length && !filters.periodes.includes(row.periode)) return false
       if (filters.collaborateurs.length && !filters.collaborateurs.includes(row.collaborateur || '')) return false
       if (filters.agencesCollaborateurs.length && !filters.agencesCollaborateurs.includes(row.agence_collaborateur || '')) return false
+      if (filters.depots.length && !filters.depots.includes(row.depot || '')) return false
       if (filters.tiers.length && !filters.tiers.includes(tiersLabel)) return false
       if (filters.famillesMacro.length && !filters.famillesMacro.includes(row.famille_macro || '')) return false
       if (filters.horsStatistique === 'non' && row.hors_statistique) return false
@@ -1268,6 +1274,7 @@ export default function IndicateursCaMargePage() {
   const activeFilterSummaryText = useMemo(() => {
     const parts: string[] = [`Mois affiché : ${analysisMonthLabel} / Période analysée : 01-${analysisMonthLabel}`]
     if (filters.agencesCollaborateurs.length) parts.push(`Agence : ${filters.agencesCollaborateurs.join(', ')}`)
+    if (filters.depots.length) parts.push(`Dépôt : ${filters.depots.join(', ')}`)
     if (filters.collaborateurs.length) parts.push(`Collaborateur : ${filters.collaborateurs.join(', ')}`)
     if (filters.tiers.length) parts.push(`Tiers : ${filters.tiers.slice(0, 4).join(', ')}${filters.tiers.length > 4 ? '…' : ''}`)
     if (filters.famillesMacro.length) parts.push(`Famille macro : ${filters.famillesMacro.join(', ')}`)
@@ -2031,6 +2038,7 @@ export default function IndicateursCaMargePage() {
             <MultiSelectFilter label="Mois / année" values={availableFilters.periodes} selected={filters.periodes} onChange={(v) => updateFilter('periodes', v)} />
             <AnalysisMonthSelect value={analysisMonthOverride} onChange={setAnalysisMonthOverride} />
             <MultiSelectFilter label="Agence collaborateur" values={availableFilters.agencesCollaborateurs} selected={filters.agencesCollaborateurs} onChange={(v) => updateFilter('agencesCollaborateurs', v)} />
+            <MultiSelectFilter label="Dépôt" values={availableFilters.depots} selected={filters.depots} onChange={(v) => updateFilter('depots', v)} />
             <MultiSelectFilter label="Collaborateur" values={availableFilters.collaborateurs} selected={filters.collaborateurs} onChange={(v) => updateFilter('collaborateurs', v)} />
             <MultiSelectFilter label="Tiers" values={availableFilters.tiers} selected={filters.tiers} onChange={(v) => updateFilter('tiers', v)} />
             <MultiSelectFilter label="Famille macro" values={availableFilters.famillesMacro} selected={filters.famillesMacro} onChange={(v) => updateFilter('famillesMacro', v)} />

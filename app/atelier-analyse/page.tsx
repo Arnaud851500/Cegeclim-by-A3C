@@ -22,7 +22,7 @@ import { supabase } from '@/lib/supabaseClient'
 // @ts-ignore - xlsx-js-style est utilisé pour conserver les styles Excel côté export.
 import * as XLSX from 'xlsx-js-style'
 
-type DataSource = 'factures' | 'activite' | 'mixte'
+type DataSource = 'factures' | 'activite' | 'devis' | 'mixte'
 type WidgetType = 'kpi' | 'histogramme' | 'histogramme_empile' | 'courbe' | 'bridge' | 'double_bridge' | 'tableau' | 'camembert' | 'synthese'
 type MeasureKey =
   | 'ca_ht'
@@ -39,6 +39,7 @@ type DimensionKey =
   | 'mois'
   | 'type_document'
   | 'agence_collaborateur'
+  | 'depot'
   | 'collaborateur'
   | 'collaborateur_facture'
   | 'collaborateur_tiers'
@@ -65,6 +66,7 @@ type StudioRow = {
   collaborateur_facture: string
   collaborateur_tiers: string
   agence_collaborateur: string
+  depot: string
   departement_tiers: string
   population_departement: number
   superficie_departement: number
@@ -84,6 +86,7 @@ type GlobalFilters = {
   years: number[]
   months: number[]
   agences: string[]
+  depots: string[]
   collaborateurs: string[] // compatibilité anciennes vues : collaborateur facture
   collaborateursFacture: string[]
   collaborateursTiers: string[]
@@ -99,6 +102,7 @@ type WidgetFilters = Partial<{
   years: number[]
   months: number[]
   agences: string[]
+  depots: string[]
   collaborateurs: string[] // compatibilité anciennes vues : collaborateur facture
   collaborateursFacture: string[]
   collaborateursTiers: string[]
@@ -174,6 +178,7 @@ type ChartDatum = {
 
 const FACTURES_TABLE = 'indicateur_factures_mensuel'
 const ACTIVITE_TABLE = 'indicateur_activite_mensuel'
+const DEVIS_TABLE = 'indicateur_devis_mensuel'
 const VIEW_TABLE = 'analyse_widget_views'
 const ATELIER_FRONT_VERSION = 'V2026-05-19-DOUBLE-BRIDGE-MIX-PERF-01'
 const ATELIER_AI_VERSION = 'STEP-3-WIDGET-BUILDER-02'
@@ -219,6 +224,7 @@ const DIMENSIONS: Array<{ key: DimensionKey; label: string }> = [
   { key: 'source', label: 'Source' },
   { key: 'type_document', label: 'Type document' },
   { key: 'agence_collaborateur', label: 'Agence' },
+  { key: 'depot', label: 'Dépôt' },
   { key: 'collaborateur_facture', label: 'Collaborateur facture' },
   { key: 'collaborateur_tiers', label: 'Collaborateur tiers' },
   { key: 'collaborateur', label: 'Collaborateur (historique)' },
@@ -234,6 +240,7 @@ const DEFAULT_FILTERS: GlobalFilters = {
   years: [],
   months: [],
   agences: [],
+  depots: [],
   collaborateurs: [],
   collaborateursFacture: [],
   collaborateursTiers: [],
@@ -307,6 +314,14 @@ function monthLabel(month: number) {
   return MONTHS[Math.max(0, Math.min(11, month - 1))] || String(month)
 }
 
+function sourceLabel(source: DataSource) {
+  if (source === 'mixte') return 'Mixte'
+  if (source === 'factures') return 'Factures'
+  if (source === 'activite') return 'Activité'
+  if (source === 'devis') return 'Devis'
+  return String(source)
+}
+
 function normalizeAggRow(row: Record<string, any>, source: Exclude<DataSource, 'mixte'>): StudioRow {
   const annee = safeNumber(row.annee || row.year || row.exercice)
   const mois = safeNumber(row.mois || row.month)
@@ -314,11 +329,12 @@ function normalizeAggRow(row: Record<string, any>, source: Exclude<DataSource, '
     source,
     annee,
     mois,
-    type_document: source === 'factures' ? 'FACTURE' : safeText(row.type_document, 'NON RENSEIGNE'),
+    type_document: source === 'factures' ? 'FACTURE' : source === 'devis' ? 'DEVIS' : safeText(row.type_document, 'NON RENSEIGNE'),
     collaborateur: safeText(row.collaborateur_facture || row.collaborateur, 'NON AFFECTE'),
     collaborateur_facture: safeText(row.collaborateur_facture || row.collaborateur, 'NON AFFECTE'),
     collaborateur_tiers: safeText(row.collaborateur_tiers, 'NON AFFECTE'),
     agence_collaborateur: safeText(row.agence_collaborateur || row.agence, 'NON AFFECTE'),
+    depot: safeText(row.depot, 'NON RENSEIGNE'),
     departement_tiers: safeText(row.departement_tiers, 'NON RENSEIGNE'),
     population_departement: safeNumber(row.population_departement || row.population || row.population_territoire),
     superficie_departement: safeNumber(row.superficie_departement || row.superficie || row.superficie_km2),
@@ -358,7 +374,7 @@ function uniqueSorted<T extends string | number>(values: T[]) {
 function getDimensionValue(row: StudioRow, dimension: DimensionKey): string {
   if (dimension === 'annee') return String(row.annee)
   if (dimension === 'mois') return monthLabel(row.mois)
-  if (dimension === 'source') return row.source === 'factures' ? 'Factures' : 'Activité'
+  if (dimension === 'source') return sourceLabel(row.source)
   return safeText((row as any)[dimension], 'NON RENSEIGNE')
 }
 
@@ -459,6 +475,7 @@ function applyGlobalFilters(rows: StudioRow[], filters: GlobalFilters) {
     if (filters.years.length && !filters.years.includes(row.annee)) return false
     if (filters.months.length && !filters.months.includes(row.mois)) return false
     if (filters.agences.length && !filters.agences.includes(row.agence_collaborateur)) return false
+    if ((filters.depots || []).length && !filters.depots.includes(row.depot)) return false
     if (filters.collaborateurs.length && !filters.collaborateurs.includes(row.collaborateur_facture || row.collaborateur)) return false
     if ((filters.collaborateursFacture || []).length && !filters.collaborateursFacture.includes(row.collaborateur_facture)) return false
     if ((filters.collaborateursTiers || []).length && !filters.collaborateursTiers.includes(row.collaborateur_tiers)) return false
@@ -485,6 +502,7 @@ function applyWidgetFilters(rows: StudioRow[], widget: WidgetConfig, globalFilte
     if (lf.years?.length && !lf.years.includes(row.annee)) return false
     if (lf.months?.length && !lf.months.includes(row.mois)) return false
     if (lf.agences?.length && !lf.agences.includes(row.agence_collaborateur)) return false
+    if (lf.depots?.length && !lf.depots.includes(row.depot)) return false
     if (lf.collaborateurs?.length && !lf.collaborateurs.includes(row.collaborateur_facture || row.collaborateur)) return false
     if (lf.collaborateursFacture?.length && !lf.collaborateursFacture.includes(row.collaborateur_facture)) return false
     if (lf.collaborateursTiers?.length && !lf.collaborateursTiers.includes(row.collaborateur_tiers)) return false
@@ -550,7 +568,7 @@ function buildDefaultWidget(type: WidgetType, availableYears: number[]): WidgetC
     sortMode: 'value_desc',
     showValues: true,
   }
-  if (type === 'courbe') base.title = 'Courbe cumulée'
+  if (type === 'courbe') { base.title = 'Flux Devis / CDC / BL / Factures'; base.source = 'mixte'; base.dimension = 'mois'; base.seriesDimension = 'type_document'; base.periodMode = 'mois' }
   if (type === 'histogramme') base.title = 'Histogramme CA par mois'
   if (type === 'histogramme_empile') { base.title = 'CA empilé par année / famille'; base.dimension = 'annee'; base.seriesDimension = 'famille_macro' }
   if (type === 'camembert') { base.title = 'Répartition par famille macro'; base.dimension = 'famille_macro'; base.seriesDimension = '' }
@@ -562,7 +580,8 @@ function buildDefaultWidget(type: WidgetType, availableYears: number[]): WidgetC
 function relevantDocumentTypes(source: DataSource, allTypes: string[]) {
   const sorted = uniqueSorted(allTypes)
   if (source === 'factures') return sorted.filter((type) => type === 'FACTURE' || type.toUpperCase().includes('FACTURE'))
-  if (source === 'activite') return sorted.filter((type) => type !== 'FACTURE' && !type.toUpperCase().includes('FACTURE'))
+  if (source === 'devis') return sorted.filter((type) => type === 'DEVIS' || type.toUpperCase().includes('DEVIS'))
+  if (source === 'activite') return sorted.filter((type) => !['FACTURE', 'DEVIS'].includes(type.toUpperCase()) && !type.toUpperCase().includes('FACTURE') && !type.toUpperCase().includes('DEVIS'))
   return sorted
 }
 
@@ -581,7 +600,7 @@ function getChartSeriesLabel(row: StudioRow, widget: WidgetConfig, seriesKey: st
     (widget.type === 'histogramme' || widget.type === 'histogramme_empile')
 
   if (splitMixedSourceForMonthlyBars) {
-    return `${base} · ${row.source === 'factures' ? 'Factures' : 'Activité'}`
+    return `${base} · ${sourceLabel(row.source)}`
   }
 
   return base
@@ -593,8 +612,11 @@ function extractYearFromSeries(series: string) {
 }
 
 function sourceRankFromSeries(series: string) {
-  if (String(series).includes('Factures')) return 0
-  if (String(series).includes('Activité')) return 1
+  if (String(series).includes('Devis')) return 0
+  if (String(series).includes('CDC')) return 1
+  if (String(series).includes('BL')) return 2
+  if (String(series).includes('Factures')) return 3
+  if (String(series).includes('Activité')) return 4
   return 0
 }
 
@@ -615,6 +637,9 @@ function chartReferenceYear(seriesNames: string[], widget: WidgetConfig) {
 function chartSeriesColor(series: string, index: number, widget: WidgetConfig, referenceYear?: number) {
   const year = extractYearFromSeries(series)
   if (year) return yearRankColor(year, referenceYear || widget.yearN || CURRENT_YEAR, String(series).includes('Activité'))
+  if (String(series).includes('Devis')) return '#8b5cf6'
+  if (String(series).includes('CDC')) return '#f59e0b'
+  if (String(series).includes('BL')) return '#0ea5e9'
   if (String(series).includes('Activité')) return '#93c5fd'
   if (String(series).includes('Factures')) return '#2563eb'
   return PALETTE[index % PALETTE.length]
@@ -738,7 +763,7 @@ function WidgetShell({
       <div className="mb-3 flex items-start justify-between gap-3">
         <div>
           <h3 className="text-sm font-black text-slate-900">{widget.title}</h3>
-          <p className="text-xs text-slate-500">{widget.source === 'mixte' ? 'Factures + activité' : widget.source === 'factures' ? 'Factures' : 'Activité'} · {getMeasureLabel(widget.measure)}</p>
+          <p className="text-xs text-slate-500">{sourceLabel(widget.source)} · {getMeasureLabel(widget.measure)}</p>
         </div>
         <div className="flex items-center gap-1">
           <button title="Configurer le widget" type="button" onClick={onConfigure} className="rounded-lg border border-blue-200 bg-blue-50 px-2 py-1 text-xs font-bold text-blue-700 hover:bg-blue-100">⚙</button>
@@ -1743,7 +1768,7 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
     const totalHeader = `TOTAL ${widget.periodMode === 'cumul' ? `01-${String(monthLimit).padStart(2, '0')}` : monthLabel(monthLimit)}`
 
     aoa.push([widget.title || 'Tableau croisé'])
-    aoa.push([`${widget.source === 'mixte' ? 'Factures + activité' : widget.source === 'factures' ? 'Factures' : 'Activité'} · ${measures.map(getMeasureLabel).join(' / ')}`])
+    aoa.push([`${sourceLabel(widget.source)} · ${measures.map(getMeasureLabel).join(' / ')}`])
     aoa.push([])
 
     const startHeaderRow = aoa.length
@@ -2232,16 +2257,92 @@ export default function AtelierAnalysePage() {
   const [aiWidgetProposals, setAiWidgetProposals] = useState<AiWidgetProposal[]>([])
   const [showClientFilters, setShowClientFilters] = useState(false)
   const [showAiPanel, setShowAiPanel] = useState(false)
+  const [maintenanceLoading, setMaintenanceLoading] = useState(false)
+  const [maintenanceMessage, setMaintenanceMessage] = useState<string | null>(null)
+
+
+  function formatDateForSql(date: Date) {
+    const pad2 = (n: number) => String(n).padStart(2, '0')
+    return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
+  }
+
+  function getRecentMonthPeriods(monthCount: 2 | 3 = 3) {
+    const periods: Array<{ p_date_debut: string; p_date_fin: string; label: string }> = []
+    const now = new Date()
+    const safeMonthCount = monthCount === 2 ? 2 : 3
+    const cursor = new Date(now.getFullYear(), now.getMonth() - (safeMonthCount - 1), 1)
+    const limit = new Date(now.getFullYear(), now.getMonth() + 1, 1)
+
+    while (cursor < limit) {
+      const next = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)
+      periods.push({
+        p_date_debut: formatDateForSql(cursor),
+        p_date_fin: formatDateForSql(next),
+        label: `${formatDateForSql(cursor)} → ${formatDateForSql(next)}`,
+      })
+      cursor.setMonth(cursor.getMonth() + 1)
+    }
+
+    return periods
+  }
+
+  async function runRpcForPeriods(functionName: string, periods: ReturnType<typeof getRecentMonthPeriods>, label: string) {
+    for (const period of periods) {
+      setMaintenanceMessage(`${label} : ${period.label}`)
+      const { error: rpcError } = await supabase.rpc(functionName, {
+        p_date_debut: period.p_date_debut,
+        p_date_fin: period.p_date_fin,
+      })
+      if (rpcError) throw new Error(`${functionName} ${period.label} : ${rpcError.message}`)
+    }
+  }
+
+
+  async function handleRebuildRecentMonths(monthCount: 2 | 3 = 3, blMxMode?: 'previous_month' | 'current_month') {
+    if (maintenanceLoading) return
+    const message = blMxMode
+      ? `Confirmer BL M-x → ${blMxMode === 'previous_month' ? 'M-1' : 'M'} puis rebuild des ${monthCount} derniers mois ?`
+      : `Confirmer le rebuild des agrégats des ${monthCount} derniers mois ?`
+    if (!window.confirm(message)) return
+
+    setMaintenanceLoading(true)
+    setMaintenanceMessage(`Préparation du rebuild ${monthCount} mois…`)
+    setError(null)
+
+    try {
+      if (blMxMode) {
+        const { error: modeError } = await supabase.rpc('set_bl_mx_mode', { p_mode: blMxMode })
+        if (modeError) throw new Error(`set_bl_mx_mode : ${modeError.message}`)
+      }
+
+      const periods = getRecentMonthPeriods(monthCount)
+      await runRpcForPeriods('refresh_facture_entetes_cache_periode', periods, 'Cache factures')
+      await runRpcForPeriods('rebuild_indicateur_factures_mensuel_periode', periods, 'Agrégat factures')
+      await runRpcForPeriods('refresh_devis_entetes_cache_periode', periods, 'Cache devis')
+      await runRpcForPeriods('rebuild_indicateur_devis_mensuel_periode', periods, 'Agrégat devis')
+      await runRpcForPeriods('rebuild_indicateur_activite_mensuel_periode', periods, 'Agrégat activité')
+      await runRpcForPeriods('rebuild_indicateur_flux_articles_mensuel_periode', periods, 'Flux articles')
+      setMaintenanceMessage('Rebuild terminé. Rechargement de l’atelier…')
+      await loadData()
+      setMaintenanceMessage(`Rebuild ${monthCount} mois terminé.`)
+    } catch (exception: any) {
+      setError(`Rebuild impossible : ${exception?.message || exception}`)
+      setMaintenanceMessage(null)
+    } finally {
+      setMaintenanceLoading(false)
+    }
+  }
 
   async function loadData() {
     setLoading(true)
     setError(null)
     try {
-      const [factures, activite] = await Promise.all([
+      const [factures, activite, devis] = await Promise.all([
         fetchAllRows(FACTURES_TABLE, 'factures'),
         fetchAllRows(ACTIVITE_TABLE, 'activite'),
+        fetchAllRows(DEVIS_TABLE, 'devis'),
       ])
-      const loaded = [...factures, ...activite]
+      const loaded = [...factures, ...activite, ...devis]
       setRows(loaded)
       const years = uniqueSorted(loaded.map((r) => r.annee)).sort((a, b) => Number(b) - Number(a))
       setGlobalFilters((prev) => ({ ...prev, years: prev.years.length ? prev.years : years.slice(0, 2).map(Number) }))
@@ -2277,6 +2378,7 @@ export default function AtelierAnalysePage() {
       years: uniqueSorted(rows.map((r) => r.annee)).sort((a, b) => Number(b) - Number(a)).map(Number),
       months: Array.from({ length: 12 }, (_v, i) => i + 1),
       agences: uniqueSorted(rows.map((r) => r.agence_collaborateur)),
+      depots: uniqueSorted(rows.map((r) => r.depot)),
       collaborateurs: uniqueSorted(rows.map((r) => r.collaborateur_facture || r.collaborateur)),
       collaborateursFacture: uniqueSorted(rows.map((r) => r.collaborateur_facture)),
       collaborateursTiers: uniqueSorted(rows.map((r) => r.collaborateur_tiers)),
@@ -2431,6 +2533,7 @@ export default function AtelierAnalysePage() {
 
     if (Array.isArray(input.years)) filters.years = input.years.map(Number).filter((v: number) => Number.isFinite(v))
     if (Array.isArray(input.months)) filters.months = input.months.map(Number).filter((v: number) => Number.isFinite(v) && v >= 1 && v <= 12)
+    if (Array.isArray(input.depots)) filters.depots = input.depots.map((v: any) => String(v || '').trim()).filter(Boolean)
     if (Array.isArray(input.agences)) filters.agences = input.agences.map((v: any) => String(v || '').trim()).filter(Boolean)
     if (Array.isArray(input.collaborateurs)) filters.collaborateurs = input.collaborateurs.map((v: any) => String(v || '').trim()).filter(Boolean)
     if (Array.isArray(input.collaborateursFacture)) filters.collaborateursFacture = input.collaborateursFacture.map((v: any) => String(v || '').trim()).filter(Boolean)
@@ -2612,6 +2715,7 @@ export default function AtelierAnalysePage() {
           months: available.months,
           activeTemporalContext: getActiveTemporalContext(),
           agencesCount: available.agences.length,
+          depotsCount: available.depots.length,
           collaborateursCount: available.collaborateurs.length,
           collaborateursFactureCount: available.collaborateursFacture.length,
           collaborateursTiersCount: available.collaborateursTiers.length,
@@ -2668,18 +2772,24 @@ export default function AtelierAnalysePage() {
               <button type="button" onClick={saveView} className="rounded-xl bg-blue-600 px-4 py-3 text-sm font-black text-white shadow-sm hover:bg-blue-700">Enregistrer la vue</button>
               <button type="button" onClick={duplicateCurrentView} disabled={!widgets.length} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50">Dupliquer la vue</button>
               <button type="button" onClick={() => { setCurrentViewId(null); setViewName('Nouvelle vue'); setWidgets([]); setSelectedWidgetId(null); setSaveMessage(null) }} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50">Nouvelle vue</button>
+              <button type="button" onClick={() => handleRebuildRecentMonths(2)} disabled={maintenanceLoading} className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm font-black text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60">{maintenanceLoading ? 'Rebuild…' : 'Rebuild 2 mois'}</button>
+              <button type="button" onClick={() => handleRebuildRecentMonths(3)} disabled={maintenanceLoading} className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm font-black text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60">{maintenanceLoading ? 'Rebuild…' : 'Rebuild 3 mois'}</button>
+              <button type="button" onClick={() => handleRebuildRecentMonths(3, 'previous_month')} disabled={maintenanceLoading} className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-black text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60">BL M-x → M-1 (3 mois)</button>
+              <button type="button" onClick={() => handleRebuildRecentMonths(3, 'current_month')} disabled={maintenanceLoading} className="rounded-xl border border-sky-300 bg-sky-50 px-4 py-3 text-sm font-black text-sky-800 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60">BL M-x → M (3 mois)</button>
               <button type="button" onClick={loadData} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50">Actualiser</button>
             </div>
           </div>
           {saveMessage && <div className="mt-4 rounded-xl bg-blue-50 p-3 text-sm font-bold text-blue-700">{saveMessage}</div>}
+          {maintenanceMessage && <div className="mt-4 rounded-xl bg-emerald-50 p-3 text-sm font-bold text-emerald-800">{maintenanceMessage}</div>}
           {error && <div className="mt-4 rounded-xl bg-red-50 p-3 text-sm font-bold text-red-700">{error}</div>}
         </section>
 
         <section className="grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm md:grid-cols-2 xl:grid-cols-10">
-          <MultiSelect label="Source" values={['factures', 'activite', 'mixte']} selected={globalFilters.sources} onChange={(v) => setGlobalFilters((p) => ({ ...p, sources: v as DataSource[] }))} />
+          <MultiSelect label="Source" values={['factures', 'activite', 'devis', 'mixte']} selected={globalFilters.sources} onChange={(v) => setGlobalFilters((p) => ({ ...p, sources: v as DataSource[] }))} />
           <MultiSelect label="Année" values={available.years.map(String)} selected={globalFilters.years.map(String)} onChange={(v) => setGlobalFilters((p) => ({ ...p, years: v.map(Number) }))} />
           <MultiSelect label="Mois" values={available.months.map((m) => `${m} - ${monthLabel(m)}`)} selected={globalFilters.months.map((m) => `${m} - ${monthLabel(m)}`)} onChange={(v) => setGlobalFilters((p) => ({ ...p, months: v.map((x) => Number(x.split(' - ')[0])) }))} />
           <MultiSelect label="Agence" values={available.agences} selected={globalFilters.agences} onChange={(v) => setGlobalFilters((p) => ({ ...p, agences: v }))} />
+          <MultiSelect label="Dépôt" values={available.depots} selected={globalFilters.depots || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, depots: v }))} />
           <MultiSelect label="Collab. facture" values={available.collaborateursFacture} selected={globalFilters.collaborateursFacture || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, collaborateursFacture: v, collaborateurs: v }))} />
           <MultiSelect label="Collab. tiers" values={available.collaborateursTiers} selected={globalFilters.collaborateursTiers || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, collaborateursTiers: v }))} />
           <MultiSelect label="Dépt tiers" values={available.departementsTiers} selected={globalFilters.departementsTiers || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, departementsTiers: v }))} />
@@ -2900,6 +3010,7 @@ export default function AtelierAnalysePage() {
                 <SelectField label="Source" value={selectedWidget.source} onChange={(v) => updateWidget(selectedWidget.id, { source: v as DataSource, localFilters: { ...selectedWidget.localFilters, typesDocument: [] } })} options={[
                   { value: 'factures', label: 'Factures' },
                   { value: 'activite', label: 'Activité' },
+                  { value: 'devis', label: 'Devis' },
                   { value: 'mixte', label: 'Mixte' },
                 ]} />
                 <SelectField
@@ -3034,6 +3145,7 @@ export default function AtelierAnalysePage() {
                   <MultiSelect label="Année" values={available.years.map(String)} selected={(selectedWidget.localFilters.years || []).map(String)} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, years: v.map(Number) } })} />
                   <MultiSelect label="Mois" values={available.months.map((m) => `${m} - ${monthLabel(m)}`)} selected={(selectedWidget.localFilters.months || []).map((m) => `${m} - ${monthLabel(m)}`)} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, months: v.map((x) => Number(x.split(' - ')[0])) } })} />
                   <MultiSelect label="Agence" values={available.agences} selected={selectedWidget.localFilters.agences || []} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, agences: v } })} />
+                  <MultiSelect label="Dépôt" values={available.depots} selected={selectedWidget.localFilters.depots || []} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, depots: v } })} />
                   <MultiSelect label="Collab. facture" values={available.collaborateursFacture} selected={selectedWidget.localFilters.collaborateursFacture || selectedWidget.localFilters.collaborateurs || []} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, collaborateursFacture: v, collaborateurs: v } })} />
                   <MultiSelect label="Collab. tiers" values={available.collaborateursTiers} selected={selectedWidget.localFilters.collaborateursTiers || []} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, collaborateursTiers: v } })} />
                   <MultiSelect label="Dépt tiers" values={available.departementsTiers} selected={selectedWidget.localFilters.departementsTiers || []} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, departementsTiers: v } })} />

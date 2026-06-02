@@ -11,6 +11,7 @@ type TableKey =
   | 'ref_articles'
   | 'ref_tiers'
   | 'facture_lignes'
+  | 'devis_lignes'
   | 'activite_lignes'
 
 type ColumnType = 'text' | 'number' | 'boolean' | 'date'
@@ -93,8 +94,14 @@ type PendingReferentialImport = {
 }
 
 const PREVIEW_LIMIT = 100
-const DUPLICATE_LOOKUP_CHUNK_SIZE = 50
-const LINE_INSERT_CHUNK_SIZE = 10
+
+// Performance import : le contrôle de doublons travaille par lots de hash.
+// 50 clés provoquait près de 300 appels Supabase pour un fichier devis d'environ 15 000 lignes.
+// 1000 clés réduit fortement le nombre d'allers-retours tout en restant raisonnable pour PostgREST.
+const DUPLICATE_LOOKUP_CHUNK_SIZE = 1000
+
+// Les triggers sont désactivés pendant l'insertion des lignes ; on peut donc insérer par lots plus larges.
+const LINE_INSERT_CHUNK_SIZE = 250
 const REF_INSERT_CHUNK_SIZE = 250
 
 const IMPORT_STEP_TEMPLATES: ImportStep[] = [
@@ -119,6 +126,17 @@ const TABLES: TableConfig[] = [
     columns: [
       { db: 'famille', label: 'Famille', required: true },
       { db: 'famille_macro', label: 'Famille macro' },
+      {
+        db: 'quantite_pertinente',
+        label: 'Quantité pertinente',
+        aliases: [
+          'Quantite_pertinente',
+          'Quantité pertinente',
+          'Quantite pertinente',
+          'Qté pertinente',
+          'Qte pertinente',
+        ],
+      },
     ],
   },
   {
@@ -335,6 +353,79 @@ const TABLES: TableConfig[] = [
     ],
   },
   {
+    key: 'devis_lignes',
+    label: 'Lignes de devis',
+    primaryKey: 'ligne_hash',
+    secondaryKeys: ['numero_piece', 'reference_article', 'designation'],
+    description: 'Table centrale : une ligne par ligne de devis.',
+    columns: [
+      { db: 'ligne_hash', label: 'Clé ligne', readonly: true },
+      { db: 'ligne_hash_metier', label: 'Clé métier', readonly: true },
+      { db: 'type_document', label: 'Type' },
+      { db: 'numero_piece', label: 'N° pièce', required: true },
+      { db: 'date_facture', label: 'Date facture', type: 'date' },
+      { db: 'date_devis', label: 'Date du devis', type: 'date' },
+      { db: 'date_bc', label: 'Date du BC', type: 'date' },
+      { db: 'date_pl', label: 'Date de la PL', type: 'date' },
+      { db: 'date_bl', label: 'Date du BL', type: 'date' },
+      { db: 'numero_tiers_entete', label: 'N° tiers entête' },
+      { db: 'intitule_tiers_entete', label: 'Intitulé tiers entête' },
+      { db: 'numero_tiers_ligne', label: 'N° tiers ligne' },
+      { db: 'intitule_tiers_ligne', label: 'Intitulé tiers ligne' },
+      { db: 'numero_piece_devis', label: 'N° devis' },
+      { db: 'numero_piece_bc', label: 'N° BC' },
+      { db: 'numero_piece_pl', label: 'N° PL' },
+      { db: 'numero_piece_bl', label: 'N° BL' },
+      { db: 'reference_article', label: 'Référence article' },
+      { db: 'reference_client', label: 'Référence client' },
+      { db: 'designation', label: 'Désignation' },
+      { db: 'complement', label: 'Complément' },
+      { db: 'reference', label: 'Référence' },
+      { db: 'gamme_1', label: 'Gamme 1' },
+      { db: 'gamme_2', label: 'Gamme 2' },
+      { db: 'numero_serie_lot', label: 'N° série / lot' },
+      { db: 'complement_serie_lot', label: 'Complément série / lot' },
+      { db: 'quantite', label: 'Quantité', type: 'number', aliases: ['Qté', 'Quantité facturée', 'Qté facturée'] },
+      { db: 'qte_ressource', label: 'Qté ressource', type: 'number' },
+      { db: 'qte_colisee', label: 'Qté colisée', type: 'number' },
+      { db: 'conditionnement', label: 'Conditionnement' },
+      { db: 'qte_devis', label: 'Qté devis', type: 'number' },
+      { db: 'qte_commandee', label: 'Qté commandée', type: 'number' },
+      { db: 'qte_preparee', label: 'Qté préparée', type: 'number', aliases: ['Qté prépar', 'Qté préparée', 'Qte preparee'] },
+      { db: 'qte_livree', label: 'Qté livrée', type: 'number', aliases: ['Qté livrée', 'Qte livree'] },
+      { db: 'poids_net_global', label: 'Poids net global', type: 'number', aliases: ['Poids net g', 'Poids net', 'Poids net GLC', 'Poids net global'] },
+      { db: 'poids_brut_global', label: 'Poids brut global', type: 'number', aliases: ['Poids brut g', 'Poids brut', 'Poids brut GL', 'Poids brut global'] },
+      { db: 'date_livraison', label: 'Date livraison', type: 'date', aliases: ['Date livraison', 'Date livrai'] },
+      { db: 'pu_ht', label: 'PU HT', type: 'number', aliases: ['P.U. HT', 'PU HT'] },
+      { db: 'pu_ttc', label: 'PU TTC', type: 'number', aliases: ['P.U. TTC', 'PU TTC'] },
+      { db: 'pu_devise', label: 'PU devise', type: 'number' },
+      { db: 'pu_bon_commande', label: 'PU bon commande', type: 'number' },
+      { db: 'ressource', label: 'Ressource' },
+      { db: 'remise', label: 'Remise', type: 'number', numberFormat: 'percent_ratio', aliases: ['Remise %', '% remise'] },
+      { db: 'pu_net', label: 'PU net', type: 'number', aliases: ['P.U. net', 'PU net'] },
+      { db: 'pu_net_ttc', label: 'PU net TTC', type: 'number', aliases: ['P.U. net TTC', 'PU net TTC'] },
+      { db: 'pu_net_devise', label: 'PU net devise', type: 'number', aliases: ['P.U. net devise', 'PU net devise'] },
+      { db: 'prix_revient_unitaire', label: 'Prix revient unitaire', type: 'number', aliases: ['Prix de revient', 'Prix revient', 'Prix revient unitaire'] },
+      { db: 'cmup', label: 'CMUP', type: 'number' },
+      { db: 'montant_ht', label: 'Montant HT', type: 'number', aliases: ['Montant H.T', 'Montant H.T.', 'Montant HT'] },
+      { db: 'montant_ht_devise', label: 'Montant HT devise', type: 'number', aliases: ['Montant HT devise', 'Montant H.T devise', 'Montant H'] },
+      { db: 'taxe_1', label: 'Taxe 1', type: 'number', numberFormat: 'percent_ratio', aliases: ['Taxe 1'] },
+      { db: 'taxe_2', label: 'Taxe 2', type: 'number', numberFormat: 'percent_ratio', aliases: ['Taxe 2'] },
+      { db: 'taxe_3', label: 'Taxe 3', type: 'number', numberFormat: 'percent_ratio', aliases: ['Taxe 3'] },
+      { db: 'prix_revient_total', label: 'Prix revient total', type: 'number', aliases: ['Prix revient total', 'Prix de revient total'] },
+      { db: 'montant_ttc', label: 'Montant TTC', type: 'number', aliases: ['Montant T.T.C', 'Montant T.T.C.', 'Montant TTC', 'Montant T'] },
+      { db: 'base_calcul_marge', label: 'Base calcul marge', type: 'number' },
+      { db: 'marge_valeur', label: 'Marge valeur', type: 'number', aliases: ['Marge', 'Marge valeur', 'Marge en valeur', 'Marge €'] },
+      { db: 'marge_pourcent', label: 'Marge %', type: 'number', numberFormat: 'percent_ratio', aliases: ['Marge %', '% marge', 'Taux marge', 'Taux de marge'] },
+      { db: 'collaborateur', label: 'Collaborateur' },
+      { db: 'depot', label: 'Dépôt' },
+      { db: 'affaire', label: 'Affaire' },
+      { db: 'date_peremption', label: 'Date péremption', type: 'date' },
+      { db: 'date_fabrication', label: 'Date fabrication', type: 'date' },
+      { db: 'projet', label: 'Projet' },
+    ],
+  },
+  {
     key: 'activite_lignes',
     label: 'Activités',
     primaryKey: 'ligne_hash',
@@ -387,12 +478,13 @@ const TABLES: TableConfig[] = [
 ]
 
 
-const LINE_TABLE_KEYS: TableKey[] = ['facture_lignes', 'activite_lignes']
+const LINE_TABLE_KEYS: TableKey[] = ['facture_lignes', 'devis_lignes', 'activite_lignes']
 const REFERENTIAL_REVIEW_TABLE_KEYS: TableKey[] = ['ref_tiers', 'ref_articles', 'ref_collaborateurs']
 
 const FILE_NAME_RULES: Partial<Record<TableKey, { keywords: string[]; expectedLabel: string }>> = {
   activite_lignes: { keywords: ['activite', 'activité'], expectedLabel: 'activite ou activité' },
   facture_lignes: { keywords: ['facture', 'facturation'], expectedLabel: 'facture ou facturation' },
+  devis_lignes: { keywords: ['devis'], expectedLabel: 'devis' },
   ref_tiers: { keywords: ['tiers'], expectedLabel: 'tiers' },
   ref_articles: { keywords: ['article'], expectedLabel: 'article' },
   ref_collaborateurs: { keywords: ['collaborateur', 'collaborateurs', 'collab'], expectedLabel: 'collaborateur ou collaborateurs' },
@@ -407,7 +499,12 @@ function shouldReviewExistingRecords(key: TableKey) {
 }
 
 const EXTRA_HEADER_ALIASES: Record<TableKey, Record<string, string>> = {
-  ref_familles: {},
+  ref_familles: {
+    quantite_pertinente: 'quantite_pertinente',
+    quantite_pertinente_oui_non: 'quantite_pertinente',
+    qte_pertinente: 'quantite_pertinente',
+    qte_pertinente_oui_non: 'quantite_pertinente',
+  },
   ref_code_naf: {},
   ref_collaborateurs: {},
   ref_articles: {},
@@ -416,6 +513,61 @@ const EXTRA_HEADER_ALIASES: Record<TableKey, Record<string, string>> = {
     date: 'date_facture',
     date_piece: 'date_facture',
     date_de_la_piece: 'date_facture',
+    n_piece: 'numero_piece',
+    numero_piece: 'numero_piece',
+    n_piece_du_devis: 'numero_piece_devis',
+    n_devis: 'numero_piece_devis',
+    n_piece_du_bc: 'numero_piece_bc',
+    n_bc: 'numero_piece_bc',
+    n_piece_de_la_pl: 'numero_piece_pl',
+    n_pl: 'numero_piece_pl',
+    n_piece_du_bl: 'numero_piece_bl',
+    n_bl: 'numero_piece_bl',
+    reference_arti: 'reference_article',
+    reference_article: 'reference_article',
+    ref_article: 'reference_article',
+    ref_client: 'reference_client',
+    qte_prepare: 'qte_preparee',
+    qte_preparee: 'qte_preparee',
+    qte_livree: 'qte_livree',
+    poids_net_g: 'poids_net_global',
+    poids_net_glc: 'poids_net_global',
+    poids_brut_g: 'poids_brut_global',
+    poids_brut_gl: 'poids_brut_global',
+    date_livrai: 'date_livraison',
+    date_livraison: 'date_livraison',
+    p_u_net: 'pu_net',
+    pu_net: 'pu_net',
+    p_u_net_ttc: 'pu_net_ttc',
+    pu_net_ttc: 'pu_net_ttc',
+    p_u_net_devise: 'pu_net_devise',
+    pu_net_devise: 'pu_net_devise',
+    prix_de_rev: 'prix_revient_unitaire',
+    prix_de_revient: 'prix_revient_unitaire',
+    prix_revient: 'prix_revient_unitaire',
+    cmup: 'cmup',
+    montant_h: 'montant_ht_devise',
+    montant_ht: 'montant_ht',
+    montant_h_t: 'montant_ht',
+    montant_ht_devise: 'montant_ht_devise',
+    taxe_1: 'taxe_1',
+    taxe_2: 'taxe_2',
+    taxe_3: 'taxe_3',
+    prix_revient_total: 'prix_revient_total',
+    montant_t: 'montant_ttc',
+    montant_ttc: 'montant_ttc',
+    marge: 'marge_valeur',
+    marge_valeur: 'marge_valeur',
+    marge_en_valeur: 'marge_valeur',
+    marge_pourcent: 'marge_pourcent',
+    marge_pct: 'marge_pourcent',
+    marge_percent: 'marge_pourcent',
+    taux_de_marge: 'marge_pourcent',
+  },
+  devis_lignes: {
+    date: 'date_devis',
+    date_piece: 'date_devis',
+    date_de_la_piece: 'date_devis',
     n_piece: 'numero_piece',
     numero_piece: 'numero_piece',
     n_piece_du_devis: 'numero_piece_devis',
@@ -606,6 +758,25 @@ function normalizeBoolean(value: any) {
   return ['oui', 'o', 'yes', 'y', 'true', 'vrai', '1', 'x'].includes(text)
 }
 
+function normalizeOuiNon(value: any) {
+  if (value === undefined || value === null || value === '') return null
+  if (typeof value === 'boolean') return value ? 'Oui' : 'Non'
+
+  const text = String(value).trim()
+  if (!text) return null
+
+  const normalized = text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase()
+
+  if (['oui', 'o', 'yes', 'y', 'true', 'vrai', '1', 'x'].includes(normalized)) return 'Oui'
+  if (['non', 'n', 'no', 'false', 'faux', '0'].includes(normalized)) return 'Non'
+
+  return text
+}
+
 function normalizeDate(value: any) {
   if (value === undefined || value === null || value === '') return null
 
@@ -676,6 +847,7 @@ function normalizeDate(value: any) {
 
 function normalizeValue(value: any, type: ColumnType = 'text', column?: ColumnConfig) {
   if (column?.db === 'code_naf') return normalizeCodeNaf(value)
+  if (column?.db === 'quantite_pertinente') return normalizeOuiNon(value)
   if (type === 'number') {
     return column?.numberFormat === 'percent_ratio' ? normalizePercentRatio(value) : normalizeNumber(value)
   }
@@ -719,7 +891,7 @@ function hashText(value: any) {
 }
 
 function buildLineBusinessSignature(row: GenericRow, tableKey: TableKey) {
-  const documentDate = tableKey === 'facture_lignes' ? row.date_facture : row.date_piece
+  const documentDate = tableKey === 'facture_lignes' ? row.date_facture : tableKey === 'devis_lignes' ? row.date_devis : row.date_piece
 
   // Clé métier volontairement stable : aucune donnée variable d'import ne doit entrer ici.
   // Ne pas inclure : id, source_import, imported_at, updated_at, nom de fichier, index brut de ligne Excel.
@@ -811,7 +983,7 @@ function assignStableLineHashes(rows: GenericRow[], config: TableConfig) {
     return {
       ...row,
       ligne_hash: stableLineHash,
-      ...(config.key === 'facture_lignes' ? { ligne_hash_metier: stableLineHash } : {}),
+      ...(['facture_lignes', 'devis_lignes'].includes(config.key) ? { ligne_hash_metier: stableLineHash } : {}),
       __business_signature: signature,
       __business_occurrence: occurrence,
     }
@@ -1105,7 +1277,7 @@ const FACTURE_LIGNES_DB_COLUMNS = [
 ]
 
 function lookupColumnsForDuplicateSignature(config: TableConfig) {
-  if (config.key === 'facture_lignes') return FACTURE_LIGNES_DB_COLUMNS.join(',')
+  if (config.key === 'facture_lignes' || config.key === 'devis_lignes') return FACTURE_LIGNES_DB_COLUMNS.join(',')
 
   return Array.from(
     new Set([
@@ -1209,7 +1381,7 @@ export default function ImportsParametragePage() {
         continue
       }
 
-      const orderColumn = ['facture_lignes', 'activite_lignes'].includes(config.key)
+      const orderColumn = isLineTableKey(config.key)
         ? 'imported_at'
         : 'updated_at'
 
@@ -1489,25 +1661,193 @@ export default function ImportsParametragePage() {
     return { ok: true }
   }
 
+  function formatDateForSql(date: Date) {
+    const pad2 = (n: number) => String(n).padStart(2, '0')
+    return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
+  }
+
+  type RpcPeriod = {
+    p_date_debut: string
+    p_date_fin: string
+    label: string
+  }
+
+  function getMonthlyPeriodsBetween(startDate: Date, endDate: Date): RpcPeriod[] {
+    const periods: RpcPeriod[] = []
+    const cursor = new Date(startDate.getFullYear(), startDate.getMonth(), 1)
+    const limit = new Date(endDate.getFullYear(), endDate.getMonth(), 1)
+
+    while (cursor < limit) {
+      const next = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)
+      periods.push({
+        p_date_debut: formatDateForSql(cursor),
+        p_date_fin: formatDateForSql(next),
+        label: `${formatDateForSql(cursor)} → ${formatDateForSql(next)}`,
+      })
+      cursor.setMonth(cursor.getMonth() + 1)
+    }
+
+    return periods
+  }
+
+  function getMonthlyAggregatePeriods(monthCount: 2 | 3 = 3) {
+    const now = new Date()
+    // Rebuild volontairement limité à 2 ou 3 périodes mensuelles pour éviter les timeouts.
+    // Par défaut : M-2 → M-1, M-1 → M, M → M+1, donc mois courant inclus.
+    const safeMonthCount = monthCount === 2 ? 2 : 3
+    const start = new Date(now.getFullYear(), now.getMonth() - (safeMonthCount - 1), 1)
+    const end = new Date(now.getFullYear(), now.getMonth() + 1, 1)
+    return getMonthlyPeriodsBetween(start, end)
+  }
+
+  function getFullMonthlyPeriodsFrom2023() {
+    const now = new Date()
+    const start = new Date(2023, 0, 1)
+    const end = new Date(now.getFullYear(), now.getMonth() + 1, 1)
+    return getMonthlyPeriodsBetween(start, end)
+  }
+
+  async function runRpcForPeriods(
+    functionName: string,
+    periods: RpcPeriod[],
+    onProgress?: (detail: string) => void,
+    label = functionName
+  ) {
+    for (const period of periods) {
+      onProgress?.(`${label} : ${period.label}`)
+      const { error } = await supabase.rpc(functionName, {
+        p_date_debut: period.p_date_debut,
+        p_date_fin: period.p_date_fin,
+      })
+      if (error) throw new Error(`${functionName} ${period.label} : ${error.message}`)
+    }
+  }
+
+  async function updateQuantitesPertinentesAgregats(
+    range: { p_date_debut: string; p_date_fin: string },
+    onProgress?: (detail: string) => void
+  ) {
+    onProgress?.(`Mise à jour quantités pertinentes du ${range.p_date_debut} au ${range.p_date_fin}`)
+    const { error } = await supabase.rpc('update_quantites_pertinentes_agregats', range)
+    if (error) throw new Error(`update_quantites_pertinentes_agregats : ${error.message}`)
+  }
+
+  async function updateQuantitesPertinentesAgregatsPeriodes(
+    periods: RpcPeriod[],
+    onProgress?: (detail: string) => void
+  ) {
+    for (const period of periods) {
+      await updateQuantitesPertinentesAgregats(
+        { p_date_debut: period.p_date_debut, p_date_fin: period.p_date_fin },
+        onProgress
+      )
+    }
+  }
+
+  function getMonthlyPeriodsCoveringDateInputs(startIso: string, endIso: string) {
+    if (!startIso || !endIso) throw new Error('Merci de renseigner une date de début et une date de fin.')
+    const startParts = startIso.split('-').map(Number)
+    const endParts = endIso.split('-').map(Number)
+    if (startParts.length !== 3 || endParts.length !== 3) throw new Error('Période invalide.')
+
+    const start = new Date(startParts[0], startParts[1] - 1, 1)
+    const endInput = new Date(endParts[0], endParts[1] - 1, endParts[2] || 1)
+
+    if (Number.isNaN(start.getTime()) || Number.isNaN(endInput.getTime())) throw new Error('Période invalide.')
+    if (endInput < start) throw new Error('La date de fin doit être supérieure ou égale à la date de début.')
+
+    // Date fin traitée comme mois inclus : 2026-06-15 inclut juin, donc fin technique = 2026-07-01.
+    const end = new Date(endInput.getFullYear(), endInput.getMonth() + 1, 1)
+    return getMonthlyPeriodsBetween(start, end)
+  }
+
+  async function runCompleteRebuildForPeriods(
+    periods: RpcPeriod[],
+    onProgress?: (detail: string) => void
+  ) {
+    await runRpcForPeriods('refresh_facture_entetes_cache_periode', periods, onProgress, 'Cache factures')
+    await runRpcForPeriods('rebuild_indicateur_factures_mensuel_periode', periods, onProgress, 'Agrégat factures')
+
+    await runRpcForPeriods('refresh_devis_entetes_cache_periode', periods, onProgress, 'Cache devis')
+    await runRpcForPeriods('rebuild_indicateur_devis_mensuel_periode', periods, onProgress, 'Agrégat devis')
+
+    await runRpcForPeriods('rebuild_indicateur_activite_mensuel_periode', periods, onProgress, 'Agrégat activité')
+    await runRpcForPeriods('rebuild_indicateur_flux_articles_mensuel_periode', periods, onProgress, 'Flux articles')
+  }
+
   async function runPostImportRefresh(config: TableConfig, onProgress?: (detail: string) => void) {
+    const monthlyPeriods = getMonthlyAggregatePeriods()
+
     if (config.key === 'facture_lignes') {
-      onProgress?.('Rafraîchissement facture_entetes_cache')
-      const { error: cacheError } = await supabase.rpc('refresh_facture_entetes_cache')
-      if (cacheError) throw new Error(`refresh_facture_entetes_cache : ${cacheError.message}`)
+      await runRpcForPeriods(
+        'refresh_facture_entetes_cache_periode',
+        monthlyPeriods,
+        onProgress,
+        'Rafraîchissement cache factures mois par mois'
+      )
 
-      onProgress?.('Rebuild indicateur_factures_mensuel')
-      const { error: factureAggError } = await supabase.rpc('rebuild_indicateur_factures_mensuel')
-      if (factureAggError) throw new Error(`rebuild_indicateur_factures_mensuel : ${factureAggError.message}`)
+      await runRpcForPeriods(
+        'rebuild_indicateur_factures_mensuel_periode',
+        monthlyPeriods,
+        onProgress,
+        'Rebuild indicateur factures mois par mois'
+      )
 
-      return 'Cache factures et indicateur factures recalculés'
+      await runRpcForPeriods(
+        'rebuild_indicateur_flux_articles_mensuel_periode',
+        monthlyPeriods,
+        onProgress,
+        'Rebuild flux articles mois par mois'
+      )
+
+      return 'Cache factures, indicateur factures et flux articles recalculés mois par mois'
+    }
+
+    if (config.key === 'devis_lignes') {
+      await runRpcForPeriods(
+        'refresh_devis_entetes_cache_periode',
+        monthlyPeriods,
+        onProgress,
+        'Rafraîchissement cache devis mois par mois'
+      )
+
+      await runRpcForPeriods(
+        'rebuild_indicateur_devis_mensuel_periode',
+        monthlyPeriods,
+        onProgress,
+        'Rebuild indicateur devis mois par mois'
+      )
+
+      await runRpcForPeriods(
+        'rebuild_indicateur_flux_articles_mensuel_periode',
+        monthlyPeriods,
+        onProgress,
+        'Rebuild flux articles mois par mois'
+      )
+
+      return 'Cache devis, indicateur devis et flux articles recalculés mois par mois'
     }
 
     if (config.key === 'activite_lignes') {
-      onProgress?.('Rebuild indicateur_activite_mensuel')
-      const { error: activiteAggError } = await supabase.rpc('rebuild_indicateur_activite_mensuel')
-      if (activiteAggError) throw new Error(`rebuild_indicateur_activite_mensuel : ${activiteAggError.message}`)
+      await runRpcForPeriods(
+        'rebuild_indicateur_activite_mensuel_periode',
+        monthlyPeriods,
+        onProgress,
+        'Rebuild indicateur activité mois par mois'
+      )
 
-      return 'Indicateur activité recalculé'
+      await runRpcForPeriods(
+        'rebuild_indicateur_flux_articles_mensuel_periode',
+        monthlyPeriods,
+        onProgress,
+        'Rebuild flux articles mois par mois'
+      )
+
+      return 'Indicateur activité et flux articles recalculés mois par mois'
+    }
+
+    if (config.key === 'ref_familles') {
+      return 'Référentiel familles mis à jour. Utilise le bouton « Recalcul qté pertinentes période » pour appliquer la nouvelle règle sur une période choisie.'
     }
 
     return 'Aucun refresh automatique requis pour cette table'
@@ -1766,7 +2106,9 @@ export default function ImportsParametragePage() {
 
       const selectCols = config.key === 'facture_lignes'
         ? 'ligne_hash,ligne_hash_metier,numero_piece,date_facture,reference_article,source_import,imported_at'
-        : 'ligne_hash,numero_piece,date_piece,reference_article,source_import,imported_at'
+        : config.key === 'devis_lignes'
+          ? 'ligne_hash,ligne_hash_metier,numero_piece,date_devis,reference_article,source_import,imported_at'
+          : 'ligne_hash,numero_piece,date_piece,reference_article,source_import,imported_at'
 
       // Important : les anciennes lignes peuvent avoir seulement ligne_hash renseigné,
       // alors que les nouvelles lignes utilisent aussi ligne_hash_metier.
@@ -1780,7 +2122,7 @@ export default function ImportsParametragePage() {
       if (technicalHashError) throw new Error(`Contrôle doublons par ligne_hash impossible : ${technicalHashError.message}`)
       if (existingByTechnicalHash?.length) existingHashRows.push(...(existingByTechnicalHash as GenericRow[]))
 
-      if (config.key === 'facture_lignes') {
+      if (['facture_lignes', 'devis_lignes'].includes(config.key)) {
         const { data: existingByBusinessHash, error: businessHashError } = await supabase
           .from(config.key)
           .select(selectCols)
@@ -1794,14 +2136,14 @@ export default function ImportsParametragePage() {
 
     const existingHashes = new Set(
       existingHashRows
-        .map((row) => String(config.key === 'facture_lignes' ? row.ligne_hash_metier || row.ligne_hash : row.ligne_hash || '').trim())
+        .map((row) => String(['facture_lignes', 'devis_lignes'].includes(config.key) ? row.ligne_hash_metier || row.ligne_hash : row.ligne_hash || '').trim())
         .filter(Boolean)
     )
 
     // Fallback sécurisé : si des anciennes lignes n'ont pas encore de ligne_hash_metier,
     // on contrôle seulement les numéros de pièces du fichier, par petits lots, avec les colonnes minimales.
     const missingHashRows = importRows.filter((row) => {
-      const hash = String(config.key === 'facture_lignes' ? row.ligne_hash_metier || row.ligne_hash : row.ligne_hash || '').trim()
+      const hash = String(['facture_lignes', 'devis_lignes'].includes(config.key) ? row.ligne_hash_metier || row.ligne_hash : row.ligne_hash || '').trim()
       return !hash || !existingHashes.has(hash)
     })
 
@@ -1841,19 +2183,19 @@ export default function ImportsParametragePage() {
       const currentOccurrence = (seenInCurrentImport.get(signature) || 0) + 1
       seenInCurrentImport.set(signature, currentOccurrence)
 
-      const metierHash = String(config.key === 'facture_lignes' ? row.ligne_hash_metier || row.ligne_hash : row.ligne_hash || '').trim()
+      const metierHash = String(['facture_lignes', 'devis_lignes'].includes(config.key) ? row.ligne_hash_metier || row.ligne_hash : row.ligne_hash || '').trim()
       const alreadyExistsByHash = metierHash ? existingHashes.has(metierHash) : false
       const existingCount = existingCounts.get(signature) || 0
 
       if (alreadyExistsByHash || currentOccurrence <= existingCount) {
         const existing = existingInfoBySignature.get(signature) || existingHashRows.find((r) => {
-          const existingHash = String(config.key === 'facture_lignes' ? r.ligne_hash_metier || r.ligne_hash : r.ligne_hash || '').trim()
+          const existingHash = String(['facture_lignes', 'devis_lignes'].includes(config.key) ? r.ligne_hash_metier || r.ligne_hash : r.ligne_hash || '').trim()
           return existingHash && existingHash === metierHash
         })
 
         duplicateRejects.push(
           `Ligne ${index + 2} rejetée : document déjà présent en base ` +
-            `(N° ${row.numero_piece || 'NC'}, date ${row.date_facture || row.date_piece || 'NC'}, article ${row.reference_article || 'NC'}). ` +
+            `(N° ${row.numero_piece || 'NC'}, date ${row.date_facture || row.date_devis || row.date_piece || 'NC'}, article ${row.reference_article || 'NC'}). ` +
             `Import existant : ${existing?.source_import || 'source inconnue'}${existing?.imported_at ? ` le ${existing.imported_at}` : ''}.`
         )
       } else {
@@ -1898,7 +2240,7 @@ export default function ImportsParametragePage() {
     if (error) {
       throw new Error(
         `Pilotage des triggers impossible sur ${config.key} : ${error.message}. ` +
-          `Crée ou vérifie la fonction SQL public.set_import_user_triggers(text, boolean).`
+          `Crée ou vérifie la fonction SQL public.set_import_user_triggers(boolean, text).`
       )
     }
 
@@ -1944,7 +2286,7 @@ export default function ImportsParametragePage() {
         if (isUniqueConstraintError(e)) {
           onProgress?.(
             `Ligne ignorée car déjà présente via contrainte technique ligne_hash ` +
-              `(N° ${row.numero_piece || 'NC'}, date ${row.date_facture || row.date_piece || 'NC'}, article ${row.reference_article || 'NC'})`
+              `(N° ${row.numero_piece || 'NC'}, date ${row.date_facture || row.date_devis || row.date_piece || 'NC'}, article ${row.reference_article || 'NC'})`
           )
           return 0
         }
@@ -2453,7 +2795,7 @@ export default function ImportsParametragePage() {
       if (isLineTableKey(selectedConfig.key) && !rowToSave.ligne_hash) {
         rowToSave.ligne_hash = buildLineHash(rowToSave, selectedConfig.key, 1)
       }
-      if (selectedConfig.key === 'facture_lignes' && !rowToSave.ligne_hash_metier) {
+      if (['facture_lignes', 'devis_lignes'].includes(selectedConfig.key) && !rowToSave.ligne_hash_metier) {
         rowToSave.ligne_hash_metier = rowToSave.ligne_hash
       }
 
@@ -2473,8 +2815,24 @@ export default function ImportsParametragePage() {
 
       if (saveError) throw saveError
 
+      const monthlyPeriods = getMonthlyAggregatePeriods()
+
       if (selectedConfig.key === 'facture_lignes') {
-        await supabase.rpc('refresh_facture_entetes_cache')
+        await runRpcForPeriods('refresh_facture_entetes_cache_periode', monthlyPeriods)
+        await runRpcForPeriods('rebuild_indicateur_factures_mensuel_periode', monthlyPeriods)
+        await runRpcForPeriods('rebuild_indicateur_flux_articles_mensuel_periode', monthlyPeriods)
+      }
+      if (selectedConfig.key === 'devis_lignes') {
+        await runRpcForPeriods('refresh_devis_entetes_cache_periode', monthlyPeriods)
+        await runRpcForPeriods('rebuild_indicateur_devis_mensuel_periode', monthlyPeriods)
+        await runRpcForPeriods('rebuild_indicateur_flux_articles_mensuel_periode', monthlyPeriods)
+      }
+      if (selectedConfig.key === 'activite_lignes') {
+        await runRpcForPeriods('rebuild_indicateur_activite_mensuel_periode', monthlyPeriods)
+        await runRpcForPeriods('rebuild_indicateur_flux_articles_mensuel_periode', monthlyPeriods)
+      }
+      if (selectedConfig.key === 'ref_familles') {
+        // Les quantités pertinentes se recalculent désormais via le bouton période dédié.
       }
 
       setMessage('Enregistrement sauvegardé.')
@@ -2494,6 +2852,112 @@ export default function ImportsParametragePage() {
     } else {
       setSortColumn(column)
       setSortDirection('asc')
+    }
+  }
+
+
+  const [maintenanceLoading, setMaintenanceLoading] = useState(false)
+  const [maintenanceMessage, setMaintenanceMessage] = useState<string | null>(null)
+  const [manualStartDate, setManualStartDate] = useState(() => {
+    const now = new Date()
+    return formatDateForSql(new Date(now.getFullYear(), now.getMonth() - 2, 1))
+  })
+  const [manualEndDate, setManualEndDate] = useState(() => {
+    const now = new Date()
+    return formatDateForSql(new Date(now.getFullYear(), now.getMonth(), now.getDate()))
+  })
+
+  async function runRecentMonthsRebuild(monthCount: 2 | 3 = 3, onProgress?: (detail: string) => void) {
+    const periods = getMonthlyAggregatePeriods(monthCount)
+
+    await runRpcForPeriods('refresh_facture_entetes_cache_periode', periods, onProgress, 'Cache factures')
+    await runRpcForPeriods('rebuild_indicateur_factures_mensuel_periode', periods, onProgress, 'Agrégat factures')
+
+    await runRpcForPeriods('refresh_devis_entetes_cache_periode', periods, onProgress, 'Cache devis')
+    await runRpcForPeriods('rebuild_indicateur_devis_mensuel_periode', periods, onProgress, 'Agrégat devis')
+
+    await runRpcForPeriods('rebuild_indicateur_activite_mensuel_periode', periods, onProgress, 'Agrégat activité')
+    await runRpcForPeriods('rebuild_indicateur_flux_articles_mensuel_periode', periods, onProgress, 'Flux articles')
+  }
+
+  async function handleManualRecentMonthsRebuild(monthCount: 2 | 3 = 3, blMxMode?: 'previous_month' | 'current_month') {
+    if (maintenanceLoading || importing) return
+
+    const confirmText = blMxMode
+      ? `Confirmer le basculement BL M-x en mode ${blMxMode === 'previous_month' ? 'mois précédent' : 'mois courant'} et relancer les agrégats des ${monthCount} derniers mois ?`
+      : `Confirmer le rebuild des agrégats des ${monthCount} derniers mois, mois par mois ?`
+
+    if (!window.confirm(confirmText)) return
+
+    setMaintenanceLoading(true)
+    setMaintenanceMessage(`Préparation du rebuild ${monthCount} mois…`)
+    setError(null)
+
+    try {
+      if (blMxMode) {
+        const { error: modeError } = await supabase.rpc('set_bl_mx_mode', { p_mode: blMxMode })
+        if (modeError) throw new Error(`set_bl_mx_mode : ${modeError.message}`)
+      }
+
+      await runRecentMonthsRebuild(monthCount, (detail) => setMaintenanceMessage(detail))
+      setMaintenanceMessage(`Rebuild ${monthCount} mois terminé. Agrégats et flux articles recalculés.`)
+      await loadStats()
+      await loadRows(selectedConfig)
+    } catch (e: any) {
+      setError(e?.message || String(e))
+      setMaintenanceMessage(null)
+    } finally {
+      setMaintenanceLoading(false)
+    }
+  }
+
+  async function handleManualPeriodRebuild() {
+    if (maintenanceLoading || importing) return
+
+    try {
+      const periods = getMonthlyPeriodsCoveringDateInputs(manualStartDate, manualEndDate)
+      if (!periods.length) throw new Error('Aucune période mensuelle à recalculer.')
+
+      if (!window.confirm(`Confirmer le rebuild complet de ${periods.length} mois, du ${manualStartDate} au ${manualEndDate} ?`)) return
+
+      setMaintenanceLoading(true)
+      setMaintenanceMessage(`Préparation du rebuild période ${manualStartDate} → ${manualEndDate}…`)
+      setError(null)
+
+      await runCompleteRebuildForPeriods(periods, (detail) => setMaintenanceMessage(detail))
+      setMaintenanceMessage(`Rebuild période terminé : ${manualStartDate} → ${manualEndDate}.`)
+      await loadStats()
+      await loadRows(selectedConfig)
+    } catch (e: any) {
+      setError(e?.message || String(e))
+      setMaintenanceMessage(null)
+    } finally {
+      setMaintenanceLoading(false)
+    }
+  }
+
+  async function handleManualPeriodQuantitesPertinentes() {
+    if (maintenanceLoading || importing) return
+
+    try {
+      const periods = getMonthlyPeriodsCoveringDateInputs(manualStartDate, manualEndDate)
+      if (!periods.length) throw new Error('Aucune période mensuelle à recalculer.')
+
+      if (!window.confirm(`Confirmer le recalcul des quantités pertinentes de ${periods.length} mois, du ${manualStartDate} au ${manualEndDate} ?`)) return
+
+      setMaintenanceLoading(true)
+      setMaintenanceMessage(`Préparation recalcul qté pertinentes ${manualStartDate} → ${manualEndDate}…`)
+      setError(null)
+
+      await updateQuantitesPertinentesAgregatsPeriodes(periods, (detail) => setMaintenanceMessage(detail))
+      setMaintenanceMessage(`Recalcul des quantités pertinentes terminé : ${manualStartDate} → ${manualEndDate}.`)
+      await loadStats()
+      await loadRows(selectedConfig)
+    } catch (e: any) {
+      setError(e?.message || String(e))
+      setMaintenanceMessage(null)
+    } finally {
+      setMaintenanceLoading(false)
     }
   }
 
@@ -2539,6 +3003,38 @@ export default function ImportsParametragePage() {
               >
                 Actualiser
               </button>
+              <button
+                type="button"
+                onClick={() => handleManualRecentMonthsRebuild(2)}
+                disabled={maintenanceLoading || importing}
+                className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {maintenanceLoading ? 'Rebuild…' : 'Rebuild 2 mois'}
+              </button>
+              <button
+                type="button"
+                onClick={() => handleManualRecentMonthsRebuild(3)}
+                disabled={maintenanceLoading || importing}
+                className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {maintenanceLoading ? 'Rebuild…' : 'Rebuild 3 mois'}
+              </button>
+              <button
+                type="button"
+                onClick={() => handleManualRecentMonthsRebuild(3, 'previous_month')}
+                disabled={maintenanceLoading || importing}
+                className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                BL M-x → M-1 (3 mois)
+              </button>
+              <button
+                type="button"
+                onClick={() => handleManualRecentMonthsRebuild(3, 'current_month')}
+                disabled={maintenanceLoading || importing}
+                className="rounded-xl border border-sky-300 bg-sky-50 px-4 py-2 text-sm font-semibold text-sky-800 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                BL M-x → M (3 mois)
+              </button>
               {lastRejects.length > 0 && (
                 <button
                   type="button"
@@ -2550,6 +3046,48 @@ export default function ImportsParametragePage() {
               )}
             </div>
           </div>
+
+          <div className="mt-4 flex flex-wrap items-end gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <label className="text-xs font-bold uppercase text-slate-500">
+              Rebuild période — du
+              <input
+                type="date"
+                value={manualStartDate}
+                onChange={(event) => setManualStartDate(event.target.value)}
+                className="mt-1 block h-10 rounded-xl border border-slate-300 bg-white px-3 text-sm font-bold text-slate-900"
+              />
+            </label>
+            <label className="text-xs font-bold uppercase text-slate-500">
+              au
+              <input
+                type="date"
+                value={manualEndDate}
+                onChange={(event) => setManualEndDate(event.target.value)}
+                className="mt-1 block h-10 rounded-xl border border-slate-300 bg-white px-3 text-sm font-bold text-slate-900"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={handleManualPeriodRebuild}
+              disabled={maintenanceLoading || importing}
+              className="rounded-xl border border-indigo-300 bg-indigo-50 px-4 py-2 text-sm font-semibold text-indigo-800 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              Rebuild période
+            </button>
+            <button
+              type="button"
+              onClick={handleManualPeriodQuantitesPertinentes}
+              disabled={maintenanceLoading || importing}
+              className="rounded-xl border border-violet-300 bg-violet-50 px-4 py-2 text-sm font-semibold text-violet-800 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              Recalcul qté pertinentes période
+            </button>
+            <div className="text-xs font-semibold text-slate-500">
+              La date de fin est traitée comme mois inclus. Le rebuild reste découpé mois par mois.
+            </div>
+          </div>
+
+          {maintenanceMessage && <div className="mt-4 rounded-xl bg-emerald-50 p-3 text-sm font-bold text-emerald-800">{maintenanceMessage}</div>}
         </section>
 
         <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
