@@ -22,7 +22,7 @@ import { supabase } from '@/lib/supabaseClient'
 // @ts-ignore - xlsx-js-style est utilisé pour conserver les styles Excel côté export.
 import * as XLSX from 'xlsx-js-style'
 
-type DataSource = 'factures' | 'activite' | 'devis' | 'mixte'
+type DataSource = 'factures' | 'activite' | 'devis' | 'flux_articles' | 'mixte'
 type WidgetType = 'kpi' | 'histogramme' | 'histogramme_empile' | 'courbe' | 'bridge' | 'double_bridge' | 'tableau' | 'camembert' | 'synthese'
 type MeasureKey =
   | 'ca_ht'
@@ -46,6 +46,8 @@ type DimensionKey =
   | 'departement_tiers'
   | 'famille_macro'
   | 'famille'
+  | 'reference_article'
+  | 'designation'
   | 'intitule_tiers'
   | 'numero_tiers'
   | 'source'
@@ -74,6 +76,8 @@ type StudioRow = {
   intitule_tiers: string
   famille: string
   famille_macro: string
+  reference_article: string
+  designation: string
   hors_statistique: boolean
   nb_lignes: number
   quantite: number
@@ -179,6 +183,7 @@ type ChartDatum = {
 const FACTURES_TABLE = 'indicateur_factures_mensuel'
 const ACTIVITE_TABLE = 'indicateur_activite_mensuel'
 const DEVIS_TABLE = 'indicateur_devis_mensuel'
+const FLUX_ARTICLES_TABLE = 'indicateur_flux_articles_mensuel'
 const VIEW_TABLE = 'analyse_widget_views'
 
 const ATELIER_COMMON_SELECT = [
@@ -206,12 +211,34 @@ const ATELIER_COMMON_SELECT = [
   'updated_at',
 ]
 
+const ATELIER_FLUX_ARTICLES_SELECT = [
+  'id',
+  'annee',
+  'mois',
+  'flux',
+  'type_document',
+  'depot',
+  'collaborateur_tiers',
+  'famille_macro',
+  'famille',
+  'reference_article',
+  'designation',
+  'hors_statistique',
+  'nb_lignes',
+  'quantite',
+  'quantite_pertinente',
+  'ca_ht',
+  'marge_valeur',
+  'updated_at',
+]
+
 const ATELIER_SELECT_BY_SOURCE: Record<Exclude<DataSource, 'mixte'>, string> = {
   factures: ATELIER_COMMON_SELECT.join(','),
   activite: [...ATELIER_COMMON_SELECT, 'type_document'].join(','),
   devis: ATELIER_COMMON_SELECT.join(','),
+  flux_articles: ATELIER_FLUX_ARTICLES_SELECT.join(','),
 }
-const ATELIER_FRONT_VERSION = 'V2026-06-02-FAST-SCOPE-LOAD-01'
+const ATELIER_FRONT_VERSION = 'V2026-06-02-FLUX-ARTICLES-ATELIER-01'
 const ATELIER_AI_VERSION = 'STEP-3-WIDGET-BUILDER-02'
 
 const MONTHS = ['Janv.', 'Févr.', 'Mars', 'Avr.', 'Mai', 'Juin', 'Juil.', 'Août', 'Sept.', 'Oct.', 'Nov.', 'Déc.']
@@ -262,6 +289,8 @@ const DIMENSIONS: Array<{ key: DimensionKey; label: string }> = [
   { key: 'departement_tiers', label: 'Département tiers' },
   { key: 'famille_macro', label: 'Famille macro' },
   { key: 'famille', label: 'Famille' },
+  { key: 'reference_article', label: 'Référence article' },
+  { key: 'designation', label: 'Désignation' },
   { key: 'intitule_tiers', label: 'Tiers' },
   { key: 'numero_tiers', label: 'Code tiers' },
 ]
@@ -350,6 +379,7 @@ function sourceLabel(source: DataSource) {
   if (source === 'factures') return 'Factures'
   if (source === 'activite') return 'Activité'
   if (source === 'devis') return 'Devis'
+  if (source === 'flux_articles') return 'Flux articles'
   return String(source)
 }
 
@@ -360,7 +390,7 @@ function normalizeAggRow(row: Record<string, any>, source: Exclude<DataSource, '
     source,
     annee,
     mois,
-    type_document: source === 'factures' ? 'FACTURE' : source === 'devis' ? 'DEVIS' : safeText(row.type_document, 'NON RENSEIGNE'),
+    type_document: source === 'factures' ? 'FACTURE' : source === 'devis' ? 'DEVIS' : source === 'flux_articles' ? safeText(row.type_document || row.flux, 'NON RENSEIGNE') : safeText(row.type_document, 'NON RENSEIGNE'),
     collaborateur: safeText(row.collaborateur_facture || row.collaborateur, 'NON AFFECTE'),
     collaborateur_facture: safeText(row.collaborateur_facture || row.collaborateur, 'NON AFFECTE'),
     collaborateur_tiers: safeText(row.collaborateur_tiers, 'NON AFFECTE'),
@@ -373,9 +403,11 @@ function normalizeAggRow(row: Record<string, any>, source: Exclude<DataSource, '
     intitule_tiers: safeText(row.intitule_tiers || row.tiers, 'NON RENSEIGNE'),
     famille: safeText(row.famille, 'NON RENSEIGNE'),
     famille_macro: safeText(row.famille_macro, 'NON RENSEIGNE'),
+    reference_article: safeText(row.reference_article, 'NON RENSEIGNE'),
+    designation: safeText(row.designation, 'NON RENSEIGNE'),
     hors_statistique: safeBool(row.hors_statistique),
     nb_lignes: safeNumber(row.nb_lignes),
-    quantite: safeNumber(row.quantite),
+    quantite: safeNumber(row.quantite_pertinente ?? row.quantite),
     ca_ht: safeNumber(row.ca_ht),
     marge_valeur: safeNumber(row.marge_valeur),
   }
@@ -578,7 +610,7 @@ function applyWidgetFilters(rows: StudioRow[], widget: WidgetConfig, globalFilte
 
   filtered = filtered.filter((row) => {
     if (widget.source === 'mixte') {
-      if (row.source === 'devis') return false
+      if (row.source === 'devis' || row.source === 'flux_articles') return false
     } else if (row.source !== widget.source) {
       return false
     }
@@ -665,6 +697,7 @@ function relevantDocumentTypes(source: DataSource, allTypes: string[]) {
   const sorted = uniqueSorted(allTypes)
   if (source === 'factures') return sorted.filter((type) => type === 'FACTURE' || type.toUpperCase().includes('FACTURE'))
   if (source === 'devis') return sorted.filter((type) => type === 'DEVIS' || type.toUpperCase().includes('DEVIS'))
+  if (source === 'flux_articles') return sorted
   if (source === 'activite') return sorted.filter((type) => !['FACTURE', 'DEVIS'].includes(type.toUpperCase()) && !type.toUpperCase().includes('FACTURE') && !type.toUpperCase().includes('DEVIS'))
   return sorted
 }
@@ -701,6 +734,7 @@ function sourceRankFromSeries(series: string) {
   if (String(series).includes('BL')) return 2
   if (String(series).includes('Factures')) return 3
   if (String(series).includes('Activité')) return 4
+  if (String(series).includes('Flux articles')) return 5
   return 0
 }
 
@@ -1967,7 +2001,7 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
 
     if (includeDetail) {
       const detail = rows.map((r) => ({
-        Source: r.source === 'factures' ? 'Factures' : 'Activité',
+        Source: sourceLabel(r.source),
         Année: r.annee,
         Mois: r.mois,
         'Type document': r.type_document,
@@ -1983,6 +2017,8 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
         'Nom tiers': r.intitule_tiers,
         Famille: r.famille,
         'Famille macro': r.famille_macro,
+        'Référence article': r.reference_article,
+        Désignation: r.designation,
         'Hors statistique': r.hors_statistique ? 'Oui' : 'Non',
         'Nb lignes': r.nb_lignes,
         Quantité: r.quantite,
@@ -2449,6 +2485,7 @@ export default function AtelierAnalysePage() {
       if (sourcesToLoad.includes('factures')) promises.push(fetchAllRows(FACTURES_TABLE, 'factures', 5000, yearsToLoad, filtersForLoad.horsStatistique))
       if (sourcesToLoad.includes('activite')) promises.push(fetchAllRows(ACTIVITE_TABLE, 'activite', 5000, yearsToLoad, filtersForLoad.horsStatistique))
       if (sourcesToLoad.includes('devis')) promises.push(fetchAllRows(DEVIS_TABLE, 'devis', 5000, yearsToLoad, filtersForLoad.horsStatistique))
+      if (sourcesToLoad.includes('flux_articles')) promises.push(fetchAllRows(FLUX_ARTICLES_TABLE, 'flux_articles', 5000, yearsToLoad, filtersForLoad.horsStatistique))
 
       const loaded = (await Promise.all(promises)).flat()
       setRows(loaded)
@@ -2642,7 +2679,7 @@ export default function AtelierAnalysePage() {
   }
 
   function isDataSource(value: any): value is DataSource {
-    return value === 'factures' || value === 'activite' || value === 'mixte'
+    return value === 'factures' || value === 'activite' || value === 'devis' || value === 'flux_articles' || value === 'mixte'
   }
 
   function isSizeKey(value: any): value is SizeKey {
@@ -2932,7 +2969,7 @@ export default function AtelierAnalysePage() {
         </section>
 
         <section className="grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm md:grid-cols-2 xl:grid-cols-10">
-          <MultiSelect label="Source" values={['factures', 'activite', 'devis', 'mixte']} selected={globalFilters.sources} onChange={(v) => setGlobalFilters((p) => ({ ...p, sources: v as DataSource[] }))} />
+          <MultiSelect label="Source" values={['factures', 'activite', 'devis', 'flux_articles', 'mixte']} selected={globalFilters.sources} onChange={(v) => setGlobalFilters((p) => ({ ...p, sources: v as DataSource[] }))} />
           <MultiSelect label="Année" values={available.years.map(String)} selected={globalFilters.years.map(String)} onChange={(v) => setGlobalFilters((p) => ({ ...p, years: v.map(Number) }))} />
           <MultiSelect label="Mois" values={available.months.map((m) => `${m} - ${monthLabel(m)}`)} selected={globalFilters.months.map((m) => `${m} - ${monthLabel(m)}`)} onChange={(v) => setGlobalFilters((p) => ({ ...p, months: v.map((x) => Number(x.split(' - ')[0])) }))} />
           <MultiSelect label="Agence" values={available.agences} selected={globalFilters.agences} onChange={(v) => setGlobalFilters((p) => ({ ...p, agences: v }))} />
@@ -3162,6 +3199,7 @@ export default function AtelierAnalysePage() {
                   { value: 'factures', label: 'Factures' },
                   { value: 'activite', label: 'Activité' },
                   { value: 'devis', label: 'Devis' },
+                  { value: 'flux_articles', label: 'Flux articles' },
                   { value: 'mixte', label: 'Mixte' },
                 ]} />
                 <SelectField
