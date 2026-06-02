@@ -180,7 +180,38 @@ const FACTURES_TABLE = 'indicateur_factures_mensuel'
 const ACTIVITE_TABLE = 'indicateur_activite_mensuel'
 const DEVIS_TABLE = 'indicateur_devis_mensuel'
 const VIEW_TABLE = 'analyse_widget_views'
-const ATELIER_FRONT_VERSION = 'V2026-05-19-DOUBLE-BRIDGE-MIX-PERF-01'
+
+const ATELIER_COMMON_SELECT = [
+  'id',
+  'annee',
+  'mois',
+  'collaborateur',
+  'collaborateur_facture',
+  'collaborateur_tiers',
+  'agence_collaborateur',
+  'depot',
+  'departement_tiers',
+  'population_departement',
+  'superficie_departement',
+  'numero_tiers',
+  'intitule_tiers',
+  'famille',
+  'famille_macro',
+  'hors_statistique',
+  'nb_lignes',
+  'quantite',
+  'quantite_pertinente',
+  'ca_ht',
+  'marge_valeur',
+  'updated_at',
+]
+
+const ATELIER_SELECT_BY_SOURCE: Record<Exclude<DataSource, 'mixte'>, string> = {
+  factures: ATELIER_COMMON_SELECT.join(','),
+  activite: [...ATELIER_COMMON_SELECT, 'type_document'].join(','),
+  devis: ATELIER_COMMON_SELECT.join(','),
+}
+const ATELIER_FRONT_VERSION = 'V2026-06-02-FAST-SCOPE-LOAD-01'
 const ATELIER_AI_VERSION = 'STEP-3-WIDGET-BUILDER-02'
 
 const MONTHS = ['Janv.', 'Févr.', 'Mars', 'Avr.', 'Mai', 'Juin', 'Juil.', 'Août', 'Sept.', 'Oct.', 'Nov.', 'Déc.']
@@ -350,23 +381,58 @@ function normalizeAggRow(row: Record<string, any>, source: Exclude<DataSource, '
   }
 }
 
+function sourcesForAtelierLoad(sources: DataSource[]) {
+  const selected = sources.length ? sources : (['factures', 'activite'] as DataSource[])
+  const output = new Set<Exclude<DataSource, 'mixte'>>()
+
+  selected.forEach((source) => {
+    if (source === 'mixte') {
+      output.add('factures')
+      output.add('activite')
+    } else {
+      output.add(source)
+    }
+  })
+
+  return Array.from(output)
+}
+
+function yearsForAtelierLoad(years: number[]) {
+  if (years.length) return years
+  return [CURRENT_YEAR, CURRENT_YEAR - 1]
+}
+
+function shouldLoadHorsStat(mode: GlobalFilters['horsStatistique']) {
+  if (mode === 'non') return false
+  if (mode === 'oui') return true
+  return null
+}
+
 async function fetchAllRows(
   tableName: string,
   source: Exclude<DataSource, 'mixte'>,
-  chunkSize = 1000,
-  yearsToLoad: number[] = [CURRENT_YEAR, CURRENT_YEAR - 1]
+  chunkSize = 5000,
+  yearsToLoad: number[] = [CURRENT_YEAR, CURRENT_YEAR - 1],
+  horsStatMode: GlobalFilters['horsStatistique'] = 'non'
 ) {
   const rows: StudioRow[] = []
   let from = 0
+  const horsStatFilter = shouldLoadHorsStat(horsStatMode)
+
   while (true) {
     const to = from + chunkSize - 1
     let query = supabase
       .from(tableName)
-      .select('*')
+      .select(ATELIER_SELECT_BY_SOURCE[source])
       .in('annee', yearsToLoad)
       .order('annee', { ascending: false })
       .order('mois', { ascending: true })
+      .order('id', { ascending: true })
       .range(from, to)
+
+    if (horsStatFilter !== null) {
+      query = query.eq('hors_statistique', horsStatFilter)
+    }
 
     const { data, error } = await query
     if (error) throw error
@@ -377,6 +443,7 @@ async function fetchAllRows(
   }
   return rows.filter((r) => r.annee && r.mois)
 }
+
 
 function uniqueSorted<T extends string | number>(values: T[]) {
   return Array.from(new Set(values.filter((v) => v !== null && v !== undefined && String(v).trim() !== ''))).sort((a: any, b: any) =>
@@ -482,8 +549,8 @@ function measureValue(agg: AggregatedValue, measure: MeasureKey) {
 function applyGlobalFilters(rows: StudioRow[], filters: GlobalFilters) {
   return rows.filter((row) => {
     if (filters.sources.length) {
-      const sourceOk = filters.sources.includes('mixte') || filters.sources.includes(row.source)
-      if (!sourceOk) return false
+      const wantedSources = sourcesForAtelierLoad(filters.sources)
+      if (!wantedSources.includes(row.source)) return false
     }
     if (filters.years.length && !filters.years.includes(row.annee)) return false
     if (filters.months.length && !filters.months.includes(row.mois)) return false
@@ -510,7 +577,11 @@ function applyWidgetFilters(rows: StudioRow[], widget: WidgetConfig, globalFilte
   if (widget.useGlobalFilters) filtered = applyGlobalFilters(filtered, globalFilters)
 
   filtered = filtered.filter((row) => {
-    if (widget.source !== 'mixte' && row.source !== widget.source) return false
+    if (widget.source === 'mixte') {
+      if (row.source === 'devis') return false
+    } else if (row.source !== widget.source) {
+      return false
+    }
     const lf = widget.localFilters
     if (lf.years?.length && !lf.years.includes(row.annee)) return false
     if (lf.months?.length && !lf.months.includes(row.mois)) return false
@@ -2343,7 +2414,7 @@ export default function AtelierAnalysePage() {
         if (applyError) throw new Error(`apply_bl_mx_month_mode_activite : ${applyError.message}`)
 
         setMaintenanceMessage('Mode BL M-x appliqué. Rechargement de l’atelier…')
-        await loadData()
+        await loadData(globalFilters)
         setMaintenanceMessage(`BL M-x → ${blMxMode === 'previous_month' ? 'M-1' : 'M'} appliqué.`)
         return
       }
@@ -2356,7 +2427,7 @@ export default function AtelierAnalysePage() {
       await runRpcForPeriods('rebuild_indicateur_activite_mensuel_periode', periods, 'Agrégat activité')
       await runRpcForPeriods('rebuild_indicateur_flux_articles_mensuel_periode', periods, 'Flux articles')
       setMaintenanceMessage('Rebuild terminé. Rechargement de l’atelier…')
-      await loadData()
+      await loadData(globalFilters)
       setMaintenanceMessage(`Rebuild ${monthCount} mois terminé.`)
     } catch (exception: any) {
       setError(`Rebuild impossible : ${exception?.message || exception}`)
@@ -2366,19 +2437,27 @@ export default function AtelierAnalysePage() {
     }
   }
 
-  async function loadData() {
+  async function loadData(filtersOverride?: GlobalFilters) {
+    const filtersForLoad = filtersOverride || globalFilters
+    const yearsToLoad = yearsForAtelierLoad(filtersForLoad.years)
+    const sourcesToLoad = sourcesForAtelierLoad(filtersForLoad.sources)
+
     setLoading(true)
     setError(null)
     try {
-      const [factures, activite, devis] = await Promise.all([
-        fetchAllRows(FACTURES_TABLE, 'factures'),
-        fetchAllRows(ACTIVITE_TABLE, 'activite'),
-        fetchAllRows(DEVIS_TABLE, 'devis'),
-      ])
-      const loaded = [...factures, ...activite, ...devis]
+      const promises: Array<Promise<StudioRow[]>> = []
+      if (sourcesToLoad.includes('factures')) promises.push(fetchAllRows(FACTURES_TABLE, 'factures', 5000, yearsToLoad, filtersForLoad.horsStatistique))
+      if (sourcesToLoad.includes('activite')) promises.push(fetchAllRows(ACTIVITE_TABLE, 'activite', 5000, yearsToLoad, filtersForLoad.horsStatistique))
+      if (sourcesToLoad.includes('devis')) promises.push(fetchAllRows(DEVIS_TABLE, 'devis', 5000, yearsToLoad, filtersForLoad.horsStatistique))
+
+      const loaded = (await Promise.all(promises)).flat()
       setRows(loaded)
+
       const years = uniqueSorted(loaded.map((r) => r.annee)).sort((a, b) => Number(b) - Number(a))
-      setGlobalFilters((prev) => ({ ...prev, years: prev.years.length ? prev.years : years.slice(0, 2).map(Number) }))
+      setGlobalFilters((prev) => ({
+        ...prev,
+        years: prev.years.length ? prev.years : years.slice(0, 2).map(Number),
+      }))
       setWidgets((prev) => prev.length ? prev : [buildDefaultWidget('bridge', years.map(Number)), buildDefaultWidget('histogramme', years.map(Number)), buildDefaultWidget('tableau', years.map(Number))])
     } catch (e: any) {
       setError(e?.message || String(e))
@@ -2386,6 +2465,7 @@ export default function AtelierAnalysePage() {
       setLoading(false)
     }
   }
+
 
   async function loadSavedViews() {
     try {
@@ -2402,9 +2482,19 @@ export default function AtelierAnalysePage() {
   }
 
   useEffect(() => {
-    loadData()
     loadSavedViews()
   }, [])
+
+  useEffect(() => {
+    loadData(globalFilters)
+    // Le chargement serveur est recalé seulement quand le périmètre volumétrique change.
+    // Les autres filtres restent appliqués instantanément côté navigateur.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    JSON.stringify(globalFilters.sources),
+    JSON.stringify(globalFilters.years),
+    globalFilters.horsStatistique,
+  ])
 
   const available = useMemo(() => {
     return {
@@ -2821,7 +2911,7 @@ export default function AtelierAnalysePage() {
               <button type="button" onClick={duplicateCurrentView} disabled={!widgets.length} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50">Dupliquer la vue</button>
               <button type="button" onClick={() => { setCurrentViewId(null); setViewName('Nouvelle vue'); setWidgets([]); setSelectedWidgetId(null); setSaveMessage(null) }} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50">Nouvelle vue</button>
               <button type="button" onClick={() => setShowMaintenancePanel((value) => !value)} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50">Actions techniques {showMaintenancePanel ? '▲' : '▼'}</button>
-              <button type="button" onClick={loadData} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50">Actualiser</button>
+              <button type="button" onClick={() => loadData(globalFilters)} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50">Actualiser</button>
             </div>
           </div>
           {showMaintenancePanel && (
