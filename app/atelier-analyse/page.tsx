@@ -238,7 +238,7 @@ const ATELIER_SELECT_BY_SOURCE: Record<Exclude<DataSource, 'mixte'>, string> = {
   devis: ATELIER_COMMON_SELECT.join(','),
   flux_articles: ATELIER_FLUX_ARTICLES_SELECT.join(','),
 }
-const ATELIER_FRONT_VERSION = 'V2026-06-02-FLUX-ARTICLES-ATELIER-01'
+const ATELIER_FRONT_VERSION = 'V2026-06-02-FLUX-ARTICLES-ATELIER-02-DOCS-QTE'
 const ATELIER_AI_VERSION = 'STEP-3-WIDGET-BUILDER-02'
 
 const MONTHS = ['Janv.', 'Févr.', 'Mars', 'Avr.', 'Mai', 'Juin', 'Juil.', 'Août', 'Sept.', 'Oct.', 'Nov.', 'Déc.']
@@ -258,6 +258,14 @@ const COLOR_RED = '#ef4444'
 const COLOR_POSITIVE = '#22c55e'
 const COLOR_NEGATIVE = '#ef4444'
 const COLOR_TOTAL = '#0f172a'
+
+const DOCUMENT_TYPES_BY_SOURCE: Record<DataSource, string[]> = {
+  factures: ['FACTURE'],
+  activite: ['BL', 'BL M-x', 'BR', 'CDC', 'PL'],
+  devis: ['DEVIS'],
+  flux_articles: ['DEVIS', 'CDC', 'BL', 'FACTURE'],
+  mixte: ['FACTURE', 'BL', 'BL M-x', 'BR', 'CDC', 'PL'],
+}
 const COLOR_BRIDGE_TOTAL = '#bfdbfe'
 const COLOR_BRIDGE_INTERMEDIATE = '#cbd5e1'
 const COLOR_MIX = '#f59e0b'
@@ -413,8 +421,9 @@ function normalizeAggRow(row: Record<string, any>, source: Exclude<DataSource, '
   }
 }
 
-function sourcesForAtelierLoad(sources: DataSource[]) {
-  const selected = sources.length ? sources : (['factures', 'activite'] as DataSource[])
+function sourcesForAtelierLoad(sources: DataSource[], extraSources: DataSource[] = []) {
+  const baseSources = sources.length ? sources : (['factures', 'activite'] as DataSource[])
+  const selected = [...baseSources, ...extraSources]
   const output = new Set<Exclude<DataSource, 'mixte'>>()
 
   selected.forEach((source) => {
@@ -694,10 +703,11 @@ function buildDefaultWidget(type: WidgetType, availableYears: number[]): WidgetC
 }
 
 function relevantDocumentTypes(source: DataSource, allTypes: string[]) {
-  const sorted = uniqueSorted(allTypes)
+  const sourceDefaults = DOCUMENT_TYPES_BY_SOURCE[source] || []
+  const sorted = uniqueSorted([...sourceDefaults, ...allTypes])
   if (source === 'factures') return sorted.filter((type) => type === 'FACTURE' || type.toUpperCase().includes('FACTURE'))
   if (source === 'devis') return sorted.filter((type) => type === 'DEVIS' || type.toUpperCase().includes('DEVIS'))
-  if (source === 'flux_articles') return sorted
+  if (source === 'flux_articles') return uniqueSorted([...sourceDefaults, ...sorted.filter((type) => ['DEVIS', 'CDC', 'BL', 'FACTURE'].includes(type.toUpperCase()))])
   if (source === 'activite') return sorted.filter((type) => !['FACTURE', 'DEVIS'].includes(type.toUpperCase()) && !type.toUpperCase().includes('FACTURE') && !type.toUpperCase().includes('DEVIS'))
   return sorted
 }
@@ -2476,7 +2486,8 @@ export default function AtelierAnalysePage() {
   async function loadData(filtersOverride?: GlobalFilters) {
     const filtersForLoad = filtersOverride || globalFilters
     const yearsToLoad = yearsForAtelierLoad(filtersForLoad.years)
-    const sourcesToLoad = sourcesForAtelierLoad(filtersForLoad.sources)
+    const widgetSources = widgets.map((widget) => widget.source)
+    const sourcesToLoad = sourcesForAtelierLoad(filtersForLoad.sources, widgetSources)
 
     setLoading(true)
     setError(null)
@@ -2522,6 +2533,11 @@ export default function AtelierAnalysePage() {
     loadSavedViews()
   }, [])
 
+  const widgetSourcesKey = useMemo(
+    () => JSON.stringify(uniqueSorted(widgets.map((widget) => widget.source))),
+    [widgets]
+  )
+
   useEffect(() => {
     loadData(globalFilters)
     // Le chargement serveur est recalé seulement quand le périmètre volumétrique change.
@@ -2531,6 +2547,7 @@ export default function AtelierAnalysePage() {
     JSON.stringify(globalFilters.sources),
     JSON.stringify(globalFilters.years),
     globalFilters.horsStatistique,
+    widgetSourcesKey,
   ])
 
   const available = useMemo(() => {
@@ -2544,7 +2561,12 @@ export default function AtelierAnalysePage() {
       collaborateursTiers: uniqueSorted(rows.map((r) => r.collaborateur_tiers)),
       departementsTiers: uniqueSorted(rows.map((r) => r.departement_tiers)),
       famillesMacro: uniqueSorted(rows.map((r) => r.famille_macro)),
-      typesDocument: uniqueSorted(rows.map((r) => r.type_document)),
+      typesDocument: uniqueSorted([
+        ...rows.map((r) => r.type_document),
+        ...globalFilters.sources.flatMap((source) => DOCUMENT_TYPES_BY_SOURCE[source] || []),
+        ...widgets.flatMap((widget) => DOCUMENT_TYPES_BY_SOURCE[widget.source] || []),
+        ...(widgetDraft ? (DOCUMENT_TYPES_BY_SOURCE[widgetDraft.source] || []) : []),
+      ]),
       clients: uniqueSorted(rows.map((r) => clientKey(r))),
     }
   }, [rows])
