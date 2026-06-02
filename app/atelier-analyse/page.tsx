@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   Bar,
@@ -350,12 +350,25 @@ function normalizeAggRow(row: Record<string, any>, source: Exclude<DataSource, '
   }
 }
 
-async function fetchAllRows(tableName: string, source: Exclude<DataSource, 'mixte'>, chunkSize = 1000) {
+async function fetchAllRows(
+  tableName: string,
+  source: Exclude<DataSource, 'mixte'>,
+  chunkSize = 1000,
+  yearsToLoad: number[] = [CURRENT_YEAR, CURRENT_YEAR - 1]
+) {
   const rows: StudioRow[] = []
   let from = 0
   while (true) {
     const to = from + chunkSize - 1
-    const { data, error } = await supabase.from(tableName).select('*').range(from, to)
+    let query = supabase
+      .from(tableName)
+      .select('*')
+      .in('annee', yearsToLoad)
+      .order('annee', { ascending: false })
+      .order('mois', { ascending: true })
+      .range(from, to)
+
+    const { data, error } = await query
     if (error) throw error
     const chunk = data || []
     rows.push(...chunk.map((row) => normalizeAggRow(row, source)))
@@ -1098,6 +1111,8 @@ function BridgeWidget({ rows, widget, onUpdate }: { rows: StudioRow[]; widget: W
         </div>
         {onUpdate && (
           <div className="flex gap-2">
+            <button type="button" onClick={() => onUpdate({ bridgeMonth: Math.max(1, (widget.bridgeMonth || CURRENT_MONTH) - 1) })} className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-black text-slate-800 hover:bg-slate-50">-1 mois</button>
+            <button type="button" onClick={() => onUpdate({ bridgeMonth: Math.min(12, (widget.bridgeMonth || CURRENT_MONTH) + 1) })} className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-black text-slate-800 hover:bg-slate-50">+1 mois</button>
             <button type="button" onClick={() => onUpdate({ periodMode: 'mois' })} className={`rounded-xl border px-3 py-2 text-xs font-black ${widget.periodMode === 'mois' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300 bg-white text-slate-800'}`}>Mois</button>
             <button type="button" onClick={() => onUpdate({ periodMode: 'cumul' })} className={`rounded-xl border px-3 py-2 text-xs font-black ${widget.periodMode === 'cumul' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300 bg-white text-slate-800'}`}>01-M</button>
           </div>
@@ -1383,6 +1398,8 @@ function DoubleBridgeWidget({ rows, widget, onUpdate }: { rows: StudioRow[]; wid
             <button type="button" onClick={() => onUpdate({ measure: 'ca_ht' })} className={`rounded-xl border px-3 py-2 text-xs font-black ${widget.measure === 'ca_ht' ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white text-slate-800'}`}>CA</button>
             <button type="button" onClick={() => onUpdate({ measure: 'marge_valeur' })} className={`rounded-xl border px-3 py-2 text-xs font-black ${widget.measure === 'marge_valeur' ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white text-slate-800'}`}>Marge €</button>
             <button type="button" onClick={() => onUpdate({ measure: 'marge_pct' })} className={`rounded-xl border px-3 py-2 text-xs font-black ${widget.measure === 'marge_pct' ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white text-slate-800'}`}>Marge %</button>
+            <button type="button" onClick={() => onUpdate({ bridgeMonth: Math.max(1, (widget.bridgeMonth || CURRENT_MONTH) - 1) })} className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-black text-slate-800 hover:bg-slate-50">-1 mois</button>
+            <button type="button" onClick={() => onUpdate({ bridgeMonth: Math.min(12, (widget.bridgeMonth || CURRENT_MONTH) + 1) })} className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-black text-slate-800 hover:bg-slate-50">+1 mois</button>
             <button type="button" onClick={() => onUpdate({ periodMode: 'mois' })} className={`rounded-xl border px-3 py-2 text-xs font-black ${widget.periodMode === 'mois' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300 bg-white text-slate-800'}`}>Mois</button>
             <button type="button" onClick={() => onUpdate({ periodMode: 'cumul' })} className={`rounded-xl border px-3 py-2 text-xs font-black ${widget.periodMode === 'cumul' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300 bg-white text-slate-800'}`}>01-M</button>
             <button type="button" onClick={() => onUpdate({ compareMode: 'month' })} className={`rounded-xl border px-3 py-2 text-xs font-black ${widget.compareMode === 'month' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300 bg-white text-slate-800'}`}>M→M+1</button>
@@ -1884,6 +1901,7 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
         Mois: r.mois,
         'Type document': r.type_document,
         Agence: r.agence_collaborateur,
+        'Dépôt': r.depot,
         'Collaborateur facture': r.collaborateur_facture,
         'Collaborateur tiers': r.collaborateur_tiers,
         'Département tiers': r.departement_tiers,
@@ -1903,10 +1921,10 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
       }))
       const wsDetail = XLSX.utils.json_to_sheet(detail)
       wsDetail['!cols'] = [
-        { wch: 12 }, { wch: 8 }, { wch: 8 }, { wch: 18 }, { wch: 18 }, { wch: 24 },
-        { wch: 24 }, { wch: 24 }, { wch: 12 }, { wch: 14 }, { wch: 14 },
-        { wch: 18 }, { wch: 36 }, { wch: 18 }, { wch: 18 }, { wch: 16 }, { wch: 10 },
-        { wch: 10 }, { wch: 14 }, { wch: 14 }, { wch: 10 },
+        { wch: 12 }, { wch: 8 }, { wch: 8 }, { wch: 18 }, { wch: 18 }, { wch: 18 },
+        { wch: 24 }, { wch: 24 }, { wch: 24 }, { wch: 12 }, { wch: 14 },
+        { wch: 14 }, { wch: 18 }, { wch: 36 }, { wch: 18 }, { wch: 18 }, { wch: 16 },
+        { wch: 10 }, { wch: 10 }, { wch: 14 }, { wch: 14 }, { wch: 10 },
       ]
       const detailRange = XLSX.utils.decode_range(wsDetail['!ref'] || 'A1:A1')
       for (let c = detailRange.s.c; c <= detailRange.e.c; c += 1) {
@@ -1914,15 +1932,15 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
         if (cell) cell.s = excelHeaderStyle('DDE5F1')
       }
       for (let r = 1; r <= detailRange.e.r; r += 1) {
-        ;[8, 9, 16, 17].forEach((c) => {
+        ;[9, 10, 17, 18].forEach((c) => {
           const cell = wsDetail[excelCellAddress(r, c)]
           if (cell) cell.z = '#,##0'
         })
-        ;[18, 19].forEach((c) => {
+        ;[19, 20].forEach((c) => {
           const cell = wsDetail[excelCellAddress(r, c)]
           if (cell) cell.z = '#,##0 €'
         })
-        const pct = wsDetail[excelCellAddress(r, 20)]
+        const pct = wsDetail[excelCellAddress(r, 21)]
         if (pct) pct.z = '0.0%'
       }
       XLSX.utils.book_append_sheet(wb, wsDetail, sanitizeExcelSheetName('Détail'))
@@ -2259,6 +2277,9 @@ export default function AtelierAnalysePage() {
   const [showAiPanel, setShowAiPanel] = useState(false)
   const [maintenanceLoading, setMaintenanceLoading] = useState(false)
   const [maintenanceMessage, setMaintenanceMessage] = useState<string | null>(null)
+  const [showMaintenancePanel, setShowMaintenancePanel] = useState(false)
+  const [widgetDraft, setWidgetDraft] = useState<WidgetConfig | null>(null)
+  const aiTextareaRef = useRef<HTMLTextAreaElement | null>(null)
 
 
   function formatDateForSql(date: Date) {
@@ -2311,8 +2332,20 @@ export default function AtelierAnalysePage() {
 
     try {
       if (blMxMode) {
+        setMaintenanceMessage(`Application BL M-x → ${blMxMode === 'previous_month' ? 'M-1' : 'M'} sur l’agrégat activité…`)
         const { error: modeError } = await supabase.rpc('set_bl_mx_mode', { p_mode: blMxMode })
         if (modeError) throw new Error(`set_bl_mx_mode : ${modeError.message}`)
+
+        const { error: applyError } = await supabase.rpc('apply_bl_mx_month_mode_activite', {
+          p_mode: blMxMode,
+          p_months_back: monthCount,
+        })
+        if (applyError) throw new Error(`apply_bl_mx_month_mode_activite : ${applyError.message}`)
+
+        setMaintenanceMessage('Mode BL M-x appliqué. Rechargement de l’atelier…')
+        await loadData()
+        setMaintenanceMessage(`BL M-x → ${blMxMode === 'previous_month' ? 'M-1' : 'M'} appliqué.`)
+        return
       }
 
       const periods = getRecentMonthPeriods(monthCount)
@@ -2391,8 +2424,23 @@ export default function AtelierAnalysePage() {
 
   const selectedWidget = selectedWidgetId ? widgets.find((w) => w.id === selectedWidgetId) || null : null
 
+  useEffect(() => {
+    setWidgetDraft(selectedWidget ? JSON.parse(JSON.stringify(selectedWidget)) : null)
+  }, [selectedWidgetId])
+
   function updateWidget(id: string, patch: Partial<WidgetConfig>) {
     setWidgets((prev) => prev.map((w) => w.id === id ? { ...w, ...patch } : w))
+  }
+
+  function updateWidgetDraft(patch: Partial<WidgetConfig>) {
+    setWidgetDraft((current) => current ? { ...current, ...patch } : current)
+  }
+
+  function applyWidgetDraft() {
+    if (!widgetDraft) return
+    updateWidget(widgetDraft.id, widgetDraft)
+    setSelectedWidgetId(null)
+    setSaveMessage(`Paramétrage appliqué : ${widgetDraft.title}`)
   }
 
   function addWidget(type: WidgetType) {
@@ -2668,7 +2716,7 @@ export default function AtelierAnalysePage() {
   }
 
   async function askAtelierAi(presetQuestion?: string) {
-    const question = String(presetQuestion ?? aiQuestion ?? '').trim()
+    const question = String(presetQuestion ?? aiTextareaRef.current?.value ?? aiQuestion ?? '').trim()
 
     if (!question) {
       setAiError('Saisis une question pour l’assistant IA.')
@@ -2772,13 +2820,22 @@ export default function AtelierAnalysePage() {
               <button type="button" onClick={saveView} className="rounded-xl bg-blue-600 px-4 py-3 text-sm font-black text-white shadow-sm hover:bg-blue-700">Enregistrer la vue</button>
               <button type="button" onClick={duplicateCurrentView} disabled={!widgets.length} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50">Dupliquer la vue</button>
               <button type="button" onClick={() => { setCurrentViewId(null); setViewName('Nouvelle vue'); setWidgets([]); setSelectedWidgetId(null); setSaveMessage(null) }} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50">Nouvelle vue</button>
-              <button type="button" onClick={() => handleRebuildRecentMonths(2)} disabled={maintenanceLoading} className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm font-black text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60">{maintenanceLoading ? 'Rebuild…' : 'Rebuild 2 mois'}</button>
-              <button type="button" onClick={() => handleRebuildRecentMonths(3)} disabled={maintenanceLoading} className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm font-black text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60">{maintenanceLoading ? 'Rebuild…' : 'Rebuild 3 mois'}</button>
-              <button type="button" onClick={() => handleRebuildRecentMonths(3, 'previous_month')} disabled={maintenanceLoading} className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-black text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60">BL M-x → M-1 (3 mois)</button>
-              <button type="button" onClick={() => handleRebuildRecentMonths(3, 'current_month')} disabled={maintenanceLoading} className="rounded-xl border border-sky-300 bg-sky-50 px-4 py-3 text-sm font-black text-sky-800 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60">BL M-x → M (3 mois)</button>
+              <button type="button" onClick={() => setShowMaintenancePanel((value) => !value)} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50">Actions techniques {showMaintenancePanel ? '▲' : '▼'}</button>
               <button type="button" onClick={loadData} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50">Actualiser</button>
             </div>
           </div>
+          {showMaintenancePanel && (
+            <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <div className="mb-3 text-xs font-black uppercase tracking-wide text-slate-500">Actions techniques — masquées par défaut</div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button type="button" onClick={() => handleRebuildRecentMonths(2)} disabled={maintenanceLoading} className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm font-black text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60">{maintenanceLoading ? 'Rebuild…' : 'Rebuild 2 mois'}</button>
+                <button type="button" onClick={() => handleRebuildRecentMonths(3)} disabled={maintenanceLoading} className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm font-black text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60">{maintenanceLoading ? 'Rebuild…' : 'Rebuild 3 mois'}</button>
+                <button type="button" onClick={() => handleRebuildRecentMonths(3, 'previous_month')} disabled={maintenanceLoading} className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-black text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60">BL M-x → M-1 (léger)</button>
+                <button type="button" onClick={() => handleRebuildRecentMonths(3, 'current_month')} disabled={maintenanceLoading} className="rounded-xl border border-sky-300 bg-sky-50 px-4 py-3 text-sm font-black text-sky-800 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60">BL M-x → M (léger)</button>
+              </div>
+              <p className="mt-2 text-xs font-semibold text-slate-500">Les boutons BL M-x ne relancent plus les rebuilds lourds : ils déplacent uniquement les lignes BL/BR concernées dans l’agrégat activité.</p>
+            </div>
+          )}
           {saveMessage && <div className="mt-4 rounded-xl bg-blue-50 p-3 text-sm font-bold text-blue-700">{saveMessage}</div>}
           {maintenanceMessage && <div className="mt-4 rounded-xl bg-emerald-50 p-3 text-sm font-bold text-emerald-800">{maintenanceMessage}</div>}
           {error && <div className="mt-4 rounded-xl bg-red-50 p-3 text-sm font-bold text-red-700">{error}</div>}
@@ -2856,8 +2913,8 @@ export default function AtelierAnalysePage() {
 
                 <div className="flex-1 space-y-3">
                   <textarea
-                    value={aiQuestion}
-                    onChange={(e) => setAiQuestion(e.target.value)}
+                    ref={aiTextareaRef}
+                    defaultValue={aiQuestion}
                     placeholder="Ex : Pourquoi le CA baisse-t-il par rapport à N-1 ? Quels widgets ajouter pour expliquer l’écart ?"
                     className="min-h-[72px] w-full rounded-xl border border-slate-200 bg-white p-3 text-sm font-semibold outline-none focus:border-indigo-500"
                   />
@@ -2865,7 +2922,7 @@ export default function AtelierAnalysePage() {
                     <button type="button" onClick={() => askAtelierAi()} disabled={aiLoading} className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-black text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60">
                       {aiLoading ? 'Analyse en cours…' : 'Envoyer à l’assistant IA'}
                     </button>
-                    <button type="button" onClick={() => { setAiQuestion(''); setAiAnswer(null); setAiError(null); setAiWidgetProposals([]) }} className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-black text-slate-700 hover:bg-slate-50">Effacer</button>
+                    <button type="button" onClick={() => { if (aiTextareaRef.current) aiTextareaRef.current.value = ''; setAiQuestion(''); setAiAnswer(null); setAiError(null); setAiWidgetProposals([]) }} className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-black text-slate-700 hover:bg-slate-50">Effacer</button>
                     <span className="text-xs font-semibold text-slate-500">Contexte transmis : vue, filtres, widgets + période active.</span>
                   </div>
                   {aiError && <div className="rounded-xl bg-red-50 p-3 text-sm font-bold text-red-700">{aiError}</div>}
@@ -2977,7 +3034,7 @@ export default function AtelierAnalysePage() {
           )}
         </section>
 
-        {selectedWidget && (
+        {widgetDraft && widgetDraft && (
           <aside
             className="fixed right-6 z-50 w-[390px] overflow-auto rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl"
             style={{ top: `${configPanelTop}px`, maxHeight: `calc(100vh - ${configPanelTop + 24}px)` }}
@@ -2986,19 +3043,23 @@ export default function AtelierAnalysePage() {
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <h2 className="text-lg font-black">Configurer le widget</h2>
-                  <p className="text-xs text-slate-500">{selectedWidget.title}</p>
+                  <p className="text-xs text-slate-500">{widgetDraft.title}</p>
                 </div>
-                <button type="button" onClick={() => setSelectedWidgetId(null)} className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-black hover:bg-slate-50">×</button>
+                <div className="flex items-center gap-2">
+                  <button type="button" onClick={applyWidgetDraft} className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-black text-white hover:bg-blue-700">OK</button>
+                  <button type="button" onClick={() => setWidgetDraft(selectedWidget ? JSON.parse(JSON.stringify(selectedWidget)) : null)} className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-black hover:bg-slate-50">Annuler</button>
+                  <button type="button" onClick={() => setSelectedWidgetId(null)} className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-black hover:bg-slate-50">×</button>
+                </div>
               </div>
 
               <label className="block">
                 <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Titre</span>
-                <input value={selectedWidget.title} onChange={(e) => updateWidget(selectedWidget.id, { title: e.target.value })} className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-semibold outline-none focus:border-blue-500" />
+                <input value={widgetDraft.title} onChange={(e) => updateWidgetDraft({ title: e.target.value })} className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-semibold outline-none focus:border-blue-500" />
               </label>
 
               <div className="grid grid-cols-2 gap-3">
-                <SelectField label="Type" value={selectedWidget.type} onChange={(v) => updateWidget(selectedWidget.id, { type: v as WidgetType })} options={widgetCatalog.map(([value, label]) => ({ value, label }))} />
-                <SelectField label="Taille" value={selectedWidget.size} onChange={(v) => updateWidget(selectedWidget.id, { size: v as SizeKey })} options={[
+                <SelectField label="Type" value={widgetDraft.type} onChange={(v) => updateWidgetDraft({ type: v as WidgetType })} options={widgetCatalog.map(([value, label]) => ({ value, label }))} />
+                <SelectField label="Taille" value={widgetDraft.size} onChange={(v) => updateWidgetDraft({ size: v as SizeKey })} options={[
                   { value: 'small', label: 'Petit' },
                   { value: 'medium', label: 'Moyen' },
                   { value: 'large', label: 'Large' },
@@ -3007,7 +3068,7 @@ export default function AtelierAnalysePage() {
               </div>
 
               <div className="grid grid-cols-2 gap-3">
-                <SelectField label="Source" value={selectedWidget.source} onChange={(v) => updateWidget(selectedWidget.id, { source: v as DataSource, localFilters: { ...selectedWidget.localFilters, typesDocument: [] } })} options={[
+                <SelectField label="Source" value={widgetDraft.source} onChange={(v) => updateWidgetDraft({ source: v as DataSource, localFilters: { ...widgetDraft.localFilters, typesDocument: [] } })} options={[
                   { value: 'factures', label: 'Factures' },
                   { value: 'activite', label: 'Activité' },
                   { value: 'devis', label: 'Devis' },
@@ -3015,9 +3076,9 @@ export default function AtelierAnalysePage() {
                 ]} />
                 <SelectField
                   label="Valeur"
-                  value={selectedWidget.measure}
-                  onChange={(v) => updateWidget(selectedWidget.id, { measure: v as MeasureKey })}
-                  options={(selectedWidget.type === 'double_bridge' ? MEASURES.filter((m) => ['ca_ht', 'marge_valeur', 'marge_pct'].includes(m.key)) : MEASURES).map((m) => ({ value: m.key, label: m.label }))}
+                  value={widgetDraft.measure}
+                  onChange={(v) => updateWidgetDraft({ measure: v as MeasureKey })}
+                  options={(widgetDraft.type === 'double_bridge' ? MEASURES.filter((m) => ['ca_ht', 'marge_valeur', 'marge_pct'].includes(m.key)) : MEASURES).map((m) => ({ value: m.key, label: m.label }))}
                 />
               </div>
 
@@ -3025,9 +3086,9 @@ export default function AtelierAnalysePage() {
                 <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Types de documents pris en compte</div>
                 <MultiSelect
                   label="Documents"
-                  values={relevantDocumentTypes(selectedWidget.source, available.typesDocument)}
-                  selected={selectedWidget.localFilters.typesDocument || []}
-                  onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, typesDocument: v } })}
+                  values={relevantDocumentTypes(widgetDraft.source, available.typesDocument)}
+                  selected={widgetDraft.localFilters.typesDocument || []}
+                  onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, typesDocument: v } })}
                 />
                 <p className="mt-2 text-[11px] font-semibold text-slate-500">Laissez vide pour garder tous les documents pertinents de la source. En mixte, décochez par exemple CDC ou BR pour les exclure de la valeur.</p>
               </div>
@@ -3035,56 +3096,56 @@ export default function AtelierAnalysePage() {
               <div className="rounded-xl border border-slate-200 p-3">
                 <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Filtre clients propre au widget</div>
                 <div className="grid gap-3">
-                  <SelectField label="Mode client" value={selectedWidget.localFilters.clientMode || 'include'} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, clientMode: v as ClientFilterMode } })} options={[{ value: 'include', label: 'Sélectionner uniquement' }, { value: 'exclude', label: 'Exclure les clients' }]} />
-                  <MultiSelect label="Numéro tiers / nom client" values={available.clients} selected={selectedWidget.localFilters.clients || []} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, clients: v } })} />
+                  <SelectField label="Mode client" value={widgetDraft.localFilters.clientMode || 'include'} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, clientMode: v as ClientFilterMode } })} options={[{ value: 'include', label: 'Sélectionner uniquement' }, { value: 'exclude', label: 'Exclure les clients' }]} />
+                  <MultiSelect label="Numéro tiers / nom client" values={available.clients} selected={widgetDraft.localFilters.clients || []} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, clients: v } })} />
                 </div>
                 <p className="mt-2 text-[11px] font-semibold text-slate-500">Ce filtre s’ajoute aux filtres globaux lorsque le widget utilise les filtres globaux.</p>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
-                <SelectField label="Mesure comparaison" value={selectedWidget.secondMeasure || selectedWidget.measure} onChange={(v) => updateWidget(selectedWidget.id, { secondMeasure: v as MeasureKey })} options={MEASURES.map((m) => ({ value: m.key, label: m.label }))} />
-                <SelectField label="Évolution" value={selectedWidget.evolutionMode} onChange={(v) => updateWidget(selectedWidget.id, { evolutionMode: v as EvolutionMode })} options={[{ value: 'none', label: 'Aucune' }, { value: 'percent', label: 'Évolution %' }, { value: 'value', label: 'Évolution valeur' }, { value: 'both', label: 'Valeur + %' }]} />
+                <SelectField label="Mesure comparaison" value={widgetDraft.secondMeasure || widgetDraft.measure} onChange={(v) => updateWidgetDraft({ secondMeasure: v as MeasureKey })} options={MEASURES.map((m) => ({ value: m.key, label: m.label }))} />
+                <SelectField label="Évolution" value={widgetDraft.evolutionMode} onChange={(v) => updateWidgetDraft({ evolutionMode: v as EvolutionMode })} options={[{ value: 'none', label: 'Aucune' }, { value: 'percent', label: 'Évolution %' }, { value: 'value', label: 'Évolution valeur' }, { value: 'both', label: 'Valeur + %' }]} />
               </div>
 
-              {selectedWidget.type !== 'kpi' && selectedWidget.type !== 'tableau' && selectedWidget.type !== 'synthese' && (
+              {widgetDraft.type !== 'kpi' && widgetDraft.type !== 'tableau' && widgetDraft.type !== 'synthese' && (
                 <>
-                  <SelectField label={selectedWidget.type === 'bridge' || selectedWidget.type === 'double_bridge' ? 'Dimension écart' : 'Axe X'} value={selectedWidget.dimension} onChange={(v) => updateWidget(selectedWidget.id, { dimension: v as DimensionKey })} options={DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))} />
-                  {selectedWidget.type !== 'bridge' && selectedWidget.type !== 'double_bridge' && selectedWidget.type !== 'camembert' && (
-                    <SelectField label="Série" value={selectedWidget.seriesDimension || ''} onChange={(v) => updateWidget(selectedWidget.id, { seriesDimension: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
+                  <SelectField label={widgetDraft.type === 'bridge' || widgetDraft.type === 'double_bridge' ? 'Dimension écart' : 'Axe X'} value={widgetDraft.dimension} onChange={(v) => updateWidgetDraft({ dimension: v as DimensionKey })} options={DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))} />
+                  {widgetDraft.type !== 'bridge' && widgetDraft.type !== 'double_bridge' && widgetDraft.type !== 'camembert' && (
+                    <SelectField label="Série" value={widgetDraft.seriesDimension || ''} onChange={(v) => updateWidgetDraft({ seriesDimension: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
                   )}
                 </>
               )}
 
-              {(['bridge', 'double_bridge', 'kpi', 'tableau', 'synthese', 'courbe', 'histogramme', 'histogramme_empile'] as WidgetType[]).includes(selectedWidget.type) && (
+              {(['bridge', 'double_bridge', 'kpi', 'tableau', 'synthese', 'courbe', 'histogramme', 'histogramme_empile'] as WidgetType[]).includes(widgetDraft.type) && (
                 <div className="grid grid-cols-2 gap-3 rounded-xl border border-slate-200 p-3">
                   <div className="col-span-2 text-xs font-black uppercase tracking-wide text-slate-500">Période de calcul / base de comparaison</div>
-                  <SelectField label="Période" value={selectedWidget.periodMode} onChange={(v) => updateWidget(selectedWidget.id, { periodMode: v as PeriodMode })} options={[{ value: 'mois', label: 'Mois seul' }, { value: 'cumul', label: 'Cumul 01-M' }]} />
-                  <SelectField label="Mois" value={selectedWidget.bridgeMonth} onChange={(v) => updateWidget(selectedWidget.id, { bridgeMonth: Number(v) })} options={available.months.map((m) => ({ value: m, label: `${String(m).padStart(2, '0')} - ${monthLabel(m)}` }))} />
-                  <SelectField label="Année N" value={selectedWidget.yearN || available.years[0] || CURRENT_YEAR} onChange={(v) => updateWidget(selectedWidget.id, { yearN: Number(v) })} options={available.years.map((y) => ({ value: y, label: String(y) }))} />
-                  <SelectField label="Année N-1" value={selectedWidget.yearN1 || (selectedWidget.yearN || CURRENT_YEAR) - 1} onChange={(v) => updateWidget(selectedWidget.id, { yearN1: Number(v) })} options={available.years.map((y) => ({ value: y, label: String(y) }))} />
+                  <SelectField label="Période" value={widgetDraft.periodMode} onChange={(v) => updateWidgetDraft({ periodMode: v as PeriodMode })} options={[{ value: 'mois', label: 'Mois seul' }, { value: 'cumul', label: 'Cumul 01-M' }]} />
+                  <SelectField label="Mois" value={widgetDraft.bridgeMonth} onChange={(v) => updateWidgetDraft({ bridgeMonth: Number(v) })} options={available.months.map((m) => ({ value: m, label: `${String(m).padStart(2, '0')} - ${monthLabel(m)}` }))} />
+                  <SelectField label="Année N" value={widgetDraft.yearN || available.years[0] || CURRENT_YEAR} onChange={(v) => updateWidgetDraft({ yearN: Number(v) })} options={available.years.map((y) => ({ value: y, label: String(y) }))} />
+                  <SelectField label="Année N-1" value={widgetDraft.yearN1 || (widgetDraft.yearN || CURRENT_YEAR) - 1} onChange={(v) => updateWidgetDraft({ yearN1: Number(v) })} options={available.years.map((y) => ({ value: y, label: String(y) }))} />
                 </div>
               )}
 
-              {selectedWidget.type === 'tableau' && (
+              {widgetDraft.type === 'tableau' && (
                 <div className="grid grid-cols-2 gap-3">
-                  <SelectField label="Lignes 1" value={selectedWidget.rowDimension} onChange={(v) => updateWidget(selectedWidget.id, { rowDimension: v as DimensionKey })} options={DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))} />
-                  <SelectField label="Lignes 2" value={selectedWidget.rowDimension2 || ''} onChange={(v) => updateWidget(selectedWidget.id, { rowDimension2: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
-                  <SelectField label="Colonnes 1" value={selectedWidget.columnDimension} onChange={(v) => updateWidget(selectedWidget.id, { columnDimension: v as DimensionKey })} options={DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))} />
-                  <SelectField label="Colonnes 2" value={selectedWidget.columnDimension2 || ''} onChange={(v) => updateWidget(selectedWidget.id, { columnDimension2: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
+                  <SelectField label="Lignes 1" value={widgetDraft.rowDimension} onChange={(v) => updateWidgetDraft({ rowDimension: v as DimensionKey })} options={DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))} />
+                  <SelectField label="Lignes 2" value={widgetDraft.rowDimension2 || ''} onChange={(v) => updateWidgetDraft({ rowDimension2: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
+                  <SelectField label="Colonnes 1" value={widgetDraft.columnDimension} onChange={(v) => updateWidgetDraft({ columnDimension: v as DimensionKey })} options={DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))} />
+                  <SelectField label="Colonnes 2" value={widgetDraft.columnDimension2 || ''} onChange={(v) => updateWidgetDraft({ columnDimension2: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
                   <div className="col-span-2 rounded-xl border border-slate-200 p-3">
                     <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Valeurs affichées dans chaque colonne</div>
                     <div className="grid grid-cols-2 gap-2">
                       {MEASURES.map((measure) => {
-                        const selected = (selectedWidget.tableMeasures || [selectedWidget.measure]).includes(measure.key)
+                        const selected = (widgetDraft.tableMeasures || [widgetDraft.measure]).includes(measure.key)
                         return (
                           <label key={measure.key} className="flex items-center gap-2 rounded-lg bg-slate-50 px-2 py-1 text-xs font-bold text-slate-700">
                             <input
                               type="checkbox"
                               checked={selected}
                               onChange={(e) => {
-                                const current = selectedWidget.tableMeasures || [selectedWidget.measure]
+                                const current = widgetDraft.tableMeasures || [widgetDraft.measure]
                                 const next = e.target.checked ? Array.from(new Set([...current, measure.key])) : current.filter((m) => m !== measure.key)
-                                updateWidget(selectedWidget.id, { tableMeasures: next.length ? next : [selectedWidget.measure] })
+                                updateWidgetDraft({ tableMeasures: next.length ? next : [widgetDraft.measure] })
                               }}
                             />
                             {measure.label}
@@ -3097,59 +3158,59 @@ export default function AtelierAnalysePage() {
               )}
 
               <div className="grid grid-cols-2 gap-3">
-                <SelectField label="Tri" value={selectedWidget.sortMode} onChange={(v) => updateWidget(selectedWidget.id, { sortMode: v as SortMode })} options={[
+                <SelectField label="Tri" value={widgetDraft.sortMode} onChange={(v) => updateWidgetDraft({ sortMode: v as SortMode })} options={[
                   { value: 'value_desc', label: 'Valeur décroissante' },
                   { value: 'value_asc', label: 'Valeur croissante' },
                   { value: 'label_asc', label: 'Libellé A-Z' },
                 ]} />
                 <label className="block">
                   <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Top N</span>
-                  <input type="number" min={1} max={100} value={selectedWidget.topN} onChange={(e) => updateWidget(selectedWidget.id, { topN: Number(e.target.value || 10) })} className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-semibold outline-none focus:border-blue-500" />
+                  <input type="number" min={1} max={100} value={widgetDraft.topN} onChange={(e) => updateWidgetDraft({ topN: Number(e.target.value || 10) })} className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-semibold outline-none focus:border-blue-500" />
                 </label>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <SelectField
                   label="Mode comparaison"
-                  value={selectedWidget.compareMode === 'dimension' && selectedWidget.type === 'double_bridge' ? 'year' : selectedWidget.compareMode}
-                  onChange={(v) => updateWidget(selectedWidget.id, { compareMode: v as CompareMode })}
-                  options={selectedWidget.type === 'double_bridge'
+                  value={widgetDraft.compareMode === 'dimension' && widgetDraft.type === 'double_bridge' ? 'year' : widgetDraft.compareMode}
+                  onChange={(v) => updateWidgetDraft({ compareMode: v as CompareMode })}
+                  options={widgetDraft.type === 'double_bridge'
                     ? [{ value: 'year', label: 'Année précédente → année N' }, { value: 'month', label: 'Mois M → mois M+1' }]
                     : [{ value: 'year', label: 'Année / période' }, { value: 'month', label: 'Mois' }, { value: 'dimension', label: 'Autre dimension' }]}
                 />
-                {selectedWidget.type !== 'double_bridge' && (
+                {widgetDraft.type !== 'double_bridge' && (
                   <>
-                    <SelectField label="Dimension comparaison" value={selectedWidget.compareDimension || ''} onChange={(v) => updateWidget(selectedWidget.id, { compareDimension: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
+                    <SelectField label="Dimension comparaison" value={widgetDraft.compareDimension || ''} onChange={(v) => updateWidgetDraft({ compareDimension: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
                     <label className="block col-span-2">
                       <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Valeur comparaison dimension</span>
-                      <input value={selectedWidget.compareValue || ''} onChange={(e) => updateWidget(selectedWidget.id, { compareValue: e.target.value })} placeholder="Ex : ANGLET, PV, 2025..." className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-semibold outline-none focus:border-blue-500" />
+                      <input value={widgetDraft.compareValue || ''} onChange={(e) => updateWidgetDraft({ compareValue: e.target.value })} placeholder="Ex : ANGLET, PV, 2025..." className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-semibold outline-none focus:border-blue-500" />
                     </label>
                   </>
                 )}
-                {selectedWidget.type === 'histogramme_empile' && (
+                {widgetDraft.type === 'histogramme_empile' && (
                   <label className="col-span-2 flex items-center gap-2 rounded-xl bg-slate-50 p-3 text-sm font-bold text-slate-700">
-                    <input type="checkbox" checked={selectedWidget.stacked100} onChange={(e) => updateWidget(selectedWidget.id, { stacked100: e.target.checked })} />
+                    <input type="checkbox" checked={widgetDraft.stacked100} onChange={(e) => updateWidgetDraft({ stacked100: e.target.checked })} />
                     Afficher en base 100
                   </label>
                 )}
               </div>
 
               <label className="flex items-center gap-2 rounded-xl bg-slate-50 p-3 text-sm font-bold text-slate-700">
-                <input type="checkbox" checked={selectedWidget.useGlobalFilters} onChange={(e) => updateWidget(selectedWidget.id, { useGlobalFilters: e.target.checked })} />
+                <input type="checkbox" checked={widgetDraft.useGlobalFilters} onChange={(e) => updateWidgetDraft({ useGlobalFilters: e.target.checked })} />
                 Utiliser les filtres globaux
               </label>
 
               <div className="rounded-xl border border-slate-200 p-3">
                 <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Filtres propres au widget</div>
                 <div className="grid gap-2">
-                  <MultiSelect label="Année" values={available.years.map(String)} selected={(selectedWidget.localFilters.years || []).map(String)} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, years: v.map(Number) } })} />
-                  <MultiSelect label="Mois" values={available.months.map((m) => `${m} - ${monthLabel(m)}`)} selected={(selectedWidget.localFilters.months || []).map((m) => `${m} - ${monthLabel(m)}`)} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, months: v.map((x) => Number(x.split(' - ')[0])) } })} />
-                  <MultiSelect label="Agence" values={available.agences} selected={selectedWidget.localFilters.agences || []} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, agences: v } })} />
-                  <MultiSelect label="Dépôt" values={available.depots} selected={selectedWidget.localFilters.depots || []} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, depots: v } })} />
-                  <MultiSelect label="Collab. facture" values={available.collaborateursFacture} selected={selectedWidget.localFilters.collaborateursFacture || selectedWidget.localFilters.collaborateurs || []} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, collaborateursFacture: v, collaborateurs: v } })} />
-                  <MultiSelect label="Collab. tiers" values={available.collaborateursTiers} selected={selectedWidget.localFilters.collaborateursTiers || []} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, collaborateursTiers: v } })} />
-                  <MultiSelect label="Dépt tiers" values={available.departementsTiers} selected={selectedWidget.localFilters.departementsTiers || []} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, departementsTiers: v } })} />
-                  <MultiSelect label="Famille macro" values={available.famillesMacro} selected={selectedWidget.localFilters.famillesMacro || []} onChange={(v) => updateWidget(selectedWidget.id, { localFilters: { ...selectedWidget.localFilters, famillesMacro: v } })} />
+                  <MultiSelect label="Année" values={available.years.map(String)} selected={(widgetDraft.localFilters.years || []).map(String)} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, years: v.map(Number) } })} />
+                  <MultiSelect label="Mois" values={available.months.map((m) => `${m} - ${monthLabel(m)}`)} selected={(widgetDraft.localFilters.months || []).map((m) => `${m} - ${monthLabel(m)}`)} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, months: v.map((x) => Number(x.split(' - ')[0])) } })} />
+                  <MultiSelect label="Agence" values={available.agences} selected={widgetDraft.localFilters.agences || []} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, agences: v } })} />
+                  <MultiSelect label="Dépôt" values={available.depots} selected={widgetDraft.localFilters.depots || []} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, depots: v } })} />
+                  <MultiSelect label="Collab. facture" values={available.collaborateursFacture} selected={widgetDraft.localFilters.collaborateursFacture || widgetDraft.localFilters.collaborateurs || []} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, collaborateursFacture: v, collaborateurs: v } })} />
+                  <MultiSelect label="Collab. tiers" values={available.collaborateursTiers} selected={widgetDraft.localFilters.collaborateursTiers || []} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, collaborateursTiers: v } })} />
+                  <MultiSelect label="Dépt tiers" values={available.departementsTiers} selected={widgetDraft.localFilters.departementsTiers || []} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, departementsTiers: v } })} />
+                  <MultiSelect label="Famille macro" values={available.famillesMacro} selected={widgetDraft.localFilters.famillesMacro || []} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, famillesMacro: v } })} />
                 </div>
               </div>
             </div>

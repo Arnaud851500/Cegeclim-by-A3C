@@ -35,6 +35,8 @@ type DetailRpcRow = {
   famille: string
   reference_article: string
   designation: string
+  depot: string
+  numero_devis: string
   mois: number
   type_document: Flux
   nb_lignes: number
@@ -378,6 +380,8 @@ export default function ApprovisionnementsPage() {
         famille: safeText(row.famille),
         reference_article: safeText(row.reference_article),
         designation: safeText(row.designation),
+        depot: safeText(row.depot, ''),
+        numero_devis: safeText(row.numero_devis || row.numero_piece || row.numero_document, ''),
         mois: safeNumber(row.mois),
         type_document: normalizeFlux(row.type_document),
         nb_lignes: safeNumber(row.nb_lignes),
@@ -399,10 +403,11 @@ export default function ApprovisionnementsPage() {
     return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
   }
 
-  function getSixMonthPeriods() {
+  function getRecentMonthPeriods(monthCount: 2 | 3 = 3) {
     const periods: Array<{ p_date_debut: string; p_date_fin: string; label: string }> = []
     const now = new Date()
-    const cursor = new Date(now.getFullYear(), now.getMonth() - 5, 1)
+    const safeMonthCount = monthCount === 2 ? 2 : 3
+    const cursor = new Date(now.getFullYear(), now.getMonth() - (safeMonthCount - 1), 1)
     const limit = new Date(now.getFullYear(), now.getMonth() + 1, 1)
 
     while (cursor < limit) {
@@ -418,7 +423,7 @@ export default function ApprovisionnementsPage() {
     return periods
   }
 
-  async function runRpcForPeriods(functionName: string, periods: ReturnType<typeof getSixMonthPeriods>, label: string) {
+  async function runRpcForPeriods(functionName: string, periods: ReturnType<typeof getRecentMonthPeriods>, label: string) {
     for (const period of periods) {
       setMaintenanceMessage(`${label} : ${period.label}`)
       const { error: rpcError } = await supabase.rpc(functionName, {
@@ -429,47 +434,48 @@ export default function ApprovisionnementsPage() {
     }
   }
 
-  async function updateQuantitesPertinentesForPeriods(periods: ReturnType<typeof getSixMonthPeriods>) {
-    for (const period of periods) {
-      setMaintenanceMessage(`Quantités pertinentes : ${period.label}`)
-      const { error: rpcError } = await supabase.rpc('update_quantites_pertinentes_agregats', {
-        p_date_debut: period.p_date_debut,
-        p_date_fin: period.p_date_fin,
-      })
-      if (rpcError) throw new Error(`update_quantites_pertinentes_agregats ${period.label} : ${rpcError.message}`)
-    }
-  }
 
-  async function handleRebuildSixMonths(blMxMode?: 'previous_month' | 'current_month') {
+  async function handleRebuildRecentMonths(monthCount: 2 | 3 = 3, blMxMode?: 'previous_month' | 'current_month') {
     if (maintenanceLoading) return
     const message = blMxMode
-      ? `Confirmer BL M-x → ${blMxMode === 'previous_month' ? 'M-1' : 'M'} puis rebuild des 6 derniers mois ?`
-      : 'Confirmer le rebuild des agrégats des 6 derniers mois ?'
+      ? `Confirmer BL M-x → ${blMxMode === 'previous_month' ? 'M-1' : 'M'} sans rebuild complet ?`
+      : `Confirmer le rebuild des agrégats des ${monthCount} derniers mois ?`
     if (!window.confirm(message)) return
 
     setMaintenanceLoading(true)
-    setMaintenanceMessage('Préparation du rebuild 6 mois…')
+    setMaintenanceMessage(`Préparation du rebuild ${monthCount} mois…`)
     setError(null)
 
     try {
       if (blMxMode) {
+        setMaintenanceMessage(`Application BL M-x → ${blMxMode === 'previous_month' ? 'M-1' : 'M'} sur l’agrégat activité…`)
         const { error: modeError } = await supabase.rpc('set_bl_mx_mode', { p_mode: blMxMode })
         if (modeError) throw new Error(`set_bl_mx_mode : ${modeError.message}`)
+
+        const { error: applyError } = await supabase.rpc('apply_bl_mx_month_mode_activite', {
+          p_mode: blMxMode,
+          p_months_back: monthCount,
+        })
+        if (applyError) throw new Error(`apply_bl_mx_month_mode_activite : ${applyError.message}`)
+
+        setMaintenanceMessage('Mode BL M-x appliqué. Rechargement de la page…')
+        await loadOptions(selectedYear)
+        await loadSummary()
+        setMaintenanceMessage(`BL M-x → ${blMxMode === 'previous_month' ? 'M-1' : 'M'} appliqué.`)
+        return
       }
 
-      const periods = getSixMonthPeriods()
+      const periods = getRecentMonthPeriods(monthCount)
       await runRpcForPeriods('refresh_facture_entetes_cache_periode', periods, 'Cache factures')
       await runRpcForPeriods('rebuild_indicateur_factures_mensuel_periode', periods, 'Agrégat factures')
       await runRpcForPeriods('refresh_devis_entetes_cache_periode', periods, 'Cache devis')
       await runRpcForPeriods('rebuild_indicateur_devis_mensuel_periode', periods, 'Agrégat devis')
       await runRpcForPeriods('rebuild_indicateur_activite_mensuel_periode', periods, 'Agrégat activité')
       await runRpcForPeriods('rebuild_indicateur_flux_articles_mensuel_periode', periods, 'Flux articles')
-      await updateQuantitesPertinentesForPeriods(periods)
-
       setMaintenanceMessage('Rebuild terminé. Rechargement de la page…')
       await loadOptions(selectedYear)
       await loadSummary()
-      setMaintenanceMessage('Rebuild 6 mois terminé.')
+      setMaintenanceMessage(`Rebuild ${monthCount} mois terminé.`)
     } catch (exception: any) {
       setError(`Rebuild impossible : ${exception?.message || exception}`)
       setMaintenanceMessage(null)
@@ -556,6 +562,8 @@ export default function ApprovisionnementsPage() {
       Famille: row.famille,
       Référence: row.reference_article,
       Désignation: row.designation,
+      Dépôt: row.depot,
+      'N° devis': row.numero_devis,
       Mois: monthLabel(row.mois),
       'Type document': FLUX_LABELS[row.type_document],
       'Nb lignes': row.nb_lignes,
@@ -584,27 +592,35 @@ export default function ApprovisionnementsPage() {
         <div className="flex flex-wrap justify-end gap-2">
           <button
             type="button"
-            onClick={() => handleRebuildSixMonths()}
+            onClick={() => handleRebuildRecentMonths(2)}
             disabled={maintenanceLoading}
             className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm font-black text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {maintenanceLoading ? 'Rebuild…' : 'Rebuild 6 mois'}
+            {maintenanceLoading ? 'Rebuild…' : 'Rebuild 2 mois'}
           </button>
           <button
             type="button"
-            onClick={() => handleRebuildSixMonths('previous_month')}
+            onClick={() => handleRebuildRecentMonths(3)}
+            disabled={maintenanceLoading}
+            className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm font-black text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {maintenanceLoading ? 'Rebuild…' : 'Rebuild 3 mois'}
+          </button>
+          <button
+            type="button"
+            onClick={() => handleRebuildRecentMonths(3, 'previous_month')}
             disabled={maintenanceLoading}
             className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-black text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            BL M-x → M-1
+            BL M-x → M-1 (léger)
           </button>
           <button
             type="button"
-            onClick={() => handleRebuildSixMonths('current_month')}
+            onClick={() => handleRebuildRecentMonths(3, 'current_month')}
             disabled={maintenanceLoading}
             className="rounded-xl border border-sky-300 bg-sky-50 px-4 py-3 text-sm font-black text-sky-800 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            BL M-x → M
+            BL M-x → M (léger)
           </button>
           <button
             type="button"
@@ -804,6 +820,8 @@ export default function ApprovisionnementsPage() {
                   <th className="px-3 py-2 text-left">Famille</th>
                   <th className="px-3 py-2 text-left">Référence</th>
                   <th className="px-3 py-2 text-left">Désignation</th>
+                  <th className="px-3 py-2 text-left">Dépôt</th>
+                  <th className="px-3 py-2 text-left">N° devis</th>
                   <th className="px-3 py-2 text-left">Mois</th>
                   <th className="px-3 py-2 text-left">Type document</th>
                   <th className="px-3 py-2 text-right">Nb lignes</th>
@@ -818,6 +836,8 @@ export default function ApprovisionnementsPage() {
                     <td className="px-3 py-2">{row.famille}</td>
                     <td className="px-3 py-2 font-mono text-xs">{row.reference_article}</td>
                     <td className="px-3 py-2">{row.designation}</td>
+                    <td className="px-3 py-2">{row.depot || '—'}</td>
+                    <td className="px-3 py-2 font-mono text-xs">{row.numero_devis || '—'}</td>
                     <td className="px-3 py-2">{monthLabel(row.mois)}</td>
                     <td className="px-3 py-2 font-bold" style={{ color: FLUX_COLORS[row.type_document] }}>{FLUX_LABELS[row.type_document]}</td>
                     <td className="px-3 py-2 text-right font-bold">{formatNumber(row.nb_lignes)}</td>
@@ -827,7 +847,7 @@ export default function ApprovisionnementsPage() {
                 ))}
                 {!detailRows.length && (
                   <tr>
-                    <td colSpan={9} className="px-3 py-8 text-center text-sm font-bold text-slate-500">Aucun détail pour cette cellule.</td>
+                    <td colSpan={11} className="px-3 py-8 text-center text-sm font-bold text-slate-500">Aucun détail pour cette cellule.</td>
                   </tr>
                 )}
               </tbody>

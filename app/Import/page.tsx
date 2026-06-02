@@ -2884,7 +2884,7 @@ export default function ImportsParametragePage() {
     if (maintenanceLoading || importing) return
 
     const confirmText = blMxMode
-      ? `Confirmer le basculement BL M-x en mode ${blMxMode === 'previous_month' ? 'mois précédent' : 'mois courant'} et relancer les agrégats des ${monthCount} derniers mois ?`
+      ? `Confirmer le basculement BL M-x en mode ${blMxMode === 'previous_month' ? 'mois précédent' : 'mois courant'} sans rebuild complet ?`
       : `Confirmer le rebuild des agrégats des ${monthCount} derniers mois, mois par mois ?`
 
     if (!window.confirm(confirmText)) return
@@ -2895,8 +2895,20 @@ export default function ImportsParametragePage() {
 
     try {
       if (blMxMode) {
+        setMaintenanceMessage(`Application BL M-x → ${blMxMode === 'previous_month' ? 'M-1' : 'M'} sur l’agrégat activité…`)
         const { error: modeError } = await supabase.rpc('set_bl_mx_mode', { p_mode: blMxMode })
         if (modeError) throw new Error(`set_bl_mx_mode : ${modeError.message}`)
+
+        const { error: applyError } = await supabase.rpc('apply_bl_mx_month_mode_activite', {
+          p_mode: blMxMode,
+          p_months_back: monthCount,
+        })
+        if (applyError) throw new Error(`apply_bl_mx_month_mode_activite : ${applyError.message}`)
+
+        setMaintenanceMessage(`BL M-x → ${blMxMode === 'previous_month' ? 'M-1' : 'M'} appliqué sans rebuild complet.`)
+        await loadStats()
+        await loadRows(selectedConfig)
+        return
       }
 
       await runRecentMonthsRebuild(monthCount, (detail) => setMaintenanceMessage(detail))
@@ -3025,7 +3037,7 @@ export default function ImportsParametragePage() {
                 disabled={maintenanceLoading || importing}
                 className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                BL M-x → M-1 (3 mois)
+                BL M-x → M-1 (léger)
               </button>
               <button
                 type="button"
@@ -3033,7 +3045,7 @@ export default function ImportsParametragePage() {
                 disabled={maintenanceLoading || importing}
                 className="rounded-xl border border-sky-300 bg-sky-50 px-4 py-2 text-sm font-semibold text-sky-800 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                BL M-x → M (3 mois)
+                BL M-x → M (léger)
               </button>
               {lastRejects.length > 0 && (
                 <button
