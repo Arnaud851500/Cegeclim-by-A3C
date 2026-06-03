@@ -238,7 +238,7 @@ const ATELIER_SELECT_BY_SOURCE: Record<Exclude<DataSource, 'mixte'>, string> = {
   devis: ATELIER_COMMON_SELECT.join(','),
   flux_articles: ATELIER_FLUX_ARTICLES_SELECT.join(','),
 }
-const ATELIER_FRONT_VERSION = 'V2026-06-02-FLUX-ARTICLES-ATELIER-02-DOCS-QTE'
+const ATELIER_FRONT_VERSION = 'V2026-06-03-FLUX-ARTICLES-ATELIER-03-LOAD-CIBLE'
 const ATELIER_AI_VERSION = 'STEP-3-WIDGET-BUILDER-02'
 
 const MONTHS = ['Janv.', 'Févr.', 'Mars', 'Avr.', 'Mai', 'Juin', 'Juil.', 'Août', 'Sept.', 'Oct.', 'Nov.', 'Déc.']
@@ -449,16 +449,69 @@ function shouldLoadHorsStat(mode: GlobalFilters['horsStatistique']) {
   return null
 }
 
+function normalizeDocumentTypes(values: string[] = []) {
+  return uniqueSorted(values.map((value) => safeText(value, '').toUpperCase()).filter(Boolean))
+}
+
+function sourceMatchesGlobalSelection(source: Exclude<DataSource, 'mixte'>, selectedSources: DataSource[]) {
+  if (!selectedSources.length) return source === 'factures' || source === 'activite'
+  if (selectedSources.includes(source)) return true
+  if (selectedSources.includes('mixte')) return source === 'factures' || source === 'activite'
+  return false
+}
+
+function documentTypesForSourceLoad(
+  source: Exclude<DataSource, 'mixte'>,
+  filters: GlobalFilters,
+  widgets: WidgetConfig[]
+): string[] | null {
+  if (source === 'factures') return null
+  if (source === 'devis') return null
+
+  const set = new Set<string>()
+
+  const add = (values?: string[]) => {
+    normalizeDocumentTypes(values || []).forEach((value) => set.add(value))
+  }
+
+  // Si la source est explicitement dans le filtre global, on respecte le filtre document global s'il existe.
+  // S'il n'existe pas, on ne restreint pas la source pour éviter de masquer des données attendues.
+  if (sourceMatchesGlobalSelection(source, filters.sources)) {
+    if (filters.typesDocument.length) add(filters.typesDocument)
+    else return null
+  }
+
+  // Les widgets qui demandent flux_articles ou activité ne doivent charger que les documents qu'ils utilisent.
+  widgets.forEach((widget) => {
+    const widgetUsesSource =
+      widget.source === source ||
+      (widget.source === 'mixte' && (source === 'factures' || source === 'activite'))
+
+    if (!widgetUsesSource) return
+
+    if (widget.localFilters?.typesDocument?.length) add(widget.localFilters.typesDocument)
+    else if (widget.useGlobalFilters && filters.typesDocument.length) add(filters.typesDocument)
+    else {
+      // Aucun filtre document sur ce widget : on ne peut pas restreindre sans changer son résultat.
+      DOCUMENT_TYPES_BY_SOURCE[widget.source].forEach((value) => set.add(value))
+    }
+  })
+
+  return set.size ? Array.from(set) : null
+}
+
 async function fetchAllRows(
   tableName: string,
   source: Exclude<DataSource, 'mixte'>,
-  chunkSize = 5000,
+  chunkSize = 2500,
   yearsToLoad: number[] = [CURRENT_YEAR, CURRENT_YEAR - 1],
-  horsStatMode: GlobalFilters['horsStatistique'] = 'non'
+  horsStatMode: GlobalFilters['horsStatistique'] = 'non',
+  documentTypes: string[] | null = null
 ) {
   const rows: StudioRow[] = []
   let from = 0
   const horsStatFilter = shouldLoadHorsStat(horsStatMode)
+  const normalizedTypes = normalizeDocumentTypes(documentTypes || [])
 
   while (true) {
     const to = from + chunkSize - 1
@@ -473,6 +526,10 @@ async function fetchAllRows(
 
     if (horsStatFilter !== null) {
       query = query.eq('hors_statistique', horsStatFilter)
+    }
+
+    if (normalizedTypes.length && (source === 'activite' || source === 'flux_articles')) {
+      query = query.in('type_document', normalizedTypes)
     }
 
     const { data, error } = await query
@@ -2493,10 +2550,32 @@ export default function AtelierAnalysePage() {
     setError(null)
     try {
       const promises: Array<Promise<StudioRow[]>> = []
-      if (sourcesToLoad.includes('factures')) promises.push(fetchAllRows(FACTURES_TABLE, 'factures', 5000, yearsToLoad, filtersForLoad.horsStatistique))
-      if (sourcesToLoad.includes('activite')) promises.push(fetchAllRows(ACTIVITE_TABLE, 'activite', 5000, yearsToLoad, filtersForLoad.horsStatistique))
-      if (sourcesToLoad.includes('devis')) promises.push(fetchAllRows(DEVIS_TABLE, 'devis', 5000, yearsToLoad, filtersForLoad.horsStatistique))
-      if (sourcesToLoad.includes('flux_articles')) promises.push(fetchAllRows(FLUX_ARTICLES_TABLE, 'flux_articles', 5000, yearsToLoad, filtersForLoad.horsStatistique))
+      if (sourcesToLoad.includes('factures')) {
+        promises.push(fetchAllRows(FACTURES_TABLE, 'factures', 2500, yearsToLoad, filtersForLoad.horsStatistique))
+      }
+      if (sourcesToLoad.includes('activite')) {
+        promises.push(fetchAllRows(
+          ACTIVITE_TABLE,
+          'activite',
+          2500,
+          yearsToLoad,
+          filtersForLoad.horsStatistique,
+          documentTypesForSourceLoad('activite', filtersForLoad, widgets)
+        ))
+      }
+      if (sourcesToLoad.includes('devis')) {
+        promises.push(fetchAllRows(DEVIS_TABLE, 'devis', 2500, yearsToLoad, filtersForLoad.horsStatistique))
+      }
+      if (sourcesToLoad.includes('flux_articles')) {
+        promises.push(fetchAllRows(
+          FLUX_ARTICLES_TABLE,
+          'flux_articles',
+          2500,
+          yearsToLoad,
+          filtersForLoad.horsStatistique,
+          documentTypesForSourceLoad('flux_articles', filtersForLoad, widgets)
+        ))
+      }
 
       const loaded = (await Promise.all(promises)).flat()
       setRows(loaded)
@@ -2569,7 +2648,7 @@ export default function AtelierAnalysePage() {
       ]),
       clients: uniqueSorted(rows.map((r) => clientKey(r))),
     }
-  }, [rows])
+  }, [rows, globalFilters.sources, widgets, widgetDraft])
 
   const selectedWidget = selectedWidgetId ? widgets.find((w) => w.id === selectedWidgetId) || null : null
 
