@@ -485,7 +485,7 @@ function documentTypesForSourceLoad(
   widgets.forEach((widget) => {
     const widgetUsesSource =
       widget.source === source ||
-      (widget.source === 'mixte' && (source === 'factures' || source === 'activite'))
+      (widget.source === 'mixte' && source === 'activite')
 
     if (!widgetUsesSource) return
 
