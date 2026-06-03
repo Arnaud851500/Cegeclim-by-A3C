@@ -238,7 +238,7 @@ const ATELIER_SELECT_BY_SOURCE: Record<Exclude<DataSource, 'mixte'>, string> = {
   devis: ATELIER_COMMON_SELECT.join(','),
   flux_articles: ATELIER_FLUX_ARTICLES_SELECT.join(','),
 }
-const ATELIER_FRONT_VERSION = 'V2026-06-03-FLUX-ARTICLES-ATELIER-03-LOAD-CIBLE'
+const ATELIER_FRONT_VERSION = 'V2026-06-03-FLUX-ARTICLES-ATELIER-04-NO-FULL-SCAN'
 const ATELIER_AI_VERSION = 'STEP-3-WIDGET-BUILDER-02'
 
 const MONTHS = ['Janv.', 'Févr.', 'Mars', 'Avr.', 'Mai', 'Juin', 'Juil.', 'Août', 'Sept.', 'Oct.', 'Nov.', 'Déc.']
@@ -474,28 +474,35 @@ function documentTypesForSourceLoad(
     normalizeDocumentTypes(values || []).forEach((value) => set.add(value))
   }
 
-  // Si la source est explicitement dans le filtre global, on respecte le filtre document global s'il existe.
-  // S'il n'existe pas, on ne restreint pas la source pour éviter de masquer des données attendues.
-  if (sourceMatchesGlobalSelection(source, filters.sources)) {
-    if (filters.typesDocument.length) add(filters.typesDocument)
-    else return null
-  }
+  const widgetsUsingSource = widgets.filter((widget) =>
+    widget.source === source ||
+    (widget.source === 'mixte' && source === 'activite')
+  )
 
-  // Les widgets qui demandent flux_articles ou activité ne doivent charger que les documents qu'ils utilisent.
-  widgets.forEach((widget) => {
-    const widgetUsesSource =
-      widget.source === source ||
-      (widget.source === 'mixte' && source === 'activite')
-
-    if (!widgetUsesSource) return
-
-    if (widget.localFilters?.typesDocument?.length) add(widget.localFilters.typesDocument)
-    else if (widget.useGlobalFilters && filters.typesDocument.length) add(filters.typesDocument)
-    else {
-      // Aucun filtre document sur ce widget : on ne peut pas restreindre sans changer son résultat.
+  // 1) Priorité aux widgets : on ne charge que les documents réellement utiles aux widgets.
+  // C'est indispensable pour flux_articles, sinon on scanne DEVIS + CDC + BL + FACTURE sur plusieurs années.
+  widgetsUsingSource.forEach((widget) => {
+    if (widget.localFilters?.typesDocument?.length) {
+      add(widget.localFilters.typesDocument)
+    } else if (widget.useGlobalFilters && filters.typesDocument.length) {
+      add(filters.typesDocument)
+    } else if (source === 'activite') {
+      // Pour activité, le volume reste raisonnable : garder le comportement historique.
       DOCUMENT_TYPES_BY_SOURCE[widget.source].forEach((value) => set.add(value))
     }
   })
+
+  // 2) Si un filtre global "Type document" est posé, on l'applique aussi.
+  if (sourceMatchesGlobalSelection(source, filters.sources) && filters.typesDocument.length) {
+    add(filters.typesDocument)
+  }
+
+  if (source === 'flux_articles') {
+    // Protection anti-timeout :
+    // Ne jamais charger flux_articles "en entier" parce que le filtre global Source contient flux_articles.
+    // Flux articles doit être chargé uniquement quand un widget ou un filtre document précise DEVIS / CDC / BL / FACTURE.
+    return set.size ? Array.from(set) : []
+  }
 
   return set.size ? Array.from(set) : null
 }
@@ -512,6 +519,11 @@ async function fetchAllRows(
   let from = 0
   const horsStatFilter = shouldLoadHorsStat(horsStatMode)
   const normalizedTypes = normalizeDocumentTypes(documentTypes || [])
+
+  // Pour les sources très volumineuses, [] signifie : aucune valeur ciblée, donc ne pas interroger.
+  if ((source === 'flux_articles' || source === 'activite') && Array.isArray(documentTypes) && documentTypes.length === 0) {
+    return []
+  }
 
   while (true) {
     const to = from + chunkSize - 1
