@@ -44,6 +44,13 @@ Mesures :
 - Quantité = sum(quantite)
 - Nb lignes = sum(nb_lignes)
 
+Règles de filtres importantes :
+- hors_statistique est un booléen PostgreSQL.
+- Si le filtre écran horsStatistique vaut "non" ou "Exclu", écrire obligatoirement : hors_statistique = false.
+- Si le filtre écran horsStatistique vaut "oui" ou "Uniquement", écrire obligatoirement : hors_statistique = true.
+- Si le filtre écran horsStatistique vaut "tous", ne pas filtrer cette colonne.
+- Ne jamais comparer hors_statistique à une chaîne texte comme 'non', 'oui', 'Exclu' ou 'Tous'.
+
 Règles SQL :
 - Générer uniquement une requête SELECT ou WITH ... SELECT.
 - Ne jamais utiliser INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE, GRANT, REVOKE, COPY, CALL, DO, EXECUTE.
@@ -115,6 +122,55 @@ function stripSql(sql: string) {
   return value
 }
 
+function normalizeBusinessBooleanLiterals(sqlInput: string) {
+  let sql = stripSql(sqlInput)
+
+  // L'IA peut parfois traduire le filtre écran horsStatistique='non' en SQL texte.
+  // Or hors_statistique est un booléen PostgreSQL : il faut false / true.
+  sql = sql.replace(
+    /(\bhors_statistique\b\s*(?:=|<>|!=)\s*)'?\s*(non|no|n|faux|false|f|0|exclu|exclude|excluded)\s*'?/gi,
+    (_match, prefix) => `${prefix}false`
+  )
+  sql = sql.replace(
+    /(\bhors_statistique\b\s*(?:=|<>|!=)\s*)'?\s*(oui|yes|y|vrai|true|t|1|inclu|include|included|uniquement)\s*'?/gi,
+    (_match, prefix) => `${prefix}true`
+  )
+  sql = sql.replace(
+    /(\bhors_statistique\b\s+is\s+)not\s+'?\s*(non|no|n|faux|false|f|0|exclu|exclude|excluded)\s*'?/gi,
+    (_match, prefix) => `${prefix}not false`
+  )
+  sql = sql.replace(
+    /(\bhors_statistique\b\s+is\s+)not\s+'?\s*(oui|yes|y|vrai|true|t|1|inclu|include|included|uniquement)\s*'?/gi,
+    (_match, prefix) => `${prefix}not true`
+  )
+  sql = sql.replace(
+    /(\bhors_statistique\b\s+is\s+)'?\s*(non|no|n|faux|false|f|0|exclu|exclude|excluded)\s*'?/gi,
+    (_match, prefix) => `${prefix}false`
+  )
+  sql = sql.replace(
+    /(\bhors_statistique\b\s+is\s+)'?\s*(oui|yes|y|vrai|true|t|1|inclu|include|included|uniquement)\s*'?/gi,
+    (_match, prefix) => `${prefix}true`
+  )
+  sql = sql.replace(
+    /\bhors_statistique\b\s+in\s*\(\s*'?\s*(non|no|n|faux|false|f|0|exclu|exclude|excluded)\s*'?\s*\)/gi,
+    'hors_statistique = false'
+  )
+  sql = sql.replace(
+    /\bhors_statistique\b\s+in\s*\(\s*'?\s*(oui|yes|y|vrai|true|t|1|inclu|include|included|uniquement)\s*'?\s*\)/gi,
+    'hors_statistique = true'
+  )
+  sql = sql.replace(
+    /\bhors_statistique\b\s+not\s+in\s*\(\s*'?\s*(non|no|n|faux|false|f|0|exclu|exclude|excluded)\s*'?\s*\)/gi,
+    'hors_statistique <> false'
+  )
+  sql = sql.replace(
+    /\bhors_statistique\b\s+not\s+in\s*\(\s*'?\s*(oui|yes|y|vrai|true|t|1|inclu|include|included|uniquement)\s*'?\s*\)/gi,
+    'hors_statistique <> true'
+  )
+
+  return sql
+}
+
 function extractCteNames(sql: string) {
   const ctes = new Set<string>()
   const lower = sql.toLowerCase()
@@ -137,8 +193,7 @@ function normalizeTableRef(ref: string) {
 }
 
 function validateReadonlySql(sqlInput: string) {
-  const sql = stripSql(sqlInput)
-  const lower = sql.toLowerCase()
+  const sql = normalizeBusinessBooleanLiterals(sqlInput)
 
   if (!/^\s*(select|with)\b/i.test(sql)) {
     throw new Error('La requête IA doit commencer par SELECT ou WITH.')
@@ -183,9 +238,18 @@ function compactJson(value: any, maxLength = 12000) {
 function buildFilterHints(body: any) {
   const globalFilters = body?.globalFilters || {}
   const active = body?.dataContext?.activeTemporalContext || {}
+  const horsStatistiqueRaw = String(globalFilters.horsStatistique || 'non')
+  const horsStatistiqueBoolean = horsStatistiqueRaw === 'non' ? false : horsStatistiqueRaw === 'oui' ? true : null
+
   return {
     currentViewName: body?.currentViewName || null,
     activeTemporalContext: active,
+    databaseFilterRules: {
+      hors_statistique: horsStatistiqueBoolean,
+      note: horsStatistiqueBoolean === null
+        ? 'Ne pas ajouter de filtre sur hors_statistique.'
+        : `Ajouter hors_statistique = ${horsStatistiqueBoolean ? 'true' : 'false'}.`,
+    },
     globalFilters: {
       sources: globalFilters.sources || [],
       years: globalFilters.years || [],
