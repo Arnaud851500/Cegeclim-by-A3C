@@ -186,16 +186,23 @@ function normalizeSqlClauseSpacing(sqlInput: string) {
   let sql = String(sqlInput || '')
 
   // Correction défensive de l'erreur vue en production :
-  // "hors_statistique = falseGROUP BY" ou ")ORDER BY" quand une normalisation
-  // ou une génération IA colle deux clauses SQL sans espace.
-  sql = sql.replace(
-    /([)\w])(?=\b(?:where|group\s+by|order\s+by|having|limit|union|intersect|except)\b)/gi,
-    '$1 '
-  )
-  sql = sql.replace(
-    /([)\w])(?=\b(?:and|or)\s+\b)/gi,
-    '$1 '
-  )
+  // "hors_statistique = falseGROUP BY", "2026AND mois" ou ")ORDER BY".
+  // La V5 utilisait une frontière de mot (\b), mais "falseGROUP" n'a PAS de
+  // frontière entre le e et le G car les deux caractères sont alphanumériques.
+  // On corrige donc explicitement les collages connus sans casser ORDER BY en "OR DER BY".
+  sql = sql.replace(/\b(true|false)(WHERE|GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|AND|OR)\b/gi, '$1 $2')
+  sql = sql.replace(/(\d)(WHERE|GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|AND|OR)\b/gi, '$1 $2')
+  sql = sql.replace(/(\))(WHERE|GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|AND|OR|UNION|INTERSECT|EXCEPT)\b/gi, '$1 $2')
+
+  // Variantes très fréquentes autour des clauses de fin.
+  sql = sql.replace(/\b(false|true)GROUP\s+BY\b/gi, '$1 GROUP BY')
+  sql = sql.replace(/\b(false|true)ORDER\s+BY\b/gi, '$1 ORDER BY')
+  sql = sql.replace(/\b(false|true)LIMIT\b/gi, '$1 LIMIT')
+  sql = sql.replace(/\b(false|true)HAVING\b/gi, '$1 HAVING')
+  sql = sql.replace(/\b(false|true)WHERE\b/gi, '$1 WHERE')
+
+  // Si un alias ou un nom de colonne est collé à FROM / WHERE / GROUP BY, on répare aussi.
+  sql = sql.replace(/([a-z_][a-z0-9_]*)(FROM|WHERE|GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT)\b/g, '$1 $2')
 
   // Nettoyage léger des espaces multiples, sans toucher aux chaînes SQL.
   sql = sql.replace(/[ \t]{2,}/g, ' ').trim()
