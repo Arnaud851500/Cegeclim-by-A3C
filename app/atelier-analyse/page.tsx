@@ -171,6 +171,15 @@ type AiVisualizationSpec = {
   note?: string
 }
 
+type AiCellLink = {
+  href: string
+  label?: string
+  object_type?: string
+  object_number?: string
+}
+
+type AiCellLinksByRow = Record<string, Record<string, AiCellLink>>
+
 type AiMode = 'view' | 'aggregated_db'
 
 type SavedView = {
@@ -258,7 +267,7 @@ const ATELIER_SELECT_BY_SOURCE: Record<Exclude<DataSource, 'mixte'>, string> = {
   flux_articles: ATELIER_FLUX_ARTICLES_SELECT.join(','),
 }
 const ATELIER_FRONT_VERSION = 'V2026-06-03-FLUX-ARTICLES-ATELIER-04-NO-FULL-SCAN'
-const ATELIER_AI_VERSION = 'STEP-5-VISUAL-RESULTS-01'
+const ATELIER_AI_VERSION = 'STEP-6-HYPERLINKED-RESULTS-01'
 
 const ATELIER_AI_CONTROLLED_SCHEMA = [
   {
@@ -2600,7 +2609,7 @@ function AiResultChart({ rows, columns, visualization }: { rows: Record<string, 
   )
 }
 
-function AiResultTable({ rows, columns, visualization }: { rows: Record<string, any>[]; columns: AiColumnInfo[]; visualization: AiVisualizationSpec | null }) {
+function AiResultTable({ rows, columns, visualization, cellLinks }: { rows: Record<string, any>[]; columns: AiColumnInfo[]; visualization: AiVisualizationSpec | null; cellLinks?: AiCellLinksByRow }) {
   if (!rows.length) return null
   const fallbackKeys = columns.length ? columns.map((column) => column.key) : Object.keys(rows[0] || {})
   const wantedKeys = (visualization?.columns?.length ? visualization.columns : fallbackKeys).filter((key) => fallbackKeys.includes(key))
@@ -2626,9 +2635,22 @@ function AiResultTable({ rows, columns, visualization }: { rows: Record<string, 
               <tr key={`ai-row-${rowIndex}`} className={rowIndex % 2 ? 'bg-white' : 'bg-slate-50/60'}>
                 {keys.map((key) => {
                   const type = aiColumnType(key, columns)
+                  const link = cellLinks?.[String(rowIndex)]?.[key]
+                  const cellContent = formatAiCell(row[key], key, columns)
                   return (
                     <td key={`${rowIndex}-${key}`} className={`border-b border-slate-100 px-3 py-2 align-top ${type === 'text' ? 'text-left' : 'text-right font-semibold tabular-nums'}`}>
-                      {formatAiCell(row[key], key, columns)}
+                      {link?.href ? (
+                        <a
+                          href={link.href}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title={link.label || `${link.object_type || 'Objet'} ${link.object_number || ''}`}
+                          className="inline-flex items-center gap-1 rounded-lg bg-blue-50 px-2 py-1 font-black text-blue-700 underline decoration-blue-200 underline-offset-2 hover:bg-blue-100 hover:text-blue-900"
+                        >
+                          <span>{cellContent}</span>
+                          <span aria-hidden="true" className="text-[10px]">↗</span>
+                        </a>
+                      ) : cellContent}
                     </td>
                   )
                 })}
@@ -2641,7 +2663,7 @@ function AiResultTable({ rows, columns, visualization }: { rows: Record<string, 
   )
 }
 
-function AiStructuredResult({ rows, columns, visualization }: { rows: Record<string, any>[]; columns: AiColumnInfo[]; visualization: AiVisualizationSpec | null }) {
+function AiStructuredResult({ rows, columns, visualization, cellLinks }: { rows: Record<string, any>[]; columns: AiColumnInfo[]; visualization: AiVisualizationSpec | null; cellLinks?: AiCellLinksByRow }) {
   if (!rows.length) return null
   return (
     <div className="mt-4 rounded-2xl border border-blue-100 bg-blue-50/40 p-3">
@@ -2654,7 +2676,7 @@ function AiStructuredResult({ rows, columns, visualization }: { rows: Record<str
       </div>
       {visualization?.note && <p className="mt-2 text-xs font-semibold text-slate-600">{visualization.note}</p>}
       <AiResultChart rows={rows} columns={columns} visualization={visualization || { kind: 'table' }} />
-      <AiResultTable rows={rows} columns={columns} visualization={visualization} />
+      <AiResultTable rows={rows} columns={columns} visualization={visualization} cellLinks={cellLinks} />
     </div>
   )
 }
@@ -2671,6 +2693,7 @@ export default function AtelierAnalysePage() {
   const [viewName, setViewName] = useState('Vue Direction')
   const [saveMessage, setSaveMessage] = useState<string | null>(null)
   const [addMenuOpen, setAddMenuOpen] = useState(false)
+  const [savedViewsMenuOpen, setSavedViewsMenuOpen] = useState(false)
   const [configPanelTop, setConfigPanelTop] = useState(120)
   const [aiQuestion, setAiQuestion] = useState('')
   const [aiMode, setAiMode] = useState<AiMode>('view')
@@ -2682,6 +2705,7 @@ export default function AtelierAnalysePage() {
   const [aiRowsPreview, setAiRowsPreview] = useState<Record<string, any>[]>([])
   const [aiColumns, setAiColumns] = useState<AiColumnInfo[]>([])
   const [aiVisualization, setAiVisualization] = useState<AiVisualizationSpec | null>(null)
+  const [aiCellLinks, setAiCellLinks] = useState<AiCellLinksByRow>({})
   const [showClientFilters, setShowClientFilters] = useState(false)
   const [showAiPanel, setShowAiPanel] = useState(false)
   const [maintenanceLoading, setMaintenanceLoading] = useState(false)
@@ -3197,6 +3221,7 @@ export default function AtelierAnalysePage() {
     setAiRowsPreview([])
     setAiColumns([])
     setAiVisualization(null)
+    setAiCellLinks({})
 
     try {
       const payload = {
@@ -3269,6 +3294,7 @@ export default function AtelierAnalysePage() {
       setAiRowsPreview(Array.isArray(data?.rows_preview) ? data.rows_preview : [])
       setAiColumns(Array.isArray(data?.columns) ? data.columns : [])
       setAiVisualization(data?.visualization && typeof data.visualization === 'object' ? data.visualization : null)
+      setAiCellLinks(data?.cell_links && typeof data.cell_links === 'object' ? data.cell_links : {})
       const proposals = Array.isArray(data?.proposed_widgets) ? data.proposed_widgets : Array.isArray(data?.proposedWidgets) ? data.proposedWidgets : []
       setAiWidgetProposals(proposals)
     } catch (e: any) {
@@ -3292,10 +3318,64 @@ export default function AtelierAnalysePage() {
               <p className="mt-2 text-sm text-slate-600">Créez vos propres widgets à partir des indicateurs factures et activité.</p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <input value={viewName} onChange={(e) => setViewName(e.target.value)} className="h-11 rounded-xl border border-slate-200 px-3 text-sm font-bold outline-none focus:border-blue-500" />
+              <div className="relative">
+                <button type="button" onClick={() => { setAddMenuOpen((v) => !v); setSavedViewsMenuOpen(false) }} className="rounded-xl bg-slate-900 px-4 py-3 text-sm font-black text-white shadow-sm hover:bg-slate-800">+ Ajouter un widget</button>
+                {addMenuOpen && (
+                  <div className="absolute left-0 top-14 z-50 w-80 rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl">
+                    <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Bibliothèque de widgets</div>
+                    <div className="space-y-2">
+                      {widgetCatalog.map(([type, label, helper]) => (
+                        <button key={type} type="button" onClick={() => addWidget(type)} className="flex w-full items-center justify-between rounded-xl border border-slate-200 bg-white p-3 text-left hover:border-blue-300 hover:bg-blue-50">
+                          <span><span className="block text-sm font-black text-slate-900">+ {label}</span><span className="block text-xs text-slate-500">{helper}</span></span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => { setSavedViewsMenuOpen((v) => !v); setAddMenuOpen(false) }}
+                  className="flex h-11 min-w-[170px] items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 text-sm font-black text-slate-900 shadow-sm hover:bg-slate-50"
+                >
+                  <span className="truncate">{viewName || 'Sélectionner une vue'}</span>
+                  <span className="text-slate-400">▼</span>
+                </button>
+                {savedViewsMenuOpen && (
+                  <div className="absolute left-0 top-14 z-50 max-h-80 min-w-[280px] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl">
+                    <div className="px-2 pb-2 text-xs font-black uppercase tracking-wide text-slate-500">Vues enregistrées</div>
+                    {savedViews.length === 0 ? (
+                      <div className="rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-500">Aucune vue enregistrée</div>
+                    ) : (
+                      <div className="space-y-1">
+                        {savedViews.map((view) => (
+                          <button
+                            key={view.id}
+                            type="button"
+                            onClick={() => {
+                              loadView(view)
+                              setSavedViewsMenuOpen(false)
+                            }}
+                            className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-left hover:bg-slate-50 ${currentViewId === view.id ? 'bg-blue-50 text-blue-700' : 'text-slate-900'}`}
+                          >
+                            <span>
+                              <span className="block text-sm font-black">{view.name}</span>
+                              <span className="block text-[11px] text-slate-500">{view.updated_at ? new Date(view.updated_at).toLocaleDateString('fr-FR') : ''}</span>
+                            </span>
+                            {currentViewId === view.id && <span className="text-xs font-black text-blue-600">Active</span>}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
               <button type="button" onClick={saveView} className="rounded-xl bg-blue-600 px-4 py-3 text-sm font-black text-white shadow-sm hover:bg-blue-700">Enregistrer la vue</button>
               <button type="button" onClick={duplicateCurrentView} disabled={!widgets.length} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50">Dupliquer la vue</button>
-              <button type="button" onClick={() => { setCurrentViewId(null); setViewName('Nouvelle vue'); setWidgets([]); setSelectedWidgetId(null); setSaveMessage(null) }} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50">Nouvelle vue</button>
+              <button type="button" onClick={() => { setCurrentViewId(null); setViewName('Nouvelle vue'); setWidgets([]); setSelectedWidgetId(null); setSaveMessage(null); setSavedViewsMenuOpen(false) }} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50">Nouvelle vue</button>
               <button type="button" onClick={() => setShowMaintenancePanel((value) => !value)} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50">Actions techniques {showMaintenancePanel ? '▲' : '▼'}</button>
               <button type="button" onClick={() => loadData(globalFilters)} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50">Actualiser</button>
             </div>
@@ -3407,15 +3487,15 @@ export default function AtelierAnalysePage() {
                     <button type="button" onClick={() => askAtelierAi()} disabled={aiLoading} className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-black text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60">
                       {aiLoading ? 'Analyse en cours…' : aiMode === 'aggregated_db' ? 'Interroger la base agrégée' : 'Envoyer à l’assistant IA'}
                     </button>
-                    <button type="button" onClick={() => { if (aiTextareaRef.current) aiTextareaRef.current.value = ''; setAiQuestion(''); setAiAnswer(null); setAiSql(null); setAiError(null); setAiWidgetProposals([]); setAiRowsPreview([]); setAiColumns([]); setAiVisualization(null) }} className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-black text-slate-700 hover:bg-slate-50">Effacer</button>
-                    <span className="text-xs font-semibold text-slate-500">{aiMode === 'aggregated_db' ? 'Contexte transmis : question + filtres + schéma agrégé autorisé + restitution structurée. Exécution SQL read-only côté serveur.' : 'Contexte transmis : vue, filtres, widgets + période active.'}</span>
+                    <button type="button" onClick={() => { if (aiTextareaRef.current) aiTextareaRef.current.value = ''; setAiQuestion(''); setAiAnswer(null); setAiSql(null); setAiError(null); setAiWidgetProposals([]); setAiRowsPreview([]); setAiColumns([]); setAiVisualization(null); setAiCellLinks({}) }} className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-black text-slate-700 hover:bg-slate-50">Effacer</button>
+                    <span className="text-xs font-semibold text-slate-500">{aiMode === 'aggregated_db' ? 'Contexte transmis : question + filtres + schéma agrégé autorisé + restitution structurée + liens objets BLG quand disponibles. Exécution SQL read-only côté serveur.' : 'Contexte transmis : vue, filtres, widgets + période active.'}</span>
                   </div>
                   {aiError && <div className="rounded-xl bg-red-50 p-3 text-sm font-bold text-red-700">{aiError}</div>}
                   {aiAnswer && (
                     <div className="rounded-xl border border-indigo-100 bg-white p-3">
                       <div className="mb-1 text-xs font-black uppercase tracking-wide text-indigo-700">Réponse de l’assistant</div>
                       <div className="whitespace-pre-wrap text-sm leading-6 text-slate-800">{aiAnswer}</div>
-                      <AiStructuredResult rows={aiRowsPreview} columns={aiColumns} visualization={aiVisualization} />
+                      <AiStructuredResult rows={aiRowsPreview} columns={aiColumns} visualization={aiVisualization} cellLinks={aiCellLinks} />
                       {aiSql && (
                         <details className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
                           <summary className="cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600">SQL contrôlé exécuté</summary>
@@ -3456,39 +3536,6 @@ export default function AtelierAnalysePage() {
               </div>
             </div>
           )}
-        </section>
-
-        <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
-            <div className="relative">
-              <button type="button" onClick={() => setAddMenuOpen((v) => !v)} className="rounded-xl bg-slate-900 px-4 py-3 text-sm font-black text-white shadow-sm hover:bg-slate-800">+ Ajouter un widget</button>
-              {addMenuOpen && (
-                <div className="absolute left-0 top-14 z-50 w-80 rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl">
-                  <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Bibliothèque de widgets</div>
-                  <div className="space-y-2">
-                    {widgetCatalog.map(([type, label, helper]) => (
-                      <button key={type} type="button" onClick={() => addWidget(type)} className="flex w-full items-center justify-between rounded-xl border border-slate-200 bg-white p-3 text-left hover:border-blue-300 hover:bg-blue-50">
-                        <span><span className="block text-sm font-black text-slate-900">+ {label}</span><span className="block text-xs text-slate-500">{helper}</span></span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="min-w-0 flex-1">
-              <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Vues enregistrées</div>
-              <div className="flex gap-2 overflow-x-auto pb-1">
-                {savedViews.length === 0 && <div className="whitespace-nowrap rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-500">Aucune vue enregistrée</div>}
-                {savedViews.map((view) => (
-                  <button key={view.id} type="button" onClick={() => loadView(view)} className={`min-w-[150px] rounded-xl border px-3 py-2 text-left text-xs hover:bg-slate-50 ${currentViewId === view.id ? 'border-blue-500 bg-blue-50' : 'border-slate-200'}`}>
-                    <span className="block truncate font-black">{view.name}</span>
-                    <span className="block truncate text-[10px] text-slate-500">{view.updated_at ? new Date(view.updated_at).toLocaleDateString('fr-FR') : ''}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
         </section>
 
         <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">

@@ -28,6 +28,54 @@ type MenuGroup = {
   items: MenuItem[]
 }
 
+type StatusLightProps = {
+  label: string
+  status: 'red' | 'green'
+  count?: number
+  blink?: boolean
+  clickable?: boolean
+  onClick?: () => void
+}
+
+function StatusLight({ label, status, count, blink = false, clickable = false, onClick }: StatusLightProps) {
+  const isRed = status === 'red'
+  const shellStyle = {
+    ...styles.statusCard,
+    ...(isRed ? styles.statusCardRed : styles.statusCardGreen),
+    ...(blink ? styles.statusCardBlink : {}),
+    cursor: clickable ? 'pointer' : 'default',
+  } as React.CSSProperties
+
+  const lightStyle = {
+    ...styles.statusLightDot,
+    ...(isRed ? styles.statusLightDotRed : styles.statusLightDotGreen),
+    ...(blink ? styles.statusLightDotBlink : {}),
+  } as React.CSSProperties
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={shellStyle}
+      title={clickable ? `Ouvrir la liste d'anomalies ${label} (à brancher)` : `${label} OK`}
+    >
+      <div style={styles.statusCardTop}>
+        <span style={lightStyle} />
+        <span style={{ ...styles.statusCardLabel, ...(isRed ? styles.statusCardLabelRed : styles.statusCardLabelGreen) }}>
+          {label}
+        </span>
+      </div>
+      {typeof count === 'number' && count > 0 ? (
+        <span style={{ ...styles.statusBadge, ...(isRed ? styles.statusBadgeRed : styles.statusBadgeGreen) }}>
+          {count}
+        </span>
+      ) : (
+        <span style={{ ...styles.statusOkText, ...(isRed ? styles.statusCardLabelRed : styles.statusCardLabelGreen) }}>OK</span>
+      )}
+    </button>
+  )
+}
+
 function AppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter()
   const pathname = usePathname()
@@ -38,11 +86,15 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const [hoverTimeout, setHoverTimeout] = useState<ReturnType<typeof setTimeout> | null>(null)
   const [sessionChecked, setSessionChecked] = useState(false)
   const [hasSession, setHasSession] = useState(false)
+  const [statusBlinkOn, setStatusBlinkOn] = useState(true)
 
   const lastLoggedPathRef = useRef<string | null>(null)
 
   const isLoginPage = pathname === '/login'
   const isUnauthorizedPage = pathname === '/unauthorized'
+
+  const cerfaKoCount = 2
+  const overdueTodoCount = 0
 
   const hasAnyMenuAccess =
     rights.can_dashboard ||
@@ -74,16 +126,13 @@ function AppShell({ children }: { children: React.ReactNode }) {
     'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Logo%20et%20images/Image%20site%20CEGECLIM%20maison.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJMb2dvIGV0IGltYWdlcy9JbWFnZSBzaXRlIENFR0VDTElNIG1haXNvbi5qcGciLCJpYXQiOjE3NzU1MDYyNTEsImV4cCI6NDg5NzU3MDI1MX0.d1YT7_-xD44QOm2LFbZIfpkjh9kiIGjpJiEuJxV0rMM'
 
   const menuGroups: MenuGroup[] = [
+  
     {
-      label: 'Accueil',
-      items: [{ label: 'Accueil', path: '/accueil' }],
-    },
-    {
-      label: 'Base clients',
+      label: 'Prospects / Carte',
       items: [
-        { label: 'Liste clients', path: '/carte', accessKey: 'can_carte' },
-        { label: 'Clients Cegeclim', path: '/clients_cegeclim', accessKey: 'can_clients_cegeclim' },
-        { label: 'Suivi Prospects', path: '/suivi prospects', accessKey: 'can_suivi_prospects' },
+        { label: 'Prospects / Carte', path: '/carte', accessKey: 'can_carte' },
+        { label: 'Clients Cegeclim', path: '/clients_cegeclim', accessKey: 'can_agences' },
+        { label: 'Suivi Prospects', path: '/suivi prospects', accessKey: 'can_agences' },
       ],
     },
     {
@@ -95,30 +144,29 @@ function AppShell({ children }: { children: React.ReactNode }) {
       ],
     },
     {
-      label: 'Documents',
-      items: [{ label: 'Documents', path: '/documents', accessKey: 'can_documents' }],
-    },
-    {
-      label: 'Todo List',
-      items: [{ label: 'Todo List', path: '/todo', accessKey: 'can_todo' }],
-    },
-    {
       label: 'Activité',
       items: [{ label: 'Activités - CA (WIP)', path: '/activite', accessKey: 'can_activites' }],
     },
     {
-      label: 'Indicateurs',
+      label: 'Tableaux de bord',
       items: [
-        { label: 'Indicateurs', path: '/Indicateurs', accessKey: 'can_dashboard' },
         { label: 'Tableaux de bord', path: '/atelier-analyse', accessKey: 'can_autorisation' },
+        { label: 'Indicateurs', path: '/Indicateurs', accessKey: 'can_dashboard' }
+        ],
+    },
+    {
+      label: 'Analyse Devis',
+      items: [
         { label: 'Analyse Devis', path: '/approvisionnements', accessKey: 'can_autorisation' }
       ],
     },
     {
-      label: 'Parametrage & MAJ',
+      label: 'Admin',
       items: [{ label: 'Autorisations', path: '/autorisation', accessKey: 'can_autorisation' },
                 { label: 'MAJ Base clients', path: '/clients', accessKey: 'can_clients' },
-                { label: 'MAJ Données Activité', path: '/Import', accessKey: 'can_autorisation' }
+                { label: 'MAJ Données Activité', path: '/Import', accessKey: 'can_autorisation' },
+                { label: 'Todo List', path: '/todo', accessKey: 'can_todo' },
+                { label: 'Documents', path: '/documents', accessKey: 'can_documents' },
       ],
     },
   ]
@@ -190,6 +238,14 @@ function AppShell({ children }: { children: React.ReactNode }) {
     })
   }, [sessionChecked, hasSession, email, pathname])
 
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setStatusBlinkOn((prev) => !prev)
+    }, 1200)
+
+    return () => clearInterval(interval)
+  }, [])
+
   if (isLoginPage) {
     return (
       <div style={{ margin: 0, fontFamily: 'Arial, sans-serif', background: '#f5f7fa' }}>
@@ -251,13 +307,15 @@ function AppShell({ children }: { children: React.ReactNode }) {
                 </button>
 
                 {email && <div style={styles.userEmail}>{email}</div>}
+
               </div>
             </div>
           </div>
 
           {menuGroups.some(isGroupVisible) && (
             <div style={styles.nav}>
-              {menuGroups.filter(isGroupVisible).map((group) => {
+              <div style={styles.navMenu}>
+                {menuGroups.filter(isGroupVisible).map((group) => {
                 const visibleItems = getVisibleItems(group)
 
                 return (
@@ -297,7 +355,26 @@ function AppShell({ children }: { children: React.ReactNode }) {
                     )}
                   </div>
                 )
-              })}
+                })}
+              </div>
+
+              <div style={styles.statusLightsRow}>
+                <StatusLight
+                  label="CERFA"
+                  status="red"
+                  count={cerfaKoCount}
+                  blink={statusBlinkOn}
+                  clickable
+                  onClick={() => {
+                    // Navigation à brancher dans un second temps
+                  }}
+                />
+                <StatusLight
+                  label="A faire"
+                  status="green"
+                  count={overdueTodoCount}
+                />
+              </div>
             </div>
           )}
         </header>
@@ -349,7 +426,7 @@ const styles: Record<string, React.CSSProperties> = {
   top: {
     display: 'flex',
     justifyContent: 'space-between',
-    padding: '8px 20px',
+    padding: '6px 20px',
     alignItems: 'center',
   },
 
@@ -390,6 +467,7 @@ const styles: Record<string, React.CSSProperties> = {
     gap: 6,
   },
 
+
   userEmail: {
     fontSize: 13,
     color: '#17344d',
@@ -415,14 +493,135 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid #d0d7de',
   },
 
+  statusCard: {
+    minWidth: 96,
+    minHeight: 30,
+    borderRadius: 11,
+    border: '1px solid rgba(15, 23, 42, 0.08)',
+    padding: '5px 8px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    background: 'rgba(255,255,255,0.92)',
+    boxShadow: '0 6px 16px rgba(15, 23, 42, 0.07)',
+    transition: 'transform 0.18s ease, box-shadow 0.18s ease, opacity 0.18s ease',
+  },
+
+  statusCardRed: {
+    border: '1px solid rgba(239, 68, 68, 0.28)',
+    boxShadow: '0 0 0 1px rgba(239,68,68,0.08), 0 0 16px rgba(239,68,68,0.22)',
+  },
+
+  statusCardGreen: {
+    border: '1px solid rgba(34, 197, 94, 0.24)',
+    boxShadow: '0 0 0 1px rgba(34,197,94,0.08), 0 0 14px rgba(34,197,94,0.16)',
+  },
+
+  statusCardBlink: {
+    opacity: 0.9,
+    transform: 'translateY(-1px)',
+  },
+
+  statusCardTop: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+  },
+
+  statusCardLabel: {
+    fontSize: 12,
+    fontWeight: 800,
+    whiteSpace: 'nowrap',
+    lineHeight: 1,
+  },
+
+  statusCardLabelRed: {
+    color: '#b91c1c',
+  },
+
+  statusCardLabelGreen: {
+    color: '#166534',
+  },
+
+  statusLightDot: {
+    width: 11,
+    height: 11,
+    borderRadius: '50%',
+    display: 'inline-block',
+    flexShrink: 0,
+  },
+
+  statusLightDotRed: {
+    background: '#ef4444',
+    boxShadow: '0 0 0 2px rgba(239, 68, 68, 0.12), 0 0 14px rgba(239, 68, 68, 0.95)',
+  },
+
+  statusLightDotGreen: {
+    background: '#22c55e',
+    boxShadow: '0 0 0 2px rgba(34, 197, 94, 0.12), 0 0 12px rgba(34, 197, 94, 0.85)',
+  },
+
+  statusLightDotBlink: {
+    boxShadow: '0 0 0 2px rgba(239, 68, 68, 0.18), 0 0 20px rgba(239, 68, 68, 1)',
+  },
+
+  statusBadge: {
+    minWidth: 23,
+    height: 23,
+    borderRadius: 999,
+    padding: '0 7px',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: 11,
+    fontWeight: 900,
+  },
+
+  statusBadgeRed: {
+    background: '#fee2e2',
+    color: '#b91c1c',
+    border: '1px solid #fecaca',
+  },
+
+  statusBadgeGreen: {
+    background: '#dcfce7',
+    color: '#166534',
+    border: '1px solid #bbf7d0',
+  },
+
+  statusOkText: {
+    fontSize: 11,
+    fontWeight: 800,
+    opacity: 0.85,
+  },
+
   nav: {
     position: 'relative',
     zIndex: 1001,
     display: 'flex',
+    alignItems: 'center',
     justifyContent: 'center',
-    gap: 20,
-    padding: '6px 0',
+    padding: '4px 20px 8px',
     overflow: 'visible',
+    minHeight: 42,
+  },
+
+  navMenu: {
+    display: 'flex',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 20,
+  },
+
+  statusLightsRow: {
+    position: 'absolute',
+    right: 20,
+    top: '50%',
+    transform: 'translateY(-50%)',
+    display: 'flex',
+    gap: 8,
+    alignItems: 'center',
   },
 
   navBtn: {
