@@ -336,8 +336,13 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   header: {
-    background: 'rgba(255,255,255,0.7)',
+    position: 'sticky',
+    top: 0,
+    zIndex: 1000,
+    width: '100%',
+    background: 'rgba(255,255,255,0.86)',
     backdropFilter: 'blur(14px)',
+    WebkitBackdropFilter: 'blur(14px)',
     boxShadow: '0 6px 20px rgba(0,0,0,0.08)',
   },
 
@@ -411,10 +416,13 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   nav: {
+    position: 'relative',
+    zIndex: 1001,
     display: 'flex',
     justifyContent: 'center',
     gap: 20,
     padding: '6px 0',
+    overflow: 'visible',
   },
 
   navBtn: {
@@ -426,6 +434,7 @@ const styles: Record<string, React.CSSProperties> = {
 
   menuWrapper: {
     position: 'relative',
+    zIndex: 1002,
     paddingBottom: 10,
   },
 
@@ -438,7 +447,7 @@ const styles: Record<string, React.CSSProperties> = {
     boxShadow: '0 10px 25px rgba(0,0,0,0.1)',
     whiteSpace: 'nowrap',
     minWidth: 'max-content',
-    zIndex: 20,
+    zIndex: 1100,
   },
 
   dropdownItem: {

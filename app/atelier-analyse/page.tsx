@@ -154,6 +154,8 @@ type AiWidgetProposal = Partial<WidgetConfig> & {
   confidence?: string | number
 }
 
+type AiMode = 'view' | 'aggregated_db'
+
 type SavedView = {
   id: string
   name: string
@@ -239,7 +241,30 @@ const ATELIER_SELECT_BY_SOURCE: Record<Exclude<DataSource, 'mixte'>, string> = {
   flux_articles: ATELIER_FLUX_ARTICLES_SELECT.join(','),
 }
 const ATELIER_FRONT_VERSION = 'V2026-06-03-FLUX-ARTICLES-ATELIER-04-NO-FULL-SCAN'
-const ATELIER_AI_VERSION = 'STEP-3-WIDGET-BUILDER-02'
+const ATELIER_AI_VERSION = 'STEP-4A-AGGREGATED-DB-QA-01'
+
+const ATELIER_AI_CONTROLLED_SCHEMA = [
+  {
+    source: 'factures',
+    table: FACTURES_TABLE,
+    description: 'Agrégat mensuel des factures : CA, marge, quantités, lignes, dimensions client / agence / famille.',
+  },
+  {
+    source: 'activite',
+    table: ACTIVITE_TABLE,
+    description: 'Agrégat mensuel de l’activité non facturée : BL, BL M-x, BR, CDC, PL.',
+  },
+  {
+    source: 'devis',
+    table: DEVIS_TABLE,
+    description: 'Agrégat mensuel des devis.',
+  },
+  {
+    source: 'flux_articles',
+    table: FLUX_ARTICLES_TABLE,
+    description: 'Agrégat mensuel des flux articles, par document, dépôt, famille, référence et désignation.',
+  },
+]
 
 const MONTHS = ['Janv.', 'Févr.', 'Mars', 'Avr.', 'Mai', 'Juin', 'Juil.', 'Août', 'Sept.', 'Oct.', 'Nov.', 'Déc.']
 const CURRENT_YEAR = new Date().getFullYear()
@@ -846,11 +871,15 @@ function MultiSelect({
   values,
   selected,
   onChange,
+  compact = false,
+  className = '',
 }: {
   label: string
   values: string[]
   selected: string[]
   onChange: (values: string[]) => void
+  compact?: boolean
+  className?: string
 }) {
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState('')
@@ -867,17 +896,17 @@ function MultiSelect({
 
 
   return (
-    <div className="relative">
+    <div className={`relative ${className}`}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex h-11 w-full items-center justify-between rounded-xl border border-slate-200 bg-white px-3 text-left text-sm font-semibold text-slate-800 shadow-sm hover:bg-slate-50"
+        className={`flex w-full items-center justify-between rounded-xl border border-slate-200 bg-white text-left font-semibold text-slate-800 shadow-sm hover:bg-slate-50 ${compact ? 'h-10 px-2 text-xs' : 'h-11 px-3 text-sm'}`}
       >
         <span className="truncate">{label} {selected.length ? `(${selected.length})` : ''}</span>
         <span className="text-slate-400">▼</span>
       </button>
       {open && (
-        <div onMouseLeave={() => setOpen(false)} className="absolute left-0 top-12 z-50 w-80 rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl">
+        <div onMouseLeave={() => setOpen(false)} className={`absolute left-0 ${compact ? 'top-11' : 'top-12'} z-50 w-80 rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl`}>
           <div className="mb-2 flex items-center justify-between gap-2">
             <div className="text-sm font-black text-slate-800">{label}</div>
             <button type="button" onClick={() => onChange([])} className="text-xs font-bold text-blue-600 hover:text-blue-800">Tout afficher</button>
@@ -919,13 +948,13 @@ function SelectField({ label, value, onChange, options }: { label: string; value
   )
 }
 
-function FilterSelect({ label, value, onChange, options }: { label: string; value: string | number; onChange: (v: string) => void; options: Array<{ value: string | number; label: string }> }) {
+function FilterSelect({ label, value, onChange, options, compact = false, className = '' }: { label: string; value: string | number; onChange: (v: string) => void; options: Array<{ value: string | number; label: string }>; compact?: boolean; className?: string }) {
   return (
     <select
       aria-label={label}
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-800 shadow-sm outline-none hover:bg-slate-50 focus:border-blue-500"
+      className={`w-full rounded-xl border border-slate-200 bg-white font-semibold text-slate-800 shadow-sm outline-none hover:bg-slate-50 focus:border-blue-500 ${compact ? 'h-10 px-2 text-xs' : 'h-11 px-3 text-sm'} ${className}`}
     >
       {options.map((option) => (
         <option key={String(option.value)} value={option.value}>{label} : {option.label}</option>
@@ -1013,14 +1042,15 @@ function KpiWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetConfig }
   const value = measureValue(currentAgg, widget.measure)
   const previousValue = measureValue(previousAgg, widget.secondMeasure || widget.measure)
   const evo = evolutionText(value, previousValue, widget.evolutionMode, widget.measure)
-  const periodText = widget.periodMode === 'cumul' ? `01-${String(monthLimit).padStart(2, '0')}` : monthLabel(monthLimit)
+  const yearSuffix = String(selectedYear).slice(-2)
+  const periodText = widget.periodMode === 'cumul' ? `01-${String(monthLimit).padStart(2, '0')} ${yearSuffix}` : `${monthLabel(monthLimit)} ${yearSuffix}`
 
 
   return (
     <div className="rounded-2xl bg-slate-50 p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="text-xs font-black uppercase tracking-wide text-slate-500">{getMeasureLabel(widget.measure)}</div>
-        <div className="rounded-full bg-white px-2 py-1 text-[10px] font-black text-slate-500">{periodText}</div>
+        <div className="min-w-[64px] rounded-full bg-white px-3 py-1.5 text-center text-xs font-black text-slate-600 shadow-sm ring-1 ring-slate-100">{periodText}</div>
       </div>
       <div className="mt-2 text-3xl font-black text-slate-900">{formatMeasure(value, widget.measure)}</div>
       <div className="mt-3 flex flex-wrap items-center gap-2 text-xs font-bold text-slate-500">
@@ -2455,7 +2485,9 @@ export default function AtelierAnalysePage() {
   const [addMenuOpen, setAddMenuOpen] = useState(false)
   const [configPanelTop, setConfigPanelTop] = useState(120)
   const [aiQuestion, setAiQuestion] = useState('')
+  const [aiMode, setAiMode] = useState<AiMode>('view')
   const [aiAnswer, setAiAnswer] = useState<string | null>(null)
+  const [aiSql, setAiSql] = useState<string | null>(null)
   const [aiError, setAiError] = useState<string | null>(null)
   const [aiLoading, setAiLoading] = useState(false)
   const [aiWidgetProposals, setAiWidgetProposals] = useState<AiWidgetProposal[]>([])
@@ -2955,7 +2987,10 @@ export default function AtelierAnalysePage() {
     setSaveMessage(`${nextWidgets.length} widget(s) IA ajouté(s). Pense à enregistrer la vue.`)
   }
 
-  async function askAtelierAi(presetQuestion?: string) {
+  async function askAtelierAi(presetQuestion?: string, forcedMode?: AiMode) {
+    const modeForCall = forcedMode || aiMode
+    if (forcedMode && forcedMode !== aiMode) setAiMode(forcedMode)
+
     const question = String(presetQuestion ?? aiTextareaRef.current?.value ?? aiQuestion ?? '').trim()
 
     if (!question) {
@@ -2966,11 +3001,13 @@ export default function AtelierAnalysePage() {
     setAiLoading(true)
     setAiError(null)
     setAiAnswer(null)
+    setAiSql(null)
     setAiWidgetProposals([])
 
     try {
       const payload = {
         question,
+        aiMode: modeForCall,
         currentViewName: viewName,
         globalFilters,
         selectedWidget,
@@ -3011,6 +3048,7 @@ export default function AtelierAnalysePage() {
           famillesMacroCount: available.famillesMacro.length,
           typesDocument: available.typesDocument,
           clientsCount: available.clients.length,
+          controlledSchema: ATELIER_AI_CONTROLLED_SCHEMA,
         },
         versions: {
           front: ATELIER_FRONT_VERSION,
@@ -3018,7 +3056,8 @@ export default function AtelierAnalysePage() {
         },
       }
 
-      const response = await fetch('/api/atelier-ai', {
+      const endpoint = modeForCall === 'aggregated_db' ? '/api/atelier-ai-db' : '/api/atelier-ai'
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -3032,6 +3071,7 @@ export default function AtelierAnalysePage() {
 
       setAiQuestion(question)
       setAiAnswer(data?.answer || 'Réponse vide.')
+      setAiSql(typeof data?.sql === 'string' ? data.sql : null)
       const proposals = Array.isArray(data?.proposed_widgets) ? data.proposed_widgets : Array.isArray(data?.proposedWidgets) ? data.proposedWidgets : []
       setAiWidgetProposals(proposals)
     } catch (e: any) {
@@ -3051,7 +3091,6 @@ export default function AtelierAnalysePage() {
             <div>
               <div className="flex flex-wrap items-center gap-3">
                 <h1 className="text-3xl font-black tracking-tight">Atelier d’analyse</h1>
-                <span className="inline-flex rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-black text-blue-700">Version front : {ATELIER_FRONT_VERSION}</span>
               </div>
               <p className="mt-2 text-sm text-slate-600">Créez vos propres widgets à partir des indicateurs factures et activité.</p>
             </div>
@@ -3081,19 +3120,22 @@ export default function AtelierAnalysePage() {
           {error && <div className="mt-4 rounded-xl bg-red-50 p-3 text-sm font-bold text-red-700">{error}</div>}
         </section>
 
-        <section className="grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm md:grid-cols-2 xl:grid-cols-10">
-          <MultiSelect label="Source" values={['factures', 'activite', 'devis', 'flux_articles', 'mixte']} selected={globalFilters.sources} onChange={(v) => setGlobalFilters((p) => ({ ...p, sources: v as DataSource[] }))} />
-          <MultiSelect label="Année" values={available.years.map(String)} selected={globalFilters.years.map(String)} onChange={(v) => setGlobalFilters((p) => ({ ...p, years: v.map(Number) }))} />
-          <MultiSelect label="Mois" values={available.months.map((m) => `${m} - ${monthLabel(m)}`)} selected={globalFilters.months.map((m) => `${m} - ${monthLabel(m)}`)} onChange={(v) => setGlobalFilters((p) => ({ ...p, months: v.map((x) => Number(x.split(' - ')[0])) }))} />
-          <MultiSelect label="Agence" values={available.agences} selected={globalFilters.agences} onChange={(v) => setGlobalFilters((p) => ({ ...p, agences: v }))} />
-          <MultiSelect label="Dépôt" values={available.depots} selected={globalFilters.depots || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, depots: v }))} />
-          <MultiSelect label="Collab. facture" values={available.collaborateursFacture} selected={globalFilters.collaborateursFacture || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, collaborateursFacture: v, collaborateurs: v }))} />
-          <MultiSelect label="Collab. tiers" values={available.collaborateursTiers} selected={globalFilters.collaborateursTiers || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, collaborateursTiers: v }))} />
-          <MultiSelect label="Dépt tiers" values={available.departementsTiers} selected={globalFilters.departementsTiers || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, departementsTiers: v }))} />
-          <MultiSelect label="Famille macro" values={available.famillesMacro} selected={globalFilters.famillesMacro} onChange={(v) => setGlobalFilters((p) => ({ ...p, famillesMacro: v }))} />
-          <MultiSelect label="Type document" values={relevantDocumentTypes(globalFilters.sources.includes('mixte') || globalFilters.sources.length !== 1 ? 'mixte' : globalFilters.sources[0], available.typesDocument)} selected={globalFilters.typesDocument} onChange={(v) => setGlobalFilters((p) => ({ ...p, typesDocument: v }))} />
-          <FilterSelect
-            label="Hors statistique"
+        <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="flex w-full flex-nowrap items-center gap-2">
+            <MultiSelect compact className="min-w-0 flex-1" label="Source" values={['factures', 'activite', 'devis', 'flux_articles', 'mixte']} selected={globalFilters.sources} onChange={(v) => setGlobalFilters((p) => ({ ...p, sources: v as DataSource[] }))} />
+            <MultiSelect compact className="min-w-0 flex-1" label="Année" values={available.years.map(String)} selected={globalFilters.years.map(String)} onChange={(v) => setGlobalFilters((p) => ({ ...p, years: v.map(Number) }))} />
+            <MultiSelect compact className="min-w-0 flex-1" label="Mois" values={available.months.map((m) => `${m} - ${monthLabel(m)}`)} selected={globalFilters.months.map((m) => `${m} - ${monthLabel(m)}`)} onChange={(v) => setGlobalFilters((p) => ({ ...p, months: v.map((x) => Number(x.split(' - ')[0])) }))} />
+            <MultiSelect compact className="min-w-0 flex-1" label="Agence" values={available.agences} selected={globalFilters.agences} onChange={(v) => setGlobalFilters((p) => ({ ...p, agences: v }))} />
+            <MultiSelect compact className="min-w-0 flex-1" label="Dépôt" values={available.depots} selected={globalFilters.depots || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, depots: v }))} />
+            <MultiSelect compact className="min-w-0 flex-1" label="Collab. facture" values={available.collaborateursFacture} selected={globalFilters.collaborateursFacture || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, collaborateursFacture: v, collaborateurs: v }))} />
+            <MultiSelect compact className="min-w-0 flex-1" label="Collab. tiers" values={available.collaborateursTiers} selected={globalFilters.collaborateursTiers || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, collaborateursTiers: v }))} />
+            <MultiSelect compact className="min-w-0 flex-1" label="Dépt tiers" values={available.departementsTiers} selected={globalFilters.departementsTiers || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, departementsTiers: v }))} />
+            <MultiSelect compact className="min-w-0 flex-1" label="Famille macro" values={available.famillesMacro} selected={globalFilters.famillesMacro} onChange={(v) => setGlobalFilters((p) => ({ ...p, famillesMacro: v }))} />
+            <MultiSelect compact className="min-w-0 flex-1" label="Type document" values={relevantDocumentTypes(globalFilters.sources.includes('mixte') || globalFilters.sources.length !== 1 ? 'mixte' : globalFilters.sources[0], available.typesDocument)} selected={globalFilters.typesDocument} onChange={(v) => setGlobalFilters((p) => ({ ...p, typesDocument: v }))} />
+            <FilterSelect
+              compact
+              className="min-w-0 flex-1"
+              label="Hors statistique"
             value={globalFilters.horsStatistique}
             onChange={(v) => setGlobalFilters((p) => ({ ...p, horsStatistique: v as GlobalFilters['horsStatistique'] }))}
             options={[{ value: 'non', label: 'Exclu' }, { value: 'oui', label: 'Uniquement' }, { value: 'tous', label: 'Tous' }]}
@@ -3102,23 +3144,24 @@ export default function AtelierAnalysePage() {
           <button
             type="button"
             onClick={() => setShowClientFilters((value) => !value)}
-            className={`flex h-11 items-center justify-between rounded-xl border px-3 text-sm font-black shadow-sm ${showClientFilters ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'}`}
+            className={`flex h-10 min-w-0 flex-1 items-center justify-between rounded-xl border px-2 text-xs font-black shadow-sm ${showClientFilters ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'}`}
           >
-            <span>Tiers {globalFilters.clients?.length ? `(${globalFilters.clients.length})` : ''}</span>
+            <span className="truncate">Tiers {globalFilters.clients?.length ? `(${globalFilters.clients.length})` : ''}</span>
             <span>{showClientFilters ? '▲' : '▼'}</span>
           </button>
 
           <button
             type="button"
             onClick={() => setShowAiPanel((value) => !value)}
-            className={`flex h-11 items-center justify-between rounded-xl border px-3 text-sm font-black shadow-sm ${showAiPanel ? 'border-indigo-500 bg-indigo-50 text-indigo-700' : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'}`}
+            className={`flex h-10 min-w-0 flex-1 items-center justify-between rounded-xl border px-2 text-xs font-black shadow-sm ${showAiPanel ? 'border-indigo-500 bg-indigo-50 text-indigo-700' : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'}`}
           >
-            <span>Contexte IA {aiWidgetProposals.length ? `(${aiWidgetProposals.length})` : ''}</span>
+            <span className="truncate">Contexte IA {aiWidgetProposals.length ? `(${aiWidgetProposals.length})` : ''}</span>
             <span>{showAiPanel ? '▲' : '▼'}</span>
           </button>
+          </div>
 
           {showClientFilters && (
-            <div className="md:col-span-2 xl:col-span-10 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+            <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 p-3">
               <div className="grid gap-3 md:grid-cols-[220px_1fr]">
                 <label className="block">
                   <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Filtre clients / tiers</span>
@@ -3134,7 +3177,7 @@ export default function AtelierAnalysePage() {
           )}
 
           {showAiPanel && (
-            <div className="md:col-span-2 xl:col-span-10 rounded-2xl border border-indigo-200 bg-indigo-50/40 p-3">
+            <div className="mt-3 rounded-2xl border border-indigo-200 bg-indigo-50/40 p-3">
               <div className="flex flex-col gap-3 xl:flex-row xl:items-start">
                 <div className="xl:w-72">
                   <div className="flex items-center gap-2">
@@ -3142,12 +3185,17 @@ export default function AtelierAnalysePage() {
                     <span className="rounded-full bg-white px-2 py-1 text-[10px] font-black text-indigo-700">{ATELIER_AI_VERSION}</span>
                   </div>
                   <p className="mt-1 text-xs leading-5 text-slate-600">
-                    Les widgets proposés héritent maintenant de la période active : {getActiveTemporalContext().periodLabel} · {getActiveTemporalContext().yearN1} → {getActiveTemporalContext().yearN}.
+                    Mode actif : {aiMode === 'aggregated_db' ? 'Base agrégée 4A' : 'Vue active'}. Période écran : {getActiveTemporalContext().periodLabel} · {getActiveTemporalContext().yearN1} → {getActiveTemporalContext().yearN}.
                   </p>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <button type="button" onClick={() => setAiMode('view')} className={`rounded-xl border px-3 py-2 text-xs font-black ${aiMode === 'view' ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}>Vue active</button>
+                    <button type="button" onClick={() => setAiMode('aggregated_db')} className={`rounded-xl border px-3 py-2 text-xs font-black ${aiMode === 'aggregated_db' ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}>Base agrégée 4A</button>
+                  </div>
                   <div className="mt-3 flex flex-wrap gap-2">
-                    <button type="button" onClick={() => askAtelierAi('Analyse la vue active et dis-moi les points d’attention à regarder en priorité.')} className="rounded-full border border-indigo-200 bg-white px-3 py-1.5 text-xs font-black text-indigo-700 hover:bg-indigo-100">Analyser la vue</button>
-                    <button type="button" onClick={() => askAtelierAi('Explique les filtres actuellement appliqués et leur impact probable sur les widgets.')} className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-black text-slate-700 hover:bg-slate-50">Expliquer les filtres</button>
-                    <button type="button" onClick={() => askAtelierAi('Propose 2 ou 3 widgets complémentaires applicables pour mieux comprendre cette vue.')} className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-black text-slate-700 hover:bg-slate-50">Proposer des widgets</button>
+                    <button type="button" onClick={() => askAtelierAi('Analyse la vue active et dis-moi les points d’attention à regarder en priorité.', 'view')} className="rounded-full border border-indigo-200 bg-white px-3 py-1.5 text-xs font-black text-indigo-700 hover:bg-indigo-100">Analyser la vue</button>
+                    <button type="button" onClick={() => askAtelierAi('Explique les filtres actuellement appliqués et leur impact probable sur les widgets.', 'view')} className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-black text-slate-700 hover:bg-slate-50">Expliquer les filtres</button>
+                    <button type="button" onClick={() => askAtelierAi('Interroge la base agrégée et donne-moi les principaux écarts de CA et de marge par agence, famille macro et type document sur la période active.', 'aggregated_db')} className="rounded-full border border-indigo-200 bg-white px-3 py-1.5 text-xs font-black text-indigo-700 hover:bg-indigo-100">Question base 4A</button>
+                    <button type="button" onClick={() => askAtelierAi('Propose 2 ou 3 widgets complémentaires applicables pour mieux comprendre cette vue.', 'view')} className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-black text-slate-700 hover:bg-slate-50">Proposer des widgets</button>
                   </div>
                 </div>
 
@@ -3155,21 +3203,27 @@ export default function AtelierAnalysePage() {
                   <textarea
                     ref={aiTextareaRef}
                     defaultValue={aiQuestion}
-                    placeholder="Ex : Pourquoi le CA baisse-t-il par rapport à N-1 ? Quels widgets ajouter pour expliquer l’écart ?"
+                    placeholder={aiMode === 'aggregated_db' ? 'Ex : Sur toute la base agrégée, quel est le CA 2026 par agence et l’écart vs 2025 ?' : 'Ex : Pourquoi le CA baisse-t-il par rapport à N-1 ? Quels widgets ajouter pour expliquer l’écart ?'}
                     className="min-h-[72px] w-full rounded-xl border border-slate-200 bg-white p-3 text-sm font-semibold outline-none focus:border-indigo-500"
                   />
                   <div className="flex flex-wrap items-center gap-2">
                     <button type="button" onClick={() => askAtelierAi()} disabled={aiLoading} className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-black text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60">
-                      {aiLoading ? 'Analyse en cours…' : 'Envoyer à l’assistant IA'}
+                      {aiLoading ? 'Analyse en cours…' : aiMode === 'aggregated_db' ? 'Interroger la base agrégée' : 'Envoyer à l’assistant IA'}
                     </button>
-                    <button type="button" onClick={() => { if (aiTextareaRef.current) aiTextareaRef.current.value = ''; setAiQuestion(''); setAiAnswer(null); setAiError(null); setAiWidgetProposals([]) }} className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-black text-slate-700 hover:bg-slate-50">Effacer</button>
-                    <span className="text-xs font-semibold text-slate-500">Contexte transmis : vue, filtres, widgets + période active.</span>
+                    <button type="button" onClick={() => { if (aiTextareaRef.current) aiTextareaRef.current.value = ''; setAiQuestion(''); setAiAnswer(null); setAiSql(null); setAiError(null); setAiWidgetProposals([]) }} className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-black text-slate-700 hover:bg-slate-50">Effacer</button>
+                    <span className="text-xs font-semibold text-slate-500">{aiMode === 'aggregated_db' ? 'Contexte transmis : question + filtres + schéma agrégé autorisé. Exécution SQL read-only côté serveur.' : 'Contexte transmis : vue, filtres, widgets + période active.'}</span>
                   </div>
                   {aiError && <div className="rounded-xl bg-red-50 p-3 text-sm font-bold text-red-700">{aiError}</div>}
                   {aiAnswer && (
                     <div className="rounded-xl border border-indigo-100 bg-white p-3">
                       <div className="mb-1 text-xs font-black uppercase tracking-wide text-indigo-700">Réponse de l’assistant</div>
                       <div className="whitespace-pre-wrap text-sm leading-6 text-slate-800">{aiAnswer}</div>
+                      {aiSql && (
+                        <details className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                          <summary className="cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600">SQL contrôlé exécuté</summary>
+                          <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap text-xs font-semibold text-slate-700">{aiSql}</pre>
+                        </details>
+                      )}
                     </div>
                   )}
                   {aiWidgetProposals.length > 0 && (
