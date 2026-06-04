@@ -124,6 +124,108 @@ function safeText(value: any, fallback = 'NON RENSEIGNE') {
   return text || fallback
 }
 
+function blgLinkKey(value: any) {
+  return String(value ?? '').trim()
+}
+
+function blgLinkCandidates(value: any) {
+  const raw = blgLinkKey(value)
+  if (!raw || raw === '—') return []
+
+  const candidates = new Set<string>([raw])
+  const separators = [' — ', ' - ', ' · ', ' | ', ' › ']
+  separators.forEach((separator) => {
+    if (raw.includes(separator)) {
+      const first = raw.split(separator)[0]?.trim()
+      if (first) candidates.add(first)
+    }
+  })
+
+  const firstToken = raw.split(/\s+/)[0]?.trim()
+  if (firstToken && /^[A-Za-z0-9_-]+$/.test(firstToken)) candidates.add(firstToken)
+
+  return Array.from(candidates)
+}
+
+function findBlgHref(links: Record<string, string>, value: any) {
+  for (const candidate of blgLinkCandidates(value)) {
+    if (links[candidate]) return links[candidate]
+  }
+  return null
+}
+
+async function fetchArticleBlgLinks() {
+  const output: Record<string, string> = {}
+  const chunkSize = 1000
+  let from = 0
+
+  while (true) {
+    const { data, error } = await supabase
+      .from('ref_articles')
+      .select('reference_article,lien_blg_article')
+      .not('lien_blg_article', 'is', null)
+      .range(from, from + chunkSize - 1)
+
+    if (error) throw error
+    const rows = (data || []) as Record<string, any>[]
+    rows.forEach((row) => {
+      const reference = blgLinkKey(row.reference_article)
+      const href = blgLinkKey(row.lien_blg_article)
+      if (reference && href) output[reference] = href
+    })
+    if (rows.length < chunkSize) break
+    from += chunkSize
+  }
+
+  return output
+}
+
+async function fetchDocumentBlgLinks() {
+  const output: Record<string, string> = {}
+  const chunkSize = 1000
+  let from = 0
+
+  while (true) {
+    const { data, error } = await supabase
+      .from('blg_link')
+      .select('numero_piece,lien_blg_doc')
+      .not('lien_blg_doc', 'is', null)
+      .range(from, from + chunkSize - 1)
+
+    if (error) throw error
+    const rows = (data || []) as Record<string, any>[]
+    rows.forEach((row) => {
+      const numero = blgLinkKey(row.numero_piece)
+      const href = blgLinkKey(row.lien_blg_doc)
+      if (numero && href) output[numero] = href
+    })
+    if (rows.length < chunkSize) break
+    from += chunkSize
+  }
+
+  return output
+}
+
+function LinkedArticleReference({ reference, links }: { reference: string; links: Record<string, string> }) {
+  const href = findBlgHref(links, reference)
+  if (!href) return <>{reference || '—'}</>
+  return (
+    <a href={href} target="_blank" rel="noopener noreferrer" className="font-black text-blue-700 underline decoration-blue-300 underline-offset-2 hover:text-blue-900">
+      {reference || '—'}
+    </a>
+  )
+}
+
+function LinkedDocumentReference({ numero, links }: { numero: string; links: Record<string, string> }) {
+  const href = findBlgHref(links, numero)
+  if (!href) return <>{numero || '—'}</>
+  return (
+    <a href={href} target="_blank" rel="noopener noreferrer" className="font-black text-blue-700 underline decoration-blue-300 underline-offset-2 hover:text-blue-900">
+      {numero || '—'}
+    </a>
+  )
+}
+
 function normalizeFlux(value: any): Flux {
   const text = safeText(value, 'DEVIS').toUpperCase()
   if (text === 'CDC' || text === 'BL' || text === 'FACTURE') return text
@@ -313,6 +415,8 @@ export default function ApprovisionnementsPage() {
   const [error, setError] = useState<string | null>(null)
   const [maintenanceLoading, setMaintenanceLoading] = useState(false)
   const [maintenanceMessage, setMaintenanceMessage] = useState<string | null>(null)
+  const [articleBlgLinks, setArticleBlgLinks] = useState<Record<string, string>>({})
+  const [documentBlgLinks, setDocumentBlgLinks] = useState<Record<string, string>>({})
 
   const selectedReferenceCodes = useMemo(
     () => references.map(referenceCode).filter(Boolean),
@@ -328,6 +432,30 @@ export default function ApprovisionnementsPage() {
     p_familles: familles,
     p_references: selectedReferenceCodes,
   }), [selectedYear, includeHorsStat, depots, collaborateursTiers, famillesMacro, familles, selectedReferenceCodes])
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadBlgLinks() {
+      try {
+        const [articlesResult, documentsResult] = await Promise.allSettled([
+          fetchArticleBlgLinks(),
+          fetchDocumentBlgLinks(),
+        ])
+        if (!cancelled) {
+          setArticleBlgLinks(articlesResult.status === 'fulfilled' ? articlesResult.value : {})
+          setDocumentBlgLinks(documentsResult.status === 'fulfilled' ? documentsResult.value : {})
+        }
+      } catch (exception) {
+        console.warn('Liens BLG articles/documents non chargés', exception)
+      }
+    }
+
+    void loadBlgLinks()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   async function loadOptions(yearToLoad = selectedYear) {
     setLoadingOptions(true)
@@ -1215,10 +1343,10 @@ export default function ApprovisionnementsPage() {
                     <tr key={`${row.famille}-${row.reference_article}-${row.type_document}-${row.mois}-${row.depot}-${row.numero_devis}`} className="border-b border-slate-100 odd:bg-slate-50">
                       <td className="px-3 py-2 font-bold">{row.famille_macro}</td>
                       <td className="px-3 py-2">{row.famille}</td>
-                      <td className="px-3 py-2 font-mono text-xs">{row.reference_article}</td>
+                      <td className="px-3 py-2 font-mono text-xs"><LinkedArticleReference reference={row.reference_article} links={articleBlgLinks} /></td>
                       <td className="px-3 py-2">{row.designation}</td>
                       <td className="px-3 py-2">{row.depot || '—'}</td>
-                      <td className="px-3 py-2 font-mono text-xs">{row.numero_devis || '—'}</td>
+                      <td className="px-3 py-2 font-mono text-xs"><LinkedDocumentReference numero={row.numero_devis} links={documentBlgLinks} /></td>
                       <td className="px-3 py-2">{monthLabel(row.mois)}</td>
                       <td className="px-3 py-2 font-bold" style={{ color: FLUX_COLORS[row.type_document] }}>{FLUX_LABELS[row.type_document]}</td>
                       <td className="px-3 py-2 text-right font-bold">{formatNumber(row.nb_lignes)}</td>

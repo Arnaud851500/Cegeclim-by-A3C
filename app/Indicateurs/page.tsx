@@ -36,7 +36,6 @@ type AggRow = {
   periode: string
   collaborateur: string
   agence_collaborateur: string
-  depot: string
   numero_tiers: string
   intitule_tiers: string
   famille: string
@@ -53,7 +52,6 @@ type Filters = {
   periodes: string[]
   collaborateurs: string[]
   agencesCollaborateurs: string[]
-  depots: string[]
   tiers: string[]
   famillesMacro: string[]
   activityOptions: ActivityFilterOption[]
@@ -201,6 +199,114 @@ function safeNumber(value: any) {
 function safeText(value: any, fallback = 'NON RENSEIGNE') {
   const text = String(value ?? '').trim()
   return text || fallback
+}
+
+function blgLinkKey(value: any) {
+  return String(value ?? '').trim()
+}
+
+function blgLinkCandidates(value: any) {
+  const raw = blgLinkKey(value)
+  if (!raw || raw === '—') return []
+
+  const candidates = new Set<string>([raw])
+  const separators = [' — ', ' - ', ' · ', ' | ', ' › ']
+  separators.forEach((separator) => {
+    if (raw.includes(separator)) {
+      const first = raw.split(separator)[0]?.trim()
+      if (first) candidates.add(first)
+    }
+  })
+
+  const firstToken = raw.split(/\s+/)[0]?.trim()
+  if (firstToken && /^[A-Za-z0-9_-]+$/.test(firstToken)) candidates.add(firstToken)
+
+  return Array.from(candidates)
+}
+
+function findBlgHref(links: Record<string, string>, value: any) {
+  for (const candidate of blgLinkCandidates(value)) {
+    if (links[candidate]) return links[candidate]
+  }
+  return null
+}
+
+async function fetchTiersBlgLinks() {
+  const output: Record<string, string> = {}
+  const chunkSize = 1000
+  let from = 0
+
+  while (true) {
+    const { data, error } = await supabase
+      .from('ref_tiers')
+      .select('numero_tiers,lien_blg_tiers')
+      .not('lien_blg_tiers', 'is', null)
+      .range(from, from + chunkSize - 1)
+
+    if (error) throw error
+    const rows = (data || []) as RawAggRow[]
+    rows.forEach((row) => {
+      const numero = blgLinkKey(row.numero_tiers)
+      const href = blgLinkKey(row.lien_blg_tiers)
+      if (numero && href) output[numero] = href
+    })
+    if (rows.length < chunkSize) break
+    from += chunkSize
+  }
+
+  return output
+}
+
+async function fetchDocumentBlgLinks() {
+  const output: Record<string, string> = {}
+  const chunkSize = 1000
+  let from = 0
+
+  while (true) {
+    const { data, error } = await supabase
+      .from('blg_link')
+      .select('numero_piece,lien_blg_doc')
+      .not('lien_blg_doc', 'is', null)
+      .range(from, from + chunkSize - 1)
+
+    if (error) throw error
+    const rows = (data || []) as RawAggRow[]
+    rows.forEach((row) => {
+      const numero = blgLinkKey(row.numero_piece)
+      const href = blgLinkKey(row.lien_blg_doc)
+      if (numero && href) output[numero] = href
+    })
+    if (rows.length < chunkSize) break
+    from += chunkSize
+  }
+
+  return output
+}
+
+function LinkedTiersValue({ numero, intitule, links }: { numero: string; intitule: string; links: Record<string, string> }) {
+  const label = `${numero || '—'} · ${intitule || 'NON RENSEIGNE'}`
+  const lookupValue = numero || intitule
+  const href = findBlgHref(links, lookupValue)
+  const visibleNumero = blgLinkCandidates(lookupValue).find((candidate) => links[candidate]) || numero || '—'
+  if (!href) return <>{label}</>
+  return (
+    <>
+      <a href={href} target="_blank" rel="noopener noreferrer" className="font-black text-blue-700 underline decoration-blue-300 underline-offset-2 hover:text-blue-900">
+        {visibleNumero}
+      </a>
+      <span> · {intitule || 'NON RENSEIGNE'}</span>
+    </>
+  )
+}
+
+function LinkedDocumentValue({ numero, links }: { numero: string; links: Record<string, string> }) {
+  const href = findBlgHref(links, numero)
+  if (!href) return <>{numero || '—'}</>
+  return (
+    <a href={href} target="_blank" rel="noopener noreferrer" className="font-black text-blue-700 underline decoration-blue-300 underline-offset-2 hover:text-blue-900">
+      {numero || '—'}
+    </a>
+  )
 }
 
 function safeBool(value: any) {
@@ -385,7 +491,6 @@ function normalizeAggRow(row: RawAggRow, source: SourceType): AggRow {
     periode: periodeRaw || `${annee}-${String(mois).padStart(2, '0')}`,
     collaborateur: safeText(row.collaborateur, 'NON AFFECTE'),
     agence_collaborateur: safeText(row.agence_collaborateur || row.agence, 'NON AFFECTE'),
-    depot: safeText(row.depot, 'NON RENSEIGNE'),
     numero_tiers: safeText(row.numero_tiers || row.numero_tiers_entete || row.code_tiers, 'NON RENSEIGNE'),
     intitule_tiers: safeText(row.intitule_tiers || row.intitule_tiers_entete || row.tiers, 'NON RENSEIGNE'),
     famille: safeText(row.famille, 'NON RENSEIGNE'),
@@ -1080,13 +1185,14 @@ export default function IndicateursCaMargePage() {
   const [rows, setRows] = useState<AggRow[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [tiersBlgLinks, setTiersBlgLinks] = useState<Record<string, string>>({})
+  const [documentBlgLinks, setDocumentBlgLinks] = useState<Record<string, string>>({})
 
   const [selectedYears, setSelectedYears] = useState<number[]>([])
   const [filters, setFilters] = useState<Filters>({
     periodes: [],
     collaborateurs: [],
     agencesCollaborateurs: [],
-    depots: [],
     tiers: [],
     famillesMacro: [],
     activityOptions: ['BL_MX', 'BL_M', 'BR'],
@@ -1160,6 +1266,30 @@ export default function IndicateursCaMargePage() {
   useEffect(() => {
     let cancelled = false
 
+    async function loadBlgLinks() {
+      try {
+        const [tiersResult, documentsResult] = await Promise.allSettled([
+          fetchTiersBlgLinks(),
+          fetchDocumentBlgLinks(),
+        ])
+        if (!cancelled) {
+          setTiersBlgLinks(tiersResult.status === 'fulfilled' ? tiersResult.value : {})
+          setDocumentBlgLinks(documentsResult.status === 'fulfilled' ? documentsResult.value : {})
+        }
+      } catch (exception) {
+        console.warn('Liens BLG tiers/documents non chargés', exception)
+      }
+    }
+
+    void loadBlgLinks()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+
     async function loadDetailDocuments() {
       if (!detailContext || detailMode !== 'documents') {
         setRawFactureDetailRows([])
@@ -1212,7 +1342,6 @@ export default function IndicateursCaMargePage() {
       periodes: getUnique(rows.map((r) => r.periode)).sort(),
       collaborateurs: getUnique(rows.map((r) => r.collaborateur)),
       agencesCollaborateurs: getUnique(rows.map((r) => r.agence_collaborateur)),
-      depots: getUnique(rows.map((r) => r.depot)),
       tiers: getUnique(rows.map((r) => r.intitule_tiers || r.numero_tiers)),
       famillesMacro: getUnique(rows.map((r) => r.famille_macro)),
     }
@@ -1231,7 +1360,6 @@ export default function IndicateursCaMargePage() {
       if (filters.periodes.length && !filters.periodes.includes(row.periode)) return false
       if (filters.collaborateurs.length && !filters.collaborateurs.includes(row.collaborateur || '')) return false
       if (filters.agencesCollaborateurs.length && !filters.agencesCollaborateurs.includes(row.agence_collaborateur || '')) return false
-      if (filters.depots.length && !filters.depots.includes(row.depot || '')) return false
       if (filters.tiers.length && !filters.tiers.includes(tiersLabel)) return false
       if (filters.famillesMacro.length && !filters.famillesMacro.includes(row.famille_macro || '')) return false
       if (filters.horsStatistique === 'non' && row.hors_statistique) return false
@@ -1274,7 +1402,6 @@ export default function IndicateursCaMargePage() {
   const activeFilterSummaryText = useMemo(() => {
     const parts: string[] = [`Mois affiché : ${analysisMonthLabel} / Période analysée : 01-${analysisMonthLabel}`]
     if (filters.agencesCollaborateurs.length) parts.push(`Agence : ${filters.agencesCollaborateurs.join(', ')}`)
-    if (filters.depots.length) parts.push(`Dépôt : ${filters.depots.join(', ')}`)
     if (filters.collaborateurs.length) parts.push(`Collaborateur : ${filters.collaborateurs.join(', ')}`)
     if (filters.tiers.length) parts.push(`Tiers : ${filters.tiers.slice(0, 4).join(', ')}${filters.tiers.length > 4 ? '…' : ''}`)
     if (filters.famillesMacro.length) parts.push(`Famille macro : ${filters.famillesMacro.join(', ')}`)
@@ -2038,7 +2165,6 @@ export default function IndicateursCaMargePage() {
             <MultiSelectFilter label="Mois / année" values={availableFilters.periodes} selected={filters.periodes} onChange={(v) => updateFilter('periodes', v)} />
             <AnalysisMonthSelect value={analysisMonthOverride} onChange={setAnalysisMonthOverride} />
             <MultiSelectFilter label="Agence collaborateur" values={availableFilters.agencesCollaborateurs} selected={filters.agencesCollaborateurs} onChange={(v) => updateFilter('agencesCollaborateurs', v)} />
-            <MultiSelectFilter label="Dépôt" values={availableFilters.depots} selected={filters.depots} onChange={(v) => updateFilter('depots', v)} />
             <MultiSelectFilter label="Collaborateur" values={availableFilters.collaborateurs} selected={filters.collaborateurs} onChange={(v) => updateFilter('collaborateurs', v)} />
             <MultiSelectFilter label="Tiers" values={availableFilters.tiers} selected={filters.tiers} onChange={(v) => updateFilter('tiers', v)} />
             <MultiSelectFilter label="Famille macro" values={availableFilters.famillesMacro} selected={filters.famillesMacro} onChange={(v) => updateFilter('famillesMacro', v)} />
@@ -2218,9 +2344,9 @@ export default function IndicateursCaMargePage() {
                     <tr key={row.id} className="hover:bg-slate-50">
                       <td className="border border-slate-200 px-3 py-2 font-bold">{row.niveau}</td>
                       {detailMode !== 'tiers' && <td className="border border-slate-200 px-3 py-2">{row.type_piece}</td>}
-                      {detailMode === 'documents' && <td className="border border-slate-200 px-3 py-2 font-black">{row.numero_document || '—'}</td>}
+                      {detailMode === 'documents' && <td className="border border-slate-200 px-3 py-2 font-black"><LinkedDocumentValue numero={row.numero_document} links={documentBlgLinks} /></td>}
                       {detailMode === 'documents' && <td className="border border-slate-200 px-3 py-2">{row.date_document || row.periode}</td>}
-                      <td className="border border-slate-200 px-3 py-2">{row.numero_tiers} · {row.intitule_tiers}</td>
+                      <td className="border border-slate-200 px-3 py-2"><LinkedTiersValue numero={row.numero_tiers} intitule={row.intitule_tiers} links={tiersBlgLinks} /></td>
                       <td className="border border-slate-200 px-3 py-2">{row.collaborateur}</td>
                       <td className="border border-slate-200 px-3 py-2">{row.agence_collaborateur_liee || row.agence}</td>
                       <td className="border border-slate-200 px-3 py-2">{row.agence}</td>

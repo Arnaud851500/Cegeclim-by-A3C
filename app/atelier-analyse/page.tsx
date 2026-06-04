@@ -182,6 +182,12 @@ type AiCellLinksByRow = Record<string, Record<string, AiCellLink>>
 
 type AiMode = 'view' | 'aggregated_db'
 
+type BlgReferenceLinks = {
+  tiers: Record<string, string>
+  articles: Record<string, string>
+  documents: Record<string, string>
+}
+
 type SavedView = {
   id: string
   name: string
@@ -384,6 +390,110 @@ function safeNumber(value: any) {
 function safeText(value: any, fallback = 'NON RENSEIGNE') {
   const text = String(value ?? '').trim()
   return text || fallback
+}
+
+function blgLinkKey(value: any) {
+  return String(value ?? '').trim()
+}
+
+function blgLinkCandidates(value: any) {
+  const raw = blgLinkKey(value)
+  if (!raw || raw === '—' || raw === 'TOTAL') return []
+
+  const candidates = new Set<string>([raw])
+  const separators = [' — ', ' - ', ' · ', ' | ', ' › ']
+  separators.forEach((separator) => {
+    if (raw.includes(separator)) {
+      const first = raw.split(separator)[0]?.trim()
+      if (first) candidates.add(first)
+    }
+  })
+
+  const firstToken = raw.split(/\s+/)[0]?.trim()
+  if (firstToken && /^[A-Za-z0-9_-]+$/.test(firstToken)) candidates.add(firstToken)
+
+  return Array.from(candidates)
+}
+
+function findBlgHref(map: Record<string, string> | undefined, value: any) {
+  if (!map) return null
+  for (const candidate of blgLinkCandidates(value)) {
+    if (map[candidate]) return map[candidate]
+  }
+  return null
+}
+
+function getBlgReferenceHref(fieldOrDimension: string, value: any, links?: BlgReferenceLinks) {
+  const candidates = blgLinkCandidates(value)
+  if (!candidates.length) return null
+  const field = String(fieldOrDimension || '').toLowerCase()
+
+  const isTiersField =
+    field.includes('numero_tiers') ||
+    field.includes('code_tiers') ||
+    field.includes('intitule_tiers') ||
+    field === 'tiers' ||
+    (field.includes('client') && !field.includes('mode'))
+  if (isTiersField && !field.includes('departement')) return findBlgHref(links?.tiers, value)
+
+  const isArticleField = field.includes('reference_article') || field === 'reference' || field.includes('article')
+  if (isArticleField) return findBlgHref(links?.articles, value)
+
+  const isDocumentField =
+    field !== 'type_document' &&
+    (field.includes('numero_piece') ||
+      field.includes('numero_document') ||
+      field.includes('num_document') ||
+      field.includes('numero_devis') ||
+      field.includes('facture') ||
+      field.includes('devis') ||
+      field.includes('document') ||
+      field.includes('piece') ||
+      field === 'bl' ||
+      field === 'cdc')
+  if (isDocumentField) return findBlgHref(links?.documents, value)
+
+  return findBlgHref(links?.documents, value)
+}
+
+function LinkedBlgValue({ value, href, className = '' }: { value: ReactNode; href?: string | null; className?: string }) {
+  if (!href) return <>{value}</>
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={`text-blue-700 underline decoration-blue-300 underline-offset-2 hover:text-blue-900 ${className}`}
+    >
+      {value}
+    </a>
+  )
+}
+
+async function fetchReferenceLinks(tableName: string, keyColumn: string, linkColumn: string) {
+  const output: Record<string, string> = {}
+  const chunkSize = 1000
+  let from = 0
+
+  while (true) {
+    const { data, error } = await supabase
+      .from(tableName)
+      .select(`${keyColumn},${linkColumn}`)
+      .not(linkColumn, 'is', null)
+      .range(from, from + chunkSize - 1)
+
+    if (error) throw error
+    const rows = (data || []) as Record<string, any>[]
+    rows.forEach((row) => {
+      const key = blgLinkKey(row[keyColumn])
+      const href = blgLinkKey(row[linkColumn])
+      if (key && href) output[key] = href
+    })
+    if (rows.length < chunkSize) break
+    from += chunkSize
+  }
+
+  return output
 }
 
 function safeBool(value: any) {
@@ -1741,7 +1851,7 @@ function excelBodyStyle(fill = 'FFFFFF', bold = false) {
   }
 }
 
-function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetConfig }) {
+function PivotTableWidget({ rows, widget, referenceLinks }: { rows: StudioRow[]; widget: WidgetConfig; referenceLinks: BlgReferenceLinks }) {
   const [sortCell, setSortCell] = useState<{ column: string; measure: MeasureKey | 'total'; dir: 'asc' | 'desc' } | null>(null)
   const [rowSorts, setRowSorts] = useState<Array<{ partIndex: number; dir: 'asc' | 'desc' }>>([])
   const [rowDetailExpanded, setRowDetailExpanded] = useState(true)
@@ -2260,12 +2370,12 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
               {columnDimensions.length > 1
                 ? pivot.columnGroups.map((group) => (
                     <th key={`group-${group.label}`} colSpan={group.columns.length * measures.length} className="border border-slate-200 px-3 py-2 text-center font-black">
-                      {group.label}
+                      <LinkedBlgValue value={group.label} href={getBlgReferenceHref(columnDimensions[0], group.label, referenceLinks)} />
                     </th>
                   ))
                 : pivot.columns.map((column) => (
                     <th key={column.key} colSpan={measures.length} className="border border-slate-200 px-3 py-2 text-center font-black">
-                      {column.parts[0] || '—'}
+                      <LinkedBlgValue value={column.parts[0] || '—'} href={getBlgReferenceHref(columnDimensions[0], column.parts[0], referenceLinks)} />
                     </th>
                   ))}
             </tr>
@@ -2273,7 +2383,7 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
               <tr className="bg-slate-50">
                 {pivot.columns.map((column) => (
                   <th key={`sub-${column.key}`} colSpan={measures.length} className="border border-slate-200 px-3 py-2 text-center font-black">
-                    {column.parts[1] || '—'}
+                    <LinkedBlgValue value={column.parts[1] || '—'} href={getBlgReferenceHref(columnDimensions[1], column.parts[1], referenceLinks)} />
                   </th>
                 ))}
               </tr>
@@ -2300,7 +2410,10 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
                     style={rowHeaderStyle(index)}
                     className={`sticky z-20 border border-slate-200 px-3 py-2 font-bold ${row.isSubtotal ? 'bg-slate-100' : 'bg-white'}`}
                   >
-                    {row.parts[index] || (row.isSubtotal && index > 0 ? 'TOTAL' : '—')}
+                    <LinkedBlgValue
+                      value={row.parts[index] || (row.isSubtotal && index > 0 ? 'TOTAL' : '—')}
+                      href={getBlgReferenceHref(rowDimensions[index], row.parts[index], referenceLinks)}
+                    />
                   </td>
                 ))}
                 {measures.map((measure) => {
@@ -2487,11 +2600,11 @@ function SummaryMatrixWidget({ rows, widget, onUpdate }: { rows: StudioRow[]; wi
   )
 }
 
-function WidgetRenderer({ rows, widget, onUpdate }: { rows: StudioRow[]; widget: WidgetConfig; onUpdate?: (patch: Partial<WidgetConfig>) => void }) {
+function WidgetRenderer({ rows, widget, referenceLinks, onUpdate }: { rows: StudioRow[]; widget: WidgetConfig; referenceLinks: BlgReferenceLinks; onUpdate?: (patch: Partial<WidgetConfig>) => void }) {
   if (widget.type === 'kpi') return <KpiWidget rows={rows} widget={widget} />
   if (widget.type === 'bridge') return <BridgeWidget rows={rows} widget={widget} onUpdate={onUpdate} />
   if (widget.type === 'double_bridge') return <DoubleBridgeWidget rows={rows} widget={widget} onUpdate={onUpdate} />
-  if (widget.type === 'tableau') return <PivotTableWidget rows={rows} widget={widget} />
+  if (widget.type === 'tableau') return <PivotTableWidget rows={rows} widget={widget} referenceLinks={referenceLinks} />
   if (widget.type === 'synthese') return <SummaryMatrixWidget rows={rows} widget={widget} onUpdate={onUpdate} />
   if (widget.type === 'camembert') return <PieWidget rows={rows} widget={widget} />
   return <ChartWidget rows={rows} widget={widget} onUpdate={onUpdate} />
@@ -2609,7 +2722,7 @@ function AiResultChart({ rows, columns, visualization }: { rows: Record<string, 
   )
 }
 
-function AiResultTable({ rows, columns, visualization, cellLinks }: { rows: Record<string, any>[]; columns: AiColumnInfo[]; visualization: AiVisualizationSpec | null; cellLinks?: AiCellLinksByRow }) {
+function AiResultTable({ rows, columns, visualization, cellLinks, referenceLinks }: { rows: Record<string, any>[]; columns: AiColumnInfo[]; visualization: AiVisualizationSpec | null; cellLinks?: AiCellLinksByRow; referenceLinks: BlgReferenceLinks }) {
   if (!rows.length) return null
   const fallbackKeys = columns.length ? columns.map((column) => column.key) : Object.keys(rows[0] || {})
   const wantedKeys = (visualization?.columns?.length ? visualization.columns : fallbackKeys).filter((key) => fallbackKeys.includes(key))
@@ -2636,15 +2749,16 @@ function AiResultTable({ rows, columns, visualization, cellLinks }: { rows: Reco
                 {keys.map((key) => {
                   const type = aiColumnType(key, columns)
                   const link = cellLinks?.[String(rowIndex)]?.[key]
+                  const referenceHref = link?.href || getBlgReferenceHref(key, row[key], referenceLinks)
                   const cellContent = formatAiCell(row[key], key, columns)
                   return (
                     <td key={`${rowIndex}-${key}`} className={`border-b border-slate-100 px-3 py-2 align-top ${type === 'text' ? 'text-left' : 'text-right font-semibold tabular-nums'}`}>
-                      {link?.href ? (
+                      {referenceHref ? (
                         <a
-                          href={link.href}
+                          href={referenceHref}
                           target="_blank"
                           rel="noopener noreferrer"
-                          title={link.label || `${link.object_type || 'Objet'} ${link.object_number || ''}`}
+                          title={link?.label || `${link?.object_type || 'Objet BLG'} ${link?.object_number || blgLinkKey(row[key])}`}
                           className="inline-flex items-center gap-1 rounded-lg bg-blue-50 px-2 py-1 font-black text-blue-700 underline decoration-blue-200 underline-offset-2 hover:bg-blue-100 hover:text-blue-900"
                         >
                           <span>{cellContent}</span>
@@ -2663,7 +2777,7 @@ function AiResultTable({ rows, columns, visualization, cellLinks }: { rows: Reco
   )
 }
 
-function AiStructuredResult({ rows, columns, visualization, cellLinks }: { rows: Record<string, any>[]; columns: AiColumnInfo[]; visualization: AiVisualizationSpec | null; cellLinks?: AiCellLinksByRow }) {
+function AiStructuredResult({ rows, columns, visualization, cellLinks, referenceLinks }: { rows: Record<string, any>[]; columns: AiColumnInfo[]; visualization: AiVisualizationSpec | null; cellLinks?: AiCellLinksByRow; referenceLinks: BlgReferenceLinks }) {
   if (!rows.length) return null
   return (
     <div className="mt-4 rounded-2xl border border-blue-100 bg-blue-50/40 p-3">
@@ -2676,7 +2790,7 @@ function AiStructuredResult({ rows, columns, visualization, cellLinks }: { rows:
       </div>
       {visualization?.note && <p className="mt-2 text-xs font-semibold text-slate-600">{visualization.note}</p>}
       <AiResultChart rows={rows} columns={columns} visualization={visualization || { kind: 'table' }} />
-      <AiResultTable rows={rows} columns={columns} visualization={visualization} cellLinks={cellLinks} />
+      <AiResultTable rows={rows} columns={columns} visualization={visualization} cellLinks={cellLinks} referenceLinks={referenceLinks} />
     </div>
   )
 }
@@ -2689,6 +2803,7 @@ export default function AtelierAnalysePage() {
   const [widgets, setWidgets] = useState<WidgetConfig[]>([])
   const [selectedWidgetId, setSelectedWidgetId] = useState<string | null>(null)
   const [savedViews, setSavedViews] = useState<SavedView[]>([])
+  const [referenceLinks, setReferenceLinks] = useState<BlgReferenceLinks>({ tiers: {}, articles: {}, documents: {} })
   const [currentViewId, setCurrentViewId] = useState<string | null>(null)
   const [viewName, setViewName] = useState('Vue Direction')
   const [saveMessage, setSaveMessage] = useState<string | null>(null)
@@ -2869,6 +2984,34 @@ export default function AtelierAnalysePage() {
 
   useEffect(() => {
     loadSavedViews()
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadBlgReferenceLinks() {
+      try {
+        const [tiersResult, articlesResult, documentsResult] = await Promise.allSettled([
+          fetchReferenceLinks('ref_tiers', 'numero_tiers', 'lien_blg_tiers'),
+          fetchReferenceLinks('ref_articles', 'reference_article', 'lien_blg_article'),
+          fetchReferenceLinks('blg_link', 'numero_piece', 'lien_blg_doc'),
+        ])
+        if (!cancelled) {
+          setReferenceLinks({
+            tiers: tiersResult.status === 'fulfilled' ? tiersResult.value : {},
+            articles: articlesResult.status === 'fulfilled' ? articlesResult.value : {},
+            documents: documentsResult.status === 'fulfilled' ? documentsResult.value : {},
+          })
+        }
+      } catch (exception) {
+        console.warn('Liens BLG tiers/articles/documents non chargés', exception)
+      }
+    }
+
+    void loadBlgReferenceLinks()
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   const widgetSourcesKey = useMemo(
@@ -3495,7 +3638,7 @@ export default function AtelierAnalysePage() {
                     <div className="rounded-xl border border-indigo-100 bg-white p-3">
                       <div className="mb-1 text-xs font-black uppercase tracking-wide text-indigo-700">Réponse de l’assistant</div>
                       <div className="whitespace-pre-wrap text-sm leading-6 text-slate-800">{aiAnswer}</div>
-                      <AiStructuredResult rows={aiRowsPreview} columns={aiColumns} visualization={aiVisualization} cellLinks={aiCellLinks} />
+                      <AiStructuredResult rows={aiRowsPreview} columns={aiColumns} visualization={aiVisualization} cellLinks={aiCellLinks} referenceLinks={referenceLinks} />
                       {aiSql && (
                         <details className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
                           <summary className="cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600">SQL contrôlé exécuté</summary>
@@ -3565,7 +3708,7 @@ export default function AtelierAnalysePage() {
                     onDuplicate={() => duplicateWidget(widget)}
                     onMove={(direction) => moveWidget(widget.id, direction)}
                   >
-                    <WidgetRenderer rows={widgetRows} widget={widget} onUpdate={(patch) => updateWidget(widget.id, patch)} />
+                    <WidgetRenderer rows={widgetRows} widget={widget} referenceLinks={referenceLinks} onUpdate={(patch) => updateWidget(widget.id, patch)} />
                   </WidgetShell>
                 )
               })}
