@@ -7,6 +7,7 @@ export const dynamic = 'force-dynamic'
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1-mini'
 const MAX_RESULT_ROWS = 500
 const MAX_REPAIR_ATTEMPTS = 1
+const MAX_PREVIEW_ROWS = 200
 
 const ALLOWED_TABLES = [
   'indicateur_factures_mensuel',
@@ -323,7 +324,127 @@ function buildFilterHints(body: any) {
 }
 
 function resultPreview(rows: any[]) {
-  return rows.slice(0, 80)
+  return rows.slice(0, MAX_PREVIEW_ROWS)
+}
+
+type AiColumnInfo = {
+  key: string
+  label: string
+  type: 'number' | 'currency' | 'percent' | 'text'
+}
+
+type AiVisualizationSpec = {
+  kind: 'table' | 'bar' | 'line' | 'pie'
+  title: string
+  xKey?: string
+  yKeys?: string[]
+  labelKey?: string
+  valueKey?: string
+  columns: string[]
+  note?: string
+}
+
+function humanizeKey(key: string) {
+  const dictionary: Record<string, string> = {
+    annee: 'Année',
+    mois: 'Mois',
+    agence: 'Agence',
+    agence_collaborateur: 'Agence',
+    depot: 'Dépôt',
+    departement_tiers: 'Dépt tiers',
+    famille_macro: 'Famille macro',
+    famille: 'Famille',
+    type_document: 'Type document',
+    flux: 'Flux',
+    numero_tiers: 'Code tiers',
+    intitule_tiers: 'Client',
+    client_id: 'Code client',
+    client_name: 'Client',
+    reference_article: 'Référence article',
+    designation: 'Désignation',
+    ca_ht: 'CA HT',
+    ca_ht_2026: 'CA HT 2026',
+    ca_ht_2025: 'CA HT 2025',
+    marge_valeur: 'Marge €',
+    marge_pct: 'Marge %',
+    quantite: 'Quantité',
+    nb_lignes: 'Nb lignes',
+    evolution_ca_ht: 'Écart CA HT',
+    evolution_pct: 'Évolution %',
+  }
+  if (dictionary[key]) return dictionary[key]
+  return String(key || '')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+function numericValue(value: any) {
+  if (value === null || value === undefined || value === '') return null
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  const normalized = String(value).replace(/\s/g, '').replace(',', '.')
+  if (!/^[-+]?\d+(\.\d+)?$/.test(normalized)) return null
+  const parsed = Number(normalized)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function inferColumnType(key: string, rows: any[]): AiColumnInfo['type'] {
+  const lower = key.toLowerCase()
+  if (lower.includes('pct') || lower.includes('percent') || lower.includes('pourcentage') || lower.includes('taux') || lower.includes('marge_%')) return 'percent'
+  if (lower.includes('ca') || lower.includes('marge') || lower.includes('montant') || lower.includes('valeur') || lower.includes('eur')) return 'currency'
+  const values = rows.slice(0, 30).map((row) => numericValue(row?.[key])).filter((value) => value !== null)
+  return values.length ? 'number' : 'text'
+}
+
+function inferColumns(rows: any[]): AiColumnInfo[] {
+  const orderedKeys: string[] = []
+  rows.slice(0, 30).forEach((row) => {
+    Object.keys(row || {}).forEach((key) => {
+      if (!orderedKeys.includes(key)) orderedKeys.push(key)
+    })
+  })
+  return orderedKeys.map((key) => ({ key, label: humanizeKey(key), type: inferColumnType(key, rows) }))
+}
+
+function preferredNumericKeys(keys: string[]) {
+  const priority = ['ca_ht', 'ca_ht_2026', 'ca_ht_2025', 'evolution_ca_ht', 'marge_valeur', 'marge_pct', 'quantite', 'nb_lignes']
+  const lowerMap = new Map(keys.map((key) => [key.toLowerCase(), key]))
+  const preferred = priority.map((key) => lowerMap.get(key)).filter(Boolean) as string[]
+  const remaining = keys.filter((key) => !preferred.includes(key))
+  return [...preferred, ...remaining]
+}
+
+function inferVisualization(question: string, rows: any[], columns: AiColumnInfo[]): AiVisualizationSpec | null {
+  if (!rows.length || !columns.length) return null
+  const numericKeys = preferredNumericKeys(columns.filter((column) => column.type !== 'text').map((column) => column.key))
+  const textKeys = columns.filter((column) => column.type === 'text').map((column) => column.key)
+  const allKeys = columns.map((column) => column.key)
+  const q = String(question || '').toLowerCase()
+
+  const xPriority = ['mois', 'annee', 'agence', 'agence_collaborateur', 'famille_macro', 'famille', 'type_document', 'flux', 'depot', 'departement_tiers', 'numero_tiers', 'intitule_tiers', 'client_name', 'reference_article', 'designation']
+  const xKey = xPriority.find((key) => allKeys.includes(key)) || textKeys[0] || allKeys[0]
+  const yKeys = numericKeys.filter((key) => key !== xKey).slice(0, 3)
+
+  if (!yKeys.length) {
+    return { kind: 'table', title: 'Résultat détaillé', columns: allKeys.slice(0, 12), note: 'Aucune mesure numérique évidente : affichage en tableau.' }
+  }
+
+  const hasMonthlyIntent = q.includes('mois par mois') || q.includes('mensuel') || q.includes('par mois') || xKey === 'mois'
+  const hasDistributionIntent = q.includes('répartition') || q.includes('part ') || q.includes('poids ') || q.includes('% du total')
+  const smallEnoughForChart = rows.length <= 30
+
+  if (hasDistributionIntent && yKeys.length === 1 && rows.length <= 12) {
+    return { kind: 'pie', title: `Répartition par ${humanizeKey(xKey).toLowerCase()}`, labelKey: xKey, valueKey: yKeys[0], columns: allKeys.slice(0, 12) }
+  }
+
+  if (hasMonthlyIntent && smallEnoughForChart) {
+    return { kind: 'line', title: `Évolution ${yKeys.map(humanizeKey).join(' / ')} par ${humanizeKey(xKey).toLowerCase()}`, xKey, yKeys, columns: allKeys.slice(0, 12) }
+  }
+
+  if (smallEnoughForChart) {
+    return { kind: 'bar', title: `${yKeys.map(humanizeKey).join(' / ')} par ${humanizeKey(xKey).toLowerCase()}`, xKey, yKeys, columns: allKeys.slice(0, 12) }
+  }
+
+  return { kind: 'table', title: 'Résultat détaillé', columns: allKeys.slice(0, 12), note: `Le résultat contient ${rows.length} lignes : affichage tableau prioritaire.` }
 }
 
 function isRepairableSqlError(message: string) {
@@ -416,13 +537,17 @@ export async function POST(request: NextRequest) {
     const answerJson = await callOpenAIJson([
       {
         role: 'system',
-        content: `Tu es un contrôleur de gestion commercial. Réponds en français, avec des chiffres lisibles, des limites claires, et si utile 1 à 3 recommandations d'analyse. Réponds en JSON strict.` ,
+        content: `Tu es un contrôleur de gestion commercial. Réponds en français, avec des chiffres lisibles, des limites claires, et si utile 1 à 3 recommandations d'analyse. Réponds en JSON strict. Important : ne produis pas de tableau Markdown dans answer, car l'interface affichera les lignes SQL sous forme de tableau et/ou graphique structuré.` ,
       },
       {
         role: 'user',
-        content: `Question : ${question}\n\nSQL exécuté :\n${execution.sql}\n\nNombre de lignes retournées : ${rows.length}\nRésultat, aperçu :\n${compactJson(resultPreview(rows), 20000)}\n\nRetourne uniquement ce JSON : {"answer":"réponse métier en français", "proposed_widgets": []}. proposed_widgets peut rester vide.`,
+        content: `Question : ${question}\n\nSQL exécuté :\n${execution.sql}\n\nNombre de lignes retournées : ${rows.length}\nRésultat, aperçu :\n${compactJson(resultPreview(rows), 20000)}\n\nRetourne uniquement ce JSON : {"answer":"réponse métier en français, sans tableau Markdown, en 3 à 8 lignes maximum", "proposed_widgets": []}. proposed_widgets peut rester vide.`,
       },
     ])
+
+    const previewRows = resultPreview(rows)
+    const columns = inferColumns(previewRows)
+    const visualization = inferVisualization(question, previewRows, columns)
 
     return jsonResponse({
       answer: answerJson?.answer || 'La requête a été exécutée, mais la synthèse IA est vide.',
@@ -432,9 +557,12 @@ export async function POST(request: NextRequest) {
       sql_repair_reason: execution.repairReason,
       sql_first_error: execution.firstError,
       row_count: rows.length,
-      rows_preview: resultPreview(rows),
+      rows_preview: previewRows,
+      columns,
+      visualization,
       proposed_widgets: Array.isArray(answerJson?.proposed_widgets) ? answerJson.proposed_widgets : [],
       mode: 'aggregated_db',
+      version: 'STEP-5-VISUAL-RESULTS-01',
     })
   } catch (error: any) {
     return jsonResponse({ error: error?.message || String(error) }, 500)

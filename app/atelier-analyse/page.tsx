@@ -154,6 +154,23 @@ type AiWidgetProposal = Partial<WidgetConfig> & {
   confidence?: string | number
 }
 
+type AiColumnInfo = {
+  key: string
+  label?: string
+  type?: 'number' | 'currency' | 'percent' | 'text'
+}
+
+type AiVisualizationSpec = {
+  kind?: 'table' | 'bar' | 'line' | 'pie'
+  title?: string
+  xKey?: string
+  yKeys?: string[]
+  labelKey?: string
+  valueKey?: string
+  columns?: string[]
+  note?: string
+}
+
 type AiMode = 'view' | 'aggregated_db'
 
 type SavedView = {
@@ -241,7 +258,7 @@ const ATELIER_SELECT_BY_SOURCE: Record<Exclude<DataSource, 'mixte'>, string> = {
   flux_articles: ATELIER_FLUX_ARTICLES_SELECT.join(','),
 }
 const ATELIER_FRONT_VERSION = 'V2026-06-03-FLUX-ARTICLES-ATELIER-04-NO-FULL-SCAN'
-const ATELIER_AI_VERSION = 'STEP-4A-AGGREGATED-DB-QA-01'
+const ATELIER_AI_VERSION = 'STEP-5-VISUAL-RESULTS-01'
 
 const ATELIER_AI_CONTROLLED_SCHEMA = [
   {
@@ -2471,6 +2488,177 @@ function WidgetRenderer({ rows, widget, onUpdate }: { rows: StudioRow[]; widget:
   return <ChartWidget rows={rows} widget={widget} onUpdate={onUpdate} />
 }
 
+function aiNumericValue(value: any) {
+  if (value === null || value === undefined || value === '') return null
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  const parsed = Number(String(value).replace(/\s/g, '').replace(',', '.'))
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function aiColumnLabel(key: string, columns: AiColumnInfo[]) {
+  return columns.find((column) => column.key === key)?.label || String(key || '').replace(/_/g, ' ')
+}
+
+function aiColumnType(key: string, columns: AiColumnInfo[]) {
+  return columns.find((column) => column.key === key)?.type || 'text'
+}
+
+function formatAiCell(value: any, key: string, columns: AiColumnInfo[]) {
+  if (value === null || value === undefined || value === '') return '—'
+  const type = aiColumnType(key, columns)
+  const numeric = aiNumericValue(value)
+  if (numeric === null) return String(value)
+  if (type === 'currency') return formatCurrency(numeric)
+  if (type === 'percent') return formatRate(numeric)
+  return new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 2 }).format(numeric)
+}
+
+function AiResultTooltip({ active, payload, label, columns }: any) {
+  if (!active || !payload?.length) return null
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-3 text-xs shadow-xl">
+      <div className="mb-2 font-black text-slate-900">{label}</div>
+      <div className="space-y-1">
+        {payload.map((entry: any) => (
+          <div key={entry.dataKey} className="flex items-center justify-between gap-5">
+            <span>{aiColumnLabel(entry.dataKey, columns || [])}</span>
+            <span className="font-black">{formatAiCell(entry.value, entry.dataKey, columns || [])}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function AiResultChart({ rows, columns, visualization }: { rows: Record<string, any>[]; columns: AiColumnInfo[]; visualization: AiVisualizationSpec }) {
+  const kind = visualization.kind || 'table'
+  const xKey = visualization.xKey || visualization.labelKey || columns.find((column) => column.type === 'text')?.key || columns[0]?.key
+  const yKeys = (visualization.yKeys || (visualization.valueKey ? [visualization.valueKey] : []))
+    .filter((key) => key && rows.some((row) => aiNumericValue(row[key]) !== null))
+    .slice(0, 3)
+
+  if (!rows.length || !xKey || !yKeys.length || kind === 'table') return null
+
+  const chartData = rows.slice(0, 30).map((row) => {
+    const result: Record<string, any> = { ...row }
+    result.__label = String(row[xKey] ?? '—')
+    yKeys.forEach((key) => {
+      result[key] = aiNumericValue(row[key]) ?? 0
+    })
+    return result
+  })
+
+  if (kind === 'pie') {
+    const valueKey = yKeys[0]
+    return (
+      <div className="mt-4 h-[320px] rounded-2xl border border-slate-200 bg-slate-50 p-3">
+        <ResponsiveContainer width="100%" height="100%">
+          <PieChart>
+            <Tooltip content={<AiResultTooltip columns={columns} />} />
+            <Legend />
+            <Pie data={chartData} dataKey={valueKey} nameKey="__label" outerRadius={105} label>
+              {chartData.map((_entry, index) => <Cell key={`ai-pie-${index}`} fill={PALETTE[index % PALETTE.length]} />)}
+            </Pie>
+          </PieChart>
+        </ResponsiveContainer>
+      </div>
+    )
+  }
+
+  if (kind === 'line') {
+    return (
+      <div className="mt-4 h-[320px] rounded-2xl border border-slate-200 bg-slate-50 p-3">
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={chartData} margin={{ top: 15, right: 20, left: 10, bottom: 30 }}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="__label" tick={{ fontSize: 11 }} />
+            <YAxis tickFormatter={(value) => `${Math.round(Number(value) / 1000)}k`} />
+            <Tooltip content={<AiResultTooltip columns={columns} />} />
+            <Legend />
+            {yKeys.map((key, index) => (
+              <Line key={key} type="monotone" dataKey={key} name={aiColumnLabel(key, columns)} stroke={PALETTE[index % PALETTE.length]} strokeWidth={3} dot={{ r: 3 }} isAnimationActive={false} />
+            ))}
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    )
+  }
+
+  return (
+    <div className="mt-4 h-[320px] rounded-2xl border border-slate-200 bg-slate-50 p-3">
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={chartData} margin={{ top: 15, right: 20, left: 10, bottom: 45 }}>
+          <CartesianGrid strokeDasharray="3 3" />
+          <XAxis dataKey="__label" tick={{ fontSize: 10 }} interval={0} angle={chartData.length > 8 ? -25 : 0} textAnchor={chartData.length > 8 ? 'end' : 'middle'} height={chartData.length > 8 ? 65 : 35} />
+          <YAxis tickFormatter={(value) => `${Math.round(Number(value) / 1000)}k`} />
+          <Tooltip content={<AiResultTooltip columns={columns} />} />
+          <Legend />
+          {yKeys.map((key, index) => <Bar key={key} dataKey={key} name={aiColumnLabel(key, columns)} fill={PALETTE[index % PALETTE.length]} isAnimationActive={false} />)}
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
+function AiResultTable({ rows, columns, visualization }: { rows: Record<string, any>[]; columns: AiColumnInfo[]; visualization: AiVisualizationSpec | null }) {
+  if (!rows.length) return null
+  const fallbackKeys = columns.length ? columns.map((column) => column.key) : Object.keys(rows[0] || {})
+  const wantedKeys = (visualization?.columns?.length ? visualization.columns : fallbackKeys).filter((key) => fallbackKeys.includes(key))
+  const keys = wantedKeys.length ? wantedKeys : fallbackKeys
+
+  return (
+    <div className="mt-4 overflow-hidden rounded-2xl border border-slate-200 bg-white">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
+        <div className="text-xs font-black uppercase tracking-wide text-slate-600">Tableau des données retournées</div>
+        <div className="text-xs font-bold text-slate-500">{rows.length} ligne(s) affichée(s)</div>
+      </div>
+      <div className="max-h-[360px] overflow-auto">
+        <table className="min-w-full border-collapse text-xs">
+          <thead className="sticky top-0 z-10 bg-slate-100 text-slate-700">
+            <tr>
+              {keys.map((key) => (
+                <th key={key} className="border-b border-slate-200 px-3 py-2 text-left font-black whitespace-nowrap">{aiColumnLabel(key, columns)}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, rowIndex) => (
+              <tr key={`ai-row-${rowIndex}`} className={rowIndex % 2 ? 'bg-white' : 'bg-slate-50/60'}>
+                {keys.map((key) => {
+                  const type = aiColumnType(key, columns)
+                  return (
+                    <td key={`${rowIndex}-${key}`} className={`border-b border-slate-100 px-3 py-2 align-top ${type === 'text' ? 'text-left' : 'text-right font-semibold tabular-nums'}`}>
+                      {formatAiCell(row[key], key, columns)}
+                    </td>
+                  )
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+function AiStructuredResult({ rows, columns, visualization }: { rows: Record<string, any>[]; columns: AiColumnInfo[]; visualization: AiVisualizationSpec | null }) {
+  if (!rows.length) return null
+  return (
+    <div className="mt-4 rounded-2xl border border-blue-100 bg-blue-50/40 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <div className="text-xs font-black uppercase tracking-wide text-blue-700">Visualisation automatique</div>
+          <div className="mt-1 text-sm font-black text-slate-900">{visualization?.title || 'Résultat structuré'}</div>
+        </div>
+        <div className="rounded-full bg-white px-3 py-1 text-xs font-black text-blue-700">{visualization?.kind === 'line' ? 'Courbe' : visualization?.kind === 'pie' ? 'Répartition' : visualization?.kind === 'bar' ? 'Graphique' : 'Tableau'}</div>
+      </div>
+      {visualization?.note && <p className="mt-2 text-xs font-semibold text-slate-600">{visualization.note}</p>}
+      <AiResultChart rows={rows} columns={columns} visualization={visualization || { kind: 'table' }} />
+      <AiResultTable rows={rows} columns={columns} visualization={visualization} />
+    </div>
+  )
+}
+
 export default function AtelierAnalysePage() {
   const [rows, setRows] = useState<StudioRow[]>([])
   const [loading, setLoading] = useState(false)
@@ -2491,6 +2679,9 @@ export default function AtelierAnalysePage() {
   const [aiError, setAiError] = useState<string | null>(null)
   const [aiLoading, setAiLoading] = useState(false)
   const [aiWidgetProposals, setAiWidgetProposals] = useState<AiWidgetProposal[]>([])
+  const [aiRowsPreview, setAiRowsPreview] = useState<Record<string, any>[]>([])
+  const [aiColumns, setAiColumns] = useState<AiColumnInfo[]>([])
+  const [aiVisualization, setAiVisualization] = useState<AiVisualizationSpec | null>(null)
   const [showClientFilters, setShowClientFilters] = useState(false)
   const [showAiPanel, setShowAiPanel] = useState(false)
   const [maintenanceLoading, setMaintenanceLoading] = useState(false)
@@ -3003,6 +3194,9 @@ export default function AtelierAnalysePage() {
     setAiAnswer(null)
     setAiSql(null)
     setAiWidgetProposals([])
+    setAiRowsPreview([])
+    setAiColumns([])
+    setAiVisualization(null)
 
     try {
       const payload = {
@@ -3072,6 +3266,9 @@ export default function AtelierAnalysePage() {
       setAiQuestion(question)
       setAiAnswer(data?.answer || 'Réponse vide.')
       setAiSql(typeof data?.sql === 'string' ? data.sql : null)
+      setAiRowsPreview(Array.isArray(data?.rows_preview) ? data.rows_preview : [])
+      setAiColumns(Array.isArray(data?.columns) ? data.columns : [])
+      setAiVisualization(data?.visualization && typeof data.visualization === 'object' ? data.visualization : null)
       const proposals = Array.isArray(data?.proposed_widgets) ? data.proposed_widgets : Array.isArray(data?.proposedWidgets) ? data.proposedWidgets : []
       setAiWidgetProposals(proposals)
     } catch (e: any) {
@@ -3185,16 +3382,16 @@ export default function AtelierAnalysePage() {
                     <span className="rounded-full bg-white px-2 py-1 text-[10px] font-black text-indigo-700">{ATELIER_AI_VERSION}</span>
                   </div>
                   <p className="mt-1 text-xs leading-5 text-slate-600">
-                    Mode actif : {aiMode === 'aggregated_db' ? 'Base agrégée 4A' : 'Vue active'}. Période écran : {getActiveTemporalContext().periodLabel} · {getActiveTemporalContext().yearN1} → {getActiveTemporalContext().yearN}.
+                    Mode actif : {aiMode === 'aggregated_db' ? 'Base agrégée IA' : 'Vue active'}. Période écran : {getActiveTemporalContext().periodLabel} · {getActiveTemporalContext().yearN1} → {getActiveTemporalContext().yearN}.
                   </p>
                   <div className="mt-3 grid grid-cols-2 gap-2">
                     <button type="button" onClick={() => setAiMode('view')} className={`rounded-xl border px-3 py-2 text-xs font-black ${aiMode === 'view' ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}>Vue active</button>
-                    <button type="button" onClick={() => setAiMode('aggregated_db')} className={`rounded-xl border px-3 py-2 text-xs font-black ${aiMode === 'aggregated_db' ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}>Base agrégée 4A</button>
+                    <button type="button" onClick={() => setAiMode('aggregated_db')} className={`rounded-xl border px-3 py-2 text-xs font-black ${aiMode === 'aggregated_db' ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}>Base agrégée IA</button>
                   </div>
                   <div className="mt-3 flex flex-wrap gap-2">
                     <button type="button" onClick={() => askAtelierAi('Analyse la vue active et dis-moi les points d’attention à regarder en priorité.', 'view')} className="rounded-full border border-indigo-200 bg-white px-3 py-1.5 text-xs font-black text-indigo-700 hover:bg-indigo-100">Analyser la vue</button>
                     <button type="button" onClick={() => askAtelierAi('Explique les filtres actuellement appliqués et leur impact probable sur les widgets.', 'view')} className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-black text-slate-700 hover:bg-slate-50">Expliquer les filtres</button>
-                    <button type="button" onClick={() => askAtelierAi('Interroge la base agrégée et donne-moi les principaux écarts de CA et de marge par agence, famille macro et type document sur la période active.', 'aggregated_db')} className="rounded-full border border-indigo-200 bg-white px-3 py-1.5 text-xs font-black text-indigo-700 hover:bg-indigo-100">Question base 4A</button>
+                    <button type="button" onClick={() => askAtelierAi('Interroge la base agrégée et donne-moi les principaux écarts de CA et de marge par agence, famille macro et type document sur la période active.', 'aggregated_db')} className="rounded-full border border-indigo-200 bg-white px-3 py-1.5 text-xs font-black text-indigo-700 hover:bg-indigo-100">Question base IA</button>
                     <button type="button" onClick={() => askAtelierAi('Propose 2 ou 3 widgets complémentaires applicables pour mieux comprendre cette vue.', 'view')} className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-black text-slate-700 hover:bg-slate-50">Proposer des widgets</button>
                   </div>
                 </div>
@@ -3210,14 +3407,15 @@ export default function AtelierAnalysePage() {
                     <button type="button" onClick={() => askAtelierAi()} disabled={aiLoading} className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-black text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60">
                       {aiLoading ? 'Analyse en cours…' : aiMode === 'aggregated_db' ? 'Interroger la base agrégée' : 'Envoyer à l’assistant IA'}
                     </button>
-                    <button type="button" onClick={() => { if (aiTextareaRef.current) aiTextareaRef.current.value = ''; setAiQuestion(''); setAiAnswer(null); setAiSql(null); setAiError(null); setAiWidgetProposals([]) }} className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-black text-slate-700 hover:bg-slate-50">Effacer</button>
-                    <span className="text-xs font-semibold text-slate-500">{aiMode === 'aggregated_db' ? 'Contexte transmis : question + filtres + schéma agrégé autorisé. Exécution SQL read-only côté serveur.' : 'Contexte transmis : vue, filtres, widgets + période active.'}</span>
+                    <button type="button" onClick={() => { if (aiTextareaRef.current) aiTextareaRef.current.value = ''; setAiQuestion(''); setAiAnswer(null); setAiSql(null); setAiError(null); setAiWidgetProposals([]); setAiRowsPreview([]); setAiColumns([]); setAiVisualization(null) }} className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-black text-slate-700 hover:bg-slate-50">Effacer</button>
+                    <span className="text-xs font-semibold text-slate-500">{aiMode === 'aggregated_db' ? 'Contexte transmis : question + filtres + schéma agrégé autorisé + restitution structurée. Exécution SQL read-only côté serveur.' : 'Contexte transmis : vue, filtres, widgets + période active.'}</span>
                   </div>
                   {aiError && <div className="rounded-xl bg-red-50 p-3 text-sm font-bold text-red-700">{aiError}</div>}
                   {aiAnswer && (
                     <div className="rounded-xl border border-indigo-100 bg-white p-3">
                       <div className="mb-1 text-xs font-black uppercase tracking-wide text-indigo-700">Réponse de l’assistant</div>
                       <div className="whitespace-pre-wrap text-sm leading-6 text-slate-800">{aiAnswer}</div>
+                      <AiStructuredResult rows={aiRowsPreview} columns={aiColumns} visualization={aiVisualization} />
                       {aiSql && (
                         <details className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
                           <summary className="cursor-pointer text-xs font-black uppercase tracking-wide text-slate-600">SQL contrôlé exécuté</summary>
