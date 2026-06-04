@@ -181,6 +181,27 @@ function normalizeBusinessBooleanLiterals(sqlInput: string) {
   return sql
 }
 
+
+function normalizeSqlClauseSpacing(sqlInput: string) {
+  let sql = String(sqlInput || '')
+
+  // Correction défensive de l'erreur vue en production :
+  // "hors_statistique = falseGROUP BY" ou ")ORDER BY" quand une normalisation
+  // ou une génération IA colle deux clauses SQL sans espace.
+  sql = sql.replace(
+    /([)\w])(?=\b(?:where|group\s+by|order\s+by|having|limit|union|intersect|except)\b)/gi,
+    '$1 '
+  )
+  sql = sql.replace(
+    /([)\w])(?=\b(?:and|or)\s+\b)/gi,
+    '$1 '
+  )
+
+  // Nettoyage léger des espaces multiples, sans toucher aux chaînes SQL.
+  sql = sql.replace(/[ \t]{2,}/g, ' ').trim()
+  return sql
+}
+
 function normalizeKnownSqlMistakes(sqlInput: string) {
   let sql = normalizeBusinessBooleanLiterals(sqlInput)
 
@@ -194,7 +215,7 @@ function normalizeKnownSqlMistakes(sqlInput: string) {
   // Autre variante fréquente : une condition après le filtre booléen sans AND.
   sql = sql.replace(/(\bhors_statistique\s*(?:=|<>|!=|is(?:\s+not)?)\s*(?:true|false))\s+(\b(?:annee|mois|agence_collaborateur|depot|famille_macro|type_document)\b)/gi, '$1 AND $2')
 
-  return sql
+  return normalizeSqlClauseSpacing(sql)
 }
 
 function extractCteNames(sql: string) {
@@ -252,7 +273,7 @@ function validateReadonlySql(sqlInput: string) {
     finalSql = finalSql.replace(/\blimit\s+(\d+)\b/i, (_m, n) => `LIMIT ${Math.min(Number(n || MAX_RESULT_ROWS), MAX_RESULT_ROWS)}`)
   }
 
-  return finalSql
+  return normalizeSqlClauseSpacing(finalSql)
 }
 
 function compactJson(value: any, maxLength = 12000) {
@@ -310,7 +331,7 @@ async function generateSql(question: string, filterHints: any) {
     },
     {
       role: 'user',
-      content: `Question utilisateur : ${question}\n\nContexte écran et filtres à appliquer quand ils sont pertinents :\n${compactJson(filterHints)}\n\nRetourne uniquement ce JSON : {"sql":"...", "reason":"..."}. La clé sql doit contenir une seule requête SQL read-only exécutable sur PostgreSQL/Supabase. Vérifie spécialement que toutes les conditions WHERE sont séparées par AND/OR.`,
+      content: `Question utilisateur : ${question}\n\nContexte écran et filtres à appliquer quand ils sont pertinents :\n${compactJson(filterHints)}\n\nRetourne uniquement ce JSON : {"sql":"...", "reason":"..."}. La clé sql doit contenir une seule requête SQL read-only exécutable sur PostgreSQL/Supabase. Vérifie spécialement que toutes les conditions WHERE sont séparées par AND/OR et qu'il y a toujours un espace avant GROUP BY, ORDER BY, HAVING et LIMIT.`,
     },
   ])
 }
@@ -323,7 +344,7 @@ async function repairSql(question: string, filterHints: any, previousSql: string
     },
     {
       role: 'user',
-      content: `Question utilisateur : ${question}\n\nContexte écran et filtres :\n${compactJson(filterHints)}\n\nSQL qui a échoué :\n${previousSql}\n\nErreur Supabase/PostgreSQL :\n${previousError}\n\nRetourne uniquement ce JSON : {"sql":"requête corrigée", "reason":"correction effectuée"}. La requête corrigée doit être une seule requête SELECT ou WITH. Si l'erreur est proche de "mois", vérifie qu'il y a bien AND avant mois dans le WHERE.`,
+      content: `Question utilisateur : ${question}\n\nContexte écran et filtres :\n${compactJson(filterHints)}\n\nSQL qui a échoué :\n${previousSql}\n\nErreur Supabase/PostgreSQL :\n${previousError}\n\nRetourne uniquement ce JSON : {"sql":"requête corrigée", "reason":"correction effectuée"}. La requête corrigée doit être une seule requête SELECT ou WITH. Si l'erreur est proche de "mois", vérifie qu'il y a bien AND avant mois dans le WHERE. Si l'erreur est proche de "BY", vérifie qu'il y a bien un espace avant GROUP BY ou ORDER BY.`,
     },
   ])
 }
