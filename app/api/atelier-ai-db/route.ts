@@ -6,6 +6,7 @@ export const dynamic = 'force-dynamic'
 
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1-mini'
 const MAX_RESULT_ROWS = 500
+const MAX_REPAIR_ATTEMPTS = 1
 
 const ALLOWED_TABLES = [
   'indicateur_factures_mensuel',
@@ -50,6 +51,8 @@ Règles de filtres importantes :
 - Si le filtre écran horsStatistique vaut "oui" ou "Uniquement", écrire obligatoirement : hors_statistique = true.
 - Si le filtre écran horsStatistique vaut "tous", ne pas filtrer cette colonne.
 - Ne jamais comparer hors_statistique à une chaîne texte comme 'non', 'oui', 'Exclu' ou 'Tous'.
+- annee et mois sont des entiers. Pour une période active 01-06 sur 2025→2026, écrire : annee IN (2025, 2026) AND mois BETWEEN 1 AND 6.
+- Toujours séparer les conditions WHERE par AND ou OR. Ne jamais écrire "annee = 2026 mois <= 6" ni "annee IN (...) mois <= 6".
 
 Règles SQL :
 - Générer uniquement une requête SELECT ou WITH ... SELECT.
@@ -62,6 +65,15 @@ Règles SQL :
 `
 
 type OpenAIJson = Record<string, any>
+
+type SqlExecutionResult = {
+  rows: any[]
+  sql: string
+  repaired: boolean
+  generationReason?: string
+  repairReason?: string
+  firstError?: string
+}
 
 function jsonResponse(payload: Record<string, any>, status = 200) {
   return NextResponse.json(payload, { status })
@@ -100,7 +112,7 @@ async function callOpenAIJson(messages: Array<{ role: 'system' | 'user'; content
     },
     body: JSON.stringify({
       model: OPENAI_MODEL,
-      temperature: 0.1,
+      temperature: 0.05,
       response_format: { type: 'json_object' },
       messages,
     }),
@@ -125,8 +137,6 @@ function stripSql(sql: string) {
 function normalizeBusinessBooleanLiterals(sqlInput: string) {
   let sql = stripSql(sqlInput)
 
-  // L'IA peut parfois traduire le filtre écran horsStatistique='non' en SQL texte.
-  // Or hors_statistique est un booléen PostgreSQL : il faut false / true.
   sql = sql.replace(
     /(\bhors_statistique\b\s*(?:=|<>|!=)\s*)'?\s*(non|no|n|faux|false|f|0|exclu|exclude|excluded)\s*'?/gi,
     (_match, prefix) => `${prefix}false`
@@ -171,6 +181,22 @@ function normalizeBusinessBooleanLiterals(sqlInput: string) {
   return sql
 }
 
+function normalizeKnownSqlMistakes(sqlInput: string) {
+  let sql = normalizeBusinessBooleanLiterals(sqlInput)
+
+  // Correction défensive de l'erreur vue en production :
+  // PostgreSQL renvoie "syntax error at or near \"mois\"" quand l'IA écrit par exemple
+  // "WHERE annee = 2026 mois <= 6" au lieu de "WHERE annee = 2026 AND mois <= 6".
+  sql = sql.replace(/(\bannee\s*=\s*\d{4})\s+(\bmois\b)/gi, '$1 AND $2')
+  sql = sql.replace(/(\bannee\s+in\s*\([^)]*\))\s+(\bmois\b)/gi, '$1 AND $2')
+  sql = sql.replace(/(\bannee\s+between\s+\d{4}\s+and\s+\d{4})\s+(\bmois\b)/gi, '$1 AND $2')
+
+  // Autre variante fréquente : une condition après le filtre booléen sans AND.
+  sql = sql.replace(/(\bhors_statistique\s*(?:=|<>|!=|is(?:\s+not)?)\s*(?:true|false))\s+(\b(?:annee|mois|agence_collaborateur|depot|famille_macro|type_document)\b)/gi, '$1 AND $2')
+
+  return sql
+}
+
 function extractCteNames(sql: string) {
   const ctes = new Set<string>()
   const lower = sql.toLowerCase()
@@ -193,7 +219,7 @@ function normalizeTableRef(ref: string) {
 }
 
 function validateReadonlySql(sqlInput: string) {
-  const sql = normalizeBusinessBooleanLiterals(sqlInput)
+  const sql = normalizeKnownSqlMistakes(sqlInput)
 
   if (!/^\s*(select|with)\b/i.test(sql)) {
     throw new Error('La requête IA doit commencer par SELECT ou WITH.')
@@ -272,6 +298,83 @@ function resultPreview(rows: any[]) {
   return rows.slice(0, 80)
 }
 
+function isRepairableSqlError(message: string) {
+  return /syntax error|invalid input syntax|operator does not exist|column .* does not exist|missing FROM-clause|aggregate function calls cannot|must appear in the GROUP BY/i.test(message)
+}
+
+async function generateSql(question: string, filterHints: any) {
+  return callOpenAIJson([
+    {
+      role: 'system',
+      content: `Tu es un générateur SQL analytique pour un écran Supply Chain / commerce. Tu dois répondre en JSON strict uniquement. ${CONTROLLED_SCHEMA}`,
+    },
+    {
+      role: 'user',
+      content: `Question utilisateur : ${question}\n\nContexte écran et filtres à appliquer quand ils sont pertinents :\n${compactJson(filterHints)}\n\nRetourne uniquement ce JSON : {"sql":"...", "reason":"..."}. La clé sql doit contenir une seule requête SQL read-only exécutable sur PostgreSQL/Supabase. Vérifie spécialement que toutes les conditions WHERE sont séparées par AND/OR.`,
+    },
+  ])
+}
+
+async function repairSql(question: string, filterHints: any, previousSql: string, previousError: string) {
+  return callOpenAIJson([
+    {
+      role: 'system',
+      content: `Tu es un correcteur SQL PostgreSQL/Supabase. Tu dois répondre en JSON strict uniquement. Corrige la requête sans changer l'intention métier. ${CONTROLLED_SCHEMA}`,
+    },
+    {
+      role: 'user',
+      content: `Question utilisateur : ${question}\n\nContexte écran et filtres :\n${compactJson(filterHints)}\n\nSQL qui a échoué :\n${previousSql}\n\nErreur Supabase/PostgreSQL :\n${previousError}\n\nRetourne uniquement ce JSON : {"sql":"requête corrigée", "reason":"correction effectuée"}. La requête corrigée doit être une seule requête SELECT ou WITH. Si l'erreur est proche de "mois", vérifie qu'il y a bien AND avant mois dans le WHERE.`,
+    },
+  ])
+}
+
+async function executeReadonlySql(supabase: ReturnType<typeof supabaseAdmin>, sql: string) {
+  const { data, error } = await supabase.rpc('atelier_ai_run_readonly_sql', { p_sql: sql })
+  if (error) throw new Error(error.message)
+  return Array.isArray(data) ? data : data ? [data] : []
+}
+
+async function generateValidateExecuteSql(question: string, filterHints: any): Promise<SqlExecutionResult> {
+  const supabase = supabaseAdmin()
+  const sqlJson = await generateSql(question, filterHints)
+  let safeSql = validateReadonlySql(String(sqlJson?.sql || ''))
+
+  try {
+    const rows = await executeReadonlySql(supabase, safeSql)
+    return {
+      rows,
+      sql: safeSql,
+      repaired: false,
+      generationReason: String(sqlJson?.reason || ''),
+    }
+  } catch (firstError: any) {
+    const firstMessage = String(firstError?.message || firstError)
+    if (!isRepairableSqlError(firstMessage) || MAX_REPAIR_ATTEMPTS < 1) {
+      throw new Error(`Erreur Supabase RPC atelier_ai_run_readonly_sql : ${firstMessage}\n\nSQL exécuté :\n${safeSql}`)
+    }
+
+    const repairedJson = await repairSql(question, filterHints, safeSql, firstMessage)
+    safeSql = validateReadonlySql(String(repairedJson?.sql || ''))
+
+    try {
+      const rows = await executeReadonlySql(supabase, safeSql)
+      return {
+        rows,
+        sql: safeSql,
+        repaired: true,
+        generationReason: String(sqlJson?.reason || ''),
+        repairReason: String(repairedJson?.reason || ''),
+        firstError: firstMessage,
+      }
+    } catch (secondError: any) {
+      const secondMessage = String(secondError?.message || secondError)
+      throw new Error(
+        `Erreur Supabase RPC atelier_ai_run_readonly_sql après tentative de correction : ${secondMessage}\n\nPremière erreur : ${firstMessage}\n\nSQL corrigé exécuté :\n${safeSql}`
+      )
+    }
+  }
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json().catch(() => ({}))
@@ -279,27 +382,8 @@ export async function POST(request: NextRequest) {
     if (!question) return jsonResponse({ error: 'Question vide.' }, 400)
 
     const filterHints = buildFilterHints(body)
-
-    const sqlJson = await callOpenAIJson([
-      {
-        role: 'system',
-        content: `Tu es un générateur SQL analytique pour un écran Supply Chain / commerce. Tu dois répondre en JSON strict uniquement. ${CONTROLLED_SCHEMA}`,
-      },
-      {
-        role: 'user',
-        content: `Question utilisateur : ${question}\n\nContexte écran et filtres à appliquer quand ils sont pertinents :\n${compactJson(filterHints)}\n\nRetourne uniquement ce JSON : {"sql":"...", "reason":"..."}. La clé sql doit contenir une seule requête SQL read-only exécutable sur PostgreSQL/Supabase.`,
-      },
-    ])
-
-    const safeSql = validateReadonlySql(String(sqlJson?.sql || ''))
-    const supabase = supabaseAdmin()
-    const { data, error } = await supabase.rpc('atelier_ai_run_readonly_sql', { p_sql: safeSql })
-
-    if (error) {
-      throw new Error(`Erreur Supabase RPC atelier_ai_run_readonly_sql : ${error.message}`)
-    }
-
-    const rows = Array.isArray(data) ? data : data ? [data] : []
+    const execution = await generateValidateExecuteSql(question, filterHints)
+    const rows = execution.rows
 
     const answerJson = await callOpenAIJson([
       {
@@ -308,13 +392,17 @@ export async function POST(request: NextRequest) {
       },
       {
         role: 'user',
-        content: `Question : ${question}\n\nSQL exécuté :\n${safeSql}\n\nNombre de lignes retournées : ${rows.length}\nRésultat, aperçu :\n${compactJson(resultPreview(rows), 20000)}\n\nRetourne uniquement ce JSON : {"answer":"réponse métier en français", "proposed_widgets": []}. proposed_widgets peut rester vide.`,
+        content: `Question : ${question}\n\nSQL exécuté :\n${execution.sql}\n\nNombre de lignes retournées : ${rows.length}\nRésultat, aperçu :\n${compactJson(resultPreview(rows), 20000)}\n\nRetourne uniquement ce JSON : {"answer":"réponse métier en français", "proposed_widgets": []}. proposed_widgets peut rester vide.`,
       },
     ])
 
     return jsonResponse({
       answer: answerJson?.answer || 'La requête a été exécutée, mais la synthèse IA est vide.',
-      sql: safeSql,
+      sql: execution.sql,
+      sql_repaired: execution.repaired,
+      sql_generation_reason: execution.generationReason,
+      sql_repair_reason: execution.repairReason,
+      sql_first_error: execution.firstError,
       row_count: rows.length,
       rows_preview: resultPreview(rows),
       proposed_widgets: Array.isArray(answerJson?.proposed_widgets) ? answerJson.proposed_widgets : [],
