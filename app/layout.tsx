@@ -143,11 +143,16 @@ function extractLeadingCode(value: any) {
 }
 
 function parseAllowedAgences(value: any) {
-  if (Array.isArray(value)) return value.map(cleanText).filter(Boolean)
-  return cleanText(value)
-    .split(/[;,|\n]+/)
-    .map((item) => item.trim())
-    .filter(Boolean)
+  const isNoRestriction = (item: string) => {
+    const normalized = item.trim().toLowerCase()
+    return !normalized || ['global', 'tous', 'tout', 'all', '*', '[]', '{}', 'null', 'none', 'aucune'].includes(normalized)
+  }
+
+  const values = Array.isArray(value)
+    ? value.map(cleanText)
+    : cleanText(value).split(/[;,|\n]+/).map((item) => item.trim())
+
+  return values.filter((item) => !isNoRestriction(item))
 }
 
 function agenceMatchesAllowed(agence: string, allowedAgences: string[]) {
@@ -505,9 +510,10 @@ function AppShell({ children }: { children: React.ReactNode }) {
     try {
       // Version rapide via RPC Supabase : évite de charger facture_lignes dans le header global.
       const rpcName = detail ? 'get_cerfa_ko_rows_for_user' : 'get_cerfa_ko_count_for_user'
+      const rpcAllowedAgences = allowedAgences.length ? allowedAgences : null
       const rpcArgs = detail
-        ? { p_email: email, p_allowed_agences: allowedAgences, p_limit: 1000 }
-        : { p_email: email, p_allowed_agences: allowedAgences }
+        ? { p_email: email, p_allowed_agences: rpcAllowedAgences, p_limit: 1000 }
+        : { p_email: email, p_allowed_agences: rpcAllowedAgences }
       const { data: rpcData, error: rpcError } = await supabase.rpc(rpcName, rpcArgs)
 
       if (!rpcError) {
