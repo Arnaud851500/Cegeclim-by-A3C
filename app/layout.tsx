@@ -62,6 +62,8 @@ type CerfaKoRow = {
   intituleTiers: string
   reference: string
   projet: string
+  collaborateur: string
+  agence: string
   affaireDraft: string
   checked: boolean
   saving: boolean
@@ -202,6 +204,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const [cerfaError, setCerfaError] = useState<string | null>(null)
 
   const lastLoggedPathRef = useRef<string | null>(null)
+  const lastStatusRefreshRef = useRef(0)
 
   const isLoginPage = pathname === '/login'
   const isUnauthorizedPage = pathname === '/unauthorized'
@@ -360,13 +363,20 @@ function AppShell({ children }: { children: React.ReactNode }) {
     if (!sessionChecked || accessLoading || !hasSession || !email) return
     if (isLoginPage || isUnauthorizedPage) return
 
-    void refreshStatusIndicators()
+    // Ne pas bloquer le chargement des écrans métiers : on décale le calcul des lumières.
+    const initialTimer = setTimeout(() => {
+      void refreshStatusIndicators()
+    }, 900)
 
+    // Rafraîchissement raisonnable : les requêtes du header ne doivent jamais saturer l'appli.
     const interval = setInterval(() => {
       void refreshStatusIndicators()
-    }, 5 * 60 * 1000)
+    }, 15 * 60 * 1000)
 
-    return () => clearInterval(interval)
+    return () => {
+      clearTimeout(initialTimer)
+      clearInterval(interval)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionChecked, accessLoading, hasSession, email, isLoginPage, isUnauthorizedPage])
 
@@ -413,36 +423,39 @@ function AppShell({ children }: { children: React.ReactNode }) {
       return
     }
 
-    const { data, error } = await supabase
-      .from('todo_actions')
-      .select('id, assigned_to, due_date, status')
-      .eq('assigned_to', displayName)
+    try {
+      const today = todayIso()
 
-    if (error) {
+      const openBase = () => supabase
+        .from('todo_actions')
+        .select('id', { count: 'exact', head: true })
+        .eq('assigned_to', displayName)
+        .not('status', 'in', '("Terminé","Annulé")')
+
+      const { count: overdueCount, error: overdueError } = await openBase()
+        .not('due_date', 'is', null)
+        .lt('due_date', today)
+
+      if (overdueError) throw overdueError
+
+      if ((overdueCount || 0) > 0) {
+        setTodoSignal({ status: 'red', count: overdueCount || 0 })
+        return
+      }
+
+      const { count: openCount, error: openError } = await openBase()
+      if (openError) throw openError
+
+      if ((openCount || 0) > 0) {
+        setTodoSignal({ status: 'orange', count: openCount || 0 })
+        return
+      }
+
+      setTodoSignal({ status: 'green', count: 0 })
+    } catch (error) {
       console.error('todo_actions status indicator', error)
       setTodoSignal({ status: 'green', count: 0 })
-      return
     }
-
-    const openRows = (data || []).filter((row: any) => {
-      const status = normalizeLoose(row.status)
-      return status !== 'terminé' && status !== 'termine' && status !== 'annulé' && status !== 'annule'
-    })
-
-    if (!openRows.length) {
-      setTodoSignal({ status: 'green', count: 0 })
-      return
-    }
-
-    const today = todayIso()
-    const overdue = openRows.filter((row: any) => cleanText(row.due_date) && cleanText(row.due_date) < today)
-
-    if (overdue.length) {
-      setTodoSignal({ status: 'red', count: overdue.length })
-      return
-    }
-
-    setTodoSignal({ status: 'orange', count: openRows.length })
   }
 
   function openTodoList() {
@@ -470,6 +483,8 @@ function AppShell({ children }: { children: React.ReactNode }) {
           intituleTiers: cleanText(rawValue(row, ['intitule_tiers', 'intitule_tiers_entete', 'nom_tiers', 'libelle_tiers', 'tiers_libelle', 'client', 'raison_sociale'])),
           reference: cleanText(rawValue(row, ['reference_article', 'reference', 'code_article', 'article', 'ref_article'])),
           projet: cleanText(rawValue(row, ['projet', 'Projet'])),
+          collaborateur: cleanText(rawValue(row, ['collaborateur', 'collaborateur_tiers', 'collaborateur_facture', 'representant', 'commercial'])),
+          agence: cleanText(rawValue(row, ['agence_collaborateur', 'agence', 'depot', 'agence_document'])),
           affaireDraft: cleanText(rawValue(row, ['affaire', 'Affaire'])),
           checked: false,
           saving: false,
@@ -477,86 +492,116 @@ function AppShell({ children }: { children: React.ReactNode }) {
       })
   }
 
-  async function refreshCerfaKo(accessProfile?: UserAccessProfile | null) {
+  async function refreshCerfaKo(accessProfile?: UserAccessProfile | null, options?: { detail?: boolean }) {
     const profile = accessProfile || await getUserAccessProfile()
     const allowedAgences = parseAllowedAgences((profile as any)?.allowed_agence ?? (profile as any)?.allowed_agences)
+    const detail = Boolean(options?.detail)
 
-    setCerfaLoading(true)
-    setCerfaError(null)
+    if (detail) {
+      setCerfaLoading(true)
+      setCerfaError(null)
+    }
 
     try {
-      const { data: factureRows, error: factureError } = await supabase
+      // Version rapide via RPC Supabase : évite de charger facture_lignes dans le header global.
+      const rpcName = detail ? 'get_cerfa_ko_rows_for_user' : 'get_cerfa_ko_count_for_user'
+      const rpcArgs = detail
+        ? { p_email: email, p_allowed_agences: allowedAgences, p_limit: 1000 }
+        : { p_email: email, p_allowed_agences: allowedAgences }
+      const { data: rpcData, error: rpcError } = await supabase.rpc(rpcName, rpcArgs)
+
+      if (!rpcError) {
+        if (!detail) {
+          const countValue = Array.isArray(rpcData)
+            ? Number((rpcData[0] as any)?.count ?? (rpcData[0] as any)?.nb_lignes ?? 0)
+            : Number(rpcData ?? 0)
+          setCerfaKoCount(Number.isFinite(countValue) ? countValue : 0)
+          return
+        }
+
+        const rows = ((rpcData || []) as Record<string, any>[]).map((row, index) => ({
+          key: buildCerfaKey(row, index),
+          raw: row,
+          idValue: rawValue(row, ['id', 'ligne_id', 'uuid']) as string | number | null,
+          dateFacture: formatDateFr(rawValue(row, ['date_facture', 'date_piece', 'date_document', 'date'])),
+          numeroFacture: cleanText(rawValue(row, ['numero_piece', 'num_piece', 'numero_facture', 'facture', 'piece', 'document', 'document_no', 'no_document'])),
+          numeroTiers: extractLeadingCode(rawValue(row, ['numero_tiers', 'numero_tiers_entete', 'code_tiers', 'tiers', 'client_code'])),
+          intituleTiers: cleanText(rawValue(row, ['intitule_tiers', 'intitule_tiers_entete', 'nom_tiers', 'libelle_tiers', 'tiers_libelle', 'client', 'raison_sociale'])),
+          reference: cleanText(rawValue(row, ['reference_article', 'reference', 'code_article', 'article', 'ref_article'])),
+          projet: cleanText(rawValue(row, ['projet', 'Projet'])),
+          collaborateur: cleanText(rawValue(row, ['collaborateur', 'collaborateur_tiers', 'collaborateur_facture', 'representant', 'commercial'])),
+          agence: cleanText(rawValue(row, ['agence_collaborateur', 'agence', 'depot', 'agence_document'])),
+          affaireDraft: cleanText(rawValue(row, ['affaire', 'Affaire'])),
+          checked: false,
+          saving: false,
+        }))
+
+        setCerfaRows(rows)
+        setCerfaKoCount(rows.length)
+        return
+      }
+
+      console.warn(`${rpcName} indisponible, fallback limité côté client`, rpcError)
+
+      // Fallback limité : utilisé uniquement si les RPC n'ont pas encore été installées.
+      const selectColumns = [
+        'id',
+        'date_facture',
+        'numero_piece',
+        'numero_tiers_entete',
+        'intitule_tiers_entete',
+        'reference_article',
+        'projet',
+        'affaire',
+        'collaborateur',
+        'agence_collaborateur',
+      ].join(',')
+
+      const { data: factureRows, error: factureError, count } = await supabase
         .from('facture_lignes')
-        .select('*')
+        .select(detail ? selectColumns : 'id', { count: 'exact', head: !detail })
         .not('projet', 'is', null)
-        .limit(5000)
+        .neq('projet', '')
+        .limit(detail ? 1000 : 1)
 
       if (factureError) throw factureError
 
-      const projetRows = ((factureRows || []) as Record<string, any>[]).filter((row) => cleanText(rawValue(row, ['projet', 'Projet'])))
-      const tierCodes = Array.from(new Set(projetRows
-        .map((row) => extractLeadingCode(rawValue(row, ['numero_tiers', 'numero_tiers_entete', 'code_tiers', 'tiers', 'client_code'])))
-        .filter(Boolean)
-      ))
-
-      const tierAgencyByCode = new Map<string, string>()
-
-      if (tierCodes.length) {
-        const chunkSize = 500
-        for (let i = 0; i < tierCodes.length; i += chunkSize) {
-          const chunk = tierCodes.slice(i, i + chunkSize)
-          const { data: tiersData, error: tiersError } = await supabase
-            .from('ref_tiers')
-            .select('*')
-            .in('numero_tiers', chunk)
-
-          if (tiersError) {
-            console.error('ref_tiers CERFA agency lookup', tiersError)
-            continue
-          }
-
-          ;((tiersData || []) as Record<string, any>[]).forEach((tier) => {
-            const code = extractLeadingCode(rawValue(tier, ['numero_tiers', 'Numero_Tiers', 'NUMERO_TIERS', 'code_tiers', 'Code_Tiers', 'CODE_TIERS']))
-            const agence = cleanText(rawValue(tier, [
-              'agence_collaborateur',
-              'Agence_Collaborateur',
-              'AGENCE_COLLABORATEUR',
-              'agence',
-              'Agence',
-              'AGENCE',
-              'agence_rattachement',
-              'depot',
-            ]))
-            if (code) tierAgencyByCode.set(normalizeLoose(code), agence)
-          })
-        }
+      if (!detail) {
+        setCerfaKoCount(count || 0)
+        return
       }
 
-      const mapped = mapCerfaRows(projetRows, tierAgencyByCode, allowedAgences)
+      const projetRows = ((factureRows || []) as Record<string, any>[]).filter((row) => cleanText(rawValue(row, ['projet', 'Projet'])))
+      const mapped = mapCerfaRows(projetRows, new Map<string, string>(), allowedAgences)
       setCerfaRows(mapped)
       setCerfaKoCount(mapped.length)
     } catch (exception: any) {
       console.error('CERFA KO status indicator', exception)
-      setCerfaError(exception?.message || String(exception))
-      setCerfaRows([])
+      if (detail) setCerfaError(exception?.message || String(exception))
+      if (detail) setCerfaRows([])
       setCerfaKoCount(0)
     } finally {
-      setCerfaLoading(false)
+      if (detail) setCerfaLoading(false)
     }
   }
 
   async function refreshStatusIndicators() {
     if (!email || isLoginPage || isUnauthorizedPage) return
+
+    const now = Date.now()
+    if (now - lastStatusRefreshRef.current < 60_000) return
+    lastStatusRefreshRef.current = now
+
     const profile = await getUserAccessProfile()
     await Promise.all([
       refreshTodoSignal(profile),
-      refreshCerfaKo(profile),
+      refreshCerfaKo(profile, { detail: false }),
     ])
   }
 
   async function openCerfaModal() {
     setCerfaModalOpen(true)
-    await refreshCerfaKo()
+    await refreshCerfaKo(undefined, { detail: true })
   }
 
   function updateCerfaRow(key: string, patch: Partial<CerfaKoRow>) {
@@ -585,7 +630,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
         query = query.eq('id', row.idValue as any)
       } else {
         if (row.numeroFacture) query = query.eq('numero_piece', row.numeroFacture)
-        if (row.numeroTiers) query = query.eq('numero_tiers', row.numeroTiers)
+        if (row.numeroTiers) query = query.eq('numero_tiers_entete', row.numeroTiers)
         if (row.reference) query = query.eq('reference_article', row.reference)
         if (row.projet) query = query.eq('projet', row.projet)
       }
@@ -714,9 +759,9 @@ function AppShell({ children }: { children: React.ReactNode }) {
                   status={todoSignal.status}
                   count={todoSignal.count}
                   blink={todoSignal.status === 'red' && statusBlinkOn}
-                  clickable={todoSignal.count > 0}
+                  clickable
                   onClick={openTodoList}
-                  title={todoSignal.count > 0 ? 'Ouvrir la TODO List dans un nouvel onglet' : 'Aucune tâche à faire'}
+                  title={todoSignal.count > 0 ? 'Ouvrir la TODO List dans un nouvel onglet' : 'Aucune tâche à faire — cliquer pour ouvrir la TODO List'}
                 />
               </div>
             </div>
@@ -749,6 +794,8 @@ function AppShell({ children }: { children: React.ReactNode }) {
                       <th style={styles.cerfaTh}>N° Tiers</th>
                       <th style={styles.cerfaTh}>Désignation du Tiers</th>
                       <th style={styles.cerfaTh}>Référence</th>
+                      <th style={styles.cerfaTh}>Agence</th>
+                      <th style={styles.cerfaTh}>Collaborateur</th>
                       <th style={styles.cerfaTh}>Projet</th>
                       <th style={styles.cerfaTh}>Affaire</th>
                       <th style={styles.cerfaTh}>OK</th>
@@ -758,7 +805,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
                   <tbody>
                     {cerfaRows.length === 0 && !cerfaLoading ? (
                       <tr>
-                        <td colSpan={9} style={styles.cerfaEmptyCell}>Aucune ligne CERFA KO à régulariser.</td>
+                        <td colSpan={11} style={styles.cerfaEmptyCell}>Aucune ligne CERFA KO à régulariser.</td>
                       </tr>
                     ) : cerfaRows.map((row) => (
                       <tr key={row.key}>
@@ -767,6 +814,8 @@ function AppShell({ children }: { children: React.ReactNode }) {
                         <td style={styles.cerfaTdStrong}>{row.numeroTiers || '—'}</td>
                         <td style={styles.cerfaTd}>{row.intituleTiers || '—'}</td>
                         <td style={styles.cerfaTd}>{row.reference || '—'}</td>
+                        <td style={styles.cerfaTd}>{row.agence || '—'}</td>
+                        <td style={styles.cerfaTd}>{row.collaborateur || '—'}</td>
                         <td style={styles.cerfaTd}>{row.projet}</td>
                         <td style={styles.cerfaTd}>
                           <input
@@ -1193,7 +1242,7 @@ const styles: Record<string, React.CSSProperties> = {
 
   cerfaTable: {
     width: '100%',
-    minWidth: 1180,
+    minWidth: 1480,
     borderCollapse: 'collapse',
     fontSize: 13,
   },
