@@ -202,54 +202,193 @@ function safeText(value: any, fallback = 'NON RENSEIGNE') {
 }
 
 function blgLinkKey(value: any) {
-  return String(value ?? '').trim()
+  return String(value ?? '')
+    .normalize('NFKC')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[–—]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function addCandidate(target: Set<string>, value: any) {
+  const clean = blgLinkKey(value)
+  if (!clean || clean === '—' || clean === 'TOTAL') return
+  target.add(clean)
+  target.add(clean.toUpperCase())
+  target.add(clean.toLowerCase())
 }
 
 function blgLinkCandidates(value: any) {
   const raw = blgLinkKey(value)
-  if (!raw || raw === '—') return []
+  if (!raw || raw === '—' || raw === 'TOTAL') return []
 
-  const candidates = new Set<string>([raw])
-  const separators = [' — ', ' - ', ' · ', ' | ', ' › ']
+  const candidates = new Set<string>()
+  addCandidate(candidates, raw)
+
+  // Cas "A0116 - ABADIE CLIM", "A0116 — ABADIE", "A0116 · ABADIE", etc.
+  const separated = raw.match(/^\s*([A-Za-z0-9_./-]+)\s*(?:-|·|\||›)\s+.+$/)
+  if (separated?.[1]) addCandidate(candidates, separated[1])
+
+  const separators = [' — ', ' - ', ' · ', ' | ', ' › ', ' – ']
   separators.forEach((separator) => {
     if (raw.includes(separator)) {
       const first = raw.split(separator)[0]?.trim()
-      if (first) candidates.add(first)
+      if (first) addCandidate(candidates, first)
     }
   })
 
   const firstToken = raw.split(/\s+/)[0]?.trim()
-  if (firstToken && /^[A-Za-z0-9_-]+$/.test(firstToken)) candidates.add(firstToken)
+  if (firstToken && /^[A-Za-z0-9_./-]+$/.test(firstToken)) addCandidate(candidates, firstToken)
+
+  // Cas document / tiers noyé dans un libellé : FA0783516, FAR15980, A0116, C0129, etc.
+  const codedTokens = raw.match(/\b[A-Za-z]{0,5}\d{2,}[A-Za-z0-9_./-]*\b/g) || []
+  codedTokens.forEach((token) => addCandidate(candidates, token))
 
   return Array.from(candidates)
+}
+
+function addLinkEntry(output: Record<string, string>, key: any, href: any) {
+  const cleanHref = blgLinkKey(href)
+  if (!cleanHref) return
+  blgLinkCandidates(key).forEach((candidate) => {
+    output[candidate] = cleanHref
+  })
 }
 
 function findBlgHref(links: Record<string, string>, value: any) {
   for (const candidate of blgLinkCandidates(value)) {
     if (links[candidate]) return links[candidate]
+    const upper = candidate.toUpperCase()
+    if (links[upper]) return links[upper]
+    const lower = candidate.toLowerCase()
+    if (links[lower]) return links[lower]
   }
   return null
 }
 
-async function fetchTiersBlgLinks() {
+function firstNonEmpty(row: Record<string, any>, columns: string[]) {
+  for (const column of columns) {
+    const value = row[column]
+    if (value !== null && value !== undefined && String(value).trim() !== '') return value
+  }
+  return ''
+}
+
+function normalizeBlgColumnName(value: string) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '')
+}
+
+function rowValueByColumnAliases(row: Record<string, any>, columns: string[]) {
+  const normalizedAliases = new Set(columns.map((column) => normalizeBlgColumnName(column)))
+  for (const [column, value] of Object.entries(row || {})) {
+    if (!normalizedAliases.has(normalizeBlgColumnName(column))) continue
+    if (value !== null && value !== undefined && String(value).trim() !== '') return value
+  }
+  return ''
+}
+
+function looksLikeBlgUrl(value: any) {
+  const text = blgLinkKey(value)
+  return /^https?:\/\//i.test(text) || text.includes('app.blgcloud.com')
+}
+
+function rowLinkValue(row: Record<string, any>, tableName: string, linkColumns: string[]) {
+  const byAlias = rowValueByColumnAliases(row, linkColumns)
+  if (byAlias) return byAlias
+
+  const table = tableName.toLowerCase()
+  for (const [column, value] of Object.entries(row || {})) {
+    if (value === null || value === undefined || String(value).trim() === '') continue
+    const normalized = normalizeBlgColumnName(column)
+    const isLinkColumn =
+      normalized.includes('lien') &&
+      normalized.includes('blg') &&
+      ((table.includes('tiers') && normalized.includes('tiers')) ||
+        (table.includes('articles') && normalized.includes('article')) ||
+        (table.includes('blg_link') && (normalized.includes('doc') || normalized.includes('piece') || normalized.includes('document'))))
+
+    if (isLinkColumn || looksLikeBlgUrl(value)) return value
+  }
+
+  return ''
+}
+
+function rowKeyValue(row: Record<string, any>, tableName: string, keyColumns: string[]) {
+  const byAlias = rowValueByColumnAliases(row, keyColumns)
+  if (byAlias) return byAlias
+
+  const table = tableName.toLowerCase()
+  for (const [column, value] of Object.entries(row || {})) {
+    if (value === null || value === undefined || String(value).trim() === '') continue
+    const normalized = normalizeBlgColumnName(column)
+
+    if (table.includes('tiers')) {
+      if (
+        (normalized.includes('tiers') || normalized.includes('client')) &&
+        (normalized.includes('numero') || normalized.includes('num') || normalized.includes('code') || normalized === 'tiers')
+      ) return value
+    }
+
+    if (table.includes('articles')) {
+      if (
+        normalized.includes('referencearticle') ||
+        normalized.includes('refarticle') ||
+        normalized === 'reference' ||
+        normalized.includes('codearticle') ||
+        normalized === 'article'
+      ) return value
+    }
+
+    if (table.includes('blg_link')) {
+      if (
+        normalized.includes('numeropiece') ||
+        normalized.includes('numerodocument') ||
+        normalized.includes('numeroarticle') ||
+        normalized === 'piece' ||
+        normalized === 'document'
+      ) return value
+    }
+  }
+
+  // Dernier filet de sécurité : on cherche une valeur ressemblant à un code métier
+  // du type C0038, A0116, FA0783516, FAR15980, BL275100, CDC..., etc.
+  for (const [column, value] of Object.entries(row || {})) {
+    const normalized = normalizeBlgColumnName(column)
+    if (normalized.includes('blg') || normalized.includes('id') || normalized.includes('siret') || normalized.includes('naf')) continue
+    const text = blgLinkKey(value)
+    if (/\b[A-Za-z]{1,5}\d{2,}[A-Za-z0-9_./-]*\b/.test(text) && !looksLikeBlgUrl(text)) return text
+  }
+
+  return ''
+}
+
+async function fetchBlgLinksFromTable(tableName: string, keyColumns: string[], linkColumns: string[]) {
   const output: Record<string, string> = {}
-  const chunkSize = 1000
+  const chunkSize = 5000
   let from = 0
 
   while (true) {
     const { data, error } = await supabase
-      .from('ref_tiers')
-      .select('numero_tiers,lien_blg_tiers')
-      .not('lien_blg_tiers', 'is', null)
+      .from(tableName)
+      .select('*')
       .range(from, from + chunkSize - 1)
 
-    if (error) throw error
-    const rows = (data || []) as RawAggRow[]
+    if (error) {
+      console.warn(`Liens BLG non chargés depuis ${tableName}`, error.message)
+      break
+    }
+
+    const rows = (data || []) as Record<string, any>[]
     rows.forEach((row) => {
-      const numero = blgLinkKey(row.numero_tiers)
-      const href = blgLinkKey(row.lien_blg_tiers)
-      if (numero && href) output[numero] = href
+      const key = rowKeyValue(row, tableName, keyColumns)
+      const href = rowLinkValue(row, tableName, linkColumns)
+      addLinkEntry(output, key, href)
     })
+
     if (rows.length < chunkSize) break
     from += chunkSize
   }
@@ -257,30 +396,21 @@ async function fetchTiersBlgLinks() {
   return output
 }
 
+
+async function fetchTiersBlgLinks() {
+  return fetchBlgLinksFromTable(
+    'ref_tiers',
+    ['numero_tiers', 'Numero_Tiers', 'NUMERO_TIERS', 'code_tiers', 'Code_Tiers'],
+    ['lien_blg_tiers', 'Lien_BLG_Tiers', 'LIEN_BLG_TIERS']
+  )
+}
+
 async function fetchDocumentBlgLinks() {
-  const output: Record<string, string> = {}
-  const chunkSize = 1000
-  let from = 0
-
-  while (true) {
-    const { data, error } = await supabase
-      .from('blg_link')
-      .select('numero_piece,lien_blg_doc')
-      .not('lien_blg_doc', 'is', null)
-      .range(from, from + chunkSize - 1)
-
-    if (error) throw error
-    const rows = (data || []) as RawAggRow[]
-    rows.forEach((row) => {
-      const numero = blgLinkKey(row.numero_piece)
-      const href = blgLinkKey(row.lien_blg_doc)
-      if (numero && href) output[numero] = href
-    })
-    if (rows.length < chunkSize) break
-    from += chunkSize
-  }
-
-  return output
+  return fetchBlgLinksFromTable(
+    'blg_link',
+    ['numero_piece', 'numero_pièce', 'Numero_Piece', 'Numero_piece', 'numero_document', 'Numero_Document'],
+    ['lien_blg_doc', 'Lien_BLG_doc', 'Lien_BLG_Doc', 'LIEN_BLG_DOC']
+  )
 }
 
 function LinkedTiersValue({ numero, intitule, links }: { numero: string; intitule: string; links: Record<string, string> }) {
