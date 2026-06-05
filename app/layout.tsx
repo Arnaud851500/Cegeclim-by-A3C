@@ -28,52 +28,159 @@ type MenuGroup = {
   items: MenuItem[]
 }
 
+type StatusLevel = 'red' | 'orange' | 'green'
+
 type StatusLightProps = {
   label: string
-  status: 'red' | 'green'
+  status: StatusLevel
   count?: number
   blink?: boolean
   clickable?: boolean
   onClick?: () => void
+  title?: string
 }
 
-function StatusLight({ label, status, count, blink = false, clickable = false, onClick }: StatusLightProps) {
+type UserAccessProfile = {
+  email?: string | null
+  display_name?: string | null
+  allowed_agence?: string | string[] | null
+  can_todo?: boolean | null
+}
+
+type TodoSignal = {
+  status: StatusLevel
+  count: number
+}
+
+type CerfaKoRow = {
+  key: string
+  raw: Record<string, any>
+  idValue: string | number | null
+  dateFacture: string
+  numeroFacture: string
+  numeroTiers: string
+  intituleTiers: string
+  reference: string
+  projet: string
+  affaireDraft: string
+  checked: boolean
+  saving: boolean
+}
+
+function StatusLight({ label, status, count, blink = false, clickable = false, onClick, title }: StatusLightProps) {
   const isRed = status === 'red'
+  const isOrange = status === 'orange'
   const shellStyle = {
     ...styles.statusCard,
-    ...(isRed ? styles.statusCardRed : styles.statusCardGreen),
+    ...(isRed ? styles.statusCardRed : isOrange ? styles.statusCardOrange : styles.statusCardGreen),
     ...(blink ? styles.statusCardBlink : {}),
     cursor: clickable ? 'pointer' : 'default',
   } as React.CSSProperties
 
   const lightStyle = {
     ...styles.statusLightDot,
-    ...(isRed ? styles.statusLightDotRed : styles.statusLightDotGreen),
+    ...(isRed ? styles.statusLightDotRed : isOrange ? styles.statusLightDotOrange : styles.statusLightDotGreen),
     ...(blink ? styles.statusLightDotBlink : {}),
+  } as React.CSSProperties
+
+  const labelStyle = {
+    ...styles.statusCardLabel,
+    ...(isRed ? styles.statusCardLabelRed : isOrange ? styles.statusCardLabelOrange : styles.statusCardLabelGreen),
+  } as React.CSSProperties
+
+  const badgeStyle = {
+    ...styles.statusBadge,
+    ...(isRed ? styles.statusBadgeRed : isOrange ? styles.statusBadgeOrange : styles.statusBadgeGreen),
+  } as React.CSSProperties
+
+  const okStyle = {
+    ...styles.statusOkText,
+    ...(isRed ? styles.statusCardLabelRed : isOrange ? styles.statusCardLabelOrange : styles.statusCardLabelGreen),
   } as React.CSSProperties
 
   return (
     <button
       type="button"
-      onClick={onClick}
+      onClick={clickable ? onClick : undefined}
       style={shellStyle}
-      title={clickable ? `Ouvrir la liste d'anomalies ${label} (à brancher)` : `${label} OK`}
+      title={title || (clickable ? `Ouvrir ${label}` : `${label} OK`)}
     >
       <div style={styles.statusCardTop}>
         <span style={lightStyle} />
-        <span style={{ ...styles.statusCardLabel, ...(isRed ? styles.statusCardLabelRed : styles.statusCardLabelGreen) }}>
-          {label}
-        </span>
+        <span style={labelStyle}>{label}</span>
       </div>
       {typeof count === 'number' && count > 0 ? (
-        <span style={{ ...styles.statusBadge, ...(isRed ? styles.statusBadgeRed : styles.statusBadgeGreen) }}>
-          {count}
-        </span>
+        <span style={badgeStyle}>{count}</span>
       ) : (
-        <span style={{ ...styles.statusOkText, ...(isRed ? styles.statusCardLabelRed : styles.statusCardLabelGreen) }}>OK</span>
+        <span style={okStyle}>OK</span>
       )}
     </button>
   )
+}
+
+function normalizeLoose(value: any) {
+  return String(value ?? '').trim().toLowerCase()
+}
+
+function cleanText(value: any) {
+  return String(value ?? '').trim()
+}
+
+function rawValue(row: Record<string, any> | null | undefined, keys: string[]) {
+  if (!row) return null
+  for (const key of keys) {
+    if (row[key] !== null && row[key] !== undefined && String(row[key]).trim() !== '') return row[key]
+  }
+  return null
+}
+
+function extractLeadingCode(value: any) {
+  const text = cleanText(value)
+  if (!text) return ''
+  return text.split(/\s[-–—·|:]\s|\s+-\s+|\s+—\s+|\s+–\s+/)[0]?.trim() || text
+}
+
+function parseAllowedAgences(value: any) {
+  if (Array.isArray(value)) return value.map(cleanText).filter(Boolean)
+  return cleanText(value)
+    .split(/[;,|\n]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function agenceMatchesAllowed(agence: string, allowedAgences: string[]) {
+  if (!allowedAgences.length) return true
+  const normalizedAgence = normalizeLoose(agence)
+  if (!normalizedAgence) return false
+  return allowedAgences.some((allowed) => {
+    const normalizedAllowed = normalizeLoose(allowed)
+    return normalizedAgence === normalizedAllowed || normalizedAgence.includes(normalizedAllowed) || normalizedAllowed.includes(normalizedAgence)
+  })
+}
+
+function todayIso() {
+  const now = new Date()
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+}
+
+function formatDateFr(value: any) {
+  const text = cleanText(value)
+  if (!text) return ''
+  const iso = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/)
+  if (iso) return `${iso[3].padStart(2, '0')}/${iso[2].padStart(2, '0')}/${iso[1]}`
+  return text
+}
+
+function buildCerfaKey(row: Record<string, any>, index: number) {
+  const idValue = rawValue(row, ['id', 'ligne_id', 'uuid'])
+  if (idValue !== null && idValue !== undefined) return String(idValue)
+  return [
+    rawValue(row, ['numero_piece', 'num_piece', 'numero_facture', 'facture', 'piece', 'document']),
+    rawValue(row, ['date_facture', 'date_piece', 'date_document', 'date']),
+    rawValue(row, ['numero_tiers', 'numero_tiers_entete', 'code_tiers', 'tiers', 'client_code']),
+    rawValue(row, ['reference_article', 'reference', 'code_article', 'article']),
+    index,
+  ].map((v) => cleanText(v)).join('__')
 }
 
 function AppShell({ children }: { children: React.ReactNode }) {
@@ -87,14 +194,17 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const [sessionChecked, setSessionChecked] = useState(false)
   const [hasSession, setHasSession] = useState(false)
   const [statusBlinkOn, setStatusBlinkOn] = useState(true)
+  const [todoSignal, setTodoSignal] = useState<TodoSignal>({ status: 'green', count: 0 })
+  const [cerfaKoCount, setCerfaKoCount] = useState(0)
+  const [cerfaRows, setCerfaRows] = useState<CerfaKoRow[]>([])
+  const [cerfaModalOpen, setCerfaModalOpen] = useState(false)
+  const [cerfaLoading, setCerfaLoading] = useState(false)
+  const [cerfaError, setCerfaError] = useState<string | null>(null)
 
   const lastLoggedPathRef = useRef<string | null>(null)
 
   const isLoginPage = pathname === '/login'
   const isUnauthorizedPage = pathname === '/unauthorized'
-
-  const cerfaKoCount = 2
-  const overdueTodoCount = 0
 
   const hasAnyMenuAccess =
     rights.can_dashboard ||
@@ -246,6 +356,20 @@ function AppShell({ children }: { children: React.ReactNode }) {
     return () => clearInterval(interval)
   }, [])
 
+  useEffect(() => {
+    if (!sessionChecked || accessLoading || !hasSession || !email) return
+    if (isLoginPage || isUnauthorizedPage) return
+
+    void refreshStatusIndicators()
+
+    const interval = setInterval(() => {
+      void refreshStatusIndicators()
+    }, 5 * 60 * 1000)
+
+    return () => clearInterval(interval)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionChecked, accessLoading, hasSession, email, isLoginPage, isUnauthorizedPage])
+
   if (isLoginPage) {
     return (
       <div style={{ margin: 0, fontFamily: 'Arial, sans-serif', background: '#f5f7fa' }}>
@@ -259,6 +383,223 @@ function AppShell({ children }: { children: React.ReactNode }) {
     localStorage.removeItem('cegeclim_last_activity_at')
     await supabase.auth.signOut()
     router.replace('/login')
+  }
+
+  async function getUserAccessProfile(): Promise<UserAccessProfile | null> {
+    if (!email) return null
+
+    const { data, error } = await supabase
+      .from('user_page_access')
+      .select('*')
+      .eq('email', email)
+      .maybeSingle()
+
+    if (error) {
+      console.error('user_page_access status indicators', error)
+      return null
+    }
+
+    return (data || { email }) as UserAccessProfile
+  }
+
+  async function refreshTodoSignal(accessProfile?: UserAccessProfile | null) {
+    if (!email) return
+
+    const profile = accessProfile || await getUserAccessProfile()
+    const displayName = cleanText(profile?.display_name) || email.split('@')[0]
+
+    if (!displayName) {
+      setTodoSignal({ status: 'green', count: 0 })
+      return
+    }
+
+    const { data, error } = await supabase
+      .from('todo_actions')
+      .select('id, assigned_to, due_date, status')
+      .eq('assigned_to', displayName)
+
+    if (error) {
+      console.error('todo_actions status indicator', error)
+      setTodoSignal({ status: 'green', count: 0 })
+      return
+    }
+
+    const openRows = (data || []).filter((row: any) => {
+      const status = normalizeLoose(row.status)
+      return status !== 'terminé' && status !== 'termine' && status !== 'annulé' && status !== 'annule'
+    })
+
+    if (!openRows.length) {
+      setTodoSignal({ status: 'green', count: 0 })
+      return
+    }
+
+    const today = todayIso()
+    const overdue = openRows.filter((row: any) => cleanText(row.due_date) && cleanText(row.due_date) < today)
+
+    if (overdue.length) {
+      setTodoSignal({ status: 'red', count: overdue.length })
+      return
+    }
+
+    setTodoSignal({ status: 'orange', count: openRows.length })
+  }
+
+  function openTodoList() {
+    window.open('/todo', '_blank', 'noopener,noreferrer')
+  }
+
+  function mapCerfaRows(rows: Record<string, any>[], tierAgencyByCode: Map<string, string>, allowedAgences: string[]) {
+    return rows
+      .filter((row) => cleanText(rawValue(row, ['projet', 'Projet'])))
+      .filter((row) => {
+        if (!allowedAgences.length) return true
+        const tierCode = extractLeadingCode(rawValue(row, ['numero_tiers', 'numero_tiers_entete', 'code_tiers', 'tiers', 'client_code']))
+        const agence = tierAgencyByCode.get(normalizeLoose(tierCode)) || ''
+        return agenceMatchesAllowed(agence, allowedAgences)
+      })
+      .map((row, index) => {
+        const numeroTiers = extractLeadingCode(rawValue(row, ['numero_tiers', 'numero_tiers_entete', 'code_tiers', 'tiers', 'client_code']))
+        return {
+          key: buildCerfaKey(row, index),
+          raw: row,
+          idValue: rawValue(row, ['id', 'ligne_id', 'uuid']) as string | number | null,
+          dateFacture: formatDateFr(rawValue(row, ['date_facture', 'date_piece', 'date_document', 'date'])),
+          numeroFacture: cleanText(rawValue(row, ['numero_piece', 'num_piece', 'numero_facture', 'facture', 'piece', 'document', 'document_no', 'no_document'])),
+          numeroTiers,
+          intituleTiers: cleanText(rawValue(row, ['intitule_tiers', 'intitule_tiers_entete', 'nom_tiers', 'libelle_tiers', 'tiers_libelle', 'client', 'raison_sociale'])),
+          reference: cleanText(rawValue(row, ['reference_article', 'reference', 'code_article', 'article', 'ref_article'])),
+          projet: cleanText(rawValue(row, ['projet', 'Projet'])),
+          affaireDraft: cleanText(rawValue(row, ['affaire', 'Affaire'])),
+          checked: false,
+          saving: false,
+        }
+      })
+  }
+
+  async function refreshCerfaKo(accessProfile?: UserAccessProfile | null) {
+    const profile = accessProfile || await getUserAccessProfile()
+    const allowedAgences = parseAllowedAgences((profile as any)?.allowed_agence ?? (profile as any)?.allowed_agences)
+
+    setCerfaLoading(true)
+    setCerfaError(null)
+
+    try {
+      const { data: factureRows, error: factureError } = await supabase
+        .from('facture_lignes')
+        .select('*')
+        .not('projet', 'is', null)
+        .limit(5000)
+
+      if (factureError) throw factureError
+
+      const projetRows = ((factureRows || []) as Record<string, any>[]).filter((row) => cleanText(rawValue(row, ['projet', 'Projet'])))
+      const tierCodes = Array.from(new Set(projetRows
+        .map((row) => extractLeadingCode(rawValue(row, ['numero_tiers', 'numero_tiers_entete', 'code_tiers', 'tiers', 'client_code'])))
+        .filter(Boolean)
+      ))
+
+      const tierAgencyByCode = new Map<string, string>()
+
+      if (tierCodes.length) {
+        const chunkSize = 500
+        for (let i = 0; i < tierCodes.length; i += chunkSize) {
+          const chunk = tierCodes.slice(i, i + chunkSize)
+          const { data: tiersData, error: tiersError } = await supabase
+            .from('ref_tiers')
+            .select('*')
+            .in('numero_tiers', chunk)
+
+          if (tiersError) {
+            console.error('ref_tiers CERFA agency lookup', tiersError)
+            continue
+          }
+
+          ;((tiersData || []) as Record<string, any>[]).forEach((tier) => {
+            const code = extractLeadingCode(rawValue(tier, ['numero_tiers', 'Numero_Tiers', 'NUMERO_TIERS', 'code_tiers', 'Code_Tiers', 'CODE_TIERS']))
+            const agence = cleanText(rawValue(tier, [
+              'agence_collaborateur',
+              'Agence_Collaborateur',
+              'AGENCE_COLLABORATEUR',
+              'agence',
+              'Agence',
+              'AGENCE',
+              'agence_rattachement',
+              'depot',
+            ]))
+            if (code) tierAgencyByCode.set(normalizeLoose(code), agence)
+          })
+        }
+      }
+
+      const mapped = mapCerfaRows(projetRows, tierAgencyByCode, allowedAgences)
+      setCerfaRows(mapped)
+      setCerfaKoCount(mapped.length)
+    } catch (exception: any) {
+      console.error('CERFA KO status indicator', exception)
+      setCerfaError(exception?.message || String(exception))
+      setCerfaRows([])
+      setCerfaKoCount(0)
+    } finally {
+      setCerfaLoading(false)
+    }
+  }
+
+  async function refreshStatusIndicators() {
+    if (!email || isLoginPage || isUnauthorizedPage) return
+    const profile = await getUserAccessProfile()
+    await Promise.all([
+      refreshTodoSignal(profile),
+      refreshCerfaKo(profile),
+    ])
+  }
+
+  async function openCerfaModal() {
+    setCerfaModalOpen(true)
+    await refreshCerfaKo()
+  }
+
+  function updateCerfaRow(key: string, patch: Partial<CerfaKoRow>) {
+    setCerfaRows((current) => current.map((row) => row.key === key ? { ...row, ...patch } : row))
+  }
+
+  async function validateCerfaRow(row: CerfaKoRow) {
+    const affaire = cleanText(row.affaireDraft)
+    if (!row.checked) {
+      alert('Coche la ligne à régulariser avant de valider.')
+      return
+    }
+    if (!affaire) {
+      alert('Renseigne le champ Affaire avant de valider.')
+      return
+    }
+
+    updateCerfaRow(row.key, { saving: true })
+
+    try {
+      let query = supabase
+        .from('facture_lignes')
+        .update({ projet: null, affaire })
+
+      if (row.idValue !== null && row.idValue !== undefined && cleanText(row.idValue)) {
+        query = query.eq('id', row.idValue as any)
+      } else {
+        if (row.numeroFacture) query = query.eq('numero_piece', row.numeroFacture)
+        if (row.numeroTiers) query = query.eq('numero_tiers', row.numeroTiers)
+        if (row.reference) query = query.eq('reference_article', row.reference)
+        if (row.projet) query = query.eq('projet', row.projet)
+      }
+
+      const { error } = await query
+      if (error) throw error
+
+      setCerfaRows((current) => current.filter((item) => item.key !== row.key))
+      setCerfaKoCount((count) => Math.max(0, count - 1))
+    } catch (exception: any) {
+      console.error('Validation CERFA KO', exception)
+      alert(`Impossible de valider cette ligne CERFA : ${exception?.message || exception}`)
+      updateCerfaRow(row.key, { saving: false })
+    }
   }
 
   return (
@@ -361,23 +702,105 @@ function AppShell({ children }: { children: React.ReactNode }) {
               <div style={styles.statusLightsRow}>
                 <StatusLight
                   label="CERFA"
-                  status="red"
+                  status={cerfaKoCount > 0 ? 'red' : 'green'}
                   count={cerfaKoCount}
-                  blink={statusBlinkOn}
-                  clickable
-                  onClick={() => {
-                    // Navigation à brancher dans un second temps
-                  }}
+                  blink={cerfaKoCount > 0 && statusBlinkOn}
+                  clickable={cerfaKoCount > 0}
+                  onClick={openCerfaModal}
+                  title={cerfaKoCount > 0 ? 'Ouvrir la liste des CERFA KO en attente de régularisation' : 'Aucun CERFA KO'}
                 />
                 <StatusLight
                   label="A faire"
-                  status="green"
-                  count={overdueTodoCount}
+                  status={todoSignal.status}
+                  count={todoSignal.count}
+                  blink={todoSignal.status === 'red' && statusBlinkOn}
+                  clickable={todoSignal.count > 0}
+                  onClick={openTodoList}
+                  title={todoSignal.count > 0 ? 'Ouvrir la TODO List dans un nouvel onglet' : 'Aucune tâche à faire'}
                 />
               </div>
             </div>
           )}
         </header>
+
+        {cerfaModalOpen && (
+          <div style={styles.modalBackdrop}>
+            <div style={styles.cerfaModal}>
+              <div style={styles.modalHeader}>
+                <div>
+                  <div style={styles.modalTitle}>Liste des CERFA KO en attente de régularisation</div>
+                  <div style={styles.modalSubtitle}>{cerfaRows.length} ligne(s) à traiter</div>
+                </div>
+                <div style={styles.modalActions}>
+                  <button type="button" onClick={() => refreshCerfaKo()} style={styles.modalSecondaryButton}>Actualiser</button>
+                  <button type="button" onClick={() => setCerfaModalOpen(false)} style={styles.modalCloseButton}>Fermer</button>
+                </div>
+              </div>
+
+              {cerfaLoading && <div style={styles.modalInfo}>Chargement des lignes CERFA…</div>}
+              {cerfaError && <div style={styles.modalError}>Erreur CERFA : {cerfaError}</div>}
+
+              <div style={styles.modalTableWrapper}>
+                <table style={styles.cerfaTable}>
+                  <thead>
+                    <tr>
+                      <th style={styles.cerfaTh}>Date facture</th>
+                      <th style={styles.cerfaTh}>N° facture</th>
+                      <th style={styles.cerfaTh}>N° Tiers</th>
+                      <th style={styles.cerfaTh}>Désignation du Tiers</th>
+                      <th style={styles.cerfaTh}>Référence</th>
+                      <th style={styles.cerfaTh}>Projet</th>
+                      <th style={styles.cerfaTh}>Affaire</th>
+                      <th style={styles.cerfaTh}>OK</th>
+                      <th style={styles.cerfaTh}>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {cerfaRows.length === 0 && !cerfaLoading ? (
+                      <tr>
+                        <td colSpan={9} style={styles.cerfaEmptyCell}>Aucune ligne CERFA KO à régulariser.</td>
+                      </tr>
+                    ) : cerfaRows.map((row) => (
+                      <tr key={row.key}>
+                        <td style={styles.cerfaTd}>{row.dateFacture}</td>
+                        <td style={styles.cerfaTdStrong}>{row.numeroFacture || '—'}</td>
+                        <td style={styles.cerfaTdStrong}>{row.numeroTiers || '—'}</td>
+                        <td style={styles.cerfaTd}>{row.intituleTiers || '—'}</td>
+                        <td style={styles.cerfaTd}>{row.reference || '—'}</td>
+                        <td style={styles.cerfaTd}>{row.projet}</td>
+                        <td style={styles.cerfaTd}>
+                          <input
+                            value={row.affaireDraft}
+                            onChange={(event) => updateCerfaRow(row.key, { affaireDraft: event.target.value })}
+                            placeholder="Commentaire / affaire"
+                            style={styles.cerfaInput}
+                          />
+                        </td>
+                        <td style={styles.cerfaTdCenter}>
+                          <input
+                            type="checkbox"
+                            checked={row.checked}
+                            onChange={(event) => updateCerfaRow(row.key, { checked: event.target.checked })}
+                          />
+                        </td>
+                        <td style={styles.cerfaTdCenter}>
+                          <button
+                            type="button"
+                            onClick={() => validateCerfaRow(row)}
+                            disabled={row.saving}
+                            style={styles.cerfaOkButton}
+                          >
+                            {row.saving ? '...' : 'OK'}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
 
         <main style={styles.content}>{children}</main>
       </div>
@@ -518,6 +941,11 @@ const styles: Record<string, React.CSSProperties> = {
     boxShadow: '0 0 0 1px rgba(34,197,94,0.08), 0 0 14px rgba(34,197,94,0.16)',
   },
 
+  statusCardOrange: {
+    border: '1px solid rgba(245, 158, 11, 0.32)',
+    boxShadow: '0 0 0 1px rgba(245,158,11,0.09), 0 0 15px rgba(245,158,11,0.24)',
+  },
+
   statusCardBlink: {
     opacity: 0.9,
     transform: 'translateY(-1px)',
@@ -544,6 +972,10 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#166534',
   },
 
+  statusCardLabelOrange: {
+    color: '#b45309',
+  },
+
   statusLightDot: {
     width: 11,
     height: 11,
@@ -560,6 +992,11 @@ const styles: Record<string, React.CSSProperties> = {
   statusLightDotGreen: {
     background: '#22c55e',
     boxShadow: '0 0 0 2px rgba(34, 197, 94, 0.12), 0 0 12px rgba(34, 197, 94, 0.85)',
+  },
+
+  statusLightDotOrange: {
+    background: '#f59e0b',
+    boxShadow: '0 0 0 2px rgba(245, 158, 11, 0.14), 0 0 12px rgba(245, 158, 11, 0.9)',
   },
 
   statusLightDotBlink: {
@@ -588,6 +1025,12 @@ const styles: Record<string, React.CSSProperties> = {
     background: '#dcfce7',
     color: '#166534',
     border: '1px solid #bbf7d0',
+  },
+
+  statusBadgeOrange: {
+    background: '#fef3c7',
+    color: '#b45309',
+    border: '1px solid #fde68a',
   },
 
   statusOkText: {
@@ -653,6 +1096,167 @@ const styles: Record<string, React.CSSProperties> = {
     padding: 10,
     cursor: 'pointer',
     whiteSpace: 'nowrap',
+  },
+
+
+  modalBackdrop: {
+    position: 'fixed',
+    inset: 0,
+    zIndex: 2000,
+    background: 'rgba(15, 23, 42, 0.35)',
+    display: 'flex',
+    alignItems: 'flex-start',
+    justifyContent: 'center',
+    padding: '120px 28px 28px',
+  },
+
+  cerfaModal: {
+    width: 'min(1450px, 96vw)',
+    maxHeight: '78vh',
+    overflow: 'hidden',
+    borderRadius: 18,
+    background: '#fff',
+    boxShadow: '0 25px 70px rgba(15, 23, 42, 0.35)',
+    border: '1px solid rgba(226, 232, 240, 1)',
+  },
+
+  modalHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    gap: 16,
+    alignItems: 'center',
+    padding: '18px 20px',
+    borderBottom: '1px solid #e2e8f0',
+  },
+
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: 900,
+    color: '#0f172a',
+  },
+
+  modalSubtitle: {
+    marginTop: 4,
+    fontSize: 13,
+    fontWeight: 700,
+    color: '#64748b',
+  },
+
+  modalActions: {
+    display: 'flex',
+    gap: 8,
+    alignItems: 'center',
+  },
+
+  modalSecondaryButton: {
+    border: '1px solid #cbd5e1',
+    background: '#fff',
+    borderRadius: 10,
+    padding: '8px 12px',
+    fontWeight: 800,
+    cursor: 'pointer',
+  },
+
+  modalCloseButton: {
+    border: '1px solid #0f172a',
+    background: '#0f172a',
+    color: '#fff',
+    borderRadius: 10,
+    padding: '8px 12px',
+    fontWeight: 900,
+    cursor: 'pointer',
+  },
+
+  modalInfo: {
+    margin: '12px 20px',
+    padding: 12,
+    borderRadius: 12,
+    background: '#eff6ff',
+    color: '#1d4ed8',
+    fontWeight: 800,
+  },
+
+  modalError: {
+    margin: '12px 20px',
+    padding: 12,
+    borderRadius: 12,
+    background: '#fef2f2',
+    color: '#b91c1c',
+    fontWeight: 800,
+  },
+
+  modalTableWrapper: {
+    maxHeight: 'calc(78vh - 88px)',
+    overflow: 'auto',
+    padding: '0 20px 20px',
+  },
+
+  cerfaTable: {
+    width: '100%',
+    minWidth: 1180,
+    borderCollapse: 'collapse',
+    fontSize: 13,
+  },
+
+  cerfaTh: {
+    position: 'sticky',
+    top: 0,
+    background: '#f1f5f9',
+    border: '1px solid #e2e8f0',
+    padding: '10px 8px',
+    textAlign: 'left',
+    fontWeight: 900,
+    color: '#0f172a',
+    zIndex: 1,
+  },
+
+  cerfaTd: {
+    border: '1px solid #e2e8f0',
+    padding: '8px',
+    verticalAlign: 'middle',
+    color: '#0f172a',
+  },
+
+  cerfaTdStrong: {
+    border: '1px solid #e2e8f0',
+    padding: '8px',
+    verticalAlign: 'middle',
+    color: '#0f172a',
+    fontWeight: 900,
+  },
+
+  cerfaTdCenter: {
+    border: '1px solid #e2e8f0',
+    padding: '8px',
+    textAlign: 'center',
+    verticalAlign: 'middle',
+  },
+
+  cerfaEmptyCell: {
+    border: '1px solid #e2e8f0',
+    padding: 24,
+    textAlign: 'center',
+    color: '#64748b',
+    fontWeight: 800,
+  },
+
+  cerfaInput: {
+    width: '100%',
+    minWidth: 220,
+    border: '1px solid #cbd5e1',
+    borderRadius: 8,
+    padding: '7px 9px',
+    outline: 'none',
+  },
+
+  cerfaOkButton: {
+    border: 'none',
+    background: '#2563eb',
+    color: '#fff',
+    borderRadius: 8,
+    padding: '7px 11px',
+    fontWeight: 900,
+    cursor: 'pointer',
   },
 
   content: {
