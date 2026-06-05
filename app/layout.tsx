@@ -553,8 +553,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
         'reference_article',
         'projet',
         'affaire',
-        'collaborateur',
-        'agence_collaborateur',
       ].join(',')
 
       const { data: factureRows, error: factureError, count } = await supabase
