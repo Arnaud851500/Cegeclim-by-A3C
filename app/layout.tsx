@@ -662,7 +662,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       void refreshStatusIndicators({ force: true })
     } catch (exception: any) {
       console.error('Validation CERFA KO', exception)
-      alert(`Impossible de valider cette ligne CERFA : ${exception?.message || exception}`)
+      alert(`Impossible d'enregistrer la régularisation CERFA : ${exception?.message || exception}`)
       updateCerfaRow(row.key, { saving: false })
     }
   }
