@@ -58,6 +58,8 @@ type CerfaKoRow = {
   idValue: string | number | null
   dateFacture: string
   numeroFacture: string
+  lienFacture: string
+  lienTiers: string
   numeroTiers: string
   intituleTiers: string
   reference: string
@@ -484,6 +486,8 @@ function AppShell({ children }: { children: React.ReactNode }) {
           idValue: rawValue(row, ['id', 'ligne_id', 'uuid']) as string | number | null,
           dateFacture: formatDateFr(rawValue(row, ['date_facture', 'date_piece', 'date_document', 'date'])),
           numeroFacture: cleanText(rawValue(row, ['numero_piece', 'num_piece', 'numero_facture', 'facture', 'piece', 'document', 'document_no', 'no_document'])),
+          lienFacture: cleanText(rawValue(row, ['lien_blg_doc', 'Lien_BLG_doc', 'url', 'lien', 'lien_doc'])),
+          lienTiers: cleanText(rawValue(row, ['lien_blg_tiers', 'Lien_BLG_Tiers', 'url_tiers', 'lien_tiers'])),
           numeroTiers,
           intituleTiers: cleanText(rawValue(row, ['intitule_tiers', 'intitule_tiers_entete', 'nom_tiers', 'libelle_tiers', 'tiers_libelle', 'client', 'raison_sociale'])),
           reference: cleanText(rawValue(row, ['reference_article', 'reference', 'code_article', 'article', 'ref_article'])),
@@ -531,6 +535,8 @@ function AppShell({ children }: { children: React.ReactNode }) {
           idValue: rawValue(row, ['id', 'ligne_id', 'uuid']) as string | number | null,
           dateFacture: formatDateFr(rawValue(row, ['date_facture', 'date_piece', 'date_document', 'date'])),
           numeroFacture: cleanText(rawValue(row, ['numero_piece', 'num_piece', 'numero_facture', 'facture', 'piece', 'document', 'document_no', 'no_document'])),
+          lienFacture: cleanText(rawValue(row, ['lien_blg_doc', 'Lien_BLG_doc', 'url', 'lien', 'lien_doc'])),
+          lienTiers: cleanText(rawValue(row, ['lien_blg_tiers', 'Lien_BLG_Tiers', 'url_tiers', 'lien_tiers'])),
           numeroTiers: extractLeadingCode(rawValue(row, ['numero_tiers', 'numero_tiers_entete', 'code_tiers', 'tiers', 'client_code'])),
           intituleTiers: cleanText(rawValue(row, ['intitule_tiers', 'intitule_tiers_entete', 'nom_tiers', 'libelle_tiers', 'tiers_libelle', 'client', 'raison_sociale'])),
           reference: cleanText(rawValue(row, ['reference_article', 'reference', 'code_article', 'article', 'ref_article'])),
@@ -626,21 +632,17 @@ function AppShell({ children }: { children: React.ReactNode }) {
     updateCerfaRow(row.key, { saving: true })
 
     try {
-      let query = supabase
-        .from('facture_lignes')
-        .update({ projet: null, affaire })
+      const { data, error } = await supabase.rpc('validate_cerfa_ko_line', {
+        p_row_locator: cleanText(row.idValue),
+        p_numero_piece: row.numeroFacture || null,
+        p_numero_tiers: row.numeroTiers || null,
+        p_reference_article: row.reference || null,
+        p_projet: row.projet || null,
+        p_affaire: affaire,
+      })
 
-      if (row.idValue !== null && row.idValue !== undefined && cleanText(row.idValue)) {
-        query = query.eq('id', row.idValue as any)
-      } else {
-        if (row.numeroFacture) query = query.eq('numero_piece', row.numeroFacture)
-        if (row.numeroTiers) query = query.eq('numero_tiers_entete', row.numeroTiers)
-        if (row.reference) query = query.eq('reference_article', row.reference)
-        if (row.projet) query = query.eq('projet', row.projet)
-      }
-
-      const { error } = await query
       if (error) throw error
+      if (!Number(data || 0)) throw new Error('Aucune ligne CERFA n’a été mise à jour. Actualise la liste puis réessaie.')
 
       setCerfaRows((current) => current.filter((item) => item.key !== row.key))
       setCerfaKoCount((count) => Math.max(0, count - 1))
@@ -781,7 +783,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
                   <div style={styles.modalSubtitle}>{cerfaRows.length} ligne(s) à traiter</div>
                 </div>
                 <div style={styles.modalActions}>
-                  <button type="button" onClick={() => refreshCerfaKo()} style={styles.modalSecondaryButton}>Actualiser</button>
+                  <button type="button" onClick={() => refreshCerfaKo(undefined, { detail: true })} style={styles.modalSecondaryButton}>Actualiser</button>
                   <button type="button" onClick={() => setCerfaModalOpen(false)} style={styles.modalCloseButton}>Fermer</button>
                 </div>
               </div>
@@ -814,8 +816,24 @@ function AppShell({ children }: { children: React.ReactNode }) {
                     ) : cerfaRows.map((row) => (
                       <tr key={row.key}>
                         <td style={styles.cerfaTd}>{row.dateFacture}</td>
-                        <td style={styles.cerfaTdStrong}>{row.numeroFacture || '—'}</td>
-                        <td style={styles.cerfaTdStrong}>{row.numeroTiers || '—'}</td>
+                        <td style={styles.cerfaTdStrong}>
+                          {row.lienFacture ? (
+                            <a href={row.lienFacture} target="_blank" rel="noopener noreferrer" style={styles.cerfaLink}>
+                              {row.numeroFacture || '—'}
+                            </a>
+                          ) : (
+                            row.numeroFacture || '—'
+                          )}
+                        </td>
+                        <td style={styles.cerfaTdStrong}>
+                          {row.lienTiers ? (
+                            <a href={row.lienTiers} target="_blank" rel="noopener noreferrer" style={styles.cerfaLink}>
+                              {row.numeroTiers || '—'}
+                            </a>
+                          ) : (
+                            row.numeroTiers || '—'
+                          )}
+                        </td>
                         <td style={styles.cerfaTd}>{row.intituleTiers || '—'}</td>
                         <td style={styles.cerfaTd}>{row.reference || '—'}</td>
                         <td style={styles.cerfaTd}>{row.agence || '—'}</td>
@@ -1160,12 +1178,12 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     alignItems: 'flex-start',
     justifyContent: 'center',
-    padding: '120px 28px 28px',
+    padding: '96px 12px 18px',
   },
 
   cerfaModal: {
-    width: 'min(1450px, 96vw)',
-    maxHeight: '78vh',
+    width: 'min(1960px, 99vw)',
+    maxHeight: '86vh',
     overflow: 'hidden',
     borderRadius: 18,
     background: '#fff',
@@ -1239,14 +1257,14 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   modalTableWrapper: {
-    maxHeight: 'calc(78vh - 88px)',
+    maxHeight: 'calc(86vh - 88px)',
     overflow: 'auto',
     padding: '0 20px 20px',
   },
 
   cerfaTable: {
     width: '100%',
-    minWidth: 1480,
+    minWidth: 1800,
     borderCollapse: 'collapse',
     fontSize: 13,
   },
@@ -1268,6 +1286,12 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '8px',
     verticalAlign: 'middle',
     color: '#0f172a',
+  },
+
+  cerfaLink: {
+    color: '#2563eb',
+    textDecoration: 'underline',
+    fontWeight: 900,
   },
 
   cerfaTdStrong: {
