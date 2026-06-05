@@ -370,10 +370,10 @@ function AppShell({ children }: { children: React.ReactNode }) {
     if (!sessionChecked || accessLoading || !hasSession || !email) return
     if (isLoginPage || isUnauthorizedPage) return
 
-    // Ne pas bloquer le chargement des écrans métiers : on décale le calcul des lumières.
+    // Refresh à la connexion : forcé pour ne pas attendre le throttle.
     const initialTimer = setTimeout(() => {
-      void refreshStatusIndicators()
-    }, 900)
+      void refreshStatusIndicators({ force: true })
+    }, 250)
 
     // Rafraîchissement raisonnable : les requêtes du header ne doivent jamais saturer l'appli.
     const interval = setInterval(() => {
@@ -386,6 +386,19 @@ function AppShell({ children }: { children: React.ReactNode }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionChecked, accessLoading, hasSession, email, isLoginPage, isUnauthorizedPage])
+
+  useEffect(() => {
+    if (!sessionChecked || accessLoading || !hasSession || !email) return
+    if (!pathname || isLoginPage || isUnauthorizedPage) return
+
+    // Refresh à chaque changement d'écran : forcé pour refléter TODO / CERFA après navigation.
+    const routeTimer = setTimeout(() => {
+      void refreshStatusIndicators({ force: true })
+    }, 250)
+
+    return () => clearTimeout(routeTimer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname, sessionChecked, accessLoading, hasSession, email, isLoginPage, isUnauthorizedPage])
 
   if (isLoginPage) {
     return (
@@ -595,11 +608,11 @@ function AppShell({ children }: { children: React.ReactNode }) {
     }
   }
 
-  async function refreshStatusIndicators() {
+  async function refreshStatusIndicators(options?: { force?: boolean }) {
     if (!email || isLoginPage || isUnauthorizedPage) return
 
     const now = Date.now()
-    if (now - lastStatusRefreshRef.current < 60_000) return
+    if (!options?.force && now - lastStatusRefreshRef.current < 60_000) return
     lastStatusRefreshRef.current = now
 
     const profile = await getUserAccessProfile()
@@ -646,6 +659,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
 
       setCerfaRows((current) => current.filter((item) => item.key !== row.key))
       setCerfaKoCount((count) => Math.max(0, count - 1))
+      void refreshStatusIndicators({ force: true })
     } catch (exception: any) {
       console.error('Validation CERFA KO', exception)
       alert(`Impossible de valider cette ligne CERFA : ${exception?.message || exception}`)
