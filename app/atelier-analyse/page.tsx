@@ -223,7 +223,7 @@ const ATELIER_ROW_CHUNK_SIZE = 1500
 // PERF V2.1 : la vue Direction CEGECLIM peut dépasser 60k lignes agrégées.
 // Le seuil reste protecteur, mais ne bloque plus les vues usuelles autour de 80/90k lignes.
 const ATELIER_MAX_ROWS_PER_SOURCE = 120000
-const ATELIER_MAX_ROWS_PER_WIDGET = 45000
+const ATELIER_MAX_ROWS_PER_WIDGET = 12000
 
 const ATELIER_COMMON_SELECT = [
   'id',
@@ -3215,31 +3215,11 @@ export default function AtelierAnalysePage() {
   }, [])
 
   useEffect(() => {
-    let cancelled = false
-
-    async function loadBlgReferenceLinks() {
-      try {
-        const [tiersResult, articlesResult, documentsResult] = await Promise.allSettled([
-          fetchReferenceLinks('ref_tiers', ['numero_tiers', 'Numero_Tiers', 'NUMERO_TIERS', 'code_tiers', 'Code_Tiers'], ['lien_blg_tiers', 'Lien_BLG_Tiers', 'LIEN_BLG_TIERS']),
-          fetchReferenceLinks('ref_articles', ['reference_article', 'Reference_Article', 'REFERENCE_ARTICLE', 'reference', 'Reference'], ['lien_blg_article', 'Lien_BLG_Article', 'LIEN_BLG_ARTICLE']),
-          fetchReferenceLinks('blg_link', ['numero_piece', 'numero_pièce', 'Numero_Piece', 'Numero_piece', 'numero_document', 'Numero_Document'], ['lien_blg_doc', 'Lien_BLG_doc', 'Lien_BLG_Doc', 'LIEN_BLG_DOC']),
-        ])
-        if (!cancelled) {
-          setReferenceLinks({
-            tiers: tiersResult.status === 'fulfilled' ? tiersResult.value : {},
-            articles: articlesResult.status === 'fulfilled' ? articlesResult.value : {},
-            documents: documentsResult.status === 'fulfilled' ? documentsResult.value : {},
-          })
-        }
-      } catch (exception) {
-        console.warn('Liens BLG tiers/articles/documents non chargés', exception)
-      }
-    }
-
-    void loadBlgReferenceLinks()
-    return () => {
-      cancelled = true
-    }
+    // PERF V2.5 : ne plus charger tous les liens BLG au montage de l'Atelier.
+    // Les tables ref_tiers / ref_articles / blg_link peuvent être volumineuses et ce chargement
+    // ralentissait l'écran avant même l'affichage des widgets.
+    // Les liens détaillés seront à rebrancher ensuite en chargement à la demande sur les lignes visibles.
+    setReferenceLinks({ tiers: {}, articles: {}, documents: {} })
   }, [])
 
   const widgetServerKey = useMemo(
