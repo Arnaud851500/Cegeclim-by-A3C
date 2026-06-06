@@ -223,7 +223,7 @@ const ATELIER_ROW_CHUNK_SIZE = 1500
 // PERF V2.1 : la vue Direction CEGECLIM peut dépasser 60k lignes agrégées.
 // Le seuil reste protecteur, mais ne bloque plus les vues usuelles autour de 80/90k lignes.
 const ATELIER_MAX_ROWS_PER_SOURCE = 120000
-const ATELIER_MAX_ROWS_PER_WIDGET = 12000
+const ATELIER_MAX_ROWS_PER_WIDGET = 3000
 
 const ATELIER_COMMON_SELECT = [
   'id',
@@ -892,7 +892,7 @@ function normalizeRpcSource(value: any): Exclude<DataSource, 'mixte'> {
 }
 
 async function fetchWidgetRowsFromServer(widget: WidgetConfig, globalFilters: GlobalFilters) {
-  const { data, error } = await supabase.rpc('get_atelier_widget_rows_v1', {
+  const { data, error } = await supabase.rpc('get_atelier_widget_rows_v3', {
     p_global_filters: globalFilters,
     p_widget: widget,
     p_limit: ATELIER_MAX_ROWS_PER_WIDGET,
@@ -1096,7 +1096,7 @@ function buildDefaultWidget(type: WidgetType, availableYears: number[]): WidgetC
     measure: type === 'double_bridge' ? 'marge_pct' : type === 'bridge' ? 'ca_ht' : 'ca_ht',
     secondMeasure: 'ca_ht',
     tableMeasures: ['ca_ht', 'marge_valeur'],
-    dimension: type === 'bridge' || type === 'double_bridge' ? 'famille_macro' : 'mois',
+    dimension: type === 'bridge' ? 'agence_collaborateur' : type === 'double_bridge' ? 'famille_macro' : 'mois',
     seriesDimension: type === 'histogramme' || type === 'histogramme_empile' || type === 'courbe' ? 'annee' : '',
     rowDimension: 'agence_collaborateur',
     rowDimension2: '',
@@ -3161,8 +3161,8 @@ export default function AtelierAnalysePage() {
       const messages: string[] = []
       if (saturatedWidgets.length) {
         messages.push(
-          `Attention : ${saturatedWidgets.length} widget(s) ont atteint la limite de ${ATELIER_MAX_ROWS_PER_WIDGET.toLocaleString('fr-FR')} lignes serveur. ` +
-          `Affinez Année / Mois / Agence / Famille ou paramétrez le widget.`
+          `Attention : ${saturatedWidgets.length} widget(s) ont atteint la limite de ${ATELIER_MAX_ROWS_PER_WIDGET.toLocaleString('fr-FR')} points widget. ` +
+          `Le widget est affiché partiellement : affinez Année / Mois / Agence / Famille ou diminuez le Top N.`
         )
       }
       if (widgetErrors.length) messages.push(widgetErrors.join(' | '))

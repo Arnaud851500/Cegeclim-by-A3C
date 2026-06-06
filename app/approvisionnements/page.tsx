@@ -15,7 +15,7 @@ import * as XLSX from 'xlsx'
 import { supabase } from '@/lib/supabaseClient'
 
 type Flux = 'DEVIS' | 'CDC' | 'BL' | 'FACTURE'
-type Metric = 'ca_ht' | 'quantite'
+type Metric = 'ca_ht' | 'quantite' | 'quantite_pertinente'
 
 type SummaryRpcRow = {
   annee: number
@@ -355,7 +355,8 @@ function referenceCode(referenceOption: string) {
 }
 
 function getMetricValue(row: Pick<SummaryRpcRow | DetailRpcRow, 'ca_ht' | 'quantite' | 'quantite_pertinente'>, metric: Metric) {
-  if (metric === 'quantite') return safeNumber(row.quantite_pertinente ?? row.quantite)
+  if (metric === 'quantite') return safeNumber(row.quantite)
+  if (metric === 'quantite_pertinente') return safeNumber(row.quantite_pertinente ?? row.quantite)
   return safeNumber(row.ca_ht)
 }
 
@@ -671,7 +672,11 @@ export default function ApprovisionnementsPage() {
     setArticleBlgLinks({})
     setDocumentBlgLinks({})
     try {
-      const { data, error: rpcError } = await supabase.rpc('get_appro_flux_reference_detail_fast_v1', {
+      const detailRpcName = scope.flux === 'DEVIS'
+        ? 'get_appro_devis_lignes_detail_v1'
+        : 'get_appro_flux_reference_detail_fast_v1'
+
+      const { data, error: rpcError } = await supabase.rpc(detailRpcName, {
         p_year: selectedYear,
         p_mois: scope.mois ?? null,
         p_flux: scope.flux ?? null,
@@ -1099,7 +1104,8 @@ export default function ApprovisionnementsPage() {
             className="h-11 rounded-xl border border-slate-300 bg-white px-3 text-sm font-black"
           >
             <option value="ca_ht">CA HT</option>
-            <option value="quantite">Quantité pertinente</option>
+            <option value="quantite">Quantité brute</option>
+            <option value="quantite_pertinente">Quantité pertinente</option>
           </select>
         </div>
         <label className="mt-3 flex items-center gap-2 text-sm font-bold text-slate-600">
@@ -1177,7 +1183,7 @@ export default function ApprovisionnementsPage() {
           <div>
             <h2 className="text-xl font-black">Synthèse par famille macro / type de document</h2>
             <p className="text-xs font-bold uppercase text-slate-500">
-              Lecture en {metric === 'ca_ht' ? 'CA HT' : 'quantité pertinente'} · valeur {selectedYear} avec {selectedYear - 1} entre parenthèses · clique sur une famille macro, un mois, une ligne, un total ou une cellule.
+              Lecture en {metric === 'ca_ht' ? 'CA HT' : metric === 'quantite' ? 'quantité brute' : 'quantité pertinente'} · valeur {selectedYear} avec {selectedYear - 1} entre parenthèses · clique sur une famille macro, un mois, une ligne, un total ou une cellule.
             </p>
           </div>
           <div className="flex gap-2">
