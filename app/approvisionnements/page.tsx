@@ -285,51 +285,33 @@ function rowKeyValue(row: Record<string, any>, tableName: string, keyColumns: st
   return ''
 }
 
-async function fetchBlgLinksFromTable(tableName: string, keyColumns: string[], linkColumns: string[]) {
-  const output: Record<string, string> = {}
-  const chunkSize = 5000
-  let from = 0
+async function fetchBlgLinksForVisibleValues(articleRefs: string[], documentNums: string[]) {
+  const articleLinks: Record<string, string> = {}
+  const documentLinks: Record<string, string> = {}
 
-  while (true) {
-    const { data, error } = await supabase
-      .from(tableName)
-      .select('*')
-      .range(from, from + chunkSize - 1)
+  const cleanArticles = uniqueSorted(articleRefs.map(referenceCode).filter(Boolean)).slice(0, 1000)
+  const cleanDocuments = uniqueSorted(documentNums.map((value) => safeText(value, '')).filter(Boolean)).slice(0, 1000)
 
-    if (error) {
-      console.warn(`Liens BLG non chargés depuis ${tableName}`, error.message)
-      break
-    }
-
-    const rows = (data || []) as Record<string, any>[]
-    rows.forEach((row) => {
-      const key = rowKeyValue(row, tableName, keyColumns)
-      const href = rowLinkValue(row, tableName, linkColumns)
-      addLinkEntry(output, key, href)
-    })
-
-    if (rows.length < chunkSize) break
-    from += chunkSize
+  if (!cleanArticles.length && !cleanDocuments.length) {
+    return { articles: articleLinks, documents: documentLinks }
   }
 
-  return output
-}
+  const { data, error } = await supabase.rpc('get_blg_links_for_values', {
+    p_article_refs: cleanArticles,
+    p_document_nums: cleanDocuments,
+  })
 
+  if (error) {
+    console.warn('Liens BLG visibles non chargés', error.message)
+    return { articles: articleLinks, documents: documentLinks }
+  }
 
-async function fetchArticleBlgLinks() {
-  return fetchBlgLinksFromTable(
-    'ref_articles',
-    ['reference_article', 'Reference_Article', 'REFERENCE_ARTICLE', 'reference', 'Reference'],
-    ['lien_blg_article', 'Lien_BLG_Article', 'LIEN_BLG_ARTICLE']
-  )
-}
+  ;((data || []) as Array<{ kind?: string; key?: string; href?: string }>).forEach((row) => {
+    if (row.kind === 'article') addLinkEntry(articleLinks, row.key, row.href)
+    if (row.kind === 'document') addLinkEntry(documentLinks, row.key, row.href)
+  })
 
-async function fetchDocumentBlgLinks() {
-  return fetchBlgLinksFromTable(
-    'blg_link',
-    ['numero_piece', 'numero_pièce', 'Numero_Piece', 'Numero_piece', 'numero_document', 'Numero_Document'],
-    ['lien_blg_doc', 'Lien_BLG_doc', 'Lien_BLG_Doc', 'LIEN_BLG_DOC']
-  )
+  return { articles: articleLinks, documents: documentLinks }
 }
 
 function LinkedArticleReference({ reference, links }: { reference: string; links: Record<string, string> }) {
@@ -559,29 +541,8 @@ export default function ApprovisionnementsPage() {
     p_references: selectedReferenceCodes,
   }), [selectedYear, includeHorsStat, depots, collaborateursTiers, famillesMacro, familles, selectedReferenceCodes])
 
-  useEffect(() => {
-    let cancelled = false
-
-    async function loadBlgLinks() {
-      try {
-        const [articlesResult, documentsResult] = await Promise.allSettled([
-          fetchArticleBlgLinks(),
-          fetchDocumentBlgLinks(),
-        ])
-        if (!cancelled) {
-          setArticleBlgLinks(articlesResult.status === 'fulfilled' ? articlesResult.value : {})
-          setDocumentBlgLinks(documentsResult.status === 'fulfilled' ? documentsResult.value : {})
-        }
-      } catch (exception) {
-        console.warn('Liens BLG articles/documents non chargés', exception)
-      }
-    }
-
-    void loadBlgLinks()
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  // PERF V3 : les liens BLG ne sont plus chargés en masse au montage.
+  // Ils sont récupérés uniquement pour les références/documents visibles dans le détail.
 
   async function loadOptions(yearToLoad = selectedYear) {
     setLoadingOptions(true)
@@ -665,7 +626,7 @@ export default function ApprovisionnementsPage() {
     setError(null)
     resetSelections()
     try {
-      const { data, error: rpcError } = await supabase.rpc('get_appro_flux_summary', rpcFilterPayload)
+      const { data, error: rpcError } = await supabase.rpc('get_appro_flux_summary_fast_v1', rpcFilterPayload)
       if (rpcError) throw rpcError
       setSummaryRows((data || []).map(mapSummaryRow))
     } catch (exception: any) {
@@ -682,7 +643,7 @@ export default function ApprovisionnementsPage() {
     setDetailRows([])
     setSecondSelection(null)
     try {
-      const { data, error: rpcError } = await supabase.rpc('get_appro_flux_family_summary', {
+      const { data, error: rpcError } = await supabase.rpc('get_appro_flux_family_summary_fast_v1', {
         p_year: selectedYear,
         p_mois: scope.mois ?? null,
         p_flux: scope.flux ?? null,
@@ -707,8 +668,10 @@ export default function ApprovisionnementsPage() {
   async function loadReferenceDetail(scope: Exclude<SecondSelection, null>) {
     setLoadingDetail(true)
     setDetailRows([])
+    setArticleBlgLinks({})
+    setDocumentBlgLinks({})
     try {
-      const { data, error: rpcError } = await supabase.rpc('get_appro_flux_reference_detail', {
+      const { data, error: rpcError } = await supabase.rpc('get_appro_flux_reference_detail_fast_v1', {
         p_year: selectedYear,
         p_mois: scope.mois ?? null,
         p_flux: scope.flux ?? null,
@@ -720,9 +683,18 @@ export default function ApprovisionnementsPage() {
         p_familles_macro: famillesMacro,
         p_familles: familles,
         p_references: selectedReferenceCodes,
+        p_limit: 5000,
       })
       if (rpcError) throw rpcError
-      setDetailRows((data || []).map(mapDetailRow))
+      const mappedRows: DetailRpcRow[] = ((data || []) as Record<string, any>[]).map(mapDetailRow)
+      setDetailRows(mappedRows)
+
+      const visibleLinks = await fetchBlgLinksForVisibleValues(
+        mappedRows.map((row) => row.reference_article),
+        mappedRows.map((row) => row.numero_devis)
+      )
+      setArticleBlgLinks(visibleLinks.articles)
+      setDocumentBlgLinks(visibleLinks.documents)
     } catch (exception: any) {
       setError(`Chargement du détail référence impossible : ${exception?.message || exception}`)
     } finally {
@@ -822,7 +794,7 @@ export default function ApprovisionnementsPage() {
       setMaintenanceMessage('Rebuild terminé. Rechargement de la page…')
       await loadOptions(selectedYear)
       await loadSummary()
-      setMaintenanceMessage(`Rebuild ${monthCount} mois terminé.`)
+      setMaintenanceMessage(`Rebuild ${monthCount} mois terminé. Pensez à relancer le cache Appro si nécessaire.`)
     } catch (exception: any) {
       setError(`Rebuild impossible : ${exception?.message || exception}`)
       setMaintenanceMessage(null)
@@ -838,9 +810,12 @@ export default function ApprovisionnementsPage() {
   }, [selectedYear, includeHorsStat])
 
   useEffect(() => {
-    loadSummary()
+    const timer = window.setTimeout(() => {
+      loadSummary()
+    }, 350)
+    return () => window.clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [depots, collaborateursTiers, famillesMacro, familles, references, metric])
+  }, [depots, collaborateursTiers, famillesMacro, familles, references])
 
 
   const chartData = useMemo<ChartDatum[]>(() => {

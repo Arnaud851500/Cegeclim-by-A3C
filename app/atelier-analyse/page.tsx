@@ -219,6 +219,11 @@ const ACTIVITE_TABLE = 'indicateur_activite_mensuel'
 const DEVIS_TABLE = 'indicateur_devis_mensuel'
 const FLUX_ARTICLES_TABLE = 'indicateur_flux_articles_mensuel'
 const VIEW_TABLE = 'analyse_widget_views'
+const ATELIER_ROW_CHUNK_SIZE = 1500
+// PERF V2.1 : la vue Direction CEGECLIM peut dépasser 60k lignes agrégées.
+// Le seuil reste protecteur, mais ne bloque plus les vues usuelles autour de 80/90k lignes.
+const ATELIER_MAX_ROWS_PER_SOURCE = 120000
+const ATELIER_MAX_ROWS_PER_WIDGET = 45000
 
 const ATELIER_COMMON_SELECT = [
   'id',
@@ -272,7 +277,7 @@ const ATELIER_SELECT_BY_SOURCE: Record<Exclude<DataSource, 'mixte'>, string> = {
   devis: ATELIER_COMMON_SELECT.join(','),
   flux_articles: ATELIER_FLUX_ARTICLES_SELECT.join(','),
 }
-const ATELIER_FRONT_VERSION = 'V2026-06-03-FLUX-ARTICLES-ATELIER-04-NO-FULL-SCAN'
+const ATELIER_FRONT_VERSION = 'V2026-06-06-PERF-V2-2-RPC-PAR-WIDGET'
 const ATELIER_AI_VERSION = 'STEP-6-HYPERLINKED-RESULTS-01'
 
 const ATELIER_AI_CONTROLLED_SCHEMA = [
@@ -809,10 +814,11 @@ function documentTypesForSourceLoad(
 async function fetchAllRows(
   tableName: string,
   source: Exclude<DataSource, 'mixte'>,
-  chunkSize = 2500,
+  chunkSize = ATELIER_ROW_CHUNK_SIZE,
   yearsToLoad: number[] = [CURRENT_YEAR, CURRENT_YEAR - 1],
   horsStatMode: GlobalFilters['horsStatistique'] = 'non',
-  documentTypes: string[] | null = null
+  documentTypes: string[] | null = null,
+  filters?: GlobalFilters
 ) {
   const rows: StudioRow[] = []
   let from = 0
@@ -839,6 +845,22 @@ async function fetchAllRows(
       query = query.eq('hors_statistique', horsStatFilter)
     }
 
+    // PERF V2 : appliquer les filtres volumétriques côté Supabase au lieu de tout rapatrier
+    // puis filtrer dans le navigateur. Les filtres non renseignés restent libres.
+    if (filters?.months?.length) query = query.in('mois', filters.months)
+    if (filters?.agences?.length) query = query.in('agence_collaborateur', filters.agences)
+    if (filters?.depots?.length) query = query.in('depot', filters.depots)
+    if (filters?.collaborateursFacture?.length) query = query.in('collaborateur_facture', filters.collaborateursFacture)
+    else if (filters?.collaborateurs?.length) query = query.in('collaborateur_facture', filters.collaborateurs)
+    if (filters?.collaborateursTiers?.length) query = query.in('collaborateur_tiers', filters.collaborateursTiers)
+    if (filters?.departementsTiers?.length) query = query.in('departement_tiers', filters.departementsTiers)
+    if (filters?.famillesMacro?.length) query = query.in('famille_macro', filters.famillesMacro)
+
+    if (filters?.clients?.length && filters.clientMode !== 'exclude') {
+      const clientCodes = uniqueSorted(filters.clients.map((client) => String(client || '').split('—')[0].trim()).filter(Boolean))
+      if (clientCodes.length) query = query.in('numero_tiers', clientCodes)
+    }
+
     if (normalizedTypes.length && (source === 'activite' || source === 'flux_articles')) {
       query = query.in('type_document', normalizedTypes)
     }
@@ -849,8 +871,40 @@ async function fetchAllRows(
     rows.push(...chunk.map((row) => normalizeAggRow(row, source)))
     if (chunk.length < chunkSize) break
     from += chunkSize
+
+    if (rows.length >= ATELIER_MAX_ROWS_PER_SOURCE) {
+      throw new Error(
+        `Chargement atelier interrompu : plus de ${ATELIER_MAX_ROWS_PER_SOURCE.toLocaleString('fr-FR')} lignes pour ${sourceLabel(source)}. ` +
+        `Affinez les filtres Année / Mois / Agence / Famille ou utilisez une vue plus ciblée.`
+      )
+    }
   }
   return rows.filter((r) => r.annee && r.mois)
+}
+
+
+function normalizeRpcSource(value: any): Exclude<DataSource, 'mixte'> {
+  const source = safeText(value, 'factures').toLowerCase()
+  if (source === 'activite') return 'activite'
+  if (source === 'devis') return 'devis'
+  if (source === 'flux_articles') return 'flux_articles'
+  return 'factures'
+}
+
+async function fetchWidgetRowsFromServer(widget: WidgetConfig, globalFilters: GlobalFilters) {
+  const { data, error } = await supabase.rpc('get_atelier_widget_rows_v1', {
+    p_global_filters: globalFilters,
+    p_widget: widget,
+    p_limit: ATELIER_MAX_ROWS_PER_WIDGET,
+  })
+
+  if (error) {
+    throw new Error(`RPC widget ${widget.title || widget.id} : ${error.message}`)
+  }
+
+  return ((data || []) as Record<string, any>[])
+    .map((row) => normalizeAggRow(row, normalizeRpcSource(row.source)))
+    .filter((row) => row.annee && row.mois)
 }
 
 
@@ -2935,10 +2989,15 @@ function AiStructuredResult({ rows, columns, visualization, cellLinks, reference
 
 export default function AtelierAnalysePage() {
   const [rows, setRows] = useState<StudioRow[]>([])
+  const [widgetRowsById, setWidgetRowsById] = useState<Record<string, StudioRow[]>>({})
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [globalFilters, setGlobalFilters] = useState<GlobalFilters>(DEFAULT_FILTERS)
-  const [widgets, setWidgets] = useState<WidgetConfig[]>([])
+  const [widgets, setWidgets] = useState<WidgetConfig[]>(() => [
+    buildDefaultWidget('bridge', [CURRENT_YEAR, CURRENT_YEAR - 1]),
+    buildDefaultWidget('histogramme', [CURRENT_YEAR, CURRENT_YEAR - 1]),
+    buildDefaultWidget('tableau', [CURRENT_YEAR, CURRENT_YEAR - 1]),
+  ])
   const [selectedWidgetId, setSelectedWidgetId] = useState<string | null>(null)
   const [savedViews, setSavedViews] = useState<SavedView[]>([])
   const [referenceLinks, setReferenceLinks] = useState<BlgReferenceLinks>({ tiers: {}, articles: {}, documents: {} })
@@ -3055,51 +3114,63 @@ export default function AtelierAnalysePage() {
   async function loadData(filtersOverride?: GlobalFilters) {
     const filtersForLoad = filtersOverride || globalFilters
     const yearsToLoad = yearsForAtelierLoad(filtersForLoad.years)
-    const widgetSources = widgets.map((widget) => widget.source)
-    const sourcesToLoad = sourcesForAtelierLoad(filtersForLoad.sources, widgetSources)
+    const defaultWidgets = [
+      buildDefaultWidget('bridge', yearsToLoad),
+      buildDefaultWidget('histogramme', yearsToLoad),
+      buildDefaultWidget('tableau', yearsToLoad),
+    ]
+    const widgetsToLoad = widgets.length ? widgets : defaultWidgets
 
     setLoading(true)
     setError(null)
     try {
-      const promises: Array<Promise<StudioRow[]>> = []
-      if (sourcesToLoad.includes('factures')) {
-        promises.push(fetchAllRows(FACTURES_TABLE, 'factures', 2500, yearsToLoad, filtersForLoad.horsStatistique))
-      }
-      if (sourcesToLoad.includes('activite')) {
-        promises.push(fetchAllRows(
-          ACTIVITE_TABLE,
-          'activite',
-          2500,
-          yearsToLoad,
-          filtersForLoad.horsStatistique,
-          documentTypesForSourceLoad('activite', filtersForLoad, widgets)
-        ))
-      }
-      if (sourcesToLoad.includes('devis')) {
-        promises.push(fetchAllRows(DEVIS_TABLE, 'devis', 2500, yearsToLoad, filtersForLoad.horsStatistique))
-      }
-      if (sourcesToLoad.includes('flux_articles')) {
-        promises.push(fetchAllRows(
-          FLUX_ARTICLES_TABLE,
-          'flux_articles',
-          2500,
-          yearsToLoad,
-          filtersForLoad.horsStatistique,
-          documentTypesForSourceLoad('flux_articles', filtersForLoad, widgets)
-        ))
+      if (!widgets.length) setWidgets(defaultWidgets)
+
+      // PERF V2.3 : ne plus lancer toutes les RPC widget en parallèle.
+      // Les appels simultanés saturent vite Supabase/PostgREST et provoquent des statement timeouts.
+      // On charge donc les widgets séquentiellement et on affiche progressivement les résultats.
+      const results: Array<readonly [string, StudioRow[]]> = []
+      const widgetErrors: string[] = []
+      const nextWidgetRows: Record<string, StudioRow[]> = {}
+
+      for (const widget of widgetsToLoad) {
+        try {
+          const widgetRows = await fetchWidgetRowsFromServer(widget, filtersForLoad)
+          results.push([widget.id, widgetRows] as const)
+          nextWidgetRows[widget.id] = widgetRows
+          setWidgetRowsById({ ...nextWidgetRows })
+          setRows(results.flatMap(([, rowsForWidget]) => rowsForWidget))
+        } catch (widgetError: any) {
+          nextWidgetRows[widget.id] = []
+          results.push([widget.id, []] as const)
+          widgetErrors.push(`RPC widget ${widget.title || widget.id} : ${widgetError?.message || widgetError}`)
+          setWidgetRowsById({ ...nextWidgetRows })
+        }
       }
 
-      const loaded = (await Promise.all(promises)).flat()
+      const loaded = results.flatMap(([, widgetRows]) => widgetRows)
       setRows(loaded)
 
-      const years = uniqueSorted(loaded.map((r) => r.annee)).sort((a, b) => Number(b) - Number(a))
+      const years = uniqueSorted(loaded.map((row) => row.annee)).sort((a, b) => Number(b) - Number(a))
       setGlobalFilters((prev) => ({
         ...prev,
-        years: prev.years.length ? prev.years : years.slice(0, 2).map(Number),
+        years: prev.years.length ? prev.years : (years.length ? years.slice(0, 2).map(Number) : yearsToLoad),
       }))
-      setWidgets((prev) => prev.length ? prev : [buildDefaultWidget('bridge', years.map(Number)), buildDefaultWidget('histogramme', years.map(Number)), buildDefaultWidget('tableau', years.map(Number))])
-    } catch (e: any) {
-      setError(e?.message || String(e))
+
+      const saturatedWidgets = results.filter(([, widgetRows]) => widgetRows.length >= ATELIER_MAX_ROWS_PER_WIDGET)
+      const messages: string[] = []
+      if (saturatedWidgets.length) {
+        messages.push(
+          `Attention : ${saturatedWidgets.length} widget(s) ont atteint la limite de ${ATELIER_MAX_ROWS_PER_WIDGET.toLocaleString('fr-FR')} lignes serveur. ` +
+          `Affinez Année / Mois / Agence / Famille ou paramétrez le widget.`
+        )
+      }
+      if (widgetErrors.length) messages.push(widgetErrors.join(' | '))
+      setError(messages.length ? messages.join('\n') : null)
+    } catch (exception: any) {
+      setError(exception?.message || String(exception))
+      setWidgetRowsById({})
+      setRows([])
     } finally {
       setLoading(false)
     }
@@ -3113,7 +3184,26 @@ export default function AtelierAnalysePage() {
         .select('id, name, description, global_filters, widgets, updated_at')
         .order('updated_at', { ascending: false })
       if (error) throw error
-      setSavedViews((data || []) as SavedView[])
+      const views = (data || []) as SavedView[]
+      setSavedViews(views)
+
+      // PERF V2.1 : si une vue enregistrée s'appelle comme la vue affichée par défaut,
+      // on l'applique automatiquement au premier chargement. Cela évite de démarrer
+      // sur une vue vide puis de lancer un chargement trop large.
+      if (!currentViewId) {
+        const preferred = views.find((view) => String(view.name || '').trim().toLowerCase() === String(viewName || '').trim().toLowerCase())
+        if (preferred) {
+          setCurrentViewId(preferred.id)
+          setViewName(preferred.name)
+          setGlobalFilters({ ...DEFAULT_FILTERS, ...(preferred.global_filters || {}) })
+          setWidgets(preferred.widgets?.length ? preferred.widgets : [
+            buildDefaultWidget('bridge', [CURRENT_YEAR, CURRENT_YEAR - 1]),
+            buildDefaultWidget('histogramme', [CURRENT_YEAR, CURRENT_YEAR - 1]),
+            buildDefaultWidget('tableau', [CURRENT_YEAR, CURRENT_YEAR - 1]),
+          ])
+          setSelectedWidgetId(null)
+        }
+      }
     } catch (_e) {
       const local = window.localStorage.getItem('atelier_analyse_views')
       if (local) setSavedViews(JSON.parse(local))
@@ -3152,22 +3242,43 @@ export default function AtelierAnalysePage() {
     }
   }, [])
 
-  const widgetSourcesKey = useMemo(
-    () => JSON.stringify(uniqueSorted(widgets.map((widget) => widget.source))),
+  const widgetServerKey = useMemo(
+    () => JSON.stringify(widgets.map((widget) => ({
+      id: widget.id,
+      type: widget.type,
+      source: widget.source,
+      useGlobalFilters: widget.useGlobalFilters,
+      localFilters: widget.localFilters,
+      measure: widget.measure,
+      secondMeasure: widget.secondMeasure,
+      dimension: widget.dimension,
+      seriesDimension: widget.seriesDimension,
+      rowDimension: widget.rowDimension,
+      rowDimension2: widget.rowDimension2,
+      columnDimension: widget.columnDimension,
+      columnDimension2: widget.columnDimension2,
+      periodMode: widget.periodMode,
+      bridgeMonth: widget.bridgeMonth,
+      yearN: widget.yearN,
+      yearN1: widget.yearN1,
+      compareMode: widget.compareMode,
+      compareDimension: widget.compareDimension,
+      compareValue: widget.compareValue,
+      topN: widget.topN,
+    }))),
     [widgets]
   )
 
+  const globalFiltersServerKey = useMemo(() => JSON.stringify(globalFilters), [globalFilters])
+
   useEffect(() => {
-    loadData(globalFilters)
-    // Le chargement serveur est recalé seulement quand le périmètre volumétrique change.
-    // Les autres filtres restent appliqués instantanément côté navigateur.
+    const timer = window.setTimeout(() => {
+      loadData(globalFilters)
+    }, 350)
+    return () => window.clearTimeout(timer)
+    // PERF V2.2 : chaque changement de filtre ou de paramétrage widget relance uniquement les RPC utiles aux widgets affichés.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    JSON.stringify(globalFilters.sources),
-    JSON.stringify(globalFilters.years),
-    globalFilters.horsStatistique,
-    widgetSourcesKey,
-  ])
+  }, [globalFiltersServerKey, widgetServerKey])
 
   const available = useMemo(() => {
     return {
@@ -3221,6 +3332,7 @@ export default function AtelierAnalysePage() {
 
   function removeWidget(id: string) {
     setWidgets((prev) => prev.filter((w) => w.id !== id))
+    setWidgetRowsById((prev) => { const next = { ...prev }; delete next[id]; return next })
     if (selectedWidgetId === id) setSelectedWidgetId(null)
   }
 
@@ -3835,7 +3947,7 @@ export default function AtelierAnalysePage() {
           ) : (
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-4">
               {widgets.map((widget) => {
-                const widgetRows = applyWidgetFilters(rows, widget, globalFilters)
+                const widgetRows = widgetRowsById[widget.id] ? applyWidgetFilters(widgetRowsById[widget.id], widget, globalFilters) : applyWidgetFilters(rows, widget, globalFilters)
                 return (
                   <WidgetShell
                     key={widget.id}
