@@ -11,1468 +11,376 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import * as XLSX from 'xlsx'
 import { supabase } from '@/lib/supabaseClient'
 
-type Flux = 'DEVIS' | 'CDC' | 'BL' | 'FACTURE'
 type Metric = 'ca_ht' | 'quantite' | 'quantite_pertinente'
 
-type SummaryRpcRow = {
+type OptionRow = { option_type: string; value: string }
+
+type ChartRow = {
   annee: number
   mois: number
-  flux: Flux
-  type_document: string
-  famille_macro: string
-  nb_lignes: number
-  quantite: number
-  quantite_pertinente: number
-  ca_ht: number
-  marge_valeur: number
-}
-
-type FamilySummaryRpcRow = SummaryRpcRow & {
-  famille: string
-}
-
-type DetailRpcRow = {
-  famille_macro: string
-  famille: string
-  reference_article: string
-  designation: string
-  depot: string
-  numero_devis: string
-  mois: number
-  type_document: Flux
-  nb_lignes: number
-  quantite: number
-  quantite_pertinente: number
-  ca_ht: number
-  marge_valeur: number
-}
-
-type OptionRpcRow = {
-  option_type?: string
-  value?: string
-  type_filtre?: string
-  valeur?: string
-}
-
-type ChartDatum = {
-  mois: number
-  label: string
-  [key: string]: string | number
+  flux: string
+  value: number
 }
 
 type MatrixRow = {
   famille_macro: string
-  flux: Flux
-  mois: Record<number, number>
-  moisN1: Record<number, number>
-  total: number
-  totalN1: number
+  flux: string
+  mois: number
+  value_n: number
+  value_n1: number
+  nb_lignes: number
 }
 
-type FamilyMatrixRow = {
-  famille_macro: string
-  famille: string
-  flux: Flux
-  mois: Record<number, number>
-  moisN1: Record<number, number>
-  total: number
-  totalN1: number
-}
-
-type FirstSelection = {
-  famille_macro?: string
-  flux?: Flux
-  mois?: number
-  label: string
-} | null
-
-type SecondSelection = {
+type DetailRow = {
+  date_document?: string
+  numero_document?: string
+  numero_tiers?: string
+  intitule_tiers?: string
   famille_macro?: string
   famille?: string
-  flux?: Flux
-  mois?: number
-  label: string
-} | null
+  reference_article?: string
+  designation?: string
+  depot?: string
+  collaborateur?: string
+  type_document?: string
+  nb_lignes?: number
+  quantite?: number
+  quantite_pertinente?: number
+  ca_ht?: number
+  marge_valeur?: number
+  value?: number
+}
+
+type DashboardPayload = {
+  row_count: number
+  metric: Metric
+  chart: ChartRow[]
+  matrix: MatrixRow[]
+}
 
 const MONTHS = ['Janv.', 'Févr.', 'Mars', 'Avr.', 'Mai', 'Juin', 'Juil.', 'Août', 'Sept.', 'Oct.', 'Nov.', 'Déc.']
-const MIN_YEAR_OPTION = 2023
-const FLUX_ORDER: Flux[] = ['DEVIS', 'CDC', 'BL', 'FACTURE']
-const FLUX_LABELS: Record<Flux, string> = {
-  DEVIS: 'Devis',
-  CDC: 'CDC',
-  BL: 'BL',
-  FACTURE: 'Factures',
-}
-const FLUX_COLORS: Record<Flux, string> = {
-  DEVIS: '#C49A00',
-  CDC: '#005F73',
-  BL: '#60A5FA',
-  FACTURE: '#16A34A',
+const FLUX = ['DEVIS', 'CDC', 'BL', 'FACTURE']
+
+function monthLabel(m: number) {
+  return MONTHS[Math.max(0, Math.min(11, Number(m || 1) - 1))]
 }
 
-function safeNumber(value: any) {
-  if (value === null || value === undefined || value === '') return 0
-  const n = Number(String(value).replace(/\s/g, '').replace(',', '.'))
-  return Number.isFinite(n) ? n : 0
+function n(value: any) {
+  const parsed = Number(value ?? 0)
+  return Number.isFinite(parsed) ? parsed : 0
 }
 
-function safeText(value: any, fallback = 'NON RENSEIGNE') {
-  const text = String(value ?? '').trim()
-  return text || fallback
+function fmt(value: number, metric: Metric) {
+  if (metric === 'ca_ht') return new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(n(value))
+  return new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 0 }).format(n(value))
 }
 
-function blgLinkKey(value: any) {
-  return String(value ?? '')
-    .normalize('NFKC')
-    .replace(/\u00a0/g, ' ')
-    .replace(/[–—]/g, '-')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
-function addCandidate(target: Set<string>, value: any) {
-  const clean = blgLinkKey(value)
-  if (!clean || clean === '—' || clean === 'TOTAL') return
-  target.add(clean)
-  target.add(clean.toUpperCase())
-  target.add(clean.toLowerCase())
-}
-
-function blgLinkCandidates(value: any) {
-  const raw = blgLinkKey(value)
-  if (!raw || raw === '—' || raw === 'TOTAL') return []
-
-  const candidates = new Set<string>()
-  addCandidate(candidates, raw)
-
-  const separated = raw.match(/^\s*([A-Za-z0-9_./-]+)\s*(?:-|·|\||›)\s+.+$/)
-  if (separated?.[1]) addCandidate(candidates, separated[1])
-
-  const separators = [' — ', ' - ', ' · ', ' | ', ' › ', ' – ']
-  separators.forEach((separator) => {
-    if (raw.includes(separator)) {
-      const first = raw.split(separator)[0]?.trim()
-      if (first) addCandidate(candidates, first)
-    }
-  })
-
-  const firstToken = raw.split(/\s+/)[0]?.trim()
-  if (firstToken && /^[A-Za-z0-9_./-]+$/.test(firstToken)) addCandidate(candidates, firstToken)
-
-  const codedTokens = raw.match(/\b[A-Za-z]{0,5}\d{2,}[A-Za-z0-9_./-]*\b/g) || []
-  codedTokens.forEach((token) => addCandidate(candidates, token))
-
-  return Array.from(candidates)
-}
-
-function addLinkEntry(output: Record<string, string>, key: any, href: any) {
-  const cleanHref = blgLinkKey(href)
-  if (!cleanHref) return
-  blgLinkCandidates(key).forEach((candidate) => {
-    output[candidate] = cleanHref
-  })
-}
-
-function findBlgHref(links: Record<string, string>, value: any) {
-  for (const candidate of blgLinkCandidates(value)) {
-    if (links[candidate]) return links[candidate]
-    if (links[candidate.toUpperCase()]) return links[candidate.toUpperCase()]
-    if (links[candidate.toLowerCase()]) return links[candidate.toLowerCase()]
-  }
-  return null
-}
-
-function firstNonEmpty(row: Record<string, any>, columns: string[]) {
-  for (const column of columns) {
-    const value = row[column]
-    if (value !== null && value !== undefined && String(value).trim() !== '') return value
-  }
-  return ''
-}
-
-function normalizeBlgColumnName(value: string) {
-  return String(value || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '')
-}
-
-function rowValueByColumnAliases(row: Record<string, any>, columns: string[]) {
-  const normalizedAliases = new Set(columns.map((column) => normalizeBlgColumnName(column)))
-  for (const [column, value] of Object.entries(row || {})) {
-    if (!normalizedAliases.has(normalizeBlgColumnName(column))) continue
-    if (value !== null && value !== undefined && String(value).trim() !== '') return value
-  }
-  return ''
-}
-
-function looksLikeBlgUrl(value: any) {
-  const text = blgLinkKey(value)
-  return /^https?:\/\//i.test(text) || text.includes('app.blgcloud.com')
-}
-
-function rowLinkValue(row: Record<string, any>, tableName: string, linkColumns: string[]) {
-  const byAlias = rowValueByColumnAliases(row, linkColumns)
-  if (byAlias) return byAlias
-
-  const table = tableName.toLowerCase()
-  for (const [column, value] of Object.entries(row || {})) {
-    if (value === null || value === undefined || String(value).trim() === '') continue
-    const normalized = normalizeBlgColumnName(column)
-    const isLinkColumn =
-      normalized.includes('lien') &&
-      normalized.includes('blg') &&
-      ((table.includes('tiers') && normalized.includes('tiers')) ||
-        (table.includes('articles') && normalized.includes('article')) ||
-        (table.includes('blg_link') && (normalized.includes('doc') || normalized.includes('piece') || normalized.includes('document'))))
-
-    if (isLinkColumn || looksLikeBlgUrl(value)) return value
-  }
-
-  return ''
-}
-
-function rowKeyValue(row: Record<string, any>, tableName: string, keyColumns: string[]) {
-  const byAlias = rowValueByColumnAliases(row, keyColumns)
-  if (byAlias) return byAlias
-
-  const table = tableName.toLowerCase()
-  for (const [column, value] of Object.entries(row || {})) {
-    if (value === null || value === undefined || String(value).trim() === '') continue
-    const normalized = normalizeBlgColumnName(column)
-
-    if (table.includes('tiers')) {
-      if (
-        (normalized.includes('tiers') || normalized.includes('client')) &&
-        (normalized.includes('numero') || normalized.includes('num') || normalized.includes('code') || normalized === 'tiers')
-      ) return value
-    }
-
-    if (table.includes('articles')) {
-      if (
-        normalized.includes('referencearticle') ||
-        normalized.includes('refarticle') ||
-        normalized === 'reference' ||
-        normalized.includes('codearticle') ||
-        normalized === 'article'
-      ) return value
-    }
-
-    if (table.includes('blg_link')) {
-      if (
-        normalized.includes('numeropiece') ||
-        normalized.includes('numerodocument') ||
-        normalized.includes('numeroarticle') ||
-        normalized === 'piece' ||
-        normalized === 'document'
-      ) return value
-    }
-  }
-
-  // Dernier filet de sécurité : on cherche une valeur ressemblant à un code métier
-  // du type C0038, A0116, FA0783516, FAR15980, BL275100, CDC..., etc.
-  for (const [column, value] of Object.entries(row || {})) {
-    const normalized = normalizeBlgColumnName(column)
-    if (normalized.includes('blg') || normalized.includes('id') || normalized.includes('siret') || normalized.includes('naf')) continue
-    const text = blgLinkKey(value)
-    if (/\b[A-Za-z]{1,5}\d{2,}[A-Za-z0-9_./-]*\b/.test(text) && !looksLikeBlgUrl(text)) return text
-  }
-
-  return ''
-}
-
-async function fetchBlgLinksForVisibleValues(articleRefs: string[], documentNums: string[]) {
-  const articleLinks: Record<string, string> = {}
-  const documentLinks: Record<string, string> = {}
-
-  const cleanArticles = uniqueSorted(articleRefs.map(referenceCode).filter(Boolean)).slice(0, 1000)
-  const cleanDocuments = uniqueSorted(documentNums.map((value) => safeText(value, '')).filter(Boolean)).slice(0, 1000)
-
-  if (!cleanArticles.length && !cleanDocuments.length) {
-    return { articles: articleLinks, documents: documentLinks }
-  }
-
-  const { data, error } = await supabase.rpc('get_blg_links_for_values', {
-    p_article_refs: cleanArticles,
-    p_document_nums: cleanDocuments,
-  })
-
-  if (error) {
-    console.warn('Liens BLG visibles non chargés', error.message)
-    return { articles: articleLinks, documents: documentLinks }
-  }
-
-  ;((data || []) as Array<{ kind?: string; key?: string; href?: string }>).forEach((row) => {
-    if (row.kind === 'article') addLinkEntry(articleLinks, row.key, row.href)
-    if (row.kind === 'document') addLinkEntry(documentLinks, row.key, row.href)
-  })
-
-  return { articles: articleLinks, documents: documentLinks }
-}
-
-function LinkedArticleReference({ reference, links }: { reference: string; links: Record<string, string> }) {
-  const href = findBlgHref(links, reference)
-  if (!href) return <>{reference || '—'}</>
-  return (
-    <a href={href} target="_blank" rel="noopener noreferrer" className="font-black text-blue-700 underline decoration-blue-300 underline-offset-2 hover:text-blue-900">
-      {reference || '—'}
-    </a>
-  )
-}
-
-function LinkedDocumentReference({ numero, links }: { numero: string; links: Record<string, string> }) {
-  const href = findBlgHref(links, numero)
-  if (!href) return <>{numero || '—'}</>
-  return (
-    <a href={href} target="_blank" rel="noopener noreferrer" className="font-black text-blue-700 underline decoration-blue-300 underline-offset-2 hover:text-blue-900">
-      {numero || '—'}
-    </a>
-  )
-}
-
-function normalizeFlux(value: any): Flux {
-  const text = safeText(value, 'DEVIS').toUpperCase()
-  if (text === 'CDC' || text === 'BL' || text === 'FACTURE') return text
-  return 'DEVIS'
-}
-
-function monthLabel(month: number) {
-  return MONTHS[Math.max(0, Math.min(11, month - 1))] || String(month)
+function metricLabel(metric: Metric) {
+  if (metric === 'quantite') return 'Quantité brute'
+  if (metric === 'quantite_pertinente') return 'Quantité pertinente'
+  return 'CA HT'
 }
 
 function uniqueSorted(values: string[]) {
-  return Array.from(new Set(values.map((value) => safeText(value, '')).filter(Boolean))).sort((a, b) =>
-    a.localeCompare(b, 'fr', { numeric: true })
-  )
+  return Array.from(new Set(values.filter(Boolean))).sort((a, b) => a.localeCompare(b, 'fr', { numeric: true }))
 }
 
-function referenceCode(referenceOption: string) {
-  return String(referenceOption || '').split(' — ')[0].trim()
-}
-
-function getMetricValue(row: Pick<SummaryRpcRow | DetailRpcRow, 'ca_ht' | 'quantite' | 'quantite_pertinente'>, metric: Metric) {
-  if (metric === 'quantite') return safeNumber(row.quantite)
-  if (metric === 'quantite_pertinente') return safeNumber(row.quantite_pertinente ?? row.quantite)
-  return safeNumber(row.ca_ht)
-}
-
-function formatNumber(value: number) {
-  return new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 0 }).format(value || 0)
-}
-
-function formatMetric(value: number, metric: Metric) {
-  if (metric === 'ca_ht') {
-    return new Intl.NumberFormat('fr-FR', {
-      style: 'currency',
-      currency: 'EUR',
-      maximumFractionDigits: 0,
-    }).format(value || 0)
-  }
-  return formatNumber(value)
-}
-
-function yAxisFormatter(value: number, metric: Metric) {
-  if (metric === 'ca_ht') return `${Math.round(Number(value || 0) / 1000)}k€`
-  return formatNumber(Number(value || 0))
-}
-
-function defaultYearOptions() {
-  const current = new Date().getFullYear()
-  const years: number[] = []
-  for (let year = current; year >= MIN_YEAR_OPTION; year -= 1) years.push(year)
-  return years
-}
-
-function downloadWorkbook(filename: string, sheets: Array<{ name: string; rows: Array<Record<string, any>> }>) {
-  const workbook = XLSX.utils.book_new()
-  sheets.forEach((sheet) => {
-    const worksheet = XLSX.utils.json_to_sheet(sheet.rows)
-    XLSX.utils.book_append_sheet(workbook, worksheet, sheet.name.slice(0, 31))
-  })
-  XLSX.writeFile(workbook, filename)
-}
-
-function MultiSelect({
-  label,
-  values,
-  selected,
-  onChange,
-}: {
-  label: string
-  values: string[]
-  selected: string[]
-  onChange: (values: string[]) => void
-}) {
+function MultiSelect({ label, values, selected, onChange }: { label: string; values: string[]; selected: string[]; onChange: (next: string[]) => void }) {
   const [open, setOpen] = useState(false)
-  const [search, setSearch] = useState('')
-  const filtered = useMemo(
-    () => values.filter((value) => value.toLowerCase().includes(search.toLowerCase())).slice(0, 300),
-    [values, search]
-  )
-
-  function toggle(value: string) {
-    onChange(selected.includes(value) ? selected.filter((item) => item !== value) : [...selected, value])
-  }
-
   return (
     <div className="relative">
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        className="h-11 w-full rounded-xl border border-slate-300 bg-white px-3 text-left text-sm font-black"
-      >
-        {label}{selected.length ? ` (${selected.length})` : ''}
+      <button type="button" onClick={() => setOpen((v) => !v)} className="h-11 min-w-[180px] rounded-xl border border-slate-200 bg-white px-3 text-left text-sm font-black shadow-sm">
+        {selected.length ? `${label} (${selected.length})` : label}
+        <span className="float-right text-slate-400">▼</span>
       </button>
-      {open && (
-        <div className="absolute z-50 mt-2 max-h-80 w-full overflow-auto rounded-xl border border-slate-200 bg-white p-2 shadow-xl">
-          <input
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Rechercher…"
-            className="mb-2 h-9 w-full rounded-lg border border-slate-200 px-2 text-sm"
-          />
-          <button
-            type="button"
-            onClick={() => onChange([])}
-            className="mb-2 w-full rounded-lg bg-slate-100 px-2 py-1 text-left text-xs font-bold hover:bg-slate-200"
-          >
-            Tout désélectionner
-          </button>
-          {filtered.map((value) => (
-            <label key={value} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 text-xs font-semibold hover:bg-slate-50">
-              <input type="checkbox" checked={selected.includes(value)} onChange={() => toggle(value)} />
-              <span className="truncate">{value}</span>
-            </label>
-          ))}
-          {!filtered.length && <div className="px-2 py-3 text-xs font-bold text-slate-400">Aucune valeur</div>}
-          {values.length > 300 && <div className="px-2 py-2 text-[11px] font-bold text-slate-400">300 premières valeurs affichées. Utilise la recherche pour filtrer.</div>}
+      {open ? (
+        <div className="absolute z-30 mt-2 max-h-72 w-80 overflow-auto rounded-xl border border-slate-200 bg-white p-2 shadow-xl">
+          <button type="button" onClick={() => onChange([])} className="mb-2 w-full rounded-lg bg-slate-100 px-2 py-1 text-left text-xs font-bold">Tout sélectionner</button>
+          {values.map((value) => {
+            const checked = selected.includes(value)
+            return (
+              <label key={value} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 text-xs hover:bg-slate-50">
+                <input type="checkbox" checked={checked} onChange={() => onChange(checked ? selected.filter((x) => x !== value) : [...selected, value])} />
+                <span>{value}</span>
+              </label>
+            )
+          })}
         </div>
-      )}
+      ) : null}
     </div>
   )
 }
 
-function ReferencesFreeInput({
-  selected,
-  onChange,
-}: {
-  selected: string[]
-  onChange: (values: string[]) => void
-}) {
-  const [text, setText] = useState(selected.join(', '))
-
-  useEffect(() => {
-    setText(selected.join(', '))
-  }, [selected])
-
-  function parseReferences(value: string) {
-    return uniqueSorted(
-      value
-        .split(/[;,\n]+/)
-        .map((item) => item.trim())
-        .filter(Boolean)
-    )
-  }
-
-  return (
-    <input
-      value={text}
-      onChange={(event) => {
-        const nextText = event.target.value
-        setText(nextText)
-        onChange(parseReferences(nextText))
-      }}
-      placeholder="Références (séparées par virgule)"
-      className="h-11 w-full rounded-xl border border-slate-300 bg-white px-3 text-sm font-black"
-    />
-  )
-}
-
 export default function ApprovisionnementsPage() {
-  const [selectedYear, setSelectedYear] = useState<number>(new Date().getFullYear())
-  const [metric, setMetric] = useState<Metric>('ca_ht')
-  const [includeHorsStat, setIncludeHorsStat] = useState(false)
-  const [visibleFlux, setVisibleFlux] = useState<Record<Flux, boolean>>({ DEVIS: true, CDC: true, BL: true, FACTURE: true })
-
+  const currentYear = new Date().getFullYear()
+  const [year, setYear] = useState(currentYear)
+  const [metric, setMetric] = useState<Metric>('quantite_pertinente')
+  const [options, setOptions] = useState<Record<string, string[]>>({})
   const [depots, setDepots] = useState<string[]>([])
   const [collaborateursTiers, setCollaborateursTiers] = useState<string[]>([])
   const [famillesMacro, setFamillesMacro] = useState<string[]>([])
   const [familles, setFamilles] = useState<string[]>([])
-  const [references, setReferences] = useState<string[]>([])
-
-  const [available, setAvailable] = useState({
-    depots: [] as string[],
-    collaborateursTiers: [] as string[],
-    famillesMacro: [] as string[],
-    familles: [] as string[],
-    references: [] as string[],
-  })
-
-  const [summaryRows, setSummaryRows] = useState<SummaryRpcRow[]>([])
-  const [familyRows, setFamilyRows] = useState<FamilySummaryRpcRow[]>([])
-  const [detailRows, setDetailRows] = useState<DetailRpcRow[]>([])
-  const [firstSelection, setFirstSelection] = useState<FirstSelection>(null)
-  const [secondSelection, setSecondSelection] = useState<SecondSelection>(null)
-  const [loadingOptions, setLoadingOptions] = useState(false)
-  const [loadingSummary, setLoadingSummary] = useState(false)
-  const [loadingFamily, setLoadingFamily] = useState(false)
+  const [referenceInput, setReferenceInput] = useState('')
+  const [includeHors, setIncludeHors] = useState(false)
+  const [dashboard, setDashboard] = useState<DashboardPayload | null>(null)
+  const [selectedScope, setSelectedScope] = useState<{ famille_macro?: string; flux?: string; mois?: number; label: string } | null>(null)
+  const [detailRows, setDetailRows] = useState<DetailRow[]>([])
+  const [loading, setLoading] = useState(false)
   const [loadingDetail, setLoadingDetail] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [maintenanceLoading, setMaintenanceLoading] = useState(false)
-  const [maintenanceMessage, setMaintenanceMessage] = useState<string | null>(null)
-  const [articleBlgLinks, setArticleBlgLinks] = useState<Record<string, string>>({})
-  const [documentBlgLinks, setDocumentBlgLinks] = useState<Record<string, string>>({})
 
-  const selectedReferenceCodes = useMemo(
-    () => references.map(referenceCode).filter(Boolean),
-    [references]
-  )
+  const references = useMemo(() => referenceInput.split(',').map((x) => x.trim()).filter(Boolean), [referenceInput])
 
-  const rpcFilterPayload = useMemo(() => ({
-    p_year: selectedYear,
-    p_include_hors_stat: includeHorsStat,
-    p_depots: depots,
-    p_collaborateurs_tiers: collaborateursTiers,
-    p_familles_macro: famillesMacro,
-    p_familles: familles,
-    p_references: selectedReferenceCodes,
-  }), [selectedYear, includeHorsStat, depots, collaborateursTiers, famillesMacro, familles, selectedReferenceCodes])
+  const filters = useMemo(() => ({
+    year,
+    depots,
+    collaborateurs_tiers: collaborateursTiers,
+    familles_macro: famillesMacro,
+    familles,
+    references,
+    include_hors_statistique: includeHors,
+  }), [year, depots, collaborateursTiers, famillesMacro, familles, references, includeHors])
 
-  // PERF V3 : les liens BLG ne sont plus chargés en masse au montage.
-  // Ils sont récupérés uniquement pour les références/documents visibles dans le détail.
-
-  async function loadOptions(yearToLoad = selectedYear) {
-    setLoadingOptions(true)
-    try {
-      const { data, error: rpcError } = await supabase.rpc('get_appro_filter_options_light', {
-        p_annee: yearToLoad,
-        p_include_hors_statistique: includeHorsStat,
-      })
-      if (rpcError) throw rpcError
-
-      const rows = ((data || []) as OptionRpcRow[]).map((row) => ({
-        optionType: safeText(row.option_type ?? row.type_filtre, ''),
-        value: safeText(row.value ?? row.valeur, ''),
-      }))
-
-      setAvailable({
-        depots: uniqueSorted(rows.filter((row) => row.optionType === 'depot').map((row) => row.value)),
-        collaborateursTiers: uniqueSorted(rows.filter((row) => row.optionType === 'collaborateur_tiers').map((row) => row.value)),
-        famillesMacro: uniqueSorted(rows.filter((row) => row.optionType === 'famille_macro').map((row) => row.value)),
-        familles: uniqueSorted(rows.filter((row) => row.optionType === 'famille').map((row) => row.value)),
-        // Les références ne sont volontairement plus chargées en masse : il peut y en avoir des dizaines de milliers.
-        // Elles sont maintenant saisies librement dans le filtre Références.
-        references: [],
-      })
-    } catch (exception: any) {
-      setError(`Chargement des filtres impossible : ${exception?.message || exception}`)
-    } finally {
-      setLoadingOptions(false)
-    }
+  async function loadOptions() {
+    const { data, error } = await supabase.rpc('get_appro_filter_options_clean_v1')
+    if (error) throw error
+    const next: Record<string, string[]> = {}
+    ;((data || []) as OptionRow[]).forEach((row) => {
+      const key = String(row.option_type || '')
+      const value = String(row.value || '').trim()
+      if (!key || !value) return
+      next[key] = next[key] || []
+      next[key].push(value)
+    })
+    Object.keys(next).forEach((key) => {
+      next[key] = uniqueSorted(next[key])
+    })
+    setOptions(next)
   }
 
-  function resetSelections() {
-    setFirstSelection(null)
-    setSecondSelection(null)
-    setFamilyRows([])
-    setDetailRows([])
-  }
-
-  function mapSummaryRow(row: any): SummaryRpcRow {
-    return {
-      annee: safeNumber(row.annee),
-      mois: safeNumber(row.mois),
-      flux: normalizeFlux(row.flux ?? row.type_document),
-      type_document: safeText(row.type_document, normalizeFlux(row.flux ?? row.type_document)),
-      famille_macro: safeText(row.famille_macro),
-      nb_lignes: safeNumber(row.nb_lignes),
-      quantite: safeNumber(row.quantite),
-      quantite_pertinente: safeNumber(row.quantite_pertinente ?? row.quantite),
-      ca_ht: safeNumber(row.ca_ht),
-      marge_valeur: safeNumber(row.marge_valeur),
-    }
-  }
-
-  function mapFamilyRow(row: any): FamilySummaryRpcRow {
-    return {
-      ...mapSummaryRow(row),
-      famille: safeText(row.famille),
-    }
-  }
-
-  function mapDetailRow(row: any): DetailRpcRow {
-    return {
-      famille_macro: safeText(row.famille_macro),
-      famille: safeText(row.famille),
-      reference_article: safeText(row.reference_article),
-      designation: safeText(row.designation),
-      depot: safeText(row.depot, ''),
-      numero_devis: safeText(row.numero_devis || row.numero_piece || row.numero_document, ''),
-      mois: safeNumber(row.mois),
-      type_document: normalizeFlux(row.type_document ?? row.flux),
-      nb_lignes: safeNumber(row.nb_lignes),
-      quantite: safeNumber(row.quantite),
-      quantite_pertinente: safeNumber(row.quantite_pertinente ?? row.quantite),
-      ca_ht: safeNumber(row.ca_ht),
-      marge_valeur: safeNumber(row.marge_valeur),
-    }
-  }
-
-  async function loadSummary() {
-    setLoadingSummary(true)
+  async function loadDashboard() {
+    setLoading(true)
     setError(null)
-    resetSelections()
-    try {
-      const { data, error: rpcError } = await supabase.rpc('get_appro_flux_summary_fast_v1', rpcFilterPayload)
-      if (rpcError) throw rpcError
-      setSummaryRows((data || []).map(mapSummaryRow))
-    } catch (exception: any) {
-      setError(`Chargement de la synthèse impossible : ${exception?.message || exception}`)
-      setSummaryRows([])
-    } finally {
-      setLoadingSummary(false)
-    }
-  }
-
-  async function loadFamilySummary(scope: Exclude<FirstSelection, null>) {
-    setLoadingFamily(true)
-    setError(null)
+    setSelectedScope(null)
     setDetailRows([])
-    setSecondSelection(null)
     try {
-      const { data, error: rpcError } = await supabase.rpc('get_appro_flux_family_summary_fast_v1', {
-        p_year: selectedYear,
-        p_mois: scope.mois ?? null,
-        p_flux: scope.flux ?? null,
-        p_famille_macro: scope.famille_macro ?? null,
-        p_include_hors_stat: includeHorsStat,
-        p_depots: depots,
-        p_collaborateurs_tiers: collaborateursTiers,
-        p_familles_macro: famillesMacro,
-        p_familles: familles,
-        p_references: selectedReferenceCodes,
+      const { data, error } = await supabase.rpc('get_appro_dashboard_clean_v1', {
+        p_filters: filters,
+        p_metric: metric,
       })
-      if (rpcError) throw rpcError
-      setFamilyRows((data || []).map(mapFamilyRow))
+      if (error) throw error
+      setDashboard((data || {}) as DashboardPayload)
     } catch (exception: any) {
-      setError(`Chargement du détail par famille impossible : ${exception?.message || exception}`)
-      setFamilyRows([])
+      setError(exception?.message || String(exception))
+      setDashboard(null)
     } finally {
-      setLoadingFamily(false)
+      setLoading(false)
     }
   }
 
-  async function loadReferenceDetail(scope: Exclude<SecondSelection, null>) {
+  async function loadDetail(scope: { famille_macro?: string; flux?: string; mois?: number; label: string }) {
+    setSelectedScope(scope)
     setLoadingDetail(true)
-    setDetailRows([])
-    setArticleBlgLinks({})
-    setDocumentBlgLinks({})
+    setError(null)
     try {
-      const detailRpcName = scope.flux === 'DEVIS'
-        ? 'get_appro_devis_lignes_detail_v1'
-        : 'get_appro_flux_reference_detail_fast_v1'
-
-      const { data, error: rpcError } = await supabase.rpc(detailRpcName, {
-        p_year: selectedYear,
-        p_mois: scope.mois ?? null,
-        p_flux: scope.flux ?? null,
-        p_famille_macro: scope.famille_macro ?? null,
-        p_famille: scope.famille ?? null,
-        p_include_hors_stat: includeHorsStat,
-        p_depots: depots,
-        p_collaborateurs_tiers: collaborateursTiers,
-        p_familles_macro: famillesMacro,
-        p_familles: familles,
-        p_references: selectedReferenceCodes,
-        p_limit: 5000,
+      const { data, error } = await supabase.rpc('get_appro_reference_detail_clean_v1', {
+        p_filters: filters,
+        p_metric: metric,
+        p_scope: scope,
+        p_limit: 700,
       })
-      if (rpcError) throw rpcError
-      const mappedRows: DetailRpcRow[] = ((data || []) as Record<string, any>[]).map(mapDetailRow)
-      setDetailRows(mappedRows)
-
-      const visibleLinks = await fetchBlgLinksForVisibleValues(
-        mappedRows.map((row) => row.reference_article),
-        mappedRows.map((row) => row.numero_devis)
-      )
-      setArticleBlgLinks(visibleLinks.articles)
-      setDocumentBlgLinks(visibleLinks.documents)
+      if (error) throw error
+      setDetailRows((data || []) as DetailRow[])
     } catch (exception: any) {
-      setError(`Chargement du détail référence impossible : ${exception?.message || exception}`)
+      setError(`Chargement du détail impossible : ${exception?.message || exception}`)
+      setDetailRows([])
     } finally {
       setLoadingDetail(false)
     }
   }
 
-  function handleFirstSelection(scope: Exclude<FirstSelection, null>) {
-    setFirstSelection(scope)
-    loadFamilySummary(scope)
-  }
-
-  function handleSecondSelection(scope: Exclude<SecondSelection, null>) {
-    setSecondSelection(scope)
-    loadReferenceDetail(scope)
-  }
-
-  function selectionLabel(scope: FirstSelection | SecondSelection) {
-    if (!scope) return ''
-    return scope.label
-  }
-
-  function formatDateForSql(date: Date) {
-    const pad2 = (n: number) => String(n).padStart(2, '0')
-    return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
-  }
-
-  function getRecentMonthPeriods(monthCount: 2 | 3 = 3) {
-    const periods: Array<{ p_date_debut: string; p_date_fin: string; label: string }> = []
-    const now = new Date()
-    const safeMonthCount = monthCount === 2 ? 2 : 3
-    const cursor = new Date(now.getFullYear(), now.getMonth() - (safeMonthCount - 1), 1)
-    const limit = new Date(now.getFullYear(), now.getMonth() + 1, 1)
-
-    while (cursor < limit) {
-      const next = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)
-      periods.push({
-        p_date_debut: formatDateForSql(cursor),
-        p_date_fin: formatDateForSql(next),
-        label: `${formatDateForSql(cursor)} → ${formatDateForSql(next)}`,
-      })
-      cursor.setMonth(cursor.getMonth() + 1)
-    }
-
-    return periods
-  }
-
-  async function runRpcForPeriods(functionName: string, periods: ReturnType<typeof getRecentMonthPeriods>, label: string) {
-    for (const period of periods) {
-      setMaintenanceMessage(`${label} : ${period.label}`)
-      const { error: rpcError } = await supabase.rpc(functionName, {
-        p_date_debut: period.p_date_debut,
-        p_date_fin: period.p_date_fin,
-      })
-      if (rpcError) throw new Error(`${functionName} ${period.label} : ${rpcError.message}`)
-    }
-  }
-
-
-  async function handleRebuildRecentMonths(monthCount: 2 | 3 = 3, blMxMode?: 'previous_month' | 'current_month') {
-    if (maintenanceLoading) return
-    const message = blMxMode
-      ? `Confirmer BL M-x → ${blMxMode === 'previous_month' ? 'M-1' : 'M'} sans rebuild complet ?`
-      : `Confirmer le rebuild des agrégats des ${monthCount} derniers mois ?`
-    if (!window.confirm(message)) return
-
-    setMaintenanceLoading(true)
-    setMaintenanceMessage(`Préparation du rebuild ${monthCount} mois…`)
-    setError(null)
-
-    try {
-      if (blMxMode) {
-        setMaintenanceMessage(`Application BL M-x → ${blMxMode === 'previous_month' ? 'M-1' : 'M'} sur l’agrégat activité…`)
-        const { error: modeError } = await supabase.rpc('set_bl_mx_mode', { p_mode: blMxMode })
-        if (modeError) throw new Error(`set_bl_mx_mode : ${modeError.message}`)
-
-        const { error: applyError } = await supabase.rpc('apply_bl_mx_month_mode_activite', {
-          p_mode: blMxMode,
-          p_months_back: monthCount,
-        })
-        if (applyError) throw new Error(`apply_bl_mx_month_mode_activite : ${applyError.message}`)
-
-        setMaintenanceMessage('Mode BL M-x appliqué. Rechargement de la page…')
-        await loadOptions(selectedYear)
-        await loadSummary()
-        setMaintenanceMessage(`BL M-x → ${blMxMode === 'previous_month' ? 'M-1' : 'M'} appliqué.`)
-        return
-      }
-
-      const periods = getRecentMonthPeriods(monthCount)
-      await runRpcForPeriods('refresh_facture_entetes_cache_periode', periods, 'Cache factures')
-      await runRpcForPeriods('rebuild_indicateur_factures_mensuel_periode', periods, 'Agrégat factures')
-      await runRpcForPeriods('refresh_devis_entetes_cache_periode', periods, 'Cache devis')
-      await runRpcForPeriods('rebuild_indicateur_devis_mensuel_periode', periods, 'Agrégat devis')
-      await runRpcForPeriods('rebuild_indicateur_activite_mensuel_periode', periods, 'Agrégat activité')
-      await runRpcForPeriods('rebuild_indicateur_flux_articles_mensuel_periode', periods, 'Flux articles')
-      setMaintenanceMessage('Rebuild terminé. Rechargement de la page…')
-      await loadOptions(selectedYear)
-      await loadSummary()
-      setMaintenanceMessage(`Rebuild ${monthCount} mois terminé. Pensez à relancer le cache Appro si nécessaire.`)
-    } catch (exception: any) {
-      setError(`Rebuild impossible : ${exception?.message || exception}`)
-      setMaintenanceMessage(null)
-    } finally {
-      setMaintenanceLoading(false)
-    }
-  }
+  useEffect(() => {
+    loadOptions().catch((exception) => setError(`Filtres indisponibles : ${exception?.message || exception}`))
+  }, [])
 
   useEffect(() => {
-    loadOptions(selectedYear)
-    loadSummary()
+    const timer = setTimeout(() => {
+      void loadDashboard()
+    }, 250)
+    return () => clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedYear, includeHorsStat])
+  }, [JSON.stringify(filters), metric])
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      loadSummary()
-    }, 350)
-    return () => window.clearTimeout(timer)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [depots, collaborateursTiers, famillesMacro, familles, references])
-
-
-  const chartData = useMemo<ChartDatum[]>(() => {
-    const output: ChartDatum[] = Array.from({ length: 12 }, (_, index) => ({ mois: index + 1, label: monthLabel(index + 1) }))
-
-    summaryRows.forEach((row) => {
-      if (!visibleFlux[row.flux]) return
-      const monthIndex = row.mois - 1
-      if (monthIndex < 0 || monthIndex > 11) return
-      const suffix = row.annee === selectedYear ? 'N' : row.annee === selectedYear - 1 ? 'N1' : null
-      if (!suffix) return
-      const key = `${row.flux}_${suffix}`
-      output[monthIndex][key] = safeNumber(output[monthIndex][key]) + getMetricValue(row, metric)
+  const chartData = useMemo(() => {
+    const map = new Map<number, Record<string, any>>()
+    for (let m = 1; m <= 12; m += 1) map.set(m, { mois: m, label: monthLabel(m) })
+    ;(dashboard?.chart || []).forEach((row) => {
+      const item = map.get(row.mois) || { mois: row.mois, label: monthLabel(row.mois) }
+      item[`${row.flux} ${row.annee}`] = n(row.value)
+      map.set(row.mois, item)
     })
+    return Array.from(map.values())
+  }, [dashboard])
 
-    return output
-  }, [summaryRows, selectedYear, metric, visibleFlux])
+  const matrix = dashboard?.matrix || []
 
-  const matrixRows = useMemo<MatrixRow[]>(() => {
-    const map = new Map<string, MatrixRow>()
-
-    summaryRows.forEach((row) => {
-      if (row.annee !== selectedYear && row.annee !== selectedYear - 1) return
-      if (!visibleFlux[row.flux]) return
-
-      const key = `${row.famille_macro}|${row.flux}`
-      if (!map.has(key)) {
-        map.set(key, {
-          famille_macro: row.famille_macro,
-          flux: row.flux,
-          mois: {},
-          moisN1: {},
-          total: 0,
-          totalN1: 0,
-        })
-      }
-
-      const target = map.get(key)!
-      const value = getMetricValue(row, metric)
-
-      if (row.annee === selectedYear) {
-        target.mois[row.mois] = safeNumber(target.mois[row.mois]) + value
-        target.total += value
-      } else {
-        target.moisN1[row.mois] = safeNumber(target.moisN1[row.mois]) + value
-        target.totalN1 += value
-      }
-    })
-
-    return Array.from(map.values()).sort((a, b) => {
-      const macro = a.famille_macro.localeCompare(b.famille_macro, 'fr', { numeric: true })
-      if (macro !== 0) return macro
-      return FLUX_ORDER.indexOf(a.flux) - FLUX_ORDER.indexOf(b.flux)
-    })
-  }, [summaryRows, selectedYear, metric, visibleFlux])
-
-  const familyMatrixRows = useMemo<FamilyMatrixRow[]>(() => {
-    const map = new Map<string, FamilyMatrixRow>()
-
-    familyRows.forEach((row) => {
-      if (row.annee !== selectedYear && row.annee !== selectedYear - 1) return
-      if (!visibleFlux[row.flux]) return
-
-      const key = `${row.famille_macro}|${row.famille}|${row.flux}`
-      if (!map.has(key)) {
-        map.set(key, {
-          famille_macro: row.famille_macro,
-          famille: row.famille,
-          flux: row.flux,
-          mois: {},
-          moisN1: {},
-          total: 0,
-          totalN1: 0,
-        })
-      }
-
-      const target = map.get(key)!
-      const value = getMetricValue(row, metric)
-
-      if (row.annee === selectedYear) {
-        target.mois[row.mois] = safeNumber(target.mois[row.mois]) + value
-        target.total += value
-      } else {
-        target.moisN1[row.mois] = safeNumber(target.moisN1[row.mois]) + value
-        target.totalN1 += value
-      }
-    })
-
-    return Array.from(map.values()).sort((a, b) => {
-      const macro = a.famille_macro.localeCompare(b.famille_macro, 'fr', { numeric: true })
-      if (macro !== 0) return macro
-      const famille = a.famille.localeCompare(b.famille, 'fr', { numeric: true })
-      if (famille !== 0) return famille
-      return FLUX_ORDER.indexOf(a.flux) - FLUX_ORDER.indexOf(b.flux)
-    })
-  }, [familyRows, selectedYear, metric, visibleFlux])
-
-  const totalAggregatedRows = useMemo(
-    () => summaryRows.reduce((sum, row) => sum + safeNumber(row.nb_lignes), 0),
-    [summaryRows]
-  )
-
-  function makeSummaryExportRows() {
-    return matrixRows.map((row) => {
-      const exported: Record<string, any> = {
-        'Famille macro': row.famille_macro,
-        'Type document': FLUX_LABELS[row.flux],
-      }
-      for (let month = 1; month <= 12; month += 1) {
-        exported[`${monthLabel(month)} ${selectedYear}`] = safeNumber(row.mois[month])
-        exported[`${monthLabel(month)} ${selectedYear - 1}`] = safeNumber(row.moisN1[month])
-      }
-      exported[`Total ${selectedYear}`] = row.total
-      exported[`Total ${selectedYear - 1}`] = row.totalN1
-      return exported
-    })
-  }
-
-  function makeFamilyExportRows() {
-    return familyMatrixRows.map((row) => {
-      const exported: Record<string, any> = {
-        'Famille macro': row.famille_macro,
-        Famille: row.famille,
-        'Type document': FLUX_LABELS[row.flux],
-      }
-      for (let month = 1; month <= 12; month += 1) {
-        exported[`${monthLabel(month)} ${selectedYear}`] = safeNumber(row.mois[month])
-        exported[`${monthLabel(month)} ${selectedYear - 1}`] = safeNumber(row.moisN1[month])
-      }
-      exported[`Total ${selectedYear}`] = row.total
-      exported[`Total ${selectedYear - 1}`] = row.totalN1
-      return exported
-    })
-  }
-
-  function makeDetailExportRows(rows: DetailRpcRow[]) {
-    return rows.map((row) => ({
-      'Famille macro': row.famille_macro,
-      Famille: row.famille,
-      Référence: row.reference_article,
-      Désignation: row.designation,
-      Dépôt: row.depot,
-      'N° devis': row.numero_devis,
-      Mois: monthLabel(row.mois),
-      'Type document': FLUX_LABELS[row.type_document],
-      'Nb lignes': row.nb_lignes,
-      'Quantité brute': row.quantite,
-      'Quantité pertinente': row.quantite_pertinente,
-      'CA HT': row.ca_ht,
-      Marge: row.marge_valeur,
-    }))
-  }
-
-  function exportWorkbook(includeDetail: boolean) {
-    const sheets = [{ name: `Synthèse ${selectedYear}`, rows: makeSummaryExportRows() }]
-    if (familyMatrixRows.length) sheets.push({ name: 'Détail familles', rows: makeFamilyExportRows() })
-    if (includeDetail) sheets.push({ name: 'Détail références', rows: makeDetailExportRows(detailRows) })
-    downloadWorkbook(`approvisionnements_${selectedYear}_${includeDetail ? 'avec_detail' : 'synthese'}.xlsx`, sheets)
-  }
-
-  function valueWithN1(value: number, valueN1: number, selected = false) {
-    const main = safeNumber(value)
-    const previous = safeNumber(valueN1)
-
-    if (!main && !previous) return '—'
-
-    return (
-      <span className={`flex flex-col items-end leading-tight ${!main ? 'text-slate-400' : ''}`}>
-        <span>{main ? formatMetric(main, metric) : '—'}</span>
-        {previous ? (
-          <span className={`text-[11px] font-bold ${selected ? 'text-blue-100' : 'text-slate-500'}`}>
-            ({formatMetric(previous, metric)})
-          </span>
-        ) : null}
-      </span>
-    )
-  }
-
-  function clickableCellClass(selected: boolean, hasValue: boolean) {
-    if (selected) return 'bg-blue-600 text-white'
-    if (hasValue) return 'hover:bg-blue-50'
-    return 'text-slate-300 hover:bg-slate-50'
-  }
-
-  function scopeFromFirst(row: MatrixRow, patch: Partial<Exclude<FirstSelection, null>>, label: string): Exclude<FirstSelection, null> {
-    return {
-      famille_macro: row.famille_macro,
-      flux: row.flux,
-      ...patch,
-      label,
-    }
-  }
-
-  function scopeFromFamily(row: FamilyMatrixRow, patch: Partial<Exclude<SecondSelection, null>>, label: string): Exclude<SecondSelection, null> {
-    return {
-      ...(firstSelection || {}),
-      famille_macro: row.famille_macro,
-      famille: row.famille,
-      flux: row.flux,
-      ...patch,
-      label,
-    }
-  }
-
-  const loading = loadingOptions || loadingSummary
+  const years = uniqueSorted(options.annee || [String(currentYear), String(currentYear - 1)]).map(Number).sort((a, b) => b - a)
 
   return (
-    <main className="min-h-screen bg-slate-100 p-6 text-slate-900">
-      <header className="mb-5 flex items-start justify-between gap-4">
+    <main className="min-h-screen bg-slate-100 p-6 text-slate-950">
+      <section className="mb-5 flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-black">Approvisionnements & flux commerciaux</h1>
-          <p className="text-sm font-bold text-slate-500">Lecture des tendances Devis → CDC → BL → Factures par famille macro, famille et référence article.</p>
+          <h1 className="text-3xl font-black">Approvisionnements & flux commerciaux</h1>
+          <p className="text-sm font-bold text-slate-500">Devis → CDC → BL → Factures, avec détail devis_lignes au clic sur les devis.</p>
         </div>
-        <div className="flex flex-wrap justify-end gap-2">
-          <button
-            type="button"
-            onClick={() => handleRebuildRecentMonths(2)}
-            disabled={maintenanceLoading}
-            className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm font-black text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {maintenanceLoading ? 'Rebuild…' : 'Rebuild 2 mois'}
-          </button>
-          <button
-            type="button"
-            onClick={() => handleRebuildRecentMonths(3)}
-            disabled={maintenanceLoading}
-            className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm font-black text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {maintenanceLoading ? 'Rebuild…' : 'Rebuild 3 mois'}
-          </button>
-          <button
-            type="button"
-            onClick={() => handleRebuildRecentMonths(3, 'previous_month')}
-            disabled={maintenanceLoading}
-            className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-black text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            BL M-x → M-1 (léger)
-          </button>
-          <button
-            type="button"
-            onClick={() => handleRebuildRecentMonths(3, 'current_month')}
-            disabled={maintenanceLoading}
-            className="rounded-xl border border-sky-300 bg-sky-50 px-4 py-3 text-sm font-black text-sky-800 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            BL M-x → M (léger)
-          </button>
-          <button
-            type="button"
-            onClick={() => { loadOptions(selectedYear); loadSummary() }}
-            className="rounded-xl bg-slate-900 px-5 py-3 text-sm font-black text-white hover:bg-slate-700"
-          >
-            Actualiser
-          </button>
-        </div>
-      </header>
+        <button onClick={loadDashboard} disabled={loading} className="rounded-xl bg-slate-950 px-5 py-3 text-sm font-black text-white disabled:opacity-50">
+          {loading ? 'Chargement…' : 'Actualiser'}
+        </button>
+      </section>
 
-      {error && <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm font-bold text-red-700">{error}</div>}
-      {maintenanceMessage && <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-bold text-emerald-800">{maintenanceMessage}</div>}
-      {loading && <div className="mb-4 rounded-xl bg-white p-4 text-sm font-bold text-slate-600 shadow-sm">Chargement de la synthèse agrégée…</div>}
+      {error ? <div className="mb-4 rounded-xl bg-red-50 p-4 text-sm font-black text-red-700">{error}</div> : null}
 
-      <section className="mb-6 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-7">
-          <select
-            value={selectedYear}
-            onChange={(event) => {
-              setSelectedYear(Number(event.target.value))
-              resetSelections()
-            }}
-            className="h-11 rounded-xl border border-slate-300 bg-white px-3 text-sm font-black"
-          >
-            {defaultYearOptions().map((year) => <option key={year} value={year}>Année : {year}</option>)}
-          </select>
-          <MultiSelect label="Dépôts" values={available.depots} selected={depots} onChange={(values) => { setDepots(values); resetSelections() }} />
-          <MultiSelect label="Collaborateur client" values={available.collaborateursTiers} selected={collaborateursTiers} onChange={(values) => { setCollaborateursTiers(values); resetSelections() }} />
-          <MultiSelect label="Familles macro" values={available.famillesMacro} selected={famillesMacro} onChange={(values) => { setFamillesMacro(values); resetSelections() }} />
-          <MultiSelect label="Familles" values={available.familles} selected={familles} onChange={(values) => { setFamilles(values); resetSelections() }} />
-          <ReferencesFreeInput selected={references} onChange={(values) => { setReferences(values); resetSelections() }} />
-          <select
-            value={metric}
-            onChange={(event) => setMetric(event.target.value as Metric)}
-            className="h-11 rounded-xl border border-slate-300 bg-white px-3 text-sm font-black"
-          >
-            <option value="ca_ht">CA HT</option>
-            <option value="quantite">Quantité brute</option>
-            <option value="quantite_pertinente">Quantité pertinente</option>
-          </select>
-        </div>
-        <label className="mt-3 flex items-center gap-2 text-sm font-bold text-slate-600">
-          <input type="checkbox" checked={includeHorsStat} onChange={(event) => { setIncludeHorsStat(event.target.checked); resetSelections() }} />
+      <section className="mb-5 flex flex-wrap gap-2 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="h-11 min-w-[160px] rounded-xl border border-slate-200 bg-white px-3 text-sm font-black">
+          {years.map((y) => <option key={y} value={y}>Année : {y}</option>)}
+        </select>
+        <MultiSelect label="Dépôts" values={options.depot || []} selected={depots} onChange={setDepots} />
+        <MultiSelect label="Collaborateur client" values={options.collaborateur_tiers || []} selected={collaborateursTiers} onChange={setCollaborateursTiers} />
+        <MultiSelect label="Familles macro" values={options.famille_macro || []} selected={famillesMacro} onChange={setFamillesMacro} />
+        <MultiSelect label="Familles" values={options.famille || []} selected={familles} onChange={setFamilles} />
+        <input value={referenceInput} onChange={(e) => setReferenceInput(e.target.value)} placeholder="Références séparées par virgule" className="h-11 min-w-[260px] rounded-xl border border-slate-200 bg-white px-3 text-sm font-bold" />
+        <select value={metric} onChange={(e) => setMetric(e.target.value as Metric)} className="h-11 min-w-[210px] rounded-xl border border-slate-200 bg-white px-3 text-sm font-black">
+          <option value="ca_ht">CA HT</option>
+          <option value="quantite">Quantité brute</option>
+          <option value="quantite_pertinente">Quantité pertinente</option>
+        </select>
+        <label className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-sm font-bold">
+          <input type="checkbox" checked={includeHors} onChange={(e) => setIncludeHors(e.target.checked)} />
           Inclure les articles hors statistique
         </label>
       </section>
 
-      <section className="mb-6 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-        <div className="mb-3 flex items-start justify-between gap-4">
+      <section className="mb-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="mb-4 flex items-start justify-between">
           <div>
             <h2 className="text-xl font-black">Courbes Devis → CDC → BL → Factures</h2>
-            <p className="text-xs font-bold uppercase text-slate-500">{selectedYear} en trait plein · {selectedYear - 1} en pointillé</p>
+            <p className="text-xs font-black uppercase text-slate-500">{year} en trait plein · {year - 1} en pointillé · lecture en {metricLabel(metric)}</p>
           </div>
-          <div className="text-right text-xs font-black uppercase text-slate-500">
-            {formatNumber(totalAggregatedRows)} lignes sources agrégées
-            {!includeHorsStat && <div className="text-amber-700">Articles hors statistique exclus</div>}
-          </div>
+          <p className="text-right text-xs font-black uppercase text-slate-500">
+            {new Intl.NumberFormat('fr-FR').format(n(dashboard?.row_count))} lignes sources représentées
+          </p>
         </div>
-
-        <div className="mb-4 flex flex-wrap gap-3">
-          {FLUX_ORDER.map((flux) => (
-            <label key={flux} className="flex cursor-pointer items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-black">
-              <input
-                type="checkbox"
-                checked={visibleFlux[flux]}
-                onChange={() => setVisibleFlux((current) => ({ ...current, [flux]: !current[flux] }))}
-              />
-              <span className="inline-block h-3 w-3 rounded-full" style={{ backgroundColor: FLUX_COLORS[flux] }} />
-              {FLUX_LABELS[flux]}
-            </label>
-          ))}
-        </div>
-
-        <div className="h-[430px] w-full">
+        <div className="h-96">
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={chartData} margin={{ top: 20, right: 20, left: 10, bottom: 20 }}>
+            <LineChart data={chartData}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis dataKey="label" />
-              <YAxis tickFormatter={(value) => yAxisFormatter(Number(value), metric)} />
-              <Tooltip formatter={(value: any) => formatMetric(safeNumber(value), metric)} />
+              <YAxis tickFormatter={(v) => metric === 'ca_ht' ? `${Math.round(Number(v) / 1000)}k€` : String(v)} />
+              <Tooltip formatter={(v: any) => fmt(Number(v), metric)} />
               <Legend />
-              {FLUX_ORDER.map((flux) => visibleFlux[flux] && (
-                <Line
-                  key={`${flux}_N`}
-                  type="monotone"
-                  dataKey={`${flux}_N`}
-                  name={`${FLUX_LABELS[flux]} ${selectedYear}`}
-                  stroke={FLUX_COLORS[flux]}
-                  strokeWidth={3}
-                  dot={{ r: 3 }}
-                  connectNulls
-                />
-              ))}
-              {FLUX_ORDER.map((flux) => visibleFlux[flux] && (
-                <Line
-                  key={`${flux}_N1`}
-                  type="monotone"
-                  dataKey={`${flux}_N1`}
-                  name={`${FLUX_LABELS[flux]} ${selectedYear - 1}`}
-                  stroke={FLUX_COLORS[flux]}
-                  strokeWidth={2}
-                  strokeDasharray="6 6"
-                  dot={{ r: 2 }}
-                  connectNulls
-                />
-              ))}
+              {FLUX.flatMap((flux) => [year - 1, year].map((y) => (
+                <Line key={`${flux} ${y}`} type="monotone" dataKey={`${flux} ${y}`} dot={false} strokeWidth={y === year ? 2 : 1} strokeDasharray={y === year ? undefined : '5 5'} />
+              )))}
             </LineChart>
           </ResponsiveContainer>
         </div>
       </section>
 
-      <section className="mb-6 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-        <div className="mb-3 flex items-start justify-between gap-4">
-          <div>
-            <h2 className="text-xl font-black">Synthèse par famille macro / type de document</h2>
-            <p className="text-xs font-bold uppercase text-slate-500">
-              Lecture en {metric === 'ca_ht' ? 'CA HT' : metric === 'quantite' ? 'quantité brute' : 'quantité pertinente'} · valeur {selectedYear} avec {selectedYear - 1} entre parenthèses · clique sur une famille macro, un mois, une ligne, un total ou une cellule.
-            </p>
-          </div>
-          <div className="flex gap-2">
-            <button type="button" onClick={() => exportWorkbook(false)} className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-black hover:bg-slate-50">Exporter synthèse</button>
-            <button type="button" onClick={() => exportWorkbook(true)} className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-black hover:bg-slate-50">Exporter avec détail</button>
-          </div>
-        </div>
-
-        <div className="overflow-auto rounded-xl border border-slate-200">
-          <table className="min-w-full text-sm">
-            <thead className="bg-slate-900 text-white">
-              <tr>
-                <th className="px-3 py-2 text-left">Famille macro</th>
-                <th className="px-3 py-2 text-left">Type document</th>
-                {MONTHS.map((month, index) => (
-                  <th key={month} className="px-3 py-2 text-right">
-                    <button
-                      type="button"
-                      onClick={() => handleFirstSelection({ mois: index + 1, label: `${month} · toutes familles macro / tous documents` })}
-                      className="rounded-md px-2 py-1 text-right font-black hover:bg-slate-700"
-                    >
-                      {month}
-                    </button>
-                  </th>
-                ))}
-                <th className="px-3 py-2 text-right">
-                  <button
-                    type="button"
-                    onClick={() => handleFirstSelection({ label: 'Total annuel · toutes familles macro / tous documents' })}
-                    className="rounded-md px-2 py-1 text-right font-black hover:bg-slate-700"
-                  >
-                    Total
-                  </button>
-                </th>
+      <section className="mb-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <h2 className="text-xl font-black">Synthèse par famille macro / type de document</h2>
+        <p className="mb-4 text-xs font-black uppercase text-slate-500">Clique sur une ligne, un mois ou une famille pour charger le détail. Lecture en {metricLabel(metric)}.</p>
+        <div className="overflow-auto">
+          <table className="min-w-full border-collapse text-sm">
+            <thead>
+              <tr className="bg-slate-900 text-white">
+                <th className="p-2 text-left">Famille macro</th>
+                <th className="p-2 text-left">Type document</th>
+                {MONTHS.map((m) => <th key={m} className="p-2 text-right">{m}</th>)}
+                <th className="p-2 text-right">Total</th>
               </tr>
             </thead>
             <tbody>
-              {matrixRows.map((row) => (
-                <tr key={`${row.famille_macro}-${row.flux}`} className="border-b border-slate-100 odd:bg-slate-50">
-                  <td className="px-3 py-2 font-bold">
-                    <button
-                      type="button"
-                      onClick={() => handleFirstSelection({ famille_macro: row.famille_macro, label: `${row.famille_macro} · tous documents / tous mois` })}
-                      className="rounded-lg px-2 py-1 text-left font-black hover:bg-blue-50"
-                    >
-                      {row.famille_macro}
-                    </button>
-                  </td>
-                  <td className="px-3 py-2 font-bold">
-                    <button
-                      type="button"
-                      onClick={() => handleFirstSelection(scopeFromFirst(row, {}, `${row.famille_macro} · ${FLUX_LABELS[row.flux]} · tous mois`))}
-                      className="rounded-lg px-2 py-1 text-left font-black hover:bg-blue-50"
-                      style={{ color: FLUX_COLORS[row.flux] }}
-                    >
-                      {FLUX_LABELS[row.flux]}
-                    </button>
-                  </td>
-                  {Array.from({ length: 12 }, (_, index) => index + 1).map((month) => {
-                    const value = safeNumber(row.mois[month])
-                    const valueN1 = safeNumber(row.moisN1[month])
-                    const hasValue = Boolean(value || valueN1)
-                    const selected = firstSelection?.famille_macro === row.famille_macro && firstSelection?.flux === row.flux && firstSelection?.mois === month
-                    return (
-                      <td key={month} className="px-2 py-1 text-right">
-                        <button
-                          type="button"
-                          disabled={!hasValue}
-                          onClick={() => handleFirstSelection(scopeFromFirst(row, { mois: month }, `${row.famille_macro} · ${FLUX_LABELS[row.flux]} · ${monthLabel(month)}`))}
-                          className={`w-full rounded-lg px-2 py-1 text-right font-black ${clickableCellClass(selected, hasValue)}`}
-                        >
-                          {valueWithN1(value, valueN1, selected)}
-                        </button>
-                      </td>
-                    )
-                  })}
-                  <td className="px-3 py-2 text-right font-black">
-                    <button
-                      type="button"
-                      disabled={!row.total && !row.totalN1}
-                      onClick={() => handleFirstSelection(scopeFromFirst(row, {}, `${row.famille_macro} · ${FLUX_LABELS[row.flux]} · total annuel`))}
-                      className="w-full rounded-lg px-2 py-1 text-right font-black hover:bg-blue-50"
-                    >
-                      {valueWithN1(row.total, row.totalN1)}
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              {!matrixRows.length && (
-                <tr>
-                  <td colSpan={15} className="px-3 py-10 text-center text-sm font-bold text-slate-500">Aucune donnée avec les filtres sélectionnés.</td>
-                </tr>
-              )}
+              {Array.from(new Set(matrix.map((r) => `${r.famille_macro}|${r.flux}`))).map((key) => {
+                const [familleMacro, flux] = key.split('|')
+                const rows = matrix.filter((r) => r.famille_macro === familleMacro && r.flux === flux)
+                const total = rows.reduce((s, r) => s + n(r.value_n), 0)
+                return (
+                  <tr key={key} className="border-b border-slate-100 hover:bg-blue-50">
+                    <td className="p-2 font-black">
+                      <button type="button" className="text-left hover:underline" onClick={() => loadDetail({ famille_macro: familleMacro, flux, label: `${familleMacro} / ${flux}` })}>
+                        {familleMacro}
+                      </button>
+                    </td>
+                    <td className="p-2">{flux}</td>
+                    {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => {
+                      const row = rows.find((r) => r.mois === m)
+                      return (
+                        <td key={m} className="p-2 text-right">
+                          <button type="button" onClick={() => loadDetail({ famille_macro: familleMacro, flux, mois: m, label: `${familleMacro} / ${flux} / ${monthLabel(m)}` })} className="font-bold hover:text-blue-700 hover:underline">
+                            {row ? fmt(n(row.value_n), metric) : '—'}
+                          </button>
+                        </td>
+                      )
+                    })}
+                    <td className="p-2 text-right font-black">{fmt(total, metric)}</td>
+                  </tr>
+                )
+              })}
+              {!matrix.length ? <tr><td colSpan={15} className="p-8 text-center font-bold text-slate-500">Aucune donnée avec les filtres sélectionnés.</td></tr> : null}
             </tbody>
           </table>
         </div>
       </section>
 
-      {firstSelection && (
-        <section className="mb-6 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-          <div className="mb-3 flex items-start justify-between gap-4">
-            <div>
-              <h2 className="text-xl font-black">Détail par famille / type de document</h2>
-              <p className="text-xs font-bold uppercase text-slate-500">
-                {selectionLabel(firstSelection)} · clique sur une famille, un mois, une ligne, un total ou une cellule pour afficher le détail référence.
-              </p>
-            </div>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => downloadWorkbook(`approvisionnements_familles_${selectedYear}.xlsx`, [{ name: 'Détail familles', rows: makeFamilyExportRows() }])}
-                className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-black hover:bg-slate-50"
-              >
-                Exporter détail familles
-              </button>
-            </div>
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-xl font-black">Détail par référence / lignes de devis</h2>
+            <p className="text-xs font-black uppercase text-slate-500">
+              {selectedScope ? selectedScope.label : 'Clique sur une ligne du tableau de synthèse.'}
+              {selectedScope?.flux === 'DEVIS' ? ' · source : devis_lignes' : ''}
+            </p>
           </div>
-
-          {loadingFamily && <div className="mb-3 rounded-xl bg-slate-50 p-4 text-sm font-bold text-slate-500">Chargement du détail par famille…</div>}
-
-          {!loadingFamily && (
-            <div className="overflow-auto rounded-xl border border-slate-200">
-              <table className="min-w-full text-sm">
-                <thead className="bg-slate-900 text-white">
-                  <tr>
-                    <th className="px-3 py-2 text-left">Famille macro</th>
-                    <th className="px-3 py-2 text-left">Famille</th>
-                    <th className="px-3 py-2 text-left">Type document</th>
-                    {MONTHS.map((month, index) => (
-                      <th key={month} className="px-3 py-2 text-right">
-                        <button
-                          type="button"
-                          onClick={() => handleSecondSelection({ ...firstSelection, mois: index + 1, label: `${selectionLabel(firstSelection)} · ${month}` })}
-                          className="rounded-md px-2 py-1 text-right font-black hover:bg-slate-700"
-                        >
-                          {month}
-                        </button>
-                      </th>
-                    ))}
-                    <th className="px-3 py-2 text-right">
-                      <button
-                        type="button"
-                        onClick={() => handleSecondSelection({ ...firstSelection, mois: undefined, label: `${selectionLabel(firstSelection)} · total annuel` })}
-                        className="rounded-md px-2 py-1 text-right font-black hover:bg-slate-700"
-                      >
-                        Total
-                      </button>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {familyMatrixRows.map((row) => (
-                    <tr key={`${row.famille_macro}-${row.famille}-${row.flux}`} className="border-b border-slate-100 odd:bg-slate-50">
-                      <td className="px-3 py-2 font-bold">
-                        <button
-                          type="button"
-                          onClick={() => handleSecondSelection({ ...firstSelection, famille_macro: row.famille_macro, famille: undefined, flux: undefined, label: `${row.famille_macro} · détail complet` })}
-                          className="rounded-lg px-2 py-1 text-left font-black hover:bg-blue-50"
-                        >
-                          {row.famille_macro}
-                        </button>
-                      </td>
-                      <td className="px-3 py-2 font-bold">
-                        <button
-                          type="button"
-                          onClick={() => handleSecondSelection({ ...firstSelection, famille_macro: row.famille_macro, famille: row.famille, flux: undefined, label: `${row.famille_macro} · ${row.famille} · tous documents` })}
-                          className="rounded-lg px-2 py-1 text-left font-black hover:bg-blue-50"
-                        >
-                          {row.famille}
-                        </button>
-                      </td>
-                      <td className="px-3 py-2 font-bold">
-                        <button
-                          type="button"
-                          onClick={() => handleSecondSelection(scopeFromFamily(row, {}, `${row.famille_macro} · ${row.famille} · ${FLUX_LABELS[row.flux]} · tous mois`))}
-                          className="rounded-lg px-2 py-1 text-left font-black hover:bg-blue-50"
-                          style={{ color: FLUX_COLORS[row.flux] }}
-                        >
-                          {FLUX_LABELS[row.flux]}
-                        </button>
-                      </td>
-                      {Array.from({ length: 12 }, (_, index) => index + 1).map((month) => {
-                        const value = safeNumber(row.mois[month])
-                        const valueN1 = safeNumber(row.moisN1[month])
-                        const hasValue = Boolean(value || valueN1)
-                        const selected = secondSelection?.famille_macro === row.famille_macro && secondSelection?.famille === row.famille && secondSelection?.flux === row.flux && secondSelection?.mois === month
-                        return (
-                          <td key={month} className="px-2 py-1 text-right">
-                            <button
-                              type="button"
-                              disabled={!hasValue}
-                              onClick={() => handleSecondSelection(scopeFromFamily(row, { mois: month }, `${row.famille_macro} · ${row.famille} · ${FLUX_LABELS[row.flux]} · ${monthLabel(month)}`))}
-                              className={`w-full rounded-lg px-2 py-1 text-right font-black ${clickableCellClass(selected, hasValue)}`}
-                            >
-                              {valueWithN1(value, valueN1, selected)}
-                            </button>
-                          </td>
-                        )
-                      })}
-                      <td className="px-3 py-2 text-right font-black">
-                        <button
-                          type="button"
-                          disabled={!row.total && !row.totalN1}
-                          onClick={() => handleSecondSelection(scopeFromFamily(row, {}, `${row.famille_macro} · ${row.famille} · ${FLUX_LABELS[row.flux]} · total annuel`))}
-                          className="w-full rounded-lg px-2 py-1 text-right font-black hover:bg-blue-50"
-                        >
-                          {valueWithN1(row.total, row.totalN1)}
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                  {!familyMatrixRows.length && (
-                    <tr>
-                      <td colSpan={16} className="px-3 py-10 text-center text-sm font-bold text-slate-500">Aucun détail famille avec cette sélection.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-      )}
-
-      {secondSelection && (
-        <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-          <div className="mb-3 flex items-start justify-between gap-4">
-            <div>
-              <h2 className="text-xl font-black">Détail référence / document</h2>
-              <p className="text-xs font-bold uppercase text-slate-500">
-                {selectionLabel(secondSelection)} · détail de l’année {selectedYear}.
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => downloadWorkbook(`approvisionnements_detail_${selectedYear}.xlsx`, [{ name: 'Détail références', rows: makeDetailExportRows(detailRows) }])}
-              className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-black hover:bg-slate-50"
-            >
-              Exporter détail
-            </button>
-          </div>
-
-          {loadingDetail && <div className="rounded-xl bg-slate-50 p-4 text-sm font-bold text-slate-500">Chargement du détail référence…</div>}
-
-          {!loadingDetail && (
-            <div className="overflow-auto rounded-xl border border-slate-200">
-              <table className="min-w-full text-sm">
-                <thead className="bg-slate-900 text-white">
-                  <tr>
-                    <th className="px-3 py-2 text-left">Famille macro</th>
-                    <th className="px-3 py-2 text-left">Famille</th>
-                    <th className="px-3 py-2 text-left">Référence</th>
-                    <th className="px-3 py-2 text-left">Désignation</th>
-                    <th className="px-3 py-2 text-left">Dépôt</th>
-                    <th className="px-3 py-2 text-left">N° devis</th>
-                    <th className="px-3 py-2 text-left">Mois</th>
-                    <th className="px-3 py-2 text-left">Type document</th>
-                    <th className="px-3 py-2 text-right">Nb lignes</th>
-                    <th className="px-3 py-2 text-right">Qté pertinente</th>
-                    <th className="px-3 py-2 text-right">CA HT</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {detailRows.map((row) => (
-                    <tr key={`${row.famille}-${row.reference_article}-${row.type_document}-${row.mois}-${row.depot}-${row.numero_devis}`} className="border-b border-slate-100 odd:bg-slate-50">
-                      <td className="px-3 py-2 font-bold">{row.famille_macro}</td>
-                      <td className="px-3 py-2">{row.famille}</td>
-                      <td className="px-3 py-2 font-mono text-xs"><LinkedArticleReference reference={row.reference_article} links={articleBlgLinks} /></td>
-                      <td className="px-3 py-2">{row.designation}</td>
-                      <td className="px-3 py-2">{row.depot || '—'}</td>
-                      <td className="px-3 py-2 font-mono text-xs"><LinkedDocumentReference numero={row.numero_devis} links={documentBlgLinks} /></td>
-                      <td className="px-3 py-2">{monthLabel(row.mois)}</td>
-                      <td className="px-3 py-2 font-bold" style={{ color: FLUX_COLORS[row.type_document] }}>{FLUX_LABELS[row.type_document]}</td>
-                      <td className="px-3 py-2 text-right font-bold">{formatNumber(row.nb_lignes)}</td>
-                      <td className="px-3 py-2 text-right font-bold">{formatNumber(row.quantite_pertinente)}</td>
-                      <td className="px-3 py-2 text-right font-bold">{formatMetric(row.ca_ht, 'ca_ht')}</td>
-                    </tr>
-                  ))}
-                  {!detailRows.length && (
-                    <tr>
-                      <td colSpan={11} className="px-3 py-8 text-center text-sm font-bold text-slate-500">Aucun détail pour cette sélection.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-      )}
-
+          {loadingDetail ? <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-black text-blue-700">Chargement…</span> : null}
+        </div>
+        <div className="overflow-auto">
+          <table className="min-w-full border-collapse text-xs">
+            <thead>
+              <tr className="bg-slate-100 text-slate-700">
+                <th className="p-2 text-left">Date</th>
+                <th className="p-2 text-left">Document</th>
+                <th className="p-2 text-left">Tiers</th>
+                <th className="p-2 text-left">Référence</th>
+                <th className="p-2 text-left">Désignation</th>
+                <th className="p-2 text-left">Dépôt</th>
+                <th className="p-2 text-right">Qté</th>
+                <th className="p-2 text-right">Qté pert.</th>
+                <th className="p-2 text-right">CA HT</th>
+                <th className="p-2 text-right">Marge</th>
+              </tr>
+            </thead>
+            <tbody>
+              {detailRows.map((row, index) => (
+                <tr key={`${row.numero_document || row.reference_article}-${index}`} className="border-b border-slate-100 hover:bg-slate-50">
+                  <td className="p-2">{row.date_document || '—'}</td>
+                  <td className="p-2 font-black">{row.numero_document || row.type_document || '—'}</td>
+                  <td className="p-2">{row.numero_tiers ? `${row.numero_tiers} - ${row.intitule_tiers || ''}` : '—'}</td>
+                  <td className="p-2 font-black">{row.reference_article || '—'}</td>
+                  <td className="p-2">{row.designation || '—'}</td>
+                  <td className="p-2">{row.depot || '—'}</td>
+                  <td className="p-2 text-right">{fmt(n(row.quantite), 'quantite')}</td>
+                  <td className="p-2 text-right">{fmt(n(row.quantite_pertinente), 'quantite')}</td>
+                  <td className="p-2 text-right font-black">{fmt(n(row.ca_ht), 'ca_ht')}</td>
+                  <td className="p-2 text-right">{fmt(n(row.marge_valeur), 'ca_ht')}</td>
+                </tr>
+              ))}
+              {!detailRows.length ? <tr><td colSpan={10} className="p-8 text-center font-bold text-slate-500">Aucun détail chargé.</td></tr> : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
     </main>
   )
 }
