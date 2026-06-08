@@ -860,34 +860,216 @@ export default function SyntheseMultiClientsPage() {
   async function exportExcel() {
     // @ts-ignore - xlsx-js-style est déjà présent dans le projet mais n'a pas toujours les types TS.
     const XLSX = await import('xlsx-js-style')
-    const exportColumns = columns
+    // L'export Excel contient systématiquement le détail Famille macro, même si l'écran l'a masqué.
+    // Les colonnes de détail sont ensuite groupées et réduites par défaut dans le fichier.
+    const exportColumns = buildColumns(true)
+
+    const sortCol = exportColumns.find((c) => c.key === sort.key) || exportColumns.find((c) => c.key === 'caN1')!
+    let exportClientRows = baseClientRows.filter((row) => {
+      return Object.entries(filters).every(([key, value]) => {
+        if (!String(value).trim()) return true
+        const col = exportColumns.find((c) => c.key === key)
+        if (!col) return true
+        return loose(displayValue(col, row, objectiveMap)).includes(loose(String(value)))
+      })
+    })
+
+    exportClientRows = [...exportClientRows].sort((a, b) => {
+      const av = rawSortableValue(sortCol, a, objectiveMap)
+      const bv = rawSortableValue(sortCol, b, objectiveMap)
+      const an = typeof av === 'number' ? av : Number(av)
+      const bn = typeof bv === 'number' ? bv : Number(bv)
+      let cmp = 0
+      if (Number.isFinite(an) && Number.isFinite(bn)) cmp = an - bn
+      else cmp = String(av ?? '').localeCompare(String(bv ?? ''), 'fr')
+      return sort.direction === 'asc' ? cmp : -cmp
+    })
+
+    const exportRows: SummaryRow[] = [totalRow]
+    exportClientRows.forEach((row) => {
+      exportRows.push(row)
+      const tier = selectedTiers.find((t) => t.numero === row.numero)
+      if (!tier) return
+      for (let month = 1; month <= 12; month += 1) {
+        exportRows.push(buildSummaryForNumero(tier, factures, devis, objectiveMap, month))
+      }
+    })
+
+    const KEUR_FORMAT = '#,##0.0 "K€"'
+    const PCT_FORMAT = '0.0%'
+    const POINTS_FORMAT = '+0.0 "pts";-0.0 "pts";0.0 "pts"'
+    const NUMBER_FORMAT = '0'
+
+    const chapterColor = (group: string) => {
+      const g = normalize(group)
+      if (g.includes('CLIENT')) return 'E2F0D9'
+      if (g.includes('COMPARATIF')) return 'F3E8FF'
+      if (g.includes('QRC')) return 'E2F0D9'
+      if (g.includes('DYNAMISME')) return 'DDEBF7'
+      if (g.includes('FREQUENCE') || g.includes('VISITE')) return 'FCE4D6'
+      return 'FFF2CC'
+    }
+
+    const bodyColor = (group: string, row?: SummaryRow) => {
+      if (row?.kind === 'total') return 'FFF2CC'
+      const g = normalize(group)
+      if (g.includes('CLIENT')) return row?.kind === 'month' ? 'EDF7E7' : 'E2F0D9'
+      if (g.includes('COMPARATIF')) return 'F8EEFF'
+      if (g.includes('QRC')) return 'EFF9EC'
+      if (g.includes('DYNAMISME')) return 'EFF6FF'
+      if (g.includes('FREQUENCE') || g.includes('VISITE')) return 'FFF4EA'
+      return 'FFF8E6'
+    }
+
+    const isFamilySubtotal = (key: string) => /^(devisN1|caN1|margeN1|devisYtdN|caYtdN|margeYtdN)_/.test(key)
+    const isMainMetric = (key: string) => [
+      'caN3', 'caN2', 'devisN1', 'caN1', 'margePctN1',
+      'objectifCa', 'potentiel', 'devisYtdN', 'caYtdN', 'margePctYtdN',
+      'contratBfa', 'caVsN1', 'margeVsN1', 'realiseObjectif',
+    ].includes(key)
+    const isGroupedFamilyColumn = (key: string) => isFamilySubtotal(key)
+
+    const excelPayload = (col: ColumnDef, row: SummaryRow) => {
+      if (col.editable && row.kind === 'client') {
+        const { domaine, rubrique, type } = col.editable
+        if (type === 'date') return { value: objectiveDate(objectiveMap, row.numero, domaine, rubrique), type: 's' as const }
+        if (type === 'texte') return { value: objectiveText(objectiveMap, row.numero, domaine, rubrique), type: 's' as const }
+        const n = objectiveNumber(objectiveMap, row.numero, domaine, rubrique)
+        if (type === 'montant') return { value: n / 1000, type: 'n' as const, z: KEUR_FORMAT }
+        return { value: n, type: 'n' as const, z: NUMBER_FORMAT }
+      }
+
+      if (shouldBlankEmptyMonthMetric(col, row)) return { value: '', type: 's' as const }
+      const value = col.value(row)
+
+      if (col.format === 'keur' || col.format === 'keurBlank') {
+        const n = safeNumber(value)
+        if (col.format === 'keurBlank' && isNullAmount(n)) return { value: '', type: 's' as const }
+        return { value: n / 1000, type: 'n' as const, z: KEUR_FORMAT }
+      }
+
+      if (col.format === 'pct' || col.format === 'pctBlank') {
+        const n = Number(value)
+        if (!Number.isFinite(n)) return { value: '', type: 's' as const }
+        return { value: n / 100, type: 'n' as const, z: PCT_FORMAT }
+      }
+
+      if (col.format === 'points') {
+        const n = Number(value)
+        if (!Number.isFinite(n)) return { value: '', type: 's' as const }
+        return { value: n, type: 'n' as const, z: POINTS_FORMAT }
+      }
+
+      if (col.format === 'number') {
+        const n = safeNumber(value)
+        return { value: n, type: 'n' as const, z: NUMBER_FORMAT }
+      }
+
+      return { value: safeText(value), type: 's' as const }
+    }
+
     const aoa = [
       exportColumns.map((c) => c.group),
       exportColumns.map((c) => c.label.replace(/\n/g, ' ')),
-      ...visibleRows.map((row) => exportColumns.map((col) => displayValue(col, row, objectiveMap))),
+      ...exportRows.map((row) => exportColumns.map((col) => excelPayload(col, row).value)),
     ]
+
     const ws = XLSX.utils.aoa_to_sheet(aoa)
     const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:A1')
+
+    const merges: any[] = []
+    let mergeStart = 0
+    for (let c = 1; c <= exportColumns.length; c += 1) {
+      const prev = exportColumns[c - 1]?.group
+      const current = exportColumns[c]?.group
+      if (current !== prev) {
+        if (c - mergeStart > 1) merges.push({ s: { r: 0, c: mergeStart }, e: { r: 0, c: c - 1 } })
+        mergeStart = c
+      }
+    }
+    ws['!merges'] = merges
+
+    const borderThin = {
+      top: { style: 'thin', color: { rgb: '111111' } },
+      bottom: { style: 'thin', color: { rgb: '111111' } },
+      left: { style: 'thin', color: { rgb: '111111' } },
+      right: { style: 'thin', color: { rgb: '111111' } },
+    }
+
+    const numericFormats = new Set(['keur', 'keurBlank', 'pct', 'pctBlank', 'points', 'number'])
+
     for (let r = range.s.r; r <= range.e.r; r += 1) {
+      const dataRow = r >= 2 ? exportRows[r - 2] : undefined
       for (let c = range.s.c; c <= range.e.c; c += 1) {
         const addr = XLSX.utils.encode_cell({ r, c })
-        if (!ws[addr]) continue
+        const col = exportColumns[c]
+        if (!ws[addr]) ws[addr] = { t: 's', v: '' }
+
+        if (r >= 2 && col && dataRow) {
+          const payload = excelPayload(col, dataRow)
+          ws[addr].v = payload.value
+          ws[addr].t = payload.type
+          if (payload.z) ws[addr].z = payload.z
+        }
+
+        const isHeader = r <= 1
+        const isNumeric = Boolean(col && (numericFormats.has(col.format || '') || ws[addr].t === 'n'))
+        const familySubtotal = Boolean(col && isFamilySubtotal(col.key))
+        const mainMetric = Boolean(col && isMainMetric(col.key))
+
         ws[addr].s = {
-          font: { bold: r <= 1 || r === 2, sz: r <= 1 ? 10 : 9 },
-          alignment: { horizontal: r <= 1 ? 'center' : 'left', vertical: 'center', wrapText: true },
-          border: {
-            top: { style: 'thin', color: { rgb: '111111' } },
-            bottom: { style: 'thin', color: { rgb: '111111' } },
-            left: { style: 'thin', color: { rgb: '111111' } },
-            right: { style: 'thin', color: { rgb: '111111' } },
+          font: {
+            bold: isHeader || dataRow?.kind === 'total' || mainMetric,
+            sz: isHeader ? 10 : familySubtotal ? 8 : mainMetric ? 10.5 : 9,
+            color: col?.className?.includes('redLabel') ? { rgb: 'E60000' } : undefined,
           },
-          fill: r === 0 ? { fgColor: { rgb: 'FFF7DF' } } : r === 1 ? { fgColor: { rgb: 'F5F5F5' } } : r === 2 ? { fgColor: { rgb: 'E2F0D9' } } : undefined,
+          alignment: {
+            horizontal: isHeader ? 'center' : isNumeric ? 'right' : 'left',
+            vertical: 'center',
+            wrapText: r >= 3 ? false : true,
+            textRotation: r === 1 && col?.rotate ? 90 : 0,
+          },
+          border: borderThin,
+          fill: { fgColor: { rgb: isHeader ? chapterColor(col?.group || '') : bodyColor(col?.group || '', dataRow) } },
         }
       }
     }
-    ws['!cols'] = exportColumns.map((c) => ({ wch: Math.max(7, Math.min(32, Math.round(c.width / 8))) }))
+
+    const autoWidth = (col: ColumnDef, index: number) => {
+      const header = col.label.replace(/\n/g, ' ')
+      const sample = exportRows.slice(0, 300).map((row) => displayValue(col, row, objectiveMap))
+      const maxLen = Math.max(header.length, col.group.length, ...sample.map((value) => String(value ?? '').length))
+      const min = col.rotate ? 8 : 10
+      const max = col.key === 'intitule' ? 34 : col.key === 'remarque' ? 42 : col.key === 'libelleNaf' ? 32 : col.rotate ? 13 : 18
+      const wch = Math.min(Math.max(maxLen + 2, min), max)
+      const grouped = isGroupedFamilyColumn(col.key)
+      return {
+        wch,
+        hidden: grouped,
+        level: grouped ? 1 : 0,
+        collapsed: grouped && !isGroupedFamilyColumn(exportColumns[index + 1]?.key || ''),
+      }
+    }
+
+    ws['!cols'] = exportColumns.map(autoWidth)
+    ws['!rows'] = [
+      { hpt: 22 },
+      { hpt: 82 },
+      ...exportRows.map((row) => ({
+        hpt: row.kind === 'total' ? 20 : 18,
+        hidden: row.kind === 'month',
+        level: row.kind === 'month' ? 1 : 0,
+        collapsed: false,
+      })),
+    ]
+    ws['!outline'] = { above: false, left: false }
     ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 1, c: 0 }, e: { r: Math.max(1, range.e.r), c: range.e.c } }) }
-    ws['!freeze'] = { xSplit: 3, ySplit: 2, topLeftCell: 'D3', activePane: 'bottomRight', state: 'frozen' }
+
+    // Cellule D4 : fige les lignes 1 à 3 et les colonnes A à C.
+    // Certaines versions de xlsx-js-style utilisent !freeze, d'autres !pane : on renseigne les deux.
+    const frozenPane = { xSplit: 3, ySplit: 3, topLeftCell: 'D4', activePane: 'bottomRight', state: 'frozen' }
+    ws['!freeze'] = frozenPane
+    ws['!pane'] = frozenPane
 
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, 'Synthèse multi-clients')
