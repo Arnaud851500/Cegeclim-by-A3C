@@ -70,7 +70,7 @@ type SummaryRow = {
   caN1: number
   caN1ByMacro: Record<string, number>
   margePctN1: number | null
-  margeN1ByMacro: Record<string, number>
+  margeN1ByMacro: Record<string, number | null>
   objectifCa: number
   potentiel: number
   devisYtdN: number
@@ -78,7 +78,7 @@ type SummaryRow = {
   caYtdN: number
   caYtdNByMacro: Record<string, number>
   margePctYtdN: number | null
-  margeYtdNByMacro: Record<string, number>
+  margeYtdNByMacro: Record<string, number | null>
   contratBfa: number
   caVsN1: number | null
   margeVsN1: number | null
@@ -107,13 +107,13 @@ type ColumnDef = {
     type: ObjectiveType
   }
   value: (row: SummaryRow) => any
-  format?: 'text' | 'keur' | 'pct' | 'number' | 'date' | 'action'
+  format?: 'text' | 'keur' | 'keurBlank' | 'pct' | 'pctBlank' | 'points' | 'number' | 'date' | 'action'
 }
 
 type SortState = { key: string; direction: SortDirection }
 
 const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Sept', 'Oct', 'Nov', 'Déc']
-const FAMILY_MACROS = ['R/R', 'R/O', 'ECS', 'DRV', 'AirZone', 'Accessoire', 'PV', 'Autres']
+const FAMILY_MACROS = ['R/R', 'R/O', 'ECS', 'DRV', 'R_Zone', 'Accessoire', 'PV', 'Autres']
 const N = new Date().getFullYear()
 const CURRENT_MONTH = new Date().getMonth() + 1
 const CURRENT_DAY = new Date().getDate()
@@ -205,13 +205,33 @@ function formatDateFr(value: any) {
   return `${day}/${month}/${year}`
 }
 
-function formatKEur(value: number) {
+function isNullAmount(value: number | null | undefined) {
+  return value === null || value === undefined || !Number.isFinite(Number(value)) || Math.abs(Number(value)) < 0.000001
+}
+
+function formatKEur(value: number | null | undefined) {
   return `${new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format((value || 0) / 1000)} K€`
+}
+
+function formatKEurBlank(value: number | null | undefined) {
+  if (isNullAmount(value)) return ''
+  return formatKEur(value)
 }
 
 function formatPct(value: number | null) {
   if (value === null || value === undefined || !Number.isFinite(value)) return '—'
   return `${new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(value)} %`
+}
+
+function formatPctBlank(value: number | null) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return ''
+  return `${new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(value)} %`
+}
+
+function formatPoints(value: number | null) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return ''
+  const sign = value > 0 ? '+' : ''
+  return `${sign}${new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(value)} pts`
 }
 
 function formatNumber(value: number) {
@@ -362,15 +382,34 @@ function byMacro(rows: AggRow[], numero: string | null, year: number, opts?: { m
   return out
 }
 
+function byMacroMarginPct(rows: AggRow[], numero: string | null, year: number, opts?: { month?: number; monthMax?: number }) {
+  const out = Object.fromEntries(FAMILY_MACROS.map((m) => [m, null])) as Record<string, number | null>
+  for (const macro of FAMILY_MACROS) {
+    const ca = sumAmount(rows, numero, year, { month: opts?.month, monthMax: opts?.monthMax, macro })
+    const marge = sumMarge(rows, numero, year, { month: opts?.month, monthMax: opts?.monthMax, macro })
+    out[macro] = ca ? (marge / ca) * 100 : null
+  }
+  return out
+}
+
+function deltaPoints(currentPct: number | null, previousPct: number | null) {
+  if (currentPct === null || previousPct === null) return null
+  if (!Number.isFinite(currentPct) || !Number.isFinite(previousPct)) return null
+  return currentPct - previousPct
+}
+
 function buildSummaryForNumero(tier: TiersRow | null, factures: AggRow[], devis: AggRow[], objectives: Map<string, ObjectiveRow>, month?: number): SummaryRow {
   const numero = tier?.numero || ''
   const monthFilter = month ? { month } : undefined
   const caN1 = sumAmount(factures, numero || null, N - 1, monthFilter)
   const margeN1 = sumMarge(factures, numero || null, N - 1, monthFilter)
+  const margePctN1 = caN1 ? (margeN1 / caN1) * 100 : null
   const caYtdN = sumAmount(factures, numero || null, N, month ? { month } : { monthMax: CLOSED_MONTH })
   const margeYtdN = sumMarge(factures, numero || null, N, month ? { month } : { monthMax: CLOSED_MONTH })
+  const margePctYtdN = caYtdN ? (margeYtdN / caYtdN) * 100 : null
   const caYtdN1 = sumAmount(factures, numero || null, N - 1, month ? { month } : { monthMax: CLOSED_MONTH })
   const margeYtdN1 = sumMarge(factures, numero || null, N - 1, month ? { month } : { monthMax: CLOSED_MONTH })
+  const margePctYtdN1 = caYtdN1 ? (margeYtdN1 / caYtdN1) * 100 : null
   const objectifCa = objectiveNumber(objectives, numero, 'Objectif', 'CA')
   const objectifProrata = month ? objectifCa / 12 : (objectifCa / 12) * CLOSED_MONTH
   const frequenceCommande = objectiveNumber(objectives, numero, 'QRC', 'Fréquence commande')
@@ -396,19 +435,21 @@ function buildSummaryForNumero(tier: TiersRow | null, factures: AggRow[], devis:
     devisN1ByMacro: byMacro(devis, numero || null, N - 1, { month, metric: 'ca' }),
     caN1,
     caN1ByMacro: byMacro(factures, numero || null, N - 1, { month, metric: 'ca' }),
-    margePctN1: caN1 ? (margeN1 / caN1) * 100 : null,
-    margeN1ByMacro: byMacro(factures, numero || null, N - 1, { month, metric: 'marge' }),
-    objectifCa,
+    margePctN1,
+    margeN1ByMacro: byMacroMarginPct(factures, numero || null, N - 1, { month }),
+    // L'objectif CA est saisi en annuel sur la ligne TOTAL du client.
+    // Lorsqu'on développe le client, chaque mois affiche 1/12 de cet objectif.
+    objectifCa: month ? objectifCa / 12 : objectifCa,
     potentiel: objectiveNumber(objectives, numero, 'Objectif', 'POTENTIEL'),
     devisYtdN: sumAmount(devis, numero || null, N, month ? { month } : { monthMax: CLOSED_MONTH }),
     devisYtdNByMacro: byMacro(devis, numero || null, N, { month, monthMax: month ? undefined : CLOSED_MONTH, metric: 'ca' }),
     caYtdN,
     caYtdNByMacro: byMacro(factures, numero || null, N, { month, monthMax: month ? undefined : CLOSED_MONTH, metric: 'ca' }),
-    margePctYtdN: caYtdN ? (margeYtdN / caYtdN) * 100 : null,
-    margeYtdNByMacro: byMacro(factures, numero || null, N, { month, monthMax: month ? undefined : CLOSED_MONTH, metric: 'marge' }),
+    margePctYtdN,
+    margeYtdNByMacro: byMacroMarginPct(factures, numero || null, N, { month, monthMax: month ? undefined : CLOSED_MONTH }),
     contratBfa: objectiveNumber(objectives, numero, 'Objectif', 'Contrat\nBFA'),
     caVsN1: ratio(caYtdN, caYtdN1),
-    margeVsN1: ratio(margeYtdN, margeYtdN1),
+    margeVsN1: deltaPoints(margePctYtdN, margePctYtdN1),
     realiseObjectif: ratio(caYtdN, objectifProrata),
     qrcN1: objectiveNumber(objectives, numero, 'QRC', `QRC ${N - 1}`) || objectiveNumber(objectives, numero, 'QRC', 'QRC N-1'),
     frequenceCommande,
@@ -431,45 +472,45 @@ function buildColumns(showFamilies: boolean): ColumnDef[] {
     { key: 'dateCreation', label: 'Date Création', group: 'Client', width: 95, value: (r) => r.dateCreation, format: 'date' },
     { key: 'prospectLabel', label: 'Prospect OUI/NON', group: 'Client', width: 86, value: (r) => r.prospectLabel, format: 'text' },
     { key: 'remarque', label: 'Remarque', group: 'Client', width: 310, value: (r) => r.numero, editable: { domaine: 'Remarque', rubrique: 'Remarque', type: 'texte' }, format: 'text' },
-    { key: 'caN3', label: `CA ${N - 3}`, group: 'CA / Objectifs', width: 92, className: 'metric previous', value: (r) => r.caN3, format: 'keur' },
-    { key: 'caN2', label: `CA ${N - 2}`, group: 'CA / Objectifs', width: 92, className: 'metric previous', value: (r) => r.caN2, format: 'keur' },
-    { key: 'devisN1', label: `DEVIS ${N - 1}`, group: 'CA / Objectifs', width: 98, className: 'metric devis', value: (r) => r.devisN1, format: 'keur' },
+    { key: 'caN3', label: `CA ${N - 3}`, group: 'CA / Objectifs', width: 92, className: 'metric previous', value: (r) => r.caN3, format: 'keurBlank' },
+    { key: 'caN2', label: `CA ${N - 2}`, group: 'CA / Objectifs', width: 92, className: 'metric previous', value: (r) => r.caN2, format: 'keurBlank' },
+    { key: 'devisN1', label: `DEVIS ${N - 1}`, group: 'CA / Objectifs', width: 98, className: 'metric devis', value: (r) => r.devisN1, format: 'keurBlank' },
   ]
 
   if (showFamilies) {
-    FAMILY_MACROS.forEach((macro) => cols.push({ key: `devisN1_${macro}`, label: `Dont ${macro}`, group: `Devis ${N - 1}`, width: 78, rotate: true, value: (r) => r.devisN1ByMacro[macro], format: 'keur' }))
+    FAMILY_MACROS.forEach((macro) => cols.push({ key: `devisN1_${macro}`, label: `Dont ${macro}`, group: `Devis ${N - 1}`, width: 78, rotate: true, value: (r) => r.devisN1ByMacro[macro], format: 'keurBlank' }))
   }
 
-  cols.push({ key: 'caN1', label: `CA ${N - 1}`, group: 'CA / Objectifs', width: 98, className: 'metric ca', value: (r) => r.caN1, format: 'keur' })
+  cols.push({ key: 'caN1', label: `CA ${N - 1}`, group: 'CA / Objectifs', width: 98, className: 'metric ca', value: (r) => r.caN1, format: 'keurBlank' })
   if (showFamilies) {
-    FAMILY_MACROS.forEach((macro) => cols.push({ key: `caN1_${macro}`, label: `Dont ${macro}`, group: `CA ${N - 1}`, width: 78, rotate: true, value: (r) => r.caN1ByMacro[macro], format: 'keur' }))
+    FAMILY_MACROS.forEach((macro) => cols.push({ key: `caN1_${macro}`, label: `Dont ${macro}`, group: `CA ${N - 1}`, width: 78, rotate: true, value: (r) => r.caN1ByMacro[macro], format: 'keurBlank' }))
   }
-  cols.push({ key: 'margePctN1', label: `MARGE ${N - 1}`, group: 'CA / Objectifs', width: 92, className: 'metric margin', value: (r) => r.margePctN1, format: 'pct' })
+  cols.push({ key: 'margePctN1', label: `MARGE ${N - 1}`, group: 'CA / Objectifs', width: 92, className: 'metric margin', value: (r) => r.margePctN1, format: 'pctBlank' })
   if (showFamilies) {
-    FAMILY_MACROS.forEach((macro) => cols.push({ key: `margeN1_${macro}`, label: `Dont ${macro}`, group: `Marge ${N - 1}`, width: 78, rotate: true, value: (r) => r.margeN1ByMacro[macro], format: 'keur' }))
+    FAMILY_MACROS.forEach((macro) => cols.push({ key: `margeN1_${macro}`, label: `Dont ${macro}`, group: `Marge ${N - 1}`, width: 78, rotate: true, value: (r) => r.margeN1ByMacro[macro], format: 'pctBlank' }))
   }
 
   cols.push(
     { key: 'objectifCa', label: `OBJECTIF ${N}`, group: 'CA / Objectifs', width: 104, className: 'editableNumber', value: (r) => r.objectifCa, editable: { domaine: 'Objectif', rubrique: 'CA', type: 'montant' }, format: 'keur' },
     { key: 'potentiel', label: 'POTENTIEL', group: 'CA / Objectifs', width: 98, className: 'editableNumber', value: (r) => r.potentiel, editable: { domaine: 'Objectif', rubrique: 'POTENTIEL', type: 'montant' }, format: 'keur' },
-    { key: 'devisYtdN', label: `DEVIS ${String(CLOSED_MONTH).padStart(2, '0')}-${N}`, group: 'CA / Objectifs', width: 108, className: 'metric devis redLabel', value: (r) => r.devisYtdN, format: 'keur' },
+    { key: 'devisYtdN', label: `DEVIS ${String(CLOSED_MONTH).padStart(2, '0')}-${N}`, group: 'CA / Objectifs', width: 108, className: 'metric devis redLabel', value: (r) => r.devisYtdN, format: 'keurBlank' },
   )
   if (showFamilies) {
-    FAMILY_MACROS.forEach((macro) => cols.push({ key: `devisYtdN_${macro}`, label: `Dont ${macro}`, group: `Devis ${N}`, width: 78, rotate: true, value: (r) => r.devisYtdNByMacro[macro], format: 'keur' }))
+    FAMILY_MACROS.forEach((macro) => cols.push({ key: `devisYtdN_${macro}`, label: `Dont ${macro}`, group: `Devis ${N}`, width: 78, rotate: true, value: (r) => r.devisYtdNByMacro[macro], format: 'keurBlank' }))
   }
-  cols.push({ key: 'caYtdN', label: `CA RÉEL ${N}`, group: 'CA / Objectifs', width: 108, className: 'metric ca redLabel', value: (r) => r.caYtdN, format: 'keur' })
+  cols.push({ key: 'caYtdN', label: `CA RÉEL ${N}`, group: 'CA / Objectifs', width: 108, className: 'metric ca redLabel', value: (r) => r.caYtdN, format: 'keurBlank' })
   if (showFamilies) {
-    FAMILY_MACROS.forEach((macro) => cols.push({ key: `caYtdN_${macro}`, label: `Dont ${macro}`, group: `CA ${N}`, width: 78, rotate: true, value: (r) => r.caYtdNByMacro[macro], format: 'keur' }))
+    FAMILY_MACROS.forEach((macro) => cols.push({ key: `caYtdN_${macro}`, label: `Dont ${macro}`, group: `CA ${N}`, width: 78, rotate: true, value: (r) => r.caYtdNByMacro[macro], format: 'keurBlank' }))
   }
-  cols.push({ key: 'margePctYtdN', label: `MARGE RÉEL ${N}`, group: 'CA / Objectifs', width: 110, className: 'metric margin redLabel', value: (r) => r.margePctYtdN, format: 'pct' })
+  cols.push({ key: 'margePctYtdN', label: `MARGE RÉEL ${N}`, group: 'CA / Objectifs', width: 110, className: 'metric margin redLabel', value: (r) => r.margePctYtdN, format: 'pctBlank' })
   if (showFamilies) {
-    FAMILY_MACROS.forEach((macro) => cols.push({ key: `margeYtdN_${macro}`, label: `Dont ${macro}`, group: `Marge ${N}`, width: 78, rotate: true, value: (r) => r.margeYtdNByMacro[macro], format: 'keur' }))
+    FAMILY_MACROS.forEach((macro) => cols.push({ key: `margeYtdN_${macro}`, label: `Dont ${macro}`, group: `Marge ${N}`, width: 78, rotate: true, value: (r) => r.margeYtdNByMacro[macro], format: 'pctBlank' }))
   }
 
   cols.push(
     { key: 'contratBfa', label: 'Contrat BFA', group: 'Objectif', width: 96, className: 'editableNumber', value: (r) => r.contratBfa, editable: { domaine: 'Objectif', rubrique: 'Contrat\nBFA', type: 'montant' }, format: 'keur' },
     { key: 'caVsN1', label: `CA Réalisé / ${N - 1}`, group: 'Comparatif', width: 86, rotate: true, value: (r) => r.caVsN1, format: 'pct' },
-    { key: 'margeVsN1', label: `Marge / ${N - 1}`, group: 'Comparatif', width: 86, rotate: true, value: (r) => r.margeVsN1, format: 'pct' },
+    { key: 'margeVsN1', label: `Écart marge / ${N - 1}`, group: 'Comparatif', width: 86, rotate: true, value: (r) => r.margeVsN1, format: 'points' },
     { key: 'realiseObjectif', label: 'Réalisé / Objectif', group: 'Comparatif', width: 86, rotate: true, value: (r) => r.realiseObjectif, format: 'pct' },
     { key: 'qrcN1', label: `QRC ${N - 1}`, group: 'QRC', width: 70, rotate: true, value: (r) => r.qrcN1, editable: { domaine: 'QRC', rubrique: `QRC ${N - 1}`, type: 'nombre' }, format: 'number' },
     { key: 'frequenceCommande', label: 'Fréquence commande', group: 'QRC', width: 76, rotate: true, value: (r) => r.frequenceCommande, editable: { domaine: 'QRC', rubrique: 'Fréquence commande', type: 'nombre' }, format: 'number' },
@@ -521,7 +562,10 @@ function displayValue(col: ColumnDef, row: SummaryRow, objectiveMap: Map<string,
 
   const value = col.value(row)
   if (col.format === 'keur') return formatKEur(safeNumber(value))
+  if (col.format === 'keurBlank') return formatKEurBlank(safeNumber(value))
   if (col.format === 'pct') return formatPct(value as number | null)
+  if (col.format === 'pctBlank') return formatPctBlank(value as number | null)
+  if (col.format === 'points') return formatPoints(value as number | null)
   if (col.format === 'number') return formatNumber(safeNumber(value))
   return safeText(value)
 }

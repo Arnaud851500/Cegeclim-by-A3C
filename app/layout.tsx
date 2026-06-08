@@ -271,7 +271,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       label: 'Tableaux de bord',
       items: [
         { label: 'Tableaux de bord', path: '/atelier-analyse', accessKey: 'can_autorisation' },
-        { label: 'Suivi multi clietns', path: '/synthese_multi_clients', accessKey: 'can_autorisation' },
+        { label: 'Suivi multi clients', path: '/synthese_multi_clients', accessKey: 'can_autorisation' },
         { label: 'Indicateurs', path: '/Indicateurs', accessKey: 'can_dashboard' }
         ],
     },
