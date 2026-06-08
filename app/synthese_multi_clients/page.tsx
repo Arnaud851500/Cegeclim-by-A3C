@@ -27,6 +27,13 @@ type CollaborateurRow = {
   agence: string
 }
 
+type SelectionOptions = {
+  collaborateurs: string[]
+  agences: string[]
+  cacheCollaborateurs: string[]
+  cacheAgences: string[]
+}
+
 type AggRow = {
   annee: number
   mois: number
@@ -52,10 +59,61 @@ type ObjectiveRow = {
   valeur_date: string | null
 }
 
+type CacheDbRow = {
+  annee: number
+  row_kind: RowKind
+  mois: number | null
+  numero_tiers: string
+  intitule_tiers: string | null
+  collaborateur: string | null
+  agence_collaborateur: string | null
+  code_postal: string | null
+  libelle_naf: string | null
+  date_creation: string | null
+  prospect_label: string | null
+  ca_n3: number | null
+  ca_n2: number | null
+  devis_n1: number | null
+  devis_n1_by_macro: Record<string, number> | null
+  ca_n1: number | null
+  ca_n1_by_macro: Record<string, number> | null
+  marge_pct_n1: number | null
+  marge_n1_value: number | null
+  marge_n1_by_macro: Record<string, number | null> | null
+  marge_n1_value_by_macro: Record<string, number> | null
+  objectif_ca: number | null
+  potentiel: number | null
+  devis_ytd_n: number | null
+  devis_ytd_n_by_macro: Record<string, number> | null
+  ca_ytd_n: number | null
+  ca_ytd_n1: number | null
+  ca_ytd_n_by_macro: Record<string, number> | null
+  marge_pct_ytd_n: number | null
+  marge_ytd_n_value: number | null
+  marge_ytd_n1_value: number | null
+  marge_ytd_n_by_macro: Record<string, number | null> | null
+  marge_ytd_n_value_by_macro: Record<string, number> | null
+  marge_ytd_n1_value_by_macro: Record<string, number> | null
+  contrat_bfa: number | null
+  ca_vs_n1: number | null
+  marge_vs_n1: number | null
+  realise_objectif: number | null
+  qrc_n1: number | null
+  frequence_commande: number | null
+  niveau_exclusivite: number | null
+  com_notre_faveur: number | null
+  garantie: number | null
+  qrc_n: number | null
+  visite_theorique: number | null
+  visite_realise: number | null
+  updated_at?: string | null
+}
+
 type SummaryRow = {
   id: string
   kind: RowKind
   level: number
+  collaborateur: string
   numero: string
   intitule: string
   totalMois: string
@@ -70,15 +128,22 @@ type SummaryRow = {
   caN1: number
   caN1ByMacro: Record<string, number>
   margePctN1: number | null
+  margeN1Value: number
   margeN1ByMacro: Record<string, number | null>
+  margeN1ValueByMacro: Record<string, number>
   objectifCa: number
   potentiel: number
   devisYtdN: number
   devisYtdNByMacro: Record<string, number>
   caYtdN: number
+  caYtdN1: number
   caYtdNByMacro: Record<string, number>
   margePctYtdN: number | null
+  margeYtdNValue: number
+  margeYtdN1Value: number
   margeYtdNByMacro: Record<string, number | null>
+  margeYtdNValueByMacro: Record<string, number>
+  margeYtdN1ValueByMacro: Record<string, number>
   contratBfa: number
   caVsN1: number | null
   margeVsN1: number | null
@@ -98,7 +163,7 @@ type ColumnDef = {
   label: string
   group: string
   width: number
-  sticky?: 'code' | 'label' | 'month'
+  sticky?: 'collaborateur' | 'code' | 'label' | 'month'
   className?: string
   rotate?: boolean
   editable?: {
@@ -120,6 +185,8 @@ const CURRENT_DAY = new Date().getDate()
 const CLOSED_MONTH = CURRENT_DAY <= 6 ? (CURRENT_MONTH === 1 ? 12 : CURRENT_MONTH - 1) : CURRENT_MONTH
 const CLOSED_MONTH_YEAR = CURRENT_MONTH === 1 && CURRENT_DAY <= 6 ? N - 1 : N
 const ANALYSIS_YEAR = CLOSED_MONTH_YEAR
+const ALL_COLLABORATEURS_VALUE = '__ALL_COLLABORATEURS__'
+
 
 const ACTIONS = [
   'Pack Sérénité PAC\n5 ans pièces',
@@ -256,6 +323,10 @@ function macroBucket(value: any) {
 
 function emptyByMacro() {
   return Object.fromEntries(FAMILY_MACROS.map((m) => [m, 0])) as Record<string, number>
+}
+
+function emptyNullableByMacro() {
+  return Object.fromEntries(FAMILY_MACROS.map((m) => [m, null])) as Record<string, number | null>
 }
 
 function ratio(num: number, den: number) {
@@ -462,6 +533,7 @@ function buildSummaryForNumero(tier: TiersRow | null, factures: AggRow[], devis:
     id: month ? `${numero}-m${month}` : numero || 'TOTAL',
     kind: month ? 'month' : tier ? 'client' : 'total',
     level: month ? 1 : 0,
+    collaborateur: tier?.collaborateur || '',
     numero: tier?.numero || 'TOTAL',
     intitule: tier?.intitule || '',
     totalMois: month ? MONTHS[month - 1] : 'TOTAL',
@@ -476,7 +548,9 @@ function buildSummaryForNumero(tier: TiersRow | null, factures: AggRow[], devis:
     caN1,
     caN1ByMacro: byMacro(factures, numero || null, N - 1, { month, metric: 'ca' }),
     margePctN1,
+    margeN1Value: margeN1,
     margeN1ByMacro: byMacroMarginPct(factures, numero || null, N - 1, { month }),
+    margeN1ValueByMacro: byMacro(factures, numero || null, N - 1, { month, metric: 'marge' }),
     // L'objectif CA est saisi en annuel sur la ligne TOTAL du client.
     // Lorsqu'on développe le client, chaque mois affiche 1/12 de cet objectif.
     objectifCa: month ? objectifCa / 12 : objectifCa,
@@ -484,9 +558,14 @@ function buildSummaryForNumero(tier: TiersRow | null, factures: AggRow[], devis:
     devisYtdN: sumAmount(devis, numero || null, N, month ? { month } : { monthMax: CLOSED_MONTH }),
     devisYtdNByMacro: byMacro(devis, numero || null, N, { month, monthMax: month ? undefined : CLOSED_MONTH, metric: 'ca' }),
     caYtdN,
+    caYtdN1,
     caYtdNByMacro: byMacro(factures, numero || null, N, { month, monthMax: month ? undefined : CLOSED_MONTH, metric: 'ca' }),
     margePctYtdN,
+    margeYtdNValue: margeYtdN,
+    margeYtdN1Value: margeYtdN1,
     margeYtdNByMacro: byMacroMarginPct(factures, numero || null, N, { month, monthMax: month ? undefined : CLOSED_MONTH }),
+    margeYtdNValueByMacro: byMacro(factures, numero || null, N, { month, monthMax: month ? undefined : CLOSED_MONTH, metric: 'marge' }),
+    margeYtdN1ValueByMacro: byMacro(factures, numero || null, N - 1, { month, monthMax: month ? undefined : CLOSED_MONTH, metric: 'marge' }),
     contratBfa: objectiveNumber(objectives, numero, 'Objectif', 'Contrat\nBFA'),
     caVsN1: ratio(caYtdN, caYtdN1),
     margeVsN1: deltaPoints(margePctYtdN, margePctYtdN1),
@@ -502,8 +581,14 @@ function buildSummaryForNumero(tier: TiersRow | null, factures: AggRow[], devis:
   }
 }
 
-function buildColumns(showFamilies: boolean): ColumnDef[] {
-  const cols: ColumnDef[] = [
+function buildColumns(showFamilies: boolean, showCollaborateurColumn = false): ColumnDef[] {
+  const cols: ColumnDef[] = []
+
+  if (showCollaborateurColumn) {
+    cols.push({ key: 'collaborateur', label: 'Collaborateur', group: 'Client', width: 130, sticky: 'collaborateur', value: (r) => r.collaborateur, format: 'text' })
+  }
+
+  cols.push(
     { key: 'numero', label: 'Code Client', group: 'Client', width: 86, sticky: 'code', value: (r) => r.numero, format: 'text' },
     { key: 'intitule', label: 'Intitulé Client', group: 'Client', width: 210, sticky: 'label', value: (r) => r.intitule, format: 'text' },
     { key: 'totalMois', label: 'Total / Mois', group: 'Client', width: 105, sticky: 'month', value: (r) => r.totalMois, format: 'text' },
@@ -515,7 +600,7 @@ function buildColumns(showFamilies: boolean): ColumnDef[] {
     { key: 'caN3', label: `CA ${N - 3}`, group: 'CA / Objectifs', width: 92, className: 'metric previous', value: (r) => r.caN3, format: 'keurBlank' },
     { key: 'caN2', label: `CA ${N - 2}`, group: 'CA / Objectifs', width: 92, className: 'metric previous', value: (r) => r.caN2, format: 'keurBlank' },
     { key: 'devisN1', label: `DEVIS ${N - 1}`, group: 'CA / Objectifs', width: 98, className: 'metric devis', value: (r) => r.devisN1, format: 'keurBlank' },
-  ]
+  )
 
   if (showFamilies) {
     FAMILY_MACROS.forEach((macro) => cols.push({ key: `devisN1_${macro}`, label: `Dont ${macro}`, group: `Devis ${N - 1}`, width: 78, rotate: true, value: (r) => r.devisN1ByMacro[macro], format: 'keurBlank' }))
@@ -629,13 +714,268 @@ function editableRawValue(row: SummaryRow, col: ColumnDef, objectiveMap: Map<str
   return value ? String(value) : ''
 }
 
+
+function macroNumberPayload(value: any) {
+  const out = emptyByMacro()
+  if (!value || typeof value !== 'object') return out
+  for (const macro of FAMILY_MACROS) out[macro] = safeNumber(value[macro])
+  return out
+}
+
+function macroNullablePayload(value: any) {
+  const out = emptyNullableByMacro()
+  if (!value || typeof value !== 'object') return out
+  for (const macro of FAMILY_MACROS) {
+    const rawValue = value[macro]
+    if (rawValue === null || rawValue === undefined || rawValue === '') out[macro] = null
+    else {
+      const n = Number(rawValue)
+      out[macro] = Number.isFinite(n) ? n : null
+    }
+  }
+  return out
+}
+
+function cacheRowToSummary(row: CacheDbRow): SummaryRow {
+  const month = row.mois ? safeNumber(row.mois) : null
+  return {
+    id: month ? `${row.numero_tiers}-m${month}` : row.numero_tiers,
+    kind: row.row_kind,
+    level: row.row_kind === 'month' ? 1 : 0,
+    collaborateur: safeText(row.collaborateur),
+    numero: safeText(row.numero_tiers, 'SANS CODE'),
+    intitule: safeText(row.intitule_tiers),
+    totalMois: month ? MONTHS[month - 1] : 'TOTAL',
+    codePostal: safeText(row.code_postal),
+    libelleNaf: safeText(row.libelle_naf, 'NA'),
+    dateCreation: formatDateFr(row.date_creation),
+    prospectLabel: safeText(row.prospect_label, 'NA'),
+    caN3: safeNumber(row.ca_n3),
+    caN2: safeNumber(row.ca_n2),
+    devisN1: safeNumber(row.devis_n1),
+    devisN1ByMacro: macroNumberPayload(row.devis_n1_by_macro),
+    caN1: safeNumber(row.ca_n1),
+    caN1ByMacro: macroNumberPayload(row.ca_n1_by_macro),
+    margePctN1: row.marge_pct_n1 === null || row.marge_pct_n1 === undefined ? null : safeNumber(row.marge_pct_n1),
+    margeN1Value: safeNumber(row.marge_n1_value),
+    margeN1ByMacro: macroNullablePayload(row.marge_n1_by_macro),
+    margeN1ValueByMacro: macroNumberPayload(row.marge_n1_value_by_macro),
+    objectifCa: safeNumber(row.objectif_ca),
+    potentiel: safeNumber(row.potentiel),
+    devisYtdN: safeNumber(row.devis_ytd_n),
+    devisYtdNByMacro: macroNumberPayload(row.devis_ytd_n_by_macro),
+    caYtdN: safeNumber(row.ca_ytd_n),
+    caYtdN1: safeNumber(row.ca_ytd_n1),
+    caYtdNByMacro: macroNumberPayload(row.ca_ytd_n_by_macro),
+    margePctYtdN: row.marge_pct_ytd_n === null || row.marge_pct_ytd_n === undefined ? null : safeNumber(row.marge_pct_ytd_n),
+    margeYtdNValue: safeNumber(row.marge_ytd_n_value),
+    margeYtdN1Value: safeNumber(row.marge_ytd_n1_value),
+    margeYtdNByMacro: macroNullablePayload(row.marge_ytd_n_by_macro),
+    margeYtdNValueByMacro: macroNumberPayload(row.marge_ytd_n_value_by_macro),
+    margeYtdN1ValueByMacro: macroNumberPayload(row.marge_ytd_n1_value_by_macro),
+    contratBfa: safeNumber(row.contrat_bfa),
+    caVsN1: row.ca_vs_n1 === null || row.ca_vs_n1 === undefined ? null : safeNumber(row.ca_vs_n1),
+    margeVsN1: row.marge_vs_n1 === null || row.marge_vs_n1 === undefined ? null : safeNumber(row.marge_vs_n1),
+    realiseObjectif: row.realise_objectif === null || row.realise_objectif === undefined ? null : safeNumber(row.realise_objectif),
+    qrcN1: safeNumber(row.qrc_n1),
+    frequenceCommande: safeNumber(row.frequence_commande),
+    niveauExclusivite: safeNumber(row.niveau_exclusivite),
+    comNotreFaveur: safeNumber(row.com_notre_faveur),
+    garantie: safeNumber(row.garantie),
+    qrcN: safeNumber(row.qrc_n),
+    visiteTheorique: safeNumber(row.visite_theorique),
+    visiteRealise: safeNumber(row.visite_realise),
+  }
+}
+
+function applyObjectiveOverrides(row: SummaryRow, objectiveMap: Map<string, ObjectiveRow>) {
+  if (row.kind === 'total' || !row.numero || row.numero === 'TOTAL') return row
+
+  const objectifCa = objectiveNumber(objectiveMap, row.numero, 'Objectif', 'CA')
+  const objectifProrata = row.kind === 'month' ? objectifCa / 12 : (objectifCa / 12) * CLOSED_MONTH
+  const frequenceCommande = objectiveNumber(objectiveMap, row.numero, 'QRC', 'Fréquence commande')
+  const niveauExclusivite = objectiveNumber(objectiveMap, row.numero, 'QRC', 'Niveau exclusivité')
+  const comNotreFaveur = objectiveNumber(objectiveMap, row.numero, 'QRC', 'Com en notre faveur')
+  const garantie = objectiveNumber(objectiveMap, row.numero, 'QRC', 'Garantie')
+  const visiteRealise = VISITES.reduce((count, rubrique) => count + (objectiveDate(objectiveMap, row.numero, 'Visite', rubrique) ? 1 : 0), 0)
+
+  return {
+    ...row,
+    objectifCa: row.kind === 'month' ? objectifCa / 12 : objectifCa,
+    potentiel: objectiveNumber(objectiveMap, row.numero, 'Objectif', 'POTENTIEL'),
+    contratBfa: objectiveNumber(objectiveMap, row.numero, 'Objectif', 'Contrat\nBFA'),
+    realiseObjectif: ratio(row.caYtdN, objectifProrata),
+    qrcN1: objectiveNumber(objectiveMap, row.numero, 'QRC', `QRC ${N - 1}`) || objectiveNumber(objectiveMap, row.numero, 'QRC', 'QRC N-1'),
+    frequenceCommande,
+    niveauExclusivite,
+    comNotreFaveur,
+    garantie,
+    qrcN: frequenceCommande + niveauExclusivite + comNotreFaveur + garantie,
+    visiteTheorique: objectiveNumber(objectiveMap, row.numero, 'Visite', 'Théorique'),
+    visiteRealise,
+  }
+}
+
+function sumMacro(rows: SummaryRow[], getter: (row: SummaryRow) => Record<string, number>) {
+  const out = emptyByMacro()
+  for (const row of rows) {
+    const values = getter(row)
+    for (const macro of FAMILY_MACROS) out[macro] += safeNumber(values[macro])
+  }
+  return out
+}
+
+function ratioMacro(caByMacro: Record<string, number>, margeByMacro: Record<string, number>) {
+  const out = emptyNullableByMacro()
+  for (const macro of FAMILY_MACROS) out[macro] = caByMacro[macro] ? (margeByMacro[macro] / caByMacro[macro]) * 100 : null
+  return out
+}
+
+function buildTotalFromRows(rows: SummaryRow[], showCollaborateurColumn: boolean): SummaryRow {
+  const caN1ByMacro = sumMacro(rows, (row) => row.caN1ByMacro)
+  const margeN1ValueByMacro = sumMacro(rows, (row) => row.margeN1ValueByMacro)
+  const caYtdNByMacro = sumMacro(rows, (row) => row.caYtdNByMacro)
+  const margeYtdNValueByMacro = sumMacro(rows, (row) => row.margeYtdNValueByMacro)
+
+  const total: SummaryRow = {
+    id: 'TOTAL',
+    kind: 'total',
+    level: 0,
+    collaborateur: showCollaborateurColumn ? 'TOTAL' : '',
+    numero: 'TOTAL',
+    intitule: '',
+    totalMois: 'TOTAL',
+    codePostal: '',
+    libelleNaf: '',
+    dateCreation: '',
+    prospectLabel: '',
+    caN3: rows.reduce((s, r) => s + r.caN3, 0),
+    caN2: rows.reduce((s, r) => s + r.caN2, 0),
+    devisN1: rows.reduce((s, r) => s + r.devisN1, 0),
+    devisN1ByMacro: sumMacro(rows, (row) => row.devisN1ByMacro),
+    caN1: rows.reduce((s, r) => s + r.caN1, 0),
+    caN1ByMacro,
+    margePctN1: null,
+    margeN1Value: rows.reduce((s, r) => s + r.margeN1Value, 0),
+    margeN1ByMacro: emptyNullableByMacro(),
+    margeN1ValueByMacro,
+    objectifCa: rows.reduce((s, r) => s + r.objectifCa, 0),
+    potentiel: rows.reduce((s, r) => s + r.potentiel, 0),
+    devisYtdN: rows.reduce((s, r) => s + r.devisYtdN, 0),
+    devisYtdNByMacro: sumMacro(rows, (row) => row.devisYtdNByMacro),
+    caYtdN: rows.reduce((s, r) => s + r.caYtdN, 0),
+    caYtdN1: rows.reduce((s, r) => s + r.caYtdN1, 0),
+    caYtdNByMacro,
+    margePctYtdN: null,
+    margeYtdNValue: rows.reduce((s, r) => s + r.margeYtdNValue, 0),
+    margeYtdN1Value: rows.reduce((s, r) => s + r.margeYtdN1Value, 0),
+    margeYtdNByMacro: emptyNullableByMacro(),
+    margeYtdNValueByMacro,
+    margeYtdN1ValueByMacro: sumMacro(rows, (row) => row.margeYtdN1ValueByMacro),
+    contratBfa: rows.reduce((s, r) => s + r.contratBfa, 0),
+    caVsN1: null,
+    margeVsN1: null,
+    realiseObjectif: null,
+    qrcN1: rows.reduce((s, r) => s + r.qrcN1, 0),
+    frequenceCommande: rows.reduce((s, r) => s + r.frequenceCommande, 0),
+    niveauExclusivite: rows.reduce((s, r) => s + r.niveauExclusivite, 0),
+    comNotreFaveur: rows.reduce((s, r) => s + r.comNotreFaveur, 0),
+    garantie: rows.reduce((s, r) => s + r.garantie, 0),
+    qrcN: 0,
+    visiteTheorique: rows.reduce((s, r) => s + r.visiteTheorique, 0),
+    visiteRealise: rows.reduce((s, r) => s + r.visiteRealise, 0),
+  }
+
+  total.margePctN1 = total.caN1 ? (total.margeN1Value / total.caN1) * 100 : null
+  total.margeN1ByMacro = ratioMacro(total.caN1ByMacro, total.margeN1ValueByMacro)
+  total.margePctYtdN = total.caYtdN ? (total.margeYtdNValue / total.caYtdN) * 100 : null
+  total.margeYtdNByMacro = ratioMacro(total.caYtdNByMacro, total.margeYtdNValueByMacro)
+  const margePctYtdN1 = total.caYtdN1 ? (total.margeYtdN1Value / total.caYtdN1) * 100 : null
+  total.caVsN1 = ratio(total.caYtdN, total.caYtdN1)
+  total.margeVsN1 = deltaPoints(total.margePctYtdN, margePctYtdN1)
+  total.realiseObjectif = ratio(total.caYtdN, (total.objectifCa / 12) * CLOSED_MONTH)
+  total.qrcN = total.frequenceCommande + total.niveauExclusivite + total.comNotreFaveur + total.garantie
+
+  return total
+}
+
+function mergeSortedOptions(...lists: string[][]) {
+  return Array.from(new Set(lists.flat().map((value) => safeText(value)).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'fr'))
+}
+
+function emptySelectionOptions(): SelectionOptions {
+  return { collaborateurs: [], agences: [], cacheCollaborateurs: [], cacheAgences: [] }
+}
+
+async function fetchCacheSelectionOptions() {
+  const rows = await fetchAll('synthese_multi_clients_cache', 'collaborateur,agence_collaborateur', (q) => q.eq('annee', N).eq('row_kind', 'client'))
+  const collaborateurs = mergeSortedOptions(rows.map((row) => safeText(row.collaborateur)))
+  const agences = mergeSortedOptions(rows.map((row) => safeText(row.agence_collaborateur)))
+  return { collaborateurs, agences }
+}
+
+async function fetchReferentialSelectionOptions() {
+  const [rawCollaborateurs, rawTiers] = await Promise.all([
+    fetchAll('ref_collaborateurs', '*'),
+    // Sélection '*' volontaire : cela évite une erreur Supabase si un des noms de colonne optionnels
+    // n'existe pas dans ref_tiers selon la version de la base.
+    fetchAll('ref_tiers', '*'),
+  ])
+
+  const collaborateurs = mergeSortedOptions(
+    rawCollaborateurs.map((row) => safeText(raw(row, ['nom', 'collaborateur', 'representant']))),
+    rawTiers.map((row) => safeText(raw(row, ['collaborateur', 'representant', 'commercial', 'vendeur'])))
+  )
+
+  const agences = mergeSortedOptions(
+    rawCollaborateurs.map((row) => safeText(raw(row, ['agence', 'agence_collaborateur', 'depot']))),
+    rawTiers.map((row) => safeText(raw(row, ['agence_rattachement', 'agence', 'depot_rattachement', 'depot'])))
+  )
+
+  return { collaborateurs, agences }
+}
+
+async function fetchSelectionOptions(): Promise<SelectionOptions> {
+  const [cacheResult, refResult] = await Promise.allSettled([
+    fetchCacheSelectionOptions(),
+    fetchReferentialSelectionOptions(),
+  ])
+
+  const cacheOptions = cacheResult.status === 'fulfilled' ? cacheResult.value : { collaborateurs: [], agences: [] }
+  const refOptions = refResult.status === 'fulfilled' ? refResult.value : { collaborateurs: [], agences: [] }
+
+  return {
+    collaborateurs: mergeSortedOptions(cacheOptions.collaborateurs, refOptions.collaborateurs),
+    agences: mergeSortedOptions(cacheOptions.agences, refOptions.agences),
+    cacheCollaborateurs: cacheOptions.collaborateurs,
+    cacheAgences: cacheOptions.agences,
+  }
+}
+
+async function fetchCacheClientRows(mode: ModeSelection, selected: string) {
+  return fetchAll('synthese_multi_clients_cache', '*', (query) => {
+    let q = query.eq('annee', N).eq('row_kind', 'client')
+    if (mode === 'collaborateur' && selected !== ALL_COLLABORATEURS_VALUE) q = q.eq('collaborateur', selected)
+    if (mode === 'agence') q = q.eq('agence_collaborateur', selected)
+    return q.order('collaborateur', { ascending: true }).order('numero_tiers', { ascending: true })
+  }) as Promise<CacheDbRow[]>
+}
+
+async function fetchCacheMonthRows(numero: string) {
+  return fetchAll('synthese_multi_clients_cache', '*', (query) => query
+    .eq('annee', N)
+    .eq('row_kind', 'month')
+    .eq('numero_tiers', numero)
+    .order('mois', { ascending: true })
+  ) as Promise<CacheDbRow[]>
+}
+
 export default function SyntheseMultiClientsPage() {
   const [mode, setMode] = useState<ModeSelection>('collaborateur')
   const [selected, setSelected] = useState('')
-  const [tiers, setTiers] = useState<TiersRow[]>([])
-  const [collaborateurs, setCollaborateurs] = useState<CollaborateurRow[]>([])
-  const [factures, setFactures] = useState<AggRow[]>([])
-  const [devis, setDevis] = useState<AggRow[]>([])
+  const [selectionOptions, setSelectionOptions] = useState<SelectionOptions>(emptySelectionOptions())
+  const [cacheRows, setCacheRows] = useState<SummaryRow[]>([])
+  const [monthRowsByNumero, setMonthRowsByNumero] = useState<Record<string, SummaryRow[]>>({})
   const [objectiveRows, setObjectiveRows] = useState<ObjectiveRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -644,6 +984,11 @@ export default function SyntheseMultiClientsPage() {
   const [sort, setSort] = useState<SortState>({ key: 'caN1', direction: 'desc' })
   const [filters, setFilters] = useState<Record<string, string>>({})
   const [savingKey, setSavingKey] = useState<string | null>(null)
+  const [loadingMonths, setLoadingMonths] = useState<Set<string>>(new Set())
+  const [cacheStatus, setCacheStatus] = useState('')
+
+  const hasSelection = Boolean(selected)
+  const showCollaborateurColumn = mode === 'collaborateur' && selected === ALL_COLLABORATEURS_VALUE
 
   const objectiveMap = useMemo(() => {
     const map = new Map<string, ObjectiveRow>()
@@ -651,7 +996,8 @@ export default function SyntheseMultiClientsPage() {
     return map
   }, [objectiveRows])
 
-  const columns = useMemo(() => buildColumns(showFamilies), [showFamilies])
+  const columns = useMemo(() => buildColumns(showFamilies, showCollaborateurColumn), [showFamilies, showCollaborateurColumn])
+  const currentSelectionOptions = mode === 'collaborateur' ? selectionOptions.collaborateurs : selectionOptions.agences
 
   useEffect(() => {
     let alive = true
@@ -659,32 +1005,24 @@ export default function SyntheseMultiClientsPage() {
       setLoading(true)
       setError(null)
       try {
-        const [nafRows, rawCollaborateurs, rawTiers] = await Promise.all([
-          fetchAll('ref_code_naf', '*'),
-          fetchAll('ref_collaborateurs', '*'),
-          fetchAll('ref_tiers', '*'),
-        ])
-
-        const nafByCode = new Map<string, string>()
-        nafRows.forEach((row) => {
-          const code = normalize(raw(row, ['code_naf', 'code']))
-          if (code) nafByCode.set(code, safeText(raw(row, ['libelle_naf', 'contenu_correspondance', 'designation', 'libelle']), 'NA'))
-        })
-
-        const normalizedCollaborateurs = rawCollaborateurs.map((row) => ({
-          nom: safeText(raw(row, ['nom', 'collaborateur', 'representant']), 'NON AFFECTE'),
-          agence: safeText(raw(row, ['agence', 'agence_collaborateur', 'depot']), 'NON AFFECTE'),
-        }))
-
-        const normalizedTiers = rawTiers.map((row) => normalizeTiers(row, nafByCode))
+        const options = await fetchSelectionOptions()
         if (!alive) return
-        setCollaborateurs(normalizedCollaborateurs)
-        setTiers(normalizedTiers)
-
-        const options = getSelectionOptions('collaborateur', normalizedTiers, normalizedCollaborateurs)
-        setSelected((current) => current || options[0] || '')
+        setSelectionOptions(options)
+        const cacheCount = options.cacheCollaborateurs.length + options.cacheAgences.length
+        const refCount = options.collaborateurs.length + options.agences.length
+        if (cacheCount) {
+          setCacheStatus('Cache prêt')
+        } else if (refCount) {
+          setCacheStatus('Référentiels chargés · cache vide : lancez la reconstruction après les imports.')
+        } else {
+          setCacheStatus('Aucun collaborateur/agence trouvé dans les référentiels et le cache.')
+        }
       } catch (err: any) {
-        if (alive) setError(err?.message || 'Erreur de chargement des référentiels')
+        if (alive) {
+          setSelectionOptions(emptySelectionOptions())
+          setError(err?.message || 'Erreur de chargement des listes collaborateur/agence')
+          setCacheStatus('Listes indisponibles')
+        }
       } finally {
         if (alive) setLoading(false)
       }
@@ -693,75 +1031,57 @@ export default function SyntheseMultiClientsPage() {
     return () => { alive = false }
   }, [])
 
-  const selectionOptions = useMemo(() => getSelectionOptions(mode, tiers, collaborateurs), [mode, tiers, collaborateurs])
-
   useEffect(() => {
-    if (!selectionOptions.length) return
-    if (!selected || !selectionOptions.includes(selected)) setSelected(selectionOptions[0])
-  }, [selectionOptions, selected])
+    if (!selected) return
 
-  const selectedTiers = useMemo(() => {
-    if (!selected) return []
     if (mode === 'collaborateur') {
-      return tiers.filter((t) => normalize(t.collaborateur) === normalize(selected))
+      if (selected === ALL_COLLABORATEURS_VALUE) return
+      if (!selectionOptions.collaborateurs.includes(selected)) setSelected('')
+      return
     }
-    const collabsForAgence = new Set(
-      collaborateurs
-        .filter((c) => normalize(c.agence) === normalize(selected))
-        .map((c) => normalize(c.nom))
-    )
-    return tiers.filter((t) => normalize(t.agence) === normalize(selected) || collabsForAgence.has(normalize(t.collaborateur)))
-  }, [mode, selected, tiers, collaborateurs])
+
+    if (!selectionOptions.agences.includes(selected)) setSelected('')
+  }, [mode, selectionOptions, selected])
 
   useEffect(() => {
     let alive = true
-    async function loadBusinessData() {
-      const codes = selectedTiers.map((t) => t.numero).filter(Boolean)
-      if (!codes.length) {
-        setFactures([])
-        setDevis([])
+    async function loadCachedBusinessData() {
+      if (!selected) {
+        setCacheRows([])
+        setMonthRowsByNumero({})
         setObjectiveRows([])
         return
       }
+
       setLoading(true)
       setError(null)
       try {
-        const [facturesRows, devisRows, objectives] = await Promise.all([
-          fetchAggForTiers('indicateur_factures_mensuel', codes, N - 3, N),
-          fetchAggForTiers('indicateur_devis_mensuel', codes, N - 1, N),
-          fetchObjectivesForTiers(codes, N),
-        ])
+        const rows = (await fetchCacheClientRows(mode, selected)).map(cacheRowToSummary)
+        const codes = rows.map((row) => row.numero).filter(Boolean)
+        const objectives = codes.length ? await fetchObjectivesForTiers(codes, N) : []
         if (!alive) return
-        setFactures(facturesRows)
-        setDevis(devisRows)
+        setCacheRows(rows)
         setObjectiveRows(objectives)
+        setMonthRowsByNumero({})
+        setExpanded(new Set())
+        setCacheStatus(rows.length ? `Cache chargé · ${rows.length} clients` : 'Aucun client dans le cache pour cette sélection')
       } catch (err: any) {
-        if (alive) setError(err?.message || 'Erreur de chargement des données activité / objectifs')
+        if (alive) {
+          setCacheRows([])
+          setObjectiveRows([])
+          setMonthRowsByNumero({})
+          setError(err?.message || 'Erreur de chargement de la synthèse cache')
+        }
       } finally {
         if (alive) setLoading(false)
       }
     }
-    void loadBusinessData()
+    void loadCachedBusinessData()
     return () => { alive = false }
-  }, [selectedTiers])
+  }, [mode, selected])
 
-  const baseClientRows = useMemo(() => selectedTiers.map((t) => buildSummaryForNumero(t, factures, devis, objectiveMap)), [selectedTiers, factures, devis, objectiveMap])
-  const totalRow = useMemo(() => {
-    const base = buildSummaryForNumero(null, factures, devis, objectiveMap)
-    base.objectifCa = baseClientRows.reduce((s, r) => s + r.objectifCa, 0)
-    base.potentiel = baseClientRows.reduce((s, r) => s + r.potentiel, 0)
-    base.contratBfa = baseClientRows.reduce((s, r) => s + r.contratBfa, 0)
-    base.qrcN1 = baseClientRows.reduce((s, r) => s + r.qrcN1, 0)
-    base.frequenceCommande = baseClientRows.reduce((s, r) => s + r.frequenceCommande, 0)
-    base.niveauExclusivite = baseClientRows.reduce((s, r) => s + r.niveauExclusivite, 0)
-    base.comNotreFaveur = baseClientRows.reduce((s, r) => s + r.comNotreFaveur, 0)
-    base.garantie = baseClientRows.reduce((s, r) => s + r.garantie, 0)
-    base.qrcN = base.frequenceCommande + base.niveauExclusivite + base.comNotreFaveur + base.garantie
-    base.visiteTheorique = baseClientRows.reduce((s, r) => s + r.visiteTheorique, 0)
-    base.visiteRealise = baseClientRows.reduce((s, r) => s + r.visiteRealise, 0)
-    base.realiseObjectif = ratio(base.caYtdN, (base.objectifCa / 12) * CLOSED_MONTH)
-    return base
-  }, [factures, devis, objectiveMap, baseClientRows])
+  const baseClientRows = useMemo(() => cacheRows.map((row) => applyObjectiveOverrides(row, objectiveMap)), [cacheRows, objectiveMap])
+  const totalRow = useMemo(() => buildTotalFromRows(baseClientRows, showCollaborateurColumn), [baseClientRows, showCollaborateurColumn])
 
   const visibleRows = useMemo(() => {
     const sortCol = columns.find((c) => c.key === sort.key) || columns.find((c) => c.key === 'caN1')!
@@ -789,14 +1109,12 @@ export default function SyntheseMultiClientsPage() {
     rows.forEach((row) => {
       out.push(row)
       if (expanded.has(row.numero)) {
-        for (let month = 1; month <= 12; month += 1) {
-          const tier = selectedTiers.find((t) => t.numero === row.numero)
-          if (tier) out.push(buildSummaryForNumero(tier, factures, devis, objectiveMap, month))
-        }
+        const monthRows = monthRowsByNumero[row.numero] || []
+        monthRows.forEach((monthRow) => out.push(applyObjectiveOverrides(monthRow, objectiveMap)))
       }
     })
     return out
-  }, [baseClientRows, filters, sort, columns, objectiveMap, totalRow, expanded, selectedTiers, factures, devis])
+  }, [baseClientRows, filters, sort, columns, objectiveMap, totalRow, expanded, monthRowsByNumero])
 
   function getFilterValue(key: string) {
     return filters[key] || ''
@@ -810,13 +1128,32 @@ export default function SyntheseMultiClientsPage() {
     setSort((prev) => prev.key === key ? { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' } : { key, direction: 'desc' })
   }
 
+  async function ensureMonthRows(numero: string) {
+    if (monthRowsByNumero[numero] || loadingMonths.has(numero)) return
+    setLoadingMonths((prev) => new Set(prev).add(numero))
+    try {
+      const rows = (await fetchCacheMonthRows(numero)).map(cacheRowToSummary)
+      setMonthRowsByNumero((prev) => ({ ...prev, [numero]: rows }))
+    } catch (err: any) {
+      setError(err?.message || 'Erreur de chargement du détail mensuel cache')
+    } finally {
+      setLoadingMonths((prev) => {
+        const next = new Set(prev)
+        next.delete(numero)
+        return next
+      })
+    }
+  }
+
   function toggleExpanded(numero: string) {
+    const willOpen = !expanded.has(numero)
     setExpanded((prev) => {
       const next = new Set(prev)
       if (next.has(numero)) next.delete(numero)
       else next.add(numero)
       return next
     })
+    if (willOpen) void ensureMonthRows(numero)
   }
 
   async function saveObjective(numero: string, editable: NonNullable<ColumnDef['editable']>, rawValue: string) {
@@ -858,11 +1195,16 @@ export default function SyntheseMultiClientsPage() {
   }
 
   async function exportExcel() {
+    if (!hasSelection) {
+      setError("Veuillez choisir un collaborateur, une agence ou Tous les collaborateurs avant de lancer l'export.")
+      return
+    }
+
     // @ts-ignore - xlsx-js-style est déjà présent dans le projet mais n'a pas toujours les types TS.
     const XLSX = await import('xlsx-js-style')
     // L'export Excel contient systématiquement le détail Famille macro, même si l'écran l'a masqué.
     // Les colonnes de détail sont ensuite groupées et réduites par défaut dans le fichier.
-    const exportColumns = buildColumns(true)
+    const exportColumns = buildColumns(true, showCollaborateurColumn)
 
     const sortCol = exportColumns.find((c) => c.key === sort.key) || exportColumns.find((c) => c.key === 'caN1')!
     let exportClientRows = baseClientRows.filter((row) => {
@@ -1057,15 +1399,16 @@ export default function SyntheseMultiClientsPage() {
     ws['!outline'] = { above: false, left: false }
     ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 1, c: 0 }, e: { r: Math.max(1, range.e.r), c: range.e.c } }) }
 
-    // Cellule D4 : fige les lignes 1 à 3 et les colonnes A à C.
-    // Certaines versions de xlsx-js-style utilisent !freeze, d'autres !pane : on renseigne les deux.
-    const frozenPane = { xSplit: 3, ySplit: 3, topLeftCell: 'D4', activePane: 'bottomRight', state: 'frozen' }
+    // Fige les lignes 1 à 3 et les colonnes d'identification client.
+    // En vue tous collaborateurs, la colonne Collaborateur est ajoutée et figée en première colonne.
+    const frozenColumnCount = showCollaborateurColumn ? 4 : 3
+    const frozenPane = { xSplit: frozenColumnCount, ySplit: 3, topLeftCell: showCollaborateurColumn ? 'E4' : 'D4', activePane: 'bottomRight', state: 'frozen' }
     ws['!freeze'] = frozenPane
     ws['!pane'] = frozenPane
 
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, 'Synthèse multi-clients')
-    XLSX.writeFile(wb, `synthese_multi_clients_${mode}_${selected || 'selection'}_${N}.xlsx`)
+    XLSX.writeFile(wb, `synthese_multi_clients_${mode}_${selected === ALL_COLLABORATEURS_VALUE ? 'tous_collaborateurs' : selected || 'selection'}_${N}.xlsx`)
   }
 
   return (
@@ -1073,12 +1416,12 @@ export default function SyntheseMultiClientsPage() {
       <section className="toolbar">
         <div>
           <h1>Synthèse multi-clients</h1>
-          <p>Vue dense par collaborateur ou agence · N = {N} · période réalisée arrêtée à {String(CLOSED_MONTH).padStart(2, '0')}/{N}</p>
+          <p>Vue dense par collaborateur ou agence · N = {N} · période réalisée arrêtée à {String(CLOSED_MONTH).padStart(2, '0')}/{N} · {cacheStatus}</p>
         </div>
         <div className="toolbarActions">
           <label>
             Sélection
-            <select value={mode} onChange={(e) => { setMode(e.target.value as ModeSelection); setExpanded(new Set()) }}>
+            <select value={mode} onChange={(e) => { setMode(e.target.value as ModeSelection); setSelected(''); setExpanded(new Set()) }}>
               <option value="collaborateur">Collaborateur</option>
               <option value="agence">Agence</option>
             </select>
@@ -1086,29 +1429,43 @@ export default function SyntheseMultiClientsPage() {
           <label>
             {mode === 'collaborateur' ? 'Collaborateur' : 'Agence'}
             <select value={selected} onChange={(e) => { setSelected(e.target.value); setExpanded(new Set()) }}>
-              {selectionOptions.map((option) => <option key={option} value={option}>{option}</option>)}
+              {mode === 'collaborateur' ? (
+                <>
+                  <option value="">Choisir un collaborateur…</option>
+                  <option value={ALL_COLLABORATEURS_VALUE}>Tous les collaborateurs</option>
+                </>
+              ) : (
+                <option value="">Choisir une agence…</option>
+              )}
+              {currentSelectionOptions.map((option) => <option key={option} value={option}>{option}</option>)}
             </select>
           </label>
           <button type="button" onClick={() => setShowFamilies((v) => !v)}>
             {showFamilies ? 'Masquer familles macro' : 'Afficher familles macro'}
           </button>
-          <button type="button" onClick={exportExcel}>Exporter Excel</button>
+          <button type="button" onClick={exportExcel} disabled={!hasSelection}>Exporter Excel</button>
         </div>
       </section>
 
       {error && <div className="error">{error}</div>}
       {loading && <div className="loading">Chargement…</div>}
 
-      <section className="kpis">
-        <div><span>Tiers</span><strong>{selectedTiers.length}</strong></div>
-        <div><span>CA {N - 1}</span><strong>{formatKEur(totalRow.caN1)}</strong></div>
-        <div><span>CA réel {N}</span><strong>{formatKEur(totalRow.caYtdN)}</strong></div>
-        <div><span>Marge réel {N}</span><strong>{formatPct(totalRow.margePctYtdN)}</strong></div>
-        <div><span>Réalisé / objectif</span><strong>{formatPct(totalRow.realiseObjectif)}</strong></div>
-      </section>
+      {!hasSelection ? (
+        <section className="emptyState">
+          Choisissez un collaborateur, une agence ou “Tous les collaborateurs” pour charger la synthèse clients.
+        </section>
+      ) : (
+        <>
+          <section className="kpis">
+            <div><span>Tiers</span><strong>{baseClientRows.length}</strong></div>
+            <div><span>CA {N - 1}</span><strong>{formatKEur(totalRow.caN1)}</strong></div>
+            <div><span>CA réel {N}</span><strong>{formatKEur(totalRow.caYtdN)}</strong></div>
+            <div><span>Marge réel {N}</span><strong>{formatPct(totalRow.margePctYtdN)}</strong></div>
+            <div><span>Réalisé / objectif</span><strong>{formatPct(totalRow.realiseObjectif)}</strong></div>
+          </section>
 
-      <div className="tableShell">
-        <table className="synthTable">
+          <div className="tableShell">
+        <table className={`synthTable ${showCollaborateurColumn ? 'withCollaborateur' : ''}`}>
           <thead>
             <tr className="groupRow">
               {columns.map((col) => <th key={`${col.key}-g`} className={`group ${groupClass(col.group)} ${stickyClass(col.sticky)}`} style={{ width: col.width, minWidth: col.width }}>{col.group}</th>)}
@@ -1124,7 +1481,7 @@ export default function SyntheseMultiClientsPage() {
             <tr className="filterRow">
               {columns.map((col) => (
                 <th key={`${col.key}-f`} className={stickyClass(col.sticky)} style={{ width: col.width, minWidth: col.width }}>
-                  {['numero', 'intitule', 'totalMois', 'codePostal', 'libelleNaf', 'prospectLabel'].includes(col.key) ? (
+                  {['collaborateur', 'numero', 'intitule', 'totalMois', 'codePostal', 'libelleNaf', 'prospectLabel'].includes(col.key) ? (
                     <input value={getFilterValue(col.key)} onChange={(e) => updateFilter(col.key, e.target.value)} placeholder="filtre" />
                   ) : null}
                 </th>
@@ -1134,11 +1491,11 @@ export default function SyntheseMultiClientsPage() {
           <tbody>
             {visibleRows.map((row) => (
               <tr key={row.id} className={`${row.kind} ${row.level ? 'child' : ''}`}>
-                {columns.map((col, index) => {
+                {columns.map((col) => {
                   const canEdit = row.kind === 'client' && Boolean(col.editable)
                   const saveKey = col.editable ? objectiveKey(row.numero, N, col.editable.domaine, col.editable.rubrique) : ''
                   return (
-                    <td key={`${row.id}-${col.key}`} className={`${col.className || ''} ${stickyClass(col.sticky)} ${index >= 8 ? 'num' : ''}`} style={{ width: col.width, minWidth: col.width }}>
+                    <td key={`${row.id}-${col.key}`} className={`${col.className || ''} ${stickyClass(col.sticky)} ${['keur', 'keurBlank', 'pct', 'pctBlank', 'points', 'number'].includes(col.format || '') ? 'num' : ''}`} style={{ width: col.width, minWidth: col.width }}>
                       {col.key === 'numero' && row.kind === 'client' ? (
                         <button type="button" className="expandBtn" onClick={() => toggleExpanded(row.numero)}>{expanded.has(row.numero) ? '−' : '+'}</button>
                       ) : null}
@@ -1159,7 +1516,9 @@ export default function SyntheseMultiClientsPage() {
             ))}
           </tbody>
         </table>
-      </div>
+          </div>
+        </>
+      )}
 
       <style jsx>{`
         .page { padding: 18px; background: #f6f8fb; min-height: 100vh; color: #0f172a; }
@@ -1170,6 +1529,8 @@ export default function SyntheseMultiClientsPage() {
         label { font-size: 11px; font-weight: 800; color: #475569; display: flex; flex-direction: column; gap: 3px; text-transform: uppercase; }
         select, button, input { border: 1px solid #cbd5e1; border-radius: 8px; padding: 7px 9px; background: white; font-size: 12px; }
         button { cursor: pointer; font-weight: 800; background: #0f172a; color: white; border-color: #0f172a; }
+        button:disabled { opacity: .45; cursor: not-allowed; }
+        .emptyState { background: white; border: 1px dashed #94a3b8; border-radius: 14px; padding: 26px; color: #475569; font-weight: 900; text-align: center; box-shadow: 0 2px 8px rgba(15,23,42,.05); }
         .error { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; padding: 10px 12px; border-radius: 10px; margin-bottom: 10px; font-weight: 700; }
         .loading { position: fixed; right: 18px; bottom: 18px; background: #0f172a; color: white; padding: 8px 12px; border-radius: 999px; z-index: 20; font-weight: 900; }
         .kpis { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 8px; margin-bottom: 12px; }
@@ -1185,11 +1546,15 @@ export default function SyntheseMultiClientsPage() {
         .filterRow th { top: 134px; height: 25px; background: #f8fafc; padding: 1px; }
         .filterRow input { width: 95%; height: 19px; padding: 1px 3px; font-size: 10px; border-radius: 3px; }
         .rotate span { writing-mode: vertical-rl; transform: rotate(180deg); display: inline-block; max-height: 96px; }
-        .client, .stickyCode, .stickyLabel, .stickyMonth { background: #e2f0d9; }
+        .client, .stickyCollaborateur, .stickyCode, .stickyLabel, .stickyMonth { background: #e2f0d9; }
+        .stickyCollaborateur { position: sticky; left: 0; z-index: 4; }
         .stickyCode { position: sticky; left: 0; z-index: 4; }
         .stickyLabel { position: sticky; left: 86px; z-index: 4; }
         .stickyMonth { position: sticky; left: 296px; z-index: 4; border-right: 3px solid #111827; }
-        thead .stickyCode, thead .stickyLabel, thead .stickyMonth { z-index: 8; }
+        .withCollaborateur .stickyCode { left: 130px; }
+        .withCollaborateur .stickyLabel { left: 216px; }
+        .withCollaborateur .stickyMonth { left: 426px; }
+        thead .stickyCollaborateur, thead .stickyCode, thead .stickyLabel, thead .stickyMonth { z-index: 8; }
         tbody tr.total td { background: #fff2cc; font-weight: 950; }
         tbody tr.client td { background: #e2f0d9; }
         tbody tr.month td { background: #edf7e7; font-style: italic; }
@@ -1222,6 +1587,7 @@ function getSelectionOptions(mode: ModeSelection, tiers: TiersRow[], collaborate
 }
 
 function stickyClass(sticky?: ColumnDef['sticky']) {
+  if (sticky === 'collaborateur') return 'stickyCollaborateur'
   if (sticky === 'code') return 'stickyCode'
   if (sticky === 'label') return 'stickyLabel'
   if (sticky === 'month') return 'stickyMonth'
