@@ -113,7 +113,7 @@ type ColumnDef = {
 type SortState = { key: string; direction: SortDirection }
 
 const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Sept', 'Oct', 'Nov', 'Déc']
-const FAMILY_MACROS = ['R/R', 'R/O', 'ECS', 'DRV', 'R_Zone', 'Accessoire', 'PV', 'Autres']
+const FAMILY_MACROS = ['R/R', 'R/O', 'ECS', 'DRV', 'R_zone', 'Accessoire', 'PV', 'Autres']
 const N = new Date().getFullYear()
 const CURRENT_MONTH = new Date().getMonth() + 1
 const CURRENT_DAY = new Date().getDate()
@@ -248,7 +248,7 @@ function macroBucket(value: any) {
   if (t === 'ro' || t.includes('renouvellement')) return 'R/O'
   if (t.includes('ecs')) return 'ECS'
   if (t.includes('drv')) return 'DRV'
-  if (t.includes('airzone')) return 'AirZone'
+  if (t === 'rzone' || t.includes('airzone')) return 'R_zone'
   if (t.includes('acc') || t.includes('accessoire')) return 'Accessoire'
   if (t === 'pv' || t.includes('photovolt')) return 'PV'
   return 'Autres'
@@ -396,6 +396,46 @@ function deltaPoints(currentPct: number | null, previousPct: number | null) {
   if (currentPct === null || previousPct === null) return null
   if (!Number.isFinite(currentPct) || !Number.isFinite(previousPct)) return null
   return currentPct - previousPct
+}
+
+
+function macroFromColumnKey(key: string, prefix: string) {
+  const marker = `${prefix}_`
+  return key.startsWith(marker) ? key.slice(marker.length) : null
+}
+
+function shouldBlankEmptyMonthMetric(col: ColumnDef, row: SummaryRow) {
+  if (row.kind !== 'month') return false
+
+  const key = col.key
+
+  if (key === 'devisN1') return isNullAmount(row.devisN1)
+  const devisN1Macro = macroFromColumnKey(key, 'devisN1')
+  if (devisN1Macro) return isNullAmount(row.devisN1ByMacro[devisN1Macro])
+
+  if (key === 'devisYtdN') return isNullAmount(row.devisYtdN)
+  const devisYtdNMacro = macroFromColumnKey(key, 'devisYtdN')
+  if (devisYtdNMacro) return isNullAmount(row.devisYtdNByMacro[devisYtdNMacro])
+
+  if (key === 'caN3') return isNullAmount(row.caN3)
+  if (key === 'caN2') return isNullAmount(row.caN2)
+  if (key === 'caN1') return isNullAmount(row.caN1)
+  const caN1Macro = macroFromColumnKey(key, 'caN1')
+  if (caN1Macro) return isNullAmount(row.caN1ByMacro[caN1Macro])
+
+  if (key === 'caYtdN') return isNullAmount(row.caYtdN)
+  const caYtdNMacro = macroFromColumnKey(key, 'caYtdN')
+  if (caYtdNMacro) return isNullAmount(row.caYtdNByMacro[caYtdNMacro])
+
+  if (key === 'margePctN1') return isNullAmount(row.caN1)
+  const margeN1Macro = macroFromColumnKey(key, 'margeN1')
+  if (margeN1Macro) return isNullAmount(row.caN1ByMacro[margeN1Macro])
+
+  if (key === 'margePctYtdN') return isNullAmount(row.caYtdN)
+  const margeYtdNMacro = macroFromColumnKey(key, 'margeYtdN')
+  if (margeYtdNMacro) return isNullAmount(row.caYtdNByMacro[margeYtdNMacro])
+
+  return false
 }
 
 function buildSummaryForNumero(tier: TiersRow | null, factures: AggRow[], devis: AggRow[], objectives: Map<string, ObjectiveRow>, month?: number): SummaryRow {
@@ -559,6 +599,8 @@ function displayValue(col: ColumnDef, row: SummaryRow, objectiveMap: Map<string,
     if (type === 'montant') return formatKEur(n)
     return n ? formatNumber(n) : ''
   }
+
+  if (shouldBlankEmptyMonthMetric(col, row)) return ''
 
   const value = col.value(row)
   if (col.format === 'keur') return formatKEur(safeNumber(value))
