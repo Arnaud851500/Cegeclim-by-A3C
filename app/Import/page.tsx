@@ -1330,6 +1330,54 @@ type ReconciliationRow = {
   ecart_bl_source_vs_flux: number | null
 }
 
+
+type ReconciliationRunSummary = {
+  run_id: number
+  status: string
+  checked_months: number
+  ok_months: number
+  ko_months: number
+  factures_ko: number
+  devis_ko: number
+  cdc_ko: number
+  bl_ko: number
+  max_abs_ecart: number | null
+}
+
+type ReconciliationStoredRow = {
+  run_id: number
+  annee: number
+  mois: number
+
+  factures_lignes: number | null
+  factures_cache: number | null
+  factures_indicateur: number | null
+  factures_flux: number | null
+  ecart_factures_lignes_vs_flux: number | null
+
+  devis_lignes: number | null
+  devis_cache: number | null
+  devis_indicateur: number | null
+  devis_flux: number | null
+  ecart_devis_lignes_vs_flux: number | null
+
+  cdc_depuis_factures: number | null
+  cdc_depuis_activite: number | null
+  cdc_flux: number | null
+  ecart_cdc: number | null
+
+  bl_depuis_factures: number | null
+  bl_depuis_activite: number | null
+  bl_flux: number | null
+  ecart_bl: number | null
+
+  factures_ok?: boolean
+  devis_ok?: boolean
+  cdc_ok?: boolean
+  bl_ok?: boolean
+  is_ok?: boolean
+}
+
 const TOLERANCE = 0.01
 
 function toNumber(value: any) {
@@ -1356,6 +1404,36 @@ function formatSigned(value: any) {
 
 function monthLabel(row: ReconciliationRow) {
   return `${String(row.mois).padStart(2, '0')}/${row.annee}`
+}
+
+
+function mapStoredReconciliationRow(row: ReconciliationStoredRow): ReconciliationRow {
+  return {
+    annee: row.annee,
+    mois: row.mois,
+
+    factures_lignes: row.factures_lignes,
+    factures_cache: row.factures_cache,
+    factures_indicateur: row.factures_indicateur,
+    factures_flux: row.factures_flux,
+    ecart_factures_lignes_vs_flux: row.ecart_factures_lignes_vs_flux,
+
+    devis_lignes: row.devis_lignes,
+    devis_cache: row.devis_cache,
+    devis_indicateur: row.devis_indicateur,
+    devis_flux: row.devis_flux,
+    ecart_devis_lignes_vs_flux: row.ecart_devis_lignes_vs_flux,
+
+    cdc_source_activite_plus_factures: row.cdc_depuis_factures,
+    cdc_indicateur_activite: row.cdc_depuis_activite,
+    cdc_flux: row.cdc_flux,
+    ecart_cdc_source_vs_flux: row.ecart_cdc,
+
+    bl_source_activite_plus_factures: row.bl_depuis_factures,
+    bl_indicateur_activite: row.bl_depuis_activite,
+    bl_flux: row.bl_flux,
+    ecart_bl_source_vs_flux: row.ecart_bl,
+  }
 }
 
 function getEcartClass(value: any) {
@@ -1454,6 +1532,7 @@ function DataReconciliationPanel() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [hasRun, setHasRun] = useState(false)
+  const [runSummary, setRunSummary] = useState<ReconciliationRunSummary | null>(null)
 
   const summary = useMemo(() => {
     const koRows = rows.filter((row) => computeRowIssues(row).length > 0)
@@ -1488,18 +1567,38 @@ function DataReconciliationPanel() {
     setLoading(true)
     setError(null)
     setHasRun(true)
+    setRunSummary(null)
 
     try {
-      const { data, error } = await supabase.rpc('get_monthly_data_reconciliation', {
+      const { data: runData, error: runError } = await supabase.rpc('run_monthly_data_reconciliation', {
         p_date_debut: startDate,
         p_date_fin: endDate,
+        p_tolerance: TOLERANCE,
       })
 
-      if (error) throw error
-      setRows((data || []) as ReconciliationRow[])
+      if (runError) throw runError
+
+      const run = Array.isArray(runData) ? (runData[0] as ReconciliationRunSummary | undefined) : null
+      if (!run?.run_id) {
+        throw new Error('Contrôle historisé exécuté, mais aucun run_id retourné.')
+      }
+
+      setRunSummary(run)
+
+      const { data: detailRows, error: detailError } = await supabase
+        .from('data_reconciliation_run_rows')
+        .select('*')
+        .eq('run_id', run.run_id)
+        .order('annee', { ascending: true })
+        .order('mois', { ascending: true })
+
+      if (detailError) throw detailError
+
+      setRows(((detailRows || []) as ReconciliationStoredRow[]).map(mapStoredReconciliationRow))
     } catch (exception: any) {
       setError(exception?.message || String(exception))
       setRows([])
+      setRunSummary(null)
     } finally {
       setLoading(false)
     }
@@ -1556,6 +1655,12 @@ function DataReconciliationPanel() {
       {error ? (
         <div className="mt-3 rounded-xl bg-red-50 p-3 text-sm font-bold text-red-700">
           Contrôle impossible : {error}
+        </div>
+      ) : null}
+
+      {runSummary ? (
+        <div className={`mt-3 rounded-xl border p-3 text-sm font-bold ${runSummary.status === 'ok' ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-red-200 bg-red-50 text-red-800'}`}>
+          Contrôle historisé #{runSummary.run_id} — statut {runSummary.status.toUpperCase()} — {runSummary.ok_months} mois OK / {runSummary.ko_months} mois KO — écart max {formatMoney(runSummary.max_abs_ecart)}.
         </div>
       ) : null}
 
