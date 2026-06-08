@@ -885,15 +885,10 @@ export default function SyntheseMultiClientsPage() {
       return sort.direction === 'asc' ? cmp : -cmp
     })
 
-    const exportRows: SummaryRow[] = [totalRow]
-    exportClientRows.forEach((row) => {
-      exportRows.push(row)
-      const tier = selectedTiers.find((t) => t.numero === row.numero)
-      if (!tier) return
-      for (let month = 1; month <= 12; month += 1) {
-        exportRows.push(buildSummaryForNumero(tier, factures, devis, objectiveMap, month))
-      }
-    })
+    // Export volontairement limité aux lignes TOTAL + clients.
+    // Le détail mois par mois n'est pas généré ici car il alourdit fortement
+    // la création du fichier pour les portefeuilles/agences volumineux.
+    const exportRows: SummaryRow[] = [totalRow, ...exportClientRows]
 
     const KEUR_FORMAT = '#,##0.0 "K€"'
     const PCT_FORMAT = '0.0%'
@@ -1057,9 +1052,6 @@ export default function SyntheseMultiClientsPage() {
       { hpt: 82 },
       ...exportRows.map((row) => ({
         hpt: row.kind === 'total' ? 20 : 18,
-        hidden: row.kind === 'month',
-        level: row.kind === 'month' ? 1 : 0,
-        collapsed: false,
       })),
     ]
     ws['!outline'] = { above: false, left: false }
