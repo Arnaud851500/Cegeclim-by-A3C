@@ -15,7 +15,7 @@ import * as XLSX from 'xlsx'
 import { supabase } from '@/lib/supabaseClient'
 
 type Flux = 'DEVIS' | 'CDC' | 'BL' | 'FACTURE'
-type Metric = 'ca_ht' | 'quantite'
+type Metric = 'ca_ht' | 'quantite' | 'quantite_pertinente'
 
 type SummaryRpcRow = {
   annee: number
@@ -35,6 +35,7 @@ type DetailRpcRow = {
   famille: string
   reference_article: string
   designation: string
+  numero_document: string
   mois: number
   type_document: Flux
   nb_lignes: number
@@ -61,24 +62,47 @@ type MatrixRow = {
   famille_macro: string
   flux: Flux
   mois: Record<number, number>
+  moisN1: Record<number, number>
+  total: number
+  totalN1: number
+}
+
+type FamilyMatrixRow = {
+  famille_macro: string
+  famille: string
+  flux: Flux
+  mois: Record<number, number>
   total: number
 }
 
-type SelectedCell = {
+type AnalysisScope = {
+  famille_macro?: string
+  flux?: Flux
+  mois?: number
+  label: string
+} | null
+
+type ReferenceScope = {
   famille_macro: string
-  flux: Flux
-  mois: number
+  famille: string
+  flux?: Flux
+  mois?: number
+  label: string
 } | null
 
 const MONTHS = ['Janv.', 'Févr.', 'Mars', 'Avr.', 'Mai', 'Juin', 'Juil.', 'Août', 'Sept.', 'Oct.', 'Nov.', 'Déc.']
 const MIN_YEAR_OPTION = 2023
 const FLUX_ORDER: Flux[] = ['DEVIS', 'CDC', 'BL', 'FACTURE']
+const PRIORITY_MACRO_ORDER = ['R/R', 'R/O', 'R_ZONE', 'ECS', 'DRV', 'PV']
+const PRIORITY_FLUX_ORDER: Flux[] = ['DEVIS', 'FACTURE']
+
 const FLUX_LABELS: Record<Flux, string> = {
   DEVIS: 'Devis',
   CDC: 'CDC',
   BL: 'BL',
   FACTURE: 'Factures',
 }
+
 const FLUX_COLORS: Record<Flux, string> = {
   DEVIS: '#C49A00',
   CDC: '#005F73',
@@ -103,6 +127,15 @@ function normalizeFlux(value: any): Flux {
   return 'DEVIS'
 }
 
+function normalizeMacro(value: any) {
+  return safeText(value, '')
+    .normalize('NFKC')
+    .trim()
+    .replace(/\s+/g, '')
+    .replace(/-/g, '_')
+    .toUpperCase()
+}
+
 function monthLabel(month: number) {
   return MONTHS[Math.max(0, Math.min(11, month - 1))] || String(month)
 }
@@ -118,8 +151,15 @@ function referenceCode(referenceOption: string) {
 }
 
 function getMetricValue(row: Pick<SummaryRpcRow | DetailRpcRow, 'ca_ht' | 'quantite' | 'quantite_pertinente'>, metric: Metric) {
-  if (metric === 'quantite') return safeNumber(row.quantite_pertinente ?? row.quantite)
+  if (metric === 'quantite') return safeNumber(row.quantite)
+  if (metric === 'quantite_pertinente') return safeNumber(row.quantite_pertinente ?? row.quantite)
   return safeNumber(row.ca_ht)
+}
+
+function metricLabel(metric: Metric) {
+  if (metric === 'ca_ht') return 'CA HT'
+  if (metric === 'quantite') return 'quantité brute'
+  return 'quantité pertinente'
 }
 
 function formatNumber(value: number) {
@@ -156,6 +196,38 @@ function downloadWorkbook(filename: string, sheets: Array<{ name: string; rows: 
     XLSX.utils.book_append_sheet(workbook, worksheet, sheet.name.slice(0, 31))
   })
   XLSX.writeFile(workbook, filename)
+}
+
+function mapSummaryRow(row: any): SummaryRpcRow {
+  return {
+    annee: safeNumber(row.annee),
+    mois: safeNumber(row.mois),
+    flux: normalizeFlux(row.flux ?? row.type_document),
+    type_document: safeText(row.type_document, normalizeFlux(row.flux ?? row.type_document)),
+    famille_macro: safeText(row.famille_macro),
+    nb_lignes: safeNumber(row.nb_lignes),
+    quantite: safeNumber(row.quantite),
+    quantite_pertinente: safeNumber(row.quantite_pertinente ?? row.qte_pertinente ?? row.quantite_pert ?? row.qte_pert ?? row.quantite),
+    ca_ht: safeNumber(row.ca_ht),
+    marge_valeur: safeNumber(row.marge_valeur),
+  }
+}
+
+function mapDetailRow(row: any): DetailRpcRow {
+  return {
+    famille_macro: safeText(row.famille_macro),
+    famille: safeText(row.famille),
+    reference_article: safeText(row.reference_article ?? row.reference ?? row.ref_article),
+    designation: safeText(row.designation ?? row.libelle_article ?? row.libelle, ''),
+    numero_document: safeText(row.numero_document ?? row.numero_piece ?? row.numero_devis ?? row.numero_facture ?? row.document ?? row.piece, ''),
+    mois: safeNumber(row.mois),
+    type_document: normalizeFlux(row.type_document ?? row.flux),
+    nb_lignes: safeNumber(row.nb_lignes),
+    quantite: safeNumber(row.quantite),
+    quantite_pertinente: safeNumber(row.quantite_pertinente ?? row.qte_pertinente ?? row.quantite_pert ?? row.qte_pert ?? row.quantite),
+    ca_ht: safeNumber(row.ca_ht),
+    marge_valeur: safeNumber(row.marge_valeur),
+  }
 }
 
 function MultiSelect({
@@ -256,7 +328,7 @@ function ReferencesFreeInput({
 
 export default function ApprovisionnementsPage() {
   const [selectedYear, setSelectedYear] = useState<number>(new Date().getFullYear())
-  const [metric, setMetric] = useState<Metric>('ca_ht')
+  const [metric, setMetric] = useState<Metric>('quantite_pertinente')
   const [includeHorsStat, setIncludeHorsStat] = useState(false)
   const [visibleFlux, setVisibleFlux] = useState<Record<Flux, boolean>>({ DEVIS: true, CDC: true, BL: true, FACTURE: true })
 
@@ -275,11 +347,13 @@ export default function ApprovisionnementsPage() {
   })
 
   const [summaryRows, setSummaryRows] = useState<SummaryRpcRow[]>([])
-  const [detailRows, setDetailRows] = useState<DetailRpcRow[]>([])
-  const [selectedCell, setSelectedCell] = useState<SelectedCell>(null)
+  const [scopeDetailRows, setScopeDetailRows] = useState<DetailRpcRow[]>([])
+  const [analysisScope, setAnalysisScope] = useState<AnalysisScope>(null)
+  const [referenceScope, setReferenceScope] = useState<ReferenceScope>(null)
+  const [chartMonth, setChartMonth] = useState<number | null>(null)
   const [loadingOptions, setLoadingOptions] = useState(false)
   const [loadingSummary, setLoadingSummary] = useState(false)
-  const [loadingDetail, setLoadingDetail] = useState(false)
+  const [loadingFamily, setLoadingFamily] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [maintenanceLoading, setMaintenanceLoading] = useState(false)
   const [maintenanceMessage, setMaintenanceMessage] = useState<string | null>(null)
@@ -298,6 +372,13 @@ export default function ApprovisionnementsPage() {
     p_familles: familles,
     p_references: selectedReferenceCodes,
   }), [selectedYear, includeHorsStat, depots, collaborateursTiers, famillesMacro, familles, selectedReferenceCodes])
+
+  function resetDownstream(keepChartMonth = false) {
+    setAnalysisScope(null)
+    setReferenceScope(null)
+    setScopeDetailRows([])
+    if (!keepChartMonth) setChartMonth(null)
+  }
 
   async function loadOptions(yearToLoad = selectedYear) {
     setLoadingOptions(true)
@@ -332,23 +413,11 @@ export default function ApprovisionnementsPage() {
   async function loadSummary() {
     setLoadingSummary(true)
     setError(null)
-    setSelectedCell(null)
-    setDetailRows([])
+    resetDownstream()
     try {
       const { data, error: rpcError } = await supabase.rpc('get_appro_flux_summary', rpcFilterPayload)
       if (rpcError) throw rpcError
-      setSummaryRows((data || []).map((row: any) => ({
-        annee: safeNumber(row.annee),
-        mois: safeNumber(row.mois),
-        flux: normalizeFlux(row.flux),
-        type_document: safeText(row.type_document, normalizeFlux(row.flux)),
-        famille_macro: safeText(row.famille_macro),
-        nb_lignes: safeNumber(row.nb_lignes),
-        quantite: safeNumber(row.quantite),
-        quantite_pertinente: safeNumber(row.quantite_pertinente ?? row.quantite),
-        ca_ht: safeNumber(row.ca_ht),
-        marge_valeur: safeNumber(row.marge_valeur),
-      })))
+      setSummaryRows(((data || []) as Record<string, any>[]).map(mapSummaryRow))
     } catch (exception: any) {
       setError(`Chargement de la synthèse impossible : ${exception?.message || exception}`)
       setSummaryRows([])
@@ -357,42 +426,88 @@ export default function ApprovisionnementsPage() {
     }
   }
 
-  async function loadDetail(cell: Exclude<SelectedCell, null>) {
-    setLoadingDetail(true)
-    setDetailRows([])
+  function detailCombinationsForScope(scope: Exclude<AnalysisScope, null>) {
+    const map = new Map<string, { mois: number; flux: Flux; famille_macro: string }>()
+
+    summaryRows.forEach((row) => {
+      if (row.annee !== selectedYear) return
+      if (scope.mois && row.mois !== scope.mois) return
+      if (scope.flux && row.flux !== scope.flux) return
+      if (!scope.flux && !visibleFlux[row.flux]) return
+      if (scope.famille_macro && row.famille_macro !== scope.famille_macro) return
+      if (!safeNumber(row.nb_lignes) && !safeNumber(row.ca_ht) && !safeNumber(row.quantite) && !safeNumber(row.quantite_pertinente)) return
+
+      const key = `${row.mois}|${row.flux}|${row.famille_macro}`
+      map.set(key, { mois: row.mois, flux: row.flux, famille_macro: row.famille_macro })
+    })
+
+    return Array.from(map.values()).sort((a, b) => {
+      if (a.mois !== b.mois) return a.mois - b.mois
+      const macro = a.famille_macro.localeCompare(b.famille_macro, 'fr', { numeric: true })
+      if (macro !== 0) return macro
+      return FLUX_ORDER.indexOf(a.flux) - FLUX_ORDER.indexOf(b.flux)
+    })
+  }
+
+  async function loadDetailForScope(scope: Exclude<AnalysisScope, null>) {
+    setLoadingFamily(true)
+    setError(null)
+    setReferenceScope(null)
+    setScopeDetailRows([])
+
     try {
-      const { data, error: rpcError } = await supabase.rpc('get_appro_flux_cell_detail', {
-        p_year: selectedYear,
-        p_mois: cell.mois,
-        p_flux: cell.flux,
-        p_famille_macro: cell.famille_macro,
-        p_include_hors_stat: includeHorsStat,
-        p_depots: depots,
-        p_collaborateurs_tiers: collaborateursTiers,
-        p_familles: familles,
-        p_references: selectedReferenceCodes,
-      })
-      if (rpcError) throw rpcError
-      setDetailRows((data || []).map((row: any) => ({
-        famille_macro: safeText(row.famille_macro),
-        famille: safeText(row.famille),
-        reference_article: safeText(row.reference_article),
-        designation: safeText(row.designation),
-        mois: safeNumber(row.mois),
-        type_document: normalizeFlux(row.type_document),
-        nb_lignes: safeNumber(row.nb_lignes),
-        quantite: safeNumber(row.quantite),
-        quantite_pertinente: safeNumber(row.quantite_pertinente ?? row.quantite),
-        ca_ht: safeNumber(row.ca_ht),
-        marge_valeur: safeNumber(row.marge_valeur),
-      })))
+      const combinations = detailCombinationsForScope(scope)
+
+      if (!combinations.length) {
+        setScopeDetailRows([])
+        return
+      }
+
+      const allRows: DetailRpcRow[] = []
+
+      for (const combo of combinations) {
+        const { data, error: rpcError } = await supabase.rpc('get_appro_flux_cell_detail', {
+          p_year: selectedYear,
+          p_mois: combo.mois,
+          p_flux: combo.flux,
+          p_famille_macro: combo.famille_macro,
+          p_include_hors_stat: includeHorsStat,
+          p_depots: depots,
+          p_collaborateurs_tiers: collaborateursTiers,
+          p_familles: familles,
+          p_references: selectedReferenceCodes,
+        })
+
+        if (rpcError) throw rpcError
+        allRows.push(...(((data || []) as Record<string, any>[]).map(mapDetailRow)))
+      }
+
+      setScopeDetailRows(allRows)
     } catch (exception: any) {
-      setError(`Chargement du détail impossible : ${exception?.message || exception}`)
+      setError(`Chargement du détail familles impossible : ${exception?.message || exception}`)
+      setScopeDetailRows([])
     } finally {
-      setLoadingDetail(false)
+      setLoadingFamily(false)
     }
   }
 
+  function handleAnalysisScope(scope: Exclude<AnalysisScope, null>) {
+    setAnalysisScope(scope)
+    setReferenceScope(null)
+    loadDetailForScope(scope)
+  }
+
+  function handleChartClick(state: any) {
+    const month = safeNumber(state?.activePayload?.[0]?.payload?.mois)
+    if (!month) return
+    setChartMonth(month)
+    handleAnalysisScope({ mois: month, label: `${monthLabel(month)} ${selectedYear} · toutes familles macro / documents sélectionnés` })
+  }
+
+  function clearChartMonth() {
+    setChartMonth(null)
+    resetDownstream(true)
+  }
 
   function formatDateForSql(date: Date) {
     const pad2 = (n: number) => String(n).padStart(2, '0')
@@ -429,7 +544,6 @@ export default function ApprovisionnementsPage() {
       if (rpcError) throw new Error(`${functionName} ${period.label} : ${rpcError.message}`)
     }
   }
-
 
   async function handleRebuildRecentMonths(monthCount: 2 | 3 = 3, blMxMode?: 'previous_month' | 'current_month') {
     if (maintenanceLoading) return
@@ -476,15 +590,17 @@ export default function ApprovisionnementsPage() {
   useEffect(() => {
     loadSummary()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [depots, collaborateursTiers, famillesMacro, familles, references, metric])
-
-  useEffect(() => {
-    if (selectedCell) loadDetail(selectedCell)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedCell])
+  }, [depots, collaborateursTiers, famillesMacro, familles, references])
 
   const chartData = useMemo<ChartDatum[]>(() => {
-    const output: ChartDatum[] = Array.from({ length: 12 }, (_, index) => ({ mois: index + 1, label: monthLabel(index + 1) }))
+    const output: ChartDatum[] = Array.from({ length: 12 }, (_, index) => {
+      const base: ChartDatum = { mois: index + 1, label: monthLabel(index + 1) }
+      FLUX_ORDER.forEach((flux) => {
+        base[`${flux}_N`] = 0
+        base[`${flux}_N1`] = 0
+      })
+      return base
+    })
 
     summaryRows.forEach((row) => {
       if (!visibleFlux[row.flux]) return
@@ -499,16 +615,89 @@ export default function ApprovisionnementsPage() {
     return output
   }, [summaryRows, selectedYear, metric, visibleFlux])
 
-  const matrixRows = useMemo<MatrixRow[]>(() => {
+  function buildMatrixRows(sourceRows: SummaryRpcRow[], sourceMetric: Metric, options?: { priorityOnly?: boolean; respectVisibleFlux?: boolean; selectedMonth?: number | null }) {
     const map = new Map<string, MatrixRow>()
+    const priorityOnly = Boolean(options?.priorityOnly)
+    const respectVisibleFlux = options?.respectVisibleFlux !== false
+    const selectedMonth = options?.selectedMonth ?? null
 
-    summaryRows.forEach((row) => {
-      if (row.annee !== selectedYear) return
-      if (!visibleFlux[row.flux]) return
+    sourceRows.forEach((row) => {
+      if (row.annee !== selectedYear && row.annee !== selectedYear - 1) return
+      if (selectedMonth && row.mois !== selectedMonth) return
+      if (respectVisibleFlux && !visibleFlux[row.flux]) return
+
+      if (priorityOnly) {
+        if (!PRIORITY_FLUX_ORDER.includes(row.flux)) return
+        if (!PRIORITY_MACRO_ORDER.includes(normalizeMacro(row.famille_macro))) return
+      }
+
       const key = `${row.famille_macro}|${row.flux}`
       if (!map.has(key)) {
-        map.set(key, { famille_macro: row.famille_macro, flux: row.flux, mois: {}, total: 0 })
+        map.set(key, {
+          famille_macro: row.famille_macro,
+          flux: row.flux,
+          mois: {},
+          moisN1: {},
+          total: 0,
+          totalN1: 0,
+        })
       }
+
+      const target = map.get(key)!
+      const value = getMetricValue(row, sourceMetric)
+
+      if (row.annee === selectedYear) {
+        target.mois[row.mois] = safeNumber(target.mois[row.mois]) + value
+        target.total += value
+      } else {
+        target.moisN1[row.mois] = safeNumber(target.moisN1[row.mois]) + value
+        target.totalN1 += value
+      }
+    })
+
+    return Array.from(map.values()).sort((a, b) => {
+      if (priorityOnly) {
+        const macro = PRIORITY_MACRO_ORDER.indexOf(normalizeMacro(a.famille_macro)) - PRIORITY_MACRO_ORDER.indexOf(normalizeMacro(b.famille_macro))
+        if (macro !== 0) return macro
+        return PRIORITY_FLUX_ORDER.indexOf(a.flux) - PRIORITY_FLUX_ORDER.indexOf(b.flux)
+      }
+      const macro = a.famille_macro.localeCompare(b.famille_macro, 'fr', { numeric: true })
+      if (macro !== 0) return macro
+      return FLUX_ORDER.indexOf(a.flux) - FLUX_ORDER.indexOf(b.flux)
+    })
+  }
+
+  const priorityRows = useMemo<MatrixRow[]>(
+    () => buildMatrixRows(summaryRows, 'quantite_pertinente', { priorityOnly: true, respectVisibleFlux: false }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [summaryRows, selectedYear]
+  )
+
+  const matrixRows = useMemo<MatrixRow[]>(
+    () => buildMatrixRows(summaryRows, metric, { selectedMonth: chartMonth }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [summaryRows, selectedYear, metric, visibleFlux, chartMonth]
+  )
+
+  const familyMatrixRows = useMemo<FamilyMatrixRow[]>(() => {
+    const map = new Map<string, FamilyMatrixRow>()
+
+    scopeDetailRows.forEach((row) => {
+      if (analysisScope?.mois && row.mois !== analysisScope.mois) return
+      if (analysisScope?.flux && row.type_document !== analysisScope.flux) return
+      if (analysisScope?.famille_macro && row.famille_macro !== analysisScope.famille_macro) return
+
+      const key = `${row.famille_macro}|${row.famille}|${row.type_document}`
+      if (!map.has(key)) {
+        map.set(key, {
+          famille_macro: row.famille_macro,
+          famille: row.famille,
+          flux: row.type_document,
+          mois: {},
+          total: 0,
+        })
+      }
+
       const target = map.get(key)!
       const value = getMetricValue(row, metric)
       target.mois[row.mois] = safeNumber(target.mois[row.mois]) + value
@@ -518,19 +707,109 @@ export default function ApprovisionnementsPage() {
     return Array.from(map.values()).sort((a, b) => {
       const macro = a.famille_macro.localeCompare(b.famille_macro, 'fr', { numeric: true })
       if (macro !== 0) return macro
+      const family = a.famille.localeCompare(b.famille, 'fr', { numeric: true })
+      if (family !== 0) return family
       return FLUX_ORDER.indexOf(a.flux) - FLUX_ORDER.indexOf(b.flux)
     })
-  }, [summaryRows, selectedYear, metric, visibleFlux])
+  }, [scopeDetailRows, metric, analysisScope])
+
+  const referenceRows = useMemo(() => {
+    if (!referenceScope) return []
+    return scopeDetailRows.filter((row) => {
+      if (row.famille_macro !== referenceScope.famille_macro) return false
+      if (row.famille !== referenceScope.famille) return false
+      if (referenceScope.flux && row.type_document !== referenceScope.flux) return false
+      if (referenceScope.mois && row.mois !== referenceScope.mois) return false
+      return true
+    })
+  }, [scopeDetailRows, referenceScope])
 
   const totalAggregatedRows = useMemo(
-    () => summaryRows.reduce((sum, row) => sum + safeNumber(row.nb_lignes), 0),
+    () => summaryRows.reduce((sum: number, row: SummaryRpcRow) => sum + safeNumber(row.nb_lignes), 0),
     [summaryRows]
   )
+
+  function valueWithN1(value: number, valueN1: number, valueMetric: Metric, selected = false) {
+    const main = safeNumber(value)
+    const previous = safeNumber(valueN1)
+
+    if (!main && !previous) return '—'
+
+    return (
+      <span className={`flex flex-col items-end leading-tight ${!main ? 'text-slate-400' : ''}`}>
+        <span>{main ? formatMetric(main, valueMetric) : '—'}</span>
+        {previous ? (
+          <span className={`text-[11px] font-bold ${selected ? 'text-blue-100' : 'text-slate-500'}`}>
+            ({formatMetric(previous, valueMetric)})
+          </span>
+        ) : null}
+      </span>
+    )
+  }
+
+  function clickableCellClass(selected: boolean, hasValue: boolean) {
+    if (selected) return 'bg-blue-600 text-white'
+    if (hasValue) return 'hover:bg-blue-50'
+    return 'text-slate-300 hover:bg-slate-50'
+  }
+
+  function makeScopeFromMatrix(row: MatrixRow, patch: Partial<Exclude<AnalysisScope, null>>, label: string): Exclude<AnalysisScope, null> {
+    return {
+      mois: chartMonth ?? undefined,
+      famille_macro: row.famille_macro,
+      flux: row.flux,
+      ...patch,
+      label,
+    }
+  }
+
+  function makeReferenceScopeFromFamily(row: FamilyMatrixRow, patch: Partial<Exclude<ReferenceScope, null>>, label: string): Exclude<ReferenceScope, null> {
+    return {
+      famille_macro: row.famille_macro,
+      famille: row.famille,
+      flux: row.flux,
+      ...patch,
+      label,
+    }
+  }
+
+  function makePriorityExportRows() {
+    return priorityRows.map((row) => {
+      const exported: Record<string, any> = {
+        'Famille macro': row.famille_macro,
+        'Type document': FLUX_LABELS[row.flux],
+      }
+      for (let month = 1; month <= 12; month += 1) {
+        exported[`${monthLabel(month)} ${selectedYear}`] = safeNumber(row.mois[month])
+        exported[`${monthLabel(month)} ${selectedYear - 1}`] = safeNumber(row.moisN1[month])
+      }
+      exported[`Total ${selectedYear}`] = row.total
+      exported[`Total ${selectedYear - 1}`] = row.totalN1
+      return exported
+    })
+  }
 
   function makeSummaryExportRows() {
     return matrixRows.map((row) => {
       const exported: Record<string, any> = {
         'Famille macro': row.famille_macro,
+        'Type document': FLUX_LABELS[row.flux],
+      }
+      for (let month = 1; month <= 12; month += 1) {
+        exported[`${monthLabel(month)} ${selectedYear}`] = safeNumber(row.mois[month])
+        exported[`${monthLabel(month)} ${selectedYear - 1}`] = safeNumber(row.moisN1[month])
+      }
+      exported[`Total ${selectedYear}`] = row.total
+      exported[`Total ${selectedYear - 1}`] = row.totalN1
+      return exported
+    })
+  }
+
+  function makeFamilyExportRows() {
+    return familyMatrixRows.map((row) => {
+      const exported: Record<string, any> = {
+        'Famille macro': row.famille_macro,
+        Famille: row.famille,
         'Type document': FLUX_LABELS[row.flux],
       }
       for (let month = 1; month <= 12; month += 1) exported[monthLabel(month)] = safeNumber(row.mois[month])
@@ -545,6 +824,7 @@ export default function ApprovisionnementsPage() {
       Famille: row.famille,
       Référence: row.reference_article,
       Désignation: row.designation,
+      'N° document': row.numero_document,
       Mois: monthLabel(row.mois),
       'Type document': FLUX_LABELS[row.type_document],
       'Nb lignes': row.nb_lignes,
@@ -556,8 +836,12 @@ export default function ApprovisionnementsPage() {
   }
 
   function exportWorkbook(includeDetail: boolean) {
-    const sheets = [{ name: `Synthèse ${selectedYear}`, rows: makeSummaryExportRows() }]
-    if (includeDetail) sheets.push({ name: 'Détail cellule', rows: makeDetailExportRows(detailRows) })
+    const sheets = [
+      { name: `Prioritaires ${selectedYear}`, rows: makePriorityExportRows() },
+      { name: `Macro ${selectedYear}`, rows: makeSummaryExportRows() },
+    ]
+    if (familyMatrixRows.length) sheets.push({ name: 'Familles', rows: makeFamilyExportRows() })
+    if (includeDetail) sheets.push({ name: 'Références', rows: makeDetailExportRows(referenceRows.length ? referenceRows : scopeDetailRows) })
     downloadWorkbook(`approvisionnements_${selectedYear}_${includeDetail ? 'avec_detail' : 'synthese'}.xlsx`, sheets)
   }
 
@@ -623,28 +907,29 @@ export default function ApprovisionnementsPage() {
             value={selectedYear}
             onChange={(event) => {
               setSelectedYear(Number(event.target.value))
-              setSelectedCell(null)
+              resetDownstream()
             }}
             className="h-11 rounded-xl border border-slate-300 bg-white px-3 text-sm font-black"
           >
             {defaultYearOptions().map((year) => <option key={year} value={year}>Année : {year}</option>)}
           </select>
-          <MultiSelect label="Dépôts" values={available.depots} selected={depots} onChange={(values) => { setDepots(values); setSelectedCell(null) }} />
-          <MultiSelect label="Collaborateur client" values={available.collaborateursTiers} selected={collaborateursTiers} onChange={(values) => { setCollaborateursTiers(values); setSelectedCell(null) }} />
-          <MultiSelect label="Familles macro" values={available.famillesMacro} selected={famillesMacro} onChange={(values) => { setFamillesMacro(values); setSelectedCell(null) }} />
-          <MultiSelect label="Familles" values={available.familles} selected={familles} onChange={(values) => { setFamilles(values); setSelectedCell(null) }} />
-          <ReferencesFreeInput selected={references} onChange={(values) => { setReferences(values); setSelectedCell(null) }} />
+          <MultiSelect label="Dépôts" values={available.depots} selected={depots} onChange={(values) => { setDepots(values); resetDownstream() }} />
+          <MultiSelect label="Collaborateur client" values={available.collaborateursTiers} selected={collaborateursTiers} onChange={(values) => { setCollaborateursTiers(values); resetDownstream() }} />
+          <MultiSelect label="Familles macro" values={available.famillesMacro} selected={famillesMacro} onChange={(values) => { setFamillesMacro(values); resetDownstream() }} />
+          <MultiSelect label="Familles" values={available.familles} selected={familles} onChange={(values) => { setFamilles(values); resetDownstream() }} />
+          <ReferencesFreeInput selected={references} onChange={(values) => { setReferences(values); resetDownstream() }} />
           <select
             value={metric}
             onChange={(event) => setMetric(event.target.value as Metric)}
             className="h-11 rounded-xl border border-slate-300 bg-white px-3 text-sm font-black"
           >
+            <option value="quantite_pertinente">Quantité pertinente</option>
             <option value="ca_ht">CA HT</option>
-            <option value="quantite">Quantité pertinente</option>
+            <option value="quantite">Quantité brute</option>
           </select>
         </div>
         <label className="mt-3 flex items-center gap-2 text-sm font-bold text-slate-600">
-          <input type="checkbox" checked={includeHorsStat} onChange={(event) => { setIncludeHorsStat(event.target.checked); setSelectedCell(null) }} />
+          <input type="checkbox" checked={includeHorsStat} onChange={(event) => { setIncludeHorsStat(event.target.checked); resetDownstream() }} />
           Inclure les articles hors statistique
         </label>
       </section>
@@ -653,7 +938,9 @@ export default function ApprovisionnementsPage() {
         <div className="mb-3 flex items-start justify-between gap-4">
           <div>
             <h2 className="text-xl font-black">Courbes Devis → CDC → BL → Factures</h2>
-            <p className="text-xs font-bold uppercase text-slate-500">{selectedYear} en trait plein · {selectedYear - 1} en pointillé</p>
+            <p className="text-xs font-bold uppercase text-slate-500">
+              {selectedYear} en trait plein · {selectedYear - 1} en pointillé · métrique par défaut : quantité pertinente · clique sur un mois du graphe pour filtrer l’analyse.
+            </p>
           </div>
           <div className="text-right text-xs font-black uppercase text-slate-500">
             {formatNumber(totalAggregatedRows)} lignes sources agrégées
@@ -661,23 +948,35 @@ export default function ApprovisionnementsPage() {
           </div>
         </div>
 
-        <div className="mb-4 flex flex-wrap gap-3">
+        <div className="mb-4 flex flex-wrap items-center gap-3">
           {FLUX_ORDER.map((flux) => (
             <label key={flux} className="flex cursor-pointer items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-black">
               <input
                 type="checkbox"
                 checked={visibleFlux[flux]}
-                onChange={() => setVisibleFlux((current) => ({ ...current, [flux]: !current[flux] }))}
+                onChange={() => {
+                  setVisibleFlux((current) => ({ ...current, [flux]: !current[flux] }))
+                  resetDownstream(true)
+                }}
               />
               <span className="inline-block h-3 w-3 rounded-full" style={{ backgroundColor: FLUX_COLORS[flux] }} />
               {FLUX_LABELS[flux]}
             </label>
           ))}
+          {chartMonth && (
+            <button
+              type="button"
+              onClick={clearChartMonth}
+              className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-black text-blue-700 hover:bg-blue-100"
+            >
+              Mois sélectionné : {monthLabel(chartMonth)} · réinitialiser
+            </button>
+          )}
         </div>
 
         <div className="h-[430px] w-full">
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={chartData} margin={{ top: 20, right: 20, left: 10, bottom: 20 }}>
+            <LineChart data={chartData} margin={{ top: 20, right: 20, left: 10, bottom: 20 }} onClick={handleChartClick}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis dataKey="label" />
               <YAxis tickFormatter={(value) => yAxisFormatter(Number(value), metric)} />
@@ -716,8 +1015,105 @@ export default function ApprovisionnementsPage() {
       <section className="mb-6 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
         <div className="mb-3 flex items-start justify-between gap-4">
           <div>
-            <h2 className="text-xl font-black">Synthèse par famille macro / type de document</h2>
-            <p className="text-xs font-bold uppercase text-slate-500">Lecture en {metric === 'ca_ht' ? 'CA HT' : 'quantité pertinente'} · clic sur une cellule mensuelle pour afficher le détail</p>
+            <h2 className="text-xl font-black">Familles prioritaires · Devis puis Factures</h2>
+            <p className="text-xs font-bold uppercase text-slate-500">
+              R/R, R/O, R_ZONE, ECS, DRV, PV · uniquement les quantités pertinentes · valeur {selectedYear} avec {selectedYear - 1} entre parenthèses.
+            </p>
+          </div>
+        </div>
+
+        <div className="overflow-auto rounded-xl border border-slate-200">
+          <table className="min-w-full text-sm">
+            <thead className="bg-slate-900 text-white">
+              <tr>
+                <th className="px-3 py-2 text-left">Famille macro</th>
+                <th className="px-3 py-2 text-left">Type document</th>
+                {MONTHS.map((month, index) => (
+                  <th key={month} className="px-3 py-2 text-right">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setChartMonth(index + 1)
+                        handleAnalysisScope({ mois: index + 1, label: `${month} ${selectedYear} · toutes familles macro / documents sélectionnés` })
+                      }}
+                      className="rounded-md px-2 py-1 text-right font-black hover:bg-slate-700"
+                    >
+                      {month}
+                    </button>
+                  </th>
+                ))}
+                <th className="px-3 py-2 text-right">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {priorityRows.map((row) => (
+                <tr key={`priority-${row.famille_macro}-${row.flux}`} className="border-b border-slate-100 odd:bg-slate-50">
+                  <td className="px-3 py-2 font-bold">
+                    <button
+                      type="button"
+                      onClick={() => handleAnalysisScope({ famille_macro: row.famille_macro, label: `${row.famille_macro} · tous documents / tous mois` })}
+                      className="rounded-lg px-2 py-1 text-left font-black hover:bg-blue-50"
+                    >
+                      {row.famille_macro}
+                    </button>
+                  </td>
+                  <td className="px-3 py-2 font-bold">
+                    <button
+                      type="button"
+                      onClick={() => handleAnalysisScope(makeScopeFromMatrix(row, { mois: undefined }, `${row.famille_macro} · ${FLUX_LABELS[row.flux]} · tous mois`))}
+                      className="rounded-lg px-2 py-1 text-left font-black hover:bg-blue-50"
+                      style={{ color: FLUX_COLORS[row.flux] }}
+                    >
+                      {FLUX_LABELS[row.flux]}
+                    </button>
+                  </td>
+                  {Array.from({ length: 12 }, (_, index) => index + 1).map((month) => {
+                    const value = safeNumber(row.mois[month])
+                    const valueN1 = safeNumber(row.moisN1[month])
+                    const hasValue = Boolean(value || valueN1)
+                    const selected = analysisScope?.famille_macro === row.famille_macro && analysisScope?.flux === row.flux && analysisScope?.mois === month
+                    return (
+                      <td key={month} className="px-2 py-1 text-right">
+                        <button
+                          type="button"
+                          disabled={!hasValue}
+                          onClick={() => handleAnalysisScope(makeScopeFromMatrix(row, { mois: month }, `${row.famille_macro} · ${FLUX_LABELS[row.flux]} · ${monthLabel(month)}`))}
+                          className={`w-full rounded-lg px-2 py-1 text-right font-black ${clickableCellClass(selected, hasValue)}`}
+                        >
+                          {valueWithN1(value, valueN1, 'quantite_pertinente', selected)}
+                        </button>
+                      </td>
+                    )
+                  })}
+                  <td className="px-3 py-2 text-right font-black">
+                    <button
+                      type="button"
+                      disabled={!row.total && !row.totalN1}
+                      onClick={() => handleAnalysisScope(makeScopeFromMatrix(row, { mois: undefined }, `${row.famille_macro} · ${FLUX_LABELS[row.flux]} · total annuel`))}
+                      className="w-full rounded-lg px-2 py-1 text-right font-black hover:bg-blue-50"
+                    >
+                      {valueWithN1(row.total, row.totalN1, 'quantite_pertinente')}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {!priorityRows.length && (
+                <tr>
+                  <td colSpan={15} className="px-3 py-10 text-center text-sm font-bold text-slate-500">Aucune donnée prioritaire avec les filtres sélectionnés.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="mb-6 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+        <div className="mb-3 flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-xl font-black">Analyse macro familles / documents sélectionnés</h2>
+            <p className="text-xs font-bold uppercase text-slate-500">
+              Lecture en {metricLabel(metric)} · documents cochés dans la légende · {chartMonth ? `filtré sur ${monthLabel(chartMonth)}` : 'tous les mois'} · valeur {selectedYear} avec {selectedYear - 1} entre parenthèses.
+            </p>
           </div>
           <div className="flex gap-2">
             <button type="button" onClick={() => exportWorkbook(false)} className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-black hover:bg-slate-50">Exporter synthèse</button>
@@ -731,32 +1127,73 @@ export default function ApprovisionnementsPage() {
               <tr>
                 <th className="px-3 py-2 text-left">Famille macro</th>
                 <th className="px-3 py-2 text-left">Type document</th>
-                {MONTHS.map((month) => <th key={month} className="px-3 py-2 text-right">{month}</th>)}
+                {MONTHS.map((month, index) => (
+                  <th key={month} className="px-3 py-2 text-right">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setChartMonth(index + 1)
+                        handleAnalysisScope({ mois: index + 1, label: `${month} ${selectedYear} · toutes familles macro / documents sélectionnés` })
+                      }}
+                      className="rounded-md px-2 py-1 text-right font-black hover:bg-slate-700"
+                    >
+                      {month}
+                    </button>
+                  </th>
+                ))}
                 <th className="px-3 py-2 text-right">Total</th>
               </tr>
             </thead>
             <tbody>
               {matrixRows.map((row) => (
                 <tr key={`${row.famille_macro}-${row.flux}`} className="border-b border-slate-100 odd:bg-slate-50">
-                  <td className="px-3 py-2 font-bold">{row.famille_macro}</td>
-                  <td className="px-3 py-2 font-bold" style={{ color: FLUX_COLORS[row.flux] }}>{FLUX_LABELS[row.flux]}</td>
+                  <td className="px-3 py-2 font-bold">
+                    <button
+                      type="button"
+                      onClick={() => handleAnalysisScope({ famille_macro: row.famille_macro, mois: chartMonth ?? undefined, label: `${row.famille_macro} · tous documents${chartMonth ? ` · ${monthLabel(chartMonth)}` : ''}` })}
+                      className="rounded-lg px-2 py-1 text-left font-black hover:bg-blue-50"
+                    >
+                      {row.famille_macro}
+                    </button>
+                  </td>
+                  <td className="px-3 py-2 font-bold">
+                    <button
+                      type="button"
+                      onClick={() => handleAnalysisScope(makeScopeFromMatrix(row, {}, `${row.famille_macro} · ${FLUX_LABELS[row.flux]}${chartMonth ? ` · ${monthLabel(chartMonth)}` : ' · tous mois'}`))}
+                      className="rounded-lg px-2 py-1 text-left font-black hover:bg-blue-50"
+                      style={{ color: FLUX_COLORS[row.flux] }}
+                    >
+                      {FLUX_LABELS[row.flux]}
+                    </button>
+                  </td>
                   {Array.from({ length: 12 }, (_, index) => index + 1).map((month) => {
                     const value = safeNumber(row.mois[month])
-                    const selected = selectedCell?.famille_macro === row.famille_macro && selectedCell?.flux === row.flux && selectedCell?.mois === month
+                    const valueN1 = safeNumber(row.moisN1[month])
+                    const hasValue = Boolean(value || valueN1)
+                    const selected = analysisScope?.famille_macro === row.famille_macro && analysisScope?.flux === row.flux && analysisScope?.mois === month
                     return (
                       <td key={month} className="px-2 py-1 text-right">
                         <button
                           type="button"
-                          disabled={!value}
-                          onClick={() => setSelectedCell({ famille_macro: row.famille_macro, flux: row.flux, mois: month })}
-                          className={`w-full rounded-lg px-2 py-1 text-right font-black ${selected ? 'bg-blue-600 text-white' : value ? 'hover:bg-blue-50' : 'text-slate-300'}`}
+                          disabled={!hasValue}
+                          onClick={() => handleAnalysisScope(makeScopeFromMatrix(row, { mois: month }, `${row.famille_macro} · ${FLUX_LABELS[row.flux]} · ${monthLabel(month)}`))}
+                          className={`w-full rounded-lg px-2 py-1 text-right font-black ${clickableCellClass(selected, hasValue)}`}
                         >
-                          {value ? formatMetric(value, metric) : '—'}
+                          {valueWithN1(value, valueN1, metric, selected)}
                         </button>
                       </td>
                     )
                   })}
-                  <td className="px-3 py-2 text-right font-black">{formatMetric(row.total, metric)}</td>
+                  <td className="px-3 py-2 text-right font-black">
+                    <button
+                      type="button"
+                      disabled={!row.total && !row.totalN1}
+                      onClick={() => handleAnalysisScope(makeScopeFromMatrix(row, {}, `${row.famille_macro} · ${FLUX_LABELS[row.flux]} · ${chartMonth ? monthLabel(chartMonth) : 'total annuel'}`))}
+                      className="w-full rounded-lg px-2 py-1 text-right font-black hover:bg-blue-50"
+                    >
+                      {valueWithN1(row.total, row.totalN1, metric)}
+                    </button>
+                  </td>
                 </tr>
               ))}
               {!matrixRows.length && (
@@ -769,30 +1206,127 @@ export default function ApprovisionnementsPage() {
         </div>
       </section>
 
-      <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-        <div className="mb-3 flex items-start justify-between gap-4">
-          <div>
-            <h2 className="text-xl font-black">Détail de la cellule sélectionnée</h2>
-            <p className="text-xs font-bold uppercase text-slate-500">
-              {selectedCell
-                ? `${selectedCell.famille_macro} · ${FLUX_LABELS[selectedCell.flux]} · ${monthLabel(selectedCell.mois)} ${selectedYear}`
-                : 'Clique sur une cellule mensuelle du tableau de synthèse.'}
-            </p>
-          </div>
-          {selectedCell && (
+      {analysisScope && (
+        <section className="mb-6 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+          <div className="mb-3 flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-xl font-black">Détail familles de la sélection</h2>
+              <p className="text-xs font-bold uppercase text-slate-500">
+                {analysisScope.label} · lecture en {metricLabel(metric)} · clique sur une famille, un type document, un mois ou un total pour afficher les références.
+              </p>
+            </div>
             <button
               type="button"
-              onClick={() => downloadWorkbook(`approvisionnements_detail_${selectedYear}.xlsx`, [{ name: 'Détail cellule', rows: makeDetailExportRows(detailRows) }])}
+              onClick={() => downloadWorkbook(`approvisionnements_familles_${selectedYear}.xlsx`, [{ name: 'Familles', rows: makeFamilyExportRows() }])}
               className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-black hover:bg-slate-50"
             >
-              Exporter détail
+              Exporter familles
             </button>
+          </div>
+
+          {loadingFamily && <div className="rounded-xl bg-slate-50 p-4 text-sm font-bold text-slate-500">Chargement des familles…</div>}
+
+          {!loadingFamily && (
+            <div className="overflow-auto rounded-xl border border-slate-200">
+              <table className="min-w-full text-sm">
+                <thead className="bg-slate-900 text-white">
+                  <tr>
+                    <th className="px-3 py-2 text-left">Famille macro</th>
+                    <th className="px-3 py-2 text-left">Famille</th>
+                    <th className="px-3 py-2 text-left">Type document</th>
+                    {MONTHS.map((month, index) => (
+                      <th key={month} className="px-3 py-2 text-right">
+                        <button
+                          type="button"
+                          onClick={() => setReferenceScope(null)}
+                          className={`rounded-md px-2 py-1 text-right font-black ${analysisScope?.mois === index + 1 ? 'bg-blue-700 text-white' : 'hover:bg-slate-700'}`}
+                        >
+                          {month}
+                        </button>
+                      </th>
+                    ))}
+                    <th className="px-3 py-2 text-right">Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {familyMatrixRows.map((row) => (
+                    <tr key={`${row.famille_macro}-${row.famille}-${row.flux}`} className="border-b border-slate-100 odd:bg-slate-50">
+                      <td className="px-3 py-2 font-bold">{row.famille_macro}</td>
+                      <td className="px-3 py-2 font-bold">
+                        <button
+                          type="button"
+                          onClick={() => setReferenceScope(makeReferenceScopeFromFamily(row, { flux: undefined, mois: analysisScope?.mois }, `${row.famille_macro} · ${row.famille} · tous documents`))}
+                          className="rounded-lg px-2 py-1 text-left font-black hover:bg-blue-50"
+                        >
+                          {row.famille}
+                        </button>
+                      </td>
+                      <td className="px-3 py-2 font-bold">
+                        <button
+                          type="button"
+                          onClick={() => setReferenceScope(makeReferenceScopeFromFamily(row, { mois: analysisScope?.mois }, `${row.famille_macro} · ${row.famille} · ${FLUX_LABELS[row.flux]}`))}
+                          className="rounded-lg px-2 py-1 text-left font-black hover:bg-blue-50"
+                          style={{ color: FLUX_COLORS[row.flux] }}
+                        >
+                          {FLUX_LABELS[row.flux]}
+                        </button>
+                      </td>
+                      {Array.from({ length: 12 }, (_, index) => index + 1).map((month) => {
+                        const value = safeNumber(row.mois[month])
+                        const selected = referenceScope?.famille_macro === row.famille_macro && referenceScope?.famille === row.famille && referenceScope?.flux === row.flux && referenceScope?.mois === month
+                        return (
+                          <td key={month} className="px-2 py-1 text-right">
+                            <button
+                              type="button"
+                              disabled={!value}
+                              onClick={() => setReferenceScope(makeReferenceScopeFromFamily(row, { mois: month }, `${row.famille_macro} · ${row.famille} · ${FLUX_LABELS[row.flux]} · ${monthLabel(month)}`))}
+                              className={`w-full rounded-lg px-2 py-1 text-right font-black ${clickableCellClass(selected, Boolean(value))}`}
+                            >
+                              {value ? formatMetric(value, metric) : '—'}
+                            </button>
+                          </td>
+                        )
+                      })}
+                      <td className="px-3 py-2 text-right font-black">
+                        <button
+                          type="button"
+                          disabled={!row.total}
+                          onClick={() => setReferenceScope(makeReferenceScopeFromFamily(row, { mois: analysisScope?.mois }, `${row.famille_macro} · ${row.famille} · ${FLUX_LABELS[row.flux]} · total`))}
+                          className="w-full rounded-lg px-2 py-1 text-right font-black hover:bg-blue-50"
+                        >
+                          {row.total ? formatMetric(row.total, metric) : '—'}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                  {!familyMatrixRows.length && (
+                    <tr>
+                      <td colSpan={16} className="px-3 py-10 text-center text-sm font-bold text-slate-500">Aucune famille pour cette sélection.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           )}
-        </div>
+        </section>
+      )}
 
-        {loadingDetail && <div className="rounded-xl bg-slate-50 p-4 text-sm font-bold text-slate-500">Chargement du détail…</div>}
+      {referenceScope && (
+        <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+          <div className="mb-3 flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-xl font-black">Détail références / documents</h2>
+              <p className="text-xs font-bold uppercase text-slate-500">{referenceScope.label} · année {selectedYear}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => downloadWorkbook(`approvisionnements_references_${selectedYear}.xlsx`, [{ name: 'Références', rows: makeDetailExportRows(referenceRows) }])}
+              className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-black hover:bg-slate-50"
+            >
+              Exporter références
+            </button>
+          </div>
 
-        {selectedCell && !loadingDetail && (
           <div className="overflow-auto rounded-xl border border-slate-200">
             <table className="min-w-full text-sm">
               <thead className="bg-slate-900 text-white">
@@ -801,37 +1335,41 @@ export default function ApprovisionnementsPage() {
                   <th className="px-3 py-2 text-left">Famille</th>
                   <th className="px-3 py-2 text-left">Référence</th>
                   <th className="px-3 py-2 text-left">Désignation</th>
+                  <th className="px-3 py-2 text-left">N° document</th>
                   <th className="px-3 py-2 text-left">Mois</th>
                   <th className="px-3 py-2 text-left">Type document</th>
                   <th className="px-3 py-2 text-right">Nb lignes</th>
+                  <th className="px-3 py-2 text-right">Qté brute</th>
                   <th className="px-3 py-2 text-right">Qté pertinente</th>
                   <th className="px-3 py-2 text-right">CA HT</th>
                 </tr>
               </thead>
               <tbody>
-                {detailRows.map((row) => (
-                  <tr key={`${row.famille}-${row.reference_article}-${row.type_document}-${row.mois}`} className="border-b border-slate-100 odd:bg-slate-50">
+                {referenceRows.map((row, index) => (
+                  <tr key={`${row.famille}-${row.reference_article}-${row.type_document}-${row.mois}-${row.numero_document}-${index}`} className="border-b border-slate-100 odd:bg-slate-50">
                     <td className="px-3 py-2 font-bold">{row.famille_macro}</td>
                     <td className="px-3 py-2">{row.famille}</td>
                     <td className="px-3 py-2 font-mono text-xs">{row.reference_article}</td>
-                    <td className="px-3 py-2">{row.designation}</td>
+                    <td className="px-3 py-2">{row.designation || '—'}</td>
+                    <td className="px-3 py-2 font-mono text-xs">{row.numero_document || '—'}</td>
                     <td className="px-3 py-2">{monthLabel(row.mois)}</td>
                     <td className="px-3 py-2 font-bold" style={{ color: FLUX_COLORS[row.type_document] }}>{FLUX_LABELS[row.type_document]}</td>
                     <td className="px-3 py-2 text-right font-bold">{formatNumber(row.nb_lignes)}</td>
+                    <td className="px-3 py-2 text-right font-bold">{formatNumber(row.quantite)}</td>
                     <td className="px-3 py-2 text-right font-bold">{formatNumber(row.quantite_pertinente)}</td>
                     <td className="px-3 py-2 text-right font-bold">{formatMetric(row.ca_ht, 'ca_ht')}</td>
                   </tr>
                 ))}
-                {!detailRows.length && (
+                {!referenceRows.length && (
                   <tr>
-                    <td colSpan={9} className="px-3 py-8 text-center text-sm font-bold text-slate-500">Aucun détail pour cette cellule.</td>
+                    <td colSpan={11} className="px-3 py-8 text-center text-sm font-bold text-slate-500">Aucun détail référence pour cette sélection.</td>
                   </tr>
                 )}
               </tbody>
             </table>
           </div>
-        )}
-      </section>
+        </section>
+      )}
     </main>
   )
 }

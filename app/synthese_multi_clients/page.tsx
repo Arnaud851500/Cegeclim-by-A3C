@@ -531,8 +531,6 @@ function buildColumns(showFamilies: boolean): ColumnDef[] {
   }
 
   cols.push(
-    { key: 'objectifCa', label: `OBJECTIF ${N}`, group: 'CA / Objectifs', width: 104, className: 'editableNumber', value: (r) => r.objectifCa, editable: { domaine: 'Objectif', rubrique: 'CA', type: 'montant' }, format: 'keur' },
-    { key: 'potentiel', label: 'POTENTIEL', group: 'CA / Objectifs', width: 98, className: 'editableNumber', value: (r) => r.potentiel, editable: { domaine: 'Objectif', rubrique: 'POTENTIEL', type: 'montant' }, format: 'keur' },
     { key: 'devisYtdN', label: `DEVIS ${String(CLOSED_MONTH).padStart(2, '0')}-${N}`, group: 'CA / Objectifs', width: 108, className: 'metric devis redLabel', value: (r) => r.devisYtdN, format: 'keurBlank' },
   )
   if (showFamilies) {
@@ -548,6 +546,8 @@ function buildColumns(showFamilies: boolean): ColumnDef[] {
   }
 
   cols.push(
+    { key: 'objectifCa', label: `OBJECTIF ${N}`, group: 'CA / Objectifs', width: 104, className: 'editableNumber', value: (r) => r.objectifCa, editable: { domaine: 'Objectif', rubrique: 'CA', type: 'montant' }, format: 'keur' },
+    { key: 'potentiel', label: 'POTENTIEL', group: 'CA / Objectifs', width: 98, className: 'editableNumber', value: (r) => r.potentiel, editable: { domaine: 'Objectif', rubrique: 'POTENTIEL', type: 'montant' }, format: 'keur' },
     { key: 'contratBfa', label: 'Contrat BFA', group: 'Objectif', width: 96, className: 'editableNumber', value: (r) => r.contratBfa, editable: { domaine: 'Objectif', rubrique: 'Contrat\nBFA', type: 'montant' }, format: 'keur' },
     { key: 'caVsN1', label: `CA Réalisé / ${N - 1}`, group: 'Comparatif', width: 86, rotate: true, value: (r) => r.caVsN1, format: 'pct' },
     { key: 'margeVsN1', label: `Écart marge / ${N - 1}`, group: 'Comparatif', width: 86, rotate: true, value: (r) => r.margeVsN1, format: 'points' },
