@@ -271,7 +271,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
       label: 'Tableaux de bord',
       items: [
         { label: 'Tableaux de bord', path: '/atelier-analyse', accessKey: 'can_autorisation' },
-        { label: 'Suivi multi clients', path: '/synthese_multi_clients', accessKey: 'can_autorisation' },
         { label: 'Indicateurs', path: '/Indicateurs', accessKey: 'can_dashboard' }
         ],
     },
@@ -416,38 +415,200 @@ function AppShell({ children }: { children: React.ReactNode }) {
     router.replace('/login')
   }
 
-  function normalizeStatusLevel(value: any): StatusLevel {
-    const normalized = String(value || '').trim().toLowerCase()
-    if (normalized === 'red' || normalized === 'rouge') return 'red'
-    if (normalized === 'orange') return 'orange'
-    return 'green'
+  async function getUserAccessProfile(): Promise<UserAccessProfile | null> {
+    if (!email) return null
+
+    const { data, error } = await supabase
+      .from('user_page_access')
+      .select('*')
+      .eq('email', email)
+      .maybeSingle()
+
+    if (error) {
+      console.error('user_page_access status indicators', error)
+      return null
+    }
+
+    return (data || { email }) as UserAccessProfile
   }
 
-  function applyStatusRows(rows: Record<string, any>[]) {
-    const byKey = new Map<string, Record<string, any>>()
+  async function refreshTodoSignal(accessProfile?: UserAccessProfile | null) {
+    if (!email) return
 
-    ;(rows || []).forEach((row) => {
-      const key = String(row.indicator_key || row.key || row.indicateur || '').trim().toUpperCase()
-      if (!key) return
+    const profile = accessProfile || await getUserAccessProfile()
+    const assigneeEmail = (cleanText(profile?.email) || email).toLowerCase()
+    const legacyDisplayName = cleanText(profile?.display_name) || email.split('@')[0]
+    const assigneeValues = Array.from(new Set([assigneeEmail, legacyDisplayName].map(cleanText).filter(Boolean)))
 
-      const rowEmail = String(row.email || row.user_email || '*').trim().toLowerCase()
-      const current = byKey.get(key)
-      const isExactUser = email && rowEmail === email.toLowerCase()
-      const currentEmail = String(current?.email || current?.user_email || '*').trim().toLowerCase()
-      const currentIsExactUser = email && currentEmail === email.toLowerCase()
+    if (!assigneeValues.length) {
+      setTodoSignal({ status: 'green', count: 0 })
+      return
+    }
 
-      // Priorité : statut spécifique utilisateur > statut global.
-      if (!current || (isExactUser && !currentIsExactUser)) byKey.set(key, row)
-    })
+    try {
+      const today = todayIso()
+      const assignedFilter = assigneeValues
+        .map((value) => `assigned_to.eq.${String(value).replace(/,/g, '\\,')}`)
+        .join(',')
 
-    const cerfa = byKey.get('CERFA')
-    const todo = byKey.get('TODO') || byKey.get('A_FAIRE') || byKey.get('A FAIRE')
+      const openBase = () => supabase
+        .from('todo_actions')
+        .select('id', { count: 'exact', head: true })
+        .or(assignedFilter)
+        .not('status', 'in', '("Terminé","Annulé")')
 
-    setCerfaKoCount(Math.max(0, Number(cerfa?.count ?? cerfa?.nb ?? 0) || 0))
-    setTodoSignal({
-      status: normalizeStatusLevel(todo?.status),
-      count: Math.max(0, Number(todo?.count ?? todo?.nb ?? 0) || 0),
-    })
+      const { count: openCount, error: openError } = await openBase()
+      if (openError) throw openError
+
+      if (!(openCount || 0)) {
+        setTodoSignal({ status: 'green', count: 0 })
+        return
+      }
+
+      const { count: overdueCount, error: overdueError } = await openBase()
+        .not('due_date', 'is', null)
+        .lt('due_date', today)
+
+      if (overdueError) throw overdueError
+
+      setTodoSignal({
+        status: (overdueCount || 0) > 0 ? 'red' : 'orange',
+        count: openCount || 0,
+      })
+    } catch (error) {
+      console.error('todo_actions status indicator', error)
+      setTodoSignal({ status: 'green', count: 0 })
+    }
+  }
+
+  function openTodoList() {
+    window.open('/todo', '_blank', 'noopener,noreferrer')
+  }
+
+  function mapCerfaRows(rows: Record<string, any>[], tierAgencyByCode: Map<string, string>, allowedAgences: string[]) {
+    return rows
+      .filter((row) => cleanText(rawValue(row, ['projet', 'Projet'])))
+      .filter((row) => {
+        if (!allowedAgences.length) return true
+        const tierCode = extractLeadingCode(rawValue(row, ['numero_tiers', 'numero_tiers_entete', 'code_tiers', 'tiers', 'client_code']))
+        const agence = tierAgencyByCode.get(normalizeLoose(tierCode)) || ''
+        return agenceMatchesAllowed(agence, allowedAgences)
+      })
+      .map((row, index) => {
+        const numeroTiers = extractLeadingCode(rawValue(row, ['numero_tiers', 'numero_tiers_entete', 'code_tiers', 'tiers', 'client_code']))
+        return {
+          key: buildCerfaKey(row, index),
+          raw: row,
+          idValue: rawValue(row, ['id', 'ligne_id', 'uuid']) as string | number | null,
+          dateFacture: formatDateFr(rawValue(row, ['date_facture', 'date_piece', 'date_document', 'date'])),
+          numeroFacture: cleanText(rawValue(row, ['numero_piece', 'num_piece', 'numero_facture', 'facture', 'piece', 'document', 'document_no', 'no_document'])),
+          lienFacture: cleanText(rawValue(row, ['lien_blg_doc', 'Lien_BLG_doc', 'url', 'lien', 'lien_doc'])),
+          lienTiers: cleanText(rawValue(row, ['lien_blg_tiers', 'Lien_BLG_Tiers', 'url_tiers', 'lien_tiers'])),
+          numeroTiers,
+          intituleTiers: cleanText(rawValue(row, ['intitule_tiers', 'intitule_tiers_entete', 'nom_tiers', 'libelle_tiers', 'tiers_libelle', 'client', 'raison_sociale'])),
+          reference: cleanText(rawValue(row, ['reference_article', 'reference', 'code_article', 'article', 'ref_article'])),
+          projet: cleanText(rawValue(row, ['projet', 'Projet'])),
+          collaborateur: cleanText(rawValue(row, ['collaborateur', 'collaborateur_tiers', 'collaborateur_facture', 'representant', 'commercial'])),
+          agence: cleanText(rawValue(row, ['agence_collaborateur', 'agence', 'depot', 'agence_document'])),
+          affaireDraft: cleanText(rawValue(row, ['affaire', 'Affaire'])),
+          checked: false,
+          saving: false,
+        }
+      })
+  }
+
+  async function refreshCerfaKo(accessProfile?: UserAccessProfile | null, options?: { detail?: boolean }) {
+    const profile = accessProfile || await getUserAccessProfile()
+    const allowedAgences = parseAllowedAgences((profile as any)?.allowed_agence ?? (profile as any)?.allowed_agences)
+    const detail = Boolean(options?.detail)
+
+    if (detail) {
+      setCerfaLoading(true)
+      setCerfaError(null)
+    }
+
+    try {
+      // Version rapide via RPC Supabase : évite de charger facture_lignes dans le header global.
+      const rpcName = detail ? 'get_cerfa_ko_rows_for_user' : 'get_cerfa_ko_count_for_user'
+      const rpcAllowedAgences = allowedAgences.length ? allowedAgences : null
+      const rpcArgs = detail
+        ? { p_email: email, p_allowed_agences: rpcAllowedAgences, p_limit: 1000 }
+        : { p_email: email, p_allowed_agences: rpcAllowedAgences }
+      const { data: rpcData, error: rpcError } = await supabase.rpc(rpcName, rpcArgs)
+
+      if (!rpcError) {
+        if (!detail) {
+          const countValue = Array.isArray(rpcData)
+            ? Number((rpcData[0] as any)?.count ?? (rpcData[0] as any)?.nb_lignes ?? 0)
+            : Number(rpcData ?? 0)
+          setCerfaKoCount(Number.isFinite(countValue) ? countValue : 0)
+          return
+        }
+
+        const rows = ((rpcData || []) as Record<string, any>[]).map((row, index) => ({
+          key: buildCerfaKey(row, index),
+          raw: row,
+          idValue: rawValue(row, ['id', 'ligne_id', 'uuid']) as string | number | null,
+          dateFacture: formatDateFr(rawValue(row, ['date_facture', 'date_piece', 'date_document', 'date'])),
+          numeroFacture: cleanText(rawValue(row, ['numero_piece', 'num_piece', 'numero_facture', 'facture', 'piece', 'document', 'document_no', 'no_document'])),
+          lienFacture: cleanText(rawValue(row, ['lien_blg_doc', 'Lien_BLG_doc', 'url', 'lien', 'lien_doc'])),
+          lienTiers: cleanText(rawValue(row, ['lien_blg_tiers', 'Lien_BLG_Tiers', 'url_tiers', 'lien_tiers'])),
+          numeroTiers: extractLeadingCode(rawValue(row, ['numero_tiers', 'numero_tiers_entete', 'code_tiers', 'tiers', 'client_code'])),
+          intituleTiers: cleanText(rawValue(row, ['intitule_tiers', 'intitule_tiers_entete', 'nom_tiers', 'libelle_tiers', 'tiers_libelle', 'client', 'raison_sociale'])),
+          reference: cleanText(rawValue(row, ['reference_article', 'reference', 'code_article', 'article', 'ref_article'])),
+          projet: cleanText(rawValue(row, ['projet', 'Projet'])),
+          collaborateur: cleanText(rawValue(row, ['collaborateur', 'collaborateur_tiers', 'collaborateur_facture', 'representant', 'commercial'])),
+          agence: cleanText(rawValue(row, ['agence_collaborateur', 'agence', 'depot', 'agence_document'])),
+          affaireDraft: cleanText(rawValue(row, ['affaire', 'Affaire'])),
+          checked: false,
+          saving: false,
+        }))
+
+        setCerfaRows(rows)
+        setCerfaKoCount(rows.length)
+        return
+      }
+
+      console.warn(`${rpcName} indisponible, fallback limité côté client`, rpcError)
+
+      // Fallback limité : utilisé uniquement si les RPC n'ont pas encore été installées.
+      const selectColumns = [
+        'id',
+        'date_facture',
+        'numero_piece',
+        'numero_tiers_entete',
+        'intitule_tiers_entete',
+        'reference_article',
+        'projet',
+        'affaire',
+      ].join(',')
+
+      const { data: factureRows, error: factureError, count } = await supabase
+        .from('facture_lignes')
+        .select(detail ? selectColumns : 'id', { count: 'exact', head: !detail })
+        .not('projet', 'is', null)
+        .neq('projet', '')
+        .limit(detail ? 1000 : 1)
+
+      if (factureError) throw factureError
+
+      if (!detail) {
+        setCerfaKoCount(count || 0)
+        return
+      }
+
+      const projetRows = ((factureRows || []) as Record<string, any>[]).filter((row) => cleanText(rawValue(row, ['projet', 'Projet'])))
+      const mapped = mapCerfaRows(projetRows, new Map<string, string>(), allowedAgences)
+      setCerfaRows(mapped)
+      setCerfaKoCount(mapped.length)
+    } catch (exception: any) {
+      console.error('CERFA KO status indicator', exception)
+      if (detail) setCerfaError(exception?.message || String(exception))
+      if (detail) setCerfaRows([])
+      setCerfaKoCount(0)
+    } finally {
+      if (detail) setCerfaLoading(false)
+    }
   }
 
   async function refreshStatusIndicators(options?: { force?: boolean }) {
@@ -457,36 +618,16 @@ function AppShell({ children }: { children: React.ReactNode }) {
     if (!options?.force && now - lastStatusRefreshRef.current < 60_000) return
     lastStatusRefreshRef.current = now
 
-    try {
-      const { data, error } = await supabase
-        .from('app_status_indicators')
-        .select('indicator_key,email,status,count,href,updated_at')
-        .in('indicator_key', ['CERFA', 'TODO', 'A_FAIRE'])
-        .in('email', [email, '*', 'GLOBAL', 'global'])
-
-      if (error) throw error
-      applyStatusRows((data || []) as Record<string, any>[])
-    } catch (exception) {
-      // Le header ne doit jamais ralentir ou bloquer les écrans métiers.
-      // Si la table de statut n'est pas encore créée, on garde un état neutre.
-      console.warn('Status indicators disabled or unavailable', exception)
-      setCerfaKoCount(0)
-      setTodoSignal({ status: 'green', count: 0 })
-    }
+    const profile = await getUserAccessProfile()
+    await Promise.all([
+      refreshTodoSignal(profile),
+      refreshCerfaKo(profile, { detail: false }),
+    ])
   }
 
-  function openTodoList() {
-    window.open('/todo', '_blank', 'noopener,noreferrer')
-  }
-
-  function openCerfaModal() {
-    // PERF V1 : on ne charge plus facture_lignes depuis le bandeau global.
-    // Le détail CERFA est traité depuis une page dédiée légère.
-    window.open('/cerfa-ko', '_blank', 'noopener,noreferrer')
-  }
-
-  async function refreshCerfaKo(_accessProfile?: UserAccessProfile | null, _options?: { detail?: boolean }) {
-    await refreshStatusIndicators({ force: true })
+  async function openCerfaModal() {
+    setCerfaModalOpen(true)
+    await refreshCerfaKo(undefined, { detail: true })
   }
 
   function updateCerfaRow(key: string, patch: Partial<CerfaKoRow>) {
@@ -494,9 +635,39 @@ function AppShell({ children }: { children: React.ReactNode }) {
   }
 
   async function validateCerfaRow(row: CerfaKoRow) {
-    // Maintenu pour compatibilité avec l'ancien modal, mais le mode PERF V1 ne modifie plus facture_lignes en direct.
-    updateCerfaRow(row.key, { saving: false })
-    alert('Mode performance : la régularisation CERFA est désormais appliquée par traitement manuel, pas depuis le bandeau global.')
+    const affaire = cleanText(row.affaireDraft)
+    if (!row.checked) {
+      alert('Coche la ligne à régulariser avant de valider.')
+      return
+    }
+    if (!affaire) {
+      alert('Renseigne le champ Affaire avant de valider.')
+      return
+    }
+
+    updateCerfaRow(row.key, { saving: true })
+
+    try {
+      const { data, error } = await supabase.rpc('validate_cerfa_ko_line', {
+        p_row_locator: cleanText(row.idValue),
+        p_numero_piece: row.numeroFacture || null,
+        p_numero_tiers: row.numeroTiers || null,
+        p_reference_article: row.reference || null,
+        p_projet: row.projet || null,
+        p_affaire: affaire,
+      })
+
+      if (error) throw error
+      if (!Number(data || 0)) throw new Error('Aucune ligne CERFA n’a été mise à jour. Actualise la liste puis réessaie.')
+
+      setCerfaRows((current) => current.filter((item) => item.key !== row.key))
+      setCerfaKoCount((count) => Math.max(0, count - 1))
+      void refreshStatusIndicators({ force: true })
+    } catch (exception: any) {
+      console.error('Validation CERFA KO', exception)
+      alert(`Impossible d'enregistrer la régularisation CERFA : ${exception?.message || exception}`)
+      updateCerfaRow(row.key, { saving: false })
+    }
   }
 
   return (

@@ -75,6 +75,22 @@ type FamilyMatrixRow = {
   total: number
 }
 
+type ReferencePivotSourceRow = DetailRpcRow & {
+  annee: number
+}
+
+type ReferencePivotRow = {
+  famille_macro: string
+  famille: string
+  reference_article: string
+  designation: string
+  type_document: Flux
+  mois: Record<number, number>
+  moisN1: Record<number, number>
+  total: number
+  totalN1: number
+}
+
 type AnalysisScope = {
   famille_macro?: string
   flux?: Flux
@@ -84,7 +100,7 @@ type AnalysisScope = {
 
 type ReferenceScope = {
   famille_macro: string
-  famille: string
+  famille?: string
   flux?: Flux
   mois?: number
   label: string
@@ -230,6 +246,41 @@ function mapDetailRow(row: any): DetailRpcRow {
   }
 }
 
+function mapReferencePivotSourceRow(row: any): ReferencePivotSourceRow {
+  return {
+    annee: safeNumber(row.annee),
+    famille_macro: safeText(row.famille_macro),
+    famille: safeText(row.famille),
+    reference_article: safeText(row.reference_article ?? row.reference ?? row.ref_article),
+    designation: safeText(row.designation ?? row.libelle_article ?? row.libelle, ''),
+    numero_document: '',
+    mois: safeNumber(row.mois),
+    type_document: normalizeFlux(row.type_document ?? row.flux),
+    nb_lignes: safeNumber(row.nb_lignes),
+    quantite: safeNumber(row.quantite),
+    quantite_pertinente: safeNumber(row.quantite_pertinente ?? row.qte_pertinente ?? row.quantite_pert ?? row.qte_pert ?? row.quantite),
+    ca_ht: safeNumber(row.ca_ht),
+    marge_valeur: safeNumber(row.marge_valeur),
+  }
+}
+
+function monthNumbers() {
+  return Array.from({ length: 12 }, (_, index) => index + 1)
+}
+
+function emptyMonths() {
+  return Object.fromEntries(monthNumbers().map((month) => [month, 0])) as Record<number, number>
+}
+
+function referencePivotKey(row: Pick<ReferencePivotSourceRow, 'famille_macro' | 'famille' | 'reference_article' | 'type_document'>) {
+  return [row.famille_macro, row.famille, row.reference_article, row.type_document].join('§')
+}
+
+function fluxSortIndex(value: Flux) {
+  const index = FLUX_ORDER.indexOf(value)
+  return index >= 0 ? index : 999
+}
+
 function MultiSelect({
   label,
   values,
@@ -348,12 +399,14 @@ export default function ApprovisionnementsPage() {
 
   const [summaryRows, setSummaryRows] = useState<SummaryRpcRow[]>([])
   const [scopeDetailRows, setScopeDetailRows] = useState<DetailRpcRow[]>([])
+  const [referencePivotRows, setReferencePivotRows] = useState<ReferencePivotSourceRow[]>([])
   const [analysisScope, setAnalysisScope] = useState<AnalysisScope>(null)
   const [referenceScope, setReferenceScope] = useState<ReferenceScope>(null)
   const [chartMonth, setChartMonth] = useState<number | null>(null)
   const [loadingOptions, setLoadingOptions] = useState(false)
   const [loadingSummary, setLoadingSummary] = useState(false)
   const [loadingFamily, setLoadingFamily] = useState(false)
+  const [loadingReferencePivot, setLoadingReferencePivot] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [maintenanceLoading, setMaintenanceLoading] = useState(false)
   const [maintenanceMessage, setMaintenanceMessage] = useState<string | null>(null)
@@ -377,6 +430,7 @@ export default function ApprovisionnementsPage() {
     setAnalysisScope(null)
     setReferenceScope(null)
     setScopeDetailRows([])
+    setReferencePivotRows([])
     if (!keepChartMonth) setChartMonth(null)
   }
 
@@ -497,6 +551,51 @@ export default function ApprovisionnementsPage() {
     loadDetailForScope(scope)
   }
 
+  function handleMacroScope(familleMacro: string, mois: number | undefined, label: string) {
+    const scope: Exclude<AnalysisScope, null> = {
+      famille_macro: familleMacro,
+      mois,
+      label,
+    }
+    handleAnalysisScope(scope)
+    setReferenceScope({
+      famille_macro: familleMacro,
+      mois,
+      label: `${label} · toutes familles / articles`,
+    })
+  }
+
+  async function loadReferencePivotForScope(scope: Exclude<ReferenceScope, null>) {
+    setLoadingReferencePivot(true)
+    setError(null)
+    setReferencePivotRows([])
+
+    try {
+      const { data, error: rpcError } = await supabase.rpc('get_appro_flux_reference_pivot_source_v19', {
+        p_year: selectedYear,
+        p_mois: scope.mois ?? null,
+        p_flux: scope.flux ?? null,
+        p_famille_macro: scope.famille_macro,
+        p_famille: scope.famille ?? null,
+        p_include_hors_stat: includeHorsStat,
+        p_depots: depots,
+        p_collaborateurs_tiers: collaborateursTiers,
+        p_familles_macro: famillesMacro,
+        p_familles: familles,
+        p_references: selectedReferenceCodes,
+        p_limit: 50000,
+      })
+
+      if (rpcError) throw rpcError
+      setReferencePivotRows(((data || []) as Record<string, any>[]).map(mapReferencePivotSourceRow))
+    } catch (exception: any) {
+      setError(`Chargement du détail articles impossible : ${exception?.message || exception}`)
+      setReferencePivotRows([])
+    } finally {
+      setLoadingReferencePivot(false)
+    }
+  }
+
   function handleChartClick(state: any) {
     const month = safeNumber(state?.activePayload?.[0]?.payload?.mois)
     if (!month) return
@@ -591,6 +690,15 @@ export default function ApprovisionnementsPage() {
     loadSummary()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [depots, collaborateursTiers, famillesMacro, familles, references])
+
+  useEffect(() => {
+    if (!referenceScope) {
+      setReferencePivotRows([])
+      return
+    }
+    loadReferencePivotForScope(referenceScope)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [referenceScope, selectedYear, includeHorsStat, depots, collaborateursTiers, famillesMacro, familles, references])
 
   const chartData = useMemo<ChartDatum[]>(() => {
     const output: ChartDatum[] = Array.from({ length: 12 }, (_, index) => {
@@ -717,12 +825,53 @@ export default function ApprovisionnementsPage() {
     if (!referenceScope) return []
     return scopeDetailRows.filter((row) => {
       if (row.famille_macro !== referenceScope.famille_macro) return false
-      if (row.famille !== referenceScope.famille) return false
+      if (referenceScope.famille && row.famille !== referenceScope.famille) return false
       if (referenceScope.flux && row.type_document !== referenceScope.flux) return false
       if (referenceScope.mois && row.mois !== referenceScope.mois) return false
       return true
     })
   }, [scopeDetailRows, referenceScope])
+
+  const referencePivotMatrixRows = useMemo<ReferencePivotRow[]>(() => {
+    const map = new Map<string, ReferencePivotRow>()
+
+    referencePivotRows.forEach((row) => {
+      const key = referencePivotKey(row)
+      if (!map.has(key)) {
+        map.set(key, {
+          famille_macro: row.famille_macro,
+          famille: row.famille,
+          reference_article: row.reference_article,
+          designation: row.designation,
+          type_document: row.type_document,
+          mois: emptyMonths(),
+          moisN1: emptyMonths(),
+          total: 0,
+          totalN1: 0,
+        })
+      }
+
+      const target = map.get(key)!
+      const value = getMetricValue(row, metric)
+      if (row.annee === selectedYear) {
+        target.mois[row.mois] = safeNumber(target.mois[row.mois]) + value
+        target.total += value
+      } else if (row.annee === selectedYear - 1) {
+        target.moisN1[row.mois] = safeNumber(target.moisN1[row.mois]) + value
+        target.totalN1 += value
+      }
+    })
+
+    return Array.from(map.values()).sort((a, b) => {
+      const macro = a.famille_macro.localeCompare(b.famille_macro, 'fr', { numeric: true })
+      if (macro !== 0) return macro
+      const family = a.famille.localeCompare(b.famille, 'fr', { numeric: true })
+      if (family !== 0) return family
+      const reference = a.reference_article.localeCompare(b.reference_article, 'fr', { numeric: true })
+      if (reference !== 0) return reference
+      return fluxSortIndex(a.type_document) - fluxSortIndex(b.type_document)
+    })
+  }, [referencePivotRows, metric, selectedYear])
 
   const totalAggregatedRows = useMemo(
     () => summaryRows.reduce((sum: number, row: SummaryRpcRow) => sum + safeNumber(row.nb_lignes), 0),
@@ -745,6 +894,14 @@ export default function ApprovisionnementsPage() {
         ) : null}
       </span>
     )
+  }
+
+  function valueWithParenthesis(value: number, valueN1: number, valueMetric: Metric = metric) {
+    const main = safeNumber(value)
+    const previous = safeNumber(valueN1)
+    if (!main && !previous) return '—'
+    if (!previous) return main ? formatMetric(main, valueMetric) : '—'
+    return `${main ? formatMetric(main, valueMetric) : '—'} (${formatMetric(previous, valueMetric)})`
   }
 
   function clickableCellClass(selected: boolean, hasValue: boolean) {
@@ -835,13 +992,34 @@ export default function ApprovisionnementsPage() {
     }))
   }
 
+  function makeReferencePivotExportRows(rows = referencePivotMatrixRows) {
+    return rows.map((row) => {
+      const output: Record<string, any> = {
+        'Famille macro': row.famille_macro,
+        Famille: row.famille,
+        Référence: row.reference_article,
+        'Type document': FLUX_LABELS[row.type_document],
+      }
+      monthNumbers().forEach((month, index) => {
+        output[MONTHS[index]] = valueWithParenthesis(row.mois[month], row.moisN1[month])
+      })
+      output['Total général'] = valueWithParenthesis(row.total, row.totalN1)
+      return output
+    })
+  }
+
   function exportWorkbook(includeDetail: boolean) {
     const sheets = [
       { name: `Prioritaires ${selectedYear}`, rows: makePriorityExportRows() },
       { name: `Macro ${selectedYear}`, rows: makeSummaryExportRows() },
     ]
     if (familyMatrixRows.length) sheets.push({ name: 'Familles', rows: makeFamilyExportRows() })
-    if (includeDetail) sheets.push({ name: 'Références', rows: makeDetailExportRows(referenceRows.length ? referenceRows : scopeDetailRows) })
+    if (includeDetail) {
+      sheets.push(referencePivotMatrixRows.length
+        ? { name: 'Détail pivot', rows: makeReferencePivotExportRows() }
+        : { name: 'Références', rows: makeDetailExportRows(referenceRows.length ? referenceRows : scopeDetailRows) }
+      )
+    }
     downloadWorkbook(`approvisionnements_${selectedYear}_${includeDetail ? 'avec_detail' : 'synthese'}.xlsx`, sheets)
   }
 
@@ -1051,7 +1229,7 @@ export default function ApprovisionnementsPage() {
                   <td className="px-3 py-2 font-bold">
                     <button
                       type="button"
-                      onClick={() => handleAnalysisScope({ famille_macro: row.famille_macro, label: `${row.famille_macro} · tous documents / tous mois` })}
+                      onClick={() => handleMacroScope(row.famille_macro, undefined, `${row.famille_macro} · tous documents / tous mois`)}
                       className="rounded-lg px-2 py-1 text-left font-black hover:bg-blue-50"
                     >
                       {row.famille_macro}
@@ -1150,7 +1328,7 @@ export default function ApprovisionnementsPage() {
                   <td className="px-3 py-2 font-bold">
                     <button
                       type="button"
-                      onClick={() => handleAnalysisScope({ famille_macro: row.famille_macro, mois: chartMonth ?? undefined, label: `${row.famille_macro} · tous documents${chartMonth ? ` · ${monthLabel(chartMonth)}` : ''}` })}
+                      onClick={() => handleMacroScope(row.famille_macro, chartMonth ?? undefined, `${row.famille_macro} · tous documents${chartMonth ? ` · ${monthLabel(chartMonth)}` : ''}`)}
                       className="rounded-lg px-2 py-1 text-left font-black hover:bg-blue-50"
                     >
                       {row.famille_macro}
@@ -1315,59 +1493,69 @@ export default function ApprovisionnementsPage() {
         <section className="rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
           <div className="mb-3 flex items-start justify-between gap-4">
             <div>
-              <h2 className="text-xl font-black">Détail références / documents</h2>
-              <p className="text-xs font-bold uppercase text-slate-500">{referenceScope.label} · année {selectedYear}</p>
+              <h2 className="text-xl font-black">Détail articles par référence / type document</h2>
+              <p className="text-xs font-bold uppercase text-slate-500">
+                {referenceScope.label} · année {selectedYear} avec {selectedYear - 1} entre parenthèses · lecture en {metricLabel(metric)}.
+              </p>
             </div>
             <button
               type="button"
-              onClick={() => downloadWorkbook(`approvisionnements_references_${selectedYear}.xlsx`, [{ name: 'Références', rows: makeDetailExportRows(referenceRows) }])}
+              onClick={() => downloadWorkbook(`approvisionnements_detail_pivot_${selectedYear}.xlsx`, [{ name: 'Détail pivot', rows: makeReferencePivotExportRows() }])}
               className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-black hover:bg-slate-50"
             >
-              Exporter références
+              Exporter détail pivot
             </button>
           </div>
 
-          <div className="overflow-auto rounded-xl border border-slate-200">
-            <table className="min-w-full text-sm">
-              <thead className="bg-slate-900 text-white">
-                <tr>
-                  <th className="px-3 py-2 text-left">Famille macro</th>
-                  <th className="px-3 py-2 text-left">Famille</th>
-                  <th className="px-3 py-2 text-left">Référence</th>
-                  <th className="px-3 py-2 text-left">Désignation</th>
-                  <th className="px-3 py-2 text-left">N° document</th>
-                  <th className="px-3 py-2 text-left">Mois</th>
-                  <th className="px-3 py-2 text-left">Type document</th>
-                  <th className="px-3 py-2 text-right">Nb lignes</th>
-                  <th className="px-3 py-2 text-right">Qté brute</th>
-                  <th className="px-3 py-2 text-right">Qté pertinente</th>
-                  <th className="px-3 py-2 text-right">CA HT</th>
-                </tr>
-              </thead>
-              <tbody>
-                {referenceRows.map((row, index) => (
-                  <tr key={`${row.famille}-${row.reference_article}-${row.type_document}-${row.mois}-${row.numero_document}-${index}`} className="border-b border-slate-100 odd:bg-slate-50">
-                    <td className="px-3 py-2 font-bold">{row.famille_macro}</td>
-                    <td className="px-3 py-2">{row.famille}</td>
-                    <td className="px-3 py-2 font-mono text-xs">{row.reference_article}</td>
-                    <td className="px-3 py-2">{row.designation || '—'}</td>
-                    <td className="px-3 py-2 font-mono text-xs">{row.numero_document || '—'}</td>
-                    <td className="px-3 py-2">{monthLabel(row.mois)}</td>
-                    <td className="px-3 py-2 font-bold" style={{ color: FLUX_COLORS[row.type_document] }}>{FLUX_LABELS[row.type_document]}</td>
-                    <td className="px-3 py-2 text-right font-bold">{formatNumber(row.nb_lignes)}</td>
-                    <td className="px-3 py-2 text-right font-bold">{formatNumber(row.quantite)}</td>
-                    <td className="px-3 py-2 text-right font-bold">{formatNumber(row.quantite_pertinente)}</td>
-                    <td className="px-3 py-2 text-right font-bold">{formatMetric(row.ca_ht, 'ca_ht')}</td>
+          {loadingReferencePivot && <div className="rounded-xl bg-slate-50 p-4 text-sm font-bold text-slate-500">Chargement du détail articles N / N-1…</div>}
+
+          {!loadingReferencePivot && (
+            <div className="overflow-auto rounded-xl border border-slate-200">
+              <table className="min-w-full border-separate border-spacing-0 text-sm">
+                <thead>
+                  <tr className="bg-[#55752c] text-white">
+                    <th colSpan={4} className="sticky left-0 z-30 px-3 py-2 text-left font-black">
+                      Somme de {metricLabel(metric)}
+                    </th>
+                    <th colSpan={13} className="px-3 py-2 text-center font-black">Mois</th>
                   </tr>
-                ))}
-                {!referenceRows.length && (
-                  <tr>
-                    <td colSpan={11} className="px-3 py-8 text-center text-sm font-bold text-slate-500">Aucun détail référence pour cette sélection.</td>
+                  <tr className="bg-[#55752c] text-white">
+                    <th className="sticky left-0 z-30 min-w-[160px] px-3 py-2 text-left">Famille macro</th>
+                    <th className="sticky left-[160px] z-30 min-w-[220px] px-3 py-2 text-left">Famille</th>
+                    <th className="sticky left-[380px] z-30 min-w-[180px] px-3 py-2 text-left">Référence</th>
+                    <th className="sticky left-[560px] z-30 min-w-[140px] px-3 py-2 text-left">Type document</th>
+                    {MONTHS.map((month) => <th key={month} className="min-w-[92px] px-3 py-2 text-right">{month}</th>)}
+                    <th className="min-w-[125px] px-3 py-2 text-right">Total général</th>
                   </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {referencePivotMatrixRows.map((row) => (
+                    <tr key={`${row.famille_macro}-${row.famille}-${row.reference_article}-${row.type_document}`} className="border-b border-slate-200 odd:bg-[#d9decf] even:bg-[#c9cfc2]">
+                      <td className="sticky left-0 z-20 bg-inherit px-3 py-1 font-black text-slate-700">{row.famille_macro}</td>
+                      <td className="sticky left-[160px] z-20 bg-inherit px-3 py-1 font-bold text-slate-800">{row.famille}</td>
+                      <td className="sticky left-[380px] z-20 bg-inherit px-3 py-1 font-mono text-xs font-black text-slate-900" title={row.designation || row.reference_article}>{row.reference_article}</td>
+                      <td className="sticky left-[560px] z-20 bg-inherit px-3 py-1 font-black" style={{ color: FLUX_COLORS[row.type_document] }}>{FLUX_LABELS[row.type_document]}</td>
+                      {monthNumbers().map((month) => (
+                        <td key={month} className="px-3 py-1 text-right font-bold text-slate-900">
+                          {valueWithParenthesis(row.mois[month], row.moisN1[month])}
+                        </td>
+                      ))}
+                      <td className="px-3 py-1 text-right font-black text-slate-900">
+                        {valueWithParenthesis(row.total, row.totalN1)}
+                      </td>
+                    </tr>
+                  ))}
+                  {!referencePivotMatrixRows.length && (
+                    <tr>
+                      <td colSpan={17} className="px-3 py-10 text-center text-sm font-bold text-slate-500">
+                        Aucun article avec cette sélection.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
         </section>
       )}
     </main>

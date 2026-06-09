@@ -109,7 +109,7 @@ export default function TodoPage() {
       return
     }
 
-    const email = user.email
+    const email = user.email.trim().toLowerCase()
     setCurrentEmail(email)
 
     const { data: access, error: accessError } = await supabase
@@ -129,16 +129,19 @@ export default function TodoPage() {
 
     const { data: usersData } = await supabase
       .from('user_page_access')
-      .select('display_name, email, can_todo')
+      .select('email, display_name, can_todo')
       .eq('can_todo', true)
-      .order('display_name', { ascending: true })
+      .order('email', { ascending: true })
 
-    const assigneeNames =
-      (usersData || [])
-        .map((u: any) => (u.display_name?.trim() || u.email?.split('@')[0] || '').trim())
+    const assigneeEmails: string[] =
+      ((usersData || []) as Array<{ email?: string | null }>)
+        .map((u) => String(u.email || '').trim().toLowerCase())
         .filter(Boolean)
 
-    setAssignees(Array.from(new Set(assigneeNames)))
+    const uniqueAssigneeEmails = Array.from(new Set<string>(assigneeEmails))
+      .sort((a, b) => a.localeCompare(b, 'fr', { sensitivity: 'base' }))
+
+    setAssignees(uniqueAssigneeEmails)
 
     await loadRows(email, displayName)
 
@@ -151,11 +154,14 @@ export default function TodoPage() {
 
     if (!email) return
 
+    const assignedToFilters = assigneeIdentityValues(email, displayName)
+      .map((value) => `assigned_to.eq.${escapeSupabaseValue(value)}`)
+
     const { data, error } = await supabase
       .from('todo_actions')
       .select('*')
       .or(
-        `created_by_email.eq.${escapeSupabaseValue(email)},assigned_to.eq.${escapeSupabaseValue(displayName)}`
+        [`created_by_email.eq.${escapeSupabaseValue(email)}`, ...assignedToFilters].join(',')
       )
       .order('status', { ascending: true })
       .order('due_date', { ascending: true, nullsFirst: false })
@@ -172,6 +178,10 @@ export default function TodoPage() {
 
   function escapeSupabaseValue(value: string) {
     return String(value || '').replace(/,/g, '\\,')
+  }
+
+  function assigneeIdentityValues(emailValue?: string, displayNameValue?: string) {
+    return Array.from(new Set([emailValue, displayNameValue].map((value) => String(value || '').trim()).filter(Boolean)))
   }
 
   function normalize(value: string | null | undefined) {
@@ -273,9 +283,11 @@ export default function TodoPage() {
   }
 
   const visibleRows = useMemo(() => {
+    const assignedToCurrentUser = assigneeIdentityValues(currentEmail, currentDisplayName).map(normalize)
+
     return rows.filter(row => {
       const isCreator = normalize(row.created_by_email) === normalize(currentEmail)
-      const isAssignee = normalize(row.assigned_to) === normalize(currentDisplayName)
+      const isAssignee = assignedToCurrentUser.includes(normalize(row.assigned_to))
       return isCreator || isAssignee
     })
   }, [rows, currentEmail, currentDisplayName])
@@ -337,7 +349,7 @@ export default function TodoPage() {
       created_by_name: currentDisplayName,
       mission_project: '',
       description_action: '',
-      assigned_to: currentDisplayName,
+      assigned_to: currentEmail,
       due_date: null,
       status: 'Non débuté' as TodoRow['status'],
       comment_progress: '',
@@ -700,9 +712,9 @@ function TodoSection({
                       className="min-h-[42px] w-full border-0 bg-transparent px-2 py-2 outline-none"
                     >
                       <option value="">--</option>
-                      {assignees.map(name => (
-                        <option key={name} value={name}>
-                          {name}
+                      {assignees.map(email => (
+                        <option key={email} value={email}>
+                          {email}
                         </option>
                       ))}
                     </select>
