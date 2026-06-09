@@ -1682,13 +1682,10 @@ function DataReconciliationPanel() {
         throw new Error('Contrôle historisé exécuté, mais aucun run_id retourné.')
       }
 
-      // V24 : le cache SMC peut concerner beaucoup de clients même sur un seul mois.
-      // On le répare donc par petits lots pour éviter les timeouts Supabase.
-      await runSmcCacheForPeriodBatchesV28({
-        p_date_debut: startDate,
-        p_date_fin: endDate,
-        label: `${startDate} → ${endDate}`,
-      })
+      // V30 : le contrôle cohérence ne reconstruit plus automatiquement
+      // le cache Synthèse multi-clients.
+      // Les colonnes SMC affichent donc l'état actuel de synthese_multi_clients_cache,
+      // sans déclencher de rebuild potentiellement long / timeout.
 
       const { error: amountsRefreshError } = await supabase.rpc('refresh_reconciliation_amounts_for_run_v22', {
         p_run_id: run.run_id,
