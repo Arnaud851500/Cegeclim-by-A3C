@@ -271,13 +271,14 @@ function AppShell({ children }: { children: React.ReactNode }) {
       label: 'Tableaux de bord',
       items: [
         { label: 'Tableaux de bord', path: '/atelier-analyse', accessKey: 'can_autorisation' },
+        { label: 'Suivi Multi Clients', path: '/synthese_multi_clients', accessKey: 'can_dashboard' },
         { label: 'Indicateurs', path: '/Indicateurs', accessKey: 'can_dashboard' }
         ],
     },
     {
       label: 'Analyse Devis',
       items: [
-        { label: 'Analyse Devis', path: '/approvisionnements', accessKey: 'can_autorisation' }
+        { label: 'Flux Devis => Fact', path: '/approvisionnements', accessKey: 'can_autorisation' }
       ],
     },
     {

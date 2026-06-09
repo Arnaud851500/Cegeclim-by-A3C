@@ -1328,6 +1328,10 @@ type ReconciliationRow = {
   bl_indicateur_activite: number | null
   bl_flux: number | null
   ecart_bl_source_vs_flux: number | null
+  smc_factures_cache: number | null
+  smc_devis_cache: number | null
+  ecart_smc_factures_vs_indicateur: number | null
+  ecart_smc_devis_vs_indicateur: number | null
 }
 
 
@@ -1371,6 +1375,11 @@ type ReconciliationStoredRow = {
   bl_flux: number | null
   ecart_bl: number | null
 
+  smc_factures_cache: number | null
+  smc_devis_cache: number | null
+  ecart_smc_factures_vs_indicateur: number | null
+  ecart_smc_devis_vs_indicateur: number | null
+
   factures_ok?: boolean
   devis_ok?: boolean
   cdc_ok?: boolean
@@ -1379,6 +1388,79 @@ type ReconciliationStoredRow = {
 }
 
 const TOLERANCE = 0.01
+
+
+type SmcRpcPeriod = {
+  p_date_debut: string
+  p_date_fin: string
+  label?: string
+}
+
+type SmcBatchResult = {
+  processed_count?: number | string | null
+  last_numero?: string | null
+  total_candidates?: number | string | null
+  remaining_count?: number | string | null
+}
+
+async function runSmcCacheForPeriodBatchesV28(
+  period: SmcRpcPeriod,
+  onProgress?: (detail: string) => void,
+  label = 'Synthèse multi-clients',
+  batchSize = 5
+) {
+  let after: string | null = null
+  let processedTotal = 0
+  const maxLoops = 500
+
+  for (let loop = 0; loop < maxLoops; loop += 1) {
+    onProgress?.(`${label} : ${period.label || `${period.p_date_debut} → ${period.p_date_fin}`} — lot ${loop + 1}${after ? ` après ${after}` : ''}`)
+
+    const { data, error } = await supabase.rpc('rebuild_smc_cache_period_batch_v28', {
+      p_date_debut: period.p_date_debut,
+      p_date_fin: period.p_date_fin,
+      p_after_numero: after,
+      p_batch_size: batchSize,
+    })
+
+    if (error) throw new Error(`rebuild_smc_cache_period_batch_v28 ${period.label || ''} : ${error.message}`)
+
+    const rows = (Array.isArray(data) ? data : data ? [data] : []) as SmcBatchResult[]
+    const batchRow = rows[0]
+    const processed = Number(batchRow?.processed_count ?? 0)
+    const totalCandidates = Number(batchRow?.total_candidates ?? 0)
+    const remaining = Number(batchRow?.remaining_count ?? 0)
+    const lastNumero: string | null = batchRow?.last_numero ? String(batchRow.last_numero) : after
+
+    processedTotal += processed
+    after = lastNumero
+
+    onProgress?.(
+      `${label} : ${period.label || `${period.p_date_debut} → ${period.p_date_fin}`} — ${processedTotal}/${totalCandidates || '?'} client(s) traité(s)${remaining ? ', suite probable…' : ''}`
+    )
+
+    // V28 ne lance plus de COUNT global pour éviter les timeouts.
+    // On continue tant que le lot est plein ; on s'arrête quand le dernier lot est incomplet ou vide.
+    if (!processed || processed < batchSize) {
+      return { processedTotal, totalCandidates, lastNumero: after }
+    }
+  }
+
+  throw new Error(
+    `${label} : arrêt de sécurité après ${maxLoops} lots. Dernier client traité : ${after || 'début'}. ` +
+      `Relance possible à partir de ce dernier numéro si nécessaire.`
+  )
+}
+
+async function runSmcCacheForPeriodsBatchesV28(
+  periods: SmcRpcPeriod[],
+  onProgress?: (detail: string) => void,
+  label = 'Synthèse multi-clients'
+) {
+  for (const period of periods) {
+    await runSmcCacheForPeriodBatchesV28(period, onProgress, label, 5)
+  }
+}
 
 function toNumber(value: any) {
   const n = Number(value ?? 0)
@@ -1433,6 +1515,11 @@ function mapStoredReconciliationRow(row: ReconciliationStoredRow): Reconciliatio
     bl_indicateur_activite: row.bl_depuis_activite,
     bl_flux: row.bl_flux,
     ecart_bl_source_vs_flux: row.ecart_bl,
+
+    smc_factures_cache: row.smc_factures_cache,
+    smc_devis_cache: row.smc_devis_cache,
+    ecart_smc_factures_vs_indicateur: row.ecart_smc_factures_vs_indicateur,
+    ecart_smc_devis_vs_indicateur: row.ecart_smc_devis_vs_indicateur,
   }
 }
 
@@ -1462,6 +1549,14 @@ function computeRowIssues(row: ReconciliationRow) {
   if (absEcart(toNumber(row.devis_cache) - devisLignes) > TOLERANCE) issues.push('Devis cache')
   if (absEcart(toNumber(row.devis_indicateur) - devisLignes) > TOLERANCE) issues.push('Devis indicateur')
   if (absEcart(toNumber(row.devis_flux) - devisLignes) > TOLERANCE) issues.push('Devis flux')
+
+  // Synthèse multi-clients : contrôle du cache écran vs indicateurs mensuels.
+  if (row.smc_factures_cache !== null && row.smc_factures_cache !== undefined) {
+    if (absEcart(row.ecart_smc_factures_vs_indicateur) > TOLERANCE) issues.push('SMC factures')
+  }
+  if (row.smc_devis_cache !== null && row.smc_devis_cache !== undefined) {
+    if (absEcart(row.ecart_smc_devis_vs_indicateur) > TOLERANCE) issues.push('SMC devis')
+  }
 
   // CDC / BL : on contrôle uniquement l'écart final calculé par la RPC :
   // CDC flux = CDC depuis factures + CDC depuis activité
@@ -1496,6 +1591,8 @@ function exportRows(rows: ReconciliationRow[]) {
       'Écart factures indicateur vs lignes': toNumber(row.factures_indicateur) - facturesLignes,
       'Factures flux': toNumber(row.factures_flux),
       'Écart factures flux vs lignes': toNumber(row.factures_flux) - facturesLignes,
+      'SMC factures': toNumber(row.smc_factures_cache),
+      'Écart SMC factures vs indicateur': toNumber(row.ecart_smc_factures_vs_indicateur),
 
       'Devis lignes': devisLignes,
       'Devis cache': toNumber(row.devis_cache),
@@ -1504,6 +1601,8 @@ function exportRows(rows: ReconciliationRow[]) {
       'Écart devis indicateur vs lignes': toNumber(row.devis_indicateur) - devisLignes,
       'Devis flux': toNumber(row.devis_flux),
       'Écart devis flux vs lignes': toNumber(row.devis_flux) - devisLignes,
+      'SMC devis': toNumber(row.smc_devis_cache),
+      'Écart SMC devis vs indicateur': toNumber(row.ecart_smc_devis_vs_indicateur),
 
       'CDC depuis fact': cdcDepuisFact,
       'CDC depuis activité': toNumber(row.cdc_indicateur_activite),
@@ -1583,7 +1682,18 @@ function DataReconciliationPanel() {
         throw new Error('Contrôle historisé exécuté, mais aucun run_id retourné.')
       }
 
-      setRunSummary(run)
+      // V24 : le cache SMC peut concerner beaucoup de clients même sur un seul mois.
+      // On le répare donc par petits lots pour éviter les timeouts Supabase.
+      await runSmcCacheForPeriodBatchesV28({
+        p_date_debut: startDate,
+        p_date_fin: endDate,
+        label: `${startDate} → ${endDate}`,
+      })
+
+      const { error: amountsRefreshError } = await supabase.rpc('refresh_reconciliation_amounts_for_run_v22', {
+        p_run_id: run.run_id,
+      })
+      if (amountsRefreshError) throw amountsRefreshError
 
       const { data: detailRows, error: detailError } = await supabase
         .from('data_reconciliation_run_rows')
@@ -1594,7 +1704,64 @@ function DataReconciliationPanel() {
 
       if (detailError) throw detailError
 
-      setRows(((detailRows || []) as ReconciliationStoredRow[]).map(mapStoredReconciliationRow))
+      const mappedRows = ((detailRows || []) as ReconciliationStoredRow[]).map(mapStoredReconciliationRow)
+      setRows(mappedRows)
+
+      const koRows = mappedRows.filter((row) => computeRowIssues(row).length > 0)
+      const maxAbsEcart = mappedRows.reduce((max, row) => {
+        const facturesLignes = toNumber(row.factures_lignes)
+        const devisLignes = toNumber(row.devis_lignes)
+        const cdcDepuisFact = toNumber(row.cdc_source_activite_plus_factures)
+        const cdcAttendu = cdcDepuisFact + toNumber(row.cdc_indicateur_activite)
+        const blDepuisFact = toNumber(row.bl_source_activite_plus_factures)
+        const blAttendu = blDepuisFact + toNumber(row.bl_indicateur_activite)
+
+        const values = [
+          toNumber(row.factures_cache) - facturesLignes,
+          toNumber(row.factures_indicateur) - facturesLignes,
+          toNumber(row.factures_flux) - facturesLignes,
+          toNumber(row.devis_cache) - devisLignes,
+          toNumber(row.devis_indicateur) - devisLignes,
+          toNumber(row.devis_flux) - devisLignes,
+          cdcAttendu - toNumber(row.cdc_flux),
+          blAttendu - toNumber(row.bl_flux),
+          row.smc_factures_cache !== null && row.smc_factures_cache !== undefined
+            ? toNumber(row.ecart_smc_factures_vs_indicateur)
+            : 0,
+          row.smc_devis_cache !== null && row.smc_devis_cache !== undefined
+            ? toNumber(row.ecart_smc_devis_vs_indicateur)
+            : 0,
+        ]
+
+        return Math.max(max, ...values.map((value) => Math.abs(value)))
+      }, 0)
+
+      setRunSummary({
+        ...run,
+        status: koRows.length ? 'ko' : 'ok',
+        checked_months: mappedRows.length,
+        ok_months: mappedRows.length - koRows.length,
+        ko_months: koRows.length,
+        factures_ko: mappedRows.filter((row) => {
+          const ref = toNumber(row.factures_lignes)
+          return (
+            absEcart(toNumber(row.factures_cache) - ref) > TOLERANCE ||
+            absEcart(toNumber(row.factures_indicateur) - ref) > TOLERANCE ||
+            absEcart(toNumber(row.factures_flux) - ref) > TOLERANCE ||
+            absEcart(row.ecart_smc_factures_vs_indicateur) > TOLERANCE
+          )
+        }).length,
+        devis_ko: mappedRows.filter((row) => {
+          const ref = toNumber(row.devis_lignes)
+          return (
+            absEcart(toNumber(row.devis_cache) - ref) > TOLERANCE ||
+            absEcart(toNumber(row.devis_indicateur) - ref) > TOLERANCE ||
+            absEcart(toNumber(row.devis_flux) - ref) > TOLERANCE ||
+            absEcart(row.ecart_smc_devis_vs_indicateur) > TOLERANCE
+          )
+        }).length,
+        max_abs_ecart: maxAbsEcart,
+      })
     } catch (exception: any) {
       setError(exception?.message || String(exception))
       setRows([])
@@ -1691,7 +1858,7 @@ function DataReconciliationPanel() {
 
       {rows.length ? (
         <div className="mt-4 max-h-[560px] overflow-auto rounded-xl border border-slate-200">
-          <table className="min-w-[1900px] border-collapse text-xs">
+          <table className="min-w-[2300px] border-collapse text-xs">
             <thead className="sticky top-0 z-10 bg-slate-900 text-white">
               <tr>
                 <th className="px-2 py-2 text-left">Période</th>
@@ -1701,11 +1868,15 @@ function DataReconciliationPanel() {
                 <th className="px-2 py-2 text-right">Fact. indic.</th>
                 <th className="px-2 py-2 text-right">Fact. flux</th>
                 <th className="px-2 py-2 text-right">Écart flux</th>
+                <th className="px-2 py-2 text-right">SMC fact.</th>
+                <th className="px-2 py-2 text-right">Écart SMC fact.</th>
                 <th className="px-2 py-2 text-right">Devis lignes</th>
                 <th className="px-2 py-2 text-right">Devis cache</th>
                 <th className="px-2 py-2 text-right">Devis indic.</th>
                 <th className="px-2 py-2 text-right">Devis flux</th>
                 <th className="px-2 py-2 text-right">Écart flux</th>
+                <th className="px-2 py-2 text-right">SMC devis</th>
+                <th className="px-2 py-2 text-right">Écart SMC devis</th>
                 <th className="px-2 py-2 text-right">CDC depuis fact</th>
                 <th className="px-2 py-2 text-right">CDC depuis activité</th>
                 <th className="px-2 py-2 text-right">CDC flux</th>
@@ -1745,12 +1916,24 @@ function DataReconciliationPanel() {
                     <td className={`px-2 py-2 text-right ${getValueClass(facturesLignes, row.factures_indicateur)}`}>{formatMoney(row.factures_indicateur)}</td>
                     <td className={`px-2 py-2 text-right ${getValueClass(facturesLignes, row.factures_flux)}`}>{formatMoney(row.factures_flux)}</td>
                     <td className={`px-2 py-2 text-right ${getEcartClass(toNumber(row.factures_flux) - facturesLignes)}`}>{formatSigned(toNumber(row.factures_flux) - facturesLignes)}</td>
+                    <td className={`px-2 py-2 text-right ${getValueClass(row.factures_indicateur, row.smc_factures_cache)}`}>
+                      {formatMoney(row.smc_factures_cache)}
+                    </td>
+                    <td className={`px-2 py-2 text-right ${getEcartClass(row.ecart_smc_factures_vs_indicateur)}`}>
+                      {formatSigned(row.ecart_smc_factures_vs_indicateur)}
+                    </td>
 
                     <td className="px-2 py-2 text-right font-bold">{formatMoney(devisLignes)}</td>
                     <td className={`px-2 py-2 text-right ${getValueClass(devisLignes, row.devis_cache)}`}>{formatMoney(row.devis_cache)}</td>
                     <td className={`px-2 py-2 text-right ${getValueClass(devisLignes, row.devis_indicateur)}`}>{formatMoney(row.devis_indicateur)}</td>
                     <td className={`px-2 py-2 text-right ${getValueClass(devisLignes, row.devis_flux)}`}>{formatMoney(row.devis_flux)}</td>
                     <td className={`px-2 py-2 text-right ${getEcartClass(toNumber(row.devis_flux) - devisLignes)}`}>{formatSigned(toNumber(row.devis_flux) - devisLignes)}</td>
+                    <td className={`px-2 py-2 text-right ${getValueClass(row.devis_indicateur, row.smc_devis_cache)}`}>
+                      {formatMoney(row.smc_devis_cache)}
+                    </td>
+                    <td className={`px-2 py-2 text-right ${getEcartClass(row.ecart_smc_devis_vs_indicateur)}`}>
+                      {formatSigned(row.ecart_smc_devis_vs_indicateur)}
+                    </td>
 
                     <td className="px-2 py-2 text-right font-bold">{formatMoney(cdcDepuisFact)}</td>
                     <td className="px-2 py-2 text-right font-bold">{formatMoney(row.cdc_indicateur_activite)}</td>
@@ -2242,10 +2425,12 @@ export default function ImportsParametragePage() {
 
     await runRpcForPeriods('rebuild_indicateur_activite_mensuel_periode', periods, onProgress, 'Agrégat activité')
     await runRpcForPeriods('rebuild_indicateur_flux_articles_mensuel_periode', periods, onProgress, 'Flux articles')
+    await runSmcCacheForPeriodsBatchesV28(periods, onProgress, 'Synthèse multi-clients')
   }
 
   async function runPostImportRefresh(config: TableConfig, onProgress?: (detail: string) => void) {
-    const monthlyPeriods = getMonthlyAggregatePeriods()
+    // Règle V21 : après import, on réactualise uniquement M-1 et M.
+    const monthlyPeriods = getMonthlyAggregatePeriods(2)
 
     if (config.key === 'facture_lignes') {
       await runRpcForPeriods(
@@ -2269,7 +2454,9 @@ export default function ImportsParametragePage() {
         'Rebuild flux articles mois par mois'
       )
 
-      return 'Cache factures, indicateur factures et flux articles recalculés mois par mois'
+      await runSmcCacheForPeriodsBatchesV28(monthlyPeriods, onProgress, 'Rebuild synthèse multi-clients ciblée')
+
+      return 'Cache factures, indicateur factures, flux articles et synthèse multi-clients recalculés mois par mois'
     }
 
     if (config.key === 'devis_lignes') {
@@ -2294,7 +2481,9 @@ export default function ImportsParametragePage() {
         'Rebuild flux articles mois par mois'
       )
 
-      return 'Cache devis, indicateur devis et flux articles recalculés mois par mois'
+      await runSmcCacheForPeriodsBatchesV28(monthlyPeriods, onProgress, 'Rebuild synthèse multi-clients ciblée')
+
+      return 'Cache devis, indicateur devis, flux articles et synthèse multi-clients recalculés mois par mois'
     }
 
     if (config.key === 'activite_lignes') {
@@ -2312,7 +2501,9 @@ export default function ImportsParametragePage() {
         'Rebuild flux articles mois par mois'
       )
 
-      return 'Indicateur activité et flux articles recalculés mois par mois'
+      await runSmcCacheForPeriodsBatchesV28(monthlyPeriods, onProgress, 'Rebuild synthèse multi-clients ciblée')
+
+      return 'Indicateur activité, flux articles et synthèse multi-clients recalculés mois par mois'
     }
 
     if (config.key === 'ref_familles') {
@@ -3336,17 +3527,20 @@ export default function ImportsParametragePage() {
     return formatDateForSql(new Date(now.getFullYear(), now.getMonth(), now.getDate()))
   })
 
-  async function runRecentMonthsRebuild(monthCount: 2 | 3 = 3, onProgress?: (detail: string) => void) {
-    const periods = getMonthlyAggregatePeriods(monthCount)
+  async function runRecentMonthsRebuild(_monthCount: 2 | 3 = 2, onProgress?: (detail: string) => void) {
+    // Règle V21 : les rebuilds standards ne recalculent que M-1 et M.
+    // Les périodes plus longues passent par le bloc manuel "Rebuild période".
+    const periods = getMonthlyAggregatePeriods(2)
 
     await runRpcForPeriods('refresh_facture_entetes_cache_periode', periods, onProgress, 'Cache factures')
     await runRpcForPeriods('rebuild_indicateur_factures_mensuel_periode', periods, onProgress, 'Agrégat factures')
 
     await runRpcForPeriods('refresh_devis_entetes_cache_periode', periods, onProgress, 'Cache devis')
-    await runRpcForPeriods('rebuild_indicateur_devis_mensuel_periode', periods, onProgress, 'Agrégat devis')
+    await runRpcForPeriods('rebuild_indicateur_devis_mensuel_periode', periods, onProgress, 'Agrégat devis / vue')
 
     await runRpcForPeriods('rebuild_indicateur_activite_mensuel_periode', periods, onProgress, 'Agrégat activité')
     await runRpcForPeriods('rebuild_indicateur_flux_articles_mensuel_periode', periods, onProgress, 'Flux articles')
+    await runSmcCacheForPeriodsBatchesV28(periods, onProgress, 'Synthèse multi-clients')
   }
 
   async function handleManualRecentMonthsRebuild(monthCount: 2 | 3 = 3, blMxMode?: 'previous_month' | 'current_month') {
@@ -3374,14 +3568,23 @@ export default function ImportsParametragePage() {
         })
         if (applyError) throw new Error(`apply_bl_mx_month_mode_activite : ${applyError.message}`)
 
-        setMaintenanceMessage(`BL M-x → ${blMxMode === 'previous_month' ? 'M-1' : 'M'} appliqué sans rebuild complet.`)
+        const periods = getMonthlyAggregatePeriods(2)
+        await runRpcForPeriods(
+          'rebuild_indicateur_flux_articles_mensuel_periode',
+          periods,
+          (detail) => setMaintenanceMessage(detail),
+          'Flux articles après BL M-x'
+        )
+        await runSmcCacheForPeriodsBatchesV28(periods, (detail) => setMaintenanceMessage(detail), 'Synthèse multi-clients après BL M-x')
+
+        setMaintenanceMessage(`BL M-x → ${blMxMode === 'previous_month' ? 'M-1' : 'M'} appliqué. Flux articles et synthèse multi-clients recalculés sur M-1/M.`)
         await loadStats()
         await loadRows(selectedConfig)
         return
       }
 
       await runRecentMonthsRebuild(monthCount, (detail) => setMaintenanceMessage(detail))
-      setMaintenanceMessage(`Rebuild ${monthCount} mois terminé. Agrégats et flux articles recalculés.`)
+      setMaintenanceMessage('Rebuild M-1/M terminé. Agrégats, flux articles et synthèse multi-clients recalculés.')
       await loadStats()
       await loadRows(selectedConfig)
     } catch (e: any) {
@@ -3490,19 +3693,11 @@ export default function ImportsParametragePage() {
                 disabled={maintenanceLoading || importing}
                 className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {maintenanceLoading ? 'Rebuild…' : 'Rebuild 2 mois'}
+                {maintenanceLoading ? 'Rebuild…' : 'Rebuild M-1 + M'}
               </button>
               <button
                 type="button"
-                onClick={() => handleManualRecentMonthsRebuild(3)}
-                disabled={maintenanceLoading || importing}
-                className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {maintenanceLoading ? 'Rebuild…' : 'Rebuild 3 mois'}
-              </button>
-              <button
-                type="button"
-                onClick={() => handleManualRecentMonthsRebuild(3, 'previous_month')}
+                onClick={() => handleManualRecentMonthsRebuild(2, 'previous_month')}
                 disabled={maintenanceLoading || importing}
                 className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
               >
@@ -3510,7 +3705,7 @@ export default function ImportsParametragePage() {
               </button>
               <button
                 type="button"
-                onClick={() => handleManualRecentMonthsRebuild(3, 'current_month')}
+                onClick={() => handleManualRecentMonthsRebuild(2, 'current_month')}
                 disabled={maintenanceLoading || importing}
                 className="rounded-xl border border-sky-300 bg-sky-50 px-4 py-2 text-sm font-semibold text-sky-800 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
               >
