@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import dynamic from 'next/dynamic'
 import { supabase } from '@/lib/supabaseClient'
 
@@ -8,6 +8,7 @@ const MapContainer: any = dynamic(() => import('react-leaflet').then((mod) => mo
 const TileLayer: any = dynamic(() => import('react-leaflet').then((mod) => mod.TileLayer as any), { ssr: false })
 const CircleMarker: any = dynamic(() => import('react-leaflet').then((mod) => mod.CircleMarker as any), { ssr: false })
 const Tooltip: any = dynamic(() => import('react-leaflet').then((mod) => mod.Tooltip as any), { ssr: false })
+const Popup: any = dynamic(() => import('react-leaflet').then((mod) => mod.Popup as any), { ssr: false })
 
 type ModeSelection = 'collaborateur' | 'agence'
 type SortDirection = 'asc' | 'desc'
@@ -38,6 +39,8 @@ type SelectionOptions = {
   agences: string[]
   cacheCollaborateurs: string[]
   cacheAgences: string[]
+  collaborateurAgence: Record<string, string>
+  agenceCollaborateurs: Record<string, string[]>
 }
 
 type AggRow = {
@@ -96,6 +99,7 @@ type CacheDbRow = {
   ca_ytd_n: number | null
   ca_ytd_n1: number | null
   ca_ytd_n_by_macro: Record<string, number> | null
+  ca_ytd_n1_by_macro?: Record<string, number> | null
   marge_pct_ytd_n: number | null
   marge_ytd_n_value: number | null
   marge_ytd_n1_value: number | null
@@ -122,6 +126,7 @@ type SummaryRow = {
   kind: RowKind
   level: number
   collaborateur: string
+  agence: string
   numero: string
   intitule: string
   totalMois: string
@@ -152,6 +157,7 @@ type SummaryRow = {
   caYtdN: number
   caYtdN1: number
   caYtdNByMacro: Record<string, number>
+  caYtdN1ByMacro: Record<string, number>
   margePctYtdN: number | null
   margeYtdNValue: number
   margeYtdN1Value: number
@@ -186,11 +192,15 @@ type ColumnDef = {
     type: ObjectiveType
   }
   value: (row: SummaryRow) => any
-  format?: 'text' | 'keur' | 'keurBlank' | 'keurCompare' | 'pct' | 'pctBlank' | 'pctCompare' | 'points' | 'number' | 'date' | 'action'
+  format?: 'text' | 'keur' | 'keurBlank' | 'keurCompare' | 'pct' | 'pctBlank' | 'pctCompare' | 'points' | 'number' | 'date' | 'action' | 'caBand'
   compareValue?: (row: SummaryRow) => any
 }
 
 type SortState = { key: string; direction: SortDirection }
+type MapBooleanFilter = 'all' | 'yes' | 'no'
+type MapProfileFilter = '' | '400K€' | '150K€' | '80K€' | '20K€' | 'vide'
+type MapProfilePeriodFilter = '12M' | 'N-1' | 'N-2'
+type ProfileMatrixDimension = 'agence' | 'collaborateur'
 
 type SyntheseMapClientRow = {
   id: string
@@ -263,6 +273,9 @@ const CURRENT_DAY = new Date().getDate()
 const CLOSED_MONTH = CURRENT_DAY <= 6 ? (CURRENT_MONTH === 1 ? 12 : CURRENT_MONTH - 1) : CURRENT_MONTH
 const CLOSED_MONTH_YEAR = CURRENT_MONTH === 1 && CURRENT_DAY <= 6 ? N - 1 : N
 const ANALYSIS_YEAR = CLOSED_MONTH_YEAR
+// Comparaison N-1 demandée : année précédente arrêtée au mois M-1,
+// alors que les valeurs N restent affichées jusqu'au mois réalisé courant.
+const N1_COMPARISON_MONTH = Math.max(0, CLOSED_MONTH - 1)
 const ALL_COLLABORATEURS_VALUE = '__ALL_COLLABORATEURS__'
 
 
@@ -388,19 +401,103 @@ function normalizeSiret(value: any) {
   return String(value ?? '').replace(/\D/g, '').trim()
 }
 
-function caBand(value: number | null | undefined) {
+const CA_PROFILE_BANDS: MapProfileFilter[] = ['400K€', '150K€', '80K€', '20K€', 'vide']
+
+function caBand(value: number | null | undefined): MapProfileFilter {
   const n = safeNumber(value)
-  if (n >= 400000) return '>400K€'
-  if (n >= 150000) return '>150K€'
-  if (n >= 80000) return '>80K€'
-  if (n >= 20000) return '>20K€'
-  if (n > 0) return '<20K€'
-  return '0€'
+  if (n >= 400000) return '400K€'
+  if (n >= 150000) return '150K€'
+  if (n >= 80000) return '80K€'
+  if (n >= 20000) return '20K€'
+  return 'vide'
 }
 
-function formatCaProfile(row: SummaryRow) {
-  if (row.kind === 'month') return ''
-  return `12M ${row.caBandN} · N-1 ${row.caBandN1} · N-2 ${row.caBandN2}`
+function caBandClass(band: string) {
+  if (band === '400K€') return 'caPill400'
+  if (band === '150K€') return 'caPill150'
+  if (band === '80K€') return 'caPill80'
+  if (band === '20K€') return 'caPill20'
+  return 'caPillEmpty'
+}
+
+function CaBandPill({ band, compact = false }: { band: string | null | undefined; compact?: boolean }) {
+  const normalized = safeText(band, 'vide')
+  return <span className={`caPill ${caBandClass(normalized)} ${compact ? 'compact' : ''}`}>{normalized === 'vide' ? 'vide' : normalized}</span>
+}
+
+function CaProfileTagSet({ row, compact = false }: { row: Pick<SummaryRow, 'caBandN' | 'caBandN1' | 'caBandN2'>; compact?: boolean }) {
+  return (
+    <span className={`caTagSet ${compact ? 'compact' : ''}`}>
+      <span><small>12M</small><CaBandPill band={row.caBandN} compact={compact} /></span>
+      <span><small>N-1</small><CaBandPill band={row.caBandN1} compact={compact} /></span>
+      <span><small>N-2</small><CaBandPill band={row.caBandN2} compact={compact} /></span>
+    </span>
+  )
+}
+
+function shortBandLabel(band: string | null | undefined) {
+  const normalized = safeText(band, 'vide')
+  if (normalized === 'vide') return ''
+  return normalized.replace('K€', '')
+}
+
+function MapProfilePill({ band, color }: { band: string | null | undefined; color: string }) {
+  const normalized = safeText(band, 'vide')
+  const isEmpty = normalized === 'vide'
+  const label = isEmpty ? '' : shortBandLabel(band)
+
+  // Style inline volontaire : les Tooltip Leaflet sont rendus hors du scope CSS JSX.
+  // Cela garantit le même rendu sur la carte ET dans la liste de droite.
+  return (
+    <span
+      className={`mapProfilePill ${isEmpty ? 'empty' : ''}`}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flex: '0 0 58px',
+        width: 58,
+        minWidth: 58,
+        maxWidth: 58,
+        height: 28,
+        padding: '0 8px',
+        boxSizing: 'border-box',
+        borderRadius: 9,
+        background: color || '#d9d9d9',
+        border: '2px solid #0f172a',
+        color: isEmpty ? 'transparent' : '#ffffff',
+        fontSize: 15,
+        fontWeight: 950,
+        lineHeight: 1,
+        whiteSpace: 'nowrap',
+        textAlign: 'center',
+        boxShadow: '0 1px 2px rgba(15,23,42,.20)',
+      }}
+      title={isEmpty ? 'Profil CA vide' : normalized}
+    >
+      {label}
+    </span>
+  )
+}
+
+function MapProfileTriplet({ row, color }: { row: Pick<SyntheseMapClientRow, 'caBandN' | 'caBandN1' | 'caBandN2'>; color: string }) {
+  return (
+    <span
+      className="mapProfileTriplet"
+      style={{
+        display: 'inline-flex',
+        gap: 8,
+        alignItems: 'center',
+        justifyContent: 'flex-end',
+        minWidth: 198,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      <MapProfilePill band={row.caBandN} color={color} />
+      <MapProfilePill band={row.caBandN1} color={color} />
+      <MapProfilePill band={row.caBandN2} color={color} />
+    </span>
+  )
 }
 
 function formatCompareKEur(current: number | null | undefined, previous: number | null | undefined) {
@@ -431,16 +528,18 @@ function translateNafForMap(value: string | null | undefined): string {
 }
 
 function getMapSectorLabel(row: SyntheseMapClientRow) {
-  return row.naf_libelle_traduit || translateNafForMap(row.activitePrincipaleEtablissement)
+  const codeLabel = translateNafForMap(row.activitePrincipaleEtablissement)
+  if (codeLabel !== 'AUTRES') return codeLabel
+  return row.naf_libelle_traduit || codeLabel
 }
 
 function getMapSectorColor(sector: string | null | undefined) {
   const s = String(sector || '').toLowerCase()
-  if (s.includes('installateur') || s.includes('cvc')) return '#8ba9be'
-  if (s.includes('enr')) return '#a2cc88'
-  if (s.includes('plomberie')) return '#c3b691'
-  if (s.includes('cmi')) return '#e0a961'
-  if (s.includes('bâtiment')) return '#8e9db3'
+  if (s.includes('installateur') || s.includes('cvc') || s.includes('thermique') || s.includes('climatisation')) return '#8ba9be'
+  if (s.includes('enr') || s.includes('electric') || s.includes('électric')) return '#a2cc88'
+  if (s.includes('plomb') || (s.includes('eau') && s.includes('gaz'))) return '#c3b691'
+  if (s.includes('cmi') || s.includes('construction')) return '#e0a961'
+  if (s.includes('bâtiment') || s.includes('batiment')) return '#8e9db3'
   return '#d9d9d9'
 }
 
@@ -607,7 +706,7 @@ function sumAmount(rows: AggRow[], numero: string | null, year: number, opts?: {
     if (numero && normalize(row.numero_tiers) !== normalize(numero)) return sum
     if (row.annee !== year) return sum
     if (opts?.month && row.mois !== opts.month) return sum
-    if (opts?.monthMax && row.mois > opts.monthMax) return sum
+    if (opts?.monthMax !== undefined && row.mois > opts.monthMax) return sum
     if (opts?.macro && row.famille_macro !== opts.macro) return sum
     return sum + row.ca_ht
   }, 0)
@@ -618,7 +717,7 @@ function sumMarge(rows: AggRow[], numero: string | null, year: number, opts?: { 
     if (numero && normalize(row.numero_tiers) !== normalize(numero)) return sum
     if (row.annee !== year) return sum
     if (opts?.month && row.mois !== opts.month) return sum
-    if (opts?.monthMax && row.mois > opts.monthMax) return sum
+    if (opts?.monthMax !== undefined && row.mois > opts.monthMax) return sum
     if (opts?.macro && row.famille_macro !== opts.macro) return sum
     return sum + row.marge_valeur
   }, 0)
@@ -699,8 +798,9 @@ function buildSummaryForNumero(tier: TiersRow | null, factures: AggRow[], devis:
   const caYtdN = sumAmount(factures, numero || null, N, month ? { month } : { monthMax: CLOSED_MONTH })
   const margeYtdN = sumMarge(factures, numero || null, N, month ? { month } : { monthMax: CLOSED_MONTH })
   const margePctYtdN = caYtdN ? (margeYtdN / caYtdN) * 100 : null
-  const caYtdN1 = sumAmount(factures, numero || null, N - 1, month ? { month } : { monthMax: CLOSED_MONTH })
-  const margeYtdN1 = sumMarge(factures, numero || null, N - 1, month ? { month } : { monthMax: CLOSED_MONTH })
+  const n1CompareOpts = month ? { month } : { monthMax: N1_COMPARISON_MONTH }
+  const caYtdN1 = sumAmount(factures, numero || null, N - 1, n1CompareOpts)
+  const margeYtdN1 = sumMarge(factures, numero || null, N - 1, n1CompareOpts)
   const margePctYtdN1 = caYtdN1 ? (margeYtdN1 / caYtdN1) * 100 : null
   const objectifCa = objectiveNumber(objectives, numero, 'Objectif', 'CA')
   const objectifProrata = month ? objectifCa / 12 : (objectifCa / 12) * CLOSED_MONTH
@@ -715,6 +815,7 @@ function buildSummaryForNumero(tier: TiersRow | null, factures: AggRow[], devis:
     kind: month ? 'month' : tier ? 'client' : 'total',
     level: month ? 1 : 0,
     collaborateur: tier?.collaborateur || '',
+    agence: tier?.agence || '',
     numero: tier?.numero || 'TOTAL',
     intitule: tier?.intitule || '',
     totalMois: month ? MONTHS[month - 1] : 'TOTAL',
@@ -737,18 +838,19 @@ function buildSummaryForNumero(tier: TiersRow | null, factures: AggRow[], devis:
     objectifCa: month ? objectifCa / 12 : objectifCa,
     potentiel: objectiveNumber(objectives, numero, 'Objectif', 'POTENTIEL'),
     devisYtdN: sumAmount(devis, numero || null, N, month ? { month } : { monthMax: CLOSED_MONTH }),
-    devisYtdN1: sumAmount(devis, numero || null, N - 1, month ? { month } : { monthMax: CLOSED_MONTH }),
+    devisYtdN1: sumAmount(devis, numero || null, N - 1, n1CompareOpts),
     devisYtdNByMacro: byMacro(devis, numero || null, N, { month, monthMax: month ? undefined : CLOSED_MONTH, metric: 'ca' }),
-    devisYtdN1ByMacro: byMacro(devis, numero || null, N - 1, { month, monthMax: month ? undefined : CLOSED_MONTH, metric: 'ca' }),
+    devisYtdN1ByMacro: byMacro(devis, numero || null, N - 1, { month, monthMax: month ? undefined : N1_COMPARISON_MONTH, metric: 'ca' }),
     caYtdN,
     caYtdN1,
     caYtdNByMacro: byMacro(factures, numero || null, N, { month, monthMax: month ? undefined : CLOSED_MONTH, metric: 'ca' }),
+    caYtdN1ByMacro: byMacro(factures, numero || null, N - 1, { month, monthMax: month ? undefined : N1_COMPARISON_MONTH, metric: 'ca' }),
     margePctYtdN,
     margeYtdNValue: margeYtdN,
     margeYtdN1Value: margeYtdN1,
     margeYtdNByMacro: byMacroMarginPct(factures, numero || null, N, { month, monthMax: month ? undefined : CLOSED_MONTH }),
     margeYtdNValueByMacro: byMacro(factures, numero || null, N, { month, monthMax: month ? undefined : CLOSED_MONTH, metric: 'marge' }),
-    margeYtdN1ValueByMacro: byMacro(factures, numero || null, N - 1, { month, monthMax: month ? undefined : CLOSED_MONTH, metric: 'marge' }),
+    margeYtdN1ValueByMacro: byMacro(factures, numero || null, N - 1, { month, monthMax: month ? undefined : N1_COMPARISON_MONTH, metric: 'marge' }),
     ca12m: caYtdN + Math.max(0, caN1 - caYtdN1),
     caBandN: caBand(caYtdN + Math.max(0, caN1 - caYtdN1)),
     caBandN1: caBand(caN1),
@@ -783,7 +885,9 @@ function buildColumns(showFamilies: boolean, showCollaborateurColumn = false): C
     { key: 'libelleNaf', label: 'Désignation Naf', group: 'Client', width: 130, value: (r) => r.libelleNaf, format: 'text' },
     { key: 'dateCreation', label: 'Date Création', group: 'Client', width: 95, value: (r) => r.dateCreation, format: 'date' },
     { key: 'prospectLabel', label: 'Prospect OUI/NON', group: 'Client', width: 86, value: (r) => r.prospectLabel, format: 'text' },
-    { key: 'caProfile', label: 'Profil CA', group: 'Client', width: 185, className: 'caProfileCell', value: (r) => formatCaProfile(r), format: 'text' },
+    { key: 'caBandN2', label: 'Profil CA N-2', group: 'Client', width: 76, className: 'caBandCell', value: (r) => r.caBandN2, format: 'caBand' },
+    { key: 'caBandN1', label: 'Profil CA N-1', group: 'Client', width: 76, className: 'caBandCell', value: (r) => r.caBandN1, format: 'caBand' },
+    { key: 'caBandN', label: 'Profil CA 12M', group: 'Client', width: 76, className: 'caBandCell', value: (r) => r.caBandN, format: 'caBand' },
     { key: 'remarque', label: 'Remarque', group: 'Client', width: 310, value: (r) => r.numero, editable: { domaine: 'Remarque', rubrique: 'Remarque', type: 'texte' }, format: 'text' },
     { key: 'caN3', label: `CA ${N - 3}`, group: 'CA / Objectifs', width: 92, className: 'metric previous', value: (r) => r.caN3, format: 'keurBlank' },
     { key: 'caN2', label: `CA ${N - 2}`, group: 'CA / Objectifs', width: 92, className: 'metric previous', value: (r) => r.caN2, format: 'keurBlank' },
@@ -807,15 +911,15 @@ function buildColumns(showFamilies: boolean, showCollaborateurColumn = false): C
     { key: 'devisYtdN', label: `DEVIS ${String(CLOSED_MONTH).padStart(2, '0')}-${N}`, group: 'CA / Objectifs', width: 124, className: 'metric devis redLabel compareCell', value: (r) => r.devisYtdN, compareValue: (r) => r.devisYtdN1, format: 'keurCompare' },
   )
   if (showFamilies) {
-    FAMILY_MACROS.forEach((macro) => cols.push({ key: `devisYtdN_${macro}`, label: `Dont ${macro}`, group: `Devis ${N}`, width: 78, rotate: true, value: (r) => r.devisYtdNByMacro[macro], format: 'keurBlank' }))
+    FAMILY_MACROS.forEach((macro) => cols.push({ key: `devisYtdN_${macro}`, label: `Dont ${macro} (N-1)`, group: `Devis ${N}`, width: 118, rotate: true, className: 'compareCell', value: (r) => r.devisYtdNByMacro[macro], compareValue: (r) => r.devisYtdN1ByMacro[macro], format: 'keurCompare' }))
   }
   cols.push({ key: 'caYtdN', label: `CA RÉEL ${N}`, group: 'CA / Objectifs', width: 124, className: 'metric ca redLabel compareCell', value: (r) => r.caYtdN, compareValue: (r) => r.caYtdN1, format: 'keurCompare' })
   if (showFamilies) {
-    FAMILY_MACROS.forEach((macro) => cols.push({ key: `caYtdN_${macro}`, label: `Dont ${macro}`, group: `CA ${N}`, width: 78, rotate: true, value: (r) => r.caYtdNByMacro[macro], format: 'keurBlank' }))
+    FAMILY_MACROS.forEach((macro) => cols.push({ key: `caYtdN_${macro}`, label: `Dont ${macro} (N-1)`, group: `CA ${N}`, width: 118, rotate: true, className: 'compareCell', value: (r) => r.caYtdNByMacro[macro], compareValue: (r) => r.caYtdN1ByMacro[macro], format: 'keurCompare' }))
   }
   cols.push({ key: 'margePctYtdN', label: `MARGE RÉEL ${N}`, group: 'CA / Objectifs', width: 124, className: 'metric margin redLabel compareCell', value: (r) => r.margePctYtdN, compareValue: (r) => ratio(r.margeYtdN1Value, r.caYtdN1), format: 'pctCompare' })
   if (showFamilies) {
-    FAMILY_MACROS.forEach((macro) => cols.push({ key: `margeYtdN_${macro}`, label: `Dont ${macro}`, group: `Marge ${N}`, width: 78, rotate: true, value: (r) => r.margeYtdNByMacro[macro], format: 'pctBlank' }))
+    FAMILY_MACROS.forEach((macro) => cols.push({ key: `margeYtdN_${macro}`, label: `Dont ${macro} (N-1)`, group: `Marge ${N}`, width: 118, rotate: true, className: 'compareCell', value: (r) => r.margeYtdNByMacro[macro], compareValue: (r) => ratio(r.margeYtdN1ValueByMacro[macro], r.caYtdN1ByMacro[macro]), format: 'pctCompare' }))
   }
 
   cols.push(
@@ -883,8 +987,15 @@ function displayValue(col: ColumnDef, row: SummaryRow, objectiveMap: Map<string,
   if (col.format === 'pctBlank') return formatPctBlank(value as number | null)
   if (col.format === 'pctCompare') return formatComparePct(value as number | null, col.compareValue?.(row) as number | null)
   if (col.format === 'points') return formatPoints(value as number | null)
+  if (col.format === 'caBand') return safeText(value, 'vide')
   if (col.format === 'number') return formatNumber(safeNumber(value))
   return safeText(value)
+}
+
+function caBandRank(value: any) {
+  const band = safeText(value, 'vide')
+  const idx = CA_PROFILE_BANDS.indexOf(band as MapProfileFilter)
+  return idx === -1 ? CA_PROFILE_BANDS.length : idx
 }
 
 function rawSortableValue(col: ColumnDef, row: SummaryRow, objectiveMap: Map<string, ObjectiveRow>) {
@@ -892,6 +1003,7 @@ function rawSortableValue(col: ColumnDef, row: SummaryRow, objectiveMap: Map<str
     if (col.editable.type === 'texte' || col.editable.type === 'date') return displayValue(col, row, objectiveMap)
     return objectiveNumber(objectiveMap, row.numero, col.editable.domaine, col.editable.rubrique)
   }
+  if (col.format === 'caBand') return -caBandRank(col.value(row))
   return col.value(row)
 }
 
@@ -933,6 +1045,7 @@ function cacheRowToSummary(row: CacheDbRow): SummaryRow {
     kind: row.row_kind,
     level: row.row_kind === 'month' ? 1 : 0,
     collaborateur: safeText(row.collaborateur),
+    agence: safeText(row.agence_collaborateur),
     numero: safeText(row.numero_tiers, 'SANS CODE'),
     intitule: safeText(row.intitule_tiers),
     totalMois: month ? MONTHS[month - 1] : 'TOTAL',
@@ -959,6 +1072,7 @@ function cacheRowToSummary(row: CacheDbRow): SummaryRow {
     caYtdN: safeNumber(row.ca_ytd_n),
     caYtdN1: safeNumber(row.ca_ytd_n1),
     caYtdNByMacro: macroNumberPayload(row.ca_ytd_n_by_macro),
+    caYtdN1ByMacro: row.row_kind === 'month' ? macroNumberPayload(row.ca_n1_by_macro) : macroNumberPayload(row.ca_ytd_n1_by_macro || row.ca_n1_by_macro),
     margePctYtdN: row.marge_pct_ytd_n === null || row.marge_pct_ytd_n === undefined ? null : safeNumber(row.marge_pct_ytd_n),
     margeYtdNValue: safeNumber(row.marge_ytd_n_value),
     margeYtdN1Value: safeNumber(row.marge_ytd_n1_value),
@@ -1031,6 +1145,7 @@ function buildTotalFromRows(rows: SummaryRow[], showCollaborateurColumn: boolean
   const caN1ByMacro = sumMacro(rows, (row) => row.caN1ByMacro)
   const margeN1ValueByMacro = sumMacro(rows, (row) => row.margeN1ValueByMacro)
   const caYtdNByMacro = sumMacro(rows, (row) => row.caYtdNByMacro)
+  const caYtdN1ByMacro = sumMacro(rows, (row) => row.caYtdN1ByMacro)
   const margeYtdNValueByMacro = sumMacro(rows, (row) => row.margeYtdNValueByMacro)
 
   const total: SummaryRow = {
@@ -1038,6 +1153,7 @@ function buildTotalFromRows(rows: SummaryRow[], showCollaborateurColumn: boolean
     kind: 'total',
     level: 0,
     collaborateur: showCollaborateurColumn ? 'TOTAL' : '',
+    agence: 'TOTAL',
     numero: 'TOTAL',
     intitule: '',
     totalMois: 'TOTAL',
@@ -1064,12 +1180,17 @@ function buildTotalFromRows(rows: SummaryRow[], showCollaborateurColumn: boolean
     caYtdN: rows.reduce((s, r) => s + r.caYtdN, 0),
     caYtdN1: rows.reduce((s, r) => s + r.caYtdN1, 0),
     caYtdNByMacro,
+    caYtdN1ByMacro,
     margePctYtdN: null,
     margeYtdNValue: rows.reduce((s, r) => s + r.margeYtdNValue, 0),
     margeYtdN1Value: rows.reduce((s, r) => s + r.margeYtdN1Value, 0),
     margeYtdNByMacro: emptyNullableByMacro(),
     margeYtdNValueByMacro,
     margeYtdN1ValueByMacro: sumMacro(rows, (row) => row.margeYtdN1ValueByMacro),
+    ca12m: rows.reduce((s, r) => s + r.ca12m, 0),
+    caBandN: caBand(rows.reduce((s, r) => s + r.ca12m, 0)),
+    caBandN1: caBand(rows.reduce((s, r) => s + r.caN1, 0)),
+    caBandN2: caBand(rows.reduce((s, r) => s + r.caN2, 0)),
     contratBfa: rows.reduce((s, r) => s + r.contratBfa, 0),
     caVsN1: null,
     margeVsN1: null,
@@ -1102,7 +1223,45 @@ function mergeSortedOptions(...lists: string[][]) {
 }
 
 function emptySelectionOptions(): SelectionOptions {
-  return { collaborateurs: [], agences: [], cacheCollaborateurs: [], cacheAgences: [] }
+  return { collaborateurs: [], agences: [], cacheCollaborateurs: [], cacheAgences: [], collaborateurAgence: {}, agenceCollaborateurs: {} }
+}
+
+function buildCollaborateurAgencyMaps(rawCollaborateurs: Record<string, any>[]) {
+  const collaborateurAgence: Record<string, string> = {}
+  const agenceCollaborateursSet = new Map<string, Set<string>>()
+  const collaborateurs: string[] = []
+  const agences: string[] = []
+
+  rawCollaborateurs.forEach((row) => {
+    const nom = safeText(raw(row, ['nom', 'collaborateur', 'representant', 'commercial', 'vendeur']))
+    const agence = safeText(raw(row, ['agence', 'agence_collaborateur', 'depot', 'depot_rattachement', 'agence_rattachement']))
+    if (!nom) return
+    collaborateurs.push(nom)
+    if (agence) {
+      agences.push(agence)
+      collaborateurAgence[normalize(nom)] = agence
+      const key = normalize(agence)
+      if (!agenceCollaborateursSet.has(key)) agenceCollaborateursSet.set(key, new Set())
+      agenceCollaborateursSet.get(key)!.add(nom)
+    }
+  })
+
+  const agenceCollaborateurs: Record<string, string[]> = {}
+  agenceCollaborateursSet.forEach((values, key) => {
+    agenceCollaborateurs[key] = Array.from(values).sort((a, b) => a.localeCompare(b, 'fr'))
+  })
+
+  return {
+    collaborateurs: mergeSortedOptions(collaborateurs),
+    agences: mergeSortedOptions(agences),
+    collaborateurAgence,
+    agenceCollaborateurs,
+  }
+}
+
+function applyRefAgence(row: SummaryRow, collaborateurAgence: Record<string, string>): SummaryRow {
+  const agence = collaborateurAgence[normalize(row.collaborateur)]
+  return agence ? { ...row, agence } : row
 }
 
 async function fetchCacheSelectionOptions() {
@@ -1120,17 +1279,18 @@ async function fetchReferentialSelectionOptions() {
     fetchAll('ref_tiers', '*'),
   ])
 
+  const maps = buildCollaborateurAgencyMaps(rawCollaborateurs)
+
   const collaborateurs = mergeSortedOptions(
-    rawCollaborateurs.map((row) => safeText(raw(row, ['nom', 'collaborateur', 'representant']))),
+    maps.collaborateurs,
     rawTiers.map((row) => safeText(raw(row, ['collaborateur', 'representant', 'commercial', 'vendeur'])))
   )
 
-  const agences = mergeSortedOptions(
-    rawCollaborateurs.map((row) => safeText(raw(row, ['agence', 'agence_collaborateur', 'depot']))),
-    rawTiers.map((row) => safeText(raw(row, ['agence_rattachement', 'agence', 'depot_rattachement', 'depot'])))
-  )
+  // Les agences de référence viennent volontairement de ref_collaborateurs.
+  // Les tiers sont rattachés ensuite via leur collaborateur, pour éviter les variantes d'agence issues de ref_tiers/cache.
+  const agences = maps.agences
 
-  return { collaborateurs, agences }
+  return { collaborateurs, agences, collaborateurAgence: maps.collaborateurAgence, agenceCollaborateurs: maps.agenceCollaborateurs }
 }
 
 async function fetchSelectionOptions(): Promise<SelectionOptions> {
@@ -1140,21 +1300,26 @@ async function fetchSelectionOptions(): Promise<SelectionOptions> {
   ])
 
   const cacheOptions = cacheResult.status === 'fulfilled' ? cacheResult.value : { collaborateurs: [], agences: [] }
-  const refOptions = refResult.status === 'fulfilled' ? refResult.value : { collaborateurs: [], agences: [] }
+  const refOptions = refResult.status === 'fulfilled' ? refResult.value : { collaborateurs: [], agences: [], collaborateurAgence: {}, agenceCollaborateurs: {} }
 
+  const refAgences = refOptions.agences || []
   return {
     collaborateurs: mergeSortedOptions(cacheOptions.collaborateurs, refOptions.collaborateurs),
-    agences: mergeSortedOptions(cacheOptions.agences, refOptions.agences),
+    agences: refAgences.length ? refAgences : mergeSortedOptions(cacheOptions.agences),
     cacheCollaborateurs: cacheOptions.collaborateurs,
     cacheAgences: cacheOptions.agences,
+    collaborateurAgence: refOptions.collaborateurAgence || {},
+    agenceCollaborateurs: refOptions.agenceCollaborateurs || {},
   }
 }
 
-async function fetchCacheClientRows(mode: ModeSelection, selected: string) {
+async function fetchCacheClientRows(mode: ModeSelection, selected: string, collaborateursForAgence: string[] = []) {
   return fetchAll('synthese_multi_clients_cache', '*', (query) => {
     let q = query.eq('annee', N).eq('row_kind', 'client')
     if (mode === 'collaborateur' && selected !== ALL_COLLABORATEURS_VALUE) q = q.eq('collaborateur', selected)
-    if (mode === 'agence') q = q.eq('agence_collaborateur', selected)
+    if (mode === 'agence') {
+      q = collaborateursForAgence.length ? q.in('collaborateur', collaborateursForAgence) : q.eq('agence_collaborateur', selected)
+    }
     return q.order('collaborateur', { ascending: true }).order('numero_tiers', { ascending: true })
   }) as Promise<CacheDbRow[]>
 }
@@ -1166,6 +1331,248 @@ async function fetchCacheMonthRows(numero: string) {
     .eq('numero_tiers', numero)
     .order('mois', { ascending: true })
   ) as Promise<CacheDbRow[]>
+}
+
+async function fetchCacheMonthRowsForNumeros(numeros: string[]) {
+  const rows: CacheDbRow[] = []
+  const uniqueNumeros = Array.from(new Set(numeros.map((numero) => safeText(numero)).filter(Boolean)))
+  for (const group of chunk(uniqueNumeros, 250)) {
+    const part = await fetchAll('synthese_multi_clients_cache', '*', (query) => query
+      .eq('annee', N)
+      .eq('row_kind', 'month')
+      .in('numero_tiers', group)
+      .order('numero_tiers', { ascending: true })
+      .order('mois', { ascending: true })
+    ) as CacheDbRow[]
+    rows.push(...part)
+  }
+  return rows
+}
+
+function monthNumberFromSummary(row: SummaryRow) {
+  const idx = MONTHS.indexOf(row.totalMois)
+  return idx >= 0 ? idx + 1 : 0
+}
+
+function groupMonthSummariesByNumero(rows: SummaryRow[]) {
+  const grouped: Record<string, SummaryRow[]> = {}
+  rows.forEach((row) => {
+    const numero = safeText(row.numero)
+    if (!numero) return
+    if (!grouped[numero]) grouped[numero] = []
+    grouped[numero].push(row)
+  })
+  Object.keys(grouped).forEach((numero) => {
+    grouped[numero] = grouped[numero].sort((a, b) => monthNumberFromSummary(a) - monthNumberFromSummary(b))
+  })
+  return grouped
+}
+
+function sumSummaryAmount(rows: SummaryRow[], getter: (row: SummaryRow) => number) {
+  return rows.reduce((sum, row) => sum + safeNumber(getter(row)), 0)
+}
+
+function recomputeClientN1ComparisonFromMonths(row: SummaryRow, monthRows: SummaryRow[]) {
+  if (row.kind !== 'client' || monthRows.length === 0) return row
+
+  const compareRows = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= N1_COMPARISON_MONTH)
+  const rollingRows = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= CLOSED_MONTH)
+
+  const devisYtdN1ByMacro = sumMacro(compareRows, (monthRow) => monthRow.devisN1ByMacro)
+  const caYtdN1ByMacro = sumMacro(compareRows, (monthRow) => monthRow.caN1ByMacro)
+  const margeYtdN1ValueByMacro = sumMacro(compareRows, (monthRow) => monthRow.margeN1ValueByMacro)
+  const devisYtdN1 = sumSummaryAmount(compareRows, (monthRow) => monthRow.devisN1)
+  const caYtdN1 = sumSummaryAmount(compareRows, (monthRow) => monthRow.caN1)
+  const margeYtdN1Value = sumSummaryAmount(compareRows, (monthRow) => monthRow.margeN1Value)
+  const rollingN1SamePeriod = sumSummaryAmount(rollingRows, (monthRow) => monthRow.caN1)
+  const ca12m = row.caYtdN + Math.max(0, row.caN1 - rollingN1SamePeriod)
+  const currentMarginPct = row.caYtdN ? (row.margeYtdNValue / row.caYtdN) * 100 : null
+  const previousMarginPct = caYtdN1 ? (margeYtdN1Value / caYtdN1) * 100 : null
+
+  return {
+    ...row,
+    devisYtdN1,
+    devisYtdN1ByMacro,
+    caYtdN1,
+    caYtdN1ByMacro,
+    margeYtdN1Value,
+    margeYtdN1ValueByMacro,
+    ca12m,
+    caBandN: caBand(ca12m),
+    caVsN1: ratio(row.caYtdN, caYtdN1),
+    margeVsN1: deltaPoints(currentMarginPct, previousMarginPct),
+  }
+}
+
+
+type ProfileMatrixPeriod = '12M' | 'N-1' | 'N-2'
+type ProfileMatrixClientDetail = {
+  numero: string
+  intitule: string
+  ca: number
+}
+type ProfileMatrixRow = {
+  label: string
+  total: number
+  counts: Record<string, number>
+  details: Record<string, ProfileMatrixClientDetail[]>
+}
+
+function bandForPeriod(row: SummaryRow, period: ProfileMatrixPeriod) {
+  if (period === '12M') return row.caBandN
+  if (period === 'N-1') return row.caBandN1
+  return row.caBandN2
+}
+
+function caForPeriod(row: SummaryRow, period: ProfileMatrixPeriod) {
+  if (period === '12M') return row.ca12m
+  if (period === 'N-1') return row.caN1
+  return row.caN2
+}
+
+function emptyProfileDetails() {
+  return Object.fromEntries(CA_PROFILE_BANDS.map((band) => [band, []])) as Record<string, ProfileMatrixClientDetail[]>
+}
+
+function buildProfileMatrix(rows: SummaryRow[], dimension: ProfileMatrixDimension, period: ProfileMatrixPeriod): ProfileMatrixRow[] {
+  const map = new Map<string, ProfileMatrixRow>()
+  rows
+    .filter((row) => row.kind === 'client')
+    .forEach((row) => {
+      const label = safeText(dimension === 'agence' ? row.agence : row.collaborateur, 'NON AFFECTE')
+      if (!map.has(label)) {
+        map.set(label, {
+          label,
+          total: 0,
+          counts: Object.fromEntries(CA_PROFILE_BANDS.map((band) => [band, 0])) as Record<string, number>,
+          details: emptyProfileDetails(),
+        })
+      }
+      const bucket = map.get(label)!
+      const band = safeText(bandForPeriod(row, period), 'vide')
+      bucket.counts[band] = (bucket.counts[band] || 0) + 1
+      bucket.details[band] = [...(bucket.details[band] || []), { numero: row.numero, intitule: row.intitule, ca: caForPeriod(row, period) }]
+      bucket.total += 1
+    })
+
+  return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label, 'fr', { numeric: true }))
+}
+
+function profileMatrixTotal(rows: ProfileMatrixRow[]) {
+  const details = emptyProfileDetails()
+  for (const band of CA_PROFILE_BANDS) {
+    details[band] = rows.flatMap((row) => row.details[band] || []).sort((a, b) => b.ca - a.ca)
+  }
+
+  const total: ProfileMatrixRow = {
+    label: 'TOTAL',
+    total: rows.reduce((sum, row) => sum + row.total, 0),
+    counts: Object.fromEntries(CA_PROFILE_BANDS.map((band) => [band, rows.reduce((sum, row) => sum + (row.counts[band] || 0), 0)])) as Record<string, number>,
+    details,
+  }
+  return total
+}
+
+type ProfileHoverPosition = { left: number; top: number }
+
+function getProfileHoverPosition(e: MouseEvent<HTMLElement>): ProfileHoverPosition {
+  const width = 380
+  const margin = 16
+  const left = Math.min(Math.max(margin, e.clientX + 14), Math.max(margin, window.innerWidth - width - margin))
+  const top = Math.min(Math.max(margin, e.clientY + 14), Math.max(margin, window.innerHeight - 340))
+  return { left, top }
+}
+
+function ProfileHoverFloating({ title, details, position }: { title: string; details: ProfileMatrixClientDetail[]; position: ProfileHoverPosition }) {
+  return (
+    <div className="profileHoverFloating" style={{ left: position.left, top: position.top }}>
+      <strong>{title}</strong>
+      {details.map((client) => (
+        <div key={`${title}-${client.numero}`} className="profileHoverRow">
+          <b>{client.numero}</b>
+          <span>{client.intitule}</span>
+          <em>{formatKEurBlank(client.ca) || '0,0 K€'}</em>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function ProfileMatrixCountCell({ row, band }: { row: ProfileMatrixRow; band: MapProfileFilter }) {
+  const [hoverPosition, setHoverPosition] = useState<ProfileHoverPosition | null>(null)
+  const count = row.counts[band] || 0
+  const details = (row.details[band] || []).slice().sort((a, b) => b.ca - a.ca)
+  const canShowDetails = count > 0 && count <= 10
+
+  const numberCellStyle = {
+    textAlign: 'center' as const,
+    verticalAlign: 'middle' as const,
+    padding: '5px 7px',
+    fontVariantNumeric: 'tabular-nums' as const,
+  }
+
+  if (!count) return <td className="profileMatrixNumberCell" style={numberCellStyle} />
+
+  return (
+    <td
+      className={`profileMatrixNumberCell${canShowDetails ? ' profileTooltipCell' : ''}`}
+      style={numberCellStyle}
+      onMouseEnter={canShowDetails ? (e) => setHoverPosition(getProfileHoverPosition(e)) : undefined}
+      onMouseMove={canShowDetails ? (e) => setHoverPosition(getProfileHoverPosition(e)) : undefined}
+      onMouseLeave={canShowDetails ? () => setHoverPosition(null) : undefined}
+    >
+      <span className="profileMatrixNumberValue">{count}</span>
+      {canShowDetails && hoverPosition ? (
+        <ProfileHoverFloating title={`${row.label} · ${band}`} details={details} position={hoverPosition} />
+      ) : null}
+    </td>
+  )
+}
+
+function ProfileMatrixTotalCell({ row }: { row: ProfileMatrixRow }) {
+  const [hoverPosition, setHoverPosition] = useState<ProfileHoverPosition | null>(null)
+  const details = CA_PROFILE_BANDS
+    .flatMap((band) => row.details[band] || [])
+    .sort((a, b) => b.ca - a.ca)
+  const canShowDetails = row.total > 0 && row.total <= 10
+
+  const numberCellStyle = {
+    textAlign: 'center' as const,
+    verticalAlign: 'middle' as const,
+    padding: '5px 7px',
+    fontVariantNumeric: 'tabular-nums' as const,
+  }
+
+  return (
+    <td
+      className={`profileMatrixNumberCell${canShowDetails ? ' profileTooltipCell' : ''}`}
+      style={numberCellStyle}
+      onMouseEnter={canShowDetails ? (e) => setHoverPosition(getProfileHoverPosition(e)) : undefined}
+      onMouseMove={canShowDetails ? (e) => setHoverPosition(getProfileHoverPosition(e)) : undefined}
+      onMouseLeave={canShowDetails ? () => setHoverPosition(null) : undefined}
+    >
+      <span className="profileMatrixNumberValue">{row.total}</span>
+      {canShowDetails && hoverPosition ? (
+        <ProfileHoverFloating title={`${row.label} · Total`} details={details} position={hoverPosition} />
+      ) : null}
+    </td>
+  )
+}
+
+function mapBooleanMatches(value: boolean, filter: MapBooleanFilter) {
+  if (filter === 'all') return true
+  return filter === 'yes' ? value : !value
+}
+
+function getMapClientProfileBand(client: SyntheseMapClientRow, period: MapProfilePeriodFilter): MapProfileFilter {
+  if (period === 'N-1') return safeText(client.caBandN1, 'vide') as MapProfileFilter
+  if (period === 'N-2') return safeText(client.caBandN2, 'vide') as MapProfileFilter
+  return safeText(client.caBandN, 'vide') as MapProfileFilter
+}
+
+function rowMatchesCaProfile(client: SyntheseMapClientRow, profile: MapProfileFilter, period: MapProfilePeriodFilter) {
+  if (!profile) return true
+  return getMapClientProfileBand(client, period) === profile
 }
 
 export default function SyntheseMultiClientsPage() {
@@ -1254,13 +1661,24 @@ export default function SyntheseMultiClientsPage() {
       setLoading(true)
       setError(null)
       try {
-        const rows = (await fetchCacheClientRows(mode, selected)).map(cacheRowToSummary)
+        const collaborateursForAgence = mode === 'agence' ? (selectionOptions.agenceCollaborateurs[normalize(selected)] || []) : []
+        const rows = (await fetchCacheClientRows(mode, selected, collaborateursForAgence))
+          .map(cacheRowToSummary)
+          .map((row) => applyRefAgence(row, selectionOptions.collaborateurAgence))
         const codes = rows.map((row) => row.numero).filter(Boolean)
-        const objectives = codes.length ? await fetchObjectivesForTiers(codes, N) : []
+        const [objectives, rawMonthRows] = await Promise.all([
+          codes.length ? fetchObjectivesForTiers(codes, N) : Promise.resolve([]),
+          codes.length ? fetchCacheMonthRowsForNumeros(codes) : Promise.resolve([]),
+        ])
+        const monthSummaries = rawMonthRows
+          .map(cacheRowToSummary)
+          .map((row) => applyRefAgence(row, selectionOptions.collaborateurAgence))
+        const monthRowsGrouped = groupMonthSummariesByNumero(monthSummaries)
+        const rowsWithCorrectN1Comparison = rows.map((row) => recomputeClientN1ComparisonFromMonths(row, monthRowsGrouped[row.numero] || []))
         if (!alive) return
-        setCacheRows(rows)
+        setCacheRows(rowsWithCorrectN1Comparison)
         setObjectiveRows(objectives)
-        setMonthRowsByNumero({})
+        setMonthRowsByNumero(monthRowsGrouped)
         setExpanded(new Set())
         setCacheStatus(rows.length ? `Cache chargé · ${rows.length} clients` : 'Aucun client dans le cache pour cette sélection')
       } catch (err: any) {
@@ -1276,7 +1694,7 @@ export default function SyntheseMultiClientsPage() {
     }
     void loadCachedBusinessData()
     return () => { alive = false }
-  }, [mode, selected])
+  }, [mode, selected, selectionOptions.agenceCollaborateurs, selectionOptions.collaborateurAgence])
 
   const baseClientRows = useMemo(() => cacheRows.map((row) => applyObjectiveOverrides(row, objectiveMap)), [cacheRows, objectiveMap])
   const totalRow = useMemo(() => buildTotalFromRows(baseClientRows, showCollaborateurColumn), [baseClientRows, showCollaborateurColumn])
@@ -1323,7 +1741,14 @@ export default function SyntheseMultiClientsPage() {
   const [mapLoading, setMapLoading] = useState(false)
   const [mapError, setMapError] = useState<string | null>(null)
   const [mapRows, setMapRows] = useState<SyntheseMapClientRow[]>([])
+  const [mapActivityFilter, setMapActivityFilter] = useState('')
+  const [mapRgeFilter, setMapRgeFilter] = useState<MapBooleanFilter>('all')
+  const [mapCapacityFilter, setMapCapacityFilter] = useState<MapBooleanFilter>('all')
+  const [mapCaProfilePeriodFilter, setMapCaProfilePeriodFilter] = useState<MapProfilePeriodFilter>('12M')
+  const [mapCaProfileFilter, setMapCaProfileFilter] = useState<MapProfileFilter>('')
   const [mapInstanceKey, setMapInstanceKey] = useState(0)
+  const [profileMatrixOpen, setProfileMatrixOpen] = useState(false)
+  const [profileMatrixDimension, setProfileMatrixDimension] = useState<ProfileMatrixDimension>('agence')
   const leafletMapRef = useRef<any>(null)
 
   const mapRowsWithCoords = useMemo(() => {
@@ -1331,8 +1756,29 @@ export default function SyntheseMultiClientsPage() {
   }, [mapRows])
 
   const mapLegendSectors = useMemo(() => {
-    return Array.from(new Set(mapRowsWithCoords.map((row) => getMapSectorLabel(row)).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'fr'))
+    return Array.from(new Set(mapRowsWithCoords.map((row) => getMapSectorLabel(row)).filter(Boolean) as string[])).sort((a, b) => a.localeCompare(b, 'fr'))
   }, [mapRowsWithCoords])
+
+  const mapFilteredRowsWithCoords = useMemo(() => {
+    return mapRowsWithCoords.filter((client) => {
+      const sector = getMapSectorLabel(client)
+      const hasRge = hasPositiveValue(client.rge) || hasPositiveValue(client.rge_domaines_travaux)
+      const hasCapacity = Boolean(client.capacite_gaz)
+      if (mapActivityFilter && sector !== mapActivityFilter) return false
+      if (!mapBooleanMatches(hasRge, mapRgeFilter)) return false
+      if (!mapBooleanMatches(hasCapacity, mapCapacityFilter)) return false
+      if (!rowMatchesCaProfile(client, mapCaProfileFilter, mapCaProfilePeriodFilter)) return false
+      return true
+    })
+  }, [mapRowsWithCoords, mapActivityFilter, mapRgeFilter, mapCapacityFilter, mapCaProfileFilter, mapCaProfilePeriodFilter])
+
+  const profileMatrixByPeriod = useMemo(() => {
+    return {
+      '12M': buildProfileMatrix(clientRowsForCurrentSelection, profileMatrixDimension, '12M'),
+      'N-1': buildProfileMatrix(clientRowsForCurrentSelection, profileMatrixDimension, 'N-1'),
+      'N-2': buildProfileMatrix(clientRowsForCurrentSelection, profileMatrixDimension, 'N-2'),
+    } as Record<ProfileMatrixPeriod, ProfileMatrixRow[]>
+  }, [clientRowsForCurrentSelection, profileMatrixDimension])
 
   useEffect(() => {
     if (!mapOpen || !leafletMapRef.current) return
@@ -1340,13 +1786,13 @@ export default function SyntheseMultiClientsPage() {
       const map = leafletMapRef.current
       if (!map || typeof map.invalidateSize !== 'function') return
       map.invalidateSize()
-      if (!mapRowsWithCoords.length) return
-      const points = mapRowsWithCoords.map((row) => [row.latitude as number, row.longitude as number])
+      if (!mapFilteredRowsWithCoords.length) return
+      const points = mapFilteredRowsWithCoords.map((row) => [row.latitude as number, row.longitude as number])
       if (points.length === 1 && typeof map.setView === 'function') map.setView(points[0], 10)
       else if (typeof map.fitBounds === 'function') map.fitBounds(points, { padding: [30, 30] })
     }, 250)
     return () => window.clearTimeout(timer)
-  }, [mapOpen, mapRowsWithCoords])
+  }, [mapOpen, mapFilteredRowsWithCoords])
 
   async function fetchRefTiersForMap(codes: string[]) {
     const rows: RefTiersMapRow[] = []
@@ -1383,10 +1829,10 @@ export default function SyntheseMultiClientsPage() {
     setMapInstanceKey((v) => v + 1)
 
     try {
-      const codes = Array.from(new Set(clientRowsForCurrentSelection.map((row) => row.numero).filter(Boolean)))
+      const codes = Array.from(new Set(clientRowsForCurrentSelection.map((row) => row.numero).filter(Boolean) as string[]))
       const tiersRows = await fetchRefTiersForMap(codes)
       const tiersByNumero = new Map(tiersRows.map((row) => [normalize(row.numero), row]))
-      const sirets = Array.from(new Set(tiersRows.map((row) => normalizeSiret(row.siret)).filter(Boolean)))
+      const sirets = Array.from(new Set(tiersRows.map((row) => normalizeSiret(row.siret)).filter(Boolean) as string[]))
       const clientsRows = sirets.length ? await fetchClientsForMap(sirets) : []
       const clientsBySiret = new Map(clientsRows.map((row) => [normalizeSiret(row.siret), row]))
 
@@ -1422,7 +1868,7 @@ export default function SyntheseMultiClientsPage() {
           caBandN1: row.caBandN1,
           caBandN2: row.caBandN2,
           collaborateur: row.collaborateur,
-          agence: mode === 'agence' ? selected : safeText(tiers?.agence_rattachement || tiers?.depot_rattachement),
+          agence: row.agence || (mode === 'agence' ? selected : safeText(tiers?.agence_rattachement || tiers?.depot_rattachement)),
         } as SyntheseMapClientRow
       })
 
@@ -1451,8 +1897,9 @@ export default function SyntheseMultiClientsPage() {
     if (monthRowsByNumero[numero] || loadingMonths.has(numero)) return
     setLoadingMonths((prev) => new Set(prev).add(numero))
     try {
-      const rows = (await fetchCacheMonthRows(numero)).map(cacheRowToSummary)
+      const rows = (await fetchCacheMonthRows(numero)).map(cacheRowToSummary).map((row) => applyRefAgence(row, selectionOptions.collaborateurAgence))
       setMonthRowsByNumero((prev) => ({ ...prev, [numero]: rows }))
+      setCacheRows((prev) => prev.map((row) => row.numero === numero ? recomputeClientN1ComparisonFromMonths(row, rows) : row))
     } catch (err: any) {
       setError(err?.message || 'Erreur de chargement du détail mensuel cache')
     } finally {
@@ -1698,7 +2145,7 @@ export default function SyntheseMultiClientsPage() {
       const sample = exportRows.slice(0, 300).map((row) => displayValue(col, row, objectiveMap))
       const maxLen = Math.max(header.length, col.group.length, ...sample.map((value) => String(value ?? '').length))
       const min = col.rotate ? 8 : 10
-      const max = col.key === 'intitule' ? 34 : col.key === 'remarque' ? 42 : col.key === 'caProfile' ? 28 : col.key === 'libelleNaf' ? 32 : col.rotate ? 13 : 18
+      const max = col.key === 'intitule' ? 34 : col.key === 'remarque' ? 42 : col.key.startsWith('caBand') ? 12 : col.key === 'libelleNaf' ? 32 : col.rotate ? 13 : 18
       const wch = Math.min(Math.max(maxLen + 2, min), max)
       const grouped = isGroupedFamilyColumn(col.key)
       return {
@@ -1767,6 +2214,7 @@ export default function SyntheseMultiClientsPage() {
           <button type="button" onClick={openMapForVisibleClients} disabled={!hasSelection || !clientRowsForCurrentSelection.length || mapLoading}>
             {mapLoading ? 'Préparation carte…' : 'Afficher sur la carte'}
           </button>
+          <button type="button" onClick={() => setProfileMatrixOpen(true)} disabled={!hasSelection || !clientRowsForCurrentSelection.length}>Profils CA croisés</button>
           <button type="button" onClick={exportExcel} disabled={!hasSelection}>Exporter Excel</button>
         </div>
       </section>
@@ -1805,7 +2253,7 @@ export default function SyntheseMultiClientsPage() {
             <tr className="filterRow">
               {columns.map((col) => (
                 <th key={`${col.key}-f`} className={stickyClass(col.sticky)} style={{ width: col.width, minWidth: col.width }}>
-                  {['collaborateur', 'numero', 'intitule', 'totalMois', 'codePostal', 'libelleNaf', 'prospectLabel', 'caProfile'].includes(col.key) ? (
+                  {['collaborateur', 'numero', 'intitule', 'totalMois', 'codePostal', 'libelleNaf', 'prospectLabel', 'caBandN2', 'caBandN1', 'caBandN'].includes(col.key) ? (
                     <input value={getFilterValue(col.key)} onChange={(e) => updateFilter(col.key, e.target.value)} placeholder="filtre" />
                   ) : null}
                 </th>
@@ -1823,7 +2271,9 @@ export default function SyntheseMultiClientsPage() {
                       {col.key === 'numero' && row.kind === 'client' ? (
                         <button type="button" className="expandBtn" onClick={() => toggleExpanded(row.numero)}>{expanded.has(row.numero) ? '−' : '+'}</button>
                       ) : null}
-                      {canEdit ? (
+                      {col.format === 'caBand' ? (
+                        <CaBandPill band={String(col.value(row) || 'vide')} />
+                      ) : canEdit ? (
                         <EditableCell
                           type={col.editable!.type}
                           value={editableRawValue(row, col, objectiveMap)}
@@ -1851,7 +2301,7 @@ export default function SyntheseMultiClientsPage() {
             <div className="mapHeader">
               <div>
                 <h2>Clients de la sélection sur la carte</h2>
-                <p>{mapRows.length} clients sélectionnés · {mapRowsWithCoords.length} géolocalisés · {mapRows.length - mapRowsWithCoords.length} sans coordonnées</p>
+                <p>{mapRows.length} clients sélectionnés · {mapRowsWithCoords.length} géolocalisés · {mapFilteredRowsWithCoords.length} visibles après filtres · {mapRows.length - mapRowsWithCoords.length} sans coordonnées</p>
                 {mapError && <div className="mapWarning">{mapError}</div>}
               </div>
               <button type="button" onClick={() => setMapOpen(false)}>Fermer</button>
@@ -1861,13 +2311,51 @@ export default function SyntheseMultiClientsPage() {
               {mapLegendSectors.map((sector) => (
                 <span key={sector} className="legendItem"><i style={{ background: getMapSectorColor(sector) }} />{sector}</span>
               ))}
-              <span className="legendItem"><i className="clientBorder" />Client sélection Synthèse</span>
+            </div>
+
+            <div className="mapFilters">
+              <label>Activité
+                <select value={mapActivityFilter} onChange={(e) => setMapActivityFilter(e.target.value)}>
+                  <option value="">Toutes</option>
+                  {mapLegendSectors.map((sector) => <option key={sector} value={sector}>{sector}</option>)}
+                </select>
+              </label>
+              <label>RGE
+                <select value={mapRgeFilter} onChange={(e) => setMapRgeFilter(e.target.value as MapBooleanFilter)}>
+                  <option value="all">Tous</option>
+                  <option value="yes">Oui</option>
+                  <option value="no">Non</option>
+                </select>
+              </label>
+              <label>Capacité
+                <select value={mapCapacityFilter} onChange={(e) => setMapCapacityFilter(e.target.value as MapBooleanFilter)}>
+                  <option value="all">Toutes</option>
+                  <option value="yes">Oui</option>
+                  <option value="no">Non</option>
+                </select>
+              </label>
+              <label>Période profil
+                <select value={mapCaProfilePeriodFilter} onChange={(e) => setMapCaProfilePeriodFilter(e.target.value as MapProfilePeriodFilter)}>
+                  <option value="12M">12M</option>
+                  <option value="N-1">N-1</option>
+                  <option value="N-2">N-2</option>
+                </select>
+              </label>
+              <label>Profil CA
+                <select value={mapCaProfileFilter} onChange={(e) => setMapCaProfileFilter(e.target.value as MapProfileFilter)}>
+                  <option value="">Tous</option>
+                  {CA_PROFILE_BANDS.map((band) => <option key={band} value={band}>{band}</option>)}
+                </select>
+              </label>
+              <button type="button" className="secondaryButton" onClick={() => { setMapActivityFilter(''); setMapRgeFilter('all'); setMapCapacityFilter('all'); setMapCaProfilePeriodFilter('12M'); setMapCaProfileFilter('') }}>Réinitialiser</button>
             </div>
 
             {mapLoading ? (
               <div className="mapEmpty">Chargement des SIRET, coordonnées et données carte…</div>
             ) : mapRowsWithCoords.length === 0 ? (
               <div className="mapEmpty">Aucun client géolocalisé à afficher. Vérifie les SIRET dans ref_tiers et les coordonnées dans clients.</div>
+            ) : mapFilteredRowsWithCoords.length === 0 ? (
+              <div className="mapEmpty">Aucun client ne correspond aux filtres carte.</div>
             ) : (
               <div className="mapGrid">
                 <div className="leafletShell">
@@ -1882,54 +2370,116 @@ export default function SyntheseMultiClientsPage() {
                       attribution="&copy; OpenStreetMap contributors"
                       url="https://api.thunderforest.com/neighbourhood/{z}/{x}/{y}.png?apikey=3750cd83dca34199969e6b9e2dcdca40"
                     />
-                    {mapRowsWithCoords.map((client) => {
+                    {mapFilteredRowsWithCoords.map((client) => {
                       const sector = getMapSectorLabel(client)
                       return (
                         <CircleMarker
                           key={`${client.numero}-${client.siret || client.id}`}
                           center={[client.latitude as number, client.longitude as number]}
-                          radius={7}
+                          radius={2}
                           pathOptions={{
-                            color: '#facc15',
+                            color: getMapSectorColor(sector),
                             fillColor: getMapSectorColor(sector),
-                            fillOpacity: 0.95,
-                            weight: 3,
+                            fillOpacity: 0.15,
+                            weight: 1,
                           }}
                         >
-                          <Tooltip direction="top" offset={[0, -8]} opacity={1} sticky>
+                          <Tooltip direction="center" offset={[0, 0]} opacity={1} permanent className="caMapTooltip">
+                            <span className="mapMarkerTags">
+                              <MapProfilePill band={client.caBandN} color={getMapSectorColor(sector)} />
+                            </span>
+                          </Tooltip>
+                          <Popup>
                             <div style={{ fontSize: 13, lineHeight: 1.45, minWidth: 260 }}>
                               <div style={{ fontWeight: 800 }}>{client.numero} — {client.raison_sociale_affichee || client.intitule}</div>
                               <div>{sector}</div>
                               <div>{client.codePostalEtablissement || '—'} {client.libelleCommuneEtablissement || ''}</div>
                               <div><b>SIRET :</b> {client.siret || 'NC'}</div>
-                              <div><b>CA 12M :</b> {formatKEurBlank(client.ca12m)} · {client.caBandN}</div>
-                              <div><b>CA N-1 :</b> {formatKEurBlank(client.caN1)} · {client.caBandN1}</div>
-                              <div><b>CA N-2 :</b> {formatKEurBlank(client.caN2)} · {client.caBandN2}</div>
+                              <div><b>CA 12M :</b> {formatKEurBlank(client.ca12m)} <CaBandPill band={client.caBandN} compact /></div>
+                              <div><b>CA N-1 :</b> {formatKEurBlank(client.caN1)} <CaBandPill band={client.caBandN1} compact /></div>
+                              <div><b>CA N-2 :</b> {formatKEurBlank(client.caN2)} <CaBandPill band={client.caBandN2} compact /></div>
                               <div><b>RGE :</b> {hasPositiveValue(client.rge) || hasPositiveValue(client.rge_domaines_travaux) ? 'OUI' : 'NON'}</div>
                               <div><b>Capacité :</b> {client.capacite_gaz ? 'OUI' : 'NON'}</div>
                               <div><b>Capital social :</b> {client.capital_social || 'NC'}</div>
                             </div>
-                          </Tooltip>
+                          </Popup>
                         </CircleMarker>
                       )
                     })}
                   </MapContainer>
                 </div>
                 <div className="mapSideList">
-                  <div className="mapSideTitle">Entreprises visibles ({mapRowsWithCoords.length})</div>
-                  {mapRowsWithCoords.map((client) => {
+                  <div className="mapSideTitle"><span>Entreprises visibles ({mapFilteredRowsWithCoords.length})</span><b>Profils CA<br />12M / N-1 / N-2</b></div>
+                  {mapFilteredRowsWithCoords.map((client) => {
                     const sector = getMapSectorLabel(client)
                     return (
                       <div key={`side-${client.numero}-${client.siret || client.id}`} className="mapSideRow" style={{ borderLeftColor: getMapSectorColor(sector) }}>
                         <strong>{client.numero} — {client.raison_sociale_affichee || client.intitule}</strong>
                         <span>{client.libelleCommuneEtablissement || 'Ville NC'} · {sector}</span>
-                        <em>12M {client.caBandN} · N-1 {client.caBandN1} · N-2 {client.caBandN2}</em>
+                        <em><MapProfileTriplet row={client} color={getMapSectorColor(sector)} /></em>
                       </div>
                     )
                   })}
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+
+      {profileMatrixOpen && (
+        <div className="profileOverlay">
+          <div className="profileModal">
+            <div className="profileHeader">
+              <div>
+                <h2>Répartition des profils CA</h2>
+                <p>{clientRowsForCurrentSelection.length} clients visibles · comparaison par profil de chiffre d'affaires</p>
+              </div>
+              <div className="profileActions">
+                <label className="inlineSwitch">
+                  <input
+                    type="checkbox"
+                    checked={profileMatrixDimension === 'collaborateur'}
+                    onChange={(e) => setProfileMatrixDimension(e.target.checked ? 'collaborateur' : 'agence')}
+                  />
+                  Lignes par collaborateur
+                </label>
+                <button type="button" onClick={() => setProfileMatrixOpen(false)}>Fermer</button>
+              </div>
+            </div>
+
+            <div className="profileTables">
+              {(['12M', 'N-1', 'N-2'] as ProfileMatrixPeriod[]).map((period) => {
+                const matrixRows = profileMatrixByPeriod[period]
+                const total = profileMatrixTotal(matrixRows)
+                return (
+                  <div key={period} className="profileTableCard">
+                    <h3>{period === '12M' ? 'Profil CA 12 mois' : `Profil CA ${period}`}</h3>
+                    <div className="profileTableScroll">
+                      <table>
+                      <thead>
+                        <tr>
+                          <th>{profileMatrixDimension === 'agence' ? 'Agence' : 'Collaborateur'}</th>
+                          {CA_PROFILE_BANDS.map((band) => <th key={band}><CaBandPill band={band} compact /></th>)}
+                          <th>Total</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {[...matrixRows, total].map((row) => (
+                          <tr key={`${period}-${row.label}`} className={row.label === 'TOTAL' ? 'profileTotalRow' : ''}>
+                            <td>{row.label}</td>
+                            {CA_PROFILE_BANDS.map((band) => <ProfileMatrixCountCell key={band} row={row} band={band} />)}
+                            <ProfileMatrixTotalCell row={row} />
+                          </tr>
+                        ))}
+                      </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
           </div>
         </div>
       )}
@@ -1986,26 +2536,71 @@ export default function SyntheseMultiClientsPage() {
         .editInput, .editSelect { width: 100%; height: 20px; padding: 1px 3px; border-radius: 3px; font-size: 11px; background: #ffffff; }
         .saving { opacity: .55; }
 
-        .compareCell span { display: inline-block; white-space: normal; line-height: 1.15; }
-        .caProfileCell span { white-space: normal; line-height: 1.15; font-size: 10px; font-weight: 800; color: #14532d; }
-        .mapOverlay { position: fixed; inset: 0; background: rgba(15,23,42,.45); z-index: 80; padding: 24px; display: flex; align-items: stretch; justify-content: center; }
-        .mapModal { width: min(1680px, 100%); background: white; border-radius: 18px; box-shadow: 0 24px 70px rgba(15,23,42,.35); display: flex; flex-direction: column; overflow: hidden; }
+        .compareCell, .compareCell span { white-space: nowrap !important; }
+        .compareCell span { display: inline-block; line-height: 1.15; }
+        .caBandCell { text-align: center; }
+        .caPill { display: inline-flex; align-items: center; justify-content: center; min-width: 48px; border-radius: 999px; padding: 2px 7px; font-size: 10px; font-weight: 950; border: 1px solid transparent; line-height: 1.05; white-space: nowrap; }
+        .caPill.compact { min-width: 34px; padding: 1px 5px; font-size: 9px; }
+        .caPill400 { background: #064e3b; color: #ecfdf5; border-color: #047857; }
+        .caPill150 { background: #1d4ed8; color: #eff6ff; border-color: #2563eb; }
+        .caPill80 { background: #f59e0b; color: #111827; border-color: #d97706; }
+        .caPill20 { background: #a7f3d0; color: #064e3b; border-color: #34d399; }
+        .caPillEmpty { background: #e5e7eb; color: #64748b; border-color: #cbd5e1; }
+        .caTagSet { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; justify-content: center; white-space: normal; }
+        .caTagSet > span { display: inline-flex; gap: 3px; align-items: center; }
+        .caTagSet small { font-size: 8px; color: #64748b; font-weight: 900; }
+        .caTagSet.compact { justify-content: flex-start; }
+        .mapProfilePill, :global(.mapProfilePill) { display: inline-flex !important; align-items: center !important; justify-content: center !important; flex: 0 0 58px !important; width: 58px !important; min-width: 58px !important; max-width: 58px !important; height: 28px !important; padding: 0 8px !important; box-sizing: border-box !important; border-radius: 9px !important; color: #fff; border: 2px solid #0f172a !important; font-size: 15px !important; font-weight: 950 !important; line-height: 1 !important; box-shadow: 0 1px 2px rgba(15,23,42,.20); white-space: nowrap !important; text-align: center !important; }
+        .mapProfilePill.empty, :global(.mapProfilePill.empty) { color: transparent !important; text-shadow: none; }
+        .mapProfileTriplet, :global(.mapProfileTriplet) { display: inline-flex !important; gap: 8px !important; align-items: center !important; justify-content: flex-end !important; min-width: 198px !important; white-space: nowrap !important; }
+        .mapOverlay { position: fixed; top: 142px; left: 0; right: 0; bottom: 0; background: rgba(15,23,42,.45); z-index: 60; padding: 14px 24px 24px; display: flex; align-items: stretch; justify-content: center; }
+        .mapModal { width: min(1680px, 100%); max-height: calc(100vh - 166px); background: white; border-radius: 18px; box-shadow: 0 24px 70px rgba(15,23,42,.35); display: flex; flex-direction: column; overflow: hidden; }
         .mapHeader { padding: 16px 18px; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; border-bottom: 1px solid #e2e8f0; }
         .mapHeader h2 { margin: 0; font-size: 22px; font-weight: 950; }
         .mapWarning { margin-top: 8px; padding: 8px 10px; border-radius: 10px; background: #fff7ed; color: #9a3412; font-weight: 800; }
         .mapLegend { padding: 10px 18px; display: flex; gap: 12px; flex-wrap: wrap; border-bottom: 1px solid #e2e8f0; background: #f8fafc; }
+        .mapFilters { padding: 10px 18px; display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; border-bottom: 1px solid #e2e8f0; background: #ffffff; }
+        .mapFilters label { min-width: 130px; }
+        .secondaryButton { background: #f8fafc; color: #0f172a; border-color: #cbd5e1; }
         .legendItem { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 800; color: #334155; }
         .legendItem i { width: 12px; height: 12px; border-radius: 50%; border: 1px solid #475569; display: inline-block; }
-        .legendItem .clientBorder { background: #94a3b8; border: 3px solid #facc15; box-sizing: border-box; }
         .mapEmpty { flex: 1; min-height: 520px; display: flex; align-items: center; justify-content: center; color: #475569; font-weight: 900; font-size: 16px; }
-        .mapGrid { flex: 1; padding: 14px; display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 14px; min-height: 650px; background: #f8fafc; }
-        .leafletShell { border-radius: 16px; overflow: hidden; border: 1px solid #cbd5e1; background: white; min-height: 620px; }
-        .mapSideList { border-radius: 16px; border: 1px solid #cbd5e1; background: white; overflow: hidden; display: flex; flex-direction: column; min-height: 620px; }
-        .mapSideTitle { padding: 12px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 950; background: #fff; }
-        .mapSideRow { padding: 10px 12px; border-bottom: 1px solid #e2e8f0; border-left: 6px solid #cbd5e1; display: flex; flex-direction: column; gap: 3px; }
-        .mapSideRow strong { font-size: 13px; }
-        .mapSideRow span { font-size: 12px; color: #475569; }
-        .mapSideRow em { font-style: normal; font-size: 11px; color: #14532d; font-weight: 900; }
+        .mapGrid { flex: 1; padding: 14px; display: grid; grid-template-columns: minmax(0, 1fr) 430px; gap: 14px; min-height: 0; overflow: hidden; background: #f8fafc; }
+        .leafletShell { border-radius: 16px; overflow: hidden; border: 1px solid #cbd5e1; background: white; min-height: 0; height: 100%; }
+        .mapSideList { border-radius: 16px; border: 1px solid #cbd5e1; background: white; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; min-height: 0; height: 100%; max-height: 100%; }
+        .mapSideTitle { position: sticky; top: 0; z-index: 2; padding: 12px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 950; background: #fff; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+        .mapSideTitle b { text-align: center; font-size: 12px; line-height: 1.1; }
+        .mapSideRow { padding: 14px 12px; border-bottom: 1px solid #e2e8f0; border-left: 6px solid #cbd5e1; display: grid; grid-template-columns: minmax(0, 1fr) 210px; gap: 6px 14px; align-items: center; }
+        .mapSideRow > strong { font-size: 14px; grid-column: 1 / 2; min-width: 0; }
+        .mapSideRow > span { font-size: 13px; color: #475569; grid-column: 1 / 2; min-width: 0; }
+        .mapSideRow > em { font-style: normal; grid-column: 2 / 3; grid-row: 1 / span 2; justify-self: end; width: 210px; display: flex; align-items: center; justify-content: flex-end; overflow: visible; }
+        :global(.caMapTooltip) { background: transparent; border: 0; box-shadow: none; padding: 0; }
+        :global(.caMapTooltip::before) { display: none; }
+        .mapMarkerTags { display: flex; gap: 2px; padding-top: 0; }
+        .profileOverlay { position: fixed; top: 142px; left: 0; right: 0; bottom: 0; background: rgba(15,23,42,.45); z-index: 62; padding: 18px 28px; display: flex; align-items: flex-start; justify-content: center; }
+        .profileModal { width: min(1720px, calc(100vw - 64px)); max-height: calc(100vh - 180px); overflow: auto; background: #ffffff; border-radius: 18px; box-shadow: 0 24px 70px rgba(15,23,42,.35); border: 1px solid #e2e8f0; }
+        .profileHeader { position: sticky; top: 0; z-index: 2; background: white; padding: 16px 18px; display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; border-bottom: 1px solid #e2e8f0; }
+        .profileHeader h2 { margin: 0; font-size: 22px; font-weight: 950; }
+        .profileActions { display: flex; gap: 10px; align-items: center; }
+        .inlineSwitch { flex-direction: row; align-items: center; gap: 8px; text-transform: none; font-size: 12px; }
+        .profileTables { display: grid; grid-template-columns: repeat(3, minmax(470px, 1fr)); gap: 14px; padding: 14px; background: #f8fafc; overflow-x: auto; }
+        .profileTableCard { border: 1px solid #cbd5e1; border-radius: 14px; background: white; overflow: hidden; min-width: 470px; }
+        .profileTableCard h3 { margin: 0; padding: 12px 14px; font-size: 15px; font-weight: 950; border-bottom: 1px solid #e2e8f0; background: #fff7df; }
+        .profileTableScroll { overflow-x: auto; }
+        .profileTableCard table { width: 100%; min-width: 460px; border-collapse: collapse; font-size: 12px; table-layout: fixed; }
+        .profileTableCard th, .profileTableCard td { height: 28px; padding: 5px 7px; border: 1px solid #e2e8f0; background: #fff; text-align: center; vertical-align: middle; }
+        .profileTableCard th:first-child, .profileTableCard td:first-child { text-align: left; font-weight: 900; }
+        :global(.profileMatrixNumberCell) { text-align: center !important; vertical-align: middle !important; }
+        :global(.profileMatrixNumberValue) { display: flex !important; align-items: center !important; justify-content: center !important; width: 100% !important; min-height: 18px !important; text-align: center !important; }
+        .profileTotalRow td { background: #fff2cc !important; font-weight: 950; }
+        :global(.profileTooltipCell) { position: relative; cursor: help; }
+        :global(.profileHoverFloating) { position: fixed; z-index: 9999; width: 380px; max-height: 320px; overflow: auto; padding: 10px; border: 1px solid #0f172a; border-radius: 12px; background: #ffffff; color: #0f172a; box-shadow: 0 18px 45px rgba(15,23,42,.30); text-align: left; font-weight: 500; pointer-events: none; }
+        :global(.profileHoverFloating > strong) { display: block; margin-bottom: 8px; font-size: 12px; font-weight: 950; color: #0f172a; }
+        :global(.profileHoverRow) { display: grid; grid-template-columns: 72px minmax(0, 1fr) 82px; gap: 6px; align-items: center; padding: 4px 0; border-top: 1px solid #e2e8f0; font-size: 11px; line-height: 1.2; }
+        :global(.profileHoverRow:first-of-type) { border-top: 0; }
+        :global(.profileHoverRow b) { font-weight: 950; }
+        :global(.profileHoverRow span) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        :global(.profileHoverRow em) { font-style: normal; text-align: right; font-weight: 900; color: #0f172a; }
       `}</style>
     </main>
   )
