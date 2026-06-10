@@ -200,6 +200,7 @@ type SortState = { key: string; direction: SortDirection }
 type MapBooleanFilter = 'all' | 'yes' | 'no'
 type MapProfileFilter = '' | '400K€' | '150K€' | '80K€' | '20K€' | 'vide'
 type MapProfilePeriodFilter = '12M' | 'N-1' | 'N-2'
+type MapLogicalOperator = 'OR' | 'AND'
 type ProfileMatrixDimension = 'agence' | 'collaborateur'
 
 type SyntheseMapClientRow = {
@@ -376,6 +377,11 @@ function formatKEurBlank(value: number | null | undefined) {
   return formatKEur(value)
 }
 
+function formatKEur0(value: number | null | undefined) {
+  if (isNullAmount(value)) return ''
+  return `${new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 0, maximumFractionDigits: 0 }).format((value || 0) / 1000)} K€`
+}
+
 function formatPct(value: number | null) {
   if (value === null || value === undefined || !Number.isFinite(value)) return '—'
   return `${new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(value)} %`
@@ -441,13 +447,11 @@ function shortBandLabel(band: string | null | undefined) {
   return normalized.replace('K€', '')
 }
 
-function MapProfilePill({ band, color }: { band: string | null | undefined; color: string }) {
+function MapProfilePill({ band, color, outlined = true }: { band: string | null | undefined; color: string; outlined?: boolean }) {
   const normalized = safeText(band, 'vide')
   const isEmpty = normalized === 'vide'
   const label = isEmpty ? '' : shortBandLabel(band)
 
-  // Style inline volontaire : les Tooltip Leaflet sont rendus hors du scope CSS JSX.
-  // Cela garantit le même rendu sur la carte ET dans la liste de droite.
   return (
     <span
       className={`mapProfilePill ${isEmpty ? 'empty' : ''}`}
@@ -455,23 +459,23 @@ function MapProfilePill({ band, color }: { band: string | null | undefined; colo
         display: 'inline-flex',
         alignItems: 'center',
         justifyContent: 'center',
-        flex: '0 0 58px',
-        width: 58,
-        minWidth: 58,
-        maxWidth: 58,
-        height: 28,
-        padding: '0 8px',
+        flex: '0 0 52px',
+        width: 52,
+        minWidth: 52,
+        maxWidth: 52,
+        height: 24,
+        padding: '0 6px',
         boxSizing: 'border-box',
-        borderRadius: 9,
+        borderRadius: 8,
         background: color || '#d9d9d9',
-        border: '2px solid #0f172a',
+        border: outlined ? '2px solid #0f172a' : '0 solid transparent',
         color: isEmpty ? 'transparent' : '#ffffff',
-        fontSize: 15,
+        fontSize: 13,
         fontWeight: 950,
         lineHeight: 1,
         whiteSpace: 'nowrap',
         textAlign: 'center',
-        boxShadow: '0 1px 2px rgba(15,23,42,.20)',
+        boxShadow: outlined ? '0 1px 2px rgba(15,23,42,.20)' : 'none',
       }}
       title={isEmpty ? 'Profil CA vide' : normalized}
     >
@@ -480,7 +484,7 @@ function MapProfilePill({ band, color }: { band: string | null | undefined; colo
   )
 }
 
-function MapProfileTriplet({ row, color }: { row: Pick<SyntheseMapClientRow, 'caBandN' | 'caBandN1' | 'caBandN2'>; color: string }) {
+function MapProfileTriplet({ row, color, outlined = true }: { row: Pick<SyntheseMapClientRow, 'caBandN' | 'caBandN1' | 'caBandN2'>; color: string; outlined?: boolean }) {
   return (
     <span
       className="mapProfileTriplet"
@@ -489,14 +493,60 @@ function MapProfileTriplet({ row, color }: { row: Pick<SyntheseMapClientRow, 'ca
         gap: 8,
         alignItems: 'center',
         justifyContent: 'flex-end',
-        minWidth: 198,
+        minWidth: 172,
         whiteSpace: 'nowrap',
       }}
     >
-      <MapProfilePill band={row.caBandN} color={color} />
-      <MapProfilePill band={row.caBandN1} color={color} />
-      <MapProfilePill band={row.caBandN2} color={color} />
+      <MapProfilePill band={row.caBandN} color={color} outlined={outlined} />
+      <MapProfilePill band={row.caBandN1} color={color} outlined={outlined} />
+      <MapProfilePill band={row.caBandN2} color={color} outlined={outlined} />
     </span>
+  )
+}
+
+function MapProfileTripletWithAmounts({ row, color }: { row: Pick<SyntheseMapClientRow, 'caBandN' | 'caBandN1' | 'caBandN2' | 'ca12m' | 'caN1' | 'caN2'>; color: string }) {
+  return (
+    <span className="mapTripletStack">
+      <MapProfileTriplet row={row} color={color} />
+      <span className="mapTripletAmounts">
+        <span>{formatKEur0(row.ca12m)}</span>
+        <span>{formatKEur0(row.caN1)}</span>
+        <span>{formatKEur0(row.caN2)}</span>
+      </span>
+    </span>
+  )
+}
+
+function MapProfileMultiSelect({
+  selected,
+  onChange,
+}: {
+  selected: MapProfileFilter[]
+  onChange: (next: MapProfileFilter[]) => void
+}) {
+  const summary = selected.length ? selected.join(', ') : 'Tous'
+
+  function toggleBand(band: MapProfileFilter, checked: boolean) {
+    if (checked) onChange(selected.includes(band) ? selected : [...selected, band])
+    else onChange(selected.filter((item) => item !== band))
+  }
+
+  return (
+    <details className="mapMultiSelect">
+      <summary>{summary}</summary>
+      <div className="mapMultiSelectMenu">
+        <label className="mapMultiSelectItem mapMultiSelectAll">
+          <input type="checkbox" checked={!selected.length} onChange={() => onChange([])} />
+          <span>Tous</span>
+        </label>
+        {CA_PROFILE_BANDS.map((band) => (
+          <label key={band} className="mapMultiSelectItem">
+            <input type="checkbox" checked={selected.includes(band)} onChange={(e) => toggleBand(band, e.target.checked)} />
+            <span>{band}</span>
+          </label>
+        ))}
+      </div>
+    </details>
   )
 }
 
@@ -1570,9 +1620,33 @@ function getMapClientProfileBand(client: SyntheseMapClientRow, period: MapProfil
   return safeText(client.caBandN, 'vide') as MapProfileFilter
 }
 
-function rowMatchesCaProfile(client: SyntheseMapClientRow, profile: MapProfileFilter, period: MapProfilePeriodFilter) {
-  if (!profile) return true
-  return getMapClientProfileBand(client, period) === profile
+function rowMatchesCaProfile(client: SyntheseMapClientRow, profiles: MapProfileFilter[], period: MapProfilePeriodFilter) {
+  if (!profiles.length) return true
+  const band = getMapClientProfileBand(client, period) as MapProfileFilter
+  return profiles.includes(band)
+}
+
+function rowMatchesCombinedCaProfiles(
+  client: SyntheseMapClientRow,
+  profile12M: MapProfileFilter[],
+  profileN1: MapProfileFilter[],
+  profileN2: MapProfileFilter[],
+  operator12MN1: MapLogicalOperator,
+  operatorN1N2: MapLogicalOperator,
+) {
+  const checks = [
+    { active: profile12M.length > 0, result: rowMatchesCaProfile(client, profile12M, '12M'), operatorBefore: null as MapLogicalOperator | null },
+    { active: profileN1.length > 0, result: rowMatchesCaProfile(client, profileN1, 'N-1'), operatorBefore: operator12MN1 },
+    { active: profileN2.length > 0, result: rowMatchesCaProfile(client, profileN2, 'N-2'), operatorBefore: operatorN1N2 },
+  ].filter((item) => item.active)
+
+  if (!checks.length) return true
+
+  let result = checks[0].result
+  for (let i = 1; i < checks.length; i += 1) {
+    result = checks[i].operatorBefore === 'AND' ? result && checks[i].result : result || checks[i].result
+  }
+  return result
 }
 
 export default function SyntheseMultiClientsPage() {
@@ -1741,15 +1815,20 @@ export default function SyntheseMultiClientsPage() {
   const [mapLoading, setMapLoading] = useState(false)
   const [mapError, setMapError] = useState<string | null>(null)
   const [mapRows, setMapRows] = useState<SyntheseMapClientRow[]>([])
-  const [mapActivityFilter, setMapActivityFilter] = useState('')
+  const [mapVisibleSectors, setMapVisibleSectors] = useState<string[]>([])
   const [mapRgeFilter, setMapRgeFilter] = useState<MapBooleanFilter>('all')
   const [mapCapacityFilter, setMapCapacityFilter] = useState<MapBooleanFilter>('all')
-  const [mapCaProfilePeriodFilter, setMapCaProfilePeriodFilter] = useState<MapProfilePeriodFilter>('12M')
-  const [mapCaProfileFilter, setMapCaProfileFilter] = useState<MapProfileFilter>('')
+  const [mapProfileFilter12M, setMapProfileFilter12M] = useState<MapProfileFilter[]>([])
+  const [mapProfileFilterN1, setMapProfileFilterN1] = useState<MapProfileFilter[]>([])
+  const [mapProfileFilterN2, setMapProfileFilterN2] = useState<MapProfileFilter[]>([])
+  const [mapProfileOperator1, setMapProfileOperator1] = useState<MapLogicalOperator>('OR')
+  const [mapProfileOperator2, setMapProfileOperator2] = useState<MapLogicalOperator>('OR')
   const [mapInstanceKey, setMapInstanceKey] = useState(0)
   const [profileMatrixOpen, setProfileMatrixOpen] = useState(false)
   const [profileMatrixDimension, setProfileMatrixDimension] = useState<ProfileMatrixDimension>('agence')
+  const [activeMapClientKey, setActiveMapClientKey] = useState<string | null>(null)
   const leafletMapRef = useRef<any>(null)
+  const mapMarkerRefs = useRef<Record<string, any>>({})
 
   const mapRowsWithCoords = useMemo(() => {
     return mapRows.filter((row) => typeof row.latitude === 'number' && typeof row.longitude === 'number' && Number.isFinite(row.latitude) && Number.isFinite(row.longitude))
@@ -1759,18 +1838,32 @@ export default function SyntheseMultiClientsPage() {
     return Array.from(new Set(mapRowsWithCoords.map((row) => getMapSectorLabel(row)).filter(Boolean) as string[])).sort((a, b) => a.localeCompare(b, 'fr'))
   }, [mapRowsWithCoords])
 
+  useEffect(() => {
+    setMapVisibleSectors((prev) => {
+      const next = prev.filter((sector) => mapLegendSectors.includes(sector))
+      return next.length ? next : mapLegendSectors
+    })
+  }, [mapLegendSectors])
+
+  const mapSectorCounts = useMemo(() => {
+    return mapLegendSectors.reduce((acc, sector) => {
+      acc[sector] = mapRowsWithCoords.filter((row) => getMapSectorLabel(row) === sector).length
+      return acc
+    }, {} as Record<string, number>)
+  }, [mapLegendSectors, mapRowsWithCoords])
+
   const mapFilteredRowsWithCoords = useMemo(() => {
     return mapRowsWithCoords.filter((client) => {
       const sector = getMapSectorLabel(client)
       const hasRge = hasPositiveValue(client.rge) || hasPositiveValue(client.rge_domaines_travaux)
       const hasCapacity = Boolean(client.capacite_gaz)
-      if (mapActivityFilter && sector !== mapActivityFilter) return false
+      if (mapVisibleSectors.length && !mapVisibleSectors.includes(sector)) return false
       if (!mapBooleanMatches(hasRge, mapRgeFilter)) return false
       if (!mapBooleanMatches(hasCapacity, mapCapacityFilter)) return false
-      if (!rowMatchesCaProfile(client, mapCaProfileFilter, mapCaProfilePeriodFilter)) return false
+      if (!rowMatchesCombinedCaProfiles(client, mapProfileFilter12M, mapProfileFilterN1, mapProfileFilterN2, mapProfileOperator1, mapProfileOperator2)) return false
       return true
     })
-  }, [mapRowsWithCoords, mapActivityFilter, mapRgeFilter, mapCapacityFilter, mapCaProfileFilter, mapCaProfilePeriodFilter])
+  }, [mapRowsWithCoords, mapVisibleSectors, mapRgeFilter, mapCapacityFilter, mapProfileFilter12M, mapProfileFilterN1, mapProfileFilterN2, mapProfileOperator1, mapProfileOperator2])
 
   const profileMatrixByPeriod = useMemo(() => {
     return {
@@ -1793,6 +1886,34 @@ export default function SyntheseMultiClientsPage() {
     }, 250)
     return () => window.clearTimeout(timer)
   }, [mapOpen, mapFilteredRowsWithCoords])
+
+  function toggleMapSector(sector: string) {
+    setMapVisibleSectors((prev) => prev.includes(sector) ? prev.filter((item) => item !== sector) : [...prev, sector])
+  }
+
+  function resetMapFilters() {
+    setMapVisibleSectors(mapLegendSectors)
+    setMapRgeFilter('all')
+    setMapCapacityFilter('all')
+    setMapProfileFilter12M([])
+    setMapProfileFilterN1([])
+    setMapProfileFilterN2([])
+    setMapProfileOperator1('OR')
+    setMapProfileOperator2('OR')
+    setActiveMapClientKey(null)
+  }
+
+  function openMapClientPopup(client: SyntheseMapClientRow) {
+    const key = `${client.numero}-${client.siret || client.id}`
+    setActiveMapClientKey(key)
+    const map = leafletMapRef.current
+    const marker = mapMarkerRefs.current[key]
+    if (map && typeof map.setView === 'function' && typeof client.latitude === 'number' && typeof client.longitude === 'number') {
+      const currentZoom = typeof map.getZoom === 'function' ? map.getZoom() : 10
+      map.setView([client.latitude, client.longitude], Math.max(currentZoom, 10))
+    }
+    if (marker && typeof marker.openPopup === 'function') marker.openPopup()
+  }
 
   async function fetchRefTiersForMap(codes: string[]) {
     const rows: RefTiersMapRow[] = []
@@ -1826,6 +1947,16 @@ export default function SyntheseMultiClientsPage() {
     setMapLoading(true)
     setMapError(null)
     setMapRows([])
+    setMapVisibleSectors([])
+    setMapRgeFilter('all')
+    setMapCapacityFilter('all')
+    setMapProfileFilter12M([])
+    setMapProfileFilterN1([])
+    setMapProfileFilterN2([])
+    setMapProfileOperator1('OR')
+    setMapProfileOperator2('OR')
+    setActiveMapClientKey(null)
+    mapMarkerRefs.current = {}
     setMapInstanceKey((v) => v + 1)
 
     try {
@@ -2302,52 +2433,59 @@ export default function SyntheseMultiClientsPage() {
               <div>
                 <h2>Clients de la sélection sur la carte</h2>
                 <p>{mapRows.length} clients sélectionnés · {mapRowsWithCoords.length} géolocalisés · {mapFilteredRowsWithCoords.length} visibles après filtres · {mapRows.length - mapRowsWithCoords.length} sans coordonnées</p>
-                {mapError && <div className="mapWarning">{mapError}</div>}
               </div>
               <button type="button" onClick={() => setMapOpen(false)}>Fermer</button>
             </div>
 
-            <div className="mapLegend">
-              {mapLegendSectors.map((sector) => (
-                <span key={sector} className="legendItem"><i style={{ background: getMapSectorColor(sector) }} />{sector}</span>
-              ))}
-            </div>
-
-            <div className="mapFilters">
-              <label>Activité
-                <select value={mapActivityFilter} onChange={(e) => setMapActivityFilter(e.target.value)}>
-                  <option value="">Toutes</option>
-                  {mapLegendSectors.map((sector) => <option key={sector} value={sector}>{sector}</option>)}
-                </select>
-              </label>
-              <label>RGE
-                <select value={mapRgeFilter} onChange={(e) => setMapRgeFilter(e.target.value as MapBooleanFilter)}>
-                  <option value="all">Tous</option>
-                  <option value="yes">Oui</option>
-                  <option value="no">Non</option>
-                </select>
-              </label>
-              <label>Capacité
-                <select value={mapCapacityFilter} onChange={(e) => setMapCapacityFilter(e.target.value as MapBooleanFilter)}>
-                  <option value="all">Toutes</option>
-                  <option value="yes">Oui</option>
-                  <option value="no">Non</option>
-                </select>
-              </label>
-              <label>Période profil
-                <select value={mapCaProfilePeriodFilter} onChange={(e) => setMapCaProfilePeriodFilter(e.target.value as MapProfilePeriodFilter)}>
-                  <option value="12M">12M</option>
-                  <option value="N-1">N-1</option>
-                  <option value="N-2">N-2</option>
-                </select>
-              </label>
-              <label>Profil CA
-                <select value={mapCaProfileFilter} onChange={(e) => setMapCaProfileFilter(e.target.value as MapProfileFilter)}>
-                  <option value="">Tous</option>
-                  {CA_PROFILE_BANDS.map((band) => <option key={band} value={band}>{band}</option>)}
-                </select>
-              </label>
-              <button type="button" className="secondaryButton" onClick={() => { setMapActivityFilter(''); setMapRgeFilter('all'); setMapCapacityFilter('all'); setMapCaProfilePeriodFilter('12M'); setMapCaProfileFilter('') }}>Réinitialiser</button>
+            <div className="mapToolbar">
+              <div className="mapLegendChecks">
+                {mapLegendSectors.map((sector) => (
+                  <label key={sector} className="mapLegendCheck">
+                    <input type="checkbox" checked={mapVisibleSectors.includes(sector)} onChange={() => toggleMapSector(sector)} />
+                    <i style={{ background: getMapSectorColor(sector) }} />
+                    <span>{sector} ({mapSectorCounts[sector] || 0})</span>
+                  </label>
+                ))}
+              </div>
+              <div className="mapToolbarRight">
+                <label>RGE
+                  <select value={mapRgeFilter} onChange={(e) => setMapRgeFilter(e.target.value as MapBooleanFilter)}>
+                    <option value="all">Tous</option>
+                    <option value="yes">Oui</option>
+                    <option value="no">Non</option>
+                  </select>
+                </label>
+                <label>Capacité
+                  <select value={mapCapacityFilter} onChange={(e) => setMapCapacityFilter(e.target.value as MapBooleanFilter)}>
+                    <option value="all">Toutes</option>
+                    <option value="yes">Oui</option>
+                    <option value="no">Non</option>
+                  </select>
+                </label>
+                <label>Profil CA 12M
+                  <MapProfileMultiSelect selected={mapProfileFilter12M} onChange={setMapProfileFilter12M} />
+                </label>
+                <label className="opLabel">Op
+                  <select value={mapProfileOperator1} onChange={(e) => setMapProfileOperator1(e.target.value as MapLogicalOperator)}>
+                    <option value="OR">OU</option>
+                    <option value="AND">ET</option>
+                  </select>
+                </label>
+                <label>Profil CA N-1
+                  <MapProfileMultiSelect selected={mapProfileFilterN1} onChange={setMapProfileFilterN1} />
+                </label>
+                <label className="opLabel">Op
+                  <select value={mapProfileOperator2} onChange={(e) => setMapProfileOperator2(e.target.value as MapLogicalOperator)}>
+                    <option value="OR">OU</option>
+                    <option value="AND">ET</option>
+                  </select>
+                </label>
+                <label>Profil CA N-2
+                  <MapProfileMultiSelect selected={mapProfileFilterN2} onChange={setMapProfileFilterN2} />
+                </label>
+                <button type="button" className="secondaryButton" onClick={resetMapFilters}>Réinitialiser</button>
+                {mapError ? <span className="mapInlineWarning">Client de la sélection carte · {mapError}</span> : null}
+              </div>
             </div>
 
             {mapLoading ? (
@@ -2372,15 +2510,18 @@ export default function SyntheseMultiClientsPage() {
                     />
                     {mapFilteredRowsWithCoords.map((client) => {
                       const sector = getMapSectorLabel(client)
+                      const markerKey = `${client.numero}-${client.siret || client.id}`
                       return (
                         <CircleMarker
-                          key={`${client.numero}-${client.siret || client.id}`}
+                          key={markerKey}
+                          ref={(marker: any) => { if (marker) mapMarkerRefs.current[markerKey] = marker }}
+                          eventHandlers={{ popupopen: () => setActiveMapClientKey(markerKey) }}
                           center={[client.latitude as number, client.longitude as number]}
                           radius={2}
                           pathOptions={{
                             color: getMapSectorColor(sector),
                             fillColor: getMapSectorColor(sector),
-                            fillOpacity: 0.15,
+                            fillOpacity: 0.12,
                             weight: 1,
                           }}
                         >
@@ -2412,12 +2553,19 @@ export default function SyntheseMultiClientsPage() {
                   <div className="mapSideTitle"><span>Entreprises visibles ({mapFilteredRowsWithCoords.length})</span><b>Profils CA<br />12M / N-1 / N-2</b></div>
                   {mapFilteredRowsWithCoords.map((client) => {
                     const sector = getMapSectorLabel(client)
+                    const sideKey = `${client.numero}-${client.siret || client.id}`
                     return (
-                      <div key={`side-${client.numero}-${client.siret || client.id}`} className="mapSideRow" style={{ borderLeftColor: getMapSectorColor(sector) }}>
+                      <button
+                        type="button"
+                        key={`side-${sideKey}`}
+                        className={`mapSideRow ${activeMapClientKey === sideKey ? 'active' : ''}`}
+                        style={{ borderLeftColor: getMapSectorColor(sector) }}
+                        onClick={() => openMapClientPopup(client)}
+                      >
                         <strong>{client.numero} — {client.raison_sociale_affichee || client.intitule}</strong>
                         <span>{client.libelleCommuneEtablissement || 'Ville NC'} · {sector}</span>
-                        <em><MapProfileTriplet row={client} color={getMapSectorColor(sector)} /></em>
-                      </div>
+                        <em><MapProfileTripletWithAmounts row={client} color={getMapSectorColor(sector)} /></em>
+                      </button>
                     )
                   })}
                 </div>
@@ -2550,30 +2698,46 @@ export default function SyntheseMultiClientsPage() {
         .caTagSet > span { display: inline-flex; gap: 3px; align-items: center; }
         .caTagSet small { font-size: 8px; color: #64748b; font-weight: 900; }
         .caTagSet.compact { justify-content: flex-start; }
-        .mapProfilePill, :global(.mapProfilePill) { display: inline-flex !important; align-items: center !important; justify-content: center !important; flex: 0 0 58px !important; width: 58px !important; min-width: 58px !important; max-width: 58px !important; height: 28px !important; padding: 0 8px !important; box-sizing: border-box !important; border-radius: 9px !important; color: #fff; border: 2px solid #0f172a !important; font-size: 15px !important; font-weight: 950 !important; line-height: 1 !important; box-shadow: 0 1px 2px rgba(15,23,42,.20); white-space: nowrap !important; text-align: center !important; }
+        .mapProfilePill, :global(.mapProfilePill) { display: inline-flex !important; align-items: center !important; justify-content: center !important; flex: 0 0 52px !important; width: 52px !important; min-width: 52px !important; max-width: 52px !important; height: 24px !important; padding: 0 6px !important; box-sizing: border-box !important; border-radius: 8px !important; color: #fff; border: 2px solid #0f172a !important; font-size: 13px !important; font-weight: 950 !important; line-height: 1 !important; box-shadow: 0 1px 2px rgba(15,23,42,.20); white-space: nowrap !important; text-align: center !important; }
         .mapProfilePill.empty, :global(.mapProfilePill.empty) { color: transparent !important; text-shadow: none; }
-        .mapProfileTriplet, :global(.mapProfileTriplet) { display: inline-flex !important; gap: 8px !important; align-items: center !important; justify-content: flex-end !important; min-width: 198px !important; white-space: nowrap !important; }
-        .mapOverlay { position: fixed; top: 142px; left: 0; right: 0; bottom: 0; background: rgba(15,23,42,.45); z-index: 60; padding: 14px 24px 24px; display: flex; align-items: stretch; justify-content: center; }
-        .mapModal { width: min(1680px, 100%); max-height: calc(100vh - 166px); background: white; border-radius: 18px; box-shadow: 0 24px 70px rgba(15,23,42,.35); display: flex; flex-direction: column; overflow: hidden; }
-        .mapHeader { padding: 16px 18px; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; border-bottom: 1px solid #e2e8f0; }
-        .mapHeader h2 { margin: 0; font-size: 22px; font-weight: 950; }
-        .mapWarning { margin-top: 8px; padding: 8px 10px; border-radius: 10px; background: #fff7ed; color: #9a3412; font-weight: 800; }
-        .mapLegend { padding: 10px 18px; display: flex; gap: 12px; flex-wrap: wrap; border-bottom: 1px solid #e2e8f0; background: #f8fafc; }
-        .mapFilters { padding: 10px 18px; display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; border-bottom: 1px solid #e2e8f0; background: #ffffff; }
-        .mapFilters label { min-width: 130px; }
+        .mapProfileTriplet, :global(.mapProfileTriplet) { display: inline-flex !important; gap: 8px !important; align-items: center !important; justify-content: flex-end !important; min-width: 172px !important; white-space: nowrap !important; }
+        .mapTripletStack { display: inline-flex; flex-direction: column; align-items: center; gap: 5px; width: 190px; }
+        .mapTripletAmounts { display: grid; grid-template-columns: repeat(3, 52px); gap: 8px; width: 172px; justify-content: center; align-items: start; }
+        .mapTripletAmounts > span { width: 52px; min-width: 52px; text-align: center; font-size: 11px; line-height: 1.1; font-weight: 900; color: #334155; display: flex; align-items: center; justify-content: center; }
+        .mapOverlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(15,23,42,.45); z-index: 9999; padding: 8px; display: flex; align-items: stretch; justify-content: center; }
+        .mapModal { width: calc(100vw - 16px); height: calc(100vh - 16px); background: white; border-radius: 18px; box-shadow: 0 24px 70px rgba(15,23,42,.35); display: flex; flex-direction: column; overflow: hidden; }
+        .mapHeader { padding: 12px 16px 8px; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; border-bottom: 1px solid #e2e8f0; }
+        .mapHeader h2 { margin: 0; font-size: 20px; font-weight: 950; }
+        .mapToolbar { padding: 8px 16px; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; border-bottom: 1px solid #e2e8f0; background: #fff; }
+        .mapLegendChecks { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; }
+        .mapLegendCheck { flex-direction: row; align-items: center; gap: 6px; min-width: auto; font-size: 12px; text-transform: none; color: #334155; }
+        .mapLegendCheck input { margin: 0; }
+        .mapLegendCheck i { width: 11px; height: 11px; border-radius: 50%; border: 1px solid #64748b; display: inline-block; }
+        .mapToolbarRight { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; justify-content: flex-end; margin-left: auto; }
+        .mapToolbarRight label { min-width: 104px; }
+        .mapToolbarRight .opLabel { min-width: 72px; }
+        .mapInlineWarning { font-size: 12px; font-weight: 900; color: #9a3412; align-self: center; margin-left: 8px; }
+.mapMultiSelect { position: relative; min-width: 92px; }
+        .mapMultiSelect > summary { list-style: none; min-width: 92px; max-width: 118px; height: 34px; border-radius: 10px; border: 1px solid #cbd5e1; padding: 0 28px 0 10px; font-weight: 700; background: #fff; display: flex; align-items: center; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; position: relative; }
+        .mapMultiSelect > summary::-webkit-details-marker { display: none; }
+        .mapMultiSelect > summary::after { content: '▾'; position: absolute; right: 10px; top: 50%; transform: translateY(-50%); color: #475569; font-size: 12px; }
+        .mapMultiSelect[open] > summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+        .mapMultiSelectMenu { position: absolute; top: calc(100% - 1px); left: 0; z-index: 50; min-width: 138px; background: #fff; border: 1px solid #cbd5e1; border-top: 0; border-radius: 0 0 12px 12px; box-shadow: 0 14px 28px rgba(15,23,42,.16); padding: 8px 10px; display: grid; gap: 6px; }
+        .mapMultiSelectItem { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 700; color: #334155; cursor: pointer; }
+        .mapMultiSelectItem input { margin: 0; }
+        .mapMultiSelectAll { padding-bottom: 6px; border-bottom: 1px solid #e2e8f0; margin-bottom: 2px; }
         .secondaryButton { background: #f8fafc; color: #0f172a; border-color: #cbd5e1; }
-        .legendItem { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 800; color: #334155; }
-        .legendItem i { width: 12px; height: 12px; border-radius: 50%; border: 1px solid #475569; display: inline-block; }
         .mapEmpty { flex: 1; min-height: 520px; display: flex; align-items: center; justify-content: center; color: #475569; font-weight: 900; font-size: 16px; }
-        .mapGrid { flex: 1; padding: 14px; display: grid; grid-template-columns: minmax(0, 1fr) 430px; gap: 14px; min-height: 0; overflow: hidden; background: #f8fafc; }
+        .mapGrid { flex: 1; padding: 10px; display: grid; grid-template-columns: minmax(0, 1fr) 390px; gap: 10px; min-height: 0; overflow: hidden; background: #f8fafc; }
         .leafletShell { border-radius: 16px; overflow: hidden; border: 1px solid #cbd5e1; background: white; min-height: 0; height: 100%; }
         .mapSideList { border-radius: 16px; border: 1px solid #cbd5e1; background: white; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; min-height: 0; height: 100%; max-height: 100%; }
         .mapSideTitle { position: sticky; top: 0; z-index: 2; padding: 12px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 950; background: #fff; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
         .mapSideTitle b { text-align: center; font-size: 12px; line-height: 1.1; }
-        .mapSideRow { padding: 14px 12px; border-bottom: 1px solid #e2e8f0; border-left: 6px solid #cbd5e1; display: grid; grid-template-columns: minmax(0, 1fr) 210px; gap: 6px 14px; align-items: center; }
+        .mapSideRow { padding: 14px 12px; border: 0; border-bottom: 1px solid #e2e8f0; border-left: 6px solid #cbd5e1; display: grid; grid-template-columns: minmax(0, 1fr) 190px; gap: 6px 12px; align-items: center; width: 100%; background: #fff; color: #0f172a; text-align: left; cursor: pointer; border-radius: 0; }
+        .mapSideRow.active { background: #eff6ff; }
         .mapSideRow > strong { font-size: 14px; grid-column: 1 / 2; min-width: 0; }
         .mapSideRow > span { font-size: 13px; color: #475569; grid-column: 1 / 2; min-width: 0; }
-        .mapSideRow > em { font-style: normal; grid-column: 2 / 3; grid-row: 1 / span 2; justify-self: end; width: 210px; display: flex; align-items: center; justify-content: flex-end; overflow: visible; }
+        .mapSideRow > em { font-style: normal; grid-column: 2 / 3; grid-row: 1 / span 2; justify-self: end; width: 190px; display: flex; align-items: center; justify-content: center; overflow: visible; }
         :global(.caMapTooltip) { background: transparent; border: 0; box-shadow: none; padding: 0; }
         :global(.caMapTooltip::before) { display: none; }
         .mapMarkerTags { display: flex; gap: 2px; padding-top: 0; }
