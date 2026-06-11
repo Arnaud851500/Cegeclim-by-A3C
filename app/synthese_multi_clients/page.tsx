@@ -504,15 +504,26 @@ function MapProfileTriplet({ row, color, outlined = true }: { row: Pick<Synthese
   )
 }
 
+function MapTripletAmountCell({ amount }: { amount: number | null | undefined }) {
+  const formatted = formatKEur0(amount)
+  const label = formatted || '\u00A0'
+
+  return (
+    <span className="mapTripletAmountCell">
+      <span className="mapTripletAmountLabel">{label}</span>
+    </span>
+  )
+}
+
 function MapProfileTripletWithAmounts({ row, color }: { row: Pick<SyntheseMapClientRow, 'caBandN' | 'caBandN1' | 'caBandN2' | 'ca12m' | 'caN1' | 'caN2'>; color: string }) {
   return (
-    <span className="mapTripletStack">
-      <MapProfileTriplet row={row} color={color} />
-      <span className="mapTripletAmounts">
-        <span>{formatKEur0(row.ca12m)}</span>
-        <span>{formatKEur0(row.caN1)}</span>
-        <span>{formatKEur0(row.caN2)}</span>
-      </span>
+    <span className="mapTripletGrid">
+      <MapProfilePill band={row.caBandN} color={color} />
+      <MapProfilePill band={row.caBandN1} color={color} />
+      <MapProfilePill band={row.caBandN2} color={color} />
+      <MapTripletAmountCell amount={row.ca12m} />
+      <MapTripletAmountCell amount={row.caN1} />
+      <MapTripletAmountCell amount={row.caN2} />
     </span>
   )
 }
@@ -1873,6 +1884,20 @@ export default function SyntheseMultiClientsPage() {
     } as Record<ProfileMatrixPeriod, ProfileMatrixRow[]>
   }, [clientRowsForCurrentSelection, profileMatrixDimension])
 
+  const mapSideRows = useMemo(() => {
+    return [...mapFilteredRowsWithCoords].sort((a, b) => {
+      const caCmp = Number(b.ca12m || 0) - Number(a.ca12m || 0)
+      if (Math.abs(caCmp) > 0.000001) return caCmp
+
+      const nameA = safeText(a.raison_sociale_affichee || a.intitule)
+      const nameB = safeText(b.raison_sociale_affichee || b.intitule)
+      const nameCmp = nameA.localeCompare(nameB, 'fr', { numeric: true, sensitivity: 'base' })
+      if (nameCmp !== 0) return nameCmp
+
+      return safeText(a.numero).localeCompare(safeText(b.numero), 'fr', { numeric: true, sensitivity: 'base' })
+    })
+  }, [mapFilteredRowsWithCoords])
+
   useEffect(() => {
     if (!mapOpen || !leafletMapRef.current) return
     const timer = window.setTimeout(() => {
@@ -2551,7 +2576,7 @@ export default function SyntheseMultiClientsPage() {
                 </div>
                 <div className="mapSideList">
                   <div className="mapSideTitle"><span>Entreprises visibles ({mapFilteredRowsWithCoords.length})</span><b>Profils CA<br />12M / N-1 / N-2</b></div>
-                  {mapFilteredRowsWithCoords.map((client) => {
+                  {mapSideRows.map((client) => {
                     const sector = getMapSectorLabel(client)
                     const sideKey = `${client.numero}-${client.siret || client.id}`
                     return (
@@ -2701,9 +2726,9 @@ export default function SyntheseMultiClientsPage() {
         .mapProfilePill, :global(.mapProfilePill) { display: inline-flex !important; align-items: center !important; justify-content: center !important; flex: 0 0 52px !important; width: 52px !important; min-width: 52px !important; max-width: 52px !important; height: 24px !important; padding: 0 6px !important; box-sizing: border-box !important; border-radius: 8px !important; color: #fff; border: 2px solid #0f172a !important; font-size: 13px !important; font-weight: 950 !important; line-height: 1 !important; box-shadow: 0 1px 2px rgba(15,23,42,.20); white-space: nowrap !important; text-align: center !important; }
         .mapProfilePill.empty, :global(.mapProfilePill.empty) { color: transparent !important; text-shadow: none; }
         .mapProfileTriplet, :global(.mapProfileTriplet) { display: inline-flex !important; gap: 8px !important; align-items: center !important; justify-content: flex-end !important; min-width: 172px !important; white-space: nowrap !important; }
-        .mapTripletStack { display: inline-flex; flex-direction: column; align-items: center; gap: 5px; width: 190px; }
-        .mapTripletAmounts { display: grid; grid-template-columns: repeat(3, 52px); gap: 8px; width: 172px; justify-content: center; align-items: start; }
-        .mapTripletAmounts > span { width: 52px; min-width: 52px; text-align: center; font-size: 11px; line-height: 1.1; font-weight: 900; color: #334155; display: flex; align-items: center; justify-content: center; }
+        .mapTripletGrid { display: grid; grid-template-columns: repeat(3, 60px); column-gap: 10px; row-gap: 6px; width: 200px; justify-content: center; align-items: start; }
+        .mapTripletAmountCell { width: 60px; min-width: 60px; display: inline-flex; align-items: flex-start; justify-content: center; text-align: center; font-size: 11px; line-height: 1.12; font-weight: 900; color: #334155; }
+        .mapTripletAmountLabel { display: block; width: 100%; text-align: center; white-space: nowrap; letter-spacing: 0.1px; }
         .mapOverlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(15,23,42,.45); z-index: 9999; padding: 8px; display: flex; align-items: stretch; justify-content: center; }
         .mapModal { width: calc(100vw - 16px); height: calc(100vh - 16px); background: white; border-radius: 18px; box-shadow: 0 24px 70px rgba(15,23,42,.35); display: flex; flex-direction: column; overflow: hidden; }
         .mapHeader { padding: 12px 16px 8px; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; border-bottom: 1px solid #e2e8f0; }
@@ -2733,11 +2758,11 @@ export default function SyntheseMultiClientsPage() {
         .mapSideList { border-radius: 16px; border: 1px solid #cbd5e1; background: white; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; min-height: 0; height: 100%; max-height: 100%; }
         .mapSideTitle { position: sticky; top: 0; z-index: 2; padding: 12px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 950; background: #fff; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
         .mapSideTitle b { text-align: center; font-size: 12px; line-height: 1.1; }
-        .mapSideRow { padding: 14px 12px; border: 0; border-bottom: 1px solid #e2e8f0; border-left: 6px solid #cbd5e1; display: grid; grid-template-columns: minmax(0, 1fr) 190px; gap: 6px 12px; align-items: center; width: 100%; background: #fff; color: #0f172a; text-align: left; cursor: pointer; border-radius: 0; }
+        .mapSideRow { padding: 14px 12px; border: 0; border-bottom: 1px solid #e2e8f0; border-left: 6px solid #cbd5e1; display: grid; grid-template-columns: minmax(0, 1fr) 208px; gap: 6px 12px; align-items: center; width: 100%; background: #fff; color: #0f172a; text-align: left; cursor: pointer; border-radius: 0; }
         .mapSideRow.active { background: #eff6ff; }
         .mapSideRow > strong { font-size: 14px; grid-column: 1 / 2; min-width: 0; }
         .mapSideRow > span { font-size: 13px; color: #475569; grid-column: 1 / 2; min-width: 0; }
-        .mapSideRow > em { font-style: normal; grid-column: 2 / 3; grid-row: 1 / span 2; justify-self: end; width: 190px; display: flex; align-items: center; justify-content: center; overflow: visible; }
+        .mapSideRow > em { font-style: normal; grid-column: 2 / 3; grid-row: 1 / span 2; justify-self: center; width: 208px; display: flex; align-items: center; justify-content: center; overflow: visible; }
         :global(.caMapTooltip) { background: transparent; border: 0; box-shadow: none; padding: 0; }
         :global(.caMapTooltip::before) { display: none; }
         .mapMarkerTags { display: flex; gap: 2px; padding-top: 0; }

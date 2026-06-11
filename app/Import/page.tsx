@@ -1387,7 +1387,23 @@ type ReconciliationStoredRow = {
   is_ok?: boolean
 }
 
+type SmcReconciliationAnnualRow = {
+  type_controle: string
+  periode: string
+  annee: number
+  date_debut: string
+  date_fin_exclue: string
+  nb_lignes_smc: number | null
+  nb_clients_smc: number | null
+  valeur_indicateur: number | null
+  valeur_smc: number | null
+  ecart: number | null
+  ratio: number | null
+  statut: string
+}
+
 const TOLERANCE = 0.01
+const FLUX_ARTICLES_FRONT_REBUILD_RPC = 'rebuild_indicateur_flux_articles_mensuel_periode_front'
 
 
 type SmcRpcPeriod = {
@@ -1550,13 +1566,9 @@ function computeRowIssues(row: ReconciliationRow) {
   if (absEcart(toNumber(row.devis_indicateur) - devisLignes) > TOLERANCE) issues.push('Devis indicateur')
   if (absEcart(toNumber(row.devis_flux) - devisLignes) > TOLERANCE) issues.push('Devis flux')
 
-  // Synthèse multi-clients : contrôle du cache écran vs indicateurs mensuels.
-  if (row.smc_factures_cache !== null && row.smc_factures_cache !== undefined) {
-    if (absEcart(row.ecart_smc_factures_vs_indicateur) > TOLERANCE) issues.push('SMC factures')
-  }
-  if (row.smc_devis_cache !== null && row.smc_devis_cache !== undefined) {
-    if (absEcart(row.ecart_smc_devis_vs_indicateur) > TOLERANCE) issues.push('SMC devis')
-  }
+  // Synthèse multi-clients : NE PLUS contrôler mois par mois.
+  // La SMC est désormais une vision année / YTD ; la comparer à chaque mois crée des faux KO.
+  // Le contrôle SMC doit être porté par un contrôle annuel / YTD séparé côté SQL.
 
   // CDC / BL : on contrôle uniquement l'écart final calculé par la RPC :
   // CDC flux = CDC depuis factures + CDC depuis activité
@@ -1567,60 +1579,78 @@ function computeRowIssues(row: ReconciliationRow) {
   return issues
 }
 
-function exportRows(rows: ReconciliationRow[]) {
-  if (!rows.length) return
+function exportRows(rows: ReconciliationRow[], smcRows: SmcReconciliationAnnualRow[] = []) {
+  if (!rows.length && !smcRows.length) return
 
-  const exportData = rows.map((row) => {
-    const facturesLignes = toNumber(row.factures_lignes)
-    const devisLignes = toNumber(row.devis_lignes)
-    const cdcDepuisFact = toNumber(row.cdc_source_activite_plus_factures)
-    const cdcAttendu = cdcDepuisFact + toNumber(row.cdc_indicateur_activite)
-    const blDepuisFact = toNumber(row.bl_source_activite_plus_factures)
-    const blAttendu = blDepuisFact + toNumber(row.bl_indicateur_activite)
-
-    return {
-      Année: row.annee,
-      Mois: row.mois,
-      Statut: computeRowIssues(row).length ? 'KO' : 'OK',
-      'Anomalies': computeRowIssues(row).join(', '),
-
-      'Factures lignes': facturesLignes,
-      'Factures cache': toNumber(row.factures_cache),
-      'Écart factures cache vs lignes': toNumber(row.factures_cache) - facturesLignes,
-      'Factures indicateur': toNumber(row.factures_indicateur),
-      'Écart factures indicateur vs lignes': toNumber(row.factures_indicateur) - facturesLignes,
-      'Factures flux': toNumber(row.factures_flux),
-      'Écart factures flux vs lignes': toNumber(row.factures_flux) - facturesLignes,
-      'SMC factures': toNumber(row.smc_factures_cache),
-      'Écart SMC factures vs indicateur': toNumber(row.ecart_smc_factures_vs_indicateur),
-
-      'Devis lignes': devisLignes,
-      'Devis cache': toNumber(row.devis_cache),
-      'Écart devis cache vs lignes': toNumber(row.devis_cache) - devisLignes,
-      'Devis indicateur': toNumber(row.devis_indicateur),
-      'Écart devis indicateur vs lignes': toNumber(row.devis_indicateur) - devisLignes,
-      'Devis flux': toNumber(row.devis_flux),
-      'Écart devis flux vs lignes': toNumber(row.devis_flux) - devisLignes,
-      'SMC devis': toNumber(row.smc_devis_cache),
-      'Écart SMC devis vs indicateur': toNumber(row.ecart_smc_devis_vs_indicateur),
-
-      'CDC depuis fact': cdcDepuisFact,
-      'CDC depuis activité': toNumber(row.cdc_indicateur_activite),
-      'CDC attendu': cdcAttendu,
-      'CDC flux': toNumber(row.cdc_flux),
-      'Écart CDC attendu vs flux': cdcAttendu - toNumber(row.cdc_flux),
-
-      'BL depuis fact': blDepuisFact,
-      'BL depuis activité': toNumber(row.bl_indicateur_activite),
-      'BL attendu': blAttendu,
-      'BL flux': toNumber(row.bl_flux),
-      'Écart BL attendu vs flux': blAttendu - toNumber(row.bl_flux),
-    }
-  })
-
-  const ws = XLSX.utils.json_to_sheet(exportData)
   const wb = XLSX.utils.book_new()
-  XLSX.utils.book_append_sheet(wb, ws, 'Contrôle agrégats')
+
+  if (rows.length) {
+    const exportData = rows.map((row) => {
+      const facturesLignes = toNumber(row.factures_lignes)
+      const devisLignes = toNumber(row.devis_lignes)
+      const cdcDepuisFact = toNumber(row.cdc_source_activite_plus_factures)
+      const cdcAttendu = cdcDepuisFact + toNumber(row.cdc_indicateur_activite)
+      const blDepuisFact = toNumber(row.bl_source_activite_plus_factures)
+      const blAttendu = blDepuisFact + toNumber(row.bl_indicateur_activite)
+
+      return {
+        Année: row.annee,
+        Mois: row.mois,
+        Statut: computeRowIssues(row).length ? 'KO' : 'OK',
+        Anomalies: computeRowIssues(row).join(', '),
+
+        'Factures lignes': facturesLignes,
+        'Factures cache': toNumber(row.factures_cache),
+        'Écart factures cache vs lignes': toNumber(row.factures_cache) - facturesLignes,
+        'Factures indicateur': toNumber(row.factures_indicateur),
+        'Écart factures indicateur vs lignes': toNumber(row.factures_indicateur) - facturesLignes,
+        'Factures flux': toNumber(row.factures_flux),
+        'Écart factures flux vs lignes': toNumber(row.factures_flux) - facturesLignes,
+        'Devis lignes': devisLignes,
+        'Devis cache': toNumber(row.devis_cache),
+        'Écart devis cache vs lignes': toNumber(row.devis_cache) - devisLignes,
+        'Devis indicateur': toNumber(row.devis_indicateur),
+        'Écart devis indicateur vs lignes': toNumber(row.devis_indicateur) - devisLignes,
+        'Devis flux': toNumber(row.devis_flux),
+        'Écart devis flux vs lignes': toNumber(row.devis_flux) - devisLignes,
+        'CDC depuis fact': cdcDepuisFact,
+        'CDC depuis activité': toNumber(row.cdc_indicateur_activite),
+        'CDC attendu': cdcAttendu,
+        'CDC flux': toNumber(row.cdc_flux),
+        'Écart CDC attendu vs flux': cdcAttendu - toNumber(row.cdc_flux),
+
+        'BL depuis fact': blDepuisFact,
+        'BL depuis activité': toNumber(row.bl_indicateur_activite),
+        'BL attendu': blAttendu,
+        'BL flux': toNumber(row.bl_flux),
+        'Écart BL attendu vs flux': blAttendu - toNumber(row.bl_flux),
+      }
+    })
+
+    const ws = XLSX.utils.json_to_sheet(exportData)
+    XLSX.utils.book_append_sheet(wb, ws, 'Contrôle mensuel')
+  }
+
+  if (smcRows.length) {
+    const smcExportData = smcRows.map((row) => ({
+      Type: row.type_controle,
+      Période: row.periode,
+      Année: row.annee,
+      'Date début': row.date_debut,
+      'Date fin exclue': row.date_fin_exclue,
+      'Lignes SMC': toNumber(row.nb_lignes_smc),
+      'Clients SMC': toNumber(row.nb_clients_smc),
+      'Valeur indicateur': toNumber(row.valeur_indicateur),
+      'Valeur SMC': toNumber(row.valeur_smc),
+      Écart: toNumber(row.ecart),
+      Ratio: toNumber(row.ratio),
+      Statut: row.statut,
+    }))
+
+    const smcWs = XLSX.utils.json_to_sheet(smcExportData)
+    XLSX.utils.book_append_sheet(wb, smcWs, 'Contrôle SMC annuel')
+  }
+
   XLSX.writeFile(wb, `controle_agregats_${new Date().toISOString().slice(0, 10)}.xlsx`)
 }
 
@@ -1632,6 +1662,7 @@ function DataReconciliationPanel() {
   const [error, setError] = useState<string | null>(null)
   const [hasRun, setHasRun] = useState(false)
   const [runSummary, setRunSummary] = useState<ReconciliationRunSummary | null>(null)
+  const [smcRows, setSmcRows] = useState<SmcReconciliationAnnualRow[]>([])
 
   const summary = useMemo(() => {
     const koRows = rows.filter((row) => computeRowIssues(row).length > 0)
@@ -1662,11 +1693,23 @@ function DataReconciliationPanel() {
     }
   }, [rows])
 
+  const smcSummary = useMemo(() => {
+    const koRows = smcRows.filter((row) => String(row.statut || '').toUpperCase() !== 'OK')
+    return {
+      total: smcRows.length,
+      ko: koRows.length,
+      ok: smcRows.length - koRows.length,
+      status: koRows.length ? 'ko' : 'ok',
+      maxAbsEcart: smcRows.reduce((max, row) => Math.max(max, absEcart(row.ecart)), 0),
+    }
+  }, [smcRows])
+
   async function loadReconciliation() {
     setLoading(true)
     setError(null)
     setHasRun(true)
     setRunSummary(null)
+    setSmcRows([])
 
     try {
       const { data: runData, error: runError } = await supabase.rpc('run_monthly_data_reconciliation', {
@@ -1722,12 +1765,6 @@ function DataReconciliationPanel() {
           toNumber(row.devis_flux) - devisLignes,
           cdcAttendu - toNumber(row.cdc_flux),
           blAttendu - toNumber(row.bl_flux),
-          row.smc_factures_cache !== null && row.smc_factures_cache !== undefined
-            ? toNumber(row.ecart_smc_factures_vs_indicateur)
-            : 0,
-          row.smc_devis_cache !== null && row.smc_devis_cache !== undefined
-            ? toNumber(row.ecart_smc_devis_vs_indicateur)
-            : 0,
         ]
 
         return Math.max(max, ...values.map((value) => Math.abs(value)))
@@ -1744,8 +1781,7 @@ function DataReconciliationPanel() {
           return (
             absEcart(toNumber(row.factures_cache) - ref) > TOLERANCE ||
             absEcart(toNumber(row.factures_indicateur) - ref) > TOLERANCE ||
-            absEcart(toNumber(row.factures_flux) - ref) > TOLERANCE ||
-            absEcart(row.ecart_smc_factures_vs_indicateur) > TOLERANCE
+            absEcart(toNumber(row.factures_flux) - ref) > TOLERANCE
           )
         }).length,
         devis_ko: mappedRows.filter((row) => {
@@ -1753,16 +1789,25 @@ function DataReconciliationPanel() {
           return (
             absEcart(toNumber(row.devis_cache) - ref) > TOLERANCE ||
             absEcart(toNumber(row.devis_indicateur) - ref) > TOLERANCE ||
-            absEcart(toNumber(row.devis_flux) - ref) > TOLERANCE ||
-            absEcart(row.ecart_smc_devis_vs_indicateur) > TOLERANCE
+            absEcart(toNumber(row.devis_flux) - ref) > TOLERANCE
           )
         }).length,
         max_abs_ecart: maxAbsEcart,
       })
+
+      const smcYear = new Date().getFullYear()
+      const { data: smcData, error: smcRpcError } = await supabase.rpc('get_smc_reconciliation_annuel_ytd_front', {
+        p_date_debut: startDate,
+        p_date_fin: endDate,
+        p_annee_n: smcYear,
+      })
+      if (smcRpcError) throw new Error(`Contrôle SMC annuel / YTD impossible : ${smcRpcError.message}`)
+      setSmcRows(((smcData || []) as SmcReconciliationAnnualRow[]))
     } catch (exception: any) {
       setError(exception?.message || String(exception))
       setRows([])
       setRunSummary(null)
+      setSmcRows([])
     } finally {
       setLoading(false)
     }
@@ -1774,7 +1819,7 @@ function DataReconciliationPanel() {
         <div>
           <h2 className="text-sm font-black uppercase tracking-wide text-slate-700">Contrôle cohérence agrégats</h2>
           <p className="mt-1 text-xs font-semibold text-slate-500">
-            Compare les lignes sources, les caches, les indicateurs et le flux articles mois par mois.
+            Compare les lignes sources, les caches, les indicateurs et le flux articles mois par mois. La SMC est exclue du contrôle mensuel et contrôlée à part via un wrapper avec timeout long.
           </p>
         </div>
 
@@ -1807,8 +1852,8 @@ function DataReconciliationPanel() {
           </button>
           <button
             type="button"
-            onClick={() => exportRows(rows)}
-            disabled={!rows.length || loading}
+            onClick={() => exportRows(rows, smcRows)}
+            disabled={(!rows.length && !smcRows.length) || loading}
             className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-bold hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
           >
             Export Excel
@@ -1853,9 +1898,15 @@ function DataReconciliationPanel() {
         </div>
       ) : null}
 
+      {hasRun && !error ? (
+        <div className="mt-3 rounded-xl border border-sky-200 bg-sky-50 p-3 text-xs font-semibold text-sky-800">
+          SMC exclue du contrôle mensuel : la synthèse multi-clients est considérée comme une vue année / YTD. Les contrôles KO ci-dessous portent uniquement sur Factures, Devis, CDC, BL et Flux articles mois par mois.
+        </div>
+      ) : null}
+
       {rows.length ? (
         <div className="mt-4 max-h-[560px] overflow-auto rounded-xl border border-slate-200">
-          <table className="min-w-[2300px] border-collapse text-xs">
+          <table className="min-w-[1900px] border-collapse text-xs">
             <thead className="sticky top-0 z-10 bg-slate-900 text-white">
               <tr>
                 <th className="px-2 py-2 text-left">Période</th>
@@ -1865,15 +1916,11 @@ function DataReconciliationPanel() {
                 <th className="px-2 py-2 text-right">Fact. indic.</th>
                 <th className="px-2 py-2 text-right">Fact. flux</th>
                 <th className="px-2 py-2 text-right">Écart flux</th>
-                <th className="px-2 py-2 text-right">SMC fact.</th>
-                <th className="px-2 py-2 text-right">Écart SMC fact.</th>
                 <th className="px-2 py-2 text-right">Devis lignes</th>
                 <th className="px-2 py-2 text-right">Devis cache</th>
                 <th className="px-2 py-2 text-right">Devis indic.</th>
                 <th className="px-2 py-2 text-right">Devis flux</th>
                 <th className="px-2 py-2 text-right">Écart flux</th>
-                <th className="px-2 py-2 text-right">SMC devis</th>
-                <th className="px-2 py-2 text-right">Écart SMC devis</th>
                 <th className="px-2 py-2 text-right">CDC depuis fact</th>
                 <th className="px-2 py-2 text-right">CDC depuis activité</th>
                 <th className="px-2 py-2 text-right">CDC flux</th>
@@ -1913,25 +1960,11 @@ function DataReconciliationPanel() {
                     <td className={`px-2 py-2 text-right ${getValueClass(facturesLignes, row.factures_indicateur)}`}>{formatMoney(row.factures_indicateur)}</td>
                     <td className={`px-2 py-2 text-right ${getValueClass(facturesLignes, row.factures_flux)}`}>{formatMoney(row.factures_flux)}</td>
                     <td className={`px-2 py-2 text-right ${getEcartClass(toNumber(row.factures_flux) - facturesLignes)}`}>{formatSigned(toNumber(row.factures_flux) - facturesLignes)}</td>
-                    <td className={`px-2 py-2 text-right ${getValueClass(row.factures_indicateur, row.smc_factures_cache)}`}>
-                      {formatMoney(row.smc_factures_cache)}
-                    </td>
-                    <td className={`px-2 py-2 text-right ${getEcartClass(row.ecart_smc_factures_vs_indicateur)}`}>
-                      {formatSigned(row.ecart_smc_factures_vs_indicateur)}
-                    </td>
-
                     <td className="px-2 py-2 text-right font-bold">{formatMoney(devisLignes)}</td>
                     <td className={`px-2 py-2 text-right ${getValueClass(devisLignes, row.devis_cache)}`}>{formatMoney(row.devis_cache)}</td>
                     <td className={`px-2 py-2 text-right ${getValueClass(devisLignes, row.devis_indicateur)}`}>{formatMoney(row.devis_indicateur)}</td>
                     <td className={`px-2 py-2 text-right ${getValueClass(devisLignes, row.devis_flux)}`}>{formatMoney(row.devis_flux)}</td>
                     <td className={`px-2 py-2 text-right ${getEcartClass(toNumber(row.devis_flux) - devisLignes)}`}>{formatSigned(toNumber(row.devis_flux) - devisLignes)}</td>
-                    <td className={`px-2 py-2 text-right ${getValueClass(row.devis_indicateur, row.smc_devis_cache)}`}>
-                      {formatMoney(row.smc_devis_cache)}
-                    </td>
-                    <td className={`px-2 py-2 text-right ${getEcartClass(row.ecart_smc_devis_vs_indicateur)}`}>
-                      {formatSigned(row.ecart_smc_devis_vs_indicateur)}
-                    </td>
-
                     <td className="px-2 py-2 text-right font-bold">{formatMoney(cdcDepuisFact)}</td>
                     <td className="px-2 py-2 text-right font-bold">{formatMoney(row.cdc_indicateur_activite)}</td>
                     <td className={`px-2 py-2 text-right ${getEcartClass(row.ecart_cdc_source_vs_flux)}`}>{formatMoney(row.cdc_flux)}</td>
@@ -1950,6 +1983,75 @@ function DataReconciliationPanel() {
       ) : hasRun && !loading && !error ? (
         <div className="mt-4 rounded-xl bg-slate-50 p-4 text-sm font-bold text-slate-500">
           Aucun résultat retourné pour cette période.
+        </div>
+      ) : null}
+
+      {hasRun && !error ? (
+        <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+          <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+            <div>
+              <h3 className="text-sm font-black uppercase tracking-wide text-slate-700">Contrôle cohérence SMC annuel / YTD</h3>
+              <p className="mt-1 text-xs font-semibold text-slate-500">
+                Compare la ligne annuelle client de synthèse_multi_clients_cache avec les indicateurs mensuels cumulés.
+                Seules les lignes SMC mois NULL et row_kind client sont contrôlées côté SQL.
+              </p>
+            </div>
+            <div className={`rounded-xl border px-3 py-2 text-xs font-black ${smcSummary.status === 'ok' ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-red-200 bg-red-50 text-red-800'}`}>
+              {smcSummary.total ? `${smcSummary.ok} OK / ${smcSummary.ko} KO — écart max ${formatMoney(smcSummary.maxAbsEcart)}` : 'Non contrôlé'}
+            </div>
+          </div>
+
+          {smcRows.length ? (
+            <div className="mt-3 overflow-auto rounded-xl border border-slate-200 bg-white">
+              <table className="min-w-[1250px] border-collapse text-xs">
+                <thead className="bg-slate-900 text-white">
+                  <tr>
+                    <th className="px-2 py-2 text-left">Type</th>
+                    <th className="px-2 py-2 text-left">Période</th>
+                    <th className="px-2 py-2 text-right">Année</th>
+                    <th className="px-2 py-2 text-left">Début</th>
+                    <th className="px-2 py-2 text-left">Fin exclue</th>
+                    <th className="px-2 py-2 text-right">Lignes SMC</th>
+                    <th className="px-2 py-2 text-right">Clients SMC</th>
+                    <th className="px-2 py-2 text-right">Indicateur</th>
+                    <th className="px-2 py-2 text-right">SMC</th>
+                    <th className="px-2 py-2 text-right">Écart</th>
+                    <th className="px-2 py-2 text-right">Ratio</th>
+                    <th className="px-2 py-2 text-left">Statut</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {smcRows.map((row) => {
+                    const isOk = String(row.statut || '').toUpperCase() === 'OK'
+                    return (
+                      <tr key={`${row.type_controle}-${row.annee}-${row.periode}`} className="border-b border-slate-100 hover:bg-slate-50">
+                        <td className="px-2 py-2 font-black">{row.type_controle}</td>
+                        <td className="px-2 py-2 font-bold">{row.periode}</td>
+                        <td className="px-2 py-2 text-right font-bold">{row.annee}</td>
+                        <td className="px-2 py-2">{row.date_debut}</td>
+                        <td className="px-2 py-2">{row.date_fin_exclue}</td>
+                        <td className="px-2 py-2 text-right">{toNumber(row.nb_lignes_smc).toLocaleString('fr-FR')}</td>
+                        <td className="px-2 py-2 text-right">{toNumber(row.nb_clients_smc).toLocaleString('fr-FR')}</td>
+                        <td className="px-2 py-2 text-right font-bold">{formatMoney(row.valeur_indicateur)}</td>
+                        <td className="px-2 py-2 text-right font-bold">{formatMoney(row.valeur_smc)}</td>
+                        <td className={`px-2 py-2 text-right ${getEcartClass(row.ecart)}`}>{formatSigned(row.ecart)}</td>
+                        <td className="px-2 py-2 text-right font-bold">{toNumber(row.ratio).toFixed(6)}</td>
+                        <td className="px-2 py-2">
+                          <span className={`rounded-full px-2 py-1 text-[11px] font-black ${isOk ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
+                            {isOk ? 'OK' : 'KO'}
+                          </span>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : loading ? (
+            <div className="mt-3 rounded-xl bg-white p-4 text-sm font-bold text-slate-500">Contrôle SMC en cours…</div>
+          ) : (
+            <div className="mt-3 rounded-xl bg-white p-4 text-sm font-bold text-slate-500">Aucun résultat SMC retourné pour cette période.</div>
+          )}
         </div>
       ) : null}
     </div>
@@ -2372,6 +2474,35 @@ export default function ImportsParametragePage() {
     }
   }
 
+  async function runFluxArticlesForPeriods(
+    periods: RpcPeriod[],
+    onProgress?: (detail: string) => void,
+    label = 'Flux articles'
+  ) {
+    try {
+      await runRpcForPeriods(FLUX_ARTICLES_FRONT_REBUILD_RPC, periods, onProgress, label)
+    } catch (error: any) {
+      const message = error?.message || String(error)
+      const missingRpc =
+        message.includes('Could not find the function') ||
+        message.includes('function') && message.includes(FLUX_ARTICLES_FRONT_REBUILD_RPC) && message.includes('does not exist')
+
+      if (missingRpc) {
+        throw new Error(
+          `${FLUX_ARTICLES_FRONT_REBUILD_RPC} introuvable. Crée d'abord le wrapper SQL SECURITY DEFINER avec statement_timeout long, puis relance le rebuild flux articles.`
+        )
+      }
+
+      if (message.toLowerCase().includes('statement timeout')) {
+        throw new Error(
+          `${label} interrompu par timeout applicatif. Relance sur une période plus courte, ou augmente le statement_timeout du wrapper ${FLUX_ARTICLES_FRONT_REBUILD_RPC}. Détail : ${message}`
+        )
+      }
+
+      throw error
+    }
+  }
+
   async function updateQuantitesPertinentesAgregats(
     range: { p_date_debut: string; p_date_fin: string },
     onProgress?: (detail: string) => void
@@ -2410,10 +2541,61 @@ export default function ImportsParametragePage() {
     return getMonthlyPeriodsBetween(start, end)
   }
 
+  function getMonthlyPeriodsFromRows(rows: GenericRow[], dateColumns: string[], includeGaps = false): RpcPeriod[] {
+    const monthKeys = new Set<string>()
+
+    rows.forEach((row) => {
+      dateColumns.forEach((column) => {
+        const normalized = normalizeDate(row[column])
+        if (!normalized) return
+
+        const [year, month] = normalized.split('-').map(Number)
+        if (!year || !month || month < 1 || month > 12) return
+        monthKeys.add(`${year}-${String(month).padStart(2, '0')}`)
+      })
+    })
+
+    const sortedKeys = Array.from(monthKeys).sort()
+    if (!sortedKeys.length) return []
+
+    const first = sortedKeys[0].split('-').map(Number)
+    const last = sortedKeys[sortedKeys.length - 1].split('-').map(Number)
+
+    if (includeGaps) {
+      const start = new Date(first[0], first[1] - 1, 1)
+      const end = new Date(last[0], last[1], 1)
+      return getMonthlyPeriodsBetween(start, end)
+    }
+
+    return sortedKeys.map((key) => {
+      const [year, month] = key.split('-').map(Number)
+      const start = new Date(year, month - 1, 1)
+      const end = new Date(year, month, 1)
+      return {
+        p_date_debut: formatDateForSql(start),
+        p_date_fin: formatDateForSql(end),
+        label: `${formatDateForSql(start)} → ${formatDateForSql(end)}`,
+      }
+    })
+  }
+
+  function fallbackRecentPeriodsIfEmpty(periods: RpcPeriod[]) {
+    return periods.length ? periods : getMonthlyAggregatePeriods(2)
+  }
+
+  function summarizePeriodList(periods: RpcPeriod[]) {
+    if (!periods.length) return '0 mois'
+    const first = periods[0]?.p_date_debut
+    const last = periods[periods.length - 1]?.p_date_fin
+    return `${periods.length} mois (${first} → ${last})`
+  }
+
   async function runCompleteRebuildForPeriods(
     periods: RpcPeriod[],
     onProgress?: (detail: string) => void
   ) {
+    // V33 : le flux articles est volontairement exclu du rebuild agrégats standard.
+    // Il dispose d'un bouton dédié, car la RPC est plus lourde et peut dépasser le timeout PostgREST.
     await runRpcForPeriods('refresh_facture_entetes_cache_periode', periods, onProgress, 'Cache factures')
     await runRpcForPeriods('rebuild_indicateur_factures_mensuel_periode', periods, onProgress, 'Agrégat factures')
 
@@ -2421,93 +2603,90 @@ export default function ImportsParametragePage() {
     await runRpcForPeriods('rebuild_indicateur_devis_mensuel_periode', periods, onProgress, 'Agrégat devis')
 
     await runRpcForPeriods('rebuild_indicateur_activite_mensuel_periode', periods, onProgress, 'Agrégat activité')
-    await runRpcForPeriods('rebuild_indicateur_flux_articles_mensuel_periode', periods, onProgress, 'Flux articles')
-    await runSmcCacheForPeriodsBatchesV28(periods, onProgress, 'Synthèse multi-clients')
   }
 
-  async function runPostImportRefresh(config: TableConfig, onProgress?: (detail: string) => void) {
-    // Règle V21 : après import, on réactualise uniquement M-1 et M.
-    const monthlyPeriods = getMonthlyAggregatePeriods(2)
+  async function runPostImportRefresh(config: TableConfig, changedRows: GenericRow[], onProgress?: (detail: string) => void) {
+    const recentPeriods = getMonthlyAggregatePeriods(2)
 
     if (config.key === 'facture_lignes') {
+      const facturePeriods = fallbackRecentPeriodsIfEmpty(getMonthlyPeriodsFromRows(changedRows, ['date_facture']))
+      const fluxPeriods = fallbackRecentPeriodsIfEmpty(
+        getMonthlyPeriodsFromRows(changedRows, ['date_facture', 'date_devis', 'date_bc', 'date_pl', 'date_bl'])
+      )
+
       await runRpcForPeriods(
         'refresh_facture_entetes_cache_periode',
-        monthlyPeriods,
+        facturePeriods,
         onProgress,
-        'Rafraîchissement cache factures mois par mois'
+        'Rafraîchissement cache factures mois facture'
       )
 
       await runRpcForPeriods(
         'rebuild_indicateur_factures_mensuel_periode',
-        monthlyPeriods,
+        facturePeriods,
         onProgress,
-        'Rebuild indicateur factures mois par mois'
+        'Rebuild indicateur factures mois facture'
       )
 
-      await runRpcForPeriods(
-        'rebuild_indicateur_flux_articles_mensuel_periode',
-        monthlyPeriods,
-        onProgress,
-        'Rebuild flux articles mois par mois'
+      return (
+        `Cache et indicateur factures recalculés sur ${summarizePeriodList(facturePeriods)}. ` +
+        `Flux articles non recalculé automatiquement ; période métier conseillée : ${summarizePeriodList(fluxPeriods)}. ` +
+        'SMC non reconstruite automatiquement.'
       )
-
-      await runSmcCacheForPeriodsBatchesV28(monthlyPeriods, onProgress, 'Rebuild synthèse multi-clients ciblée')
-
-      return 'Cache factures, indicateur factures, flux articles et synthèse multi-clients recalculés mois par mois'
     }
 
     if (config.key === 'devis_lignes') {
+      const devisPeriods = fallbackRecentPeriodsIfEmpty(getMonthlyPeriodsFromRows(changedRows, ['date_devis']))
+      const fluxPeriods = fallbackRecentPeriodsIfEmpty(
+        getMonthlyPeriodsFromRows(changedRows, ['date_devis', 'date_bc', 'date_pl', 'date_bl'])
+      )
+
       await runRpcForPeriods(
         'refresh_devis_entetes_cache_periode',
-        monthlyPeriods,
+        devisPeriods,
         onProgress,
-        'Rafraîchissement cache devis mois par mois'
+        'Rafraîchissement cache devis mois devis'
       )
 
       await runRpcForPeriods(
         'rebuild_indicateur_devis_mensuel_periode',
-        monthlyPeriods,
+        devisPeriods,
         onProgress,
-        'Rebuild indicateur devis mois par mois'
+        'Rebuild indicateur devis mois devis'
       )
 
-      await runRpcForPeriods(
-        'rebuild_indicateur_flux_articles_mensuel_periode',
-        monthlyPeriods,
-        onProgress,
-        'Rebuild flux articles mois par mois'
+      return (
+        `Cache et indicateur devis recalculés sur ${summarizePeriodList(devisPeriods)}. ` +
+        `Flux articles non recalculé automatiquement ; période métier conseillée : ${summarizePeriodList(fluxPeriods)}. ` +
+        'SMC non reconstruite automatiquement.'
       )
-
-      await runSmcCacheForPeriodsBatchesV28(monthlyPeriods, onProgress, 'Rebuild synthèse multi-clients ciblée')
-
-      return 'Cache devis, indicateur devis, flux articles et synthèse multi-clients recalculés mois par mois'
     }
 
     if (config.key === 'activite_lignes') {
+      const activitePeriods = fallbackRecentPeriodsIfEmpty(getMonthlyPeriodsFromRows(changedRows, ['date_piece'], true))
+      const fluxPeriods = fallbackRecentPeriodsIfEmpty(
+        getMonthlyPeriodsFromRows(changedRows, ['date_piece', 'date_devis', 'date_bc', 'date_pl', 'date_bl'], true)
+      )
+
       await runRpcForPeriods(
         'rebuild_indicateur_activite_mensuel_periode',
-        monthlyPeriods,
+        activitePeriods,
         onProgress,
-        'Rebuild indicateur activité mois par mois'
+        'Rebuild indicateur activité période complète du fichier'
       )
 
-      await runRpcForPeriods(
-        'rebuild_indicateur_flux_articles_mensuel_periode',
-        monthlyPeriods,
-        onProgress,
-        'Rebuild flux articles mois par mois'
+      return (
+        `Indicateur activité recalculé sur ${summarizePeriodList(activitePeriods)}. ` +
+        `Flux articles non recalculé automatiquement ; période métier conseillée : ${summarizePeriodList(fluxPeriods)}. ` +
+        'SMC non reconstruite automatiquement.'
       )
-
-      await runSmcCacheForPeriodsBatchesV28(monthlyPeriods, onProgress, 'Rebuild synthèse multi-clients ciblée')
-
-      return 'Indicateur activité, flux articles et synthèse multi-clients recalculés mois par mois'
     }
 
     if (config.key === 'ref_familles') {
       return 'Référentiel familles mis à jour. Utilise le bouton « Recalcul qté pertinentes période » pour appliquer la nouvelle règle sur une période choisie.'
     }
 
-    return 'Aucun refresh automatique requis pour cette table'
+    return `Aucun refresh automatique requis pour cette table. Référence de sécurité M-1/M disponible : ${summarizePeriodList(recentPeriods)}.`
   }
 
   async function ensureReferencedTiers(
@@ -3210,7 +3389,7 @@ export default function ImportsParametragePage() {
     updateImportStep('insert', 'done', `${imported} ligne(s) insérée(s).${isLineTableKey(config.key) ? ' Triggers réactivés.' : ''}`)
 
     updateImportStep('refresh', 'running', 'Mise à jour des caches et agrégats')
-    const refreshMessage = await runPostImportRefresh(config, (detail) => updateImportStep('refresh', 'running', detail))
+    const refreshMessage = await runPostImportRefresh(config, rowsToInsert, (detail) => updateImportStep('refresh', 'running', detail))
     updateImportStep('refresh', 'done', refreshMessage)
 
     const allMessages = [...technicalMessages, ...duplicateRejects]
@@ -3477,22 +3656,19 @@ export default function ImportsParametragePage() {
       if (selectedConfig.key === 'facture_lignes') {
         await runRpcForPeriods('refresh_facture_entetes_cache_periode', monthlyPeriods)
         await runRpcForPeriods('rebuild_indicateur_factures_mensuel_periode', monthlyPeriods)
-        await runRpcForPeriods('rebuild_indicateur_flux_articles_mensuel_periode', monthlyPeriods)
       }
       if (selectedConfig.key === 'devis_lignes') {
         await runRpcForPeriods('refresh_devis_entetes_cache_periode', monthlyPeriods)
         await runRpcForPeriods('rebuild_indicateur_devis_mensuel_periode', monthlyPeriods)
-        await runRpcForPeriods('rebuild_indicateur_flux_articles_mensuel_periode', monthlyPeriods)
       }
       if (selectedConfig.key === 'activite_lignes') {
         await runRpcForPeriods('rebuild_indicateur_activite_mensuel_periode', monthlyPeriods)
-        await runRpcForPeriods('rebuild_indicateur_flux_articles_mensuel_periode', monthlyPeriods)
       }
       if (selectedConfig.key === 'ref_familles') {
         // Les quantités pertinentes se recalculent désormais via le bouton période dédié.
       }
 
-      setMessage('Enregistrement sauvegardé.')
+      setMessage('Enregistrement sauvegardé. Agrégats rapides recalculés si nécessaire ; flux articles et SMC non reconstruits automatiquement.')
       setEditingRow(null)
       await loadStats()
       await loadRows(selectedConfig)
@@ -3526,7 +3702,7 @@ export default function ImportsParametragePage() {
 
   async function runRecentMonthsRebuild(_monthCount: 2 | 3 = 2, onProgress?: (detail: string) => void) {
     // Règle V21 : les rebuilds standards ne recalculent que M-1 et M.
-    // Les périodes plus longues passent par le bloc manuel "Rebuild période".
+    // Les périodes plus longues passent par le bloc manuel "Rebuild agrégats période".
     const periods = getMonthlyAggregatePeriods(2)
 
     await runRpcForPeriods('refresh_facture_entetes_cache_periode', periods, onProgress, 'Cache factures')
@@ -3536,8 +3712,6 @@ export default function ImportsParametragePage() {
     await runRpcForPeriods('rebuild_indicateur_devis_mensuel_periode', periods, onProgress, 'Agrégat devis / vue')
 
     await runRpcForPeriods('rebuild_indicateur_activite_mensuel_periode', periods, onProgress, 'Agrégat activité')
-    await runRpcForPeriods('rebuild_indicateur_flux_articles_mensuel_periode', periods, onProgress, 'Flux articles')
-    await runSmcCacheForPeriodsBatchesV28(periods, onProgress, 'Synthèse multi-clients')
   }
 
   async function handleManualRecentMonthsRebuild(monthCount: 2 | 3 = 3, blMxMode?: 'previous_month' | 'current_month') {
@@ -3545,12 +3719,12 @@ export default function ImportsParametragePage() {
 
     const confirmText = blMxMode
       ? `Confirmer le basculement BL M-x en mode ${blMxMode === 'previous_month' ? 'mois précédent' : 'mois courant'} sans rebuild complet ?`
-      : `Confirmer le rebuild des agrégats des ${monthCount} derniers mois, mois par mois ?`
+      : `Confirmer le rebuild des agrégats rapides des ${monthCount} derniers mois, mois par mois, hors flux articles et hors SMC ?`
 
     if (!window.confirm(confirmText)) return
 
     setMaintenanceLoading(true)
-    setMaintenanceMessage(`Préparation du rebuild ${monthCount} mois…`)
+    setMaintenanceMessage(`Préparation du rebuild agrégats rapides ${monthCount} mois…`)
     setError(null)
 
     try {
@@ -3566,22 +3740,19 @@ export default function ImportsParametragePage() {
         if (applyError) throw new Error(`apply_bl_mx_month_mode_activite : ${applyError.message}`)
 
         const periods = getMonthlyAggregatePeriods(2)
-        await runRpcForPeriods(
-          'rebuild_indicateur_flux_articles_mensuel_periode',
+        await runFluxArticlesForPeriods(
           periods,
           (detail) => setMaintenanceMessage(detail),
           'Flux articles après BL M-x'
         )
-        await runSmcCacheForPeriodsBatchesV28(periods, (detail) => setMaintenanceMessage(detail), 'Synthèse multi-clients après BL M-x')
-
-        setMaintenanceMessage(`BL M-x → ${blMxMode === 'previous_month' ? 'M-1' : 'M'} appliqué. Flux articles et synthèse multi-clients recalculés sur M-1/M.`)
+        setMaintenanceMessage(`BL M-x → ${blMxMode === 'previous_month' ? 'M-1' : 'M'} appliqué. Flux articles recalculé sur M-1/M. SMC non reconstruite automatiquement.`)
         await loadStats()
         await loadRows(selectedConfig)
         return
       }
 
       await runRecentMonthsRebuild(monthCount, (detail) => setMaintenanceMessage(detail))
-      setMaintenanceMessage('Rebuild M-1/M terminé. Agrégats, flux articles et synthèse multi-clients recalculés.')
+      setMaintenanceMessage('Rebuild agrégats M-1/M terminé hors flux articles. Lance le rebuild flux articles dédié si les dates CDC/BL doivent être rafraîchies. SMC non reconstruite automatiquement.')
       await loadStats()
       await loadRows(selectedConfig)
     } catch (e: any) {
@@ -3599,14 +3770,90 @@ export default function ImportsParametragePage() {
       const periods = getMonthlyPeriodsCoveringDateInputs(manualStartDate, manualEndDate)
       if (!periods.length) throw new Error('Aucune période mensuelle à recalculer.')
 
-      if (!window.confirm(`Confirmer le rebuild complet de ${periods.length} mois, du ${manualStartDate} au ${manualEndDate} ?`)) return
+      if (!window.confirm(`Confirmer le rebuild des agrégats rapides de ${periods.length} mois, du ${manualStartDate} au ${manualEndDate}, hors flux articles et hors SMC ?`)) return
 
       setMaintenanceLoading(true)
-      setMaintenanceMessage(`Préparation du rebuild période ${manualStartDate} → ${manualEndDate}…`)
+      setMaintenanceMessage(`Préparation du rebuild agrégats rapides période ${manualStartDate} → ${manualEndDate}…`)
       setError(null)
 
       await runCompleteRebuildForPeriods(periods, (detail) => setMaintenanceMessage(detail))
-      setMaintenanceMessage(`Rebuild période terminé : ${manualStartDate} → ${manualEndDate}.`)
+      setMaintenanceMessage(`Rebuild agrégats période terminé hors flux articles : ${manualStartDate} → ${manualEndDate}. Lance le rebuild flux articles dédié si nécessaire.`)
+      await loadStats()
+      await loadRows(selectedConfig)
+    } catch (e: any) {
+      setError(e?.message || String(e))
+      setMaintenanceMessage(null)
+    } finally {
+      setMaintenanceLoading(false)
+    }
+  }
+
+  async function handleManualPeriodFluxRebuild() {
+    if (maintenanceLoading || importing) return
+
+    try {
+      const periods = getMonthlyPeriodsCoveringDateInputs(manualStartDate, manualEndDate)
+      if (!periods.length) throw new Error('Aucune période mensuelle à recalculer.')
+
+      if (!window.confirm(
+        `Confirmer le rebuild Flux articles de ${periods.length} mois, du ${manualStartDate} au ${manualEndDate} ?\n\n` +
+          `Traitement potentiellement long : la RPC appelée est ${FLUX_ARTICLES_FRONT_REBUILD_RPC}.`
+      )) return
+
+      setMaintenanceLoading(true)
+      setMaintenanceMessage(`Préparation rebuild flux articles période ${manualStartDate} → ${manualEndDate}…`)
+      setError(null)
+
+      await runFluxArticlesForPeriods(periods, (detail) => setMaintenanceMessage(detail), 'Flux articles période')
+      setMaintenanceMessage(`Rebuild flux articles période terminé : ${manualStartDate} → ${manualEndDate}.`)
+      await loadStats()
+      await loadRows(selectedConfig)
+    } catch (e: any) {
+      setError(e?.message || String(e))
+      setMaintenanceMessage(null)
+    } finally {
+      setMaintenanceLoading(false)
+    }
+  }
+
+  async function handleManualRecentSmcRebuild() {
+    if (maintenanceLoading || importing) return
+
+    const periods = getMonthlyAggregatePeriods(2)
+    if (!window.confirm(`Confirmer le rebuild SMC par batch faible sur M-1/M (${periods.length} mois) ?`)) return
+
+    setMaintenanceLoading(true)
+    setMaintenanceMessage('Préparation rebuild SMC M-1/M…')
+    setError(null)
+
+    try {
+      await runSmcCacheForPeriodsBatchesV28(periods, (detail) => setMaintenanceMessage(detail), 'Synthèse multi-clients M-1/M')
+      setMaintenanceMessage('Rebuild SMC M-1/M terminé. Tu peux relancer le contrôle SMC annuel / YTD pour vérifier la cohérence.')
+      await loadStats()
+      await loadRows(selectedConfig)
+    } catch (e: any) {
+      setError(e?.message || String(e))
+      setMaintenanceMessage(null)
+    } finally {
+      setMaintenanceLoading(false)
+    }
+  }
+
+  async function handleManualPeriodSmcRebuild() {
+    if (maintenanceLoading || importing) return
+
+    try {
+      const periods = getMonthlyPeriodsCoveringDateInputs(manualStartDate, manualEndDate)
+      if (!periods.length) throw new Error('Aucune période mensuelle à recalculer.')
+
+      if (!window.confirm(`Confirmer le rebuild SMC par batch faible de ${periods.length} mois, du ${manualStartDate} au ${manualEndDate} ?`)) return
+
+      setMaintenanceLoading(true)
+      setMaintenanceMessage(`Préparation rebuild SMC période ${manualStartDate} → ${manualEndDate}…`)
+      setError(null)
+
+      await runSmcCacheForPeriodsBatchesV28(periods, (detail) => setMaintenanceMessage(detail), 'Synthèse multi-clients période')
+      setMaintenanceMessage(`Rebuild SMC période terminé : ${manualStartDate} → ${manualEndDate}.`)
       await loadStats()
       await loadRows(selectedConfig)
     } catch (e: any) {
@@ -3690,7 +3937,15 @@ export default function ImportsParametragePage() {
                 disabled={maintenanceLoading || importing}
                 className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {maintenanceLoading ? 'Rebuild…' : 'Rebuild M-1 + M'}
+                {maintenanceLoading ? 'Rebuild…' : 'Rebuild agrégats rapides M-1 + M'}
+              </button>
+              <button
+                type="button"
+                onClick={handleManualRecentSmcRebuild}
+                disabled={maintenanceLoading || importing}
+                className="rounded-xl border border-cyan-300 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-800 hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Rebuild SMC M-1 + M
               </button>
               <button
                 type="button"
@@ -3722,7 +3977,7 @@ export default function ImportsParametragePage() {
 
           <div className="mt-4 flex flex-wrap items-end gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
             <label className="text-xs font-bold uppercase text-slate-500">
-              Rebuild période — du
+              Rebuilds période — du
               <input
                 type="date"
                 value={manualStartDate}
@@ -3745,7 +4000,23 @@ export default function ImportsParametragePage() {
               disabled={maintenanceLoading || importing}
               className="rounded-xl border border-indigo-300 bg-indigo-50 px-4 py-2 text-sm font-semibold text-indigo-800 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              Rebuild période
+              Rebuild agrégats rapides période
+            </button>
+            <button
+              type="button"
+              onClick={handleManualPeriodFluxRebuild}
+              disabled={maintenanceLoading || importing}
+              className="rounded-xl border border-orange-300 bg-orange-50 px-4 py-2 text-sm font-semibold text-orange-800 hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              Rebuild flux articles période
+            </button>
+            <button
+              type="button"
+              onClick={handleManualPeriodSmcRebuild}
+              disabled={maintenanceLoading || importing}
+              className="rounded-xl border border-cyan-300 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-800 hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              Rebuild SMC période
             </button>
             <button
               type="button"
@@ -3756,7 +4027,7 @@ export default function ImportsParametragePage() {
               Recalcul qté pertinentes période
             </button>
             <div className="text-xs font-semibold text-slate-500">
-              La date de fin est traitée comme mois inclus. Le rebuild reste découpé mois par mois.
+              La date de fin est traitée comme mois inclus. Les agrégats rapides, le flux articles et SMC sont séparés. Le flux articles utilise un wrapper dédié avec timeout long.
             </div>
           </div>
 
