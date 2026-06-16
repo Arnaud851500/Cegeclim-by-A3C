@@ -1419,63 +1419,149 @@ type SmcBatchResult = {
   remaining_count?: number | string | null
 }
 
+const SMC_BATCH_SIZE = 1
+const SMC_MAX_LOOPS = 10000
+const SMC_RETRY_LIMIT = 3
+const SMC_PAUSE_BETWEEN_BATCHES_MS = 150
+
+function waitForSmcBatch(delayMs: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, delayMs))
+}
+
+function isSmcTimeoutError(error: any) {
+  const message = String(error?.message || error || '').toLowerCase()
+  return message.includes('statement timeout') || message.includes('canceling statement')
+}
+
+function getSmcCheckpointKey(period: SmcRpcPeriod) {
+  return `smc-rebuild-v28:${period.p_date_debut}:${period.p_date_fin}`
+}
+
 async function runSmcCacheForPeriodBatchesV28(
   period: SmcRpcPeriod,
   onProgress?: (detail: string) => void,
   label = 'Synthèse multi-clients',
-  batchSize = 5
+  batchSize = SMC_BATCH_SIZE
 ) {
-  let after: string | null = null
+  const periodLabel = period.label || `${period.p_date_debut} → ${period.p_date_fin}`
+  const checkpointKey = getSmcCheckpointKey(period)
+
+  let after: string | null =
+    typeof window !== 'undefined'
+      ? window.localStorage.getItem(checkpointKey)
+      : null
+
   let processedTotal = 0
-  const maxLoops = 500
 
-  for (let loop = 0; loop < maxLoops; loop += 1) {
-    onProgress?.(`${label} : ${period.label || `${period.p_date_debut} → ${period.p_date_fin}`} — lot ${loop + 1}${after ? ` après ${after}` : ''}`)
+  if (after) {
+    onProgress?.(`${label} : reprise de ${periodLabel} après le client ${after}`)
+  }
 
-    const { data, error } = await supabase.rpc('rebuild_smc_cache_period_batch_v28', {
-      p_date_debut: period.p_date_debut,
-      p_date_fin: period.p_date_fin,
-      p_after_numero: after,
-      p_batch_size: batchSize,
-    })
+  for (let loop = 0; loop < SMC_MAX_LOOPS; loop += 1) {
+    const previousAfter = after
 
-    if (error) throw new Error(`rebuild_smc_cache_period_batch_v28 ${period.label || ''} : ${error.message}`)
+    onProgress?.(
+      `${label} : ${periodLabel} — client ${loop + 1}` +
+      `${after ? ` après ${after}` : ''}`
+    )
 
-    const rows = (Array.isArray(data) ? data : data ? [data] : []) as SmcBatchResult[]
+    let rpcData: any = null
+    let lastError: any = null
+
+    for (let attempt = 0; attempt <= SMC_RETRY_LIMIT; attempt += 1) {
+      const { data, error } = await supabase.rpc('rebuild_smc_cache_period_batch_v28', {
+        p_date_debut: period.p_date_debut,
+        p_date_fin: period.p_date_fin,
+        p_after_numero: after,
+        p_batch_size: batchSize,
+      })
+
+      if (!error) {
+        rpcData = data
+        lastError = null
+        break
+      }
+
+      lastError = error
+
+      if (!isSmcTimeoutError(error) || attempt >= SMC_RETRY_LIMIT) {
+        break
+      }
+
+      const retryDelay = 1000 * (attempt + 1)
+      onProgress?.(
+        `${label} : ${periodLabel} — timeout sur le client en cours, ` +
+        `nouvelle tentative ${attempt + 1}/${SMC_RETRY_LIMIT} dans ${retryDelay / 1000}s`
+      )
+      await waitForSmcBatch(retryDelay)
+    }
+
+    if (lastError) {
+      throw new Error(
+        `rebuild_smc_cache_period_batch_v28 ${periodLabel}` +
+        `${after ? ` après ${after}` : ''} : ${lastError.message}`
+      )
+    }
+
+    const rows = (
+      Array.isArray(rpcData)
+        ? rpcData
+        : rpcData
+          ? [rpcData]
+          : []
+    ) as SmcBatchResult[]
+
     const batchRow = rows[0]
     const processed = Number(batchRow?.processed_count ?? 0)
     const totalCandidates = Number(batchRow?.total_candidates ?? 0)
     const remaining = Number(batchRow?.remaining_count ?? 0)
-    const lastNumero: string | null = batchRow?.last_numero ? String(batchRow.last_numero) : after
+    const lastNumero: string | null =
+      batchRow?.last_numero
+        ? String(batchRow.last_numero)
+        : after
 
     processedTotal += processed
     after = lastNumero
 
+    if (processed > 0 && after === previousAfter) {
+      throw new Error(
+        `${label} : la RPC indique un client traité mais le curseur n'a pas progressé ` +
+        `(dernier client : ${after || 'inconnu'}).`
+      )
+    }
+
+    if (typeof window !== 'undefined' && after) {
+      window.localStorage.setItem(checkpointKey, after)
+    }
+
     onProgress?.(
-      `${label} : ${period.label || `${period.p_date_debut} → ${period.p_date_fin}`} — ${processedTotal}/${totalCandidates || '?'} client(s) traité(s)${remaining ? ', suite probable…' : ''}`
+      `${label} : ${periodLabel} — ${processedTotal}` +
+      `${totalCandidates ? `/${totalCandidates}` : ''} client(s) traité(s)` +
+      `${remaining ? ', suite…' : ''}`
     )
 
-    // V28 ne lance plus de COUNT global pour éviter les timeouts.
-    // On continue tant que le lot est plein ; on s'arrête quand le dernier lot est incomplet ou vide.
+    // Avec un micro-lot d'un client, un résultat vide marque la fin de toute la période.
     if (!processed || processed < batchSize) {
-      return { processedTotal, totalCandidates, lastNumero: after }
+      if (typeof window !== 'undefined') {
+        window.localStorage.removeItem(checkpointKey)
+      }
+
+      return {
+        processedTotal,
+        totalCandidates,
+        lastNumero: after,
+      }
     }
+
+    // Petite pause entre les clients pour ne pas saturer PostgREST et PostgreSQL.
+    await waitForSmcBatch(SMC_PAUSE_BETWEEN_BATCHES_MS)
   }
 
   throw new Error(
-    `${label} : arrêt de sécurité après ${maxLoops} lots. Dernier client traité : ${after || 'début'}. ` +
-      `Relance possible à partir de ce dernier numéro si nécessaire.`
+    `${label} : arrêt de sécurité après ${SMC_MAX_LOOPS} clients. ` +
+    `Dernier client traité : ${after || 'début'}. ` +
+    `Le prochain clic reprendra automatiquement à ce client.`
   )
-}
-
-async function runSmcCacheForPeriodsBatchesV28(
-  periods: SmcRpcPeriod[],
-  onProgress?: (detail: string) => void,
-  label = 'Synthèse multi-clients'
-) {
-  for (const period of periods) {
-    await runSmcCacheForPeriodBatchesV28(period, onProgress, label, 5)
-  }
 }
 
 function toNumber(value: any) {
@@ -2539,6 +2625,39 @@ export default function ImportsParametragePage() {
     // Date fin traitée comme mois inclus : 2026-06-15 inclut juin, donc fin technique = 2026-07-01.
     const end = new Date(endInput.getFullYear(), endInput.getMonth() + 1, 1)
     return getMonthlyPeriodsBetween(start, end)
+  }
+
+  function getSmcPeriodCoveringDateInputs(startIso: string, endIso: string): SmcRpcPeriod {
+    if (!startIso || !endIso) throw new Error('Merci de renseigner une date de début et une date de fin.')
+
+    const startParts = startIso.split('-').map(Number)
+    const endParts = endIso.split('-').map(Number)
+
+    if (startParts.length !== 3 || endParts.length !== 3) {
+      throw new Error('Période SMC invalide.')
+    }
+
+    const start = new Date(startParts[0], startParts[1] - 1, 1)
+    const endInput = new Date(endParts[0], endParts[1] - 1, endParts[2] || 1)
+
+    if (Number.isNaN(start.getTime()) || Number.isNaN(endInput.getTime())) {
+      throw new Error('Période SMC invalide.')
+    }
+
+    if (endInput < start) {
+      throw new Error('La date de fin doit être supérieure ou égale à la date de début.')
+    }
+
+    // La plage SMC reste unique. La date de fin saisie est traitée comme mois inclus.
+    const endExclusive = new Date(endInput.getFullYear(), endInput.getMonth() + 1, 1)
+    const pDateDebut = formatDateForSql(start)
+    const pDateFin = formatDateForSql(endExclusive)
+
+    return {
+      p_date_debut: pDateDebut,
+      p_date_fin: pDateFin,
+      label: `${pDateDebut} → ${pDateFin}`,
+    }
   }
 
   function getMonthlyPeriodsFromRows(rows: GenericRow[], dateColumns: string[], includeGaps = false): RpcPeriod[] {
@@ -3820,15 +3939,39 @@ export default function ImportsParametragePage() {
     if (maintenanceLoading || importing) return
 
     const periods = getMonthlyAggregatePeriods(2)
-    if (!window.confirm(`Confirmer le rebuild SMC par batch faible sur M-1/M (${periods.length} mois) ?`)) return
+    const firstPeriod = periods[0]
+    const lastPeriod = periods[periods.length - 1]
+
+    if (!firstPeriod || !lastPeriod) {
+      setError('Impossible de déterminer la période SMC M-1/M.')
+      return
+    }
+
+    const period: SmcRpcPeriod = {
+      p_date_debut: firstPeriod.p_date_debut,
+      p_date_fin: lastPeriod.p_date_fin,
+      label: `${firstPeriod.p_date_debut} → ${lastPeriod.p_date_fin}`,
+    }
+
+    if (!window.confirm(
+      `Confirmer le rebuild SMC sur une période unique M-1/M, ` +
+      `traitée client par client ?\n\n${period.label}`
+    )) return
 
     setMaintenanceLoading(true)
-    setMaintenanceMessage('Préparation rebuild SMC M-1/M…')
+    setMaintenanceMessage('Préparation rebuild SMC M-1/M — un client par appel…')
     setError(null)
 
     try {
-      await runSmcCacheForPeriodsBatchesV28(periods, (detail) => setMaintenanceMessage(detail), 'Synthèse multi-clients M-1/M')
-      setMaintenanceMessage('Rebuild SMC M-1/M terminé. Tu peux relancer le contrôle SMC annuel / YTD pour vérifier la cohérence.')
+      await runSmcCacheForPeriodBatchesV28(
+        period,
+        (detail) => setMaintenanceMessage(detail),
+        'Synthèse multi-clients M-1/M',
+        SMC_BATCH_SIZE
+      )
+      setMaintenanceMessage(
+        'Rebuild SMC M-1/M terminé. Tu peux relancer le contrôle SMC annuel / YTD pour vérifier la cohérence.'
+      )
       await loadStats()
       await loadRows(selectedConfig)
     } catch (e: any) {
@@ -3843,17 +3986,29 @@ export default function ImportsParametragePage() {
     if (maintenanceLoading || importing) return
 
     try {
-      const periods = getMonthlyPeriodsCoveringDateInputs(manualStartDate, manualEndDate)
-      if (!periods.length) throw new Error('Aucune période mensuelle à recalculer.')
+      const period = getSmcPeriodCoveringDateInputs(manualStartDate, manualEndDate)
 
-      if (!window.confirm(`Confirmer le rebuild SMC par batch faible de ${periods.length} mois, du ${manualStartDate} au ${manualEndDate} ?`)) return
+      if (!window.confirm(
+        `Confirmer le rebuild SMC sur toute la plage sélectionnée, sans découpage mensuel ?\n\n` +
+        `${period.label}\n` +
+        `Le traitement sera exécuté client par client.`
+      )) return
 
       setMaintenanceLoading(true)
-      setMaintenanceMessage(`Préparation rebuild SMC période ${manualStartDate} → ${manualEndDate}…`)
+      setMaintenanceMessage(
+        `Préparation rebuild SMC période unique ${period.label} — un client par appel…`
+      )
       setError(null)
 
-      await runSmcCacheForPeriodsBatchesV28(periods, (detail) => setMaintenanceMessage(detail), 'Synthèse multi-clients période')
-      setMaintenanceMessage(`Rebuild SMC période terminé : ${manualStartDate} → ${manualEndDate}.`)
+      await runSmcCacheForPeriodBatchesV28(
+        period,
+        (detail) => setMaintenanceMessage(detail),
+        'Synthèse multi-clients période',
+        SMC_BATCH_SIZE
+      )
+      setMaintenanceMessage(
+        `Rebuild SMC période (1 client/lot) terminé sans découpage mensuel : ${period.label}.`
+      )
       await loadStats()
       await loadRows(selectedConfig)
     } catch (e: any) {
@@ -4016,7 +4171,7 @@ export default function ImportsParametragePage() {
               disabled={maintenanceLoading || importing}
               className="rounded-xl border border-cyan-300 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-800 hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              Rebuild SMC période
+              Rebuild SMC période (1 client/lot)
             </button>
             <button
               type="button"
@@ -4027,7 +4182,7 @@ export default function ImportsParametragePage() {
               Recalcul qté pertinentes période
             </button>
             <div className="text-xs font-semibold text-slate-500">
-              La date de fin est traitée comme mois inclus. Les agrégats rapides, le flux articles et SMC sont séparés. Le flux articles utilise un wrapper dédié avec timeout long.
+              La date de fin est traitée comme mois inclus. Les agrégats rapides et le flux articles restent découpés par mois. SMC traite toute la plage en une seule période, client par client.
             </div>
           </div>
 
