@@ -1698,9 +1698,17 @@ async function openMapFromCell(secteur: string, departement: string | null) {
   setMapOpen(true)
   setMapLoading(true)
   setMapClients([])
-  setShowMapCegeclim(false)
-  setShowMapCegeclimSommeil(false)
-  setShowMapProspects(true)
+  // La carte doit reprendre le périmètre Clients sélectionné sur l'écran principal.
+  // En mode "Tous", les trois catégories sont visibles dès l'ouverture.
+  setShowMapCegeclim(
+    selectedClientScope === 'Tous' || selectedClientScope === 'Cegeclim'
+  )
+  setShowMapCegeclimSommeil(
+    selectedClientScope === 'Tous' || selectedClientScope === 'CegeclimSommeil'
+  )
+  setShowMapProspects(
+    selectedClientScope === 'Tous' || selectedClientScope === 'Prospects'
+  )
   setMapAgeSliderMin(ageSliderMin)
   setMapAgeSliderMax(ageSliderMax)
   setMapInstanceKey((prev) => prev + 1)
@@ -2120,7 +2128,11 @@ function matchesMapCommonFilters(row: ClientRow) {
   }
 
   if (selectedSectors.length > 0) {
-    const sector = translateNaf(row.activitePrincipaleEtablissement)
+    // Utiliser exactement le même libellé d'activité que dans le tableau,
+    // la synthèse et la liste. Certains enregistrements disposent d'un
+    // naf_libelle_traduit ("CMI", "Electricité ENR", etc.) alors que
+    // translateNaf() renvoie un libellé enrichi avec le code NAF.
+    const sector = getClientSectorLabel(row)
     if (!selectedSectors.includes(sector)) return false
   }
 
@@ -2527,7 +2539,7 @@ const ageRangeTitle = useMemo(
     return Array.from(
       new Set(
         scopedClients
-          .map((r) => r.naf_libelle_traduit || translateNaf(r.activitePrincipaleEtablissement))
+          .map((r) => getClientSectorLabel(r))
           .filter(Boolean) as string[]
       )
     ).sort((a, b) => a.localeCompare(b, 'fr'))
@@ -2601,7 +2613,7 @@ const ageRangeTitle = useMemo(
     const designationQ = designationSearch.trim().toLowerCase()
 
     return scopedClientsBase.filter((row) => {
-      const sector = row.naf_libelle_traduit || translateNaf(row.activitePrincipaleEtablissement)
+      const sector = getClientSectorLabel(row)
       const department = getClientDepartment(row)
       const ageDays = diffDaysFromToday(row.dateCreationEtablissement)
       const completeness = getCompletenessPercent(row)
