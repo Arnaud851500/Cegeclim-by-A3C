@@ -125,6 +125,7 @@ type SummaryRow = {
   id: string
   kind: RowKind
   level: number
+  updatedAt?: string
   collaborateur: string
   agence: string
   numero: string
@@ -266,17 +267,23 @@ type ClientMapDbRow = {
   capital_social: string | null
 }
 
+type LastBusinessDates = {
+  devis: string | null
+  factures: string | null
+  bl: string | null
+}
+
 const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Sept', 'Oct', 'Nov', 'Déc']
 const FAMILY_MACROS = ['R/R', 'R/O', 'ECS', 'DRV', 'R_zone', 'Accessoire', 'PV', 'Autres']
 const N = new Date().getFullYear()
 const CURRENT_MONTH = new Date().getMonth() + 1
-const CURRENT_DAY = new Date().getDate()
-const CLOSED_MONTH = CURRENT_DAY <= 6 ? (CURRENT_MONTH === 1 ? 12 : CURRENT_MONTH - 1) : CURRENT_MONTH
-const CLOSED_MONTH_YEAR = CURRENT_MONTH === 1 && CURRENT_DAY <= 6 ? N - 1 : N
-const ANALYSIS_YEAR = CLOSED_MONTH_YEAR
-// Comparaison N-1 demandée : année précédente arrêtée au mois M-1,
-// alors que les valeurs N restent affichées jusqu'au mois réalisé courant.
-const N1_COMPARISON_MONTH = Math.max(0, CLOSED_MONTH - 1)
+// Règle SMC : les totaux année N ne prennent que les mois totalement révolus.
+// Exemple : en juin, les lignes mensuelles de juin restent visibles,
+// mais les lignes TOTAL / client cumulent uniquement janvier → mai.
+const CLOSED_MONTH = Math.max(0, CURRENT_MONTH - 1)
+const CLOSED_MONTH_YEAR = N
+const ANALYSIS_YEAR = N
+const N1_COMPARISON_MONTH = CLOSED_MONTH
 const ALL_COLLABORATEURS_VALUE = '__ALL_COLLABORATEURS__'
 
 
@@ -362,6 +369,95 @@ function formatDateFr(value: any) {
   if (!iso) return safeText(value)
   const [year, month, day] = iso.split('-')
   return `${day}/${month}/${year}`
+}
+
+const EMPTY_LAST_BUSINESS_DATES: LastBusinessDates = { devis: null, factures: null, bl: null }
+
+function normalizeBusinessDate(value: any): string | null {
+  if (!value) return null
+  const text = String(value).trim()
+  if (!text) return null
+
+  const iso = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/)
+  if (iso) return `${iso[1]}-${iso[2].padStart(2, '0')}-${iso[3].padStart(2, '0')}`
+
+  const fr = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})/)
+  if (fr) return `${fr[3]}-${fr[2].padStart(2, '0')}-${fr[1].padStart(2, '0')}`
+
+  const timestamp = new Date(text).getTime()
+  if (!Number.isFinite(timestamp)) return null
+  return new Date(timestamp).toISOString().slice(0, 10)
+}
+
+function formatBusinessDate(value: string | null | undefined) {
+  const iso = normalizeBusinessDate(value)
+  if (!iso) return '—'
+  const [year, month, day] = iso.split('-')
+  return `${day}/${month}/${year}`
+}
+
+function formatLastBusinessDatesLabel(dates: LastBusinessDates) {
+  return `Devis : ${formatBusinessDate(dates.devis)} · Factures : ${formatBusinessDate(dates.factures)} · BL : ${formatBusinessDate(dates.bl)}`
+}
+
+function latestBusinessDate(values: Array<string | null>) {
+  const sortedValues = values
+    .map((value) => normalizeBusinessDate(value))
+    .filter((value): value is string => Boolean(value))
+    .sort()
+  return sortedValues.length ? sortedValues[sortedValues.length - 1] : null
+}
+
+async function fetchLatestBusinessDate(table: string, dateColumns: string[], year: number) {
+  const start = `${year}-01-01`
+  const end = `${year + 1}-01-01`
+
+  for (const dateColumn of dateColumns) {
+    try {
+      const { data, error } = await supabase
+        .from(table)
+        .select(dateColumn)
+        .not(dateColumn, 'is', null)
+        .gte(dateColumn, start)
+        .lt(dateColumn, end)
+        .order(dateColumn, { ascending: false })
+        .limit(1)
+
+      if (error) continue
+
+      const rawDate = ((data || []) as Record<string, any>[])[0]?.[dateColumn]
+      const normalized = normalizeBusinessDate(rawDate)
+      if (normalized) return normalized
+    } catch {
+      // On passe à la colonne candidate suivante pour rester compatible avec les variantes de schéma.
+    }
+  }
+
+  return null
+}
+
+async function fetchLatestBusinessDates(year: number): Promise<LastBusinessDates> {
+  const [devis, factures, blActivite, blFacture] = await Promise.all([
+    fetchLatestBusinessDate('devis_lignes', ['date_devis', 'date_piece', 'date_document'], year),
+    fetchLatestBusinessDate('facture_lignes', ['date_piece', 'date_facture', 'date_document'], year),
+    fetchLatestBusinessDate('activite_lignes', ['date_bl', 'date_piece_bl', 'date_livraison_bl', 'date_livraison'], year),
+    fetchLatestBusinessDate('facture_lignes', ['date_bl', 'date_piece_bl', 'date_livraison_bl', 'date_livraison'], year),
+  ])
+
+  return { devis, factures, bl: latestBusinessDate([blActivite, blFacture]) }
+}
+
+function latestUpdateIsoFromRows(rows: Array<{ updatedAt?: string | null }>) {
+  let latest = 0
+
+  rows.forEach((row) => {
+    if (!row.updatedAt) return
+
+    const timestamp = new Date(row.updatedAt).getTime()
+    if (Number.isFinite(timestamp) && timestamp > latest) latest = timestamp
+  })
+
+  return latest ? new Date(latest).toISOString() : ''
 }
 
 function isNullAmount(value: number | null | undefined) {
@@ -875,6 +971,7 @@ function buildSummaryForNumero(tier: TiersRow | null, factures: AggRow[], devis:
     id: month ? `${numero}-m${month}` : numero || 'TOTAL',
     kind: month ? 'month' : tier ? 'client' : 'total',
     level: month ? 1 : 0,
+    updatedAt: '',
     collaborateur: tier?.collaborateur || '',
     agence: tier?.agence || '',
     numero: tier?.numero || 'TOTAL',
@@ -1105,6 +1202,7 @@ function cacheRowToSummary(row: CacheDbRow): SummaryRow {
     id: month ? `${row.numero_tiers}-m${month}` : row.numero_tiers,
     kind: row.row_kind,
     level: row.row_kind === 'month' ? 1 : 0,
+    updatedAt: safeText(row.updated_at),
     collaborateur: safeText(row.collaborateur),
     agence: safeText(row.agence_collaborateur),
     numero: safeText(row.numero_tiers, 'SANS CODE'),
@@ -1213,6 +1311,7 @@ function buildTotalFromRows(rows: SummaryRow[], showCollaborateurColumn: boolean
     id: 'TOTAL',
     kind: 'total',
     level: 0,
+    updatedAt: latestUpdateIsoFromRows(rows),
     collaborateur: showCollaborateurColumn ? 'TOTAL' : '',
     agence: 'TOTAL',
     numero: 'TOTAL',
@@ -1436,22 +1535,40 @@ function sumSummaryAmount(rows: SummaryRow[], getter: (row: SummaryRow) => numbe
 function recomputeClientN1ComparisonFromMonths(row: SummaryRow, monthRows: SummaryRow[]) {
   if (row.kind !== 'client' || monthRows.length === 0) return row
 
-  const compareRows = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= N1_COMPARISON_MONTH)
-  const rollingRows = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= CLOSED_MONTH)
+  const closedRowsN = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= CLOSED_MONTH)
+  const compareRowsN1 = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= N1_COMPARISON_MONTH)
 
-  const devisYtdN1ByMacro = sumMacro(compareRows, (monthRow) => monthRow.devisN1ByMacro)
-  const caYtdN1ByMacro = sumMacro(compareRows, (monthRow) => monthRow.caN1ByMacro)
-  const margeYtdN1ValueByMacro = sumMacro(compareRows, (monthRow) => monthRow.margeN1ValueByMacro)
-  const devisYtdN1 = sumSummaryAmount(compareRows, (monthRow) => monthRow.devisN1)
-  const caYtdN1 = sumSummaryAmount(compareRows, (monthRow) => monthRow.caN1)
-  const margeYtdN1Value = sumSummaryAmount(compareRows, (monthRow) => monthRow.margeN1Value)
-  const rollingN1SamePeriod = sumSummaryAmount(rollingRows, (monthRow) => monthRow.caN1)
-  const ca12m = row.caYtdN + Math.max(0, row.caN1 - rollingN1SamePeriod)
-  const currentMarginPct = row.caYtdN ? (row.margeYtdNValue / row.caYtdN) * 100 : null
+  const devisYtdNByMacro = sumMacro(closedRowsN, (monthRow) => monthRow.devisYtdNByMacro)
+  const caYtdNByMacro = sumMacro(closedRowsN, (monthRow) => monthRow.caYtdNByMacro)
+  const margeYtdNValueByMacro = sumMacro(closedRowsN, (monthRow) => monthRow.margeYtdNValueByMacro)
+
+  const devisYtdN = sumSummaryAmount(closedRowsN, (monthRow) => monthRow.devisYtdN)
+  const caYtdN = sumSummaryAmount(closedRowsN, (monthRow) => monthRow.caYtdN)
+  const margeYtdNValue = sumSummaryAmount(closedRowsN, (monthRow) => monthRow.margeYtdNValue)
+  const margePctYtdN = caYtdN ? (margeYtdNValue / caYtdN) * 100 : null
+
+  const devisYtdN1ByMacro = sumMacro(compareRowsN1, (monthRow) => monthRow.devisN1ByMacro)
+  const caYtdN1ByMacro = sumMacro(compareRowsN1, (monthRow) => monthRow.caN1ByMacro)
+  const margeYtdN1ValueByMacro = sumMacro(compareRowsN1, (monthRow) => monthRow.margeN1ValueByMacro)
+
+  const devisYtdN1 = sumSummaryAmount(compareRowsN1, (monthRow) => monthRow.devisN1)
+  const caYtdN1 = sumSummaryAmount(compareRowsN1, (monthRow) => monthRow.caN1)
+  const margeYtdN1Value = sumSummaryAmount(compareRowsN1, (monthRow) => monthRow.margeN1Value)
+
+  const rollingN1SamePeriod = sumSummaryAmount(compareRowsN1, (monthRow) => monthRow.caN1)
+  const ca12m = caYtdN + Math.max(0, row.caN1 - rollingN1SamePeriod)
   const previousMarginPct = caYtdN1 ? (margeYtdN1Value / caYtdN1) * 100 : null
 
   return {
     ...row,
+    devisYtdN,
+    devisYtdNByMacro,
+    caYtdN,
+    caYtdNByMacro,
+    margePctYtdN,
+    margeYtdNValue,
+    margeYtdNByMacro: ratioMacro(caYtdNByMacro, margeYtdNValueByMacro),
+    margeYtdNValueByMacro,
     devisYtdN1,
     devisYtdN1ByMacro,
     caYtdN1,
@@ -1460,8 +1577,9 @@ function recomputeClientN1ComparisonFromMonths(row: SummaryRow, monthRows: Summa
     margeYtdN1ValueByMacro,
     ca12m,
     caBandN: caBand(ca12m),
-    caVsN1: ratio(row.caYtdN, caYtdN1),
-    margeVsN1: deltaPoints(currentMarginPct, previousMarginPct),
+    caVsN1: ratio(caYtdN, caYtdN1),
+    margeVsN1: deltaPoints(margePctYtdN, previousMarginPct),
+    realiseObjectif: ratio(caYtdN, (row.objectifCa / 12) * CLOSED_MONTH),
   }
 }
 
@@ -1679,6 +1797,8 @@ export default function SyntheseMultiClientsPage() {
 
   const hasSelection = Boolean(selected)
   const showCollaborateurColumn = mode === 'collaborateur' && selected === ALL_COLLABORATEURS_VALUE
+  const [lastBusinessDates, setLastBusinessDates] = useState<LastBusinessDates>(EMPTY_LAST_BUSINESS_DATES)
+  const lastUpdateLabel = useMemo(() => formatLastBusinessDatesLabel(lastBusinessDates), [lastBusinessDates])
 
   const objectiveMap = useMemo(() => {
     const map = new Map<string, ObjectiveRow>()
@@ -1688,6 +1808,25 @@ export default function SyntheseMultiClientsPage() {
 
   const columns = useMemo(() => buildColumns(showFamilies, showCollaborateurColumn), [showFamilies, showCollaborateurColumn])
   const currentSelectionOptions = mode === 'collaborateur' ? selectionOptions.collaborateurs : selectionOptions.agences
+
+  useEffect(() => {
+    let alive = true
+
+    async function loadLastBusinessDates() {
+      try {
+        const dates = await fetchLatestBusinessDates(N)
+        if (alive) setLastBusinessDates(dates)
+      } catch {
+        if (alive) setLastBusinessDates(EMPTY_LAST_BUSINESS_DATES)
+      }
+    }
+
+    loadLastBusinessDates()
+
+    return () => {
+      alive = false
+    }
+  }, [])
 
   useEffect(() => {
     let alive = true
@@ -2339,7 +2478,10 @@ export default function SyntheseMultiClientsPage() {
     <main className="page">
       <section className="toolbar">
         <div>
-          <h1>Synthèse multi-clients</h1>
+          <div className="titleLine">
+            <h1>Synthèse multi-clients</h1>
+            <span className="lastUpdateBadge">Dernières pièces : {lastUpdateLabel}</span>
+          </div>
           <p>Vue dense par collaborateur ou agence · N = {N} · période réalisée arrêtée à {String(CLOSED_MONTH).padStart(2, '0')}/{N} · {cacheStatus}</p>
         </div>
         <div className="toolbarActions">
@@ -2660,7 +2802,9 @@ export default function SyntheseMultiClientsPage() {
       <style jsx>{`
         .page { padding: 18px; background: #f6f8fb; min-height: 100vh; color: #0f172a; }
         .toolbar { display: flex; gap: 18px; justify-content: space-between; align-items: end; margin-bottom: 12px; }
+        .titleLine { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
         h1 { margin: 0; font-size: 26px; font-weight: 900; letter-spacing: -0.02em; }
+        .lastUpdateBadge { display: inline-flex; align-items: center; border: 1px solid #e2e8f0; border-radius: 999px; background: #ffffff; padding: 3px 8px; color: #64748b; font-size: 11px; font-weight: 850; line-height: 1.2; white-space: nowrap; box-shadow: 0 1px 2px rgba(15,23,42,.06); }
         p { margin: 4px 0 0; color: #64748b; font-size: 13px; }
         .toolbarActions { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; justify-content: flex-end; }
         label { font-size: 11px; font-weight: 800; color: #475569; display: flex; flex-direction: column; gap: 3px; text-transform: uppercase; }

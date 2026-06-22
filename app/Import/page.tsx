@@ -1419,6 +1419,26 @@ type SmcBatchResult = {
   remaining_count?: number | string | null
 }
 
+type SmcBackgroundJobState = {
+  job_name: string
+  date_debut: string | null
+  date_fin: string | null
+  batch_size: number | null
+  status: string | null
+  total_clients: number | null
+  processed_clients: number | null
+  last_rn: number | null
+  started_at: string | null
+  finished_at: string | null
+  last_error: string | null
+  updated_at: string | null
+}
+
+const SMC_BACKGROUND_JOB_NAME = 'smc_period_catchup'
+const SMC_BACKGROUND_CRON_JOB_NAME = 'smc_period_catchup_auto'
+const SMC_BACKGROUND_BATCH_SIZE = 50
+const SMC_BACKGROUND_POLL_MS = 5000
+
 const SMC_BATCH_SIZE = 1
 const SMC_MAX_LOOPS = 10000
 const SMC_RETRY_LIMIT = 3
@@ -3810,6 +3830,8 @@ export default function ImportsParametragePage() {
 
   const [maintenanceLoading, setMaintenanceLoading] = useState(false)
   const [maintenanceMessage, setMaintenanceMessage] = useState<string | null>(null)
+  const [smcBackgroundState, setSmcBackgroundState] = useState<SmcBackgroundJobState | null>(null)
+  const [smcBackgroundBusy, setSmcBackgroundBusy] = useState(false)
   const [manualStartDate, setManualStartDate] = useState(() => {
     const now = new Date()
     return formatDateForSql(new Date(now.getFullYear(), now.getMonth() - 2, 1))
@@ -3818,6 +3840,179 @@ export default function ImportsParametragePage() {
     const now = new Date()
     return formatDateForSql(new Date(now.getFullYear(), now.getMonth(), now.getDate()))
   })
+
+  async function loadSmcBackgroundJobState(showMessage = false) {
+    const { data, error: stateError } = await supabase
+      .from('smc_batch_job_state')
+      .select('*')
+      .eq('job_name', SMC_BACKGROUND_JOB_NAME)
+      .maybeSingle()
+
+    if (stateError) {
+      if (showMessage) setError(`Lecture statut SMC arrière-plan impossible : ${stateError.message}`)
+      return null
+    }
+
+    const state = (data || null) as SmcBackgroundJobState | null
+    setSmcBackgroundState(state)
+
+    if (showMessage) {
+      if (!state) {
+        setMaintenanceMessage('Aucun job SMC arrière-plan trouvé.')
+      } else {
+        const total = Number(state.total_clients || 0)
+        const done = Number(state.processed_clients || 0)
+        setMaintenanceMessage(
+          `SMC arrière-plan : ${state.status || '—'} — ${done}/${total} client(s) traité(s).`
+        )
+      }
+    }
+
+    if (state?.status === 'done') {
+      // Sécurité UI : le wrapper SQL se désactive aussi normalement tout seul.
+      await supabase.rpc('smc_disable_period_batch_cron', {
+        p_cron_job_name: SMC_BACKGROUND_CRON_JOB_NAME,
+      })
+    }
+
+    return state
+  }
+
+  useEffect(() => {
+    loadSmcBackgroundJobState(false)
+  }, [])
+
+  useEffect(() => {
+    if (smcBackgroundState?.status !== 'running') return
+
+    const timer = window.setInterval(() => {
+      loadSmcBackgroundJobState(false)
+    }, SMC_BACKGROUND_POLL_MS)
+
+    return () => window.clearInterval(timer)
+  }, [smcBackgroundState?.status])
+
+  function getSmcBackgroundProgressPercent() {
+    const total = Number(smcBackgroundState?.total_clients || 0)
+    const processed = Number(smcBackgroundState?.processed_clients || 0)
+    if (!total) return 0
+    return Math.max(0, Math.min(100, Math.round((processed / total) * 100)))
+  }
+
+  async function disableSmcBackgroundCron(showMessage = true) {
+    const { error: disableError } = await supabase.rpc('smc_disable_period_batch_cron', {
+      p_cron_job_name: SMC_BACKGROUND_CRON_JOB_NAME,
+    })
+
+    if (disableError) {
+      throw new Error(`Désactivation cron SMC : ${disableError.message}`)
+    }
+
+    if (showMessage) {
+      setMaintenanceMessage('Cron SMC arrière-plan désactivé.')
+    }
+  }
+
+  async function startSmcBackgroundJob(period: SmcRpcPeriod, label: string) {
+    if (maintenanceLoading || importing || smcBackgroundBusy) return
+
+    if (!window.confirm(
+      `Confirmer le lancement du job SMC en arrière-plan ?\n\n` +
+      `${period.label}\n\n` +
+      `Le traitement sera découpé en lots de ${SMC_BACKGROUND_BATCH_SIZE} clients. ` +
+      `Le cron sera activé automatiquement puis désactivé à la fin.`
+    )) return
+
+    setSmcBackgroundBusy(true)
+    setMaintenanceLoading(true)
+    setError(null)
+    setMaintenanceMessage(`${label} : création de la file de clients SMC…`)
+
+    try {
+      const { data: startData, error: startError } = await supabase.rpc('smc_start_period_batch_job', {
+        p_date_debut: period.p_date_debut,
+        p_date_fin: period.p_date_fin,
+        p_batch_size: SMC_BACKGROUND_BATCH_SIZE,
+        p_job_name: SMC_BACKGROUND_JOB_NAME,
+      })
+
+      if (startError) throw new Error(`smc_start_period_batch_job : ${startError.message}`)
+
+      const firstRow = Array.isArray(startData) ? startData[0] : startData
+      const totalClients = Number(firstRow?.total_clients || 0)
+
+      setMaintenanceMessage(
+        `${label} : file créée avec ${totalClients} client(s). Activation du cron…`
+      )
+
+      const { error: cronError } = await supabase.rpc('smc_enable_period_batch_cron', {
+        p_job_name: SMC_BACKGROUND_JOB_NAME,
+        p_cron_job_name: SMC_BACKGROUND_CRON_JOB_NAME,
+      })
+
+      if (cronError) throw new Error(`smc_enable_period_batch_cron : ${cronError.message}`)
+
+      await loadSmcBackgroundJobState(false)
+
+      setMaintenanceMessage(
+        `${label} lancé en arrière-plan : ${totalClients} client(s), lots de ${SMC_BACKGROUND_BATCH_SIZE}. ` +
+        `La page va suivre l'avancement automatiquement.`
+      )
+    } catch (e: any) {
+      setError(e?.message || String(e))
+      setMaintenanceMessage(null)
+    } finally {
+      setSmcBackgroundBusy(false)
+      setMaintenanceLoading(false)
+    }
+  }
+
+  async function handleRunSmcBackgroundBatchNow() {
+    if (smcBackgroundBusy || importing) return
+
+    setSmcBackgroundBusy(true)
+    setError(null)
+    setMaintenanceMessage('Exécution immédiate du prochain lot SMC…')
+
+    try {
+      const { data, error: runError } = await supabase.rpc('smc_run_next_period_batch_and_stop_cron', {
+        p_job_name: SMC_BACKGROUND_JOB_NAME,
+        p_cron_job_name: SMC_BACKGROUND_CRON_JOB_NAME,
+      })
+
+      if (runError) throw new Error(`smc_run_next_period_batch_and_stop_cron : ${runError.message}`)
+
+      const row = Array.isArray(data) ? data[0] : data
+      setMaintenanceMessage(
+        `Lot SMC exécuté : ${Number(row?.processed_after || 0)}/${Number(row?.total_clients || 0)} client(s). ` +
+        `${row?.done ? 'Job terminé, cron désactivé.' : 'Suite en arrière-plan.'}`
+      )
+
+      await loadSmcBackgroundJobState(false)
+    } catch (e: any) {
+      setError(e?.message || String(e))
+      setMaintenanceMessage(null)
+    } finally {
+      setSmcBackgroundBusy(false)
+    }
+  }
+
+  async function handleStopSmcBackgroundCron() {
+    if (smcBackgroundBusy) return
+
+    setSmcBackgroundBusy(true)
+    setError(null)
+
+    try {
+      await disableSmcBackgroundCron(true)
+      await loadSmcBackgroundJobState(false)
+    } catch (e: any) {
+      setError(e?.message || String(e))
+      setMaintenanceMessage(null)
+    } finally {
+      setSmcBackgroundBusy(false)
+    }
+  }
 
   async function runRecentMonthsRebuild(_monthCount: 2 | 3 = 2, onProgress?: (detail: string) => void) {
     // Règle V21 : les rebuilds standards ne recalculent que M-1 et M.
@@ -3936,8 +4131,6 @@ export default function ImportsParametragePage() {
   }
 
   async function handleManualRecentSmcRebuild() {
-    if (maintenanceLoading || importing) return
-
     const periods = getMonthlyAggregatePeriods(2)
     const firstPeriod = periods[0]
     const lastPeriod = periods[periods.length - 1]
@@ -3947,75 +4140,23 @@ export default function ImportsParametragePage() {
       return
     }
 
-    const period: SmcRpcPeriod = {
-      p_date_debut: firstPeriod.p_date_debut,
-      p_date_fin: lastPeriod.p_date_fin,
-      label: `${firstPeriod.p_date_debut} → ${lastPeriod.p_date_fin}`,
-    }
-
-    if (!window.confirm(
-      `Confirmer le rebuild SMC sur une période unique M-1/M, ` +
-      `traitée client par client ?\n\n${period.label}`
-    )) return
-
-    setMaintenanceLoading(true)
-    setMaintenanceMessage('Préparation rebuild SMC M-1/M — un client par appel…')
-    setError(null)
-
-    try {
-      await runSmcCacheForPeriodBatchesV28(
-        period,
-        (detail) => setMaintenanceMessage(detail),
-        'Synthèse multi-clients M-1/M',
-        SMC_BATCH_SIZE
-      )
-      setMaintenanceMessage(
-        'Rebuild SMC M-1/M terminé. Tu peux relancer le contrôle SMC annuel / YTD pour vérifier la cohérence.'
-      )
-      await loadStats()
-      await loadRows(selectedConfig)
-    } catch (e: any) {
-      setError(e?.message || String(e))
-      setMaintenanceMessage(null)
-    } finally {
-      setMaintenanceLoading(false)
-    }
+    await startSmcBackgroundJob(
+      {
+        p_date_debut: firstPeriod.p_date_debut,
+        p_date_fin: lastPeriod.p_date_fin,
+        label: `${firstPeriod.p_date_debut} → ${lastPeriod.p_date_fin}`,
+      },
+      'SMC M-1/M'
+    )
   }
 
   async function handleManualPeriodSmcRebuild() {
-    if (maintenanceLoading || importing) return
-
     try {
       const period = getSmcPeriodCoveringDateInputs(manualStartDate, manualEndDate)
-
-      if (!window.confirm(
-        `Confirmer le rebuild SMC sur toute la plage sélectionnée, sans découpage mensuel ?\n\n` +
-        `${period.label}\n` +
-        `Le traitement sera exécuté client par client.`
-      )) return
-
-      setMaintenanceLoading(true)
-      setMaintenanceMessage(
-        `Préparation rebuild SMC période unique ${period.label} — un client par appel…`
-      )
-      setError(null)
-
-      await runSmcCacheForPeriodBatchesV28(
-        period,
-        (detail) => setMaintenanceMessage(detail),
-        'Synthèse multi-clients période',
-        SMC_BATCH_SIZE
-      )
-      setMaintenanceMessage(
-        `Rebuild SMC période (1 client/lot) terminé sans découpage mensuel : ${period.label}.`
-      )
-      await loadStats()
-      await loadRows(selectedConfig)
+      await startSmcBackgroundJob(period, 'SMC période')
     } catch (e: any) {
       setError(e?.message || String(e))
       setMaintenanceMessage(null)
-    } finally {
-      setMaintenanceLoading(false)
     }
   }
 
@@ -4097,10 +4238,10 @@ export default function ImportsParametragePage() {
               <button
                 type="button"
                 onClick={handleManualRecentSmcRebuild}
-                disabled={maintenanceLoading || importing}
+                disabled={maintenanceLoading || importing || smcBackgroundBusy}
                 className="rounded-xl border border-cyan-300 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-800 hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                Rebuild SMC M-1 + M
+                SMC M-1 + M arrière-plan
               </button>
               <button
                 type="button"
@@ -4168,10 +4309,10 @@ export default function ImportsParametragePage() {
             <button
               type="button"
               onClick={handleManualPeriodSmcRebuild}
-              disabled={maintenanceLoading || importing}
+              disabled={maintenanceLoading || importing || smcBackgroundBusy}
               className="rounded-xl border border-cyan-300 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-800 hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              Rebuild SMC période (1 client/lot)
+              SMC période arrière-plan
             </button>
             <button
               type="button"
@@ -4182,11 +4323,73 @@ export default function ImportsParametragePage() {
               Recalcul qté pertinentes période
             </button>
             <div className="text-xs font-semibold text-slate-500">
-              La date de fin est traitée comme mois inclus. Les agrégats rapides et le flux articles restent découpés par mois. SMC traite toute la plage en une seule période, client par client.
+              La date de fin est traitée comme mois inclus. Les agrégats rapides et le flux articles restent découpés par mois. SMC est lancé en arrière-plan via pg_cron, par lots de clients.
             </div>
           </div>
 
           {maintenanceMessage && <div className="mt-4 rounded-xl bg-emerald-50 p-3 text-sm font-bold text-emerald-800">{maintenanceMessage}</div>}
+
+          {smcBackgroundState && (
+            <div className="mt-4 rounded-2xl border border-cyan-200 bg-cyan-50 p-4">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-black uppercase tracking-wide text-cyan-900">
+                    Job SMC arrière-plan
+                  </div>
+                  <div className="mt-1 text-sm font-bold text-cyan-950">
+                    Statut : {smcBackgroundState.status || '—'} — {Number(smcBackgroundState.processed_clients || 0)} / {Number(smcBackgroundState.total_clients || 0)} client(s)
+                  </div>
+                  <div className="mt-2 h-3 overflow-hidden rounded-full bg-white">
+                    <div
+                      className="h-full rounded-full bg-cyan-700 transition-all"
+                      style={{ width: `${getSmcBackgroundProgressPercent()}%` }}
+                    />
+                  </div>
+                  <div className="mt-2 grid gap-1 text-xs font-semibold text-cyan-900 sm:grid-cols-2 lg:grid-cols-4">
+                    <div>Dernier rang : {smcBackgroundState.last_rn || 0}</div>
+                    <div>Lot : {smcBackgroundState.batch_size || '—'} clients</div>
+                    <div>Début : {formatDateTime(smcBackgroundState.started_at || null)}</div>
+                    <div>Fin : {formatDateTime(smcBackgroundState.finished_at || null)}</div>
+                  </div>
+                  {smcBackgroundState.last_error && (
+                    <pre className="mt-2 whitespace-pre-wrap rounded-xl bg-red-50 p-2 text-xs font-semibold text-red-700">
+                      {smcBackgroundState.last_error}
+                    </pre>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => loadSmcBackgroundJobState(true)}
+                    disabled={smcBackgroundBusy}
+                    className="rounded-xl border border-cyan-300 bg-white px-3 py-2 text-xs font-bold text-cyan-900 hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    Actualiser statut
+                  </button>
+                  {smcBackgroundState.status !== 'done' && (
+                    <button
+                      type="button"
+                      onClick={handleRunSmcBackgroundBatchNow}
+                      disabled={smcBackgroundBusy || importing}
+                      className="rounded-xl border border-cyan-300 bg-white px-3 py-2 text-xs font-bold text-cyan-900 hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      Lancer le prochain lot
+                    </button>
+                  )}
+                  {smcBackgroundState.status === 'running' && (
+                    <button
+                      type="button"
+                      onClick={handleStopSmcBackgroundCron}
+                      disabled={smcBackgroundBusy}
+                      className="rounded-xl border border-red-300 bg-white px-3 py-2 text-xs font-bold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      Stopper le cron
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
         </section>
 
         <DataReconciliationPanel />

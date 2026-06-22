@@ -28,6 +28,7 @@ type SummaryRpcRow = {
   quantite_pertinente: number
   ca_ht: number
   marge_valeur: number
+  updated_at?: string | null
 }
 
 type DetailRpcRow = {
@@ -106,9 +107,17 @@ type ReferenceScope = {
   label: string
 } | null
 
+type LastBusinessDates = {
+  devis: string | null
+  factures: string | null
+  bl: string | null
+}
+
 const MONTHS = ['Janv.', 'Févr.', 'Mars', 'Avr.', 'Mai', 'Juin', 'Juil.', 'Août', 'Sept.', 'Oct.', 'Nov.', 'Déc.']
 const MIN_YEAR_OPTION = 2023
 const FLUX_ORDER: Flux[] = ['DEVIS', 'CDC', 'BL', 'FACTURE']
+const DEFAULT_SELECTED_MACROS = ['ACC', 'DRV', 'ECS', 'PV', 'R_ZONE', 'R/O', 'R/R']
+const DEFAULT_SELECTED_MACRO_NORMALIZED = new Set(DEFAULT_SELECTED_MACROS.map((macro) => normalizeMacro(macro)))
 const PRIORITY_MACRO_ORDER = ['R/R', 'R/O', 'R_ZONE', 'ECS', 'DRV', 'PV']
 const PRIORITY_FLUX_ORDER: Flux[] = ['DEVIS', 'FACTURE']
 
@@ -156,10 +165,118 @@ function monthLabel(month: number) {
   return MONTHS[Math.max(0, Math.min(11, month - 1))] || String(month)
 }
 
+function comparisonPeriodLabel(month: number) {
+  if (month <= 0) return 'aucun mois réalisé'
+  return `Janv. à ${monthLabel(month)}`
+}
+
 function uniqueSorted(values: string[]) {
   return Array.from(new Set(values.map((value) => safeText(value, '')).filter(Boolean))).sort((a, b) =>
     a.localeCompare(b, 'fr', { numeric: true })
   )
+}
+
+function defaultSelectedMacrosFromAvailable(values: string[]) {
+  const normalizedValueByMacro = new Map(values.map((value) => [normalizeMacro(value), value]))
+  return DEFAULT_SELECTED_MACROS
+    .map((macro) => normalizedValueByMacro.get(normalizeMacro(macro)) ?? macro)
+    .filter((macro, index, list) => list.findIndex((item) => normalizeMacro(item) === normalizeMacro(macro)) === index)
+}
+
+function currentComparisonMonthForYear(year: number) {
+  const now = new Date()
+  const currentYear = now.getFullYear()
+  if (year < currentYear) return 12
+  if (year > currentYear) return 0
+  return now.getMonth() + 1
+}
+
+const EMPTY_LAST_BUSINESS_DATES: LastBusinessDates = { devis: null, factures: null, bl: null }
+
+function normalizeBusinessDate(value: any): string | null {
+  if (!value) return null
+  const text = String(value).trim()
+  if (!text) return null
+
+  const iso = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/)
+  if (iso) return `${iso[1]}-${iso[2].padStart(2, '0')}-${iso[3].padStart(2, '0')}`
+
+  const fr = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})/)
+  if (fr) return `${fr[3]}-${fr[2].padStart(2, '0')}-${fr[1].padStart(2, '0')}`
+
+  const timestamp = new Date(text).getTime()
+  if (!Number.isFinite(timestamp)) return null
+  return new Date(timestamp).toISOString().slice(0, 10)
+}
+
+function formatBusinessDate(value: string | null | undefined) {
+  const iso = normalizeBusinessDate(value)
+  if (!iso) return '—'
+  const [year, month, day] = iso.split('-')
+  return `${day}/${month}/${year}`
+}
+
+function formatLastBusinessDatesLabel(dates: LastBusinessDates) {
+  return `Devis : ${formatBusinessDate(dates.devis)} · Factures : ${formatBusinessDate(dates.factures)} · BL : ${formatBusinessDate(dates.bl)}`
+}
+
+function latestBusinessDate(values: Array<string | null>) {
+  const sortedValues = values
+    .map((value) => normalizeBusinessDate(value))
+    .filter((value): value is string => Boolean(value))
+    .sort()
+  return sortedValues.length ? sortedValues[sortedValues.length - 1] : null
+}
+
+async function fetchLatestBusinessDate(table: string, dateColumns: string[], year: number) {
+  const start = `${year}-01-01`
+  const end = `${year + 1}-01-01`
+
+  for (const dateColumn of dateColumns) {
+    try {
+      const { data, error } = await supabase
+        .from(table)
+        .select(dateColumn)
+        .not(dateColumn, 'is', null)
+        .gte(dateColumn, start)
+        .lt(dateColumn, end)
+        .order(dateColumn, { ascending: false })
+        .limit(1)
+
+      if (error) continue
+
+      const rawDate = ((data || []) as Record<string, any>[])[0]?.[dateColumn]
+      const normalized = normalizeBusinessDate(rawDate)
+      if (normalized) return normalized
+    } catch {
+      // On passe à la colonne candidate suivante pour rester compatible avec les variantes de schéma.
+    }
+  }
+
+  return null
+}
+
+async function fetchLatestBusinessDates(year: number): Promise<LastBusinessDates> {
+  const [devis, factures, blActivite, blFacture] = await Promise.all([
+    fetchLatestBusinessDate('devis_lignes', ['date_devis', 'date_piece', 'date_document'], year),
+    fetchLatestBusinessDate('facture_lignes', ['date_piece', 'date_facture', 'date_document'], year),
+    fetchLatestBusinessDate('activite_lignes', ['date_bl', 'date_piece_bl', 'date_livraison_bl', 'date_livraison'], year),
+    fetchLatestBusinessDate('facture_lignes', ['date_bl', 'date_piece_bl', 'date_livraison_bl', 'date_livraison'], year),
+  ])
+
+  return { devis, factures, bl: latestBusinessDate([blActivite, blFacture]) }
+}
+
+function hasMetricValue(value: number | null | undefined) {
+  return Math.abs(safeNumber(value)) > 0.000001
+}
+
+function hasAnyMonthMetricValue(values: Record<number, number>) {
+  return Object.values(values).some((value) => hasMetricValue(value))
+}
+
+function matrixRowHasValue(row: Pick<MatrixRow | ReferencePivotRow, 'mois' | 'moisN1' | 'total' | 'totalN1'>) {
+  return hasMetricValue(row.total) || hasMetricValue(row.totalN1) || hasAnyMonthMetricValue(row.mois) || hasAnyMonthMetricValue(row.moisN1)
 }
 
 function referenceCode(referenceOption: string) {
@@ -226,6 +343,10 @@ function mapSummaryRow(row: any): SummaryRpcRow {
     quantite_pertinente: safeNumber(row.quantite_pertinente ?? row.qte_pertinente ?? row.quantite_pert ?? row.qte_pert ?? row.quantite),
     ca_ht: safeNumber(row.ca_ht),
     marge_valeur: safeNumber(row.marge_valeur),
+    updated_at: safeText(
+      row.updated_at ?? row.updatedAt ?? row.date_maj ?? row.date_mise_a_jour ?? row.derniere_maj ?? row.last_update ?? row.last_updated_at ?? row.max_updated_at,
+      ''
+    ),
   }
 }
 
@@ -381,11 +502,11 @@ export default function ApprovisionnementsPage() {
   const [selectedYear, setSelectedYear] = useState<number>(new Date().getFullYear())
   const [metric, setMetric] = useState<Metric>('quantite_pertinente')
   const [includeHorsStat, setIncludeHorsStat] = useState(false)
-  const [visibleFlux, setVisibleFlux] = useState<Record<Flux, boolean>>({ DEVIS: true, CDC: true, BL: true, FACTURE: true })
+  const [visibleFlux, setVisibleFlux] = useState<Record<Flux, boolean>>({ DEVIS: true, CDC: false, BL: true, FACTURE: true })
 
   const [depots, setDepots] = useState<string[]>([])
   const [collaborateursTiers, setCollaborateursTiers] = useState<string[]>([])
-  const [famillesMacro, setFamillesMacro] = useState<string[]>([])
+  const [famillesMacro, setFamillesMacro] = useState<string[]>(DEFAULT_SELECTED_MACROS)
   const [familles, setFamilles] = useState<string[]>([])
   const [references, setReferences] = useState<string[]>([])
 
@@ -410,6 +531,10 @@ export default function ApprovisionnementsPage() {
   const [error, setError] = useState<string | null>(null)
   const [maintenanceLoading, setMaintenanceLoading] = useState(false)
   const [maintenanceMessage, setMaintenanceMessage] = useState<string | null>(null)
+  const [lastBusinessDates, setLastBusinessDates] = useState<LastBusinessDates>(EMPTY_LAST_BUSINESS_DATES)
+
+  const n1ComparisonMonth = useMemo(() => currentComparisonMonthForYear(selectedYear), [selectedYear])
+  const lastUpdateLabel = useMemo(() => formatLastBusinessDatesLabel(lastBusinessDates), [lastBusinessDates])
 
   const selectedReferenceCodes = useMemo(
     () => references.map(referenceCode).filter(Boolean),
@@ -448,14 +573,26 @@ export default function ApprovisionnementsPage() {
         value: safeText(row.value ?? row.valeur, ''),
       }))
 
+      const nextDepots = uniqueSorted(rows.filter((row) => row.optionType === 'depot').map((row) => row.value))
+      const nextCollaborateursTiers = uniqueSorted(rows.filter((row) => row.optionType === 'collaborateur_tiers').map((row) => row.value))
+      const nextFamillesMacro = uniqueSorted(rows.filter((row) => row.optionType === 'famille_macro').map((row) => row.value))
+      const nextFamilles = uniqueSorted(rows.filter((row) => row.optionType === 'famille').map((row) => row.value))
+
       setAvailable({
-        depots: uniqueSorted(rows.filter((row) => row.optionType === 'depot').map((row) => row.value)),
-        collaborateursTiers: uniqueSorted(rows.filter((row) => row.optionType === 'collaborateur_tiers').map((row) => row.value)),
-        famillesMacro: uniqueSorted(rows.filter((row) => row.optionType === 'famille_macro').map((row) => row.value)),
-        familles: uniqueSorted(rows.filter((row) => row.optionType === 'famille').map((row) => row.value)),
+        depots: nextDepots,
+        collaborateursTiers: nextCollaborateursTiers,
+        famillesMacro: nextFamillesMacro,
+        familles: nextFamilles,
         // Les références ne sont volontairement plus chargées en masse : il peut y en avoir des dizaines de milliers.
         // Elles sont maintenant saisies librement dans le filtre Références.
         references: [],
+      })
+
+      // Au chargement, on sélectionne par défaut les familles macro vues sur l'écran de référence
+      // sans écraser ensuite un choix utilisateur volontairement différent.
+      setFamillesMacro((current) => {
+        const currentIsDefault = !current.length || current.every((macro) => DEFAULT_SELECTED_MACRO_NORMALIZED.has(normalizeMacro(macro)))
+        return currentIsDefault ? defaultSelectedMacrosFromAvailable(nextFamillesMacro) : current
       })
     } catch (exception: any) {
       setError(`Chargement des filtres impossible : ${exception?.message || exception}`)
@@ -471,12 +608,22 @@ export default function ApprovisionnementsPage() {
     try {
       const { data, error: rpcError } = await supabase.rpc('get_appro_flux_summary', rpcFilterPayload)
       if (rpcError) throw rpcError
-      setSummaryRows(((data || []) as Record<string, any>[]).map(mapSummaryRow))
+      const mappedRows = ((data || []) as Record<string, any>[]).map(mapSummaryRow)
+      setSummaryRows(mappedRows)
     } catch (exception: any) {
       setError(`Chargement de la synthèse impossible : ${exception?.message || exception}`)
       setSummaryRows([])
     } finally {
       setLoadingSummary(false)
+    }
+  }
+
+
+  async function loadLastBusinessDates(yearToLoad = selectedYear) {
+    try {
+      setLastBusinessDates(await fetchLatestBusinessDates(yearToLoad))
+    } catch {
+      setLastBusinessDates(EMPTY_LAST_BUSINESS_DATES)
     }
   }
 
@@ -683,6 +830,7 @@ export default function ApprovisionnementsPage() {
   useEffect(() => {
     loadOptions(selectedYear)
     loadSummary()
+    loadLastBusinessDates(selectedYear)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedYear, includeHorsStat])
 
@@ -739,6 +887,9 @@ export default function ApprovisionnementsPage() {
         if (!PRIORITY_MACRO_ORDER.includes(normalizeMacro(row.famille_macro))) return
       }
 
+      const value = getMetricValue(row, sourceMetric)
+      if (!hasMetricValue(value)) return
+
       const key = `${row.famille_macro}|${row.flux}`
       if (!map.has(key)) {
         map.set(key, {
@@ -752,18 +903,17 @@ export default function ApprovisionnementsPage() {
       }
 
       const target = map.get(key)!
-      const value = getMetricValue(row, sourceMetric)
 
       if (row.annee === selectedYear) {
         target.mois[row.mois] = safeNumber(target.mois[row.mois]) + value
         target.total += value
       } else {
         target.moisN1[row.mois] = safeNumber(target.moisN1[row.mois]) + value
-        target.totalN1 += value
+        if (row.mois <= n1ComparisonMonth) target.totalN1 += value
       }
     })
 
-    return Array.from(map.values()).sort((a, b) => {
+    return Array.from(map.values()).filter(matrixRowHasValue).sort((a, b) => {
       if (priorityOnly) {
         const macro = PRIORITY_MACRO_ORDER.indexOf(normalizeMacro(a.famille_macro)) - PRIORITY_MACRO_ORDER.indexOf(normalizeMacro(b.famille_macro))
         if (macro !== 0) return macro
@@ -778,13 +928,13 @@ export default function ApprovisionnementsPage() {
   const priorityRows = useMemo<MatrixRow[]>(
     () => buildMatrixRows(summaryRows, 'quantite_pertinente', { priorityOnly: true, respectVisibleFlux: false }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [summaryRows, selectedYear]
+    [summaryRows, selectedYear, n1ComparisonMonth]
   )
 
   const matrixRows = useMemo<MatrixRow[]>(
     () => buildMatrixRows(summaryRows, metric, { selectedMonth: chartMonth }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [summaryRows, selectedYear, metric, visibleFlux, chartMonth]
+    [summaryRows, selectedYear, metric, visibleFlux, chartMonth, n1ComparisonMonth]
   )
 
   const familyMatrixRows = useMemo<FamilyMatrixRow[]>(() => {
@@ -793,7 +943,11 @@ export default function ApprovisionnementsPage() {
     scopeDetailRows.forEach((row) => {
       if (analysisScope?.mois && row.mois !== analysisScope.mois) return
       if (analysisScope?.flux && row.type_document !== analysisScope.flux) return
+      if (!analysisScope?.flux && !visibleFlux[row.type_document]) return
       if (analysisScope?.famille_macro && row.famille_macro !== analysisScope.famille_macro) return
+
+      const value = getMetricValue(row, metric)
+      if (!hasMetricValue(value)) return
 
       const key = `${row.famille_macro}|${row.famille}|${row.type_document}`
       if (!map.has(key)) {
@@ -807,19 +961,18 @@ export default function ApprovisionnementsPage() {
       }
 
       const target = map.get(key)!
-      const value = getMetricValue(row, metric)
       target.mois[row.mois] = safeNumber(target.mois[row.mois]) + value
       target.total += value
     })
 
-    return Array.from(map.values()).sort((a, b) => {
+    return Array.from(map.values()).filter((row) => hasMetricValue(row.total) || hasAnyMonthMetricValue(row.mois)).sort((a, b) => {
       const macro = a.famille_macro.localeCompare(b.famille_macro, 'fr', { numeric: true })
       if (macro !== 0) return macro
       const family = a.famille.localeCompare(b.famille, 'fr', { numeric: true })
       if (family !== 0) return family
       return FLUX_ORDER.indexOf(a.flux) - FLUX_ORDER.indexOf(b.flux)
     })
-  }, [scopeDetailRows, metric, analysisScope])
+  }, [scopeDetailRows, metric, analysisScope, visibleFlux])
 
   const referenceRows = useMemo(() => {
     if (!referenceScope) return []
@@ -827,15 +980,21 @@ export default function ApprovisionnementsPage() {
       if (row.famille_macro !== referenceScope.famille_macro) return false
       if (referenceScope.famille && row.famille !== referenceScope.famille) return false
       if (referenceScope.flux && row.type_document !== referenceScope.flux) return false
+      if (!referenceScope.flux && !visibleFlux[row.type_document]) return false
       if (referenceScope.mois && row.mois !== referenceScope.mois) return false
       return true
     })
-  }, [scopeDetailRows, referenceScope])
+  }, [scopeDetailRows, referenceScope, visibleFlux])
 
   const referencePivotMatrixRows = useMemo<ReferencePivotRow[]>(() => {
     const map = new Map<string, ReferencePivotRow>()
 
     referencePivotRows.forEach((row) => {
+      if (!referenceScope?.flux && !visibleFlux[row.type_document]) return
+
+      const value = getMetricValue(row, metric)
+      if (!hasMetricValue(value)) return
+
       const key = referencePivotKey(row)
       if (!map.has(key)) {
         map.set(key, {
@@ -852,17 +1011,16 @@ export default function ApprovisionnementsPage() {
       }
 
       const target = map.get(key)!
-      const value = getMetricValue(row, metric)
       if (row.annee === selectedYear) {
         target.mois[row.mois] = safeNumber(target.mois[row.mois]) + value
         target.total += value
       } else if (row.annee === selectedYear - 1) {
         target.moisN1[row.mois] = safeNumber(target.moisN1[row.mois]) + value
-        target.totalN1 += value
+        if (row.mois <= n1ComparisonMonth) target.totalN1 += value
       }
     })
 
-    return Array.from(map.values()).sort((a, b) => {
+    return Array.from(map.values()).filter(matrixRowHasValue).sort((a, b) => {
       const macro = a.famille_macro.localeCompare(b.famille_macro, 'fr', { numeric: true })
       if (macro !== 0) return macro
       const family = a.famille.localeCompare(b.famille, 'fr', { numeric: true })
@@ -871,29 +1029,34 @@ export default function ApprovisionnementsPage() {
       if (reference !== 0) return reference
       return fluxSortIndex(a.type_document) - fluxSortIndex(b.type_document)
     })
-  }, [referencePivotRows, metric, selectedYear])
+  }, [referencePivotRows, metric, selectedYear, referenceScope, visibleFlux, n1ComparisonMonth])
 
   const totalAggregatedRows = useMemo(
     () => summaryRows.reduce((sum: number, row: SummaryRpcRow) => sum + safeNumber(row.nb_lignes), 0),
     [summaryRows]
   )
 
-  function valueWithN1(value: number, valueN1: number, valueMetric: Metric, selected = false) {
+  function valueWithN1(value: number, valueN1: number, valueMetric: Metric, selected = false, flux?: Flux) {
     const main = safeNumber(value)
     const previous = safeNumber(valueN1)
+    const colorStyle = flux && !selected ? { color: FLUX_COLORS[flux] } : undefined
 
     if (!main && !previous) return '—'
 
     return (
-      <span className={`flex flex-col items-end leading-tight ${!main ? 'text-slate-400' : ''}`}>
+      <span className={`flex flex-col items-end leading-tight ${!main ? 'text-slate-400' : ''}`} style={colorStyle}>
         <span>{main ? formatMetric(main, valueMetric) : '—'}</span>
         {previous ? (
-          <span className={`text-[11px] font-bold ${selected ? 'text-blue-100' : 'text-slate-500'}`}>
+          <span className={`text-[11px] font-bold ${selected ? 'text-blue-100' : 'text-slate-500'}`} style={colorStyle}>
             ({formatMetric(previous, valueMetric)})
           </span>
         ) : null}
       </span>
     )
+  }
+
+  function fluxValueStyle(flux: Flux, selected = false) {
+    return selected ? undefined : { color: FLUX_COLORS[flux] }
   }
 
   function valueWithParenthesis(value: number, valueN1: number, valueMetric: Metric = metric) {
@@ -1029,7 +1192,12 @@ export default function ApprovisionnementsPage() {
     <main className="min-h-screen bg-slate-100 p-6 text-slate-900">
       <header className="mb-5 flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-black">Approvisionnements & flux commerciaux</h1>
+          <div className="flex flex-wrap items-baseline gap-3">
+            <h1 className="text-2xl font-black">Approvisionnements & flux commerciaux</h1>
+            <span className="rounded-full border border-slate-200 bg-white px-2 py-1 text-[11px] font-extrabold uppercase tracking-wide text-slate-500 shadow-sm">
+              Dernières pièces : {lastUpdateLabel}
+            </span>
+          </div>
           <p className="text-sm font-bold text-slate-500">Lecture des tendances Devis → CDC → BL → Factures par famille macro, famille et référence article.</p>
         </div>
         <div className="flex flex-wrap justify-end gap-2">
@@ -1195,7 +1363,7 @@ export default function ApprovisionnementsPage() {
           <div>
             <h2 className="text-xl font-black">Familles prioritaires · Devis puis Factures</h2>
             <p className="text-xs font-bold uppercase text-slate-500">
-              R/R, R/O, R_ZONE, ECS, DRV, PV · uniquement les quantités pertinentes · valeur {selectedYear} avec {selectedYear - 1} entre parenthèses.
+              R/R, R/O, R_ZONE, ECS, DRV, PV · uniquement les quantités pertinentes · valeur {selectedYear} avec {selectedYear - 1} entre parenthèses · total N-1 arrêté sur {comparisonPeriodLabel(n1ComparisonMonth)}.
             </p>
           </div>
         </div>
@@ -1257,8 +1425,9 @@ export default function ApprovisionnementsPage() {
                           disabled={!hasValue}
                           onClick={() => handleAnalysisScope(makeScopeFromMatrix(row, { mois: month }, `${row.famille_macro} · ${FLUX_LABELS[row.flux]} · ${monthLabel(month)}`))}
                           className={`w-full rounded-lg px-2 py-1 text-right font-black ${clickableCellClass(selected, hasValue)}`}
+                          style={fluxValueStyle(row.flux, selected)}
                         >
-                          {valueWithN1(value, valueN1, 'quantite_pertinente', selected)}
+                          {valueWithN1(value, valueN1, 'quantite_pertinente', selected, row.flux)}
                         </button>
                       </td>
                     )
@@ -1269,8 +1438,9 @@ export default function ApprovisionnementsPage() {
                       disabled={!row.total && !row.totalN1}
                       onClick={() => handleAnalysisScope(makeScopeFromMatrix(row, { mois: undefined }, `${row.famille_macro} · ${FLUX_LABELS[row.flux]} · total annuel`))}
                       className="w-full rounded-lg px-2 py-1 text-right font-black hover:bg-blue-50"
+                      style={fluxValueStyle(row.flux)}
                     >
-                      {valueWithN1(row.total, row.totalN1, 'quantite_pertinente')}
+                      {valueWithN1(row.total, row.totalN1, 'quantite_pertinente', false, row.flux)}
                     </button>
                   </td>
                 </tr>
@@ -1290,7 +1460,7 @@ export default function ApprovisionnementsPage() {
           <div>
             <h2 className="text-xl font-black">Analyse macro familles / documents sélectionnés</h2>
             <p className="text-xs font-bold uppercase text-slate-500">
-              Lecture en {metricLabel(metric)} · documents cochés dans la légende · {chartMonth ? `filtré sur ${monthLabel(chartMonth)}` : 'tous les mois'} · valeur {selectedYear} avec {selectedYear - 1} entre parenthèses.
+              Lecture en {metricLabel(metric)} · documents cochés dans la légende · {chartMonth ? `filtré sur ${monthLabel(chartMonth)}` : 'tous les mois'} · valeur {selectedYear} avec {selectedYear - 1} entre parenthèses · total N-1 arrêté sur {comparisonPeriodLabel(n1ComparisonMonth)}.
             </p>
           </div>
           <div className="flex gap-2">
@@ -1356,8 +1526,9 @@ export default function ApprovisionnementsPage() {
                           disabled={!hasValue}
                           onClick={() => handleAnalysisScope(makeScopeFromMatrix(row, { mois: month }, `${row.famille_macro} · ${FLUX_LABELS[row.flux]} · ${monthLabel(month)}`))}
                           className={`w-full rounded-lg px-2 py-1 text-right font-black ${clickableCellClass(selected, hasValue)}`}
+                          style={fluxValueStyle(row.flux, selected)}
                         >
-                          {valueWithN1(value, valueN1, metric, selected)}
+                          {valueWithN1(value, valueN1, metric, selected, row.flux)}
                         </button>
                       </td>
                     )
@@ -1368,8 +1539,9 @@ export default function ApprovisionnementsPage() {
                       disabled={!row.total && !row.totalN1}
                       onClick={() => handleAnalysisScope(makeScopeFromMatrix(row, {}, `${row.famille_macro} · ${FLUX_LABELS[row.flux]} · ${chartMonth ? monthLabel(chartMonth) : 'total annuel'}`))}
                       className="w-full rounded-lg px-2 py-1 text-right font-black hover:bg-blue-50"
+                      style={fluxValueStyle(row.flux)}
                     >
-                      {valueWithN1(row.total, row.totalN1, metric)}
+                      {valueWithN1(row.total, row.totalN1, metric, false, row.flux)}
                     </button>
                   </td>
                 </tr>
@@ -1459,6 +1631,7 @@ export default function ApprovisionnementsPage() {
                               disabled={!value}
                               onClick={() => setReferenceScope(makeReferenceScopeFromFamily(row, { mois: month }, `${row.famille_macro} · ${row.famille} · ${FLUX_LABELS[row.flux]} · ${monthLabel(month)}`))}
                               className={`w-full rounded-lg px-2 py-1 text-right font-black ${clickableCellClass(selected, Boolean(value))}`}
+                              style={fluxValueStyle(row.flux, selected)}
                             >
                               {value ? formatMetric(value, metric) : '—'}
                             </button>
@@ -1471,6 +1644,7 @@ export default function ApprovisionnementsPage() {
                           disabled={!row.total}
                           onClick={() => setReferenceScope(makeReferenceScopeFromFamily(row, { mois: analysisScope?.mois }, `${row.famille_macro} · ${row.famille} · ${FLUX_LABELS[row.flux]} · total`))}
                           className="w-full rounded-lg px-2 py-1 text-right font-black hover:bg-blue-50"
+                          style={fluxValueStyle(row.flux)}
                         >
                           {row.total ? formatMetric(row.total, metric) : '—'}
                         </button>
@@ -1495,7 +1669,7 @@ export default function ApprovisionnementsPage() {
             <div>
               <h2 className="text-xl font-black">Détail articles par référence / type document</h2>
               <p className="text-xs font-bold uppercase text-slate-500">
-                {referenceScope.label} · année {selectedYear} avec {selectedYear - 1} entre parenthèses · lecture en {metricLabel(metric)}.
+                {referenceScope.label} · année {selectedYear} avec {selectedYear - 1} entre parenthèses · total N-1 arrêté sur {comparisonPeriodLabel(n1ComparisonMonth)} · lecture en {metricLabel(metric)}.
               </p>
             </div>
             <button
@@ -1536,11 +1710,11 @@ export default function ApprovisionnementsPage() {
                       <td className="sticky left-[380px] z-20 bg-inherit px-3 py-1 font-mono text-xs font-black text-slate-900" title={row.designation || row.reference_article}>{row.reference_article}</td>
                       <td className="sticky left-[560px] z-20 bg-inherit px-3 py-1 font-black" style={{ color: FLUX_COLORS[row.type_document] }}>{FLUX_LABELS[row.type_document]}</td>
                       {monthNumbers().map((month) => (
-                        <td key={month} className="px-3 py-1 text-right font-bold text-slate-900">
+                        <td key={month} className="px-3 py-1 text-right font-bold" style={{ color: FLUX_COLORS[row.type_document] }}>
                           {valueWithParenthesis(row.mois[month], row.moisN1[month])}
                         </td>
                       ))}
-                      <td className="px-3 py-1 text-right font-black text-slate-900">
+                      <td className="px-3 py-1 text-right font-black" style={{ color: FLUX_COLORS[row.type_document] }}>
                         {valueWithParenthesis(row.total, row.totalN1)}
                       </td>
                     </tr>
