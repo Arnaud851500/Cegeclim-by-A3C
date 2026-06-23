@@ -32,6 +32,7 @@ type SummaryRpcRow = {
 }
 
 type DetailRpcRow = {
+  annee: number
   famille_macro: string
   famille: string
   reference_article: string
@@ -73,7 +74,9 @@ type FamilyMatrixRow = {
   famille: string
   flux: Flux
   mois: Record<number, number>
+  moisN1: Record<number, number>
   total: number
+  totalN1: number
 }
 
 type ReferencePivotSourceRow = DetailRpcRow & {
@@ -350,8 +353,9 @@ function mapSummaryRow(row: any): SummaryRpcRow {
   }
 }
 
-function mapDetailRow(row: any): DetailRpcRow {
+function mapDetailRow(row: any, forcedYear?: number): DetailRpcRow {
   return {
+    annee: safeNumber(forcedYear ?? row.annee),
     famille_macro: safeText(row.famille_macro),
     famille: safeText(row.famille),
     reference_article: safeText(row.reference_article ?? row.reference ?? row.ref_article),
@@ -631,7 +635,7 @@ export default function ApprovisionnementsPage() {
     const map = new Map<string, { mois: number; flux: Flux; famille_macro: string }>()
 
     summaryRows.forEach((row) => {
-      if (row.annee !== selectedYear) return
+      if (row.annee !== selectedYear && row.annee !== selectedYear - 1) return
       if (scope.mois && row.mois !== scope.mois) return
       if (scope.flux && row.flux !== scope.flux) return
       if (!scope.flux && !visibleFlux[row.flux]) return
@@ -667,20 +671,22 @@ export default function ApprovisionnementsPage() {
       const allRows: DetailRpcRow[] = []
 
       for (const combo of combinations) {
-        const { data, error: rpcError } = await supabase.rpc('get_appro_flux_cell_detail', {
-          p_year: selectedYear,
-          p_mois: combo.mois,
-          p_flux: combo.flux,
-          p_famille_macro: combo.famille_macro,
-          p_include_hors_stat: includeHorsStat,
-          p_depots: depots,
-          p_collaborateurs_tiers: collaborateursTiers,
-          p_familles: familles,
-          p_references: selectedReferenceCodes,
-        })
+        for (const yearToLoad of [selectedYear, selectedYear - 1]) {
+          const { data, error: rpcError } = await supabase.rpc('get_appro_flux_cell_detail', {
+            p_year: yearToLoad,
+            p_mois: combo.mois,
+            p_flux: combo.flux,
+            p_famille_macro: combo.famille_macro,
+            p_include_hors_stat: includeHorsStat,
+            p_depots: depots,
+            p_collaborateurs_tiers: collaborateursTiers,
+            p_familles: familles,
+            p_references: selectedReferenceCodes,
+          })
 
-        if (rpcError) throw rpcError
-        allRows.push(...(((data || []) as Record<string, any>[]).map(mapDetailRow)))
+          if (rpcError) throw rpcError
+          allRows.push(...(((data || []) as Record<string, any>[]).map((detailRow) => mapDetailRow(detailRow, yearToLoad))))
+        }
       }
 
       setScopeDetailRows(allRows)
@@ -941,6 +947,7 @@ export default function ApprovisionnementsPage() {
     const map = new Map<string, FamilyMatrixRow>()
 
     scopeDetailRows.forEach((row) => {
+      if (row.annee !== selectedYear && row.annee !== selectedYear - 1) return
       if (analysisScope?.mois && row.mois !== analysisScope.mois) return
       if (analysisScope?.flux && row.type_document !== analysisScope.flux) return
       if (!analysisScope?.flux && !visibleFlux[row.type_document]) return
@@ -956,23 +963,31 @@ export default function ApprovisionnementsPage() {
           famille: row.famille,
           flux: row.type_document,
           mois: {},
+          moisN1: {},
           total: 0,
+          totalN1: 0,
         })
       }
 
       const target = map.get(key)!
-      target.mois[row.mois] = safeNumber(target.mois[row.mois]) + value
-      target.total += value
+
+      if (row.annee === selectedYear) {
+        target.mois[row.mois] = safeNumber(target.mois[row.mois]) + value
+        target.total += value
+      } else {
+        target.moisN1[row.mois] = safeNumber(target.moisN1[row.mois]) + value
+        if (analysisScope?.mois || row.mois <= n1ComparisonMonth) target.totalN1 += value
+      }
     })
 
-    return Array.from(map.values()).filter((row) => hasMetricValue(row.total) || hasAnyMonthMetricValue(row.mois)).sort((a, b) => {
+    return Array.from(map.values()).filter((row) => matrixRowHasValue(row)).sort((a, b) => {
       const macro = a.famille_macro.localeCompare(b.famille_macro, 'fr', { numeric: true })
       if (macro !== 0) return macro
       const family = a.famille.localeCompare(b.famille, 'fr', { numeric: true })
       if (family !== 0) return family
       return FLUX_ORDER.indexOf(a.flux) - FLUX_ORDER.indexOf(b.flux)
     })
-  }, [scopeDetailRows, metric, analysisScope, visibleFlux])
+  }, [scopeDetailRows, selectedYear, metric, analysisScope, visibleFlux, n1ComparisonMonth])
 
   const referenceRows = useMemo(() => {
     if (!referenceScope) return []
@@ -1132,8 +1147,8 @@ export default function ApprovisionnementsPage() {
         Famille: row.famille,
         'Type document': FLUX_LABELS[row.flux],
       }
-      for (let month = 1; month <= 12; month += 1) exported[monthLabel(month)] = safeNumber(row.mois[month])
-      exported.Total = row.total
+      for (let month = 1; month <= 12; month += 1) exported[monthLabel(month)] = valueWithParenthesis(row.mois[month], row.moisN1[month])
+      exported.Total = valueWithParenthesis(row.total, row.totalN1)
       return exported
     })
   }
@@ -1562,7 +1577,7 @@ export default function ApprovisionnementsPage() {
             <div>
               <h2 className="text-xl font-black">Détail familles de la sélection</h2>
               <p className="text-xs font-bold uppercase text-slate-500">
-                {analysisScope.label} · lecture en {metricLabel(metric)} · clique sur une famille, un type document, un mois ou un total pour afficher les références.
+                {analysisScope.label} · lecture en {metricLabel(metric)} · {selectedYear - 1} entre parenthèses · total N-1 arrêté sur {comparisonPeriodLabel(n1ComparisonMonth)} · clique sur une famille, un type document, un mois ou un total pour afficher les références.
               </p>
             </div>
             <button
@@ -1623,17 +1638,19 @@ export default function ApprovisionnementsPage() {
                       </td>
                       {Array.from({ length: 12 }, (_, index) => index + 1).map((month) => {
                         const value = safeNumber(row.mois[month])
+                        const valueN1 = safeNumber(row.moisN1[month])
+                        const hasValue = hasMetricValue(value) || hasMetricValue(valueN1)
                         const selected = referenceScope?.famille_macro === row.famille_macro && referenceScope?.famille === row.famille && referenceScope?.flux === row.flux && referenceScope?.mois === month
                         return (
                           <td key={month} className="px-2 py-1 text-right">
                             <button
                               type="button"
-                              disabled={!value}
+                              disabled={!hasValue}
                               onClick={() => setReferenceScope(makeReferenceScopeFromFamily(row, { mois: month }, `${row.famille_macro} · ${row.famille} · ${FLUX_LABELS[row.flux]} · ${monthLabel(month)}`))}
-                              className={`w-full rounded-lg px-2 py-1 text-right font-black ${clickableCellClass(selected, Boolean(value))}`}
+                              className={`w-full rounded-lg px-2 py-1 text-right font-black ${clickableCellClass(selected, hasValue)}`}
                               style={fluxValueStyle(row.flux, selected)}
                             >
-                              {value ? formatMetric(value, metric) : '—'}
+                              {valueWithN1(value, valueN1, metric, selected, row.flux)}
                             </button>
                           </td>
                         )
@@ -1641,12 +1658,12 @@ export default function ApprovisionnementsPage() {
                       <td className="px-3 py-2 text-right font-black">
                         <button
                           type="button"
-                          disabled={!row.total}
+                          disabled={!hasMetricValue(row.total) && !hasMetricValue(row.totalN1)}
                           onClick={() => setReferenceScope(makeReferenceScopeFromFamily(row, { mois: analysisScope?.mois }, `${row.famille_macro} · ${row.famille} · ${FLUX_LABELS[row.flux]} · total`))}
                           className="w-full rounded-lg px-2 py-1 text-right font-black hover:bg-blue-50"
                           style={fluxValueStyle(row.flux)}
                         >
-                          {row.total ? formatMetric(row.total, metric) : '—'}
+                          {valueWithN1(row.total, row.totalN1, metric, false, row.flux)}
                         </button>
                       </td>
                     </tr>
