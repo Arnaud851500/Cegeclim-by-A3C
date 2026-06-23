@@ -313,6 +313,27 @@ function formatMetric(value: number, metric: Metric) {
   return formatNumber(value)
 }
 
+function formatPercent(value: number) {
+  const sign = value > 0 ? '+' : ''
+  return `${sign}${new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 1 }).format(value || 0)} %`
+}
+
+function evolutionPercentValue(value: number, valueN1: number) {
+  const main = safeNumber(value)
+  const previous = safeNumber(valueN1)
+  if (!hasMetricValue(previous)) return null
+  return ((main - previous) / Math.abs(previous)) * 100
+}
+
+function formatEvolutionExport(value: number, valueN1: number) {
+  const main = safeNumber(value)
+  const previous = safeNumber(valueN1)
+  if (!hasMetricValue(main) && !hasMetricValue(previous)) return ''
+  if (!hasMetricValue(previous)) return hasMetricValue(main) ? 'Nouveau' : ''
+  const evolution = evolutionPercentValue(main, previous)
+  return evolution === null ? '' : formatPercent(evolution)
+}
+
 function yAxisFormatter(value: number, metric: Metric) {
   if (metric === 'ca_ht') return `${Math.round(Number(value || 0) / 1000)}k€`
   return formatNumber(Number(value || 0))
@@ -1070,6 +1091,62 @@ export default function ApprovisionnementsPage() {
     )
   }
 
+  function evolutionBadge(value: number, valueN1: number, selected = false) {
+    const main = safeNumber(value)
+    const previous = safeNumber(valueN1)
+
+    if (!hasMetricValue(main) && !hasMetricValue(previous)) return null
+
+    if (!hasMetricValue(previous)) {
+      if (!hasMetricValue(main)) return null
+      return (
+        <span
+          className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-black ring-1 ${
+            selected ? 'bg-blue-500 text-white ring-blue-200' : 'bg-blue-50 text-blue-700 ring-blue-200'
+          }`}
+          title={`Pas de valeur N-1 sur la période comparable (${comparisonPeriodLabel(n1ComparisonMonth)})`}
+        >
+          Nouveau
+        </span>
+      )
+    }
+
+    const evolution = evolutionPercentValue(main, previous) ?? 0
+    const isPositive = evolution > 0.05
+    const isNegative = evolution < -0.05
+    const badgeClass = selected
+      ? 'bg-blue-500 text-white ring-blue-200'
+      : isPositive
+        ? 'bg-emerald-50 text-emerald-700 ring-emerald-200'
+        : isNegative
+          ? 'bg-red-50 text-red-700 ring-red-200'
+          : 'bg-slate-100 text-slate-600 ring-slate-200'
+    const prefix = isPositive ? '▲ ' : isNegative ? '▼ ' : '● '
+
+    return (
+      <span
+        className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-black ring-1 ${badgeClass}`}
+        title={`Évolution vs N-1 sur la période comparable (${comparisonPeriodLabel(n1ComparisonMonth)})`}
+      >
+        {prefix}{formatPercent(evolution)}
+      </span>
+    )
+  }
+
+  function totalValueWithEvolution(value: number, valueN1: number, valueMetric: Metric, selected = false, flux?: Flux) {
+    const main = safeNumber(value)
+    const previous = safeNumber(valueN1)
+
+    if (!hasMetricValue(main) && !hasMetricValue(previous)) return '—'
+
+    return (
+      <span className="flex items-center justify-end gap-2">
+        {valueWithN1(main, previous, valueMetric, selected, flux)}
+        {evolutionBadge(main, previous, selected)}
+      </span>
+    )
+  }
+
   function fluxValueStyle(flux: Flux, selected = false) {
     return selected ? undefined : { color: FLUX_COLORS[flux] }
   }
@@ -1113,13 +1190,14 @@ export default function ApprovisionnementsPage() {
       const exported: Record<string, any> = {
         'Famille macro': row.famille_macro,
         'Type document': FLUX_LABELS[row.flux],
+        [`Total ${selectedYear}`]: row.total,
+        [`Total ${selectedYear - 1}`]: row.totalN1,
+        'Évolution % vs N-1': formatEvolutionExport(row.total, row.totalN1),
       }
       for (let month = 1; month <= 12; month += 1) {
         exported[`${monthLabel(month)} ${selectedYear}`] = safeNumber(row.mois[month])
         exported[`${monthLabel(month)} ${selectedYear - 1}`] = safeNumber(row.moisN1[month])
       }
-      exported[`Total ${selectedYear}`] = row.total
-      exported[`Total ${selectedYear - 1}`] = row.totalN1
       return exported
     })
   }
@@ -1129,13 +1207,14 @@ export default function ApprovisionnementsPage() {
       const exported: Record<string, any> = {
         'Famille macro': row.famille_macro,
         'Type document': FLUX_LABELS[row.flux],
+        [`Total ${selectedYear}`]: row.total,
+        [`Total ${selectedYear - 1}`]: row.totalN1,
+        'Évolution % vs N-1': formatEvolutionExport(row.total, row.totalN1),
       }
       for (let month = 1; month <= 12; month += 1) {
         exported[`${monthLabel(month)} ${selectedYear}`] = safeNumber(row.mois[month])
         exported[`${monthLabel(month)} ${selectedYear - 1}`] = safeNumber(row.moisN1[month])
       }
-      exported[`Total ${selectedYear}`] = row.total
-      exported[`Total ${selectedYear - 1}`] = row.totalN1
       return exported
     })
   }
@@ -1146,9 +1225,10 @@ export default function ApprovisionnementsPage() {
         'Famille macro': row.famille_macro,
         Famille: row.famille,
         'Type document': FLUX_LABELS[row.flux],
+        Total: valueWithParenthesis(row.total, row.totalN1),
+        'Évolution % vs N-1': formatEvolutionExport(row.total, row.totalN1),
       }
       for (let month = 1; month <= 12; month += 1) exported[monthLabel(month)] = valueWithParenthesis(row.mois[month], row.moisN1[month])
-      exported.Total = valueWithParenthesis(row.total, row.totalN1)
       return exported
     })
   }
@@ -1177,11 +1257,12 @@ export default function ApprovisionnementsPage() {
         Famille: row.famille,
         Référence: row.reference_article,
         'Type document': FLUX_LABELS[row.type_document],
+        'Total général': valueWithParenthesis(row.total, row.totalN1),
+        'Évolution % vs N-1': formatEvolutionExport(row.total, row.totalN1),
       }
       monthNumbers().forEach((month, index) => {
         output[MONTHS[index]] = valueWithParenthesis(row.mois[month], row.moisN1[month])
       })
-      output['Total général'] = valueWithParenthesis(row.total, row.totalN1)
       return output
     })
   }
@@ -1216,38 +1297,7 @@ export default function ApprovisionnementsPage() {
           <p className="text-sm font-bold text-slate-500">Lecture des tendances Devis → CDC → BL → Factures par famille macro, famille et référence article.</p>
         </div>
         <div className="flex flex-wrap justify-end gap-2">
-          <button
-            type="button"
-            onClick={() => handleRebuildRecentMonths(2)}
-            disabled={maintenanceLoading}
-            className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm font-black text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {maintenanceLoading ? 'Rebuild…' : 'Rebuild 2 mois'}
-          </button>
-          <button
-            type="button"
-            onClick={() => handleRebuildRecentMonths(3)}
-            disabled={maintenanceLoading}
-            className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm font-black text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {maintenanceLoading ? 'Rebuild…' : 'Rebuild 3 mois'}
-          </button>
-          <button
-            type="button"
-            onClick={() => handleRebuildRecentMonths(3, 'previous_month')}
-            disabled={maintenanceLoading}
-            className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-black text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            BL M-x → M-1 (3 mois)
-          </button>
-          <button
-            type="button"
-            onClick={() => handleRebuildRecentMonths(3, 'current_month')}
-            disabled={maintenanceLoading}
-            className="rounded-xl border border-sky-300 bg-sky-50 px-4 py-3 text-sm font-black text-sky-800 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            BL M-x → M (3 mois)
-          </button>
+          
           <button
             type="button"
             onClick={() => { loadOptions(selectedYear); loadSummary() }}
@@ -1389,6 +1439,7 @@ export default function ApprovisionnementsPage() {
               <tr>
                 <th className="px-3 py-2 text-left">Famille macro</th>
                 <th className="px-3 py-2 text-left">Type document</th>
+                <th className="px-3 py-2 text-right">Total</th>
                 {MONTHS.map((month, index) => (
                   <th key={month} className="px-3 py-2 text-right">
                     <button
@@ -1403,7 +1454,6 @@ export default function ApprovisionnementsPage() {
                     </button>
                   </th>
                 ))}
-                <th className="px-3 py-2 text-right">Total</th>
               </tr>
             </thead>
             <tbody>
@@ -1428,6 +1478,17 @@ export default function ApprovisionnementsPage() {
                       {FLUX_LABELS[row.flux]}
                     </button>
                   </td>
+                  <td className="px-3 py-2 text-right font-black">
+                    <button
+                      type="button"
+                      disabled={!row.total && !row.totalN1}
+                      onClick={() => handleAnalysisScope(makeScopeFromMatrix(row, { mois: undefined }, `${row.famille_macro} · ${FLUX_LABELS[row.flux]} · total annuel`))}
+                      className="w-full rounded-lg px-2 py-1 text-right font-black hover:bg-blue-50"
+                      style={fluxValueStyle(row.flux)}
+                    >
+                      {totalValueWithEvolution(row.total, row.totalN1, 'quantite_pertinente', false, row.flux)}
+                    </button>
+                  </td>
                   {Array.from({ length: 12 }, (_, index) => index + 1).map((month) => {
                     const value = safeNumber(row.mois[month])
                     const valueN1 = safeNumber(row.moisN1[month])
@@ -1447,17 +1508,6 @@ export default function ApprovisionnementsPage() {
                       </td>
                     )
                   })}
-                  <td className="px-3 py-2 text-right font-black">
-                    <button
-                      type="button"
-                      disabled={!row.total && !row.totalN1}
-                      onClick={() => handleAnalysisScope(makeScopeFromMatrix(row, { mois: undefined }, `${row.famille_macro} · ${FLUX_LABELS[row.flux]} · total annuel`))}
-                      className="w-full rounded-lg px-2 py-1 text-right font-black hover:bg-blue-50"
-                      style={fluxValueStyle(row.flux)}
-                    >
-                      {valueWithN1(row.total, row.totalN1, 'quantite_pertinente', false, row.flux)}
-                    </button>
-                  </td>
                 </tr>
               ))}
               {!priorityRows.length && (
@@ -1490,6 +1540,7 @@ export default function ApprovisionnementsPage() {
               <tr>
                 <th className="px-3 py-2 text-left">Famille macro</th>
                 <th className="px-3 py-2 text-left">Type document</th>
+                <th className="px-3 py-2 text-right">Total</th>
                 {MONTHS.map((month, index) => (
                   <th key={month} className="px-3 py-2 text-right">
                     <button
@@ -1504,7 +1555,6 @@ export default function ApprovisionnementsPage() {
                     </button>
                   </th>
                 ))}
-                <th className="px-3 py-2 text-right">Total</th>
               </tr>
             </thead>
             <tbody>
@@ -1529,6 +1579,17 @@ export default function ApprovisionnementsPage() {
                       {FLUX_LABELS[row.flux]}
                     </button>
                   </td>
+                  <td className="px-3 py-2 text-right font-black">
+                    <button
+                      type="button"
+                      disabled={!row.total && !row.totalN1}
+                      onClick={() => handleAnalysisScope(makeScopeFromMatrix(row, {}, `${row.famille_macro} · ${FLUX_LABELS[row.flux]} · ${chartMonth ? monthLabel(chartMonth) : 'total annuel'}`))}
+                      className="w-full rounded-lg px-2 py-1 text-right font-black hover:bg-blue-50"
+                      style={fluxValueStyle(row.flux)}
+                    >
+                      {totalValueWithEvolution(row.total, row.totalN1, metric, false, row.flux)}
+                    </button>
+                  </td>
                   {Array.from({ length: 12 }, (_, index) => index + 1).map((month) => {
                     const value = safeNumber(row.mois[month])
                     const valueN1 = safeNumber(row.moisN1[month])
@@ -1548,17 +1609,6 @@ export default function ApprovisionnementsPage() {
                       </td>
                     )
                   })}
-                  <td className="px-3 py-2 text-right font-black">
-                    <button
-                      type="button"
-                      disabled={!row.total && !row.totalN1}
-                      onClick={() => handleAnalysisScope(makeScopeFromMatrix(row, {}, `${row.famille_macro} · ${FLUX_LABELS[row.flux]} · ${chartMonth ? monthLabel(chartMonth) : 'total annuel'}`))}
-                      className="w-full rounded-lg px-2 py-1 text-right font-black hover:bg-blue-50"
-                      style={fluxValueStyle(row.flux)}
-                    >
-                      {valueWithN1(row.total, row.totalN1, metric, false, row.flux)}
-                    </button>
-                  </td>
                 </tr>
               ))}
               {!matrixRows.length && (
@@ -1599,6 +1649,7 @@ export default function ApprovisionnementsPage() {
                     <th className="px-3 py-2 text-left">Famille macro</th>
                     <th className="px-3 py-2 text-left">Famille</th>
                     <th className="px-3 py-2 text-left">Type document</th>
+                    <th className="px-3 py-2 text-right">Total</th>
                     {MONTHS.map((month, index) => (
                       <th key={month} className="px-3 py-2 text-right">
                         <button
@@ -1610,7 +1661,6 @@ export default function ApprovisionnementsPage() {
                         </button>
                       </th>
                     ))}
-                    <th className="px-3 py-2 text-right">Total</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1636,6 +1686,17 @@ export default function ApprovisionnementsPage() {
                           {FLUX_LABELS[row.flux]}
                         </button>
                       </td>
+                      <td className="px-3 py-2 text-right font-black">
+                        <button
+                          type="button"
+                          disabled={!hasMetricValue(row.total) && !hasMetricValue(row.totalN1)}
+                          onClick={() => setReferenceScope(makeReferenceScopeFromFamily(row, { mois: analysisScope?.mois }, `${row.famille_macro} · ${row.famille} · ${FLUX_LABELS[row.flux]} · total`))}
+                          className="w-full rounded-lg px-2 py-1 text-right font-black hover:bg-blue-50"
+                          style={fluxValueStyle(row.flux)}
+                        >
+                          {totalValueWithEvolution(row.total, row.totalN1, metric, false, row.flux)}
+                        </button>
+                      </td>
                       {Array.from({ length: 12 }, (_, index) => index + 1).map((month) => {
                         const value = safeNumber(row.mois[month])
                         const valueN1 = safeNumber(row.moisN1[month])
@@ -1655,17 +1716,6 @@ export default function ApprovisionnementsPage() {
                           </td>
                         )
                       })}
-                      <td className="px-3 py-2 text-right font-black">
-                        <button
-                          type="button"
-                          disabled={!hasMetricValue(row.total) && !hasMetricValue(row.totalN1)}
-                          onClick={() => setReferenceScope(makeReferenceScopeFromFamily(row, { mois: analysisScope?.mois }, `${row.famille_macro} · ${row.famille} · ${FLUX_LABELS[row.flux]} · total`))}
-                          className="w-full rounded-lg px-2 py-1 text-right font-black hover:bg-blue-50"
-                          style={fluxValueStyle(row.flux)}
-                        >
-                          {valueWithN1(row.total, row.totalN1, metric, false, row.flux)}
-                        </button>
-                      </td>
                     </tr>
                   ))}
                   {!familyMatrixRows.length && (
@@ -1708,15 +1758,16 @@ export default function ApprovisionnementsPage() {
                     <th colSpan={4} className="sticky left-0 z-30 px-3 py-2 text-left font-black">
                       Somme de {metricLabel(metric)}
                     </th>
-                    <th colSpan={13} className="px-3 py-2 text-center font-black">Mois</th>
+                    <th className="px-3 py-2 text-center font-black">Total</th>
+                    <th colSpan={12} className="px-3 py-2 text-center font-black">Mois</th>
                   </tr>
                   <tr className="bg-[#55752c] text-white">
                     <th className="sticky left-0 z-30 min-w-[160px] px-3 py-2 text-left">Famille macro</th>
                     <th className="sticky left-[160px] z-30 min-w-[220px] px-3 py-2 text-left">Famille</th>
                     <th className="sticky left-[380px] z-30 min-w-[180px] px-3 py-2 text-left">Référence</th>
                     <th className="sticky left-[560px] z-30 min-w-[140px] px-3 py-2 text-left">Type document</th>
+                    <th className="min-w-[150px] px-3 py-2 text-right">Total général</th>
                     {MONTHS.map((month) => <th key={month} className="min-w-[92px] px-3 py-2 text-right">{month}</th>)}
-                    <th className="min-w-[125px] px-3 py-2 text-right">Total général</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1726,14 +1777,14 @@ export default function ApprovisionnementsPage() {
                       <td className="sticky left-[160px] z-20 bg-inherit px-3 py-1 font-bold text-slate-800">{row.famille}</td>
                       <td className="sticky left-[380px] z-20 bg-inherit px-3 py-1 font-mono text-xs font-black text-slate-900" title={row.designation || row.reference_article}>{row.reference_article}</td>
                       <td className="sticky left-[560px] z-20 bg-inherit px-3 py-1 font-black" style={{ color: FLUX_COLORS[row.type_document] }}>{FLUX_LABELS[row.type_document]}</td>
+                      <td className="px-3 py-1 text-right font-black" style={{ color: FLUX_COLORS[row.type_document] }}>
+                        {totalValueWithEvolution(row.total, row.totalN1, metric, false, row.type_document)}
+                      </td>
                       {monthNumbers().map((month) => (
                         <td key={month} className="px-3 py-1 text-right font-bold" style={{ color: FLUX_COLORS[row.type_document] }}>
                           {valueWithParenthesis(row.mois[month], row.moisN1[month])}
                         </td>
                       ))}
-                      <td className="px-3 py-1 text-right font-black" style={{ color: FLUX_COLORS[row.type_document] }}>
-                        {valueWithParenthesis(row.total, row.totalN1)}
-                      </td>
                     </tr>
                   ))}
                   {!referencePivotMatrixRows.length && (

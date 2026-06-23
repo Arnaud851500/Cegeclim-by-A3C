@@ -180,6 +180,7 @@ const FACTURES_TABLE = 'indicateur_factures_mensuel'
 const ACTIVITE_TABLE = 'indicateur_activite_mensuel'
 const DEVIS_TABLE = 'indicateur_devis_mensuel'
 const VIEW_TABLE = 'analyse_widget_views'
+const DEFAULT_SAVED_VIEW_NAME = 'CEGECLIM'
 
 const ATELIER_COMMON_SELECT = [
   'id',
@@ -351,6 +352,18 @@ function sourceLabel(source: DataSource) {
   if (source === 'activite') return 'Activité'
   if (source === 'devis') return 'Devis'
   return String(source)
+}
+
+function normalizeSavedViewName(value: any) {
+  return safeText(value, '')
+    .normalize('NFKC')
+    .trim()
+    .toUpperCase()
+}
+
+function findDefaultSavedView(views: SavedView[]) {
+  const wanted = normalizeSavedViewName(DEFAULT_SAVED_VIEW_NAME)
+  return views.find((view) => normalizeSavedViewName(view.name) === wanted) || null
 }
 
 function normalizeAggRow(row: Record<string, any>, source: Exclude<DataSource, 'mixte'>): StudioRow {
@@ -2334,8 +2347,9 @@ export default function AtelierAnalysePage() {
   const [widgets, setWidgets] = useState<WidgetConfig[]>([])
   const [selectedWidgetId, setSelectedWidgetId] = useState<string | null>(null)
   const [savedViews, setSavedViews] = useState<SavedView[]>([])
+  const [savedViewBootstrapped, setSavedViewBootstrapped] = useState(false)
   const [currentViewId, setCurrentViewId] = useState<string | null>(null)
-  const [viewName, setViewName] = useState('Vue Direction')
+  const [viewName, setViewName] = useState('CEGECLIM')
   const [saveMessage, setSaveMessage] = useState<string | null>(null)
   const [addMenuOpen, setAddMenuOpen] = useState(false)
   const [configPanelTop, setConfigPanelTop] = useState(120)
@@ -2474,18 +2488,39 @@ export default function AtelierAnalysePage() {
         .select('id, name, description, global_filters, widgets, updated_at')
         .order('updated_at', { ascending: false })
       if (error) throw error
-      setSavedViews((data || []) as SavedView[])
+      const views = (data || []) as SavedView[]
+      setSavedViews(views)
+      return views
     } catch (_e) {
       const local = window.localStorage.getItem('atelier_analyse_views')
-      if (local) setSavedViews(JSON.parse(local))
+      const views = local ? (JSON.parse(local) as SavedView[]) : []
+      setSavedViews(views)
+      return views
     }
   }
 
   useEffect(() => {
-    loadSavedViews()
+    let cancelled = false
+
+    async function bootstrapSavedViews() {
+      const views = await loadSavedViews()
+      if (cancelled) return
+
+      const defaultView = findDefaultSavedView(views)
+      if (defaultView) loadView(defaultView)
+
+      setSavedViewBootstrapped(true)
+    }
+
+    bootstrapSavedViews()
+
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   useEffect(() => {
+    if (!savedViewBootstrapped) return
     loadData(globalFilters)
     // Le chargement serveur est recalé seulement quand le périmètre volumétrique change.
     // Les autres filtres restent appliqués instantanément côté navigateur.
@@ -2494,6 +2529,7 @@ export default function AtelierAnalysePage() {
     JSON.stringify(globalFilters.sources),
     JSON.stringify(globalFilters.years),
     globalFilters.horsStatistique,
+    savedViewBootstrapped,
   ])
 
   const available = useMemo(() => {
