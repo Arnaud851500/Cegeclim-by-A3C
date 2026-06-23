@@ -159,6 +159,12 @@ type SavedView = {
   updated_at?: string | null
 }
 
+type LastBusinessDates = {
+  devis: string | null
+  factures: string | null
+  bl: string | null
+}
+
 type AggregatedValue = {
   ca_ht: number
   marge_valeur: number
@@ -284,6 +290,8 @@ const DEFAULT_FILTERS: GlobalFilters = {
   horsStatistique: 'non',
 }
 
+const EMPTY_LAST_BUSINESS_DATES: LastBusinessDates = { devis: null, factures: null, bl: null }
+
 function uid(prefix = 'w') {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
 }
@@ -301,6 +309,80 @@ function safeText(value: any, fallback = 'NON RENSEIGNE') {
 
 function safeBool(value: any) {
   return value === true || String(value).toLowerCase() === 'true'
+}
+
+function normalizeBusinessDate(value: any): string | null {
+  if (!value) return null
+  const text = String(value).trim()
+  if (!text) return null
+
+  const iso = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/)
+  if (iso) return `${iso[1]}-${iso[2].padStart(2, '0')}-${iso[3].padStart(2, '0')}`
+
+  const fr = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})/)
+  if (fr) return `${fr[3]}-${fr[2].padStart(2, '0')}-${fr[1].padStart(2, '0')}`
+
+  const timestamp = new Date(text).getTime()
+  if (!Number.isFinite(timestamp)) return null
+  return new Date(timestamp).toISOString().slice(0, 10)
+}
+
+function formatBusinessDate(value: string | null | undefined) {
+  const iso = normalizeBusinessDate(value)
+  if (!iso) return '—'
+  const [year, month, day] = iso.split('-')
+  return `${day}/${month}/${year}`
+}
+
+function formatLastBusinessDatesLabel(dates: LastBusinessDates) {
+  return `Devis : ${formatBusinessDate(dates.devis)} · BL : ${formatBusinessDate(dates.bl)} · Factures : ${formatBusinessDate(dates.factures)}`
+}
+
+function latestBusinessDate(values: Array<string | null>) {
+  const sortedValues = values
+    .map((value) => normalizeBusinessDate(value))
+    .filter((value): value is string => Boolean(value))
+    .sort()
+  return sortedValues.length ? sortedValues[sortedValues.length - 1] : null
+}
+
+async function fetchLatestBusinessDate(table: string, dateColumns: string[], year: number) {
+  const start = `${year}-01-01`
+  const end = `${year + 1}-01-01`
+
+  for (const dateColumn of dateColumns) {
+    try {
+      const { data, error } = await supabase
+        .from(table)
+        .select(dateColumn)
+        .not(dateColumn, 'is', null)
+        .gte(dateColumn, start)
+        .lt(dateColumn, end)
+        .order(dateColumn, { ascending: false })
+        .limit(1)
+
+      if (error) continue
+
+      const rawDate = ((data || []) as Record<string, any>[])[0]?.[dateColumn]
+      const normalized = normalizeBusinessDate(rawDate)
+      if (normalized) return normalized
+    } catch {
+      // On passe à la colonne candidate suivante pour rester compatible avec les variantes de schéma.
+    }
+  }
+
+  return null
+}
+
+async function fetchLatestBusinessDates(year: number): Promise<LastBusinessDates> {
+  const [devis, factures, blActivite, blFacture] = await Promise.all([
+    fetchLatestBusinessDate('devis_lignes', ['date_devis', 'date_piece', 'date_document'], year),
+    fetchLatestBusinessDate('facture_lignes', ['date_piece', 'date_facture', 'date_document'], year),
+    fetchLatestBusinessDate('activite_lignes', ['date_bl', 'date_piece_bl', 'date_livraison_bl', 'date_livraison', 'date_piece'], year),
+    fetchLatestBusinessDate('facture_lignes', ['date_bl', 'date_piece_bl', 'date_livraison_bl', 'date_livraison'], year),
+  ])
+
+  return { devis, factures, bl: latestBusinessDate([blActivite, blFacture]) }
 }
 
 function formatCurrency(value: number) {
@@ -2364,6 +2446,7 @@ export default function AtelierAnalysePage() {
   const [maintenanceMessage, setMaintenanceMessage] = useState<string | null>(null)
   const [showMaintenancePanel, setShowMaintenancePanel] = useState(false)
   const [widgetDraft, setWidgetDraft] = useState<WidgetConfig | null>(null)
+  const [lastBusinessDates, setLastBusinessDates] = useState<LastBusinessDates>(EMPTY_LAST_BUSINESS_DATES)
   const aiTextareaRef = useRef<HTMLTextAreaElement | null>(null)
 
 
@@ -2403,6 +2486,19 @@ export default function AtelierAnalysePage() {
     }
   }
 
+  function businessDateYear(filters = globalFilters) {
+    const years = (filters.years || []).map(Number).filter((year) => Number.isFinite(year))
+    return years.length ? Math.max(...years) : CURRENT_YEAR
+  }
+
+  async function loadLastBusinessDates(filters = globalFilters) {
+    try {
+      setLastBusinessDates(await fetchLatestBusinessDates(businessDateYear(filters)))
+    } catch {
+      setLastBusinessDates(EMPTY_LAST_BUSINESS_DATES)
+    }
+  }
+
 
   async function handleRebuildRecentMonths(monthCount: 2 | 3 = 3, blMxMode?: 'previous_month' | 'current_month') {
     if (maintenanceLoading) return
@@ -2429,6 +2525,7 @@ export default function AtelierAnalysePage() {
 
         setMaintenanceMessage('Mode BL M-x appliqué. Rechargement de l’atelier…')
         await loadData(globalFilters)
+        await loadLastBusinessDates(globalFilters)
         setMaintenanceMessage(`BL M-x → ${blMxMode === 'previous_month' ? 'M-1' : 'M'} appliqué.`)
         return
       }
@@ -2442,6 +2539,7 @@ export default function AtelierAnalysePage() {
       await runRpcForPeriods('rebuild_indicateur_flux_articles_mensuel_periode', periods, 'Flux articles')
       setMaintenanceMessage('Rebuild terminé. Rechargement de l’atelier…')
       await loadData(globalFilters)
+      await loadLastBusinessDates(globalFilters)
       setMaintenanceMessage(`Rebuild ${monthCount} mois terminé.`)
     } catch (exception: any) {
       setError(`Rebuild impossible : ${exception?.message || exception}`)
@@ -2522,6 +2620,7 @@ export default function AtelierAnalysePage() {
   useEffect(() => {
     if (!savedViewBootstrapped) return
     loadData(globalFilters)
+    loadLastBusinessDates(globalFilters)
     // Le chargement serveur est recalé seulement quand le périmètre volumétrique change.
     // Les autres filtres restent appliqués instantanément côté navigateur.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2549,6 +2648,7 @@ export default function AtelierAnalysePage() {
   }, [rows])
 
   const selectedWidget = selectedWidgetId ? widgets.find((w) => w.id === selectedWidgetId) || null : null
+  const lastBusinessDatesLabel = useMemo(() => formatLastBusinessDatesLabel(lastBusinessDates), [lastBusinessDates])
 
   useEffect(() => {
     setWidgetDraft(selectedWidget ? JSON.parse(JSON.stringify(selectedWidget)) : null)
@@ -2937,7 +3037,7 @@ export default function AtelierAnalysePage() {
             <div>
               <div className="flex flex-wrap items-center gap-3">
                 <h1 className="text-3xl font-black tracking-tight">Atelier d’analyse</h1>
-                <span className="inline-flex rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-black text-blue-700">Version front : {ATELIER_FRONT_VERSION}</span>
+                <span className="inline-flex rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-black text-slate-600 shadow-sm">Dernières pièces : {lastBusinessDatesLabel}</span>
               </div>
               <p className="mt-2 text-sm text-slate-600">Créez vos propres widgets à partir des indicateurs factures et activité.</p>
             </div>
@@ -2947,7 +3047,7 @@ export default function AtelierAnalysePage() {
               <button type="button" onClick={duplicateCurrentView} disabled={!widgets.length} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50">Dupliquer la vue</button>
               <button type="button" onClick={() => { setCurrentViewId(null); setViewName('Nouvelle vue'); setWidgets([]); setSelectedWidgetId(null); setSaveMessage(null) }} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50">Nouvelle vue</button>
               <button type="button" onClick={() => setShowMaintenancePanel((value) => !value)} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50">Actions techniques {showMaintenancePanel ? '▲' : '▼'}</button>
-              <button type="button" onClick={() => loadData(globalFilters)} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50">Actualiser</button>
+              <button type="button" onClick={async () => { await loadData(globalFilters); await loadLastBusinessDates(globalFilters) }} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50">Actualiser</button>
             </div>
           </div>
           {showMaintenancePanel && (
