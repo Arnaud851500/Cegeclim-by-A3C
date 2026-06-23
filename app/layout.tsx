@@ -248,9 +248,9 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const menuGroups: MenuGroup[] = [
   
     {
-      label: 'Prospects / Carte',
+      label: 'Prospects / Clients',
       items: [
-        { label: 'Prospects / Carte', path: '/carte', accessKey: 'can_carte' },
+        { label: 'Prospects / Clients', path: '/carte', accessKey: 'can_carte' },
         { label: 'Clients Cegeclim', path: '/clients_cegeclim', accessKey: 'can_agences' },
         { label: 'Suivi Prospects', path: '/suivi prospects', accessKey: 'can_agences' },
       ],
@@ -270,17 +270,14 @@ function AppShell({ children }: { children: React.ReactNode }) {
     {
       label: 'Tableaux de bord',
       items: [
-        { label: 'Tableaux de bord', path: '/atelier-analyse', accessKey: 'can_autorisation' },
+        { label: 'Flux Devis, CDC, BL, Fact', path: '/approvisionnements', accessKey: 'can_autorisation' },
+        { label: 'Statistiques Devis', path: '/cycle-documents', accessKey: 'can_autorisation' },
         { label: 'Suivi Multi Clients', path: '/synthese_multi_clients', accessKey: 'can_dashboard' },
+        { label: 'Tableaux de bord', path: '/atelier-analyse', accessKey: 'can_autorisation' },
         { label: 'Indicateurs', path: '/Indicateurs', accessKey: 'can_dashboard' }
         ],
     },
-    {
-      label: 'Analyse Devis',
-      items: [
-        { label: 'Flux Devis => Fact', path: '/approvisionnements', accessKey: 'can_autorisation' }
-      ],
-    },
+
     {
       label: 'Admin',
       items: [{ label: 'Autorisations', path: '/autorisation', accessKey: 'can_autorisation' },
