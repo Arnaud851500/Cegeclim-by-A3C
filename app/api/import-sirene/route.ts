@@ -40,6 +40,10 @@ function translateNaf(activitePrincipaleEtablissement: string | null) {
   if (code.startsWith('43.21') || code.startsWith('4321')) return 'Electricité ENR'
   if (code.startsWith('41.20') || code.startsWith('4120')) return 'CMI'
   if (code.startsWith('43.99') || code.startsWith('4399')) return 'Bâtiment'
+  if (code.startsWith('28.25Z') || code.startsWith('2825Z')) return 'Equip Frigo Indu.'
+  if (code.startsWith('33.20B') || code.startsWith('3320B')) return 'Instal Machine Indu.'
+  if (code.startsWith('33.12Z') || code.startsWith('3312Z')) return 'Repa Machine Indu.'
+  if (code.startsWith('43.29A') || code.startsWith('4329A')) return 'Travaux isolat.'
   return 'AUTRES'
 }
 

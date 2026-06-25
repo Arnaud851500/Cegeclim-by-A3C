@@ -92,6 +92,9 @@ type CacheDbRow = {
   marge_n1_value_by_macro: Record<string, number> | null
   objectif_ca: number | null
   potentiel: number | null
+  encours_commande_n?: number | null
+  encours_commande_n_by_macro?: Record<string, number> | null
+  encours_commande_n_by_type?: Record<string, number> | null
   devis_ytd_n: number | null
   devis_ytd_n1?: number | null
   devis_ytd_n_by_macro: Record<string, number> | null
@@ -147,6 +150,9 @@ type SummaryRow = {
   margeN1ValueByMacro: Record<string, number>
   objectifCa: number
   potentiel: number
+  encoursCommandeN: number
+  encoursCommandeNByMacro: Record<string, number>
+  encoursCommandeNByType: Record<string, number>
   devisYtdN: number
   devisYtdN1: number
   devisYtdNByMacro: Record<string, number>
@@ -203,6 +209,7 @@ type MapProfileFilter = '' | '400K€' | '150K€' | '80K€' | '20K€' | 'vide
 type MapProfilePeriodFilter = '12M' | 'N-1' | 'N-2'
 type MapLogicalOperator = 'OR' | 'AND'
 type ProfileMatrixDimension = 'agence' | 'collaborateur'
+type EncoursDetailMode = 'macro' | 'type'
 
 type SyntheseMapClientRow = {
   id: string
@@ -275,16 +282,24 @@ type LastBusinessDates = {
 
 const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Sept', 'Oct', 'Nov', 'Déc']
 const FAMILY_MACROS = ['R/R', 'R/O', 'ECS', 'DRV', 'R_zone', 'Accessoire', 'PV', 'Autres']
+const ENCOURS_DOCUMENT_TYPES = ['BL-BR', 'PL', 'CDC']
 const N = new Date().getFullYear()
 const CURRENT_MONTH = new Date().getMonth() + 1
-// Règle SMC : les totaux année N ne prennent que les mois totalement révolus.
-// Exemple : en juin, les lignes mensuelles de juin restent visibles,
-// mais les lignes TOTAL / client cumulent uniquement janvier → mai.
-const CLOSED_MONTH = Math.max(0, CURRENT_MONTH - 1)
+// Règle SMC :
+// - les devis N restent comparés sur le mois courant complet disponible (M).
+// - le CA / la marge N sont comparés sur M-1, car le mois courant est non facturé ou partiel.
+// Exemple en juin : Devis = janvier → juin ; CA / marge = janvier → mai.
+const CLOSED_MONTH = CURRENT_MONTH
+const CA_CLOSED_MONTH = Math.max(0, CURRENT_MONTH - 1)
 const CLOSED_MONTH_YEAR = N
 const ANALYSIS_YEAR = N
 const N1_COMPARISON_MONTH = CLOSED_MONTH
+const CA_N1_COMPARISON_MONTH = CA_CLOSED_MONTH
 const ALL_COLLABORATEURS_VALUE = '__ALL_COLLABORATEURS__'
+
+function periodMonthLabel(month: number, year: number) {
+  return month > 0 ? `${String(month).padStart(2, '0')}-${year}` : `M-1-${year}`
+}
 
 
 const ACTIONS = [
@@ -762,6 +777,10 @@ function emptyByMacro() {
   return Object.fromEntries(FAMILY_MACROS.map((m) => [m, 0])) as Record<string, number>
 }
 
+function emptyEncoursByType() {
+  return Object.fromEntries(ENCOURS_DOCUMENT_TYPES.map((type) => [type, 0])) as Record<string, number>
+}
+
 function emptyNullableByMacro() {
   return Object.fromEntries(FAMILY_MACROS.map((m) => [m, null])) as Record<string, number | null>
 }
@@ -932,6 +951,14 @@ function shouldBlankEmptyMonthMetric(col: ColumnDef, row: SummaryRow) {
   if (caN1Macro) return isNullAmount(row.caN1ByMacro[caN1Macro])
 
   if (key === 'caYtdN') return isNullAmount(row.caYtdN)
+
+  if (key === 'encoursCommandeN') return isNullAmount(row.encoursCommandeN)
+  const encoursMacro = macroFromColumnKey(key, 'encoursCommandeN')
+  if (encoursMacro) {
+    if (ENCOURS_DOCUMENT_TYPES.includes(encoursMacro)) return isNullAmount(row.encoursCommandeNByType[encoursMacro])
+    return isNullAmount(row.encoursCommandeNByMacro[encoursMacro])
+  }
+
   const caYtdNMacro = macroFromColumnKey(key, 'caYtdN')
   if (caYtdNMacro) return isNullAmount(row.caYtdNByMacro[caYtdNMacro])
 
@@ -952,15 +979,17 @@ function buildSummaryForNumero(tier: TiersRow | null, factures: AggRow[], devis:
   const caN1 = sumAmount(factures, numero || null, N - 1, monthFilter)
   const margeN1 = sumMarge(factures, numero || null, N - 1, monthFilter)
   const margePctN1 = caN1 ? (margeN1 / caN1) * 100 : null
-  const caYtdN = sumAmount(factures, numero || null, N, month ? { month } : { monthMax: CLOSED_MONTH })
-  const margeYtdN = sumMarge(factures, numero || null, N, month ? { month } : { monthMax: CLOSED_MONTH })
+  const devisNCompareOpts = month ? { month } : { monthMax: N1_COMPARISON_MONTH }
+  const caNOpts = month ? { month } : { monthMax: CA_CLOSED_MONTH }
+  const caN1CompareOpts = month ? { month } : { monthMax: CA_N1_COMPARISON_MONTH }
+  const caYtdN = sumAmount(factures, numero || null, N, caNOpts)
+  const margeYtdN = sumMarge(factures, numero || null, N, caNOpts)
   const margePctYtdN = caYtdN ? (margeYtdN / caYtdN) * 100 : null
-  const n1CompareOpts = month ? { month } : { monthMax: N1_COMPARISON_MONTH }
-  const caYtdN1 = sumAmount(factures, numero || null, N - 1, n1CompareOpts)
-  const margeYtdN1 = sumMarge(factures, numero || null, N - 1, n1CompareOpts)
+  const caYtdN1 = sumAmount(factures, numero || null, N - 1, caN1CompareOpts)
+  const margeYtdN1 = sumMarge(factures, numero || null, N - 1, caN1CompareOpts)
   const margePctYtdN1 = caYtdN1 ? (margeYtdN1 / caYtdN1) * 100 : null
   const objectifCa = objectiveNumber(objectives, numero, 'Objectif', 'CA')
-  const objectifProrata = month ? objectifCa / 12 : (objectifCa / 12) * CLOSED_MONTH
+  const objectifProrata = month ? objectifCa / 12 : (objectifCa / 12) * CA_CLOSED_MONTH
   const frequenceCommande = objectiveNumber(objectives, numero, 'QRC', 'Fréquence commande')
   const niveauExclusivite = objectiveNumber(objectives, numero, 'QRC', 'Niveau exclusivité')
   const comNotreFaveur = objectiveNumber(objectives, numero, 'QRC', 'Com en notre faveur')
@@ -995,20 +1024,23 @@ function buildSummaryForNumero(tier: TiersRow | null, factures: AggRow[], devis:
     // Lorsqu'on développe le client, chaque mois affiche 1/12 de cet objectif.
     objectifCa: month ? objectifCa / 12 : objectifCa,
     potentiel: objectiveNumber(objectives, numero, 'Objectif', 'POTENTIEL'),
+    encoursCommandeN: 0,
+    encoursCommandeNByMacro: emptyByMacro(),
+    encoursCommandeNByType: emptyEncoursByType(),
     devisYtdN: sumAmount(devis, numero || null, N, month ? { month } : { monthMax: CLOSED_MONTH }),
-    devisYtdN1: sumAmount(devis, numero || null, N - 1, n1CompareOpts),
+    devisYtdN1: sumAmount(devis, numero || null, N - 1, devisNCompareOpts),
     devisYtdNByMacro: byMacro(devis, numero || null, N, { month, monthMax: month ? undefined : CLOSED_MONTH, metric: 'ca' }),
     devisYtdN1ByMacro: byMacro(devis, numero || null, N - 1, { month, monthMax: month ? undefined : N1_COMPARISON_MONTH, metric: 'ca' }),
     caYtdN,
     caYtdN1,
-    caYtdNByMacro: byMacro(factures, numero || null, N, { month, monthMax: month ? undefined : CLOSED_MONTH, metric: 'ca' }),
-    caYtdN1ByMacro: byMacro(factures, numero || null, N - 1, { month, monthMax: month ? undefined : N1_COMPARISON_MONTH, metric: 'ca' }),
+    caYtdNByMacro: byMacro(factures, numero || null, N, { month, monthMax: month ? undefined : CA_CLOSED_MONTH, metric: 'ca' }),
+    caYtdN1ByMacro: byMacro(factures, numero || null, N - 1, { month, monthMax: month ? undefined : CA_N1_COMPARISON_MONTH, metric: 'ca' }),
     margePctYtdN,
     margeYtdNValue: margeYtdN,
     margeYtdN1Value: margeYtdN1,
-    margeYtdNByMacro: byMacroMarginPct(factures, numero || null, N, { month, monthMax: month ? undefined : CLOSED_MONTH }),
-    margeYtdNValueByMacro: byMacro(factures, numero || null, N, { month, monthMax: month ? undefined : CLOSED_MONTH, metric: 'marge' }),
-    margeYtdN1ValueByMacro: byMacro(factures, numero || null, N - 1, { month, monthMax: month ? undefined : N1_COMPARISON_MONTH, metric: 'marge' }),
+    margeYtdNByMacro: byMacroMarginPct(factures, numero || null, N, { month, monthMax: month ? undefined : CA_CLOSED_MONTH }),
+    margeYtdNValueByMacro: byMacro(factures, numero || null, N, { month, monthMax: month ? undefined : CA_CLOSED_MONTH, metric: 'marge' }),
+    margeYtdN1ValueByMacro: byMacro(factures, numero || null, N - 1, { month, monthMax: month ? undefined : CA_N1_COMPARISON_MONTH, metric: 'marge' }),
     ca12m: caYtdN + Math.max(0, caN1 - caYtdN1),
     caBandN: caBand(caYtdN + Math.max(0, caN1 - caYtdN1)),
     caBandN1: caBand(caN1),
@@ -1028,7 +1060,7 @@ function buildSummaryForNumero(tier: TiersRow | null, factures: AggRow[], devis:
   }
 }
 
-function buildColumns(showFamilies: boolean, showCollaborateurColumn = false): ColumnDef[] {
+function buildColumns(showFamilies: boolean, showCollaborateurColumn = false, encoursDetailMode: EncoursDetailMode = 'macro'): ColumnDef[] {
   const cols: ColumnDef[] = []
 
   if (showCollaborateurColumn) {
@@ -1066,19 +1098,30 @@ function buildColumns(showFamilies: boolean, showCollaborateurColumn = false): C
   }
 
   cols.push(
-    { key: 'devisYtdN', label: `DEVIS ${String(CLOSED_MONTH).padStart(2, '0')}-${N}`, group: 'CA / Objectifs', width: 124, className: 'metric devis redLabel compareCell', value: (r) => r.devisYtdN, compareValue: (r) => r.devisYtdN1, format: 'keurCompare' },
+    { key: 'devisYtdN', label: `DEVIS ${periodMonthLabel(CLOSED_MONTH, N)}`, group: 'CA / Objectifs', width: 124, className: 'metric devis redLabel compareCell', value: (r) => r.devisYtdN, compareValue: (r) => r.devisYtdN1, format: 'keurCompare' },
   )
   if (showFamilies) {
-    FAMILY_MACROS.forEach((macro) => cols.push({ key: `devisYtdN_${macro}`, label: `Dont ${macro} (N-1)`, group: `Devis ${N}`, width: 118, rotate: true, className: 'compareCell', value: (r) => r.devisYtdNByMacro[macro], compareValue: (r) => r.devisYtdN1ByMacro[macro], format: 'keurCompare' }))
+    FAMILY_MACROS.forEach((macro) => cols.push({ key: `devisYtdN_${macro}`, label: `Dont ${macro} (N-1)`, group: `Devis ${periodMonthLabel(CLOSED_MONTH, N)}`, width: 118, rotate: true, className: 'compareCell', value: (r) => r.devisYtdNByMacro[macro], compareValue: (r) => r.devisYtdN1ByMacro[macro], format: 'keurCompare' }))
   }
-  cols.push({ key: 'caYtdN', label: `CA RÉEL ${N}`, group: 'CA / Objectifs', width: 124, className: 'metric ca redLabel compareCell', value: (r) => r.caYtdN, compareValue: (r) => r.caYtdN1, format: 'keurCompare' })
+  cols.push({ key: 'caYtdN', label: `CA RÉEL ${periodMonthLabel(CA_CLOSED_MONTH, N)}`, group: 'CA / Objectifs', width: 124, className: 'metric ca redLabel compareCell', value: (r) => r.caYtdN, compareValue: (r) => r.caYtdN1, format: 'keurCompare' })
   if (showFamilies) {
-    FAMILY_MACROS.forEach((macro) => cols.push({ key: `caYtdN_${macro}`, label: `Dont ${macro} (N-1)`, group: `CA ${N}`, width: 118, rotate: true, className: 'compareCell', value: (r) => r.caYtdNByMacro[macro], compareValue: (r) => r.caYtdN1ByMacro[macro], format: 'keurCompare' }))
+    FAMILY_MACROS.forEach((macro) => cols.push({ key: `caYtdN_${macro}`, label: `Dont ${macro} (N-1)`, group: `CA ${periodMonthLabel(CA_CLOSED_MONTH, N)}`, width: 118, rotate: true, className: 'compareCell', value: (r) => r.caYtdNByMacro[macro], compareValue: (r) => r.caYtdN1ByMacro[macro], format: 'keurCompare' }))
   }
-  cols.push({ key: 'margePctYtdN', label: `MARGE RÉEL ${N}`, group: 'CA / Objectifs', width: 124, className: 'metric margin redLabel compareCell', value: (r) => r.margePctYtdN, compareValue: (r) => ratio(r.margeYtdN1Value, r.caYtdN1), format: 'pctCompare' })
+
+  cols.push({ key: 'encoursCommandeN', label: 'ENCOURS CMD', group: 'Encours commande', width: 118, className: 'metric orderBacklog', value: (r) => r.encoursCommandeN, format: 'keurBlank' })
   if (showFamilies) {
-    FAMILY_MACROS.forEach((macro) => cols.push({ key: `margeYtdN_${macro}`, label: `Dont ${macro} (N-1)`, group: `Marge ${N}`, width: 118, rotate: true, className: 'compareCell', value: (r) => r.margeYtdNByMacro[macro], compareValue: (r) => ratio(r.margeYtdN1ValueByMacro[macro], r.caYtdN1ByMacro[macro]), format: 'pctCompare' }))
+    if (encoursDetailMode === 'macro') {
+      FAMILY_MACROS.forEach((macro) => cols.push({ key: `encoursCommandeN_${macro}`, label: `Dont ${macro}`, group: 'Encours commande', width: 104, rotate: true, className: 'orderBacklog', value: (r) => r.encoursCommandeNByMacro[macro], format: 'keurBlank' }))
+    } else {
+      ENCOURS_DOCUMENT_TYPES.forEach((type) => cols.push({ key: `encoursCommandeN_${type}`, label: type, group: 'Encours commande', width: 104, rotate: true, className: 'orderBacklog', value: (r) => r.encoursCommandeNByType[type], format: 'keurBlank' }))
+    }
   }
+
+  cols.push({ key: 'margePctYtdN', label: `MARGE RÉEL ${periodMonthLabel(CA_CLOSED_MONTH, N)}`, group: 'CA / Objectifs', width: 124, className: 'metric margin redLabel compareCell', value: (r) => r.margePctYtdN, compareValue: (r) => ratio(r.margeYtdN1Value, r.caYtdN1), format: 'pctCompare' })
+  if (showFamilies) {
+    FAMILY_MACROS.forEach((macro) => cols.push({ key: `margeYtdN_${macro}`, label: `Dont ${macro} (N-1)`, group: `Marge ${periodMonthLabel(CA_CLOSED_MONTH, N)}`, width: 118, rotate: true, className: 'compareCell', value: (r) => r.margeYtdNByMacro[macro], compareValue: (r) => ratio(r.margeYtdN1ValueByMacro[macro], r.caYtdN1ByMacro[macro]), format: 'pctCompare' }))
+  }
+
 
   cols.push(
     { key: 'objectifCa', label: `OBJECTIF ${N}`, group: 'Objectif', width: 104, className: 'editableNumber', value: (r) => r.objectifCa, editable: { domaine: 'Objectif', rubrique: 'CA', type: 'montant' }, format: 'keur' },
@@ -1150,6 +1193,65 @@ function displayValue(col: ColumnDef, row: SummaryRow, objectiveMap: Map<string,
   return safeText(value)
 }
 
+
+function isHeaderComparisonColumn(col: ColumnDef) {
+  return (
+    col.key === 'devisYtdN' ||
+    col.key.startsWith('devisYtdN_') ||
+    col.key === 'caYtdN' ||
+    col.key.startsWith('caYtdN_')
+  )
+}
+
+function headerComparisonPercent(col: ColumnDef, totalRow: SummaryRow): number | null {
+  if (!isHeaderComparisonColumn(col) || !col.compareValue) return null
+
+  const current = safeNumber(col.value(totalRow))
+  const previous = safeNumber(col.compareValue(totalRow))
+
+  if (!Number.isFinite(current) || !Number.isFinite(previous) || Math.abs(previous) < 0.000001) return null
+
+  // Pastille d'évolution, alignée avec l'écran flux_articles :
+  // 66 % du niveau N-1 doit s'afficher comme -34 %, pas comme 66 %.
+  return ((current - previous) / Math.abs(previous)) * 100
+}
+
+function headerComparisonClass(percent: number | null) {
+  if (percent === null || !Number.isFinite(percent)) return 'neutral'
+  if (percent > 0.000001) return 'good'
+  if (percent < -0.000001) return 'bad'
+  return 'neutral'
+}
+
+function formatHeaderComparisonPercent(percent: number | null) {
+  if (percent === null || !Number.isFinite(percent)) return ''
+
+  const rounded = Math.abs(percent) < 0.05 ? 0 : percent
+  const sign = rounded > 0 ? '+' : rounded < 0 ? '-' : ''
+  const arrow = rounded > 0 ? '▲' : rounded < 0 ? '▼' : '■'
+  const value = new Intl.NumberFormat('fr-FR', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 1,
+  }).format(Math.abs(rounded))
+
+  return `${arrow} ${sign}${value} %`
+}
+
+function HeaderComparisonPill({ col, totalRow }: { col: ColumnDef; totalRow: SummaryRow }) {
+  const percent = headerComparisonPercent(col, totalRow)
+  const label = formatHeaderComparisonPercent(percent)
+  if (!label) return null
+
+  return (
+    <span
+      className={`headerComparisonPill ${headerComparisonClass(percent)}`}
+      title={`${col.label.replace(/\n/g, ' ')} : évolution ${N} vs ${N - 1} sur la même période`}
+    >
+      {label}
+    </span>
+  )
+}
+
 function caBandRank(value: any) {
   const band = safeText(value, 'vide')
   const idx = CA_PROFILE_BANDS.indexOf(band as MapProfileFilter)
@@ -1179,6 +1281,13 @@ function macroNumberPayload(value: any) {
   const out = emptyByMacro()
   if (!value || typeof value !== 'object') return out
   for (const macro of FAMILY_MACROS) out[macro] = safeNumber(value[macro])
+  return out
+}
+
+function encoursTypePayload(value: any) {
+  const out = emptyEncoursByType()
+  if (!value || typeof value !== 'object') return out
+  for (const type of ENCOURS_DOCUMENT_TYPES) out[type] = safeNumber(value[type])
   return out
 }
 
@@ -1224,6 +1333,9 @@ function cacheRowToSummary(row: CacheDbRow): SummaryRow {
     margeN1ValueByMacro: macroNumberPayload(row.marge_n1_value_by_macro),
     objectifCa: safeNumber(row.objectif_ca),
     potentiel: safeNumber(row.potentiel),
+    encoursCommandeN: safeNumber(row.encours_commande_n),
+    encoursCommandeNByMacro: macroNumberPayload(row.encours_commande_n_by_macro),
+    encoursCommandeNByType: encoursTypePayload(row.encours_commande_n_by_type),
     devisYtdN: safeNumber(row.devis_ytd_n),
     devisYtdN1: row.row_kind === 'month' ? safeNumber(row.devis_n1) : safeNumber(row.devis_ytd_n1),
     devisYtdNByMacro: macroNumberPayload(row.devis_ytd_n_by_macro),
@@ -1261,7 +1373,7 @@ function applyObjectiveOverrides(row: SummaryRow, objectiveMap: Map<string, Obje
   if (row.kind === 'total' || !row.numero || row.numero === 'TOTAL') return row
 
   const objectifCa = objectiveNumber(objectiveMap, row.numero, 'Objectif', 'CA')
-  const objectifProrata = row.kind === 'month' ? objectifCa / 12 : (objectifCa / 12) * CLOSED_MONTH
+  const objectifProrata = row.kind === 'month' ? objectifCa / 12 : (objectifCa / 12) * CA_CLOSED_MONTH
   const frequenceCommande = objectiveNumber(objectiveMap, row.numero, 'QRC', 'Fréquence commande')
   const niveauExclusivite = objectiveNumber(objectiveMap, row.numero, 'QRC', 'Niveau exclusivité')
   const comNotreFaveur = objectiveNumber(objectiveMap, row.numero, 'QRC', 'Com en notre faveur')
@@ -1304,6 +1416,11 @@ function buildTotalFromRows(rows: SummaryRow[], showCollaborateurColumn: boolean
   const caN1ByMacro = sumMacro(rows, (row) => row.caN1ByMacro)
   const margeN1ValueByMacro = sumMacro(rows, (row) => row.margeN1ValueByMacro)
   const caYtdNByMacro = sumMacro(rows, (row) => row.caYtdNByMacro)
+  const encoursCommandeNByMacro = sumMacro(rows, (row) => row.encoursCommandeNByMacro)
+  const encoursCommandeNByType = ENCOURS_DOCUMENT_TYPES.reduce((acc, type) => {
+    acc[type] = rows.reduce((sum, row) => sum + safeNumber(row.encoursCommandeNByType[type]), 0)
+    return acc
+  }, emptyEncoursByType())
   const caYtdN1ByMacro = sumMacro(rows, (row) => row.caYtdN1ByMacro)
   const margeYtdNValueByMacro = sumMacro(rows, (row) => row.margeYtdNValueByMacro)
 
@@ -1333,6 +1450,9 @@ function buildTotalFromRows(rows: SummaryRow[], showCollaborateurColumn: boolean
     margeN1ValueByMacro,
     objectifCa: rows.reduce((s, r) => s + r.objectifCa, 0),
     potentiel: rows.reduce((s, r) => s + r.potentiel, 0),
+    encoursCommandeN: rows.reduce((s, r) => s + r.encoursCommandeN, 0),
+    encoursCommandeNByMacro,
+    encoursCommandeNByType,
     devisYtdN: rows.reduce((s, r) => s + r.devisYtdN, 0),
     devisYtdN1: rows.reduce((s, r) => s + r.devisYtdN1, 0),
     devisYtdNByMacro: sumMacro(rows, (row) => row.devisYtdNByMacro),
@@ -1372,7 +1492,7 @@ function buildTotalFromRows(rows: SummaryRow[], showCollaborateurColumn: boolean
   const margePctYtdN1 = total.caYtdN1 ? (total.margeYtdN1Value / total.caYtdN1) * 100 : null
   total.caVsN1 = ratio(total.caYtdN, total.caYtdN1)
   total.margeVsN1 = deltaPoints(total.margePctYtdN, margePctYtdN1)
-  total.realiseObjectif = ratio(total.caYtdN, (total.objectifCa / 12) * CLOSED_MONTH)
+  total.realiseObjectif = ratio(total.caYtdN, (total.objectifCa / 12) * CA_CLOSED_MONTH)
   total.qrcN = total.frequenceCommande + total.niveauExclusivite + total.comNotreFaveur + total.garantie
 
   return total
@@ -1535,42 +1655,55 @@ function sumSummaryAmount(rows: SummaryRow[], getter: (row: SummaryRow) => numbe
 function recomputeClientN1ComparisonFromMonths(row: SummaryRow, monthRows: SummaryRow[]) {
   if (row.kind !== 'client' || monthRows.length === 0) return row
 
-  const closedRowsN = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= CLOSED_MONTH)
-  const compareRowsN1 = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= N1_COMPARISON_MONTH)
+  // Devis : comparaison à M courant.
+  // CA / marge : comparaison à M-1, pour éviter de comparer un mois courant partiellement facturé.
+  const devisRowsN = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= CLOSED_MONTH)
+  const devisCompareRowsN1 = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= N1_COMPARISON_MONTH)
+  const caRowsN = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= CA_CLOSED_MONTH)
+  const caCompareRowsN1 = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= CA_N1_COMPARISON_MONTH)
+  const encoursRowsN = devisRowsN
 
-  const devisYtdNByMacro = sumMacro(closedRowsN, (monthRow) => monthRow.devisYtdNByMacro)
-  const caYtdNByMacro = sumMacro(closedRowsN, (monthRow) => monthRow.caYtdNByMacro)
-  const margeYtdNValueByMacro = sumMacro(closedRowsN, (monthRow) => monthRow.margeYtdNValueByMacro)
+  const devisYtdNByMacro = sumMacro(devisRowsN, (monthRow) => monthRow.devisYtdNByMacro)
+  const devisYtdN = sumSummaryAmount(devisRowsN, (monthRow) => monthRow.devisYtdN)
+  const devisYtdN1ByMacro = sumMacro(devisCompareRowsN1, (monthRow) => monthRow.devisN1ByMacro)
+  const devisYtdN1 = sumSummaryAmount(devisCompareRowsN1, (monthRow) => monthRow.devisN1)
 
-  const devisYtdN = sumSummaryAmount(closedRowsN, (monthRow) => monthRow.devisYtdN)
-  const caYtdN = sumSummaryAmount(closedRowsN, (monthRow) => monthRow.caYtdN)
-  const margeYtdNValue = sumSummaryAmount(closedRowsN, (monthRow) => monthRow.margeYtdNValue)
+  const encoursCommandeN = sumSummaryAmount(encoursRowsN, (monthRow) => monthRow.encoursCommandeN)
+  const encoursCommandeNByMacro = sumMacro(encoursRowsN, (monthRow) => monthRow.encoursCommandeNByMacro)
+  const encoursCommandeNByType = ENCOURS_DOCUMENT_TYPES.reduce((acc, type) => {
+    acc[type] = encoursRowsN.reduce((sum, monthRow) => sum + safeNumber(monthRow.encoursCommandeNByType[type]), 0)
+    return acc
+  }, emptyEncoursByType())
+
+  const caYtdNByMacro = sumMacro(caRowsN, (monthRow) => monthRow.caYtdNByMacro)
+  const margeYtdNValueByMacro = sumMacro(caRowsN, (monthRow) => monthRow.margeYtdNValueByMacro)
+  const caYtdN = sumSummaryAmount(caRowsN, (monthRow) => monthRow.caYtdN)
+  const margeYtdNValue = sumSummaryAmount(caRowsN, (monthRow) => monthRow.margeYtdNValue)
   const margePctYtdN = caYtdN ? (margeYtdNValue / caYtdN) * 100 : null
 
-  const devisYtdN1ByMacro = sumMacro(compareRowsN1, (monthRow) => monthRow.devisN1ByMacro)
-  const caYtdN1ByMacro = sumMacro(compareRowsN1, (monthRow) => monthRow.caN1ByMacro)
-  const margeYtdN1ValueByMacro = sumMacro(compareRowsN1, (monthRow) => monthRow.margeN1ValueByMacro)
+  const caYtdN1ByMacro = sumMacro(caCompareRowsN1, (monthRow) => monthRow.caN1ByMacro)
+  const margeYtdN1ValueByMacro = sumMacro(caCompareRowsN1, (monthRow) => monthRow.margeN1ValueByMacro)
+  const caYtdN1 = sumSummaryAmount(caCompareRowsN1, (monthRow) => monthRow.caN1)
+  const margeYtdN1Value = sumSummaryAmount(caCompareRowsN1, (monthRow) => monthRow.margeN1Value)
 
-  const devisYtdN1 = sumSummaryAmount(compareRowsN1, (monthRow) => monthRow.devisN1)
-  const caYtdN1 = sumSummaryAmount(compareRowsN1, (monthRow) => monthRow.caN1)
-  const margeYtdN1Value = sumSummaryAmount(compareRowsN1, (monthRow) => monthRow.margeN1Value)
-
-  const rollingN1SamePeriod = sumSummaryAmount(compareRowsN1, (monthRow) => monthRow.caN1)
-  const ca12m = caYtdN + Math.max(0, row.caN1 - rollingN1SamePeriod)
+  const ca12m = caYtdN + Math.max(0, row.caN1 - caYtdN1)
   const previousMarginPct = caYtdN1 ? (margeYtdN1Value / caYtdN1) * 100 : null
 
   return {
     ...row,
     devisYtdN,
     devisYtdNByMacro,
+    devisYtdN1,
+    devisYtdN1ByMacro,
+    encoursCommandeN,
+    encoursCommandeNByMacro,
+    encoursCommandeNByType,
     caYtdN,
     caYtdNByMacro,
     margePctYtdN,
     margeYtdNValue,
     margeYtdNByMacro: ratioMacro(caYtdNByMacro, margeYtdNValueByMacro),
     margeYtdNValueByMacro,
-    devisYtdN1,
-    devisYtdN1ByMacro,
     caYtdN1,
     caYtdN1ByMacro,
     margeYtdN1Value,
@@ -1579,7 +1712,7 @@ function recomputeClientN1ComparisonFromMonths(row: SummaryRow, monthRows: Summa
     caBandN: caBand(ca12m),
     caVsN1: ratio(caYtdN, caYtdN1),
     margeVsN1: deltaPoints(margePctYtdN, previousMarginPct),
-    realiseObjectif: ratio(caYtdN, (row.objectifCa / 12) * CLOSED_MONTH),
+    realiseObjectif: ratio(caYtdN, (row.objectifCa / 12) * CA_CLOSED_MONTH),
   }
 }
 
@@ -1788,6 +1921,7 @@ export default function SyntheseMultiClientsPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [showFamilies, setShowFamilies] = useState(false)
+  const [encoursDetailMode, setEncoursDetailMode] = useState<EncoursDetailMode>('macro')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [sort, setSort] = useState<SortState>({ key: 'caN1', direction: 'desc' })
   const [filters, setFilters] = useState<Record<string, string>>({})
@@ -1806,7 +1940,7 @@ export default function SyntheseMultiClientsPage() {
     return map
   }, [objectiveRows])
 
-  const columns = useMemo(() => buildColumns(showFamilies, showCollaborateurColumn), [showFamilies, showCollaborateurColumn])
+  const columns = useMemo(() => buildColumns(showFamilies, showCollaborateurColumn, encoursDetailMode), [showFamilies, showCollaborateurColumn, encoursDetailMode])
   const currentSelectionOptions = mode === 'collaborateur' ? selectionOptions.collaborateurs : selectionOptions.agences
 
   useEffect(() => {
@@ -2265,7 +2399,7 @@ export default function SyntheseMultiClientsPage() {
     const XLSX = await import('xlsx-js-style')
     // L'export Excel contient systématiquement le détail Famille macro, même si l'écran l'a masqué.
     // Les colonnes de détail sont ensuite groupées et réduites par défaut dans le fichier.
-    const exportColumns = buildColumns(true, showCollaborateurColumn)
+    const exportColumns = buildColumns(true, showCollaborateurColumn, encoursDetailMode)
 
     const sortCol = exportColumns.find((c) => c.key === sort.key) || exportColumns.find((c) => c.key === 'caN1')!
     let exportClientRows = baseClientRows.filter((row) => {
@@ -2301,6 +2435,7 @@ export default function SyntheseMultiClientsPage() {
     const chapterColor = (group: string) => {
       const g = normalize(group)
       if (g.includes('CLIENT')) return 'E2F0D9'
+      if (g.includes('ENCOURS')) return 'E0F2FE'
       if (g.includes('COMPARATIF')) return 'F3E8FF'
       if (g.includes('QRC')) return 'E2F0D9'
       if (g.includes('DYNAMISME')) return 'DDEBF7'
@@ -2312,6 +2447,7 @@ export default function SyntheseMultiClientsPage() {
       if (row?.kind === 'total') return 'FFF2CC'
       const g = normalize(group)
       if (g.includes('CLIENT')) return row?.kind === 'month' ? 'EDF7E7' : 'E2F0D9'
+      if (g.includes('ENCOURS')) return 'EFF6FF'
       if (g.includes('COMPARATIF')) return 'F8EEFF'
       if (g.includes('QRC')) return 'EFF9EC'
       if (g.includes('DYNAMISME')) return 'EFF6FF'
@@ -2319,10 +2455,10 @@ export default function SyntheseMultiClientsPage() {
       return 'FFF8E6'
     }
 
-    const isFamilySubtotal = (key: string) => /^(devisN1|caN1|margeN1|devisYtdN|caYtdN|margeYtdN)_/.test(key)
+    const isFamilySubtotal = (key: string) => /^(devisN1|caN1|margeN1|devisYtdN|caYtdN|margeYtdN|encoursCommandeN)_/.test(key)
     const isMainMetric = (key: string) => [
       'caN3', 'caN2', 'devisN1', 'caN1', 'margePctN1',
-      'objectifCa', 'potentiel', 'devisYtdN', 'caYtdN', 'margePctYtdN',
+      'objectifCa', 'potentiel', 'encoursCommandeN', 'devisYtdN', 'caYtdN', 'margePctYtdN',
       'contratBfa', 'caVsN1', 'margeVsN1', 'realiseObjectif',
     ].includes(key)
     const isGroupedFamilyColumn = (key: string) => isFamilySubtotal(key)
@@ -2421,7 +2557,11 @@ export default function SyntheseMultiClientsPage() {
           font: {
             bold: isHeader || dataRow?.kind === 'total' || mainMetric,
             sz: isHeader ? 10 : familySubtotal ? 8 : mainMetric ? 10.5 : 9,
-            color: col?.className?.includes('redLabel') ? { rgb: 'E60000' } : undefined,
+            color: col?.className?.includes('orderBacklog')
+              ? { rgb: '008CFF' }
+              : col?.className?.includes('redLabel')
+                ? { rgb: 'E60000' }
+                : undefined,
           },
           alignment: {
             horizontal: isHeader ? 'center' : isNumeric ? 'right' : 'left',
@@ -2482,7 +2622,7 @@ export default function SyntheseMultiClientsPage() {
             <h1>Synthèse multi-clients</h1>
             <span className="lastUpdateBadge">Dernières pièces : {lastUpdateLabel}</span>
           </div>
-          <p>Vue dense par collaborateur ou agence · N = {N} · période réalisée arrêtée à {String(CLOSED_MONTH).padStart(2, '0')}/{N} · {cacheStatus}</p>
+          <p>Vue dense par collaborateur ou agence · N = {N} · Devis comparés à M ({periodMonthLabel(CLOSED_MONTH, N)}) · CA/Marge comparés à M-1 ({periodMonthLabel(CA_CLOSED_MONTH, N)}) · {cacheStatus}</p>
         </div>
         <div className="toolbarActions">
           <label>
@@ -2509,6 +2649,13 @@ export default function SyntheseMultiClientsPage() {
           <button type="button" onClick={() => setShowFamilies((v) => !v)}>
             {showFamilies ? 'Masquer familles macro' : 'Afficher familles macro'}
           </button>
+          <label>
+            Détail encours
+            <select value={encoursDetailMode} onChange={(e) => setEncoursDetailMode(e.target.value as EncoursDetailMode)} disabled={!showFamilies}>
+              <option value="macro">Famille macro</option>
+              <option value="type">Type document</option>
+            </select>
+          </label>
           <button type="button" onClick={openMapForVisibleClients} disabled={!hasSelection || !clientRowsForCurrentSelection.length || mapLoading}>
             {mapLoading ? 'Préparation carte…' : 'Afficher sur la carte'}
           </button>
@@ -2530,6 +2677,7 @@ export default function SyntheseMultiClientsPage() {
             <div><span>Tiers</span><strong>{baseClientRows.length}</strong></div>
             <div><span>CA {N - 1}</span><strong>{formatKEur(totalRow.caN1)}</strong></div>
             <div><span>CA réel {N}</span><strong>{formatKEur(totalRow.caYtdN)}</strong></div>
+            <div><span>Encours commande</span><strong>{formatKEur(totalRow.encoursCommandeN)}</strong></div>
             <div><span>Marge réel {N}</span><strong>{formatPct(totalRow.margePctYtdN)}</strong></div>
             <div><span>Réalisé / objectif</span><strong>{formatPct(totalRow.realiseObjectif)}</strong></div>
           </section>
@@ -2549,13 +2697,19 @@ export default function SyntheseMultiClientsPage() {
               ))}
             </tr>
             <tr className="filterRow">
-              {columns.map((col) => (
-                <th key={`${col.key}-f`} className={stickyClass(col.sticky)} style={{ width: col.width, minWidth: col.width }}>
-                  {['collaborateur', 'numero', 'intitule', 'totalMois', 'codePostal', 'libelleNaf', 'prospectLabel', 'caBandN2', 'caBandN1', 'caBandN'].includes(col.key) ? (
-                    <input value={getFilterValue(col.key)} onChange={(e) => updateFilter(col.key, e.target.value)} placeholder="filtre" />
-                  ) : null}
-                </th>
-              ))}
+              {columns.map((col) => {
+                const isFilterableColumn = ['collaborateur', 'numero', 'intitule', 'totalMois', 'codePostal', 'libelleNaf', 'prospectLabel', 'caBandN2', 'caBandN1', 'caBandN'].includes(col.key)
+
+                return (
+                  <th key={`${col.key}-f`} className={`${col.className || ''} ${stickyClass(col.sticky)}`} style={{ width: col.width, minWidth: col.width }}>
+                    {isFilterableColumn ? (
+                      <input value={getFilterValue(col.key)} onChange={(e) => updateFilter(col.key, e.target.value)} placeholder="filtre" />
+                    ) : (
+                      <HeaderComparisonPill col={col} totalRow={totalRow} />
+                    )}
+                  </th>
+                )
+              })}
             </tr>
           </thead>
           <tbody>
@@ -2824,8 +2978,14 @@ export default function SyntheseMultiClientsPage() {
         thead th { position: sticky; top: 0; z-index: 5; background: #f8fafc; text-align: center; font-weight: 950; }
         .groupRow th { top: 0; height: 24px; font-size: 11px; background: #fff7df; border-top: 2px solid #111827; }
         .headerRow th { top: 25px; height: 108px; vertical-align: bottom; background: #f8fafc; }
-        .filterRow th { top: 134px; height: 25px; background: #f8fafc; padding: 1px; }
+        .filterRow th { top: 134px; height: 25px; background: #f8fafc; padding: 1px; text-align: center; vertical-align: middle; }
         .filterRow input { width: 95%; height: 19px; padding: 1px 3px; font-size: 10px; border-radius: 3px; }
+        .headerComparisonPill { display: inline-flex; align-items: center; justify-content: center; min-width: 58px; height: 22px; padding: 0 9px; border-radius: 999px; font-size: 11px; font-weight: 950; line-height: 1; box-shadow: inset 0 0 0 1px rgba(15,23,42,.08); }
+        .headerComparisonPill.good { background: #dcfce7; color: #047857; border: 1px solid #86efac; }
+        .headerComparisonPill.ok { background: #dcfce7; color: #047857; border: 1px solid #86efac; }
+        .headerComparisonPill.warn { background: #fef3c7; color: #92400e; border: 1px solid #fde68a; }
+        .headerComparisonPill.bad { background: #fee2e2; color: #dc2626; border: 1px solid #fecaca; }
+        .headerComparisonPill.neutral { background: #e5e7eb; color: #475569; border: 1px solid #cbd5e1; }
         .rotate span { writing-mode: vertical-rl; transform: rotate(180deg); display: inline-block; max-height: 96px; }
         .client, .stickyCollaborateur, .stickyCode, .stickyLabel, .stickyMonth { background: #e2f0d9; }
         .stickyCollaborateur { position: sticky; left: 0; z-index: 4; }
@@ -2845,6 +3005,9 @@ export default function SyntheseMultiClientsPage() {
         .ca { border-left: 3px solid #111827; }
         .margin { border-left: 3px solid #111827; }
         .redLabel, .redLabel span { color: #e60000; font-weight: 950; }
+        .orderBacklog, .orderBacklog span { color: #008CFF !important; font-weight: 950; }
+        th.orderBacklog, th.orderBacklog span { color: #006FE6 !important; }
+        .groupEncourscommande { background: #e0f2fe !important; color: #006FE6 !important; }
         .groupComparatif, .groupComparatif { background: #f3e8ff !important; }
         .groupQRC { background: #e9f7e6 !important; }
         .groupDynamismeClient { background: #eff6ff !important; }

@@ -1436,7 +1436,9 @@ type SmcBackgroundJobState = {
 
 const SMC_BACKGROUND_JOB_NAME = 'smc_period_catchup'
 const SMC_BACKGROUND_CRON_JOB_NAME = 'smc_period_catchup_auto'
-const SMC_BACKGROUND_BATCH_SIZE = 50
+const SMC_BACKGROUND_DEFAULT_BATCH_SIZE = 25
+const SMC_BACKGROUND_MIN_BATCH_SIZE = 1
+const SMC_BACKGROUND_MAX_BATCH_SIZE = 200
 const SMC_BACKGROUND_POLL_MS = 5000
 
 const SMC_BATCH_SIZE = 1
@@ -3832,6 +3834,7 @@ export default function ImportsParametragePage() {
   const [maintenanceMessage, setMaintenanceMessage] = useState<string | null>(null)
   const [smcBackgroundState, setSmcBackgroundState] = useState<SmcBackgroundJobState | null>(null)
   const [smcBackgroundBusy, setSmcBackgroundBusy] = useState(false)
+  const [smcBackgroundBatchSize, setSmcBackgroundBatchSize] = useState(SMC_BACKGROUND_DEFAULT_BATCH_SIZE)
   const [manualStartDate, setManualStartDate] = useState(() => {
     const now = new Date()
     return formatDateForSql(new Date(now.getFullYear(), now.getMonth() - 2, 1))
@@ -3899,6 +3902,15 @@ export default function ImportsParametragePage() {
     return Math.max(0, Math.min(100, Math.round((processed / total) * 100)))
   }
 
+  function getSafeSmcBackgroundBatchSize() {
+    const raw = Number(smcBackgroundBatchSize || SMC_BACKGROUND_DEFAULT_BATCH_SIZE)
+    if (!Number.isFinite(raw)) return SMC_BACKGROUND_DEFAULT_BATCH_SIZE
+    return Math.max(
+      SMC_BACKGROUND_MIN_BATCH_SIZE,
+      Math.min(SMC_BACKGROUND_MAX_BATCH_SIZE, Math.round(raw))
+    )
+  }
+
   async function disableSmcBackgroundCron(showMessage = true) {
     const { error: disableError } = await supabase.rpc('smc_disable_period_batch_cron', {
       p_cron_job_name: SMC_BACKGROUND_CRON_JOB_NAME,
@@ -3913,50 +3925,64 @@ export default function ImportsParametragePage() {
     }
   }
 
-  async function startSmcBackgroundJob(period: SmcRpcPeriod, label: string) {
+  async function startSmcBackgroundJob(
+    period: SmcRpcPeriod,
+    label: string,
+    mode: 'restart' | 'resume' = 'restart'
+  ) {
     if (maintenanceLoading || importing || smcBackgroundBusy) return
 
+    const batchSize = getSafeSmcBackgroundBatchSize()
+    const isResume = mode === 'resume'
+
     if (!window.confirm(
-      `Confirmer le lancement du job SMC en arrière-plan ?\n\n` +
+      `${isResume ? 'Reprendre' : 'Relancer depuis le début'} le job SMC en arrière-plan ?\n\n` +
       `${period.label}\n\n` +
-      `Le traitement sera découpé en lots de ${SMC_BACKGROUND_BATCH_SIZE} clients. ` +
+      `Lot : ${batchSize} client(s).\n` +
+      `${isResume ? 'La reprise conserve les clients déjà traités et repart du premier client non traité.' : 'La file de clients sera recréée et le traitement repartira de zéro.'}\n\n` +
       `Le cron sera activé automatiquement puis désactivé à la fin.`
     )) return
 
     setSmcBackgroundBusy(true)
     setMaintenanceLoading(true)
     setError(null)
-    setMaintenanceMessage(`${label} : création de la file de clients SMC…`)
+    setMaintenanceMessage(
+      isResume
+        ? `${label} : arrêt propre du traitement bloqué puis reprise au point d'arrêt…`
+        : `${label} : arrêt propre puis recréation de la file de clients SMC…`
+    )
 
     try {
-      const { data: startData, error: startError } = await supabase.rpc('smc_start_period_batch_job', {
-        p_date_debut: period.p_date_debut,
-        p_date_fin: period.p_date_fin,
-        p_batch_size: SMC_BACKGROUND_BATCH_SIZE,
-        p_job_name: SMC_BACKGROUND_JOB_NAME,
-      })
+      const rpcName = isResume ? 'smc_resume_period_batch_job' : 'smc_restart_period_batch_job'
+      const rpcPayload = isResume
+        ? {
+            p_job_name: SMC_BACKGROUND_JOB_NAME,
+            p_cron_job_name: SMC_BACKGROUND_CRON_JOB_NAME,
+            p_batch_size: batchSize,
+            p_enable_cron: true,
+          }
+        : {
+            p_date_debut: period.p_date_debut,
+            p_date_fin: period.p_date_fin,
+            p_batch_size: batchSize,
+            p_job_name: SMC_BACKGROUND_JOB_NAME,
+            p_cron_job_name: SMC_BACKGROUND_CRON_JOB_NAME,
+            p_enable_cron: true,
+          }
 
-      if (startError) throw new Error(`smc_start_period_batch_job : ${startError.message}`)
+      const { data, error: rpcError } = await supabase.rpc(rpcName, rpcPayload)
+      if (rpcError) throw new Error(`${rpcName} : ${rpcError.message}`)
 
-      const firstRow = Array.isArray(startData) ? startData[0] : startData
-      const totalClients = Number(firstRow?.total_clients || 0)
-
-      setMaintenanceMessage(
-        `${label} : file créée avec ${totalClients} client(s). Activation du cron…`
-      )
-
-      const { error: cronError } = await supabase.rpc('smc_enable_period_batch_cron', {
-        p_job_name: SMC_BACKGROUND_JOB_NAME,
-        p_cron_job_name: SMC_BACKGROUND_CRON_JOB_NAME,
-      })
-
-      if (cronError) throw new Error(`smc_enable_period_batch_cron : ${cronError.message}`)
+      const row = Array.isArray(data) ? data[0] : data
+      const totalClients = Number(row?.total_clients || row?.total_queue || 0)
+      const processedClients = Number(row?.processed_clients || 0)
 
       await loadSmcBackgroundJobState(false)
 
       setMaintenanceMessage(
-        `${label} lancé en arrière-plan : ${totalClients} client(s), lots de ${SMC_BACKGROUND_BATCH_SIZE}. ` +
-        `La page va suivre l'avancement automatiquement.`
+        `${label} ${isResume ? 'repris' : 'relancé'} en arrière-plan : ` +
+        `${processedClients}/${totalClients} client(s), lots de ${batchSize}. ` +
+        `La page suit l'avancement automatiquement.`
       )
     } catch (e: any) {
       setError(e?.message || String(e))
@@ -3965,6 +3991,26 @@ export default function ImportsParametragePage() {
       setSmcBackgroundBusy(false)
       setMaintenanceLoading(false)
     }
+  }
+
+  async function resumeSmcBackgroundJob(label = 'SMC') {
+    if (maintenanceLoading || importing || smcBackgroundBusy) return
+
+    const state = await loadSmcBackgroundJobState(false)
+    if (!state) {
+      setError('Aucun job SMC existant à reprendre. Lance d’abord un job depuis le début.')
+      return
+    }
+
+    await startSmcBackgroundJob(
+      {
+        p_date_debut: state.date_debut || manualStartDate,
+        p_date_fin: state.date_fin || manualEndDate,
+        label: `${state.date_debut || manualStartDate} → ${state.date_fin || manualEndDate}`,
+      },
+      label,
+      'resume'
+    )
   }
 
   async function handleRunSmcBackgroundBatchNow() {
@@ -4000,11 +4046,26 @@ export default function ImportsParametragePage() {
   async function handleStopSmcBackgroundCron() {
     if (smcBackgroundBusy) return
 
+    if (!window.confirm(
+      'Stopper proprement le job SMC ?\n\n' +
+      'Le cron sera désactivé, le job sera marqué annulé et les éventuelles requêtes SMC en cours seront annulées.\n' +
+      'Les clients déjà traités resteront marqués comme traités, ce qui permettra une reprise au point d’arrêt.'
+    )) return
+
     setSmcBackgroundBusy(true)
     setError(null)
+    setMaintenanceMessage('Arrêt propre du job SMC en cours…')
 
     try {
-      await disableSmcBackgroundCron(true)
+      const { error: stopError } = await supabase.rpc('smc_stop_period_batch_job', {
+        p_job_name: SMC_BACKGROUND_JOB_NAME,
+        p_cron_job_name: SMC_BACKGROUND_CRON_JOB_NAME,
+        p_cancel_running: true,
+      })
+
+      if (stopError) throw new Error(`smc_stop_period_batch_job : ${stopError.message}`)
+
+      setMaintenanceMessage('Job SMC arrêté proprement. Tu peux reprendre au point d’arrêt ou relancer depuis le début.')
       await loadSmcBackgroundJobState(false)
     } catch (e: any) {
       setError(e?.message || String(e))
@@ -4290,6 +4351,17 @@ export default function ImportsParametragePage() {
                 className="mt-1 block h-10 rounded-xl border border-slate-300 bg-white px-3 text-sm font-bold text-slate-900"
               />
             </label>
+            <label className="text-xs font-bold uppercase text-slate-500">
+              Lot SMC
+              <input
+                type="number"
+                min={SMC_BACKGROUND_MIN_BATCH_SIZE}
+                max={SMC_BACKGROUND_MAX_BATCH_SIZE}
+                value={smcBackgroundBatchSize}
+                onChange={(event) => setSmcBackgroundBatchSize(Number(event.target.value || SMC_BACKGROUND_DEFAULT_BATCH_SIZE))}
+                className="mt-1 block h-10 w-24 rounded-xl border border-slate-300 bg-white px-3 text-sm font-black text-slate-900"
+              />
+            </label>
             <button
               type="button"
               onClick={handleManualPeriodRebuild}
@@ -4312,7 +4384,15 @@ export default function ImportsParametragePage() {
               disabled={maintenanceLoading || importing || smcBackgroundBusy}
               className="rounded-xl border border-cyan-300 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-800 hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              SMC période arrière-plan
+              SMC période depuis début
+            </button>
+            <button
+              type="button"
+              onClick={() => resumeSmcBackgroundJob('SMC période')}
+              disabled={maintenanceLoading || importing || smcBackgroundBusy || !smcBackgroundState}
+              className="rounded-xl border border-blue-300 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-800 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              Reprendre SMC au point d'arrêt
             </button>
             <button
               type="button"
@@ -4323,7 +4403,7 @@ export default function ImportsParametragePage() {
               Recalcul qté pertinentes période
             </button>
             <div className="text-xs font-semibold text-slate-500">
-              La date de fin est traitée comme mois inclus. Les agrégats rapides et le flux articles restent découpés par mois. SMC est lancé en arrière-plan via pg_cron, par lots de clients.
+              La date de fin est traitée comme mois inclus. Les agrégats rapides et le flux articles restent découpés par mois. SMC est lancé en arrière-plan via pg_cron, par lots de clients paramétrables. La reprise conserve les clients déjà traités.
             </div>
           </div>
 
@@ -4347,7 +4427,8 @@ export default function ImportsParametragePage() {
                   </div>
                   <div className="mt-2 grid gap-1 text-xs font-semibold text-cyan-900 sm:grid-cols-2 lg:grid-cols-4">
                     <div>Dernier rang : {smcBackgroundState.last_rn || 0}</div>
-                    <div>Lot : {smcBackgroundState.batch_size || '—'} clients</div>
+                    <div>Lot en base : {smcBackgroundState.batch_size || '—'} clients</div>
+                    <div>Lot demandé : {getSafeSmcBackgroundBatchSize()} clients</div>
                     <div>Début : {formatDateTime(smcBackgroundState.started_at || null)}</div>
                     <div>Fin : {formatDateTime(smcBackgroundState.finished_at || null)}</div>
                   </div>
@@ -4376,6 +4457,30 @@ export default function ImportsParametragePage() {
                       Lancer le prochain lot
                     </button>
                   )}
+                  <button
+                    type="button"
+                    onClick={() => resumeSmcBackgroundJob('SMC')}
+                    disabled={smcBackgroundBusy || importing}
+                    className="rounded-xl border border-blue-300 bg-white px-3 py-2 text-xs font-bold text-blue-800 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    Reprendre au point d'arrêt
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const start = smcBackgroundState.date_debut || manualStartDate
+                      const end = smcBackgroundState.date_fin || manualEndDate
+                      void startSmcBackgroundJob(
+                        { p_date_debut: start, p_date_fin: end, label: `${start} → ${end}` },
+                        'SMC',
+                        'restart'
+                      )
+                    }}
+                    disabled={smcBackgroundBusy || importing}
+                    className="rounded-xl border border-amber-300 bg-white px-3 py-2 text-xs font-bold text-amber-800 hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    Relancer depuis début
+                  </button>
                   {smcBackgroundState.status === 'running' && (
                     <button
                       type="button"
@@ -4383,7 +4488,7 @@ export default function ImportsParametragePage() {
                       disabled={smcBackgroundBusy}
                       className="rounded-xl border border-red-300 bg-white px-3 py-2 text-xs font-bold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
                     >
-                      Stopper le cron
+                      Stopper proprement
                     </button>
                   )}
                 </div>

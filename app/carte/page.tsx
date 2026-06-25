@@ -291,6 +291,12 @@ type ImportStats = {
   rejected: number
 }
 
+type DashboardKpiRow = {
+  entreprises_actives: number
+  clients_cegeclim_actifs: number
+  departements: number
+}
+
 type ScreenMode = 'clients' | 'cegeclim_absents'
 type SortDirection = 'asc' | 'desc'
 
@@ -563,18 +569,51 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return out
 }
 
+type TrackedSectorDefinition = {
+  prefixes: string[]
+  label: string
+  color: string
+  textColor?: string
+}
+
+const TRACKED_SECTORS: TrackedSectorDefinition[] = [
+  { prefixes: ['43.21', '4321'], label: 'Electricité ENR', color: '#a2cc88' },
+  { prefixes: ['43.22A', '4322A'], label: 'Plomberie', color: '#c3b691' },
+  { prefixes: ['43.22B', '4322B'], label: 'Installateur CVC', color: '#8ba9be' },
+  { prefixes: ['41.20', '4120'], label: 'CMI', color: '#e0a961' },
+  { prefixes: ['28.25Z', '2825Z'], label: 'Equipement Frigorifiques Indus.', color: '#00A3FF' },
+  { prefixes: ['33.20B', '3320B'], label: 'Installation de machines mécaniques', color: '#4b5563', textColor: '#ffffff' },
+  { prefixes: ['33.12Z', '3312Z'], label: 'Réparation de machines', color: '#4b5563', textColor: '#ffffff' },
+  { prefixes: ['43.29A', '4329A'], label: "Travaux d'isolation", color: '#f9a8d4' },
+  { prefixes: ['43.99', '4399'], label: 'Bâtiment', color: '#8e9db3' },
+]
+
+const TRACKED_SECTOR_LABELS = TRACKED_SECTORS.map((sector) => sector.label)
+
+function normalizeNafCode(value: string | null | undefined): string {
+  return String(value || '').replace(/\s/g, '').toUpperCase()
+}
+
+function findTrackedSectorByCode(activitePrincipaleEtablissement: string | null | undefined) {
+  const code = normalizeNafCode(activitePrincipaleEtablissement)
+  if (!code) return null
+  return TRACKED_SECTORS.find((sector) => sector.prefixes.some((prefix) => code.startsWith(prefix))) || null
+}
+
+function findTrackedSectorByLabel(sector: string | null | undefined) {
+  const normalized = normalizeScopeValue(sector)
+  if (!normalized) return null
+  return TRACKED_SECTORS.find((definition) => normalizeScopeValue(definition.label) === normalized) || null
+}
+
 function translateNaf(activitePrincipaleEtablissement: string | null): string {
-  const code = (activitePrincipaleEtablissement || '').replace(/\s/g, '').toUpperCase()
-  if (!code) return 'AUTRES'
-  if (code.startsWith('43.22B') || code.startsWith('4322B')) return 'Installateur CVC (43.22B)'
-  if (code.startsWith('43.22A') || code.startsWith('4322A')) return 'Plomberie (43.22A)'
-  if (code.startsWith('43.21') || code.startsWith('4321')) return 'Electricité ENR (43.21A)'
-  if (code.startsWith('41.20') || code.startsWith('4120')) return 'CMI (41.20A)'
-  if (code.startsWith('43.99') || code.startsWith('4399')) return 'Bâtiment'
-  return 'AUTRES'
+  return findTrackedSectorByCode(activitePrincipaleEtablissement)?.label || 'AUTRES'
 }
 
 function getSectorColor(sector: string | null | undefined) {
+  const tracked = findTrackedSectorByLabel(sector)
+  if (tracked) return tracked.color
+
   const s = (sector || '').toLowerCase()
   if (s.includes('installateur') || s.includes('cvc')) return '#8ba9be'
   if (s.includes('enr')) return '#a2cc88'
@@ -582,6 +621,18 @@ function getSectorColor(sector: string | null | undefined) {
   if (s.includes('cmi')) return '#e0a961'
   if (s.includes('bâtiment')) return '#8e9db3'
   return '#d9d9d9'
+}
+
+function getSectorTextColor(sector: string | null | undefined) {
+  return findTrackedSectorByLabel(sector)?.textColor || '#0f172a'
+}
+
+function getSectorSortRank(sector: string | null | undefined) {
+  const normalized = normalizeScopeValue(sector)
+  const index = TRACKED_SECTORS.findIndex((definition) => normalizeScopeValue(definition.label) === normalized)
+  if (index >= 0) return index
+  if (normalized === 'autres') return 999
+  return 900
 }
 
 function getPresencePercentColor(percent: number): string {
@@ -627,7 +678,13 @@ function getAbsentDepartment(row: CegeclimAbsentRow): string {
 function getClientSectorLabel(
   row: Pick<ClientRow, 'naf_libelle_traduit' | 'activitePrincipaleEtablissement'>
 ): string {
-  return row.naf_libelle_traduit || translateNaf(row.activitePrincipaleEtablissement)
+  const translatedFromCode = translateNaf(row.activitePrincipaleEtablissement)
+  const storedLabel = String(row.naf_libelle_traduit || '').trim()
+
+  // Les anciennes lignes déjà importées peuvent avoir été stockées avec naf_libelle_traduit = "AUTRES"
+  // avant l'ajout des nouveaux codes NAF. Si le code NAF est maintenant reconnu, il doit primer.
+  if (translatedFromCode !== 'AUTRES') return translatedFromCode
+  return storedLabel || 'AUTRES'
 }
 
 function getCegeclimPresenceValue(value: unknown): string {
@@ -939,6 +996,38 @@ async function fetchClientsInitialBatch(): Promise<{ rows: ClientRow[]; totalCou
   return {
     rows: (data || []) as ClientRow[],
     totalCount: count || 0,
+  }
+}
+
+
+async function fetchDashboardKpis(params: {
+  societeDepartements: string[]
+  userAllowedDepartements: string[]
+  userAllowedCodesPostaux: string[]
+}): Promise<DashboardKpiRow | null> {
+  const { data, error } = await supabase.rpc('get_clients_dashboard_kpis', {
+    p_societe_departements: params.societeDepartements,
+    p_user_allowed_departements: params.userAllowedDepartements,
+    p_user_allowed_codes_postaux: params.userAllowedCodesPostaux,
+  })
+
+  if (error) {
+    console.error('Erreur chargement KPI dashboard clients:', {
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+      code: error.code,
+    })
+    return null
+  }
+
+  const row = Array.isArray(data) ? data[0] : data
+  if (!row) return null
+
+  return {
+    entreprises_actives: Number((row as any).entreprises_actives || 0),
+    clients_cegeclim_actifs: Number((row as any).clients_cegeclim_actifs || 0),
+    departements: Number((row as any).departements || 0),
   }
 }
 
@@ -1317,6 +1406,8 @@ export default function ClientsPage() {
 
   const [clients, setClients] = useState<ClientRow[]>([])
   const [clientsTotalCount, setClientsTotalCount] = useState<number>(0)
+  const [dashboardKpis, setDashboardKpis] = useState<DashboardKpiRow | null>(null)
+  const [dashboardKpisLoading, setDashboardKpisLoading] = useState(false)
   const [cegeclimAbsents, setCegeclimAbsents] = useState<CegeclimAbsentRow[]>([])
   const [clientsCegeclim, setClientsCegeclim] = useState<ClientCegeclimRow[]>([])
   const [agences, setAgences] = useState<AgenceRow[]>([])
@@ -1456,6 +1547,7 @@ async function saveSelectedClientField(field: 'prospect_comment' | 'prospect_sta
   const [selectedSectors, setSelectedSectors] = useState<string[]>([])
   const [selectedNafCodes, setSelectedNafCodes] = useState<string[]>([])
   const [selectedAgence, setSelectedAgence] = useState('TOUS')
+  const [selectedCegeclimCollaborateur, setSelectedCegeclimCollaborateur] = useState('TOUS')
   const [selectedClientScope, setSelectedClientScope] = useState<'Tous' | 'Cegeclim' | 'CegeclimSommeil' | 'Prospects'>('Tous')
   const [selectedProspectStatuses, setSelectedProspectStatuses] = useState<ProspectStatusValue[]>([])
   const [selectedRgeFilter, setSelectedRgeFilter] = useState<'TOUS' | 'OUI' | 'NON'>('TOUS')
@@ -1515,6 +1607,7 @@ async function saveSelectedClientField(field: 'prospect_comment' | 'prospect_sta
     selectedSectors,
     selectedNafCodes,
     selectedAgence,
+    selectedCegeclimCollaborateur,
     selectedClientScope,
     selectedProspectStatuses,
     selectedRgeFilter,
@@ -1564,10 +1657,22 @@ async function saveSelectedClientField(field: 'prospect_comment' | 'prospect_sta
   }, [showRejects, lastImport?.id, rejectsLoaded])
 
   async function hydrateAllClientsInBackground(loadToken: number) {
-  if (latestLoadTokenRef.current === loadToken) {
-    setBackgroundHydratingClients(false)
+    setBackgroundHydratingClients(true)
+
+    try {
+      const fullClients = await fetchAllClients()
+      if (latestLoadTokenRef.current !== loadToken) return
+
+      setClients(fullClients.rows)
+      setClientsTotalCount(fullClients.totalCount)
+    } catch (error) {
+      console.error('Erreur chargement complet clients en arrière-plan:', error)
+    } finally {
+      if (latestLoadTokenRef.current === loadToken) {
+        setBackgroundHydratingClients(false)
+      }
+    }
   }
-}
 
 
   async function loadAll() {
@@ -1673,7 +1778,7 @@ async function saveSelectedClientField(field: 'prospect_comment' | 'prospect_sta
       }
 
       if (clientsRes.totalCount > clientsRes.rows.length) {
-        
+        void hydrateAllClientsInBackground(loadToken)
       } else {
         setBackgroundHydratingClients(false)
       }
@@ -1942,6 +2047,32 @@ function isRowCapaciteGaz(row: any) {
     return true
   }
 
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function refreshDashboardKpis() {
+      setDashboardKpisLoading(true)
+      try {
+        const next = await fetchDashboardKpis({
+          societeDepartements: allowedDepartments,
+          userAllowedDepartements: allowedDepartements,
+          userAllowedCodesPostaux: allowedCodesPostaux,
+        })
+
+        if (!cancelled) setDashboardKpis(next)
+      } finally {
+        if (!cancelled) setDashboardKpisLoading(false)
+      }
+    }
+
+    void refreshDashboardKpis()
+
+    return () => {
+      cancelled = true
+    }
+  }, [allowedDepartments, allowedDepartements, allowedCodesPostaux])
+
   const scopedClients = useMemo(() => {
     let result = clients
 
@@ -2185,11 +2316,19 @@ function matchesMapProspectFilters(row: ClientRow) {
   return true
 }
 
+function matchesCegeclimCollaborateurFilter(row: ClientRow) {
+  if (selectedCegeclimCollaborateur === 'TOUS') return true
+
+  const cegeclimCollaborateur = String(getClientCegeclimAnyRow(row)?.representant || '').trim()
+  return normalizeScopeValue(cegeclimCollaborateur) === normalizeScopeValue(selectedCegeclimCollaborateur)
+}
+
 const mapCegeclimPoints = useMemo(() => {
   return mapClientsWithCoords.filter(
     (client) =>
       isClientPresentInCegeclim(client, activeCegeclimBySiret) &&
-      matchesMapCommonFilters(client)
+      matchesMapCommonFilters(client) &&
+      matchesCegeclimCollaborateurFilter(client)
   )
 }, [
   mapClientsWithCoords,
@@ -2201,6 +2340,8 @@ const mapCegeclimPoints = useMemo(() => {
   selectedSectors,
   selectedNafCodes,
   selectedAgence,
+  selectedCegeclimCollaborateur,
+  allCegeclimDetailsBySiret,
   includeNoDistance,
   onlyContactable,
   selectedProspectStatuses,
@@ -2219,7 +2360,8 @@ const mapCegeclimSommeilPoints = useMemo(() => {
   return mapClientsWithCoords.filter(
     (client) =>
       isClientInCegeclimSommeil(client) &&
-      matchesMapCommonFilters(client)
+      matchesMapCommonFilters(client) &&
+      matchesCegeclimCollaborateurFilter(client)
   )
 }, [
   mapClientsWithCoords,
@@ -2230,6 +2372,8 @@ const mapCegeclimSommeilPoints = useMemo(() => {
   selectedSectors,
   selectedNafCodes,
   selectedAgence,
+  selectedCegeclimCollaborateur,
+  allCegeclimDetailsBySiret,
   includeNoDistance,
   onlyContactable,
   selectedProspectStatuses,
@@ -2283,7 +2427,7 @@ const mapLegendSectors = useMemo(() => {
         .map((client) => getClientSectorLabel(client))
         .filter(Boolean)
     )
-  ).sort((a, b) => a.localeCompare(b, 'fr'))
+  ).sort((a, b) => getSectorSortRank(a) - getSectorSortRank(b) || a.localeCompare(b, 'fr'))
 }, [mapCegeclimPoints, mapCegeclimSommeilPoints, mapProspectPoints])
 
 
@@ -2528,7 +2672,7 @@ const ageRangeTitle = useMemo(
   const departmentOptions = useMemo(() => {
     return Array.from(
       new Set(scopedClients.map((r) => getClientDepartment(r)).filter(Boolean) as string[])
-    ).sort((a, b) => a.localeCompare(b, 'fr'))
+    ).sort((a, b) => getSectorSortRank(a) - getSectorSortRank(b) || a.localeCompare(b, 'fr'))
   }, [scopedClients])
 
   useEffect(() => {
@@ -2542,7 +2686,7 @@ const ageRangeTitle = useMemo(
           .map((r) => getClientSectorLabel(r))
           .filter(Boolean) as string[]
       )
-    ).sort((a, b) => a.localeCompare(b, 'fr'))
+    ).sort((a, b) => getSectorSortRank(a) - getSectorSortRank(b) || a.localeCompare(b, 'fr'))
   }, [scopedClients])
 
   const nafOptions = useMemo(() => {
@@ -2608,6 +2752,21 @@ const ageRangeTitle = useMemo(
     return scopedAgences.find((a) => a.agence === selectedAgence) || null
   }, [scopedAgences, selectedAgence])
 
+  const cegeclimCollaborateurOptions = useMemo(() => {
+    const collaborateurs = scopedClientsCegeclim
+      .map((row) => String(row.representant || '').trim())
+      .filter((value): value is string => Boolean(value))
+
+    return Array.from(new Set<string>(collaborateurs)).sort((a, b) => a.localeCompare(b, 'fr'))
+  }, [scopedClientsCegeclim])
+
+  useEffect(() => {
+    if (selectedCegeclimCollaborateur === 'TOUS') return
+    if (!cegeclimCollaborateurOptions.includes(selectedCegeclimCollaborateur)) {
+      setSelectedCegeclimCollaborateur('TOUS')
+    }
+  }, [cegeclimCollaborateurOptions, selectedCegeclimCollaborateur])
+
   const filteredClients = useMemo(() => {
     const q = search.trim().toLowerCase()
     const designationQ = designationSearch.trim().toLowerCase()
@@ -2620,12 +2779,23 @@ const ageRangeTitle = useMemo(
       const isCegeclim = isClientPresentInCegeclim(row, activeCegeclimBySiret)
       const isCegeclimSommeil = isClientInCegeclimSommeil(row)
       const isCegeclimAny = isCegeclim || isCegeclimSommeil
+      const cegeclimCollaborateur = String(getClientCegeclimAnyRow(row)?.representant || '').trim()
       const rowIsRge = isClientRgeCombined(row)
       const rowHasCapaciteGaz = isClientCapaciteGazCombined(row)
 
       if (selectedClientScope === 'Cegeclim' && !isCegeclim) return false
       if (selectedClientScope === 'CegeclimSommeil' && !isCegeclimSommeil) return false
       if (selectedClientScope === 'Prospects' && isCegeclimAny) return false
+
+      // Filtre collaborateur CEGECLIM : il s'applique uniquement aux clients CEGECLIM
+      // actifs ou en sommeil. Les prospects restent filtrés uniquement par les critères classiques.
+      if (
+        isCegeclimAny &&
+        selectedCegeclimCollaborateur !== 'TOUS' &&
+        normalizeScopeValue(cegeclimCollaborateur) !== normalizeScopeValue(selectedCegeclimCollaborateur)
+      ) {
+        return false
+      }
 
       const designationRaw = String(row.raison_sociale_affichee ?? '').trim()
       const designationNormalized = designationRaw.toLowerCase()
@@ -2716,6 +2886,8 @@ const ageRangeTitle = useMemo(
     selectedSectors,
     selectedNafCodes,
     selectedAgenceRow,
+    selectedCegeclimCollaborateur,
+    allCegeclimDetailsBySiret,
     includeNoDistance,
     onlyContactable,
     onlyNotInCegeclim,
@@ -2737,8 +2909,8 @@ const ageRangeTitle = useMemo(
     const rows = [...filteredClients]
 
     rows.sort((a, b) => {
-      const sectorA = a.naf_libelle_traduit || translateNaf(a.activitePrincipaleEtablissement)
-      const sectorB = b.naf_libelle_traduit || translateNaf(b.activitePrincipaleEtablissement)
+      const sectorA = getClientSectorLabel(a)
+      const sectorB = getClientSectorLabel(b)
 
       const distanceA = selectedAgenceRow
         ? distanceKmLambert(
@@ -2839,10 +3011,8 @@ const ageRangeTitle = useMemo(
 
   const summarySectorRows = useMemo(() => {
     const sectors = Array.from(
-      new Set(
-        sortedFilteredClients.map(
-          (r) => r.naf_libelle_traduit || translateNaf(r.activitePrincipaleEtablissement)
-        )
+      new Set<string>(
+        sortedFilteredClients.map((r) => getClientSectorLabel(r))
       )
     )
 
@@ -2856,7 +3026,7 @@ const ageRangeTitle = useMemo(
         summaryDepartments.forEach((dep) => {
           const matchingRows = sortedFilteredClients.filter((r) => {
             const d = getClientDepartment(r)
-            const s = r.naf_libelle_traduit || translateNaf(r.activitePrincipaleEtablissement)
+            const s = getClientSectorLabel(r)
             return d === dep && s === sector
           })
           const count = matchingRows.length
@@ -2869,7 +3039,7 @@ const ageRangeTitle = useMemo(
 
         return { sector, total, totalCegeclim, byDept, byDeptCegeclim }
       })
-      .sort((a, b) => b.total - a.total)
+      .sort((a, b) => getSectorSortRank(a.sector) - getSectorSortRank(b.sector) || b.total - a.total || a.sector.localeCompare(b.sector, 'fr'))
   }, [sortedFilteredClients, summaryDepartments, activeCegeclimBySiret])
 
   const summaryDeptTotals = useMemo(() => {
@@ -2902,7 +3072,7 @@ const ageRangeTitle = useMemo(
   )
 
   const cegeclimPresenceRows = useMemo(() => {
-    const topSectors = ['Electricité ENR', 'Plomberie', 'Installateur CVC', 'CMI']
+    const topSectors = TRACKED_SECTOR_LABELS
     return topSectors
       .map((sector) => {
         const baseRow = summarySectorRows.find((row) => row.sector === sector)
@@ -3172,7 +3342,7 @@ const selectedClientMapReason = useMemo(() => {
           siret: row.siret || 'ND',
           presentCegeclim: getClientCegeclimDisplayCode(row),
           apeNaf: row.activitePrincipaleEtablissement || 'ND',
-          secteur: row.naf_libelle_traduit || translateNaf(row.activitePrincipaleEtablissement),
+          secteur: getClientSectorLabel(row),
           creation: formatDateFr(row.dateCreationEtablissement),
           departement: getClientDepartment(row) || 'ND',
           ville: row.libelleCommuneEtablissement || 'ND',
@@ -3818,7 +3988,7 @@ const selectedClientMapReason = useMemo(() => {
         `Téléphone : ${pdfText(client.telephone)}`,
         `SIRET : ${pdfText(client.siret)}`,
         `Code NAF : ${pdfText(client.activitePrincipaleEtablissement)}`,
-        `Secteur : ${pdfText(client.naf_libelle_traduit || translateNaf(client.activitePrincipaleEtablissement), 'NC')}`,
+        `Secteur : ${pdfText(getClientSectorLabel(client), 'NC')}`,
         `Date création : ${formatDateFr(client.dateCreationEtablissement)}`,
         `Ancienneté : ${formatAgePrecise(diffDaysFromToday(client.dateCreationEtablissement))}`,
         `Effectifs SIRENE : ${pdfText(client.trancheEffectifsEtablissement)}`,
@@ -3913,9 +4083,19 @@ const selectedClientMapReason = useMemo(() => {
     })
   }, [scopedClientsBase])
   
-  const totalClientsBaseForScope = kpiBaseRows.length
+  const fallbackTotalClientsBaseForScope = kpiBaseRows.length
 
-  const totalCegeclimBase = kpiBaseRows.filter((row) => isClientPresentInCegeclim(row, activeCegeclimBySiret)).length
+  const fallbackTotalCegeclimBase = kpiBaseRows.filter((row) => isClientPresentInCegeclim(row, activeCegeclimBySiret)).length
+
+  const fallbackTotalDepartmentsBase = Array.from(
+    new Set(scopedClientsBase.map((r) => getClientDepartment(r)).filter(Boolean))
+  ).length
+
+  const totalClientsBaseForScope = dashboardKpis?.entreprises_actives ?? fallbackTotalClientsBaseForScope
+
+  const totalCegeclimBase = dashboardKpis?.clients_cegeclim_actifs ?? fallbackTotalCegeclimBase
+
+  const totalDepartmentsBase = dashboardKpis?.departements ?? fallbackTotalDepartmentsBase
 
   const totalSelection = sortedFilteredClients.length
   const totalSelectedDepartments = summaryDepartments.length
@@ -3944,7 +4124,7 @@ const selectedClientMapReason = useMemo(() => {
             )}
             <section style={sectionCardStyle}>
               <div style={cardSectionTitleWrapStyle}>
-            <h1 style={cardSectionTitleStyle}>Listes des entreprises actives (4 codes NAF) & clients CEGECLIM :</h1>
+            <h1 style={cardSectionTitleStyle}>Listes des entreprises actives (activités suivies) & clients CEGECLIM :</h1>
             <span style={{ fontSize: 18, fontWeight: 500, color: '#475569' }}>
              dernière mise à jour le :{' '}
               {lastImport?.date_import
@@ -3966,12 +4146,17 @@ const selectedClientMapReason = useMemo(() => {
             {currentUserEmail ? ` • ${currentUserEmail}` : ''}
           </div>
         )}
+        {dashboardKpisLoading && (
+          <div style={{ fontSize: 12, color: '#64748b', marginTop: -4 }}>
+            Actualisation des indicateurs globaux en base…
+          </div>
+        )}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                 <div style={kpiGridStyle}>
                   <div style={kpiGroupStyle}>
                     <div style={kpiTitleStyle}>
                       Entreprises actives
-                      <span style={kpiTitleSmallStyle}>(sur les 4 activités principales)</span>
+                      <span style={kpiTitleSmallStyle}>(sur les activités suivies)</span>
                     </div>
                     <div style={kpiCardStyle}>
                       <div style={kpiValueStyle}>{totalClientsBaseForScope}</div>
@@ -3991,7 +4176,7 @@ const selectedClientMapReason = useMemo(() => {
                   <div style={kpiGroupStyle}>
                     <div style={kpiTitleStyle}>Départements</div>
                     <div style={kpiCardStyle}>
-                      <div style={kpiValueStyle}>{Array.from(new Set(scopedClientsBase.map((r) => getClientDepartment(r)).filter(Boolean))).length}</div>
+                      <div style={kpiValueStyle}>{totalDepartmentsBase}</div>
                     </div>
                   </div>
                 </div>
@@ -4042,7 +4227,7 @@ const selectedClientMapReason = useMemo(() => {
                       </thead>
                       <tbody>
                         {summarySectorRows.map((row) => (
-                          <tr key={row.sector} style={{ background: getSectorColor(row.sector) }}>
+                          <tr key={row.sector} style={{ background: getSectorColor(row.sector), color: getSectorTextColor(row.sector) }}>
                             <td style={{ ...summaryBodyCellStyle, textAlign: 'left' }}>{row.sector}</td>
                             <td style={summaryBodyCellStyleBold}>
   <button
@@ -4054,6 +4239,7 @@ const selectedClientMapReason = useMemo(() => {
       cursor: 'pointer',
       background: 'transparent',
       border: 'none',
+      color: 'inherit',
     }}
   >
     {row.total} <span style={{ fontSize: 16, fontWeight: 500, opacity: 0.75 }}>({row.totalCegeclim})</span>
@@ -4070,6 +4256,7 @@ const selectedClientMapReason = useMemo(() => {
       cursor: 'pointer',
       background: 'transparent',
       border: 'none',
+      color: 'inherit',
     }}
   >
     {row.byDept[dep] || 0} <span style={{ fontSize: 16, fontWeight: 500, opacity: 0.75 }}>({row.byDeptCegeclim[dep] || 0})</span>
@@ -4090,6 +4277,7 @@ const selectedClientMapReason = useMemo(() => {
       cursor: 'pointer',
       background: 'transparent',
       border: 'none',
+      color: 'inherit',
     }}
   >
     {sortedFilteredClients.length} <span style={{ fontSize: 16, fontWeight: 500, opacity: 0.75 }}>({summaryTotalCegeclim})</span>
@@ -4155,6 +4343,21 @@ const selectedClientMapReason = useMemo(() => {
                         <option value="Prospects">Prospects</option>
                     </select>
                     </div>
+
+                    <div style={{ minWidth: 220 }}>
+                      <div style={filterLabelStyle}>Collaborateur CEGECLIM :</div>
+                      <select
+                        value={selectedCegeclimCollaborateur}
+                        onChange={(e) => setSelectedCegeclimCollaborateur(e.target.value)}
+                        style={selectLikeStyle}
+                      >
+                        <option value="TOUS">Tous</option>
+                        {cegeclimCollaborateurOptions.map((option) => (
+                          <option key={option} value={option}>{option}</option>
+                        ))}
+                      </select>
+                    </div>
+
                     <div style={{ width: 180 }}>
                       <MultiSelectHorizontal
                         label="Suivi Prospect :"
@@ -4391,7 +4594,7 @@ const selectedClientMapReason = useMemo(() => {
                       </thead>
                       <tbody>
                         {paginatedClients.map((row) => {
-                          const sector = row.naf_libelle_traduit || translateNaf(row.activitePrincipaleEtablissement)
+                          const sector = getClientSectorLabel(row)
                           const distance = selectedAgenceRow
                             ? distanceKmLambert(
                                 row.coordonneeLambertAbscisseEtablissement,
@@ -4674,6 +4877,20 @@ const selectedClientMapReason = useMemo(() => {
                       <div style={{ fontSize: 15, fontWeight: 700 }}>
                         {visibleMapRows.length} entreprises visibles
                       </div>
+                    </div>
+
+                    <div style={{ minWidth: 220 }}>
+                      <div style={filterLabelStyle}>Collaborateur CEGECLIM :</div>
+                      <select
+                        value={selectedCegeclimCollaborateur}
+                        onChange={(e) => setSelectedCegeclimCollaborateur(e.target.value)}
+                        style={selectLikeStyle}
+                      >
+                        <option value="TOUS">Tous</option>
+                        {cegeclimCollaborateurOptions.map((option) => (
+                          <option key={option} value={option}>{option}</option>
+                        ))}
+                      </select>
                     </div>
 
                     <div style={{ minWidth: 120 }}>
@@ -5115,8 +5332,7 @@ const selectedClientMapReason = useMemo(() => {
                       <div><b>Code NAF :</b> {selectedClient.activitePrincipaleEtablissement || 'NC'}</div>
                       <div>
                           <b>Secteur :</b>{' '}
-                          {selectedClient.naf_libelle_traduit ||
-                            translateNaf(selectedClient.activitePrincipaleEtablissement)}
+                          {getClientSectorLabel(selectedClient)}
                       </div>
                       <div><b>Date création :</b> {formatDateFr(selectedClient.dateCreationEtablissement)}</div>
                       <div>
@@ -5336,7 +5552,7 @@ const selectedClientMapReason = useMemo(() => {
                       {cegeclimPresenceRows.map((row) => {
                         const totalPercent = row.total > 0 ? (row.totalCegeclim / row.total) * 100 : 0
                         return (
-                          <tr key={`presence-row-${row.sector}`} style={{ background: getSectorColor(row.sector) }}>
+                          <tr key={`presence-row-${row.sector}`} style={{ background: getSectorColor(row.sector), color: getSectorTextColor(row.sector) }}>
                             <td style={{ ...summaryBodyCellStyle, textAlign: 'left', fontWeight: 700 }}>{row.sector}</td>
                             <td style={{ ...summaryBodyCellStyleBold, minWidth: 120 }}>
                               <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'center', gap: 10, minHeight: 54 }}>
