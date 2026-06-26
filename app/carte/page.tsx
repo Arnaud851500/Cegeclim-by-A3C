@@ -1827,7 +1827,12 @@ async function openMapFromCell(secteur: string, departement: string | null) {
   )
 
   try {
-    let rows = scopedClientsBase.map(ensureClientCoordinates)
+    // IMPORTANT : la carte ouverte depuis une cellule doit repartir du même périmètre
+    // que celui utilisé pour calculer la cellule du tableau de synthèse.
+    // On utilise donc sortedFilteredClients, et non scopedClientsBase, afin de conserver
+    // les filtres actifs : ancienneté, recherche, activité, NAF, RGE, capacité, capital,
+    // contactable, enrichissement, distance agence, statut prospect et collaborateur CEGECLIM.
+    let rows = sortedFilteredClients.map(ensureClientCoordinates)
 
     if (departement) {
       rows = rows.filter((row) => getClientDepartment(row) === departement)
@@ -2272,6 +2277,22 @@ function matchesMapCommonFilters(row: ClientRow) {
     if (!selectedNafCodes.includes(naf)) return false
   }
 
+  // La carte possède ses propres curseurs d'ancienneté. Ils sont initialisés depuis
+  // les filtres de l'écran au moment du clic sur une cellule, puis peuvent être affinés
+  // directement dans la carte. Sans ce contrôle, la carte réaffichait tous les prospects
+  // du département / activité, même si le tableau était filtré sur 0 jour -> 3 mois.
+  const ageDays = diffDaysFromToday(row.dateCreationEtablissement)
+  const currentMapAgeDaysMin = Math.min(sliderToDays(mapAgeSliderMin), sliderToDays(mapAgeSliderMax))
+  const currentMapAgeDaysMax = Math.max(sliderToDays(mapAgeSliderMin), sliderToDays(mapAgeSliderMax))
+
+  if (ageDays === null || ageDays < 0) {
+    if (!(ageDays !== null && ageDays < 0 && !excludeFutureCreation)) return false
+  }
+
+  if (ageDays !== null && ageDays >= 0) {
+    if (ageDays < currentMapAgeDaysMin || ageDays > currentMapAgeDaysMax) return false
+  }
+
   if (onlyContactable && !row.contactable) return false
 
   if (selectedProspectStatuses.length > 0) {
@@ -2341,6 +2362,8 @@ const mapCegeclimPoints = useMemo(() => {
   selectedNafCodes,
   selectedAgence,
   selectedCegeclimCollaborateur,
+  mapAgeSliderMin,
+  mapAgeSliderMax,
   allCegeclimDetailsBySiret,
   includeNoDistance,
   onlyContactable,
@@ -2373,6 +2396,8 @@ const mapCegeclimSommeilPoints = useMemo(() => {
   selectedNafCodes,
   selectedAgence,
   selectedCegeclimCollaborateur,
+  mapAgeSliderMin,
+  mapAgeSliderMax,
   allCegeclimDetailsBySiret,
   includeNoDistance,
   onlyContactable,
@@ -2414,8 +2439,8 @@ const mapProspectPoints = useMemo(() => {
   excludeFutureCreation,
   onlyToEnrich,
   distanceMax,
-  ageSliderMin,
-  ageSliderMax,
+  mapAgeSliderMin,
+  mapAgeSliderMax,
   agences,
   clientsCegeclim,
 ])
