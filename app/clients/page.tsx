@@ -112,7 +112,7 @@ type ClientUpsertRow = {
 }
 
 const UPSERT_CHUNK_SIZE = 500
-const IMPORT_TYPES = ['entreprise_france', 'api_sirene']
+const IMPORT_TYPES = ['entreprise_france', 'api_sirene', 'api_sirene_cessation']
 
 function normalizeSiret(value: unknown): string {
   return String(value ?? '').replace(/\D/g, '').trim()
@@ -255,6 +255,7 @@ export default function ClientsPage() {
 
   const [loading, setLoading] = useState(true)
   const [importingApi, setImportingApi] = useState(false)
+  const [importingCessationsApi, setImportingCessationsApi] = useState(false)
   const [savingSireneParams, setSavingSireneParams] = useState(false)
   const [uploadingCsv, setUploadingCsv] = useState(false)
   const [refreshingRge, setRefreshingRge] = useState(false)
@@ -459,6 +460,75 @@ export default function ClientsPage() {
     } finally {
       setSavingSireneParams(false)
       setImportingApi(false)
+    }
+  }
+
+
+  async function launchImportSireneCessations() {
+    const confirmed = window.confirm(
+      "Lancer l'import des cessations SIRENE ?\n\n" +
+        "Les SIRET fermés seront supprimés de la table clients, sauf s'ils sont clients CEGECLIM.\n" +
+        "Pour les clients CEGECLIM, l'établissement sera conservé et marqué comme fermé avec la date de cessation."
+    )
+
+    if (!confirmed) return
+
+    setImportingCessationsApi(true)
+    setSavingSireneParams(true)
+
+    try {
+      const paramsBeforeImport: SireneParamsForm = {
+        ...sireneParams,
+      }
+
+      await persistSireneParams(paramsBeforeImport)
+
+      const res = await fetch('/api/import-sirene', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'cessation' }),
+      })
+
+      const text = await res.text()
+
+      let data: any
+      try {
+        data = JSON.parse(text)
+      } catch {
+        throw new Error(text)
+      }
+
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || 'Erreur import cessations SIRENE')
+      }
+
+      const importDate = new Date().toISOString().slice(0, 10)
+      await persistSireneParams(paramsBeforeImport, importDate)
+      setLastApiImportAt(importDate)
+
+      alert(
+        `Import cessations SIRENE terminé\n` +
+          `Fermetures valides : ${data.closed_candidates ?? 0}\n` +
+          `SIRET supprimés de clients : ${data.deleted_from_clients ?? 0}\n` +
+          `Clients CEGECLIM marqués fermés : ${data.cegeclim_alerts_updated ?? 0}\n` +
+          `Déjà absents de clients : ${data.already_absent ?? 0}\n` +
+          `Rejets filtres : ${data.rejected_by_filter ?? 0}\n` +
+          `Rejets totaux : ${data.rejected_total ?? 0}\n` +
+          `Batchs journaliers : ${data.daily_batch_count ?? 0}\n` +
+          `Unités de requête : ${data.query_unit_count ?? 0}\n` +
+          `Découpage par code APE : ${data.split_by_ape ? 'oui' : 'non'}\n` +
+          `Pages lues : ${data.pages ?? 0}\n` +
+          `Parcourus API : ${data.fetched ?? 0}\n` +
+          `Total API annoncé : ${data.api_total ?? 'n/a'}`
+      )
+
+      await loadPage()
+    } catch (error: any) {
+      console.error(error)
+      alert('Erreur import cessations SIRENE : ' + (error?.message || String(error)))
+    } finally {
+      setSavingSireneParams(false)
+      setImportingCessationsApi(false)
     }
   }
 
@@ -794,7 +864,10 @@ export default function ClientsPage() {
             <div style={styles.importOptionsGrid}>
               <div style={styles.importBox}>
                 <h3 style={styles.optionTitle}>Option 1 : Import automatique via API Sirene</h3>
-                <div style={styles.optionText}>Prépare les paramètres à stocker en base avant de brancher l’API.</div>
+                <div style={styles.optionText}>
+                  Prépare les paramètres à stocker en base avant de brancher l’API. L’import classique utilise les dates de création.
+                  L’import cessations utilise les dates de modification si elles sont renseignées, sinon les dates de création.
+                </div>
 
                 <div style={styles.formGrid}>
                   <div>
@@ -849,11 +922,19 @@ export default function ClientsPage() {
                 </div>
 
                 <div style={styles.buttonRow}>
-                  <button type="button" onClick={saveSireneParams} style={styles.primaryButton} disabled={savingSireneParams || importingApi}>
+                  <button type="button" onClick={saveSireneParams} style={styles.primaryButton} disabled={savingSireneParams || importingApi || importingCessationsApi}>
                     {savingSireneParams && !importingApi ? 'Enregistrement...' : 'Enregistrer les paramètres'}
                   </button>
-                  <button type="button" onClick={launchImportSirene} style={styles.secondaryButton} disabled={savingSireneParams || importingApi}>
+                  <button type="button" onClick={launchImportSirene} style={styles.secondaryButton} disabled={savingSireneParams || importingApi || importingCessationsApi}>
                     {importingApi ? 'Import en cours...' : 'Lancer import API'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={launchImportSireneCessations}
+                    style={styles.dangerOutlineButton}
+                    disabled={savingSireneParams || importingApi || importingCessationsApi}
+                  >
+                    {importingCessationsApi ? 'Import cessations...' : 'Importer cessations SIRENE'}
                   </button>
                 </div>
               </div>
@@ -1067,6 +1148,15 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '10px 14px',
     cursor: 'pointer',
     fontWeight: 700,
+  },
+  dangerOutlineButton: {
+    border: '1px solid #ef4444',
+    background: '#fff',
+    color: '#b91c1c',
+    borderRadius: 10,
+    padding: '10px 14px',
+    cursor: 'pointer',
+    fontWeight: 800,
   },
   uploadRow: {
     marginTop: 20,

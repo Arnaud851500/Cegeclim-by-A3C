@@ -71,6 +71,29 @@ type CerfaKoRow = {
   saving: boolean
 }
 
+type CertificationAlertKind = 'rge' | 'capacite'
+
+type CertificationSignal = {
+  status: StatusLevel
+  count: number
+  expiredCount: number
+  soonCount: number
+}
+
+type CertificationAlertRow = {
+  kind: CertificationAlertKind
+  alert_status: 'expired' | 'soon'
+  numero_tiers: string
+  designation: string
+  departement: string
+  representant: string
+  date_validite_client: string | null
+  date_validite_ref_tiers: string | null
+  date_validite: string | null
+  jours_ecart: number
+  siret: string
+}
+
 function StatusLight({ label, status, count, blink = false, clickable = false, onClick, title }: StatusLightProps) {
   const isRed = status === 'red'
   const isOrange = status === 'orange'
@@ -209,6 +232,15 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const [cerfaModalOpen, setCerfaModalOpen] = useState(false)
   const [cerfaLoading, setCerfaLoading] = useState(false)
   const [cerfaError, setCerfaError] = useState<string | null>(null)
+  const [certificationSignals, setCertificationSignals] = useState<Record<CertificationAlertKind, CertificationSignal>>({
+    rge: { status: 'green', count: 0, expiredCount: 0, soonCount: 0 },
+    capacite: { status: 'green', count: 0, expiredCount: 0, soonCount: 0 },
+  })
+  const [certificationModalOpen, setCertificationModalOpen] = useState(false)
+  const [certificationModalKind, setCertificationModalKind] = useState<CertificationAlertKind>('rge')
+  const [certificationRows, setCertificationRows] = useState<CertificationAlertRow[]>([])
+  const [certificationLoading, setCertificationLoading] = useState(false)
+  const [certificationError, setCertificationError] = useState<string | null>(null)
 
   const lastLoggedPathRef = useRef<string | null>(null)
   const lastStatusRefreshRef = useRef(0)
@@ -248,9 +280,9 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const menuGroups: MenuGroup[] = [
   
     {
-      label: 'Prospects / Clients',
+      label: 'Prospects / Carte',
       items: [
-        { label: 'Prospects / Clients', path: '/carte', accessKey: 'can_carte' },
+        { label: 'Prospects / Carte', path: '/carte', accessKey: 'can_carte' },
         { label: 'Clients Cegeclim', path: '/clients_cegeclim', accessKey: 'can_agences' },
         { label: 'Suivi Prospects', path: '/suivi prospects', accessKey: 'can_agences' },
       ],
@@ -270,14 +302,16 @@ function AppShell({ children }: { children: React.ReactNode }) {
     {
       label: 'Tableaux de bord',
       items: [
-        { label: 'Flux Devis, CDC, BL, Fact', path: '/approvisionnements', accessKey: 'can_autorisation' },
-        { label: 'Statistiques Devis', path: '/cycle-documents', accessKey: 'can_autorisation' },
-        { label: 'Suivi Multi Clients', path: '/synthese_multi_clients', accessKey: 'can_dashboard' },
         { label: 'Tableaux de bord', path: '/atelier-analyse', accessKey: 'can_autorisation' },
         { label: 'Indicateurs', path: '/Indicateurs', accessKey: 'can_dashboard' }
         ],
     },
-
+    {
+      label: 'Analyse Devis',
+      items: [
+        { label: 'Analyse Devis', path: '/approvisionnements', accessKey: 'can_autorisation' }
+      ],
+    },
     {
       label: 'Admin',
       items: [{ label: 'Autorisations', path: '/autorisation', accessKey: 'can_autorisation' },
@@ -609,6 +643,61 @@ function AppShell({ children }: { children: React.ReactNode }) {
     }
   }
 
+  async function refreshCertificationSignals() {
+    try {
+      const { data, error } = await supabase.rpc('get_client_certification_alert_summary')
+      if (error) throw error
+
+      const next: Record<CertificationAlertKind, CertificationSignal> = {
+        rge: { status: 'green', count: 0, expiredCount: 0, soonCount: 0 },
+        capacite: { status: 'green', count: 0, expiredCount: 0, soonCount: 0 },
+      }
+
+      ;((data || []) as any[]).forEach((row) => {
+        const kind = String(row.kind || '').toLowerCase() as CertificationAlertKind
+        if (kind !== 'rge' && kind !== 'capacite') return
+
+        next[kind] = {
+          status: (row.status || 'green') as StatusLevel,
+          count: Number(row.total_count || 0),
+          expiredCount: Number(row.expired_count || 0),
+          soonCount: Number(row.soon_count || 0),
+        }
+      })
+
+      setCertificationSignals(next)
+    } catch (error) {
+      console.error('Alertes certifications clients', error)
+      setCertificationSignals({
+        rge: { status: 'green', count: 0, expiredCount: 0, soonCount: 0 },
+        capacite: { status: 'green', count: 0, expiredCount: 0, soonCount: 0 },
+      })
+    }
+  }
+
+  async function openCertificationModal(kind: CertificationAlertKind) {
+    setCertificationModalKind(kind)
+    setCertificationModalOpen(true)
+    setCertificationLoading(true)
+    setCertificationError(null)
+
+    try {
+      const { data, error } = await supabase.rpc('get_client_certification_alert_rows', {
+        p_kind: kind,
+        p_limit: 1000,
+      })
+
+      if (error) throw error
+      setCertificationRows((data || []) as CertificationAlertRow[])
+    } catch (error: any) {
+      console.error('Détail alertes certifications clients', error)
+      setCertificationRows([])
+      setCertificationError(error?.message || String(error))
+    } finally {
+      setCertificationLoading(false)
+    }
+  }
+
   async function refreshStatusIndicators(options?: { force?: boolean }) {
     if (!email || isLoginPage || isUnauthorizedPage) return
 
@@ -620,6 +709,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
     await Promise.all([
       refreshTodoSignal(profile),
       refreshCerfaKo(profile, { detail: false }),
+      refreshCertificationSignals(),
     ])
   }
 
@@ -776,6 +866,32 @@ function AppShell({ children }: { children: React.ReactNode }) {
                   title={cerfaKoCount > 0 ? 'Ouvrir la liste des CERFA KO en attente de régularisation' : 'Aucun CERFA KO'}
                 />
                 <StatusLight
+                  label="RGE"
+                  status={certificationSignals.rge.status}
+                  count={certificationSignals.rge.count}
+                  blink={certificationSignals.rge.status === 'red' && statusBlinkOn}
+                  clickable={certificationSignals.rge.count > 0}
+                  onClick={() => openCertificationModal('rge')}
+                  title={
+                    certificationSignals.rge.count > 0
+                      ? `RGE : ${certificationSignals.rge.expiredCount} dépassé(s), ${certificationSignals.rge.soonCount} proche(s)`
+                      : 'Aucune alerte RGE'
+                  }
+                />
+                <StatusLight
+                  label="Capacité gaz"
+                  status={certificationSignals.capacite.status}
+                  count={certificationSignals.capacite.count}
+                  blink={certificationSignals.capacite.status === 'red' && statusBlinkOn}
+                  clickable={certificationSignals.capacite.count > 0}
+                  onClick={() => openCertificationModal('capacite')}
+                  title={
+                    certificationSignals.capacite.count > 0
+                      ? `Capacité gaz : ${certificationSignals.capacite.expiredCount} dépassée(s), ${certificationSignals.capacite.soonCount} proche(s)`
+                      : 'Aucune alerte capacité gaz'
+                  }
+                />
+                <StatusLight
                   label="A faire"
                   status={todoSignal.status}
                   count={todoSignal.count}
@@ -879,6 +995,91 @@ function AppShell({ children }: { children: React.ReactNode }) {
                             {row.saving ? '...' : 'OK'}
                           </button>
                         </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+
+        {certificationModalOpen && (
+          <div style={styles.modalBackdrop}>
+            <div style={styles.cerfaModal}>
+              <div style={styles.modalHeader}>
+                <div>
+                  <div style={styles.modalTitle}>
+                    {certificationModalKind === 'rge'
+                      ? 'Clients CEGECLIM RGE à surveiller'
+                      : 'Clients CEGECLIM capacité gaz à surveiller'}
+                  </div>
+                  <div style={styles.modalSubtitle}>
+                    {certificationRows.length} client(s) avec date dépassée ou proche
+                  </div>
+                </div>
+                <div style={styles.modalActions}>
+                  <button
+                    type="button"
+                    onClick={() => openCertificationModal(certificationModalKind)}
+                    style={styles.modalSecondaryButton}
+                  >
+                    Actualiser
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCertificationModalOpen(false)}
+                    style={styles.modalCloseButton}
+                  >
+                    Fermer
+                  </button>
+                </div>
+              </div>
+
+              {certificationLoading && <div style={styles.modalInfo}>Chargement des alertes…</div>}
+              {certificationError && <div style={styles.modalError}>Erreur : {certificationError}</div>}
+
+              <div style={styles.modalTableWrapper}>
+                <table style={{ ...styles.cerfaTable, minWidth: 1580 }}>
+                  <thead>
+                    <tr>
+                      <th style={styles.cerfaTh}>Date validité clients</th>
+                      <th style={styles.cerfaTh}>Date validité ref_tiers</th>
+                      <th style={styles.cerfaTh}>Statut</th>
+                      <th style={styles.cerfaTh}>N° tiers</th>
+                      <th style={styles.cerfaTh}>Désignation</th>
+                      <th style={styles.cerfaTh}>Département</th>
+                      <th style={styles.cerfaTh}>Représentant</th>
+                      <th style={styles.cerfaTh}>SIRET</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {certificationRows.length === 0 && !certificationLoading ? (
+                      <tr>
+                        <td colSpan={8} style={styles.cerfaEmptyCell}>
+                          Aucune alerte.
+                        </td>
+                      </tr>
+                    ) : certificationRows.map((row) => (
+                      <tr key={`${row.kind}-${row.siret}-${row.date_validite_client || row.date_validite || 'na'}`}>
+                        <td style={styles.cerfaTdStrong}>{formatDateFr(row.date_validite_client || row.date_validite)}</td>
+                        <td style={styles.cerfaTdStrong}>{formatDateFr(row.date_validite_ref_tiers) || '—'}</td>
+                        <td
+                          style={{
+                            ...styles.cerfaTdStrong,
+                            color: row.alert_status === 'expired' ? '#b91c1c' : '#c2410c',
+                          }}
+                        >
+                          {row.alert_status === 'expired'
+                            ? `Dépassé depuis ${Math.abs(Number(row.jours_ecart || 0))} j`
+                            : `Expire dans ${Number(row.jours_ecart || 0)} j`}
+                        </td>
+                        <td style={styles.cerfaTdStrong}>{row.numero_tiers || '—'}</td>
+                        <td style={styles.cerfaTd}>{row.designation || '—'}</td>
+                        <td style={styles.cerfaTd}>{row.departement || '—'}</td>
+                        <td style={styles.cerfaTd}>{row.representant || '—'}</td>
+                        <td style={styles.cerfaTd}>{row.siret || '—'}</td>
                       </tr>
                     ))}
                   </tbody>

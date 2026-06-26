@@ -720,7 +720,7 @@ function buildDefaultWidget(type: WidgetType, availableYears: number[]): WidgetC
   const base: WidgetConfig = {
     id: uid(),
     type,
-    title: type === 'bridge' ? 'Bridge CA N-1 ⇒ N par agence' : type === 'double_bridge' ? 'Double bridge mix / performance' : type === 'synthese' ? 'Suivi du CA et marge' : type === 'tableau' ? 'Tableau croisé' : type === 'kpi' ? 'Indicateur clé' : type === 'histogramme_empile' ? 'Histogramme empilé' : type === 'camembert' ? 'Répartition' : 'Nouveau graphique',
+    title: type === 'bridge' ? 'Bridge CA N-1 ⇒ N par agence' : type === 'double_bridge' ? 'Double bridge mix / performance' : type === 'synthese' ? '' : type === 'tableau' ? 'Tableau croisé' : type === 'kpi' ? 'Indicateur clé' : type === 'histogramme_empile' ? 'Histogramme empilé' : type === 'camembert' ? 'Répartition' : 'Nouveau graphique',
     source: 'factures',
     size: type === 'double_bridge' ? 'full' : type === 'kpi' || type === 'histogramme_empile' ? 'small' : type === 'tableau' || type === 'synthese' ? 'full' : type === 'camembert' ? 'medium' : 'medium',
     useGlobalFilters: true,
@@ -752,7 +752,7 @@ function buildDefaultWidget(type: WidgetType, availableYears: number[]): WidgetC
   if (type === 'histogramme_empile') { base.title = 'CA empilé par année / famille'; base.dimension = 'annee'; base.seriesDimension = 'famille_macro' }
   if (type === 'camembert') { base.title = 'Répartition par famille macro'; base.dimension = 'famille_macro'; base.seriesDimension = '' }
   if (type === 'double_bridge') { base.title = 'Double bridge marge % mix / performance'; base.dimension = 'famille_macro'; base.periodMode = 'cumul'; base.compareMode = 'year'; base.topN = 10; base.showValues = true }
-  if (type === 'synthese') { base.title = 'Suivi du CA et marge'; base.measure = 'ca_ht'; base.secondMeasure = 'marge_pct'; base.tableMeasures = ['ca_ht', 'marge_pct']; base.periodMode = 'cumul'; base.size = 'full' }
+  if (type === 'synthese') { base.title = ''; base.measure = 'ca_ht'; base.secondMeasure = 'marge_pct'; base.tableMeasures = ['ca_ht', 'marge_pct']; base.periodMode = 'cumul'; base.size = 'full' }
   return base
 }
 
