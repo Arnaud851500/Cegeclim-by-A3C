@@ -280,11 +280,9 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const menuGroups: MenuGroup[] = [
   
     {
-      label: 'Prospects / Carte',
+      label: 'Prospects / Clients',
       items: [
-        { label: 'Prospects / Carte', path: '/carte', accessKey: 'can_carte' },
-        { label: 'Clients Cegeclim', path: '/clients_cegeclim', accessKey: 'can_agences' },
-        { label: 'Suivi Prospects', path: '/suivi prospects', accessKey: 'can_agences' },
+        { label: 'Prospects / Clients', path: '/carte', accessKey: 'can_carte' },
       ],
     },
     {
@@ -295,23 +293,18 @@ function AppShell({ children }: { children: React.ReactNode }) {
         { label: 'Cartographie', path: '/cartographie', accessKey: 'can_cartographie' },
       ],
     },
-    {
-      label: 'Activité',
-      items: [{ label: 'Activités - CA (WIP)', path: '/activite', accessKey: 'can_activites' }],
-    },
+   
     {
       label: 'Tableaux de bord',
       items: [
+        { label: 'Flux Devis-CDC-BC-Fact', path: '/approvisionnements', accessKey: 'can_autorisation' },
+        { label: 'Analyse Devis', path: '/cycle-documents', accessKey: 'can_autorisation' },
+        { label: 'Suivi Multi Clients', path: '/synthese_multi_clients', accessKey: 'can_autorisation' },        
         { label: 'Tableaux de bord', path: '/atelier-analyse', accessKey: 'can_autorisation' },
-        { label: 'Indicateurs', path: '/Indicateurs', accessKey: 'can_dashboard' }
+        { label: 'Indicateurs', path: '/Indicateurs', accessKey: 'can_documents' }
         ],
     },
-    {
-      label: 'Analyse Devis',
-      items: [
-        { label: 'Analyse Devis', path: '/approvisionnements', accessKey: 'can_autorisation' }
-      ],
-    },
+  
     {
       label: 'Admin',
       items: [{ label: 'Autorisations', path: '/autorisation', accessKey: 'can_autorisation' },
