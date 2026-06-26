@@ -293,7 +293,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
         { label: 'Cartographie', path: '/cartographie', accessKey: 'can_cartographie' },
       ],
     },
-   
     {
       label: 'Tableaux de bord',
       items: [
@@ -301,10 +300,10 @@ function AppShell({ children }: { children: React.ReactNode }) {
         { label: 'Analyse Devis', path: '/cycle-documents', accessKey: 'can_autorisation' },
         { label: 'Suivi Multi Clients', path: '/synthese_multi_clients', accessKey: 'can_autorisation' },        
         { label: 'Tableaux de bord', path: '/atelier-analyse', accessKey: 'can_autorisation' },
+        { label: 'Focus Mois', path: '/focus_mensuel', accessKey: 'can_autorisation' },
         { label: 'Indicateurs', path: '/Indicateurs', accessKey: 'can_documents' }
         ],
     },
-  
     {
       label: 'Admin',
       items: [{ label: 'Autorisations', path: '/autorisation', accessKey: 'can_autorisation' },
