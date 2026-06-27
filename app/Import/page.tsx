@@ -782,11 +782,32 @@ function normalizeDate(value: any) {
 
   const pad2 = (n: number) => String(n).padStart(2, '0')
 
+  const isValidDateParts = (year: number, month: number, day: number) => {
+    if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return false
+    if (year < 1900 || year > 2100) return false
+    if (month < 1 || month > 12) return false
+    if (day < 1 || day > 31) return false
+
+    // Validation calendaire locale : pas de conversion UTC.
+    const check = new Date(year, month - 1, day)
+    return (
+      check.getFullYear() === year &&
+      check.getMonth() === month - 1 &&
+      check.getDate() === day
+    )
+  }
+
+  const toIsoDate = (year: number, month: number, day: number) => {
+    if (!isValidDateParts(year, month, day)) return null
+    return `${year}-${pad2(month)}-${pad2(day)}`
+  }
+
   // IMPORTANT : ne jamais utiliser toISOString() pour une date métier Excel.
   // Excel fournit des dates sans notion de fuseau horaire. toISOString() convertit en UTC
   // et peut donc retirer 1 jour en France selon l'heure/fuseau du navigateur.
+  // On lit donc toujours l'année / mois / jour en local.
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return `${value.getFullYear()}-${pad2(value.getMonth() + 1)}-${pad2(value.getDate())}`
+    return toIsoDate(value.getFullYear(), value.getMonth() + 1, value.getDate())
   }
 
   // Cas Excel serial number, ex : 46142.
@@ -794,7 +815,7 @@ function normalizeDate(value: any) {
   if (typeof value === 'number' && Number.isFinite(value)) {
     const parsed = XLSX.SSF.parse_date_code(value)
     if (!parsed) return null
-    return `${parsed.y}-${pad2(parsed.m)}-${pad2(parsed.d)}`
+    return toIsoDate(Number(parsed.y), Number(parsed.m), Number(parsed.d))
   }
 
   const text = String(value).trim()
@@ -802,44 +823,35 @@ function normalizeDate(value: any) {
 
   // Format ISO ou pseudo ISO : YYYY-MM-DD, éventuellement suivi d'une heure.
   // On extrait uniquement la partie date, sans passer par new Date().
-  const isoLike = text.match(/^(\d{4})[\/.-](\d{1,2})[\/.-](\d{1,2})/)
+  const isoLike = text.match(/^(\d{4})[\/.\-](\d{1,2})[\/.\-](\d{1,2})/)
   if (isoLike) {
-    const yyyy = isoLike[1]
-    const mm = Number(isoLike[2])
-    const dd = Number(isoLike[3])
-    if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
-      return `${yyyy}-${pad2(mm)}-${pad2(dd)}`
-    }
-    return null
+    return toIsoDate(Number(isoLike[1]), Number(isoLike[2]), Number(isoLike[3]))
   }
 
   // Format français ou ambigu : DD/MM/YYYY ou DD-MM-YYYY.
-  const frOrUs = text.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})$/)
+  const frOrUs = text.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})$/)
   if (frOrUs) {
     const part1 = Number(frOrUs[1])
     const part2 = Number(frOrUs[2])
-    const yyyy = frOrUs[3].length === 2 ? `20${frOrUs[3]}` : frOrUs[3]
+    const year = Number(frOrUs[3].length === 2 ? `20${frOrUs[3]}` : frOrUs[3])
 
-    let dd = part1
-    let mm = part2
+    let day = part1
+    let month = part2
 
     // Si le 2e morceau > 12, c'est nécessairement MM/DD/YYYY.
     if (part2 > 12 && part1 <= 12) {
-      dd = part2
-      mm = part1
+      day = part2
+      month = part1
     }
 
-    if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
-      return `${yyyy}-${pad2(mm)}-${pad2(dd)}`
-    }
-
-    return null
+    return toIsoDate(year, month, day)
   }
 
   // Dernier recours : parsing JS, mais lecture en local, jamais toISOString().
+  // Ce cas sert uniquement aux libellés texte atypiques renvoyés par Excel.
   const parsed = new Date(text)
   if (!Number.isNaN(parsed.getTime())) {
-    return `${parsed.getFullYear()}-${pad2(parsed.getMonth() + 1)}-${pad2(parsed.getDate())}`
+    return toIsoDate(parsed.getFullYear(), parsed.getMonth() + 1, parsed.getDate())
   }
 
   return null
@@ -1008,6 +1020,118 @@ function formatDateTime(value: string | null) {
   }).format(new Date(value))
 }
 
+
+
+function detectAutoImportFileKind(fileName: string): AutoImportFileKind {
+  const baseName = String(fileName || '').replace(/\.[^.]+$/, '')
+  const normalized = normalizeHeader(baseName)
+
+  if (normalized.startsWith('activite')) return 'Activite'
+  if (normalized.startsWith('facture')) return 'Facture'
+  if (normalized.startsWith('devis')) return 'Devis'
+
+  return 'Invalide'
+}
+
+function isAutoImportXlsx(fileName: string) {
+  return String(fileName || '').toLowerCase().endsWith('.xlsx')
+}
+
+function isValidAutoImportFileName(fileName: string) {
+  return isAutoImportXlsx(fileName) && detectAutoImportFileKind(fileName) !== 'Invalide'
+}
+
+function cleanStorageFileName(fileName: string) {
+  return String(fileName || '')
+    .replace(/[\\/]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function formatFileSize(value: number | null | undefined) {
+  const n = Number(value || 0)
+  if (!n) return '—'
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toLocaleString('fr-FR', { maximumFractionDigits: 1 })} Mo`
+  if (n >= 1024) return `${(n / 1024).toLocaleString('fr-FR', { maximumFractionDigits: 0 })} Ko`
+  return `${n.toLocaleString('fr-FR')} o`
+}
+
+function isAutoImportRunRunning(status: any) {
+  const s = String(status || '').toLowerCase()
+  return ['running', 'processing', 'started', 'smc_running', 'pre_smc_done', 'queued'].includes(s)
+}
+
+function isAutoImportRunSuccess(status: any) {
+  const s = String(status || '').toLowerCase()
+  return ['done', 'success', 'finished', 'completed', 'ok'].includes(s)
+}
+
+function isAutoImportRunError(status: any) {
+  const s = String(status || '').toLowerCase()
+  return ['error', 'failed', 'ko', 'cancelled', 'canceled'].includes(s)
+}
+
+function statusBadgeClass(status: any) {
+  if (isAutoImportRunSuccess(status)) return 'border-emerald-200 bg-emerald-50 text-emerald-800'
+  if (isAutoImportRunRunning(status)) return 'border-blue-200 bg-blue-50 text-blue-800'
+  if (isAutoImportRunError(status)) return 'border-red-200 bg-red-50 text-red-800'
+  return 'border-slate-200 bg-slate-50 text-slate-700'
+}
+
+function folderBadgeClass(folder: AutoImportFolder) {
+  if (folder === 'pending') return 'border-amber-200 bg-amber-50 text-amber-800'
+  if (folder === 'processing') return 'border-blue-200 bg-blue-50 text-blue-800'
+  if (folder === 'rejected') return 'border-red-200 bg-red-50 text-red-800'
+  return 'border-emerald-200 bg-emerald-50 text-emerald-800'
+}
+
+function fileKindBadgeClass(kind: AutoImportFileKind) {
+  if (kind === 'Activite') return 'border-indigo-200 bg-indigo-50 text-indigo-800'
+  if (kind === 'Facture') return 'border-emerald-200 bg-emerald-50 text-emerald-800'
+  if (kind === 'Devis') return 'border-orange-200 bg-orange-50 text-orange-800'
+  return 'border-red-200 bg-red-50 text-red-800'
+}
+
+function getPipelineRunReport(run: ImportPipelineRun | null, tab: AutoImportReportTab) {
+  if (!run) return 'Aucun run disponible.'
+
+  if (tab === 'pre_smc') {
+    return (
+      run.pre_smc_report ||
+      run.report_pre_smc ||
+      run.pre_smc_message ||
+      'Aucun rapport avant SMC disponible pour ce run.'
+    )
+  }
+
+  if (tab === 'final') {
+    return (
+      run.final_report ||
+      run.report_final ||
+      run.message ||
+      'Aucun rapport final disponible pour ce run.'
+    )
+  }
+
+  return (
+    run.error_message ||
+    run.last_error ||
+    run.error ||
+    'Aucune erreur remontée sur le dernier run.'
+  )
+}
+
+function rpcSignatureMismatch(error: any) {
+  const message = String(error?.message || error || '').toLowerCase()
+  const code = String(error?.code || '').toUpperCase()
+  return (
+    code === 'PGRST202' ||
+    code === 'PGRST204' ||
+    message.includes('could not find the function') ||
+    message.includes('function') && message.includes('does not exist') ||
+    message.includes('schema cache')
+  )
+}
 function tableDisplayKey(row: GenericRow, config: TableConfig) {
   const value = row[config.primaryKey]
   if (value) return String(value)
@@ -1440,6 +1564,62 @@ const SMC_BACKGROUND_DEFAULT_BATCH_SIZE = 25
 const SMC_BACKGROUND_MIN_BATCH_SIZE = 1
 const SMC_BACKGROUND_MAX_BATCH_SIZE = 200
 const SMC_BACKGROUND_POLL_MS = 5000
+
+
+type AutoImportFolder = 'pending' | 'processing' | 'rejected' | 'archive'
+type AutoImportFileKind = 'Activite' | 'Facture' | 'Devis' | 'Invalide'
+type AutoImportReportTab = 'pre_smc' | 'final' | 'errors'
+
+type AutoImportStorageFile = {
+  folder: AutoImportFolder
+  name: string
+  path: string
+  kind: AutoImportFileKind
+  size: number | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+type ImportPipelineRun = {
+  id?: number
+  started_at?: string | null
+  finished_at?: string | null
+  status?: string | null
+  current_step?: string | null
+  pre_smc_report_at?: string | null
+  smc_started_at?: string | null
+  smc_finished_at?: string | null
+  pre_smc_report?: string | null
+  final_report?: string | null
+  error_message?: string | null
+  message?: string | null
+  [key: string]: any
+}
+
+type ImportPipelineFile = {
+  id?: number
+  run_id?: number | null
+  original_filename?: string | null
+  file_type?: string | null
+  storage_path_initial?: string | null
+  storage_path_processing?: string | null
+  storage_path_final?: string | null
+  status?: string | null
+  imported_at?: string | null
+  error_message?: string | null
+  [key: string]: any
+}
+
+const AUTO_IMPORT_BUCKET = 'commercial-imports'
+const AUTO_IMPORT_FOLDERS: AutoImportFolder[] = ['pending', 'processing', 'rejected', 'archive']
+const AUTO_IMPORT_PIPELINE_RPC_CANDIDATES = [
+  'run_pipeline_commercial_auto',
+  'run_import_pipeline_global',
+  'start_import_pipeline_global',
+]
+const AUTO_IMPORT_POLL_MS = 10000
+const AUTO_IMPORT_FLUX_ARTICLES_MONTHS_BACK = 10
+const AUTO_IMPORT_EDGE_FUNCTION_NAME = 'import-pipeline-global'
 
 const SMC_BATCH_SIZE = 1
 const SMC_MAX_LOOPS = 10000
@@ -2183,6 +2363,16 @@ export default function ImportsParametragePage() {
   const [importSteps, setImportSteps] = useState<ImportStep[]>([])
   const [pendingReferentialImport, setPendingReferentialImport] = useState<PendingReferentialImport | null>(null)
 
+  const [autoImportStorageFiles, setAutoImportStorageFiles] = useState<AutoImportStorageFile[]>([])
+  const [autoImportPipelineRuns, setAutoImportPipelineRuns] = useState<ImportPipelineRun[]>([])
+  const [autoImportPipelineFiles, setAutoImportPipelineFiles] = useState<ImportPipelineFile[]>([])
+  const [autoImportLoading, setAutoImportLoading] = useState(false)
+  const [autoImportUploading, setAutoImportUploading] = useState(false)
+  const [autoImportRunning, setAutoImportRunning] = useState(false)
+  const [autoImportMessage, setAutoImportMessage] = useState<string | null>(null)
+  const [autoImportError, setAutoImportError] = useState<string | null>(null)
+  const [autoImportReportTab, setAutoImportReportTab] = useState<AutoImportReportTab>('pre_smc')
+
   const selectedConfig = useMemo(
     () => TABLES.find((t) => t.key === selectedTableKey) || TABLES[0],
     [selectedTableKey]
@@ -2294,6 +2484,23 @@ export default function ImportsParametragePage() {
     loadStats()
   }, [])
 
+
+  useEffect(() => {
+    void loadAutomaticImportDashboard(false)
+  }, [])
+
+  useEffect(() => {
+    const latestRun = autoImportPipelineRuns[0]
+    if (!latestRun || !isAutoImportRunRunning(latestRun.status)) return
+
+    const timer = window.setInterval(() => {
+      void loadAutomaticImportDashboard(false)
+      void loadStats()
+    }, AUTO_IMPORT_POLL_MS)
+
+    return () => window.clearInterval(timer)
+  }, [autoImportPipelineRuns[0]?.id, autoImportPipelineRuns[0]?.status])
+
   useEffect(() => {
     loadRows(selectedConfig)
     setFilter('')
@@ -2333,7 +2540,16 @@ export default function ImportsParametragePage() {
       reader.onload = (event) => {
         try {
           const data = event.target?.result
-          const workbook = XLSX.read(data, { type: 'array', cellDates: true })
+          const workbook = XLSX.read(data, {
+            type: 'array',
+            // IMPORTANT V2 dates métier : on ne laisse plus SheetJS convertir les cellules Excel en Date JS.
+            // Avec cellDates:true, certaines dates Excel arrivent déjà décalées d'un jour avant normalizeDate().
+            // On lit donc les dates au format brut : les vraies dates Excel restent des numéros de série,
+            // puis normalizeDate() les convertit via XLSX.SSF.parse_date_code(), sans fuseau horaire.
+            cellDates: false,
+            cellNF: true,
+            cellText: false,
+          })
           const sheetName = workbook.SheetNames[0]
           const sheet = workbook.Sheets[sheetName]
           const jsonRows = XLSX.utils.sheet_to_json<Record<string, any>>(sheet, {
@@ -2672,6 +2888,24 @@ export default function ImportsParametragePage() {
 
     // La plage SMC reste unique. La date de fin saisie est traitée comme mois inclus.
     const endExclusive = new Date(endInput.getFullYear(), endInput.getMonth() + 1, 1)
+    const pDateDebut = formatDateForSql(start)
+    const pDateFin = formatDateForSql(endExclusive)
+
+    return {
+      p_date_debut: pDateDebut,
+      p_date_fin: pDateFin,
+      label: `${pDateDebut} → ${pDateFin}`,
+    }
+  }
+
+
+  function getAutoImportFluxArticlesPeriod(): SmcRpcPeriod {
+    const now = new Date()
+    // Pipeline automatique : après les imports, les agrégats rapides sont déjà gérés
+    // par les fonctions d'import existantes. On ne relance donc que flux_articles,
+    // en découpant côté SQL / job mois par mois sur les 10 derniers mois pour éviter les timeouts.
+    const start = new Date(now.getFullYear(), now.getMonth() - (AUTO_IMPORT_FLUX_ARTICLES_MONTHS_BACK - 1), 1)
+    const endExclusive = new Date(now.getFullYear(), now.getMonth() + 1, 1)
     const pDateDebut = formatDateForSql(start)
     const pDateFin = formatDateForSql(endExclusive)
 
@@ -4246,6 +4480,723 @@ export default function ImportsParametragePage() {
     }
   }
 
+
+  async function fetchAutoImportStorageFiles() {
+    const allFiles: AutoImportStorageFile[] = []
+
+    for (const folder of AUTO_IMPORT_FOLDERS) {
+      const { data, error: listError } = await supabase.storage
+        .from(AUTO_IMPORT_BUCKET)
+        .list(folder, {
+          limit: 200,
+          sortBy: { column: 'updated_at', order: 'desc' },
+        })
+
+      if (listError) {
+        throw new Error(`Lecture bucket ${AUTO_IMPORT_BUCKET}/${folder} impossible : ${listError.message}`)
+      }
+
+      ;((data || []) as any[]).forEach((item) => {
+        const name = String(item?.name || '').trim()
+        if (!name || name === '.emptyFolderPlaceholder') return
+
+        const path = `${folder}/${name}`
+        allFiles.push({
+          folder,
+          name,
+          path,
+          kind: detectAutoImportFileKind(name),
+          size: Number(item?.metadata?.size || item?.metadata?.contentLength || 0) || null,
+          created_at: item?.created_at || item?.createdAt || null,
+          updated_at: item?.updated_at || item?.updatedAt || null,
+        })
+      })
+    }
+
+    return allFiles.sort((a, b) => {
+      const folderScore = (folder: AutoImportFolder) => AUTO_IMPORT_FOLDERS.indexOf(folder)
+      const folderDelta = folderScore(a.folder) - folderScore(b.folder)
+      if (folderDelta !== 0) return folderDelta
+      return String(b.updated_at || b.created_at || '').localeCompare(String(a.updated_at || a.created_at || ''))
+    })
+  }
+
+  async function loadAutomaticImportDashboard(showMessage = false) {
+    setAutoImportLoading(true)
+    setAutoImportError(null)
+
+    try {
+      const storageFiles = await fetchAutoImportStorageFiles()
+      setAutoImportStorageFiles(storageFiles)
+
+      const { data: runs, error: runsError } = await supabase
+        .from('import_pipeline_runs')
+        .select('*')
+        .order('started_at', { ascending: false, nullsFirst: false })
+        .limit(5)
+
+      if (runsError) {
+        throw new Error(`Lecture import_pipeline_runs impossible : ${runsError.message}`)
+      }
+
+      const runRows = (runs || []) as ImportPipelineRun[]
+      if (runRows[0]) {
+        const syncedRun = await syncLatestAutoImportRunWithSmcIfFinished(runRows[0])
+        if (syncedRun) runRows[0] = syncedRun
+      }
+      setAutoImportPipelineRuns(runRows)
+
+      const latestRunId = runRows[0]?.id
+      let filesQuery = supabase
+        .from('import_pipeline_files')
+        .select('*')
+
+      if (latestRunId !== undefined && latestRunId !== null) {
+        filesQuery = filesQuery.eq('run_id', latestRunId)
+      }
+
+      const { data: pipelineFiles, error: pipelineFilesError } = await filesQuery
+        .order('id', { ascending: false, nullsFirst: false })
+        .limit(50)
+
+      if (pipelineFilesError) {
+        throw new Error(`Lecture import_pipeline_files impossible : ${pipelineFilesError.message}`)
+      }
+
+      setAutoImportPipelineFiles((pipelineFiles || []) as ImportPipelineFile[])
+
+      if (showMessage) {
+        setAutoImportMessage('Statut fichiers et dernier job global actualisés.')
+      }
+    } catch (e: any) {
+      setAutoImportError(e?.message || String(e))
+      if (showMessage) setAutoImportMessage(null)
+    } finally {
+      setAutoImportLoading(false)
+    }
+  }
+
+  async function handleAutoImportFileUpload(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files || [])
+    event.target.value = ''
+
+    if (!files.length) return
+
+    setAutoImportUploading(true)
+    setAutoImportError(null)
+    setAutoImportMessage(null)
+
+    try {
+      const invalidFiles = files.filter((file) => !isValidAutoImportFileName(file.name))
+      if (invalidFiles.length) {
+        throw new Error(
+          'Fichier(s) refusé(s) : ' +
+          invalidFiles.map((file) => file.name).join(', ') +
+          '. Les fichiers attendus sont des .xlsx dont le nom commence par Activite, Facture ou Devis.'
+        )
+      }
+
+      const kindCounts = new Map<AutoImportFileKind, number>()
+      files.forEach((file) => {
+        const kind = detectAutoImportFileKind(file.name)
+        kindCounts.set(kind, (kindCounts.get(kind) || 0) + 1)
+      })
+
+      const duplicateKinds = Array.from(kindCounts.entries())
+        .filter(([kind, count]) => kind !== 'Invalide' && count > 1)
+        .map(([kind]) => kind)
+
+      if (duplicateKinds.length) {
+        throw new Error(
+          `Plusieurs fichiers du même type sélectionnés (${duplicateKinds.join(', ')}). ` +
+          'Pour le job global, conserve un seul fichier Activite, un seul Facture et un seul Devis dans pending.'
+        )
+      }
+
+      for (const file of files) {
+        const cleanName = cleanStorageFileName(file.name)
+        const storagePath = `pending/${cleanName}`
+
+        const { error: uploadError } = await supabase.storage
+          .from(AUTO_IMPORT_BUCKET)
+          .upload(storagePath, file, {
+            cacheControl: '3600',
+            contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            upsert: false,
+          })
+
+        if (uploadError) {
+          throw new Error(`Upload ${storagePath} impossible : ${uploadError.message}`)
+        }
+      }
+
+      setAutoImportMessage(
+        `${files.length} fichier(s) chargé(s) dans ${AUTO_IMPORT_BUCKET}/pending. ` +
+        'Tu peux lancer le job global.'
+      )
+      await loadAutomaticImportDashboard(false)
+    } catch (e: any) {
+      setAutoImportError(e?.message || String(e))
+      setAutoImportMessage(null)
+    } finally {
+      setAutoImportUploading(false)
+    }
+  }
+
+  function getTableConfigForAutoImportKind(kind: AutoImportFileKind) {
+    const tableKeyByKind: Partial<Record<AutoImportFileKind, TableKey>> = {
+      Activite: 'activite_lignes',
+      Facture: 'facture_lignes',
+      Devis: 'devis_lignes',
+    }
+
+    const tableKey = tableKeyByKind[kind]
+    const config = TABLES.find((table) => table.key === tableKey)
+    if (!tableKey || !config) {
+      throw new Error(`Type de fichier non importable automatiquement : ${kind}`)
+    }
+    return config
+  }
+
+  function sortAutoImportFilesForPipeline(files: AutoImportStorageFile[]) {
+    const order: Record<AutoImportFileKind, number> = {
+      Activite: 1,
+      Facture: 2,
+      Devis: 3,
+      Invalide: 99,
+    }
+
+    return [...files].sort((a, b) => {
+      const orderDelta = (order[a.kind] || 99) - (order[b.kind] || 99)
+      if (orderDelta !== 0) return orderDelta
+      return a.name.localeCompare(b.name)
+    })
+  }
+
+  function getAutoImportFluxArticlesMonthlyPeriods() {
+    const fluxPeriod = getAutoImportFluxArticlesPeriod()
+    const startParts = fluxPeriod.p_date_debut.split('-').map(Number)
+    const endParts = fluxPeriod.p_date_fin.split('-').map(Number)
+    return getMonthlyPeriodsBetween(
+      new Date(startParts[0], startParts[1] - 1, 1),
+      new Date(endParts[0], endParts[1] - 1, 1)
+    )
+  }
+
+  function buildStorageTargetPath(folder: AutoImportFolder, originalName: string, runId: number | null) {
+    const timestamp = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)
+    const prefix = runId ? `${timestamp}_run${runId}` : timestamp
+    return `${folder}/${prefix}_${cleanStorageFileName(originalName)}`
+  }
+
+  async function moveAutoImportFile(fromPath: string, folder: AutoImportFolder, originalName: string, runId: number | null) {
+    const toPath = buildStorageTargetPath(folder, originalName, runId)
+    const { error: moveError } = await supabase.storage
+      .from(AUTO_IMPORT_BUCKET)
+      .move(fromPath, toPath)
+
+    if (moveError) {
+      throw new Error(`Déplacement Storage ${fromPath} → ${toPath} impossible : ${moveError.message}`)
+    }
+
+    return toPath
+  }
+
+  async function downloadAutoImportFileAsFile(storagePath: string, fileName: string) {
+    const { data, error: downloadError } = await supabase.storage
+      .from(AUTO_IMPORT_BUCKET)
+      .download(storagePath)
+
+    if (downloadError || !data) {
+      throw new Error(`Téléchargement ${storagePath} impossible : ${downloadError?.message || 'fichier introuvable'}`)
+    }
+
+    return new File([data], fileName, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    })
+  }
+
+  async function createAutoImportRun(pendingFiles: AutoImportStorageFile[], fluxPeriod: SmcRpcPeriod, smcPeriod: SmcRpcPeriod) {
+    const { data, error: insertError } = await supabase
+      .from('import_pipeline_runs')
+      .insert({
+        status: 'running',
+        current_step: 'Initialisation du pipeline',
+        started_at: new Date().toISOString(),
+        date_debut: smcPeriod.p_date_debut,
+        date_fin: smcPeriod.p_date_fin,
+        message:
+          `Fichiers pending : ${pendingFiles.map((file) => file.name).join(', ')}. ` +
+          `Flux articles : ${fluxPeriod.label}. SMC : ${smcPeriod.label}.`,
+      })
+      .select('*')
+      .single()
+
+    if (insertError) {
+      throw new Error(`Création import_pipeline_runs impossible : ${insertError.message}`)
+    }
+
+    return data as ImportPipelineRun
+  }
+
+  async function updateAutoImportRun(runId: number, patch: GenericRow) {
+    const { error: updateError } = await supabase
+      .from('import_pipeline_runs')
+      .update(patch)
+      .eq('id', runId)
+
+    if (updateError) {
+      throw new Error(`Mise à jour import_pipeline_runs #${runId} impossible : ${updateError.message}`)
+    }
+  }
+
+  async function createAutoImportPipelineFile(runId: number, file: AutoImportStorageFile) {
+    const { data, error: insertError } = await supabase
+      .from('import_pipeline_files')
+      .insert({
+        run_id: runId,
+        original_filename: file.name,
+        file_type: file.kind,
+        storage_path_initial: file.path,
+        status: 'pending',
+      })
+      .select('*')
+      .single()
+
+    if (insertError) {
+      throw new Error(`Création import_pipeline_files pour ${file.name} impossible : ${insertError.message}`)
+    }
+
+    return data as ImportPipelineFile
+  }
+
+  async function updateAutoImportPipelineFile(fileRowId: number | undefined, patch: GenericRow) {
+    if (!fileRowId) return
+
+    const { error: updateError } = await supabase
+      .from('import_pipeline_files')
+      .update(patch)
+      .eq('id', fileRowId)
+
+    if (updateError) {
+      throw new Error(`Mise à jour import_pipeline_files #${fileRowId} impossible : ${updateError.message}`)
+    }
+  }
+
+  async function importAutoStorageExcelWithExistingLogic(storagePath: string, storageFile: AutoImportStorageFile) {
+    const config = getTableConfigForAutoImportKind(storageFile.kind)
+    const file = await downloadAutoImportFileAsFile(storagePath, storageFile.name)
+
+    resetImportProgress()
+    updateImportStep('read', 'running', `${file.name} — lecture depuis Storage`)
+    const parsedRows = await parseExcelRows(file, config)
+    updateImportStep('read', 'done', `${parsedRows.length} ligne(s) lue(s)`)
+
+    updateImportStep('normalize', 'running', 'Analyse des colonnes et conversion des dates/nombres')
+    const parseErrors = parsedRows.flatMap((row) => Array.isArray(row.__errors) ? row.__errors : [])
+    const cleanedRows = parsedRows.map(({ __errors, ...row }) => row)
+    updateImportStep('normalize', 'done', `${parseErrors.length} avertissement(s) de mapping/conversion`)
+
+    updateImportStep('validate', 'running', 'Contrôle des champs obligatoires')
+    const { valid, errors } = validateRows(cleanedRows, config)
+    const { rows: deduplicatedRows, duplicates } = deduplicateRows(valid, config)
+    updateImportStep(
+      'validate',
+      'done',
+      `${valid.length} ligne(s) valide(s), ${errors.length} rejet(s), ${duplicates.length} doublon(s) dans le fichier`
+    )
+
+    const technicalMessages = [...parseErrors, ...errors, ...duplicates]
+
+    if (!deduplicatedRows.length) {
+      await executeValidatedImportRows(config, [], technicalMessages)
+      throw new Error(`Aucune ligne valide à importer dans ${file.name}.`)
+    }
+
+    // Les trois fichiers du pipeline sont des tables de lignes. On garde strictement
+    // la logique d'import existante : validation, contrôles d'existence, insert/upsert,
+    // refresh/cache déjà présents dans executeValidatedImportRows().
+    await executeValidatedImportRows(config, deduplicatedRows, technicalMessages)
+
+    return {
+      table: config.label,
+      rowsRead: parsedRows.length,
+      rowsValid: valid.length,
+      rowsReady: deduplicatedRows.length,
+      warnings: technicalMessages.length,
+    }
+  }
+
+  function formatAutoImportPreSmcReport(args: {
+    runId: number
+    startedAt: string
+    importedFiles: GenericRow[]
+    fluxPeriods: RpcPeriod[]
+    smcPeriod: SmcRpcPeriod
+  }) {
+    return [
+      `Pipeline automatique #${args.runId} — rapport avant SMC`,
+      `Début : ${formatDateTime(args.startedAt)}`,
+      '',
+      'Fichiers importés :',
+      ...args.importedFiles.map((file) => (
+        `- ${file.type} : ${file.name} — OK — ${file.rowsReady} ligne(s) prêtes/importées sur ${file.rowsRead} lue(s)` +
+        `${file.warnings ? ` — ${file.warnings} avertissement(s)` : ''}`
+      )),
+      '',
+      `Flux articles : OK — ${args.fluxPeriods.length} mois recalculé(s), de ${args.fluxPeriods[0]?.p_date_debut || '—'} à ${args.fluxPeriods[args.fluxPeriods.length - 1]?.p_date_fin || '—'}.`,
+      '',
+      `SMC : non terminé à ce stade — lancement prévu sur ${args.smcPeriod.label}.`,
+    ].join('\n')
+  }
+
+  async function startSmcBackgroundJobFromPipeline(period: SmcRpcPeriod, runId: number) {
+    const batchSize = getSafeSmcBackgroundBatchSize()
+
+    const { data, error: rpcError } = await supabase.rpc('smc_restart_period_batch_job', {
+      p_date_debut: period.p_date_debut,
+      p_date_fin: period.p_date_fin,
+      p_batch_size: batchSize,
+      p_job_name: SMC_BACKGROUND_JOB_NAME,
+      p_cron_job_name: SMC_BACKGROUND_CRON_JOB_NAME,
+      p_enable_cron: true,
+    })
+
+    if (rpcError) {
+      throw new Error(`smc_restart_period_batch_job : ${rpcError.message}`)
+    }
+
+    const row = Array.isArray(data) ? data[0] : data
+    await loadSmcBackgroundJobState(false)
+
+    return {
+      totalClients: Number(row?.total_clients || row?.total_queue || 0),
+      processedClients: Number(row?.processed_clients || 0),
+      batchSize,
+      runId,
+    }
+  }
+
+  async function syncLatestAutoImportRunWithSmcIfFinished(run: ImportPipelineRun | null) {
+    if (!run?.id || String(run.status || '').toLowerCase() !== 'smc_running') return run
+
+    const { data: stateData, error: stateError } = await supabase
+      .from('smc_batch_job_state')
+      .select('*')
+      .eq('job_name', SMC_BACKGROUND_JOB_NAME)
+      .maybeSingle()
+
+    if (stateError || !stateData) return run
+
+    const state = stateData as SmcBackgroundJobState
+    const total = Number(state.total_clients || 0)
+    const processed = Number(state.processed_clients || 0)
+    const nowIso = new Date().toISOString()
+
+    if (state.status === 'done') {
+      const finalReport = [
+        `Pipeline automatique #${run.id} — rapport final`,
+        `SMC : OK — ${processed}/${total} client(s) traité(s).`,
+        `Fin détectée : ${formatDateTime(nowIso)}.`,
+        '',
+        run.pre_smc_report ? 'Rappel rapport avant SMC :' : '',
+        run.pre_smc_report || '',
+      ].filter(Boolean).join('\n')
+
+      const patch = {
+        status: 'done',
+        current_step: 'Terminé',
+        finished_at: nowIso,
+        smc_finished_at: nowIso,
+        final_report: finalReport,
+        message: `Pipeline terminé avec succès. SMC ${processed}/${total} client(s).`,
+      }
+
+      const { error: updateError } = await supabase
+        .from('import_pipeline_runs')
+        .update(patch)
+        .eq('id', run.id)
+
+      if (!updateError) return { ...run, ...patch }
+    }
+
+    if (['error', 'failed', 'ko', 'cancelled', 'canceled'].includes(String(state.status || '').toLowerCase())) {
+      const patch = {
+        status: 'error',
+        current_step: 'Erreur SMC',
+        finished_at: nowIso,
+        smc_finished_at: nowIso,
+        error_message: `SMC terminé en statut ${state.status}. ${processed}/${total} client(s) traité(s).`,
+        final_report: `Pipeline automatique #${run.id} — erreur SMC\nStatut SMC : ${state.status}\nClients traités : ${processed}/${total}`,
+      }
+
+      const { error: updateError } = await supabase
+        .from('import_pipeline_runs')
+        .update(patch)
+        .eq('id', run.id)
+
+      if (!updateError) return { ...run, ...patch }
+    }
+
+    return run
+  }
+
+  async function runAutoImportPipelineFromBucket(pendingFiles: AutoImportStorageFile[]) {
+    const sortedPendingFiles = sortAutoImportFilesForPipeline(pendingFiles)
+    const fluxPeriod = getAutoImportFluxArticlesPeriod()
+    const fluxPeriods = getAutoImportFluxArticlesMonthlyPeriods()
+    const smcPeriod = getSmcPeriodCoveringDateInputs(manualStartDate, manualEndDate)
+
+    const run = await createAutoImportRun(sortedPendingFiles, fluxPeriod, smcPeriod)
+    const runId = Number(run.id)
+    const startedAt = run.started_at || new Date().toISOString()
+    const importedFiles: GenericRow[] = []
+
+    setImporting(true)
+
+    try {
+      for (const storageFile of sortedPendingFiles) {
+        await updateAutoImportRun(runId, {
+          current_step: `Import ${storageFile.kind} — ${storageFile.name}`,
+          status: 'running',
+        })
+
+        const pipelineFile = await createAutoImportPipelineFile(runId, storageFile)
+        let processingPath = ''
+
+        try {
+          processingPath = await moveAutoImportFile(storageFile.path, 'processing', storageFile.name, runId)
+          await updateAutoImportPipelineFile(pipelineFile.id, {
+            status: 'processing',
+            storage_path_processing: processingPath,
+          })
+
+          setAutoImportMessage(`Import ${storageFile.kind} en cours : ${storageFile.name}`)
+          const result = await importAutoStorageExcelWithExistingLogic(processingPath, storageFile)
+
+          const archivePath = await moveAutoImportFile(processingPath, 'archive', storageFile.name, runId)
+          await updateAutoImportPipelineFile(pipelineFile.id, {
+            status: 'imported',
+            imported_at: new Date().toISOString(),
+            storage_path_final: archivePath,
+          })
+
+          importedFiles.push({
+            type: storageFile.kind,
+            name: storageFile.name,
+            archivePath,
+            ...result,
+          })
+        } catch (fileError: any) {
+          const rejectedPath = processingPath
+            ? await moveAutoImportFile(processingPath, 'rejected', storageFile.name, runId).catch(() => processingPath)
+            : storageFile.path
+
+          await updateAutoImportPipelineFile(pipelineFile.id, {
+            status: 'error',
+            storage_path_final: rejectedPath,
+            error_message: fileError?.message || String(fileError),
+          })
+
+          throw fileError
+        }
+      }
+
+      await updateAutoImportRun(runId, {
+        current_step: `Rebuild flux_articles ${AUTO_IMPORT_FLUX_ARTICLES_MONTHS_BACK} mois`,
+        status: 'running',
+      })
+
+      setAutoImportMessage(`Rebuild flux_articles sur ${AUTO_IMPORT_FLUX_ARTICLES_MONTHS_BACK} mois, mois par mois…`)
+      await runFluxArticlesForPeriods(
+        fluxPeriods,
+        (detail) => setAutoImportMessage(detail),
+        'Pipeline flux_articles'
+      )
+
+      const preSmcReport = formatAutoImportPreSmcReport({
+        runId,
+        startedAt,
+        importedFiles,
+        fluxPeriods,
+        smcPeriod,
+      })
+
+      await updateAutoImportRun(runId, {
+        status: 'pre_smc_done',
+        current_step: 'Rapport avant SMC généré',
+        pre_smc_report_at: new Date().toISOString(),
+        pre_smc_report: preSmcReport,
+      })
+
+      await updateAutoImportRun(runId, {
+        status: 'smc_running',
+        current_step: 'SMC en arrière-plan',
+        smc_started_at: new Date().toISOString(),
+        final_report:
+          `Pipeline automatique #${runId}\n` +
+          `Imports et flux_articles terminés.\n` +
+          `SMC lancé en arrière-plan sur ${smcPeriod.label}.\n` +
+          `Clique sur Actualiser statut pour produire le rapport final dès que SMC est terminé.`,
+      })
+
+      const smcLaunch = await startSmcBackgroundJobFromPipeline(smcPeriod, runId)
+
+      return {
+        runId,
+        message:
+          `Job global #${runId} lancé. Imports + flux_articles OK. ` +
+          `SMC lancé en arrière-plan : ${smcLaunch.processedClients}/${smcLaunch.totalClients} client(s), lots de ${smcLaunch.batchSize}.`,
+      }
+    } catch (pipelineError: any) {
+      const msg = pipelineError?.message || String(pipelineError)
+      await updateAutoImportRun(runId, {
+        status: 'error',
+        current_step: 'Erreur pipeline',
+        finished_at: new Date().toISOString(),
+        error_message: msg,
+        final_report: `Pipeline automatique #${runId} — ERREUR\n${msg}`,
+      }).catch(() => undefined)
+      throw pipelineError
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  async function handleStartAutoImportPipeline() {
+    if (autoImportRunning || autoImportUploading || importing || maintenanceLoading) return
+
+    setAutoImportRunning(true)
+    setAutoImportError(null)
+    setAutoImportMessage(null)
+
+    try {
+      const storageFiles = await fetchAutoImportStorageFiles()
+      setAutoImportStorageFiles(storageFiles)
+
+      const pendingFiles = storageFiles.filter((file) => file.folder === 'pending')
+      if (!pendingFiles.length) {
+        throw new Error('Aucun fichier à traiter dans commercial-imports/pending.')
+      }
+
+      const invalidPending = pendingFiles.filter((file) => !isValidAutoImportFileName(file.name))
+      if (invalidPending.length) {
+        throw new Error(
+          'Le dossier pending contient des fichiers non conformes : ' +
+          invalidPending.map((file) => file.name).join(', ') +
+          '. Déplace-les en rejected ou renomme-les avant de lancer le job.'
+        )
+      }
+
+      const pendingKindCounts = new Map<AutoImportFileKind, number>()
+      pendingFiles.forEach((file) => {
+        pendingKindCounts.set(file.kind, (pendingKindCounts.get(file.kind) || 0) + 1)
+      })
+
+      const duplicatePendingKinds = Array.from(pendingKindCounts.entries())
+        .filter(([kind, count]) => kind !== 'Invalide' && count > 1)
+        .map(([kind]) => kind)
+
+      if (duplicatePendingKinds.length) {
+        throw new Error(
+          `Le dossier pending contient plusieurs fichiers du même type (${duplicatePendingKinds.join(', ')}). ` +
+          'Garde un seul fichier par type avant de lancer le job global.'
+        )
+      }
+
+      const fluxPeriod = getAutoImportFluxArticlesPeriod()
+      const smcPeriod = getSmcPeriodCoveringDateInputs(manualStartDate, manualEndDate)
+
+      const confirmed = window.confirm(
+        `Lancer le job global serveur ?\n\n` +
+        `Fichiers pending : ${pendingFiles.map((file) => file.name).join(', ')}\n\n` +
+        `Flux articles : ${fluxPeriod.label} (${AUTO_IMPORT_FLUX_ARTICLES_MONTHS_BACK} mois), mois par mois.\n` +
+        `SMC : ${smcPeriod.label}.\n\n` +
+        `Le traitement sera déclenché côté Supabase Edge Function (${AUTO_IMPORT_EDGE_FUNCTION_NAME}). ` +
+        `Tu pourras fermer le front après confirmation de création du run : l'écran ne servira plus qu'au suivi des rapports.`
+      )
+
+      if (!confirmed) return
+
+      setAutoImportMessage(
+        `Création du job serveur via ${AUTO_IMPORT_EDGE_FUNCTION_NAME}… ` +
+        'Après confirmation, tu peux fermer cet onglet et revenir plus tard pour suivre les rapports.'
+      )
+
+      const { data, error: invokeError } = await supabase.functions.invoke(AUTO_IMPORT_EDGE_FUNCTION_NAME, {
+        body: {
+          action: 'start',
+          bucket: AUTO_IMPORT_BUCKET,
+          flux_months_back: AUTO_IMPORT_FLUX_ARTICLES_MONTHS_BACK,
+          smc_date_debut: smcPeriod.p_date_debut,
+          smc_date_fin: smcPeriod.p_date_fin,
+          smc_batch_size: getSafeSmcBackgroundBatchSize(),
+          expected_files: pendingFiles.map((file) => ({
+            name: file.name,
+            path: file.path,
+            kind: file.kind,
+          })),
+        },
+      })
+
+      if (invokeError) {
+        throw new Error(
+          `${AUTO_IMPORT_EDGE_FUNCTION_NAME} : ${invokeError.message}. ` +
+          `Déploie d'abord la Supabase Edge Function fournie, puis relance le job.`
+        )
+      }
+
+      const runId = Number((data as any)?.run_id || (data as any)?.runId || 0)
+      setAutoImportMessage(
+        `Job serveur${runId ? ` #${runId}` : ''} créé. ` +
+        `Le serveur va importer les fichiers, reconstruire flux_articles, produire le rapport avant SMC, puis lancer SMC automatiquement. ` +
+        `Tu peux fermer le front ; utilise Actualiser statut pour suivre l'avancement.`
+      )
+
+      await loadAutomaticImportDashboard(false)
+      await loadStats()
+      await loadRows(selectedConfig)
+    } catch (e: any) {
+      setAutoImportError(e?.message || String(e))
+      setAutoImportMessage(null)
+    } finally {
+      setAutoImportRunning(false)
+    }
+  }
+
+  function getAutoImportRunDuration(run: ImportPipelineRun | null) {
+    if (!run?.started_at) return '—'
+    const end = run.finished_at || run.updated_at || null
+    if (!end) return '—'
+    const startMs = new Date(run.started_at).getTime()
+    const endMs = new Date(end).getTime()
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) return '—'
+    const seconds = Math.round((endMs - startMs) / 1000)
+    if (seconds < 60) return `${seconds} s`
+    return `${Math.floor(seconds / 60)} min ${seconds % 60} s`
+  }
+
+  function getAutoImportFileDisplayPath(file: ImportPipelineFile) {
+    return (
+      file.storage_path_final ||
+      file.storage_path_processing ||
+      file.storage_path_initial ||
+      file.original_filename ||
+      '—'
+    )
+  }
+
+
+
+  const latestAutoImportRun = autoImportPipelineRuns[0] || null
+  const latestSuccessfulAutoImportRun = autoImportPipelineRuns.find((run) => isAutoImportRunSuccess(run.status)) || null
+  const autoImportPendingFiles = autoImportStorageFiles.filter((file) => file.folder === 'pending')
+  const autoImportProcessingFiles = autoImportStorageFiles.filter((file) => file.folder === 'processing')
+  const autoImportRejectedFiles = autoImportStorageFiles.filter((file) => file.folder === 'rejected')
+  const autoImportArchivedFiles = autoImportStorageFiles.filter((file) => file.folder === 'archive')
+  const autoImportBusy = autoImportLoading || autoImportUploading || autoImportRunning
+  const latestAutoImportReport = getPipelineRunReport(latestAutoImportRun, autoImportReportTab)
+
   const currentStats = stats[selectedConfig.key]
 
   return (
@@ -4495,6 +5446,267 @@ export default function ImportsParametragePage() {
               </div>
             </div>
           )}
+        </section>
+
+
+        <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+            <div>
+              <h2 className="text-lg font-black tracking-tight">Pipeline automatique serveur — fichiers & job global</h2>
+              <p className="mt-1 max-w-4xl text-sm text-slate-600">
+                Dépôt dans le bucket <b>{AUTO_IMPORT_BUCKET}</b>, dossier <b>pending</b>. Les fichiers attendus sont des Excel .xlsx
+                dont le nom commence par <b>Activite</b>, <b>Facture</b> ou <b>Devis</b>. Les imports existants ne sont pas modifiés :
+                ce bloc ne fait que charger les fichiers, lancer le job global et afficher les rapports.
+                Après import, le pipeline automatique ne relance pas les agrégats rapides séparément ; il relance <b>flux_articles</b> sur les <b>{AUTO_IMPORT_FLUX_ARTICLES_MONTHS_BACK} derniers mois</b>, mois par mois, génère le rapport avant SMC, puis lance SMC automatiquement.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <label className="cursor-pointer rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-slate-800">
+                {autoImportUploading ? 'Chargement…' : 'Charger fichier(s) pending'}
+                <input
+                  type="file"
+                  accept=".xlsx"
+                  multiple
+                  className="hidden"
+                  onChange={handleAutoImportFileUpload}
+                  disabled={autoImportBusy || importing || maintenanceLoading}
+                />
+              </label>
+              <button
+                type="button"
+                onClick={handleStartAutoImportPipeline}
+                disabled={autoImportBusy || importing || maintenanceLoading || autoImportPendingFiles.length === 0}
+                className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {autoImportRunning ? 'Job global…' : 'Lancer job global'}
+              </button>
+              <button
+                type="button"
+                onClick={() => loadAutomaticImportDashboard(true)}
+                disabled={autoImportBusy}
+                className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Actualiser statut
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <div className="text-xs font-black uppercase tracking-wide text-slate-500">Dernier job global</div>
+              <div className="mt-2 flex items-center gap-2">
+                <span className={`rounded-full border px-2.5 py-1 text-xs font-black ${statusBadgeClass(latestAutoImportRun?.status)}`}>
+                  {latestAutoImportRun?.status || 'Aucun'}
+                </span>
+                {latestAutoImportRun?.current_step && (
+                  <span className="truncate text-xs font-bold text-slate-600">{latestAutoImportRun.current_step}</span>
+                )}
+              </div>
+              <div className="mt-2 text-sm font-bold text-slate-900">
+                Début : {formatDateTime(latestAutoImportRun?.started_at || null)}
+              </div>
+              <div className="text-xs font-semibold text-slate-500">
+                Fin : {formatDateTime(latestAutoImportRun?.finished_at || null)} · Durée : {getAutoImportRunDuration(latestAutoImportRun)}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+              <div className="text-xs font-black uppercase tracking-wide text-emerald-800">Dernière bonne exécution</div>
+              <div className="mt-2 text-lg font-black text-emerald-950">
+                {latestSuccessfulAutoImportRun
+                  ? formatDateTime(latestSuccessfulAutoImportRun.finished_at || latestSuccessfulAutoImportRun.smc_finished_at || latestSuccessfulAutoImportRun.started_at || null)
+                  : '—'}
+              </div>
+              <div className="mt-1 text-xs font-semibold text-emerald-700">
+                {latestSuccessfulAutoImportRun
+                  ? `Run n°${latestSuccessfulAutoImportRun.id || '—'} · ${latestSuccessfulAutoImportRun.status || 'OK'}`
+                  : 'Aucun run terminé avec succès dans les derniers runs.'}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+              <div className="text-xs font-black uppercase tracking-wide text-amber-800">Fichiers pending</div>
+              <div className="mt-2 text-lg font-black text-amber-950">{autoImportPendingFiles.length}</div>
+              <div className="mt-1 text-xs font-semibold text-amber-700">
+                {autoImportPendingFiles.length
+                  ? autoImportPendingFiles.map((file) => `${file.kind}: ${file.name}`).join(' · ')
+                  : 'Aucun fichier en attente.'}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
+              <div className="text-xs font-black uppercase tracking-wide text-blue-800">Processing / rejetés / archive</div>
+              <div className="mt-2 text-lg font-black text-blue-950">
+                {autoImportProcessingFiles.length} / {autoImportRejectedFiles.length} / {autoImportArchivedFiles.length}
+              </div>
+              <div className="mt-1 text-xs font-semibold text-blue-700">
+                Suivi direct du bucket {AUTO_IMPORT_BUCKET}.
+              </div>
+            </div>
+          </div>
+
+          {(autoImportMessage || autoImportError) && (
+            <div className="mt-4 space-y-2">
+              {autoImportMessage && (
+                <div className="rounded-xl bg-emerald-50 p-3 text-sm font-bold text-emerald-800">
+                  {autoImportMessage}
+                </div>
+              )}
+              {autoImportError && (
+                <pre className="whitespace-pre-wrap rounded-xl bg-red-50 p-3 text-sm font-bold text-red-700">
+                  {autoImportError}
+                </pre>
+              )}
+            </div>
+          )}
+
+          <div className="mt-4 grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-black uppercase tracking-wide text-slate-700">Fichiers du bucket</h3>
+                  <p className="text-xs text-slate-500">Le job ne consomme que le dossier pending. Les autres dossiers sont affichés pour contrôle.</p>
+                </div>
+                {autoImportLoading && <span className="rounded-full bg-blue-100 px-3 py-1 text-xs font-bold text-blue-700">Lecture…</span>}
+              </div>
+
+              <div className="max-h-[360px] overflow-auto rounded-xl border border-slate-200 bg-white">
+                <table className="min-w-full border-collapse text-xs">
+                  <thead className="sticky top-0 bg-slate-100">
+                    <tr>
+                      <th className="border-b border-slate-200 px-3 py-2 text-left">Dossier</th>
+                      <th className="border-b border-slate-200 px-3 py-2 text-left">Type</th>
+                      <th className="border-b border-slate-200 px-3 py-2 text-left">Fichier</th>
+                      <th className="border-b border-slate-200 px-3 py-2 text-right">Taille</th>
+                      <th className="border-b border-slate-200 px-3 py-2 text-left">MAJ</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {autoImportStorageFiles.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="px-3 py-6 text-center font-semibold text-slate-500">
+                          Aucun fichier détecté dans pending / processing / rejected / archive.
+                        </td>
+                      </tr>
+                    ) : (
+                      autoImportStorageFiles.map((file) => (
+                        <tr key={file.path} className="hover:bg-slate-50">
+                          <td className="whitespace-nowrap border-b border-slate-100 px-3 py-2">
+                            <span className={`rounded-full border px-2 py-0.5 text-xs font-black ${folderBadgeClass(file.folder)}`}>
+                              {file.folder}
+                            </span>
+                          </td>
+                          <td className="whitespace-nowrap border-b border-slate-100 px-3 py-2">
+                            <span className={`rounded-full border px-2 py-0.5 text-xs font-black ${fileKindBadgeClass(file.kind)}`}>
+                              {file.kind}
+                            </span>
+                          </td>
+                          <td className="max-w-[360px] truncate border-b border-slate-100 px-3 py-2 font-semibold" title={file.path}>
+                            {file.name}
+                          </td>
+                          <td className="whitespace-nowrap border-b border-slate-100 px-3 py-2 text-right font-semibold">
+                            {formatFileSize(file.size)}
+                          </td>
+                          <td className="whitespace-nowrap border-b border-slate-100 px-3 py-2 text-slate-500">
+                            {formatDateTime(file.updated_at || file.created_at)}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <h3 className="text-sm font-black uppercase tracking-wide text-slate-700">Rapports du dernier job</h3>
+                  <p className="text-xs text-slate-500">
+                    Rapport intermédiaire avant SMC, rapport final et erreurs remontées par le run.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {(['pre_smc', 'final', 'errors'] as AutoImportReportTab[]).map((tab) => {
+                    const label = tab === 'pre_smc' ? 'Avant SMC' : tab === 'final' ? 'Final' : 'Erreurs'
+                    return (
+                      <button
+                        key={tab}
+                        type="button"
+                        onClick={() => setAutoImportReportTab(tab)}
+                        className={`rounded-xl border px-3 py-2 text-xs font-black ${
+                          autoImportReportTab === tab
+                            ? 'border-slate-900 bg-slate-900 text-white'
+                            : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-100'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-slate-200 bg-white p-3">
+                <div className="mb-2 flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-500">
+                  <span>Run n°{latestAutoImportRun?.id || '—'}</span>
+                  <span>·</span>
+                  <span>Rapport avant SMC : {formatDateTime(latestAutoImportRun?.pre_smc_report_at || null)}</span>
+                  <span>·</span>
+                  <span>SMC fin : {formatDateTime(latestAutoImportRun?.smc_finished_at || null)}</span>
+                </div>
+                <pre className="max-h-[260px] overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950 p-3 text-xs font-semibold text-slate-50">
+                  {latestAutoImportReport}
+                </pre>
+              </div>
+
+              <div className="mt-3 rounded-xl border border-slate-200 bg-white">
+                <div className="border-b border-slate-200 px-3 py-2 text-xs font-black uppercase tracking-wide text-slate-600">
+                  Fichiers rattachés au dernier run
+                </div>
+                <div className="max-h-[190px] overflow-auto">
+                  <table className="min-w-full border-collapse text-xs">
+                    <thead className="sticky top-0 bg-slate-100">
+                      <tr>
+                        <th className="border-b border-slate-200 px-3 py-2 text-left">Type</th>
+                        <th className="border-b border-slate-200 px-3 py-2 text-left">Statut</th>
+                        <th className="border-b border-slate-200 px-3 py-2 text-left">Fichier</th>
+                        <th className="border-b border-slate-200 px-3 py-2 text-left">Erreur</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {autoImportPipelineFiles.length === 0 ? (
+                        <tr>
+                          <td colSpan={4} className="px-3 py-4 text-center font-semibold text-slate-500">
+                            Aucun fichier rattaché au dernier run.
+                          </td>
+                        </tr>
+                      ) : (
+                        autoImportPipelineFiles.map((file) => (
+                          <tr key={file.id || `${file.run_id}-${file.original_filename}`} className="align-top hover:bg-slate-50">
+                            <td className="whitespace-nowrap border-b border-slate-100 px-3 py-2 font-bold">
+                              {file.file_type || '—'}
+                            </td>
+                            <td className="whitespace-nowrap border-b border-slate-100 px-3 py-2">
+                              <span className={`rounded-full border px-2 py-0.5 text-xs font-black ${statusBadgeClass(file.status)}`}>
+                                {file.status || '—'}
+                              </span>
+                            </td>
+                            <td className="max-w-[260px] truncate border-b border-slate-100 px-3 py-2 font-semibold" title={getAutoImportFileDisplayPath(file)}>
+                              {getAutoImportFileDisplayPath(file)}
+                            </td>
+                            <td className="max-w-[360px] border-b border-slate-100 px-3 py-2 text-red-700">
+                              {file.error_message || '—'}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
         </section>
 
         <DataReconciliationPanel />

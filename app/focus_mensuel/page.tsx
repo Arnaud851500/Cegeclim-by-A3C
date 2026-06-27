@@ -648,9 +648,9 @@ export default function FocusMensuelPage() {
     <section style={styles.page}>
       <div style={styles.headerCard}>
         <div>
-          <h1 style={styles.title}>Focus activité mensuelle</h1>
+          <h1 style={styles.title}>Focus activité mensuelle (maille jour)</h1>
           <div style={styles.subtitle}>
-            Vision quotidienne à la maille jour · focus {formatDateFr(focusDate)} · moyennes sur {businessDayBasis.label} · faits marquants sur 7 jours calendaires.
+            Focus {formatDateFr(focusDate)} · Moyennes sur {businessDayBasis.label} · Faits marquants sur 7 jours calendaires.
           </div>
         </div>
         <div style={styles.headerActions}>
@@ -677,12 +677,7 @@ export default function FocusMensuelPage() {
       {cacheInfo && <div style={styles.successBox}>{cacheInfo}</div>}
       {loading && <div style={styles.infoBox}>Chargement des données journalières depuis le cache…</div>}
       {rebuildingCache && <div style={styles.infoBox}>Reconstruction du cache mensuel en cours…</div>}
-      <div style={styles.neutralBox}>
-        Moyennes mensuelles calculées sur <b>{businessDayBasis.label}</b> jusqu’au {formatDateFr(focusDate)}
-        {businessDayBasis.blDaysCount > 0
-          ? `, en excluant naturellement les jours sans BL.`
-          : `, faute de BL détecté dans le périmètre filtré.`}
-      </div>
+
 
       <div style={styles.kpiGrid}>
         {kpiCards.map((card) => <KpiCard key={card.type} card={card} mode={viewMode} basisLabel={businessDayBasis.label} />)}
