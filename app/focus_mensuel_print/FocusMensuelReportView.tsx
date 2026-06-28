@@ -716,15 +716,32 @@ function FocusMensuelPageContent() {
       {isPdfMode && (
         <style>{`
           @page { size: A4 landscape; margin: 3mm 3mm 3mm 3mm; }
-          html, body, #__next, main {
+          html, body {
             margin: 0 !important;
             padding: 0 !important;
             background: #eef5fb !important;
+            background-color: #eef5fb !important;
             background-image: none !important;
           }
-          body, * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
-          body::before, body::after, main::before, main::after { display: none !important; content: none !important; }
-          [style*="background-image"] { background-image: none !important; }
+          body, * {
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
+          }
+          body::before,
+          body::after,
+          main::before,
+          main::after,
+          section::before,
+          section::after {
+            content: none !important;
+            display: none !important;
+            background: transparent !important;
+            background-image: none !important;
+            box-shadow: none !important;
+            filter: none !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+          }
           [data-focus-report-ready] {
             width: 100% !important;
             max-width: 100% !important;
@@ -732,10 +749,47 @@ function FocusMensuelPageContent() {
             padding: 8px !important;
             color: #0f172a !important;
             background: #eef5fb !important;
+            background-color: #eef5fb !important;
             background-image: none !important;
             isolation: isolate !important;
+            filter: none !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+          }
+          [data-focus-report-ready] *,
+          [data-focus-report-ready] *::before,
+          [data-focus-report-ready] *::after {
+            filter: none !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
           }
           [data-no-print="true"], .focus-pdf-header-actions { display: none !important; }
+          .focus-pdf-brand-header,
+          .focus-pdf-filters,
+          .focus-pdf-kpi-grid > div,
+          .focus-pdf-chart-box,
+          .focus-pdf-section-card {
+            box-shadow: none !important;
+            filter: none !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+            background-image: none !important;
+          }
+          .focus-pdf-brand-header,
+          .focus-pdf-filters,
+          .focus-pdf-kpi-grid > div,
+          .focus-pdf-chart-box,
+          .focus-pdf-section-card,
+          .focus-pdf-table-wrap,
+          table,
+          thead,
+          tbody,
+          tr,
+          th,
+          td {
+            position: relative !important;
+            z-index: 1 !important;
+          }
           .focus-pdf-brand-header {
             display: flex !important;
             align-items: center !important;
@@ -744,6 +798,8 @@ function FocusMensuelPageContent() {
             padding: 4px 8px 7px !important;
             margin-bottom: 5px !important;
             background: #ffffff !important;
+            background-color: #ffffff !important;
+            background-image: none !important;
             border-bottom: 1px solid #e5e7eb !important;
             break-inside: avoid !important;
             page-break-inside: avoid !important;
@@ -777,6 +833,8 @@ function FocusMensuelPageContent() {
             border-radius: 6px !important;
             padding: 5px 8px !important;
             background: #ffffff !important;
+            background-color: #ffffff !important;
+            background-image: none !important;
             font-size: 10px !important;
             font-weight: 900 !important;
             color: #0f172a !important;
@@ -803,12 +861,19 @@ function FocusMensuelPageContent() {
           .focus-pdf-section-card, .focus-pdf-chart-box {
             padding: 8px !important;
             border-radius: 10px !important;
+            background: #ffffff !important;
+            background-color: #ffffff !important;
+            background-image: none !important;
+            box-shadow: none !important;
             break-inside: avoid !important;
             page-break-inside: avoid !important;
           }
-          .focus-pdf-section-card, .focus-pdf-chart-box, .focus-pdf-kpi-grid > div, .focus-pdf-filters, .focus-pdf-brand-header {
+          .focus-pdf-kpi-grid > div,
+          .focus-pdf-filters {
             background: #ffffff !important;
+            background-color: #ffffff !important;
             background-image: none !important;
+            box-shadow: none !important;
           }
           .focus-pdf-chart-box svg { height: 185px !important; }
           .focus-pdf-table-wrap { max-height: none !important; overflow: hidden !important; }

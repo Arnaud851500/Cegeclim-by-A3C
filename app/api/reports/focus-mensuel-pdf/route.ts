@@ -263,27 +263,72 @@ export async function POST(req: NextRequest) {
     await page.addStyleTag({
       content: `
         @page { size: A4 landscape; margin: 3mm 3mm 3mm 3mm; }
-        html, body, #__next, main {
+        html, body {
           margin: 0 !important;
           padding: 0 !important;
           background: #eef5fb !important;
+          background-color: #eef5fb !important;
           background-image: none !important;
         }
-        body { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
-        * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
-        body::before, body::after, main::before, main::after { display: none !important; content: none !important; }
-        [style*="background-image"] { background-image: none !important; }
-        [data-focus-report-ready], [data-report-ready] {
+        body,
+        * {
+          -webkit-print-color-adjust: exact !important;
+          print-color-adjust: exact !important;
+        }
+        body::before,
+        body::after,
+        main::before,
+        main::after,
+        section::before,
+        section::after {
+          content: none !important;
+          display: none !important;
+          background: transparent !important;
+          background-image: none !important;
+          box-shadow: none !important;
+          filter: none !important;
+          backdrop-filter: none !important;
+          -webkit-backdrop-filter: none !important;
+        }
+        [data-focus-report-ready],
+        [data-report-ready] {
           width: 100% !important;
           max-width: 100% !important;
           box-sizing: border-box !important;
           background: #eef5fb !important;
+          background-color: #eef5fb !important;
           background-image: none !important;
           isolation: isolate !important;
+          filter: none !important;
+          backdrop-filter: none !important;
+          -webkit-backdrop-filter: none !important;
         }
-        .focus-pdf-section-card, .focus-pdf-chart-box, .focus-pdf-kpi-grid > div, .focus-pdf-filters, .focus-pdf-brand-header {
-          background: #ffffff !important;
+        [data-focus-report-ready] *,
+        [data-focus-report-ready] *::before,
+        [data-focus-report-ready] *::after {
+          filter: none !important;
+          backdrop-filter: none !important;
+          -webkit-backdrop-filter: none !important;
+        }
+        .focus-pdf-brand-header,
+        .focus-pdf-filters,
+        .focus-pdf-kpi-grid > div,
+        .focus-pdf-chart-box,
+        .focus-pdf-section-card {
           background-image: none !important;
+          box-shadow: none !important;
+          filter: none !important;
+          backdrop-filter: none !important;
+          -webkit-backdrop-filter: none !important;
+        }
+        .focus-pdf-brand-header,
+        .focus-pdf-filters,
+        .focus-pdf-kpi-grid > div,
+        .focus-pdf-chart-box,
+        .focus-pdf-section-card,
+        .focus-pdf-table-wrap {
+          position: relative !important;
+          z-index: 1 !important;
         }
         .no-print, [data-no-print="true"] { display: none !important; }
       `,
