@@ -70,6 +70,14 @@ const DOC_COLORS: Record<DocType, string> = {
   Factures: '#16a34a',
 }
 
+const REPORT_BUCKET = 'commercial-imports'
+const REPORT_PATH = 'reports/focus-mensuel/Rapport_activite_quotidien.pdf'
+const REPORT_FILENAME = "Rapport d'activité quotidien.pdf"
+
+function isViewMode(value: string | null | undefined): value is ViewMode {
+  return value === 'montant_ht' || value === 'nb_documents' || value === 'quantite_pertinente'
+}
+
 function todayYmd() {
   const d = new Date()
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
@@ -111,6 +119,15 @@ function formatDateFr(ymd: string | null | undefined) {
   const m = String(ymd).match(/^(\d{4})-(\d{2})-(\d{2})/)
   if (!m) return String(ymd)
   return `${m[3]}/${m[2]}/${m[1]}`
+}
+
+function formatMonthFr(month: string | null | undefined) {
+  if (!month) return '—'
+  const m = String(month).match(/^(\d{4})-(\d{2})$/)
+  if (!m) return String(month)
+  const date = new Date(Number(m[1]), Number(m[2]) - 1, 1)
+  const label = date.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' })
+  return label.charAt(0).toUpperCase() + label.slice(1)
 }
 
 function formatShortDate(ymd: string) {
@@ -445,13 +462,17 @@ function FocusMensuelPageContent() {
   const requestedMonth = searchParams?.get('month')
   const requestedFocusDate = searchParams?.get('focusDate') || searchParams?.get('focus_date')
   const requestedHorsStats = searchParams?.get('horsStatistiques') || searchParams?.get('hors_statistiques')
+  const requestedView = searchParams?.get('view')
+  const requestedAgence = searchParams?.get('agence') || ''
+  const requestedFamilleMacro = searchParams?.get('familleMacro') || searchParams?.get('famille_macro') || ''
+  const requestedCollaborateur = searchParams?.get('collaborateur') || ''
   const currentMonth = /^\d{4}-\d{2}$/.test(String(requestedMonth || '')) ? String(requestedMonth) : todayYmd().slice(0, 7)
   const [month, setMonth] = useState(currentMonth)
   const [focusDate, setFocusDate] = useState(/^\d{4}-\d{2}-\d{2}$/.test(String(requestedFocusDate || '')) ? String(requestedFocusDate) : pickDefaultFocusDate())
-  const [viewMode, setViewMode] = useState<ViewMode>('montant_ht')
-  const [agence, setAgence] = useState('')
-  const [familleMacro, setFamilleMacro] = useState('')
-  const [collaborateur, setCollaborateur] = useState('')
+  const [viewMode, setViewMode] = useState<ViewMode>(isViewMode(requestedView) ? requestedView : 'montant_ht')
+  const [agence, setAgence] = useState(requestedAgence)
+  const [familleMacro, setFamilleMacro] = useState(requestedFamilleMacro)
+  const [collaborateur, setCollaborateur] = useState(requestedCollaborateur)
   const [includeHorsStats, setIncludeHorsStats] = useState(isPdfMode || ['afficher', 'show', 'true', '1'].includes(String(requestedHorsStats || '').toLowerCase()))
   const [dailyRows, setDailyRows] = useState<DailyRow[]>([])
   const [highlightRows, setHighlightRows] = useState<HighlightRow[]>([])
@@ -459,6 +480,12 @@ function FocusMensuelPageContent() {
   const [rebuildingCache, setRebuildingCache] = useState(false)
   const [cacheInfo, setCacheInfo] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [reportEmailTo, setReportEmailTo] = useState('')
+  const [pdfLoading, setPdfLoading] = useState(false)
+  const [emailLoading, setEmailLoading] = useState(false)
+  const [reportMessage, setReportMessage] = useState<string | null>(null)
+  const [reportError, setReportError] = useState<string | null>(null)
+  const [lastGeneratedPdfPath, setLastGeneratedPdfPath] = useState(REPORT_PATH)
 
   const days = useMemo(() => daysInMonth(month), [month])
   const monthBegin = useMemo(() => monthStart(month), [month])
@@ -562,6 +589,129 @@ function FocusMensuelPageContent() {
     void loadHighlights()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusDate, agence, familleMacro, collaborateur, includeHorsStats])
+
+  useEffect(() => {
+    void (async () => {
+      const { data } = await supabase.auth.getSession()
+      const email = data.session?.user?.email || ''
+      if (email) setReportEmailTo((current) => current || email)
+    })()
+  }, [])
+
+  function buildReportPayload() {
+    return {
+      bucket: REPORT_BUCKET,
+      path: REPORT_PATH,
+      filename: REPORT_FILENAME,
+      month,
+      focus_date: focusDate,
+      hors_statistiques: includeHorsStats ? 'afficher' : 'masquer',
+      view: viewMode,
+      agence: agence || null,
+      famille_macro: familleMacro || null,
+      collaborateur: collaborateur || null,
+    }
+  }
+
+  async function getSessionAccessToken() {
+    const { data, error } = await supabase.auth.getSession()
+    if (error) throw error
+    const token = data.session?.access_token
+    if (!token) throw new Error('Session utilisateur absente : reconnecte-toi puis réessaie.')
+    return token
+  }
+
+  async function generateFocusPdf() {
+    setPdfLoading(true)
+    setReportError(null)
+    setReportMessage(null)
+
+    try {
+      const token = await getSessionAccessToken()
+      const response = await fetch('/api/reports/focus-mensuel-pdf', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(buildReportPayload()),
+      })
+
+      const result = await response.json().catch(() => null)
+      if (!response.ok || !result?.ok) {
+        throw new Error(result?.error || `Génération PDF impossible (${response.status})`)
+      }
+
+      setLastGeneratedPdfPath(result.path || REPORT_PATH)
+      setReportMessage(
+        `PDF généré : ${result.path || REPORT_PATH}${result.bytes ? ` · ${(Number(result.bytes) / 1024).toLocaleString('fr-FR', { maximumFractionDigits: 0 })} Ko` : ''}`
+      )
+      return result
+    } catch (exception: any) {
+      setReportError(exception?.message || String(exception))
+      throw exception
+    } finally {
+      setPdfLoading(false)
+    }
+  }
+
+  async function sendFocusReportEmail() {
+    const recipients = reportEmailTo.trim()
+    if (!recipients) {
+      setReportError('Renseigne au moins une adresse email destinataire.')
+      return
+    }
+
+    setEmailLoading(true)
+    setReportError(null)
+    setReportMessage(null)
+
+    try {
+      const token = await getSessionAccessToken()
+      const response = await fetch('/api/mail/send', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          to: recipients,
+          subject: `Rapport activité quotidienne - ${formatDateFr(focusDate)}`,
+          html: `
+            <p>Bonjour,</p>
+            <p>Tu trouveras en pièce jointe le rapport d'activité quotidien généré depuis l'écran Focus Mensuel.</p>
+            <p><strong>Périmètre :</strong> ${formatMonthFr(month)} · focus ${formatDateFr(focusDate)} · ${labelForMode(viewMode)}</p>
+            <p>Cordialement,</p>
+          `,
+          text: `Rapport d'activité quotidien - ${formatDateFr(focusDate)}\nPérimètre : ${formatMonthFr(month)} · ${labelForMode(viewMode)}`,
+          attachments: [
+            {
+              bucket: REPORT_BUCKET,
+              path: lastGeneratedPdfPath || REPORT_PATH,
+              filename: REPORT_FILENAME,
+              contentType: 'application/pdf',
+            },
+          ],
+          tags: [
+            { name: 'category', value: 'focus_mensuel' },
+            { name: 'document', value: 'rapport_activite_quotidien' },
+          ],
+        }),
+      })
+
+      const result = await response.json().catch(() => null)
+      if (!response.ok || !result?.ok) {
+        const resendMessage = result?.resend_response?.message || result?.resend_response?.error || ''
+        throw new Error(result?.error ? `${result.error}${resendMessage ? ` : ${resendMessage}` : ''}` : `Envoi email impossible (${response.status})`)
+      }
+
+      setReportMessage(`Email envoyé à ${Array.isArray(result.to) ? result.to.join(', ') : recipients}`)
+    } catch (exception: any) {
+      setReportError(exception?.message || String(exception))
+    } finally {
+      setEmailLoading(false)
+    }
+  }
 
 
   async function rebuildCacheForMonth() {
@@ -669,19 +819,17 @@ function FocusMensuelPageContent() {
         <div>
           <h1 style={styles.title}>Focus activité mensuelle</h1>
           <div style={styles.subtitle}>
-            Vision quotidienne à la maille jour ·{' '}
             <span style={styles.subtitleBasisNote}>
-              (moyennes mensuelles sur {businessDayBasis.label} jusqu’au {formatDateFr(focusDate)}
+              Moyennes mensuelles sur {businessDayBasis.label} jusqu’au {formatDateFr(focusDate)}
               {businessDayBasis.blDaysCount > 0
                 ? ', jours sans BL exclus'
                 : ', faute de BL détecté dans le périmètre filtré'}
-              )
             </span>{' '}
             <span style={styles.focusDayText}>Focus journée du : {formatDateFr(focusDate)}</span>
             {' '}· faits marquants sur 7 jours calendaires.
           </div>
         </div>
-        <div style={styles.headerActions}>
+        <div style={styles.headerActions} data-no-print="true">
           <button style={styles.secondaryButton} onClick={() => setFocusDate(todayYmd())}>Aujourd’hui</button>
           <button style={styles.secondaryButton} onClick={() => setFocusDate(addDaysYmd(todayYmd(), -1))}>Hier</button>
           <button style={styles.warningButton} onClick={rebuildCacheForMonth} disabled={rebuildingCache}>
@@ -700,6 +848,56 @@ function FocusMensuelPageContent() {
         <div style={styles.field}><label style={styles.label}>Collaborateur</label><select value={collaborateur} onChange={(e) => setCollaborateur(e.target.value)} style={styles.input}><option value="">Tous</option>{availableCollaborateurs.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
         <div style={styles.field}><label style={styles.label}>Hors statistiques</label><select value={includeHorsStats ? 'show' : 'hide'} onChange={(e) => setIncludeHorsStats(e.target.value === 'show')} style={styles.input}><option value="hide">Masquer</option><option value="show">Afficher</option></select></div>
       </div>
+
+      {!isPdfMode && (
+        <div style={styles.reportCard} data-no-print="true">
+          <div style={styles.reportHeader}>
+            <div>
+              <div style={styles.reportTitle}>Rapport PDF & email</div>
+              <div style={styles.reportSubtitle}>
+                Génère le PDF avec les filtres courants, le stocke dans <b>{REPORT_BUCKET}/{REPORT_PATH}</b>, puis l'envoie via la route email générique.
+              </div>
+            </div>
+            <div style={styles.reportActions}>
+              <button
+                type="button"
+                onClick={generateFocusPdf}
+                disabled={pdfLoading || emailLoading}
+                style={styles.secondaryButton}
+              >
+                {pdfLoading ? 'Génération PDF…' : 'Générer PDF'}
+              </button>
+              <button
+                type="button"
+                onClick={sendFocusReportEmail}
+                disabled={pdfLoading || emailLoading}
+                style={styles.primaryButton}
+              >
+                {emailLoading ? 'Envoi email…' : 'Envoyer PDF par email'}
+              </button>
+            </div>
+          </div>
+
+          <div style={styles.reportFormRow}>
+            <div style={styles.reportField}>
+              <label style={styles.label}>Destinataires</label>
+              <input
+                value={reportEmailTo}
+                onChange={(event) => setReportEmailTo(event.target.value)}
+                placeholder="adresse1@domaine.fr; adresse2@domaine.fr"
+                style={styles.reportInput}
+              />
+            </div>
+            <div style={styles.reportPathBox}>
+              <span style={styles.reportPathLabel}>PDF stocké</span>
+              <span style={styles.reportPathText}>{lastGeneratedPdfPath}</span>
+            </div>
+          </div>
+
+          {reportMessage && <div style={styles.successBox}>{reportMessage}</div>}
+          {reportError && <div style={styles.errorBox}>Erreur rapport : {reportError}</div>}
+        </div>
+      )}
 
       {error && <div style={styles.errorBox}>Erreur chargement focus mensuel : {error}</div>}
       {cacheInfo && <div style={styles.successBox}>{cacheInfo}</div>}
@@ -847,6 +1045,17 @@ const styles: Record<string, React.CSSProperties> = {
   errorBox: { background: '#fef2f2', color: '#b91c1c', border: '1px solid #fecaca', borderRadius: 14, padding: 12, marginBottom: 12, fontWeight: 900 },
   infoBox: { background: '#eff6ff', color: '#1d4ed8', border: '1px solid #bfdbfe', borderRadius: 14, padding: 12, marginBottom: 12, fontWeight: 900 },
   neutralBox: { background: '#f8fafc', color: '#334155', border: '1px solid #e2e8f0', borderRadius: 14, padding: 12, marginBottom: 12, fontWeight: 800 },
+  reportCard: { background: 'rgba(255,255,255,0.96)', border: '1px solid #dbeafe', borderRadius: 18, padding: 14, marginBottom: 14, boxShadow: '0 8px 22px rgba(15,23,42,0.06)' },
+  reportHeader: { display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'center', marginBottom: 12 },
+  reportTitle: { fontSize: 16, fontWeight: 950, color: '#0f172a', marginBottom: 4 },
+  reportSubtitle: { fontSize: 12, fontWeight: 750, color: '#64748b', lineHeight: 1.45 },
+  reportActions: { display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 },
+  reportFormRow: { display: 'grid', gridTemplateColumns: 'minmax(280px, 1fr) minmax(280px, 1fr)', gap: 12, alignItems: 'end' },
+  reportField: { display: 'flex', flexDirection: 'column', gap: 5 },
+  reportInput: { border: '1px solid #cbd5e1', borderRadius: 10, padding: '10px 12px', background: '#fff', fontWeight: 800, minWidth: 0, width: '100%', boxSizing: 'border-box' },
+  reportPathBox: { border: '1px solid #e2e8f0', borderRadius: 12, padding: '9px 11px', background: '#f8fafc', display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0 },
+  reportPathLabel: { fontSize: 11, fontWeight: 950, color: '#64748b', textTransform: 'uppercase' },
+  reportPathText: { fontSize: 12, fontWeight: 850, color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   kpiGrid: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(220px, 1fr))', gap: 14, marginBottom: 14 },
   kpiCard: { background: '#fff', border: '1px solid #e2e8f0', borderRadius: 18, padding: 14, boxShadow: '0 8px 22px rgba(15,23,42,0.06)' },
   kpiHeader: { display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', marginBottom: 10 },

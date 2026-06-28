@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
+import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import chromium from '@sparticuz/chromium'
 import puppeteer from 'puppeteer-core'
 
@@ -13,8 +13,20 @@ type PdfRequest = {
   path?: string
   month?: string
   focus_date?: string
+  focusDate?: string
   hors_statistiques?: 'afficher' | 'masquer' | string
+  horsStatistiques?: 'afficher' | 'masquer' | string
+  view?: string
+  agence?: string | null
+  famille_macro?: string | null
+  familleMacro?: string | null
+  collaborateur?: string | null
   filename?: string
+}
+
+type AuthorizedCaller = {
+  mode: 'trusted_secret' | 'user_session'
+  email?: string | null
 }
 
 function getRequiredEnv(name: string) {
@@ -24,11 +36,49 @@ function getRequiredEnv(name: string) {
 }
 
 function appendParam(url: URL, key: string, value: string | undefined | null) {
-  if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, value)
+  if (value !== undefined && value !== null && String(value).trim() !== '') {
+    url.searchParams.set(key, String(value))
+  }
 }
 
 function redactSecretInUrl(url: string) {
   return url.replace(/(render_secret=)[^&]+/gi, '$1***')
+}
+
+function sanitizeError(error: unknown) {
+  if (error instanceof Error) return error.message
+  return String(error)
+}
+
+function buildSupabaseAdmin() {
+  const supabaseUrl = getRequiredEnv('SUPABASE_URL')
+  const serviceRoleKey = getRequiredEnv('SUPABASE_SERVICE_ROLE_KEY')
+  return createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
+}
+
+async function authorizeRequest(req: NextRequest, supabaseAdmin: SupabaseClient): Promise<AuthorizedCaller> {
+  const trustedSecret = process.env.REPORT_PDF_RENDER_SECRET || process.env.INTERNAL_API_SECRET || ''
+  const incomingSecret = req.headers.get('x-report-secret') || req.headers.get('x-internal-secret') || ''
+
+  if (trustedSecret && incomingSecret && incomingSecret === trustedSecret) {
+    return { mode: 'trusted_secret' }
+  }
+
+  const authHeader = req.headers.get('authorization') || ''
+  const token = authHeader.toLowerCase().startsWith('bearer ')
+    ? authHeader.slice(7).trim()
+    : ''
+
+  if (!token) {
+    throw new Error('Unauthorized : ajoute un Bearer token utilisateur ou le header interne x-report-secret.')
+  }
+
+  const { data, error } = await supabaseAdmin.auth.getUser(token)
+  if (error || !data?.user) {
+    throw new Error(`Unauthorized : session utilisateur invalide${error?.message ? ` (${error.message})` : ''}.`)
+  }
+
+  return { mode: 'user_session', email: data.user.email }
 }
 
 function buildFocusPrintUrl(payload: PdfRequest = {}) {
@@ -36,15 +86,22 @@ function buildFocusPrintUrl(payload: PdfRequest = {}) {
   const renderSecret = getRequiredEnv('REPORT_PDF_RENDER_SECRET')
 
   const focusUrl = new URL(focusBaseUrl)
+  const focusDate = payload.focus_date || payload.focusDate
+  const horsStatistiques = payload.hors_statistiques || payload.horsStatistiques || 'afficher'
+  const familleMacro = payload.famille_macro || payload.familleMacro || null
 
   appendParam(focusUrl, 'pdf', '1')
   appendParam(focusUrl, 'render_secret', renderSecret)
   appendParam(focusUrl, 'month', payload.month)
-  appendParam(focusUrl, 'focusDate', payload.focus_date)
-  appendParam(focusUrl, 'focus_date', payload.focus_date)
-  appendParam(focusUrl, 'horsStatistiques', payload.hors_statistiques || 'afficher')
-  appendParam(focusUrl, 'hors_statistiques', payload.hors_statistiques || 'afficher')
-  appendParam(focusUrl, 'view', 'montant_ht')
+  appendParam(focusUrl, 'focusDate', focusDate)
+  appendParam(focusUrl, 'focus_date', focusDate)
+  appendParam(focusUrl, 'horsStatistiques', horsStatistiques)
+  appendParam(focusUrl, 'hors_statistiques', horsStatistiques)
+  appendParam(focusUrl, 'view', payload.view || 'montant_ht')
+  appendParam(focusUrl, 'agence', payload.agence)
+  appendParam(focusUrl, 'familleMacro', familleMacro)
+  appendParam(focusUrl, 'famille_macro', familleMacro)
+  appendParam(focusUrl, 'collaborateur', payload.collaborateur)
 
   return focusUrl
 }
@@ -58,7 +115,10 @@ function isLoginPageText(bodyText: string) {
   )
 }
 
-async function openFocusPageAndAssertNotLogin(page: Awaited<ReturnType<Awaited<ReturnType<typeof puppeteer.launch>>['newPage']>>, targetUrl: string) {
+async function openFocusPageAndAssertNotLogin(
+  page: Awaited<ReturnType<Awaited<ReturnType<typeof puppeteer.launch>>['newPage']>>,
+  targetUrl: string
+) {
   await page.goto(targetUrl, { waitUntil: 'networkidle0', timeout: 90000 })
 
   await page
@@ -138,8 +198,12 @@ export async function GET(req: NextRequest) {
 
     const focusUrl = buildFocusPrintUrl({
       month: url.searchParams.get('month') || undefined,
-      focus_date: url.searchParams.get('focus_date') || undefined,
-      hors_statistiques: url.searchParams.get('hors_statistiques') || 'afficher',
+      focus_date: url.searchParams.get('focus_date') || url.searchParams.get('focusDate') || undefined,
+      hors_statistiques: url.searchParams.get('hors_statistiques') || url.searchParams.get('horsStatistiques') || 'afficher',
+      view: url.searchParams.get('view') || 'montant_ht',
+      agence: url.searchParams.get('agence') || null,
+      famille_macro: url.searchParams.get('famille_macro') || url.searchParams.get('familleMacro') || null,
+      collaborateur: url.searchParams.get('collaborateur') || null,
     })
 
     return NextResponse.json({
@@ -152,26 +216,22 @@ export async function GET(req: NextRequest) {
       targetUrl: redactSecretInUrl(focusUrl.toString()),
       expectedPrintPath: new URL(process.env.FOCUS_MENSUEL_PRINT_URL || 'https://invalid.local').pathname,
     })
-  } catch (error: any) {
-    return NextResponse.json({ ok: false, error: error?.message || String(error) }, { status: 500 })
+  } catch (error) {
+    return NextResponse.json({ ok: false, error: sanitizeError(error) }, { status: 500 })
   }
 }
 
 export async function POST(req: NextRequest) {
   let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null
+  let caller: AuthorizedCaller | null = null
 
   try {
-    const secret = req.headers.get('x-report-secret') || ''
-    if (!process.env.REPORT_PDF_RENDER_SECRET || secret !== process.env.REPORT_PDF_RENDER_SECRET) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
+    const supabaseAdmin = buildSupabaseAdmin()
+    caller = await authorizeRequest(req, supabaseAdmin)
 
     const payload = (await req.json()) as PdfRequest
     const bucket = payload.bucket || 'commercial-imports'
     const pdfPath = payload.path || 'reports/focus-mensuel/Rapport_activite_quotidien.pdf'
-
-    const supabaseUrl = getRequiredEnv('SUPABASE_URL')
-    const serviceRoleKey = getRequiredEnv('SUPABASE_SERVICE_ROLE_KEY')
     const focusUrl = buildFocusPrintUrl(payload)
 
     const debug = req.nextUrl.searchParams.get('debug') === '1'
@@ -184,6 +244,7 @@ export async function POST(req: NextRequest) {
         focusMensuelPrintUrl: process.env.FOCUS_MENSUEL_PRINT_URL || null,
         targetUrl: redactSecretInUrl(focusUrl.toString()),
         hasRenderSecret: Boolean(process.env.REPORT_PDF_RENDER_SECRET),
+        caller,
       })
     }
 
@@ -219,8 +280,7 @@ export async function POST(req: NextRequest) {
       scale: Number(process.env.FOCUS_PDF_LANDSCAPE_SCALE || process.env.FOCUS_PDF_SCALE || 0.84),
     })
 
-    const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
-    const { error: uploadError } = await supabase.storage.from(bucket).upload(pdfPath, pdf, {
+    const { error: uploadError } = await supabaseAdmin.storage.from(bucket).upload(pdfPath, pdf, {
       contentType: 'application/pdf',
       upsert: true,
     })
@@ -236,9 +296,10 @@ export async function POST(req: NextRequest) {
       orientation: 'landscape',
       filename: payload.filename || `Rapport d'activité quotidien.pdf`,
       bytes: pdf.byteLength,
+      caller,
     })
-  } catch (error: any) {
-    return NextResponse.json({ error: error?.message || String(error) }, { status: 500 })
+  } catch (error) {
+    return NextResponse.json({ ok: false, error: sanitizeError(error), caller }, { status: 500 })
   } finally {
     if (browser) await browser.close().catch(() => undefined)
   }
