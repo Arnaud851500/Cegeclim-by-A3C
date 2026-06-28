@@ -174,8 +174,8 @@ async function launchBrowser() {
     executablePath,
     headless: true,
     defaultViewport: {
-      width: Number(process.env.FOCUS_PDF_VIEWPORT_WIDTH || 2400),
-      height: Number(process.env.FOCUS_PDF_VIEWPORT_HEIGHT || 1600),
+      width: Number(process.env.FOCUS_PDF_VIEWPORT_WIDTH || 1920),
+      height: Number(process.env.FOCUS_PDF_VIEWPORT_HEIGHT || 1200),
     },
   })
 }
@@ -252,8 +252,8 @@ export async function POST(req: NextRequest) {
     const page = await browser.newPage()
 
     await page.setViewport({
-      width: Number(process.env.FOCUS_PDF_VIEWPORT_WIDTH || 2400),
-      height: Number(process.env.FOCUS_PDF_VIEWPORT_HEIGHT || 1600),
+      width: Number(process.env.FOCUS_PDF_VIEWPORT_WIDTH || 1920),
+      height: Number(process.env.FOCUS_PDF_VIEWPORT_HEIGHT || 1200),
       deviceScaleFactor: 1,
     })
     await page.emulateMediaType('screen')
@@ -262,11 +262,11 @@ export async function POST(req: NextRequest) {
 
     await page.addStyleTag({
       content: `
-        @page { size: A4 landscape; margin: 5mm 5mm 5mm 5mm; }
+        @page { size: A4 landscape; margin: 3mm 3mm 3mm 3mm; }
         html, body { margin: 0 !important; padding: 0 !important; background: #eef5fb !important; }
         body { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
         * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
-        [data-focus-report-ready], [data-report-ready] { width: 100% !important; box-sizing: border-box !important; }
+        [data-focus-report-ready], [data-report-ready] { width: 100% !important; max-width: 100% !important; box-sizing: border-box !important; }
         .no-print, [data-no-print="true"] { display: none !important; }
       `,
     })
@@ -276,8 +276,8 @@ export async function POST(req: NextRequest) {
       landscape: true,
       printBackground: true,
       preferCSSPageSize: true,
-      margin: { top: '5mm', right: '5mm', bottom: '5mm', left: '5mm' },
-      scale: Number(process.env.FOCUS_PDF_LANDSCAPE_SCALE || process.env.FOCUS_PDF_SCALE || 0.84),
+      margin: { top: '3mm', right: '3mm', bottom: '3mm', left: '3mm' },
+      scale: Number(process.env.FOCUS_PDF_LANDSCAPE_SCALE || process.env.FOCUS_PDF_SCALE || 0.72),
     })
 
     const { error: uploadError } = await supabaseAdmin.storage.from(bucket).upload(pdfPath, pdf, {

@@ -817,13 +817,15 @@ function FocusMensuelPageContent() {
       )}
       <div style={styles.headerCard}>
         <div>
-          <h1 style={styles.title}>Focus activité mensuelle</h1>
+          <h1 style={styles.title}>ACTIVITE CEGECLIM DU : <span style={styles.titleDate}>{formatDateFr(focusDate)}</span></h1>
           <div style={styles.subtitle}>
+
             <span style={styles.subtitleBasisNote}>
               Moyennes mensuelles sur {businessDayBasis.label} jusqu’au {formatDateFr(focusDate)}
               {businessDayBasis.blDaysCount > 0
                 ? ', jours sans BL exclus'
                 : ', faute de BL détecté dans le périmètre filtré'}
+              
             </span>{' '}
             <span style={styles.focusDayText}>Focus journée du : {formatDateFr(focusDate)}</span>
             {' '}· faits marquants sur 7 jours calendaires.
@@ -1012,6 +1014,7 @@ const styles: Record<string, React.CSSProperties> = {
   page: { padding: 20, color: '#0f172a' },
   headerCard: { display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center', background: 'rgba(255,255,255,0.92)', border: '1px solid #e2e8f0', borderRadius: 22, padding: 18, boxShadow: '0 10px 28px rgba(15,23,42,0.06)', marginBottom: 14 },
   title: { margin: 0, fontSize: 26, fontWeight: 900 },
+  titleDate: { color: '#dc2626', fontWeight: 950 },
   subtitle: { marginTop: 6, color: '#64748b', fontSize: 14, fontWeight: 700, lineHeight: 1.45 },
   subtitleBasisNote: { color: '#64748b', fontSize: 12, fontWeight: 700 },
   focusDayText: { color: '#0f172a', fontSize: 15, fontWeight: 950 },

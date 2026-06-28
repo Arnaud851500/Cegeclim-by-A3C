@@ -70,6 +70,9 @@ const DOC_COLORS: Record<DocType, string> = {
   Factures: '#16a34a',
 }
 
+const LOGO_CEGECLIM_URL =
+  'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/cegecilm%20officiel.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL2NlZ2VjaWxtIG9mZmljaWVsLmpwZyIsImlhdCI6MTc3NDY1MTM3OSwiZXhwIjo0ODk2NzE1Mzc5fQ.ePcMFHir7RsvdR-cR7nwh83H03S8oihNKwVgK2eCmy0'
+
 const MONTH_LABELS_FR = [
   'janvier',
   'février',
@@ -427,6 +430,23 @@ function Table({ children }: { children: React.ReactNode }) {
   return <div style={styles.tableWrap} className="focus-pdf-table-wrap"><table style={styles.table}>{children}</table></div>
 }
 
+function ReportBrandHeader({ focusDate }: { focusDate: string }) {
+  return (
+    <div style={styles.reportBrandHeader} className="focus-pdf-brand-header">
+      <div style={styles.reportBrandLeft}>
+        <img src={LOGO_CEGECLIM_URL} alt="CEGECLIM Énergies" style={styles.reportLogo} />
+        <div style={styles.reportBrandTextBlock}>
+          <div style={styles.reportBrandSubtitle}>Concessionnaire agréé de Bosch Home Comfort Group</div>
+          <div style={styles.reportBrandTitle}>Hitachi Cooling &amp; Heating</div>
+        </div>
+      </div>
+      <div style={styles.reportMainTitle}>
+        ACTIVITE CEGECLIM DU <span style={styles.reportMainTitleDate}>{formatDateFr(focusDate)}</span>
+      </div>
+    </div>
+  )
+}
+
 function FilterDisplay({ label, value }: { label: string; value: string }) {
   return (
     <div style={styles.field}>
@@ -695,78 +715,100 @@ function FocusMensuelPageContent() {
     >
       {isPdfMode && (
         <style>{`
-          @page { size: A4 landscape; margin: 5mm 5mm 5mm 5mm; }
+          @page { size: A4 landscape; margin: 3mm 3mm 3mm 3mm; }
           html, body { margin: 0 !important; padding: 0 !important; background: #eef5fb !important; }
           body, * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
           [data-focus-report-ready] {
             width: 100% !important;
             max-width: 100% !important;
             box-sizing: border-box !important;
-            padding: 10px !important;
+            padding: 8px !important;
+            color: #0f172a !important;
           }
           [data-no-print="true"], .focus-pdf-header-actions { display: none !important; }
-          .focus-pdf-header-card {
-            padding: 12px 14px !important;
-            margin-bottom: 8px !important;
-            border-radius: 16px !important;
+          .focus-pdf-brand-header {
+            display: flex !important;
+            align-items: center !important;
+            justify-content: space-between !important;
+            min-height: 48px !important;
+            padding: 4px 8px 7px !important;
+            margin-bottom: 5px !important;
+            background: #ffffff !important;
+            border-bottom: 1px solid #e5e7eb !important;
             break-inside: avoid !important;
             page-break-inside: avoid !important;
           }
-          .focus-pdf-title { font-size: 20px !important; }
-          .focus-pdf-subtitle { font-size: 10.5px !important; line-height: 1.3 !important; }
+          .focus-pdf-header-card {
+            padding: 0 !important;
+            margin: 0 0 5px !important;
+            border: none !important;
+            border-radius: 0 !important;
+            box-shadow: none !important;
+            background: transparent !important;
+            break-inside: avoid !important;
+            page-break-inside: avoid !important;
+          }
+          .focus-pdf-title { display: none !important; }
+          .focus-pdf-subtitle { font-size: 9.5px !important; line-height: 1.25 !important; font-weight: 800 !important; padding: 0 8px !important; }
           .focus-pdf-filters {
             grid-template-columns: repeat(7, minmax(0, 1fr)) !important;
-            gap: 8px !important;
-            padding: 10px !important;
-            margin-bottom: 10px !important;
-            border-radius: 14px !important;
+            gap: 6px !important;
+            padding: 7px !important;
+            margin-bottom: 8px !important;
+            border-radius: 8px !important;
             break-inside: avoid !important;
             page-break-inside: avoid !important;
           }
           .focus-pdf-filter-value {
-            min-height: 32px !important;
+            min-height: 27px !important;
             display: flex !important;
             align-items: center !important;
             border: 1px solid #cbd5e1 !important;
-            border-radius: 10px !important;
-            padding: 7px 9px !important;
+            border-radius: 6px !important;
+            padding: 5px 8px !important;
             background: #ffffff !important;
-            font-size: 11px !important;
+            font-size: 10px !important;
             font-weight: 900 !important;
             color: #0f172a !important;
           }
           .focus-pdf-kpi-grid {
             grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
-            gap: 10px !important;
-            margin-bottom: 10px !important;
+            gap: 8px !important;
+            margin-bottom: 8px !important;
             break-inside: avoid !important;
             page-break-inside: avoid !important;
           }
+          .focus-pdf-kpi-grid > div { padding: 8px !important; min-height: 114px !important; border-radius: 12px !important; }
+          .focus-pdf-kpi-grid [style*="font-size: 26"] { font-size: 18px !important; }
           .focus-pdf-chart-grid, .focus-pdf-section-grid {
             grid-template-columns: 1fr 1fr !important;
-            gap: 10px !important;
-            margin-bottom: 10px !important;
+            gap: 8px !important;
+            margin-bottom: 8px !important;
           }
           .focus-pdf-highlights-grid {
-            grid-template-columns: 1fr 1fr 1fr !important;
-            gap: 10px !important;
+            grid-template-columns: 1fr !important;
+            gap: 8px !important;
             align-items: start !important;
           }
           .focus-pdf-section-card, .focus-pdf-chart-box {
-            padding: 10px !important;
-            border-radius: 14px !important;
+            padding: 8px !important;
+            border-radius: 10px !important;
             break-inside: avoid !important;
             page-break-inside: avoid !important;
           }
-          .focus-pdf-chart-box svg { height: 205px !important; }
+          .focus-pdf-chart-box svg { height: 185px !important; }
           .focus-pdf-table-wrap { max-height: none !important; overflow: hidden !important; }
-          .focus-pdf-highlights-grid table { min-width: 0 !important; font-size: 8.5px !important; }
+          .focus-pdf-section-card table { min-width: 0 !important; font-size: 8px !important; }
+          .focus-pdf-section-card th, .focus-pdf-section-card td { padding: 4px 5px !important; }
+          .focus-pdf-highlights-grid table { min-width: 0 !important; font-size: 8px !important; }
           .focus-pdf-highlights-grid th, .focus-pdf-highlights-grid td { padding: 4px 5px !important; }
         `}</style>
       )}
+      {isPdfMode && <ReportBrandHeader focusDate={focusDate} />}
+
       <div style={styles.headerCard} className="focus-pdf-header-card">
         <div>
-          <h1 style={styles.title} className="focus-pdf-title">Focus activité mensuelle</h1>
+          <h1 style={styles.title} className="focus-pdf-title">ACTIVITE CEGECLIM DU : <span style={styles.titleDate}>{formatDateFr(focusDate)}</span></h1>
           <div style={styles.subtitle} className="focus-pdf-subtitle">
             <span style={styles.subtitleBasisNote}>
               Moyennes mensuelles sur {businessDayBasis.label} jusqu’au {formatDateFr(focusDate)}
@@ -923,9 +965,64 @@ function SummaryMatrix({ title, rows }: { title: string; rows: ReturnType<typeof
 }
 
 const styles: Record<string, React.CSSProperties> = {
+  reportBrandHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 20,
+    background: '#ffffff',
+    padding: '7px 12px 9px',
+    borderBottom: '1px solid #e5e7eb',
+  },
+  reportBrandLeft: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 12,
+    minWidth: 0,
+  },
+  reportLogo: {
+    width: 98,
+    height: 'auto',
+    objectFit: 'contain',
+    flexShrink: 0,
+  },
+  reportBrandTextBlock: {
+    display: 'flex',
+    flexDirection: 'column',
+    justifyContent: 'center',
+    minWidth: 0,
+  },
+  reportBrandSubtitle: {
+    fontSize: 13,
+    fontWeight: 650,
+    color: '#2d3748',
+    lineHeight: 1.12,
+    whiteSpace: 'nowrap',
+  },
+  reportBrandTitle: {
+    fontSize: 17,
+    fontWeight: 950,
+    color: '#111827',
+    lineHeight: 1.12,
+    whiteSpace: 'nowrap',
+  },
+  reportMainTitle: {
+    flex: 1,
+    textAlign: 'center',
+    fontSize: 16,
+    fontWeight: 950,
+    color: '#17344d',
+    letterSpacing: '0.01em',
+    whiteSpace: 'nowrap',
+  },
+  reportMainTitleDate: {
+    color: '#dc2626',
+    fontWeight: 950,
+  },
   page: { padding: 20, color: '#0f172a' },
   headerCard: { display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center', background: 'rgba(255,255,255,0.92)', border: '1px solid #e2e8f0', borderRadius: 22, padding: 18, boxShadow: '0 10px 28px rgba(15,23,42,0.06)', marginBottom: 14 },
   title: { margin: 0, fontSize: 26, fontWeight: 900 },
+  titleDate: { color: '#dc2626', fontWeight: 950 },
   subtitle: { marginTop: 6, color: '#64748b', fontSize: 14, fontWeight: 700, lineHeight: 1.45 },
   subtitleBasisNote: { color: '#64748b', fontSize: 12, fontWeight: 700 },
   focusDayText: { color: '#0f172a', fontSize: 15, fontWeight: 950 },
