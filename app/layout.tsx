@@ -247,6 +247,8 @@ function AppShell({ children }: { children: React.ReactNode }) {
 
   const isLoginPage = pathname === '/login'
   const isUnauthorizedPage = pathname === '/unauthorized'
+  const isPdfPrintPage = pathname === '/focus_mensuel_print' || pathname.startsWith('/focus_mensuel_print/')
+  const isPublicShellPage = isLoginPage || isPdfPrintPage
 
   const hasAnyMenuAccess =
     rights.can_dashboard ||
@@ -326,7 +328,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       setHasSession(exists)
       setSessionChecked(true)
 
-      if (!exists && !isLoginPage) {
+      if (!exists && !isPublicShellPage) {
         router.replace('/login')
       }
     }
@@ -340,7 +342,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       setHasSession(exists)
       setSessionChecked(true)
 
-      if (!exists && !isLoginPage) {
+      if (!exists && !isPublicShellPage) {
         router.replace('/login')
       }
     })
@@ -349,13 +351,13 @@ function AppShell({ children }: { children: React.ReactNode }) {
       isMounted = false
       subscription.unsubscribe()
     }
-  }, [router, isLoginPage])
+  }, [router, isPublicShellPage])
 
   useEffect(() => {
     if (!sessionChecked) return
     if (accessLoading) return
     if (!hasSession) return
-    if (isLoginPage || isUnauthorizedPage) return
+    if (isPublicShellPage || isUnauthorizedPage) return
 
     const currentPage = menuGroups
       .flatMap((g) => g.items)
@@ -364,13 +366,13 @@ function AppShell({ children }: { children: React.ReactNode }) {
     if (currentPage?.accessKey && !rights[currentPage.accessKey]) {
       router.replace('/unauthorized')
     }
-  }, [sessionChecked, hasSession, accessLoading, pathname, rights, router, isLoginPage, isUnauthorizedPage])
+  }, [sessionChecked, hasSession, accessLoading, pathname, rights, router, isPublicShellPage, isUnauthorizedPage])
 
   useEffect(() => {
     if (!sessionChecked || !hasSession) return
     if (!email) return
     if (!pathname) return
-    if (pathname === '/login' || pathname === '/unauthorized') return
+    if (isPublicShellPage || pathname === '/unauthorized') return
     if (lastLoggedPathRef.current === pathname) return
 
     lastLoggedPathRef.current = pathname
@@ -380,7 +382,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       event_type: 'page_view',
       pathname,
     })
-  }, [sessionChecked, hasSession, email, pathname])
+  }, [sessionChecked, hasSession, email, pathname, isPublicShellPage])
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -392,7 +394,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!sessionChecked || accessLoading || !hasSession || !email) return
-    if (isLoginPage || isUnauthorizedPage) return
+    if (isPublicShellPage || isUnauthorizedPage) return
 
     // Refresh à la connexion : forcé pour ne pas attendre le throttle.
     const initialTimer = setTimeout(() => {
@@ -409,11 +411,11 @@ function AppShell({ children }: { children: React.ReactNode }) {
       clearInterval(interval)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionChecked, accessLoading, hasSession, email, isLoginPage, isUnauthorizedPage])
+  }, [sessionChecked, accessLoading, hasSession, email, isPublicShellPage, isUnauthorizedPage])
 
   useEffect(() => {
     if (!sessionChecked || accessLoading || !hasSession || !email) return
-    if (!pathname || isLoginPage || isUnauthorizedPage) return
+    if (!pathname || isPublicShellPage || isUnauthorizedPage) return
 
     // Refresh à chaque changement d'écran : forcé pour refléter TODO / CERFA après navigation.
     const routeTimer = setTimeout(() => {
@@ -422,7 +424,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
 
     return () => clearTimeout(routeTimer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pathname, sessionChecked, accessLoading, hasSession, email, isLoginPage, isUnauthorizedPage])
+  }, [pathname, sessionChecked, accessLoading, hasSession, email, isPublicShellPage, isUnauthorizedPage])
 
   if (isLoginPage) {
     return (
@@ -430,6 +432,15 @@ function AppShell({ children }: { children: React.ReactNode }) {
         {children}
         <Analytics />
       </div>
+    )
+  }
+
+  if (isPdfPrintPage) {
+    return (
+      <>
+        {children}
+        <Analytics />
+      </>
     )
   }
 
@@ -691,7 +702,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
   }
 
   async function refreshStatusIndicators(options?: { force?: boolean }) {
-    if (!email || isLoginPage || isUnauthorizedPage) return
+    if (!email || isPublicShellPage || isUnauthorizedPage) return
 
     const now = Date.now()
     if (!options?.force && now - lastStatusRefreshRef.current < 60_000) return
