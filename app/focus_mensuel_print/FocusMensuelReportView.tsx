@@ -716,14 +716,24 @@ function FocusMensuelPageContent() {
       {isPdfMode && (
         <style>{`
           @page { size: A4 landscape; margin: 3mm 3mm 3mm 3mm; }
-          html, body { margin: 0 !important; padding: 0 !important; background: #eef5fb !important; }
+          html, body, #__next, main {
+            margin: 0 !important;
+            padding: 0 !important;
+            background: #eef5fb !important;
+            background-image: none !important;
+          }
           body, * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+          body::before, body::after, main::before, main::after { display: none !important; content: none !important; }
+          [style*="background-image"] { background-image: none !important; }
           [data-focus-report-ready] {
             width: 100% !important;
             max-width: 100% !important;
             box-sizing: border-box !important;
             padding: 8px !important;
             color: #0f172a !important;
+            background: #eef5fb !important;
+            background-image: none !important;
+            isolation: isolate !important;
           }
           [data-no-print="true"], .focus-pdf-header-actions { display: none !important; }
           .focus-pdf-brand-header {
@@ -795,6 +805,10 @@ function FocusMensuelPageContent() {
             border-radius: 10px !important;
             break-inside: avoid !important;
             page-break-inside: avoid !important;
+          }
+          .focus-pdf-section-card, .focus-pdf-chart-box, .focus-pdf-kpi-grid > div, .focus-pdf-filters, .focus-pdf-brand-header {
+            background: #ffffff !important;
+            background-image: none !important;
           }
           .focus-pdf-chart-box svg { height: 185px !important; }
           .focus-pdf-table-wrap { max-height: none !important; overflow: hidden !important; }

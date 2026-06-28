@@ -263,10 +263,28 @@ export async function POST(req: NextRequest) {
     await page.addStyleTag({
       content: `
         @page { size: A4 landscape; margin: 3mm 3mm 3mm 3mm; }
-        html, body { margin: 0 !important; padding: 0 !important; background: #eef5fb !important; }
+        html, body, #__next, main {
+          margin: 0 !important;
+          padding: 0 !important;
+          background: #eef5fb !important;
+          background-image: none !important;
+        }
         body { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
         * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
-        [data-focus-report-ready], [data-report-ready] { width: 100% !important; max-width: 100% !important; box-sizing: border-box !important; }
+        body::before, body::after, main::before, main::after { display: none !important; content: none !important; }
+        [style*="background-image"] { background-image: none !important; }
+        [data-focus-report-ready], [data-report-ready] {
+          width: 100% !important;
+          max-width: 100% !important;
+          box-sizing: border-box !important;
+          background: #eef5fb !important;
+          background-image: none !important;
+          isolation: isolate !important;
+        }
+        .focus-pdf-section-card, .focus-pdf-chart-box, .focus-pdf-kpi-grid > div, .focus-pdf-filters, .focus-pdf-brand-header {
+          background: #ffffff !important;
+          background-image: none !important;
+        }
         .no-print, [data-no-print="true"] { display: none !important; }
       `,
     })
