@@ -114,8 +114,8 @@ async function launchBrowser() {
     executablePath,
     headless: true,
     defaultViewport: {
-      width: Number(process.env.FOCUS_PDF_VIEWPORT_WIDTH || 1680),
-      height: Number(process.env.FOCUS_PDF_VIEWPORT_HEIGHT || 2400),
+      width: Number(process.env.FOCUS_PDF_VIEWPORT_WIDTH || 2400),
+      height: Number(process.env.FOCUS_PDF_VIEWPORT_HEIGHT || 1600),
     },
   })
 }
@@ -191,8 +191,8 @@ export async function POST(req: NextRequest) {
     const page = await browser.newPage()
 
     await page.setViewport({
-      width: Number(process.env.FOCUS_PDF_VIEWPORT_WIDTH || 1680),
-      height: Number(process.env.FOCUS_PDF_VIEWPORT_HEIGHT || 2400),
+      width: Number(process.env.FOCUS_PDF_VIEWPORT_WIDTH || 2400),
+      height: Number(process.env.FOCUS_PDF_VIEWPORT_HEIGHT || 1600),
       deviceScaleFactor: 1,
     })
     await page.emulateMediaType('screen')
@@ -201,7 +201,7 @@ export async function POST(req: NextRequest) {
 
     await page.addStyleTag({
       content: `
-        @page { size: A4 portrait; margin: 6mm 4mm 6mm 4mm; }
+        @page { size: A4 landscape; margin: 5mm 5mm 5mm 5mm; }
         html, body { margin: 0 !important; padding: 0 !important; background: #eef5fb !important; }
         body { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
         * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
@@ -212,11 +212,11 @@ export async function POST(req: NextRequest) {
 
     const pdf = await page.pdf({
       format: 'A4',
-      landscape: false,
+      landscape: true,
       printBackground: true,
       preferCSSPageSize: true,
-      margin: { top: '6mm', right: '4mm', bottom: '6mm', left: '4mm' },
-      scale: Number(process.env.FOCUS_PDF_SCALE || 0.62),
+      margin: { top: '5mm', right: '5mm', bottom: '5mm', left: '5mm' },
+      scale: Number(process.env.FOCUS_PDF_LANDSCAPE_SCALE || process.env.FOCUS_PDF_SCALE || 0.84),
     })
 
     const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
@@ -233,6 +233,7 @@ export async function POST(req: NextRequest) {
       focus_url: redactSecretInUrl(focusUrl.toString()),
       loaded_url: redactSecretInUrl(pageInfo.loadedUrl),
       page_ready_marker_found: pageInfo.readyFound,
+      orientation: 'landscape',
       filename: payload.filename || `Rapport d'activité quotidien.pdf`,
       bytes: pdf.byteLength,
     })

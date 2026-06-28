@@ -70,6 +70,21 @@ const DOC_COLORS: Record<DocType, string> = {
   Factures: '#16a34a',
 }
 
+const MONTH_LABELS_FR = [
+  'janvier',
+  'février',
+  'mars',
+  'avril',
+  'mai',
+  'juin',
+  'juillet',
+  'août',
+  'septembre',
+  'octobre',
+  'novembre',
+  'décembre',
+]
+
 function todayYmd() {
   const d = new Date()
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
@@ -111,6 +126,15 @@ function formatDateFr(ymd: string | null | undefined) {
   const m = String(ymd).match(/^(\d{4})-(\d{2})-(\d{2})/)
   if (!m) return String(ymd)
   return `${m[3]}/${m[2]}/${m[1]}`
+}
+
+function formatMonthFr(month: string | null | undefined) {
+  const text = String(month || '')
+  const m = text.match(/^(\d{4})-(\d{2})$/)
+  if (!m) return text || '—'
+  const monthIndex = Number(m[2]) - 1
+  const label = MONTH_LABELS_FR[monthIndex] || m[2]
+  return `${label.charAt(0).toUpperCase()}${label.slice(1)} ${m[1]}`
 }
 
 function formatShortDate(ymd: string) {
@@ -260,7 +284,7 @@ function MultiLineChart({ days, rows, mode, title }: { days: string[]; rows: Dai
   const yFor = (value: number) => padTop + plotH - (Math.max(0, value) / max) * plotH
 
   return (
-    <div style={styles.chartBox} onMouseLeave={() => setHoverPoint(null)}>
+    <div style={styles.chartBox} className="focus-pdf-chart-box" onMouseLeave={() => setHoverPoint(null)}>
       <div style={styles.chartTitle}>{title || `Flux journalier — ${labelForMode(mode)}`}</div>
       <svg viewBox={`0 0 ${width} ${height}`} style={styles.chartSvg} preserveAspectRatio="none">
         {[0, 0.25, 0.5, 0.75, 1].map((t) => {
@@ -400,12 +424,21 @@ function KpiCard({ card, mode, basisLabel }: { card: KpiCardData; mode: ViewMode
 }
 
 function Table({ children }: { children: React.ReactNode }) {
-  return <div style={styles.tableWrap}><table style={styles.table}>{children}</table></div>
+  return <div style={styles.tableWrap} className="focus-pdf-table-wrap"><table style={styles.table}>{children}</table></div>
+}
+
+function FilterDisplay({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={styles.field}>
+      <div style={styles.label}>{label}</div>
+      <div style={styles.filterValue} className="focus-pdf-filter-value">{value}</div>
+    </div>
+  )
 }
 
 function HighlightTable({ title, rows }: { title: string; rows: HighlightRow[] }) {
   return (
-    <div style={styles.sectionCard}>
+    <div style={styles.sectionCard} className="focus-pdf-section-card">
       <div style={styles.sectionTitle}>{title}</div>
       <Table>
         <thead>
@@ -445,10 +478,14 @@ function FocusMensuelPageContent() {
   const requestedMonth = searchParams?.get('month')
   const requestedFocusDate = searchParams?.get('focusDate') || searchParams?.get('focus_date')
   const requestedHorsStats = searchParams?.get('horsStatistiques') || searchParams?.get('hors_statistiques')
+  const requestedView = searchParams?.get('view')
   const currentMonth = /^\d{4}-\d{2}$/.test(String(requestedMonth || '')) ? String(requestedMonth) : todayYmd().slice(0, 7)
+  const requestedViewMode: ViewMode = ['montant_ht', 'nb_documents', 'quantite_pertinente'].includes(String(requestedView || ''))
+    ? String(requestedView) as ViewMode
+    : 'montant_ht'
   const [month, setMonth] = useState(currentMonth)
   const [focusDate, setFocusDate] = useState(/^\d{4}-\d{2}-\d{2}$/.test(String(requestedFocusDate || '')) ? String(requestedFocusDate) : pickDefaultFocusDate())
-  const [viewMode, setViewMode] = useState<ViewMode>('montant_ht')
+  const [viewMode, setViewMode] = useState<ViewMode>(requestedViewMode)
   const [agence, setAgence] = useState('')
   const [familleMacro, setFamilleMacro] = useState('')
   const [collaborateur, setCollaborateur] = useState('')
@@ -658,17 +695,79 @@ function FocusMensuelPageContent() {
     >
       {isPdfMode && (
         <style>{`
-          @page { size: A4 portrait; margin: 6mm 4mm 6mm 4mm; }
+          @page { size: A4 landscape; margin: 5mm 5mm 5mm 5mm; }
           html, body { margin: 0 !important; padding: 0 !important; background: #eef5fb !important; }
           body, * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
-          [data-focus-report-ready] { width: 100% !important; box-sizing: border-box !important; }
-          [data-no-print="true"] { display: none !important; }
+          [data-focus-report-ready] {
+            width: 100% !important;
+            max-width: 100% !important;
+            box-sizing: border-box !important;
+            padding: 10px !important;
+          }
+          [data-no-print="true"], .focus-pdf-header-actions { display: none !important; }
+          .focus-pdf-header-card {
+            padding: 12px 14px !important;
+            margin-bottom: 8px !important;
+            border-radius: 16px !important;
+            break-inside: avoid !important;
+            page-break-inside: avoid !important;
+          }
+          .focus-pdf-title { font-size: 20px !important; }
+          .focus-pdf-subtitle { font-size: 10.5px !important; line-height: 1.3 !important; }
+          .focus-pdf-filters {
+            grid-template-columns: repeat(7, minmax(0, 1fr)) !important;
+            gap: 8px !important;
+            padding: 10px !important;
+            margin-bottom: 10px !important;
+            border-radius: 14px !important;
+            break-inside: avoid !important;
+            page-break-inside: avoid !important;
+          }
+          .focus-pdf-filter-value {
+            min-height: 32px !important;
+            display: flex !important;
+            align-items: center !important;
+            border: 1px solid #cbd5e1 !important;
+            border-radius: 10px !important;
+            padding: 7px 9px !important;
+            background: #ffffff !important;
+            font-size: 11px !important;
+            font-weight: 900 !important;
+            color: #0f172a !important;
+          }
+          .focus-pdf-kpi-grid {
+            grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+            gap: 10px !important;
+            margin-bottom: 10px !important;
+            break-inside: avoid !important;
+            page-break-inside: avoid !important;
+          }
+          .focus-pdf-chart-grid, .focus-pdf-section-grid {
+            grid-template-columns: 1fr 1fr !important;
+            gap: 10px !important;
+            margin-bottom: 10px !important;
+          }
+          .focus-pdf-highlights-grid {
+            grid-template-columns: 1fr 1fr 1fr !important;
+            gap: 10px !important;
+            align-items: start !important;
+          }
+          .focus-pdf-section-card, .focus-pdf-chart-box {
+            padding: 10px !important;
+            border-radius: 14px !important;
+            break-inside: avoid !important;
+            page-break-inside: avoid !important;
+          }
+          .focus-pdf-chart-box svg { height: 205px !important; }
+          .focus-pdf-table-wrap { max-height: none !important; overflow: hidden !important; }
+          .focus-pdf-highlights-grid table { min-width: 0 !important; font-size: 8.5px !important; }
+          .focus-pdf-highlights-grid th, .focus-pdf-highlights-grid td { padding: 4px 5px !important; }
         `}</style>
       )}
-      <div style={styles.headerCard}>
+      <div style={styles.headerCard} className="focus-pdf-header-card">
         <div>
-          <h1 style={styles.title}>Focus activité mensuelle</h1>
-          <div style={styles.subtitle}>
+          <h1 style={styles.title} className="focus-pdf-title">Focus activité mensuelle</h1>
+          <div style={styles.subtitle} className="focus-pdf-subtitle">
             <span style={styles.subtitleBasisNote}>
               Moyennes mensuelles sur {businessDayBasis.label} jusqu’au {formatDateFr(focusDate)}
               {businessDayBasis.blDaysCount > 0
@@ -680,7 +779,7 @@ function FocusMensuelPageContent() {
             {' '}· faits marquants sur 7 jours calendaires.
           </div>
         </div>
-        <div style={styles.headerActions}>
+        <div style={styles.headerActions} className="focus-pdf-header-actions" data-no-print="true">
           <button style={styles.secondaryButton} onClick={() => setFocusDate(todayYmd())}>Aujourd’hui</button>
           <button style={styles.secondaryButton} onClick={() => setFocusDate(addDaysYmd(todayYmd(), -1))}>Hier</button>
           <button style={styles.warningButton} onClick={rebuildCacheForMonth} disabled={rebuildingCache}>
@@ -690,31 +789,45 @@ function FocusMensuelPageContent() {
         </div>
       </div>
 
-      <div style={styles.filtersCard}>
-        <div style={styles.field}><label style={styles.label}>Mois analysé</label><input type="month" value={month} onChange={(e) => setMonth(e.target.value)} style={styles.input} /></div>
-        <div style={styles.field}><label style={styles.label}>Jour focus</label><input type="date" value={focusDate} onChange={(e) => setFocusDate(e.target.value)} style={styles.input} /></div>
-        <div style={styles.field}><label style={styles.label}>Vue</label><select value={viewMode} onChange={(e) => setViewMode(e.target.value as ViewMode)} style={styles.input}><option value="montant_ht">Montant HT</option><option value="nb_documents">Nombre documents</option><option value="quantite_pertinente">Quantité pertinente</option></select></div>
-        <div style={styles.field}><label style={styles.label}>Agence</label><select value={agence} onChange={(e) => setAgence(e.target.value)} style={styles.input}><option value="">Toutes</option>{availableAgences.map((a) => <option key={a} value={a}>{a}</option>)}</select></div>
-        <div style={styles.field}><label style={styles.label}>Famille macro</label><select value={familleMacro} onChange={(e) => setFamilleMacro(e.target.value)} style={styles.input}><option value="">Toutes</option>{availableFamilies.map((f) => <option key={f} value={f}>{f}</option>)}</select></div>
-        <div style={styles.field}><label style={styles.label}>Collaborateur</label><select value={collaborateur} onChange={(e) => setCollaborateur(e.target.value)} style={styles.input}><option value="">Tous</option>{availableCollaborateurs.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
-        <div style={styles.field}><label style={styles.label}>Hors statistiques</label><select value={includeHorsStats ? 'show' : 'hide'} onChange={(e) => setIncludeHorsStats(e.target.value === 'show')} style={styles.input}><option value="hide">Masquer</option><option value="show">Afficher</option></select></div>
+      <div style={styles.filtersCard} className="focus-pdf-filters">
+        {isPdfMode ? (
+          <>
+            <FilterDisplay label="Mois analysé" value={formatMonthFr(month)} />
+            <FilterDisplay label="Jour focus" value={formatDateFr(focusDate)} />
+            <FilterDisplay label="Vue" value={labelForMode(viewMode)} />
+            <FilterDisplay label="Agence" value={agence || 'Toutes'} />
+            <FilterDisplay label="Famille macro" value={familleMacro || 'Toutes'} />
+            <FilterDisplay label="Collaborateur" value={collaborateur || 'Tous'} />
+            <FilterDisplay label="Hors statistiques" value={includeHorsStats ? 'Afficher' : 'Masquer'} />
+          </>
+        ) : (
+          <>
+            <div style={styles.field}><label style={styles.label}>Mois analysé</label><input type="month" value={month} onChange={(e) => setMonth(e.target.value)} style={styles.input} /></div>
+            <div style={styles.field}><label style={styles.label}>Jour focus</label><input type="date" value={focusDate} onChange={(e) => setFocusDate(e.target.value)} style={styles.input} /></div>
+            <div style={styles.field}><label style={styles.label}>Vue</label><select value={viewMode} onChange={(e) => setViewMode(e.target.value as ViewMode)} style={styles.input}><option value="montant_ht">Montant HT</option><option value="nb_documents">Nombre documents</option><option value="quantite_pertinente">Quantité pertinente</option></select></div>
+            <div style={styles.field}><label style={styles.label}>Agence</label><select value={agence} onChange={(e) => setAgence(e.target.value)} style={styles.input}><option value="">Toutes</option>{availableAgences.map((a) => <option key={a} value={a}>{a}</option>)}</select></div>
+            <div style={styles.field}><label style={styles.label}>Famille macro</label><select value={familleMacro} onChange={(e) => setFamilleMacro(e.target.value)} style={styles.input}><option value="">Toutes</option>{availableFamilies.map((f) => <option key={f} value={f}>{f}</option>)}</select></div>
+            <div style={styles.field}><label style={styles.label}>Collaborateur</label><select value={collaborateur} onChange={(e) => setCollaborateur(e.target.value)} style={styles.input}><option value="">Tous</option>{availableCollaborateurs.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
+            <div style={styles.field}><label style={styles.label}>Hors statistiques</label><select value={includeHorsStats ? 'show' : 'hide'} onChange={(e) => setIncludeHorsStats(e.target.value === 'show')} style={styles.input}><option value="hide">Masquer</option><option value="show">Afficher</option></select></div>
+          </>
+        )}
       </div>
 
       {error && <div style={styles.errorBox}>Erreur chargement focus mensuel : {error}</div>}
       {cacheInfo && <div style={styles.successBox}>{cacheInfo}</div>}
       {loading && <div style={styles.infoBox}>Chargement des données journalières depuis le cache…</div>}
       {rebuildingCache && <div style={styles.infoBox}>Reconstruction du cache mensuel en cours…</div>}
-      <div style={styles.kpiGrid}>
+      <div style={styles.kpiGrid} className="focus-pdf-kpi-grid">
         {kpiCards.map((card) => <KpiCard key={card.type} card={card} mode={viewMode} basisLabel={businessDayBasis.label} />)}
       </div>
 
-      <div style={styles.chartGrid}>
+      <div style={styles.chartGrid} className="focus-pdf-chart-grid">
         <MultiLineChart days={days} rows={normalizedRows} mode={viewMode} />
         <CumulativeChart days={days} rows={normalizedRows} mode={viewMode} />
       </div>
 
-      <div style={styles.sectionGrid}>
-        <div style={styles.sectionCard}>
+      <div style={styles.sectionGrid} className="focus-pdf-section-grid">
+        <div style={styles.sectionCard} className="focus-pdf-section-card">
           <div style={styles.sectionTitle}>Perspective MTD au {formatDateFr(focusDate)} — base {businessDayBasis.label}</div>
           <Table>
             <thead>
@@ -745,12 +858,12 @@ function FocusMensuelPageContent() {
         <SummaryMatrix title={`Jour focus par famille macro — ${formatDateFr(focusDate)}`} rows={byFamilyRows} />
       </div>
 
-      <div style={styles.sectionGrid}>
+      <div style={styles.sectionGrid} className="focus-pdf-section-grid">
         <SummaryMatrix title={`Jour focus par agence — ${formatDateFr(focusDate)}`} rows={byAgencyRows} />
         <SummaryMatrix title={`Depuis début du mois par agence — au ${formatDateFr(focusDate)}`} rows={byAgencyMtdRows} />
       </div>
 
-      <div style={styles.highlightsGrid}>
+      <div style={styles.highlightsGrid} className="focus-pdf-highlights-grid">
         <HighlightTable title="Top 20 devis créés — 7 derniers jours" rows={highlights.topDevis} />
         <HighlightTable title="Top 20 commandes CDC — 7 derniers jours" rows={highlights.topCdc} />
         <HighlightTable title="Top 20 documents BL / CDC / Factures — 7 derniers jours" rows={highlights.topDocs} />
@@ -785,7 +898,7 @@ function aggregateMatrix(rows: DailyRow[], labelFn: (row: DailyRow) => string) {
 
 function SummaryMatrix({ title, rows }: { title: string; rows: ReturnType<typeof aggregateMatrix> }) {
   return (
-    <div style={styles.sectionCard}>
+    <div style={styles.sectionCard} className="focus-pdf-section-card">
       <div style={styles.sectionTitle}>{title}</div>
       <Table>
         <thead>
@@ -820,6 +933,7 @@ const styles: Record<string, React.CSSProperties> = {
   filtersCard: { display: 'grid', gridTemplateColumns: 'repeat(7, minmax(150px, 1fr))', gap: 12, background: 'rgba(248,250,252,0.96)', border: '1px solid #e2e8f0', borderRadius: 18, padding: 14, marginBottom: 14 },
   field: { display: 'flex', flexDirection: 'column', gap: 5 },
   label: { fontSize: 12, fontWeight: 900, color: '#475569', textTransform: 'uppercase' },
+  filterValue: { border: '1px solid #cbd5e1', borderRadius: 10, padding: '9px 10px', background: '#fff', fontWeight: 900, minWidth: 0, color: '#0f172a' },
   input: { border: '1px solid #cbd5e1', borderRadius: 10, padding: '9px 10px', background: '#fff', fontWeight: 800, minWidth: 0 },
   warningButton: {
     border: '1px solid #d97706',
