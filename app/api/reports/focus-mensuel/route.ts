@@ -3,6 +3,7 @@ import { createClient } from '@supabase/supabase-js'
 import chromium from '@sparticuz/chromium'
 import puppeteer from 'puppeteer-core'
 
+export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 export const maxDuration = 120
 
