@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 
 type DocType = 'Devis' | 'CDC' | 'BL' | 'Factures'
@@ -439,14 +440,19 @@ function HighlightTable({ title, rows }: { title: string; rows: HighlightRow[] }
 }
 
 export default function FocusMensuelPage() {
-  const currentMonth = todayYmd().slice(0, 7)
+  const searchParams = useSearchParams()
+  const isPdfMode = searchParams?.get('pdf') === '1' || searchParams?.get('print') === '1'
+  const requestedMonth = searchParams?.get('month')
+  const requestedFocusDate = searchParams?.get('focusDate') || searchParams?.get('focus_date')
+  const requestedHorsStats = searchParams?.get('horsStatistiques') || searchParams?.get('hors_statistiques')
+  const currentMonth = /^\d{4}-\d{2}$/.test(String(requestedMonth || '')) ? String(requestedMonth) : todayYmd().slice(0, 7)
   const [month, setMonth] = useState(currentMonth)
-  const [focusDate, setFocusDate] = useState(pickDefaultFocusDate())
+  const [focusDate, setFocusDate] = useState(/^\d{4}-\d{2}-\d{2}$/.test(String(requestedFocusDate || '')) ? String(requestedFocusDate) : pickDefaultFocusDate())
   const [viewMode, setViewMode] = useState<ViewMode>('montant_ht')
   const [agence, setAgence] = useState('')
   const [familleMacro, setFamilleMacro] = useState('')
   const [collaborateur, setCollaborateur] = useState('')
-  const [includeHorsStats, setIncludeHorsStats] = useState(false)
+  const [includeHorsStats, setIncludeHorsStats] = useState(isPdfMode || ['afficher', 'show', 'true', '1'].includes(String(requestedHorsStats || '').toLowerCase()))
   const [dailyRows, setDailyRows] = useState<DailyRow[]>([])
   const [highlightRows, setHighlightRows] = useState<HighlightRow[]>([])
   const [loading, setLoading] = useState(false)
@@ -645,12 +651,34 @@ export default function FocusMensuelPage() {
   }
 
   return (
-    <section style={styles.page}>
+    <section
+      style={styles.page}
+      data-focus-report-ready={!loading && !rebuildingCache ? '1' : '0'}
+      data-focus-report-mode={isPdfMode ? '1' : '0'}
+    >
+      {isPdfMode && (
+        <style>{`
+          @page { size: A4 portrait; margin: 6mm 4mm 6mm 4mm; }
+          html, body { margin: 0 !important; padding: 0 !important; background: #eef5fb !important; }
+          body, * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+          [data-focus-report-ready] { width: 100% !important; box-sizing: border-box !important; }
+          [data-no-print="true"] { display: none !important; }
+        `}</style>
+      )}
       <div style={styles.headerCard}>
         <div>
-          <h1 style={styles.title}>Focus activité mensuelle (maille jour)</h1>
+          <h1 style={styles.title}>Focus activité mensuelle</h1>
           <div style={styles.subtitle}>
-            Focus {formatDateFr(focusDate)} · Moyennes sur {businessDayBasis.label} · Faits marquants sur 7 jours calendaires.
+            Vision quotidienne à la maille jour ·{' '}
+            <span style={styles.subtitleBasisNote}>
+              (moyennes mensuelles sur {businessDayBasis.label} jusqu’au {formatDateFr(focusDate)}
+              {businessDayBasis.blDaysCount > 0
+                ? ', jours sans BL exclus'
+                : ', faute de BL détecté dans le périmètre filtré'}
+              )
+            </span>{' '}
+            <span style={styles.focusDayText}>Focus journée du : {formatDateFr(focusDate)}</span>
+            {' '}· faits marquants sur 7 jours calendaires.
           </div>
         </div>
         <div style={styles.headerActions}>
@@ -677,8 +705,6 @@ export default function FocusMensuelPage() {
       {cacheInfo && <div style={styles.successBox}>{cacheInfo}</div>}
       {loading && <div style={styles.infoBox}>Chargement des données journalières depuis le cache…</div>}
       {rebuildingCache && <div style={styles.infoBox}>Reconstruction du cache mensuel en cours…</div>}
-
-
       <div style={styles.kpiGrid}>
         {kpiCards.map((card) => <KpiCard key={card.type} card={card} mode={viewMode} basisLabel={businessDayBasis.label} />)}
       </div>
@@ -788,7 +814,9 @@ const styles: Record<string, React.CSSProperties> = {
   page: { padding: 20, color: '#0f172a' },
   headerCard: { display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center', background: 'rgba(255,255,255,0.92)', border: '1px solid #e2e8f0', borderRadius: 22, padding: 18, boxShadow: '0 10px 28px rgba(15,23,42,0.06)', marginBottom: 14 },
   title: { margin: 0, fontSize: 26, fontWeight: 900 },
-  subtitle: { marginTop: 6, color: '#64748b', fontSize: 14, fontWeight: 700 },
+  subtitle: { marginTop: 6, color: '#64748b', fontSize: 14, fontWeight: 700, lineHeight: 1.45 },
+  subtitleBasisNote: { color: '#64748b', fontSize: 12, fontWeight: 700 },
+  focusDayText: { color: '#0f172a', fontSize: 15, fontWeight: 950 },
   headerActions: { display: 'flex', gap: 8, alignItems: 'center' },
   filtersCard: { display: 'grid', gridTemplateColumns: 'repeat(7, minmax(150px, 1fr))', gap: 12, background: 'rgba(248,250,252,0.96)', border: '1px solid #e2e8f0', borderRadius: 18, padding: 14, marginBottom: 14 },
   field: { display: 'flex', flexDirection: 'column', gap: 5 },

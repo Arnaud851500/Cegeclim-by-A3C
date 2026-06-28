@@ -1026,9 +1026,11 @@ function detectAutoImportFileKind(fileName: string): AutoImportFileKind {
   const baseName = String(fileName || '').replace(/\.[^.]+$/, '')
   const normalized = normalizeHeader(baseName)
 
-  if (normalized.startsWith('activite')) return 'Activite'
-  if (normalized.startsWith('facture')) return 'Facture'
-  if (normalized.startsWith('devis')) return 'Devis'
+  // Les fichiers archivés / processing sont préfixés par timestamp_runX_.
+  // On détecte donc le type même si Activite / Facture / Devis n'est plus au tout début du nom.
+  if (normalized.startsWith('activite') || normalized.includes('activite')) return 'Activite'
+  if (normalized.startsWith('facture') || normalized.includes('facture')) return 'Facture'
+  if (normalized.startsWith('devis') || normalized.includes('devis')) return 'Devis'
 
   return 'Invalide'
 }
@@ -1037,8 +1039,268 @@ function isAutoImportXlsx(fileName: string) {
   return String(fileName || '').toLowerCase().endsWith('.xlsx')
 }
 
+function isAutoImportCsv(fileName: string) {
+  return String(fileName || '').toLowerCase().endsWith('.csv')
+}
+
 function isValidAutoImportFileName(fileName: string) {
-  return isAutoImportXlsx(fileName) && detectAutoImportFileKind(fileName) !== 'Invalide'
+  const kind = detectAutoImportFileKind(fileName)
+  if (kind === 'Activite' || kind === 'Facture' || kind === 'Devis') return isAutoImportXlsx(fileName) || isAutoImportCsv(fileName)
+  return false
+}
+
+// Pipeline automatique : on accepte des fichiers Excel en entrée, mais on les convertit
+// en morceaux CSV au chargement pour éviter les limites CPU/mémoire des Edge Functions
+// lors du parsing XLSX côté serveur. L'import manuel existant reste inchangé.
+const AUTO_IMPORT_MAX_CSV_CHUNK_BYTES = 500 * 1024
+const AUTO_IMPORT_TARGET_CSV_CHUNK_BYTES = Math.floor(AUTO_IMPORT_MAX_CSV_CHUNK_BYTES * 0.92)
+
+function autoImportKindBaseName(kind: AutoImportFileKind) {
+  if (kind === 'Activite') return 'Activite'
+  if (kind === 'Facture') return 'Facture'
+  if (kind === 'Devis') return 'Devis'
+  return 'Import'
+}
+
+
+type AutoImportNamedFileForValidation = {
+  name: string
+  kind: AutoImportFileKind
+}
+
+function getAutoImportSplitPartNumber(fileName: string, kind: AutoImportFileKind) {
+  if (kind === 'Invalide') return null
+  const baseName = String(fileName || '').replace(/\.[^.]+$/, '')
+  const normalizedBase = normalizeHeader(baseName)
+  const normalizedKind = normalizeHeader(autoImportKindBaseName(kind))
+  const match = normalizedBase.match(new RegExp(`(?:^|_)${normalizedKind}_part(\\d+)$`))
+  if (!match) return null
+  const partNumber = Number(match[1])
+  return Number.isFinite(partNumber) && partNumber > 0 ? partNumber : null
+}
+
+function validateAutoImportPendingFileSet(files: AutoImportNamedFileForValidation[]) {
+  const byKind = new Map<AutoImportFileKind, AutoImportNamedFileForValidation[]>()
+
+  files.forEach((file) => {
+    if (file.kind === 'Invalide') return
+    const current = byKind.get(file.kind) || []
+    current.push(file)
+    byKind.set(file.kind, current)
+  })
+
+  const errors: string[] = []
+
+  Array.from(byKind.entries()).forEach(([kind, kindFiles]) => {
+    if (kindFiles.length <= 1) return
+
+    const partNumbers = kindFiles.map((file) => getAutoImportSplitPartNumber(file.name, kind))
+    const allFilesAreSplitParts = partNumbers.every((part) => part !== null)
+
+    if (!allFilesAreSplitParts) {
+      errors.push(
+        `${kind} : plusieurs fichiers détectés (${kindFiles.map((file) => file.name).join(', ')}). ` +
+        `C'est autorisé uniquement si tous les fichiers sont nommés ${autoImportKindBaseName(kind)}_part001.csv, ` +
+        `${autoImportKindBaseName(kind)}_part002.csv, etc.`
+      )
+      return
+    }
+
+    const sortedParts = (partNumbers as number[]).sort((a, b) => a - b)
+    const duplicatedParts = sortedParts.filter((part, index) => sortedParts.indexOf(part) !== index)
+    if (duplicatedParts.length) {
+      errors.push(`${kind} : doublon de morceau détecté (${Array.from(new Set(duplicatedParts)).map((part) => `part${String(part).padStart(3, '0')}`).join(', ')}).`)
+      return
+    }
+
+    const expectedParts = Array.from({ length: sortedParts.length }, (_, index) => index + 1)
+    const hasGap = expectedParts.some((expected, index) => sortedParts[index] !== expected)
+    if (hasGap) {
+      errors.push(
+        `${kind} : les morceaux doivent être consécutifs à partir de part001. ` +
+        `Morceaux présents : ${sortedParts.map((part) => `part${String(part).padStart(3, '0')}`).join(', ')}.`
+      )
+    }
+  })
+
+  return errors
+}
+
+function getTableConfigForAutoImportKind(kind: AutoImportFileKind) {
+  const tableKeyByKind: Partial<Record<AutoImportFileKind, TableKey>> = {
+    Activite: 'activite_lignes',
+    Facture: 'facture_lignes',
+    Devis: 'devis_lignes',
+  }
+
+  const tableKey = tableKeyByKind[kind]
+  const config = TABLES.find((table) => table.key === tableKey)
+  if (!tableKey || !config) {
+    throw new Error(`Type de fichier non importable automatiquement : ${kind}`)
+  }
+  return config
+}
+
+function getAutoImportDocumentColumnIndex(headers: any[], kind: AutoImportFileKind) {
+  const config = getTableConfigForAutoImportKind(kind)
+  const aliases = EXTRA_HEADER_ALIASES[config.key] || {}
+  const numeroPieceCandidates = new Set([
+    normalizeHeader('numero_piece'),
+    normalizeHeader('N° pièce'),
+    normalizeHeader('N piece'),
+    normalizeHeader('N° de pièce'),
+    normalizeHeader('No piece'),
+    normalizeHeader('Pièce'),
+  ])
+
+  return headers.findIndex((header) => {
+    const normalized = normalizeHeader(String(header || ''))
+    if (!normalized) return false
+    if (numeroPieceCandidates.has(normalized)) return true
+    if (aliases[normalized] === 'numero_piece') return true
+    const mappedColumn = config.columns.find((column) => {
+      if (normalizeHeader(column.db) === normalized && column.db === 'numero_piece') return true
+      if (normalizeHeader(column.label) === normalized && column.db === 'numero_piece') return true
+      return (column.aliases || []).some((alias) => normalizeHeader(alias) === normalized) && column.db === 'numero_piece'
+    })
+    return Boolean(mappedColumn)
+  })
+}
+
+function rowHasValue(row: any[]) {
+  return Array.isArray(row) && row.some((value) => value !== null && value !== undefined && String(value).trim() !== '')
+}
+
+function csvEscapeValue(value: any) {
+  if (value === undefined || value === null) return ''
+  const text = String(value)
+  if (/[";\n\r]/.test(text)) return `"${text.replace(/"/g, '""')}"`
+  return text
+}
+
+function writeAutoImportCsvFile(headerRow: any[], dataRows: any[][], fileName: string) {
+  const allRows = [headerRow, ...dataRows]
+  const csv = `\ufeff${allRows.map((row) => row.map(csvEscapeValue).join(';')).join('\r\n')}\r\n`
+  return new File([csv], fileName, { type: 'text/csv;charset=utf-8' })
+}
+
+async function splitXlsxForAutoImportUpload(file: File, kind: AutoImportFileKind) {
+  if (isAutoImportCsv(file.name) && file.size <= AUTO_IMPORT_MAX_CSV_CHUNK_BYTES) {
+    return [{ file, rows: null as number | null, part: 1, parts: 1 }]
+  }
+
+  const arrayBuffer = await file.arrayBuffer()
+  const workbook = XLSX.read(arrayBuffer, {
+    type: 'array',
+    cellDates: false,
+    cellNF: true,
+    cellText: false,
+  })
+
+  const sheetName = workbook.SheetNames[0]
+  if (!sheetName) throw new Error(`Le fichier ${file.name} ne contient aucune feuille.`)
+
+  const sheet = workbook.Sheets[sheetName]
+
+  // raw:false permet d'exporter les dates Excel sous forme lisible plutôt qu'en serial brut.
+  // Le serveur ne parse plus de XLSX ; il consomme uniquement ces morceaux CSV.
+  const aoa = XLSX.utils.sheet_to_json<any[]>(sheet, {
+    header: 1,
+    raw: false,
+    defval: '',
+    blankrows: false,
+  }) as any[][]
+
+  if (!aoa.length) throw new Error(`Le fichier ${file.name} ne contient aucune ligne.`)
+
+  const headerRow = aoa[0] || []
+  const dataRows = aoa.slice(1).filter(rowHasValue)
+  if (!dataRows.length) throw new Error(`Le fichier ${file.name} ne contient aucune donnée après l'entête.`)
+
+  const documentColumnIndex = getAutoImportDocumentColumnIndex(headerRow, kind)
+  if (documentColumnIndex < 0) {
+    throw new Error(
+      `Impossible de découper ${file.name} : colonne N° pièce / numero_piece introuvable. ` +
+      `Le découpage automatique doit préserver les documents entiers.`
+    )
+  }
+
+  const groups: { key: string; rows: any[][] }[] = []
+  const groupByDocument = new Map<string, { key: string; rows: any[][] }>()
+
+  dataRows.forEach((row, index) => {
+    const rawDocument = normalizeText(row[documentColumnIndex])
+    const key = rawDocument ? String(rawDocument) : `__ligne_sans_numero_${index + 2}`
+    let group = groupByDocument.get(key)
+    if (!group) {
+      group = { key, rows: [] }
+      groupByDocument.set(key, group)
+      groups.push(group)
+    }
+    group.rows.push(row)
+  })
+
+  const baseName = autoImportKindBaseName(kind)
+  const buildFile = (partIndex: number, rows: any[][]) =>
+    writeAutoImportCsvFile(headerRow, rows, `${baseName}_part${String(partIndex).padStart(3, '0')}.csv`)
+
+  const estimatedRowsPerChunk = Math.max(200, Math.floor(dataRows.length * AUTO_IMPORT_TARGET_CSV_CHUNK_BYTES / Math.max(file.size, AUTO_IMPORT_MAX_CSV_CHUNK_BYTES)))
+  const chunks: { rows: any[][]; part: number }[] = []
+  let cursor = 0
+
+  while (cursor < groups.length) {
+    let end = cursor
+    let rowCount = 0
+    while (end < groups.length && (rowCount < estimatedRowsPerChunk || end === cursor)) {
+      rowCount += groups[end].rows.length
+      end += 1
+    }
+
+    let candidateRows = groups.slice(cursor, end).flatMap((group) => group.rows)
+    let candidateFile = buildFile(chunks.length + 1, candidateRows)
+
+    if (candidateFile.size > AUTO_IMPORT_MAX_CSV_CHUNK_BYTES) {
+      let low = cursor + 1
+      let high = end
+      let bestEnd = -1
+      let bestRows: any[][] | null = null
+      while (low <= high) {
+        const mid = Math.floor((low + high) / 2)
+        const rows = groups.slice(cursor, mid).flatMap((group) => group.rows)
+        const testFile = buildFile(chunks.length + 1, rows)
+        if (testFile.size <= AUTO_IMPORT_MAX_CSV_CHUNK_BYTES) {
+          bestEnd = mid
+          bestRows = rows
+          low = mid + 1
+        } else {
+          high = mid - 1
+        }
+      }
+
+      if (bestEnd < 0 || !bestRows) {
+        const firstGroupRows = groups[cursor].rows
+        const tooLargeFile = buildFile(chunks.length + 1, firstGroupRows)
+        throw new Error(
+          `Impossible de découper ${file.name} sans couper un document : ` +
+          `le document « ${groups[cursor].key} » génère à lui seul un CSV de ${formatFileSize(tooLargeFile.size)}, supérieur à ${formatFileSize(AUTO_IMPORT_MAX_CSV_CHUNK_BYTES)}.`
+        )
+      }
+
+      candidateRows = bestRows
+      end = bestEnd
+    }
+
+    chunks.push({ rows: candidateRows, part: chunks.length + 1 })
+    cursor = end
+  }
+
+  return chunks.map((chunk, index) => {
+    const uploadedFile = buildFile(index + 1, chunk.rows)
+    if (uploadedFile.size > AUTO_IMPORT_MAX_CSV_CHUNK_BYTES) {
+      throw new Error(`${uploadedFile.name} dépasse encore ${formatFileSize(AUTO_IMPORT_MAX_CSV_CHUNK_BYTES)} (${formatFileSize(uploadedFile.size)}).`)
+    }
+    return { file: uploadedFile, rows: chunk.rows.length, part: index + 1, parts: chunks.length }
+  })
 }
 
 function cleanStorageFileName(fileName: string) {
@@ -2372,6 +2634,8 @@ export default function ImportsParametragePage() {
   const [autoImportMessage, setAutoImportMessage] = useState<string | null>(null)
   const [autoImportError, setAutoImportError] = useState<string | null>(null)
   const [autoImportReportTab, setAutoImportReportTab] = useState<AutoImportReportTab>('pre_smc')
+  const [autoImportReportEmailTo, setAutoImportReportEmailTo] = useState('')
+  const [autoImportSendReportEmail, setAutoImportSendReportEmail] = useState(false)
 
   const selectedConfig = useMemo(
     () => TABLES.find((t) => t.key === selectedTableKey) || TABLES[0],
@@ -4592,46 +4856,53 @@ export default function ImportsParametragePage() {
         throw new Error(
           'Fichier(s) refusé(s) : ' +
           invalidFiles.map((file) => file.name).join(', ') +
-          '. Les fichiers attendus sont des .xlsx dont le nom commence par Activite, Facture ou Devis.'
+          '. Les fichiers attendus sont : Activite.xlsx, Facture.xlsx, Devis.xlsx. Le dépôt automatique les convertit ensuite en CSV découpés.'
         )
       }
 
-      const kindCounts = new Map<AutoImportFileKind, number>()
-      files.forEach((file) => {
-        const kind = detectAutoImportFileKind(file.name)
-        kindCounts.set(kind, (kindCounts.get(kind) || 0) + 1)
-      })
+      const selectedFileSetErrors = validateAutoImportPendingFileSet(
+        files.map((file) => ({ name: file.name, kind: detectAutoImportFileKind(file.name) }))
+      )
 
-      const duplicateKinds = Array.from(kindCounts.entries())
-        .filter(([kind, count]) => kind !== 'Invalide' && count > 1)
-        .map(([kind]) => kind)
-
-      if (duplicateKinds.length) {
+      if (selectedFileSetErrors.length) {
         throw new Error(
-          `Plusieurs fichiers du même type sélectionnés (${duplicateKinds.join(', ')}). ` +
-          'Pour le job global, conserve un seul fichier Activite, un seul Facture et un seul Devis dans pending.'
+          'Sélection de fichiers incompatible avec le job global :\n' +
+          selectedFileSetErrors.map((message) => `- ${message}`).join('\n')
         )
       }
+
+      let uploadedCount = 0
+      const splitSummaries: string[] = []
 
       for (const file of files) {
-        const cleanName = cleanStorageFileName(file.name)
-        const storagePath = `pending/${cleanName}`
+        const kind = detectAutoImportFileKind(file.name)
+        const chunks = await splitXlsxForAutoImportUpload(file, kind)
+        if (chunks.length > 1) {
+          splitSummaries.push(`${file.name} → ${chunks.length} fichier(s) CSV de moins de ${formatFileSize(AUTO_IMPORT_MAX_CSV_CHUNK_BYTES)}`)
+        }
 
-        const { error: uploadError } = await supabase.storage
-          .from(AUTO_IMPORT_BUCKET)
-          .upload(storagePath, file, {
-            cacheControl: '3600',
-            contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            upsert: false,
-          })
+        for (const chunk of chunks) {
+          const cleanName = cleanStorageFileName(chunk.file.name)
+          const storagePath = `pending/${cleanName}`
 
-        if (uploadError) {
-          throw new Error(`Upload ${storagePath} impossible : ${uploadError.message}`)
+          const { error: uploadError } = await supabase.storage
+            .from(AUTO_IMPORT_BUCKET)
+            .upload(storagePath, chunk.file, {
+              cacheControl: '3600',
+              contentType: chunk.file.type || (isAutoImportCsv(chunk.file.name) ? 'text/csv;charset=utf-8' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'),
+              upsert: false,
+            })
+
+          if (uploadError) {
+            throw new Error(`Upload ${storagePath} impossible : ${uploadError.message}`)
+          }
+          uploadedCount += 1
         }
       }
 
       setAutoImportMessage(
-        `${files.length} fichier(s) chargé(s) dans ${AUTO_IMPORT_BUCKET}/pending. ` +
+        `${uploadedCount} fichier(s) chargé(s) dans ${AUTO_IMPORT_BUCKET}/pending. ` +
+        (splitSummaries.length ? `${splitSummaries.join(' · ')}. ` : '') +
         'Tu peux lancer le job global.'
       )
       await loadAutomaticImportDashboard(false)
@@ -4643,20 +4914,6 @@ export default function ImportsParametragePage() {
     }
   }
 
-  function getTableConfigForAutoImportKind(kind: AutoImportFileKind) {
-    const tableKeyByKind: Partial<Record<AutoImportFileKind, TableKey>> = {
-      Activite: 'activite_lignes',
-      Facture: 'facture_lignes',
-      Devis: 'devis_lignes',
-    }
-
-    const tableKey = tableKeyByKind[kind]
-    const config = TABLES.find((table) => table.key === tableKey)
-    if (!tableKey || !config) {
-      throw new Error(`Type de fichier non importable automatiquement : ${kind}`)
-    }
-    return config
-  }
 
   function sortAutoImportFilesForPipeline(files: AutoImportStorageFile[]) {
     const order: Record<AutoImportFileKind, number> = {
@@ -5063,7 +5320,7 @@ export default function ImportsParametragePage() {
     }
   }
 
-  async function handleStartAutoImportPipeline() {
+  async function handleStartAutoImportPipeline(launchSmc: boolean) {
     if (autoImportRunning || autoImportUploading || importing || maintenanceLoading) return
 
     setAutoImportRunning(true)
@@ -5088,19 +5345,14 @@ export default function ImportsParametragePage() {
         )
       }
 
-      const pendingKindCounts = new Map<AutoImportFileKind, number>()
-      pendingFiles.forEach((file) => {
-        pendingKindCounts.set(file.kind, (pendingKindCounts.get(file.kind) || 0) + 1)
-      })
+      const pendingFileSetErrors = validateAutoImportPendingFileSet(
+        pendingFiles.map((file) => ({ name: file.name, kind: file.kind }))
+      )
 
-      const duplicatePendingKinds = Array.from(pendingKindCounts.entries())
-        .filter(([kind, count]) => kind !== 'Invalide' && count > 1)
-        .map(([kind]) => kind)
-
-      if (duplicatePendingKinds.length) {
+      if (pendingFileSetErrors.length) {
         throw new Error(
-          `Le dossier pending contient plusieurs fichiers du même type (${duplicatePendingKinds.join(', ')}). ` +
-          'Garde un seul fichier par type avant de lancer le job global.'
+          'Le dossier pending contient des fichiers incompatibles avec le lancement du job global :\n' +
+          pendingFileSetErrors.map((message) => `- ${message}`).join('\n')
         )
       }
 
@@ -5108,10 +5360,12 @@ export default function ImportsParametragePage() {
       const smcPeriod = getSmcPeriodCoveringDateInputs(manualStartDate, manualEndDate)
 
       const confirmed = window.confirm(
-        `Lancer le job global serveur ?\n\n` +
+        `${launchSmc ? 'Lancer le job global serveur AVEC SMC ?' : 'Lancer le job global serveur SANS SMC ?'}\n\n` +
         `Fichiers pending : ${pendingFiles.map((file) => file.name).join(', ')}\n\n` +
         `Flux articles : ${fluxPeriod.label} (${AUTO_IMPORT_FLUX_ARTICLES_MONTHS_BACK} mois), mois par mois.\n` +
-        `SMC : ${smcPeriod.label}.\n\n` +
+        `PDF : commercial-imports/reports/focus-mensuel/Rapport d'activité quotidien.pdf sera écrasé.\n` +
+        `SMC : ${launchSmc ? `${smcPeriod.label} — lancement automatique après rapport avant SMC` : 'non lancé — arrêt après rapport avant SMC'}.\n` +
+        `Email rapport avant SMC : ${autoImportSendReportEmail && autoImportReportEmailTo.trim() ? autoImportReportEmailTo.trim() : 'non demandé'}.\n\n` +
         `Le traitement sera déclenché côté Supabase Edge Function (${AUTO_IMPORT_EDGE_FUNCTION_NAME}). ` +
         `Tu pourras fermer le front après confirmation de création du run : l'écran ne servira plus qu'au suivi des rapports.`
       )
@@ -5131,6 +5385,9 @@ export default function ImportsParametragePage() {
           smc_date_debut: smcPeriod.p_date_debut,
           smc_date_fin: smcPeriod.p_date_fin,
           smc_batch_size: getSafeSmcBackgroundBatchSize(),
+          report_email_to: autoImportSendReportEmail ? autoImportReportEmailTo.trim() : '',
+          send_report_email: autoImportSendReportEmail,
+          launch_smc: launchSmc,
           expected_files: pendingFiles.map((file) => ({
             name: file.name,
             path: file.path,
@@ -5149,7 +5406,8 @@ export default function ImportsParametragePage() {
       const runId = Number((data as any)?.run_id || (data as any)?.runId || 0)
       setAutoImportMessage(
         `Job serveur${runId ? ` #${runId}` : ''} créé. ` +
-        `Le serveur va importer les fichiers, reconstruire flux_articles, produire le rapport avant SMC, puis lancer SMC automatiquement. ` +
+        `Le serveur va importer les fichiers, reconstruire flux_articles, reconstruire Focus Mensuel et produire le rapport avant SMC. ` +
+        `${launchSmc ? 'SMC sera lancé automatiquement ensuite. ' : 'SMC ne sera pas lancé : le job s’arrêtera après le rapport avant SMC. '}` +
         `Tu peux fermer le front ; utilise Actualiser statut pour suivre l'avancement.`
       )
 
@@ -5454,11 +5712,31 @@ export default function ImportsParametragePage() {
             <div>
               <h2 className="text-lg font-black tracking-tight">Pipeline automatique serveur — fichiers & job global</h2>
               <p className="mt-1 max-w-4xl text-sm text-slate-600">
-                Dépôt dans le bucket <b>{AUTO_IMPORT_BUCKET}</b>, dossier <b>pending</b>. Les fichiers attendus sont des Excel .xlsx
-                dont le nom commence par <b>Activite</b>, <b>Facture</b> ou <b>Devis</b>. Les imports existants ne sont pas modifiés :
-                ce bloc ne fait que charger les fichiers, lancer le job global et afficher les rapports.
-                Après import, le pipeline automatique ne relance pas les agrégats rapides séparément ; il relance <b>flux_articles</b> sur les <b>{AUTO_IMPORT_FLUX_ARTICLES_MONTHS_BACK} derniers mois</b>, mois par mois, génère le rapport avant SMC, puis lance SMC automatiquement.
+                Dépôt dans le bucket <b>{AUTO_IMPORT_BUCKET}</b>, dossier <b>pending</b>. Les fichiers attendus sont <b>Activite.xlsx</b>, <b>Facture.xlsx</b> et <b>Devis.xlsx</b>.
+                Les fichiers Excel sont automatiquement convertis et découpés en plusieurs <b>.csv</b> de moins de <b>500 Ko</b>, en conservant la ligne d’entête et sans couper un même numéro de document entre deux fichiers. Les imports manuels existants ne sont pas modifiés :
+                ce bloc ne fait que charger les fichiers découpés, lancer le job global et afficher les rapports.
+                Le pipeline serveur traite ensuite <b>un seul morceau par invocation</b>, pour éviter les limites CPU/mémoire, puis relance <b>flux_articles</b> sur les <b>{AUTO_IMPORT_FLUX_ARTICLES_MONTHS_BACK} derniers mois</b>, reconstruit le <b>cache Focus Mensuel du mois courant</b>, génère le PDF <b>reports/focus-mensuel/Rapport d'activité quotidien.pdf</b> en écrasant l'ancien fichier, génère le rapport avant SMC, puis lance ou non SMC selon le bouton choisi.
               </p>
+              <div className="mt-3 flex flex-col gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center">
+                <label className="flex items-center gap-2 text-xs font-bold text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={autoImportSendReportEmail}
+                    onChange={(event) => setAutoImportSendReportEmail(event.target.checked)}
+                    disabled={autoImportBusy || importing || maintenanceLoading}
+                  />
+                  Envoyer le rapport avant SMC + PDF Focus Mensuel par email
+                </label>
+                <input
+                  type="text"
+                  value={autoImportReportEmailTo}
+                  onChange={(event) => setAutoImportReportEmailTo(event.target.value)}
+                  placeholder="adresse1@domaine.fr; adresse2@domaine.fr"
+                  disabled={!autoImportSendReportEmail || autoImportBusy || importing || maintenanceLoading}
+                  className="min-w-[320px] rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-semibold outline-none focus:border-blue-400 disabled:bg-slate-100"
+                />
+                <span className="text-[11px] font-semibold text-slate-500">Plusieurs adresses possibles, séparées par ; ou ,</span>
+              </div>
             </div>
             <div className="flex flex-wrap gap-2">
               <label className="cursor-pointer rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-slate-800">
@@ -5474,11 +5752,19 @@ export default function ImportsParametragePage() {
               </label>
               <button
                 type="button"
-                onClick={handleStartAutoImportPipeline}
+                onClick={() => handleStartAutoImportPipeline(false)}
+                disabled={autoImportBusy || importing || maintenanceLoading || autoImportPendingFiles.length === 0}
+                className="rounded-xl border border-sky-300 bg-sky-50 px-4 py-2 text-sm font-semibold text-sky-800 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {autoImportRunning ? 'Job global…' : 'Job global sans SMC'}
+              </button>
+              <button
+                type="button"
+                onClick={() => handleStartAutoImportPipeline(true)}
                 disabled={autoImportBusy || importing || maintenanceLoading || autoImportPendingFiles.length === 0}
                 className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {autoImportRunning ? 'Job global…' : 'Lancer job global'}
+                {autoImportRunning ? 'Job global…' : 'Job global avec SMC'}
               </button>
               <button
                 type="button"
@@ -5654,6 +5940,18 @@ export default function ImportsParametragePage() {
                   <span>Rapport avant SMC : {formatDateTime(latestAutoImportRun?.pre_smc_report_at || null)}</span>
                   <span>·</span>
                   <span>SMC fin : {formatDateTime(latestAutoImportRun?.smc_finished_at || null)}</span>
+                  {latestAutoImportRun?.focus_pdf_path && (
+                    <>
+                      <span>·</span>
+                      <span>PDF Focus : {latestAutoImportRun.focus_pdf_path}</span>
+                    </>
+                  )}
+                  {latestAutoImportRun?.report_email_status && (
+                    <>
+                      <span>·</span>
+                      <span>Email : {latestAutoImportRun.report_email_status}</span>
+                    </>
+                  )}
                 </div>
                 <pre className="max-h-[260px] overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950 p-3 text-xs font-semibold text-slate-50">
                   {latestAutoImportReport}
