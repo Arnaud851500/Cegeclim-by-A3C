@@ -46,6 +46,8 @@ export async function POST(req: NextRequest) {
 
     const focusUrl = new URL(focusBaseUrl)
     appendParam(focusUrl, 'pdf', '1')
+    // Secret passé à la page d'impression pour contourner l'auth utilisateur sans exposer de session.
+    appendParam(focusUrl, 'render_secret', process.env.REPORT_PDF_RENDER_SECRET)
     appendParam(focusUrl, 'month', payload.month)
     appendParam(focusUrl, 'focusDate', payload.focus_date)
     appendParam(focusUrl, 'focus_date', payload.focus_date)
