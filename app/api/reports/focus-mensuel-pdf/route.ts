@@ -17,14 +17,144 @@ type PdfRequest = {
   filename?: string
 }
 
-function appendParam(url: URL, key: string, value: string | undefined | null) {
-  if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, value)
-}
-
 function getRequiredEnv(name: string) {
   const value = process.env[name]
   if (!value) throw new Error(`Variable d'environnement manquante : ${name}`)
   return value
+}
+
+function appendParam(url: URL, key: string, value: string | undefined | null) {
+  if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, value)
+}
+
+function redactSecretInUrl(url: string) {
+  return url.replace(/(render_secret=)[^&]+/gi, '$1***')
+}
+
+function buildFocusPrintUrl(payload: PdfRequest = {}) {
+  const focusBaseUrl = getRequiredEnv('FOCUS_MENSUEL_PRINT_URL')
+  const renderSecret = getRequiredEnv('REPORT_PDF_RENDER_SECRET')
+
+  const focusUrl = new URL(focusBaseUrl)
+
+  appendParam(focusUrl, 'pdf', '1')
+  appendParam(focusUrl, 'render_secret', renderSecret)
+  appendParam(focusUrl, 'month', payload.month)
+  appendParam(focusUrl, 'focusDate', payload.focus_date)
+  appendParam(focusUrl, 'focus_date', payload.focus_date)
+  appendParam(focusUrl, 'horsStatistiques', payload.hors_statistiques || 'afficher')
+  appendParam(focusUrl, 'hors_statistiques', payload.hors_statistiques || 'afficher')
+  appendParam(focusUrl, 'view', 'montant_ht')
+
+  return focusUrl
+}
+
+function isLoginPageText(bodyText: string) {
+  const text = String(bodyText || '')
+  return (
+    text.includes('Mot de passe') &&
+    text.includes('Connexion') &&
+    text.includes('SUIVI COMMERCIAL & PROSPECT')
+  )
+}
+
+async function openFocusPageAndAssertNotLogin(page: Awaited<ReturnType<Awaited<ReturnType<typeof puppeteer.launch>>['newPage']>>, targetUrl: string) {
+  await page.goto(targetUrl, { waitUntil: 'networkidle0', timeout: 90000 })
+
+  await page
+    .waitForFunction(
+      () => {
+        const ready = document.querySelector('[data-focus-report-ready="1"], [data-report-ready="1"]')
+        if (ready) return true
+        const body = document.body?.innerText || ''
+        if (body.includes('Mot de passe') && body.includes('Connexion')) return true
+        return !/Chargement|Reconstruction/i.test(body)
+      },
+      { timeout: 60000 }
+    )
+    .catch(() => null)
+
+  const loadedUrl = page.url()
+  const bodyText = await page.evaluate(() => document.body?.innerText || '')
+  const title = await page.title().catch(() => '')
+  const readyFound = await page
+    .$('[data-focus-report-ready="1"], [data-report-ready="1"]')
+    .then(Boolean)
+    .catch(() => false)
+
+  if (loadedUrl.includes('/login') || isLoginPageText(bodyText)) {
+    throw new Error(
+      [
+        `La génération PDF a chargé l'écran de connexion au lieu du Focus Mensuel.`,
+        `URL demandée=${redactSecretInUrl(targetUrl)}`,
+        `URL chargée=${redactSecretInUrl(loadedUrl)}`,
+        `Titre=${title || '—'}`,
+        `Indice : FOCUS_MENSUEL_PRINT_URL doit pointer vers /focus_mensuel_print et cette route doit être exclue de l'auth globale.`,
+      ].join(' ')
+    )
+  }
+
+  if (!readyFound) {
+    console.warn('Aucun marqueur data-focus-report-ready/data-report-ready trouvé. Le PDF sera généré quand même.')
+  }
+
+  return {
+    loadedUrl,
+    title,
+    readyFound,
+    bodyPreview: bodyText.slice(0, 300),
+  }
+}
+
+async function launchBrowser() {
+  const executablePath = await chromium.executablePath()
+
+  return puppeteer.launch({
+    args: chromium.args,
+    executablePath,
+    headless: true,
+    defaultViewport: {
+      width: Number(process.env.FOCUS_PDF_VIEWPORT_WIDTH || 1680),
+      height: Number(process.env.FOCUS_PDF_VIEWPORT_HEIGHT || 2400),
+    },
+  })
+}
+
+export async function GET(req: NextRequest) {
+  try {
+    const url = req.nextUrl
+    const debugSecret = url.searchParams.get('debug_secret') || url.searchParams.get('render_secret') || ''
+    const expectedSecret = process.env.REPORT_PDF_RENDER_SECRET || ''
+
+    if (!expectedSecret || debugSecret !== expectedSecret) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: 'Unauthorized debug request. Ajoute ?debug_secret=<REPORT_PDF_RENDER_SECRET>.',
+        },
+        { status: 401 }
+      )
+    }
+
+    const focusUrl = buildFocusPrintUrl({
+      month: url.searchParams.get('month') || undefined,
+      focus_date: url.searchParams.get('focus_date') || undefined,
+      hors_statistiques: url.searchParams.get('hors_statistiques') || 'afficher',
+    })
+
+    return NextResponse.json({
+      ok: true,
+      route: '/api/reports/focus-mensuel-pdf',
+      focusMensuelPrintUrl: process.env.FOCUS_MENSUEL_PRINT_URL || null,
+      hasRenderSecret: Boolean(process.env.REPORT_PDF_RENDER_SECRET),
+      hasSupabaseUrl: Boolean(process.env.SUPABASE_URL),
+      hasServiceRoleKey: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
+      targetUrl: redactSecretInUrl(focusUrl.toString()),
+      expectedPrintPath: new URL(process.env.FOCUS_MENSUEL_PRINT_URL || 'https://invalid.local').pathname,
+    })
+  } catch (error: any) {
+    return NextResponse.json({ ok: false, error: error?.message || String(error) }, { status: 500 })
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -42,44 +172,32 @@ export async function POST(req: NextRequest) {
 
     const supabaseUrl = getRequiredEnv('SUPABASE_URL')
     const serviceRoleKey = getRequiredEnv('SUPABASE_SERVICE_ROLE_KEY')
-    const focusBaseUrl = getRequiredEnv('FOCUS_MENSUEL_PRINT_URL')
+    const focusUrl = buildFocusPrintUrl(payload)
 
-    const focusUrl = new URL(focusBaseUrl)
-    appendParam(focusUrl, 'pdf', '1')
-    // Secret passé à la page d'impression pour contourner l'auth utilisateur sans exposer de session.
-    appendParam(focusUrl, 'render_secret', process.env.REPORT_PDF_RENDER_SECRET)
-    appendParam(focusUrl, 'month', payload.month)
-    appendParam(focusUrl, 'focusDate', payload.focus_date)
-    appendParam(focusUrl, 'focus_date', payload.focus_date)
-    appendParam(focusUrl, 'horsStatistiques', payload.hors_statistiques || 'afficher')
-    appendParam(focusUrl, 'hors_statistiques', payload.hors_statistiques || 'afficher')
-    appendParam(focusUrl, 'view', 'montant_ht')
+    const debug = req.nextUrl.searchParams.get('debug') === '1'
+    if (debug) {
+      return NextResponse.json({
+        ok: true,
+        debug: true,
+        bucket,
+        pdfPath,
+        focusMensuelPrintUrl: process.env.FOCUS_MENSUEL_PRINT_URL || null,
+        targetUrl: redactSecretInUrl(focusUrl.toString()),
+        hasRenderSecret: Boolean(process.env.REPORT_PDF_RENDER_SECRET),
+      })
+    }
 
-    const executablePath = await chromium.executablePath()
-    browser = await puppeteer.launch({
-      args: chromium.args,
-      executablePath,
-      headless: true,
-      defaultViewport: { width: Number(process.env.FOCUS_PDF_VIEWPORT_WIDTH || 1680), height: Number(process.env.FOCUS_PDF_VIEWPORT_HEIGHT || 2400) },
-    })
-
+    browser = await launchBrowser()
     const page = await browser.newPage()
-    await page.setViewport({ width: Number(process.env.FOCUS_PDF_VIEWPORT_WIDTH || 1680), height: Number(process.env.FOCUS_PDF_VIEWPORT_HEIGHT || 2400), deviceScaleFactor: 1 })
+
+    await page.setViewport({
+      width: Number(process.env.FOCUS_PDF_VIEWPORT_WIDTH || 1680),
+      height: Number(process.env.FOCUS_PDF_VIEWPORT_HEIGHT || 2400),
+      deviceScaleFactor: 1,
+    })
     await page.emulateMediaType('screen')
 
-    await page.goto(focusUrl.toString(), { waitUntil: 'networkidle0', timeout: 90000 })
-
-    await page
-      .waitForFunction(
-        () => {
-          const ready = document.querySelector('[data-focus-report-ready="1"], [data-report-ready="1"]')
-          if (ready) return true
-          const body = document.body?.innerText || ''
-          return !/Chargement|Reconstruction|Erreur chargement/i.test(body)
-        },
-        { timeout: 60000 }
-      )
-      .catch(() => null)
+    const pageInfo = await openFocusPageAndAssertNotLogin(page, focusUrl.toString())
 
     await page.addStyleTag({
       content: `
@@ -87,7 +205,7 @@ export async function POST(req: NextRequest) {
         html, body { margin: 0 !important; padding: 0 !important; background: #eef5fb !important; }
         body { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
         * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
-        [data-focus-report-ready] { width: 100% !important; box-sizing: border-box !important; }
+        [data-focus-report-ready], [data-report-ready] { width: 100% !important; box-sizing: border-box !important; }
         .no-print, [data-no-print="true"] { display: none !important; }
       `,
     })
@@ -112,7 +230,9 @@ export async function POST(req: NextRequest) {
       ok: true,
       bucket,
       path: pdfPath,
-      focus_url: focusUrl.toString(),
+      focus_url: redactSecretInUrl(focusUrl.toString()),
+      loaded_url: redactSecretInUrl(pageInfo.loadedUrl),
+      page_ready_marker_found: pageInfo.readyFound,
       filename: payload.filename || `Rapport d'activité quotidien.pdf`,
       bytes: pdf.byteLength,
     })
