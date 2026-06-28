@@ -667,11 +667,10 @@ export default function FocusMensuelPage() {
       )}
       <div style={styles.headerCard}>
         <div>
-          <h1 style={styles.title}>Focus activité mensuelle</h1>
+          <h1 style={styles.title}>Focus activité mensuelle à la maille jour</h1>
           <div style={styles.subtitle}>
-            Vision quotidienne à la maille jour ·{' '}
             <span style={styles.subtitleBasisNote}>
-              (moyennes mensuelles sur {businessDayBasis.label} jusqu’au {formatDateFr(focusDate)}
+              Moyennes mensuelles sur {businessDayBasis.label} jusqu’au {formatDateFr(focusDate)}
               {businessDayBasis.blDaysCount > 0
                 ? ', jours sans BL exclus'
                 : ', faute de BL détecté dans le périmètre filtré'}

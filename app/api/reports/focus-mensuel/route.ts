@@ -56,7 +56,7 @@ export async function POST(req: NextRequest) {
     browser = await puppeteer.launch({
       args: chromium.args,
       executablePath,
-      headless: chromium.headless,
+      headless: true,
       defaultViewport: { width: Number(process.env.FOCUS_PDF_VIEWPORT_WIDTH || 1680), height: Number(process.env.FOCUS_PDF_VIEWPORT_HEIGHT || 2400) },
     })
 
