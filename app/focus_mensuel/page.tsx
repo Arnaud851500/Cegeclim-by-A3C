@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { Suspense, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 
@@ -439,7 +439,7 @@ function HighlightTable({ title, rows }: { title: string; rows: HighlightRow[] }
   )
 }
 
-export default function FocusMensuelPage() {
+function FocusMensuelPageContent() {
   const searchParams = useSearchParams()
   const isPdfMode = searchParams?.get('pdf') === '1' || searchParams?.get('print') === '1'
   const requestedMonth = searchParams?.get('month')
@@ -667,10 +667,11 @@ export default function FocusMensuelPage() {
       )}
       <div style={styles.headerCard}>
         <div>
-          <h1 style={styles.title}>Focus activité mensuelle à la maille jour</h1>
+          <h1 style={styles.title}>Focus activité mensuelle</h1>
           <div style={styles.subtitle}>
+            Vision quotidienne à la maille jour ·{' '}
             <span style={styles.subtitleBasisNote}>
-              Moyennes mensuelles sur {businessDayBasis.label} jusqu’au {formatDateFr(focusDate)}
+              (moyennes mensuelles sur {businessDayBasis.label} jusqu’au {formatDateFr(focusDate)}
               {businessDayBasis.blDaysCount > 0
                 ? ', jours sans BL exclus'
                 : ', faute de BL détecté dans le périmètre filtré'}
@@ -899,4 +900,13 @@ const styles: Record<string, React.CSSProperties> = {
   tdStrong: { borderBottom: '1px solid #f1f5f9', padding: '7px 9px', color: '#0f172a', fontWeight: 900, whiteSpace: 'nowrap' },
   tdRight: { borderBottom: '1px solid #f1f5f9', padding: '7px 9px', textAlign: 'right', color: '#0f172a', fontWeight: 800, whiteSpace: 'nowrap' },
   emptyCell: { padding: 18, textAlign: 'center', color: '#64748b', fontWeight: 900 },
+}
+
+
+export default function FocusMensuelPage() {
+  return (
+    <Suspense fallback={<div style={{ padding: 24 }}>Chargement du focus mensuel…</div>}>
+      <FocusMensuelPageContent />
+    </Suspense>
+  )
 }
