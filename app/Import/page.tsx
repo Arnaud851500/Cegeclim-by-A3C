@@ -1202,11 +1202,15 @@ async function splitXlsxForAutoImportUpload(file: File, kind: AutoImportFileKind
 
   const sheet = workbook.Sheets[sheetName]
 
-  // raw:false permet d'exporter les dates Excel sous forme lisible plutôt qu'en serial brut.
-  // Le serveur ne parse plus de XLSX ; il consomme uniquement ces morceaux CSV.
+  // IMPORTANT : on garde les valeurs brutes Excel.
+  // Pour les dates, cela permet de conserver les serials Excel au lieu de générer
+  // des dates texte ambiguës du type 6/1/26, qui peuvent être relues comme
+  // 6 janvier au lieu du 1er juin.
+  // L'Edge Function sait convertir les serials Excel, y compris lorsqu'ils arrivent
+  // sous forme texte depuis un CSV.
   const aoa = XLSX.utils.sheet_to_json<any[]>(sheet, {
     header: 1,
-    raw: false,
+    raw: true,
     defval: '',
     blankrows: false,
   }) as any[][]
