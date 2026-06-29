@@ -1184,6 +1184,67 @@ function writeAutoImportCsvFile(headerRow: any[], dataRows: any[][], fileName: s
   return new File([csv], fileName, { type: 'text/csv;charset=utf-8' })
 }
 
+function getAutoImportTableKeyFromKind(kind: AutoImportFileKind): TableKey | null {
+  if (kind === 'Activite') return 'activite_lignes'
+  if (kind === 'Facture') return 'facture_lignes'
+  if (kind === 'Devis') return 'devis_lignes'
+  return null
+}
+
+function resolveAutoImportHeaderDb(headerValue: any, tableKey: TableKey) {
+  const normalized = normalizeHeader(String(headerValue || ''))
+  if (!normalized) return null
+
+  const aliasDb = EXTRA_HEADER_ALIASES[tableKey]?.[normalized]
+  if (aliasDb) return aliasDb
+
+  const config = TABLES.find((table) => table.key === tableKey)
+  if (!config) return null
+
+  const column = config.columns.find((candidate) => {
+    if (normalizeHeader(candidate.db) === normalized) return true
+    if (normalizeHeader(candidate.label) === normalized) return true
+    return (candidate.aliases || []).some((alias) => normalizeHeader(alias) === normalized)
+  })
+
+  return column?.db || null
+}
+
+function getAutoImportDateColumnIndexes(headerRow: any[], kind: AutoImportFileKind) {
+  const tableKey = getAutoImportTableKeyFromKind(kind)
+  if (!tableKey) return []
+
+  const config = TABLES.find((table) => table.key === tableKey)
+  if (!config) return []
+
+  const dateColumnDbs = new Set(config.columns.filter((column) => column.type === 'date').map((column) => column.db))
+
+  return headerRow.reduce<number[]>((indexes, headerValue, index) => {
+    const db = resolveAutoImportHeaderDb(headerValue, tableKey)
+    if (db && dateColumnDbs.has(db)) indexes.push(index)
+    return indexes
+  }, [])
+}
+
+function normalizeAutoImportDateCellsForCsv(row: any[], dateColumnIndexes: number[]) {
+  if (!dateColumnIndexes.length) return row
+
+  const normalizedRow = [...row]
+
+  for (const index of dateColumnIndexes) {
+    const value = normalizedRow[index]
+    if (value === undefined || value === null || value === '') {
+      normalizedRow[index] = ''
+      continue
+    }
+
+    const normalizedDate = normalizeDate(value)
+    normalizedRow[index] = normalizedDate || ''
+  }
+
+  return normalizedRow
+}
+
 async function splitXlsxForAutoImportUpload(file: File, kind: AutoImportFileKind) {
   if (isAutoImportCsv(file.name) && file.size <= AUTO_IMPORT_MAX_CSV_CHUNK_BYTES) {
     return [{ file, rows: null as number | null, part: 1, parts: 1 }]
@@ -1202,12 +1263,10 @@ async function splitXlsxForAutoImportUpload(file: File, kind: AutoImportFileKind
 
   const sheet = workbook.Sheets[sheetName]
 
-  // IMPORTANT : on garde les valeurs brutes Excel.
-  // Pour les dates, cela permet de conserver les serials Excel au lieu de générer
-  // des dates texte ambiguës du type 6/1/26, qui peuvent être relues comme
-  // 6 janvier au lieu du 1er juin.
-  // L'Edge Function sait convertir les serials Excel, y compris lorsqu'ils arrivent
-  // sous forme texte depuis un CSV.
+  // IMPORTANT : on lit les cellules en brut pour éviter les dates texte ambiguës
+  // produites par XLSX en CSV, par exemple 6/1/26 qui peut être relu comme
+  // 6 janvier au lieu du 1er juin. Les colonnes dates sont ensuite converties
+  // explicitement en ISO YYYY-MM-DD avant d'écrire les CSV découpés.
   const aoa = XLSX.utils.sheet_to_json<any[]>(sheet, {
     header: 1,
     raw: true,
@@ -1218,8 +1277,11 @@ async function splitXlsxForAutoImportUpload(file: File, kind: AutoImportFileKind
   if (!aoa.length) throw new Error(`Le fichier ${file.name} ne contient aucune ligne.`)
 
   const headerRow = aoa[0] || []
-  const dataRows = aoa.slice(1).filter(rowHasValue)
-  if (!dataRows.length) throw new Error(`Le fichier ${file.name} ne contient aucune donnée après l'entête.`)
+  const rawDataRows = aoa.slice(1).filter(rowHasValue)
+  if (!rawDataRows.length) throw new Error(`Le fichier ${file.name} ne contient aucune donnée après l'entête.`)
+
+  const dateColumnIndexes = getAutoImportDateColumnIndexes(headerRow, kind)
+  const dataRows = rawDataRows.map((row) => normalizeAutoImportDateCellsForCsv(row, dateColumnIndexes))
 
   const documentColumnIndex = getAutoImportDocumentColumnIndex(headerRow, kind)
   if (documentColumnIndex < 0) {
