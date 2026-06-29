@@ -499,6 +499,9 @@ function FocusMensuelPageContent() {
   const requestedFocusDate = searchParams?.get('focusDate') || searchParams?.get('focus_date')
   const requestedHorsStats = searchParams?.get('horsStatistiques') || searchParams?.get('hors_statistiques')
   const requestedView = searchParams?.get('view')
+  const requestedAgence = searchParams?.get('agence') || ''
+  const requestedFamilleMacro = searchParams?.get('familleMacro') || searchParams?.get('famille_macro') || ''
+  const requestedCollaborateur = searchParams?.get('collaborateur') || ''
   const currentMonth = /^\d{4}-\d{2}$/.test(String(requestedMonth || '')) ? String(requestedMonth) : todayYmd().slice(0, 7)
   const requestedViewMode: ViewMode = ['montant_ht', 'nb_documents', 'quantite_pertinente'].includes(String(requestedView || ''))
     ? String(requestedView) as ViewMode
@@ -506,9 +509,9 @@ function FocusMensuelPageContent() {
   const [month, setMonth] = useState(currentMonth)
   const [focusDate, setFocusDate] = useState(/^\d{4}-\d{2}-\d{2}$/.test(String(requestedFocusDate || '')) ? String(requestedFocusDate) : pickDefaultFocusDate())
   const [viewMode, setViewMode] = useState<ViewMode>(requestedViewMode)
-  const [agence, setAgence] = useState('')
-  const [familleMacro, setFamilleMacro] = useState('')
-  const [collaborateur, setCollaborateur] = useState('')
+  const [agence, setAgence] = useState(requestedAgence)
+  const [familleMacro, setFamilleMacro] = useState(requestedFamilleMacro)
+  const [collaborateur, setCollaborateur] = useState(requestedCollaborateur)
   const [includeHorsStats, setIncludeHorsStats] = useState(isPdfMode || ['afficher', 'show', 'true', '1'].includes(String(requestedHorsStats || '').toLowerCase()))
   const [dailyRows, setDailyRows] = useState<DailyRow[]>([])
   const [highlightRows, setHighlightRows] = useState<HighlightRow[]>([])
@@ -577,22 +580,8 @@ function FocusMensuelPageContent() {
   const byAgencyRows = useMemo(() => aggregateMatrix(filteredFocusRows, (r) => r.agence || 'Sans agence'), [filteredFocusRows])
   const byFamilyRows = useMemo(() => aggregateMatrix(filteredFocusRows, (r) => r.famille_macro || 'AUTRES'), [filteredFocusRows])
   const mtdSourceRows = useMemo(() => normalizedRows.filter((row) => row.jour <= focusDate), [normalizedRows, focusDate])
+  const byFamilyMtdRows = useMemo(() => aggregateMatrix(mtdSourceRows, (r) => r.famille_macro || 'AUTRES'), [mtdSourceRows])
   const byAgencyMtdRows = useMemo(() => aggregateMatrix(mtdSourceRows, (r) => r.agence || 'Sans agence'), [mtdSourceRows])
-
-  const mtdRows = useMemo(() => {
-    return DOC_TYPES.map((type) => {
-      const rows = normalizedRows.filter((r) => r.type_document === type && r.jour <= focusDate)
-      return {
-        type,
-        cumulAmount: sum(rows, (r) => r.montant_ht),
-        cumulNb: sum(rows, (r) => r.nb_documents),
-        cumulQty: sum(rows, (r) => r.quantite_pertinente),
-        avgAmount: sum(rows, (r) => r.montant_ht) / businessDayBasis.count,
-        avgNb: sum(rows, (r) => r.nb_documents) / businessDayBasis.count,
-        avgQty: sum(rows, (r) => r.quantite_pertinente) / businessDayBasis.count,
-      }
-    })
-  }, [normalizedRows, focusDate, businessDayBasis])
 
   const highlights = useMemo(() => {
     const sorted = [...highlightRows].map((row) => ({ ...row, montant_ht: Number(row.montant_ht || 0) }))
@@ -948,40 +937,13 @@ function FocusMensuelPageContent() {
       </div>
 
       <div style={styles.sectionGrid} className="focus-pdf-section-grid">
-        <div style={styles.sectionCard} className="focus-pdf-section-card">
-          <div style={styles.sectionTitle}>Perspective MTD au {formatDateFr(focusDate)} — base {businessDayBasis.label}</div>
-          <Table>
-            <thead>
-              <tr>
-                <th style={styles.th}>Document</th>
-                <th style={styles.thRight}>Cumul €</th>
-                <th style={styles.thRight}>Cumul docs</th>
-                <th style={styles.thRight}>Cumul qté pert.</th>
-                <th style={styles.thRight}>Moy. €/jour ouvré</th>
-                <th style={styles.thRight}>Moy. docs/jour ouvré</th>
-              </tr>
-            </thead>
-            <tbody>
-              {mtdRows.map((row) => (
-                <tr key={row.type}>
-                  <td style={styles.tdStrong}><span style={{ ...styles.smallDocPill, color: DOC_COLORS[row.type] }}>{row.type}</span></td>
-                  <td style={styles.tdRight}>{formatMoney(row.cumulAmount)}</td>
-                  <td style={styles.tdRight}>{formatNumber(row.cumulNb)}</td>
-                  <td style={styles.tdRight}>{formatNumber(row.cumulQty)}</td>
-                  <td style={styles.tdRight}>{formatMoney(row.avgAmount)}</td>
-                  <td style={styles.tdRight}>{row.avgNb.toLocaleString('fr-FR', { maximumFractionDigits: 1 })}</td>
-                </tr>
-              ))}
-            </tbody>
-          </Table>
-        </div>
-
-        <SummaryMatrix title={`Jour focus par famille macro — ${formatDateFr(focusDate)}`} rows={byFamilyRows} />
+        <SummaryMatrix title={`Jour focus par famille macro — ${formatDateFr(focusDate)}`} rows={byFamilyRows} metric="quantite_pertinente" />
+        <SummaryMatrix title={`Depuis début du mois par famille macro — au ${formatDateFr(focusDate)}`} rows={byFamilyMtdRows} metric="quantite_pertinente" />
       </div>
 
       <div style={styles.sectionGrid} className="focus-pdf-section-grid">
-        <SummaryMatrix title={`Jour focus par agence — ${formatDateFr(focusDate)}`} rows={byAgencyRows} />
-        <SummaryMatrix title={`Depuis début du mois par agence — au ${formatDateFr(focusDate)}`} rows={byAgencyMtdRows} />
+        <SummaryMatrix title={`Jour focus par agence — ${formatDateFr(focusDate)}`} rows={byAgencyRows} metric="nb_documents" />
+        <SummaryMatrix title={`Depuis début du mois par agence — au ${formatDateFr(focusDate)}`} rows={byAgencyMtdRows} metric="nb_documents" />
       </div>
 
       <div style={styles.highlightsGrid} className="focus-pdf-highlights-grid">
@@ -1011,13 +973,45 @@ function aggregateMatrix(rows: DailyRow[], labelFn: (row: DailyRow) => string) {
       return [type, {
         amount: sum(typeRows, (r) => r.montant_ht),
         nb: sum(typeRows, (r) => r.nb_documents),
+        qtyPert: sum(typeRows, (r) => r.quantite_pertinente),
       }]
-    })) as Record<DocType, { amount: number; nb: number }>
+    })) as Record<DocType, { amount: number; nb: number; qtyPert: number }>
     return { label, byType, total: sum(items, (r) => r.montant_ht) }
   }).sort((a, b) => Math.abs(b.total) - Math.abs(a.total))
 }
 
-function SummaryMatrix({ title, rows }: { title: string; rows: ReturnType<typeof aggregateMatrix> }) {
+type SummaryMatrixMetric = 'nb_documents' | 'quantite_pertinente'
+
+function SummaryMatrix({
+  title,
+  rows,
+  metric = 'nb_documents',
+}: {
+  title: string
+  rows: ReturnType<typeof aggregateMatrix>
+  metric?: SummaryMatrixMetric
+}) {
+  const rowsWithTotal = useMemo(() => {
+    if (!rows.length) return []
+
+    const totalRow = {
+      label: 'TOTAL',
+      byType: Object.fromEntries(DOC_TYPES.map((type) => [
+        type,
+        {
+          amount: sum(rows, (row) => row.byType[type].amount),
+          nb: sum(rows, (row) => row.byType[type].nb),
+          qtyPert: sum(rows, (row) => row.byType[type].qtyPert),
+        },
+      ])) as Record<DocType, { amount: number; nb: number; qtyPert: number }>,
+      total: sum(rows, (row) => row.total),
+    }
+
+    return [totalRow, ...rows]
+  }, [rows])
+
+  const isQuantityMetric = metric === 'quantite_pertinente'
+
   return (
     <div style={styles.sectionCard} className="focus-pdf-section-card">
       <div style={styles.sectionTitle}>{title}</div>
@@ -1025,18 +1019,36 @@ function SummaryMatrix({ title, rows }: { title: string; rows: ReturnType<typeof
         <thead>
           <tr>
             <th style={styles.th}>Dimension</th>
-            {DOC_TYPES.map((type) => <th key={type} style={styles.thRight}>{type} docs</th>)}
+            {DOC_TYPES.map((type) => <th key={type} style={styles.thRight}>{type} {isQuantityMetric ? 'qté pert.' : 'docs'}</th>)}
             {DOC_TYPES.map((type) => <th key={`${type}-amount`} style={styles.thRight}>{type} €</th>)}
           </tr>
         </thead>
         <tbody>
-          {rows.length === 0 ? <tr><td colSpan={9} style={styles.emptyCell}>Aucune donnée sur le jour focus.</td></tr> : rows.map((row) => (
-            <tr key={row.label}>
-              <td style={styles.tdStrong}>{row.label}</td>
-              {DOC_TYPES.map((type) => <td key={type} style={styles.tdRight}>{formatNumber(row.byType[type].nb)}</td>)}
-              {DOC_TYPES.map((type) => <td key={`${type}-amount`} style={{ ...styles.tdRight, color: DOC_COLORS[type], fontWeight: 900 }}>{formatMoney(row.byType[type].amount)}</td>)}
-            </tr>
-          ))}
+          {rowsWithTotal.length === 0 ? <tr><td colSpan={9} style={styles.emptyCell}>Aucune donnée sur le périmètre.</td></tr> : rowsWithTotal.map((row) => {
+            const isTotal = row.label === 'TOTAL'
+            return (
+              <tr key={row.label}>
+                <td style={isTotal ? styles.tdTotalLabel : styles.tdStrong}>{row.label}</td>
+                {DOC_TYPES.map((type) => (
+                  <td key={type} style={isTotal ? styles.tdTotalRight : styles.tdRight}>
+                    {formatNumber(isQuantityMetric ? row.byType[type].qtyPert : row.byType[type].nb)}
+                  </td>
+                ))}
+                {DOC_TYPES.map((type) => (
+                  <td
+                    key={`${type}-amount`}
+                    style={{
+                      ...(isTotal ? styles.tdTotalRight : styles.tdRight),
+                      color: DOC_COLORS[type],
+                      fontWeight: 950,
+                    }}
+                  >
+                    {formatMoney(row.byType[type].amount)}
+                  </td>
+                ))}
+              </tr>
+            )
+          })}
         </tbody>
       </Table>
     </div>
@@ -1188,6 +1200,8 @@ const styles: Record<string, React.CSSProperties> = {
   td: { borderBottom: '1px solid #f1f5f9', padding: '7px 9px', color: '#0f172a', whiteSpace: 'nowrap' },
   tdStrong: { borderBottom: '1px solid #f1f5f9', padding: '7px 9px', color: '#0f172a', fontWeight: 900, whiteSpace: 'nowrap' },
   tdRight: { borderBottom: '1px solid #f1f5f9', padding: '7px 9px', textAlign: 'right', color: '#0f172a', fontWeight: 800, whiteSpace: 'nowrap' },
+  tdTotalLabel: { borderBottom: '2px solid #cbd5e1', padding: '7px 9px', color: '#0f172a', fontWeight: 950, whiteSpace: 'nowrap', background: '#f8fafc' },
+  tdTotalRight: { borderBottom: '2px solid #cbd5e1', padding: '7px 9px', textAlign: 'right', color: '#0f172a', fontWeight: 950, whiteSpace: 'nowrap', background: '#f8fafc' },
   emptyCell: { padding: 18, textAlign: 'center', color: '#64748b', fontWeight: 900 },
 }
 
