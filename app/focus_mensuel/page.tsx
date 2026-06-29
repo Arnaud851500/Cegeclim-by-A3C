@@ -547,22 +547,8 @@ function FocusMensuelPageContent() {
   const byAgencyRows = useMemo(() => aggregateMatrix(filteredFocusRows, (r) => r.agence || 'Sans agence'), [filteredFocusRows])
   const byFamilyRows = useMemo(() => aggregateMatrix(filteredFocusRows, (r) => r.famille_macro || 'AUTRES'), [filteredFocusRows])
   const mtdSourceRows = useMemo(() => normalizedRows.filter((row) => row.jour <= focusDate), [normalizedRows, focusDate])
+  const byFamilyMtdRows = useMemo(() => aggregateMatrix(mtdSourceRows, (r) => r.famille_macro || 'AUTRES'), [mtdSourceRows])
   const byAgencyMtdRows = useMemo(() => aggregateMatrix(mtdSourceRows, (r) => r.agence || 'Sans agence'), [mtdSourceRows])
-
-  const mtdRows = useMemo(() => {
-    return DOC_TYPES.map((type) => {
-      const rows = normalizedRows.filter((r) => r.type_document === type && r.jour <= focusDate)
-      return {
-        type,
-        cumulAmount: sum(rows, (r) => r.montant_ht),
-        cumulNb: sum(rows, (r) => r.nb_documents),
-        cumulQty: sum(rows, (r) => r.quantite_pertinente),
-        avgAmount: sum(rows, (r) => r.montant_ht) / businessDayBasis.count,
-        avgNb: sum(rows, (r) => r.nb_documents) / businessDayBasis.count,
-        avgQty: sum(rows, (r) => r.quantite_pertinente) / businessDayBasis.count,
-      }
-    })
-  }, [normalizedRows, focusDate, businessDayBasis])
 
   const highlights = useMemo(() => {
     const sorted = [...highlightRows].map((row) => ({ ...row, montant_ht: Number(row.montant_ht || 0) }))
@@ -915,40 +901,31 @@ function FocusMensuelPageContent() {
       </div>
 
       <div style={styles.sectionGrid}>
-        <div style={styles.sectionCard}>
-          <div style={styles.sectionTitle}>Perspective MTD au {formatDateFr(focusDate)} — base {businessDayBasis.label}</div>
-          <Table>
-            <thead>
-              <tr>
-                <th style={styles.th}>Document</th>
-                <th style={styles.thRight}>Cumul €</th>
-                <th style={styles.thRight}>Cumul docs</th>
-                <th style={styles.thRight}>Cumul qté pert.</th>
-                <th style={styles.thRight}>Moy. €/jour ouvré</th>
-                <th style={styles.thRight}>Moy. docs/jour ouvré</th>
-              </tr>
-            </thead>
-            <tbody>
-              {mtdRows.map((row) => (
-                <tr key={row.type}>
-                  <td style={styles.tdStrong}><span style={{ ...styles.smallDocPill, color: DOC_COLORS[row.type] }}>{row.type}</span></td>
-                  <td style={styles.tdRight}>{formatMoney(row.cumulAmount)}</td>
-                  <td style={styles.tdRight}>{formatNumber(row.cumulNb)}</td>
-                  <td style={styles.tdRight}>{formatNumber(row.cumulQty)}</td>
-                  <td style={styles.tdRight}>{formatMoney(row.avgAmount)}</td>
-                  <td style={styles.tdRight}>{row.avgNb.toLocaleString('fr-FR', { maximumFractionDigits: 1 })}</td>
-                </tr>
-              ))}
-            </tbody>
-          </Table>
-        </div>
-
-        <SummaryMatrix title={`Jour focus par famille macro — ${formatDateFr(focusDate)}`} rows={byFamilyRows} />
+        <SummaryMatrix
+          title={`Jour focus par famille macro — ${formatDateFr(focusDate)}`}
+          rows={byFamilyRows}
+          metric="quantite_pertinente"
+          emptyMessage="Aucune donnée par famille macro sur le jour focus."
+        />
+        <SummaryMatrix
+          title={`Depuis début du mois par famille macro — au ${formatDateFr(focusDate)}`}
+          rows={byFamilyMtdRows}
+          metric="quantite_pertinente"
+          emptyMessage="Aucune donnée par famille macro depuis le début du mois."
+        />
       </div>
 
       <div style={styles.sectionGrid}>
-        <SummaryMatrix title={`Jour focus par agence — ${formatDateFr(focusDate)}`} rows={byAgencyRows} />
-        <SummaryMatrix title={`Depuis début du mois par agence — au ${formatDateFr(focusDate)}`} rows={byAgencyMtdRows} />
+        <SummaryMatrix
+          title={`Jour focus par agence — ${formatDateFr(focusDate)}`}
+          rows={byAgencyRows}
+          emptyMessage="Aucune donnée par agence sur le jour focus."
+        />
+        <SummaryMatrix
+          title={`Depuis début du mois par agence — au ${formatDateFr(focusDate)}`}
+          rows={byAgencyMtdRows}
+          emptyMessage="Aucune donnée par agence depuis le début du mois."
+        />
       </div>
 
       <div style={styles.highlightsGrid}>
@@ -978,13 +955,40 @@ function aggregateMatrix(rows: DailyRow[], labelFn: (row: DailyRow) => string) {
       return [type, {
         amount: sum(typeRows, (r) => r.montant_ht),
         nb: sum(typeRows, (r) => r.nb_documents),
+        qtyPert: sum(typeRows, (r) => r.quantite_pertinente),
       }]
-    })) as Record<DocType, { amount: number; nb: number }>
+    })) as Record<DocType, { amount: number; nb: number; qtyPert: number }>
     return { label, byType, total: sum(items, (r) => r.montant_ht) }
   }).sort((a, b) => Math.abs(b.total) - Math.abs(a.total))
 }
 
-function SummaryMatrix({ title, rows }: { title: string; rows: ReturnType<typeof aggregateMatrix> }) {
+type MatrixMetric = 'nb_documents' | 'quantite_pertinente'
+
+function SummaryMatrix({
+  title,
+  rows,
+  metric = 'nb_documents',
+  emptyMessage = 'Aucune donnée sur le jour focus.',
+}: {
+  title: string
+  rows: ReturnType<typeof aggregateMatrix>
+  metric?: MatrixMetric
+  emptyMessage?: string
+}) {
+  const metricLabel = metric === 'quantite_pertinente' ? 'qté pert.' : 'docs'
+  const totalRow = rows.length > 0
+    ? {
+        label: 'TOTAL',
+        byType: Object.fromEntries(DOC_TYPES.map((type) => [type, {
+          amount: rows.reduce((acc, row) => acc + Number(row.byType[type].amount || 0), 0),
+          nb: rows.reduce((acc, row) => acc + Number(row.byType[type].nb || 0), 0),
+          qtyPert: rows.reduce((acc, row) => acc + Number(row.byType[type].qtyPert || 0), 0),
+        }])) as Record<DocType, { amount: number; nb: number; qtyPert: number }>,
+        total: rows.reduce((acc, row) => acc + Number(row.total || 0), 0),
+      }
+    : null
+  const displayRows = totalRow ? [totalRow, ...rows] : []
+
   return (
     <div style={styles.sectionCard}>
       <div style={styles.sectionTitle}>{title}</div>
@@ -992,18 +996,32 @@ function SummaryMatrix({ title, rows }: { title: string; rows: ReturnType<typeof
         <thead>
           <tr>
             <th style={styles.th}>Dimension</th>
-            {DOC_TYPES.map((type) => <th key={type} style={styles.thRight}>{type} docs</th>)}
+            {DOC_TYPES.map((type) => <th key={type} style={styles.thRight}>{type} {metricLabel}</th>)}
             {DOC_TYPES.map((type) => <th key={`${type}-amount`} style={styles.thRight}>{type} €</th>)}
           </tr>
         </thead>
         <tbody>
-          {rows.length === 0 ? <tr><td colSpan={9} style={styles.emptyCell}>Aucune donnée sur le jour focus.</td></tr> : rows.map((row) => (
-            <tr key={row.label}>
-              <td style={styles.tdStrong}>{row.label}</td>
-              {DOC_TYPES.map((type) => <td key={type} style={styles.tdRight}>{formatNumber(row.byType[type].nb)}</td>)}
-              {DOC_TYPES.map((type) => <td key={`${type}-amount`} style={{ ...styles.tdRight, color: DOC_COLORS[type], fontWeight: 900 }}>{formatMoney(row.byType[type].amount)}</td>)}
-            </tr>
-          ))}
+          {displayRows.length === 0 ? <tr><td colSpan={9} style={styles.emptyCell}>{emptyMessage}</td></tr> : displayRows.map((row, index) => {
+            const isTotal = index === 0 && row.label === 'TOTAL'
+            return (
+              <tr key={row.label} style={isTotal ? styles.totalRow : undefined}>
+                <td style={isTotal ? styles.tdStrongTotal : styles.tdStrong}>{row.label}</td>
+                {DOC_TYPES.map((type) => (
+                  <td key={type} style={isTotal ? styles.tdRightTotal : styles.tdRight}>
+                    {formatNumber(metric === 'quantite_pertinente' ? row.byType[type].qtyPert : row.byType[type].nb)}
+                  </td>
+                ))}
+                {DOC_TYPES.map((type) => (
+                  <td
+                    key={`${type}-amount`}
+                    style={{ ...(isTotal ? styles.tdRightTotal : styles.tdRight), color: DOC_COLORS[type], fontWeight: 900 }}
+                  >
+                    {formatMoney(row.byType[type].amount)}
+                  </td>
+                ))}
+              </tr>
+            )
+          })}
         </tbody>
       </Table>
     </div>
@@ -1111,6 +1129,9 @@ const styles: Record<string, React.CSSProperties> = {
   td: { borderBottom: '1px solid #f1f5f9', padding: '7px 9px', color: '#0f172a', whiteSpace: 'nowrap' },
   tdStrong: { borderBottom: '1px solid #f1f5f9', padding: '7px 9px', color: '#0f172a', fontWeight: 900, whiteSpace: 'nowrap' },
   tdRight: { borderBottom: '1px solid #f1f5f9', padding: '7px 9px', textAlign: 'right', color: '#0f172a', fontWeight: 800, whiteSpace: 'nowrap' },
+  totalRow: { background: '#f8fafc' },
+  tdStrongTotal: { borderBottom: '2px solid #cbd5e1', padding: '8px 9px', color: '#0f172a', fontWeight: 950, whiteSpace: 'nowrap' },
+  tdRightTotal: { borderBottom: '2px solid #cbd5e1', padding: '8px 9px', textAlign: 'right', color: '#0f172a', fontWeight: 950, whiteSpace: 'nowrap' },
   emptyCell: { padding: 18, textAlign: 'center', color: '#64748b', fontWeight: 900 },
 }
 
