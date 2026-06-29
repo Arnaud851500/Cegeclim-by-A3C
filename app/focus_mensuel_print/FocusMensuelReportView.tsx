@@ -653,7 +653,7 @@ function FocusMensuelPageContent() {
     setError(null)
 
     try {
-      const { data, error } = await supabase.rpc('get_focus_mensuel_daily_summary', {
+      const { data, error } = await supabase.rpc('get_focus_mensuel_daily_summary_metier', {
         p_date_debut: monthBegin,
         p_date_fin: monthEnd,
         p_agence: agence || null,
