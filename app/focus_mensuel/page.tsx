@@ -1253,7 +1253,7 @@ function FocusMensuelPageContent() {
     >
       {isPdfMode && (
         <style>{`
-          @page { size: A4 portrait; margin: 6mm 4mm 6mm 4mm; }
+         @page { size: A4 landscape; margin: 4mm 4mm 4mm 4mm; }
           html, body { margin: 0 !important; padding: 0 !important; background: #eef5fb !important; }
           body, * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
           [data-focus-report-ready] { width: 100% !important; box-sizing: border-box !important; }
