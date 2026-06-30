@@ -1433,7 +1433,6 @@ export default function ClientsPage() {
   const [mapSectorVisibility, setMapSectorVisibility] = useState<Record<string, boolean>>({})
   const [mapAgeSliderMin, setMapAgeSliderMin] = useState(daysToSlider(0))
   const [mapAgeSliderMax, setMapAgeSliderMax] = useState(daysToSlider(MAX_AGE_DAYS))
-  const [showMapListPanel, setShowMapListPanel] = useState(true)
   const [showCegeclimPresenceModal, setShowCegeclimPresenceModal] = useState(false)
   
   function openPreviousClient() {
@@ -1802,7 +1801,6 @@ async function saveSelectedClientField(field: 'prospect_comment' | 'prospect_sta
 async function openMapFromCell(secteur: string, departement: string | null) {
   window.scrollTo({ top: 0, behavior: 'smooth' })
   setMapOpen(true)
-  setShowMapListPanel(true)
   setMapLoading(true)
   setMapClients([])
   // La carte doit reprendre le périmètre Clients sélectionné sur l'écran principal.
@@ -2630,7 +2628,7 @@ useEffect(() => {
     cancelled = true
     window.clearTimeout(timeout)
   }
-}, [mapOpen, visibleMapPoints, showMapListPanel])
+}, [mapOpen, visibleMapPoints])
 
 useEffect(() => {
   if (mapOpen) return
@@ -4801,16 +4799,29 @@ const selectedClientMapReason = useMemo(() => {
             {mapOpen && (
               <div style={mapOverlayStyle}>
                 <div style={mapModalStyle}>
-                  <div style={mapCompactHeaderStyle}>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0, flex: '1 1 760px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                        <h2 style={{ margin: 0, fontSize: 18, lineHeight: 1.15 }}>{mapTitle}</h2>
-                        <span style={mapCountBadgeStyle}>{visibleMapRows.length} visibles</span>
-                        <span style={mapInfoTextStyle}>Ancienneté appliquée uniquement aux prospects</span>
-                      </div>
+                  <div
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'flex-start',
+                      gap: 20,
+                      flexWrap: 'wrap',
+                    }}
+                  >
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 520, flex: 1 }}>
+                      <h2 style={{ margin: 0 }}>{mapTitle}</h2>
 
-                      <div style={mapToolbarStyle}>
-                        <label style={{ ...mapPillToggleStyle, background: showMapProspects ? '#eff6ff' : '#ffffff' }}>
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 14,
+                          flexWrap: 'wrap',
+                          fontSize: 14,
+                          color: '#334155',
+                        }}
+                      >
+                        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
                           <input
                             type="checkbox"
                             checked={showMapProspects}
@@ -4818,19 +4829,18 @@ const selectedClientMapReason = useMemo(() => {
                           />
                           <span
                             style={{
-                              width: 10,
-                              height: 10,
+                              width: 12,
+                              height: 12,
                               borderRadius: '50%',
                               background: '#94a3b8',
                               border: '1px solid #334155',
                               display: 'inline-block',
-                              flexShrink: 0,
                             }}
                           />
-                          Prospects ({mapProspectPoints.length})
+                          Prospects géolocalisés ({mapProspectPoints.length})
                         </label>
 
-                        <label style={{ ...mapPillToggleStyle, background: showMapCegeclim ? '#eff6ff' : '#ffffff' }}>
+                        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
                           <input
                             type="checkbox"
                             checked={showMapCegeclim}
@@ -4838,20 +4848,19 @@ const selectedClientMapReason = useMemo(() => {
                           />
                           <span
                             style={{
-                              width: 10,
-                              height: 10,
+                              width: 12,
+                              height: 12,
                               borderRadius: '50%',
                               background: '#94a3b8',
                               border: '3px solid #facc15',
                               display: 'inline-block',
                               boxSizing: 'border-box',
-                              flexShrink: 0,
                             }}
                           />
-                          Clients CEGECLIM ({mapCegeclimPoints.length})
+                          Clients CEGECLIM géolocalisés ({mapCegeclimPoints.length})
                         </label>
 
-                        <label style={{ ...mapPillToggleStyle, background: showMapCegeclimSommeil ? '#eff6ff' : '#ffffff' }}>
+                        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
                           <input
                             type="checkbox"
                             checked={showMapCegeclimSommeil}
@@ -4859,213 +4868,153 @@ const selectedClientMapReason = useMemo(() => {
                           />
                           <span
                             style={{
-                              width: 10,
-                              height: 10,
+                              width: 12,
+                              height: 12,
                               borderRadius: '50%',
                               background: '#94a3b8',
                               border: '3px solid #dc2626',
                               display: 'inline-block',
                               boxSizing: 'border-box',
-                              flexShrink: 0,
                             }}
                           />
-                          Sommeil ({mapCegeclimSommeilPoints.length})
+                          CEGECLIM Sommeil géolocalisés ({mapCegeclimSommeilPoints.length})
                         </label>
 
-                        <details style={mapDropdownStyle}>
-                          <summary style={mapFilterButtonStyle}>
-                            Secteurs : {mapLegendSectors.filter((sector) => mapSectorVisibility[sector] !== false).length}/{mapLegendSectors.length} ▾
-                          </summary>
-                          <div style={mapDropdownPanelStyle}>
-                            <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setMapSectorVisibility((prev) => {
-                                    const next = { ...prev }
-                                    mapLegendSectors.forEach((sector) => {
-                                      next[sector] = true
-                                    })
-                                    return next
-                                  })
-                                }
-                                style={miniButtonStyle}
-                              >
-                                Tout sélectionner
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setMapSectorVisibility((prev) => {
-                                    const next = { ...prev }
-                                    mapLegendSectors.forEach((sector) => {
-                                      next[sector] = false
-                                    })
-                                    return next
-                                  })
-                                }
-                                style={miniButtonStyle}
-                              >
-                                Tout effacer
-                              </button>
-                            </div>
+                        {mapLegendSectors.map((sector) => (
+                          <label
+                            key={sector}
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={mapSectorVisibility[sector] !== false}
+                              onChange={(e) =>
+                                setMapSectorVisibility((prev) => ({
+                                  ...prev,
+                                  [sector]: e.target.checked,
+                                }))
+                              }
+                            />
+                            <span
+                              style={{
+                                width: 12,
+                                height: 12,
+                                borderRadius: '50%',
+                                background: getSectorColor(sector),
+                                border: '1px solid #475569',
+                                display: 'inline-block',
+                              }}
+                            />
+                            {sector}
+                          </label>
+                        ))}
+                      </div>
 
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '8px 14px' }}>
-                              {mapLegendSectors.map((sector) => (
-                                <label
-                                  key={sector}
-                                  style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13, minWidth: 0 }}
-                                >
-                                  <input
-                                    type="checkbox"
-                                    checked={mapSectorVisibility[sector] !== false}
-                                    onChange={(e) =>
-                                      setMapSectorVisibility((prev) => ({
-                                        ...prev,
-                                        [sector]: e.target.checked,
-                                      }))
-                                    }
-                                  />
-                                  <span
-                                    style={{
-                                      width: 10,
-                                      height: 10,
-                                      borderRadius: '50%',
-                                      background: getSectorColor(sector),
-                                      border: '1px solid #475569',
-                                      display: 'inline-block',
-                                      flexShrink: 0,
-                                    }}
-                                  />
-                                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sector}</span>
-                                </label>
-                              ))}
-                            </div>
-                          </div>
-                        </details>
-
-                        <details style={mapDropdownStyle}>
-                          <summary style={mapFilterButtonStyle}>Ancienneté prospects : {mapAgeRangeLabel} ▾</summary>
-                          <div style={{ ...mapDropdownPanelStyle, width: 360, maxWidth: '50vw' }}>
-                            <div style={{ fontWeight: 800, marginBottom: 8 }}>Ancienneté prospects min / max</div>
-
-                            <div style={{ position: 'relative', height: 42 }}>
-                              <div
-                                style={{
-                                  position: 'absolute',
-                                  top: 16,
-                                  left: 0,
-                                  right: 0,
-                                  height: 6,
-                                  borderRadius: 999,
-                                  background: '#d1d5db',
-                                }}
-                              />
-
-                              <input
-                                type="range"
-                                min={0}
-                                max={100}
-                                step={1}
-                                value={mapAgeSliderMin}
-                                onChange={(e) =>
-                                  setMapAgeSliderMin(Math.min(Number(e.target.value), mapAgeSliderMax))
-                                }
-                                style={mapMinSliderStyle}
-                              />
-
-                              <input
-                                type="range"
-                                min={0}
-                                max={100}
-                                step={1}
-                                value={mapAgeSliderMax}
-                                onChange={(e) =>
-                                  setMapAgeSliderMax(Math.max(Number(e.target.value), mapAgeSliderMin))
-                                }
-                                style={mapMaxSliderStyle}
-                              />
-                            </div>
-
-                            <div style={{ marginTop: 6, fontSize: 13, color: '#475569', fontWeight: 700 }}>
-                              {mapAgeRangeLabel}
-                            </div>
-                            <div style={{ marginTop: 6, fontSize: 12, color: '#64748b', lineHeight: 1.35 }}>
-                              Ce filtre ne masque pas les clients CEGECLIM actifs ou sommeil.
-                            </div>
-                          </div>
-                        </details>
+                      <div style={{ fontSize: 15, fontWeight: 700 }}>
+                        {visibleMapRows.length} entreprises visibles
                       </div>
                     </div>
 
-                    <div style={mapCompactFiltersStyle}>
-                      <div style={{ minWidth: 180 }}>
-                        <div style={filterLabelStyle}>Collaborateur CEGECLIM :</div>
-                        <select
-                          value={selectedCegeclimCollaborateur}
-                          onChange={(e) => setSelectedCegeclimCollaborateur(e.target.value)}
-                          style={selectLikeStyle}
-                        >
-                          <option value="TOUS">Tous</option>
-                          {cegeclimCollaborateurOptions.map((option) => (
-                            <option key={option} value={option}>{option}</option>
-                          ))}
-                        </select>
-                      </div>
+                    <div style={{ minWidth: 220 }}>
+                      <div style={filterLabelStyle}>Collaborateur CEGECLIM :</div>
+                      <select
+                        value={selectedCegeclimCollaborateur}
+                        onChange={(e) => setSelectedCegeclimCollaborateur(e.target.value)}
+                        style={selectLikeStyle}
+                      >
+                        <option value="TOUS">Tous</option>
+                        {cegeclimCollaborateurOptions.map((option) => (
+                          <option key={option} value={option}>{option}</option>
+                        ))}
+                      </select>
+                    </div>
 
-                      <div style={{ minWidth: 105 }}>
-                        <div style={filterLabelStyle}>RGE :</div>
-                        <select
-                          value={selectedRgeFilter}
-                          onChange={(e) => setSelectedRgeFilter(e.target.value as 'TOUS' | 'OUI' | 'NON')}
-                          style={selectLikeStyle}
-                        >
-                          <option value="TOUS">TOUS</option>
-                          <option value="OUI">OUI</option>
-                          <option value="NON">NON</option>
-                        </select>
-                      </div>
+                    <div style={{ minWidth: 120 }}>
+                      <div style={filterLabelStyle}>RGE :</div>
+                      <select
+                        value={selectedRgeFilter}
+                        onChange={(e) => setSelectedRgeFilter(e.target.value as 'TOUS' | 'OUI' | 'NON')}
+                        style={selectLikeStyle}
+                      >
+                        <option value="TOUS">TOUS</option>
+                        <option value="OUI">OUI</option>
+                        <option value="NON">NON</option>
+                      </select>
+                    </div>
 
-                      <div style={{ minWidth: 145 }}>
-                        <div style={filterLabelStyle}>Capacité froid/clim :</div>
-                        <select
-                          value={selectedCapaciteGazFilter}
-                          onChange={(e) => setSelectedCapaciteGazFilter(e.target.value as 'TOUS' | 'OUI' | 'NON')}
-                          style={selectLikeStyle}
-                        >
-                          <option value="TOUS">TOUS</option>
-                          <option value="OUI">OUI</option>
-                          <option value="NON">NON</option>
-                        </select>
-                      </div>
+                    <div style={{ minWidth: 170 }}>
+                      <div style={filterLabelStyle}>Capacité froid/clim :</div>
+                      <select
+                        value={selectedCapaciteGazFilter}
+                        onChange={(e) => setSelectedCapaciteGazFilter(e.target.value as 'TOUS' | 'OUI' | 'NON')}
+                        style={selectLikeStyle}
+                      >
+                        <option value="TOUS">TOUS</option>
+                        <option value="OUI">OUI</option>
+                        <option value="NON">NON</option>
+                      </select>
+                    </div>
 
-                      <div style={{ width: 165 }}>
-                        <MultiSelectHorizontal
-                          label="Capital Social :"
-                          options={capitalSocialFilterOptions}
-                          selected={selectedCapitalSocialFilters}
-                          onChange={(next) => setSelectedCapitalSocialFilters(next as CapitalSocialFilterOption[])}
+                    <div style={{ width: 180 }}>
+                      <MultiSelectHorizontal
+                        label="Capital Social :"
+                        options={capitalSocialFilterOptions}
+                        selected={selectedCapitalSocialFilters}
+                        onChange={(next) => setSelectedCapitalSocialFilters(next as CapitalSocialFilterOption[])}
+                      />
+                    </div>
+
+                    <div style={{ width: 320, minWidth: 320 }}>
+                      <div style={{ fontWeight: 800, marginBottom: 8 }}>Ancienneté prospects min / max</div>
+
+                      <div style={{ position: 'relative', height: 42 }}>
+                        <div
+                          style={{
+                            position: 'absolute',
+                            top: 16,
+                            left: 0,
+                            right: 0,
+                            height: 6,
+                            borderRadius: 999,
+                            background: '#d1d5db',
+                          }}
+                        />
+
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          step={1}
+                          value={mapAgeSliderMin}
+                          onChange={(e) =>
+                            setMapAgeSliderMin(Math.min(Number(e.target.value), mapAgeSliderMax))
+                          }
+                          style={mapMinSliderStyle}
+                        />
+
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          step={1}
+                          value={mapAgeSliderMax}
+                          onChange={(e) =>
+                            setMapAgeSliderMax(Math.max(Number(e.target.value), mapAgeSliderMin))
+                          }
+                          style={mapMaxSliderStyle}
                         />
                       </div>
 
-                      <button
-                        type="button"
-                        onClick={() => setShowMapListPanel((prev) => !prev)}
-                        style={mapActionButtonStyle}
-                      >
-                        {showMapListPanel ? 'Masquer la liste' : `Liste ${visibleMapRows.length}`}
-                      </button>
-
-                      <button type="button" onClick={() => setMapOpen(false)} style={mapCloseButtonStyle}>
-                        Fermer
-                      </button>
+                      <div style={{ marginTop: 6, fontSize: 13, color: '#475569', fontWeight: 700 }}>
+                        {mapAgeRangeLabel}
+                      </div>
                     </div>
                   </div>
 
                   <div
                     style={{
                       flex: 1,
-                      padding: 0,
+                      padding: 12,
                       overflow: 'hidden',
                       background: '#f8fafc',
                       display: 'flex',
@@ -5106,10 +5055,10 @@ const selectedClientMapReason = useMemo(() => {
                       <div
                         style={{
                           display: 'grid',
-                          gridTemplateColumns: showMapListPanel ? 'minmax(0, 1fr) minmax(320px, 360px)' : 'minmax(0, 1fr)',
-                          gap: showMapListPanel ? 12 : 0,
+                          gridTemplateColumns: 'minmax(0, 1fr) 360px',
+                          gap: 14,
                           alignItems: 'stretch',
-                          minHeight: 0,
+                          minHeight: 620,
                           flex: 1,
                         }}
                       >
@@ -5119,15 +5068,14 @@ const selectedClientMapReason = useMemo(() => {
                             overflow: 'hidden',
                             border: '1px solid #cbd5e1',
                             background: '#fff',
-                            minHeight: 0,
-                            height: '100%',
+                            minHeight: 620,
                           }}
                         >
                           <MapContainer
                             key={`map-${mapInstanceKey}-${mapTitle}`}
                             center={[46.603354, 1.888334] as any}
                             zoom={6}
-                            style={{ height: '100%', width: '100%', minHeight: 0 }}
+                            style={{ height: '100%', width: '100%', minHeight: 620 }}
                             ref={(mapInstance: any) => {
                               if (mapInstance) leafletMapRef.current = mapInstance
                             }}
@@ -5184,19 +5132,17 @@ const selectedClientMapReason = useMemo(() => {
                           </MapContainer>
                         </div>
 
-                        {showMapListPanel && (
-                          <div
-                            style={{
-                              borderRadius: 16,
-                              border: '1px solid #cbd5e1',
-                              background: '#fff',
-                              overflow: 'hidden',
-                              minHeight: 0,
-                              display: 'flex',
-                              flexDirection: 'column',
-                              height: '100%',
-                            }}
-                          >
+                        <div
+                          style={{
+                            borderRadius: 16,
+                            border: '1px solid #cbd5e1',
+                            background: '#fff',
+                            overflow: 'hidden',
+                            minHeight: 620,
+                            display: 'flex',
+                            flexDirection: 'column',
+                          }}
+                        >
                           <div
                             style={{
                               padding: '12px 14px',
@@ -5295,11 +5241,12 @@ const selectedClientMapReason = useMemo(() => {
                               )
                             })}
                           </div>
-                          </div>
-                        )}
+                        </div>
                       </div>
                     )}
                   </div>
+
+                  <button onClick={() => setMapOpen(false)}>Fermer</button>
                 </div>
               </div>
             )}
@@ -6333,121 +6280,6 @@ const activeTabStyle: React.CSSProperties = {
   ...tabStyle,
   background: '#1f2937',
   color: '#fff',
-}
-
-const mapCompactHeaderStyle: React.CSSProperties = {
-  flexShrink: 0,
-  display: 'flex',
-  justifyContent: 'space-between',
-  alignItems: 'flex-start',
-  gap: 12,
-  flexWrap: 'wrap',
-  padding: '10px 12px',
-  border: '1px solid #e2e8f0',
-  borderRadius: 14,
-  background: '#ffffff',
-  overflow: 'visible',
-}
-
-const mapToolbarStyle: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 8,
-  flexWrap: 'wrap',
-  fontSize: 13,
-  color: '#334155',
-  overflow: 'visible',
-}
-
-const mapPillToggleStyle: React.CSSProperties = {
-  display: 'inline-flex',
-  alignItems: 'center',
-  gap: 6,
-  cursor: 'pointer',
-  border: '1px solid #cbd5e1',
-  borderRadius: 999,
-  padding: '5px 9px',
-  fontWeight: 700,
-  whiteSpace: 'nowrap',
-}
-
-const mapCountBadgeStyle: React.CSSProperties = {
-  display: 'inline-flex',
-  alignItems: 'center',
-  borderRadius: 999,
-  padding: '4px 10px',
-  background: '#0f172a',
-  color: '#ffffff',
-  fontSize: 12,
-  fontWeight: 800,
-  whiteSpace: 'nowrap',
-}
-
-const mapInfoTextStyle: React.CSSProperties = {
-  fontSize: 12,
-  color: '#64748b',
-  fontWeight: 700,
-}
-
-const mapDropdownStyle: React.CSSProperties = {
-  position: 'relative',
-  zIndex: 23000,
-  overflow: 'visible',
-}
-
-const mapFilterButtonStyle: React.CSSProperties = {
-  listStyle: 'none',
-  border: '1px solid #6aa0ff',
-  background: '#ffffff',
-  borderRadius: 999,
-  padding: '6px 11px',
-  fontSize: 13,
-  fontWeight: 800,
-  cursor: 'pointer',
-  whiteSpace: 'nowrap',
-  boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
-}
-
-const mapDropdownPanelStyle: React.CSSProperties = {
-  position: 'absolute',
-  top: 'calc(100% + 8px)',
-  left: 0,
-  zIndex: 24000,
-  width: 440,
-  maxWidth: '62vw',
-  borderRadius: 12,
-  border: '1px solid #cbd5e1',
-  background: '#ffffff',
-  padding: 12,
-  boxShadow: '0 14px 35px rgba(15,23,42,0.22)',
-}
-
-const mapCompactFiltersStyle: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'flex-end',
-  justifyContent: 'flex-end',
-  gap: 10,
-  flexWrap: 'wrap',
-  overflow: 'visible',
-}
-
-const mapActionButtonStyle: React.CSSProperties = {
-  height: 38,
-  border: '1px solid #cbd5e1',
-  background: '#ffffff',
-  borderRadius: 9,
-  padding: '0 12px',
-  fontSize: 13,
-  fontWeight: 800,
-  cursor: 'pointer',
-  whiteSpace: 'nowrap',
-}
-
-const mapCloseButtonStyle: React.CSSProperties = {
-  ...mapActionButtonStyle,
-  border: '1px solid #0f172a',
-  background: '#0f172a',
-  color: '#ffffff',
 }
 
 const mapOverlayStyle: React.CSSProperties = {
