@@ -132,6 +132,9 @@ const DOC_COLORS: Record<DocType, string> = {
   Factures: '#16a34a',
 }
 
+const LOGO_CEGECLIM_URL =
+  'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/cegecilm%20officiel.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL2NlZ2VjaWxtIG9mZmljaWVsLmpwZyIsImlhdCI6MTc3NDY1MTM3OSwiZXhwIjo0ODk2NzE1Mzc5fQ.ePcMFHir7RsvdR-cR7nwh83H03S8oihNKwVgK2eCmy0'
+
 const REPORT_BUCKET = 'commercial-imports'
 const REPORT_PATH = 'reports/focus-mensuel/Rapport_activite_quotidien.pdf'
 const REPORT_FILENAME = "Rapport d'activité quotidien.pdf"
@@ -303,6 +306,23 @@ function formatMoneyPlain(value: number | null | undefined, maximumFractionDigit
   })
 }
 
+function formatMoneyCompact(value: number | null | undefined) {
+  const n = Number(value || 0)
+  const abs = Math.abs(n)
+
+  if (abs >= 1000000) {
+    return `${(n / 1000000).toLocaleString('fr-FR', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })} M€`
+  }
+
+  return `${(n / 1000).toLocaleString('fr-FR', {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  })} K€`
+}
+
 function chunkArray<T>(values: T[], size = 500) {
   const chunks: T[][] = []
   for (let index = 0; index < values.length; index += size) {
@@ -453,7 +473,7 @@ function MultiLineChart({ days, rows, mode, title }: { days: string[]; rows: Dai
   const yFor = (value: number) => padTop + plotH - (Math.max(0, value) / max) * plotH
 
   return (
-    <div style={styles.chartBox} onMouseLeave={() => setHoverPoint(null)}>
+    <div style={styles.chartBox} className="focus-pdf-chart-box" onMouseLeave={() => setHoverPoint(null)}>
       <div style={styles.chartTitle}>{title || `Flux journalier — ${labelForMode(mode)}`}</div>
       <svg viewBox={`0 0 ${width} ${height}`} style={styles.chartSvg} preserveAspectRatio="none">
         {[0, 0.25, 0.5, 0.75, 1].map((t) => {
@@ -572,7 +592,7 @@ function KpiCard({ card, mode, basisLabel }: { card: KpiCardData; mode: ViewMode
   const isUp = (card.evolutionVsMtdPct || 0) >= 0
 
   return (
-    <div style={styles.kpiCard}>
+    <div style={styles.kpiCard} className="focus-pdf-kpi-card">
       <div style={styles.kpiHeader}>
         <span style={{ ...styles.docPill, background: `${color}22`, color }}>{card.type}</span>
         <span style={{ ...styles.evoPill, background: isUp ? '#dcfce7' : '#fee2e2', color: isUp ? '#047857' : '#b91c1c' }}>
@@ -593,12 +613,39 @@ function KpiCard({ card, mode, basisLabel }: { card: KpiCardData; mode: ViewMode
 }
 
 function Table({ children }: { children: React.ReactNode }) {
-  return <div style={styles.tableWrap}><table style={styles.table}>{children}</table></div>
+  return <div style={styles.tableWrap} className="focus-pdf-table-wrap"><table style={styles.table}>{children}</table></div>
+}
+
+function ReportBrandHeader({ focusDate }: { focusDate: string }) {
+  return (
+    <div style={styles.reportBrandHeader} className="focus-pdf-brand-header">
+      <div style={styles.reportBrandLeft}>
+        <img src={LOGO_CEGECLIM_URL} alt="CEGECLIM Energies" style={styles.reportLogo} />
+        <div style={styles.reportBrandTextBlock}>
+          <div style={styles.reportBrandSubtitle}>Concessionnaire agréé de Bosch Home Comfort Group</div>
+          <div style={styles.reportBrandTitle}>Hitachi Cooling &amp; Heating</div>
+        </div>
+      </div>
+      <div style={styles.reportMainTitle}>
+        ACTIVITE CEGECLIM DU <span style={styles.reportMainTitleDate}>{formatDateFr(focusDate)}</span>
+      </div>
+      <div style={styles.reportBrandRightSpacer} />
+    </div>
+  )
+}
+
+function FilterDisplay({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={styles.field}>
+      <label style={styles.label}>{label}</label>
+      <div style={styles.filterDisplayValue} className="focus-pdf-filter-value">{value}</div>
+    </div>
+  )
 }
 
 function HighlightTable({ title, rows }: { title: string; rows: HighlightRow[] }) {
   return (
-    <div style={styles.sectionCard}>
+    <div style={styles.sectionCard} className="focus-pdf-section-card">
       <div style={styles.sectionTitle}>{title}</div>
       <Table>
         <thead>
@@ -649,7 +696,12 @@ function FocusMensuelPageContent() {
   const [agence, setAgence] = useState(requestedAgence)
   const [familleMacro, setFamilleMacro] = useState(requestedFamilleMacro)
   const [collaborateur, setCollaborateur] = useState(requestedCollaborateur)
-  const [includeHorsStats, setIncludeHorsStats] = useState(isPdfMode || ['afficher', 'show', 'true', '1'].includes(String(requestedHorsStats || '').toLowerCase()))
+  const [includeHorsStats, setIncludeHorsStats] = useState(() => {
+    const horsStatsParam = String(requestedHorsStats || '').toLowerCase()
+    if (['masquer', 'hide', 'false', '0'].includes(horsStatsParam)) return false
+    if (['afficher', 'show', 'true', '1'].includes(horsStatsParam)) return true
+    return true
+  })
   const [dailyRows, setDailyRows] = useState<DailyRow[]>([])
   const [highlightRows, setHighlightRows] = useState<HighlightRow[]>([])
   const [agencyPortfolioRows, setAgencyPortfolioRows] = useState<AgencyPortfolioRow[]>([])
@@ -757,9 +809,10 @@ function FocusMensuelPageContent() {
   }, [focusDate, agence, familleMacro, collaborateur, includeHorsStats])
 
   useEffect(() => {
+    if (!normalizedRows.length) return
     void loadAgencyControlTables()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [month, focusDate, agence, familleMacro, collaborateur, includeHorsStats])
+  }, [month, focusDate, agence, familleMacro, collaborateur, includeHorsStats, normalizedRows])
 
   useEffect(() => {
     void (async () => {
@@ -1161,6 +1214,18 @@ function FocusMensuelPageContent() {
         }
       })
 
+      const facturesMtdByAgency = new Map<string, number>()
+
+      mtdSourceRows
+        .filter((row) => row.type_document === 'Factures')
+        .forEach((row) => {
+          const key = normalizeKey(row.agence || 'Sans agence')
+          facturesMtdByAgency.set(
+            key,
+            (facturesMtdByAgency.get(key) || 0) + Number(row.montant_ht || 0)
+          )
+        })
+
       const projectionRows = agencyLabels.map((label) => {
         const portfolio = portfolioRows.find((row) => row.label === label) || {
           label,
@@ -1180,16 +1245,19 @@ function FocusMensuelPageContent() {
           (row) => row.type_document === 'Bon de livraison' && String(row.effective_date || '').startsWith(month) && String(row.effective_date || '') <= focusDate
         )
 
-        const factures = sum(agencyCurrentInvoices, (row) => signedInvoiceAmount(row))
+        const facturesFromMtdTable = facturesMtdByAgency.get(normalizeKey(label))
+        const factures =
+          facturesFromMtdTable !== undefined
+            ? facturesFromMtdTable
+            : sum(agencyCurrentInvoices, (row) => signedInvoiceAmount(row))
         const caN1 = sum(agencyPreviousYearInvoices, (row) => signedInvoiceAmount(row))
         const blBrMx = portfolio.blMx + portfolio.brMx
         const blBrM = portfolio.blM + portfolio.brM
 
-        const lastBlDate = maxYmd(agencyCurrentMonthBl.map((row) => row.effective_date))
         const blDays = Array.from(new Set(agencyCurrentMonthBl.map((row) => String(row.effective_date || '')).filter(Boolean))).sort()
-        const remainingBusinessDays = lastBlDate
-          ? countWeekdays(daysInMonth(month).filter((day) => day > lastBlDate && day <= currentMonthEnd))
-          : 0
+        const remainingBusinessDays = countWeekdays(
+          daysInMonth(month).filter((day) => day > focusDate && day <= currentMonthEnd)
+        )
         const blMonthValue = sum(agencyCurrentMonthBl, (row) => Math.abs(Number(row.montant_ht || 0)))
         const dailyBlFlux = blDays.length ? blMonthValue / blDays.length : 0
         const projectionFluxBl = dailyBlFlux * remainingBusinessDays
@@ -1253,17 +1321,166 @@ function FocusMensuelPageContent() {
     >
       {isPdfMode && (
         <style>{`
-          @page { size: A4 portrait; margin: 6mm 4mm 6mm 4mm; }
-          html, body { margin: 0 !important; padding: 0 !important; background: #eef5fb !important; }
+          @page { size: A4 landscape; margin: 3mm 3mm 3mm 3mm; }
+          html, body {
+            margin: 0 !important;
+            padding: 0 !important;
+            background: #eef5fb !important;
+            background-color: #eef5fb !important;
+            background-image: none !important;
+          }
           body, * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
-          [data-focus-report-ready] { width: 100% !important; box-sizing: border-box !important; }
-          [data-no-print="true"] { display: none !important; }
+          body::before, body::after, main::before, main::after, section::before, section::after {
+            content: none !important;
+            display: none !important;
+            background: transparent !important;
+            background-image: none !important;
+            box-shadow: none !important;
+            filter: none !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+          }
+          [data-focus-report-ready] {
+            width: 100% !important;
+            max-width: 100% !important;
+            box-sizing: border-box !important;
+            padding: 0 !important;
+            background: #eef5fb !important;
+            background-color: #eef5fb !important;
+            background-image: none !important;
+            isolation: isolate !important;
+          }
+          [data-focus-report-ready] *,
+          [data-focus-report-ready] *::before,
+          [data-focus-report-ready] *::after {
+            filter: none !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+          }
+          [data-no-print="true"], .focus-pdf-header-actions { display: none !important; }
+          .focus-pdf-brand-header,
+          .focus-pdf-filters,
+          .focus-pdf-kpi-card,
+          .focus-pdf-chart-box,
+          .focus-pdf-section-card {
+            background: #ffffff !important;
+            background-color: #ffffff !important;
+            background-image: none !important;
+            box-shadow: none !important;
+            filter: none !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+          }
+          .focus-pdf-brand-header,
+          .focus-pdf-filters,
+          .focus-pdf-kpi-card,
+          .focus-pdf-chart-box,
+          .focus-pdf-section-card,
+          .focus-pdf-table-wrap,
+          table, thead, tbody, tr, th, td {
+            position: relative !important;
+            z-index: 1 !important;
+          }
+          .focus-pdf-brand-header {
+            display: flex !important;
+            align-items: center !important;
+            justify-content: space-between !important;
+            min-height: 48px !important;
+            padding: 4px 8px 7px !important;
+            margin-bottom: 5px !important;
+            border-bottom: 1px solid #e5e7eb !important;
+            break-inside: avoid !important;
+            page-break-inside: avoid !important;
+          }
+          .focus-pdf-header-card {
+            padding: 0 !important;
+            margin: 0 0 5px !important;
+            border: none !important;
+            border-radius: 0 !important;
+            box-shadow: none !important;
+            background: transparent !important;
+            break-inside: avoid !important;
+            page-break-inside: avoid !important;
+          }
+          .focus-pdf-title { display: none !important; }
+          .focus-pdf-subtitle { font-size: 9.5px !important; line-height: 1.25 !important; font-weight: 800 !important; padding: 0 8px !important; }
+          .focus-pdf-filters {
+            grid-template-columns: repeat(7, minmax(0, 1fr)) !important;
+            gap: 6px !important;
+            padding: 7px !important;
+            margin-bottom: 8px !important;
+            border-radius: 8px !important;
+            break-inside: avoid !important;
+            page-break-inside: avoid !important;
+          }
+          .focus-pdf-filter-value {
+            min-height: 27px !important;
+            display: flex !important;
+            align-items: center !important;
+            border: 1px solid #cbd5e1 !important;
+            border-radius: 6px !important;
+            padding: 5px 8px !important;
+            background: #ffffff !important;
+            background-color: #ffffff !important;
+            background-image: none !important;
+            font-size: 10px !important;
+            font-weight: 900 !important;
+            color: #0f172a !important;
+          }
+          .focus-pdf-kpi-grid {
+            grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+            gap: 8px !important;
+            margin-bottom: 8px !important;
+            break-inside: avoid !important;
+            page-break-inside: avoid !important;
+          }
+          .focus-pdf-kpi-card { padding: 8px !important; min-height: 114px !important; border-radius: 12px !important; }
+          .focus-pdf-kpi-card [style*="font-size: 26"] { font-size: 18px !important; }
+          .focus-pdf-chart-grid,
+          .focus-pdf-section-grid {
+            grid-template-columns: 1fr 1fr !important;
+            gap: 8px !important;
+            margin-bottom: 8px !important;
+          }
+          .focus-pdf-chart-box,
+          .focus-pdf-section-card {
+            padding: 8px !important;
+            border-radius: 10px !important;
+            background: #ffffff !important;
+            background-color: #ffffff !important;
+            background-image: none !important;
+            box-shadow: none !important;
+            break-inside: avoid !important;
+            page-break-inside: avoid !important;
+          }
+          .focus-pdf-chart-box svg { height: 185px !important; }
+          .focus-pdf-table-wrap { max-height: none !important; overflow: hidden !important; background: #ffffff !important; }
+          .focus-pdf-section-card table { min-width: 0 !important; font-size: 8px !important; }
+          .focus-pdf-section-card th, .focus-pdf-section-card td { padding: 4px 5px !important; }
+          .focus-pdf-highlights-grid {
+            grid-template-columns: 1fr !important;
+            gap: 8px !important;
+            align-items: start !important;
+          }
+          .focus-pdf-highlights-grid table { min-width: 0 !important; font-size: 8px !important; }
+          .focus-pdf-highlights-grid th, .focus-pdf-highlights-grid td { padding: 4px 5px !important; }
+          .focus-pdf-agency-section-grid {
+            break-before: page !important;
+            page-break-before: always !important;
+            break-inside: avoid !important;
+            page-break-inside: avoid !important;
+          }
+          .focus-pdf-agency-section-grid > .focus-pdf-section-card {
+            break-inside: avoid !important;
+            page-break-inside: avoid !important;
+          }
         `}</style>
       )}
-      <div style={styles.headerCard}>
+      {isPdfMode && <ReportBrandHeader focusDate={focusDate} />}
+      <div style={styles.headerCard} className="focus-pdf-header-card">
         <div>
-          <h1 style={styles.title}>ACTIVITE CEGECLIM DU : <span style={styles.titleDate}>{formatDateFr(focusDate)}</span></h1>
-          <div style={styles.subtitle}>
+          <h1 style={styles.title} className="focus-pdf-title">ACTIVITE CEGECLIM DU : <span style={styles.titleDate}>{formatDateFr(focusDate)}</span></h1>
+          <div style={styles.subtitle} className="focus-pdf-subtitle">
 
             <span style={styles.subtitleBasisNote}>
               Moyennes mensuelles sur {businessDayBasis.label} jusqu’au {formatDateFr(focusDate)}
@@ -1276,7 +1493,7 @@ function FocusMensuelPageContent() {
             {' '}· faits marquants sur 7 jours calendaires.
           </div>
         </div>
-        <div style={styles.headerActions} data-no-print="true">
+        <div style={styles.headerActions} className="focus-pdf-header-actions" data-no-print="true">
           <button style={styles.secondaryButton} onClick={() => setFocusDate(todayYmd())}>Aujourd’hui</button>
           <button style={styles.secondaryButton} onClick={() => setFocusDate(addDaysYmd(todayYmd(), -1))}>Hier</button>
           <button style={styles.warningButton} onClick={rebuildCacheForMonth} disabled={rebuildingCache}>
@@ -1286,14 +1503,28 @@ function FocusMensuelPageContent() {
         </div>
       </div>
 
-      <div style={styles.filtersCard}>
-        <div style={styles.field}><label style={styles.label}>Mois analysé</label><input type="month" value={month} onChange={(e) => setMonth(e.target.value)} style={styles.input} /></div>
-        <div style={styles.field}><label style={styles.label}>Jour focus</label><input type="date" value={focusDate} onChange={(e) => setFocusDate(e.target.value)} style={styles.input} /></div>
-        <div style={styles.field}><label style={styles.label}>Vue</label><select value={viewMode} onChange={(e) => setViewMode(e.target.value as ViewMode)} style={styles.input}><option value="montant_ht">Montant HT</option><option value="nb_documents">Nombre documents</option><option value="quantite_pertinente">Quantité pertinente</option></select></div>
-        <div style={styles.field}><label style={styles.label}>Agence</label><select value={agence} onChange={(e) => setAgence(e.target.value)} style={styles.input}><option value="">Toutes</option>{availableAgences.map((a) => <option key={a} value={a}>{a}</option>)}</select></div>
-        <div style={styles.field}><label style={styles.label}>Famille macro</label><select value={familleMacro} onChange={(e) => setFamilleMacro(e.target.value)} style={styles.input}><option value="">Toutes</option>{availableFamilies.map((f) => <option key={f} value={f}>{f}</option>)}</select></div>
-        <div style={styles.field}><label style={styles.label}>Collaborateur</label><select value={collaborateur} onChange={(e) => setCollaborateur(e.target.value)} style={styles.input}><option value="">Tous</option>{availableCollaborateurs.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
-        <div style={styles.field}><label style={styles.label}>Hors statistiques</label><select value={includeHorsStats ? 'show' : 'hide'} onChange={(e) => setIncludeHorsStats(e.target.value === 'show')} style={styles.input}><option value="hide">Masquer</option><option value="show">Afficher</option></select></div>
+      <div style={styles.filtersCard} className="focus-pdf-filters">
+        {isPdfMode ? (
+          <>
+            <FilterDisplay label="Mois analysé" value={formatMonthFr(month)} />
+            <FilterDisplay label="Jour focus" value={formatDateFr(focusDate)} />
+            <FilterDisplay label="Vue" value={labelForMode(viewMode)} />
+            <FilterDisplay label="Agence" value={agence || 'Toutes'} />
+            <FilterDisplay label="Famille macro" value={familleMacro || 'Toutes'} />
+            <FilterDisplay label="Collaborateur" value={collaborateur || 'Tous'} />
+            <FilterDisplay label="Hors statistiques" value={includeHorsStats ? 'Afficher' : 'Masquer'} />
+          </>
+        ) : (
+          <>
+            <div style={styles.field}><label style={styles.label}>Mois analysé</label><input type="month" value={month} onChange={(e) => setMonth(e.target.value)} style={styles.input} /></div>
+            <div style={styles.field}><label style={styles.label}>Jour focus</label><input type="date" value={focusDate} onChange={(e) => setFocusDate(e.target.value)} style={styles.input} /></div>
+            <div style={styles.field}><label style={styles.label}>Vue</label><select value={viewMode} onChange={(e) => setViewMode(e.target.value as ViewMode)} style={styles.input}><option value="montant_ht">Montant HT</option><option value="nb_documents">Nombre documents</option><option value="quantite_pertinente">Quantité pertinente</option></select></div>
+            <div style={styles.field}><label style={styles.label}>Agence</label><select value={agence} onChange={(e) => setAgence(e.target.value)} style={styles.input}><option value="">Toutes</option>{availableAgences.map((a) => <option key={a} value={a}>{a}</option>)}</select></div>
+            <div style={styles.field}><label style={styles.label}>Famille macro</label><select value={familleMacro} onChange={(e) => setFamilleMacro(e.target.value)} style={styles.input}><option value="">Toutes</option>{availableFamilies.map((f) => <option key={f} value={f}>{f}</option>)}</select></div>
+            <div style={styles.field}><label style={styles.label}>Collaborateur</label><select value={collaborateur} onChange={(e) => setCollaborateur(e.target.value)} style={styles.input}><option value="">Tous</option>{availableCollaborateurs.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
+            <div style={styles.field}><label style={styles.label}>Hors statistiques</label><select value={includeHorsStats ? 'show' : 'hide'} onChange={(e) => setIncludeHorsStats(e.target.value === 'show')} style={styles.input}><option value="hide">Masquer</option><option value="show">Afficher</option></select></div>
+          </>
+        )}
       </div>
 
       {!isPdfMode && (
@@ -1350,16 +1581,16 @@ function FocusMensuelPageContent() {
       {cacheInfo && <div style={styles.successBox}>{cacheInfo}</div>}
       {loading && <div style={styles.infoBox}>Chargement des données journalières depuis le cache…</div>}
       {rebuildingCache && <div style={styles.infoBox}>Reconstruction du cache mensuel en cours…</div>}
-      <div style={styles.kpiGrid}>
+      <div style={styles.kpiGrid} className="focus-pdf-kpi-grid">
         {kpiCards.map((card) => <KpiCard key={card.type} card={card} mode={viewMode} basisLabel={businessDayBasis.label} />)}
       </div>
 
-      <div style={styles.chartGrid}>
+      <div style={styles.chartGrid} className="focus-pdf-chart-grid">
         <MultiLineChart days={days} rows={normalizedRows} mode={viewMode} />
         <CumulativeChart days={days} rows={normalizedRows} mode={viewMode} />
       </div>
 
-      <div style={styles.sectionGrid}>
+      <div style={styles.sectionGrid} className="focus-pdf-section-grid">
         <SummaryMatrix
           title={`Jour focus par famille macro — ${formatDateFr(focusDate)}`}
           rows={byFamilyRows}
@@ -1374,7 +1605,7 @@ function FocusMensuelPageContent() {
         />
       </div>
 
-      <div style={styles.sectionGrid}>
+      <div style={styles.sectionGrid} className="focus-pdf-section-grid">
         <SummaryMatrix
           title={`Jour focus par agence — ${formatDateFr(focusDate)}`}
           rows={byAgencyRows}
@@ -1390,7 +1621,7 @@ function FocusMensuelPageContent() {
       {agencyTablesError && <div style={styles.errorBox}>Erreur tableaux portefeuille / projection : {agencyTablesError}</div>}
       {agencyTablesLoading && <div style={styles.infoBox}>Chargement du portefeuille de commande et de la projection du CA par agence…</div>}
 
-      <div style={styles.sectionGrid}>
+      <div style={styles.sectionGrid} className="focus-pdf-section-grid focus-pdf-agency-section-grid">
         <AgencyPortfolioTable
           title={`Portefeuille de commande au ${formatDateFr(focusDate)}`}
           rows={agencyPortfolioRows}
@@ -1403,7 +1634,7 @@ function FocusMensuelPageContent() {
         />
       </div>
 
-      <div style={styles.highlightsGrid}>
+      <div style={styles.highlightsGrid} className="focus-pdf-highlights-grid">
         <HighlightTable title="Top 20 devis créés — 7 derniers jours" rows={highlights.topDevis} />
         <HighlightTable title="Top 20 commandes CDC — 7 derniers jours" rows={highlights.topCdc} />
         <HighlightTable title="Top 20 documents BL / CDC / Factures — 7 derniers jours" rows={highlights.topDocs} />
@@ -1465,7 +1696,7 @@ function SummaryMatrix({
   const displayRows = totalRow ? [totalRow, ...rows] : []
 
   return (
-    <div style={styles.sectionCard}>
+    <div style={styles.sectionCard} className="focus-pdf-section-card">
       <div style={styles.sectionTitle}>{title}</div>
       <Table>
         <thead>
@@ -1491,7 +1722,7 @@ function SummaryMatrix({
                     key={`${type}-amount`}
                     style={{ ...(isTotal ? styles.tdRightTotal : styles.tdRight), color: DOC_COLORS[type], fontWeight: 900 }}
                   >
-                    {formatMoney(row.byType[type].amount)}
+                    {formatMoneyCompact(row.byType[type].amount)}
                   </td>
                 ))}
               </tr>
@@ -1576,25 +1807,25 @@ function AgencyPortfolioTable({
                 </td>
 
                 <td style={moneyCellStyle(row.cdc, DOC_COLORS.CDC, isTotal)}>
-                  {formatMoneyPlain(row.cdc)}
+                  {formatMoneyCompact(row.cdc)}
                 </td>
                 <td style={moneyCellStyle(row.pl, DOC_COLORS.BL, isTotal)}>
-                  {formatMoneyPlain(row.pl)}
+                  {formatMoneyCompact(row.pl)}
                 </td>
                 <td style={moneyCellStyle(row.brMx, '#b91c1c', isTotal)}>
-                  {formatMoneyPlain(row.brMx)}
+                  {formatMoneyCompact(row.brMx)}
                 </td>
                 <td style={moneyCellStyle(row.brM, '#b91c1c', isTotal)}>
-                  {formatMoneyPlain(row.brM)}
+                  {formatMoneyCompact(row.brM)}
                 </td>
                 <td style={moneyCellStyle(row.blMx, DOC_COLORS.BL, isTotal)}>
-                  {formatMoneyPlain(row.blMx)}
+                  {formatMoneyCompact(row.blMx)}
                 </td>
                 <td style={moneyCellStyle(row.blM, DOC_COLORS.BL, isTotal)}>
-                  {formatMoneyPlain(row.blM)}
+                  {formatMoneyCompact(row.blM)}
                 </td>
                 <td style={moneyCellStyle(row.total, '#0f172a', isTotal)}>
-                  {formatMoneyPlain(row.total)}
+                  {formatMoneyCompact(row.total)}
                 </td>
               </tr>
             )
@@ -1697,25 +1928,25 @@ function AgencyProjectionTable({
                 </td>
 
                 <td style={moneyCellStyle(row.blBrMx, DOC_COLORS.BL, isTotal)}>
-                  {formatMoneyPlain(row.blBrMx)}
+                  {formatMoneyCompact(row.blBrMx)}
                 </td>
                 <td style={moneyCellStyle(row.blBrM, DOC_COLORS.BL, isTotal)}>
-                  {formatMoneyPlain(row.blBrM)}
+                  {formatMoneyCompact(row.blBrM)}
                 </td>
                 <td style={moneyCellStyle(row.factures, DOC_COLORS.Factures, isTotal)}>
-                  {formatMoneyPlain(row.factures)}
+                  {formatMoneyCompact(row.factures)}
                 </td>
                 <td style={moneyCellStyle(row.projectionFluxBl, DOC_COLORS.BL, isTotal)}>
-                  {formatMoneyPlain(row.projectionFluxBl)}
+                  {formatMoneyCompact(row.projectionFluxBl)}
                 </td>
                 <td style={moneyCellStyle(row.valeurBlNf3Pct, '#b91c1c', isTotal)}>
-                  {formatMoneyPlain(row.valeurBlNf3Pct)}
+                  {formatMoneyCompact(row.valeurBlNf3Pct)}
                 </td>
                 <td style={moneyCellStyle(row.projectionCa, DOC_COLORS.Factures, isTotal)}>
-                  {formatMoneyPlain(row.projectionCa)}
+                  {formatMoneyCompact(row.projectionCa)}
                 </td>
                 <td style={moneyCellStyle(row.caN1, '#0f172a', isTotal)}>
-                  {formatMoneyPlain(row.caN1)}
+                  {formatMoneyCompact(row.caN1)}
                 </td>
                 <td style={pctCellStyle(row.evolPct, isTotal)}>
                   {formatPct(row.evolPct)}
@@ -1730,6 +1961,73 @@ function AgencyProjectionTable({
 }
 
 const styles: Record<string, React.CSSProperties> = {
+  reportBrandHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 20,
+    background: '#ffffff',
+    padding: '7px 12px 9px',
+    borderBottom: '1px solid #e5e7eb',
+  },
+  reportBrandLeft: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 12,
+    minWidth: 0,
+  },
+  reportLogo: {
+    width: 98,
+    height: 'auto',
+    objectFit: 'contain',
+    flexShrink: 0,
+  },
+  reportBrandTextBlock: {
+    display: 'flex',
+    flexDirection: 'column',
+    justifyContent: 'center',
+    minWidth: 0,
+  },
+  reportBrandSubtitle: {
+    fontSize: 13,
+    fontWeight: 650,
+    color: '#2d3748',
+    lineHeight: 1.12,
+    whiteSpace: 'nowrap',
+  },
+  reportBrandTitle: {
+    fontSize: 17,
+    fontWeight: 950,
+    color: '#111827',
+    lineHeight: 1.12,
+    whiteSpace: 'nowrap',
+  },
+  reportMainTitle: {
+    flex: 1,
+    textAlign: 'center',
+    fontSize: 16,
+    fontWeight: 950,
+    color: '#17344d',
+    letterSpacing: '0.01em',
+    whiteSpace: 'nowrap',
+  },
+  reportMainTitleDate: {
+    color: '#dc2626',
+    fontWeight: 950,
+  },
+  reportBrandRightSpacer: {
+    width: 260,
+    flexShrink: 0,
+  },
+  filterDisplayValue: {
+    border: '1px solid #cbd5e1',
+    borderRadius: 10,
+    padding: '9px 10px',
+    background: '#fff',
+    fontWeight: 800,
+    minWidth: 0,
+    minHeight: 20,
+  },
   page: { padding: 20, color: '#0f172a' },
   headerCard: { display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center', background: 'rgba(255,255,255,0.92)', border: '1px solid #e2e8f0', borderRadius: 22, padding: 18, boxShadow: '0 10px 28px rgba(15,23,42,0.06)', marginBottom: 14 },
   title: { margin: 0, fontSize: 26, fontWeight: 900 },
