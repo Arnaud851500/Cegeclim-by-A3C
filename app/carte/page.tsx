@@ -1827,12 +1827,14 @@ async function openMapFromCell(secteur: string, departement: string | null) {
   )
 
   try {
-    // IMPORTANT : la carte ouverte depuis une cellule doit repartir du même périmètre
-    // que celui utilisé pour calculer la cellule du tableau de synthèse.
-    // On utilise donc sortedFilteredClients, et non scopedClientsBase, afin de conserver
-    // les filtres actifs : ancienneté, recherche, activité, NAF, RGE, capacité, capital,
-    // contactable, enrichissement, distance agence, statut prospect et collaborateur CEGECLIM.
-    let rows = sortedFilteredClients.map(ensureClientCoordinates)
+    // IMPORTANT : la carte repart du périmètre géographique / société de base,
+    // puis les filtres de carte sont appliqués dans les mémos mapCegeclimPoints,
+    // mapCegeclimSommeilPoints et mapProspectPoints.
+    // On n'utilise pas sortedFilteredClients ici, car celui-ci applique le filtre
+    // d'ancienneté à toutes les lignes. Sur la carte, l'ancienneté doit filtrer
+    // uniquement les prospects ; les clients CEGECLIM actifs ou sommeil doivent
+    // rester visibles quel que soit leur âge.
+    let rows = scopedClientsBase.map(ensureClientCoordinates)
 
     if (departement) {
       rows = rows.filter((row) => getClientDepartment(row) === departement)
@@ -2277,23 +2279,15 @@ function matchesMapCommonFilters(row: ClientRow) {
     if (!selectedNafCodes.includes(naf)) return false
   }
 
-  // La carte possède ses propres curseurs d'ancienneté. Ils sont initialisés depuis
-  // les filtres de l'écran au moment du clic sur une cellule, puis peuvent être affinés
-  // directement dans la carte. Sans ce contrôle, la carte réaffichait tous les prospects
-  // du département / activité, même si le tableau était filtré sur 0 jour -> 3 mois.
-  const ageDays = diffDaysFromToday(row.dateCreationEtablissement)
-  const currentMapAgeDaysMin = Math.min(sliderToDays(mapAgeSliderMin), sliderToDays(mapAgeSliderMax))
-  const currentMapAgeDaysMax = Math.max(sliderToDays(mapAgeSliderMin), sliderToDays(mapAgeSliderMax))
+  const isCegeclimAny = isClientInCegeclimAny(row)
 
-  if (ageDays === null || ageDays < 0) {
-    if (!(ageDays !== null && ageDays < 0 && !excludeFutureCreation)) return false
-  }
+  // Ne pas appliquer ici le filtre d'ancienneté : il est réservé aux prospects
+  // dans matchesMapProspectAgeFilters(). Les clients CEGECLIM actifs ou sommeil
+  // doivent rester visibles sur la carte quel que soit leur âge.
 
-  if (ageDays !== null && ageDays >= 0) {
-    if (ageDays < currentMapAgeDaysMin || ageDays > currentMapAgeDaysMax) return false
-  }
-
-  if (onlyContactable && !row.contactable) return false
+  if (onlyContactable && !(row.telephone || row.email || row.contactable)) return false
+  if (onlyNotInCegeclim && isCegeclimAny) return false
+  if (onlyPresentInCegeclim && !isCegeclimAny) return false
 
   if (selectedProspectStatuses.length > 0) {
     const prospectStatus = normalizeProspectStatus(row.prospect_status)
@@ -2332,8 +2326,25 @@ function matchesMapCommonFilters(row: ClientRow) {
   return true
 }
 
+function matchesMapProspectAgeFilters(row: ClientRow) {
+  const ageDays = diffDaysFromToday(row.dateCreationEtablissement)
+  const currentMapAgeDaysMin = Math.min(sliderToDays(mapAgeSliderMin), sliderToDays(mapAgeSliderMax))
+  const currentMapAgeDaysMax = Math.max(sliderToDays(mapAgeSliderMin), sliderToDays(mapAgeSliderMax))
+
+  if (ageDays === null || ageDays < 0) {
+    if (!(ageDays !== null && ageDays < 0 && !excludeFutureCreation)) return false
+  }
+
+  if (ageDays !== null && ageDays >= 0) {
+    if (ageDays < currentMapAgeDaysMin || ageDays > currentMapAgeDaysMax) return false
+  }
+
+  return true
+}
+
 function matchesMapProspectFilters(row: ClientRow) {
   if (!matchesMapCommonFilters(row)) return false
+  if (!matchesMapProspectAgeFilters(row)) return false
   return true
 }
 
@@ -4954,7 +4965,7 @@ const selectedClientMapReason = useMemo(() => {
                     </div>
 
                     <div style={{ width: 320, minWidth: 320 }}>
-                      <div style={{ fontWeight: 800, marginBottom: 8 }}>Ancienneté min / max</div>
+                      <div style={{ fontWeight: 800, marginBottom: 8 }}>Ancienneté prospects min / max</div>
 
                       <div style={{ position: 'relative', height: 42 }}>
                         <div
