@@ -371,7 +371,12 @@ function signedInvoiceAmount(row: FocusInvoiceLineRaw) {
 }
 
 function signedActivityAmount(typeDocument: string | null | undefined, amount: number | null | undefined) {
-  const numericAmount = Math.abs(Number(amount || 0))
+  const numericAmount = Number(amount || 0)
+
+  // Règle commune activité :
+  // BL = montant source tel quel
+  // BR = -montant source
+  // Important : pas de Math.abs(), car certaines lignes BL/BR peuvent déjà être négatives.
   if (String(typeDocument || '') === 'Bon de retour') return -numericAmount
   return numericAmount
 }
@@ -1258,7 +1263,7 @@ function FocusMensuelPageContent() {
         const remainingBusinessDays = countWeekdays(
           daysInMonth(month).filter((day) => day > focusDate && day <= currentMonthEnd)
         )
-        const blMonthValue = sum(agencyCurrentMonthBl, (row) => Math.abs(Number(row.montant_ht || 0)))
+        const blMonthValue = sum(agencyCurrentMonthBl, (row) => signedActivityAmount(row.type_document, row.montant_ht))
         const dailyBlFlux = blDays.length ? blMonthValue / blDays.length : 0
         const projectionFluxBl = dailyBlFlux * remainingBusinessDays
         const valeurBlNf3Pct = (blMonthValue + projectionFluxBl) * 0.04
