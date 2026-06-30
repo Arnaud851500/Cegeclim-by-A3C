@@ -62,6 +62,68 @@ type BusinessDayBasis = {
   label: string
 }
 
+type FocusActivityLineRaw = {
+  type_document: string | null
+  date_piece: string | null
+  date_bc: string | null
+  date_pl: string | null
+  date_bl: string | null
+  numero_tiers_entete: string | null
+  reference_article: string | null
+  montant_ht: number | null
+  collaborateur: string | null
+}
+
+type FocusInvoiceLineRaw = {
+  numero_piece: string | null
+  date_facture: string | null
+  numero_tiers_entete: string | null
+  reference_article: string | null
+  montant_ht: number | null
+  collaborateur: string | null
+}
+
+type AgencyPortfolioRow = {
+  label: string
+  cdc: number
+  pl: number
+  brMx: number
+  brM: number
+  blMx: number
+  blM: number
+  total: number
+}
+
+type AgencyProjectionRow = {
+  label: string
+  blBrMx: number
+  blBrM: number
+  factures: number
+  projectionFluxBl: number
+  valeurBlNf3Pct: number
+  projectionCa: number
+  caN1: number
+  evolPct: number | null
+}
+
+type EnrichedActivityLine = FocusActivityLineRaw & {
+  montant_ht: number
+  effective_date: string | null
+  agence: string
+  famille_macro: string | null
+  hors_statistique: boolean
+  collaborateur: string
+}
+
+type EnrichedInvoiceLine = FocusInvoiceLineRaw & {
+  montant_ht: number
+  agence: string
+  famille_macro: string | null
+  hors_statistique: boolean
+  collaborateur: string
+}
+
+
 const DOC_TYPES: DocType[] = ['Devis', 'CDC', 'BL', 'Factures']
 const DOC_COLORS: Record<DocType, string> = {
   Devis: '#d59b00',
@@ -229,6 +291,116 @@ function pickDefaultFocusDate() {
   const yesterday = addDaysYmd(todayYmd(), -1)
   return yesterday
 }
+
+function normalizeKey(value: any) {
+  return String(value || '').trim().toUpperCase()
+}
+
+function formatMoneyPlain(value: number | null | undefined, maximumFractionDigits = 1) {
+  return Number(value || 0).toLocaleString('fr-FR', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits,
+  })
+}
+
+function chunkArray<T>(values: T[], size = 500) {
+  const chunks: T[][] = []
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size))
+  }
+  return chunks
+}
+
+function uniqueStrings(values: Array<string | null | undefined>) {
+  return Array.from(new Set(values.map((value) => String(value || '').trim()).filter(Boolean)))
+}
+
+function previousYearMonth(month: string) {
+  const [year, monthNumber] = month.split('-').map(Number)
+  return `${year - 1}-${String(monthNumber).padStart(2, '0')}`
+}
+
+function lastDayOfMonth(month: string) {
+  const monthDays = daysInMonth(month)
+  return monthDays[monthDays.length - 1]
+}
+
+function maxYmd(values: Array<string | null | undefined>) {
+  const filtered = values.map((value) => String(value || '')).filter(Boolean).sort()
+  return filtered[filtered.length - 1] || null
+}
+
+function activityEffectiveDate(row: FocusActivityLineRaw) {
+  const type = String(row.type_document || '')
+  if (type === 'Bon de commande') return row.date_bc || row.date_piece || null
+  if (type === 'Préparation de livraison') return row.date_pl || row.date_piece || null
+  if (type === 'Bon de livraison' || type === 'Bon de retour') return row.date_bl || row.date_piece || null
+  return row.date_piece || row.date_bc || row.date_pl || row.date_bl || null
+}
+
+function signedInvoiceAmount(row: FocusInvoiceLineRaw) {
+  const amount = Math.abs(Number(row.montant_ht || 0))
+  const numeroPiece = String(row.numero_piece || '').toUpperCase()
+  if (numeroPiece.startsWith('FAR') || numeroPiece.startsWith('FAV')) return -amount
+  if (numeroPiece.startsWith('FA0')) return amount
+  return Number(row.montant_ht || 0)
+}
+
+function signedActivityAmount(typeDocument: string | null | undefined, amount: number | null | undefined) {
+  const numericAmount = Math.abs(Number(amount || 0))
+  if (String(typeDocument || '') === 'Bon de retour') return -numericAmount
+  return numericAmount
+}
+
+function agencySort(a: string, b: string) {
+  const aIsSans = normalizeKey(a) === 'SANS AGENCE'
+  const bIsSans = normalizeKey(b) === 'SANS AGENCE'
+  if (aIsSans && !bIsSans) return 1
+  if (!aIsSans && bIsSans) return -1
+  return a.localeCompare(b, 'fr-FR')
+}
+
+async function fetchAllFromSupabase(table: string, select: string, transform?: (query: any) => any) {
+  const pageSize = 2000
+  const rows: any[] = []
+  let from = 0
+
+  while (true) {
+    let query: any = (supabase as any).from(table).select(select)
+    if (transform) query = transform(query)
+    query = query.range(from, from + pageSize - 1)
+
+    const { data, error } = await query
+    if (error) throw error
+
+    const chunk = Array.isArray(data) ? data : []
+    rows.push(...chunk)
+
+    if (chunk.length < pageSize) break
+    from += pageSize
+  }
+
+  return rows
+}
+
+async function fetchRowsByIn(table: string, select: string, column: string, values: string[]) {
+  const normalizedValues = uniqueStrings(values)
+  if (!normalizedValues.length) return []
+
+  const rows: any[] = []
+  for (const chunk of chunkArray(normalizedValues, 500)) {
+    const { data, error } = await (supabase as any)
+      .from(table)
+      .select(select)
+      .in(column, chunk)
+
+    if (error) throw error
+    rows.push(...(Array.isArray(data) ? data : []))
+  }
+
+  return rows
+}
+
 
 function SparkLine({ values, color }: { values: number[]; color: string }) {
   const width = 190
@@ -476,6 +648,10 @@ function FocusMensuelPageContent() {
   const [includeHorsStats, setIncludeHorsStats] = useState(isPdfMode || ['afficher', 'show', 'true', '1'].includes(String(requestedHorsStats || '').toLowerCase()))
   const [dailyRows, setDailyRows] = useState<DailyRow[]>([])
   const [highlightRows, setHighlightRows] = useState<HighlightRow[]>([])
+  const [agencyPortfolioRows, setAgencyPortfolioRows] = useState<AgencyPortfolioRow[]>([])
+  const [agencyProjectionRows, setAgencyProjectionRows] = useState<AgencyProjectionRow[]>([])
+  const [agencyTablesLoading, setAgencyTablesLoading] = useState(false)
+  const [agencyTablesError, setAgencyTablesError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [rebuildingCache, setRebuildingCache] = useState(false)
   const [cacheInfo, setCacheInfo] = useState<string | null>(null)
@@ -575,6 +751,11 @@ function FocusMensuelPageContent() {
     void loadHighlights()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusDate, agence, familleMacro, collaborateur, includeHorsStats])
+
+  useEffect(() => {
+    void loadAgencyControlTables()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [month, focusDate, agence, familleMacro, collaborateur, includeHorsStats])
 
   useEffect(() => {
     void (async () => {
@@ -727,6 +908,7 @@ function FocusMensuelPageContent() {
       setCacheInfo(message)
       await loadData()
       await loadHighlights()
+      await loadAgencyControlTables()
     } catch (exception: any) {
       console.error('rebuild focus mensuel cache', exception)
       setError(
@@ -760,6 +942,279 @@ function FocusMensuelPageContent() {
       setDailyRows([])
     } finally {
       setLoading(false)
+    }
+  }
+
+
+  async function loadAgencyControlTables() {
+    setAgencyTablesLoading(true)
+    setAgencyTablesError(null)
+
+    try {
+      const currentMonthEnd = lastDayOfMonth(month)
+      const prevYearMonthValue = previousYearMonth(month)
+      const prevYearMonthBegin = monthStart(prevYearMonthValue)
+      const prevYearMonthEnd = nextMonthStart(prevYearMonthValue)
+
+      const [activityRowsRaw, currentInvoiceRowsRaw, previousYearInvoiceRowsRaw] = await Promise.all([
+        fetchAllFromSupabase(
+          'activite_lignes',
+          'type_document,date_piece,date_bc,date_pl,date_bl,numero_tiers_entete,reference_article,montant_ht,collaborateur'
+        ) as Promise<FocusActivityLineRaw[]>,
+        fetchAllFromSupabase(
+          'facture_lignes',
+          'numero_piece,date_facture,numero_tiers_entete,reference_article,montant_ht,collaborateur',
+          (query) => query.gte('date_facture', monthBegin).lte('date_facture', focusDate)
+        ) as Promise<FocusInvoiceLineRaw[]>,
+        fetchAllFromSupabase(
+          'facture_lignes',
+          'numero_piece,date_facture,numero_tiers_entete,reference_article,montant_ht,collaborateur',
+          (query) => query.gte('date_facture', prevYearMonthBegin).lt('date_facture', prevYearMonthEnd)
+        ) as Promise<FocusInvoiceLineRaw[]>,
+      ])
+
+      const tierNumbers = uniqueStrings([
+        ...activityRowsRaw.map((row) => row.numero_tiers_entete),
+        ...currentInvoiceRowsRaw.map((row) => row.numero_tiers_entete),
+        ...previousYearInvoiceRowsRaw.map((row) => row.numero_tiers_entete),
+      ])
+      const articleReferences = uniqueStrings([
+        ...activityRowsRaw.map((row) => row.reference_article),
+        ...currentInvoiceRowsRaw.map((row) => row.reference_article),
+        ...previousYearInvoiceRowsRaw.map((row) => row.reference_article),
+      ])
+
+      const tierRows = await fetchRowsByIn(
+        'ref_tiers',
+        'numero,representant',
+        'numero',
+        tierNumbers
+      ) as Array<{ numero: string | null; representant: string | null }>
+      const tierMap = new Map(
+        tierRows.map((row) => [normalizeKey(row.numero), { representant: row.representant || null }])
+      )
+
+      const collaborateurRows = await fetchAllFromSupabase(
+        'ref_collaborateurs',
+        'nom_prenom,nom,prenom,agence'
+      ) as Array<{ nom_prenom: string | null; nom: string | null; prenom: string | null; agence: string | null }>
+      const collaborateurMap = new Map<string, string | null>()
+      collaborateurRows.forEach((row) => {
+        const nomPrenom = String(row.nom_prenom || '').trim()
+        const nom = String(row.nom || '').trim()
+        const prenom = String(row.prenom || '').trim()
+        const nomPrenomConstruit = [nom, prenom].filter(Boolean).join(' ')
+
+        if (nomPrenom) collaborateurMap.set(normalizeKey(nomPrenom), row.agence || null)
+        if (nomPrenomConstruit) collaborateurMap.set(normalizeKey(nomPrenomConstruit), row.agence || null)
+        if (nom) collaborateurMap.set(normalizeKey(nom), row.agence || null)
+      })
+
+      const articleRows = await fetchRowsByIn(
+        'ref_articles',
+        'reference_article,famille,hors_statistique',
+        'reference_article',
+        articleReferences
+      ) as Array<{ reference_article: string | null; famille: string | null; hors_statistique: boolean | null }>
+      const articleMap = new Map(
+        articleRows.map((row) => [
+          normalizeKey(row.reference_article),
+          { famille: row.famille || null, hors_statistique: Boolean(row.hors_statistique) },
+        ])
+      )
+
+      const familles = uniqueStrings(articleRows.map((row) => row.famille))
+      const familleRows = await fetchRowsByIn(
+        'ref_familles',
+        'famille,famille_macro',
+        'famille',
+        familles
+      ) as Array<{ famille: string | null; famille_macro: string | null }>
+      const familleMap = new Map(
+        familleRows.map((row) => [normalizeKey(row.famille), row.famille_macro || null])
+      )
+
+      const enrichCommon = (row: {
+        numero_tiers_entete: string | null
+        reference_article: string | null
+        collaborateur: string | null
+      }) => {
+        const tier = tierMap.get(normalizeKey(row.numero_tiers_entete))
+        const agenceValue =
+          collaborateurMap.get(normalizeKey(row.collaborateur)) ||
+          collaborateurMap.get(normalizeKey(tier?.representant)) ||
+          'Sans agence'
+        const article = articleMap.get(normalizeKey(row.reference_article))
+        const familleValue = article?.famille || null
+        const familleMacroValue = familleMap.get(normalizeKey(familleValue)) || null
+        const horsStatistiqueValue = Boolean(article?.hors_statistique)
+        const collaborateurValue = String(row.collaborateur || '').trim() || '—'
+
+        return {
+          agence: String(agenceValue || 'Sans agence'),
+          famille_macro: familleMacroValue,
+          hors_statistique: horsStatistiqueValue,
+          collaborateur: collaborateurValue,
+        }
+      }
+
+      const filteredActivity: EnrichedActivityLine[] = activityRowsRaw
+        .map((row) => ({
+          ...row,
+          montant_ht: Number(row.montant_ht || 0),
+          effective_date: activityEffectiveDate(row),
+          ...enrichCommon(row),
+        }))
+        .filter((row) => {
+          if (!row.effective_date || row.effective_date > focusDate) return false
+          if (agence && normalizeKey(row.agence) !== normalizeKey(agence)) return false
+          if (familleMacro && normalizeKey(row.famille_macro) !== normalizeKey(familleMacro)) return false
+          if (collaborateur && normalizeKey(row.collaborateur) !== normalizeKey(collaborateur)) return false
+          if (!includeHorsStats && row.hors_statistique) return false
+
+          return ['Bon de commande', 'Préparation de livraison', 'Bon de livraison', 'Bon de retour'].includes(
+            String(row.type_document || '')
+          )
+        })
+
+      const filteredCurrentInvoices: EnrichedInvoiceLine[] = currentInvoiceRowsRaw
+        .map((row) => ({
+          ...row,
+          montant_ht: Number(row.montant_ht || 0),
+          ...enrichCommon(row),
+        }))
+        .filter((row) => {
+          if (!row.date_facture || row.date_facture < monthBegin || row.date_facture > focusDate) return false
+          if (agence && normalizeKey(row.agence) !== normalizeKey(agence)) return false
+          if (familleMacro && normalizeKey(row.famille_macro) !== normalizeKey(familleMacro)) return false
+          if (collaborateur && normalizeKey(row.collaborateur) !== normalizeKey(collaborateur)) return false
+          if (!includeHorsStats && row.hors_statistique) return false
+          return true
+        })
+
+      const filteredPreviousYearInvoices: EnrichedInvoiceLine[] = previousYearInvoiceRowsRaw
+        .map((row) => ({
+          ...row,
+          montant_ht: Number(row.montant_ht || 0),
+          ...enrichCommon(row),
+        }))
+        .filter((row) => {
+          if (!row.date_facture) return false
+          if (agence && normalizeKey(row.agence) !== normalizeKey(agence)) return false
+          if (familleMacro && normalizeKey(row.famille_macro) !== normalizeKey(familleMacro)) return false
+          if (collaborateur && normalizeKey(row.collaborateur) !== normalizeKey(collaborateur)) return false
+          if (!includeHorsStats && row.hors_statistique) return false
+          return true
+        })
+
+      const agencyLabels: string[] = Array.from(new Set([
+        ...filteredActivity.map((row) => row.agence || 'Sans agence'),
+        ...filteredCurrentInvoices.map((row) => row.agence || 'Sans agence'),
+        ...filteredPreviousYearInvoices.map((row) => row.agence || 'Sans agence'),
+      ])).sort(agencySort)
+
+      const portfolioRows = agencyLabels.map((label) => {
+        const agencyActivity = filteredActivity.filter((row) => normalizeKey(row.agence) === normalizeKey(label))
+
+        const cdc = sum(
+          agencyActivity.filter((row) => row.type_document === 'Bon de commande'),
+          (row) => Number(row.montant_ht || 0)
+        )
+        const pl = sum(
+          agencyActivity.filter((row) => row.type_document === 'Préparation de livraison'),
+          (row) => Number(row.montant_ht || 0)
+        )
+
+        const blRows = agencyActivity.filter((row) => row.type_document === 'Bon de livraison')
+        const brRows = agencyActivity.filter((row) => row.type_document === 'Bon de retour')
+
+        const blMx = sum(
+          blRows.filter((row) => String(row.effective_date || '') < monthBegin),
+          (row) => signedActivityAmount(row.type_document, row.montant_ht)
+        )
+        const blM = sum(
+          blRows.filter((row) => String(row.effective_date || '').startsWith(month) && String(row.effective_date || '') <= focusDate),
+          (row) => signedActivityAmount(row.type_document, row.montant_ht)
+        )
+        const brMx = sum(
+          brRows.filter((row) => String(row.effective_date || '') < monthBegin),
+          (row) => signedActivityAmount(row.type_document, row.montant_ht)
+        )
+        const brM = sum(
+          brRows.filter((row) => String(row.effective_date || '').startsWith(month) && String(row.effective_date || '') <= focusDate),
+          (row) => signedActivityAmount(row.type_document, row.montant_ht)
+        )
+
+        return {
+          label,
+          cdc,
+          pl,
+          brMx,
+          brM,
+          blMx,
+          blM,
+          total: cdc + pl + brMx + brM + blMx + blM,
+        }
+      })
+
+      const projectionRows = agencyLabels.map((label) => {
+        const portfolio = portfolioRows.find((row) => row.label === label) || {
+          label,
+          cdc: 0,
+          pl: 0,
+          brMx: 0,
+          brM: 0,
+          blMx: 0,
+          blM: 0,
+          total: 0,
+        }
+
+        const agencyCurrentInvoices = filteredCurrentInvoices.filter((row) => normalizeKey(row.agence) === normalizeKey(label))
+        const agencyPreviousYearInvoices = filteredPreviousYearInvoices.filter((row) => normalizeKey(row.agence) === normalizeKey(label))
+        const agencyActivity = filteredActivity.filter((row) => normalizeKey(row.agence) === normalizeKey(label))
+        const agencyCurrentMonthBl = agencyActivity.filter(
+          (row) => row.type_document === 'Bon de livraison' && String(row.effective_date || '').startsWith(month) && String(row.effective_date || '') <= focusDate
+        )
+
+        const factures = sum(agencyCurrentInvoices, (row) => signedInvoiceAmount(row))
+        const caN1 = sum(agencyPreviousYearInvoices, (row) => signedInvoiceAmount(row))
+        const blBrMx = portfolio.blMx + portfolio.brMx
+        const blBrM = portfolio.blM + portfolio.brM
+
+        const lastBlDate = maxYmd(agencyCurrentMonthBl.map((row) => row.effective_date))
+        const blDays = Array.from(new Set(agencyCurrentMonthBl.map((row) => String(row.effective_date || '')).filter(Boolean))).sort()
+        const remainingBusinessDays = lastBlDate
+          ? countWeekdays(daysInMonth(month).filter((day) => day > lastBlDate && day <= currentMonthEnd))
+          : 0
+        const blMonthValue = sum(agencyCurrentMonthBl, (row) => Math.abs(Number(row.montant_ht || 0)))
+        const dailyBlFlux = blDays.length ? blMonthValue / blDays.length : 0
+        const projectionFluxBl = dailyBlFlux * remainingBusinessDays
+        const valeurBlNf3Pct = (blMonthValue + projectionFluxBl) * 0.03
+        const projectionCa = factures + blBrMx + blBrM + projectionFluxBl - valeurBlNf3Pct
+        const evolPct = caN1 ? ((projectionCa - caN1) / Math.abs(caN1)) * 100 : null
+
+        return {
+          label,
+          blBrMx,
+          blBrM,
+          factures,
+          projectionFluxBl,
+          valeurBlNf3Pct,
+          projectionCa,
+          caN1,
+          evolPct,
+        }
+      })
+
+      setAgencyPortfolioRows(portfolioRows)
+      setAgencyProjectionRows(projectionRows)
+    } catch (exception: any) {
+      console.error('focus mensuel agency control tables', exception)
+      setAgencyTablesError(exception?.message || String(exception))
+      setAgencyPortfolioRows([])
+      setAgencyProjectionRows([])
+    } finally {
+      setAgencyTablesLoading(false)
     }
   }
 
@@ -823,7 +1278,7 @@ function FocusMensuelPageContent() {
           <button style={styles.warningButton} onClick={rebuildCacheForMonth} disabled={rebuildingCache}>
             {rebuildingCache ? 'Rebuild cache…' : 'Reconstruire cache mois'}
           </button>
-          <button style={styles.primaryButton} onClick={() => { void loadData(); void loadHighlights() }}>Actualiser</button>
+          <button style={styles.primaryButton} onClick={() => { void loadData(); void loadHighlights(); void loadAgencyControlTables() }}>Actualiser</button>
         </div>
       </div>
 
@@ -928,6 +1383,22 @@ function FocusMensuelPageContent() {
         />
       </div>
 
+      {agencyTablesError && <div style={styles.errorBox}>Erreur tableaux portefeuille / projection : {agencyTablesError}</div>}
+      {agencyTablesLoading && <div style={styles.infoBox}>Chargement du portefeuille de commande et de la projection du CA par agence…</div>}
+
+      <div style={styles.wideSectionStack}>
+        <AgencyPortfolioTable
+          title={`Portefeuille de commande au ${formatDateFr(focusDate)}`}
+          rows={agencyPortfolioRows}
+          emptyMessage="Aucune donnée d'activité disponible pour le portefeuille de commande."
+        />
+        <AgencyProjectionTable
+          title={`Projection facturation mois par agence — au ${formatDateFr(focusDate)}`}
+          rows={agencyProjectionRows}
+          emptyMessage="Aucune donnée disponible pour la projection du CA du mois."
+        />
+      </div>
+
       <div style={styles.highlightsGrid}>
         <HighlightTable title="Top 20 devis créés — 7 derniers jours" rows={highlights.topDevis} />
         <HighlightTable title="Top 20 commandes CDC — 7 derniers jours" rows={highlights.topCdc} />
@@ -1028,6 +1499,174 @@ function SummaryMatrix({
   )
 }
 
+
+function AgencyPortfolioTable({
+  title,
+  rows,
+  emptyMessage,
+}: {
+  title: string
+  rows: AgencyPortfolioRow[]
+  emptyMessage?: string
+}) {
+  const totalRow = useMemo<AgencyPortfolioRow | null>(() => {
+    if (!rows.length) return null
+    return {
+      label: 'TOTAL',
+      cdc: sum(rows, (row) => row.cdc),
+      pl: sum(rows, (row) => row.pl),
+      brMx: sum(rows, (row) => row.brMx),
+      brM: sum(rows, (row) => row.brM),
+      blMx: sum(rows, (row) => row.blMx),
+      blM: sum(rows, (row) => row.blM),
+      total: sum(rows, (row) => row.total),
+    }
+  }, [rows])
+
+  const displayRows = totalRow ? [totalRow, ...rows] : rows
+
+  const moneyCellStyle = (value: number, isTotal = false): React.CSSProperties => ({
+    ...(isTotal ? styles.tdRightTotal : styles.tdRight),
+    color: value < 0 ? '#b91c1c' : '#0f172a',
+    fontWeight: isTotal ? 950 : 850,
+  })
+
+  return (
+    <div style={styles.sectionCard} className="focus-pdf-section-card">
+      <div style={styles.sectionTitle}>{title}</div>
+      <div style={styles.sectionSubtitle}>Base : données d'activité uniquement, ventilées par agence et par statut du portefeuille.</div>
+      <Table>
+        <thead>
+          <tr>
+            <th style={styles.th}>Dimension</th>
+            <th style={styles.thRight}>CDC €</th>
+            <th style={styles.thRight}>PL €</th>
+            <th style={styles.thRight}>BR M-x</th>
+            <th style={styles.thRight}>BR M</th>
+            <th style={styles.thRight}>BL M-x</th>
+            <th style={styles.thRight}>BL M</th>
+            <th style={styles.thRight}>Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {displayRows.length === 0 ? (
+            <tr>
+              <td colSpan={8} style={styles.emptyCell}>{emptyMessage || 'Aucune donnée sur le périmètre.'}</td>
+            </tr>
+          ) : displayRows.map((row, index) => {
+            const isTotal = index === 0 && row.label === 'TOTAL'
+            return (
+              <tr key={row.label} style={isTotal ? styles.totalRow : undefined}>
+                <td style={isTotal ? styles.tdStrongTotal : styles.tdStrong}>{row.label}</td>
+                <td style={moneyCellStyle(row.cdc, isTotal)}>{formatMoneyPlain(row.cdc)}</td>
+                <td style={moneyCellStyle(row.pl, isTotal)}>{formatMoneyPlain(row.pl)}</td>
+                <td style={moneyCellStyle(row.brMx, isTotal)}>{formatMoneyPlain(row.brMx)}</td>
+                <td style={moneyCellStyle(row.brM, isTotal)}>{formatMoneyPlain(row.brM)}</td>
+                <td style={moneyCellStyle(row.blMx, isTotal)}>{formatMoneyPlain(row.blMx)}</td>
+                <td style={moneyCellStyle(row.blM, isTotal)}>{formatMoneyPlain(row.blM)}</td>
+                <td style={moneyCellStyle(row.total, isTotal)}>{formatMoneyPlain(row.total)}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </Table>
+    </div>
+  )
+}
+
+function AgencyProjectionTable({
+  title,
+  rows,
+  emptyMessage,
+}: {
+  title: string
+  rows: AgencyProjectionRow[]
+  emptyMessage?: string
+}) {
+  const totalRow = useMemo<AgencyProjectionRow | null>(() => {
+    if (!rows.length) return null
+    const blBrMx = sum(rows, (row) => row.blBrMx)
+    const blBrM = sum(rows, (row) => row.blBrM)
+    const factures = sum(rows, (row) => row.factures)
+    const projectionFluxBl = sum(rows, (row) => row.projectionFluxBl)
+    const valeurBlNf3Pct = sum(rows, (row) => row.valeurBlNf3Pct)
+    const projectionCa = sum(rows, (row) => row.projectionCa)
+    const caN1 = sum(rows, (row) => row.caN1)
+
+    return {
+      label: 'TOTAL',
+      blBrMx,
+      blBrM,
+      factures,
+      projectionFluxBl,
+      valeurBlNf3Pct,
+      projectionCa,
+      caN1,
+      evolPct: caN1 ? ((projectionCa - caN1) / Math.abs(caN1)) * 100 : null,
+    }
+  }, [rows])
+
+  const displayRows = totalRow ? [totalRow, ...rows] : rows
+
+  const moneyCellStyle = (value: number, isTotal = false): React.CSSProperties => ({
+    ...(isTotal ? styles.tdRightTotal : styles.tdRight),
+    color: value < 0 ? '#b91c1c' : '#0f172a',
+    fontWeight: isTotal ? 950 : 850,
+  })
+
+  const pctCellStyle = (value: number | null | undefined, isTotal = false): React.CSSProperties => ({
+    ...(isTotal ? styles.tdRightTotal : styles.tdRight),
+    color: value === null || value === undefined ? '#64748b' : value < 0 ? '#b91c1c' : '#166534',
+    fontWeight: isTotal ? 950 : 850,
+  })
+
+  return (
+    <div style={styles.sectionCard} className="focus-pdf-section-card">
+      <div style={styles.sectionTitle}>{title}</div>
+      <div style={styles.sectionSubtitle}>
+        Projection = Factures à date + BL/BR non facturés (M-x + M) + flux BL restant à créer – 3% de BL non facturés du mois projeté.
+      </div>
+      <Table>
+        <thead>
+          <tr>
+            <th style={styles.th}>Dimension</th>
+            <th style={styles.thRight}>BL-BR non facturés M-x</th>
+            <th style={styles.thRight}>BL-BR non facturés du mois</th>
+            <th style={styles.thRight}>Factures €</th>
+            <th style={styles.thRight}>Projection flux BL à venir</th>
+            <th style={styles.thRight}>Valeur BL NF sur M (3%)</th>
+            <th style={styles.thRight}>Projection CA du mois</th>
+            <th style={styles.thRight}>CA N-1</th>
+            <th style={styles.thRight}>Evol %</th>
+          </tr>
+        </thead>
+        <tbody>
+          {displayRows.length === 0 ? (
+            <tr>
+              <td colSpan={9} style={styles.emptyCell}>{emptyMessage || 'Aucune donnée sur le périmètre.'}</td>
+            </tr>
+          ) : displayRows.map((row, index) => {
+            const isTotal = index === 0 && row.label === 'TOTAL'
+            return (
+              <tr key={row.label} style={isTotal ? styles.totalRow : undefined}>
+                <td style={isTotal ? styles.tdStrongTotal : styles.tdStrong}>{row.label}</td>
+                <td style={moneyCellStyle(row.blBrMx, isTotal)}>{formatMoneyPlain(row.blBrMx)}</td>
+                <td style={moneyCellStyle(row.blBrM, isTotal)}>{formatMoneyPlain(row.blBrM)}</td>
+                <td style={moneyCellStyle(row.factures, isTotal)}>{formatMoneyPlain(row.factures)}</td>
+                <td style={moneyCellStyle(row.projectionFluxBl, isTotal)}>{formatMoneyPlain(row.projectionFluxBl)}</td>
+                <td style={moneyCellStyle(row.valeurBlNf3Pct, isTotal)}>{formatMoneyPlain(row.valeurBlNf3Pct)}</td>
+                <td style={moneyCellStyle(row.projectionCa, isTotal)}>{formatMoneyPlain(row.projectionCa)}</td>
+                <td style={moneyCellStyle(row.caN1, isTotal)}>{formatMoneyPlain(row.caN1)}</td>
+                <td style={pctCellStyle(row.evolPct, isTotal)}>{formatPct(row.evolPct)}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </Table>
+    </div>
+  )
+}
+
 const styles: Record<string, React.CSSProperties> = {
   page: { padding: 20, color: '#0f172a' },
   headerCard: { display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center', background: 'rgba(255,255,255,0.92)', border: '1px solid #e2e8f0', borderRadius: 22, padding: 18, boxShadow: '0 10px 28px rgba(15,23,42,0.06)', marginBottom: 14 },
@@ -1119,9 +1758,11 @@ const styles: Record<string, React.CSSProperties> = {
   legendItem: { display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 12, fontWeight: 900, color: '#475569' },
   legendDot: { width: 10, height: 10, borderRadius: '50%' },
   sectionGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 },
+  wideSectionStack: { display: 'grid', gridTemplateColumns: '1fr', gap: 14, marginBottom: 14 },
   highlightsGrid: { display: 'grid', gridTemplateColumns: '1fr', gap: 14 },
   sectionCard: { background: '#fff', border: '1px solid #e2e8f0', borderRadius: 18, padding: 14, boxShadow: '0 8px 22px rgba(15,23,42,0.06)', minWidth: 0 },
   sectionTitle: { fontSize: 16, fontWeight: 950, marginBottom: 10 },
+  sectionSubtitle: { marginTop: -4, marginBottom: 10, color: '#64748b', fontSize: 12, fontWeight: 700, lineHeight: 1.45 },
   tableWrap: { overflow: 'auto', maxWidth: '100%', border: '1px solid #e2e8f0', borderRadius: 12 },
   table: { width: '100%', borderCollapse: 'collapse', fontSize: 12, minWidth: 760 },
   th: { background: '#f1f5f9', color: '#0f172a', borderBottom: '1px solid #e2e8f0', padding: '8px 9px', textAlign: 'left', fontWeight: 950, whiteSpace: 'nowrap' },
