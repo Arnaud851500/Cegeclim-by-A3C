@@ -196,22 +196,6 @@ function formatShortDate(ymd: string) {
   const m = ymd.match(/^\d{4}-(\d{2})-(\d{2})/)
   return m ? `${m[2]}/${m[1]}` : ymd
 }
-function formatMoneyCompact(value: number | null | undefined) {
-  const n = Number(value || 0)
-  const abs = Math.abs(n)
-
-  if (abs >= 1000000) {
-    return `${(n / 1000000).toLocaleString('fr-FR', {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    })} M€`
-  }
-
-  return `${(n / 1000).toLocaleString('fr-FR', {
-    minimumFractionDigits: 1,
-    maximumFractionDigits: 1,
-  })} K€`
-}
 
 function formatMoney(value: number | null | undefined) {
   const n = Number(value || 0)
@@ -1507,7 +1491,7 @@ function SummaryMatrix({
                     key={`${type}-amount`}
                     style={{ ...(isTotal ? styles.tdRightTotal : styles.tdRight), color: DOC_COLORS[type], fontWeight: 900 }}
                   >
-                    {formatMoneyCompact(row.byType[type].amount)}
+                    {formatMoney(row.byType[type].amount)}
                   </td>
                 ))}
               </tr>
