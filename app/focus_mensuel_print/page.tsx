@@ -1,5 +1,5 @@
 import type { CSSProperties } from 'react'
-import FocusMensuelReportView from './FocusMensuelReportView'
+import FocusMensuelPage from '../focus_mensuel/page'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -46,7 +46,7 @@ export default async function FocusMensuelPrintPage({ searchParams }: PageProps)
 
   return (
     <main style={styles.page}>
-      <FocusMensuelReportView />
+      <FocusMensuelPage />
     </main>
   )
 }

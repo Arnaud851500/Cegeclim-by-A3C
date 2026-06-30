@@ -1390,7 +1390,7 @@ function FocusMensuelPageContent() {
       {agencyTablesError && <div style={styles.errorBox}>Erreur tableaux portefeuille / projection : {agencyTablesError}</div>}
       {agencyTablesLoading && <div style={styles.infoBox}>Chargement du portefeuille de commande et de la projection du CA par agence…</div>}
 
-      <div style={styles.wideSectionStack}>
+      <div style={styles.sectionGrid}>
         <AgencyPortfolioTable
           title={`Portefeuille de commande au ${formatDateFr(focusDate)}`}
           rows={agencyPortfolioRows}
@@ -1529,16 +1529,23 @@ function AgencyPortfolioTable({
 
   const displayRows = totalRow ? [totalRow, ...rows] : rows
 
-  const moneyCellStyle = (value: number, isTotal = false): React.CSSProperties => ({
+  const moneyCellStyle = (
+    value: number,
+    color: string,
+    isTotal = false
+  ): React.CSSProperties => ({
     ...(isTotal ? styles.tdRightTotal : styles.tdRight),
-    color: value < 0 ? '#b91c1c' : '#0f172a',
-    fontWeight: isTotal ? 950 : 850,
+    color: value < 0 ? '#b91c1c' : color,
+    fontWeight: isTotal ? 950 : 900,
   })
 
   return (
     <div style={styles.sectionCard} className="focus-pdf-section-card">
       <div style={styles.sectionTitle}>{title}</div>
-      <div style={styles.sectionSubtitle}>Base : données d'activité uniquement, ventilées par agence et par statut du portefeuille.</div>
+      <div style={styles.sectionSubtitle}>
+        Base activité non facturée : CDC, PL, BL et BR ventilés par agence.
+      </div>
+
       <Table>
         <thead>
           <tr>
@@ -1549,26 +1556,46 @@ function AgencyPortfolioTable({
             <th style={styles.thRight}>BR M</th>
             <th style={styles.thRight}>BL M-x</th>
             <th style={styles.thRight}>BL M</th>
-            <th style={styles.thRight}>Total</th>
+            <th style={styles.thRight}>Total €</th>
           </tr>
         </thead>
         <tbody>
           {displayRows.length === 0 ? (
             <tr>
-              <td colSpan={8} style={styles.emptyCell}>{emptyMessage || 'Aucune donnée sur le périmètre.'}</td>
+              <td colSpan={8} style={styles.emptyCell}>
+                {emptyMessage || 'Aucune donnée sur le périmètre.'}
+              </td>
             </tr>
           ) : displayRows.map((row, index) => {
             const isTotal = index === 0 && row.label === 'TOTAL'
+
             return (
               <tr key={row.label} style={isTotal ? styles.totalRow : undefined}>
-                <td style={isTotal ? styles.tdStrongTotal : styles.tdStrong}>{row.label}</td>
-                <td style={moneyCellStyle(row.cdc, isTotal)}>{formatMoneyPlain(row.cdc)}</td>
-                <td style={moneyCellStyle(row.pl, isTotal)}>{formatMoneyPlain(row.pl)}</td>
-                <td style={moneyCellStyle(row.brMx, isTotal)}>{formatMoneyPlain(row.brMx)}</td>
-                <td style={moneyCellStyle(row.brM, isTotal)}>{formatMoneyPlain(row.brM)}</td>
-                <td style={moneyCellStyle(row.blMx, isTotal)}>{formatMoneyPlain(row.blMx)}</td>
-                <td style={moneyCellStyle(row.blM, isTotal)}>{formatMoneyPlain(row.blM)}</td>
-                <td style={moneyCellStyle(row.total, isTotal)}>{formatMoneyPlain(row.total)}</td>
+                <td style={isTotal ? styles.tdStrongTotal : styles.tdStrong}>
+                  {row.label}
+                </td>
+
+                <td style={moneyCellStyle(row.cdc, DOC_COLORS.CDC, isTotal)}>
+                  {formatMoneyPlain(row.cdc)}
+                </td>
+                <td style={moneyCellStyle(row.pl, DOC_COLORS.BL, isTotal)}>
+                  {formatMoneyPlain(row.pl)}
+                </td>
+                <td style={moneyCellStyle(row.brMx, '#b91c1c', isTotal)}>
+                  {formatMoneyPlain(row.brMx)}
+                </td>
+                <td style={moneyCellStyle(row.brM, '#b91c1c', isTotal)}>
+                  {formatMoneyPlain(row.brM)}
+                </td>
+                <td style={moneyCellStyle(row.blMx, DOC_COLORS.BL, isTotal)}>
+                  {formatMoneyPlain(row.blMx)}
+                </td>
+                <td style={moneyCellStyle(row.blM, DOC_COLORS.BL, isTotal)}>
+                  {formatMoneyPlain(row.blM)}
+                </td>
+                <td style={moneyCellStyle(row.total, '#0f172a', isTotal)}>
+                  {formatMoneyPlain(row.total)}
+                </td>
               </tr>
             )
           })}
@@ -1589,6 +1616,7 @@ function AgencyProjectionTable({
 }) {
   const totalRow = useMemo<AgencyProjectionRow | null>(() => {
     if (!rows.length) return null
+
     const blBrMx = sum(rows, (row) => row.blBrMx)
     const blBrM = sum(rows, (row) => row.blBrM)
     const factures = sum(rows, (row) => row.factures)
@@ -1612,56 +1640,86 @@ function AgencyProjectionTable({
 
   const displayRows = totalRow ? [totalRow, ...rows] : rows
 
-  const moneyCellStyle = (value: number, isTotal = false): React.CSSProperties => ({
+  const moneyCellStyle = (
+    value: number,
+    color: string,
+    isTotal = false
+  ): React.CSSProperties => ({
     ...(isTotal ? styles.tdRightTotal : styles.tdRight),
-    color: value < 0 ? '#b91c1c' : '#0f172a',
-    fontWeight: isTotal ? 950 : 850,
+    color: value < 0 ? '#b91c1c' : color,
+    fontWeight: isTotal ? 950 : 900,
   })
 
-  const pctCellStyle = (value: number | null | undefined, isTotal = false): React.CSSProperties => ({
+  const pctCellStyle = (
+    value: number | null | undefined,
+    isTotal = false
+  ): React.CSSProperties => ({
     ...(isTotal ? styles.tdRightTotal : styles.tdRight),
     color: value === null || value === undefined ? '#64748b' : value < 0 ? '#b91c1c' : '#166534',
-    fontWeight: isTotal ? 950 : 850,
+    fontWeight: isTotal ? 950 : 900,
   })
 
   return (
     <div style={styles.sectionCard} className="focus-pdf-section-card">
       <div style={styles.sectionTitle}>{title}</div>
       <div style={styles.sectionSubtitle}>
-        Projection = Factures à date + BL/BR non facturés (M-x + M) + flux BL restant à créer – 3% de BL non facturés du mois projeté.
+        Factures à date + BL/BR non facturés + projection du flux BL restant – 3% de BL non facturés.
       </div>
+
       <Table>
         <thead>
           <tr>
             <th style={styles.th}>Dimension</th>
-            <th style={styles.thRight}>BL-BR non facturés M-x</th>
-            <th style={styles.thRight}>BL-BR non facturés du mois</th>
+            <th style={styles.thRight}>BL/BR M-x</th>
+            <th style={styles.thRight}>BL/BR M</th>
             <th style={styles.thRight}>Factures €</th>
-            <th style={styles.thRight}>Projection flux BL à venir</th>
-            <th style={styles.thRight}>Valeur BL NF sur M (3%)</th>
-            <th style={styles.thRight}>Projection CA du mois</th>
+            <th style={styles.thRight}>Flux BL</th>
+            <th style={styles.thRight}>BL NF 3%</th>
+            <th style={styles.thRight}>Proj. CA</th>
             <th style={styles.thRight}>CA N-1</th>
-            <th style={styles.thRight}>Evol %</th>
+            <th style={styles.thRight}>Evol.</th>
           </tr>
         </thead>
         <tbody>
           {displayRows.length === 0 ? (
             <tr>
-              <td colSpan={9} style={styles.emptyCell}>{emptyMessage || 'Aucune donnée sur le périmètre.'}</td>
+              <td colSpan={9} style={styles.emptyCell}>
+                {emptyMessage || 'Aucune donnée sur le périmètre.'}
+              </td>
             </tr>
           ) : displayRows.map((row, index) => {
             const isTotal = index === 0 && row.label === 'TOTAL'
+
             return (
               <tr key={row.label} style={isTotal ? styles.totalRow : undefined}>
-                <td style={isTotal ? styles.tdStrongTotal : styles.tdStrong}>{row.label}</td>
-                <td style={moneyCellStyle(row.blBrMx, isTotal)}>{formatMoneyPlain(row.blBrMx)}</td>
-                <td style={moneyCellStyle(row.blBrM, isTotal)}>{formatMoneyPlain(row.blBrM)}</td>
-                <td style={moneyCellStyle(row.factures, isTotal)}>{formatMoneyPlain(row.factures)}</td>
-                <td style={moneyCellStyle(row.projectionFluxBl, isTotal)}>{formatMoneyPlain(row.projectionFluxBl)}</td>
-                <td style={moneyCellStyle(row.valeurBlNf3Pct, isTotal)}>{formatMoneyPlain(row.valeurBlNf3Pct)}</td>
-                <td style={moneyCellStyle(row.projectionCa, isTotal)}>{formatMoneyPlain(row.projectionCa)}</td>
-                <td style={moneyCellStyle(row.caN1, isTotal)}>{formatMoneyPlain(row.caN1)}</td>
-                <td style={pctCellStyle(row.evolPct, isTotal)}>{formatPct(row.evolPct)}</td>
+                <td style={isTotal ? styles.tdStrongTotal : styles.tdStrong}>
+                  {row.label}
+                </td>
+
+                <td style={moneyCellStyle(row.blBrMx, DOC_COLORS.BL, isTotal)}>
+                  {formatMoneyPlain(row.blBrMx)}
+                </td>
+                <td style={moneyCellStyle(row.blBrM, DOC_COLORS.BL, isTotal)}>
+                  {formatMoneyPlain(row.blBrM)}
+                </td>
+                <td style={moneyCellStyle(row.factures, DOC_COLORS.Factures, isTotal)}>
+                  {formatMoneyPlain(row.factures)}
+                </td>
+                <td style={moneyCellStyle(row.projectionFluxBl, DOC_COLORS.BL, isTotal)}>
+                  {formatMoneyPlain(row.projectionFluxBl)}
+                </td>
+                <td style={moneyCellStyle(row.valeurBlNf3Pct, DOC_COLORS.BL, isTotal)}>
+                  {formatMoneyPlain(row.valeurBlNf3Pct)}
+                </td>
+                <td style={moneyCellStyle(row.projectionCa, DOC_COLORS.Factures, isTotal)}>
+                  {formatMoneyPlain(row.projectionCa)}
+                </td>
+                <td style={moneyCellStyle(row.caN1, '#0f172a', isTotal)}>
+                  {formatMoneyPlain(row.caN1)}
+                </td>
+                <td style={pctCellStyle(row.evolPct, isTotal)}>
+                  {formatPct(row.evolPct)}
+                </td>
               </tr>
             )
           })}
