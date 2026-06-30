@@ -339,11 +339,15 @@ function activityEffectiveDate(row: FocusActivityLineRaw) {
 }
 
 function signedInvoiceAmount(row: FocusInvoiceLineRaw) {
-  const amount = Math.abs(Number(row.montant_ht || 0))
-  const numeroPiece = String(row.numero_piece || '').toUpperCase()
-  if (numeroPiece.startsWith('FAR') || numeroPiece.startsWith('FAV')) return -amount
+  const numeroPiece = String(row.numero_piece || '').trim().toUpperCase()
+  const amount = Number(row.montant_ht || 0)
+
+  // Règle commune factures :
+  // FA0 = montant tel quel
+  // tout le reste = -montant
+  // Important : pas de Math.abs(), car certaines lignes FA0 peuvent déjà être négatives.
   if (numeroPiece.startsWith('FA0')) return amount
-  return Number(row.montant_ht || 0)
+  return -amount
 }
 
 function signedActivityAmount(typeDocument: string | null | undefined, amount: number | null | undefined) {
