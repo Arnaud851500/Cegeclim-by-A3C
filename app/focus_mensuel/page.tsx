@@ -1215,7 +1215,7 @@ function FocusMensuelPageContent() {
         const blMonthValue = sum(agencyCurrentMonthBl, (row) => Math.abs(Number(row.montant_ht || 0)))
         const dailyBlFlux = blDays.length ? blMonthValue / blDays.length : 0
         const projectionFluxBl = dailyBlFlux * remainingBusinessDays
-        const valeurBlNf3Pct = (blMonthValue + projectionFluxBl) * 0.03
+        const valeurBlNf3Pct = (blMonthValue + projectionFluxBl) * 0.04
         const projectionCa = factures + blBrMx + blBrM + projectionFluxBl - valeurBlNf3Pct
         const evolPct = caN1 ? ((projectionCa - caN1) / Math.abs(caN1)) * 100 : null
 
@@ -1685,7 +1685,7 @@ function AgencyProjectionTable({
     <div style={styles.sectionCard} className="focus-pdf-section-card">
       <div style={styles.sectionTitle}>{title}</div>
       <div style={styles.sectionSubtitle}>
-        Factures à date + BL/BR non facturés + projection du flux BL restant – 3% de BL non facturés.
+        BL/BR non facturés + Factures à date +  Projection du flux BL restant (BL à venir) – 4% de BL non facturés(BL NF 4%).
       </div>
 
       <Table>
@@ -1695,8 +1695,8 @@ function AgencyProjectionTable({
             <th style={styles.thRight}>BL/BR M-x</th>
             <th style={styles.thRight}>BL/BR M</th>
             <th style={styles.thRight}>Factures €</th>
-            <th style={styles.thRight}>Flux BL</th>
-            <th style={styles.thRight}>BL NF 3%</th>
+            <th style={styles.thRight}>BL à venir</th>
+            <th style={styles.thRight}>BL NF 4%</th>
             <th style={styles.thRight}>Proj. CA</th>
             <th style={styles.thRight}>CA N-1</th>
             <th style={styles.thRight}>Evol.</th>
@@ -1730,7 +1730,7 @@ function AgencyProjectionTable({
                 <td style={moneyCellStyle(row.projectionFluxBl, DOC_COLORS.BL, isTotal)}>
                   {formatMoneyCompact(row.projectionFluxBl)}
                 </td>
-                <td style={moneyCellStyle(row.valeurBlNf3Pct, DOC_COLORS.BL, isTotal)}>
+                <td style={moneyCellStyle(row.valeurBlNf3Pct, '#b91c1c', isTotal)}>
                   {formatMoneyCompact(row.valeurBlNf3Pct)}
                 </td>
                 <td style={moneyCellStyle(row.projectionCa, DOC_COLORS.Factures, isTotal)}>
