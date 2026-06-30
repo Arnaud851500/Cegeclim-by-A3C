@@ -303,6 +303,23 @@ function formatMoneyPlain(value: number | null | undefined, maximumFractionDigit
   })
 }
 
+function formatMoneyCompact(value: number | null | undefined) {
+  const n = Number(value || 0)
+  const abs = Math.abs(n)
+
+  if (abs >= 1000000) {
+    return `${(n / 1000000).toLocaleString('fr-FR', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })} M€`
+  }
+
+  return `${(n / 1000).toLocaleString('fr-FR', {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  })} K€`
+}
+
 function chunkArray<T>(values: T[], size = 500) {
   const chunks: T[][] = []
   for (let index = 0; index < values.length; index += size) {
@@ -649,7 +666,12 @@ function FocusMensuelPageContent() {
   const [agence, setAgence] = useState(requestedAgence)
   const [familleMacro, setFamilleMacro] = useState(requestedFamilleMacro)
   const [collaborateur, setCollaborateur] = useState(requestedCollaborateur)
-  const [includeHorsStats, setIncludeHorsStats] = useState(isPdfMode || ['afficher', 'show', 'true', '1'].includes(String(requestedHorsStats || '').toLowerCase()))
+  const [includeHorsStats, setIncludeHorsStats] = useState(() => {
+    const horsStatsParam = String(requestedHorsStats || '').toLowerCase()
+    if (['masquer', 'hide', 'false', '0'].includes(horsStatsParam)) return false
+    if (['afficher', 'show', 'true', '1'].includes(horsStatsParam)) return true
+    return true
+  })
   const [dailyRows, setDailyRows] = useState<DailyRow[]>([])
   const [highlightRows, setHighlightRows] = useState<HighlightRow[]>([])
   const [agencyPortfolioRows, setAgencyPortfolioRows] = useState<AgencyPortfolioRow[]>([])
@@ -1253,7 +1275,7 @@ function FocusMensuelPageContent() {
     >
       {isPdfMode && (
         <style>{`
-         @page { size: A4 landscape; margin: 4mm 4mm 4mm 4mm; }
+          @page { size: A4 landscape; margin: 4mm 4mm 4mm 4mm; }
           html, body { margin: 0 !important; padding: 0 !important; background: #eef5fb !important; }
           body, * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
           [data-focus-report-ready] { width: 100% !important; box-sizing: border-box !important; }
@@ -1491,7 +1513,7 @@ function SummaryMatrix({
                     key={`${type}-amount`}
                     style={{ ...(isTotal ? styles.tdRightTotal : styles.tdRight), color: DOC_COLORS[type], fontWeight: 900 }}
                   >
-                    {formatMoney(row.byType[type].amount)}
+                    {formatMoneyCompact(row.byType[type].amount)}
                   </td>
                 ))}
               </tr>
@@ -1576,25 +1598,25 @@ function AgencyPortfolioTable({
                 </td>
 
                 <td style={moneyCellStyle(row.cdc, DOC_COLORS.CDC, isTotal)}>
-                  {formatMoneyPlain(row.cdc)}
+                  {formatMoneyCompact(row.cdc)}
                 </td>
                 <td style={moneyCellStyle(row.pl, DOC_COLORS.BL, isTotal)}>
-                  {formatMoneyPlain(row.pl)}
+                  {formatMoneyCompact(row.pl)}
                 </td>
                 <td style={moneyCellStyle(row.brMx, '#b91c1c', isTotal)}>
-                  {formatMoneyPlain(row.brMx)}
+                  {formatMoneyCompact(row.brMx)}
                 </td>
                 <td style={moneyCellStyle(row.brM, '#b91c1c', isTotal)}>
-                  {formatMoneyPlain(row.brM)}
+                  {formatMoneyCompact(row.brM)}
                 </td>
                 <td style={moneyCellStyle(row.blMx, DOC_COLORS.BL, isTotal)}>
-                  {formatMoneyPlain(row.blMx)}
+                  {formatMoneyCompact(row.blMx)}
                 </td>
                 <td style={moneyCellStyle(row.blM, DOC_COLORS.BL, isTotal)}>
-                  {formatMoneyPlain(row.blM)}
+                  {formatMoneyCompact(row.blM)}
                 </td>
                 <td style={moneyCellStyle(row.total, '#0f172a', isTotal)}>
-                  {formatMoneyPlain(row.total)}
+                  {formatMoneyCompact(row.total)}
                 </td>
               </tr>
             )
@@ -1697,25 +1719,25 @@ function AgencyProjectionTable({
                 </td>
 
                 <td style={moneyCellStyle(row.blBrMx, DOC_COLORS.BL, isTotal)}>
-                  {formatMoneyPlain(row.blBrMx)}
+                  {formatMoneyCompact(row.blBrMx)}
                 </td>
                 <td style={moneyCellStyle(row.blBrM, DOC_COLORS.BL, isTotal)}>
-                  {formatMoneyPlain(row.blBrM)}
+                  {formatMoneyCompact(row.blBrM)}
                 </td>
                 <td style={moneyCellStyle(row.factures, DOC_COLORS.Factures, isTotal)}>
-                  {formatMoneyPlain(row.factures)}
+                  {formatMoneyCompact(row.factures)}
                 </td>
                 <td style={moneyCellStyle(row.projectionFluxBl, DOC_COLORS.BL, isTotal)}>
-                  {formatMoneyPlain(row.projectionFluxBl)}
+                  {formatMoneyCompact(row.projectionFluxBl)}
                 </td>
                 <td style={moneyCellStyle(row.valeurBlNf3Pct, DOC_COLORS.BL, isTotal)}>
-                  {formatMoneyPlain(row.valeurBlNf3Pct)}
+                  {formatMoneyCompact(row.valeurBlNf3Pct)}
                 </td>
                 <td style={moneyCellStyle(row.projectionCa, DOC_COLORS.Factures, isTotal)}>
-                  {formatMoneyPlain(row.projectionCa)}
+                  {formatMoneyCompact(row.projectionCa)}
                 </td>
                 <td style={moneyCellStyle(row.caN1, '#0f172a', isTotal)}>
-                  {formatMoneyPlain(row.caN1)}
+                  {formatMoneyCompact(row.caN1)}
                 </td>
                 <td style={pctCellStyle(row.evolPct, isTotal)}>
                   {formatPct(row.evolPct)}
