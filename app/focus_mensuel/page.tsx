@@ -1,6 +1,6 @@
 'use client'
 
-import { Suspense, useEffect, useMemo, useState } from 'react'
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 
@@ -42,12 +42,31 @@ type HighlightRow = {
   hors_statistique?: boolean | null
 }
 
+type DistinctDocRow = {
+  jour: string
+  dimension_type: 'TOTAL' | 'AGENCE' | 'FAMILLE_MACRO' | string
+  dimension: string | null
+  type_document: DocType | string
+  nb_documents: number
+}
+
+type ComparisonProgress = {
+  status: 'idle' | 'loading' | 'ready' | 'error'
+  label: string
+  current: string | null
+  done: number
+  total: number
+}
+
+
 type KpiCardData = {
   type: DocType
   nb: number
   amount: number
   qtyPert: number
+  monthAverageAmount: number
   fmsPct?: number
+  fmsPctMonth?: number
   topAgence: string
   topFamille: string
   evolutionVsMtdPct: number | null
@@ -123,6 +142,21 @@ type EnrichedInvoiceLine = FocusInvoiceLineRaw & {
   collaborateur: string
 }
 
+type MatrixCell = { amount: number; nb: number; qtyPert: number }
+type MatrixRow = { label: string; byType: Record<DocType, MatrixCell>; total: number }
+
+type ComparisonCell = {
+  amountN1: number
+  amountN: number
+  qtyPertN1: number
+  qtyPertN: number
+}
+
+type ComparisonRow = {
+  label: string
+  byType: Record<DocType, ComparisonCell>
+  total: number
+}
 
 const DOC_TYPES: DocType[] = ['Devis', 'CDC', 'BL', 'Factures']
 const DOC_COLORS: Record<DocType, string> = {
@@ -130,6 +164,60 @@ const DOC_COLORS: Record<DocType, string> = {
   CDC: '#006d7f',
   BL: '#4c9dff',
   Factures: '#16a34a',
+}
+
+function isDocType(value: any): value is DocType {
+  return DOC_TYPES.includes(value as DocType)
+}
+
+function createEmptyDocRecord(): Record<DocType, number> {
+  return { Devis: 0, CDC: 0, BL: 0, Factures: 0 }
+}
+
+function dateOnly(value: any) {
+  return String(value || '').slice(0, 10)
+}
+
+function sumDistinctDocs(
+  rows: DistinctDocRow[],
+  type: DocType,
+  startDate: string,
+  endDate: string,
+  dimensionType = 'TOTAL',
+  dimension?: string | null
+) {
+  return rows.reduce((acc, row) => {
+    const day = dateOnly(row.jour)
+    if (day < startDate || day > endDate) return acc
+    if (String(row.type_document) !== type) return acc
+    if (normalizeKey(row.dimension_type) !== normalizeKey(dimensionType)) return acc
+    if (dimension !== undefined && normalizeKey(row.dimension || '') !== normalizeKey(dimension || '')) return acc
+    return acc + Number(row.nb_documents || 0)
+  }, 0)
+}
+
+function buildDistinctDocOverrideMap(
+  rows: DistinctDocRow[],
+  dimensionType: 'AGENCE' | 'FAMILLE_MACRO',
+  startDate: string,
+  endDate: string
+) {
+  const map = new Map<string, Record<DocType, number>>()
+
+  rows.forEach((row) => {
+    const day = dateOnly(row.jour)
+    if (day < startDate || day > endDate) return
+    if (normalizeKey(row.dimension_type) !== normalizeKey(dimensionType)) return
+    if (!isDocType(row.type_document)) return
+
+    const label = String(row.dimension || (dimensionType === 'AGENCE' ? 'Sans agence' : 'AUTRES'))
+    const key = normalizeKey(label)
+    const current = map.get(key) || createEmptyDocRecord()
+    current[row.type_document] += Number(row.nb_documents || 0)
+    map.set(key, current)
+  })
+
+  return map
 }
 
 const LOGO_CEGECLIM_URL =
@@ -152,6 +240,28 @@ function addDaysYmd(ymd: string, days: number) {
   const d = new Date(`${ymd}T12:00:00`)
   d.setDate(d.getDate() + days)
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+function addMonthsYmd(ymd: string, months: number) {
+  const d = new Date(`${ymd}T12:00:00`)
+  const originalDay = d.getDate()
+  d.setDate(1)
+  d.setMonth(d.getMonth() + months)
+  const last = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()
+  d.setDate(Math.min(originalDay, last))
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+function addYearsYmd(ymd: string, years: number) {
+  return addMonthsYmd(ymd, years * 12)
+}
+
+function monthKey(ymd: string | null | undefined) {
+  return String(ymd || '').slice(0, 7)
+}
+
+function addMonthsToMonth(month: string, months: number) {
+  return addMonthsYmd(`${month}-01`, months).slice(0, 7)
 }
 
 function monthStart(month: string) {
@@ -198,6 +308,14 @@ function formatMonthFr(month: string | null | undefined) {
 function formatShortDate(ymd: string) {
   const m = ymd.match(/^\d{4}-(\d{2})-(\d{2})/)
   return m ? `${m[2]}/${m[1]}` : ymd
+}
+
+function formatShortMonthFr(month: string | null | undefined) {
+  if (!month) return '—'
+  const m = String(month).match(/^(\d{4})-(\d{2})$/)
+  if (!m) return String(month)
+  const date = new Date(Number(m[1]), Number(m[2]) - 1, 1)
+  return date.toLocaleDateString('fr-FR', { month: 'short', year: '2-digit' }).replace('.', '')
 }
 
 function formatMoney(value: number | null | undefined) {
@@ -605,9 +723,12 @@ function KpiCard({ card, mode, basisLabel }: { card: KpiCardData; mode: ViewMode
         </span>
       </div>
       <div style={styles.kpiMain}>{mainValue}</div>
-      <div style={styles.kpiSub}>{formatNumber(card.nb)} document(s) · {formatMoney(card.amount)}</div>
+      <div style={styles.kpiSub}>{formatNumber(card.nb)} document(s) · moy mois : {formatMoney(card.monthAverageAmount)}</div>
       {card.type === 'BL' && (
-        <div style={styles.kpiSub}>Part dépôt FMS : <b>{card.fmsPct === undefined ? '—' : `${card.fmsPct.toLocaleString('fr-FR', { maximumFractionDigits: 1 })} %`}</b></div>
+        <div style={styles.kpiSub}>
+          Part dépôt FMS : <b>jour {card.fmsPct === undefined ? '—' : `${card.fmsPct.toLocaleString('fr-FR', { maximumFractionDigits: 1 })} %`}</b>
+          {' '}(moy mois : <b>{card.fmsPctMonth === undefined ? '—' : `${card.fmsPctMonth.toLocaleString('fr-FR', { maximumFractionDigits: 1 })} %`}</b>)
+        </div>
       )}
       <div style={styles.kpiMeta}>Agence dominante : <b>{card.topAgence}</b></div>
       <div style={styles.kpiMeta}>Famille dominante : <b>{card.topFamille}</b></div>
@@ -694,6 +815,7 @@ function FocusMensuelPageContent() {
   const requestedAgence = searchParams?.get('agence') || ''
   const requestedFamilleMacro = searchParams?.get('familleMacro') || searchParams?.get('famille_macro') || ''
   const requestedCollaborateur = searchParams?.get('collaborateur') || ''
+  const requestedCaProjeteFactures = searchParams?.get('caProjeteFactures') || searchParams?.get('ca_projete_factures') || ''
   const currentMonth = /^\d{4}-\d{2}$/.test(String(requestedMonth || '')) ? String(requestedMonth) : todayYmd().slice(0, 7)
   const [month, setMonth] = useState(currentMonth)
   const [focusDate, setFocusDate] = useState(/^\d{4}-\d{2}-\d{2}$/.test(String(requestedFocusDate || '')) ? String(requestedFocusDate) : pickDefaultFocusDate())
@@ -708,11 +830,33 @@ function FocusMensuelPageContent() {
     return true
   })
   const [dailyRows, setDailyRows] = useState<DailyRow[]>([])
+  const [dailyReady, setDailyReady] = useState(false)
+  const [distinctDocRows, setDistinctDocRows] = useState<DistinctDocRow[]>([])
+  const [distinctDocsLoading, setDistinctDocsLoading] = useState(false)
+  const [distinctDocsReady, setDistinctDocsReady] = useState(false)
+  const [ytdRowsN, setYtdRowsN] = useState<DailyRow[]>([])
+  const [ytdRowsN1, setYtdRowsN1] = useState<DailyRow[]>([])
+  const [rollingRowsN, setRollingRowsN] = useState<DailyRow[]>([])
+  const [rollingRowsN1, setRollingRowsN1] = useState<DailyRow[]>([])
+  const [comparisonLoading, setComparisonLoading] = useState(false)
+  const [comparisonReady, setComparisonReady] = useState(false)
+  const [comparisonProgress, setComparisonProgress] = useState<ComparisonProgress>({
+    status: 'idle',
+    label: '',
+    current: null,
+    done: 0,
+    total: 0,
+  })
+  const [comparisonError, setComparisonError] = useState<string | null>(null)
+  const comparisonLoadIdRef = useRef(0)
   const [highlightRows, setHighlightRows] = useState<HighlightRow[]>([])
   const [agencyPortfolioRows, setAgencyPortfolioRows] = useState<AgencyPortfolioRow[]>([])
   const [agencyProjectionRows, setAgencyProjectionRows] = useState<AgencyProjectionRow[]>([])
   const [agencyTablesLoading, setAgencyTablesLoading] = useState(false)
+  const [agencyTablesReady, setAgencyTablesReady] = useState(false)
   const [agencyTablesError, setAgencyTablesError] = useState<string | null>(null)
+  const [highlightsLoading, setHighlightsLoading] = useState(false)
+  const [highlightsReady, setHighlightsReady] = useState(false)
   const [loading, setLoading] = useState(false)
   const [rebuildingCache, setRebuildingCache] = useState(false)
   const [cacheInfo, setCacheInfo] = useState<string | null>(null)
@@ -723,6 +867,10 @@ function FocusMensuelPageContent() {
   const [reportMessage, setReportMessage] = useState<string | null>(null)
   const [reportError, setReportError] = useState<string | null>(null)
   const [lastGeneratedPdfPath, setLastGeneratedPdfPath] = useState(REPORT_PATH)
+  const [useProjectedCurrentMonthFactures, setUseProjectedCurrentMonthFactures] = useState(() => {
+    const value = String(requestedCaProjeteFactures || '').toLowerCase()
+    return ['1', 'true', 'oui', 'yes', 'on'].includes(value)
+  })
 
   const days = useMemo(() => daysInMonth(month), [month])
   const monthBegin = useMemo(() => monthStart(month), [month])
@@ -737,9 +885,50 @@ function FocusMensuelPageContent() {
     quantite_pertinente: Number(row.quantite_pertinente || 0),
   })), [dailyRows])
 
+  const normalizedDistinctDocRows = useMemo(() => distinctDocRows.map((row) => ({
+    ...row,
+    jour: dateOnly(row.jour),
+    dimension_type: String(row.dimension_type || 'TOTAL'),
+    dimension: row.dimension || null,
+    nb_documents: Number(row.nb_documents || 0),
+  })), [distinctDocRows])
+
+  const normalizedYtdRowsN = useMemo(() => normalizeDailyRows(ytdRowsN), [ytdRowsN])
+  const normalizedYtdRowsN1 = useMemo(() => normalizeDailyRows(ytdRowsN1), [ytdRowsN1])
+  const normalizedRollingRowsN = useMemo(() => normalizeDailyRows(rollingRowsN), [rollingRowsN])
+  const normalizedRollingRowsN1 = useMemo(() => normalizeDailyRows(rollingRowsN1), [rollingRowsN1])
+
+  const chartRows = useMemo<DailyRow[]>(() => {
+    if (viewMode !== 'nb_documents' || normalizedDistinctDocRows.length === 0) return normalizedRows
+
+    return normalizedDistinctDocRows
+      .filter((row) => normalizeKey(row.dimension_type) === 'TOTAL' && isDocType(row.type_document))
+      .map((row) => ({
+        jour: row.jour,
+        type_document: row.type_document as DocType,
+        agence: 'TOTAL',
+        collaborateur: '',
+        depot: '',
+        depot_bucket: '',
+        famille_macro: 'TOTAL',
+        hors_statistique: null,
+        nb_documents: Number(row.nb_documents || 0),
+        nb_lignes: 0,
+        montant_ht: 0,
+        quantite_brute: 0,
+        quantite_pertinente: 0,
+      }))
+  }, [viewMode, normalizedRows, normalizedDistinctDocRows])
+
   const filteredFocusRows = useMemo(() => normalizedRows.filter((row) => row.jour === focusDate), [normalizedRows, focusDate])
 
-  const availableAgences = useMemo(() => Array.from(new Set(normalizedRows.map((r) => r.agence || '').filter(Boolean))).sort(), [normalizedRows])
+  const availableAgences = useMemo(() => Array.from(new Set([
+    ...normalizedRows.map((r) => r.agence || '').filter(Boolean),
+    ...normalizedDistinctDocRows
+      .filter((r) => normalizeKey(r.dimension_type) === 'AGENCE')
+      .map((r) => r.dimension || '')
+      .filter(Boolean),
+  ])).sort(), [normalizedRows, normalizedDistinctDocRows])
   const availableFamilies = useMemo(() => Array.from(new Set(normalizedRows.map((r) => r.famille_macro || '').filter(Boolean))).sort(), [normalizedRows])
   const availableCollaborateurs = useMemo(() => Array.from(new Set(normalizedRows.map((r) => r.collaborateur || '').filter(Boolean))).sort(), [normalizedRows])
 
@@ -758,34 +947,148 @@ function FocusMensuelPageContent() {
 
       const amount = sum(dayRows, (r) => r.montant_ht)
       const qtyPert = sum(dayRows, (r) => r.quantite_pertinente)
-      const nb = sum(dayRows, (r) => r.nb_documents)
+      const nb = normalizedDistinctDocRows.length
+        ? sumDistinctDocs(normalizedDistinctDocRows, type, focusDate, focusDate)
+        : sum(dayRows, (r) => r.nb_documents)
+      const mtdDocs = normalizedDistinctDocRows.length
+        ? sumDistinctDocs(normalizedDistinctDocRows, type, monthBegin, focusDate)
+        : modeValueFromRows(monthRowsBeforeFocus, 'nb_documents')
+      const last7Docs = normalizedDistinctDocRows.length
+        ? sumDistinctDocs(normalizedDistinctDocRows, type, last7Start, focusDate)
+        : modeValueFromRows(last7Rows, 'nb_documents')
       const last7PeriodDays = days.filter((d) => d >= last7Start && d <= focusDate)
       const last7Basis = getBusinessDayBasis(normalizedRows, last7PeriodDays)
-      const selectedDayValue = modeValueFromComponents({ amount, nb, qtyPert }, viewMode)
-      const mtdAvg = modeValueFromRows(monthRowsBeforeFocus, viewMode) / businessDayBasis.count
-      const last7Avg = modeValueFromRows(last7Rows, viewMode) / last7Basis.count
+      const selectedDayValue = viewMode === 'nb_documents'
+        ? nb
+        : modeValueFromComponents({ amount, nb, qtyPert }, viewMode)
+      const mtdValue = viewMode === 'nb_documents'
+        ? mtdDocs
+        : modeValueFromRows(monthRowsBeforeFocus, viewMode)
+      const last7Value = viewMode === 'nb_documents'
+        ? last7Docs
+        : modeValueFromRows(last7Rows, viewMode)
+      const mtdAvg = mtdValue / businessDayBasis.count
+      const last7Avg = last7Value / last7Basis.count
+      const monthAverageAmount = modeValueFromRows(monthRowsBeforeFocus, 'montant_ht') / businessDayBasis.count
       const blFmsAmount = sum(dayRows.filter((r) => r.depot_bucket === 'FMS'), (r) => Math.abs(r.montant_ht))
       const blTotalAmount = sum(dayRows, (r) => Math.abs(r.montant_ht))
+      const blFmsAmountMonth = sum(monthRowsBeforeFocus.filter((r) => r.depot_bucket === 'FMS'), (r) => Math.abs(r.montant_ht))
+      const blTotalAmountMonth = sum(monthRowsBeforeFocus, (r) => Math.abs(r.montant_ht))
 
       return {
         type,
         nb,
         amount,
         qtyPert,
+        monthAverageAmount,
         fmsPct: type === 'BL' && blTotalAmount ? (blFmsAmount / blTotalAmount) * 100 : undefined,
+        fmsPctMonth: type === 'BL' && blTotalAmountMonth ? (blFmsAmountMonth / blTotalAmountMonth) * 100 : undefined,
         topAgence: getTopLabel(dayRows, 'agence'),
         topFamille: getTopLabel(dayRows, 'famille_macro'),
         evolutionVsMtdPct: buildEvolution(selectedDayValue, mtdAvg),
         evolutionVs7dPct: buildEvolution(selectedDayValue, last7Avg),
       }
     })
-  }, [filteredFocusRows, normalizedRows, focusDate, days, viewMode, businessDayBasis])
+  }, [filteredFocusRows, normalizedRows, normalizedDistinctDocRows, focusDate, monthBegin, days, viewMode, businessDayBasis])
 
-  const byAgencyRows = useMemo(() => aggregateMatrix(filteredFocusRows, (r) => r.agence || 'Sans agence'), [filteredFocusRows])
+  const byAgencyDocOverrides = useMemo(
+    () => buildDistinctDocOverrideMap(normalizedDistinctDocRows, 'AGENCE', focusDate, focusDate),
+    [normalizedDistinctDocRows, focusDate]
+  )
+  const byAgencyMtdDocOverrides = useMemo(
+    () => buildDistinctDocOverrideMap(normalizedDistinctDocRows, 'AGENCE', monthBegin, focusDate),
+    [normalizedDistinctDocRows, monthBegin, focusDate]
+  )
+
+  const byAgencyRows = useMemo(() => aggregateMatrix(filteredFocusRows, (r) => r.agence || 'Sans agence', byAgencyDocOverrides), [filteredFocusRows, byAgencyDocOverrides])
   const byFamilyRows = useMemo(() => aggregateMatrix(filteredFocusRows, (r) => r.famille_macro || 'AUTRES'), [filteredFocusRows])
   const mtdSourceRows = useMemo(() => normalizedRows.filter((row) => row.jour <= focusDate), [normalizedRows, focusDate])
   const byFamilyMtdRows = useMemo(() => aggregateMatrix(mtdSourceRows, (r) => r.famille_macro || 'AUTRES'), [mtdSourceRows])
-  const byAgencyMtdRows = useMemo(() => aggregateMatrix(mtdSourceRows, (r) => r.agence || 'Sans agence'), [mtdSourceRows])
+  const byAgencyMtdRows = useMemo(() => aggregateMatrix(mtdSourceRows, (r) => r.agence || 'Sans agence', byAgencyMtdDocOverrides), [mtdSourceRows, byAgencyMtdDocOverrides])
+
+  const ytdAgencyComparisonRows = useMemo(
+    () => aggregateComparisonRows(normalizedYtdRowsN, normalizedYtdRowsN1, (row) => row.agence || 'Sans agence', (row) => row.agence || 'Sans agence'),
+    [normalizedYtdRowsN, normalizedYtdRowsN1]
+  )
+  const ytdFamilyComparisonRows = useMemo(
+    () => aggregateComparisonRows(normalizedYtdRowsN, normalizedYtdRowsN1, (row) => row.famille_macro || 'AUTRES', (row) => row.famille_macro || 'AUTRES'),
+    [normalizedYtdRowsN, normalizedYtdRowsN1]
+  )
+  const rollingMonths = useMemo(() => Array.from({ length: 12 }, (_, index) => addMonthsToMonth(month, index - 11)), [month])
+  const rollingComparisonRows = useMemo(
+    () => buildRollingComparisonRows(normalizedRollingRowsN, normalizedRollingRowsN1, rollingMonths),
+    [normalizedRollingRowsN, normalizedRollingRowsN1, rollingMonths]
+  )
+
+  const projectionFacturesEnabled = useProjectedCurrentMonthFactures && agencyTablesReady && agencyProjectionRows.length > 0
+
+  const ytdAgencyComparisonRowsDisplay = useMemo(() => {
+    if (!projectionFacturesEnabled) return ytdAgencyComparisonRows
+    return applyProjectedCurrentMonthFacturesToAgencyRows(
+      ytdAgencyComparisonRows,
+      normalizedYtdRowsN,
+      agencyProjectionRows,
+      month
+    )
+  }, [projectionFacturesEnabled, ytdAgencyComparisonRows, normalizedYtdRowsN, agencyProjectionRows, month])
+
+  const rollingComparisonRowsDisplay = useMemo(() => {
+    if (!projectionFacturesEnabled) return rollingComparisonRows
+    return applyProjectedCurrentMonthFacturesToRollingRows(
+      rollingComparisonRows,
+      normalizedRollingRowsN,
+      agencyProjectionRows,
+      month
+    )
+  }, [projectionFacturesEnabled, rollingComparisonRows, normalizedRollingRowsN, agencyProjectionRows, month])
+
+  const projectedFacturesOptionLabel = useMemo(() => {
+    const projectedTotal = sum(agencyProjectionRows, (row) => row.projectionCa)
+    return `CA projeté mois en cours sur facturation €${projectedTotal ? ` (${formatMoneyCompact(projectedTotal)})` : ''}`
+  }, [agencyProjectionRows])
+
+  const comparisonProgressLabel = useMemo(() => {
+    if (comparisonProgress.status === 'ready') return 'Tableaux activité N / N-1 chargés complètement.'
+    if (comparisonProgress.status === 'error') return 'Erreur pendant le chargement des tableaux activité N / N-1.'
+    if (comparisonProgress.status !== 'loading') return ''
+
+    const total = comparisonProgress.total || 0
+    const done = comparisonProgress.done || 0
+    const pct = total ? Math.min(100, Math.round((done / total) * 100)) : 0
+    const current = comparisonProgress.current ? ` · ${comparisonProgress.current}` : ''
+    return `Actualisation des tableaux activité N / N-1 : ${done}/${total} périodes (${pct} %)${current}`
+  }, [comparisonProgress])
+
+  const focusReportReady = Boolean(
+    dailyReady &&
+    distinctDocsReady &&
+    highlightsReady &&
+    agencyTablesReady &&
+    comparisonReady &&
+    !loading &&
+    !distinctDocsLoading &&
+    !highlightsLoading &&
+    !agencyTablesLoading &&
+    !comparisonLoading &&
+    !rebuildingCache &&
+    !error &&
+    !comparisonError &&
+    !agencyTablesError
+  )
+
+  const focusReportStatus = error || comparisonError || agencyTablesError
+    ? 'error'
+    : focusReportReady
+      ? 'ready'
+      : 'loading'
+
+  const focusReportLoadingLabel = [
+    loading ? 'données journalières' : null,
+    distinctDocsLoading ? 'documents distincts' : null,
+    highlightsLoading ? 'TOP 20' : null,
+    agencyTablesLoading ? 'portefeuille / projection' : null,
+    comparisonLoading ? 'tableaux N / N-1 et 12 mois glissants' : null,
+  ].filter(Boolean).join(', ')
 
   const highlights = useMemo(() => {
     const sorted = [...highlightRows].map((row) => ({ ...row, montant_ht: Number(row.montant_ht || 0) }))
@@ -805,8 +1108,14 @@ function FocusMensuelPageContent() {
 
   useEffect(() => {
     void loadData()
+    void loadDistinctDocs()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [month, agence, familleMacro, collaborateur, includeHorsStats])
+
+  useEffect(() => {
+    void loadComparisonTables()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [month, focusDate, agence, familleMacro, collaborateur, includeHorsStats])
 
   useEffect(() => {
     void loadHighlights()
@@ -814,10 +1123,13 @@ function FocusMensuelPageContent() {
   }, [focusDate, agence, familleMacro, collaborateur, includeHorsStats])
 
   useEffect(() => {
-    if (!normalizedRows.length) return
+    if (!normalizedRows.length) {
+      setAgencyTablesReady(dailyReady)
+      return
+    }
     void loadAgencyControlTables()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [month, focusDate, agence, familleMacro, collaborateur, includeHorsStats, normalizedRows])
+  }, [month, focusDate, agence, familleMacro, collaborateur, includeHorsStats, normalizedRows, dailyReady])
 
   useEffect(() => {
     void (async () => {
@@ -839,6 +1151,7 @@ function FocusMensuelPageContent() {
       agence: agence || null,
       famille_macro: familleMacro || null,
       collaborateur: collaborateur || null,
+      ca_projete_factures_mois_en_cours: useProjectedCurrentMonthFactures,
     }
   }
 
@@ -851,6 +1164,14 @@ function FocusMensuelPageContent() {
   }
 
   async function generateFocusPdf() {
+    if (!focusReportReady) {
+      setReportError(
+        `Les données ne sont pas encore complètement chargées${focusReportLoadingLabel ? ` (${focusReportLoadingLabel})` : ''}. ` +
+        'Attends que le statut passe à "données complètes" avant de générer le PDF.'
+      )
+      return
+    }
+
     setPdfLoading(true)
     setReportError(null)
     setReportMessage(null)
@@ -969,6 +1290,8 @@ function FocusMensuelPageContent() {
 
       setCacheInfo(message)
       await loadData()
+      await loadDistinctDocs()
+      await loadComparisonTables()
       await loadHighlights()
       await loadAgencyControlTables()
     } catch (exception: any) {
@@ -984,6 +1307,7 @@ function FocusMensuelPageContent() {
 
   async function loadData() {
     setLoading(true)
+    setDailyReady(false)
     setError(null)
 
     try {
@@ -998,18 +1322,244 @@ function FocusMensuelPageContent() {
 
       if (error) throw error
       setDailyRows((data || []) as DailyRow[])
+      setDailyReady(true)
     } catch (exception: any) {
       console.error('focus mensuel daily summary', exception)
       setError(exception?.message || String(exception))
       setDailyRows([])
+      setDailyReady(false)
     } finally {
       setLoading(false)
     }
   }
 
+  async function loadDistinctDocs() {
+    setDistinctDocsLoading(true)
+    setDistinctDocsReady(false)
+
+    try {
+      const { data, error } = await supabase.rpc('get_focus_mensuel_docs_distinct_metier', {
+        p_date_debut: monthBegin,
+        p_date_fin: monthEnd,
+        p_agence: agence || null,
+        p_famille_macro: familleMacro || null,
+        p_collaborateur: collaborateur || null,
+        p_include_hors_statistiques: includeHorsStats,
+      })
+
+      if (error) throw error
+      setDistinctDocRows((data || []) as DistinctDocRow[])
+      setDistinctDocsReady(true)
+    } catch (exception: any) {
+      console.error('focus mensuel distinct docs', exception)
+      setDistinctDocRows([])
+      setDistinctDocsReady(false)
+      setError(`Erreur chargement documents distincts : ${exception?.message || String(exception)}`)
+    } finally {
+      setDistinctDocsLoading(false)
+    }
+  }
+
+
+  function buildMonthlyRpcRanges(dateDebut: string, dateFin: string) {
+    const ranges: Array<{ start: string; end: string }> = []
+    let cursor = dateDebut
+
+    // Les dates sont au format YYYY-MM-DD : la comparaison alphabétique est fiable.
+    while (cursor < dateFin) {
+      const endOfCursorMonth = nextMonthStart(monthKey(cursor))
+      const end = endOfCursorMonth < dateFin ? endOfCursorMonth : dateFin
+      ranges.push({ start: cursor, end })
+      cursor = end
+    }
+
+    return ranges
+  }
+
+  function splitDateRangeByDays(dateDebut: string, dateFin: string, stepDays: number) {
+    const ranges: Array<{ start: string; end: string }> = []
+    let cursor = dateDebut
+
+    while (cursor < dateFin) {
+      const candidateEnd = addDaysYmd(cursor, stepDays)
+      const end = candidateEnd < dateFin ? candidateEnd : dateFin
+      ranges.push({ start: cursor, end })
+      cursor = end
+    }
+
+    return ranges
+  }
+
+  function isStatementTimeout(exception: any) {
+    const message = String(exception?.message || exception || '').toLowerCase()
+    return message.includes('statement timeout') || message.includes('timeout') || message.includes('canceling statement')
+  }
+
+  async function fetchFocusSummaryRange(range: { start: string; end: string }) {
+    const { data, error } = await supabase.rpc('get_focus_mensuel_daily_summary_metier', {
+      p_date_debut: range.start,
+      p_date_fin: range.end,
+      p_agence: agence || null,
+      p_famille_macro: familleMacro || null,
+      p_collaborateur: collaborateur || null,
+      p_include_hors_statistiques: includeHorsStats,
+    })
+
+    if (error) throw error
+    return (data || []) as DailyRow[]
+  }
+
+  async function loadComparisonTables() {
+    const loadId = comparisonLoadIdRef.current + 1
+    comparisonLoadIdRef.current = loadId
+
+    setComparisonLoading(true)
+    setComparisonReady(false)
+    setComparisonError(null)
+    setYtdRowsN([])
+    setYtdRowsN1([])
+    setRollingRowsN([])
+    setRollingRowsN1([])
+
+    try {
+      const focusYear = Number(focusDate.slice(0, 4))
+      const ytdStart = `${focusYear}-01-01`
+      const ytdEndExclusive = addDaysYmd(focusDate, 1)
+      const ytdPreviousStart = `${focusYear - 1}-01-01`
+      const ytdPreviousEndExclusive = addYearsYmd(ytdEndExclusive, -1)
+      const rollingStart = `${addMonthsToMonth(month, -11)}-01`
+      const rollingEndExclusive = ytdEndExclusive
+      const rollingPreviousStart = addYearsYmd(rollingStart, -1)
+      const rollingPreviousEndExclusive = addYearsYmd(rollingEndExclusive, -1)
+
+      const buckets: Array<{
+        key: 'ytdN' | 'ytdN1' | 'rollingN' | 'rollingN1'
+        label: string
+        ranges: Array<{ start: string; end: string }>
+      }> = [
+        { key: 'ytdN', label: `YTD N ${focusYear}`, ranges: buildMonthlyRpcRanges(ytdStart, ytdEndExclusive) },
+        { key: 'ytdN1', label: `YTD N-1 ${focusYear - 1}`, ranges: buildMonthlyRpcRanges(ytdPreviousStart, ytdPreviousEndExclusive) },
+        { key: 'rollingN', label: '12 mois glissants N', ranges: buildMonthlyRpcRanges(rollingStart, rollingEndExclusive) },
+        { key: 'rollingN1', label: '12 mois glissants N-1', ranges: buildMonthlyRpcRanges(rollingPreviousStart, rollingPreviousEndExclusive) },
+      ]
+
+      const result: Record<'ytdN' | 'ytdN1' | 'rollingN' | 'rollingN1', DailyRow[]> = {
+        ytdN: [],
+        ytdN1: [],
+        rollingN: [],
+        rollingN1: [],
+      }
+
+      let totalSteps = buckets.reduce((acc, bucket) => acc + bucket.ranges.length, 0)
+      let doneSteps = 0
+
+      const ensureActive = () => {
+        if (loadId !== comparisonLoadIdRef.current) {
+          throw new Error('__STALE_COMPARISON_LOAD__')
+        }
+      }
+
+      const setProgress = (bucketLabel: string, range: { start: string; end: string } | null) => {
+        if (loadId !== comparisonLoadIdRef.current) return
+        setComparisonProgress({
+          status: 'loading',
+          label: bucketLabel,
+          current: range
+            ? `${bucketLabel} · ${formatDateFr(range.start)} au ${formatDateFr(addDaysYmd(range.end, -1))}`
+            : bucketLabel,
+          done: doneSteps,
+          total: totalSteps,
+        })
+      }
+
+      const fetchRangeWithFallback = async (bucketLabel: string, range: { start: string; end: string }) => {
+        ensureActive()
+        setProgress(bucketLabel, range)
+
+        try {
+          const rows = await fetchFocusSummaryRange(range)
+          doneSteps += 1
+          setProgress(bucketLabel, null)
+          return rows
+        } catch (exception: any) {
+          if (!isStatementTimeout(exception)) throw exception
+
+          const weeklyRanges = splitDateRangeByDays(range.start, range.end, 7)
+          totalSteps += Math.max(0, weeklyRanges.length - 1)
+
+          const weeklyRows: DailyRow[] = []
+          for (const weeklyRange of weeklyRanges) {
+            ensureActive()
+            setProgress(`${bucketLabel} · découpage semaine`, weeklyRange)
+
+            try {
+              weeklyRows.push(...await fetchFocusSummaryRange(weeklyRange))
+              doneSteps += 1
+              setProgress(`${bucketLabel} · découpage semaine`, null)
+            } catch (weeklyException: any) {
+              if (!isStatementTimeout(weeklyException)) throw weeklyException
+
+              const dailyRanges = splitDateRangeByDays(weeklyRange.start, weeklyRange.end, 1)
+              totalSteps += Math.max(0, dailyRanges.length - 1)
+
+              for (const dailyRange of dailyRanges) {
+                ensureActive()
+                setProgress(`${bucketLabel} · découpage jour`, dailyRange)
+                weeklyRows.push(...await fetchFocusSummaryRange(dailyRange))
+                doneSteps += 1
+                setProgress(`${bucketLabel} · découpage jour`, null)
+              }
+            }
+          }
+
+          return weeklyRows
+        }
+      }
+
+      for (const bucket of buckets) {
+        for (const range of bucket.ranges) {
+          ensureActive()
+          result[bucket.key].push(...await fetchRangeWithFallback(bucket.label, range))
+        }
+      }
+
+      ensureActive()
+      setYtdRowsN(result.ytdN)
+      setYtdRowsN1(result.ytdN1)
+      setRollingRowsN(result.rollingN)
+      setRollingRowsN1(result.rollingN1)
+      setComparisonReady(true)
+      setComparisonProgress({
+        status: 'ready',
+        label: 'Terminé',
+        current: null,
+        done: totalSteps,
+        total: totalSteps,
+      })
+    } catch (exception: any) {
+      if (String(exception?.message || exception) === '__STALE_COMPARISON_LOAD__') return
+
+      console.error('focus mensuel comparison tables', exception)
+      setComparisonError(exception?.message || String(exception))
+      setComparisonReady(false)
+      setComparisonProgress((current) => ({
+        ...current,
+        status: 'error',
+      }))
+      setYtdRowsN([])
+      setYtdRowsN1([])
+      setRollingRowsN([])
+      setRollingRowsN1([])
+    } finally {
+      if (loadId === comparisonLoadIdRef.current) {
+        setComparisonLoading(false)
+      }
+    }
+  }
 
   async function loadAgencyControlTables() {
     setAgencyTablesLoading(true)
+    setAgencyTablesReady(false)
     setAgencyTablesError(null)
 
     try {
@@ -1102,15 +1652,20 @@ function FocusMensuelPageContent() {
         collaborateur: string | null
       }) => {
         const tier = tierMap.get(normalizeKey(row.numero_tiers_entete))
+        const representantTiers = String(tier?.representant || '').trim()
+
+        // Règle unique demandée : l'agence est toujours celle du représentant
+        // rattaché au tiers de la ligne, pas celle du collaborateur porté
+        // directement par la ligne activité/facture.
         const agenceValue =
-          collaborateurMap.get(normalizeKey(row.collaborateur)) ||
-          collaborateurMap.get(normalizeKey(tier?.representant)) ||
+          collaborateurMap.get(normalizeKey(representantTiers)) ||
           'Sans agence'
+
         const article = articleMap.get(normalizeKey(row.reference_article))
         const familleValue = article?.famille || null
         const familleMacroValue = familleMap.get(normalizeKey(familleValue)) || null
         const horsStatistiqueValue = Boolean(article?.hors_statistique)
-        const collaborateurValue = String(row.collaborateur || '').trim() || '—'
+        const collaborateurValue = representantTiers || '—'
 
         return {
           agence: String(agenceValue || 'Sans agence'),
@@ -1285,11 +1840,13 @@ function FocusMensuelPageContent() {
 
       setAgencyPortfolioRows(portfolioRows)
       setAgencyProjectionRows(projectionRows)
+      setAgencyTablesReady(true)
     } catch (exception: any) {
       console.error('focus mensuel agency control tables', exception)
       setAgencyTablesError(exception?.message || String(exception))
       setAgencyPortfolioRows([])
       setAgencyProjectionRows([])
+      setAgencyTablesReady(false)
     } finally {
       setAgencyTablesLoading(false)
     }
@@ -1298,6 +1855,9 @@ function FocusMensuelPageContent() {
   async function loadHighlights() {
     const start7 = addDaysYmd(focusDate, -6)
     const endExclusive = addDaysYmd(focusDate, 1)
+
+    setHighlightsLoading(true)
+    setHighlightsReady(false)
 
     try {
       const { data, error } = await supabase.rpc('get_focus_mensuel_highlights', {
@@ -1312,16 +1872,28 @@ function FocusMensuelPageContent() {
 
       if (error) throw error
       setHighlightRows((data || []) as HighlightRow[])
+      setHighlightsReady(true)
     } catch (exception: any) {
       console.error('focus mensuel highlights', exception)
       setHighlightRows([])
+      // Les TOP 20 ne doivent pas bloquer indéfiniment la génération du PDF.
+      // En cas d'erreur isolée, le rapport reste générable avec des tableaux TOP 20 vides.
+      setHighlightsReady(true)
+    } finally {
+      setHighlightsLoading(false)
     }
   }
+
 
   return (
     <section
       style={styles.page}
-      data-focus-report-ready={!loading && !rebuildingCache ? '1' : '0'}
+      data-focus-report-ready={focusReportReady ? '1' : '0'}
+      data-focus-projected-current-month-factures={projectionFacturesEnabled ? '1' : '0'}
+      data-focus-report-status={focusReportStatus}
+      data-focus-report-loading={focusReportLoadingLabel || ''}
+      data-focus-comparison-ready={comparisonReady ? '1' : '0'}
+      data-focus-comparison-progress={`${comparisonProgress.done}/${comparisonProgress.total}`}
       data-focus-report-mode={isPdfMode ? '1' : '0'}
     >
       {isPdfMode && (
@@ -1469,6 +2041,13 @@ function FocusMensuelPageContent() {
           }
           .focus-pdf-highlights-grid table { min-width: 0 !important; font-size: 8px !important; }
           .focus-pdf-highlights-grid th, .focus-pdf-highlights-grid td { padding: 4px 5px !important; }
+          .focus-pdf-comparison-grid {
+            grid-template-columns: 1fr !important;
+            gap: 8px !important;
+            margin-bottom: 8px !important;
+          }
+          .focus-pdf-comparison-grid table { min-width: 0 !important; font-size: 7px !important; }
+          .focus-pdf-comparison-grid th, .focus-pdf-comparison-grid td { padding: 3px 4px !important; }
           .focus-pdf-agency-section-grid {
             break-before: page !important;
             page-break-before: always !important;
@@ -1504,7 +2083,18 @@ function FocusMensuelPageContent() {
           <button style={styles.warningButton} onClick={rebuildCacheForMonth} disabled={rebuildingCache}>
             {rebuildingCache ? 'Rebuild cache…' : 'Reconstruire cache mois'}
           </button>
-          <button style={styles.primaryButton} onClick={() => { void loadData(); void loadHighlights(); void loadAgencyControlTables() }}>Actualiser</button>
+          <button
+            style={styles.primaryButton}
+            onClick={() => {
+              setAgencyTablesReady(false)
+              void loadData()
+              void loadDistinctDocs()
+              void loadComparisonTables()
+              void loadHighlights()
+            }}
+          >
+            Actualiser
+          </button>
         </div>
       </div>
 
@@ -1545,15 +2135,15 @@ function FocusMensuelPageContent() {
               <button
                 type="button"
                 onClick={generateFocusPdf}
-                disabled={pdfLoading || emailLoading}
+                disabled={pdfLoading || emailLoading || !focusReportReady}
                 style={styles.secondaryButton}
               >
-                {pdfLoading ? 'Génération PDF…' : 'Générer PDF'}
+                {pdfLoading ? 'Génération PDF…' : !focusReportReady ? 'Données en cours…' : 'Générer PDF'}
               </button>
               <button
                 type="button"
                 onClick={sendFocusReportEmail}
-                disabled={pdfLoading || emailLoading}
+                disabled={pdfLoading || emailLoading || !focusReportReady}
                 style={styles.primaryButton}
               >
                 {emailLoading ? 'Envoi email…' : 'Envoyer PDF par email'}
@@ -1577,6 +2167,13 @@ function FocusMensuelPageContent() {
             </div>
           </div>
 
+          {!focusReportReady && (
+            <div style={styles.infoBox}>
+              Préparation du rapport en cours{focusReportLoadingLabel ? ` : ${focusReportLoadingLabel}` : '…'}
+              {comparisonProgressLabel ? <div style={styles.progressText}>{comparisonProgressLabel}</div> : null}
+            </div>
+          )}
+          {focusReportReady && <div style={styles.successBox}>Données complètes : la génération PDF peut démarrer.</div>}
           {reportMessage && <div style={styles.successBox}>{reportMessage}</div>}
           {reportError && <div style={styles.errorBox}>Erreur rapport : {reportError}</div>}
         </div>
@@ -1585,14 +2182,16 @@ function FocusMensuelPageContent() {
       {error && <div style={styles.errorBox}>Erreur chargement focus mensuel : {error}</div>}
       {cacheInfo && <div style={styles.successBox}>{cacheInfo}</div>}
       {loading && <div style={styles.infoBox}>Chargement des données journalières depuis le cache…</div>}
+      {distinctDocsLoading && <div style={styles.infoBox}>Chargement des documents distincts…</div>}
+      {highlightsLoading && <div style={styles.infoBox}>Chargement des TOP 20…</div>}
       {rebuildingCache && <div style={styles.infoBox}>Reconstruction du cache mensuel en cours…</div>}
       <div style={styles.kpiGrid} className="focus-pdf-kpi-grid">
         {kpiCards.map((card) => <KpiCard key={card.type} card={card} mode={viewMode} basisLabel={businessDayBasis.label} />)}
       </div>
 
       <div style={styles.chartGrid} className="focus-pdf-chart-grid">
-        <MultiLineChart days={days} rows={normalizedRows} mode={viewMode} />
-        <CumulativeChart days={days} rows={normalizedRows} mode={viewMode} />
+        <MultiLineChart days={days} rows={chartRows} mode={viewMode} />
+        <CumulativeChart days={days} rows={chartRows} mode={viewMode} />
       </div>
 
       <div style={styles.sectionGrid} className="focus-pdf-section-grid">
@@ -1639,6 +2238,51 @@ function FocusMensuelPageContent() {
         />
       </div>
 
+      {comparisonError && <div style={styles.errorBox}>Erreur tableaux activité N / N-1 : {comparisonError}</div>}
+      {comparisonLoading && (
+        <div style={styles.infoBox}>
+          Chargement complet des tableaux activité N / N-1 et 12 mois glissants…
+          {comparisonProgressLabel ? <div style={styles.progressText}>{comparisonProgressLabel}</div> : null}
+        </div>
+      )}
+
+      <div style={styles.optionCard} className="focus-pdf-section-card">
+        <label style={styles.checkboxLabel}>
+          <input
+            type="checkbox"
+            checked={useProjectedCurrentMonthFactures}
+            disabled={agencyTablesLoading || !agencyProjectionRows.length}
+            onChange={(event) => setUseProjectedCurrentMonthFactures(event.target.checked)}
+            style={styles.checkboxInput}
+          />
+          <span>{projectedFacturesOptionLabel}</span>
+        </label>
+        <div style={styles.optionHelp}>
+          Option appliquée uniquement aux colonnes Factures N et Evol Fac des tableaux “Activité par agence depuis le début de l’année” et “Activité 12 mois glissants”.
+          Le tableau “Activité par famille macro” reste calculé sur les factures réelles.
+        </div>
+      </div>
+
+      <div style={styles.wideSectionStack} className="focus-pdf-comparison-grid">
+        <ActivityByAgencyComparisonTable
+          title={`Activité par agence depuis le début de l'année (01/01/${focusDate.slice(0, 4)} au ${formatDateFr(focusDate)})`}
+          subtitle={`Option CA projeté : si cochée, les factures réelles de ${formatMonthFr(month).toLowerCase()} sont remplacées par le CA projeté du tableau Projection facturation mois par agence ; le total et l'évolution Factures sont recalculés.`}
+          rows={comparisonReady ? ytdAgencyComparisonRowsDisplay : []}
+          emptyMessage={comparisonLoading ? 'Actualisation en cours : le tableau sera affiché une fois le chargement complet terminé.' : "Aucune donnée d'activité par agence sur la période."}
+        />
+        <ActivityByFamilyComparisonTable
+          title={`Activité par famille macro depuis le début de l'année (01/01/${focusDate.slice(0, 4)} au ${formatDateFr(focusDate)})`}
+          rows={comparisonReady ? ytdFamilyComparisonRows : []}
+          emptyMessage={comparisonLoading ? 'Actualisation en cours : le tableau sera affiché une fois le chargement complet terminé.' : "Aucune donnée d'activité par famille macro sur la période."}
+        />
+        <Rolling12ComparisonTable
+          title="Activité 12 mois glissants"
+          subtitle={`Option CA projeté : si cochée, la ligne ${formatShortMonthFr(month)} remplace les factures réelles du mois par le CA projeté total ; la ligne TOTAL 12 MOIS G. et l'évolution Factures sont recalculées.`}
+          rows={comparisonReady ? rollingComparisonRowsDisplay : []}
+          emptyMessage={comparisonLoading ? 'Actualisation en cours : le tableau sera affiché une fois le chargement complet terminé.' : "Aucune donnée d'activité sur les 12 mois glissants."}
+        />
+      </div>
+
       <div style={styles.highlightsGrid} className="focus-pdf-highlights-grid">
         <HighlightTable title="Top 20 devis créés — 7 derniers jours" rows={highlights.topDevis} />
         <HighlightTable title="Top 20 commandes CDC — 7 derniers jours" rows={highlights.topCdc} />
@@ -1646,6 +2290,261 @@ function FocusMensuelPageContent() {
       </div>
     </section>
   )
+}
+
+function normalizeDailyRows(rows: DailyRow[]) {
+  return rows.map((row) => ({
+    ...row,
+    jour: dateOnly(row.jour),
+    nb_documents: Number(row.nb_documents || 0),
+    nb_lignes: Number(row.nb_lignes || 0),
+    montant_ht: Number(row.montant_ht || 0),
+    quantite_brute: Number(row.quantite_brute || 0),
+    quantite_pertinente: Number(row.quantite_pertinente || 0),
+  }))
+}
+
+function createEmptyComparisonCell(): ComparisonCell {
+  return { amountN1: 0, amountN: 0, qtyPertN1: 0, qtyPertN: 0 }
+}
+
+function createEmptyComparisonRecord(): Record<DocType, ComparisonCell> {
+  return {
+    Devis: createEmptyComparisonCell(),
+    CDC: createEmptyComparisonCell(),
+    BL: createEmptyComparisonCell(),
+    Factures: createEmptyComparisonCell(),
+  }
+}
+
+function aggregateComparisonRows(
+  currentRows: DailyRow[],
+  previousRows: DailyRow[],
+  currentLabelFn: (row: DailyRow) => string,
+  previousLabelFn: (row: DailyRow) => string
+): ComparisonRow[] {
+  const map = new Map<string, ComparisonRow>()
+
+  const ensureRow = (label: string) => {
+    const key = normalizeKey(label || '—')
+    const existing = map.get(key)
+    if (existing) return existing
+    const created: ComparisonRow = {
+      label: label || '—',
+      byType: createEmptyComparisonRecord(),
+      total: 0,
+    }
+    map.set(key, created)
+    return created
+  }
+
+  currentRows.forEach((row) => {
+    if (!isDocType(row.type_document)) return
+    const target = ensureRow(currentLabelFn(row))
+    target.byType[row.type_document].amountN += Number(row.montant_ht || 0)
+    target.byType[row.type_document].qtyPertN += Number(row.quantite_pertinente || 0)
+    target.total += Number(row.montant_ht || 0)
+  })
+
+  previousRows.forEach((row) => {
+    if (!isDocType(row.type_document)) return
+    const target = ensureRow(previousLabelFn(row))
+    target.byType[row.type_document].amountN1 += Number(row.montant_ht || 0)
+    target.byType[row.type_document].qtyPertN1 += Number(row.quantite_pertinente || 0)
+  })
+
+  return Array.from(map.values()).sort((a, b) => Math.abs(b.total) - Math.abs(a.total))
+}
+
+function buildRollingComparisonRows(currentRows: DailyRow[], previousRows: DailyRow[], months: string[]): ComparisonRow[] {
+  const currentMonthSet = new Set(months)
+  const previousRowsShifted = previousRows.map((row) => ({
+    ...row,
+    jour: addYearsYmd(dateOnly(row.jour), 1),
+  }))
+
+  const rows = months.map((month) => {
+    const monthCurrentRows = currentRows.filter((row) => monthKey(row.jour) === month)
+    const monthPreviousRows = previousRowsShifted.filter((row) => monthKey(row.jour) === month)
+    const aggregated = aggregateComparisonRows(
+      monthCurrentRows,
+      monthPreviousRows,
+      () => formatShortMonthFr(month),
+      () => formatShortMonthFr(month)
+    )
+    return aggregated[0] || {
+      label: formatShortMonthFr(month),
+      byType: createEmptyComparisonRecord(),
+      total: 0,
+    }
+  })
+
+  const totalRows = aggregateComparisonRows(
+    currentRows.filter((row) => currentMonthSet.has(monthKey(row.jour))),
+    previousRowsShifted.filter((row) => currentMonthSet.has(monthKey(row.jour))),
+    () => 'TOTAL 12 MOIS G.',
+    () => 'TOTAL 12 MOIS G.'
+  )
+  const total = totalRows[0] || {
+    label: 'TOTAL 12 MOIS G.',
+    byType: createEmptyComparisonRecord(),
+    total: 0,
+  }
+
+  return [total, ...rows]
+}
+
+
+function cloneComparisonRow(row: ComparisonRow): ComparisonRow {
+  return {
+    label: row.label,
+    byType: Object.fromEntries(DOC_TYPES.map((type) => [type, { ...row.byType[type] }])) as Record<DocType, ComparisonCell>,
+    total: Number(row.total || 0),
+  }
+}
+
+function buildProjectionCaByAgency(rows: AgencyProjectionRow[]) {
+  const values = new Map<string, { label: string; projectionCa: number }>()
+
+  rows.forEach((row) => {
+    const label = String(row.label || '').trim() || 'Sans agence'
+    if (normalizeKey(label) === 'TOTAL') return
+    const key = normalizeKey(label)
+    const current = values.get(key)
+    const projectionCa = Number(row.projectionCa || 0)
+    if (current) {
+      current.projectionCa += projectionCa
+    } else {
+      values.set(key, { label, projectionCa })
+    }
+  })
+
+  return values
+}
+
+function buildCurrentMonthFacturesByAgency(rows: DailyRow[], currentMonth: string) {
+  const values = new Map<string, number>()
+
+  rows.forEach((row) => {
+    if (row.type_document !== 'Factures') return
+    if (monthKey(row.jour) !== currentMonth) return
+    const label = row.agence || 'Sans agence'
+    const key = normalizeKey(label)
+    values.set(key, (values.get(key) || 0) + Number(row.montant_ht || 0))
+  })
+
+  return values
+}
+
+function applyProjectedCurrentMonthFacturesToAgencyRows(
+  rows: ComparisonRow[],
+  currentRows: DailyRow[],
+  projectionRows: AgencyProjectionRow[],
+  currentMonth: string
+): ComparisonRow[] {
+  const projectionByAgency = buildProjectionCaByAgency(projectionRows)
+  if (!projectionByAgency.size) return rows
+
+  const actualFacturesByAgency = buildCurrentMonthFacturesByAgency(currentRows, currentMonth)
+  const adjustedRows = rows.map((row) => {
+    const key = normalizeKey(row.label)
+    const projection = projectionByAgency.get(key)
+    if (!projection) return cloneComparisonRow(row)
+
+    const cloned = cloneComparisonRow(row)
+    const actualFacturesMonth = actualFacturesByAgency.get(key) || 0
+    const delta = projection.projectionCa - actualFacturesMonth
+    cloned.byType.Factures.amountN += delta
+    cloned.total += delta
+    return cloned
+  })
+
+  const existingKeys = new Set(rows.map((row) => normalizeKey(row.label)))
+  projectionByAgency.forEach((projection, key) => {
+    if (existingKeys.has(key)) return
+    if (!projection.projectionCa) return
+
+    const created: ComparisonRow = {
+      label: projection.label,
+      byType: createEmptyComparisonRecord(),
+      total: projection.projectionCa,
+    }
+    created.byType.Factures.amountN = projection.projectionCa
+    adjustedRows.push(created)
+  })
+
+  return adjustedRows.sort((a, b) => Math.abs(b.total) - Math.abs(a.total))
+}
+
+function applyProjectedCurrentMonthFacturesToRollingRows(
+  rows: ComparisonRow[],
+  currentRows: DailyRow[],
+  projectionRows: AgencyProjectionRow[],
+  currentMonth: string
+): ComparisonRow[] {
+  const projectedFacturesMonth = sum(projectionRows, (row) => row.projectionCa)
+  if (!projectedFacturesMonth) return rows
+
+  const actualFacturesMonth = sum(
+    currentRows.filter((row) => row.type_document === 'Factures' && monthKey(row.jour) === currentMonth),
+    (row) => row.montant_ht
+  )
+  const delta = projectedFacturesMonth - actualFacturesMonth
+  const monthLabel = formatShortMonthFr(currentMonth)
+
+  return rows.map((row) => {
+    const cloned = cloneComparisonRow(row)
+    const isTotal = normalizeKey(cloned.label).startsWith('TOTAL')
+    const isCurrentMonth = normalizeKey(cloned.label) === normalizeKey(monthLabel)
+
+    if (isTotal || isCurrentMonth) {
+      cloned.byType.Factures.amountN += delta
+      cloned.total += delta
+    }
+
+    return cloned
+  })
+}
+
+function buildTotalComparisonRow(rows: ComparisonRow[], label = 'TOTAL'): ComparisonRow {
+  const total: ComparisonRow = {
+    label,
+    byType: createEmptyComparisonRecord(),
+    total: 0,
+  }
+
+  rows.forEach((row) => {
+    DOC_TYPES.forEach((type) => {
+      total.byType[type].amountN1 += Number(row.byType[type].amountN1 || 0)
+      total.byType[type].amountN += Number(row.byType[type].amountN || 0)
+      total.byType[type].qtyPertN1 += Number(row.byType[type].qtyPertN1 || 0)
+      total.byType[type].qtyPertN += Number(row.byType[type].qtyPertN || 0)
+    })
+    total.total += Number(row.total || 0)
+  })
+
+  return total
+}
+
+function pctEvolution(current: number, previous: number) {
+  if (!previous) return null
+  return ((Number(current || 0) - Number(previous || 0)) / Math.abs(previous)) * 100
+}
+
+function pctCellStyle(value: number | null | undefined, isTotal = false): React.CSSProperties {
+  const base = isTotal ? styles.tdRightTotal : styles.tdRight
+  if (value === null || value === undefined || !Number.isFinite(value)) return { ...base, color: '#64748b', fontWeight: 900 }
+  if (value > 0) return { ...base, color: '#047857', fontWeight: 950 }
+  if (value < 0) return { ...base, color: '#b91c1c', fontWeight: 950 }
+  return { ...base, color: '#64748b', fontWeight: 900 }
+}
+
+function moneyCellStyle(value: number, color: string, isTotal = false): React.CSSProperties {
+  return { ...(isTotal ? styles.tdRightTotal : styles.tdRight), color, fontWeight: 950 }
+}
+
+function qtyCellStyle(value: number, color: string, isTotal = false): React.CSSProperties {
+  return { ...(isTotal ? styles.tdRightTotal : styles.tdRight), color, fontWeight: 900 }
 }
 
 function modeValueFromComponents(values: { amount: number; nb: number; qtyPert: number }, mode: ViewMode) {
@@ -1658,17 +2557,22 @@ function modeValueFromRows(rows: DailyRow[], mode: ViewMode) {
   return sum(rows, (r) => valueOf(r, mode))
 }
 
-function aggregateMatrix(rows: DailyRow[], labelFn: (row: DailyRow) => string) {
+function aggregateMatrix(
+  rows: DailyRow[],
+  labelFn: (row: DailyRow) => string,
+  docOverrides?: Map<string, Record<DocType, number>>
+): MatrixRow[] {
   const grouped = groupBy(rows, labelFn)
   return Array.from(grouped.entries()).map(([label, items]) => {
+    const override = docOverrides?.get(normalizeKey(label))
     const byType = Object.fromEntries(DOC_TYPES.map((type) => {
       const typeRows = items.filter((r) => r.type_document === type)
       return [type, {
         amount: sum(typeRows, (r) => r.montant_ht),
-        nb: sum(typeRows, (r) => r.nb_documents),
+        nb: override ? Number(override[type] || 0) : sum(typeRows, (r) => r.nb_documents),
         qtyPert: sum(typeRows, (r) => r.quantite_pertinente),
       }]
-    })) as Record<DocType, { amount: number; nb: number; qtyPert: number }>
+    })) as Record<DocType, MatrixCell>
     return { label, byType, total: sum(items, (r) => r.montant_ht) }
   }).sort((a, b) => Math.abs(b.total) - Math.abs(a.total))
 }
@@ -1682,7 +2586,7 @@ function SummaryMatrix({
   emptyMessage = 'Aucune donnée sur le jour focus.',
 }: {
   title: string
-  rows: ReturnType<typeof aggregateMatrix>
+  rows: MatrixRow[]
   metric?: MatrixMetric
   emptyMessage?: string
 }) {
@@ -1739,6 +2643,178 @@ function SummaryMatrix({
   )
 }
 
+
+
+function ActivityByAgencyComparisonTable({
+  title,
+  subtitle,
+  rows,
+  emptyMessage,
+}: {
+  title: string
+  subtitle?: string
+  rows: ComparisonRow[]
+  emptyMessage: string
+}) {
+  const displayRows = rows.length ? [buildTotalComparisonRow(rows, 'TOTAL'), ...rows] : []
+
+  return (
+    <div style={styles.sectionCard} className="focus-pdf-section-card">
+      <div style={styles.sectionTitle}>{title}</div>
+      {subtitle ? <div style={styles.sectionSubtitle}>{subtitle}</div> : null}
+      <Table>
+        <thead>
+          <tr>
+            <th style={styles.th}>Dimension</th>
+            {DOC_TYPES.flatMap((type) => ([
+              <th key={`${type}-n1`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>{type} N-1</th>,
+              <th key={`${type}-n`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>{type} N</th>,
+              <th key={`${type}-evol`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>Evol {type === 'Factures' ? 'Fac' : type}</th>,
+            ]))}
+          </tr>
+        </thead>
+        <tbody>
+          {displayRows.length === 0 ? (
+            <tr><td colSpan={13} style={styles.emptyCell}>{emptyMessage}</td></tr>
+          ) : displayRows.map((row, index) => {
+            const isTotal = index === 0 && row.label === 'TOTAL'
+            return (
+              <tr key={`agency-comparison-${row.label}`} style={isTotal ? styles.totalRow : undefined}>
+                <td style={isTotal ? styles.tdStrongTotal : styles.tdStrong}>{row.label}</td>
+                {DOC_TYPES.flatMap((type) => {
+                  const cell = row.byType[type]
+                  const evol = pctEvolution(cell.amountN, cell.amountN1)
+                  return [
+                    <td key={`${type}-n1`} style={moneyCellStyle(cell.amountN1, DOC_COLORS[type], isTotal)}>{formatMoneyCompact(cell.amountN1)}</td>,
+                    <td key={`${type}-n`} style={moneyCellStyle(cell.amountN, DOC_COLORS[type], isTotal)}>{formatMoneyCompact(cell.amountN)}</td>,
+                    <td key={`${type}-evol`} style={pctCellStyle(evol, isTotal)}>{formatPct(evol)}</td>,
+                  ]
+                })}
+              </tr>
+            )
+          })}
+        </tbody>
+      </Table>
+    </div>
+  )
+}
+
+function ActivityByFamilyComparisonTable({
+  title,
+  rows,
+  emptyMessage,
+}: {
+  title: string
+  rows: ComparisonRow[]
+  emptyMessage: string
+}) {
+  const displayRows = rows.length ? [buildTotalComparisonRow(rows, 'TOTAL'), ...rows] : []
+
+  return (
+    <div style={styles.sectionCard} className="focus-pdf-section-card">
+      <div style={styles.sectionTitle}>{title}</div>
+      <Table>
+        <thead>
+          <tr>
+            <th style={styles.th}>Dimension</th>
+            {DOC_TYPES.flatMap((type) => ([
+              <th key={`${type}-qty-n1`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>{type} qté N-1</th>,
+              <th key={`${type}-qty-n`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>{type} qté N</th>,
+              <th key={`${type}-qty-evol`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>Evol qté</th>,
+            ]))}
+            {DOC_TYPES.flatMap((type) => ([
+              <th key={`${type}-amt-n1`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>{type} € N-1</th>,
+              <th key={`${type}-amt-n`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>{type} € N</th>,
+              <th key={`${type}-amt-evol`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>Evol €</th>,
+            ]))}
+          </tr>
+        </thead>
+        <tbody>
+          {displayRows.length === 0 ? (
+            <tr><td colSpan={25} style={styles.emptyCell}>{emptyMessage}</td></tr>
+          ) : displayRows.map((row, index) => {
+            const isTotal = index === 0 && row.label === 'TOTAL'
+            return (
+              <tr key={`family-comparison-${row.label}`} style={isTotal ? styles.totalRow : undefined}>
+                <td style={isTotal ? styles.tdStrongTotal : styles.tdStrong}>{row.label}</td>
+                {DOC_TYPES.flatMap((type) => {
+                  const cell = row.byType[type]
+                  const evol = pctEvolution(cell.qtyPertN, cell.qtyPertN1)
+                  return [
+                    <td key={`${type}-qty-n1`} style={qtyCellStyle(cell.qtyPertN1, DOC_COLORS[type], isTotal)}>{formatNumber(cell.qtyPertN1)}</td>,
+                    <td key={`${type}-qty-n`} style={qtyCellStyle(cell.qtyPertN, DOC_COLORS[type], isTotal)}>{formatNumber(cell.qtyPertN)}</td>,
+                    <td key={`${type}-qty-evol`} style={pctCellStyle(evol, isTotal)}>{formatPct(evol)}</td>,
+                  ]
+                })}
+                {DOC_TYPES.flatMap((type) => {
+                  const cell = row.byType[type]
+                  const evol = pctEvolution(cell.amountN, cell.amountN1)
+                  return [
+                    <td key={`${type}-amt-n1`} style={moneyCellStyle(cell.amountN1, DOC_COLORS[type], isTotal)}>{formatMoneyCompact(cell.amountN1)}</td>,
+                    <td key={`${type}-amt-n`} style={moneyCellStyle(cell.amountN, DOC_COLORS[type], isTotal)}>{formatMoneyCompact(cell.amountN)}</td>,
+                    <td key={`${type}-amt-evol`} style={pctCellStyle(evol, isTotal)}>{formatPct(evol)}</td>,
+                  ]
+                })}
+              </tr>
+            )
+          })}
+        </tbody>
+      </Table>
+    </div>
+  )
+}
+
+function Rolling12ComparisonTable({
+  title,
+  subtitle,
+  rows,
+  emptyMessage,
+}: {
+  title: string
+  subtitle?: string
+  rows: ComparisonRow[]
+  emptyMessage: string
+}) {
+  return (
+    <div style={styles.sectionCard} className="focus-pdf-section-card">
+      <div style={styles.sectionTitle}>{title}</div>
+      {subtitle ? <div style={styles.sectionSubtitle}>{subtitle}</div> : null}
+      <Table>
+        <thead>
+          <tr>
+            <th style={styles.th}>Dimension</th>
+            {DOC_TYPES.flatMap((type) => ([
+              <th key={`${type}-n1`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>{type} N-1</th>,
+              <th key={`${type}-n`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>{type} N</th>,
+              <th key={`${type}-evol`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>Evol {type === 'Factures' ? 'Fac' : type}</th>,
+            ]))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 ? (
+            <tr><td colSpan={13} style={styles.emptyCell}>{emptyMessage}</td></tr>
+          ) : rows.map((row, index) => {
+            const isTotal = index === 0 && row.label.startsWith('TOTAL')
+            return (
+              <tr key={`rolling-comparison-${row.label}`} style={isTotal ? styles.totalRow : undefined}>
+                <td style={isTotal ? styles.tdStrongTotal : styles.tdStrong}>{row.label}</td>
+                {DOC_TYPES.flatMap((type) => {
+                  const cell = row.byType[type]
+                  const evol = pctEvolution(cell.amountN, cell.amountN1)
+                  return [
+                    <td key={`${type}-n1`} style={moneyCellStyle(cell.amountN1, DOC_COLORS[type], isTotal)}>{formatMoneyCompact(cell.amountN1)}</td>,
+                    <td key={`${type}-n`} style={moneyCellStyle(cell.amountN, DOC_COLORS[type], isTotal)}>{formatMoneyCompact(cell.amountN)}</td>,
+                    <td key={`${type}-evol`} style={pctCellStyle(evol, isTotal)}>{formatPct(evol)}</td>,
+                  ]
+                })}
+              </tr>
+            )
+          })}
+        </tbody>
+      </Table>
+    </div>
+  )
+}
 
 function AgencyPortfolioTable({
   title,
@@ -2069,6 +3145,7 @@ const styles: Record<string, React.CSSProperties> = {
 
   errorBox: { background: '#fef2f2', color: '#b91c1c', border: '1px solid #fecaca', borderRadius: 14, padding: 12, marginBottom: 12, fontWeight: 900 },
   infoBox: { background: '#eff6ff', color: '#1d4ed8', border: '1px solid #bfdbfe', borderRadius: 14, padding: 12, marginBottom: 12, fontWeight: 900 },
+  progressText: { marginTop: 6, fontSize: 12, fontWeight: 850, color: '#1e40af' },
   neutralBox: { background: '#f8fafc', color: '#334155', border: '1px solid #e2e8f0', borderRadius: 14, padding: 12, marginBottom: 12, fontWeight: 800 },
   reportCard: { background: 'rgba(255,255,255,0.96)', border: '1px solid #dbeafe', borderRadius: 18, padding: 14, marginBottom: 14, boxShadow: '0 8px 22px rgba(15,23,42,0.06)' },
   reportHeader: { display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'center', marginBottom: 12 },
@@ -2124,6 +3201,10 @@ const styles: Record<string, React.CSSProperties> = {
   legendDot: { width: 10, height: 10, borderRadius: '50%' },
   sectionGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 },
   wideSectionStack: { display: 'grid', gridTemplateColumns: '1fr', gap: 14, marginBottom: 14 },
+  optionCard: { background: '#fff', border: '1px solid #e2e8f0', borderRadius: 18, padding: 14, boxShadow: '0 8px 22px rgba(15,23,42,0.06)', marginBottom: 14 },
+  checkboxLabel: { display: 'inline-flex', alignItems: 'center', gap: 9, color: '#0f172a', fontSize: 13, fontWeight: 950, cursor: 'pointer' },
+  checkboxInput: { width: 16, height: 16, cursor: 'pointer' },
+  optionHelp: { marginTop: 6, color: '#64748b', fontSize: 12, fontWeight: 750, lineHeight: 1.45 },
   highlightsGrid: { display: 'grid', gridTemplateColumns: '1fr', gap: 14 },
   sectionCard: { background: '#fff', border: '1px solid #e2e8f0', borderRadius: 18, padding: 14, boxShadow: '0 8px 22px rgba(15,23,42,0.06)', minWidth: 0 },
   sectionTitle: { fontSize: 16, fontWeight: 950, marginBottom: 10 },
