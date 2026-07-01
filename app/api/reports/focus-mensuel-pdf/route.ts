@@ -5,7 +5,10 @@ import puppeteer from 'puppeteer-core'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
-export const maxDuration = 120
+
+// Important : la génération PDF doit parfois attendre le chargement complet
+// des tableaux N / N-1 et 12 mois glissants. 120 s est trop court.
+export const maxDuration = 300
 
 type PdfRequest = {
   run_id?: number
@@ -22,11 +25,23 @@ type PdfRequest = {
   familleMacro?: string | null
   collaborateur?: string | null
   filename?: string
+
+  // Nouveaux paramètres utiles pour le rendu PDF
+  caProjeteFactures?: string | boolean | null
+  ca_projete_factures?: string | boolean | null
+  wait_for_ready_selector?: string | null
+  wait_timeout_ms?: number | string | null
+  stabilize_ms?: number | string | null
 }
 
 type AuthorizedCaller = {
   mode: 'trusted_secret' | 'user_session'
   email?: string | null
+}
+
+type StepTrace = {
+  step: string
+  ms: number
 }
 
 function getRequiredEnv(name: string) {
@@ -35,7 +50,7 @@ function getRequiredEnv(name: string) {
   return value
 }
 
-function appendParam(url: URL, key: string, value: string | undefined | null) {
+function appendParam(url: URL, key: string, value: string | number | boolean | undefined | null) {
   if (value !== undefined && value !== null && String(value).trim() !== '') {
     url.searchParams.set(key, String(value))
   }
@@ -48,6 +63,23 @@ function redactSecretInUrl(url: string) {
 function sanitizeError(error: unknown) {
   if (error instanceof Error) return error.message
   return String(error)
+}
+
+function isTimeoutError(error: unknown) {
+  const message = sanitizeError(error).toLowerCase()
+  return (
+    message.includes('timeout') ||
+    message.includes('timed out') ||
+    message.includes('navigation timeout') ||
+    message.includes('waiting failed')
+  )
+}
+
+function asPositiveNumber(value: number | string | null | undefined, fallback: number, maxValue?: number) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || numeric <= 0) return fallback
+  if (maxValue && numeric > maxValue) return maxValue
+  return numeric
 }
 
 function buildSupabaseAdmin() {
@@ -90,6 +122,12 @@ function buildFocusPrintUrl(payload: PdfRequest = {}) {
   const horsStatistiques = payload.hors_statistiques || payload.horsStatistiques || 'afficher'
   const familleMacro = payload.famille_macro || payload.familleMacro || null
 
+  // Par défaut, le PDF doit prendre le CA projeté du mois courant.
+  const caProjeteFactures =
+    payload.caProjeteFactures ??
+    payload.ca_projete_factures ??
+    '1'
+
   appendParam(focusUrl, 'pdf', '1')
   appendParam(focusUrl, 'render_secret', renderSecret)
   appendParam(focusUrl, 'month', payload.month)
@@ -103,6 +141,13 @@ function buildFocusPrintUrl(payload: PdfRequest = {}) {
   appendParam(focusUrl, 'famille_macro', familleMacro)
   appendParam(focusUrl, 'collaborateur', payload.collaborateur)
 
+  // Les deux noms sont envoyés pour rester compatibles avec le TSX.
+  appendParam(focusUrl, 'caProjeteFactures', caProjeteFactures)
+  appendParam(focusUrl, 'ca_projete_factures', caProjeteFactures)
+
+  // Évite une capture d'une ancienne page mise en cache.
+  appendParam(focusUrl, 'render_ts', Date.now())
+
   return focusUrl
 }
 
@@ -115,54 +160,156 @@ function isLoginPageText(bodyText: string) {
   )
 }
 
+async function readPageDiagnostics(
+  page: Awaited<ReturnType<Awaited<ReturnType<typeof puppeteer.launch>>['newPage']>>
+) {
+  const loadedUrl = page.url()
+  const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '')
+  const title = await page.title().catch(() => '')
+  const reportAttrs = await page
+    .evaluate(() => {
+      const root =
+        document.querySelector('[data-focus-report-ready]') ||
+        document.querySelector('[data-report-ready]') ||
+        document.querySelector('section') ||
+        document.body
+
+      if (!root) return {}
+
+      const element = root as HTMLElement
+      return {
+        focusReportReady: element.getAttribute('data-focus-report-ready'),
+        reportReady: element.getAttribute('data-report-ready'),
+        focusReportStatus: element.getAttribute('data-focus-report-status'),
+        focusReportLoading: element.getAttribute('data-focus-report-loading'),
+        focusComparisonReady: element.getAttribute('data-focus-comparison-ready'),
+        focusComparisonProgress: element.getAttribute('data-focus-comparison-progress'),
+        projectedCurrentMonthFactures: element.getAttribute('data-focus-projected-current-month-factures'),
+      }
+    })
+    .catch(() => ({}))
+
+  return {
+    loadedUrl,
+    title,
+    reportAttrs,
+    bodyPreview: bodyText.slice(0, 700),
+    isLogin: loadedUrl.includes('/login') || isLoginPageText(bodyText),
+  }
+}
+
 async function openFocusPageAndAssertNotLogin(
   page: Awaited<ReturnType<Awaited<ReturnType<typeof puppeteer.launch>>['newPage']>>,
-  targetUrl: string
+  targetUrl: string,
+  options: {
+    readySelector?: string
+    waitTimeoutMs?: number
+    stabilizeMs?: number
+  } = {}
 ) {
-  await page.goto(targetUrl, { waitUntil: 'networkidle0', timeout: 90000 })
+  const readySelector =
+    options.readySelector ||
+    '[data-focus-report-ready="1"], [data-report-ready="1"]'
 
-  await page
+  const waitTimeoutMs = asPositiveNumber(options.waitTimeoutMs, 240000, 290000)
+  const stabilizeMs = asPositiveNumber(options.stabilizeMs, 1500, 10000)
+
+  page.setDefaultNavigationTimeout(waitTimeoutMs)
+  page.setDefaultTimeout(waitTimeoutMs)
+
+  // Ne pas utiliser networkidle0 ici :
+  // Supabase / fetch / ressources lentes peuvent empêcher l'état network idle
+  // et provoquer un timeout même si la page est visuellement prête.
+  await page.goto(targetUrl, {
+    waitUntil: 'domcontentloaded',
+    timeout: waitTimeoutMs,
+  })
+
+  const waitHandle = await page
     .waitForFunction(
-      () => {
-        const ready = document.querySelector('[data-focus-report-ready="1"], [data-report-ready="1"]')
-        if (ready) return true
+      (selector: string) => {
+        if (document.querySelector(selector)) return 'ready'
+
         const body = document.body?.innerText || ''
-        if (body.includes('Mot de passe') && body.includes('Connexion')) return true
-        return !/Chargement|Reconstruction/i.test(body)
+        if (body.includes('Mot de passe') && body.includes('Connexion')) return 'login'
+
+        const root =
+          document.querySelector('[data-focus-report-status]') ||
+          document.querySelector('[data-focus-report-ready]') ||
+          document.querySelector('[data-report-ready]')
+
+        const status = root?.getAttribute('data-focus-report-status') || ''
+        if (status === 'error') return 'error'
+
+        return false
       },
-      { timeout: 60000 }
+      { timeout: waitTimeoutMs },
+      readySelector
     )
-    .catch(() => null)
+    .catch(async (error) => {
+      const diagnostics = await readPageDiagnostics(page)
+      throw new Error(
+        [
+          `Timeout en attente du marqueur PDF prêt (${readySelector}).`,
+          `URL demandée=${redactSecretInUrl(targetUrl)}`,
+          `URL chargée=${redactSecretInUrl(diagnostics.loadedUrl)}`,
+          `Attributs=${JSON.stringify(diagnostics.reportAttrs)}`,
+          `Aperçu=${diagnostics.bodyPreview}`,
+          `Détail=${sanitizeError(error)}`,
+        ].join(' ')
+      )
+    })
 
-  const loadedUrl = page.url()
-  const bodyText = await page.evaluate(() => document.body?.innerText || '')
-  const title = await page.title().catch(() => '')
-  const readyFound = await page
-    .$('[data-focus-report-ready="1"], [data-report-ready="1"]')
-    .then(Boolean)
-    .catch(() => false)
+  const waitResult = await waitHandle.jsonValue().catch(() => null)
+  const diagnostics = await readPageDiagnostics(page)
 
-  if (loadedUrl.includes('/login') || isLoginPageText(bodyText)) {
+  if (diagnostics.isLogin || waitResult === 'login') {
     throw new Error(
       [
         `La génération PDF a chargé l'écran de connexion au lieu du Focus Mensuel.`,
         `URL demandée=${redactSecretInUrl(targetUrl)}`,
-        `URL chargée=${redactSecretInUrl(loadedUrl)}`,
-        `Titre=${title || '—'}`,
+        `URL chargée=${redactSecretInUrl(diagnostics.loadedUrl)}`,
+        `Titre=${diagnostics.title || '—'}`,
         `Indice : FOCUS_MENSUEL_PRINT_URL doit pointer vers /focus_mensuel_print et cette route doit être exclue de l'auth globale.`,
       ].join(' ')
     )
   }
 
+  if (waitResult === 'error') {
+    throw new Error(
+      [
+        `La page Focus Mensuel indique une erreur avant génération PDF.`,
+        `URL=${redactSecretInUrl(diagnostics.loadedUrl)}`,
+        `Attributs=${JSON.stringify(diagnostics.reportAttrs)}`,
+        `Aperçu=${diagnostics.bodyPreview}`,
+      ].join(' ')
+    )
+  }
+
+  await page
+    .evaluate(() => {
+      const fontSet = (document as any).fonts
+      return fontSet?.ready || Promise.resolve()
+    })
+    .catch(() => null)
+
+  await new Promise((resolve) => setTimeout(resolve, stabilizeMs))
+
+  const readyFound = await page
+    .$(readySelector)
+    .then(Boolean)
+    .catch(() => false)
+
   if (!readyFound) {
-    console.warn('Aucun marqueur data-focus-report-ready/data-report-ready trouvé. Le PDF sera généré quand même.')
+    console.warn(`Aucun marqueur ${readySelector} trouvé après attente. Le PDF sera généré quand même.`)
   }
 
   return {
-    loadedUrl,
-    title,
+    loadedUrl: diagnostics.loadedUrl,
+    title: diagnostics.title,
     readyFound,
-    bodyPreview: bodyText.slice(0, 300),
+    bodyPreview: diagnostics.bodyPreview,
+    reportAttrs: diagnostics.reportAttrs,
   }
 }
 
@@ -170,7 +317,12 @@ async function launchBrowser() {
   const executablePath = await chromium.executablePath()
 
   return puppeteer.launch({
-    args: chromium.args,
+    args: [
+      ...chromium.args,
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--no-zygote',
+    ],
     executablePath,
     headless: true,
     defaultViewport: {
@@ -204,6 +356,7 @@ export async function GET(req: NextRequest) {
       agence: url.searchParams.get('agence') || null,
       famille_macro: url.searchParams.get('famille_macro') || url.searchParams.get('familleMacro') || null,
       collaborateur: url.searchParams.get('collaborateur') || null,
+      caProjeteFactures: url.searchParams.get('caProjeteFactures') || url.searchParams.get('ca_projete_factures') || '1',
     })
 
     return NextResponse.json({
@@ -215,6 +368,7 @@ export async function GET(req: NextRequest) {
       hasServiceRoleKey: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
       targetUrl: redactSecretInUrl(focusUrl.toString()),
       expectedPrintPath: new URL(process.env.FOCUS_MENSUEL_PRINT_URL || 'https://invalid.local').pathname,
+      maxDuration,
     })
   } catch (error) {
     return NextResponse.json({ ok: false, error: sanitizeError(error) }, { status: 500 })
@@ -224,15 +378,30 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null
   let caller: AuthorizedCaller | null = null
+  const trace: StepTrace[] = []
+  const startedAt = Date.now()
+
+  async function timedStep<T>(step: string, fn: () => Promise<T>) {
+    const stepStartedAt = Date.now()
+    const result = await fn()
+    trace.push({ step, ms: Date.now() - stepStartedAt })
+    return result
+  }
 
   try {
-    const supabaseAdmin = buildSupabaseAdmin()
-    caller = await authorizeRequest(req, supabaseAdmin)
+    const supabaseAdmin = await timedStep('supabase_admin', async () => buildSupabaseAdmin())
+    caller = await timedStep('authorize', async () => authorizeRequest(req, supabaseAdmin))
 
-    const payload = (await req.json()) as PdfRequest
+    const payload = (await timedStep('read_payload', async () => req.json())) as PdfRequest
     const bucket = payload.bucket || 'commercial-imports'
     const pdfPath = payload.path || 'reports/focus-mensuel/Rapport_activite_quotidien.pdf'
     const focusUrl = buildFocusPrintUrl(payload)
+
+    const readySelector =
+      payload.wait_for_ready_selector ||
+      '[data-focus-report-ready="1"], [data-report-ready="1"]'
+    const waitTimeoutMs = asPositiveNumber(payload.wait_timeout_ms, 240000, 290000)
+    const stabilizeMs = asPositiveNumber(payload.stabilize_ms, 1500, 10000)
 
     const debug = req.nextUrl.searchParams.get('debug') === '1'
     if (debug) {
@@ -245,109 +414,127 @@ export async function POST(req: NextRequest) {
         targetUrl: redactSecretInUrl(focusUrl.toString()),
         hasRenderSecret: Boolean(process.env.REPORT_PDF_RENDER_SECRET),
         caller,
+        readySelector,
+        waitTimeoutMs,
+        stabilizeMs,
+        maxDuration,
       })
     }
 
-    browser = await launchBrowser()
-    const page = await browser.newPage()
+    browser = await timedStep('launch_browser', async () => launchBrowser())
+    const page = await timedStep('new_page', async () => browser!.newPage())
 
-    await page.setViewport({
-      width: Number(process.env.FOCUS_PDF_VIEWPORT_WIDTH || 1920),
-      height: Number(process.env.FOCUS_PDF_VIEWPORT_HEIGHT || 1200),
-      deviceScaleFactor: 1,
-    })
-    await page.emulateMediaType('screen')
-
-    const pageInfo = await openFocusPageAndAssertNotLogin(page, focusUrl.toString())
-
-    await page.addStyleTag({
-      content: `
-        @page { size: A4 landscape; margin: 3mm 3mm 3mm 3mm; }
-        html, body {
-          margin: 0 !important;
-          padding: 0 !important;
-          background: #eef5fb !important;
-          background-color: #eef5fb !important;
-          background-image: none !important;
-        }
-        body,
-        * {
-          -webkit-print-color-adjust: exact !important;
-          print-color-adjust: exact !important;
-        }
-        body::before,
-        body::after,
-        main::before,
-        main::after,
-        section::before,
-        section::after {
-          content: none !important;
-          display: none !important;
-          background: transparent !important;
-          background-image: none !important;
-          box-shadow: none !important;
-          filter: none !important;
-          backdrop-filter: none !important;
-          -webkit-backdrop-filter: none !important;
-        }
-        [data-focus-report-ready],
-        [data-report-ready] {
-          width: 100% !important;
-          max-width: 100% !important;
-          box-sizing: border-box !important;
-          background: #eef5fb !important;
-          background-color: #eef5fb !important;
-          background-image: none !important;
-          isolation: isolate !important;
-          filter: none !important;
-          backdrop-filter: none !important;
-          -webkit-backdrop-filter: none !important;
-        }
-        [data-focus-report-ready] *,
-        [data-focus-report-ready] *::before,
-        [data-focus-report-ready] *::after {
-          filter: none !important;
-          backdrop-filter: none !important;
-          -webkit-backdrop-filter: none !important;
-        }
-        .focus-pdf-brand-header,
-        .focus-pdf-filters,
-        .focus-pdf-kpi-grid > div,
-        .focus-pdf-chart-box,
-        .focus-pdf-section-card {
-          background-image: none !important;
-          box-shadow: none !important;
-          filter: none !important;
-          backdrop-filter: none !important;
-          -webkit-backdrop-filter: none !important;
-        }
-        .focus-pdf-brand-header,
-        .focus-pdf-filters,
-        .focus-pdf-kpi-grid > div,
-        .focus-pdf-chart-box,
-        .focus-pdf-section-card,
-        .focus-pdf-table-wrap {
-          position: relative !important;
-          z-index: 1 !important;
-        }
-        .no-print, [data-no-print="true"] { display: none !important; }
-      `,
+    await timedStep('configure_page', async () => {
+      await page.setViewport({
+        width: Number(process.env.FOCUS_PDF_VIEWPORT_WIDTH || 1920),
+        height: Number(process.env.FOCUS_PDF_VIEWPORT_HEIGHT || 1200),
+        deviceScaleFactor: 1,
+      })
+      await page.emulateMediaType('screen')
     })
 
-    const pdf = await page.pdf({
-      format: 'A4',
-      landscape: true,
-      printBackground: true,
-      preferCSSPageSize: true,
-      margin: { top: '3mm', right: '3mm', bottom: '3mm', left: '3mm' },
-      scale: Number(process.env.FOCUS_PDF_LANDSCAPE_SCALE || process.env.FOCUS_PDF_SCALE || 0.72),
+    const pageInfo = await timedStep('open_focus_page_wait_ready', async () =>
+      openFocusPageAndAssertNotLogin(page, focusUrl.toString(), {
+        readySelector,
+        waitTimeoutMs,
+        stabilizeMs,
+      })
+    )
+
+    await timedStep('inject_pdf_css', async () => {
+      await page.addStyleTag({
+        content: `
+          @page { size: A4 landscape; margin: 3mm 3mm 3mm 3mm; }
+          html, body {
+            margin: 0 !important;
+            padding: 0 !important;
+            background: #eef5fb !important;
+            background-color: #eef5fb !important;
+            background-image: none !important;
+          }
+          body,
+          * {
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
+          }
+          body::before,
+          body::after,
+          main::before,
+          main::after,
+          section::before,
+          section::after {
+            content: none !important;
+            display: none !important;
+            background: transparent !important;
+            background-image: none !important;
+            box-shadow: none !important;
+            filter: none !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+          }
+          [data-focus-report-ready],
+          [data-report-ready] {
+            width: 100% !important;
+            max-width: 100% !important;
+            box-sizing: border-box !important;
+            background: #eef5fb !important;
+            background-color: #eef5fb !important;
+            background-image: none !important;
+            isolation: isolate !important;
+            filter: none !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+          }
+          [data-focus-report-ready] *,
+          [data-focus-report-ready] *::before,
+          [data-focus-report-ready] *::after {
+            filter: none !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+          }
+          .focus-pdf-brand-header,
+          .focus-pdf-filters,
+          .focus-pdf-kpi-grid > div,
+          .focus-pdf-chart-box,
+          .focus-pdf-section-card {
+            background-image: none !important;
+            box-shadow: none !important;
+            filter: none !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+          }
+          .focus-pdf-brand-header,
+          .focus-pdf-filters,
+          .focus-pdf-kpi-grid > div,
+          .focus-pdf-chart-box,
+          .focus-pdf-section-card,
+          .focus-pdf-table-wrap {
+            position: relative !important;
+            z-index: 1 !important;
+          }
+          .no-print, [data-no-print="true"] { display: none !important; }
+        `,
+      })
     })
 
-    const { error: uploadError } = await supabaseAdmin.storage.from(bucket).upload(pdfPath, pdf, {
-      contentType: 'application/pdf',
-      upsert: true,
+    const pdf = await timedStep('render_pdf', async () =>
+      page.pdf({
+        format: 'A4',
+        landscape: true,
+        printBackground: true,
+        preferCSSPageSize: true,
+        margin: { top: '3mm', right: '3mm', bottom: '3mm', left: '3mm' },
+        scale: Number(process.env.FOCUS_PDF_LANDSCAPE_SCALE || process.env.FOCUS_PDF_SCALE || 0.72),
+      })
+    )
+
+    await timedStep('upload_storage', async () => {
+      const { error: uploadError } = await supabaseAdmin.storage.from(bucket).upload(pdfPath, pdf, {
+        contentType: 'application/pdf',
+        upsert: true,
+      })
+      if (uploadError) throw new Error(`Upload Storage impossible : ${uploadError.message}`)
     })
-    if (uploadError) throw new Error(`Upload Storage impossible : ${uploadError.message}`)
 
     return NextResponse.json({
       ok: true,
@@ -356,13 +543,27 @@ export async function POST(req: NextRequest) {
       focus_url: redactSecretInUrl(focusUrl.toString()),
       loaded_url: redactSecretInUrl(pageInfo.loadedUrl),
       page_ready_marker_found: pageInfo.readyFound,
+      page_report_attrs: pageInfo.reportAttrs,
       orientation: 'landscape',
       filename: payload.filename || `Rapport d'activité quotidien.pdf`,
       bytes: pdf.byteLength,
       caller,
+      duration_ms: Date.now() - startedAt,
+      trace,
     })
   } catch (error) {
-    return NextResponse.json({ ok: false, error: sanitizeError(error), caller }, { status: 500 })
+    const status = isTimeoutError(error) ? 504 : 500
+
+    return NextResponse.json(
+      {
+        ok: false,
+        error: sanitizeError(error),
+        caller,
+        duration_ms: Date.now() - startedAt,
+        trace,
+      },
+      { status }
+    )
   } finally {
     if (browser) await browser.close().catch(() => undefined)
   }
