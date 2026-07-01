@@ -838,6 +838,13 @@ function FocusMensuelPageContent() {
   const [distinctDocRows, setDistinctDocRows] = useState<DistinctDocRow[]>([])
   const [distinctDocsLoading, setDistinctDocsLoading] = useState(false)
   const [distinctDocsReady, setDistinctDocsReady] = useState(false)
+  const [distinctDocsProgress, setDistinctDocsProgress] = useState<ComparisonProgress>({
+    status: 'idle',
+    label: '',
+    current: null,
+    done: 0,
+    total: 0,
+  })
   const [ytdRowsN, setYtdRowsN] = useState<DailyRow[]>([])
   const [ytdRowsN1, setYtdRowsN1] = useState<DailyRow[]>([])
   const [rollingRowsN, setRollingRowsN] = useState<DailyRow[]>([])
@@ -1064,6 +1071,18 @@ function FocusMensuelPageContent() {
     return `Actualisation des tableaux activité N / N-1 : ${done}/${total} périodes (${pct} %)${current}`
   }, [comparisonProgress])
 
+  const distinctDocsProgressLabel = useMemo(() => {
+    if (distinctDocsProgress.status === 'ready') return 'Documents distincts chargés complètement.'
+    if (distinctDocsProgress.status === 'error') return 'Erreur pendant le chargement des documents distincts.'
+    if (distinctDocsProgress.status !== 'loading') return ''
+
+    const total = distinctDocsProgress.total || 0
+    const done = distinctDocsProgress.done || 0
+    const pct = total ? Math.min(100, Math.round((done / total) * 100)) : 0
+    const current = distinctDocsProgress.current ? ` · ${distinctDocsProgress.current}` : ''
+    return `Actualisation des documents distincts : ${done}/${total} périodes (${pct} %)${current}`
+  }, [distinctDocsProgress])
+
   const focusReportReady = Boolean(
     dailyReady &&
     distinctDocsReady &&
@@ -1089,7 +1108,7 @@ function FocusMensuelPageContent() {
 
   const focusReportLoadingLabel = [
     loading ? 'données journalières' : null,
-    distinctDocsLoading ? 'documents distincts' : null,
+    distinctDocsLoading ? (distinctDocsProgressLabel || 'documents distincts') : null,
     highlightsLoading ? 'TOP 20' : null,
     agencyTablesLoading ? 'portefeuille / projection' : null,
     comparisonLoading ? 'tableaux N / N-1 et 12 mois glissants' : null,
@@ -1360,11 +1379,13 @@ function FocusMensuelPageContent() {
   async function loadDistinctDocs() {
     setDistinctDocsLoading(true)
     setDistinctDocsReady(false)
+    setDistinctDocRows([])
+    setDistinctDocsProgress({ status: 'loading', label: 'documents distincts', current: null, done: 0, total: 0 })
 
-    try {
+    const fetchDistinctDocsRange = async (range: { start: string; end: string }) => {
       const { data, error } = await supabase.rpc('get_focus_mensuel_docs_distinct_metier', {
-        p_date_debut: monthBegin,
-        p_date_fin: monthEnd,
+        p_date_debut: range.start,
+        p_date_fin: range.end,
         p_agence: agence || null,
         p_famille_macro: familleMacro || null,
         p_collaborateur: collaborateur || null,
@@ -1372,12 +1393,78 @@ function FocusMensuelPageContent() {
       })
 
       if (error) throw error
-      setDistinctDocRows((data || []) as DistinctDocRow[])
+      return (data || []) as DistinctDocRow[]
+    }
+
+    try {
+      // Ne jamais appeler la RPC documents distincts sur tout le mois en mode PDF :
+      // c'est la cause du timeout qui empêche la génération du PDF.
+      // On découpe en semaines, puis en jours si une semaine timeoute.
+      const initialRanges = isPdfMode
+        ? splitDateRangeByDays(monthBegin, monthEnd, 1)
+        : splitDateRangeByDays(monthBegin, monthEnd, 7)
+
+      let totalSteps = initialRanges.length
+      let doneSteps = 0
+      const rows: DistinctDocRow[] = []
+
+      const setDistinctProgress = (label: string, range: { start: string; end: string } | null) => {
+        setDistinctDocsProgress({
+          status: 'loading',
+          label,
+          current: range
+            ? `${formatDateFr(range.start)} au ${formatDateFr(addDaysYmd(range.end, -1))}`
+            : null,
+          done: doneSteps,
+          total: totalSteps,
+        })
+      }
+
+      for (const range of initialRanges) {
+        setDistinctProgress(
+          isPdfMode ? 'Documents distincts · découpage jour' : 'Documents distincts · découpage semaine',
+          range
+        )
+
+        try {
+          rows.push(...await fetchDistinctDocsRange(range))
+          doneSteps += 1
+          setDistinctProgress('Documents distincts', null)
+        } catch (exception: any) {
+          if (!isStatementTimeout(exception) || isPdfMode) throw exception
+
+          const dailyRanges = splitDateRangeByDays(range.start, range.end, 1)
+          totalSteps += Math.max(0, dailyRanges.length - 1)
+
+          for (const dailyRange of dailyRanges) {
+            setDistinctProgress('Documents distincts · découpage jour', dailyRange)
+            rows.push(...await fetchDistinctDocsRange(dailyRange))
+            doneSteps += 1
+            setDistinctProgress('Documents distincts', null)
+          }
+        }
+      }
+
+      setDistinctDocRows(rows)
       setDistinctDocsReady(true)
+      setDistinctDocsProgress({
+        status: 'ready',
+        label: 'Documents distincts chargés complètement.',
+        current: null,
+        done: totalSteps,
+        total: totalSteps,
+      })
     } catch (exception: any) {
       console.error('focus mensuel distinct docs', exception)
       setDistinctDocRows([])
       setDistinctDocsReady(false)
+      setDistinctDocsProgress({
+        status: 'error',
+        label: 'Erreur pendant le chargement des documents distincts.',
+        current: null,
+        done: 0,
+        total: 0,
+      })
       setError(`Erreur chargement documents distincts : ${exception?.message || String(exception)}`)
     } finally {
       setDistinctDocsLoading(false)
@@ -2206,7 +2293,7 @@ function FocusMensuelPageContent() {
       {error && <div style={styles.errorBox}>Erreur chargement focus mensuel : {error}</div>}
       {cacheInfo && <div style={styles.successBox}>{cacheInfo}</div>}
       {loading && <div style={styles.infoBox}>Chargement des données journalières depuis le cache…</div>}
-      {distinctDocsLoading && <div style={styles.infoBox}>Chargement des documents distincts…</div>}
+      {distinctDocsLoading && <div style={styles.infoBox}>{distinctDocsProgressLabel || 'Chargement des documents distincts…'}</div>}
       {highlightsLoading && <div style={styles.infoBox}>Chargement des TOP 20…</div>}
       {rebuildingCache && <div style={styles.infoBox}>Reconstruction du cache mensuel en cours…</div>}
       <div style={styles.kpiGrid} className="focus-pdf-kpi-grid">
