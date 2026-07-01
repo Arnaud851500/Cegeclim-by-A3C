@@ -363,6 +363,10 @@ function labelForMode(mode: ViewMode) {
   return 'Montant HT'
 }
 
+function shortDocLabel(type: DocType | string) {
+  return String(type) === 'Factures' ? 'Fac' : String(type)
+}
+
 function displayValue(value: number, mode: ViewMode) {
   if (mode === 'montant_ht') return formatMoney(value)
   return formatNumber(value)
@@ -869,7 +873,8 @@ function FocusMensuelPageContent() {
   const [lastGeneratedPdfPath, setLastGeneratedPdfPath] = useState(REPORT_PATH)
   const [useProjectedCurrentMonthFactures, setUseProjectedCurrentMonthFactures] = useState(() => {
     const value = String(requestedCaProjeteFactures || '').toLowerCase()
-    return ['1', 'true', 'oui', 'yes', 'on'].includes(value)
+    if (['0', 'false', 'faux', 'non', 'no', 'off'].includes(value)) return false
+    return true
   })
 
   const days = useMemo(() => daysInMonth(month), [month])
@@ -1098,6 +1103,22 @@ function FocusMensuelPageContent() {
     return { topDevis, topCdc, topDocs }
   }, [highlightRows])
 
+  function setFocusDateAndSyncMonth(nextFocusDate: string) {
+    setFocusDate(nextFocusDate)
+    const nextMonth = String(nextFocusDate || '').slice(0, 7)
+    if (/^\d{4}-\d{2}$/.test(nextMonth) && nextMonth !== month) {
+      setMonth(nextMonth)
+    }
+  }
+
+  function setMonthAndSyncFocusDate(nextMonth: string) {
+    setMonth(nextMonth)
+    if (!String(focusDate || '').startsWith(nextMonth)) {
+      const candidate = nextMonth === todayYmd().slice(0, 7) ? pickDefaultFocusDate() : `${nextMonth}-01`
+      setFocusDate(candidate.startsWith(nextMonth) ? candidate : `${nextMonth}-01`)
+    }
+  }
+
   useEffect(() => {
     if (!focusDate.startsWith(month)) {
       const candidate = month === currentMonth ? pickDefaultFocusDate() : `${month}-${String(Math.min(new Date(`${month}-01T12:00:00`).getDate(), 1)).padStart(2, '0')}`
@@ -1152,6 +1173,9 @@ function FocusMensuelPageContent() {
       famille_macro: familleMacro || null,
       collaborateur: collaborateur || null,
       ca_projete_factures_mois_en_cours: useProjectedCurrentMonthFactures,
+      caProjeteFactures: useProjectedCurrentMonthFactures ? '1' : '0',
+      wait_for_ready_selector: '[data-focus-report-ready="1"]',
+      wait_timeout_ms: 240000,
     }
   }
 
@@ -2078,8 +2102,8 @@ function FocusMensuelPageContent() {
           </div>
         </div>
         <div style={styles.headerActions} className="focus-pdf-header-actions" data-no-print="true">
-          <button style={styles.secondaryButton} onClick={() => setFocusDate(todayYmd())}>Aujourd’hui</button>
-          <button style={styles.secondaryButton} onClick={() => setFocusDate(addDaysYmd(todayYmd(), -1))}>Hier</button>
+          <button style={styles.secondaryButton} onClick={() => setFocusDateAndSyncMonth(todayYmd())}>Aujourd’hui</button>
+          <button style={styles.secondaryButton} onClick={() => setFocusDateAndSyncMonth(addDaysYmd(todayYmd(), -1))}>Hier</button>
           <button style={styles.warningButton} onClick={rebuildCacheForMonth} disabled={rebuildingCache}>
             {rebuildingCache ? 'Rebuild cache…' : 'Reconstruire cache mois'}
           </button>
@@ -2111,8 +2135,8 @@ function FocusMensuelPageContent() {
           </>
         ) : (
           <>
-            <div style={styles.field}><label style={styles.label}>Mois analysé</label><input type="month" value={month} onChange={(e) => setMonth(e.target.value)} style={styles.input} /></div>
-            <div style={styles.field}><label style={styles.label}>Jour focus</label><input type="date" value={focusDate} onChange={(e) => setFocusDate(e.target.value)} style={styles.input} /></div>
+            <div style={styles.field}><label style={styles.label}>Mois analysé</label><input type="month" value={month} onChange={(e) => setMonthAndSyncFocusDate(e.target.value)} style={styles.input} /></div>
+            <div style={styles.field}><label style={styles.label}>Jour focus</label><input type="date" value={focusDate} onChange={(e) => setFocusDateAndSyncMonth(e.target.value)} style={styles.input} /></div>
             <div style={styles.field}><label style={styles.label}>Vue</label><select value={viewMode} onChange={(e) => setViewMode(e.target.value as ViewMode)} style={styles.input}><option value="montant_ht">Montant HT</option><option value="nb_documents">Nombre documents</option><option value="quantite_pertinente">Quantité pertinente</option></select></div>
             <div style={styles.field}><label style={styles.label}>Agence</label><select value={agence} onChange={(e) => setAgence(e.target.value)} style={styles.input}><option value="">Toutes</option>{availableAgences.map((a) => <option key={a} value={a}>{a}</option>)}</select></div>
             <div style={styles.field}><label style={styles.label}>Famille macro</label><select value={familleMacro} onChange={(e) => setFamilleMacro(e.target.value)} style={styles.input}><option value="">Toutes</option>{availableFamilies.map((f) => <option key={f} value={f}>{f}</option>)}</select></div>
@@ -2258,7 +2282,7 @@ function FocusMensuelPageContent() {
           <span>{projectedFacturesOptionLabel}</span>
         </label>
         <div style={styles.optionHelp}>
-          Option appliquée uniquement aux colonnes Factures N et Evol Fac des tableaux “Activité par agence depuis le début de l’année” et “Activité 12 mois glissants”.
+          Option appliquée uniquement aux colonnes Fac N et Evol Fac des tableaux “Activité par agence depuis le début de l’année” et “Activité 12 mois glissants”.
           Le tableau “Activité par famille macro” reste calculé sur les factures réelles.
         </div>
       </div>
@@ -2266,7 +2290,7 @@ function FocusMensuelPageContent() {
       <div style={styles.wideSectionStack} className="focus-pdf-comparison-grid">
         <ActivityByAgencyComparisonTable
           title={`Activité par agence depuis le début de l'année (01/01/${focusDate.slice(0, 4)} au ${formatDateFr(focusDate)})`}
-          subtitle={`Option CA projeté : si cochée, les factures réelles de ${formatMonthFr(month).toLowerCase()} sont remplacées par le CA projeté du tableau Projection facturation mois par agence ; le total et l'évolution Factures sont recalculés.`}
+          subtitle={`Option CA projeté : si cochée, les factures réelles de ${formatMonthFr(month).toLowerCase()} sont remplacées par le CA projeté du tableau Projection facturation mois par agence ; le total et l'évolution Fac sont recalculés.`}
           rows={comparisonReady ? ytdAgencyComparisonRowsDisplay : []}
           emptyMessage={comparisonLoading ? 'Actualisation en cours : le tableau sera affiché une fois le chargement complet terminé.' : "Aucune donnée d'activité par agence sur la période."}
         />
@@ -2277,7 +2301,7 @@ function FocusMensuelPageContent() {
         />
         <Rolling12ComparisonTable
           title="Activité 12 mois glissants"
-          subtitle={`Option CA projeté : si cochée, la ligne ${formatShortMonthFr(month)} remplace les factures réelles du mois par le CA projeté total ; la ligne TOTAL 12 MOIS G. et l'évolution Factures sont recalculées.`}
+          subtitle={`Option CA projeté : si cochée, la ligne ${formatShortMonthFr(month)} remplace les factures réelles du mois par le CA projeté total ; la ligne TOTAL 12 MOIS G. et l'évolution Fac sont recalculées.`}
           rows={comparisonReady ? rollingComparisonRowsDisplay : []}
           emptyMessage={comparisonLoading ? 'Actualisation en cours : le tableau sera affiché une fois le chargement complet terminé.' : "Aucune donnée d'activité sur les 12 mois glissants."}
         />
@@ -2531,20 +2555,28 @@ function pctEvolution(current: number, previous: number) {
   return ((Number(current || 0) - Number(previous || 0)) / Math.abs(previous)) * 100
 }
 
-function pctCellStyle(value: number | null | undefined, isTotal = false): React.CSSProperties {
-  const base = isTotal ? styles.tdRightTotal : styles.tdRight
+function pctCellStyle(value: number | null | undefined, isTotal = false, compact = false): React.CSSProperties {
+  const base = compact
+    ? (isTotal ? styles.tdRightTotalCompact : styles.tdRightCompact)
+    : (isTotal ? styles.tdRightTotal : styles.tdRight)
   if (value === null || value === undefined || !Number.isFinite(value)) return { ...base, color: '#64748b', fontWeight: 900 }
   if (value > 0) return { ...base, color: '#047857', fontWeight: 950 }
   if (value < 0) return { ...base, color: '#b91c1c', fontWeight: 950 }
   return { ...base, color: '#64748b', fontWeight: 900 }
 }
 
-function moneyCellStyle(value: number, color: string, isTotal = false): React.CSSProperties {
-  return { ...(isTotal ? styles.tdRightTotal : styles.tdRight), color, fontWeight: 950 }
+function moneyCellStyle(value: number, color: string, isTotal = false, compact = false): React.CSSProperties {
+  const base = compact
+    ? (isTotal ? styles.tdRightTotalCompact : styles.tdRightCompact)
+    : (isTotal ? styles.tdRightTotal : styles.tdRight)
+  return { ...base, color, fontWeight: 950 }
 }
 
-function qtyCellStyle(value: number, color: string, isTotal = false): React.CSSProperties {
-  return { ...(isTotal ? styles.tdRightTotal : styles.tdRight), color, fontWeight: 900 }
+function qtyCellStyle(value: number, color: string, isTotal = false, compact = false): React.CSSProperties {
+  const base = compact
+    ? (isTotal ? styles.tdRightTotalCompact : styles.tdRightCompact)
+    : (isTotal ? styles.tdRightTotal : styles.tdRight)
+  return { ...base, color, fontWeight: 900 }
 }
 
 function modeValueFromComponents(values: { amount: number; nb: number; qtyPert: number }, mode: ViewMode) {
@@ -2590,7 +2622,7 @@ function SummaryMatrix({
   metric?: MatrixMetric
   emptyMessage?: string
 }) {
-  const metricLabel = metric === 'quantite_pertinente' ? 'qté pert.' : 'docs'
+  const metricLabel = metric === 'quantite_pertinente' ? 'Q pert.' : 'docs'
   const totalRow = rows.length > 0
     ? {
         label: 'TOTAL',
@@ -2667,9 +2699,9 @@ function ActivityByAgencyComparisonTable({
           <tr>
             <th style={styles.th}>Dimension</th>
             {DOC_TYPES.flatMap((type) => ([
-              <th key={`${type}-n1`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>{type} N-1</th>,
-              <th key={`${type}-n`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>{type} N</th>,
-              <th key={`${type}-evol`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>Evol {type === 'Factures' ? 'Fac' : type}</th>,
+              <th key={`${type}-n1`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>{shortDocLabel(type)} N-1</th>,
+              <th key={`${type}-n`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>{shortDocLabel(type)} N</th>,
+              <th key={`${type}-evol`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>Evol {shortDocLabel(type)}</th>,
             ]))}
           </tr>
         </thead>
@@ -2709,57 +2741,66 @@ function ActivityByFamilyComparisonTable({
   emptyMessage: string
 }) {
   const displayRows = rows.length ? [buildTotalComparisonRow(rows, 'TOTAL'), ...rows] : []
+  const compactHeaderBase: React.CSSProperties = {
+    ...styles.thRightCompact,
+  }
 
   return (
     <div style={styles.sectionCard} className="focus-pdf-section-card">
       <div style={styles.sectionTitle}>{title}</div>
-      <Table>
-        <thead>
-          <tr>
-            <th style={styles.th}>Dimension</th>
-            {DOC_TYPES.flatMap((type) => ([
-              <th key={`${type}-qty-n1`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>{type} qté N-1</th>,
-              <th key={`${type}-qty-n`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>{type} qté N</th>,
-              <th key={`${type}-qty-evol`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>Evol qté</th>,
-            ]))}
-            {DOC_TYPES.flatMap((type) => ([
-              <th key={`${type}-amt-n1`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>{type} € N-1</th>,
-              <th key={`${type}-amt-n`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>{type} € N</th>,
-              <th key={`${type}-amt-evol`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>Evol €</th>,
-            ]))}
-          </tr>
-        </thead>
-        <tbody>
-          {displayRows.length === 0 ? (
-            <tr><td colSpan={25} style={styles.emptyCell}>{emptyMessage}</td></tr>
-          ) : displayRows.map((row, index) => {
-            const isTotal = index === 0 && row.label === 'TOTAL'
-            return (
-              <tr key={`family-comparison-${row.label}`} style={isTotal ? styles.totalRow : undefined}>
-                <td style={isTotal ? styles.tdStrongTotal : styles.tdStrong}>{row.label}</td>
-                {DOC_TYPES.flatMap((type) => {
-                  const cell = row.byType[type]
-                  const evol = pctEvolution(cell.qtyPertN, cell.qtyPertN1)
-                  return [
-                    <td key={`${type}-qty-n1`} style={qtyCellStyle(cell.qtyPertN1, DOC_COLORS[type], isTotal)}>{formatNumber(cell.qtyPertN1)}</td>,
-                    <td key={`${type}-qty-n`} style={qtyCellStyle(cell.qtyPertN, DOC_COLORS[type], isTotal)}>{formatNumber(cell.qtyPertN)}</td>,
-                    <td key={`${type}-qty-evol`} style={pctCellStyle(evol, isTotal)}>{formatPct(evol)}</td>,
-                  ]
-                })}
-                {DOC_TYPES.flatMap((type) => {
-                  const cell = row.byType[type]
-                  const evol = pctEvolution(cell.amountN, cell.amountN1)
-                  return [
-                    <td key={`${type}-amt-n1`} style={moneyCellStyle(cell.amountN1, DOC_COLORS[type], isTotal)}>{formatMoneyCompact(cell.amountN1)}</td>,
-                    <td key={`${type}-amt-n`} style={moneyCellStyle(cell.amountN, DOC_COLORS[type], isTotal)}>{formatMoneyCompact(cell.amountN)}</td>,
-                    <td key={`${type}-amt-evol`} style={pctCellStyle(evol, isTotal)}>{formatPct(evol)}</td>,
-                  ]
-                })}
-              </tr>
-            )
-          })}
-        </tbody>
-      </Table>
+      <div style={styles.compactTableWrap} className="focus-pdf-family-table-wrap">
+        <table style={styles.familyComparisonTable} className="focus-pdf-family-table">
+          <colgroup>
+            <col style={{ width: '92px' }} />
+            {Array.from({ length: 24 }).map((_, index) => <col key={index} style={{ width: 'calc((100% - 92px) / 24)' }} />)}
+          </colgroup>
+          <thead>
+            <tr>
+              <th style={styles.thCompact}>Dimension</th>
+              {DOC_TYPES.flatMap((type) => ([
+                <th key={`${type}-qty-n1`} style={{ ...compactHeaderBase, color: DOC_COLORS[type] }}>{shortDocLabel(type)} Q N-1</th>,
+                <th key={`${type}-qty-n`} style={{ ...compactHeaderBase, color: DOC_COLORS[type] }}>{shortDocLabel(type)} Q N</th>,
+                <th key={`${type}-qty-evol`} style={{ ...compactHeaderBase, color: DOC_COLORS[type] }}>Evol Q</th>,
+              ]))}
+              {DOC_TYPES.flatMap((type) => ([
+                <th key={`${type}-amt-n1`} style={{ ...compactHeaderBase, color: DOC_COLORS[type] }}>{shortDocLabel(type)} € N-1</th>,
+                <th key={`${type}-amt-n`} style={{ ...compactHeaderBase, color: DOC_COLORS[type] }}>{shortDocLabel(type)} € N</th>,
+                <th key={`${type}-amt-evol`} style={{ ...compactHeaderBase, color: DOC_COLORS[type] }}>Evol €</th>,
+              ]))}
+            </tr>
+          </thead>
+          <tbody>
+            {displayRows.length === 0 ? (
+              <tr><td colSpan={25} style={styles.emptyCell}>{emptyMessage}</td></tr>
+            ) : displayRows.map((row, index) => {
+              const isTotal = index === 0 && row.label === 'TOTAL'
+              return (
+                <tr key={`family-comparison-${row.label}`} style={isTotal ? styles.totalRow : undefined}>
+                  <td style={isTotal ? styles.tdStrongTotalCompact : styles.tdStrongCompact}>{row.label}</td>
+                  {DOC_TYPES.flatMap((type) => {
+                    const cell = row.byType[type]
+                    const evol = pctEvolution(cell.qtyPertN, cell.qtyPertN1)
+                    return [
+                      <td key={`${type}-qty-n1`} style={qtyCellStyle(cell.qtyPertN1, DOC_COLORS[type], isTotal, true)}>{formatNumber(cell.qtyPertN1)}</td>,
+                      <td key={`${type}-qty-n`} style={qtyCellStyle(cell.qtyPertN, DOC_COLORS[type], isTotal, true)}>{formatNumber(cell.qtyPertN)}</td>,
+                      <td key={`${type}-qty-evol`} style={pctCellStyle(evol, isTotal, true)}>{formatPct(evol)}</td>,
+                    ]
+                  })}
+                  {DOC_TYPES.flatMap((type) => {
+                    const cell = row.byType[type]
+                    const evol = pctEvolution(cell.amountN, cell.amountN1)
+                    return [
+                      <td key={`${type}-amt-n1`} style={moneyCellStyle(cell.amountN1, DOC_COLORS[type], isTotal, true)}>{formatMoneyCompact(cell.amountN1)}</td>,
+                      <td key={`${type}-amt-n`} style={moneyCellStyle(cell.amountN, DOC_COLORS[type], isTotal, true)}>{formatMoneyCompact(cell.amountN)}</td>,
+                      <td key={`${type}-amt-evol`} style={pctCellStyle(evol, isTotal, true)}>{formatPct(evol)}</td>,
+                    ]
+                  })}
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }
@@ -2784,9 +2825,9 @@ function Rolling12ComparisonTable({
           <tr>
             <th style={styles.th}>Dimension</th>
             {DOC_TYPES.flatMap((type) => ([
-              <th key={`${type}-n1`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>{type} N-1</th>,
-              <th key={`${type}-n`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>{type} N</th>,
-              <th key={`${type}-evol`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>Evol {type === 'Factures' ? 'Fac' : type}</th>,
+              <th key={`${type}-n1`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>{shortDocLabel(type)} N-1</th>,
+              <th key={`${type}-n`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>{shortDocLabel(type)} N</th>,
+              <th key={`${type}-evol`} style={{ ...styles.thRight, color: DOC_COLORS[type] }}>Evol {shortDocLabel(type)}</th>,
             ]))}
           </tr>
         </thead>
@@ -3211,14 +3252,22 @@ const styles: Record<string, React.CSSProperties> = {
   sectionSubtitle: { marginTop: -4, marginBottom: 10, color: '#64748b', fontSize: 12, fontWeight: 700, lineHeight: 1.45 },
   tableWrap: { overflow: 'auto', maxWidth: '100%', border: '1px solid #e2e8f0', borderRadius: 12 },
   table: { width: '100%', borderCollapse: 'collapse', fontSize: 12, minWidth: 760 },
+  compactTableWrap: { overflowX: 'hidden', overflowY: 'visible', maxWidth: '100%', border: '1px solid #e2e8f0', borderRadius: 12 },
+  familyComparisonTable: { width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', fontSize: 10 },
   th: { background: '#f1f5f9', color: '#0f172a', borderBottom: '1px solid #e2e8f0', padding: '8px 9px', textAlign: 'left', fontWeight: 950, whiteSpace: 'nowrap' },
   thRight: { background: '#f1f5f9', color: '#0f172a', borderBottom: '1px solid #e2e8f0', padding: '8px 9px', textAlign: 'right', fontWeight: 950, whiteSpace: 'nowrap' },
+  thCompact: { background: '#f1f5f9', color: '#0f172a', borderBottom: '1px solid #e2e8f0', padding: '5px 4px', textAlign: 'left', fontWeight: 950, whiteSpace: 'normal', lineHeight: 1.05 },
+  thRightCompact: { background: '#f1f5f9', color: '#0f172a', borderBottom: '1px solid #e2e8f0', padding: '5px 3px', textAlign: 'right', fontWeight: 950, whiteSpace: 'normal', lineHeight: 1.05 },
   td: { borderBottom: '1px solid #f1f5f9', padding: '7px 9px', color: '#0f172a', whiteSpace: 'nowrap' },
   tdStrong: { borderBottom: '1px solid #f1f5f9', padding: '7px 9px', color: '#0f172a', fontWeight: 900, whiteSpace: 'nowrap' },
   tdRight: { borderBottom: '1px solid #f1f5f9', padding: '7px 9px', textAlign: 'right', color: '#0f172a', fontWeight: 800, whiteSpace: 'nowrap' },
+  tdStrongCompact: { borderBottom: '1px solid #f1f5f9', padding: '5px 4px', color: '#0f172a', fontWeight: 900, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  tdRightCompact: { borderBottom: '1px solid #f1f5f9', padding: '5px 3px', textAlign: 'right', color: '#0f172a', fontWeight: 800, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'clip' },
   totalRow: { background: '#f8fafc' },
   tdStrongTotal: { borderBottom: '2px solid #cbd5e1', padding: '8px 9px', color: '#0f172a', fontWeight: 950, whiteSpace: 'nowrap' },
   tdRightTotal: { borderBottom: '2px solid #cbd5e1', padding: '8px 9px', textAlign: 'right', color: '#0f172a', fontWeight: 950, whiteSpace: 'nowrap' },
+  tdStrongTotalCompact: { borderBottom: '2px solid #cbd5e1', padding: '5px 4px', color: '#0f172a', fontWeight: 950, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  tdRightTotalCompact: { borderBottom: '2px solid #cbd5e1', padding: '5px 3px', textAlign: 'right', color: '#0f172a', fontWeight: 950, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'clip' },
   emptyCell: { padding: 18, textAlign: 'center', color: '#64748b', fontWeight: 900 },
 }
 
