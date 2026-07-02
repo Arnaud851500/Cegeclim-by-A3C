@@ -359,14 +359,58 @@ export async function POST(req: NextRequest) {
       throw new Error(`La page Focus print répond HTTP ${status}. URL=${redactSecretInUrl(focusUrl.toString())}`)
     }
 
-    await mark('waiting_focus_ready')
-    await withTimeout(
-      page.waitForSelector('[data-focus-report-ready="1"], [data-report-ready="1"]', {
-        timeout: timeoutMs('FOCUS_PDF_READY_TIMEOUT_MS', 120000),
-      }),
-      timeoutMs('FOCUS_PDF_READY_HARD_TIMEOUT_MS', 135000),
-      'Attente data-focus-report-ready=1'
-    )
+   async function waitForFocusReadyWithHeartbeat() {
+  const startedAt = Date.now()
+  const maxMs = timeoutMs('FOCUS_PDF_READY_HARD_TIMEOUT_MS', 180000)
+  let lastState: any = null
+
+  while (Date.now() - startedAt < maxMs) {
+    lastState = await page.evaluate(() => {
+      const root = document.querySelector('[data-focus-report-ready], [data-report-ready]') as HTMLElement | null
+      const bodyText = document.body?.innerText || ''
+
+      return {
+        ready:
+          root?.getAttribute('data-focus-report-ready') ||
+          root?.getAttribute('data-report-ready') ||
+          null,
+        status:
+          root?.getAttribute('data-focus-report-status') ||
+          root?.getAttribute('data-report-status') ||
+          null,
+        loading: root?.getAttribute('data-focus-report-loading') || null,
+        comparisonReady: root?.getAttribute('data-focus-comparison-ready') || null,
+        comparisonProgress: root?.getAttribute('data-focus-comparison-progress') || null,
+        projectedCurrentMonthFactures: root?.getAttribute('data-focus-projected-current-month-factures') || null,
+        hasVisibleError: /Erreur chargement|Erreur rapport|Génération PDF impossible|statement timeout/i.test(bodyText),
+        bodyPreview: bodyText.slice(0, 800),
+      }
+    })
+
+    await mark('waiting_focus_ready', {
+      page_state: lastState,
+      elapsed_ms: Date.now() - startedAt,
+    })
+
+    if (lastState.ready === '1' && lastState.status !== 'error' && !lastState.hasVisibleError) {
+      return lastState
+    }
+
+    if (lastState.status === 'error' || lastState.hasVisibleError) {
+      throw new Error(
+        `La page Focus Mensuel indique une erreur avant génération PDF. Etat=${JSON.stringify(lastState)}`
+      )
+    }
+
+    await sleep(3000)
+  }
+
+  throw new Error(
+    `Timeout attente data-focus-report-ready=1 après ${maxMs} ms. Dernier état=${JSON.stringify(lastState)}`
+  )
+}
+
+await waitForFocusReadyWithHeartbeat()
 
     await mark('checking_page_state')
     const pageState = await page.evaluate(() => {
@@ -458,6 +502,12 @@ export async function POST(req: NextRequest) {
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
 
     await mark('rendering_pdf')
+   
+   function sleep(ms: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
     const pdf = await withTimeout(
       page.pdf({
         format: 'A4',
