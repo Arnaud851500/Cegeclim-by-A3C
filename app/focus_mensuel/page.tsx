@@ -2434,7 +2434,7 @@ function FocusMensuelPageContent() {
             break-inside: avoid !important;
             page-break-inside: avoid !important;
           }
-          .focus-pdf-kpi-card { padding: 8px !important; min-height: 114px !important; border-radius: 12px !important; }
+          .focus-pdf-kpi-card { padding: 6px !important; min-height: 92px !important; border-radius: 10px !important; }
           .focus-pdf-kpi-card [style*="font-size: 26"] { font-size: 18px !important; }
           .focus-pdf-chart-grid,
           .focus-pdf-section-grid {
@@ -2453,33 +2453,42 @@ function FocusMensuelPageContent() {
             break-inside: avoid !important;
             page-break-inside: avoid !important;
           }
-          .focus-pdf-chart-box svg { height: 185px !important; }
-          .focus-pdf-table-wrap { max-height: none !important; overflow: hidden !important; background: #ffffff !important; }
-          .focus-pdf-section-card table { min-width: 0 !important; font-size: 8px !important; }
-          .focus-pdf-section-card th, .focus-pdf-section-card td { padding: 4px 5px !important; }
+          .focus-pdf-chart-box svg { height: 158px !important; }
+          .focus-pdf-table-wrap { max-height: none !important; overflow: visible !important; background: #ffffff !important; }
+          .focus-pdf-section-card table { min-width: 0 !important; font-size: 6.6px !important; }
+          .focus-pdf-section-card th, .focus-pdf-section-card td { padding: 2.5px 3.5px !important; line-height: 1.08 !important; }
           .focus-pdf-highlights-grid {
-            grid-template-columns: 1fr !important;
-            gap: 8px !important;
+            grid-template-columns: 1fr 1fr !important;
+            gap: 5px !important;
             align-items: start !important;
+            margin-top: 4px !important;
           }
-          .focus-pdf-highlights-grid table { min-width: 0 !important; font-size: 8px !important; }
-          .focus-pdf-highlights-grid th, .focus-pdf-highlights-grid td { padding: 4px 5px !important; }
+          .focus-pdf-highlights-grid > .focus-pdf-section-card:first-child { grid-column: span 2 !important; }
+          .focus-pdf-highlights-grid table { min-width: 0 !important; font-size: 6.4px !important; }
+          .focus-pdf-highlights-grid th, .focus-pdf-highlights-grid td { padding: 2px 3px !important; line-height: 1.05 !important; }
           .focus-pdf-comparison-grid {
             grid-template-columns: 1fr !important;
             gap: 8px !important;
             margin-bottom: 8px !important;
           }
-          .focus-pdf-comparison-grid table { min-width: 0 !important; font-size: 7px !important; }
-          .focus-pdf-comparison-grid th, .focus-pdf-comparison-grid td { padding: 3px 4px !important; }
+          .focus-pdf-comparison-grid table { min-width: 0 !important; font-size: 5.8px !important; }
+          .focus-pdf-comparison-grid th, .focus-pdf-comparison-grid td { padding: 2px 3px !important; line-height: 1.04 !important; }
           .focus-pdf-agency-section-grid {
-            break-before: page !important;
-            page-break-before: always !important;
-            break-inside: avoid !important;
-            page-break-inside: avoid !important;
+            break-before: auto !important;
+            page-break-before: auto !important;
+            break-inside: auto !important;
+            page-break-inside: auto !important;
+            margin-top: 6px !important;
           }
           .focus-pdf-agency-section-grid > .focus-pdf-section-card {
             break-inside: avoid !important;
             page-break-inside: avoid !important;
+          }
+          html, body, main, section,
+          [data-focus-report-ready], [data-report-ready] {
+            min-height: 0 !important;
+            height: auto !important;
+            overflow: visible !important;
           }
         `}</style>
       )}

@@ -291,6 +291,18 @@ async function readPageState(page: Awaited<ReturnType<Awaited<ReturnType<typeof 
     const hasReportTitle = /ACTIVITE\s+CEGECLIM/i.test(bodyText)
     const hasCards = /Devis/i.test(bodyText) && /CDC/i.test(bodyText) && /\bBL\b/i.test(bodyText) && /Factures/i.test(bodyText)
     const hasMainContent = hasReportTitle && hasCards
+    const comparisonProgress = root?.getAttribute('data-focus-comparison-progress') || null
+    const comparisonMatch = String(comparisonProgress || '').match(/(\d+)\s*\/\s*(\d+)/)
+    const comparisonCurrent = comparisonMatch ? Number(comparisonMatch[1]) : null
+    const comparisonTotal = comparisonMatch ? Number(comparisonMatch[2]) : null
+    const comparisonComplete =
+      comparisonCurrent != null &&
+      comparisonTotal != null &&
+      Number.isFinite(comparisonCurrent) &&
+      Number.isFinite(comparisonTotal) &&
+      comparisonTotal > 0 &&
+      comparisonCurrent >= comparisonTotal
+    const hasPdfReadyMessage = /Données complètes|Donnees completes|génération PDF peut démarrer|generation PDF peut demarrer/i.test(bodyText)
 
     return {
       url: window.location.href,
@@ -299,7 +311,11 @@ async function readPageState(page: Awaited<ReturnType<Awaited<ReturnType<typeof 
       status: root?.getAttribute('data-focus-report-status') || root?.getAttribute('data-report-status') || null,
       loading: root?.getAttribute('data-focus-report-loading') || null,
       comparisonReady: root?.getAttribute('data-focus-comparison-ready') || null,
-      comparisonProgress: root?.getAttribute('data-focus-comparison-progress') || null,
+      comparisonProgress,
+      comparisonCurrent,
+      comparisonTotal,
+      comparisonComplete,
+      hasPdfReadyMessage,
       projectedCurrentMonthFactures: root?.getAttribute('data-focus-projected-current-month-factures') || null,
       hasReportTitle,
       hasCards,
@@ -316,18 +332,36 @@ async function waitForStableReport(
 ) {
   const startedAt = Date.now()
 
-  // IMPORTANT Vercel / serverless : cette étape ne doit jamais durer plusieurs minutes.
-  // La route process doit garder du temps pour page.pdf() + upload Storage.
-  // On plafonne volontairement les variables d'environnement pour éviter un nouveau blocage
-  // en waiting_page_stable si FOCUS_PDF_FALLBACK_MIN_WAIT_MS vaut encore 75000 ou 120000.
-  const minFallbackMs = Math.min(timeoutMs('FOCUS_PDF_FALLBACK_MIN_WAIT_MS', 12000), 20000)
-  const titleFallbackMs = Math.min(timeoutMs('FOCUS_PDF_TITLE_FALLBACK_MIN_WAIT_MS', 22000), 30000)
-  const hardMaxMs = Math.min(timeoutMs('FOCUS_PDF_READY_HARD_TIMEOUT_MS', 35000), 45000)
+  // On laisse maintenant le temps aux 3 tableaux comparatifs de s’actualiser.
+  // Les anciennes versions forçaient trop tôt le PDF et capturaient les tableaux vides.
+  // La génération reste toutefois bornée pour éviter les jobs morts en waiting_page_stable.
+  const minStableWaitMs = Math.min(
+    Math.max(timeoutMs('FOCUS_PDF_MIN_STABLE_WAIT_MS', 90000), 45000),
+    120000
+  )
+  const hardMaxMs = Math.min(
+    Math.max(timeoutMs('FOCUS_PDF_READY_HARD_TIMEOUT_MS', 140000), 90000),
+    165000
+  )
+  const progressStallMs = Math.min(
+    Math.max(timeoutMs('FOCUS_PDF_PROGRESS_STALL_MS', 30000), 15000),
+    45000
+  )
+
   let lastState: any = null
+  let lastProgressKey = ''
+  let lastProgressAt = Date.now()
 
   while (Date.now() - startedAt < hardMaxMs) {
     lastState = await readPageState(page)
     const elapsedMs = Date.now() - startedAt
+    const progressKey = String(lastState.comparisonProgress || '')
+
+    if (progressKey && progressKey !== lastProgressKey) {
+      lastProgressKey = progressKey
+      lastProgressAt = Date.now()
+    }
+
     const redactedState = {
       ...lastState,
       url: redactSecretInUrl(String(lastState.url || '')),
@@ -335,6 +369,10 @@ async function waitForStableReport(
 
     await mark('waiting_page_stable', {
       elapsed_ms: elapsedMs,
+      min_stable_wait_ms: minStableWaitMs,
+      hard_max_ms: hardMaxMs,
+      progress_stall_ms: progressStallMs,
+      progress_stalled_ms: Date.now() - lastProgressAt,
       page_state: redactedState,
     })
 
@@ -348,29 +386,36 @@ async function waitForStableReport(
     }
 
     if (lastState.ready === '1') {
-      await mark('page_ready_marker_found', { elapsed_ms: elapsedMs })
+      await mark('page_ready_marker_found', { elapsed_ms: elapsedMs, page_state: redactedState })
       return { mode: 'ready_marker', state: lastState }
     }
 
-    // Sortie de secours principale : les blocs essentiels sont visibles.
-    if (elapsedMs >= minFallbackMs && lastState.hasMainContent) {
-      await mark('page_fallback_ready_main_content', {
+    if (lastState.hasMainContent && lastState.comparisonComplete) {
+      await mark('page_ready_comparison_complete', {
         elapsed_ms: elapsedMs,
-        warning: 'Génération autorisée sans data-focus-report-ready=1 : contenu principal visible et aucune erreur bloquante.',
         page_state: redactedState,
+        warning: 'Génération autorisée : tableaux comparatifs complets.',
       })
-      return { mode: 'fallback_main_content', state: lastState }
+      return { mode: 'comparison_complete', state: lastState }
     }
 
-    // Sortie de secours renforcée : le titre du rapport est visible, mais les cartes ne sont pas toutes détectées
-    // dans innerText. Cela évite de laisser mourir la fonction serverless sur un compteur secondaire 35/36.
-    if (elapsedMs >= titleFallbackMs && lastState.hasReportTitle) {
-      await mark('page_force_ready_report_title', {
+    if (elapsedMs >= minStableWaitMs && lastState.hasMainContent && lastState.hasPdfReadyMessage) {
+      await mark('page_fallback_ready_after_min_wait', {
         elapsed_ms: elapsedMs,
-        warning: 'Génération forcée : titre rapport visible, absence d’erreur bloquante, attente stabilité plafonnée.',
         page_state: redactedState,
+        warning: 'Génération autorisée après attente longue : contenu principal visible et message de disponibilité PDF présent.',
       })
-      return { mode: 'fallback_report_title', state: lastState }
+      return { mode: 'fallback_min_wait_ready_message', state: lastState }
+    }
+
+    const progressStalled = Date.now() - lastProgressAt >= progressStallMs
+    if (elapsedMs >= minStableWaitMs && progressStalled && lastState.hasMainContent) {
+      await mark('page_fallback_ready_progress_stalled', {
+        elapsed_ms: elapsedMs,
+        page_state: redactedState,
+        warning: 'Génération autorisée : progression des tableaux figée après attente longue. Le PDF conserve les données déjà chargées.',
+      })
+      return { mode: 'fallback_progress_stalled', state: lastState }
     }
 
     await sleep(3000)
@@ -456,6 +501,59 @@ async function addPrintCss(page: Awaited<ReturnType<Awaited<ReturnType<typeof pu
         position: relative !important;
         z-index: 1 !important;
       }
+
+      /* Compactage PDF : supprime les grands blancs et évite de pousser les tableaux utiles sur la page suivante. */
+      html, body, main, section,
+      [data-focus-report-ready], [data-report-ready] {
+        min-height: 0 !important;
+        height: auto !important;
+        overflow: visible !important;
+      }
+      .focus-pdf-agency-section-grid {
+        break-before: auto !important;
+        page-break-before: auto !important;
+        break-inside: auto !important;
+        page-break-inside: auto !important;
+        margin-top: 6px !important;
+      }
+      .focus-pdf-section-grid,
+      .focus-pdf-chart-grid,
+      .focus-pdf-kpi-grid,
+      .focus-pdf-comparison-grid,
+      .focus-pdf-highlights-grid {
+        gap: 5px !important;
+        margin-bottom: 5px !important;
+      }
+      .focus-pdf-section-card,
+      .focus-pdf-chart-box,
+      .focus-pdf-kpi-card {
+        padding: 6px !important;
+        border-radius: 8px !important;
+        break-inside: avoid !important;
+        page-break-inside: avoid !important;
+      }
+      .focus-pdf-kpi-card { min-height: 92px !important; }
+      .focus-pdf-chart-box svg { height: 158px !important; }
+      .focus-pdf-table-wrap {
+        max-height: none !important;
+        overflow: visible !important;
+      }
+      .focus-pdf-section-card table { font-size: 6.6px !important; }
+      .focus-pdf-section-card th,
+      .focus-pdf-section-card td { padding: 2.5px 3.5px !important; line-height: 1.08 !important; }
+      .focus-pdf-comparison-grid table { font-size: 5.8px !important; }
+      .focus-pdf-comparison-grid th,
+      .focus-pdf-comparison-grid td { padding: 2px 3px !important; line-height: 1.04 !important; }
+      .focus-pdf-highlights-grid {
+        grid-template-columns: 1fr 1fr !important;
+        align-items: start !important;
+      }
+      .focus-pdf-highlights-grid > .focus-pdf-section-card:first-child {
+        grid-column: span 2 !important;
+      }
+      .focus-pdf-highlights-grid table { font-size: 6.4px !important; }
+      .focus-pdf-highlights-grid th,
+      .focus-pdf-highlights-grid td { padding: 2px 3px !important; line-height: 1.05 !important; }
     `,
   })
 }
@@ -575,7 +673,10 @@ async function processJob(req: NextRequest) {
         printBackground: true,
         preferCSSPageSize: true,
         margin: { top: '3mm', right: '3mm', bottom: '3mm', left: '3mm' },
-        scale: Number(process.env.FOCUS_PDF_LANDSCAPE_SCALE || process.env.FOCUS_PDF_SCALE || 0.72),
+        scale: Math.min(
+          Number(process.env.FOCUS_PDF_LANDSCAPE_SCALE || process.env.FOCUS_PDF_SCALE || 0.66),
+          0.68
+        ),
       }),
       timeoutMs('FOCUS_PDF_RENDER_TIMEOUT_MS', 90000),
       'Rendu page.pdf()'
