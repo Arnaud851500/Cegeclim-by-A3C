@@ -31,6 +31,17 @@ type AuthorizedCaller = {
   email?: string | null
 }
 
+type FocusReadyState = {
+  ready: string | null
+  status: string | null
+  loading: string | null
+  comparisonReady: string | null
+  comparisonProgress: string | null
+  projectedCurrentMonthFactures: string | null
+  bodyPreview: string
+  hasVisibleError: boolean
+}
+
 function getRequiredEnv(name: string) {
   const value = process.env[name]
   if (!value) throw new Error(`Variable d'environnement manquante : ${name}`)
@@ -52,13 +63,44 @@ function sanitizeError(error: unknown) {
   return String(error)
 }
 
+function timeoutMs(name: string, fallback: number) {
+  const value = Number(process.env[name] || fallback)
+  return Number.isFinite(value) && value > 0 ? value : fallback
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} : timeout après ${ms} ms`)), ms)
+  })
+
+  try {
+    return await Promise.race([promise, timeout])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 function buildSupabaseAdmin() {
   const supabaseUrl = getRequiredEnv('SUPABASE_URL')
   const serviceRoleKey = getRequiredEnv('SUPABASE_SERVICE_ROLE_KEY')
-  return createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } })
+
+  return createClient(supabaseUrl, serviceRoleKey, {
+    auth: { persistSession: false },
+  })
 }
 
-async function authorizeRequest(req: NextRequest, supabaseAdmin: SupabaseClient): Promise<AuthorizedCaller> {
+async function authorizeRequest(
+  req: NextRequest,
+  supabaseAdmin: SupabaseClient
+): Promise<AuthorizedCaller> {
   const trustedSecret = process.env.REPORT_PDF_RENDER_SECRET || process.env.INTERNAL_API_SECRET || ''
   const incomingSecret = req.headers.get('x-report-secret') || req.headers.get('x-internal-secret') || ''
 
@@ -109,7 +151,7 @@ function buildFocusPrintUrl(payload: PdfRequest = {}) {
   appendParam(focusUrl, 'caProjeteFactures', caProjeteFactures)
   appendParam(focusUrl, 'ca_projete_factures', caProjeteFactures)
 
-  // Evite qu'un rendu PDF réutilise une page ou des appels front mis en cache.
+  // Evite de réutiliser une page ou des appels front mis en cache pendant le rendu PDF.
   appendParam(focusUrl, 'render_ts', Date.now())
 
   return focusUrl
@@ -122,24 +164,6 @@ function isLoginPageText(bodyText: string) {
     text.includes('Connexion') &&
     text.includes('SUIVI COMMERCIAL & PROSPECT')
   )
-}
-
-function timeoutMs(name: string, fallback: number) {
-  const value = Number(process.env[name] || fallback)
-  return Number.isFinite(value) && value > 0 ? value : fallback
-}
-
-async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  let timer: NodeJS.Timeout | undefined
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label} : timeout après ${ms} ms`)), ms)
-  })
-
-  try {
-    return await Promise.race([promise, timeout])
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
 }
 
 async function launchBrowser() {
@@ -207,12 +231,18 @@ export async function GET(req: NextRequest) {
     const focusUrl = buildFocusPrintUrl({
       month: url.searchParams.get('month') || undefined,
       focus_date: url.searchParams.get('focus_date') || url.searchParams.get('focusDate') || undefined,
-      hors_statistiques: url.searchParams.get('hors_statistiques') || url.searchParams.get('horsStatistiques') || 'afficher',
+      hors_statistiques:
+        url.searchParams.get('hors_statistiques') ||
+        url.searchParams.get('horsStatistiques') ||
+        'afficher',
       view: url.searchParams.get('view') || 'montant_ht',
       agence: url.searchParams.get('agence') || null,
       famille_macro: url.searchParams.get('famille_macro') || url.searchParams.get('familleMacro') || null,
       collaborateur: url.searchParams.get('collaborateur') || null,
-      caProjeteFactures: url.searchParams.get('caProjeteFactures') || url.searchParams.get('ca_projete_factures') || '1',
+      caProjeteFactures:
+        url.searchParams.get('caProjeteFactures') ||
+        url.searchParams.get('ca_projete_factures') ||
+        '1',
     })
 
     return NextResponse.json({
@@ -235,6 +265,7 @@ export async function POST(req: NextRequest) {
   let caller: AuthorizedCaller | null = null
   let supabaseAdmin: SupabaseClient | null = null
   let jobId: number | null = null
+
   const trace: Array<Record<string, unknown>> = []
   const consoleMessages: string[] = []
   const requestFailures: string[] = []
@@ -245,7 +276,9 @@ export async function POST(req: NextRequest) {
       at: new Date().toISOString(),
       ...extra,
     }
+
     trace.push(entry)
+    if (trace.length > 80) trace.splice(0, trace.length - 80)
 
     if (!supabaseAdmin || !jobId) return
 
@@ -275,7 +308,13 @@ export async function POST(req: NextRequest) {
     supabaseAdmin = buildSupabaseAdmin()
     caller = await authorizeRequest(req, supabaseAdmin)
 
-    const payload = (await req.json()) as PdfRequest
+    let payload: PdfRequest = {}
+    try {
+      payload = (await req.json()) as PdfRequest
+    } catch {
+      payload = {}
+    }
+
     const bucket = payload.bucket || 'commercial-imports'
     const pdfPath = payload.path || 'reports/focus-mensuel/Rapport_activite_quotidien.pdf'
     const focusUrl = buildFocusPrintUrl(payload)
@@ -315,7 +354,9 @@ export async function POST(req: NextRequest) {
 
     page.on('requestfailed', (request) => {
       const failure = request.failure()
-      requestFailures.push(`${request.method()} ${request.url()} :: ${failure?.errorText || 'request failed'}`.slice(0, 500))
+      requestFailures.push(
+        `${request.method()} ${request.url()} :: ${failure?.errorText || 'request failed'}`.slice(0, 500)
+      )
       if (requestFailures.length > 25) requestFailures.shift()
     })
 
@@ -324,11 +365,12 @@ export async function POST(req: NextRequest) {
       height: Number(process.env.FOCUS_PDF_VIEWPORT_HEIGHT || 1200),
       deviceScaleFactor: 1,
     })
+
     await page.emulateMediaType('screen')
     page.setDefaultTimeout(timeoutMs('FOCUS_PDF_DEFAULT_TIMEOUT_MS', 120000))
     page.setDefaultNavigationTimeout(timeoutMs('FOCUS_PDF_GOTO_TIMEOUT_MS', 45000))
 
-    // Bloque seulement les ressources vraiment inutiles au PDF. On garde les images, car le logo doit rester disponible.
+    // On bloque seulement les ressources inutiles au PDF. On garde les images pour le logo.
     await page.setRequestInterception(true)
     page.on('request', (request) => {
       const type = request.resourceType()
@@ -359,17 +401,78 @@ export async function POST(req: NextRequest) {
       throw new Error(`La page Focus print répond HTTP ${status}. URL=${redactSecretInUrl(focusUrl.toString())}`)
     }
 
-   async function waitForFocusReadyWithHeartbeat() {
-  const startedAt = Date.now()
-  const maxMs = timeoutMs('FOCUS_PDF_READY_HARD_TIMEOUT_MS', 180000)
-  let lastState: any = null
+    async function waitForFocusReadyWithHeartbeat() {
+      const startedAt = Date.now()
+      const maxMs = timeoutMs('FOCUS_PDF_READY_HARD_TIMEOUT_MS', 180000)
+      let lastState: FocusReadyState | null = null
 
-  while (Date.now() - startedAt < maxMs) {
-    lastState = await page.evaluate(() => {
+      while (Date.now() - startedAt < maxMs) {
+        lastState = await page.evaluate(() => {
+          const root = document.querySelector('[data-focus-report-ready], [data-report-ready]') as HTMLElement | null
+          const bodyText = document.body?.innerText || ''
+
+          return {
+            ready:
+              root?.getAttribute('data-focus-report-ready') ||
+              root?.getAttribute('data-report-ready') ||
+              null,
+            status:
+              root?.getAttribute('data-focus-report-status') ||
+              root?.getAttribute('data-report-status') ||
+              null,
+            loading: root?.getAttribute('data-focus-report-loading') || null,
+            comparisonReady: root?.getAttribute('data-focus-comparison-ready') || null,
+            comparisonProgress: root?.getAttribute('data-focus-comparison-progress') || null,
+            projectedCurrentMonthFactures:
+              root?.getAttribute('data-focus-projected-current-month-factures') || null,
+            bodyPreview: bodyText.slice(0, 1200),
+            hasVisibleError:
+              /Erreur chargement|Erreur rapport|Génération PDF impossible|statement timeout|canceling statement/i.test(bodyText),
+          }
+        })
+
+        await mark('waiting_focus_ready', {
+          elapsed_ms: Date.now() - startedAt,
+          page_state: lastState,
+          console_messages: consoleMessages,
+          request_failures: requestFailures,
+        })
+
+        if (
+          lastState.ready === '1' &&
+          lastState.status !== 'error' &&
+          !lastState.hasVisibleError
+        ) {
+          return lastState
+        }
+
+        if (lastState.status === 'error' || lastState.hasVisibleError) {
+          throw new Error(
+            `La page Focus Mensuel indique une erreur avant génération PDF. Etat=${JSON.stringify(lastState)}`
+          )
+        }
+
+        await sleep(3000)
+      }
+
+      throw new Error(
+        `Timeout attente data-focus-report-ready=1 après ${maxMs} ms. Dernier état=${JSON.stringify(lastState)}`
+      )
+    }
+
+    await mark('waiting_focus_ready_start')
+    await waitForFocusReadyWithHeartbeat()
+    await mark('waiting_focus_ready_done')
+
+    await mark('checking_page_state')
+    const pageState = await page.evaluate(() => {
       const root = document.querySelector('[data-focus-report-ready], [data-report-ready]') as HTMLElement | null
       const bodyText = document.body?.innerText || ''
 
       return {
+        url: window.location.href,
+        title: document.title,
+        bodyPreview: bodyText.slice(0, 1000),
         ready:
           root?.getAttribute('data-focus-report-ready') ||
           root?.getAttribute('data-report-ready') ||
@@ -381,52 +484,10 @@ export async function POST(req: NextRequest) {
         loading: root?.getAttribute('data-focus-report-loading') || null,
         comparisonReady: root?.getAttribute('data-focus-comparison-ready') || null,
         comparisonProgress: root?.getAttribute('data-focus-comparison-progress') || null,
-        projectedCurrentMonthFactures: root?.getAttribute('data-focus-projected-current-month-factures') || null,
-        hasVisibleError: /Erreur chargement|Erreur rapport|Génération PDF impossible|statement timeout/i.test(bodyText),
-        bodyPreview: bodyText.slice(0, 800),
-      }
-    })
-
-    await mark('waiting_focus_ready', {
-      page_state: lastState,
-      elapsed_ms: Date.now() - startedAt,
-    })
-
-    if (lastState.ready === '1' && lastState.status !== 'error' && !lastState.hasVisibleError) {
-      return lastState
-    }
-
-    if (lastState.status === 'error' || lastState.hasVisibleError) {
-      throw new Error(
-        `La page Focus Mensuel indique une erreur avant génération PDF. Etat=${JSON.stringify(lastState)}`
-      )
-    }
-
-    await sleep(3000)
-  }
-
-  throw new Error(
-    `Timeout attente data-focus-report-ready=1 après ${maxMs} ms. Dernier état=${JSON.stringify(lastState)}`
-  )
-}
-
-await waitForFocusReadyWithHeartbeat()
-
-    await mark('checking_page_state')
-    const pageState = await page.evaluate(() => {
-      const root = document.querySelector('[data-focus-report-ready], [data-report-ready]') as HTMLElement | null
-      const bodyText = document.body?.innerText || ''
-      return {
-        url: window.location.href,
-        title: document.title,
-        bodyPreview: bodyText.slice(0, 1000),
-        ready: root?.getAttribute('data-focus-report-ready') || root?.getAttribute('data-report-ready') || null,
-        status: root?.getAttribute('data-focus-report-status') || root?.getAttribute('data-report-status') || null,
-        loading: root?.getAttribute('data-focus-report-loading') || null,
-        comparisonReady: root?.getAttribute('data-focus-comparison-ready') || null,
-        comparisonProgress: root?.getAttribute('data-focus-comparison-progress') || null,
-        projectedCurrentMonthFactures: root?.getAttribute('data-focus-projected-current-month-factures') || null,
-        hasVisibleError: /Erreur chargement|Erreur rapport|Génération PDF impossible|statement timeout/i.test(bodyText),
+        projectedCurrentMonthFactures:
+          root?.getAttribute('data-focus-projected-current-month-factures') || null,
+        hasVisibleError:
+          /Erreur chargement|Erreur rapport|Génération PDF impossible|statement timeout|canceling statement/i.test(bodyText),
       }
     })
 
@@ -494,20 +555,23 @@ await waitForFocusReadyWithHeartbeat()
           backdrop-filter: none !important;
           -webkit-backdrop-filter: none !important;
         }
-        .no-print, [data-no-print="true"], .focus-pdf-header-actions { display: none !important; }
+        .no-print,
+        [data-no-print="true"],
+        .focus-pdf-header-actions {
+          display: none !important;
+        }
       `,
     })
 
     await mark('stabilizing_layout')
-    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+        })
+    )
 
     await mark('rendering_pdf')
-   
-   function sleep(ms: number) {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, ms)
-  })
-}
     const pdf = await withTimeout(
       page.pdf({
         format: 'A4',
@@ -530,6 +594,7 @@ await waitForFocusReadyWithHeartbeat()
       timeoutMs('FOCUS_PDF_UPLOAD_TIMEOUT_MS', 45000),
       'Upload Storage PDF'
     )
+
     if (uploadError) throw new Error(`Upload Storage impossible : ${uploadError.message}`)
 
     await mark('done', {
@@ -553,6 +618,7 @@ await waitForFocusReadyWithHeartbeat()
     })
   } catch (error) {
     const errorMessage = sanitizeError(error)
+
     await mark('error', {
       status: 'error',
       error_message: errorMessage,
