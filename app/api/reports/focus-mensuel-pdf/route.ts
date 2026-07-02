@@ -21,23 +21,14 @@ type PdfRequest = {
   famille_macro?: string | null
   familleMacro?: string | null
   collaborateur?: string | null
+  caProjeteFactures?: string | number | boolean | null
+  ca_projete_factures?: string | number | boolean | null
   filename?: string
-  caProjeteFactures?: string | boolean | number | null
-  ca_projete_factures?: string | boolean | number | null
-  wait_for_ready_selector?: string | null
-  wait_timeout_ms?: number | null
 }
 
 type AuthorizedCaller = {
   mode: 'trusted_secret' | 'user_session'
   email?: string | null
-}
-
-type TraceEntry = {
-  step: string
-  at: string
-  ms_from_start: number
-  extra?: Record<string, unknown>
 }
 
 function getRequiredEnv(name: string) {
@@ -46,17 +37,10 @@ function getRequiredEnv(name: string) {
   return value
 }
 
-function appendParam(url: URL, key: string, value: string | undefined | null) {
+function appendParam(url: URL, key: string, value: string | number | boolean | undefined | null) {
   if (value !== undefined && value !== null && String(value).trim() !== '') {
     url.searchParams.set(key, String(value))
   }
-}
-
-function boolParam(value: unknown, defaultValue = '1') {
-  if (value === undefined || value === null || value === '') return defaultValue
-  if (value === true || value === 1 || String(value).toLowerCase() === 'true') return '1'
-  if (value === false || value === 0 || String(value).toLowerCase() === 'false') return '0'
-  return String(value)
 }
 
 function redactSecretInUrl(url: string) {
@@ -107,11 +91,11 @@ function buildFocusPrintUrl(payload: PdfRequest = {}) {
   const focusDate = payload.focus_date || payload.focusDate
   const horsStatistiques = payload.hors_statistiques || payload.horsStatistiques || 'afficher'
   const familleMacro = payload.famille_macro || payload.familleMacro || null
-  const caProjeteFactures = boolParam(payload.caProjeteFactures ?? payload.ca_projete_factures, '1')
+  const caProjeteFactures = payload.caProjeteFactures ?? payload.ca_projete_factures ?? '1'
 
   appendParam(focusUrl, 'pdf', '1')
+  appendParam(focusUrl, 'print', '1')
   appendParam(focusUrl, 'render_secret', renderSecret)
-  appendParam(focusUrl, 'render_ts', String(Date.now()))
   appendParam(focusUrl, 'month', payload.month)
   appendParam(focusUrl, 'focusDate', focusDate)
   appendParam(focusUrl, 'focus_date', focusDate)
@@ -125,6 +109,9 @@ function buildFocusPrintUrl(payload: PdfRequest = {}) {
   appendParam(focusUrl, 'caProjeteFactures', caProjeteFactures)
   appendParam(focusUrl, 'ca_projete_factures', caProjeteFactures)
 
+  // Evite qu'un rendu PDF réutilise une page ou des appels front mis en cache.
+  appendParam(focusUrl, 'render_ts', Date.now())
+
   return focusUrl
 }
 
@@ -137,10 +124,22 @@ function isLoginPageText(bodyText: string) {
   )
 }
 
-function hasFocusErrorText(bodyText: string) {
-  return /Erreur chargement focus mensuel|Erreur chargement documents distincts|Erreur tableaux activité|Erreur rapport/i.test(
-    String(bodyText || '')
-  )
+function timeoutMs(name: string, fallback: number) {
+  const value = Number(process.env[name] || fallback)
+  return Number.isFinite(value) && value > 0 ? value : fallback
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} : timeout après ${ms} ms`)), ms)
+  })
+
+  try {
+    return await Promise.race([promise, timeout])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
 async function launchBrowser() {
@@ -153,14 +152,13 @@ async function launchBrowser() {
       '--disable-gpu',
       '--no-sandbox',
       '--disable-setuid-sandbox',
-      '--font-render-hinting=none',
     ],
     executablePath,
     headless: true,
+    protocolTimeout: timeoutMs('FOCUS_PDF_PROTOCOL_TIMEOUT_MS', 240000),
     defaultViewport: {
       width: Number(process.env.FOCUS_PDF_VIEWPORT_WIDTH || 1920),
       height: Number(process.env.FOCUS_PDF_VIEWPORT_HEIGHT || 1200),
-      deviceScaleFactor: 1,
     },
   })
 }
@@ -170,169 +168,24 @@ async function createPdfJob(
   bucket: string,
   path: string,
   payload: PdfRequest
-): Promise<number | null> {
-  try {
-    const { data, error } = await supabaseAdmin
-      .from('report_pdf_jobs')
-      .insert({
-        report_type: 'focus_mensuel',
-        status: 'running',
-        step: 'starting',
-        bucket,
-        path,
-        payload: payload as any,
-      })
-      .select('id')
-      .single()
-
-    if (error) {
-      console.warn('Création report_pdf_jobs impossible', error.message)
-      return null
-    }
-
-    return Number(data?.id || 0) || null
-  } catch (error) {
-    console.warn('Table report_pdf_jobs indisponible', sanitizeError(error))
-    return null
-  }
-}
-
-async function updatePdfJob(
-  supabaseAdmin: SupabaseClient,
-  jobId: number | null,
-  step: string,
-  patch: Record<string, unknown> = {}
 ) {
-  if (!jobId) return
+  const { data, error } = await supabaseAdmin
+    .from('report_pdf_jobs')
+    .insert({
+      report_type: 'focus_mensuel',
+      status: 'running',
+      step: 'starting',
+      bucket,
+      path,
+      payload,
+      started_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .select('id')
+    .single()
 
-  try {
-    const statusPatch = step === 'done'
-      ? { status: 'done', finished_at: new Date().toISOString() }
-      : step === 'error'
-        ? { status: 'error', finished_at: new Date().toISOString() }
-        : {}
-
-    await supabaseAdmin
-      .from('report_pdf_jobs')
-      .update({
-        step,
-        updated_at: new Date().toISOString(),
-        ...statusPatch,
-        ...patch,
-      })
-      .eq('id', jobId)
-  } catch (error) {
-    console.warn(`Mise à jour job PDF impossible étape=${step}`, sanitizeError(error))
-  }
-}
-
-function makeTracer(startedAt: number, trace: TraceEntry[]) {
-  return (step: string, extra?: Record<string, unknown>) => {
-    const entry: TraceEntry = {
-      step,
-      at: new Date().toISOString(),
-      ms_from_start: Date.now() - startedAt,
-      ...(extra ? { extra } : {}),
-    }
-    trace.push(entry)
-    console.log('[focus-pdf]', step, extra || '')
-    return entry
-  }
-}
-
-async function openFocusPageAndAssertReady(
-  page: Awaited<ReturnType<Awaited<ReturnType<typeof puppeteer.launch>>['newPage']>>,
-  targetUrl: string,
-  waitTimeoutMs: number
-) {
-  page.setDefaultTimeout(waitTimeoutMs)
-  page.setDefaultNavigationTimeout(waitTimeoutMs)
-
-  await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: waitTimeoutMs })
-
-  await page
-    .waitForFunction(
-      () => {
-        const root = document.querySelector('[data-focus-report-ready], [data-report-ready]') as HTMLElement | null
-        if (!root) return false
-
-        const focusReady = root.getAttribute('data-focus-report-ready') || root.getAttribute('data-report-ready')
-        const focusStatus = root.getAttribute('data-focus-report-status') || ''
-        const comparisonReady = root.getAttribute('data-focus-comparison-ready') || '1'
-        const docsReady = root.getAttribute('data-focus-docs-distinct-ready') || '1'
-        const body = document.body?.innerText || ''
-
-        if (focusStatus === 'error') return true
-        if (/Erreur chargement focus mensuel|Erreur chargement documents distincts|Erreur tableaux activité/i.test(body)) return true
-
-        return focusReady === '1' && comparisonReady !== '0' && docsReady !== '0'
-      },
-      { timeout: waitTimeoutMs }
-    )
-    .catch(() => null)
-
-  const loadedUrl = page.url()
-  const bodyText = await page.evaluate(() => document.body?.innerText || '')
-  const title = await page.title().catch(() => '')
-  const attrs = await page.evaluate(() => {
-    const root = document.querySelector('[data-focus-report-ready], [data-report-ready]') as HTMLElement | null
-    if (!root) return null
-    return {
-      focusReportReady: root.getAttribute('data-focus-report-ready'),
-      reportReady: root.getAttribute('data-report-ready'),
-      focusReportStatus: root.getAttribute('data-focus-report-status'),
-      focusReportLoading: root.getAttribute('data-focus-report-loading'),
-      focusComparisonReady: root.getAttribute('data-focus-comparison-ready'),
-      focusComparisonProgress: root.getAttribute('data-focus-comparison-progress'),
-      focusDocsDistinctReady: root.getAttribute('data-focus-docs-distinct-ready'),
-      focusDocsDistinctProgress: root.getAttribute('data-focus-docs-distinct-progress'),
-      projectedCurrentMonthFactures: root.getAttribute('data-focus-projected-current-month-factures'),
-    }
-  })
-
-  const readyFound = Boolean(attrs?.focusReportReady === '1' || attrs?.reportReady === '1')
-
-  if (loadedUrl.includes('/login') || isLoginPageText(bodyText)) {
-    throw new Error(
-      [
-        `La génération PDF a chargé l'écran de connexion au lieu du Focus Mensuel.`,
-        `URL demandée=${redactSecretInUrl(targetUrl)}`,
-        `URL chargée=${redactSecretInUrl(loadedUrl)}`,
-        `Titre=${title || '—'}`,
-        `Indice : FOCUS_MENSUEL_PRINT_URL doit pointer vers /focus_mensuel_print et cette route doit être exclue de l'auth globale.`,
-      ].join(' ')
-    )
-  }
-
-  if (attrs?.focusReportStatus === 'error' || hasFocusErrorText(bodyText)) {
-    throw new Error(
-      [
-        `La page Focus Mensuel indique une erreur avant génération PDF.`,
-        `URL=${redactSecretInUrl(targetUrl)}`,
-        `Attributs=${JSON.stringify(attrs)}`,
-        `Aperçu=${bodyText.slice(0, 1200)}`,
-      ].join(' ')
-    )
-  }
-
-  if (!readyFound) {
-    throw new Error(
-      [
-        `Timeout : marqueur data-focus-report-ready="1" introuvable avant génération PDF.`,
-        `URL=${redactSecretInUrl(targetUrl)}`,
-        `Attributs=${JSON.stringify(attrs)}`,
-        `Aperçu=${bodyText.slice(0, 1200)}`,
-      ].join(' ')
-    )
-  }
-
-  return {
-    loadedUrl,
-    title,
-    readyFound,
-    attrs,
-    bodyPreview: bodyText.slice(0, 500),
-  }
+  if (error) throw new Error(`Création job PDF impossible : ${error.message}`)
+  return Number(data.id)
 }
 
 export async function GET(req: NextRequest) {
@@ -378,72 +231,92 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const startedAt = Date.now()
-  const trace: TraceEntry[] = []
-  const mark = makeTracer(startedAt, trace)
-  const pageConsole: string[] = []
-  const pageErrors: string[] = []
-
   let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null
   let caller: AuthorizedCaller | null = null
-  let jobId: number | null = null
   let supabaseAdmin: SupabaseClient | null = null
+  let jobId: number | null = null
+  const trace: Array<Record<string, unknown>> = []
+  const consoleMessages: string[] = []
+  const requestFailures: string[] = []
+
+  async function mark(step: string, extra: Record<string, unknown> = {}) {
+    const entry = {
+      step,
+      at: new Date().toISOString(),
+      ...extra,
+    }
+    trace.push(entry)
+
+    if (!supabaseAdmin || !jobId) return
+
+    try {
+      const { error } = await supabaseAdmin
+        .from('report_pdf_jobs')
+        .update({
+          status: String(extra.status || 'running'),
+          step,
+          trace,
+          updated_at: new Date().toISOString(),
+          ...(extra.bytes !== undefined ? { bytes: extra.bytes } : {}),
+          ...(extra.error_message !== undefined ? { error_message: extra.error_message } : {}),
+          ...(extra.finished_at !== undefined ? { finished_at: extra.finished_at } : {}),
+        })
+        .eq('id', jobId)
+
+      if (error) {
+        console.warn(`Impossible de mettre à jour le job PDF étape ${step} :`, error.message)
+      }
+    } catch (exception) {
+      console.warn(`Erreur silencieuse mark étape ${step} :`, exception)
+    }
+  }
 
   try {
-    mark('build_supabase_admin')
     supabaseAdmin = buildSupabaseAdmin()
-
-    mark('authorize_request')
     caller = await authorizeRequest(req, supabaseAdmin)
 
     const payload = (await req.json()) as PdfRequest
     const bucket = payload.bucket || 'commercial-imports'
     const pdfPath = payload.path || 'reports/focus-mensuel/Rapport_activite_quotidien.pdf'
     const focusUrl = buildFocusPrintUrl(payload)
-    const waitTimeoutMs = Math.min(Math.max(Number(payload.wait_timeout_ms || 240000), 30000), 285000)
-
-    mark('create_job', { bucket, pdfPath })
-    jobId = await createPdfJob(supabaseAdmin, bucket, pdfPath, payload)
 
     const debug = req.nextUrl.searchParams.get('debug') === '1'
     if (debug) {
-      await updatePdfJob(supabaseAdmin, jobId, 'debug_done', { trace })
       return NextResponse.json({
         ok: true,
         debug: true,
-        job_id: jobId,
         bucket,
         pdfPath,
         focusMensuelPrintUrl: process.env.FOCUS_MENSUEL_PRINT_URL || null,
         targetUrl: redactSecretInUrl(focusUrl.toString()),
         hasRenderSecret: Boolean(process.env.REPORT_PDF_RENDER_SECRET),
         caller,
-        trace,
       })
     }
 
-    await updatePdfJob(supabaseAdmin, jobId, 'launching_browser', { trace })
-    mark('launching_browser')
-    browser = await launchBrowser()
+    jobId = await createPdfJob(supabaseAdmin, bucket, pdfPath, payload)
+    await mark('job_created', { target_url: redactSecretInUrl(focusUrl.toString()) })
 
-    await updatePdfJob(supabaseAdmin, jobId, 'opening_page', { trace })
-    mark('opening_page')
+    await mark('launching_browser')
+    browser = await withTimeout(
+      launchBrowser(),
+      timeoutMs('FOCUS_PDF_LAUNCH_TIMEOUT_MS', 30000),
+      'Lancement Chromium'
+    )
+
+    await mark('new_page')
     const page = await browser.newPage()
 
     page.on('console', (message) => {
       const text = `[${message.type()}] ${message.text()}`
-      pageConsole.push(text.slice(0, 1000))
-      console.log('[focus-pdf page console]', text)
+      consoleMessages.push(text.slice(0, 500))
+      if (consoleMessages.length > 25) consoleMessages.shift()
     })
-    page.on('pageerror', (error) => {
-      const text = sanitizeError(error)
-      pageErrors.push(text.slice(0, 1000))
-      console.warn('[focus-pdf page error]', text)
-    })
-    page.on('error', (error) => {
-      const text = sanitizeError(error)
-      pageErrors.push(text.slice(0, 1000))
-      console.warn('[focus-pdf page crashed]', text)
+
+    page.on('requestfailed', (request) => {
+      const failure = request.failure()
+      requestFailures.push(`${request.method()} ${request.url()} :: ${failure?.errorText || 'request failed'}`.slice(0, 500))
+      if (requestFailures.length > 25) requestFailures.shift()
     })
 
     await page.setViewport({
@@ -452,15 +325,88 @@ export async function POST(req: NextRequest) {
       deviceScaleFactor: 1,
     })
     await page.emulateMediaType('screen')
+    page.setDefaultTimeout(timeoutMs('FOCUS_PDF_DEFAULT_TIMEOUT_MS', 120000))
+    page.setDefaultNavigationTimeout(timeoutMs('FOCUS_PDF_GOTO_TIMEOUT_MS', 45000))
 
-    await updatePdfJob(supabaseAdmin, jobId, 'waiting_focus_ready', {
-      trace,
-      target_url: redactSecretInUrl(focusUrl.toString()),
+    // Bloque seulement les ressources vraiment inutiles au PDF. On garde les images, car le logo doit rester disponible.
+    await page.setRequestInterception(true)
+    page.on('request', (request) => {
+      const type = request.resourceType()
+      if (['media', 'websocket', 'eventsource'].includes(type)) {
+        void request.abort()
+        return
+      }
+      void request.continue()
     })
-    mark('waiting_focus_ready', { waitTimeoutMs, targetUrl: redactSecretInUrl(focusUrl.toString()) })
-    const pageInfo = await openFocusPageAndAssertReady(page, focusUrl.toString(), waitTimeoutMs)
 
-    mark('inject_print_css')
+    await mark('goto_start')
+    const response = await withTimeout(
+      page.goto(focusUrl.toString(), {
+        waitUntil: 'domcontentloaded',
+        timeout: timeoutMs('FOCUS_PDF_GOTO_TIMEOUT_MS', 45000),
+      }),
+      timeoutMs('FOCUS_PDF_GOTO_HARD_TIMEOUT_MS', 60000),
+      'Ouverture page Focus print'
+    )
+
+    const status = response?.status() || null
+    await mark('goto_done', {
+      http_status: status,
+      loaded_url: redactSecretInUrl(page.url()),
+    })
+
+    if (status && status >= 400) {
+      throw new Error(`La page Focus print répond HTTP ${status}. URL=${redactSecretInUrl(focusUrl.toString())}`)
+    }
+
+    await mark('waiting_focus_ready')
+    await withTimeout(
+      page.waitForSelector('[data-focus-report-ready="1"], [data-report-ready="1"]', {
+        timeout: timeoutMs('FOCUS_PDF_READY_TIMEOUT_MS', 120000),
+      }),
+      timeoutMs('FOCUS_PDF_READY_HARD_TIMEOUT_MS', 135000),
+      'Attente data-focus-report-ready=1'
+    )
+
+    await mark('checking_page_state')
+    const pageState = await page.evaluate(() => {
+      const root = document.querySelector('[data-focus-report-ready], [data-report-ready]') as HTMLElement | null
+      const bodyText = document.body?.innerText || ''
+      return {
+        url: window.location.href,
+        title: document.title,
+        bodyPreview: bodyText.slice(0, 1000),
+        ready: root?.getAttribute('data-focus-report-ready') || root?.getAttribute('data-report-ready') || null,
+        status: root?.getAttribute('data-focus-report-status') || root?.getAttribute('data-report-status') || null,
+        loading: root?.getAttribute('data-focus-report-loading') || null,
+        comparisonReady: root?.getAttribute('data-focus-comparison-ready') || null,
+        comparisonProgress: root?.getAttribute('data-focus-comparison-progress') || null,
+        projectedCurrentMonthFactures: root?.getAttribute('data-focus-projected-current-month-factures') || null,
+        hasVisibleError: /Erreur chargement|Erreur rapport|Génération PDF impossible|statement timeout/i.test(bodyText),
+      }
+    })
+
+    await mark('page_state_checked', {
+      page_state: {
+        ...pageState,
+        url: redactSecretInUrl(String(pageState.url || '')),
+      },
+      console_messages: consoleMessages,
+      request_failures: requestFailures,
+    })
+
+    if (isLoginPageText(pageState.bodyPreview || '') || String(pageState.url || '').includes('/login')) {
+      throw new Error(
+        `La génération PDF a chargé l'écran de connexion. URL chargée=${redactSecretInUrl(String(pageState.url || ''))}`
+      )
+    }
+
+    if (pageState.status === 'error' || pageState.hasVisibleError) {
+      throw new Error(
+        `La page Focus Mensuel indique une erreur avant génération PDF. Aperçu=${pageState.bodyPreview}`
+      )
+    }
+
     await page.addStyleTag({
       content: `
         @page { size: A4 landscape; margin: 3mm 3mm 3mm 3mm; }
@@ -497,63 +443,49 @@ export async function POST(req: NextRequest) {
           backdrop-filter: none !important;
           -webkit-backdrop-filter: none !important;
         }
-        [data-focus-report-ready] *, [data-focus-report-ready] *::before, [data-focus-report-ready] *::after {
+        [data-focus-report-ready] *,
+        [data-focus-report-ready] *::before,
+        [data-focus-report-ready] *::after {
           filter: none !important;
           backdrop-filter: none !important;
           -webkit-backdrop-filter: none !important;
         }
-        .focus-pdf-brand-header,
-        .focus-pdf-filters,
-        .focus-pdf-kpi-grid > div,
-        .focus-pdf-chart-box,
-        .focus-pdf-section-card,
-        .focus-pdf-table-wrap {
-          background-image: none !important;
-          box-shadow: none !important;
-          filter: none !important;
-          backdrop-filter: none !important;
-          -webkit-backdrop-filter: none !important;
-          position: relative !important;
-          z-index: 1 !important;
-        }
-        .no-print, [data-no-print="true"] { display: none !important; }
+        .no-print, [data-no-print="true"], .focus-pdf-header-actions { display: none !important; }
       `,
     })
 
-    await page.evaluate(() => new Promise((resolve) => window.requestAnimationFrame(() => resolve(true))))
-    await new Promise((resolve) => setTimeout(resolve, 1200))
+    await mark('stabilizing_layout')
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
 
-    await updatePdfJob(supabaseAdmin, jobId, 'rendering_pdf', {
-      trace,
-      page_info: pageInfo,
-      page_console: pageConsole.slice(-30),
-      page_errors: pageErrors.slice(-30),
-    })
-    mark('rendering_pdf')
-    const pdf = await page.pdf({
-      format: 'A4',
-      landscape: true,
-      printBackground: true,
-      preferCSSPageSize: true,
-      margin: { top: '3mm', right: '3mm', bottom: '3mm', left: '3mm' },
-      scale: Number(process.env.FOCUS_PDF_LANDSCAPE_SCALE || process.env.FOCUS_PDF_SCALE || 0.72),
-    })
+    await mark('rendering_pdf')
+    const pdf = await withTimeout(
+      page.pdf({
+        format: 'A4',
+        landscape: true,
+        printBackground: true,
+        preferCSSPageSize: true,
+        margin: { top: '3mm', right: '3mm', bottom: '3mm', left: '3mm' },
+        scale: Number(process.env.FOCUS_PDF_LANDSCAPE_SCALE || process.env.FOCUS_PDF_SCALE || 0.72),
+      }),
+      timeoutMs('FOCUS_PDF_RENDER_TIMEOUT_MS', 60000),
+      'Rendu page.pdf()'
+    )
 
-    await updatePdfJob(supabaseAdmin, jobId, 'uploading_storage', {
-      bytes: pdf.byteLength,
-      trace,
-    })
-    mark('uploading_storage', { bytes: pdf.byteLength })
-    const { error: uploadError } = await supabaseAdmin.storage.from(bucket).upload(pdfPath, pdf, {
-      contentType: 'application/pdf',
-      upsert: true,
-    })
+    await mark('uploading_storage', { bytes: pdf.byteLength })
+    const { error: uploadError } = await withTimeout(
+      supabaseAdmin.storage.from(bucket).upload(pdfPath, pdf, {
+        contentType: 'application/pdf',
+        upsert: true,
+      }),
+      timeoutMs('FOCUS_PDF_UPLOAD_TIMEOUT_MS', 45000),
+      'Upload Storage PDF'
+    )
     if (uploadError) throw new Error(`Upload Storage impossible : ${uploadError.message}`)
 
-    mark('done', { bytes: pdf.byteLength })
-    await updatePdfJob(supabaseAdmin, jobId, 'done', {
+    await mark('done', {
+      status: 'done',
       bytes: pdf.byteLength,
-      trace,
+      finished_at: new Date().toISOString(),
     })
 
     return NextResponse.json({
@@ -562,39 +494,32 @@ export async function POST(req: NextRequest) {
       bucket,
       path: pdfPath,
       focus_url: redactSecretInUrl(focusUrl.toString()),
-      loaded_url: redactSecretInUrl(pageInfo.loadedUrl),
-      page_ready_marker_found: pageInfo.readyFound,
-      page_attrs: pageInfo.attrs,
+      loaded_url: redactSecretInUrl(page.url()),
       orientation: 'landscape',
       filename: payload.filename || `Rapport d'activité quotidien.pdf`,
       bytes: pdf.byteLength,
       caller,
       trace,
-      page_console: pageConsole.slice(-20),
-      page_errors: pageErrors.slice(-20),
     })
   } catch (error) {
     const errorMessage = sanitizeError(error)
-    mark('error', { error: errorMessage })
-
-    if (supabaseAdmin) {
-      await updatePdfJob(supabaseAdmin, jobId, 'error', {
-        error_message: errorMessage,
-        trace,
-        page_console: pageConsole.slice(-50),
-        page_errors: pageErrors.slice(-50),
-      })
-    }
+    await mark('error', {
+      status: 'error',
+      error_message: errorMessage,
+      finished_at: new Date().toISOString(),
+      console_messages: consoleMessages,
+      request_failures: requestFailures,
+    })
 
     return NextResponse.json(
       {
         ok: false,
-        error: errorMessage,
         job_id: jobId,
+        error: errorMessage,
         caller,
         trace,
-        page_console: pageConsole.slice(-20),
-        page_errors: pageErrors.slice(-20),
+        console_messages: consoleMessages,
+        request_failures: requestFailures,
       },
       { status: 500 }
     )
