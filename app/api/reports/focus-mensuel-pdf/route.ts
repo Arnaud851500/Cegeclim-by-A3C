@@ -40,6 +40,10 @@ type FocusReadyState = {
   projectedCurrentMonthFactures: string | null
   bodyPreview: string
   hasVisibleError: boolean
+  hasReportTitle?: boolean
+  hasPdfReadyMessage?: boolean
+  hasCards?: boolean
+  hasCoreContent?: boolean
 }
 
 function getRequiredEnv(name: string) {
@@ -428,21 +432,56 @@ export async function POST(req: NextRequest) {
             bodyPreview: bodyText.slice(0, 1200),
             hasVisibleError:
               /Erreur chargement|Erreur rapport|Génération PDF impossible|statement timeout|canceling statement/i.test(bodyText),
+            hasReportTitle: /ACTIVITE CEGECLIM/i.test(bodyText),
+            hasPdfReadyMessage: /Données complètes|generation PDF peut démarrer|génération PDF peut démarrer/i.test(bodyText),
+            hasCards:
+              /Devis/i.test(bodyText) &&
+              /CDC/i.test(bodyText) &&
+              /BL/i.test(bodyText) &&
+              /Factures/i.test(bodyText),
+            hasCoreContent:
+              /ACTIVITE CEGECLIM/i.test(bodyText) &&
+              /Devis/i.test(bodyText) &&
+              /CDC/i.test(bodyText) &&
+              /BL/i.test(bodyText) &&
+              /Factures/i.test(bodyText),
           }
         })
 
+        const elapsedMs = Date.now() - startedAt
+
         await mark('waiting_focus_ready', {
-          elapsed_ms: Date.now() - startedAt,
+          elapsed_ms: elapsedMs,
           page_state: lastState,
           console_messages: consoleMessages,
           request_failures: requestFailures,
         })
 
-        if (
+        const strictReady =
           lastState.ready === '1' &&
           lastState.status !== 'error' &&
           !lastState.hasVisibleError
-        ) {
+
+        // Sécurité PDF : si le contenu principal est visible mais que le flag technique
+        // data-focus-report-ready reste à 0, on ne bloque plus indéfiniment.
+        // Cela couvre les cas 35/36 ou 37/38 sur les tableaux comparatifs.
+        const fallbackAfterMs = timeoutMs('FOCUS_PDF_READY_FALLBACK_AFTER_MS', 75000)
+        const canFallbackProceed =
+          elapsedMs >= fallbackAfterMs &&
+          lastState.hasCoreContent &&
+          lastState.hasPdfReadyMessage &&
+          lastState.status !== 'error' &&
+          !lastState.hasVisibleError
+
+        if (strictReady || canFallbackProceed) {
+          await mark(strictReady ? 'waiting_focus_ready_done_strict' : 'waiting_focus_ready_fallback_proceed', {
+            elapsed_ms: elapsedMs,
+            page_state: lastState,
+            warning: strictReady
+              ? null
+              : 'PDF généré malgré data-focus-report-ready différent de 1, car le contenu principal est visible et aucune erreur bloquante n’est affichée.',
+          })
+
           return lastState
         }
 
@@ -455,6 +494,16 @@ export async function POST(req: NextRequest) {
         await sleep(3000)
       }
 
+      // Dernière sécurité : si le timeout est atteint mais que le contenu principal est là,
+      // on génère quand même au lieu de laisser Vercel couper la route.
+      if (lastState?.hasCoreContent && lastState?.hasPdfReadyMessage && !lastState?.hasVisibleError) {
+        await mark('waiting_focus_ready_timeout_fallback_proceed', {
+          page_state: lastState,
+          warning: 'Timeout ready atteint, mais contenu principal visible : génération PDF poursuivie.',
+        })
+        return lastState
+      }
+
       throw new Error(
         `Timeout attente data-focus-report-ready=1 après ${maxMs} ms. Dernier état=${JSON.stringify(lastState)}`
       )
@@ -462,7 +511,7 @@ export async function POST(req: NextRequest) {
 
     await mark('waiting_focus_ready_start')
     await waitForFocusReadyWithHeartbeat()
-    await mark('waiting_focus_ready_done')
+    await mark('waiting_focus_ready_completed')
 
     await mark('checking_page_state')
     const pageState = await page.evaluate(() => {
