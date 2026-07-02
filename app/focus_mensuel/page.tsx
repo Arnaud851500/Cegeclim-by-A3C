@@ -81,6 +81,23 @@ type BusinessDayBasis = {
   label: string
 }
 
+type PdfJobStatus = 'pending' | 'running' | 'done' | 'error' | 'cancelled' | string
+
+type PdfJobApiRow = {
+  id: number
+  status: PdfJobStatus
+  step: string | null
+  bucket: string | null
+  path: string | null
+  filename?: string | null
+  bytes: number | null
+  error_message: string | null
+  created_at?: string | null
+  started_at?: string | null
+  finished_at?: string | null
+  updated_at?: string | null
+}
+
 type FocusActivityLineRaw = {
   type_document: string | null
   date_piece: string | null
@@ -226,6 +243,8 @@ const LOGO_CEGECLIM_URL =
 const REPORT_BUCKET = 'commercial-imports'
 const REPORT_PATH = 'reports/focus-mensuel/Rapport_activite_quotidien.pdf'
 const REPORT_FILENAME = "Rapport d'activité quotidien.pdf"
+const REPORT_JOB_CREATE_ROUTE = '/api/reports/focus-mensuel-pdf'
+const REPORT_JOB_PROCESS_ROUTE = '/api/reports/focus-mensuel-pdf/process'
 
 // Sécurité PDF : les tableaux comparatifs ne doivent jamais empêcher la capture Puppeteer.
 // Si une période reste bloquée, on garde les données déjà chargées et on laisse le PDF partir.
@@ -882,6 +901,9 @@ function FocusMensuelPageContent() {
   const [reportMessage, setReportMessage] = useState<string | null>(null)
   const [reportError, setReportError] = useState<string | null>(null)
   const [lastGeneratedPdfPath, setLastGeneratedPdfPath] = useState(REPORT_PATH)
+  const [pdfJobId, setPdfJobId] = useState<number | null>(null)
+  const [pdfJobStatus, setPdfJobStatus] = useState<PdfJobStatus | null>(null)
+  const [pdfJobStep, setPdfJobStep] = useState<string | null>(null)
   const [useProjectedCurrentMonthFactures, setUseProjectedCurrentMonthFactures] = useState(() => {
     const value = String(requestedCaProjeteFactures || '').toLowerCase()
     if (['0', 'false', 'faux', 'non', 'no', 'off'].includes(value)) return false
@@ -1214,6 +1236,36 @@ function FocusMensuelPageContent() {
     })()
   }, [])
 
+  useEffect(() => {
+    if (!pdfJobId) return
+    if (!['pending', 'running'].includes(String(pdfJobStatus || ''))) return
+
+    let cancelled = false
+    let timer: number | null = null
+
+    async function tick() {
+      try {
+        if (cancelled || !pdfJobId) return
+        await refreshPdfJobStatus(pdfJobId)
+      } catch (exception: any) {
+        if (!cancelled) {
+          console.warn('Polling job PDF impossible:', exception)
+        }
+      }
+    }
+
+    void tick()
+    timer = window.setInterval(() => {
+      void tick()
+    }, 3000)
+
+    return () => {
+      cancelled = true
+      if (timer !== null) window.clearInterval(timer)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pdfJobId, pdfJobStatus])
+
   function buildReportPayload() {
     return {
       bucket: REPORT_BUCKET,
@@ -1241,22 +1293,87 @@ function FocusMensuelPageContent() {
     return token
   }
 
+  function formatPdfJobLabel(job: PdfJobApiRow) {
+    const stepLabel = job.step ? ` · ${job.step}` : ''
+    const sizeLabel = job.bytes ? ` · ${(Number(job.bytes) / 1024).toLocaleString('fr-FR', { maximumFractionDigits: 0 })} Ko` : ''
+    if (job.status === 'done') return `PDF généré : ${job.path || REPORT_PATH}${sizeLabel}`
+    if (job.status === 'error') return `Erreur génération PDF${stepLabel}${job.error_message ? ` : ${job.error_message}` : ''}`
+    if (job.status === 'pending') return `Génération PDF en attente · job ${job.id}`
+    if (job.status === 'running') return `Génération PDF en arrière-plan · job ${job.id}${stepLabel}`
+    return `Job PDF ${job.id} · ${job.status}${stepLabel}`
+  }
+
+  async function refreshPdfJobStatus(jobId: number, token?: string) {
+    const accessToken = token || await getSessionAccessToken()
+    const response = await fetch(`${REPORT_JOB_CREATE_ROUTE}?job_id=${jobId}`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    })
+
+    const result = await response.json().catch(() => null)
+    if (!response.ok || !result?.ok || !result?.job) {
+      throw new Error(result?.error || `Lecture statut PDF impossible (${response.status})`)
+    }
+
+    const job = result.job as PdfJobApiRow
+    setPdfJobStatus(job.status)
+    setPdfJobStep(job.step || null)
+    setLastGeneratedPdfPath(job.path || REPORT_PATH)
+
+    if (job.status === 'done') {
+      setPdfLoading(false)
+      setReportError(null)
+      setReportMessage(formatPdfJobLabel(job))
+    } else if (job.status === 'error' || job.status === 'cancelled') {
+      setPdfLoading(false)
+      setReportError(formatPdfJobLabel(job))
+      setReportMessage(null)
+    } else {
+      setPdfLoading(true)
+      setReportMessage(formatPdfJobLabel(job))
+    }
+
+    return job
+  }
+
+  function triggerFocusPdfWorker(jobId: number, token: string) {
+    void fetch(REPORT_JOB_PROCESS_ROUTE, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ job_id: jobId }),
+    })
+      .then(async () => {
+        await refreshPdfJobStatus(jobId, token).catch(() => null)
+      })
+      .catch((exception) => {
+        console.warn('Déclenchement worker PDF non bloquant échoué:', exception)
+        setReportMessage(
+          `Job PDF ${jobId} créé. Le worker n'a pas répondu immédiatement ; il sera repris par le cron ou pourra être relancé.`
+        )
+      })
+  }
+
   async function generateFocusPdf() {
     if (!focusReportReady) {
       setReportError(
         `Les données ne sont pas encore complètement chargées${focusReportLoadingLabel ? ` (${focusReportLoadingLabel})` : ''}. ` +
-        'Attends que le statut passe à "données complètes" avant de générer le PDF.'
+        'Attends que le statut passe à "données complètes" avant de lancer le PDF.'
       )
       return
     }
 
     setPdfLoading(true)
     setReportError(null)
-    setReportMessage(null)
+    setReportMessage('Création du job PDF…')
 
     try {
       const token = await getSessionAccessToken()
-      const response = await fetch('/api/reports/focus-mensuel-pdf', {
+      const response = await fetch(REPORT_JOB_CREATE_ROUTE, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1266,20 +1383,23 @@ function FocusMensuelPageContent() {
       })
 
       const result = await response.json().catch(() => null)
-      if (!response.ok || !result?.ok) {
-        throw new Error(result?.error || `Génération PDF impossible (${response.status})`)
+      if (!response.ok || !result?.ok || !result?.job_id) {
+        throw new Error(result?.error || `Création job PDF impossible (${response.status})`)
       }
 
+      const jobId = Number(result.job_id)
+      setPdfJobId(jobId)
+      setPdfJobStatus(result.status || 'pending')
+      setPdfJobStep(result.step || 'created')
       setLastGeneratedPdfPath(result.path || REPORT_PATH)
-      setReportMessage(
-        `PDF généré : ${result.path || REPORT_PATH}${result.bytes ? ` · ${(Number(result.bytes) / 1024).toLocaleString('fr-FR', { maximumFractionDigits: 0 })} Ko` : ''}`
-      )
+      setReportMessage(`Génération PDF lancée en arrière-plan · job ${jobId}`)
+
+      triggerFocusPdfWorker(jobId, token)
       return result
     } catch (exception: any) {
+      setPdfLoading(false)
       setReportError(exception?.message || String(exception))
       throw exception
-    } finally {
-      setPdfLoading(false)
     }
   }
 
@@ -2441,7 +2561,7 @@ function FocusMensuelPageContent() {
                 disabled={pdfLoading || emailLoading || !focusReportReady}
                 style={styles.secondaryButton}
               >
-                {pdfLoading ? 'Génération PDF…' : !focusReportReady ? 'Données en cours…' : 'Générer PDF'}
+                {pdfLoading ? (pdfJobStep ? `PDF en cours · ${pdfJobStep}` : 'PDF en cours…') : !focusReportReady ? 'Données en cours…' : 'Générer PDF'}
               </button>
               <button
                 type="button"
