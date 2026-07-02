@@ -407,7 +407,7 @@ export async function POST(req: NextRequest) {
 
     async function waitForFocusReadyWithHeartbeat() {
       const startedAt = Date.now()
-      const maxMs = timeoutMs('FOCUS_PDF_READY_HARD_TIMEOUT_MS', 180000)
+      const maxMs = timeoutMs('FOCUS_PDF_READY_HARD_TIMEOUT_MS', 110000)
       let lastState: FocusReadyState | null = null
 
       while (Date.now() - startedAt < maxMs) {
@@ -462,24 +462,29 @@ export async function POST(req: NextRequest) {
           lastState.status !== 'error' &&
           !lastState.hasVisibleError
 
-        // Sécurité PDF : si le contenu principal est visible mais que le flag technique
-        // data-focus-report-ready reste à 0, on ne bloque plus indéfiniment.
-        // Cela couvre les cas 35/36 ou 37/38 sur les tableaux comparatifs.
+        // Sécurité PDF renforcée : en production, Vercel peut tuer la route avant la fin
+        // si on reste trop longtemps à attendre data-focus-report-ready=1.
+        // Dès que le rapport principal est visible et qu'aucune erreur bloquante n'est affichée,
+        // on lance le PDF après FOCUS_PDF_READY_FALLBACK_AFTER_MS, même si les tableaux
+        // comparatifs restent à 35/36 ou 37/38.
         const fallbackAfterMs = timeoutMs('FOCUS_PDF_READY_FALLBACK_AFTER_MS', 75000)
         const canFallbackProceed =
           elapsedMs >= fallbackAfterMs &&
-          lastState.hasCoreContent &&
-          lastState.hasPdfReadyMessage &&
+          !lastState.hasVisibleError &&
           lastState.status !== 'error' &&
-          !lastState.hasVisibleError
+          (
+            lastState.hasCoreContent ||
+            lastState.hasReportTitle ||
+            /ACTIVITE CEGECLIM|Devis|CDC|BL|Factures/i.test(lastState.bodyPreview || '')
+          )
 
         if (strictReady || canFallbackProceed) {
-          await mark(strictReady ? 'waiting_focus_ready_done_strict' : 'waiting_focus_ready_fallback_proceed', {
+          await mark(strictReady ? 'waiting_focus_ready_done_strict' : 'waiting_focus_ready_force_proceed', {
             elapsed_ms: elapsedMs,
             page_state: lastState,
             warning: strictReady
               ? null
-              : 'PDF généré malgré data-focus-report-ready différent de 1, car le contenu principal est visible et aucune erreur bloquante n’est affichée.',
+              : 'PDF forcé malgré data-focus-report-ready différent de 1 : contenu principal visible, aucune erreur bloquante visible.',
           })
 
           return lastState
@@ -494,12 +499,17 @@ export async function POST(req: NextRequest) {
         await sleep(3000)
       }
 
-      // Dernière sécurité : si le timeout est atteint mais que le contenu principal est là,
-      // on génère quand même au lieu de laisser Vercel couper la route.
-      if (lastState?.hasCoreContent && lastState?.hasPdfReadyMessage && !lastState?.hasVisibleError) {
-        await mark('waiting_focus_ready_timeout_fallback_proceed', {
+      // Dernière sécurité : si le timeout est atteint mais que la page contient le rapport
+      // et qu'aucune erreur bloquante n'est affichée, on génère quand même.
+      if (
+        lastState &&
+        !lastState.hasVisibleError &&
+        lastState.status !== 'error' &&
+        (lastState.hasCoreContent || lastState.hasReportTitle || /ACTIVITE CEGECLIM|Devis|CDC|BL|Factures/i.test(lastState.bodyPreview || ''))
+      ) {
+        await mark('waiting_focus_ready_timeout_force_proceed', {
           page_state: lastState,
-          warning: 'Timeout ready atteint, mais contenu principal visible : génération PDF poursuivie.',
+          warning: 'Timeout ready atteint, mais contenu rapport visible : génération PDF poursuivie.',
         })
         return lastState
       }
