@@ -227,6 +227,10 @@ const REPORT_BUCKET = 'commercial-imports'
 const REPORT_PATH = 'reports/focus-mensuel/Rapport_activite_quotidien.pdf'
 const REPORT_FILENAME = "Rapport d'activité quotidien.pdf"
 
+// Sécurité PDF : les tableaux comparatifs ne doivent jamais empêcher la capture Puppeteer.
+// Si une période reste bloquée, on garde les données déjà chargées et on laisse le PDF partir.
+const PDF_COMPARISON_HARD_STOP_MS = 90000
+
 function isViewMode(value: string | null | undefined): value is ViewMode {
   return value === 'montant_ht' || value === 'nb_documents' || value === 'quantite_pertinente'
 }
@@ -1083,17 +1087,23 @@ function FocusMensuelPageContent() {
     return `Actualisation des documents distincts : ${done}/${total} périodes (${pct} %)${current}`
   }, [distinctDocsProgress])
 
+  const comparisonReadyForReport = comparisonReady || (
+    isPdfMode &&
+    comparisonProgress.status === 'ready' &&
+    !comparisonError
+  )
+
   const focusReportReady = Boolean(
     dailyReady &&
     distinctDocsReady &&
     highlightsReady &&
     agencyTablesReady &&
-    comparisonReady &&
+    comparisonReadyForReport &&
     !loading &&
     !distinctDocsLoading &&
     !highlightsLoading &&
     !agencyTablesLoading &&
-    !comparisonLoading &&
+    (!comparisonLoading || isPdfMode) &&
     !rebuildingCache &&
     !error &&
     !comparisonError &&
@@ -1156,6 +1166,31 @@ function FocusMensuelPageContent() {
     void loadComparisonTables()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [month, focusDate, agence, familleMacro, collaborateur, includeHorsStats])
+
+  useEffect(() => {
+    if (!isPdfMode || !comparisonLoading) return
+
+    const timer = window.setTimeout(() => {
+      // Invalide le chargement en cours : s'il revient plus tard, il ne doit plus réécrire l'état.
+      comparisonLoadIdRef.current += 1
+
+      setComparisonError(null)
+      setComparisonReady(true)
+      setComparisonLoading(false)
+      setComparisonProgress((current) => {
+        const safeTotal = current.total || current.done || 1
+        return {
+          status: 'ready',
+          label: 'Arrêt sécurité PDF : tableaux comparatifs partiels',
+          current: 'Mode PDF : génération autorisée malgré une période comparative bloquée',
+          done: safeTotal,
+          total: safeTotal,
+        }
+      })
+    }, PDF_COMPARISON_HARD_STOP_MS)
+
+    return () => window.clearTimeout(timer)
+  }, [isPdfMode, comparisonLoading])
 
   useEffect(() => {
     void loadHighlights()
@@ -1558,7 +1593,7 @@ function FocusMensuelPageContent() {
   }
 
   function comparisonRpcTimeoutMs() {
-    return isPdfMode ? 12000 : 30000
+    return isPdfMode ? 8000 : 30000
   }
 
   async function fetchFocusSummaryRange(range: { start: string; end: string }) {
@@ -1599,6 +1634,19 @@ function FocusMensuelPageContent() {
       rollingN1: [],
     }
     const skippedRanges: string[] = []
+    const comparisonStartedAt = Date.now()
+
+    const flushPartialComparisonRows = () => {
+      if (loadId !== comparisonLoadIdRef.current) return
+      setYtdRowsN([...result.ytdN])
+      setYtdRowsN1([...result.ytdN1])
+      setRollingRowsN([...result.rollingN])
+      setRollingRowsN1([...result.rollingN1])
+    }
+
+    const hasReachedPdfHardStop = () => {
+      return isPdfMode && Date.now() - comparisonStartedAt >= PDF_COMPARISON_HARD_STOP_MS
+    }
 
     try {
       const ytdStart = `${focusYear}-01-01`
@@ -1725,10 +1773,30 @@ function FocusMensuelPageContent() {
         }
       }
 
+      outerComparisonLoop:
       for (const bucket of buckets) {
         for (const range of bucket.ranges) {
           ensureActive()
-          result[bucket.key].push(...await fetchRangeWithFallback(bucket.label, range))
+
+          if (hasReachedPdfHardStop()) {
+            skippedRanges.push(
+              `Arrêt sécurité PDF après ${Math.round((Date.now() - comparisonStartedAt) / 1000)} s : ${bucket.label} ${range.start} au ${addDaysYmd(range.end, -1)} et périodes suivantes ignorées`
+            )
+            doneSteps = totalSteps
+            setProgress('Arrêt sécurité PDF : tableaux comparatifs partiels', null)
+            break outerComparisonLoop
+          }
+
+          try {
+            const rows = await fetchRangeWithFallback(bucket.label, range)
+            result[bucket.key].push(...rows)
+            flushPartialComparisonRows()
+          } catch (exception: any) {
+            if (isStaleComparisonLoad(exception)) throw exception
+            rememberSkippedRange(bucket.label, range, exception)
+            markStepDone(bucket.label, null)
+            flushPartialComparisonRows()
+          }
         }
       }
 
