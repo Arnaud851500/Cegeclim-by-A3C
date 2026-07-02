@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import Papa from 'papaparse'
 import * as XLSX from 'xlsx-js-style'
 import jsPDF from 'jspdf'
@@ -1549,6 +1549,7 @@ async function saveSelectedClientField(field: 'prospect_comment' | 'prospect_sta
   const [selectedNafCodes, setSelectedNafCodes] = useState<string[]>([])
   const [selectedAgence, setSelectedAgence] = useState('TOUS')
   const [selectedCegeclimCollaborateur, setSelectedCegeclimCollaborateur] = useState('TOUS')
+  const [selectedMapCegeclimCollaborateur, setSelectedMapCegeclimCollaborateur] = useState('TOUS')
   const [selectedClientScope, setSelectedClientScope] = useState<'Tous' | 'Cegeclim' | 'CegeclimSommeil' | 'Prospects'>('Tous')
   const [selectedProspectStatuses, setSelectedProspectStatuses] = useState<ProspectStatusValue[]>([])
   const [selectedRgeFilter, setSelectedRgeFilter] = useState<'TOUS' | 'OUI' | 'NON'>('TOUS')
@@ -1802,7 +1803,10 @@ async function saveSelectedClientField(field: 'prospect_comment' | 'prospect_sta
 async function openMapFromCell(secteur: string, departement: string | null) {
   window.scrollTo({ top: 0, behavior: 'smooth' })
   setMapOpen(true)
-  setShowMapListPanel(true)
+  // Pour éviter un rendu initial trop lourd, la liste latérale reste repliée à l'ouverture.
+  // Les pastilles de carte sont affichées en priorité et la liste reste accessible via le bouton.
+  setShowMapListPanel(false)
+  setSelectedMapCegeclimCollaborateur(selectedCegeclimCollaborateur)
   setMapLoading(true)
   setMapClients([])
   // La carte doit reprendre le périmètre Clients sélectionné sur l'écran principal.
@@ -2215,6 +2219,9 @@ function isRowCapaciteGaz(row: any) {
   }
 
 
+const deferredMapSectorVisibility = useDeferredValue(mapSectorVisibility)
+const deferredSelectedMapCegeclimCollaborateur = useDeferredValue(selectedMapCegeclimCollaborateur)
+
 const mapClientsWithCoords = useMemo(() => {
   return mapClients.filter(
     (client) =>
@@ -2350,11 +2357,11 @@ function matchesMapProspectFilters(row: ClientRow) {
   return true
 }
 
-function matchesCegeclimCollaborateurFilter(row: ClientRow) {
-  if (selectedCegeclimCollaborateur === 'TOUS') return true
+function matchesMapCegeclimCollaborateurFilter(row: ClientRow) {
+  if (deferredSelectedMapCegeclimCollaborateur === 'TOUS') return true
 
   const cegeclimCollaborateur = String(getClientCegeclimAnyRow(row)?.representant || '').trim()
-  return normalizeScopeValue(cegeclimCollaborateur) === normalizeScopeValue(selectedCegeclimCollaborateur)
+  return normalizeScopeValue(cegeclimCollaborateur) === normalizeScopeValue(deferredSelectedMapCegeclimCollaborateur)
 }
 
 const mapCegeclimPoints = useMemo(() => {
@@ -2362,7 +2369,7 @@ const mapCegeclimPoints = useMemo(() => {
     (client) =>
       isClientPresentInCegeclim(client, activeCegeclimBySiret) &&
       matchesMapCommonFilters(client) &&
-      matchesCegeclimCollaborateurFilter(client)
+      matchesMapCegeclimCollaborateurFilter(client)
   )
 }, [
   mapClientsWithCoords,
@@ -2374,9 +2381,7 @@ const mapCegeclimPoints = useMemo(() => {
   selectedSectors,
   selectedNafCodes,
   selectedAgence,
-  selectedCegeclimCollaborateur,
-  mapAgeSliderMin,
-  mapAgeSliderMax,
+  deferredSelectedMapCegeclimCollaborateur,
   allCegeclimDetailsBySiret,
   includeNoDistance,
   onlyContactable,
@@ -2397,7 +2402,7 @@ const mapCegeclimSommeilPoints = useMemo(() => {
     (client) =>
       isClientInCegeclimSommeil(client) &&
       matchesMapCommonFilters(client) &&
-      matchesCegeclimCollaborateurFilter(client)
+      matchesMapCegeclimCollaborateurFilter(client)
   )
 }, [
   mapClientsWithCoords,
@@ -2408,9 +2413,7 @@ const mapCegeclimSommeilPoints = useMemo(() => {
   selectedSectors,
   selectedNafCodes,
   selectedAgence,
-  selectedCegeclimCollaborateur,
-  mapAgeSliderMin,
-  mapAgeSliderMax,
+  deferredSelectedMapCegeclimCollaborateur,
   allCegeclimDetailsBySiret,
   includeNoDistance,
   onlyContactable,
@@ -2510,7 +2513,7 @@ const visibleMapPoints = useMemo(() => {
     const sector = getClientSectorLabel(client)
     const isCegeclimAny = isClientInCegeclimAny(client)
 
-    if (mapSectorVisibility[sector] === false) return false
+    if (deferredMapSectorVisibility[sector] === false) return false
 
     if (!isCegeclimAny) {
       const ageDays = diffDaysFromToday(client.dateCreationEtablissement)
@@ -2527,18 +2530,48 @@ const visibleMapPoints = useMemo(() => {
   mapCegeclimPoints,
   mapCegeclimSommeilPoints,
   mapProspectPoints,
-  mapSectorVisibility,
+  deferredMapSectorVisibility,
   mapAgeDaysMin,
   mapAgeDaysMax,
   activeCegeclimBySiret,
   sommeilCegeclimBySiret,
 ])
 
+const mapRenderPoints = useDeferredValue(visibleMapPoints)
+const visibleMapCount = mapRenderPoints.length
+
 const visibleMapRows = useMemo(() => {
-  return [...visibleMapPoints].sort((a, b) =>
+  if (!showMapListPanel) return []
+
+  return [...mapRenderPoints].sort((a, b) =>
     String(a.raison_sociale_affichee || '').localeCompare(String(b.raison_sociale_affichee || ''), 'fr')
   )
-}, [visibleMapPoints])
+}, [mapRenderPoints, showMapListPanel])
+
+const mapBoundsSignature = useMemo(() => {
+  if (!mapOpen || mapRenderPoints.length === 0) return ''
+
+  let minLat = Infinity
+  let maxLat = -Infinity
+  let minLng = Infinity
+  let maxLng = -Infinity
+
+  for (const client of mapRenderPoints) {
+    const lat = Number(client.latitude)
+    const lng = Number(client.longitude)
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue
+    minLat = Math.min(minLat, lat)
+    maxLat = Math.max(maxLat, lat)
+    minLng = Math.min(minLng, lng)
+    maxLng = Math.max(maxLng, lng)
+  }
+
+  if (!Number.isFinite(minLat) || !Number.isFinite(maxLat) || !Number.isFinite(minLng) || !Number.isFinite(maxLng)) {
+    return `${mapRenderPoints.length}:empty`
+  }
+
+  return `${mapRenderPoints.length}:${minLat.toFixed(4)}:${maxLat.toFixed(4)}:${minLng.toFixed(4)}:${maxLng.toFixed(4)}`
+}, [mapOpen, mapRenderPoints])
 
 useEffect(() => {
   setMapSectorVisibility((prev) => {
@@ -2565,7 +2598,7 @@ useEffect(() => {
 
 useEffect(() => {
   if (!mapOpen) return
-  if (!visibleMapPoints.length) return
+  if (!mapRenderPoints.length) return
 
   let cancelled = false
   let attempts = 0
@@ -2599,18 +2632,18 @@ useEffect(() => {
         return
       }
 
-      if (visibleMapPoints.length === 1) {
+      if (mapRenderPoints.length === 1) {
         map.setView(
           [
-            visibleMapPoints[0].latitude as number,
-            visibleMapPoints[0].longitude as number,
+            mapRenderPoints[0].latitude as number,
+            mapRenderPoints[0].longitude as number,
           ],
           12
         )
         return
       }
 
-      const bounds = visibleMapPoints.map((client) => [
+      const bounds = mapRenderPoints.map((client) => [
         client.latitude as number,
         client.longitude as number,
       ])
@@ -2624,13 +2657,13 @@ useEffect(() => {
     }
   }
 
-  const timeout = window.setTimeout(runFit, 180)
+  const timeout = window.setTimeout(runFit, 320)
 
   return () => {
     cancelled = true
     window.clearTimeout(timeout)
   }
-}, [mapOpen, visibleMapPoints, showMapListPanel])
+}, [mapOpen, mapBoundsSignature, showMapListPanel])
 
 useEffect(() => {
   if (mapOpen) return
@@ -2804,6 +2837,13 @@ const ageRangeTitle = useMemo(
       setSelectedCegeclimCollaborateur('TOUS')
     }
   }, [cegeclimCollaborateurOptions, selectedCegeclimCollaborateur])
+
+  useEffect(() => {
+    if (selectedMapCegeclimCollaborateur === 'TOUS') return
+    if (!cegeclimCollaborateurOptions.includes(selectedMapCegeclimCollaborateur)) {
+      setSelectedMapCegeclimCollaborateur('TOUS')
+    }
+  }, [cegeclimCollaborateurOptions, selectedMapCegeclimCollaborateur])
 
   const filteredClients = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -4146,6 +4186,22 @@ const selectedClientMapReason = useMemo(() => {
     return completeness < 100 || row.enrichment_status !== 'ok'
   })
 
+  function stopMapControlEvent(event: React.SyntheticEvent) {
+    // Les contrôles de la carte sont superposés à Leaflet : on évite que les clics,
+    // roues et mouvements souris partent jusqu'à la couche carte, ce qui rendait
+    // certains menus très lents au clic alors que la navigation clavier restait fluide.
+    event.stopPropagation()
+  }
+
+  function closeMapNow() {
+    setMapOpen(false)
+    // On laisse l'effet de démontage Leaflet nettoyer l'instance, puis on vide les points
+    // après le repli pour libérer le rendu sans bloquer le clic sur Fermer.
+    window.setTimeout(() => {
+      setMapClients([])
+    }, 150)
+  }
+
   if (loading) {
     return <div style={{ padding: 24, fontSize: 14 }}>Chargement de l’écran Clients...</div>
   }
@@ -4801,11 +4857,17 @@ const selectedClientMapReason = useMemo(() => {
             {mapOpen && (
               <div style={mapOverlayStyle}>
                 <div style={mapModalStyle}>
-                  <div style={mapCompactHeaderStyle}>
+                  <div
+                    style={mapCompactHeaderStyle}
+                    onMouseDown={stopMapControlEvent}
+                    onPointerDown={stopMapControlEvent}
+                    onClick={stopMapControlEvent}
+                    onWheel={stopMapControlEvent}
+                  >
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0, flex: '1 1 760px' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                         <h2 style={{ margin: 0, fontSize: 18, lineHeight: 1.15 }}>{mapTitle}</h2>
-                        <span style={mapCountBadgeStyle}>{visibleMapRows.length} visibles</span>
+                        <span style={mapCountBadgeStyle}>{visibleMapCount} visibles</span>
                         <span style={mapInfoTextStyle}>Ancienneté appliquée uniquement aux prospects</span>
                       </div>
 
@@ -5002,8 +5064,8 @@ const selectedClientMapReason = useMemo(() => {
                       <div style={{ minWidth: 180 }}>
                         <div style={filterLabelStyle}>Collaborateur CEGECLIM :</div>
                         <select
-                          value={selectedCegeclimCollaborateur}
-                          onChange={(e) => setSelectedCegeclimCollaborateur(e.target.value)}
+                          value={selectedMapCegeclimCollaborateur}
+                          onChange={(e) => setSelectedMapCegeclimCollaborateur(e.target.value)}
                           style={selectLikeStyle}
                         >
                           <option value="TOUS">Tous</option>
@@ -5053,10 +5115,10 @@ const selectedClientMapReason = useMemo(() => {
                         onClick={() => setShowMapListPanel((prev) => !prev)}
                         style={mapActionButtonStyle}
                       >
-                        {showMapListPanel ? 'Masquer la liste' : `Liste ${visibleMapRows.length}`}
+                        {showMapListPanel ? 'Masquer la liste' : `Liste ${visibleMapCount}`}
                       </button>
 
-                      <button type="button" onClick={() => setMapOpen(false)} style={mapCloseButtonStyle}>
+                      <button type="button" onClick={closeMapNow} style={mapCloseButtonStyle}>
                         Fermer
                       </button>
                     </div>
@@ -5088,7 +5150,7 @@ const selectedClientMapReason = useMemo(() => {
                       >
                         Chargement...
                       </div>
-                    ) : visibleMapRows.length === 0 ? (
+                    ) : visibleMapCount === 0 ? (
                       <div
                         style={{
                           flex: 1,
@@ -5127,6 +5189,7 @@ const selectedClientMapReason = useMemo(() => {
                             key={`map-${mapInstanceKey}-${mapTitle}`}
                             center={[46.603354, 1.888334] as any}
                             zoom={6}
+                            preferCanvas={true}
                             style={{ height: '100%', width: '100%', minHeight: 0 }}
                             ref={(mapInstance: any) => {
                               if (mapInstance) leafletMapRef.current = mapInstance
@@ -5137,7 +5200,7 @@ const selectedClientMapReason = useMemo(() => {
                               url="https://api.thunderforest.com/neighbourhood/{z}/{x}/{y}.png?apikey=3750cd83dca34199969e6b9e2dcdca40"
                             />
 
-                            {visibleMapPoints.map((client) => {
+                            {mapRenderPoints.map((client) => {
                               const isCegeclim = isClientPresentInCegeclim(client, activeCegeclimBySiret)
                               const isCegeclimSommeil = isClientInCegeclimSommeil(client)
                               const sectorLabel = getClientSectorLabel(client)
@@ -6337,6 +6400,9 @@ const activeTabStyle: React.CSSProperties = {
 
 const mapCompactHeaderStyle: React.CSSProperties = {
   flexShrink: 0,
+  position: 'relative',
+  zIndex: 26000,
+  pointerEvents: 'auto',
   display: 'flex',
   justifyContent: 'space-between',
   alignItems: 'flex-start',
@@ -6351,6 +6417,7 @@ const mapCompactHeaderStyle: React.CSSProperties = {
 
 const mapToolbarStyle: React.CSSProperties = {
   display: 'flex',
+  pointerEvents: 'auto',
   alignItems: 'center',
   gap: 8,
   flexWrap: 'wrap',
@@ -6391,6 +6458,7 @@ const mapInfoTextStyle: React.CSSProperties = {
 
 const mapDropdownStyle: React.CSSProperties = {
   position: 'relative',
+  pointerEvents: 'auto',
   zIndex: 23000,
   overflow: 'visible',
 }
@@ -6410,6 +6478,9 @@ const mapFilterButtonStyle: React.CSSProperties = {
 
 const mapDropdownPanelStyle: React.CSSProperties = {
   position: 'absolute',
+  pointerEvents: 'auto',
+  willChange: 'transform',
+  transform: 'translateZ(0)',
   top: 'calc(100% + 8px)',
   left: 0,
   zIndex: 24000,
@@ -6424,6 +6495,7 @@ const mapDropdownPanelStyle: React.CSSProperties = {
 
 const mapCompactFiltersStyle: React.CSSProperties = {
   display: 'flex',
+  pointerEvents: 'auto',
   alignItems: 'flex-end',
   justifyContent: 'flex-end',
   gap: 10,
@@ -6462,6 +6534,7 @@ const mapOverlayStyle: React.CSSProperties = {
 
 const mapModalStyle: React.CSSProperties = {
   background: '#fff',
+  pointerEvents: 'auto',
   margin: '0 auto',
   padding: 16,
   width: '96vw',
