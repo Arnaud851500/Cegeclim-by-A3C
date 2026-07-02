@@ -1383,14 +1383,18 @@ function FocusMensuelPageContent() {
     setDistinctDocsProgress({ status: 'loading', label: 'documents distincts', current: null, done: 0, total: 0 })
 
     const fetchDistinctDocsRange = async (range: { start: string; end: string }) => {
-      const { data, error } = await supabase.rpc('get_focus_mensuel_docs_distinct_metier', {
-        p_date_debut: range.start,
-        p_date_fin: range.end,
-        p_agence: agence || null,
-        p_famille_macro: familleMacro || null,
-        p_collaborateur: collaborateur || null,
-        p_include_hors_statistiques: includeHorsStats,
-      })
+      const { data, error } = await withClientTimeout(
+        supabase.rpc('get_focus_mensuel_docs_distinct_metier', {
+          p_date_debut: range.start,
+          p_date_fin: range.end,
+          p_agence: agence || null,
+          p_famille_macro: familleMacro || null,
+          p_collaborateur: collaborateur || null,
+          p_include_hors_statistiques: includeHorsStats,
+        }),
+        isPdfMode ? 12000 : 30000,
+        `Documents distincts ${range.start} au ${addDaysYmd(range.end, -1)}`
+      )
 
       if (error) throw error
       return (data || []) as DistinctDocRow[]
@@ -1431,16 +1435,28 @@ function FocusMensuelPageContent() {
           doneSteps += 1
           setDistinctProgress('Documents distincts', null)
         } catch (exception: any) {
-          if (!isStatementTimeout(exception) || isPdfMode) throw exception
+          if (!isStatementTimeout(exception) && !isPdfMode) throw exception
+
+          if (isPdfMode) {
+            console.warn('Période documents distincts ignorée pour ne pas bloquer le PDF:', range, exception)
+            doneSteps += 1
+            setDistinctProgress('Documents distincts', null)
+            continue
+          }
 
           const dailyRanges = splitDateRangeByDays(range.start, range.end, 1)
           totalSteps += Math.max(0, dailyRanges.length - 1)
 
           for (const dailyRange of dailyRanges) {
             setDistinctProgress('Documents distincts · découpage jour', dailyRange)
-            rows.push(...await fetchDistinctDocsRange(dailyRange))
-            doneSteps += 1
-            setDistinctProgress('Documents distincts', null)
+            try {
+              rows.push(...await fetchDistinctDocsRange(dailyRange))
+            } catch (dailyException: any) {
+              console.warn('Journée documents distincts ignorée:', dailyRange, dailyException)
+            } finally {
+              doneSteps += 1
+              setDistinctProgress('Documents distincts', null)
+            }
           }
         }
       }
@@ -1456,16 +1472,31 @@ function FocusMensuelPageContent() {
       })
     } catch (exception: any) {
       console.error('focus mensuel distinct docs', exception)
-      setDistinctDocRows([])
-      setDistinctDocsReady(false)
-      setDistinctDocsProgress({
-        status: 'error',
-        label: 'Erreur pendant le chargement des documents distincts.',
-        current: null,
-        done: 0,
-        total: 0,
-      })
-      setError(`Erreur chargement documents distincts : ${exception?.message || String(exception)}`)
+
+      if (isPdfMode) {
+        // En mode PDF, on ne bloque pas le marqueur ready sur les documents distincts.
+        // Un blocage ici empêche Puppeteer de démarrer page.pdf().
+        setDistinctDocRows([])
+        setDistinctDocsReady(true)
+        setDistinctDocsProgress({
+          status: 'ready',
+          label: 'Documents distincts ignorés après timeout en mode PDF.',
+          current: null,
+          done: 1,
+          total: 1,
+        })
+      } else {
+        setDistinctDocRows([])
+        setDistinctDocsReady(false)
+        setDistinctDocsProgress({
+          status: 'error',
+          label: 'Erreur pendant le chargement des documents distincts.',
+          current: null,
+          done: 0,
+          total: 0,
+        })
+        setError(`Erreur chargement documents distincts : ${exception?.message || String(exception)}`)
+      }
     } finally {
       setDistinctDocsLoading(false)
     }
@@ -1506,15 +1537,43 @@ function FocusMensuelPageContent() {
     return message.includes('statement timeout') || message.includes('timeout') || message.includes('canceling statement')
   }
 
-  async function fetchFocusSummaryRange(range: { start: string; end: string }) {
-    const { data, error } = await supabase.rpc('get_focus_mensuel_daily_summary_metier', {
-      p_date_debut: range.start,
-      p_date_fin: range.end,
-      p_agence: agence || null,
-      p_famille_macro: familleMacro || null,
-      p_collaborateur: collaborateur || null,
-      p_include_hors_statistiques: includeHorsStats,
+  function isStaleComparisonLoad(exception: any) {
+    return String(exception?.message || exception) === '__STALE_COMPARISON_LOAD__'
+  }
+
+  async function withClientTimeout<T>(promise: PromiseLike<T>, timeoutMs: number, label: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`${label} : timeout après ${timeoutMs} ms`))
+      }, timeoutMs)
     })
+
+    try {
+      return await Promise.race([promise, timeoutPromise])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  function comparisonRpcTimeoutMs() {
+    return isPdfMode ? 12000 : 30000
+  }
+
+  async function fetchFocusSummaryRange(range: { start: string; end: string }) {
+    const { data, error } = await withClientTimeout(
+      supabase.rpc('get_focus_mensuel_daily_summary_metier', {
+        p_date_debut: range.start,
+        p_date_fin: range.end,
+        p_agence: agence || null,
+        p_famille_macro: familleMacro || null,
+        p_collaborateur: collaborateur || null,
+        p_include_hors_statistiques: includeHorsStats,
+      }),
+      comparisonRpcTimeoutMs(),
+      `Chargement Focus ${range.start} au ${addDaysYmd(range.end, -1)}`
+    )
 
     if (error) throw error
     return (data || []) as DailyRow[]
@@ -1532,8 +1591,16 @@ function FocusMensuelPageContent() {
     setRollingRowsN([])
     setRollingRowsN1([])
 
+    const focusYear = Number(focusDate.slice(0, 4))
+    const result: Record<'ytdN' | 'ytdN1' | 'rollingN' | 'rollingN1', DailyRow[]> = {
+      ytdN: [],
+      ytdN1: [],
+      rollingN: [],
+      rollingN1: [],
+    }
+    const skippedRanges: string[] = []
+
     try {
-      const focusYear = Number(focusDate.slice(0, 4))
       const ytdStart = `${focusYear}-01-01`
       const ytdEndExclusive = addDaysYmd(focusDate, 1)
       const ytdPreviousStart = `${focusYear - 1}-01-01`
@@ -1553,13 +1620,6 @@ function FocusMensuelPageContent() {
         { key: 'rollingN', label: '12 mois glissants N', ranges: buildMonthlyRpcRanges(rollingStart, rollingEndExclusive) },
         { key: 'rollingN1', label: '12 mois glissants N-1', ranges: buildMonthlyRpcRanges(rollingPreviousStart, rollingPreviousEndExclusive) },
       ]
-
-      const result: Record<'ytdN' | 'ytdN1' | 'rollingN' | 'rollingN1', DailyRow[]> = {
-        ytdN: [],
-        ytdN1: [],
-        rollingN: [],
-        rollingN1: [],
-      }
 
       let totalSteps = buckets.reduce((acc, bucket) => acc + bucket.ranges.length, 0)
       let doneSteps = 0
@@ -1583,44 +1643,82 @@ function FocusMensuelPageContent() {
         })
       }
 
+      const markStepDone = (bucketLabel: string, range: { start: string; end: string } | null = null) => {
+        doneSteps += 1
+        setProgress(bucketLabel, range)
+      }
+
+      const rememberSkippedRange = (bucketLabel: string, range: { start: string; end: string }, exception: any) => {
+        const label = `${bucketLabel} ${range.start} au ${addDaysYmd(range.end, -1)}`
+        const message = exception?.message || String(exception)
+        skippedRanges.push(`${label} : ${message}`)
+        console.warn('Période comparaison ignorée pour ne pas bloquer le PDF:', label, exception)
+      }
+
+      const fetchDailyRangeSafely = async (bucketLabel: string, range: { start: string; end: string }) => {
+        ensureActive()
+        setProgress(`${bucketLabel} · découpage jour`, range)
+
+        try {
+          const rows = await fetchFocusSummaryRange(range)
+          markStepDone(`${bucketLabel} · découpage jour`, null)
+          return rows
+        } catch (exception: any) {
+          if (isStaleComparisonLoad(exception)) throw exception
+          rememberSkippedRange(`${bucketLabel} · jour`, range, exception)
+          markStepDone(`${bucketLabel} · découpage jour`, null)
+          return [] as DailyRow[]
+        }
+      }
+
+      const fetchWeeklyRangeWithDailyFallback = async (bucketLabel: string, range: { start: string; end: string }) => {
+        ensureActive()
+        setProgress(`${bucketLabel} · découpage semaine`, range)
+
+        try {
+          const rows = await fetchFocusSummaryRange(range)
+          markStepDone(`${bucketLabel} · découpage semaine`, null)
+          return rows
+        } catch (exception: any) {
+          if (isStaleComparisonLoad(exception)) throw exception
+
+          const dailyRanges = splitDateRangeByDays(range.start, range.end, 1)
+          totalSteps += Math.max(0, dailyRanges.length - 1)
+
+          const dailyRows: DailyRow[] = []
+          for (const dailyRange of dailyRanges) {
+            dailyRows.push(...await fetchDailyRangeSafely(bucketLabel, dailyRange))
+          }
+
+          if (dailyRows.length === 0) {
+            rememberSkippedRange(`${bucketLabel} · semaine`, range, exception)
+          }
+
+          return dailyRows
+        }
+      }
+
       const fetchRangeWithFallback = async (bucketLabel: string, range: { start: string; end: string }) => {
         ensureActive()
         setProgress(bucketLabel, range)
 
         try {
           const rows = await fetchFocusSummaryRange(range)
-          doneSteps += 1
-          setProgress(bucketLabel, null)
+          markStepDone(bucketLabel, null)
           return rows
         } catch (exception: any) {
-          if (!isStatementTimeout(exception)) throw exception
+          if (isStaleComparisonLoad(exception)) throw exception
 
           const weeklyRanges = splitDateRangeByDays(range.start, range.end, 7)
           totalSteps += Math.max(0, weeklyRanges.length - 1)
 
           const weeklyRows: DailyRow[] = []
           for (const weeklyRange of weeklyRanges) {
-            ensureActive()
-            setProgress(`${bucketLabel} · découpage semaine`, weeklyRange)
+            weeklyRows.push(...await fetchWeeklyRangeWithDailyFallback(bucketLabel, weeklyRange))
+          }
 
-            try {
-              weeklyRows.push(...await fetchFocusSummaryRange(weeklyRange))
-              doneSteps += 1
-              setProgress(`${bucketLabel} · découpage semaine`, null)
-            } catch (weeklyException: any) {
-              if (!isStatementTimeout(weeklyException)) throw weeklyException
-
-              const dailyRanges = splitDateRangeByDays(weeklyRange.start, weeklyRange.end, 1)
-              totalSteps += Math.max(0, dailyRanges.length - 1)
-
-              for (const dailyRange of dailyRanges) {
-                ensureActive()
-                setProgress(`${bucketLabel} · découpage jour`, dailyRange)
-                weeklyRows.push(...await fetchFocusSummaryRange(dailyRange))
-                doneSteps += 1
-                setProgress(`${bucketLabel} · découpage jour`, null)
-              }
-            }
+          if (weeklyRows.length === 0) {
+            rememberSkippedRange(bucketLabel, range, exception)
           }
 
           return weeklyRows
@@ -1640,27 +1738,53 @@ function FocusMensuelPageContent() {
       setRollingRowsN(result.rollingN)
       setRollingRowsN1(result.rollingN1)
       setComparisonReady(true)
+      setComparisonError(null)
       setComparisonProgress({
         status: 'ready',
-        label: 'Terminé',
+        label: skippedRanges.length
+          ? `Terminé avec ${skippedRanges.length} période(s) ignorée(s)`
+          : 'Terminé',
         current: null,
         done: totalSteps,
         total: totalSteps,
       })
+
+      if (skippedRanges.length) {
+        console.warn('Tableaux N / N-1 chargés avec avertissements:', skippedRanges)
+      }
     } catch (exception: any) {
-      if (String(exception?.message || exception) === '__STALE_COMPARISON_LOAD__') return
+      if (isStaleComparisonLoad(exception)) return
 
       console.error('focus mensuel comparison tables', exception)
-      setComparisonError(exception?.message || String(exception))
-      setComparisonReady(false)
-      setComparisonProgress((current) => ({
-        ...current,
-        status: 'error',
-      }))
-      setYtdRowsN([])
-      setYtdRowsN1([])
-      setRollingRowsN([])
-      setRollingRowsN1([])
+
+      // En mode PDF, on ne bloque jamais le marqueur ready sur ces tableaux.
+      // Sinon la route Puppeteer attend indéfiniment data-focus-report-ready="1".
+      if (isPdfMode) {
+        setYtdRowsN(result.ytdN)
+        setYtdRowsN1(result.ytdN1)
+        setRollingRowsN(result.rollingN)
+        setRollingRowsN1(result.rollingN1)
+        setComparisonReady(true)
+        setComparisonError(null)
+        setComparisonProgress((current) => ({
+          status: 'ready',
+          label: 'Terminé avec erreur non bloquante en mode PDF',
+          current: null,
+          done: current.total || current.done || 0,
+          total: current.total || current.done || 0,
+        }))
+      } else {
+        setComparisonError(exception?.message || String(exception))
+        setComparisonReady(false)
+        setComparisonProgress((current) => ({
+          ...current,
+          status: 'error',
+        }))
+        setYtdRowsN([])
+        setYtdRowsN1([])
+        setRollingRowsN([])
+        setRollingRowsN1([])
+      }
     } finally {
       if (loadId === comparisonLoadIdRef.current) {
         setComparisonLoading(false)
