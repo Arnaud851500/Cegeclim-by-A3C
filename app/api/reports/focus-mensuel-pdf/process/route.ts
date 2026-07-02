@@ -315,8 +315,14 @@ async function waitForStableReport(
   mark: (step: string, extra?: Record<string, unknown>) => Promise<void>
 ) {
   const startedAt = Date.now()
-  const minFallbackMs = timeoutMs('FOCUS_PDF_FALLBACK_MIN_WAIT_MS', 75000)
-  const hardMaxMs = timeoutMs('FOCUS_PDF_READY_HARD_TIMEOUT_MS', 120000)
+
+  // IMPORTANT Vercel / serverless : cette étape ne doit jamais durer plusieurs minutes.
+  // La route process doit garder du temps pour page.pdf() + upload Storage.
+  // On plafonne volontairement les variables d'environnement pour éviter un nouveau blocage
+  // en waiting_page_stable si FOCUS_PDF_FALLBACK_MIN_WAIT_MS vaut encore 75000 ou 120000.
+  const minFallbackMs = Math.min(timeoutMs('FOCUS_PDF_FALLBACK_MIN_WAIT_MS', 12000), 20000)
+  const titleFallbackMs = Math.min(timeoutMs('FOCUS_PDF_TITLE_FALLBACK_MIN_WAIT_MS', 22000), 30000)
+  const hardMaxMs = Math.min(timeoutMs('FOCUS_PDF_READY_HARD_TIMEOUT_MS', 35000), 45000)
   let lastState: any = null
 
   while (Date.now() - startedAt < hardMaxMs) {
@@ -346,8 +352,9 @@ async function waitForStableReport(
       return { mode: 'ready_marker', state: lastState }
     }
 
+    // Sortie de secours principale : les blocs essentiels sont visibles.
     if (elapsedMs >= minFallbackMs && lastState.hasMainContent) {
-      await mark('page_fallback_ready', {
+      await mark('page_fallback_ready_main_content', {
         elapsed_ms: elapsedMs,
         warning: 'Génération autorisée sans data-focus-report-ready=1 : contenu principal visible et aucune erreur bloquante.',
         page_state: redactedState,
@@ -355,19 +362,30 @@ async function waitForStableReport(
       return { mode: 'fallback_main_content', state: lastState }
     }
 
+    // Sortie de secours renforcée : le titre du rapport est visible, mais les cartes ne sont pas toutes détectées
+    // dans innerText. Cela évite de laisser mourir la fonction serverless sur un compteur secondaire 35/36.
+    if (elapsedMs >= titleFallbackMs && lastState.hasReportTitle) {
+      await mark('page_force_ready_report_title', {
+        elapsed_ms: elapsedMs,
+        warning: 'Génération forcée : titre rapport visible, absence d’erreur bloquante, attente stabilité plafonnée.',
+        page_state: redactedState,
+      })
+      return { mode: 'fallback_report_title', state: lastState }
+    }
+
     await sleep(3000)
   }
 
-  if (lastState?.hasMainContent && !lastState?.hasVisibleError && lastState?.status !== 'error') {
-    await mark('page_hard_timeout_fallback', {
+  if (lastState?.hasReportTitle && !lastState?.hasVisibleError && lastState?.status !== 'error') {
+    await mark('page_hard_timeout_force_ready', {
       elapsed_ms: Date.now() - startedAt,
-      warning: 'Timeout ready atteint : génération forcée car le contenu principal est visible.',
+      warning: 'Timeout stabilité atteint : génération forcée car le rapport est visible.',
       page_state: {
         ...lastState,
         url: redactSecretInUrl(String(lastState.url || '')),
       },
     })
-    return { mode: 'hard_timeout_fallback', state: lastState }
+    return { mode: 'hard_timeout_report_title', state: lastState }
   }
 
   throw new Error(`Timeout attente page Focus stable après ${hardMaxMs} ms. Dernier état=${JSON.stringify(lastState)}`)
