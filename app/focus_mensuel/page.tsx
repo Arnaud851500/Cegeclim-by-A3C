@@ -264,6 +264,7 @@ const REPORT_PATH = 'reports/focus-mensuel/Rapport_activite_quotidien.pdf'
 const REPORT_FILENAME = "Rapport d'activité quotidien.pdf"
 const REPORT_JOB_CREATE_ROUTE = '/api/reports/focus-mensuel-pdf'
 const REPORT_JOB_PROCESS_ROUTE = '/api/reports/focus-mensuel-pdf/process'
+const REPORT_SNAPSHOT_ROUTE = '/api/reports/focus-mensuel-pdf/snapshot'
 
 // Sécurité PDF : les tableaux comparatifs ne doivent jamais empêcher la capture Puppeteer.
 // Si une période reste bloquée, on garde les données déjà chargées et on laisse le PDF partir.
@@ -1356,24 +1357,38 @@ function FocusMensuelPageContent() {
     }
   }
 
-  async function createComparisonSnapshotForPdf() {
+  async function createComparisonSnapshotForPdf(token?: string) {
     if (!comparisonReady || comparisonLoading) {
       throw new Error('Les tableaux comparatifs ne sont pas prêts : impossible de créer le snapshot PDF.')
     }
 
     const payload = buildComparisonSnapshotPayload()
+    const accessToken = token || await getSessionAccessToken()
 
-    const { data, error } = await supabase.rpc('create_focus_mensuel_pdf_snapshot', {
-      p_payload: payload as any,
-      p_ttl_minutes: 240,
+    // On passe par une route Next locale plutôt que par supabase.rpc côté navigateur.
+    // Cela évite les erreurs réseau/CORS/timeout PostgREST du type "TypeError: Failed to fetch"
+    // quand le snapshot JSON est un peu volumineux.
+    const response = await fetch(REPORT_SNAPSHOT_ROUTE, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({
+        payload,
+        ttl_minutes: 240,
+      }),
     })
 
-    if (error) throw new Error(`Création snapshot comparatif PDF impossible : ${error.message}`)
+    const result = await response.json().catch(() => null)
 
-    const snapshotId = Array.isArray(data) ? data[0] : data
-    if (!snapshotId) throw new Error('Création snapshot comparatif PDF impossible : id non retourné.')
+    if (!response.ok || !result?.ok || !result?.snapshot_id) {
+      throw new Error(
+        `Création snapshot comparatif PDF impossible : ${result?.error || `HTTP ${response.status}`}`
+      )
+    }
 
-    return String(snapshotId)
+    return String(result.snapshot_id)
   }
 
   async function loadComparisonSnapshot(snapshotId: string) {
@@ -1530,7 +1545,7 @@ function FocusMensuelPageContent() {
     try {
       const token = await getSessionAccessToken()
       setReportMessage('Sauvegarde des tableaux comparatifs pour le PDF…')
-      const comparisonSnapshotId = await createComparisonSnapshotForPdf()
+      const comparisonSnapshotId = await createComparisonSnapshotForPdf(token)
 
       const response = await fetch(REPORT_JOB_CREATE_ROUTE, {
         method: 'POST',
