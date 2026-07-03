@@ -3901,7 +3901,7 @@ const styles: Record<string, React.CSSProperties> = {
   kpiValueBlockLeft: { textAlign: 'center', minWidth: 0 },
   kpiValueBlockRight: { textAlign: 'center', minWidth: 0 },
   kpiValueLabel: { fontSize: 11, fontWeight: 950, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 3 },
-  kpiMain: { fontSize: 49, fontWeight: 950, marginBottom: 4 },
+  kpiMain: { fontSize: 39, fontWeight: 950, marginBottom: 4 },
   kpiSub: { fontSize: 13, color: '#475569', fontWeight: 800, marginTop: 10, marginBottom: 0 },
   kpiValueSub: { fontSize: 12, color: '#64748b', fontWeight: 850 },
   kpiMeta: { fontSize: 12, color: '#64748b', marginTop: 5 },
