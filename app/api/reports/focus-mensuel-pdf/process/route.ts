@@ -178,6 +178,29 @@ export async function POST(req: NextRequest) {
 
     if (!pageState?.hasReportTitle) throw new Error(`Page print non prête : ${JSON.stringify(pageState)}`)
 
+    // Les tableaux Portefeuille de commande et Projection facturation chargent quelques secondes
+    // après l'affichage principal de la page print. On attend volontairement avant le rendu PDF
+    // pour éviter de capturer les blocs encore vides. Par défaut : 15 secondes.
+    const postReadyWaitMs = Number(process.env.FOCUS_PDF_POST_READY_WAIT_MS || 15000)
+    if (Number.isFinite(postReadyWaitMs) && postReadyWaitMs > 0) {
+      await mark(sb, jobId, 'waiting_portefeuille_projection', { wait_ms: postReadyWaitMs })
+      await sleep(postReadyWaitMs)
+
+      const afterWaitState = await page.evaluate(() => {
+        const body = document.body?.innerText || ''
+        return {
+          hasPortefeuille: /Portefeuille de commande/i.test(body),
+          hasProjection: /Projection facturation/i.test(body),
+          hasProjectionMonth: /Projection facturation mois par agence/i.test(body),
+          hasNoProjectionData: /Aucune donnée disponible pour la projection du CA du mois/i.test(body),
+          hasNoPortfolioData: /Aucune donnée d'activité disponible pour le portefeuille de commande/i.test(body),
+          bodyPreview: body.slice(0, 800),
+        }
+      })
+
+      await mark(sb, jobId, 'portefeuille_projection_checked', { page_state: afterWaitState })
+    }
+
     await mark(sb, jobId, 'rendering_pdf')
     await page.addStyleTag({
       content: `
