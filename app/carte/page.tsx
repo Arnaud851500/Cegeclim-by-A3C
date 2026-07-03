@@ -4188,9 +4188,23 @@ const selectedClientMapReason = useMemo(() => {
 
   function stopMapControlEvent(event: React.SyntheticEvent) {
     // Les contrôles de la carte sont superposés à Leaflet : on évite que les clics,
-    // roues et mouvements souris partent jusqu'à la couche carte, ce qui rendait
-    // certains menus très lents au clic alors que la navigation clavier restait fluide.
+    // roues et mouvements souris partent jusqu'à la couche carte. On bloque aussi
+    // l'événement natif pour éviter que Leaflet capture le mousedown/pointerdown
+    // avant que les contrôles Outlook-like (checkbox, select, details) aient fini
+    // leur action. Le clavier n'était pas impacté, d'où le symptôme observé.
     event.stopPropagation()
+
+    const nativeEvent = event.nativeEvent as Event & {
+      stopImmediatePropagation?: () => void
+    }
+
+    if (typeof nativeEvent.stopPropagation === 'function') {
+      nativeEvent.stopPropagation()
+    }
+
+    if (typeof nativeEvent.stopImmediatePropagation === 'function') {
+      nativeEvent.stopImmediatePropagation()
+    }
   }
 
   function closeMapNow() {
@@ -4429,7 +4443,7 @@ const selectedClientMapReason = useMemo(() => {
                         onChange={(e) =>
                         setSelectedClientScope(e.target.value as 'Tous' | 'Cegeclim' | 'CegeclimSommeil' | 'Prospects')
                         }
-                        style={selectLikeStyle}
+                        style={nativeSelectStyle}
                     >
                         <option value="Tous">Tous</option>
                         <option value="Cegeclim">Cegeclim actif</option>
@@ -4443,7 +4457,7 @@ const selectedClientMapReason = useMemo(() => {
                       <select
                         value={selectedCegeclimCollaborateur}
                         onChange={(e) => setSelectedCegeclimCollaborateur(e.target.value)}
-                        style={selectLikeStyle}
+                        style={nativeSelectStyle}
                       >
                         <option value="TOUS">Tous</option>
                         {cegeclimCollaborateurOptions.map((option) => (
@@ -4484,7 +4498,7 @@ const selectedClientMapReason = useMemo(() => {
                       <select
                         value={selectedRgeFilter}
                         onChange={(e) => setSelectedRgeFilter(e.target.value as 'TOUS' | 'OUI' | 'NON')}
-                        style={selectLikeStyle}
+                        style={nativeSelectStyle}
                       >
                         <option value="TOUS">TOUS</option>
                         <option value="OUI">OUI</option>
@@ -4497,7 +4511,7 @@ const selectedClientMapReason = useMemo(() => {
                       <select
                         value={selectedCapaciteGazFilter}
                         onChange={(e) => setSelectedCapaciteGazFilter(e.target.value as 'TOUS' | 'OUI' | 'NON')}
-                        style={selectLikeStyle}
+                        style={nativeSelectStyle}
                       >
                         <option value="TOUS">TOUS</option>
                         <option value="OUI">OUI</option>
@@ -4860,8 +4874,13 @@ const selectedClientMapReason = useMemo(() => {
                   <div
                     style={mapCompactHeaderStyle}
                     onMouseDown={stopMapControlEvent}
+                    onMouseUp={stopMapControlEvent}
                     onPointerDown={stopMapControlEvent}
+                    onPointerUp={stopMapControlEvent}
+                    onTouchStart={stopMapControlEvent}
+                    onTouchEnd={stopMapControlEvent}
                     onClick={stopMapControlEvent}
+                    onDoubleClick={stopMapControlEvent}
                     onWheel={stopMapControlEvent}
                   >
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0, flex: '1 1 760px' }}>
@@ -5066,7 +5085,7 @@ const selectedClientMapReason = useMemo(() => {
                         <select
                           value={selectedMapCegeclimCollaborateur}
                           onChange={(e) => setSelectedMapCegeclimCollaborateur(e.target.value)}
-                          style={selectLikeStyle}
+                          style={nativeSelectStyle}
                         >
                           <option value="TOUS">Tous</option>
                           {cegeclimCollaborateurOptions.map((option) => (
@@ -5080,7 +5099,7 @@ const selectedClientMapReason = useMemo(() => {
                         <select
                           value={selectedRgeFilter}
                           onChange={(e) => setSelectedRgeFilter(e.target.value as 'TOUS' | 'OUI' | 'NON')}
-                          style={selectLikeStyle}
+                          style={nativeSelectStyle}
                         >
                           <option value="TOUS">TOUS</option>
                           <option value="OUI">OUI</option>
@@ -5093,7 +5112,7 @@ const selectedClientMapReason = useMemo(() => {
                         <select
                           value={selectedCapaciteGazFilter}
                           onChange={(e) => setSelectedCapaciteGazFilter(e.target.value as 'TOUS' | 'OUI' | 'NON')}
-                          style={selectLikeStyle}
+                          style={nativeSelectStyle}
                         >
                           <option value="TOUS">TOUS</option>
                           <option value="OUI">OUI</option>
@@ -6167,6 +6186,19 @@ const selectLikeStyle: React.CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'space-between',
+}
+
+const nativeSelectStyle: React.CSSProperties = {
+  height: '38px',
+  width: '100%',
+  maxWidth: '320px',
+  borderRadius: '9px',
+  border: '1px solid #6aa0ff',
+  background: '#fff',
+  padding: '0 34px 0 14px',
+  fontSize: '14px',
+  boxShadow: '0 1px 3px rgba(0,0,0,0.10)',
+  cursor: 'pointer',
 }
 
 const multiPanelStyle: React.CSSProperties = {

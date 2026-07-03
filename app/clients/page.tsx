@@ -68,6 +68,57 @@ type SireneParamsForm = {
   dateMajMax: string
 }
 
+
+type ClientMaintenanceRunRow = {
+  id: string
+  source: string | null
+  status: 'queued' | 'running' | 'done' | 'error' | 'partial' | 'cancelled'
+  started_at: string | null
+  finished_at: string | null
+  current_step: string | null
+  message: string | null
+  error_message: string | null
+  config_json: Record<string, any> | null
+  result_json: Record<string, any> | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+type ClientMaintenanceStepRow = {
+  id: string
+  run_id: string
+  step_key: string
+  step_label: string
+  status: 'queued' | 'running' | 'done' | 'error' | 'skipped'
+  started_at: string | null
+  finished_at: string | null
+  processed_count: number | null
+  inserted_count: number | null
+  updated_count: number | null
+  rejected_count: number | null
+  error_count: number | null
+  result_json: Record<string, any> | null
+  error_message: string | null
+  sort_order: number | null
+}
+
+type ClientMaintenanceLogRow = {
+  id: string
+  run_id: string
+  step_id: string | null
+  level: 'info' | 'warning' | 'error'
+  message: string
+  payload_json: Record<string, any> | null
+  created_at: string
+}
+
+type ClientMaintenanceStatusPayload = {
+  success: boolean
+  runs: ClientMaintenanceRunRow[]
+  steps: ClientMaintenanceStepRow[]
+  logs: ClientMaintenanceLogRow[]
+}
+
 type CsvRawRow = Record<string, unknown>
 
 type ClientUpsertRow = {
@@ -228,6 +279,49 @@ function formatDateFr(dateStr: string | null | undefined): string {
   return d.toLocaleDateString('fr-FR')
 }
 
+
+function formatDateTimeFr(dateStr: string | null | undefined): string {
+  if (!dateStr) return '—'
+  const d = new Date(dateStr)
+  if (Number.isNaN(d.getTime())) return '—'
+  return d.toLocaleString('fr-FR')
+}
+
+function formatDuration(start: string | null | undefined, end: string | null | undefined): string {
+  if (!start) return '—'
+  const startDate = new Date(start)
+  const endDate = end ? new Date(end) : new Date()
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) return '—'
+  const seconds = Math.max(0, Math.round((endDate.getTime() - startDate.getTime()) / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const remainingSeconds = seconds % 60
+  if (minutes < 60) return `${minutes}m ${remainingSeconds}s`
+  const hours = Math.floor(minutes / 60)
+  const remainingMinutes = minutes % 60
+  return `${hours}h ${remainingMinutes}m`
+}
+
+function getMaintenanceStatusLabel(status: ClientMaintenanceRunRow['status'] | ClientMaintenanceStepRow['status'] | null | undefined): string {
+  if (status === 'queued') return 'En attente'
+  if (status === 'running') return 'En cours'
+  if (status === 'done') return 'Terminé'
+  if (status === 'partial') return 'Partiel'
+  if (status === 'error') return 'Erreur'
+  if (status === 'skipped') return 'Ignoré'
+  if (status === 'cancelled') return 'Annulé'
+  return '—'
+}
+
+function getMaintenanceStatusStyle(status: string | null | undefined): React.CSSProperties {
+  if (status === 'done') return { background: '#dcfce7', color: '#166534', borderColor: '#86efac' }
+  if (status === 'running') return { background: '#dbeafe', color: '#1d4ed8', borderColor: '#93c5fd' }
+  if (status === 'queued') return { background: '#fef9c3', color: '#854d0e', borderColor: '#fde68a' }
+  if (status === 'partial') return { background: '#ffedd5', color: '#9a3412', borderColor: '#fdba74' }
+  if (status === 'error') return { background: '#fee2e2', color: '#991b1b', borderColor: '#fca5a5' }
+  return { background: '#f1f5f9', color: '#334155', borderColor: '#cbd5e1' }
+}
+
 function buildDefaultSireneParams(lastImport: ImportRow | null): SireneParamsForm {
   const defaultMin = lastImport?.date_import ? formatDateInput(lastImport.date_import) : ''
   return {
@@ -260,6 +354,12 @@ export default function ClientsPage() {
   const [uploadingCsv, setUploadingCsv] = useState(false)
   const [refreshingRge, setRefreshingRge] = useState(false)
   const [refreshingCapacite, setRefreshingCapacite] = useState(false)
+  const [maintenanceLoading, setMaintenanceLoading] = useState(false)
+  const [startingMaintenance, setStartingMaintenance] = useState(false)
+  const [maintenanceRuns, setMaintenanceRuns] = useState<ClientMaintenanceRunRow[]>([])
+  const [maintenanceSteps, setMaintenanceSteps] = useState<ClientMaintenanceStepRow[]>([])
+  const [maintenanceLogs, setMaintenanceLogs] = useState<ClientMaintenanceLogRow[]>([])
+  const [showMaintenanceLogs, setShowMaintenanceLogs] = useState(false)
 
   const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(null)
   const [allowedDepartements, setAllowedDepartements] = useState<string[]>([])
@@ -279,6 +379,15 @@ export default function ClientsPage() {
 
   useEffect(() => {
     void loadPage()
+  }, [])
+
+  useEffect(() => {
+    void loadMaintenanceMonitor()
+    const timer = window.setInterval(() => {
+      void loadMaintenanceMonitor(false)
+    }, 15000)
+
+    return () => window.clearInterval(timer)
   }, [])
 
   async function loadPage() {
@@ -364,6 +473,71 @@ export default function ClientsPage() {
       alert("Erreur lors du chargement de l'écran.")
     } finally {
       setLoading(false)
+    }
+  }
+
+
+  async function loadMaintenanceMonitor(showLoader = true) {
+    if (showLoader) setMaintenanceLoading(true)
+    try {
+      const res = await fetch('/api/client-maintenance/status?limit=10', { cache: 'no-store' })
+      const data = (await res.json().catch(() => null)) as ClientMaintenanceStatusPayload | null
+
+      if (!res.ok || !data?.success) {
+        throw new Error((data as any)?.error || 'Erreur chargement monitoring maintenance clients')
+      }
+
+      setMaintenanceRuns(data.runs || [])
+      setMaintenanceSteps(data.steps || [])
+      setMaintenanceLogs(data.logs || [])
+    } catch (error) {
+      console.error('Erreur monitoring maintenance clients:', error)
+    } finally {
+      if (showLoader) setMaintenanceLoading(false)
+    }
+  }
+
+  async function startClientMaintenance() {
+    const confirmed = window.confirm(
+      'Lancer la maintenance complète clients ?\n\n' +
+        'Le traitement sera suivi dans le bloc de monitoring : SIRENE, cessations, RGE, capacité gaz et enrichissement.'
+    )
+
+    if (!confirmed) return
+
+    setStartingMaintenance(true)
+    try {
+      await persistSireneParams(sireneParams)
+
+      const res = await fetch('/api/client-maintenance/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source: 'manual',
+          config: {
+            sirene: true,
+            cessations: true,
+            rge: true,
+            capacite: true,
+            enrichment: true,
+            enrichmentLimit: 1000,
+            enrichmentBatchSize: 25,
+          },
+        }),
+      })
+
+      const data = await res.json().catch(() => null)
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || 'Erreur lancement maintenance clients')
+      }
+
+      await loadMaintenanceMonitor()
+      alert('Maintenance clients planifiée. Le suivi est disponible dans le bloc de monitoring.')
+    } catch (error: any) {
+      console.error(error)
+      alert('Erreur lancement maintenance clients : ' + (error?.message || String(error)))
+    } finally {
+      setStartingMaintenance(false)
     }
   }
 
@@ -762,6 +936,16 @@ export default function ClientsPage() {
     }
   }
 
+
+  const latestMaintenanceRun = maintenanceRuns[0] || null
+  const activeMaintenanceRun = maintenanceRuns.find((run) => ['queued', 'running'].includes(run.status)) || null
+  const latestMaintenanceSteps = latestMaintenanceRun
+    ? maintenanceSteps.filter((step) => step.run_id === latestMaintenanceRun.id).sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0))
+    : []
+  const latestMaintenanceLogs = latestMaintenanceRun
+    ? maintenanceLogs.filter((log) => log.run_id === latestMaintenanceRun.id)
+    : []
+
   const scopedDepartmentSet = useMemo(() => {
     if (normalizedSocieteFilter === 'global') return null
 
@@ -837,6 +1021,121 @@ export default function ClientsPage() {
           <StatCard title="Entreprise base CEGECLIM" value={clientKpis.cegeclimCount} />
           <StatCard title="Clients CEGECLIM absent base Clients" value={clientKpis.cegeclimMissingCount} />
         </div>
+      </div>
+
+      <div style={styles.card}>
+        <div style={styles.sectionHeaderRow}>
+          <div>
+            <h2 style={styles.sectionTitle}>Maintenance automatique clients</h2>
+            <div style={styles.optionText}>
+              Pipeline quotidien : création / mise à jour SIRENE, cessations, RGE, capacité froid/clim et enrichissement.
+            </div>
+          </div>
+          <div style={styles.buttonRow}>
+            <button
+              type="button"
+              onClick={() => void loadMaintenanceMonitor()}
+              style={styles.secondaryButton}
+              disabled={maintenanceLoading}
+            >
+              {maintenanceLoading ? 'Actualisation...' : 'Actualiser'}
+            </button>
+            <button
+              type="button"
+              onClick={startClientMaintenance}
+              style={styles.primaryButton}
+              disabled={startingMaintenance || Boolean(activeMaintenanceRun)}
+            >
+              {startingMaintenance ? 'Planification...' : activeMaintenanceRun ? 'Traitement en cours' : 'Lancer maintenant'}
+            </button>
+          </div>
+        </div>
+
+        {latestMaintenanceRun ? (
+          <>
+            <div style={styles.maintenanceSummaryGrid}>
+              <div style={styles.maintenanceSummaryCard}>
+                <div style={styles.statTitle}>Dernier statut</div>
+                <span style={{ ...styles.statusPill, ...getMaintenanceStatusStyle(latestMaintenanceRun.status) }}>
+                  {getMaintenanceStatusLabel(latestMaintenanceRun.status)}
+                </span>
+              </div>
+              <div style={styles.maintenanceSummaryCard}>
+                <div style={styles.statTitle}>Début</div>
+                <div style={styles.smallValue}>{formatDateTimeFr(latestMaintenanceRun.started_at || latestMaintenanceRun.created_at)}</div>
+              </div>
+              <div style={styles.maintenanceSummaryCard}>
+                <div style={styles.statTitle}>Durée</div>
+                <div style={styles.smallValue}>{formatDuration(latestMaintenanceRun.started_at || latestMaintenanceRun.created_at, latestMaintenanceRun.finished_at)}</div>
+              </div>
+              <div style={styles.maintenanceSummaryCard}>
+                <div style={styles.statTitle}>Étape en cours</div>
+                <div style={styles.smallValue}>{latestMaintenanceRun.current_step || '—'}</div>
+              </div>
+            </div>
+
+            {latestMaintenanceRun.message && <div style={styles.maintenanceMessage}>{latestMaintenanceRun.message}</div>}
+            {latestMaintenanceRun.error_message && <div style={styles.maintenanceError}>{latestMaintenanceRun.error_message}</div>}
+
+            <div style={styles.tableWrap}>
+              <table style={styles.maintenanceTable}>
+                <thead>
+                  <tr>
+                    <th style={styles.th}>Étape</th>
+                    <th style={styles.th}>Statut</th>
+                    <th style={styles.thRight}>Traité</th>
+                    <th style={styles.thRight}>Créés</th>
+                    <th style={styles.thRight}>Mis à jour</th>
+                    <th style={styles.thRight}>Rejets</th>
+                    <th style={styles.thRight}>Erreurs</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {latestMaintenanceSteps.map((step) => (
+                    <tr key={step.id}>
+                      <td style={styles.td}>{step.step_label}</td>
+                      <td style={styles.td}>
+                        <span style={{ ...styles.statusPill, ...getMaintenanceStatusStyle(step.status) }}>
+                          {getMaintenanceStatusLabel(step.status)}
+                        </span>
+                      </td>
+                      <td style={styles.tdRight}>{step.processed_count ?? 0}</td>
+                      <td style={styles.tdRight}>{step.inserted_count ?? 0}</td>
+                      <td style={styles.tdRight}>{step.updated_count ?? 0}</td>
+                      <td style={styles.tdRight}>{step.rejected_count ?? 0}</td>
+                      <td style={styles.tdRight}>{step.error_count ?? 0}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div style={{ marginTop: 12, display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+              <button type="button" onClick={() => setShowMaintenanceLogs((prev) => !prev)} style={styles.secondaryButton}>
+                {showMaintenanceLogs ? 'Masquer les logs' : 'Afficher les logs'}
+              </button>
+              <div style={styles.helpText}>Actualisation automatique toutes les 15 secondes.</div>
+            </div>
+
+            {showMaintenanceLogs && (
+              <div style={styles.logsBox}>
+                {latestMaintenanceLogs.length === 0 ? (
+                  <div style={styles.helpText}>Aucun log disponible.</div>
+                ) : (
+                  latestMaintenanceLogs.slice(0, 80).map((log) => (
+                    <div key={log.id} style={styles.logLine}>
+                      <span style={{ fontWeight: 800 }}>{formatDateTimeFr(log.created_at)}</span>
+                      <span style={{ marginLeft: 8, textTransform: 'uppercase' }}>{log.level}</span>
+                      <span style={{ marginLeft: 8 }}>{log.message}</span>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </>
+        ) : (
+          <div style={styles.maintenanceMessage}>Aucune maintenance clients historisée pour le moment.</div>
+        )}
       </div>
 
       <div style={styles.card}>
@@ -1169,5 +1468,107 @@ const styles: Record<string, React.CSSProperties> = {
   uploadLabel: {
     fontSize: 16,
     color: '#111827',
+  },
+  maintenanceSummaryGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(4, minmax(180px, 1fr))',
+    gap: 12,
+    marginTop: 14,
+  },
+  maintenanceSummaryCard: {
+    background: '#f8fafc',
+    border: '1px solid #dbe2ea',
+    borderRadius: 16,
+    padding: 12,
+    minHeight: 72,
+  },
+  smallValue: {
+    fontSize: 14,
+    color: '#111827',
+    fontWeight: 800,
+    marginTop: 6,
+  },
+  maintenanceMessage: {
+    marginTop: 12,
+    background: '#eff6ff',
+    border: '1px solid #bfdbfe',
+    color: '#1e3a8a',
+    borderRadius: 14,
+    padding: 12,
+    fontWeight: 700,
+  },
+  maintenanceError: {
+    marginTop: 12,
+    background: '#fef2f2',
+    border: '1px solid #fecaca',
+    color: '#991b1b',
+    borderRadius: 14,
+    padding: 12,
+    fontWeight: 700,
+  },
+  tableWrap: {
+    marginTop: 14,
+    overflowX: 'auto',
+    border: '1px solid #e2e8f0',
+    borderRadius: 14,
+  },
+  maintenanceTable: {
+    width: '100%',
+    borderCollapse: 'collapse',
+    fontSize: 13,
+  },
+  th: {
+    textAlign: 'left',
+    background: '#f8fafc',
+    color: '#334155',
+    padding: '10px 12px',
+    borderBottom: '1px solid #e2e8f0',
+    fontWeight: 800,
+  },
+  thRight: {
+    textAlign: 'right',
+    background: '#f8fafc',
+    color: '#334155',
+    padding: '10px 12px',
+    borderBottom: '1px solid #e2e8f0',
+    fontWeight: 800,
+  },
+  td: {
+    padding: '10px 12px',
+    borderBottom: '1px solid #e2e8f0',
+    color: '#111827',
+  },
+  tdRight: {
+    padding: '10px 12px',
+    borderBottom: '1px solid #e2e8f0',
+    color: '#111827',
+    textAlign: 'right',
+    fontVariantNumeric: 'tabular-nums',
+  },
+  statusPill: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 84,
+    border: '1px solid',
+    borderRadius: 999,
+    padding: '4px 9px',
+    fontWeight: 800,
+    fontSize: 12,
+  },
+  logsBox: {
+    marginTop: 12,
+    background: '#0f172a',
+    color: '#e5e7eb',
+    borderRadius: 14,
+    padding: 12,
+    maxHeight: 280,
+    overflow: 'auto',
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+    fontSize: 12,
+  },
+  logLine: {
+    padding: '4px 0',
+    borderBottom: '1px solid rgba(255,255,255,0.08)',
   },
 }
