@@ -77,9 +77,23 @@ export async function POST(req: NextRequest) {
   let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null
 
   try {
-    const secret = req.headers.get('x-report-secret') || req.nextUrl.searchParams.get('secret') || ''
+    const secret = req.headers.get('x-report-secret') || req.headers.get('x-internal-secret') || req.nextUrl.searchParams.get('secret') || ''
     const expectedSecret = process.env.REPORT_PDF_RENDER_SECRET || process.env.INTERNAL_API_SECRET || ''
-    if (!expectedSecret || secret !== expectedSecret) {
+
+    const authHeader = req.headers.get('authorization') || ''
+    const token = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice(7).trim() : ''
+
+    if (expectedSecret && secret && secret === expectedSecret) {
+      // Appel worker interne autorisé.
+    } else if (token) {
+      const { data: userData, error: userError } = await sb.auth.getUser(token)
+      if (userError || !userData?.user) {
+        return NextResponse.json(
+          { ok: false, error: `Unauthorized worker : session utilisateur invalide${userError?.message ? ` (${userError.message})` : ''}.` },
+          { status: 401 }
+        )
+      }
+    } else {
       return NextResponse.json({ ok: false, error: 'Unauthorized worker.' }, { status: 401 })
     }
 

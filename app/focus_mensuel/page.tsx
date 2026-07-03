@@ -83,6 +83,9 @@ type KpiCardData = {
   nb: number
   amount: number
   qtyPert: number
+  monthAmount: number
+  monthQtyPert: number
+  monthNb: number
   monthAverageAmount: number
   fmsPct?: number
   fmsPctMonth?: number
@@ -421,6 +424,12 @@ function kpiValue(card: KpiCardData, mode: ViewMode) {
   return card.amount
 }
 
+function kpiMonthValue(card: KpiCardData, mode: ViewMode) {
+  if (mode === 'nb_documents') return card.monthNb
+  if (mode === 'quantite_pertinente') return card.monthQtyPert
+  return card.monthAmount
+}
+
 function getTopLabel(rows: DailyRow[], dimension: 'agence' | 'famille_macro') {
   const grouped = groupBy(rows, (r) => String((r as any)[dimension] || '—'))
   const ranked = Array.from(grouped.entries())
@@ -756,9 +765,10 @@ function CumulativeChart({ days, rows, mode }: { days: string[]; rows: DailyRow[
   return <MultiLineChart days={days} rows={cumulativeRows} mode={mode} title={`Cumul mensuel — ${labelForMode(mode)}`} />
 }
 
-function KpiCard({ card, mode, basisLabel }: { card: KpiCardData; mode: ViewMode; basisLabel: string }) {
+function KpiCard({ card, mode }: { card: KpiCardData; mode: ViewMode }) {
   const color = DOC_COLORS[card.type]
-  const mainValue = displayValue(kpiValue(card, mode), mode)
+  const dayValue = displayValue(kpiValue(card, mode), mode)
+  const monthValue = displayValue(kpiMonthValue(card, mode), mode)
   const isUp = (card.evolutionVsMtdPct || 0) >= 0
 
   return (
@@ -769,18 +779,26 @@ function KpiCard({ card, mode, basisLabel }: { card: KpiCardData; mode: ViewMode
           {card.evolutionVsMtdPct === null ? 'vs moy. mensuelle —' : `vs moy. mensuelle ${isUp ? '▲' : '▼'} ${formatPct(card.evolutionVsMtdPct)}`}
         </span>
       </div>
-      <div style={styles.kpiMain}>{mainValue}</div>
-      <div style={styles.kpiSub}>{formatNumber(card.nb)} document(s) · moy mois : {formatMoney(card.monthAverageAmount)}</div>
+
+      <div style={styles.kpiValuesGrid}>
+        <div style={styles.kpiValueBlockLeft}>
+          <div style={styles.kpiValueLabel}>Jour</div>
+          <div style={styles.kpiMain}>{dayValue}</div>
+          <div style={styles.kpiValueSub}>{formatNumber(card.nb)} document(s)</div>
+        </div>
+        <div style={styles.kpiValueBlockRight}>
+          <div style={styles.kpiValueLabel}>Mois</div>
+          <div style={styles.kpiMain}>{monthValue}</div>
+          <div style={styles.kpiValueSub}>{formatNumber(card.monthNb)} document(s)</div>
+        </div>
+      </div>
+
       {card.type === 'BL' && (
         <div style={styles.kpiSub}>
           Part dépôt FMS : <b>jour {card.fmsPct === undefined ? '—' : `${card.fmsPct.toLocaleString('fr-FR', { maximumFractionDigits: 1 })} %`}</b>
-          {' '}(moy mois : <b>{card.fmsPctMonth === undefined ? '—' : `${card.fmsPctMonth.toLocaleString('fr-FR', { maximumFractionDigits: 1 })} %`}</b>)
+          {' '}· <b>mois {card.fmsPctMonth === undefined ? '—' : `${card.fmsPctMonth.toLocaleString('fr-FR', { maximumFractionDigits: 1 })} %`}</b>
         </div>
       )}
-      <div style={styles.kpiMeta}>Agence dominante : <b>{card.topAgence}</b></div>
-      <div style={styles.kpiMeta}>Famille dominante : <b>{card.topFamille}</b></div>
-      <div style={styles.kpiMeta}>Base moyenne mensuelle : <b>{basisLabel}</b></div>
-      <div style={styles.kpiMeta}>vs moyenne 7 jours ouvrés : <b>{formatPct(card.evolutionVs7dPct)}</b></div>
     </div>
   )
 }
@@ -1010,6 +1028,8 @@ function FocusMensuelPageContent() {
 
       const amount = sum(dayRows, (r) => r.montant_ht)
       const qtyPert = sum(dayRows, (r) => r.quantite_pertinente)
+      const monthAmount = sum(monthRowsBeforeFocus, (r) => r.montant_ht)
+      const monthQtyPert = sum(monthRowsBeforeFocus, (r) => r.quantite_pertinente)
       const nb = normalizedDistinctDocRows.length
         ? sumDistinctDocs(normalizedDistinctDocRows, type, focusDate, focusDate)
         : sum(dayRows, (r) => r.nb_documents)
@@ -1043,6 +1063,9 @@ function FocusMensuelPageContent() {
         nb,
         amount,
         qtyPert,
+        monthAmount,
+        monthQtyPert,
+        monthNb: mtdDocs,
         monthAverageAmount,
         fmsPct: type === 'BL' && blTotalAmount ? (blFmsAmount / blTotalAmount) * 100 : undefined,
         fmsPctMonth: type === 'BL' && blTotalAmountMonth ? (blFmsAmountMonth / blTotalAmountMonth) * 100 : undefined,
@@ -2537,7 +2560,7 @@ function FocusMensuelPageContent() {
   }
 
   async function loadHighlights() {
-    const start7 = addDaysYmd(focusDate, -6)
+    const startPeriod = monthBegin
     const endExclusive = addDaysYmd(focusDate, 1)
 
     setHighlightsLoading(true)
@@ -2545,7 +2568,7 @@ function FocusMensuelPageContent() {
 
     try {
       const { data, error } = await supabase.rpc('get_focus_mensuel_highlights', {
-        p_date_debut: start7,
+        p_date_debut: startPeriod,
         p_date_fin: endExclusive,
         p_limit: 500,
         p_agence: agence || null,
@@ -2879,7 +2902,7 @@ function FocusMensuelPageContent() {
       {highlightsLoading && <div style={styles.infoBox}>Chargement des TOP 20…</div>}
       {rebuildingCache && <div style={styles.infoBox}>Reconstruction du cache mensuel en cours…</div>}
       <div style={styles.kpiGrid} className="focus-pdf-kpi-grid">
-        {kpiCards.map((card) => <KpiCard key={card.type} card={card} mode={viewMode} basisLabel={businessDayBasis.label} />)}
+        {kpiCards.map((card) => <KpiCard key={card.type} card={card} mode={viewMode} />)}
       </div>
 
       <div style={styles.chartGrid} className="focus-pdf-chart-grid">
@@ -2977,9 +3000,9 @@ function FocusMensuelPageContent() {
       </div>
 
       <div style={styles.highlightsGrid} className="focus-pdf-highlights-grid">
-        <HighlightTable title="Top 20 devis créés — 7 derniers jours" rows={highlights.topDevis} />
-        <HighlightTable title="Top 20 commandes CDC — 7 derniers jours" rows={highlights.topCdc} />
-        <HighlightTable title="Top 20 documents BL / CDC / Factures — 7 derniers jours" rows={highlights.topDocs} />
+        <HighlightTable title="Top 20 devis créés — depuis le début du mois" rows={highlights.topDevis} />
+        <HighlightTable title="Top 20 commandes CDC — depuis le début du mois" rows={highlights.topCdc} />
+        <HighlightTable title="Top 20 documents BL / CDC / Factures — depuis le début du mois" rows={highlights.topDocs} />
       </div>
     </section>
   )
@@ -3874,8 +3897,13 @@ const styles: Record<string, React.CSSProperties> = {
   docPill: { borderRadius: 999, padding: '5px 9px', fontWeight: 900, fontSize: 12 },
   smallDocPill: { fontWeight: 900 },
   evoPill: { borderRadius: 999, padding: '5px 8px', fontWeight: 900, fontSize: 12 },
-  kpiMain: { fontSize: 26, fontWeight: 950, marginBottom: 4 },
-  kpiSub: { fontSize: 13, color: '#475569', fontWeight: 800, marginBottom: 4 },
+  kpiValuesGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, alignItems: 'center', marginTop: 8 },
+  kpiValueBlockLeft: { textAlign: 'center', minWidth: 0 },
+  kpiValueBlockRight: { textAlign: 'center', minWidth: 0 },
+  kpiValueLabel: { fontSize: 11, fontWeight: 950, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 3 },
+  kpiMain: { fontSize: 49, fontWeight: 950, marginBottom: 4 },
+  kpiSub: { fontSize: 13, color: '#475569', fontWeight: 800, marginTop: 10, marginBottom: 0 },
+  kpiValueSub: { fontSize: 12, color: '#64748b', fontWeight: 850 },
   kpiMeta: { fontSize: 12, color: '#64748b', marginTop: 5 },
   chartGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 },
   chartBox: { position: 'relative', background: '#fff', border: '1px solid #e2e8f0', borderRadius: 18, padding: 14, boxShadow: '0 8px 22px rgba(15,23,42,0.06)', minWidth: 0 },
