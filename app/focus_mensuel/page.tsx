@@ -264,7 +264,7 @@ const REPORT_PATH = 'reports/focus-mensuel/Rapport_activite_quotidien.pdf'
 const REPORT_FILENAME = "Rapport d'activité quotidien.pdf"
 const REPORT_JOB_CREATE_ROUTE = '/api/reports/focus-mensuel-pdf'
 const REPORT_JOB_PROCESS_ROUTE = '/api/reports/focus-mensuel-pdf/process'
-const REPORT_SNAPSHOT_ROUTE = '/api/reports/focus-mensuel-pdf/snapshot'
+const REPORT_PDF_CACHE_ROUTE = '/api/reports/focus-mensuel-pdf/cache'
 
 // Sécurité PDF : les tableaux comparatifs ne doivent jamais empêcher la capture Puppeteer.
 // Si une période reste bloquée, on garde les données déjà chargées et on laisse le PDF partir.
@@ -863,7 +863,8 @@ function FocusMensuelPageContent() {
   const requestedFamilleMacro = searchParams?.get('familleMacro') || searchParams?.get('famille_macro') || ''
   const requestedCollaborateur = searchParams?.get('collaborateur') || ''
   const requestedCaProjeteFactures = searchParams?.get('caProjeteFactures') || searchParams?.get('ca_projete_factures') || ''
-  const requestedComparisonSnapshotId = searchParams?.get('comparisonSnapshotId') || searchParams?.get('comparison_snapshot_id') || ''
+  const requestedPdfCacheId = searchParams?.get('pdf_cache_id') || searchParams?.get('cache_id') || searchParams?.get('comparison_cache_id') || ''
+  const requestedRenderSecret = searchParams?.get('render_secret') || ''
   const currentMonth = /^\d{4}-\d{2}$/.test(String(requestedMonth || '')) ? String(requestedMonth) : todayYmd().slice(0, 7)
   const [month, setMonth] = useState(currentMonth)
   const [focusDate, setFocusDate] = useState(/^\d{4}-\d{2}-\d{2}$/.test(String(requestedFocusDate || '')) ? String(requestedFocusDate) : pickDefaultFocusDate())
@@ -903,6 +904,9 @@ function FocusMensuelPageContent() {
     total: 0,
   })
   const [comparisonError, setComparisonError] = useState<string | null>(null)
+  const [cachedAgencyYtdRows, setCachedAgencyYtdRows] = useState<ComparisonRow[] | null>(null)
+  const [cachedFamilyYtdRows, setCachedFamilyYtdRows] = useState<ComparisonRow[] | null>(null)
+  const [cachedRolling12Rows, setCachedRolling12Rows] = useState<ComparisonRow[] | null>(null)
   const comparisonLoadIdRef = useRef(0)
   const [highlightRows, setHighlightRows] = useState<HighlightRow[]>([])
   const [agencyPortfolioRows, setAgencyPortfolioRows] = useState<AgencyPortfolioRow[]>([])
@@ -1101,6 +1105,10 @@ function FocusMensuelPageContent() {
     )
   }, [projectionFacturesEnabled, rollingComparisonRows, normalizedRollingRowsN, agencyProjectionRows, month])
 
+  const ytdAgencyComparisonRowsForTable = cachedAgencyYtdRows || ytdAgencyComparisonRowsDisplay
+  const ytdFamilyComparisonRowsForTable = cachedFamilyYtdRows || ytdFamilyComparisonRows
+  const rollingComparisonRowsForTable = cachedRolling12Rows || rollingComparisonRowsDisplay
+
   const projectedFacturesOptionLabel = useMemo(() => {
     const projectedTotal = sum(agencyProjectionRows, (row) => row.projectionCa)
     return `CA projeté mois en cours sur facturation €${projectedTotal ? ` (${formatMoneyCompact(projectedTotal)})` : ''}`
@@ -1206,14 +1214,17 @@ function FocusMensuelPageContent() {
   }, [month, agence, familleMacro, collaborateur, includeHorsStats])
 
   useEffect(() => {
-    if (isPdfMode && requestedComparisonSnapshotId) {
-      void loadComparisonSnapshot(requestedComparisonSnapshotId)
+    if (isPdfMode && requestedPdfCacheId) {
+      void loadPdfCacheTables(requestedPdfCacheId)
       return
     }
 
+    setCachedAgencyYtdRows(null)
+    setCachedFamilyYtdRows(null)
+    setCachedRolling12Rows(null)
     void loadComparisonTables()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [month, focusDate, agence, familleMacro, collaborateur, includeHorsStats, requestedComparisonSnapshotId])
+  }, [month, focusDate, agence, familleMacro, collaborateur, includeHorsStats, requestedPdfCacheId])
 
   useEffect(() => {
     if (!isPdfMode || !comparisonLoading) return
@@ -1292,7 +1303,7 @@ function FocusMensuelPageContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pdfJobId, pdfJobStatus])
 
-  function buildReportPayload(comparisonSnapshotId?: string | null) {
+  function buildReportPayload(pdfCacheId?: string | null) {
     return {
       bucket: REPORT_BUCKET,
       path: REPORT_PATH,
@@ -1306,92 +1317,149 @@ function FocusMensuelPageContent() {
       collaborateur: collaborateur || null,
       ca_projete_factures_mois_en_cours: useProjectedCurrentMonthFactures,
       caProjeteFactures: useProjectedCurrentMonthFactures ? '1' : '0',
-      comparison_snapshot_id: comparisonSnapshotId || null,
-      comparisonSnapshotId: comparisonSnapshotId || null,
+      pdf_cache_id: pdfCacheId || null,
+      cache_id: pdfCacheId || null,
+      comparison_cache_id: pdfCacheId || null,
       wait_for_ready_selector: '[data-focus-report-ready="1"]',
       wait_timeout_ms: 240000,
     }
   }
 
-  function sanitizeSnapshotRows(rows: unknown): DailyRow[] {
+  function sanitizeComparisonRows(rows: unknown): ComparisonRow[] {
     if (!Array.isArray(rows)) return []
 
-    return rows.map((row: any) => ({
-      jour: dateOnly(row?.jour),
-      type_document: row?.type_document || '',
-      agence: row?.agence || null,
-      collaborateur: row?.collaborateur || null,
-      depot: row?.depot || null,
-      depot_bucket: row?.depot_bucket || null,
-      famille_macro: row?.famille_macro || null,
-      hors_statistique: Boolean(row?.hors_statistique),
-      nb_documents: Number(row?.nb_documents || 0),
-      nb_lignes: Number(row?.nb_lignes || 0),
-      montant_ht: Number(row?.montant_ht || 0),
-      quantite_brute: Number(row?.quantite_brute || 0),
-      quantite_pertinente: Number(row?.quantite_pertinente || 0),
-    }))
+    return rows.map((row: any) => {
+      const byType = createEmptyComparisonRecord()
+
+      DOC_TYPES.forEach((type) => {
+        const source = row?.byType?.[type] || {}
+        byType[type] = {
+          amountN1: Number(source.amountN1 || 0),
+          amountN: Number(source.amountN || 0),
+          qtyPertN1: Number(source.qtyPertN1 || 0),
+          qtyPertN: Number(source.qtyPertN || 0),
+        }
+      })
+
+      return {
+        label: String(row?.label || '—'),
+        byType,
+        total: Number(row?.total || 0),
+      }
+    })
   }
 
-  function buildComparisonSnapshotPayload(): FocusComparisonSnapshotPayload {
-    return {
-      version: 1,
-      type: 'focus_mensuel_comparison_snapshot',
-      created_at: new Date().toISOString(),
-      filters: {
-        month,
-        focusDate,
-        agence: agence || null,
-        familleMacro: familleMacro || null,
-        collaborateur: collaborateur || null,
-        includeHorsStats,
-        viewMode,
-        useProjectedCurrentMonthFactures,
-      },
-      // IMPORTANT : on sauvegarde les calculs déjà réalisés par la page Focus.
-      // La page print ne recalculera plus les 36 périodes ; elle relira ce snapshot.
-      ytdRowsN,
-      ytdRowsN1,
-      rollingRowsN,
-      rollingRowsN1,
-    }
-  }
-
-  async function createComparisonSnapshotForPdf(token?: string) {
-    if (!comparisonReady || comparisonLoading) {
-      throw new Error('Les tableaux comparatifs ne sont pas prêts : impossible de créer le snapshot PDF.')
-    }
-
-    const payload = buildComparisonSnapshotPayload()
+  async function createPdfCacheRun(token?: string) {
     const accessToken = token || await getSessionAccessToken()
-
-    // On passe par une route Next locale plutôt que par supabase.rpc côté navigateur.
-    // Cela évite les erreurs réseau/CORS/timeout PostgREST du type "TypeError: Failed to fetch"
-    // quand le snapshot JSON est un peu volumineux.
-    const response = await fetch(REPORT_SNAPSHOT_ROUTE, {
+    const response = await fetch(REPORT_PDF_CACHE_ROUTE, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${accessToken}`,
       },
       body: JSON.stringify({
-        payload,
-        ttl_minutes: 240,
+        action: 'create',
+        month,
+        focus_date: focusDate,
+        view: viewMode,
+        agence: agence || null,
+        famille_macro: familleMacro || null,
+        collaborateur: collaborateur || null,
+        include_hors_statistiques: includeHorsStats,
+        ca_projete_factures: useProjectedCurrentMonthFactures,
+        expected_tables: ['activity_agency_ytd', 'activity_family_ytd', 'activity_rolling_12'],
       }),
     })
 
     const result = await response.json().catch(() => null)
-
-    if (!response.ok || !result?.ok || !result?.snapshot_id) {
-      throw new Error(
-        `Création snapshot comparatif PDF impossible : ${result?.error || `HTTP ${response.status}`}`
-      )
+    if (!response.ok || !result?.ok || !result?.cache_id) {
+      throw new Error(result?.error || `Création cache PDF impossible (${response.status})`)
     }
 
-    return String(result.snapshot_id)
+    return String(result.cache_id)
   }
 
-  async function loadComparisonSnapshot(snapshotId: string) {
+  async function savePdfCacheTable(
+    cacheId: string,
+    tableKey: 'activity_agency_ytd' | 'activity_family_ytd' | 'activity_rolling_12',
+    rows: ComparisonRow[],
+    token?: string,
+    meta: Record<string, any> = {}
+  ) {
+    const accessToken = token || await getSessionAccessToken()
+    const response = await fetch(REPORT_PDF_CACHE_ROUTE, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({
+        action: 'table',
+        cache_id: cacheId,
+        table_key: tableKey,
+        rows,
+        meta,
+      }),
+    })
+
+    const result = await response.json().catch(() => null)
+    if (!response.ok || !result?.ok) {
+      throw new Error(result?.error || `Sauvegarde cache PDF ${tableKey} impossible (${response.status})`)
+    }
+
+    return result.cache
+  }
+
+  async function preparePdfCacheFromCurrentScreen(token?: string) {
+    if (!comparisonReady || comparisonLoading) {
+      throw new Error('Les tableaux comparatifs ne sont pas prêts : impossible de créer le cache PDF.')
+    }
+
+    const accessToken = token || await getSessionAccessToken()
+    const cacheId = await createPdfCacheRun(accessToken)
+
+    await savePdfCacheTable(
+      cacheId,
+      'activity_agency_ytd',
+      ytdAgencyComparisonRowsForTable,
+      accessToken,
+      {
+        label: 'Activité par agence depuis le début de l’année',
+        focus_date: focusDate,
+        month,
+        projected_current_month_factures: useProjectedCurrentMonthFactures,
+      }
+    )
+
+    await savePdfCacheTable(
+      cacheId,
+      'activity_family_ytd',
+      ytdFamilyComparisonRowsForTable,
+      accessToken,
+      {
+        label: 'Activité par famille macro depuis le début de l’année',
+        focus_date: focusDate,
+        month,
+      }
+    )
+
+    await savePdfCacheTable(
+      cacheId,
+      'activity_rolling_12',
+      rollingComparisonRowsForTable,
+      accessToken,
+      {
+        label: 'Activité 12 mois glissants',
+        focus_date: focusDate,
+        month,
+        projected_current_month_factures: useProjectedCurrentMonthFactures,
+      }
+    )
+
+    return cacheId
+  }
+
+  async function loadPdfCacheTables(cacheId: string) {
     const loadId = comparisonLoadIdRef.current + 1
     comparisonLoadIdRef.current = loadId
 
@@ -1400,54 +1468,69 @@ function FocusMensuelPageContent() {
     setComparisonError(null)
     setComparisonProgress({
       status: 'loading',
-      label: 'Chargement snapshot comparatif PDF',
-      current: snapshotId,
+      label: 'Chargement cache PDF des tableaux comparatifs',
+      current: cacheId,
       done: 0,
-      total: 1,
+      total: 3,
     })
 
     try {
-      const { data, error } = await supabase.rpc('get_focus_mensuel_pdf_snapshot', {
-        p_id: snapshotId,
+      const params = new URLSearchParams({ cache_id: cacheId })
+      if (requestedRenderSecret) params.set('render_secret', requestedRenderSecret)
+
+      const response = await fetch(`${REPORT_PDF_CACHE_ROUTE}?${params.toString()}`, {
+        method: 'GET',
+        cache: 'no-store',
       })
 
-      if (error) throw error
-      if (loadId !== comparisonLoadIdRef.current) return
-
-      const row = Array.isArray(data) ? data[0] : data
-      const payload = row?.payload as Partial<FocusComparisonSnapshotPayload> | null
-
-      if (!payload || payload.type !== 'focus_mensuel_comparison_snapshot') {
-        throw new Error('Snapshot comparatif PDF introuvable ou invalide.')
+      const result = await response.json().catch(() => null)
+      if (!response.ok || !result?.ok || !result?.payload) {
+        throw new Error(result?.error || `Chargement cache PDF impossible (${response.status})`)
       }
 
-      setYtdRowsN(sanitizeSnapshotRows(payload.ytdRowsN))
-      setYtdRowsN1(sanitizeSnapshotRows(payload.ytdRowsN1))
-      setRollingRowsN(sanitizeSnapshotRows(payload.rollingRowsN))
-      setRollingRowsN1(sanitizeSnapshotRows(payload.rollingRowsN1))
-      setComparisonReady(true)
-      setComparisonError(null)
-      setComparisonProgress({
-        status: 'ready',
-        label: 'Calculs comparatifs chargés depuis le snapshot PDF',
-        current: snapshotId,
-        done: 1,
-        total: 1,
-      })
-    } catch (exception: any) {
-      console.error('Chargement snapshot comparatif PDF', exception)
+      if (loadId !== comparisonLoadIdRef.current) return
+
+      const tables = result.payload?.tables || {}
+      const agencyRows = sanitizeComparisonRows(tables.activity_agency_ytd?.rows)
+      const familyRows = sanitizeComparisonRows(tables.activity_family_ytd?.rows)
+      const rollingRows = sanitizeComparisonRows(tables.activity_rolling_12?.rows)
+
+      if (!agencyRows.length && !familyRows.length && !rollingRows.length) {
+        throw new Error('Cache PDF vide : aucun tableau comparatif disponible.')
+      }
+
+      setCachedAgencyYtdRows(agencyRows)
+      setCachedFamilyYtdRows(familyRows)
+      setCachedRolling12Rows(rollingRows)
+
+      // On vide les sources DailyRow des comparatifs pour éviter tout recalcul parasite en mode print.
       setYtdRowsN([])
       setYtdRowsN1([])
       setRollingRowsN([])
       setRollingRowsN1([])
+
+      setComparisonReady(true)
+      setComparisonError(null)
+      setComparisonProgress({
+        status: 'ready',
+        label: 'Tableaux comparatifs chargés depuis le cache PDF',
+        current: cacheId,
+        done: 3,
+        total: 3,
+      })
+    } catch (exception: any) {
+      console.error('Chargement cache PDF tableaux comparatifs', exception)
+      setCachedAgencyYtdRows(null)
+      setCachedFamilyYtdRows(null)
+      setCachedRolling12Rows(null)
       setComparisonReady(false)
       setComparisonError(exception?.message || String(exception))
       setComparisonProgress({
         status: 'error',
-        label: 'Erreur snapshot comparatif PDF',
-        current: snapshotId,
+        label: 'Erreur cache PDF tableaux comparatifs',
+        current: cacheId,
         done: 0,
-        total: 1,
+        total: 3,
       })
     } finally {
       if (loadId === comparisonLoadIdRef.current) {
@@ -1544,8 +1627,8 @@ function FocusMensuelPageContent() {
 
     try {
       const token = await getSessionAccessToken()
-      setReportMessage('Sauvegarde des tableaux comparatifs pour le PDF…')
-      const comparisonSnapshotId = await createComparisonSnapshotForPdf(token)
+      setReportMessage('Préparation du cache PDF à partir des tableaux affichés…')
+      const pdfCacheId = await preparePdfCacheFromCurrentScreen(token)
 
       const response = await fetch(REPORT_JOB_CREATE_ROUTE, {
         method: 'POST',
@@ -1553,7 +1636,7 @@ function FocusMensuelPageContent() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify(buildReportPayload(comparisonSnapshotId)),
+        body: JSON.stringify(buildReportPayload(pdfCacheId)),
       })
 
       const result = await response.json().catch(() => null)
@@ -2877,18 +2960,18 @@ function FocusMensuelPageContent() {
         <ActivityByAgencyComparisonTable
           title={`Activité par agence depuis le début de l'année (01/01/${focusDate.slice(0, 4)} au ${formatDateFr(focusDate)})`}
           subtitle={`Option CA projeté : si cochée, les factures réelles de ${formatMonthFr(month).toLowerCase()} sont remplacées par le CA projeté du tableau Projection facturation mois par agence ; le total et l'évolution Fac sont recalculés.`}
-          rows={comparisonReady ? ytdAgencyComparisonRowsDisplay : []}
+          rows={comparisonReady ? ytdAgencyComparisonRowsForTable : []}
           emptyMessage={comparisonLoading ? 'Actualisation en cours : le tableau sera affiché une fois le chargement complet terminé.' : "Aucune donnée d'activité par agence sur la période."}
         />
         <ActivityByFamilyComparisonTable
           title={`Activité par famille macro depuis le début de l'année (01/01/${focusDate.slice(0, 4)} au ${formatDateFr(focusDate)})`}
-          rows={comparisonReady ? ytdFamilyComparisonRows : []}
+          rows={comparisonReady ? ytdFamilyComparisonRowsForTable : []}
           emptyMessage={comparisonLoading ? 'Actualisation en cours : le tableau sera affiché une fois le chargement complet terminé.' : "Aucune donnée d'activité par famille macro sur la période."}
         />
         <Rolling12ComparisonTable
           title="Activité 12 mois glissants"
           subtitle={`Option CA projeté : si cochée, la ligne ${formatShortMonthFr(month)} remplace les factures réelles du mois par le CA projeté total ; la ligne TOTAL 12 MOIS G. et l'évolution Fac sont recalculées.`}
-          rows={comparisonReady ? rollingComparisonRowsDisplay : []}
+          rows={comparisonReady ? rollingComparisonRowsForTable : []}
           emptyMessage={comparisonLoading ? 'Actualisation en cours : le tableau sera affiché une fois le chargement complet terminé.' : "Aucune donnée d'activité sur les 12 mois glissants."}
         />
       </div>
