@@ -58,6 +58,25 @@ type ComparisonProgress = {
   total: number
 }
 
+type FocusComparisonSnapshotPayload = {
+  version: 1
+  type: 'focus_mensuel_comparison_snapshot'
+  created_at: string
+  filters: {
+    month: string
+    focusDate: string
+    agence: string | null
+    familleMacro: string | null
+    collaborateur: string | null
+    includeHorsStats: boolean
+    viewMode: ViewMode
+    useProjectedCurrentMonthFactures: boolean
+  }
+  ytdRowsN: DailyRow[]
+  ytdRowsN1: DailyRow[]
+  rollingRowsN: DailyRow[]
+  rollingRowsN1: DailyRow[]
+}
 
 type KpiCardData = {
   type: DocType
@@ -843,6 +862,7 @@ function FocusMensuelPageContent() {
   const requestedFamilleMacro = searchParams?.get('familleMacro') || searchParams?.get('famille_macro') || ''
   const requestedCollaborateur = searchParams?.get('collaborateur') || ''
   const requestedCaProjeteFactures = searchParams?.get('caProjeteFactures') || searchParams?.get('ca_projete_factures') || ''
+  const requestedComparisonSnapshotId = searchParams?.get('comparisonSnapshotId') || searchParams?.get('comparison_snapshot_id') || ''
   const currentMonth = /^\d{4}-\d{2}$/.test(String(requestedMonth || '')) ? String(requestedMonth) : todayYmd().slice(0, 7)
   const [month, setMonth] = useState(currentMonth)
   const [focusDate, setFocusDate] = useState(/^\d{4}-\d{2}-\d{2}$/.test(String(requestedFocusDate || '')) ? String(requestedFocusDate) : pickDefaultFocusDate())
@@ -1185,9 +1205,14 @@ function FocusMensuelPageContent() {
   }, [month, agence, familleMacro, collaborateur, includeHorsStats])
 
   useEffect(() => {
+    if (isPdfMode && requestedComparisonSnapshotId) {
+      void loadComparisonSnapshot(requestedComparisonSnapshotId)
+      return
+    }
+
     void loadComparisonTables()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [month, focusDate, agence, familleMacro, collaborateur, includeHorsStats])
+  }, [month, focusDate, agence, familleMacro, collaborateur, includeHorsStats, requestedComparisonSnapshotId])
 
   useEffect(() => {
     if (!isPdfMode || !comparisonLoading) return
@@ -1266,7 +1291,7 @@ function FocusMensuelPageContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pdfJobId, pdfJobStatus])
 
-  function buildReportPayload() {
+  function buildReportPayload(comparisonSnapshotId?: string | null) {
     return {
       bucket: REPORT_BUCKET,
       path: REPORT_PATH,
@@ -1280,8 +1305,139 @@ function FocusMensuelPageContent() {
       collaborateur: collaborateur || null,
       ca_projete_factures_mois_en_cours: useProjectedCurrentMonthFactures,
       caProjeteFactures: useProjectedCurrentMonthFactures ? '1' : '0',
+      comparison_snapshot_id: comparisonSnapshotId || null,
+      comparisonSnapshotId: comparisonSnapshotId || null,
       wait_for_ready_selector: '[data-focus-report-ready="1"]',
       wait_timeout_ms: 240000,
+    }
+  }
+
+  function sanitizeSnapshotRows(rows: unknown): DailyRow[] {
+    if (!Array.isArray(rows)) return []
+
+    return rows.map((row: any) => ({
+      jour: dateOnly(row?.jour),
+      type_document: row?.type_document || '',
+      agence: row?.agence || null,
+      collaborateur: row?.collaborateur || null,
+      depot: row?.depot || null,
+      depot_bucket: row?.depot_bucket || null,
+      famille_macro: row?.famille_macro || null,
+      hors_statistique: Boolean(row?.hors_statistique),
+      nb_documents: Number(row?.nb_documents || 0),
+      nb_lignes: Number(row?.nb_lignes || 0),
+      montant_ht: Number(row?.montant_ht || 0),
+      quantite_brute: Number(row?.quantite_brute || 0),
+      quantite_pertinente: Number(row?.quantite_pertinente || 0),
+    }))
+  }
+
+  function buildComparisonSnapshotPayload(): FocusComparisonSnapshotPayload {
+    return {
+      version: 1,
+      type: 'focus_mensuel_comparison_snapshot',
+      created_at: new Date().toISOString(),
+      filters: {
+        month,
+        focusDate,
+        agence: agence || null,
+        familleMacro: familleMacro || null,
+        collaborateur: collaborateur || null,
+        includeHorsStats,
+        viewMode,
+        useProjectedCurrentMonthFactures,
+      },
+      // IMPORTANT : on sauvegarde les calculs déjà réalisés par la page Focus.
+      // La page print ne recalculera plus les 36 périodes ; elle relira ce snapshot.
+      ytdRowsN,
+      ytdRowsN1,
+      rollingRowsN,
+      rollingRowsN1,
+    }
+  }
+
+  async function createComparisonSnapshotForPdf() {
+    if (!comparisonReady || comparisonLoading) {
+      throw new Error('Les tableaux comparatifs ne sont pas prêts : impossible de créer le snapshot PDF.')
+    }
+
+    const payload = buildComparisonSnapshotPayload()
+
+    const { data, error } = await supabase.rpc('create_focus_mensuel_pdf_snapshot', {
+      p_payload: payload as any,
+      p_ttl_minutes: 240,
+    })
+
+    if (error) throw new Error(`Création snapshot comparatif PDF impossible : ${error.message}`)
+
+    const snapshotId = Array.isArray(data) ? data[0] : data
+    if (!snapshotId) throw new Error('Création snapshot comparatif PDF impossible : id non retourné.')
+
+    return String(snapshotId)
+  }
+
+  async function loadComparisonSnapshot(snapshotId: string) {
+    const loadId = comparisonLoadIdRef.current + 1
+    comparisonLoadIdRef.current = loadId
+
+    setComparisonLoading(true)
+    setComparisonReady(false)
+    setComparisonError(null)
+    setComparisonProgress({
+      status: 'loading',
+      label: 'Chargement snapshot comparatif PDF',
+      current: snapshotId,
+      done: 0,
+      total: 1,
+    })
+
+    try {
+      const { data, error } = await supabase.rpc('get_focus_mensuel_pdf_snapshot', {
+        p_id: snapshotId,
+      })
+
+      if (error) throw error
+      if (loadId !== comparisonLoadIdRef.current) return
+
+      const row = Array.isArray(data) ? data[0] : data
+      const payload = row?.payload as Partial<FocusComparisonSnapshotPayload> | null
+
+      if (!payload || payload.type !== 'focus_mensuel_comparison_snapshot') {
+        throw new Error('Snapshot comparatif PDF introuvable ou invalide.')
+      }
+
+      setYtdRowsN(sanitizeSnapshotRows(payload.ytdRowsN))
+      setYtdRowsN1(sanitizeSnapshotRows(payload.ytdRowsN1))
+      setRollingRowsN(sanitizeSnapshotRows(payload.rollingRowsN))
+      setRollingRowsN1(sanitizeSnapshotRows(payload.rollingRowsN1))
+      setComparisonReady(true)
+      setComparisonError(null)
+      setComparisonProgress({
+        status: 'ready',
+        label: 'Calculs comparatifs chargés depuis le snapshot PDF',
+        current: snapshotId,
+        done: 1,
+        total: 1,
+      })
+    } catch (exception: any) {
+      console.error('Chargement snapshot comparatif PDF', exception)
+      setYtdRowsN([])
+      setYtdRowsN1([])
+      setRollingRowsN([])
+      setRollingRowsN1([])
+      setComparisonReady(false)
+      setComparisonError(exception?.message || String(exception))
+      setComparisonProgress({
+        status: 'error',
+        label: 'Erreur snapshot comparatif PDF',
+        current: snapshotId,
+        done: 0,
+        total: 1,
+      })
+    } finally {
+      if (loadId === comparisonLoadIdRef.current) {
+        setComparisonLoading(false)
+      }
     }
   }
 
@@ -1373,13 +1529,16 @@ function FocusMensuelPageContent() {
 
     try {
       const token = await getSessionAccessToken()
+      setReportMessage('Sauvegarde des tableaux comparatifs pour le PDF…')
+      const comparisonSnapshotId = await createComparisonSnapshotForPdf()
+
       const response = await fetch(REPORT_JOB_CREATE_ROUTE, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify(buildReportPayload()),
+        body: JSON.stringify(buildReportPayload(comparisonSnapshotId)),
       })
 
       const result = await response.json().catch(() => null)
@@ -1750,69 +1909,181 @@ function FocusMensuelPageContent() {
     setRollingRowsN([])
     setRollingRowsN1([])
 
+    const focusYear = Number(focusDate.slice(0, 4))
     const result: Record<'ytdN' | 'ytdN1' | 'rollingN' | 'rollingN1', DailyRow[]> = {
       ytdN: [],
       ytdN1: [],
       rollingN: [],
       rollingN1: [],
     }
+    const skippedRanges: string[] = []
+    const comparisonStartedAt = Date.now()
 
-    const ensureActive = () => {
-      if (loadId !== comparisonLoadIdRef.current) {
-        throw new Error('__STALE_COMPARISON_LOAD__')
-      }
+    const flushPartialComparisonRows = () => {
+      if (loadId !== comparisonLoadIdRef.current) return
+      setYtdRowsN([...result.ytdN])
+      setYtdRowsN1([...result.ytdN1])
+      setRollingRowsN([...result.rollingN])
+      setRollingRowsN1([...result.rollingN1])
     }
 
-    const setProgress = (label: string, current: string | null, done: number, total: number) => {
-      if (loadId !== comparisonLoadIdRef.current) return
-      setComparisonProgress({
-        status: 'loading',
-        label,
-        current,
-        done,
-        total,
-      })
+    const hasReachedPdfHardStop = () => {
+      return isPdfMode && Date.now() - comparisonStartedAt >= PDF_COMPARISON_HARD_STOP_MS
     }
 
     try {
-      setProgress('Chargement cache comparatif Focus', 'RPC cache globale', 0, 1)
+      const ytdStart = `${focusYear}-01-01`
+      const ytdEndExclusive = addDaysYmd(focusDate, 1)
+      const ytdPreviousStart = `${focusYear - 1}-01-01`
+      const ytdPreviousEndExclusive = addYearsYmd(ytdEndExclusive, -1)
+      const rollingStart = `${addMonthsToMonth(month, -11)}-01`
+      const rollingEndExclusive = ytdEndExclusive
+      const rollingPreviousStart = addYearsYmd(rollingStart, -1)
+      const rollingPreviousEndExclusive = addYearsYmd(rollingEndExclusive, -1)
 
-      // IMPORTANT : la page print ne doit plus lancer 36 périodes ni 4 grosses requêtes parallèles.
-      // Cette RPC lit directement la table de cache indicateur_focus_journalier et renvoie les 4 blocs
-      // déjà agrégés : YTD N, YTD N-1, 12 mois glissants N, 12 mois glissants N-1.
-      const { data, error } = await withClientTimeout(
-        supabase.rpc('get_focus_mensuel_comparison_cache_metier', {
-          p_focus_date: focusDate,
-          p_month: month,
-          p_agence: agence || null,
-          p_famille_macro: familleMacro || null,
-          p_collaborateur: collaborateur || null,
-          p_include_hors_statistiques: includeHorsStats,
-        }),
-        isPdfMode ? 28000 : 45000,
-        'Chargement cache comparatif Focus global'
-      )
+      const buckets: Array<{
+        key: 'ytdN' | 'ytdN1' | 'rollingN' | 'rollingN1'
+        label: string
+        ranges: Array<{ start: string; end: string }>
+      }> = [
+        { key: 'ytdN', label: `YTD N ${focusYear}`, ranges: buildMonthlyRpcRanges(ytdStart, ytdEndExclusive) },
+        { key: 'ytdN1', label: `YTD N-1 ${focusYear - 1}`, ranges: buildMonthlyRpcRanges(ytdPreviousStart, ytdPreviousEndExclusive) },
+        { key: 'rollingN', label: '12 mois glissants N', ranges: buildMonthlyRpcRanges(rollingStart, rollingEndExclusive) },
+        { key: 'rollingN1', label: '12 mois glissants N-1', ranges: buildMonthlyRpcRanges(rollingPreviousStart, rollingPreviousEndExclusive) },
+      ]
 
-      if (error) throw error
-      ensureActive()
+      let totalSteps = buckets.reduce((acc, bucket) => acc + bucket.ranges.length, 0)
+      let doneSteps = 0
 
-      const rows = ((data || []) as Array<DailyRow & { comparison_key?: string }>).map((row) => ({
-        ...row,
-        nb_documents: Number(row.nb_documents || 0),
-        nb_lignes: Number(row.nb_lignes || 0),
-        montant_ht: Number(row.montant_ht || 0),
-        quantite_brute: Number(row.quantite_brute || 0),
-        quantite_pertinente: Number(row.quantite_pertinente || 0),
-      }))
-
-      for (const row of rows) {
-        const key = String((row as any).comparison_key || '') as keyof typeof result
-        if (key === 'ytdN' || key === 'ytdN1' || key === 'rollingN' || key === 'rollingN1') {
-          const { comparison_key: _comparisonKey, ...dailyRow } = row as any
-          result[key].push(dailyRow as DailyRow)
+      const ensureActive = () => {
+        if (loadId !== comparisonLoadIdRef.current) {
+          throw new Error('__STALE_COMPARISON_LOAD__')
         }
       }
 
+      const setProgress = (bucketLabel: string, range: { start: string; end: string } | null) => {
+        if (loadId !== comparisonLoadIdRef.current) return
+        setComparisonProgress({
+          status: 'loading',
+          label: bucketLabel,
+          current: range
+            ? `${bucketLabel} · ${formatDateFr(range.start)} au ${formatDateFr(addDaysYmd(range.end, -1))}`
+            : bucketLabel,
+          done: doneSteps,
+          total: totalSteps,
+        })
+      }
+
+      const markStepDone = (bucketLabel: string, range: { start: string; end: string } | null = null) => {
+        doneSteps += 1
+        setProgress(bucketLabel, range)
+      }
+
+      const rememberSkippedRange = (bucketLabel: string, range: { start: string; end: string }, exception: any) => {
+        const label = `${bucketLabel} ${range.start} au ${addDaysYmd(range.end, -1)}`
+        const message = exception?.message || String(exception)
+        skippedRanges.push(`${label} : ${message}`)
+        console.warn('Période comparaison ignorée pour ne pas bloquer le PDF:', label, exception)
+      }
+
+      const fetchDailyRangeSafely = async (bucketLabel: string, range: { start: string; end: string }) => {
+        ensureActive()
+        setProgress(`${bucketLabel} · découpage jour`, range)
+
+        try {
+          const rows = await fetchFocusSummaryRange(range)
+          markStepDone(`${bucketLabel} · découpage jour`, null)
+          return rows
+        } catch (exception: any) {
+          if (isStaleComparisonLoad(exception)) throw exception
+          rememberSkippedRange(`${bucketLabel} · jour`, range, exception)
+          markStepDone(`${bucketLabel} · découpage jour`, null)
+          return [] as DailyRow[]
+        }
+      }
+
+      const fetchWeeklyRangeWithDailyFallback = async (bucketLabel: string, range: { start: string; end: string }) => {
+        ensureActive()
+        setProgress(`${bucketLabel} · découpage semaine`, range)
+
+        try {
+          const rows = await fetchFocusSummaryRange(range)
+          markStepDone(`${bucketLabel} · découpage semaine`, null)
+          return rows
+        } catch (exception: any) {
+          if (isStaleComparisonLoad(exception)) throw exception
+
+          const dailyRanges = splitDateRangeByDays(range.start, range.end, 1)
+          totalSteps += Math.max(0, dailyRanges.length - 1)
+
+          const dailyRows: DailyRow[] = []
+          for (const dailyRange of dailyRanges) {
+            dailyRows.push(...await fetchDailyRangeSafely(bucketLabel, dailyRange))
+          }
+
+          if (dailyRows.length === 0) {
+            rememberSkippedRange(`${bucketLabel} · semaine`, range, exception)
+          }
+
+          return dailyRows
+        }
+      }
+
+      const fetchRangeWithFallback = async (bucketLabel: string, range: { start: string; end: string }) => {
+        ensureActive()
+        setProgress(bucketLabel, range)
+
+        try {
+          const rows = await fetchFocusSummaryRange(range)
+          markStepDone(bucketLabel, null)
+          return rows
+        } catch (exception: any) {
+          if (isStaleComparisonLoad(exception)) throw exception
+
+          const weeklyRanges = splitDateRangeByDays(range.start, range.end, 7)
+          totalSteps += Math.max(0, weeklyRanges.length - 1)
+
+          const weeklyRows: DailyRow[] = []
+          for (const weeklyRange of weeklyRanges) {
+            weeklyRows.push(...await fetchWeeklyRangeWithDailyFallback(bucketLabel, weeklyRange))
+          }
+
+          if (weeklyRows.length === 0) {
+            rememberSkippedRange(bucketLabel, range, exception)
+          }
+
+          return weeklyRows
+        }
+      }
+
+      outerComparisonLoop:
+      for (const bucket of buckets) {
+        for (const range of bucket.ranges) {
+          ensureActive()
+
+          if (hasReachedPdfHardStop()) {
+            skippedRanges.push(
+              `Arrêt sécurité PDF après ${Math.round((Date.now() - comparisonStartedAt) / 1000)} s : ${bucket.label} ${range.start} au ${addDaysYmd(range.end, -1)} et périodes suivantes ignorées`
+            )
+            doneSteps = totalSteps
+            setProgress('Arrêt sécurité PDF : tableaux comparatifs partiels', null)
+            break outerComparisonLoop
+          }
+
+          try {
+            const rows = await fetchRangeWithFallback(bucket.label, range)
+            result[bucket.key].push(...rows)
+            flushPartialComparisonRows()
+          } catch (exception: any) {
+            if (isStaleComparisonLoad(exception)) throw exception
+            rememberSkippedRange(bucket.label, range, exception)
+            markStepDone(bucket.label, null)
+            flushPartialComparisonRows()
+          }
+        }
+      }
+
+      ensureActive()
       setYtdRowsN(result.ytdN)
       setYtdRowsN1(result.ytdN1)
       setRollingRowsN(result.rollingN)
@@ -1821,43 +2092,49 @@ function FocusMensuelPageContent() {
       setComparisonError(null)
       setComparisonProgress({
         status: 'ready',
-        label: 'Cache comparatif Focus chargé',
+        label: skippedRanges.length
+          ? `Terminé avec ${skippedRanges.length} période(s) ignorée(s)`
+          : 'Terminé',
         current: null,
-        done: 1,
-        total: 1,
+        done: totalSteps,
+        total: totalSteps,
       })
+
+      if (skippedRanges.length) {
+        console.warn('Tableaux N / N-1 chargés avec avertissements:', skippedRanges)
+      }
     } catch (exception: any) {
       if (isStaleComparisonLoad(exception)) return
 
-      console.error('focus mensuel comparison cache global', exception)
+      console.error('focus mensuel comparison tables', exception)
 
-      setYtdRowsN(result.ytdN)
-      setYtdRowsN1(result.ytdN1)
-      setRollingRowsN(result.rollingN)
-      setRollingRowsN1(result.rollingN1)
-
+      // En mode PDF, on ne bloque jamais le marqueur ready sur ces tableaux.
+      // Sinon la route Puppeteer attend indéfiniment data-focus-report-ready="1".
       if (isPdfMode) {
-        // En mode PDF, le bloc comparatif ne doit pas bloquer la génération.
-        // Le worker capturera la page avec les tableaux disponibles et une trace d'avertissement côté console.
+        setYtdRowsN(result.ytdN)
+        setYtdRowsN1(result.ytdN1)
+        setRollingRowsN(result.rollingN)
+        setRollingRowsN1(result.rollingN1)
         setComparisonReady(true)
         setComparisonError(null)
-        setComparisonProgress({
+        setComparisonProgress((current) => ({
           status: 'ready',
-          label: 'Cache comparatif Focus indisponible en mode PDF',
+          label: 'Terminé avec erreur non bloquante en mode PDF',
           current: null,
-          done: 1,
-          total: 1,
-        })
+          done: current.total || current.done || 0,
+          total: current.total || current.done || 0,
+        }))
       } else {
-        setComparisonReady(false)
         setComparisonError(exception?.message || String(exception))
-        setComparisonProgress({
+        setComparisonReady(false)
+        setComparisonProgress((current) => ({
+          ...current,
           status: 'error',
-          label: 'Erreur cache comparatif Focus',
-          current: null,
-          done: 0,
-          total: 1,
-        })
+        }))
+        setYtdRowsN([])
+        setYtdRowsN1([])
+        setRollingRowsN([])
+        setRollingRowsN1([])
       }
     } finally {
       if (loadId === comparisonLoadIdRef.current) {

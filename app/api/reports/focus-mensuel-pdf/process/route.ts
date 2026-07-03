@@ -24,6 +24,8 @@ type PdfRequest = {
   caProjeteFactures?: string | number | boolean | null
   ca_projete_factures?: string | number | boolean | null
   ca_projete_factures_mois_en_cours?: string | number | boolean | null
+  comparison_snapshot_id?: string | null
+  comparisonSnapshotId?: string | null
 }
 
 type AuthorizedCaller = {
@@ -136,6 +138,7 @@ function buildFocusPrintUrl(payload: PdfRequest = {}) {
   const horsStatistiques = payload.hors_statistiques || payload.horsStatistiques || 'afficher'
   const familleMacro = payload.famille_macro || payload.familleMacro || null
   const caProjete = payload.caProjeteFactures ?? payload.ca_projete_factures ?? payload.ca_projete_factures_mois_en_cours ?? '1'
+  const comparisonSnapshotId = payload.comparison_snapshot_id || payload.comparisonSnapshotId || null
 
   appendParam(focusUrl, 'pdf', '1')
   appendParam(focusUrl, 'print', '1')
@@ -152,6 +155,8 @@ function buildFocusPrintUrl(payload: PdfRequest = {}) {
   appendParam(focusUrl, 'collaborateur', payload.collaborateur)
   appendParam(focusUrl, 'caProjeteFactures', caProjete)
   appendParam(focusUrl, 'ca_projete_factures', caProjete)
+  appendParam(focusUrl, 'comparisonSnapshotId', comparisonSnapshotId)
+  appendParam(focusUrl, 'comparison_snapshot_id', comparisonSnapshotId)
   appendParam(focusUrl, 'render_ts', Date.now())
 
   return focusUrl

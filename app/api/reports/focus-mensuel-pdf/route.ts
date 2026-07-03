@@ -23,6 +23,8 @@ type PdfRequest = {
   caProjeteFactures?: string | number | boolean | null
   ca_projete_factures?: string | number | boolean | null
   ca_projete_factures_mois_en_cours?: string | number | boolean | null
+  comparison_snapshot_id?: string | null
+  comparisonSnapshotId?: string | null
 }
 
 type AuthorizedCaller = {
