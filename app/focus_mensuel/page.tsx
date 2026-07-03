@@ -1750,21 +1750,11 @@ function FocusMensuelPageContent() {
     setRollingRowsN([])
     setRollingRowsN1([])
 
-    const focusYear = Number(focusDate.slice(0, 4))
     const result: Record<'ytdN' | 'ytdN1' | 'rollingN' | 'rollingN1', DailyRow[]> = {
       ytdN: [],
       ytdN1: [],
       rollingN: [],
       rollingN1: [],
-    }
-    const skippedRanges: string[] = []
-
-    const flushPartialComparisonRows = () => {
-      if (loadId !== comparisonLoadIdRef.current) return
-      setYtdRowsN([...result.ytdN])
-      setYtdRowsN1([...result.ytdN1])
-      setRollingRowsN([...result.rollingN])
-      setRollingRowsN1([...result.rollingN1])
     }
 
     const ensureActive = () => {
@@ -1773,168 +1763,101 @@ function FocusMensuelPageContent() {
       }
     }
 
+    const setProgress = (label: string, current: string | null, done: number, total: number) => {
+      if (loadId !== comparisonLoadIdRef.current) return
+      setComparisonProgress({
+        status: 'loading',
+        label,
+        current,
+        done,
+        total,
+      })
+    }
+
     try {
-      const ytdStart = `${focusYear}-01-01`
-      const ytdEndExclusive = addDaysYmd(focusDate, 1)
-      const ytdPreviousStart = `${focusYear - 1}-01-01`
-      const ytdPreviousEndExclusive = addYearsYmd(ytdEndExclusive, -1)
-      const rollingStart = `${addMonthsToMonth(month, -11)}-01`
-      const rollingEndExclusive = ytdEndExclusive
-      const rollingPreviousStart = addYearsYmd(rollingStart, -1)
-      const rollingPreviousEndExclusive = addYearsYmd(rollingEndExclusive, -1)
+      setProgress('Chargement cache comparatif Focus', 'RPC cache globale', 0, 1)
 
-      const requests: Array<{
-        key: 'ytdN' | 'ytdN1' | 'rollingN' | 'rollingN1'
-        label: string
-        range: { start: string; end: string }
-      }> = [
-        {
-          key: 'ytdN',
-          label: `YTD N ${focusYear}`,
-          range: { start: ytdStart, end: ytdEndExclusive },
-        },
-        {
-          key: 'ytdN1',
-          label: `YTD N-1 ${focusYear - 1}`,
-          range: { start: ytdPreviousStart, end: ytdPreviousEndExclusive },
-        },
-        {
-          key: 'rollingN',
-          label: '12 mois glissants N',
-          range: { start: rollingStart, end: rollingEndExclusive },
-        },
-        {
-          key: 'rollingN1',
-          label: '12 mois glissants N-1',
-          range: { start: rollingPreviousStart, end: rollingPreviousEndExclusive },
-        },
-      ]
+      // IMPORTANT : la page print ne doit plus lancer 36 périodes ni 4 grosses requêtes parallèles.
+      // Cette RPC lit directement la table de cache indicateur_focus_journalier et renvoie les 4 blocs
+      // déjà agrégés : YTD N, YTD N-1, 12 mois glissants N, 12 mois glissants N-1.
+      const { data, error } = await withClientTimeout(
+        supabase.rpc('get_focus_mensuel_comparison_cache_metier', {
+          p_focus_date: focusDate,
+          p_month: month,
+          p_agence: agence || null,
+          p_famille_macro: familleMacro || null,
+          p_collaborateur: collaborateur || null,
+          p_include_hors_statistiques: includeHorsStats,
+        }),
+        isPdfMode ? 28000 : 45000,
+        'Chargement cache comparatif Focus global'
+      )
 
-      let doneSteps = 0
-      const totalSteps = requests.length
+      if (error) throw error
+      ensureActive()
 
-      const setProgress = (label: string, current: string | null = null) => {
-        if (loadId !== comparisonLoadIdRef.current) return
-        setComparisonProgress({
-          status: 'loading',
-          label,
-          current,
-          done: doneSteps,
-          total: totalSteps,
-        })
-      }
+      const rows = ((data || []) as Array<DailyRow & { comparison_key?: string }>).map((row) => ({
+        ...row,
+        nb_documents: Number(row.nb_documents || 0),
+        nb_lignes: Number(row.nb_lignes || 0),
+        montant_ht: Number(row.montant_ht || 0),
+        quantite_brute: Number(row.quantite_brute || 0),
+        quantite_pertinente: Number(row.quantite_pertinente || 0),
+      }))
 
-      const markStepDone = (label: string, current: string | null = null) => {
-        doneSteps += 1
-        if (loadId !== comparisonLoadIdRef.current) return
-        setComparisonProgress({
-          status: 'loading',
-          label,
-          current,
-          done: doneSteps,
-          total: totalSteps,
-        })
-      }
-
-      setProgress('Chargement cache comparatif Focus', '4 blocs cache à charger')
-
-      const loadOneCacheBlock = async (request: typeof requests[number]) => {
-        ensureActive()
-        const rangeLabel = `${formatDateFr(request.range.start)} au ${formatDateFr(addDaysYmd(request.range.end, -1))}`
-        setProgress(`Cache ${request.label}`, rangeLabel)
-
-        try {
-          const rows = await fetchFocusSummaryRange(request.range)
-          ensureActive()
-          result[request.key] = rows
-          flushPartialComparisonRows()
-        } catch (exception: any) {
-          if (isStaleComparisonLoad(exception)) throw exception
-
-          const message = exception?.message || String(exception)
-          const skippedLabel = `${request.label} ${request.range.start} au ${addDaysYmd(request.range.end, -1)} : ${message}`
-          skippedRanges.push(skippedLabel)
-          console.warn('Bloc cache comparaison ignoré:', skippedLabel, exception)
-          result[request.key] = []
-          flushPartialComparisonRows()
-        } finally {
-          markStepDone(`Cache ${request.label}`, rangeLabel)
+      for (const row of rows) {
+        const key = String((row as any).comparison_key || '') as keyof typeof result
+        if (key === 'ytdN' || key === 'ytdN1' || key === 'rollingN' || key === 'rollingN1') {
+          const { comparison_key: _comparisonKey, ...dailyRow } = row as any
+          result[key].push(dailyRow as DailyRow)
         }
       }
 
-      // IMPORTANT PDF : on ne découpe plus en 36 périodes mensuelles.
-      // Les 4 blocs ci-dessous interrogent le cache Focus sur les fenêtres complètes :
-      //   1. YTD N
-      //   2. YTD N-1
-      //   3. 12 mois glissants N
-      //   4. 12 mois glissants N-1
-      // Les appels sont lancés en parallèle pour rester compatibles avec une exécution
-      // serveur coupée autour de 60 secondes.
-      const settled = await Promise.allSettled(requests.map(loadOneCacheBlock))
-
-      const stale = settled.find(
-        (item) => item.status === 'rejected' && isStaleComparisonLoad((item as PromiseRejectedResult).reason)
-      ) as PromiseRejectedResult | undefined
-      if (stale) throw stale.reason
-
-      ensureActive()
       setYtdRowsN(result.ytdN)
       setYtdRowsN1(result.ytdN1)
       setRollingRowsN(result.rollingN)
       setRollingRowsN1(result.rollingN1)
       setComparisonReady(true)
-
-      if (skippedRanges.length && !isPdfMode) {
-        setComparisonError(`Chargement cache partiel : ${skippedRanges.length} bloc(s) non chargé(s).`)
-      } else {
-        setComparisonError(null)
-      }
-
+      setComparisonError(null)
       setComparisonProgress({
         status: 'ready',
-        label: skippedRanges.length
-          ? `Cache comparatif chargé avec ${skippedRanges.length} bloc(s) ignoré(s)`
-          : 'Cache comparatif chargé',
+        label: 'Cache comparatif Focus chargé',
         current: null,
-        done: totalSteps,
-        total: totalSteps,
+        done: 1,
+        total: 1,
       })
-
-      if (skippedRanges.length) {
-        console.warn('Tableaux N / N-1 chargés depuis le cache avec avertissements:', skippedRanges)
-      }
     } catch (exception: any) {
       if (isStaleComparisonLoad(exception)) return
 
-      console.error('focus mensuel comparison cache tables', exception)
+      console.error('focus mensuel comparison cache global', exception)
 
-      // En mode PDF, les tableaux comparatifs ne doivent jamais empêcher le marqueur ready.
-      // On garde les données éventuellement déjà chargées et on laisse la génération PDF continuer.
+      setYtdRowsN(result.ytdN)
+      setYtdRowsN1(result.ytdN1)
+      setRollingRowsN(result.rollingN)
+      setRollingRowsN1(result.rollingN1)
+
       if (isPdfMode) {
-        setYtdRowsN(result.ytdN)
-        setYtdRowsN1(result.ytdN1)
-        setRollingRowsN(result.rollingN)
-        setRollingRowsN1(result.rollingN1)
+        // En mode PDF, le bloc comparatif ne doit pas bloquer la génération.
+        // Le worker capturera la page avec les tableaux disponibles et une trace d'avertissement côté console.
         setComparisonReady(true)
         setComparisonError(null)
         setComparisonProgress({
           status: 'ready',
-          label: 'Cache comparatif partiel en mode PDF',
+          label: 'Cache comparatif Focus indisponible en mode PDF',
           current: null,
-          done: 4,
-          total: 4,
+          done: 1,
+          total: 1,
         })
       } else {
-        setComparisonError(exception?.message || String(exception))
         setComparisonReady(false)
-        setComparisonProgress((current) => ({
-          ...current,
+        setComparisonError(exception?.message || String(exception))
+        setComparisonProgress({
           status: 'error',
-        }))
-        setYtdRowsN([])
-        setYtdRowsN1([])
-        setRollingRowsN([])
-        setRollingRowsN1([])
+          label: 'Erreur cache comparatif Focus',
+          current: null,
+          done: 0,
+          total: 1,
+        })
       }
     } finally {
       if (loadId === comparisonLoadIdRef.current) {
