@@ -2058,7 +2058,10 @@ function FocusMensuelPageContent() {
       const ytdPreviousStart = `${focusYear - 1}-01-01`
       const ytdPreviousEndExclusive = addYearsYmd(ytdEndExclusive, -1)
       const rollingStart = `${addMonthsToMonth(month, -11)}-01`
-      const rollingEndExclusive = ytdEndExclusive
+      // Tableau 12 mois glissants : lecture en mois calendaires complets.
+      // Le jour focus ne doit pas tronquer le mois N ni le mois N-1 : chaque ligne mensuelle
+      // affiche le cumul disponible du 1er au dernier jour du mois dans le cache.
+      const rollingEndExclusive = nextMonthStart(month)
       const rollingPreviousStart = addYearsYmd(rollingStart, -1)
       const rollingPreviousEndExclusive = addYearsYmd(rollingEndExclusive, -1)
 
@@ -2993,7 +2996,7 @@ function FocusMensuelPageContent() {
         />
         <Rolling12ComparisonTable
           title="Activité 12 mois glissants"
-          subtitle={`Option CA projeté : si cochée, la ligne ${formatShortMonthFr(month)} remplace les factures réelles du mois par le CA projeté total ; la ligne TOTAL 12 MOIS G. et l'évolution Fac sont recalculées.`}
+          subtitle={`Lecture en mois calendaires complets : les colonnes N et N-1 affichent le cumul disponible du 1er au dernier jour de chaque mois, indépendamment du jour focus sélectionné. Option CA projeté : si cochée, la ligne ${formatShortMonthFr(month)} remplace les factures réelles du mois par le CA projeté total ; la ligne TOTAL 12 MOIS G. et l'évolution Fac sont recalculées.`}
           rows={comparisonReady ? rollingComparisonRowsForTable : []}
           emptyMessage={comparisonLoading ? 'Actualisation en cours : le tableau sera affiché une fois le chargement complet terminé.' : "Aucune donnée d'activité sur les 12 mois glissants."}
         />
@@ -3901,7 +3904,7 @@ const styles: Record<string, React.CSSProperties> = {
   kpiValueBlockLeft: { textAlign: 'center', minWidth: 0 },
   kpiValueBlockRight: { textAlign: 'center', minWidth: 0 },
   kpiValueLabel: { fontSize: 11, fontWeight: 950, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 3 },
-  kpiMain: { fontSize: 39, fontWeight: 950, marginBottom: 4 },
+  kpiMain: { fontSize: 36, fontWeight: 950, marginBottom: 4 },
   kpiSub: { fontSize: 13, color: '#475569', fontWeight: 800, marginTop: 10, marginBottom: 0 },
   kpiValueSub: { fontSize: 12, color: '#64748b', fontWeight: 850 },
   kpiMeta: { fontSize: 12, color: '#64748b', marginTop: 5 },
