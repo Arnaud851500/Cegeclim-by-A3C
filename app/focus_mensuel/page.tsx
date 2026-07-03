@@ -1094,7 +1094,7 @@ function FocusMensuelPageContent() {
     const done = comparisonProgress.done || 0
     const pct = total ? Math.min(100, Math.round((done / total) * 100)) : 0
     const current = comparisonProgress.current ? ` · ${comparisonProgress.current}` : ''
-    return `Actualisation des tableaux activité N / N-1 : ${done}/${total} périodes (${pct} %)${current}`
+    return `Actualisation des tableaux activité N / N-1 : ${done}/${total} blocs cache (${pct} %)${current}`
   }, [comparisonProgress])
 
   const distinctDocsProgressLabel = useMemo(() => {
@@ -1713,7 +1713,11 @@ function FocusMensuelPageContent() {
   }
 
   function comparisonRpcTimeoutMs() {
-    return isPdfMode ? 8000 : 30000
+    // Les tableaux N / N-1 et 12 mois glissants sont maintenant chargés depuis le cache
+    // en 4 appels globaux, et non plus par 36 périodes mensuelles.
+    // On donne donc un peu plus de temps à chaque appel cache, sans dépasser
+    // la fenêtre d'exécution disponible pour le worker PDF.
+    return isPdfMode ? 18000 : 45000
   }
 
   async function fetchFocusSummaryRange(range: { start: string; end: string }) {
@@ -1754,7 +1758,6 @@ function FocusMensuelPageContent() {
       rollingN1: [],
     }
     const skippedRanges: string[] = []
-    const comparisonStartedAt = Date.now()
 
     const flushPartialComparisonRows = () => {
       if (loadId !== comparisonLoadIdRef.current) return
@@ -1764,8 +1767,10 @@ function FocusMensuelPageContent() {
       setRollingRowsN1([...result.rollingN1])
     }
 
-    const hasReachedPdfHardStop = () => {
-      return isPdfMode && Date.now() - comparisonStartedAt >= PDF_COMPARISON_HARD_STOP_MS
+    const ensureActive = () => {
+      if (loadId !== comparisonLoadIdRef.current) {
+        throw new Error('__STALE_COMPARISON_LOAD__')
+      }
     }
 
     try {
@@ -1778,147 +1783,99 @@ function FocusMensuelPageContent() {
       const rollingPreviousStart = addYearsYmd(rollingStart, -1)
       const rollingPreviousEndExclusive = addYearsYmd(rollingEndExclusive, -1)
 
-      const buckets: Array<{
+      const requests: Array<{
         key: 'ytdN' | 'ytdN1' | 'rollingN' | 'rollingN1'
         label: string
-        ranges: Array<{ start: string; end: string }>
+        range: { start: string; end: string }
       }> = [
-        { key: 'ytdN', label: `YTD N ${focusYear}`, ranges: buildMonthlyRpcRanges(ytdStart, ytdEndExclusive) },
-        { key: 'ytdN1', label: `YTD N-1 ${focusYear - 1}`, ranges: buildMonthlyRpcRanges(ytdPreviousStart, ytdPreviousEndExclusive) },
-        { key: 'rollingN', label: '12 mois glissants N', ranges: buildMonthlyRpcRanges(rollingStart, rollingEndExclusive) },
-        { key: 'rollingN1', label: '12 mois glissants N-1', ranges: buildMonthlyRpcRanges(rollingPreviousStart, rollingPreviousEndExclusive) },
+        {
+          key: 'ytdN',
+          label: `YTD N ${focusYear}`,
+          range: { start: ytdStart, end: ytdEndExclusive },
+        },
+        {
+          key: 'ytdN1',
+          label: `YTD N-1 ${focusYear - 1}`,
+          range: { start: ytdPreviousStart, end: ytdPreviousEndExclusive },
+        },
+        {
+          key: 'rollingN',
+          label: '12 mois glissants N',
+          range: { start: rollingStart, end: rollingEndExclusive },
+        },
+        {
+          key: 'rollingN1',
+          label: '12 mois glissants N-1',
+          range: { start: rollingPreviousStart, end: rollingPreviousEndExclusive },
+        },
       ]
 
-      let totalSteps = buckets.reduce((acc, bucket) => acc + bucket.ranges.length, 0)
       let doneSteps = 0
+      const totalSteps = requests.length
 
-      const ensureActive = () => {
-        if (loadId !== comparisonLoadIdRef.current) {
-          throw new Error('__STALE_COMPARISON_LOAD__')
-        }
-      }
-
-      const setProgress = (bucketLabel: string, range: { start: string; end: string } | null) => {
+      const setProgress = (label: string, current: string | null = null) => {
         if (loadId !== comparisonLoadIdRef.current) return
         setComparisonProgress({
           status: 'loading',
-          label: bucketLabel,
-          current: range
-            ? `${bucketLabel} · ${formatDateFr(range.start)} au ${formatDateFr(addDaysYmd(range.end, -1))}`
-            : bucketLabel,
+          label,
+          current,
           done: doneSteps,
           total: totalSteps,
         })
       }
 
-      const markStepDone = (bucketLabel: string, range: { start: string; end: string } | null = null) => {
+      const markStepDone = (label: string, current: string | null = null) => {
         doneSteps += 1
-        setProgress(bucketLabel, range)
+        if (loadId !== comparisonLoadIdRef.current) return
+        setComparisonProgress({
+          status: 'loading',
+          label,
+          current,
+          done: doneSteps,
+          total: totalSteps,
+        })
       }
 
-      const rememberSkippedRange = (bucketLabel: string, range: { start: string; end: string }, exception: any) => {
-        const label = `${bucketLabel} ${range.start} au ${addDaysYmd(range.end, -1)}`
-        const message = exception?.message || String(exception)
-        skippedRanges.push(`${label} : ${message}`)
-        console.warn('Période comparaison ignorée pour ne pas bloquer le PDF:', label, exception)
-      }
+      setProgress('Chargement cache comparatif Focus', '4 blocs cache à charger')
 
-      const fetchDailyRangeSafely = async (bucketLabel: string, range: { start: string; end: string }) => {
+      const loadOneCacheBlock = async (request: typeof requests[number]) => {
         ensureActive()
-        setProgress(`${bucketLabel} · découpage jour`, range)
+        const rangeLabel = `${formatDateFr(request.range.start)} au ${formatDateFr(addDaysYmd(request.range.end, -1))}`
+        setProgress(`Cache ${request.label}`, rangeLabel)
 
         try {
-          const rows = await fetchFocusSummaryRange(range)
-          markStepDone(`${bucketLabel} · découpage jour`, null)
-          return rows
-        } catch (exception: any) {
-          if (isStaleComparisonLoad(exception)) throw exception
-          rememberSkippedRange(`${bucketLabel} · jour`, range, exception)
-          markStepDone(`${bucketLabel} · découpage jour`, null)
-          return [] as DailyRow[]
-        }
-      }
-
-      const fetchWeeklyRangeWithDailyFallback = async (bucketLabel: string, range: { start: string; end: string }) => {
-        ensureActive()
-        setProgress(`${bucketLabel} · découpage semaine`, range)
-
-        try {
-          const rows = await fetchFocusSummaryRange(range)
-          markStepDone(`${bucketLabel} · découpage semaine`, null)
-          return rows
-        } catch (exception: any) {
-          if (isStaleComparisonLoad(exception)) throw exception
-
-          const dailyRanges = splitDateRangeByDays(range.start, range.end, 1)
-          totalSteps += Math.max(0, dailyRanges.length - 1)
-
-          const dailyRows: DailyRow[] = []
-          for (const dailyRange of dailyRanges) {
-            dailyRows.push(...await fetchDailyRangeSafely(bucketLabel, dailyRange))
-          }
-
-          if (dailyRows.length === 0) {
-            rememberSkippedRange(`${bucketLabel} · semaine`, range, exception)
-          }
-
-          return dailyRows
-        }
-      }
-
-      const fetchRangeWithFallback = async (bucketLabel: string, range: { start: string; end: string }) => {
-        ensureActive()
-        setProgress(bucketLabel, range)
-
-        try {
-          const rows = await fetchFocusSummaryRange(range)
-          markStepDone(bucketLabel, null)
-          return rows
-        } catch (exception: any) {
-          if (isStaleComparisonLoad(exception)) throw exception
-
-          const weeklyRanges = splitDateRangeByDays(range.start, range.end, 7)
-          totalSteps += Math.max(0, weeklyRanges.length - 1)
-
-          const weeklyRows: DailyRow[] = []
-          for (const weeklyRange of weeklyRanges) {
-            weeklyRows.push(...await fetchWeeklyRangeWithDailyFallback(bucketLabel, weeklyRange))
-          }
-
-          if (weeklyRows.length === 0) {
-            rememberSkippedRange(bucketLabel, range, exception)
-          }
-
-          return weeklyRows
-        }
-      }
-
-      outerComparisonLoop:
-      for (const bucket of buckets) {
-        for (const range of bucket.ranges) {
+          const rows = await fetchFocusSummaryRange(request.range)
           ensureActive()
+          result[request.key] = rows
+          flushPartialComparisonRows()
+        } catch (exception: any) {
+          if (isStaleComparisonLoad(exception)) throw exception
 
-          if (hasReachedPdfHardStop()) {
-            skippedRanges.push(
-              `Arrêt sécurité PDF après ${Math.round((Date.now() - comparisonStartedAt) / 1000)} s : ${bucket.label} ${range.start} au ${addDaysYmd(range.end, -1)} et périodes suivantes ignorées`
-            )
-            doneSteps = totalSteps
-            setProgress('Arrêt sécurité PDF : tableaux comparatifs partiels', null)
-            break outerComparisonLoop
-          }
-
-          try {
-            const rows = await fetchRangeWithFallback(bucket.label, range)
-            result[bucket.key].push(...rows)
-            flushPartialComparisonRows()
-          } catch (exception: any) {
-            if (isStaleComparisonLoad(exception)) throw exception
-            rememberSkippedRange(bucket.label, range, exception)
-            markStepDone(bucket.label, null)
-            flushPartialComparisonRows()
-          }
+          const message = exception?.message || String(exception)
+          const skippedLabel = `${request.label} ${request.range.start} au ${addDaysYmd(request.range.end, -1)} : ${message}`
+          skippedRanges.push(skippedLabel)
+          console.warn('Bloc cache comparaison ignoré:', skippedLabel, exception)
+          result[request.key] = []
+          flushPartialComparisonRows()
+        } finally {
+          markStepDone(`Cache ${request.label}`, rangeLabel)
         }
       }
+
+      // IMPORTANT PDF : on ne découpe plus en 36 périodes mensuelles.
+      // Les 4 blocs ci-dessous interrogent le cache Focus sur les fenêtres complètes :
+      //   1. YTD N
+      //   2. YTD N-1
+      //   3. 12 mois glissants N
+      //   4. 12 mois glissants N-1
+      // Les appels sont lancés en parallèle pour rester compatibles avec une exécution
+      // serveur coupée autour de 60 secondes.
+      const settled = await Promise.allSettled(requests.map(loadOneCacheBlock))
+
+      const stale = settled.find(
+        (item) => item.status === 'rejected' && isStaleComparisonLoad((item as PromiseRejectedResult).reason)
+      ) as PromiseRejectedResult | undefined
+      if (stale) throw stale.reason
 
       ensureActive()
       setYtdRowsN(result.ytdN)
@@ -1926,27 +1883,33 @@ function FocusMensuelPageContent() {
       setRollingRowsN(result.rollingN)
       setRollingRowsN1(result.rollingN1)
       setComparisonReady(true)
-      setComparisonError(null)
+
+      if (skippedRanges.length && !isPdfMode) {
+        setComparisonError(`Chargement cache partiel : ${skippedRanges.length} bloc(s) non chargé(s).`)
+      } else {
+        setComparisonError(null)
+      }
+
       setComparisonProgress({
         status: 'ready',
         label: skippedRanges.length
-          ? `Terminé avec ${skippedRanges.length} période(s) ignorée(s)`
-          : 'Terminé',
+          ? `Cache comparatif chargé avec ${skippedRanges.length} bloc(s) ignoré(s)`
+          : 'Cache comparatif chargé',
         current: null,
         done: totalSteps,
         total: totalSteps,
       })
 
       if (skippedRanges.length) {
-        console.warn('Tableaux N / N-1 chargés avec avertissements:', skippedRanges)
+        console.warn('Tableaux N / N-1 chargés depuis le cache avec avertissements:', skippedRanges)
       }
     } catch (exception: any) {
       if (isStaleComparisonLoad(exception)) return
 
-      console.error('focus mensuel comparison tables', exception)
+      console.error('focus mensuel comparison cache tables', exception)
 
-      // En mode PDF, on ne bloque jamais le marqueur ready sur ces tableaux.
-      // Sinon la route Puppeteer attend indéfiniment data-focus-report-ready="1".
+      // En mode PDF, les tableaux comparatifs ne doivent jamais empêcher le marqueur ready.
+      // On garde les données éventuellement déjà chargées et on laisse la génération PDF continuer.
       if (isPdfMode) {
         setYtdRowsN(result.ytdN)
         setYtdRowsN1(result.ytdN1)
@@ -1954,13 +1917,13 @@ function FocusMensuelPageContent() {
         setRollingRowsN1(result.rollingN1)
         setComparisonReady(true)
         setComparisonError(null)
-        setComparisonProgress((current) => ({
+        setComparisonProgress({
           status: 'ready',
-          label: 'Terminé avec erreur non bloquante en mode PDF',
+          label: 'Cache comparatif partiel en mode PDF',
           current: null,
-          done: current.total || current.done || 0,
-          total: current.total || current.done || 0,
-        }))
+          done: 4,
+          total: 4,
+        })
       } else {
         setComparisonError(exception?.message || String(exception))
         setComparisonReady(false)

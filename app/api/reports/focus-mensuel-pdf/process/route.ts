@@ -332,20 +332,20 @@ async function waitForStableReport(
 ) {
   const startedAt = Date.now()
 
-  // On laisse maintenant le temps aux 3 tableaux comparatifs de s’actualiser.
-  // Les anciennes versions forçaient trop tôt le PDF et capturaient les tableaux vides.
-  // La génération reste toutefois bornée pour éviter les jobs morts en waiting_page_stable.
+  // Les tableaux comparatifs ne sont plus recalculés en 36 périodes :
+  // la page print charge désormais 4 blocs cache globaux.
+  // Le worker doit donc terminer avant le plafond réel de 60 s constaté sur Vercel.
   const minStableWaitMs = Math.min(
-    Math.max(timeoutMs('FOCUS_PDF_MIN_STABLE_WAIT_MS', 90000), 45000),
-    120000
+    Math.max(timeoutMs('FOCUS_PDF_MIN_STABLE_WAIT_MS', 18000), 12000),
+    25000
   )
   const hardMaxMs = Math.min(
-    Math.max(timeoutMs('FOCUS_PDF_READY_HARD_TIMEOUT_MS', 140000), 90000),
-    165000
+    Math.max(timeoutMs('FOCUS_PDF_READY_HARD_TIMEOUT_MS', 42000), 30000),
+    48000
   )
   const progressStallMs = Math.min(
-    Math.max(timeoutMs('FOCUS_PDF_PROGRESS_STALL_MS', 30000), 15000),
-    45000
+    Math.max(timeoutMs('FOCUS_PDF_PROGRESS_STALL_MS', 9000), 6000),
+    12000
   )
 
   let lastState: any = null
