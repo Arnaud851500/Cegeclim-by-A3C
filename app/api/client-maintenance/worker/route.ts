@@ -107,7 +107,7 @@ function countFromResult(stepKey: string, data: any) {
       inserted_count: 0,
       updated_count:
         Number(data?.deleted_from_clients ?? 0) +
-        Number(data?.cegeclim_alerts_updated ?? 0),
+        Number(data?.cegeclim_marked_closed ?? data?.cegeclim_alerts_updated ?? 0),
       rejected_count:
         Number(data?.rejected_total ?? data?.rejected_by_filter ?? 0) || 0,
       error_count: 0,
@@ -267,12 +267,60 @@ async function runHttpStep(
   const data = await callInternalApi(req, path, body)
   const counts = countFromResult(step.step_key, data)
 
+  const accumulatedCounts = {
+    processed_count: Number(step.processed_count || 0) + Number(counts.processed_count || 0),
+    inserted_count: Number(step.inserted_count || 0) + Number(counts.inserted_count || 0),
+    updated_count: Number(step.updated_count || 0) + Number(counts.updated_count || 0),
+    rejected_count: Number(step.rejected_count || 0) + Number(counts.rejected_count || 0),
+    error_count: Number(step.error_count || 0) + Number(counts.error_count || 0),
+  }
+
+  // SIRENE peut répondre partial=true quand le lot est volontairement interrompu
+  // pour éviter un timeout Vercel. Dans ce cas, on garde l'étape en running.
+  // Le prochain appel worker reprendra la même étape avec le curseur Supabase.
+  if (data?.partial === true && data?.done !== true) {
+    await supabase
+      .from('client_maintenance_steps')
+      .update({
+        ...accumulatedCounts,
+        status: 'running',
+        result_json: data || {},
+        error_message: null,
+      })
+      .eq('id', step.id)
+
+    await supabase
+      .from('client_maintenance_runs')
+      .update({
+        status: 'running',
+        current_step: step.step_label,
+        message: `Étape partielle : ${step.step_label}. Reprise au prochain appel worker.`,
+        error_message: null,
+      })
+      .eq('id', step.run_id)
+
+    await addLog(
+      supabase,
+      step.run_id,
+      step.id,
+      'info',
+      `Étape partielle : ${step.step_label}`,
+      { counts, accumulatedCounts, result: data }
+    )
+
+    return {
+      partial: true,
+      counts: accumulatedCounts,
+      result: data,
+    }
+  }
+
   if (await shouldFinalizeSireneParams(supabase, step)) {
     await finalizeSireneParams(supabase)
   }
 
   await finishStep(supabase, step, 'done', {
-    ...counts,
+    ...accumulatedCounts,
     result_json: data || {},
   })
 
@@ -282,8 +330,14 @@ async function runHttpStep(
     step.id,
     'info',
     `Étape terminée : ${step.step_label}`,
-    { counts, result: data }
+    { counts, accumulatedCounts, result: data }
   )
+
+  return {
+    partial: false,
+    counts: accumulatedCounts,
+    result: data,
+  }
 }
 
 function enrichmentPriority(row: any) {
@@ -533,7 +587,9 @@ async function finalizeRunIfNeeded(supabase: any, run: any) {
     0
   )
 
-  const finalStatus = hasError ? 'error' : hasStepErrors ? 'partial' : 'done'
+  // Une étape en erreur ne doit plus faire tomber tout le run en "error".
+  // Le pipeline continue, puis le run est finalisé en "partial".
+  const finalStatus = hasError || hasStepErrors ? 'partial' : 'done'
 
   await supabase
     .from('client_maintenance_runs')
@@ -541,9 +597,8 @@ async function finalizeRunIfNeeded(supabase: any, run: any) {
       status: finalStatus,
       current_step: null,
       finished_at: new Date().toISOString(),
-      message: hasError
-        ? 'Maintenance terminée en erreur.'
-        : hasStepErrors
+      message:
+        hasError || hasStepErrors
           ? 'Maintenance terminée avec erreurs partielles.'
           : 'Maintenance clients terminée.',
       result_json: {
@@ -557,7 +612,7 @@ async function finalizeRunIfNeeded(supabase: any, run: any) {
     supabase,
     run.id,
     null,
-    hasError ? 'error' : hasStepErrors ? 'warning' : 'info',
+    hasError || hasStepErrors ? 'warning' : 'info',
     'Run finalisé.',
     {
       totalProcessed,
@@ -655,10 +710,13 @@ export async function POST(req: NextRequest) {
 
     try {
       if (step.step_key === 'sirene_import') {
-        await runHttpStep(req, supabase, step, '/api/import-sirene')
+        await runHttpStep(req, supabase, step, '/api/import-sirene', {
+          run_id: run.id,
+        })
       } else if (step.step_key === 'sirene_cessation') {
         await runHttpStep(req, supabase, step, '/api/import-sirene', {
           mode: 'cessation',
+          run_id: run.id,
         })
       } else if (step.step_key === 'rge_refresh') {
         await runHttpStep(req, supabase, step, '/api/rge-refresh')
@@ -682,17 +740,27 @@ export async function POST(req: NextRequest) {
         )
       }
     } catch (error: any) {
+      const errorMessage = error?.message || String(error)
+
+      // Important : une erreur sur une étape ne bloque plus le pipeline complet.
+      // L'étape est marquée en erreur, mais le run reste "running" pour permettre
+      // au prochain appel worker de passer à l'étape suivante.
       await finishStep(supabase, step, 'error', {
         error_count: Number(step.error_count || 0) + 1,
-        error_message: error?.message || String(error),
+        error_message: errorMessage,
+        result_json: {
+          success: false,
+          error: errorMessage,
+          continued: true,
+        },
       })
 
       await supabase
         .from('client_maintenance_runs')
         .update({
-          status: 'error',
-          error_message: error?.message || String(error),
-          message: `Erreur étape : ${step.step_label}`,
+          status: 'running',
+          error_message: null,
+          message: `Erreur non bloquante étape : ${step.step_label}. Passage à l'étape suivante.`,
           current_step: null,
         })
         .eq('id', run.id)
@@ -702,13 +770,22 @@ export async function POST(req: NextRequest) {
         run.id,
         step.id,
         'error',
-        `Erreur étape ${step.step_label}`,
+        `Erreur non bloquante étape ${step.step_label}`,
         {
-          error: error?.message || String(error),
+          error: errorMessage,
+          continued: true,
         }
       )
 
-      throw error
+      return NextResponse.json({
+        success: true,
+        run_id: run.id,
+        step_key: step.step_key,
+        step_label: step.step_label,
+        step_error: true,
+        continued: true,
+        error: errorMessage,
+      })
     }
 
     return NextResponse.json({
