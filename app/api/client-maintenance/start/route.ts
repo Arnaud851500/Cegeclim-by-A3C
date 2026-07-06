@@ -24,7 +24,7 @@ const DEFAULT_CONFIG: Required<MaintenanceConfig> = {
   "enrichment": true,
   "enrichmentLimit": 1000,
   "enrichmentBatchSize": 50,
-  "enrichmentMaxBatchesPerWorker": 10,
+  "enrichmentMaxBatchesPerWorker": 20,
   "enrichmentMaxRuntimeMs": 240000
 }
 

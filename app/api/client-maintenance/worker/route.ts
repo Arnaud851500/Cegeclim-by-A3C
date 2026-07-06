@@ -426,14 +426,14 @@ async function runEnrichmentBatch(
 
   const batchSize = Math.max(
     1,
-    Math.min(Number(config.enrichmentBatchSize || 25), 100)
+    Math.min(Number(config.enrichmentBatchSize || 50), 100)
   )
 
   // Nombre maximum de batchs traités dans UN appel worker.
   // Exemple : 10 batchs x 25 clients = 250 clients par appel worker.
   const maxBatchesPerWorker = Math.max(
     1,
-    Math.min(Number(config.enrichmentMaxBatchesPerWorker || 10), 50)
+    Math.min(Number(config.enrichmentMaxBatchesPerWorker || 50), 50)
   )
 
   // Garde-fou temps pour éviter les timeouts Vercel.
