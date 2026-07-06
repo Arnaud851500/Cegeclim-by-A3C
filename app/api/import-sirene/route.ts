@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 
 const INSEE_SIRENE_URL = 'https://api.insee.fr/api-sirene/3.11/siret'
-const MAX_PAGES = 200
+const MAX_PAGES = Number(process.env.SIRENE_MAX_PAGES || '500')
 const DB_CHUNK_SIZE = 500
 const REJECTS_CHUNK_SIZE = 500
 
@@ -208,6 +208,40 @@ function buildQueryFromDates(
   return dateClause
 }
 
+const SIRENE_PAGE_SIZE = 1000
+const SIRENE_MAX_DEBUT = Number(process.env.SIRENE_MAX_DEBUT || '10000')
+const SIRENE_MAX_SPLIT_DEPTH = Number(process.env.SIRENE_MAX_SPLIT_DEPTH || '24')
+const SIREN_RANGE_MIN = 0
+const SIREN_RANGE_MAX = 999999999
+
+type SireneQueryChunk = {
+  mode: ImportMode
+  min: string
+  max: string
+  q: string
+  siren_min: string
+  siren_max: string
+  total: number
+  fetched: number
+  pages: number
+  depth: number
+  split?: boolean
+}
+
+function padSiren(value: number) {
+  return String(Math.max(0, Math.min(999999999, Math.floor(value)))).padStart(9, '0')
+}
+
+function withSirenRange(q: string, sirenMin: number, sirenMax: number) {
+  return `(${q}) AND siren:[${padSiren(sirenMin)} TO ${padSiren(sirenMax)}]`
+}
+
+function shouldSplitSireneQuery(total: number) {
+  // L'API INSEE bloque la fenêtre de pagination autour de debut=10000.
+  // Donc dès qu'une requête peut nécessiter un offset > 10000, on la découpe.
+  return total > SIRENE_MAX_DEBUT
+}
+
 function filterRowsByDepartments(etablissements: any[], params: any) {
   const departments = new Set(normalizeArray(params.departements))
 
@@ -400,26 +434,140 @@ async function collectSireneRows(params: any, mode: ImportMode, apiKey: string) 
   let pageCount = 0
   let totalFetched = 0
   let totalAvailable = 0
+  let splitBySiren = false
+  const queryChunks: SireneQueryChunk[] = []
 
-  for (const unit of queryUnits) {
-    const q = buildQueryFromDates(unit.min, unit.max, mode, dateField)
-    let debut = 0
-    let fetchedForUnit = 0
-    let totalForUnit: number | null = null
+  async function collectUnitBySirenRange(args: {
+    unit: { min: string; max: string; ape: string | null }
+    sirenMin: number
+    sirenMax: number
+    depth: number
+  }): Promise<{
+    rows: any[]
+    totalFetched: number
+    totalAvailable: number
+    pageCount: number
+    chunks: SireneQueryChunk[]
+    splitBySiren: boolean
+  }> {
+    const baseQ = buildQueryFromDates(args.unit.min, args.unit.max, mode, dateField)
+
+    const isFullSirenRange =
+      args.sirenMin === SIREN_RANGE_MIN && args.sirenMax === SIREN_RANGE_MAX
+
+    const q = isFullSirenRange
+      ? baseQ
+      : withSirenRange(baseQ, args.sirenMin, args.sirenMax)
 
     console.log('SIRENE QUERY UNIT START', {
       mode,
-      min: unit.min,
-      max: unit.max,
-      ape: unit.ape,
+      min: args.unit.min,
+      max: args.unit.max,
+      ape: args.unit.ape,
+      sirenMin: padSiren(args.sirenMin),
+      sirenMax: padSiren(args.sirenMax),
+      depth: args.depth,
       q,
     })
 
-    while (pageCount < MAX_PAGES) {
-      if (debut > 10000) {
+    const firstPage = await fetchSirenePage(apiKey, q, 0)
+    const firstPageCount = 1
+    const totalForUnit = Number(firstPage.total || 0)
+
+    console.log('PAGE SIRENE', {
+      mode,
+      pageNumber: 1,
+      rangeMin: args.unit.min,
+      rangeMax: args.unit.max,
+      ape: args.unit.ape,
+      sirenMin: padSiren(args.sirenMin),
+      sirenMax: padSiren(args.sirenMax),
+      depth: args.depth,
+      received: firstPage.etablissements.length,
+      total: firstPage.total,
+      debutSent: 0,
+      debutReturned: firstPage.debut,
+      nombreReturned: firstPage.nombre,
+    })
+
+    if (shouldSplitSireneQuery(totalForUnit)) {
+      splitBySiren = true
+
+      if (args.depth >= SIRENE_MAX_SPLIT_DEPTH || args.sirenMin >= args.sirenMax) {
         throw new Error(
-          `Pagination SIRENE bloquée pour la plage ${unit.min} -> ${unit.max}` +
-            `${unit.ape ? ` / APE ${unit.ape}` : ''} : debut=${debut} dépasse la limite API de 10000`
+          `Pagination SIRENE impossible : ${totalForUnit} résultats sur la plage ` +
+            `${args.unit.min} -> ${args.unit.max} / SIREN ${padSiren(args.sirenMin)}-${padSiren(args.sirenMax)}. ` +
+            `La profondeur de découpage maximale est atteinte.`
+        )
+      }
+
+      const middle = Math.floor((args.sirenMin + args.sirenMax) / 2)
+
+      console.warn('SIRENE QUERY SPLIT BY SIREN', {
+        mode,
+        min: args.unit.min,
+        max: args.unit.max,
+        totalForUnit,
+        sirenMin: padSiren(args.sirenMin),
+        sirenMax: padSiren(args.sirenMax),
+        left: `${padSiren(args.sirenMin)}-${padSiren(middle)}`,
+        right: `${padSiren(middle + 1)}-${padSiren(args.sirenMax)}`,
+        depth: args.depth,
+      })
+
+      const left = await collectUnitBySirenRange({
+        unit: args.unit,
+        sirenMin: args.sirenMin,
+        sirenMax: middle,
+        depth: args.depth + 1,
+      })
+
+      const right = await collectUnitBySirenRange({
+        unit: args.unit,
+        sirenMin: middle + 1,
+        sirenMax: args.sirenMax,
+        depth: args.depth + 1,
+      })
+
+      return {
+        rows: [...left.rows, ...right.rows],
+        totalFetched: left.totalFetched + right.totalFetched,
+        totalAvailable: left.totalAvailable + right.totalAvailable,
+        // On compte aussi la page parent qui a servi à détecter le split.
+        pageCount: firstPageCount + left.pageCount + right.pageCount,
+        chunks: [
+          {
+            mode,
+            min: args.unit.min,
+            max: args.unit.max,
+            q,
+            siren_min: padSiren(args.sirenMin),
+            siren_max: padSiren(args.sirenMax),
+            total: totalForUnit,
+            fetched: 0,
+            pages: firstPageCount,
+            depth: args.depth,
+            split: true,
+          },
+          ...left.chunks,
+          ...right.chunks,
+        ],
+        splitBySiren: true,
+      }
+    }
+
+    const rows = [...firstPage.etablissements]
+    let fetchedForUnit = firstPage.etablissements.length
+    let pagesForUnit = firstPageCount
+    let debut = firstPage.nombre || firstPage.etablissements.length || SIRENE_PAGE_SIZE
+
+    while (debut < totalForUnit) {
+      if (debut > SIRENE_MAX_DEBUT) {
+        throw new Error(
+          `Pagination SIRENE bloquée pour la plage ${args.unit.min} -> ${args.unit.max}` +
+            `${args.unit.ape ? ` / APE ${args.unit.ape}` : ''}` +
+            ` / SIREN ${padSiren(args.sirenMin)}-${padSiren(args.sirenMax)} : ` +
+            `debut=${debut} dépasse la limite API de ${SIRENE_MAX_DEBUT}`
         )
       }
 
@@ -427,10 +575,13 @@ async function collectSireneRows(params: any, mode: ImportMode, apiKey: string) 
 
       console.log('PAGE SIRENE', {
         mode,
-        pageNumber: pageCount + 1,
-        rangeMin: unit.min,
-        rangeMax: unit.max,
-        ape: unit.ape,
+        pageNumber: pagesForUnit + 1,
+        rangeMin: args.unit.min,
+        rangeMax: args.unit.max,
+        ape: args.unit.ape,
+        sirenMin: padSiren(args.sirenMin),
+        sirenMax: padSiren(args.sirenMax),
+        depth: args.depth,
         received: page.etablissements.length,
         total: page.total,
         debutSent: debut,
@@ -438,35 +589,77 @@ async function collectSireneRows(params: any, mode: ImportMode, apiKey: string) 
         nombreReturned: page.nombre,
       })
 
-      if (totalForUnit === null) totalForUnit = page.total
-
-      for (const e of page.etablissements) {
-        if (e?.siret) allMap.set(String(e.siret), e)
-      }
-
-      totalFetched += page.etablissements.length
-      fetchedForUnit += page.etablissements.length
-      pageCount += 1
-
       if (page.etablissements.length === 0) break
 
-      debut += page.nombre || page.etablissements.length
+      rows.push(...page.etablissements)
+      fetchedForUnit += page.etablissements.length
+      pagesForUnit += 1
 
-      if (totalForUnit !== null && debut >= totalForUnit) break
+      const nextDebut = debut + (page.nombre || page.etablissements.length || SIRENE_PAGE_SIZE)
+      if (nextDebut <= debut) break
+      debut = nextDebut
     }
 
-    totalAvailable += totalForUnit ?? 0
-
-    if ((totalForUnit ?? 0) > fetchedForUnit) {
+    if (totalForUnit > fetchedForUnit) {
       console.warn('Pagination potentiellement incomplète sur la plage', {
         mode,
-        rangeMin: unit.min,
-        rangeMax: unit.max,
-        ape: unit.ape,
+        rangeMin: args.unit.min,
+        rangeMax: args.unit.max,
+        ape: args.unit.ape,
+        sirenMin: padSiren(args.sirenMin),
+        sirenMax: padSiren(args.sirenMax),
         totalForUnit,
         fetchedForUnit,
         nextDebut: debut,
       })
+    }
+
+    return {
+      rows,
+      totalFetched: fetchedForUnit,
+      totalAvailable: totalForUnit,
+      pageCount: pagesForUnit,
+      chunks: [
+        {
+          mode,
+          min: args.unit.min,
+          max: args.unit.max,
+          q,
+          siren_min: padSiren(args.sirenMin),
+          siren_max: padSiren(args.sirenMax),
+          total: totalForUnit,
+          fetched: fetchedForUnit,
+          pages: pagesForUnit,
+          depth: args.depth,
+        },
+      ],
+      splitBySiren: false,
+    }
+  }
+
+  for (const unit of queryUnits) {
+    const result = await collectUnitBySirenRange({
+      unit,
+      sirenMin: SIREN_RANGE_MIN,
+      sirenMax: SIREN_RANGE_MAX,
+      depth: 0,
+    })
+
+    for (const e of result.rows) {
+      if (e?.siret) allMap.set(String(e.siret), e)
+    }
+
+    totalFetched += result.totalFetched
+    totalAvailable += result.totalAvailable
+    pageCount += result.pageCount
+    splitBySiren = splitBySiren || result.splitBySiren
+    queryChunks.push(...result.chunks)
+
+    if (pageCount > MAX_PAGES) {
+      throw new Error(
+        `Import SIRENE interrompu : ${pageCount} pages appelées, limite MAX_PAGES=${MAX_PAGES}. ` +
+          `Augmenter SIRENE_MAX_PAGES ou réduire le périmètre.`
+      )
     }
   }
 
@@ -479,8 +672,10 @@ async function collectSireneRows(params: any, mode: ImportMode, apiKey: string) 
     totalAvailable,
     pageCount,
     dailyBatchCount: dailyRanges.length,
-    queryUnitCount: queryUnits.length,
+    queryUnitCount: queryChunks.filter((chunk) => !chunk.split).length,
     splitByApe: false,
+    splitBySiren,
+    queryChunks,
   }
 }
 
@@ -594,6 +789,7 @@ async function handleCreationImport(params: any, apiKey: string) {
         ` - unique=${collected.uniqueSirets}` +
         ` - présents=${alreadyPresentRows.length}` +
         ` - filtres=${rejectedByFilter.length}` +
+        ` - split_siren=${collected.splitBySiren}` +
         ` - delay=${SIRENE_MIN_DELAY_MS}ms`,
     })
     .eq('id', importId)
@@ -615,6 +811,8 @@ async function handleCreationImport(params: any, apiKey: string) {
     daily_batches: collected.dailyBatchCount,
     query_units: collected.queryUnitCount,
     split_by_ape: collected.splitByApe,
+    split_by_siren: collected.splitBySiren,
+    query_chunks: collected.queryChunks,
     rate_limit_delay_ms: SIRENE_MIN_DELAY_MS,
   })
 }
@@ -768,6 +966,8 @@ async function handleCessationImport(params: any, apiKey: string) {
     daily_batches: collected.dailyBatchCount,
     query_units: collected.queryUnitCount,
     split_by_ape: collected.splitByApe,
+    split_by_siren: collected.splitBySiren,
+    query_chunks: collected.queryChunks,
     rate_limit_delay_ms: SIRENE_MIN_DELAY_MS,
   })
 }
