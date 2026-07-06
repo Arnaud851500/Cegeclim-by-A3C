@@ -719,7 +719,12 @@ async function collectSireneRowsWithCursor(
   }
 }
 
-async function collectSireneRows(params: any, mode: ImportMode, apiKey: string, runId?: string | null) {
+async function collectSireneRows(
+  params: any,
+  mode: ImportMode,
+  apiKey: string,
+  runId?: string | null
+): Promise<CollectedRows> {
   if (runId) {
     return await collectSireneRowsWithCursor(params, mode, apiKey, runId)
   }
@@ -787,8 +792,11 @@ async function collectSireneRows(params: any, mode: ImportMode, apiKey: string, 
     done: false,
     stoppedBecauseOfRuntime: false,
     stoppedBecauseOfPageLimit: pageCount >= SIRENE_MAX_PAGES_PER_INVOCATION,
+    cursor: null,
+    cursorTotalFetched: totalFetched,
+    cursorTotalAvailable: totalAvailable,
     queryChunks,
-  } satisfies CollectedRows
+  }
 }
 
 async function handleCreationImport(params: any, apiKey: string, runId?: string | null) {
