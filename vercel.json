@@ -5,8 +5,8 @@
       "schedule": "* * * * *"
     },
     {
-      "path": "/api/cron/client-maintenance-worker?iterations=6",
-      "schedule": "* * * * *"
+      "path": "/api/cron/client-maintenance-worker?iterations=8",
+      "schedule": "*/5 * * * *"
     }
   ]
 }
