@@ -3,6 +3,10 @@
     {
       "path": "/api/cron/scheduler-dispatcher",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/client-maintenance-worker?iterations=6",
+      "schedule": "* * * * *"
     }
   ]
 }
