@@ -11,17 +11,21 @@ type MaintenanceConfig = {
   capacite?: boolean
   enrichment?: boolean
   enrichmentLimit?: number
+  enrichmentMaxBatchesPerWorker?: number
   enrichmentBatchSize?: number
+  enrichmentMaxRuntimeMs:number
 }
 
 const DEFAULT_CONFIG: Required<MaintenanceConfig> = {
-  sirene: true,
-  cessations: true,
-  rge: true,
-  capacite: true,
-  enrichment: true,
-  enrichmentLimit: 1000,
-  enrichmentBatchSize: 25,
+  "sirene": true,
+  "cessations": true,
+  "rge": true,
+  "capacite": true,
+  "enrichment": true,
+  "enrichmentLimit": 1000,
+  "enrichmentBatchSize": 50,
+  "enrichmentMaxBatchesPerWorker": 10,
+  "enrichmentMaxRuntimeMs": 240000
 }
 
 const ALL_STEPS = [
