@@ -26,15 +26,16 @@ function isAuthorized(req: NextRequest) {
   return false
 }
 
-function shouldStopAfterWorkerResponse(body: any) {
+function shouldStop(body: any) {
   const text = JSON.stringify(body || {}).toLowerCase()
 
   return (
+    body?.nothing_to_do === true ||
+    body?.finalized === true ||
     text.includes('aucun run actif') ||
     text.includes('aucun run') ||
-    text.includes('no active') ||
     text.includes('nothing_to_do') ||
-    body?.finalized === true
+    text.includes('no active')
   )
 }
 
@@ -59,6 +60,8 @@ async function runWorkerBurst(req: NextRequest) {
     const calls: any[] = []
 
     for (let i = 1; i <= iterations; i++) {
+      const startedAt = new Date().toISOString()
+
       const res = await fetch(workerUrl.toString(), {
         method: 'POST',
         headers: {
@@ -80,16 +83,13 @@ async function runWorkerBurst(req: NextRequest) {
         iteration: i,
         status: res.status,
         ok: res.ok,
+        started_at: startedAt,
+        finished_at: new Date().toISOString(),
         body,
       })
 
-      if (!res.ok) {
-        break
-      }
-
-      if (shouldStopAfterWorkerResponse(body)) {
-        break
-      }
+      if (!res.ok) break
+      if (shouldStop(body)) break
     }
 
     return NextResponse.json({
@@ -100,8 +100,6 @@ async function runWorkerBurst(req: NextRequest) {
       calls,
     })
   } catch (error: any) {
-    console.error('cron/client-maintenance-worker error:', error)
-
     return NextResponse.json(
       {
         success: false,
