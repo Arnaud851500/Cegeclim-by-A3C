@@ -20,7 +20,7 @@ export async function POST(req: NextRequest) {
     const startUrl = new URL('/api/client-maintenance/start', req.url)
 
     const res = await fetch(startUrl.toString(), {
-      method: 'POST',
+      method: 'GET',
       headers: {
         'Content-Type': 'application/json',
         'x-client-maintenance-secret': secret,
