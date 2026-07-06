@@ -423,144 +423,221 @@ async function runEnrichmentBatch(
   step: StepRow
 ) {
   const config = run.config_json || {}
+
   const batchSize = Math.max(
     1,
     Math.min(Number(config.enrichmentBatchSize || 25), 100)
   )
 
-  const { data: queuedRows, error: queueError } = await supabase
-    .from('client_enrichment_queue')
-    .select('*')
-    .eq('run_id', run.id)
-    .eq('status', 'queued')
-    .order('priority', { ascending: true })
-    .order('created_at', { ascending: true })
-    .limit(batchSize)
+  // Nombre maximum de batchs traités dans UN appel worker.
+  // Exemple : 10 batchs x 25 clients = 250 clients par appel worker.
+  const maxBatchesPerWorker = Math.max(
+    1,
+    Math.min(Number(config.enrichmentMaxBatchesPerWorker || 10), 50)
+  )
 
-  if (queueError) throw queueError
+  // Garde-fou temps pour éviter les timeouts Vercel.
+  // 240s = 4 min, compatible avec maxDuration 300.
+  const maxRuntimeMs = Math.max(
+    30_000,
+    Math.min(Number(config.enrichmentMaxRuntimeMs || 240_000), 280_000)
+  )
 
-  if (!queuedRows || queuedRows.length === 0) {
-    const { count: errorCount } = await supabase
+  const startedAt = Date.now()
+
+  let totalOk = 0
+  let totalErrors = 0
+  let totalProcessed = 0
+  let batchesDone = 0
+
+  while (batchesDone < maxBatchesPerWorker) {
+    if (Date.now() - startedAt > maxRuntimeMs) {
+      await addLog(
+        supabase,
+        step.run_id,
+        step.id,
+        'warning',
+        'Arrêt temporaire enrichissement : limite de temps worker atteinte.',
+        {
+          batchesDone,
+          totalOk,
+          totalErrors,
+          totalProcessed,
+          maxRuntimeMs,
+        }
+      )
+      break
+    }
+
+    const { data: queuedRows, error: queueError } = await supabase
       .from('client_enrichment_queue')
-      .select('id', { count: 'exact', head: true })
+      .select('*')
       .eq('run_id', run.id)
-      .eq('status', 'error')
+      .eq('status', 'queued')
+      .order('priority', { ascending: true })
+      .order('created_at', { ascending: true })
+      .limit(batchSize)
 
-    const { count: doneCount } = await supabase
-      .from('client_enrichment_queue')
-      .select('id', { count: 'exact', head: true })
-      .eq('run_id', run.id)
-      .eq('status', 'done')
+    if (queueError) throw queueError
 
-    await finishStep(supabase, step, 'done', {
-      processed_count: Number(doneCount || 0) + Number(errorCount || 0),
-      updated_count: Number(doneCount || 0),
-      error_count: Number(errorCount || 0),
-      result_json: {
-        done: doneCount || 0,
-        errors: errorCount || 0,
-      },
-    })
-
-    await addLog(
-      supabase,
-      step.run_id,
-      step.id,
-      'info',
-      'Enrichissement terminé.',
-      {
-        done: doneCount || 0,
-        errors: errorCount || 0,
-      }
-    )
-
-    return
-  }
-
-  const ids = queuedRows.map((row: any) => row.id)
-
-  await supabase
-    .from('client_enrichment_queue')
-    .update({
-      status: 'running',
-      locked_at: new Date().toISOString(),
-    })
-    .in('id', ids)
-
-  let ok = 0
-  let errors = 0
-
-  for (const item of queuedRows) {
-    try {
-      const data = await callInternalApi(req, '/api/enrich-client', {
-        siret: item.siret,
-      })
-
-      await supabase
+    if (!queuedRows || queuedRows.length === 0) {
+      const { count: errorCount } = await supabase
         .from('client_enrichment_queue')
-        .update({
-          status: 'done',
-          attempts: Number(item.attempts || 0) + 1,
-          processed_at: new Date().toISOString(),
-          last_error: null,
-        })
-        .eq('id', item.id)
+        .select('id', { count: 'exact', head: true })
+        .eq('run_id', run.id)
+        .eq('status', 'error')
 
-      ok += 1
+      const { count: doneCount } = await supabase
+        .from('client_enrichment_queue')
+        .select('id', { count: 'exact', head: true })
+        .eq('run_id', run.id)
+        .eq('status', 'done')
+
+      await finishStep(supabase, step, 'done', {
+        processed_count: Number(doneCount || 0) + Number(errorCount || 0),
+        updated_count: Number(doneCount || 0),
+        error_count: Number(errorCount || 0),
+        result_json: {
+          done: doneCount || 0,
+          errors: errorCount || 0,
+          batches_done_last_worker: batchesDone,
+          completed: true,
+        },
+      })
 
       await addLog(
         supabase,
         step.run_id,
         step.id,
         'info',
-        `Enrichissement OK ${item.siret}`,
-        { result: data }
+        'Enrichissement terminé.',
+        {
+          done: doneCount || 0,
+          errors: errorCount || 0,
+          batchesDone,
+        }
       )
-    } catch (error: any) {
-      errors += 1
 
-      await supabase
-        .from('client_enrichment_queue')
-        .update({
-          status: 'error',
-          attempts: Number(item.attempts || 0) + 1,
-          processed_at: new Date().toISOString(),
-          last_error: error?.message || String(error),
-        })
-        .eq('id', item.id)
-
-      await addLog(
-        supabase,
-        step.run_id,
-        step.id,
-        'error',
-        `Enrichissement erreur ${item.siret}`,
-        { error: error?.message || String(error) }
-      )
+      return
     }
-  }
 
-  await supabase
-    .from('client_maintenance_steps')
-    .update({
-      processed_count: Number(step.processed_count || 0) + queuedRows.length,
-      updated_count: Number(step.updated_count || 0) + ok,
-      error_count: Number(step.error_count || 0) + errors,
-      result_json: {
-        last_batch_ok: ok,
-        last_batch_errors: errors,
-        batch_size: queuedRows.length,
-      },
-    })
-    .eq('id', step.id)
+    const ids = queuedRows.map((row: any) => row.id)
+
+    await supabase
+      .from('client_enrichment_queue')
+      .update({
+        status: 'running',
+        locked_at: new Date().toISOString(),
+      })
+      .in('id', ids)
+
+    let ok = 0
+    let errors = 0
+
+    for (const item of queuedRows) {
+      try {
+        const data = await callInternalApi(req, '/api/enrich-client', {
+          siret: item.siret,
+        })
+
+        await supabase
+          .from('client_enrichment_queue')
+          .update({
+            status: 'done',
+            attempts: Number(item.attempts || 0) + 1,
+            processed_at: new Date().toISOString(),
+            last_error: null,
+          })
+          .eq('id', item.id)
+
+        ok += 1
+
+        await addLog(
+          supabase,
+          step.run_id,
+          step.id,
+          'info',
+          `Enrichissement OK ${item.siret}`,
+          { result: data }
+        )
+      } catch (error: any) {
+        errors += 1
+
+        await supabase
+          .from('client_enrichment_queue')
+          .update({
+            status: 'error',
+            attempts: Number(item.attempts || 0) + 1,
+            processed_at: new Date().toISOString(),
+            last_error: error?.message || String(error),
+          })
+          .eq('id', item.id)
+
+        await addLog(
+          supabase,
+          step.run_id,
+          step.id,
+          'error',
+          `Enrichissement erreur ${item.siret}`,
+          { error: error?.message || String(error) }
+        )
+      }
+    }
+
+    batchesDone += 1
+    totalOk += ok
+    totalErrors += errors
+    totalProcessed += queuedRows.length
+
+    await supabase
+      .from('client_maintenance_steps')
+      .update({
+        processed_count: Number(step.processed_count || 0) + totalProcessed,
+        updated_count: Number(step.updated_count || 0) + totalOk,
+        error_count: Number(step.error_count || 0) + totalErrors,
+        result_json: {
+          last_batch_ok: ok,
+          last_batch_errors: errors,
+          last_batch_size: queuedRows.length,
+          batches_done_last_worker: batchesDone,
+          total_ok_last_worker: totalOk,
+          total_errors_last_worker: totalErrors,
+          total_processed_last_worker: totalProcessed,
+          completed: false,
+        },
+      })
+      .eq('id', step.id)
+
+    await addLog(
+      supabase,
+      step.run_id,
+      step.id,
+      'info',
+      `Batch enrichissement traité : ${ok} OK / ${errors} erreurs.`,
+      {
+        batchNumber: batchesDone,
+        batchSize: queuedRows.length,
+        ok,
+        errors,
+        totalOk,
+        totalErrors,
+        totalProcessed,
+      }
+    )
+  }
 
   await addLog(
     supabase,
     step.run_id,
     step.id,
     'info',
-    `Batch enrichissement traité : ${ok} OK / ${errors} erreurs.`,
-    { ok, errors }
+    'Enrichissement partiel : reprise au prochain appel worker.',
+    {
+      batchesDone,
+      totalOk,
+      totalErrors,
+      totalProcessed,
+    }
   )
 }
 
