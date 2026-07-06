@@ -509,7 +509,7 @@ export default function ClientsPage() {
     try {
       await persistSireneParams(sireneParams)
 
-      const res = await fetch('/api/client-maintenance/start', {
+      const res = await fetch('/api/client-maintenance/start-ui', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

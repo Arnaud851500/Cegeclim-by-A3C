@@ -82,15 +82,24 @@ function countFromResult(stepKey: string, data: any) {
   }
 
   if (stepKey === 'rge_refresh') {
-    const stats = data?.stats || {}
-    return {
-      processed_count: Number(stats.sourceRows ?? 0) || 0,
-      inserted_count: Number(stats.cacheInserted ?? 0) || 0,
-      updated_count: Number(stats.clientsUpdated ?? stats.cacheUpdated ?? 0) || 0,
-      rejected_count: 0,
-      error_count: 0,
-    }
+  const stats = data?.stats || {}
+
+  return {
+    processed_count:
+      Number(data?.nb_rows_source ?? stats.sourceRows ?? stats.source_rows ?? 0) || 0,
+
+    inserted_count:
+      Number(data?.nb_rows_imported ?? stats.cacheInserted ?? stats.cache_inserted ?? stats.imported ?? 0) || 0,
+
+    updated_count:
+      Number(data?.nb_rows_updated ?? stats.clientsUpdated ?? stats.cacheUpdated ?? stats.clients_updated ?? stats.cache_updated ?? 0) || 0,
+
+    rejected_count:
+      Number(data?.nb_rows_rejected ?? stats.rejected ?? stats.rejectedRows ?? 0) || 0,
+
+    error_count: 0,
   }
+}
 
   if (stepKey === 'capacite_refresh') {
     return {

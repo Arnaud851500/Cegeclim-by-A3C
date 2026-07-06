@@ -29,7 +29,11 @@ function errMsg(error: unknown) {
 
 async function authorize(req: NextRequest, sb: SupabaseAdmin) {
   const trustedSecret = process.env.REPORT_PDF_RENDER_SECRET || process.env.INTERNAL_API_SECRET || ''
-  const incomingSecret = req.headers.get('x-report-secret') || req.headers.get('x-internal-secret') || req.nextUrl.searchParams.get('secret') || ''
+  const incomingSecret =
+    req.headers.get('x-report-secret') ||
+    req.headers.get('x-internal-secret') ||
+    req.nextUrl.searchParams.get('secret') ||
+    ''
 
   if (trustedSecret && incomingSecret && incomingSecret === trustedSecret) {
     return { mode: 'trusted_secret' as const, email: null as string | null }
@@ -37,9 +41,11 @@ async function authorize(req: NextRequest, sb: SupabaseAdmin) {
 
   const authHeader = req.headers.get('authorization') || ''
   const token = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice(7).trim() : ''
+
   if (!token) throw new Error('Unauthorized : token utilisateur manquant.')
 
   const { data, error } = await sb.auth.getUser(token)
+
   if (error || !data.user) {
     throw new Error(`Unauthorized : session invalide${error?.message ? ` (${error.message})` : ''}.`)
   }
@@ -65,6 +71,91 @@ function sanitizeJob(row: any) {
     finished_at: row.finished_at,
     updated_at: row.updated_at,
     payload: row.payload,
+  }
+}
+
+async function readJsonPayload(req: NextRequest) {
+  try {
+    const text = await req.text()
+    if (!text || !text.trim()) return {}
+    return JSON.parse(text)
+  } catch {
+    return {}
+  }
+}
+
+function firstNonEmpty(...values: Array<unknown>) {
+  for (const value of values) {
+    if (value === null || value === undefined) continue
+    const str = String(value).trim()
+    if (str) return str
+  }
+  return ''
+}
+
+async function resolvePdfCacheRun(req: NextRequest, sb: SupabaseAdmin, payload: any) {
+  const explicitCacheId = firstNonEmpty(
+    payload?.pdf_cache_id,
+    payload?.cache_id,
+    payload?.comparison_cache_id,
+    payload?.report_cache_id,
+    payload?.run_cache_id,
+    req.nextUrl.searchParams.get('pdf_cache_id'),
+    req.nextUrl.searchParams.get('cache_id'),
+    req.nextUrl.searchParams.get('comparison_cache_id'),
+    req.nextUrl.searchParams.get('report_cache_id'),
+    req.nextUrl.searchParams.get('run_cache_id'),
+    req.headers.get('x-pdf-cache-id'),
+    req.headers.get('x-cache-id')
+  )
+
+  if (explicitCacheId) {
+    const { data, error } = await sb
+      .from('focus_mensuel_pdf_cache_runs')
+      .select('*')
+      .eq('id', explicitCacheId)
+      .single()
+
+    if (error || !data) {
+      throw new Error(`Cache PDF introuvable pour id=${explicitCacheId} : ${error?.message || 'aucune ligne trouvée'}`)
+    }
+
+    if (data.status !== 'ready') {
+      throw new Error(
+        `Cache PDF non prêt pour id=${explicitCacheId} : ${data.status} (${(data.completed_tables || []).join(', ')})`
+      )
+    }
+
+    return {
+      cacheId: String(data.id),
+      cacheRun: data,
+      resolvedFrom: 'explicit_cache_id',
+    }
+  }
+
+  const { data, error } = await sb
+    .from('focus_mensuel_pdf_cache_runs')
+    .select('*')
+    .eq('status', 'ready')
+    .order('id', { ascending: false })
+    .limit(1)
+
+  if (error) {
+    throw new Error(`Recherche du dernier cache PDF prêt impossible : ${error.message}`)
+  }
+
+  const latestReadyCache = Array.isArray(data) ? data[0] : null
+
+  if (!latestReadyCache) {
+    throw new Error(
+      'pdf_cache_id/cache_id manquant et aucun cache PDF prêt trouvé : le PDF doit utiliser le cache des tableaux déjà calculés.'
+    )
+  }
+
+  return {
+    cacheId: String(latestReadyCache.id),
+    cacheRun: latestReadyCache,
+    resolvedFrom: 'latest_ready_cache',
   }
 }
 
@@ -95,7 +186,10 @@ export async function GET(req: NextRequest) {
     if (error) throw new Error(error.message)
 
     const job = Array.isArray(data) ? data[0] : null
-    if (!job) return NextResponse.json({ ok: false, error: 'Job PDF introuvable.' }, { status: 404 })
+
+    if (!job) {
+      return NextResponse.json({ ok: false, error: 'Job PDF introuvable.' }, { status: 404 })
+    }
 
     return NextResponse.json({ ok: true, job: sanitizeJob(job) })
   } catch (error) {
@@ -107,26 +201,9 @@ export async function POST(req: NextRequest) {
   try {
     const sb = admin()
     const caller = await authorize(req, sb)
-    const payload = await req.json()
+    const payload = await readJsonPayload(req)
 
-    const cacheId = payload.pdf_cache_id || payload.cache_id || payload.comparison_cache_id
-    if (!cacheId) {
-      throw new Error('pdf_cache_id/cache_id manquant : le PDF doit utiliser le cache des tableaux déjà calculés.')
-    }
-
-    const { data: cacheRun, error: cacheError } = await sb
-      .from('focus_mensuel_pdf_cache_runs')
-      .select('*')
-      .eq('id', cacheId)
-      .single()
-
-    if (cacheError) throw new Error(`Cache PDF introuvable : ${cacheError.message}`)
-
-    if (cacheRun.status !== 'ready') {
-      throw new Error(
-        `Cache PDF non prêt : ${cacheRun.status} (${(cacheRun.completed_tables || []).join(', ')})`
-      )
-    }
+    const { cacheId, cacheRun, resolvedFrom } = await resolvePdfCacheRun(req, sb, payload)
 
     const bucket = payload.bucket || 'commercial-imports'
     const path = payload.path || 'reports/focus-mensuel/Rapport_activite_quotidien.pdf'
@@ -140,7 +217,12 @@ export async function POST(req: NextRequest) {
       path,
       filename,
       created_from: 'focus_mensuel_front_cache_tables',
+      cache_resolved_from: resolvedFrom,
+      cache_status: cacheRun.status,
+      cache_completed_tables: cacheRun.completed_tables || [],
     }
+
+    const now = new Date().toISOString()
 
     const { data, error } = await sb
       .from('report_pdf_jobs')
@@ -155,12 +237,15 @@ export async function POST(req: NextRequest) {
         created_by_email: caller.email,
         trace: [
           {
-            at: new Date().toISOString(),
+            at: now,
             step: 'created',
             cache_id: cacheId,
+            cache_resolved_from: resolvedFrom,
+            cache_status: cacheRun.status,
+            completed_tables: cacheRun.completed_tables || [],
           },
         ],
-        updated_at: new Date().toISOString(),
+        updated_at: now,
       })
       .select('*')
       .single()
@@ -175,6 +260,8 @@ export async function POST(req: NextRequest) {
       path,
       bucket,
       filename,
+      cache_id: cacheId,
+      cache_resolved_from: resolvedFrom,
       job: sanitizeJob(data),
     })
   } catch (error) {
