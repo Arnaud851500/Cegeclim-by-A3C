@@ -13,24 +13,29 @@ function requiredEnv(name: string) {
 }
 
 function isAuthorized(req: NextRequest) {
-  const cronSecret = process.env.CRON_SECRET
   const maintenanceSecret = process.env.CLIENT_MAINTENANCE_SECRET
+  const cronSecret = process.env.CRON_SECRET
 
-  const authorization = req.headers.get('authorization') || ''
-  const clientSecret = req.headers.get('x-client-maintenance-secret') || ''
+  const headerSecret = req.headers.get('x-client-maintenance-secret') || ''
+  const bearer = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '') || ''
 
-  if (cronSecret && authorization === `Bearer ${cronSecret}`) return true
-  if (maintenanceSecret && clientSecret === maintenanceSecret) return true
+  if (maintenanceSecret && headerSecret === maintenanceSecret) return true
+  if (maintenanceSecret && bearer === maintenanceSecret) return true
+  if (cronSecret && bearer === cronSecret) return true
 
   return false
 }
 
-export async function GET(req: NextRequest) {
-  return runWorkerBurst(req)
-}
+function shouldStopAfterWorkerResponse(body: any) {
+  const text = JSON.stringify(body || {}).toLowerCase()
 
-export async function POST(req: NextRequest) {
-  return runWorkerBurst(req)
+  return (
+    text.includes('aucun run actif') ||
+    text.includes('aucun run') ||
+    text.includes('no active') ||
+    text.includes('nothing_to_do') ||
+    body?.finalized === true
+  )
 }
 
 async function runWorkerBurst(req: NextRequest) {
@@ -44,19 +49,16 @@ async function runWorkerBurst(req: NextRequest) {
 
     const secret = requiredEnv('CLIENT_MAINTENANCE_SECRET')
 
-    const url = new URL(req.url)
-    const iterations = Math.min(
-      Number(url.searchParams.get('iterations') || 6),
-      10
+    const iterations = Math.max(
+      1,
+      Math.min(Number(req.nextUrl.searchParams.get('iterations') || 8), 12)
     )
 
-    const workerUrl = new URL('/api/client-maintenance/worker', req.url)
+    const workerUrl = new URL('/api/client-maintenance/worker', req.nextUrl.origin)
 
     const calls: any[] = []
 
     for (let i = 1; i <= iterations; i++) {
-      const startedAt = new Date().toISOString()
-
       const res = await fetch(workerUrl.toString(), {
         method: 'POST',
         headers: {
@@ -69,17 +71,15 @@ async function runWorkerBurst(req: NextRequest) {
 
       let body: any = null
       try {
-        body = JSON.parse(text)
+        body = text ? JSON.parse(text) : null
       } catch {
-        body = text
+        body = { raw: text }
       }
 
       calls.push({
         iteration: i,
         status: res.status,
         ok: res.ok,
-        started_at: startedAt,
-        finished_at: new Date().toISOString(),
         body,
       })
 
@@ -87,31 +87,35 @@ async function runWorkerBurst(req: NextRequest) {
         break
       }
 
-      const serialized = JSON.stringify(body).toLowerCase()
-
-      if (
-        serialized.includes('aucun run') ||
-        serialized.includes('no run') ||
-        serialized.includes('no_active') ||
-        serialized.includes('nothing_to_do')
-      ) {
+      if (shouldStopAfterWorkerResponse(body)) {
         break
       }
     }
 
     return NextResponse.json({
       success: true,
+      message: 'Burst worker maintenance clients exécuté.',
       iterations_requested: iterations,
       iterations_done: calls.length,
       calls,
     })
   } catch (error: any) {
+    console.error('cron/client-maintenance-worker error:', error)
+
     return NextResponse.json(
       {
         success: false,
-        error: error?.message || 'Erreur cron maintenance clients.',
+        error: error?.message || String(error),
       },
       { status: 500 }
     )
   }
+}
+
+export async function GET(req: NextRequest) {
+  return runWorkerBurst(req)
+}
+
+export async function POST(req: NextRequest) {
+  return runWorkerBurst(req)
 }
