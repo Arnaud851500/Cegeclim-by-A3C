@@ -1,8 +1,8 @@
 {
   "crons": [
     {
-      "path": "/api/cron/client-maintenance-worker?iterations=8",
-      "schedule": "0 5 * * *"
+      "path": "/api/cron/client-maintenance-worker?iterations=6",
+      "schedule": "*/5 * * * *"
     }
   ]
 }
