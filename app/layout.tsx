@@ -312,6 +312,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
     {
       label: 'Admin',
       items: [{ label: 'Autorisations', path: '/autorisation', accessKey: 'can_autorisation' },
+                { label: 'Job scheduling', path: '/admin/planification', accessKey: 'can_autorisation' },
                 { label: 'MAJ Base clients', path: '/clients', accessKey: 'can_clients' },
                 { label: 'MAJ Données Activité', path: '/Import', accessKey: 'can_autorisation' },
                 { label: 'Todo List', path: '/todo', accessKey: 'can_todo' },
