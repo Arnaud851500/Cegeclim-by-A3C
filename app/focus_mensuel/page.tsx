@@ -883,9 +883,26 @@ function FocusMensuelPageContent() {
   const requestedCaProjeteFactures = searchParams?.get('caProjeteFactures') || searchParams?.get('ca_projete_factures') || ''
   const requestedPdfCacheId = searchParams?.get('pdf_cache_id') || searchParams?.get('cache_id') || searchParams?.get('comparison_cache_id') || ''
   const requestedRenderSecret = searchParams?.get('render_secret') || ''
-  const currentMonth = /^\d{4}-\d{2}$/.test(String(requestedMonth || '')) ? String(requestedMonth) : todayYmd().slice(0, 7)
-  const [month, setMonth] = useState(currentMonth)
-  const [focusDate, setFocusDate] = useState(/^\d{4}-\d{2}-\d{2}$/.test(String(requestedFocusDate || '')) ? String(requestedFocusDate) : pickDefaultFocusDate())
+
+  // Par défaut, Focus Mensuel doit s'ouvrir sur le jour J.
+  // Les paramètres d'URL restent prioritaires uniquement lorsqu'ils sont explicitement présents.
+  const today = todayYmd()
+  const actualCurrentMonth = today.slice(0, 7)
+  const requestedMonthIsValid = /^\d{4}-\d{2}$/.test(String(requestedMonth || ''))
+  const requestedFocusDateIsValid = /^\d{4}-\d{2}-\d{2}$/.test(String(requestedFocusDate || ''))
+  const defaultFocusDate = pickDefaultFocusDate()
+  const initialFocusDate = requestedFocusDateIsValid ? String(requestedFocusDate) : defaultFocusDate
+  const initialMonth = requestedMonthIsValid
+    ? String(requestedMonth)
+    : monthKey(initialFocusDate) || actualCurrentMonth
+  const initialFocusDateForMonth = initialFocusDate.startsWith(initialMonth)
+    ? initialFocusDate
+    : initialMonth === actualCurrentMonth
+      ? defaultFocusDate
+      : `${initialMonth}-01`
+
+  const [month, setMonth] = useState(initialMonth)
+  const [focusDate, setFocusDate] = useState(initialFocusDateForMonth)
   const [viewMode, setViewMode] = useState<ViewMode>(isViewMode(requestedView) ? requestedView : 'montant_ht')
   const [agence, setAgence] = useState(requestedAgence)
   const [familleMacro, setFamilleMacro] = useState(requestedFamilleMacro)
@@ -1217,22 +1234,18 @@ function FocusMensuelPageContent() {
   function setMonthAndSyncFocusDate(nextMonth: string) {
     setMonth(nextMonth)
     if (!String(focusDate || '').startsWith(nextMonth)) {
-      const candidate = nextMonth === todayYmd().slice(0, 7) ? pickDefaultFocusDate() : `${nextMonth}-01`
+      const candidate = nextMonth === actualCurrentMonth ? pickDefaultFocusDate() : `${nextMonth}-01`
       setFocusDate(candidate.startsWith(nextMonth) ? candidate : `${nextMonth}-01`)
     }
   }
 
   useEffect(() => {
-  if (!focusDate.startsWith(month)) {
-    const candidate =
-      month === currentMonth
-        ? todayYmd()
-        : `${month}-01`
-
-    setFocusDate(candidate)
-  }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, [month])
+    if (!focusDate.startsWith(month)) {
+      const candidate = month === actualCurrentMonth ? pickDefaultFocusDate() : `${month}-01`
+      setFocusDate(candidate.startsWith(month) ? candidate : `${month}-01`)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [month])
 
   useEffect(() => {
     void loadData()
