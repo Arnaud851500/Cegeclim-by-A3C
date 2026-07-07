@@ -1223,12 +1223,16 @@ function FocusMensuelPageContent() {
   }
 
   useEffect(() => {
-    if (!focusDate.startsWith(month)) {
-      const candidate = month === currentMonth ? pickDefaultFocusDate() : `${month}-${String(Math.min(new Date(`${month}-01T12:00:00`).getDate(), 1)).padStart(2, '0')}`
-      setFocusDate(candidate.startsWith(month) ? candidate : `${month}-01`)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [month])
+  if (!focusDate.startsWith(month)) {
+    const candidate =
+      month === currentMonth
+        ? todayYmd()
+        : `${month}-01`
+
+    setFocusDate(candidate)
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [month])
 
   useEffect(() => {
     void loadData()
