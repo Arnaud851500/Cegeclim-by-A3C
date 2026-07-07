@@ -419,6 +419,7 @@ export default function PlanificationTraitementsPage() {
   const [runs, setRuns] = useState<SchedulerRun[]>([])
   const [logs, setLogs] = useState<SchedulerLog[]>([])
   const [selected, setSelected] = useState<SchedulerJob | null>(null)
+  const [selectedDirty, setSelectedDirty] = useState(false)
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -435,7 +436,39 @@ export default function PlanificationTraitementsPage() {
     }
   }, [jobs, runs])
 
-  async function refresh() {
+  function selectJob(job: SchedulerJob) {
+    setSelected(clone(job))
+    setSelectedDirty(false)
+    setMessage(null)
+    setError(null)
+  }
+
+  function editJob(job: SchedulerJob) {
+    setSelected(job)
+    setSelectedDirty(true)
+  }
+
+  function clearSelected() {
+    setSelected(null)
+    setSelectedDirty(false)
+  }
+
+  function startNewJob() {
+    setSelected(newJob())
+    setSelectedDirty(true)
+    setMessage('Nouveau job en cours de saisie. Clique sur Sauvegarder pour le créer.')
+    setError(null)
+  }
+
+  function startAggregateJob(template: typeof quickAggregateJobs[number]) {
+    setSelected(newAggregateJob(template))
+    setSelectedDirty(true)
+    setMessage('Nouveau job d’agrégat en cours de saisie. Définis la période puis clique sur Sauvegarder.')
+    setError(null)
+  }
+
+  async function refresh(options?: { preserveDraft?: boolean }) {
+    const preserveDraft = options?.preserveDraft ?? true
     setLoading(true)
     setError(null)
 
@@ -444,16 +477,21 @@ export default function PlanificationTraitementsPage() {
       const json = await res.json()
       if (!res.ok || json.success === false) throw new Error(json.error || 'Erreur chargement scheduler')
 
-      const nextJobs = json.jobs || []
+      const nextJobs = (json.jobs || []) as SchedulerJob[]
       setJobs(nextJobs)
       setRuns(json.runs || [])
       setLogs(json.logs || [])
 
-      if (!selected && nextJobs?.[0]) {
+      // Important : on ne réécrit pas le formulaire si l’utilisateur est en train de modifier un job.
+      // C’est ce qui rendait l’écran inutilisable avec le refresh automatique.
+      if (!selected && nextJobs?.[0] && !preserveDraft) {
         setSelected(nextJobs[0])
-      } else if (selected?.id) {
-        const refreshedSelected = nextJobs.find((job: SchedulerJob) => job.id === selected.id)
+        setSelectedDirty(false)
+      } else if (selected?.id && !selectedDirty && preserveDraft) {
+        const refreshedSelected = nextJobs.find((job) => job.id === selected.id)
         if (refreshedSelected) setSelected(refreshedSelected)
+      } else if (selected?.id && !nextJobs.some((job) => job.id === selected.id) && !selectedDirty) {
+        clearSelected()
       }
     } catch (e: any) {
       setError(e?.message || String(e))
@@ -463,9 +501,9 @@ export default function PlanificationTraitementsPage() {
   }
 
   useEffect(() => {
-    refresh()
-    const timer = window.setInterval(refresh, 15000)
-    return () => window.clearInterval(timer)
+    // Chargement initial uniquement. Le refresh automatique est volontairement désactivé
+    // pour éviter d’écraser le paramétrage précis d’un nouveau job.
+    void refresh({ preserveDraft: false })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -487,8 +525,9 @@ export default function PlanificationTraitementsPage() {
       if (!res.ok || json.success === false) throw new Error(json.error || 'Erreur sauvegarde')
 
       setSelected(json.job)
+      setSelectedDirty(false)
       setMessage('Traitement sauvegardé.')
-      await refresh()
+      await refresh({ preserveDraft: true })
     } catch (e: any) {
       setError(e?.message || String(e))
     } finally {
@@ -510,8 +549,8 @@ export default function PlanificationTraitementsPage() {
       const json = await res.json()
       if (!res.ok || json.success === false) throw new Error(json.error || 'Erreur lancement')
 
-      setMessage('Traitement lancé. Le monitoring se mettra à jour automatiquement.')
-      await refresh()
+      setMessage('Traitement lancé. Clique sur Actualiser pour suivre l’avancement.')
+      await refresh({ preserveDraft: true })
     } catch (e: any) {
       setError(e?.message || String(e))
     } finally {
@@ -522,7 +561,7 @@ export default function PlanificationTraitementsPage() {
   async function deleteJob(job: SchedulerJob) {
     if (!job.id) {
       setJobs((current) => current.filter((j) => j.job_key !== job.job_key))
-      if (selected?.job_key === job.job_key) setSelected(null)
+      if (selected?.job_key === job.job_key) clearSelected()
       setMessage('Job non sauvegardé retiré de l’écran.')
       return
     }
@@ -556,10 +595,10 @@ export default function PlanificationTraitementsPage() {
       }
 
       setJobs((current) => current.filter((j) => j.id !== job.id))
-      if (selected?.id === job.id) setSelected(null)
+      if (selected?.id === job.id) clearSelected()
 
       setMessage('Job archivé, désactivé et retiré de la liste.')
-      await refresh()
+      await refresh({ preserveDraft: false })
     } catch (e: any) {
       setError(e?.message || String(e))
     } finally {
@@ -578,7 +617,7 @@ export default function PlanificationTraitementsPage() {
           <h1>Planification des traitements</h1>
           <p>Orchestration des mises à jour clients, recalculs d’agrégats, SMC et envois de documents.</p>
         </div>
-        <button onClick={refresh} disabled={loading}>Actualiser</button>
+        <button onClick={() => refresh({ preserveDraft: true })} disabled={loading}>Actualiser</button>
       </div>
 
       {message && <div className="alert ok">{message}</div>}
@@ -592,18 +631,23 @@ export default function PlanificationTraitementsPage() {
         <div className="card wide"><span>Prochaine exécution</span><strong>{formatDate(stats.nextRun)}</strong></div>
       </div>
 
+      <div className="refreshNote">
+        Refresh automatique désactivé sur cet écran : le formulaire ne sera plus écrasé pendant la saisie.
+        Utilise <strong>Actualiser</strong> pour recharger l’historique et les statuts.
+      </div>
+
       <div className="layout">
         <section className="panel listPanel">
           <div className="sectionHeader">
             <h2>Traitements</h2>
-            <button onClick={() => setSelected(newJob())}>Nouveau</button>
+            <button onClick={startNewJob}>Nouveau</button>
           </div>
 
           <div className="quickJobs">
             <strong>Ajouter rapidement un job d’agrégat</strong>
             <div className="quickJobButtons">
               {quickAggregateJobs.map((template) => (
-                <button key={template.job_key} type="button" onClick={() => setSelected(newAggregateJob(template))}>
+                <button key={template.job_key} type="button" onClick={() => startAggregateJob(template)}>
                   {template.job_label}
                 </button>
               ))}
@@ -626,7 +670,7 @@ export default function PlanificationTraitementsPage() {
               {jobs.map((job) => (
                 <tr key={job.id || job.job_key} className={selected?.id === job.id ? 'selected' : ''}>
                   <td>
-                    <button className="linkButton" onClick={() => setSelected(clone(job))}>
+                    <button className="linkButton" onClick={() => selectJob(job)}>
                       <strong>{job.job_label}</strong>
                       <small>{job.job_key}</small>
                     </button>
@@ -648,7 +692,10 @@ export default function PlanificationTraitementsPage() {
         </section>
 
         <section className="panel editPanel">
-          <h2>Paramétrage</h2>
+          <div className="editHeader">
+            <h2>Paramétrage</h2>
+            {selectedDirty && <span className="draftBadge">Modifications non sauvegardées</span>}
+          </div>
 
           {!selected ? (
             <p>Sélectionne un traitement.</p>
@@ -657,11 +704,11 @@ export default function PlanificationTraitementsPage() {
               <div className="twoCols">
                 <label>
                   Clé technique
-                  <input value={selected.job_key} onChange={(e) => setSelected({ ...selected, job_key: e.target.value })} />
+                  <input value={selected.job_key} onChange={(e) => editJob({ ...selected, job_key: e.target.value })} />
                 </label>
                 <label>
                   Libellé
-                  <input value={selected.job_label} onChange={(e) => setSelected({ ...selected, job_label: e.target.value })} />
+                  <input value={selected.job_label} onChange={(e) => editJob({ ...selected, job_label: e.target.value })} />
                 </label>
               </div>
 
@@ -672,7 +719,7 @@ export default function PlanificationTraitementsPage() {
                     value={selected.job_type}
                     onChange={(e) => {
                       const jobType = e.target.value
-                      setSelected({
+                      editJob({
                         ...selected,
                         job_type: jobType,
                         config_json:
@@ -695,7 +742,7 @@ export default function PlanificationTraitementsPage() {
                   Activé
                   <select
                     value={selected.enabled ? 'true' : 'false'}
-                    onChange={(e) => setSelected({ ...selected, enabled: e.target.value === 'true' })}
+                    onChange={(e) => editJob({ ...selected, enabled: e.target.value === 'true' })}
                   >
                     <option value="true">Oui</option>
                     <option value="false">Non</option>
@@ -706,7 +753,7 @@ export default function PlanificationTraitementsPage() {
               <div className="threeCols">
                 <label>
                   Fréquence
-                  <select value={selected.frequency} onChange={(e) => setSelected({ ...selected, frequency: e.target.value })}>
+                  <select value={selected.frequency} onChange={(e) => editJob({ ...selected, frequency: e.target.value })}>
                     <option value="manual">Manuel uniquement</option>
                     <option value="hourly">Toutes les heures</option>
                     <option value="daily">Tous les jours</option>
@@ -721,7 +768,7 @@ export default function PlanificationTraitementsPage() {
                     min={0}
                     max={23}
                     value={selected.scheduled_hour ?? 0}
-                    onChange={(e) => setSelected({ ...selected, scheduled_hour: Number(e.target.value) })}
+                    onChange={(e) => editJob({ ...selected, scheduled_hour: Number(e.target.value) })}
                   />
                 </label>
                 <label>
@@ -731,7 +778,7 @@ export default function PlanificationTraitementsPage() {
                     min={0}
                     max={59}
                     value={selected.scheduled_minute ?? 0}
-                    onChange={(e) => setSelected({ ...selected, scheduled_minute: Number(e.target.value) })}
+                    onChange={(e) => editJob({ ...selected, scheduled_minute: Number(e.target.value) })}
                   />
                 </label>
               </div>
@@ -740,14 +787,14 @@ export default function PlanificationTraitementsPage() {
                 Jours d’exécution
                 <WeekdaySelector
                   value={selected.scheduled_weekdays || []}
-                  onChange={(value) => setSelected({ ...selected, scheduled_weekdays: value })}
+                  onChange={(value) => editJob({ ...selected, scheduled_weekdays: value })}
                 />
               </label>
 
               <div className="threeCols">
                 <label>
                   Fuseau horaire
-                  <input value={selected.timezone} onChange={(e) => setSelected({ ...selected, timezone: e.target.value })} />
+                  <input value={selected.timezone} onChange={(e) => editJob({ ...selected, timezone: e.target.value })} />
                 </label>
                 <label>
                   Itérations worker
@@ -756,14 +803,14 @@ export default function PlanificationTraitementsPage() {
                     min={1}
                     max={50}
                     value={selected.max_iterations}
-                    onChange={(e) => setSelected({ ...selected, max_iterations: Number(e.target.value) })}
+                    onChange={(e) => editJob({ ...selected, max_iterations: Number(e.target.value) })}
                   />
                 </label>
                 <label>
                   Continuer en erreur
                   <select
                     value={selected.continue_on_error ? 'true' : 'false'}
-                    onChange={(e) => setSelected({ ...selected, continue_on_error: e.target.value === 'true' })}
+                    onChange={(e) => editJob({ ...selected, continue_on_error: e.target.value === 'true' })}
                   >
                     <option value="true">Oui</option>
                     <option value="false">Non</option>
@@ -786,7 +833,7 @@ export default function PlanificationTraitementsPage() {
                         <input
                           type="checkbox"
                           checked={Boolean(config[key])}
-                          onChange={(e) => setSelected(setNestedConfig(selected, [key], e.target.checked))}
+                          onChange={(e) => editJob(setNestedConfig(selected, [key], e.target.checked))}
                         />
                         {label}
                       </label>
@@ -797,12 +844,12 @@ export default function PlanificationTraitementsPage() {
                     <SireneDateEditor
                       title="Dates création / mise à jour"
                       value={sireneDates.creation || { mode: 'params' }}
-                      onChange={(value) => setSelected(setNestedConfig(selected, ['sireneDates', 'creation'], value))}
+                      onChange={(value) => editJob(setNestedConfig(selected, ['sireneDates', 'creation'], value))}
                     />
                     <SireneDateEditor
                       title="Dates cessations"
                       value={sireneDates.cessation || { mode: 'params' }}
-                      onChange={(value) => setSelected(setNestedConfig(selected, ['sireneDates', 'cessation'], value))}
+                      onChange={(value) => editJob(setNestedConfig(selected, ['sireneDates', 'cessation'], value))}
                     />
                   </div>
                 </div>
@@ -811,11 +858,11 @@ export default function PlanificationTraitementsPage() {
                   <h3>Route HTTP</h3>
                   <label>
                     Route
-                    <input value={config.routePath || ''} onChange={(e) => setSelected(setNestedConfig(selected, ['routePath'], e.target.value))} />
+                    <input value={config.routePath || ''} onChange={(e) => editJob(setNestedConfig(selected, ['routePath'], e.target.value))} />
                   </label>
                   <label>
                     Méthode
-                    <select value={config.method || 'POST'} onChange={(e) => setSelected(setNestedConfig(selected, ['method'], e.target.value))}>
+                    <select value={config.method || 'POST'} onChange={(e) => editJob(setNestedConfig(selected, ['method'], e.target.value))}>
                       <option value="POST">POST</option>
                       <option value="GET">GET</option>
                     </select>
@@ -824,7 +871,7 @@ export default function PlanificationTraitementsPage() {
                   {selectedIsAggregateJob && (
                     <AggregatePeriodEditor
                       value={config.period || defaultAggregatePeriod}
-                      onChange={(value) => setSelected(setNestedConfig(selected, ['period'], value))}
+                      onChange={(value) => editJob(setNestedConfig(selected, ['period'], value))}
                     />
                   )}
 
@@ -834,9 +881,9 @@ export default function PlanificationTraitementsPage() {
                       value={JSON.stringify(config.body || {}, null, 2)}
                       onChange={(e) => {
                         try {
-                          setSelected(setNestedConfig(selected, ['body'], JSON.parse(e.target.value || '{}')))
+                          editJob(setNestedConfig(selected, ['body'], JSON.parse(e.target.value || '{}')))
                         } catch {
-                          setSelected(setNestedConfig(selected, ['body'], e.target.value))
+                          editJob(setNestedConfig(selected, ['body'], e.target.value))
                         }
                       }}
                     />
@@ -917,6 +964,10 @@ export default function PlanificationTraitementsPage() {
         .layout { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(420px, .9fr); gap: 16px; align-items: start; }
         .panel { background: white; border: 1px solid #dbe3ef; border-radius: 18px; padding: 16px; margin-bottom: 16px; box-shadow: 0 8px 20px rgba(15, 23, 42, .04); }
         .sectionHeader { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+        .editHeader { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+        .editHeader h2 { margin: 0; }
+        .draftBadge { background: #fef3c7; color: #92400e; border: 1px solid #fde68a; border-radius: 999px; padding: 6px 10px; font-size: 12px; font-weight: 900; white-space: nowrap; }
+        .refreshNote { margin: -4px 0 16px; border: 1px solid #bfdbfe; background: #eff6ff; color: #1e3a8a; border-radius: 14px; padding: 10px 12px; font-size: 13px; font-weight: 700; }
         .quickJobs { border: 1px solid #e2e8f0; border-radius: 14px; padding: 12px; margin-bottom: 14px; background: #f8fafc; }
         .quickJobButtons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
         .quickJobs p { font-size: 12px; }
@@ -950,9 +1001,9 @@ export default function PlanificationTraitementsPage() {
         .dateBox { background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px; }
         .aggregatePeriod { margin: 12px 0; border-color: #bfdbfe; background: #eff6ff; }
         .weekdayBox { border: 1px solid #e2e8f0; border-radius: 12px; padding: 10px; margin-bottom: 12px; background: #fff; }
-        .weekdayActions { display: flex; gap: 8px; margin-bottom: 8px; }
+        .weekdayActions { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
         .weekdayActions button { padding: 7px 10px; font-size: 12px; }
-        .weekdayList { display: flex; flex-wrap: wrap; gap: 10px; }
+        .weekdayList { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
         .helpText { font-size: 12px; color: #64748b; font-weight: 500; }
         .actions { display: flex; gap: 10px; justify-content: flex-end; }
         .logs { background: #0f172a; border-radius: 14px; color: #e5e7eb; padding: 10px 14px; max-height: 340px; overflow: auto; }
