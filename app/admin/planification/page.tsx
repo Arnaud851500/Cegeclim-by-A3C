@@ -68,6 +68,67 @@ const emptyClientMaintenanceConfig = {
   },
 }
 
+
+const emptyHttpRouteConfig = {
+  routePath: '/api/reports/focus-mensuel-pdf/process',
+  path: '/api/reports/focus-mensuel-pdf/process',
+  method: 'POST',
+  body: {},
+}
+
+const DAYS = [
+  { value: 1, label: 'Lun' },
+  { value: 2, label: 'Mar' },
+  { value: 3, label: 'Mer' },
+  { value: 4, label: 'Jeu' },
+  { value: 5, label: 'Ven' },
+  { value: 6, label: 'Sam' },
+  { value: 0, label: 'Dim' },
+]
+
+const AGGREGATE_PRESETS = [
+  {
+    key: 'agg_activite_daily',
+    label: 'Recalcul agrégats activité',
+    routePath: '/api/aggregates/activite/rebuild',
+    hour: 5,
+    minute: 45,
+    body: { mode: 'relative', fromOffsetDays: 3, toOffsetDays: 0 },
+  },
+  {
+    key: 'agg_factures_daily',
+    label: 'Recalcul agrégats factures',
+    routePath: '/api/aggregates/factures/rebuild',
+    hour: 5,
+    minute: 50,
+    body: { mode: 'relative', fromOffsetDays: 3, toOffsetDays: 0 },
+  },
+  {
+    key: 'agg_devis_daily',
+    label: 'Recalcul agrégats devis',
+    routePath: '/api/aggregates/devis/rebuild',
+    hour: 5,
+    minute: 55,
+    body: { mode: 'relative', fromOffsetDays: 3, toOffsetDays: 0 },
+  },
+  {
+    key: 'flux_articles_daily',
+    label: 'Rebuild flux articles',
+    routePath: '/api/flux-articles/rebuild',
+    hour: 6,
+    minute: 5,
+    body: { mode: 'relative', fromOffsetDays: 3, toOffsetDays: 0 },
+  },
+  {
+    key: 'smc_daily_refresh',
+    label: 'Mise à jour SMC quotidienne',
+    routePath: '/api/smc/rebuild',
+    hour: 6,
+    minute: 10,
+    body: { mode: 'all' },
+  },
+]
+
 function newJob(): SchedulerJob {
   return {
     job_key: `job_${Date.now()}`,
@@ -82,6 +143,33 @@ function newJob(): SchedulerJob {
     scheduled_month_day: 1,
     config_json: emptyClientMaintenanceConfig,
     max_iterations: 20,
+    max_runtime_seconds: 600,
+    allow_overlap: false,
+    continue_on_error: true,
+  }
+}
+
+
+function newAggregateJob(preset: (typeof AGGREGATE_PRESETS)[number]): SchedulerJob {
+  return {
+    job_key: preset.key,
+    job_label: preset.label,
+    job_type: 'http_route',
+    enabled: false,
+    frequency: 'daily',
+    timezone: 'Europe/Paris',
+    scheduled_hour: preset.hour,
+    scheduled_minute: preset.minute,
+    scheduled_weekdays: [1, 2, 3, 4, 5],
+    scheduled_month_day: 1,
+    config_json: {
+      ...emptyHttpRouteConfig,
+      routePath: preset.routePath,
+      path: preset.routePath,
+      method: 'POST',
+      body: preset.body,
+    },
+    max_iterations: 5,
     max_runtime_seconds: 600,
     allow_overlap: false,
     continue_on_error: true,
@@ -106,6 +194,7 @@ function statusClass(status?: string | null) {
   if (status === 'queued') return 'status queued'
   if (status === 'partial') return 'status partial'
   if (status === 'error') return 'status error'
+  if (status === 'cancelled') return 'status cancelled'
   return 'status'
 }
 
@@ -125,6 +214,11 @@ function setNestedConfig(job: SchedulerJob, path: string[], value: any): Schedul
   }
 
   cursor[path[path.length - 1]] = value
+
+  // Compatibilité : certains schedulers lisent routePath, d'autres path.
+  if (path.length === 1 && path[0] === 'routePath') cursor.path = value
+  if (path.length === 1 && path[0] === 'path') cursor.routePath = value
+
   return next
 }
 
@@ -212,6 +306,56 @@ function SireneDateEditor({
   )
 }
 
+
+function WeekdayPicker({
+  value,
+  onChange,
+}: {
+  value?: number[]
+  onChange: (value: number[]) => void
+}) {
+  const selected = new Set(value || [])
+
+  function toggle(day: number) {
+    const next = new Set(selected)
+    if (next.has(day)) next.delete(day)
+    else next.add(day)
+    onChange(Array.from(next).sort((a, b) => a - b))
+  }
+
+  return (
+    <div className="weekdayPicker">
+      <div className="weekdayHeader">
+        <label>Jours d’exécution</label>
+        <div className="weekdayShortcuts">
+          <button type="button" onClick={() => onChange([1, 2, 3, 4, 5])}>Ouvrés</button>
+          <button type="button" onClick={() => onChange([1, 2, 3, 4, 5, 6, 0])}>Tous</button>
+          <button type="button" onClick={() => onChange([])}>Aucun</button>
+        </div>
+      </div>
+
+      <div className="weekdayButtons">
+        {DAYS.map((day) => {
+          const isSelected = selected.has(day.value)
+          return (
+            <button
+              key={day.value}
+              type="button"
+              onClick={() => toggle(day.value)}
+              className={isSelected ? 'weekday selectedDay' : 'weekday'}
+            >
+              <span className="fakeCheck">{isSelected ? '✓' : ''}</span>
+              {day.label}
+            </button>
+          )
+        })}
+      </div>
+
+      <p className="hint">Si aucun jour n’est coché, le job n’est pas limité par jour.</p>
+    </div>
+  )
+}
+
 export default function PlanificationTraitementsPage() {
   const [jobs, setJobs] = useState<SchedulerJob[]>([])
   const [runs, setRuns] = useState<SchedulerRun[]>([])
@@ -220,6 +364,16 @@ export default function PlanificationTraitementsPage() {
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+
+  const activeRunsByJobKey = useMemo(() => {
+    const map = new Map<string, SchedulerRun>()
+    for (const run of runs) {
+      if (run.status === 'queued' || run.status === 'running') {
+        if (!map.has(run.job_key)) map.set(run.job_key, run)
+      }
+    }
+    return map
+  }, [runs])
 
   const stats = useMemo(() => {
     return {
@@ -304,6 +458,65 @@ export default function PlanificationTraitementsPage() {
     }
   }
 
+
+  async function cancelRun(runId: string) {
+    if (!confirm('Arrêter ce run en cours ? Les étapes restantes seront annulées proprement.')) return
+
+    setLoading(true)
+    setError(null)
+    setMessage(null)
+
+    try {
+      const res = await fetch('/api/admin/scheduler/cancel-run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schedulerRunId: runId, cancelAllClientRuns: true }),
+      })
+
+      const json = await res.json().catch(() => null)
+      if (!res.ok || json?.success === false) throw new Error(json?.error || 'Erreur annulation du run')
+
+      setMessage('Run arrêté proprement.')
+      await refresh()
+    } catch (e: any) {
+      setError(e?.message || String(e))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function deleteJob(job: SchedulerJob) {
+    if (!job.id) {
+      setSelected(null)
+      return
+    }
+
+    if (!confirm(`Supprimer / archiver le job "${job.job_label}" ?`)) return
+
+    setLoading(true)
+    setError(null)
+    setMessage(null)
+
+    try {
+      const res = await fetch('/api/admin/scheduler/delete-job', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobId: job.id }),
+      })
+
+      const json = await res.json().catch(() => null)
+      if (!res.ok || json?.success === false) throw new Error(json?.error || 'Erreur suppression du job')
+
+      setMessage('Job archivé et désactivé.')
+      setSelected(null)
+      await refresh()
+    } catch (e: any) {
+      setError(e?.message || String(e))
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const config = selected?.config_json || {}
   const sireneDates = config.sireneDates || {}
 
@@ -335,6 +548,18 @@ export default function PlanificationTraitementsPage() {
             <button onClick={() => setSelected(newJob())}>Nouveau</button>
           </div>
 
+          <div className="presetPanel">
+            <strong>Ajouter rapidement un job d’agrégat</strong>
+            <div className="presetButtons">
+              {AGGREGATE_PRESETS.map((preset) => (
+                <button key={preset.key} type="button" onClick={() => setSelected(newAggregateJob(preset))}>
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+            <p>Les routes proposées sont des modèles : adapte le chemin API si ta route réelle porte un autre nom.</p>
+          </div>
+
           <table>
             <thead>
               <tr>
@@ -343,25 +568,37 @@ export default function PlanificationTraitementsPage() {
                 <th>Fréquence</th>
                 <th>Dernier statut</th>
                 <th>Prochain passage</th>
-                <th></th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {jobs.map((job) => (
-                <tr key={job.id || job.job_key} className={selected?.id === job.id ? 'selected' : ''}>
-                  <td>
-                    <button className="linkButton" onClick={() => setSelected(clone(job))}>
-                      <strong>{job.job_label}</strong>
-                      <small>{job.job_key}</small>
-                    </button>
-                  </td>
-                  <td>{job.enabled ? 'Oui' : 'Non'}</td>
-                  <td>{job.frequency}</td>
-                  <td><span className={statusClass(job.last_status)}>{job.last_status || '—'}</span></td>
-                  <td>{formatDate(job.next_run_at)}</td>
-                  <td><button onClick={() => runNow(job)} disabled={loading}>Lancer</button></td>
-                </tr>
-              ))}
+              {jobs.map((job) => {
+                const activeRun = activeRunsByJobKey.get(job.job_key)
+
+                return (
+                  <tr key={job.id || job.job_key} className={selected?.id === job.id ? 'selected' : ''}>
+                    <td>
+                      <button className="linkButton" onClick={() => setSelected(clone(job))}>
+                        <strong>{job.job_label}</strong>
+                        <small>{job.job_key}</small>
+                      </button>
+                    </td>
+                    <td>{job.enabled ? 'Oui' : 'Non'}</td>
+                    <td>{job.frequency}</td>
+                    <td><span className={statusClass(job.last_status)}>{job.last_status || '—'}</span></td>
+                    <td>{formatDate(job.next_run_at)}</td>
+                    <td>
+                      <div className="rowActions">
+                        <button onClick={() => runNow(job)} disabled={loading}>Lancer</button>
+                        {activeRun && (
+                          <button className="dangerButton" onClick={() => cancelRun(activeRun.id)} disabled={loading}>Arrêter</button>
+                        )}
+                        <button className="ghostButton" onClick={() => deleteJob(job)} disabled={loading || Boolean(activeRun)}>Supprimer</button>
+                      </div>
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </section>
@@ -397,7 +634,7 @@ export default function PlanificationTraitementsPage() {
                         config_json:
                           jobType === 'client_maintenance'
                             ? emptyClientMaintenanceConfig
-                            : { routePath: '/api/reports/focus-mensuel-pdf/process', method: 'POST', body: {} },
+                            : clone(emptyHttpRouteConfig),
                       })
                     }}
                   >
@@ -449,6 +686,26 @@ export default function PlanificationTraitementsPage() {
                   />
                 </label>
               </div>
+
+              {(selected.frequency === 'daily' || selected.frequency === 'weekly' || selected.frequency === 'hourly') && (
+                <WeekdayPicker
+                  value={selected.scheduled_weekdays || []}
+                  onChange={(weekdays) => setSelected({ ...selected, scheduled_weekdays: weekdays })}
+                />
+              )}
+
+              {selected.frequency === 'monthly' && (
+                <label className="monthDay">
+                  Jour du mois
+                  <input
+                    type="number"
+                    min={1}
+                    max={31}
+                    value={selected.scheduled_month_day ?? 1}
+                    onChange={(e) => setSelected({ ...selected, scheduled_month_day: Number(e.target.value) })}
+                  />
+                </label>
+              )}
 
               <div className="threeCols">
                 <label>
@@ -518,8 +775,12 @@ export default function PlanificationTraitementsPage() {
                   <label>
                     Route
                     <input
-                      value={config.routePath || ''}
-                      onChange={(e) => setSelected(setNestedConfig(selected, ['routePath'], e.target.value))}
+                      value={config.routePath || config.path || ''}
+                      placeholder="/api/..."
+                      onChange={(e) => {
+                        const next = setNestedConfig(selected, ['routePath'], e.target.value)
+                        setSelected(setNestedConfig(next, ['path'], e.target.value))
+                      }}
                     />
                   </label>
                   <label>
@@ -549,6 +810,7 @@ export default function PlanificationTraitementsPage() {
               )}
 
               <div className="actions">
+                <button className="ghostButton" onClick={() => deleteJob(selected)} disabled={loading}>Supprimer</button>
                 <button onClick={saveJob} disabled={loading}>Sauvegarder</button>
                 <button onClick={() => runNow(selected)} disabled={loading || !selected.id}>Lancer maintenant</button>
               </div>
@@ -568,6 +830,7 @@ export default function PlanificationTraitementsPage() {
               <th>Statut</th>
               <th>Message</th>
               <th>Erreur</th>
+              <th>Action</th>
             </tr>
           </thead>
           <tbody>
@@ -579,6 +842,13 @@ export default function PlanificationTraitementsPage() {
                 <td><span className={statusClass(run.status)}>{run.status}</span></td>
                 <td>{run.message || '—'}</td>
                 <td>{run.error_message || '—'}</td>
+                <td>
+                  {(run.status === 'queued' || run.status === 'running') ? (
+                    <button className="dangerButton" onClick={() => cancelRun(run.id)} disabled={loading}>Arrêter</button>
+                  ) : (
+                    <span className="muted">—</span>
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -634,7 +904,7 @@ export default function PlanificationTraitementsPage() {
         .status.partial { background: #ffedd5; color: #9a3412; }
         .status.error { background: #fee2e2; color: #991b1b; }
         .form label { display: flex; flex-direction: column; gap: 6px; color: #334155; font-weight: 800; font-size: 13px; }
-        input, select, textarea { border: 1px solid #cbd5e1; border-radius: 10px; padding: 10px 12px; font: inherit; background: white; }
+        input, select, textarea { border: 1px solid #cbd5e1; border-radius: 10px; padding: 10px 12px; font-family: inherit; font-size: 13px; font-weight: 700; color: #0f172a; background: white; }
         textarea { min-height: 120px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
         .twoCols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
         .threeCols { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 12px; }
@@ -644,6 +914,28 @@ export default function PlanificationTraitementsPage() {
         .check input { width: auto; }
         .dateBox { background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px; }
         .actions { display: flex; gap: 10px; justify-content: flex-end; }
+        .rowActions { display: flex; flex-wrap: wrap; gap: 8px; }
+        .dangerButton { border-color: #fecaca; background: #fef2f2; color: #991b1b; }
+        .dangerButton:hover { background: #fee2e2; }
+        .ghostButton { color: #334155; background: #f8fafc; }
+        .muted { color: #94a3b8; }
+        .presetPanel { border: 1px solid #e2e8f0; background: #f8fafc; border-radius: 14px; padding: 12px; margin-bottom: 14px; }
+        .presetPanel strong { display: block; font-size: 13px; margin-bottom: 8px; }
+        .presetPanel p { font-size: 12px; }
+        .presetButtons { display: flex; flex-wrap: wrap; gap: 8px; }
+        .presetButtons button { padding: 8px 10px; font-size: 12px; }
+        .status.cancelled { background: #e2e8f0; color: #475569; }
+        .weekdayPicker { border: 1px solid #dbe3ef; border-radius: 14px; padding: 12px; background: #ffffff; margin-bottom: 12px; }
+        .weekdayHeader { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 10px; }
+        .weekdayShortcuts { display: flex; gap: 6px; }
+        .weekdayShortcuts button { padding: 6px 8px; font-size: 12px; }
+        .weekdayButtons { display: flex; flex-wrap: wrap; gap: 8px; }
+        .weekday { display: inline-flex; align-items: center; gap: 7px; min-width: 74px; justify-content: center; border-color: #cbd5e1; background: #fff; }
+        .weekday.selectedDay { border-color: #60a5fa; background: #eff6ff; color: #1d4ed8; box-shadow: 0 0 0 2px rgba(96, 165, 250, .12); }
+        .fakeCheck { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 5px; border: 1px solid #cbd5e1; font-size: 12px; font-weight: 900; }
+        .selectedDay .fakeCheck { border-color: #3b82f6; background: #3b82f6; color: white; }
+        .hint { font-size: 12px; margin-top: 8px; }
+        .monthDay { max-width: 220px; margin-bottom: 12px; }
         .logs { background: #0f172a; border-radius: 14px; color: #e5e7eb; padding: 10px 14px; max-height: 340px; overflow: auto; }
         .log { display: grid; grid-template-columns: 150px 70px 1fr; gap: 10px; border-bottom: 1px solid rgba(255,255,255,.08); padding: 8px 0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
         .log p { color: #e5e7eb; margin: 0; }
