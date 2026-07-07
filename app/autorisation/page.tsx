@@ -767,69 +767,69 @@ export default function AutorisationPage() {
           </div>
         </div>
 
-        <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white shadow-sm">
-          <div className="overflow-x-auto">
-            <table className="w-max min-w-full table-auto border-collapse">
+        <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+          <div className="max-h-[72vh] overflow-auto">
+            <table className="w-max min-w-full table-auto border-separate border-spacing-0">
               <thead className="bg-slate-100">
                 <tr>
-                  <th className="sticky left-0 z-30 min-w-[280px] whitespace-nowrap border-r border-slate-200 bg-slate-100 px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="sticky left-0 top-0 z-50 min-w-[280px] whitespace-nowrap border-b border-r border-slate-200 bg-slate-100 px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-600 shadow-[4px_0_8px_rgba(15,23,42,0.06)]">
                     Utilisateur
                   </th>
-                  <th className="sticky left-[280px] z-30 min-w-[220px] whitespace-nowrap border-r border-slate-200 bg-slate-100 px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="sticky top-0 z-40 min-w-[220px] whitespace-nowrap border-b border-slate-200 bg-slate-100 px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-600">
                     Nom
                   </th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="sticky top-0 z-40 border-b border-slate-200 bg-slate-100 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
                     KPI
                   </th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="sticky top-0 z-40 border-b border-slate-200 bg-slate-100 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Territoire
                   </th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="sticky top-0 z-40 border-b border-slate-200 bg-slate-100 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Carto
                   </th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="sticky top-0 z-40 border-b border-slate-200 bg-slate-100 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Clients
                   </th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="sticky top-0 z-40 border-b border-slate-200 bg-slate-100 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Carte
                   </th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="sticky top-0 z-40 border-b border-slate-200 bg-slate-100 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Todo
                   </th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="sticky top-0 z-40 border-b border-slate-200 bg-slate-100 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Cegeclim
                   </th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="sticky top-0 z-40 border-b border-slate-200 bg-slate-100 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Prospects
                   </th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="sticky top-0 z-40 border-b border-slate-200 bg-slate-100 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Agences
                   </th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="sticky top-0 z-40 border-b border-slate-200 bg-slate-100 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Auto
                   </th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="sticky top-0 z-40 border-b border-slate-200 bg-slate-100 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Documents
                   </th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="sticky top-0 z-40 border-b border-slate-200 bg-slate-100 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Stocks
                   </th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="sticky top-0 z-40 border-b border-slate-200 bg-slate-100 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Activités
                   </th>
-                  <th className="px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="sticky top-0 z-40 border-b border-slate-200 bg-slate-100 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Scope
                   </th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="sticky top-0 z-40 border-b border-slate-200 bg-slate-100 px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Allowed scopes
                   </th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="sticky top-0 z-40 border-b border-slate-200 bg-slate-100 px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Allowed agences
                   </th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="sticky top-0 z-40 border-b border-slate-200 bg-slate-100 px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Écran d'ouverture
                   </th>
-                  <th className="min-w-[290px] whitespace-nowrap px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  <th className="sticky top-0 z-40 min-w-[290px] whitespace-nowrap border-b border-slate-200 bg-slate-100 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Actions
                   </th>
                 </tr>
@@ -851,12 +851,12 @@ export default function AutorisationPage() {
                 ) : (
                   filteredRows.map((row) => (
                     <tr key={row.email} className="border-t border-slate-200 hover:bg-slate-50/80">
-                      <td className="sticky left-0 z-20 whitespace-nowrap border-r border-slate-200 bg-white px-3 py-2 align-top">
+                      <td className="sticky left-0 z-30 whitespace-nowrap border-b border-r border-slate-200 bg-white px-3 py-2 align-top shadow-[4px_0_8px_rgba(15,23,42,0.04)]">
                         <div className="min-w-fit text-sm font-medium leading-5 text-slate-900">
                           {row.email}
                         </div>
                       </td>
-                      <td className="sticky left-[280px] z-20 border-r border-slate-200 bg-white px-3 py-2 align-top">
+                      <td className="border-b border-slate-200 bg-white px-3 py-2 align-top">
                         <input
                           type="text"
                           value={row.display_name || ''}
