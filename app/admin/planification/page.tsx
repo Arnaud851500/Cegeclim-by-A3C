@@ -55,79 +55,40 @@ const emptyClientMaintenanceConfig = {
   capacite: true,
   enrichment: false,
   sireneDates: {
-    creation: {
-      mode: 'relative_range',
-      fromOffsetDays: 1,
-      toOffsetDays: 1,
-    },
-    cessation: {
-      mode: 'relative_range',
-      fromOffsetDays: 1,
-      toOffsetDays: 1,
-    },
+    creation: { mode: 'relative_range', fromOffsetDays: 1, toOffsetDays: 1 },
+    cessation: { mode: 'relative_range', fromOffsetDays: 1, toOffsetDays: 1 },
   },
 }
 
+const defaultAggregatePeriod = { mode: 'relative_months', months: 2, includeCurrentMonth: true }
 
-const emptyHttpRouteConfig = {
-  routePath: '/api/reports/focus-mensuel-pdf/process',
-  path: '/api/reports/focus-mensuel-pdf/process',
-  method: 'POST',
-  body: {},
-}
-
-const DAYS = [
-  { value: 1, label: 'Lun' },
-  { value: 2, label: 'Mar' },
-  { value: 3, label: 'Mer' },
-  { value: 4, label: 'Jeu' },
-  { value: 5, label: 'Ven' },
-  { value: 6, label: 'Sam' },
-  { value: 0, label: 'Dim' },
-]
-
-const AGGREGATE_PRESETS = [
+const quickAggregateJobs = [
   {
-    key: 'agg_activite_daily',
-    label: 'Recalcul agrégats activité',
-    routePath: '/api/aggregates/activite/rebuild',
-    hour: 5,
-    minute: 45,
-    body: { mode: 'relative', fromOffsetDays: 3, toOffsetDays: 0 },
+    job_key: 'recompute_activity_aggregates_daily',
+    job_label: 'Recalcul agrégats activité',
+    routePath: '/api/admin/maintenance/recompute-activity-aggregates',
   },
   {
-    key: 'agg_factures_daily',
-    label: 'Recalcul agrégats factures',
-    routePath: '/api/aggregates/factures/rebuild',
-    hour: 5,
-    minute: 50,
-    body: { mode: 'relative', fromOffsetDays: 3, toOffsetDays: 0 },
+    job_key: 'recompute_invoice_aggregates_daily',
+    job_label: 'Recalcul agrégats factures',
+    routePath: '/api/admin/maintenance/recompute-invoice-aggregates',
   },
   {
-    key: 'agg_devis_daily',
-    label: 'Recalcul agrégats devis',
-    routePath: '/api/aggregates/devis/rebuild',
-    hour: 5,
-    minute: 55,
-    body: { mode: 'relative', fromOffsetDays: 3, toOffsetDays: 0 },
+    job_key: 'recompute_quote_aggregates_daily',
+    job_label: 'Recalcul agrégats devis',
+    routePath: '/api/admin/maintenance/recompute-quote-aggregates',
   },
   {
-    key: 'flux_articles_daily',
-    label: 'Rebuild flux articles',
-    routePath: '/api/flux-articles/rebuild',
-    hour: 6,
-    minute: 5,
-    body: { mode: 'relative', fromOffsetDays: 3, toOffsetDays: 0 },
+    job_key: 'rebuild_flux_articles_daily',
+    job_label: 'Rebuild flux articles',
+    routePath: '/api/admin/maintenance/rebuild-flux-articles',
   },
   {
-    key: 'smc_daily_refresh',
-    label: 'Mise à jour SMC quotidienne',
-    routePath: '/api/smc/rebuild',
-    hour: 6,
-    minute: 10,
-    body: { mode: 'all' },
+    job_key: 'refresh_smc_daily',
+    job_label: 'Mise à jour SMC quotidienne',
+    routePath: '/api/admin/maintenance/refresh-smc',
   },
-]
+] as const
 
 function newJob(): SchedulerJob {
   return {
@@ -149,27 +110,25 @@ function newJob(): SchedulerJob {
   }
 }
 
-
-function newAggregateJob(preset: (typeof AGGREGATE_PRESETS)[number]): SchedulerJob {
+function newAggregateJob(template: typeof quickAggregateJobs[number]): SchedulerJob {
   return {
-    job_key: preset.key,
-    job_label: preset.label,
+    job_key: template.job_key,
+    job_label: template.job_label,
     job_type: 'http_route',
     enabled: false,
     frequency: 'daily',
     timezone: 'Europe/Paris',
-    scheduled_hour: preset.hour,
-    scheduled_minute: preset.minute,
-    scheduled_weekdays: [1, 2, 3, 4, 5],
+    scheduled_hour: 6,
+    scheduled_minute: 30,
+    scheduled_weekdays: [],
     scheduled_month_day: 1,
     config_json: {
-      ...emptyHttpRouteConfig,
-      routePath: preset.routePath,
-      path: preset.routePath,
+      routePath: template.routePath,
       method: 'POST',
-      body: preset.body,
+      body: {},
+      period: defaultAggregatePeriod,
     },
-    max_iterations: 5,
+    max_iterations: 20,
     max_runtime_seconds: 600,
     allow_overlap: false,
     continue_on_error: true,
@@ -179,17 +138,14 @@ function newAggregateJob(preset: (typeof AGGREGATE_PRESETS)[number]): SchedulerJ
 function formatDate(value?: string | null) {
   if (!value) return '—'
   try {
-    return new Intl.DateTimeFormat('fr-FR', {
-      dateStyle: 'short',
-      timeStyle: 'medium',
-    }).format(new Date(value))
+    return new Intl.DateTimeFormat('fr-FR', { dateStyle: 'short', timeStyle: 'medium' }).format(new Date(value))
   } catch {
     return value
   }
 }
 
 function statusClass(status?: string | null) {
-  if (status === 'done') return 'status done'
+  if (status === 'done' || status === 'success') return 'status done'
   if (status === 'running') return 'status running'
   if (status === 'queued') return 'status queued'
   if (status === 'partial') return 'status partial'
@@ -214,12 +170,30 @@ function setNestedConfig(job: SchedulerJob, path: string[], value: any): Schedul
   }
 
   cursor[path[path.length - 1]] = value
-
-  // Compatibilité : certains schedulers lisent routePath, d'autres path.
-  if (path.length === 1 && path[0] === 'routePath') cursor.path = value
-  if (path.length === 1 && path[0] === 'path') cursor.routePath = value
-
   return next
+}
+
+function isAggregateJob(job: SchedulerJob | null) {
+  if (!job || job.job_type !== 'http_route') return false
+  const key = `${job.job_key || ''} ${job.job_label || ''} ${job.config_json?.routePath || ''}`.toLowerCase()
+
+  return (
+    key.includes('agregat') ||
+    key.includes('agrégat') ||
+    key.includes('aggregate') ||
+    key.includes('recompute') ||
+    key.includes('flux') ||
+    key.includes('smc')
+  )
+}
+
+function safeJson(value: any) {
+  try {
+    if (typeof value === 'string') return JSON.parse(value || '{}')
+    return value || {}
+  } catch {
+    return {}
+  }
 }
 
 function SireneDateEditor({
@@ -306,52 +280,136 @@ function SireneDateEditor({
   )
 }
 
-
-function WeekdayPicker({
+function AggregatePeriodEditor({
   value,
   onChange,
 }: {
-  value?: number[]
+  value: any
+  onChange: (value: any) => void
+}) {
+  const mode = value?.mode || 'relative_months'
+
+  return (
+    <div className="dateBox aggregatePeriod">
+      <h4>Période de mise à jour des agrégats</h4>
+
+      <label>
+        Mode de période
+        <select value={mode} onChange={(e) => onChange({ ...value, mode: e.target.value })}>
+          <option value="relative_months">X derniers mois</option>
+          <option value="relative_days">X derniers jours</option>
+          <option value="current_month">Mois courant</option>
+          <option value="previous_month">Mois précédent</option>
+          <option value="fixed_range">Plage fixe</option>
+        </select>
+      </label>
+
+      {mode === 'relative_months' && (
+        <div className="twoCols">
+          <label>
+            Nombre de mois
+            <input
+              type="number"
+              min={1}
+              max={24}
+              value={value?.months ?? 2}
+              onChange={(e) => onChange({ ...value, months: Number(e.target.value) })}
+            />
+          </label>
+          <label>
+            Inclure le mois courant
+            <select
+              value={value?.includeCurrentMonth === false ? 'false' : 'true'}
+              onChange={(e) => onChange({ ...value, includeCurrentMonth: e.target.value === 'true' })}
+            >
+              <option value="true">Oui</option>
+              <option value="false">Non</option>
+            </select>
+          </label>
+        </div>
+      )}
+
+      {mode === 'relative_days' && (
+        <label>
+          Nombre de jours
+          <input
+            type="number"
+            min={1}
+            max={365}
+            value={value?.days ?? 1}
+            onChange={(e) => onChange({ ...value, days: Number(e.target.value) })}
+          />
+        </label>
+      )}
+
+      {mode === 'fixed_range' && (
+        <div className="twoCols">
+          <label>
+            Du
+            <input
+              type="date"
+              value={value?.fromDate || ''}
+              onChange={(e) => onChange({ ...value, fromDate: e.target.value })}
+            />
+          </label>
+          <label>
+            Au
+            <input
+              type="date"
+              value={value?.toDate || ''}
+              onChange={(e) => onChange({ ...value, toDate: e.target.value })}
+            />
+          </label>
+        </div>
+      )}
+
+      <p className="helpText">
+        Cette période est stockée dans <code>config_json.period</code>. Le worker doit la résoudre au moment de
+        l’exécution pour alimenter <code>date_debut</code>, <code>date_fin</code>, <code>p_date_debut</code> et{' '}
+        <code>p_date_fin</code>.
+      </p>
+    </div>
+  )
+}
+
+function WeekdaySelector({
+  value,
+  onChange,
+}: {
+  value: number[]
   onChange: (value: number[]) => void
 }) {
-  const selected = new Set(value || [])
+  const days = [
+    { value: 1, label: 'Lun' },
+    { value: 2, label: 'Mar' },
+    { value: 3, label: 'Mer' },
+    { value: 4, label: 'Jeu' },
+    { value: 5, label: 'Ven' },
+    { value: 6, label: 'Sam' },
+    { value: 0, label: 'Dim' },
+  ]
 
   function toggle(day: number) {
-    const next = new Set(selected)
-    if (next.has(day)) next.delete(day)
-    else next.add(day)
-    onChange(Array.from(next).sort((a, b) => a - b))
+    if (value.includes(day)) onChange(value.filter((v) => v !== day))
+    else onChange([...value, day])
   }
 
   return (
-    <div className="weekdayPicker">
-      <div className="weekdayHeader">
-        <label>Jours d’exécution</label>
-        <div className="weekdayShortcuts">
-          <button type="button" onClick={() => onChange([1, 2, 3, 4, 5])}>Ouvrés</button>
-          <button type="button" onClick={() => onChange([1, 2, 3, 4, 5, 6, 0])}>Tous</button>
-          <button type="button" onClick={() => onChange([])}>Aucun</button>
-        </div>
+    <div className="weekdayBox">
+      <div className="weekdayActions">
+        <button type="button" onClick={() => onChange([1, 2, 3, 4, 5])}>Ouvrés</button>
+        <button type="button" onClick={() => onChange([1, 2, 3, 4, 5, 6, 0])}>Tous</button>
+        <button type="button" onClick={() => onChange([])}>Aucun</button>
       </div>
-
-      <div className="weekdayButtons">
-        {DAYS.map((day) => {
-          const isSelected = selected.has(day.value)
-          return (
-            <button
-              key={day.value}
-              type="button"
-              onClick={() => toggle(day.value)}
-              className={isSelected ? 'weekday selectedDay' : 'weekday'}
-            >
-              <span className="fakeCheck">{isSelected ? '✓' : ''}</span>
-              {day.label}
-            </button>
-          )
-        })}
+      <div className="weekdayList">
+        {days.map((day) => (
+          <label key={day.value} className="check miniCheck">
+            <input type="checkbox" checked={value.includes(day.value)} onChange={() => toggle(day.value)} />
+            {day.label}
+          </label>
+        ))}
       </div>
-
-      <p className="hint">Si aucun jour n’est coché, le job n’est pas limité par jour.</p>
+      <p className="helpText">Si aucun jour n’est coché, le job n’est pas limité par jour.</p>
     </div>
   )
 }
@@ -364,16 +422,6 @@ export default function PlanificationTraitementsPage() {
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-
-  const activeRunsByJobKey = useMemo(() => {
-    const map = new Map<string, SchedulerRun>()
-    for (const run of runs) {
-      if (run.status === 'queued' || run.status === 'running') {
-        if (!map.has(run.job_key)) map.set(run.job_key, run)
-      }
-    }
-    return map
-  }, [runs])
 
   const stats = useMemo(() => {
     return {
@@ -395,10 +443,18 @@ export default function PlanificationTraitementsPage() {
       const res = await fetch('/api/admin/scheduler/jobs', { cache: 'no-store' })
       const json = await res.json()
       if (!res.ok || json.success === false) throw new Error(json.error || 'Erreur chargement scheduler')
-      setJobs(json.jobs || [])
+
+      const nextJobs = json.jobs || []
+      setJobs(nextJobs)
       setRuns(json.runs || [])
       setLogs(json.logs || [])
-      if (!selected && json.jobs?.[0]) setSelected(json.jobs[0])
+
+      if (!selected && nextJobs?.[0]) {
+        setSelected(nextJobs[0])
+      } else if (selected?.id) {
+        const refreshedSelected = nextJobs.find((job: SchedulerJob) => job.id === selected.id)
+        if (refreshedSelected) setSelected(refreshedSelected)
+      }
     } catch (e: any) {
       setError(e?.message || String(e))
     } finally {
@@ -410,6 +466,7 @@ export default function PlanificationTraitementsPage() {
     refresh()
     const timer = window.setInterval(refresh, 15000)
     return () => window.clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   async function saveJob() {
@@ -419,13 +476,16 @@ export default function PlanificationTraitementsPage() {
     setMessage(null)
 
     try {
+      const normalized = { ...selected, config_json: safeJson(selected.config_json) }
+
       const res = await fetch('/api/admin/scheduler/jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ job: selected }),
+        body: JSON.stringify({ job: normalized }),
       })
       const json = await res.json()
       if (!res.ok || json.success === false) throw new Error(json.error || 'Erreur sauvegarde')
+
       setSelected(json.job)
       setMessage('Traitement sauvegardé.')
       await refresh()
@@ -449,34 +509,8 @@ export default function PlanificationTraitementsPage() {
       })
       const json = await res.json()
       if (!res.ok || json.success === false) throw new Error(json.error || 'Erreur lancement')
+
       setMessage('Traitement lancé. Le monitoring se mettra à jour automatiquement.')
-      await refresh()
-    } catch (e: any) {
-      setError(e?.message || String(e))
-    } finally {
-      setLoading(false)
-    }
-  }
-
-
-  async function cancelRun(runId: string) {
-    if (!confirm('Arrêter ce run en cours ? Les étapes restantes seront annulées proprement.')) return
-
-    setLoading(true)
-    setError(null)
-    setMessage(null)
-
-    try {
-      const res = await fetch('/api/admin/scheduler/cancel-run', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ schedulerRunId: runId, cancelAllClientRuns: true }),
-      })
-
-      const json = await res.json().catch(() => null)
-      if (!res.ok || json?.success === false) throw new Error(json?.error || 'Erreur annulation du run')
-
-      setMessage('Run arrêté proprement.')
       await refresh()
     } catch (e: any) {
       setError(e?.message || String(e))
@@ -487,28 +521,44 @@ export default function PlanificationTraitementsPage() {
 
   async function deleteJob(job: SchedulerJob) {
     if (!job.id) {
-      setSelected(null)
+      setJobs((current) => current.filter((j) => j.job_key !== job.job_key))
+      if (selected?.job_key === job.job_key) setSelected(null)
+      setMessage('Job non sauvegardé retiré de l’écran.')
       return
     }
 
-    if (!confirm(`Supprimer / archiver le job "${job.job_label}" ?`)) return
+    const confirmed = window.confirm(
+      `Supprimer ce traitement ?\n\n${job.job_label}\n${job.job_key}\n\n` +
+        `Le job sera archivé, désactivé et retiré de la liste. L’historique des runs sera conservé.`
+    )
+
+    if (!confirmed) return
 
     setLoading(true)
     setError(null)
     setMessage(null)
 
     try {
-      const res = await fetch('/api/admin/scheduler/delete-job', {
-        method: 'POST',
+      const res = await fetch('/api/admin/scheduler/jobs', {
+        method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId: job.id }),
+        body: JSON.stringify({
+          id: job.id,
+          job_key: job.job_key,
+          reason: 'Suppression utilisateur depuis écran planification',
+        }),
       })
 
       const json = await res.json().catch(() => null)
-      if (!res.ok || json?.success === false) throw new Error(json?.error || 'Erreur suppression du job')
 
-      setMessage('Job archivé et désactivé.')
-      setSelected(null)
+      if (!res.ok || json?.success === false) {
+        throw new Error(json?.error || 'Erreur suppression job')
+      }
+
+      setJobs((current) => current.filter((j) => j.id !== job.id))
+      if (selected?.id === job.id) setSelected(null)
+
+      setMessage('Job archivé, désactivé et retiré de la liste.')
       await refresh()
     } catch (e: any) {
       setError(e?.message || String(e))
@@ -519,6 +569,7 @@ export default function PlanificationTraitementsPage() {
 
   const config = selected?.config_json || {}
   const sireneDates = config.sireneDates || {}
+  const selectedIsAggregateJob = isAggregateJob(selected)
 
   return (
     <div className="page">
@@ -548,12 +599,12 @@ export default function PlanificationTraitementsPage() {
             <button onClick={() => setSelected(newJob())}>Nouveau</button>
           </div>
 
-          <div className="presetPanel">
+          <div className="quickJobs">
             <strong>Ajouter rapidement un job d’agrégat</strong>
-            <div className="presetButtons">
-              {AGGREGATE_PRESETS.map((preset) => (
-                <button key={preset.key} type="button" onClick={() => setSelected(newAggregateJob(preset))}>
-                  {preset.label}
+            <div className="quickJobButtons">
+              {quickAggregateJobs.map((template) => (
+                <button key={template.job_key} type="button" onClick={() => setSelected(newAggregateJob(template))}>
+                  {template.job_label}
                 </button>
               ))}
             </div>
@@ -572,33 +623,26 @@ export default function PlanificationTraitementsPage() {
               </tr>
             </thead>
             <tbody>
-              {jobs.map((job) => {
-                const activeRun = activeRunsByJobKey.get(job.job_key)
-
-                return (
-                  <tr key={job.id || job.job_key} className={selected?.id === job.id ? 'selected' : ''}>
-                    <td>
-                      <button className="linkButton" onClick={() => setSelected(clone(job))}>
-                        <strong>{job.job_label}</strong>
-                        <small>{job.job_key}</small>
-                      </button>
-                    </td>
-                    <td>{job.enabled ? 'Oui' : 'Non'}</td>
-                    <td>{job.frequency}</td>
-                    <td><span className={statusClass(job.last_status)}>{job.last_status || '—'}</span></td>
-                    <td>{formatDate(job.next_run_at)}</td>
-                    <td>
-                      <div className="rowActions">
-                        <button onClick={() => runNow(job)} disabled={loading}>Lancer</button>
-                        {activeRun && (
-                          <button className="dangerButton" onClick={() => cancelRun(activeRun.id)} disabled={loading}>Arrêter</button>
-                        )}
-                        <button className="ghostButton" onClick={() => deleteJob(job)} disabled={loading || Boolean(activeRun)}>Supprimer</button>
-                      </div>
-                    </td>
-                  </tr>
-                )
-              })}
+              {jobs.map((job) => (
+                <tr key={job.id || job.job_key} className={selected?.id === job.id ? 'selected' : ''}>
+                  <td>
+                    <button className="linkButton" onClick={() => setSelected(clone(job))}>
+                      <strong>{job.job_label}</strong>
+                      <small>{job.job_key}</small>
+                    </button>
+                  </td>
+                  <td>{job.enabled ? 'Oui' : 'Non'}</td>
+                  <td>{job.frequency}</td>
+                  <td><span className={statusClass(job.last_status)}>{job.last_status || '—'}</span></td>
+                  <td>{formatDate(job.next_run_at)}</td>
+                  <td>
+                    <div className="rowActions">
+                      <button onClick={() => runNow(job)} disabled={loading}>Lancer</button>
+                      <button onClick={() => deleteJob(job)} disabled={loading} className="dangerButton">Supprimer</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </section>
@@ -634,7 +678,12 @@ export default function PlanificationTraitementsPage() {
                         config_json:
                           jobType === 'client_maintenance'
                             ? emptyClientMaintenanceConfig
-                            : clone(emptyHttpRouteConfig),
+                            : {
+                                routePath: '/api/admin/maintenance/recompute-activity-aggregates',
+                                method: 'POST',
+                                body: {},
+                                period: defaultAggregatePeriod,
+                              },
                       })
                     }}
                   >
@@ -687,25 +736,13 @@ export default function PlanificationTraitementsPage() {
                 </label>
               </div>
 
-              {(selected.frequency === 'daily' || selected.frequency === 'weekly' || selected.frequency === 'hourly') && (
-                <WeekdayPicker
+              <label>
+                Jours d’exécution
+                <WeekdaySelector
                   value={selected.scheduled_weekdays || []}
-                  onChange={(weekdays) => setSelected({ ...selected, scheduled_weekdays: weekdays })}
+                  onChange={(value) => setSelected({ ...selected, scheduled_weekdays: value })}
                 />
-              )}
-
-              {selected.frequency === 'monthly' && (
-                <label className="monthDay">
-                  Jour du mois
-                  <input
-                    type="number"
-                    min={1}
-                    max={31}
-                    value={selected.scheduled_month_day ?? 1}
-                    onChange={(e) => setSelected({ ...selected, scheduled_month_day: Number(e.target.value) })}
-                  />
-                </label>
-              )}
+              </label>
 
               <div className="threeCols">
                 <label>
@@ -774,27 +811,25 @@ export default function PlanificationTraitementsPage() {
                   <h3>Route HTTP</h3>
                   <label>
                     Route
-                    <input
-                      value={config.routePath || config.path || ''}
-                      placeholder="/api/..."
-                      onChange={(e) => {
-                        const next = setNestedConfig(selected, ['routePath'], e.target.value)
-                        setSelected(setNestedConfig(next, ['path'], e.target.value))
-                      }}
-                    />
+                    <input value={config.routePath || ''} onChange={(e) => setSelected(setNestedConfig(selected, ['routePath'], e.target.value))} />
                   </label>
                   <label>
                     Méthode
-                    <select
-                      value={config.method || 'POST'}
-                      onChange={(e) => setSelected(setNestedConfig(selected, ['method'], e.target.value))}
-                    >
+                    <select value={config.method || 'POST'} onChange={(e) => setSelected(setNestedConfig(selected, ['method'], e.target.value))}>
                       <option value="POST">POST</option>
                       <option value="GET">GET</option>
                     </select>
                   </label>
+
+                  {selectedIsAggregateJob && (
+                    <AggregatePeriodEditor
+                      value={config.period || defaultAggregatePeriod}
+                      onChange={(value) => setSelected(setNestedConfig(selected, ['period'], value))}
+                    />
+                  )}
+
                   <label>
-                    Body JSON
+                    Body JSON complémentaire
                     <textarea
                       value={JSON.stringify(config.body || {}, null, 2)}
                       onChange={(e) => {
@@ -810,7 +845,6 @@ export default function PlanificationTraitementsPage() {
               )}
 
               <div className="actions">
-                <button className="ghostButton" onClick={() => deleteJob(selected)} disabled={loading}>Supprimer</button>
                 <button onClick={saveJob} disabled={loading}>Sauvegarder</button>
                 <button onClick={() => runNow(selected)} disabled={loading || !selected.id}>Lancer maintenant</button>
               </div>
@@ -830,7 +864,6 @@ export default function PlanificationTraitementsPage() {
               <th>Statut</th>
               <th>Message</th>
               <th>Erreur</th>
-              <th>Action</th>
             </tr>
           </thead>
           <tbody>
@@ -842,13 +875,6 @@ export default function PlanificationTraitementsPage() {
                 <td><span className={statusClass(run.status)}>{run.status}</span></td>
                 <td>{run.message || '—'}</td>
                 <td>{run.error_message || '—'}</td>
-                <td>
-                  {(run.status === 'queued' || run.status === 'running') ? (
-                    <button className="dangerButton" onClick={() => cancelRun(run.id)} disabled={loading}>Arrêter</button>
-                  ) : (
-                    <span className="muted">—</span>
-                  )}
-                </td>
               </tr>
             ))}
           </tbody>
@@ -876,6 +902,7 @@ export default function PlanificationTraitementsPage() {
         h3 { margin: 0 0 12px; font-size: 17px; }
         h4 { margin: 0 0 10px; font-size: 15px; }
         p { margin: 6px 0 0; color: #475569; }
+        code { background: #eef2ff; color: #3730a3; border-radius: 6px; padding: 1px 5px; }
         button { border: 1px solid #cbd5e1; background: white; border-radius: 10px; padding: 10px 14px; font-weight: 700; cursor: pointer; }
         button:hover { background: #f8fafc; }
         button:disabled { opacity: .5; cursor: not-allowed; }
@@ -890,6 +917,9 @@ export default function PlanificationTraitementsPage() {
         .layout { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(420px, .9fr); gap: 16px; align-items: start; }
         .panel { background: white; border: 1px solid #dbe3ef; border-radius: 18px; padding: 16px; margin-bottom: 16px; box-shadow: 0 8px 20px rgba(15, 23, 42, .04); }
         .sectionHeader { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+        .quickJobs { border: 1px solid #e2e8f0; border-radius: 14px; padding: 12px; margin-bottom: 14px; background: #f8fafc; }
+        .quickJobButtons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+        .quickJobs p { font-size: 12px; }
         table { width: 100%; border-collapse: collapse; font-size: 13px; }
         th { text-align: left; color: #334155; background: #f8fafc; border-bottom: 1px solid #dbe3ef; padding: 10px; }
         td { border-bottom: 1px solid #e5eaf1; padding: 10px; vertical-align: top; }
@@ -897,14 +927,18 @@ export default function PlanificationTraitementsPage() {
         .linkButton { border: 0; background: transparent; padding: 0; text-align: left; }
         .linkButton strong { display: block; }
         .linkButton small { display: block; color: #64748b; margin-top: 2px; }
+        .rowActions { display: flex; gap: 8px; align-items: center; }
+        .dangerButton { border-color: #fecaca; background: #fef2f2; color: #991b1b; }
+        .dangerButton:hover { background: #fee2e2; }
         .status { display: inline-block; border-radius: 999px; padding: 5px 9px; background: #f1f5f9; font-weight: 800; font-size: 12px; }
         .status.done { background: #dcfce7; color: #166534; }
         .status.running { background: #dbeafe; color: #1d4ed8; }
         .status.queued { background: #fef9c3; color: #854d0e; }
         .status.partial { background: #ffedd5; color: #9a3412; }
         .status.error { background: #fee2e2; color: #991b1b; }
+        .status.cancelled { background: #e5e7eb; color: #374151; }
         .form label { display: flex; flex-direction: column; gap: 6px; color: #334155; font-weight: 800; font-size: 13px; }
-        input, select, textarea { border: 1px solid #cbd5e1; border-radius: 10px; padding: 10px 12px; font-family: inherit; font-size: 13px; font-weight: 700; color: #0f172a; background: white; }
+        input, select, textarea { border: 1px solid #cbd5e1; border-radius: 10px; padding: 10px 12px; font: inherit; background: white; }
         textarea { min-height: 120px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
         .twoCols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
         .threeCols { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 12px; }
@@ -912,30 +946,15 @@ export default function PlanificationTraitementsPage() {
         .checks { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
         .check { flex-direction: row !important; align-items: center; gap: 8px !important; }
         .check input { width: auto; }
+        .miniCheck { font-size: 12px !important; font-weight: 700 !important; }
         .dateBox { background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px; }
+        .aggregatePeriod { margin: 12px 0; border-color: #bfdbfe; background: #eff6ff; }
+        .weekdayBox { border: 1px solid #e2e8f0; border-radius: 12px; padding: 10px; margin-bottom: 12px; background: #fff; }
+        .weekdayActions { display: flex; gap: 8px; margin-bottom: 8px; }
+        .weekdayActions button { padding: 7px 10px; font-size: 12px; }
+        .weekdayList { display: flex; flex-wrap: wrap; gap: 10px; }
+        .helpText { font-size: 12px; color: #64748b; font-weight: 500; }
         .actions { display: flex; gap: 10px; justify-content: flex-end; }
-        .rowActions { display: flex; flex-wrap: wrap; gap: 8px; }
-        .dangerButton { border-color: #fecaca; background: #fef2f2; color: #991b1b; }
-        .dangerButton:hover { background: #fee2e2; }
-        .ghostButton { color: #334155; background: #f8fafc; }
-        .muted { color: #94a3b8; }
-        .presetPanel { border: 1px solid #e2e8f0; background: #f8fafc; border-radius: 14px; padding: 12px; margin-bottom: 14px; }
-        .presetPanel strong { display: block; font-size: 13px; margin-bottom: 8px; }
-        .presetPanel p { font-size: 12px; }
-        .presetButtons { display: flex; flex-wrap: wrap; gap: 8px; }
-        .presetButtons button { padding: 8px 10px; font-size: 12px; }
-        .status.cancelled { background: #e2e8f0; color: #475569; }
-        .weekdayPicker { border: 1px solid #dbe3ef; border-radius: 14px; padding: 12px; background: #ffffff; margin-bottom: 12px; }
-        .weekdayHeader { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 10px; }
-        .weekdayShortcuts { display: flex; gap: 6px; }
-        .weekdayShortcuts button { padding: 6px 8px; font-size: 12px; }
-        .weekdayButtons { display: flex; flex-wrap: wrap; gap: 8px; }
-        .weekday { display: inline-flex; align-items: center; gap: 7px; min-width: 74px; justify-content: center; border-color: #cbd5e1; background: #fff; }
-        .weekday.selectedDay { border-color: #60a5fa; background: #eff6ff; color: #1d4ed8; box-shadow: 0 0 0 2px rgba(96, 165, 250, .12); }
-        .fakeCheck { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 5px; border: 1px solid #cbd5e1; font-size: 12px; font-weight: 900; }
-        .selectedDay .fakeCheck { border-color: #3b82f6; background: #3b82f6; color: white; }
-        .hint { font-size: 12px; margin-top: 8px; }
-        .monthDay { max-width: 220px; margin-bottom: 12px; }
         .logs { background: #0f172a; border-radius: 14px; color: #e5e7eb; padding: 10px 14px; max-height: 340px; overflow: auto; }
         .log { display: grid; grid-template-columns: 150px 70px 1fr; gap: 10px; border-bottom: 1px solid rgba(255,255,255,.08); padding: 8px 0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
         .log p { color: #e5e7eb; margin: 0; }

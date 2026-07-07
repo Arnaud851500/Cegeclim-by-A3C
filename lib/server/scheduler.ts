@@ -21,6 +21,9 @@ type SchedulerJob = {
   allow_overlap?: boolean | null
   continue_on_error?: boolean | null
   next_run_at?: string | null
+  archived_at?: string | null
+  archived_by?: string | null
+  archive_reason?: string | null
 }
 
 type SchedulerRun = {
@@ -54,6 +57,29 @@ function addDaysToYmd(ymd: string, days: number) {
   const date = new Date(`${ymd}T00:00:00.000Z`)
   date.setUTCDate(date.getUTCDate() + days)
   return date.toISOString().slice(0, 10)
+}
+
+function addMonthsToYmd(ymd: string, months: number) {
+  const year = Number(ymd.slice(0, 4))
+  const monthIndex = Number(ymd.slice(5, 7)) - 1
+  const day = Number(ymd.slice(8, 10))
+
+  const date = new Date(Date.UTC(year, monthIndex + months, 1))
+  const lastDayOfTargetMonth = new Date(
+    Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0)
+  ).getUTCDate()
+
+  date.setUTCDate(Math.min(day, lastDayOfTargetMonth))
+
+  return date.toISOString().slice(0, 10)
+}
+
+function firstDayOfMonthYmd(ymd: string) {
+  return `${ymd.slice(0, 7)}-01`
+}
+
+function firstDayOfNextMonthYmd(ymd: string) {
+  return addMonthsToYmd(firstDayOfMonthYmd(ymd), 1)
 }
 
 function parseOffsetMinutes(date: Date, timezone: string) {
@@ -157,6 +183,99 @@ function resolveSireneDateRange(config: any, timezone = 'Europe/Paris') {
   }
 
   return null
+}
+
+function normalizeDateRange(startDate?: string | null, endDate?: string | null) {
+  if (!startDate || !endDate) return null
+
+  const date_debut = String(startDate).slice(0, 10)
+  const date_fin = String(endDate).slice(0, 10)
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date_debut)) return null
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date_fin)) return null
+  if (date_fin < date_debut) return null
+
+  return { date_debut, date_fin }
+}
+
+export function resolveAggregatePeriod(
+  period: any,
+  timezone = 'Europe/Paris',
+  now = new Date()
+) {
+  if (!period?.mode) return null
+
+  const today = toYmdInTimezone(now, timezone)
+  const tomorrow = addDaysToYmd(today, 1)
+  const firstDayCurrentMonth = firstDayOfMonthYmd(today)
+  const firstDayNextMonth = firstDayOfNextMonthYmd(today)
+
+  if (period.mode === 'fixed_range') {
+    return normalizeDateRange(period.fromDate, period.toDate || period.fromDate)
+  }
+
+  if (period.mode === 'current_month') {
+    return normalizeDateRange(firstDayCurrentMonth, tomorrow)
+  }
+
+  if (period.mode === 'current_full_month') {
+    return normalizeDateRange(firstDayCurrentMonth, firstDayNextMonth)
+  }
+
+  if (period.mode === 'previous_month') {
+    const firstDayPreviousMonth = addMonthsToYmd(firstDayCurrentMonth, -1)
+    return normalizeDateRange(firstDayPreviousMonth, firstDayCurrentMonth)
+  }
+
+  if (period.mode === 'relative_days') {
+    const days = Math.max(1, Number(period.days || 1))
+    return normalizeDateRange(addDaysToYmd(today, -days), tomorrow)
+  }
+
+  if (period.mode === 'relative_months') {
+    const months = Math.max(1, Number(period.months || 2))
+    const includeCurrentMonth = period.includeCurrentMonth !== false
+
+    if (includeCurrentMonth) {
+      const start = addMonthsToYmd(firstDayCurrentMonth, -(months - 1))
+      return normalizeDateRange(start, tomorrow)
+    }
+
+    const firstDayPreviousMonth = addMonthsToYmd(firstDayCurrentMonth, -1)
+    const start = addMonthsToYmd(firstDayPreviousMonth, -(months - 1))
+    return normalizeDateRange(start, firstDayCurrentMonth)
+  }
+
+  return null
+}
+
+export function buildSchedulerHttpBody(job: SchedulerJob) {
+  const config = job.config_json || {}
+  const body = {
+    ...(config.body || {}),
+  }
+
+  const resolvedPeriod = resolveAggregatePeriod(config.period, job.timezone || 'Europe/Paris')
+
+  if (resolvedPeriod?.date_debut && resolvedPeriod?.date_fin) {
+    return {
+      ...body,
+      date_debut: resolvedPeriod.date_debut,
+      date_fin: resolvedPeriod.date_fin,
+      p_date_debut: resolvedPeriod.date_debut,
+      p_date_fin: resolvedPeriod.date_fin,
+      startDate: resolvedPeriod.date_debut,
+      endDate: resolvedPeriod.date_fin,
+      fromDate: resolvedPeriod.date_debut,
+      toDate: resolvedPeriod.date_fin,
+      period: {
+        ...(config.period || {}),
+        resolved: resolvedPeriod,
+      },
+    }
+  }
+
+  return body
 }
 
 async function addSchedulerLog(
@@ -347,6 +466,7 @@ async function executeHttpRoute(job: SchedulerJob, origin: string) {
 
   const method = String(config.method || 'POST').toUpperCase()
   const url = new URL(routePath, origin)
+  const body = buildSchedulerHttpBody(job)
 
   const init: RequestInit = {
     method,
@@ -357,7 +477,13 @@ async function executeHttpRoute(job: SchedulerJob, origin: string) {
   }
 
   if (method !== 'GET' && method !== 'HEAD') {
-    init.body = JSON.stringify(config.body || {})
+    init.body = JSON.stringify(body)
+  } else {
+    Object.entries(body).forEach(([key, value]) => {
+      if (value === null || value === undefined) return
+      if (typeof value === 'object') return
+      url.searchParams.set(key, String(value))
+    })
   }
 
   const res = await fetch(url.toString(), init)
@@ -371,7 +497,14 @@ async function executeHttpRoute(job: SchedulerJob, origin: string) {
     done: true,
     status: 'done',
     message: `Route ${routePath} exécutée.`,
-    result: json,
+    result: {
+      response: json,
+      request: {
+        routePath,
+        method,
+        body,
+      },
+    },
   }
 }
 
@@ -477,6 +610,21 @@ export async function runDueSchedulerJobs(origin: string) {
     const job = run.scheduler_jobs as SchedulerJob | null
     if (!job) continue
 
+    if (job.archived_at) {
+      await supabase
+        .from('scheduler_runs')
+        .update({
+          status: 'cancelled',
+          finished_at: new Date().toISOString(),
+          message: 'Run annulé : job archivé.',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', run.id)
+
+      results.push({ job_key: job.job_key, resumed: true, cancelled: true, reason: 'job archived' })
+      continue
+    }
+
     try {
       const execution = await executeSchedulerRun({
         supabase,
@@ -510,6 +658,7 @@ export async function runDueSchedulerJobs(origin: string) {
     .from('scheduler_jobs')
     .select('*')
     .eq('enabled', true)
+    .is('archived_at', null)
     .or(`next_run_at.is.null,next_run_at.lte.${now}`)
     .order('next_run_at', { ascending: true, nullsFirst: true })
     .limit(10)
@@ -597,6 +746,7 @@ export async function recomputeAllMissingNextRuns() {
     .from('scheduler_jobs')
     .select('*')
     .is('next_run_at', null)
+    .is('archived_at', null)
     .neq('frequency', 'manual')
 
   if (error) throw error
