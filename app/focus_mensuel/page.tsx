@@ -127,6 +127,7 @@ type FocusActivityLineRaw = {
   date_bc: string | null
   date_pl: string | null
   date_bl: string | null
+  date_livraison: string | null
   numero_tiers_entete: string | null
   reference_article: string | null
   montant_ht: number | null
@@ -145,7 +146,9 @@ type FocusInvoiceLineRaw = {
 type AgencyPortfolioRow = {
   label: string
   cdc: number
+  cdcLivMx: number
   pl: number
+  plLivMPlus: number
   brMx: number
   brM: number
   blMx: number
@@ -530,6 +533,11 @@ function activityEffectiveDate(row: FocusActivityLineRaw) {
   if (type === 'Préparation de livraison') return row.date_pl || row.date_piece || null
   if (type === 'Bon de livraison' || type === 'Bon de retour') return row.date_bl || row.date_piece || null
   return row.date_piece || row.date_bc || row.date_pl || row.date_bl || null
+}
+
+function activityDeliveryDate(row: Pick<FocusActivityLineRaw, 'date_livraison'>) {
+  const deliveryDate = dateOnly(row.date_livraison)
+  return deliveryDate || null
 }
 
 function signedInvoiceAmount(row: FocusInvoiceLineRaw) {
@@ -2298,7 +2306,7 @@ function FocusMensuelPageContent() {
       const [activityRowsRaw, currentInvoiceRowsRaw, previousYearInvoiceRowsRaw] = await Promise.all([
         fetchAllFromSupabase(
           'activite_lignes',
-          'type_document,date_piece,date_bc,date_pl,date_bl,numero_tiers_entete,reference_article,montant_ht,collaborateur'
+          'type_document,date_piece,date_bc,date_pl,date_bl,date_livraison,numero_tiers_entete,reference_article,montant_ht,collaborateur'
         ) as Promise<FocusActivityLineRaw[]>,
         fetchAllFromSupabase(
           'facture_lignes',
@@ -2460,12 +2468,29 @@ function FocusMensuelPageContent() {
       const portfolioRows = agencyLabels.map((label) => {
         const agencyActivity = filteredActivity.filter((row) => normalizeKey(row.agence) === normalizeKey(label))
 
+        const cdcRows = agencyActivity.filter((row) => row.type_document === 'Bon de commande')
+        const plRows = agencyActivity.filter((row) => row.type_document === 'Préparation de livraison')
+
         const cdc = sum(
-          agencyActivity.filter((row) => row.type_document === 'Bon de commande'),
+          cdcRows,
+          (row) => Number(row.montant_ht || 0)
+        )
+        const cdcLivMx = sum(
+          cdcRows.filter((row) => {
+            const deliveryDate = activityDeliveryDate(row)
+            return Boolean(deliveryDate && deliveryDate < monthBegin)
+          }),
           (row) => Number(row.montant_ht || 0)
         )
         const pl = sum(
-          agencyActivity.filter((row) => row.type_document === 'Préparation de livraison'),
+          plRows,
+          (row) => Number(row.montant_ht || 0)
+        )
+        const plLivMPlus = sum(
+          plRows.filter((row) => {
+            const deliveryDate = activityDeliveryDate(row)
+            return Boolean(deliveryDate && deliveryDate >= monthEnd)
+          }),
           (row) => Number(row.montant_ht || 0)
         )
 
@@ -2492,7 +2517,9 @@ function FocusMensuelPageContent() {
         return {
           label,
           cdc,
+          cdcLivMx,
           pl,
+          plLivMPlus,
           brMx,
           brM,
           blMx,
@@ -2517,7 +2544,9 @@ function FocusMensuelPageContent() {
         const portfolio = portfolioRows.find((row) => row.label === label) || {
           label,
           cdc: 0,
+          cdcLivMx: 0,
           pl: 0,
+          plLivMPlus: 0,
           brMx: 0,
           brM: 0,
           blMx: 0,
@@ -3583,7 +3612,9 @@ function AgencyPortfolioTable({
     return {
       label: 'TOTAL',
       cdc: sum(rows, (row) => row.cdc),
+      cdcLivMx: sum(rows, (row) => row.cdcLivMx),
       pl: sum(rows, (row) => row.pl),
+      plLivMPlus: sum(rows, (row) => row.plLivMPlus),
       brMx: sum(rows, (row) => row.brMx),
       brM: sum(rows, (row) => row.brM),
       blMx: sum(rows, (row) => row.blMx),
@@ -3608,7 +3639,7 @@ function AgencyPortfolioTable({
     <div style={styles.sectionCard} className="focus-pdf-section-card">
       <div style={styles.sectionTitle}>{title}</div>
       <div style={styles.sectionSubtitle}>
-        Base activité non facturée : CDC, PL, BL et BR ventilés par agence.
+        Base activité non facturée : CDC, PL, BL et BR ventilés par agence. Les colonnes “dont” utilisent le champ date_livraison d’activite_lignes.
       </div>
 
       <Table>
@@ -3616,11 +3647,11 @@ function AgencyPortfolioTable({
           <tr>
             <th style={styles.th}>Dimension</th>
             <th style={styles.thRight}>CDC €</th>
+            <th style={styles.thRight}>dont CDC liv M-x</th>
             <th style={styles.thRight}>PL €</th>
-            <th style={styles.thRight}>BR M-x</th>
-            <th style={styles.thRight}>BR M</th>
-            <th style={styles.thRight}>BL M-x</th>
-            <th style={styles.thRight}>BL M</th>
+            <th style={styles.thRight}>dont PL liv M+x</th>
+            <th style={styles.thRight}>BL/BR M-x</th>
+            <th style={styles.thRight}>BL/BR M</th>
             <th style={styles.thRight}>Total €</th>
           </tr>
         </thead>
@@ -3643,20 +3674,20 @@ function AgencyPortfolioTable({
                 <td style={moneyCellStyle(row.cdc, DOC_COLORS.CDC, isTotal)}>
                   {formatMoneyCompact(row.cdc)}
                 </td>
+                <td style={moneyCellStyle(row.cdcLivMx, DOC_COLORS.CDC, isTotal)}>
+                  {formatMoneyCompact(row.cdcLivMx)}
+                </td>
                 <td style={moneyCellStyle(row.pl, DOC_COLORS.BL, isTotal)}>
                   {formatMoneyCompact(row.pl)}
                 </td>
-                <td style={moneyCellStyle(row.brMx, '#b91c1c', isTotal)}>
-                  {formatMoneyCompact(row.brMx)}
+                <td style={moneyCellStyle(row.plLivMPlus, DOC_COLORS.BL, isTotal)}>
+                  {formatMoneyCompact(row.plLivMPlus)}
                 </td>
-                <td style={moneyCellStyle(row.brM, '#b91c1c', isTotal)}>
-                  {formatMoneyCompact(row.brM)}
+                <td style={moneyCellStyle(row.blMx + row.brMx, DOC_COLORS.BL, isTotal)}>
+                  {formatMoneyCompact(row.blMx + row.brMx)}
                 </td>
-                <td style={moneyCellStyle(row.blMx, DOC_COLORS.BL, isTotal)}>
-                  {formatMoneyCompact(row.blMx)}
-                </td>
-                <td style={moneyCellStyle(row.blM, DOC_COLORS.BL, isTotal)}>
-                  {formatMoneyCompact(row.blM)}
+                <td style={moneyCellStyle(row.blM + row.brM, DOC_COLORS.BL, isTotal)}>
+                  {formatMoneyCompact(row.blM + row.brM)}
                 </td>
                 <td style={moneyCellStyle(row.total, '#0f172a', isTotal)}>
                   {formatMoneyCompact(row.total)}
