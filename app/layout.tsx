@@ -71,7 +71,7 @@ type CerfaKoRow = {
   saving: boolean
 }
 
-type CertificationAlertKind = 'rge' | 'capacite'
+type CertificationAlertKind = 'capacite'
 
 type CertificationSignal = {
   status: StatusLevel
@@ -233,11 +233,10 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const [cerfaLoading, setCerfaLoading] = useState(false)
   const [cerfaError, setCerfaError] = useState<string | null>(null)
   const [certificationSignals, setCertificationSignals] = useState<Record<CertificationAlertKind, CertificationSignal>>({
-    rge: { status: 'green', count: 0, expiredCount: 0, soonCount: 0 },
     capacite: { status: 'green', count: 0, expiredCount: 0, soonCount: 0 },
   })
   const [certificationModalOpen, setCertificationModalOpen] = useState(false)
-  const [certificationModalKind, setCertificationModalKind] = useState<CertificationAlertKind>('rge')
+  const [certificationModalKind, setCertificationModalKind] = useState<CertificationAlertKind>('capacite')
   const [certificationRows, setCertificationRows] = useState<CertificationAlertRow[]>([])
   const [certificationLoading, setCertificationLoading] = useState(false)
   const [certificationError, setCertificationError] = useState<string | null>(null)
@@ -656,13 +655,12 @@ function AppShell({ children }: { children: React.ReactNode }) {
       if (error) throw error
 
       const next: Record<CertificationAlertKind, CertificationSignal> = {
-        rge: { status: 'green', count: 0, expiredCount: 0, soonCount: 0 },
         capacite: { status: 'green', count: 0, expiredCount: 0, soonCount: 0 },
       }
 
       ;((data || []) as any[]).forEach((row) => {
         const kind = String(row.kind || '').toLowerCase() as CertificationAlertKind
-        if (kind !== 'rge' && kind !== 'capacite') return
+        if (kind !== 'capacite') return
 
         next[kind] = {
           status: (row.status || 'green') as StatusLevel,
@@ -676,7 +674,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
     } catch (error) {
       console.error('Alertes certifications clients', error)
       setCertificationSignals({
-        rge: { status: 'green', count: 0, expiredCount: 0, soonCount: 0 },
         capacite: { status: 'green', count: 0, expiredCount: 0, soonCount: 0 },
       })
     }
@@ -873,29 +870,16 @@ function AppShell({ children }: { children: React.ReactNode }) {
                   title={cerfaKoCount > 0 ? 'Ouvrir la liste des CERFA KO en attente de régularisation' : 'Aucun CERFA KO'}
                 />
                 <StatusLight
-                  label="RGE"
-                  status={certificationSignals.rge.status}
-                  count={certificationSignals.rge.count}
-                  blink={certificationSignals.rge.status === 'red' && statusBlinkOn}
-                  clickable={certificationSignals.rge.count > 0}
-                  onClick={() => openCertificationModal('rge')}
-                  title={
-                    certificationSignals.rge.count > 0
-                      ? `RGE : ${certificationSignals.rge.expiredCount} dépassé(s), ${certificationSignals.rge.soonCount} proche(s)`
-                      : 'Aucune alerte RGE'
-                  }
-                />
-                <StatusLight
                   label="Capacité gaz"
                   status={certificationSignals.capacite.status}
                   count={certificationSignals.capacite.count}
-                  blink={certificationSignals.capacite.status === 'red' && statusBlinkOn}
+                  blink={certificationSignals.capacite.status === 'orange' && statusBlinkOn}
                   clickable={certificationSignals.capacite.count > 0}
                   onClick={() => openCertificationModal('capacite')}
                   title={
                     certificationSignals.capacite.count > 0
-                      ? `Capacité gaz : ${certificationSignals.capacite.expiredCount} dépassée(s), ${certificationSignals.capacite.soonCount} proche(s)`
-                      : 'Aucune alerte capacité gaz'
+                      ? `Capacité gaz : ${certificationSignals.capacite.soonCount} validité(s) à moins d’un mois`
+                      : 'Aucune capacité gaz à échéance dans moins d’un mois'
                   }
                 />
                 <StatusLight
@@ -1018,12 +1002,10 @@ function AppShell({ children }: { children: React.ReactNode }) {
               <div style={styles.modalHeader}>
                 <div>
                   <div style={styles.modalTitle}>
-                    {certificationModalKind === 'rge'
-                      ? 'Clients CEGECLIM RGE à surveiller'
-                      : 'Clients CEGECLIM capacité gaz à surveiller'}
+                    Clients CEGECLIM capacité gaz à surveiller
                   </div>
                   <div style={styles.modalSubtitle}>
-                    {certificationRows.length} client(s) avec date dépassée ou proche
+                    {certificationRows.length} client(s) actif(s) avec une fin de validité dans moins d’un mois
                   </div>
                 </div>
                 <div style={styles.modalActions}>
@@ -1075,12 +1057,10 @@ function AppShell({ children }: { children: React.ReactNode }) {
                         <td
                           style={{
                             ...styles.cerfaTdStrong,
-                            color: row.alert_status === 'expired' ? '#b91c1c' : '#c2410c',
+                            color: '#c2410c',
                           }}
                         >
-                          {row.alert_status === 'expired'
-                            ? `Dépassé depuis ${Math.abs(Number(row.jours_ecart || 0))} j`
-                            : `Expire dans ${Number(row.jours_ecart || 0)} j`}
+                          {`Expire dans ${Number(row.jours_ecart || 0)} j`}
                         </td>
                         <td style={styles.cerfaTdStrong}>{row.numero_tiers || '—'}</td>
                         <td style={styles.cerfaTd}>{row.designation || '—'}</td>
