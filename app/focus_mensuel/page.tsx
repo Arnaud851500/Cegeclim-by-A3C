@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
+import { Risque } from 'next/font/google'
 
 type DocType = 'Devis' | 'CDC' | 'BL' | 'Factures'
 type ViewMode = 'montant_ht' | 'nb_documents' | 'quantite_pertinente'
@@ -465,8 +466,7 @@ function getBusinessDayBasis(rows: DailyRow[], periodDays: string[]): BusinessDa
 }
 
 function pickDefaultFocusDate() {
-  const yesterday = addDaysYmd(todayYmd(), -1)
-  return yesterday
+  return todayYmd()
 }
 
 function normalizeKey(value: any) {
