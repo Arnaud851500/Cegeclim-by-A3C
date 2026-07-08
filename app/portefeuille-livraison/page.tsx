@@ -13,8 +13,9 @@ type LignePortefeuille = {
   date_creation_document: string | null
   date_livraison: string | null
   mois_livraison: string | null
-  reference: string | null
+  reference_article: string | null
   designation_article: string | null
+  reference: string | null
   famille: string | null
   famille_macro: string | null
   quantite: number | null
@@ -40,6 +41,8 @@ type DocumentPortefeuille = {
   mois_livraison: string
   client_en_sommeil: boolean
   familles_macro: string
+  references_articles: string
+  references: string
 }
 
 type SyntheseRow = {
@@ -214,6 +217,18 @@ function monthLabel(month: string) {
   return month
 }
 
+function uniqueJoined(values: Array<string | null | undefined>) {
+  return Array.from(
+    new Set(
+      values
+        .map((value) => String(value || '').trim())
+        .filter(Boolean)
+    )
+  )
+    .sort((a, b) => a.localeCompare(b, 'fr', { numeric: true }))
+    .join(', ')
+}
+
 export default function PortefeuilleLivraisonPage() {
   const currentMonthKey = useMemo(() => getCurrentMonthKey(), [])
 
@@ -326,13 +341,22 @@ export default function PortefeuilleLivraisonPage() {
   }, [])
 
   const documents = useMemo<DocumentPortefeuille[]>(() => {
-    const map = new Map<string, DocumentPortefeuille & { famillesSet: Set<string> }>()
+    const map = new Map<
+      string,
+      DocumentPortefeuille & {
+        famillesSet: Set<string>
+        referencesArticlesSet: Set<string>
+        referencesSet: Set<string>
+      }
+    >()
 
     for (const ligne of lignes) {
       const key = docKey(ligne)
       const existing = map.get(key)
 
       const familleMacro = safeText(ligne.famille_macro, 'Sans famille macro')
+      const referenceArticle = safeText(ligne.reference_article, '')
+      const reference = safeText(ligne.reference, '')
 
       if (!existing) {
         map.set(key, {
@@ -350,17 +374,29 @@ export default function PortefeuilleLivraisonPage() {
           mois_livraison: ligne.mois_livraison || 'SANS_DATE_LIVRAISON',
           client_en_sommeil: Boolean(ligne.client_en_sommeil),
           familles_macro: familleMacro,
-          famillesSet: new Set([familleMacro]),
+          references_articles: referenceArticle,
+          references: reference,
+          famillesSet: new Set(familleMacro ? [familleMacro] : []),
+          referencesArticlesSet: new Set(referenceArticle ? [referenceArticle] : []),
+          referencesSet: new Set(reference ? [reference] : []),
         })
       } else {
         existing.nb_lignes += 1
         existing.montant_ht += Number(ligne.montant_ht || 0)
-        existing.famillesSet.add(familleMacro)
+
+        if (familleMacro) existing.famillesSet.add(familleMacro)
+        if (referenceArticle) existing.referencesArticlesSet.add(referenceArticle)
+        if (reference) existing.referencesSet.add(reference)
+
         existing.familles_macro = Array.from(existing.famillesSet).sort().join(', ')
+        existing.references_articles = Array.from(existing.referencesArticlesSet).sort().join(', ')
+        existing.references = Array.from(existing.referencesSet).sort().join(', ')
       }
     }
 
-    return Array.from(map.values()).map(({ famillesSet, ...doc }) => doc)
+    return Array.from(map.values()).map(
+      ({ famillesSet, referencesArticlesSet, referencesSet, ...doc }) => doc
+    )
   }, [lignes])
 
   const moisLivraison = useMemo(() => {
@@ -577,6 +613,8 @@ export default function PortefeuilleLivraisonPage() {
       'Date création document': formatDate(doc.date_creation_document),
       'Date livraison': formatDate(doc.date_livraison),
       'Mois livraison': monthLabel(doc.mois_livraison),
+      'Références articles': doc.references_articles,
+      Référence: doc.references,
       'Client en sommeil': doc.client_en_sommeil ? 'Oui' : 'Non',
       'Familles macro': doc.familles_macro,
     }))
@@ -594,8 +632,9 @@ export default function PortefeuilleLivraisonPage() {
       Client: safeText(ligne.nom_tiers, ''),
       'Type doc': safeText(ligne.type_document, ''),
       'N° document': safeText(ligne.numero_document, ''),
-      Référence: safeText(ligne.reference, ''),
+      'Référence article': safeText(ligne.reference_article, ''),
       'Désignation article': safeText(ligne.designation_article, ''),
+      Référence: safeText(ligne.reference, ''),
       Famille: safeText(ligne.famille, ''),
       'Famille macro': safeText(ligne.famille_macro, 'Sans famille macro'),
       Quantité: Number(ligne.quantite || 0),
@@ -1022,6 +1061,8 @@ export default function PortefeuilleLivraisonPage() {
                     ['nom_tiers', 'Client'],
                     ['type_document', 'Type doc'],
                     ['numero_document', 'N° document'],
+                    ['references_articles', 'Réf. articles'],
+                    ['references', 'Référence'],
                     ['nb_lignes', 'Nb lignes'],
                     ['montant_ht', 'Montant HT'],
                     ['date_creation_document', 'Date création'],
@@ -1049,21 +1090,11 @@ export default function PortefeuilleLivraisonPage() {
                       selectedDocumentKeyForLines === doc.key ? 'bg-blue-50' : '',
                     ].join(' ')}
                   >
-                    <td className="border-b border-r border-slate-200 px-3 py-2">
-                      {doc.representant}
-                    </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">
-                      {doc.agence}
-                    </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">
-                      {doc.numero_tiers}
-                    </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">
-                      {doc.nom_tiers}
-                    </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">
-                      {doc.type_document}
-                    </td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2">{doc.representant}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2">{doc.agence}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2">{doc.numero_tiers}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2">{doc.nom_tiers}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2">{doc.type_document}</td>
                     <td className="border-b border-r border-slate-200 px-3 py-2 font-medium">
                       <button
                         type="button"
@@ -1073,30 +1104,20 @@ export default function PortefeuilleLivraisonPage() {
                         {doc.numero_document}
                       </button>
                     </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right">
-                      {doc.nb_lignes}
-                    </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right">
-                      {formatMoney(doc.montant_ht)}
-                    </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">
-                      {formatDate(doc.date_creation_document)}
-                    </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">
-                      {formatDate(doc.date_livraison)}
-                    </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">
-                      {doc.familles_macro}
-                    </td>
-                    <td className="border-b border-slate-200 px-3 py-2">
-                      {doc.client_en_sommeil ? 'Oui' : 'Non'}
-                    </td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2">{doc.references_articles}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2">{doc.references}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{doc.nb_lignes}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{formatMoney(doc.montant_ht)}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2">{formatDate(doc.date_creation_document)}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2">{formatDate(doc.date_livraison)}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2">{doc.familles_macro}</td>
+                    <td className="border-b border-slate-200 px-3 py-2">{doc.client_en_sommeil ? 'Oui' : 'Non'}</td>
                   </tr>
                 ))}
 
                 {sortedDocuments.length === 0 && (
                   <tr>
-                    <td colSpan={12} className="px-4 py-8 text-center text-slate-500">
+                    <td colSpan={14} className="px-4 py-8 text-center text-slate-500">
                       Aucun document à afficher.
                     </td>
                   </tr>
@@ -1140,8 +1161,9 @@ export default function PortefeuilleLivraisonPage() {
                     ['nom_tiers', 'Client'],
                     ['type_document', 'Type doc'],
                     ['numero_document', 'N° document'],
-                    ['reference', 'Référence article'],
+                    ['reference_article', 'Référence article'],
                     ['designation_article', 'Désignation article'],
+                    ['reference', 'Référence'],
                     ['famille', 'Famille'],
                     ['famille_macro', 'Famille macro'],
                     ['quantite', 'Quantité'],
@@ -1164,57 +1186,28 @@ export default function PortefeuilleLivraisonPage() {
               <tbody>
                 {sortedLignes.map((ligne, index) => (
                   <tr key={`${ligne.id || index}-${ligne.numero_document}`} className="hover:bg-slate-50">
-                    <td className="border-b border-r border-slate-200 px-3 py-2">
-                      {safeText(ligne.representant, 'Sans représentant')}
-                    </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">
-                      {safeText(ligne.agence, 'Sans agence')}
-                    </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">
-                      {safeText(ligne.numero_tiers, '')}
-                    </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">
-                      {safeText(ligne.nom_tiers, '')}
-                    </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">
-                      {safeText(ligne.type_document, '')}
-                    </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 font-medium">
-                      {safeText(ligne.numero_document, '')}
-                    </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 font-medium">
-                      {safeText(ligne.reference, '')}
-                    </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">
-                      {safeText(ligne.designation_article, '')}
-                    </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">
-                      {safeText(ligne.famille, '')}
-                    </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">
-                      {safeText(ligne.famille_macro, 'Sans famille macro')}
-                    </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right">
-                      {Number(ligne.quantite || 0).toLocaleString('fr-FR')}
-                    </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right">
-                      {formatMoney(ligne.montant_ht)}
-                    </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">
-                      {formatDate(ligne.date_creation_document)}
-                    </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">
-                      {formatDate(ligne.date_livraison)}
-                    </td>
-                    <td className="border-b border-slate-200 px-3 py-2">
-                      {ligne.client_en_sommeil ? 'Oui' : 'Non'}
-                    </td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2">{safeText(ligne.representant, 'Sans représentant')}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2">{safeText(ligne.agence, 'Sans agence')}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2">{safeText(ligne.numero_tiers, '')}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2">{safeText(ligne.nom_tiers, '')}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2">{safeText(ligne.type_document, '')}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2 font-medium">{safeText(ligne.numero_document, '')}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2 font-medium">{safeText(ligne.reference_article, '')}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2">{safeText(ligne.designation_article, '')}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2">{safeText(ligne.reference, '')}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2">{safeText(ligne.famille, '')}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2">{safeText(ligne.famille_macro, 'Sans famille macro')}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{Number(ligne.quantite || 0).toLocaleString('fr-FR')}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{formatMoney(ligne.montant_ht)}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2">{formatDate(ligne.date_creation_document)}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2">{formatDate(ligne.date_livraison)}</td>
+                    <td className="border-b border-slate-200 px-3 py-2">{ligne.client_en_sommeil ? 'Oui' : 'Non'}</td>
                   </tr>
                 ))}
 
                 {sortedLignes.length === 0 && (
                   <tr>
-                    <td colSpan={15} className="px-4 py-8 text-center text-slate-500">
+                    <td colSpan={16} className="px-4 py-8 text-center text-slate-500">
                       Aucune ligne à afficher.
                     </td>
                   </tr>
