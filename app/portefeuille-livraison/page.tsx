@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@supabase/supabase-js'
 import * as XLSX from 'xlsx'
+import { accessLockedSelectClassName, lockedFilterLabel, restrictOptions, usePageFilterAccess } from '@/lib/pageAccessFilters'
 
 type LignePortefeuille = {
   id: number | string | null
@@ -74,6 +75,8 @@ const supabase = createClient(supabaseUrl, supabaseAnonKey)
 
 const DEFAULT_TYPES = ['CDC']
 const ALL_TYPES = ['CDC', 'PL', 'BL', 'BR']
+const ACCESS_LOCKED_AGENCE_VALUE = '__ACCESS_LOCKED_AGENCE__'
+const ACCESS_LOCKED_REPRESENTANT_VALUE = '__ACCESS_LOCKED_REPRESENTANT__'
 
 function getYesterdayIsoDate() {
   const date = new Date()
@@ -230,7 +233,10 @@ function uniqueJoined(values: Array<string | null | undefined>) {
 }
 
 export default function PortefeuilleLivraisonPage() {
+ 
+  
   const currentMonthKey = useMemo(() => getCurrentMonthKey(), [])
+  const access = usePageFilterAccess()
 
   const [loading, setLoading] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
@@ -294,11 +300,15 @@ export default function PortefeuilleLivraisonPage() {
         query = query.lte('date_livraison', dateLivraisonFin)
       }
 
-      if (selectedRepresentant) {
+      if (access.allowedCollaborateurs.length > 0) {
+        query = query.in('representant', access.allowedCollaborateurs)
+      } else if (selectedRepresentant) {
         query = query.eq('representant', selectedRepresentant)
       }
 
-      if (selectedAgence) {
+      if (access.allowedAgences.length > 0) {
+        query = query.in('agence', access.allowedAgences)
+      } else if (selectedAgence) {
         query = query.eq('agence', selectedAgence)
       }
 
@@ -336,9 +346,9 @@ export default function PortefeuilleLivraisonPage() {
   }
 
   useEffect(() => {
-    loadData()
+    if (!access.loading) loadData()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [access.loading])
 
   const documents = useMemo<DocumentPortefeuille[]>(() => {
     const map = new Map<
@@ -463,16 +473,39 @@ export default function PortefeuilleLivraisonPage() {
   }, [documents])
 
   const representants = useMemo(() => {
-    return Array.from(
+    const values = Array.from(
       new Set(lignes.map((ligne) => safeText(ligne.representant, 'Sans représentant')))
     ).sort()
-  }, [lignes])
+
+    const restricted = restrictOptions(values, access.allowedCollaborateurs)
+    return Array.from(new Set([...access.allowedCollaborateurs, ...restricted])).filter(Boolean).sort()
+  }, [lignes, access.allowedCollaborateurs])
 
   const agences = useMemo(() => {
-    return Array.from(
+    const values = Array.from(
       new Set(lignes.map((ligne) => safeText(ligne.agence, 'Sans agence')))
     ).sort()
-  }, [lignes])
+
+    const restricted = restrictOptions(values, access.allowedAgences)
+    return Array.from(new Set([...access.allowedAgences, ...restricted])).filter(Boolean).sort()
+  }, [lignes, access.allowedAgences])
+
+  const isRepresentantLocked = access.hasCollaborateurRestriction
+  const isAgenceLocked = access.hasAgenceRestriction
+
+  const representantSelectValue = isRepresentantLocked
+    ? access.allowedCollaborateurs.length === 1
+      ? access.allowedCollaborateurs[0]
+      : ACCESS_LOCKED_REPRESENTANT_VALUE
+    : selectedRepresentant
+
+  const agenceSelectValue = isAgenceLocked
+    ? access.allowedAgences.length === 1
+      ? access.allowedAgences[0]
+      : ACCESS_LOCKED_AGENCE_VALUE
+    : selectedAgence
+
+  const selectBaseClassName = 'w-full rounded-xl border border-slate-300 px-3 py-2 text-sm'
 
   const famillesMacro = useMemo(() => {
     return Array.from(
@@ -783,14 +816,23 @@ export default function PortefeuilleLivraisonPage() {
                 Représentant
               </span>
               <select
-                value={selectedRepresentant}
-                onChange={(event) => setSelectedRepresentant(event.target.value)}
-                className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                value={representantSelectValue}
+                disabled={isRepresentantLocked}
+                onChange={(event) => {
+                  if (!isRepresentantLocked) setSelectedRepresentant(event.target.value)
+                }}
+                className={accessLockedSelectClassName(selectBaseClassName, isRepresentantLocked)}
               >
-                <option value="">Tous</option>
+                {isRepresentantLocked && access.allowedCollaborateurs.length > 1 ? (
+                  <option value={ACCESS_LOCKED_REPRESENTANT_VALUE}>
+                    {lockedFilterLabel(access.allowedCollaborateurs, 'Tous')}
+                  </option>
+                ) : (
+                  <option value="">Tous</option>
+                )}
                 {representants.map((value) => (
                   <option key={value} value={value}>
-                    {value}
+                    {isRepresentantLocked && access.allowedCollaborateurs.length === 1 ? `${value} 🔒` : value}
                   </option>
                 ))}
               </select>
@@ -801,14 +843,23 @@ export default function PortefeuilleLivraisonPage() {
                 Agence
               </span>
               <select
-                value={selectedAgence}
-                onChange={(event) => setSelectedAgence(event.target.value)}
-                className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                value={agenceSelectValue}
+                disabled={isAgenceLocked}
+                onChange={(event) => {
+                  if (!isAgenceLocked) setSelectedAgence(event.target.value)
+                }}
+                className={accessLockedSelectClassName(selectBaseClassName, isAgenceLocked)}
               >
-                <option value="">Toutes</option>
+                {isAgenceLocked && access.allowedAgences.length > 1 ? (
+                  <option value={ACCESS_LOCKED_AGENCE_VALUE}>
+                    {lockedFilterLabel(access.allowedAgences, 'Toutes')}
+                  </option>
+                ) : (
+                  <option value="">Toutes</option>
+                )}
                 {agences.map((value) => (
                   <option key={value} value={value}>
-                    {value}
+                    {isAgenceLocked && access.allowedAgences.length === 1 ? `${value} 🔒` : value}
                   </option>
                 ))}
               </select>

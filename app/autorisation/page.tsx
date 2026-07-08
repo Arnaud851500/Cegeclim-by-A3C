@@ -22,6 +22,7 @@ type UserPageAccess = {
   display_name: string
   allowed_scopes: string[]
   allowed_agences: string[]
+  allowed_collaborateurs: string[]
   allowed_departements: string[]
   allowed_codes_postaux: string[]
   default_landing_page: string
@@ -62,6 +63,7 @@ const defaultNewRow: UserPageAccess = {
   display_name: '',
   allowed_scopes: ['Global'],
   allowed_agences: [],
+  allowed_collaborateurs: [],
   allowed_departements: [],
   allowed_codes_postaux: [],
   default_landing_page: '/accueil',
@@ -104,6 +106,7 @@ export default function AutorisationPage() {
         display_name,
         allowed_scopes,
         allowed_agences,
+        allowed_collaborateurs,
         allowed_departements,
         allowed_codes_postaux,
         default_landing_page
@@ -145,7 +148,11 @@ export default function AutorisationPage() {
           : ['Global'],
       allowed_agences:
         Array.isArray(item.allowed_agences) && item.allowed_agences.length > 0
-          ? item.allowed_agences
+          ? item.allowed_agences.map((agence) => String(agence || '').trim()).filter(Boolean)
+          : [],
+      allowed_collaborateurs:
+        Array.isArray(item.allowed_collaborateurs) && item.allowed_collaborateurs.length > 0
+          ? item.allowed_collaborateurs.map((collaborateur) => String(collaborateur || '').trim()).filter(Boolean)
           : [],
       allowed_departements:
         Array.isArray(item.allowed_departements) && item.allowed_departements.length > 0
@@ -182,7 +189,7 @@ export default function AutorisationPage() {
 
   function updateLocalValue(
     email: string,
-    field: keyof Omit<UserPageAccess, 'email' | 'display_name' | 'allowed_scopes' | 'allowed_agences' | 'allowed_departements' | 'allowed_codes_postaux' | 'default_landing_page'>,
+    field: keyof Omit<UserPageAccess, 'email' | 'display_name' | 'allowed_scopes' | 'allowed_agences' | 'allowed_collaborateurs' | 'allowed_departements' | 'allowed_codes_postaux' | 'default_landing_page'>,
     value: boolean
   ) {
     const normalizedEmail = email.toLowerCase().trim()
@@ -234,6 +241,23 @@ export default function AutorisationPage() {
       prev.map((row) =>
         row.email === normalizedEmail
           ? { ...row, allowed_agences: agences }
+          : row
+      )
+    )
+  }
+
+  function updateAllowedCollaborateurs(email: string, value: string) {
+    const normalizedEmail = email.toLowerCase().trim()
+
+    const collaborateurs = value
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+
+    setRows((prev) =>
+      prev.map((row) =>
+        row.email === normalizedEmail
+          ? { ...row, allowed_collaborateurs: collaborateurs }
           : row
       )
     )
@@ -301,7 +325,7 @@ export default function AutorisationPage() {
   }
 
   function updateNewRowValue(
-    field: keyof Omit<UserPageAccess, 'email' | 'display_name' | 'allowed_scopes' | 'allowed_agences' | 'allowed_departements' | 'allowed_codes_postaux' | 'default_landing_page'>,
+    field: keyof Omit<UserPageAccess, 'email' | 'display_name' | 'allowed_scopes' | 'allowed_agences' | 'allowed_collaborateurs' | 'allowed_departements' | 'allowed_codes_postaux' | 'default_landing_page'>,
     value: boolean
   ) {
     setNewRow((prev) => ({ ...prev, [field]: value }))
@@ -328,6 +352,18 @@ export default function AutorisationPage() {
     setNewRow((prev) => ({
       ...prev,
       allowed_agences: agences,
+    }))
+  }
+
+  function updateNewRowAllowedCollaborateurs(value: string) {
+    const collaborateurs = value
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+
+    setNewRow((prev) => ({
+      ...prev,
+      allowed_collaborateurs: collaborateurs,
     }))
   }
 
@@ -377,6 +413,7 @@ export default function AutorisationPage() {
         display_name: row.display_name.trim(),
         allowed_scopes: row.allowed_scopes,
         allowed_agences: row.allowed_agences,
+        allowed_collaborateurs: row.allowed_collaborateurs,
         allowed_departements: row.allowed_departements,
         allowed_codes_postaux: row.allowed_codes_postaux,
         default_landing_page: row.default_landing_page || '/accueil',
@@ -426,6 +463,7 @@ export default function AutorisationPage() {
       display_name: newRow.display_name.trim(),
       allowed_scopes: newRow.allowed_scopes,
       allowed_agences: newRow.allowed_agences,
+      allowed_collaborateurs: newRow.allowed_collaborateurs,
       allowed_departements: newRow.allowed_departements,
       allowed_codes_postaux: newRow.allowed_codes_postaux,
       default_landing_page: newRow.default_landing_page || '/accueil',
@@ -514,7 +552,7 @@ export default function AutorisationPage() {
                 Gestion des autorisations
               </h1>
               <p className="mt-1 text-sm text-slate-600">
-                Gestion des pages, scopes autorisés, agences autorisées, départements visibles et page d’ouverture après login.
+                Gestion des pages, scopes autorisés, agences/collaborateurs autorisés, départements visibles et page d’ouverture après login.
               </p>
             </div>
 
@@ -631,7 +669,15 @@ export default function AutorisationPage() {
               type="text"
               value={(newRow.allowed_agences ?? []).join(', ')}
               onChange={(e) => updateNewRowAllowedAgences(e.target.value)}
-              placeholder="Agences autorisées séparées par des virgules"
+              placeholder="Agences autorisées séparées par des virgules - vide = toutes"
+              className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
+            />
+
+            <input
+              type="text"
+              value={(newRow.allowed_collaborateurs ?? []).join(', ')}
+              onChange={(e) => updateNewRowAllowedCollaborateurs(e.target.value)}
+              placeholder="Collaborateurs / représentants autorisés séparés par des virgules - vide = tous"
               className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
             />
 
@@ -827,6 +873,9 @@ export default function AutorisationPage() {
                     Allowed agences
                   </th>
                   <th className="sticky top-0 z-40 border-b border-slate-200 bg-slate-100 px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
+                    Allowed collaborateurs
+                  </th>
+                  <th className="sticky top-0 z-40 border-b border-slate-200 bg-slate-100 px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Écran d'ouverture
                   </th>
                   <th className="sticky top-0 z-40 min-w-[290px] whitespace-nowrap border-b border-slate-200 bg-slate-100 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-600">
@@ -838,13 +887,13 @@ export default function AutorisationPage() {
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={20} className="px-4 py-10 text-center text-sm text-slate-500">
+                    <td colSpan={21} className="px-4 py-10 text-center text-sm text-slate-500">
                       Chargement des autorisations...
                     </td>
                   </tr>
                 ) : filteredRows.length === 0 ? (
                   <tr>
-                    <td colSpan={20} className="px-4 py-10 text-center text-sm text-slate-500">
+                    <td colSpan={21} className="px-4 py-10 text-center text-sm text-slate-500">
                       Aucun utilisateur trouvé.
                     </td>
                   </tr>
@@ -895,6 +944,16 @@ export default function AutorisationPage() {
                           onChange={(e) => updateAllowedAgences(row.email, e.target.value)}
                           className="w-52 rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-slate-500"
                           placeholder="Toutes si vide"
+                        />
+                      </td>
+
+                      <td className="px-4 py-4 align-top">
+                        <input
+                          type="text"
+                          value={(row.allowed_collaborateurs ?? []).join(', ')}
+                          onChange={(e) => updateAllowedCollaborateurs(row.email, e.target.value)}
+                          className="w-56 rounded-lg border border-slate-300 px-3 py-1.5 text-sm outline-none focus:border-slate-500"
+                          placeholder="Tous si vide"
                         />
                       </td>
 

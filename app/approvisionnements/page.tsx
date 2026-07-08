@@ -13,6 +13,7 @@ import {
 } from 'recharts'
 import * as XLSX from 'xlsx'
 import { supabase } from '@/lib/supabaseClient'
+import { restrictOptions, usePageFilterAccess } from '@/lib/pageAccessFilters'
 
 type Flux = 'DEVIS' | 'CDC' | 'BL' | 'FACTURE'
 type Metric = 'ca_ht' | 'quantite' | 'quantite_pertinente'
@@ -432,11 +433,13 @@ function MultiSelect({
   values,
   selected,
   onChange,
+  disabled = false,
 }: {
   label: string
   values: string[]
   selected: string[]
   onChange: (values: string[]) => void
+  disabled?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState('')
@@ -446,6 +449,7 @@ function MultiSelect({
   )
 
   function toggle(value: string) {
+    if (disabled) return
     onChange(selected.includes(value) ? selected.filter((item) => item !== value) : [...selected, value])
   }
 
@@ -453,10 +457,11 @@ function MultiSelect({
     <div className="relative">
       <button
         type="button"
-        onClick={() => setOpen((value) => !value)}
-        className="h-11 w-full rounded-xl border border-slate-300 bg-white px-3 text-left text-sm font-black"
+        onClick={() => { if (!disabled) setOpen((value) => !value) }}
+        disabled={disabled}
+        className={`h-11 w-full rounded-xl border border-slate-300 px-3 text-left text-sm font-black ${disabled ? 'cursor-not-allowed bg-slate-100 text-slate-500' : 'bg-white'}`}
       >
-        {label}{selected.length ? ` (${selected.length})` : ''}
+        {label}{selected.length ? ` (${selected.length})` : ''}{disabled ? ' 🔒' : ''}
       </button>
       {open && (
         <div className="absolute z-50 mt-2 max-h-80 w-full overflow-auto rounded-xl border border-slate-200 bg-white p-2 shadow-xl">
@@ -468,7 +473,7 @@ function MultiSelect({
           />
           <button
             type="button"
-            onClick={() => onChange([])}
+            onClick={() => { if (!disabled) onChange([]) }}
             className="mb-2 w-full rounded-lg bg-slate-100 px-2 py-1 text-left text-xs font-bold hover:bg-slate-200"
           >
             Tout désélectionner
@@ -524,6 +529,7 @@ function ReferencesFreeInput({
 }
 
 export default function ApprovisionnementsPage() {
+  const access = usePageFilterAccess()
   const [selectedYear, setSelectedYear] = useState<number>(new Date().getFullYear())
   const [metric, setMetric] = useState<Metric>('quantite_pertinente')
   const [includeHorsStat, setIncludeHorsStat] = useState(false)
@@ -565,16 +571,29 @@ export default function ApprovisionnementsPage() {
     () => references.map(referenceCode).filter(Boolean),
     [references]
   )
+  const effectiveCollaborateursTiers = access.hasCollaborateurRestriction ? access.allowedCollaborateurs : collaborateursTiers
+  const visibleCollaborateursTiers = useMemo(
+    () => restrictOptions(available.collaborateursTiers, access.allowedCollaborateurs),
+    [available.collaborateursTiers, access.allowedCollaborateurs]
+  )
+
+  useEffect(() => {
+    if (access.hasCollaborateurRestriction) {
+      setCollaborateursTiers(access.allowedCollaborateurs)
+      resetDownstream()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [access.hasCollaborateurRestriction, access.allowedCollaborateurs])
 
   const rpcFilterPayload = useMemo(() => ({
     p_year: selectedYear,
     p_include_hors_stat: includeHorsStat,
     p_depots: depots,
-    p_collaborateurs_tiers: collaborateursTiers,
+    p_collaborateurs_tiers: effectiveCollaborateursTiers,
     p_familles_macro: famillesMacro,
     p_familles: familles,
     p_references: selectedReferenceCodes,
-  }), [selectedYear, includeHorsStat, depots, collaborateursTiers, famillesMacro, familles, selectedReferenceCodes])
+  }), [selectedYear, includeHorsStat, depots, effectiveCollaborateursTiers, famillesMacro, familles, selectedReferenceCodes])
 
   function resetDownstream(keepChartMonth = false) {
     setAnalysisScope(null)
@@ -700,7 +719,7 @@ export default function ApprovisionnementsPage() {
             p_famille_macro: combo.famille_macro,
             p_include_hors_stat: includeHorsStat,
             p_depots: depots,
-            p_collaborateurs_tiers: collaborateursTiers,
+            p_collaborateurs_tiers: effectiveCollaborateursTiers,
             p_familles: familles,
             p_references: selectedReferenceCodes,
           })
@@ -753,7 +772,7 @@ export default function ApprovisionnementsPage() {
         p_famille: scope.famille ?? null,
         p_include_hors_stat: includeHorsStat,
         p_depots: depots,
-        p_collaborateurs_tiers: collaborateursTiers,
+        p_collaborateurs_tiers: effectiveCollaborateursTiers,
         p_familles_macro: famillesMacro,
         p_familles: familles,
         p_references: selectedReferenceCodes,
@@ -864,7 +883,7 @@ export default function ApprovisionnementsPage() {
   useEffect(() => {
     loadSummary()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [depots, collaborateursTiers, famillesMacro, familles, references])
+  }, [depots, effectiveCollaborateursTiers, famillesMacro, familles, references])
 
   useEffect(() => {
     if (!referenceScope) {
@@ -873,7 +892,7 @@ export default function ApprovisionnementsPage() {
     }
     loadReferencePivotForScope(referenceScope)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [referenceScope, selectedYear, includeHorsStat, depots, collaborateursTiers, famillesMacro, familles, references])
+  }, [referenceScope, selectedYear, includeHorsStat, depots, effectiveCollaborateursTiers, famillesMacro, familles, references])
 
   const chartData = useMemo<ChartDatum[]>(() => {
     const output: ChartDatum[] = Array.from({ length: 12 }, (_, index) => {
@@ -1309,6 +1328,7 @@ export default function ApprovisionnementsPage() {
       </header>
 
       {error && <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm font-bold text-red-700">{error}</div>}
+      {access.accessBadge && <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm font-bold text-amber-900">Périmètre utilisateur appliqué : {access.accessBadge}</div>}
       {maintenanceMessage && <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-bold text-emerald-800">{maintenanceMessage}</div>}
       {loading && <div className="mb-4 rounded-xl bg-white p-4 text-sm font-bold text-slate-600 shadow-sm">Chargement de la synthèse agrégée…</div>}
 
@@ -1325,7 +1345,7 @@ export default function ApprovisionnementsPage() {
             {defaultYearOptions().map((year) => <option key={year} value={year}>Année : {year}</option>)}
           </select>
           <MultiSelect label="Dépôts" values={available.depots} selected={depots} onChange={(values) => { setDepots(values); resetDownstream() }} />
-          <MultiSelect label="Collaborateur client" values={available.collaborateursTiers} selected={collaborateursTiers} onChange={(values) => { setCollaborateursTiers(values); resetDownstream() }} />
+          <MultiSelect label="Collaborateur client" values={access.hasCollaborateurRestriction ? access.allowedCollaborateurs : visibleCollaborateursTiers} selected={effectiveCollaborateursTiers} onChange={(values) => { setCollaborateursTiers(values); resetDownstream() }} disabled={access.hasCollaborateurRestriction} />
           <MultiSelect label="Familles macro" values={available.famillesMacro} selected={famillesMacro} onChange={(values) => { setFamillesMacro(values); resetDownstream() }} />
           <MultiSelect label="Familles" values={available.familles} selected={familles} onChange={(values) => { setFamilles(values); resetDownstream() }} />
           <ReferencesFreeInput selected={references} onChange={(values) => { setReferences(values); resetDownstream() }} />

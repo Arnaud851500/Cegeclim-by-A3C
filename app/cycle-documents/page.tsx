@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import * as XLSX from 'xlsx'
 import { supabase } from '@/lib/supabaseClient'
+import { accessLockedSelectClassName, firstAllowedValue, restrictOptions, usePageFilterAccess } from '@/lib/pageAccessFilters'
 
 type AxisType = 'agence' | 'collaborateur' | 'famille_macro' | 'famille' | 'client'
 type TransformationStatus = 'Tous' | 'Non transformé' | 'CDC créée' | 'BL créé' | 'Facturé'
@@ -427,14 +428,36 @@ function KpiCard({ title, value, subtitle, intent = 'neutral' }: { title: string
   )
 }
 
-function SelectFilter({ label, value, options, onChange }: { label: string; value: string; options: string[]; onChange: (value: string) => void }) {
+function SelectFilter({
+  label,
+  value,
+  options,
+  onChange,
+  disabled = false,
+}: {
+  label: string
+  value: string
+  options: string[]
+  onChange: (value: string) => void
+  disabled?: boolean
+}) {
+  const className = accessLockedSelectClassName(
+    'h-11 rounded-xl border border-slate-300 bg-white px-3 text-sm font-black',
+    disabled
+  )
+
   return (
     <label className="flex flex-col gap-1">
-      <span className="text-[11px] font-black uppercase tracking-wide text-slate-500">{label}</span>
+      <span className="text-[11px] font-black uppercase tracking-wide text-slate-500">
+        {label}{disabled ? ' 🔒' : ''}
+      </span>
       <select
         value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="h-11 rounded-xl border border-slate-300 bg-white px-3 text-sm font-black"
+        disabled={disabled}
+        onChange={(event) => {
+          if (!disabled) onChange(event.target.value)
+        }}
+        className={className}
       >
         <option value="">Tous</option>
         {options.map((option) => (
@@ -455,6 +478,7 @@ function ProgressBar({ value }: { value: number | null | undefined }) {
 }
 
 export default function CycleDocumentsPage() {
+  const access = usePageFilterAccess()
   const period = useMemo(defaultPeriod, [])
   const [dateDebut, setDateDebut] = useState(period.start)
   const [dateFin, setDateFin] = useState(period.end)
@@ -488,17 +512,29 @@ export default function CycleDocumentsPage() {
   const [error, setError] = useState<string | null>(null)
 
   const topDateDebut = useMemo(() => addMonths(dateFin, -Math.max(1, topMonths)), [dateFin, topMonths])
+  const effectiveAgence = access.hasAgenceRestriction ? firstAllowedValue(access.allowedAgences) : agence
+  const effectiveCollaborateur = access.hasCollaborateurRestriction ? firstAllowedValue(access.allowedCollaborateurs) : collaborateur
+  const visibleAgences = useMemo(() => restrictOptions(options.agences, access.allowedAgences), [options.agences, access.allowedAgences])
+  const visibleCollaborateurs = useMemo(() => restrictOptions(options.collaborateurs, access.allowedCollaborateurs), [options.collaborateurs, access.allowedCollaborateurs])
+
+  useEffect(() => {
+    if (access.hasAgenceRestriction) setAgence(firstAllowedValue(access.allowedAgences))
+  }, [access.hasAgenceRestriction, access.allowedAgences])
+
+  useEffect(() => {
+    if (access.hasCollaborateurRestriction) setCollaborateur(firstAllowedValue(access.allowedCollaborateurs))
+  }, [access.hasCollaborateurRestriction, access.allowedCollaborateurs])
 
   const commonParams = useMemo(() => ({
     p_date_debut: dateDebut,
     p_date_fin: dateFin,
-    p_agence: agence || null,
-    p_collaborateur: collaborateur || null,
+    p_agence: effectiveAgence || null,
+    p_collaborateur: effectiveCollaborateur || null,
     p_famille_macro: familleMacro || null,
     p_famille: famille || null,
     p_client: client || null,
     p_include_hors_stat: includeHorsStat,
-  }), [dateDebut, dateFin, agence, collaborateur, familleMacro, famille, client, includeHorsStat])
+  }), [dateDebut, dateFin, effectiveAgence, effectiveCollaborateur, familleMacro, famille, client, includeHorsStat])
 
   function updateYear(year: number) {
     setSelectedYear(year)
@@ -559,8 +595,8 @@ export default function CycleDocumentsPage() {
         supabase.rpc('get_cycle_documents_top_devis', {
           p_date_debut: topDateDebut,
           p_date_fin: dateFin,
-          p_agence: agence || null,
-          p_collaborateur: collaborateur || null,
+          p_agence: effectiveAgence || null,
+          p_collaborateur: effectiveCollaborateur || null,
           p_famille_macro: familleMacro || null,
           p_famille: famille || null,
           p_client: client || null,
@@ -578,8 +614,8 @@ export default function CycleDocumentsPage() {
         supabase.rpc('get_cycle_documents_alertes_clients', {
           p_date_debut: dateDebut,
           p_date_fin: dateFin,
-          p_agence: agence || null,
-          p_collaborateur: collaborateur || null,
+          p_agence: effectiveAgence || null,
+          p_collaborateur: effectiveCollaborateur || null,
           p_famille_macro: familleMacro || null,
           p_famille: famille || null,
           p_include_hors_stat: includeHorsStat,
@@ -730,7 +766,8 @@ export default function CycleDocumentsPage() {
 
       {error && <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm font-bold text-red-700">{error}</div>}
       {message && <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-bold text-emerald-800">{message}</div>}
-      {(loading || loadingOptions) && <div className="mb-4 rounded-xl bg-white p-4 text-sm font-bold text-slate-600 shadow-sm">Chargement de l'analyse cycle documents…</div>}
+      {access.accessBadge && <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm font-bold text-amber-900">Périmètre utilisateur appliqué : {access.accessBadge}</div>}
+      {(loading || loadingOptions || access.loading) && <div className="mb-4 rounded-xl bg-white p-4 text-sm font-bold text-slate-600 shadow-sm">Chargement de l'analyse cycle documents…</div>}
 
       <section className="mb-6 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
         <div className="grid grid-cols-1 gap-3 md:grid-cols-6 xl:grid-cols-12">
@@ -752,8 +789,8 @@ export default function CycleDocumentsPage() {
             <span className="text-[11px] font-black uppercase tracking-wide text-slate-500">Fin exclue</span>
             <input type="date" value={dateFin} onChange={(event) => setDateFin(event.target.value)} className="h-11 rounded-xl border border-slate-300 bg-white px-3 text-sm font-black" />
           </label>
-          <SelectFilter label="Agence" value={agence} options={options.agences} onChange={setAgence} />
-          <SelectFilter label="Collaborateur" value={collaborateur} options={options.collaborateurs} onChange={setCollaborateur} />
+          <SelectFilter label="Agence" value={effectiveAgence} options={access.hasAgenceRestriction ? access.allowedAgences : visibleAgences} onChange={setAgence} disabled={access.hasAgenceRestriction} />
+          <SelectFilter label="Collaborateur" value={effectiveCollaborateur} options={access.hasCollaborateurRestriction ? access.allowedCollaborateurs : visibleCollaborateurs} onChange={setCollaborateur} disabled={access.hasCollaborateurRestriction} />
           <SelectFilter label="Famille macro" value={familleMacro} options={options.familles_macro} onChange={setFamilleMacro} />
           <SelectFilter label="Famille" value={famille} options={options.familles} onChange={setFamille} />
           <label className="flex flex-col gap-1 md:col-span-2">

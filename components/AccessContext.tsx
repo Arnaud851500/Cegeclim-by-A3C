@@ -8,10 +8,10 @@ export type AccessRights = {
   can_territoire: boolean
   can_cartographie: boolean
   can_clients: boolean
-  can_carte: boolean,
-  can_todo: boolean,
-  can_clients_cegeclim : boolean,
-  can_suivi_prospects : boolean,
+  can_carte: boolean
+  can_todo: boolean
+  can_clients_cegeclim: boolean
+  can_suivi_prospects: boolean
   can_agences: boolean
   can_autorisation: boolean
   can_documents: boolean
@@ -19,8 +19,12 @@ export type AccessRights = {
   can_activites: boolean
   can_change_scope: boolean
   allowed_scopes: string[]
+  allowed_agences: string[]
+  allowed_collaborateurs: string[]
   allowed_departements: string[]
   allowed_codes_postaux: string[]
+  display_name: string
+  default_landing_page: string
 }
 
 type AccessContextType = {
@@ -30,6 +34,29 @@ type AccessContextType = {
   refreshAccess: () => Promise<void>
 }
 
+function normalizeList(value: unknown, fallback: string[] = []): string[] {
+  if (value === null || value === undefined) return fallback
+
+  if (Array.isArray(value)) {
+    const values: string[] = value
+      .flatMap((item: unknown): string[] => normalizeList(item, []))
+      .map((item: string): string => String(item || '').trim())
+      .filter((item: string): boolean => Boolean(item))
+
+    return values.length ? Array.from(new Set(values)) : fallback
+  }
+
+  const text = String(value || '').trim()
+  if (!text) return fallback
+
+  const values = text
+    .split(/[;,|\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+
+  return values.length ? Array.from(new Set(values)) : fallback
+}
+
 const defaultRights: AccessRights = {
   can_dashboard: false,
   can_territoire: false,
@@ -37,8 +64,8 @@ const defaultRights: AccessRights = {
   can_clients: false,
   can_carte: false,
   can_todo: false,
-  can_clients_cegeclim : false,
-  can_suivi_prospects : false,
+  can_clients_cegeclim: false,
+  can_suivi_prospects: false,
   can_agences: false,
   can_autorisation: false,
   can_documents: false,
@@ -46,8 +73,12 @@ const defaultRights: AccessRights = {
   can_activites: false,
   can_change_scope: false,
   allowed_scopes: ['Global'],
+  allowed_agences: [],
+  allowed_collaborateurs: [],
   allowed_departements: [],
   allowed_codes_postaux: [],
+  display_name: '',
+  default_landing_page: '/accueil',
 }
 
 const AccessContext = createContext<AccessContextType>({
@@ -58,6 +89,10 @@ const AccessContext = createContext<AccessContextType>({
 })
 
 export function getFirstAllowedPath(rights: AccessRights) {
+  if (rights.default_landing_page && rights.default_landing_page !== '/accueil') {
+    return rights.default_landing_page
+  }
+
   if (rights.can_dashboard) return '/indicateurs'
   if (rights.can_territoire) return '/territoire'
   if (rights.can_cartographie) return '/cartographie'
@@ -71,10 +106,11 @@ export function getFirstAllowedPath(rights: AccessRights) {
   if (rights.can_activites) return '/activites'
   if (rights.can_documents) return '/documents'
   if (rights.can_stocks) return '/stocks'
+
   return '/unauthorized'
 }
 
-async function fetchAccess() {
+async function fetchAccess(): Promise<{ email: string | null; rights: AccessRights }> {
   try {
     const {
       data: { session },
@@ -111,8 +147,12 @@ async function fetchAccess() {
         can_activites,
         can_change_scope,
         allowed_scopes,
+        allowed_agences,
+        allowed_collaborateurs,
         allowed_departements,
-        allowed_codes_postaux
+        allowed_codes_postaux,
+        display_name,
+        default_landing_page
       `)
       .eq('email', normalizedEmail)
       .maybeSingle()
@@ -142,22 +182,18 @@ async function fetchAccess() {
         can_stocks: !!data.can_stocks,
         can_activites: !!data.can_activites,
         can_change_scope: !!data.can_change_scope,
-        allowed_scopes:
-          Array.isArray(data.allowed_scopes) && data.allowed_scopes.length > 0
-            ? data.allowed_scopes
-            : ['Global'],
-        allowed_departements:
-          Array.isArray(data.allowed_departements) && data.allowed_departements.length > 0
-            ? data.allowed_departements
-            : [],
-        allowed_codes_postaux:
-          Array.isArray(data.allowed_codes_postaux) && data.allowed_codes_postaux.length > 0
-            ? data.allowed_codes_postaux.map((cp: unknown) => String(cp || '').trim()).filter(Boolean)
-            : [],
+        allowed_scopes: normalizeList(data.allowed_scopes, ['Global']),
+        allowed_agences: normalizeList(data.allowed_agences, []),
+        allowed_collaborateurs: normalizeList(data.allowed_collaborateurs, []),
+        allowed_departements: normalizeList(data.allowed_departements, []),
+        allowed_codes_postaux: normalizeList(data.allowed_codes_postaux, []),
+        display_name: String(data.display_name || '').trim(),
+        default_landing_page:
+          String(data.default_landing_page || '/accueil').trim() || '/accueil',
       },
     }
   } catch (err) {
-    console.error('TEST ACCESS - erreur inattendue', err)
+    console.error('ACCESS - erreur inattendue', err)
     return { email: null, rights: defaultRights }
   }
 }
