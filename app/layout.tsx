@@ -8,6 +8,7 @@ import { logUserEvent } from '@/lib/audit'
 import { AccessProvider, useAccess, type AccessRights } from '@/components/AccessContext'
 import { Analytics } from '@vercel/analytics/next'
 import AutoLogout from '@/components/autologout'
+import { usePageFilterAccess } from '@/lib/pageAccessFilters'
 import './globals.css'
 
 import {
@@ -16,7 +17,17 @@ import {
   type SocieteFilter,
 } from '@/components/SocieteFilterContext'
 
-type MenuAccessKey = Exclude<keyof AccessRights, 'allowed_scopes' | 'can_change_scope'>
+type MenuAccessKey = Exclude<
+  keyof AccessRights,
+  | 'allowed_scopes'
+  | 'allowed_agences'
+  | 'allowed_collaborateurs'
+  | 'allowed_departements'
+  | 'allowed_codes_postaux'
+  | 'display_name'
+  | 'default_landing_page'
+  | 'can_change_scope'
+>
 
 type MenuItem = {
   label: string
@@ -45,6 +56,10 @@ type UserAccessProfile = {
   email?: string | null
   display_name?: string | null
   allowed_agence?: string | string[] | null
+  allowed_agences?: string | string[] | null
+  allowed_collaborateurs?: string | string[] | null
+  allowed_departements?: string | string[] | null
+  allowed_codes_postaux?: string | string[] | null
   can_todo?: boolean | null
 }
 
@@ -93,6 +108,9 @@ type CertificationAlertRow = {
   designation: string
   departement: string
   representant: string
+  agence?: string | null
+  agence_rattachement?: string | null
+  agence_collaborateur?: string | null
   date_validite_client: string | null
   date_validite_ref_tiers: string | null
   date_validite: string | null
@@ -185,6 +203,18 @@ function parseAllowedAgences(value: any) {
 
   return values.filter((item) => !isNoRestriction(item))
 }
+function parseAllowedCollaborateurs(value: any) {
+  const isNoRestriction = (item: string) => {
+    const normalized = item.trim().toLowerCase()
+    return !normalized || ['global', 'tous', 'tout', 'all', '*', '[]', '{}', 'null', 'none', 'aucune'].includes(normalized)
+  }
+
+  const values = Array.isArray(value)
+    ? value.map(cleanText)
+    : cleanText(value).split(/[;,|\n]+/).map((item) => item.trim())
+
+  return values.filter((item) => !isNoRestriction(item))
+}
 
 function agenceMatchesAllowed(agence: string, allowedAgences: string[]) {
   if (!allowedAgences.length) return true
@@ -253,7 +283,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
 
   const lastLoggedPathRef = useRef<string | null>(null)
   const lastStatusRefreshRef = useRef(0)
-
+  const access = usePageFilterAccess()
   const isLoginPage = pathname === '/login'
   const isUnauthorizedPage = pathname === '/unauthorized'
   const isPdfPrintPage =
@@ -290,6 +320,60 @@ function AppShell({ children }: { children: React.ReactNode }) {
 
   const backgroundImageUrl =
     'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Logo%20et%20images/Image%20site%20CEGECLIM%20maison.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJMb2dvIGV0IGltYWdlcy9JbWFnZSBzaXRlIENFR0VDTElNIG1haXNvbi5qcGciLCJpYXQiOjE3NzU1MDYyNTEsImV4cCI6NDg5NzU3MDI1MX0.d1YT7_-xD44QOm2LFbZIfpkjh9kiIGjpJiEuJxV0rMM'
+
+  function getAllowedAgencesForStatus(accessProfile?: UserAccessProfile | null) {
+    const fromHook = parseAllowedAgences(access.allowedAgences)
+    if (fromHook.length) return fromHook
+    return parseAllowedAgences((accessProfile as any)?.allowed_agences ?? (accessProfile as any)?.allowed_agence)
+  }
+
+  function getAllowedCollaborateursForStatus(accessProfile?: UserAccessProfile | null) {
+    const fromHook = parseAllowedCollaborateurs(access.allowedCollaborateurs)
+    if (fromHook.length) return fromHook
+    return parseAllowedCollaborateurs((accessProfile as any)?.allowed_collaborateurs)
+  }
+
+  function certificationRowAgence(row: Record<string, any>) {
+    return cleanText(rawValue(row, ['agence', 'agence_rattachement', 'agence_collaborateur', 'agence_document']))
+  }
+
+  function certificationRowRepresentant(row: Record<string, any>) {
+    return cleanText(rawValue(row, ['representant', 'collaborateur', 'collaborateur_tiers', 'collaborateur_facture', 'commercial']))
+  }
+function collaborateurMatchesAllowed(collaborateur: string, allowedCollaborateurs: string[]) {
+  if (!allowedCollaborateurs.length) return true
+  const normalizedCollaborateur = normalizeLoose(collaborateur)
+  if (!normalizedCollaborateur) return false
+
+  return allowedCollaborateurs.some((allowed) => {
+    const normalizedAllowed = normalizeLoose(allowed)
+    return (
+      normalizedCollaborateur === normalizedAllowed ||
+      normalizedCollaborateur.includes(normalizedAllowed) ||
+      normalizedAllowed.includes(normalizedCollaborateur)
+    )
+  })
+}
+  function filterCertificationRowsForAccess(
+    rows: Record<string, any>[],
+    allowedAgences: string[],
+    allowedCollaborateurs: string[]
+  ) {
+    return rows.filter((row) => {
+      const representant = certificationRowRepresentant(row)
+      const agence = certificationRowAgence(row)
+
+      if (allowedCollaborateurs.length > 0) {
+        return collaborateurMatchesAllowed(representant, allowedCollaborateurs)
+      }
+
+      if (allowedAgences.length > 0) {
+        return agenceMatchesAllowed(agence, allowedAgences)
+      }
+
+      return true
+    })
+  }
 
   const menuGroups: MenuGroup[] = [
     {
@@ -467,7 +551,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
     const { data, error } = await supabase
       .from('user_page_access')
       .select('*')
-      .eq('email', email)
+      .ilike('email', email.trim())
       .maybeSingle()
 
     if (error) {
@@ -655,51 +739,113 @@ function AppShell({ children }: { children: React.ReactNode }) {
     }
   }
 
-  async function refreshCertificationSignals() {
+  async function refreshCertificationSignals(accessProfile?: UserAccessProfile | null) {
+    const allowedAgences = getAllowedAgencesForStatus(accessProfile)
+    const allowedCollaborateurs = getAllowedCollaborateursForStatus(accessProfile)
+
     try {
-      const { data, error } = await supabase.rpc('get_client_certification_alert_summary')
+      const { data, error } = await supabase.rpc('get_client_certification_alert_rows', {
+        p_kind: 'capacite',
+        p_limit: 10000,
+      })
+
       if (error) throw error
 
-      const next: Record<CertificationAlertKind, CertificationSignal> = {
-        capacite: { status: 'green', count: 0, expiredCount: 0, soonCount: 0 },
-      }
+      const rows = filterCertificationRowsForAccess(
+        ((data || []) as Record<string, any>[]),
+        allowedAgences,
+        allowedCollaborateurs
+      )
 
-      ;((data || []) as any[]).forEach((row) => {
-        const kind = String(row.kind || '').toLowerCase() as CertificationAlertKind
-        if (kind !== 'capacite') return
+      const expiredCount = rows.filter((row) => String(row.alert_status || '').toLowerCase() === 'expired').length
+      const soonCount = rows.filter((row) => String(row.alert_status || '').toLowerCase() !== 'expired').length
+      const count = rows.length
 
-        next[kind] = {
-          status: (row.status || 'green') as StatusLevel,
-          count: Number(row.total_count || 0),
-          expiredCount: Number(row.expired_count || 0),
-          soonCount: Number(row.soon_count || 0),
-        }
+      setCertificationSignals({
+        capacite: {
+          status: expiredCount > 0 ? 'red' : count > 0 ? 'orange' : 'green',
+          count,
+          expiredCount,
+          soonCount,
+        },
       })
-
-      setCertificationSignals(next)
     } catch (error) {
       console.error('Alertes certifications clients', error)
-      setCertificationSignals({
-        capacite: { status: 'green', count: 0, expiredCount: 0, soonCount: 0 },
-      })
+
+      // Sécurité : si l'utilisateur a une restriction et que le détail filtrable échoue,
+      // on n'affiche pas le total global afin d'éviter une pastille hors périmètre.
+      if (allowedAgences.length > 0 || allowedCollaborateurs.length > 0) {
+        setCertificationSignals({
+          capacite: { status: 'green', count: 0, expiredCount: 0, soonCount: 0 },
+        })
+        return
+      }
+
+      try {
+        const { data, error: summaryError } = await supabase.rpc('get_client_certification_alert_summary')
+        if (summaryError) throw summaryError
+
+        const next: Record<CertificationAlertKind, CertificationSignal> = {
+          capacite: { status: 'green', count: 0, expiredCount: 0, soonCount: 0 },
+        }
+
+        ;((data || []) as any[]).forEach((row) => {
+          const kind = String(row.kind || '').toLowerCase() as CertificationAlertKind
+          if (kind !== 'capacite') return
+
+          next[kind] = {
+            status: (row.status || 'green') as StatusLevel,
+            count: Number(row.total_count || 0),
+            expiredCount: Number(row.expired_count || 0),
+            soonCount: Number(row.soon_count || 0),
+          }
+        })
+
+        setCertificationSignals(next)
+      } catch (summaryException) {
+        console.error('Résumé alertes certifications clients', summaryException)
+        setCertificationSignals({
+          capacite: { status: 'green', count: 0, expiredCount: 0, soonCount: 0 },
+        })
+      }
     }
   }
 
   async function refreshCdcLivAvant2026Signal(accessProfile?: UserAccessProfile | null) {
-    void accessProfile
+    const allowedAgences = getAllowedAgencesForStatus(accessProfile)
+    const allowedCollaborateurs = getAllowedCollaborateursForStatus(accessProfile)
 
     try {
-      const { data, error } = await supabase.rpc('get_cdc_liv_avant_2026_count', {
-        p_email: email,
-      })
+      let query = supabase
+        .from('v_portefeuille_livraison_lignes')
+        .select('type_document,numero_document,numero_tiers,agence,representant,mois_livraison,date_livraison')
+        .eq('type_document', 'CDC')
+        .or('mois_livraison.eq.AVANT_2026,date_livraison.lt.2026-01-01')
 
+      if (allowedAgences.length > 0) {
+        query = query.in('agence', allowedAgences)
+      }
+
+      if (allowedCollaborateurs.length > 0) {
+        query = query.in('representant', allowedCollaborateurs)
+      }
+
+      const { data, error } = await query.limit(50000)
       if (error) throw error
 
-      const countValue = Number(data || 0)
+      const distinctDocuments = new Set(
+        ((data || []) as Record<string, any>[]).map((row) => [
+          cleanText(row.type_document),
+          cleanText(row.numero_document),
+          cleanText(row.numero_tiers),
+        ].join('::'))
+      )
+
+      const countValue = distinctDocuments.size
 
       setCdcLivAvant2026Signal({
         status: countValue > 0 ? 'red' : 'green',
-        count: Number.isFinite(countValue) ? countValue : 0,
+        count: countValue,
       })
     } catch (error) {
       console.error('CDC livraison avant 2026 status indicator', error)
@@ -718,13 +864,24 @@ function AppShell({ children }: { children: React.ReactNode }) {
     setCertificationError(null)
 
     try {
+      const profile = await getUserAccessProfile()
+      const allowedAgences = getAllowedAgencesForStatus(profile)
+      const allowedCollaborateurs = getAllowedCollaborateursForStatus(profile)
+
       const { data, error } = await supabase.rpc('get_client_certification_alert_rows', {
         p_kind: kind,
-        p_limit: 1000,
+        p_limit: 10000,
       })
 
       if (error) throw error
-      setCertificationRows((data || []) as CertificationAlertRow[])
+
+      const rows = filterCertificationRowsForAccess(
+        ((data || []) as Record<string, any>[]),
+        allowedAgences,
+        allowedCollaborateurs
+      ) as CertificationAlertRow[]
+
+      setCertificationRows(rows)
     } catch (error: any) {
       console.error('Détail alertes certifications clients', error)
       setCertificationRows([])
@@ -745,7 +902,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
     await Promise.all([
       refreshTodoSignal(profile),
       refreshCerfaKo(profile, { detail: false }),
-      refreshCertificationSignals(),
+      refreshCertificationSignals(profile),
       refreshCdcLivAvant2026Signal(profile),
     ])
   }
