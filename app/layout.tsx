@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import type React from 'react'
 import { usePathname, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { logUserEvent } from '@/lib/audit'
@@ -48,6 +49,11 @@ type UserAccessProfile = {
 }
 
 type TodoSignal = {
+  status: StatusLevel
+  count: number
+}
+
+type CdcLivAvant2026Signal = {
   status: StatusLevel
   count: number
 }
@@ -227,6 +233,10 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const [hasSession, setHasSession] = useState(false)
   const [statusBlinkOn, setStatusBlinkOn] = useState(true)
   const [todoSignal, setTodoSignal] = useState<TodoSignal>({ status: 'green', count: 0 })
+  const [cdcLivAvant2026Signal, setCdcLivAvant2026Signal] = useState<CdcLivAvant2026Signal>({
+    status: 'green',
+    count: 0,
+  })
   const [cerfaKoCount, setCerfaKoCount] = useState(0)
   const [cerfaRows, setCerfaRows] = useState<CerfaKoRow[]>([])
   const [cerfaModalOpen, setCerfaModalOpen] = useState(false)
@@ -282,7 +292,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
     'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Logo%20et%20images/Image%20site%20CEGECLIM%20maison.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJMb2dvIGV0IGltYWdlcy9JbWFnZSBzaXRlIENFR0VDTElNIG1haXNvbi5qcGciLCJpYXQiOjE3NzU1MDYyNTEsImV4cCI6NDg5NzU3MDI1MX0.d1YT7_-xD44QOm2LFbZIfpkjh9kiIGjpJiEuJxV0rMM'
 
   const menuGroups: MenuGroup[] = [
-  
     {
       label: 'Prospects / Clients',
       items: [
@@ -302,20 +311,22 @@ function AppShell({ children }: { children: React.ReactNode }) {
       items: [
         { label: 'Flux Devis-CDC-BC-Fact', path: '/approvisionnements', accessKey: 'can_autorisation' },
         { label: 'Analyse Devis', path: '/cycle-documents', accessKey: 'can_autorisation' },
-        { label: 'Suivi Multi Clients', path: '/synthese_multi_clients', accessKey: 'can_autorisation' },        
+        { label: 'Portefeuille cde', path: '/portefeuille-livraison', accessKey: 'can_autorisation' },
+        { label: 'Suivi Multi Clients', path: '/synthese_multi_clients', accessKey: 'can_autorisation' },
         { label: 'Tableaux de bord', path: '/atelier-analyse', accessKey: 'can_autorisation' },
         { label: 'Focus Mois', path: '/focus_mensuel', accessKey: 'can_autorisation' },
-        { label: 'Indicateurs', path: '/Indicateurs', accessKey: 'can_documents' }
-        ],
+        { label: 'Indicateurs', path: '/Indicateurs', accessKey: 'can_documents' },
+      ],
     },
     {
       label: 'Admin',
-      items: [{ label: 'Autorisations', path: '/autorisation', accessKey: 'can_autorisation' },
-                { label: 'Job scheduling', path: '/admin/planification', accessKey: 'can_autorisation' },
-                { label: 'MAJ Base clients', path: '/clients', accessKey: 'can_clients' },
-                { label: 'MAJ Données Activité', path: '/Import', accessKey: 'can_autorisation' },
-                { label: 'Todo List', path: '/todo', accessKey: 'can_todo' },
-                { label: 'Documents', path: '/documents', accessKey: 'can_documents' },
+      items: [
+        { label: 'Autorisations', path: '/autorisation', accessKey: 'can_autorisation' },
+        { label: 'Job scheduling', path: '/admin/planification', accessKey: 'can_autorisation' },
+        { label: 'MAJ Base clients', path: '/clients', accessKey: 'can_clients' },
+        { label: 'MAJ Données Activité', path: '/Import', accessKey: 'can_autorisation' },
+        { label: 'Todo List', path: '/todo', accessKey: 'can_todo' },
+        { label: 'Documents', path: '/documents', accessKey: 'can_documents' },
       ],
     },
   ]
@@ -369,7 +380,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
     if (currentPage?.accessKey && !rights[currentPage.accessKey]) {
       router.replace('/unauthorized')
     }
-  }, [sessionChecked, hasSession, accessLoading, pathname, rights, router, isLoginPage, isUnauthorizedPage])
+  }, [sessionChecked, hasSession, accessLoading, pathname, rights, router, isLoginPage, isUnauthorizedPage, isPdfPrintPage, menuGroups])
 
   useEffect(() => {
     if (!sessionChecked || !hasSession) return
@@ -385,7 +396,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       event_type: 'page_view',
       pathname,
     })
-  }, [sessionChecked, hasSession, email, pathname])
+  }, [sessionChecked, hasSession, email, pathname, isPdfPrintPage])
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -399,12 +410,10 @@ function AppShell({ children }: { children: React.ReactNode }) {
     if (!sessionChecked || accessLoading || !hasSession || !email) return
     if (isLoginPage || isUnauthorizedPage || isPdfPrintPage) return
 
-    // Refresh à la connexion : forcé pour ne pas attendre le throttle.
     const initialTimer = setTimeout(() => {
       void refreshStatusIndicators({ force: true })
     }, 250)
 
-    // Rafraîchissement raisonnable : les requêtes du header ne doivent jamais saturer l'appli.
     const interval = setInterval(() => {
       void refreshStatusIndicators()
     }, 15 * 60 * 1000)
@@ -420,7 +429,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
     if (!sessionChecked || accessLoading || !hasSession || !email) return
     if (!pathname || isLoginPage || isUnauthorizedPage) return
 
-    // Refresh à chaque changement d'écran : forcé pour refléter TODO / CERFA après navigation.
     const routeTimer = setTimeout(() => {
       void refreshStatusIndicators({ force: true })
     }, 250)
@@ -566,7 +574,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
     }
 
     try {
-      // Version rapide via RPC Supabase : évite de charger facture_lignes dans le header global.
       const rpcName = detail ? 'get_cerfa_ko_rows_for_user' : 'get_cerfa_ko_count_for_user'
       const rpcAllowedAgences = allowedAgences.length ? allowedAgences : null
       const rpcArgs = detail
@@ -609,7 +616,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
 
       console.warn(`${rpcName} indisponible, fallback limité côté client`, rpcError)
 
-      // Fallback limité : utilisé uniquement si les RPC n'ont pas encore été installées.
       const selectColumns = [
         'id',
         'date_facture',
@@ -679,6 +685,32 @@ function AppShell({ children }: { children: React.ReactNode }) {
     }
   }
 
+  async function refreshCdcLivAvant2026Signal(accessProfile?: UserAccessProfile | null) {
+    void accessProfile
+
+    try {
+      const { data, error } = await supabase.rpc('get_cdc_liv_avant_2026_count', {
+        p_email: email,
+      })
+
+      if (error) throw error
+
+      const countValue = Number(data || 0)
+
+      setCdcLivAvant2026Signal({
+        status: countValue > 0 ? 'red' : 'green',
+        count: Number.isFinite(countValue) ? countValue : 0,
+      })
+    } catch (error) {
+      console.error('CDC livraison avant 2026 status indicator', error)
+      setCdcLivAvant2026Signal({ status: 'green', count: 0 })
+    }
+  }
+
+  function openCdcLivAvant2026() {
+    router.push('/portefeuille-livraison')
+  }
+
   async function openCertificationModal(kind: CertificationAlertKind) {
     setCertificationModalKind(kind)
     setCertificationModalOpen(true)
@@ -714,6 +746,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       refreshTodoSignal(profile),
       refreshCerfaKo(profile, { detail: false }),
       refreshCertificationSignals(),
+      refreshCdcLivAvant2026Signal(profile),
     ])
   }
 
@@ -778,6 +811,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
               <img
                 src="https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/cegecilm%20officiel.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL2NlZ2VjaWxtIG9mZmljaWVsLmpwZyIsImlhdCI6MTc3NDY1MTM3OSwiZXhwIjo0ODk2NzE1Mzc5fQ.ePcMFHir7RsvdR-cR7nwh83H03S8oihNKwVgK2eCmy0"
                 style={styles.logo}
+                alt="CEGECLIM"
               />
               <div>
                 <div style={styles.subtitle}>
@@ -808,7 +842,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
                 </button>
 
                 {email && <div style={styles.userEmail}>{email}</div>}
-
               </div>
             </div>
           </div>
@@ -817,45 +850,45 @@ function AppShell({ children }: { children: React.ReactNode }) {
             <div style={styles.nav}>
               <div style={styles.navMenu}>
                 {menuGroups.filter(isGroupVisible).map((group) => {
-                const visibleItems = getVisibleItems(group)
+                  const visibleItems = getVisibleItems(group)
 
-                return (
-                  <div
-                    key={group.label}
-                    style={styles.menuWrapper}
-                    onMouseEnter={() => {
-                      if (hoverTimeout) clearTimeout(hoverTimeout)
-                      setOpenGroup(group.label)
-                    }}
-                    onMouseLeave={() => {
-                      const t = setTimeout(() => setOpenGroup(null), 150)
-                      setHoverTimeout(t)
-                    }}
-                  >
-                    <button
-                      style={{
-                        ...styles.navBtn,
-                        ...(isGroupActive(group) ? styles.navBtnActive : {}),
+                  return (
+                    <div
+                      key={group.label}
+                      style={styles.menuWrapper}
+                      onMouseEnter={() => {
+                        if (hoverTimeout) clearTimeout(hoverTimeout)
+                        setOpenGroup(group.label)
+                      }}
+                      onMouseLeave={() => {
+                        const t = setTimeout(() => setOpenGroup(null), 150)
+                        setHoverTimeout(t)
                       }}
                     >
-                      {group.label} ▼
-                    </button>
+                      <button
+                        style={{
+                          ...styles.navBtn,
+                          ...(isGroupActive(group) ? styles.navBtnActive : {}),
+                        }}
+                      >
+                        {group.label} ▼
+                      </button>
 
-                    {openGroup === group.label && (
-                      <div style={styles.dropdown}>
-                        {visibleItems.map((item) => (
-                          <div
-                            key={item.path}
-                            style={styles.dropdownItem}
-                            onClick={() => router.push(item.path)}
-                          >
-                            {item.label}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )
+                      {openGroup === group.label && (
+                        <div style={styles.dropdown}>
+                          {visibleItems.map((item) => (
+                            <div
+                              key={item.path}
+                              style={styles.dropdownItem}
+                              onClick={() => router.push(item.path)}
+                            >
+                              {item.label}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )
                 })}
               </div>
 
@@ -869,6 +902,21 @@ function AppShell({ children }: { children: React.ReactNode }) {
                   onClick={openCerfaModal}
                   title={cerfaKoCount > 0 ? 'Ouvrir la liste des CERFA KO en attente de régularisation' : 'Aucun CERFA KO'}
                 />
+
+                <StatusLight
+                  label="CDC liv avant 2026"
+                  status={cdcLivAvant2026Signal.status}
+                  count={cdcLivAvant2026Signal.count}
+                  blink={cdcLivAvant2026Signal.status === 'red' && statusBlinkOn}
+                  clickable={cdcLivAvant2026Signal.count > 0}
+                  onClick={openCdcLivAvant2026}
+                  title={
+                    cdcLivAvant2026Signal.count > 0
+                      ? `${cdcLivAvant2026Signal.count} CDC avec livraison avant 2026`
+                      : 'Aucun CDC avec livraison avant 2026'
+                  }
+                />
+
                 <StatusLight
                   label="Capacité gaz"
                   status={certificationSignals.capacite.status}
@@ -882,6 +930,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
                       : 'Aucune capacité gaz à échéance dans moins d’un mois'
                   }
                 />
+
                 <StatusLight
                   label="A faire"
                   status={todoSignal.status}
@@ -994,7 +1043,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
             </div>
           </div>
         )}
-
 
         {certificationModalOpen && (
           <div style={styles.modalBackdrop}>
@@ -1179,7 +1227,6 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'flex-end',
     gap: 6,
   },
-
 
   userEmail: {
     fontSize: 13,
@@ -1387,7 +1434,6 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     whiteSpace: 'nowrap',
   },
-
 
   modalBackdrop: {
     position: 'fixed',
