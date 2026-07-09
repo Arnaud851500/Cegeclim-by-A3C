@@ -2589,12 +2589,16 @@ export default function SyntheseMultiClientsPage() {
     else if (editable.type === 'texte') payload.valeur_text = value || null
     else payload.valeur_number = value === '' ? null : safeNumber(value)
 
-    const { data, error } = await supabase
-      .from('objectif_tiers')
-      .upsert(payload, { onConflict: 'numero_tiers,annee,domaine,rubrique' })
-      .select('*')
-      .single()
-
+    const { data, error } = await supabase.rpc('save_objectif_tiers', {
+  p_numero_tiers: payload.numero_tiers,
+  p_annee: payload.annee,
+  p_domaine: payload.domaine,
+  p_rubrique: payload.rubrique,
+  p_valeur_type: payload.valeur_type,
+  p_valeur_text: payload.valeur_text,
+  p_valeur_number: payload.valeur_number,
+  p_valeur_date: payload.valeur_date,
+})
     setSavingKey(null)
     if (error) {
       setError(`Sauvegarde impossible : ${error.message}`)
