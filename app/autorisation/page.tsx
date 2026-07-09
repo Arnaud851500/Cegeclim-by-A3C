@@ -969,10 +969,13 @@ export default function AutorisationPage() {
                           <option value="/cartographie">/cartographie</option>
                           <option value="/clients">/clients</option>
                           <option value="/carte">/carte</option>
+                          <option value="/approvisionnements">/Flux Devis-CDC-BL</option>
+                          <option value="/focus_mensuel">/Focus Mensuel</option>
+                          <option value="/portefeuille-livraison">/Portefeuille Cde</option>
                           <option value="/atelier-analyse">/atelier-analyse</option>
                           <option value="/agences">/agences</option>
                           <option value="/todo">/todo</option>
-                          <option value="/suivi_prospects">/suivi_prospects</option>
+                          <option value="/synthese_multi_clients">/Synthese Multi Clients</option>
                           <option value="/documents">/documents</option>
                           <option value="/stocks">/stocks</option>
                           <option value="/activites">/activites</option>
