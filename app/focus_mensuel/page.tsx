@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
+import { usePageFilterAccess } from '@/lib/pageAccessFilters'
 import { Risque } from 'next/font/google'
 
 type DocType = 'Devis' | 'CDC' | 'BL' | 'Factures'
@@ -880,6 +881,7 @@ function HighlightTable({ title, rows }: { title: string; rows: HighlightRow[] }
 
 function FocusMensuelPageContent() {
   const searchParams = useSearchParams()
+  const access = usePageFilterAccess()
   const isPdfMode = searchParams?.get('pdf') === '1' || searchParams?.get('print') === '1'
   const requestedMonth = searchParams?.get('month')
   const requestedFocusDate = searchParams?.get('focusDate') || searchParams?.get('focus_date')
@@ -982,6 +984,11 @@ function FocusMensuelPageContent() {
   const monthBegin = useMemo(() => monthStart(month), [month])
   const monthEnd = useMemo(() => nextMonthStart(month), [month])
 
+  const isAgenceLocked = access.hasAgenceRestriction
+  const isCollaborateurLocked = access.hasCollaborateurRestriction
+  const effectiveAgence = isAgenceLocked ? (access.allowedAgences[0] || '') : agence
+  const effectiveCollaborateur = isCollaborateurLocked ? (access.allowedCollaborateurs[0] || '') : collaborateur
+
   const normalizedRows = useMemo(() => dailyRows.map((row) => ({
     ...row,
     nb_documents: Number(row.nb_documents || 0),
@@ -1037,6 +1044,16 @@ function FocusMensuelPageContent() {
   ])).sort(), [normalizedRows, normalizedDistinctDocRows])
   const availableFamilies = useMemo(() => Array.from(new Set(normalizedRows.map((r) => r.famille_macro || '').filter(Boolean))).sort(), [normalizedRows])
   const availableCollaborateurs = useMemo(() => Array.from(new Set(normalizedRows.map((r) => r.collaborateur || '').filter(Boolean))).sort(), [normalizedRows])
+
+  const availableAgencesForSelect = useMemo(() => {
+    const values = isAgenceLocked ? access.allowedAgences : availableAgences
+    return Array.from(new Set(values.filter(Boolean))).sort(agencySort)
+  }, [isAgenceLocked, access.allowedAgences, availableAgences])
+
+  const availableCollaborateursForSelect = useMemo(() => {
+    const values = isCollaborateurLocked ? access.allowedCollaborateurs : availableCollaborateurs
+    return Array.from(new Set(values.filter(Boolean))).sort((a, b) => a.localeCompare(b, 'fr-FR'))
+  }, [isCollaborateurLocked, access.allowedCollaborateurs, availableCollaborateurs])
 
   const elapsedMonthDays = useMemo(() => days.filter((day) => day <= focusDate), [days, focusDate])
 
@@ -1256,12 +1273,31 @@ function FocusMensuelPageContent() {
   }, [month])
 
   useEffect(() => {
+    if (access.loading) return
+    if (isAgenceLocked) {
+      setAgence(access.allowedAgences[0] || '')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [access.loading, isAgenceLocked, access.allowedAgences.join('|')])
+
+  useEffect(() => {
+    if (access.loading) return
+    if (isCollaborateurLocked) {
+      setCollaborateur(access.allowedCollaborateurs[0] || '')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [access.loading, isCollaborateurLocked, access.allowedCollaborateurs.join('|')])
+
+  useEffect(() => {
+    if (access.loading) return
     void loadData()
     void loadDistinctDocs()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [month, agence, familleMacro, collaborateur, includeHorsStats])
+  }, [access.loading, month, effectiveAgence, familleMacro, effectiveCollaborateur, includeHorsStats])
 
   useEffect(() => {
+    if (access.loading) return
+
     if (isPdfMode && requestedPdfCacheId) {
       void loadPdfCacheTables(requestedPdfCacheId)
       return
@@ -1272,7 +1308,7 @@ function FocusMensuelPageContent() {
     setCachedRolling12Rows(null)
     void loadComparisonTables()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [month, focusDate, agence, familleMacro, collaborateur, includeHorsStats, requestedPdfCacheId])
+  }, [access.loading, month, focusDate, effectiveAgence, familleMacro, effectiveCollaborateur, includeHorsStats, requestedPdfCacheId])
 
   useEffect(() => {
     if (!isPdfMode || !comparisonLoading) return
@@ -1300,18 +1336,21 @@ function FocusMensuelPageContent() {
   }, [isPdfMode, comparisonLoading])
 
   useEffect(() => {
+    if (access.loading) return
     void loadHighlights()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusDate, agence, familleMacro, collaborateur, includeHorsStats])
+  }, [access.loading, focusDate, effectiveAgence, familleMacro, effectiveCollaborateur, includeHorsStats])
 
   useEffect(() => {
+    if (access.loading) return
+
     if (!normalizedRows.length) {
       setAgencyTablesReady(dailyReady)
       return
     }
     void loadAgencyControlTables()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [month, focusDate, agence, familleMacro, collaborateur, includeHorsStats, normalizedRows, dailyReady])
+  }, [access.loading, month, focusDate, effectiveAgence, familleMacro, effectiveCollaborateur, includeHorsStats, normalizedRows, dailyReady])
 
   useEffect(() => {
     void (async () => {
@@ -1360,9 +1399,9 @@ function FocusMensuelPageContent() {
       focus_date: focusDate,
       hors_statistiques: includeHorsStats ? 'afficher' : 'masquer',
       view: viewMode,
-      agence: agence || null,
+      agence: effectiveAgence || null,
       famille_macro: familleMacro || null,
-      collaborateur: collaborateur || null,
+      collaborateur: effectiveCollaborateur || null,
       ca_projete_factures_mois_en_cours: useProjectedCurrentMonthFactures,
       caProjeteFactures: useProjectedCurrentMonthFactures ? '1' : '0',
       pdf_cache_id: pdfCacheId || null,
@@ -1410,9 +1449,9 @@ function FocusMensuelPageContent() {
         month,
         focus_date: focusDate,
         view: viewMode,
-        agence: agence || null,
+        agence: effectiveAgence || null,
         famille_macro: familleMacro || null,
-        collaborateur: collaborateur || null,
+        collaborateur: effectiveCollaborateur || null,
         include_hors_statistiques: includeHorsStats,
         ca_projete_factures: useProjectedCurrentMonthFactures,
         expected_tables: ['activity_agency_ytd', 'activity_family_ytd', 'activity_rolling_12'],
@@ -1817,9 +1856,9 @@ function FocusMensuelPageContent() {
       const { data, error } = await supabase.rpc('get_focus_mensuel_daily_summary_metier', {
         p_date_debut: monthBegin,
         p_date_fin: monthEnd,
-        p_agence: agence || null,
+        p_agence: effectiveAgence || null,
         p_famille_macro: familleMacro || null,
-        p_collaborateur: collaborateur || null,
+        p_collaborateur: effectiveCollaborateur || null,
         p_include_hors_statistiques: includeHorsStats,
       })
 
@@ -1847,9 +1886,9 @@ function FocusMensuelPageContent() {
         supabase.rpc('get_focus_mensuel_docs_distinct_metier', {
           p_date_debut: range.start,
           p_date_fin: range.end,
-          p_agence: agence || null,
+          p_agence: effectiveAgence || null,
           p_famille_macro: familleMacro || null,
-          p_collaborateur: collaborateur || null,
+          p_collaborateur: effectiveCollaborateur || null,
           p_include_hors_statistiques: includeHorsStats,
         }),
         isPdfMode ? 12000 : 30000,
@@ -2030,9 +2069,9 @@ function FocusMensuelPageContent() {
       supabase.rpc('get_focus_mensuel_daily_summary_metier', {
         p_date_debut: range.start,
         p_date_fin: range.end,
-        p_agence: agence || null,
+        p_agence: effectiveAgence || null,
         p_famille_macro: familleMacro || null,
-        p_collaborateur: collaborateur || null,
+        p_collaborateur: effectiveCollaborateur || null,
         p_include_hors_statistiques: includeHorsStats,
       }),
       comparisonRpcTimeoutMs(),
@@ -2419,9 +2458,9 @@ function FocusMensuelPageContent() {
         }))
         .filter((row) => {
           if (!row.effective_date || row.effective_date > focusDate) return false
-          if (agence && normalizeKey(row.agence) !== normalizeKey(agence)) return false
+          if (effectiveAgence && normalizeKey(row.agence) !== normalizeKey(effectiveAgence)) return false
           if (familleMacro && normalizeKey(row.famille_macro) !== normalizeKey(familleMacro)) return false
-          if (collaborateur && normalizeKey(row.collaborateur) !== normalizeKey(collaborateur)) return false
+          if (effectiveCollaborateur && normalizeKey(row.collaborateur) !== normalizeKey(effectiveCollaborateur)) return false
           if (!includeHorsStats && row.hors_statistique) return false
 
           return ['Bon de commande', 'Préparation de livraison', 'Bon de livraison', 'Bon de retour'].includes(
@@ -2437,9 +2476,9 @@ function FocusMensuelPageContent() {
         }))
         .filter((row) => {
           if (!row.date_facture || row.date_facture < monthBegin || row.date_facture > focusDate) return false
-          if (agence && normalizeKey(row.agence) !== normalizeKey(agence)) return false
+          if (effectiveAgence && normalizeKey(row.agence) !== normalizeKey(effectiveAgence)) return false
           if (familleMacro && normalizeKey(row.famille_macro) !== normalizeKey(familleMacro)) return false
-          if (collaborateur && normalizeKey(row.collaborateur) !== normalizeKey(collaborateur)) return false
+          if (effectiveCollaborateur && normalizeKey(row.collaborateur) !== normalizeKey(effectiveCollaborateur)) return false
           if (!includeHorsStats && row.hors_statistique) return false
           return true
         })
@@ -2452,9 +2491,9 @@ function FocusMensuelPageContent() {
         }))
         .filter((row) => {
           if (!row.date_facture) return false
-          if (agence && normalizeKey(row.agence) !== normalizeKey(agence)) return false
+          if (effectiveAgence && normalizeKey(row.agence) !== normalizeKey(effectiveAgence)) return false
           if (familleMacro && normalizeKey(row.famille_macro) !== normalizeKey(familleMacro)) return false
-          if (collaborateur && normalizeKey(row.collaborateur) !== normalizeKey(collaborateur)) return false
+          if (effectiveCollaborateur && normalizeKey(row.collaborateur) !== normalizeKey(effectiveCollaborateur)) return false
           if (!includeHorsStats && row.hors_statistique) return false
           return true
         })
@@ -2620,9 +2659,9 @@ function FocusMensuelPageContent() {
         p_date_debut: startPeriod,
         p_date_fin: endExclusive,
         p_limit: 500,
-        p_agence: agence || null,
+        p_agence: effectiveAgence || null,
         p_famille_macro: familleMacro || null,
-        p_collaborateur: collaborateur || null,
+        p_collaborateur: effectiveCollaborateur || null,
         p_include_hors_statistiques: includeHorsStats,
       })
 
@@ -2869,9 +2908,9 @@ function FocusMensuelPageContent() {
             <FilterDisplay label="Mois analysé" value={formatMonthFr(month)} />
             <FilterDisplay label="Jour focus" value={formatDateFr(focusDate)} />
             <FilterDisplay label="Vue" value={labelForMode(viewMode)} />
-            <FilterDisplay label="Agence" value={agence || 'Toutes'} />
+            <FilterDisplay label="Agence" value={effectiveAgence || 'Toutes'} />
             <FilterDisplay label="Famille macro" value={familleMacro || 'Toutes'} />
-            <FilterDisplay label="Collaborateur" value={collaborateur || 'Tous'} />
+            <FilterDisplay label="Collaborateur" value={effectiveCollaborateur || 'Tous'} />
             <FilterDisplay label="Hors statistiques" value={includeHorsStats ? 'Afficher' : 'Masquer'} />
           </>
         ) : (
@@ -2879,13 +2918,19 @@ function FocusMensuelPageContent() {
             <div style={styles.field}><label style={styles.label}>Mois analysé</label><input type="month" value={month} onChange={(e) => setMonthAndSyncFocusDate(e.target.value)} style={styles.input} /></div>
             <div style={styles.field}><label style={styles.label}>Jour focus</label><input type="date" value={focusDate} onChange={(e) => setFocusDateAndSyncMonth(e.target.value)} style={styles.input} /></div>
             <div style={styles.field}><label style={styles.label}>Vue</label><select value={viewMode} onChange={(e) => setViewMode(e.target.value as ViewMode)} style={styles.input}><option value="montant_ht">Montant HT</option><option value="nb_documents">Nombre documents</option><option value="quantite_pertinente">Quantité pertinente</option></select></div>
-            <div style={styles.field}><label style={styles.label}>Agence</label><select value={agence} onChange={(e) => setAgence(e.target.value)} style={styles.input}><option value="">Toutes</option>{availableAgences.map((a) => <option key={a} value={a}>{a}</option>)}</select></div>
+            <div style={styles.field}><label style={styles.label}>Agence</label><select value={effectiveAgence} disabled={isAgenceLocked} onChange={(e) => { if (!isAgenceLocked) setAgence(e.target.value) }} style={{ ...styles.input, ...(isAgenceLocked ? styles.lockedInput : {}) }}><option value="">Toutes</option>{availableAgencesForSelect.map((a) => <option key={a} value={a}>{isAgenceLocked ? `${a} 🔒` : a}</option>)}</select></div>
             <div style={styles.field}><label style={styles.label}>Famille macro</label><select value={familleMacro} onChange={(e) => setFamilleMacro(e.target.value)} style={styles.input}><option value="">Toutes</option>{availableFamilies.map((f) => <option key={f} value={f}>{f}</option>)}</select></div>
-            <div style={styles.field}><label style={styles.label}>Collaborateur</label><select value={collaborateur} onChange={(e) => setCollaborateur(e.target.value)} style={styles.input}><option value="">Tous</option>{availableCollaborateurs.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
+            <div style={styles.field}><label style={styles.label}>Collaborateur</label><select value={effectiveCollaborateur} disabled={isCollaborateurLocked} onChange={(e) => { if (!isCollaborateurLocked) setCollaborateur(e.target.value) }} style={{ ...styles.input, ...(isCollaborateurLocked ? styles.lockedInput : {}) }}><option value="">Tous</option>{availableCollaborateursForSelect.map((c) => <option key={c} value={c}>{isCollaborateurLocked ? `${c} 🔒` : c}</option>)}</select></div>
             <div style={styles.field}><label style={styles.label}>Hors statistiques</label><select value={includeHorsStats ? 'show' : 'hide'} onChange={(e) => setIncludeHorsStats(e.target.value === 'show')} style={styles.input}><option value="hide">Masquer</option><option value="show">Afficher</option></select></div>
           </>
         )}
       </div>
+
+      {!isPdfMode && access.accessBadge && (
+        <div style={styles.accessBadge} data-no-print="true">
+          Périmètre utilisateur appliqué : {access.accessBadge}
+        </div>
+      )}
 
       {!isPdfMode && (
         <div style={styles.reportCard} data-no-print="true">
@@ -3905,6 +3950,17 @@ const styles: Record<string, React.CSSProperties> = {
   field: { display: 'flex', flexDirection: 'column', gap: 5 },
   label: { fontSize: 12, fontWeight: 900, color: '#475569', textTransform: 'uppercase' },
   input: { border: '1px solid #cbd5e1', borderRadius: 10, padding: '9px 10px', background: '#fff', fontWeight: 800, minWidth: 0 },
+  lockedInput: { background: '#f1f5f9', color: '#64748b', cursor: 'not-allowed' },
+  accessBadge: {
+    border: '1px solid #facc15',
+    background: '#fffbeb',
+    color: '#7c2d12',
+    borderRadius: 14,
+    padding: '12px 14px',
+    marginBottom: 14,
+    fontSize: 13,
+    fontWeight: 900,
+  },
   warningButton: {
     border: '1px solid #d97706',
     background: '#f59e0b',
