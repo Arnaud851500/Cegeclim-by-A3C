@@ -1,9 +1,15 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { createClient } from '@supabase/supabase-js'
 import * as XLSX from 'xlsx'
-import { accessLockedSelectClassName, lockedFilterLabel, restrictOptions, usePageFilterAccess } from '@/lib/pageAccessFilters'
+import { supabase } from '@/lib/supabaseClient'
+import {
+  accessLockedSelectClassName,
+  isAllowedByList,
+  lockedFilterLabel,
+  restrictOptions,
+  usePageFilterAccess,
+} from '@/lib/pageAccessFilters'
 
 type LignePortefeuille = {
   id: number | string | null
@@ -69,11 +75,7 @@ type SortConfig<T> = {
   direction: 'asc' | 'desc'
 } | null
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ''
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
-const supabase = createClient(supabaseUrl, supabaseAnonKey)
-
-const DEFAULT_TYPES = ['CDC','PL']
+const DEFAULT_TYPES = ['CDC']
 const ALL_TYPES = ['CDC', 'PL', 'BL', 'BR']
 const ACCESS_LOCKED_AGENCE_VALUE = '__ACCESS_LOCKED_AGENCE__'
 const ACCESS_LOCKED_REPRESENTANT_VALUE = '__ACCESS_LOCKED_REPRESENTANT__'
@@ -232,6 +234,23 @@ function uniqueJoined(values: Array<string | null | undefined>) {
     .join(', ')
 }
 
+function formatLoadError(error: unknown) {
+  if (!error) return 'Erreur inconnue lors du chargement du portefeuille.'
+
+  if (error instanceof Error) return error.message
+
+  if (typeof error === 'object') {
+    const err = error as Record<string, unknown>
+    const parts = [err.message, err.details, err.hint, err.code]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+
+    if (parts.length > 0) return parts.join(' · ')
+  }
+
+  return String(error) || 'Erreur inconnue lors du chargement du portefeuille.'
+}
+
 export default function PortefeuilleLivraisonPage() {
  
   
@@ -330,25 +349,36 @@ export default function PortefeuilleLivraisonPage() {
         throw error
       }
 
-      setLignes((data || []) as LignePortefeuille[])
+      const rows = ((data || []) as LignePortefeuille[]).filter((row) => {
+        return (
+          isAllowedByList(row.representant, access.allowedCollaborateurs) &&
+          isAllowedByList(row.agence, access.allowedAgences)
+        )
+      })
+
+      setLignes(rows)
       setSelection(null)
       setSelectedDocumentKeyForLines(null)
     } catch (error) {
-      console.error(error)
-      setErrorMessage(
-        error instanceof Error
-          ? error.message
-          : 'Erreur inconnue lors du chargement du portefeuille.'
-      )
+      console.error('PORTefeuille livraison - erreur chargement', error)
+      setLignes([])
+      setSelection(null)
+      setSelectedDocumentKeyForLines(null)
+      setErrorMessage(formatLoadError(error))
     } finally {
       setLoading(false)
     }
   }
 
   useEffect(() => {
+    if (access.hasCollaborateurRestriction) setSelectedRepresentant('')
+    if (access.hasAgenceRestriction) setSelectedAgence('')
+  }, [access.hasCollaborateurRestriction, access.hasAgenceRestriction])
+
+  useEffect(() => {
     if (!access.loading) loadData()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [access.loading])
+  }, [access.loading, access.allowedCollaborateurs.join('|'), access.allowedAgences.join('|')])
 
   const documents = useMemo<DocumentPortefeuille[]>(() => {
     const map = new Map<
@@ -507,6 +537,39 @@ export default function PortefeuilleLivraisonPage() {
 
   const selectBaseClassName = 'w-full rounded-xl border border-slate-300 px-3 py-2 text-sm'
 
+  useEffect(() => {
+    const effectiveAgences = access.allowedAgences.length > 0
+      ? access.allowedAgences
+      : selectedAgence
+        ? [selectedAgence]
+        : []
+
+    const effectiveCollaborateurs = access.allowedCollaborateurs.length > 0
+      ? access.allowedCollaborateurs
+      : selectedRepresentant
+        ? [selectedRepresentant]
+        : []
+
+    window.dispatchEvent(new CustomEvent('cegeclim:status-scope-change', {
+      detail: {
+        active: true,
+        agences: effectiveAgences,
+        collaborateurs: effectiveCollaborateurs,
+      },
+    }))
+
+    return () => {
+      window.dispatchEvent(new CustomEvent('cegeclim:status-scope-change', {
+        detail: { active: false, agences: [], collaborateurs: [] },
+      }))
+    }
+  }, [
+    access.allowedAgences.join('|'),
+    access.allowedCollaborateurs.join('|'),
+    selectedAgence,
+    selectedRepresentant,
+  ])
+
   const famillesMacro = useMemo(() => {
     return Array.from(
       new Set(lignes.map((ligne) => safeText(ligne.famille_macro, 'Sans famille macro')))
@@ -646,7 +709,6 @@ export default function PortefeuilleLivraisonPage() {
       'Date création document': formatDate(doc.date_creation_document),
       'Date livraison': formatDate(doc.date_livraison),
       'Mois livraison': monthLabel(doc.mois_livraison),
-      'Références articles': doc.references_articles,
       Référence: doc.references,
       'Client en sommeil': doc.client_en_sommeil ? 'Oui' : 'Non',
       'Familles macro': doc.familles_macro,
@@ -901,6 +963,21 @@ export default function PortefeuilleLivraisonPage() {
             </label>
           </div>
 
+          {!access.loading && (access.accessBadge || access.error) && (
+            <div
+              className={[
+                'mt-4 rounded-xl border px-3 py-2 text-sm',
+                access.error
+                  ? 'border-amber-200 bg-amber-50 text-amber-800'
+                  : 'border-blue-200 bg-blue-50 text-blue-800',
+              ].join(' ')}
+            >
+              {access.error
+                ? `Droits utilisateur non chargés : ${access.error}`
+                : `Périmètre utilisateur appliqué : ${access.accessBadge}`}
+            </div>
+          )}
+
           {errorMessage && (
             <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
               {errorMessage}
@@ -1112,7 +1189,6 @@ export default function PortefeuilleLivraisonPage() {
                     ['nom_tiers', 'Client'],
                     ['type_document', 'Type doc'],
                     ['numero_document', 'N° document'],
-                    ['references_articles', 'Réf. articles'],
                     ['references', 'Référence'],
                     ['nb_lignes', 'Nb lignes'],
                     ['montant_ht', 'Montant HT'],
@@ -1155,7 +1231,6 @@ export default function PortefeuilleLivraisonPage() {
                         {doc.numero_document}
                       </button>
                     </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">{doc.references_articles}</td>
                     <td className="border-b border-r border-slate-200 px-3 py-2">{doc.references}</td>
                     <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{doc.nb_lignes}</td>
                     <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{formatMoney(doc.montant_ht)}</td>
@@ -1168,7 +1243,7 @@ export default function PortefeuilleLivraisonPage() {
 
                 {sortedDocuments.length === 0 && (
                   <tr>
-                    <td colSpan={14} className="px-4 py-8 text-center text-slate-500">
+                    <td colSpan={13} className="px-4 py-8 text-center text-slate-500">
                       Aucun document à afficher.
                     </td>
                   </tr>
