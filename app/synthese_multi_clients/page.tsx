@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import dynamic from 'next/dynamic'
 import { supabase } from '@/lib/supabaseClient'
+import { usePageFilterAccess } from '@/lib/pageAccessFilters'
 
 const MapContainer: any = dynamic(() => import('react-leaflet').then((mod) => mod.MapContainer as any), { ssr: false })
 const TileLayer: any = dynamic(() => import('react-leaflet').then((mod) => mod.TileLayer as any), { ssr: false })
@@ -1591,6 +1592,71 @@ function emptySelectionOptions(): SelectionOptions {
   return { collaborateurs: [], agences: [], cacheCollaborateurs: [], cacheAgences: [], collaborateurAgence: {}, agenceCollaborateurs: {} }
 }
 
+
+function listIncludesNormalized(values: string[], candidate: string) {
+  const normalizedCandidate = normalize(candidate)
+  return values.some((value) => normalize(value) === normalizedCandidate)
+}
+
+function filterOptionsByAllowed(values: string[], allowedValues: string[]) {
+  const normalizedAllowed = allowedValues.map((value) => safeText(value)).filter(Boolean)
+  if (!normalizedAllowed.length) return values
+
+  const filtered = values.filter((value) => listIncludesNormalized(normalizedAllowed, value))
+  return filtered.length ? filtered : mergeSortedOptions(normalizedAllowed)
+}
+
+function collaboratorsForAllowedAgences(options: SelectionOptions, allowedAgences: string[]) {
+  if (!allowedAgences.length) return options.collaborateurs
+
+  const collaborators = new Set<string>()
+  allowedAgences.forEach((agence) => {
+    const fromMap = options.agenceCollaborateurs[normalize(agence)] || []
+    fromMap.forEach((collaborateur) => collaborators.add(collaborateur))
+  })
+
+  if (!collaborators.size) {
+    options.collaborateurs.forEach((collaborateur) => {
+      const agence = options.collaborateurAgence[normalize(collaborateur)]
+      if (agence && listIncludesNormalized(allowedAgences, agence)) collaborators.add(collaborateur)
+    })
+  }
+
+  return mergeSortedOptions(Array.from(collaborators))
+}
+
+function restrictSelectionOptionsByAccess(
+  options: SelectionOptions,
+  allowedAgences: string[] = [],
+  allowedCollaborateurs: string[] = []
+): SelectionOptions {
+  let agences = options.agences
+  let collaborateurs = options.collaborateurs
+
+  if (allowedAgences.length > 0) {
+    agences = filterOptionsByAllowed(agences, allowedAgences)
+    const collaborateursAgence = collaboratorsForAllowedAgences(options, allowedAgences)
+    collaborateurs = collaborateursAgence.length ? collaborateursAgence : []
+  }
+
+  if (allowedCollaborateurs.length > 0) {
+    collaborateurs = filterOptionsByAllowed(collaborateurs, allowedCollaborateurs)
+    const agencesCollaborateurs = mergeSortedOptions(
+      collaborateurs
+        .map((collaborateur) => options.collaborateurAgence[normalize(collaborateur)])
+        .filter(Boolean)
+    )
+    if (agencesCollaborateurs.length > 0) agences = filterOptionsByAllowed(agences, agencesCollaborateurs)
+    else if (allowedAgences.length > 0) agences = filterOptionsByAllowed(agences, allowedAgences)
+  }
+
+  return {
+    ...options,
+    agences,
+    collaborateurs,
+  }
+}
+
 function buildCollaborateurAgencyMaps(rawCollaborateurs: Record<string, any>[]) {
   const collaborateurAgence: Record<string, string> = {}
   const agenceCollaborateursSet = new Map<string, Set<string>>()
@@ -1678,13 +1744,27 @@ async function fetchSelectionOptions(): Promise<SelectionOptions> {
   }
 }
 
-async function fetchCacheClientRows(mode: ModeSelection, selected: string, collaborateursForAgence: string[] = []) {
+async function fetchCacheClientRows(
+  mode: ModeSelection,
+  selected: string,
+  collaborateursForAgence: string[] = [],
+  forcedCollaborateurs: string[] = []
+) {
   return fetchAll('synthese_multi_clients_cache', '*', (query) => {
     let q = query.eq('annee', N).eq('row_kind', 'client')
-    if (mode === 'collaborateur' && selected !== ALL_COLLABORATEURS_VALUE) q = q.eq('collaborateur', selected)
+
+    if (mode === 'collaborateur') {
+      if (selected !== ALL_COLLABORATEURS_VALUE) {
+        q = q.eq('collaborateur', selected)
+      } else if (forcedCollaborateurs.length > 0) {
+        q = q.in('collaborateur', forcedCollaborateurs)
+      }
+    }
+
     if (mode === 'agence') {
       q = collaborateursForAgence.length ? q.in('collaborateur', collaborateursForAgence) : q.eq('agence_collaborateur', selected)
     }
+
     return q.order('collaborateur', { ascending: true }).order('numero_tiers', { ascending: true })
   }) as Promise<CacheDbRow[]>
 }
@@ -1997,6 +2077,7 @@ function rowMatchesCombinedCaProfiles(
 }
 
 export default function SyntheseMultiClientsPage() {
+  const access = usePageFilterAccess()
   const [mode, setMode] = useState<ModeSelection>('collaborateur')
   const [selected, setSelected] = useState('')
   const [selectionOptions, setSelectionOptions] = useState<SelectionOptions>(emptySelectionOptions())
@@ -2026,7 +2107,17 @@ export default function SyntheseMultiClientsPage() {
   }, [objectiveRows])
 
   const columns = useMemo(() => buildColumns(showFamilies, showCollaborateurColumn, encoursDetailMode), [showFamilies, showCollaborateurColumn, encoursDetailMode])
-  const currentSelectionOptions = mode === 'collaborateur' ? selectionOptions.collaborateurs : selectionOptions.agences
+  const allowedAgences = access.allowedAgences || []
+  const allowedCollaborateurs = access.allowedCollaborateurs || []
+  const restrictedSelectionOptions = useMemo(
+    () => restrictSelectionOptionsByAccess(selectionOptions, allowedAgences, allowedCollaborateurs),
+    [selectionOptions, allowedAgences, allowedCollaborateurs]
+  )
+  const currentSelectionOptions = mode === 'collaborateur' ? restrictedSelectionOptions.collaborateurs : restrictedSelectionOptions.agences
+  const isModeLockedByCollaborateur = access.hasCollaborateurRestriction
+  const isSelectionLocked =
+    (access.hasCollaborateurRestriction && allowedCollaborateurs.length === 1) ||
+    (mode === 'agence' && access.hasAgenceRestriction && allowedAgences.length === 1)
 
   useEffect(() => {
     let alive = true
@@ -2080,16 +2171,46 @@ export default function SyntheseMultiClientsPage() {
   }, [])
 
   useEffect(() => {
+    if (access.loading) return
+
+    if (access.hasCollaborateurRestriction && allowedCollaborateurs.length > 0) {
+      const collaborator = filterOptionsByAllowed(restrictedSelectionOptions.collaborateurs, allowedCollaborateurs)[0] || allowedCollaborateurs[0]
+      if (mode !== 'collaborateur') setMode('collaborateur')
+      if (selected !== collaborator) setSelected(collaborator)
+      return
+    }
+
+    if (access.hasAgenceRestriction && allowedAgences.length > 0) {
+      if (mode === 'agence') {
+        const agence = filterOptionsByAllowed(restrictedSelectionOptions.agences, allowedAgences)[0] || allowedAgences[0]
+        if (!selected || !listIncludesNormalized(allowedAgences, selected)) setSelected(agence)
+      } else if (mode === 'collaborateur') {
+        if (selected && selected !== ALL_COLLABORATEURS_VALUE && !restrictedSelectionOptions.collaborateurs.includes(selected)) setSelected('')
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    access.loading,
+    access.hasAgenceRestriction,
+    access.hasCollaborateurRestriction,
+    allowedAgences,
+    allowedCollaborateurs,
+    restrictedSelectionOptions,
+    mode,
+    selected,
+  ])
+
+  useEffect(() => {
     if (!selected) return
 
     if (mode === 'collaborateur') {
       if (selected === ALL_COLLABORATEURS_VALUE) return
-      if (!selectionOptions.collaborateurs.includes(selected)) setSelected('')
+      if (!restrictedSelectionOptions.collaborateurs.includes(selected)) setSelected('')
       return
     }
 
-    if (!selectionOptions.agences.includes(selected)) setSelected('')
-  }, [mode, selectionOptions, selected])
+    if (!restrictedSelectionOptions.agences.includes(selected)) setSelected('')
+  }, [mode, restrictedSelectionOptions, selected])
 
   useEffect(() => {
     let alive = true
@@ -2105,7 +2226,12 @@ export default function SyntheseMultiClientsPage() {
       setError(null)
       try {
         const collaborateursForAgence = mode === 'agence' ? (selectionOptions.agenceCollaborateurs[normalize(selected)] || []) : []
-        const rows = (await fetchCacheClientRows(mode, selected, collaborateursForAgence))
+        const forcedCollaborateurs = mode === 'collaborateur' && selected === ALL_COLLABORATEURS_VALUE
+          ? (access.hasAgenceRestriction || access.hasCollaborateurRestriction
+            ? (restrictedSelectionOptions.collaborateurs.length ? restrictedSelectionOptions.collaborateurs : ['__NO_ALLOWED_COLLABORATEUR__'])
+            : [])
+          : []
+        const rows = (await fetchCacheClientRows(mode, selected, collaborateursForAgence, forcedCollaborateurs))
           .map(cacheRowToSummary)
           .map((row) => applyRefAgence(row, selectionOptions.collaborateurAgence))
         const codes = rows.map((row) => row.numero).filter(Boolean)
@@ -2137,7 +2263,7 @@ export default function SyntheseMultiClientsPage() {
     }
     void loadCachedBusinessData()
     return () => { alive = false }
-  }, [mode, selected, selectionOptions.agenceCollaborateurs, selectionOptions.collaborateurAgence])
+  }, [mode, selected, selectionOptions.agenceCollaborateurs, selectionOptions.collaborateurAgence, restrictedSelectionOptions.collaborateurs, access.hasAgenceRestriction, access.hasCollaborateurRestriction])
 
   const baseClientRows = useMemo(() => cacheRows.map((row) => applyObjectiveOverrides(row, objectiveMap)), [cacheRows, objectiveMap])
   const totalRow = useMemo(() => buildTotalFromRows(baseClientRows, showCollaborateurColumn), [baseClientRows, showCollaborateurColumn])
@@ -2719,23 +2845,23 @@ export default function SyntheseMultiClientsPage() {
         <div className="toolbarActions">
           <label>
             Sélection
-            <select value={mode} onChange={(e) => { setMode(e.target.value as ModeSelection); setSelected(''); setExpanded(new Set()) }}>
+            <select value={mode} disabled={isModeLockedByCollaborateur} onChange={(e) => { setMode(e.target.value as ModeSelection); setSelected(''); setExpanded(new Set()) }}>
               <option value="collaborateur">Collaborateur</option>
               <option value="agence">Agence</option>
             </select>
           </label>
           <label>
             {mode === 'collaborateur' ? 'Collaborateur' : 'Agence'}
-            <select value={selected} onChange={(e) => { setSelected(e.target.value); setExpanded(new Set()) }}>
+            <select value={selected} disabled={isSelectionLocked} onChange={(e) => { setSelected(e.target.value); setExpanded(new Set()) }}>
               {mode === 'collaborateur' ? (
                 <>
                   <option value="">Choisir un collaborateur…</option>
-                  <option value={ALL_COLLABORATEURS_VALUE}>Tous les collaborateurs</option>
+                  {!access.hasCollaborateurRestriction && <option value={ALL_COLLABORATEURS_VALUE}>Tous les collaborateurs</option>}
                 </>
               ) : (
                 <option value="">Choisir une agence…</option>
               )}
-              {currentSelectionOptions.map((option) => <option key={option} value={option}>{option}</option>)}
+              {currentSelectionOptions.map((option) => <option key={option} value={option}>{option}{isSelectionLocked && selected === option ? ' 🔒' : ''}</option>)}
             </select>
           </label>
           <button type="button" onClick={() => setShowFamilies((v) => !v)}>
@@ -2757,6 +2883,7 @@ export default function SyntheseMultiClientsPage() {
       </section>
 
       {error && <div className="error">{error}</div>}
+      {access.accessBadge && <div className="accessBadge">Périmètre utilisateur appliqué : {access.accessBadge}</div>}
       {loading && <div className="loading">Chargement…</div>}
 
       {!hasSelection ? (
@@ -3102,6 +3229,7 @@ export default function SyntheseMultiClientsPage() {
         button:disabled { opacity: .45; cursor: not-allowed; }
         .emptyState { background: white; border: 1px dashed #94a3b8; border-radius: 14px; padding: 26px; color: #475569; font-weight: 900; text-align: center; box-shadow: 0 2px 8px rgba(15,23,42,.05); }
         .error { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; padding: 10px 12px; border-radius: 10px; margin-bottom: 10px; font-weight: 700; }
+        .accessBadge { background: #fffbeb; color: #92400e; border: 1px solid #fcd34d; padding: 10px 12px; border-radius: 10px; margin-bottom: 10px; font-weight: 900; }
         .loading { position: fixed; right: 18px; bottom: 18px; background: #0f172a; color: white; padding: 8px 12px; border-radius: 999px; z-index: 20; font-weight: 900; }
         .kpis { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 8px; margin-bottom: 12px; }
         .kpis div { background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 10px 12px; box-shadow: 0 2px 8px rgba(15,23,42,.05); }
