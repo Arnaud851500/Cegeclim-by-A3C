@@ -393,13 +393,13 @@ function collaborateurMatchesAllowed(collaborateur: string, allowedCollaborateur
     {
       label: 'Tableaux de bord',
       items: [
-        { label: 'Flux Devis-CDC-BC-Fact', path: '/approvisionnements', accessKey: 'can_autorisation' },
+        { label: 'Flux Devis-CDC-BC-Fact', path: '/approvisionnements', accessKey: 'can_dashboard' },
         { label: 'Analyse Devis', path: '/cycle-documents', accessKey: 'can_autorisation' },
-        { label: 'Portefeuille cde', path: '/portefeuille-livraison', accessKey: 'can_autorisation' },
-        { label: 'Suivi Multi Clients', path: '/synthese_multi_clients', accessKey: 'can_autorisation' },
+        { label: 'Portefeuille cde', path: '/portefeuille-livraison', accessKey: 'can_dashboard' },
+        { label: 'Suivi Multi Clients', path: '/synthese_multi_clients', accessKey: 'can_dashboard' },
         { label: 'Tableaux de bord', path: '/atelier-analyse', accessKey: 'can_autorisation' },
-        { label: 'Focus Mois', path: '/focus_mensuel', accessKey: 'can_autorisation' },
-        { label: 'Indicateurs', path: '/Indicateurs', accessKey: 'can_documents' },
+        { label: 'Focus Mois', path: '/focus_mensuel', accessKey: 'can_dashboard' },
+        { label: 'Indicateurs', path: '/Indicateurs', accessKey: 'can_autorisation' },
       ],
     },
     {
@@ -407,7 +407,7 @@ function collaborateurMatchesAllowed(collaborateur: string, allowedCollaborateur
       items: [
         { label: 'Autorisations', path: '/autorisation', accessKey: 'can_autorisation' },
         { label: 'Job scheduling', path: '/admin/planification', accessKey: 'can_autorisation' },
-        { label: 'MAJ Base clients', path: '/clients', accessKey: 'can_clients' },
+        { label: 'MAJ Base clients', path: '/clients', accessKey: 'can_autorisation' },
         { label: 'MAJ Données Activité', path: '/Import', accessKey: 'can_autorisation' },
         { label: 'Todo List', path: '/todo', accessKey: 'can_todo' },
         { label: 'Documents', path: '/documents', accessKey: 'can_documents' },

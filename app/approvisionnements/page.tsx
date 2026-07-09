@@ -535,14 +535,14 @@ export default function ApprovisionnementsPage() {
   const [includeHorsStat, setIncludeHorsStat] = useState(false)
   const [visibleFlux, setVisibleFlux] = useState<Record<Flux, boolean>>({ DEVIS: true, CDC: false, BL: true, FACTURE: true })
 
-  const [depots, setDepots] = useState<string[]>([])
+  const [agences, setAgences] = useState<string[]>([])
   const [collaborateursTiers, setCollaborateursTiers] = useState<string[]>([])
   const [famillesMacro, setFamillesMacro] = useState<string[]>(DEFAULT_SELECTED_MACROS)
   const [familles, setFamilles] = useState<string[]>([])
   const [references, setReferences] = useState<string[]>([])
 
   const [available, setAvailable] = useState({
-    depots: [] as string[],
+    agences: [] as string[],
     collaborateursTiers: [] as string[],
     famillesMacro: [] as string[],
     familles: [] as string[],
@@ -571,11 +571,24 @@ export default function ApprovisionnementsPage() {
     () => references.map(referenceCode).filter(Boolean),
     [references]
   )
+  const effectiveAgences = access.hasAgenceRestriction ? access.allowedAgences : agences
+  const visibleAgences = useMemo(
+    () => restrictOptions(available.agences, access.allowedAgences),
+    [available.agences, access.allowedAgences]
+  )
   const effectiveCollaborateursTiers = access.hasCollaborateurRestriction ? access.allowedCollaborateurs : collaborateursTiers
   const visibleCollaborateursTiers = useMemo(
     () => restrictOptions(available.collaborateursTiers, access.allowedCollaborateurs),
     [available.collaborateursTiers, access.allowedCollaborateurs]
   )
+
+  useEffect(() => {
+    if (access.hasAgenceRestriction) {
+      setAgences(access.allowedAgences)
+      resetDownstream()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [access.hasAgenceRestriction, access.allowedAgences])
 
   useEffect(() => {
     if (access.hasCollaborateurRestriction) {
@@ -588,12 +601,12 @@ export default function ApprovisionnementsPage() {
   const rpcFilterPayload = useMemo(() => ({
     p_year: selectedYear,
     p_include_hors_stat: includeHorsStat,
-    p_depots: depots,
+    p_depots: effectiveAgences,
     p_collaborateurs_tiers: effectiveCollaborateursTiers,
     p_familles_macro: famillesMacro,
     p_familles: familles,
     p_references: selectedReferenceCodes,
-  }), [selectedYear, includeHorsStat, depots, effectiveCollaborateursTiers, famillesMacro, familles, selectedReferenceCodes])
+  }), [selectedYear, includeHorsStat, effectiveAgences, effectiveCollaborateursTiers, famillesMacro, familles, selectedReferenceCodes])
 
   function resetDownstream(keepChartMonth = false) {
     setAnalysisScope(null)
@@ -617,13 +630,13 @@ export default function ApprovisionnementsPage() {
         value: safeText(row.value ?? row.valeur, ''),
       }))
 
-      const nextDepots = uniqueSorted(rows.filter((row) => row.optionType === 'depot').map((row) => row.value))
+      const nextAgences = uniqueSorted(rows.filter((row) => row.optionType === 'agence' || row.optionType === 'depot').map((row) => row.value))
       const nextCollaborateursTiers = uniqueSorted(rows.filter((row) => row.optionType === 'collaborateur_tiers').map((row) => row.value))
       const nextFamillesMacro = uniqueSorted(rows.filter((row) => row.optionType === 'famille_macro').map((row) => row.value))
       const nextFamilles = uniqueSorted(rows.filter((row) => row.optionType === 'famille').map((row) => row.value))
 
       setAvailable({
-        depots: nextDepots,
+        agences: nextAgences,
         collaborateursTiers: nextCollaborateursTiers,
         famillesMacro: nextFamillesMacro,
         familles: nextFamilles,
@@ -718,7 +731,7 @@ export default function ApprovisionnementsPage() {
             p_flux: combo.flux,
             p_famille_macro: combo.famille_macro,
             p_include_hors_stat: includeHorsStat,
-            p_depots: depots,
+            p_depots: effectiveAgences,
             p_collaborateurs_tiers: effectiveCollaborateursTiers,
             p_familles: familles,
             p_references: selectedReferenceCodes,
@@ -771,7 +784,7 @@ export default function ApprovisionnementsPage() {
         p_famille_macro: scope.famille_macro,
         p_famille: scope.famille ?? null,
         p_include_hors_stat: includeHorsStat,
-        p_depots: depots,
+        p_depots: effectiveAgences,
         p_collaborateurs_tiers: effectiveCollaborateursTiers,
         p_familles_macro: famillesMacro,
         p_familles: familles,
@@ -883,7 +896,7 @@ export default function ApprovisionnementsPage() {
   useEffect(() => {
     loadSummary()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [depots, effectiveCollaborateursTiers, famillesMacro, familles, references])
+  }, [effectiveAgences, effectiveCollaborateursTiers, famillesMacro, familles, references])
 
   useEffect(() => {
     if (!referenceScope) {
@@ -892,7 +905,7 @@ export default function ApprovisionnementsPage() {
     }
     loadReferencePivotForScope(referenceScope)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [referenceScope, selectedYear, includeHorsStat, depots, effectiveCollaborateursTiers, famillesMacro, familles, references])
+  }, [referenceScope, selectedYear, includeHorsStat, effectiveAgences, effectiveCollaborateursTiers, famillesMacro, familles, references])
 
   const chartData = useMemo<ChartDatum[]>(() => {
     const output: ChartDatum[] = Array.from({ length: 12 }, (_, index) => {
@@ -1344,7 +1357,7 @@ export default function ApprovisionnementsPage() {
           >
             {defaultYearOptions().map((year) => <option key={year} value={year}>Année : {year}</option>)}
           </select>
-          <MultiSelect label="Dépôts" values={available.depots} selected={depots} onChange={(values) => { setDepots(values); resetDownstream() }} />
+          <MultiSelect label="Agences" values={access.hasAgenceRestriction ? access.allowedAgences : visibleAgences} selected={effectiveAgences} onChange={(values) => { setAgences(values); resetDownstream() }} disabled={access.hasAgenceRestriction} />
           <MultiSelect label="Collaborateur client" values={access.hasCollaborateurRestriction ? access.allowedCollaborateurs : visibleCollaborateursTiers} selected={effectiveCollaborateursTiers} onChange={(values) => { setCollaborateursTiers(values); resetDownstream() }} disabled={access.hasCollaborateurRestriction} />
           <MultiSelect label="Familles macro" values={available.famillesMacro} selected={famillesMacro} onChange={(values) => { setFamillesMacro(values); resetDownstream() }} />
           <MultiSelect label="Familles" values={available.familles} selected={familles} onChange={(values) => { setFamilles(values); resetDownstream() }} />
