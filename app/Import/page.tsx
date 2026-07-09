@@ -13,6 +13,8 @@ type TableKey =
   | 'facture_lignes'
   | 'devis_lignes'
   | 'activite_lignes'
+  | 'stock_articles_snapshot'
+  | 'commandes_fournisseurs_lignes'
 
 type ColumnType = 'text' | 'number' | 'boolean' | 'date'
 
@@ -476,6 +478,129 @@ const TABLES: TableConfig[] = [
       { db: 'projet', label: 'Projet' },
     ],
   },
+  {
+    key: 'stock_articles_snapshot',
+    label: 'Stock articles',
+    primaryKey: 'reference_article',
+    secondaryKeys: ['designation', 'famille', 'fournisseur_principal'],
+    description: 'Photo du stock article issue du fichier Article stock.xlsx.',
+    columns: [
+      { db: 'reference_article', label: 'Référence article', required: true },
+      { db: 'type_article', label: 'Type', aliases: ['Type'] },
+      { db: 'designation', label: 'Désignation' },
+      { db: 'nomenclature', label: 'Nomenclature' },
+      { db: 'famille', label: 'Famille' },
+      { db: 'unite_vente', label: 'Unité de vente', aliases: ['Unité vente', 'Unite de vente', 'Unite vente'] },
+      { db: 'conditionnement', label: 'Conditionnement' },
+      { db: 'gamme_1', label: 'Gamme 1' },
+      { db: 'gamme_2', label: 'Gamme 2' },
+      { db: 'suivi_stock', label: 'Suivi de stock' },
+      { db: 'mise_en_sommeil', label: 'Mise en sommeil', type: 'boolean' },
+      { db: 'prix_achat', label: "Prix d'achat", type: 'number', aliases: ['Prix achat'] },
+      { db: 'coefficient', label: 'Coefficient', type: 'number' },
+      { db: 'prix_vente', label: 'Prix de vente', type: 'number', aliases: ['Prix vente'] },
+      { db: 'fournisseur_principal', label: 'Fournisseur principal' },
+      { db: 'stock_reel', label: 'Stock réel', type: 'number', aliases: ['Stock reel'] },
+      { db: 'stock_disponible', label: 'Stock disponible', type: 'number' },
+      { db: 'stock_a_terme', label: 'Stock à terme', type: 'number', aliases: ['Stock terme', 'Stock a terme'] },
+      { db: 'langue_1', label: 'Langue 1' },
+      { db: 'langue_2', label: 'Langue 2' },
+      { db: 'code_fiscal', label: 'Code fiscal' },
+      { db: 'pays_origine', label: 'Pays origine' },
+      { db: 'code_edi', label: 'Code EDI' },
+      { db: 'marque', label: 'Marque' },
+      { db: 'zone_libre', label: 'Zone libre' },
+      { db: 'code_barres', label: 'Code barres' },
+      { db: 'poids_net', label: 'Poids net', type: 'number' },
+      { db: 'poids_brut', label: 'Poids brut', type: 'number' },
+      { db: 'article_substitution', label: 'Article de substitution', aliases: ['Article substitution'] },
+      { db: 'criticite', label: 'Criticité' },
+      { db: 'date_creation', label: 'Date de création', type: 'date' },
+      { db: 'derniere_mise_a_jour', label: 'Dernière mise à jour', type: 'date' },
+      { db: 'categorie_fluide_hfc', label: 'Catégorie fluide (HFC )', aliases: ['Catégorie fluide HFC', 'Categorie fluide HFC'] },
+      { db: 'marque_2', label: 'MARQUE', aliases: ['MARQUE'] },
+      { db: 'type_equipement', label: "Type d'équipement", aliases: ['Type équipement', 'Type equipement'] },
+      { db: 'dimensions_hxlxp', label: 'Dimensions (HxLxP)' },
+      { db: 'type_gaz', label: 'Type de Gaz', aliases: ['Type gaz'] },
+      { db: 'categorie_psi', label: 'Catégorie PSI' },
+      { db: 'mystock', label: 'MYSTOCK' },
+      { db: 'uo_fms', label: 'UO FMS' },
+      { db: 'vie_produit', label: 'VieProduit', aliases: ['Vie produit'] },
+    ],
+  },
+  {
+    key: 'commandes_fournisseurs_lignes',
+    label: 'Commandes fournisseurs ouvertes',
+    primaryKey: 'row_number',
+    secondaryKeys: ['numero_piece', 'reference_article', 'designation'],
+    description: 'BDCF : commandes fournisseurs ouvertes utilisées comme entrées futures de stock.',
+    columns: [
+      { db: 'row_number', label: 'N° ligne import', type: 'number', readonly: true },
+      { db: 'type_document', label: 'Type', aliases: ['Type'] },
+      { db: 'numero_piece', label: 'N° pièce', required: true },
+      { db: 'numero_tiers_entete', label: 'N° tiers entête' },
+      { db: 'intitule_tiers_entete', label: 'Intitulé tiers entête' },
+      { db: 'numero_tiers_ligne', label: 'N° tiers ligne' },
+      { db: 'intitule_tiers_ligne', label: 'Intitulé tiers ligne' },
+      { db: 'numero_piece_devis', label: 'N° devis', aliases: ['N° pièce du devis', 'N piece du devis'] },
+      { db: 'numero_piece_bc', label: 'N° BC', aliases: ['N° pièce du BC', 'N piece du BC'] },
+      { db: 'numero_piece_pl', label: 'N° PL', aliases: ['N° pièce de la PL', 'N piece de la PL'] },
+      { db: 'numero_piece_bl', label: 'N° BL', aliases: ['N° pièce du BL', 'N piece du BL'] },
+      { db: 'date_piece', label: 'Date', type: 'date', aliases: ['Date pièce', 'Date de la pièce'] },
+      { db: 'date_devis', label: 'Date du devis', type: 'date' },
+      { db: 'date_bc', label: 'Date du BC', type: 'date' },
+      { db: 'date_pl', label: 'Date de la PL', type: 'date' },
+      { db: 'date_bl', label: 'Date du BL', type: 'date' },
+      { db: 'date_livraison', label: 'Date livraison', type: 'date', aliases: ['Date livrai'] },
+      { db: 'reference_article', label: 'Référence article', required: true },
+      { db: 'reference_client', label: 'Réf. client', aliases: ['Réf client', 'Reference client', 'Ref client'] },
+      { db: 'designation', label: 'Désignation' },
+      { db: 'complement', label: 'Complément' },
+      { db: 'reference_ligne', label: 'Référence', aliases: ['Reference', 'Référence'] },
+      { db: 'gamme_1', label: 'Gamme 1' },
+      { db: 'gamme_2', label: 'Gamme 2' },
+      { db: 'numero_serie_lot', label: 'N° série/lot', aliases: ['N° série / lot', 'N série lot'] },
+      { db: 'complement_serie_lot', label: 'Complément série/lot', aliases: ['Complément série / lot'] },
+      { db: 'pu_ht', label: 'P.U. HT', type: 'number', aliases: ['PU HT'] },
+      { db: 'pu_ttc', label: 'P.U. TTC', type: 'number', aliases: ['PU TTC'] },
+      { db: 'pu_devise', label: 'P.U. Devise', type: 'number', aliases: ['PU Devise'] },
+      { db: 'pu_bon_commande', label: 'P.U. bon de commande', type: 'number' },
+      { db: 'ressource', label: 'Ressource' },
+      { db: 'qte_ressource', label: 'Qté ressource', type: 'number' },
+      { db: 'quantite', label: 'Quantité', type: 'number', aliases: ['Qté'] },
+      { db: 'qte_colisee', label: 'Qté colisée', type: 'number' },
+      { db: 'conditionnement', label: 'Conditionnement' },
+      { db: 'qte_devis', label: 'Qté devis', type: 'number' },
+      { db: 'qte_commandee', label: 'Qté commandée', type: 'number', aliases: ['Qte commandee'] },
+      { db: 'qte_preparee', label: 'Qté préparée', type: 'number', aliases: ['Qte preparee', 'Qté prépar'] },
+      { db: 'qte_livree', label: 'Qté livrée', type: 'number', aliases: ['Qte livree'] },
+      { db: 'poids_net_global', label: 'Poids net global', type: 'number' },
+      { db: 'poids_brut_global', label: 'Poids brut global', type: 'number' },
+      { db: 'remise', label: 'Remise', type: 'number', numberFormat: 'percent_ratio', aliases: ['Remise %', '% remise'] },
+      { db: 'pu_net', label: 'P.U. net', type: 'number', aliases: ['PU net'] },
+      { db: 'pu_net_ttc', label: 'P.U. net TTC', type: 'number', aliases: ['PU net TTC'] },
+      { db: 'pu_net_devise', label: 'P.U. net Devise', type: 'number', aliases: ['PU net devise'] },
+      { db: 'prix_revient_unitaire', label: 'Prix de revient unitaire', type: 'number', aliases: ['Prix revient unitaire'] },
+      { db: 'cmup', label: 'CMUP', type: 'number' },
+      { db: 'montant_ht', label: 'Montant HT', type: 'number' },
+      { db: 'montant_ht_devise', label: 'Montant HT Devise', type: 'number' },
+      { db: 'taxe_1', label: 'Taxe 1', type: 'number', numberFormat: 'percent_ratio' },
+      { db: 'taxe_2', label: 'Taxe 2', type: 'number', numberFormat: 'percent_ratio' },
+      { db: 'taxe_3', label: 'Taxe 3', type: 'number', numberFormat: 'percent_ratio' },
+      { db: 'prix_revient_total', label: 'Prix de revient total', type: 'number' },
+      { db: 'montant_ttc', label: 'Montant TTC', type: 'number' },
+      { db: 'collaborateur', label: 'Collaborateur' },
+      { db: 'depot', label: 'Dépôt' },
+      { db: 'affaire', label: 'Affaire' },
+      { db: 'date_peremption', label: 'Date péremption', type: 'date' },
+      { db: 'date_fabrication', label: 'Date fabrication', type: 'date' },
+      { db: 'base_calcul_marge', label: 'Base calcul marge', type: 'number' },
+      { db: 'marge_valeur', label: 'Marge en valeur', type: 'number', aliases: ['Marge valeur'] },
+      { db: 'marge_pourcent', label: 'Marge en %', type: 'number', numberFormat: 'percent_ratio', aliases: ['Marge %', 'Marge pourcent'] },
+      { db: 'projet', label: 'Projet' },
+    ],
+  }
+
 ]
 
 
@@ -489,6 +614,8 @@ const FILE_NAME_RULES: Partial<Record<TableKey, { keywords: string[]; expectedLa
   ref_tiers: { keywords: ['tiers'], expectedLabel: 'tiers' },
   ref_articles: { keywords: ['article'], expectedLabel: 'article' },
   ref_collaborateurs: { keywords: ['collaborateur', 'collaborateurs', 'collab'], expectedLabel: 'collaborateur ou collaborateurs' },
+  stock_articles_snapshot: { keywords: ['article stock', 'stock article', 'stock'], expectedLabel: 'article stock ou stock' },
+  commandes_fournisseurs_lignes: { keywords: ['bdcf', 'commande fournisseur', 'commandes fournisseurs', 'fournisseur'], expectedLabel: 'BDCF ou commande fournisseur' },
 }
 
 function isLineTableKey(key: TableKey) {
@@ -510,6 +637,98 @@ const EXTRA_HEADER_ALIASES: Record<TableKey, Record<string, string>> = {
   ref_collaborateurs: {},
   ref_articles: {},
   ref_tiers: {},
+  stock_articles_snapshot: {
+    type: 'type_article',
+    reference_article: 'reference_article',
+    reference_arti: 'reference_article',
+    designation: 'designation',
+    famille: 'famille',
+    unite_de_vente: 'unite_vente',
+    unite_vente: 'unite_vente',
+    suivi_de_stock: 'suivi_stock',
+    prix_dachat: 'prix_achat',
+    prix_achat: 'prix_achat',
+    prix_de_vente: 'prix_vente',
+    prix_vente: 'prix_vente',
+    fournisseur_principal: 'fournisseur_principal',
+    stock_reel: 'stock_reel',
+    stock_disponible: 'stock_disponible',
+    stock_a_terme: 'stock_a_terme',
+    stock_terme: 'stock_a_terme',
+    article_de_substitution: 'article_substitution',
+    date_de_creation: 'date_creation',
+    derniere_mise_a_jour: 'derniere_mise_a_jour',
+    categorie_fluide_hfc: 'categorie_fluide_hfc',
+    marque: 'marque',
+    type_dequipement: 'type_equipement',
+    type_equipement: 'type_equipement',
+    dimensions_hxlxp: 'dimensions_hxlxp',
+    type_de_gaz: 'type_gaz',
+    type_gaz: 'type_gaz',
+    categorie_psi: 'categorie_psi',
+    vieproduit: 'vie_produit',
+    vie_produit: 'vie_produit',
+  },
+  commandes_fournisseurs_lignes: {
+    type: 'type_document',
+    date: 'date_piece',
+    date_piece: 'date_piece',
+    n_piece: 'numero_piece',
+    numero_piece: 'numero_piece',
+    n_piece_du_devis: 'numero_piece_devis',
+    n_devis: 'numero_piece_devis',
+    n_piece_du_bc: 'numero_piece_bc',
+    n_bc: 'numero_piece_bc',
+    n_piece_de_la_pl: 'numero_piece_pl',
+    n_pl: 'numero_piece_pl',
+    n_piece_du_bl: 'numero_piece_bl',
+    n_bl: 'numero_piece_bl',
+    reference_arti: 'reference_article',
+    reference_article: 'reference_article',
+    ref_article: 'reference_article',
+    ref_client: 'reference_client',
+    reference: 'reference_ligne',
+    ref: 'reference_ligne',
+    qte_prepare: 'qte_preparee',
+    qte_preparee: 'qte_preparee',
+    qte_commandee: 'qte_commandee',
+    qte_livree: 'qte_livree',
+    poids_net_global: 'poids_net_global',
+    poids_brut_global: 'poids_brut_global',
+    date_livrai: 'date_livraison',
+    date_livraison: 'date_livraison',
+    p_u_ht: 'pu_ht',
+    pu_ht: 'pu_ht',
+    p_u_ttc: 'pu_ttc',
+    pu_ttc: 'pu_ttc',
+    p_u_devise: 'pu_devise',
+    pu_devise: 'pu_devise',
+    p_u_bon_de_commande: 'pu_bon_commande',
+    p_u_net: 'pu_net',
+    pu_net: 'pu_net',
+    p_u_net_ttc: 'pu_net_ttc',
+    pu_net_ttc: 'pu_net_ttc',
+    p_u_net_devise: 'pu_net_devise',
+    pu_net_devise: 'pu_net_devise',
+    prix_de_revient_unitaire: 'prix_revient_unitaire',
+    prix_revient_unitaire: 'prix_revient_unitaire',
+    cmup: 'cmup',
+    montant_ht: 'montant_ht',
+    montant_ht_devise: 'montant_ht_devise',
+    taxe_1: 'taxe_1',
+    taxe_2: 'taxe_2',
+    taxe_3: 'taxe_3',
+    prix_de_revient_total: 'prix_revient_total',
+    prix_revient_total: 'prix_revient_total',
+    montant_ttc: 'montant_ttc',
+    base_calcul_marge: 'base_calcul_marge',
+    marge_en_valeur: 'marge_valeur',
+    marge_valeur: 'marge_valeur',
+    marge_en: 'marge_pourcent',
+    marge_pourcent: 'marge_pourcent',
+    marge_pct: 'marge_pourcent',
+    taux_de_marge: 'marge_pourcent',
+  },
   facture_lignes: {
     date: 'date_facture',
     date_piece: 'date_facture',
@@ -1032,6 +1251,14 @@ function detectAutoImportFileKind(fileName: string): AutoImportFileKind {
 
   // Les fichiers archivés / processing sont préfixés par timestamp_runX_.
   // On détecte donc le type même si Activite / Facture / Devis n'est plus au tout début du nom.
+  if (
+    normalized.startsWith('article_stock') ||
+    normalized.includes('article_stock') ||
+    normalized.startsWith('stock_article') ||
+    normalized.includes('stock_article') ||
+    normalized === 'stock'
+  ) return 'StockArticle'
+  if (normalized.startsWith('bdcf') || normalized.includes('bdcf')) return 'BDCF'
   if (normalized.startsWith('activite') || normalized.includes('activite')) return 'Activite'
   if (normalized.startsWith('facture') || normalized.includes('facture')) return 'Facture'
   if (normalized.startsWith('devis') || normalized.includes('devis')) return 'Devis'
@@ -1049,7 +1276,7 @@ function isAutoImportCsv(fileName: string) {
 
 function isValidAutoImportFileName(fileName: string) {
   const kind = detectAutoImportFileKind(fileName)
-  if (kind === 'Activite' || kind === 'Facture' || kind === 'Devis') return isAutoImportXlsx(fileName) || isAutoImportCsv(fileName)
+  if (kind === 'StockArticle' || kind === 'BDCF' || kind === 'Activite' || kind === 'Facture' || kind === 'Devis') return isAutoImportXlsx(fileName) || isAutoImportCsv(fileName)
   return false
 }
 
@@ -1060,6 +1287,8 @@ const AUTO_IMPORT_MAX_CSV_CHUNK_BYTES = 500 * 1024
 const AUTO_IMPORT_TARGET_CSV_CHUNK_BYTES = Math.floor(AUTO_IMPORT_MAX_CSV_CHUNK_BYTES * 0.92)
 
 function autoImportKindBaseName(kind: AutoImportFileKind) {
+  if (kind === 'StockArticle') return 'Article_stock'
+  if (kind === 'BDCF') return 'BDCF'
   if (kind === 'Activite') return 'Activite'
   if (kind === 'Facture') return 'Facture'
   if (kind === 'Devis') return 'Devis'
@@ -1132,6 +1361,8 @@ function validateAutoImportPendingFileSet(files: AutoImportNamedFileForValidatio
 
 function getTableConfigForAutoImportKind(kind: AutoImportFileKind) {
   const tableKeyByKind: Partial<Record<AutoImportFileKind, TableKey>> = {
+    StockArticle: 'stock_articles_snapshot',
+    BDCF: 'commandes_fournisseurs_lignes',
     Activite: 'activite_lignes',
     Facture: 'facture_lignes',
     Devis: 'devis_lignes',
@@ -1189,6 +1420,8 @@ function writeAutoImportCsvFile(headerRow: any[], dataRows: any[][], fileName: s
 }
 
 function getAutoImportTableKeyFromKind(kind: AutoImportFileKind): TableKey | null {
+  if (kind === 'StockArticle') return 'stock_articles_snapshot'
+  if (kind === 'BDCF') return 'commandes_fournisseurs_lignes'
   if (kind === 'Activite') return 'activite_lignes'
   if (kind === 'Facture') return 'facture_lignes'
   if (kind === 'Devis') return 'devis_lignes'
@@ -1288,27 +1521,35 @@ async function splitXlsxForAutoImportUpload(file: File, kind: AutoImportFileKind
   const dataRows = rawDataRows.map((row) => normalizeAutoImportDateCellsForCsv(row, dateColumnIndexes))
 
   const documentColumnIndex = getAutoImportDocumentColumnIndex(headerRow, kind)
-  if (documentColumnIndex < 0) {
-    throw new Error(
-      `Impossible de découper ${file.name} : colonne N° pièce / numero_piece introuvable. ` +
-      `Le découpage automatique doit préserver les documents entiers.`
-    )
-  }
 
   const groups: { key: string; rows: any[][] }[] = []
   const groupByDocument = new Map<string, { key: string; rows: any[][] }>()
 
-  dataRows.forEach((row, index) => {
-    const rawDocument = normalizeText(row[documentColumnIndex])
-    const key = rawDocument ? String(rawDocument) : `__ligne_sans_numero_${index + 2}`
-    let group = groupByDocument.get(key)
-    if (!group) {
-      group = { key, rows: [] }
-      groupByDocument.set(key, group)
-      groups.push(group)
+  if (documentColumnIndex < 0) {
+    if (kind !== 'StockArticle') {
+      throw new Error(
+        `Impossible de découper ${file.name} : colonne N° pièce / numero_piece introuvable. ` +
+        `Le découpage automatique doit préserver les documents entiers.`
+      )
     }
-    group.rows.push(row)
-  })
+
+    // Le fichier Article stock n'a pas de numéro de document : le découpage peut se faire ligne par ligne.
+    dataRows.forEach((row, index) => {
+      groups.push({ key: `stock_${index + 2}`, rows: [row] })
+    })
+  } else {
+    dataRows.forEach((row, index) => {
+      const rawDocument = normalizeText(row[documentColumnIndex])
+      const key = rawDocument ? String(rawDocument) : `__ligne_sans_numero_${index + 2}`
+      let group = groupByDocument.get(key)
+      if (!group) {
+        group = { key, rows: [] }
+        groupByDocument.set(key, group)
+        groups.push(group)
+      }
+      group.rows.push(row)
+    })
+  }
 
   const baseName = autoImportKindBaseName(kind)
   const buildFile = (partIndex: number, rows: any[][]) =>
@@ -1899,7 +2140,7 @@ const SMC_BACKGROUND_POLL_MS = 5000
 
 
 type AutoImportFolder = 'pending' | 'processing' | 'rejected' | 'archive'
-type AutoImportFileKind = 'Activite' | 'Facture' | 'Devis' | 'Invalide'
+type AutoImportFileKind = 'StockArticle' | 'BDCF' | 'Activite' | 'Facture' | 'Devis' | 'Invalide'
 type AutoImportReportTab = 'pre_smc' | 'final' | 'errors'
 
 type AutoImportStorageFile = {
@@ -2940,6 +3181,20 @@ export default function ImportsParametragePage() {
 
             targetRow.updated_at = nowIso
 
+            if (config.key === 'stock_articles_snapshot') {
+              targetRow.date_snapshot = formatDateForSql(new Date())
+              targetRow.source_import = file.name
+              targetRow.imported_at = nowIso
+              targetRow.depot = targetRow.depot || 'GLOBAL'
+            }
+
+            if (config.key === 'commandes_fournisseurs_lignes') {
+              targetRow.row_number = index + 2
+              targetRow.source_import = file.name
+              targetRow.imported_at = nowIso
+              targetRow.depot = targetRow.depot || 'GLOBAL'
+            }
+
             return targetRow
           })
 
@@ -3064,6 +3319,37 @@ export default function ImportsParametragePage() {
       throw new Error(
         `Nettoyage préalable activité impossible : ${error.message}. ` +
           `Crée ou vérifie la fonction SQL public.reset_import_activite_tables().`
+      )
+    }
+
+    return { ok: true }
+  }
+
+
+  function isStockAvailabilityImportTable(key: TableKey) {
+    return key === 'stock_articles_snapshot' || key === 'commandes_fournisseurs_lignes'
+  }
+
+  async function resetStockAvailabilityTableBeforeImport(
+    config: TableConfig,
+    onProgress?: (detail: string) => void
+  ) {
+    const rpcByTable: Partial<Record<TableKey, string>> = {
+      stock_articles_snapshot: 'reset_stock_articles_snapshot_import',
+      commandes_fournisseurs_lignes: 'reset_commandes_fournisseurs_lignes_import',
+    }
+
+    const rpcName = rpcByTable[config.key]
+    if (!rpcName) return { ok: true }
+
+    onProgress?.(`Vidage préalable de ${config.label} avant rechargement complet`)
+
+    const { error } = await supabase.rpc(rpcName)
+
+    if (error) {
+      throw new Error(
+        `Nettoyage préalable ${config.label} impossible : ${error.message}. ` +
+          `Crée ou vérifie la fonction SQL public.${rpcName}().`
       )
     }
 
@@ -3389,6 +3675,25 @@ export default function ImportsParametragePage() {
         `Flux articles non recalculé automatiquement ; période métier conseillée : ${summarizePeriodList(fluxPeriods)}. ` +
         'SMC non reconstruite automatiquement.'
       )
+    }
+
+    if (isStockAvailabilityImportTable(config.key)) {
+      const { data, error } = await supabase.rpc('rebuild_stock_projection_hebdo_front', {
+        p_date_debut: formatDateForSql(new Date()),
+        p_nb_semaines: 16,
+        p_scenario_prevision_pct: 1.2,
+        p_depot_mode: 'GLOBAL',
+        p_commentaire: `Projection stock automatique après import manuel ${config.label}`,
+      })
+
+      if (error) {
+        throw new Error(
+          `Recalcul projection stock impossible après import ${config.label} : ${error.message}. ` +
+            `Crée ou vérifie la fonction SQL public.rebuild_stock_projection_hebdo_front().`
+        )
+      }
+
+      return `Stock / BDCF importé. Projection hebdomadaire stock recalculée sur 16 semaines, scénario historique BL x 120 %. Run : ${data || 'créé'}.`
     }
 
     if (config.key === 'ref_familles') {
@@ -3755,7 +4060,7 @@ export default function ImportsParametragePage() {
   async function writeChunk(rows: GenericRow[], config: TableConfig) {
     const cleanRows = rows.map(stripTechnicalImportFields)
 
-    if (isLineTableKey(config.key)) {
+    if (isLineTableKey(config.key) || isStockAvailabilityImportTable(config.key)) {
       const { error: insertError } = await supabase
         .from(config.key)
         .insert(cleanRows)
@@ -3976,6 +4281,10 @@ export default function ImportsParametragePage() {
       updateImportStep('reset', 'running', 'Vidage activité avant rechargement complet')
       await resetActivityTablesBeforeImport((detail) => updateImportStep('reset', 'running', detail))
       updateImportStep('reset', 'done', 'activite_lignes et indicateur_activite_mensuel vidées')
+    } else if (isStockAvailabilityImportTable(config.key)) {
+      updateImportStep('reset', 'running', `Vidage ${config.label} avant rechargement complet`)
+      await resetStockAvailabilityTableBeforeImport(config, (detail) => updateImportStep('reset', 'running', detail))
+      updateImportStep('reset', 'done', `${config.label} vidé avant import`)
     } else {
       updateImportStep('reset', 'done', 'Étape non requise pour cette table')
     }
@@ -4926,7 +5235,7 @@ export default function ImportsParametragePage() {
         throw new Error(
           'Fichier(s) refusé(s) : ' +
           invalidFiles.map((file) => file.name).join(', ') +
-          '. Les fichiers attendus sont : Activite.xlsx, Facture.xlsx, Devis.xlsx. Le dépôt automatique les convertit ensuite en CSV découpés.'
+          '. Les fichiers attendus sont : Article stock.xlsx, BDCF.xlsx, Activite.xlsx, Facture.xlsx, Devis.xlsx. Le dépôt automatique les convertit ensuite en CSV découpés.'
         )
       }
 
@@ -4987,9 +5296,11 @@ export default function ImportsParametragePage() {
 
   function sortAutoImportFilesForPipeline(files: AutoImportStorageFile[]) {
     const order: Record<AutoImportFileKind, number> = {
-      Activite: 1,
-      Facture: 2,
-      Devis: 3,
+      StockArticle: 1,
+      BDCF: 2,
+      Activite: 3,
+      Facture: 4,
+      Devis: 5,
       Invalide: 99,
     }
 
@@ -5458,6 +5769,10 @@ export default function ImportsParametragePage() {
           report_email_to: autoImportSendReportEmail ? autoImportReportEmailTo.trim() : '',
           send_report_email: autoImportSendReportEmail,
           launch_smc: launchSmc,
+          launch_stock_projection: true,
+          stock_projection_weeks: 16,
+          stock_projection_sales_coeff: 1.2,
+          stock_projection_depot_mode: 'GLOBAL',
           expected_files: pendingFiles.map((file) => ({
             name: file.name,
             path: file.path,
@@ -5476,7 +5791,7 @@ export default function ImportsParametragePage() {
       const runId = Number((data as any)?.run_id || (data as any)?.runId || 0)
       setAutoImportMessage(
         `Job serveur${runId ? ` #${runId}` : ''} créé. ` +
-        `Le serveur va importer les fichiers, reconstruire flux_articles, reconstruire Focus Mensuel et produire le rapport avant SMC. ` +
+        `Le serveur va importer les fichiers, reconstruire flux_articles, recalculer la projection stock si Stock/BDCF sont présents, reconstruire Focus Mensuel et produire le rapport avant SMC. ` +
         `${launchSmc ? 'SMC sera lancé automatiquement ensuite. ' : 'SMC ne sera pas lancé : le job s’arrêtera après le rapport avant SMC. '}` +
         `Tu peux fermer le front ; utilise Actualiser statut pour suivre l'avancement.`
       )
@@ -5782,8 +6097,8 @@ export default function ImportsParametragePage() {
             <div>
               <h2 className="text-lg font-black tracking-tight">Pipeline automatique serveur — fichiers & job global</h2>
               <p className="mt-1 max-w-4xl text-sm text-slate-600">
-                Dépôt dans le bucket <b>{AUTO_IMPORT_BUCKET}</b>, dossier <b>pending</b>. Les fichiers attendus sont <b>Activite.xlsx</b>, <b>Facture.xlsx</b> et <b>Devis.xlsx</b>.
-                Les fichiers Excel sont automatiquement convertis et découpés en plusieurs <b>.csv</b> de moins de <b>500 Ko</b>, en conservant la ligne d’entête et sans couper un même numéro de document entre deux fichiers. Les imports manuels existants ne sont pas modifiés :
+                Dépôt dans le bucket <b>{AUTO_IMPORT_BUCKET}</b>, dossier <b>pending</b>. Les fichiers attendus sont <b>Article stock.xlsx</b>, <b>BDCF.xlsx</b>, <b>Activite.xlsx</b>, <b>Facture.xlsx</b> et <b>Devis.xlsx</b>.
+                Les fichiers Excel sont automatiquement convertis et découpés en plusieurs <b>.csv</b> de moins de <b>500 Ko</b>, en conservant la ligne d’entête. Les fichiers de documents ne coupent pas un même numéro de document entre deux morceaux ; le fichier stock, lui, peut être découpé ligne par ligne. Les imports manuels existants ne sont pas modifiés :
                 ce bloc ne fait que charger les fichiers découpés, lancer le job global et afficher les rapports.
                 Le pipeline serveur traite ensuite <b>un seul morceau par invocation</b>, pour éviter les limites CPU/mémoire, puis relance <b>flux_articles</b> sur les <b>{AUTO_IMPORT_FLUX_ARTICLES_MONTHS_BACK} derniers mois</b>, reconstruit le <b>cache Focus Mensuel du mois courant</b>, génère le PDF <b>reports/focus-mensuel/Rapport d'activité quotidien.pdf</b> en écrasant l'ancien fichier, génère le rapport avant SMC, puis lance ou non SMC selon le bouton choisi.
               </p>
