@@ -63,6 +63,12 @@ type UserAccessProfile = {
   can_todo?: boolean | null
 }
 
+type StatusScopeOverride = {
+  active: boolean
+  agences?: string[] | string | null
+  collaborateurs?: string[] | string | null
+}
+
 type TodoSignal = {
   status: StatusLevel
   count: number
@@ -305,6 +311,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const lastLoggedPathRef = useRef<string | null>(null)
   const lastStatusRefreshRef = useRef(0)
   const access = usePageFilterAccess()
+  const [statusScopeOverride, setStatusScopeOverride] = useState<StatusScopeOverride | null>(null)
   const isLoginPage = pathname === '/login'
   const isUnauthorizedPage = pathname === '/unauthorized'
   const isPdfPrintPage =
@@ -343,14 +350,32 @@ function AppShell({ children }: { children: React.ReactNode }) {
     'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Logo%20et%20images/Image%20site%20CEGECLIM%20maison.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJMb2dvIGV0IGltYWdlcy9JbWFnZSBzaXRlIENFR0VDTElNIG1haXNvbi5qcGciLCJpYXQiOjE3NzU1MDYyNTEsImV4cCI6NDg5NzU3MDI1MX0.d1YT7_-xD44QOm2LFbZIfpkjh9kiIGjpJiEuJxV0rMM'
 
   function getAllowedAgencesForStatus(accessProfile?: UserAccessProfile | null) {
+    // 1) La restriction user_page_access est prioritaire : elle borne toujours le périmètre.
     const fromHook = parseAllowedAgences(access.allowedAgences)
     if (fromHook.length) return fromHook
+
+    // 2) Sinon, on suit le filtre actif de l'écran courant (portefeuille, synthèse, etc.).
+    const fromPageFilter = statusScopeOverride?.active
+      ? parseAllowedAgences(statusScopeOverride.agences)
+      : []
+    if (fromPageFilter.length) return fromPageFilter
+
+    // 3) Fallback direct en relisant le profil si le hook n'est pas encore synchronisé.
     return parseAllowedAgences((accessProfile as any)?.allowed_agences ?? (accessProfile as any)?.allowed_agence)
   }
 
   function getAllowedCollaborateursForStatus(accessProfile?: UserAccessProfile | null) {
+    // 1) La restriction user_page_access est prioritaire : elle borne toujours le périmètre.
     const fromHook = parseAllowedCollaborateurs(access.allowedCollaborateurs)
     if (fromHook.length) return fromHook
+
+    // 2) Sinon, on suit le filtre actif de l'écran courant.
+    const fromPageFilter = statusScopeOverride?.active
+      ? parseAllowedCollaborateurs(statusScopeOverride.collaborateurs)
+      : []
+    if (fromPageFilter.length) return fromPageFilter
+
+    // 3) Fallback direct en relisant le profil si le hook n'est pas encore synchronisé.
     return parseAllowedCollaborateurs((accessProfile as any)?.allowed_collaborateurs)
   }
 
@@ -585,6 +610,66 @@ function AppShell({ children }: { children: React.ReactNode }) {
     return () => clearInterval(interval)
   }, [])
 
+
+  useEffect(() => {
+    function handleStatusScopeChange(event: Event) {
+      const detail = (event as CustomEvent<Partial<StatusScopeOverride>>).detail || {}
+
+      if (!detail.active) {
+        setStatusScopeOverride(null)
+        return
+      }
+
+      setStatusScopeOverride({
+        active: true,
+        agences: parseAllowedAgences(detail.agences),
+        collaborateurs: parseAllowedCollaborateurs(detail.collaborateurs),
+      })
+    }
+
+    window.addEventListener('cegeclim:status-scope-change', handleStatusScopeChange)
+
+    return () => {
+      window.removeEventListener('cegeclim:status-scope-change', handleStatusScopeChange)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!sessionChecked || accessLoading || !hasSession || !email) return
+    if (isLoginPage || isUnauthorizedPage || isPdfPrintPage) return
+    if (access.loading) return
+
+    const timer = setTimeout(() => {
+      void refreshStatusIndicators({ force: true })
+    }, 150)
+
+    return () => clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    sessionChecked,
+    accessLoading,
+    hasSession,
+    email,
+    isLoginPage,
+    isUnauthorizedPage,
+    isPdfPrintPage,
+    access.loading,
+    access.allowedAgences.join('|'),
+    access.allowedCollaborateurs.join('|'),
+    statusScopeOverride?.agences && Array.isArray(statusScopeOverride.agences) ? statusScopeOverride.agences.join('|') : String(statusScopeOverride?.agences || ''),
+    statusScopeOverride?.collaborateurs && Array.isArray(statusScopeOverride.collaborateurs) ? statusScopeOverride.collaborateurs.join('|') : String(statusScopeOverride?.collaborateurs || ''),
+  ])
+
+  useEffect(() => {
+    function handleWindowFocus() {
+      void refreshStatusIndicators({ force: true })
+    }
+
+    window.addEventListener('focus', handleWindowFocus)
+    return () => window.removeEventListener('focus', handleWindowFocus)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [email, sessionChecked, hasSession])
+
   useEffect(() => {
     if (!sessionChecked || accessLoading || !hasSession || !email) return
     if (isLoginPage || isUnauthorizedPage || isPdfPrintPage) return
@@ -595,7 +680,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
 
     const interval = setInterval(() => {
       void refreshStatusIndicators()
-    }, 15 * 60 * 1000)
+    }, 5 * 60 * 1000)
 
     return () => {
       clearTimeout(initialTimer)
@@ -979,6 +1064,18 @@ function AppShell({ children }: { children: React.ReactNode }) {
       ) as CertificationAlertRow[]
 
       setCertificationRows(rows)
+
+      const expiredCount = rows.filter((row) => String(row.alert_status || '').toLowerCase() === 'expired').length
+      const soonCount = rows.length - expiredCount
+      setCertificationSignals((current) => ({
+        ...current,
+        [kind]: {
+          status: expiredCount > 0 ? 'red' : rows.length > 0 ? 'orange' : 'green',
+          count: rows.length,
+          expiredCount,
+          soonCount,
+        },
+      }))
     } catch (error: any) {
       console.error('Détail alertes certifications clients', error)
       setCertificationRows([])
@@ -1180,7 +1277,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
                   onClick={() => openCertificationModal('capacite')}
                   title={
                     certificationSignals.capacite.count > 0
-                      ? `Capacité gaz : ${certificationSignals.capacite.soonCount} validité(s) à moins d’un mois`
+                      ? `Capacité gaz : ${certificationSignals.capacite.count} validité(s) à moins d’un mois sur le périmètre actif`
                       : 'Aucune capacité gaz à échéance dans moins d’un mois'
                   }
                 />
@@ -1335,8 +1432,8 @@ function AppShell({ children }: { children: React.ReactNode }) {
                 <table style={{ ...styles.cerfaTable, minWidth: 1680 }}>
                   <thead>
                     <tr>
-                      <th style={styles.cerfaTh}>Date validité ADEME</th>
-                      <th style={styles.cerfaTh}>Date validité SAGE</th>
+                      <th style={styles.cerfaTh}>Date validité clients</th>
+                      <th style={styles.cerfaTh}>Date validité ref_tiers</th>
                       <th style={styles.cerfaTh}>Statut</th>
                       <th style={styles.cerfaTh}>N° tiers</th>
                       <th style={styles.cerfaTh}>Désignation</th>
