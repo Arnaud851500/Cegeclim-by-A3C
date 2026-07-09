@@ -216,12 +216,33 @@ function parseAllowedCollaborateurs(value: any) {
   return values.filter((item) => !isNoRestriction(item))
 }
 
+function normalizeComparable(value: any) {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+}
+
+function uniqueCleanTexts(values: any[]) {
+  return Array.from(new Set(values.map((value) => cleanText(value)).filter(Boolean)))
+}
+
+function chunkArray<T>(values: T[], size = 400) {
+  const output: T[][] = []
+  for (let index = 0; index < values.length; index += size) {
+    output.push(values.slice(index, index + size))
+  }
+  return output
+}
+
 function agenceMatchesAllowed(agence: string, allowedAgences: string[]) {
   if (!allowedAgences.length) return true
-  const normalizedAgence = normalizeLoose(agence)
+  const normalizedAgence = normalizeComparable(agence)
   if (!normalizedAgence) return false
   return allowedAgences.some((allowed) => {
-    const normalizedAllowed = normalizeLoose(allowed)
+    const normalizedAllowed = normalizeComparable(allowed)
     return normalizedAgence === normalizedAllowed || normalizedAgence.includes(normalizedAllowed) || normalizedAllowed.includes(normalizedAgence)
   })
 }
@@ -340,13 +361,87 @@ function AppShell({ children }: { children: React.ReactNode }) {
   function certificationRowRepresentant(row: Record<string, any>) {
     return cleanText(rawValue(row, ['representant', 'collaborateur', 'collaborateur_tiers', 'collaborateur_facture', 'commercial']))
   }
-function collaborateurMatchesAllowed(collaborateur: string, allowedCollaborateurs: string[]) {
+
+  async function fetchCertificationRefTiersByNumero(numeroTiersValues: string[]) {
+    const rows: Record<string, any>[] = []
+    const cleanedValues = uniqueCleanTexts(numeroTiersValues)
+
+    for (const group of chunkArray(cleanedValues, 400)) {
+      const { data, error } = await supabase
+        .from('ref_tiers')
+        .select('numero,representant,agence_rattachement,depot_rattachement')
+        .in('numero', group)
+
+      if (error) throw error
+      rows.push(...((data || []) as Record<string, any>[]))
+    }
+
+    return rows
+  }
+
+  async function fetchCertificationCollaborateurAgences() {
+    const { data, error } = await supabase
+      .from('ref_collaborateurs')
+      .select('*')
+      .range(0, 9999)
+
+    if (error) throw error
+
+    const agenceByCollaborateur = new Map<string, string>()
+
+    ;((data || []) as Record<string, any>[]).forEach((row) => {
+      const nom = cleanText(rawValue(row, ['nom', 'collaborateur', 'representant', 'code']))
+      const agence = cleanText(rawValue(row, ['agence', 'agence_rattachement', 'agence_collaborateur']))
+      if (nom && agence) agenceByCollaborateur.set(normalizeComparable(nom), agence)
+    })
+
+    return agenceByCollaborateur
+  }
+
+  async function enrichCertificationRowsWithAgence(rows: Record<string, any>[]) {
+    if (!rows.length) return rows
+
+    const numeroTiersValues = uniqueCleanTexts(
+      rows.map((row) => extractLeadingCode(rawValue(row, ['numero_tiers', 'numero_tiers_entete', 'code_tiers', 'tiers', 'client_code'])))
+    )
+
+    const [refTiersRows, agenceByCollaborateur] = await Promise.all([
+      fetchCertificationRefTiersByNumero(numeroTiersValues),
+      fetchCertificationCollaborateurAgences(),
+    ])
+
+    const refTiersByNumero = new Map<string, Record<string, any>>()
+    refTiersRows.forEach((row) => {
+      const numero = cleanText(rawValue(row, ['numero', 'numero_tiers', 'code_tiers']))
+      if (numero) refTiersByNumero.set(normalizeComparable(numero), row)
+    })
+
+    return rows.map((row) => {
+      const numeroTiers = extractLeadingCode(rawValue(row, ['numero_tiers', 'numero_tiers_entete', 'code_tiers', 'tiers', 'client_code']))
+      const refTier = numeroTiers ? refTiersByNumero.get(normalizeComparable(numeroTiers)) : null
+      const representant = certificationRowRepresentant(row) || cleanText(rawValue(refTier, ['representant', 'collaborateur', 'commercial']))
+      const agenceDepuisCollaborateur = representant ? agenceByCollaborateur.get(normalizeComparable(representant)) : ''
+      const agence = certificationRowAgence(row)
+        || agenceDepuisCollaborateur
+        || cleanText(rawValue(refTier, ['agence_rattachement', 'agence', 'depot_rattachement']))
+
+      return {
+        ...row,
+        numero_tiers: numeroTiers || row.numero_tiers,
+        representant: representant || row.representant,
+        agence: agence || row.agence,
+        agence_rattachement: agence || row.agence_rattachement,
+        agence_collaborateur: agence || row.agence_collaborateur,
+      }
+    })
+  }
+  function collaborateurMatchesAllowed(collaborateur: string, allowedCollaborateurs: string[]) {
   if (!allowedCollaborateurs.length) return true
-  const normalizedCollaborateur = normalizeLoose(collaborateur)
+  const normalizedCollaborateur = normalizeComparable(collaborateur)
   if (!normalizedCollaborateur) return false
 
   return allowedCollaborateurs.some((allowed) => {
-    const normalizedAllowed = normalizeLoose(allowed)
+    const normalizedAllowed = normalizeComparable(allowed)
     return (
       normalizedCollaborateur === normalizedAllowed ||
       normalizedCollaborateur.includes(normalizedAllowed) ||
@@ -751,8 +846,9 @@ function collaborateurMatchesAllowed(collaborateur: string, allowedCollaborateur
 
       if (error) throw error
 
+      const enrichedRows = await enrichCertificationRowsWithAgence((data || []) as Record<string, any>[])
       const rows = filterCertificationRowsForAccess(
-        ((data || []) as Record<string, any>[]),
+        enrichedRows,
         allowedAgences,
         allowedCollaborateurs
       )
@@ -875,8 +971,9 @@ function collaborateurMatchesAllowed(collaborateur: string, allowedCollaborateur
 
       if (error) throw error
 
+      const enrichedRows = await enrichCertificationRowsWithAgence((data || []) as Record<string, any>[])
       const rows = filterCertificationRowsForAccess(
-        ((data || []) as Record<string, any>[]),
+        enrichedRows,
         allowedAgences,
         allowedCollaborateurs
       ) as CertificationAlertRow[]
@@ -1235,7 +1332,7 @@ function collaborateurMatchesAllowed(collaborateur: string, allowedCollaborateur
               {certificationError && <div style={styles.modalError}>Erreur : {certificationError}</div>}
 
               <div style={styles.modalTableWrapper}>
-                <table style={{ ...styles.cerfaTable, minWidth: 1580 }}>
+                <table style={{ ...styles.cerfaTable, minWidth: 1680 }}>
                   <thead>
                     <tr>
                       <th style={styles.cerfaTh}>Date validité clients</th>
@@ -1244,6 +1341,7 @@ function collaborateurMatchesAllowed(collaborateur: string, allowedCollaborateur
                       <th style={styles.cerfaTh}>N° tiers</th>
                       <th style={styles.cerfaTh}>Désignation</th>
                       <th style={styles.cerfaTh}>Département</th>
+                      <th style={styles.cerfaTh}>Agence</th>
                       <th style={styles.cerfaTh}>Représentant</th>
                       <th style={styles.cerfaTh}>SIRET</th>
                     </tr>
@@ -1251,7 +1349,7 @@ function collaborateurMatchesAllowed(collaborateur: string, allowedCollaborateur
                   <tbody>
                     {certificationRows.length === 0 && !certificationLoading ? (
                       <tr>
-                        <td colSpan={8} style={styles.cerfaEmptyCell}>
+                        <td colSpan={9} style={styles.cerfaEmptyCell}>
                           Aucune alerte.
                         </td>
                       </tr>
@@ -1270,6 +1368,7 @@ function collaborateurMatchesAllowed(collaborateur: string, allowedCollaborateur
                         <td style={styles.cerfaTdStrong}>{row.numero_tiers || '—'}</td>
                         <td style={styles.cerfaTd}>{row.designation || '—'}</td>
                         <td style={styles.cerfaTd}>{row.departement || '—'}</td>
+                        <td style={styles.cerfaTdStrong}>{row.agence || row.agence_rattachement || row.agence_collaborateur || '—'}</td>
                         <td style={styles.cerfaTd}>{row.representant || '—'}</td>
                         <td style={styles.cerfaTd}>{row.siret || '—'}</td>
                       </tr>
