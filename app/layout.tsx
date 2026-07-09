@@ -1335,8 +1335,8 @@ function AppShell({ children }: { children: React.ReactNode }) {
                 <table style={{ ...styles.cerfaTable, minWidth: 1680 }}>
                   <thead>
                     <tr>
-                      <th style={styles.cerfaTh}>Date validité clients</th>
-                      <th style={styles.cerfaTh}>Date validité ref_tiers</th>
+                      <th style={styles.cerfaTh}>Date validité ADEME</th>
+                      <th style={styles.cerfaTh}>Date validité SAGE</th>
                       <th style={styles.cerfaTh}>Statut</th>
                       <th style={styles.cerfaTh}>N° tiers</th>
                       <th style={styles.cerfaTh}>Désignation</th>
