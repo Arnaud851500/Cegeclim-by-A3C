@@ -1333,19 +1333,24 @@ const styles: Record<string, React.CSSProperties> = {
   header: {
     position: 'sticky',
     top: 0,
-    zIndex: 1000,
+    zIndex: 30000,
     width: '100%',
     background: 'rgba(255,255,255,0.86)',
     backdropFilter: 'blur(14px)',
     WebkitBackdropFilter: 'blur(14px)',
     boxShadow: '0 6px 20px rgba(0,0,0,0.08)',
+    isolation: 'isolate',
+    pointerEvents: 'auto',
   },
 
   top: {
+    position: 'relative',
+    zIndex: 30030,
     display: 'flex',
     justifyContent: 'space-between',
     padding: '6px 20px',
     alignItems: 'center',
+    pointerEvents: 'auto',
   },
 
   left: {
@@ -1374,15 +1379,21 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   right: {
+    position: 'relative',
+    zIndex: 30050,
     display: 'flex',
     gap: 10,
+    pointerEvents: 'auto',
   },
 
   rightUserBlock: {
+    position: 'relative',
+    zIndex: 30060,
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'flex-end',
     gap: 6,
+    pointerEvents: 'auto',
   },
 
   userEmail: {
@@ -1391,8 +1402,11 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   select: {
+    position: 'relative',
+    zIndex: 30070,
     padding: 6,
     borderRadius: 8,
+    pointerEvents: 'auto',
   },
 
   navBtnActive: {
@@ -1403,11 +1417,14 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   logout: {
+    position: 'relative',
+    zIndex: 30070,
     background: '#fff',
     borderRadius: 8,
     padding: '6px 10px',
     cursor: 'pointer',
     border: '1px solid #d0d7de',
+    pointerEvents: 'auto',
   },
 
   statusCard: {
@@ -1535,13 +1552,14 @@ const styles: Record<string, React.CSSProperties> = {
 
   nav: {
     position: 'relative',
-    zIndex: 1001,
+    zIndex: 30020,
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
     padding: '4px 20px 8px',
     overflow: 'visible',
     minHeight: 42,
+    pointerEvents: 'none',
   },
 
   navMenu: {
@@ -1549,6 +1567,7 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: 'center',
     alignItems: 'center',
     gap: 20,
+    pointerEvents: 'auto',
   },
 
   statusLightsRow: {
@@ -1559,6 +1578,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     gap: 8,
     alignItems: 'center',
+    pointerEvents: 'auto',
   },
 
   navBtn: {
@@ -1566,12 +1586,14 @@ const styles: Record<string, React.CSSProperties> = {
     border: 'none',
     fontWeight: 700,
     cursor: 'pointer',
+    pointerEvents: 'auto',
   },
 
   menuWrapper: {
     position: 'relative',
-    zIndex: 1002,
+    zIndex: 30040,
     paddingBottom: 10,
+    pointerEvents: 'auto',
   },
 
   dropdown: {
@@ -1583,19 +1605,21 @@ const styles: Record<string, React.CSSProperties> = {
     boxShadow: '0 10px 25px rgba(0,0,0,0.1)',
     whiteSpace: 'nowrap',
     minWidth: 'max-content',
-    zIndex: 1100,
+    zIndex: 30080,
+    pointerEvents: 'auto',
   },
 
   dropdownItem: {
     padding: 10,
     cursor: 'pointer',
     whiteSpace: 'nowrap',
+    pointerEvents: 'auto',
   },
 
   modalBackdrop: {
     position: 'fixed',
     inset: 0,
-    zIndex: 2000,
+    zIndex: 50000,
     background: 'rgba(15, 23, 42, 0.35)',
     display: 'flex',
     alignItems: 'flex-start',
@@ -1759,6 +1783,8 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   content: {
+    position: 'relative',
+    zIndex: 1,
     padding: 20,
   },
 }
