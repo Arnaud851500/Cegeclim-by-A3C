@@ -871,46 +871,32 @@ export default function StocksDisponibilitesPage() {
       const weeks = Math.max(1, Math.min(104, Number(horizonWeeks || 16)))
       const pct = Math.max(0, Number(defaultProjectionPct || 120)) / 100
 
-      const response = await supabase.rpc('rebuild_stock_projection_hebdo_front', {
-        p_date_debut: new Date().toISOString().slice(0, 10),
-        p_nb_semaines: weeks,
-        p_scenario_prevision_pct: pct,
-        p_depot_mode: 'GLOBAL',
-        p_commentaire: commentaire,
+      const sessionResponse = await supabase.auth.getSession()
+      const token = sessionResponse.data.session?.access_token
+
+      const response = await fetch('/api/stocks-disponibilites/rebuild', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          date_debut: new Date().toISOString().slice(0, 10),
+          nb_semaines: weeks,
+          scenario_prevision_pct: pct,
+          depot_mode: 'GLOBAL',
+          commentaire,
+        }),
       })
 
-      if (response.error) throw response.error
-
-      const nextSecurity = toNumber(stockSecurityInput)
-      const sameArticle = (row: StockAlertRow) => currentSelected
-        ? row.reference_article === currentSelected.reference_article && (row.depot || 'GLOBAL') === (currentSelected.depot || 'GLOBAL')
-        : false
-      const updateAlertRow = (row: StockAlertRow): StockAlertRow => {
-        if (!sameArticle(row)) return row
-        const nextLevel = levelFromValues(toNumber(row.stock_projete_min), nextSecurity)
-        return {
-          ...row,
-          stock_securite: nextSecurity,
-          qte_manquante_max: Math.max(0, nextSecurity - toNumber(row.stock_projete_min)),
-          niveau_alerte: nextLevel,
-        }
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) {
+        throw new Error(payload?.error || `Erreur HTTP ${response.status} pendant le recalcul de projection.`)
       }
 
-      setAlertes((prev) => prev.map(updateAlertRow))
-      setSelected((prev) => prev ? updateAlertRow(prev) : prev)
-      setProjection((prev) => prev.map((row) => {
-        const stock = toNumber(row.stock_projete)
-        const nextLevel = levelFromValues(stock, nextSecurity)
-        return {
-          ...row,
-          stock_securite: nextSecurity,
-          stock_disponible_projete: stock - nextSecurity,
-          quantite_manquante: Math.max(0, nextSecurity - stock),
-          niveau_alerte: nextLevel,
-        }
-      }))
+      await loadData({ keepSelected: Boolean(currentSelected), keepProjectionSettings: true })
     } catch (err: any) {
-      setError(`${err?.message || 'Erreur pendant le recalcul de projection.'}${String(err?.message || '').toLowerCase().includes('timeout') ? ' Le SQL V15 ajoute des index et augmente le timeout de la fonction ; si le navigateur coupe encore, relance depuis l’écran Import / pipeline arrière-plan.' : ''}`)
+      setError(`${err?.message || 'Erreur pendant le recalcul de projection.'}${String(err?.message || '').toLowerCase().includes('timeout') ? ' Le recalcul passe maintenant par une route serveur V17 et une fonction SQL optimisée. Si ce message persiste, réduire temporairement l’horizon puis relancer.' : ''}`)
     } finally {
       setRecalculating(false)
     }
