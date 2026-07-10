@@ -784,6 +784,9 @@ function ProjectionChart({ rows }: { rows: ProjectionRow[] }) {
 
   return (
     <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="mb-2 text-[11px] font-semibold text-slate-500">
+        Les besoins fermes sont compris dans la prévision totale. La barre rouge clair représente uniquement le complément restant à prévoir.
+      </div>
       <div className="mb-3 flex flex-wrap items-center gap-3 text-xs text-slate-600">
         <span className="inline-flex items-center gap-1">
           <span className="h-2 w-6 rounded-full bg-slate-900" /> Stock projeté
@@ -802,7 +805,7 @@ function ProjectionChart({ rows }: { rows: ProjectionRow[] }) {
         </span>
         <span className="inline-flex items-center gap-1">
           <span className="h-3 w-3 rounded bg-red-100 ring-1 ring-red-200" />{" "}
-          Besoins prévisionnels
+          Prévision complémentaire
         </span>
       </div>
 
@@ -1068,8 +1071,7 @@ function WeeklyProjectionTable({
           Hypothèses hebdomadaires de sortie
         </h3>
         <p className="text-xs text-slate-500">
-          BL N-1 par semaine, coefficient ou quantité forcée modifiable, besoins
-          clients fermes et stock projeté.
+          BL N-1 par semaine, coefficient ou prévision totale forcée. Les besoins fermes sont inclus dans la prévision : seule la part complémentaire est ajoutée au stock projeté.
         </p>
       </div>
       <div className="overflow-auto">
@@ -1086,10 +1088,10 @@ function WeeklyProjectionTable({
                 Projection %
               </th>
               <th className="border-b border-slate-200 px-3 py-2 text-right">
-                Qté forcée
+                Prévision totale forcée
               </th>
               <th className="border-b border-slate-200 px-3 py-2 text-right">
-                Sortie projetée
+                Prévision compl.
               </th>
               <th className="border-b border-slate-200 px-3 py-2 text-right">
                 Besoins fermes
@@ -1128,9 +1130,11 @@ function WeeklyProjectionTable({
                   : String(toNumber(row.prevision_forcee)));
               const manualValue =
                 manualText === "" ? null : Math.max(0, toNumber(manualText));
-              const projected =
+              const projectedTarget =
                 manualValue === null ? (base * pct) / 100 : manualValue;
-              const firm = toNumber(row.besoins_clients_fermes);
+              const firm = Math.max(0, toNumber(row.besoins_clients_fermes));
+              const projected = Math.max(0, projectedTarget - firm);
+              const totalSorties = firm + projected;
               const stock = toNumber(row.stock_projete);
               const stockFirm = toNumber(row.stock_projete_ferme);
               const security = toNumber(row.stock_securite);
@@ -1175,14 +1179,20 @@ function WeeklyProjectionTable({
                       className="w-24 rounded-lg border border-slate-300 bg-white px-2 py-1 text-right font-semibold"
                     />
                   </td>
-                  <td className="px-3 py-2 text-right font-semibold text-red-400 tabular-nums">
+                  <td
+                    className="px-3 py-2 text-right font-semibold text-red-400 tabular-nums"
+                    title={`Prévision totale ${formatNumber(projectedTarget)} moins besoins fermes ${formatNumber(firm)}`}
+                  >
                     {formatNumber(projected)}
                   </td>
                   <td className="px-3 py-2 text-right font-black text-red-900 tabular-nums">
                     {formatNumber(firm)}
                   </td>
-                  <td className="px-3 py-2 text-right font-black tabular-nums">
-                    {formatNumber(firm + projected)}
+                  <td
+                    className="px-3 py-2 text-right font-black tabular-nums"
+                    title={`Prévision totale ${formatNumber(projectedTarget)} dont ${formatNumber(firm)} ferme(s) et ${formatNumber(projected)} complémentaire(s)`}
+                  >
+                    {formatNumber(totalSorties)}
                   </td>
                   <td className="px-3 py-2 text-right font-semibold text-emerald-700 tabular-nums">
                     {formatNumber(row.commandes_fournisseurs_attendues)}
@@ -1930,9 +1940,9 @@ export default function StocksDisponibilitesPage() {
                 detail="CDC / PL ouverts"
               />
               <KpiCard
-                label="Sorties projetées"
+                label="Prévisions compl."
                 value={formatNumber(filteredKpi.prevision_ventes)}
-                detail={`Base N-1 : ${formatNumber(filteredKpi.prevision_base_n1)}`}
+                detail={`Après déduction des besoins fermes · Base N-1 : ${formatNumber(filteredKpi.prevision_base_n1)}`}
               />
               <KpiCard
                 label="Entrées BDCF"
