@@ -61,7 +61,7 @@ type ComparisonProgress = {
 };
 
 type PersistentFocusComparisonPayload = {
-  version: 2;
+  version: 3;
   type: "focus_mensuel_persistent_comparison_cache";
   created_at: string;
   month: string;
@@ -75,6 +75,10 @@ type PersistentFocusComparisonPayload = {
   ytdRowsN1: DailyRow[];
   rollingRowsN: DailyRow[];
   rollingRowsN1: DailyRow[];
+  status: "partial" | "complete";
+  completedRanges: string[];
+  totalRanges: number;
+  updated_at: string;
 };
 
 type FocusComparisonSnapshotPayload = {
@@ -304,7 +308,8 @@ const REPORT_JOB_CREATE_ROUTE = "/api/reports/focus-mensuel-pdf";
 const REPORT_JOB_PROCESS_ROUTE = "/api/reports/focus-mensuel-pdf/process";
 const REPORT_PDF_CACHE_ROUTE = "/api/reports/focus-mensuel-pdf/cache";
 const FOCUS_COMPARISON_CACHE_TABLE = "focus_mensuel_comparison_cache";
-const FOCUS_COMPARISON_CACHE_VERSION = 2;
+const FOCUS_COMPARISON_CACHE_VERSION = 3;
+const FOCUS_COMPARISON_CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 
 // Sécurité PDF : les tableaux comparatifs ne doivent jamais empêcher la capture Puppeteer.
 // Si une période reste bloquée, on garde les données déjà chargées et on laisse le PDF partir.
@@ -2454,8 +2459,10 @@ function FocusMensuelPageContent() {
       .maybeSingle();
 
     if (error) {
-      // La page reste utilisable même si la table n'a pas encore été créée.
       console.warn("Lecture cache comparatif persistant impossible:", error);
+      setCacheInfo(
+        `Cache comparatif inaccessible : ${error.message || String(error)}`,
+      );
       return null;
     }
 
@@ -2465,15 +2472,30 @@ function FocusMensuelPageContent() {
       payload.version !== FOCUS_COMPARISON_CACHE_VERSION ||
       payload.type !== "focus_mensuel_persistent_comparison_cache" ||
       payload.month !== month
+    )
+      return null;
+
+    const cacheDate = new Date(
+      payload.updated_at || data?.rebuilt_at || payload.created_at,
+    ).getTime();
+    if (
+      !Number.isFinite(cacheDate) ||
+      Date.now() - cacheDate > FOCUS_COMPARISON_CACHE_TTL_MS
     ) {
+      setCacheInfo(
+        "Cache comparatif expiré après 14 jours : reconstruction en cours.",
+      );
       return null;
     }
 
+    const done = Array.isArray(payload.completedRanges)
+      ? payload.completedRanges.length
+      : 0;
+    const total = Number(payload.totalRanges || 0);
     setCacheInfo(
-      `Tableaux comparatifs chargés depuis le cache mensuel` +
-        (data?.rebuilt_at
-          ? ` · ${new Date(data.rebuilt_at).toLocaleString("fr-FR")}`
-          : ""),
+      payload.status === "complete"
+        ? `Cache comparatif complet chargé · valable 14 jours${data?.rebuilt_at ? ` · ${new Date(data.rebuilt_at).toLocaleString("fr-FR")}` : ""}`
+        : `Reprise du cache comparatif : ${done}/${total || "?"} blocs déjà disponibles`,
     );
     return payload;
   }
@@ -2482,6 +2504,7 @@ function FocusMensuelPageContent() {
     payload: PersistentFocusComparisonPayload,
   ) {
     const cacheKey = buildPersistentComparisonCacheKey();
+    const nowIso = new Date().toISOString();
     const { error } = await (supabase as any)
       .from(FOCUS_COMPARISON_CACHE_TABLE)
       .upsert(
@@ -2493,16 +2516,12 @@ function FocusMensuelPageContent() {
           famille_macro: familleMacro || null,
           collaborateur: effectiveCollaborateur || null,
           include_hors_statistiques: includeHorsStats,
-          payload,
-          rebuilt_at: new Date().toISOString(),
+          payload: { ...payload, updated_at: nowIso },
+          rebuilt_at: nowIso,
         },
         { onConflict: "cache_key" },
       );
-
-    if (error) {
-      // Non bloquant : les données calculées restent affichées.
-      console.warn("Sauvegarde cache comparatif persistant impossible:", error);
-    }
+    if (error) throw error;
   }
 
   async function invalidatePersistentComparisonCacheForMonth() {
@@ -2848,7 +2867,6 @@ function FocusMensuelPageContent() {
   async function loadComparisonTables(forceRefresh = false) {
     const loadId = comparisonLoadIdRef.current + 1;
     comparisonLoadIdRef.current = loadId;
-
     setComparisonLoading(true);
     setComparisonReady(false);
     setComparisonError(null);
@@ -2856,29 +2874,6 @@ function FocusMensuelPageContent() {
     setYtdRowsN1([]);
     setRollingRowsN([]);
     setRollingRowsN1([]);
-
-    if (!forceRefresh && !isPdfMode) {
-      const cached = await readPersistentComparisonCache();
-      if (loadId !== comparisonLoadIdRef.current) return;
-
-      if (cached) {
-        setYtdRowsN(cached.ytdRowsN || []);
-        setYtdRowsN1(cached.ytdRowsN1 || []);
-        setRollingRowsN(cached.rollingRowsN || []);
-        setRollingRowsN1(cached.rollingRowsN1 || []);
-        setComparisonReady(true);
-        setComparisonError(null);
-        setComparisonProgress({
-          status: "ready",
-          label: "Chargé depuis le cache mensuel persistant",
-          current: month,
-          done: 1,
-          total: 1,
-        });
-        setComparisonLoading(false);
-        return;
-      }
-    }
 
     const focusYear = Number(month.slice(0, 4));
     const result: Record<
@@ -2890,9 +2885,43 @@ function FocusMensuelPageContent() {
       rollingN: [],
       rollingN1: [],
     };
+    const completedRanges = new Set<string>();
+    let cacheCreatedAt = new Date().toISOString();
+
+    if (!forceRefresh && !isPdfMode) {
+      const cached = await readPersistentComparisonCache();
+      if (loadId !== comparisonLoadIdRef.current) return;
+      if (cached) {
+        result.ytdN = cached.ytdRowsN || [];
+        result.ytdN1 = cached.ytdRowsN1 || [];
+        result.rollingN = cached.rollingRowsN || [];
+        result.rollingN1 = cached.rollingRowsN1 || [];
+        (cached.completedRanges || []).forEach((key) =>
+          completedRanges.add(key),
+        );
+        cacheCreatedAt = cached.created_at || cacheCreatedAt;
+        setYtdRowsN([...result.ytdN]);
+        setYtdRowsN1([...result.ytdN1]);
+        setRollingRowsN([...result.rollingN]);
+        setRollingRowsN1([...result.rollingN1]);
+        if (cached.status === "complete") {
+          const total = cached.totalRanges || completedRanges.size;
+          setComparisonReady(true);
+          setComparisonProgress({
+            status: "ready",
+            label: "Chargé depuis le cache mensuel persistant",
+            current: month,
+            done: total,
+            total,
+          });
+          setComparisonLoading(false);
+          return;
+        }
+      }
+    }
+
     const skippedRanges: string[] = [];
     const comparisonStartedAt = Date.now();
-
     const flushPartialComparisonRows = () => {
       if (loadId !== comparisonLoadIdRef.current) return;
       setYtdRowsN([...result.ytdN]);
@@ -2901,28 +2930,11 @@ function FocusMensuelPageContent() {
       setRollingRowsN1([...result.rollingN1]);
     };
 
-    const hasReachedPdfHardStop = () => {
-      return (
-        isPdfMode &&
-        Date.now() - comparisonStartedAt >= PDF_COMPARISON_HARD_STOP_MS
-      );
-    };
-
     try {
       const ytdStart = `${focusYear}-01-01`;
-      // On charge jusqu'à la fin du mois analysé afin qu'un changement de jour focus
-      // soit servi immédiatement depuis le même cache mensuel.
       const ytdEndExclusive = monthEnd;
-      const ytdPreviousStart = `${focusYear - 1}-01-01`;
-      const ytdPreviousEndExclusive = addYearsYmd(ytdEndExclusive, -1);
       const rollingStart = `${addMonthsToMonth(month, -11)}-01`;
-      // Tableau 12 mois glissants : lecture en mois calendaires complets.
-      // Le jour focus ne doit pas tronquer le mois N ni le mois N-1 : chaque ligne mensuelle
-      // affiche le cumul disponible du 1er au dernier jour du mois dans le cache.
       const rollingEndExclusive = nextMonthStart(month);
-      const rollingPreviousStart = addYearsYmd(rollingStart, -1);
-      const rollingPreviousEndExclusive = addYearsYmd(rollingEndExclusive, -1);
-
       const buckets: Array<{
         key: "ytdN" | "ytdN1" | "rollingN" | "rollingN1";
         label: string;
@@ -2937,8 +2949,8 @@ function FocusMensuelPageContent() {
           key: "ytdN1",
           label: `YTD N-1 ${focusYear - 1}`,
           ranges: buildMonthlyRpcRanges(
-            ytdPreviousStart,
-            ytdPreviousEndExclusive,
+            `${focusYear - 1}-01-01`,
+            addYearsYmd(ytdEndExclusive, -1),
           ),
         },
         {
@@ -2950,189 +2962,123 @@ function FocusMensuelPageContent() {
           key: "rollingN1",
           label: "12 mois glissants N-1",
           ranges: buildMonthlyRpcRanges(
-            rollingPreviousStart,
-            rollingPreviousEndExclusive,
+            addYearsYmd(rollingStart, -1),
+            addYearsYmd(rollingEndExclusive, -1),
           ),
         },
       ];
-
-      let totalSteps = buckets.reduce(
+      const expectedRanges = buckets.reduce(
         (acc, bucket) => acc + bucket.ranges.length,
         0,
       );
-      let doneSteps = 0;
+      const rangeId = (
+        bucketKey: string,
+        range: { start: string; end: string },
+      ) => `${bucketKey}|${range.start}|${range.end}`;
+      let totalSteps = expectedRanges;
+      let doneSteps = completedRanges.size;
 
       const ensureActive = () => {
-        if (loadId !== comparisonLoadIdRef.current) {
+        if (loadId !== comparisonLoadIdRef.current)
           throw new Error("__STALE_COMPARISON_LOAD__");
-        }
       };
-
       const setProgress = (
-        bucketLabel: string,
+        label: string,
         range: { start: string; end: string } | null,
       ) => {
         if (loadId !== comparisonLoadIdRef.current) return;
         setComparisonProgress({
           status: "loading",
-          label: bucketLabel,
+          label,
           current: range
-            ? `${bucketLabel} · ${formatDateFr(range.start)} au ${formatDateFr(addDaysYmd(range.end, -1))}`
-            : bucketLabel,
+            ? `${label} · ${formatDateFr(range.start)} au ${formatDateFr(addDaysYmd(range.end, -1))}`
+            : label,
           done: doneSteps,
           total: totalSteps,
         });
       };
-
-      const markStepDone = (
-        bucketLabel: string,
-        range: { start: string; end: string } | null = null,
-      ) => {
+      const markStepDone = (label: string) => {
         doneSteps += 1;
-        setProgress(bucketLabel, range);
+        setProgress(label, null);
       };
-
       const rememberSkippedRange = (
-        bucketLabel: string,
+        label: string,
         range: { start: string; end: string },
         exception: any,
       ) => {
-        const label = `${bucketLabel} ${range.start} au ${addDaysYmd(range.end, -1)}`;
-        const message = exception?.message || String(exception);
-        skippedRanges.push(`${label} : ${message}`);
-        console.warn(
-          "Période comparaison ignorée pour ne pas bloquer le PDF:",
-          label,
-          exception,
+        skippedRanges.push(
+          `${label} ${range.start} au ${addDaysYmd(range.end, -1)} : ${exception?.message || String(exception)}`,
         );
       };
-
       const fetchDailyRangeSafely = async (
-        bucketLabel: string,
+        label: string,
         range: { start: string; end: string },
       ) => {
         ensureActive();
-        setProgress(`${bucketLabel} · découpage jour`, range);
-
+        setProgress(`${label} · découpage jour`, range);
         try {
           const rows = await fetchFocusSummaryRange(range);
-          markStepDone(`${bucketLabel} · découpage jour`, null);
+          markStepDone(`${label} · découpage jour`);
           return rows;
         } catch (exception: any) {
           if (isStaleComparisonLoad(exception)) throw exception;
-          rememberSkippedRange(`${bucketLabel} · jour`, range, exception);
-          markStepDone(`${bucketLabel} · découpage jour`, null);
+          rememberSkippedRange(`${label} · jour`, range, exception);
+          markStepDone(`${label} · découpage jour`);
           return [] as DailyRow[];
         }
       };
-
       const fetchWeeklyRangeWithDailyFallback = async (
-        bucketLabel: string,
+        label: string,
         range: { start: string; end: string },
       ) => {
         ensureActive();
-        setProgress(`${bucketLabel} · découpage semaine`, range);
-
+        setProgress(`${label} · découpage semaine`, range);
         try {
           const rows = await fetchFocusSummaryRange(range);
-          markStepDone(`${bucketLabel} · découpage semaine`, null);
+          markStepDone(`${label} · découpage semaine`);
           return rows;
         } catch (exception: any) {
           if (isStaleComparisonLoad(exception)) throw exception;
-
           const dailyRanges = splitDateRangeByDays(range.start, range.end, 1);
           totalSteps += Math.max(0, dailyRanges.length - 1);
-
-          const dailyRows: DailyRow[] = [];
-          for (const dailyRange of dailyRanges) {
-            dailyRows.push(
-              ...(await fetchDailyRangeSafely(bucketLabel, dailyRange)),
-            );
-          }
-
-          if (dailyRows.length === 0) {
-            rememberSkippedRange(`${bucketLabel} · semaine`, range, exception);
-          }
-
-          return dailyRows;
+          const rows: DailyRow[] = [];
+          for (const dailyRange of dailyRanges)
+            rows.push(...(await fetchDailyRangeSafely(label, dailyRange)));
+          if (!rows.length)
+            rememberSkippedRange(`${label} · semaine`, range, exception);
+          return rows;
         }
       };
-
       const fetchRangeWithFallback = async (
-        bucketLabel: string,
+        label: string,
         range: { start: string; end: string },
       ) => {
         ensureActive();
-        setProgress(bucketLabel, range);
-
+        setProgress(label, range);
         try {
           const rows = await fetchFocusSummaryRange(range);
-          markStepDone(bucketLabel, null);
+          markStepDone(label);
           return rows;
         } catch (exception: any) {
           if (isStaleComparisonLoad(exception)) throw exception;
-
           const weeklyRanges = splitDateRangeByDays(range.start, range.end, 7);
           totalSteps += Math.max(0, weeklyRanges.length - 1);
-
-          const weeklyRows: DailyRow[] = [];
-          for (const weeklyRange of weeklyRanges) {
-            weeklyRows.push(
-              ...(await fetchWeeklyRangeWithDailyFallback(
-                bucketLabel,
-                weeklyRange,
-              )),
+          const rows: DailyRow[] = [];
+          for (const weeklyRange of weeklyRanges)
+            rows.push(
+              ...(await fetchWeeklyRangeWithDailyFallback(label, weeklyRange)),
             );
-          }
-
-          if (weeklyRows.length === 0) {
-            rememberSkippedRange(bucketLabel, range, exception);
-          }
-
-          return weeklyRows;
+          if (!rows.length) rememberSkippedRange(label, range, exception);
+          return rows;
         }
       };
-
-      outerComparisonLoop: for (const bucket of buckets) {
-        for (const range of bucket.ranges) {
-          ensureActive();
-
-          if (hasReachedPdfHardStop()) {
-            skippedRanges.push(
-              `Arrêt sécurité PDF après ${Math.round((Date.now() - comparisonStartedAt) / 1000)} s : ${bucket.label} ${range.start} au ${addDaysYmd(range.end, -1)} et périodes suivantes ignorées`,
-            );
-            doneSteps = totalSteps;
-            setProgress(
-              "Arrêt sécurité PDF : tableaux comparatifs partiels",
-              null,
-            );
-            break outerComparisonLoop;
-          }
-
-          try {
-            const rows = await fetchRangeWithFallback(bucket.label, range);
-            result[bucket.key].push(...rows);
-            flushPartialComparisonRows();
-          } catch (exception: any) {
-            if (isStaleComparisonLoad(exception)) throw exception;
-            rememberSkippedRange(bucket.label, range, exception);
-            markStepDone(bucket.label, null);
-            flushPartialComparisonRows();
-          }
-        }
-      }
-
-      ensureActive();
-      setYtdRowsN(result.ytdN);
-      setYtdRowsN1(result.ytdN1);
-      setRollingRowsN(result.rollingN);
-      setRollingRowsN1(result.rollingN1);
-
-      if (!isPdfMode && skippedRanges.length === 0) {
-        await savePersistentComparisonCache({
+      const persistProgress = async (status: "partial" | "complete") => {
+        if (isPdfMode) return;
+        const payload: PersistentFocusComparisonPayload = {
           version: FOCUS_COMPARISON_CACHE_VERSION,
           type: "focus_mensuel_persistent_comparison_cache",
-          created_at: new Date().toISOString(),
+          created_at: cacheCreatedAt,
+          updated_at: new Date().toISOString(),
           month,
           filters: {
             agence: effectiveAgence || null,
@@ -3144,39 +3090,100 @@ function FocusMensuelPageContent() {
           ytdRowsN1: result.ytdN1,
           rollingRowsN: result.rollingN,
           rollingRowsN1: result.rollingN1,
-        });
+          status,
+          completedRanges: Array.from(completedRanges),
+          totalRanges: expectedRanges,
+        };
+        try {
+          await savePersistentComparisonCache(payload);
+          setCacheInfo(
+            status === "complete"
+              ? "Cache comparatif complet enregistré · valable 14 jours"
+              : `Cache progressif enregistré : ${completedRanges.size}/${expectedRanges} blocs`,
+          );
+        } catch (cacheError: any) {
+          console.error(
+            "Sauvegarde progressive du cache impossible:",
+            cacheError,
+          );
+          setCacheInfo(
+            `Échec sauvegarde cache : ${cacheError?.message || String(cacheError)}`,
+          );
+        }
+      };
+
+      outer: for (const bucket of buckets) {
+        for (const range of bucket.ranges) {
+          ensureActive();
+          const id = rangeId(bucket.key, range);
+          if (completedRanges.has(id)) {
+            setProgress(`Reprise cache · ${bucket.label}`, range);
+            continue;
+          }
+          if (
+            isPdfMode &&
+            Date.now() - comparisonStartedAt >= PDF_COMPARISON_HARD_STOP_MS
+          )
+            break outer;
+          const skippedBefore = skippedRanges.length;
+          const rows = await fetchRangeWithFallback(bucket.label, range);
+          result[bucket.key].push(...rows);
+          if (skippedRanges.length === skippedBefore) completedRanges.add(id);
+          flushPartialComparisonRows();
+          await persistProgress("partial");
+        }
       }
 
+      ensureActive();
+      flushPartialComparisonRows();
+      const complete =
+        completedRanges.size >= expectedRanges && skippedRanges.length === 0;
+      await persistProgress(complete ? "complete" : "partial");
       setComparisonReady(true);
       setComparisonError(null);
       setComparisonProgress({
         status: "ready",
-        label: skippedRanges.length
-          ? `Terminé avec ${skippedRanges.length} période(s) ignorée(s)`
-          : "Terminé",
+        label: complete
+          ? "Terminé et mis en cache pour 14 jours"
+          : `Terminé partiellement · reprise possible (${completedRanges.size}/${expectedRanges})`,
         current: null,
-        done: totalSteps,
-        total: totalSteps,
+        done: completedRanges.size,
+        total: expectedRanges,
       });
-
-      if (skippedRanges.length) {
-        console.warn(
-          "Tableaux N / N-1 chargés avec avertissements:",
-          skippedRanges,
-        );
-      }
     } catch (exception: any) {
       if (isStaleComparisonLoad(exception)) return;
-
       console.error("focus mensuel comparison tables", exception);
-
-      // En mode PDF, on ne bloque jamais le marqueur ready sur ces tableaux.
-      // Sinon la route Puppeteer attend indéfiniment data-focus-report-ready="1".
+      if (!isPdfMode) {
+        try {
+          await savePersistentComparisonCache({
+            version: FOCUS_COMPARISON_CACHE_VERSION,
+            type: "focus_mensuel_persistent_comparison_cache",
+            created_at: cacheCreatedAt,
+            updated_at: new Date().toISOString(),
+            month,
+            filters: {
+              agence: effectiveAgence || null,
+              familleMacro: familleMacro || null,
+              collaborateur: effectiveCollaborateur || null,
+              includeHorsStats,
+            },
+            ytdRowsN: result.ytdN,
+            ytdRowsN1: result.ytdN1,
+            rollingRowsN: result.rollingN,
+            rollingRowsN1: result.rollingN1,
+            status: "partial",
+            completedRanges: Array.from(completedRanges),
+            totalRanges: 0,
+          });
+        } catch (cacheError) {
+          console.error(
+            "Sauvegarde du cache partiel après erreur impossible:",
+            cacheError,
+          );
+        }
+      }
       if (isPdfMode) {
-        setYtdRowsN(result.ytdN);
-        setYtdRowsN1(result.ytdN1);
-        setRollingRowsN(result.rollingN);
-        setRollingRowsN1(result.rollingN1);
+        flushPartialComparisonRows();
         setComparisonReady(true);
         setComparisonError(null);
         setComparisonProgress((current) => ({
@@ -3187,21 +3194,13 @@ function FocusMensuelPageContent() {
           total: current.total || current.done || 0,
         }));
       } else {
+        flushPartialComparisonRows();
         setComparisonError(exception?.message || String(exception));
         setComparisonReady(false);
-        setComparisonProgress((current) => ({
-          ...current,
-          status: "error",
-        }));
-        setYtdRowsN([]);
-        setYtdRowsN1([]);
-        setRollingRowsN([]);
-        setRollingRowsN1([]);
+        setComparisonProgress((current) => ({ ...current, status: "error" }));
       }
     } finally {
-      if (loadId === comparisonLoadIdRef.current) {
-        setComparisonLoading(false);
-      }
+      if (loadId === comparisonLoadIdRef.current) setComparisonLoading(false);
     }
   }
 
