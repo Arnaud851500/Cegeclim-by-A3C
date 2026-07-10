@@ -132,9 +132,12 @@ type BesoinClientRow = {
   numeros_pieces: string | null
 }
 
+type RuptureHorizonFilter = 'TOUS' | 'CURRENT' | '8' | '12' | '16'
+
 type Filters = {
   search: string
   niveau: 'TOUS' | 'ROUGE' | 'ORANGE' | 'JAUNE' | 'VERT'
+  ruptureHorizon: RuptureHorizonFilter
   macroFamille: string
   famille: string
   fournisseur: string
@@ -168,6 +171,7 @@ const ALERT_ORDER: Record<string, number> = {
 const DEFAULT_FILTERS: Filters = {
   search: '',
   niveau: 'TOUS',
+  ruptureHorizon: 'TOUS',
   macroFamille: 'TOUS',
   famille: 'TOUS',
   fournisseur: 'TOUS',
@@ -236,6 +240,38 @@ function localTodayIso() {
   const now = new Date()
   const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000)
   return local.toISOString().slice(0, 10)
+}
+
+function dateMs(value: string | null | undefined) {
+  if (!value) return null
+  const ms = new Date(value).getTime()
+  return Number.isFinite(ms) ? ms : null
+}
+
+function isCurrentRupture(row: StockAlertRow) {
+  return toNumber(row.stock_projete_min) < 0 || String(row.niveau_alerte || '').toUpperCase() === 'ROUGE'
+}
+
+function isRuptureWithinWeeks(row: StockAlertRow, weeks: number) {
+  const ruptureMs = dateMs(row.date_rupture)
+  if (ruptureMs === null) return false
+  const todayMs = new Date(localTodayIso()).getTime()
+  const horizonMs = todayMs + weeks * 7 * 86400000
+  return ruptureMs <= horizonMs
+}
+
+function ruptureHorizonDetail(rows: StockAlertRow[], weeks: number) {
+  const dates = rows
+    .map((row) => dateMs(row.date_rupture))
+    .filter((value): value is number => value !== null)
+    .filter((value) => value <= new Date(localTodayIso()).getTime() + weeks * 7 * 86400000)
+    .sort((a, b) => a - b)
+
+  return dates.length ? `Prochaine : ${formatDate(new Date(dates[0]).toISOString().slice(0, 10))}` : 'Aucune date dans cet horizon'
+}
+
+function horizonCardClass(active: boolean) {
+  return active ? 'ring-2 ring-blue-500 border-blue-300 bg-blue-50' : 'hover:border-blue-200 hover:bg-blue-50/40'
 }
 
 function formatDateTime(value: string | null | undefined) {
@@ -394,12 +430,45 @@ function levelFromValues(stockProjete: number, stockSecurite: number): AlertLeve
   return 'VERT'
 }
 
-function KpiCard({ label, value, detail, tone }: { label: string; value: string; detail?: string; tone?: string }) {
-  return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+function KpiCard({
+  label,
+  value,
+  detail,
+  tone,
+  onClick,
+  active = false,
+}: {
+  label: string
+  value: string
+  detail?: string
+  tone?: string
+  onClick?: () => void
+  active?: boolean
+}) {
+  const content = (
+    <>
       <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</div>
       <div className={`mt-2 text-2xl font-black ${tone || 'text-slate-950'}`}>{value}</div>
       {detail ? <div className="mt-1 text-xs text-slate-500">{detail}</div> : null}
+      {onClick ? <div className="mt-2 text-[11px] font-bold uppercase tracking-wide text-blue-700">Cliquer pour filtrer</div> : null}
+    </>
+  )
+
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        className={`rounded-2xl border border-slate-200 bg-white p-4 text-left shadow-sm transition ${horizonCardClass(active)}`}
+      >
+        {content}
+      </button>
+    )
+  }
+
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+      {content}
     </div>
   )
 }
@@ -696,30 +765,38 @@ export default function StocksDisponibilitesPage() {
     return Array.from(new Set(alertes.map((row) => row.fournisseur_principal).filter(Boolean) as string[])).sort((a, b) => a.localeCompare(b, 'fr'))
   }, [alertes])
 
-  const filteredAlertes = useMemo(() => {
+  const baseFilteredAlertes = useMemo(() => {
     const search = normalizeSearch(filters.search)
 
-    return alertes
-      .filter((row) => {
-        if (filters.niveau !== 'TOUS' && String(row.niveau_alerte || '').toUpperCase() !== filters.niveau) return false
-        if (filters.macroFamille !== 'TOUS' && row.macro_famille !== filters.macroFamille) return false
-        if (filters.famille !== 'TOUS' && row.famille !== filters.famille) return false
-        if (filters.fournisseur !== 'TOUS' && row.fournisseur_principal !== filters.fournisseur) return false
-        if (filters.onlyWithRupture && !row.date_rupture) return false
+    return alertes.filter((row) => {
+      if (filters.niveau !== 'TOUS' && String(row.niveau_alerte || '').toUpperCase() !== filters.niveau) return false
+      if (filters.macroFamille !== 'TOUS' && row.macro_famille !== filters.macroFamille) return false
+      if (filters.famille !== 'TOUS' && row.famille !== filters.famille) return false
+      if (filters.fournisseur !== 'TOUS' && row.fournisseur_principal !== filters.fournisseur) return false
+      if (filters.onlyWithRupture && !row.date_rupture) return false
 
-        if (!search) return true
-        const haystack = normalizeSearch([
-          row.reference_article,
-          row.designation,
-          row.famille,
-          row.macro_famille,
-          row.fournisseur_principal,
-          row.depot,
-        ].join(' '))
-        return haystack.includes(search)
+      if (!search) return true
+      const haystack = normalizeSearch([
+        row.reference_article,
+        row.designation,
+        row.famille,
+        row.macro_famille,
+        row.fournisseur_principal,
+        row.depot,
+      ].join(' '))
+      return haystack.includes(search)
+    })
+  }, [alertes, filters.search, filters.niveau, filters.macroFamille, filters.famille, filters.fournisseur, filters.onlyWithRupture])
+
+  const filteredAlertes = useMemo(() => {
+    return baseFilteredAlertes
+      .filter((row) => {
+        if (filters.ruptureHorizon === 'TOUS') return true
+        if (filters.ruptureHorizon === 'CURRENT') return isCurrentRupture(row)
+        return isRuptureWithinWeeks(row, Number(filters.ruptureHorizon))
       })
       .sort((a, b) => compareAlertRows(a, b, sortState))
-  }, [alertes, filters, sortState])
+  }, [baseFilteredAlertes, filters.ruptureHorizon, sortState])
 
   const filteredKpi = useMemo(() => {
     const today = new Date(localTodayIso()).getTime()
@@ -750,6 +827,25 @@ export default function StocksDisponibilitesPage() {
       nb_commandes_clients_risque: sum((row) => row.nb_commandes_clients_risque),
     }
   }, [filteredAlertes])
+
+  const ruptureHorizonKpi = useMemo(() => {
+    return {
+      current: baseFilteredAlertes.filter(isCurrentRupture).length,
+      weeks8: baseFilteredAlertes.filter((row) => isRuptureWithinWeeks(row, 8)).length,
+      weeks12: baseFilteredAlertes.filter((row) => isRuptureWithinWeeks(row, 12)).length,
+      weeks16: baseFilteredAlertes.filter((row) => isRuptureWithinWeeks(row, 16)).length,
+      detail8: ruptureHorizonDetail(baseFilteredAlertes, 8),
+      detail12: ruptureHorizonDetail(baseFilteredAlertes, 12),
+      detail16: ruptureHorizonDetail(baseFilteredAlertes, 16),
+    }
+  }, [baseFilteredAlertes])
+
+  function setRuptureHorizonFilter(next: RuptureHorizonFilter) {
+    setFilters((prev) => ({
+      ...prev,
+      ruptureHorizon: prev.ruptureHorizon === next ? 'TOUS' : next,
+    }))
+  }
 
   function toggleSort(key: SortKey) {
     setSortState((prev) => ({
@@ -993,6 +1089,20 @@ export default function StocksDisponibilitesPage() {
   }, [])
 
   useEffect(() => {
+    if (!filteredAlertes.length) {
+      if (selected) setSelected(null)
+      return
+    }
+
+    const selectedStillVisible = selected
+      ? filteredAlertes.some((row) => row.reference_article === selected.reference_article && (row.depot || 'GLOBAL') === (selected.depot || 'GLOBAL'))
+      : false
+
+    if (!selectedStillVisible) setSelected(filteredAlertes[0])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredAlertes])
+
+  useEffect(() => {
     loadDetail(selected)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.reference_article, selected?.depot])
@@ -1081,11 +1191,41 @@ export default function StocksDisponibilitesPage() {
           <EmptyState title="Aucune projection disponible" message="Lance un calcul de projection depuis l’écran Import ou le bouton Recalculer projection." />
         ) : (
           <>
-            <section className="grid grid-cols-2 gap-4 lg:grid-cols-4 2xl:grid-cols-8">
+            <section className="grid grid-cols-2 gap-4 lg:grid-cols-5 2xl:grid-cols-10">
               <KpiCard label="Articles suivis" value={formatNumber(filteredKpi.articles_suivis)} detail="Sélection filtrée" />
-              <KpiCard label="Rupture" value={formatNumber(filteredKpi.articles_rouge)} detail="Stock projeté < 0" tone="text-red-700" />
+              <KpiCard
+                label="Rupture actuelle"
+                value={formatNumber(ruptureHorizonKpi.current)}
+                detail="Stock projeté < 0"
+                tone="text-red-700"
+                active={filters.ruptureHorizon === 'CURRENT'}
+                onClick={() => setRuptureHorizonFilter('CURRENT')}
+              />
+              <KpiCard
+                label="Rupture ≤ 8 sem."
+                value={formatNumber(ruptureHorizonKpi.weeks8)}
+                detail={ruptureHorizonKpi.detail8}
+                tone="text-red-700"
+                active={filters.ruptureHorizon === '8'}
+                onClick={() => setRuptureHorizonFilter('8')}
+              />
+              <KpiCard
+                label="Rupture ≤ 12 sem."
+                value={formatNumber(ruptureHorizonKpi.weeks12)}
+                detail={ruptureHorizonKpi.detail12}
+                tone="text-red-700"
+                active={filters.ruptureHorizon === '12'}
+                onClick={() => setRuptureHorizonFilter('12')}
+              />
+              <KpiCard
+                label="Rupture ≤ 16 sem."
+                value={formatNumber(ruptureHorizonKpi.weeks16)}
+                detail={ruptureHorizonKpi.detail16}
+                tone="text-red-700"
+                active={filters.ruptureHorizon === '16'}
+                onClick={() => setRuptureHorizonFilter('16')}
+              />
               <KpiCard label="Sous sécurité" value={formatNumber((filteredKpi.articles_orange || 0) + (filteredKpi.articles_jaune || 0))} detail="Stock projeté < seuil" tone="text-orange-700" />
-              <KpiCard label="Rupture < 30j" value={formatNumber(filteredKpi.articles_rupture_30j)} detail={`Prochaine : ${formatDate(filteredKpi.prochaine_date_rupture)}`} tone="text-red-700" />
               <KpiCard label="Besoins fermes" value={formatNumber(filteredKpi.besoins_clients_fermes)} detail="CDC / PL ouverts" />
               <KpiCard label="Sorties projetées" value={formatNumber(filteredKpi.prevision_ventes)} detail={`Base N-1 : ${formatNumber(filteredKpi.prevision_base_n1)}`} />
               <KpiCard label="Entrées BDCF" value={formatNumber(filteredKpi.commandes_fournisseurs_attendues)} detail="Commandes ouvertes" tone="text-emerald-700" />
@@ -1124,6 +1264,12 @@ export default function StocksDisponibilitesPage() {
                   Avec rupture
                 </label>
               </div>
+              {filters.ruptureHorizon !== 'TOUS' ? (
+                <div className="mt-3 flex items-center justify-between rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+                  <span className="font-bold">Filtre KPI actif : {filters.ruptureHorizon === 'CURRENT' ? 'rupture actuelle' : `rupture dans les ${filters.ruptureHorizon} prochaines semaines`}</span>
+                  <button type="button" onClick={() => setFilters((prev) => ({ ...prev, ruptureHorizon: 'TOUS' }))} className="rounded-lg bg-white px-3 py-1 text-xs font-black text-blue-700 shadow-sm">Retirer</button>
+                </div>
+              ) : null}
             </section>
 
             <section className="grid grid-cols-1 gap-5 2xl:grid-cols-[minmax(1120px,1.15fr)_minmax(900px,1fr)]">
@@ -1270,7 +1416,7 @@ export default function StocksDisponibilitesPage() {
                             ) : 'Projection ferme indisponible'}
                           </div>
                         </div>
-                        <p className="mt-2 text-xs text-slate-500">Calcul volontairement ferme : stock disponible + entrées BDCF - besoins clients fermes. Les sorties prévisionnelles ne sont pas prises en compte pour proposer cette date.</p>
+                        <p className="mt-2 text-xs text-slate-500">Calcul volontairement ferme : stock disponible + entrées BDCF - besoins clients fermes. Les sorties prévisionnelles ne sont pas prises en compte pour proposer cette date ; l’objectif est de donner une date fiable pour une nouvelle commande client.</p>
                       </div>
                     </div>
 
