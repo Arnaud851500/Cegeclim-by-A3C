@@ -656,19 +656,19 @@ function KpiMini({
   tone?: string;
 }) {
   return (
-    <div className="flex min-h-[94px] min-w-0 flex-col rounded-2xl border border-slate-200 bg-slate-50 p-3">
-      <div className="min-h-[30px] break-words text-[10px] font-bold uppercase leading-4 tracking-wide text-slate-500">
+    <div className="flex min-h-[62px] min-w-0 flex-col rounded-xl border border-slate-200 bg-slate-50 p-2.5">
+      <div className="min-h-[18px] break-words text-[9px] font-bold uppercase leading-3 tracking-wide text-slate-500">
         {label}
       </div>
       <div
-        className={`mt-1 break-words text-xl font-black leading-tight tabular-nums ${
+        className={`mt-0.5 break-words text-lg font-black leading-tight tabular-nums ${
           tone || "text-slate-950"
         }`}
       >
         {value}
       </div>
       {detail ? (
-        <div className="mt-auto pt-1 text-[11px] font-bold leading-4 text-slate-500">
+        <div className="mt-auto pt-0.5 text-[10px] font-bold leading-3 text-slate-500">
           {detail}
         </div>
       ) : null}
@@ -1704,7 +1704,7 @@ export default function StocksDisponibilitesPage() {
   return (
     <main className="min-h-screen bg-slate-50 px-4 py-6 text-slate-900 md:px-6 lg:px-8">
       <div className="mx-auto max-w-none space-y-5">
-        <header className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+        <header className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
             <div>
               <p className="text-sm font-bold uppercase tracking-wide text-blue-700">
@@ -1718,7 +1718,7 @@ export default function StocksDisponibilitesPage() {
                 fournisseurs ouvertes, des besoins clients fermes et des sorties
                 projetées sur la base BL N-1.
               </p>
-              <p className="mt-1 text-xs text-slate-500">
+              <p className="mt-0.5 text-[11px] text-slate-500">
                 Dernier calcul :{" "}
                 {formatDateTime(kpi?.run_completed_at || kpi?.run_created_at)} ·
                 Horizon : {kpi?.run_nb_semaines || "—"} semaines · Coefficient
@@ -2225,7 +2225,7 @@ export default function StocksDisponibilitesPage() {
               <aside className="min-w-0 space-y-4">
                 {selected ? (
                   <>
-                    <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+                    <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div className="min-w-0 flex-1">
                           <span
@@ -2240,18 +2240,18 @@ export default function StocksDisponibilitesPage() {
                             />
                             {alertCompactLabel(selectedLevel)}
                           </span>
-                          <h2 className="mt-3 break-words text-2xl font-black text-slate-950">
+                          <h2 className="mt-2 break-words text-xl font-black leading-tight text-slate-950">
                             {selected.reference_article}
                           </h2>
-                          <p className="mt-1 text-sm leading-5 text-slate-600">
+                          <p className="mt-0.5 text-sm leading-4 text-slate-600">
                             {selected.designation || "Sans désignation"}
                           </p>
-                          <p className="mt-1 text-xs text-slate-500">
+                          <p className="mt-0.5 text-[11px] text-slate-500">
                             {selected.macro_famille || "Sans macro-famille"} ·{" "}
                             {selected.famille || "Sans famille"}
                           </p>
                         </div>
-                        <div className="text-right text-xs text-slate-500">
+                        <div className="text-right text-[11px] leading-4 text-slate-500">
                           <div>
                             Dépôt :{" "}
                             <span className="font-bold text-slate-700">
@@ -2267,7 +2267,7 @@ export default function StocksDisponibilitesPage() {
                         </div>
                       </div>
 
-                      <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3">
+                      <div className="mt-3 grid grid-cols-3 gap-2">
                         <KpiMini
                           label="Stock initial"
                           value={formatNumber(selected.stock_initial)}
@@ -2328,12 +2328,12 @@ export default function StocksDisponibilitesPage() {
                         />
                       </div>
 
-                      <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                        <div className="mb-2 text-sm font-black text-slate-900">
+                      <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 p-2.5">
+                        <div className="mb-1.5 text-xs font-black text-slate-900">
                           Stock de sécurité article
                         </div>
-                        <div className="flex flex-wrap items-end gap-3">
-                          <label className="min-w-[180px] text-xs font-bold text-slate-600">
+                        <div className="flex flex-wrap items-end gap-2">
+                          <label className="min-w-[150px] text-[11px] font-bold text-slate-600">
                             Quantité seuil
                             <input
                               type="number"
@@ -2343,20 +2343,20 @@ export default function StocksDisponibilitesPage() {
                               onChange={(event) =>
                                 setStockSecurityInput(event.target.value)
                               }
-                              className="mt-1 w-40 rounded-xl border border-slate-300 bg-white px-3 py-2 text-right text-sm font-bold text-slate-950"
+                              className="mt-1 w-32 rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-right text-sm font-bold text-slate-950"
                             />
                           </label>
                           <button
                             type="button"
                             onClick={saveStockSecurity}
                             disabled={savingSecurity || recalculating}
-                            className="rounded-xl bg-blue-700 px-4 py-2 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-60"
+                            className="rounded-xl bg-blue-700 px-3 py-1.5 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-60"
                           >
                             {savingSecurity
                               ? "Enregistrement…"
                               : "Enregistrer le seuil"}
                           </button>
-                          <p className="min-w-[220px] flex-1 text-xs text-slate-500">
+                          <p className="min-w-[180px] flex-1 text-[11px] leading-4 text-slate-500">
                             Si l’article n’existe pas encore dans les
                             paramètres, il est créé automatiquement. Le seuil
                             est appliqué au dernier calcul sans recalcul global.
