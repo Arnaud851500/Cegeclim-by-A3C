@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 
 type AlertLevel = "ROUGE" | "ORANGE" | "JAUNE" | "VERT" | string;
+type AbcClass = "A" | "B" | "C";
 
 type StockKpi = {
   run_id: string | null;
@@ -73,6 +74,15 @@ type StockAlertRow = {
   stock_securite: number | null;
   ca_client_risque: number | null;
   nb_commandes_clients_risque: number | null;
+  abc_annee?: number | null;
+  abc_ca_bl_ytd?: number | null;
+  abc_nb_lignes_bl_ytd?: number | null;
+  abc_part_ca_pct?: number | null;
+  abc_cumul_ca_pct?: number | null;
+  classe_abc_ca?: AbcClass | null;
+  abc_part_lignes_pct?: number | null;
+  abc_cumul_lignes_pct?: number | null;
+  classe_abc_lignes?: AbcClass | null;
   niveau_alerte: AlertLevel;
 };
 
@@ -141,6 +151,8 @@ type Filters = {
   macroFamille: string;
   famille: string;
   fournisseur: string;
+  abcCa: "TOUS" | AbcClass;
+  abcLignes: "TOUS" | AbcClass;
   onlyWithRupture: boolean;
 };
 
@@ -175,6 +187,8 @@ const DEFAULT_FILTERS: Filters = {
   macroFamille: "TOUS",
   famille: "TOUS",
   fournisseur: "TOUS",
+  abcCa: "TOUS",
+  abcLignes: "TOUS",
   onlyWithRupture: false,
 };
 
@@ -410,6 +424,41 @@ function alertCompactLabel(level: AlertLevel) {
   if (normalized === "ROUGE") return "R";
   if (normalized === "ORANGE" || normalized === "JAUNE") return "A";
   return "OK";
+}
+
+function normalizeAbcClass(value: string | null | undefined): AbcClass {
+  const normalized = String(value || "C").toUpperCase();
+  return normalized === "A" || normalized === "B" ? normalized : "C";
+}
+
+function abcBadgeClass(value: AbcClass) {
+  if (value === "A") return "border-indigo-200 bg-indigo-50 text-indigo-800";
+  if (value === "B") return "border-amber-200 bg-amber-50 text-amber-800";
+  return "border-slate-200 bg-slate-100 text-slate-700";
+}
+
+function AbcBadge({
+  label,
+  value,
+  title,
+  compact = false,
+}: {
+  label: string;
+  value: string | null | undefined;
+  title?: string;
+  compact?: boolean;
+}) {
+  const abc = normalizeAbcClass(value);
+  return (
+    <span
+      title={title}
+      className={`inline-flex items-center justify-center rounded-full border font-black ${abcBadgeClass(abc)} ${
+        compact ? "min-w-[34px] px-1.5 py-0.5 text-[10px]" : "px-2 py-1 text-[11px]"
+      }`}
+    >
+      {label} {abc}
+    </span>
+  );
 }
 
 function alertClass(level: AlertLevel) {
@@ -1257,6 +1306,18 @@ export default function StocksDisponibilitesPage() {
       ) {
         return false;
       }
+      if (
+        filters.abcCa !== "TOUS" &&
+        normalizeAbcClass(row.classe_abc_ca) !== filters.abcCa
+      ) {
+        return false;
+      }
+      if (
+        filters.abcLignes !== "TOUS" &&
+        normalizeAbcClass(row.classe_abc_lignes) !== filters.abcLignes
+      ) {
+        return false;
+      }
       if (filters.onlyWithRupture && !row.date_rupture) return false;
 
       if (!search) return true;
@@ -1267,6 +1328,8 @@ export default function StocksDisponibilitesPage() {
           row.famille,
           row.macro_famille,
           row.fournisseur_principal,
+          row.classe_abc_ca,
+          row.classe_abc_lignes,
           row.depot,
         ].join(" "),
       );
@@ -1279,6 +1342,8 @@ export default function StocksDisponibilitesPage() {
     filters.macroFamille,
     filters.famille,
     filters.fournisseur,
+    filters.abcCa,
+    filters.abcLignes,
     filters.onlyWithRupture,
   ]);
 
@@ -1364,7 +1429,7 @@ export default function StocksDisponibilitesPage() {
     try {
       const [kpiResponse, alertesResponse] = await Promise.all([
         supabase.from("v_stock_projection_kpis").select("*").maybeSingle(),
-        supabase.from("v_stock_projection_alertes").select("*"),
+        supabase.from("v_stock_projection_alertes_abc").select("*"),
       ]);
 
       if (kpiResponse.error) throw kpiResponse.error;
@@ -1888,7 +1953,7 @@ export default function StocksDisponibilitesPage() {
             </section>
 
             <section className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-7">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-9">
                 <input
                   value={filters.search}
                   onChange={(event) =>
@@ -1967,6 +2032,38 @@ export default function StocksDisponibilitesPage() {
                     </option>
                   ))}
                 </select>
+                <select
+                  value={filters.abcCa}
+                  onChange={(event) =>
+                    setFilters((prev) => ({
+                      ...prev,
+                      abcCa: event.target.value as Filters["abcCa"],
+                    }))
+                  }
+                  className="rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                  title="Classification ABC selon le montant HT cumulé des BL depuis le début de l'année"
+                >
+                  <option value="TOUS">ABC CA : tous</option>
+                  <option value="A">ABC CA : A</option>
+                  <option value="B">ABC CA : B</option>
+                  <option value="C">ABC CA : C</option>
+                </select>
+                <select
+                  value={filters.abcLignes}
+                  onChange={(event) =>
+                    setFilters((prev) => ({
+                      ...prev,
+                      abcLignes: event.target.value as Filters["abcLignes"],
+                    }))
+                  }
+                  className="rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                  title="Classification ABC selon le nombre cumulé de lignes de BL depuis le début de l'année"
+                >
+                  <option value="TOUS">ABC lignes : tous</option>
+                  <option value="A">ABC lignes : A</option>
+                  <option value="B">ABC lignes : B</option>
+                  <option value="C">ABC lignes : C</option>
+                </select>
                 <label className="flex items-center gap-2 rounded-xl border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700">
                   <input
                     type="checkbox"
@@ -2013,24 +2110,24 @@ export default function StocksDisponibilitesPage() {
                     Articles à risque
                   </h2>
                   <p className="text-sm text-slate-500">
-                    {formatNumber(filteredAlertes.length)} article(s)
-                    affiché(s).
+                    {formatNumber(filteredAlertes.length)} article(s) affiché(s) · ABC BL YTD : CA HT / lignes.
                   </p>
                 </div>
 
                 <div className="max-h-[820px] overflow-y-auto overflow-x-hidden">
                   <table className="w-full table-fixed text-sm">
                     <colgroup>
+                      <col className="w-[5%]" />
+                      <col className="w-[20%]" />
+                      <col className="w-[13%]" />
+                      <col className="w-[8%]" />
                       <col className="w-[6%]" />
-                      <col className="w-[23%]" />
-                      <col className="w-[15%]" />
-                      <col className="w-[7%]" />
-                      <col className="w-[11%]" />
-                      <col className="w-[11%]" />
-                      <col className="w-[7%]" />
-                      <col className="w-[7%]" />
-                      <col className="w-[7%]" />
+                      <col className="w-[10%]" />
+                      <col className="w-[10%]" />
                       <col className="w-[6%]" />
+                      <col className="w-[7%]" />
+                      <col className="w-[7%]" />
+                      <col className="w-[8%]" />
                     </colgroup>
                     <thead className="sticky top-0 z-10 bg-slate-100 text-xs uppercase tracking-wide text-slate-600">
                       <tr>
@@ -2052,6 +2149,9 @@ export default function StocksDisponibilitesPage() {
                           sortState={sortState}
                           onSort={toggleSort}
                         />
+                        <th className="border-b border-slate-200 px-1 py-3 text-center text-[10px] font-black uppercase tracking-wide text-slate-600">
+                          ABC
+                        </th>
                         <SortableTh
                           label="Stock"
                           sortKey="stock_initial"
@@ -2169,6 +2269,22 @@ export default function StocksDisponibilitesPage() {
                                 {row.famille || "—"}
                               </div>
                             </td>
+                            <td className="px-1 py-3 align-middle">
+                              <div className="flex flex-col items-center gap-1">
+                                <AbcBadge
+                                  label="CA"
+                                  value={row.classe_abc_ca}
+                                  compact
+                                  title={`ABC CA BL ${row.abc_annee || new Date().getFullYear()} · ${formatNumber(row.abc_ca_bl_ytd)} € · part ${formatNumber(row.abc_part_ca_pct, 1)} % · cumul ${formatNumber(row.abc_cumul_ca_pct, 1)} %`}
+                                />
+                                <AbcBadge
+                                  label="L"
+                                  value={row.classe_abc_lignes}
+                                  compact
+                                  title={`ABC lignes BL ${row.abc_annee || new Date().getFullYear()} · ${formatNumber(row.abc_nb_lignes_bl_ytd)} lignes · part ${formatNumber(row.abc_part_lignes_pct, 1)} % · cumul ${formatNumber(row.abc_cumul_lignes_pct, 1)} %`}
+                                />
+                              </div>
+                            </td>
                             <td className="px-2.5 py-3 text-right align-middle text-[15px] font-bold tabular-nums whitespace-nowrap">
                               {formatNumber(row.stock_initial)}
                             </td>
@@ -2250,6 +2366,18 @@ export default function StocksDisponibilitesPage() {
                             {selected.macro_famille || "Sans macro-famille"} ·{" "}
                             {selected.famille || "Sans famille"}
                           </p>
+                          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                            <AbcBadge
+                              label="ABC CA"
+                              value={selected.classe_abc_ca}
+                              title={`Montant BL ${selected.abc_annee || new Date().getFullYear()} : ${formatNumber(selected.abc_ca_bl_ytd)} € · part ${formatNumber(selected.abc_part_ca_pct, 1)} % · cumul ${formatNumber(selected.abc_cumul_ca_pct, 1)} %`}
+                            />
+                            <AbcBadge
+                              label="ABC lignes"
+                              value={selected.classe_abc_lignes}
+                              title={`Lignes BL ${selected.abc_annee || new Date().getFullYear()} : ${formatNumber(selected.abc_nb_lignes_bl_ytd)} · part ${formatNumber(selected.abc_part_lignes_pct, 1)} % · cumul ${formatNumber(selected.abc_cumul_lignes_pct, 1)} %`}
+                            />
+                          </div>
                         </div>
                         <div className="text-right text-[11px] leading-4 text-slate-500">
                           <div>
