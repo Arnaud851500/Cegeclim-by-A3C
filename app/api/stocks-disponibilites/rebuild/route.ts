@@ -1,7 +1,7 @@
 // app/api/stocks-disponibilites/rebuild/route.ts
 // Recalcul serveur de la projection de stock par lots.
-// Cette version évite les timeouts Supabase/PostgREST en remplaçant un gros RPC
-// par plusieurs RPC courts : start -> batchs -> finalize.
+// V2 : après la construction des semaines, la règle
+// "besoins fermes inclus dans la prévision" est appliquée par lots RPC séparés.
 
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
@@ -53,6 +53,10 @@ function parseRunId(payload: unknown) {
   return typeof record.run_id === 'string' ? record.run_id : null
 }
 
+function hasAlmostReachedServerLimit(startedAt: number) {
+  return Date.now() - startedAt > 275_000
+}
+
 export async function POST(req: NextRequest) {
   const startedAt = Date.now()
 
@@ -63,12 +67,18 @@ export async function POST(req: NextRequest) {
     const token = authorization.replace(/^Bearer\s+/i, '').trim()
 
     if (!token) {
-      return NextResponse.json({ success: false, error: 'Non autorisé : session utilisateur absente.' }, { status: 401 })
+      return NextResponse.json(
+        { success: false, error: 'Non autorisé : session utilisateur absente.' },
+        { status: 401 },
+      )
     }
 
     const { data: userData, error: userError } = await supabase.auth.getUser(token)
     if (userError || !userData?.user) {
-      return NextResponse.json({ success: false, error: 'Non autorisé : session utilisateur invalide.' }, { status: 401 })
+      return NextResponse.json(
+        { success: false, error: 'Non autorisé : session utilisateur invalide.' },
+        { status: 401 },
+      )
     }
 
     const body = await req.json().catch(() => ({}))
@@ -76,20 +86,27 @@ export async function POST(req: NextRequest) {
     const dateDebut = toIsoDate(body.date_debut)
     const nbSemaines = toPositiveInteger(body.nb_semaines, 16, 1, 104)
     const scenarioPct = toPositiveNumber(body.scenario_prevision_pct, 1.2)
-    const depotMode = getString(body.depot_mode, 'GLOBAL').toUpperCase() === 'DEPOT' ? 'DEPOT' : 'GLOBAL'
-    const commentaire = getString(body.commentaire, 'Projection stock depuis route serveur par lots')
+    const depotMode =
+      getString(body.depot_mode, 'GLOBAL').toUpperCase() === 'DEPOT' ? 'DEPOT' : 'GLOBAL'
+    const commentaire = getString(
+      body.commentaire,
+      'Projection stock depuis route serveur par lots',
+    )
 
-    // Valeur volontairement modérée : si un batch timeout encore, descendre à 50.
-    const batchSize = toPositiveInteger(body.batch_size, 100, 25, 300)
+    const projectionBatchSize = toPositiveInteger(body.batch_size, 100, 25, 300)
+    const nettingBatchSize = toPositiveInteger(body.netting_batch_size, 50, 10, 150)
 
-    const { data: startData, error: startError } = await supabase.rpc('start_stock_projection_hebdo_front', {
-      p_date_debut: dateDebut,
-      p_nb_semaines: nbSemaines,
-      p_scenario_prevision_pct: scenarioPct,
-      p_depot_mode: depotMode,
-      p_commentaire: commentaire,
-      p_batch_size: batchSize,
-    })
+    const { data: startData, error: startError } = await supabase.rpc(
+      'start_stock_projection_hebdo_front',
+      {
+        p_date_debut: dateDebut,
+        p_nb_semaines: nbSemaines,
+        p_scenario_prevision_pct: scenarioPct,
+        p_depot_mode: depotMode,
+        p_commentaire: commentaire,
+        p_batch_size: projectionBatchSize,
+      },
+    )
 
     if (startError) {
       return NextResponse.json(
@@ -99,67 +116,148 @@ export async function POST(req: NextRequest) {
           error: startError.message || 'Erreur Supabase au démarrage de la projection.',
           details: startError,
         },
-        { status: 500 }
+        { status: 500 },
       )
     }
 
     const runId = parseRunId(startData)
     if (!runId) {
       return NextResponse.json(
-        { success: false, step: 'start', error: 'Le démarrage de projection n’a pas retourné de run_id.', details: startData },
-        { status: 500 }
+        {
+          success: false,
+          step: 'start',
+          error: 'Le démarrage de projection n’a pas retourné de run_id.',
+          details: startData,
+        },
+        { status: 500 },
       )
     }
 
     const totalArticles = Number((startData as JsonRecord)?.total_articles || 0)
-    const batches: JsonRecord[] = []
+    const projectionBatches: JsonRecord[] = []
 
-    for (let offset = 0; offset < totalArticles; offset += batchSize) {
-      // Sécurité Vercel : si on approche de la limite de durée, on renvoie l’état plutôt que de laisser mourir le worker.
-      // Dans ce cas, relancer le bouton continuera à créer un nouveau run complet ; on pourra ensuite passer en vrai job async si besoin.
-      if (Date.now() - startedAt > 275_000) {
+    for (let offset = 0; offset < totalArticles; offset += projectionBatchSize) {
+      if (hasAlmostReachedServerLimit(startedAt)) {
         return NextResponse.json(
           {
             success: false,
             partial: true,
+            step: 'projection_batch',
             run_id: runId,
-            error: 'Temps serveur presque atteint avant la fin du recalcul. Réduis temporairement l’horizon ou le batch_size.',
-            completed_batches: batches.length,
+            error:
+              'Temps serveur presque atteint avant la fin du calcul. Réduis temporairement l’horizon ou le batch_size.',
+            completed_batches: projectionBatches.length,
             total_articles: totalArticles,
             duration_ms: Date.now() - startedAt,
           },
-          { status: 504 }
+          { status: 504 },
         )
       }
 
-      const { data: batchData, error: batchError } = await supabase.rpc('process_stock_projection_hebdo_batch', {
-        p_run_id: runId,
-        p_offset: offset,
-        p_limit: batchSize,
-      })
+      const { data: batchData, error: batchError } = await supabase.rpc(
+        'process_stock_projection_hebdo_batch',
+        {
+          p_run_id: runId,
+          p_offset: offset,
+          p_limit: projectionBatchSize,
+        },
+      )
 
       if (batchError) {
         return NextResponse.json(
           {
             success: false,
-            step: 'batch',
+            step: 'projection_batch',
             run_id: runId,
             offset,
-            batch_size: batchSize,
-            error: batchError.message || 'Erreur Supabase pendant un batch de projection.',
+            batch_size: projectionBatchSize,
+            error: batchError.message || 'Erreur Supabase pendant un lot de projection.',
             details: batchError,
-            completed_batches: batches.length,
+            completed_batches: projectionBatches.length,
           },
-          { status: 500 }
+          { status: 500 },
         )
       }
 
-      batches.push(batchData as JsonRecord)
+      projectionBatches.push((batchData || {}) as JsonRecord)
     }
 
-    const { data: finalizeData, error: finalizeError } = await supabase.rpc('finalize_stock_projection_hebdo_run', {
-      p_run_id: runId,
-    })
+    const { data: countData, error: countError } = await supabase.rpc(
+      'count_stock_projection_references',
+      { p_run_id: runId },
+    )
+
+    if (countError) {
+      return NextResponse.json(
+        {
+          success: false,
+          step: 'netting_count',
+          run_id: runId,
+          error:
+            countError.message ||
+            'Impossible de compter les références avant la normalisation des prévisions.',
+          details: countError,
+        },
+        { status: 500 },
+      )
+    }
+
+    const totalReferences = Number(countData || 0)
+    const nettingBatches: JsonRecord[] = []
+
+    for (let offset = 0; offset < totalReferences; offset += nettingBatchSize) {
+      if (hasAlmostReachedServerLimit(startedAt)) {
+        return NextResponse.json(
+          {
+            success: false,
+            partial: true,
+            step: 'netting_batch',
+            run_id: runId,
+            error:
+              'Temps serveur presque atteint pendant la déduction des besoins fermes. Relance avec un netting_batch_size plus petit.',
+            completed_projection_batches: projectionBatches.length,
+            completed_netting_batches: nettingBatches.length,
+            total_references: totalReferences,
+            duration_ms: Date.now() - startedAt,
+          },
+          { status: 504 },
+        )
+      }
+
+      const { data: nettingData, error: nettingError } = await supabase.rpc(
+        'apply_stock_projection_fermes_incluses_batch',
+        {
+          p_run_id: runId,
+          p_offset: offset,
+          p_limit: nettingBatchSize,
+        },
+      )
+
+      if (nettingError) {
+        return NextResponse.json(
+          {
+            success: false,
+            step: 'netting_batch',
+            run_id: runId,
+            offset,
+            batch_size: nettingBatchSize,
+            error:
+              nettingError.message ||
+              'Erreur Supabase pendant la déduction des besoins fermes.',
+            details: nettingError,
+            completed_netting_batches: nettingBatches.length,
+          },
+          { status: 500 },
+        )
+      }
+
+      nettingBatches.push((nettingData || {}) as JsonRecord)
+    }
+
+    const { data: finalizeData, error: finalizeError } = await supabase.rpc(
+      'finalize_stock_projection_hebdo_run',
+      { p_run_id: runId },
+    )
 
     if (finalizeError) {
       return NextResponse.json(
@@ -167,36 +265,45 @@ export async function POST(req: NextRequest) {
           success: false,
           step: 'finalize',
           run_id: runId,
-          error: finalizeError.message || 'Erreur Supabase pendant la finalisation de projection.',
+          error: finalizeError.message || 'Erreur Supabase pendant la finalisation.',
           details: finalizeError,
-          completed_batches: batches.length,
+          completed_projection_batches: projectionBatches.length,
+          completed_netting_batches: nettingBatches.length,
         },
-        { status: 500 }
+        { status: 500 },
       )
     }
 
-    // V19 : on rafraîchit le cache des sorties YTD / mois passé une seule fois après le run.
-    // L'écran ne doit plus recalculer ces statistiques en live sur facture_lignes à chaque ouverture.
-    const { data: statsCacheData, error: statsCacheError } = await supabase.rpc('refresh_stock_article_sorties_stats_cache', {
-      p_cache_date: new Date().toISOString().slice(0, 10),
-    })
+    const { data: statsCacheData, error: statsCacheError } = await supabase.rpc(
+      'refresh_stock_article_sorties_stats_cache',
+      { p_cache_date: new Date().toISOString().slice(0, 10) },
+    )
 
-    return NextResponse.json({
-      success: !statsCacheError,
-      run_id: runId,
-      start: startData,
-      finalize: finalizeData,
-      stats_cache: statsCacheData || null,
-      stats_cache_warning: statsCacheError?.message || null,
-      completed_batches: batches.length,
-      total_articles: totalArticles,
-      batch_size: batchSize,
-      duration_ms: Date.now() - startedAt,
-    }, { status: statsCacheError ? 207 : 200 })
+    return NextResponse.json(
+      {
+        success: !statsCacheError,
+        run_id: runId,
+        start: startData,
+        finalize: finalizeData,
+        stats_cache: statsCacheData || null,
+        stats_cache_warning: statsCacheError?.message || null,
+        completed_projection_batches: projectionBatches.length,
+        completed_netting_batches: nettingBatches.length,
+        total_articles: totalArticles,
+        total_references: totalReferences,
+        projection_batch_size: projectionBatchSize,
+        netting_batch_size: nettingBatchSize,
+        duration_ms: Date.now() - startedAt,
+      },
+      { status: statsCacheError ? 207 : 200 },
+    )
   } catch (err: any) {
     return NextResponse.json(
-      { success: false, error: err?.message || 'Erreur serveur pendant le recalcul de projection.' },
-      { status: 500 }
+      {
+        success: false,
+        error: err?.message || 'Erreur serveur pendant le recalcul de projection.',
+      },
+      { status: 500 },
     )
   }
 }
