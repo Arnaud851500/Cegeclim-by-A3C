@@ -862,6 +862,8 @@ export default function StocksDisponibilitesPage() {
   }
 
   async function rebuildProjection(commentaire: string) {
+    const currentSelected = selected
+
     setRecalculating(true)
     setError(null)
 
@@ -880,7 +882,9 @@ export default function StocksDisponibilitesPage() {
       if (response.error) throw response.error
 
       const nextSecurity = toNumber(stockSecurityInput)
-      const sameArticle = (row: StockAlertRow) => row.reference_article === selected.reference_article && (row.depot || 'GLOBAL') === (selected.depot || 'GLOBAL')
+      const sameArticle = (row: StockAlertRow) => currentSelected
+        ? row.reference_article === currentSelected.reference_article && (row.depot || 'GLOBAL') === (currentSelected.depot || 'GLOBAL')
+        : false
       const updateAlertRow = (row: StockAlertRow): StockAlertRow => {
         if (!sameArticle(row)) return row
         const nextLevel = levelFromValues(toNumber(row.stock_projete_min), nextSecurity)
@@ -906,29 +910,59 @@ export default function StocksDisponibilitesPage() {
         }
       }))
     } catch (err: any) {
-      setError(err?.message || 'Erreur pendant le recalcul de projection.')
+      setError(`${err?.message || 'Erreur pendant le recalcul de projection.'}${String(err?.message || '').toLowerCase().includes('timeout') ? ' Le SQL V15 ajoute des index et augmente le timeout de la fonction ; si le navigateur coupe encore, relance depuis l’écran Import / pipeline arrière-plan.' : ''}`)
     } finally {
       setRecalculating(false)
     }
   }
 
   async function saveStockSecurity() {
-    if (!selected) return
+    const currentSelected = selected
+    if (!currentSelected) return
     setSavingSecurity(true)
     setError(null)
 
     try {
       const response = await supabase.rpc('upsert_stock_article_stock_securite_fast', {
-        p_reference_article: selected.reference_article,
-        p_designation: selected.designation,
-        p_famille: selected.famille,
-        p_macro_famille: selected.macro_famille,
-        p_fournisseur_principal: selected.fournisseur_principal,
+        p_reference_article: currentSelected.reference_article,
+        p_designation: currentSelected.designation,
+        p_famille: currentSelected.famille,
+        p_macro_famille: currentSelected.macro_famille,
+        p_fournisseur_principal: currentSelected.fournisseur_principal,
         p_stock_securite: toNumber(stockSecurityInput),
       })
 
       if (response.error) throw response.error
-      await loadData({ keepSelected: true, keepProjectionSettings: true })
+
+      const nextSecurity = toNumber(stockSecurityInput)
+      const sameArticle = (row: StockAlertRow) =>
+        row.reference_article === currentSelected.reference_article && (row.depot || 'GLOBAL') === (currentSelected.depot || 'GLOBAL')
+
+      const updateAlertRow = (row: StockAlertRow): StockAlertRow => {
+        if (!sameArticle(row)) return row
+        const mini = toNumber(row.stock_projete_min)
+        const nextLevel = levelFromValues(mini, nextSecurity)
+        return {
+          ...row,
+          stock_securite: nextSecurity,
+          qte_manquante_max: Math.max(0, nextSecurity - mini),
+          niveau_alerte: nextLevel,
+        }
+      }
+
+      setAlertes((prev) => prev.map(updateAlertRow))
+      setSelected((prev) => prev ? updateAlertRow(prev) : prev)
+      setProjection((prev) => prev.map((row) => {
+        const stock = toNumber(row.stock_projete)
+        const nextLevel = levelFromValues(stock, nextSecurity)
+        return {
+          ...row,
+          stock_securite: nextSecurity,
+          stock_disponible_projete: stock - nextSecurity,
+          quantite_manquante: Math.max(0, nextSecurity - stock),
+          niveau_alerte: nextLevel,
+        }
+      }))
     } catch (err: any) {
       setError(err?.message || 'Erreur pendant l’enregistrement du stock de sécurité.')
     } finally {
@@ -937,7 +971,8 @@ export default function StocksDisponibilitesPage() {
   }
 
   async function saveWeeklyAssumptions() {
-    if (!selected || !projection.length) return
+    const currentSelected = selected
+    if (!currentSelected || !projection.length) return
     setSavingWeekly(true)
     setError(null)
 
@@ -945,8 +980,8 @@ export default function StocksDisponibilitesPage() {
       const calls = projection.map((row) => {
         const manualText = weeklyManualQty[row.periode_debut]
         return supabase.rpc('upsert_stock_prevision_override_v2', {
-          p_reference_article: selected.reference_article,
-          p_depot: selected.depot || 'GLOBAL',
+          p_reference_article: currentSelected.reference_article,
+          p_depot: currentSelected.depot || 'GLOBAL',
           p_periode_debut: row.periode_debut,
           p_coefficient_prevision: Math.max(0, toNumber(weeklyPct[row.periode_debut] ?? defaultProjectionPct)) / 100,
           p_quantite_prevision_forcee: manualText === undefined || manualText === '' ? null : Math.max(0, toNumber(manualText)),
@@ -958,7 +993,7 @@ export default function StocksDisponibilitesPage() {
       const firstError = results.find((result) => result.error)?.error
       if (firstError) throw firstError
 
-      await rebuildProjection(`Hypothèses semaine modifiées ${selected.reference_article}`)
+      await rebuildProjection(`Hypothèses semaine modifiées ${currentSelected.reference_article}`)
     } catch (err: any) {
       setError(err?.message || 'Erreur pendant l’enregistrement des hypothèses hebdomadaires.')
     } finally {
