@@ -1630,7 +1630,7 @@ export default function StocksDisponibilitesPage() {
           />
         ) : (
           <>
-            <section className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
+            <section className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-10">
               <KpiCard
                 label="Articles suivis"
                 value={formatNumber(filteredKpi.articles_suivis)}
@@ -1821,7 +1821,7 @@ export default function StocksDisponibilitesPage() {
               ) : null}
             </section>
 
-            <section className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.65fr)_minmax(500px,0.8fr)] 2xl:grid-cols-[minmax(0,1.72fr)_minmax(560px,0.78fr)]">
+            <section className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
               <div className="min-w-0 rounded-3xl border border-slate-200 bg-white shadow-sm">
                 <div className="border-b border-slate-200 p-4">
                   <h2 className="text-xl font-black text-slate-950">Articles à risque</h2>
