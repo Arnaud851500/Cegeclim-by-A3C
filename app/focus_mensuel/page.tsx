@@ -2502,26 +2502,39 @@ function FocusMensuelPageContent() {
 
   async function savePersistentComparisonCache(
     payload: PersistentFocusComparisonPayload,
-  ) {
+  ): Promise<PersistentFocusComparisonPayload> {
     const cacheKey = buildPersistentComparisonCacheKey();
     const nowIso = new Date().toISOString();
-    const { error } = await (supabase as any)
-      .from(FOCUS_COMPARISON_CACHE_TABLE)
-      .upsert(
-        {
-          cache_key: cacheKey,
-          cache_version: FOCUS_COMPARISON_CACHE_VERSION,
-          month_key: month,
-          agence: effectiveAgence || null,
-          famille_macro: familleMacro || null,
-          collaborateur: effectiveCollaborateur || null,
-          include_hors_statistiques: includeHorsStats,
-          payload: { ...payload, updated_at: nowIso },
-          rebuilt_at: nowIso,
-        },
-        { onConflict: "cache_key" },
-      );
+    const payloadToSave: PersistentFocusComparisonPayload = {
+      ...payload,
+      updated_at: nowIso,
+    };
+
+    // Sauvegarde atomique côté PostgreSQL :
+    // - un cache complet ne peut plus être écrasé par un onglet encore en cours ;
+    // - une progression plus ancienne ne peut plus remplacer une progression plus avancée.
+    const { data, error } = await (supabase as any).rpc(
+      "save_focus_mensuel_comparison_cache_safe",
+      {
+        p_cache_key: cacheKey,
+        p_cache_version: FOCUS_COMPARISON_CACHE_VERSION,
+        p_month_key: month,
+        p_agence: effectiveAgence || null,
+        p_famille_macro: familleMacro || null,
+        p_collaborateur: effectiveCollaborateur || null,
+        p_include_hors_statistiques: includeHorsStats,
+        p_payload: payloadToSave,
+      },
+    );
+
     if (error) throw error;
+
+    const savedPayload = (data?.payload || data) as PersistentFocusComparisonPayload | null;
+    if (!savedPayload || savedPayload.type !== "focus_mensuel_persistent_comparison_cache") {
+      throw new Error("La sauvegarde du cache n'a pas renvoyé de payload valide.");
+    }
+
+    return savedPayload;
   }
 
   async function invalidatePersistentComparisonCacheForMonth() {
@@ -3095,13 +3108,30 @@ function FocusMensuelPageContent() {
           totalRanges: expectedRanges,
         };
         try {
-          await savePersistentComparisonCache(payload);
+          const serverPayload = await savePersistentComparisonCache(payload);
+
+          // Un autre onglet a pu terminer pendant que celui-ci travaillait.
+          // Dans ce cas, on adopte immédiatement le cache complet du serveur
+          // et on arrête le recalcul local, sans jamais écraser ce cache complet.
+          if (status === "partial" && serverPayload.status === "complete") {
+            result.ytdN = serverPayload.ytdRowsN || [];
+            result.ytdN1 = serverPayload.ytdRowsN1 || [];
+            result.rollingN = serverPayload.rollingRowsN || [];
+            result.rollingN1 = serverPayload.rollingRowsN1 || [];
+            completedRanges.clear();
+            (serverPayload.completedRanges || []).forEach((key) => completedRanges.add(key));
+            flushPartialComparisonRows();
+            setCacheInfo("Cache complet détecté dans un autre onglet · recalcul local arrêté");
+            throw new Error("__CACHE_COMPLETED_ELSEWHERE__");
+          }
+
           setCacheInfo(
-            status === "complete"
+            serverPayload.status === "complete"
               ? "Cache comparatif complet enregistré · valable 14 jours"
-              : `Cache progressif enregistré : ${completedRanges.size}/${expectedRanges} blocs`,
+              : `Cache progressif enregistré : ${(serverPayload.completedRanges || []).length}/${serverPayload.totalRanges || expectedRanges} blocs`,
           );
         } catch (cacheError: any) {
+          if (cacheError?.message === "__CACHE_COMPLETED_ELSEWHERE__") throw cacheError;
           console.error(
             "Sauvegarde progressive du cache impossible:",
             cacheError,
@@ -3152,6 +3182,19 @@ function FocusMensuelPageContent() {
       });
     } catch (exception: any) {
       if (isStaleComparisonLoad(exception)) return;
+      if (exception?.message === "__CACHE_COMPLETED_ELSEWHERE__") {
+        flushPartialComparisonRows();
+        setComparisonError(null);
+        setComparisonReady(true);
+        setComparisonProgress({
+          status: "ready",
+          label: "Cache complet chargé depuis un autre onglet",
+          current: month,
+          done: completedRanges.size,
+          total: completedRanges.size,
+        });
+        return;
+      }
       console.error("focus mensuel comparison tables", exception);
       if (!isPdfMode) {
         try {
