@@ -1,6 +1,7 @@
 // app/api/stocks-disponibilites/rebuild/route.ts
-// Recalcul serveur de la projection de stock.
-// Objectif : éviter que le navigateur / Supabase client coupe la requête pendant un calcul long.
+// Recalcul serveur de la projection de stock par lots.
+// Cette version évite les timeouts Supabase/PostgREST en remplaçant un gros RPC
+// par plusieurs RPC courts : start -> batchs -> finalize.
 
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
@@ -8,6 +9,8 @@ import { createClient } from '@supabase/supabase-js'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300
+
+type JsonRecord = Record<string, any>
 
 function requiredEnv(name: string) {
   const value = process.env[name]
@@ -39,7 +42,20 @@ function toIsoDate(value: unknown) {
   return new Date().toISOString().slice(0, 10)
 }
 
+function getString(value: unknown, fallback = '') {
+  const text = String(value ?? '').trim()
+  return text || fallback
+}
+
+function parseRunId(payload: unknown) {
+  if (!payload || typeof payload !== 'object') return null
+  const record = payload as JsonRecord
+  return typeof record.run_id === 'string' ? record.run_id : null
+}
+
 export async function POST(req: NextRequest) {
+  const startedAt = Date.now()
+
   try {
     const supabase = adminClient()
 
@@ -60,35 +76,123 @@ export async function POST(req: NextRequest) {
     const dateDebut = toIsoDate(body.date_debut)
     const nbSemaines = toPositiveInteger(body.nb_semaines, 16, 1, 104)
     const scenarioPct = toPositiveNumber(body.scenario_prevision_pct, 1.2)
-    const depotMode = String(body.depot_mode || 'GLOBAL').toUpperCase() === 'DEPOT' ? 'DEPOT' : 'GLOBAL'
-    const commentaire = String(body.commentaire || 'Projection stock depuis route serveur')
+    const depotMode = getString(body.depot_mode, 'GLOBAL').toUpperCase() === 'DEPOT' ? 'DEPOT' : 'GLOBAL'
+    const commentaire = getString(body.commentaire, 'Projection stock depuis route serveur par lots')
 
-    const startedAt = Date.now()
+    // Valeur volontairement modérée : si un batch timeout encore, descendre à 50.
+    const batchSize = toPositiveInteger(body.batch_size, 100, 25, 300)
 
-    const { data, error } = await supabase.rpc('rebuild_stock_projection_hebdo_front', {
+    const { data: startData, error: startError } = await supabase.rpc('start_stock_projection_hebdo_front', {
       p_date_debut: dateDebut,
       p_nb_semaines: nbSemaines,
       p_scenario_prevision_pct: scenarioPct,
       p_depot_mode: depotMode,
       p_commentaire: commentaire,
+      p_batch_size: batchSize,
     })
 
-    if (error) {
+    if (startError) {
       return NextResponse.json(
         {
           success: false,
-          error: error.message || 'Erreur Supabase pendant le recalcul de projection.',
-          details: error,
+          step: 'start',
+          error: startError.message || 'Erreur Supabase au démarrage de la projection.',
+          details: startError,
         },
         { status: 500 }
       )
     }
 
-    return NextResponse.json({
-      success: true,
-      run_id: data,
-      duration_ms: Date.now() - startedAt,
+    const runId = parseRunId(startData)
+    if (!runId) {
+      return NextResponse.json(
+        { success: false, step: 'start', error: 'Le démarrage de projection n’a pas retourné de run_id.', details: startData },
+        { status: 500 }
+      )
+    }
+
+    const totalArticles = Number((startData as JsonRecord)?.total_articles || 0)
+    const batches: JsonRecord[] = []
+
+    for (let offset = 0; offset < totalArticles; offset += batchSize) {
+      // Sécurité Vercel : si on approche de la limite de durée, on renvoie l’état plutôt que de laisser mourir le worker.
+      // Dans ce cas, relancer le bouton continuera à créer un nouveau run complet ; on pourra ensuite passer en vrai job async si besoin.
+      if (Date.now() - startedAt > 275_000) {
+        return NextResponse.json(
+          {
+            success: false,
+            partial: true,
+            run_id: runId,
+            error: 'Temps serveur presque atteint avant la fin du recalcul. Réduis temporairement l’horizon ou le batch_size.',
+            completed_batches: batches.length,
+            total_articles: totalArticles,
+            duration_ms: Date.now() - startedAt,
+          },
+          { status: 504 }
+        )
+      }
+
+      const { data: batchData, error: batchError } = await supabase.rpc('process_stock_projection_hebdo_batch', {
+        p_run_id: runId,
+        p_offset: offset,
+        p_limit: batchSize,
+      })
+
+      if (batchError) {
+        return NextResponse.json(
+          {
+            success: false,
+            step: 'batch',
+            run_id: runId,
+            offset,
+            batch_size: batchSize,
+            error: batchError.message || 'Erreur Supabase pendant un batch de projection.',
+            details: batchError,
+            completed_batches: batches.length,
+          },
+          { status: 500 }
+        )
+      }
+
+      batches.push(batchData as JsonRecord)
+    }
+
+    const { data: finalizeData, error: finalizeError } = await supabase.rpc('finalize_stock_projection_hebdo_run', {
+      p_run_id: runId,
     })
+
+    if (finalizeError) {
+      return NextResponse.json(
+        {
+          success: false,
+          step: 'finalize',
+          run_id: runId,
+          error: finalizeError.message || 'Erreur Supabase pendant la finalisation de projection.',
+          details: finalizeError,
+          completed_batches: batches.length,
+        },
+        { status: 500 }
+      )
+    }
+
+    // V19 : on rafraîchit le cache des sorties YTD / mois passé une seule fois après le run.
+    // L'écran ne doit plus recalculer ces statistiques en live sur facture_lignes à chaque ouverture.
+    const { data: statsCacheData, error: statsCacheError } = await supabase.rpc('refresh_stock_article_sorties_stats_cache', {
+      p_cache_date: new Date().toISOString().slice(0, 10),
+    })
+
+    return NextResponse.json({
+      success: !statsCacheError,
+      run_id: runId,
+      start: startData,
+      finalize: finalizeData,
+      stats_cache: statsCacheData || null,
+      stats_cache_warning: statsCacheError?.message || null,
+      completed_batches: batches.length,
+      total_articles: totalArticles,
+      batch_size: batchSize,
+      duration_ms: Date.now() - startedAt,
+    }, { status: statsCacheError ? 207 : 200 })
   } catch (err: any) {
     return NextResponse.json(
       { success: false, error: err?.message || 'Erreur serveur pendant le recalcul de projection.' },
