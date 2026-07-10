@@ -519,7 +519,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
         { label: 'Suivi Multi Clients', path: '/synthese_multi_clients', accessKey: 'can_dashboard' },
         { label: 'Tableaux de bord', path: '/atelier-analyse', accessKey: 'can_autorisation' },
         { label: 'Focus Mois', path: '/focus_mensuel', accessKey: 'can_dashboard' },
-        { label: 'Projection Stock', path: '/stocks-disponibilites', accessKey: 'can_autorisation' },
+        { label: 'Projection Stock', path: '/stocks-disponibilites', accessKey: 'can_stocks' },
         { label: 'Indicateurs', path: '/Indicateurs', accessKey: 'can_autorisation' },
       ],
     },

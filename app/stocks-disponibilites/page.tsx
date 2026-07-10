@@ -215,10 +215,10 @@ function evolutionClass(current: number | string | null | undefined, previous: n
 
 function QuantityWithEvolution({ current, previous }: { current: number | string | null | undefined; previous: number | string | null | undefined }) {
   return (
-    <div className="flex flex-col items-end gap-1">
+    <div className="flex flex-col items-end gap-0.5 leading-tight">
       <span className="font-black text-slate-950">{formatNumber(current)}</span>
-      <span className="text-[11px] text-slate-500">N-1 : {formatNumber(previous)}</span>
-      <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-black ${evolutionClass(current, previous)}`}>{formatEvolution(current, previous)}</span>
+      <span className="text-[10px] text-slate-500">N-1 : {formatNumber(previous)}</span>
+      <span className={`inline-flex rounded-full border px-1.5 py-0.5 text-[10px] font-black ${evolutionClass(current, previous)}`}>{formatEvolution(current, previous)}</span>
     </div>
   )
 }
@@ -302,6 +302,13 @@ function alertLabel(level: AlertLevel) {
   if (normalized === 'ROUGE') return 'Rupture'
   if (normalized === 'ORANGE') return 'Sous sécurité'
   if (normalized === 'JAUNE') return 'Proche sécurité'
+  return 'OK'
+}
+
+function alertCompactLabel(level: AlertLevel) {
+  const normalized = String(level || 'VERT').toUpperCase()
+  if (normalized === 'ROUGE') return 'R'
+  if (normalized === 'ORANGE' || normalized === 'JAUNE') return 'A'
   return 'OK'
 }
 
@@ -409,11 +416,11 @@ function SortableTh({
   const active = sortState.key === sortKey
   const arrow = active ? (sortState.direction === 'asc' ? '▲' : '▼') : '↕'
   return (
-    <th className={`border-b border-slate-200 px-3 py-3 ${align === 'right' ? 'text-right' : 'text-left'}`}>
+    <th className={`border-b border-slate-200 px-2 py-2 ${align === 'right' ? 'text-right' : 'text-left'}`}>
       <button
         type="button"
         onClick={() => onSort(sortKey)}
-        className={`inline-flex w-full items-center gap-1 font-black uppercase tracking-wide ${align === 'right' ? 'justify-end' : 'justify-start'} ${active ? 'text-blue-700' : 'text-slate-600 hover:text-slate-950'}`}
+        className={`inline-flex w-full items-center gap-1 text-[11px] font-black uppercase tracking-wide ${align === 'right' ? 'justify-end' : 'justify-start'} ${active ? 'text-blue-700' : 'text-slate-600 hover:text-slate-950'}`}
         title={`Trier par ${label}`}
       >
         <span>{label}</span>
@@ -1272,24 +1279,36 @@ export default function StocksDisponibilitesPage() {
               ) : null}
             </section>
 
-            <section className="grid grid-cols-1 gap-5 2xl:grid-cols-[minmax(1120px,1.15fr)_minmax(900px,1fr)]">
+            <section className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.42fr)_minmax(0,0.88fr)] 2xl:grid-cols-[minmax(1180px,1.42fr)_minmax(760px,0.88fr)]">
               <div className="rounded-3xl border border-slate-200 bg-white shadow-sm">
                 <div className="border-b border-slate-200 p-4">
                   <h2 className="text-xl font-black text-slate-950">Articles à risque</h2>
                   <p className="text-sm text-slate-500">{formatNumber(filteredAlertes.length)} article(s) affiché(s).</p>
                 </div>
-                <div className="max-h-[820px] overflow-auto">
-                  <table className="min-w-[1280px] w-full text-sm">
+                <div className="max-h-[820px] overflow-y-auto overflow-x-hidden">
+                  <table className="w-full table-fixed text-[13px]">
+                    <colgroup>
+                      <col className="w-[68px]" />
+                      <col className="w-[210px]" />
+                      <col className="w-[130px]" />
+                      <col className="w-[64px]" />
+                      <col className="w-[110px]" />
+                      <col className="w-[110px]" />
+                      <col className="w-[72px]" />
+                      <col className="w-[78px]" />
+                      <col className="w-[78px]" />
+                      <col className="w-[82px]" />
+                    </colgroup>
                     <thead className="sticky top-0 z-10 bg-slate-100 text-xs uppercase tracking-wide text-slate-600">
                       <tr>
-                        <SortableTh label="Alerte" sortKey="niveau_alerte" sortState={sortState} onSort={toggleSort} />
+                        <SortableTh label="Al." sortKey="niveau_alerte" sortState={sortState} onSort={toggleSort} />
                         <SortableTh label="Article" sortKey="reference_article" sortState={sortState} onSort={toggleSort} />
-                        <SortableTh label="Macro / famille" sortKey="macro_famille" sortState={sortState} onSort={toggleSort} />
+                        <SortableTh label="Macro / fam." sortKey="macro_famille" sortState={sortState} onSort={toggleSort} />
                         <SortableTh label="Stock" sortKey="stock_initial" sortState={sortState} onSort={toggleSort} align="right" />
                         <SortableTh label="BL YTD" sortKey="sorties_ytd_n" sortState={sortState} onSort={toggleSort} align="right" />
-                        <SortableTh label="BL mois passé" sortKey="sorties_mois_passe_n" sortState={sortState} onSort={toggleSort} align="right" />
-                        <SortableTh label="Sécurité" sortKey="stock_securite" sortState={sortState} onSort={toggleSort} align="right" />
-                        <SortableTh label="Mini proj." sortKey="stock_projete_min" sortState={sortState} onSort={toggleSort} align="right" />
+                        <SortableTh label="BL M-1" sortKey="sorties_mois_passe_n" sortState={sortState} onSort={toggleSort} align="right" />
+                        <SortableTh label="Sécu" sortKey="stock_securite" sortState={sortState} onSort={toggleSort} align="right" />
+                        <SortableTh label="Mini" sortKey="stock_projete_min" sortState={sortState} onSort={toggleSort} align="right" />
                         <SortableTh label="Manque" sortKey="qte_manquante_max" sortState={sortState} onSort={toggleSort} align="right" />
                         <SortableTh label="Rupture" sortKey="date_rupture" sortState={sortState} onSort={toggleSort} />
                       </tr>
@@ -1299,28 +1318,31 @@ export default function StocksDisponibilitesPage() {
                         const isSelected = selected?.reference_article === row.reference_article && (selected?.depot || 'GLOBAL') === (row.depot || 'GLOBAL')
                         return (
                           <tr key={`${row.reference_article}-${row.depot || 'GLOBAL'}`} onClick={() => setSelected(row)} className={`cursor-pointer border-b border-slate-100 ${isSelected ? 'bg-blue-50' : rowToneClass(row.niveau_alerte)}`}>
-                            <td className="px-3 py-3">
-                              <span className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs font-black ${alertClass(row.niveau_alerte)}`}>
-                                <span className={`h-2 w-2 rounded-full ${dotClass(row.niveau_alerte)}`} />
-                                {alertLabel(row.niveau_alerte)}
+                            <td className="px-2 py-2.5 align-top">
+                              <span
+                                title={alertLabel(row.niveau_alerte)}
+                                className={`inline-flex min-w-[34px] items-center justify-center gap-1 rounded-full border px-1.5 py-0.5 text-[11px] font-black ${alertClass(row.niveau_alerte)}`}
+                              >
+                                <span className={`h-1.5 w-1.5 rounded-full ${dotClass(row.niveau_alerte)}`} />
+                                {alertCompactLabel(row.niveau_alerte)}
                               </span>
                             </td>
-                            <td className="px-3 py-3">
-                              <div className="font-black text-slate-950">{row.reference_article}</div>
-                              <div className="max-w-[320px] truncate text-xs text-slate-500" title={row.designation || ''}>{row.designation || '—'}</div>
-                              <div className="mt-1 text-[11px] text-slate-400">{row.fournisseur_principal || '—'}</div>
+                            <td className="px-2 py-2.5 align-top">
+                              <div className="truncate font-black text-slate-950" title={row.reference_article}>{row.reference_article}</div>
+                              <div className="truncate text-[11px] text-slate-500" title={row.designation || ''}>{row.designation || '—'}</div>
+                              <div className="truncate text-[10px] text-slate-400" title={row.fournisseur_principal || ''}>{row.fournisseur_principal || '—'}</div>
                             </td>
-                            <td className="px-3 py-3">
-                              <div className="max-w-[180px] truncate font-semibold text-slate-700" title={row.macro_famille || ''}>{row.macro_famille || '—'}</div>
-                              <div className="max-w-[180px] truncate text-xs text-slate-500" title={row.famille || ''}>{row.famille || '—'}</div>
+                            <td className="px-2 py-2.5 align-top">
+                              <div className="truncate font-semibold text-slate-700" title={row.macro_famille || ''}>{row.macro_famille || '—'}</div>
+                              <div className="truncate text-[11px] text-slate-500" title={row.famille || ''}>{row.famille || '—'}</div>
                             </td>
-                            <td className="px-3 py-3 text-right font-semibold">{formatNumber(row.stock_initial)}</td>
-                            <td className="px-3 py-3 text-right"><QuantityWithEvolution current={row.sorties_ytd_n} previous={row.sorties_ytd_n1} /></td>
-                            <td className="px-3 py-3 text-right"><QuantityWithEvolution current={row.sorties_mois_passe_n} previous={row.sorties_mois_passe_n1} /></td>
-                            <td className="px-3 py-3 text-right font-semibold">{formatNumber(row.stock_securite)}</td>
-                            <td className={`px-3 py-3 text-right font-semibold ${toNumber(row.stock_projete_min) < 0 ? 'text-red-700' : toNumber(row.stock_projete_min) < toNumber(row.stock_securite) ? 'text-orange-700' : 'text-slate-700'}`}>{formatNumber(row.stock_projete_min)}</td>
-                            <td className="px-3 py-3 text-right font-semibold text-red-700">{formatNumber(row.qte_manquante_max)}</td>
-                            <td className="px-3 py-3 text-xs text-slate-600">{formatDate(row.date_rupture)}</td>
+                            <td className="px-2 py-2.5 text-right align-top font-semibold whitespace-nowrap">{formatNumber(row.stock_initial)}</td>
+                            <td className="px-2 py-2.5 text-right align-top"><QuantityWithEvolution current={row.sorties_ytd_n} previous={row.sorties_ytd_n1} /></td>
+                            <td className="px-2 py-2.5 text-right align-top"><QuantityWithEvolution current={row.sorties_mois_passe_n} previous={row.sorties_mois_passe_n1} /></td>
+                            <td className="px-2 py-2.5 text-right align-top font-semibold whitespace-nowrap">{formatNumber(row.stock_securite)}</td>
+                            <td className={`px-2 py-2.5 text-right align-top font-semibold whitespace-nowrap ${toNumber(row.stock_projete_min) < 0 ? 'text-red-700' : toNumber(row.stock_projete_min) < toNumber(row.stock_securite) ? 'text-orange-700' : 'text-slate-700'}`}>{formatNumber(row.stock_projete_min)}</td>
+                            <td className="px-2 py-2.5 text-right align-top font-semibold whitespace-nowrap text-red-700">{formatNumber(row.qte_manquante_max)}</td>
+                            <td className="px-2 py-2.5 text-right align-top text-[11px] whitespace-nowrap text-slate-600">{formatDate(row.date_rupture)}</td>
                           </tr>
                         )
                       })}
@@ -1337,9 +1359,9 @@ export default function StocksDisponibilitesPage() {
                     <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div>
-                          <span className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs font-black ${alertClass(selectedLevel)}`}>
-                            <span className={`h-2 w-2 rounded-full ${dotClass(selectedLevel)}`} />
-                            {alertLabel(selectedLevel)}
+                          <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-black ${alertClass(selectedLevel)}`}>
+                            <span className={`h-1.5 w-1.5 rounded-full ${dotClass(selectedLevel)}`} />
+                            {alertCompactLabel(selectedLevel)}
                           </span>
                           <h2 className="mt-3 text-2xl font-black text-slate-950">{selected.reference_article}</h2>
                           <p className="mt-1 text-sm leading-5 text-slate-600">{selected.designation || 'Sans désignation'}</p>
