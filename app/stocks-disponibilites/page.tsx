@@ -6,6 +6,53 @@ import { supabase } from "@/lib/supabaseClient";
 type AlertLevel = "ROUGE" | "ORANGE" | "JAUNE" | "VERT" | string;
 type AbcClass = "A" | "B" | "C";
 
+type DiagnosticStep = {
+  event_id?: string | null;
+  trace_id: string;
+  module: string;
+  action: string;
+  layer: string;
+  step: string;
+  object_name?: string | null;
+  run_id?: string | null;
+  batch_offset?: number | null;
+  batch_limit?: number | null;
+  started_at: string;
+  finished_at?: string | null;
+  duration_ms?: number | null;
+  status: "STARTED" | "SUCCESS" | "WARNING" | "ERROR";
+  http_status?: number | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  error_details?: string | null;
+  error_hint?: string | null;
+  error_context?: string | null;
+  row_count?: number | null;
+  context?: Record<string, unknown> | null;
+};
+
+type DiagnosticReport = {
+  trace_id: string;
+  module: string;
+  action: string;
+  status: "SUCCESS" | "WARNING" | "ERROR";
+  category?: string | null;
+  user_message?: string | null;
+  technical_message?: string | null;
+  started_at: string;
+  finished_at: string;
+  duration_ms: number;
+  steps: DiagnosticStep[];
+};
+
+type ApiPayload = {
+  success?: boolean;
+  error?: string;
+  trace_id?: string;
+  diagnostic?: DiagnosticReport;
+  [key: string]: unknown;
+};
+
 type StockKpi = {
   run_id: string | null;
   run_date_debut: string | null;
@@ -409,6 +456,195 @@ function friendlyError(error: unknown, fallback: string) {
   const cleaned = stripHtml(raw);
   if (!cleaned) return fallback;
   return cleaned.length > 360 ? `${cleaned.slice(0, 357)}…` : cleaned;
+}
+
+function createClientTraceId(prefix: string) {
+  const stamp = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
+  const random = Math.random().toString(36).slice(2, 10).toUpperCase();
+  return `${prefix}-${stamp}-${random}`;
+}
+
+function localDiagnosticReport(
+  traceId: string,
+  action: string,
+  objectName: string,
+  error: unknown,
+): DiagnosticReport {
+  const message = friendlyError(error, "Erreur de communication avec le serveur.");
+  const rawMessage =
+    error instanceof Error ? error.message : typeof error === "string" ? error : String(error);
+  const now = new Date().toISOString();
+  return {
+    trace_id: traceId,
+    module: "stocks-disponibilites",
+    action,
+    status: "ERROR",
+    category: "browser_to_vercel",
+    user_message: message,
+    technical_message: rawMessage,
+    started_at: now,
+    finished_at: now,
+    duration_ms: 0,
+    steps: [
+      {
+        trace_id: traceId,
+        module: "stocks-disponibilites",
+        action,
+        layer: "browser_to_vercel",
+        step: "fetch_route",
+        object_name: objectName,
+        started_at: now,
+        finished_at: now,
+        duration_ms: 0,
+        status: "ERROR",
+        error_message: rawMessage,
+      },
+    ],
+  };
+}
+
+async function authenticatedFetch(
+  url: string,
+  traceId: string,
+  init?: RequestInit,
+): Promise<{ response: Response; payload: ApiPayload }> {
+  const sessionResponse = await supabase.auth.getSession();
+  const token = sessionResponse.data.session?.access_token;
+  const response = await fetch(url, {
+    ...init,
+    headers: {
+      ...(init?.headers || {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      "x-trace-id": traceId,
+    },
+  });
+  const payload = (await response.json().catch(() => ({}))) as ApiPayload;
+  return { response, payload };
+}
+
+function diagnosticCopyText(report: DiagnosticReport) {
+  return JSON.stringify(report, null, 2);
+}
+
+function DiagnosticPanel({
+  report,
+  tone = "error",
+  onRetry,
+  retrying = false,
+  onTest,
+  testing = false,
+}: {
+  report: DiagnosticReport;
+  tone?: "error" | "warning" | "success";
+  onRetry?: () => void;
+  retrying?: boolean;
+  onTest?: () => void;
+  testing?: boolean;
+}) {
+  const classes =
+    tone === "warning"
+      ? "border-amber-200 bg-amber-50 text-amber-900"
+      : tone === "success"
+        ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+        : "border-red-200 bg-red-50 text-red-900";
+  const title =
+    report.status === "SUCCESS"
+      ? "Diagnostic terminé"
+      : report.status === "WARNING"
+        ? "Diagnostic avec avertissement"
+        : "Incident technique identifié";
+
+  async function copyReport() {
+    await navigator.clipboard.writeText(diagnosticCopyText(report));
+  }
+
+  return (
+    <div role={tone === "error" ? "alert" : "status"} className={`rounded-2xl border p-4 ${classes}`}>
+      <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+        <div className="min-w-0">
+          <div className="font-black">{title}</div>
+          <div className="mt-1 break-words text-sm font-medium leading-5">
+            {report.user_message || report.technical_message || "Consulte le diagnostic technique."}
+          </div>
+          <div className="mt-2 break-all font-mono text-[11px]">
+            Trace : {report.trace_id} · Catégorie : {report.category || "non classée"} · Durée : {formatNumber(report.duration_ms)} ms
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {onRetry ? (
+            <button
+              type="button"
+              onClick={onRetry}
+              disabled={retrying}
+              className="rounded-xl border border-current bg-white px-3 py-2 text-xs font-black disabled:opacity-60"
+            >
+              {retrying ? "Nouvelle tentative…" : "Réessayer"}
+            </button>
+          ) : null}
+          {onTest ? (
+            <button
+              type="button"
+              onClick={onTest}
+              disabled={testing}
+              className="rounded-xl border border-current bg-white px-3 py-2 text-xs font-black disabled:opacity-60"
+            >
+              {testing ? "Test en cours…" : "Tester la connexion"}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={copyReport}
+            className="rounded-xl border border-current bg-white px-3 py-2 text-xs font-black"
+          >
+            Copier le rapport
+          </button>
+          <a
+            href="/admin/diagnostics"
+            className="rounded-xl border border-current bg-white px-3 py-2 text-xs font-black"
+          >
+            Ouvrir l’historique
+          </a>
+        </div>
+      </div>
+
+      <details className="mt-3 rounded-xl border border-current/20 bg-white/70 p-3">
+        <summary className="cursor-pointer text-xs font-black uppercase tracking-wide">Afficher le diagnostic technique</summary>
+        <div className="mt-3 overflow-auto">
+          <table className="min-w-[1100px] w-full text-[11px]">
+            <thead className="text-left uppercase tracking-wide opacity-70">
+              <tr>
+                <th className="px-2 py-2">Statut</th>
+                <th className="px-2 py-2">Couche</th>
+                <th className="px-2 py-2">Étape</th>
+                <th className="px-2 py-2">Objet</th>
+                <th className="px-2 py-2 text-right">Durée</th>
+                <th className="px-2 py-2">Lot</th>
+                <th className="px-2 py-2">Code</th>
+                <th className="px-2 py-2">Message technique</th>
+              </tr>
+            </thead>
+            <tbody>
+              {report.steps.map((step, index) => (
+                <tr key={`${step.step}-${index}`} className="border-t border-current/10 align-top">
+                  <td className="px-2 py-2 font-black">{step.status}</td>
+                  <td className="px-2 py-2">{step.layer}</td>
+                  <td className="px-2 py-2 font-bold">{step.step}</td>
+                  <td className="max-w-[260px] break-words px-2 py-2">{step.object_name || "—"}</td>
+                  <td className="whitespace-nowrap px-2 py-2 text-right">{step.duration_ms == null ? "—" : `${formatNumber(step.duration_ms)} ms`}</td>
+                  <td className="whitespace-nowrap px-2 py-2">{step.batch_offset == null ? "—" : `${step.batch_offset} / ${step.batch_limit ?? "—"}`}</td>
+                  <td className="whitespace-nowrap px-2 py-2 font-mono">{step.error_code || step.http_status || "—"}</td>
+                  <td className="max-w-[460px] break-words px-2 py-2">
+                    <div>{step.error_message || "—"}</div>
+                    {step.error_details ? <div className="mt-1 opacity-75">{step.error_details}</div> : null}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </details>
+    </div>
+  );
 }
 
 function alertLabel(level: AlertLevel) {
@@ -1265,7 +1501,11 @@ export default function StocksDisponibilitesPage() {
   const [savingSecurity, setSavingSecurity] = useState(false);
   const [savingWeekly, setSavingWeekly] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [diagnostic, setDiagnostic] = useState<DiagnosticReport | null>(null);
   const [detailWarning, setDetailWarning] = useState<string | null>(null);
+  const [detailDiagnostic, setDetailDiagnostic] = useState<DiagnosticReport | null>(null);
+  const [connectionDiagnostic, setConnectionDiagnostic] = useState<DiagnosticReport | null>(null);
+  const [testingConnection, setTestingConnection] = useState(false);
 
   const macroFamilles = useMemo(() => {
     return Array.from(
@@ -1435,20 +1675,22 @@ export default function StocksDisponibilitesPage() {
   }) {
     setLoading(true);
     setError(null);
+    setDiagnostic(null);
 
+    const traceId = createClientTraceId("STOCK-DATA");
     try {
-      const [kpiResponse, alertesResponse] = await Promise.all([
-        supabase.from("v_stock_projection_kpis").select("*").maybeSingle(),
-        supabase.from("v_stock_projection_alertes_abc").select("*"),
-      ]);
+      const { response, payload } = await authenticatedFetch(
+        `/api/stocks-disponibilites/data?trace_id=${encodeURIComponent(traceId)}`,
+        traceId,
+      );
 
-      if (kpiResponse.error) throw kpiResponse.error;
-      if (alertesResponse.error) throw alertesResponse.error;
+      if (!response.ok || !payload.success) {
+        if (payload.diagnostic) setDiagnostic(payload.diagnostic);
+        throw new Error(payload.error || `Erreur HTTP ${response.status} pendant le chargement.`);
+      }
 
-      const nextKpi = (kpiResponse.data || null) as StockKpi | null;
-      const nextAlertes = (
-        (alertesResponse.data || []) as StockAlertRow[]
-      ).sort(sortAlerts);
+      const nextKpi = (payload.kpi || null) as StockKpi | null;
+      const nextAlertes = ((payload.alertes || []) as StockAlertRow[]).sort(sortAlerts);
 
       setKpi(nextKpi);
       setAlertes(nextAlertes);
@@ -1471,10 +1713,14 @@ export default function StocksDisponibilitesPage() {
         setSelected(nextAlertes[0] || null);
       }
     } catch (err: any) {
-      setError(
-        friendlyError(
+      setError(friendlyError(err, "Erreur pendant le chargement des projections stock."));
+      setDiagnostic((current) =>
+        current ||
+        localDiagnosticReport(
+          traceId,
+          "load_main_data",
+          "/api/stocks-disponibilites/data",
           err,
-          "Erreur pendant le chargement des projections stock.",
         ),
       );
     } finally {
@@ -1489,25 +1735,34 @@ export default function StocksDisponibilitesPage() {
     setWeeklyPct({});
     setWeeklyManualQty({});
     setDetailWarning(null);
+    setDetailDiagnostic(null);
 
     if (!row?.reference_article) return;
 
     setStockSecurityInput(String(toNumber(row.stock_securite)));
     setDetailLoading(true);
-
-    const warnings: string[] = [];
+    const traceId = createClientTraceId("STOCK-DETAIL");
 
     try {
-      const projectionResponse = await supabase
-        .from("v_stock_projection_hebdo_latest")
-        .select("*")
-        .eq("reference_article", row.reference_article)
-        .eq("depot", row.depot || "GLOBAL")
-        .order("periode_debut", { ascending: true });
+      const params = new URLSearchParams({
+        reference_article: row.reference_article,
+        depot: row.depot || "GLOBAL",
+        trace_id: traceId,
+      });
+      const { response, payload } = await authenticatedFetch(
+        `/api/stocks-disponibilites/detail?${params.toString()}`,
+        traceId,
+      );
 
-      if (projectionResponse.error) throw projectionResponse.error;
-      const nextProjection = (projectionResponse.data || []) as ProjectionRow[];
+      if ((!response.ok && response.status !== 207) || !payload.success) {
+        if (payload.diagnostic) setDetailDiagnostic(payload.diagnostic);
+        throw new Error(payload.error || `Erreur HTTP ${response.status} pendant le chargement du détail.`);
+      }
+
+      const nextProjection = (payload.projection || []) as ProjectionRow[];
       setProjection(nextProjection);
+      setFournisseurs((payload.fournisseurs || []) as FournisseurRow[]);
+      setBesoinsClients((payload.besoins_clients || []) as BesoinClientRow[]);
 
       const nextPct: Record<string, number> = {};
       const nextManualQty: Record<string, string> = {};
@@ -1527,50 +1782,23 @@ export default function StocksDisponibilitesPage() {
       setWeeklyPct(nextPct);
       setWeeklyManualQty(nextManualQty);
 
-      const cfResponse = await supabase
-        .from("v_commandes_fournisseurs_ouvertes_enrichies")
-        .select(
-          "numero_piece,fournisseur_code,fournisseur_nom,date_livraison,date_livraison_calculee,reference_article,designation,depot,quantite_attendue,montant_ht",
-        )
-        .eq("reference_article", row.reference_article)
-        .order("date_livraison_calculee", { ascending: true })
-        .limit(100);
-
-      if (cfResponse.error) {
-        warnings.push(
-          `Commandes fournisseurs non affichées : ${friendlyError(
-            cfResponse.error,
-            "Erreur de lecture des commandes fournisseurs.",
-          )}`,
+      if (payload.partial || payload.diagnostic?.status === "WARNING") {
+        setDetailWarning(
+          payload.diagnostic?.user_message ||
+            "Certaines sources secondaires du détail ne sont pas disponibles.",
         );
-      } else {
-        setFournisseurs((cfResponse.data || []) as FournisseurRow[]);
+        if (payload.diagnostic) setDetailDiagnostic(payload.diagnostic);
       }
-
-      const besoinsResponse = await supabase
-        .from("v_stock_besoins_clients_ouverts_source")
-        .select(
-          "reference_article,designation,depot,date_besoin,quantite_besoin,montant_ht,nb_commandes,numeros_pieces",
-        )
-        .eq("reference_article", row.reference_article)
-        .order("date_besoin", { ascending: true })
-        .limit(100);
-
-      if (besoinsResponse.error) {
-        warnings.push(
-          `Besoins clients non affichés : ${friendlyError(
-            besoinsResponse.error,
-            "Erreur de lecture des besoins clients.",
-          )}`,
-        );
-      } else {
-        setBesoinsClients((besoinsResponse.data || []) as BesoinClientRow[]);
-      }
-
-      setDetailWarning(warnings.length ? warnings.join(" | ") : null);
     } catch (err: any) {
-      setDetailWarning(
-        friendlyError(err, "Erreur pendant le chargement du détail article."),
+      setDetailWarning(friendlyError(err, "Erreur pendant le chargement du détail article."));
+      setDetailDiagnostic((current) =>
+        current ||
+        localDiagnosticReport(
+          traceId,
+          "load_article_detail",
+          "/api/stocks-disponibilites/detail",
+          err,
+        ),
       );
     } finally {
       setDetailLoading(false);
@@ -1581,52 +1809,51 @@ export default function StocksDisponibilitesPage() {
     const currentSelected = selected;
     setRecalculating(true);
     setError(null);
+    setDiagnostic(null);
+    const traceId = createClientTraceId("STOCK-REBUILD");
 
     try {
       const weeks = Math.max(1, Math.min(104, Number(horizonWeeks || 16)));
       const pct = Math.max(0, Number(defaultProjectionPct || 120)) / 100;
 
-      const sessionResponse = await supabase.auth.getSession();
-      const token = sessionResponse.data.session?.access_token;
-
-      const response = await fetch("/api/stocks-disponibilites/rebuild", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      const { response, payload } = await authenticatedFetch(
+        "/api/stocks-disponibilites/rebuild",
+        traceId,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            date_debut: new Date().toISOString().slice(0, 10),
+            nb_semaines: weeks,
+            scenario_prevision_pct: pct,
+            depot_mode: "GLOBAL",
+            commentaire,
+            trace_id: traceId,
+          }),
         },
-        body: JSON.stringify({
-          date_debut: new Date().toISOString().slice(0, 10),
-          nb_semaines: weeks,
-          scenario_prevision_pct: pct,
-          depot_mode: "GLOBAL",
-          commentaire,
-        }),
-      });
+      );
 
-      const payload = await response.json().catch(() => null);
-      if (!response.ok) {
-        throw new Error(
-          payload?.error ||
-            `Erreur HTTP ${response.status} pendant le recalcul de projection.`,
-        );
+      if ((!response.ok && response.status !== 207) || !payload.success) {
+        if (payload.diagnostic) setDiagnostic(payload.diagnostic);
+        throw new Error(payload.error || `Erreur HTTP ${response.status} pendant le recalcul.`);
       }
+
+      if (payload.diagnostic?.status === "WARNING") setDiagnostic(payload.diagnostic);
 
       await loadData({
         keepSelected: Boolean(currentSelected),
         keepProjectionSettings: true,
       });
     } catch (err: unknown) {
-      const message = friendlyError(
-        err,
-        "Erreur pendant le recalcul de projection.",
-      );
-      setError(
-        `${message}${
-          message.toLowerCase().includes("délai")
-            ? " Le recalcul passe par une route serveur et une fonction SQL optimisée. Si ce message persiste, réduis temporairement l’horizon puis relance."
-            : ""
-        }`,
+      setError(friendlyError(err, "Erreur pendant le recalcul de projection."));
+      setDiagnostic((current) =>
+        current ||
+        localDiagnosticReport(
+          traceId,
+          "rebuild_projection",
+          "/api/stocks-disponibilites/rebuild",
+          err,
+        ),
       );
     } finally {
       setRecalculating(false);
@@ -1639,21 +1866,31 @@ export default function StocksDisponibilitesPage() {
 
     setSavingSecurity(true);
     setError(null);
+    setDiagnostic(null);
+    const traceId = createClientTraceId("STOCK-SECURITY");
 
     try {
-      const response = await supabase.rpc(
-        "upsert_stock_article_stock_securite_fast",
+      const { response, payload } = await authenticatedFetch(
+        "/api/stocks-disponibilites/settings",
+        traceId,
         {
-          p_reference_article: currentSelected.reference_article,
-          p_designation: currentSelected.designation,
-          p_famille: currentSelected.famille,
-          p_macro_famille: currentSelected.macro_famille,
-          p_fournisseur_principal: currentSelected.fournisseur_principal,
-          p_stock_securite: toNumber(stockSecurityInput),
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "stock_security",
+            reference_article: currentSelected.reference_article,
+            designation: currentSelected.designation,
+            famille: currentSelected.famille,
+            macro_famille: currentSelected.macro_famille,
+            fournisseur_principal: currentSelected.fournisseur_principal,
+            stock_securite: toNumber(stockSecurityInput),
+          }),
         },
       );
-
-      if (response.error) throw response.error;
+      if (!response.ok || !payload.success) {
+        if (payload.diagnostic) setDiagnostic(payload.diagnostic);
+        throw new Error(payload.error || `Erreur HTTP ${response.status} pendant l’enregistrement.`);
+      }
 
       const nextSecurity = toNumber(stockSecurityInput);
       const sameArticle = (row: StockAlertRow) =>
@@ -1688,10 +1925,14 @@ export default function StocksDisponibilitesPage() {
         }),
       );
     } catch (err: any) {
-      setError(
-        friendlyError(
+      setError(friendlyError(err, "Erreur pendant l’enregistrement du stock de sécurité."));
+      setDiagnostic((current) =>
+        current ||
+        localDiagnosticReport(
+          traceId,
+          "save_stock_security",
+          "/api/stocks-disponibilites/settings",
           err,
-          "Erreur pendant l’enregistrement du stock de sécurité.",
         ),
       );
     } finally {
@@ -1705,44 +1946,90 @@ export default function StocksDisponibilitesPage() {
 
     setSavingWeekly(true);
     setError(null);
+    setDiagnostic(null);
+    const traceId = createClientTraceId("STOCK-WEEKLY");
 
     try {
-      const calls = projection.map((row) => {
+      const assumptions = projection.map((row) => {
         const manualText = weeklyManualQty[row.periode_debut];
-        return supabase.rpc("upsert_stock_prevision_override_v2", {
-          p_reference_article: currentSelected.reference_article,
-          p_depot: currentSelected.depot || "GLOBAL",
-          p_periode_debut: row.periode_debut,
-          p_coefficient_prevision:
+        return {
+          periode_debut: row.periode_debut,
+          coefficient_prevision:
             Math.max(
               0,
               toNumber(weeklyPct[row.periode_debut] ?? defaultProjectionPct),
             ) / 100,
-          p_quantite_prevision_forcee:
+          quantite_prevision_forcee:
             manualText === undefined || manualText === ""
               ? null
               : Math.max(0, toNumber(manualText)),
-          p_commentaire:
-            "Hypothèse modifiée depuis écran Stocks & disponibilités",
-        });
+        };
       });
 
-      const results = await Promise.all(calls);
-      const firstError = results.find((result) => result.error)?.error;
-      if (firstError) throw firstError;
+      const { response, payload } = await authenticatedFetch(
+        "/api/stocks-disponibilites/settings",
+        traceId,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "weekly_assumptions",
+            reference_article: currentSelected.reference_article,
+            depot: currentSelected.depot || "GLOBAL",
+            assumptions,
+          }),
+        },
+      );
+
+      if (!response.ok || !payload.success) {
+        if (payload.diagnostic) setDiagnostic(payload.diagnostic);
+        throw new Error(payload.error || `Erreur HTTP ${response.status} pendant l’enregistrement.`);
+      }
 
       await rebuildProjection(
         `Hypothèses semaine modifiées ${currentSelected.reference_article}`,
       );
     } catch (err: any) {
-      setError(
-        friendlyError(
+      setError(friendlyError(err, "Erreur pendant l’enregistrement des hypothèses hebdomadaires."));
+      setDiagnostic((current) =>
+        current ||
+        localDiagnosticReport(
+          traceId,
+          "save_weekly_assumptions",
+          "/api/stocks-disponibilites/settings",
           err,
-          "Erreur pendant l’enregistrement des hypothèses hebdomadaires.",
         ),
       );
     } finally {
       setSavingWeekly(false);
+    }
+  }
+
+  async function testConnection() {
+    setTestingConnection(true);
+    setConnectionDiagnostic(null);
+    const traceId = createClientTraceId("STOCK-CHECK");
+    try {
+      const { response, payload } = await authenticatedFetch(
+        `/api/stocks-disponibilites/diagnostics?trace_id=${encodeURIComponent(traceId)}`,
+        traceId,
+      );
+      if (payload.diagnostic) setConnectionDiagnostic(payload.diagnostic);
+      if (!response.ok || !payload.success) {
+        throw new Error(payload.error || `Diagnostic HTTP ${response.status}`);
+      }
+    } catch (err) {
+      setConnectionDiagnostic((current) =>
+        current ||
+        localDiagnosticReport(
+          traceId,
+          "connection_diagnostic",
+          "/api/stocks-disponibilites/diagnostics",
+          err,
+        ),
+      );
+    } finally {
+      setTestingConnection(false);
     }
   }
 
@@ -1802,7 +2089,7 @@ export default function StocksDisponibilitesPage() {
             </div>
 
             <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-              <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
                 <label className="text-xs font-bold text-slate-600">
                   Horizon semaines
                   <input
@@ -1831,13 +2118,21 @@ export default function StocksDisponibilitesPage() {
                 </label>
                 <button
                   type="button"
+                  onClick={testConnection}
+                  disabled={testingConnection}
+                  className="mt-5 rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-black text-slate-700 shadow-sm disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {testingConnection ? "Test en cours…" : "Tester la connexion"}
+                </button>
+                <button
+                  type="button"
                   onClick={() =>
                     rebuildProjection(
                       "Recalcul depuis écran Stocks & disponibilités",
                     )
                   }
                   disabled={recalculating}
-                  className="col-span-2 mt-5 rounded-xl bg-slate-950 px-4 py-2 text-sm font-black text-white shadow-sm disabled:cursor-not-allowed disabled:opacity-60 md:col-span-2"
+                  className="col-span-2 mt-5 rounded-xl bg-slate-950 px-4 py-2 text-sm font-black text-white shadow-sm disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {recalculating
                     ? "Recalcul en cours…"
@@ -1848,31 +2143,36 @@ export default function StocksDisponibilitesPage() {
           </div>
         </header>
 
-        {error ? (
-          <div
-            role="alert"
-            aria-live="polite"
-            className="flex flex-col gap-3 rounded-2xl border border-red-200 bg-red-50 p-4 text-red-800 sm:flex-row sm:items-center sm:justify-between"
-          >
-            <div className="min-w-0">
-              <div className="font-black">
-                Connexion aux données momentanément indisponible
-              </div>
-              <div className="mt-1 break-words text-sm font-medium leading-5">
-                {error}
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() =>
-                loadData({ keepSelected: true, keepProjectionSettings: true })
-              }
-              disabled={loading}
-              className="shrink-0 rounded-xl border border-red-300 bg-white px-4 py-2 text-sm font-black text-red-700 shadow-sm disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {loading ? "Nouvelle tentative…" : "Réessayer"}
-            </button>
+        {diagnostic ? (
+          <DiagnosticPanel
+            report={diagnostic}
+            tone={diagnostic.status === "WARNING" ? "warning" : "error"}
+            onRetry={() =>
+              loadData({ keepSelected: true, keepProjectionSettings: true })
+            }
+            retrying={loading}
+            onTest={testConnection}
+            testing={testingConnection}
+          />
+        ) : error ? (
+          <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm font-bold text-red-800">
+            {error}
           </div>
+        ) : null}
+
+        {connectionDiagnostic ? (
+          <DiagnosticPanel
+            report={connectionDiagnostic}
+            tone={
+              connectionDiagnostic.status === "SUCCESS"
+                ? "success"
+                : connectionDiagnostic.status === "WARNING"
+                  ? "warning"
+                  : "error"
+            }
+            onTest={testConnection}
+            testing={testingConnection}
+          />
         ) : null}
 
         {loading ? (
@@ -2503,7 +2803,16 @@ export default function StocksDisponibilitesPage() {
                       </div>
                     </div>
 
-                    {detailWarning ? (
+                    {detailDiagnostic ? (
+                      <DiagnosticPanel
+                        report={detailDiagnostic}
+                        tone="warning"
+                        onRetry={() => loadDetail(selected)}
+                        retrying={detailLoading}
+                        onTest={testConnection}
+                        testing={testingConnection}
+                      />
+                    ) : detailWarning ? (
                       <div
                         role="status"
                         className="break-words rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm font-medium leading-5 text-amber-800"
