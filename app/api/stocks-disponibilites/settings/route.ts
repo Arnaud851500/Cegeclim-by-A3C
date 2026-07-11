@@ -65,22 +65,22 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === 'weekly_assumptions') {
+      const runId = String(body?.run_id || '').trim()
       const referenceArticle = String(body?.reference_article || '').trim()
       const depot = String(body?.depot || 'GLOBAL').trim() || 'GLOBAL'
       const assumptions = Array.isArray(body?.assumptions)
         ? (body.assumptions as WeeklyAssumption[])
         : []
 
-      if (!referenceArticle || !assumptions.length) {
+      if (!runId || !referenceArticle || !assumptions.length) {
         const error = {
           status: 400,
           code: 'ASSUMPTIONS_REQUIRED',
-          message: 'La référence article et au moins une hypothèse hebdomadaire sont obligatoires.',
+          message: 'Le run, la référence article et au moins une hypothèse hebdomadaire sont obligatoires.',
         }
         throw new DiagnosticError(trace.reportFromUnknown(error, error.message), 400, error)
       }
 
-      const results: unknown[] = []
       for (const assumption of assumptions) {
         const periodeDebut = String(assumption?.periode_debut || '').trim()
         if (!/^\d{4}-\d{2}-\d{2}$/.test(periodeDebut)) {
@@ -91,33 +91,45 @@ export async function POST(req: NextRequest) {
           }
           throw new DiagnosticError(trace.reportFromUnknown(error, error.message), 400, error)
         }
-
-        const rpcResponse: any = await trace.runStep(
-          {
-            layer: 'supabase_rpc',
-            step: `save_week_${periodeDebut}`,
-            objectName: 'public.upsert_stock_prevision_override_v2',
-            context: { reference_article: referenceArticle, depot, periode_debut: periodeDebut },
-          },
-          () =>
-            admin.rpc('upsert_stock_prevision_override_v2', {
-              p_reference_article: referenceArticle,
-              p_depot: depot,
-              p_periode_debut: periodeDebut,
-              p_coefficient_prevision: Math.max(0, Number(assumption.coefficient_prevision || 0)),
-              p_quantite_prevision_forcee:
-                assumption.quantite_prevision_forcee === null ||
-                assumption.quantite_prevision_forcee === undefined
-                  ? null
-                  : Math.max(0, Number(assumption.quantite_prevision_forcee || 0)),
-              p_commentaire: 'Hypothèse modifiée depuis écran Stocks & disponibilités',
-            }),
-        )
-        results.push(rpcResponse.data || null)
       }
 
+      const rpcResponse: any = await trace.runStep(
+        {
+          layer: 'supabase_rpc',
+          step: 'save_assumptions_and_recalculate_article',
+          objectName: 'public.save_stock_projection_article_assumptions_fast',
+          runId,
+          context: {
+            reference_article: referenceArticle,
+            depot,
+            weeks: assumptions.length,
+          },
+          rowCount: (data) => {
+            const projection = (data as { projection?: unknown[] } | null)?.projection
+            return Array.isArray(projection) ? projection.length : null
+          },
+        },
+        () =>
+          admin.rpc('save_stock_projection_article_assumptions_fast', {
+            p_run_id: runId,
+            p_reference_article: referenceArticle,
+            p_depot: depot,
+            p_assumptions: assumptions,
+            p_trace_id: traceId,
+          }),
+      )
+
+      const result = (rpcResponse.data || {}) as Record<string, unknown>
+
       return diagnosticJson(
-        { success: true, updated_weeks: assumptions.length, results },
+        {
+          success: true,
+          mode: 'single_article',
+          updated_weeks: assumptions.length,
+          result,
+          projection: Array.isArray(result.projection) ? result.projection : [],
+          article: result.article || null,
+        },
         trace.reportSuccess(),
       )
     }

@@ -1966,6 +1966,7 @@ export default function StocksDisponibilitesPage() {
         };
       });
 
+      const currentRunId = projection[0]?.run_id || currentSelected.run_id;
       const { response, payload } = await authenticatedFetch(
         "/api/stocks-disponibilites/settings",
         traceId,
@@ -1974,6 +1975,7 @@ export default function StocksDisponibilitesPage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             action: "weekly_assumptions",
+            run_id: currentRunId,
             reference_article: currentSelected.reference_article,
             depot: currentSelected.depot || "GLOBAL",
             assumptions,
@@ -1986,9 +1988,65 @@ export default function StocksDisponibilitesPage() {
         throw new Error(payload.error || `Erreur HTTP ${response.status} pendant l’enregistrement.`);
       }
 
-      await rebuildProjection(
-        `Hypothèses semaine modifiées ${currentSelected.reference_article}`,
-      );
+      const result = (payload.result || {}) as {
+        projection?: ProjectionRow[];
+        article?: Partial<StockAlertRow>;
+      };
+      const nextProjection = (
+        (Array.isArray(payload.projection)
+          ? payload.projection
+          : result.projection || []) as ProjectionRow[]
+      ).sort((a, b) => a.periode_debut.localeCompare(b.periode_debut));
+      const articlePatch = (payload.article || result.article || null) as
+        | Partial<StockAlertRow>
+        | null;
+
+      if (nextProjection.length) {
+        setProjection(nextProjection);
+
+        const nextPct: Record<string, number> = {};
+        const nextManualQty: Record<string, string> = {};
+        nextProjection.forEach((projectionRow) => {
+          nextPct[projectionRow.periode_debut] = Math.round(
+            toNumber(projectionRow.coefficient_prevision_applique || 1.2) * 100,
+          );
+          if (
+            projectionRow.prevision_forcee !== null &&
+            projectionRow.prevision_forcee !== undefined
+          ) {
+            nextManualQty[projectionRow.periode_debut] = String(
+              toNumber(projectionRow.prevision_forcee),
+            );
+          }
+        });
+        setWeeklyPct(nextPct);
+        setWeeklyManualQty(nextManualQty);
+      } else {
+        await loadDetail(currentSelected);
+      }
+
+      if (articlePatch) {
+        const sameArticle = (row: StockAlertRow) =>
+          row.reference_article === currentSelected.reference_article &&
+          (row.depot || "GLOBAL") === (currentSelected.depot || "GLOBAL");
+
+        const patchAlertRow = (row: StockAlertRow): StockAlertRow =>
+          sameArticle(row)
+            ? {
+                ...row,
+                ...articlePatch,
+                reference_article: row.reference_article,
+                depot: row.depot,
+              }
+            : row;
+
+        setAlertes((prev) => prev.map(patchAlertRow).sort(sortAlerts));
+        setSelected((prev) => (prev ? patchAlertRow(prev) : prev));
+      }
+
+      if (payload.diagnostic?.status === "WARNING") {
+        setDiagnostic(payload.diagnostic);
+      }
     } catch (err: any) {
       setError(friendlyError(err, "Erreur pendant l’enregistrement des hypothèses hebdomadaires."));
       setDiagnostic((current) =>
