@@ -1498,6 +1498,11 @@ export default function StocksDisponibilitesPage() {
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [recalculating, setRecalculating] = useState(false);
+  const [rebuildProgress, setRebuildProgress] = useState<{
+    percent: number;
+    message: string;
+    phase: string;
+  } | null>(null);
   const [savingSecurity, setSavingSecurity] = useState(false);
   const [savingWeekly, setSavingWeekly] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1808,6 +1813,11 @@ export default function StocksDisponibilitesPage() {
   async function rebuildProjection(commentaire: string) {
     const currentSelected = selected;
     setRecalculating(true);
+    setRebuildProgress({
+      percent: 0,
+      phase: "start",
+      message: "Initialisation de la projection",
+    });
     setError(null);
     setDiagnostic(null);
     const traceId = createClientTraceId("STOCK-REBUILD");
@@ -1816,29 +1826,89 @@ export default function StocksDisponibilitesPage() {
       const weeks = Math.max(1, Math.min(104, Number(horizonWeeks || 16)));
       const pct = Math.max(0, Number(defaultProjectionPct || 120)) / 100;
 
-      const { response, payload } = await authenticatedFetch(
-        "/api/stocks-disponibilites/rebuild",
-        traceId,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            date_debut: new Date().toISOString().slice(0, 10),
-            nb_semaines: weeks,
-            scenario_prevision_pct: pct,
-            depot_mode: "GLOBAL",
-            commentaire,
-            trace_id: traceId,
-          }),
-        },
-      );
+      let continuation: Record<string, unknown> | null = null;
+      let completed = false;
+      let calls = 0;
 
-      if ((!response.ok && response.status !== 207) || !payload.success) {
-        if (payload.diagnostic) setDiagnostic(payload.diagnostic);
-        throw new Error(payload.error || `Erreur HTTP ${response.status} pendant le recalcul.`);
+      while (!completed) {
+        calls += 1;
+        if (calls > 200) {
+          throw new Error(
+            "Le recalcul a dépassé le nombre maximal d’étapes de continuation.",
+          );
+        }
+
+        const requestBody: Record<string, unknown> = continuation
+          ? {
+              ...continuation,
+              trace_id: traceId,
+            }
+          : {
+              date_debut: new Date().toISOString().slice(0, 10),
+              nb_semaines: weeks,
+              scenario_prevision_pct: pct,
+              depot_mode: "GLOBAL",
+              commentaire,
+              trace_id: traceId,
+              projection_batch_size: 100,
+              projection_batches_per_request: 3,
+              netting_batch_size: 50,
+              netting_batches_per_request: 8,
+              netting_concurrency: 4,
+            };
+
+        const { response, payload } = await authenticatedFetch(
+          "/api/stocks-disponibilites/rebuild",
+          traceId,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(requestBody),
+          },
+        );
+
+        if ((!response.ok && response.status !== 207) || !payload.success) {
+          if (payload.diagnostic) setDiagnostic(payload.diagnostic);
+          throw new Error(
+            payload.error ||
+              `Erreur HTTP ${response.status} pendant le recalcul.`,
+          );
+        }
+
+        const progress = payload.progress as
+          | { percent?: number; message?: string; phase?: string }
+          | undefined;
+
+        if (progress) {
+          setRebuildProgress({
+            percent: Math.max(0, Math.min(100, Number(progress.percent || 0))),
+            message: String(progress.message || "Recalcul en cours"),
+            phase: String(progress.phase || "processing"),
+          });
+        }
+
+        if (payload.diagnostic?.status === "WARNING") {
+          setDiagnostic(payload.diagnostic);
+        }
+
+        completed = Boolean(payload.done);
+        if (!completed) {
+          const nextContinuation = payload.continuation;
+          if (!nextContinuation || typeof nextContinuation !== "object") {
+            throw new Error(
+              "La route de recalcul n’a pas retourné l’état de continuation attendu.",
+            );
+          }
+          continuation = nextContinuation as Record<string, unknown>;
+          await new Promise((resolve) => window.setTimeout(resolve, 100));
+        }
       }
 
-      if (payload.diagnostic?.status === "WARNING") setDiagnostic(payload.diagnostic);
+      setRebuildProgress({
+        percent: 100,
+        phase: "done",
+        message: "Projection terminée, actualisation de l’écran",
+      });
 
       await loadData({
         keepSelected: Boolean(currentSelected),
@@ -1857,6 +1927,7 @@ export default function StocksDisponibilitesPage() {
       );
     } finally {
       setRecalculating(false);
+      setRebuildProgress(null);
     }
   }
 
@@ -2193,10 +2264,15 @@ export default function StocksDisponibilitesPage() {
                   className="col-span-2 mt-5 rounded-xl bg-slate-950 px-4 py-2 text-sm font-black text-white shadow-sm disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {recalculating
-                    ? "Recalcul en cours…"
+                    ? `Recalcul ${Math.round(rebuildProgress?.percent || 0)} %`
                     : "Recalculer projection"}
                 </button>
               </div>
+              {recalculating && rebuildProgress ? (
+                <div className="mt-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-900">
+                  {rebuildProgress.message}
+                </div>
+              ) : null}
             </div>
           </div>
         </header>

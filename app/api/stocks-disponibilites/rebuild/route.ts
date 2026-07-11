@@ -1,8 +1,8 @@
 // app/api/stocks-disponibilites/rebuild/route.ts
-// Recalcul global de projection instrumenté.
-// Les lots de projection restent séquentiels.
-// Les lots de netting, indépendants par groupes de références, sont exécutés
-// avec une concurrence bornée pour rester largement sous la limite Vercel.
+// Recalcul global découpé en plusieurs requêtes courtes et reprenables.
+// Une requête ne tente plus de traiter l'intégralité des références avant
+// la limite Vercel : elle exécute quelques lots, retourne l'état d'avancement,
+// puis la page rappelle automatiquement la route avec la continuation reçue.
 
 import { NextRequest } from 'next/server'
 import {
@@ -17,9 +17,22 @@ import {
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
-export const maxDuration = 300
+export const maxDuration = 60
 
 type JsonRecord = Record<string, any>
+type RebuildPhase = 'projection' | 'netting' | 'finalize' | 'done'
+
+type Continuation = {
+  run_id: string
+  phase: RebuildPhase
+  projection_offset: number
+  netting_offset: number
+  total_articles: number
+  total_references: number
+  projection_batch_size: number
+  netting_batch_size: number
+  netting_concurrency: number
+}
 
 function toPositiveInteger(value: unknown, fallback: number, min: number, max: number) {
   const n = Number(value)
@@ -50,302 +63,349 @@ function parseRunId(payload: unknown) {
   return typeof record.run_id === 'string' ? record.run_id : null
 }
 
-function serverBudgetExceeded(startedAt: number) {
-  return Date.now() - startedAt > 275_000
-}
+function progressPercent(state: Continuation) {
+  if (state.phase === 'done') return 100
+  if (state.phase === 'finalize') return 98
 
-async function throwServerBudgetError(
-  trace: DiagnosticTrace,
-  step: string,
-  runId: string | null,
-  context: Record<string, unknown>,
-) {
-  const error = {
-    status: 504,
-    code: 'VERCEL_TIME_BUDGET',
-    message: 'La route approche de la limite Vercel de 300 secondes avant la fin du traitement.',
-    details: context,
+  if (state.phase === 'projection') {
+    if (state.total_articles <= 0) return 45
+    return Math.max(
+      1,
+      Math.min(45, Math.round((state.projection_offset / state.total_articles) * 45)),
+    )
   }
 
-  await trace.recordManual({
-    layer: 'vercel_function',
-    step,
-    objectName: '/api/stocks-disponibilites/rebuild',
-    runId,
-    status: 'ERROR',
-    httpStatus: 504,
-    errorCode: 'VERCEL_TIME_BUDGET',
-    errorMessage: error.message,
-    context,
-    rawError: error,
-  })
-
-  throw new DiagnosticError(trace.reportFromUnknown(error, error.message), 504, error)
+  if (state.total_references <= 0) return 95
+  return Math.max(
+    46,
+    Math.min(
+      95,
+      45 + Math.round((state.netting_offset / state.total_references) * 50),
+    ),
+  )
 }
 
-function buildOffsets(total: number, batchSize: number) {
-  const offsets: number[] = []
-  for (let offset = 0; offset < total; offset += batchSize) offsets.push(offset)
-  return offsets
+function progressMessage(state: Continuation) {
+  if (state.phase === 'projection') {
+    return `Construction des projections : ${Math.min(
+      state.projection_offset,
+      state.total_articles,
+    )} / ${state.total_articles} articles`
+  }
+  if (state.phase === 'netting') {
+    return `Calcul des stocks : ${Math.min(
+      state.netting_offset,
+      state.total_references,
+    )} / ${state.total_references} références`
+  }
+  if (state.phase === 'finalize') return 'Finalisation de la projection'
+  return 'Projection terminée'
 }
 
-async function runConcurrentOffsets(options: {
+function continuationPayload(state: Continuation) {
+  return {
+    success: true,
+    done: state.phase === 'done',
+    continuation: state.phase === 'done' ? null : state,
+    progress: {
+      phase: state.phase,
+      percent: progressPercent(state),
+      message: progressMessage(state),
+      projection_offset: state.projection_offset,
+      netting_offset: state.netting_offset,
+      total_articles: state.total_articles,
+      total_references: state.total_references,
+    },
+  }
+}
+
+async function runNettingWave(options: {
   offsets: number[]
-  concurrency: number
-  startedAt: number
+  state: Continuation
   trace: DiagnosticTrace
-  runId: string
-  totalReferences: number
-  nettingBatchSize: number
   admin: ReturnType<typeof createAdminClient>
 }) {
-  const {
-    offsets,
-    concurrency,
-    startedAt,
-    trace,
-    runId,
-    totalReferences,
-    nettingBatchSize,
-    admin,
-  } = options
+  const { offsets, state, trace, admin } = options
 
-  if (!offsets.length) return 0
-
-  let cursor = 0
-  let completed = 0
-
-  async function worker(workerIndex: number) {
-    while (true) {
-      const currentIndex = cursor
-      cursor += 1
-
-      if (currentIndex >= offsets.length) return
-
-      const offset = offsets[currentIndex]
-
-      if (serverBudgetExceeded(startedAt)) {
-        await throwServerBudgetError(trace, 'netting_route_time_budget', runId, {
-          offset,
-          completed_netting_batches: completed,
-          total_netting_batches: offsets.length,
-          total_references: totalReferences,
-          netting_batch_size: nettingBatchSize,
-          netting_concurrency: concurrency,
-          worker_index: workerIndex,
-          duration_ms: Date.now() - startedAt,
-        })
-      }
-
-      await trace.runStep(
+  await Promise.all(
+    offsets.map((offset, index) =>
+      trace.runStep(
         {
           layer: 'supabase_rpc',
           step: 'netting_batch',
           objectName: 'public.apply_stock_projection_fermes_incluses_batch',
-          runId,
+          runId: state.run_id,
           batchOffset: offset,
-          batchLimit: nettingBatchSize,
+          batchLimit: state.netting_batch_size,
           context: {
-            total_references: totalReferences,
-            total_netting_batches: offsets.length,
-            netting_concurrency: concurrency,
-            worker_index: workerIndex,
+            total_references: state.total_references,
+            netting_concurrency: state.netting_concurrency,
+            worker_index: index + 1,
           },
         },
         () =>
           admin.rpc('apply_stock_projection_fermes_incluses_batch', {
-            p_run_id: runId,
+            p_run_id: state.run_id,
             p_offset: offset,
-            p_limit: nettingBatchSize,
+            p_limit: state.netting_batch_size,
           }),
-      )
-
-      completed += 1
-    }
-  }
-
-  const workerCount = Math.min(concurrency, offsets.length)
-  await Promise.all(
-    Array.from({ length: workerCount }, (_, index) => worker(index + 1)),
+      ),
+    ),
   )
-
-  return completed
 }
 
 export async function POST(req: NextRequest) {
-  const startedAt = Date.now()
   const traceId = resolveTraceId(req, 'STOCK-REBUILD')
   const admin = createAdminClient(traceId)
   const trace = new DiagnosticTrace(admin, {
     traceId,
     module: 'stocks-disponibilites',
-    action: 'rebuild_projection',
+    action: 'rebuild_projection_resumable',
   })
-
-  let runId: string | null = null
 
   try {
     const user = await requireAuthenticatedUser(req, admin, trace)
     const body = await req.json().catch(() => ({}))
 
-    const dateDebut = toIsoDate(body.date_debut)
-    const nbSemaines = toPositiveInteger(body.nb_semaines, 16, 1, 104)
-    const scenarioPct = toPositiveNumber(body.scenario_prevision_pct, 1.2)
-    const depotMode =
-      getString(body.depot_mode, 'GLOBAL').toUpperCase() === 'DEPOT'
-        ? 'DEPOT'
-        : 'GLOBAL'
-    const commentaire = getString(
-      body.commentaire,
-      'Projection stock depuis route serveur instrumentée',
+    const projectionBatchSize = toPositiveInteger(
+      body.projection_batch_size ?? body.batch_size,
+      100,
+      25,
+      300,
     )
-
-    const projectionBatchSize = toPositiveInteger(body.batch_size, 100, 25, 300)
     const nettingBatchSize = toPositiveInteger(body.netting_batch_size, 50, 10, 150)
+    const nettingConcurrency = toPositiveInteger(body.netting_concurrency, 4, 1, 6)
 
-    // 4 lots en parallèle :
-    // - suffisamment rapide pour rester sous 300 secondes ;
-    // - concurrence volontairement bornée pour ne pas saturer PostgreSQL.
-    const nettingConcurrency = toPositiveInteger(
-      body.netting_concurrency,
-      4,
+    // Nombre maximal de lots exécutés par requête. Ces limites gardent chaque
+    // appel sous 60 secondes même lorsque PostgreSQL est plus lent.
+    const projectionBatchesPerRequest = toPositiveInteger(
+      body.projection_batches_per_request,
+      3,
       1,
       6,
     )
-
-    const startResponse: any = await trace.runStep(
-      {
-        layer: 'supabase_rpc',
-        step: 'start_run',
-        objectName: 'public.start_stock_projection_hebdo_front',
-        context: {
-          user_id: user.id,
-          date_debut: dateDebut,
-          nb_semaines: nbSemaines,
-          scenario_prevision_pct: scenarioPct,
-          depot_mode: depotMode,
-          projection_batch_size: projectionBatchSize,
-          netting_batch_size: nettingBatchSize,
-          netting_concurrency: nettingConcurrency,
-        },
-      },
-      () =>
-        admin.rpc('start_stock_projection_hebdo_front', {
-          p_date_debut: dateDebut,
-          p_nb_semaines: nbSemaines,
-          p_scenario_prevision_pct: scenarioPct,
-          p_depot_mode: depotMode,
-          p_commentaire: `${commentaire} | trace_id=${traceId}`,
-          p_batch_size: projectionBatchSize,
-        }),
+    const nettingBatchesPerRequest = toPositiveInteger(
+      body.netting_batches_per_request,
+      8,
+      1,
+      24,
     )
 
-    const startData = (startResponse.data || {}) as JsonRecord
-    runId = parseRunId(startData)
+    let state: Continuation
 
-    if (!runId) {
-      const error = {
-        status: 500,
-        code: 'RUN_ID_MISSING',
-        message: 'Le démarrage de projection n’a pas retourné de run_id.',
-        details: startData,
-      }
-      throw new DiagnosticError(
-        trace.reportFromUnknown(error, error.message),
-        500,
-        error,
+    const incomingRunId = getString(body.run_id)
+    const incomingPhase = getString(body.phase) as RebuildPhase
+
+    if (!incomingRunId) {
+      const dateDebut = toIsoDate(body.date_debut)
+      const nbSemaines = toPositiveInteger(body.nb_semaines, 16, 1, 104)
+      const scenarioPct = toPositiveNumber(body.scenario_prevision_pct, 1.2)
+      const depotMode =
+        getString(body.depot_mode, 'GLOBAL').toUpperCase() === 'DEPOT'
+          ? 'DEPOT'
+          : 'GLOBAL'
+      const commentaire = getString(
+        body.commentaire,
+        'Projection stock depuis route serveur reprenable',
       )
-    }
 
-    const totalArticles = Number(startData.total_articles || 0)
-    let completedProjectionBatches = 0
-
-    // Cette phase est déjà rapide dans les diagnostics et reste séquentielle
-    // pour limiter la charge de création des lignes de projection.
-    for (
-      let offset = 0;
-      offset < totalArticles;
-      offset += projectionBatchSize
-    ) {
-      if (serverBudgetExceeded(startedAt)) {
-        await throwServerBudgetError(
-          trace,
-          'projection_route_time_budget',
-          runId,
-          {
-            offset,
-            completed_projection_batches: completedProjectionBatches,
-            total_articles: totalArticles,
-            duration_ms: Date.now() - startedAt,
-          },
-        )
-      }
-
-      await trace.runStep(
+      const startResponse: any = await trace.runStep(
         {
           layer: 'supabase_rpc',
-          step: 'projection_batch',
-          objectName: 'public.process_stock_projection_hebdo_batch',
-          runId,
-          batchOffset: offset,
-          batchLimit: projectionBatchSize,
-          context: { total_articles: totalArticles },
+          step: 'start_run',
+          objectName: 'public.start_stock_projection_hebdo_front',
+          context: {
+            user_id: user.id,
+            date_debut: dateDebut,
+            nb_semaines: nbSemaines,
+            scenario_prevision_pct: scenarioPct,
+            depot_mode: depotMode,
+            projection_batch_size: projectionBatchSize,
+            netting_batch_size: nettingBatchSize,
+            netting_concurrency: nettingConcurrency,
+          },
         },
         () =>
-          admin.rpc('process_stock_projection_hebdo_batch', {
-            p_run_id: runId,
-            p_offset: offset,
-            p_limit: projectionBatchSize,
+          admin.rpc('start_stock_projection_hebdo_front', {
+            p_date_debut: dateDebut,
+            p_nb_semaines: nbSemaines,
+            p_scenario_prevision_pct: scenarioPct,
+            p_depot_mode: depotMode,
+            p_commentaire: `${commentaire} | trace_id=${traceId}`,
+            p_batch_size: projectionBatchSize,
           }),
       )
 
-      completedProjectionBatches += 1
+      const startData = (startResponse.data || {}) as JsonRecord
+      const runId = parseRunId(startData)
+
+      if (!runId) {
+        const error = {
+          status: 500,
+          code: 'RUN_ID_MISSING',
+          message: 'Le démarrage de projection n’a pas retourné de run_id.',
+          details: startData,
+        }
+        throw new DiagnosticError(
+          trace.reportFromUnknown(error, error.message),
+          500,
+          error,
+        )
+      }
+
+      state = {
+        run_id: runId,
+        phase: 'projection',
+        projection_offset: 0,
+        netting_offset: 0,
+        total_articles: Number(startData.total_articles || 0),
+        total_references: 0,
+        projection_batch_size: projectionBatchSize,
+        netting_batch_size: nettingBatchSize,
+        netting_concurrency: nettingConcurrency,
+      }
+    } else {
+      if (!['projection', 'netting', 'finalize'].includes(incomingPhase)) {
+        const error = {
+          status: 400,
+          code: 'INVALID_CONTINUATION_PHASE',
+          message: `Phase de continuation invalide : ${incomingPhase || 'vide'}.`,
+        }
+        throw new DiagnosticError(
+          trace.reportFromUnknown(error, error.message),
+          400,
+          error,
+        )
+      }
+
+      state = {
+        run_id: incomingRunId,
+        phase: incomingPhase,
+        projection_offset: toPositiveInteger(body.projection_offset, 0, 0, 10_000_000),
+        netting_offset: toPositiveInteger(body.netting_offset, 0, 0, 10_000_000),
+        total_articles: toPositiveInteger(body.total_articles, 0, 0, 10_000_000),
+        total_references: toPositiveInteger(body.total_references, 0, 0, 10_000_000),
+        projection_batch_size: projectionBatchSize,
+        netting_batch_size: nettingBatchSize,
+        netting_concurrency: nettingConcurrency,
+      }
     }
 
-    const countResponse: any = await trace.runStep(
-      {
-        layer: 'supabase_rpc',
-        step: 'count_netting_references',
-        objectName: 'public.count_stock_projection_references',
-        runId,
-      },
-      () =>
-        admin.rpc('count_stock_projection_references', {
-          p_run_id: runId,
-        }),
-    )
+    if (state.phase === 'projection') {
+      let processedBatches = 0
 
-    const totalReferences = Number(countResponse.data || 0)
-    const nettingOffsets = buildOffsets(totalReferences, nettingBatchSize)
+      while (
+        state.projection_offset < state.total_articles &&
+        processedBatches < projectionBatchesPerRequest
+      ) {
+        const offset = state.projection_offset
 
-    // Les lots ciblent des groupes de références distincts.
-    // Ils peuvent donc être exécutés en parallèle sans modifier la règle métier.
-    const completedNettingBatches = await runConcurrentOffsets({
-      offsets: nettingOffsets,
-      concurrency: nettingConcurrency,
-      startedAt,
-      trace,
-      runId,
-      totalReferences,
-      nettingBatchSize,
-      admin,
-    })
+        await trace.runStep(
+          {
+            layer: 'supabase_rpc',
+            step: 'projection_batch',
+            objectName: 'public.process_stock_projection_hebdo_batch',
+            runId: state.run_id,
+            batchOffset: offset,
+            batchLimit: state.projection_batch_size,
+            context: {
+              total_articles: state.total_articles,
+              projection_batches_per_request: projectionBatchesPerRequest,
+            },
+          },
+          () =>
+            admin.rpc('process_stock_projection_hebdo_batch', {
+              p_run_id: state.run_id,
+              p_offset: offset,
+              p_limit: state.projection_batch_size,
+            }),
+        )
+
+        state.projection_offset += state.projection_batch_size
+        processedBatches += 1
+      }
+
+      if (state.projection_offset >= state.total_articles) {
+        const countResponse: any = await trace.runStep(
+          {
+            layer: 'supabase_rpc',
+            step: 'count_netting_references',
+            objectName: 'public.count_stock_projection_references',
+            runId: state.run_id,
+          },
+          () =>
+            admin.rpc('count_stock_projection_references', {
+              p_run_id: state.run_id,
+            }),
+        )
+
+        state.total_references = Number(countResponse.data || 0)
+        state.netting_offset = 0
+        state.phase = state.total_references > 0 ? 'netting' : 'finalize'
+      }
+
+      const report = trace.reportSuccess()
+      return diagnosticJson(
+        continuationPayload(state),
+        report,
+        state.phase === 'finalize' ? 202 : 202,
+      )
+    }
+
+    if (state.phase === 'netting') {
+      let remainingForRequest = nettingBatchesPerRequest
+
+      while (
+        state.netting_offset < state.total_references &&
+        remainingForRequest > 0
+      ) {
+        const waveSize = Math.min(
+          state.netting_concurrency,
+          remainingForRequest,
+          Math.ceil(
+            (state.total_references - state.netting_offset) /
+              state.netting_batch_size,
+          ),
+        )
+
+        const offsets = Array.from(
+          { length: waveSize },
+          (_, index) =>
+            state.netting_offset + index * state.netting_batch_size,
+        )
+
+        await runNettingWave({ offsets, state, trace, admin })
+
+        state.netting_offset += offsets.length * state.netting_batch_size
+        remainingForRequest -= offsets.length
+      }
+
+      if (state.netting_offset >= state.total_references) {
+        state.phase = 'finalize'
+      }
+
+      return diagnosticJson(
+        continuationPayload(state),
+        trace.reportSuccess(),
+        202,
+      )
+    }
+
+    let statsCache: unknown = null
+    let statsCacheWarning: unknown = null
 
     const finalizeResponse: any = await trace.runStep(
       {
         layer: 'supabase_rpc',
         step: 'finalize_run',
         objectName: 'public.finalize_stock_projection_hebdo_run',
-        runId,
+        runId: state.run_id,
       },
       () =>
         admin.rpc('finalize_stock_projection_hebdo_run', {
-          p_run_id: runId,
+          p_run_id: state.run_id,
         }),
     )
-
-    let statsCache: unknown = null
-    let statsCacheWarning: unknown = null
 
     try {
       const statsResponse: any = await trace.runStep(
@@ -353,7 +413,7 @@ export async function POST(req: NextRequest) {
           layer: 'supabase_rpc',
           step: 'refresh_stats_cache',
           objectName: 'public.refresh_stock_article_sorties_stats_cache',
-          runId,
+          runId: state.run_id,
         },
         () =>
           admin.rpc('refresh_stock_article_sorties_stats_cache', {
@@ -369,6 +429,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    state.phase = 'done'
     const report = trace.reportSuccess()
 
     if (statsCacheWarning) {
@@ -379,20 +440,11 @@ export async function POST(req: NextRequest) {
 
     return diagnosticJson(
       {
-        success: true,
-        run_id: runId,
-        start: startData,
+        ...continuationPayload(state),
+        run_id: state.run_id,
         finalize: finalizeResponse.data || null,
         stats_cache: statsCache,
         stats_cache_warning: statsCacheWarning,
-        completed_projection_batches: completedProjectionBatches,
-        completed_netting_batches: completedNettingBatches,
-        total_articles: totalArticles,
-        total_references: totalReferences,
-        projection_batch_size: projectionBatchSize,
-        netting_batch_size: nettingBatchSize,
-        netting_concurrency: nettingConcurrency,
-        duration_ms: Date.now() - startedAt,
       },
       report,
       statsCacheWarning ? 207 : 200,
