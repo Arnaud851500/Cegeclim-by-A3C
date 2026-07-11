@@ -434,7 +434,7 @@ export class DiagnosticTrace {
     }
   }
 
-  async runStep<T>(meta: RunStepOptions, fn: () => Promise<T>): Promise<T> {
+  async runStep<T>(meta: RunStepOptions, fn: () => PromiseLike<T> | T): Promise<T> {
     const startedAt = new Date()
     const startedMs = Date.now()
     const base: DiagnosticStep = {
@@ -455,7 +455,9 @@ export class DiagnosticTrace {
     const eventId = await this.insertStart(base)
 
     try {
-      const result: any = await fn()
+      // Les builders Supabase/PostgREST sont des PromiseLike (thenables), pas des Promise natives.
+      // Promise.resolve les adopte correctement sans imposer les propriétés catch/finally de Promise.
+      const result: any = await Promise.resolve(fn())
       if (result && typeof result === 'object' && 'error' in result && result.error) {
         const wrapped: any = result.error
         wrapped.status = wrapped.status || result.status
