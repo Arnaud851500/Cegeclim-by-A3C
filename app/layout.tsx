@@ -1032,7 +1032,14 @@ function AppShell({ children }: { children: React.ReactNode }) {
   }
 
   function openFraisPortManquant() {
-    router.push('/portefeuille-livraison?controle=frais-port-manquant')
+    // Le timestamp garantit un changement d'URL même lorsque l'utilisateur est déjà
+    // sur la page Portefeuille avec le même filtre actif.
+    const target = `/portefeuille-livraison?controle=frais-port-manquant&open=${Date.now()}`
+    router.push(target)
+
+    // Lorsque la page est déjà montée, Next.js ne la remonte pas nécessairement.
+    // Cet événement applique donc immédiatement le filtre dans l'écran courant.
+    window.dispatchEvent(new CustomEvent('cegeclim:open-frais-port-manquant'))
   }
 
   async function refreshCdcLivAvant2026Signal(accessProfile?: UserAccessProfile | null) {
@@ -1318,12 +1325,12 @@ function AppShell({ children }: { children: React.ReactNode }) {
                   status={fraisPortManquantSignal.status}
                   count={fraisPortManquantSignal.count}
                   blink={fraisPortManquantSignal.status === 'red' && statusBlinkOn}
-                  clickable={fraisPortManquantSignal.count > 0}
+                  clickable
                   onClick={openFraisPortManquant}
                   title={
                     fraisPortManquantSignal.count > 0
-                      ? `${fraisPortManquantSignal.count} BL avec frais de port manquant sur le périmètre actif`
-                      : 'Aucun frais de port manquant détecté sur les BL'
+                      ? `${fraisPortManquantSignal.count} BL avec frais de port manquant sur le périmètre actif — cliquer pour les afficher`
+                      : 'Ouvrir le contrôle frais de port dans le portefeuille livraison'
                   }
                 />
 
