@@ -79,6 +79,11 @@ type CdcLivAvant2026Signal = {
   count: number
 }
 
+type FraisPortManquantSignal = {
+  status: StatusLevel
+  count: number
+}
+
 type CerfaKoRow = {
   key: string
   raw: Record<string, any>
@@ -291,6 +296,10 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const [statusBlinkOn, setStatusBlinkOn] = useState(true)
   const [todoSignal, setTodoSignal] = useState<TodoSignal>({ status: 'green', count: 0 })
   const [cdcLivAvant2026Signal, setCdcLivAvant2026Signal] = useState<CdcLivAvant2026Signal>({
+    status: 'green',
+    count: 0,
+  })
+  const [fraisPortManquantSignal, setFraisPortManquantSignal] = useState<FraisPortManquantSignal>({
     status: 'green',
     count: 0,
   })
@@ -993,6 +1002,39 @@ function AppShell({ children }: { children: React.ReactNode }) {
     }
   }
 
+
+  async function refreshFraisPortManquantSignal(accessProfile?: UserAccessProfile | null) {
+    const allowedAgences = getAllowedAgencesForStatus(accessProfile)
+    const allowedCollaborateurs = getAllowedCollaborateursForStatus(accessProfile)
+
+    try {
+      let query = supabase
+        .from('v_controle_frais_port_documents')
+        .select('numero_document', { count: 'exact', head: true })
+        .eq('type_document', 'BL')
+        .eq('statut_controle', 'FRAIS_PORT_MANQUANT')
+
+      if (allowedAgences.length > 0) query = query.in('agence', allowedAgences)
+      if (allowedCollaborateurs.length > 0) query = query.in('representant', allowedCollaborateurs)
+
+      const { count, error } = await query
+      if (error) throw error
+
+      const countValue = Number(count || 0)
+      setFraisPortManquantSignal({
+        status: countValue > 0 ? 'red' : 'green',
+        count: countValue,
+      })
+    } catch (error) {
+      console.error('Frais de port manquant status indicator', error)
+      setFraisPortManquantSignal({ status: 'green', count: 0 })
+    }
+  }
+
+  function openFraisPortManquant() {
+    router.push('/portefeuille-livraison?controle=frais-port-manquant')
+  }
+
   async function refreshCdcLivAvant2026Signal(accessProfile?: UserAccessProfile | null) {
     const allowedAgences = getAllowedAgencesForStatus(accessProfile)
     const allowedCollaborateurs = getAllowedCollaborateursForStatus(accessProfile)
@@ -1099,6 +1141,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       refreshCerfaKo(profile, { detail: false }),
       refreshCertificationSignals(profile),
       refreshCdcLivAvant2026Signal(profile),
+      refreshFraisPortManquantSignal(profile),
     ])
   }
 
@@ -1266,6 +1309,21 @@ function AppShell({ children }: { children: React.ReactNode }) {
                     cdcLivAvant2026Signal.count > 0
                       ? `${cdcLivAvant2026Signal.count} CDC avec livraison avant 2026`
                       : 'Aucun CDC avec livraison avant 2026'
+                  }
+                />
+
+
+                <StatusLight
+                  label="Frais de port manquant"
+                  status={fraisPortManquantSignal.status}
+                  count={fraisPortManquantSignal.count}
+                  blink={fraisPortManquantSignal.status === 'red' && statusBlinkOn}
+                  clickable={fraisPortManquantSignal.count > 0}
+                  onClick={openFraisPortManquant}
+                  title={
+                    fraisPortManquantSignal.count > 0
+                      ? `${fraisPortManquantSignal.count} BL avec frais de port manquant sur le périmètre actif`
+                      : 'Aucun frais de port manquant détecté sur les BL'
                   }
                 />
 

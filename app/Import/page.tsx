@@ -13,6 +13,8 @@ type TableKey =
   | 'facture_lignes'
   | 'devis_lignes'
   | 'activite_lignes'
+  | 'activite_entete'
+  | 'modes_expedition'
   | 'stock_articles_snapshot'
   | 'commandes_fournisseurs_lignes'
 
@@ -479,6 +481,74 @@ const TABLES: TableConfig[] = [
     ],
   },
   {
+    key: 'activite_entete',
+    label: 'Activité entêtes',
+    primaryKey: 'numero_piece',
+    secondaryKeys: ['numero_tiers', 'reference', 'expedition'],
+    description: 'Une ligne par entête de BL / PL. La table est vidée avant chaque nouvel import.',
+    columns: [
+      { db: 'type_document', label: 'Type' },
+      { db: 'etat', label: 'Etat', aliases: ['État'] },
+      { db: 'souche', label: 'Souche' },
+      { db: 'numero_piece', label: 'N° pièce', required: true },
+      { db: 'reference', label: 'Référence' },
+      { db: 'date_piece', label: 'Date', type: 'date', aliases: ['Date pièce'] },
+      { db: 'numero_tiers', label: 'N° tiers' },
+      { db: 'intitule_tiers', label: 'Intitulé tiers' },
+      { db: 'date_livraison', label: 'Date de livraison', type: 'date', aliases: ['Date livraison'] },
+      { db: 'date_livraison_realisee', label: 'Date de livraison réalisée', type: 'date' },
+      { db: 'depot_stockage', label: 'Dépôt de stockage', aliases: ['Dépôt'] },
+      { db: 'lieu_livraison', label: 'Lieu de livraison' },
+      { db: 'periodicite', label: 'Périodicité' },
+      { db: 'devise', label: 'Devise' },
+      { db: 'cours', label: 'Cours', type: 'number' },
+      { db: 'payeur', label: 'Payeur' },
+      { db: 'expedition', label: 'Expédition', aliases: ["Mode d'expédition", 'Mode expedition'] },
+      { db: 'condition_livraison', label: 'Condition de livraison' },
+      { db: 'langue', label: 'Langue' },
+      { db: 'collaborateur', label: 'Collaborateur' },
+      { db: 'nom_prenom', label: 'Nom Prénom', aliases: ['Nom Prenom'] },
+      { db: 'adresse', label: 'Adresse' },
+      { db: 'complement_adresse_telephone', label: 'Cplt adresse / N° tel' },
+      { db: 'cp_ville', label: 'CP + Ville' },
+      { db: 'affaire', label: 'Affaire' },
+      { db: 'categorie_tarifaire', label: 'Cat. tarifaire' },
+      { db: 'categorie_comptable', label: 'Cat. comptable' },
+      { db: 'regime', label: 'Régime', type: 'number' },
+      { db: 'transaction', label: 'Transaction', type: 'number' },
+      { db: 'colisage', label: 'Colisage', type: 'number' },
+      { db: 'unite_colisage', label: 'Unité de colisage' },
+      { db: 'nombre_factures', label: 'Nbre facture', type: 'number' },
+      { db: 'un_bl_par_facture', label: '1 BL/ facture', type: 'boolean' },
+      { db: 'montant_ht', label: 'Total HT', type: 'number', aliases: ['Montant HT', 'Montant H.T'] },
+      { db: 'taux_escompte', label: 'Taux escompte', type: 'number', numberFormat: 'percent_ratio' },
+      { db: 'auteur', label: 'Auteur' },
+      { db: 'observations', label: 'Observations' },
+      { db: 'capacite_expiration', label: 'Capacite expiration', type: 'date', aliases: ['Capacité expiration'] },
+      { db: 'attestation_capacite', label: 'Attestation de capacité' },
+      { db: 'particularite_facture', label: 'Particularité facture' },
+      { db: 'fmsftp', label: 'FMSFTP' },
+      { db: 'mb_tournee', label: 'MB Tournée' },
+      { db: 'volumes', label: 'VOLUMES' },
+      { db: 'notes', label: 'Notes' },
+      { db: 'frais_pv', label: 'Frs PV', type: 'number' },
+      { db: 'gyutaki', label: 'GYUTAKI' },
+      { db: 'g5pmg10', label: 'G5PMG10' },
+    ],
+  },
+  {
+    key: 'modes_expedition',
+    label: "Modes d'expédition",
+    primaryKey: 'mode_expedition',
+    secondaryKeys: ['base_calcul', 'frais_port_ht'],
+    description: "Référentiel du forfait de port théorique par mode d'expédition. La table est vidée avant chaque import.",
+    columns: [
+      { db: 'mode_expedition', label: "Mode d'expédition", required: true },
+      { db: 'base_calcul', label: 'Base de calcul' },
+      { db: 'frais_port_ht', label: 'Frais de port (HT)', type: 'number', aliases: ['Frais de port HT', 'Frais de port'] },
+    ],
+  },
+  {
     key: 'stock_articles_snapshot',
     label: 'Stock articles',
     primaryKey: 'reference_article',
@@ -605,10 +675,13 @@ const TABLES: TableConfig[] = [
 
 
 const LINE_TABLE_KEYS: TableKey[] = ['facture_lignes', 'devis_lignes', 'activite_lignes']
+const FULL_REPLACEMENT_TABLE_KEYS: TableKey[] = ['activite_entete', 'modes_expedition']
 const REFERENTIAL_REVIEW_TABLE_KEYS: TableKey[] = ['ref_tiers', 'ref_articles', 'ref_collaborateurs']
 
 const FILE_NAME_RULES: Partial<Record<TableKey, { keywords: string[]; expectedLabel: string }>> = {
   activite_lignes: { keywords: ['activite', 'activité'], expectedLabel: 'activite ou activité' },
+  activite_entete: { keywords: ['entete', 'entête'], expectedLabel: 'entete ou entête' },
+  modes_expedition: { keywords: ['mode expedition', 'modes expedition', 'expedition'], expectedLabel: 'mode(s) expedition' },
   facture_lignes: { keywords: ['facture', 'facturation'], expectedLabel: 'facture ou facturation' },
   devis_lignes: { keywords: ['devis'], expectedLabel: 'devis' },
   ref_tiers: { keywords: ['tiers'], expectedLabel: 'tiers' },
@@ -620,6 +693,10 @@ const FILE_NAME_RULES: Partial<Record<TableKey, { keywords: string[]; expectedLa
 
 function isLineTableKey(key: TableKey) {
   return LINE_TABLE_KEYS.includes(key)
+}
+
+function isFullReplacementImportTable(key: TableKey) {
+  return FULL_REPLACEMENT_TABLE_KEYS.includes(key)
 }
 
 function shouldReviewExistingRecords(key: TableKey) {
@@ -637,6 +714,71 @@ const EXTRA_HEADER_ALIASES: Record<TableKey, Record<string, string>> = {
   ref_collaborateurs: {},
   ref_articles: {},
   ref_tiers: {},
+  activite_entete: {
+    type: 'type_document',
+    etat: 'etat',
+    souche: 'souche',
+    n_piece: 'numero_piece',
+    numero_piece: 'numero_piece',
+    reference: 'reference',
+    date: 'date_piece',
+    date_piece: 'date_piece',
+    n_tiers: 'numero_tiers',
+    numero_tiers: 'numero_tiers',
+    intitule_tiers: 'intitule_tiers',
+    date_de_livraison: 'date_livraison',
+    date_livraison: 'date_livraison',
+    date_de_livraison_realisee: 'date_livraison_realisee',
+    depot_de_stockage: 'depot_stockage',
+    depot_stockage: 'depot_stockage',
+    lieu_de_livraison: 'lieu_livraison',
+    periodicite: 'periodicite',
+    devise: 'devise',
+    cours: 'cours',
+    payeur: 'payeur',
+    expedition: 'expedition',
+    mode_dexpedition: 'expedition',
+    mode_expedition: 'expedition',
+    condition_de_livraison: 'condition_livraison',
+    langue: 'langue',
+    collaborateur: 'collaborateur',
+    nom_prenom: 'nom_prenom',
+    adresse: 'adresse',
+    cplt_adresse_n_tel: 'complement_adresse_telephone',
+    cp_ville: 'cp_ville',
+    affaire: 'affaire',
+    cat_tarifaire: 'categorie_tarifaire',
+    cat_comptable: 'categorie_comptable',
+    regime: 'regime',
+    transaction: 'transaction',
+    colisage: 'colisage',
+    unite_de_colisage: 'unite_colisage',
+    nbre_facture: 'nombre_factures',
+    '1_bl_facture': 'un_bl_par_facture',
+    total_ht: 'montant_ht',
+    montant_ht: 'montant_ht',
+    taux_escompte: 'taux_escompte',
+    auteur: 'auteur',
+    observations: 'observations',
+    capacite_expiration: 'capacite_expiration',
+    attestation_de_capacite: 'attestation_capacite',
+    particularite_facture: 'particularite_facture',
+    fmsftp: 'fmsftp',
+    mb_tournee: 'mb_tournee',
+    volumes: 'volumes',
+    notes: 'notes',
+    frs_pv: 'frais_pv',
+    gyutaki: 'gyutaki',
+    g5pmg10: 'g5pmg10',
+  },
+  modes_expedition: {
+    mode_dexpedition: 'mode_expedition',
+    mode_expedition: 'mode_expedition',
+    modes_dexpedition: 'mode_expedition',
+    base_de_calcul: 'base_calcul',
+    frais_de_port_ht: 'frais_port_ht',
+    frais_de_port: 'frais_port_ht',
+  },
   stock_articles_snapshot: {
     type: 'type_article',
     reference_article: 'reference_article',
@@ -904,6 +1046,33 @@ function normalizeHeader(value: string) {
     .replace(/[%€]/g, '')
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '')
+}
+
+function getImportHeaderRowIndex(aoa: any[][], config: TableConfig) {
+  if (config.key !== 'modes_expedition') return 0
+
+  const expectedHeaders = new Set([
+    normalizeHeader("Mode d'expédition"),
+    normalizeHeader('Mode expedition'),
+    normalizeHeader('mode_expedition'),
+  ])
+
+  const index = aoa.findIndex((row) =>
+    Array.isArray(row) && row.some((cell) => expectedHeaders.has(normalizeHeader(String(cell || ''))))
+  )
+
+  if (index < 0) {
+    throw new Error(
+      `Entête introuvable pour ${config.label}. La ligne contenant « Mode d'expédition » est obligatoire.`
+    )
+  }
+
+  return index
+}
+
+function isImportFooterRow(row: GenericRow, config: TableConfig) {
+  if (config.key !== 'modes_expedition') return false
+  return /^source\s*:/i.test(String(row.mode_expedition || '').trim())
 }
 
 function normalizeText(value: any) {
@@ -1259,6 +1428,8 @@ function detectAutoImportFileKind(fileName: string): AutoImportFileKind {
     normalized === 'stock'
   ) return 'StockArticle'
   if (normalized.startsWith('bdcf') || normalized.includes('bdcf')) return 'BDCF'
+  if (normalized.includes('mode_expedition') || normalized.includes('modes_expedition')) return 'ModesExpedition'
+  if (normalized.includes('activite_entete') || normalized.startsWith('entete') || normalized.includes('_entete')) return 'ActiviteEntete'
   if (normalized.startsWith('activite') || normalized.includes('activite')) return 'Activite'
   if (normalized.startsWith('facture') || normalized.includes('facture')) return 'Facture'
   if (normalized.startsWith('devis') || normalized.includes('devis')) return 'Devis'
@@ -1276,7 +1447,7 @@ function isAutoImportCsv(fileName: string) {
 
 function isValidAutoImportFileName(fileName: string) {
   const kind = detectAutoImportFileKind(fileName)
-  if (kind === 'StockArticle' || kind === 'BDCF' || kind === 'Activite' || kind === 'Facture' || kind === 'Devis') return isAutoImportXlsx(fileName) || isAutoImportCsv(fileName)
+  if (['StockArticle', 'BDCF', 'ModesExpedition', 'ActiviteEntete', 'Activite', 'Facture', 'Devis'].includes(kind)) return isAutoImportXlsx(fileName) || isAutoImportCsv(fileName)
   return false
 }
 
@@ -1289,6 +1460,8 @@ const AUTO_IMPORT_TARGET_CSV_CHUNK_BYTES = Math.floor(AUTO_IMPORT_MAX_CSV_CHUNK_
 function autoImportKindBaseName(kind: AutoImportFileKind) {
   if (kind === 'StockArticle') return 'Article_stock'
   if (kind === 'BDCF') return 'BDCF'
+  if (kind === 'ModesExpedition') return 'Modes_expedition'
+  if (kind === 'ActiviteEntete') return 'Activite_entete'
   if (kind === 'Activite') return 'Activite'
   if (kind === 'Facture') return 'Facture'
   if (kind === 'Devis') return 'Devis'
@@ -1363,6 +1536,8 @@ function getTableConfigForAutoImportKind(kind: AutoImportFileKind) {
   const tableKeyByKind: Partial<Record<AutoImportFileKind, TableKey>> = {
     StockArticle: 'stock_articles_snapshot',
     BDCF: 'commandes_fournisseurs_lignes',
+    ModesExpedition: 'modes_expedition',
+    ActiviteEntete: 'activite_entete',
     Activite: 'activite_lignes',
     Facture: 'facture_lignes',
     Devis: 'devis_lignes',
@@ -1422,6 +1597,8 @@ function writeAutoImportCsvFile(headerRow: any[], dataRows: any[][], fileName: s
 function getAutoImportTableKeyFromKind(kind: AutoImportFileKind): TableKey | null {
   if (kind === 'StockArticle') return 'stock_articles_snapshot'
   if (kind === 'BDCF') return 'commandes_fournisseurs_lignes'
+  if (kind === 'ModesExpedition') return 'modes_expedition'
+  if (kind === 'ActiviteEntete') return 'activite_entete'
   if (kind === 'Activite') return 'activite_lignes'
   if (kind === 'Facture') return 'facture_lignes'
   if (kind === 'Devis') return 'devis_lignes'
@@ -1513,8 +1690,10 @@ async function splitXlsxForAutoImportUpload(file: File, kind: AutoImportFileKind
 
   if (!aoa.length) throw new Error(`Le fichier ${file.name} ne contient aucune ligne.`)
 
-  const headerRow = aoa[0] || []
-  const rawDataRows = aoa.slice(1).filter(rowHasValue)
+  const config = getTableConfigForAutoImportKind(kind)
+  const headerRowIndex = getImportHeaderRowIndex(aoa, config)
+  const headerRow = aoa[headerRowIndex] || []
+  const rawDataRows = aoa.slice(headerRowIndex + 1).filter(rowHasValue)
   if (!rawDataRows.length) throw new Error(`Le fichier ${file.name} ne contient aucune donnée après l'entête.`)
 
   const dateColumnIndexes = getAutoImportDateColumnIndexes(headerRow, kind)
@@ -1526,7 +1705,7 @@ async function splitXlsxForAutoImportUpload(file: File, kind: AutoImportFileKind
   const groupByDocument = new Map<string, { key: string; rows: any[][] }>()
 
   if (documentColumnIndex < 0) {
-    if (kind !== 'StockArticle') {
+    if (!['StockArticle', 'ModesExpedition'].includes(kind)) {
       throw new Error(
         `Impossible de découper ${file.name} : colonne N° pièce / numero_piece introuvable. ` +
         `Le découpage automatique doit préserver les documents entiers.`
@@ -1659,12 +1838,15 @@ function folderBadgeClass(folder: AutoImportFolder) {
 }
 
 function fileKindBadgeClass(kind: AutoImportFileKind) {
+  if (kind === 'StockArticle') return 'border-sky-200 bg-sky-50 text-sky-800'
+  if (kind === 'BDCF') return 'border-violet-200 bg-violet-50 text-violet-800'
+  if (kind === 'ModesExpedition') return 'border-cyan-200 bg-cyan-50 text-cyan-800'
+  if (kind === 'ActiviteEntete') return 'border-fuchsia-200 bg-fuchsia-50 text-fuchsia-800'
   if (kind === 'Activite') return 'border-indigo-200 bg-indigo-50 text-indigo-800'
   if (kind === 'Facture') return 'border-emerald-200 bg-emerald-50 text-emerald-800'
   if (kind === 'Devis') return 'border-orange-200 bg-orange-50 text-orange-800'
   return 'border-red-200 bg-red-50 text-red-800'
 }
-
 function getPipelineRunReport(run: ImportPipelineRun | null, tab: AutoImportReportTab) {
   if (!run) return 'Aucun run disponible.'
 
@@ -2140,7 +2322,7 @@ const SMC_BACKGROUND_POLL_MS = 5000
 
 
 type AutoImportFolder = 'pending' | 'processing' | 'rejected' | 'archive'
-type AutoImportFileKind = 'StockArticle' | 'BDCF' | 'Activite' | 'Facture' | 'Devis' | 'Invalide'
+type AutoImportFileKind = 'StockArticle' | 'BDCF' | 'ModesExpedition' | 'ActiviteEntete' | 'Activite' | 'Facture' | 'Devis' | 'Invalide'
 type AutoImportReportTab = 'pre_smc' | 'final' | 'errors'
 
 type AutoImportStorageFile = {
@@ -3127,9 +3309,17 @@ export default function ImportsParametragePage() {
           })
           const sheetName = workbook.SheetNames[0]
           const sheet = workbook.Sheets[sheetName]
+          const aoa = XLSX.utils.sheet_to_json<any[]>(sheet, {
+            header: 1,
+            defval: '',
+            raw: true,
+            blankrows: false,
+          }) as any[][]
+          const headerRowIndex = getImportHeaderRowIndex(aoa, config)
           const jsonRows = XLSX.utils.sheet_to_json<Record<string, any>>(sheet, {
             defval: null,
             raw: true,
+            range: headerRowIndex,
           })
 
           if (!jsonRows.length) {
@@ -3159,7 +3349,7 @@ export default function ImportsParametragePage() {
                 !normalizedValue
               ) {
                 rowErrors.push(
-                  `Ligne ${index + 2}, champ "${column.label}" (${column.db}) : date impossible à convertir, valeur source = "${String(rawValue)}"`
+                  `Ligne ${index + headerRowIndex + 2}, champ "${column.label}" (${column.db}) : date impossible à convertir, valeur source = "${String(rawValue)}"`
                 )
               }
 
@@ -3174,7 +3364,7 @@ export default function ImportsParametragePage() {
             // On n'envoie donc à Supabase que les champs qui existent réellement dans chaque table.
             const isLineTable = isLineTableKey(config.key)
 
-            if (isLineTable) {
+            if (isLineTable || isFullReplacementImportTable(config.key)) {
               targetRow.imported_at = nowIso
               targetRow.source_import = file.name
             }
@@ -3198,7 +3388,7 @@ export default function ImportsParametragePage() {
             return targetRow
           })
 
-          const rowsWithStableHashes = assignStableLineHashes(normalizedRows, config)
+          const rowsWithStableHashes = assignStableLineHashes(normalizedRows.filter((row) => !isImportFooterRow(row, config)), config)
 
           if (ignoredHeaders.length && rowsWithStableHashes[0]) {
             const firstRow = rowsWithStableHashes[0] as GenericRow
@@ -3354,6 +3544,28 @@ export default function ImportsParametragePage() {
     }
 
     return { ok: true }
+  }
+
+  async function resetFullReplacementTableBeforeImport(
+    config: TableConfig,
+    onProgress?: (detail: string) => void
+  ) {
+    const rpcByTable: Partial<Record<TableKey, string>> = {
+      activite_entete: 'reset_activite_entete_import',
+      modes_expedition: 'reset_modes_expedition_import',
+    }
+
+    const rpcName = rpcByTable[config.key]
+    if (!rpcName) return
+
+    onProgress?.(`Vidage préalable de ${config.label} avant rechargement complet`)
+    const { error } = await supabase.rpc(rpcName)
+    if (error) {
+      throw new Error(
+        `Nettoyage préalable ${config.label} impossible : ${error.message}. ` +
+          `Crée ou vérifie la fonction SQL public.${rpcName}().`
+      )
+    }
   }
 
   function formatDateForSql(date: Date) {
@@ -4060,7 +4272,7 @@ export default function ImportsParametragePage() {
   async function writeChunk(rows: GenericRow[], config: TableConfig) {
     const cleanRows = rows.map(stripTechnicalImportFields)
 
-    if (isLineTableKey(config.key) || isStockAvailabilityImportTable(config.key)) {
+    if (isLineTableKey(config.key) || isStockAvailabilityImportTable(config.key) || isFullReplacementImportTable(config.key)) {
       const { error: insertError } = await supabase
         .from(config.key)
         .insert(cleanRows)
@@ -4281,6 +4493,10 @@ export default function ImportsParametragePage() {
       updateImportStep('reset', 'running', 'Vidage activité avant rechargement complet')
       await resetActivityTablesBeforeImport((detail) => updateImportStep('reset', 'running', detail))
       updateImportStep('reset', 'done', 'activite_lignes et indicateur_activite_mensuel vidées')
+    } else if (isFullReplacementImportTable(config.key)) {
+      updateImportStep('reset', 'running', `Vidage ${config.label} avant rechargement complet`)
+      await resetFullReplacementTableBeforeImport(config, (detail) => updateImportStep('reset', 'running', detail))
+      updateImportStep('reset', 'done', `${config.label} vidé avant import`)
     } else if (isStockAvailabilityImportTable(config.key)) {
       updateImportStep('reset', 'running', `Vidage ${config.label} avant rechargement complet`)
       await resetStockAvailabilityTableBeforeImport(config, (detail) => updateImportStep('reset', 'running', detail))
@@ -4343,11 +4559,13 @@ export default function ImportsParametragePage() {
     let rowsToInsert = inputRows
     let duplicateRejects: string[] = []
 
-    if (config.key === 'activite_lignes') {
+    if (config.key === 'activite_lignes' || isFullReplacementImportTable(config.key)) {
       updateImportStep(
         'duplicates',
         'done',
-        'Contrôle des doublons en base ignoré : l’import activité vide activite_lignes et indicateur_activite_mensuel avant chargement'
+        config.key === 'activite_lignes'
+          ? 'Contrôle des doublons en base ignoré : l’import activité vide activite_lignes et indicateur_activite_mensuel avant chargement'
+          : `Contrôle des doublons en base ignoré : ${config.label} vient d’être vidé avant rechargement complet`
       )
     } else {
       updateImportStep('duplicates', 'running', 'Recherche des lignes déjà présentes en base')
@@ -5235,7 +5453,7 @@ export default function ImportsParametragePage() {
         throw new Error(
           'Fichier(s) refusé(s) : ' +
           invalidFiles.map((file) => file.name).join(', ') +
-          '. Les fichiers attendus sont : Article stock.xlsx, BDCF.xlsx, Activite.xlsx, Facture.xlsx, Devis.xlsx. Le dépôt automatique les convertit ensuite en CSV découpés.'
+          '. Les fichiers attendus sont : Article stock.xlsx, BDCF.xlsx, modes_expedition.xlsx, Entete.xlsx, Activite.xlsx, Facture.xlsx, Devis.xlsx. Le dépôt automatique les convertit ensuite en CSV découpés.'
         )
       }
 
@@ -5298,9 +5516,11 @@ export default function ImportsParametragePage() {
     const order: Record<AutoImportFileKind, number> = {
       StockArticle: 1,
       BDCF: 2,
-      Activite: 3,
-      Facture: 4,
-      Devis: 5,
+      ModesExpedition: 3,
+      ActiviteEntete: 4,
+      Activite: 5,
+      Facture: 6,
+      Devis: 7,
       Invalide: 99,
     }
 
@@ -6097,7 +6317,7 @@ export default function ImportsParametragePage() {
             <div>
               <h2 className="text-lg font-black tracking-tight">Pipeline automatique serveur — fichiers & job global</h2>
               <p className="mt-1 max-w-4xl text-sm text-slate-600">
-                Dépôt dans le bucket <b>{AUTO_IMPORT_BUCKET}</b>, dossier <b>pending</b>. Les fichiers attendus sont <b>Article stock.xlsx</b>, <b>BDCF.xlsx</b>, <b>Activite.xlsx</b>, <b>Facture.xlsx</b> et <b>Devis.xlsx</b>.
+                Dépôt dans le bucket <b>{AUTO_IMPORT_BUCKET}</b>, dossier <b>pending</b>. Les fichiers attendus sont <b>Article stock.xlsx</b>, <b>BDCF.xlsx</b>, <b>modes_expedition.xlsx</b>, <b>Entete.xlsx</b>, <b>Activite.xlsx</b>, <b>Facture.xlsx</b> et <b>Devis.xlsx</b>.
                 Les fichiers Excel sont automatiquement convertis et découpés en plusieurs <b>.csv</b> de moins de <b>500 Ko</b>, en conservant la ligne d’entête. Les fichiers de documents ne coupent pas un même numéro de document entre deux morceaux ; le fichier stock, lui, peut être découpé ligne par ligne. Les imports manuels existants ne sont pas modifiés :
                 ce bloc ne fait que charger les fichiers découpés, lancer le job global et afficher les rapports.
                 Le pipeline serveur traite ensuite <b>un seul morceau par invocation</b>, pour éviter les limites CPU/mémoire, puis relance <b>flux_articles</b> sur les <b>{AUTO_IMPORT_FLUX_ARTICLES_MONTHS_BACK} derniers mois</b>, reconstruit le <b>cache Focus Mensuel du mois courant</b>, génère le PDF <b>reports/focus-mensuel/Rapport d'activité quotidien.pdf</b> en écrasant l'ancien fichier, génère le rapport avant SMC, puis lance ou non SMC selon le bouton choisi.
