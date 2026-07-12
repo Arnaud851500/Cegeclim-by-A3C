@@ -227,6 +227,63 @@ const ALERT_ORDER: Record<string, number> = {
   VERT: 4,
 };
 
+const EXCLUDED_MACRO_FAMILIES = new Set(["DIV", "TECH", "SAV"]);
+
+function normalizedMacroFamily(value: string | null | undefined) {
+  return String(value || "")
+    .trim()
+    .toUpperCase();
+}
+
+function isDisplayedMacroFamily(value: string | null | undefined) {
+  return !EXCLUDED_MACRO_FAMILIES.has(normalizedMacroFamily(value));
+}
+
+function articleDepotKey(
+  referenceArticle: string | null | undefined,
+  depot: string | null | undefined,
+) {
+  return `${String(referenceArticle || "").trim()}||${String(
+    depot || "GLOBAL",
+  )
+    .trim()
+    .toUpperCase()}`;
+}
+
+function familyKey(
+  macroFamille: string | null | undefined,
+  famille: string | null | undefined,
+) {
+  return `${String(macroFamille || "Sans macro-famille").trim()}||${String(
+    famille || "Sans famille",
+  ).trim()}`;
+}
+
+function excelColumnName(index: number) {
+  let value = Math.max(1, Math.trunc(index));
+  let result = "";
+  while (value > 0) {
+    const modulo = (value - 1) % 26;
+    result = String.fromCharCode(65 + modulo) + result;
+    value = Math.floor((value - 1) / 26);
+  }
+  return result;
+}
+
+function mostFrequentNumber(values: number[], fallback: number) {
+  if (!values.length) return fallback;
+  const counts = new Map<string, { value: number; count: number }>();
+  values.forEach((raw) => {
+    const value = Math.round(raw * 10_000) / 10_000;
+    const key = String(value);
+    const current = counts.get(key);
+    counts.set(key, { value, count: (current?.count || 0) + 1 });
+  });
+  return Array.from(counts.values()).sort(
+    (a, b) => b.count - a.count || a.value - b.value,
+  )[0]?.value ?? fallback;
+}
+
 const DEFAULT_FILTERS: Filters = {
   search: "",
   niveau: "TOUS",
@@ -1495,6 +1552,9 @@ export default function StocksDisponibilitesPage() {
   const [weeklyManualQty, setWeeklyManualQty] = useState<
     Record<string, string>
   >({});
+  const [articleEvolutionPct, setArticleEvolutionPct] = useState("");
+  const [exportingExcel, setExportingExcel] = useState(false);
+  const [exportProgress, setExportProgress] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [recalculating, setRecalculating] = useState(false);
@@ -1695,7 +1755,9 @@ export default function StocksDisponibilitesPage() {
       }
 
       const nextKpi = (payload.kpi || null) as StockKpi | null;
-      const nextAlertes = ((payload.alertes || []) as StockAlertRow[]).sort(sortAlerts);
+      const nextAlertes = ((payload.alertes || []) as StockAlertRow[])
+        .filter((row) => isDisplayedMacroFamily(row.macro_famille))
+        .sort(sortAlerts);
 
       setKpi(nextKpi);
       setAlertes(nextAlertes);
@@ -1739,6 +1801,7 @@ export default function StocksDisponibilitesPage() {
     setBesoinsClients([]);
     setWeeklyPct({});
     setWeeklyManualQty({});
+    setArticleEvolutionPct("");
     setDetailWarning(null);
     setDetailDiagnostic(null);
 
@@ -1786,6 +1849,18 @@ export default function StocksDisponibilitesPage() {
       });
       setWeeklyPct(nextPct);
       setWeeklyManualQty(nextManualQty);
+
+      const horizonCoefficients = Object.values(nextPct).filter((value) =>
+        Number.isFinite(value),
+      );
+      const roundedCoefficients = Array.from(
+        new Set(horizonCoefficients.map((value) => Math.round(value * 100) / 100)),
+      );
+      setArticleEvolutionPct(
+        roundedCoefficients.length === 1
+          ? String(Math.round((roundedCoefficients[0] - 100) * 100) / 100)
+          : "",
+      );
 
       if (payload.partial || payload.diagnostic?.status === "WARNING") {
         setDetailWarning(
@@ -2092,6 +2167,22 @@ export default function StocksDisponibilitesPage() {
         });
         setWeeklyPct(nextPct);
         setWeeklyManualQty(nextManualQty);
+
+        const savedCoefficients = Object.values(nextPct).filter((value) =>
+          Number.isFinite(value),
+        );
+        const savedRoundedCoefficients = Array.from(
+          new Set(
+            savedCoefficients.map((value) => Math.round(value * 100) / 100),
+          ),
+        );
+        setArticleEvolutionPct(
+          savedRoundedCoefficients.length === 1
+            ? String(
+                Math.round((savedRoundedCoefficients[0] - 100) * 100) / 100,
+              )
+            : "",
+        );
       } else {
         await loadDetail(currentSelected);
       }
@@ -2131,6 +2222,764 @@ export default function StocksDisponibilitesPage() {
       );
     } finally {
       setSavingWeekly(false);
+    }
+  }
+
+  function applyArticleEvolutionToHorizon() {
+    if (!projection.length) return;
+    const evolution = Number(articleEvolutionPct);
+    if (!Number.isFinite(evolution)) {
+      setError("Saisis un pourcentage d’évolution valide pour l’article.");
+      return;
+    }
+
+    const coefficientPct = Math.max(0, 100 + evolution);
+    const nextPct: Record<string, number> = {};
+    projection.forEach((row) => {
+      nextPct[row.periode_debut] = coefficientPct;
+    });
+
+    setWeeklyPct(nextPct);
+    setWeeklyManualQty({});
+    setError(null);
+  }
+
+  async function exportFilteredArticlesToExcel() {
+    if (!kpi?.run_id || !filteredAlertes.length) return;
+
+    setExportingExcel(true);
+    setExportProgress("Lecture des projections hebdomadaires…");
+    setError(null);
+
+    try {
+      const exportedArticles = filteredAlertes
+        .filter((row) => isDisplayedMacroFamily(row.macro_famille))
+        .slice()
+        .sort((a, b) => {
+          const macro = String(a.macro_famille || "").localeCompare(
+            String(b.macro_famille || ""),
+            "fr",
+          );
+          if (macro !== 0) return macro;
+          const famille = String(a.famille || "").localeCompare(
+            String(b.famille || ""),
+            "fr",
+          );
+          if (famille !== 0) return famille;
+          return String(a.reference_article || "").localeCompare(
+            String(b.reference_article || ""),
+            "fr",
+          );
+        });
+
+      const selectedKeys = new Set(
+        exportedArticles.map((row) =>
+          articleDepotKey(row.reference_article, row.depot),
+        ),
+      );
+
+      const allProjectionRows: ProjectionRow[] = [];
+      const pageSize = 1000;
+      let from = 0;
+
+      while (true) {
+        setExportProgress(
+          `Lecture des projections : ${formatNumber(allProjectionRows.length)} ligne(s)…`,
+        );
+
+        const { data, error: projectionError } = await supabase
+          .from("v_stock_projection_hebdo_latest")
+          .select(
+            "run_id,reference_article,designation,famille,macro_famille,fournisseur_principal,depot,periode_debut,periode_fin,stock_initial,commandes_fournisseurs_attendues,besoins_clients_fermes,prevision_base_n1,coefficient_prevision_applique,prevision_ventes,prevision_forcee,stock_projete,stock_projete_ferme,stock_disponible_ferme,date_rupture_ferme,date_retour_dispo_ferme,stock_securite,stock_disponible_projete,quantite_manquante,niveau_alerte,date_rupture,date_retour_dispo,ca_client_risque,nb_commandes_clients_risque",
+          )
+          .eq("run_id", kpi.run_id)
+          .order("reference_article", { ascending: true })
+          .order("periode_debut", { ascending: true })
+          .range(from, from + pageSize - 1);
+
+        if (projectionError) throw projectionError;
+        const pageRows = (data || []) as ProjectionRow[];
+        allProjectionRows.push(...pageRows);
+        if (pageRows.length < pageSize) break;
+        from += pageSize;
+      }
+
+      const projectionRows = allProjectionRows.filter((row) =>
+        selectedKeys.has(articleDepotKey(row.reference_article, row.depot)),
+      );
+
+      const weeks = Array.from(
+        new Set(projectionRows.map((row) => row.periode_debut).filter(Boolean)),
+      )
+        .sort((a, b) => a.localeCompare(b))
+        .slice(0, Math.max(1, Number(kpi.run_nb_semaines || horizonWeeks || 16)));
+
+      if (!weeks.length) {
+        throw new Error(
+          "Aucune semaine de projection n’est disponible pour les articles affichés.",
+        );
+      }
+
+      setExportProgress("Création du classeur Excel…");
+      const ExcelJS = await import("exceljs");
+      const workbook = new ExcelJS.Workbook();
+      workbook.creator = "Cegeclim by A3C";
+      workbook.created = new Date();
+      workbook.modified = new Date();
+      workbook.calcProperties.fullCalcOnLoad = true;
+  
+
+      const projectionSheet = workbook.addWorksheet("Projection articles", {
+        views: [{ state: "frozen", xSplit: 16, ySplit: 4 }],
+        properties: { defaultRowHeight: 18 },
+      });
+      const hypothesisSheet = workbook.addWorksheet("Hypothèses familles", {
+        views: [{ state: "frozen", xSplit: 3, ySplit: 4 }],
+        properties: { defaultRowHeight: 20 },
+      });
+
+      const blue = "FF1D4ED8";
+      const darkBlue = "FF1E3A8A";
+      const lightBlue = "FFDBEAFE";
+      const slate = "FF334155";
+      const lightSlate = "FFF1F5F9";
+      const borderColor = "FFCBD5E1";
+      const greenFill = "FFDCFCE7";
+      const greenFont = "FF166534";
+      const yellowFill = "FFFEF3C7";
+      const yellowFont = "FF92400E";
+      const orangeFill = "FFFFEDD5";
+      const orangeFont = "FF9A3412";
+      const redFill = "FFFEE2E2";
+      const redFont = "FFB91C1C";
+
+      const thinBorder = {
+        top: { style: "thin" as const, color: { argb: borderColor } },
+        left: { style: "thin" as const, color: { argb: borderColor } },
+        bottom: { style: "thin" as const, color: { argb: borderColor } },
+        right: { style: "thin" as const, color: { argb: borderColor } },
+      };
+
+      const familyPairs = Array.from(
+        new Map(
+          exportedArticles.map((row) => [
+            familyKey(row.macro_famille, row.famille),
+            {
+              macro: row.macro_famille || "Sans macro-famille",
+              famille: row.famille || "Sans famille",
+            },
+          ]),
+        ).entries(),
+      ).sort((a, b) => {
+        const macro = a[1].macro.localeCompare(b[1].macro, "fr");
+        return macro !== 0
+          ? macro
+          : a[1].famille.localeCompare(b[1].famille, "fr");
+      });
+
+      const familyWeekValues = new Map<string, number[]>();
+      projectionRows.forEach((row) => {
+        const key = `${familyKey(row.macro_famille, row.famille)}||${row.periode_debut}`;
+        const coefficient =
+          row.coefficient_prevision_applique === null ||
+          row.coefficient_prevision_applique === undefined
+            ? 1
+            : toNumber(row.coefficient_prevision_applique);
+        const evolution = coefficient - 1;
+        const values = familyWeekValues.get(key) || [];
+        values.push(evolution);
+        familyWeekValues.set(key, values);
+      });
+
+      const hypothesisWeekStartColumn = 4;
+      const hypothesisHeaderRow = 4;
+      const hypothesisFamilyStartRow = 5;
+      const fallbackEvolution = Math.max(0, defaultProjectionPct) / 100 - 1;
+      const hypothesisRowByFamily = new Map<string, number>();
+
+      hypothesisSheet.mergeCells(
+        1,
+        1,
+        1,
+        hypothesisWeekStartColumn + weeks.length - 1,
+      );
+      const hypothesisTitle = hypothesisSheet.getCell(1, 1);
+      hypothesisTitle.value = "Hypothèses d’évolution par famille et par semaine";
+      hypothesisTitle.font = {
+        bold: true,
+        size: 16,
+        color: { argb: "FFFFFFFF" },
+      };
+      hypothesisTitle.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: darkBlue },
+      };
+      hypothesisTitle.alignment = { vertical: "middle", horizontal: "left" };
+      hypothesisSheet.getRow(1).height = 28;
+
+      hypothesisSheet.mergeCells(
+        2,
+        1,
+        2,
+        hypothesisWeekStartColumn + weeks.length - 1,
+      );
+      const hypothesisNote = hypothesisSheet.getCell(2, 1);
+      hypothesisNote.value =
+        "Les cellules bleues sont modifiables. La prévision supplémentaire de la feuille Projection articles est recalculée automatiquement pour toutes les références de la famille.";
+      hypothesisNote.font = { italic: true, color: { argb: slate } };
+      hypothesisNote.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: lightBlue },
+      };
+      hypothesisNote.alignment = { wrapText: true, vertical: "middle" };
+      hypothesisSheet.getRow(2).height = 34;
+
+      ["Famille macro", "Famille", "Clé famille"].forEach((label, index) => {
+        const cell = hypothesisSheet.getCell(hypothesisHeaderRow, index + 1);
+        cell.value = label;
+        cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: blue },
+        };
+        cell.alignment = { horizontal: "center", vertical: "middle" };
+        cell.border = thinBorder;
+      });
+
+      weeks.forEach((week, index) => {
+        const cell = hypothesisSheet.getCell(
+          hypothesisHeaderRow,
+          hypothesisWeekStartColumn + index,
+        );
+        cell.value = new Date(`${week}T00:00:00`);
+        cell.numFmt = "dd/mm/yyyy";
+        cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: blue },
+        };
+        cell.alignment = { horizontal: "center", vertical: "middle" };
+        cell.border = thinBorder;
+      });
+
+      familyPairs.forEach(([key, pair], familyIndex) => {
+        const rowNumber = hypothesisFamilyStartRow + familyIndex;
+        hypothesisRowByFamily.set(key, rowNumber);
+        const row = hypothesisSheet.getRow(rowNumber);
+        row.getCell(1).value = pair.macro;
+        row.getCell(2).value = pair.famille;
+        row.getCell(3).value = key;
+        row.getCell(3).font = { color: { argb: "FF94A3B8" } };
+
+        weeks.forEach((week, weekIndex) => {
+          const values = familyWeekValues.get(`${key}||${week}`) || [];
+          const cell = row.getCell(hypothesisWeekStartColumn + weekIndex);
+          cell.value = mostFrequentNumber(values, fallbackEvolution);
+          cell.numFmt = "0%;[Red]-0%";
+          cell.fill = {
+            type: "pattern",
+            pattern: "solid",
+            fgColor: { argb: lightBlue },
+          };
+          cell.font = { bold: true, color: { argb: darkBlue } };
+          cell.alignment = { horizontal: "center" };
+          cell.dataValidation = {
+            type: "decimal",
+            operator: "between",
+            allowBlank: false,
+            formulae: [-1, 10],
+            showErrorMessage: true,
+            errorTitle: "Pourcentage invalide",
+            error: "Saisis une évolution comprise entre -100 % et 1 000 %.",
+          };
+        });
+
+        for (
+          let column = 1;
+          column <= hypothesisWeekStartColumn + weeks.length - 1;
+          column += 1
+        ) {
+          row.getCell(column).border = thinBorder;
+          row.getCell(column).alignment = {
+            ...row.getCell(column).alignment,
+            vertical: "middle",
+            wrapText: true,
+          };
+        }
+      });
+
+      hypothesisSheet.getColumn(1).width = 18;
+      hypothesisSheet.getColumn(2).width = 24;
+      hypothesisSheet.getColumn(3).width = 28;
+      hypothesisSheet.getColumn(3).hidden = true;
+      weeks.forEach((_, index) => {
+        hypothesisSheet.getColumn(hypothesisWeekStartColumn + index).width = 13;
+      });
+      hypothesisSheet.autoFilter = {
+        from: { row: hypothesisHeaderRow, column: 1 },
+        to: {
+          row: hypothesisHeaderRow,
+          column: hypothesisWeekStartColumn + weeks.length - 1,
+        },
+      };
+
+      const metaHeaders = [
+        "Famille macro",
+        "Famille",
+        "Article",
+        "Désignation",
+        "Fournisseur",
+        "Classe ABC CA",
+        "Classe ABC lignes",
+        "BL YTD N",
+        "BL YTD N-1",
+        "Évol. BL YTD",
+        "BL mois dernier N",
+        "BL mois dernier N-1",
+        "Évol. BL mois dernier",
+        "Stock initial",
+        "Stock sécurité",
+        "Type de ligne",
+      ];
+      const weekStartColumn = metaHeaders.length + 1;
+      const headerRowNumber = 4;
+
+      projectionSheet.mergeCells(
+        1,
+        1,
+        1,
+        weekStartColumn + weeks.length - 1,
+      );
+      const titleCell = projectionSheet.getCell(1, 1);
+      titleCell.value = "Projection de stock par article";
+      titleCell.font = {
+        bold: true,
+        size: 18,
+        color: { argb: "FFFFFFFF" },
+      };
+      titleCell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: darkBlue },
+      };
+      titleCell.alignment = { vertical: "middle", horizontal: "left" };
+      projectionSheet.getRow(1).height = 30;
+
+      projectionSheet.mergeCells(
+        2,
+        1,
+        2,
+        weekStartColumn + weeks.length - 1,
+      );
+      const subtitleCell = projectionSheet.getCell(2, 1);
+      subtitleCell.value = `Export du ${new Intl.DateTimeFormat("fr-FR", {
+        dateStyle: "short",
+        timeStyle: "short",
+      }).format(new Date())} · ${formatNumber(exportedArticles.length)} article(s) · Les familles macro DIV, TECH et SAV sont exclues.`;
+      subtitleCell.font = { italic: true, color: { argb: slate } };
+      subtitleCell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: lightSlate },
+      };
+
+      metaHeaders.forEach((label, index) => {
+        const cell = projectionSheet.getCell(headerRowNumber, index + 1);
+        cell.value = label;
+        cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: blue },
+        };
+        cell.alignment = {
+          horizontal: "center",
+          vertical: "middle",
+          wrapText: true,
+        };
+        cell.border = thinBorder;
+      });
+
+      weeks.forEach((week, index) => {
+        const cell = projectionSheet.getCell(
+          headerRowNumber,
+          weekStartColumn + index,
+        );
+        cell.value = new Date(`${week}T00:00:00`);
+        cell.numFmt = "dd/mm/yyyy";
+        cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: blue },
+        };
+        cell.alignment = { horizontal: "center", vertical: "middle" };
+        cell.border = thinBorder;
+      });
+      projectionSheet.getRow(headerRowNumber).height = 34;
+
+      const projectionByArticle = new Map<string, Map<string, ProjectionRow>>();
+      projectionRows.forEach((row) => {
+        const key = articleDepotKey(row.reference_article, row.depot);
+        const byWeek =
+          projectionByArticle.get(key) || new Map<string, ProjectionRow>();
+        byWeek.set(row.periode_debut, row);
+        projectionByArticle.set(key, byWeek);
+      });
+
+      const lineLabels = [
+        "Stock projeté",
+        "Sorties fermes",
+        "Sorties BL N-1",
+        "Prévision supplémentaire",
+        "Entrées prévisionnelles",
+      ];
+      const lineFills = [
+        "FFE2E8F0",
+        "FFFEE2E2",
+        "FFF8FAFC",
+        "FFFFEDD5",
+        "FFDCFCE7",
+      ];
+
+      exportedArticles.forEach((article, articleIndex) => {
+        const startRow = 5 + articleIndex * 5;
+        const stockRow = startRow;
+        const firmRow = startRow + 1;
+        const n1Row = startRow + 2;
+        const additionalRow = startRow + 3;
+        const incomingRow = startRow + 4;
+        const byWeek =
+          projectionByArticle.get(
+            articleDepotKey(article.reference_article, article.depot),
+          ) || new Map<string, ProjectionRow>();
+
+        const metaValues: Array<string | number | null> = [
+          article.macro_famille || "Sans macro-famille",
+          article.famille || "Sans famille",
+          article.reference_article,
+          article.designation || "",
+          article.fournisseur_principal || "",
+          normalizeAbcClass(article.classe_abc_ca),
+          normalizeAbcClass(article.classe_abc_lignes),
+          toNumber(article.sorties_ytd_n),
+          toNumber(article.sorties_ytd_n1),
+          toNumber(article.sorties_ytd_evol_pct) / 100,
+          toNumber(article.sorties_mois_passe_n),
+          toNumber(article.sorties_mois_passe_n1),
+          toNumber(article.sorties_mois_passe_evol_pct) / 100,
+        ];
+
+        metaValues.forEach((value, index) => {
+          const column = index + 1;
+          projectionSheet.mergeCells(startRow, column, startRow + 4, column);
+          const cell = projectionSheet.getCell(startRow, column);
+          cell.value = value;
+          cell.alignment = {
+            vertical: "middle",
+            horizontal: column >= 6 ? "center" : "left",
+            wrapText: true,
+          };
+          cell.border = thinBorder;
+          if (column === 10) {
+            const current = toNumber(article.sorties_ytd_n);
+            const previous = toNumber(article.sorties_ytd_n1);
+            const result =
+              previous === 0
+                ? current === 0
+                  ? 0
+                  : 1
+                : (current - previous) / Math.abs(previous);
+            cell.value = {
+              formula: `IF(I${startRow}=0,IF(H${startRow}=0,0,1),(H${startRow}-I${startRow})/ABS(I${startRow}))`,
+              result,
+            };
+            cell.numFmt = "0%;[Red]-0%";
+          }
+          if (column === 13) {
+            const current = toNumber(article.sorties_mois_passe_n);
+            const previous = toNumber(article.sorties_mois_passe_n1);
+            const result =
+              previous === 0
+                ? current === 0
+                  ? 0
+                  : 1
+                : (current - previous) / Math.abs(previous);
+            cell.value = {
+              formula: `IF(L${startRow}=0,IF(K${startRow}=0,0,1),(K${startRow}-L${startRow})/ABS(L${startRow}))`,
+              result,
+            };
+            cell.numFmt = "0%;[Red]-0%";
+          }
+          if ([8, 9, 11, 12].includes(column)) cell.numFmt = "#,##0";
+          if (column === 3) {
+            cell.font = { bold: true, color: { argb: darkBlue } };
+          }
+          if (column === 6 || column === 7) {
+            cell.font = { bold: true, color: { argb: darkBlue } };
+            cell.fill = {
+              type: "pattern",
+              pattern: "solid",
+              fgColor: { argb: lightBlue },
+            };
+          }
+        });
+
+        const firstProjection = weeks
+          .map((week) => byWeek.get(week))
+          .find(Boolean);
+        projectionSheet.getCell(stockRow, 14).value = toNumber(
+          firstProjection?.stock_initial ?? article.stock_initial,
+        );
+        projectionSheet.getCell(stockRow, 15).value = toNumber(
+          firstProjection?.stock_securite ?? article.stock_securite,
+        );
+        projectionSheet.getCell(stockRow, 14).numFmt = "#,##0";
+        projectionSheet.getCell(stockRow, 15).numFmt = "#,##0";
+
+        lineLabels.forEach((label, lineIndex) => {
+          const rowNumber = startRow + lineIndex;
+          const labelCell = projectionSheet.getCell(rowNumber, 16);
+          labelCell.value = label;
+          labelCell.font = { bold: true, color: { argb: slate } };
+          labelCell.fill = {
+            type: "pattern",
+            pattern: "solid",
+            fgColor: { argb: lineFills[lineIndex] },
+          };
+          labelCell.border = thinBorder;
+          labelCell.alignment = { vertical: "middle", wrapText: true };
+          projectionSheet.getRow(rowNumber).height = 21;
+        });
+
+        const articleFamilyKey = familyKey(
+          article.macro_famille,
+          article.famille,
+        );
+        const hypothesisRow = hypothesisRowByFamily.get(articleFamilyKey);
+
+        weeks.forEach((week, weekIndex) => {
+          const column = weekStartColumn + weekIndex;
+          const columnLetter = excelColumnName(column);
+          const previousColumnLetter = excelColumnName(column - 1);
+          const projectionRow = byWeek.get(week);
+          const firm = Math.max(
+            0,
+            toNumber(projectionRow?.besoins_clients_fermes),
+          );
+          const n1 = Math.max(0, toNumber(projectionRow?.prevision_base_n1));
+          const additional = Math.max(
+            0,
+            toNumber(projectionRow?.prevision_ventes),
+          );
+          const incoming = Math.max(
+            0,
+            toNumber(projectionRow?.commandes_fournisseurs_attendues),
+          );
+          const currentStock = toNumber(projectionRow?.stock_projete);
+
+          const firmCell = projectionSheet.getCell(firmRow, column);
+          firmCell.value = firm === 0 ? null : firm;
+          const n1Cell = projectionSheet.getCell(n1Row, column);
+          n1Cell.value = n1;
+          const incomingCell = projectionSheet.getCell(incomingRow, column);
+          incomingCell.value = incoming === 0 ? null : incoming;
+
+          const hypothesisColumnLetter = excelColumnName(
+            hypothesisWeekStartColumn + weekIndex,
+          );
+          const hypothesisReference = hypothesisRow
+            ? `'Hypothèses familles'!$${hypothesisColumnLetter}$${hypothesisRow}`
+            : String(fallbackEvolution);
+          const additionalCell = projectionSheet.getCell(additionalRow, column);
+          additionalCell.value = {
+            formula: `MAX(0,${columnLetter}${n1Row}*(1+${hypothesisReference})-N(${columnLetter}${firmRow}))`,
+            result: additional,
+          };
+
+          const stockCell = projectionSheet.getCell(stockRow, column);
+          const stockFormula =
+            weekIndex === 0
+              ? `$N${stockRow}+N(${columnLetter}${incomingRow})-N(${columnLetter}${firmRow})-N(${columnLetter}${additionalRow})`
+              : `${previousColumnLetter}${stockRow}+N(${columnLetter}${incomingRow})-N(${columnLetter}${firmRow})-N(${columnLetter}${additionalRow})`;
+          stockCell.value = { formula: stockFormula, result: currentStock };
+
+          [stockCell, firmCell, n1Cell, additionalCell, incomingCell].forEach(
+            (cell) => {
+              cell.numFmt = "#,##0";
+              cell.border = thinBorder;
+              cell.alignment = { horizontal: "right", vertical: "middle" };
+            },
+          );
+
+          firmCell.fill = {
+            type: "pattern",
+            pattern: "solid",
+            fgColor: { argb: redFill },
+          };
+          n1Cell.fill = {
+            type: "pattern",
+            pattern: "solid",
+            fgColor: { argb: "FFF8FAFC" },
+          };
+          additionalCell.fill = {
+            type: "pattern",
+            pattern: "solid",
+            fgColor: { argb: orangeFill },
+          };
+          incomingCell.fill = {
+            type: "pattern",
+            pattern: "solid",
+            fgColor: { argb: greenFill },
+          };
+
+        });
+
+        for (
+          let rowNumber = startRow;
+          rowNumber <= startRow + 4;
+          rowNumber += 1
+        ) {
+          for (
+            let column = 1;
+            column <= weekStartColumn + weeks.length - 1;
+            column += 1
+          ) {
+            const cell = projectionSheet.getCell(rowNumber, column);
+            if (!cell.border) cell.border = thinBorder;
+          }
+        }
+      });
+
+      const firstWeekLetter = excelColumnName(weekStartColumn);
+      const lastWeekLetter = excelColumnName(
+        weekStartColumn + weeks.length - 1,
+      );
+      const lastExportRow = 4 + exportedArticles.length * 5;
+      const stockRowPredicate = `MOD(ROW()-5,5)=0`;
+      const securityForCurrentBlock = `INDEX($O:$O,ROW()-MOD(ROW()-5,5))`;
+
+      projectionSheet.addConditionalFormatting({
+        ref: `${firstWeekLetter}5:${lastWeekLetter}${lastExportRow}`,
+        rules: [
+          {
+            type: "expression",
+            priority: 1,
+            formulae: [
+              `AND(${stockRowPredicate},${firstWeekLetter}5<0)`,
+            ],
+            style: {
+              fill: {
+                type: "pattern",
+                pattern: "solid",
+                fgColor: { argb: redFill },
+              },
+              font: { bold: true, color: { argb: redFont } },
+            },
+          },
+          {
+            type: "expression",
+            priority: 2,
+            formulae: [
+              `AND(${stockRowPredicate},${firstWeekLetter}5>=0,${firstWeekLetter}5<${securityForCurrentBlock})`,
+            ],
+            style: {
+              fill: {
+                type: "pattern",
+                pattern: "solid",
+                fgColor: { argb: orangeFill },
+              },
+              font: { bold: true, color: { argb: orangeFont } },
+            },
+          },
+          {
+            type: "expression",
+            priority: 3,
+            formulae: [
+              `AND(${stockRowPredicate},${firstWeekLetter}5>=${securityForCurrentBlock},${firstWeekLetter}5<${securityForCurrentBlock}*1.2)`,
+            ],
+            style: {
+              fill: {
+                type: "pattern",
+                pattern: "solid",
+                fgColor: { argb: yellowFill },
+              },
+              font: { bold: true, color: { argb: yellowFont } },
+            },
+          },
+          {
+            type: "expression",
+            priority: 4,
+            formulae: [
+              `AND(${stockRowPredicate},${firstWeekLetter}5>=${securityForCurrentBlock}*1.2)`,
+            ],
+            style: {
+              fill: {
+                type: "pattern",
+                pattern: "solid",
+                fgColor: { argb: greenFill },
+              },
+              font: { bold: true, color: { argb: greenFont } },
+            },
+          },
+        ],
+      });
+
+      const widths = [
+        18,
+        22,
+        18,
+        34,
+        24,
+        13,
+        15,
+        12,
+        12,
+        13,
+        15,
+        15,
+        17,
+        12,
+        12,
+        24,
+      ];
+      widths.forEach((width, index) => {
+        projectionSheet.getColumn(index + 1).width = width;
+      });
+      projectionSheet.getColumn(14).hidden = true;
+      projectionSheet.getColumn(15).hidden = true;
+      weeks.forEach((_, index) => {
+        projectionSheet.getColumn(weekStartColumn + index).width = 13;
+      });
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer as BlobPart], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `Projection_stocks_${new Date()
+        .toISOString()
+        .slice(0, 10)}.xlsx`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      setExportProgress(null);
+    } catch (err: any) {
+      setExportProgress(null);
+      setError(
+        friendlyError(
+          err,
+          "Erreur pendant la création de l’export Excel des projections.",
+        ),
+      );
+    } finally {
+      setExportingExcel(false);
     }
   }
 
@@ -2218,7 +3067,7 @@ export default function StocksDisponibilitesPage() {
             </div>
 
             <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-              <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-6">
                 <label className="text-xs font-bold text-slate-600">
                   Horizon semaines
                   <input
@@ -2255,6 +3104,14 @@ export default function StocksDisponibilitesPage() {
                 </button>
                 <button
                   type="button"
+                  onClick={exportFilteredArticlesToExcel}
+                  disabled={exportingExcel || loading || !filteredAlertes.length}
+                  className="mt-5 rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-black text-emerald-800 shadow-sm disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {exportingExcel ? "Export en cours…" : "Exporter Excel"}
+                </button>
+                <button
+                  type="button"
                   onClick={() =>
                     rebuildProjection(
                       "Recalcul depuis écran Stocks & disponibilités",
@@ -2271,6 +3128,10 @@ export default function StocksDisponibilitesPage() {
               {recalculating && rebuildProgress ? (
                 <div className="mt-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-900">
                   {rebuildProgress.message}
+                </div>
+              ) : exportProgress ? (
+                <div className="mt-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-900">
+                  {exportProgress}
                 </div>
               ) : null}
             </div>
@@ -2839,7 +3700,7 @@ export default function StocksDisponibilitesPage() {
                         </div>
                       </div>
 
-                      <div className="mt-3 grid grid-cols-3 gap-2">
+                      <div className="mt-3 grid grid-cols-5 gap-2">
                         <KpiMini
                           label="Stock initial"
                           value={formatNumber(selected.stock_initial)}
@@ -2933,6 +3794,46 @@ export default function StocksDisponibilitesPage() {
                             paramètres, il est créé automatiquement. Le seuil
                             est appliqué au dernier calcul sans recalcul global.
                           </p>
+                        </div>
+
+                        <div className="mt-2 border-t border-slate-200 pt-2">
+                          <div className="mb-1.5 text-xs font-black text-slate-900">
+                            Évolution de l’article sur tout l’horizon
+                          </div>
+                          <div className="flex flex-wrap items-end gap-2">
+                            <label className="min-w-[150px] text-[11px] font-bold text-slate-600">
+                              Évolution vs BL N-1
+                              <div className="relative mt-1 w-32">
+                                <input
+                                  type="number"
+                                  min="-100"
+                                  step="1"
+                                  placeholder="Mixte"
+                                  value={articleEvolutionPct}
+                                  onChange={(event) =>
+                                    setArticleEvolutionPct(event.target.value)
+                                  }
+                                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-1.5 pr-7 text-right text-sm font-bold text-slate-950"
+                                />
+                                <span className="pointer-events-none absolute right-2 top-1.5 text-sm font-bold text-slate-500">
+                                  %
+                                </span>
+                              </div>
+                            </label>
+                            <button
+                              type="button"
+                              onClick={applyArticleEvolutionToHorizon}
+                              disabled={!projection.length || savingWeekly}
+                              className="rounded-xl border border-blue-300 bg-blue-50 px-3 py-1.5 text-sm font-black text-blue-800 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              Appliquer aux {projection.length || horizonWeeks} semaines
+                            </button>
+                            <p className="min-w-[180px] flex-1 text-[11px] leading-4 text-slate-500">
+                              Exemple : +20 % applique un coefficient de 120 %. Les
+                              quantités forcées semaine par semaine sont effacées, puis
+                              l’enregistrement recalcule uniquement cet article.
+                            </p>
+                          </div>
                         </div>
                       </div>
                     </div>
