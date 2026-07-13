@@ -1,4 +1,4 @@
-'use client'
+       'use client'
 
 import { useEffect, useRef, useState } from 'react'
 import type React from 'react'
@@ -329,6 +329,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const [statusScopeOverride, setStatusScopeOverride] = useState<StatusScopeOverride | null>(null)
   const isLoginPage = pathname === '/login'
   const isUnauthorizedPage = pathname === '/unauthorized'
+  const isPortefeuilleLivraisonPage = pathname === '/portefeuille-livraison' || pathname.startsWith('/portefeuille-livraison/')
   const isPdfPrintPage =
     pathname === '/focus_mensuel_print' ||
     pathname.startsWith('/focus_mensuel_print/')
@@ -1562,7 +1563,14 @@ function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         )}
 
-        <main style={styles.content}>{children}</main>
+        <main
+          style={{
+            ...styles.content,
+            ...(isPortefeuilleLivraisonPage ? styles.contentFullWidth : {}),
+          }}
+        >
+          {children}
+        </main>
       </div>
 
       <Analytics />
@@ -2066,6 +2074,14 @@ const styles: Record<string, React.CSSProperties> = {
   content: {
     position: 'relative',
     zIndex: 1,
+    width: '100%',
+    minWidth: 0,
     padding: 20,
+  },
+
+  contentFullWidth: {
+    padding: '4px 2px 16px',
+    maxWidth: 'none',
+    overflowX: 'hidden',
   },
 }

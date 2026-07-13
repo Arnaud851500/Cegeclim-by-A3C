@@ -235,7 +235,7 @@ function isMonthBeforeCurrent(month: string, currentMonthKey: string) {
 
 function getSummaryHeaderClassName(month: string, currentMonthKey: string) {
   const base =
-    'whitespace-nowrap cursor-pointer border-b border-r border-slate-200 px-3 py-2 text-right'
+    'whitespace-nowrap cursor-pointer border-b border-r border-slate-200 px-2 py-2 text-right'
 
   if (month === 'AVANT_2026') {
     return `${base} bg-red-100 text-red-950 hover:bg-red-200`
@@ -249,7 +249,7 @@ function getSummaryHeaderClassName(month: string, currentMonthKey: string) {
 }
 
 function getSummaryCellClassName(month: string, hasValue: boolean, currentMonthKey: string) {
-  const base = 'border-b border-r border-slate-200 px-3 py-2 text-right'
+  const base = 'border-b border-r border-slate-200 px-2 py-2 text-right'
 
   if (month === 'AVANT_2026') {
     return [
@@ -1302,8 +1302,8 @@ export default function PortefeuilleLivraisonPage() {
   }
 
   return (
-    <main className="min-h-screen bg-slate-50 p-4 text-slate-900">
-      <div className="mx-auto max-w-[1800px] space-y-4">
+    <main className="min-h-screen w-full max-w-none bg-slate-50 px-2 pb-4 pt-2 text-slate-900">
+      <div className="w-full max-w-none space-y-3">
         <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
             <div>
@@ -1314,7 +1314,7 @@ export default function PortefeuilleLivraisonPage() {
                 Contrôle groupé des BL : un seul forfait par Date BL / N° tiers / Mode d’expédition / Lieu de livraison. Les BL à corriger sont identifiés avec une action Ajouter, Supprimer ou Vérifier.
               </p>
               <div className="mt-2 inline-flex rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-800">
-                Version contrôle frais de port groupé 2026-07-13 v3
+                Version contrôle frais de port groupé 2026-07-13 v3.1 — pleine largeur
               </div>
             </div>
 
@@ -1754,7 +1754,7 @@ export default function PortefeuilleLivraisonPage() {
                     <th
                       key={key}
                       onClick={() => toggleGroupSort(key as keyof GroupeFraisPort)}
-                      className="whitespace-nowrap cursor-pointer border-b border-r border-slate-200 px-3 py-2 text-left hover:bg-slate-200"
+                      className="whitespace-nowrap cursor-pointer border-b border-r border-slate-200 px-2 py-2 text-left hover:bg-slate-200"
                     >
                       {label}
                     </th>
@@ -1780,24 +1780,24 @@ export default function PortefeuilleLivraisonPage() {
                         group.nb_bl_a_supprimer > 0 ? 'bg-rose-50' : '',
                       ].join(' ')}
                     >
-                      <td className="whitespace-nowrap border-b border-r border-slate-200 px-3 py-2 font-semibold">{formatDate(group.date_controle)}</td>
-                      <td className="whitespace-nowrap border-b border-r border-slate-200 px-3 py-2 font-semibold">{group.numero_tiers}</td>
-                      <td className="max-w-[260px] border-b border-r border-slate-200 px-3 py-2">{group.nom_tiers}</td>
-                      <td className="whitespace-nowrap border-b border-r border-slate-200 px-3 py-2">{group.expedition || '—'}</td>
-                      <td className="max-w-[320px] border-b border-r border-slate-200 px-3 py-2" title={group.lieu_livraison}>{group.lieu_livraison || '—'}</td>
-                      <td className="whitespace-nowrap border-b border-r border-slate-200 px-3 py-2">{group.depots || '—'}</td>
-                      <td className="border-b border-r border-slate-200 px-3 py-2 text-right font-semibold">{group.nb_bl}</td>
-                      <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{group.nb_bl_avec_port}</td>
-                      <td className="border-b border-r border-slate-200 px-3 py-2 text-right font-semibold">{formatMoneyCents(group.frais_port_constate_groupe_ht)}</td>
-                      <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{formatMoneyCents(group.frais_port_attendu_groupe_ht)}</td>
-                      <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{formatMoneyCents(group.ecart_groupe_ht)}</td>
+                      <td className="whitespace-nowrap border-b border-r border-slate-200 px-2 py-2 font-semibold">{formatDate(group.date_controle)}</td>
+                      <td className="whitespace-nowrap border-b border-r border-slate-200 px-2 py-2 font-semibold">{group.numero_tiers}</td>
+                      <td className="max-w-[260px] border-b border-r border-slate-200 px-2 py-2">{group.nom_tiers}</td>
+                      <td className="whitespace-nowrap border-b border-r border-slate-200 px-2 py-2">{group.expedition || '—'}</td>
+                      <td className="max-w-[320px] border-b border-r border-slate-200 px-2 py-2" title={group.lieu_livraison}>{group.lieu_livraison || '—'}</td>
+                      <td className="whitespace-nowrap border-b border-r border-slate-200 px-2 py-2">{group.depots || '—'}</td>
+                      <td className="border-b border-r border-slate-200 px-2 py-2 text-right font-semibold">{group.nb_bl}</td>
+                      <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{group.nb_bl_avec_port}</td>
+                      <td className="border-b border-r border-slate-200 px-2 py-2 text-right font-semibold">{formatMoneyCents(group.frais_port_constate_groupe_ht)}</td>
+                      <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{formatMoneyCents(group.frais_port_attendu_groupe_ht)}</td>
+                      <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{formatMoneyCents(group.ecart_groupe_ht)}</td>
                       <td className={[
-                        'border-b border-r border-slate-200 px-3 py-2 text-right font-semibold',
+                        'border-b border-r border-slate-200 px-2 py-2 text-right font-semibold',
                         group.nb_bl_a_supprimer > 0 ? 'text-rose-700' : 'text-slate-400',
                       ].join(' ')}>
                         {group.nb_bl_a_supprimer}
                       </td>
-                      <td className="border-b border-slate-200 px-3 py-2">
+                      <td className="border-b border-slate-200 px-2 py-2">
                         <div className="space-y-1">
                           <span className={['inline-flex whitespace-nowrap rounded-full border px-2 py-1 text-xs font-semibold', controlStatusClassName(group.statut_groupe)].join(' ')}>
                             {controlStatusLabel(group.statut_groupe)}
@@ -1849,11 +1849,11 @@ export default function PortefeuilleLivraisonPage() {
                     Agence
                   </th>
 
-                  <th className="whitespace-nowrap border-b border-r border-slate-200 px-3 py-2 text-left">
+                  <th className="whitespace-nowrap border-b border-r border-slate-200 px-2 py-2 text-left">
                     Représentant
                   </th>
 
-                  <th className="whitespace-nowrap border-b border-r border-slate-200 px-3 py-2 text-left">
+                  <th className="whitespace-nowrap border-b border-r border-slate-200 px-2 py-2 text-left">
                     Type doc
                   </th>
 
@@ -1885,7 +1885,7 @@ export default function PortefeuilleLivraisonPage() {
                   ))}
 
                   <th
-                    className="whitespace-nowrap cursor-pointer border-b border-slate-200 px-3 py-2 text-right hover:bg-slate-200"
+                    className="whitespace-nowrap cursor-pointer border-b border-slate-200 px-2 py-2 text-right hover:bg-slate-200"
                     onClick={() => applyDetailSelection({ totalType: 'general' })}
                   >
                     Total
@@ -1900,30 +1900,30 @@ export default function PortefeuilleLivraisonPage() {
                       {row.agence}
                     </td>
 
-                    <td className="border-b border-r border-slate-200 px-3 py-2">
+                    <td className="border-b border-r border-slate-200 px-2 py-2">
                       {row.representant}
                     </td>
 
-                    <td className="border-b border-r border-slate-200 px-3 py-2">
+                    <td className="border-b border-r border-slate-200 px-2 py-2">
                       {row.type_document}
                     </td>
 
                     <td className={[
-                      'border-b border-r border-slate-200 px-3 py-2 text-right font-semibold',
+                      'border-b border-r border-slate-200 px-2 py-2 text-right font-semibold',
                       row.total_nb_anomalies > 0 ? 'bg-orange-50 text-orange-800' : 'text-slate-400',
                     ].join(' ')}>
                       {row.total_nb_anomalies.toLocaleString('fr-FR')}
                     </td>
 
                     <td className={[
-                      'border-b border-r border-slate-200 px-3 py-2 text-right font-semibold',
+                      'border-b border-r border-slate-200 px-2 py-2 text-right font-semibold',
                       row.total_nb_frais_port_manquant > 0 ? 'bg-red-50 text-red-800' : 'text-slate-400',
                     ].join(' ')}>
                       {row.total_nb_frais_port_manquant.toLocaleString('fr-FR')}
                     </td>
 
                     <td className={[
-                      'border-b border-r border-slate-200 px-3 py-2 text-right font-semibold',
+                      'border-b border-r border-slate-200 px-2 py-2 text-right font-semibold',
                       row.total_nb_bl_a_supprimer > 0 ? 'bg-rose-50 text-rose-800' : 'text-slate-400',
                     ].join(' ')}>
                       <div>{row.total_nb_bl_a_supprimer.toLocaleString('fr-FR')}</div>
@@ -2075,7 +2075,7 @@ export default function PortefeuilleLivraisonPage() {
                     <th
                       key={key}
                       onClick={() => toggleDocumentSort(key as keyof DocumentPortefeuille)}
-                      className="whitespace-nowrap cursor-pointer border-b border-r border-slate-200 px-3 py-2 text-left hover:bg-slate-200"
+                      className="whitespace-nowrap cursor-pointer border-b border-r border-slate-200 px-2 py-2 text-left hover:bg-slate-200"
                     >
                       {label}
                     </th>
@@ -2095,12 +2095,12 @@ export default function PortefeuilleLivraisonPage() {
                       selectedDocumentKeyForLines === doc.key ? 'ring-1 ring-inset ring-blue-300' : '',
                     ].join(' ')}
                   >
-                    <td className="border-b border-r border-slate-200 px-3 py-2">{doc.agence}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">{doc.representant}</td>
-                    <td className="whitespace-nowrap border-b border-r border-slate-200 px-3 py-2 font-semibold">{formatDate(doc.date_controle)}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">{doc.numero_tiers}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">{doc.nom_tiers}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 font-medium">
+                    <td className="border-b border-r border-slate-200 px-2 py-2">{doc.agence}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2">{doc.representant}</td>
+                    <td className="whitespace-nowrap border-b border-r border-slate-200 px-2 py-2 font-semibold">{formatDate(doc.date_controle)}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2">{doc.numero_tiers}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2">{doc.nom_tiers}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2 font-medium">
                       <button
                         type="button"
                         onClick={() => setSelectedDocumentKeyForLines(doc.key)}
@@ -2109,30 +2109,30 @@ export default function PortefeuilleLivraisonPage() {
                         {doc.numero_document}
                       </button>
                     </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 font-medium">{doc.reference_entete || '—'}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">{doc.references || '—'}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">{doc.expedition || '—'}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">{doc.depot_entete || '—'}</td>
-                    <td className="max-w-[280px] border-b border-r border-slate-200 px-3 py-2" title={doc.lieu_livraison}>{doc.lieu_livraison || '—'}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right font-semibold">{doc.nb_bl_groupe || '—'}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{doc.nb_bl_avec_port || '—'}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right font-semibold">{formatMoneyCents(doc.frais_port_constate_ht)}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{formatMoneyCents(doc.frais_port_constate_groupe_ht)}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{formatMoneyCents(doc.frais_port_attendu_groupe_ht)}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">
+                    <td className="border-b border-r border-slate-200 px-2 py-2 font-medium">{doc.reference_entete || '—'}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2">{doc.references || '—'}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2">{doc.expedition || '—'}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2">{doc.depot_entete || '—'}</td>
+                    <td className="max-w-[280px] border-b border-r border-slate-200 px-2 py-2" title={doc.lieu_livraison}>{doc.lieu_livraison || '—'}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2 text-right font-semibold">{doc.nb_bl_groupe || '—'}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{doc.nb_bl_avec_port || '—'}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2 text-right font-semibold">{formatMoneyCents(doc.frais_port_constate_ht)}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{formatMoneyCents(doc.frais_port_constate_groupe_ht)}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{formatMoneyCents(doc.frais_port_attendu_groupe_ht)}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2">
                       <span className={['inline-flex whitespace-nowrap rounded-full border px-2 py-1 text-xs font-semibold', actionClassName(doc.action_recommandee)].join(' ')}>
                         {actionLabel(doc.action_recommandee)}
                       </span>
                     </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right font-semibold">{formatMoneyCents(doc.montant_action_ht)}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">
+                    <td className="border-b border-r border-slate-200 px-2 py-2 text-right font-semibold">{formatMoneyCents(doc.montant_action_ht)}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2">
                       <span className={['inline-flex whitespace-nowrap rounded-full border px-2 py-1 text-xs font-semibold', controlStatusClassName(doc.statut_controle)].join(' ')} title={doc.base_calcul_frais_port || undefined}>
                         {controlStatusLabel(doc.statut_controle)}
                       </span>
                     </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">{formatDate(doc.date_livraison)}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">{doc.familles_macro}</td>
-                    <td className="border-b border-slate-200 px-3 py-2">{doc.client_en_sommeil ? 'Oui' : 'Non'}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2">{formatDate(doc.date_livraison)}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2">{doc.familles_macro}</td>
+                    <td className="border-b border-slate-200 px-2 py-2">{doc.client_en_sommeil ? 'Oui' : 'Non'}</td>
                   </tr>
                 ))}
 
@@ -2196,7 +2196,7 @@ export default function PortefeuilleLivraisonPage() {
                     <th
                       key={key}
                       onClick={() => toggleLigneSort(key as keyof LignePortefeuille)}
-                      className="whitespace-nowrap cursor-pointer border-b border-r border-slate-200 px-3 py-2 text-left hover:bg-slate-200"
+                      className="whitespace-nowrap cursor-pointer border-b border-r border-slate-200 px-2 py-2 text-left hover:bg-slate-200"
                     >
                       {label}
                     </th>
@@ -2207,22 +2207,22 @@ export default function PortefeuilleLivraisonPage() {
               <tbody>
                 {sortedLignes.map((ligne, index) => (
                   <tr key={`${ligne.id || index}-${ligne.numero_document}`} className="hover:bg-slate-50">
-                    <td className="border-b border-r border-slate-200 px-3 py-2">{safeText(ligne.agence, 'Sans agence')}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">{safeText(ligne.representant, 'Sans représentant')}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">{safeText(ligne.numero_tiers, '')}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">{safeText(ligne.nom_tiers, '')}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">{safeText(ligne.type_document, '')}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 font-medium">{safeText(ligne.numero_document, '')}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 font-medium">{safeText(ligne.reference_article, '')}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">{safeText(ligne.designation_article, '')}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">{safeText(ligne.reference, '')}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">{safeText(ligne.famille, '')}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">{safeText(ligne.famille_macro, 'Sans famille macro')}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{Number(ligne.quantite || 0).toLocaleString('fr-FR')}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{formatMoney(ligne.montant_ht)}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">{formatDate(ligne.date_creation_document)}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">{formatDate(ligne.date_livraison)}</td>
-                    <td className="border-b border-slate-200 px-3 py-2">{ligne.client_en_sommeil ? 'Oui' : 'Non'}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.agence, 'Sans agence')}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.representant, 'Sans représentant')}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.numero_tiers, '')}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.nom_tiers, '')}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.type_document, '')}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2 font-medium">{safeText(ligne.numero_document, '')}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2 font-medium">{safeText(ligne.reference_article, '')}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.designation_article, '')}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.reference, '')}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.famille, '')}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.famille_macro, 'Sans famille macro')}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{Number(ligne.quantite || 0).toLocaleString('fr-FR')}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{formatMoney(ligne.montant_ht)}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2">{formatDate(ligne.date_creation_document)}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2">{formatDate(ligne.date_livraison)}</td>
+                    <td className="border-b border-slate-200 px-2 py-2">{ligne.client_en_sommeil ? 'Oui' : 'Non'}</td>
                   </tr>
                 ))}
 
