@@ -49,18 +49,83 @@ type ControleFraisPort = {
   montant_lignes_ht: number | null
   numero_piece_entete: string | null
   reference_entete: string | null
+  date_piece_entete: string | null
+  date_controle: string | null
   expedition: string | null
+  expedition_normalisee: string | null
   depot_entete: string | null
   lieu_livraison: string | null
+  lieu_livraison_normalise: string | null
   montant_entete_ht: number | null
   mode_expedition_reference: string | null
   base_calcul_frais_port: string | null
+  frais_port_unitaire_attendu_ht: number | null
   frais_port_attendu_ht: number | null
+  frais_port_constate_ht: number | null
   ecart_entete_lignes_ht: number | null
   ecart_vs_attendu_ht: number | null
+  cle_groupe_frais_port: string | null
+  nb_bl_groupe: number | null
+  nb_bl_avec_port: number | null
+  nb_depots: number | null
+  depots: string | null
+  agences: string | null
+  representants: string | null
+  numeros_bl: string | null
+  bl_conseille_ajout: string | null
+  bl_conseille_conservation: string | null
+  frais_port_attendu_groupe_ht: number | null
+  frais_port_constate_groupe_ht: number | null
+  ecart_groupe_ht: number | null
+  nb_bl_a_supprimer: number | null
+  montant_a_supprimer_ht: number | null
+  montant_a_ajouter_ht: number | null
+  nb_actions: number | null
+  statut_groupe: string | null
+  niveau_alerte: string | null
+  action_recommandee: string | null
+  montant_action_ht: number | null
   controle_applicable: boolean | null
   frais_port_manquant: boolean | null
+  frais_port_a_supprimer: boolean | null
   statut_controle: string | null
+}
+
+type GroupeFraisPort = {
+  cle_groupe_frais_port: string
+  date_controle: string | null
+  numero_tiers: string
+  nom_tiers: string
+  expedition: string
+  lieu_livraison: string
+  lieu_livraison_normalise: string
+  depots: string
+  agences: string
+  representants: string
+  numeros_bl: string
+  bl_conseille_ajout: string
+  bl_conseille_conservation: string
+  date_livraison_min: string | null
+  date_livraison_max: string | null
+  client_en_sommeil: boolean
+  nb_bl: number
+  nb_bl_avec_port: number
+  nb_depots: number
+  frais_port_attendu_groupe_ht: number | null
+  frais_port_constate_groupe_ht: number
+  ecart_groupe_ht: number
+  montant_lignes_groupe_ht: number
+  montant_entete_groupe_ht: number
+  base_calcul_frais_port: string
+  mois_controle: string
+  statut_groupe: string
+  anomalie_controle: boolean
+  frais_port_manquant: boolean
+  nb_bl_a_supprimer: number
+  montant_a_supprimer_ht: number
+  montant_a_ajouter_ht: number
+  nb_actions: number
+  niveau_alerte: string
 }
 
 type DocumentPortefeuille = {
@@ -81,16 +146,26 @@ type DocumentPortefeuille = {
   references_articles: string
   references: string
   reference_entete: string
+  date_controle: string | null
   expedition: string
   depot_entete: string
   lieu_livraison: string
   montant_lignes_controle_ht: number | null
   montant_entete_ht: number | null
-  ecart_entete_lignes_ht: number | null
+  frais_port_constate_ht: number | null
   frais_port_attendu_ht: number | null
-  ecart_vs_attendu_ht: number | null
+  frais_port_attendu_groupe_ht: number | null
+  frais_port_constate_groupe_ht: number | null
+  ecart_groupe_ht: number | null
   base_calcul_frais_port: string
+  cle_groupe_frais_port: string
+  nb_bl_groupe: number
+  nb_bl_avec_port: number
+  nb_bl_a_supprimer: number
   frais_port_manquant: boolean
+  frais_port_a_supprimer: boolean
+  action_recommandee: string
+  montant_action_ht: number
   statut_controle: string
 }
 
@@ -99,7 +174,8 @@ type SyntheseControlCell = {
   montant_ht: number
   nb_anomalies: number
   nb_frais_port_manquant: number
-  frais_port_attendu_ht: number
+  nb_bl_a_supprimer: number
+  montant_actions_ht: number
 }
 
 type SyntheseRow = {
@@ -112,7 +188,8 @@ type SyntheseRow = {
   total_montant_ht: number
   total_nb_anomalies: number
   total_nb_frais_port_manquant: number
-  total_frais_port_attendu_ht: number
+  total_nb_bl_a_supprimer: number
+  total_montant_actions_ht: number
 }
 
 type DetailSelection = {
@@ -268,39 +345,71 @@ function formatMoneyCents(value: number | null | undefined) {
 function controlStatusLabel(status: string) {
   const labels: Record<string, string> = {
     OK: 'OK',
-    FRAIS_PORT_MANQUANT: 'Frais de port manquant',
+    FRAIS_PORT_MANQUANT: 'Port manquant',
+    FRAIS_PORT_EN_DOUBLE: 'Port en double',
+    FRAIS_COMPTOIR_A_SUPPRIMER: 'Port comptoir à supprimer',
+    FRAIS_PORT_REPARTI_A_REGROUPER: 'Port réparti à regrouper',
+    MONTANT_FRAIS_PORT_A_VERIFIER: 'Montant à vérifier',
+    LIEU_LIVRAISON_A_COMPLETER: 'Lieu à compléter',
+    MULTI_DEPOT_A_VALIDER: 'Multi-dépôt à valider',
+    DATE_BL_ABSENTE: 'Date BL absente',
+    TIERS_ABSENT: 'Tiers absent',
     ENTETE_ABSENTE: 'Entête absente',
     MODE_EXPEDITION_ABSENT: 'Mode absent',
     MODE_EXPEDITION_INCONNU: 'Mode inconnu',
-    ECART_INFERIEUR_ATTENDU: 'Écart inférieur au forfait',
-    ECART_SUPERIEUR_ATTENDU: 'Écart supérieur au forfait',
     PL_A_CONFIRMER: 'PL à confirmer',
     NON_APPLICABLE: 'Non applicable',
+    NON_CONTROLE: 'Non contrôlé',
   }
   return labels[status] || status || 'Non contrôlé'
 }
 
+function actionLabel(action: string) {
+  const labels: Record<string, string> = {
+    AJOUTER: 'Ajouter le port',
+    SUPPRIMER: 'Supprimer le port',
+    CONSERVER: 'Conserver le port',
+    VERIFIER: 'Vérifier le groupe',
+    AUCUNE_ACTION: 'Aucune action',
+  }
+  return labels[action] || action || 'Aucune action'
+}
+
 function isControlAnomaly(status: string) {
-  return [
-    'FRAIS_PORT_MANQUANT',
-    'ENTETE_ABSENTE',
-    'MODE_EXPEDITION_ABSENT',
-    'MODE_EXPEDITION_INCONNU',
-    'ECART_INFERIEUR_ATTENDU',
-    'ECART_SUPERIEUR_ATTENDU',
-  ].includes(status)
+  return Boolean(status) && !['OK', 'PL_A_CONFIRMER', 'NON_APPLICABLE', 'NON_CONTROLE'].includes(status)
+}
+
+function isDirectControlAction(action: string) {
+  return ['AJOUTER', 'SUPPRIMER', 'VERIFIER'].includes(action)
 }
 
 function controlStatusClassName(status: string) {
   if (status === 'OK') return 'border-emerald-200 bg-emerald-50 text-emerald-800'
   if (status === 'FRAIS_PORT_MANQUANT') return 'border-red-300 bg-red-100 text-red-900'
-  if (['ENTETE_ABSENTE', 'MODE_EXPEDITION_ABSENT', 'MODE_EXPEDITION_INCONNU'].includes(status)) {
+  if (['FRAIS_PORT_EN_DOUBLE', 'FRAIS_COMPTOIR_A_SUPPRIMER'].includes(status)) {
+    return 'border-rose-300 bg-rose-100 text-rose-900'
+  }
+  if (['ENTETE_ABSENTE', 'MODE_EXPEDITION_ABSENT', 'MODE_EXPEDITION_INCONNU', 'DATE_BL_ABSENTE', 'TIERS_ABSENT', 'LIEU_LIVRAISON_A_COMPLETER'].includes(status)) {
     return 'border-orange-300 bg-orange-100 text-orange-900'
   }
-  if (status === 'PL_A_CONFIRMER' || status === 'NON_APPLICABLE') {
+  if (status === 'PL_A_CONFIRMER' || status === 'NON_APPLICABLE' || status === 'NON_CONTROLE') {
     return 'border-slate-200 bg-slate-100 text-slate-700'
   }
   return 'border-amber-300 bg-amber-100 text-amber-900'
+}
+
+function actionClassName(action: string) {
+  if (action === 'AJOUTER') return 'border-red-300 bg-red-100 text-red-900'
+  if (action === 'SUPPRIMER') return 'border-rose-300 bg-rose-100 text-rose-900'
+  if (action === 'CONSERVER') return 'border-emerald-200 bg-emerald-50 text-emerald-800'
+  if (action === 'VERIFIER') return 'border-amber-300 bg-amber-100 text-amber-900'
+  return 'border-slate-200 bg-slate-100 text-slate-600'
+}
+
+function scopeTextMatchesAllowed(value: string | null | undefined, allowed: string[]) {
+  if (!allowed.length) return true
+  const normalizedValue = String(value || '').toLowerCase()
+  return allowed.some((item) => normalizedValue.includes(String(item || '').trim().toLowerCase()))
 }
 
 function sortValues(a: unknown, b: unknown) {
@@ -371,6 +480,7 @@ export default function PortefeuilleLivraisonPage() {
 
   const [lignes, setLignes] = useState<LignePortefeuille[]>([])
   const [controlesFraisPort, setControlesFraisPort] = useState<ControleFraisPort[]>([])
+  const [groupesFraisPort, setGroupesFraisPort] = useState<GroupeFraisPort[]>([])
 
   const [selectedTypes, setSelectedTypes] = useState<string[]>(DEFAULT_TYPES)
 
@@ -388,6 +498,7 @@ export default function PortefeuilleLivraisonPage() {
   const [selectedDepotEntete, setSelectedDepotEntete] = useState('')
   const [referenceEnteteSearch, setReferenceEnteteSearch] = useState('')
   const [lieuLivraisonSearch, setLieuLivraisonSearch] = useState('')
+  const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null)
 
   const [selection, setSelection] = useState<DetailSelection | null>(null)
   const [selectedDocumentKeyForLines, setSelectedDocumentKeyForLines] = useState<string | null>(null)
@@ -395,6 +506,11 @@ export default function PortefeuilleLivraisonPage() {
   const [documentSort, setDocumentSort] = useState<SortConfig<DocumentPortefeuille>>({
     key: 'agence',
     direction: 'asc',
+  })
+
+  const [groupSort, setGroupSort] = useState<SortConfig<GroupeFraisPort>>({
+    key: 'date_controle',
+    direction: 'desc',
   })
 
   const [ligneSort, setLigneSort] = useState<SortConfig<LignePortefeuille>>({
@@ -409,9 +525,10 @@ export default function PortefeuilleLivraisonPage() {
 
 
   useEffect(() => {
-    function applyMissingPortFilter() {
+    function applyControlFilter(mode: 'ANOMALIES' | 'FRAIS_PORT_MANQUANT' | 'FRAIS_PORT_A_SUPPRIMER') {
       setSelectedTypes(['BL'])
-      setSelectedControle('FRAIS_PORT_MANQUANT')
+      setSelectedControle(mode)
+      setSelectedGroupKey(null)
       setSelection(null)
       setSelectedDocumentKeyForLines(null)
     }
@@ -423,19 +540,29 @@ export default function PortefeuilleLivraisonPage() {
         .toLowerCase()
         .replace(/_/g, '-')
 
-      if (requestedControl === 'frais-port-manquant') applyMissingPortFilter()
+      if (requestedControl === 'frais-port-manquant') applyControlFilter('FRAIS_PORT_MANQUANT')
+      if (requestedControl === 'frais-port-a-supprimer') applyControlFilter('FRAIS_PORT_A_SUPPRIMER')
+      if (requestedControl === 'controle-frais-port' || requestedControl === 'anomalies-frais-port') {
+        applyControlFilter('ANOMALIES')
+      }
+    }
+
+    function handleOpenControl() {
+      applyControlFilter('ANOMALIES')
     }
 
     function handleOpenMissingPort() {
-      applyMissingPortFilter()
+      applyControlFilter('FRAIS_PORT_MANQUANT')
     }
 
     applyControlFromUrl()
     window.addEventListener('popstate', applyControlFromUrl)
+    window.addEventListener('cegeclim:open-controle-frais-port', handleOpenControl)
     window.addEventListener('cegeclim:open-frais-port-manquant', handleOpenMissingPort)
 
     return () => {
       window.removeEventListener('popstate', applyControlFromUrl)
+      window.removeEventListener('cegeclim:open-controle-frais-port', handleOpenControl)
       window.removeEventListener('cegeclim:open-frais-port-manquant', handleOpenMissingPort)
     }
   }, [])
@@ -489,19 +616,20 @@ export default function PortefeuilleLivraisonPage() {
       setSelection(null)
       setSelectedDocumentKeyForLines(null)
 
-      // Le contrôle frais de port est volontairement chargé séparément :
-      // une erreur SQL sur la vue de contrôle ne doit jamais vider le portefeuille principal.
+      // Le contrôle frais de port est chargé séparément : une erreur SQL sur
+      // les vues de contrôle ne doit jamais vider le portefeuille principal.
       try {
+        const controlTypes = Array.from(new Set([...(selectedTypes.length ? selectedTypes : DEFAULT_TYPES), 'BL']))
         let controlQuery = supabase
-          .from('v_controle_frais_port_documents')
+          .from('v_controle_frais_port_actions')
           .select('*')
-          .in('type_document', selectedTypes.length ? selectedTypes : DEFAULT_TYPES)
-          .order('agence', { ascending: true, nullsFirst: true })
-          .order('representant', { ascending: true, nullsFirst: true })
-          .order('date_livraison', { ascending: true, nullsFirst: true })
+          .in('type_document', controlTypes)
+          .order('date_controle', { ascending: false, nullsFirst: false })
+          .order('numero_tiers', { ascending: true, nullsFirst: true })
+          .order('numero_document', { ascending: true, nullsFirst: true })
 
-        if (dateCreationDebut) controlQuery = controlQuery.gte('date_creation_document', dateCreationDebut)
-        if (dateCreationFin) controlQuery = controlQuery.lte('date_creation_document', dateCreationFin)
+        if (dateCreationDebut) controlQuery = controlQuery.gte('date_controle', dateCreationDebut)
+        if (dateCreationFin) controlQuery = controlQuery.lte('date_controle', dateCreationFin)
         if (dateLivraisonDebut) controlQuery = controlQuery.gte('date_livraison', dateLivraisonDebut)
         if (dateLivraisonFin) controlQuery = controlQuery.lte('date_livraison', dateLivraisonFin)
 
@@ -522,18 +650,47 @@ export default function PortefeuilleLivraisonPage() {
           controlQuery = controlQuery.or('client_en_sommeil.is.false,client_en_sommeil.is.null')
         }
 
-        const { data: controlData, error: controlError } = await controlQuery.limit(50000)
-        if (controlError) throw controlError
+        let groupQuery = supabase
+          .from('v_controle_frais_port_groupes')
+          .select('*')
+          .order('date_controle', { ascending: false, nullsFirst: false })
+          .order('numero_tiers', { ascending: true, nullsFirst: true })
+          .order('lieu_livraison', { ascending: true, nullsFirst: true })
 
-        const controlRows = ((controlData || []) as ControleFraisPort[]).filter((row) =>
+        if (dateCreationDebut) groupQuery = groupQuery.gte('date_controle', dateCreationDebut)
+        if (dateCreationFin) groupQuery = groupQuery.lte('date_controle', dateCreationFin)
+        if (dateLivraisonDebut) groupQuery = groupQuery.gte('date_livraison_max', dateLivraisonDebut)
+        if (dateLivraisonFin) groupQuery = groupQuery.lte('date_livraison_min', dateLivraisonFin)
+        if (selectedSommeil === 'OUI') groupQuery = groupQuery.eq('client_en_sommeil', true)
+        if (selectedSommeil === 'NON') groupQuery = groupQuery.eq('client_en_sommeil', false)
+
+        const [controlResponse, groupResponse] = await Promise.all([
+          controlQuery.limit(50000),
+          groupQuery.limit(20000),
+        ])
+
+        if (controlResponse.error) throw controlResponse.error
+        if (groupResponse.error) throw groupResponse.error
+
+        const controlRows = ((controlResponse.data || []) as ControleFraisPort[]).filter((row) =>
           isAllowedByList(row.representant, access.allowedCollaborateurs) &&
           isAllowedByList(row.agence, access.allowedAgences)
         )
 
+        const groupRows = ((groupResponse.data || []) as GroupeFraisPort[]).filter((row) => {
+          const accessAgenceOk = scopeTextMatchesAllowed(row.agences, access.allowedAgences)
+          const accessRepresentantOk = scopeTextMatchesAllowed(row.representants, access.allowedCollaborateurs)
+          const selectedAgenceOk = !selectedAgence || scopeTextMatchesAllowed(row.agences, [selectedAgence])
+          const selectedRepresentantOk = !selectedRepresentant || scopeTextMatchesAllowed(row.representants, [selectedRepresentant])
+          return accessAgenceOk && accessRepresentantOk && selectedAgenceOk && selectedRepresentantOk
+        })
+
         setControlesFraisPort(controlRows)
+        setGroupesFraisPort(groupRows)
       } catch (controlError) {
         console.error('Portefeuille livraison - contrôle frais de port', controlError)
         setControlesFraisPort([])
+        setGroupesFraisPort([])
         setControlErrorMessage(
           `Le portefeuille est chargé, mais le contrôle frais de port est indisponible : ${formatLoadError(controlError)}`
         )
@@ -542,6 +699,7 @@ export default function PortefeuilleLivraisonPage() {
       console.error('Portefeuille livraison - erreur chargement', error)
       setLignes([])
       setControlesFraisPort([])
+      setGroupesFraisPort([])
       setSelection(null)
       setSelectedDocumentKeyForLines(null)
       setErrorMessage(formatLoadError(error))
@@ -619,16 +777,26 @@ export default function PortefeuilleLivraisonPage() {
           references_articles: referenceArticle,
           references: reference,
           reference_entete: safeText(controlByKey.get(key)?.reference_entete, ''),
+          date_controle: controlByKey.get(key)?.date_controle ?? ligne.date_creation_document,
           expedition: safeText(controlByKey.get(key)?.expedition, ''),
           depot_entete: safeText(controlByKey.get(key)?.depot_entete, ''),
           lieu_livraison: safeText(controlByKey.get(key)?.lieu_livraison, ''),
           montant_lignes_controle_ht: controlByKey.get(key)?.montant_lignes_ht ?? null,
           montant_entete_ht: controlByKey.get(key)?.montant_entete_ht ?? null,
-          ecart_entete_lignes_ht: controlByKey.get(key)?.ecart_entete_lignes_ht ?? null,
+          frais_port_constate_ht: controlByKey.get(key)?.frais_port_constate_ht ?? null,
           frais_port_attendu_ht: controlByKey.get(key)?.frais_port_attendu_ht ?? null,
-          ecart_vs_attendu_ht: controlByKey.get(key)?.ecart_vs_attendu_ht ?? null,
+          frais_port_attendu_groupe_ht: controlByKey.get(key)?.frais_port_attendu_groupe_ht ?? null,
+          frais_port_constate_groupe_ht: controlByKey.get(key)?.frais_port_constate_groupe_ht ?? null,
+          ecart_groupe_ht: controlByKey.get(key)?.ecart_groupe_ht ?? null,
           base_calcul_frais_port: safeText(controlByKey.get(key)?.base_calcul_frais_port, ''),
+          cle_groupe_frais_port: safeText(controlByKey.get(key)?.cle_groupe_frais_port, ''),
+          nb_bl_groupe: Number(controlByKey.get(key)?.nb_bl_groupe || 0),
+          nb_bl_avec_port: Number(controlByKey.get(key)?.nb_bl_avec_port || 0),
+          nb_bl_a_supprimer: Number(controlByKey.get(key)?.nb_bl_a_supprimer || 0),
           frais_port_manquant: Boolean(controlByKey.get(key)?.frais_port_manquant),
+          frais_port_a_supprimer: Boolean(controlByKey.get(key)?.frais_port_a_supprimer),
+          action_recommandee: safeText(controlByKey.get(key)?.action_recommandee, 'AUCUNE_ACTION'),
+          montant_action_ht: Number(controlByKey.get(key)?.montant_action_ht || 0),
           statut_controle: safeText(controlByKey.get(key)?.statut_controle, 'NON_CONTROLE'),
           famillesSet: new Set(familleMacro ? [familleMacro] : []),
           referencesArticlesSet: new Set(referenceArticle ? [referenceArticle] : []),
@@ -655,31 +823,60 @@ export default function PortefeuilleLivraisonPage() {
 
   const expeditions = useMemo<string[]>(() =>
     Array.from(
-      new Set<string>(documents.map((doc) => doc.expedition).filter((value): value is string => Boolean(value)))
+      new Set<string>([
+        ...documents.map((doc) => doc.expedition),
+        ...groupesFraisPort.map((group) => group.expedition),
+      ].filter((value): value is string => Boolean(value)))
     ).sort((a, b) => a.localeCompare(b, 'fr')),
-  [documents])
+  [documents, groupesFraisPort])
 
   const depotsEntete = useMemo<string[]>(() =>
     Array.from(
-      new Set<string>(documents.map((doc) => doc.depot_entete).filter((value): value is string => Boolean(value)))
+      new Set<string>([
+        ...documents.map((doc) => doc.depot_entete),
+        ...groupesFraisPort.flatMap((group) => String(group.depots || '').split(',').map((value) => value.trim())),
+      ].filter((value): value is string => Boolean(value)))
     ).sort((a, b) => a.localeCompare(b, 'fr')),
-  [documents])
+  [documents, groupesFraisPort])
+
+  const groupesFiltresControle = useMemo(() => {
+    const lieuSearch = lieuLivraisonSearch.trim().toLowerCase()
+
+    return groupesFraisPort.filter((group) => {
+      if (selectedControle === 'FRAIS_PORT_MANQUANT' && group.statut_groupe !== 'FRAIS_PORT_MANQUANT') return false
+      if (selectedControle === 'FRAIS_PORT_A_SUPPRIMER' && group.nb_bl_a_supprimer <= 0) return false
+      if (selectedControle === 'AUTRES_ANOMALIES' && (!group.anomalie_controle || group.statut_groupe === 'FRAIS_PORT_MANQUANT' || group.nb_bl_a_supprimer > 0)) return false
+      if (selectedControle === 'ANOMALIES' && !group.anomalie_controle) return false
+      if (!['TOUS', 'ANOMALIES', 'FRAIS_PORT_MANQUANT', 'FRAIS_PORT_A_SUPPRIMER', 'AUTRES_ANOMALIES'].includes(selectedControle) && group.statut_groupe !== selectedControle) return false
+      if (selectedExpedition && group.expedition !== selectedExpedition) return false
+      if (selectedDepotEntete && !scopeTextMatchesAllowed(group.depots, [selectedDepotEntete])) return false
+      if (lieuSearch && !group.lieu_livraison.toLowerCase().includes(lieuSearch)) return false
+      return true
+    })
+  }, [groupesFraisPort, selectedControle, selectedExpedition, selectedDepotEntete, lieuLivraisonSearch])
+
+  const sortedGroupesFraisPort = useMemo(() => {
+    return sortArray(groupesFiltresControle, groupSort)
+  }, [groupesFiltresControle, groupSort])
 
   const documentsFiltresControle = useMemo(() => {
     const referenceSearch = referenceEnteteSearch.trim().toLowerCase()
     const lieuSearch = lieuLivraisonSearch.trim().toLowerCase()
 
     return documents.filter((doc) => {
-      if (selectedControle === 'FRAIS_PORT_MANQUANT' && !doc.frais_port_manquant) return false
-      if (selectedControle === 'ANOMALIES' && !isControlAnomaly(doc.statut_controle)) return false
-      if (!['TOUS', 'ANOMALIES', 'FRAIS_PORT_MANQUANT'].includes(selectedControle) && doc.statut_controle !== selectedControle) return false
+      if (selectedGroupKey && doc.cle_groupe_frais_port !== selectedGroupKey) return false
+      if (selectedControle === 'FRAIS_PORT_MANQUANT' && doc.action_recommandee !== 'AJOUTER') return false
+      if (selectedControle === 'FRAIS_PORT_A_SUPPRIMER' && doc.action_recommandee !== 'SUPPRIMER') return false
+      if (selectedControle === 'AUTRES_ANOMALIES' && doc.action_recommandee !== 'VERIFIER') return false
+      if (selectedControle === 'ANOMALIES' && !isDirectControlAction(doc.action_recommandee)) return false
+      if (!['TOUS', 'ANOMALIES', 'FRAIS_PORT_MANQUANT', 'FRAIS_PORT_A_SUPPRIMER', 'AUTRES_ANOMALIES'].includes(selectedControle) && doc.statut_controle !== selectedControle) return false
       if (selectedExpedition && doc.expedition !== selectedExpedition) return false
       if (selectedDepotEntete && doc.depot_entete !== selectedDepotEntete) return false
       if (referenceSearch && !doc.reference_entete.toLowerCase().includes(referenceSearch)) return false
       if (lieuSearch && !doc.lieu_livraison.toLowerCase().includes(lieuSearch)) return false
       return true
     })
-  }, [documents, selectedControle, selectedExpedition, selectedDepotEntete, referenceEnteteSearch, lieuLivraisonSearch])
+  }, [documents, selectedGroupKey, selectedControle, selectedExpedition, selectedDepotEntete, referenceEnteteSearch, lieuLivraisonSearch])
 
   const moisLivraison = useMemo(() => {
     const set = new Set<string>()
@@ -719,7 +916,8 @@ export default function PortefeuilleLivraisonPage() {
           total_montant_ht: 0,
           total_nb_anomalies: 0,
           total_nb_frais_port_manquant: 0,
-          total_frais_port_attendu_ht: 0,
+          total_nb_bl_a_supprimer: 0,
+          total_montant_actions_ht: 0,
         })
       }
 
@@ -731,24 +929,28 @@ export default function PortefeuilleLivraisonPage() {
           montant_ht: 0,
           nb_anomalies: 0,
           nb_frais_port_manquant: 0,
-          frais_port_attendu_ht: 0,
+          nb_bl_a_supprimer: 0,
+          montant_actions_ht: 0,
         }
       }
 
-      const isAnomaly = isControlAnomaly(doc.statut_controle)
-      const isMissingPort = doc.frais_port_manquant
-      const expectedPort = Number(doc.frais_port_attendu_ht || 0)
+      const isAnomaly = isDirectControlAction(doc.action_recommandee)
+      const isMissingPort = doc.action_recommandee === 'AJOUTER'
+      const isPortToRemove = doc.action_recommandee === 'SUPPRIMER'
+      const actionAmount = Number(doc.montant_action_ht || 0)
 
       row.byMonth[mois].nb_documents += 1
       row.byMonth[mois].montant_ht += doc.montant_ht
       row.byMonth[mois].nb_anomalies += isAnomaly ? 1 : 0
       row.byMonth[mois].nb_frais_port_manquant += isMissingPort ? 1 : 0
-      row.byMonth[mois].frais_port_attendu_ht += expectedPort
+      row.byMonth[mois].nb_bl_a_supprimer += isPortToRemove ? 1 : 0
+      row.byMonth[mois].montant_actions_ht += actionAmount
       row.total_nb_documents += 1
       row.total_montant_ht += doc.montant_ht
       row.total_nb_anomalies += isAnomaly ? 1 : 0
       row.total_nb_frais_port_manquant += isMissingPort ? 1 : 0
-      row.total_frais_port_attendu_ht += expectedPort
+      row.total_nb_bl_a_supprimer += isPortToRemove ? 1 : 0
+      row.total_montant_actions_ht += actionAmount
     }
 
     return Array.from(map.values()).sort((a, b) => {
@@ -897,10 +1099,20 @@ export default function PortefeuilleLivraisonPage() {
     )
   }, [documentsFiltresControle])
 
-  const fraisPortManquants = useMemo(
-    () => documents.filter((doc) => doc.frais_port_manquant).length,
-    [documents]
-  )
+  const controleKpis = useMemo(() => {
+    return groupesFraisPort.reduce(
+      (acc, group) => {
+        if (group.statut_groupe === 'FRAIS_PORT_MANQUANT') acc.portManquant += 1
+        acc.blASupprimer += Number(group.nb_bl_a_supprimer || 0)
+        if (group.anomalie_controle && group.statut_groupe !== 'FRAIS_PORT_MANQUANT' && group.nb_bl_a_supprimer <= 0) {
+          acc.autresAnomalies += 1
+        }
+        acc.totalActions += Number(group.nb_actions || 0)
+        return acc
+      },
+      { portManquant: 0, blASupprimer: 0, autresAnomalies: 0, totalActions: 0 }
+    )
+  }, [groupesFraisPort])
 
   function toggleType(type: string) {
     setSelectedTypes((current) => {
@@ -923,6 +1135,14 @@ export default function PortefeuilleLivraisonPage() {
         key,
         direction: current.direction === 'asc' ? 'desc' : 'asc',
       }
+    })
+  }
+
+
+  function toggleGroupSort(key: keyof GroupeFraisPort) {
+    setGroupSort((current) => {
+      if (!current || current.key !== key) return { key, direction: 'asc' }
+      return { key, direction: current.direction === 'asc' ? 'desc' : 'asc' }
     })
   }
 
@@ -954,17 +1174,42 @@ export default function PortefeuilleLivraisonPage() {
         base[`${monthLabel(mois)} - Montant HT`] = Number((cell?.montant_ht || 0).toFixed(2))
         base[`${monthLabel(mois)} - Anomalies port`] = cell?.nb_anomalies || 0
         base[`${monthLabel(mois)} - Frais port manquant`] = cell?.nb_frais_port_manquant || 0
-        base[`${monthLabel(mois)} - Port attendu HT`] = Number((cell?.frais_port_attendu_ht || 0).toFixed(2))
+        base[`${monthLabel(mois)} - BL à supprimer`] = cell?.nb_bl_a_supprimer || 0
+        base[`${monthLabel(mois)} - Montant actions HT`] = Number((cell?.montant_actions_ht || 0).toFixed(2))
       }
 
       base['Total - Nb docs'] = row.total_nb_documents
       base['Total - Montant HT'] = Number(row.total_montant_ht.toFixed(2))
       base['Total - Anomalies port'] = row.total_nb_anomalies
       base['Total - Frais port manquant'] = row.total_nb_frais_port_manquant
-      base['Total - Port attendu HT'] = Number(row.total_frais_port_attendu_ht.toFixed(2))
+      base['Total - BL à supprimer'] = row.total_nb_bl_a_supprimer
+      base['Total - Montant actions HT'] = Number(row.total_montant_actions_ht.toFixed(2))
 
       return base
     })
+
+    const groupesExport = sortedGroupesFraisPort.map((group) => ({
+      'Date BL': formatDate(group.date_controle),
+      'N° tiers': group.numero_tiers,
+      Client: group.nom_tiers,
+      Expédition: group.expedition,
+      'Lieu de livraison': group.lieu_livraison,
+      Dépôts: group.depots,
+      Agences: group.agences,
+      Représentants: group.representants,
+      'N° BL': group.numeros_bl,
+      'Nb BL': group.nb_bl,
+      'BL avec port': group.nb_bl_avec_port,
+      'Port constaté groupe': group.frais_port_constate_groupe_ht,
+      'Port attendu groupe': group.frais_port_attendu_groupe_ht,
+      'Écart groupe': group.ecart_groupe_ht,
+      'BL à supprimer': group.nb_bl_a_supprimer,
+      'Montant à supprimer': group.montant_a_supprimer_ht,
+      'Montant à ajouter': group.montant_a_ajouter_ht,
+      'BL conseillé ajout': group.bl_conseille_ajout,
+      'BL conseillé conservation': group.bl_conseille_conservation,
+      Statut: controlStatusLabel(group.statut_groupe),
+    }))
 
     const documentsExport = sortedDocuments.map((doc) => ({
       Agence: doc.agence,
@@ -973,17 +1218,23 @@ export default function PortefeuilleLivraisonPage() {
       Client: doc.nom_tiers,
       'Type doc': doc.type_document,
       'N° document': doc.numero_document,
+      'Date BL': formatDate(doc.date_controle),
       'Référence entête': doc.reference_entete,
       Expédition: doc.expedition,
       'Dépôt entête': doc.depot_entete,
       'Lieu de livraison': doc.lieu_livraison,
+      'Nb BL groupe': doc.nb_bl_groupe,
+      'BL avec port groupe': doc.nb_bl_avec_port,
       'Nb lignes': doc.nb_lignes,
       'Montant HT portefeuille': Number(doc.montant_ht.toFixed(2)),
       'Montant HT lignes contrôle': doc.montant_lignes_controle_ht,
       'Montant HT entête': doc.montant_entete_ht,
-      'Écart entête - lignes': doc.ecart_entete_lignes_ht,
-      'Frais de port attendu': doc.frais_port_attendu_ht,
-      'Écart vs forfait': doc.ecart_vs_attendu_ht,
+      'Port constaté BL': doc.frais_port_constate_ht,
+      'Port attendu groupe': doc.frais_port_attendu_groupe_ht,
+      'Port constaté groupe': doc.frais_port_constate_groupe_ht,
+      'Écart groupe': doc.ecart_groupe_ht,
+      Action: actionLabel(doc.action_recommandee),
+      'Montant action': doc.montant_action_ht,
       'Base calcul port': doc.base_calcul_frais_port,
       'Statut contrôle': controlStatusLabel(doc.statut_controle),
       'Date création document': formatDate(doc.date_creation_document),
@@ -1030,6 +1281,12 @@ export default function PortefeuilleLivraisonPage() {
 
     XLSX.utils.book_append_sheet(
       workbook,
+      XLSX.utils.json_to_sheet(groupesExport),
+      'Controle groupes'
+    )
+
+    XLSX.utils.book_append_sheet(
+      workbook,
       XLSX.utils.json_to_sheet(documentsExport),
       'Documents'
     )
@@ -1054,10 +1311,10 @@ export default function PortefeuilleLivraisonPage() {
                 Portefeuille CDC / PL / BL / BR par livraison
               </h1>
               <p className="mt-1 text-sm text-slate-500">
-                Contrôle BL : Total HT entête − somme des lignes = frais de port théorique, avec une tolérance de 0,02 €. Les PL restent visibles mais sont marquées « à confirmer ».
+                Contrôle groupé des BL : un seul forfait par Date BL / N° tiers / Mode d’expédition / Lieu de livraison. Les BL à corriger sont identifiés avec une action Ajouter, Supprimer ou Vérifier.
               </p>
               <div className="mt-2 inline-flex rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-800">
-                Version contrôle frais de port 2026-07-13 v2
+                Version contrôle frais de port groupé 2026-07-13 v3
               </div>
             </div>
 
@@ -1248,23 +1505,39 @@ export default function PortefeuilleLivraisonPage() {
 
 
           <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50/50 p-3">
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <div className="text-sm font-semibold text-blue-950">Filtres et contrôle frais de port</div>
-                <div className="text-xs text-blue-800">Référence entête, expédition, dépôt, lieu de livraison et statut du rapprochement.</div>
+                <div className="text-xs text-blue-800">Le contrôle est réalisé par Date BL / client / mode d’expédition / lieu de livraison, puis redescendu sur les BL à corriger.</div>
               </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setSelectedTypes(['BL'])
-                  setSelectedControle('FRAIS_PORT_MANQUANT')
-                  setSelection(null)
-                  setSelectedDocumentKeyForLines(null)
-                }}
-                className="rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-50"
-              >
-                Afficher les frais de port manquants
-              </button>
+              <div className="flex flex-wrap gap-2">
+                {[
+                  ['ANOMALIES', 'Toutes les anomalies'],
+                  ['FRAIS_PORT_MANQUANT', 'Port manquant'],
+                  ['FRAIS_PORT_A_SUPPRIMER', 'BL à supprimer'],
+                  ['AUTRES_ANOMALIES', 'Autres contrôles'],
+                ].map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => {
+                      setSelectedTypes(['BL'])
+                      setSelectedControle(value)
+                      setSelectedGroupKey(null)
+                      setSelection(null)
+                      setSelectedDocumentKeyForLines(null)
+                    }}
+                    className={[
+                      'rounded-lg border px-3 py-1.5 text-xs font-semibold',
+                      selectedControle === value
+                        ? 'border-blue-700 bg-blue-700 text-white'
+                        : 'border-blue-300 bg-white text-blue-800 hover:bg-blue-100',
+                    ].join(' ')}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
             </div>
 
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
@@ -1274,20 +1547,29 @@ export default function PortefeuilleLivraisonPage() {
                 value={selectedControle}
                 onChange={(event) => {
                   setSelectedControle(event.target.value)
+                  setSelectedGroupKey(null)
                   setSelection(null)
                   setSelectedDocumentKeyForLines(null)
                 }}
                 className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
               >
                 <option value="TOUS">Tous les statuts</option>
-                <option value="FRAIS_PORT_MANQUANT">Frais de port manquant</option>
                 <option value="ANOMALIES">Toutes les anomalies</option>
+                <option value="FRAIS_PORT_MANQUANT">Port manquant</option>
+                <option value="FRAIS_PORT_A_SUPPRIMER">BL à supprimer</option>
+                <option value="AUTRES_ANOMALIES">Autres anomalies</option>
                 <option value="OK">OK</option>
+                <option value="FRAIS_PORT_EN_DOUBLE">Port en double</option>
+                <option value="FRAIS_COMPTOIR_A_SUPPRIMER">Port comptoir à supprimer</option>
+                <option value="FRAIS_PORT_REPARTI_A_REGROUPER">Port réparti à regrouper</option>
+                <option value="MONTANT_FRAIS_PORT_A_VERIFIER">Montant à vérifier</option>
+                <option value="LIEU_LIVRAISON_A_COMPLETER">Lieu à compléter</option>
+                <option value="MULTI_DEPOT_A_VALIDER">Multi-dépôt à valider</option>
                 <option value="ENTETE_ABSENTE">Entête absente</option>
                 <option value="MODE_EXPEDITION_ABSENT">Mode absent</option>
                 <option value="MODE_EXPEDITION_INCONNU">Mode inconnu</option>
-                <option value="ECART_INFERIEUR_ATTENDU">Écart inférieur</option>
-                <option value="ECART_SUPERIEUR_ATTENDU">Écart supérieur</option>
+                <option value="DATE_BL_ABSENTE">Date BL absente</option>
+                <option value="TIERS_ABSENT">Tiers absent</option>
                 <option value="PL_A_CONFIRMER">PL à confirmer</option>
               </select>
             </label>
@@ -1349,61 +1631,195 @@ export default function PortefeuilleLivraisonPage() {
           )}
         </section>
 
-        <section className="grid grid-cols-1 gap-4 xl:grid-cols-5">
+        <section className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-6">
           <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-              Documents
-            </div>
-            <div className="mt-1 text-2xl font-semibold">
-              {totalGeneral.nb_documents.toLocaleString('fr-FR')}
-            </div>
+            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Documents affichés</div>
+            <div className="mt-1 text-2xl font-semibold">{totalGeneral.nb_documents.toLocaleString('fr-FR')}</div>
           </div>
 
           <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-              Montant HT
-            </div>
-            <div className="mt-1 text-2xl font-semibold">
-              {formatMoney(totalGeneral.montant_ht)}
-            </div>
+            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Montant HT</div>
+            <div className="mt-1 text-2xl font-semibold">{formatMoney(totalGeneral.montant_ht)}</div>
           </div>
 
           <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-              Lignes
-            </div>
-            <div className="mt-1 text-2xl font-semibold">
-              {lignes.length.toLocaleString('fr-FR')}
-            </div>
+            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Groupes BL contrôlés</div>
+            <div className="mt-1 text-2xl font-semibold">{groupesFraisPort.length.toLocaleString('fr-FR')}</div>
           </div>
-
 
           <button
             type="button"
             onClick={() => {
               setSelectedTypes(['BL'])
               setSelectedControle('FRAIS_PORT_MANQUANT')
+              setSelectedGroupKey(null)
               setSelection(null)
               setSelectedDocumentKeyForLines(null)
             }}
             className={[
               'rounded-2xl border p-4 text-left shadow-sm',
-              fraisPortManquants > 0 ? 'border-red-300 bg-red-50' : 'border-emerald-200 bg-white',
+              controleKpis.portManquant > 0 ? 'border-red-300 bg-red-50' : 'border-emerald-200 bg-white',
             ].join(' ')}
           >
-            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Frais de port manquant</div>
-            <div className={['mt-1 text-2xl font-semibold', fraisPortManquants > 0 ? 'text-red-700' : 'text-emerald-700'].join(' ')}>
-              {fraisPortManquants.toLocaleString('fr-FR')}
+            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Groupes sans port</div>
+            <div className={['mt-1 text-2xl font-semibold', controleKpis.portManquant > 0 ? 'text-red-700' : 'text-emerald-700'].join(' ')}>
+              {controleKpis.portManquant.toLocaleString('fr-FR')}
             </div>
           </button>
 
-          <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-              Sélection détail
+          <button
+            type="button"
+            onClick={() => {
+              setSelectedTypes(['BL'])
+              setSelectedControle('FRAIS_PORT_A_SUPPRIMER')
+              setSelectedGroupKey(null)
+              setSelection(null)
+              setSelectedDocumentKeyForLines(null)
+            }}
+            className={[
+              'rounded-2xl border p-4 text-left shadow-sm',
+              controleKpis.blASupprimer > 0 ? 'border-rose-300 bg-rose-50' : 'border-emerald-200 bg-white',
+            ].join(' ')}
+          >
+            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">BL avec port à supprimer</div>
+            <div className={['mt-1 text-2xl font-semibold', controleKpis.blASupprimer > 0 ? 'text-rose-700' : 'text-emerald-700'].join(' ')}>
+              {controleKpis.blASupprimer.toLocaleString('fr-FR')}
             </div>
-            <div className="mt-1 text-sm font-medium text-slate-700">
-              {selection ? 'Filtrée par clic tableau' : 'Toutes les données filtrées'}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setSelectedTypes(['BL'])
+              setSelectedControle('AUTRES_ANOMALIES')
+              setSelectedGroupKey(null)
+              setSelection(null)
+              setSelectedDocumentKeyForLines(null)
+            }}
+            className={[
+              'rounded-2xl border p-4 text-left shadow-sm',
+              controleKpis.autresAnomalies > 0 ? 'border-amber-300 bg-amber-50' : 'border-emerald-200 bg-white',
+            ].join(' ')}
+          >
+            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Autres groupes à vérifier</div>
+            <div className={['mt-1 text-2xl font-semibold', controleKpis.autresAnomalies > 0 ? 'text-amber-700' : 'text-emerald-700'].join(' ')}>
+              {controleKpis.autresAnomalies.toLocaleString('fr-FR')}
             </div>
+          </button>
+        </section>
+
+        <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+          <div className="flex flex-col gap-2 border-b border-slate-200 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold">Contrôle des frais de port par livraison</h2>
+              <p className="text-sm text-slate-500">
+                Une ligne correspond à une combinaison Date BL / N° tiers / Mode / Lieu. Clique sur un groupe pour afficher les BL et les actions recommandées.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-700">
+                {sortedGroupesFraisPort.length.toLocaleString('fr-FR')} groupe(s)
+              </span>
+              {selectedGroupKey && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedGroupKey(null)}
+                  className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700"
+                >
+                  Réafficher tous les groupes
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="max-h-[460px] overflow-auto">
+            <table className="min-w-full border-collapse text-sm">
+              <thead className="sticky top-0 z-10 bg-slate-100">
+                <tr>
+                  {[
+                    ['date_controle', 'Date BL'],
+                    ['numero_tiers', 'N° tiers'],
+                    ['nom_tiers', 'Client'],
+                    ['expedition', 'Expédition'],
+                    ['lieu_livraison', 'Lieu de livraison'],
+                    ['depots', 'Dépôt(s)'],
+                    ['nb_bl', 'Nb BL'],
+                    ['nb_bl_avec_port', 'BL avec port'],
+                    ['frais_port_constate_groupe_ht', 'Port constaté'],
+                    ['frais_port_attendu_groupe_ht', 'Port attendu'],
+                    ['ecart_groupe_ht', 'Écart'],
+                    ['nb_bl_a_supprimer', 'BL à supprimer'],
+                    ['statut_groupe', 'Statut'],
+                  ].map(([key, label]) => (
+                    <th
+                      key={key}
+                      onClick={() => toggleGroupSort(key as keyof GroupeFraisPort)}
+                      className="whitespace-nowrap cursor-pointer border-b border-r border-slate-200 px-3 py-2 text-left hover:bg-slate-200"
+                    >
+                      {label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {sortedGroupesFraisPort.map((group) => {
+                  const isSelected = selectedGroupKey === group.cle_groupe_frais_port
+                  return (
+                    <tr
+                      key={group.cle_groupe_frais_port}
+                      onClick={() => {
+                        setSelectedTypes(['BL'])
+                        setSelectedGroupKey(group.cle_groupe_frais_port)
+                        setSelection(null)
+                        setSelectedDocumentKeyForLines(null)
+                      }}
+                      className={[
+                        'cursor-pointer hover:bg-blue-50',
+                        isSelected ? 'bg-blue-100 ring-1 ring-inset ring-blue-300' : '',
+                        group.statut_groupe === 'FRAIS_PORT_MANQUANT' ? 'bg-red-50' : '',
+                        group.nb_bl_a_supprimer > 0 ? 'bg-rose-50' : '',
+                      ].join(' ')}
+                    >
+                      <td className="whitespace-nowrap border-b border-r border-slate-200 px-3 py-2 font-semibold">{formatDate(group.date_controle)}</td>
+                      <td className="whitespace-nowrap border-b border-r border-slate-200 px-3 py-2 font-semibold">{group.numero_tiers}</td>
+                      <td className="max-w-[260px] border-b border-r border-slate-200 px-3 py-2">{group.nom_tiers}</td>
+                      <td className="whitespace-nowrap border-b border-r border-slate-200 px-3 py-2">{group.expedition || '—'}</td>
+                      <td className="max-w-[320px] border-b border-r border-slate-200 px-3 py-2" title={group.lieu_livraison}>{group.lieu_livraison || '—'}</td>
+                      <td className="whitespace-nowrap border-b border-r border-slate-200 px-3 py-2">{group.depots || '—'}</td>
+                      <td className="border-b border-r border-slate-200 px-3 py-2 text-right font-semibold">{group.nb_bl}</td>
+                      <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{group.nb_bl_avec_port}</td>
+                      <td className="border-b border-r border-slate-200 px-3 py-2 text-right font-semibold">{formatMoneyCents(group.frais_port_constate_groupe_ht)}</td>
+                      <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{formatMoneyCents(group.frais_port_attendu_groupe_ht)}</td>
+                      <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{formatMoneyCents(group.ecart_groupe_ht)}</td>
+                      <td className={[
+                        'border-b border-r border-slate-200 px-3 py-2 text-right font-semibold',
+                        group.nb_bl_a_supprimer > 0 ? 'text-rose-700' : 'text-slate-400',
+                      ].join(' ')}>
+                        {group.nb_bl_a_supprimer}
+                      </td>
+                      <td className="border-b border-slate-200 px-3 py-2">
+                        <div className="space-y-1">
+                          <span className={['inline-flex whitespace-nowrap rounded-full border px-2 py-1 text-xs font-semibold', controlStatusClassName(group.statut_groupe)].join(' ')}>
+                            {controlStatusLabel(group.statut_groupe)}
+                          </span>
+                          {group.statut_groupe === 'FRAIS_PORT_MANQUANT' && group.bl_conseille_ajout && (
+                            <div className="text-[11px] font-semibold text-red-700">Ajouter sur {group.bl_conseille_ajout}</div>
+                          )}
+                          {group.nb_bl_a_supprimer > 0 && group.bl_conseille_conservation && (
+                            <div className="text-[11px] font-semibold text-rose-700">Conserver sur {group.bl_conseille_conservation}</div>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+                {sortedGroupesFraisPort.length === 0 && (
+                  <tr>
+                    <td colSpan={13} className="px-4 py-8 text-center text-slate-500">Aucun groupe de BL avec les filtres sélectionnés.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </section>
 
@@ -1447,6 +1863,10 @@ export default function PortefeuilleLivraisonPage() {
 
                   <th className="whitespace-nowrap border-b border-r border-slate-200 bg-red-50 px-3 py-2 text-right text-red-900">
                     Port manquant
+                  </th>
+
+                  <th className="whitespace-nowrap border-b border-r border-slate-200 bg-rose-50 px-3 py-2 text-right text-rose-900">
+                    BL à supprimer
                   </th>
 
                   {moisLivraison.map((mois) => (
@@ -1499,9 +1919,16 @@ export default function PortefeuilleLivraisonPage() {
                       'border-b border-r border-slate-200 px-3 py-2 text-right font-semibold',
                       row.total_nb_frais_port_manquant > 0 ? 'bg-red-50 text-red-800' : 'text-slate-400',
                     ].join(' ')}>
-                      <div>{row.total_nb_frais_port_manquant.toLocaleString('fr-FR')}</div>
-                      {row.total_frais_port_attendu_ht > 0 && (
-                        <div className="text-[11px] font-medium">{formatMoneyCents(row.total_frais_port_attendu_ht)}</div>
+                      {row.total_nb_frais_port_manquant.toLocaleString('fr-FR')}
+                    </td>
+
+                    <td className={[
+                      'border-b border-r border-slate-200 px-3 py-2 text-right font-semibold',
+                      row.total_nb_bl_a_supprimer > 0 ? 'bg-rose-50 text-rose-800' : 'text-slate-400',
+                    ].join(' ')}>
+                      <div>{row.total_nb_bl_a_supprimer.toLocaleString('fr-FR')}</div>
+                      {row.total_montant_actions_ht > 0 && (
+                        <div className="text-[11px] font-medium">{formatMoneyCents(row.total_montant_actions_ht)}</div>
                       )}
                     </td>
 
@@ -1542,6 +1969,11 @@ export default function PortefeuilleLivraisonPage() {
                                   {cell.nb_frais_port_manquant} port manquant
                                 </div>
                               )}
+                              {cell.nb_bl_a_supprimer > 0 && (
+                                <div className="whitespace-nowrap text-[11px] font-semibold text-rose-700">
+                                  {cell.nb_bl_a_supprimer} BL à supprimer
+                                </div>
+                              )}
                             </div>
                           ) : (
                             '-'
@@ -1578,6 +2010,11 @@ export default function PortefeuilleLivraisonPage() {
                             {row.total_nb_frais_port_manquant} port manquant
                           </div>
                         )}
+                        {row.total_nb_bl_a_supprimer > 0 && (
+                          <div className="whitespace-nowrap text-[11px] font-semibold text-rose-700">
+                            {row.total_nb_bl_a_supprimer} BL à supprimer
+                          </div>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -1586,7 +2023,7 @@ export default function PortefeuilleLivraisonPage() {
                 {synthese.length === 0 && (
                   <tr>
                     <td
-                      colSpan={6 + moisLivraison.length}
+                      colSpan={7 + moisLivraison.length}
                       className="px-4 py-8 text-center text-slate-500"
                     >
                       Aucune donnée trouvée avec les filtres sélectionnés.
@@ -1614,23 +2051,23 @@ export default function PortefeuilleLivraisonPage() {
                   {[
                     ['agence', 'Agence'],
                     ['representant', 'Représentant'],
+                    ['date_controle', 'Date BL'],
                     ['numero_tiers', 'N° tiers'],
                     ['nom_tiers', 'Client'],
-                    ['type_document', 'Type doc'],
-                    ['numero_document', 'N° document'],
+                    ['numero_document', 'N° BL'],
                     ['reference_entete', 'Référence entête'],
                     ['references', 'Réf. lignes'],
                     ['expedition', 'Expédition'],
                     ['depot_entete', 'Dépôt'],
                     ['lieu_livraison', 'Lieu de liv.'],
-                    ['nb_lignes', 'Nb lignes'],
-                    ['montant_ht', 'Portef. HT'],
-                    ['montant_lignes_controle_ht', 'Lignes HT contrôle'],
-                    ['montant_entete_ht', 'Entête HT'],
-                    ['ecart_entete_lignes_ht', 'Écart'],
-                    ['frais_port_attendu_ht', 'Port attendu'],
-                    ['statut_controle', 'Contrôle'],
-                    ['date_creation_document', 'Date création'],
+                    ['nb_bl_groupe', 'Nb BL groupe'],
+                    ['nb_bl_avec_port', 'BL avec port'],
+                    ['frais_port_constate_ht', 'Port constaté BL'],
+                    ['frais_port_constate_groupe_ht', 'Port constaté groupe'],
+                    ['frais_port_attendu_groupe_ht', 'Port attendu groupe'],
+                    ['action_recommandee', 'Action recommandée'],
+                    ['montant_action_ht', 'Montant action'],
+                    ['statut_controle', 'Statut groupe'],
                     ['date_livraison', 'Date livraison'],
                     ['familles_macro', 'Familles macro'],
                     ['client_en_sommeil', 'Sommeil'],
@@ -1652,15 +2089,17 @@ export default function PortefeuilleLivraisonPage() {
                     key={doc.key}
                     className={[
                       'hover:bg-slate-50',
-                      doc.frais_port_manquant ? 'bg-red-50' : '',
+                      doc.action_recommandee === 'AJOUTER' ? 'bg-red-50' : '',
+                      doc.action_recommandee === 'SUPPRIMER' ? 'bg-rose-50' : '',
+                      doc.action_recommandee === 'VERIFIER' ? 'bg-amber-50' : '',
                       selectedDocumentKeyForLines === doc.key ? 'ring-1 ring-inset ring-blue-300' : '',
                     ].join(' ')}
                   >
                     <td className="border-b border-r border-slate-200 px-3 py-2">{doc.agence}</td>
                     <td className="border-b border-r border-slate-200 px-3 py-2">{doc.representant}</td>
+                    <td className="whitespace-nowrap border-b border-r border-slate-200 px-3 py-2 font-semibold">{formatDate(doc.date_controle)}</td>
                     <td className="border-b border-r border-slate-200 px-3 py-2">{doc.numero_tiers}</td>
                     <td className="border-b border-r border-slate-200 px-3 py-2">{doc.nom_tiers}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">{doc.type_document}</td>
                     <td className="border-b border-r border-slate-200 px-3 py-2 font-medium">
                       <button
                         type="button"
@@ -1675,18 +2114,22 @@ export default function PortefeuilleLivraisonPage() {
                     <td className="border-b border-r border-slate-200 px-3 py-2">{doc.expedition || '—'}</td>
                     <td className="border-b border-r border-slate-200 px-3 py-2">{doc.depot_entete || '—'}</td>
                     <td className="max-w-[280px] border-b border-r border-slate-200 px-3 py-2" title={doc.lieu_livraison}>{doc.lieu_livraison || '—'}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{doc.nb_lignes}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{formatMoney(doc.montant_ht)}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{formatMoneyCents(doc.montant_lignes_controle_ht)}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right font-semibold">{formatMoneyCents(doc.montant_entete_ht)}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{formatMoneyCents(doc.ecart_entete_lignes_ht)}</td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{formatMoneyCents(doc.frais_port_attendu_ht)}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right font-semibold">{doc.nb_bl_groupe || '—'}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{doc.nb_bl_avec_port || '—'}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right font-semibold">{formatMoneyCents(doc.frais_port_constate_ht)}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{formatMoneyCents(doc.frais_port_constate_groupe_ht)}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right">{formatMoneyCents(doc.frais_port_attendu_groupe_ht)}</td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2">
+                      <span className={['inline-flex whitespace-nowrap rounded-full border px-2 py-1 text-xs font-semibold', actionClassName(doc.action_recommandee)].join(' ')}>
+                        {actionLabel(doc.action_recommandee)}
+                      </span>
+                    </td>
+                    <td className="border-b border-r border-slate-200 px-3 py-2 text-right font-semibold">{formatMoneyCents(doc.montant_action_ht)}</td>
                     <td className="border-b border-r border-slate-200 px-3 py-2">
                       <span className={['inline-flex whitespace-nowrap rounded-full border px-2 py-1 text-xs font-semibold', controlStatusClassName(doc.statut_controle)].join(' ')} title={doc.base_calcul_frais_port || undefined}>
                         {controlStatusLabel(doc.statut_controle)}
                       </span>
                     </td>
-                    <td className="border-b border-r border-slate-200 px-3 py-2">{formatDate(doc.date_creation_document)}</td>
                     <td className="border-b border-r border-slate-200 px-3 py-2">{formatDate(doc.date_livraison)}</td>
                     <td className="border-b border-r border-slate-200 px-3 py-2">{doc.familles_macro}</td>
                     <td className="border-b border-slate-200 px-3 py-2">{doc.client_en_sommeil ? 'Oui' : 'Non'}</td>

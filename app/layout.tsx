@@ -79,9 +79,12 @@ type CdcLivAvant2026Signal = {
   count: number
 }
 
-type FraisPortManquantSignal = {
+type ControleFraisPortSignal = {
   status: StatusLevel
   count: number
+  missingGroups: number
+  blToRemove: number
+  otherGroups: number
 }
 
 type CerfaKoRow = {
@@ -299,9 +302,12 @@ function AppShell({ children }: { children: React.ReactNode }) {
     status: 'green',
     count: 0,
   })
-  const [fraisPortManquantSignal, setFraisPortManquantSignal] = useState<FraisPortManquantSignal>({
+  const [controleFraisPortSignal, setControleFraisPortSignal] = useState<ControleFraisPortSignal>({
     status: 'green',
     count: 0,
+    missingGroups: 0,
+    blToRemove: 0,
+    otherGroups: 0,
   })
   const [cerfaKoCount, setCerfaKoCount] = useState(0)
   const [cerfaRows, setCerfaRows] = useState<CerfaKoRow[]>([])
@@ -1003,43 +1009,56 @@ function AppShell({ children }: { children: React.ReactNode }) {
   }
 
 
-  async function refreshFraisPortManquantSignal(accessProfile?: UserAccessProfile | null) {
+  async function refreshControleFraisPortSignal(accessProfile?: UserAccessProfile | null) {
     const allowedAgences = getAllowedAgencesForStatus(accessProfile)
     const allowedCollaborateurs = getAllowedCollaborateursForStatus(accessProfile)
 
     try {
-      let query = supabase
-        .from('v_controle_frais_port_documents')
-        .select('numero_document', { count: 'exact', head: true })
-        .eq('type_document', 'BL')
-        .eq('statut_controle', 'FRAIS_PORT_MANQUANT')
+      const { data, error } = await supabase
+        .from('v_controle_frais_port_groupes')
+        .select('agences,representants,statut_groupe,nb_bl_a_supprimer,nb_actions')
+        .neq('statut_groupe', 'OK')
+        .limit(20000)
 
-      if (allowedAgences.length > 0) query = query.in('agence', allowedAgences)
-      if (allowedCollaborateurs.length > 0) query = query.in('representant', allowedCollaborateurs)
-
-      const { count, error } = await query
       if (error) throw error
 
-      const countValue = Number(count || 0)
-      setFraisPortManquantSignal({
-        status: countValue > 0 ? 'red' : 'green',
-        count: countValue,
+      const rows = ((data || []) as Record<string, any>[]).filter((row) => {
+        const agenceOk = allowedAgences.length === 0 || agenceMatchesAllowed(cleanText(row.agences), allowedAgences)
+        const collaborateurOk = allowedCollaborateurs.length === 0 || collaborateurMatchesAllowed(cleanText(row.representants), allowedCollaborateurs)
+        return agenceOk && collaborateurOk
+      })
+
+      const missingGroups = rows.filter((row) => cleanText(row.statut_groupe) === 'FRAIS_PORT_MANQUANT').length
+      const blToRemove = rows.reduce((sum, row) => sum + Number(row.nb_bl_a_supprimer || 0), 0)
+      const otherGroups = rows.filter((row) => {
+        const status = cleanText(row.statut_groupe)
+        return status !== 'FRAIS_PORT_MANQUANT' && Number(row.nb_bl_a_supprimer || 0) <= 0
+      }).length
+      const count = missingGroups + blToRemove + otherGroups
+
+      setControleFraisPortSignal({
+        status: missingGroups > 0 || blToRemove > 0 ? 'red' : otherGroups > 0 ? 'orange' : 'green',
+        count,
+        missingGroups,
+        blToRemove,
+        otherGroups,
       })
     } catch (error) {
-      console.error('Frais de port manquant status indicator', error)
-      setFraisPortManquantSignal({ status: 'green', count: 0 })
+      console.error('Contrôle frais de port status indicator', error)
+      setControleFraisPortSignal({
+        status: 'green',
+        count: 0,
+        missingGroups: 0,
+        blToRemove: 0,
+        otherGroups: 0,
+      })
     }
   }
 
-  function openFraisPortManquant() {
-    // Le timestamp garantit un changement d'URL même lorsque l'utilisateur est déjà
-    // sur la page Portefeuille avec le même filtre actif.
-    const target = `/portefeuille-livraison?controle=frais-port-manquant&open=${Date.now()}`
+  function openControleFraisPort() {
+    const target = `/portefeuille-livraison?controle=controle-frais-port&open=${Date.now()}`
     router.push(target)
-
-    // Lorsque la page est déjà montée, Next.js ne la remonte pas nécessairement.
-    // Cet événement applique donc immédiatement le filtre dans l'écran courant.
-    window.dispatchEvent(new CustomEvent('cegeclim:open-frais-port-manquant'))
+    window.dispatchEvent(new CustomEvent('cegeclim:open-controle-frais-port'))
   }
 
   async function refreshCdcLivAvant2026Signal(accessProfile?: UserAccessProfile | null) {
@@ -1148,7 +1167,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       refreshCerfaKo(profile, { detail: false }),
       refreshCertificationSignals(profile),
       refreshCdcLivAvant2026Signal(profile),
-      refreshFraisPortManquantSignal(profile),
+      refreshControleFraisPortSignal(profile),
     ])
   }
 
@@ -1321,16 +1340,16 @@ function AppShell({ children }: { children: React.ReactNode }) {
 
 
                 <StatusLight
-                  label="Frais de port manquant"
-                  status={fraisPortManquantSignal.status}
-                  count={fraisPortManquantSignal.count}
-                  blink={fraisPortManquantSignal.status === 'red' && statusBlinkOn}
+                  label="Contrôle frais de port"
+                  status={controleFraisPortSignal.status}
+                  count={controleFraisPortSignal.count}
+                  blink={controleFraisPortSignal.status !== 'green' && statusBlinkOn}
                   clickable
-                  onClick={openFraisPortManquant}
+                  onClick={openControleFraisPort}
                   title={
-                    fraisPortManquantSignal.count > 0
-                      ? `${fraisPortManquantSignal.count} BL avec frais de port manquant sur le périmètre actif — cliquer pour les afficher`
-                      : 'Ouvrir le contrôle frais de port dans le portefeuille livraison'
+                    controleFraisPortSignal.count > 0
+                      ? `${controleFraisPortSignal.count} action(s) : ${controleFraisPortSignal.missingGroups} groupe(s) sans port, ${controleFraisPortSignal.blToRemove} BL à supprimer, ${controleFraisPortSignal.otherGroups} autre(s) groupe(s) à vérifier — cliquer pour afficher`
+                      : 'Ouvrir le contrôle groupé des frais de port dans le portefeuille livraison'
                   }
                 />
 
