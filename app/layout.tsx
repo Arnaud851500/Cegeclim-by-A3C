@@ -297,6 +297,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const [sessionChecked, setSessionChecked] = useState(false)
   const [hasSession, setHasSession] = useState(false)
   const [statusBlinkOn, setStatusBlinkOn] = useState(true)
+  const [pageFloatingLayerOpen, setPageFloatingLayerOpen] = useState(false)
   const [todoSignal, setTodoSignal] = useState<TodoSignal>({ status: 'green', count: 0 })
   const [cdcLivAvant2026Signal, setCdcLivAvant2026Signal] = useState<CdcLivAvant2026Signal>({
     status: 'green',
@@ -626,6 +627,86 @@ function AppShell({ children }: { children: React.ReactNode }) {
 
     return () => clearInterval(interval)
   }, [])
+
+  useEffect(() => {
+    // Les cartes et l'éditeur de widgets sont rendus par les pages elles-mêmes.
+    // Ils peuvent donc se retrouver dans un contexte d'empilement inférieur au
+    // bandeau sticky. On détecte toute grande couche fixe visible et on efface
+    // temporairement le bandeau pour laisser apparaître l'en-tête et les boutons
+    // de la fenêtre flottante. La détection est générique et couvre aussi les
+    // futures modales plein écran sans modifier chaque page.
+    if (typeof window === 'undefined' || typeof document === 'undefined') return
+
+    let animationFrame = 0
+
+    const candidateSelector = [
+      '[role="dialog"]',
+      '[aria-modal="true"]',
+      '[class~="fixed"]',
+      '[class*="modal"]',
+      '[class*="Modal"]',
+      '[class*="overlay"]',
+      '[class*="Overlay"]',
+      '[style*="position: fixed"]',
+      '[style*="position:fixed"]',
+    ].join(',')
+
+    function isLargeVisibleFixedLayer(element: Element) {
+      if (!(element instanceof HTMLElement)) return false
+      if (element.closest('[data-cegeclim-header="true"]')) return false
+
+      const computed = window.getComputedStyle(element)
+      if (computed.position !== 'fixed') return false
+      if (computed.display === 'none' || computed.visibility === 'hidden') return false
+      if (Number.parseFloat(computed.opacity || '1') <= 0.01) return false
+
+      const rect = element.getBoundingClientRect()
+      const viewportWidth = Math.max(window.innerWidth, 1)
+      const viewportHeight = Math.max(window.innerHeight, 1)
+      const visibleWidth = Math.max(0, Math.min(rect.right, viewportWidth) - Math.max(rect.left, 0))
+      const visibleHeight = Math.max(0, Math.min(rect.bottom, viewportHeight) - Math.max(rect.top, 0))
+      const coverage = (visibleWidth * visibleHeight) / (viewportWidth * viewportHeight)
+
+      return (
+        coverage >= 0.35 &&
+        visibleWidth >= viewportWidth * 0.55 &&
+        visibleHeight >= viewportHeight * 0.45
+      )
+    }
+
+    function refreshFloatingLayerState() {
+      animationFrame = 0
+      const candidates = Array.from(document.body.querySelectorAll(candidateSelector))
+      const nextOpen = candidates.some(isLargeVisibleFixedLayer)
+      setPageFloatingLayerOpen((current) => (current === nextOpen ? current : nextOpen))
+      document.documentElement.toggleAttribute('data-cegeclim-floating-layer-open', nextOpen)
+    }
+
+    function scheduleRefresh() {
+      if (animationFrame) return
+      animationFrame = window.requestAnimationFrame(refreshFloatingLayerState)
+    }
+
+    const observer = new MutationObserver(scheduleRefresh)
+    observer.observe(document.body, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ['class', 'style', 'hidden', 'aria-hidden', 'aria-modal'],
+    })
+
+    window.addEventListener('resize', scheduleRefresh)
+    window.addEventListener('cegeclim:floating-layer-change', scheduleRefresh as EventListener)
+    scheduleRefresh()
+
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', scheduleRefresh)
+      window.removeEventListener('cegeclim:floating-layer-change', scheduleRefresh as EventListener)
+      if (animationFrame) window.cancelAnimationFrame(animationFrame)
+      document.documentElement.removeAttribute('data-cegeclim-floating-layer-open')
+    }
+  }, [pathname])
 
 
   useEffect(() => {
@@ -1227,7 +1308,13 @@ function AppShell({ children }: { children: React.ReactNode }) {
       <AutoLogout />
 
       <div style={styles.overlay}>
-        <header style={styles.header}>
+        <header
+          data-cegeclim-header="true"
+          style={{
+            ...styles.header,
+            ...(pageFloatingLayerOpen ? styles.headerHiddenForFloatingLayer : {}),
+          }}
+        >
           <div style={styles.top}>
             <div style={styles.left}>
               <img
@@ -1615,23 +1702,33 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   overlay: {
-    backdropFilter: 'blur(3px)',
+    // Ne pas utiliser backdrop-filter sur le conteneur global : il crée un
+    // contexte d'empilement et un contenant pour position: fixed, ce qui peut
+    // enfermer les modales des pages sous le bandeau sticky.
     minHeight: '100vh',
   },
 
   header: {
     position: 'sticky',
     top: 0,
-    // Le bandeau reste au-dessus du contenu courant, mais sous les fenêtres
-    // flottantes des pages (souvent en z-40 / z-50).
     zIndex: 30,
     width: '100%',
     background: 'rgba(255,255,255,0.86)',
     backdropFilter: 'blur(14px)',
     WebkitBackdropFilter: 'blur(14px)',
     boxShadow: '0 6px 20px rgba(0,0,0,0.08)',
-    isolation: 'isolate',
     pointerEvents: 'auto',
+  },
+
+  headerHiddenForFloatingLayer: {
+    // Masquage réel, et non simple baisse du z-index : certaines pages créent
+    // leur propre contexte d'empilement et ne pourraient toujours pas dépasser
+    // un header sticky positif. Le bandeau revient automatiquement à la fermeture.
+    opacity: 0,
+    visibility: 'hidden',
+    pointerEvents: 'none',
+    transform: 'translateY(-100%)',
+    transition: 'none',
   },
 
   top: {
