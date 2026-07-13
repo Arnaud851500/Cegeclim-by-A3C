@@ -1267,6 +1267,7 @@ function FocusMensuelPageContent() {
   const [pdfJobId, setPdfJobId] = useState<number | null>(null);
   const [pdfJobStatus, setPdfJobStatus] = useState<PdfJobStatus | null>(null);
   const [pdfJobStep, setPdfJobStep] = useState<string | null>(null);
+  const [reportPanelOpen, setReportPanelOpen] = useState(false);
   const [
     useProjectedCurrentMonthFactures,
     setUseProjectedCurrentMonthFactures,
@@ -1686,18 +1687,12 @@ function FocusMensuelPageContent() {
 
   const comparisonProgressLabel = useMemo(() => {
     if (comparisonProgress.status === "ready")
-      return "Tableaux activité N / N-1 chargés complètement.";
+      return "Tableaux activité N / N-1 chargés depuis le cache global.";
     if (comparisonProgress.status === "error")
-      return "Erreur pendant le chargement des tableaux activité N / N-1.";
+      return "Erreur pendant le chargement du cache comparatif global.";
     if (comparisonProgress.status !== "loading") return "";
 
-    const total = comparisonProgress.total || 0;
-    const done = comparisonProgress.done || 0;
-    const pct = total ? Math.min(100, Math.round((done / total) * 100)) : 0;
-    const current = comparisonProgress.current
-      ? ` · ${comparisonProgress.current}`
-      : "";
-    return `Actualisation des tableaux activité N / N-1 : ${done}/${total} blocs cache (${pct} %)${current}`;
+    return comparisonProgress.current || "Chargement du cache comparatif global…";
   }, [comparisonProgress]);
 
   const distinctDocsProgressLabel = useMemo(() => {
@@ -2579,9 +2574,8 @@ function FocusMensuelPageContent() {
         `Cache reconstruit : ${Number(row?.inserted_documents || 0).toLocaleString("fr-FR")} documents, ` +
         `${Number(row?.inserted_summary || 0).toLocaleString("fr-FR")} lignes de synthèse.`;
 
-      await invalidatePersistentComparisonCacheForMonth();
       setCacheInfo(
-        `${message} Cache des 3 tableaux comparatifs invalidé puis régénéré.`,
+        `${message} Le comparatif global est rechargé en un seul appel.`,
       );
       await loadData();
       await loadDistinctDocs();
@@ -2877,9 +2871,10 @@ function FocusMensuelPageContent() {
     return (data || []) as DailyRow[];
   }
 
-  async function loadComparisonTables(forceRefresh = false) {
+  async function loadComparisonTables(_forceRefresh = false) {
     const loadId = comparisonLoadIdRef.current + 1;
     comparisonLoadIdRef.current = loadId;
+
     setComparisonLoading(true);
     setComparisonReady(false);
     setComparisonError(null);
@@ -2887,363 +2882,93 @@ function FocusMensuelPageContent() {
     setYtdRowsN1([]);
     setRollingRowsN([]);
     setRollingRowsN1([]);
-
-    const focusYear = Number(month.slice(0, 4));
-    const result: Record<
-      "ytdN" | "ytdN1" | "rollingN" | "rollingN1",
-      DailyRow[]
-    > = {
-      ytdN: [],
-      ytdN1: [],
-      rollingN: [],
-      rollingN1: [],
-    };
-    const completedRanges = new Set<string>();
-    let cacheCreatedAt = new Date().toISOString();
-
-    if (!forceRefresh && !isPdfMode) {
-      const cached = await readPersistentComparisonCache();
-      if (loadId !== comparisonLoadIdRef.current) return;
-      if (cached) {
-        result.ytdN = cached.ytdRowsN || [];
-        result.ytdN1 = cached.ytdRowsN1 || [];
-        result.rollingN = cached.rollingRowsN || [];
-        result.rollingN1 = cached.rollingRowsN1 || [];
-        (cached.completedRanges || []).forEach((key) =>
-          completedRanges.add(key),
-        );
-        cacheCreatedAt = cached.created_at || cacheCreatedAt;
-        setYtdRowsN([...result.ytdN]);
-        setYtdRowsN1([...result.ytdN1]);
-        setRollingRowsN([...result.rollingN]);
-        setRollingRowsN1([...result.rollingN1]);
-        if (cached.status === "complete") {
-          const total = cached.totalRanges || completedRanges.size;
-          setComparisonReady(true);
-          setComparisonProgress({
-            status: "ready",
-            label: "Chargé depuis le cache mensuel persistant",
-            current: month,
-            done: total,
-            total,
-          });
-          setComparisonLoading(false);
-          return;
-        }
-      }
-    }
-
-    const skippedRanges: string[] = [];
-    const comparisonStartedAt = Date.now();
-    const flushPartialComparisonRows = () => {
-      if (loadId !== comparisonLoadIdRef.current) return;
-      setYtdRowsN([...result.ytdN]);
-      setYtdRowsN1([...result.ytdN1]);
-      setRollingRowsN([...result.rollingN]);
-      setRollingRowsN1([...result.rollingN1]);
-    };
+    setCacheInfo(null);
+    setComparisonProgress({
+      status: "loading",
+      label: "Chargement du cache comparatif global",
+      current: "Lecture des tableaux N / N-1 et 12 mois glissants…",
+      done: 0,
+      total: 1,
+    });
 
     try {
-      const ytdStart = `${focusYear}-01-01`;
-      const ytdEndExclusive = monthEnd;
-      const rollingStart = `${addMonthsToMonth(month, -11)}-01`;
-      const rollingEndExclusive = nextMonthStart(month);
-      const buckets: Array<{
-        key: "ytdN" | "ytdN1" | "rollingN" | "rollingN1";
-        label: string;
-        ranges: Array<{ start: string; end: string }>;
-      }> = [
-        {
-          key: "ytdN",
-          label: `YTD N ${focusYear}`,
-          ranges: buildMonthlyRpcRanges(ytdStart, ytdEndExclusive),
-        },
-        {
-          key: "ytdN1",
-          label: `YTD N-1 ${focusYear - 1}`,
-          ranges: buildMonthlyRpcRanges(
-            `${focusYear - 1}-01-01`,
-            addYearsYmd(ytdEndExclusive, -1),
-          ),
-        },
-        {
-          key: "rollingN",
-          label: "12 mois glissants N",
-          ranges: buildMonthlyRpcRanges(rollingStart, rollingEndExclusive),
-        },
-        {
-          key: "rollingN1",
-          label: "12 mois glissants N-1",
-          ranges: buildMonthlyRpcRanges(
-            addYearsYmd(rollingStart, -1),
-            addYearsYmd(rollingEndExclusive, -1),
-          ),
-        },
-      ];
-      const expectedRanges = buckets.reduce(
-        (acc, bucket) => acc + bucket.ranges.length,
-        0,
+      // On charge le mois complet une seule fois. Le jour focus est ensuite
+      // appliqué localement par normalizedYtdRowsNAtFocus / N1AtFocus.
+      const comparisonFocusDate = lastDayOfMonth(month);
+
+      const { data, error } = await withClientTimeout(
+        supabase.rpc("get_focus_mensuel_comparison_cache_metier", {
+          p_focus_date: comparisonFocusDate,
+          p_month: month,
+          p_agence: effectiveAgence || null,
+          p_famille_macro: familleMacro || null,
+          p_collaborateur: effectiveCollaborateur || null,
+          p_include_hors_statistiques: includeHorsStats,
+        }),
+        isPdfMode ? 30000 : 45000,
+        `Chargement du cache comparatif global ${month}`,
       );
-      const rangeId = (
-        bucketKey: string,
-        range: { start: string; end: string },
-      ) => `${bucketKey}|${range.start}|${range.end}`;
-      let totalSteps = expectedRanges;
-      let doneSteps = completedRanges.size;
 
-      const ensureActive = () => {
-        if (loadId !== comparisonLoadIdRef.current)
-          throw new Error("__STALE_COMPARISON_LOAD__");
-      };
-      const setProgress = (
-        label: string,
-        range: { start: string; end: string } | null,
-      ) => {
-        if (loadId !== comparisonLoadIdRef.current) return;
-        setComparisonProgress({
-          status: "loading",
-          label,
-          current: range
-            ? `${label} · ${formatDateFr(range.start)} au ${formatDateFr(addDaysYmd(range.end, -1))}`
-            : label,
-          done: doneSteps,
-          total: totalSteps,
-        });
-      };
-      const markStepDone = (label: string) => {
-        doneSteps += 1;
-        setProgress(label, null);
-      };
-      const rememberSkippedRange = (
-        label: string,
-        range: { start: string; end: string },
-        exception: any,
-      ) => {
-        skippedRanges.push(
-          `${label} ${range.start} au ${addDaysYmd(range.end, -1)} : ${exception?.message || String(exception)}`,
-        );
-      };
-      const fetchDailyRangeSafely = async (
-        label: string,
-        range: { start: string; end: string },
-      ) => {
-        ensureActive();
-        setProgress(`${label} · découpage jour`, range);
-        try {
-          const rows = await fetchFocusSummaryRange(range);
-          markStepDone(`${label} · découpage jour`);
-          return rows;
-        } catch (exception: any) {
-          if (isStaleComparisonLoad(exception)) throw exception;
-          rememberSkippedRange(`${label} · jour`, range, exception);
-          markStepDone(`${label} · découpage jour`);
-          return [] as DailyRow[];
-        }
-      };
-      const fetchWeeklyRangeWithDailyFallback = async (
-        label: string,
-        range: { start: string; end: string },
-      ) => {
-        ensureActive();
-        setProgress(`${label} · découpage semaine`, range);
-        try {
-          const rows = await fetchFocusSummaryRange(range);
-          markStepDone(`${label} · découpage semaine`);
-          return rows;
-        } catch (exception: any) {
-          if (isStaleComparisonLoad(exception)) throw exception;
-          const dailyRanges = splitDateRangeByDays(range.start, range.end, 1);
-          totalSteps += Math.max(0, dailyRanges.length - 1);
-          const rows: DailyRow[] = [];
-          for (const dailyRange of dailyRanges)
-            rows.push(...(await fetchDailyRangeSafely(label, dailyRange)));
-          if (!rows.length)
-            rememberSkippedRange(`${label} · semaine`, range, exception);
-          return rows;
-        }
-      };
-      const fetchRangeWithFallback = async (
-        label: string,
-        range: { start: string; end: string },
-      ) => {
-        ensureActive();
-        setProgress(label, range);
-        try {
-          const rows = await fetchFocusSummaryRange(range);
-          markStepDone(label);
-          return rows;
-        } catch (exception: any) {
-          if (isStaleComparisonLoad(exception)) throw exception;
-          const weeklyRanges = splitDateRangeByDays(range.start, range.end, 7);
-          totalSteps += Math.max(0, weeklyRanges.length - 1);
-          const rows: DailyRow[] = [];
-          for (const weeklyRange of weeklyRanges)
-            rows.push(
-              ...(await fetchWeeklyRangeWithDailyFallback(label, weeklyRange)),
-            );
-          if (!rows.length) rememberSkippedRange(label, range, exception);
-          return rows;
-        }
-      };
-      const persistProgress = async (status: "partial" | "complete") => {
-        if (isPdfMode) return;
-        const payload: PersistentFocusComparisonPayload = {
-          version: FOCUS_COMPARISON_CACHE_VERSION,
-          type: "focus_mensuel_persistent_comparison_cache",
-          created_at: cacheCreatedAt,
-          updated_at: new Date().toISOString(),
-          month,
-          filters: {
-            agence: effectiveAgence || null,
-            familleMacro: familleMacro || null,
-            collaborateur: effectiveCollaborateur || null,
-            includeHorsStats,
-          },
-          ytdRowsN: result.ytdN,
-          ytdRowsN1: result.ytdN1,
-          rollingRowsN: result.rollingN,
-          rollingRowsN1: result.rollingN1,
-          status,
-          completedRanges: Array.from(completedRanges),
-          totalRanges: expectedRanges,
-        };
-        try {
-          const serverPayload = await savePersistentComparisonCache(payload);
+      if (error) throw error;
+      if (loadId !== comparisonLoadIdRef.current) return;
 
-          // Un autre onglet a pu terminer pendant que celui-ci travaillait.
-          // Dans ce cas, on adopte immédiatement le cache complet du serveur
-          // et on arrête le recalcul local, sans jamais écraser ce cache complet.
-          if (status === "partial" && serverPayload.status === "complete") {
-            result.ytdN = serverPayload.ytdRowsN || [];
-            result.ytdN1 = serverPayload.ytdRowsN1 || [];
-            result.rollingN = serverPayload.rollingRowsN || [];
-            result.rollingN1 = serverPayload.rollingRowsN1 || [];
-            completedRanges.clear();
-            (serverPayload.completedRanges || []).forEach((key) => completedRanges.add(key));
-            flushPartialComparisonRows();
-            setCacheInfo("Cache complet détecté dans un autre onglet · recalcul local arrêté");
-            throw new Error("__CACHE_COMPLETED_ELSEWHERE__");
-          }
-
-          setCacheInfo(
-            serverPayload.status === "complete"
-              ? "Cache comparatif complet enregistré · valable 14 jours"
-              : `Cache progressif enregistré : ${(serverPayload.completedRanges || []).length}/${serverPayload.totalRanges || expectedRanges} blocs`,
-          );
-        } catch (cacheError: any) {
-          if (cacheError?.message === "__CACHE_COMPLETED_ELSEWHERE__") throw cacheError;
-          console.error(
-            "Sauvegarde progressive du cache impossible:",
-            cacheError,
-          );
-          setCacheInfo(
-            `Échec sauvegarde cache : ${cacheError?.message || String(cacheError)}`,
-          );
-        }
+      const result: Record<
+        "ytdN" | "ytdN1" | "rollingN" | "rollingN1",
+        DailyRow[]
+      > = {
+        ytdN: [],
+        ytdN1: [],
+        rollingN: [],
+        rollingN1: [],
       };
 
-      outer: for (const bucket of buckets) {
-        for (const range of bucket.ranges) {
-          ensureActive();
-          const id = rangeId(bucket.key, range);
-          if (completedRanges.has(id)) {
-            setProgress(`Reprise cache · ${bucket.label}`, range);
-            continue;
-          }
-          if (
-            isPdfMode &&
-            Date.now() - comparisonStartedAt >= PDF_COMPARISON_HARD_STOP_MS
-          )
-            break outer;
-          const skippedBefore = skippedRanges.length;
-          const rows = await fetchRangeWithFallback(bucket.label, range);
-          result[bucket.key].push(...rows);
-          if (skippedRanges.length === skippedBefore) completedRanges.add(id);
-          flushPartialComparisonRows();
-          await persistProgress("partial");
-        }
-      }
+      (
+        (Array.isArray(data) ? data : []) as Array<
+          DailyRow & { comparison_key?: string | null }
+        >
+      ).forEach((row) => {
+        const { comparison_key, ...dailyRow } = row;
+        const key = String(comparison_key || "");
+        if (!Object.prototype.hasOwnProperty.call(result, key)) return;
+        result[key as keyof typeof result].push(dailyRow as DailyRow);
+      });
 
-      ensureActive();
-      flushPartialComparisonRows();
-      const complete =
-        completedRanges.size >= expectedRanges && skippedRanges.length === 0;
-      await persistProgress(complete ? "complete" : "partial");
+      setYtdRowsN(result.ytdN);
+      setYtdRowsN1(result.ytdN1);
+      setRollingRowsN(result.rollingN);
+      setRollingRowsN1(result.rollingN1);
       setComparisonReady(true);
       setComparisonError(null);
       setComparisonProgress({
         status: "ready",
-        label: complete
-          ? "Terminé et mis en cache pour 14 jours"
-          : `Terminé partiellement · reprise possible (${completedRanges.size}/${expectedRanges})`,
+        label: "Cache comparatif global chargé",
         current: null,
-        done: completedRanges.size,
-        total: expectedRanges,
+        done: 1,
+        total: 1,
       });
     } catch (exception: any) {
-      if (isStaleComparisonLoad(exception)) return;
-      if (exception?.message === "__CACHE_COMPLETED_ELSEWHERE__") {
-        flushPartialComparisonRows();
-        setComparisonError(null);
-        setComparisonReady(true);
-        setComparisonProgress({
-          status: "ready",
-          label: "Cache complet chargé depuis un autre onglet",
-          current: month,
-          done: completedRanges.size,
-          total: completedRanges.size,
-        });
-        return;
-      }
-      console.error("focus mensuel comparison tables", exception);
-      if (!isPdfMode) {
-        try {
-          await savePersistentComparisonCache({
-            version: FOCUS_COMPARISON_CACHE_VERSION,
-            type: "focus_mensuel_persistent_comparison_cache",
-            created_at: cacheCreatedAt,
-            updated_at: new Date().toISOString(),
-            month,
-            filters: {
-              agence: effectiveAgence || null,
-              familleMacro: familleMacro || null,
-              collaborateur: effectiveCollaborateur || null,
-              includeHorsStats,
-            },
-            ytdRowsN: result.ytdN,
-            ytdRowsN1: result.ytdN1,
-            rollingRowsN: result.rollingN,
-            rollingRowsN1: result.rollingN1,
-            status: "partial",
-            completedRanges: Array.from(completedRanges),
-            totalRanges: 0,
-          });
-        } catch (cacheError) {
-          console.error(
-            "Sauvegarde du cache partiel après erreur impossible:",
-            cacheError,
-          );
-        }
-      }
-      if (isPdfMode) {
-        flushPartialComparisonRows();
-        setComparisonReady(true);
-        setComparisonError(null);
-        setComparisonProgress((current) => ({
-          status: "ready",
-          label: "Terminé avec erreur non bloquante en mode PDF",
-          current: null,
-          done: current.total || current.done || 0,
-          total: current.total || current.done || 0,
-        }));
-      } else {
-        flushPartialComparisonRows();
-        setComparisonError(exception?.message || String(exception));
-        setComparisonReady(false);
-        setComparisonProgress((current) => ({ ...current, status: "error" }));
-      }
+      if (loadId !== comparisonLoadIdRef.current) return;
+
+      console.error("focus mensuel global comparison cache", exception);
+      setYtdRowsN([]);
+      setYtdRowsN1([]);
+      setRollingRowsN([]);
+      setRollingRowsN1([]);
+      setComparisonReady(false);
+      setComparisonError(
+        `${exception?.message || String(exception)}. Vérifie que le SQL 20260713_focus_mensuel_comparison_global.sql a bien été exécuté dans Supabase.`,
+      );
+      setComparisonProgress({
+        status: "error",
+        label: "Erreur cache comparatif global",
+        current: null,
+        done: 0,
+        total: 1,
+      });
     } finally {
-      if (loadId === comparisonLoadIdRef.current) setComparisonLoading(false);
+      if (loadId === comparisonLoadIdRef.current) {
+        setComparisonLoading(false);
+      }
     }
   }
 
@@ -4094,86 +3819,150 @@ function FocusMensuelPageContent() {
         )}
       </div>
 
-      {!isPdfMode && access.accessBadge && (
-        <div style={styles.accessBadge} data-no-print="true">
-          Périmètre utilisateur appliqué : {access.accessBadge}
-        </div>
-      )}
 
       {!isPdfMode && (
-        <div style={styles.reportCard} data-no-print="true">
-          <div style={styles.reportHeader}>
-            <div>
+        <div
+          style={{
+            ...styles.reportCard,
+            ...(reportPanelOpen ? {} : styles.reportCardCollapsed),
+          }}
+          data-no-print="true"
+        >
+          <div
+            style={{
+              ...styles.reportHeader,
+              marginBottom: reportPanelOpen ? 12 : 0,
+            }}
+          >
+            <div style={styles.reportHeadingGroup}>
               <div style={styles.reportTitle}>Rapport PDF & email</div>
-              <div style={styles.reportSubtitle}>
-                Génère le PDF avec les filtres courants, le stocke dans{" "}
-                <b>
-                  {REPORT_BUCKET}/{REPORT_PATH}
-                </b>
-                , puis l'envoie via la route email générique.
-              </div>
+
+              {reportPanelOpen ? (
+                <div style={styles.reportSubtitle}>
+                  Génère le PDF avec les filtres courants, le stocke dans{" "}
+                  <b>
+                    {REPORT_BUCKET}/{REPORT_PATH}
+                  </b>
+                  , puis l'envoie via la route email générique.
+                </div>
+              ) : (
+                <div style={styles.reportCollapsedLine}>
+                  <span
+                    style={{
+                      ...styles.reportStatusPill,
+                      background: pdfLoading
+                        ? "#fef3c7"
+                        : focusReportReady
+                          ? "#dcfce7"
+                          : "#eff6ff",
+                      color: pdfLoading
+                        ? "#92400e"
+                        : focusReportReady
+                          ? "#166534"
+                          : "#1d4ed8",
+                    }}
+                  >
+                    {pdfLoading
+                      ? "PDF en cours"
+                      : focusReportReady
+                        ? "Données prêtes"
+                        : "Chargement en arrière-plan"}
+                  </span>
+                  <span>
+                    {reportMessage ||
+                      reportError ||
+                      "Ouvrir pour générer le PDF ou l'envoyer par email."}
+                  </span>
+                </div>
+              )}
             </div>
+
             <div style={styles.reportActions}>
+              {reportPanelOpen && (
+                <>
+                  <button
+                    type="button"
+                    onClick={generateFocusPdf}
+                    disabled={pdfLoading || emailLoading || !focusReportReady}
+                    style={styles.secondaryButton}
+                  >
+                    {pdfLoading
+                      ? pdfJobStep
+                        ? `PDF en cours · ${pdfJobStep}`
+                        : "PDF en cours…"
+                      : !focusReportReady
+                        ? "Données en cours…"
+                        : "Générer PDF"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={sendFocusReportEmail}
+                    disabled={pdfLoading || emailLoading || !focusReportReady}
+                    style={styles.primaryButton}
+                  >
+                    {emailLoading ? "Envoi email…" : "Envoyer PDF par email"}
+                  </button>
+                </>
+              )}
+
               <button
                 type="button"
-                onClick={generateFocusPdf}
-                disabled={pdfLoading || emailLoading || !focusReportReady}
-                style={styles.secondaryButton}
+                onClick={() => setReportPanelOpen((current) => !current)}
+                style={styles.reportToggleButton}
+                aria-expanded={reportPanelOpen}
               >
-                {pdfLoading
-                  ? pdfJobStep
-                    ? `PDF en cours · ${pdfJobStep}`
-                    : "PDF en cours…"
-                  : !focusReportReady
-                    ? "Données en cours…"
-                    : "Générer PDF"}
-              </button>
-              <button
-                type="button"
-                onClick={sendFocusReportEmail}
-                disabled={pdfLoading || emailLoading || !focusReportReady}
-                style={styles.primaryButton}
-              >
-                {emailLoading ? "Envoi email…" : "Envoyer PDF par email"}
+                {reportPanelOpen ? "Réduire ▲" : "Développer ▼"}
               </button>
             </div>
           </div>
 
-          <div style={styles.reportFormRow}>
-            <div style={styles.reportField}>
-              <label style={styles.label}>Destinataires</label>
-              <input
-                value={reportEmailTo}
-                onChange={(event) => setReportEmailTo(event.target.value)}
-                placeholder="adresse1@domaine.fr; adresse2@domaine.fr"
-                style={styles.reportInput}
-              />
-            </div>
-            <div style={styles.reportPathBox}>
-              <span style={styles.reportPathLabel}>PDF stocké</span>
-              <span style={styles.reportPathText}>{lastGeneratedPdfPath}</span>
-            </div>
-          </div>
+          {reportPanelOpen && (
+            <>
+              <div style={styles.reportFormRow}>
+                <div style={styles.reportField}>
+                  <label style={styles.label}>Destinataires</label>
+                  <input
+                    value={reportEmailTo}
+                    onChange={(event) => setReportEmailTo(event.target.value)}
+                    placeholder="adresse1@domaine.fr; adresse2@domaine.fr"
+                    style={styles.reportInput}
+                  />
+                </div>
+                <div style={styles.reportPathBox}>
+                  <span style={styles.reportPathLabel}>PDF stocké</span>
+                  <span style={styles.reportPathText}>
+                    {lastGeneratedPdfPath}
+                  </span>
+                </div>
+              </div>
 
-          {!focusReportReady && (
-            <div style={styles.infoBox}>
-              Préparation du rapport en cours
-              {focusReportLoadingLabel ? ` : ${focusReportLoadingLabel}` : "…"}
-              {comparisonProgressLabel ? (
-                <div style={styles.progressText}>{comparisonProgressLabel}</div>
-              ) : null}
-            </div>
-          )}
-          {focusReportReady && (
-            <div style={styles.successBox}>
-              Données complètes : la génération PDF peut démarrer.
-            </div>
-          )}
-          {reportMessage && (
-            <div style={styles.successBox}>{reportMessage}</div>
-          )}
-          {reportError && (
-            <div style={styles.errorBox}>Erreur rapport : {reportError}</div>
+              {!focusReportReady && (
+                <div style={styles.infoBox}>
+                  Préparation du rapport en cours
+                  {focusReportLoadingLabel
+                    ? ` : ${focusReportLoadingLabel}`
+                    : "…"}
+                  {comparisonProgressLabel ? (
+                    <div style={styles.progressText}>
+                      {comparisonProgressLabel}
+                    </div>
+                  ) : null}
+                </div>
+              )}
+              {focusReportReady && (
+                <div style={styles.successBox}>
+                  Données complètes : la génération PDF peut démarrer.
+                </div>
+              )}
+              {reportMessage && (
+                <div style={styles.successBox}>{reportMessage}</div>
+              )}
+              {reportError && (
+                <div style={styles.errorBox}>
+                  Erreur rapport : {reportError}
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
@@ -4276,10 +4065,7 @@ function FocusMensuelPageContent() {
       )}
       {comparisonLoading && (
         <div style={styles.infoBox}>
-          Chargement complet des tableaux activité N / N-1 et 12 mois glissants…
-          {comparisonProgressLabel ? (
-            <div style={styles.progressText}>{comparisonProgressLabel}</div>
-          ) : null}
+          {comparisonProgressLabel || "Chargement du cache comparatif global…"}
         </div>
       )}
 
@@ -5728,6 +5514,43 @@ const styles: Record<string, React.CSSProperties> = {
     padding: 14,
     marginBottom: 14,
     boxShadow: "0 8px 22px rgba(15,23,42,0.06)",
+  },
+  reportCardCollapsed: {
+    padding: "9px 12px",
+  },
+  reportHeadingGroup: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+    minWidth: 0,
+  },
+  reportCollapsedLine: {
+    display: "flex",
+    alignItems: "center",
+    gap: 9,
+    minWidth: 0,
+    color: "#64748b",
+    fontSize: 12,
+    fontWeight: 750,
+  },
+  reportStatusPill: {
+    display: "inline-flex",
+    alignItems: "center",
+    flexShrink: 0,
+    borderRadius: 999,
+    padding: "4px 8px",
+    fontSize: 11,
+    fontWeight: 950,
+  },
+  reportToggleButton: {
+    border: "1px solid #cbd5e1",
+    background: "#f8fafc",
+    color: "#0f172a",
+    borderRadius: 10,
+    padding: "8px 11px",
+    fontWeight: 900,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
   },
   reportHeader: {
     display: "flex",
