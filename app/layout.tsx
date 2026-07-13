@@ -1,4 +1,4 @@
-       'use client'
+'use client'
 
 import { useEffect, useRef, useState } from 'react'
 import type React from 'react'
@@ -1622,7 +1622,9 @@ const styles: Record<string, React.CSSProperties> = {
   header: {
     position: 'sticky',
     top: 0,
-    zIndex: 30000,
+    // Le bandeau reste au-dessus du contenu courant, mais sous les fenêtres
+    // flottantes des pages (souvent en z-40 / z-50).
+    zIndex: 30,
     width: '100%',
     background: 'rgba(255,255,255,0.86)',
     backdropFilter: 'blur(14px)',
@@ -1634,7 +1636,7 @@ const styles: Record<string, React.CSSProperties> = {
 
   top: {
     position: 'relative',
-    zIndex: 30030,
+    zIndex: 3,
     display: 'flex',
     justifyContent: 'space-between',
     padding: '6px 20px',
@@ -1669,7 +1671,7 @@ const styles: Record<string, React.CSSProperties> = {
 
   right: {
     position: 'relative',
-    zIndex: 30050,
+    zIndex: 5,
     display: 'flex',
     gap: 10,
     pointerEvents: 'auto',
@@ -1677,7 +1679,7 @@ const styles: Record<string, React.CSSProperties> = {
 
   rightUserBlock: {
     position: 'relative',
-    zIndex: 30060,
+    zIndex: 6,
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'flex-end',
@@ -1692,7 +1694,7 @@ const styles: Record<string, React.CSSProperties> = {
 
   select: {
     position: 'relative',
-    zIndex: 30070,
+    zIndex: 7,
     padding: 6,
     borderRadius: 8,
     pointerEvents: 'auto',
@@ -1707,7 +1709,7 @@ const styles: Record<string, React.CSSProperties> = {
 
   logout: {
     position: 'relative',
-    zIndex: 30070,
+    zIndex: 7,
     background: '#fff',
     borderRadius: 8,
     padding: '6px 10px',
@@ -1841,7 +1843,7 @@ const styles: Record<string, React.CSSProperties> = {
 
   nav: {
     position: 'relative',
-    zIndex: 30020,
+    zIndex: 2,
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1880,7 +1882,7 @@ const styles: Record<string, React.CSSProperties> = {
 
   menuWrapper: {
     position: 'relative',
-    zIndex: 30040,
+    zIndex: 4,
     paddingBottom: 10,
     pointerEvents: 'auto',
   },
@@ -1894,7 +1896,7 @@ const styles: Record<string, React.CSSProperties> = {
     boxShadow: '0 10px 25px rgba(0,0,0,0.1)',
     whiteSpace: 'nowrap',
     minWidth: 'max-content',
-    zIndex: 30080,
+    zIndex: 10,
     pointerEvents: 'auto',
   },
 
@@ -1908,7 +1910,8 @@ const styles: Record<string, React.CSSProperties> = {
   modalBackdrop: {
     position: 'fixed',
     inset: 0,
-    zIndex: 50000,
+    // Les fenêtres propres au layout doivent recouvrir le bandeau commun.
+    zIndex: 1000,
     background: 'rgba(15, 23, 42, 0.35)',
     display: 'flex',
     alignItems: 'flex-start',
@@ -2073,7 +2076,9 @@ const styles: Record<string, React.CSSProperties> = {
 
   content: {
     position: 'relative',
-    zIndex: 1,
+    // Ne pas créer de contexte d'empilement : les modales/fenêtres fixes
+    // déclarées dans les pages peuvent ainsi passer au-dessus du header.
+    zIndex: 'auto',
     width: '100%',
     minWidth: 0,
     padding: 20,
