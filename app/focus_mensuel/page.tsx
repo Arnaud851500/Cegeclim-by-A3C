@@ -4,7 +4,6 @@ import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { usePageFilterAccess } from "@/lib/pageAccessFilters";
-import { Risque } from "next/font/google";
 
 type DocType = "Devis" | "CDC" | "BL" | "Factures";
 type ViewMode = "montant_ht" | "nb_documents" | "quantite_pertinente";
@@ -229,6 +228,39 @@ type ComparisonRow = {
   label: string;
   byType: Record<DocType, ComparisonCell>;
   total: number;
+};
+
+type AnnualCacheRpcRow = {
+  table_key: "agency_ytd" | "family_ytd" | "rolling_12" | string;
+  label: string | null;
+  type_document: DocType | string;
+  amount_n1: number | null;
+  amount_n: number | null;
+  qty_pert_n1: number | null;
+  qty_pert_n: number | null;
+  sort_order: number | null;
+};
+
+type SupabaseRpcResult<TData> = {
+  data: TData | null;
+  error: unknown | null;
+};
+
+type AgencyControlRpcRow = {
+  label: string | null;
+  cdc: number | null;
+  cdc_liv_mx: number | null;
+  pl: number | null;
+  pl_liv_mplus: number | null;
+  blbr_mx: number | null;
+  blbr_m: number | null;
+  total: number | null;
+  factures: number | null;
+  projection_flux_bl: number | null;
+  valeur_bl_nf_4pct: number | null;
+  projection_ca: number | null;
+  ca_n1: number | null;
+  evol_pct: number | null;
 };
 
 const DOC_TYPES: DocType[] = ["Devis", "CDC", "BL", "Factures"];
@@ -752,6 +784,178 @@ async function fetchRowsByIn(
 
   return rows;
 }
+
+const PDF_PRINT_STYLES = String.raw`
+@page { size: A4 landscape; margin: 3mm 3mm 3mm 3mm; }
+html, body {
+  margin: 0 !important;
+  padding: 0 !important;
+  background: #eef5fb !important;
+  background-color: #eef5fb !important;
+  background-image: none !important;
+}
+body, * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+body::before, body::after, main::before, main::after, section::before, section::after {
+  content: none !important;
+  display: none !important;
+  background: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  filter: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+[data-focus-report-ready] {
+  width: 100% !important;
+  max-width: 100% !important;
+  box-sizing: border-box !important;
+  padding: 0 !important;
+  background: #eef5fb !important;
+  background-color: #eef5fb !important;
+  background-image: none !important;
+  isolation: isolate !important;
+}
+[data-focus-report-ready] *,
+[data-focus-report-ready] *::before,
+[data-focus-report-ready] *::after {
+  filter: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+[data-no-print="true"], .focus-pdf-header-actions { display: none !important; }
+.focus-pdf-brand-header,
+.focus-pdf-filters,
+.focus-pdf-kpi-card,
+.focus-pdf-chart-box,
+.focus-pdf-section-card {
+  background: #ffffff !important;
+  background-color: #ffffff !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  filter: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+.focus-pdf-brand-header,
+.focus-pdf-filters,
+.focus-pdf-kpi-card,
+.focus-pdf-chart-box,
+.focus-pdf-section-card,
+.focus-pdf-table-wrap,
+table, thead, tbody, tr, th, td {
+  position: relative !important;
+  z-index: 1 !important;
+}
+.focus-pdf-brand-header {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  min-height: 48px !important;
+  padding: 4px 8px 7px !important;
+  margin-bottom: 5px !important;
+  border-bottom: 1px solid #e5e7eb !important;
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
+.focus-pdf-header-card {
+  padding: 0 !important;
+  margin: 0 0 5px !important;
+  border: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  background: transparent !important;
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
+.focus-pdf-title { display: none !important; }
+.focus-pdf-subtitle { font-size: 9.5px !important; line-height: 1.25 !important; font-weight: 800 !important; padding: 0 8px !important; }
+.focus-pdf-filters {
+  grid-template-columns: repeat(7, minmax(0, 1fr)) !important;
+  gap: 6px !important;
+  padding: 7px !important;
+  margin-bottom: 8px !important;
+  border-radius: 8px !important;
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
+.focus-pdf-filter-value {
+  min-height: 27px !important;
+  display: flex !important;
+  align-items: center !important;
+  border: 1px solid #cbd5e1 !important;
+  border-radius: 6px !important;
+  padding: 5px 8px !important;
+  background: #ffffff !important;
+  background-color: #ffffff !important;
+  background-image: none !important;
+  font-size: 10px !important;
+  font-weight: 900 !important;
+  color: #0f172a !important;
+}
+.focus-pdf-kpi-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  gap: 8px !important;
+  margin-bottom: 8px !important;
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
+.focus-pdf-kpi-card { padding: 6px !important; min-height: 92px !important; border-radius: 10px !important; }
+.focus-pdf-kpi-card [style*="font-size: 26"] { font-size: 18px !important; }
+.focus-pdf-chart-grid,
+.focus-pdf-section-grid {
+  grid-template-columns: 1fr 1fr !important;
+  gap: 8px !important;
+  margin-bottom: 8px !important;
+}
+.focus-pdf-chart-box,
+.focus-pdf-section-card {
+  padding: 8px !important;
+  border-radius: 10px !important;
+  background: #ffffff !important;
+  background-color: #ffffff !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
+.focus-pdf-chart-box svg { height: 158px !important; }
+.focus-pdf-table-wrap { max-height: none !important; overflow: visible !important; background: #ffffff !important; }
+.focus-pdf-section-card table { min-width: 0 !important; font-size: 6.6px !important; }
+.focus-pdf-section-card th, .focus-pdf-section-card td { padding: 2.5px 3.5px !important; line-height: 1.08 !important; }
+.focus-pdf-highlights-grid {
+  grid-template-columns: 1fr 1fr !important;
+  gap: 5px !important;
+  align-items: start !important;
+  margin-top: 4px !important;
+}
+.focus-pdf-highlights-grid > .focus-pdf-section-card:first-child { grid-column: span 2 !important; }
+.focus-pdf-highlights-grid table { min-width: 0 !important; font-size: 6.4px !important; }
+.focus-pdf-highlights-grid th, .focus-pdf-highlights-grid td { padding: 2px 3px !important; line-height: 1.05 !important; }
+.focus-pdf-comparison-grid {
+  grid-template-columns: 1fr !important;
+  gap: 8px !important;
+  margin-bottom: 8px !important;
+}
+.focus-pdf-comparison-grid table { min-width: 0 !important; font-size: 5.8px !important; }
+.focus-pdf-comparison-grid th, .focus-pdf-comparison-grid td { padding: 2px 3px !important; line-height: 1.04 !important; }
+.focus-pdf-agency-section-grid {
+  break-before: auto !important;
+  page-break-before: auto !important;
+  break-inside: auto !important;
+  page-break-inside: auto !important;
+  margin-top: 6px !important;
+}
+.focus-pdf-agency-section-grid > .focus-pdf-section-card {
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
+html, body, main, section,
+[data-focus-report-ready], [data-report-ready] {
+  min-height: 0 !important;
+  height: auto !important;
+  overflow: visible !important;
+}
+`;
 
 function SparkLine({ values, color }: { values: number[]; color: string }) {
   const width = 190;
@@ -1282,6 +1486,9 @@ function FocusMensuelPageContent() {
   const [cachedRolling12Rows, setCachedRolling12Rows] = useState<
     ComparisonRow[] | null
   >(null);
+  const [globalAgencyYtdRows, setGlobalAgencyYtdRows] = useState<ComparisonRow[]>([]);
+  const [globalFamilyYtdRows, setGlobalFamilyYtdRows] = useState<ComparisonRow[]>([]);
+  const [globalRolling12Rows, setGlobalRolling12Rows] = useState<ComparisonRow[]>([]);
   const comparisonLoadIdRef = useRef(0);
   const [highlightRows, setHighlightRows] = useState<HighlightRow[]>([]);
   const [agencyPortfolioRows, setAgencyPortfolioRows] = useState<
@@ -1455,17 +1662,21 @@ function FocusMensuelPageContent() {
   );
 
   const availableAgencesForSelect = useMemo(() => {
-    const values = isAgenceLocked ? access.allowedAgences : availableAgences;
-    return Array.from(new Set(values.filter(Boolean))).sort(agencySort);
+    const values: string[] = isAgenceLocked
+      ? (access.allowedAgences as string[])
+      : availableAgences;
+    return Array.from(
+      new Set(values.filter((value): value is string => Boolean(value))),
+    ).sort(agencySort);
   }, [isAgenceLocked, access.allowedAgences, availableAgences]);
 
   const availableCollaborateursForSelect = useMemo(() => {
-    const values = isCollaborateurLocked
-      ? access.allowedCollaborateurs
+    const values: string[] = isCollaborateurLocked
+      ? (access.allowedCollaborateurs as string[])
       : availableCollaborateurs;
-    return Array.from(new Set(values.filter(Boolean))).sort((a, b) =>
-      a.localeCompare(b, "fr-FR"),
-    );
+    return Array.from(
+      new Set(values.filter((value): value is string => Boolean(value))),
+    ).sort((a, b) => a.localeCompare(b, "fr-FR"));
   }, [
     isCollaborateurLocked,
     access.allowedCollaborateurs,
@@ -1642,7 +1853,7 @@ function FocusMensuelPageContent() {
     [mtdSourceRows, byAgencyMtdDocOverrides],
   );
 
-  const ytdAgencyComparisonRows = useMemo(
+  const ytdAgencyComparisonRowsFallback = useMemo(
     () =>
       aggregateComparisonRows(
         normalizedYtdRowsNAtFocus,
@@ -1652,7 +1863,7 @@ function FocusMensuelPageContent() {
       ),
     [normalizedYtdRowsNAtFocus, normalizedYtdRowsN1AtFocus],
   );
-  const ytdFamilyComparisonRows = useMemo(
+  const ytdFamilyComparisonRowsFallback = useMemo(
     () =>
       aggregateComparisonRows(
         normalizedYtdRowsNAtFocus,
@@ -1669,7 +1880,7 @@ function FocusMensuelPageContent() {
       ),
     [month],
   );
-  const rollingComparisonRows = useMemo(
+  const rollingComparisonRowsFallback = useMemo(
     () =>
       buildRollingComparisonRows(
         normalizedRollingRowsN,
@@ -1679,39 +1890,49 @@ function FocusMensuelPageContent() {
     [normalizedRollingRowsN, normalizedRollingRowsN1, rollingMonths],
   );
 
+  const ytdAgencyComparisonRowsBase = globalAgencyYtdRows.length
+    ? globalAgencyYtdRows
+    : ytdAgencyComparisonRowsFallback;
+  const ytdFamilyComparisonRowsBase = globalFamilyYtdRows.length
+    ? globalFamilyYtdRows
+    : ytdFamilyComparisonRowsFallback;
+  const rollingComparisonRowsBase = globalRolling12Rows.length
+    ? globalRolling12Rows
+    : rollingComparisonRowsFallback;
+
   const projectionFacturesEnabled =
     useProjectedCurrentMonthFactures &&
     agencyTablesReady &&
     agencyProjectionRows.length > 0;
 
   const ytdAgencyComparisonRowsDisplay = useMemo(() => {
-    if (!projectionFacturesEnabled) return ytdAgencyComparisonRows;
+    if (!projectionFacturesEnabled) return ytdAgencyComparisonRowsBase;
     return applyProjectedCurrentMonthFacturesToAgencyRows(
-      ytdAgencyComparisonRows,
-      normalizedYtdRowsNAtFocus,
+      ytdAgencyComparisonRowsBase,
+      normalizedRows,
       agencyProjectionRows,
       month,
     );
   }, [
     projectionFacturesEnabled,
-    ytdAgencyComparisonRows,
-    normalizedYtdRowsNAtFocus,
+    ytdAgencyComparisonRowsBase,
+    normalizedRows,
     agencyProjectionRows,
     month,
   ]);
 
   const rollingComparisonRowsDisplay = useMemo(() => {
-    if (!projectionFacturesEnabled) return rollingComparisonRows;
+    if (!projectionFacturesEnabled) return rollingComparisonRowsBase;
     return applyProjectedCurrentMonthFacturesToRollingRows(
-      rollingComparisonRows,
-      normalizedRollingRowsN,
+      rollingComparisonRowsBase,
+      normalizedRows,
       agencyProjectionRows,
       month,
     );
   }, [
     projectionFacturesEnabled,
-    rollingComparisonRows,
-    normalizedRollingRowsN,
+    rollingComparisonRowsBase,
+    normalizedRows,
     agencyProjectionRows,
     month,
   ]);
@@ -1719,7 +1940,7 @@ function FocusMensuelPageContent() {
   const ytdAgencyComparisonRowsForTable =
     cachedAgencyYtdRows || ytdAgencyComparisonRowsDisplay;
   const ytdFamilyComparisonRowsForTable =
-    cachedFamilyYtdRows || ytdFamilyComparisonRows;
+    cachedFamilyYtdRows || ytdFamilyComparisonRowsBase;
   const rollingComparisonRowsForTable =
     cachedRolling12Rows || rollingComparisonRowsDisplay;
 
@@ -1906,6 +2127,7 @@ function FocusMensuelPageContent() {
   }, [
     access.loading,
     month,
+    focusDate,
     effectiveAgence,
     familleMacro,
     effectiveCollaborateur,
@@ -1954,11 +2176,6 @@ function FocusMensuelPageContent() {
 
   useEffect(() => {
     if (access.loading) return;
-
-    if (!normalizedRows.length) {
-      setAgencyTablesReady(dailyReady);
-      return;
-    }
     void loadAgencyControlTables();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
@@ -1969,8 +2186,6 @@ function FocusMensuelPageContent() {
     familleMacro,
     effectiveCollaborateur,
     includeHorsStats,
-    normalizedRows,
-    dailyReady,
   ]);
 
   useEffect(() => {
@@ -2237,6 +2452,9 @@ function FocusMensuelPageContent() {
       setCachedAgencyYtdRows(agencyRows);
       setCachedFamilyYtdRows(familyRows);
       setCachedRolling12Rows(rollingRows);
+      setGlobalAgencyYtdRows([]);
+      setGlobalFamilyYtdRows([]);
+      setGlobalRolling12Rows([]);
 
       // On vide les sources DailyRow des comparatifs pour éviter tout recalcul parasite en mode print.
       setYtdRowsN([]);
@@ -2602,8 +2820,8 @@ function FocusMensuelPageContent() {
 
   async function rebuildCacheForMonth() {
     const ok = window.confirm(
-      `Reconstruire le cache Focus mensuel pour ${month} ?\n\n` +
-        `Cette opération peut prendre quelques dizaines de secondes, mais ensuite la page se chargera rapidement.`,
+      `Planifier la reconstruction du cache Focus mensuel pour ${month} ?\n\n` +
+        `Le calcul sera exécuté en arrière-plan. La page reste utilisable pendant le traitement.`,
     );
     if (!ok) return;
 
@@ -2612,34 +2830,34 @@ function FocusMensuelPageContent() {
     setError(null);
 
     try {
-      const { data, error } = await supabase.rpc(
-        "rebuild_indicateur_focus_journalier_periode",
+      const { data, error } = await (supabase as any).rpc(
+        "request_focus_mensuel_cache_refresh",
         {
-          p_date_debut: monthBegin,
-          p_date_fin: monthEnd,
+          p_month: monthBegin,
+          p_force: true,
         },
       );
 
       if (error) throw error;
-
       const row = Array.isArray(data) ? data[0] : data;
-      const message =
-        `Cache reconstruit : ${Number(row?.inserted_documents || 0).toLocaleString("fr-FR")} documents, ` +
-        `${Number(row?.inserted_summary || 0).toLocaleString("fr-FR")} lignes de synthèse.`;
-
       setCacheInfo(
-        `${message} Le comparatif global est rechargé en un seul appel.`,
+        `Reconstruction mise en file pour ${formatMonthFr(month)} · statut ${String(row?.status || "queued")}. ` +
+          `Le worker SQL reconstruit le mois sans dépendre du délai HTTP du navigateur.`,
       );
-      await loadData();
-      await loadDistinctDocs();
-      await loadComparisonTables(true);
-      await loadHighlights();
-      await loadAgencyControlTables();
+
+      // Les lectures restent immédiates sur le cache existant. Le prochain clic
+      // sur Actualiser récupérera les valeurs reconstruites.
+      await Promise.all([
+        loadData(),
+        loadDistinctDocs(),
+        loadComparisonTables(true),
+        loadHighlights(),
+        loadAgencyControlTables(),
+      ]);
     } catch (exception: any) {
-      console.error("rebuild focus mensuel cache", exception);
+      console.error("request focus mensuel cache refresh", exception);
       setError(
-        (exception?.message || String(exception)) +
-          "\nSi le rebuild timeoute côté front, lance la même fonction depuis Supabase SQL Editor.",
+        `${exception?.message || String(exception)}. Vérifie que le SQL cache global V5 est installé et que Supabase Cron est activé.`,
       );
     } finally {
       setRebuildingCache(false);
@@ -2693,7 +2911,9 @@ function FocusMensuelPageContent() {
       start: string;
       end: string;
     }) => {
-      const { data, error } = await withClientTimeout(
+      const { data, error } = await withClientTimeout<
+        SupabaseRpcResult<DistinctDocRow[]>
+      >(
         supabase.rpc("get_focus_mensuel_docs_distinct_metier", {
           p_date_debut: range.start,
           p_date_fin: range.end,
@@ -2907,7 +3127,9 @@ function FocusMensuelPageContent() {
   }
 
   async function fetchFocusSummaryRange(range: { start: string; end: string }) {
-    const { data, error } = await withClientTimeout(
+    const { data, error } = await withClientTimeout<
+      SupabaseRpcResult<DailyRow[]>
+    >(
       supabase.rpc("get_focus_mensuel_daily_summary_metier", {
         p_date_debut: range.start,
         p_date_fin: range.end,
@@ -3087,6 +3309,9 @@ function FocusMensuelPageContent() {
     setComparisonLoading(true);
     setComparisonReady(false);
     setComparisonError(null);
+    setGlobalAgencyYtdRows([]);
+    setGlobalFamilyYtdRows([]);
+    setGlobalRolling12Rows([]);
     setYtdRowsN([]);
     setYtdRowsN1([]);
     setRollingRowsN([]);
@@ -3094,181 +3319,80 @@ function FocusMensuelPageContent() {
     setCacheInfo(null);
     setComparisonProgress({
       status: "loading",
-      label: "Chargement des tableaux comparatifs",
-      current: "Lecture du cache global…",
+      label: "Lecture du cache global persistant",
+      current: "Agrégation des 3 tableaux annuels…",
       done: 0,
       total: 1,
     });
 
-    const comparisonFocusDate = lastDayOfMonth(month);
-    const rollingNStart = monthStart(addMonthsToMonth(month, -11));
-    const rollingNEnd = nextMonthStart(month);
-    const rollingN1Start = addYearsYmd(rollingNStart, -1);
-    const rollingN1End = addYearsYmd(rollingNEnd, -1);
-    let result = createEmptyComparisonBuckets();
-    const completedRanges: string[] = [];
-
     try {
-      // 1. Cache persistant applicatif : il évite toute reconstruction lors des
-      // ouvertures suivantes et reste valable 14 jours.
-      if (!_forceRefresh && !isPdfMode) {
-        const cached = await readPersistentComparisonCache();
-        if (loadId !== comparisonLoadIdRef.current) return;
+      const { data, error } = await withClientTimeout<
+        SupabaseRpcResult<AnnualCacheRpcRow[]>
+      >(
+        (supabase as any).rpc("get_focus_mensuel_annual_tables_cached", {
+          p_focus_date: focusDate,
+          p_month: month,
+          p_agence: effectiveAgence || null,
+          p_famille_macro: familleMacro || null,
+          p_collaborateur: effectiveCollaborateur || null,
+          p_include_hors_statistiques: includeHorsStats,
+        }),
+        isPdfMode ? 20000 : 30000,
+        `Lecture cache annuel Focus ${month}`,
+      );
 
-        if (cached?.status === "complete") {
-          const cachedResolved = resolveComparisonBuckets({
-            ytdN: cached.ytdRowsN || [],
-            ytdN1: cached.ytdRowsN1 || [],
-            rollingN: cached.rollingRowsN || [],
-            rollingN1: cached.rollingRowsN1 || [],
-          });
-
-          if (
-            cachedResolved.rollingN.length > 0 &&
-            cachedResolved.rollingN1.length > 0
-          ) {
-            applyComparisonBuckets(cachedResolved);
-            setComparisonReady(true);
-            setComparisonError(null);
-            setComparisonProgress({
-              status: "ready",
-              label: "3 tableaux annuels chargés depuis le cache corrigé.",
-              current: null,
-              done: 1,
-              total: 1,
-            });
-            return;
-          }
-        }
-      }
-
-      // 2. Appel global rapide. La normalisation accepte les différentes formes
-      // de clés déjà déployées (ytdN1, ytd_n_1, rolling-n-1, etc.).
-      try {
-        const { data, error } = await withClientTimeout(
-          supabase.rpc("get_focus_mensuel_comparison_cache_metier", {
-            p_focus_date: comparisonFocusDate,
-            p_month: month,
-            p_agence: effectiveAgence || null,
-            p_famille_macro: familleMacro || null,
-            p_collaborateur: effectiveCollaborateur || null,
-            p_include_hors_statistiques: includeHorsStats,
-          }),
-          isPdfMode ? 30000 : 45000,
-          `Chargement du cache comparatif global ${month}`,
-        );
-
-        if (error) throw error;
-        if (loadId !== comparisonLoadIdRef.current) return;
-
-        const globalResult = createEmptyComparisonBuckets();
-        (
-          (Array.isArray(data) ? data : []) as Array<
-            DailyRow & { comparison_key?: string | null }
-          >
-        ).forEach((row) => {
-          const { comparison_key, ...dailyRow } = row;
-          const key = normalizeComparisonBucketKey(comparison_key);
-          if (!key) return;
-          globalResult[key].push(dailyRow as DailyRow);
-        });
-
-        result = resolveComparisonBuckets(globalResult);
-        completedRanges.push("global");
-      } catch (globalException) {
-        console.warn(
-          "Cache comparatif global indisponible, passage au repli mensuel:",
-          globalException,
-        );
-        result = createEmptyComparisonBuckets();
-      }
-
-      // 3. Repli ciblé : on ne recharge que le ou les blocs rolling réellement
-      // absents. Les deux tableaux YTD sont ensuite dérivés localement de ces
-      // mêmes lignes, ce qui garantit des chiffres cohérents entre les 3 tableaux.
-      const missingRollingN = result.rollingN.length === 0;
-      const missingRollingN1 = result.rollingN1.length === 0;
-      const missingRanges =
-        (missingRollingN ? buildMonthlyRpcRanges(rollingNStart, rollingNEnd).length : 0) +
-        (missingRollingN1
-          ? buildMonthlyRpcRanges(rollingN1Start, rollingN1End).length
-          : 0);
-      const progress = { done: completedRanges.length, total: 1 + missingRanges };
-
-      if (missingRollingN) {
-        result.rollingN = await fetchComparisonPeriodByMonth(
-          rollingNStart,
-          rollingNEnd,
-          "12 mois N",
-          loadId,
-          progress,
-        );
-        completedRanges.push("rollingN-monthly-fallback");
-      }
-
-      if (missingRollingN1) {
-        result.rollingN1 = await fetchComparisonPeriodByMonth(
-          rollingN1Start,
-          rollingN1End,
-          "12 mois N-1",
-          loadId,
-          progress,
-        );
-        completedRanges.push("rollingN1-monthly-fallback");
-      }
-
+      if (error) throw error;
       if (loadId !== comparisonLoadIdRef.current) return;
-      result = resolveComparisonBuckets(result);
 
-      const hasCurrentData =
-        result.rollingN.length > 0 || result.ytdN.length > 0;
-      const hasPreviousData =
-        result.rollingN1.length > 0 || result.ytdN1.length > 0;
+      const rpcRows = (Array.isArray(data) ? data : []) as AnnualCacheRpcRow[];
+      const agencyRows = buildComparisonRowsFromAnnualCache(
+        rpcRows,
+        "agency_ytd",
+      );
+      const familyRows = buildComparisonRowsFromAnnualCache(
+        rpcRows,
+        "family_ytd",
+      );
+      const rollingRows = buildComparisonRowsFromAnnualCache(
+        rpcRows,
+        "rolling_12",
+      );
 
-      if (!hasCurrentData && !hasPreviousData) {
+      if (!agencyRows.length && !familyRows.length && !rollingRows.length) {
         throw new Error(
-          "Aucune ligne n'a été renvoyée pour les périodes N, N-1 et 12 mois glissants.",
+          "Le cache global ne contient encore aucune donnée pour cette période. Consulte le statut des mois mis en file.",
         );
       }
 
-      applyComparisonBuckets(result);
+      setGlobalAgencyYtdRows(agencyRows);
+      setGlobalFamilyYtdRows(familyRows);
+      setGlobalRolling12Rows(rollingRows);
       setComparisonReady(true);
       setComparisonError(null);
-
-      const usedFallback = completedRanges.some((value) =>
-        value.includes("fallback"),
-      );
       setComparisonProgress({
         status: "ready",
-        label: usedFallback
-          ? "3 tableaux annuels corrigés et remis en cache."
-          : "3 tableaux annuels chargés depuis le cache global.",
+        label: "3 tableaux annuels chargés depuis le cache SQL global.",
         current: null,
-        done: progress.total,
-        total: progress.total,
+        done: 1,
+        total: 1,
       });
       setCacheInfo(
-        usedFallback
-          ? "Le cache global était incomplet : les périodes manquantes ont été rechargées automatiquement puis mémorisées pour 14 jours."
-          : "Cache comparatif global contrôlé : les blocs YTD sont recalculés depuis les mêmes lignes que le tableau 12 mois glissants.",
+        "Cache SQL global : les mois historiques sont figés et les filtres ne déclenchent plus aucun recalcul métier.",
       );
-
-      await persistResolvedComparisonBuckets(result, completedRanges);
     } catch (exception: any) {
-      if (isStaleComparisonLoad(exception)) return;
       if (loadId !== comparisonLoadIdRef.current) return;
 
-      console.error("focus mensuel comparison tables", exception);
-      applyComparisonBuckets(result);
+      console.error("focus mensuel annual global cache", exception);
+      setGlobalAgencyYtdRows([]);
+      setGlobalFamilyYtdRows([]);
+      setGlobalRolling12Rows([]);
 
       if (isPdfMode) {
-        // Le PDF doit continuer avec les lignes disponibles, mais l'écran normal
-        // signale l'erreur afin d'éviter d'afficher silencieusement des zéros.
         setComparisonReady(true);
         setComparisonError(null);
         setComparisonProgress({
           status: "ready",
-          label: "Tableaux comparatifs partiels en mode PDF.",
+          label: "Cache annuel indisponible en mode PDF : tableaux laissés vides.",
           current: null,
           done: 1,
           total: 1,
@@ -3276,11 +3400,11 @@ function FocusMensuelPageContent() {
       } else {
         setComparisonReady(false);
         setComparisonError(
-          `${exception?.message || String(exception)}. Le chargement global et le repli mensuel ont tous les deux échoué.`,
+          `${exception?.message || String(exception)}. Exécute le SQL 20260714_focus_mensuel_cache_global_v5.sql puis laisse le worker traiter la file.`,
         );
         setComparisonProgress({
           status: "error",
-          label: "Erreur de chargement des 3 tableaux annuels.",
+          label: "Erreur de lecture du cache SQL global.",
           current: null,
           done: 0,
           total: 1,
@@ -3299,433 +3423,59 @@ function FocusMensuelPageContent() {
     setAgencyTablesError(null);
 
     try {
-      const currentMonthEnd = lastDayOfMonth(month);
-      const prevYearMonthValue = previousYearMonth(month);
-      const prevYearMonthBegin = monthStart(prevYearMonthValue);
-      const prevYearMonthEnd = nextMonthStart(prevYearMonthValue);
-
-      const [
-        activityRowsRaw,
-        currentInvoiceRowsRaw,
-        previousYearInvoiceRowsRaw,
-      ] = await Promise.all([
-        fetchAllFromSupabase(
-          "activite_lignes",
-          "type_document,date_piece,date_bc,date_pl,date_bl,date_livraison,numero_tiers_entete,reference_article,montant_ht,collaborateur",
-        ) as Promise<FocusActivityLineRaw[]>,
-        fetchAllFromSupabase(
-          "facture_lignes",
-          "numero_piece,date_facture,numero_tiers_entete,reference_article,montant_ht,collaborateur",
-          (query) =>
-            query
-              .gte("date_facture", monthBegin)
-              .lte("date_facture", focusDate),
-        ) as Promise<FocusInvoiceLineRaw[]>,
-        fetchAllFromSupabase(
-          "facture_lignes",
-          "numero_piece,date_facture,numero_tiers_entete,reference_article,montant_ht,collaborateur",
-          (query) =>
-            query
-              .gte("date_facture", prevYearMonthBegin)
-              .lt("date_facture", prevYearMonthEnd),
-        ) as Promise<FocusInvoiceLineRaw[]>,
-      ]);
-
-      const tierNumbers = uniqueStrings([
-        ...activityRowsRaw.map((row) => row.numero_tiers_entete),
-        ...currentInvoiceRowsRaw.map((row) => row.numero_tiers_entete),
-        ...previousYearInvoiceRowsRaw.map((row) => row.numero_tiers_entete),
-      ]);
-      const articleReferences = uniqueStrings([
-        ...activityRowsRaw.map((row) => row.reference_article),
-        ...currentInvoiceRowsRaw.map((row) => row.reference_article),
-        ...previousYearInvoiceRowsRaw.map((row) => row.reference_article),
-      ]);
-
-      const tierRows = (await fetchRowsByIn(
-        "ref_tiers",
-        "numero,representant",
-        "numero",
-        tierNumbers,
-      )) as Array<{ numero: string | null; representant: string | null }>;
-      const tierMap = new Map(
-        tierRows.map((row) => [
-          normalizeKey(row.numero),
-          { representant: row.representant || null },
-        ]),
+      const { data, error } = await withClientTimeout<
+        SupabaseRpcResult<AgencyControlRpcRow[]>
+      >(
+        (supabase as any).rpc("get_focus_mensuel_agency_control_cached", {
+          p_focus_date: focusDate,
+          p_month: month,
+          p_agence: effectiveAgence || null,
+          p_famille_macro: familleMacro || null,
+          p_collaborateur: effectiveCollaborateur || null,
+          p_include_hors_statistiques: includeHorsStats,
+        }),
+        isPdfMode ? 20000 : 30000,
+        `Lecture portefeuille / projection Focus ${month}`,
       );
 
-      const collaborateurRows = (await fetchAllFromSupabase(
-        "ref_collaborateurs",
-        "nom_prenom,nom,prenom,agence",
-      )) as Array<{
-        nom_prenom: string | null;
-        nom: string | null;
-        prenom: string | null;
-        agence: string | null;
-      }>;
-      const collaborateurMap = new Map<string, string | null>();
-      collaborateurRows.forEach((row) => {
-        const nomPrenom = String(row.nom_prenom || "").trim();
-        const nom = String(row.nom || "").trim();
-        const prenom = String(row.prenom || "").trim();
-        const nomPrenomConstruit = [nom, prenom].filter(Boolean).join(" ");
+      if (error) throw error;
 
-        if (nomPrenom)
-          collaborateurMap.set(normalizeKey(nomPrenom), row.agence || null);
-        if (nomPrenomConstruit)
-          collaborateurMap.set(
-            normalizeKey(nomPrenomConstruit),
-            row.agence || null,
-          );
-        if (nom) collaborateurMap.set(normalizeKey(nom), row.agence || null);
-      });
+      const rpcRows = (Array.isArray(data) ? data : []) as AgencyControlRpcRow[];
+      const portfolioRows: AgencyPortfolioRow[] = rpcRows.map((row) => ({
+        label: String(row.label || "Sans agence"),
+        cdc: Number(row.cdc || 0),
+        cdcLivMx: Number(row.cdc_liv_mx || 0),
+        pl: Number(row.pl || 0),
+        plLivMPlus: Number(row.pl_liv_mplus || 0),
+        // Le tableau affiche déjà BL et BR cumulés. La RPC renvoie donc
+        // directement le montant signé BL/BR dans blMx et blM.
+        blMx: Number(row.blbr_mx || 0),
+        brMx: 0,
+        blM: Number(row.blbr_m || 0),
+        brM: 0,
+        total: Number(row.total || 0),
+      }));
 
-      const articleRows = (await fetchRowsByIn(
-        "ref_articles",
-        "reference_article,famille,hors_statistique",
-        "reference_article",
-        articleReferences,
-      )) as Array<{
-        reference_article: string | null;
-        famille: string | null;
-        hors_statistique: boolean | null;
-      }>;
-      const articleMap = new Map(
-        articleRows.map((row) => [
-          normalizeKey(row.reference_article),
-          {
-            famille: row.famille || null,
-            hors_statistique: Boolean(row.hors_statistique),
-          },
-        ]),
-      );
-
-      const familles = uniqueStrings(articleRows.map((row) => row.famille));
-      const familleRows = (await fetchRowsByIn(
-        "ref_familles",
-        "famille,famille_macro",
-        "famille",
-        familles,
-      )) as Array<{ famille: string | null; famille_macro: string | null }>;
-      const familleMap = new Map(
-        familleRows.map((row) => [
-          normalizeKey(row.famille),
-          row.famille_macro || null,
-        ]),
-      );
-
-      const enrichCommon = (row: {
-        numero_tiers_entete: string | null;
-        reference_article: string | null;
-        collaborateur: string | null;
-      }) => {
-        const tier = tierMap.get(normalizeKey(row.numero_tiers_entete));
-        const representantTiers = String(tier?.representant || "").trim();
-
-        // Règle unique demandée : l'agence est toujours celle du représentant
-        // rattaché au tiers de la ligne, pas celle du collaborateur porté
-        // directement par la ligne activité/facture.
-        const agenceValue =
-          collaborateurMap.get(normalizeKey(representantTiers)) ||
-          "Sans agence";
-
-        const article = articleMap.get(normalizeKey(row.reference_article));
-        const familleValue = article?.famille || null;
-        const familleMacroValue =
-          familleMap.get(normalizeKey(familleValue)) || null;
-        const horsStatistiqueValue = Boolean(article?.hors_statistique);
-        const collaborateurValue = representantTiers || "—";
-
-        return {
-          agence: String(agenceValue || "Sans agence"),
-          famille_macro: familleMacroValue,
-          hors_statistique: horsStatistiqueValue,
-          collaborateur: collaborateurValue,
-        };
-      };
-
-      const filteredActivity: EnrichedActivityLine[] = activityRowsRaw
-        .map((row) => ({
-          ...row,
-          montant_ht: Number(row.montant_ht || 0),
-          effective_date: activityEffectiveDate(row),
-          ...enrichCommon(row),
-        }))
-        .filter((row) => {
-          if (!row.effective_date || row.effective_date > focusDate)
-            return false;
-          if (
-            effectiveAgence &&
-            normalizeKey(row.agence) !== normalizeKey(effectiveAgence)
-          )
-            return false;
-          if (
-            familleMacro &&
-            normalizeKey(row.famille_macro) !== normalizeKey(familleMacro)
-          )
-            return false;
-          if (
-            effectiveCollaborateur &&
-            normalizeKey(row.collaborateur) !==
-              normalizeKey(effectiveCollaborateur)
-          )
-            return false;
-          if (!includeHorsStats && row.hors_statistique) return false;
-
-          return [
-            "Bon de commande",
-            "Préparation de livraison",
-            "Bon de livraison",
-            "Bon de retour",
-          ].includes(String(row.type_document || ""));
-        });
-
-      const filteredCurrentInvoices: EnrichedInvoiceLine[] =
-        currentInvoiceRowsRaw
-          .map((row) => ({
-            ...row,
-            montant_ht: Number(row.montant_ht || 0),
-            ...enrichCommon(row),
-          }))
-          .filter((row) => {
-            if (
-              !row.date_facture ||
-              row.date_facture < monthBegin ||
-              row.date_facture > focusDate
-            )
-              return false;
-            if (
-              effectiveAgence &&
-              normalizeKey(row.agence) !== normalizeKey(effectiveAgence)
-            )
-              return false;
-            if (
-              familleMacro &&
-              normalizeKey(row.famille_macro) !== normalizeKey(familleMacro)
-            )
-              return false;
-            if (
-              effectiveCollaborateur &&
-              normalizeKey(row.collaborateur) !==
-                normalizeKey(effectiveCollaborateur)
-            )
-              return false;
-            if (!includeHorsStats && row.hors_statistique) return false;
-            return true;
-          });
-
-      const filteredPreviousYearInvoices: EnrichedInvoiceLine[] =
-        previousYearInvoiceRowsRaw
-          .map((row) => ({
-            ...row,
-            montant_ht: Number(row.montant_ht || 0),
-            ...enrichCommon(row),
-          }))
-          .filter((row) => {
-            if (!row.date_facture) return false;
-            if (
-              effectiveAgence &&
-              normalizeKey(row.agence) !== normalizeKey(effectiveAgence)
-            )
-              return false;
-            if (
-              familleMacro &&
-              normalizeKey(row.famille_macro) !== normalizeKey(familleMacro)
-            )
-              return false;
-            if (
-              effectiveCollaborateur &&
-              normalizeKey(row.collaborateur) !==
-                normalizeKey(effectiveCollaborateur)
-            )
-              return false;
-            if (!includeHorsStats && row.hors_statistique) return false;
-            return true;
-          });
-
-      const agencyLabels: string[] = Array.from(
-        new Set([
-          ...filteredActivity.map((row) => row.agence || "Sans agence"),
-          ...filteredCurrentInvoices.map((row) => row.agence || "Sans agence"),
-          ...filteredPreviousYearInvoices.map(
-            (row) => row.agence || "Sans agence",
-          ),
-        ]),
-      ).sort(agencySort);
-
-      const portfolioRows = agencyLabels.map((label) => {
-        const agencyActivity = filteredActivity.filter(
-          (row) => normalizeKey(row.agence) === normalizeKey(label),
-        );
-
-        const cdcRows = agencyActivity.filter(
-          (row) => row.type_document === "Bon de commande",
-        );
-        const plRows = agencyActivity.filter(
-          (row) => row.type_document === "Préparation de livraison",
-        );
-
-        const cdc = sum(cdcRows, (row) => Number(row.montant_ht || 0));
-        const cdcLivMx = sum(
-          cdcRows.filter((row) => {
-            const deliveryDate = activityDeliveryDate(row);
-            return Boolean(deliveryDate && deliveryDate < monthBegin);
-          }),
-          (row) => Number(row.montant_ht || 0),
-        );
-        const pl = sum(plRows, (row) => Number(row.montant_ht || 0));
-        const plLivMPlus = sum(
-          plRows.filter((row) => {
-            const deliveryDate = activityDeliveryDate(row);
-            return Boolean(deliveryDate && deliveryDate >= monthEnd);
-          }),
-          (row) => Number(row.montant_ht || 0),
-        );
-
-        const blRows = agencyActivity.filter(
-          (row) => row.type_document === "Bon de livraison",
-        );
-        const brRows = agencyActivity.filter(
-          (row) => row.type_document === "Bon de retour",
-        );
-
-        const blMx = sum(
-          blRows.filter((row) => String(row.effective_date || "") < monthBegin),
-          (row) => signedActivityAmount(row.type_document, row.montant_ht),
-        );
-        const blM = sum(
-          blRows.filter(
-            (row) =>
-              String(row.effective_date || "").startsWith(month) &&
-              String(row.effective_date || "") <= focusDate,
-          ),
-          (row) => signedActivityAmount(row.type_document, row.montant_ht),
-        );
-        const brMx = sum(
-          brRows.filter((row) => String(row.effective_date || "") < monthBegin),
-          (row) => signedActivityAmount(row.type_document, row.montant_ht),
-        );
-        const brM = sum(
-          brRows.filter(
-            (row) =>
-              String(row.effective_date || "").startsWith(month) &&
-              String(row.effective_date || "") <= focusDate,
-          ),
-          (row) => signedActivityAmount(row.type_document, row.montant_ht),
-        );
-
-        return {
-          label,
-          cdc,
-          cdcLivMx,
-          pl,
-          plLivMPlus,
-          brMx,
-          brM,
-          blMx,
-          blM,
-          total: cdc + pl + brMx + brM + blMx + blM,
-        };
-      });
-
-      const facturesMtdByAgency = new Map<string, number>();
-
-      mtdSourceRows
-        .filter((row) => row.type_document === "Factures")
-        .forEach((row) => {
-          const key = normalizeKey(row.agence || "Sans agence");
-          facturesMtdByAgency.set(
-            key,
-            (facturesMtdByAgency.get(key) || 0) + Number(row.montant_ht || 0),
-          );
-        });
-
-      const projectionRows = agencyLabels.map((label) => {
-        const portfolio = portfolioRows.find((row) => row.label === label) || {
-          label,
-          cdc: 0,
-          cdcLivMx: 0,
-          pl: 0,
-          plLivMPlus: 0,
-          brMx: 0,
-          brM: 0,
-          blMx: 0,
-          blM: 0,
-          total: 0,
-        };
-
-        const agencyCurrentInvoices = filteredCurrentInvoices.filter(
-          (row) => normalizeKey(row.agence) === normalizeKey(label),
-        );
-        const agencyPreviousYearInvoices = filteredPreviousYearInvoices.filter(
-          (row) => normalizeKey(row.agence) === normalizeKey(label),
-        );
-        const agencyActivity = filteredActivity.filter(
-          (row) => normalizeKey(row.agence) === normalizeKey(label),
-        );
-        const agencyCurrentMonthBl = agencyActivity.filter(
-          (row) =>
-            row.type_document === "Bon de livraison" &&
-            String(row.effective_date || "").startsWith(month) &&
-            String(row.effective_date || "") <= focusDate,
-        );
-
-        const facturesFromMtdTable = facturesMtdByAgency.get(
-          normalizeKey(label),
-        );
-        const factures =
-          facturesFromMtdTable !== undefined
-            ? facturesFromMtdTable
-            : sum(agencyCurrentInvoices, (row) => signedInvoiceAmount(row));
-        const caN1 = sum(agencyPreviousYearInvoices, (row) =>
-          signedInvoiceAmount(row),
-        );
-        const blBrMx = portfolio.blMx + portfolio.brMx;
-        const blBrM = portfolio.blM + portfolio.brM;
-
-        const blDays = Array.from(
-          new Set(
-            agencyCurrentMonthBl
-              .map((row) => String(row.effective_date || ""))
-              .filter(Boolean),
-          ),
-        ).sort();
-        const remainingBusinessDays = countWeekdays(
-          daysInMonth(month).filter(
-            (day) => day > focusDate && day <= currentMonthEnd,
-          ),
-        );
-        const blMonthValue = sum(agencyCurrentMonthBl, (row) =>
-          signedActivityAmount(row.type_document, row.montant_ht),
-        );
-        const dailyBlFlux = blDays.length ? blMonthValue / blDays.length : 0;
-        const projectionFluxBl = dailyBlFlux * remainingBusinessDays;
-        const valeurBlNf3Pct = (blMonthValue + projectionFluxBl) * 0.04;
-        const projectionCa =
-          factures + blBrMx + blBrM + projectionFluxBl - valeurBlNf3Pct;
-        const evolPct = caN1
-          ? ((projectionCa - caN1) / Math.abs(caN1)) * 100
-          : null;
-
-        return {
-          label,
-          blBrMx,
-          blBrM,
-          factures,
-          projectionFluxBl,
-          valeurBlNf3Pct,
-          projectionCa,
-          caN1,
-          evolPct,
-        };
-      });
+      const projectionRows: AgencyProjectionRow[] = rpcRows.map((row) => ({
+        label: String(row.label || "Sans agence"),
+        blBrMx: Number(row.blbr_mx || 0),
+        blBrM: Number(row.blbr_m || 0),
+        factures: Number(row.factures || 0),
+        projectionFluxBl: Number(row.projection_flux_bl || 0),
+        valeurBlNf3Pct: Number(row.valeur_bl_nf_4pct || 0),
+        projectionCa: Number(row.projection_ca || 0),
+        caN1: Number(row.ca_n1 || 0),
+        evolPct:
+          row.evol_pct === null || row.evol_pct === undefined
+            ? null
+            : Number(row.evol_pct),
+      }));
 
       setAgencyPortfolioRows(portfolioRows);
       setAgencyProjectionRows(projectionRows);
       setAgencyTablesReady(true);
     } catch (exception: any) {
-      console.error("focus mensuel agency control tables", exception);
+      console.error("focus mensuel agency control cached rpc", exception);
       setAgencyTablesError(exception?.message || String(exception));
       setAgencyPortfolioRows([]);
       setAgencyProjectionRows([]);
@@ -3784,177 +3534,7 @@ function FocusMensuelPageContent() {
       data-focus-report-mode={isPdfMode ? "1" : "0"}
     >
       {isPdfMode && (
-        <style>{`
-          @page { size: A4 landscape; margin: 3mm 3mm 3mm 3mm; }
-          html, body {
-            margin: 0 !important;
-            padding: 0 !important;
-            background: #eef5fb !important;
-            background-color: #eef5fb !important;
-            background-image: none !important;
-          }
-          body, * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
-          body::before, body::after, main::before, main::after, section::before, section::after {
-            content: none !important;
-            display: none !important;
-            background: transparent !important;
-            background-image: none !important;
-            box-shadow: none !important;
-            filter: none !important;
-            backdrop-filter: none !important;
-            -webkit-backdrop-filter: none !important;
-          }
-          [data-focus-report-ready] {
-            width: 100% !important;
-            max-width: 100% !important;
-            box-sizing: border-box !important;
-            padding: 0 !important;
-            background: #eef5fb !important;
-            background-color: #eef5fb !important;
-            background-image: none !important;
-            isolation: isolate !important;
-          }
-          [data-focus-report-ready] *,
-          [data-focus-report-ready] *::before,
-          [data-focus-report-ready] *::after {
-            filter: none !important;
-            backdrop-filter: none !important;
-            -webkit-backdrop-filter: none !important;
-          }
-          [data-no-print="true"], .focus-pdf-header-actions { display: none !important; }
-          .focus-pdf-brand-header,
-          .focus-pdf-filters,
-          .focus-pdf-kpi-card,
-          .focus-pdf-chart-box,
-          .focus-pdf-section-card {
-            background: #ffffff !important;
-            background-color: #ffffff !important;
-            background-image: none !important;
-            box-shadow: none !important;
-            filter: none !important;
-            backdrop-filter: none !important;
-            -webkit-backdrop-filter: none !important;
-          }
-          .focus-pdf-brand-header,
-          .focus-pdf-filters,
-          .focus-pdf-kpi-card,
-          .focus-pdf-chart-box,
-          .focus-pdf-section-card,
-          .focus-pdf-table-wrap,
-          table, thead, tbody, tr, th, td {
-            position: relative !important;
-            z-index: 1 !important;
-          }
-          .focus-pdf-brand-header {
-            display: flex !important;
-            align-items: center !important;
-            justify-content: space-between !important;
-            min-height: 48px !important;
-            padding: 4px 8px 7px !important;
-            margin-bottom: 5px !important;
-            border-bottom: 1px solid #e5e7eb !important;
-            break-inside: avoid !important;
-            page-break-inside: avoid !important;
-          }
-          .focus-pdf-header-card {
-            padding: 0 !important;
-            margin: 0 0 5px !important;
-            border: none !important;
-            border-radius: 0 !important;
-            box-shadow: none !important;
-            background: transparent !important;
-            break-inside: avoid !important;
-            page-break-inside: avoid !important;
-          }
-          .focus-pdf-title { display: none !important; }
-          .focus-pdf-subtitle { font-size: 9.5px !important; line-height: 1.25 !important; font-weight: 800 !important; padding: 0 8px !important; }
-          .focus-pdf-filters {
-            grid-template-columns: repeat(7, minmax(0, 1fr)) !important;
-            gap: 6px !important;
-            padding: 7px !important;
-            margin-bottom: 8px !important;
-            border-radius: 8px !important;
-            break-inside: avoid !important;
-            page-break-inside: avoid !important;
-          }
-          .focus-pdf-filter-value {
-            min-height: 27px !important;
-            display: flex !important;
-            align-items: center !important;
-            border: 1px solid #cbd5e1 !important;
-            border-radius: 6px !important;
-            padding: 5px 8px !important;
-            background: #ffffff !important;
-            background-color: #ffffff !important;
-            background-image: none !important;
-            font-size: 10px !important;
-            font-weight: 900 !important;
-            color: #0f172a !important;
-          }
-          .focus-pdf-kpi-grid {
-            grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
-            gap: 8px !important;
-            margin-bottom: 8px !important;
-            break-inside: avoid !important;
-            page-break-inside: avoid !important;
-          }
-          .focus-pdf-kpi-card { padding: 6px !important; min-height: 92px !important; border-radius: 10px !important; }
-          .focus-pdf-kpi-card [style*="font-size: 26"] { font-size: 18px !important; }
-          .focus-pdf-chart-grid,
-          .focus-pdf-section-grid {
-            grid-template-columns: 1fr 1fr !important;
-            gap: 8px !important;
-            margin-bottom: 8px !important;
-          }
-          .focus-pdf-chart-box,
-          .focus-pdf-section-card {
-            padding: 8px !important;
-            border-radius: 10px !important;
-            background: #ffffff !important;
-            background-color: #ffffff !important;
-            background-image: none !important;
-            box-shadow: none !important;
-            break-inside: avoid !important;
-            page-break-inside: avoid !important;
-          }
-          .focus-pdf-chart-box svg { height: 158px !important; }
-          .focus-pdf-table-wrap { max-height: none !important; overflow: visible !important; background: #ffffff !important; }
-          .focus-pdf-section-card table { min-width: 0 !important; font-size: 6.6px !important; }
-          .focus-pdf-section-card th, .focus-pdf-section-card td { padding: 2.5px 3.5px !important; line-height: 1.08 !important; }
-          .focus-pdf-highlights-grid {
-            grid-template-columns: 1fr 1fr !important;
-            gap: 5px !important;
-            align-items: start !important;
-            margin-top: 4px !important;
-          }
-          .focus-pdf-highlights-grid > .focus-pdf-section-card:first-child { grid-column: span 2 !important; }
-          .focus-pdf-highlights-grid table { min-width: 0 !important; font-size: 6.4px !important; }
-          .focus-pdf-highlights-grid th, .focus-pdf-highlights-grid td { padding: 2px 3px !important; line-height: 1.05 !important; }
-          .focus-pdf-comparison-grid {
-            grid-template-columns: 1fr !important;
-            gap: 8px !important;
-            margin-bottom: 8px !important;
-          }
-          .focus-pdf-comparison-grid table { min-width: 0 !important; font-size: 5.8px !important; }
-          .focus-pdf-comparison-grid th, .focus-pdf-comparison-grid td { padding: 2px 3px !important; line-height: 1.04 !important; }
-          .focus-pdf-agency-section-grid {
-            break-before: auto !important;
-            page-break-before: auto !important;
-            break-inside: auto !important;
-            page-break-inside: auto !important;
-            margin-top: 6px !important;
-          }
-          .focus-pdf-agency-section-grid > .focus-pdf-section-card {
-            break-inside: avoid !important;
-            page-break-inside: avoid !important;
-          }
-          html, body, main, section,
-          [data-focus-report-ready], [data-report-ready] {
-            min-height: 0 !important;
-            height: auto !important;
-            overflow: visible !important;
-          }
-        `}</style>
+        <style dangerouslySetInnerHTML={{ __html: PDF_PRINT_STYLES }} />
       )}
       {isPdfMode && <ReportBrandHeader focusDate={focusDate} />}
       <div style={styles.headerCard} className="focus-pdf-header-card">
@@ -3999,7 +3579,7 @@ function FocusMensuelPageContent() {
             onClick={rebuildCacheForMonth}
             disabled={rebuildingCache}
           >
-            {rebuildingCache ? "Rebuild cache…" : "Reconstruire cache mois"}
+            {rebuildingCache ? "Mise en file…" : "Recalculer mois en arrière-plan"}
           </button>
           <button
             style={styles.primaryButton}
@@ -4582,6 +4162,66 @@ function buildRollingComparisonRows(
   };
 
   return [total, ...rows];
+}
+
+function buildComparisonRowsFromAnnualCache(
+  rows: AnnualCacheRpcRow[],
+  tableKey: "agency_ytd" | "family_ytd" | "rolling_12",
+): ComparisonRow[] {
+  const map = new Map<
+    string,
+    { row: ComparisonRow; sortOrder: number }
+  >();
+
+  rows
+    .filter((source) => String(source.table_key) === tableKey)
+    .forEach((source) => {
+      if (!isDocType(source.type_document)) return;
+      const label = String(source.label || "—");
+      const key = normalizeKey(label);
+      const existing = map.get(key);
+      const target =
+        existing ||
+        {
+          row: {
+            label,
+            byType: createEmptyComparisonRecord(),
+            total: 0,
+          },
+          sortOrder: Number(source.sort_order ?? 1000),
+        };
+
+      const cell = target.row.byType[source.type_document];
+      cell.amountN1 += Number(source.amount_n1 || 0);
+      cell.amountN += Number(source.amount_n || 0);
+      cell.qtyPertN1 += Number(source.qty_pert_n1 || 0);
+      cell.qtyPertN += Number(source.qty_pert_n || 0);
+      target.row.total += Number(source.amount_n || 0);
+      target.sortOrder = Math.min(
+        target.sortOrder,
+        Number(source.sort_order ?? 1000),
+      );
+      map.set(key, target);
+    });
+
+  const values = Array.from(map.values());
+  if (tableKey === "rolling_12") {
+    return values
+      .sort((a, b) => {
+        if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder;
+        return a.row.label.localeCompare(b.row.label, "fr-FR");
+      })
+      .map(({ row }) => ({
+        ...row,
+        label: row.label.startsWith("TOTAL")
+          ? row.label
+          : formatShortMonthFr(row.label),
+      }));
+  }
+
+  return values
+    .map(({ row }) => row)
+    .sort((a, b) => Math.abs(b.total) - Math.abs(a.total));
 }
 
 function cloneComparisonRow(row: ComparisonRow): ComparisonRow {
