@@ -6,8 +6,6 @@ import { supabase } from '@/lib/supabaseClient'
 export type PageFilterAccess = {
   email: string | null
   loading: boolean
-  profileId: string | null
-  profileName: string
   allowedAgences: string[]
   allowedCollaborateurs: string[]
   allowedDepartements: string[]
@@ -23,8 +21,6 @@ export type PageFilterAccess = {
 const EMPTY_ACCESS: PageFilterAccess = {
   email: null,
   loading: true,
-  profileId: null,
-  profileName: '',
   allowedAgences: [],
   allowedCollaborateurs: [],
   allowedDepartements: [],
@@ -126,7 +122,7 @@ export function usePageFilterAccess() {
     let cancelled = false
 
     async function loadAccess() {
-      setState((previous) => ({ ...previous, loading: true, error: null }))
+      setState((prev) => ({ ...prev, loading: true, error: null }))
 
       try {
         const { data: userData, error: userError } = await supabase.auth.getUser()
@@ -140,25 +136,11 @@ export function usePageFilterAccess() {
 
         const { data, error } = await supabase
           .from('user_page_access')
-          .select('email, access_profile_id, allowed_agences, allowed_collaborateurs, allowed_departements, allowed_codes_postaux')
+          .select('email, allowed_agences, allowed_collaborateurs, allowed_departements, allowed_codes_postaux')
           .eq('email', email)
           .maybeSingle()
 
         if (error) throw error
-
-        const profileId = String((data as any)?.access_profile_id || '').trim() || null
-        let profileName = ''
-
-        if (profileId) {
-          const { data: profileData, error: profileError } = await supabase
-            .from('access_profiles')
-            .select('name')
-            .eq('id', profileId)
-            .maybeSingle()
-
-          if (profileError) throw profileError
-          profileName = String((profileData as any)?.name || '').trim()
-        }
 
         const allowedAgences = normalizeAccessList((data as any)?.allowed_agences)
         const allowedCollaborateurs = normalizeAccessList((data as any)?.allowed_collaborateurs)
@@ -166,7 +148,6 @@ export function usePageFilterAccess() {
         const allowedCodesPostaux = normalizeAccessList((data as any)?.allowed_codes_postaux)
 
         const badges = [
-          profileName ? `Profil: ${profileName}` : '',
           allowedAgences.length ? `Agences: ${allowedAgences.join(', ')}` : '',
           allowedCollaborateurs.length ? `Collaborateurs: ${allowedCollaborateurs.join(', ')}` : '',
           allowedCodesPostaux.length ? `CP: ${allowedCodesPostaux.join(', ')}` : '',
@@ -177,8 +158,6 @@ export function usePageFilterAccess() {
           setState({
             email,
             loading: false,
-            profileId,
-            profileName,
             allowedAgences,
             allowedCollaborateurs,
             allowedDepartements,
@@ -202,19 +181,15 @@ export function usePageFilterAccess() {
       }
     }
 
-    void loadAccess()
+    loadAccess()
 
     const { data } = supabase.auth.onAuthStateChange(() => {
-      void loadAccess()
+      loadAccess()
     })
-
-    const handleAccessChanged = () => void loadAccess()
-    window.addEventListener('cegeclim:access-changed', handleAccessChanged)
 
     return () => {
       cancelled = true
       data.subscription.unsubscribe()
-      window.removeEventListener('cegeclim:access-changed', handleAccessChanged)
     }
   }, [])
 

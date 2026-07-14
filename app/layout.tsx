@@ -26,6 +26,14 @@ type MenuAccessKey = Exclude<
   | 'allowed_codes_postaux'
   | 'display_name'
   | 'default_landing_page'
+  | 'profile_id'
+  | 'profile_code'
+  | 'profile_name'
+  | 'show_alert_cerfa_ko'
+  | 'show_alert_cdc_liv_avant_2026'
+  | 'show_alert_controle_frais_port'
+  | 'show_alert_capacite_gaz'
+  | 'show_alert_todo'
   | 'can_change_scope'
 >
 
@@ -55,6 +63,7 @@ type StatusLightProps = {
 type UserAccessProfile = {
   email?: string | null
   display_name?: string | null
+  access_profile_id?: string | null
   allowed_agence?: string | string[] | null
   allowed_agences?: string | string[] | null
   allowed_collaborateurs?: string | string[] | null
@@ -336,6 +345,13 @@ function AppShell({ children }: { children: React.ReactNode }) {
     pathname.startsWith('/focus_mensuel_print/')
 
   const isPublicShellPage = isLoginPage || isPdfPrintPage
+
+  const hasVisibleStatusLights =
+    rights.show_alert_cerfa_ko ||
+    rights.show_alert_cdc_liv_avant_2026 ||
+    rights.show_alert_controle_frais_port ||
+    rights.show_alert_capacite_gaz ||
+    rights.show_alert_todo
 
   const hasAnyMenuAccess =
     rights.can_dashboard ||
@@ -1238,19 +1254,57 @@ function AppShell({ children }: { children: React.ReactNode }) {
 
   async function refreshStatusIndicators(options?: { force?: boolean }) {
     if (!email || isLoginPage || isUnauthorizedPage) return
+    if (!hasVisibleStatusLights) return
 
     const now = Date.now()
     if (!options?.force && now - lastStatusRefreshRef.current < 60_000) return
     lastStatusRefreshRef.current = now
 
     const profile = await getUserAccessProfile()
-    await Promise.all([
-      refreshTodoSignal(profile),
-      refreshCerfaKo(profile, { detail: false }),
-      refreshCertificationSignals(profile),
-      refreshCdcLivAvant2026Signal(profile),
-      refreshControleFraisPortSignal(profile),
-    ])
+    const tasks: Promise<unknown>[] = []
+
+    if (rights.show_alert_todo) {
+      tasks.push(refreshTodoSignal(profile))
+    } else {
+      setTodoSignal({ status: 'green', count: 0 })
+    }
+
+    if (rights.show_alert_cerfa_ko) {
+      tasks.push(refreshCerfaKo(profile, { detail: false }))
+    } else {
+      setCerfaKoCount(0)
+      setCerfaRows([])
+      setCerfaModalOpen(false)
+    }
+
+    if (rights.show_alert_capacite_gaz) {
+      tasks.push(refreshCertificationSignals(profile))
+    } else {
+      setCertificationSignals({
+        capacite: { status: 'green', count: 0, expiredCount: 0, soonCount: 0 },
+      })
+      setCertificationModalOpen(false)
+    }
+
+    if (rights.show_alert_cdc_liv_avant_2026) {
+      tasks.push(refreshCdcLivAvant2026Signal(profile))
+    } else {
+      setCdcLivAvant2026Signal({ status: 'green', count: 0 })
+    }
+
+    if (rights.show_alert_controle_frais_port) {
+      tasks.push(refreshControleFraisPortSignal(profile))
+    } else {
+      setControleFraisPortSignal({
+        status: 'green',
+        count: 0,
+        missingGroups: 0,
+        blToRemove: 0,
+        otherGroups: 0,
+      })
+    }
+
+    await Promise.all(tasks)
   }
 
   async function openCerfaModal() {
@@ -1339,7 +1393,14 @@ function AppShell({ children }: { children: React.ReactNode }) {
                 <select
                   value={societeFilter}
                   onChange={(e) => setSocieteFilter(e.target.value as SocieteFilter)}
-                  style={styles.select}
+                  disabled={!rights.can_change_scope || (rights.allowed_scopes || []).length <= 1}
+                  title={rights.can_change_scope ? 'Changer de société' : 'Changement de société non autorisé par le profil'}
+                  style={{
+                    ...styles.select,
+                    ...(!rights.can_change_scope || (rights.allowed_scopes || []).length <= 1
+                      ? styles.selectDisabled
+                      : {}),
+                  }}
                 >
                   {(rights.allowed_scopes || ['Global']).map((s) => (
                     <option key={s}>{s}</option>
@@ -1351,11 +1412,14 @@ function AppShell({ children }: { children: React.ReactNode }) {
                 </button>
 
                 {email && <div style={styles.userEmail}>{email}</div>}
+                <div style={styles.userProfile}>
+                  Profil : {rights.profile_name || 'Aucun profil'}
+                </div>
               </div>
             </div>
           </div>
 
-          {menuGroups.some(isGroupVisible) && (
+          {(menuGroups.some(isGroupVisible) || hasVisibleStatusLights) && (
             <div style={styles.nav}>
               <div style={styles.navMenu}>
                 {menuGroups.filter(isGroupVisible).map((group) => {
@@ -1401,70 +1465,81 @@ function AppShell({ children }: { children: React.ReactNode }) {
                 })}
               </div>
 
-              <div style={styles.statusLightsRow}>
-                <StatusLight
-                  label="CERFA"
-                  status={cerfaKoCount > 0 ? 'red' : 'green'}
-                  count={cerfaKoCount}
-                  blink={cerfaKoCount > 0 && statusBlinkOn}
-                  clickable={cerfaKoCount > 0}
-                  onClick={openCerfaModal}
-                  title={cerfaKoCount > 0 ? 'Ouvrir la liste des CERFA KO en attente de régularisation' : 'Aucun CERFA KO'}
-                />
+              {hasVisibleStatusLights && (
+                <div style={styles.statusLightsRow}>
+                  {rights.show_alert_cerfa_ko && (
+                    <StatusLight
+                      label="CERFA"
+                      status={cerfaKoCount > 0 ? 'red' : 'green'}
+                      count={cerfaKoCount}
+                      blink={cerfaKoCount > 0 && statusBlinkOn}
+                      clickable={cerfaKoCount > 0}
+                      onClick={openCerfaModal}
+                      title={cerfaKoCount > 0 ? 'Ouvrir la liste des CERFA KO en attente de régularisation' : 'Aucun CERFA KO'}
+                    />
+                  )}
 
-                <StatusLight
-                  label="CDC liv avant 2026"
-                  status={cdcLivAvant2026Signal.status}
-                  count={cdcLivAvant2026Signal.count}
-                  blink={cdcLivAvant2026Signal.status === 'red' && statusBlinkOn}
-                  clickable={cdcLivAvant2026Signal.count > 0}
-                  onClick={openCdcLivAvant2026}
-                  title={
-                    cdcLivAvant2026Signal.count > 0
-                      ? `${cdcLivAvant2026Signal.count} CDC avec livraison avant 2026`
-                      : 'Aucun CDC avec livraison avant 2026'
-                  }
-                />
+                  {rights.show_alert_cdc_liv_avant_2026 && (
+                    <StatusLight
+                      label="CDC liv avant 2026"
+                      status={cdcLivAvant2026Signal.status}
+                      count={cdcLivAvant2026Signal.count}
+                      blink={cdcLivAvant2026Signal.status === 'red' && statusBlinkOn}
+                      clickable={cdcLivAvant2026Signal.count > 0}
+                      onClick={openCdcLivAvant2026}
+                      title={
+                        cdcLivAvant2026Signal.count > 0
+                          ? `${cdcLivAvant2026Signal.count} CDC avec livraison avant 2026`
+                          : 'Aucun CDC avec livraison avant 2026'
+                      }
+                    />
+                  )}
 
+                  {rights.show_alert_controle_frais_port && (
+                    <StatusLight
+                      label="Contrôle frais de port"
+                      status={controleFraisPortSignal.status}
+                      count={controleFraisPortSignal.count}
+                      blink={controleFraisPortSignal.status !== 'green' && statusBlinkOn}
+                      clickable
+                      onClick={openControleFraisPort}
+                      title={
+                        controleFraisPortSignal.count > 0
+                          ? `${controleFraisPortSignal.count} action(s) : ${controleFraisPortSignal.missingGroups} groupe(s) sans port, ${controleFraisPortSignal.blToRemove} BL à supprimer, ${controleFraisPortSignal.otherGroups} autre(s) groupe(s) à vérifier — cliquer pour afficher`
+                          : 'Ouvrir le contrôle groupé des frais de port dans le portefeuille livraison'
+                      }
+                    />
+                  )}
 
-                <StatusLight
-                  label="Contrôle frais de port"
-                  status={controleFraisPortSignal.status}
-                  count={controleFraisPortSignal.count}
-                  blink={controleFraisPortSignal.status !== 'green' && statusBlinkOn}
-                  clickable
-                  onClick={openControleFraisPort}
-                  title={
-                    controleFraisPortSignal.count > 0
-                      ? `${controleFraisPortSignal.count} action(s) : ${controleFraisPortSignal.missingGroups} groupe(s) sans port, ${controleFraisPortSignal.blToRemove} BL à supprimer, ${controleFraisPortSignal.otherGroups} autre(s) groupe(s) à vérifier — cliquer pour afficher`
-                      : 'Ouvrir le contrôle groupé des frais de port dans le portefeuille livraison'
-                  }
-                />
+                  {rights.show_alert_capacite_gaz && (
+                    <StatusLight
+                      label="Capacité gaz"
+                      status={certificationSignals.capacite.status}
+                      count={certificationSignals.capacite.count}
+                      blink={certificationSignals.capacite.status === 'orange' && statusBlinkOn}
+                      clickable={certificationSignals.capacite.count > 0}
+                      onClick={() => openCertificationModal('capacite')}
+                      title={
+                        certificationSignals.capacite.count > 0
+                          ? `Capacité gaz : ${certificationSignals.capacite.count} validité(s) à moins d’un mois sur le périmètre actif`
+                          : 'Aucune capacité gaz à échéance dans moins d’un mois'
+                      }
+                    />
+                  )}
 
-                <StatusLight
-                  label="Capacité gaz"
-                  status={certificationSignals.capacite.status}
-                  count={certificationSignals.capacite.count}
-                  blink={certificationSignals.capacite.status === 'orange' && statusBlinkOn}
-                  clickable={certificationSignals.capacite.count > 0}
-                  onClick={() => openCertificationModal('capacite')}
-                  title={
-                    certificationSignals.capacite.count > 0
-                      ? `Capacité gaz : ${certificationSignals.capacite.count} validité(s) à moins d’un mois sur le périmètre actif`
-                      : 'Aucune capacité gaz à échéance dans moins d’un mois'
-                  }
-                />
-
-                <StatusLight
-                  label="A faire"
-                  status={todoSignal.status}
-                  count={todoSignal.count}
-                  blink={todoSignal.status === 'red' && statusBlinkOn}
-                  clickable
-                  onClick={openTodoList}
-                  title={todoSignal.count > 0 ? 'Ouvrir la TODO List dans un nouvel onglet' : 'Aucune tâche à faire — cliquer pour ouvrir la TODO List'}
-                />
-              </div>
+                  {rights.show_alert_todo && (
+                    <StatusLight
+                      label="A faire"
+                      status={todoSignal.status}
+                      count={todoSignal.count}
+                      blink={todoSignal.status === 'red' && statusBlinkOn}
+                      clickable
+                      onClick={openTodoList}
+                      title={todoSignal.count > 0 ? 'Ouvrir la TODO List dans un nouvel onglet' : 'Aucune tâche à faire — cliquer pour ouvrir la TODO List'}
+                    />
+                  )}
+                </div>
+              )}
             </div>
           )}
         </header>
@@ -1789,12 +1864,28 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#17344d',
   },
 
+  userProfile: {
+    fontSize: 12,
+    fontWeight: 700,
+    color: '#5b7285',
+    background: 'rgba(238, 247, 251, 0.95)',
+    border: '1px solid rgba(94, 167, 195, 0.28)',
+    borderRadius: 999,
+    padding: '3px 8px',
+  },
+
   select: {
     position: 'relative',
     zIndex: 7,
     padding: 6,
     borderRadius: 8,
     pointerEvents: 'auto',
+  },
+
+  selectDisabled: {
+    cursor: 'not-allowed',
+    opacity: 0.65,
+    background: '#eef2f6',
   },
 
   navBtnActive: {

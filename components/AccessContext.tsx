@@ -1,6 +1,6 @@
 'use client'
 
-import React, { createContext, useContext, useEffect, useState } from 'react'
+import React, { createContext, useCallback, useContext, useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 
 export type AccessRights = {
@@ -25,6 +25,14 @@ export type AccessRights = {
   allowed_codes_postaux: string[]
   display_name: string
   default_landing_page: string
+  profile_id: string | null
+  profile_code: string
+  profile_name: string
+  show_alert_cerfa_ko: boolean
+  show_alert_cdc_liv_avant_2026: boolean
+  show_alert_controle_frais_port: boolean
+  show_alert_capacite_gaz: boolean
+  show_alert_todo: boolean
 }
 
 type AccessContextType = {
@@ -34,20 +42,70 @@ type AccessContextType = {
   refreshAccess: () => Promise<void>
 }
 
+type UserAccessRow = {
+  email?: string | null
+  display_name?: string | null
+  allowed_scopes?: unknown
+  allowed_agences?: unknown
+  allowed_collaborateurs?: unknown
+  allowed_departements?: unknown
+  allowed_codes_postaux?: unknown
+  access_profile_id?: string | null
+}
+
+type AccessProfileRow = {
+  id?: string | null
+  code?: string | null
+  name?: string | null
+  is_active?: boolean | null
+  can_dashboard?: boolean | null
+  can_territoire?: boolean | null
+  can_cartographie?: boolean | null
+  can_clients?: boolean | null
+  can_carte?: boolean | null
+  can_todo?: boolean | null
+  can_clients_cegeclim?: boolean | null
+  can_suivi_prospects?: boolean | null
+  can_agences?: boolean | null
+  can_autorisation?: boolean | null
+  can_documents?: boolean | null
+  can_stocks?: boolean | null
+  can_activites?: boolean | null
+  can_change_scope?: boolean | null
+  default_landing_page?: string | null
+  show_alert_cerfa_ko?: boolean | null
+  show_alert_cdc_liv_avant_2026?: boolean | null
+  show_alert_controle_frais_port?: boolean | null
+  show_alert_capacite_gaz?: boolean | null
+  show_alert_todo?: boolean | null
+}
+
 function normalizeList(value: unknown, fallback: string[] = []): string[] {
   if (value === null || value === undefined) return fallback
 
   if (Array.isArray(value)) {
-    const values: string[] = value
-      .flatMap((item: unknown): string[] => normalizeList(item, []))
-      .map((item: string): string => String(item || '').trim())
-      .filter((item: string): boolean => Boolean(item))
+    const values = value
+      .flatMap((item) => normalizeList(item, []))
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
 
     return values.length ? Array.from(new Set(values)) : fallback
   }
 
+  if (typeof value === 'object') {
+    return normalizeList(Object.values(value as Record<string, unknown>), fallback)
+  }
+
   const text = String(value || '').trim()
   if (!text) return fallback
+
+  if (text.startsWith('[') && text.endsWith(']')) {
+    try {
+      return normalizeList(JSON.parse(text), fallback)
+    } catch {
+      // On poursuit avec le découpage texte.
+    }
+  }
 
   const values = text
     .split(/[;,|\n]/)
@@ -57,7 +115,7 @@ function normalizeList(value: unknown, fallback: string[] = []): string[] {
   return values.length ? Array.from(new Set(values)) : fallback
 }
 
-const defaultRights: AccessRights = {
+export const defaultRights: AccessRights = {
   can_dashboard: false,
   can_territoire: false,
   can_cartographie: false,
@@ -79,6 +137,14 @@ const defaultRights: AccessRights = {
   allowed_codes_postaux: [],
   display_name: '',
   default_landing_page: '/accueil',
+  profile_id: null,
+  profile_code: '',
+  profile_name: 'Aucun profil',
+  show_alert_cerfa_ko: false,
+  show_alert_cdc_liv_avant_2026: false,
+  show_alert_controle_frais_port: false,
+  show_alert_capacite_gaz: false,
+  show_alert_todo: false,
 }
 
 const AccessContext = createContext<AccessContextType>({
@@ -88,24 +154,58 @@ const AccessContext = createContext<AccessContextType>({
   refreshAccess: async () => {},
 })
 
+const PAGE_ACCESS_CHECKS: Array<[string, keyof AccessRights]> = [
+  ['/indicateurs', 'can_dashboard'],
+  ['/Indicateurs', 'can_dashboard'],
+  ['/approvisionnements', 'can_dashboard'],
+  ['/portefeuille-livraison', 'can_dashboard'],
+  ['/synthese_multi_clients', 'can_dashboard'],
+  ['/focus_mensuel', 'can_dashboard'],
+  ['/territoire', 'can_territoire'],
+  ['/cartographie', 'can_cartographie'],
+  ['/clients', 'can_autorisation'],
+  ['/carte', 'can_carte'],
+  ['/todo', 'can_todo'],
+  ['/clients_cegeclim', 'can_clients_cegeclim'],
+  ['/suivi_prospects', 'can_suivi_prospects'],
+  ['/agences', 'can_agences'],
+  ['/autorisation', 'can_autorisation'],
+  ['/admin/planification', 'can_autorisation'],
+  ['/Import', 'can_autorisation'],
+  ['/cycle-documents', 'can_autorisation'],
+  ['/atelier-analyse', 'can_autorisation'],
+  ['/documents', 'can_documents'],
+  ['/stocks', 'can_stocks'],
+  ['/stocks-disponibilites', 'can_stocks'],
+  ['/activites', 'can_activites'],
+]
+
+function isPathAllowed(path: string, rights: AccessRights) {
+  if (!path || path === '/accueil') return true
+  const match = PAGE_ACCESS_CHECKS.find(([prefix]) => path === prefix || path.startsWith(`${prefix}/`))
+  if (!match) return true
+  return Boolean(rights[match[1]])
+}
+
 export function getFirstAllowedPath(rights: AccessRights) {
-  if (rights.default_landing_page && rights.default_landing_page !== '/accueil') {
-    return rights.default_landing_page
+  const requestedLandingPage = String(rights.default_landing_page || '').trim()
+  if (requestedLandingPage && requestedLandingPage !== '/accueil' && isPathAllowed(requestedLandingPage, rights)) {
+    return requestedLandingPage
   }
 
   if (rights.can_dashboard) return '/indicateurs'
   if (rights.can_territoire) return '/territoire'
   if (rights.can_cartographie) return '/cartographie'
-  if (rights.can_clients) return '/clients'
-  if (rights.can_todo) return '/todo'
+  if (rights.can_clients) return '/accueil'
   if (rights.can_carte) return '/carte'
+  if (rights.can_todo) return '/todo'
   if (rights.can_clients_cegeclim) return '/clients_cegeclim'
   if (rights.can_suivi_prospects) return '/suivi_prospects'
   if (rights.can_agences) return '/agences'
   if (rights.can_autorisation) return '/autorisation'
   if (rights.can_activites) return '/activites'
   if (rights.can_documents) return '/documents'
-  if (rights.can_stocks) return '/stocks'
+  if (rights.can_stocks) return '/stocks-disponibilites'
 
   return '/unauthorized'
 }
@@ -128,16 +228,56 @@ async function fetchAccess(): Promise<{ email: string | null; rights: AccessRigh
 
     const normalizedEmail = session.user.email.toLowerCase().trim()
 
-    const { data, error } = await supabase
+    const { data: userData, error: userError } = await supabase
       .from('user_page_access')
       .select(`
         email,
+        display_name,
+        allowed_scopes,
+        allowed_agences,
+        allowed_collaborateurs,
+        allowed_departements,
+        allowed_codes_postaux,
+        access_profile_id
+      `)
+      .eq('email', normalizedEmail)
+      .maybeSingle()
+
+    if (userError || !userData) {
+      if (userError) console.error('ACCESS - lecture user_page_access', userError)
+      return { email: normalizedEmail, rights: defaultRights }
+    }
+
+    const userRow = userData as UserAccessRow
+    const profileId = String(userRow.access_profile_id || '').trim()
+    if (!profileId) {
+      return {
+        email: normalizedEmail,
+        rights: {
+          ...defaultRights,
+          display_name: String(userRow.display_name || '').trim(),
+          allowed_scopes: normalizeList(userRow.allowed_scopes, ['Global']),
+          allowed_agences: normalizeList(userRow.allowed_agences, []),
+          allowed_collaborateurs: normalizeList(userRow.allowed_collaborateurs, []),
+          allowed_departements: normalizeList(userRow.allowed_departements, []),
+          allowed_codes_postaux: normalizeList(userRow.allowed_codes_postaux, []),
+        },
+      }
+    }
+
+    const { data: profileData, error: profileError } = await supabase
+      .from('access_profiles')
+      .select(`
+        id,
+        code,
+        name,
+        is_active,
         can_dashboard,
         can_territoire,
         can_cartographie,
         can_clients,
-        can_todo,
         can_carte,
+        can_todo,
         can_clients_cegeclim,
         can_suivi_prospects,
         can_agences,
@@ -146,54 +286,89 @@ async function fetchAccess(): Promise<{ email: string | null; rights: AccessRigh
         can_stocks,
         can_activites,
         can_change_scope,
-        allowed_scopes,
-        allowed_agences,
-        allowed_collaborateurs,
-        allowed_departements,
-        allowed_codes_postaux,
-        display_name,
-        default_landing_page
+        default_landing_page,
+        show_alert_cerfa_ko,
+        show_alert_cdc_liv_avant_2026,
+        show_alert_controle_frais_port,
+        show_alert_capacite_gaz,
+        show_alert_todo
       `)
-      .eq('email', normalizedEmail)
+      .eq('id', profileId)
       .maybeSingle()
 
-    console.log('ACCESS - session email =', normalizedEmail)
-    console.log('ACCESS - query data =', data)
-    console.log('ACCESS - query error =', error)
+    if (profileError || !profileData) {
+      if (profileError) console.error('ACCESS - lecture access_profiles', profileError)
+      return {
+        email: normalizedEmail,
+        rights: {
+          ...defaultRights,
+          display_name: String(userRow.display_name || '').trim(),
+          allowed_scopes: normalizeList(userRow.allowed_scopes, ['Global']),
+          allowed_agences: normalizeList(userRow.allowed_agences, []),
+          allowed_collaborateurs: normalizeList(userRow.allowed_collaborateurs, []),
+          allowed_departements: normalizeList(userRow.allowed_departements, []),
+          allowed_codes_postaux: normalizeList(userRow.allowed_codes_postaux, []),
+          profile_id: profileId,
+          profile_name: 'Profil introuvable',
+        },
+      }
+    }
 
-    if (error || !data) {
-      return { email: normalizedEmail, rights: defaultRights }
+    const profile = profileData as AccessProfileRow
+    if (profile.is_active === false) {
+      return {
+        email: normalizedEmail,
+        rights: {
+          ...defaultRights,
+          display_name: String(userRow.display_name || '').trim(),
+          allowed_scopes: normalizeList(userRow.allowed_scopes, ['Global']),
+          allowed_agences: normalizeList(userRow.allowed_agences, []),
+          allowed_collaborateurs: normalizeList(userRow.allowed_collaborateurs, []),
+          allowed_departements: normalizeList(userRow.allowed_departements, []),
+          allowed_codes_postaux: normalizeList(userRow.allowed_codes_postaux, []),
+          profile_id: profileId,
+          profile_code: String(profile.code || '').trim(),
+          profile_name: `${String(profile.name || 'Profil').trim()} (inactif)`,
+        },
+      }
     }
 
     return {
       email: normalizedEmail,
       rights: {
-        can_dashboard: !!data.can_dashboard,
-        can_territoire: !!data.can_territoire,
-        can_cartographie: !!data.can_cartographie,
-        can_clients: !!data.can_clients,
-        can_carte: !!data.can_carte,
-        can_todo: !!data.can_todo,
-        can_clients_cegeclim: !!data.can_clients_cegeclim,
-        can_suivi_prospects: !!data.can_suivi_prospects,
-        can_agences: !!data.can_agences,
-        can_autorisation: !!data.can_autorisation,
-        can_documents: !!data.can_documents,
-        can_stocks: !!data.can_stocks,
-        can_activites: !!data.can_activites,
-        can_change_scope: !!data.can_change_scope,
-        allowed_scopes: normalizeList(data.allowed_scopes, ['Global']),
-        allowed_agences: normalizeList(data.allowed_agences, []),
-        allowed_collaborateurs: normalizeList(data.allowed_collaborateurs, []),
-        allowed_departements: normalizeList(data.allowed_departements, []),
-        allowed_codes_postaux: normalizeList(data.allowed_codes_postaux, []),
-        display_name: String(data.display_name || '').trim(),
-        default_landing_page:
-          String(data.default_landing_page || '/accueil').trim() || '/accueil',
+        can_dashboard: !!profile.can_dashboard,
+        can_territoire: !!profile.can_territoire,
+        can_cartographie: !!profile.can_cartographie,
+        can_clients: !!profile.can_clients,
+        can_carte: !!profile.can_carte,
+        can_todo: !!profile.can_todo,
+        can_clients_cegeclim: !!profile.can_clients_cegeclim,
+        can_suivi_prospects: !!profile.can_suivi_prospects,
+        can_agences: !!profile.can_agences,
+        can_autorisation: !!profile.can_autorisation,
+        can_documents: !!profile.can_documents,
+        can_stocks: !!profile.can_stocks,
+        can_activites: !!profile.can_activites,
+        can_change_scope: !!profile.can_change_scope,
+        allowed_scopes: normalizeList(userRow.allowed_scopes, ['Global']),
+        allowed_agences: normalizeList(userRow.allowed_agences, []),
+        allowed_collaborateurs: normalizeList(userRow.allowed_collaborateurs, []),
+        allowed_departements: normalizeList(userRow.allowed_departements, []),
+        allowed_codes_postaux: normalizeList(userRow.allowed_codes_postaux, []),
+        display_name: String(userRow.display_name || '').trim(),
+        default_landing_page: String(profile.default_landing_page || '/accueil').trim() || '/accueil',
+        profile_id: String(profile.id || profileId),
+        profile_code: String(profile.code || '').trim(),
+        profile_name: String(profile.name || 'Profil sans nom').trim(),
+        show_alert_cerfa_ko: !!profile.show_alert_cerfa_ko,
+        show_alert_cdc_liv_avant_2026: !!profile.show_alert_cdc_liv_avant_2026,
+        show_alert_controle_frais_port: !!profile.show_alert_controle_frais_port,
+        show_alert_capacite_gaz: !!profile.show_alert_capacite_gaz,
+        show_alert_todo: !!profile.show_alert_todo,
       },
     }
-  } catch (err) {
-    console.error('ACCESS - erreur inattendue', err)
+  } catch (error) {
+    console.error('ACCESS - erreur inattendue', error)
     return { email: null, rights: defaultRights }
   }
 }
@@ -203,25 +378,33 @@ export function AccessProvider({ children }: { children: React.ReactNode }) {
   const [email, setEmail] = useState<string | null>(null)
   const [rights, setRights] = useState<AccessRights>(defaultRights)
 
-  const refreshAccess = async () => {
+  const refreshAccess = useCallback(async () => {
     setLoading(true)
-    const res = await fetchAccess()
-    setEmail(res.email)
-    setRights(res.rights)
+    const result = await fetchAccess()
+    setEmail(result.email)
+    setRights(result.rights)
     setLoading(false)
-  }
+  }, [])
 
   useEffect(() => {
-    refreshAccess()
+    void refreshAccess()
 
     const { data } = supabase.auth.onAuthStateChange(() => {
-      refreshAccess()
+      void refreshAccess()
     })
+
+    const handleAccessChanged = () => void refreshAccess()
+    const handleWindowFocus = () => void refreshAccess()
+
+    window.addEventListener('cegeclim:access-changed', handleAccessChanged)
+    window.addEventListener('focus', handleWindowFocus)
 
     return () => {
       data.subscription.unsubscribe()
+      window.removeEventListener('cegeclim:access-changed', handleAccessChanged)
+      window.removeEventListener('focus', handleWindowFocus)
     }
-  }, [])
+  }, [refreshAccess])
 
   return (
     <AccessContext.Provider value={{ loading, email, rights, refreshAccess }}>

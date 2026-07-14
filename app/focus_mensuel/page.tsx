@@ -60,8 +60,11 @@ type ComparisonProgress = {
   total: number;
 };
 
+type ComparisonBucketKey = "ytdN" | "ytdN1" | "rollingN" | "rollingN1";
+type ComparisonBuckets = Record<ComparisonBucketKey, DailyRow[]>;
+
 type PersistentFocusComparisonPayload = {
-  version: 3;
+  version: 4;
   type: "focus_mensuel_persistent_comparison_cache";
   created_at: string;
   month: string;
@@ -308,7 +311,7 @@ const REPORT_JOB_CREATE_ROUTE = "/api/reports/focus-mensuel-pdf";
 const REPORT_JOB_PROCESS_ROUTE = "/api/reports/focus-mensuel-pdf/process";
 const REPORT_PDF_CACHE_ROUTE = "/api/reports/focus-mensuel-pdf/cache";
 const FOCUS_COMPARISON_CACHE_TABLE = "focus_mensuel_comparison_cache";
-const FOCUS_COMPARISON_CACHE_VERSION = 3;
+const FOCUS_COMPARISON_CACHE_VERSION = 4;
 const FOCUS_COMPARISON_CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 
 // Sécurité PDF : les tableaux comparatifs ne doivent jamais empêcher la capture Puppeteer.
@@ -546,6 +549,46 @@ function normalizeKey(value: any) {
   return String(value || "")
     .trim()
     .toUpperCase();
+}
+
+function normalizeComparisonBucketKey(
+  value: string | null | undefined,
+): ComparisonBucketKey | null {
+  const compact = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+
+  if (["ytdn", "ytdcurrent", "currentytd", "ytd0"].includes(compact))
+    return "ytdN";
+  if (
+    [
+      "ytdn1",
+      "ytdprevious",
+      "ytdpreviousyear",
+      "previousytd",
+      "ytdprev",
+    ].includes(compact)
+  )
+    return "ytdN1";
+  if (
+    ["rollingn", "rolling12n", "rollingcurrent", "currentrolling"].includes(
+      compact,
+    )
+  )
+    return "rollingN";
+  if (
+    [
+      "rollingn1",
+      "rolling12n1",
+      "rollingprevious",
+      "rollingpreviousyear",
+      "previousrolling",
+    ].includes(compact)
+  )
+    return "rollingN1";
+
+  return null;
 }
 
 function formatMoneyPlain(
@@ -1687,12 +1730,22 @@ function FocusMensuelPageContent() {
 
   const comparisonProgressLabel = useMemo(() => {
     if (comparisonProgress.status === "ready")
-      return "Tableaux activité N / N-1 chargés depuis le cache global.";
+      return (
+        comparisonProgress.label ||
+        "Tableaux activité N / N-1 et 12 mois glissants chargés."
+      );
     if (comparisonProgress.status === "error")
-      return "Erreur pendant le chargement du cache comparatif global.";
+      return (
+        comparisonProgress.label ||
+        "Erreur pendant le chargement des tableaux comparatifs."
+      );
     if (comparisonProgress.status !== "loading") return "";
 
-    return comparisonProgress.current || "Chargement du cache comparatif global…";
+    return (
+      comparisonProgress.current ||
+      comparisonProgress.label ||
+      "Chargement des tableaux comparatifs…"
+    );
   }, [comparisonProgress]);
 
   const distinctDocsProgressLabel = useMemo(() => {
@@ -2871,6 +2924,162 @@ function FocusMensuelPageContent() {
     return (data || []) as DailyRow[];
   }
 
+  function createEmptyComparisonBuckets(): ComparisonBuckets {
+    return {
+      ytdN: [],
+      ytdN1: [],
+      rollingN: [],
+      rollingN1: [],
+    };
+  }
+
+  function deriveYtdRowsFromRolling(
+    rows: DailyRow[],
+    year: number,
+  ): DailyRow[] {
+    const yearPrefix = `${year}-`;
+    return rows.filter((row) => dateOnly(row.jour).startsWith(yearPrefix));
+  }
+
+  function resolveComparisonBuckets(
+    source: ComparisonBuckets,
+  ): ComparisonBuckets {
+    const focusYear = Number(month.slice(0, 4));
+    const rollingN = normalizeDailyRows(source.rollingN || []);
+    const rollingN1 = normalizeDailyRows(source.rollingN1 || []);
+    const ytdNFromRolling = deriveYtdRowsFromRolling(rollingN, focusYear);
+    const ytdN1FromRolling = deriveYtdRowsFromRolling(
+      rollingN1,
+      focusYear - 1,
+    );
+
+    // Les blocs YTD et rolling se recouvrent. Le rolling est la source la plus
+    // fiable car il est également utilisé par le troisième tableau. On dérive
+    // donc systématiquement le YTD depuis le rolling lorsqu'il est disponible.
+    // Cela corrige les RPC déployées avec des clés YTD différentes ou des blocs
+    // YTD partiels, sans refaire de requête.
+    return {
+      ytdN:
+        ytdNFromRolling.length > 0
+          ? ytdNFromRolling
+          : normalizeDailyRows(source.ytdN || []),
+      ytdN1:
+        ytdN1FromRolling.length > 0
+          ? ytdN1FromRolling
+          : normalizeDailyRows(source.ytdN1 || []),
+      rollingN,
+      rollingN1,
+    };
+  }
+
+  function applyComparisonBuckets(result: ComparisonBuckets) {
+    setYtdRowsN(result.ytdN);
+    setYtdRowsN1(result.ytdN1);
+    setRollingRowsN(result.rollingN);
+    setRollingRowsN1(result.rollingN1);
+  }
+
+  async function fetchComparisonPeriodByMonth(
+    dateDebut: string,
+    dateFin: string,
+    label: string,
+    loadId: number,
+    progress: { done: number; total: number },
+  ) {
+    const ranges = buildMonthlyRpcRanges(dateDebut, dateFin);
+    const rows: DailyRow[] = [];
+
+    for (const range of ranges) {
+      if (loadId !== comparisonLoadIdRef.current)
+        throw new Error("__STALE_COMPARISON_LOAD__");
+
+      setComparisonProgress({
+        status: "loading",
+        label: "Complément automatique des tableaux comparatifs",
+        current: `${label} · ${formatMonthFr(monthKey(range.start))}`,
+        done: progress.done,
+        total: progress.total,
+      });
+
+      try {
+        rows.push(...(await fetchFocusSummaryRange(range)));
+      } catch (exception: any) {
+        if (!isStatementTimeout(exception)) throw exception;
+
+        // Un mois isolé peut encore dépasser le statement_timeout selon le
+        // volume BL. Dans ce cas on replie en semaines, puis en jours uniquement
+        // pour la semaine qui pose problème.
+        const weeklyRanges = splitDateRangeByDays(range.start, range.end, 7);
+        for (const weeklyRange of weeklyRanges) {
+          try {
+            rows.push(...(await fetchFocusSummaryRange(weeklyRange)));
+          } catch (weeklyException: any) {
+            if (!isStatementTimeout(weeklyException)) throw weeklyException;
+            const dailyRanges = splitDateRangeByDays(
+              weeklyRange.start,
+              weeklyRange.end,
+              1,
+            );
+            for (const dailyRange of dailyRanges) {
+              rows.push(...(await fetchFocusSummaryRange(dailyRange)));
+            }
+          }
+        }
+      }
+
+      progress.done += 1;
+      if (loadId !== comparisonLoadIdRef.current)
+        throw new Error("__STALE_COMPARISON_LOAD__");
+
+      setComparisonProgress({
+        status: "loading",
+        label: "Complément automatique des tableaux comparatifs",
+        current: `${label} · ${formatMonthFr(monthKey(range.start))} terminé`,
+        done: progress.done,
+        total: progress.total,
+      });
+    }
+
+    return normalizeDailyRows(rows);
+  }
+
+  async function persistResolvedComparisonBuckets(
+    result: ComparisonBuckets,
+    completedRanges: string[],
+  ) {
+    if (isPdfMode) return;
+
+    try {
+      await savePersistentComparisonCache({
+        version: FOCUS_COMPARISON_CACHE_VERSION,
+        type: "focus_mensuel_persistent_comparison_cache",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        month,
+        filters: {
+          agence: effectiveAgence || null,
+          familleMacro: familleMacro || null,
+          collaborateur: effectiveCollaborateur || null,
+          includeHorsStats,
+        },
+        ytdRowsN: result.ytdN,
+        ytdRowsN1: result.ytdN1,
+        rollingRowsN: result.rollingN,
+        rollingRowsN1: result.rollingN1,
+        status: "complete",
+        completedRanges,
+        totalRanges: completedRanges.length,
+      });
+    } catch (cacheException) {
+      // Le cache persistant accélère les ouvertures suivantes mais ne doit
+      // jamais empêcher l'affichage des données déjà chargées.
+      console.warn(
+        "Sauvegarde du cache comparatif corrigé impossible:",
+        cacheException,
+      );
+    }
+  }
+
   async function loadComparisonTables(_forceRefresh = false) {
     const loadId = comparisonLoadIdRef.current + 1;
     comparisonLoadIdRef.current = loadId;
@@ -2885,86 +3094,198 @@ function FocusMensuelPageContent() {
     setCacheInfo(null);
     setComparisonProgress({
       status: "loading",
-      label: "Chargement du cache comparatif global",
-      current: "Lecture des tableaux N / N-1 et 12 mois glissants…",
+      label: "Chargement des tableaux comparatifs",
+      current: "Lecture du cache global…",
       done: 0,
       total: 1,
     });
 
+    const comparisonFocusDate = lastDayOfMonth(month);
+    const rollingNStart = monthStart(addMonthsToMonth(month, -11));
+    const rollingNEnd = nextMonthStart(month);
+    const rollingN1Start = addYearsYmd(rollingNStart, -1);
+    const rollingN1End = addYearsYmd(rollingNEnd, -1);
+    let result = createEmptyComparisonBuckets();
+    const completedRanges: string[] = [];
+
     try {
-      // On charge le mois complet une seule fois. Le jour focus est ensuite
-      // appliqué localement par normalizedYtdRowsNAtFocus / N1AtFocus.
-      const comparisonFocusDate = lastDayOfMonth(month);
+      // 1. Cache persistant applicatif : il évite toute reconstruction lors des
+      // ouvertures suivantes et reste valable 14 jours.
+      if (!_forceRefresh && !isPdfMode) {
+        const cached = await readPersistentComparisonCache();
+        if (loadId !== comparisonLoadIdRef.current) return;
 
-      const { data, error } = await withClientTimeout(
-        supabase.rpc("get_focus_mensuel_comparison_cache_metier", {
-          p_focus_date: comparisonFocusDate,
-          p_month: month,
-          p_agence: effectiveAgence || null,
-          p_famille_macro: familleMacro || null,
-          p_collaborateur: effectiveCollaborateur || null,
-          p_include_hors_statistiques: includeHorsStats,
-        }),
-        isPdfMode ? 30000 : 45000,
-        `Chargement du cache comparatif global ${month}`,
-      );
+        if (cached?.status === "complete") {
+          const cachedResolved = resolveComparisonBuckets({
+            ytdN: cached.ytdRowsN || [],
+            ytdN1: cached.ytdRowsN1 || [],
+            rollingN: cached.rollingRowsN || [],
+            rollingN1: cached.rollingRowsN1 || [],
+          });
 
-      if (error) throw error;
+          if (
+            cachedResolved.rollingN.length > 0 &&
+            cachedResolved.rollingN1.length > 0
+          ) {
+            applyComparisonBuckets(cachedResolved);
+            setComparisonReady(true);
+            setComparisonError(null);
+            setComparisonProgress({
+              status: "ready",
+              label: "3 tableaux annuels chargés depuis le cache corrigé.",
+              current: null,
+              done: 1,
+              total: 1,
+            });
+            return;
+          }
+        }
+      }
+
+      // 2. Appel global rapide. La normalisation accepte les différentes formes
+      // de clés déjà déployées (ytdN1, ytd_n_1, rolling-n-1, etc.).
+      try {
+        const { data, error } = await withClientTimeout(
+          supabase.rpc("get_focus_mensuel_comparison_cache_metier", {
+            p_focus_date: comparisonFocusDate,
+            p_month: month,
+            p_agence: effectiveAgence || null,
+            p_famille_macro: familleMacro || null,
+            p_collaborateur: effectiveCollaborateur || null,
+            p_include_hors_statistiques: includeHorsStats,
+          }),
+          isPdfMode ? 30000 : 45000,
+          `Chargement du cache comparatif global ${month}`,
+        );
+
+        if (error) throw error;
+        if (loadId !== comparisonLoadIdRef.current) return;
+
+        const globalResult = createEmptyComparisonBuckets();
+        (
+          (Array.isArray(data) ? data : []) as Array<
+            DailyRow & { comparison_key?: string | null }
+          >
+        ).forEach((row) => {
+          const { comparison_key, ...dailyRow } = row;
+          const key = normalizeComparisonBucketKey(comparison_key);
+          if (!key) return;
+          globalResult[key].push(dailyRow as DailyRow);
+        });
+
+        result = resolveComparisonBuckets(globalResult);
+        completedRanges.push("global");
+      } catch (globalException) {
+        console.warn(
+          "Cache comparatif global indisponible, passage au repli mensuel:",
+          globalException,
+        );
+        result = createEmptyComparisonBuckets();
+      }
+
+      // 3. Repli ciblé : on ne recharge que le ou les blocs rolling réellement
+      // absents. Les deux tableaux YTD sont ensuite dérivés localement de ces
+      // mêmes lignes, ce qui garantit des chiffres cohérents entre les 3 tableaux.
+      const missingRollingN = result.rollingN.length === 0;
+      const missingRollingN1 = result.rollingN1.length === 0;
+      const missingRanges =
+        (missingRollingN ? buildMonthlyRpcRanges(rollingNStart, rollingNEnd).length : 0) +
+        (missingRollingN1
+          ? buildMonthlyRpcRanges(rollingN1Start, rollingN1End).length
+          : 0);
+      const progress = { done: completedRanges.length, total: 1 + missingRanges };
+
+      if (missingRollingN) {
+        result.rollingN = await fetchComparisonPeriodByMonth(
+          rollingNStart,
+          rollingNEnd,
+          "12 mois N",
+          loadId,
+          progress,
+        );
+        completedRanges.push("rollingN-monthly-fallback");
+      }
+
+      if (missingRollingN1) {
+        result.rollingN1 = await fetchComparisonPeriodByMonth(
+          rollingN1Start,
+          rollingN1End,
+          "12 mois N-1",
+          loadId,
+          progress,
+        );
+        completedRanges.push("rollingN1-monthly-fallback");
+      }
+
       if (loadId !== comparisonLoadIdRef.current) return;
+      result = resolveComparisonBuckets(result);
 
-      const result: Record<
-        "ytdN" | "ytdN1" | "rollingN" | "rollingN1",
-        DailyRow[]
-      > = {
-        ytdN: [],
-        ytdN1: [],
-        rollingN: [],
-        rollingN1: [],
-      };
+      const hasCurrentData =
+        result.rollingN.length > 0 || result.ytdN.length > 0;
+      const hasPreviousData =
+        result.rollingN1.length > 0 || result.ytdN1.length > 0;
 
-      (
-        (Array.isArray(data) ? data : []) as Array<
-          DailyRow & { comparison_key?: string | null }
-        >
-      ).forEach((row) => {
-        const { comparison_key, ...dailyRow } = row;
-        const key = String(comparison_key || "");
-        if (!Object.prototype.hasOwnProperty.call(result, key)) return;
-        result[key as keyof typeof result].push(dailyRow as DailyRow);
-      });
+      if (!hasCurrentData && !hasPreviousData) {
+        throw new Error(
+          "Aucune ligne n'a été renvoyée pour les périodes N, N-1 et 12 mois glissants.",
+        );
+      }
 
-      setYtdRowsN(result.ytdN);
-      setYtdRowsN1(result.ytdN1);
-      setRollingRowsN(result.rollingN);
-      setRollingRowsN1(result.rollingN1);
+      applyComparisonBuckets(result);
       setComparisonReady(true);
       setComparisonError(null);
-      setComparisonProgress({
-        status: "ready",
-        label: "Cache comparatif global chargé",
-        current: null,
-        done: 1,
-        total: 1,
-      });
-    } catch (exception: any) {
-      if (loadId !== comparisonLoadIdRef.current) return;
 
-      console.error("focus mensuel global comparison cache", exception);
-      setYtdRowsN([]);
-      setYtdRowsN1([]);
-      setRollingRowsN([]);
-      setRollingRowsN1([]);
-      setComparisonReady(false);
-      setComparisonError(
-        `${exception?.message || String(exception)}. Vérifie que le SQL 20260713_focus_mensuel_comparison_global.sql a bien été exécuté dans Supabase.`,
+      const usedFallback = completedRanges.some((value) =>
+        value.includes("fallback"),
       );
       setComparisonProgress({
-        status: "error",
-        label: "Erreur cache comparatif global",
+        status: "ready",
+        label: usedFallback
+          ? "3 tableaux annuels corrigés et remis en cache."
+          : "3 tableaux annuels chargés depuis le cache global.",
         current: null,
-        done: 0,
-        total: 1,
+        done: progress.total,
+        total: progress.total,
       });
+      setCacheInfo(
+        usedFallback
+          ? "Le cache global était incomplet : les périodes manquantes ont été rechargées automatiquement puis mémorisées pour 14 jours."
+          : "Cache comparatif global contrôlé : les blocs YTD sont recalculés depuis les mêmes lignes que le tableau 12 mois glissants.",
+      );
+
+      await persistResolvedComparisonBuckets(result, completedRanges);
+    } catch (exception: any) {
+      if (isStaleComparisonLoad(exception)) return;
+      if (loadId !== comparisonLoadIdRef.current) return;
+
+      console.error("focus mensuel comparison tables", exception);
+      applyComparisonBuckets(result);
+
+      if (isPdfMode) {
+        // Le PDF doit continuer avec les lignes disponibles, mais l'écran normal
+        // signale l'erreur afin d'éviter d'afficher silencieusement des zéros.
+        setComparisonReady(true);
+        setComparisonError(null);
+        setComparisonProgress({
+          status: "ready",
+          label: "Tableaux comparatifs partiels en mode PDF.",
+          current: null,
+          done: 1,
+          total: 1,
+        });
+      } else {
+        setComparisonReady(false);
+        setComparisonError(
+          `${exception?.message || String(exception)}. Le chargement global et le repli mensuel ont tous les deux échoué.`,
+        );
+        setComparisonProgress({
+          status: "error",
+          label: "Erreur de chargement des 3 tableaux annuels.",
+          current: null,
+          done: 0,
+          total: 1,
+        });
+      }
     } finally {
       if (loadId === comparisonLoadIdRef.current) {
         setComparisonLoading(false);
