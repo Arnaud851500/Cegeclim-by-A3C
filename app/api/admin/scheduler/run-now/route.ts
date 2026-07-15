@@ -42,6 +42,19 @@ type SchedulerRun = {
   result_json?: Record<string, any>
 }
 
+
+function toErrorMessage(error: unknown) {
+  if (error instanceof Error) return error.message
+  if (typeof error === 'string') return error
+
+  try {
+    return JSON.stringify(error)
+  } catch {
+    return String(error)
+  }
+}
+
+
 async function addSchedulerLog(
   supabase: ReturnType<typeof createSupabaseAdmin>,
   schedulerRunId: string,
@@ -186,8 +199,8 @@ export async function POST(req: NextRequest) {
       next_run_at: nextRunAt,
       execution,
     })
-  } catch (error: any) {
-    const message = error?.message || String(error)
+  } catch (error: unknown) {
+    const message = toErrorMessage(error)
     const now = new Date().toISOString()
 
     if (schedulerRun?.id) {

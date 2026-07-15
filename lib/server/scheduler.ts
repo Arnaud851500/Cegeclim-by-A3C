@@ -42,6 +42,17 @@ function requiredEnv(name: string) {
   return value
 }
 
+function toErrorMessage(error: unknown) {
+  if (error instanceof Error) return error.message
+  if (typeof error === 'string') return error
+
+  try {
+    return JSON.stringify(error)
+  } catch {
+    return String(error)
+  }
+}
+
 function toYmdInTimezone(date: Date, timezone = 'Europe/Paris') {
   const formatter = new Intl.DateTimeFormat('fr-CA', {
     timeZone: timezone,
@@ -54,14 +65,10 @@ function toYmdInTimezone(date: Date, timezone = 'Europe/Paris') {
 }
 
 function getAppOrigin() {
-  const configuredOrigin =
-    process.env.APP_BASE_URL ||
-    process.env.VERCEL_PROJECT_PRODUCTION_URL
+  const configuredOrigin = String(process.env.APP_BASE_URL || '').trim()
 
   if (!configuredOrigin) {
-    throw new Error(
-      'APP_BASE_URL ou VERCEL_PROJECT_PRODUCTION_URL est manquant.'
-    )
+    throw new Error("Variable d'environnement manquante : APP_BASE_URL")
   }
 
   return configuredOrigin.startsWith('http')
@@ -535,7 +542,7 @@ export async function executeSchedulerRun(params: {
   schedulerRun: SchedulerRun
 }) {
   const { supabase, job, schedulerRun } = params
-  const origin = getAppOrigin()
+  const appOrigin = getAppOrigin()
   const startedAt = new Date().toISOString()
 
   await supabase
@@ -553,13 +560,13 @@ export async function executeSchedulerRun(params: {
   let executionResult: any
 
   if (job.job_type === 'client_maintenance') {
-    executionResult = await executeClientMaintenance(supabase, job, schedulerRun, origin)
+    executionResult = await executeClientMaintenance(supabase, job, schedulerRun, appOrigin)
   } else if (job.job_type === 'http_route') {
-    executionResult = await executeHttpRoute(job, origin)
+    executionResult = await executeHttpRoute(job, appOrigin)
   } else {
     const config = job.config_json || {}
     if (config.routePath || config.path) {
-      executionResult = await executeHttpRoute(job, origin)
+      executionResult = await executeHttpRoute(job, appOrigin)
     } else {
       throw new Error(`Type de job non supporté : ${job.job_type}`)
     }
@@ -612,7 +619,7 @@ export async function createSchedulerRun(
   return data as SchedulerRun
 }
 
-export async function runDueSchedulerJobs(_origin?: string) {
+export async function runDueSchedulerJobs() {
   const supabase = createSupabaseAdmin()
   const now = new Date().toISOString()
   const results: any[] = []
@@ -659,17 +666,17 @@ export async function runDueSchedulerJobs(_origin?: string) {
         .update({
           status: job.continue_on_error === false ? 'error' : 'partial',
           finished_at: new Date().toISOString(),
-          error_message: error?.message || String(error),
+          error_message: toErrorMessage(error),
           message: 'Erreur traitement scheduler.',
           updated_at: new Date().toISOString(),
         })
         .eq('id', run.id)
 
       await addSchedulerLog(supabase, run.id, 'error', 'Erreur reprise traitement.', {
-        error: error?.message || String(error),
+        error: toErrorMessage(error),
       })
 
-      results.push({ job_key: job.job_key, resumed: true, error: error?.message || String(error) })
+      results.push({ job_key: job.job_key, resumed: true, error: toErrorMessage(error) })
     }
   }
 
@@ -731,7 +738,7 @@ export async function runDueSchedulerJobs(_origin?: string) {
         .update({
           status: job.continue_on_error === false ? 'error' : 'partial',
           finished_at: new Date().toISOString(),
-          error_message: error?.message || String(error),
+          error_message: toErrorMessage(error),
           message: 'Erreur traitement scheduler.',
           updated_at: new Date().toISOString(),
         })
@@ -748,10 +755,10 @@ export async function runDueSchedulerJobs(_origin?: string) {
         .eq('id', job.id)
 
       await addSchedulerLog(supabase, schedulerRun.id, 'error', 'Erreur traitement scheduler.', {
-        error: error?.message || String(error),
+        error: toErrorMessage(error),
       })
 
-      results.push({ job_key: job.job_key, launched: true, error: error?.message || String(error) })
+      results.push({ job_key: job.job_key, launched: true, error: toErrorMessage(error) })
     }
   }
 
