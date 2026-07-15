@@ -202,6 +202,61 @@ function buildMonthlyPeriods(
   return periods
 }
 
+
+const LOCK_RETRY_DELAYS_MS = [2000, 5000, 10000, 20000]
+
+function wait(delayMs: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, delayMs))
+}
+
+function isRetryableDatabaseError(message: string) {
+  const normalized = String(message || '').toLowerCase()
+
+  return (
+    normalized.includes('lock timeout') ||
+    normalized.includes('deadlock detected') ||
+    normalized.includes('could not obtain lock') ||
+    normalized.includes('canceling statement due to lock timeout')
+  )
+}
+
+async function rebuildPeriodWithRetry(
+  supabase: ReturnType<typeof createSupabaseAdmin>,
+  period: MonthPeriod
+) {
+  let lastError = ''
+
+  for (let attempt = 0; attempt <= LOCK_RETRY_DELAYS_MS.length; attempt += 1) {
+    const { data, error } = await supabase.rpc(
+      FLUX_ARTICLES_RPC,
+      {
+        p_date_debut: period.p_date_debut,
+        p_date_fin: period.p_date_fin,
+      }
+    )
+
+    if (!error) {
+      return {
+        data: data ?? null,
+        attempts: attempt + 1,
+      }
+    }
+
+    lastError = error.message || String(error)
+
+    if (
+      !isRetryableDatabaseError(lastError) ||
+      attempt >= LOCK_RETRY_DELAYS_MS.length
+    ) {
+      throw new Error(lastError)
+    }
+
+    await wait(LOCK_RETRY_DELAYS_MS[attempt])
+  }
+
+  throw new Error(lastError || 'Erreur inconnue pendant le rebuild flux articles.')
+}
+
 async function handler(req: NextRequest) {
   if (!isAuthorized(req)) {
     return NextResponse.json(
@@ -226,10 +281,12 @@ async function handler(req: NextRequest) {
     const { startDate, endDate } =
       resolveRequestedRange(body)
 
+    // On traite le mois le plus récent en premier afin que les écrans du jour
+    // soient actualisés même si un ancien mois rencontre un verrou temporaire.
     const periods = buildMonthlyPeriods(
       startDate,
       endDate
-    )
+    ).reverse()
 
     if (periods.length === 0) {
       throw new Error(
@@ -240,30 +297,69 @@ async function handler(req: NextRequest) {
     const supabase = createSupabaseAdmin()
     const results: Array<{
       period: MonthPeriod
-      status: 'done'
-      result: unknown
+      status: 'done' | 'error'
+      attempts: number
+      result?: unknown
+      error?: string
     }> = []
 
     for (const period of periods) {
-      const { data, error } = await supabase.rpc(
-        FLUX_ARTICLES_RPC,
-        {
-          p_date_debut: period.p_date_debut,
-          p_date_fin: period.p_date_fin,
-        }
-      )
-
-      if (error) {
-        throw new Error(
-          `${FLUX_ARTICLES_RPC} ${period.label} : ${error.message}`
+      try {
+        const rebuilt = await rebuildPeriodWithRetry(
+          supabase,
+          period
         )
-      }
 
-      results.push({
-        period,
-        status: 'done',
-        result: data ?? null,
-      })
+        results.push({
+          period,
+          status: 'done',
+          attempts: rebuilt.attempts,
+          result: rebuilt.data,
+        })
+      } catch (error: unknown) {
+        results.push({
+          period,
+          status: 'error',
+          attempts: LOCK_RETRY_DELAYS_MS.length + 1,
+          error: toErrorMessage(error),
+        })
+
+        // On poursuit les autres mois : un verrou sur un mois historique
+        // ne doit plus empêcher le recalcul des périodes plus récentes.
+      }
+    }
+
+    const failedPeriods = results.filter(
+      (result) => result.status === 'error'
+    )
+
+    if (failedPeriods.length > 0) {
+      const failedLabels = failedPeriods
+        .map((result) =>
+          `${result.period.label} : ${result.error}`
+        )
+        .join(' | ')
+
+      return NextResponse.json(
+        {
+          success: false,
+          partial: true,
+          error:
+            `Rebuild flux articles partiel. ` +
+            `${failedPeriods.length}/${periods.length} période(s) en erreur : ` +
+            failedLabels,
+          rpc: FLUX_ARTICLES_RPC,
+          requested_range: {
+            startDate,
+            endDate,
+          },
+          periods,
+          results,
+          started_at: startedAt,
+          finished_at: new Date().toISOString(),
+        },
+        { status: 500 }
+      )
     }
 
     return NextResponse.json({
