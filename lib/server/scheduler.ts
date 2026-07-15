@@ -533,7 +533,6 @@ export async function executeSchedulerRun(params: {
   supabase: SupabaseAdmin
   job: SchedulerJob
   schedulerRun: SchedulerRun
-  origin?: string
 }) {
   const { supabase, job, schedulerRun } = params
   const origin = getAppOrigin()
@@ -652,7 +651,6 @@ export async function runDueSchedulerJobs(_origin?: string) {
         supabase,
         job,
         schedulerRun: run as SchedulerRun,
-        origin,
       })
       results.push({ job_key: job.job_key, resumed: true, execution })
     } catch (error: any) {
@@ -710,7 +708,6 @@ export async function runDueSchedulerJobs(_origin?: string) {
         supabase,
         job,
         schedulerRun,
-        origin,
       })
 
       const nextRunAt = computeNextRunAt(job)
