@@ -423,16 +423,21 @@ const config: Record<string, any> = {
     })
   }
 
-  const workerUrl = new URL('/api/cron/client-maintenance-worker', origin)
-  workerUrl.searchParams.set('iterations', String(maxIterations))
 
-  const workerRes = await fetch(workerUrl.toString(), {
-    method: 'GET',
-    headers: {
-      'x-client-maintenance-secret': secret,
-    },
-    cache: 'no-store',
-  })
+  const workerUrl = new URL('/api/cron/client-maintenance-worker', origin)
+workerUrl.searchParams.set('iterations', String(maxIterations))
+
+const workerRes = await fetch(workerUrl.toString(), {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'x-client-maintenance-secret': secret,
+  },
+  body: JSON.stringify({
+    iterations: maxIterations,
+  }),
+  cache: 'no-store',
+})
 
   const workerJson = await readJsonSafe(workerRes)
 
