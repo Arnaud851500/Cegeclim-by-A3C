@@ -10,6 +10,7 @@ import { Analytics } from '@vercel/analytics/next'
 import AutoLogout from '@/components/autologout'
 import { usePageFilterAccess } from '@/lib/pageAccessFilters'
 import './globals.css'
+import { SpeedInsights } from "@vercel/speed-insights/next"
 
 import {
   SocieteFilterProvider,
