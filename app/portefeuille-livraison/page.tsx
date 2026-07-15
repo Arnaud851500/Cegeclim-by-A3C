@@ -2032,17 +2032,21 @@ export default function PortefeuilleLivraisonPage() {
                     Type doc
                   </th>
 
-                  <th className="whitespace-nowrap border-b border-r border-slate-200 bg-orange-50 px-3 py-2 text-right text-orange-900">
-                    Anomalies port
-                  </th>
+                  {isBlSelected && (
+                    <>
+                      <th className="whitespace-nowrap border-b border-r border-slate-200 bg-orange-50 px-3 py-2 text-right text-orange-900">
+                        Anomalies port
+                      </th>
 
-                  <th className="whitespace-nowrap border-b border-r border-slate-200 bg-red-50 px-3 py-2 text-right text-red-900">
-                    Port manquant
-                  </th>
+                      <th className="whitespace-nowrap border-b border-r border-slate-200 bg-red-50 px-3 py-2 text-right text-red-900">
+                        Port manquant
+                      </th>
 
-                  <th className="whitespace-nowrap border-b border-r border-slate-200 bg-rose-50 px-3 py-2 text-right text-rose-900">
-                    BL à supprimer
-                  </th>
+                      <th className="whitespace-nowrap border-b border-r border-slate-200 bg-rose-50 px-3 py-2 text-right text-rose-900">
+                        BL à supprimer
+                      </th>
+                    </>
+                  )}
 
                   {moisLivraison.map((mois) => (
                     <th
@@ -2083,29 +2087,33 @@ export default function PortefeuilleLivraisonPage() {
                       {row.type_document}
                     </td>
 
-                    <td className={[
-                      'border-b border-r border-slate-200 px-2 py-2 text-right font-semibold',
-                      row.total_nb_anomalies > 0 ? 'bg-orange-50 text-orange-800' : 'text-slate-400',
-                    ].join(' ')}>
-                      {row.total_nb_anomalies.toLocaleString('fr-FR')}
-                    </td>
+                    {isBlSelected && (
+                      <>
+                        <td className={[
+                          'border-b border-r border-slate-200 px-2 py-2 text-right font-semibold',
+                          row.total_nb_anomalies > 0 ? 'bg-orange-50 text-orange-800' : 'text-slate-400',
+                        ].join(' ')}>
+                          {row.total_nb_anomalies.toLocaleString('fr-FR')}
+                        </td>
 
-                    <td className={[
-                      'border-b border-r border-slate-200 px-2 py-2 text-right font-semibold',
-                      row.total_nb_frais_port_manquant > 0 ? 'bg-red-50 text-red-800' : 'text-slate-400',
-                    ].join(' ')}>
-                      {row.total_nb_frais_port_manquant.toLocaleString('fr-FR')}
-                    </td>
+                        <td className={[
+                          'border-b border-r border-slate-200 px-2 py-2 text-right font-semibold',
+                          row.total_nb_frais_port_manquant > 0 ? 'bg-red-50 text-red-800' : 'text-slate-400',
+                        ].join(' ')}>
+                          {row.total_nb_frais_port_manquant.toLocaleString('fr-FR')}
+                        </td>
 
-                    <td className={[
-                      'border-b border-r border-slate-200 px-2 py-2 text-right font-semibold',
-                      row.total_nb_bl_a_supprimer > 0 ? 'bg-rose-50 text-rose-800' : 'text-slate-400',
-                    ].join(' ')}>
-                      <div>{row.total_nb_bl_a_supprimer.toLocaleString('fr-FR')}</div>
-                      {row.total_montant_actions_ht > 0 && (
-                        <div className="text-[11px] font-medium">{formatMoneyCents(row.total_montant_actions_ht)}</div>
-                      )}
-                    </td>
+                        <td className={[
+                          'border-b border-r border-slate-200 px-2 py-2 text-right font-semibold',
+                          row.total_nb_bl_a_supprimer > 0 ? 'bg-rose-50 text-rose-800' : 'text-slate-400',
+                        ].join(' ')}>
+                          <div>{row.total_nb_bl_a_supprimer.toLocaleString('fr-FR')}</div>
+                          {row.total_montant_actions_ht > 0 && (
+                            <div className="text-[11px] font-medium">{formatMoneyCents(row.total_montant_actions_ht)}</div>
+                          )}
+                        </td>
+                      </>
+                    )}
 
                     {moisLivraison.map((mois) => {
                       const cell = row.byMonth[mois]
@@ -2198,7 +2206,7 @@ export default function PortefeuilleLivraisonPage() {
                 {synthese.length === 0 && (
                   <tr>
                     <td
-                      colSpan={7 + moisLivraison.length}
+                      colSpan={(isBlSelected ? 7 : 4) + moisLivraison.length}
                       className="px-4 py-8 text-center text-slate-500"
                     >
                       Aucune donnée trouvée avec les filtres sélectionnés.
