@@ -12,6 +12,7 @@
     "@sparticuz/chromium": "^149.0.0",
     "@supabase/supabase-js": "^2.99.3",
     "@vercel/analytics": "^2.0.1",
+    "@vercel/speed-insights": "^2.0.0",
     "exceljs": "^4.4.0",
     "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.7",
