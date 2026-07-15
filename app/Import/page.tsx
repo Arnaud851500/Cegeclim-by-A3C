@@ -3573,6 +3573,25 @@ export default function ImportsParametragePage() {
     return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
   }
 
+  function getTodayInParisForFocusPdf() {
+    const parts = new Intl.DateTimeFormat('fr-FR', {
+      timeZone: 'Europe/Paris',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(new Date())
+
+    const year = parts.find((part) => part.type === 'year')?.value
+    const month = parts.find((part) => part.type === 'month')?.value
+    const day = parts.find((part) => part.type === 'day')?.value
+
+    if (!year || !month || !day) {
+      return formatDateForSql(new Date())
+    }
+
+    return `${year}-${month}-${day}`
+  }
+
   type RpcPeriod = {
     p_date_debut: string
     p_date_fin: string
@@ -5959,12 +5978,15 @@ export default function ImportsParametragePage() {
 
       const fluxPeriod = getAutoImportFluxArticlesPeriod()
       const smcPeriod = getSmcPeriodCoveringDateInputs(manualStartDate, manualEndDate)
+      const focusDate = getTodayInParisForFocusPdf()
+      const focusMonth = focusDate.slice(0, 7)
 
       const confirmed = window.confirm(
         `${launchSmc ? 'Lancer le job global serveur AVEC SMC ?' : 'Lancer le job global serveur SANS SMC ?'}\n\n` +
         `Fichiers pending : ${pendingFiles.map((file) => file.name).join(', ')}\n\n` +
         `Flux articles : ${fluxPeriod.label} (${AUTO_IMPORT_FLUX_ARTICLES_MONTHS_BACK} mois), mois par mois.\n` +
-        `PDF : commercial-imports/reports/focus-mensuel/Rapport d'activité quotidien.pdf sera écrasé.\n` +
+        `PDF Focus Mensuel : mois ${focusMonth}, journée du ${focusDate} (jour courant Europe/Paris).\n` +
+        `Fichier : commercial-imports/reports/focus-mensuel/Rapport d'activité quotidien.pdf sera écrasé.\n` +
         `SMC : ${launchSmc ? `${smcPeriod.label} — lancement automatique après rapport avant SMC` : 'non lancé — arrêt après rapport avant SMC'}.\n` +
         `Email rapport avant SMC : ${autoImportSendReportEmail && autoImportReportEmailTo.trim() ? autoImportReportEmailTo.trim() : 'non demandé'}.\n\n` +
         `Le traitement sera déclenché côté Supabase Edge Function (${AUTO_IMPORT_EDGE_FUNCTION_NAME}). ` +
@@ -5982,6 +6004,16 @@ export default function ImportsParametragePage() {
         body: {
           action: 'start',
           bucket: AUTO_IMPORT_BUCKET,
+
+          // Le PDF doit toujours être rendu sur la journée civile courante en France.
+          // Les alias sont conservés pour rester compatibles avec les différentes
+          // versions de la fonction Edge et de la route de rendu PDF.
+          focus_date: focusDate,
+          focusDate,
+          report_focus_date: focusDate,
+          focus_month: focusMonth,
+          month: focusMonth,
+
           flux_months_back: AUTO_IMPORT_FLUX_ARTICLES_MONTHS_BACK,
           smc_date_debut: smcPeriod.p_date_debut,
           smc_date_fin: smcPeriod.p_date_fin,
@@ -6011,7 +6043,7 @@ export default function ImportsParametragePage() {
       const runId = Number((data as any)?.run_id || (data as any)?.runId || 0)
       setAutoImportMessage(
         `Job serveur${runId ? ` #${runId}` : ''} créé. ` +
-        `Le serveur va importer les fichiers, reconstruire flux_articles, recalculer la projection stock si Stock/BDCF sont présents, reconstruire Focus Mensuel et produire le rapport avant SMC. ` +
+        `Le serveur va importer les fichiers, reconstruire flux_articles, recalculer la projection stock si Stock/BDCF sont présents, reconstruire Focus Mensuel et produire le rapport du ${focusDate} avant SMC. ` +
         `${launchSmc ? 'SMC sera lancé automatiquement ensuite. ' : 'SMC ne sera pas lancé : le job s’arrêtera après le rapport avant SMC. '}` +
         `Tu peux fermer le front ; utilise Actualiser statut pour suivre l'avancement.`
       )

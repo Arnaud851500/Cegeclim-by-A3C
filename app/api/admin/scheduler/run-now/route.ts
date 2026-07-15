@@ -42,17 +42,6 @@ type SchedulerRun = {
   result_json?: Record<string, any>
 }
 
-function getOrigin(req: NextRequest) {
-  const origin = req.headers.get('origin')
-  if (origin) return origin
-
-  const host = req.headers.get('x-forwarded-host') || req.headers.get('host')
-  const proto = req.headers.get('x-forwarded-proto') || 'https'
-
-  if (!host) throw new Error('Impossible de déterminer l’origine de l’application.')
-  return `${proto}://${host}`
-}
-
 async function addSchedulerLog(
   supabase: ReturnType<typeof createSupabaseAdmin>,
   schedulerRunId: string,
@@ -113,9 +102,10 @@ async function updateJobAfterRun(
   status: string
 ) {
   const now = new Date().toISOString()
-  const nextRunAt = job.enabled && job.frequency !== 'manual'
-    ? computeNextRunAt(job)
-    : job.next_run_at || null
+  const nextRunAt =
+    job.enabled && job.frequency !== 'manual'
+      ? computeNextRunAt(job)
+      : job.next_run_at || null
 
   const { error } = await supabase
     .from('scheduler_jobs')
@@ -128,7 +118,6 @@ async function updateJobAfterRun(
     .eq('id', job.id)
 
   if (error) throw error
-
   return nextRunAt
 }
 
@@ -146,7 +135,10 @@ export async function POST(req: NextRequest) {
 
     if (job.archived_at) {
       return NextResponse.json(
-        { success: false, error: 'Ce job est archivé et ne peut plus être lancé.' },
+        {
+          success: false,
+          error: 'Ce job est archivé et ne peut plus être lancé.',
+        },
         { status: 409 }
       )
     }
@@ -155,12 +147,16 @@ export async function POST(req: NextRequest) {
 
     if (existingActiveRun?.id) {
       schedulerRun = existingActiveRun
+
       await addSchedulerLog(
         supabase,
         schedulerRun.id,
         'warning',
-        'Run manuel demandé alors qu’un run était déjà actif : reprise du run existant.',
-        { job_key: job.job_key, existing_run_id: schedulerRun.id }
+        'Run manuel demandé alors qu’un run scheduler était déjà actif : reprise du run existant.',
+        {
+          job_key: job.job_key,
+          existing_run_id: schedulerRun.id,
+        }
       )
     } else {
       schedulerRun = await createSchedulerRun(supabase, job, 'manual')
@@ -170,17 +166,22 @@ export async function POST(req: NextRequest) {
       supabase,
       job,
       schedulerRun,
-      origin: getOrigin(req),
     })
 
-    const finalStatus = execution.schedulerRunStatus || execution.status || 'done'
-    const nextRunAt = await updateJobAfterRun(supabase, job, finalStatus)
+    const finalStatus =
+      execution.schedulerRunStatus || execution.status || 'done'
+
+    const nextRunAt = await updateJobAfterRun(
+      supabase,
+      job,
+      finalStatus
+    )
 
     return NextResponse.json({
       success: true,
       job_key: job.job_key,
       run_id: schedulerRun.id,
-      reused_existing_run: Boolean(existingActiveRun?.id),
+      reused_existing_scheduler_run: Boolean(existingActiveRun?.id),
       status: finalStatus,
       next_run_at: nextRunAt,
       execution,
@@ -193,7 +194,10 @@ export async function POST(req: NextRequest) {
       await supabase
         .from('scheduler_runs')
         .update({
-          status: job?.continue_on_error === false ? 'error' : 'partial',
+          status:
+            job?.continue_on_error === false
+              ? 'error'
+              : 'partial',
           finished_at: now,
           error_message: message,
           message: 'Erreur lancement manuel scheduler.',
@@ -201,10 +205,16 @@ export async function POST(req: NextRequest) {
         })
         .eq('id', schedulerRun.id)
 
-      await addSchedulerLog(supabase, schedulerRun.id, 'error', 'Erreur lancement manuel scheduler.', {
-        error: message,
-        job_key: job?.job_key || null,
-      })
+      await addSchedulerLog(
+        supabase,
+        schedulerRun.id,
+        'error',
+        'Erreur lancement manuel scheduler.',
+        {
+          error: message,
+          job_key: job?.job_key || null,
+        }
+      )
     }
 
     if (job?.id) {
@@ -212,14 +222,20 @@ export async function POST(req: NextRequest) {
         .from('scheduler_jobs')
         .update({
           last_run_at: now,
-          last_status: job.continue_on_error === false ? 'error' : 'partial',
+          last_status:
+            job.continue_on_error === false
+              ? 'error'
+              : 'partial',
           updated_at: now,
         })
         .eq('id', job.id)
     }
 
     return NextResponse.json(
-      { success: false, error: message },
+      {
+        success: false,
+        error: message,
+      },
       { status: 500 }
     )
   }
