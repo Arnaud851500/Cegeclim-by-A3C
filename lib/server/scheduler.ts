@@ -496,10 +496,21 @@ async function executeHttpRoute(job: SchedulerJob, origin: string) {
   const url = new URL(routePath, origin)
   const body = buildSchedulerHttpBody(job)
 
+  const internalSecret =
+    process.env.CLIENT_MAINTENANCE_SECRET ||
+    process.env.CRON_SECRET ||
+    ''
+
   const init: RequestInit = {
     method,
     headers: {
       'Content-Type': 'application/json',
+      ...(internalSecret
+        ? {
+            Authorization: `Bearer ${internalSecret}`,
+            'x-client-maintenance-secret': internalSecret,
+          }
+        : {}),
     },
     cache: 'no-store',
   }
@@ -518,7 +529,15 @@ async function executeHttpRoute(job: SchedulerJob, origin: string) {
   const json = await readJsonSafe(res)
 
   if (!res.ok || json?.success === false) {
-    throw new Error(json?.error || json?.message || `Erreur route ${routePath}`)
+    const detail =
+      json?.error ||
+      json?.message ||
+      json?.raw ||
+      `Réponse HTTP ${res.status}`
+
+    throw new Error(
+      `Erreur route ${routePath} — HTTP ${res.status} : ${detail}`
+    )
   }
 
   return {
