@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import * as XLSX from 'xlsx'
 import { supabase } from '@/lib/supabaseClient'
 import {
@@ -215,6 +215,47 @@ const DEFAULT_TYPES = ['CDC','PL']
 const ALL_TYPES = ['CDC', 'PL', 'BL', 'BR']
 const ACCESS_LOCKED_AGENCE_VALUE = '__ACCESS_LOCKED_AGENCE__'
 const ACCESS_LOCKED_REPRESENTANT_VALUE = '__ACCESS_LOCKED_REPRESENTANT__'
+
+const CONTROL_QUERY_MAX_ATTEMPTS = 3
+const CONTROL_QUERY_RETRY_DELAYS_MS = [0, 1200, 3000]
+const STALE_LOAD_ERROR = '__STALE_PORTFOLIO_LOAD__'
+
+const CONTROL_ACTION_SELECT = [
+  'type_document',
+  'numero_document',
+  'numero_tiers',
+  'nom_tiers',
+  'date_creation_document',
+  'date_livraison',
+  'mois_livraison',
+  'representant',
+  'agence',
+  'client_en_sommeil',
+  'nb_lignes',
+  'montant_lignes_ht',
+  'reference_entete',
+  'date_controle',
+  'expedition',
+  'depot_entete',
+  'lieu_livraison',
+  'montant_entete_ht',
+  'base_calcul_frais_port',
+  'frais_port_attendu_ht',
+  'frais_port_constate_ht',
+  'cle_groupe_frais_port',
+  'nb_bl_groupe',
+  'nb_bl_avec_port',
+  'frais_port_attendu_groupe_ht',
+  'frais_port_constate_groupe_ht',
+  'ecart_groupe_ht',
+  'nb_bl_a_supprimer',
+  'action_recommandee',
+  'montant_action_ht',
+  'controle_applicable',
+  'frais_port_manquant',
+  'frais_port_a_supprimer',
+  'statut_controle',
+].join(',')
 
 function getYesterdayIsoDate() {
   const date = new Date()
@@ -520,9 +561,72 @@ function formatLoadError(error: unknown) {
   return String(error) || 'Erreur inconnue lors du chargement du portefeuille.'
 }
 
+
+function isStatementTimeoutError(error: unknown) {
+  if (!error) return false
+
+  const err = error as Record<string, unknown>
+  const code = String(err?.code || '').trim()
+  const message = formatLoadError(error).toLowerCase()
+
+  return (
+    code === '57014' ||
+    message.includes('statement timeout') ||
+    message.includes('canceling statement') ||
+    message.includes('cancelling statement') ||
+    message.includes('query timeout')
+  )
+}
+
+function isStaleLoadError(error: unknown) {
+  return error instanceof Error && error.message === STALE_LOAD_ERROR
+}
+
+function waitForRetry(delayMs: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, delayMs)
+  })
+}
+
+async function runControlQueryWithRetry<T>(
+  label: string,
+  operation: () => Promise<T>,
+  isCurrentLoad: () => boolean,
+) {
+  let lastError: unknown = null
+
+  for (let attempt = 1; attempt <= CONTROL_QUERY_MAX_ATTEMPTS; attempt += 1) {
+    if (!isCurrentLoad()) throw new Error(STALE_LOAD_ERROR)
+
+    const delayMs = CONTROL_QUERY_RETRY_DELAYS_MS[attempt - 1] || 0
+    if (delayMs > 0) {
+      await waitForRetry(delayMs)
+      if (!isCurrentLoad()) throw new Error(STALE_LOAD_ERROR)
+    }
+
+    try {
+      return await operation()
+    } catch (error) {
+      lastError = error
+
+      if (!isStatementTimeoutError(error) || attempt >= CONTROL_QUERY_MAX_ATTEMPTS) {
+        throw error
+      }
+
+      console.warn(
+        `Portefeuille livraison - ${label} en timeout, nouvelle tentative ${attempt + 1}/${CONTROL_QUERY_MAX_ATTEMPTS}`,
+        error,
+      )
+    }
+  }
+
+  throw lastError
+}
+
 export default function PortefeuilleLivraisonPage() {
   const currentMonthKey = useMemo(() => getCurrentMonthKey(), [])
   const access = usePageFilterAccess()
+  const loadRequestIdRef = useRef(0)
 
   const [loading, setLoading] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
@@ -633,6 +737,11 @@ export default function PortefeuilleLivraisonPage() {
   }, [])
 
   async function loadData() {
+    const requestId = loadRequestIdRef.current + 1
+    loadRequestIdRef.current = requestId
+
+    const isCurrentLoad = () => loadRequestIdRef.current === requestId
+
     setLoading(true)
     setErrorMessage(null)
     setControlErrorMessage(null)
@@ -671,6 +780,7 @@ export default function PortefeuilleLivraisonPage() {
 
       const { data, error } = await query.limit(50000)
       if (error) throw error
+      if (!isCurrentLoad()) return
 
       const rows = ((data || []) as LignePortefeuille[]).filter((row) =>
         isAllowedByList(row.representant, access.allowedCollaborateurs) &&
@@ -688,89 +798,177 @@ export default function PortefeuilleLivraisonPage() {
         return
       }
 
-      // Le contrôle frais de port est chargé séparément : une erreur SQL sur
-      // les vues de contrôle ne doit jamais vider le portefeuille principal.
+      // Les deux vues de contrôle sont lourdes. Elles ne sont plus lancées en
+      // parallèle : cela évite qu'elles se concurrencent sur Supabase. Chaque
+      // requête est reconstruite et rejouée automatiquement jusqu'à 3 fois
+      // uniquement en cas de statement_timeout (57014).
+      let controlRowsLoaded = false
+      let groupRowsLoaded = false
+
       try {
-        let controlQuery = supabase
-          .from('v_controle_frais_port_actions')
-          .select('*')
-          .eq('type_document', 'BL')
-          .order('date_controle', { ascending: false, nullsFirst: false })
-          .order('numero_tiers', { ascending: true, nullsFirst: true })
-          .order('numero_document', { ascending: true, nullsFirst: true })
+        const controlData = await runControlQueryWithRetry<ControleFraisPort[]>(
+          'actions frais de port',
+          async () => {
+            let controlQuery = supabase
+              .from('v_controle_frais_port_actions')
+              .select(CONTROL_ACTION_SELECT)
+              .eq('type_document', 'BL')
 
-        if (dateCreationDebut) controlQuery = controlQuery.gte('date_controle', dateCreationDebut)
-        if (dateCreationFin) controlQuery = controlQuery.lte('date_controle', dateCreationFin)
-        if (dateLivraisonDebut) controlQuery = controlQuery.gte('date_livraison', dateLivraisonDebut)
-        if (dateLivraisonFinControle) controlQuery = controlQuery.lte('date_livraison', dateLivraisonFinControle)
+            if (dateCreationDebut) {
+              controlQuery = controlQuery.gte('date_controle', dateCreationDebut)
+            }
+            if (dateCreationFin) {
+              controlQuery = controlQuery.lte('date_controle', dateCreationFin)
+            }
+            if (dateLivraisonDebut) {
+              controlQuery = controlQuery.gte('date_livraison', dateLivraisonDebut)
+            }
+            if (dateLivraisonFinControle) {
+              controlQuery = controlQuery.lte('date_livraison', dateLivraisonFinControle)
+            }
 
-        if (access.allowedCollaborateurs.length > 0) {
-          controlQuery = controlQuery.in('representant', access.allowedCollaborateurs)
-        } else if (selectedRepresentant) {
-          controlQuery = controlQuery.eq('representant', selectedRepresentant)
-        }
+            if (access.allowedCollaborateurs.length > 0) {
+              controlQuery = controlQuery.in('representant', access.allowedCollaborateurs)
+            } else if (selectedRepresentant) {
+              controlQuery = controlQuery.eq('representant', selectedRepresentant)
+            }
 
-        if (access.allowedAgences.length > 0) {
-          controlQuery = controlQuery.in('agence', access.allowedAgences)
-        } else if (selectedAgence) {
-          controlQuery = controlQuery.eq('agence', selectedAgence)
-        }
+            if (access.allowedAgences.length > 0) {
+              controlQuery = controlQuery.in('agence', access.allowedAgences)
+            } else if (selectedAgence) {
+              controlQuery = controlQuery.eq('agence', selectedAgence)
+            }
 
-        if (selectedSommeil === 'OUI') controlQuery = controlQuery.eq('client_en_sommeil', true)
-        if (selectedSommeil === 'NON') {
-          controlQuery = controlQuery.or('client_en_sommeil.is.false,client_en_sommeil.is.null')
-        }
+            if (selectedSommeil === 'OUI') {
+              controlQuery = controlQuery.eq('client_en_sommeil', true)
+            }
+            if (selectedSommeil === 'NON') {
+              controlQuery = controlQuery.or(
+                'client_en_sommeil.is.false,client_en_sommeil.is.null',
+              )
+            }
 
-        let groupQuery = supabase
-          .from('v_controle_frais_port_groupes')
-          .select('*')
-          .order('date_controle', { ascending: false, nullsFirst: false })
-          .order('numero_tiers', { ascending: true, nullsFirst: true })
-          .order('lieu_livraison', { ascending: true, nullsFirst: true })
+            const response = await controlQuery.limit(50000)
+            if (response.error) throw response.error
 
-        if (dateCreationDebut) groupQuery = groupQuery.gte('date_controle', dateCreationDebut)
-        if (dateCreationFin) groupQuery = groupQuery.lte('date_controle', dateCreationFin)
-        if (dateLivraisonDebut) groupQuery = groupQuery.gte('date_livraison_max', dateLivraisonDebut)
-        if (dateLivraisonFinControle) groupQuery = groupQuery.lte('date_livraison_min', dateLivraisonFinControle)
-        if (selectedSommeil === 'OUI') groupQuery = groupQuery.eq('client_en_sommeil', true)
-        if (selectedSommeil === 'NON') groupQuery = groupQuery.eq('client_en_sommeil', false)
+            // Le client Supabase typé ne sait pas déduire le résultat d'une
+            // sélection dynamique. Le passage explicite par unknown évite le
+            // faux positif TypeScript sans modifier les données reçues.
+            return (response.data ?? []) as unknown as ControleFraisPort[]
+          },
+          isCurrentLoad,
+        )
 
-        const [controlResponse, groupResponse] = await Promise.all([
-          controlQuery.limit(50000),
-          groupQuery.limit(20000),
-        ])
+        if (!isCurrentLoad()) return
 
-        if (controlResponse.error) throw controlResponse.error
-        if (groupResponse.error) throw groupResponse.error
-
-        const controlRows = ((controlResponse.data || []) as ControleFraisPort[])
+        const controlRows = controlData
           .map(normalizeControlRow)
           .filter((row) =>
             isAllowedByList(row.representant, access.allowedCollaborateurs) &&
             isAllowedByList(row.agence, access.allowedAgences)
           )
 
-        const groupRows = ((groupResponse.data || []) as GroupeFraisPort[])
+        setControlesFraisPort(controlRows)
+        controlRowsLoaded = true
+
+        const groupData = await runControlQueryWithRetry<GroupeFraisPort[]>(
+          'groupes frais de port',
+          async () => {
+            let groupQuery = supabase
+              .from('v_controle_frais_port_groupes')
+              .select('*')
+
+            if (dateCreationDebut) {
+              groupQuery = groupQuery.gte('date_controle', dateCreationDebut)
+            }
+            if (dateCreationFin) {
+              groupQuery = groupQuery.lte('date_controle', dateCreationFin)
+            }
+            if (dateLivraisonDebut) {
+              groupQuery = groupQuery.gte('date_livraison_max', dateLivraisonDebut)
+            }
+            if (dateLivraisonFinControle) {
+              groupQuery = groupQuery.lte('date_livraison_min', dateLivraisonFinControle)
+            }
+            if (selectedSommeil === 'OUI') {
+              groupQuery = groupQuery.eq('client_en_sommeil', true)
+            }
+            if (selectedSommeil === 'NON') {
+              groupQuery = groupQuery.eq('client_en_sommeil', false)
+            }
+
+            // Lorsque l'utilisateur choisit un seul périmètre, on pousse aussi
+            // le filtre dans la requête SQL afin de ne pas charger tous les groupes.
+            if (!access.allowedAgences.length && selectedAgence) {
+              groupQuery = groupQuery.ilike('agences', `%${selectedAgence}%`)
+            }
+            if (!access.allowedCollaborateurs.length && selectedRepresentant) {
+              groupQuery = groupQuery.ilike(
+                'representants',
+                `%${selectedRepresentant}%`,
+              )
+            }
+
+            const response = await groupQuery.limit(20000)
+            if (response.error) throw response.error
+
+            return (response.data ?? []) as unknown as GroupeFraisPort[]
+          },
+          isCurrentLoad,
+        )
+
+        if (!isCurrentLoad()) return
+
+        const groupRows = groupData
           .map(normalizeControlGroup)
           .filter((row) => {
-            const accessAgenceOk = scopeTextMatchesAllowed(row.agences, access.allowedAgences)
-            const accessRepresentantOk = scopeTextMatchesAllowed(row.representants, access.allowedCollaborateurs)
-            const selectedAgenceOk = !selectedAgence || scopeTextMatchesAllowed(row.agences, [selectedAgence])
-            const selectedRepresentantOk = !selectedRepresentant || scopeTextMatchesAllowed(row.representants, [selectedRepresentant])
-            return accessAgenceOk && accessRepresentantOk && selectedAgenceOk && selectedRepresentantOk
+            const accessAgenceOk = scopeTextMatchesAllowed(
+              row.agences,
+              access.allowedAgences,
+            )
+            const accessRepresentantOk = scopeTextMatchesAllowed(
+              row.representants,
+              access.allowedCollaborateurs,
+            )
+            const selectedAgenceOk =
+              !selectedAgence || scopeTextMatchesAllowed(row.agences, [selectedAgence])
+            const selectedRepresentantOk =
+              !selectedRepresentant ||
+              scopeTextMatchesAllowed(row.representants, [selectedRepresentant])
+
+            return (
+              accessAgenceOk &&
+              accessRepresentantOk &&
+              selectedAgenceOk &&
+              selectedRepresentantOk
+            )
           })
 
-        setControlesFraisPort(controlRows)
         setGroupesFraisPort(groupRows)
+        groupRowsLoaded = true
+        setControlErrorMessage(null)
       } catch (controlError) {
+        if (!isCurrentLoad() || isStaleLoadError(controlError)) return
+
         console.error('Portefeuille livraison - contrôle frais de port', controlError)
-        setControlesFraisPort([])
-        setGroupesFraisPort([])
+
+        // Ne pas effacer la partie qui aurait déjà réussi. Par exemple, si les
+        // actions sont chargées mais que les groupes échouent, le détail BL reste
+        // disponible au lieu de disparaître entièrement.
+        if (!controlRowsLoaded) setControlesFraisPort([])
+        if (!groupRowsLoaded) setGroupesFraisPort([])
+
+        const retrySuffix = isStatementTimeoutError(controlError)
+          ? ` après ${CONTROL_QUERY_MAX_ATTEMPTS} tentatives automatiques`
+          : ''
+
         setControlErrorMessage(
-          `Le portefeuille est chargé, mais le contrôle frais de port est indisponible : ${formatLoadError(controlError)}`
+          `Le portefeuille est chargé, mais le contrôle frais de port reste indisponible${retrySuffix} : ${formatLoadError(controlError)}`
         )
       }
     } catch (error) {
+      if (!isCurrentLoad() || isStaleLoadError(error)) return
+
       console.error('Portefeuille livraison - erreur chargement', error)
       setLignes([])
       setControlesFraisPort([])
@@ -779,7 +977,7 @@ export default function PortefeuilleLivraisonPage() {
       setSelectedDocumentKeyForLines(null)
       setErrorMessage(formatLoadError(error))
     } finally {
-      setLoading(false)
+      if (isCurrentLoad()) setLoading(false)
     }
   }
 
@@ -1166,6 +1364,47 @@ export default function PortefeuilleLivraisonPage() {
   const sortedDocuments = useMemo(() => {
     return sortArray(selectedDocuments, documentSort)
   }, [selectedDocuments, documentSort])
+
+  const documentColumns = useMemo<Array<[keyof DocumentPortefeuille, string]>>(() => {
+    const generalColumns: Array<[keyof DocumentPortefeuille, string]> = [
+      ['agence', 'Agence'],
+      ['representant', 'Représentant'],
+      ['numero_tiers', 'N° tiers'],
+      ['nom_tiers', 'Client'],
+      ['numero_document', 'N° document'],
+      ['references', 'Réf. lignes'],
+      ['date_livraison', 'Date livraison'],
+      ['familles_macro', 'Familles macro'],
+      ['client_en_sommeil', 'Sommeil'],
+    ]
+
+    if (!isBlSelected) return generalColumns
+
+    return [
+      ['agence', 'Agence'],
+      ['representant', 'Représentant'],
+      ['date_controle', 'Date BL'],
+      ['numero_tiers', 'N° tiers'],
+      ['nom_tiers', 'Client'],
+      ['numero_document', selectedTypes.length === 1 ? 'N° BL' : 'N° document'],
+      ['reference_entete', 'Référence entête'],
+      ['references', 'Réf. lignes'],
+      ['expedition', 'Expédition'],
+      ['depot_entete', 'Dépôt'],
+      ['lieu_livraison', 'Lieu de liv.'],
+      ['nb_bl_groupe', 'Nb BL groupe'],
+      ['nb_bl_avec_port', 'BL avec port'],
+      ['frais_port_constate_ht', 'Port constaté BL'],
+      ['frais_port_constate_groupe_ht', 'Port constaté groupe'],
+      ['frais_port_attendu_groupe_ht', 'Port attendu groupe'],
+      ['action_recommandee', 'Action recommandée'],
+      ['montant_action_ht', 'Montant action'],
+      ['statut_controle', 'Statut groupe'],
+      ['date_livraison', 'Date livraison'],
+      ['familles_macro', 'Familles macro'],
+      ['client_en_sommeil', 'Sommeil'],
+    ]
+  }, [isBlSelected, selectedTypes.length])
 
   const sortedLignes = useMemo(() => {
     return sortArray(selectedLignes, ligneSort)
@@ -2231,30 +2470,7 @@ export default function PortefeuilleLivraisonPage() {
             <table className="min-w-full border-collapse text-sm">
               <thead className="sticky top-0 bg-slate-100">
                 <tr>
-                  {[
-                    ['agence', 'Agence'],
-                    ['representant', 'Représentant'],
-                    ['date_controle', 'Date BL'],
-                    ['numero_tiers', 'N° tiers'],
-                    ['nom_tiers', 'Client'],
-                    ['numero_document', 'N° BL'],
-                    ['reference_entete', 'Référence entête'],
-                    ['references', 'Réf. lignes'],
-                    ['expedition', 'Expédition'],
-                    ['depot_entete', 'Dépôt'],
-                    ['lieu_livraison', 'Lieu de liv.'],
-                    ['nb_bl_groupe', 'Nb BL groupe'],
-                    ['nb_bl_avec_port', 'BL avec port'],
-                    ['frais_port_constate_ht', 'Port constaté BL'],
-                    ['frais_port_constate_groupe_ht', 'Port constaté groupe'],
-                    ['frais_port_attendu_groupe_ht', 'Port attendu groupe'],
-                    ['action_recommandee', 'Action recommandée'],
-                    ['montant_action_ht', 'Montant action'],
-                    ['statut_controle', 'Statut groupe'],
-                    ['date_livraison', 'Date livraison'],
-                    ['familles_macro', 'Familles macro'],
-                    ['client_en_sommeil', 'Sommeil'],
-                  ].map(([key, label]) => (
+                  {documentColumns.map(([key, label]) => (
                     <th
                       key={key}
                       onClick={() => toggleDocumentSort(key as keyof DocumentPortefeuille)}
@@ -2280,7 +2496,13 @@ export default function PortefeuilleLivraisonPage() {
                   >
                     <td className="border-b border-r border-slate-200 px-2 py-2">{doc.agence}</td>
                     <td className="border-b border-r border-slate-200 px-2 py-2">{doc.representant}</td>
-                    <td className="whitespace-nowrap border-b border-r border-slate-200 px-2 py-2 font-semibold">{formatDate(doc.date_controle)}</td>
+
+                    {isBlSelected && (
+                      <td className="whitespace-nowrap border-b border-r border-slate-200 px-2 py-2 font-semibold">
+                        {formatDate(doc.date_controle)}
+                      </td>
+                    )}
+
                     <td className="border-b border-r border-slate-200 px-2 py-2">{doc.numero_tiers}</td>
                     <td className="border-b border-r border-slate-200 px-2 py-2">{doc.nom_tiers}</td>
                     <td className="border-b border-r border-slate-200 px-2 py-2 font-medium">
@@ -2292,36 +2514,91 @@ export default function PortefeuilleLivraisonPage() {
                         {doc.numero_document}
                       </button>
                     </td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2 font-medium">{doc.reference_entete || '—'}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{doc.references || '—'}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{doc.expedition || '—'}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{doc.depot_entete || '—'}</td>
-                    <td className="max-w-[280px] border-b border-r border-slate-200 px-2 py-2" title={doc.lieu_livraison}>{doc.lieu_livraison || '—'}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2 text-right font-semibold">{doc.nb_bl_groupe || '—'}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{doc.nb_bl_avec_port || '—'}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2 text-right font-semibold">{formatMoneyCents(doc.frais_port_constate_ht)}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{formatMoneyCents(doc.frais_port_constate_groupe_ht)}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{formatMoneyCents(doc.frais_port_attendu_groupe_ht)}</td>
+
+                    {isBlSelected && (
+                      <td className="border-b border-r border-slate-200 px-2 py-2 font-medium">
+                        {doc.reference_entete || '—'}
+                      </td>
+                    )}
+
                     <td className="border-b border-r border-slate-200 px-2 py-2">
-                      <span className={['inline-flex whitespace-nowrap rounded-full border px-2 py-1 text-xs font-semibold', actionClassName(doc.action_recommandee)].join(' ')}>
-                        {actionLabel(doc.action_recommandee)}
-                      </span>
+                      {doc.references || '—'}
                     </td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2 text-right font-semibold">{formatMoneyCents(doc.montant_action_ht)}</td>
+
+                    {isBlSelected && (
+                      <>
+                        <td className="border-b border-r border-slate-200 px-2 py-2">
+                          {doc.expedition || '—'}
+                        </td>
+                        <td className="border-b border-r border-slate-200 px-2 py-2">
+                          {doc.depot_entete || '—'}
+                        </td>
+                        <td
+                          className="max-w-[280px] border-b border-r border-slate-200 px-2 py-2"
+                          title={doc.lieu_livraison}
+                        >
+                          {doc.lieu_livraison || '—'}
+                        </td>
+                        <td className="border-b border-r border-slate-200 px-2 py-2 text-right font-semibold">
+                          {doc.nb_bl_groupe || '—'}
+                        </td>
+                        <td className="border-b border-r border-slate-200 px-2 py-2 text-right">
+                          {doc.nb_bl_avec_port || '—'}
+                        </td>
+                        <td className="border-b border-r border-slate-200 px-2 py-2 text-right font-semibold">
+                          {formatMoneyCents(doc.frais_port_constate_ht)}
+                        </td>
+                        <td className="border-b border-r border-slate-200 px-2 py-2 text-right">
+                          {formatMoneyCents(doc.frais_port_constate_groupe_ht)}
+                        </td>
+                        <td className="border-b border-r border-slate-200 px-2 py-2 text-right">
+                          {formatMoneyCents(doc.frais_port_attendu_groupe_ht)}
+                        </td>
+                        <td className="border-b border-r border-slate-200 px-2 py-2">
+                          <span
+                            className={[
+                              'inline-flex whitespace-nowrap rounded-full border px-2 py-1 text-xs font-semibold',
+                              actionClassName(doc.action_recommandee),
+                            ].join(' ')}
+                          >
+                            {actionLabel(doc.action_recommandee)}
+                          </span>
+                        </td>
+                        <td className="border-b border-r border-slate-200 px-2 py-2 text-right font-semibold">
+                          {formatMoneyCents(doc.montant_action_ht)}
+                        </td>
+                        <td className="border-b border-r border-slate-200 px-2 py-2">
+                          <span
+                            className={[
+                              'inline-flex whitespace-nowrap rounded-full border px-2 py-1 text-xs font-semibold',
+                              controlStatusClassName(doc.statut_controle),
+                            ].join(' ')}
+                            title={doc.base_calcul_frais_port || undefined}
+                          >
+                            {controlStatusLabel(doc.statut_controle)}
+                          </span>
+                        </td>
+                      </>
+                    )}
+
                     <td className="border-b border-r border-slate-200 px-2 py-2">
-                      <span className={['inline-flex whitespace-nowrap rounded-full border px-2 py-1 text-xs font-semibold', controlStatusClassName(doc.statut_controle)].join(' ')} title={doc.base_calcul_frais_port || undefined}>
-                        {controlStatusLabel(doc.statut_controle)}
-                      </span>
+                      {formatDate(doc.date_livraison)}
                     </td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{formatDate(doc.date_livraison)}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{doc.familles_macro}</td>
-                    <td className="border-b border-slate-200 px-2 py-2">{doc.client_en_sommeil ? 'Oui' : 'Non'}</td>
+                    <td className="border-b border-r border-slate-200 px-2 py-2">
+                      {doc.familles_macro}
+                    </td>
+                    <td className="border-b border-slate-200 px-2 py-2">
+                      {doc.client_en_sommeil ? 'Oui' : 'Non'}
+                    </td>
                   </tr>
                 ))}
 
                 {sortedDocuments.length === 0 && (
                   <tr>
-                    <td colSpan={22} className="px-4 py-8 text-center text-slate-500">
+                    <td
+                      colSpan={documentColumns.length}
+                      className="px-4 py-8 text-center text-slate-500"
+                    >
                       Aucun document à afficher.
                     </td>
                   </tr>
