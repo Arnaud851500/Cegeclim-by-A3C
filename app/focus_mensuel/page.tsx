@@ -3376,9 +3376,9 @@ function FocusMensuelPageContent() {
         done: 1,
         total: 1,
       });
-      setCacheInfo(
-        "Cache SQL global : les mois historiques sont figés et les filtres ne déclenchent plus aucun recalcul métier.",
-      );
+      // Le fonctionnement normal du cache ne doit pas occuper une ligne permanente
+      // dans l'écran. Les erreurs et actions de reconstruction restent affichées.
+      setCacheInfo(null);
     } catch (exception: any) {
       if (loadId !== comparisonLoadIdRef.current) return;
 

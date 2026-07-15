@@ -1545,7 +1545,7 @@ export default function StocksDisponibilitesPage() {
     key: "niveau_alerte",
     direction: "asc",
   });
-  const [horizonWeeks, setHorizonWeeks] = useState(16);
+  const [horizonWeeks, setHorizonWeeks] = useState(26);
   const [defaultProjectionPct, setDefaultProjectionPct] = useState(120);
   const [stockSecurityInput, setStockSecurityInput] = useState("0");
   const [weeklyPct, setWeeklyPct] = useState<Record<string, number>>({});
@@ -1763,7 +1763,7 @@ export default function StocksDisponibilitesPage() {
       setAlertes(nextAlertes);
 
       if (nextKpi && !options?.keepProjectionSettings) {
-        setHorizonWeeks(Number(nextKpi.run_nb_semaines || 16));
+        setHorizonWeeks(Number(nextKpi.run_nb_semaines || 26));
         setDefaultProjectionPct(
           Math.round(toNumber(nextKpi.scenario_prevision_pct || 1.2) * 100),
         );
@@ -1898,7 +1898,7 @@ export default function StocksDisponibilitesPage() {
     const traceId = createClientTraceId("STOCK-REBUILD");
 
     try {
-      const weeks = Math.max(1, Math.min(104, Number(horizonWeeks || 16)));
+      const weeks = Math.max(1, Math.min(104, Number(horizonWeeks || 26)));
       const pct = Math.max(0, Number(defaultProjectionPct || 120)) / 100;
 
       let continuation: Record<string, unknown> | null = null;
@@ -2312,7 +2312,7 @@ export default function StocksDisponibilitesPage() {
         new Set(projectionRows.map((row) => row.periode_debut).filter(Boolean)),
       )
         .sort((a, b) => a.localeCompare(b))
-        .slice(0, Math.max(1, Number(kpi.run_nb_semaines || horizonWeeks || 16)));
+        .slice(0, Math.max(1, Number(kpi.run_nb_semaines || horizonWeeks || 26)));
 
       if (!weeks.length) {
         throw new Error(
@@ -2743,7 +2743,7 @@ export default function StocksDisponibilitesPage() {
 
         lineLabels.forEach((label, lineIndex) => {
           const rowNumber = startRow + lineIndex;
-          const labelCell = projectionSheet.getCell(rowNumber, 16);
+          const labelCell = projectionSheet.getCell(rowNumber, 26);
           labelCell.value = label;
           labelCell.font = { bold: true, color: { argb: slate } };
           labelCell.fill = {
