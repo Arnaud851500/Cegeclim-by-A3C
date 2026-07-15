@@ -37,6 +37,8 @@ const ALL_STEPS = [
   { key: 'enrichment_worker', label: 'Enrichissement INPI / Google', order: 60, flag: 'enrichment' },
 ] as const
 
+
+
 function isAuthorized(req: NextRequest) {
   const secret = process.env.CLIENT_MAINTENANCE_SECRET
   if (!secret) return true
@@ -55,7 +57,12 @@ export async function POST(req: NextRequest) {
     const supabase = createSupabaseAdmin()
     const body = await req.json().catch(() => ({}))
     const config: Required<MaintenanceConfig> = { ...DEFAULT_CONFIG, ...(body?.config || {}) }
-    const source = body?.source === 'cron' ? 'cron' : 'manual'
+    const requestedSource = String(body?.source || '')
+
+    const source =
+    requestedSource === 'cron' || requestedSource.startsWith('scheduler:')
+    ? 'cron'
+    : 'manual'
 
     const { data: activeRun, error: activeError } = await supabase
       .from('client_maintenance_runs')

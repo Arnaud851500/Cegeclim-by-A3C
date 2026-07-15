@@ -53,6 +53,23 @@ function toYmdInTimezone(date: Date, timezone = 'Europe/Paris') {
   return formatter.format(date)
 }
 
+function getAppOrigin() {
+  const configuredOrigin =
+    process.env.APP_BASE_URL ||
+    process.env.VERCEL_PROJECT_PRODUCTION_URL
+
+  if (!configuredOrigin) {
+    throw new Error(
+      'APP_BASE_URL ou VERCEL_PROJECT_PRODUCTION_URL est manquant.'
+    )
+  }
+ 
+  return configuredOrigin.startsWith('http')
+    ? configuredOrigin.replace(/\/+$/, '')
+    : `https://${configuredOrigin.replace(/\/+$/, '')}`
+
+}
+
 function addDaysToYmd(ymd: string, days: number) {
   const date = new Date(`${ymd}T00:00:00.000Z`)
   date.setUTCDate(date.getUTCDate() + days)
