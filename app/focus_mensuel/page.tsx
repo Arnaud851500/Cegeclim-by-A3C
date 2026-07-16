@@ -112,12 +112,33 @@ type KpiCardData = {
   monthQtyPert: number;
   monthNb: number;
   monthAverageAmount: number;
+  monthAmountN1: number;
+  monthQtyPertN1: number;
+  monthAmountEvolutionPct: number | null;
+  monthQtyPertEvolutionPct: number | null;
   fmsPct?: number;
   fmsPctMonth?: number;
   topAgence: string;
   topFamille: string;
   evolutionVsMtdPct: number | null;
   evolutionVs7dPct: number | null;
+};
+
+type MtdComparisonBasis = {
+  currentMonth: string;
+  previousMonth: string;
+  currentBlDays: string[];
+  previousBlDays: string[];
+  currentDayCount: number;
+  previousDayCountUsed: number;
+  previousDayCountTotal: number;
+  previousEndDate: string | null;
+  monthClosed: boolean;
+  usedFullPreviousMonth: boolean;
+  usedWeekdayFallback: boolean;
+  dayDifference: number;
+  titleLabel: string;
+  detailLabel: string;
 };
 
 type BusinessDayBasis = {
@@ -573,6 +594,144 @@ function getBusinessDayBasis(
   };
 }
 
+
+function getBlShippingDays(
+  rows: DailyRow[],
+  startDate: string,
+  endDateInclusive: string,
+) {
+  return Array.from(
+    new Set(
+      rows
+        .filter((row) => {
+          const day = dateOnly(row.jour);
+          if (day < startDate || day > endDateInclusive) return false;
+          if (String(row.type_document) !== "BL") return false;
+
+          return (
+            Number(row.nb_documents || 0) > 0 ||
+            Number(row.nb_lignes || 0) > 0 ||
+            Math.abs(Number(row.montant_ht || 0)) > 0 ||
+            Math.abs(Number(row.quantite_pertinente || 0)) > 0
+          );
+        })
+        .map((row) => dateOnly(row.jour))
+        .filter(Boolean),
+    ),
+  ).sort();
+}
+
+function hasRemainingWeekdayInMonth(month: string, focusDate: string) {
+  return daysInMonth(month).some(
+    (day) => day > focusDate && !isWeekendYmd(day),
+  );
+}
+
+function ordinalDayLabel(value: number) {
+  if (!value) return "aucun jour";
+  return value === 1 ? "1er jour" : `${value}e jour`;
+}
+
+function buildMtdComparisonBasis(
+  currentRows: DailyRow[],
+  previousRows: DailyRow[],
+  month: string,
+  focusDate: string,
+): MtdComparisonBasis {
+  const currentMonthBegin = monthStart(month);
+  const previousMonth = previousYearMonth(month);
+  const previousMonthBegin = monthStart(previousMonth);
+  const previousMonthLastDay = lastDayOfMonth(previousMonth);
+
+  const currentBlDays = getBlShippingDays(
+    currentRows,
+    currentMonthBegin,
+    focusDate,
+  );
+  const previousBlDays = getBlShippingDays(
+    previousRows,
+    previousMonthBegin,
+    previousMonthLastDay,
+  );
+
+  const elapsedDays = daysInMonth(month).filter((day) => day <= focusDate);
+  const fallbackDayCount = Math.max(1, countWeekdays(elapsedDays));
+  const usedWeekdayFallback = currentBlDays.length === 0;
+  const currentDayCount = usedWeekdayFallback
+    ? fallbackDayCount
+    : currentBlDays.length;
+
+  const monthClosed = !hasRemainingWeekdayInMonth(month, focusDate);
+
+  let previousEndDate: string | null = null;
+  let previousDayCountUsed = 0;
+  let usedFullPreviousMonth = false;
+
+  if (monthClosed) {
+    previousEndDate = previousMonthLastDay;
+    previousDayCountUsed = previousBlDays.length;
+    usedFullPreviousMonth = true;
+  } else if (previousBlDays.length >= currentDayCount) {
+    previousDayCountUsed = currentDayCount;
+    previousEndDate = previousBlDays[currentDayCount - 1] || null;
+  } else {
+    // N-1 ne dispose pas d'assez de journées BL pour atteindre le rang de N :
+    // on conserve alors tout le mois N-1 et on l'indique explicitement.
+    previousDayCountUsed = previousBlDays.length;
+    previousEndDate = previousMonthLastDay;
+    usedFullPreviousMonth = true;
+  }
+
+  const dayDifference = previousBlDays.length - currentDayCount;
+
+  let titleLabel = `${currentDayCount} j BL N vs ${previousDayCountUsed} j BL N-1`;
+  let detailLabel = "";
+
+  if (monthClosed) {
+    const differenceLabel =
+      dayDifference > 0
+        ? `${dayDifference} jour(s) d'expédition BL en plus en N-1`
+        : dayDifference < 0
+          ? `${Math.abs(dayDifference)} jour(s) d'expédition BL en moins en N-1`
+          : "même nombre de jours d'expédition BL";
+
+    detailLabel =
+      `Mois clôturé : comparaison avec ${formatMonthFr(previousMonth).toLowerCase()} complet ` +
+      `(${previousBlDays.length} jour(s) BL ; ${differenceLabel}).`;
+  } else if (previousBlDays.length >= currentDayCount && previousEndDate) {
+    detailLabel =
+      `N-1 arrêté au ${ordinalDayLabel(currentDayCount)} d'expédition BL ` +
+      `(${formatDateFr(previousEndDate)}), et non à la même date calendaire.`;
+  } else {
+    detailLabel =
+      `N-1 ne comptait que ${previousBlDays.length} jour(s) d'expédition BL sur le mois complet ; ` +
+      `${ordinalDayLabel(currentDayCount)} impossible à atteindre.`;
+  }
+
+  if (usedWeekdayFallback) {
+    titleLabel += " · base ouvrée estimée";
+    detailLabel +=
+      " Aucun jour BL n'étant disponible dans le périmètre courant, la base N est estimée sur les jours ouvrés.";
+  }
+
+  return {
+    currentMonth: month,
+    previousMonth,
+    currentBlDays,
+    previousBlDays,
+    currentDayCount,
+    previousDayCountUsed,
+    previousDayCountTotal: previousBlDays.length,
+    previousEndDate,
+    monthClosed,
+    usedFullPreviousMonth,
+    usedWeekdayFallback,
+    dayDifference,
+    titleLabel,
+    detailLabel,
+  };
+}
+
 function pickDefaultFocusDate() {
   return todayYmd();
 }
@@ -922,6 +1081,28 @@ table, thead, tbody, tr, th, td {
 .focus-pdf-table-wrap { max-height: none !important; overflow: visible !important; background: #ffffff !important; }
 .focus-pdf-section-card table { min-width: 0 !important; font-size: 6.6px !important; }
 .focus-pdf-section-card th, .focus-pdf-section-card td { padding: 2.5px 3.5px !important; line-height: 1.08 !important; }
+.focus-pdf-mtd-comparison-table {
+  min-width: 0 !important;
+  table-layout: fixed !important;
+  font-size: 5.9px !important;
+}
+.focus-pdf-mtd-comparison-table th,
+.focus-pdf-mtd-comparison-table td {
+  padding: 2px 2.5px !important;
+  line-height: 1.04 !important;
+  white-space: normal !important;
+}
+.focus-pdf-dense-matrix-table {
+  min-width: 0 !important;
+  table-layout: fixed !important;
+  font-size: 5.9px !important;
+}
+.focus-pdf-dense-matrix-table th,
+.focus-pdf-dense-matrix-table td {
+  padding: 2px 2.5px !important;
+  line-height: 1.04 !important;
+  white-space: normal !important;
+}
 .focus-pdf-highlights-grid {
   grid-template-columns: 1fr 1fr !important;
   gap: 5px !important;
@@ -1208,11 +1389,83 @@ function CumulativeChart({
   );
 }
 
-function KpiCard({ card, mode }: { card: KpiCardData; mode: ViewMode }) {
+function ComparisonEvolutionBadge({
+  value,
+}: {
+  value: number | null | undefined;
+}) {
+  const isValid =
+    value !== null && value !== undefined && Number.isFinite(value);
+  const isPositive = isValid && Number(value) > 0;
+  const isNegative = isValid && Number(value) < 0;
+
+  return (
+    <span
+      style={{
+        ...styles.mtdEvolutionBadge,
+        background: isPositive
+          ? "#dcfce7"
+          : isNegative
+            ? "#fee2e2"
+            : "#e2e8f0",
+        color: isPositive
+          ? "#047857"
+          : isNegative
+            ? "#b91c1c"
+            : "#64748b",
+      }}
+    >
+      {isValid ? formatPct(value) : "—"}
+    </span>
+  );
+}
+
+function KpiMtdMetric({
+  current,
+  previous,
+  evolution,
+  color,
+  comparisonReady,
+}: {
+  current: number;
+  previous: number;
+  evolution: number | null;
+  color: string;
+  comparisonReady: boolean;
+}) {
+  return (
+    <div style={styles.kpiMtdMetric}>
+      <div style={styles.kpiMtdMetricLabel}>Month to date</div>
+      <div style={{ ...styles.kpiMtdMetricCurrent, color }}>
+        {formatMoney(current)}
+      </div>
+      <div style={styles.kpiMtdMetricBottom}>
+        <span style={styles.kpiMtdMetricPrevious}>
+          vs n-1 :    {comparisonReady ? formatMoney(previous) : "…"}
+        </span>
+        </div>
+        <div>
+        <ComparisonEvolutionBadge
+          value={comparisonReady ? evolution : null}
+        />
+      </div>
+    </div>
+  );
+}
+
+function KpiCard({
+  card,
+  mode,
+  comparisonBasis,
+  comparisonReady,
+}: {
+  card: KpiCardData;
+  mode: ViewMode;
+  comparisonBasis: MtdComparisonBasis;
+  comparisonReady: boolean;
+}) {
   const color = DOC_COLORS[card.type];
   const dayValue = displayValue(kpiValue(card, mode), mode);
-  const monthValue = displayValue(kpiMonthValue(card, mode), mode);
-  const isUp = (card.evolutionVsMtdPct || 0) >= 0;
 
   return (
     <div style={styles.kpiCard} className="focus-pdf-kpi-card">
@@ -1221,19 +1474,20 @@ function KpiCard({ card, mode }: { card: KpiCardData; mode: ViewMode }) {
           {card.type}
         </span>
         <span
-          style={{
-            ...styles.evoPill,
-            background: isUp ? "#dcfce7" : "#fee2e2",
-            color: isUp ? "#047857" : "#b91c1c",
-          }}
+          style={styles.mtdBasisPill}
+          title={
+            comparisonReady
+              ? comparisonBasis.detailLabel
+              : "Préparation de la comparaison N-1"
+          }
         >
-          {card.evolutionVsMtdPct === null
-            ? "vs moy. mensuelle —"
-            : `vs moy. mensuelle ${isUp ? "▲" : "▼"} ${formatPct(card.evolutionVsMtdPct)}`}
+          {comparisonReady
+            ? comparisonBasis.titleLabel
+            : "N-1 en préparation…"}
         </span>
       </div>
 
-      <div style={styles.kpiValuesGrid}>
+      <div style={styles.kpiValuesGridMtd}>
         <div style={styles.kpiValueBlockLeft}>
           <div style={styles.kpiValueLabel}>Jour</div>
           <div style={styles.kpiMain}>{dayValue}</div>
@@ -1241,12 +1495,15 @@ function KpiCard({ card, mode }: { card: KpiCardData; mode: ViewMode }) {
             {formatNumber(card.nb)} document(s)
           </div>
         </div>
-        <div style={styles.kpiValueBlockRight}>
-          <div style={styles.kpiValueLabel}>Mois</div>
-          <div style={styles.kpiMain}>{monthValue}</div>
-          <div style={styles.kpiValueSub}>
-            {formatNumber(card.monthNb)} document(s)
-          </div>
+
+        <div style={styles.kpiMtdBlock}>
+          <KpiMtdMetric
+            current={card.monthAmount}
+            previous={card.monthAmountN1}
+            evolution={card.monthAmountEvolutionPct}
+            color={color}
+            comparisonReady={comparisonReady}
+          />
         </div>
       </div>
 
@@ -1477,6 +1734,16 @@ function FocusMensuelPageContent() {
       total: 0,
     });
   const [comparisonError, setComparisonError] = useState<string | null>(null);
+
+  // Comparaison Month to date N / N-1 : chargement direct du même mois
+  // de l'année précédente au niveau journalier, indépendamment du cache annuel.
+  const [mtdPreviousRows, setMtdPreviousRows] = useState<DailyRow[]>([]);
+  const [mtdComparisonLoading, setMtdComparisonLoading] = useState(false);
+  const [mtdComparisonReady, setMtdComparisonReady] = useState(false);
+  const [mtdComparisonError, setMtdComparisonError] = useState<string | null>(
+    null,
+  );
+
   const [cachedAgencyYtdRows, setCachedAgencyYtdRows] = useState<
     ComparisonRow[] | null
   >(null);
@@ -1490,6 +1757,7 @@ function FocusMensuelPageContent() {
   const [globalFamilyYtdRows, setGlobalFamilyYtdRows] = useState<ComparisonRow[]>([]);
   const [globalRolling12Rows, setGlobalRolling12Rows] = useState<ComparisonRow[]>([]);
   const comparisonLoadIdRef = useRef(0);
+  const mtdComparisonLoadIdRef = useRef(0);
   const [highlightRows, setHighlightRows] = useState<HighlightRow[]>([]);
   const [agencyPortfolioRows, setAgencyPortfolioRows] = useState<
     AgencyPortfolioRow[]
@@ -1573,6 +1841,10 @@ function FocusMensuelPageContent() {
   const normalizedYtdRowsN1 = useMemo(
     () => normalizeDailyRows(ytdRowsN1),
     [ytdRowsN1],
+  );
+  const normalizedMtdPreviousRows = useMemo(
+    () => normalizeDailyRows(mtdPreviousRows),
+    [mtdPreviousRows],
   );
   const normalizedRollingRowsN = useMemo(
     () => normalizeDailyRows(rollingRowsN),
@@ -1692,11 +1964,37 @@ function FocusMensuelPageContent() {
     return getBusinessDayBasis(normalizedRows, elapsedMonthDays);
   }, [normalizedRows, elapsedMonthDays]);
 
+  const mtdComparisonBasis = useMemo(
+    () =>
+      buildMtdComparisonBasis(
+        normalizedRows,
+        normalizedMtdPreviousRows,
+        month,
+        focusDate,
+      ),
+    [normalizedRows, normalizedMtdPreviousRows, month, focusDate],
+  );
+
+  const previousMtdMatchedRows = useMemo(() => {
+    if (!mtdComparisonBasis.previousEndDate) return [];
+
+    return normalizedMtdPreviousRows.filter((row) => {
+      const day = dateOnly(row.jour);
+      return (
+        monthKey(day) === mtdComparisonBasis.previousMonth &&
+        day <= String(mtdComparisonBasis.previousEndDate)
+      );
+    });
+  }, [normalizedMtdPreviousRows, mtdComparisonBasis]);
+
   const kpiCards = useMemo<KpiCardData[]>(() => {
     return DOC_TYPES.map((type) => {
       const dayRows = filteredFocusRows.filter((r) => r.type_document === type);
       const monthRowsBeforeFocus = normalizedRows.filter(
         (r) => r.type_document === type && r.jour <= focusDate,
+      );
+      const previousMonthRowsMatched = previousMtdMatchedRows.filter(
+        (r) => r.type_document === type,
       );
       const last7Start = addDaysYmd(focusDate, -6);
       const last7Rows = normalizedRows.filter(
@@ -1711,6 +2009,14 @@ function FocusMensuelPageContent() {
       const monthAmount = sum(monthRowsBeforeFocus, (r) => r.montant_ht);
       const monthQtyPert = sum(
         monthRowsBeforeFocus,
+        (r) => r.quantite_pertinente,
+      );
+      const monthAmountN1 = sum(
+        previousMonthRowsMatched,
+        (r) => r.montant_ht,
+      );
+      const monthQtyPertN1 = sum(
+        previousMonthRowsMatched,
         (r) => r.quantite_pertinente,
       );
       const nb = normalizedDistinctDocRows.length
@@ -1775,6 +2081,13 @@ function FocusMensuelPageContent() {
         monthQtyPert,
         monthNb: mtdDocs,
         monthAverageAmount,
+        monthAmountN1,
+        monthQtyPertN1,
+        monthAmountEvolutionPct: pctEvolution(monthAmount, monthAmountN1),
+        monthQtyPertEvolutionPct: pctEvolution(
+          monthQtyPert,
+          monthQtyPertN1,
+        ),
         fmsPct:
           type === "BL" && blTotalAmount
             ? (blFmsAmount / blTotalAmount) * 100
@@ -1798,6 +2111,7 @@ function FocusMensuelPageContent() {
     days,
     viewMode,
     businessDayBasis,
+    previousMtdMatchedRows,
   ]);
 
   const byAgencyDocOverrides = useMemo(
@@ -1809,16 +2123,6 @@ function FocusMensuelPageContent() {
         focusDate,
       ),
     [normalizedDistinctDocRows, focusDate],
-  );
-  const byAgencyMtdDocOverrides = useMemo(
-    () =>
-      buildDistinctDocOverrideMap(
-        normalizedDistinctDocRows,
-        "AGENCE",
-        monthBegin,
-        focusDate,
-      ),
-    [normalizedDistinctDocRows, monthBegin, focusDate],
   );
 
   const byAgencyRows = useMemo(
@@ -1839,18 +2143,26 @@ function FocusMensuelPageContent() {
     () => normalizedRows.filter((row) => row.jour <= focusDate),
     [normalizedRows, focusDate],
   );
-  const byFamilyMtdRows = useMemo(
-    () => aggregateMatrix(mtdSourceRows, (r) => r.famille_macro || "AUTRES"),
-    [mtdSourceRows],
-  );
-  const byAgencyMtdRows = useMemo(
+  const byFamilyMtdComparisonRows = useMemo(
     () =>
-      aggregateMatrix(
+      aggregateComparisonRows(
         mtdSourceRows,
-        (r) => r.agence || "Sans agence",
-        byAgencyMtdDocOverrides,
+        previousMtdMatchedRows,
+        (row) => row.famille_macro || "AUTRES",
+        (row) => row.famille_macro || "AUTRES",
       ),
-    [mtdSourceRows, byAgencyMtdDocOverrides],
+    [mtdSourceRows, previousMtdMatchedRows],
+  );
+
+  const byAgencyMtdComparisonRows = useMemo(
+    () =>
+      aggregateComparisonRows(
+        mtdSourceRows,
+        previousMtdMatchedRows,
+        (row) => row.agence || "Sans agence",
+        (row) => row.agence || "Sans agence",
+      ),
+    [mtdSourceRows, previousMtdMatchedRows],
   );
 
   const ytdAgencyComparisonRowsFallback = useMemo(
@@ -1989,25 +2301,31 @@ function FocusMensuelPageContent() {
     comparisonReady ||
     (isPdfMode && comparisonProgress.status === "ready" && !comparisonError);
 
+  const mtdComparisonReadyForReport =
+    mtdComparisonReady && !mtdComparisonError;
+
   const focusReportReady = Boolean(
     dailyReady &&
     distinctDocsReady &&
     highlightsReady &&
     agencyTablesReady &&
     comparisonReadyForReport &&
+    mtdComparisonReadyForReport &&
     !loading &&
     !distinctDocsLoading &&
     !highlightsLoading &&
     !agencyTablesLoading &&
     (!comparisonLoading || isPdfMode) &&
+    !mtdComparisonLoading &&
     !rebuildingCache &&
     !error &&
     !comparisonError &&
+    !mtdComparisonError &&
     !agencyTablesError,
   );
 
   const focusReportStatus =
-    error || comparisonError || agencyTablesError
+    error || comparisonError || mtdComparisonError || agencyTablesError
       ? "error"
       : focusReportReady
         ? "ready"
@@ -2021,6 +2339,7 @@ function FocusMensuelPageContent() {
     highlightsLoading ? "TOP 20" : null,
     agencyTablesLoading ? "portefeuille / projection" : null,
     comparisonLoading ? "tableaux N / N-1 et 12 mois glissants" : null,
+    mtdComparisonLoading ? "Month to date N-1" : null,
   ]
     .filter(Boolean)
     .join(", ");
@@ -2133,6 +2452,20 @@ function FocusMensuelPageContent() {
     effectiveCollaborateur,
     includeHorsStats,
     requestedPdfCacheId,
+  ]);
+
+  useEffect(() => {
+    if (access.loading) return;
+    void loadMtdPreviousYearRows();
+    // Le mois N-1 complet est réutilisé lorsque seul le jour focus change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    access.loading,
+    month,
+    effectiveAgence,
+    familleMacro,
+    effectiveCollaborateur,
+    includeHorsStats,
   ]);
 
   useEffect(() => {
@@ -2851,6 +3184,7 @@ function FocusMensuelPageContent() {
         loadData(),
         loadDistinctDocs(),
         loadComparisonTables(true),
+        loadMtdPreviousYearRows(),
         loadHighlights(),
         loadAgencyControlTables(),
       ]);
@@ -3144,6 +3478,47 @@ function FocusMensuelPageContent() {
 
     if (error) throw error;
     return (data || []) as DailyRow[];
+  }
+
+  async function loadMtdPreviousYearRows() {
+    const loadId = mtdComparisonLoadIdRef.current + 1;
+    mtdComparisonLoadIdRef.current = loadId;
+
+    const previousMonth = previousYearMonth(month);
+    const previousStart = monthStart(previousMonth);
+    const previousEnd = nextMonthStart(previousMonth);
+
+    setMtdComparisonLoading(true);
+    setMtdComparisonReady(false);
+    setMtdComparisonError(null);
+
+    try {
+      const rows = await fetchFocusSummaryRange({
+        start: previousStart,
+        end: previousEnd,
+      });
+
+      if (loadId !== mtdComparisonLoadIdRef.current) return;
+
+      setMtdPreviousRows(rows);
+      setMtdComparisonReady(true);
+      setMtdComparisonError(null);
+    } catch (exception: any) {
+      if (loadId !== mtdComparisonLoadIdRef.current) return;
+
+      console.error("focus mensuel MTD N-1", exception);
+      setMtdPreviousRows([]);
+      setMtdComparisonReady(false);
+      setMtdComparisonError(
+        `Chargement MTD N-1 impossible pour ${formatMonthFr(previousMonth)} : ${
+          exception?.message || String(exception)
+        }`,
+      );
+    } finally {
+      if (loadId === mtdComparisonLoadIdRef.current) {
+        setMtdComparisonLoading(false);
+      }
+    }
   }
 
   function createEmptyComparisonBuckets(): ComparisonBuckets {
@@ -3588,6 +3963,7 @@ function FocusMensuelPageContent() {
               void loadData();
               void loadDistinctDocs();
               void loadComparisonTables(true);
+              void loadMtdPreviousYearRows();
               void loadHighlights();
             }}
           >
@@ -3894,7 +4270,13 @@ function FocusMensuelPageContent() {
       )}
       <div style={styles.kpiGrid} className="focus-pdf-kpi-grid">
         {kpiCards.map((card) => (
-          <KpiCard key={card.type} card={card} mode={viewMode} />
+          <KpiCard
+            key={card.type}
+            card={card}
+            mode={viewMode}
+            comparisonBasis={mtdComparisonBasis}
+            comparisonReady={mtdComparisonReady}
+          />
         ))}
       </div>
 
@@ -3910,10 +4292,15 @@ function FocusMensuelPageContent() {
           metric="quantite_pertinente"
           emptyMessage="Aucune donnée par famille macro sur le jour focus."
         />
-        <SummaryMatrix
+        <MtdComparisonMatrix
           title={`Depuis début du mois par famille macro — au ${formatDateFr(focusDate)}`}
-          rows={byFamilyMtdRows}
-          metric="quantite_pertinente"
+          subtitle={
+            mtdComparisonReady
+              ? mtdComparisonBasis.detailLabel
+              : "Préparation de la comparaison N-1 par rang de jour d'expédition BL…"
+          }
+          rows={byFamilyMtdComparisonRows}
+          comparisonReady={mtdComparisonReady}
           emptyMessage="Aucune donnée par famille macro depuis le début du mois."
         />
       </div>
@@ -3922,11 +4309,18 @@ function FocusMensuelPageContent() {
         <SummaryMatrix
           title={`Jour focus par agence — ${formatDateFr(focusDate)}`}
           rows={byAgencyRows}
+          metric="quantite_pertinente"
           emptyMessage="Aucune donnée par agence sur le jour focus."
         />
-        <SummaryMatrix
+        <MtdComparisonMatrix
           title={`Depuis début du mois par agence — au ${formatDateFr(focusDate)}`}
-          rows={byAgencyMtdRows}
+          subtitle={
+            mtdComparisonReady
+              ? mtdComparisonBasis.detailLabel
+              : "Préparation de la comparaison N-1 par rang de jour d'expédition BL…"
+          }
+          rows={byAgencyMtdComparisonRows}
+          comparisonReady={mtdComparisonReady}
           emptyMessage="Aucune donnée par agence depuis le début du mois."
         />
       </div>
@@ -3968,6 +4362,14 @@ function FocusMensuelPageContent() {
         <div style={styles.infoBox}>
           {comparisonProgressLabel || "Chargement du cache comparatif global…"}
         </div>
+      )}
+      {mtdComparisonLoading && !isPdfMode && (
+        <div style={styles.infoBox}>
+          Chargement du Month to date N-1 par rang de jour d’expédition BL…
+        </div>
+      )}
+      {mtdComparisonError && (
+        <div style={styles.errorBox}>{mtdComparisonError}</div>
       )}
 
       <div style={styles.optionCard} className="focus-pdf-section-card">
@@ -4472,6 +4874,17 @@ function aggregateMatrix(
 
 type MatrixMetric = "nb_documents" | "quantite_pertinente";
 
+function DenseMatrixColGroup() {
+  return (
+    <colgroup>
+      <col style={{ width: "18%" }} />
+      {Array.from({ length: 8 }, (_, index) => (
+        <col key={`dense-col-${index}`} style={{ width: "10.25%" }} />
+      ))}
+    </colgroup>
+  );
+}
+
 function SummaryMatrix({
   title,
   rows,
@@ -4483,7 +4896,7 @@ function SummaryMatrix({
   metric?: MatrixMetric;
   emptyMessage?: string;
 }) {
-  const metricLabel = metric === "quantite_pertinente" ? "Q pert." : "docs";
+  const metricLabel = metric === "quantite_pertinente" ? "Q pert." : "Docs";
   const totalRow =
     rows.length > 0
       ? {
@@ -4515,73 +4928,292 @@ function SummaryMatrix({
   return (
     <div style={styles.sectionCard} className="focus-pdf-section-card">
       <div style={styles.sectionTitle}>{title}</div>
-      <Table>
-        <thead>
-          <tr>
-            <th style={styles.th}>Dimension</th>
-            {DOC_TYPES.map((type) => (
-              <th key={type} style={styles.thRight}>
-                {type} {metricLabel}
-              </th>
-            ))}
-            {DOC_TYPES.map((type) => (
-              <th key={`${type}-amount`} style={styles.thRight}>
-                {type} €
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {displayRows.length === 0 ? (
+      <div
+        style={styles.denseMatrixTableWrap}
+        className="focus-pdf-table-wrap"
+      >
+        <table
+          style={styles.denseMatrixTable}
+          className="focus-pdf-dense-matrix-table"
+        >
+          <DenseMatrixColGroup />
+          <thead>
             <tr>
-              <td colSpan={9} style={styles.emptyCell}>
-                {emptyMessage}
-              </td>
-            </tr>
-          ) : (
-            displayRows.map((row, index) => {
-              const isTotal = index === 0 && row.label === "TOTAL";
-              return (
-                <tr
-                  key={row.label}
-                  style={isTotal ? styles.totalRow : undefined}
+              <th rowSpan={2} style={styles.denseThDimension}>
+                Dimension
+              </th>
+              {DOC_TYPES.map((type) => (
+                <th
+                  key={`${type}-day-group`}
+                  colSpan={2}
+                  style={{
+                    ...styles.denseThGroup,
+                    color: DOC_COLORS[type],
+                  }}
                 >
-                  <td style={isTotal ? styles.tdStrongTotal : styles.tdStrong}>
-                    {row.label}
-                  </td>
-                  {DOC_TYPES.map((type) => (
+                  {type}
+                </th>
+              ))}
+            </tr>
+            <tr>
+              {DOC_TYPES.flatMap((type) => [
+                <th
+                  key={`${type}-day-metric`}
+                  style={{ ...styles.denseThMetric, color: DOC_COLORS[type] }}
+                >
+                  {metricLabel}
+                </th>,
+                <th
+                  key={`${type}-day-ca`}
+                  style={{ ...styles.denseThMetric, color: DOC_COLORS[type] }}
+                >
+                  CA
+                </th>,
+              ])}
+            </tr>
+          </thead>
+          <tbody>
+            {displayRows.length === 0 ? (
+              <tr>
+                <td colSpan={9} style={styles.emptyCell}>
+                  {emptyMessage}
+                </td>
+              </tr>
+            ) : (
+              displayRows.map((row, index) => {
+                const isTotal = index === 0 && row.label === "TOTAL";
+                return (
+                  <tr
+                    key={row.label}
+                    style={isTotal ? styles.totalRow : undefined}
+                  >
                     <td
-                      key={type}
-                      style={isTotal ? styles.tdRightTotal : styles.tdRight}
+                      style={
+                        isTotal
+                          ? styles.denseTdDimensionTotal
+                          : styles.denseTdDimension
+                      }
                     >
-                      {formatNumber(
+                      {row.label}
+                    </td>
+                    {DOC_TYPES.flatMap((type) => {
+                      const metricValue =
                         metric === "quantite_pertinente"
                           ? row.byType[type].qtyPert
-                          : row.byType[type].nb,
-                      )}
-                    </td>
-                  ))}
-                  {DOC_TYPES.map((type) => (
-                    <td
-                      key={`${type}-amount`}
-                      style={{
-                        ...(isTotal ? styles.tdRightTotal : styles.tdRight),
-                        color: DOC_COLORS[type],
-                        fontWeight: 900,
-                      }}
-                    >
-                      {formatMoneyCompact(row.byType[type].amount)}
-                    </td>
-                  ))}
-                </tr>
-              );
-            })
-          )}
-        </tbody>
-      </Table>
+                          : row.byType[type].nb;
+
+                      return [
+                        <td
+                          key={`${type}-day-metric`}
+                          style={{
+                            ...(isTotal
+                              ? styles.denseTdValueTotal
+                              : styles.denseTdValue),
+                            color: DOC_COLORS[type],
+                          }}
+                        >
+                          {formatNumber(metricValue)}
+                        </td>,
+                        <td
+                          key={`${type}-day-ca`}
+                          style={{
+                            ...(isTotal
+                              ? styles.denseTdValueTotal
+                              : styles.denseTdValue),
+                            color: DOC_COLORS[type],
+                          }}
+                        >
+                          {formatMoneyCompact(row.byType[type].amount)}
+                        </td>,
+                      ];
+                    })}
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
+
+
+function MtdComparisonMatrix({
+  title,
+  subtitle,
+  rows,
+  comparisonReady,
+  emptyMessage,
+}: {
+  title: string;
+  subtitle: string;
+  rows: ComparisonRow[];
+  comparisonReady: boolean;
+  emptyMessage: string;
+}) {
+  const displayRows = rows.length
+    ? [buildTotalComparisonRow(rows, "TOTAL"), ...rows]
+    : [];
+
+  return (
+    <div style={styles.sectionCard} className="focus-pdf-section-card">
+      <div style={styles.sectionTitle}>{title}</div>
+      <div style={styles.sectionSubtitle}>{subtitle}</div>
+      <div
+        style={styles.mtdComparisonTableWrap}
+        className="focus-pdf-table-wrap"
+      >
+        <table
+          style={styles.mtdComparisonTable}
+          className="focus-pdf-mtd-comparison-table"
+        >
+          <DenseMatrixColGroup />
+          <thead>
+            <tr>
+              <th rowSpan={2} style={styles.denseThDimension}>
+                Dimension / période
+              </th>
+              {DOC_TYPES.map((type) => (
+                <th
+                  key={`${type}-group`}
+                  colSpan={2}
+                  style={{
+                    ...styles.denseThGroup,
+                    color: DOC_COLORS[type],
+                  }}
+                >
+                  {type}
+                </th>
+              ))}
+            </tr>
+            <tr>
+              {DOC_TYPES.flatMap((type) => [
+                <th
+                  key={`${type}-qty`}
+                  style={{ ...styles.denseThMetric, color: DOC_COLORS[type] }}
+                >
+                  Q pert.
+                </th>,
+                <th
+                  key={`${type}-ca`}
+                  style={{ ...styles.denseThMetric, color: DOC_COLORS[type] }}
+                >
+                  CA
+                </th>,
+              ])}
+            </tr>
+          </thead>
+          <tbody>
+            {displayRows.length === 0 ? (
+              <tr>
+                <td colSpan={9} style={styles.emptyCell}>
+                  {emptyMessage}
+                </td>
+              </tr>
+            ) : (
+              displayRows.map((row, index) => {
+                const isTotal = index === 0 && row.label === "TOTAL";
+
+                const currentRow = (
+                  <tr
+                    key={`mtd-current-${row.label}`}
+                    style={isTotal ? styles.totalRow : styles.mtdCurrentRow}
+                  >
+                    <td
+                      style={
+                        isTotal
+                          ? styles.mtdDimensionCurrentTotal
+                          : styles.mtdDimensionCurrent
+                      }
+                    >
+                      <span>{row.label}</span>
+                      <span style={styles.mtdPeriodCurrent}>N</span>
+                    </td>
+                    {DOC_TYPES.flatMap((type) => {
+                      const cell = row.byType[type];
+                      return [
+                        <td
+                          key={`${type}-qty-current`}
+                          style={{
+                            ...(isTotal
+                              ? styles.mtdTdCurrentTotal
+                              : styles.mtdTdCurrent),
+                            color: DOC_COLORS[type],
+                          }}
+                        >
+                          {formatNumber(cell.qtyPertN)}
+                        </td>,
+                        <td
+                          key={`${type}-ca-current`}
+                          style={{
+                            ...(isTotal
+                              ? styles.mtdTdCurrentTotal
+                              : styles.mtdTdCurrent),
+                            color: DOC_COLORS[type],
+                          }}
+                        >
+                          {formatMoneyCompact(cell.amountN)}
+                        </td>,
+                      ];
+                    })}
+                  </tr>
+                );
+
+                const previousRow = (
+                  <tr
+                    key={`mtd-previous-${row.label}`}
+                    style={styles.mtdPreviousRow}
+                  >
+                    <td
+                      style={
+                        isTotal
+                          ? styles.mtdDimensionPreviousTotal
+                          : styles.mtdDimensionPrevious
+                      }
+                    >
+                      N-1
+                    </td>
+                    {DOC_TYPES.flatMap((type) => {
+                      const cell = row.byType[type];
+                      return [
+                        <td
+                          key={`${type}-qty-previous`}
+                          style={
+                            isTotal
+                              ? styles.mtdTdPreviousTotal
+                              : styles.mtdTdPrevious
+                          }
+                        >
+                          {comparisonReady ? formatNumber(cell.qtyPertN1) : "…"}
+                        </td>,
+                        <td
+                          key={`${type}-ca-previous`}
+                          style={
+                            isTotal
+                              ? styles.mtdTdPreviousTotal
+                              : styles.mtdTdPrevious
+                          }
+                        >
+                          {comparisonReady
+                            ? formatMoneyCompact(cell.amountN1)
+                            : "…"}
+                        </td>,
+                      ];
+                    })}
+                  </tr>
+                );
+
+                return [currentRow, previousRow];
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 
 function ActivityByAgencyComparisonTable({
   title,
@@ -5612,6 +6244,19 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 900,
     fontSize: 12,
   },
+  mtdBasisPill: {
+    borderRadius: 999,
+    padding: "5px 8px",
+    fontWeight: 900,
+    fontSize: 11,
+    color: "#075985",
+    background: "#e0f2fe",
+    border: "1px solid #bae6fd",
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    maxWidth: "72%",
+  },
   kpiValuesGrid: {
     display: "grid",
     gridTemplateColumns: "1fr 1fr",
@@ -5619,17 +6264,103 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: "center",
     marginTop: 8,
   },
-  kpiValueBlockLeft: { textAlign: "center", minWidth: 0 },
-  kpiValueBlockRight: { textAlign: "center", minWidth: 0 },
-  kpiValueLabel: {
+  kpiValuesGridMtd: {
+    display: "grid",
+    gridTemplateColumns: "minmax(104px, 0.72fr) minmax(0, 1.28fr)",
+    gap: 14,
+    alignItems: "start",
+    marginTop: 8,
+  },
+  kpiValueBlockLeft: {
+    textAlign: "center",
+    minWidth: 0,
+    display: "grid",
+    gridTemplateRows: "18px 44px 25px",
+    alignItems: "center",
+    alignSelf: "stretch",
+    paddingRight: 2,
+  },
+  kpiMtdBlock: {
+    minWidth: 0,
+    borderLeft: "1px solid #e2e8f0",
+    paddingLeft: 16,
+    display: "block",
+    alignSelf: "stretch",
+  },
+  kpiMtdMetric: {
+    background: "transparent",
+    minWidth: 0,
+    width: "100%",
+    display: "grid",
+    gridTemplateRows: "18px 44px 25px",
+    justifyItems: "end",
+    alignItems: "center",
+    textAlign: "right",
+  },
+  kpiMtdMetricTop: {
+    display: "block",
+  },
+  kpiMtdMetricBottom: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    gap: 10,
+    width: "100%",
+    minWidth: 0,
+  },
+  kpiMtdMetricLabel: {
+    width: "100%",
     fontSize: 11,
+    lineHeight: "18px",
     fontWeight: 950,
     color: "#64748b",
     textTransform: "uppercase",
     letterSpacing: "0.04em",
-    marginBottom: 3,
+    textAlign: "right",
   },
-  kpiMain: { fontSize: 36, fontWeight: 950, marginBottom: 4 },
+  kpiMtdMetricCurrent: {
+    width: "100%",
+    fontSize: 36,
+    lineHeight: 1,
+    fontWeight: 950,
+    whiteSpace: "nowrap",
+    textAlign: "right",
+  },
+  kpiMtdMetricPrevious: {
+    fontSize: 19,
+    lineHeight: 1.1,
+    fontWeight: 900,
+    color: "#475569",
+    whiteSpace: "nowrap",
+  },
+  mtdEvolutionBadge: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    minWidth: 62,
+    borderRadius: 999,
+    padding: "4px 8px",
+    fontSize: 11.5,
+    lineHeight: 1.1,
+    fontWeight: 950,
+    whiteSpace: "nowrap",
+  },
+  kpiValueBlockRight: { textAlign: "center", minWidth: 0 },
+  kpiValueLabel: {
+    fontSize: 11,
+    lineHeight: "18px",
+    fontWeight: 950,
+    color: "#64748b",
+    textTransform: "uppercase",
+    letterSpacing: "0.04em",
+    margin: 0,
+  },
+  kpiMain: {
+    fontSize: 36,
+    lineHeight: 1,
+    fontWeight: 950,
+    margin: 0,
+  },
   kpiSub: {
     fontSize: 13,
     color: "#475569",
@@ -5637,7 +6368,12 @@ const styles: Record<string, React.CSSProperties> = {
     marginTop: 10,
     marginBottom: 0,
   },
-  kpiValueSub: { fontSize: 12, color: "#64748b", fontWeight: 850 },
+  kpiValueSub: {
+    fontSize: 12,
+    lineHeight: 1.1,
+    color: "#64748b",
+    fontWeight: 850,
+  },
   kpiMeta: { fontSize: 12, color: "#64748b", marginTop: 5 },
   chartGrid: {
     display: "grid",
@@ -5770,6 +6506,193 @@ const styles: Record<string, React.CSSProperties> = {
     maxWidth: "100%",
     border: "1px solid #e2e8f0",
     borderRadius: 12,
+  },
+  denseMatrixTableWrap: {
+    overflowX: "hidden",
+    overflowY: "visible",
+    width: "100%",
+    maxWidth: "100%",
+    border: "1px solid #e2e8f0",
+    borderRadius: 12,
+  },
+  denseMatrixTable: {
+    width: "100%",
+    minWidth: 0,
+    borderCollapse: "collapse",
+    tableLayout: "fixed",
+    fontSize: 10.5,
+  },
+  mtdComparisonTableWrap: {
+    overflowX: "hidden",
+    overflowY: "visible",
+    width: "100%",
+    maxWidth: "100%",
+    border: "1px solid #e2e8f0",
+    borderRadius: 12,
+  },
+  mtdComparisonTable: {
+    width: "100%",
+    minWidth: 0,
+    borderCollapse: "collapse",
+    tableLayout: "fixed",
+    fontSize: 10.5,
+  },
+  denseThDimension: {
+    background: "#f1f5f9",
+    color: "#0f172a",
+    borderBottom: "1px solid #cbd5e1",
+    padding: "6px 7px",
+    textAlign: "left",
+    verticalAlign: "middle",
+    fontWeight: 950,
+    lineHeight: 1.05,
+  },
+  denseThGroup: {
+    background: "#f1f5f9",
+    borderBottom: "1px solid #cbd5e1",
+    padding: "5px 3px 3px",
+    textAlign: "center",
+    fontWeight: 950,
+    whiteSpace: "nowrap",
+    lineHeight: 1.05,
+  },
+  denseThMetric: {
+    background: "#f8fafc",
+    borderBottom: "1px solid #cbd5e1",
+    padding: "3px 2px 5px",
+    textAlign: "right",
+    fontWeight: 900,
+    whiteSpace: "nowrap",
+    lineHeight: 1.05,
+    fontSize: 9.5,
+  },
+  denseTdDimension: {
+    borderBottom: "1px solid #e2e8f0",
+    padding: "5px 7px",
+    fontWeight: 900,
+    color: "#0f172a",
+    lineHeight: 1.08,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  denseTdDimensionTotal: {
+    borderBottom: "2px solid #cbd5e1",
+    padding: "5px 7px",
+    fontWeight: 950,
+    color: "#0f172a",
+    lineHeight: 1.08,
+    whiteSpace: "nowrap",
+  },
+  denseTdValue: {
+    borderBottom: "1px solid #e2e8f0",
+    padding: "5px 3px",
+    textAlign: "right",
+    fontWeight: 900,
+    lineHeight: 1.08,
+    whiteSpace: "nowrap",
+  },
+  denseTdValueTotal: {
+    borderBottom: "2px solid #cbd5e1",
+    padding: "5px 3px",
+    textAlign: "right",
+    fontWeight: 950,
+    lineHeight: 1.08,
+    whiteSpace: "nowrap",
+  },
+  mtdCurrentRow: {
+    background: "#ffffff",
+  },
+  mtdPreviousRow: {
+    background: "#f8fafc",
+  },
+  mtdDimensionCurrent: {
+    borderBottom: "1px solid #e2e8f0",
+    padding: "5px 7px 3px",
+    fontWeight: 950,
+    color: "#0f172a",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 5,
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+  },
+  mtdDimensionCurrentTotal: {
+    borderBottom: "1px solid #cbd5e1",
+    padding: "5px 7px 3px",
+    fontWeight: 950,
+    color: "#0f172a",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 5,
+    whiteSpace: "nowrap",
+  },
+  mtdPeriodCurrent: {
+    flexShrink: 0,
+    borderRadius: 999,
+    background: "#e2e8f0",
+    color: "#475569",
+    padding: "1px 5px",
+    fontSize: 9,
+    fontWeight: 950,
+  },
+  mtdDimensionPrevious: {
+    borderBottom: "2px solid #e2e8f0",
+    padding: "3px 7px 5px",
+    textAlign: "right",
+    color: "#475569",
+    fontSize: 11.5,
+    fontWeight: 950,
+    whiteSpace: "nowrap",
+  },
+  mtdDimensionPreviousTotal: {
+    borderBottom: "2px solid #cbd5e1",
+    padding: "3px 7px 5px",
+    textAlign: "right",
+    color: "#334155",
+    fontSize: 12,
+    fontWeight: 950,
+    whiteSpace: "nowrap",
+  },
+  mtdTdCurrent: {
+    borderBottom: "1px solid #e2e8f0",
+    padding: "5px 3px 3px",
+    textAlign: "right",
+    fontSize: 11,
+    lineHeight: 1.05,
+    fontWeight: 950,
+    whiteSpace: "nowrap",
+  },
+  mtdTdCurrentTotal: {
+    borderBottom: "1px solid #cbd5e1",
+    padding: "5px 3px 3px",
+    textAlign: "right",
+    fontSize: 11.5,
+    lineHeight: 1.05,
+    fontWeight: 950,
+    whiteSpace: "nowrap",
+  },
+  mtdTdPrevious: {
+    borderBottom: "2px solid #e2e8f0",
+    padding: "3px 3px 5px",
+    textAlign: "right",
+    color: "#475569",
+    fontSize: 11,
+    lineHeight: 1.05,
+    fontWeight: 900,
+    whiteSpace: "nowrap",
+  },
+  mtdTdPreviousTotal: {
+    borderBottom: "2px solid #cbd5e1",
+    padding: "3px 3px 5px",
+    textAlign: "right",
+    color: "#334155",
+    fontSize: 11.5,
+    lineHeight: 1.05,
+    fontWeight: 950,
+    whiteSpace: "nowrap",
   },
   familyComparisonTable: {
     width: "100%",
