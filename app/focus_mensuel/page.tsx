@@ -4288,6 +4288,7 @@ function FocusMensuelPageContent() {
       <div style={styles.sectionGrid} className="focus-pdf-section-grid">
         <SummaryMatrix
           title={`Jour focus par famille macro — ${formatDateFr(focusDate)}`}
+          subtitle="Lecture de la journée sélectionnée, sans comparaison N-1."
           rows={byFamilyRows}
           metric="quantite_pertinente"
           emptyMessage="Aucune donnée par famille macro sur le jour focus."
@@ -4308,6 +4309,7 @@ function FocusMensuelPageContent() {
       <div style={styles.sectionGrid} className="focus-pdf-section-grid">
         <SummaryMatrix
           title={`Jour focus par agence — ${formatDateFr(focusDate)}`}
+          subtitle="Lecture de la journée sélectionnée, sans comparaison N-1."
           rows={byAgencyRows}
           metric="quantite_pertinente"
           emptyMessage="Aucune donnée par agence sur le jour focus."
@@ -4887,11 +4889,13 @@ function DenseMatrixColGroup() {
 
 function SummaryMatrix({
   title,
+  subtitle,
   rows,
   metric = "nb_documents",
   emptyMessage = "Aucune donnée sur le jour focus.",
 }: {
   title: string;
+  subtitle?: string;
   rows: MatrixRow[];
   metric?: MatrixMetric;
   emptyMessage?: string;
@@ -4928,6 +4932,7 @@ function SummaryMatrix({
   return (
     <div style={styles.sectionCard} className="focus-pdf-section-card">
       <div style={styles.sectionTitle}>{title}</div>
+      {subtitle ? <div style={styles.sectionSubtitle}>{subtitle}</div> : null}
       <div
         style={styles.denseMatrixTableWrap}
         className="focus-pdf-table-wrap"
@@ -4982,19 +4987,21 @@ function SummaryMatrix({
             ) : (
               displayRows.map((row, index) => {
                 const isTotal = index === 0 && row.label === "TOTAL";
-                return (
+
+                const currentRow = (
                   <tr
-                    key={row.label}
-                    style={isTotal ? styles.totalRow : undefined}
+                    key={`day-current-${row.label}`}
+                    style={isTotal ? styles.totalRow : styles.mtdCurrentRow}
                   >
                     <td
                       style={
                         isTotal
-                          ? styles.denseTdDimensionTotal
-                          : styles.denseTdDimension
+                          ? styles.mtdDimensionCurrentTotal
+                          : styles.mtdDimensionCurrent
                       }
                     >
-                      {row.label}
+                      <span>{row.label}</span>
+                      <span style={styles.mtdPeriodCurrent}>N</span>
                     </td>
                     {DOC_TYPES.flatMap((type) => {
                       const metricValue =
@@ -5007,8 +5014,8 @@ function SummaryMatrix({
                           key={`${type}-day-metric`}
                           style={{
                             ...(isTotal
-                              ? styles.denseTdValueTotal
-                              : styles.denseTdValue),
+                              ? styles.mtdTdCurrentTotal
+                              : styles.mtdTdCurrent),
                             color: DOC_COLORS[type],
                           }}
                         >
@@ -5018,8 +5025,8 @@ function SummaryMatrix({
                           key={`${type}-day-ca`}
                           style={{
                             ...(isTotal
-                              ? styles.denseTdValueTotal
-                              : styles.denseTdValue),
+                              ? styles.mtdTdCurrentTotal
+                              : styles.mtdTdCurrent),
                             color: DOC_COLORS[type],
                           }}
                         >
@@ -5029,6 +5036,48 @@ function SummaryMatrix({
                     })}
                   </tr>
                 );
+
+                const spacerRow = (
+                  <tr
+                    key={`day-spacer-${row.label}`}
+                    style={styles.mtdPreviousRow}
+                    aria-hidden="true"
+                  >
+                    <td
+                      style={
+                        isTotal
+                          ? styles.mtdDimensionPreviousTotal
+                          : styles.mtdDimensionPrevious
+                      }
+                    >
+                      {"\u00A0"}
+                    </td>
+                    {DOC_TYPES.flatMap((type) => [
+                      <td
+                        key={`${type}-day-spacer-metric`}
+                        style={
+                          isTotal
+                            ? styles.mtdTdPreviousTotal
+                            : styles.mtdTdPrevious
+                        }
+                      >
+                        {"\u00A0"}
+                      </td>,
+                      <td
+                        key={`${type}-day-spacer-ca`}
+                        style={
+                          isTotal
+                            ? styles.mtdTdPreviousTotal
+                            : styles.mtdTdPrevious
+                        }
+                      >
+                        {"\u00A0"}
+                      </td>,
+                    ])}
+                  </tr>
+                );
+
+                return [currentRow, spacerRow];
               })
             )}
           </tbody>
@@ -6266,8 +6315,11 @@ const styles: Record<string, React.CSSProperties> = {
   },
   kpiValuesGridMtd: {
     display: "grid",
-    gridTemplateColumns: "minmax(104px, 0.72fr) minmax(0, 1.28fr)",
-    gap: 14,
+    // Environ 45 % pour Jour et 55 % pour Month to date :
+    // le séparateur est déplacé vers la droite pour laisser les montants Jour
+    // sur une seule ligne, même aux résolutions intermédiaires.
+    gridTemplateColumns: "minmax(145px, 0.9fr) minmax(0, 1.1fr)",
+    gap: 12,
     alignItems: "start",
     marginTop: 8,
   },
@@ -6283,7 +6335,7 @@ const styles: Record<string, React.CSSProperties> = {
   kpiMtdBlock: {
     minWidth: 0,
     borderLeft: "1px solid #e2e8f0",
-    paddingLeft: 16,
+    paddingLeft: 13,
     display: "block",
     alignSelf: "stretch",
   },
@@ -6360,6 +6412,7 @@ const styles: Record<string, React.CSSProperties> = {
     lineHeight: 1,
     fontWeight: 950,
     margin: 0,
+    whiteSpace: "nowrap",
   },
   kpiSub: {
     fontSize: 13,
