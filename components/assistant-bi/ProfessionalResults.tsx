@@ -189,57 +189,6 @@ export function ProfessionalResults({
   function renderChart() {
     if (!result.rows_preview.length || !xKey || !valueKey) return <EmptyState text="Le résultat ne contient pas une dimension et une mesure exploitables." />
 
-    if (visualization === 'histogramme_empile' && pivot) {
-      const visible = pivot.columns.filter((series) => !hiddenSeries.includes(series))
-      return (
-        <>
-          <div style={styles.chartMeta}>
-            <span>Axe : <b>{getColumn(result, xKey)?.label || xKey}</b></span>
-            <span>Empilement : <b>{getColumn(result, stackKey)?.label || stackKey}</b></span>
-            <span>Valeur : <b>{valueColumn?.label || valueKey}</b></span>
-          </div>
-          {renderLegend(pivot.columns)}
-          <ResponsiveContainer width="100%" height={430}>
-            <BarChart data={pivot.rows} margin={{ top: 20, right: 28, left: 18, bottom: 28 }}>
-              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
-              <XAxis dataKey={xKey} tick={{ fontSize: 12 }} tickLine={false} />
-              <YAxis tickFormatter={formatCompact} tick={{ fontSize: 11 }} axisLine={false} tickLine={false} width={70} />
-              <Tooltip formatter={(value) => formatValue(value, valueColumn?.type || 'number')} />
-              {visible.map((series, index) => (
-                <Bar
-                  key={series}
-                  dataKey={series}
-                  stackId="cegeclim"
-                  fill={colorFor(series, index)}
-                  radius={index === visible.length - 1 ? [4, 4, 0, 0] : 0}
-                  maxBarSize={90}
-                />
-              ))}
-            </BarChart>
-          </ResponsiveContainer>
-        </>
-      )
-    }
-
-    if (visualization === 'courbe') {
-      return (
-        <>
-          {renderLegend(measureKeys)}
-          <ResponsiveContainer width="100%" height={430}>
-            <LineChart data={normalizedRows} margin={{ top: 20, right: 28, left: 18, bottom: 28 }}>
-              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
-              <XAxis dataKey={xKey} tick={{ fontSize: 12 }} tickLine={false} />
-              <YAxis tickFormatter={formatCompact} tick={{ fontSize: 11 }} axisLine={false} tickLine={false} width={70} />
-              <Tooltip formatter={(value) => formatValue(value, valueColumn?.type || 'number')} />
-              {measureKeys.filter((key) => !hiddenSeries.includes(key)).map((key, index) => (
-                <Line key={key} dataKey={key} name={getColumn(result, key)?.label || key} stroke={colorFor(key, index)} strokeWidth={3} dot={{ r: 3 }} type="monotone" />
-              ))}
-            </LineChart>
-          </ResponsiveContainer>
-        </>
-      )
-    }
-
     if (visualization === 'camembert') {
       const pieRows = normalizedRows.slice(0, 12)
       return (
@@ -262,6 +211,100 @@ export function ProfessionalResults({
             ))}
           </div>
         </div>
+      )
+    }
+
+    if (pivot && visualization === 'courbe') {
+      const visible = pivot.columns.filter((series) => !hiddenSeries.includes(series))
+      return (
+        <>
+          <div style={styles.chartMeta}>
+            <span>Axe : <b>{getColumn(result, xKey)?.label || xKey}</b></span>
+            <span>Séries : <b>{getColumn(result, stackKey)?.label || stackKey}</b></span>
+            <span>Valeur : <b>{valueColumn?.label || valueKey}</b></span>
+          </div>
+          {renderLegend(pivot.columns)}
+          <ResponsiveContainer width="100%" height={430}>
+            <LineChart data={pivot.rows} margin={{ top: 20, right: 28, left: 18, bottom: 28 }}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
+              <XAxis dataKey={xKey} tick={{ fontSize: 12 }} tickLine={false} />
+              <YAxis tickFormatter={formatCompact} tick={{ fontSize: 11 }} axisLine={false} tickLine={false} width={70} />
+              <Tooltip formatter={(value) => formatValue(value, valueColumn?.type || 'number')} />
+              {visible.map((series) => {
+                const colorIndex = pivot.columns.indexOf(series)
+                return (
+                  <Line
+                    key={series}
+                    dataKey={series}
+                    name={series}
+                    stroke={colorFor(series, colorIndex)}
+                    strokeWidth={3}
+                    dot={{ r: 3 }}
+                    type="monotone"
+                  />
+                )
+              })}
+            </LineChart>
+          </ResponsiveContainer>
+        </>
+      )
+    }
+
+    if (pivot) {
+      const visible = pivot.columns.filter((series) => !hiddenSeries.includes(series))
+      const stacked = visualization === 'histogramme_empile'
+      return (
+        <>
+          <div style={styles.chartMeta}>
+            <span>Axe : <b>{getColumn(result, xKey)?.label || xKey}</b></span>
+            <span>{stacked ? 'Empilement' : 'Séries'} : <b>{getColumn(result, stackKey)?.label || stackKey}</b></span>
+            <span>Valeur : <b>{valueColumn?.label || valueKey}</b></span>
+          </div>
+          {renderLegend(pivot.columns)}
+          <ResponsiveContainer width="100%" height={430}>
+            <BarChart data={pivot.rows} margin={{ top: 20, right: 28, left: 18, bottom: 32 }}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
+              <XAxis dataKey={xKey} tick={{ fontSize: 11 }} tickLine={false} interval="preserveStartEnd" />
+              <YAxis tickFormatter={formatCompact} tick={{ fontSize: 11 }} axisLine={false} tickLine={false} width={70} />
+              <Tooltip formatter={(value) => formatValue(value, valueColumn?.type || 'number')} />
+              {visible.map((series, visibleIndex) => {
+                const colorIndex = pivot.columns.indexOf(series)
+                return (
+                  <Bar
+                    key={series}
+                    dataKey={series}
+                    name={series}
+                    stackId={stacked ? 'cegeclim' : undefined}
+                    fill={colorFor(series, colorIndex)}
+                    radius={stacked
+                      ? (visibleIndex === visible.length - 1 ? [4, 4, 0, 0] : 0)
+                      : [4, 4, 0, 0]}
+                    maxBarSize={stacked ? 90 : 72}
+                  />
+                )
+              })}
+            </BarChart>
+          </ResponsiveContainer>
+        </>
+      )
+    }
+
+    if (visualization === 'courbe') {
+      return (
+        <>
+          {renderLegend(measureKeys)}
+          <ResponsiveContainer width="100%" height={430}>
+            <LineChart data={normalizedRows} margin={{ top: 20, right: 28, left: 18, bottom: 28 }}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
+              <XAxis dataKey={xKey} tick={{ fontSize: 12 }} tickLine={false} />
+              <YAxis tickFormatter={formatCompact} tick={{ fontSize: 11 }} axisLine={false} tickLine={false} width={70} />
+              <Tooltip formatter={(value) => formatValue(value, valueColumn?.type || 'number')} />
+              {measureKeys.filter((key) => !hiddenSeries.includes(key)).map((key, index) => (
+                <Line key={key} dataKey={key} name={getColumn(result, key)?.label || key} stroke={colorFor(key, index)} strokeWidth={3} dot={{ r: 3 }} type="monotone" />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        </>
       )
     }
 
