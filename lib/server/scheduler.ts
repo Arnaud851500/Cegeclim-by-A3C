@@ -272,6 +272,122 @@ export function resolveAggregatePeriod(
   return null
 }
 
+
+const SMC_BACKGROUND_JOB_KEY = 'refresh_smc_daily'
+const SMC_BACKGROUND_JOB_NAME = 'smc_period_catchup'
+const SMC_BACKGROUND_CRON_JOB_NAME = 'smc_period_catchup_auto'
+const SMC_BACKGROUND_DEFAULT_BATCH_SIZE = 25
+const SMC_BACKGROUND_MIN_BATCH_SIZE = 1
+const SMC_BACKGROUND_MAX_BATCH_SIZE = 200
+const LEGACY_SMC_ROUTE_PATH = '/api/admin/maintenance/refresh-smc'
+
+function clampSmcBatchSize(value: unknown) {
+  const parsed = Number(value)
+  const safeValue = Number.isFinite(parsed)
+    ? Math.round(parsed)
+    : SMC_BACKGROUND_DEFAULT_BATCH_SIZE
+
+  return Math.max(
+    SMC_BACKGROUND_MIN_BATCH_SIZE,
+    Math.min(SMC_BACKGROUND_MAX_BATCH_SIZE, safeValue)
+  )
+}
+
+function isSmcBackgroundJob(job: SchedulerJob) {
+  const config = job.config_json || {}
+  const routePath = String(config.routePath || config.path || '').trim()
+
+  return (
+    job.job_type === 'smc_background' ||
+    job.job_key === SMC_BACKGROUND_JOB_KEY ||
+    routePath === LEGACY_SMC_ROUTE_PATH
+  )
+}
+
+function resolveSmcBackgroundPeriod(job: SchedulerJob) {
+  const config = job.config_json || {}
+  const timezone = job.timezone || 'Europe/Paris'
+  const period = config.period || {
+    mode: 'relative_months',
+    months: 2,
+    includeCurrentMonth: true,
+  }
+
+  const resolved = resolveAggregatePeriod(period, timezone)
+
+  if (!resolved?.date_debut || !resolved?.date_fin) {
+    throw new Error('Période SMC impossible à déterminer dans config_json.period.')
+  }
+
+  // Comme dans import.tsx, SMC travaille sur une plage mensuelle complète :
+  // début au premier jour du premier mois, fin exclusive au premier jour du mois suivant.
+  const dateDebut = firstDayOfMonthYmd(resolved.date_debut)
+  const lastIncludedDay = addDaysToYmd(resolved.date_fin, -1)
+  const dateFin = firstDayOfNextMonthYmd(lastIncludedDay)
+
+  return {
+    p_date_debut: dateDebut,
+    p_date_fin: dateFin,
+  }
+}
+
+async function executeSmcBackgroundJob(
+  supabase: SupabaseAdmin,
+  job: SchedulerJob
+) {
+  const config = job.config_json || {}
+  const period = resolveSmcBackgroundPeriod(job)
+  const batchSize = clampSmcBatchSize(
+    config.batch_size ??
+      config.batchSize ??
+      config.smc_batch_size ??
+      config.body?.batch_size ??
+      config.body?.batchSize
+  )
+  const smcJobName = String(
+    config.smc_job_name || config.job_name || SMC_BACKGROUND_JOB_NAME
+  ).trim()
+  const smcCronJobName = String(
+    config.smc_cron_job_name || config.cron_job_name || SMC_BACKGROUND_CRON_JOB_NAME
+  ).trim()
+
+  const { data, error } = await supabase.rpc('smc_restart_period_batch_job', {
+    p_date_debut: period.p_date_debut,
+    p_date_fin: period.p_date_fin,
+    p_batch_size: batchSize,
+    p_job_name: smcJobName,
+    p_cron_job_name: smcCronJobName,
+    p_enable_cron: true,
+  })
+
+  if (error) {
+    throw new Error(`smc_restart_period_batch_job : ${error.message}`)
+  }
+
+  const row = Array.isArray(data) ? data[0] : data
+  const totalClients = Number(row?.total_clients || row?.total_queue || 0)
+  const processedClients = Number(row?.processed_clients || 0)
+
+  return {
+    done: true,
+    status: 'done',
+    message:
+      `SMC lancé en arrière-plan sur ${period.p_date_debut} → ${period.p_date_fin} : ` +
+      `${processedClients}/${totalClients} client(s), lots de ${batchSize}.`,
+    result: {
+      background: true,
+      rpc: 'smc_restart_period_batch_job',
+      period,
+      batchSize,
+      smcJobName,
+      smcCronJobName,
+      totalClients,
+      processedClients,
+      response: row || null,
+    },
+  }
+}
+
 export function buildSchedulerHttpBody(job: SchedulerJob) {
   const config = job.config_json || {}
   const body = {
@@ -561,7 +677,6 @@ export async function executeSchedulerRun(params: {
   schedulerRun: SchedulerRun
 }) {
   const { supabase, job, schedulerRun } = params
-  const appOrigin = getAppOrigin()
   const startedAt = new Date().toISOString()
 
   await supabase
@@ -579,13 +694,16 @@ export async function executeSchedulerRun(params: {
   let executionResult: any
 
   if (job.job_type === 'client_maintenance') {
-    executionResult = await executeClientMaintenance(supabase, job, schedulerRun, appOrigin)
+    executionResult = await executeClientMaintenance(supabase, job, schedulerRun, getAppOrigin())
+  } else if (isSmcBackgroundJob(job)) {
+    // Aucun appel HTTP/Vercel : on prépare directement le job SQL SMC et son cron.
+    executionResult = await executeSmcBackgroundJob(supabase, job)
   } else if (job.job_type === 'http_route') {
-    executionResult = await executeHttpRoute(job, appOrigin)
+    executionResult = await executeHttpRoute(job, getAppOrigin())
   } else {
     const config = job.config_json || {}
     if (config.routePath || config.path) {
-      executionResult = await executeHttpRoute(job, appOrigin)
+      executionResult = await executeHttpRoute(job, getAppOrigin())
     } else {
       throw new Error(`Type de job non supporté : ${job.job_type}`)
     }

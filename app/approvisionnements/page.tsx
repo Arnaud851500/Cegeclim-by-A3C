@@ -1341,7 +1341,6 @@ export default function ApprovisionnementsPage() {
       </header>
 
       {error && <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm font-bold text-red-700">{error}</div>}
-      {access.accessBadge && <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm font-bold text-amber-900">Périmètre utilisateur appliqué : {access.accessBadge}</div>}
       {maintenanceMessage && <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-bold text-emerald-800">{maintenanceMessage}</div>}
       {loading && <div className="mb-4 rounded-xl bg-white p-4 text-sm font-bold text-slate-600 shadow-sm">Chargement de la synthèse agrégée…</div>}
 
