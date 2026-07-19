@@ -496,11 +496,11 @@ export default function PlanificationTraitementsPage() {
       setRuns(json.runs || [])
       setLogs(json.logs || [])
 
+      // Ne jamais écraser le formulaire en cours d'édition lors d'une actualisation.
+      // Les jobs, runs et logs sont rafraîchis, mais le job sélectionné reste intact
+      // jusqu'à une sauvegarde explicite ou la sélection volontaire d'un autre job.
       if (!selected && nextJobs?.[0]) {
-        setSelected(nextJobs[0])
-      } else if (selected?.id) {
-        const refreshedSelected = nextJobs.find((job: SchedulerJob) => job.id === selected.id)
-        if (refreshedSelected) setSelected(refreshedSelected)
+        setSelected(clone(nextJobs[0]))
       }
     } catch (e: any) {
       setError(e?.message || String(e))
@@ -510,9 +510,10 @@ export default function PlanificationTraitementsPage() {
   }
 
   useEffect(() => {
-    refresh()
-    const timer = window.setInterval(refresh, 15000)
-    return () => window.clearInterval(timer)
+    // Chargement initial uniquement. Aucun rafraîchissement automatique :
+    // un timer réinjectait les données serveur toutes les 15 secondes et
+    // supprimait les paramètres saisis avant leur sauvegarde.
+    void refresh()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -557,7 +558,7 @@ export default function PlanificationTraitementsPage() {
       const json = await res.json()
       if (!res.ok || json.success === false) throw new Error(json.error || 'Erreur lancement')
 
-      setMessage('Traitement lancé. Le monitoring se mettra à jour automatiquement.')
+      setMessage('Traitement lancé. Clique sur Actualiser pour mettre à jour le suivi, sans interrompre une saisie en cours.')
       await refresh()
     } catch (e: any) {
       setError(e?.message || String(e))
@@ -625,7 +626,7 @@ export default function PlanificationTraitementsPage() {
           <h1>Planification des traitements</h1>
           <p>Orchestration des mises à jour clients, recalculs d’agrégats, SMC et envois de documents.</p>
         </div>
-        <button onClick={refresh} disabled={loading}>Actualiser</button>
+        <button onClick={() => void refresh()} disabled={loading}>Actualiser</button>
       </div>
 
       {message && <div className="alert ok">{message}</div>}
@@ -655,7 +656,7 @@ export default function PlanificationTraitementsPage() {
                 </button>
               ))}
             </div>
-            <p>Les routes proposées sont des modèles : adapte le chemin API si ta route réelle porte un autre nom.</p>
+            <p>Les mises à jour de la liste, des runs et des logs se font uniquement avec le bouton Actualiser afin de préserver les saisies non sauvegardées.</p>
           </div>
 
           <table>
