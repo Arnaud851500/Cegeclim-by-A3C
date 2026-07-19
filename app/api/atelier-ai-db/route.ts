@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import {
+  hasDetailedStructuredFilters,
+  normalizeAssistantBiStructuredFilters,
+  type AssistantBiStructuredFilters,
+} from '@/lib/ai/assistantBiStructuredFilters'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -34,13 +39,7 @@ const SCHEMA: Record<string, string[]> = {
 }
 
 const ALLOWED_TABLES = new Set(Object.keys(SCHEMA))
-const ALLOWED_JOIN_TARGETS = new Set([
-  'ref_tiers',
-  'ref_collaborateurs',
-  'ref_articles',
-  'ref_familles',
-  'v_stock_projection_alertes_abc',
-])
+const ALLOWED_JOIN_TARGETS = new Set(['ref_tiers', 'ref_collaborateurs', 'ref_articles', 'ref_familles', 'v_stock_projection_alertes_abc'])
 
 const LABELS: Record<string, string> = {
   annee: 'Année',
@@ -162,8 +161,6 @@ function validateSql(value: string) {
     [...sql.matchAll(/(?:\bwith\b|,)\s*([a-z_][a-z0-9_]*)\s+as\s*\(/gi)]
       .map((match) => match[1].toLowerCase()),
   )
-
-  // Empêche le validateur de confondre « FROM l.date » dans EXTRACT avec une table appelée « l ».
   const sqlForRelations = sql.replace(
     /EXTRACT\s*\(\s*(YEAR|MONTH|DAY|QUARTER)\s+FROM\s+/gi,
     'EXTRACT($1 __DATE_FROM__ ',
@@ -173,9 +170,7 @@ function validateSql(value: string) {
   for (const relation of relations) {
     const keyword = relation[1].toLowerCase()
     const table = relation[2].replace(/^public\./i, '').toLowerCase()
-    if (!ALLOWED_TABLES.has(table) && !ctes.has(table)) {
-      throw new Error(`Table non autorisée : ${table}`)
-    }
+    if (!ALLOWED_TABLES.has(table) && !ctes.has(table)) throw new Error(`Table non autorisée : ${table}`)
     if (keyword === 'join' && ALLOWED_TABLES.has(table) && !ALLOWED_JOIN_TARGETS.has(table)) {
       throw new Error(`JOIN non autorisé vers ${table}.`)
     }
@@ -185,13 +180,40 @@ function validateSql(value: string) {
 
 const quote = (value: unknown) => `'${String(value ?? '').replaceAll("'", "''")}'`
 
+function normalizedStrings(values: unknown[]) {
+  return values.map(String).map((value) => value.trim()).filter(Boolean)
+}
+
 function inSql(column: string, values: unknown[]) {
-  const list = values.map(String).map((value) => value.trim()).filter(Boolean)
+  const list = normalizedStrings(values)
   return list.length ? `${column} IN (${list.map(quote).join(', ')})` : ''
+}
+
+function notInSql(column: string, values: unknown[]) {
+  const list = normalizedStrings(values)
+  return list.length ? `${column} NOT IN (${list.map(quote).join(', ')})` : ''
+}
+
+function textMatchSql(columns: string[], values: string[], negate = false) {
+  const list = normalizedStrings(values)
+  if (!list.length) return ''
+  const comparisons = list.map((value) => {
+    const variants = columns.map((column) => `UPPER(BTRIM(COALESCE(${column}::text, ''))) = UPPER(${quote(value)})`)
+    return `(${variants.join(' OR ')})`
+  })
+  return negate ? `NOT (${comparisons.join(' OR ')})` : `(${comparisons.join(' OR ')})`
+}
+
+function structuredFilters(body: JsonObject) {
+  return normalizeAssistantBiStructuredFilters(body?.globalFilters?.interpretedFreeText)
 }
 
 function normalizeSortMode(value: unknown): SortMode {
   return value === 'measure_desc' || value === 'measure_asc' ? value : 'dimensions_asc'
+}
+
+function effectiveSortMode(body: JsonObject, filters: AssistantBiStructuredFilters): SortMode {
+  return normalizeSortMode(filters.sortMode || body?.globalFilters?.sortMode)
 }
 
 function orderBySql(dimensions: string[], firstMeasure: string, sortMode: SortMode) {
@@ -200,11 +222,18 @@ function orderBySql(dimensions: string[], firstMeasure: string, sortMode: SortMo
   return dimensions.join(', ')
 }
 
+function appendTopN(sql: string, filters: AssistantBiStructuredFilters) {
+  return filters.topN ? `${sql}\nLIMIT ${filters.topN}` : sql
+}
+
 function aggregateMetric(key: string, columns: string[]) {
   if (key === 'ca_ht' && columns.includes(key)) return 'SUM(ca_ht) AS ca_ht'
   if (key === 'quantite' && columns.includes(key)) return 'SUM(quantite) AS quantite'
   if (key === 'marge_valeur' && columns.includes(key)) return 'SUM(marge_valeur) AS marge_valeur'
   if (key === 'nb_lignes' && columns.includes(key)) return 'SUM(nb_lignes) AS nb_lignes'
+  if (key === 'panier_moyen' && columns.includes('ca_ht') && columns.includes('nb_lignes')) {
+    return 'CASE WHEN SUM(nb_lignes) <> 0 THEN SUM(ca_ht) / SUM(nb_lignes) ELSE 0 END AS panier_moyen'
+  }
   if (key === 'marge_pct' && columns.includes('marge_valeur') && columns.includes('ca_ht')) {
     return 'CASE WHEN SUM(ca_ht) <> 0 THEN SUM(marge_valeur) / SUM(ca_ht) * 100 ELSE 0 END AS marge_pct'
   }
@@ -226,41 +255,38 @@ function needsClientCreation(dimensions: string[], measures: string[]) {
   return measures.includes('nb_clients_crees') || dimensions.includes('annee_creation_client')
 }
 
-function needsDetailed(dimensions: string[]) {
-  return dimensions.some((key) => [
-    'reference_article',
-    'designation',
-    'classe_abc_ca',
-    'classe_abc_lignes',
+function needsDetailed(dimensions: string[], filters: AssistantBiStructuredFilters) {
+  const dimensionalNeed = dimensions.some((key) => [
+    'reference_article', 'designation', 'classe_abc_ca', 'classe_abc_lignes',
   ].includes(key)) && dimensions.some((key) => [
-    'agence_collaborateur',
-    'departement_tiers',
-    'numero_tiers',
-    'intitule_tiers',
-    'collaborateur_facture',
-    'classe_abc_ca',
-    'classe_abc_lignes',
+    'agence_collaborateur', 'departement_tiers', 'numero_tiers', 'intitule_tiers',
+    'collaborateur_facture', 'classe_abc_ca', 'classe_abc_lignes',
   ].includes(key))
+  return dimensionalNeed || hasDetailedStructuredFilters(filters)
+}
+
+function safeDate(alias: string, column: string) {
+  return `NULLIF(BTRIM(${alias}.${column}::text), '')::date`
 }
 
 function detailSource(body: JsonObject) {
   const subject = String(body?.dataContext?.semanticSubject?.key || '')
   if (subject === 'factures' || subject === 'clients') {
-    return { table: 'facture_lignes', date: 'l.date_facture::date', defaultTypes: [] as string[] }
+    return { table: 'facture_lignes', date: safeDate('l', 'date_facture'), defaultTypes: [] as string[] }
   }
   if (subject === 'devis') {
-    return { table: 'devis_lignes', date: 'l.date_devis::date', defaultTypes: [] as string[] }
+    return { table: 'devis_lignes', date: safeDate('l', 'date_devis'), defaultTypes: [] as string[] }
   }
   if (subject === 'ventes_bl') {
     return {
       table: 'activite_lignes',
-      date: 'COALESCE(l.date_bl::date, l.date_piece::date)',
+      date: `COALESCE(${safeDate('l', 'date_bl')}, ${safeDate('l', 'date_piece')})`,
       defaultTypes: ['BL'],
     }
   }
   return {
     table: 'activite_lignes',
-    date: 'COALESCE(l.date_piece::date, l.date_bl::date)',
+    date: `COALESCE(${safeDate('l', 'date_piece')}, ${safeDate('l', 'date_bl')})`,
     defaultTypes: [] as string[],
   }
 }
@@ -303,27 +329,84 @@ function detailedMetric(key: string) {
   if (key === 'quantite') return 'SUM(COALESCE(l.quantite, 0)) AS quantite'
   if (key === 'marge_valeur') return 'SUM(COALESCE(l.marge_valeur, 0)) AS marge_valeur'
   if (key === 'nb_lignes') return 'COUNT(*) AS nb_lignes'
-  if (key === 'panier_moyen') {
-    return 'CASE WHEN COUNT(DISTINCT l.numero_piece) <> 0 THEN SUM(COALESCE(l.montant_ht, 0)) / COUNT(DISTINCT l.numero_piece) ELSE 0 END AS panier_moyen'
-  }
-  if (key === 'marge_pct') {
-    return 'CASE WHEN SUM(COALESCE(l.montant_ht, 0)) <> 0 THEN SUM(COALESCE(l.marge_valeur, 0)) / SUM(COALESCE(l.montant_ht, 0)) * 100 ELSE 0 END AS marge_pct'
-  }
+  if (key === 'panier_moyen') return 'CASE WHEN COUNT(DISTINCT l.numero_piece) <> 0 THEN SUM(COALESCE(l.montant_ht, 0)) / COUNT(DISTINCT l.numero_piece) ELSE 0 END AS panier_moyen'
+  if (key === 'marge_pct') return 'CASE WHEN SUM(COALESCE(l.montant_ht, 0)) <> 0 THEN SUM(COALESCE(l.marge_valeur, 0)) / SUM(COALESCE(l.montant_ht, 0)) * 100 ELSE 0 END AS marge_pct'
   return ''
 }
 
-function macroFilter(question: string) {
-  const precision = question.match(/Précision utilisateur\s*:\s*([^\n]+)/i)?.[1] || ''
-  return precision.match(/famille\s+macro\s+(?:est\s+|=\s*|:\s*)?([A-Za-z0-9][A-Za-z0-9/_-]*)/i)?.[1] || ''
+function pushCondition(where: string[], condition: string) {
+  if (condition) where.push(condition)
+}
+
+function applyAggregateStructuredFilters(
+  where: string[],
+  filters: AssistantBiStructuredFilters,
+  columns: string[],
+) {
+  if (filters.includeYears.length) pushCondition(where, inSql('annee', filters.includeYears))
+  if (filters.excludeYears.length) pushCondition(where, notInSql('annee', filters.excludeYears))
+
+  const mappings: Array<[string, string[], string[]]> = [
+    ['agence_collaborateur', filters.includeAgencies, filters.excludeAgencies],
+    ['departement_tiers', filters.includeDepartments, filters.excludeDepartments],
+    ['famille_macro', filters.includeFamilyMacros, filters.excludeFamilyMacros],
+    ['famille', filters.includeFamilies, filters.excludeFamilies],
+    ['reference_article', filters.includeReferences, filters.excludeReferences],
+    ['type_document', filters.includeDocumentTypes, filters.excludeDocumentTypes],
+  ]
+  for (const [column, included, excluded] of mappings) {
+    if (!columns.includes(column)) continue
+    pushCondition(where, inSql(column, included))
+    pushCondition(where, notInSql(column, excluded))
+  }
+  if (columns.includes('numero_tiers') || columns.includes('intitule_tiers')) {
+    const clientColumns = ['numero_tiers', 'intitule_tiers'].filter((column) => columns.includes(column))
+    pushCondition(where, textMatchSql(clientColumns, filters.includeClients))
+    pushCondition(where, textMatchSql(clientColumns, filters.excludeClients, true))
+  }
+}
+
+function applyDetailedStructuredFilters(
+  where: string[],
+  filters: AssistantBiStructuredFilters,
+  dateExpression: string,
+) {
+  if (filters.includeYears.length) pushCondition(where, inSql(`EXTRACT(YEAR FROM ${dateExpression})::int`, filters.includeYears))
+  if (filters.excludeYears.length) pushCondition(where, notInSql(`EXTRACT(YEAR FROM ${dateExpression})::int`, filters.excludeYears))
+  pushCondition(where, inSql("COALESCE(NULLIF(BTRIM(c.agence::text), ''), 'NON RENSEIGNE')", filters.includeAgencies))
+  pushCondition(where, notInSql("COALESCE(NULLIF(BTRIM(c.agence::text), ''), 'NON RENSEIGNE')", filters.excludeAgencies))
+  pushCondition(where, inSql(departmentExpression('t'), filters.includeDepartments))
+  pushCondition(where, notInSql(departmentExpression('t'), filters.excludeDepartments))
+  pushCondition(where, inSql("BTRIM(COALESCE(f.famille_macro::text, ''))", filters.includeFamilyMacros))
+  pushCondition(where, notInSql("BTRIM(COALESCE(f.famille_macro::text, ''))", filters.excludeFamilyMacros))
+  pushCondition(where, inSql("BTRIM(COALESCE(a.famille::text, ''))", filters.includeFamilies))
+  pushCondition(where, notInSql("BTRIM(COALESCE(a.famille::text, ''))", filters.excludeFamilies))
+  pushCondition(where, inSql("BTRIM(COALESCE(l.reference_article::text, ''))", filters.includeReferences))
+  pushCondition(where, notInSql("BTRIM(COALESCE(l.reference_article::text, ''))", filters.excludeReferences))
+  pushCondition(where, textMatchSql(['l.numero_tiers_entete', 'l.intitule_tiers_entete'], filters.includeClients))
+  pushCondition(where, textMatchSql(['l.numero_tiers_entete', 'l.intitule_tiers_entete'], filters.excludeClients, true))
+  pushCondition(where, inSql("BTRIM(COALESCE(l.type_document::text, ''))", filters.includeDocumentTypes))
+  pushCondition(where, notInSql("BTRIM(COALESCE(l.type_document::text, ''))", filters.excludeDocumentTypes))
+}
+
+function applyClientCreationStructuredFilters(
+  where: string[],
+  filters: AssistantBiStructuredFilters,
+) {
+  const dateExpression = safeDate('t', 'date_creation')
+  if (filters.includeYears.length) pushCondition(where, inSql(`EXTRACT(YEAR FROM ${dateExpression})::int`, filters.includeYears))
+  if (filters.excludeYears.length) pushCondition(where, notInSql(`EXTRACT(YEAR FROM ${dateExpression})::int`, filters.excludeYears))
+  pushCondition(where, inSql("COALESCE(NULLIF(BTRIM(c.agence::text), ''), 'NON RENSEIGNE')", filters.includeAgencies))
+  pushCondition(where, notInSql("COALESCE(NULLIF(BTRIM(c.agence::text), ''), 'NON RENSEIGNE')", filters.excludeAgencies))
+  pushCondition(where, inSql(departmentExpression('t'), filters.includeDepartments))
+  pushCondition(where, notInSql(departmentExpression('t'), filters.excludeDepartments))
+  pushCondition(where, textMatchSql(['t.numero', 't.intitule'], filters.includeClients))
+  pushCondition(where, textMatchSql(['t.numero', 't.intitule'], filters.excludeClients, true))
 }
 
 function visualization(kind: string, dimensions: string[], measureKeys: string[]) {
   const kinds: Record<string, string> = {
-    tableau: 'table',
-    courbe: 'line',
-    histogramme: 'bar',
-    histogramme_empile: 'stacked_bar',
-    camembert: 'pie',
+    tableau: 'table', courbe: 'line', histogramme: 'bar', histogramme_empile: 'stacked_bar', camembert: 'pie',
   }
   return {
     kind: kinds[kind] || 'table',
@@ -342,12 +425,11 @@ function aggregateQuery(body: JsonObject, dimensions: string[], wanted: string[]
   const missing = dimensions.find((key) => !columns.includes(key))
   if (missing) throw new Error(`${label(missing)} n'existe pas dans ${table}. Une source détaillée ou une autre dimension est nécessaire.`)
 
-  const metrics = wanted
-    .map((key) => ({ key, sql: aggregateMetric(key, columns) }))
-    .filter((item) => Boolean(item.sql))
+  const metrics = wanted.map((key) => ({ key, sql: aggregateMetric(key, columns) })).filter((item) => Boolean(item.sql))
   if (!metrics.length) throw new Error('Aucune mesure disponible dans cette source.')
 
-  const filters = body?.globalFilters || {}
+  const globals = body?.globalFilters || {}
+  const free = structuredFilters(body)
   const period = body?.dataContext?.activeTemporalContext || {}
   const where: string[] = []
   const start = String(period.dateStart || '').slice(0, 7).replace('-', '')
@@ -355,33 +437,25 @@ function aggregateQuery(body: JsonObject, dimensions: string[], wanted: string[]
   if (/^\d{6}$/.test(start) && /^\d{6}$/.test(end)) {
     where.push(`(annee * 100 + mois) BETWEEN ${Math.min(Number(start), Number(end))} AND ${Math.max(Number(start), Number(end))}`)
   }
-  if (columns.includes('hors_statistique') && String(filters.horsStatistique || 'non') === 'non') {
-    where.push('hors_statistique = FALSE')
-  }
+  if (columns.includes('hors_statistique') && String(globals.horsStatistique || 'non') === 'non') where.push('hors_statistique = FALSE')
 
-  const scopedFilters = [
-    { column: 'agence_collaborateur', values: Array.isArray(filters.agences) ? filters.agences : [] },
-    { column: 'departement_tiers', values: Array.isArray(filters.departementsTiers) ? filters.departementsTiers : [] },
+  const scoped = [
+    { column: 'agence_collaborateur', values: Array.isArray(globals.agences) ? globals.agences : [] },
+    { column: 'departement_tiers', values: Array.isArray(globals.departementsTiers) ? globals.departementsTiers : [] },
   ]
-  for (const scoped of scopedFilters) {
-    if (!scoped.values.length) continue
-    if (!columns.includes(scoped.column)) {
-      throw new Error(`${label(scoped.column)} est absent de ${table}; le dépôt ne peut pas le remplacer.`)
-    }
-    const condition = inSql(scoped.column, scoped.values)
-    if (condition) where.push(condition)
+  for (const item of scoped) {
+    if (!item.values.length) continue
+    if (!columns.includes(item.column)) throw new Error(`${label(item.column)} est absent de ${table}; le dépôt ne peut pas le remplacer.`)
+    pushCondition(where, inSql(item.column, item.values))
   }
 
-  const types = Array.isArray(filters.typesDocument) ? filters.typesDocument : []
-  if (types.length && columns.includes('type_document')) {
-    const condition = inSql('type_document', types)
-    if (condition) where.push(condition)
-  }
+  const types = Array.isArray(globals.typesDocument) ? globals.typesDocument : []
+  if (types.length && columns.includes('type_document')) pushCondition(where, inSql('type_document', types))
+  applyAggregateStructuredFilters(where, free, columns)
 
   const measureKeys = metrics.map((item) => item.key)
-  const sortMode = normalizeSortMode(filters.sortMode)
-  const order = orderBySql(dimensions, measureKeys[0], sortMode)
-  const sql = validateSql(`SELECT
+  const order = orderBySql(dimensions, measureKeys[0], effectiveSortMode(body, free))
+  const baseSql = validateSql(`SELECT
   ${[...dimensions, ...metrics.map((item) => item.sql)].join(',\n  ')}
 FROM public.${table}${where.length ? `\nWHERE ${where.join('\n  AND ')}` : ''}
 GROUP BY ${dimensions.join(', ')}
@@ -389,55 +463,34 @@ ORDER BY ${order}`)
 
   return {
     rows: [],
-    sql,
+    sql: appendTopN(baseSql, free),
     repaired: false,
-    reason: `Requête guidée sur l’agrégat ${table}.`,
+    reason: `Requête guidée sur l’agrégat ${table}, avec application des filtres confirmés.`,
     visualization: visualization(kind, dimensions, measureKeys),
   }
 }
 
-function detailedQuery(body: JsonObject, question: string, dimensions: string[], wanted: string[], kind: string): QueryResult {
+function detailedQuery(body: JsonObject, dimensions: string[], wanted: string[], kind: string): QueryResult {
   const source = detailSource(body)
   const dimensionExpressions = dimensions.map((key) => ({ key, expression: detailedDimension(key, source.date) }))
-  const metrics = wanted
-    .map((key) => ({ key, sql: detailedMetric(key) }))
-    .filter((item) => Boolean(item.sql))
+  const metrics = wanted.map((key) => ({ key, sql: detailedMetric(key) })).filter((item) => Boolean(item.sql))
   if (!metrics.length) throw new Error('Aucune mesure disponible pour cette extraction détaillée.')
 
-  const filters = body?.globalFilters || {}
+  const globals = body?.globalFilters || {}
+  const free = structuredFilters(body)
   const period = body?.dataContext?.activeTemporalContext || {}
   const where: string[] = []
   if (period.dateStart) where.push(`${source.date} >= ${quote(period.dateStart)}::date`)
   if (period.dateEnd) where.push(`${source.date} <= ${quote(period.dateEnd)}::date`)
 
-  const requestedTypes = Array.isArray(filters.typesDocument) ? filters.typesDocument.map(String).filter(Boolean) : []
+  const requestedTypes = Array.isArray(globals.typesDocument) ? globals.typesDocument.map(String).filter(Boolean) : []
   const documentTypes = requestedTypes.length ? requestedTypes : source.defaultTypes
-  if (documentTypes.length) {
-    const condition = inSql('l.type_document', documentTypes)
-    if (condition) where.push(condition)
-  }
-
-  const agencies = Array.isArray(filters.agences) ? filters.agences : []
-  if (agencies.length) {
-    const condition = inSql("COALESCE(NULLIF(BTRIM(c.agence::text), ''), 'NON RENSEIGNE')", agencies)
-    if (condition) where.push(condition)
-  }
-  const collaborators = Array.isArray(filters.collaborateursTiers) ? filters.collaborateursTiers : []
-  if (collaborators.length) {
-    const condition = inSql("COALESCE(NULLIF(BTRIM(t.representant::text), ''), 'NON RENSEIGNE')", collaborators)
-    if (condition) where.push(condition)
-  }
-  const departments = Array.isArray(filters.departementsTiers) ? filters.departementsTiers : []
-  if (departments.length) {
-    const condition = inSql(departmentExpression('t'), departments)
-    if (condition) where.push(condition)
-  }
-  if (String(filters.horsStatistique || 'non') === 'non') {
-    where.push('COALESCE(a.hors_statistique, FALSE) = FALSE')
-  }
-
-  const macro = macroFilter(question)
-  if (macro) where.push(`BTRIM(COALESCE(f.famille_macro::text, '')) = ${quote(macro)}`)
+  pushCondition(where, inSql('l.type_document', documentTypes))
+  pushCondition(where, inSql("COALESCE(NULLIF(BTRIM(c.agence::text), ''), 'NON RENSEIGNE')", Array.isArray(globals.agences) ? globals.agences : []))
+  pushCondition(where, inSql("COALESCE(NULLIF(BTRIM(t.representant::text), ''), 'NON RENSEIGNE')", Array.isArray(globals.collaborateursTiers) ? globals.collaborateursTiers : []))
+  pushCondition(where, inSql(departmentExpression('t'), Array.isArray(globals.departementsTiers) ? globals.departementsTiers : []))
+  if (String(globals.horsStatistique || 'non') === 'non') where.push('COALESCE(a.hors_statistique, FALSE) = FALSE')
+  applyDetailedStructuredFilters(where, free, source.date)
 
   const needsAbc = dimensions.some((key) => key === 'classe_abc_ca' || key === 'classe_abc_lignes')
   const abcCte = needsAbc ? `WITH abc_current AS (
@@ -456,12 +509,9 @@ function detailedQuery(body: JsonObject, question: string, dimensions: string[],
 
   const group = dimensionExpressions.map((_item, index) => String(index + 1)).join(', ')
   const measureKeys = metrics.map((item) => item.key)
-  const sortMode = normalizeSortMode(filters.sortMode)
-  const order = sortMode === 'dimensions_asc'
-    ? group
-    : `${measureKeys[0]} ${sortMode === 'measure_desc' ? 'DESC' : 'ASC'} NULLS LAST`
-
-  const sql = validateSql(`${abcCte}SELECT
+  const sortMode = effectiveSortMode(body, free)
+  const order = sortMode === 'dimensions_asc' ? group : `${measureKeys[0]} ${sortMode === 'measure_desc' ? 'DESC' : 'ASC'} NULLS LAST`
+  const baseSql = validateSql(`${abcCte}SELECT
   ${[
     ...dimensionExpressions.map((item) => `${item.expression} AS ${item.key}`),
     ...metrics.map((item) => item.sql),
@@ -476,19 +526,20 @@ ORDER BY ${order}`)
 
   return {
     rows: [],
-    sql,
+    sql: appendTopN(baseSql, free),
     repaired: false,
-    reason: `Extraction détaillée sur ${source.table}, enrichie par les référentiels client, collaborateur, article${needsAbc ? ' et ABC actuelle' : ''}.`,
+    reason: `Extraction détaillée sur ${source.table}, enrichie par les référentiels client, collaborateur et article${needsAbc ? ' et la classe ABC actuelle' : ''}.`,
     visualization: visualization(kind, dimensions, measureKeys),
   }
 }
 
 function clientCreationDimension(key: string) {
+  const date = safeDate('t', 'date_creation')
   const department = departmentExpression('t')
   const expressions: Record<string, string> = {
-    annee_creation_client: 'EXTRACT(YEAR FROM t.date_creation::date)::int',
-    annee: 'EXTRACT(YEAR FROM t.date_creation::date)::int',
-    mois: 'EXTRACT(MONTH FROM t.date_creation::date)::int',
+    annee_creation_client: `EXTRACT(YEAR FROM ${date})::int`,
+    annee: `EXTRACT(YEAR FROM ${date})::int`,
+    mois: `EXTRACT(MONTH FROM ${date})::int`,
     agence_collaborateur: "COALESCE(NULLIF(BTRIM(c.agence::text), ''), 'NON RENSEIGNE')",
     collaborateur_tiers: "COALESCE(NULLIF(BTRIM(t.representant::text), ''), 'NON RENSEIGNE')",
     departement_tiers: `COALESCE(NULLIF(${department}, ''), 'NON RENSEIGNE')`,
@@ -500,37 +551,24 @@ function clientCreationDimension(key: string) {
 }
 
 function clientCreationQuery(body: JsonObject, dimensions: string[], wanted: string[], kind: string): QueryResult {
-  if (!wanted.includes('nb_clients_crees')) {
-    throw new Error('La dimension Année de création client doit être utilisée avec la mesure Nouveaux clients.')
-  }
+  if (!wanted.includes('nb_clients_crees')) throw new Error('La dimension Année de création client doit être utilisée avec la mesure Nouveaux clients.')
   const dimensionExpressions = dimensions.map((key) => ({ key, expression: clientCreationDimension(key) }))
-  const filters = body?.globalFilters || {}
+  const globals = body?.globalFilters || {}
+  const free = structuredFilters(body)
   const period = body?.dataContext?.activeTemporalContext || {}
-  const where = ['t.date_creation IS NOT NULL']
-  if (period.dateStart) where.push(`t.date_creation::date >= ${quote(period.dateStart)}::date`)
-  if (period.dateEnd) where.push(`t.date_creation::date <= ${quote(period.dateEnd)}::date`)
-  if (String(filters.inclureProspects || 'non') !== 'oui') {
-    where.push('COALESCE(t.prospect, FALSE) = FALSE')
-  }
-
-  const agencies = Array.isArray(filters.agences) ? filters.agences : []
-  if (agencies.length) {
-    const condition = inSql("COALESCE(NULLIF(BTRIM(c.agence::text), ''), 'NON RENSEIGNE')", agencies)
-    if (condition) where.push(condition)
-  }
-  const departments = Array.isArray(filters.departementsTiers) ? filters.departementsTiers : []
-  if (departments.length) {
-    const condition = inSql(departmentExpression('t'), departments)
-    if (condition) where.push(condition)
-  }
+  const date = safeDate('t', 'date_creation')
+  const where = [`${date} IS NOT NULL`]
+  if (period.dateStart) where.push(`${date} >= ${quote(period.dateStart)}::date`)
+  if (period.dateEnd) where.push(`${date} <= ${quote(period.dateEnd)}::date`)
+  if (String(globals.inclureProspects || 'non') !== 'oui') where.push('COALESCE(t.prospect, FALSE) = FALSE')
+  pushCondition(where, inSql("COALESCE(NULLIF(BTRIM(c.agence::text), ''), 'NON RENSEIGNE')", Array.isArray(globals.agences) ? globals.agences : []))
+  pushCondition(where, inSql(departmentExpression('t'), Array.isArray(globals.departementsTiers) ? globals.departementsTiers : []))
+  applyClientCreationStructuredFilters(where, free)
 
   const group = dimensionExpressions.map((_item, index) => String(index + 1)).join(', ')
-  const sortMode = normalizeSortMode(filters.sortMode)
-  const order = sortMode === 'dimensions_asc'
-    ? group
-    : `nb_clients_crees ${sortMode === 'measure_desc' ? 'DESC' : 'ASC'} NULLS LAST`
-
-  const sql = validateSql(`SELECT
+  const sortMode = effectiveSortMode(body, free)
+  const order = sortMode === 'dimensions_asc' ? group : `nb_clients_crees ${sortMode === 'measure_desc' ? 'DESC' : 'ASC'} NULLS LAST`
+  const baseSql = validateSql(`SELECT
   ${dimensionExpressions.map((item) => `${item.expression} AS ${item.key}`).join(',\n  ')},
   COUNT(DISTINCT t.numero) AS nb_clients_crees
 FROM public.ref_tiers t
@@ -541,14 +579,14 @@ ORDER BY ${order}`)
 
   return {
     rows: [],
-    sql,
+    sql: appendTopN(baseSql, free),
     repaired: false,
-    reason: 'Comptage des clients créés depuis ref_tiers.date_creation, avec agence issue du représentant du client.',
+    reason: 'Comptage des clients créés depuis ref_tiers.date_creation, avec application des exclusions confirmées.',
     visualization: visualization(kind, dimensions, ['nb_clients_crees']),
   }
 }
 
-function guided(body: JsonObject, question: string): QueryResult | null {
+function guided(body: JsonObject): QueryResult | null {
   const request = body?.dataContext?.visualizationRequest
   if (!request || typeof request !== 'object') return null
   const allDimensions: string[] = Array.isArray(request.dimensions) ? request.dimensions.map(String) : []
@@ -556,9 +594,10 @@ function guided(body: JsonObject, question: string): QueryResult | null {
   if (!allDimensions.length || !wanted.length) return null
   const kind = String(request.kind || 'tableau')
   const dimensions = kind === 'histogramme_empile' ? allDimensions.slice(0, 2) : allDimensions
+  const free = structuredFilters(body)
 
   if (needsClientCreation(dimensions, wanted)) return clientCreationQuery(body, dimensions, wanted, kind)
-  if (needsDetailed(dimensions)) return detailedQuery(body, question, dimensions, wanted, kind)
+  if (needsDetailed(dimensions, free)) return detailedQuery(body, dimensions, wanted, kind)
   return aggregateQuery(body, dimensions, wanted, kind)
 }
 
@@ -612,7 +651,7 @@ export async function POST(request: NextRequest) {
     const question = String(body?.question || '').trim()
     if (!question) return json({ error: 'Question vide.' }, 400)
 
-    const structured = guided(body, question)
+    const structured = guided(body)
     const result = structured || await legacy(question, body)
     if (structured) result.rows = await execute(structured.sql)
 
@@ -620,12 +659,12 @@ export async function POST(request: NextRequest) {
     let answer = `Analyse exécutée sur ${result.rows.length} ligne(s).`
     try {
       const summary = await openAi([
-        { role: 'system', content: 'Réponds en français et en JSON strict. Ne présente pas une classe ABC actuelle comme une classe historique.' },
-        { role: 'user', content: `Question: ${question}\nSQL: ${result.sql}\nNombre total de lignes: ${result.rows.length}\nÉchantillon: ${JSON.stringify(summarySample).slice(0, 20000)}\nRetourne {"answer":"synthèse courte"}.` },
+        { role: 'system', content: 'Réponds en français et en JSON strict. Mentionne les exclusions appliquées. Ne présente pas une classe ABC actuelle comme une classe historique.' },
+        { role: 'user', content: `Question: ${question}\nFiltres structurés: ${JSON.stringify(structuredFilters(body))}\nSQL: ${result.sql}\nNombre total de lignes: ${result.rows.length}\nÉchantillon: ${JSON.stringify(summarySample).slice(0, 20000)}\nRetourne {"answer":"synthèse courte"}.` },
       ])
       answer = String(summary?.answer || answer)
     } catch {
-      // Le résultat de données reste utilisable si la synthèse IA échoue.
+      // Les données restent utilisables si la synthèse IA échoue.
     }
 
     return json({
@@ -640,7 +679,7 @@ export async function POST(request: NextRequest) {
       proposed_widgets: [],
       is_complete: true,
       mode: structured ? 'guided_deterministic_db' : 'aggregated_db',
-      version: 'STEP-10-CONFIRMED-PLAN-ABC-CLIENTS',
+      version: 'STEP-11-FREE-TEXT-STRUCTURED-FILTERS',
     })
   } catch (error: unknown) {
     return json({ error: error instanceof Error ? error.message : String(error) }, 500)
