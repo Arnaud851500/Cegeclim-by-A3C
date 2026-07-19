@@ -1,0 +1,10 @@
+-- Documentation de la granularité utilisée par l'Assistant BI.
+-- Cette requête n'est pas à exécuter comme migration : elle décrit les relations métier
+-- utilisées par la route /api/atelier-ai-db pour les extractions détaillées.
+--
+-- activite_lignes.numero_tiers_entete -> ref_tiers.numero
+-- ref_tiers.representant             -> ref_collaborateurs.nom
+-- ref_collaborateurs.agence          -> agence métier du client
+-- ref_tiers.code_postal              -> département client
+-- activite_lignes.reference_article  -> ref_articles.reference_article
+-- ref_articles.famille               -> ref_familles.famille
