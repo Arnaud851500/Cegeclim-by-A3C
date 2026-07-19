@@ -99,3 +99,22 @@ GRANT EXECUTE ON FUNCTION public.atelier_ai_run_readonly_sql_v2(text) TO service
 
 COMMENT ON FUNCTION public.atelier_ai_run_readonly_sql_v2(text) IS
 'Exécute les SELECT readonly validés de l Assistant BI sur les agrégats, lignes détaillées et référentiels autorisés.';
+
+-- Compatibilité immédiate avec la route actuelle : le RPC historique délègue
+-- maintenant au moteur étendu. Aucun changement de nom n'est nécessaire côté Next.js.
+CREATE OR REPLACE FUNCTION public.atelier_ai_run_readonly_sql(p_sql text)
+RETURNS jsonb
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT public.atelier_ai_run_readonly_sql_v2(p_sql);
+$$;
+
+REVOKE ALL ON FUNCTION public.atelier_ai_run_readonly_sql(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.atelier_ai_run_readonly_sql(text) FROM anon;
+REVOKE ALL ON FUNCTION public.atelier_ai_run_readonly_sql(text) FROM authenticated;
+GRANT EXECUTE ON FUNCTION public.atelier_ai_run_readonly_sql(text) TO service_role;
+
+COMMENT ON FUNCTION public.atelier_ai_run_readonly_sql(text) IS
+'Point d entrée compatible de l Assistant BI, délégué au moteur readonly étendu v2.';
