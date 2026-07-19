@@ -115,8 +115,14 @@ export function explicitYearRules(text: string) {
   const excludeYears = new Set<number>()
   const normalized = text.replace(/[’']/g, "'")
 
-  for (const match of normalized.matchAll(/(?:exclu(?:re|s|ant)?|sans|sauf|hors|ne\s+(?:prends?|prendre|tenir|consid[eé]rer)[^\n]{0,35}?(?:pas|plus)|ne\s+pas[^\n]{0,30}?(?:prendre|consid[eé]rer))[^\d]{0,20}(20\d{2}|19\d{2})/gi)) {
-    excludeYears.add(Number(match[1]))
+  const exclusionPatterns = [
+    /(?:exclu(?:re|s|ant)?|sans|sauf|hors)[^\d]{0,120}(20\d{2}|19\d{2})/gi,
+    /ne\s+(?:prends?|prendre|tiens?|tenir|consid[eé]rer)[^\n]{0,140}?(?:pas|plus)[^\d]{0,120}(20\d{2}|19\d{2})/gi,
+    /ne\s+(?:prends?|prendre|tiens?|tenir)[^\n]{0,160}(20\d{2}|19\d{2})[^\n]{0,40}(?:pas|plus)\s+en\s+compte/gi,
+    /(?:ignore|retire|supprime)[^\d]{0,120}(20\d{2}|19\d{2})/gi,
+  ]
+  for (const pattern of exclusionPatterns) {
+    for (const match of normalized.matchAll(pattern)) excludeYears.add(Number(match[1]))
   }
 
   for (const match of normalized.matchAll(/(?:uniquement|seulement|sur|pour|en)\s+(?:l[' ]ann[eé]e\s+)?(20\d{2}|19\d{2})/gi)) {
@@ -142,8 +148,8 @@ export function mergeExplicitYearRules(
     ...interpretation,
     filters: {
       ...interpretation.filters,
-      includeYears: [...included].sort(),
-      excludeYears: [...excluded].sort(),
+      includeYears: [...included].sort((left, right) => left - right),
+      excludeYears: [...excluded].sort((left, right) => left - right),
     },
   }
 }
