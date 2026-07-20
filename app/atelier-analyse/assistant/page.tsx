@@ -8,6 +8,7 @@ import { assistantBiPageStyles as styles } from '@/components/assistant-bi/assis
 import { normalizeAiResult, type AiResult } from '@/lib/ai/assistantBiTypes'
 import {
   describeAssistantBiStructuredFilters,
+  emptyAssistantBiAnalysisPlan,
   emptyAssistantBiStructuredFilters,
   normalizeAssistantBiFreeTextInterpretation,
   type AssistantBiFreeTextInterpretation,
@@ -15,12 +16,18 @@ import {
 import {
   ANALYSIS_TEMPLATES,
   DIMENSIONS,
+  ENVIRONMENTS,
   MEASURES,
-  SUBJECTS,
   buildGuidedQuestion,
+  environmentForSubject,
+  getEnvironment,
   getSubject,
+  recommendedVisualization,
+  sanitizeSubjectConfiguration,
+  subjectsForEnvironment,
   type AnalysisTemplate,
   type SemanticDimensionKey,
+  type SemanticEnvironmentKey,
   type SemanticMeasureKey,
   type SemanticSubjectKey,
   type SemanticVisualizationKey,
@@ -40,6 +47,12 @@ const SORT_OPTIONS: Array<{ key: SortMode; label: string; description: string }>
   { key: 'dimensions_asc', label: 'Dimensions croissantes', description: 'Ex. année, mois, agence, référence.' },
   { key: 'measure_desc', label: 'Mesure décroissante', description: 'Les plus fortes valeurs en premier.' },
   { key: 'measure_asc', label: 'Mesure croissante', description: 'Les plus faibles valeurs en premier.' },
+]
+
+const FREE_TEXT_EXAMPLES = [
+  'Montre-moi l’évolution mensuelle du CA facturé par agence depuis janvier, sous forme de courbe.',
+  'Top 20 clients en BL sur les 12 derniers mois, hors Marmande, avec le CA et la marge.',
+  'Compare les quantités de la famille macro R/R par référence et par agence cette année.',
 ]
 
 function isoDate(date: Date) {
@@ -124,6 +137,7 @@ function emptyInterpretation(): AssistantBiFreeTextInterpretation {
   return {
     summary: 'Aucune précision libre.',
     filters: emptyAssistantBiStructuredFilters(),
+    plan: emptyAssistantBiAnalysisPlan(),
     assumptions: [],
     needsConfirmation: false,
     clarificationQuestion: '',
@@ -133,6 +147,7 @@ function emptyInterpretation(): AssistantBiFreeTextInterpretation {
 export default function AssistantBiPage() {
   const { rights } = useAccess()
   const now = useMemo(() => new Date(), [])
+  const [environment, setEnvironment] = useState<SemanticEnvironmentKey>('pilotage_commercial')
   const [subject, setSubject] = useState<SemanticSubjectKey>('ventes_bl')
   const [measures, setMeasures] = useState<SemanticMeasureKey[]>(['ca_ht', 'quantite'])
   const [dimensions, setDimensions] = useState<SemanticDimensionKey[]>(['mois', 'agence_collaborateur'])
@@ -151,16 +166,19 @@ export default function AssistantBiPage() {
   const [error, setError] = useState('')
   const [result, setResult] = useState<AiResult | null>(null)
 
+  const selectedEnvironment = useMemo(() => getEnvironment(environment), [environment])
+  const availableSubjects = useMemo(() => subjectsForEnvironment(environment), [environment])
   const selectedSubject = useMemo(() => getSubject(subject), [subject])
   const generatedQuestion = useMemo(() => buildGuidedQuestion({
     subject, measures, dimensions, visualization, dateStart, dateEnd, freeText, promptSuffix: templateSuffix,
   }), [subject, measures, dimensions, visualization, dateStart, dateEnd, freeText, templateSuffix])
   const resultTitle = useMemo(() => {
+    if (interpretation?.plan.title) return interpretation.plan.title
     const measure = labelFor(measures[0] || '', MEASURES)
     const first = labelFor(dimensions[0] || '', DIMENSIONS)
     const second = dimensions[1] ? ` et ${labelFor(dimensions[1], DIMENSIONS)}` : ''
     return `${measure} par ${first}${second}`
-  }, [measures, dimensions])
+  }, [interpretation, measures, dimensions])
   const calculationSource = useMemo(() => resolveCalculationSource(subject, dimensions, measures), [subject, dimensions, measures])
   const allowedAgencies = rights.allowed_agences || []
   const allowedCollaborators = rights.allowed_collaborateurs || []
@@ -175,16 +193,31 @@ export default function AssistantBiPage() {
     setError('')
   }
 
+  function changeEnvironment(next: SemanticEnvironmentKey) {
+    const nextEnvironment = getEnvironment(next)
+    const firstSubject = getSubject(nextEnvironment.subjects[0])
+    setEnvironment(next)
+    setSubject(firstSubject.key)
+    setMeasures([...firstSubject.defaultMeasures])
+    setDimensions([...firstSubject.defaultDimensions])
+    setVisualization(recommendedVisualization(firstSubject.defaultDimensions, firstSubject.defaultMeasures))
+    setTemplateSuffix('')
+    resetCalculatedState()
+  }
+
   function changeSubject(next: SemanticSubjectKey) {
     const definition = getSubject(next)
     setSubject(next)
+    if (!selectedEnvironment.subjects.includes(next)) setEnvironment(environmentForSubject(next))
     setMeasures([...definition.defaultMeasures])
     setDimensions([...definition.defaultDimensions])
+    setVisualization(recommendedVisualization(definition.defaultDimensions, definition.defaultMeasures))
     setTemplateSuffix('')
     resetCalculatedState()
   }
 
   function applyTemplate(template: AnalysisTemplate) {
+    setEnvironment(environmentForSubject(template.subject))
     setSubject(template.subject)
     setMeasures([...template.measures])
     setDimensions([...template.dimensions])
@@ -203,13 +236,27 @@ export default function AssistantBiPage() {
     return ''
   }
 
+  function applyInterpretedPlan(interpreted: AssistantBiFreeTextInterpretation) {
+    const nextSubject = interpreted.plan.subject || subject
+    const sanitized = sanitizeSubjectConfiguration({
+      subject: nextSubject,
+      measures: interpreted.plan.measures.length ? interpreted.plan.measures : measures,
+      dimensions: interpreted.plan.dimensions.length ? interpreted.plan.dimensions : dimensions,
+    })
+    const nextVisualization = interpreted.plan.visualization ||
+      recommendedVisualization(sanitized.dimensions, sanitized.measures)
+
+    setEnvironment(interpreted.plan.environment || environmentForSubject(nextSubject))
+    setSubject(nextSubject)
+    setMeasures(sanitized.measures)
+    setDimensions(sanitized.dimensions)
+    setVisualization(nextVisualization)
+    if (interpreted.plan.dateStart) setDateStart(interpreted.plan.dateStart)
+    if (interpreted.plan.dateEnd) setDateEnd(interpreted.plan.dateEnd)
+    if (interpreted.filters.sortMode) setSortMode(interpreted.filters.sortMode)
+  }
+
   async function prepareAnalysis() {
-    const validationError = validateConfiguration()
-    if (validationError) {
-      setError(validationError)
-      setShowConfirmation(false)
-      return
-    }
     setError('')
     setInterpreting(true)
     try {
@@ -220,15 +267,25 @@ export default function AssistantBiPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             freeText,
-            context: { subject: selectedSubject, measures, dimensions, visualization, dateStart, dateEnd, source: calculationSource },
+            context: {
+              environment: selectedEnvironment,
+              subject: selectedSubject,
+              measures,
+              dimensions,
+              visualization,
+              dateStart,
+              dateEnd,
+              source: calculationSource,
+            },
           }),
         })
         const payload = await response.json().catch(() => ({})) as Record<string, unknown>
         if (!response.ok || payload.error) throw new Error(String(payload.error || `Erreur HTTP ${response.status}`))
         interpreted = normalizeAssistantBiFreeTextInterpretation(payload.interpretation)
+        applyInterpretedPlan(interpreted)
       }
+
       setInterpretation(interpreted)
-      if (interpreted.filters.sortMode) setSortMode(interpreted.filters.sortMode)
       setShowConfirmation(true)
     } catch (caught: unknown) {
       setError(caught instanceof Error ? caught.message : String(caught))
@@ -276,8 +333,15 @@ export default function AssistantBiPage() {
           },
           dataContext: {
             activeTemporalContext: { dateStart, dateEnd },
+            semanticEnvironment: selectedEnvironment,
             semanticSubject: selectedSubject,
-            confirmedCalculationPlan: { source: calculationSource, excludeHorsStatistique, includeProspects, sortMode, freeTextInterpretation: confirmed },
+            confirmedCalculationPlan: {
+              source: calculationSource,
+              excludeHorsStatistique,
+              includeProspects,
+              sortMode,
+              freeTextInterpretation: confirmed,
+            },
             visualizationRequest: {
               kind: visualization,
               xKey: dimensions[0] || null,
@@ -312,12 +376,45 @@ export default function AssistantBiPage() {
         <div>
           <div style={styles.eyebrow}>CEGECLIM · ASSISTANT DÉCISIONNEL</div>
           <h1 style={styles.title}>Analyse BI professionnelle</h1>
-          <p style={styles.subtitle}>Décris ton besoin, vérifie l’interprétation de l’IA, puis confirme le calcul.</p>
+          <p style={styles.subtitle}>Pose une question libre ou construis précisément ton analyse. L’Assistant traduit la demande en calcul contrôlé avant exécution.</p>
         </div>
         <div style={styles.topActions}>
           <button type="button" style={styles.secondaryButton} onClick={() => window.location.assign('/atelier-analyse')}>Atelier classique</button>
           <button type="button" style={styles.primaryButton} onClick={() => void prepareAnalysis()} disabled={loading || interpreting}>
-            {interpreting ? 'Interprétation en cours…' : 'Vérifier le calcul'}
+            {interpreting ? 'Compréhension en cours…' : 'Comprendre et vérifier'}
+          </button>
+        </div>
+      </section>
+
+      <section style={styles.templateSection}>
+        <div style={styles.sectionHeading}>
+          <div>
+            <h2 style={styles.sectionTitle}>Demande libre</h2>
+            <p style={styles.sectionText}>Décris directement le résultat attendu. L’Assistant choisit le sujet, les mesures, les axes, la période et le graphique adaptés.</p>
+          </div>
+          <span style={styles.proBadge}>MODÈLE SÉMANTIQUE V2</span>
+        </div>
+        <textarea
+          value={freeText}
+          onChange={(event) => { setFreeText(event.target.value); invalidateInterpretation() }}
+          placeholder="Ex. Top 20 clients en BL sur les 12 derniers mois, hors Marmande, avec le CA et la marge sous forme de tableau."
+          style={{ ...styles.textarea, minHeight: 110, fontSize: 15 }}
+        />
+        <div style={{ ...styles.chipRow, marginTop: 10 }}>
+          {FREE_TEXT_EXAMPLES.map((example) => (
+            <button
+              type="button"
+              key={example}
+              style={styles.chip}
+              onClick={() => { setFreeText(example); invalidateInterpretation() }}
+            >
+              {example}
+            </button>
+          ))}
+        </div>
+        <div style={styles.confirmActions}>
+          <button type="button" style={styles.confirmButton} onClick={() => void prepareAnalysis()} disabled={loading || interpreting || !freeText.trim()}>
+            {interpreting ? 'Interprétation…' : 'Interpréter cette demande'}
           </button>
         </div>
       </section>
@@ -325,7 +422,7 @@ export default function AssistantBiPage() {
       <section style={styles.templateSection}>
         <div style={styles.sectionHeading}>
           <div><h2 style={styles.sectionTitle}>Analyses prêtes à l’emploi</h2><p style={styles.sectionText}>Les modèles configurent le sujet, les mesures, les dimensions et la restitution.</p></div>
-          <span style={styles.proBadge}>MODE GUIDÉ + IA</span>
+          <span style={styles.proBadge}>MODE GUIDÉ</span>
         </div>
         <div style={styles.templateGrid}>
           {ANALYSIS_TEMPLATES.map((template) => <button type="button" key={template.id} style={styles.templateCard} onClick={() => applyTemplate(template)}><strong>{template.title}</strong><span>{template.description}</span></button>)}
@@ -334,12 +431,28 @@ export default function AssistantBiPage() {
 
       <section style={styles.workspace}>
         <aside style={styles.builder}>
-          <Step number="1" title="Sujet métier">
-            <div style={styles.choiceGrid}>{SUBJECTS.map((item) => <ChoiceButton key={item.key} active={subject === item.key} title={item.label} description={item.description} onClick={() => changeSubject(item.key)} />)}</div>
+          <Step number="1" title="Environnement métier">
+            <div style={styles.choiceGrid}>
+              {ENVIRONMENTS.map((item) => (
+                <ChoiceButton
+                  key={item.key}
+                  active={environment === item.key}
+                  title={item.label}
+                  description={item.description}
+                  onClick={() => changeEnvironment(item.key)}
+                />
+              ))}
+            </div>
+          </Step>
+
+          <Step number="2" title="Sujet métier">
+            <div style={styles.choiceGrid}>
+              {availableSubjects.map((item) => <ChoiceButton key={item.key} active={subject === item.key} title={item.label} description={item.description} onClick={() => changeSubject(item.key)} />)}
+            </div>
             <div style={styles.subjectImpact}><strong>Impact du sujet sélectionné</strong><span>{selectedSubject.sourceHint}</span></div>
           </Step>
 
-          <Step number="2" title="Mesures">
+          <Step number="3" title="Mesures">
             <div style={styles.orderHint}>La mesure n°1 pilote le graphique, le tableau croisé et le tri par valeur.</div>
             <div style={styles.chipRow}>{MEASURES.map((item) => {
               const index = measures.indexOf(item.key as SemanticMeasureKey)
@@ -347,7 +460,7 @@ export default function AssistantBiPage() {
             })}</div>
           </Step>
 
-          <Step number="3" title="Niveaux de détail">
+          <Step number="4" title="Niveaux de détail">
             <div style={styles.orderHint}>1 = axe/lignes ; 2 = couleur/colonnes ; les suivantes détaillent le tableau.</div>
             <div style={styles.selectedPath}>{dimensions.length ? dimensions.map((key, index) => <span key={key} style={styles.pathPill}>{index + 1}. {labelFor(key, DIMENSIONS)}</span>) : <span>Aucune dimension sélectionnée</span>}</div>
             <div style={styles.chipRow}>{DIMENSIONS.map((item) => {
@@ -356,31 +469,29 @@ export default function AssistantBiPage() {
             })}</div>
           </Step>
 
-          <Step number="4" title="Période et restitution">
+          <Step number="5" title="Période et restitution">
             <div style={styles.dateRow}>
               <label style={styles.fieldLabel}>Du<input type="date" value={dateStart} onChange={(event) => { setDateStart(event.target.value); invalidateInterpretation() }} style={styles.input} /></label>
               <label style={styles.fieldLabel}>Au<input type="date" value={dateEnd} onChange={(event) => { setDateEnd(event.target.value); invalidateInterpretation() }} style={styles.input} /></label>
             </div>
             <div style={styles.visualGrid}>{VISUALIZATIONS.map((item) => <ChoiceButton key={item.key} active={visualization === item.key} title={item.label} description={item.description} onClick={() => { setVisualization(item.key); invalidateInterpretation() }} compact />)}</div>
-          </Step>
-
-          <Step number="5" title="Précision libre interprétée par l’IA">
-            <textarea value={freeText} onChange={(event) => { setFreeText(event.target.value); invalidateInterpretation() }} placeholder="Ex. exclure 2015, uniquement R/R, hors Marmande, top 20 clients, seulement les BL…" style={styles.textarea} />
-            <div style={styles.freeTextHint}>Le texte sera converti en filtres structurés. L’interprétation sera affichée avant exécution.</div>
-            <details style={styles.previewBox}><summary>Voir la demande complète transmise à l’IA</summary><pre style={styles.previewText}>{generatedQuestion}</pre></details>
+            {freeText.trim() ? <details style={styles.previewBox}><summary>Voir la demande complète transmise à l’Assistant</summary><pre style={styles.previewText}>{generatedQuestion}</pre></details> : null}
           </Step>
 
           {showConfirmation ? <Step number="6" title="Vérification et confirmation">
             <div style={styles.confirmCard}>
+              <PlanLine label="Analyse comprise" value={interpretation?.summary || 'Configuration guidée manuelle'} />
+              <PlanLine label="Environnement" value={getEnvironment(environment).label} />
+              <PlanLine label="Sujet" value={selectedSubject.label} />
               <PlanLine label="Source" value={`${calculationSource.title} — ${calculationSource.detail}`} />
               <PlanLine label="Période" value={`${dateStart} au ${dateEnd}`} />
               <PlanLine label="Mesures" value={measures.map((key) => labelFor(key, MEASURES)).join(', ')} />
               <PlanLine label="Regroupement" value={dimensions.map((key, index) => `${index + 1}. ${labelFor(key, DIMENSIONS)}`).join(' → ')} />
+              <PlanLine label="Restitution" value={VISUALIZATIONS.find((item) => item.key === visualization)?.label || visualization} />
               <PlanLine label="Documents" value={documentTypesForSubject(subject).join(', ') || 'Selon le sujet et les filtres'} />
               <PlanLine label="Périmètre" value={`${allowedAgencies.length || 'toutes'} agence(s), ${allowedDepartments.length || 'tous'} département(s) autorisé(s).`} />
               <div style={styles.interpretationBox}>
-                <strong>Demande libre comprise par l’IA</strong>
-                <span>{interpretation?.summary || 'Aucune précision libre.'}</span>
+                <strong>Filtres compris</strong>
                 <b>{describeAssistantBiStructuredFilters(interpretation?.filters || emptyAssistantBiStructuredFilters())}</b>
                 {interpretation?.assumptions.length ? <ul style={styles.assumptionList}>{interpretation.assumptions.map((item) => <li key={item}>{item}</li>)}</ul> : null}
               </div>
@@ -394,11 +505,11 @@ export default function AssistantBiPage() {
           </Step> : null}
 
           {error ? <div style={styles.error}>{error}</div> : null}
-          {!showConfirmation ? <button type="button" style={{ ...styles.primaryButton, width: '100%', justifyContent: 'center' }} onClick={() => void prepareAnalysis()} disabled={loading || interpreting}>{interpreting ? 'Interprétation de la demande…' : 'Interpréter et vérifier le calcul'}</button> : null}
+          {!showConfirmation ? <button type="button" style={{ ...styles.primaryButton, width: '100%', justifyContent: 'center' }} onClick={() => void prepareAnalysis()} disabled={loading || interpreting}>{interpreting ? 'Interprétation de la demande…' : 'Vérifier le calcul configuré'}</button> : null}
         </aside>
 
         <section style={styles.results}>
-          {result ? <ProfessionalResults result={result} visualization={visualization} dimensions={dimensions} measures={measures} title={result.visualization?.title || resultTitle} dateStart={dateStart} dateEnd={dateEnd} generatedQuestion={generatedQuestion} onFollowUp={(instruction) => void runAnalysis(instruction)} /> : <div style={styles.emptyState}><div style={styles.emptyIcon}>BI</div><h2 style={{ marginBottom: 4 }}>Ton rapport professionnel apparaîtra ici</h2><p style={{ maxWidth: 580 }}>Décris ton besoin, vérifie comment l’IA l’a interprété, puis confirme les règles avant calcul.</p><div style={styles.emptyFeatures}><span>✓ Demande interprétée</span><span>✓ Filtres confirmés</span><span>✓ Droits appliqués</span><span>✓ Traçabilité SQL</span></div></div>}
+          {result ? <ProfessionalResults result={result} visualization={visualization} dimensions={dimensions} measures={measures} title={result.visualization?.title || resultTitle} dateStart={dateStart} dateEnd={dateEnd} generatedQuestion={generatedQuestion} onFollowUp={(instruction) => void runAnalysis(instruction)} /> : <div style={styles.emptyState}><div style={styles.emptyIcon}>BI</div><h2 style={{ marginBottom: 4 }}>Ton rapport professionnel apparaîtra ici</h2><p style={{ maxWidth: 580 }}>Pose une question libre ou configure l’analyse, vérifie ce que l’Assistant a compris, puis confirme le calcul.</p><div style={styles.emptyFeatures}><span>✓ Langage naturel</span><span>✓ Plan sémantique contrôlé</span><span>✓ Graphique adapté</span><span>✓ Droits appliqués</span><span>✓ Traçabilité SQL</span></div></div>}
         </section>
       </section>
     </main>
