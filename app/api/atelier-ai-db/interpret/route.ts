@@ -135,6 +135,7 @@ async function interpretWithAi(freeText: string, context: unknown) {
         {
           role: 'system',
           content: `Tu interprètes une demande libre d'analyse BI CEGECLIM.
+Réponds exclusivement avec un objet JSON valide, sans texte avant ou après le JSON.
 Transforme uniquement les contraintes réellement demandées en filtres structurés.
 N'invente aucune valeur. Distingue clairement inclure et exclure.
 Exemples :
@@ -144,7 +145,7 @@ Exemples :
 - "top 20 clients" => topN:20 et sortMode:"measure_desc"
 - "uniquement les BL" => includeDocumentTypes:["BL"]
 Si la demande est ambiguë, formule une clarification mais fournis l'interprétation la plus prudente.
-Retourne strictement :
+Retourne strictement ce JSON :
 {
   "summary":"phrase courte décrivant ce qui sera appliqué",
   "filters":{
@@ -166,7 +167,7 @@ Retourne strictement :
         },
         {
           role: 'user',
-          content: `Demande libre : ${freeText}\nContexte de l'analyse : ${JSON.stringify(context || {})}`,
+          content: `Demande libre à interpréter en JSON : ${freeText}\nContexte de l'analyse : ${JSON.stringify(context || {})}`,
         },
       ],
     }),
