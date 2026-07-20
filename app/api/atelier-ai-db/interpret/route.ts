@@ -29,6 +29,12 @@ export const dynamic = 'force-dynamic'
 
 const MODEL = process.env.OPENAI_INTERPRET_MODEL || process.env.OPENAI_BI_MODEL || 'gpt-4.1-mini'
 
+const FILTER_VALUE_STOPWORDS = new Set([
+  'A', 'AU', 'AUX', 'AVEC', 'DANS', 'DE', 'DEPUIS', 'DES', 'DU', 'EN', 'ET',
+  'LA', 'LE', 'LES', 'MACRO', 'MOIS', 'PAR', 'POUR', 'SUR', 'TOUT', 'TOUTE',
+  'TOUTES', 'TOUS', 'UNIQUEMENT',
+])
+
 type JsonObject = Record<string, unknown>
 
 type OpenAiFailureDetails = {
@@ -91,6 +97,14 @@ function unique<T extends string>(values: T[]) {
   return Array.from(new Set(values))
 }
 
+function normalizedFilterValue(value: string) {
+  return String(value || '').trim().toUpperCase()
+}
+
+function validFilterValue(value: string) {
+  return Boolean(value) && !FILTER_VALUE_STOPWORDS.has(value)
+}
+
 function inferSubject(text: string): SemanticSubjectKey | null {
   const routed = resolveSemanticRouting(text)
   if (routed) return routed.subject
@@ -128,7 +142,7 @@ function inferDimensions(text: string, subject: SemanticSubjectKey): SemanticDim
     [/\b(?:d[eé]p[oô]t|d[eé]p[oô]ts)\b/i, 'depot'],
     [/\b(?:d[eé]partement|d[eé]partements|territoire|zone\s+g[eé]ographique)\b/i, 'departement_tiers'],
     [/\b(?:famille\s+macro|macro\s+famille)\b/i, 'famille_macro'],
-    [/\b(?:famille|familles)\b/i, 'famille'],
+    [/\bfamilles?\b(?!\s+macro)/i, 'famille'],
     [/\b(?:r[eé]f[eé]rence|r[eé]f[eé]rences|article|articles|sku)\b/i, 'reference_article'],
     [/\b(?:d[eé]signation|libell[eé]\s+article)\b/i, 'designation'],
     [/\b(?:client|clients|tiers)\b/i, 'intitule_tiers'],
@@ -164,22 +178,44 @@ function mergeDeterministicBusinessRules(
 ): AssistantBiFreeTextInterpretation {
   const filters = {
     ...interpretation.filters,
-    includeFamilyMacros: [...interpretation.filters.includeFamilyMacros],
+    includeFamilyMacros: unique(
+      interpretation.filters.includeFamilyMacros
+        .map(normalizedFilterValue)
+        .filter(validFilterValue),
+    ),
+    includeFamilies: unique(
+      interpretation.filters.includeFamilies
+        .map(normalizedFilterValue)
+        .filter(validFilterValue),
+    ),
     includeDocumentTypes: [...interpretation.filters.includeDocumentTypes],
   }
   const normalized = freeText.replace(/[’']/g, "'")
   const semanticRoute = resolveSemanticRouting(normalized)
+  const hasMacroContext = /\b(?:familles?\s+macro|macro\s+familles?)\b/i.test(normalized)
 
   const macroMatches = [
-    ...normalized.matchAll(/famille\s+macro\s+(?:est\s+|=\s*|de\s+)?([A-Z0-9][A-Z0-9_\/-]*)/gi),
+    ...normalized.matchAll(/\bfamilles?\s+macro\s*(?:(?:=|:)\s*|(?:est|de)\s+)?([A-Z0-9][A-Z0-9_\/-]*)/gi),
+    ...normalized.matchAll(/\bmacro\s+familles?\s*(?:(?:=|:)\s*|(?:est|de)\s+)?([A-Z0-9][A-Z0-9_\/-]*)/gi),
   ]
   for (const match of macroMatches) {
-    const value = String(match[1] || '').trim().toUpperCase()
-    if (value && !filters.includeFamilyMacros.includes(value)) filters.includeFamilyMacros.push(value)
+    const value = normalizedFilterValue(String(match[1] || ''))
+    if (validFilterValue(value) && !filters.includeFamilyMacros.includes(value)) filters.includeFamilyMacros.push(value)
   }
 
-  if (/\b(?:uniquement|seulement|s[eé]lectionner)[^\n]{0,100}\bR\s*\/\s*R\b/i.test(normalized)) {
-    if (!filters.includeFamilyMacros.includes('R/R')) filters.includeFamilyMacros.push('R/R')
+  const contextualFamilyMatch = normalized.match(/\b(?:uniquement|seulement|exclusivement|pour)\b[^\n]{0,100}\b(?:la\s+)?famille\s+([A-Z0-9][A-Z0-9_\/-]*)/i)
+  if (hasMacroContext && contextualFamilyMatch) {
+    const value = normalizedFilterValue(String(contextualFamilyMatch[1] || ''))
+    if (validFilterValue(value) && !filters.includeFamilyMacros.includes(value)) filters.includeFamilyMacros.push(value)
+  }
+
+  if (hasMacroContext && /\bR\s*\/\s*R\b/i.test(normalized) && !filters.includeFamilyMacros.includes('R/R')) {
+    filters.includeFamilyMacros.push('R/R')
+  }
+
+  if (hasMacroContext && filters.includeFamilyMacros.length) {
+    const macroValues = new Set(filters.includeFamilyMacros)
+    filters.includeFamilies = filters.includeFamilies.filter((value) => !macroValues.has(value))
   }
 
   const documentRules: Array<[RegExp, string]> = [
@@ -195,7 +231,7 @@ function mergeDeterministicBusinessRules(
       filters.includeDocumentTypes.push(value)
     }
   }
-  if (semanticRoute?.documentType && !filters.includeDocumentTypes.includes(semanticRoute.documentType)) {
+  if (semanticRoute?.subject === 'portefeuille' && semanticRoute.documentType && !filters.includeDocumentTypes.includes(semanticRoute.documentType)) {
     filters.includeDocumentTypes.push(semanticRoute.documentType)
   }
 
@@ -243,6 +279,9 @@ function mergeDeterministicBusinessRules(
     if (!assumptions.includes(routingDescription)) assumptions.unshift(routingDescription)
   }
 
+  const sinceYear = normalized.match(/\bdepuis\s+(?:le\s+)?(?:d[eé]but\s+)?(20\d{2}|19\d{2})\b/i)
+  const deterministicDateStart = sinceYear ? `${sinceYear[1]}-01-01` : ''
+
   return {
     ...interpretation,
     filters,
@@ -254,6 +293,7 @@ function mergeDeterministicBusinessRules(
       measures: sanitized.measures,
       dimensions: sanitized.dimensions,
       visualization,
+      dateStart: deterministicDateStart || interpretation.plan.dateStart,
       title: interpretation.plan.title || interpretation.summary || getSubject(inferredSubject).label,
     },
   }
@@ -289,6 +329,9 @@ La table de routage métier ci-dessous est prioritaire sur le sujet présélecti
 Si le contexte contient lockSubject:true, conserve le sujet du contexte seulement lorsqu'aucune règle de routage métier explicite ne correspond à la demande.
 Si l'utilisateur donne seulement une précision de filtre, conserve le sujet, les mesures, les dimensions et la période du contexte.
 Résous les périodes relatives ("cette année", "mois dernier", "12 derniers mois") en dates ISO.
+« Depuis début 2025 » signifie une période commençant le 1er janvier 2025 ; cela ne signifie jamais « uniquement janvier ».
+Un mot de liaison comme « par », « pour », « depuis », « avec » ou « sur » ne doit jamais devenir une valeur de famille, de famille macro, de client ou d'agence.
+Quand une valeur comme R/R qualifie la famille macro, place-la uniquement dans includeFamilyMacros et pas dans includeFamilies.
 Choisis :
 - courbe pour une tendance temporelle ;
 - histogramme pour comparer des catégories ;
@@ -413,7 +456,7 @@ export async function POST(request: NextRequest) {
         error: aiError || undefined,
       },
       routing: resolveSemanticRouting(freeText),
-      version: 'SEMANTIC-PLAN-V3-BUSINESS-ROUTING',
+      version: 'SEMANTIC-PLAN-V4-FILTER-GUARDS',
     })
   } catch (error: unknown) {
     return NextResponse.json(
