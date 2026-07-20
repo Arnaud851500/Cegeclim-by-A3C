@@ -200,11 +200,14 @@ function mergeDeterministicBusinessRules(
   const contextSubject = contextRecord.subject && typeof contextRecord.subject === 'object'
     ? String((contextRecord.subject as Record<string, unknown>).key || '')
     : String(contextRecord.subject || '')
+  const lockSubject = contextRecord.lockSubject === true
+  const validContextSubject = ['ventes_bl', 'factures', 'devis', 'portefeuille', 'clients', 'articles'].includes(contextSubject)
+    ? contextSubject as SemanticSubjectKey
+    : null
 
-  const inferredSubject = interpretation.plan.subject || inferSubject(normalized) ||
-    (['ventes_bl', 'factures', 'devis', 'portefeuille', 'clients', 'articles'].includes(contextSubject)
-      ? contextSubject as SemanticSubjectKey
-      : 'ventes_bl')
+  const inferredSubject = lockSubject && validContextSubject
+    ? validContextSubject
+    : interpretation.plan.subject || inferSubject(normalized) || validContextSubject || 'ventes_bl'
 
   const rawMeasures = interpretation.plan.measures.length
     ? interpretation.plan.measures
@@ -226,7 +229,7 @@ function mergeDeterministicBusinessRules(
     plan: {
       ...interpretation.plan,
       subject: inferredSubject,
-      environment: interpretation.plan.environment || environmentForSubject(inferredSubject),
+      environment: environmentForSubject(inferredSubject),
       measures: sanitized.measures,
       dimensions: sanitized.dimensions,
       visualization,
@@ -261,8 +264,8 @@ Ta mission est de transformer une demande libre en :
 
 Tu ne génères jamais de SQL. Tu n'inventes aucune valeur métier.
 Tu peux corriger les formulations imprécises grâce aux synonymes du catalogue.
+Si le contexte contient lockSubject:true, conserve obligatoirement le sujet du contexte, même si la demande emploie des mots associés à un autre sujet. Adapte alors seulement les mesures, dimensions, dates, filtres et restitution.
 Si l'utilisateur donne seulement une précision de filtre, conserve le sujet, les mesures, les dimensions et la période du contexte.
-Si l'utilisateur formule une analyse complète, renseigne le plan complet.
 Résous les périodes relatives ("cette année", "mois dernier", "12 derniers mois") en dates ISO.
 Choisis :
 - courbe pour une tendance temporelle ;
@@ -383,7 +386,7 @@ export async function POST(request: NextRequest) {
         model: MODEL,
         error: aiError || undefined,
       },
-      version: 'SEMANTIC-PLAN-V2',
+      version: 'SEMANTIC-PLAN-V2-LOCKED-SUBJECT',
     })
   } catch (error: unknown) {
     return NextResponse.json(
