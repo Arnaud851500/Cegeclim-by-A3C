@@ -1,4 +1,9 @@
 {
+  "env": {
+    "OPENAI_MODEL": "gpt-5.6-terra",
+    "OPENAI_INTERPRET_MODEL": "gpt-5.6-terra",
+    "OPENAI_BI_MODEL": "gpt-5.6-terra"
+  },
   "crons": [
     {
       "path": "/api/cron/scheduler-dispatcher",
