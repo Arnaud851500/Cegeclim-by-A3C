@@ -240,14 +240,11 @@ function aggregateMetric(key: string, columns: string[]) {
   return ''
 }
 
-function aggregateSource(body: JsonObject, dimensions: string[]) {
+function aggregateSource(body: JsonObject) {
   const subject = String(body?.dataContext?.semanticSubject?.key || '')
-  if (subject === 'articles' || dimensions.some((key) => key === 'reference_article' || key === 'designation')) {
-    return 'indicateur_flux_articles_mensuel'
-  }
-  if (subject === 'factures') return 'indicateur_factures_mensuel'
+  if (subject === 'factures' || subject === 'clients') return 'indicateur_factures_mensuel'
   if (subject === 'devis') return 'indicateur_devis_mensuel'
-  if (subject === 'clients') return 'indicateur_factures_mensuel'
+  if (subject === 'articles') return 'indicateur_flux_articles_mensuel'
   return 'indicateur_activite_mensuel'
 }
 
@@ -255,14 +252,22 @@ function needsClientCreation(dimensions: string[], measures: string[]) {
   return measures.includes('nb_clients_crees') || dimensions.includes('annee_creation_client')
 }
 
-function needsDetailed(dimensions: string[], filters: AssistantBiStructuredFilters) {
-  const dimensionalNeed = dimensions.some((key) => [
+function needsDetailed(body: JsonObject, dimensions: string[], filters: AssistantBiStructuredFilters) {
+  const subject = String(body?.dataContext?.semanticSubject?.key || '')
+  const articleDetail = dimensions.some((key) => [
     'reference_article', 'designation', 'classe_abc_ca', 'classe_abc_lignes',
-  ].includes(key)) && dimensions.some((key) => [
-    'agence_collaborateur', 'departement_tiers', 'numero_tiers', 'intitule_tiers',
-    'collaborateur_facture', 'classe_abc_ca', 'classe_abc_lignes',
   ].includes(key))
-  return dimensionalNeed || hasDetailedStructuredFilters(filters)
+  if (articleDetail && ['factures', 'devis', 'clients', 'ventes_bl', 'portefeuille'].includes(subject)) return true
+  if (hasDetailedStructuredFilters(filters)) return true
+
+  const table = aggregateSource(body)
+  const columns = SCHEMA[table] || []
+  const globals = body?.globalFilters || {}
+  const agencies = Array.isArray(globals.agences) ? globals.agences : []
+  const departments = Array.isArray(globals.departementsTiers) ? globals.departementsTiers : []
+  if (agencies.length && !columns.includes('agence_collaborateur')) return true
+  if (departments.length && !columns.includes('departement_tiers')) return true
+  return false
 }
 
 function safeDate(alias: string, column: string) {
@@ -272,22 +277,24 @@ function safeDate(alias: string, column: string) {
 function detailSource(body: JsonObject) {
   const subject = String(body?.dataContext?.semanticSubject?.key || '')
   if (subject === 'factures' || subject === 'clients') {
-    return { table: 'facture_lignes', date: safeDate('l', 'date_facture'), defaultTypes: [] as string[] }
+    return { table: 'facture_lignes', date: safeDate('l', 'date_facture'), defaultTypes: [] as string[], filterDocumentTypes: false }
   }
   if (subject === 'devis') {
-    return { table: 'devis_lignes', date: safeDate('l', 'date_devis'), defaultTypes: [] as string[] }
+    return { table: 'devis_lignes', date: safeDate('l', 'date_devis'), defaultTypes: [] as string[], filterDocumentTypes: false }
   }
   if (subject === 'ventes_bl') {
     return {
       table: 'activite_lignes',
       date: `COALESCE(${safeDate('l', 'date_bl')}, ${safeDate('l', 'date_piece')})`,
       defaultTypes: ['BL'],
+      filterDocumentTypes: true,
     }
   }
   return {
     table: 'activite_lignes',
     date: `COALESCE(${safeDate('l', 'date_piece')}, ${safeDate('l', 'date_bl')})`,
     defaultTypes: [] as string[],
+    filterDocumentTypes: true,
   }
 }
 
@@ -338,11 +345,7 @@ function pushCondition(where: string[], condition: string) {
   if (condition) where.push(condition)
 }
 
-function applyAggregateStructuredFilters(
-  where: string[],
-  filters: AssistantBiStructuredFilters,
-  columns: string[],
-) {
+function applyAggregateStructuredFilters(where: string[], filters: AssistantBiStructuredFilters, columns: string[]) {
   if (filters.includeYears.length) pushCondition(where, inSql('annee', filters.includeYears))
   if (filters.excludeYears.length) pushCondition(where, notInSql('annee', filters.excludeYears))
 
@@ -366,11 +369,7 @@ function applyAggregateStructuredFilters(
   }
 }
 
-function applyDetailedStructuredFilters(
-  where: string[],
-  filters: AssistantBiStructuredFilters,
-  dateExpression: string,
-) {
+function applyDetailedStructuredFilters(where: string[], filters: AssistantBiStructuredFilters, dateExpression: string, allowDocumentTypes: boolean) {
   if (filters.includeYears.length) pushCondition(where, inSql(`EXTRACT(YEAR FROM ${dateExpression})::int`, filters.includeYears))
   if (filters.excludeYears.length) pushCondition(where, notInSql(`EXTRACT(YEAR FROM ${dateExpression})::int`, filters.excludeYears))
   pushCondition(where, inSql("COALESCE(NULLIF(BTRIM(c.agence::text), ''), 'NON RENSEIGNE')", filters.includeAgencies))
@@ -385,23 +384,10 @@ function applyDetailedStructuredFilters(
   pushCondition(where, notInSql("BTRIM(COALESCE(l.reference_article::text, ''))", filters.excludeReferences))
   pushCondition(where, textMatchSql(['l.numero_tiers_entete', 'l.intitule_tiers_entete'], filters.includeClients))
   pushCondition(where, textMatchSql(['l.numero_tiers_entete', 'l.intitule_tiers_entete'], filters.excludeClients, true))
-  pushCondition(where, inSql("BTRIM(COALESCE(l.type_document::text, ''))", filters.includeDocumentTypes))
-  pushCondition(where, notInSql("BTRIM(COALESCE(l.type_document::text, ''))", filters.excludeDocumentTypes))
-}
-
-function applyClientCreationStructuredFilters(
-  where: string[],
-  filters: AssistantBiStructuredFilters,
-) {
-  const dateExpression = safeDate('t', 'date_creation')
-  if (filters.includeYears.length) pushCondition(where, inSql(`EXTRACT(YEAR FROM ${dateExpression})::int`, filters.includeYears))
-  if (filters.excludeYears.length) pushCondition(where, notInSql(`EXTRACT(YEAR FROM ${dateExpression})::int`, filters.excludeYears))
-  pushCondition(where, inSql("COALESCE(NULLIF(BTRIM(c.agence::text), ''), 'NON RENSEIGNE')", filters.includeAgencies))
-  pushCondition(where, notInSql("COALESCE(NULLIF(BTRIM(c.agence::text), ''), 'NON RENSEIGNE')", filters.excludeAgencies))
-  pushCondition(where, inSql(departmentExpression('t'), filters.includeDepartments))
-  pushCondition(where, notInSql(departmentExpression('t'), filters.excludeDepartments))
-  pushCondition(where, textMatchSql(['t.numero', 't.intitule'], filters.includeClients))
-  pushCondition(where, textMatchSql(['t.numero', 't.intitule'], filters.excludeClients, true))
+  if (allowDocumentTypes) {
+    pushCondition(where, inSql("BTRIM(COALESCE(l.type_document::text, ''))", filters.includeDocumentTypes))
+    pushCondition(where, notInSql("BTRIM(COALESCE(l.type_document::text, ''))", filters.excludeDocumentTypes))
+  }
 }
 
 function visualization(kind: string, dimensions: string[], measureKeys: string[]) {
@@ -420,10 +406,10 @@ function visualization(kind: string, dimensions: string[], measureKeys: string[]
 }
 
 function aggregateQuery(body: JsonObject, dimensions: string[], wanted: string[], kind: string): QueryResult {
-  const table = aggregateSource(body, dimensions)
+  const table = aggregateSource(body)
   const columns = SCHEMA[table] || []
   const missing = dimensions.find((key) => !columns.includes(key))
-  if (missing) throw new Error(`${label(missing)} n'existe pas dans ${table}. Une source détaillée ou une autre dimension est nécessaire.`)
+  if (missing) throw new Error(`${label(missing)} n'existe pas dans ${table}. Une source détaillée est nécessaire.`)
 
   const metrics = wanted.map((key) => ({ key, sql: aggregateMetric(key, columns) })).filter((item) => Boolean(item.sql))
   if (!metrics.length) throw new Error('Aucune mesure disponible dans cette source.')
@@ -445,7 +431,7 @@ function aggregateQuery(body: JsonObject, dimensions: string[], wanted: string[]
   ]
   for (const item of scoped) {
     if (!item.values.length) continue
-    if (!columns.includes(item.column)) throw new Error(`${label(item.column)} est absent de ${table}; le dépôt ne peut pas le remplacer.`)
+    if (!columns.includes(item.column)) throw new Error(`${label(item.column)} est absent de ${table}.`)
     pushCondition(where, inSql(item.column, item.values))
   }
 
@@ -465,7 +451,7 @@ ORDER BY ${order}`)
     rows: [],
     sql: appendTopN(baseSql, free),
     repaired: false,
-    reason: `Requête guidée sur l’agrégat ${table}, avec application des filtres confirmés.`,
+    reason: `Requête guidée sur l'agrégat ${table}, avec application des filtres confirmés.`,
     visualization: visualization(kind, dimensions, measureKeys),
   }
 }
@@ -483,14 +469,16 @@ function detailedQuery(body: JsonObject, dimensions: string[], wanted: string[],
   if (period.dateStart) where.push(`${source.date} >= ${quote(period.dateStart)}::date`)
   if (period.dateEnd) where.push(`${source.date} <= ${quote(period.dateEnd)}::date`)
 
-  const requestedTypes = Array.isArray(globals.typesDocument) ? globals.typesDocument.map(String).filter(Boolean) : []
-  const documentTypes = requestedTypes.length ? requestedTypes : source.defaultTypes
-  pushCondition(where, inSql('l.type_document', documentTypes))
+  if (source.filterDocumentTypes) {
+    const requestedTypes = Array.isArray(globals.typesDocument) ? globals.typesDocument.map(String).filter(Boolean) : []
+    const documentTypes = requestedTypes.length ? requestedTypes : source.defaultTypes
+    pushCondition(where, inSql('l.type_document', documentTypes))
+  }
   pushCondition(where, inSql("COALESCE(NULLIF(BTRIM(c.agence::text), ''), 'NON RENSEIGNE')", Array.isArray(globals.agences) ? globals.agences : []))
   pushCondition(where, inSql("COALESCE(NULLIF(BTRIM(t.representant::text), ''), 'NON RENSEIGNE')", Array.isArray(globals.collaborateursTiers) ? globals.collaborateursTiers : []))
   pushCondition(where, inSql(departmentExpression('t'), Array.isArray(globals.departementsTiers) ? globals.departementsTiers : []))
   if (String(globals.horsStatistique || 'non') === 'non') where.push('COALESCE(a.hors_statistique, FALSE) = FALSE')
-  applyDetailedStructuredFilters(where, free, source.date)
+  applyDetailedStructuredFilters(where, free, source.date, source.filterDocumentTypes)
 
   const needsAbc = dimensions.some((key) => key === 'classe_abc_ca' || key === 'classe_abc_lignes')
   const abcCte = needsAbc ? `WITH abc_current AS (
@@ -546,7 +534,7 @@ function clientCreationDimension(key: string) {
     numero_tiers: "COALESCE(NULLIF(BTRIM(t.numero::text), ''), 'NON RENSEIGNE')",
     intitule_tiers: "COALESCE(NULLIF(BTRIM(t.intitule::text), ''), 'NON RENSEIGNE')",
   }
-  if (!expressions[key]) throw new Error(`${label(key)} n'est pas disponible pour l’analyse de création des clients.`)
+  if (!expressions[key]) throw new Error(`${label(key)} n'est pas disponible pour l'analyse de création des clients.`)
   return expressions[key]
 }
 
@@ -563,7 +551,14 @@ function clientCreationQuery(body: JsonObject, dimensions: string[], wanted: str
   if (String(globals.inclureProspects || 'non') !== 'oui') where.push('COALESCE(t.prospect, FALSE) = FALSE')
   pushCondition(where, inSql("COALESCE(NULLIF(BTRIM(c.agence::text), ''), 'NON RENSEIGNE')", Array.isArray(globals.agences) ? globals.agences : []))
   pushCondition(where, inSql(departmentExpression('t'), Array.isArray(globals.departementsTiers) ? globals.departementsTiers : []))
-  applyClientCreationStructuredFilters(where, free)
+  if (free.includeYears.length) pushCondition(where, inSql(`EXTRACT(YEAR FROM ${date})::int`, free.includeYears))
+  if (free.excludeYears.length) pushCondition(where, notInSql(`EXTRACT(YEAR FROM ${date})::int`, free.excludeYears))
+  pushCondition(where, inSql("COALESCE(NULLIF(BTRIM(c.agence::text), ''), 'NON RENSEIGNE')", free.includeAgencies))
+  pushCondition(where, notInSql("COALESCE(NULLIF(BTRIM(c.agence::text), ''), 'NON RENSEIGNE')", free.excludeAgencies))
+  pushCondition(where, inSql(departmentExpression('t'), free.includeDepartments))
+  pushCondition(where, notInSql(departmentExpression('t'), free.excludeDepartments))
+  pushCondition(where, textMatchSql(['t.numero', 't.intitule'], free.includeClients))
+  pushCondition(where, textMatchSql(['t.numero', 't.intitule'], free.excludeClients, true))
 
   const group = dimensionExpressions.map((_item, index) => String(index + 1)).join(', ')
   const sortMode = effectiveSortMode(body, free)
@@ -597,7 +592,7 @@ function guided(body: JsonObject): QueryResult | null {
   const free = structuredFilters(body)
 
   if (needsClientCreation(dimensions, wanted)) return clientCreationQuery(body, dimensions, wanted, kind)
-  if (needsDetailed(dimensions, free)) return detailedQuery(body, dimensions, wanted, kind)
+  if (needsDetailed(body, dimensions, free)) return detailedQuery(body, dimensions, wanted, kind)
   return aggregateQuery(body, dimensions, wanted, kind)
 }
 
@@ -656,10 +651,12 @@ export async function POST(request: NextRequest) {
     if (structured) result.rows = await execute(structured.sql)
 
     const summarySample = result.rows.slice(0, SUMMARY_SAMPLE_ROWS)
-    let answer = `Analyse exécutée sur ${result.rows.length} ligne(s).`
+    let answer = result.rows.length
+      ? `Analyse exécutée sur ${result.rows.length} ligne(s).`
+      : 'Aucune donnée ne correspond exactement aux critères appliqués.'
     try {
       const summary = await openAi([
-        { role: 'system', content: 'Réponds en français et en JSON strict. Mentionne les exclusions appliquées. Ne présente pas une classe ABC actuelle comme une classe historique.' },
+        { role: 'system', content: 'Réponds en français et en JSON strict. Mentionne les exclusions appliquées. Ne présente pas une classe ABC actuelle comme une classe historique. Si le résultat est vide, ne conclus pas à une absence d’activité générale : indique seulement qu’aucune ligne ne correspond aux critères.' },
         { role: 'user', content: `Question: ${question}\nFiltres structurés: ${JSON.stringify(structuredFilters(body))}\nSQL: ${result.sql}\nNombre total de lignes: ${result.rows.length}\nÉchantillon: ${JSON.stringify(summarySample).slice(0, 20000)}\nRetourne {"answer":"synthèse courte"}.` },
       ])
       answer = String(summary?.answer || answer)
@@ -679,7 +676,7 @@ export async function POST(request: NextRequest) {
       proposed_widgets: [],
       is_complete: true,
       mode: structured ? 'guided_deterministic_db' : 'aggregated_db',
-      version: 'STEP-11-FREE-TEXT-STRUCTURED-FILTERS',
+      version: 'SEMANTIC-V2-DETAILED-SOURCE-FIX',
     })
   } catch (error: unknown) {
     return json({ error: error instanceof Error ? error.message : String(error) }, 500)
