@@ -120,6 +120,9 @@ export function explicitYearRules(text: string) {
     /ne\s+(?:prends?|prendre|tiens?|tenir|consid[eé]rer)[^\n]{0,140}?(?:pas|plus)[^\d]{0,120}(20\d{2}|19\d{2})/gi,
     /ne\s+(?:prends?|prendre|tiens?|tenir)[^\n]{0,160}(20\d{2}|19\d{2})[^\n]{0,40}(?:pas|plus)\s+en\s+compte/gi,
     /(?:ignore|retire|supprime)[^\d]{0,120}(20\d{2}|19\d{2})/gi,
+    /ne\s+pas\s+(?:afficher|montrer|inclure|présenter|presenter|visualiser|prendre\s+en\s+compte)[^\d]{0,120}(20\d{2}|19\d{2})/gi,
+    /n[' ](?:affiche|afficher|inclue|inclure|montre|montrer)\s+pas[^\d]{0,120}(20\d{2}|19\d{2})/gi,
+    /(?:masque|cacher|cache)[^\d]{0,120}(20\d{2}|19\d{2})/gi,
   ]
   for (const pattern of exclusionPatterns) {
     for (const match of normalized.matchAll(pattern)) excludeYears.add(Number(match[1]))
@@ -148,8 +151,8 @@ export function mergeExplicitYearRules(
     ...interpretation,
     filters: {
       ...interpretation.filters,
-      includeYears: [...included].sort((left, right) => left - right),
-      excludeYears: [...excluded].sort((left, right) => left - right),
+      includeYears: [...included].sort(),
+      excludeYears: [...excluded].sort(),
     },
   }
 }
