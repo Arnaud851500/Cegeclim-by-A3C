@@ -18,6 +18,11 @@ import {
   type SemanticSubjectKey,
   type SemanticVisualizationKey,
 } from '@/lib/ai/cegeclimSemanticCatalog'
+import {
+  buildSemanticRoutingPromptReference,
+  describeSemanticRouting,
+  resolveSemanticRouting,
+} from '@/lib/ai/cegeclimSemanticRouting'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -87,6 +92,9 @@ function unique<T extends string>(values: T[]) {
 }
 
 function inferSubject(text: string): SemanticSubjectKey | null {
+  const routed = resolveSemanticRouting(text)
+  if (routed) return routed.subject
+
   const rules: Array<[RegExp, SemanticSubjectKey]> = [
     [/\b(?:nouveaux?\s+clients?|clients?\s+cr[eé][eé]s?|prospects?|tiers)\b/i, 'clients'],
     [/\b(?:factures?|facturation|ca\s+factur[eé])\b/i, 'factures'],
@@ -160,6 +168,7 @@ function mergeDeterministicBusinessRules(
     includeDocumentTypes: [...interpretation.filters.includeDocumentTypes],
   }
   const normalized = freeText.replace(/[’']/g, "'")
+  const semanticRoute = resolveSemanticRouting(normalized)
 
   const macroMatches = [
     ...normalized.matchAll(/famille\s+macro\s+(?:est\s+|=\s*|de\s+)?([A-Z0-9][A-Z0-9_\/-]*)/gi),
@@ -186,6 +195,9 @@ function mergeDeterministicBusinessRules(
       filters.includeDocumentTypes.push(value)
     }
   }
+  if (semanticRoute?.documentType && !filters.includeDocumentTypes.includes(semanticRoute.documentType)) {
+    filters.includeDocumentTypes.push(semanticRoute.documentType)
+  }
 
   const topMatch = normalized.match(/\btop\s+(\d{1,3})\b/i)
   if (topMatch && !filters.topN) {
@@ -205,9 +217,11 @@ function mergeDeterministicBusinessRules(
     ? contextSubject as SemanticSubjectKey
     : null
 
-  const inferredSubject = lockSubject && validContextSubject
-    ? validContextSubject
-    : interpretation.plan.subject || inferSubject(normalized) || validContextSubject || 'ventes_bl'
+  const inferredSubject = semanticRoute?.subject || (
+    lockSubject && validContextSubject
+      ? validContextSubject
+      : interpretation.plan.subject || inferSubject(normalized) || validContextSubject || 'ventes_bl'
+  )
 
   const rawMeasures = interpretation.plan.measures.length
     ? interpretation.plan.measures
@@ -223,9 +237,16 @@ function mergeDeterministicBusinessRules(
   const visualization = interpretation.plan.visualization ||
     inferVisualization(normalized, sanitized.dimensions, sanitized.measures)
 
+  const assumptions = [...interpretation.assumptions]
+  if (semanticRoute) {
+    const routingDescription = `Routage sémantique CEGECLIM : ${describeSemanticRouting(semanticRoute)}`
+    if (!assumptions.includes(routingDescription)) assumptions.unshift(routingDescription)
+  }
+
   return {
     ...interpretation,
     filters,
+    assumptions,
     plan: {
       ...interpretation.plan,
       subject: inferredSubject,
@@ -264,7 +285,8 @@ Ta mission est de transformer une demande libre en :
 
 Tu ne génères jamais de SQL. Tu n'inventes aucune valeur métier.
 Tu peux corriger les formulations imprécises grâce aux synonymes du catalogue.
-Si le contexte contient lockSubject:true, conserve obligatoirement le sujet du contexte, même si la demande emploie des mots associés à un autre sujet. Adapte alors seulement les mesures, dimensions, dates, filtres et restitution.
+La table de routage métier ci-dessous est prioritaire sur le sujet présélectionné. Ainsi, « chiffre d'affaires », « facturé », « facture » ou « facturation » imposent le sujet factures, sauf lorsqu'un flux plus précis comme BL, CDC ou devis est explicitement demandé.
+Si le contexte contient lockSubject:true, conserve le sujet du contexte seulement lorsqu'aucune règle de routage métier explicite ne correspond à la demande.
 Si l'utilisateur donne seulement une précision de filtre, conserve le sujet, les mesures, les dimensions et la période du contexte.
 Résous les périodes relatives ("cette année", "mois dernier", "12 derniers mois") en dates ISO.
 Choisis :
@@ -275,7 +297,11 @@ Choisis :
 - camembert uniquement pour une répartition simple de 6 catégories maximum.
 N'utilise que les clés exactes du catalogue ci-dessous.
 
+CATALOGUE :
 ${buildSemanticPromptReference()}
+
+TABLE DE ROUTAGE MÉTIER PRIORITAIRE :
+${buildSemanticRoutingPromptReference()}
 
 Retourne strictement ce JSON :
 {
@@ -386,7 +412,8 @@ export async function POST(request: NextRequest) {
         model: MODEL,
         error: aiError || undefined,
       },
-      version: 'SEMANTIC-PLAN-V2-LOCKED-SUBJECT',
+      routing: resolveSemanticRouting(freeText),
+      version: 'SEMANTIC-PLAN-V3-BUSINESS-ROUTING',
     })
   } catch (error: unknown) {
     return NextResponse.json(
