@@ -13,10 +13,12 @@ export type SemanticMeasureKey =
   | 'marge_pct'
   | 'nb_lignes'
   | 'panier_moyen'
+  | 'nb_clients_crees'
 
 export type SemanticDimensionKey =
   | 'mois'
   | 'annee'
+  | 'annee_creation_client'
   | 'agence_collaborateur'
   | 'depot'
   | 'collaborateur_facture'
@@ -24,6 +26,8 @@ export type SemanticDimensionKey =
   | 'departement_tiers'
   | 'famille_macro'
   | 'famille'
+  | 'classe_abc_ca'
+  | 'classe_abc_lignes'
   | 'numero_tiers'
   | 'intitule_tiers'
   | 'reference_article'
@@ -69,8 +73,8 @@ export const SUBJECTS: SemanticSubject[] = [
   {
     key: 'ventes_bl',
     label: 'Ventes BL',
-    description: 'Analyse des bons de livraison, du mix produit et de la performance commerciale.',
-    sourceHint: "Utiliser indicateur_activite_mensuel avec type_document = 'BL' pour les analyses agence/client/famille, et indicateur_flux_articles_mensuel avec type_document = 'BL' pour les analyses par référence article.",
+    description: 'Analyse les marchandises livrées : CA, quantités, références, clients et mix produit.',
+    sourceHint: "Utiliser les bons de livraison uniquement. Les analyses simples viennent de l’agrégat activité ; les croisements Référence × Agence/Client utilisent les lignes de BL et les référentiels.",
     defaultMeasures: ['ca_ht', 'quantite'],
     defaultDimensions: ['mois', 'agence_collaborateur'],
     suggestedDimensions: ['departement_tiers', 'famille_macro', 'famille', 'numero_tiers', 'intitule_tiers', 'reference_article'],
@@ -78,17 +82,17 @@ export const SUBJECTS: SemanticSubject[] = [
   {
     key: 'factures',
     label: 'Factures',
-    description: 'Analyse du chiffre d’affaires facturé, des quantités et de la marge.',
-    sourceHint: 'Utiliser indicateur_factures_mensuel.',
+    description: 'Analyse le chiffre d’affaires réellement facturé, les quantités et la marge.',
+    sourceHint: 'Utiliser l’agrégat factures. Si une référence ou une classe ABC est demandée, utiliser les lignes de factures enrichies par les référentiels articles et ABC.',
     defaultMeasures: ['ca_ht', 'marge_pct'],
     defaultDimensions: ['mois', 'agence_collaborateur'],
-    suggestedDimensions: ['departement_tiers', 'collaborateur_facture', 'famille_macro', 'famille', 'intitule_tiers'],
+    suggestedDimensions: ['departement_tiers', 'collaborateur_facture', 'famille_macro', 'famille', 'classe_abc_ca', 'intitule_tiers'],
   },
   {
     key: 'devis',
     label: 'Devis',
-    description: 'Analyse des devis émis, de leur valeur et de leur répartition.',
-    sourceHint: 'Utiliser indicateur_devis_mensuel.',
+    description: 'Analyse les propositions commerciales émises, leur valeur et leur répartition.',
+    sourceHint: 'Utiliser l’agrégat devis. Les détails par référence utilisent les lignes de devis enrichies par les référentiels.',
     defaultMeasures: ['ca_ht', 'nb_lignes'],
     defaultDimensions: ['mois', 'agence_collaborateur'],
     suggestedDimensions: ['collaborateur_facture', 'departement_tiers', 'famille_macro', 'famille', 'intitule_tiers'],
@@ -96,8 +100,8 @@ export const SUBJECTS: SemanticSubject[] = [
   {
     key: 'portefeuille',
     label: 'Portefeuille de commandes',
-    description: 'Analyse des CDC, PL, BL et BR présents dans l’activité mensuelle.',
-    sourceHint: "Utiliser indicateur_activite_mensuel et conserver type_document comme dimension ou filtre parmi CDC, PL, BL, BR et BL M-x.",
+    description: 'Analyse les documents encore présents dans l’activité : CDC, PL, BL et BR.',
+    sourceHint: 'Utiliser l’activité mensuelle avec le type de document comme filtre ou dimension. Ce sujet ne représente pas le CA facturé.',
     defaultMeasures: ['ca_ht'],
     defaultDimensions: ['type_document', 'agence_collaborateur'],
     suggestedDimensions: ['mois', 'collaborateur_facture', 'departement_tiers', 'famille_macro', 'intitule_tiers'],
@@ -105,20 +109,20 @@ export const SUBJECTS: SemanticSubject[] = [
   {
     key: 'clients',
     label: 'Clients',
-    description: 'Analyse de la contribution, du panier, du mix familles et de la marge par client.',
-    sourceHint: 'Utiliser les agrégats mensuels et regrouper par numero_tiers et intitule_tiers. Pour un panier moyen BL, calculer le CA BL divisé par un nombre de documents distincts uniquement si la source le permet ; sinon indiquer clairement la limite et utiliser un indicateur de CA par ligne.',
+    description: 'Analyse la création, la contribution, le panier, le mix familles et la marge des clients.',
+    sourceHint: 'Pour les ventes clients, utiliser les agrégats de factures. Pour les nouveaux clients, utiliser ref_tiers.date_creation et rattacher l’agence via le représentant du client.',
     defaultMeasures: ['ca_ht', 'marge_pct'],
     defaultDimensions: ['intitule_tiers', 'agence_collaborateur'],
-    suggestedDimensions: ['numero_tiers', 'departement_tiers', 'famille_macro', 'famille', 'mois'],
+    suggestedDimensions: ['annee_creation_client', 'numero_tiers', 'departement_tiers', 'famille_macro', 'famille', 'mois'],
   },
   {
     key: 'articles',
     label: 'Articles et familles',
-    description: 'Analyse des références, désignations, familles et familles macro.',
-    sourceHint: 'Utiliser indicateur_flux_articles_mensuel pour disposer de reference_article et designation.',
+    description: 'Analyse les références, désignations, familles, classes ABC et familles macro.',
+    sourceHint: 'Utiliser l’agrégat flux articles. Les croisements avec agence/client nécessitent les lignes détaillées et les référentiels.',
     defaultMeasures: ['ca_ht', 'quantite', 'marge_pct'],
     defaultDimensions: ['reference_article', 'famille_macro'],
-    suggestedDimensions: ['designation', 'famille', 'mois', 'depot', 'collaborateur_tiers'],
+    suggestedDimensions: ['designation', 'famille', 'classe_abc_ca', 'classe_abc_lignes', 'mois', 'depot', 'collaborateur_tiers'],
   },
 ]
 
@@ -132,24 +136,32 @@ export const MEASURES: SemanticDefinition[] = [
     description: 'Marge pondérée par le CA.',
     sqlHint: 'case when sum(ca_ht) <> 0 then sum(marge_valeur) / sum(ca_ht) * 100 else 0 end',
   },
-  { key: 'nb_lignes', label: 'Nombre de lignes', description: 'Somme du nombre de lignes.', sqlHint: 'sum(nb_lignes)' },
+  { key: 'nb_lignes', label: 'Nombre de lignes', description: 'Somme ou décompte des lignes selon la source.', sqlHint: 'sum(nb_lignes)' },
   {
     key: 'panier_moyen',
     label: 'Panier moyen',
-    description: 'CA divisé par le nombre de documents. À utiliser uniquement lorsque le nombre de documents distincts est disponible.',
+    description: 'CA divisé par le nombre de documents distincts lorsque la source détaillée le permet.',
+  },
+  {
+    key: 'nb_clients_crees',
+    label: 'Nouveaux clients',
+    description: 'Nombre distinct de clients dont la date de création appartient à la période.',
   },
 ]
 
 export const DIMENSIONS: SemanticDefinition[] = [
-  { key: 'mois', label: 'Mois', description: 'Mois numérique de 1 à 12.' },
+  { key: 'mois', label: 'Mois', description: 'Mois du document, de 1 à 12.' },
   { key: 'annee', label: 'Année', description: 'Année du document.' },
-  { key: 'agence_collaborateur', label: 'Agence', description: 'Agence rattachée au collaborateur.' },
-  { key: 'depot', label: 'Dépôt', description: 'Dépôt logistique ou commercial.' },
+  { key: 'annee_creation_client', label: 'Année de création client', description: 'Année issue de ref_tiers.date_creation.' },
+  { key: 'agence_collaborateur', label: 'Agence', description: 'Agence du représentant rattaché au client.' },
+  { key: 'depot', label: 'Dépôt', description: 'Dépôt logistique ou commercial du document.' },
   { key: 'collaborateur_facture', label: 'Collaborateur du document', description: 'Collaborateur porté par le document.' },
-  { key: 'collaborateur_tiers', label: 'Collaborateur du client', description: 'Collaborateur de rattachement du tiers.' },
-  { key: 'departement_tiers', label: 'Département client', description: 'Département rattaché à l’adresse du tiers.' },
+  { key: 'collaborateur_tiers', label: 'Collaborateur du client', description: 'Représentant de rattachement du tiers.' },
+  { key: 'departement_tiers', label: 'Département client', description: 'Département calculé depuis le code postal du tiers.' },
   { key: 'famille_macro', label: 'Famille macro', description: 'Regroupement métier supérieur de la famille article.' },
   { key: 'famille', label: 'Famille', description: 'Famille de la référence article.' },
+  { key: 'classe_abc_ca', label: 'Classe ABC CA', description: 'Classe A/B/C actuelle calculée dans la projection stock selon le CA BL YTD.' },
+  { key: 'classe_abc_lignes', label: 'Classe ABC lignes', description: 'Classe A/B/C actuelle calculée selon le nombre de lignes BL YTD.' },
   { key: 'numero_tiers', label: 'Code client', description: 'Identifiant du tiers.' },
   { key: 'intitule_tiers', label: 'Client', description: 'Nom ou intitulé du tiers.' },
   { key: 'reference_article', label: 'Référence article', description: 'Code de la référence article.' },
@@ -170,22 +182,40 @@ export const ANALYSIS_TEMPLATES: AnalysisTemplate[] = [
   {
     id: 'ventes-reference-agence-departement',
     title: 'Ventes par référence, agence et département',
-    description: 'Tableau détaillé demandé pour analyser les ventes BL par territoire client.',
+    description: 'Tableau détaillé des ventes BL par article et territoire client.',
     subject: 'ventes_bl',
     measures: ['ca_ht', 'quantite'],
     dimensions: ['mois', 'reference_article', 'agence_collaborateur', 'departement_tiers'],
     visualization: 'tableau',
-    promptSuffix: 'Présente d’abord une synthèse par agence, puis le détail par référence et département.',
   },
   {
     id: 'mix-famille-marge',
     title: 'Mix familles et marge',
-    description: 'Repère les agences dont le mix familles est associé à une marge différente du réseau.',
+    description: 'Compare le mix familles et la marge entre agences.',
     subject: 'factures',
     measures: ['ca_ht', 'marge_pct'],
     dimensions: ['agence_collaborateur', 'famille_macro'],
     visualization: 'histogramme_empile',
-    promptSuffix: 'Signale les écarts significatifs de mix et de marge sans conclure à un lien de causalité.',
+  },
+  {
+    id: 'nouveaux-clients-agence',
+    title: 'Nouveaux clients par agence',
+    description: 'Nombre de clients créés par année et agence de rattachement.',
+    subject: 'clients',
+    measures: ['nb_clients_crees'],
+    dimensions: ['annee_creation_client', 'agence_collaborateur'],
+    visualization: 'histogramme_empile',
+    promptSuffix: 'Exclure les prospects sauf choix contraire explicite.',
+  },
+  {
+    id: 'factures-abc-ca',
+    title: 'CA facturé par classe ABC',
+    description: 'Répartit le CA facturé selon la classe ABC CA actuelle des articles.',
+    subject: 'factures',
+    measures: ['ca_ht'],
+    dimensions: ['classe_abc_ca'],
+    visualization: 'histogramme',
+    promptSuffix: 'Préciser que la classe ABC est la classe actuelle de la projection stock et non une classe historique à la date de facture.',
   },
   {
     id: 'top-clients',
@@ -195,7 +225,7 @@ export const ANALYSIS_TEMPLATES: AnalysisTemplate[] = [
     measures: ['ca_ht', 'marge_pct'],
     dimensions: ['intitule_tiers', 'agence_collaborateur', 'famille_macro'],
     visualization: 'tableau',
-    promptSuffix: 'Limite le résultat aux 30 principaux clients par CA HT.',
+    promptSuffix: 'Limiter le résultat aux 30 principaux clients par CA HT.',
   },
   {
     id: 'portefeuille-agence-document',
@@ -210,11 +240,11 @@ export const ANALYSIS_TEMPLATES: AnalysisTemplate[] = [
 
 export const CEGECLIM_BUSINESS_RULES = [
   'Famille macro et famille proviennent du référentiel familles relié aux références article.',
-  'L’agence métier est en priorité l’agence du collaborateur de rattachement du client, sauf demande explicite sur le collaborateur du document.',
-  'Pour les analyses par référence article ou désignation, utiliser indicateur_flux_articles_mensuel.',
+  'L’agence métier est en priorité l’agence du représentant rattaché au client.',
   'Pour les ventes livrées, filtrer type_document = BL.',
   'Marge % doit être calculée comme une marge pondérée : somme marge / somme CA.',
-  'hors_statistique est un booléen. Par défaut, exclure les lignes hors statistique.',
+  'Par défaut, exclure les articles hors statistiques après confirmation utilisateur.',
+  'La classe ABC utilisée dans les analyses de factures est la classe actuelle de la projection stock, sauf création ultérieure d’un historique ABC daté.',
   'Une corrélation doit être présentée comme une association et non comme une causalité.',
 ]
 
