@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useAccess } from '@/components/AccessContext'
 import { ChoiceButton, PlanLine, Step, ToggleChoice } from '@/components/assistant-bi/AssistantBiControls'
 import { ProfessionalResults } from '@/components/assistant-bi/ProfessionalResults'
@@ -16,18 +16,16 @@ import {
 import {
   ANALYSIS_TEMPLATES,
   DIMENSIONS,
-  ENVIRONMENTS,
   MEASURES,
+  SUBJECTS,
   buildGuidedQuestion,
   environmentForSubject,
   getEnvironment,
   getSubject,
   recommendedVisualization,
   sanitizeSubjectConfiguration,
-  subjectsForEnvironment,
   type AnalysisTemplate,
   type SemanticDimensionKey,
-  type SemanticEnvironmentKey,
   type SemanticMeasureKey,
   type SemanticSubjectKey,
   type SemanticVisualizationKey,
@@ -76,9 +74,14 @@ function sourceForSubject(subject: SemanticSubjectKey) {
 function documentTypesForSubject(subject: SemanticSubjectKey) {
   if (subject === 'ventes_bl') return ['BL']
   if (subject === 'portefeuille') return ['CDC', 'PL', 'BL', 'BR', 'BL M-x']
-  if (subject === 'devis') return ['DEVIS']
-  if (subject === 'factures') return ['FACTURE']
   return []
+}
+
+function documentLabelForSubject(subject: SemanticSubjectKey) {
+  if (subject === 'factures') return 'Factures — source dédiée facture_lignes'
+  if (subject === 'devis') return 'Devis — source dédiée devis_lignes'
+  const types = documentTypesForSubject(subject)
+  return types.length ? types.join(', ') : 'Selon le sujet et les filtres'
 }
 
 function monthHints(dateStart: string, dateEnd: string) {
@@ -117,9 +120,8 @@ function resolveCalculationSource(
     return { title: 'Référentiel clients', detail: 'ref_tiers.date_creation enrichi par ref_collaborateurs.' }
   }
   const hasArticle = dimensions.some((key) => key === 'reference_article' || key === 'designation')
-  const hasRelation = dimensions.some((key) => ['agence_collaborateur', 'departement_tiers', 'numero_tiers', 'intitule_tiers', 'collaborateur_facture'].includes(key))
   const hasAbc = dimensions.some((key) => key === 'classe_abc_ca' || key === 'classe_abc_lignes')
-  if ((hasArticle && hasRelation) || hasAbc) {
+  if ((hasArticle && ['factures', 'clients', 'devis', 'ventes_bl', 'portefeuille'].includes(subject)) || hasAbc) {
     const lineTable = subject === 'factures' || subject === 'clients'
       ? 'facture_lignes'
       : subject === 'devis'
@@ -147,7 +149,7 @@ function emptyInterpretation(): AssistantBiFreeTextInterpretation {
 export default function AssistantBiPage() {
   const { rights } = useAccess()
   const now = useMemo(() => new Date(), [])
-  const [environment, setEnvironment] = useState<SemanticEnvironmentKey>('pilotage_commercial')
+  const interpretationRef = useRef<HTMLElement | null>(null)
   const [subject, setSubject] = useState<SemanticSubjectKey>('ventes_bl')
   const [measures, setMeasures] = useState<SemanticMeasureKey[]>(['ca_ht', 'quantite'])
   const [dimensions, setDimensions] = useState<SemanticDimensionKey[]>(['mois', 'agence_collaborateur'])
@@ -166,9 +168,8 @@ export default function AssistantBiPage() {
   const [error, setError] = useState('')
   const [result, setResult] = useState<AiResult | null>(null)
 
-  const selectedEnvironment = useMemo(() => getEnvironment(environment), [environment])
-  const availableSubjects = useMemo(() => subjectsForEnvironment(environment), [environment])
   const selectedSubject = useMemo(() => getSubject(subject), [subject])
+  const selectedEnvironment = useMemo(() => getEnvironment(environmentForSubject(subject)), [subject])
   const generatedQuestion = useMemo(() => buildGuidedQuestion({
     subject, measures, dimensions, visualization, dateStart, dateEnd, freeText, promptSuffix: templateSuffix,
   }), [subject, measures, dimensions, visualization, dateStart, dateEnd, freeText, templateSuffix])
@@ -186,6 +187,14 @@ export default function AssistantBiPage() {
   const isClientCreation = measures.includes('nb_clients_crees') || dimensions.includes('annee_creation_client')
   const usesAbc = dimensions.includes('classe_abc_ca') || dimensions.includes('classe_abc_lignes')
 
+  useEffect(() => {
+    if (!showConfirmation) return
+    const timer = window.setTimeout(() => {
+      interpretationRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 80)
+    return () => window.clearTimeout(timer)
+  }, [showConfirmation])
+
   function resetCalculatedState() {
     setShowConfirmation(false)
     setInterpretation(null)
@@ -193,22 +202,9 @@ export default function AssistantBiPage() {
     setError('')
   }
 
-  function changeEnvironment(next: SemanticEnvironmentKey) {
-    const nextEnvironment = getEnvironment(next)
-    const firstSubject = getSubject(nextEnvironment.subjects[0])
-    setEnvironment(next)
-    setSubject(firstSubject.key)
-    setMeasures([...firstSubject.defaultMeasures])
-    setDimensions([...firstSubject.defaultDimensions])
-    setVisualization(recommendedVisualization(firstSubject.defaultDimensions, firstSubject.defaultMeasures))
-    setTemplateSuffix('')
-    resetCalculatedState()
-  }
-
   function changeSubject(next: SemanticSubjectKey) {
     const definition = getSubject(next)
     setSubject(next)
-    if (!selectedEnvironment.subjects.includes(next)) setEnvironment(environmentForSubject(next))
     setMeasures([...definition.defaultMeasures])
     setDimensions([...definition.defaultDimensions])
     setVisualization(recommendedVisualization(definition.defaultDimensions, definition.defaultMeasures))
@@ -217,7 +213,6 @@ export default function AssistantBiPage() {
   }
 
   function applyTemplate(template: AnalysisTemplate) {
-    setEnvironment(environmentForSubject(template.subject))
     setSubject(template.subject)
     setMeasures([...template.measures])
     setDimensions([...template.dimensions])
@@ -237,17 +232,14 @@ export default function AssistantBiPage() {
   }
 
   function applyInterpretedPlan(interpreted: AssistantBiFreeTextInterpretation) {
-    const nextSubject = interpreted.plan.subject || subject
     const sanitized = sanitizeSubjectConfiguration({
-      subject: nextSubject,
+      subject,
       measures: interpreted.plan.measures.length ? interpreted.plan.measures : measures,
       dimensions: interpreted.plan.dimensions.length ? interpreted.plan.dimensions : dimensions,
     })
     const nextVisualization = interpreted.plan.visualization ||
       recommendedVisualization(sanitized.dimensions, sanitized.measures)
 
-    setEnvironment(interpreted.plan.environment || environmentForSubject(nextSubject))
-    setSubject(nextSubject)
     setMeasures(sanitized.measures)
     setDimensions(sanitized.dimensions)
     setVisualization(nextVisualization)
@@ -268,6 +260,7 @@ export default function AssistantBiPage() {
           body: JSON.stringify({
             freeText,
             context: {
+              lockSubject: true,
               environment: selectedEnvironment,
               subject: selectedSubject,
               measures,
@@ -282,6 +275,14 @@ export default function AssistantBiPage() {
         const payload = await response.json().catch(() => ({})) as Record<string, unknown>
         if (!response.ok || payload.error) throw new Error(String(payload.error || `Erreur HTTP ${response.status}`))
         interpreted = normalizeAssistantBiFreeTextInterpretation(payload.interpretation)
+        interpreted = {
+          ...interpreted,
+          plan: {
+            ...interpreted.plan,
+            subject,
+            environment: environmentForSubject(subject),
+          },
+        }
         applyInterpretedPlan(interpreted)
       }
 
@@ -370,13 +371,51 @@ export default function AssistantBiPage() {
     setInterpretation(null)
   }
 
+  const confirmationPanel = showConfirmation ? (
+    <section ref={interpretationRef} style={{ ...styles.templateSection, scrollMarginTop: 210 }}>
+      <div style={styles.sectionHeading}>
+        <div>
+          <h2 style={styles.sectionTitle}>Interprétation à valider</h2>
+          <p style={styles.sectionText}>Le sujet reste celui que tu as sélectionné. L’Assistant adapte seulement les mesures, les niveaux de détail, la période, les filtres et la restitution.</p>
+        </div>
+        <span style={styles.proBadge}>À CONFIRMER</span>
+      </div>
+      <div style={styles.confirmCard}>
+        <PlanLine label="Analyse comprise" value={interpretation?.summary || 'Configuration guidée manuelle'} />
+        <PlanLine label="Domaine" value={selectedEnvironment.label} />
+        <PlanLine label="Sujet conservé" value={selectedSubject.label} />
+        <PlanLine label="Source" value={`${calculationSource.title} — ${calculationSource.detail}`} />
+        <PlanLine label="Période" value={`${dateStart} au ${dateEnd}`} />
+        <PlanLine label="Mesures" value={measures.map((key) => labelFor(key, MEASURES)).join(', ')} />
+        <PlanLine label="Regroupement" value={dimensions.map((key, index) => `${index + 1}. ${labelFor(key, DIMENSIONS)}`).join(' → ')} />
+        <PlanLine label="Restitution" value={VISUALIZATIONS.find((item) => item.key === visualization)?.label || visualization} />
+        <PlanLine label="Documents" value={documentLabelForSubject(subject)} />
+        <PlanLine label="Périmètre" value={`${allowedAgencies.length || 'toutes'} agence(s), ${allowedDepartments.length || 'tous'} département(s) autorisé(s).`} />
+        <div style={styles.interpretationBox}>
+          <strong>Filtres compris</strong>
+          <b>{describeAssistantBiStructuredFilters(interpretation?.filters || emptyAssistantBiStructuredFilters())}</b>
+          {interpretation?.assumptions.length ? <ul style={styles.assumptionList}>{interpretation.assumptions.map((item) => <li key={item}>{item}</li>)}</ul> : null}
+        </div>
+        {interpretation?.needsConfirmation || interpretation?.clarificationQuestion ? <div style={styles.clarificationBox}><strong>Point à confirmer :</strong> {interpretation.clarificationQuestion || 'Vérifie que l’interprétation correspond à ton besoin.'}</div> : null}
+        <div style={styles.settingBlock}><strong>Exclure les articles hors statistiques ?</strong><ToggleChoice value={excludeHorsStatistique} onChange={setExcludeHorsStatistique} /></div>
+        {isClientCreation ? <div style={styles.settingBlock}><strong>Inclure aussi les prospects créés ?</strong><ToggleChoice value={includeProspects} onChange={setIncludeProspects} /></div> : null}
+        <label style={styles.selectLabel}>Ordre de tri<select value={sortMode} onChange={(event) => setSortMode(event.target.value as SortMode)} style={styles.select}>{SORT_OPTIONS.map((option) => <option key={option.key} value={option.key}>{option.label}</option>)}</select><span>{SORT_OPTIONS.find((option) => option.key === sortMode)?.description}</span></label>
+        {usesAbc ? <div style={styles.warningBox}><strong>Attention ABC :</strong> la classe utilisée est la classe actuelle issue de la projection stock. Elle n’est pas recalculée historiquement.</div> : null}
+        <div style={styles.confirmActions}>
+          <button type="button" style={styles.cancelButton} onClick={() => setShowConfirmation(false)}>Modifier la sélection</button>
+          <button type="button" style={styles.confirmButton} onClick={() => void runAnalysis()} disabled={loading}>{loading ? 'Calcul en cours…' : 'Je confirme et je lance le calcul'}</button>
+        </div>
+      </div>
+    </section>
+  ) : null
+
   return (
     <main style={styles.page}>
       <section style={styles.topBar}>
         <div>
           <div style={styles.eyebrow}>CEGECLIM · ASSISTANT DÉCISIONNEL</div>
           <h1 style={styles.title}>Analyse BI professionnelle</h1>
-          <p style={styles.subtitle}>Pose une question libre ou construis précisément ton analyse. L’Assistant traduit la demande en calcul contrôlé avant exécution.</p>
+          <p style={styles.subtitle}>Pose une question libre ou construis précisément ton analyse. Le sujet sélectionné reste la référence du calcul.</p>
         </div>
         <div style={styles.topActions}>
           <button type="button" style={styles.secondaryButton} onClick={() => window.location.assign('/atelier-analyse')}>Atelier classique</button>
@@ -390,24 +429,19 @@ export default function AssistantBiPage() {
         <div style={styles.sectionHeading}>
           <div>
             <h2 style={styles.sectionTitle}>Demande libre</h2>
-            <p style={styles.sectionText}>Décris directement le résultat attendu. L’Assistant choisit le sujet, les mesures, les axes, la période et le graphique adaptés.</p>
+            <p style={styles.sectionText}>Décris le résultat attendu. L’Assistant conserve le sujet choisi à gauche et adapte les mesures, axes, dates, filtres et graphique.</p>
           </div>
           <span style={styles.proBadge}>MODÈLE SÉMANTIQUE V2</span>
         </div>
         <textarea
           value={freeText}
           onChange={(event) => { setFreeText(event.target.value); invalidateInterpretation() }}
-          placeholder="Ex. Top 20 clients en BL sur les 12 derniers mois, hors Marmande, avec le CA et la marge sous forme de tableau."
+          placeholder="Ex. Liste les articles de la famille macro R/R avec les quantités facturées en 2025 et 2026."
           style={{ ...styles.textarea, minHeight: 110, fontSize: 15 }}
         />
         <div style={{ ...styles.chipRow, marginTop: 10 }}>
           {FREE_TEXT_EXAMPLES.map((example) => (
-            <button
-              type="button"
-              key={example}
-              style={styles.chip}
-              onClick={() => { setFreeText(example); invalidateInterpretation() }}
-            >
+            <button type="button" key={example} style={styles.chip} onClick={() => { setFreeText(example); invalidateInterpretation() }}>
               {example}
             </button>
           ))}
@@ -418,6 +452,8 @@ export default function AssistantBiPage() {
           </button>
         </div>
       </section>
+
+      {confirmationPanel}
 
       <section style={styles.templateSection}>
         <div style={styles.sectionHeading}>
@@ -431,28 +467,19 @@ export default function AssistantBiPage() {
 
       <section style={styles.workspace}>
         <aside style={styles.builder}>
-          <Step number="1" title="Environnement métier">
-            <div style={styles.choiceGrid}>
-              {ENVIRONMENTS.map((item) => (
-                <ChoiceButton
-                  key={item.key}
-                  active={environment === item.key}
-                  title={item.label}
-                  description={item.description}
-                  onClick={() => changeEnvironment(item.key)}
-                />
-              ))}
-            </div>
-          </Step>
+          <div style={styles.subjectImpact}>
+            <strong>Domaine métier : {selectedEnvironment.label}</strong>
+            <span>Le domaine organise le catalogue en interne. Tu sélectionnes seulement le sujet de données à analyser.</span>
+          </div>
 
-          <Step number="2" title="Sujet métier">
+          <Step number="1" title="Sujet métier">
             <div style={styles.choiceGrid}>
-              {availableSubjects.map((item) => <ChoiceButton key={item.key} active={subject === item.key} title={item.label} description={item.description} onClick={() => changeSubject(item.key)} />)}
+              {SUBJECTS.map((item) => <ChoiceButton key={item.key} active={subject === item.key} title={item.label} description={item.description} onClick={() => changeSubject(item.key)} />)}
             </div>
             <div style={styles.subjectImpact}><strong>Impact du sujet sélectionné</strong><span>{selectedSubject.sourceHint}</span></div>
           </Step>
 
-          <Step number="3" title="Mesures">
+          <Step number="2" title="Mesures">
             <div style={styles.orderHint}>La mesure n°1 pilote le graphique, le tableau croisé et le tri par valeur.</div>
             <div style={styles.chipRow}>{MEASURES.map((item) => {
               const index = measures.indexOf(item.key as SemanticMeasureKey)
@@ -460,7 +487,7 @@ export default function AssistantBiPage() {
             })}</div>
           </Step>
 
-          <Step number="4" title="Niveaux de détail">
+          <Step number="3" title="Niveaux de détail">
             <div style={styles.orderHint}>1 = axe/lignes ; 2 = couleur/colonnes ; les suivantes détaillent le tableau.</div>
             <div style={styles.selectedPath}>{dimensions.length ? dimensions.map((key, index) => <span key={key} style={styles.pathPill}>{index + 1}. {labelFor(key, DIMENSIONS)}</span>) : <span>Aucune dimension sélectionnée</span>}</div>
             <div style={styles.chipRow}>{DIMENSIONS.map((item) => {
@@ -469,7 +496,7 @@ export default function AssistantBiPage() {
             })}</div>
           </Step>
 
-          <Step number="5" title="Période et restitution">
+          <Step number="4" title="Période et restitution">
             <div style={styles.dateRow}>
               <label style={styles.fieldLabel}>Du<input type="date" value={dateStart} onChange={(event) => { setDateStart(event.target.value); invalidateInterpretation() }} style={styles.input} /></label>
               <label style={styles.fieldLabel}>Au<input type="date" value={dateEnd} onChange={(event) => { setDateEnd(event.target.value); invalidateInterpretation() }} style={styles.input} /></label>
@@ -478,38 +505,14 @@ export default function AssistantBiPage() {
             {freeText.trim() ? <details style={styles.previewBox}><summary>Voir la demande complète transmise à l’Assistant</summary><pre style={styles.previewText}>{generatedQuestion}</pre></details> : null}
           </Step>
 
-          {showConfirmation ? <Step number="6" title="Vérification et confirmation">
-            <div style={styles.confirmCard}>
-              <PlanLine label="Analyse comprise" value={interpretation?.summary || 'Configuration guidée manuelle'} />
-              <PlanLine label="Environnement" value={getEnvironment(environment).label} />
-              <PlanLine label="Sujet" value={selectedSubject.label} />
-              <PlanLine label="Source" value={`${calculationSource.title} — ${calculationSource.detail}`} />
-              <PlanLine label="Période" value={`${dateStart} au ${dateEnd}`} />
-              <PlanLine label="Mesures" value={measures.map((key) => labelFor(key, MEASURES)).join(', ')} />
-              <PlanLine label="Regroupement" value={dimensions.map((key, index) => `${index + 1}. ${labelFor(key, DIMENSIONS)}`).join(' → ')} />
-              <PlanLine label="Restitution" value={VISUALIZATIONS.find((item) => item.key === visualization)?.label || visualization} />
-              <PlanLine label="Documents" value={documentTypesForSubject(subject).join(', ') || 'Selon le sujet et les filtres'} />
-              <PlanLine label="Périmètre" value={`${allowedAgencies.length || 'toutes'} agence(s), ${allowedDepartments.length || 'tous'} département(s) autorisé(s).`} />
-              <div style={styles.interpretationBox}>
-                <strong>Filtres compris</strong>
-                <b>{describeAssistantBiStructuredFilters(interpretation?.filters || emptyAssistantBiStructuredFilters())}</b>
-                {interpretation?.assumptions.length ? <ul style={styles.assumptionList}>{interpretation.assumptions.map((item) => <li key={item}>{item}</li>)}</ul> : null}
-              </div>
-              {interpretation?.needsConfirmation || interpretation?.clarificationQuestion ? <div style={styles.clarificationBox}><strong>Point à confirmer :</strong> {interpretation.clarificationQuestion || 'Vérifie que l’interprétation correspond à ton besoin.'}</div> : null}
-              <div style={styles.settingBlock}><strong>Exclure les articles hors statistiques ?</strong><ToggleChoice value={excludeHorsStatistique} onChange={setExcludeHorsStatistique} /></div>
-              {isClientCreation ? <div style={styles.settingBlock}><strong>Inclure aussi les prospects créés ?</strong><ToggleChoice value={includeProspects} onChange={setIncludeProspects} /></div> : null}
-              <label style={styles.selectLabel}>Ordre de tri<select value={sortMode} onChange={(event) => setSortMode(event.target.value as SortMode)} style={styles.select}>{SORT_OPTIONS.map((option) => <option key={option.key} value={option.key}>{option.label}</option>)}</select><span>{SORT_OPTIONS.find((option) => option.key === sortMode)?.description}</span></label>
-              {usesAbc ? <div style={styles.warningBox}><strong>Attention ABC :</strong> la classe utilisée est la classe actuelle issue de la projection stock. Elle n’est pas recalculée historiquement.</div> : null}
-              <div style={styles.confirmActions}><button type="button" style={styles.cancelButton} onClick={() => setShowConfirmation(false)}>Modifier la sélection</button><button type="button" style={styles.confirmButton} onClick={() => void runAnalysis()} disabled={loading}>{loading ? 'Calcul en cours…' : 'Je confirme et je lance le calcul'}</button></div>
-            </div>
-          </Step> : null}
-
           {error ? <div style={styles.error}>{error}</div> : null}
-          {!showConfirmation ? <button type="button" style={{ ...styles.primaryButton, width: '100%', justifyContent: 'center' }} onClick={() => void prepareAnalysis()} disabled={loading || interpreting}>{interpreting ? 'Interprétation de la demande…' : 'Vérifier le calcul configuré'}</button> : null}
+          <button type="button" style={{ ...styles.primaryButton, width: '100%', justifyContent: 'center' }} onClick={() => void prepareAnalysis()} disabled={loading || interpreting}>
+            {interpreting ? 'Interprétation de la demande…' : 'Vérifier le calcul configuré'}
+          </button>
         </aside>
 
         <section style={styles.results}>
-          {result ? <ProfessionalResults result={result} visualization={visualization} dimensions={dimensions} measures={measures} title={result.visualization?.title || resultTitle} dateStart={dateStart} dateEnd={dateEnd} generatedQuestion={generatedQuestion} onFollowUp={(instruction) => void runAnalysis(instruction)} /> : <div style={styles.emptyState}><div style={styles.emptyIcon}>BI</div><h2 style={{ marginBottom: 4 }}>Ton rapport professionnel apparaîtra ici</h2><p style={{ maxWidth: 580 }}>Pose une question libre ou configure l’analyse, vérifie ce que l’Assistant a compris, puis confirme le calcul.</p><div style={styles.emptyFeatures}><span>✓ Langage naturel</span><span>✓ Plan sémantique contrôlé</span><span>✓ Graphique adapté</span><span>✓ Droits appliqués</span><span>✓ Traçabilité SQL</span></div></div>}
+          {result ? <ProfessionalResults result={result} visualization={visualization} dimensions={dimensions} measures={measures} title={result.visualization?.title || resultTitle} dateStart={dateStart} dateEnd={dateEnd} generatedQuestion={generatedQuestion} onFollowUp={(instruction) => void runAnalysis(instruction)} /> : <div style={styles.emptyState}><div style={styles.emptyIcon}>BI</div><h2 style={{ marginBottom: 4 }}>Ton rapport professionnel apparaîtra ici</h2><p style={{ maxWidth: 580 }}>Pose une question libre ou configure l’analyse, vérifie ce que l’Assistant a compris, puis confirme le calcul.</p><div style={styles.emptyFeatures}><span>✓ Langage naturel</span><span>✓ Sujet conservé</span><span>✓ Plan sémantique contrôlé</span><span>✓ Droits appliqués</span><span>✓ Traçabilité SQL</span></div></div>}
         </section>
       </section>
     </main>
