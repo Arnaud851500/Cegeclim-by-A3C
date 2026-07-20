@@ -1,3 +1,11 @@
+import type {
+  SemanticDimensionKey,
+  SemanticEnvironmentKey,
+  SemanticMeasureKey,
+  SemanticSubjectKey,
+  SemanticVisualizationKey,
+} from '@/lib/ai/cegeclimSemanticCatalog'
+
 export type AssistantBiStructuredFilters = {
   includeYears: number[]
   excludeYears: number[]
@@ -19,9 +27,21 @@ export type AssistantBiStructuredFilters = {
   sortMode: 'dimensions_asc' | 'measure_desc' | 'measure_asc' | null
 }
 
+export type AssistantBiAnalysisPlan = {
+  environment: SemanticEnvironmentKey | null
+  subject: SemanticSubjectKey | null
+  measures: SemanticMeasureKey[]
+  dimensions: SemanticDimensionKey[]
+  visualization: SemanticVisualizationKey | null
+  dateStart: string
+  dateEnd: string
+  title: string
+}
+
 export type AssistantBiFreeTextInterpretation = {
   summary: string
   filters: AssistantBiStructuredFilters
+  plan: AssistantBiAnalysisPlan
   assumptions: string[]
   needsConfirmation: boolean
   clarificationQuestion: string
@@ -48,9 +68,79 @@ const EMPTY_FILTERS: AssistantBiStructuredFilters = {
   sortMode: null,
 }
 
+const EMPTY_PLAN: AssistantBiAnalysisPlan = {
+  environment: null,
+  subject: null,
+  measures: [],
+  dimensions: [],
+  visualization: null,
+  dateStart: '',
+  dateEnd: '',
+  title: '',
+}
+
+const ENVIRONMENTS = new Set<SemanticEnvironmentKey>([
+  'pilotage_commercial',
+  'clients_territoires',
+  'produits_articles',
+  'stocks_approvisionnements',
+  'controles_actions',
+])
+
+const SUBJECTS = new Set<SemanticSubjectKey>([
+  'ventes_bl',
+  'factures',
+  'devis',
+  'portefeuille',
+  'clients',
+  'articles',
+])
+
+const MEASURES = new Set<SemanticMeasureKey>([
+  'ca_ht',
+  'quantite',
+  'marge_valeur',
+  'marge_pct',
+  'nb_lignes',
+  'panier_moyen',
+  'nb_clients_crees',
+])
+
+const DIMENSIONS = new Set<SemanticDimensionKey>([
+  'mois',
+  'annee',
+  'annee_creation_client',
+  'agence_collaborateur',
+  'depot',
+  'collaborateur_facture',
+  'collaborateur_tiers',
+  'departement_tiers',
+  'famille_macro',
+  'famille',
+  'classe_abc_ca',
+  'classe_abc_lignes',
+  'numero_tiers',
+  'intitule_tiers',
+  'reference_article',
+  'designation',
+  'type_document',
+])
+
+const VISUALIZATIONS = new Set<SemanticVisualizationKey>([
+  'tableau',
+  'courbe',
+  'histogramme',
+  'histogramme_empile',
+  'camembert',
+])
+
 function strings(value: unknown) {
   if (!Array.isArray(value)) return []
   return Array.from(new Set(value.map(String).map((item) => item.trim()).filter(Boolean)))
+}
+
+function allowedStrings<T extends string>(value: unknown, allowed: Set<T>): T[] {
+  return strings(value).filter((item): item is T => allowed.has(item as T))
 }
 
 function years(value: unknown) {
@@ -69,8 +159,44 @@ function sortMode(value: unknown): AssistantBiStructuredFilters['sortMode'] {
     : null
 }
 
+function isoDate(value: unknown) {
+  const text = typeof value === 'string' ? value.trim() : ''
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : ''
+}
+
+function singleAllowed<T extends string>(value: unknown, allowed: Set<T>): T | null {
+  const text = typeof value === 'string' ? value.trim() : ''
+  return allowed.has(text as T) ? text as T : null
+}
+
 export function emptyAssistantBiStructuredFilters(): AssistantBiStructuredFilters {
-  return { ...EMPTY_FILTERS }
+  return {
+    ...EMPTY_FILTERS,
+    includeYears: [],
+    excludeYears: [],
+    includeAgencies: [],
+    excludeAgencies: [],
+    includeDepartments: [],
+    excludeDepartments: [],
+    includeFamilyMacros: [],
+    excludeFamilyMacros: [],
+    includeFamilies: [],
+    excludeFamilies: [],
+    includeReferences: [],
+    excludeReferences: [],
+    includeClients: [],
+    excludeClients: [],
+    includeDocumentTypes: [],
+    excludeDocumentTypes: [],
+  }
+}
+
+export function emptyAssistantBiAnalysisPlan(): AssistantBiAnalysisPlan {
+  return {
+    ...EMPTY_PLAN,
+    measures: [],
+    dimensions: [],
+  }
 }
 
 export function normalizeAssistantBiStructuredFilters(value: unknown): AssistantBiStructuredFilters {
@@ -97,11 +223,26 @@ export function normalizeAssistantBiStructuredFilters(value: unknown): Assistant
   }
 }
 
+export function normalizeAssistantBiAnalysisPlan(value: unknown): AssistantBiAnalysisPlan {
+  const source = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  return {
+    environment: singleAllowed(source.environment, ENVIRONMENTS),
+    subject: singleAllowed(source.subject, SUBJECTS),
+    measures: allowedStrings(source.measures, MEASURES),
+    dimensions: allowedStrings(source.dimensions, DIMENSIONS),
+    visualization: singleAllowed(source.visualization, VISUALIZATIONS),
+    dateStart: isoDate(source.dateStart),
+    dateEnd: isoDate(source.dateEnd),
+    title: typeof source.title === 'string' ? source.title.trim().slice(0, 120) : '',
+  }
+}
+
 export function normalizeAssistantBiFreeTextInterpretation(value: unknown): AssistantBiFreeTextInterpretation {
   const source = value && typeof value === 'object' ? value as Record<string, unknown> : {}
   return {
     summary: typeof source.summary === 'string' ? source.summary.trim() : '',
     filters: normalizeAssistantBiStructuredFilters(source.filters),
+    plan: normalizeAssistantBiAnalysisPlan(source.plan),
     assumptions: strings(source.assumptions),
     needsConfirmation: source.needsConfirmation === true,
     clarificationQuestion: typeof source.clarificationQuestion === 'string'
