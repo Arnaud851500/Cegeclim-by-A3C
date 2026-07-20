@@ -44,6 +44,7 @@ type SourcePlan = {
 }
 
 type EffectiveConfig = {
+  subject: SemanticSubjectKey
   measures: SemanticMeasureKey[]
   dimensions: SemanticDimensionKey[]
   visualization: SemanticVisualizationKey
@@ -246,23 +247,26 @@ export default function AssistantBiPage() {
   }
 
   function effectiveConfig(interpreted: AssistantBiFreeTextInterpretation): EffectiveConfig {
+    const resolvedSubject = interpreted.plan.subject || subject
     const sanitized = sanitizeSubjectConfiguration({
-      subject,
+      subject: resolvedSubject,
       measures: interpreted.plan.measures.length ? interpreted.plan.measures : measures,
       dimensions: interpreted.plan.dimensions.length ? interpreted.plan.dimensions : dimensions,
     })
     return {
+      subject: resolvedSubject,
       measures: sanitized.measures,
       dimensions: sanitized.dimensions,
       visualization: interpreted.plan.visualization || recommendedVisualization(sanitized.dimensions, sanitized.measures),
       dateStart: interpreted.plan.dateStart || dateStart,
       dateEnd: interpreted.plan.dateEnd || dateEnd,
       sortMode: interpreted.filters.sortMode || sortMode,
-      articleFlow: subject === 'articles' ? inferArticleFlow(freeText, articleFlow) : articleFlow,
+      articleFlow: resolvedSubject === 'articles' ? inferArticleFlow(freeText, articleFlow) : articleFlow,
     }
   }
 
   function applyConfig(config: EffectiveConfig) {
+    setSubject(config.subject)
     setMeasures(config.measures)
     setDimensions(config.dimensions)
     setVisualization(config.visualization)
@@ -274,10 +278,11 @@ export default function AssistantBiPage() {
 
   function requestPayload(config: EffectiveConfig, interpreted: AssistantBiFreeTextInterpretation, previewOnly = false, extraInstruction = '') {
     const temporal = monthHints(config.dateStart, config.dateEnd)
+    const effectiveSubject = getSubject(config.subject)
+    const effectiveEnvironment = getEnvironment(environmentForSubject(config.subject))
     const question = [
-      buildGuidedQuestion({ subject, measures: config.measures, dimensions: config.dimensions, visualization: config.visualization, dateStart: config.dateStart, dateEnd: config.dateEnd, freeText, promptSuffix: templateSuffix }),
+      buildGuidedQuestion({ subject: config.subject, measures: config.measures, dimensions: config.dimensions, visualization: config.visualization, dateStart: config.dateStart, dateEnd: config.dateEnd, freeText, promptSuffix: templateSuffix }),
       professionalDataInstruction(config.visualization, config.dimensions, config.measures),
-      `Demande libre interprétée : ${interpreted.summary}`,
       extraInstruction,
     ].filter(Boolean).join('\n')
 
@@ -286,14 +291,14 @@ export default function AssistantBiPage() {
       question,
       currentViewName: 'Assistant BI CEGECLIM professionnel',
       globalFilters: {
-        sources: sourceForSubject(subject),
+        sources: sourceForSubject(config.subject),
         years: temporal.years,
         months: temporal.months,
         agences: allowedAgencies,
         collaborateursFacture: allowedCollaborators,
         collaborateursTiers: allowedCollaborators,
         departementsTiers: allowedDepartments,
-        typesDocument: documentTypesForSubject(subject, config.articleFlow),
+        typesDocument: documentTypesForSubject(config.subject, config.articleFlow),
         horsStatistique: excludeHorsStatistique ? 'non' : 'tous',
         inclureProspects: includeProspects ? 'oui' : 'non',
         sortMode: config.sortMode,
@@ -302,9 +307,11 @@ export default function AssistantBiPage() {
         accessProfileName: rights.profile_name,
       },
       dataContext: {
+        originalFreeText: freeText,
+        interpretationSummary: interpreted.summary,
         activeTemporalContext: { dateStart: config.dateStart, dateEnd: config.dateEnd },
-        semanticEnvironment: selectedEnvironment,
-        semanticSubject: selectedSubject,
+        semanticEnvironment: effectiveEnvironment,
+        semanticSubject: effectiveSubject,
         analysisBasis: { articleFlow: config.articleFlow },
         visualizationRequest: {
           kind: config.visualization,
@@ -339,7 +346,7 @@ export default function AssistantBiPage() {
           body: JSON.stringify({
             freeText,
             context: {
-              lockSubject: true,
+              lockSubject: false,
               environment: selectedEnvironment,
               subject: selectedSubject,
               measures,
@@ -354,7 +361,6 @@ export default function AssistantBiPage() {
         const payload = await response.json().catch(() => ({})) as Record<string, unknown>
         if (!response.ok || payload.error) throw new Error(String(payload.error || `Erreur HTTP ${response.status}`))
         interpreted = normalizeAssistantBiFreeTextInterpretation(payload.interpretation)
-        interpreted = { ...interpreted, plan: { ...interpreted.plan, subject, environment: environmentForSubject(subject) } }
       }
 
       const config = effectiveConfig(interpreted)
@@ -375,7 +381,7 @@ export default function AssistantBiPage() {
 
   async function runAnalysis(extraInstruction = '') {
     const confirmed = interpretation || emptyInterpretation()
-    const config: EffectiveConfig = { measures, dimensions, visualization, dateStart, dateEnd, sortMode, articleFlow }
+    const config: EffectiveConfig = { subject, measures, dimensions, visualization, dateStart, dateEnd, sortMode, articleFlow }
     const validationError = validateConfiguration(config)
     if (validationError) {
       setError(validationError)
@@ -418,7 +424,7 @@ export default function AssistantBiPage() {
       <div style={styles.confirmCard}>
         <PlanLine label="Analyse comprise" value={interpretation?.summary || 'Configuration guidée manuelle'} />
         <PlanLine label="Domaine" value={selectedEnvironment.label} />
-        <PlanLine label="Sujet conservé" value={selectedSubject.label} />
+        <PlanLine label="Sujet retenu" value={selectedSubject.label} />
         <PlanLine label="Source réelle" value={sourcePlan ? `${sourcePlan.title} — ${sourcePlan.detail}` : 'Planification indisponible'} />
         {sourcePlan?.flow && sourcePlan.flow !== 'ALL' ? <PlanLine label="Flux retenu" value={sourcePlan.flow} /> : null}
         <PlanLine label="Période" value={`${dateStart} au ${dateEnd}`} />
@@ -451,7 +457,7 @@ export default function AssistantBiPage() {
         <div>
           <div style={styles.eyebrow}>CEGECLIM · ASSISTANT DÉCISIONNEL</div>
           <h1 style={styles.title}>Analyse BI professionnelle</h1>
-          <p style={styles.subtitle}>Le sujet sélectionné reste la référence ; la source physique est ensuite planifiée et affichée avant le calcul.</p>
+          <p style={styles.subtitle}>La demande libre détermine le sujet métier lorsque le vocabulaire est explicite ; la source physique est affichée avant le calcul.</p>
         </div>
         <div style={styles.topActions}>
           <button type="button" style={styles.secondaryButton} onClick={() => window.location.assign('/atelier-analyse')}>Atelier classique</button>
@@ -461,7 +467,7 @@ export default function AssistantBiPage() {
 
       <section style={styles.templateSection}>
         <div style={styles.sectionHeading}>
-          <div><h2 style={styles.sectionTitle}>Demande libre</h2><p style={styles.sectionText}>Décris le résultat attendu. Le sujet ne change pas automatiquement.</p></div>
+          <div><h2 style={styles.sectionTitle}>Demande libre</h2><p style={styles.sectionText}>Décris le résultat attendu. Les règles CEGECLIM choisissent le sujet et la source adaptés à ton vocabulaire.</p></div>
           <span style={styles.proBadge}>MODÈLE SÉMANTIQUE V2</span>
         </div>
         <textarea value={freeText} onChange={(event) => { setFreeText(event.target.value); invalidateInterpretation() }} placeholder="Ex. Quel est le CA par famille macro en juin 2026 et juin 2025, avec l’évolution en % ?" style={{ ...styles.textarea, minHeight: 110, fontSize: 15 }} />
@@ -481,7 +487,7 @@ export default function AssistantBiPage() {
 
       <section style={styles.workspace}>
         <aside style={styles.builder}>
-          <div style={styles.subjectImpact}><strong>Domaine métier : {selectedEnvironment.label}</strong><span>Le domaine organise le catalogue ; seul le sujet pilote l’analyse.</span></div>
+          <div style={styles.subjectImpact}><strong>Domaine métier : {selectedEnvironment.label}</strong><span>Le domaine organise le catalogue ; le sujet retenu pilote l’analyse et peut être ajusté par la demande libre.</span></div>
 
           <Step number="1" title="Sujet métier">
             <div style={styles.choiceGrid}>{SUBJECTS.map((item) => <ChoiceButton key={item.key} active={subject === item.key} title={item.label} description={item.description} onClick={() => changeSubject(item.key)} />)}</div>
@@ -523,7 +529,7 @@ export default function AssistantBiPage() {
         </aside>
 
         <section style={styles.results}>
-          {result ? <ProfessionalResults result={result} visualization={visualization} dimensions={dimensions} measures={measures} title={result.visualization?.title || resultTitle} dateStart={dateStart} dateEnd={dateEnd} generatedQuestion={generatedQuestion} onFollowUp={(instruction) => void runAnalysis(instruction)} /> : <div style={styles.emptyState}><div style={styles.emptyIcon}>BI</div><h2 style={{ marginBottom: 4 }}>Ton rapport professionnel apparaîtra ici</h2><p style={{ maxWidth: 580 }}>Pose une question ou configure l’analyse, puis vérifie la source réelle avant de lancer le calcul.</p><div style={styles.emptyFeatures}><span>✓ Sujet conservé</span><span>✓ Source planifiée</span><span>✓ Flux Articles normalisé</span><span>✓ Traçabilité SQL</span></div></div>}
+          {result ? <ProfessionalResults result={result} visualization={visualization} dimensions={dimensions} measures={measures} title={result.visualization?.title || resultTitle} dateStart={dateStart} dateEnd={dateEnd} generatedQuestion={generatedQuestion} onFollowUp={(instruction) => void runAnalysis(instruction)} /> : <div style={styles.emptyState}><div style={styles.emptyIcon}>BI</div><h2 style={{ marginBottom: 4 }}>Ton rapport professionnel apparaîtra ici</h2><p style={{ maxWidth: 580 }}>Pose une question ou configure l’analyse, puis vérifie la source réelle avant de lancer le calcul.</p><div style={styles.emptyFeatures}><span>✓ Sujet interprété</span><span>✓ Source planifiée</span><span>✓ Flux Articles normalisé</span><span>✓ Traçabilité SQL</span></div></div>}
         </section>
       </section>
     </main>
