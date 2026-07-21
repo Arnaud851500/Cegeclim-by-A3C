@@ -250,13 +250,13 @@ export const SUBJECTS: SemanticSubject[] = [
     environment: 'produits_articles',
     label: 'Articles et familles',
     description: 'Références, désignations, familles, classes ABC et familles macro.',
-    sourceHint: 'Utiliser exclusivement indicateur_flux_articles_mensuel, avec choix explicite du flux FACTURE, BL, DEVIS, CDC ou de tous les flux. Ne jamais basculer silencieusement sur activite_lignes.',
+    sourceHint: 'Utiliser exclusivement indicateur_flux_articles_mensuel, avec choix explicite du flux FACTURE, BL, DEVIS, CDC ou de tous les flux. Le département client est porté nativement par cet agrégat.',
     aliases: ['articles', 'références', 'produits', 'familles', 'famille macro', 'abc', 'sku'],
     defaultMeasures: ['quantite'],
     defaultDimensions: ['famille_macro', 'famille'],
-    suggestedDimensions: ['mois', 'annee', 'agence_collaborateur', 'depot', 'collaborateur_tiers', 'famille_macro', 'famille', 'reference_article', 'designation', 'type_document', 'classe_abc_ca', 'classe_abc_lignes'],
+    suggestedDimensions: ['mois', 'annee', 'agence_collaborateur', 'depot', 'collaborateur_tiers', 'departement_tiers', 'famille_macro', 'famille', 'reference_article', 'designation', 'type_document', 'classe_abc_ca', 'classe_abc_lignes'],
     supportedMeasures: COMMON_MEASURES,
-    supportedDimensions: ['mois', 'annee', 'agence_collaborateur', 'depot', 'collaborateur_tiers', 'famille_macro', 'famille', 'reference_article', 'designation', 'type_document', 'classe_abc_ca', 'classe_abc_lignes'],
+    supportedDimensions: ['mois', 'annee', 'agence_collaborateur', 'depot', 'collaborateur_tiers', 'departement_tiers', 'famille_macro', 'famille', 'reference_article', 'designation', 'type_document', 'classe_abc_ca', 'classe_abc_lignes'],
   },
 ]
 
