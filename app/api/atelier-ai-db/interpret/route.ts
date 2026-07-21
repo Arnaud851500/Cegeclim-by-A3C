@@ -1,19 +1,39 @@
 import { randomUUID } from 'node:crypto'
 import { NextRequest, NextResponse } from 'next/server'
 import {
+  emptyAssistantBiAnalysisPlan,
   emptyAssistantBiStructuredFilters,
   mergeExplicitYearRules,
   normalizeAssistantBiFreeTextInterpretation,
   type AssistantBiFreeTextInterpretation,
 } from '@/lib/ai/assistantBiStructuredFilters'
+import {
+  buildSemanticPromptReference,
+  environmentForSubject,
+  getSubject,
+  recommendedVisualization,
+  sanitizeSubjectConfiguration,
+  type SemanticDimensionKey,
+  type SemanticMeasureKey,
+  type SemanticSubjectKey,
+  type SemanticVisualizationKey,
+} from '@/lib/ai/cegeclimSemanticCatalog'
+import {
+  buildSemanticRoutingPromptReference,
+  describeSemanticRouting,
+  resolveSemanticRouting,
+} from '@/lib/ai/cegeclimSemanticRouting'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-// L'interprétation utilise volontairement un modèle stable et peu coûteux.
-// Elle ne dépend plus de OPENAI_MODEL, qui peut être configuré avec un modèle
-// de raisonnement dont certains paramètres Chat Completions sont incompatibles.
-const MODEL = process.env.OPENAI_INTERPRET_MODEL || 'gpt-4.1-mini'
+const MODEL = process.env.OPENAI_INTERPRET_MODEL || process.env.OPENAI_BI_MODEL || 'gpt-4.1-mini'
+
+const FILTER_VALUE_STOPWORDS = new Set([
+  'A', 'AU', 'AUX', 'AVEC', 'DANS', 'DE', 'DEPUIS', 'DES', 'DU', 'EN', 'ET',
+  'LA', 'LE', 'LES', 'MACRO', 'MOIS', 'PAR', 'POUR', 'SUR', 'TOUT', 'TOUTE',
+  'TOUTES', 'TOUS', 'UNIQUEMENT',
+])
 
 type JsonObject = Record<string, unknown>
 
@@ -73,38 +93,146 @@ function publicErrorMessage(error: unknown) {
   return error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500)
 }
 
+function unique<T extends string>(values: T[]) {
+  return Array.from(new Set(values))
+}
+
+function normalizedFilterValue(value: string) {
+  return String(value || '').trim().toUpperCase()
+}
+
+function validFilterValue(value: string) {
+  return Boolean(value) && !FILTER_VALUE_STOPWORDS.has(value)
+}
+
+function inferSubject(text: string): SemanticSubjectKey | null {
+  const routed = resolveSemanticRouting(text)
+  if (routed) return routed.subject
+
+  const rules: Array<[RegExp, SemanticSubjectKey]> = [
+    [/\b(?:nouveaux?\s+clients?|clients?\s+cr[eé][eé]s?|prospects?|tiers)\b/i, 'clients'],
+    [/\b(?:factures?|facturation|ca\s+factur[eé])\b/i, 'factures'],
+    [/\b(?:devis|offres?|propositions?\s+commerciales?)\b/i, 'devis'],
+    [/\b(?:portefeuille|encours|commandes?|cdc|pr[eé]parations?|\bpl\b|\bbr\b)\b/i, 'portefeuille'],
+    [/\b(?:articles?|r[eé]f[eé]rences?|produits?|familles?|classe\s+abc|\babc\b)\b/i, 'articles'],
+    [/\b(?:ventes?|livraisons?|bons?\s+de\s+livraison|\bbl\b|sorties?)\b/i, 'ventes_bl'],
+  ]
+  return rules.find(([pattern]) => pattern.test(text))?.[1] || null
+}
+
+function inferMeasures(text: string, subject: SemanticSubjectKey): SemanticMeasureKey[] {
+  const measures: SemanticMeasureKey[] = []
+  if (/\b(?:nouveaux?\s+clients?|clients?\s+cr[eé][eé]s?|cr[eé]ations?\s+clients?)\b/i.test(text)) measures.push('nb_clients_crees')
+  if (/\b(?:ca|chiffre\s+d['’]affaires|montant|valeur|contribution)\b/i.test(text)) measures.push('ca_ht')
+  if (/\b(?:quantit[eé]s?|volumes?|unit[eé]s?|sorties?)\b/i.test(text)) measures.push('quantite')
+  if (/\b(?:marge\s+en\s+euros?|marge\s+valeur)\b/i.test(text)) measures.push('marge_valeur')
+  if (/\b(?:taux\s+de\s+marge|marge\s*%|pourcentage\s+de\s+marge)\b/i.test(text)) measures.push('marge_pct')
+  if (/\b(?:panier|ticket|montant)\s+moyen\b/i.test(text)) measures.push('panier_moyen')
+  if (/\b(?:nombre|nb)\s+de\s+lignes?\b/i.test(text)) measures.push('nb_lignes')
+  if (measures.length) return unique(measures)
+  return [...getSubject(subject).defaultMeasures]
+}
+
+function inferDimensions(text: string, subject: SemanticSubjectKey): SemanticDimensionKey[] {
+  const dimensions: SemanticDimensionKey[] = []
+  const rules: Array<[RegExp, SemanticDimensionKey]> = [
+    [/\b(?:mois|mensuel|mensuelle|mois\s+par\s+mois|[eé]volution)\b/i, 'mois'],
+    [/\b(?:ann[eé]e|annuel|annuelle|n-1)\b/i, 'annee'],
+    [/\b(?:agence|agences)\b/i, 'agence_collaborateur'],
+    [/\b(?:d[eé]p[oô]t|d[eé]p[oô]ts)\b/i, 'depot'],
+    [/\b(?:d[eé]partement|d[eé]partements|territoire|zone\s+g[eé]ographique)\b/i, 'departement_tiers'],
+    [/\b(?:famille\s+macro|macro\s+famille)\b/i, 'famille_macro'],
+    [/\bfamilles?\b(?!\s+macro)/i, 'famille'],
+    [/\b(?:r[eé]f[eé]rence|r[eé]f[eé]rences|article|articles|sku)\b/i, 'reference_article'],
+    [/\b(?:d[eé]signation|libell[eé]\s+article)\b/i, 'designation'],
+    [/\b(?:client|clients|tiers)\b/i, 'intitule_tiers'],
+    [/\b(?:type\s+de\s+document|documents?|flux)\b/i, 'type_document'],
+    [/\b(?:commercial|collaborateur|vendeur|repr[eé]sentant)\b/i, 'collaborateur_tiers'],
+    [/\b(?:classe\s+abc\s+ca|abc\s+ca)\b/i, 'classe_abc_ca'],
+    [/\b(?:classe\s+abc\s+lignes?|abc\s+lignes?)\b/i, 'classe_abc_lignes'],
+    [/\b(?:ann[eé]e\s+de\s+cr[eé]ation|anciennet[eé]\s+client)\b/i, 'annee_creation_client'],
+  ]
+  for (const [pattern, dimension] of rules) {
+    if (pattern.test(text)) dimensions.push(dimension)
+  }
+
+  if (/\btop\s+\d+\s+clients?\b/i.test(text) && !dimensions.includes('intitule_tiers')) dimensions.unshift('intitule_tiers')
+  if (/\btop\s+\d+\s+(?:articles?|r[eé]f[eé]rences?)\b/i.test(text) && !dimensions.includes('reference_article')) dimensions.unshift('reference_article')
+
+  return dimensions.length ? unique(dimensions) : [...getSubject(subject).defaultDimensions]
+}
+
+function inferVisualization(text: string, dimensions: SemanticDimensionKey[], measures: SemanticMeasureKey[]): SemanticVisualizationKey {
+  if (/\b(?:tableau|liste|d[eé]tail)\b/i.test(text)) return 'tableau'
+  if (/\b(?:courbe|ligne|[eé]volution|tendance)\b/i.test(text)) return 'courbe'
+  if (/\b(?:camembert|secteurs?|r[eé]partition\s+circulaire)\b/i.test(text)) return 'camembert'
+  if (/\b(?:empil[eé]|stack)\b/i.test(text)) return 'histogramme_empile'
+  if (/\b(?:histogramme|barres?|graphique)\b/i.test(text)) return dimensions.length > 1 ? 'histogramme_empile' : 'histogramme'
+  return recommendedVisualization(dimensions, measures)
+}
+
 function mergeDeterministicBusinessRules(
   interpretation: AssistantBiFreeTextInterpretation,
   freeText: string,
+  context: unknown,
 ): AssistantBiFreeTextInterpretation {
   const filters = {
     ...interpretation.filters,
-    includeFamilyMacros: [...interpretation.filters.includeFamilyMacros],
+    includeFamilyMacros: unique(
+      interpretation.filters.includeFamilyMacros
+        .map(normalizedFilterValue)
+        .filter(validFilterValue),
+    ),
+    includeFamilies: unique(
+      interpretation.filters.includeFamilies
+        .map(normalizedFilterValue)
+        .filter(validFilterValue),
+    ),
     includeDocumentTypes: [...interpretation.filters.includeDocumentTypes],
   }
   const normalized = freeText.replace(/[’']/g, "'")
+  const semanticRoute = resolveSemanticRouting(normalized)
+  const hasMacroContext = /\b(?:familles?\s+macro|macro\s+familles?)\b/i.test(normalized)
 
   const macroMatches = [
-    ...normalized.matchAll(/famille\s+macro\s+(?:est\s+|=\s*|de\s+)?([A-Z0-9][A-Z0-9_\/-]*)/gi),
+    ...normalized.matchAll(/\bfamilles?\s+macro\s*(?:(?:=|:)\s*|(?:est|de)\s+)?([A-Z0-9][A-Z0-9_\/-]*)/gi),
+    ...normalized.matchAll(/\bmacro\s+familles?\s*(?:(?:=|:)\s*|(?:est|de)\s+)?([A-Z0-9][A-Z0-9_\/-]*)/gi),
   ]
   for (const match of macroMatches) {
-    const value = String(match[1] || '').trim().toUpperCase()
-    if (value && !filters.includeFamilyMacros.includes(value)) filters.includeFamilyMacros.push(value)
+    const value = normalizedFilterValue(String(match[1] || ''))
+    if (validFilterValue(value) && !filters.includeFamilyMacros.includes(value)) filters.includeFamilyMacros.push(value)
   }
 
-  if (/\b(?:uniquement|seulement|sélectionner|selectionner)[^\n]{0,100}\bR\s*\/\s*R\b/i.test(normalized)) {
-    if (!filters.includeFamilyMacros.includes('R/R')) filters.includeFamilyMacros.push('R/R')
+  const contextualFamilyMatch = normalized.match(/\b(?:uniquement|seulement|exclusivement|pour)\b[^\n]{0,100}\b(?:la\s+)?famille\s+([A-Z0-9][A-Z0-9_\/-]*)/i)
+  if (hasMacroContext && contextualFamilyMatch) {
+    const value = normalizedFilterValue(String(contextualFamilyMatch[1] || ''))
+    if (validFilterValue(value) && !filters.includeFamilyMacros.includes(value)) filters.includeFamilyMacros.push(value)
+  }
+
+  if (hasMacroContext && /\bR\s*\/\s*R\b/i.test(normalized) && !filters.includeFamilyMacros.includes('R/R')) {
+    filters.includeFamilyMacros.push('R/R')
+  }
+
+  if (hasMacroContext && filters.includeFamilyMacros.length) {
+    const macroValues = new Set(filters.includeFamilyMacros)
+    filters.includeFamilies = filters.includeFamilies.filter((value) => !macroValues.has(value))
   }
 
   const documentRules: Array<[RegExp, string]> = [
     [/\b(?:uniquement|seulement)[^\n]{0,60}\bBL\b/i, 'BL'],
     [/\b(?:uniquement|seulement)[^\n]{0,60}\bDEVIS\b/i, 'DEVIS'],
     [/\b(?:uniquement|seulement)[^\n]{0,60}\bFACTURES?\b/i, 'FACTURE'],
+    [/\b(?:uniquement|seulement)[^\n]{0,60}\bCDC\b/i, 'CDC'],
+    [/\b(?:uniquement|seulement)[^\n]{0,60}\bPL\b/i, 'PL'],
+    [/\b(?:uniquement|seulement)[^\n]{0,60}\bBR\b/i, 'BR'],
   ]
   for (const [pattern, value] of documentRules) {
     if (pattern.test(normalized) && !filters.includeDocumentTypes.includes(value)) {
       filters.includeDocumentTypes.push(value)
     }
+  }
+  if (semanticRoute?.subject === 'portefeuille' && semanticRoute.documentType && !filters.includeDocumentTypes.includes(semanticRoute.documentType)) {
+    filters.includeDocumentTypes.push(semanticRoute.documentType)
   }
 
   const topMatch = normalized.match(/\btop\s+(\d{1,3})\b/i)
@@ -116,11 +244,64 @@ function mergeDeterministicBusinessRules(
     }
   }
 
-  return { ...interpretation, filters }
+  const contextRecord = context && typeof context === 'object' ? context as Record<string, unknown> : {}
+  const contextSubject = contextRecord.subject && typeof contextRecord.subject === 'object'
+    ? String((contextRecord.subject as Record<string, unknown>).key || '')
+    : String(contextRecord.subject || '')
+  const lockSubject = contextRecord.lockSubject === true
+  const validContextSubject = ['ventes_bl', 'factures', 'devis', 'portefeuille', 'clients', 'articles'].includes(contextSubject)
+    ? contextSubject as SemanticSubjectKey
+    : null
+
+  const inferredSubject = semanticRoute?.subject || (
+    lockSubject && validContextSubject
+      ? validContextSubject
+      : interpretation.plan.subject || inferSubject(normalized) || validContextSubject || 'ventes_bl'
+  )
+
+  const rawMeasures = interpretation.plan.measures.length
+    ? interpretation.plan.measures
+    : inferMeasures(normalized, inferredSubject)
+  const rawDimensions = interpretation.plan.dimensions.length
+    ? interpretation.plan.dimensions
+    : inferDimensions(normalized, inferredSubject)
+  const sanitized = sanitizeSubjectConfiguration({
+    subject: inferredSubject,
+    measures: rawMeasures,
+    dimensions: rawDimensions,
+  })
+  const visualization = interpretation.plan.visualization ||
+    inferVisualization(normalized, sanitized.dimensions, sanitized.measures)
+
+  const assumptions = [...interpretation.assumptions]
+  if (semanticRoute) {
+    const routingDescription = `Routage sémantique CEGECLIM : ${describeSemanticRouting(semanticRoute)}`
+    if (!assumptions.includes(routingDescription)) assumptions.unshift(routingDescription)
+  }
+
+  const sinceYear = normalized.match(/\bdepuis\s+(?:le\s+)?(?:d[eé]but\s+)?(20\d{2}|19\d{2})\b/i)
+  const deterministicDateStart = sinceYear ? `${sinceYear[1]}-01-01` : ''
+
+  return {
+    ...interpretation,
+    filters,
+    assumptions,
+    plan: {
+      ...interpretation.plan,
+      subject: inferredSubject,
+      environment: environmentForSubject(inferredSubject),
+      measures: sanitized.measures,
+      dimensions: sanitized.dimensions,
+      visualization,
+      dateStart: deterministicDateStart || interpretation.plan.dateStart,
+      title: interpretation.plan.title || interpretation.summary || getSubject(inferredSubject).label,
+    },
+  }
 }
 
 async function interpretWithAi(freeText: string, context: unknown) {
   const clientRequestId = randomUUID()
+  const today = new Date().toISOString().slice(0, 10)
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -134,20 +315,50 @@ async function interpretWithAi(freeText: string, context: unknown) {
       messages: [
         {
           role: 'system',
-          content: `Tu interprètes une demande libre d'analyse BI CEGECLIM.
-Réponds exclusivement avec un objet JSON valide, sans texte avant ou après le JSON.
-Transforme uniquement les contraintes réellement demandées en filtres structurés.
-N'invente aucune valeur. Distingue clairement inclure et exclure.
-Exemples :
-- "ne prends pas les clients créés en 2015" => excludeYears:[2015]
-- "uniquement la famille macro R/R" => includeFamilyMacros:["R/R"]
-- "hors Marmande" => excludeAgencies:["MARMANDE"]
-- "top 20 clients" => topN:20 et sortMode:"measure_desc"
-- "uniquement les BL" => includeDocumentTypes:["BL"]
-Si la demande est ambiguë, formule une clarification mais fournis l'interprétation la plus prudente.
+          content: `Tu es l'interpréteur sémantique de l'Assistant BI CEGECLIM.
+Date du jour : ${today}. Langue métier : français.
+
+Ta mission est de transformer une demande libre en :
+1. un plan d'analyse métier contrôlé ;
+2. des filtres structurés ;
+3. une restitution lisible et adaptée.
+
+Tu ne génères jamais de SQL. Tu n'inventes aucune valeur métier.
+Tu peux corriger les formulations imprécises grâce aux synonymes du catalogue.
+La table de routage métier ci-dessous est prioritaire sur le sujet présélectionné. Ainsi, « chiffre d'affaires », « facturé », « facture » ou « facturation » imposent le sujet factures, sauf lorsqu'un flux plus précis comme BL, CDC ou devis est explicitement demandé.
+Si le contexte contient lockSubject:true, conserve le sujet du contexte seulement lorsqu'aucune règle de routage métier explicite ne correspond à la demande.
+Si l'utilisateur donne seulement une précision de filtre, conserve le sujet, les mesures, les dimensions et la période du contexte.
+Résous les périodes relatives ("cette année", "mois dernier", "12 derniers mois") en dates ISO.
+« Depuis début 2025 » signifie une période commençant le 1er janvier 2025 ; cela ne signifie jamais « uniquement janvier ».
+Un mot de liaison comme « par », « pour », « depuis », « avec » ou « sur » ne doit jamais devenir une valeur de famille, de famille macro, de client ou d'agence.
+Quand une valeur comme R/R qualifie la famille macro, place-la uniquement dans includeFamilyMacros et pas dans includeFamilies.
+Choisis :
+- courbe pour une tendance temporelle ;
+- histogramme pour comparer des catégories ;
+- histogramme_empile pour une évolution ou une comparaison avec une seconde dimension ;
+- tableau pour un top, un détail ou plus de deux dimensions ;
+- camembert uniquement pour une répartition simple de 6 catégories maximum.
+N'utilise que les clés exactes du catalogue ci-dessous.
+
+CATALOGUE :
+${buildSemanticPromptReference()}
+
+TABLE DE ROUTAGE MÉTIER PRIORITAIRE :
+${buildSemanticRoutingPromptReference()}
+
 Retourne strictement ce JSON :
 {
-  "summary":"phrase courte décrivant ce qui sera appliqué",
+  "summary":"phrase courte décrivant l'analyse comprise",
+  "plan":{
+    "environment":null,
+    "subject":null,
+    "measures":[],
+    "dimensions":[],
+    "visualization":null,
+    "dateStart":"",
+    "dateEnd":"",
+    "title":""
+  },
   "filters":{
     "includeYears":[],"excludeYears":[],
     "includeAgencies":[],"excludeAgencies":[],
@@ -167,7 +378,7 @@ Retourne strictement ce JSON :
         },
         {
           role: 'user',
-          content: `Demande libre à interpréter en JSON : ${freeText}\nContexte de l'analyse : ${JSON.stringify(context || {})}`,
+          content: `Demande libre : ${freeText}\nContexte actuel : ${JSON.stringify(context || {})}`,
         },
       ],
     }),
@@ -204,6 +415,7 @@ export async function POST(request: NextRequest) {
         interpretation: {
           summary: 'Aucune précision libre.',
           filters: emptyAssistantBiStructuredFilters(),
+          plan: emptyAssistantBiAnalysisPlan(),
           assumptions: [],
           needsConfirmation: false,
           clarificationQuestion: '',
@@ -221,8 +433,9 @@ export async function POST(request: NextRequest) {
       aiAvailable = false
       aiError = publicErrorMessage(error)
       raw = {
-        summary: 'Interprétation automatique limitée aux règles explicites détectées.',
+        summary: 'Interprétation automatique basée sur le catalogue métier et les règles explicites détectées.',
         filters: emptyAssistantBiStructuredFilters(),
+        plan: emptyAssistantBiAnalysisPlan(),
         assumptions: [`IA indisponible : ${aiError}`],
         needsConfirmation: true,
         clarificationQuestion: '',
@@ -233,7 +446,7 @@ export async function POST(request: NextRequest) {
       normalizeAssistantBiFreeTextInterpretation(raw),
       freeText,
     )
-    const normalized = mergeDeterministicBusinessRules(withYears, freeText)
+    const normalized = mergeDeterministicBusinessRules(withYears, freeText, body.context)
 
     return NextResponse.json({
       interpretation: normalized,
@@ -242,6 +455,8 @@ export async function POST(request: NextRequest) {
         model: MODEL,
         error: aiError || undefined,
       },
+      routing: resolveSemanticRouting(freeText),
+      version: 'SEMANTIC-PLAN-V4-FILTER-GUARDS',
     })
   } catch (error: unknown) {
     return NextResponse.json(
