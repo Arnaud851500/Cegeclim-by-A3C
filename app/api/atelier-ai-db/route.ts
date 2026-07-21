@@ -9,7 +9,7 @@ import {
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1-mini'
+const MODEL = process.env.OPENAI_MODEL || 'gpt-5.6-terra'
 const SUMMARY_SAMPLE_ROWS = 200
 
 type JsonObject = Record<string, any>
@@ -40,7 +40,7 @@ const SCHEMA: Record<string, string[]> = {
   indicateur_factures_mensuel: ['annee', 'mois', 'collaborateur_facture', 'collaborateur_tiers', 'agence_collaborateur', 'depot', 'departement_tiers', 'numero_tiers', 'intitule_tiers', 'famille', 'famille_macro', 'hors_statistique', 'nb_lignes', 'quantite', 'ca_ht', 'marge_valeur'],
   indicateur_activite_mensuel: ['annee', 'mois', 'type_document', 'collaborateur_facture', 'collaborateur_tiers', 'agence_collaborateur', 'depot', 'departement_tiers', 'numero_tiers', 'intitule_tiers', 'famille', 'famille_macro', 'hors_statistique', 'nb_lignes', 'quantite', 'ca_ht', 'marge_valeur'],
   indicateur_devis_mensuel: ['annee', 'mois', 'collaborateur_facture', 'collaborateur_tiers', 'agence_collaborateur', 'depot', 'departement_tiers', 'numero_tiers', 'intitule_tiers', 'famille', 'famille_macro', 'nb_lignes', 'quantite', 'ca_ht', 'marge_valeur'],
-  indicateur_flux_articles_mensuel: ['annee', 'mois', 'flux', 'type_document', 'depot', 'collaborateur_tiers', 'famille_macro', 'famille', 'reference_article', 'designation', 'hors_statistique', 'nb_lignes', 'quantite', 'quantite_pertinente', 'ca_ht', 'marge_valeur'],
+  indicateur_flux_articles_mensuel: ['annee', 'mois', 'flux', 'type_document', 'depot', 'collaborateur_tiers', 'departement_tiers', 'famille_macro', 'famille', 'reference_article', 'designation', 'hors_statistique', 'nb_lignes', 'quantite', 'quantite_pertinente', 'ca_ht', 'marge_valeur'],
   facture_lignes: ['type_document', 'numero_piece', 'date_facture', 'date_bl', 'date_bc', 'numero_tiers_entete', 'intitule_tiers_entete', 'reference_article', 'designation', 'quantite', 'montant_ht', 'marge_valeur', 'collaborateur', 'depot'],
   devis_lignes: ['type_document', 'numero_piece', 'date_devis', 'numero_tiers_entete', 'intitule_tiers_entete', 'reference_article', 'designation', 'quantite', 'montant_ht', 'marge_valeur', 'collaborateur', 'depot'],
   activite_lignes: ['type_document', 'numero_piece', 'date_piece', 'date_bl', 'date_bc', 'numero_tiers_entete', 'intitule_tiers_entete', 'reference_article', 'designation', 'quantite', 'montant_ht', 'marge_valeur', 'collaborateur', 'depot'],
@@ -67,7 +67,7 @@ const LABELS: Record<string, string> = {
 }
 
 const ARTICLE_DIMENSIONS = new Set(['famille_macro', 'famille', 'reference_article', 'designation', 'classe_abc_ca', 'classe_abc_lignes'])
-const FLUX_UNSUPPORTED_DIMENSIONS = new Set(['departement_tiers', 'numero_tiers', 'intitule_tiers', 'collaborateur_facture', 'annee_creation_client'])
+const FLUX_UNSUPPORTED_DIMENSIONS = new Set(['numero_tiers', 'intitule_tiers', 'collaborateur_facture', 'annee_creation_client'])
 
 const json = (value: Record<string, unknown>, status = 200) => NextResponse.json(value, { status })
 
@@ -116,7 +116,7 @@ async function openAi(messages: Array<{ role: 'system' | 'user'; content: string
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: { Authorization: `Bearer ${env('OPENAI_API_KEY')}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: MODEL, temperature: 0.03, response_format: { type: 'json_object' }, messages }),
+    body: JSON.stringify({ model: MODEL, response_format: { type: 'json_object' }, messages }),
   })
   const payload = await response.json().catch(() => ({})) as JsonObject
   if (!response.ok) throw new Error(payload?.error?.message || `Erreur OpenAI ${response.status}`)
@@ -230,11 +230,6 @@ function requestedFlow(body: JsonObject, subject: string): ArticleFlow {
   return 'ALL'
 }
 
-function isAdminScope(body: JsonObject) {
-  const code = `${body?.globalFilters?.accessProfileCode || ''} ${body?.globalFilters?.accessProfileName || ''}`.toUpperCase()
-  return code.includes('ADMIN')
-}
-
 function aggregateSource(subject: string) {
   if (subject === 'factures' || subject === 'clients') return 'indicateur_factures_mensuel'
   if (subject === 'devis') return 'indicateur_devis_mensuel'
@@ -261,8 +256,6 @@ function planSource(body: JsonObject, dimensions: string[], measures: string[]):
   const articleAnalysis = subject === 'articles' || hasArticleDimension(dimensions)
   if (articleAnalysis) {
     const unsupported = dimensions.filter((key) => FLUX_UNSUPPORTED_DIMENSIONS.has(key))
-    const free = structuredFilters(body)
-    const explicitDepartmentFilter = free.includeDepartments.length || free.excludeDepartments.length
 
     if (subject === 'factures' && unsupported.length) {
       return { mode: 'detailed', table: 'facture_lignes', title: 'Facturation détaillée par article', detail: 'facture_lignes enrichie par les référentiels client, collaborateur, article et famille.', flow: 'FACTURE', warnings }
@@ -271,17 +264,7 @@ function planSource(body: JsonObject, dimensions: string[], measures: string[]):
       return { mode: 'detailed', table: 'devis_lignes', title: 'Devis détaillés par article', detail: 'devis_lignes enrichie par les référentiels client, collaborateur, article et famille.', flow: 'DEVIS', warnings }
     }
     if (unsupported.length) {
-      throw new Error(`${unsupported.map(label).join(', ')} n'est pas disponible dans Flux Articles. Choisis le sujet Factures pour un croisement article/client ou article/département.`)
-    }
-    if (explicitDepartmentFilter) {
-      throw new Error('Un filtre département explicite ne peut pas être appliqué à Flux Articles, car le département client n’est pas stocké dans cet agrégat.')
-    }
-
-    const globalDepartments = Array.isArray(body?.globalFilters?.departementsTiers) ? body.globalFilters.departementsTiers : []
-    if (globalDepartments.length && isAdminScope(body)) {
-      warnings.push('Le profil administrateur possède un périmètre département, mais Flux Articles ne porte pas cette dimension. Les filtres agence et collaborateur restent appliqués.')
-    } else if (globalDepartments.length) {
-      throw new Error('Flux Articles ne permet pas encore de sécuriser un périmètre limité par département. Utilise le sujet Factures ou demande l’extension du modèle Flux Articles.')
+      throw new Error(`${unsupported.map(label).join(', ')} n'est pas disponible dans Flux Articles. Choisis le sujet Factures pour un croisement article/client.`)
     }
 
     const flowLabel = flow === 'ALL' ? 'tous flux' : `flux ${flow}`
@@ -289,7 +272,7 @@ function planSource(body: JsonObject, dimensions: string[], measures: string[]):
       mode: 'flux_articles',
       table: 'indicateur_flux_articles_mensuel',
       title: `Flux Articles — ${flowLabel}`,
-      detail: `Source canonique indicateur_flux_articles_mensuel${flow === 'ALL' ? '' : ` filtrée sur flux = ${flow}`}. Elle combine les sources avec les règles de signes et de dates du rebuild Flux Articles.`,
+      detail: `Source canonique indicateur_flux_articles_mensuel${flow === 'ALL' ? '' : ` filtrée sur flux = ${flow}`}. Elle combine les sources avec les règles de signes et de dates du rebuild Flux Articles, et porte le département client calculé depuis ref_tiers.code_postal.`,
       flow,
       warnings,
     }
@@ -421,6 +404,7 @@ function fluxDimension(key: string) {
     agence_collaborateur: "COALESCE(NULLIF(BTRIM(c.agence::text), ''), 'NON RENSEIGNE')",
     depot: "COALESCE(NULLIF(BTRIM(fa.depot::text), ''), 'NON RENSEIGNE')",
     collaborateur_tiers: "COALESCE(NULLIF(BTRIM(fa.collaborateur_tiers::text), ''), 'NON AFFECTE')",
+    departement_tiers: "COALESCE(NULLIF(BTRIM(fa.departement_tiers::text), ''), 'NON RENSEIGNE')",
     famille_macro: "COALESCE(NULLIF(BTRIM(fa.famille_macro::text), ''), 'NON RENSEIGNE')",
     famille: "COALESCE(NULLIF(BTRIM(fa.famille::text), ''), 'NON RENSEIGNE')",
     reference_article: "COALESCE(NULLIF(BTRIM(fa.reference_article::text), ''), 'NON RENSEIGNE')",
@@ -464,10 +448,13 @@ function fluxArticleQuery(body: JsonObject, dimensions: string[], wanted: string
 
   pushCondition(where, inSql("COALESCE(NULLIF(BTRIM(c.agence::text), ''), 'NON RENSEIGNE')", Array.isArray(globals.agences) ? globals.agences : []))
   pushCondition(where, inSql("COALESCE(NULLIF(BTRIM(fa.collaborateur_tiers::text), ''), 'NON AFFECTE')", Array.isArray(globals.collaborateursTiers) ? globals.collaborateursTiers : []))
+  pushCondition(where, inSql("COALESCE(NULLIF(BTRIM(fa.departement_tiers::text), ''), 'NON RENSEIGNE')", Array.isArray(globals.departementsTiers) ? globals.departementsTiers : []))
   if (free.includeYears.length) pushCondition(where, inSql('fa.annee', free.includeYears))
   if (free.excludeYears.length) pushCondition(where, notInSql('fa.annee', free.excludeYears))
   pushCondition(where, inSql("COALESCE(NULLIF(BTRIM(c.agence::text), ''), 'NON RENSEIGNE')", free.includeAgencies))
   pushCondition(where, notInSql("COALESCE(NULLIF(BTRIM(c.agence::text), ''), 'NON RENSEIGNE')", free.excludeAgencies))
+  pushCondition(where, inSql("COALESCE(NULLIF(BTRIM(fa.departement_tiers::text), ''), 'NON RENSEIGNE')", free.includeDepartments))
+  pushCondition(where, notInSql("COALESCE(NULLIF(BTRIM(fa.departement_tiers::text), ''), 'NON RENSEIGNE')", free.excludeDepartments))
   pushCondition(where, inSql("BTRIM(COALESCE(fa.famille_macro::text, ''))", free.includeFamilyMacros))
   pushCondition(where, notInSql("BTRIM(COALESCE(fa.famille_macro::text, ''))", free.excludeFamilyMacros))
   pushCondition(where, inSql("BTRIM(COALESCE(fa.famille::text, ''))", free.includeFamilies))
@@ -637,11 +624,10 @@ function clientCreationQuery(body: JsonObject, dimensions: string[], wanted: str
 function guided(body: JsonObject): QueryResult | null {
   const request = body?.dataContext?.visualizationRequest
   if (!request || typeof request !== 'object') return null
-  const allDimensions: string[] = Array.isArray(request.dimensions) ? request.dimensions.map(String) : []
+  const dimensions: string[] = Array.isArray(request.dimensions) ? request.dimensions.map(String) : []
   const wanted: string[] = Array.isArray(request.measures) ? request.measures.map(String) : []
-  if (!allDimensions.length || !wanted.length) return null
+  if (!dimensions.length || !wanted.length) return null
   const kind = String(request.kind || 'tableau')
-  const dimensions = kind === 'histogramme_empile' ? allDimensions.slice(0, 2) : allDimensions
   const plan = planSource(body, dimensions, wanted)
   if (body.previewOnly === true) return { rows: [], sql: '', repaired: false, reason: plan.detail, visualization: visualization(kind, dimensions, wanted), sourcePlan: plan }
   if (plan.mode === 'client_creation') return clientCreationQuery(body, dimensions, wanted, kind, plan)
@@ -717,7 +703,7 @@ export async function POST(request: NextRequest) {
     const structured = guided(body)
     if (body.previewOnly === true) {
       if (!structured?.sourcePlan) return json({ error: 'Plan de source indisponible.' }, 400)
-      return json({ sourcePlan: structured.sourcePlan, visualization: structured.visualization, version: 'SEMANTIC-V2-SOURCE-PLANNER' })
+      return json({ sourcePlan: structured.sourcePlan, visualization: structured.visualization, version: 'SEMANTIC-V3-FULL-DIMENSIONS' })
     }
 
     const result = structured || await legacy(question, body)
@@ -747,7 +733,7 @@ export async function POST(request: NextRequest) {
       row_count: result.rows.length, rows_preview: result.rows, columns: inferColumns(result.rows),
       visualization: result.visualization, source_plan: result.sourcePlan || null,
       proposed_widgets: [], is_complete: true, mode: structured ? 'guided_deterministic_db' : 'aggregated_db',
-      version: 'SEMANTIC-V2-SOURCE-PLANNER',
+      version: 'SEMANTIC-V3-FULL-DIMENSIONS',
     })
   } catch (error: unknown) {
     return json({ error: error instanceof Error ? error.message : String(error) }, 500)
