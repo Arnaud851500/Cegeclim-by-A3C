@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 
 type AlertLevel = "ROUGE" | "ORANGE" | "JAUNE" | "VERT" | string;
@@ -1027,9 +1027,15 @@ function EmptyState({ title, message }: { title: string; message: string }) {
   );
 }
 
-function ProjectionChart({ rows }: { rows: ProjectionRow[] }) {
-  const width = 920;
-  const height = 280;
+function ProjectionChart({
+  rows,
+  compact = false,
+}: {
+  rows: ProjectionRow[];
+  compact?: boolean;
+}) {
+  const width = compact ? 760 : 920;
+  const height = compact ? 240 : 280;
   const padding = { top: 24, right: 24, bottom: 44, left: 58 };
   const innerWidth = width - padding.left - padding.right;
   const innerHeight = height - padding.top - padding.bottom;
@@ -1104,7 +1110,11 @@ function ProjectionChart({ rows }: { rows: ProjectionRow[] }) {
 
       <svg
         viewBox={`0 0 ${width} ${height}`}
-        className="h-[300px] min-w-[920px] w-full"
+        className={
+          compact
+            ? "h-[260px] min-w-[760px] w-full"
+            : "h-[300px] min-w-[920px] w-full"
+        }
       >
         <rect x="0" y="0" width={width} height={height} rx="18" fill="white" />
 
@@ -1272,6 +1282,106 @@ function ProjectionChart({ rows }: { rows: ProjectionRow[] }) {
       </svg>
     </div>
   );
+}
+
+function aggregateProjectionRows(
+  rows: ProjectionRow[],
+  options: {
+    referenceLabel: string;
+    famille?: string | null;
+    macroFamille?: string | null;
+  },
+): ProjectionRow[] {
+  const byWeek = new Map<string, ProjectionRow>();
+
+  rows.forEach((row) => {
+    const weekKey = String(row.periode_debut || "");
+    if (!weekKey) return;
+
+    const current =
+      byWeek.get(weekKey) ||
+      ({
+        run_id: row.run_id,
+        reference_article: options.referenceLabel,
+        designation: options.referenceLabel,
+        famille: options.famille ?? row.famille ?? null,
+        macro_famille: options.macroFamille ?? row.macro_famille ?? null,
+        fournisseur_principal: null,
+        depot: "GLOBAL",
+        periode_debut: row.periode_debut,
+        periode_fin: row.periode_fin,
+        stock_initial: 0,
+        commandes_fournisseurs_attendues: 0,
+        besoins_clients_fermes: 0,
+        prevision_base_n1: 0,
+        coefficient_prevision_applique: 1,
+        prevision_ventes: 0,
+        prevision_forcee: 0,
+        stock_projete: 0,
+        stock_projete_ferme: 0,
+        stock_disponible_ferme: 0,
+        date_rupture_ferme: null,
+        date_retour_dispo_ferme: null,
+        stock_securite: 0,
+        stock_disponible_projete: 0,
+        quantite_manquante: 0,
+        niveau_alerte: "VERT",
+        date_rupture: null,
+        date_retour_dispo: null,
+        ca_client_risque: 0,
+        nb_commandes_clients_risque: 0,
+      } satisfies ProjectionRow);
+
+    current.stock_initial =
+      toNumber(current.stock_initial) + toNumber(row.stock_initial);
+    current.commandes_fournisseurs_attendues =
+      toNumber(current.commandes_fournisseurs_attendues) +
+      toNumber(row.commandes_fournisseurs_attendues);
+    current.besoins_clients_fermes =
+      toNumber(current.besoins_clients_fermes) +
+      toNumber(row.besoins_clients_fermes);
+    current.prevision_base_n1 =
+      toNumber(current.prevision_base_n1) + toNumber(row.prevision_base_n1);
+    current.prevision_ventes =
+      toNumber(current.prevision_ventes) + toNumber(row.prevision_ventes);
+    current.prevision_forcee =
+      toNumber(current.prevision_forcee) + toNumber(row.prevision_forcee);
+    current.stock_projete =
+      toNumber(current.stock_projete) + toNumber(row.stock_projete);
+    current.stock_projete_ferme =
+      toNumber(current.stock_projete_ferme) +
+      toNumber(row.stock_projete_ferme);
+    current.stock_disponible_ferme =
+      toNumber(current.stock_disponible_ferme) +
+      toNumber(row.stock_disponible_ferme);
+    current.stock_securite =
+      toNumber(current.stock_securite) + toNumber(row.stock_securite);
+    current.stock_disponible_projete =
+      toNumber(current.stock_disponible_projete) +
+      toNumber(row.stock_disponible_projete);
+    current.quantite_manquante =
+      toNumber(current.quantite_manquante) +
+      toNumber(row.quantite_manquante);
+    current.ca_client_risque =
+      toNumber(current.ca_client_risque) + toNumber(row.ca_client_risque);
+    current.nb_commandes_clients_risque =
+      toNumber(current.nb_commandes_clients_risque) +
+      toNumber(row.nb_commandes_clients_risque);
+
+    byWeek.set(weekKey, current);
+  });
+
+  return Array.from(byWeek.values())
+    .sort((a, b) =>
+      String(a.periode_debut).localeCompare(String(b.periode_debut)),
+    )
+    .map((row) => ({
+      ...row,
+      niveau_alerte: levelFromValues(
+        toNumber(row.stock_projete),
+        toNumber(row.stock_securite),
+      ),
+    }));
 }
 
 function DetailTable({
@@ -1537,6 +1647,13 @@ export default function StocksDisponibilitesPage() {
   const [kpi, setKpi] = useState<StockKpi | null>(null);
   const [alertes, setAlertes] = useState<StockAlertRow[]>([]);
   const [projection, setProjection] = useState<ProjectionRow[]>([]);
+  const [selectionProjection, setSelectionProjection] = useState<ProjectionRow[]>([]);
+  const [aggregateProjectionLoading, setAggregateProjectionLoading] =
+    useState(false);
+  const [aggregateProjectionError, setAggregateProjectionError] = useState<
+    string | null
+  >(null);
+  const aggregateProjectionRequestRef = useRef(0);
   const [fournisseurs, setFournisseurs] = useState<FournisseurRow[]>([]);
   const [besoinsClients, setBesoinsClients] = useState<BesoinClientRow[]>([]);
   const [selected, setSelected] = useState<StockAlertRow | null>(null);
@@ -1671,6 +1788,15 @@ export default function StocksDisponibilitesPage() {
       })
       .sort((a, b) => compareAlertRows(a, b, sortState));
   }, [baseFilteredAlertes, filters.ruptureHorizon, sortState]);
+
+  const aggregateSelectionSignature = useMemo(
+    () =>
+      filteredAlertes
+        .map((row) => articleDepotKey(row.reference_article, row.depot))
+        .sort((a, b) => a.localeCompare(b, "fr"))
+        .join("|"),
+    [filteredAlertes],
+  );
 
   const filteredKpi = useMemo(() => {
     const sum = (selector: (row: StockAlertRow) => number | null | undefined) =>
@@ -1882,6 +2008,111 @@ export default function StocksDisponibilitesPage() {
       );
     } finally {
       setDetailLoading(false);
+    }
+  }
+
+  async function loadSelectionProjection(selectionRows: StockAlertRow[]) {
+    const requestId = aggregateProjectionRequestRef.current + 1;
+    aggregateProjectionRequestRef.current = requestId;
+
+    setSelectionProjection([]);
+    setAggregateProjectionError(null);
+
+    const runId = kpi?.run_id || selectionRows[0]?.run_id || null;
+    if (!runId || !selectionRows.length) {
+      setAggregateProjectionLoading(false);
+      return;
+    }
+
+    /*
+     * Le graphe agrégé suit exactement la liste filtrée à l'écran :
+     * recherche libre (référence ou désignation), niveau d'alerte,
+     * horizon de rupture, famille, macro-famille, fournisseur et classes ABC.
+     */
+    const selectedKeys = new Set(
+      selectionRows.map((row) =>
+        articleDepotKey(row.reference_article, row.depot),
+      ),
+    );
+    const selectedReferences = Array.from(
+      new Set(
+        selectionRows
+          .map((row) => String(row.reference_article || "").trim())
+          .filter(Boolean),
+      ),
+    ).sort((a, b) => a.localeCompare(b, "fr"));
+
+    if (!selectedReferences.length) {
+      setAggregateProjectionLoading(false);
+      return;
+    }
+
+    setAggregateProjectionLoading(true);
+
+    try {
+      const selectedProjectionRows: ProjectionRow[] = [];
+      const referenceChunkSize = 50;
+      const pageSize = 1000;
+
+      for (
+        let referenceOffset = 0;
+        referenceOffset < selectedReferences.length;
+        referenceOffset += referenceChunkSize
+      ) {
+        const referenceChunk = selectedReferences.slice(
+          referenceOffset,
+          referenceOffset + referenceChunkSize,
+        );
+        let from = 0;
+
+        while (true) {
+          const { data, error: projectionError } = await supabase
+            .from("v_stock_projection_hebdo_latest")
+            .select(
+              "run_id,reference_article,designation,famille,macro_famille,fournisseur_principal,depot,periode_debut,periode_fin,stock_initial,commandes_fournisseurs_attendues,besoins_clients_fermes,prevision_base_n1,coefficient_prevision_applique,prevision_ventes,prevision_forcee,stock_projete,stock_projete_ferme,stock_disponible_ferme,date_rupture_ferme,date_retour_dispo_ferme,stock_securite,stock_disponible_projete,quantite_manquante,niveau_alerte,date_rupture,date_retour_dispo,ca_client_risque,nb_commandes_clients_risque",
+            )
+            .eq("run_id", runId)
+            .in("reference_article", referenceChunk)
+            .order("reference_article", { ascending: true })
+            .order("periode_debut", { ascending: true })
+            .range(from, from + pageSize - 1);
+
+          if (projectionError) throw projectionError;
+
+          const rawRows = (data || []) as ProjectionRow[];
+          selectedProjectionRows.push(
+            ...rawRows.filter((row) =>
+              selectedKeys.has(
+                articleDepotKey(row.reference_article, row.depot),
+              ),
+            ),
+          );
+
+          if (rawRows.length < pageSize) break;
+          from += pageSize;
+        }
+      }
+
+      if (aggregateProjectionRequestRef.current !== requestId) return;
+
+      setSelectionProjection(
+        aggregateProjectionRows(selectedProjectionRows, {
+          referenceLabel: "Sélection filtrée",
+        }),
+      );
+    } catch (err: any) {
+      if (aggregateProjectionRequestRef.current !== requestId) return;
+      console.error("Erreur chargement projection de la sélection", err);
+      setAggregateProjectionError(
+        friendlyError(
+          err,
+          "Erreur pendant le chargement de la projection de la sélection.",
+        ),
+      );
+    } finally {
+      if (aggregateProjectionRequestRef.current === requestId) {
+        setAggregateProjectionLoading(false);
+      }
     }
   }
 
@@ -3039,6 +3270,11 @@ export default function StocksDisponibilitesPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.reference_article, selected?.depot]);
 
+  useEffect(() => {
+    loadSelectionProjection(filteredAlertes);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aggregateSelectionSignature, kpi?.run_id]);
+
   const selectedLevel = String(selected?.niveau_alerte || "VERT").toUpperCase();
 
   return (
@@ -3122,7 +3358,7 @@ export default function StocksDisponibilitesPage() {
                 >
                   {recalculating
                     ? `Recalcul ${Math.round(rebuildProgress?.percent || 0)} %`
-                    : "Recalculer projection"}
+                    : "Recalculer toute la projection"}
                 </button>
               </div>
               {recalculating && rebuildProgress ? (
@@ -3178,7 +3414,7 @@ export default function StocksDisponibilitesPage() {
         ) : !kpi?.run_id ? (
           <EmptyState
             title="Aucune projection disponible"
-            message="Lance un calcul de projection depuis l’écran Import ou le bouton Recalculer projection."
+            message="Lance un calcul de projection depuis l’écran Import ou le bouton Recalculer toute la projection."
           />
         ) : (
           <>
@@ -3418,6 +3654,39 @@ export default function StocksDisponibilitesPage() {
                     {formatNumber(filteredAlertes.length)} article(s) affiché(s) · ABC BL YTD : CA HT / lignes.
                   </p>
                 </div>
+
+                {filteredAlertes.length ? (
+                  <div className="border-b border-slate-200 bg-slate-50/50 p-4">
+                    {aggregateProjectionError ? (
+                      <div
+                        role="alert"
+                        className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800"
+                      >
+                        {aggregateProjectionError}
+                      </div>
+                    ) : null}
+
+                    <div className="mb-2">
+                      <div className="text-sm font-black text-slate-950">
+                        Projection de la sélection filtrée
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        Somme hebdomadaire des stocks, entrées et besoins des {formatNumber(
+                          filteredAlertes.length,
+                        )} article(s) visibles. Le graphe suit tous les filtres, y compris la recherche libre par référence ou désignation.
+                      </div>
+                    </div>
+
+                    {aggregateProjectionLoading ? (
+                      <EmptyState
+                        title="Chargement de la sélection…"
+                        message="Lecture et agrégation des projections hebdomadaires filtrées."
+                      />
+                    ) : (
+                      <ProjectionChart rows={selectionProjection} compact />
+                    )}
+                  </div>
+                ) : null}
 
                 <div className="max-h-[820px] overflow-y-auto overflow-x-hidden">
                   <table className="w-full table-fixed text-sm">
