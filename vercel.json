@@ -1,4 +1,5 @@
 {
+  "regions": ["cdg1"],
   "env": {
     "OPENAI_MODEL": "gpt-5.6-terra",
     "OPENAI_INTERPRET_MODEL": "gpt-5.6-terra",

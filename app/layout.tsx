@@ -1286,9 +1286,14 @@ function AppShell({ children }: { children: React.ReactNode }) {
     if (!email || isLoginPage || isUnauthorizedPage) return
     if (!hasVisibleStatusLights) return
 
-    const now = Date.now()
-    if (!options?.force && now - lastStatusRefreshRef.current < 60_000) return
-    lastStatusRefreshRef.current = now
+  const now = Date.now()
+if (!options?.force && now - lastStatusRefreshRef.current < 60_000) return
+// Même en force=true : absorbe les appels quasi simultanés (montage,
+// changement de session/périmètre et changement de page se déclenchent
+// tous à 150-250ms d'écart au premier chargement). Un vrai changement de
+// page ou un retour de focus survient largement au-delà de cette fenêtre.
+if (options?.force && now - lastStatusRefreshRef.current < 800) return
+lastStatusRefreshRef.current = now
 
     const profile = await getUserAccessProfile()
     const tasks: Promise<unknown>[] = []
