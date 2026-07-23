@@ -590,8 +590,8 @@ function AppShell({ children }: { children: React.ReactNode }) {
         {
       label: 'TBD Nv Design',
       items: [
-        {label: '1 : Activite Quotidienne ND',activeLabel: 'Focus_mensuel',path: '/focus_mensuel2',accessKey: 'can_autorisation',},
-        { label: '7 : Projection Stock ND', path: '/stocks-disponibilites2', accessKey: 'can_autorisation' },
+        {label: '1 : Activite Quotidienne ND',activeLabel: 'Focus_mensuel',path: '/focus_mensuel2',accessKey: 'can_agences',},
+        { label: '7 : Projection Stock ND', path: '/stocks-disponibilites2', accessKey: 'can_agences' },
       ],
     },
 
