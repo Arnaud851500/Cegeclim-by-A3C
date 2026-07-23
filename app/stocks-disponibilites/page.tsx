@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 
-type AlertLevel = "ROUGE" | "ORANGE" | "JAUNE" | "VERT" | string;
+export type AlertLevel = "ROUGE" | "ORANGE" | "JAUNE" | "VERT" | string;
 type AbcClass = "A" | "B" | "C";
 
 type DiagnosticStep = {
@@ -85,7 +85,7 @@ type StockKpi = {
   prochaine_date_rupture: string | null;
 };
 
-type StockAlertRow = {
+export type StockAlertRow = {
   run_id: string;
   run_date_debut?: string | null;
   run_nb_semaines?: number | null;
@@ -133,7 +133,7 @@ type StockAlertRow = {
   niveau_alerte: AlertLevel;
 };
 
-type ProjectionRow = {
+export type ProjectionRow = {
   run_id: string;
   reference_article: string;
   designation: string | null;
@@ -229,17 +229,17 @@ const ALERT_ORDER: Record<string, number> = {
 
 const EXCLUDED_MACRO_FAMILIES = new Set(["DIV", "TECH", "SAV"]);
 
-function normalizedMacroFamily(value: string | null | undefined) {
+export function normalizedMacroFamily(value: string | null | undefined) {
   return String(value || "")
     .trim()
     .toUpperCase();
 }
 
-function isDisplayedMacroFamily(value: string | null | undefined) {
+export function isDisplayedMacroFamily(value: string | null | undefined) {
   return !EXCLUDED_MACRO_FAMILIES.has(normalizedMacroFamily(value));
 }
 
-function articleDepotKey(
+export function articleDepotKey(
   referenceArticle: string | null | undefined,
   depot: string | null | undefined,
 ) {
@@ -250,7 +250,7 @@ function articleDepotKey(
     .toUpperCase()}`;
 }
 
-function familyKey(
+export function familyKey(
   macroFamille: string | null | undefined,
   famille: string | null | undefined,
 ) {
@@ -296,25 +296,25 @@ const DEFAULT_FILTERS: Filters = {
   onlyWithRupture: false,
 };
 
-function toNumber(value: number | string | null | undefined) {
+export function toNumber(value: number | string | null | undefined) {
   const n = Number(value ?? 0);
   return Number.isFinite(n) ? n : 0;
 }
 
-function formatNumber(value: number | string | null | undefined, digits = 0) {
+export function formatNumber(value: number | string | null | undefined, digits = 0) {
   return toNumber(value).toLocaleString("fr-FR", {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   });
 }
 
-function formatPercent(value: number | string | null | undefined) {
+export function formatPercent(value: number | string | null | undefined) {
   return `${(toNumber(value) * 100).toLocaleString("fr-FR", {
     maximumFractionDigits: 0,
   })} %`;
 }
 
-function formatEvolution(
+export function formatEvolution(
   current: number | string | null | undefined,
   previous: number | string | null | undefined,
 ) {
@@ -327,7 +327,7 @@ function formatEvolution(
   return `${sign}${pct.toLocaleString("fr-FR", { maximumFractionDigits: 0 })} %`;
 }
 
-function evolutionClass(
+export function evolutionClass(
   current: number | string | null | undefined,
   previous: number | string | null | undefined,
 ) {
@@ -339,7 +339,7 @@ function evolutionClass(
   return "border-slate-200 bg-slate-50 text-slate-700";
 }
 
-function QuantityWithEvolution({
+export function QuantityWithEvolution({
   current,
   previous,
 }: {
@@ -366,7 +366,7 @@ function QuantityWithEvolution({
   );
 }
 
-function formatCurrencyK(value: number | string | null | undefined) {
+export function formatCurrencyK(value: number | string | null | undefined) {
   const n = toNumber(value);
   if (Math.abs(n) >= 1_000_000) {
     return `${(n / 1_000_000).toLocaleString("fr-FR", {
@@ -378,14 +378,14 @@ function formatCurrencyK(value: number | string | null | undefined) {
   })} K€`;
 }
 
-function formatDate(value: string | null | undefined) {
+export function formatDate(value: string | null | undefined) {
   if (!value) return "—";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return new Intl.DateTimeFormat("fr-FR").format(date);
 }
 
-function formatDateTime(value: string | null | undefined) {
+export function formatDateTime(value: string | null | undefined) {
   if (!value) return "—";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
@@ -407,14 +407,14 @@ function dateMs(value: string | null | undefined) {
   return Number.isFinite(ms) ? ms : null;
 }
 
-function isCurrentRupture(row: StockAlertRow) {
+export function isCurrentRupture(row: StockAlertRow) {
   return (
     toNumber(row.stock_projete_min) < 0 ||
     String(row.niveau_alerte || "").toUpperCase() === "ROUGE"
   );
 }
 
-function isRuptureWithinWeeks(row: StockAlertRow, weeks: number) {
+export function isRuptureWithinWeeks(row: StockAlertRow, weeks: number) {
   const ruptureMs = dateMs(row.date_rupture);
   if (ruptureMs === null) return false;
   const todayMs = new Date(localTodayIso()).getTime();
@@ -435,7 +435,7 @@ function ruptureHorizonDetail(rows: StockAlertRow[], weeks: number) {
     : "Aucune date dans cet horizon";
 }
 
-function normalizeSearch(value: string | null | undefined) {
+export function normalizeSearch(value: string | null | undefined) {
   return String(value || "")
     .trim()
     .toLowerCase()
@@ -704,7 +704,7 @@ function DiagnosticPanel({
   );
 }
 
-function alertLabel(level: AlertLevel) {
+export function alertLabel(level: AlertLevel) {
   const normalized = String(level || "VERT").toUpperCase();
   if (normalized === "ROUGE") return "Rupture";
   if (normalized === "ORANGE") return "Sous sécurité";
@@ -712,25 +712,25 @@ function alertLabel(level: AlertLevel) {
   return "OK";
 }
 
-function alertCompactLabel(level: AlertLevel) {
+export function alertCompactLabel(level: AlertLevel) {
   const normalized = String(level || "VERT").toUpperCase();
   if (normalized === "ROUGE") return "R";
   if (normalized === "ORANGE" || normalized === "JAUNE") return "A";
   return "OK";
 }
 
-function normalizeAbcClass(value: string | null | undefined): AbcClass {
+export function normalizeAbcClass(value: string | null | undefined): AbcClass {
   const normalized = String(value || "C").toUpperCase();
   return normalized === "A" || normalized === "B" ? normalized : "C";
 }
 
-function abcBadgeClass(value: AbcClass) {
+export function abcBadgeClass(value: AbcClass) {
   if (value === "A") return "border-indigo-200 bg-indigo-50 text-indigo-800";
   if (value === "B") return "border-amber-200 bg-amber-50 text-amber-800";
   return "border-slate-200 bg-slate-100 text-slate-700";
 }
 
-function AbcBadge({
+export function AbcBadge({
   label,
   value,
   title,
@@ -754,7 +754,7 @@ function AbcBadge({
   );
 }
 
-function alertClass(level: AlertLevel) {
+export function alertClass(level: AlertLevel) {
   const normalized = String(level || "VERT").toUpperCase();
   if (normalized === "ROUGE") return "border-red-200 bg-red-50 text-red-800";
   if (normalized === "ORANGE")
@@ -764,7 +764,7 @@ function alertClass(level: AlertLevel) {
   return "border-emerald-200 bg-emerald-50 text-emerald-800";
 }
 
-function rowToneClass(level: AlertLevel) {
+export function rowToneClass(level: AlertLevel) {
   const normalized = String(level || "VERT").toUpperCase();
   if (normalized === "ROUGE") return "bg-red-50/80 hover:bg-red-100";
   if (normalized === "ORANGE") return "bg-orange-50/80 hover:bg-orange-100";
@@ -772,7 +772,7 @@ function rowToneClass(level: AlertLevel) {
   return "bg-white hover:bg-blue-50";
 }
 
-function dotClass(level: AlertLevel) {
+export function dotClass(level: AlertLevel) {
   const normalized = String(level || "VERT").toUpperCase();
   if (normalized === "ROUGE") return "bg-red-500";
   if (normalized === "ORANGE") return "bg-orange-500";
@@ -780,7 +780,7 @@ function dotClass(level: AlertLevel) {
   return "bg-emerald-500";
 }
 
-function levelFromValues(
+export function levelFromValues(
   stockProjete: number,
   stockSecurite: number,
 ): AlertLevel {
@@ -923,7 +923,7 @@ function SortableTh({
   );
 }
 
-function KpiCard({
+export function KpiCard({
   label,
   value,
   detail,
@@ -986,7 +986,7 @@ function KpiCard({
   );
 }
 
-function KpiMini({
+export function KpiMini({
   label,
   value,
   detail,
@@ -1018,7 +1018,7 @@ function KpiMini({
   );
 }
 
-function EmptyState({ title, message }: { title: string; message: string }) {
+export function EmptyState({ title, message }: { title: string; message: string }) {
   return (
     <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-8 text-center">
       <div className="text-lg font-black text-slate-900">{title}</div>
@@ -1027,7 +1027,7 @@ function EmptyState({ title, message }: { title: string; message: string }) {
   );
 }
 
-function ProjectionChart({
+export function ProjectionChart({
   rows,
   compact = false,
 }: {
@@ -1452,7 +1452,7 @@ function DetailTable({
   );
 }
 
-function WeeklyProjectionTable({
+export function WeeklyProjectionTable({
   rows,
   weeklyPct,
   weeklyManualQty,

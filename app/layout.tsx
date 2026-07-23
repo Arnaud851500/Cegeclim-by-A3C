@@ -329,6 +329,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const [hasSession, setHasSession] = useState(false)
   const [statusBlinkOn, setStatusBlinkOn] = useState(true)
   const [pageFloatingLayerOpen, setPageFloatingLayerOpen] = useState(false)
+  const [headerHiddenForScroll, setHeaderHiddenForScroll] = useState(false)
   const [todoSignal, setTodoSignal] = useState<TodoSignal>({ status: 'green', count: 0 })
   const [cdcLivAvant2026Signal, setCdcLivAvant2026Signal] = useState<CdcLivAvant2026Signal>({
     status: 'green',
@@ -586,6 +587,14 @@ function AppShell({ children }: { children: React.ReactNode }) {
         { label: '9 : Indicateurs', path: '/Indicateurs', accessKey: 'can_autorisation' },
       ],
     },
+        {
+      label: 'TBD Nv Design',
+      items: [
+        {label: '1 : Activite Quotidienne ND',activeLabel: 'Focus_mensuel',path: '/focus_mensuel2',accessKey: 'can_autorisation',},
+        { label: '7 : Projection Stock ND', path: '/stocks-disponibilites2', accessKey: 'can_autorisation' },
+      ],
+    },
+
     {
       label: 'Admin',
       items: [
@@ -672,6 +681,25 @@ function AppShell({ children }: { children: React.ReactNode }) {
     }, 1200)
 
     return () => clearInterval(interval)
+  }, [])
+
+  useEffect(() => {
+    // Masque le bandeau au scroll vers le bas, le réaffiche au scroll vers
+    // le haut ou en haut de page — indépendant de la détection de couche
+    // flottante ci-dessous (les deux mécanismes se combinent en OR au rendu).
+    if (typeof window === 'undefined') return
+    let lastY = window.scrollY
+
+    function onScroll() {
+      const y = window.scrollY
+      if (y < 80) setHeaderHiddenForScroll(false)
+      else if (y > lastY + 4) setHeaderHiddenForScroll(true)
+      else if (y < lastY - 4) setHeaderHiddenForScroll(false)
+      lastY = y
+    }
+
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => window.removeEventListener('scroll', onScroll)
   }, [])
 
   useEffect(() => {
@@ -1286,14 +1314,14 @@ function AppShell({ children }: { children: React.ReactNode }) {
     if (!email || isLoginPage || isUnauthorizedPage) return
     if (!hasVisibleStatusLights) return
 
-  const now = Date.now()
-if (!options?.force && now - lastStatusRefreshRef.current < 60_000) return
-// Même en force=true : absorbe les appels quasi simultanés (montage,
-// changement de session/périmètre et changement de page se déclenchent
-// tous à 150-250ms d'écart au premier chargement). Un vrai changement de
-// page ou un retour de focus survient largement au-delà de cette fenêtre.
-if (options?.force && now - lastStatusRefreshRef.current < 800) return
-lastStatusRefreshRef.current = now
+    const now = Date.now()
+    if (!options?.force && now - lastStatusRefreshRef.current < 60_000) return
+    // Même en force=true : absorbe les appels quasi simultanés (montage,
+    // changement de session/périmètre et changement de page se déclenchent
+    // tous à 150-250ms d'écart au premier chargement). Un vrai changement de
+    // page ou un retour de focus survient largement au-delà de cette fenêtre.
+    if (options?.force && now - lastStatusRefreshRef.current < 800) return
+    lastStatusRefreshRef.current = now
 
     const profile = await getUserAccessProfile()
     const tasks: Promise<unknown>[] = []
@@ -1401,7 +1429,7 @@ lastStatusRefreshRef.current = now
           data-cegeclim-header="true"
           style={{
             ...styles.header,
-            ...(pageFloatingLayerOpen ? styles.headerHiddenForFloatingLayer : {}),
+            ...((pageFloatingLayerOpen || headerHiddenForScroll) ? styles.headerHiddenForFloatingLayer : {}),
           }}
         >
           <div style={styles.top}>

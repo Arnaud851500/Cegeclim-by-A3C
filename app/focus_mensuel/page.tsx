@@ -5,10 +5,10 @@ import { useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { usePageFilterAccess } from "@/lib/pageAccessFilters";
 
-type DocType = "Devis" | "CDC" | "BL" | "Factures";
-type ViewMode = "montant_ht" | "nb_documents" | "quantite_pertinente";
+export type DocType = "Devis" | "CDC" | "BL" | "Factures";
+export type ViewMode = "montant_ht" | "nb_documents" | "quantite_pertinente";
 
-type DailyRow = {
+export type DailyRow = {
   jour: string;
   type_document: DocType | string;
   agence: string | null;
@@ -24,7 +24,7 @@ type DailyRow = {
   quantite_pertinente: number;
 };
 
-type HighlightRow = {
+export type HighlightRow = {
   date_document: string;
   type_document: DocType | string;
   numero_document: string | null;
@@ -43,7 +43,7 @@ type HighlightRow = {
   hors_statistique?: boolean | null;
 };
 
-type DistinctDocRow = {
+export type DistinctDocRow = {
   jour: string;
   dimension_type: "TOTAL" | "AGENCE" | "FAMILLE_MACRO" | string;
   dimension: string | null;
@@ -103,7 +103,7 @@ type FocusComparisonSnapshotPayload = {
   rollingRowsN1: DailyRow[];
 };
 
-type KpiCardData = {
+export type KpiCardData = {
   type: DocType;
   nb: number;
   amount: number;
@@ -124,7 +124,7 @@ type KpiCardData = {
   evolutionVs7dPct: number | null;
 };
 
-type MtdComparisonBasis = {
+export type MtdComparisonBasis = {
   currentMonth: string;
   previousMonth: string;
   currentBlDays: string[];
@@ -189,7 +189,7 @@ type FocusInvoiceLineRaw = {
   collaborateur: string | null;
 };
 
-type AgencyPortfolioRow = {
+export type AgencyPortfolioRow = {
   label: string;
   cdc: number;
   cdcLivMx: number;
@@ -202,7 +202,7 @@ type AgencyPortfolioRow = {
   total: number;
 };
 
-type AgencyProjectionRow = {
+export type AgencyProjectionRow = {
   label: string;
   blBrMx: number;
   blBrM: number;
@@ -232,26 +232,26 @@ type EnrichedInvoiceLine = FocusInvoiceLineRaw & {
 };
 
 type MatrixCell = { amount: number; nb: number; qtyPert: number };
-type MatrixRow = {
+export type MatrixRow = {
   label: string;
   byType: Record<DocType, MatrixCell>;
   total: number;
 };
 
-type ComparisonCell = {
+export type ComparisonCell = {
   amountN1: number;
   amountN: number;
   qtyPertN1: number;
   qtyPertN: number;
 };
 
-type ComparisonRow = {
+export type ComparisonRow = {
   label: string;
   byType: Record<DocType, ComparisonCell>;
   total: number;
 };
 
-type AnnualCacheRpcRow = {
+export type AnnualCacheRpcRow = {
   table_key: "agency_ytd" | "family_ytd" | "rolling_12" | string;
   label: string | null;
   type_document: DocType | string;
@@ -284,15 +284,15 @@ type AgencyControlRpcRow = {
   evol_pct: number | null;
 };
 
-const DOC_TYPES: DocType[] = ["Devis", "CDC", "BL", "Factures"];
-const DOC_COLORS: Record<DocType, string> = {
+export const DOC_TYPES: DocType[] = ["Devis", "CDC", "BL", "Factures"];
+export const DOC_COLORS: Record<DocType, string> = {
   Devis: "#d59b00",
   CDC: "#006d7f",
   BL: "#4c9dff",
   Factures: "#16a34a",
 };
 
-function isDocType(value: any): value is DocType {
+export function isDocType(value: any): value is DocType {
   return DOC_TYPES.includes(value as DocType);
 }
 
@@ -300,7 +300,7 @@ function createEmptyDocRecord(): Record<DocType, number> {
   return { Devis: 0, CDC: 0, BL: 0, Factures: 0 };
 }
 
-function dateOnly(value: any) {
+export function dateOnly(value: any) {
   return String(value || "").slice(0, 10);
 }
 
@@ -379,18 +379,18 @@ function isViewMode(value: string | null | undefined): value is ViewMode {
   );
 }
 
-function todayYmd() {
+export function todayYmd() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-function addDaysYmd(ymd: string, days: number) {
+export function addDaysYmd(ymd: string, days: number) {
   const d = new Date(`${ymd}T12:00:00`);
   d.setDate(d.getDate() + days);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-function addMonthsYmd(ymd: string, months: number) {
+export function addMonthsYmd(ymd: string, months: number) {
   const d = new Date(`${ymd}T12:00:00`);
   const originalDay = d.getDate();
   d.setDate(1);
@@ -400,29 +400,29 @@ function addMonthsYmd(ymd: string, months: number) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-function addYearsYmd(ymd: string, years: number) {
+export function addYearsYmd(ymd: string, years: number) {
   return addMonthsYmd(ymd, years * 12);
 }
 
-function monthKey(ymd: string | null | undefined) {
+export function monthKey(ymd: string | null | undefined) {
   return String(ymd || "").slice(0, 7);
 }
 
-function addMonthsToMonth(month: string, months: number) {
+export function addMonthsToMonth(month: string, months: number) {
   return addMonthsYmd(`${month}-01`, months).slice(0, 7);
 }
 
-function monthStart(month: string) {
+export function monthStart(month: string) {
   return `${month}-01`;
 }
 
-function nextMonthStart(month: string) {
+export function nextMonthStart(month: string) {
   const [y, m] = month.split("-").map(Number);
   const d = new Date(y, m, 1);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
 }
 
-function daysInMonth(month: string) {
+export function daysInMonth(month: string) {
   const [y, m] = month.split("-").map(Number);
   const last = new Date(y, m, 0).getDate();
   return Array.from(
@@ -440,14 +440,14 @@ function countWeekdays(days: string[]) {
   return days.filter((day) => !isWeekendYmd(day)).length;
 }
 
-function formatDateFr(ymd: string | null | undefined) {
+export function formatDateFr(ymd: string | null | undefined) {
   if (!ymd) return "—";
   const m = String(ymd).match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (!m) return String(ymd);
   return `${m[3]}/${m[2]}/${m[1]}`;
 }
 
-function formatMonthFr(month: string | null | undefined) {
+export function formatMonthFr(month: string | null | undefined) {
   if (!month) return "—";
   const m = String(month).match(/^(\d{4})-(\d{2})$/);
   if (!m) return String(month);
@@ -459,12 +459,12 @@ function formatMonthFr(month: string | null | undefined) {
   return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
-function formatShortDate(ymd: string) {
+export function formatShortDate(ymd: string) {
   const m = ymd.match(/^\d{4}-(\d{2})-(\d{2})/);
   return m ? `${m[2]}/${m[1]}` : ymd;
 }
 
-function formatShortMonthFr(month: string | null | undefined) {
+export function formatShortMonthFr(month: string | null | undefined) {
   if (!month) return "—";
   const m = String(month).match(/^(\d{4})-(\d{2})$/);
   if (!m) return String(month);
@@ -474,7 +474,7 @@ function formatShortMonthFr(month: string | null | undefined) {
     .replace(".", "");
 }
 
-function formatMoney(value: number | null | undefined) {
+export function formatMoney(value: number | null | undefined) {
   const n = Number(value || 0);
   const abs = Math.abs(n);
   if (abs >= 1000000)
@@ -484,24 +484,24 @@ function formatMoney(value: number | null | undefined) {
   return `${n.toLocaleString("fr-FR", { maximumFractionDigits: 0 })} €`;
 }
 
-function formatNumber(value: number | null | undefined) {
+export function formatNumber(value: number | null | undefined) {
   return Number(value || 0).toLocaleString("fr-FR", {
     maximumFractionDigits: 0,
   });
 }
 
-function formatPct(value: number | null | undefined) {
+export function formatPct(value: number | null | undefined) {
   if (value === null || value === undefined || !Number.isFinite(value))
     return "—";
   const sign = value >= 0 ? "+" : "";
   return `${sign}${value.toLocaleString("fr-FR", { maximumFractionDigits: 1 })} %`;
 }
 
-function sum<T>(rows: T[], selector: (row: T) => number) {
+export function sum<T>(rows: T[], selector: (row: T) => number) {
   return rows.reduce((acc, row) => acc + Number(selector(row) || 0), 0);
 }
 
-function groupBy<T>(rows: T[], keyFn: (row: T) => string) {
+export function groupBy<T>(rows: T[], keyFn: (row: T) => string) {
   const map = new Map<string, T[]>();
   rows.forEach((row) => {
     const key = keyFn(row) || "—";
@@ -512,7 +512,7 @@ function groupBy<T>(rows: T[], keyFn: (row: T) => string) {
   return map;
 }
 
-function valueOf(row: DailyRow, mode: ViewMode) {
+export function valueOf(row: DailyRow, mode: ViewMode) {
   if (mode === "nb_documents") return Number(row.nb_documents || 0);
   if (mode === "quantite_pertinente")
     return Number(row.quantite_pertinente || 0);
@@ -525,7 +525,7 @@ function labelForMode(mode: ViewMode) {
   return "Montant HT";
 }
 
-function shortDocLabel(type: DocType | string) {
+export function shortDocLabel(type: DocType | string) {
   return String(type) === "Factures" ? "Fac" : String(type);
 }
 
@@ -534,13 +534,13 @@ function displayValue(value: number, mode: ViewMode) {
   return formatNumber(value);
 }
 
-function kpiValue(card: KpiCardData, mode: ViewMode) {
+export function kpiValue(card: KpiCardData, mode: ViewMode) {
   if (mode === "nb_documents") return card.nb;
   if (mode === "quantite_pertinente") return card.qtyPert;
   return card.amount;
 }
 
-function kpiMonthValue(card: KpiCardData, mode: ViewMode) {
+export function kpiMonthValue(card: KpiCardData, mode: ViewMode) {
   if (mode === "nb_documents") return card.monthNb;
   if (mode === "quantite_pertinente") return card.monthQtyPert;
   return card.monthAmount;
@@ -557,7 +557,7 @@ function getTopLabel(rows: DailyRow[], dimension: "agence" | "famille_macro") {
   return ranked[0]?.label || "—";
 }
 
-function buildEvolution(dayValue: number, baseValue: number) {
+export function buildEvolution(dayValue: number, baseValue: number) {
   if (!baseValue) return null;
   return ((dayValue - baseValue) / Math.abs(baseValue)) * 100;
 }
@@ -632,7 +632,7 @@ function ordinalDayLabel(value: number) {
   return value === 1 ? "1er jour" : `${value}e jour`;
 }
 
-function buildMtdComparisonBasis(
+export function buildMtdComparisonBasis(
   currentRows: DailyRow[],
   previousRows: DailyRow[],
   month: string,
@@ -736,7 +736,7 @@ function pickDefaultFocusDate() {
   return todayYmd();
 }
 
-function normalizeKey(value: any) {
+export function normalizeKey(value: any) {
   return String(value || "")
     .trim()
     .toUpperCase();
@@ -792,7 +792,7 @@ function formatMoneyPlain(
   });
 }
 
-function formatMoneyCompact(value: number | null | undefined) {
+export function formatMoneyCompact(value: number | null | undefined) {
   const n = Number(value || 0);
   const abs = Math.abs(n);
 
@@ -886,7 +886,7 @@ function signedActivityAmount(
   return numericAmount;
 }
 
-function agencySort(a: string, b: string) {
+export function agencySort(a: string, b: string) {
   const aIsSans = normalizeKey(a) === "SANS AGENCE";
   const bIsSans = normalizeKey(b) === "SANS AGENCE";
   if (aIsSans && !bIsSans) return 1;
@@ -1138,7 +1138,7 @@ html, body, main, section,
 }
 `;
 
-function SparkLine({ values, color }: { values: number[]; color: string }) {
+export function SparkLine({ values, color }: { values: number[]; color: string }) {
   const width = 190;
   const height = 34;
   const absMax = Math.max(1, ...values.map((v) => Math.abs(v)));
@@ -1160,7 +1160,7 @@ function SparkLine({ values, color }: { values: number[]; color: string }) {
   );
 }
 
-function MultiLineChart({
+export function MultiLineChart({
   days,
   rows,
   mode,
@@ -1345,7 +1345,7 @@ function MultiLineChart({
   );
 }
 
-function CumulativeChart({
+export function CumulativeChart({
   days,
   rows,
   mode,
@@ -1389,7 +1389,7 @@ function CumulativeChart({
   );
 }
 
-function ComparisonEvolutionBadge({
+export function ComparisonEvolutionBadge({
   value,
 }: {
   value: number | null | undefined;
@@ -1420,7 +1420,7 @@ function ComparisonEvolutionBadge({
   );
 }
 
-function KpiMtdMetric({
+export function KpiMtdMetric({
   current,
   previous,
   evolution,
@@ -1453,7 +1453,7 @@ function KpiMtdMetric({
   );
 }
 
-function KpiCard({
+export function KpiCard({
   card,
   mode,
   comparisonBasis,
@@ -1529,7 +1529,7 @@ function KpiCard({
   );
 }
 
-function Table({ children }: { children: React.ReactNode }) {
+export function Table({ children }: { children: React.ReactNode }) {
   return (
     <div style={styles.tableWrap} className="focus-pdf-table-wrap">
       <table style={styles.table}>{children}</table>
@@ -1577,7 +1577,7 @@ function FilterDisplay({ label, value }: { label: string; value: string }) {
   );
 }
 
-function HighlightTable({
+export function HighlightTable({
   title,
   rows,
 }: {
@@ -4448,7 +4448,7 @@ function FocusMensuelPageContent() {
   );
 }
 
-function normalizeDailyRows(rows: DailyRow[]) {
+export function normalizeDailyRows(rows: DailyRow[]) {
   return rows.map((row) => ({
     ...row,
     jour: dateOnly(row.jour),
@@ -4473,7 +4473,7 @@ function createEmptyComparisonRecord(): Record<DocType, ComparisonCell> {
   };
 }
 
-function aggregateComparisonRows(
+export function aggregateComparisonRows(
   currentRows: DailyRow[],
   previousRows: DailyRow[],
   currentLabelFn: (row: DailyRow) => string,
@@ -4518,7 +4518,7 @@ function aggregateComparisonRows(
   );
 }
 
-function buildRollingComparisonRows(
+export function buildRollingComparisonRows(
   currentRows: DailyRow[],
   previousRows: DailyRow[],
   months: string[],
@@ -4568,7 +4568,7 @@ function buildRollingComparisonRows(
   return [total, ...rows];
 }
 
-function buildComparisonRowsFromAnnualCache(
+export function buildComparisonRowsFromAnnualCache(
   rows: AnnualCacheRpcRow[],
   tableKey: "agency_ytd" | "family_ytd" | "rolling_12",
 ): ComparisonRow[] {
@@ -4638,7 +4638,7 @@ function cloneComparisonRow(row: ComparisonRow): ComparisonRow {
   };
 }
 
-function buildProjectionCaByAgency(rows: AgencyProjectionRow[]) {
+export function buildProjectionCaByAgency(rows: AgencyProjectionRow[]) {
   const values = new Map<string, { label: string; projectionCa: number }>();
 
   rows.forEach((row) => {
@@ -4657,7 +4657,7 @@ function buildProjectionCaByAgency(rows: AgencyProjectionRow[]) {
   return values;
 }
 
-function buildCurrentMonthFacturesByAgency(
+export function buildCurrentMonthFacturesByAgency(
   rows: DailyRow[],
   currentMonth: string,
 ) {
@@ -4674,7 +4674,7 @@ function buildCurrentMonthFacturesByAgency(
   return values;
 }
 
-function applyProjectedCurrentMonthFacturesToAgencyRows(
+export function applyProjectedCurrentMonthFacturesToAgencyRows(
   rows: ComparisonRow[],
   currentRows: DailyRow[],
   projectionRows: AgencyProjectionRow[],
@@ -4717,7 +4717,7 @@ function applyProjectedCurrentMonthFacturesToAgencyRows(
   return adjustedRows.sort((a, b) => Math.abs(b.total) - Math.abs(a.total));
 }
 
-function applyProjectedCurrentMonthFacturesToRollingRows(
+export function applyProjectedCurrentMonthFacturesToRollingRows(
   rows: ComparisonRow[],
   currentRows: DailyRow[],
   projectionRows: AgencyProjectionRow[],
@@ -4751,7 +4751,7 @@ function applyProjectedCurrentMonthFacturesToRollingRows(
   });
 }
 
-function buildTotalComparisonRow(
+export function buildTotalComparisonRow(
   rows: ComparisonRow[],
   label = "TOTAL",
 ): ComparisonRow {
@@ -4774,7 +4774,7 @@ function buildTotalComparisonRow(
   return total;
 }
 
-function pctEvolution(current: number, previous: number) {
+export function pctEvolution(current: number, previous: number) {
   if (!previous) return null;
   return (
     ((Number(current || 0) - Number(previous || 0)) / Math.abs(previous)) * 100
@@ -4874,7 +4874,7 @@ function aggregateMatrix(
     .sort((a, b) => Math.abs(b.total) - Math.abs(a.total));
 }
 
-type MatrixMetric = "nb_documents" | "quantite_pertinente";
+export type MatrixMetric = "nb_documents" | "quantite_pertinente";
 
 function DenseMatrixColGroup() {
   return (
@@ -4887,7 +4887,7 @@ function DenseMatrixColGroup() {
   );
 }
 
-function SummaryMatrix({
+export function SummaryMatrix({
   title,
   subtitle,
   rows,
@@ -5088,7 +5088,7 @@ function SummaryMatrix({
 }
 
 
-function MtdComparisonMatrix({
+export function MtdComparisonMatrix({
   title,
   subtitle,
   rows,
@@ -5264,7 +5264,7 @@ function MtdComparisonMatrix({
 }
 
 
-function ActivityByAgencyComparisonTable({
+export function ActivityByAgencyComparisonTable({
   title,
   subtitle,
   rows,
@@ -5369,7 +5369,7 @@ function ActivityByAgencyComparisonTable({
   );
 }
 
-function ActivityByFamilyComparisonTable({
+export function ActivityByFamilyComparisonTable({
   title,
   rows,
   emptyMessage,
@@ -5550,7 +5550,7 @@ function ActivityByFamilyComparisonTable({
   );
 }
 
-function Rolling12ComparisonTable({
+export function Rolling12ComparisonTable({
   title,
   subtitle,
   rows,
@@ -5651,7 +5651,7 @@ function Rolling12ComparisonTable({
   );
 }
 
-function AgencyPortfolioTable({
+export function AgencyPortfolioTable({
   title,
   rows,
   emptyMessage,
@@ -5784,7 +5784,7 @@ function AgencyPortfolioTable({
   );
 }
 
-function AgencyProjectionTable({
+export function AgencyProjectionTable({
   title,
   rows,
   emptyMessage,
@@ -5945,7 +5945,7 @@ function AgencyProjectionTable({
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
+export const styles: Record<string, React.CSSProperties> = {
   reportBrandHeader: {
     display: "flex",
     justifyContent: "space-between",

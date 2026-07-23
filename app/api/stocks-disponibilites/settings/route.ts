@@ -134,6 +134,86 @@ export async function POST(req: NextRequest) {
       )
     }
 
+    if (action === 'weekly_assumptions_famille' || action === 'weekly_assumptions_famille_macro') {
+      const isMacro = action === 'weekly_assumptions_famille_macro'
+      const cle = String(body?.cle || '').trim() // valeur de famille OU famille_macro
+      const depot = body?.depot ? String(body.depot).trim() : 'GLOBAL'
+      const assumptions = Array.isArray(body?.assumptions)
+        ? (body.assumptions as WeeklyAssumption[])
+        : []
+
+      if (!cle || !assumptions.length) {
+        const error = {
+          status: 400,
+          code: 'ASSUMPTIONS_REQUIRED',
+          message: `${isMacro ? 'La famille macro' : 'La famille'} et au moins une hypothèse hebdomadaire sont obligatoires.`,
+        }
+        throw new DiagnosticError(trace.reportFromUnknown(error, error.message), 400, error)
+      }
+
+      for (const assumption of assumptions) {
+        const periodeDebut = String(assumption?.periode_debut || '').trim()
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(periodeDebut)) {
+          const error = {
+            status: 400,
+            code: 'INVALID_PERIOD',
+            message: `Période hebdomadaire invalide : ${periodeDebut || 'vide'}.`,
+          }
+          throw new DiagnosticError(trace.reportFromUnknown(error, error.message), 400, error)
+        }
+      }
+
+      const tableName = isMacro
+        ? 'stock_prevision_overrides_famille_macro'
+        : 'stock_prevision_overrides_famille'
+      const keyColumn = isMacro ? 'famille_macro' : 'famille'
+
+      const rows = assumptions.map((a) => ({
+        [keyColumn]: cle,
+        depot,
+        periode_debut: a.periode_debut,
+        coefficient_prevision: a.coefficient_prevision,
+        quantite_prevision_forcee: a.quantite_prevision_forcee,
+        updated_at: new Date().toISOString(),
+      }))
+
+      const upsertResponse: any = await trace.runStep(
+        {
+          layer: 'supabase_rest',
+          step: 'upsert_family_assumptions',
+          objectName: `public.${tableName}`,
+          context: { [keyColumn]: cle, depot, weeks: assumptions.length },
+        },
+        () =>
+          admin
+            .from(tableName)
+            .upsert(rows, { onConflict: `${keyColumn},depot,periode_debut` }),
+      )
+
+      if (upsertResponse.error) {
+        throw new DiagnosticError(
+          trace.reportFromUnknown(upsertResponse.error, upsertResponse.error.message),
+          500,
+          upsertResponse.error,
+        )
+      }
+
+      return diagnosticJson(
+        {
+          success: true,
+          mode: isMacro ? 'famille_macro' : 'famille',
+          updated_weeks: assumptions.length,
+          // Contrairement au niveau référence, il n'y a pas de recalcul
+          // instantané ici : l'hypothèse s'applique à tous les articles de
+          // la famille/famille macro au prochain "Recalculer toute la
+          // projection". La cascade en temps réel est un chantier séparé
+          // (moteur de recalcul multi-articles), pas encore construit.
+          requires_full_rebuild: true,
+        },
+        trace.reportSuccess(),
+      )
+    }
+
     const error = { status: 400, code: 'UNKNOWN_ACTION', message: `Action inconnue : ${action || 'vide'}.` }
     throw new DiagnosticError(trace.reportFromUnknown(error, error.message), 400, error)
   } catch (error) {
