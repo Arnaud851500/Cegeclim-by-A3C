@@ -1,9 +1,19 @@
 "use client";
 
 /**
- * PROJECTIONS STOCK — V2.2
+ * PROJECTIONS STOCK — V2.3
  * ------------------------------------------------------------------------
- * Suite de la V2.1. Cette révision :
+ * Suite de la V2.2. Cette révision :
+ *  - case à cocher « Intégrer les CDC en retard » sur le graphique famille
+ *    ET sur la fiche référence : les commandes clients ouvertes avec date
+ *    de livraison ANTÉRIEURE au début de projection (colonne
+ *    besoins_clients_retard, semaine 1 uniquement) apparaissent en VIOLET
+ *    au plus près de zéro, puis CDC fermes, puis prévision complémentaire.
+ *    La courbe de stock projeté est décalée de -retard à partir de la
+ *    semaine 1. Bascule 100% côté client : aucun recalcul serveur, les
+ *    deux lectures coexistent dans le même jeu de données.
+ * ------------------------------------------------------------------------
+ * Suite de la V2.1 (V2.2) :
  *  - la recherche référence passe au-dessus des 2 graphiques et filtre
  *    désormais les KPI ET les deux graphiques (pas seulement la liste),
  *    avec un compteur "X/Y références" affiché à côté
@@ -52,6 +62,7 @@ const ALERT_COLOR: Record<string, string> = {
 const GREEN = "#3F9142";
 const LIGHT_RED = "#E08A6B";
 const DARK_RED = "#A8422A";
+const PURPLE = "#7C5CBF"; // CDC en retard (date de livraison passée)
 
 function alertWeight(level: string): number {
   return level === "ROUGE" ? 3 : level === "ORANGE" ? 2 : level === "JAUNE" ? 1 : 0;
@@ -133,6 +144,10 @@ export default function StocksDisponibilites2Page() {
 
   const [search, setSearch] = useState("");
   const [onlyRupture, setOnlyRupture] = useState(false);
+  // Intégration des CDC avec date de livraison passée comme besoin ferme
+  // sur la 1re semaine (violet). Bascule instantanée : simple relecture
+  // client des colonnes déjà chargées, aucun recalcul de projection.
+  const [includeRetard, setIncludeRetard] = useState(false);
 
   const [horizonWeeks, setHorizonWeeks] = useState(26);
   const [scenarioPct, setScenarioPct] = useState(120);
@@ -243,7 +258,7 @@ export default function StocksDisponibilites2Page() {
   }, [familleArticles]);
 
   const [familleWeeklyRaw, setFamilleWeeklyRaw] = useState<
-    Array<{ reference_article: string; periode_debut: string; stock_projete: number; prevision_ventes: number; prevision_base_n1: number; besoins_clients_fermes: number; commandes_fournisseurs_attendues: number; niveau_alerte: string }>
+    Array<{ reference_article: string; periode_debut: string; stock_projete: number; prevision_ventes: number; prevision_base_n1: number; besoins_clients_fermes: number; besoins_clients_retard: number; commandes_fournisseurs_attendues: number; niveau_alerte: string }>
   >([]);
   const [familleWeeklyLoading, setFamilleWeeklyLoading] = useState(false);
 
@@ -270,6 +285,7 @@ export default function StocksDisponibilites2Page() {
             prevision_ventes: number | null;
             prevision_base_n1: number | null;
             besoins_clients_fermes: number | null;
+            besoins_clients_retard?: number | null;
             commandes_fournisseurs_attendues: number | null;
             niveau_alerte: string;
           }>;
@@ -284,6 +300,7 @@ export default function StocksDisponibilites2Page() {
               prevision_ventes: Number(r.prevision_ventes || 0),
               prevision_base_n1: Number(r.prevision_base_n1 || 0),
               besoins_clients_fermes: Number(r.besoins_clients_fermes || 0),
+              besoins_clients_retard: Number(r.besoins_clients_retard || 0),
               commandes_fournisseurs_attendues: Number(r.commandes_fournisseurs_attendues || 0),
               niveau_alerte: r.niveau_alerte,
             })),
@@ -303,11 +320,12 @@ export default function StocksDisponibilites2Page() {
 
   const familleWeekly = useMemo(() => {
     const filtered = searchMatches ? familleWeeklyRaw.filter((r) => searchMatches.has(r.reference_article)) : familleWeeklyRaw;
-    const byWeek = new Map<string, { stock_projete: number; sorties_fermes: number; sorties_prevision: number; sorties_n1: number; entrees: number; worst: number }>();
+    const byWeek = new Map<string, { stock_projete: number; sorties_fermes: number; sorties_retard: number; sorties_prevision: number; sorties_n1: number; entrees: number; worst: number }>();
     filtered.forEach((r) => {
-      const entry = byWeek.get(r.periode_debut) || { stock_projete: 0, sorties_fermes: 0, sorties_prevision: 0, sorties_n1: 0, entrees: 0, worst: 0 };
+      const entry = byWeek.get(r.periode_debut) || { stock_projete: 0, sorties_fermes: 0, sorties_retard: 0, sorties_prevision: 0, sorties_n1: 0, entrees: 0, worst: 0 };
       entry.stock_projete += r.stock_projete;
       entry.sorties_fermes += r.besoins_clients_fermes;
+      entry.sorties_retard += r.besoins_clients_retard;
       entry.sorties_prevision += r.prevision_ventes;
       entry.sorties_n1 += r.prevision_base_n1;
       entry.entrees += r.commandes_fournisseurs_attendues;
@@ -320,6 +338,7 @@ export default function StocksDisponibilites2Page() {
         periode_debut,
         stock_projete: v.stock_projete,
         sorties_fermes: v.sorties_fermes,
+        sorties_retard: v.sorties_retard,
         sorties_prevision: v.sorties_prevision,
         sorties_n: v.sorties_fermes + v.sorties_prevision,
         sorties_n1: v.sorties_n1,
@@ -383,10 +402,21 @@ export default function StocksDisponibilites2Page() {
       reelByMonth.set(key, entry);
     });
 
+    // Répartition AU PRORATA DES JOURS de chaque semaine sur les mois
+    // qu'elle chevauche. Sans cela, une semaine à cheval (ex. 30/11 → 06/12)
+    // était affectée en totalité au mois de son lundi, ce qui gonflait
+    // novembre et écrasait décembre — la courbe orange semblait alors
+    // rejoindre N-1 en fin d'année alors que le cumul était juste.
     const forecastByMonth = new Map<string, number>();
+    const daysCoveredByMonth = new Map<string, number>();
     familleWeekly.forEach((r) => {
-      const month = r.periode_debut.slice(5, 7);
-      forecastByMonth.set(month, (forecastByMonth.get(month) || 0) + r.sorties_n);
+      const start = new Date(`${r.periode_debut}T00:00:00Z`);
+      for (let d = 0; d < 7; d++) {
+        const day = new Date(start.getTime() + d * 86400000);
+        const month = String(day.getUTCMonth() + 1).padStart(2, "0");
+        forecastByMonth.set(month, (forecastByMonth.get(month) || 0) + r.sorties_n / 7);
+        daysCoveredByMonth.set(month, (daysCoveredByMonth.get(month) || 0) + 1);
+      }
     });
 
     const months = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0"));
@@ -396,7 +426,13 @@ export default function StocksDisponibilites2Page() {
       const forecast = forecastByMonth.get(m);
       const isFuture = m > currentMonth;
       const n = isFuture ? forecast ?? 0 : reel?.n ?? 0;
-      return { month: m, n, n1: reel?.n1 ?? 0, isFuture };
+      // Un mois futur situé au bord de l'horizon n'est couvert que
+      // partiellement : son total est mécaniquement sous-estimé et ne doit
+      // pas être comparé tel quel au mois calendaire N-1.
+      const daysInMonth = new Date(Date.UTC(currentYear, Number(m), 0)).getUTCDate();
+      const covered = daysCoveredByMonth.get(m) ?? 0;
+      const isPartial = isFuture && covered < daysInMonth;
+      return { month: m, n, n1: reel?.n1 ?? 0, isFuture, isPartial, coverageRatio: daysInMonth > 0 ? Math.min(1, covered / daysInMonth) : 0 };
     });
   }, [monthlyReelRaw, familleWeekly, searchMatches, todayIso, currentYear]);
 
@@ -410,7 +446,9 @@ export default function StocksDisponibilites2Page() {
 
   const forecastEvolution = useMemo(() => {
     const currentMonth = todayIso.slice(5, 7);
-    const future = monthlyChartData.filter((m) => m.month > currentMonth);
+    // Les mois partiellement couverts par l'horizon sont exclus : les
+    // inclure ferait apparaître une baisse purement optique.
+    const future = monthlyChartData.filter((m) => m.month > currentMonth && !m.isPartial);
     const n = future.reduce((s, m) => s + m.n, 0);
     const n1 = future.reduce((s, m) => s + m.n1, 0);
     return n1 > 0 ? ((n - n1) / n1) * 100 : null;
@@ -627,7 +665,7 @@ export default function StocksDisponibilites2Page() {
                 ) : familleWeekly.length === 0 ? (
                   <p className="py-8 text-center text-sm text-[#141A26]/40">Aucune donnée hebdomadaire.</p>
                 ) : (
-                  <WeeklyStockChart rows={familleWeekly} />
+                  <WeeklyStockChart rows={familleWeekly} includeRetard={includeRetard} onToggleRetard={setIncludeRetard} />
                 )}
               </div>
             </div>
@@ -685,7 +723,7 @@ export default function StocksDisponibilites2Page() {
         )}
       </div>
 
-      {selectedArticle && <ArticleDrawer article={selectedArticle} runId={runId} onClose={() => setSelectedArticle(null)} />}
+      {selectedArticle && <ArticleDrawer article={selectedArticle} runId={runId} onClose={() => setSelectedArticle(null)} includeRetard={includeRetard} onToggleRetard={setIncludeRetard} />}
     </div>
   );
 }
@@ -800,7 +838,7 @@ const MONTH_LABELS = ["janv.", "fév.", "mars", "avr.", "mai", "juin", "juil.", 
 function MonthlySortiesChart({
   rows, todayIso, ytdEvolution, forecastEvolution,
 }: {
-  rows: Array<{ month: string; n: number; n1: number; isFuture: boolean }>;
+  rows: Array<{ month: string; n: number; n1: number; isFuture: boolean; isPartial?: boolean; coverageRatio?: number }>;
   todayIso: string;
   ytdEvolution: number | null;
   forecastEvolution: number | null;
@@ -831,6 +869,7 @@ function MonthlySortiesChart({
         { label: MONTH_LABELS[i], value: "" },
         { label: r.isFuture ? "Prévisionnel N" : "Réel N", value: formatNumber(r.n), color: r.isFuture ? "#C1683C" : "#141A26" },
         { label: "N-1", value: formatNumber(r.n1), color: "#8A93A6" },
+        ...(r.isPartial ? [{ label: "Horizon partiel", value: `${Math.round((r.coverageRatio ?? 0) * 100)}% du mois couvert`, color: "#D69A4A" }] : []),
       ],
     });
   }
@@ -853,13 +892,16 @@ function MonthlySortiesChart({
           <line key={i} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke={s.future ? "#C1683C" : "#141A26"} strokeWidth={2.75} strokeDasharray={s.future ? "9 5" : undefined} />
         ))}
         {rows.map((r, i) => (
-          <circle key={r.month} cx={x(i)} cy={y(r.n)} r={4} fill={r.isFuture ? "#C1683C" : "#141A26"} />
+          <circle key={r.month} cx={x(i)} cy={y(r.n)} r={4} fill={r.isPartial ? "#F5F3EC" : r.isFuture ? "#C1683C" : "#141A26"} stroke={r.isPartial ? "#C1683C" : undefined} strokeWidth={r.isPartial ? 1.75 : undefined} />
         ))}
         {rows.map((r, i) => (
           <rect key={`hit-${r.month}`} x={x(i) - (innerW / 22)} y={0} width={innerW / 11} height={height} fill="transparent" onMouseMove={(e) => handleMove(e, i)} className="cursor-pointer" />
         ))}
 
         {rows.map((r, i) => {
+          // Un mois seulement partiellement couvert par l'horizon donnerait
+          // un % trompeur (baisse purement optique) : on ne l'affiche pas.
+          if (r.isPartial) return null;
           const pct = r.n1 > 0 ? ((r.n - r.n1) / r.n1) * 100 : null;
           if (pct === null) return null;
           return (
@@ -886,13 +928,16 @@ function MonthlySortiesChart({
           Hypothèse fin d&rsquo;année vs N-1 : <EvolBadge pct={forecastEvolution} />
         </div>
       </div>
-      <div className="mt-2 flex gap-4 text-[10px] text-[#141A26]/50">
+      <div className="mt-2 flex flex-wrap gap-4 text-[10px] text-[#141A26]/50">
         <span><span className="mr-1 inline-block h-0.5 w-3 bg-[#141A26] align-middle" /> Réel N</span>
         <span><span className="mr-1 inline-block h-0.5 w-3 bg-[#C1683C] align-middle" /> Prévisionnel N</span>
         <span><span className="mr-1 inline-block h-0.5 w-3 bg-[#8A93A6] align-middle" /> N-1</span>
+        {rows.some((r) => r.isPartial) && (
+          <span><span className="mr-1 inline-block h-2 w-2 rounded-full border border-[#C1683C] bg-[#F5F3EC] align-middle" /> Mois partiellement couvert par l&rsquo;horizon</span>
+        )}
       </div>
       <p className="mt-1.5 text-[10px] italic text-[#141A26]/40">
-        Le prévisionnel inclut les CDC fermes, qui ne sont pas affectées par le % d&rsquo;évolution — c&rsquo;est pourquoi il peut dépasser N-1 même à 100%. Détail visible dans le graphique de droite.
+        Le prévisionnel inclut les CDC fermes, qui ne sont pas affectées par le % d&rsquo;évolution — c&rsquo;est pourquoi il peut dépasser N-1 même à 100%. Chaque semaine est répartie au prorata des jours sur les mois qu&rsquo;elle chevauche, et les mois incomplets en fin d&rsquo;horizon sont exclus des % pour éviter une baisse purement optique. Détail visible dans le graphique de droite.
       </p>
     </div>
   );
@@ -900,8 +945,12 @@ function MonthlySortiesChart({
 
 function WeeklyStockChart({
   rows,
+  includeRetard = false,
+  onToggleRetard,
 }: {
-  rows: Array<{ periode_debut: string; stock_projete: number; sorties_n: number; sorties_fermes?: number; sorties_prevision?: number; sorties_n1: number; entrees: number; niveau_alerte_max: string }>;
+  rows: Array<{ periode_debut: string; stock_projete: number; sorties_n: number; sorties_fermes?: number; sorties_retard?: number; sorties_prevision?: number; sorties_n1: number; entrees: number; niveau_alerte_max: string }>;
+  includeRetard?: boolean;
+  onToggleRetard?: (v: boolean) => void;
 }) {
   const [simQty, setSimQty] = useState(0);
   const [simWeek, setSimWeek] = useState(rows[0]?.periode_debut || "");
@@ -914,16 +963,38 @@ function WeeklyStockChart({
   const innerW = width - padding.left - padding.right;
   const innerH = height - padding.top - padding.bottom;
 
+  // Total des CDC en retard sur l'horizon (portées par la 1re semaine).
+  const retardTotal = useMemo(() => rows.reduce((s, r) => s + (r.sorties_retard || 0), 0), [rows]);
+
   const simulated = useMemo(() => {
-    if (!simQty || !simWeek) return rows.map((r) => ({ ...r, simMarker: 0 }));
-    return rows.map((r) => ({
+    // 1) Intégration éventuelle des CDC en retard : consommées en cumul à
+    //    partir de leur semaine (en pratique la semaine 1), la courbe de
+    //    stock est donc décalée de -retard sur toute la suite. Bascule
+    //    purement client — aucun recalcul de projection.
+    let cumRetard = 0;
+    const withRetard = rows.map((r) => {
+      const retard = includeRetard ? r.sorties_retard || 0 : 0;
+      cumRetard += retard;
+      const stockAjuste = r.stock_projete - (includeRetard ? cumRetard : 0);
+      return {
+        ...r,
+        retardAffiche: retard,
+        stock_projete: stockAjuste,
+        // Si l'intégration du retard fait passer le stock sous zéro, la
+        // lecture d'alerte de la semaine bascule en rouge.
+        niveau_alerte_max: includeRetard && stockAjuste < 0 ? "ROUGE" : r.niveau_alerte_max,
+      };
+    });
+    // 2) Simulation d'appro (comportement existant).
+    if (!simQty || !simWeek) return withRetard.map((r) => ({ ...r, simMarker: 0 }));
+    return withRetard.map((r) => ({
       ...r,
       simMarker: r.periode_debut === simWeek ? simQty : 0,
       stock_projete: r.periode_debut >= simWeek ? r.stock_projete + simQty : r.stock_projete,
     }));
-  }, [rows, simQty, simWeek]);
+  }, [rows, simQty, simWeek, includeRetard]);
 
-  const allVals = simulated.flatMap((r) => [r.stock_projete, r.entrees, -r.sorties_n]);
+  const allVals = simulated.flatMap((r) => [r.stock_projete, r.entrees, -(r.sorties_n + r.retardAffiche)]);
   const maxVal = Math.max(1, ...allVals);
   const minVal = Math.min(0, ...allVals);
   const x = (i: number) => padding.left + (i / Math.max(1, simulated.length - 1)) * innerW;
@@ -939,11 +1010,12 @@ function WeeklyStockChart({
       y: (y(r.stock_projete) / height) * rect.height,
       lines: [
         { label: formatDate(r.periode_debut), value: "" },
-        { label: "Stock projeté", value: formatNumber(r.stock_projete), color: ALERT_COLOR[r.niveau_alerte_max] },
+        { label: includeRetard ? "Stock projeté (retards intégrés)" : "Stock projeté", value: formatNumber(r.stock_projete), color: ALERT_COLOR[r.niveau_alerte_max] },
         { label: "Entrées à venir", value: formatNumber(r.entrees), color: GREEN },
+        ...(r.retardAffiche > 0 ? [{ label: "  dont CDC en retard (à date)", value: formatNumber(r.retardAffiche), color: PURPLE }] : []),
         ...(r.sorties_fermes !== undefined ? [{ label: "  dont CDC fermes", value: formatNumber(r.sorties_fermes), color: DARK_RED }] : []),
         ...(r.sorties_prevision !== undefined ? [{ label: "  dont prévisionnel pur", value: formatNumber(r.sorties_prevision), color: LIGHT_RED }] : []),
-        { label: "Sorties prévisionnelles (total)", value: formatNumber(r.sorties_n) },
+        { label: "Sorties prévisionnelles (total)", value: formatNumber(r.sorties_n + r.retardAffiche) },
         ...(r.simMarker ? [{ label: "Simulation ajoutée ici", value: `+${formatNumber(r.simMarker)}`, color: "#3F9142" }] : []),
       ],
     });
@@ -964,16 +1036,21 @@ function WeeklyStockChart({
           {simulated.map((r, i) => (
             <rect key={`in-${r.periode_debut}`} x={x(i) - barWidth / 2} y={y(Math.max(0, r.entrees))} width={barWidth} height={Math.max(0, y(0) - y(Math.max(0, r.entrees)))} fill={GREEN} opacity={0.3} />
           ))}
-          {/* Sorties prévisionnelles empilées : CDC fermes (rouge foncé) au plus
-              près de zéro, puis prévisionnel pur (rouge clair) au-dessus —
-              rend visible la part garantie vs la part purement hypothétique. */}
+          {/* Sorties empilées sous zéro, du plus « certain » au plus
+              hypothétique : CDC en retard (violet, semaine 1 uniquement, si
+              la case est cochée), puis CDC fermes (rouge foncé), puis
+              prévisionnel complémentaire (rouge clair). */}
           {simulated.map((r, i) => {
+            const retard = r.retardAffiche;
             const fermes = r.sorties_fermes ?? 0;
             const prevision = r.sorties_prevision ?? r.sorties_n;
             return (
               <g key={`out-${r.periode_debut}`}>
-                <rect x={x(i) - barWidth / 2} y={y(0)} width={barWidth} height={Math.max(0, y(-fermes) - y(0))} fill={DARK_RED} opacity={0.55} />
-                <rect x={x(i) - barWidth / 2} y={y(-fermes)} width={barWidth} height={Math.max(0, y(-fermes - prevision) - y(-fermes))} fill={LIGHT_RED} opacity={0.35} />
+                {retard > 0 && (
+                  <rect x={x(i) - barWidth / 2} y={y(0)} width={barWidth} height={Math.max(0, y(-retard) - y(0))} fill={PURPLE} opacity={0.75} />
+                )}
+                <rect x={x(i) - barWidth / 2} y={y(-retard)} width={barWidth} height={Math.max(0, y(-retard - fermes) - y(-retard))} fill={DARK_RED} opacity={0.55} />
+                <rect x={x(i) - barWidth / 2} y={y(-retard - fermes)} width={barWidth} height={Math.max(0, y(-retard - fermes - prevision) - y(-retard - fermes))} fill={LIGHT_RED} opacity={0.35} />
               </g>
             );
           })}
@@ -1001,9 +1078,31 @@ function WeeklyStockChart({
         </svg>
         <ChartTooltip tooltip={tooltip} />
       </div>
+      {/* Case à cocher : bascule instantanée, aucun recalcul serveur —
+          les deux lectures viennent du même jeu de données déjà chargé. */}
+      {onToggleRetard && (
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border p-2 text-xs" style={{ borderColor: `${PURPLE}55`, background: `${PURPLE}0F` }}>
+          <label className="flex cursor-pointer items-center gap-2 text-[#141A26]">
+            <input
+              type="checkbox"
+              checked={includeRetard}
+              onChange={(e) => onToggleRetard(e.target.checked)}
+              className="h-4 w-4 rounded border-black/20"
+              style={{ accentColor: PURPLE }}
+            />
+            <span className="font-medium">Intégrer les CDC en retard comme besoins fermes (1<sup>re</sup> semaine)</span>
+          </label>
+          <span className="font-[var(--font-mono)]" style={{ color: PURPLE }}>
+            {retardTotal > 0 ? `${formatNumber(retardTotal)} u. en retard` : "Aucun retard"}
+          </span>
+        </div>
+      )}
       <div className="mb-2 flex flex-wrap gap-4 text-[10px] text-[#141A26]/50">
         <span>— Stock projeté (couleur = alerte)</span>
         <span><span className="mr-1 inline-block h-2 w-2 align-middle" style={{ background: GREEN, opacity: 0.4 }} /> Entrées à venir</span>
+        {includeRetard && (
+          <span><span className="mr-1 inline-block h-2 w-2 align-middle" style={{ background: PURPLE, opacity: 0.75 }} /> CDC en retard (livraison passée)</span>
+        )}
         <span><span className="mr-1 inline-block h-2 w-2 align-middle" style={{ background: DARK_RED, opacity: 0.55 }} /> Sorties CDC fermes</span>
         <span><span className="mr-1 inline-block h-2 w-2 align-middle" style={{ background: LIGHT_RED, opacity: 0.45 }} /> Sorties prévisionnelles pures</span>
         <span><span className="mr-1 inline-block h-2 w-2 border border-[#3F9142] align-middle" style={{ background: "repeating-linear-gradient(45deg, #3F9142 0 2px, transparent 2px 5px)" }} /> Simulation (semaine d&rsquo;injection)</span>
@@ -1042,7 +1141,7 @@ type BesoinClientRow = {
   numeros_pieces: string | null;
 };
 
-function ArticleDrawer({ article, runId, onClose }: { article: AlertRow; runId: string | null; onClose: () => void }) {
+function ArticleDrawer({ article, runId, onClose, includeRetard, onToggleRetard }: { article: AlertRow; runId: string | null; onClose: () => void; includeRetard: boolean; onToggleRetard: (v: boolean) => void }) {
   const [rows, setRows] = useState<ProjectionRow[]>([]);
   const [fournisseurs, setFournisseurs] = useState<FournisseurRow[]>([]);
   const [besoinsClients, setBesoinsClients] = useState<BesoinClientRow[]>([]);
@@ -1090,6 +1189,9 @@ function ArticleDrawer({ article, runId, onClose }: { article: AlertRow; runId: 
         periode_debut: r.periode_debut,
         stock_projete: r.stock_projete || 0,
         sorties_fermes: r.besoins_clients_fermes || 0,
+        // Colonne ajoutée côté base (V2.3) : peut être absente d'un run
+        // antérieur, d'où l'accès défensif.
+        sorties_retard: Number((r as unknown as { besoins_clients_retard?: number | null }).besoins_clients_retard || 0),
         sorties_prevision: r.prevision_ventes || 0,
         sorties_n: (r.prevision_ventes || 0) + (r.besoins_clients_fermes || 0),
         sorties_n1: r.prevision_base_n1 || 0,
@@ -1135,7 +1237,7 @@ function ArticleDrawer({ article, runId, onClose }: { article: AlertRow; runId: 
               {weeklyForChart.length === 0 ? (
                 <p className="py-8 text-center text-sm text-[#141A26]/40">Aucune projection hebdomadaire.</p>
               ) : (
-                <WeeklyStockChart rows={weeklyForChart} />
+                <WeeklyStockChart rows={weeklyForChart} includeRetard={includeRetard} onToggleRetard={onToggleRetard} />
               )}
             </div>
 
@@ -1147,6 +1249,7 @@ function ArticleDrawer({ article, runId, onClose }: { article: AlertRow; runId: 
                   <tr className="border-b border-black/10 text-left text-xs uppercase tracking-wide text-[#141A26]/50">
                     <th className="whitespace-nowrap px-4 py-3">Semaine</th>
                     <th className="whitespace-nowrap px-4 py-3 text-right">BL N-1</th>
+                    {includeRetard && <th className="whitespace-nowrap px-4 py-3 text-right" style={{ color: PURPLE }}>CDC en retard</th>}
                     <th className="whitespace-nowrap px-4 py-3 text-right">CDC fermes</th>
                     <th className="whitespace-nowrap px-4 py-3 text-right">Prévision complémentaire</th>
                     <th className="whitespace-nowrap px-4 py-3 text-right">Coefficient appliqué</th>
@@ -1158,6 +1261,11 @@ function ArticleDrawer({ article, runId, onClose }: { article: AlertRow; runId: 
                     <tr key={r.periode_debut}>
                       <td className="whitespace-nowrap px-4 py-2 font-[var(--font-mono)] text-[#141A26]">{formatDate(r.periode_debut)}</td>
                       <td className="whitespace-nowrap px-4 py-2 text-right font-[var(--font-mono)] text-[#8A93A6]">{formatNumber(r.prevision_base_n1)}</td>
+                      {includeRetard && (
+                        <td className="whitespace-nowrap px-4 py-2 text-right font-[var(--font-mono)] font-medium" style={{ color: PURPLE }}>
+                          {formatNumber(Number((r as unknown as { besoins_clients_retard?: number | null }).besoins_clients_retard || 0))}
+                        </td>
+                      )}
                       <td className="whitespace-nowrap px-4 py-2 text-right font-[var(--font-mono)]">{formatNumber(r.besoins_clients_fermes)}</td>
                       <td className="whitespace-nowrap px-4 py-2 text-right font-[var(--font-mono)] text-[#C1683C]">{formatNumber(r.prevision_ventes)}</td>
                       <td className="whitespace-nowrap px-4 py-2 text-right font-[var(--font-mono)] text-[#141A26]/60">×{toNumber(r.coefficient_prevision_applique).toFixed(2)}</td>
