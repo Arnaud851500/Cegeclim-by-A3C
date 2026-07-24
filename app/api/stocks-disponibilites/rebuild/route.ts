@@ -198,7 +198,7 @@ export async function POST(req: NextRequest) {
 
     if (!incomingRunId) {
       const dateDebut = toIsoDate(body.date_debut)
-      const nbSemaines = toPositiveInteger(body.nb_semaines, 16, 1, 104)
+      const nbSemaines = toPositiveInteger(body.nb_semaines, 26, 1, 104)
       const scenarioPct = toPositiveNumber(body.scenario_prevision_pct, 1.2)
       const depotMode =
         getString(body.depot_mode, 'GLOBAL').toUpperCase() === 'DEPOT'
