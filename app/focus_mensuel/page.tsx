@@ -267,7 +267,7 @@ type SupabaseRpcResult<TData> = {
   error: unknown | null;
 };
 
-type AgencyControlRpcRow = {
+export type AgencyControlRpcRow = {
   label: string | null;
   cdc: number | null;
   cdc_liv_mx: number | null;

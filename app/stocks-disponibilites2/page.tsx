@@ -51,6 +51,7 @@ const ALERT_COLOR: Record<string, string> = {
 };
 const GREEN = "#3F9142";
 const LIGHT_RED = "#E08A6B";
+const DARK_RED = "#A8422A";
 
 function alertWeight(level: string): number {
   return level === "ROUGE" ? 3 : level === "ORANGE" ? 2 : level === "JAUNE" ? 1 : 0;
@@ -144,31 +145,28 @@ export default function StocksDisponibilites2Page() {
     else setRecalcScope("all");
   }, [level]);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      setLoading(true);
-      setError(null);
-      try {
-        const session = await supabase.auth.getSession();
-        const token = session.data.session?.access_token;
-        const res = await fetch("/api/stocks-disponibilites/data", { headers: token ? { Authorization: `Bearer ${token}` } : {} });
-        const payload = (await res.json()) as { success: boolean; message?: string; alertes?: AlertRow[]; kpi?: { run_id?: string } };
-        if (!res.ok || !payload.success) throw new Error(payload?.message || "Erreur inconnue");
-        if (!cancelled) {
-          setAlertes(payload.alertes || []);
-          setRunId(payload.kpi?.run_id ?? null);
-        }
-      } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  async function loadMainData() {
+    setLoading(true);
+    setError(null);
+    try {
+      const session = await supabase.auth.getSession();
+      const token = session.data.session?.access_token;
+      const res = await fetch("/api/stocks-disponibilites/data", { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+      const payload = (await res.json()) as { success: boolean; message?: string; alertes?: AlertRow[]; kpi?: { run_id?: string } };
+      if (!res.ok || !payload.success) throw new Error(payload?.message || "Erreur inconnue");
+      setAlertes(payload.alertes || []);
+      setRunId(payload.kpi?.run_id ?? null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
     }
-    load();
-    return () => {
-      cancelled = true;
-    };
+  }
+
+  useEffect(() => {
+    loadMainData();
   }, []);
 
   const macroCards = useMemo(() => {
@@ -301,15 +299,16 @@ export default function StocksDisponibilites2Page() {
     return () => {
       cancelled = true;
     };
-  }, [selectedFamille]);
+  }, [selectedFamille, refreshKey]);
 
   const familleWeekly = useMemo(() => {
     const filtered = searchMatches ? familleWeeklyRaw.filter((r) => searchMatches.has(r.reference_article)) : familleWeeklyRaw;
-    const byWeek = new Map<string, { stock_projete: number; sorties_n: number; sorties_n1: number; entrees: number; worst: number }>();
+    const byWeek = new Map<string, { stock_projete: number; sorties_fermes: number; sorties_prevision: number; sorties_n1: number; entrees: number; worst: number }>();
     filtered.forEach((r) => {
-      const entry = byWeek.get(r.periode_debut) || { stock_projete: 0, sorties_n: 0, sorties_n1: 0, entrees: 0, worst: 0 };
+      const entry = byWeek.get(r.periode_debut) || { stock_projete: 0, sorties_fermes: 0, sorties_prevision: 0, sorties_n1: 0, entrees: 0, worst: 0 };
       entry.stock_projete += r.stock_projete;
-      entry.sorties_n += r.prevision_ventes + r.besoins_clients_fermes;
+      entry.sorties_fermes += r.besoins_clients_fermes;
+      entry.sorties_prevision += r.prevision_ventes;
       entry.sorties_n1 += r.prevision_base_n1;
       entry.entrees += r.commandes_fournisseurs_attendues;
       entry.worst = Math.max(entry.worst, alertWeight(r.niveau_alerte));
@@ -320,12 +319,15 @@ export default function StocksDisponibilites2Page() {
       .map(([periode_debut, v]) => ({
         periode_debut,
         stock_projete: v.stock_projete,
-        sorties_n: v.sorties_n,
+        sorties_fermes: v.sorties_fermes,
+        sorties_prevision: v.sorties_prevision,
+        sorties_n: v.sorties_fermes + v.sorties_prevision,
         sorties_n1: v.sorties_n1,
         entrees: v.entrees,
         niveau_alerte_max: v.worst >= 3 ? "ROUGE" : v.worst >= 2 ? "ORANGE" : v.worst >= 1 ? "JAUNE" : "VERT",
       }));
   }, [familleWeeklyRaw, searchMatches]);
+
 
   const sortiesHorizonKpi = useMemo(() => {
     const n = familleWeekly.reduce((s, r) => s + r.sorties_n, 0);
@@ -365,7 +367,7 @@ export default function StocksDisponibilites2Page() {
     return () => {
       cancelled = true;
     };
-  }, [selectedFamille]);
+  }, [selectedFamille, refreshKey]);
 
   const todayIso = new Date().toISOString().slice(0, 10);
   const currentYear = new Date().getFullYear();
@@ -419,6 +421,11 @@ export default function StocksDisponibilites2Page() {
 
   async function handleRecalculerGlobal() {
     setRebuildProgress({ percent: 0, message: "Démarrage…" });
+    const warnBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
     try {
       const session = await supabase.auth.getSession();
       const token = session.data.session?.access_token;
@@ -436,11 +443,15 @@ export default function StocksDisponibilites2Page() {
         done = payload.done;
         continuation = payload.continuation;
       }
-      setRebuildProgress({ percent: 100, message: "Terminé — rechargement…" });
-      window.location.reload();
+      setRebuildProgress({ percent: 100, message: "Terminé — actualisation…" });
+      await loadMainData();
+      setRefreshKey((k) => k + 1);
+      setTimeout(() => setRebuildProgress(null), 2000);
     } catch (e) {
       setRebuildProgress(null);
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      window.removeEventListener("beforeunload", warnBeforeUnload);
     }
   }
 
@@ -452,6 +463,11 @@ export default function StocksDisponibilites2Page() {
     const cle = recalcScope === "famille" ? selectedFamille : selectedMacro;
     if (!cle) return;
     setRebuildProgress({ percent: 0, message: `Recalcul de ${cle}…` });
+    const warnBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
     try {
       const session = await supabase.auth.getSession();
       const token = session.data.session?.access_token;
@@ -463,10 +479,14 @@ export default function StocksDisponibilites2Page() {
       const payload = (await res.json()) as { success: boolean; message?: string; articles_traites?: number; articles_total?: number };
       if (!res.ok || !payload.success) throw new Error(payload?.message || "Échec du recalcul");
       setRebuildProgress({ percent: 100, message: `${payload.articles_traites}/${payload.articles_total} article(s) recalculé(s)` });
-      window.location.reload();
+      await loadMainData();
+      setRefreshKey((k) => k + 1);
+      setTimeout(() => setRebuildProgress(null), 2000);
     } catch (e) {
       setRebuildProgress(null);
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      window.removeEventListener("beforeunload", warnBeforeUnload);
     }
   }
 
@@ -474,7 +494,7 @@ export default function StocksDisponibilites2Page() {
 
   return (
     <div className={`${display.variable} ${body.variable} ${mono.variable} min-h-screen w-full`} style={{ background: "#0B1220", fontFamily: "var(--font-body)" }}>
-      <div className="sticky z-20 border-b border-white/10 bg-[#0B1220]/97 backdrop-blur" style={{ top: headerOffset }}>
+      <div className="sticky z-10 border-b border-white/10 bg-[#0B1220]/97 backdrop-blur" style={{ top: headerOffset }}>
         <div className="w-full px-6 py-4 md:px-10">
           <div className="mb-4 flex flex-wrap items-end justify-between gap-4">
             <div>
@@ -485,6 +505,11 @@ export default function StocksDisponibilites2Page() {
               <div className="flex items-center gap-2">
                 <label className="text-xs uppercase tracking-wide text-white/40">Horizon (sem.)</label>
                 <input type="number" min={1} max={104} value={horizonWeeks} onChange={(e) => setHorizonWeeks(Number(e.target.value))} className="w-20 rounded-lg border border-white/15 bg-white/5 px-2 py-1.5 text-sm text-white outline-none focus:border-[#A6A181]" />
+                {selectedFamille && familleWeekly.length > 0 && familleWeekly.length !== horizonWeeks && (
+                  <span className="text-[11px] text-[#D69A4A]" title="Les données affichées viennent du dernier recalcul terminé, pas forcément de ce réglage">
+                    (données chargées : {familleWeekly.length} sem.)
+                  </span>
+                )}
               </div>
               <div className="flex items-center gap-2">
                 <label className="text-xs uppercase tracking-wide text-white/40">Scénario %</label>
@@ -513,6 +538,11 @@ export default function StocksDisponibilites2Page() {
               <div className="h-1.5 w-full rounded-full bg-white/10">
                 <div className="h-1.5 rounded-full bg-[#4B92AC] transition-all" style={{ width: `${rebuildProgress.percent}%` }} />
               </div>
+              {rebuildProgress.percent < 100 && (
+                <p className="mt-1.5 text-[11px] text-[#D69A4A]">
+                  Le calcul complet peut prendre plusieurs minutes — gardez cet onglet ouvert et actif jusqu&rsquo;à la fin, sinon il restera bloqué à mi-parcours.
+                </p>
+              )}
             </div>
           )}
 
@@ -577,7 +607,7 @@ export default function StocksDisponibilites2Page() {
               blYtd={blYtdKpi}
               sortiesHorizon={sortiesHorizonKpi}
               stockEvolution={stockEvolutionKpi}
-              horizonWeeks={horizonWeeks}
+              horizonWeeks={familleWeekly.length}
             />
 
             <div className="mb-6 grid grid-cols-1 gap-4 xl:grid-cols-2">
@@ -861,6 +891,9 @@ function MonthlySortiesChart({
         <span><span className="mr-1 inline-block h-0.5 w-3 bg-[#C1683C] align-middle" /> Prévisionnel N</span>
         <span><span className="mr-1 inline-block h-0.5 w-3 bg-[#8A93A6] align-middle" /> N-1</span>
       </div>
+      <p className="mt-1.5 text-[10px] italic text-[#141A26]/40">
+        Le prévisionnel inclut les CDC fermes, qui ne sont pas affectées par le % d&rsquo;évolution — c&rsquo;est pourquoi il peut dépasser N-1 même à 100%. Détail visible dans le graphique de droite.
+      </p>
     </div>
   );
 }
@@ -868,7 +901,7 @@ function MonthlySortiesChart({
 function WeeklyStockChart({
   rows,
 }: {
-  rows: Array<{ periode_debut: string; stock_projete: number; sorties_n: number; sorties_n1: number; entrees: number; niveau_alerte_max: string }>;
+  rows: Array<{ periode_debut: string; stock_projete: number; sorties_n: number; sorties_fermes?: number; sorties_prevision?: number; sorties_n1: number; entrees: number; niveau_alerte_max: string }>;
 }) {
   const [simQty, setSimQty] = useState(0);
   const [simWeek, setSimWeek] = useState(rows[0]?.periode_debut || "");
@@ -908,7 +941,9 @@ function WeeklyStockChart({
         { label: formatDate(r.periode_debut), value: "" },
         { label: "Stock projeté", value: formatNumber(r.stock_projete), color: ALERT_COLOR[r.niveau_alerte_max] },
         { label: "Entrées à venir", value: formatNumber(r.entrees), color: GREEN },
-        { label: "Sorties prévisionnelles", value: formatNumber(r.sorties_n), color: LIGHT_RED },
+        ...(r.sorties_fermes !== undefined ? [{ label: "  dont CDC fermes", value: formatNumber(r.sorties_fermes), color: DARK_RED }] : []),
+        ...(r.sorties_prevision !== undefined ? [{ label: "  dont prévisionnel pur", value: formatNumber(r.sorties_prevision), color: LIGHT_RED }] : []),
+        { label: "Sorties prévisionnelles (total)", value: formatNumber(r.sorties_n) },
         ...(r.simMarker ? [{ label: "Simulation ajoutée ici", value: `+${formatNumber(r.simMarker)}`, color: "#3F9142" }] : []),
       ],
     });
@@ -929,9 +964,19 @@ function WeeklyStockChart({
           {simulated.map((r, i) => (
             <rect key={`in-${r.periode_debut}`} x={x(i) - barWidth / 2} y={y(Math.max(0, r.entrees))} width={barWidth} height={Math.max(0, y(0) - y(Math.max(0, r.entrees)))} fill={GREEN} opacity={0.3} />
           ))}
-          {simulated.map((r, i) => (
-            <rect key={`out-${r.periode_debut}`} x={x(i) - barWidth / 2} y={y(0)} width={barWidth} height={Math.max(0, y(-r.sorties_n) - y(0))} fill={LIGHT_RED} opacity={0.35} />
-          ))}
+          {/* Sorties prévisionnelles empilées : CDC fermes (rouge foncé) au plus
+              près de zéro, puis prévisionnel pur (rouge clair) au-dessus —
+              rend visible la part garantie vs la part purement hypothétique. */}
+          {simulated.map((r, i) => {
+            const fermes = r.sorties_fermes ?? 0;
+            const prevision = r.sorties_prevision ?? r.sorties_n;
+            return (
+              <g key={`out-${r.periode_debut}`}>
+                <rect x={x(i) - barWidth / 2} y={y(0)} width={barWidth} height={Math.max(0, y(-fermes) - y(0))} fill={DARK_RED} opacity={0.55} />
+                <rect x={x(i) - barWidth / 2} y={y(-fermes)} width={barWidth} height={Math.max(0, y(-fermes - prevision) - y(-fermes))} fill={LIGHT_RED} opacity={0.35} />
+              </g>
+            );
+          })}
           {simulated.map((r, i) =>
             r.simMarker ? (
               <rect key={`sim-${r.periode_debut}`} x={x(i) - barWidth / 2} y={y(r.stock_projete) - 7} width={barWidth} height={14} fill="url(#hatch-green)" stroke="#3F9142" strokeWidth={1} />
@@ -959,7 +1004,8 @@ function WeeklyStockChart({
       <div className="mb-2 flex flex-wrap gap-4 text-[10px] text-[#141A26]/50">
         <span>— Stock projeté (couleur = alerte)</span>
         <span><span className="mr-1 inline-block h-2 w-2 align-middle" style={{ background: GREEN, opacity: 0.4 }} /> Entrées à venir</span>
-        <span><span className="mr-1 inline-block h-2 w-2 align-middle" style={{ background: LIGHT_RED, opacity: 0.45 }} /> Sorties prévisionnelles</span>
+        <span><span className="mr-1 inline-block h-2 w-2 align-middle" style={{ background: DARK_RED, opacity: 0.55 }} /> Sorties CDC fermes</span>
+        <span><span className="mr-1 inline-block h-2 w-2 align-middle" style={{ background: LIGHT_RED, opacity: 0.45 }} /> Sorties prévisionnelles pures</span>
         <span><span className="mr-1 inline-block h-2 w-2 border border-[#3F9142] align-middle" style={{ background: "repeating-linear-gradient(45deg, #3F9142 0 2px, transparent 2px 5px)" }} /> Simulation (semaine d&rsquo;injection)</span>
       </div>
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-black/10 bg-white/60 p-2 text-xs">
@@ -1043,6 +1089,8 @@ function ArticleDrawer({ article, runId, onClose }: { article: AlertRow; runId: 
       rows.map((r) => ({
         periode_debut: r.periode_debut,
         stock_projete: r.stock_projete || 0,
+        sorties_fermes: r.besoins_clients_fermes || 0,
+        sorties_prevision: r.prevision_ventes || 0,
         sorties_n: (r.prevision_ventes || 0) + (r.besoins_clients_fermes || 0),
         sorties_n1: r.prevision_base_n1 || 0,
         entrees: r.commandes_fournisseurs_attendues || 0,
