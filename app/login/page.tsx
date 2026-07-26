@@ -1,18 +1,30 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { Montserrat } from 'next/font/google'
+import { Space_Grotesk, IBM_Plex_Sans, IBM_Plex_Mono } from 'next/font/google'
 import { supabase } from '@/lib/supabaseClient'
 import { useAccess } from '@/components/AccessContext'
 import { logUserEvent } from '@/lib/audit'
 
-const montserrat = Montserrat({
-  subsets: ['latin'],
-  weight: ['400', '500', '600', '700', '800'],
-})
+const fontDisplay = Space_Grotesk({ subsets: ['latin'], weight: ['500', '700'], variable: '--font-display' })
+const fontBody = IBM_Plex_Sans({ subsets: ['latin'], weight: ['400', '500', '600'], variable: '--font-body' })
+const fontMono = IBM_Plex_Mono({ subsets: ['latin'], weight: ['400', '500', '600'], variable: '--font-mono' })
 
 const DEFAULT_LANDING_PAGE = '/accueil'
+
+/** Préfixe des clés localStorage mémorisant les messages déjà masqués. */
+const ANNONCE_MASQUEE_PREFIX = 'cegeclim_annonce_masquee_'
+
+type Annonce = {
+  id: string
+  titre: string | null
+  message: string
+  date_debut: string
+  date_fin: string
+  dismissible: boolean
+  dismiss_after_seconds: number
+}
 
 async function getUserLandingPage(email: string | null | undefined) {
   const normalizedEmail = String(email || '').toLowerCase().trim()
@@ -30,6 +42,112 @@ async function getUserLandingPage(email: string | null | undefined) {
   return page || DEFAULT_LANDING_PAGE
 }
 
+/**
+ * Message temporaire piloté par la table `app_announcements`.
+ * Rien n'est codé en dur : période de diffusion, texte, possibilité de masquer
+ * et délai avant que le bouton « Ne plus afficher » s'active sont tous des
+ * colonnes. Publier ou retirer un message ne demande aucun déploiement.
+ */
+function AnnonceTemporaire() {
+  const [annonce, setAnnonce] = useState<Annonce | null>(null)
+  const [secondesRestantes, setSecondesRestantes] = useState(0)
+  const [masquee, setMasquee] = useState(false)
+
+  useEffect(() => {
+    let annule = false
+
+    async function charger() {
+      const { data, error } = await supabase
+        .from('app_announcements')
+        .select('id, titre, message, date_debut, date_fin, dismissible, dismiss_after_seconds')
+        .in('emplacement', ['login', 'both'])
+        .eq('actif', true)
+        .order('ordre', { ascending: true })
+        .order('date_debut', { ascending: true })
+
+      // Une annonce indisponible ne doit jamais empêcher de se connecter :
+      // on trace en console et on n'affiche rien.
+      if (error) {
+        console.warn('[annonces] lecture impossible :', error.message)
+        return
+      }
+      if (annule) return
+
+      const aujourdhui = new Date().toISOString().slice(0, 10)
+
+      const premiere = ((data || []) as Annonce[])
+        .filter((a) => a.date_debut <= aujourdhui && aujourdhui <= a.date_fin)
+        .find((a) => {
+          if (!a.dismissible) return true
+          try {
+            return window.localStorage.getItem(`${ANNONCE_MASQUEE_PREFIX}${a.id}`) !== '1'
+          } catch {
+            return true
+          }
+        })
+
+      if (!premiere) return
+
+      setAnnonce(premiere)
+      setSecondesRestantes(Math.max(0, Number(premiere.dismiss_after_seconds || 0)))
+    }
+
+    void charger()
+    return () => {
+      annule = true
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!annonce || secondesRestantes <= 0) return
+    const timer = window.setTimeout(() => setSecondesRestantes((v) => Math.max(0, v - 1)), 1000)
+    return () => window.clearTimeout(timer)
+  }, [annonce, secondesRestantes])
+
+  const masquer = useCallback(() => {
+    if (!annonce) return
+    try {
+      window.localStorage.setItem(`${ANNONCE_MASQUEE_PREFIX}${annonce.id}`, '1')
+    } catch {
+      // Navigation privée ou stockage refusé : le message réapparaîtra, ce qui
+      // est le comportement le moins risqué pour une information importante.
+    }
+    setMasquee(true)
+  }, [annonce])
+
+  if (!annonce || masquee) return null
+
+  const boutonActif = secondesRestantes <= 0
+
+  return (
+    <div style={styles.annonceWrap} role="status" aria-live="polite">
+      <div style={styles.annonceCarte}>
+        <span style={styles.annoncePastille} aria-hidden="true" />
+
+        <div style={styles.annonceTexte}>
+          {annonce.titre && <div style={styles.annonceTitre}>{annonce.titre}</div>}
+          <div style={styles.annonceMessage}>{annonce.message}</div>
+        </div>
+
+        {annonce.dismissible && (
+          <button
+            type="button"
+            onClick={masquer}
+            disabled={!boutonActif}
+            style={{
+              ...styles.annonceBouton,
+              opacity: boutonActif ? 1 : 0.45,
+              cursor: boutonActif ? 'pointer' : 'default',
+            }}
+          >
+            {boutonActif ? 'Ne plus afficher' : `Ne plus afficher (${secondesRestantes} s)`}
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export default function LoginPage() {
   const router = useRouter()
   const { loading: accessLoading, email: sessionEmail } = useAccess()
@@ -39,11 +157,9 @@ export default function LoginPage() {
   const [errorMsg, setErrorMsg] = useState('')
   const [loading, setLoading] = useState(false)
 
-  // Logo CEGECLIM déjà présent
   const logoCegeclim =
     'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/cegecilm%20officiel.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL2NlZ2VjaWxtIG9mZmljaWVsLmpwZyIsImlhdCI6MTc3NDY1MTM3OSwiZXhwIjo0ODk2NzE1Mzc5fQ.ePcMFHir7RsvdR-cR7nwh83H03S8oihNKwVgK2eCmy0'
 
-  // À remplacer par l’URL réelle de la photo maison dans ton bucket Supabase
   const backgroundImageUrl =
     'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Logo%20et%20images/Image%20site%20CEGECLIM%20maison.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJMb2dvIGV0IGltYWdlcy9JbWFnZSBzaXRlIENFR0VDTElNIG1haXNvbi5qcGciLCJpYXQiOjE3NzU1MDYyNTEsImV4cCI6NDg5NzU3MDI1MX0.d1YT7_-xD44QOm2LFbZIfpkjh9kiIGjpJiEuJxV0rMM'
 
@@ -71,65 +187,93 @@ export default function LoginPage() {
     })
 
     if (error) {
-      setErrorMsg('Identifiant ou mot de passe incorrect.')
+      // L'erreur dit ce qui s'est passé et quoi faire, sans révéler si
+      // l'adresse existe.
+      setErrorMsg("Cette combinaison identifiant / mot de passe n'est pas reconnue. Vérifiez la saisie puis réessayez.")
       setLoading(false)
       return
     }
+
     await logUserEvent({
       user_email: data.user?.email ?? email,
       event_type: 'login',
       pathname: '/login',
       metadata: { result: 'success' },
     })
+
     const landingPage = await getUserLandingPage(data.user?.email || normalizedEmail)
     setLoading(false)
     router.replace(landingPage)
   }
 
   return (
-    <main className={montserrat.className} style={styles.page}>
-      <div style={styles.header} className="loginHeader">
-        <div style={styles.headerLeft} className="loginHeaderLeft">
-          <img
-            src={logoCegeclim}
-            alt="Cegeclim Énergies"
-            style={styles.logo}
-            className="loginLogo"
-          />
+    <main
+      className={`${fontDisplay.variable} ${fontBody.variable} ${fontMono.variable} loginPage`}
+      style={styles.page}
+    >
+      <AnnonceTemporaire />
 
-          <div style={styles.headerTitles} className="loginHeaderTitles">
-            <div style={styles.headerSubtitle} className="loginHeaderSubtitle">
+      {/* --- Volet identité : la photo recule derrière un voile marine ----- */}
+      <section
+        className="loginVisuel"
+        style={{
+          ...styles.visuel,
+          backgroundImage: `linear-gradient(180deg, rgba(11,18,32,0.70), rgba(11,18,32,0.93)), url("${backgroundImageUrl}")`,
+        }}
+      >
+        <div style={styles.marque}>
+          <img src={logoCegeclim} alt="CEGECLIM Énergies" style={styles.logo} className="loginLogo" />
+          <div>
+            <div style={styles.marqueSur} className="loginMarqueSur">
               Concessionnaire agréé de Bosch Home Comfort Group
             </div>
-            <div style={styles.headerTitle} className="loginHeaderTitle">
+            <div style={styles.marqueNom} className="loginMarqueNom">
               Hitachi Cooling &amp; Heating
             </div>
           </div>
         </div>
 
-        <div style={styles.headerRight} className="loginHeaderRight">
-          <span style={styles.headerRightBlue}>DISTRIBUTEUR DE SOLUTIONS </span>
-          <span style={styles.headerRightGreen}>DURABLES</span>
+        {/* Signature de marque. Le bicolore d'origine est marine + vert ; sur
+            fond sombre le marine deviendrait illisible, la première partie
+            passe donc en blanc et le vert #9EAD43 est conservé tel quel. */}
+        <div style={styles.signature} className="loginSignature">
+          Distributeur de solutions <span style={styles.signatureAccent}>durables</span>
         </div>
-      </div>
 
-      <section
-        className="loginHero"
-        style={{
-          ...styles.hero,
-          backgroundImage: `url("${backgroundImageUrl}")`,
-        }}
-      >
-        <div style={styles.formCard} className="loginCard">
-          <div style={styles.formTitle} className="loginCardTitle">
-            SUIVI COMMERCIAL & PROSPECT
+        <div style={styles.visuelBas}>
+          <div style={styles.eyebrow}>Suivi commercial &amp; prospect</div>
+          <h1 style={styles.titre} className="loginTitre">Le pilotage commercial CEGECLIM</h1>
+          <p style={styles.sousTitre} className="loginSousTitre">
+            Activité quotidienne, portefeuille de commandes, projection de stock et indicateurs d&rsquo;agence,
+            sur un même périmètre.
+          </p>
+
+          <div style={styles.rail} className="loginRail">
+            <div>
+              <div style={styles.railEtiquette}>Tableaux de bord</div>
+              <div style={styles.railValeur}>9</div>
+            </div>
+            <div>
+              <div style={styles.railEtiquette}>Périmètre</div>
+              <div style={styles.railValeur}>Par profil</div>
+            </div>
+            <div>
+              <div style={styles.railEtiquette}>Mise à jour</div>
+              <div style={styles.railValeur}>Quotidienne</div>
+            </div>
           </div>
+        </div>
+      </section>
 
-          <form onSubmit={handleLogin} style={styles.form}>
-            <div style={styles.formRow} className="loginRow">
-              <label htmlFor="email" style={styles.label} className="loginLabel">
-                User
-              </label>
+      {/* --- Volet formulaire --------------------------------------------- */}
+      <section style={styles.voletForm} className="loginVolet">
+        <div style={styles.carte} className="loginCarte">
+          <div style={styles.formTitre}>Connexion</div>
+          <div style={styles.formAide}>Utilisez l&rsquo;adresse professionnelle associée à votre profil.</div>
+
+          <form onSubmit={handleLogin} style={{ marginTop: 4 }}>
+            <div style={styles.champ}>
+              <label htmlFor="email" style={styles.label}>Identifiant</label>
               <input
                 id="email"
                 type="email"
@@ -138,13 +282,12 @@ export default function LoginPage() {
                 style={styles.input}
                 className="loginInput"
                 autoComplete="email"
+                placeholder="prenom.nom@cegeclim.fr"
               />
             </div>
 
-            <div style={styles.formRow} className="loginRow">
-              <label htmlFor="password" style={styles.label} className="loginLabel">
-                Mot de passe
-              </label>
+            <div style={styles.champ}>
+              <label htmlFor="password" style={styles.label}>Mot de passe</label>
               <input
                 id="password"
                 type="password"
@@ -153,172 +296,59 @@ export default function LoginPage() {
                 style={styles.input}
                 className="loginInput"
                 autoComplete="current-password"
+                placeholder="••••••••"
               />
             </div>
 
-            <div style={styles.buttonRow}>
-              <button
-                type="submit"
-                disabled={loading}
-                style={styles.button}
-                className="loginButton"
-              >
-                {loading ? 'Connexion...' : 'Connexion'}
-              </button>
-            </div>
+            <button type="submit" disabled={loading} style={styles.bouton} className="loginBouton">
+              {loading ? 'Connexion…' : 'Se connecter'}
+            </button>
 
-            {!!errorMsg && <div style={styles.error}>{errorMsg}</div>}
+            {!!errorMsg && <div style={styles.erreur} role="alert">{errorMsg}</div>}
           </form>
+
+          <div style={styles.pied}>Profil et périmètre appliqués automatiquement à la connexion.</div>
         </div>
       </section>
 
-      <style jsx>{`
-        @media (max-width: 1200px) {
-          .loginHeader {
-            padding: 12px 24px;
-          }
+      <style jsx global>{`
+        html, body { margin: 0; }
 
-          .loginHeaderRight {
-            font-size: 20px;
-          }
+        .loginInput:focus {
+          border-color: #A6A181 !important;
+          box-shadow: 0 0 0 3px rgba(166, 161, 129, 0.28);
+        }
+        .loginBouton:hover:not(:disabled) { filter: brightness(1.08); }
+        .loginBouton:disabled { opacity: 0.6; cursor: default; }
 
-          .loginHeaderSubtitle {
-            font-size: 20px;
-          }
-
-          .loginHeaderTitle {
-            font-size: 25px;
-          }
-
-          .loginCard {
-            max-width: 680px;
-          }
+        @media (max-width: 1400px) {
+          .loginCarte { max-width: 470px !important; }
         }
 
-        @media (max-width: 980px) {
-          .loginHeader {
-            height: auto;
-            min-height: 96px;
-            flex-direction: column;
-            align-items: flex-start;
-            justify-content: center;
-            gap: 10px;
-          }
-
-          .loginHeaderLeft {
-            width: 100%;
-          }
-
-          .loginHeaderRight {
-            width: 100%;
-            text-align: left;
-            white-space: normal;
-            margin-left: 0;
-            font-size: 18px;
-          }
-
-          .loginLogo {
-            width: 118px !important;
-          }
-
-          .loginHeaderSubtitle {
-            font-size: 18px;
-          }
-
-          .loginHeaderTitle {
-            font-size: 23px;
-          }
-
-          .loginHero {
-            min-height: calc(100vh - 96px);
-            padding: 24px;
-          }
-
-          .loginCard {
-            max-width: 640px;
-            padding: 28px 30px 24px !important;
-          }
-
-          .loginCardTitle {
-            font-size: 30px !important;
-            margin-bottom: 24px !important;
-          }
-
-          .loginRow {
-            grid-template-columns: 160px 1fr !important;
-            column-gap: 22px !important;
-          }
-
-          .loginLabel {
-            font-size: 20px !important;
-          }
+        /* Le volet identité passe au-dessus du formulaire sur écran étroit,
+           réduit à une bande : la photo reste présente sans voler la hauteur
+           nécessaire à la saisie. */
+        @media (max-width: 1000px) {
+          .loginPage { grid-template-columns: 1fr !important; }
+          .loginVisuel { min-height: 300px; padding: 28px 26px !important; }
+          .loginSousTitre { font-size: 17px !important; }
+          .loginSignature { font-size: 19px !important; margin-top: 20px !important; }
+          .loginRail { display: none !important; }
+          .loginVolet { padding: 30px 20px !important; }
         }
 
-        @media (max-width: 700px) {
-          .loginHeader {
-            padding: 12px 16px;
-          }
+        @media (max-width: 600px) {
+          .loginLogo { width: 150px !important; }
+          .loginMarqueSur { font-size: 13px !important; }
+          .loginMarqueNom { font-size: 20px !important; }
+          .loginVisuel { min-height: 230px; }
+          .loginSousTitre { font-size: 15px !important; }
+          .loginSignature { font-size: 15px !important; margin-top: 16px !important; }
+          .loginCarte { padding: 28px 24px 24px !important; }
+        }
 
-          .loginHeaderLeft {
-            gap: 12px;
-            align-items: flex-start;
-          }
-
-          .loginLogo {
-            width: 90px !important;
-          }
-
-          .loginHeaderSubtitle {
-            font-size: 14px;
-            line-height: 1.2;
-          }
-
-          .loginHeaderTitle {
-            font-size: 19px;
-            line-height: 1.12;
-          }
-
-          .loginHeaderRight {
-            font-size: 15px;
-          }
-
-          .loginHero {
-            padding: 16px;
-            background-position: center center;
-          }
-
-          .loginCard {
-            width: 100%;
-            padding: 22px 18px 20px !important;
-          }
-
-          .loginCardTitle {
-            font-size: 24px !important;
-            margin-bottom: 20px !important;
-          }
-
-          .loginRow {
-            grid-template-columns: 1fr !important;
-            row-gap: 8px !important;
-            margin-bottom: 16px !important;
-          }
-
-          .loginLabel {
-            font-size: 18px !important;
-          }
-
-          .loginInput {
-            height: 48px !important;
-            font-size: 16px !important;
-            border-radius: 14px !important;
-          }
-
-          .loginButton {
-            min-width: 160px !important;
-            height: 48px !important;
-            font-size: 18px !important;
-            border-radius: 14px !important;
-          }
+        @media (prefers-reduced-motion: reduce) {
+          * { transition: none !important; }
         }
       `}</style>
     </main>
@@ -329,164 +359,286 @@ const styles: Record<string, React.CSSProperties> = {
   page: {
     minHeight: '100vh',
     width: '100%',
-    margin: 0,
-    background: '#e9e9e9',
+    display: 'grid',
+    gridTemplateColumns: '1fr 0.92fr',
+    background: '#0B1220',
+    fontFamily: 'var(--font-body)',
+    color: '#fff',
   },
 
-  header: {
-    height: 108,
-    background: '#ffffff',
+  /* ---- Message temporaire ----------------------------------------------- */
+
+  annonceWrap: {
+    position: 'fixed',
+    top: 22,
+    left: '50%',
+    transform: 'translateX(-50%)',
+    zIndex: 60,
+    width: 'min(880px, calc(100vw - 32px))',
     display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: '10px 34px 10px 28px',
-    boxSizing: 'border-box',
-    borderBottom: '1px solid #ececec',
-    gap: 20,
+    justifyContent: 'center',
   },
 
-  headerLeft: {
+  annonceCarte: {
+    width: '100%',
     display: 'flex',
     alignItems: 'center',
-    gap: 18,
+    gap: 16,
+    padding: '16px 20px',
+    borderRadius: 14,
+    background: '#F5F3EC',
+    color: '#141A26',
+    border: '1px solid rgba(166,161,129,0.55)',
+    boxShadow: '0 18px 44px rgba(0,0,0,0.42)',
+  },
+
+  annoncePastille: {
+    width: 10,
+    height: 10,
+    borderRadius: '50%',
+    background: '#C1683C',
+    boxShadow: '0 0 0 4px rgba(193,104,60,0.18)',
+    flexShrink: 0,
+  },
+
+  annonceTexte: {
+    flex: 1,
     minWidth: 0,
+  },
+
+  annonceTitre: {
+    fontFamily: 'var(--font-display)',
+    fontSize: 16,
+    fontWeight: 700,
+    letterSpacing: '-0.01em',
+    marginBottom: 3,
+  },
+
+  annonceMessage: {
+    fontSize: 14,
+    lineHeight: 1.5,
+    color: 'rgba(20,26,38,0.75)',
+  },
+
+  annonceBouton: {
+    flexShrink: 0,
+    border: '1px solid rgba(20,26,38,0.22)',
+    background: '#ffffff',
+    color: '#141A26',
+    borderRadius: 9,
+    padding: '9px 14px',
+    fontFamily: 'var(--font-body)',
+    fontSize: 12.5,
+    fontWeight: 600,
+    whiteSpace: 'nowrap',
+  },
+
+  /* ---- Volet identité ---------------------------------------------------- */
+
+  visuel: {
+    position: 'relative',
+    display: 'flex',
+    flexDirection: 'column',
+    padding: '52px 56px 50px',
+    backgroundSize: 'cover',
+    backgroundPosition: 'center',
+    backgroundRepeat: 'no-repeat',
+  },
+
+  marque: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 24,
   },
 
   logo: {
-    width: 150,
+    width: 210,
     height: 'auto',
     objectFit: 'contain',
+    background: '#fff',
+    borderRadius: 10,
+    padding: '7px 12px',
     flexShrink: 0,
   },
 
-  headerTitles: {
-    display: 'flex',
-    flexDirection: 'column',
-    justifyContent: 'center',
-    minWidth: 0,
+  marqueSur: {
+    fontSize: 17,
+    color: 'rgba(255,255,255,0.55)',
+    lineHeight: 1.25,
   },
 
-  headerSubtitle: {
-    fontSize: 23,
-    fontWeight: 500,
-    color: '#2d2d2d',
-    lineHeight: 1.08,
-    letterSpacing: '-0.02em',
+  marqueNom: {
+    fontFamily: 'var(--font-display)',
+    fontSize: 30,
+    fontWeight: 700,
+    letterSpacing: '-0.015em',
+    marginTop: 4,
   },
 
-  headerTitle: {
-    fontSize: 28,
-    fontWeight: 800,
-    color: '#222222',
-    lineHeight: 1.08,
-    letterSpacing: '-0.02em',
-    marginTop: 2,
-  },
-
-  headerRight: {
-    fontSize: 22,
-    fontWeight: 800,
+  signature: {
+    marginTop: 30,
+    fontFamily: 'var(--font-display)',
+    fontWeight: 700,
+    fontSize: 'clamp(18px, 1.85vw, 30px)',
     lineHeight: 1.1,
-    letterSpacing: '0.01em',
-    textAlign: 'right',
-    whiteSpace: 'nowrap',
-    marginLeft: 24,
-    flexShrink: 0,
+    letterSpacing: '-0.005em',
+    textTransform: 'uppercase',
+    color: '#ffffff',
   },
 
-  headerRightBlue: {
-    color: '#17344d',
+  signatureAccent: {
+    color: '#9EAD43',
   },
 
-  headerRightGreen: {
-    color: '#9ead43',
+  visuelBas: {
+    marginTop: 'auto',
   },
 
-  hero: {
-    width: '100%',
-    minHeight: 'calc(100vh - 108px)',
-    backgroundSize: 'cover',
-    backgroundPosition: 'center center',
-    backgroundRepeat: 'no-repeat',
+  eyebrow: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: 15,
+    fontWeight: 500,
+    letterSpacing: '0.26em',
+    textTransform: 'uppercase',
+    color: '#A6A181',
+  },
+
+  titre: {
+    fontFamily: 'var(--font-display)',
+    // Le titre suit la largeur disponible plutôt qu'une valeur figée : sur un
+    // très grand écran il double vraiment, sans déborder sur un portable.
+    fontSize: 'clamp(38px, 5.4vw, 84px)',
+    fontWeight: 700,
+    lineHeight: 1.02,
+    letterSpacing: '-0.035em',
+    margin: '20px 0 0',
+    maxWidth: '15ch',
+  },
+
+  sousTitre: {
+    fontSize: 20,
+    lineHeight: 1.55,
+    color: 'rgba(255,255,255,0.6)',
+    margin: '22px 0 0',
+    maxWidth: '44ch',
+  },
+
+  rail: {
+    display: 'flex',
+    gap: 48,
+    marginTop: 42,
+    paddingTop: 28,
+    borderTop: '1px solid rgba(255,255,255,0.16)',
+  },
+
+  railEtiquette: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: 13,
+    letterSpacing: '0.16em',
+    textTransform: 'uppercase',
+    color: 'rgba(255,255,255,0.42)',
+  },
+
+  railValeur: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: 30,
+    fontWeight: 600,
+    marginTop: 8,
+  },
+
+  /* ---- Volet formulaire -------------------------------------------------- */
+
+  voletForm: {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 32,
-    boxSizing: 'border-box',
+    padding: '48px 44px',
   },
 
-  formCard: {
+  carte: {
     width: '100%',
-    maxWidth: 720,
-    background: 'rgba(247, 247, 247, 0.97)',
-    padding: '34px 56px 26px',
-    boxSizing: 'border-box',
-    boxShadow: '0 2px 12px rgba(0,0,0,0.08)',
+    maxWidth: 540,
+    background: '#F5F3EC',
+    borderRadius: 20,
+    padding: '46px 44px 36px',
+    color: '#141A26',
+    boxShadow: '0 28px 70px rgba(0,0,0,0.38)',
   },
 
-  formTitle: {
-    textAlign: 'center',
-    color: '#17344d',
-    fontSize: 34,
-    fontWeight: 800,
-    letterSpacing: '-0.02em',
-    marginBottom: 30,
+  formTitre: {
+    fontFamily: 'var(--font-display)',
+    fontSize: 38,
+    fontWeight: 700,
+    letterSpacing: '-0.025em',
+    lineHeight: 1.05,
   },
 
-  form: {
-    width: '100%',
+  formAide: {
+    fontSize: 17,
+    lineHeight: 1.5,
+    color: 'rgba(20,26,38,0.55)',
+    marginTop: 10,
   },
 
-  formRow: {
-    display: 'grid',
-    gridTemplateColumns: '190px 1fr',
-    alignItems: 'center',
-    columnGap: 34,
-    marginBottom: 20,
+  champ: {
+    marginTop: 28,
   },
 
   label: {
-    fontSize: 22,
-    fontWeight: 500,
-    color: '#1f2430',
+    display: 'block',
+    fontFamily: 'var(--font-mono)',
+    fontSize: 13,
+    letterSpacing: '0.16em',
+    textTransform: 'uppercase',
+    color: 'rgba(20,26,38,0.5)',
+    marginBottom: 10,
   },
 
   input: {
     width: '100%',
-    height: 54,
-    background: '#f7f7f7',
-    border: '3px solid #17344d',
-    borderRadius: 18,
+    height: 58,
+    borderRadius: 12,
     padding: '0 18px',
     fontSize: 18,
-    color: '#1f2430',
+    fontFamily: 'var(--font-body)',
+    color: '#141A26',
+    background: '#fff',
+    border: '1px solid rgba(20,26,38,0.16)',
     outline: 'none',
     boxSizing: 'border-box',
+    transition: 'border-color 0.15s ease, box-shadow 0.15s ease',
   },
 
-  buttonRow: {
-    display: 'flex',
-    justifyContent: 'center',
-    marginTop: 8,
-  },
-
-  button: {
-    minWidth: 160,
-    height: 52,
-    borderRadius: 16,
-    border: '3px solid #17344d',
-    background: '#f7f7f7',
-    color: '#1f2430',
+  bouton: {
+    width: '100%',
+    height: 60,
+    marginTop: 34,
+    border: 'none',
+    borderRadius: 12,
+    background: '#A6A181',
+    color: '#141A26',
+    fontFamily: 'var(--font-body)',
     fontSize: 18,
-    fontWeight: 700,
+    fontWeight: 600,
     cursor: 'pointer',
+    transition: 'filter 0.15s ease',
   },
 
-  error: {
-    marginTop: 16,
-    textAlign: 'center',
-    color: '#b42318',
+  erreur: {
+    marginTop: 20,
+    padding: '13px 15px',
+    borderRadius: 12,
+    background: 'rgba(193,104,60,0.12)',
+    border: '1px solid rgba(193,104,60,0.28)',
+    color: '#9C4A24',
+    fontSize: 15,
+    lineHeight: 1.5,
+  },
+
+  pied: {
+    marginTop: 24,
     fontSize: 14,
-    fontWeight: 600,
+    color: 'rgba(20,26,38,0.4)',
+    textAlign: 'center',
   },
 }

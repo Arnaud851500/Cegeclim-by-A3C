@@ -18,7 +18,7 @@
  * ------------------------------------------------------------------------
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Space_Grotesk, IBM_Plex_Sans, IBM_Plex_Mono } from "next/font/google";
 import { supabase } from "@/lib/supabaseClient";
 import { usePageFilterAccess } from "@/lib/pageAccessFilters";
@@ -57,6 +57,11 @@ const TABS = [
 ] as const;
 type TabKey = (typeof TABS)[number]["key"];
 
+// Hauteur commune aux 3 cartes de la vue d'ensemble. Dimensionnée pour
+// afficher le portefeuille et la projection sans ascenseur interne dans le
+// cas courant (~16 agences + ligne TOTAL).
+const OVERVIEW_CARD_MIN_HEIGHT = 660;
+
 // ---------------------------------------------------------------------------
 // Utilitaires de dates locales à V3 (uniquement pour construire les plages
 // de requête RPC — n'affecte pas la logique de calcul réutilisée)
@@ -92,25 +97,36 @@ function last12Months(monthStr: string): string[] {
 // Bandeau supérieur escamotable au scroll
 // ---------------------------------------------------------------------------
 
-function useAutoHideHeader() {
-  const [hidden, setHidden] = useState(false);
-  const lastY = useRef(0);
+/**
+ * Suit le bord bas RÉEL et VISIBLE du bandeau de navigation du site, qui
+ * s'escamote lui-même au scroll via translateY. On s'y ancre en `sticky` au
+ * lieu de repositionner ce bandeau de page en `fixed` : un élément fixe se
+ * superpose au bandeau du site (il devenait inaccessible) et impose une cale
+ * de compensation qui, elle, laissait une bande vide. En `sticky`, l'élément
+ * reste dans le flux : aucun vide n'est possible, et le bandeau de page
+ * remonte naturellement en haut de l'écran quand celui du site disparaît.
+ *
+ * Même mécanique que la page Projections stock — comportement homogène entre
+ * les deux écrans.
+ */
+function useSiteHeaderOffset() {
+  const [offset, setOffset] = useState(0);
 
   useEffect(() => {
-    function onScroll() {
-      const y = window.scrollY;
-      const goingDown = y > lastY.current + 4;
-      const goingUp = y < lastY.current - 4;
-      if (y < 80) setHidden(false);
-      else if (goingDown) setHidden(true);
-      else if (goingUp) setHidden(false);
-      lastY.current = y;
+    const el = document.querySelector('[data-cegeclim-header="true"]') as HTMLElement | null;
+    if (!el) return;
+
+    let raf = 0;
+    function update() {
+      const rect = el!.getBoundingClientRect();
+      setOffset(Math.max(0, rect.bottom));
+      raf = requestAnimationFrame(update);
     }
-    window.addEventListener("scroll", onScroll, { passive: true });
-    return () => window.removeEventListener("scroll", onScroll);
+    raf = requestAnimationFrame(update);
+    return () => cancelAnimationFrame(raf);
   }, []);
 
-  return hidden;
+  return offset;
 }
 
 // ---------------------------------------------------------------------------
@@ -119,7 +135,7 @@ function useAutoHideHeader() {
 
 export default function FocusMensuel3Page() {
   const access = usePageFilterAccess();
-  const headerHidden = useAutoHideHeader();
+  const headerOffset = useSiteHeaderOffset();
 
   const [tab, setTab] = useState<TabKey>("vue");
   const [useProjectedCaInRolling, setUseProjectedCaInRolling] = useState(true);
@@ -394,6 +410,11 @@ export default function FocusMensuel3Page() {
 
   const months12 = useMemo(() => last12Months(month), [month]);
 
+  const focusDayLabel = useMemo(
+    () => new Date(focusDay).toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" }),
+    [focusDay],
+  );
+
   return (
     <div
       className={`${display.variable} ${body.variable} ${mono.variable} min-h-screen w-full`}
@@ -405,10 +426,14 @@ export default function FocusMensuel3Page() {
           modifier là-bas. Surcharge locale, scopée à cette page uniquement. */}
       <style>{`.focus-pdf-section-card { background: #F5F3EC !important; }`}</style>
 
-      {/* ---- Bandeau supérieur escamotable ---- */}
+      {/* ---- Bandeau de page, ancré sous le bandeau de navigation du site ----
+          Il reste dans le flux (sticky) : il ne masque jamais la navigation du
+          site et ne peut pas laisser de bande vide au scroll. Quand le bandeau
+          du site s'escamote, `headerOffset` tombe à 0 et celui-ci remonte tout
+          en haut de l'écran. */}
       <div
-        className="sticky top-0 z-10 border-b border-white/10 bg-[#0B1220]/95 backdrop-blur transition-transform duration-300"
-        style={{ transform: headerHidden ? "translateY(-100%)" : "translateY(0)" }}
+        className="sticky z-20 border-b border-white/10 bg-[#0B1220]/95 backdrop-blur"
+        style={{ top: headerOffset }}
       >
         <div className="w-full px-6 py-4 md:px-10">
           <div className="mb-4 flex flex-wrap items-end justify-between gap-4">
@@ -492,7 +517,7 @@ export default function FocusMensuel3Page() {
 
         {tab === "vue" && (
           <>
-            <section className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <section className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
               {loading || !monthTotals
                 ? DOC_TYPES.map((t) => <KpiSkeleton key={t} />)
                 : DOC_TYPES.map((type) => (
@@ -500,6 +525,7 @@ export default function FocusMensuel3Page() {
                       key={type}
                       type={type}
                       dayValue={dayValueByType[type]}
+                      dayLabel={focusDayLabel}
                       monthValue={monthTotals.byType[type].amountN}
                       monthValueN1={monthTotals.byType[type].amountN1}
                       annualSeries={annualSeriesByType[type]}
@@ -508,23 +534,26 @@ export default function FocusMensuel3Page() {
                   ))}
             </section>
 
-            <section className="mb-8 grid grid-cols-1 gap-4 xl:grid-cols-3">
-              <div className="rounded-xl border border-white/10 bg-[#F5F3EC] p-4">
+            <section className="mb-8 grid grid-cols-1 items-stretch gap-4 xl:grid-cols-3">
+              <div
+                className="flex flex-col rounded-xl border border-white/10 bg-[#F5F3EC] p-4"
+                style={{ minHeight: OVERVIEW_CARD_MIN_HEIGHT }}
+              >
                 <h3 className="mb-3 font-[var(--font-display)] text-base font-semibold text-[#141A26]">
                   Cumul BL / CDC depuis le 1er {monthLabel}
                 </h3>
                 {loading ? (
-                  <div className="h-56 animate-pulse rounded-lg bg-black/[0.04]" />
+                  <div className="min-h-0 flex-1 animate-pulse rounded-lg bg-black/[0.04]" />
                 ) : (
                   <CumulativeBlCdcChart monthRows={monthRows} monthRowsN1={monthRowsN1} />
                 )}
               </div>
 
-              <TableShell loading={loading}>
+              <TableShell loading={loading} minHeight={OVERVIEW_CARD_MIN_HEIGHT}>
                 <PortfolioTableCompact rows={agencyPortfolioRows} />
               </TableShell>
 
-              <TableShell loading={loading}>
+              <TableShell loading={loading} minHeight={OVERVIEW_CARD_MIN_HEIGHT}>
                 <ProjectionTableCompact rows={agencyProjectionRows} />
               </TableShell>
             </section>
@@ -621,7 +650,7 @@ const CUMUL_CDC_COLOR = "#C1683C";
 
 function CumulativeBlCdcChart({ monthRows, monthRowsN1 }: { monthRows: DailyRow[]; monthRowsN1: DailyRow[] }) {
   const width = 560;
-  const height = 260;
+  const height = 300;
   const padding = { top: 12, right: 12, bottom: 26, left: 52 };
   const innerW = width - padding.left - padding.right;
   const innerH = height - padding.top - padding.bottom;
@@ -669,11 +698,23 @@ function CumulativeBlCdcChart({ monthRows, monthRowsN1 }: { monthRows: DailyRow[
     monthRows.filter((r) => r.type_document === "BL").forEach((r) => days.add(r.jour));
     return days.size;
   }, [monthRows]);
-  const blDailyAvgN = daysWithBL > 0 && blN.length ? blN[blN.length - 1] / daysWithBL : 0;
-  const cdcDailyAvgN = daysWithBL > 0 && cdcN.length ? cdcN[cdcN.length - 1] / daysWithBL : 0;
+  const blTotalN = blN.length ? blN[blN.length - 1] : 0;
+  const cdcTotalN = cdcN.length ? cdcN[cdcN.length - 1] : 0;
+  const blDailyAvgN = daysWithBL > 0 ? blTotalN / daysWithBL : 0;
+  const cdcDailyAvgN = daysWithBL > 0 ? cdcTotalN / daysWithBL : 0;
+
+  // Mêmes moyennes sur N-1, pour donner un point de comparaison plutôt qu'un
+  // chiffre isolé — dénominateur construit à l'identique (jours avec BL).
+  const daysWithBLN1 = useMemo(() => {
+    const days = new Set<string>();
+    monthRowsN1.filter((r) => r.type_document === "BL").forEach((r) => days.add(r.jour));
+    return days.size;
+  }, [monthRowsN1]);
+  const blDailyAvgN1 = daysWithBLN1 > 0 && blN1.length ? blN1[blN1.length - 1] / daysWithBLN1 : 0;
+  const cdcDailyAvgN1 = daysWithBLN1 > 0 && cdcN1.length ? cdcN1[cdcN1.length - 1] / daysWithBLN1 : 0;
 
   return (
-    <div>
+    <div className="flex min-h-0 flex-1 flex-col">
       <svg viewBox={`0 0 ${width} ${height}`} className="w-full">
         <YAxisMoney maxVal={maxVal} height={height} top={padding.top} innerH={innerH} />
         <path d={path(blN1)} fill="none" stroke={CUMUL_BL_COLOR} strokeWidth={1.5} strokeDasharray="5 4" opacity={0.6} />
@@ -694,13 +735,46 @@ function CumulativeBlCdcChart({ monthRows, monthRowsN1 }: { monthRows: DailyRow[
         <span><span className="mr-1 inline-block h-0.5 w-3 align-middle" style={{ background: CUMUL_CDC_COLOR }} /> CDC (N)</span>
         <span className="opacity-60">┄ N-1 (même couleur)</span>
       </div>
-      <div className="mt-2 border-t border-black/10 pt-2 text-xs text-[#141A26]/70">
-        <div className="flex gap-4">
-          <span>Moyenne quotidienne BL (N) : <strong className="font-[var(--font-mono)] text-[#141A26]">{formatMoney(blDailyAvgN)}</strong></span>
-          <span>Moyenne quotidienne CDC (N) : <strong className="font-[var(--font-mono)] text-[#141A26]">{formatMoney(cdcDailyAvgN)}</strong></span>
+
+      {/* Bloc moyennes — développé pour occuper la hauteur laissée libre par
+          le graphique et équilibrer la colonne face aux deux tableaux. */}
+      <div className="mt-auto pt-4">
+        <div className="mb-2 text-[10px] font-medium uppercase tracking-[0.18em] text-[#141A26]/40">
+          Moyennes quotidiennes · depuis le 1er du mois
         </div>
-        <div className="mt-0.5 text-[10px] text-[#141A26]/40">Sur {daysWithBL} jour{daysWithBL > 1 ? "s" : ""} avec expédition BL depuis le 1er du mois.</div>
+        <div className="grid grid-cols-2 gap-3">
+          <AverageStat label="BL par jour" value={blDailyAvgN} valueN1={blDailyAvgN1} total={blTotalN} color={CUMUL_BL_COLOR} />
+          <AverageStat label="CDC par jour" value={cdcDailyAvgN} valueN1={cdcDailyAvgN1} total={cdcTotalN} color={CUMUL_CDC_COLOR} />
+        </div>
+        <div className="mt-2 text-[10px] text-[#141A26]/40">
+          Base : {daysWithBL} jour{daysWithBL > 1 ? "s" : ""} avec expédition BL (N) · {daysWithBLN1} jour{daysWithBLN1 > 1 ? "s" : ""} sur N-1.
+        </div>
       </div>
+    </div>
+  );
+}
+
+function AverageStat({
+  label, value, valueN1, total, color,
+}: { label: string; value: number; valueN1: number; total: number; color: string }) {
+  const evolPct = valueN1 > 0 ? ((value - valueN1) / valueN1) * 100 : null;
+  const isUp = (evolPct ?? 0) >= 0;
+
+  return (
+    <div className="rounded-lg bg-black/[0.035] px-3 py-3" style={{ borderLeft: `3px solid ${color}` }}>
+      <div className="text-[10px] uppercase tracking-wide text-[#141A26]/45">{label}</div>
+      <div className="mt-1 font-[var(--font-mono)] text-2xl font-semibold leading-none text-[#141A26]">
+        {formatMoney(value)}
+      </div>
+      <div className="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[11px]">
+        {evolPct !== null && (
+          <span className={isUp ? "font-medium text-[#C1683C]" : "font-medium text-[#4B92AC]"}>
+            {isUp ? "▲" : "▼"} {Math.abs(evolPct).toFixed(1)}%
+          </span>
+        )}
+        <span className="text-[#141A26]/45">N-1 : {formatMoney(valueN1)}</span>
+      </div>
+      <div className="mt-1 text-[10px] text-[#141A26]/40">Cumul mois : {formatMoney(total)}</div>
     </div>
   );
 }
@@ -726,10 +800,16 @@ function YAxisMoney({ maxVal, height, top, innerH }: { maxVal: number; height: n
 // Sous-composants V3
 // ---------------------------------------------------------------------------
 
-function TableShell({ loading, children }: { loading: boolean; children: React.ReactNode }) {
+function TableShell({
+  loading, children, minHeight,
+}: { loading: boolean; children: React.ReactNode; minHeight?: number }) {
   return (
-    <div className="rounded-xl border border-white/10 bg-[#F5F3EC] p-1">
-      {loading ? <div className="p-6 text-sm text-[#141A26]/50">Chargement…</div> : children}
+    <div className="flex flex-col rounded-xl border border-white/10 bg-[#F5F3EC] p-1" style={minHeight ? { minHeight } : undefined}>
+      {loading ? (
+        <div className="p-6 text-sm text-[#141A26]/50">Chargement…</div>
+      ) : (
+        <div className="flex min-h-0 flex-1 flex-col">{children}</div>
+      )}
     </div>
   );
 }
@@ -758,9 +838,12 @@ function PortfolioTableCompact({ rows }: { rows: AgencyPortfolioRow[] }) {
   const display = withoutTotal.length ? [totalRow, ...sorted] : [];
 
   return (
-    <div className="p-3">
+    <div className="flex min-h-0 flex-1 flex-col p-3">
       <h3 className="mb-3 font-[var(--font-display)] text-base font-semibold text-[#141A26]">Portefeuille de commandes par agence</h3>
-      <div className="overflow-y-auto" style={{ maxHeight: 340 }}>
+      {/* La carte impose désormais une hauteur suffisante : l'ascenseur
+          interne ne se déclenche plus que si le périmètre dépasse la place
+          disponible. */}
+      <div className="min-h-0 flex-1 overflow-y-auto">
         <table className="w-full text-sm">
           <thead className="sticky top-0 bg-[#F5F3EC]">
             <tr className="border-b border-black/10 text-left text-xs uppercase tracking-wide text-[#141A26]/50">
@@ -774,11 +857,11 @@ function PortfolioTableCompact({ rows }: { rows: AgencyPortfolioRow[] }) {
           <tbody className="divide-y divide-black/[0.06]">
             {display.map((r) => (
               <tr key={r.label} className={r.label === "TOTAL AGENCE" ? "bg-black/[0.03] font-semibold" : ""}>
-                <td className="px-2 py-1.5 text-[#141A26]">{r.label}</td>
-                <td className="px-2 py-1.5 text-right font-[var(--font-mono)] text-[#141A26]">{formatMoney(r.total)}</td>
-                <td className="px-2 py-1.5 text-right font-[var(--font-mono)] text-[#141A26]/80">{formatMoney(r.cdc + r.cdcLivMx)}</td>
-                <td className="px-2 py-1.5 text-right font-[var(--font-mono)] text-[#141A26]/80">{formatMoney(r.pl + r.plLivMPlus)}</td>
-                <td className="px-2 py-1.5 text-right font-[var(--font-mono)] text-[#141A26]/80">{formatMoney(r.blMx + r.blM + r.brMx + r.brM)}</td>
+                <td className="px-2 py-2 text-[#141A26]">{r.label}</td>
+                <td className="px-2 py-2 text-right font-[var(--font-mono)] text-[#141A26]">{formatMoney(r.total)}</td>
+                <td className="px-2 py-2 text-right font-[var(--font-mono)] text-[#141A26]/80">{formatMoney(r.cdc + r.cdcLivMx)}</td>
+                <td className="px-2 py-2 text-right font-[var(--font-mono)] text-[#141A26]/80">{formatMoney(r.pl + r.plLivMPlus)}</td>
+                <td className="px-2 py-2 text-right font-[var(--font-mono)] text-[#141A26]/80">{formatMoney(r.blMx + r.blM + r.brMx + r.brM)}</td>
               </tr>
             ))}
             {display.length === 0 && (
@@ -810,9 +893,9 @@ function ProjectionTableCompact({ rows }: { rows: AgencyProjectionRow[] }) {
   const display = withoutTotal.length ? [totalRow, ...sorted] : [];
 
   return (
-    <div className="p-3">
+    <div className="flex min-h-0 flex-1 flex-col p-3">
       <h3 className="mb-3 font-[var(--font-display)] text-base font-semibold text-[#141A26]">Projection du CA par agence</h3>
-      <div className="overflow-auto" style={{ maxHeight: 340 }}>
+      <div className="min-h-0 flex-1 overflow-auto">
         <table className="w-full text-sm">
           <thead className="sticky top-0 z-10 bg-[#F5F3EC]">
             <tr className="border-b border-black/10 text-left text-xs uppercase tracking-wide text-[#141A26]/50">
@@ -829,18 +912,18 @@ function ProjectionTableCompact({ rows }: { rows: AgencyProjectionRow[] }) {
           <tbody className="divide-y divide-black/[0.06]">
             {display.map((r) => (
               <tr key={r.label} className={r.label === "TOTAL AGENCE" ? "bg-black/[0.03] font-semibold" : ""}>
-                <td className={`sticky left-0 z-10 px-2 py-1.5 text-[#141A26] ${r.label === "TOTAL AGENCE" ? "bg-[#EDEAE0]" : "bg-[#F5F3EC]"}`}>{r.label}</td>
-                <td className="whitespace-nowrap px-2 py-1.5 text-right font-[var(--font-mono)] font-semibold text-[#141A26]">{formatMoney(r.projectionCa)}</td>
-                <td className="whitespace-nowrap px-2 py-1.5 text-right font-[var(--font-mono)] text-[#141A26]/70">{formatMoney(r.caN1)}</td>
-                <td className="whitespace-nowrap px-2 py-1.5 text-right">
+                <td className={`sticky left-0 z-10 px-2 py-2 text-[#141A26] ${r.label === "TOTAL AGENCE" ? "bg-[#EDEAE0]" : "bg-[#F5F3EC]"}`}>{r.label}</td>
+                <td className="whitespace-nowrap px-2 py-2 text-right font-[var(--font-mono)] font-semibold text-[#141A26]">{formatMoney(r.projectionCa)}</td>
+                <td className="whitespace-nowrap px-2 py-2 text-right font-[var(--font-mono)] text-[#141A26]/70">{formatMoney(r.caN1)}</td>
+                <td className="whitespace-nowrap px-2 py-2 text-right">
                   {r.evolPct === null ? <span className="text-[#141A26]/30">—</span> : (
                     <span className={r.evolPct >= 0 ? "text-[#C1683C]" : "text-[#4B92AC]"}>{r.evolPct >= 0 ? "▲" : "▼"} {Math.abs(r.evolPct).toFixed(1)}%</span>
                   )}
                 </td>
-                <td className="whitespace-nowrap px-2 py-1.5 text-right font-[var(--font-mono)] text-[#141A26]/80">{formatMoney(r.blBrMx + r.blBrM)}</td>
-                <td className="whitespace-nowrap px-2 py-1.5 text-right font-[var(--font-mono)] text-[#141A26]/80">{formatMoney(r.projectionFluxBl)}</td>
-                <td className="whitespace-nowrap px-2 py-1.5 text-right font-[var(--font-mono)] text-[#141A26]/80">{formatMoney(r.valeurBlNf3Pct)}</td>
-                <td className="whitespace-nowrap px-2 py-1.5 text-right font-[var(--font-mono)] text-[#141A26]/80">{formatMoney(r.factures)}</td>
+                <td className="whitespace-nowrap px-2 py-2 text-right font-[var(--font-mono)] text-[#141A26]/80">{formatMoney(r.blBrMx + r.blBrM)}</td>
+                <td className="whitespace-nowrap px-2 py-2 text-right font-[var(--font-mono)] text-[#141A26]/80">{formatMoney(r.projectionFluxBl)}</td>
+                <td className="whitespace-nowrap px-2 py-2 text-right font-[var(--font-mono)] text-[#141A26]/80">{formatMoney(r.valeurBlNf3Pct)}</td>
+                <td className="whitespace-nowrap px-2 py-2 text-right font-[var(--font-mono)] text-[#141A26]/80">{formatMoney(r.factures)}</td>
               </tr>
             ))}
             {display.length === 0 && (
@@ -876,38 +959,67 @@ function FilterSelect({
 }
 
 function KpiCardJMA({
-  type, dayValue, monthValue, monthValueN1, annualSeries, months,
-}: { type: DocType; dayValue: number; monthValue: number; monthValueN1: number; annualSeries: number[]; months: string[] }) {
+  type, dayValue, dayLabel, monthValue, monthValueN1, annualSeries, months,
+}: {
+  type: DocType;
+  dayValue: number;
+  dayLabel: string;
+  monthValue: number;
+  monthValueN1: number;
+  annualSeries: number[];
+  months: string[];
+}) {
   const color = DOC_COLORS[type];
   const evolutionPct = monthValueN1 > 0 ? ((monthValue - monthValueN1) / monthValueN1) * 100 : null;
   const isUp = (evolutionPct ?? 0) >= 0;
 
   return (
-    <div className="rounded-xl border border-white/10 bg-white/[0.04] p-5">
-      <div className="mb-3">
-        <span className="rounded-md px-2 py-1 text-[11px] font-medium uppercase tracking-wide" style={{ background: `${color}22`, color }}>
+    <div className="flex flex-col rounded-xl border border-white/10 bg-white/[0.04] p-5">
+      <div className="mb-4">
+        <span className="rounded-md px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide" style={{ background: `${color}22`, color }}>
           {type}
         </span>
       </div>
 
-      <div className="mb-4 flex items-end justify-between gap-6">
-        <div>
-          <div className="text-[10px] uppercase tracking-wide text-white/35">Jour ({dayValue ? "focus" : "—"})</div>
-          <div className="font-[var(--font-mono)] text-lg font-medium text-white/80">{formatMoney(dayValue)}</div>
+      {/* Jour et mois en cours sur la même ligne de base et à la même taille :
+          le jour ancré à gauche, le mois à droite du cadre. */}
+      <div className="flex items-end justify-between gap-4">
+        <div className="min-w-0">
+          <div className="mb-1.5 text-[10px] uppercase tracking-wide text-white/35">Jour · {dayLabel}</div>
+          <div className="whitespace-nowrap font-[var(--font-mono)] text-[2.5rem] font-semibold leading-none tracking-tight text-white/85">
+            {formatMoney(dayValue)}
+          </div>
         </div>
-        <div className="text-right">
-          <div className="text-[10px] uppercase tracking-wide text-white/35">Mois en cours</div>
-          <div className="font-[var(--font-mono)] text-2xl font-semibold text-white">{formatMoney(monthValue)}</div>
-          {evolutionPct !== null && (
-            <div className={`mt-0.5 text-xs font-medium ${isUp ? "text-[#C1683C]" : "text-[#4B92AC]"}`}>
-              {isUp ? "▲" : "▼"} {Math.abs(evolutionPct).toFixed(1)}% vs N-1 ({formatMoney(monthValueN1)})
-            </div>
-          )}
+        <div className="min-w-0 text-right">
+          <div className="mb-1.5 text-[10px] uppercase tracking-[0.18em] text-white/35">Mois en cours</div>
+          <div className="whitespace-nowrap font-[var(--font-mono)] text-[2.5rem] font-semibold leading-none tracking-tight text-white">
+            {formatMoney(monthValue)}
+          </div>
         </div>
       </div>
 
-      <div>
-        <div className="mb-1 text-[10px] uppercase tracking-wide text-white/35">Tendance annuelle · 12 derniers mois</div>
+      {/* Comparaison N-1 alignée sous le montant du mois, même axe droit. */}
+      <div className="mt-3 flex flex-wrap items-center justify-end gap-x-3 gap-y-1.5 border-t border-white/10 pt-3">
+        {evolutionPct !== null && (
+          <span
+            className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ${
+              isUp ? "bg-[#C1683C]/15 text-[#e0a685]" : "bg-[#4B92AC]/15 text-[#8fc0d4]"
+            }`}
+          >
+            {isUp ? "▲" : "▼"} {Math.abs(evolutionPct).toFixed(1)}%
+            <span className="font-normal text-white/40">vs N-1</span>
+          </span>
+        )}
+        <span className="text-[11px] uppercase tracking-wide text-white/35">
+          N-1 · même mois{" "}
+          <span className="ml-1 font-[var(--font-mono)] text-sm normal-case tracking-normal text-white/60">
+            {formatMoney(monthValueN1)}
+          </span>
+        </span>
+      </div>
+
+      <div className="mt-4">
+        <div className="mb-1.5 text-[10px] uppercase tracking-[0.18em] text-white/35">Tendance · 12 derniers mois</div>
         <KpiTrendChart values={annualSeries} months={months} color={color} />
       </div>
     </div>
@@ -916,8 +1028,8 @@ function KpiCardJMA({
 
 function KpiTrendChart({ values, months, color }: { values: number[]; months: string[]; color: string }) {
   const width = 320;
-  const height = 100;
-  const padding = { top: 4, right: 4, bottom: 16, left: 44 };
+  const height = 124;
+  const padding = { top: 6, right: 6, bottom: 18, left: 46 };
   const innerW = width - padding.left - padding.right;
   const innerH = height - padding.top - padding.bottom;
 
@@ -927,23 +1039,39 @@ function KpiTrendChart({ values, months, color }: { values: number[]; months: st
   const y = (v: number) => padding.top + innerH - ((v - minVal) / (maxVal - minVal || 1)) * innerH;
 
   const ticks = [minVal, minVal + (maxVal - minVal) / 2, maxVal];
-  const path = values.map((v, i) => `${i === 0 ? "M" : "L"} ${x(i)} ${y(v)}`).join(" ");
+  const linePath = values.map((v, i) => `${i === 0 ? "M" : "L"} ${x(i)} ${y(v)}`).join(" ");
+  // Aplat sous la courbe : donne du corps à la sparkline maintenant qu'elle
+  // dispose de plus de hauteur.
+  const areaPath =
+    values.length > 1
+      ? `${linePath} L ${x(values.length - 1)} ${y(minVal)} L ${x(0)} ${y(minVal)} Z`
+      : "";
+  const gradientId = `kpi-trend-${color.replace("#", "")}`;
+  const lastIndex = values.length - 1;
 
   return (
     <svg viewBox={`0 0 ${width} ${height}`} className="w-full">
+      <defs>
+        <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity={0.28} />
+          <stop offset="100%" stopColor={color} stopOpacity={0} />
+        </linearGradient>
+      </defs>
       {ticks.map((t, i) => (
         <g key={i}>
           <line x1={padding.left} y1={y(t)} x2={width - padding.right} y2={y(t)} stroke="#FFFFFF14" strokeDasharray={i === ticks.length - 1 ? undefined : "3 3"} />
-          <text x={padding.left - 4} y={y(t) + 3} fontSize={8} textAnchor="end" fill="#FFFFFF55">{formatMoney(t)}</text>
+          <text x={padding.left - 4} y={y(t) + 3} fontSize={9} textAnchor="end" fill="#FFFFFF55">{formatMoney(t)}</text>
         </g>
       ))}
-      <path d={path} fill="none" stroke={color} strokeWidth={2} />
+      {areaPath && <path d={areaPath} fill={`url(#${gradientId})`} />}
+      <path d={linePath} fill="none" stroke={color} strokeWidth={2.25} strokeLinejoin="round" strokeLinecap="round" />
       {values.map((v, i) => (
-        <circle key={i} cx={x(i)} cy={y(v)} r={2} fill={color} />
+        <circle key={i} cx={x(i)} cy={y(v)} r={i === lastIndex ? 3.5 : 2} fill={color} />
       ))}
+      {lastIndex >= 0 && <circle cx={x(lastIndex)} cy={y(values[lastIndex])} r={6} fill={color} opacity={0.22} />}
       {months.map((m, i) =>
         i % 2 === 0 ? (
-          <text key={m} x={x(i)} y={height - 2} fontSize={8} textAnchor="middle" fill="#FFFFFF55">
+          <text key={m} x={x(i)} y={height - 3} fontSize={9} textAnchor="middle" fill="#FFFFFF55">
             {new Date(m + "-01").toLocaleDateString("fr-FR", { month: "short" })}
           </text>
         ) : null,
@@ -955,10 +1083,15 @@ function KpiTrendChart({ values, months, color }: { values: number[]; months: st
 function KpiSkeleton() {
   return (
     <div className="animate-pulse rounded-xl border border-white/10 bg-white/[0.03] p-5">
-      <div className="mb-3 h-3 w-24 rounded bg-white/10" />
-      <div className="mb-3 h-4 w-20 rounded bg-white/10" />
-      <div className="mb-3 h-7 w-32 rounded bg-white/10" />
-      <div className="h-8 w-full rounded bg-white/10" />
+      <div className="mb-4 h-5 w-16 rounded bg-white/10" />
+      <div className="mb-4 flex items-end justify-between gap-4">
+        <div className="h-12 w-32 rounded bg-white/10" />
+        <div className="h-12 w-32 rounded bg-white/10" />
+      </div>
+      <div className="mb-4 flex justify-end border-t border-white/10 pt-3">
+        <div className="h-6 w-44 rounded-full bg-white/10" />
+      </div>
+      <div className="h-24 w-full rounded bg-white/10" />
     </div>
   );
 }

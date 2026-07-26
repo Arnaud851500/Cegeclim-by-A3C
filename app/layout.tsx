@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type React from 'react'
 import { usePathname, useRouter } from 'next/navigation'
+import { Space_Grotesk, IBM_Plex_Sans, IBM_Plex_Mono } from 'next/font/google'
 import { supabase } from '@/lib/supabaseClient'
 import { logUserEvent } from '@/lib/audit'
 import { AccessProvider, useAccess, type AccessRights } from '@/components/AccessContext'
@@ -17,6 +18,10 @@ import {
   useSocieteFilter,
   type SocieteFilter,
 } from '@/components/SocieteFilterContext'
+
+const fontDisplay = Space_Grotesk({ subsets: ['latin'], weight: ['500', '700'], variable: '--font-display' })
+const fontBody = IBM_Plex_Sans({ subsets: ['latin'], weight: ['400', '500', '600'], variable: '--font-body' })
+const fontMono = IBM_Plex_Mono({ subsets: ['latin'], weight: ['400', '500', '600'], variable: '--font-mono' })
 
 type MenuAccessKey = Exclude<
   keyof AccessRights,
@@ -156,6 +161,7 @@ function StatusLight({
 }: StatusLightProps) {
   const isRed = status === 'red'
   const isOrange = status === 'orange'
+
   const shellStyle = {
     ...styles.statusCard,
     ...(isRed ? styles.statusCardRed : isOrange ? styles.statusCardOrange : styles.statusCardGreen),
@@ -168,47 +174,29 @@ function StatusLight({
     ...styles.statusLightDot,
     ...(isRed ? styles.statusLightDotRed : isOrange ? styles.statusLightDotOrange : styles.statusLightDotGreen),
     ...(blink ? styles.statusLightDotBlink : {}),
-    ...(compact ? styles.statusLightDotCompact : {}),
-  } as React.CSSProperties
-
-  const labelStyle = {
-    ...styles.statusCardLabel,
-    ...(isRed ? styles.statusCardLabelRed : isOrange ? styles.statusCardLabelOrange : styles.statusCardLabelGreen),
-    ...(compact ? styles.statusCardLabelCompact : {}),
   } as React.CSSProperties
 
   const badgeStyle = {
     ...styles.statusBadge,
     ...(isRed ? styles.statusBadgeRed : isOrange ? styles.statusBadgeOrange : styles.statusBadgeGreen),
-    ...(compact ? styles.statusBadgeCompact : {}),
-  } as React.CSSProperties
-
-  const okStyle = {
-    ...styles.statusOkText,
-    ...(isRed ? styles.statusCardLabelRed : isOrange ? styles.statusCardLabelOrange : styles.statusCardLabelGreen),
-    ...(compact ? styles.statusOkTextCompact : {}),
-  } as React.CSSProperties
-
-  const topStyle = {
-    ...styles.statusCardTop,
-    ...(compact ? styles.statusCardTopCompact : {}),
   } as React.CSSProperties
 
   return (
     <button
       type="button"
+      className="cgcAlerte"
       onClick={clickable ? onClick : undefined}
       style={shellStyle}
-      title={title || (clickable ? `Ouvrir ${label}` : `${label} OK`)}
+      title={title || (clickable ? `Ouvrir ${label}` : `${label} : rien à traiter`)}
     >
-      <div style={topStyle}>
-        <span style={lightStyle} />
-        <span style={labelStyle}>{label}</span>
-      </div>
+      <span style={lightStyle} />
+      <span style={styles.statusCardLabel}>{label}</span>
       {typeof count === 'number' && count > 0 ? (
         <span style={badgeStyle}>{count}</span>
       ) : (
-        <span style={okStyle}>OK</span>
+        /* Au vert, pas de compteur mis en avant : seuls les chiffres qui
+           appellent une action attirent l'œil sur la réglette. */
+        <span style={styles.statusOkText}>OK</span>
       )}
     </button>
   )
@@ -576,22 +564,15 @@ function AppShell({ children }: { children: React.ReactNode }) {
     {
       label: 'Tableaux de bord',
       items: [
-        {label: '1 : Activite Quotidienne',activeLabel: 'Focus_mensuel',path: '/focus_mensuel',accessKey: 'can_dashboard',},
+        {label: '1 : Activite Quotidienne',activeLabel: 'Focus_mensuel',path: '/focus_mensuel2',accessKey: 'can_dashboard',},
         { label: '2 : Suivi Multi Clients', path: '/synthese_multi_clients', accessKey: 'can_dashboard' },
         { label: '3 : Tableaux de bord', path: '/atelier-analyse', accessKey: 'can_autorisation' },
         { label: '4 : Portefeuille cde', path: '/portefeuille-livraison', accessKey: 'can_dashboard' },
         { label: '5 : Courbes Flux Devis-CDC-BL-Fact', path: '/approvisionnements', accessKey: 'can_dashboard' },
         { label: '6 : Analyse IA', path: '/atelier-analyse/assistant', accessKey: 'can_autorisation' },
-        { label: '7 : Projection Stock', path: '/stocks-disponibilites', accessKey: 'can_stocks' },
+        { label: '7 : Projection Stock', path: '/stocks-disponibilites2', accessKey: 'can_stocks' },
         { label: '8 : Analyse Devis', path: '/cycle-documents', accessKey: 'can_autorisation' },
         { label: '9 : Indicateurs', path: '/Indicateurs', accessKey: 'can_autorisation' },
-      ],
-    },
-        {
-      label: 'TBD Nv Design',
-      items: [
-        {label: '1 : Activite Quotidienne ND',activeLabel: 'Focus_mensuel',path: '/focus_mensuel2',accessKey: 'can_agences',},
-        { label: '7 : Projection Stock ND', path: '/stocks-disponibilites2', accessKey: 'can_agences' },
       ],
     },
 
@@ -884,7 +865,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
 
   if (isLoginPage) {
     return (
-      <div style={{ margin: 0, fontFamily: 'Arial, sans-serif', background: '#f5f7fa' }}>
+      <div style={{ margin: 0 }}>
         {children}
         <Analytics />
       </div>
@@ -1417,12 +1398,26 @@ function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div
+      className={`${fontDisplay.variable} ${fontBody.variable} ${fontMono.variable}`}
       style={{
         ...styles.app,
-        backgroundImage: `linear-gradient(rgba(255,255,255,0.75), rgba(255,255,255,0.92)), url("${backgroundImageUrl}")`,
+        // La photo de maison reste, mais à l'état de texture sous un voile
+        // marine quasi opaque : elle porte l'identité sans concurrencer les
+        // panneaux de données.
+        backgroundImage: `linear-gradient(rgba(11,18,32,0.965), rgba(11,18,32,0.985)), url("${backgroundImageUrl}")`,
       }}
     >
       <AutoLogout />
+
+      {/* Survols : impossibles en style inline, regroupés ici plutôt que
+          dispersés dans globals.css. */}
+      <style>{`
+        .cgcNavBtn:hover { background: rgba(255,255,255,0.05); }
+        .cgcNavBtn:hover .cgcNavLabel { color: #fff; }
+        .cgcAlerte:hover { border-color: rgba(255,255,255,0.24); filter: brightness(1.12); }
+        .cgcMenuItem:hover { background: rgba(255,255,255,0.07); color: #fff; }
+        .cgcLogout:hover { color: #fff; border-color: rgba(255,255,255,0.4); background: rgba(255,255,255,0.05); }
+      `}</style>
 
       <div style={styles.overlay}>
         <header
@@ -1443,37 +1438,25 @@ function AppShell({ children }: { children: React.ReactNode }) {
                 <div style={styles.subtitle}>
                   Concessionnaire agréé de Bosch Home Comfort Group
                 </div>
-                <div style={styles.title}>Hitachi Cooling & Heating</div>
+                <div style={styles.title}>Hitachi Cooling &amp; Heating</div>
               </div>
             </div>
 
-            <div style={styles.center}>
-              SUIVI COMMERCIAL & PROSPECT
-            </div>
+            <div style={styles.center}>Suivi commercial &amp; prospect</div>
 
             <div style={styles.right}>
-              <div style={styles.rightUserBlock}>
-              
-
-                <button onClick={handleLogout} style={styles.logout}>
-                  Déconnexion
-                </button>
-
-                {email && <div style={styles.userEmail}>{email}</div>}
-                <div style={styles.userProfile}>
-                  Profil : {rights.profile_name || 'Aucun profil'}
-                </div>
-              </div>
+              {email && <div style={styles.userEmail}>{email}</div>}
+              <span style={styles.userProfile}>
+                {rights.profile_name || 'Aucun profil'}
+              </span>
+              <button onClick={handleLogout} className="cgcLogout" style={styles.logout}>
+                Se déconnecter
+              </button>
             </div>
           </div>
 
           {(menuGroups.some(isGroupVisible) || hasVisibleStatusLights) && (
-            <div
-              style={{
-                ...styles.nav,
-                ...(hasVisibleStatusLights ? styles.navWithAlerts : {}),
-              }}
-            >
+            <div style={styles.nav}>
               <div style={styles.navMenu}>
                 {menuGroups.filter(isGroupVisible).map((group) => {
                   const visibleItems = getVisibleItems(group)
@@ -1494,20 +1477,27 @@ function AppShell({ children }: { children: React.ReactNode }) {
                     >
                       <button
                         type="button"
+                        className="cgcNavBtn"
                         aria-expanded={openGroup === group.label}
                         style={{
                           ...styles.navBtn,
                           ...(activeItem ? styles.navBtnActive : {}),
                         }}
                       >
-                        <span style={styles.navBtnGroupLabel}>
-                          {group.label} ▼
+                        <span
+                          className="cgcNavLabel"
+                          style={{
+                            ...styles.navBtnGroupLabel,
+                            ...(activeItem ? styles.navBtnGroupLabelActive : {}),
+                          }}
+                        >
+                          {group.label}
                         </span>
-                        {activeItem && (
-                          <span style={styles.navBtnCurrentPage}>
-                            {activeItem.activeLabel || activeItem.label}
-                          </span>
-                        )}
+                        <span style={styles.navBtnCurrentPage}>
+                          {activeItem
+                            ? (activeItem.activeLabel || activeItem.label)
+                            : `${visibleItems.length} écran${visibleItems.length > 1 ? 's' : ''}`}
+                        </span>
                       </button>
 
                       {openGroup === group.label && (
@@ -1518,6 +1508,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
                             return (
                               <div
                                 key={item.path}
+                                className="cgcMenuItem"
                                 aria-current={itemActive ? 'page' : undefined}
                                 style={{
                                   ...styles.dropdownItem,
@@ -1544,7 +1535,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
                   <div style={styles.alertsPanelHeading}>
                     <span style={styles.alertsPanelTitle}>Mes alertes</span>
                     <span style={styles.alertsPanelSubtitle}>
-                      {visibleAlertCount} indicateur{visibleAlertCount > 1 ? 's' : ''} actif{visibleAlertCount > 1 ? 's' : ''}
+                      {visibleAlertCount} active{visibleAlertCount > 1 ? 's' : ''}
                     </span>
                   </div>
 
@@ -1563,11 +1554,11 @@ function AppShell({ children }: { children: React.ReactNode }) {
                         title={cerfaKoCount > 0 ? 'Ouvrir la liste des CERFA KO en attente de régularisation' : 'Aucun CERFA KO'}
                       />
                     )}
-  
+
                     {rights.show_alert_cdc_liv_avant_2026 && (
                       <StatusLight
                         compact
-                        label="CDC liv avant 2026"
+                        label="CDC < 2026"
                         status={cdcLivAvant2026Signal.status}
                         count={cdcLivAvant2026Signal.count}
                         blink={cdcLivAvant2026Signal.status === 'red' && statusBlinkOn}
@@ -1580,11 +1571,11 @@ function AppShell({ children }: { children: React.ReactNode }) {
                         }
                       />
                     )}
-  
+
                     {rights.show_alert_controle_frais_port && (
                       <StatusLight
                         compact
-                        label="Contrôle frais de port"
+                        label="Frais de port"
                         status={controleFraisPortSignal.status}
                         count={controleFraisPortSignal.count}
                         blink={controleFraisPortSignal.status !== 'green' && statusBlinkOn}
@@ -1597,7 +1588,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
                         }
                       />
                     )}
-  
+
                     {rights.show_alert_capacite_gaz && (
                       <StatusLight
                         compact
@@ -1614,11 +1605,11 @@ function AppShell({ children }: { children: React.ReactNode }) {
                         }
                       />
                     )}
-  
+
                     {rights.show_alert_todo && (
                       <StatusLight
                         compact
-                        label="A faire"
+                        label="À faire"
                         status={todoSignal.status}
                         count={todoSignal.count}
                         blink={todoSignal.status === 'red' && statusBlinkOn}
@@ -1626,7 +1617,8 @@ function AppShell({ children }: { children: React.ReactNode }) {
                         onClick={openTodoList}
                         title={todoSignal.count > 0 ? 'Ouvrir la TODO List dans un nouvel onglet' : 'Aucune tâche à faire — cliquer pour ouvrir la TODO List'}
                       />
-                    )}                  </div>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
@@ -1794,7 +1786,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
                         <td
                           style={{
                             ...styles.cerfaTdStrong,
-                            color: '#c2410c',
+                            color: '#9C4A24',
                           }}
                         >
                           {`Expire dans ${Number(row.jours_ecart || 0)} j`}
@@ -1848,7 +1840,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
   return (
     <html>
-      <body>
+      <body className={`${fontDisplay.variable} ${fontBody.variable} ${fontMono.variable}`}>
         <AccessProvider>
           <SocieteFilterProvider>
             <AppShell>{children}</AppShell>
@@ -1862,32 +1854,46 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 const styles: Record<string, React.CSSProperties> = {
   app: {
     minHeight: '100vh',
+    // `backgroundColor` et non le raccourci `background` : le raccourci,
+    // declare apres les proprietes de fond, remettait backgroundSize et
+    // backgroundRepeat a leur valeur initiale. La photo s'affichait alors a sa
+    // taille naturelle et se repetait en mosaique.
+    backgroundColor: '#0B1220',
     backgroundSize: 'cover',
+    backgroundRepeat: 'no-repeat',
+    backgroundPosition: 'center center',
+    backgroundAttachment: 'fixed',
+    fontFamily: 'var(--font-body)',
+    // Pas de couleur de texte globale ici : elle serait heritee par les ecrans
+    // historiques a fond clair. Le blanc est porte par le bandeau, le sombre
+    // par la zone de contenu.
   },
 
   overlay: {
-    // Ne pas utiliser backdrop-filter sur le conteneur global : il crée un
-    // contexte d'empilement et un contenant pour position: fixed, ce qui peut
-    // enfermer les modales des pages sous le bandeau sticky.
+    // Toujours pas de backdrop-filter ici : il créerait un contexte
+    // d'empilement et enfermerait les modales des pages sous le bandeau.
     minHeight: '100vh',
   },
+
+  /* ---- Bandeau ---------------------------------------------------------- */
 
   header: {
     position: 'sticky',
     top: 0,
     zIndex: 30,
     width: '100%',
-    background: 'rgba(255,255,255,0.86)',
+    color: '#ffffff',
+    background: 'rgba(11,18,32,0.94)',
     backdropFilter: 'blur(14px)',
     WebkitBackdropFilter: 'blur(14px)',
-    boxShadow: '0 6px 20px rgba(0,0,0,0.08)',
+    borderBottom: '1px solid rgba(255,255,255,0.10)',
     pointerEvents: 'auto',
   },
 
   headerHiddenForFloatingLayer: {
     // Masquage réel, et non simple baisse du z-index : certaines pages créent
     // leur propre contexte d'empilement et ne pourraient toujours pas dépasser
-    // un header sticky positif. Le bandeau revient automatiquement à la fermeture.
+    // un header sticky positif. Le bandeau revient à la fermeture.
     opacity: 0,
     visibility: 'hidden',
     pointerEvents: 'none',
@@ -1899,420 +1905,390 @@ const styles: Record<string, React.CSSProperties> = {
     position: 'relative',
     zIndex: 3,
     display: 'flex',
-    justifyContent: 'space-between',
-    padding: '6px 20px',
     alignItems: 'center',
+    gap: 20,
+    padding: '10px 22px',
+    borderBottom: '1px solid rgba(255,255,255,0.07)',
     pointerEvents: 'auto',
   },
 
   left: {
     display: 'flex',
-    gap: 12,
+    gap: 14,
     alignItems: 'center',
+    minWidth: 0,
   },
 
   logo: {
-    width: 130,
+    width: 112,
+    background: '#fff',
+    borderRadius: 5,
+    padding: '3px 6px',
+    flexShrink: 0,
   },
 
   subtitle: {
-    fontSize: 16,
+    fontSize: 11,
+    lineHeight: 1.2,
+    color: 'rgba(255,255,255,0.42)',
   },
 
   title: {
-    fontSize: 22,
-    fontWeight: 800,
+    fontFamily: 'var(--font-display)',
+    fontSize: 16,
+    fontWeight: 700,
+    letterSpacing: '-0.01em',
+    lineHeight: 1.2,
+    marginTop: 1,
+    color: '#ffffff',
   },
 
   center: {
-    fontWeight: 800,
-    fontSize: 20,
-    color: '#17344d',
+    marginLeft: 'auto',
+    marginRight: 'auto',
+    fontFamily: 'var(--font-mono)',
+    fontSize: 11,
+    fontWeight: 500,
+    letterSpacing: '0.28em',
+    textTransform: 'uppercase',
+    color: '#A6A181',
+    whiteSpace: 'nowrap',
   },
 
   right: {
     position: 'relative',
     zIndex: 5,
     display: 'flex',
-    gap: 10,
+    alignItems: 'center',
+    gap: 12,
     pointerEvents: 'auto',
   },
 
   rightUserBlock: {
-    position: 'relative',
-    zIndex: 6,
     display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'flex-end',
-    gap: 6,
-    pointerEvents: 'auto',
+    alignItems: 'center',
+    gap: 12,
   },
 
   userEmail: {
-    fontSize: 13,
-    color: '#17344d',
-  },
-
-  userProfile: {
-    fontSize: 12,
-    fontWeight: 700,
-    color: '#5b7285',
-    background: 'rgba(238, 247, 251, 0.95)',
-    border: '1px solid rgba(94, 167, 195, 0.28)',
-    borderRadius: 999,
-    padding: '3px 8px',
-  },
-
-  select: {
-    position: 'relative',
-    zIndex: 7,
-    padding: 6,
-    borderRadius: 8,
-    pointerEvents: 'auto',
-  },
-
-  selectDisabled: {
-    cursor: 'not-allowed',
-    opacity: 0.65,
-    background: '#eef2f6',
-  },
-
-  navBtnActive: {
-    color: '#2f7f9d',
-    background: 'rgba(238,247,251,0.98)',
-    border: '2px solid #5ea7c3',
-    borderRadius: 12,
-    padding: '5px 12px 4px',
-    boxShadow: '0 4px 12px rgba(47, 127, 157, 0.12)',
-  },
-
-  navBtnGroupLabel: {
-    display: 'block',
-    lineHeight: 1.05,
+    fontFamily: 'var(--font-mono)',
+    fontSize: 11.5,
+    color: 'rgba(255,255,255,0.55)',
     whiteSpace: 'nowrap',
   },
 
-  navBtnCurrentPage: {
-    display: 'block',
-    marginTop: 3,
+  userProfile: {
     fontSize: 10,
-    lineHeight: 1.05,
-    fontWeight: 800,
-    color: '#17344d',
+    fontWeight: 600,
+    letterSpacing: '0.1em',
+    textTransform: 'uppercase',
+    color: '#A6A181',
+    background: 'rgba(166,161,129,0.10)',
+    border: '1px solid rgba(166,161,129,0.35)',
+    borderRadius: 999,
+    padding: '3px 9px',
     whiteSpace: 'nowrap',
   },
 
   logout: {
-    position: 'relative',
-    zIndex: 7,
-    background: '#fff',
-    borderRadius: 8,
-    padding: '6px 10px',
+    fontFamily: 'var(--font-body)',
+    fontSize: 12,
+    fontWeight: 600,
+    color: 'rgba(255,255,255,0.65)',
+    background: 'transparent',
+    border: '1px solid rgba(255,255,255,0.16)',
+    borderRadius: 9,
+    padding: '6px 12px',
     cursor: 'pointer',
-    border: '1px solid #d0d7de',
+    whiteSpace: 'nowrap',
+    transition: 'color 0.16s ease, border-color 0.16s ease, background 0.16s ease',
     pointerEvents: 'auto',
   },
 
-  statusCard: {
-    minWidth: 96,
-    minHeight: 30,
-    borderRadius: 11,
-    border: '1px solid rgba(15, 23, 42, 0.08)',
-    padding: '5px 8px',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 8,
-    background: 'rgba(255,255,255,0.92)',
-    boxShadow: '0 6px 16px rgba(15, 23, 42, 0.07)',
-    transition: 'transform 0.18s ease, box-shadow 0.18s ease, opacity 0.18s ease',
+  select: {
+    padding: 6,
+    borderRadius: 8,
+    background: 'rgba(255,255,255,0.06)',
+    border: '1px solid rgba(255,255,255,0.14)',
+    color: '#fff',
   },
 
-  statusCardCompact: {
-    width: '100%',
-    minWidth: 0,
-    minHeight: 27,
-    borderRadius: 9,
-    padding: '4px 6px',
-    gap: 5,
-    boxShadow: '0 3px 9px rgba(15, 23, 42, 0.06)',
+  selectDisabled: {
+    cursor: 'not-allowed',
+    opacity: 0.5,
   },
 
-  statusCardRed: {
-    border: '1px solid rgba(239, 68, 68, 0.28)',
-    boxShadow: '0 0 0 1px rgba(239,68,68,0.08), 0 0 16px rgba(239,68,68,0.22)',
-  },
-
-  statusCardGreen: {
-    border: '1px solid rgba(34, 197, 94, 0.24)',
-    boxShadow: '0 0 0 1px rgba(34,197,94,0.08), 0 0 14px rgba(34,197,94,0.16)',
-  },
-
-  statusCardOrange: {
-    border: '1px solid rgba(245, 158, 11, 0.32)',
-    boxShadow: '0 0 0 1px rgba(245,158,11,0.09), 0 0 15px rgba(245,158,11,0.24)',
-  },
-
-  statusCardBlink: {
-    opacity: 0.9,
-    transform: 'translateY(-1px)',
-  },
-
-  statusCardTop: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 8,
-  },
-
-  statusCardTopCompact: {
-    flex: 1,
-    gap: 5,
-    minWidth: 0,
-  },
-
-  statusCardLabel: {
-    fontSize: 12,
-    fontWeight: 800,
-    whiteSpace: 'nowrap',
-    lineHeight: 1,
-  },
-
-  statusCardLabelCompact: {
-    minWidth: 0,
-    fontSize: 10.5,
-    lineHeight: 1,
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-  },
-
-  statusCardLabelRed: {
-    color: '#b91c1c',
-  },
-
-  statusCardLabelGreen: {
-    color: '#166534',
-  },
-
-  statusCardLabelOrange: {
-    color: '#b45309',
-  },
-
-  statusLightDot: {
-    width: 11,
-    height: 11,
-    borderRadius: '50%',
-    display: 'inline-block',
-    flexShrink: 0,
-  },
-
-  statusLightDotCompact: {
-    width: 8,
-    height: 8,
-  },
-
-  statusLightDotRed: {
-    background: '#ef4444',
-    boxShadow: '0 0 0 2px rgba(239, 68, 68, 0.12), 0 0 14px rgba(239, 68, 68, 0.95)',
-  },
-
-  statusLightDotGreen: {
-    background: '#22c55e',
-    boxShadow: '0 0 0 2px rgba(34, 197, 94, 0.12), 0 0 12px rgba(34, 197, 94, 0.85)',
-  },
-
-  statusLightDotOrange: {
-    background: '#f59e0b',
-    boxShadow: '0 0 0 2px rgba(245, 158, 11, 0.14), 0 0 12px rgba(245, 158, 11, 0.9)',
-  },
-
-  statusLightDotBlink: {
-    boxShadow: '0 0 0 2px rgba(239, 68, 68, 0.18), 0 0 20px rgba(239, 68, 68, 1)',
-  },
-
-  statusBadge: {
-    minWidth: 23,
-    height: 23,
-    borderRadius: 999,
-    padding: '0 7px',
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    fontSize: 11,
-    fontWeight: 900,
-  },
-
-  statusBadgeCompact: {
-    minWidth: 19,
-    height: 19,
-    padding: '0 5px',
-    fontSize: 9.5,
-  },
-
-  statusBadgeRed: {
-    background: '#fee2e2',
-    color: '#b91c1c',
-    border: '1px solid #fecaca',
-  },
-
-  statusBadgeGreen: {
-    background: '#dcfce7',
-    color: '#166534',
-    border: '1px solid #bbf7d0',
-  },
-
-  statusBadgeOrange: {
-    background: '#fef3c7',
-    color: '#b45309',
-    border: '1px solid #fde68a',
-  },
-
-  statusOkText: {
-    fontSize: 11,
-    fontWeight: 800,
-    opacity: 0.85,
-  },
-
-  statusOkTextCompact: {
-    fontSize: 9.5,
-  },
+  /* ---- Navigation ------------------------------------------------------- */
 
   nav: {
     position: 'relative',
     zIndex: 2,
     display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: '4px 20px 8px',
+    alignItems: 'stretch',
+    gap: 24,
+    padding: '0 22px',
     overflow: 'visible',
-    minHeight: 52,
     pointerEvents: 'none',
   },
 
-  navWithAlerts: {
-    minHeight: 82,
-    paddingLeft: 420,
-  },
+  // Conservée pour compatibilité : le calage à 420px n'a plus lieu d'être,
+  // les alertes étant désormais à droite et le menu à gauche.
+  navWithAlerts: {},
 
   navMenu: {
     display: 'flex',
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 20,
-    pointerEvents: 'auto',
-  },
-
-  alertsPanel: {
-    position: 'absolute',
-    left: 20,
-    top: '50%',
-    transform: 'translateY(-50%)',
-    display: 'flex',
     alignItems: 'stretch',
-    gap: 9,
-    padding: '7px 9px',
-    border: '1px solid rgba(94, 167, 195, 0.30)',
-    borderRadius: 15,
-    background: 'linear-gradient(135deg, rgba(255,255,255,0.98), rgba(241,248,251,0.97))',
-    boxShadow: '0 7px 20px rgba(23, 52, 77, 0.10)',
-    pointerEvents: 'auto',
-  },
-
-  alertsPanelHeading: {
-    width: 92,
-    minWidth: 92,
-    display: 'flex',
-    flexDirection: 'column',
-    justifyContent: 'center',
-    padding: '2px 7px 2px 4px',
-  },
-
-  alertsPanelTitle: {
-    fontSize: 13,
-    lineHeight: 1.1,
-    fontWeight: 900,
-    color: '#17344d',
-    letterSpacing: '0.01em',
-    whiteSpace: 'nowrap',
-  },
-
-  alertsPanelSubtitle: {
-    marginTop: 4,
-    fontSize: 9.5,
-    lineHeight: 1.15,
-    fontWeight: 700,
-    color: '#718096',
-    whiteSpace: 'nowrap',
-  },
-
-  alertsPanelDivider: {
-    width: 1,
-    alignSelf: 'stretch',
-    background: 'linear-gradient(180deg, transparent, rgba(94,167,195,0.42), transparent)',
-  },
-
-  alertsGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(3, 154px)',
-    gridAutoRows: 27,
-    gap: '5px 6px',
-    alignContent: 'center',
-  },
-
-  navBtn: {
-    minHeight: 30,
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    background: 'transparent',
-    border: '2px solid transparent',
-    borderRadius: 12,
-    padding: '5px 12px 4px',
-    fontWeight: 700,
-    color: '#0f172a',
-    cursor: 'pointer',
+    gap: 2,
     pointerEvents: 'auto',
   },
 
   menuWrapper: {
     position: 'relative',
     zIndex: 4,
-    paddingBottom: 10,
+    display: 'flex',
     pointerEvents: 'auto',
+  },
+
+  navBtn: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'flex-start',
+    justifyContent: 'center',
+    background: 'transparent',
+    border: 'none',
+    borderBottom: '2px solid transparent',
+    borderRadius: 0,
+    padding: '10px 14px 9px',
+    cursor: 'pointer',
+    transition: 'background 0.16s ease, border-color 0.16s ease',
+    pointerEvents: 'auto',
+  },
+
+  navBtnActive: {
+    borderBottom: '2px solid #A6A181',
+    background: 'rgba(166,161,129,0.07)',
+  },
+
+  navBtnGroupLabel: {
+    display: 'block',
+    fontSize: 13,
+    fontWeight: 600,
+    lineHeight: 1.1,
+    color: 'rgba(255,255,255,0.62)',
+    whiteSpace: 'nowrap',
+    transition: 'color 0.16s ease',
+  },
+
+  navBtnGroupLabelActive: {
+    color: '#ffffff',
+  },
+
+  navBtnCurrentPage: {
+    display: 'block',
+    marginTop: 3,
+    fontFamily: 'var(--font-mono)',
+    fontSize: 9.5,
+    lineHeight: 1.1,
+    letterSpacing: '0.1em',
+    textTransform: 'uppercase',
+    color: 'rgba(255,255,255,0.30)',
+    whiteSpace: 'nowrap',
   },
 
   dropdown: {
     position: 'absolute',
-    top: 'calc(100% - 10px)',
+    top: '100%',
     left: 0,
-    background: '#d8dadf',
-    borderRadius: 12,
-    boxShadow: '0 10px 25px rgba(0,0,0,0.1)',
-    whiteSpace: 'nowrap',
-    minWidth: 'max-content',
+    marginTop: 2,
     zIndex: 10,
+    minWidth: 250,
+    background: '#101A2E',
+    border: '1px solid rgba(255,255,255,0.12)',
+    borderRadius: 12,
+    padding: 6,
+    boxShadow: '0 18px 40px rgba(0,0,0,0.5)',
+    whiteSpace: 'nowrap',
     pointerEvents: 'auto',
   },
 
   dropdownItem: {
-    padding: 10,
+    padding: '8px 10px',
+    borderRadius: 8,
+    fontSize: 13,
+    color: 'rgba(255,255,255,0.7)',
     cursor: 'pointer',
     whiteSpace: 'nowrap',
+    transition: 'background 0.14s ease, color 0.14s ease',
     pointerEvents: 'auto',
   },
 
   dropdownItemActive: {
-    background: '#eef7fb',
-    color: '#2f7f9d',
-    fontWeight: 800,
+    background: 'rgba(166,161,129,0.14)',
+    color: '#ffffff',
+    fontWeight: 600,
   },
+
+  /* ---- Réglette d'alertes ----------------------------------------------- */
+
+  alertsPanel: {
+    marginLeft: 'auto',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    padding: '8px 0',
+    pointerEvents: 'auto',
+  },
+
+  alertsPanelHeading: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+  },
+
+  alertsPanelTitle: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: 9.5,
+    fontWeight: 500,
+    letterSpacing: '0.16em',
+    textTransform: 'uppercase',
+    color: 'rgba(255,255,255,0.55)',
+    whiteSpace: 'nowrap',
+  },
+
+  alertsPanelSubtitle: {
+    marginTop: 3,
+    fontFamily: 'var(--font-mono)',
+    fontSize: 9.5,
+    letterSpacing: '0.16em',
+    textTransform: 'uppercase',
+    color: 'rgba(255,255,255,0.30)',
+    whiteSpace: 'nowrap',
+  },
+
+  alertsPanelDivider: {
+    width: 1,
+    alignSelf: 'stretch',
+    background: 'linear-gradient(180deg, transparent, rgba(255,255,255,0.20), transparent)',
+  },
+
+  alertsGrid: {
+    display: 'flex',
+    alignItems: 'stretch',
+    gap: 6,
+  },
+
+  /* ---- Fiche d'alerte --------------------------------------------------- */
+
+  statusCard: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 7,
+    padding: '6px 10px 6px 8px',
+    borderRadius: 9,
+    border: '1px solid rgba(255,255,255,0.09)',
+    background: 'rgba(255,255,255,0.045)',
+    transition: 'filter 0.16s ease, border-color 0.16s ease, opacity 0.4s ease',
+  },
+
+  // Neutres : la réglette est déjà compacte par construction. Conservées pour
+  // que les appels existants ne cassent pas.
+  statusCardCompact: {},
+  statusCardTop: {},
+  statusCardTopCompact: {},
+  statusCardLabelCompact: {},
+  statusBadgeCompact: {},
+  statusOkTextCompact: {},
+  statusLightDotCompact: {},
+
+  statusCardRed: {
+    border: '1px solid rgba(193,104,60,0.30)',
+    background: 'rgba(193,104,60,0.09)',
+  },
+
+  statusCardOrange: {
+    border: '1px solid rgba(214,154,74,0.26)',
+    background: 'rgba(214,154,74,0.07)',
+  },
+
+  statusCardGreen: {
+    border: '1px solid rgba(255,255,255,0.09)',
+    background: 'rgba(255,255,255,0.045)',
+  },
+
+  // Pulsation : pilotée par statusBlinkOn, qui bascule toutes les 1,2 s.
+  statusCardBlink: {
+    opacity: 0.55,
+  },
+
+  statusCardLabel: {
+    fontSize: 10.5,
+    fontWeight: 500,
+    letterSpacing: '0.04em',
+    textTransform: 'uppercase',
+    lineHeight: 1,
+    color: 'rgba(255,255,255,0.6)',
+    whiteSpace: 'nowrap',
+  },
+
+  // Le libellé reste neutre, c'est le compteur qui porte la couleur.
+  statusCardLabelRed: { color: 'rgba(255,255,255,0.6)' },
+  statusCardLabelOrange: { color: 'rgba(255,255,255,0.6)' },
+  statusCardLabelGreen: { color: 'rgba(255,255,255,0.6)' },
+
+  statusLightDot: {
+    width: 7,
+    height: 7,
+    borderRadius: '50%',
+    display: 'inline-block',
+    flexShrink: 0,
+  },
+
+  statusLightDotRed: {
+    background: '#C1683C',
+    boxShadow: '0 0 0 3px rgba(193,104,60,0.16)',
+  },
+
+  statusLightDotOrange: {
+    background: '#D69A4A',
+    boxShadow: '0 0 0 3px rgba(214,154,74,0.16)',
+  },
+
+  statusLightDotGreen: {
+    background: '#4B92AC',
+    boxShadow: '0 0 0 3px rgba(75,146,172,0.14)',
+  },
+
+  statusLightDotBlink: {
+    boxShadow: '0 0 0 4px rgba(193,104,60,0.24)',
+  },
+
+  statusBadge: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: 13,
+    fontWeight: 600,
+    lineHeight: 1,
+  },
+
+  statusBadgeRed: { color: '#C1683C' },
+  statusBadgeOrange: { color: '#D69A4A' },
+  statusBadgeGreen: { color: 'rgba(255,255,255,0.5)' },
+
+  statusOkText: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: 10,
+    letterSpacing: '0.08em',
+    color: 'rgba(255,255,255,0.35)',
+  },
+
+  /* ---- Modales : crème, pour la lisibilité des tableaux ----------------- */
 
   modalBackdrop: {
     position: 'fixed',
     inset: 0,
     // Les fenêtres propres au layout doivent recouvrir le bandeau commun.
     zIndex: 1000,
-    background: 'rgba(15, 23, 42, 0.35)',
+    background: 'rgba(6,10,18,0.62)',
     display: 'flex',
     alignItems: 'flex-start',
     justifyContent: 'center',
@@ -2324,9 +2300,10 @@ const styles: Record<string, React.CSSProperties> = {
     maxHeight: '86vh',
     overflow: 'hidden',
     borderRadius: 18,
-    background: '#fff',
-    boxShadow: '0 25px 70px rgba(15, 23, 42, 0.35)',
-    border: '1px solid rgba(226, 232, 240, 1)',
+    background: '#F5F3EC',
+    color: '#141A26',
+    boxShadow: '0 30px 80px rgba(0,0,0,0.5)',
+    border: '1px solid rgba(20,26,38,0.12)',
   },
 
   modalHeader: {
@@ -2335,20 +2312,21 @@ const styles: Record<string, React.CSSProperties> = {
     gap: 16,
     alignItems: 'center',
     padding: '18px 20px',
-    borderBottom: '1px solid #e2e8f0',
+    borderBottom: '1px solid rgba(20,26,38,0.10)',
   },
 
   modalTitle: {
+    fontFamily: 'var(--font-display)',
     fontSize: 20,
-    fontWeight: 900,
-    color: '#0f172a',
+    fontWeight: 700,
+    letterSpacing: '-0.01em',
+    color: '#141A26',
   },
 
   modalSubtitle: {
     marginTop: 4,
     fontSize: 13,
-    fontWeight: 700,
-    color: '#64748b',
+    color: 'rgba(20,26,38,0.55)',
   },
 
   modalActions: {
@@ -2358,21 +2336,26 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   modalSecondaryButton: {
-    border: '1px solid #cbd5e1',
+    border: '1px solid rgba(20,26,38,0.18)',
     background: '#fff',
+    color: '#141A26',
     borderRadius: 10,
     padding: '8px 12px',
-    fontWeight: 800,
+    fontFamily: 'var(--font-body)',
+    fontSize: 13,
+    fontWeight: 600,
     cursor: 'pointer',
   },
 
   modalCloseButton: {
-    border: '1px solid #0f172a',
-    background: '#0f172a',
+    border: '1px solid #141A26',
+    background: '#141A26',
     color: '#fff',
     borderRadius: 10,
     padding: '8px 12px',
-    fontWeight: 900,
+    fontFamily: 'var(--font-body)',
+    fontSize: 13,
+    fontWeight: 600,
     cursor: 'pointer',
   },
 
@@ -2380,18 +2363,22 @@ const styles: Record<string, React.CSSProperties> = {
     margin: '12px 20px',
     padding: 12,
     borderRadius: 12,
-    background: '#eff6ff',
-    color: '#1d4ed8',
-    fontWeight: 800,
+    background: 'rgba(75,146,172,0.12)',
+    border: '1px solid rgba(75,146,172,0.28)',
+    color: '#2C6F88',
+    fontSize: 13,
+    fontWeight: 500,
   },
 
   modalError: {
     margin: '12px 20px',
     padding: 12,
     borderRadius: 12,
-    background: '#fef2f2',
-    color: '#b91c1c',
-    fontWeight: 800,
+    background: 'rgba(193,104,60,0.12)',
+    border: '1px solid rgba(193,104,60,0.28)',
+    color: '#9C4A24',
+    fontSize: 13,
+    fontWeight: 500,
   },
 
   modalTableWrapper: {
@@ -2410,69 +2397,80 @@ const styles: Record<string, React.CSSProperties> = {
   cerfaTh: {
     position: 'sticky',
     top: 0,
-    background: '#f1f5f9',
-    border: '1px solid #e2e8f0',
+    background: '#EDEAE0',
+    border: '1px solid rgba(20,26,38,0.10)',
     padding: '10px 8px',
     textAlign: 'left',
-    fontWeight: 900,
-    color: '#0f172a',
+    fontSize: 11,
+    fontWeight: 600,
+    letterSpacing: '0.06em',
+    textTransform: 'uppercase',
+    color: 'rgba(20,26,38,0.6)',
     zIndex: 1,
   },
 
   cerfaTd: {
-    border: '1px solid #e2e8f0',
-    padding: '8px',
+    border: '1px solid rgba(20,26,38,0.08)',
+    padding: 8,
     verticalAlign: 'middle',
-    color: '#0f172a',
-  },
-
-  cerfaLink: {
-    color: '#2563eb',
-    textDecoration: 'underline',
-    fontWeight: 900,
+    color: '#141A26',
   },
 
   cerfaTdStrong: {
-    border: '1px solid #e2e8f0',
-    padding: '8px',
+    border: '1px solid rgba(20,26,38,0.08)',
+    padding: 8,
     verticalAlign: 'middle',
-    color: '#0f172a',
-    fontWeight: 900,
+    color: '#141A26',
+    fontFamily: 'var(--font-mono)',
+    fontWeight: 600,
   },
 
   cerfaTdCenter: {
-    border: '1px solid #e2e8f0',
-    padding: '8px',
+    border: '1px solid rgba(20,26,38,0.08)',
+    padding: 8,
     textAlign: 'center',
     verticalAlign: 'middle',
   },
 
+  cerfaLink: {
+    color: '#35708A',
+    textDecoration: 'underline',
+    fontWeight: 600,
+  },
+
   cerfaEmptyCell: {
-    border: '1px solid #e2e8f0',
+    border: '1px solid rgba(20,26,38,0.08)',
     padding: 24,
     textAlign: 'center',
-    color: '#64748b',
-    fontWeight: 800,
+    color: 'rgba(20,26,38,0.45)',
   },
 
   cerfaInput: {
     width: '100%',
     minWidth: 220,
-    border: '1px solid #cbd5e1',
+    border: '1px solid rgba(20,26,38,0.18)',
     borderRadius: 8,
     padding: '7px 9px',
+    fontFamily: 'var(--font-body)',
+    fontSize: 13,
+    color: '#141A26',
+    background: '#fff',
     outline: 'none',
   },
 
   cerfaOkButton: {
     border: 'none',
-    background: '#2563eb',
-    color: '#fff',
+    background: '#A6A181',
+    color: '#141A26',
     borderRadius: 8,
-    padding: '7px 11px',
-    fontWeight: 900,
+    padding: '7px 12px',
+    fontFamily: 'var(--font-body)',
+    fontSize: 12.5,
+    fontWeight: 600,
     cursor: 'pointer',
   },
+
+  /* ---- Contenu ---------------------------------------------------------- */
 
   content: {
     position: 'relative',
@@ -2482,6 +2480,11 @@ const styles: Record<string, React.CSSProperties> = {
     width: '100%',
     minWidth: 0,
     padding: 20,
+    // Couleur de texte par defaut de la zone de contenu. Les ecrans
+    // historiques (TODO, Clients, Carte...) sont a fond clair et comptaient sur
+    // un texte sombre herite ; les ecrans sombres refondus fixent eux-memes
+    // leurs couleurs classe par classe.
+    color: '#141A26',
   },
 
   contentFullWidth: {

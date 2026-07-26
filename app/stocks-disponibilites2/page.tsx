@@ -33,7 +33,6 @@ import {
   isCurrentRupture,
   isRuptureWithinWeeks,
   toNumber,
-  AbcBadge,
 } from "../stocks-disponibilites/page";
 
 const display = Space_Grotesk({ subsets: ["latin"], weight: ["500", "700"], variable: "--font-display" });
@@ -143,6 +142,12 @@ export default function StocksDisponibilites2Page() {
   // chaque graphique) pour que le choix fait au niveau famille s'applique
   // aussi à la lecture de chaque référence ouverte ensuite.
   const [includeRetard, setIncludeRetard] = useState(false);
+
+  // Confirmation avant d'écraser des hypothèses propres à certains articles.
+  const [scopeOverrideAsk, setScopeOverrideAsk] = useState<
+    { cle: string; articlesTotal: number; articlesSpecifiques: number; coefficients: number[]; references: string[]; referencesTronquees: boolean } | null
+  >(null);
+  const [scopeNotice, setScopeNotice] = useState<string | null>(null);
 
   const [horizonWeeks, setHorizonWeeks] = useState(26);
   const [scenarioPct, setScenarioPct] = useState(120);
@@ -315,7 +320,7 @@ export default function StocksDisponibilites2Page() {
   // Chargées UNE SEULE FOIS avec la projection, en même temps que le reste.
   // Cocher/décocher la case ne relance donc aucun appel : les deux lectures
   // (avec et sans retard) sont dérivées du même jeu de données en mémoire.
-  const [retardsRaw, setRetardsRaw] = useState<Array<{ reference_article: string; quantite: number }>>([]);
+  const [retardsRaw, setRetardsRaw] = useState<Array<{ reference_article: string; quantite: number; coefficient: number }>>([]);
   const [retardError, setRetardError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -325,11 +330,13 @@ export default function StocksDisponibilites2Page() {
     }
     let cancelled = false;
     async function loadRetards() {
+      // Une seule requête pour les deux besoins : les CDC en retard ET le
+      // coefficient d'hypothèse réellement appliqué, que la route
+      // famille-detail ne renvoie pas.
       const { data, error: err } = await supabase
         .from("v_stock_projection_hebdo_latest")
-        .select("reference_article, besoins_clients_retard")
-        .eq("famille", selectedFamille as string)
-        .gt("besoins_clients_retard", 0);
+        .select("reference_article, besoins_clients_retard, coefficient_prevision_applique")
+        .eq("famille", selectedFamille as string);
       if (cancelled) return;
       if (err) {
         // Surtout ne pas avaler l'erreur en silence : un cache de schéma
@@ -345,6 +352,7 @@ export default function StocksDisponibilites2Page() {
         (data || []).map((r) => ({
           reference_article: r.reference_article as string,
           quantite: Number(r.besoins_clients_retard || 0),
+          coefficient: Number(r.coefficient_prevision_applique || 0),
         })),
       );
     }
@@ -359,6 +367,36 @@ export default function StocksDisponibilites2Page() {
     retardsRaw.forEach((r) => map.set(r.reference_article, (map.get(r.reference_article) || 0) + r.quantite));
     return map;
   }, [retardsRaw]);
+
+  // Hypothèse appliquée par référence. Elle est en principe uniforme sur
+  // l'horizon ; on retient la valeur maximale pour rester lisible si une
+  // semaine porte un forçage différent.
+  const coefficientByRef = useMemo(() => {
+    const map = new Map<string, number>();
+    retardsRaw.forEach((r) => {
+      if (!r.coefficient) return;
+      map.set(r.reference_article, Math.max(map.get(r.reference_article) || 0, r.coefficient));
+    });
+    return map;
+  }, [retardsRaw]);
+
+  // Agrégats par référence sur tout l'horizon, repris du détail hebdomadaire
+  // déjà chargé : aucune requête supplémentaire.
+  const articleAggregates = useMemo(() => {
+    const map = new Map<string, { entrees: number; previsionComplementaire: number; stockTerme: number; derniereSemaine: string }>();
+    familleWeeklyRaw.forEach((r) => {
+      const entry = map.get(r.reference_article) || { entrees: 0, previsionComplementaire: 0, stockTerme: 0, derniereSemaine: "" };
+      entry.entrees += r.commandes_fournisseurs_attendues;
+      entry.previsionComplementaire += r.prevision_ventes;
+      // Stock à terme = stock projeté de la dernière semaine de l'horizon.
+      if (r.periode_debut >= entry.derniereSemaine) {
+        entry.derniereSemaine = r.periode_debut;
+        entry.stockTerme = r.stock_projete;
+      }
+      map.set(r.reference_article, entry);
+    });
+    return map;
+  }, [familleWeeklyRaw]);
 
   const familleWeekly = useMemo(() => {
     const filtered = searchMatches ? familleWeeklyRaw.filter((r) => searchMatches.has(r.reference_article)) : familleWeeklyRaw;
@@ -528,6 +566,11 @@ export default function StocksDisponibilites2Page() {
     }
   }
 
+  /**
+   * Étape de contrôle avant d'appliquer un scénario à un périmètre.
+   * Les hypothèses saisies article par article sont prioritaires dans la
+   * cascade : les écraser est une perte de réglage fin, jamais implicite.
+   */
   async function handleRecalculerScope() {
     if (!runId) {
       setError("Aucun run actif — lancez d'abord un recalcul complet.");
@@ -535,6 +578,50 @@ export default function StocksDisponibilites2Page() {
     }
     const cle = recalcScope === "famille" ? selectedFamille : selectedMacro;
     if (!cle) return;
+
+    setScopeNotice(null);
+
+    try {
+      const { data, error: diagError } = await supabase.rpc("count_stock_scope_article_overrides", {
+        p_run_id: runId,
+        p_scope: recalcScope,
+        p_cle: cle,
+        p_depot: "GLOBAL",
+      });
+      if (diagError) throw new Error(diagError.message);
+
+      const diagnostic = data as {
+        articles_total?: number;
+        articles_specifiques?: number;
+        coefficients?: number[];
+        references?: string[];
+        references_tronquees?: boolean;
+      } | null;
+
+      if ((diagnostic?.articles_specifiques ?? 0) > 0) {
+        setScopeOverrideAsk({
+          cle,
+          articlesTotal: Number(diagnostic?.articles_total || 0),
+          articlesSpecifiques: Number(diagnostic?.articles_specifiques || 0),
+          coefficients: (diagnostic?.coefficients || []).map(Number),
+          references: diagnostic?.references || [],
+          referencesTronquees: Boolean(diagnostic?.references_tronquees),
+        });
+        return;
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      return;
+    }
+
+    await executeRecalculerScope(false);
+  }
+
+  async function executeRecalculerScope(ecraserSpecifiques: boolean) {
+    if (!runId) return;
+    const cle = recalcScope === "famille" ? selectedFamille : selectedMacro;
+    if (!cle) return;
+    setScopeOverrideAsk(null);
     setRebuildProgress({ percent: 0, message: `Recalcul de ${cle}…` });
     const warnBeforeUnload = (e: BeforeUnloadEvent) => {
       e.preventDefault();
@@ -542,16 +629,27 @@ export default function StocksDisponibilites2Page() {
     };
     window.addEventListener("beforeunload", warnBeforeUnload);
     try {
-      const session = await supabase.auth.getSession();
-      const token = session.data.session?.access_token;
-      const res = await fetch("/api/stocks-disponibilites/recalculer-scope", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-        body: JSON.stringify({ run_id: runId, scope: recalcScope, cle, depot: "GLOBAL", scenario_prevision_pct: scenarioPct / 100 }),
+      // On passe par la RPC apply_stock_scenario_scope et non par la route
+      // /recalculer-scope : celle-ci s'appuie sur
+      // recalculate_stock_projection_article_fast, qui réutilise le coefficient
+      // DÉJÀ STOCKÉ sur la ligne et ne re-résout jamais la cascade
+      // d'hypothèses. Le scénario % était donc silencieusement ignoré au
+      // niveau périmètre, alors qu'il fonctionnait au niveau article — l'écran
+      // y écrit d'abord un override, ce que personne ne faisait ici.
+      // La RPC écrit l'override de famille / famille macro sur toutes les
+      // semaines, re-résout la cascade puis rechaîne les projections.
+      const { data: payload, error: rpcError } = await supabase.rpc("apply_stock_scenario_scope", {
+        p_run_id: runId,
+        p_scope: recalcScope,
+        p_cle: cle,
+        p_depot: "GLOBAL",
+        p_scenario_pct: scenarioPct / 100,
+        p_ecraser_specifiques: ecraserSpecifiques,
       });
-      const payload = (await res.json()) as { success: boolean; message?: string; articles_traites?: number; articles_total?: number };
-      if (!res.ok || !payload.success) throw new Error(payload?.message || "Échec du recalcul");
-      setRebuildProgress({ percent: 100, message: `${payload.articles_traites}/${payload.articles_total} article(s) recalculé(s)` });
+      if (rpcError) throw new Error(rpcError.message);
+      const result = payload as { success?: boolean; message?: string; articles_traites?: number; articles_total?: number } | null;
+      if (!result?.success) throw new Error(result?.message || "Échec du recalcul");
+      setRebuildProgress({ percent: 100, message: result.message || `${result.articles_traites}/${result.articles_total} article(s) recalculé(s)` });
       await loadMainData();
       setRefreshKey((k) => k + 1);
       setTimeout(() => setRebuildProgress(null), 2000);
@@ -562,6 +660,9 @@ export default function StocksDisponibilites2Page() {
       window.removeEventListener("beforeunload", warnBeforeUnload);
     }
   }
+
+  // Nombre de semaines réellement présentes dans la projection affichée.
+  const horizonLabel = `${familleWeekly.length || horizonWeeks} sem.`;
 
   const canRecalcScope = recalcScope !== "all" && ((recalcScope === "famille" && selectedFamille) || (recalcScope === "famille_macro" && selectedMacro));
 
@@ -640,6 +741,18 @@ export default function StocksDisponibilites2Page() {
       <div className="w-full px-6 py-8 md:px-10">
         {error && <div className="mb-6 rounded-lg border border-[#C1683C]/40 bg-[#C1683C]/10 px-4 py-3 text-sm text-[#e0a685]">{error}</div>}
 
+        {scopeNotice && (
+          <div className="mb-6 flex items-start justify-between gap-4 rounded-lg border border-[#4B92AC]/40 bg-[#4B92AC]/10 px-4 py-3 text-sm text-[#9ecadb]">
+            <span>{scopeNotice}</span>
+            <button
+              onClick={() => setScopeNotice(null)}
+              className="shrink-0 text-xs font-medium text-white/50 transition hover:text-white"
+            >
+              Fermer
+            </button>
+          </div>
+        )}
+
         {loading ? (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
             {Array.from({ length: 8 }).map((_, i) => (
@@ -681,6 +794,9 @@ export default function StocksDisponibilites2Page() {
               sortiesHorizon={sortiesHorizonKpi}
               stockEvolution={stockEvolutionKpi}
               horizonWeeks={familleWeekly.length}
+              retardTotal={familleWeekly[0]?.sorties_retard ?? 0}
+              includeRetard={includeRetard}
+              onToggleRetard={setIncludeRetard}
             />
 
             <div className="mb-6 grid grid-cols-1 gap-4 xl:grid-cols-2">
@@ -716,14 +832,17 @@ export default function StocksDisponibilites2Page() {
                   <tr className="border-b border-black/10 text-left text-xs uppercase tracking-wide text-[#141A26]/50">
                     <th className="whitespace-nowrap px-4 py-3">Référence</th>
                     <th className="whitespace-nowrap px-4 py-3">Désignation</th>
-                    <th className="whitespace-nowrap px-4 py-3">ABC</th>
                     <th className="whitespace-nowrap px-4 py-3 text-right">Stock dispo</th>
                     <th className="whitespace-nowrap px-4 py-3 text-right">CDC en cmd</th>
+                    <th className="whitespace-nowrap px-4 py-3 text-right" style={{ color: VIOLET }}>CDC en retard</th>
+                    <th className="whitespace-nowrap px-4 py-3 text-right">Hypothèse</th>
+                    <th className="whitespace-nowrap px-4 py-3 text-right">Prév. complém.</th>
+                    <th className="whitespace-nowrap px-4 py-3 text-right">À récept. {horizonLabel}</th>
+                    <th className="whitespace-nowrap px-4 py-3 text-right">Stock à terme</th>
                     <th className="whitespace-nowrap px-4 py-3 text-right">Qté YTD (évol. N-1)</th>
                     <th className="whitespace-nowrap px-4 py-3 text-right">Manque max</th>
                     <th className="whitespace-nowrap px-4 py-3">Date rupture</th>
                     <th className="whitespace-nowrap px-4 py-3">Levée rupture</th>
-                    <th className="whitespace-nowrap px-4 py-3 text-right">CA à risque</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-black/[0.06]">
@@ -731,9 +850,35 @@ export default function StocksDisponibilites2Page() {
                     <tr key={a.reference_article} onClick={() => setSelectedArticle(a)} className="cursor-pointer hover:bg-black/[0.03]">
                       <td className="whitespace-nowrap px-4 py-3 font-[var(--font-mono)] font-medium text-[#141A26]">{a.reference_article}</td>
                       <td className="max-w-[220px] truncate px-4 py-3 text-[#141A26]/80">{a.designation}</td>
-                      <td className="px-4 py-3"><AbcBadge label="CA" value={a.classe_abc_ca} compact /></td>
                       <td className="whitespace-nowrap px-4 py-3 text-right font-[var(--font-mono)]">{formatNumber(a.stock_initial)}</td>
                       <td className="whitespace-nowrap px-4 py-3 text-right font-[var(--font-mono)]">{formatNumber(a.besoins_clients_fermes)}</td>
+                      <td
+                        className="whitespace-nowrap px-4 py-3 text-right font-[var(--font-mono)]"
+                        style={{
+                          color: (retardByRef.get(a.reference_article) || 0) > 0 ? VIOLET : "#141A2640",
+                          fontWeight: (retardByRef.get(a.reference_article) || 0) > 0 && includeRetard ? 600 : 400,
+                        }}
+                      >
+                        {formatNumber(retardByRef.get(a.reference_article) || 0)}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-right font-[var(--font-mono)] text-[#141A26]/70">
+                        {coefficientByRef.has(a.reference_article) ? `×${(coefficientByRef.get(a.reference_article) as number).toFixed(2)}` : "—"}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-right font-[var(--font-mono)] text-[#C1683C]">
+                        {formatNumber(articleAggregates.get(a.reference_article)?.previsionComplementaire ?? 0)}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-right font-[var(--font-mono)] text-[#3F9142]">
+                        {formatNumber(articleAggregates.get(a.reference_article)?.entrees ?? 0)}
+                      </td>
+                      <td
+                        className={`whitespace-nowrap px-4 py-3 text-right font-[var(--font-mono)] font-medium ${
+                          (articleAggregates.get(a.reference_article)?.stockTerme ?? 0) < 0 ? "text-[#C1683C]" : "text-[#141A26]"
+                        }`}
+                      >
+                        {articleAggregates.has(a.reference_article)
+                          ? formatNumber(articleAggregates.get(a.reference_article)?.stockTerme ?? 0)
+                          : "—"}
+                      </td>
                       <td className="whitespace-nowrap px-4 py-3 text-right font-[var(--font-mono)]">
                         {formatNumber(a.sorties_ytd_n)}{" "}
                         {a.sorties_ytd_evol_pct !== null && a.sorties_ytd_evol_pct !== undefined && (
@@ -748,12 +893,11 @@ export default function StocksDisponibilites2Page() {
                         {formatDate(a.date_rupture)}
                       </td>
                       <td className="whitespace-nowrap px-4 py-3 text-xs text-[#141A26]/60">{formatDate(a.date_retour_dispo)}</td>
-                      <td className="whitespace-nowrap px-4 py-3 text-right font-[var(--font-mono)]">{formatCurrencyK(a.ca_client_risque)}</td>
                     </tr>
                   ))}
                   {articleRows.length === 0 && (
                     <tr>
-                      <td colSpan={10} className="px-4 py-8 text-center text-[#141A26]/40">Aucun article sur ce périmètre.</td>
+                      <td colSpan={13} className="px-4 py-8 text-center text-[#141A26]/40">Aucun article sur ce périmètre.</td>
                     </tr>
                   )}
                 </tbody>
@@ -762,6 +906,68 @@ export default function StocksDisponibilites2Page() {
           </div>
         )}
       </div>
+
+      {scopeOverrideAsk && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#060A12]/70 p-4">
+          <div className="w-full max-w-lg rounded-2xl border border-white/10 bg-[#101A2E] p-6 shadow-2xl">
+            <h3 className="font-[var(--font-display)] text-lg font-semibold text-white">
+              Des % d&rsquo;évolutions sont spécifiques dans cette famille
+            </h3>
+            <p className="mt-3 text-sm leading-relaxed text-white/70">
+              Voulez-vous écraser les hypothèses actuelles par celle-ci&nbsp;?
+            </p>
+
+            <div className="mt-4 rounded-xl border border-white/10 bg-white/[0.04] p-4 text-xs text-white/60">
+              <div className="flex justify-between gap-4">
+                <span>Périmètre</span>
+                <span className="font-[var(--font-mono)] text-white/85">{scopeOverrideAsk.cle}</span>
+              </div>
+              <div className="mt-2 flex justify-between gap-4">
+                <span>Références avec hypothèse propre</span>
+                <span className="font-[var(--font-mono)] text-white/85">
+                  {scopeOverrideAsk.articlesSpecifiques} / {scopeOverrideAsk.articlesTotal}
+                </span>
+              </div>
+              {scopeOverrideAsk.coefficients.length > 0 && (
+                <div className="mt-2 flex justify-between gap-4">
+                  <span>Coefficients en place</span>
+                  <span className="font-[var(--font-mono)] text-white/85">
+                    {scopeOverrideAsk.coefficients.map((c) => `×${c.toFixed(2)}`).join(" · ")}
+                  </span>
+                </div>
+              )}
+              <div className="mt-2 flex justify-between gap-4">
+                <span>Nouvelle hypothèse</span>
+                <span className="font-[var(--font-mono)] text-[#A6A181]">×{(scenarioPct / 100).toFixed(2)}</span>
+              </div>
+              {scopeOverrideAsk.references.length > 0 && (
+                <div className="mt-3 border-t border-white/10 pt-3 font-[var(--font-mono)] text-[11px] leading-relaxed text-white/45">
+                  {scopeOverrideAsk.references.join(", ")}
+                  {scopeOverrideAsk.referencesTronquees ? "…" : ""}
+                </div>
+              )}
+            </div>
+
+            <div className="mt-5 flex justify-end gap-3">
+              <button
+                onClick={() => {
+                  setScopeOverrideAsk(null);
+                  setScopeNotice("Modifier dans ce cas chaque article selon vos souhaits.");
+                }}
+                className="rounded-lg border border-white/15 px-4 py-2 text-sm font-medium text-white/70 transition hover:bg-white/5 hover:text-white"
+              >
+                Non
+              </button>
+              <button
+                onClick={() => void executeRecalculerScope(true)}
+                className="rounded-lg bg-[#A6A181] px-4 py-2 text-sm font-semibold text-[#141A26] transition hover:brightness-110"
+              >
+                Oui, écraser et appliquer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {selectedArticle && (
         <ArticleDrawer
@@ -813,6 +1019,7 @@ function EvolBadge({ pct }: { pct: number | null }) {
 
 function FamilleKpiPanel({
   nbArticles, ruptureActuel, parHorizon, prochaineRupture, prochaineLevee, blYtd, sortiesHorizon, stockEvolution, horizonWeeks,
+  retardTotal, includeRetard, onToggleRetard,
 }: {
   nbArticles: number;
   ruptureActuel: number;
@@ -823,59 +1030,98 @@ function FamilleKpiPanel({
   sortiesHorizon: { n: number; n1: number; evolPct: number | null; approFerme: number; manque: number };
   stockEvolution: { first: number; last: number; deltaPct: number | null } | null;
   horizonWeeks: number;
+  retardTotal: number;
+  includeRetard: boolean;
+  onToggleRetard: (value: boolean) => void;
 }) {
   return (
-    <div className="mb-6 grid grid-cols-1 gap-4 lg:grid-cols-4">
+    <div className="mb-6 grid grid-cols-1 gap-4 lg:grid-cols-2 xl:grid-cols-4">
+      {/* 1 — Ruptures */}
       <div className="rounded-xl border border-white/10 bg-white/[0.04] p-5">
         <div className="mb-3 text-[11px] font-medium uppercase tracking-wide text-white/40">Ruptures — {nbArticles} article(s)</div>
-        <div className="mb-1 flex items-baseline gap-2">
-          <span className="font-[var(--font-mono)] text-2xl font-semibold text-[#C1683C]">{ruptureActuel}</span>
+        <div className="mb-2 flex items-baseline gap-2">
+          <span className="font-[var(--font-mono)] text-[2.25rem] font-semibold leading-none text-[#C1683C]">{ruptureActuel}</span>
           <span className="text-xs text-white/40">actuellement</span>
         </div>
-        {prochaineRupture && <div className="mb-2 text-xs text-white/50">Prochaine : {formatDate(prochaineRupture)}</div>}
+        {prochaineRupture && <div className="mb-1 text-xs text-white/50">Prochaine : {formatDate(prochaineRupture)}</div>}
         {prochaineLevee && <div className="mb-3 text-xs text-[#4B92AC]">Prochaine levée : {formatDate(prochaineLevee)}</div>}
         <div className="grid grid-cols-5 gap-1.5">
           {parHorizon.map((h) => (
             <div key={h.semaines} className="rounded-lg bg-white/5 p-1.5 text-center">
-              <div className="font-[var(--font-mono)] text-sm font-semibold text-white">{h.count}</div>
+              <div className="font-[var(--font-mono)] text-base font-semibold text-white">{h.count}</div>
               <div className="text-[9px] text-white/35">≤{h.semaines}s</div>
             </div>
           ))}
         </div>
       </div>
 
+      {/* 2 — BL réalisés */}
       <div className="rounded-xl border border-white/10 bg-white/[0.04] p-5">
         <div className="mb-3 text-[11px] font-medium uppercase tracking-wide text-white/40">BL depuis le 1er janvier</div>
-        <div className="mb-1 font-[var(--font-mono)] text-2xl font-semibold text-white">{formatNumber(blYtd.n)}</div>
-        <div className="text-xs text-white/40">N-1 : {formatNumber(blYtd.n1)} · <EvolBadge pct={blYtd.evolPct} /></div>
+        <div className="font-[var(--font-mono)] text-[2.25rem] font-semibold leading-none text-white">{formatNumber(blYtd.n)}</div>
+        <div className="mt-2 text-xs text-white/40">N-1 : {formatNumber(blYtd.n1)} · <EvolBadge pct={blYtd.evolPct} /></div>
       </div>
 
+      {/* 3 — Demande sur l'horizon, retard compris */}
       <div className="rounded-xl border border-white/10 bg-white/[0.04] p-5">
         <div className="mb-3 text-[11px] font-medium uppercase tracking-wide text-white/40">Sorties + fermes — {horizonWeeks} sem.</div>
-        <div className="mb-1 font-[var(--font-mono)] text-2xl font-semibold text-white">{formatNumber(sortiesHorizon.n)}</div>
-        <div className="mb-2 text-xs text-white/40">N-1 même période : {formatNumber(sortiesHorizon.n1)} · <EvolBadge pct={sortiesHorizon.evolPct} /></div>
-        <div className="flex justify-between border-t border-white/10 pt-2 text-xs">
-          <span className="text-white/40">Entrées à venir</span>
-          <span className="font-[var(--font-mono)] text-white">{formatNumber(sortiesHorizon.approFerme)}</span>
-        </div>
-        {sortiesHorizon.manque > 0 && (
-          <div className="mt-1 flex justify-between text-xs">
-            <span className="text-[#C1683C]">Manque estimé</span>
-            <span className="font-[var(--font-mono)] font-semibold text-[#C1683C]">{formatNumber(sortiesHorizon.manque)}</span>
+        <div className="font-[var(--font-mono)] text-[2.25rem] font-semibold leading-none text-white">{formatNumber(sortiesHorizon.n)}</div>
+        <div className="mt-2 text-xs text-white/40">N-1 même période : {formatNumber(sortiesHorizon.n1)} · <EvolBadge pct={sortiesHorizon.evolPct} /></div>
+
+        {/* CDC en retard : même charte violette que les graphiques. Le statut
+            indique explicitement si la quantité est intégrée au chiffre
+            ci-dessus, et sert de bascule. */}
+        <div className="mt-4 rounded-lg border border-[#7A5EA8]/30 bg-[#7A5EA8]/[0.10] p-3">
+          <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-white/45">
+            <span className="inline-block h-2 w-2 rounded-sm" style={{ background: VIOLET }} />
+            CDC en retard · livraison passée
           </div>
-        )}
+          <div className="flex items-end justify-between gap-3">
+            <span className="font-[var(--font-mono)] text-[1.75rem] font-semibold leading-none" style={{ color: "#B79BE0" }}>
+              {formatNumber(retardTotal)}
+            </span>
+            <button
+              type="button"
+              disabled={retardTotal === 0}
+              onClick={() => onToggleRetard(!includeRetard)}
+              className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                includeRetard && retardTotal > 0
+                  ? "bg-[#7A5EA8]/35 text-[#D8C9F2] hover:bg-[#7A5EA8]/50"
+                  : "bg-white/10 text-white/50 hover:bg-white/20"
+              }`}
+              title="Bascule identique à la case sous le graphique de projection"
+            >
+              {retardTotal === 0 ? "Aucun retard" : includeRetard ? "Pris en compte" : "Non pris en compte"}
+            </button>
+          </div>
+        </div>
       </div>
 
+      {/* 4 — Couverture : évolution du stock et approvisionnements */}
       <div className="rounded-xl border border-white/10 bg-white/[0.04] p-5">
         <div className="mb-3 text-[11px] font-medium uppercase tracking-wide text-white/40">Évolution du stock sur la période</div>
         {stockEvolution ? (
           <>
-            <div className="mb-1 font-[var(--font-mono)] text-2xl font-semibold text-white">{formatNumber(stockEvolution.last)}</div>
-            <div className="text-xs text-white/40">Départ : {formatNumber(stockEvolution.first)} · <EvolBadge pct={stockEvolution.deltaPct} /></div>
+            <div className="font-[var(--font-mono)] text-[2.25rem] font-semibold leading-none text-white">{formatNumber(stockEvolution.last)}</div>
+            <div className="mt-2 text-xs text-white/40">Départ : {formatNumber(stockEvolution.first)} · <EvolBadge pct={stockEvolution.deltaPct} /></div>
           </>
         ) : (
           <span className="text-white/30">—</span>
         )}
+        <div className="mt-4 grid grid-cols-2 gap-3 border-t border-white/10 pt-3">
+          <div>
+            <div className="mb-1 text-[10px] uppercase tracking-wide text-white/40">Entrées à venir</div>
+            <div className="font-[var(--font-mono)] text-[1.75rem] font-semibold leading-none text-[#3F9142]">{formatNumber(sortiesHorizon.approFerme)}</div>
+            <div className="mt-1 text-[10px] text-white/30">Cmd fournisseurs</div>
+          </div>
+          <div className="text-right">
+            <div className="mb-1 text-[10px] uppercase tracking-wide text-white/40">Manque estimé</div>
+            <div className={`font-[var(--font-mono)] text-[1.75rem] font-semibold leading-none ${sortiesHorizon.manque > 0 ? "text-[#C1683C]" : "text-white/35"}`}>
+              {formatNumber(sortiesHorizon.manque)}
+            </div>
+            <div className="mt-1 text-[10px] text-white/30">Sorties − entrées</div>
+          </div>
+        </div>
       </div>
     </div>
   );
