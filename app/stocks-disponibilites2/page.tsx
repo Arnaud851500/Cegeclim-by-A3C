@@ -922,7 +922,12 @@ export default function StocksDisponibilites2Page() {
                   disabled={exportEnCours || !runId}
                   className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-[#141A26] transition disabled:opacity-40"
                   style={{ background: "#A6A181" }}
-                  title={selectedFamille ? `Export Excel — ${selectedFamille}` : selectedMacro ? `Export Excel — ${selectedMacro}` : "Export Excel — tous les articles"}
+                  title={
+                    !runId ? "Lancez d'abord un recalcul de projection" :
+                    selectedFamille ? `Export Excel — famille ${selectedFamille}` :
+                    selectedMacro ? `Export Excel — famille macro ${selectedMacro}` :
+                    "Export Excel — toutes les références (projection complète)"
+                  }
                 >
                   {exportEnCours ? "⏳ Export…" : "⬇ Excel"}
                 </button>
