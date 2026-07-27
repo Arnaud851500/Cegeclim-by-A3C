@@ -551,7 +551,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: 'var(--font-display)',
     // Le titre suit la largeur disponible plutôt qu'une valeur figée : sur un
     // très grand écran il double vraiment, sans déborder sur un portable.
-    fontSize: 'clamp(38px, 5.4vw, 84px)',
+    fontSize: 'clamp(30px, 5.4vw, 74px)',
     fontWeight: 700,
     lineHeight: 1.02,
     letterSpacing: '-0.035em',
