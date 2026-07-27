@@ -152,6 +152,10 @@ function lireParams(): Params {
 export default function FocusMensuelPrintPage() {
   const [params, setParams] = useState<Params | null>(null)
   const [sectionsActives, setSectionsActives] = useState<SectionKey[]>([])
+  // Échelle d'impression. Une section « une page » n'a aucune raison de tenir
+  // pile dans 192 mm de haut : plutôt que de deviner, on réduit l'ensemble
+  // proportionnellement et on laisse le réglage accessible.
+  const [echelle, setEchelle] = useState(0.75)
 
   const [monthRows, setMonthRows] = useState<DailyRow[]>([])
   const [monthRowsN1, setMonthRowsN1] = useState<DailyRow[]>([])
@@ -355,13 +359,23 @@ export default function FocusMensuelPrintPage() {
 
   // Chaque section imprimée s'ouvre sur son propre en-tête. Le compteur ne sert
   // qu'à savoir laquelle est la première : elle seule n'a pas de saut de page.
+  //
+  // `compacte` force la section à ne pas se scinder et lui applique l'échelle.
+  // Les faits marquants en sont exclus : leurs TOP 20 doivent pouvoir couler
+  // sur plusieurs pages, en réimprimant leurs en-têtes de colonnes.
   let indexSection = 0
-  const prochainSaut = () => (indexSection++ > 0 ? 'section avantSaut' : 'section')
+  const classesSection = (compacte = true) => {
+    const base = indexSection++ > 0 ? 'section avantSaut' : 'section'
+    return compacte ? `${base} sectionCompacte` : base
+  }
 
   if (!params) return null
 
   return (
-    <div className={`${display.variable} ${body.variable} ${mono.variable} document`}>
+    <div
+      className={`${display.variable} ${body.variable} ${mono.variable} document`}
+      style={{ ['--echelle' as string]: String(echelle) } as React.CSSProperties}
+    >
       {/* ---- Barre d'outils, absente du document imprimé ------------------ */}
       <div className="barre noPrint">
         <div className="barreTitre">Focus mensuel — document d&rsquo;impression</div>
@@ -375,6 +389,19 @@ export default function FocusMensuelPrintPage() {
           ))}
         </div>
 
+        <label className="barreEchelle">
+          Échelle
+          <select value={echelle} onChange={(e) => setEchelle(Number(e.target.value))}>
+            <option value={0.9}>90 %</option>
+            <option value={0.85}>85 %</option>
+            <option value={0.8}>80 %</option>
+            <option value={0.75}>75 %</option>
+            <option value={0.7}>70 %</option>
+            <option value={0.65}>65 %</option>
+            <option value={0.6}>60 %</option>
+          </select>
+        </label>
+
         <button
           type="button"
           className="barreBouton"
@@ -383,6 +410,12 @@ export default function FocusMensuelPrintPage() {
         >
           Imprimer / Enregistrer en PDF
         </button>
+
+        <div className="barreAide">
+          Chaque onglet tient sur une page, sauf les faits marquants. Si une section déborde encore,
+          descendez d&rsquo;un cran. Dans la boîte d&rsquo;impression : marges <strong>Minimum</strong>,
+          en-têtes et pieds de page décochés.
+        </div>
       </div>
 
       {loading && <div className="etat">Chargement des données…</div>}
@@ -392,7 +425,7 @@ export default function FocusMensuelPrintPage() {
         <>
           {/* ================= Vue d'ensemble ================= */}
           {estActive('vue') && (
-            <section className={prochainSaut()}>
+            <section className={classesSection()}>
               <EnTete
                 titre="Vue d'ensemble"
                 perimetre={perimetre}
@@ -437,7 +470,7 @@ export default function FocusMensuelPrintPage() {
           {/* ================= Comparatif agence ================= */}
           {estActive('agence') && (
             <>
-              <section className={prochainSaut()}>
+              <section className={classesSection()}>
                 <EnTete
                   titre="Comparatif agence — mois en cours (MTD)"
                   perimetre={perimetre}
@@ -453,7 +486,7 @@ export default function FocusMensuelPrintPage() {
                 />
               </section>
 
-              <section className={prochainSaut()}>
+              <section className={classesSection()}>
                 <EnTete
                   titre="Comparatif agence — cumul annuel (YTD)"
                   perimetre={perimetre}
@@ -474,7 +507,7 @@ export default function FocusMensuelPrintPage() {
           {/* ================= Comparatif famille ================= */}
           {estActive('famille') && (
             <>
-              <section className={prochainSaut()}>
+              <section className={classesSection()}>
                 <EnTete
                   titre="Comparatif famille — mois en cours (MTD)"
                   perimetre={perimetre}
@@ -489,7 +522,7 @@ export default function FocusMensuelPrintPage() {
                 />
               </section>
 
-              <section className={prochainSaut()}>
+              <section className={classesSection()}>
                 <EnTete
                   titre="Comparatif famille — cumul annuel (YTD)"
                   perimetre={perimetre}
@@ -508,7 +541,7 @@ export default function FocusMensuelPrintPage() {
 
           {/* ================= Rolling 12 mois ================= */}
           {estActive('rolling') && (
-            <section className={prochainSaut()}>
+            <section className={classesSection()}>
               <EnTete
                 titre="Rolling 12 mois"
                 perimetre={perimetre}
@@ -532,7 +565,7 @@ export default function FocusMensuelPrintPage() {
           {estActive('faits') && (
             <>
               {(['Devis', 'CDC', 'BL'] as const).map((type) => (
-                <section key={type} className={prochainSaut()}>
+                <section key={type} className={classesSection(false)}>
                   <EnTete
                     titre={`Faits marquants — TOP 20 ${type}`}
                     perimetre={perimetre}
@@ -596,7 +629,6 @@ export default function FocusMensuelPrintPage() {
           cursor: pointer;
         }
         .barreBouton {
-          margin-left: auto;
           border: none;
           border-radius: 9px;
           background: #A6A181;
@@ -608,6 +640,28 @@ export default function FocusMensuelPrintPage() {
           cursor: pointer;
         }
         .barreBouton:disabled { opacity: 0.5; cursor: default; }
+
+        .barreEchelle {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          margin-left: auto;
+          font-size: 13px;
+        }
+        .barreEchelle select {
+          border: 1px solid rgba(20,26,38,0.2);
+          border-radius: 8px;
+          padding: 6px 8px;
+          font-family: var(--font-body);
+          font-size: 13px;
+          background: #fff;
+        }
+        .barreAide {
+          flex-basis: 100%;
+          font-size: 11.5px;
+          line-height: 1.5;
+          color: rgba(20,26,38,0.55);
+        }
 
         .etat {
           padding: 24px;
@@ -623,6 +677,38 @@ export default function FocusMensuelPrintPage() {
 
         .section { margin-bottom: 26px; }
         .avantSaut { break-before: page; page-break-before: always; }
+
+        /* Une section compacte doit tenir sur une page : elle ne se scinde pas
+           et l'ensemble est réduit à l'échelle choisie. La propriété zoom, et
+           non transform: scale, parce qu'elle agit sur la mise en forme : la
+           pagination reste juste, là où une transformation se contenterait de
+           dessiner plus petit en gardant la hauteur d'origine. */
+        .sectionCompacte {
+          zoom: var(--echelle, 0.75);
+          break-inside: avoid;
+          page-break-inside: avoid;
+        }
+
+        /* Les tableaux réutilisés vivent dans des conteneurs à ascenseur,
+           indispensables à l'écran. À l'impression, un conteneur en overflow
+           coupe net ce qui dépasse : on les libère, sinon le portefeuille et la
+           projection perdaient silencieusement leurs dernières agences. */
+        .sectionCompacte [class*="overflow-"],
+        .sectionCompacte [style*="overflow"] {
+          overflow: visible !important;
+          max-height: none !important;
+        }
+
+        /* L'espace vertical se joue dans les marges internes des cellules, pas
+           dans la taille du texte : on comprime les unes sans sacrifier
+           l'autre. */
+        .section th,
+        .section td {
+          padding: 3px 6px !important;
+          line-height: 1.28 !important;
+        }
+
+        .trioGrille table { font-size: 10px; }
 
         .enTete {
           display: flex;
