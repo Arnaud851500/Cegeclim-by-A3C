@@ -156,6 +156,10 @@ export default function FocusMensuelPrintPage() {
   // pile dans 192 mm de haut : plutôt que de deviner, on réduit l'ensemble
   // proportionnellement et on laisse le réglage accessible.
   const [echelle, setEchelle] = useState(0.75)
+  // Sombre par défaut : ce document est lu à l'écran neuf fois sur dix, et la
+  // charte du front y gagne en lisibilité. Le thème clair reste disponible pour
+  // une impression papier réelle.
+  const [theme, setTheme] = useState<'ecran' | 'papier'>('ecran')
 
   const [monthRows, setMonthRows] = useState<DailyRow[]>([])
   const [monthRowsN1, setMonthRowsN1] = useState<DailyRow[]>([])
@@ -373,7 +377,7 @@ export default function FocusMensuelPrintPage() {
 
   return (
     <div
-      className={`${display.variable} ${body.variable} ${mono.variable} document`}
+      className={`${display.variable} ${body.variable} ${mono.variable} document ${theme === 'papier' ? 'themePapier' : 'themeEcran'}`}
       style={{ ['--echelle' as string]: String(echelle) } as React.CSSProperties}
     >
       {/* ---- Barre d'outils, absente du document imprimé ------------------ */}
@@ -388,6 +392,14 @@ export default function FocusMensuelPrintPage() {
             </label>
           ))}
         </div>
+
+        <label className="barreEchelle">
+          Rendu
+          <select value={theme} onChange={(e) => setTheme(e.target.value as 'ecran' | 'papier')}>
+            <option value="ecran">Écran — charte sombre</option>
+            <option value="papier">Papier — fond blanc</option>
+          </select>
+        </label>
 
         <label className="barreEchelle">
           Échelle
@@ -446,6 +458,7 @@ export default function FocusMensuelPrintPage() {
                       monthValueN1={monthTotals.byType[type].amountN1}
                       annualSeries={annualSeriesByType[type]}
                       months={months12}
+                      theme={theme}
                     />
                   ))}
               </div>
@@ -478,12 +491,14 @@ export default function FocusMensuelPrintPage() {
                   moisLabel={monthLabel}
                   dateEdition={dateEdition}
                 />
+                <div className="panneauTable">
                 <ActivityByAgencyComparisonTable
                   title={`Du 1er au ${focusDayOfMonth} ${monthLabel} vs N-1`}
                   subtitle={perimetre}
                   rows={agencyComparisonRowsMtd}
                   emptyMessage="Aucune donnée sur ce périmètre pour la période."
                 />
+                </div>
               </section>
 
               <section className={classesSection()}>
@@ -494,12 +509,14 @@ export default function FocusMensuelPrintPage() {
                   moisLabel={monthLabel}
                   dateEdition={dateEdition}
                 />
+                <div className="panneauTable">
                 <ActivityByAgencyComparisonTable
                   title="Cumul annuel vs N-1"
                   subtitle={perimetre}
                   rows={agencyComparisonRows}
                   emptyMessage="Aucune donnée sur ce périmètre pour la période."
                 />
+                </div>
               </section>
             </>
           )}
@@ -515,11 +532,13 @@ export default function FocusMensuelPrintPage() {
                   moisLabel={monthLabel}
                   dateEdition={dateEdition}
                 />
+                <div className="panneauTable">
                 <ActivityByFamilyComparisonTable
                   title={`Du 1er au ${focusDayOfMonth} ${monthLabel} vs N-1`}
                   rows={familyComparisonRowsMtd}
                   emptyMessage="Aucune donnée sur ce périmètre pour la période."
                 />
+                </div>
               </section>
 
               <section className={classesSection()}>
@@ -530,11 +549,13 @@ export default function FocusMensuelPrintPage() {
                   moisLabel={monthLabel}
                   dateEdition={dateEdition}
                 />
+                <div className="panneauTable">
                 <ActivityByFamilyComparisonTable
                   title="Cumul annuel vs N-1"
                   rows={familyComparisonRows}
                   emptyMessage="Aucune donnée sur ce périmètre pour la période."
                 />
+                </div>
               </section>
             </>
           )}
@@ -552,12 +573,14 @@ export default function FocusMensuelPrintPage() {
               {/* Le CA projeté du mois en cours n'est PAS substitué ici : un
                   document imprimé doit porter le réalisé, pas une hypothèse.
                   L'écran garde sa bascule pour l'analyse à chaud. */}
+              <div className="panneauTable">
               <Rolling12ComparisonTable
                 title="Glissant vs N-1 — réalisé"
                 subtitle={`${months12[0]} → ${months12[months12.length - 1]} · ${perimetre}`}
                 rows={rollingComparisonRows}
                 emptyMessage="Aucune donnée sur les 12 derniers mois pour ce périmètre."
               />
+              </div>
             </section>
           )}
 
@@ -573,7 +596,9 @@ export default function FocusMensuelPrintPage() {
                     moisLabel={monthLabel}
                     dateEdition={dateEdition}
                   />
-                  <HighlightTable title={`TOP 20 ${type}`} rows={top20ByType[type]} />
+                  <div className="panneauTable">
+                    <HighlightTable title={`TOP 20 ${type}`} rows={top20ByType[type]} />
+                  </div>
                 </section>
               ))}
             </>
@@ -582,24 +607,56 @@ export default function FocusMensuelPrintPage() {
       )}
 
       <style jsx global>{`
-        @page {
-          size: A4 landscape;
-          margin: 9mm 8mm;
-        }
+        /* Marges nulles : le fond de page doit aller jusqu'au bord de la
+           feuille. Les marges typographiques sont reprises en padding dans les
+           sections, ce qui permet un aplat sombre plein format. */
+        @page { size: A4 landscape; margin: 0; }
 
-        html, body { margin: 0; background: #ffffff; }
+        html, body { margin: 0; }
+
+        /* Le fond de l'élément racine se propage au canevas de la page :
+           c'est ce qui donne un PDF entièrement sombre, bord à bord. */
+        html {
+          background: var(--doc-fond, #0B1220);
+          -webkit-print-color-adjust: exact;
+          print-color-adjust: exact;
+        }
 
         .document {
+          --doc-fond: #0B1220;
+          --doc-texte: #FFFFFF;
+          --doc-attenue: rgba(255,255,255,0.45);
+          --doc-discret: rgba(255,255,255,0.30);
+          --doc-filet: rgba(255,255,255,0.14);
+          --doc-carte: rgba(255,255,255,0.045);
+          --doc-carte-filet: rgba(255,255,255,0.11);
+          --doc-panneau: #F5F3EC;
+          --doc-accent: #A6A181;
+
           font-family: var(--font-body);
-          color: #141A26;
-          background: #ffffff;
-          padding: 14px 16px 28px;
+          color: var(--doc-texte);
+          background: var(--doc-fond);
+          -webkit-print-color-adjust: exact;
+          print-color-adjust: exact;
         }
 
-        /* Les composants réutilisés portent cette classe et un fond crème sur
-           l'écran V3. Sur papier, le blanc pur économise l'encre et gagne en
-           contraste. */
-        .focus-pdf-section-card { background: #ffffff !important; }
+        .document.themePapier {
+          --doc-fond: #FFFFFF;
+          --doc-texte: #141A26;
+          --doc-attenue: rgba(20,26,38,0.55);
+          --doc-discret: rgba(20,26,38,0.40);
+          --doc-filet: rgba(20,26,38,0.16);
+          --doc-carte: #FFFFFF;
+          --doc-carte-filet: rgba(20,26,38,0.16);
+          --doc-panneau: #FFFFFF;
+          --doc-accent: #8A855F;
+        }
+
+        /* Les composants réutilisés portent cette classe. Sur fond sombre, ils
+           deviennent des panneaux crème, exactement comme à l'écran. */
+        .focus-pdf-section-card { background: var(--doc-panneau) !important; }
+
+        /* ---- Barre d'outils, absente du document imprimé ---------------- */
 
         .barre {
           position: sticky;
@@ -609,24 +666,26 @@ export default function FocusMensuelPrintPage() {
           flex-wrap: wrap;
           align-items: center;
           gap: 16px;
-          margin-bottom: 18px;
+          margin: 12px 14px 18px;
           padding: 12px 16px;
           border: 1px solid rgba(20,26,38,0.12);
           border-radius: 12px;
           background: #F5F3EC;
+          color: #141A26;
         }
-        .barreTitre {
-          font-family: var(--font-display);
-          font-size: 15px;
-          font-weight: 700;
-        }
+        .barreTitre { font-family: var(--font-display); font-size: 15px; font-weight: 700; }
         .barreSections { display: flex; flex-wrap: wrap; gap: 14px; }
-        .barreCase {
-          display: inline-flex;
-          align-items: center;
-          gap: 6px;
+        .barreCase { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
+        .barreEchelle { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; }
+        .barreEchelle:first-of-type { margin-left: auto; }
+        .barreEchelle select {
+          border: 1px solid rgba(20,26,38,0.2);
+          border-radius: 8px;
+          padding: 6px 8px;
+          font-family: var(--font-body);
           font-size: 13px;
-          cursor: pointer;
+          background: #fff;
+          color: #141A26;
         }
         .barreBouton {
           border: none;
@@ -640,179 +699,195 @@ export default function FocusMensuelPrintPage() {
           cursor: pointer;
         }
         .barreBouton:disabled { opacity: 0.5; cursor: default; }
+        .barreAide { flex-basis: 100%; font-size: 11.5px; line-height: 1.5; color: rgba(20,26,38,0.55); }
 
-        .barreEchelle {
-          display: inline-flex;
-          align-items: center;
-          gap: 8px;
-          margin-left: auto;
-          font-size: 13px;
-        }
-        .barreEchelle select {
-          border: 1px solid rgba(20,26,38,0.2);
-          border-radius: 8px;
-          padding: 6px 8px;
-          font-family: var(--font-body);
-          font-size: 13px;
-          background: #fff;
-        }
-        .barreAide {
-          flex-basis: 100%;
-          font-size: 11.5px;
-          line-height: 1.5;
-          color: rgba(20,26,38,0.55);
-        }
-
-        .etat {
-          padding: 24px;
-          font-size: 14px;
-          color: rgba(20,26,38,0.6);
-        }
+        .etat { padding: 24px; font-size: 14px; color: var(--doc-attenue); }
         .etat.erreur {
-          border: 1px solid rgba(193,104,60,0.3);
-          background: rgba(193,104,60,0.08);
-          color: #9C4A24;
+          margin: 0 14px;
+          border: 1px solid rgba(193,104,60,0.4);
+          background: rgba(193,104,60,0.12);
+          color: #e0a685;
           border-radius: 10px;
         }
 
-        .section { margin-bottom: 26px; }
+        /* ---- Sections ---------------------------------------------------- */
+
+        .section {
+          padding: 9mm 10mm 7mm;
+          box-sizing: border-box;
+          background: var(--doc-fond);
+        }
         .avantSaut { break-before: page; page-break-before: always; }
 
-        /* Une section compacte doit tenir sur une page : elle ne se scinde pas
-           et l'ensemble est réduit à l'échelle choisie. La propriété zoom, et
-           non transform: scale, parce qu'elle agit sur la mise en forme : la
-           pagination reste juste, là où une transformation se contenterait de
-           dessiner plus petit en gardant la hauteur d'origine. */
         .sectionCompacte {
           zoom: var(--echelle, 0.75);
           break-inside: avoid;
           page-break-inside: avoid;
         }
 
-        /* Les tableaux réutilisés vivent dans des conteneurs à ascenseur,
-           indispensables à l'écran. À l'impression, un conteneur en overflow
-           coupe net ce qui dépasse : on les libère, sinon le portefeuille et la
-           projection perdaient silencieusement leurs dernières agences. */
         .sectionCompacte [class*="overflow-"],
         .sectionCompacte [style*="overflow"] {
           overflow: visible !important;
           max-height: none !important;
         }
 
-        /* L'espace vertical se joue dans les marges internes des cellules, pas
-           dans la taille du texte : on comprime les unes sans sacrifier
-           l'autre. */
-        .section th,
-        .section td {
-          padding: 3px 6px !important;
-          line-height: 1.28 !important;
-        }
-
-        .trioGrille table { font-size: 10px; }
+        /* ---- En-tête de section ------------------------------------------ */
 
         .enTete {
           display: flex;
           align-items: flex-end;
           justify-content: space-between;
-          gap: 20px;
-          margin-bottom: 12px;
-          padding-bottom: 8px;
-          border-bottom: 2px solid #141A26;
+          gap: 24px;
+          margin-bottom: 14px;
+          padding-bottom: 10px;
+          border-bottom: 1px solid var(--doc-accent);
         }
         .enTeteEyebrow {
           font-family: var(--font-mono);
           font-size: 9px;
-          letter-spacing: 0.2em;
+          letter-spacing: 0.24em;
           text-transform: uppercase;
-          color: rgba(20,26,38,0.45);
+          color: var(--doc-accent);
         }
         .enTeteTitre {
-          margin: 3px 0 0;
+          margin: 5px 0 0;
           font-family: var(--font-display);
-          font-size: 20px;
+          font-size: 27px;
           font-weight: 700;
-          letter-spacing: -0.02em;
+          letter-spacing: -0.025em;
+          line-height: 1.05;
+          color: var(--doc-texte);
         }
         .enTeteMeta {
           text-align: right;
           font-family: var(--font-mono);
-          font-size: 9.5px;
-          line-height: 1.6;
-          color: rgba(20,26,38,0.55);
+          font-size: 9px;
+          line-height: 1.7;
+          letter-spacing: 0.02em;
+          color: var(--doc-attenue);
         }
+
+        /* ---- Cartes KPI, calquées sur l'écran ----------------------------- */
 
         .kpiGrille {
           display: grid;
           grid-template-columns: repeat(4, minmax(0, 1fr));
-          gap: 10px;
-          margin-bottom: 12px;
+          gap: 12px;
+          margin-bottom: 14px;
         }
         .kpiCarte {
-          border: 1px solid rgba(20,26,38,0.14);
-          border-radius: 10px;
-          padding: 10px 12px;
+          border: 1px solid var(--doc-carte-filet);
+          background: var(--doc-carte);
+          border-radius: 12px;
+          padding: 14px 16px 12px;
           break-inside: avoid;
         }
+        .kpiEnTete { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
         .kpiBadge {
           display: inline-block;
-          border-radius: 5px;
-          padding: 2px 7px;
-          font-size: 9px;
+          border-radius: 6px;
+          padding: 3px 9px;
+          font-size: 9.5px;
           font-weight: 700;
-          letter-spacing: 0.06em;
+          letter-spacing: 0.08em;
           text-transform: uppercase;
         }
-        .kpiLigne {
-          display: flex;
-          align-items: flex-end;
-          justify-content: space-between;
-          gap: 10px;
-          margin-top: 8px;
-        }
+        .kpiLigne { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
         .kpiEtiquette {
           font-family: var(--font-mono);
           font-size: 8px;
-          letter-spacing: 0.14em;
+          letter-spacing: 0.16em;
           text-transform: uppercase;
-          color: rgba(20,26,38,0.45);
-        }
-        .kpiValeur {
-          font-family: var(--font-mono);
-          font-size: 21px;
-          font-weight: 600;
-          line-height: 1.05;
-          letter-spacing: -0.02em;
+          color: var(--doc-discret);
+          margin-bottom: 4px;
         }
         .kpiValeurJour {
           font-family: var(--font-mono);
-          font-size: 16px;
+          font-size: 26px;
           font-weight: 600;
-          line-height: 1.05;
-          color: rgba(20,26,38,0.7);
+          line-height: 1;
+          letter-spacing: -0.02em;
+          color: var(--doc-texte);
+          opacity: 0.85;
+          white-space: nowrap;
         }
-        .kpiEvol {
-          margin-top: 6px;
-          text-align: right;
-          font-size: 10px;
+        .kpiValeurMois {
+          font-family: var(--font-mono);
+          font-size: 30px;
           font-weight: 600;
+          line-height: 1;
+          letter-spacing: -0.025em;
+          color: var(--doc-texte);
+          white-space: nowrap;
+        }
+        .kpiComparaison {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 8px;
+          margin-top: 10px;
+          padding-top: 9px;
+          border-top: 1px solid var(--doc-filet);
+        }
+        .kpiPastille {
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+          border-radius: 999px;
+          padding: 3px 9px;
+          font-size: 10px;
+          font-weight: 700;
+        }
+        .kpiN1 {
+          font-family: var(--font-mono);
+          font-size: 9px;
+          letter-spacing: 0.1em;
+          text-transform: uppercase;
+          color: var(--doc-discret);
+        }
+        .kpiN1 b { font-weight: 600; color: var(--doc-attenue); letter-spacing: normal; text-transform: none; font-size: 11px; }
+        .kpiTendance { margin-top: 10px; }
+        .kpiTendanceTitre {
+          font-family: var(--font-mono);
+          font-size: 8px;
+          letter-spacing: 0.16em;
+          text-transform: uppercase;
+          color: var(--doc-discret);
+          margin-bottom: 4px;
         }
 
-        .trioGrille {
-          display: grid;
-          grid-template-columns: repeat(3, minmax(0, 1fr));
-          gap: 10px;
-        }
+        /* ---- Panneaux de données ------------------------------------------ */
+
+        .trioGrille { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
         .bloc {
-          border: 1px solid rgba(20,26,38,0.14);
-          border-radius: 10px;
-          padding: 10px;
+          border-radius: 12px;
+          padding: 12px 14px;
+          background: var(--doc-panneau);
+          color: #141A26;
           break-inside: avoid;
         }
         .blocTitre {
-          margin: 0 0 8px;
+          margin: 0 0 10px;
           font-family: var(--font-display);
-          font-size: 12px;
+          font-size: 13px;
           font-weight: 600;
+          color: #141A26;
+        }
+        .trioGrille table { font-size: 10px; }
+
+        /* Les tableaux comparatifs, eux aussi en panneau crème. */
+        .panneauTable {
+          border-radius: 12px;
+          background: var(--doc-panneau);
+          color: #141A26;
+          padding: 4px 6px;
+          overflow: hidden;
+        }
+
+        .section th, .section td {
+          padding: 3px 6px !important;
+          line-height: 1.28 !important;
         }
 
         table { break-inside: auto; }
@@ -821,9 +896,7 @@ export default function FocusMensuelPrintPage() {
 
         @media print {
           .noPrint { display: none !important; }
-          .document { padding: 0; }
-          .section { margin-bottom: 0; }
-          .bloc, .kpiCarte { border-color: rgba(20,26,38,0.28); }
+          .section { margin: 0; }
         }
       `}</style>
     </div>
@@ -862,7 +935,7 @@ function EnTete({
 }
 
 function KpiPrint({
-  type, dayValue, jour, monthValue, monthValueN1, annualSeries, months,
+  type, dayValue, jour, monthValue, monthValueN1, annualSeries, months, theme,
 }: {
   type: DocType
   dayValue: number
@@ -871,35 +944,55 @@ function KpiPrint({
   monthValueN1: number
   annualSeries: number[]
   months: string[]
+  theme: 'ecran' | 'papier'
 }) {
   const color = DOC_COLORS[type]
   const evolutionPct = monthValueN1 > 0 ? ((monthValue - monthValueN1) / monthValueN1) * 100 : null
   const isUp = (evolutionPct ?? 0) >= 0
   const jourLabel = new Date(jour).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' })
+  const teinte = isUp ? '#C1683C' : '#4B92AC'
 
   return (
     <div className="kpiCarte">
-      <span className="kpiBadge" style={{ background: `${color}22`, color }}>{type}</span>
+      <div className="kpiEnTete">
+        <span className="kpiBadge" style={{ background: `${color}22`, color }}>{type}</span>
+        <span className="kpiEtiquette" style={{ marginBottom: 0 }}>Mois en cours</span>
+      </div>
 
+      {/* Jour et mois sur la même ligne de base, à la même échelle : c'est la
+          lecture retenue à l'écran, on ne la change pas sur le document. */}
       <div className="kpiLigne">
         <div>
           <div className="kpiEtiquette">Jour · {jourLabel}</div>
           <div className="kpiValeurJour">{formatMoney(dayValue)}</div>
         </div>
         <div style={{ textAlign: 'right' }}>
-          <div className="kpiEtiquette">Mois en cours</div>
-          <div className="kpiValeur">{formatMoney(monthValue)}</div>
+          <div className="kpiValeurMois">{formatMoney(monthValue)}</div>
         </div>
       </div>
 
-      <div className="kpiEvol" style={{ color: evolutionPct === null ? 'rgba(20,26,38,0.4)' : isUp ? '#C1683C' : '#4B92AC' }}>
-        {evolutionPct === null
-          ? 'N-1 non comparable'
-          : `${isUp ? '▲' : '▼'} ${Math.abs(evolutionPct).toFixed(1)}% vs N-1 · ${formatMoney(monthValueN1)}`}
+      <div className="kpiComparaison">
+        {evolutionPct !== null && (
+          <span
+            className="kpiPastille"
+            style={{ background: `${teinte}22`, color: teinte }}
+          >
+            {isUp ? '▲' : '▼'} {Math.abs(evolutionPct).toFixed(1)}%
+          </span>
+        )}
+        <span className="kpiN1">
+          N-1 <b>{formatMoney(monthValueN1)}</b>
+        </span>
       </div>
 
-      <div style={{ marginTop: 6 }}>
-        <KpiTrendChart values={annualSeries} months={months} color={color} theme="light" />
+      <div className="kpiTendance">
+        <div className="kpiTendanceTitre">Tendance · 12 derniers mois</div>
+        <KpiTrendChart
+          values={annualSeries}
+          months={months}
+          color={color}
+          theme={theme === 'papier' ? 'light' : 'dark'}
+        />
       </div>
     </div>
   )
