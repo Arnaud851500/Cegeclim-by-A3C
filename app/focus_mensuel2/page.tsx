@@ -410,6 +410,23 @@ export default function FocusMensuel3Page() {
 
   const months12 = useMemo(() => last12Months(month), [month]);
 
+  /**
+   * Ouvre la route d'impression avec l'état exact de l'écran. Les paramètres
+   * transitent par l'URL : le document reflète donc toujours ce qui est
+   * affiché, et l'adresse reste partageable ou mémorisable en favori.
+   */
+  function ouvrirExportPdf() {
+    const params = new URLSearchParams({
+      jour: focusDay,
+      mois: month,
+      agence,
+      famille: familleMacro,
+      collaborateur,
+      horsStats: includeHorsStats ? '1' : '0',
+    });
+    window.open(`/focus_mensuel_print/nd?${params.toString()}`, '_blank', 'noopener,noreferrer');
+  }
+
   const focusDayLabel = useMemo(
     () => new Date(focusDay).toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" }),
     [focusDay],
@@ -476,6 +493,14 @@ export default function FocusMensuel3Page() {
                   className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-sm text-white outline-none focus:border-[#A6A181]"
                 />
               </div>
+
+              <button
+                onClick={ouvrirExportPdf}
+                title="Ouvre le document d'impression dans un nouvel onglet, avec le jour focus, le mois et les filtres en cours"
+                className="rounded-lg bg-[#A6A181] px-3.5 py-1.5 text-sm font-semibold text-[#141A26] transition hover:brightness-110"
+              >
+                Exporter en PDF
+              </button>
             </div>
           </div>
 
@@ -648,7 +673,7 @@ export default function FocusMensuel3Page() {
 const CUMUL_BL_COLOR = "#4B92AC";
 const CUMUL_CDC_COLOR = "#C1683C";
 
-function CumulativeBlCdcChart({ monthRows, monthRowsN1 }: { monthRows: DailyRow[]; monthRowsN1: DailyRow[] }) {
+export function CumulativeBlCdcChart({ monthRows, monthRowsN1 }: { monthRows: DailyRow[]; monthRowsN1: DailyRow[] }) {
   const width = 560;
   const height = 300;
   const padding = { top: 12, right: 12, bottom: 26, left: 52 };
@@ -820,7 +845,7 @@ function TableShell({
 // détail M / M-x qui obligeait à scroller.
 // ---------------------------------------------------------------------------
 
-function PortfolioTableCompact({ rows }: { rows: AgencyPortfolioRow[] }) {
+export function PortfolioTableCompact({ rows }: { rows: AgencyPortfolioRow[] }) {
   const withoutTotal = rows.filter((r) => r.label.toUpperCase() !== "TOTAL");
   const totalRow: AgencyPortfolioRow = {
     label: "TOTAL AGENCE",
@@ -874,7 +899,7 @@ function PortfolioTableCompact({ rows }: { rows: AgencyPortfolioRow[] }) {
   );
 }
 
-function ProjectionTableCompact({ rows }: { rows: AgencyProjectionRow[] }) {
+export function ProjectionTableCompact({ rows }: { rows: AgencyProjectionRow[] }) {
   const withoutTotal = rows.filter((r) => r.label.toUpperCase() !== "TOTAL");
   const caN1Total = withoutTotal.reduce((s, r) => s + r.caN1, 0);
   const projectionCaTotal = withoutTotal.reduce((s, r) => s + r.projectionCa, 0);
@@ -1026,7 +1051,18 @@ function KpiCardJMA({
   );
 }
 
-function KpiTrendChart({ values, months, color }: { values: number[]; months: string[]; color: string }) {
+export function KpiTrendChart({
+  values, months, color, theme = 'dark',
+}: {
+  values: number[];
+  months: string[];
+  color: string;
+  // Le document imprimé est sur fond blanc : les lignes de repère et les
+  // libellés d'axe doivent basculer en encre, sinon ils disparaissent.
+  theme?: 'dark' | 'light';
+}) {
+  const gridColor = theme === 'light' ? '#141A2618' : '#FFFFFF14';
+  const axisColor = theme === 'light' ? '#141A2699' : '#FFFFFF55';
   const width = 320;
   const height = 124;
   const padding = { top: 6, right: 6, bottom: 18, left: 46 };
@@ -1059,8 +1095,8 @@ function KpiTrendChart({ values, months, color }: { values: number[]; months: st
       </defs>
       {ticks.map((t, i) => (
         <g key={i}>
-          <line x1={padding.left} y1={y(t)} x2={width - padding.right} y2={y(t)} stroke="#FFFFFF14" strokeDasharray={i === ticks.length - 1 ? undefined : "3 3"} />
-          <text x={padding.left - 4} y={y(t) + 3} fontSize={9} textAnchor="end" fill="#FFFFFF55">{formatMoney(t)}</text>
+          <line x1={padding.left} y1={y(t)} x2={width - padding.right} y2={y(t)} stroke={gridColor} strokeDasharray={i === ticks.length - 1 ? undefined : "3 3"} />
+          <text x={padding.left - 4} y={y(t) + 3} fontSize={9} textAnchor="end" fill={axisColor}>{formatMoney(t)}</text>
         </g>
       ))}
       {areaPath && <path d={areaPath} fill={`url(#${gradientId})`} />}
@@ -1071,7 +1107,7 @@ function KpiTrendChart({ values, months, color }: { values: number[]; months: st
       {lastIndex >= 0 && <circle cx={x(lastIndex)} cy={y(values[lastIndex])} r={6} fill={color} opacity={0.22} />}
       {months.map((m, i) =>
         i % 2 === 0 ? (
-          <text key={m} x={x(i)} y={height - 3} fontSize={9} textAnchor="middle" fill="#FFFFFF55">
+          <text key={m} x={x(i)} y={height - 3} fontSize={9} textAnchor="middle" fill={axisColor}>
             {new Date(m + "-01").toLocaleDateString("fr-FR", { month: "short" })}
           </text>
         ) : null,

@@ -163,16 +163,40 @@ export default function LoginPage() {
   const backgroundImageUrl =
     'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Logo%20et%20images/Image%20site%20CEGECLIM%20maison.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJMb2dvIGV0IGltYWdlcy9JbWFnZSBzaXRlIENFR0VDTElNIG1haXNvbi5qcGciLCJpYXQiOjE3NzU1MDYyNTEsImV4cCI6NDg5NzU3MDI1MX0.d1YT7_-xD44QOm2LFbZIfpkjh9kiIGjpJiEuJxV0rMM'
 
+  /**
+   * Redirection après authentification.
+   *
+   * `router.replace` fait une navigation côté client : la coque applicative se
+   * ré-évalue sans rechargement et peut, si la session n'est pas encore visible
+   * à cet instant précis, renvoyer aussitôt vers /login — l'utilisateur revient
+   * alors sur un formulaire vide sans le moindre message. Le filet ci-dessous
+   * force un chargement complet si l'on est toujours sur /login peu après :
+   * la session est relue depuis le stockage, et le rebond devient impossible.
+   */
+  const allerVers = useCallback(
+    (destination: string) => {
+      router.replace(destination)
+
+      window.setTimeout(() => {
+        if (window.location.pathname === '/login') {
+          console.warn('[login] navigation cliente sans effet, rechargement complet vers', destination)
+          window.location.assign(destination)
+        }
+      }, 1200)
+    },
+    [router],
+  )
+
   useEffect(() => {
     if (accessLoading) return
 
     if (sessionEmail) {
       void (async () => {
         const landingPage = await getUserLandingPage(sessionEmail)
-        router.replace(landingPage)
+        allerVers(landingPage)
       })()
     }
-  }, [accessLoading, sessionEmail, router])
+  }, [accessLoading, sessionEmail, allerVers])
 
   const handleLogin = async (e?: React.FormEvent) => {
     e?.preventDefault()
@@ -181,29 +205,49 @@ export default function LoginPage() {
 
     const normalizedEmail = email.toLowerCase().trim()
 
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email: normalizedEmail,
-      password,
-    })
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: normalizedEmail,
+        password,
+      })
 
-    if (error) {
-      // L'erreur dit ce qui s'est passé et quoi faire, sans révéler si
-      // l'adresse existe.
-      setErrorMsg("Cette combinaison identifiant / mot de passe n'est pas reconnue. Vérifiez la saisie puis réessayez.")
+      if (error) {
+        // L'erreur dit ce qui s'est passé et quoi faire, sans révéler si
+        // l'adresse existe.
+        setErrorMsg("Cette combinaison identifiant / mot de passe n'est pas reconnue. Vérifiez la saisie puis réessayez.")
+        setLoading(false)
+        return
+      }
+
+      // La journalisation ne doit jamais empêcher d'entrer : si l'audit tombe,
+      // on trace et on poursuit.
+      try {
+        await logUserEvent({
+          user_email: data.user?.email ?? email,
+          event_type: 'login',
+          pathname: '/login',
+          metadata: { result: 'success' },
+        })
+      } catch (err) {
+        console.warn('[login] journalisation impossible :', err)
+      }
+
+      let landingPage = DEFAULT_LANDING_PAGE
+      try {
+        landingPage = await getUserLandingPage(data.user?.email || normalizedEmail)
+      } catch (err) {
+        console.warn('[login] page d\'accueil du profil illisible, repli sur', DEFAULT_LANDING_PAGE, err)
+      }
+
       setLoading(false)
-      return
+      allerVers(landingPage)
+    } catch (err) {
+      // Sans ce filet, une exception laissait le bouton bloqué sur
+      // « Connexion… » ou la page figée, sans rien afficher.
+      console.error('[login] échec inattendu :', err)
+      setErrorMsg("La connexion n'a pas abouti. Réessayez ; si le problème persiste, signalez-le avec l'heure exacte.")
+      setLoading(false)
     }
-
-    await logUserEvent({
-      user_email: data.user?.email ?? email,
-      event_type: 'login',
-      pathname: '/login',
-      metadata: { result: 'success' },
-    })
-
-    const landingPage = await getUserLandingPage(data.user?.email || normalizedEmail)
-    setLoading(false)
-    router.replace(landingPage)
   }
 
   return (
