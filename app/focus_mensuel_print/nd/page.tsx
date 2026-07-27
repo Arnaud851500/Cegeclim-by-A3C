@@ -51,6 +51,7 @@ import {
   PortfolioTableCompact,
   ProjectionTableCompact,
   KpiTrendChart,
+  appliquerCaProjeteAuRolling,
 } from '../../focus_mensuel2/page'
 
 const display = Space_Grotesk({ subsets: ['latin'], weight: ['500', '700'], variable: '--font-display' })
@@ -103,6 +104,7 @@ type Params = {
   famille: string
   collaborateur: string
   horsStats: boolean
+  caProjete: boolean
   sections: SectionKey[]
 }
 
@@ -119,6 +121,7 @@ function lireParams(): Params {
     famille: '',
     collaborateur: '',
     horsStats: true,
+    caProjete: true,
     sections: SECTIONS.map((s) => s.key),
   }
 
@@ -141,6 +144,9 @@ function lireParams(): Params {
     famille: q.get('famille') || '',
     collaborateur: q.get('collaborateur') || '',
     horsStats: (q.get('horsStats') ?? '1') !== '0',
+    // Reflète la case « Utiliser le CA projeté » de l'écran : le document doit
+    // dire la même chose que ce que l'utilisateur avait sous les yeux.
+    caProjete: (q.get('caProjete') ?? '1') !== '0',
     sections: sectionsValides.length ? sectionsValides : defauts.sections,
   }
 }
@@ -296,6 +302,13 @@ export default function FocusMensuelPrintPage() {
     () => buildComparisonRowsFromAnnualCache(annualCacheRows, 'rolling_12'),
     [annualCacheRows],
   )
+
+  // Même transformation que l'écran, par la même fonction : aucune variante
+  // recodée ici, donc aucun risque d'écart entre l'affichage et le document.
+  const rollingComparisonRowsDisplay: ComparisonRow[] = useMemo(() => {
+    if (!params?.caProjete) return rollingComparisonRows
+    return appliquerCaProjeteAuRolling(rollingComparisonRows, agencyProjectionRows)
+  }, [rollingComparisonRows, agencyProjectionRows, params])
 
   const monthTotals = useMemo(() => {
     const totalRows = aggregateComparisonRows(monthRows, monthRowsN1, () => 'TOTAL', () => 'TOTAL')
@@ -570,14 +583,15 @@ export default function FocusMensuelPrintPage() {
                 moisLabel={monthLabel}
                 dateEdition={dateEdition}
               />
-              {/* Le CA projeté du mois en cours n'est PAS substitué ici : un
-                  document imprimé doit porter le réalisé, pas une hypothèse.
-                  L'écran garde sa bascule pour l'analyse à chaud. */}
               <div className="panneauTable">
               <Rolling12ComparisonTable
-                title="Glissant vs N-1 — réalisé"
+                title={
+                  params.caProjete
+                    ? `Glissant vs N-1 — CA projeté appliqué au mois en cours`
+                    : 'Glissant vs N-1 — réalisé'
+                }
                 subtitle={`${months12[0]} → ${months12[months12.length - 1]} · ${perimetre}`}
-                rows={rollingComparisonRows}
+                rows={rollingComparisonRowsDisplay}
                 emptyMessage="Aucune donnée sur les 12 derniers mois pour ce périmètre."
               />
               </div>

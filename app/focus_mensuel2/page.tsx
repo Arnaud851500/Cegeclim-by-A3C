@@ -129,6 +129,59 @@ function useSiteHeaderOffset() {
   return offset;
 }
 
+/**
+ * Remplace le « Factures N » du mois en cours — encore partiel puisqu'on n'est
+ * pas en fin de mois — par la projection de CA déjà calculée pour le widget
+ * agences, et répercute le même écart sur la ligne TOTAL.
+ *
+ * Exportée pour que la route d'impression applique EXACTEMENT la même
+ * transformation que l'écran, plutôt que d'en recoder une variante.
+ */
+export function appliquerCaProjeteAuRolling(
+  rollingRows: ComparisonRow[],
+  agencyProjectionRows: AgencyProjectionRow[],
+): ComparisonRow[] {
+  if (rollingRows.length === 0) return rollingRows;
+
+  const totalRow = agencyProjectionRows.find((r) => r.label === "TOTAL");
+  const projectedTotal = totalRow
+    ? totalRow.projectionCa
+    : agencyProjectionRows.reduce((s, r) => s + r.projectionCa, 0);
+
+  const rows = [...rollingRows];
+  let lastMonthIdx = -1;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (!rows[i].label.toUpperCase().startsWith("TOTAL")) {
+      lastMonthIdx = i;
+      break;
+    }
+  }
+  if (lastMonthIdx === -1) return rollingRows;
+
+  const original = rows[lastMonthIdx];
+  const delta = projectedTotal - (original.byType.Factures.amountN || 0);
+  rows[lastMonthIdx] = {
+    ...original,
+    byType: { ...original.byType, Factures: { ...original.byType.Factures, amountN: projectedTotal } },
+  };
+
+  // Sans cette répercussion, la ligne TOTAL continuerait d'afficher l'ancien
+  // montant réalisé partiel du mois en cours.
+  const totalIdx = rows.findIndex((r) => r.label.toUpperCase().startsWith("TOTAL"));
+  if (totalIdx !== -1) {
+    const totalOriginal = rows[totalIdx];
+    rows[totalIdx] = {
+      ...totalOriginal,
+      byType: {
+        ...totalOriginal.byType,
+        Factures: { ...totalOriginal.byType.Factures, amountN: (totalOriginal.byType.Factures.amountN || 0) + delta },
+      },
+    };
+  }
+
+  return rows;
+}
+
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
@@ -322,46 +375,13 @@ export default function FocusMensuel3Page() {
   // Bascule optionnelle : remplace le "Factures N" du mois en cours (encore
   // partiel puisqu'on n'est pas en fin de mois) par la projection CA déjà
   // calculée pour le widget 3 — même logique, pas de nouveau calcul.
-  const rollingComparisonRowsDisplay: ComparisonRow[] = useMemo(() => {
-    if (!useProjectedCaInRolling || rollingComparisonRows.length === 0) return rollingComparisonRows;
-    const totalRow = agencyProjectionRows.find((r) => r.label === "TOTAL");
-    const projectedTotal = totalRow
-      ? totalRow.projectionCa
-      : agencyProjectionRows.reduce((s, r) => s + r.projectionCa, 0);
-
-    const rows = [...rollingComparisonRows];
-    let lastMonthIdx = -1;
-    for (let i = rows.length - 1; i >= 0; i--) {
-      if (!rows[i].label.toUpperCase().startsWith("TOTAL")) {
-        lastMonthIdx = i;
-        break;
-      }
-    }
-    if (lastMonthIdx === -1) return rollingComparisonRows;
-
-    const original = rows[lastMonthIdx];
-    const delta = projectedTotal - (original.byType.Factures.amountN || 0);
-    rows[lastMonthIdx] = {
-      ...original,
-      byType: { ...original.byType, Factures: { ...original.byType.Factures, amountN: projectedTotal } },
-    };
-
-    // Répercute le même delta sur la ligne TOTAL, sinon elle continue de
-    // refléter l'ancien montant réalisé partiel du mois en cours.
-    const totalIdx = rows.findIndex((r) => r.label.toUpperCase().startsWith("TOTAL"));
-    if (totalIdx !== -1) {
-      const totalOriginal = rows[totalIdx];
-      rows[totalIdx] = {
-        ...totalOriginal,
-        byType: {
-          ...totalOriginal.byType,
-          Factures: { ...totalOriginal.byType.Factures, amountN: (totalOriginal.byType.Factures.amountN || 0) + delta },
-        },
-      };
-    }
-
-    return rows;
-  }, [rollingComparisonRows, useProjectedCaInRolling, agencyProjectionRows]);
+  const rollingComparisonRowsDisplay: ComparisonRow[] = useMemo(
+    () =>
+      useProjectedCaInRolling
+        ? appliquerCaProjeteAuRolling(rollingComparisonRows, agencyProjectionRows)
+        : rollingComparisonRows,
+    [rollingComparisonRows, useProjectedCaInRolling, agencyProjectionRows],
+  );
 
   const monthTotals = useMemo(() => {
     const totalRows = aggregateComparisonRows(monthRows, monthRowsN1, () => "TOTAL", () => "TOTAL");
@@ -423,6 +443,7 @@ export default function FocusMensuel3Page() {
       famille: familleMacro,
       collaborateur,
       horsStats: includeHorsStats ? '1' : '0',
+      caProjete: useProjectedCaInRolling ? '1' : '0',
     });
     window.open(`/focus_mensuel_print/nd?${params.toString()}`, '_blank', 'noopener,noreferrer');
   }
