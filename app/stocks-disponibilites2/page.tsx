@@ -24,6 +24,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Space_Grotesk, IBM_Plex_Sans, IBM_Plex_Mono } from "next/font/google";
 import { supabase } from "@/lib/supabaseClient";
+import PanneauRemplacements from "@/components/PanneauRemplacements";
 import {
   type ProjectionRow,
   type StockAlertRow,
@@ -39,7 +40,11 @@ const display = Space_Grotesk({ subsets: ["latin"], weight: ["500", "700"], vari
 const body = IBM_Plex_Sans({ subsets: ["latin"], weight: ["400", "500", "600"], variable: "--font-body" });
 const mono = IBM_Plex_Mono({ subsets: ["latin"], weight: ["400", "500", "600"], variable: "--font-mono" });
 
-type AlertRow = StockAlertRow;
+type AlertRow = StockAlertRow & {
+  statut_substitution?: string;
+  prevision_base_n1_origine?: number;
+  prevision_transferee_entrante?: number;
+};
 type Level = "macro" | "famille" | "article";
 
 const ALERT_COLOR: Record<string, string> = {
@@ -122,6 +127,54 @@ function YAxis({ maxVal, minVal, height, top, innerH }: { maxVal: number; minVal
 // Page
 // ---------------------------------------------------------------------------
 
+/**
+ * Repère visuel de remplacement dans la liste des références.
+ * Une référence remplacée reste affichée — on doit pouvoir vérifier que sa
+ * prévision est bien retombée à zéro — mais elle est visuellement mise en
+ * retrait pour qu'on ne la confonde pas avec une référence encore vivante.
+ */
+function PastilleSubstitution({ statut }: { statut: string }) {
+  if (!statut || statut === "ACTIVE") return null;
+
+  const config: Record<string, { libelle: string; titre: string; fond: string; texte: string; icone: string }> = {
+    REMPLACEE: {
+      libelle: "Remplacée",
+      titre: "Référence remplacée : ses besoins sont transférés, sa prévision est nulle",
+      fond: "rgba(20,26,38,0.08)",
+      texte: "#141A2699",
+      icone: "\u2192",
+    },
+    PARTIELLE: {
+      libelle: "Partielle",
+      titre: "Une partie seulement des besoins est transférée vers une remplaçante",
+      fond: "rgba(193,104,60,0.14)",
+      texte: "#9C4A24",
+      icone: "\u2192",
+    },
+    REMPLACANTE: {
+      libelle: "Remplaçante",
+      titre: "Référence remplaçante : elle reprend l'historique d'une ou plusieurs références",
+      fond: "rgba(63,145,66,0.14)",
+      texte: "#2F6B31",
+      icone: "\u2605",
+    },
+  };
+
+  const c = config[statut];
+  if (!c) return null;
+
+  return (
+    <span
+      title={c.titre}
+      className="ml-2 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-semibold"
+      style={{ background: c.fond, color: c.texte }}
+    >
+      <span aria-hidden="true">{c.icone}</span>
+      {c.libelle}
+    </span>
+  );
+}
+
 export default function StocksDisponibilites2Page() {
   const headerOffset = useSiteHeaderOffset();
 
@@ -142,12 +195,45 @@ export default function StocksDisponibilites2Page() {
   // chaque graphique) pour que le choix fait au niveau famille s'applique
   // aussi à la lecture de chaque référence ouverte ensuite.
   const [includeRetard, setIncludeRetard] = useState(false);
+  const [masquerRemplacees, setMasquerRemplacees] = useState(false);
+  const [exportEnCours, setExportEnCours] = useState(false);
+  const [exportGranularite, setExportGranularite] = useState<"mensuel"|"hebdo">("mensuel");
 
   // Confirmation avant d'écraser des hypothèses propres à certains articles.
   const [scopeOverrideAsk, setScopeOverrideAsk] = useState<
     { cle: string; articlesTotal: number; articlesSpecifiques: number; coefficients: number[]; references: string[]; referencesTronquees: boolean } | null
   >(null);
   const [scopeNotice, setScopeNotice] = useState<string | null>(null);
+
+  // Référence dont on gère les remplaçantes. Null = panneau fermé.
+  const [remplacementPour, setRemplacementPour] = useState<{ reference: string; designation: string } | null>(null);
+
+  async function handleExport() {
+    if (!runId) return;
+    setExportEnCours(true);
+    try {
+      const session = await supabase.auth.getSession();
+      const token   = session.data.session?.access_token;
+      const params  = new URLSearchParams({ granularite: exportGranularite });
+      if (selectedFamille) params.set("famille", selectedFamille as string);
+      else if (selectedMacro) params.set("macro", selectedMacro as string);
+      const res = await fetch(`/api/stocks-disponibilites/export-excel?${params}`,
+        { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+      if (!res.ok) throw new Error(await res.text());
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement("a");
+      a.href     = url;
+      const scope = selectedFamille || selectedMacro || "tous";
+      a.download = `projection_stock_${scope}_${exportGranularite}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert("Erreur export : " + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setExportEnCours(false);
+    }
+  }
 
   const [horizonWeeks, setHorizonWeeks] = useState(26);
   const [scenarioPct, setScenarioPct] = useState(120);
@@ -234,8 +320,11 @@ export default function StocksDisponibilites2Page() {
   }, [familleArticlesAll, searchMatches]);
 
   const articleRows = useMemo(
-    () => familleArticles.filter((a) => !onlyRupture || a.niveau_alerte === "ROUGE" || a.niveau_alerte === "ORANGE").sort((a, b) => alertWeight(b.niveau_alerte) - alertWeight(a.niveau_alerte)),
-    [familleArticles, onlyRupture],
+    () => familleArticles
+      .filter((a) => !onlyRupture || a.niveau_alerte === "ROUGE" || a.niveau_alerte === "ORANGE")
+      .filter((a) => !masquerRemplacees || (a.statut_substitution || "ACTIVE") !== "REMPLACEE")
+      .sort((a, b) => alertWeight(b.niveau_alerte) - alertWeight(a.niveau_alerte)),
+    [familleArticles, onlyRupture, masquerRemplacees],
   );
 
   const ruptureHorizonCounts = useMemo(() => {
@@ -320,7 +409,16 @@ export default function StocksDisponibilites2Page() {
   // Chargées UNE SEULE FOIS avec la projection, en même temps que le reste.
   // Cocher/décocher la case ne relance donc aucun appel : les deux lectures
   // (avec et sans retard) sont dérivées du même jeu de données en mémoire.
-  const [retardsRaw, setRetardsRaw] = useState<Array<{ reference_article: string; quantite: number; coefficient: number }>>([]);
+  const [retardsRaw, setRetardsRaw] = useState<
+    Array<{
+      reference_article: string;
+      quantite: number;
+      coefficient: number;
+      statutSubstitution: string;
+      baseOrigine: number;
+      transfereeEntrante: number;
+    }>
+  >([]);
   const [retardError, setRetardError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -335,7 +433,7 @@ export default function StocksDisponibilites2Page() {
       // famille-detail ne renvoie pas.
       const { data, error: err } = await supabase
         .from("v_stock_projection_hebdo_latest")
-        .select("reference_article, besoins_clients_retard, coefficient_prevision_applique")
+        .select("reference_article, besoins_clients_retard, coefficient_prevision_applique, statut_substitution, prevision_base_n1_origine, prevision_transferee_entrante")
         .eq("famille", selectedFamille as string);
       if (cancelled) return;
       if (err) {
@@ -353,6 +451,9 @@ export default function StocksDisponibilites2Page() {
           reference_article: r.reference_article as string,
           quantite: Number(r.besoins_clients_retard || 0),
           coefficient: Number(r.coefficient_prevision_applique || 0),
+          statutSubstitution: String(r.statut_substitution || "ACTIVE"),
+          baseOrigine: Number(r.prevision_base_n1_origine || 0),
+          transfereeEntrante: Number(r.prevision_transferee_entrante || 0),
         })),
       );
     }
@@ -365,6 +466,26 @@ export default function StocksDisponibilites2Page() {
   const retardByRef = useMemo(() => {
     const map = new Map<string, number>();
     retardsRaw.forEach((r) => map.set(r.reference_article, (map.get(r.reference_article) || 0) + r.quantite));
+    return map;
+  }, [retardsRaw]);
+
+  // Statut de remplacement par référence : ACTIVE, REMPLACEE, PARTIELLE ou
+  // REMPLACANTE. Source : v_stock_projection_alertes via l'API de données
+  // principale, plutôt que la requête secondaire des retards (qui ne portait
+  // pas ces colonnes dans la réponse).
+  // Source : retardsRaw — requête directe sur v_stock_projection_hebdo_latest
+  // qui expose bien statut_substitution, contrairement à l'API /data dont le
+  // type StockAlertRow ne contient pas ces colonnes.
+  const substitutionByRef = useMemo(() => {
+    const map = new Map<string, { statut: string; entrante: number; origineBase: number }>();
+    retardsRaw.forEach((r) => {
+      if (!r.statutSubstitution || r.statutSubstitution === "ACTIVE") return;
+      map.set(r.reference_article, {
+        statut: r.statutSubstitution,
+        entrante: r.transfereeEntrante,
+        origineBase: r.baseOrigine,
+      });
+    });
     return map;
   }, [retardsRaw]);
 
@@ -779,9 +900,33 @@ export default function StocksDisponibilites2Page() {
                 <input type="checkbox" checked={onlyRupture} onChange={(e) => setOnlyRupture(e.target.checked)} className="h-4 w-4 rounded border-white/20 bg-transparent accent-[#A6A181]" />
                 Avec rupture uniquement
               </label>
+              <label className="flex cursor-pointer items-center gap-2 text-sm text-white/60">
+                <input type="checkbox" checked={masquerRemplacees} onChange={(e) => setMasquerRemplacees(e.target.checked)} className="h-4 w-4 rounded border-white/20 bg-transparent accent-[#A6A181]" />
+                Masquer les remplacées
+              </label>
               <span className="text-xs text-white/40">
                 {search.trim() ? `${familleArticles.length} / ${familleArticlesAll.length} référence(s) filtrée(s)` : `${familleArticlesAll.length} référence(s)`}
               </span>
+
+              <div className="ml-auto flex items-center gap-2">
+                <select
+                  value={exportGranularite}
+                  onChange={(e) => setExportGranularite(e.target.value as "mensuel"|"hebdo")}
+                  className="rounded-md border border-white/20 bg-white/5 px-2 py-1.5 text-xs text-white/70 outline-none focus:border-[#A6A181]"
+                >
+                  <option value="mensuel">Mensuel</option>
+                  <option value="hebdo">Hebdomadaire</option>
+                </select>
+                <button
+                  onClick={() => void handleExport()}
+                  disabled={exportEnCours || !runId}
+                  className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-[#141A26] transition disabled:opacity-40"
+                  style={{ background: "#A6A181" }}
+                  title={selectedFamille ? `Export Excel — ${selectedFamille}` : selectedMacro ? `Export Excel — ${selectedMacro}` : "Export Excel — tous les articles"}
+                >
+                  {exportEnCours ? "⏳ Export…" : "⬇ Excel"}
+                </button>
+              </div>
             </div>
 
             <FamilleKpiPanel
@@ -830,6 +975,7 @@ export default function StocksDisponibilites2Page() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-black/10 text-left text-xs uppercase tracking-wide text-[#141A26]/50">
+                    <th className="w-7 px-1 py-3" />
                     <th className="whitespace-nowrap px-4 py-3">Référence</th>
                     <th className="whitespace-nowrap px-4 py-3">Désignation</th>
                     <th className="whitespace-nowrap px-4 py-3 text-right">Stock dispo</th>
@@ -843,12 +989,36 @@ export default function StocksDisponibilites2Page() {
                     <th className="whitespace-nowrap px-4 py-3 text-right">Manque max</th>
                     <th className="whitespace-nowrap px-4 py-3">Date rupture</th>
                     <th className="whitespace-nowrap px-4 py-3">Levée rupture</th>
+
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-black/[0.06]">
                   {articleRows.map((a) => (
-                    <tr key={a.reference_article} onClick={() => setSelectedArticle(a)} className="cursor-pointer hover:bg-black/[0.03]">
-                      <td className="whitespace-nowrap px-4 py-3 font-[var(--font-mono)] font-medium text-[#141A26]">{a.reference_article}</td>
+                    <tr
+                      key={a.reference_article}
+                      onClick={() => setSelectedArticle(a)}
+                      className="cursor-pointer hover:bg-black/[0.03]"
+                      style={
+                        substitutionByRef.get(a.reference_article)?.statut === "REMPLACEE"
+                          ? { opacity: 0.55 }
+                          : undefined
+                      }
+                    >
+                      <td className="w-7 px-1 py-2 text-center">
+                        <button
+                          title="Gérer le remplacement de cette référence"
+                          onClick={(e) => { e.stopPropagation(); setRemplacementPour({ reference: a.reference_article, designation: a.designation || "" }); }}
+                          className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-black/15 text-[#141A26]/45 transition hover:border-[#A6A181] hover:text-[#141A26]"
+                        >
+                          <svg viewBox="0 0 14 14" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.7">
+                            <path d="M8.5 1.5C9.5.5 11.5.5 12.5 1.5S13.5 4.5 12.5 5.5L5 13H1V9Z"/>
+                          </svg>
+                        </button>
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 font-[var(--font-mono)] font-medium text-[#141A26]">
+                        {a.reference_article}
+                        <PastilleSubstitution statut={substitutionByRef.get(a.reference_article)?.statut || "ACTIVE"} />
+                      </td>
                       <td className="max-w-[220px] truncate px-4 py-3 text-[#141A26]/80">{a.designation}</td>
                       <td className="whitespace-nowrap px-4 py-3 text-right font-[var(--font-mono)]">{formatNumber(a.stock_initial)}</td>
                       <td className="whitespace-nowrap px-4 py-3 text-right font-[var(--font-mono)]">{formatNumber(a.besoins_clients_fermes)}</td>
@@ -893,11 +1063,12 @@ export default function StocksDisponibilites2Page() {
                         {formatDate(a.date_rupture)}
                       </td>
                       <td className="whitespace-nowrap px-4 py-3 text-xs text-[#141A26]/60">{formatDate(a.date_retour_dispo)}</td>
+
                     </tr>
                   ))}
                   {articleRows.length === 0 && (
                     <tr>
-                      <td colSpan={13} className="px-4 py-8 text-center text-[#141A26]/40">Aucun article sur ce périmètre.</td>
+                      <td colSpan={14} className="px-4 py-8 text-center text-[#141A26]/40">Aucun article sur ce périmètre.</td>
                     </tr>
                   )}
                 </tbody>
@@ -969,6 +1140,20 @@ export default function StocksDisponibilites2Page() {
         </div>
       )}
 
+      {remplacementPour && (
+        <PanneauRemplacements
+          referenceSource={remplacementPour.reference}
+          designationSource={remplacementPour.designation}
+          runId={runId}
+          onClose={() => setRemplacementPour(null)}
+          onApplied={() => {
+            // La projection vient d'être recalculée en base : on relit l'écran
+            // pour que prévisions, pastilles et graphiques suivent.
+            setRefreshKey((k) => k + 1);
+          }}
+        />
+      )}
+
       {selectedArticle && (
         <ArticleDrawer
           article={selectedArticle}
@@ -976,6 +1161,7 @@ export default function StocksDisponibilites2Page() {
           includeRetard={includeRetard}
           onIncludeRetardChange={setIncludeRetard}
           onClose={() => setSelectedArticle(null)}
+          substitutionByRef={substitutionByRef}
         />
       )}
     </div>
@@ -1436,12 +1622,14 @@ function ArticleDrawer({
   includeRetard,
   onIncludeRetardChange,
   onClose,
+  substitutionByRef,
 }: {
   article: AlertRow;
   runId: string | null;
   includeRetard: boolean;
   onIncludeRetardChange: (value: boolean) => void;
   onClose: () => void;
+  substitutionByRef: Map<string, { statut: string; entrante: number; origineBase: number }>;
 }) {
   const [rows, setRows] = useState<ProjectionRow[]>([]);
   const [fournisseurs, setFournisseurs] = useState<FournisseurRow[]>([]);
@@ -1543,8 +1731,28 @@ function ArticleDrawer({
         <div className="mb-6 flex items-start justify-between">
           <div>
             <div className="mb-1 text-[11px] uppercase tracking-[0.2em] text-[#A6A181]">{article.macro_famille} · {article.famille}</div>
-            <h2 className="font-[var(--font-display)] text-xl font-bold text-white">{article.reference_article}</h2>
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="font-[var(--font-display)] text-xl font-bold text-white">{article.reference_article}</h2>
+              <PastilleSubstitution statut={substitutionByRef.get(article.reference_article)?.statut || "ACTIVE"} />
+            </div>
             <div className="text-sm text-white/50">{article.designation}</div>
+            {/* Bandeau informatif lorsque la référence est impliquée dans une substitution */}
+            {substitutionByRef.get(article.reference_article)?.statut === "REMPLACEE" && (
+              <div className="mt-2 rounded-lg border border-white/10 bg-white/[0.06] px-3 py-2 text-xs text-white/65">
+                Cette référence est <strong className="text-white/85">remplacée</strong> : ses besoins futurs ont été transférés vers une ou plusieurs remplaçantes. Sa prévision est ramenée à zéro.
+              </div>
+            )}
+            {substitutionByRef.get(article.reference_article)?.statut === "PARTIELLE" && (
+              <div className="mt-2 rounded-lg border border-white/10 bg-white/[0.06] px-3 py-2 text-xs text-white/65">
+                Remplacement <strong className="text-white/85">partiel</strong> : une partie de ses besoins futurs reste sur cette référence.
+              </div>
+            )}
+            {substitutionByRef.get(article.reference_article)?.statut === "REMPLACANTE" && (substitutionByRef.get(article.reference_article)?.entrante || 0) > 0 && (
+              <div className="mt-2 rounded-lg border border-white/10 bg-white/[0.06] px-3 py-2 text-xs text-white/65">
+                Référence <strong className="text-white/85">remplaçante</strong> : la prévision intègre l&rsquo;historique consolidé (propre + transféré).
+                Base N-1 propre : <strong className="text-white/85">{Math.round((substitutionByRef.get(article.reference_article)?.origineBase || 0) - (substitutionByRef.get(article.reference_article)?.entrante || 0))}</strong> · Reçu : <strong style={{color:"#3F9142"}}>{Math.round(substitutionByRef.get(article.reference_article)?.entrante || 0)}</strong>
+              </div>
+            )}
           </div>
           <button onClick={onClose} className="rounded-lg border border-white/15 px-3 py-1.5 text-sm text-white/70 hover:text-white">Fermer</button>
         </div>

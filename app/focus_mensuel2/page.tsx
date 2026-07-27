@@ -905,8 +905,26 @@ export function PortfolioTableCompact({ rows }: { rows: AgencyPortfolioRow[] }) 
               <tr key={r.label} className={r.label === "TOTAL AGENCE" ? "bg-black/[0.03] font-semibold" : ""}>
                 <td className="px-2 py-2 text-[#141A26]">{r.label}</td>
                 <td className="px-2 py-2 text-right font-[var(--font-mono)] text-[#141A26]">{formatMoney(r.total)}</td>
-                <td className="px-2 py-2 text-right font-[var(--font-mono)] text-[#141A26]/80">{formatMoney(r.cdc + r.cdcLivMx)}</td>
-                <td className="px-2 py-2 text-right font-[var(--font-mono)] text-[#141A26]/80">{formatMoney(r.pl + r.plLivMPlus)}</td>
+                {/* cdcLivMx et plLivMPlus sont des SOUS-ENSEMBLES de cdc et pl,
+                    pas des compléments : les additionner double-comptait la part
+                    concernée et faisait passer la colonne CDC au-dessus du total.
+                    On affiche donc l'ensemble, et le sous-ensemble en mention. */}
+                <td className="px-2 py-2 text-right font-[var(--font-mono)] text-[#141A26]/80">
+                  <div>{formatMoney(r.cdc)}</div>
+                  {r.cdcLivMx > 0 && (
+                    <div className="text-[10px] font-normal text-[#C1683C]">
+                      dont retard {formatMoney(r.cdcLivMx)}
+                    </div>
+                  )}
+                </td>
+                <td className="px-2 py-2 text-right font-[var(--font-mono)] text-[#141A26]/80">
+                  <div>{formatMoney(r.pl)}</div>
+                  {r.plLivMPlus > 0 && (
+                    <div className="text-[10px] font-normal text-[#141A26]/45">
+                      dont M+ {formatMoney(r.plLivMPlus)}
+                    </div>
+                  )}
+                </td>
                 <td className="px-2 py-2 text-right font-[var(--font-mono)] text-[#141A26]/80">{formatMoney(r.blMx + r.blM + r.brMx + r.brM)}</td>
               </tr>
             ))}
