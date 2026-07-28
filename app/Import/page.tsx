@@ -3909,7 +3909,7 @@ export default function ImportsParametragePage() {
     }
 
     if (isStockAvailabilityImportTable(config.key)) {
-      const { data, error } = await supabase.rpc('rebuild_stock_projection_hebdo_front', {
+      const { data, error } = await supabase.rpc('rebuild_stock_projection_hebdo_pipeline', {
         p_date_debut: formatDateForSql(new Date()),
         p_nb_semaines: 26,
         p_scenario_prevision_pct: 1.2,
