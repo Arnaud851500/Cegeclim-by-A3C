@@ -3916,6 +3916,8 @@ export default function ImportsParametragePage() {
         p_depot_mode: 'GLOBAL',
         p_commentaire: `Projection stock automatique après import manuel ${config.label}`,
       })
+      // Refresh des vues matérialisées contrôle frais de port
+      await supabase.rpc('refresh_controle_frais_port_materialized')
 
       if (error) {
         throw new Error(
