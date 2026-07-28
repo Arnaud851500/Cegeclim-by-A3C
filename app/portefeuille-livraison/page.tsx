@@ -219,10 +219,10 @@ const CONTROL_QUERY_MAX_ATTEMPTS = 3
 const CONTROL_QUERY_RETRY_DELAYS_MS = [0, 1200, 3000]
 const STALE_LOAD_ERROR = '__STALE_PORTFOLIO_LOAD__'
 
-// Fenêtre par défaut appliquée aux vues de contrôle quand aucune date n'est
-// saisie. 90 jours évite le scan complet de l'historique tout en couvrant
-// les BL du trimestre courant — modifiable ici si besoin.
-const CONTROL_DEFAULT_WINDOW_DAYS = 90
+// Actions SQL considérées comme anomalies frais de port.
+// Utilisées pour le filtrage SQL direct sur les vues de contrôle — évite le
+// scan complet de l'historique sans avoir besoin d'une borne de date.
+const ANOMALY_ACTIONS = ['AJOUTER', 'SUPPRIMER', 'VERIFIER'] as const
 
 const CONTROL_ACTION_SELECT = [
   'type_document',
@@ -277,23 +277,6 @@ function getCurrentMonthKey() {
   return `${year}-${month}`
 }
 
-/**
- * Calcule la borne de début à utiliser pour les vues de contrôle quand
- * l'utilisateur n'a saisi aucune date de livraison.
- *
- * Priorité :
- *   1. Date de création début si saisie (les BL créés avant ne nous intéressent pas)
- *   2. Sinon : aujourd'hui − CONTROL_DEFAULT_WINDOW_DAYS
- *
- * Cela évite le scan complet de l'historique qui provoque les timeouts.
- */
-function getControlDateDebutFallback(dateCreationDebut: string): string {
-  if (dateCreationDebut) return dateCreationDebut
-
-  const date = new Date()
-  date.setDate(date.getDate() - CONTROL_DEFAULT_WINDOW_DAYS)
-  return date.toISOString().slice(0, 10)
-}
 
 function isMonthBeforeCurrent(month: string, currentMonthKey: string) {
   if (!/^\d{4}-\d{2}$/.test(month)) return false
@@ -495,10 +478,6 @@ export default function PortefeuilleLivraisonPage() {
   const [controlesFraisPort, setControlesFraisPort] = useState<ControleFraisPort[]>([])
   const [groupesFraisPort, setGroupesFraisPort] = useState<GroupeFraisPort[]>([])
 
-  // Label informatif affiché sous les filtres BL pour indiquer quelle fenêtre
-  // de dates est effectivement appliquée au contrôle (utile quand le fallback joue).
-  const [controlDateWindowLabel, setControlDateWindowLabel] = useState<string | null>(null)
-
   const [selectedTypes, setSelectedTypes] = useState<string[]>(DEFAULT_TYPES)
 
   const [dateCreationDebut, setDateCreationDebut] = useState('')
@@ -584,7 +563,6 @@ export default function PortefeuilleLivraisonPage() {
     setLoading(true)
     setErrorMessage(null)
     setControlErrorMessage(null)
-    setControlDateWindowLabel(null)
 
     try {
       let query = supabase
@@ -629,30 +607,21 @@ export default function PortefeuilleLivraisonPage() {
         return
       }
 
-      // ── Calcul de la fenêtre de date pour le contrôle ──────────────────────
-      // Les vues de contrôle sont lourdes. Sans borne sur date_controle, elles
-      // scannent l'historique complet et tombent en timeout (57014).
+      // ── Stratégie de filtrage des vues de contrôle ─────────────────────────
+      // Les vues de contrôle (actions + groupes) couvrent tout l'historique.
+      // Sans filtre sur le statut, elles scannent des dizaines de milliers de
+      // lignes OK pour n'en retourner que quelques centaines — d'où les timeouts.
       //
-      // Stratégie :
-      //   • Si l'utilisateur a saisi une date de livraison fin → on l'utilise comme
-      //     borne haute sur date_controle (comportement d'origine).
-      //   • Sinon → on calcule une borne basse de repli (date création début OU
-      //     aujourd'hui − 90 j) pour limiter le volume scanné sans borne haute.
+      // Solution : pousser le filtre d'anomalie directement dans la requête SQL.
+      // • En mode "Toutes anomalies" → .in('action_recommandee', ANOMALY_ACTIONS)
+      // • En mode ciblé (manquant / à supprimer / autres) → filtre plus précis
+      // • En mode "Tous les statuts" → on garde le fallback de date pour ne pas
+      //   tout charger ; dans ce cas l'utilisateur doit saisir des dates lui-même.
       //
-      // La borne haute sur date_controle n'est volontairement pas forcée quand
-      // l'utilisateur n'en a pas saisi une : des BL récents peuvent être créés
-      // après la date de livraison (saisie différée) et doivent rester visibles.
+      // Résultat : les requêtes ne ramènent que les BL utiles, quelle que soit
+      // la profondeur historique, sans borne de date artificielle.
       // ───────────────────────────────────────────────────────────────────────
-      const controlDebutEffectif = dateLivraisonDebut || getControlDateDebutFallback(dateCreationDebut)
-      const usedFallback = !dateLivraisonDebut && !dateLivraisonFinControle
-
-      if (usedFallback) {
-        const fallbackDate = getControlDateDebutFallback(dateCreationDebut)
-        const label = dateCreationDebut
-          ? `Contrôle chargé depuis la date de création début (${formatDate(fallbackDate)})`
-          : `Contrôle chargé sur les ${CONTROL_DEFAULT_WINDOW_DAYS} derniers jours (depuis le ${formatDate(fallbackDate)}) — affinez les dates pour élargir la fenêtre`
-        if (isCurrentLoad()) setControlDateWindowLabel(label)
-      }
+      const isAnomalyMode = ['ANOMALIES', 'FRAIS_PORT_MANQUANT', 'FRAIS_PORT_A_SUPPRIMER', 'AUTRES_ANOMALIES'].includes(selectedControle)
 
       let controlRowsLoaded = false
       let groupRowsLoaded = false
@@ -665,11 +634,32 @@ export default function PortefeuilleLivraisonPage() {
               .from('v_controle_frais_port_actions')
               .select(CONTROL_ACTION_SELECT)
               .eq('type_document', 'BL')
-              // Borne basse sur date_controle : toujours appliquée pour éviter le scan complet.
-              .gte('date_controle', controlDebutEffectif)
 
-            if (dateCreationFin) controlQuery = controlQuery.lte('date_controle', dateCreationFin)
-            if (dateLivraisonFinControle) controlQuery = controlQuery.lte('date_livraison', dateLivraisonFinControle)
+            // Filtre SQL sur le statut d'anomalie — remplace la borne de date artificielle.
+            // En mode anomalie, seules les lignes actionnables sont chargées.
+            if (selectedControle === 'FRAIS_PORT_MANQUANT') {
+              controlQuery = controlQuery.eq('action_recommandee', 'AJOUTER')
+            } else if (selectedControle === 'FRAIS_PORT_A_SUPPRIMER') {
+              controlQuery = controlQuery.eq('action_recommandee', 'SUPPRIMER')
+            } else if (selectedControle === 'AUTRES_ANOMALIES') {
+              controlQuery = controlQuery.eq('action_recommandee', 'VERIFIER')
+            } else if (selectedControle === 'ANOMALIES') {
+              controlQuery = controlQuery.in('action_recommandee', [...ANOMALY_ACTIONS])
+            }
+            // En mode "Tous les statuts" ou statut spécifique : on applique les dates
+            // saisies par l'utilisateur comme bornes — sans fallback artificiel.
+            if (!isAnomalyMode) {
+              if (dateCreationDebut) controlQuery = controlQuery.gte('date_controle', dateCreationDebut)
+              if (dateCreationFin) controlQuery = controlQuery.lte('date_controle', dateCreationFin)
+              if (dateLivraisonDebut) controlQuery = controlQuery.gte('date_livraison', dateLivraisonDebut)
+              if (dateLivraisonFinControle) controlQuery = controlQuery.lte('date_livraison', dateLivraisonFinControle)
+            } else {
+              // En mode anomalie, on applique quand même les dates si l'utilisateur en a saisi.
+              if (dateCreationDebut) controlQuery = controlQuery.gte('date_controle', dateCreationDebut)
+              if (dateCreationFin) controlQuery = controlQuery.lte('date_controle', dateCreationFin)
+              if (dateLivraisonDebut) controlQuery = controlQuery.gte('date_livraison', dateLivraisonDebut)
+              if (dateLivraisonFinControle) controlQuery = controlQuery.lte('date_livraison', dateLivraisonFinControle)
+            }
 
             if (access.allowedCollaborateurs.length > 0) controlQuery = controlQuery.in('representant', access.allowedCollaborateurs)
             else if (selectedRepresentant) controlQuery = controlQuery.eq('representant', selectedRepresentant)
@@ -704,12 +694,20 @@ export default function PortefeuilleLivraisonPage() {
             let groupQuery = supabase
               .from('v_controle_frais_port_groupes')
               .select('*')
-              // Borne basse sur date_controle : cohérente avec la requête actions.
-              .gte('date_controle', controlDebutEffectif)
 
+            // Même logique côté groupes : filtre SQL sur l'anomalie en priorité.
+            if (selectedControle === 'FRAIS_PORT_MANQUANT') {
+              groupQuery = groupQuery.eq('statut_groupe', 'FRAIS_PORT_MANQUANT')
+            } else if (selectedControle === 'FRAIS_PORT_A_SUPPRIMER') {
+              groupQuery = groupQuery.gt('nb_bl_a_supprimer', 0)
+            } else if (selectedControle === 'ANOMALIES' || selectedControle === 'AUTRES_ANOMALIES') {
+              groupQuery = groupQuery.eq('anomalie_controle', true)
+            }
+
+            if (dateCreationDebut) groupQuery = groupQuery.gte('date_controle', dateCreationDebut)
             if (dateCreationFin) groupQuery = groupQuery.lte('date_controle', dateCreationFin)
-            if (dateLivraisonFinControle) groupQuery = groupQuery.lte('date_livraison_min', dateLivraisonFinControle)
             if (dateLivraisonDebut) groupQuery = groupQuery.gte('date_livraison_max', dateLivraisonDebut)
+            if (dateLivraisonFinControle) groupQuery = groupQuery.lte('date_livraison_min', dateLivraisonFinControle)
 
             if (selectedSommeil === 'OUI') groupQuery = groupQuery.eq('client_en_sommeil', true)
             if (selectedSommeil === 'NON') groupQuery = groupQuery.eq('client_en_sommeil', false)
@@ -1178,14 +1176,6 @@ export default function PortefeuilleLivraisonPage() {
                   ))}
                 </div>
               </div>
-
-              {/* ── Fenêtre de contrôle effective ── */}
-              {controlDateWindowLabel && (
-                <div className="mb-3 flex items-start gap-2 rounded-lg border border-blue-300 bg-blue-100 px-3 py-2 text-xs text-blue-900">
-                  <span className="mt-0.5 shrink-0">ℹ️</span>
-                  <span>{controlDateWindowLabel}</span>
-                </div>
-              )}
 
               <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
                 <label className="space-y-1">
