@@ -608,20 +608,14 @@ export default function PortefeuilleLivraisonPage() {
       }
 
       // ── Stratégie de filtrage des vues de contrôle ─────────────────────────
-      // Les vues de contrôle (actions + groupes) couvrent tout l'historique.
-      // Sans filtre sur le statut, elles scannent des dizaines de milliers de
-      // lignes OK pour n'en retourner que quelques centaines — d'où les timeouts.
+      // Principe : filtre SQL sur l'anomalie EN PRIORITÉ (évite le scan complet),
+      // puis filtres de dates toujours appliqués par-dessus si l'utilisateur en a saisi.
       //
-      // Solution : pousser le filtre d'anomalie directement dans la requête SQL.
-      // • En mode "Toutes anomalies" → .in('action_recommandee', ANOMALY_ACTIONS)
-      // • En mode ciblé (manquant / à supprimer / autres) → filtre plus précis
-      // • En mode "Tous les statuts" → on garde le fallback de date pour ne pas
-      //   tout charger ; dans ce cas l'utilisateur doit saisir des dates lui-même.
-      //
-      // Résultat : les requêtes ne ramènent que les BL utiles, quelle que soit
-      // la profondeur historique, sans borne de date artificielle.
+      // Correspondance des colonnes de date :
+      //   dates de création UI  → date_controle (= date du BL dans les deux vues)
+      //   dates de livraison UI → date_livraison (actions) / date_livraison_min/max (groupes)
       // ───────────────────────────────────────────────────────────────────────
-      const isAnomalyMode = ['ANOMALIES', 'FRAIS_PORT_MANQUANT', 'FRAIS_PORT_A_SUPPRIMER', 'AUTRES_ANOMALIES'].includes(selectedControle)
+      
 
       let controlRowsLoaded = false
       let groupRowsLoaded = false
@@ -635,8 +629,8 @@ export default function PortefeuilleLivraisonPage() {
               .select(CONTROL_ACTION_SELECT)
               .eq('type_document', 'BL')
 
-            // Filtre SQL sur le statut d'anomalie — remplace la borne de date artificielle.
-            // En mode anomalie, seules les lignes actionnables sont chargées.
+            // Filtre SQL sur le statut d'anomalie — permet de charger tout l'historique
+            // sans timeout, car la vue ne retourne que les lignes actionnables.
             if (selectedControle === 'FRAIS_PORT_MANQUANT') {
               controlQuery = controlQuery.eq('action_recommandee', 'AJOUTER')
             } else if (selectedControle === 'FRAIS_PORT_A_SUPPRIMER') {
@@ -646,20 +640,13 @@ export default function PortefeuilleLivraisonPage() {
             } else if (selectedControle === 'ANOMALIES') {
               controlQuery = controlQuery.in('action_recommandee', [...ANOMALY_ACTIONS])
             }
-            // En mode "Tous les statuts" ou statut spécifique : on applique les dates
-            // saisies par l'utilisateur comme bornes — sans fallback artificiel.
-            if (!isAnomalyMode) {
-              if (dateCreationDebut) controlQuery = controlQuery.gte('date_controle', dateCreationDebut)
-              if (dateCreationFin) controlQuery = controlQuery.lte('date_controle', dateCreationFin)
-              if (dateLivraisonDebut) controlQuery = controlQuery.gte('date_livraison', dateLivraisonDebut)
-              if (dateLivraisonFinControle) controlQuery = controlQuery.lte('date_livraison', dateLivraisonFinControle)
-            } else {
-              // En mode anomalie, on applique quand même les dates si l'utilisateur en a saisi.
-              if (dateCreationDebut) controlQuery = controlQuery.gte('date_controle', dateCreationDebut)
-              if (dateCreationFin) controlQuery = controlQuery.lte('date_controle', dateCreationFin)
-              if (dateLivraisonDebut) controlQuery = controlQuery.gte('date_livraison', dateLivraisonDebut)
-              if (dateLivraisonFinControle) controlQuery = controlQuery.lte('date_livraison', dateLivraisonFinControle)
-            }
+
+            // Filtres de dates : toujours appliqués par-dessus le filtre anomalie.
+            // date_controle = date du BL dans la vue actions.
+            if (dateCreationDebut) controlQuery = controlQuery.gte('date_controle', dateCreationDebut)
+            if (dateCreationFin) controlQuery = controlQuery.lte('date_controle', dateCreationFin)
+            if (dateLivraisonDebut) controlQuery = controlQuery.gte('date_livraison', dateLivraisonDebut)
+            if (dateLivraisonFinControle) controlQuery = controlQuery.lte('date_livraison', dateLivraisonFinControle)
 
             if (access.allowedCollaborateurs.length > 0) controlQuery = controlQuery.in('representant', access.allowedCollaborateurs)
             else if (selectedRepresentant) controlQuery = controlQuery.eq('representant', selectedRepresentant)
