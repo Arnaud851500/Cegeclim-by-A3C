@@ -387,7 +387,7 @@ export async function GET(req: NextRequest) {
   // ══════════════════════════════════════════════════════════════════════════
   // ONGLET 2 — VENTES N / N-1
   // ══════════════════════════════════════════════════════════════════════════
-  const wv = wb.addWorksheet("Ventes N / N-1", {
+  const wv = wb.addWorksheet("Ventes N & N-1", {
     views: [{ state:"frozen", xSplit:4, ySplit:3 }],
   });
   wv.properties.showGridLines = false;
