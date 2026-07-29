@@ -525,8 +525,8 @@ export default function StocksDisponibilites2Page() {
           )}
 
           <div className="flex flex-wrap items-center gap-2 text-sm">
-            <Breadcrumb label="Toutes les familles" active={level === "macro"} onClick={() => setLevel("macro")} />
-            {selectedMacro && (<><span className="text-white/20">/</span><Breadcrumb label={selectedMacro} active={level === "famille"} onClick={() => setLevel("famille")} /></>)}
+            <Breadcrumb label="Toutes les familles" active={level === "macro"} onClick={() => { setLevel("macro"); setSelectedMacro(null); setSelectedFamille(null); }} />
+            {selectedMacro && (<><span className="text-white/20">/</span><Breadcrumb label={selectedMacro} active={level === "famille"} onClick={() => { setLevel("famille"); setSelectedFamille(null); }} /></>)}
             {selectedFamille && (<><span className="text-white/20">/</span><Breadcrumb label={selectedFamille} active={level === "article"} onClick={() => setLevel("article")} /></>)}
           </div>
         </div>
