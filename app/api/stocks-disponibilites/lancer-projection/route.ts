@@ -1,16 +1,9 @@
 /**
  * POST /api/stocks-disponibilites/lancer-projection
  *
- * Lance une nouvelle projection complète en réutilisant EXACTEMENT les
- * paramètres (horizon, scénario, dépôt) du dernier run enregistré en base.
- * Les substitutions de références sont appliquées automatiquement à la fin.
- *
- * Aucun paramètre en entrée — c'est voulu : ce bouton ne change rien
- * aux hypothèses déjà saisies par les utilisateurs.
- *
- * La fonction SQL tourne dans Supabase sans limite de temps (statement_timeout
- * à 0 dans rebuild_stock_projection_hebdo_pipeline). La route attend jusqu'à
- * 9 minutes (Vercel Pro) ou délègue via pg_cron si besoin.
+ * Lance une nouvelle projection complète en réutilisant les paramètres
+ * (horizon, scénario, dépôt) du dernier run enregistré en base.
+ * Les substitutions sont appliquées automatiquement.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -30,13 +23,17 @@ export async function POST(req: NextRequest) {
     { global: { headers: { Authorization: `Bearer ${userToken}` } } },
   );
 
-  // Vérifier que l'utilisateur a le droit can_stocks ou can_autorisation
-  const { data: acces } = await supabase
-    .from("user_page_access")
-    .select("can_stocks, can_autorisation")
-    .single();
+  // Vérification des droits via la fonction SQL qui consulte profil ET ligne
+  // utilisateur (même logique que la politique RLS des substitutions)
+  const { data: autorise, error: authErr } = await supabase
+    .rpc("peut_gerer_substitutions_stock");
 
-  if (!acces?.can_stocks && !acces?.can_autorisation) {
+  if (authErr) {
+    console.error("[lancer-projection] auth check:", authErr.message);
+    return NextResponse.json({ success: false, message: authErr.message }, { status: 500 });
+  }
+
+  if (!autorise) {
     return NextResponse.json({ success: false, message: "Droits insuffisants" }, { status: 403 });
   }
 
@@ -45,10 +42,7 @@ export async function POST(req: NextRequest) {
 
   if (error) {
     console.error("[lancer-projection]", error.message);
-    return NextResponse.json(
-      { success: false, message: error.message },
-      { status: 500 },
-    );
+    return NextResponse.json({ success: false, message: error.message }, { status: 500 });
   }
 
   const result = data as {
