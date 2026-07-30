@@ -183,7 +183,7 @@ type ProspectStatusValue =
   | '4 : Proposition faite'
   | '5 : Client non intéressé'
   | '6 : Ne pas poursuivre'
-  | '7 : Abandon'
+  | '7 : Abandon' 
 
 type CegeclimAbsentRow = {
   id: string

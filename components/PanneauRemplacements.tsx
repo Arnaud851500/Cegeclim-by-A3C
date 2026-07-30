@@ -1,4 +1,3 @@
-'use client'
 
 /**
  * PANNEAU DE GESTION DES REMPLACEMENTS DE RÉFÉRENCES
@@ -87,6 +86,10 @@ export default function PanneauRemplacements({
     setChargement(true)
     setErreur(null)
     try {
+      // S'assurer que la session JWT est active avant d'interroger la table.
+      // Sans ça, la RLS retourne 0 lignes silencieusement à la première ouverture.
+      await supabase.auth.getSession()
+
       const [{ data: subs, error: e1 }, { data: cands, error: e2 }] = await Promise.all([
         supabase
           .from('stock_article_substitutions')
@@ -423,4 +426,4 @@ export default function PanneauRemplacements({
       </div>
     </div>
   )
-}
+  }

@@ -625,7 +625,7 @@ export default function PortefeuilleLivraisonPage() {
           'actions frais de port',
           async () => {
             let controlQuery = supabase
-              .from('v_controle_frais_port_actions')
+              .from('mv_controle_frais_port_actions')
               .select(CONTROL_ACTION_SELECT)
               .eq('type_document', 'BL')
 
@@ -679,7 +679,7 @@ export default function PortefeuilleLivraisonPage() {
           'groupes frais de port',
           async () => {
             let groupQuery = supabase
-              .from('v_controle_frais_port_groupes')
+              .from('mv_controle_frais_port_groupes')
               .select('*')
 
             // Même logique côté groupes : filtre SQL sur l'anomalie en priorité.
