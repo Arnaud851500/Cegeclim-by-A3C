@@ -214,6 +214,47 @@ export default function StocksDisponibilites2Page() {
   const [hypoOpen, setHypoOpen] = useState(false);
   const [hypoFamilleScope, setHypoFamilleScope] = useState<string | null>(null);
 
+  // Horizon de projection MÉMORISÉ PAR FAMILLE (distinct de l'horizon global
+  // de recalcul en haut de page). Chargé dès qu'on entre dans une famille, il
+  // pilote l'affichage du graphe hebdomadaire, du graphe mensuel et des KPI
+  // de cet écran — sans avoir à le ressaisir à chaque visite.
+  const [familleHorizonWeeks, setFamilleHorizonWeeks] = useState(26);
+  const [familleHorizonInput, setFamilleHorizonInput] = useState("26");
+  const [familleHorizonSaving, setFamilleHorizonSaving] = useState(false);
+
+  useEffect(() => {
+    if (!selectedFamille) return;
+    let cancelled = false;
+    async function loadHorizon() {
+      const { data, error: err } = await supabase.rpc("get_stock_famille_horizon", { p_famille: selectedFamille, p_defaut: 26 });
+      if (cancelled) return;
+      if (!err && typeof data === "number") {
+        setFamilleHorizonWeeks(data);
+        setFamilleHorizonInput(String(data));
+      }
+    }
+    loadHorizon();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedFamille]);
+
+  async function handleSaveFamilleHorizon() {
+    if (!selectedFamille) return;
+    const valeur = Math.max(1, Math.min(104, Number(familleHorizonInput) || 26));
+    setFamilleHorizonSaving(true);
+    try {
+      const { error: err } = await supabase.rpc("set_stock_famille_horizon", { p_famille: selectedFamille, p_horizon_semaines: valeur });
+      if (err) throw new Error(err.message);
+      setFamilleHorizonWeeks(valeur);
+      setFamilleHorizonInput(String(valeur));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setFamilleHorizonSaving(false);
+    }
+  }
+
   // Référence dont on gère les remplaçantes. Null = panneau fermé.
   const [remplacementPour, setRemplacementPour] = useState<{ reference: string; designation: string } | null>(null);
 
@@ -498,18 +539,6 @@ export default function StocksDisponibilites2Page() {
     return map;
   }, [retardsRaw]);
 
-  // Hypothèse appliquée par référence. Elle est en principe uniforme sur
-  // l'horizon ; on retient la valeur maximale pour rester lisible si une
-  // semaine porte un forçage différent.
-  const coefficientByRef = useMemo(() => {
-    const map = new Map<string, number>();
-    retardsRaw.forEach((r) => {
-      if (!r.coefficient) return;
-      map.set(r.reference_article, Math.max(map.get(r.reference_article) || 0, r.coefficient));
-    });
-    return map;
-  }, [retardsRaw]);
-
   // Agrégats par référence sur tout l'horizon, repris du détail hebdomadaire
   // déjà chargé : aucune requête supplémentaire.
   const articleAggregates = useMemo(() => {
@@ -569,20 +598,29 @@ export default function StocksDisponibilites2Page() {
       }));
   }, [familleWeeklyRaw, searchMatches, retardByRef]);
 
+  // Vue tronquée à l'horizon mémorisé pour cette famille : c'est cette série
+  // (et non familleWeekly en entier) qui alimente le graphe hebdomadaire de
+  // droite et les KPI liés à l'horizon. Si l'horizon demandé dépasse le
+  // nombre de semaines réellement calculées dans le dernier run, on affiche
+  // simplement tout ce qui est disponible.
+  const familleWeeklyHorizon = useMemo(
+    () => familleWeekly.slice(0, familleHorizonWeeks),
+    [familleWeekly, familleHorizonWeeks],
+  );
 
   const sortiesHorizonKpi = useMemo(() => {
-    const n = familleWeekly.reduce((s, r) => s + r.sorties_n + (includeRetard ? r.sorties_retard : 0), 0);
-    const n1 = familleWeekly.reduce((s, r) => s + r.sorties_n1, 0);
-    const entrees = familleWeekly.reduce((s, r) => s + r.entrees, 0);
+    const n = familleWeeklyHorizon.reduce((s, r) => s + r.sorties_n + (includeRetard ? r.sorties_retard : 0), 0);
+    const n1 = familleWeeklyHorizon.reduce((s, r) => s + r.sorties_n1, 0);
+    const entrees = familleWeeklyHorizon.reduce((s, r) => s + r.entrees, 0);
     return { n, n1, evolPct: n1 > 0 ? ((n - n1) / n1) * 100 : null, approFerme: entrees, manque: Math.max(0, n - entrees) };
-  }, [familleWeekly, includeRetard]);
+  }, [familleWeeklyHorizon, includeRetard]);
 
   const stockEvolutionKpi = useMemo(() => {
-    if (familleWeekly.length < 2) return null;
-    const first = familleWeekly[0].stock_projete;
-    const last = familleWeekly[familleWeekly.length - 1].stock_projete;
+    if (familleWeeklyHorizon.length < 2) return null;
+    const first = familleWeeklyHorizon[0].stock_projete;
+    const last = familleWeeklyHorizon[familleWeeklyHorizon.length - 1].stock_projete;
     return { first, last, deltaPct: first !== 0 ? ((last - first) / Math.abs(first)) * 100 : null };
-  }, [familleWeekly]);
+  }, [familleWeeklyHorizon]);
 
   const [monthlyReelRaw, setMonthlyReelRaw] = useState<Array<{ annee: number; mois: number; reference_article: string; quantite: number }>>([]);
 
@@ -613,49 +651,92 @@ export default function StocksDisponibilites2Page() {
   const todayIso = new Date().toISOString().slice(0, 10);
   const currentYear = new Date().getFullYear();
 
+  // Bornes du graphe mensuel : toujours à partir de janvier de l'année en
+  // cours, et jusqu'à la fin de l'HORIZON DE LA FAMILLE — qui peut déborder
+  // sur l'année suivante (avec un horizon de 26 semaines lancé fin juillet,
+  // la fin de l'horizon tombe déjà fin janvier de l'année suivante).
+  // Le N-1 d'un mois de l'année suivante est le même mois de l'année en
+  // cours : cette donnée est déjà chargée (bucket "n" de monthlyReelRaw), pas
+  // besoin d'un second appel réseau. On plafonne à 24 mois (2 années civiles)
+  // par cohérence avec l'historique réellement disponible (année en cours et
+  // année précédente).
+  const moisAffiches = useMemo(() => {
+    const horizonFin = new Date(todayIso + "T00:00:00");
+    horizonFin.setDate(horizonFin.getDate() + familleHorizonWeeks * 7);
+    const moisFinIndex = (horizonFin.getFullYear() - currentYear) * 12 + horizonFin.getMonth(); // 0-based depuis janvier N
+    const nbMois = Math.max(1, Math.min(24, moisFinIndex + 1));
+    return Array.from({ length: nbMois }, (_, i) => {
+      const annee = currentYear + Math.floor(i / 12);
+      const mois = (i % 12) + 1;
+      return { annee, mois, key: `${annee}-${String(mois).padStart(2, "0")}` };
+    });
+  }, [todayIso, currentYear, familleHorizonWeeks]);
+
   const monthlyChartData = useMemo(() => {
     const filteredReel = searchMatches ? monthlyReelRaw.filter((r) => searchMatches.has(r.reference_article)) : monthlyReelRaw;
-    const reelByMonth = new Map<string, { n: number; n1: number }>();
+    // Totaux réels indexés par année-mois complète (pas seulement par mois),
+    // pour pouvoir servir à la fois de "réalisé N" et, décalé d'un an, de
+    // "N-1" d'un mois de l'année suivante.
+    const reelParAnneeMois = new Map<string, number>();
     filteredReel.forEach((r) => {
-      const key = String(r.mois).padStart(2, "0");
-      const bucket = r.annee === currentYear ? "n" : "n1";
-      const entry = reelByMonth.get(key) || { n: 0, n1: 0 };
-      entry[bucket] += r.quantite;
-      reelByMonth.set(key, entry);
+      const key = `${r.annee}-${String(r.mois).padStart(2, "0")}`;
+      reelParAnneeMois.set(key, (reelParAnneeMois.get(key) || 0) + r.quantite);
     });
 
     const forecastByMonth = new Map<string, number>();
-    familleWeekly.forEach((r) => {
-      const month = r.periode_debut.slice(5, 7);
-      forecastByMonth.set(month, (forecastByMonth.get(month) || 0) + r.sorties_n);
+    familleWeeklyHorizon.forEach((r) => {
+      const moisKey = r.periode_debut.slice(0, 7); // "YYYY-MM"
+      forecastByMonth.set(moisKey, (forecastByMonth.get(moisKey) || 0) + r.sorties_n);
     });
 
-    const months = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0"));
-    const currentMonth = todayIso.slice(5, 7);
-    return months.map((m) => {
-      const reel = reelByMonth.get(m);
-      const forecast = forecastByMonth.get(m);
-      const isFuture = m > currentMonth;
-      const n = isFuture ? forecast ?? 0 : reel?.n ?? 0;
-      return { month: m, n, n1: reel?.n1 ?? 0, isFuture };
+    const currentMonthKey = todayIso.slice(0, 7);
+    return moisAffiches.map(({ annee, mois, key }) => {
+      const n1Key = `${annee - 1}-${String(mois).padStart(2, "0")}`;
+      const isFuture = key > currentMonthKey;
+      const n = isFuture ? forecastByMonth.get(key) ?? 0 : reelParAnneeMois.get(key) ?? 0;
+      return { annee, mois, key, n, n1: reelParAnneeMois.get(n1Key) ?? 0, isFuture };
     });
-  }, [monthlyReelRaw, familleWeekly, searchMatches, todayIso, currentYear]);
+  }, [monthlyReelRaw, familleWeeklyHorizon, searchMatches, todayIso, moisAffiches]);
 
   const ytdEvolution = useMemo(() => {
-    const currentMonth = todayIso.slice(5, 7);
-    const past = monthlyChartData.filter((m) => m.month <= currentMonth);
+    const currentMonthKey = todayIso.slice(0, 7);
+    const past = monthlyChartData.filter((m) => m.key <= currentMonthKey);
     const n = past.reduce((s, m) => s + m.n, 0);
     const n1 = past.reduce((s, m) => s + m.n1, 0);
     return n1 > 0 ? ((n - n1) / n1) * 100 : null;
   }, [monthlyChartData, todayIso]);
 
   const forecastEvolution = useMemo(() => {
-    const currentMonth = todayIso.slice(5, 7);
-    const future = monthlyChartData.filter((m) => m.month > currentMonth);
+    const currentMonthKey = todayIso.slice(0, 7);
+    const future = monthlyChartData.filter((m) => m.key > currentMonthKey);
     const n = future.reduce((s, m) => s + m.n, 0);
     const n1 = future.reduce((s, m) => s + m.n1, 0);
     return n1 > 0 ? ((n - n1) / n1) * 100 : null;
   }, [monthlyChartData, todayIso]);
+
+  // Bande d'hypothèses mensuelles affichée au-dessus des graphiques : les %
+  // réellement appliqués, mois par mois, du mois en cours jusqu'à la fin de
+  // l'horizon de cette famille.
+  const [hypoStrip, setHypoStrip] = useState<Array<{ mois: string; coefficient: number }>>([]);
+  useEffect(() => {
+    if (!selectedFamille) {
+      setHypoStrip([]);
+      return;
+    }
+    let cancelled = false;
+    async function loadStrip() {
+      const horizonFin = new Date(todayIso + "T00:00:00");
+      horizonFin.setDate(horizonFin.getDate() + familleHorizonWeeks * 7);
+      const nbMoisAVenir = Math.max(1, Math.min(24, (horizonFin.getFullYear() - currentYear) * 12 + horizonFin.getMonth() - (Number(todayIso.slice(5, 7)) - 1) + 1));
+      const { data, error: err } = await supabase.rpc("get_stock_hypotheses_matrice", { p_nb_mois: nbMoisAVenir, p_famille: selectedFamille });
+      if (cancelled || err) return;
+      setHypoStrip(((data || []) as Array<{ mois: string; coefficient: number }>).map((r) => ({ mois: r.mois, coefficient: Number(r.coefficient) })));
+    }
+    loadStrip();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedFamille, familleHorizonWeeks, refreshKey, todayIso, currentYear]);
 
   type RebuildContinuation = Record<string, unknown> | null;
   type RebuildPayload = { success: boolean; message?: string; done: boolean; continuation: RebuildContinuation; progress: { percent: number; message: string } };
@@ -771,7 +852,7 @@ export default function StocksDisponibilites2Page() {
   }
 
   // Nombre de semaines réellement présentes dans la projection affichée.
-  const horizonLabel = `${familleWeekly.length || horizonWeeks} sem.`;
+  const horizonLabel = `${familleWeeklyHorizon.length || familleHorizonWeeks} sem.`;
 
   const canRecalcScope = recalcScope !== "all" && ((recalcScope === "famille" && selectedFamille) || (recalcScope === "famille_macro" && selectedMacro));
 
@@ -922,6 +1003,34 @@ export default function StocksDisponibilites2Page() {
                 </button>
               )}
 
+              {/* Horizon de projection MÉMORISÉ pour cette famille : pilote le
+                  graphe hebdomadaire, le graphe mensuel et les KPI de cet
+                  écran. Distinct de l'horizon global de recalcul en haut de
+                  page, et conservé d'une visite à l'autre. */}
+              {selectedFamille && (
+                <div className="flex items-center gap-1.5 rounded-lg border border-white/15 bg-white/5 px-2 py-1">
+                  <label className="text-[11px] uppercase tracking-wide text-white/40">Horizon famille</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={104}
+                    value={familleHorizonInput}
+                    onChange={(e) => setFamilleHorizonInput(e.target.value)}
+                    className="w-14 rounded border border-white/15 bg-transparent px-1.5 py-1 text-center text-xs text-white outline-none focus:border-[#A6A181]"
+                  />
+                  <span className="text-[11px] text-white/40">sem.</span>
+                  {Number(familleHorizonInput) !== familleHorizonWeeks && (
+                    <button
+                      onClick={() => void handleSaveFamilleHorizon()}
+                      disabled={familleHorizonSaving}
+                      className="rounded bg-[#A6A181] px-2 py-1 text-[11px] font-semibold text-[#141A26] disabled:opacity-50"
+                    >
+                      {familleHorizonSaving ? "…" : "OK"}
+                    </button>
+                  )}
+                </div>
+              )}
+
               <div className="ml-auto flex items-center gap-2">
                 <select
                   value={exportGranularite}
@@ -957,11 +1066,37 @@ export default function StocksDisponibilites2Page() {
               blYtd={blYtdKpi}
               sortiesHorizon={sortiesHorizonKpi}
               stockEvolution={stockEvolutionKpi}
-              horizonWeeks={familleWeekly.length}
-              retardTotal={familleWeekly[0]?.sorties_retard ?? 0}
+              horizonWeeks={familleWeeklyHorizon.length}
+              retardTotal={familleWeeklyHorizon[0]?.sorties_retard ?? 0}
               includeRetard={includeRetard}
               onToggleRetard={setIncludeRetard}
             />
+
+            {/* Hypothèses mensuelles appliquées sur l'horizon de cette
+                famille : les % ne sont pas fixes d'un mois à l'autre, donc on
+                les affiche ici plutôt que comme une valeur unique par
+                référence dans le tableau plus bas. */}
+            {hypoStrip.length > 0 && (
+              <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-[#A6A181]/25 bg-[#A6A181]/[0.06] px-4 py-3">
+                <span className="mr-1 text-[11px] font-medium uppercase tracking-wide text-white/40">Hypothèses {selectedFamille} :</span>
+                {hypoStrip.map((h) => {
+                  const pct = Math.round(h.coefficient * 100);
+                  const d = new Date(h.mois + "T00:00:00");
+                  return (
+                    <button
+                      key={h.mois}
+                      onClick={() => { setHypoFamilleScope(selectedFamille); setHypoOpen(true); }}
+                      title="Cliquer pour ajuster les hypothèses mensuelles de cette famille"
+                      className={`rounded-md px-2 py-1 text-[11px] font-[var(--font-mono)] font-medium transition hover:brightness-110 ${
+                        pct === 100 ? "bg-white/10 text-white/50" : "bg-[#A6A181]/25 text-[#A6A181]"
+                      }`}
+                    >
+                      {d.toLocaleDateString("fr-FR", { month: "short", year: "2-digit" })} · {pct}%
+                    </button>
+                  );
+                })}
+              </div>
+            )}
 
             <div className="mb-6 grid grid-cols-1 gap-4 xl:grid-cols-2">
               <div className="rounded-xl border border-white/10 bg-[#F5F3EC] p-4">
@@ -982,10 +1117,10 @@ export default function StocksDisponibilites2Page() {
                 )}
                 {familleWeeklyLoading ? (
                   <div className="h-64 animate-pulse rounded-lg bg-black/[0.04]" />
-                ) : familleWeekly.length === 0 ? (
+                ) : familleWeeklyHorizon.length === 0 ? (
                   <p className="py-8 text-center text-sm text-[#141A26]/40">Aucune donnée hebdomadaire.</p>
                 ) : (
-                  <WeeklyStockChart rows={familleWeekly} includeRetard={includeRetard} onIncludeRetardChange={setIncludeRetard} />
+                  <WeeklyStockChart rows={familleWeeklyHorizon} includeRetard={includeRetard} onIncludeRetardChange={setIncludeRetard} />
                 )}
               </div>
             </div>
@@ -1000,7 +1135,6 @@ export default function StocksDisponibilites2Page() {
                     <th className="whitespace-nowrap px-4 py-3 text-right">Stock dispo</th>
                     <th className="whitespace-nowrap px-4 py-3 text-right">CDC en cmd</th>
                     <th className="whitespace-nowrap px-4 py-3 text-right" style={{ color: VIOLET }}>CDC en retard</th>
-                    <th className="whitespace-nowrap px-4 py-3 text-right">Hypothèse</th>
                     <th className="whitespace-nowrap px-4 py-3 text-right">Prév. complém.</th>
                     <th className="whitespace-nowrap px-4 py-3 text-right">À récept. {horizonLabel}</th>
                     <th className="whitespace-nowrap px-4 py-3 text-right">Stock à terme</th>
@@ -1050,9 +1184,6 @@ export default function StocksDisponibilites2Page() {
                       >
                         {formatNumber(retardByRef.get(a.reference_article) || 0)}
                       </td>
-                      <td className="whitespace-nowrap px-4 py-3 text-right font-[var(--font-mono)] text-[#141A26]/70">
-                        {coefficientByRef.has(a.reference_article) ? `×${(coefficientByRef.get(a.reference_article) as number).toFixed(2)}` : "—"}
-                      </td>
                       <td className="whitespace-nowrap px-4 py-3 text-right font-[var(--font-mono)] text-[#C1683C]">
                         {formatNumber(articleAggregates.get(a.reference_article)?.previsionComplementaire ?? 0)}
                       </td>
@@ -1087,7 +1218,7 @@ export default function StocksDisponibilites2Page() {
                   ))}
                   {articleRows.length === 0 && (
                     <tr>
-                      <td colSpan={14} className="px-4 py-8 text-center text-[#141A26]/40">Aucun article sur ce périmètre.</td>
+                      <td colSpan={13} className="px-4 py-8 text-center text-[#141A26]/40">Aucun article sur ce périmètre.</td>
                     </tr>
                   )}
                 </tbody>
@@ -1291,7 +1422,10 @@ const MONTH_LABELS = ["janv.", "fév.", "mars", "avr.", "mai", "juin", "juil.", 
 function MonthlySortiesChart({
   rows, todayIso, ytdEvolution, forecastEvolution,
 }: {
-  rows: Array<{ month: string; n: number; n1: number; isFuture: boolean }>;
+  // Un mois par entrée, de janvier de l'année en cours jusqu'à la fin de
+  // l'horizon de la famille : peut donc déborder sur l'année suivante
+  // (annee/mois portent l'année civile réelle du point, key = "YYYY-MM").
+  rows: Array<{ annee: number; mois: number; key: string; n: number; n1: number; isFuture: boolean }>;
   todayIso: string;
   ytdEvolution: number | null;
   forecastEvolution: number | null;
@@ -1304,12 +1438,15 @@ function MonthlySortiesChart({
   const [tooltip, setTooltip] = useState<TooltipState>(null);
   const svgRef = useRef<SVGSVGElement>(null);
 
-  const currentMonthIdx = Number(todayIso.slice(5, 7)) - 1;
+  const nbMois = Math.max(1, rows.length - 1);
+  const currentMonthKey = todayIso.slice(0, 7);
+  const currentMonthIdx = Math.max(0, rows.findIndex((r) => r.key === currentMonthKey));
   const maxVal = Math.max(1, ...rows.flatMap((r) => [r.n, r.n1]));
   const minVal = 0;
-  const x = (i: number) => padding.left + (i / 11) * innerW;
+  const x = (i: number) => padding.left + (i / nbMois) * innerW;
   const y = (v: number) => padding.top + innerH - ((v - minVal) / (maxVal - minVal)) * innerH;
   const todayX = x(currentMonthIdx);
+  const label = (r: { annee: number; mois: number }) => `${MONTH_LABELS[r.mois - 1]}${r.annee !== rows[0]?.annee ? ` ${String(r.annee).slice(2)}` : ""}`;
 
   function handleMove(e: React.MouseEvent, i: number) {
     const rect = svgRef.current?.getBoundingClientRect();
@@ -1319,7 +1456,7 @@ function MonthlySortiesChart({
       x: (x(i) / width) * rect.width,
       y: (y(Math.max(r.n, r.n1)) / height) * rect.height,
       lines: [
-        { label: MONTH_LABELS[i], value: "" },
+        { label: label(r), value: "" },
         { label: r.isFuture ? "Prévisionnel N" : "Réel N", value: formatNumber(r.n), color: r.isFuture ? "#C1683C" : "#141A26" },
         { label: "N-1", value: formatNumber(r.n1), color: "#8A93A6" },
       ],
@@ -1344,17 +1481,17 @@ function MonthlySortiesChart({
           <line key={i} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke={s.future ? "#C1683C" : "#141A26"} strokeWidth={2.75} strokeDasharray={s.future ? "9 5" : undefined} />
         ))}
         {rows.map((r, i) => (
-          <circle key={r.month} cx={x(i)} cy={y(r.n)} r={4} fill={r.isFuture ? "#C1683C" : "#141A26"} />
+          <circle key={r.key} cx={x(i)} cy={y(r.n)} r={4} fill={r.isFuture ? "#C1683C" : "#141A26"} />
         ))}
         {rows.map((r, i) => (
-          <rect key={`hit-${r.month}`} x={x(i) - (innerW / 22)} y={0} width={innerW / 11} height={height} fill="transparent" onMouseMove={(e) => handleMove(e, i)} className="cursor-pointer" />
+          <rect key={`hit-${r.key}`} x={x(i) - innerW / (2 * nbMois)} y={0} width={innerW / nbMois} height={height} fill="transparent" onMouseMove={(e) => handleMove(e, i)} className="cursor-pointer" />
         ))}
 
         {rows.map((r, i) => {
           const pct = r.n1 > 0 ? ((r.n - r.n1) / r.n1) * 100 : null;
           if (pct === null) return null;
           return (
-            <text key={`pct-${r.month}`} x={x(i)} y={padding.top - 10} fontSize={10} textAnchor="middle" fill="#141A26aa">
+            <text key={`pct-${r.key}`} x={x(i)} y={padding.top - 10} fontSize={10} textAnchor="middle" fill="#141A26aa">
               {pct >= 0 ? "+" : ""}{pct.toFixed(0)}%
             </text>
           );
@@ -1362,8 +1499,8 @@ function MonthlySortiesChart({
 
         <line x1={padding.left} y1={y(0)} x2={width - padding.right} y2={y(0)} stroke="#00000022" />
         {rows.map((r, i) => (
-          <text key={`lbl-${r.month}`} x={x(i)} y={height - padding.bottom + 30} fontSize={9} textAnchor="middle" fill="#141A26aa">
-            {MONTH_LABELS[i]}
+          <text key={`lbl-${r.key}`} x={x(i)} y={height - padding.bottom + 30} fontSize={9} textAnchor="middle" fill="#141A26aa">
+            {label(r)}
           </text>
         ))}
       </svg>
@@ -1374,7 +1511,7 @@ function MonthlySortiesChart({
           Réalisé YTD vs N-1 : <EvolBadge pct={ytdEvolution} />
         </div>
         <div className="rounded-md bg-black/5 px-2 py-1 text-[#141A26]/70">
-          Hypothèse fin d&rsquo;année vs N-1 : <EvolBadge pct={forecastEvolution} />
+          Hypothèse sur l&rsquo;horizon vs N-1 : <EvolBadge pct={forecastEvolution} />
         </div>
       </div>
       <div className="mt-2 flex gap-4 text-[10px] text-[#141A26]/50">
@@ -1383,7 +1520,7 @@ function MonthlySortiesChart({
         <span><span className="mr-1 inline-block h-0.5 w-3 bg-[#8A93A6] align-middle" /> N-1</span>
       </div>
       <p className="mt-1.5 text-[10px] italic text-[#141A26]/40">
-        Le prévisionnel inclut les CDC fermes, qui ne sont pas affectées par l&rsquo;hypothèse mensuelle — c&rsquo;est pourquoi il peut dépasser N-1 même à 100%. Détail visible dans le graphique de droite.
+        Le prévisionnel inclut les CDC fermes, qui ne sont pas affectées par l&rsquo;hypothèse mensuelle — c&rsquo;est pourquoi il peut dépasser N-1 même à 100%. Détail visible dans le graphique de droite. Le graphe se poursuit jusqu&rsquo;à la fin de l&rsquo;horizon défini pour cette famille (ci-dessus), même au-delà de décembre.
       </p>
     </div>
   );
