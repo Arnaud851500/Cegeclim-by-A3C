@@ -27,7 +27,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 
-type MatriceRow = { famille_macro: string; famille: string; mois: string; coefficient: number };
+type MatriceRow = { famille_macro: string; famille: string; horizon_semaines: number; mois: string; coefficient: number };
 
 type Props = {
   /** null = toutes les familles. Une valeur = édition scoping à cette famille + recalcul auto à la sauvegarde. */
@@ -53,6 +53,10 @@ export default function MonthlyHypothesesMatrix({ familleFilter = null, runId = 
   const [rowsMeta, setRowsMeta] = useState<Array<{ macro: string; famille: string }>>([]);
   const [values, setValues] = useState<Map<string, number>>(new Map()); // pct entier, 100 = 100%
   const [dirty, setDirty] = useState<Set<string>>(new Set());
+  // Horizon de projection par famille (en semaines) : mémorisé et éditable
+  // ici même, en 3e colonne, à côté des hypothèses mensuelles de la famille.
+  const [horizons, setHorizons] = useState<Map<string, number>>(new Map());
+  const [horizonsDirty, setHorizonsDirty] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
 
   useEffect(() => {
@@ -71,14 +75,18 @@ export default function MonthlyHypothesesMatrix({ familleFilter = null, runId = 
         const monthsSet = Array.from(new Set(rows.map((r) => r.mois))).sort();
         const metaMap = new Map<string, { macro: string; famille: string }>();
         const val = new Map<string, number>();
+        const horizonMap = new Map<string, number>();
         rows.forEach((r) => {
           metaMap.set(r.famille, { macro: r.famille_macro, famille: r.famille });
           val.set(key(r.famille, r.mois), Math.round(Number(r.coefficient) * 100));
+          horizonMap.set(r.famille, Number(r.horizon_semaines) || 26);
         });
         setMonths(monthsSet);
         setRowsMeta(Array.from(metaMap.values()).sort((a, b) => a.macro.localeCompare(b.macro) || a.famille.localeCompare(b.famille)));
         setValues(val);
         setDirty(new Set());
+        setHorizons(horizonMap);
+        setHorizonsDirty(new Set());
         setSaved(null);
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -124,11 +132,26 @@ export default function MonthlyHypothesesMatrix({ familleFilter = null, runId = 
     });
   }
 
+  function setHorizonValue(famille: string, semaines: number) {
+    const v = Math.max(1, Math.min(104, Math.round(semaines) || 26));
+    setHorizons((prev) => {
+      const next = new Map(prev);
+      next.set(famille, v);
+      return next;
+    });
+    setHorizonsDirty((prev) => {
+      const next = new Set(prev);
+      next.add(famille);
+      return next;
+    });
+  }
+
   async function handleSave() {
     setSaving(true);
     setError(null);
     setSaved(null);
     try {
+      let nbSaved = 0;
       if (dirty.size > 0) {
         const hypotheses = Array.from(dirty).map((k) => {
           const [famille, mois] = k.split("|");
@@ -137,9 +160,22 @@ export default function MonthlyHypothesesMatrix({ familleFilter = null, runId = 
         });
         const { data, error: err } = await supabase.rpc("upsert_stock_hypotheses_mensuelles", { p_hypotheses: hypotheses });
         if (err) throw new Error(err.message);
-        setSaved(`${(data as { lignes?: number })?.lignes ?? hypotheses.length} valeur(s) enregistrée(s).`);
+        nbSaved += (data as { lignes?: number })?.lignes ?? hypotheses.length;
         setDirty(new Set());
       }
+
+      if (horizonsDirty.size > 0) {
+        for (const famille of horizonsDirty) {
+          const { error: err } = await supabase.rpc("set_stock_famille_horizon", {
+            p_famille: famille,
+            p_horizon_semaines: horizons.get(famille) ?? 26,
+          });
+          if (err) throw new Error(err.message);
+          nbSaved += 1;
+        }
+        setHorizonsDirty(new Set());
+      }
+      if (nbSaved > 0) setSaved(`${nbSaved} valeur(s) enregistrée(s).`);
 
       // Édition scopée à une famille : on recalcule immédiatement cette
       // famille à partir des hypothèses tout juste enregistrées, pour que
@@ -181,7 +217,9 @@ export default function MonthlyHypothesesMatrix({ familleFilter = null, runId = 
             <p className="mt-0.5 text-xs text-white/45">
               % d&rsquo;évolution des ventes vs N-1, par famille et par mois. 100% = identique à N-1. Ces valeurs sont
               conservées à travers les imports et pilotent le recalcul de la projection ; elles sont interprétées au
-              prorata pour obtenir un coefficient hebdomadaire.
+              prorata pour obtenir un coefficient hebdomadaire. La colonne « Horizon » fixe le nombre de semaines
+              affichées sur l&rsquo;écran de chaque famille — le recalcul complet couvre toujours la plus grande
+              plage enregistrée, quelle que soit cette valeur.
             </p>
           </div>
           <button onClick={onClose} className="rounded-lg border border-white/15 px-3 py-1.5 text-sm text-white/70 hover:text-white">
@@ -227,6 +265,9 @@ export default function MonthlyHypothesesMatrix({ familleFilter = null, runId = 
                   <th className="sticky left-[160px] z-20 min-w-[160px] border-b border-r border-white/10 bg-[#101A2E] px-3 py-2 text-left text-white/50">
                     Famille
                   </th>
+                  <th className="sticky left-[320px] z-20 min-w-[90px] border-b border-r border-white/10 bg-[#101A2E] px-2 py-2 text-center text-white/50">
+                    Horizon (sem.)
+                  </th>
                   {months.map((m) => (
                     <th key={m} className="min-w-[64px] border-b border-white/10 px-1 py-2 text-center text-white/50">
                       {monthLabel(m)}
@@ -240,6 +281,19 @@ export default function MonthlyHypothesesMatrix({ familleFilter = null, runId = 
                   <tr key={r.famille} className="odd:bg-white/[0.02]">
                     <td className="sticky left-0 z-10 border-r border-white/10 bg-[#101A2E] px-3 py-1.5 text-white/70">{r.macro}</td>
                     <td className="sticky left-[160px] z-10 border-r border-white/10 bg-[#101A2E] px-3 py-1.5 font-medium text-white">{r.famille}</td>
+                    <td className="sticky left-[320px] z-10 border-r border-white/10 bg-[#101A2E] p-1 text-center">
+                      <input
+                        type="number"
+                        min={1}
+                        max={104}
+                        value={horizons.get(r.famille) ?? 26}
+                        onChange={(e) => setHorizonValue(r.famille, Number(e.target.value))}
+                        title="Nombre de semaines affichées sur l'écran de cette famille — le recalcul complet couvre toujours la plus grande plage enregistrée, quelle que soit cette valeur"
+                        className={`w-16 rounded border bg-white/5 px-1 py-1 text-center font-[var(--font-mono)] text-white outline-none focus:border-[#A6A181] ${
+                          horizonsDirty.has(r.famille) ? "border-[#A6A181]" : "border-white/10"
+                        }`}
+                      />
+                    </td>
                     {months.map((m) => {
                       const v = values.get(key(r.famille, m)) ?? 100;
                       const isDirty = dirty.has(key(r.famille, m));

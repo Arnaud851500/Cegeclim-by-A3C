@@ -289,6 +289,17 @@ export default function StocksDisponibilites2Page() {
   }
 
   const [horizonWeeks, setHorizonWeeks] = useState(26);
+
+  // Au chargement de l'écran, aligne la valeur par défaut du champ "Horizon
+  // (sem.)" sur la plus grande plage mémorisée par famille — simple confort
+  // d'affichage : le recalcul complet applique de toute façon ce maximum
+  // même si l'utilisateur modifie ensuite ce champ à la baisse.
+  useEffect(() => {
+    supabase.rpc("get_stock_max_famille_horizon").then(({ data }) => {
+      const v = Number(data);
+      if (v > 0) setHorizonWeeks((prev) => Math.max(prev, v));
+    });
+  }, []);
   const [recalcScope, setRecalcScope] = useState<"all" | "famille_macro" | "famille">("all");
   const [rebuildProgress, setRebuildProgress] = useState<{ percent: number; message: string } | null>(null);
 
@@ -751,11 +762,18 @@ export default function StocksDisponibilites2Page() {
     try {
       const session = await supabase.auth.getSession();
       const token = session.data.session?.access_token;
+      // Le recalcul complet doit toujours couvrir la plus grande plage
+      // nécessaire : celle du champ "Horizon (sem.)" ci-dessus OU l'horizon
+      // le plus grand mémorisé pour une famille, si celui-ci est supérieur.
+      // Chaque écran famille se charge ensuite de tronquer l'affichage à son
+      // propre horizon (cf. "Horizon famille").
+      const { data: maxFamilleHorizon } = await supabase.rpc("get_stock_max_famille_horizon");
+      const nbSemaines = Math.max(horizonWeeks, Number(maxFamilleHorizon) || 26);
       // scenario_prevision_pct est conservé dans l'appel pour compatibilité de
       // la route (colonne d'historique du run), mais n'intervient plus dans le
       // calcul du coefficient de prévision : celui-ci vient désormais des
       // hypothèses mensuelles par famille (cf. "Hypothèses mensuelles").
-      let continuation: RebuildContinuation = { nb_semaines: horizonWeeks, scenario_prevision_pct: 1, date_debut: todayIso };
+      let continuation: RebuildContinuation = { nb_semaines: nbSemaines, scenario_prevision_pct: 1, date_debut: todayIso };
       let done = false;
       while (!done) {
         const res: Response = await fetch("/api/stocks-disponibilites/rebuild", {
@@ -785,11 +803,32 @@ export default function StocksDisponibilites2Page() {
    * Lance une nouvelle projection complète en réutilisant les paramètres
    * (horizon, dépôt) du dernier run enregistré en base. Aucun paramètre à
    * saisir — hypothèses mensuelles et substitutions appliquées automatiquement.
+   *
+   * Avant de réutiliser tel quel l'horizon du dernier run, on vérifie qu'il
+   * couvre bien la plus grande plage mémorisée par famille : si une famille a
+   * depuis reçu un horizon plus grand que ce que le dernier run a calculé, on
+   * bascule sur un recalcul complet avec le bon horizon plutôt que de relancer
+   * "à l'identique" et de laisser cette famille sans assez de semaines.
    */
   async function handleLancerProjection() {
     setRebuildProgress({ percent: 0, message: "Démarrage de la projection…" });
     window.addEventListener("beforeunload", (e) => { e.preventDefault(); e.returnValue = ""; });
     try {
+      const [{ data: maxFamilleHorizon }, { data: dernierRun }] = await Promise.all([
+        supabase.rpc("get_stock_max_famille_horizon"),
+        runId ? supabase.from("stock_projection_runs").select("nb_semaines").eq("id", runId).maybeSingle() : Promise.resolve({ data: null as { nb_semaines?: number } | null }),
+      ]);
+      const horizonRequis = Number(maxFamilleHorizon) || 26;
+      const horizonDernierRun = Number(dernierRun?.nb_semaines) || 0;
+      if (horizonRequis > horizonDernierRun) {
+        // Le dernier run ne couvre pas l'horizon désormais requis par au
+        // moins une famille : on force le champ horizon en conséquence et on
+        // bascule sur le recalcul complet (qui, lui, prend l'horizon en compte).
+        setHorizonWeeks(horizonRequis);
+        await handleRecalculerGlobal();
+        return;
+      }
+
       const { data: { session } } = await supabase.auth.getSession();
       const token = session?.access_token;
       const res = await fetch("/api/stocks-disponibilites/lancer-projection", {
@@ -830,6 +869,22 @@ export default function StocksDisponibilites2Page() {
     };
     window.addEventListener("beforeunload", warnBeforeUnload);
     try {
+      // Un recalcul de périmètre re-résout la cascade sur les semaines DÉJÀ
+      // présentes dans le run : il ne peut pas en ajouter. Si l'horizon
+      // mémorisé pour cette famille dépasse ce que le run couvre, on bascule
+      // sur un recalcul complet (qui, lui, couvre la plus grande plage
+      // enregistrée) plutôt que de rendre un résultat tronqué silencieusement.
+      if (recalcScope === "famille") {
+        const { data: dernierRun } = await supabase.from("stock_projection_runs").select("nb_semaines").eq("id", runId).maybeSingle();
+        const horizonDernierRun = Number(dernierRun?.nb_semaines) || 0;
+        if (familleHorizonWeeks > horizonDernierRun) {
+          setRebuildProgress({ percent: 0, message: `L'horizon de ${cle} (${familleHorizonWeeks} sem.) dépasse le dernier run (${horizonDernierRun} sem.) — recalcul complet…` });
+          setHorizonWeeks(familleHorizonWeeks);
+          await handleRecalculerGlobal();
+          return;
+        }
+      }
+
       const { data, error: rpcError } = await supabase.rpc("recalc_stock_projection_scope_hypotheses", {
         p_run_id: runId,
         p_scope: recalcScope,
