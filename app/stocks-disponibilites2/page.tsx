@@ -1,23 +1,30 @@
 "use client";
 
 /**
- * PROJECTIONS STOCK — V2.2
+ * PROJECTIONS STOCK — V2.3
  * ------------------------------------------------------------------------
- * Suite de la V2.1. Cette révision :
- *  - la recherche référence passe au-dessus des 2 graphiques et filtre
- *    désormais les KPI ET les deux graphiques (pas seulement la liste),
- *    avec un compteur "X/Y références" affiché à côté
- *  - graphique "Stock projeté hebdomadaire" : entrées à venir en vert,
- *    sorties prévisionnelles en rouge clair (barres), échelle à gauche
- *  - simulateur : le hachuré vert n'apparaît plus que sur LA semaine où
- *    l'appro est ajouté (avant : sur toutes les semaines suivantes)
- *  - graphique "Sorties mensuelles" entièrement refondu : vraies données
- *    BL réelles de janvier à aujourd'hui (nouvelle route dédiée), portion
- *    prévisionnelle jusqu'à fin d'année, ligne N-1 complète, repère
- *    vertical "aujourd'hui", annotations d'évolution par point et par
- *    grande période (réalisé vs N-1, hypothèse fin d'année vs N-1)
- * Le bandeau du site (layout.tsx) a par ailleurs été corrigé séparément
- * pour se masquer au scroll vers le bas.
+ * Suite de la V2.2. Cette révision remplace le "scénario % global" par des
+ * hypothèses mensuelles PAR FAMILLE, éditables dans une grille dédiée :
+ *  - bouton "Hypothèses mensuelles" en haut de l'écran principal → ouvre la
+ *    grille complète (toutes familles macro / familles × 24 mois, 100% par
+ *    défaut, éditable mois par mois). Les valeurs sont enregistrées en base
+ *    et réutilisées à chaque recalcul de projection, y compris après un
+ *    import de stock ou de commandes fournisseurs (aucune saisie à refaire).
+ *  - sur l'écran d'une famille : bouton "Ajuster les hypothèses de cette
+ *    famille" → ouvre la même grille filtrée sur la famille sélectionnée ;
+ *    à la sauvegarde, la projection de cette famille est recalculée
+ *    automatiquement à partir des nouvelles hypothèses puis on revient à
+ *    l'écran famille.
+ *  - le champ "Scénario %" valable pour toutes les familles est supprimé de
+ *    l'écran principal : il n'existe plus d'hypothèse unique globale.
+ *  - le champ "Horizon (sem.)" continue de piloter le nombre de semaines sur
+ *    lequel la projection est calculée et affichée ; l'interprétation des
+ *    hypothèses mensuelles en coefficient hebdomadaire est faite côté base
+ *    (prorata des jours de la semaine sur chaque mois traversé).
+ *  - le bouton de recalcul par périmètre (famille / famille macro) ne prend
+ *    plus de % en paramètre : il re-résout simplement la cascade à partir
+ *    des hypothèses mensuelles enregistrées (plus de dialogue d'écrasement
+ *    des hypothèses spécifiques, qui n'a plus lieu d'être).
  * ------------------------------------------------------------------------
  */
 
@@ -25,6 +32,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Space_Grotesk, IBM_Plex_Sans, IBM_Plex_Mono } from "next/font/google";
 import { supabase } from "@/lib/supabaseClient";
 import PanneauRemplacements from "@/components/PanneauRemplacements";
+import MonthlyHypothesesMatrix from "@/components/MonthlyHypothesesMatrix";
 import {
   type ProjectionRow,
   type StockAlertRow,
@@ -199,11 +207,12 @@ export default function StocksDisponibilites2Page() {
   const [exportEnCours, setExportEnCours] = useState(false);
   const [exportGranularite, setExportGranularite] = useState<"mensuel"|"hebdo">("mensuel");
 
-  // Confirmation avant d'écraser des hypothèses propres à certains articles.
-  const [scopeOverrideAsk, setScopeOverrideAsk] = useState<
-    { cle: string; articlesTotal: number; articlesSpecifiques: number; coefficients: number[]; references: string[]; referencesTronquees: boolean } | null
-  >(null);
-  const [scopeNotice, setScopeNotice] = useState<string | null>(null);
+  // Grille d'hypothèses mensuelles (remplace l'ancien scénario % global).
+  // hypoFamilleScope = null → écran plein (toutes familles), ouvert depuis
+  // l'écran principal. hypoFamilleScope = "XXX" → édition + recalcul auto
+  // scopés à cette famille, ouvert depuis l'écran famille.
+  const [hypoOpen, setHypoOpen] = useState(false);
+  const [hypoFamilleScope, setHypoFamilleScope] = useState<string | null>(null);
 
   // Référence dont on gère les remplaçantes. Null = panneau fermé.
   const [remplacementPour, setRemplacementPour] = useState<{ reference: string; designation: string } | null>(null);
@@ -239,7 +248,6 @@ export default function StocksDisponibilites2Page() {
   }
 
   const [horizonWeeks, setHorizonWeeks] = useState(26);
-  const [scenarioPct, setScenarioPct] = useState(120);
   const [recalcScope, setRecalcScope] = useState<"all" | "famille_macro" | "famille">("all");
   const [rebuildProgress, setRebuildProgress] = useState<{ percent: number; message: string } | null>(null);
 
@@ -473,12 +481,10 @@ export default function StocksDisponibilites2Page() {
   }, [retardsRaw]);
 
   // Statut de remplacement par référence : ACTIVE, REMPLACEE, PARTIELLE ou
-  // REMPLACANTE. Source : v_stock_projection_alertes via l'API de données
-  // principale, plutôt que la requête secondaire des retards (qui ne portait
-  // pas ces colonnes dans la réponse).
-  // Source : retardsRaw — requête directe sur v_stock_projection_hebdo_latest
-  // qui expose bien statut_substitution, contrairement à l'API /data dont le
-  // type StockAlertRow ne contient pas ces colonnes.
+  // REMPLACANTE. Source : retardsRaw — requête directe sur
+  // v_stock_projection_hebdo_latest qui expose bien statut_substitution,
+  // contrairement à l'API /data dont le type StockAlertRow ne contient pas
+  // ces colonnes.
   const substitutionByRef = useMemo(() => {
     const map = new Map<string, { statut: string; entrante: number; origineBase: number }>();
     retardsRaw.forEach((r) => {
@@ -664,7 +670,11 @@ export default function StocksDisponibilites2Page() {
     try {
       const session = await supabase.auth.getSession();
       const token = session.data.session?.access_token;
-      let continuation: RebuildContinuation = { nb_semaines: horizonWeeks, scenario_prevision_pct: scenarioPct / 100, date_debut: todayIso };
+      // scenario_prevision_pct est conservé dans l'appel pour compatibilité de
+      // la route (colonne d'historique du run), mais n'intervient plus dans le
+      // calcul du coefficient de prévision : celui-ci vient désormais des
+      // hypothèses mensuelles par famille (cf. "Hypothèses mensuelles").
+      let continuation: RebuildContinuation = { nb_semaines: horizonWeeks, scenario_prevision_pct: 1, date_debut: todayIso };
       let done = false;
       while (!done) {
         const res: Response = await fetch("/api/stocks-disponibilites/rebuild", {
@@ -692,8 +702,8 @@ export default function StocksDisponibilites2Page() {
 
   /**
    * Lance une nouvelle projection complète en réutilisant les paramètres
-   * (horizon, scénario, dépôt) du dernier run enregistré en base.
-   * Aucun paramètre à saisir — substitutions appliquées automatiquement.
+   * (horizon, dépôt) du dernier run enregistré en base. Aucun paramètre à
+   * saisir — hypothèses mensuelles et substitutions appliquées automatiquement.
    */
   async function handleLancerProjection() {
     setRebuildProgress({ percent: 0, message: "Démarrage de la projection…" });
@@ -706,9 +716,9 @@ export default function StocksDisponibilites2Page() {
         headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       });
       setRebuildProgress({ percent: 50, message: "Projection en cours…" });
-      const payload = await res.json() as { success: boolean; message?: string; run_id?: string; nb_semaines?: number; scenario_prevision_pct?: number };
+      const payload = await res.json() as { success: boolean; message?: string; run_id?: string; nb_semaines?: number };
       if (!res.ok || !payload.success) throw new Error(payload?.message || "Échec");
-      setRebuildProgress({ percent: 100, message: `Terminé — ${payload.nb_semaines} sem. · ×${((payload.scenario_prevision_pct ?? 1) * 100).toFixed(0)}% · substitutions appliquées` });
+      setRebuildProgress({ percent: 100, message: `Terminé — ${payload.nb_semaines} sem. · hypothèses mensuelles et substitutions appliquées` });
       await loadMainData();
       setRefreshKey((k) => k + 1);
       setTimeout(() => setRebuildProgress(null), 3000);
@@ -719,9 +729,10 @@ export default function StocksDisponibilites2Page() {
   }
 
   /**
-   * Étape de contrôle avant d'appliquer un scénario à un périmètre.
-   * Les hypothèses saisies article par article sont prioritaires dans la
-   * cascade : les écraser est une perte de réglage fin, jamais implicite.
+   * Recalcule un périmètre (famille ou famille macro) à partir des
+   * hypothèses mensuelles enregistrées, sans écraser aucune hypothèse
+   * spécifique à un article (celles-ci restent prioritaires dans la
+   * cascade — cf. resolve_forecast_coefficient côté base).
    */
   async function handleRecalculerScope() {
     if (!runId) {
@@ -731,77 +742,23 @@ export default function StocksDisponibilites2Page() {
     const cle = recalcScope === "famille" ? selectedFamille : selectedMacro;
     if (!cle) return;
 
-    setScopeNotice(null);
-
-    try {
-      const { data, error: diagError } = await supabase.rpc("count_stock_scope_article_overrides", {
-        p_run_id: runId,
-        p_scope: recalcScope,
-        p_cle: cle,
-        p_depot: "GLOBAL",
-      });
-      if (diagError) throw new Error(diagError.message);
-
-      const diagnostic = data as {
-        articles_total?: number;
-        articles_specifiques?: number;
-        coefficients?: number[];
-        references?: string[];
-        references_tronquees?: boolean;
-      } | null;
-
-      if ((diagnostic?.articles_specifiques ?? 0) > 0) {
-        setScopeOverrideAsk({
-          cle,
-          articlesTotal: Number(diagnostic?.articles_total || 0),
-          articlesSpecifiques: Number(diagnostic?.articles_specifiques || 0),
-          coefficients: (diagnostic?.coefficients || []).map(Number),
-          references: diagnostic?.references || [],
-          referencesTronquees: Boolean(diagnostic?.references_tronquees),
-        });
-        return;
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      return;
-    }
-
-    await executeRecalculerScope(false);
-  }
-
-  async function executeRecalculerScope(ecraserSpecifiques: boolean) {
-    if (!runId) return;
-    const cle = recalcScope === "famille" ? selectedFamille : selectedMacro;
-    if (!cle) return;
-    setScopeOverrideAsk(null);
-    setRebuildProgress({ percent: 0, message: `Recalcul de ${cle}…` });
+    setRebuildProgress({ percent: 0, message: `Recalcul de ${cle} depuis les hypothèses mensuelles…` });
     const warnBeforeUnload = (e: BeforeUnloadEvent) => {
       e.preventDefault();
       e.returnValue = "";
     };
     window.addEventListener("beforeunload", warnBeforeUnload);
     try {
-      // On passe par la RPC apply_stock_scenario_scope et non par la route
-      // /recalculer-scope : celle-ci s'appuie sur
-      // recalculate_stock_projection_article_fast, qui réutilise le coefficient
-      // DÉJÀ STOCKÉ sur la ligne et ne re-résout jamais la cascade
-      // d'hypothèses. Le scénario % était donc silencieusement ignoré au
-      // niveau périmètre, alors qu'il fonctionnait au niveau article — l'écran
-      // y écrit d'abord un override, ce que personne ne faisait ici.
-      // La RPC écrit l'override de famille / famille macro sur toutes les
-      // semaines, re-résout la cascade puis rechaîne les projections.
-      const { data: payload, error: rpcError } = await supabase.rpc("apply_stock_scenario_scope", {
+      const { data, error: rpcError } = await supabase.rpc("recalc_stock_projection_scope_hypotheses", {
         p_run_id: runId,
         p_scope: recalcScope,
         p_cle: cle,
         p_depot: "GLOBAL",
-        p_scenario_pct: scenarioPct / 100,
-        p_ecraser_specifiques: ecraserSpecifiques,
       });
       if (rpcError) throw new Error(rpcError.message);
-      const result = payload as { success?: boolean; message?: string; articles_traites?: number; articles_total?: number } | null;
+      const result = data as { success?: boolean; message?: string } | null;
       if (!result?.success) throw new Error(result?.message || "Échec du recalcul");
-      setRebuildProgress({ percent: 100, message: result.message || `${result.articles_traites}/${result.articles_total} article(s) recalculé(s)` });
+      setRebuildProgress({ percent: 100, message: result.message || "Terminé" });
       await loadMainData();
       setRefreshKey((k) => k + 1);
       setTimeout(() => setRebuildProgress(null), 2000);
@@ -837,10 +794,18 @@ export default function StocksDisponibilites2Page() {
                   </span>
                 )}
               </div>
-              <div className="flex items-center gap-2">
-                <label className="text-xs uppercase tracking-wide text-white/40">Scénario %</label>
-                <input type="number" min={0} value={scenarioPct} onChange={(e) => setScenarioPct(Number(e.target.value))} className="w-20 rounded-lg border border-white/15 bg-white/5 px-2 py-1.5 text-sm text-white outline-none focus:border-[#A6A181]" />
-              </div>
+
+              {/* Bouton hypothèses mensuelles : remplace le champ "Scénario %"
+                  global — il n'existe plus d'hypothèse unique pour toutes les
+                  familles. */}
+              <button
+                onClick={() => { setHypoFamilleScope(null); setHypoOpen(true); }}
+                className="rounded-lg border border-[#A6A181]/50 bg-[#A6A181]/10 px-4 py-2 text-sm font-semibold text-[#A6A181] transition hover:bg-[#A6A181]/20"
+                title="Éditer, famille par famille et mois par mois, l'hypothèse d'évolution des ventes vs N-1"
+              >
+                📅 Hypothèses mensuelles
+              </button>
+
               <div className="flex items-center gap-2">
                 <label className="text-xs uppercase tracking-wide text-white/40">Périmètre</label>
                 <select value={recalcScope} onChange={(e) => setRecalcScope(e.target.value as typeof recalcScope)} className="rounded-lg border border-white/15 bg-white/5 px-2 py-1.5 text-sm text-white outline-none focus:border-[#A6A181]">
@@ -855,19 +820,19 @@ export default function StocksDisponibilites2Page() {
                 disabled={!!rebuildProgress && rebuildProgress.percent < 100}
                 className="rounded-lg px-4 py-2 text-sm font-semibold text-[#141A26] transition hover:brightness-110 disabled:opacity-50"
                 style={{ background: "#3F9142" }}
-                title="Relance la projection complète en conservant les paramètres du dernier recalcul (horizon, scénario, dépôt). Les substitutions sont appliquées automatiquement."
+                title="Relance la projection complète en conservant les paramètres du dernier recalcul (horizon, dépôt). Hypothèses mensuelles et substitutions sont appliquées automatiquement."
               >
                 ↺ Recalculer la projection
               </button>
 
-              {/* Bouton secondaire : recalcul sur un périmètre réduit (famille / macro) */}
+              {/* Bouton secondaire : recalcul sur un périmètre réduit (famille / macro), à partir des hypothèses mensuelles enregistrées */}
               <button
                 onClick={recalcScope === "all" ? handleRecalculerGlobal : handleRecalculerScope}
                 disabled={(!!rebuildProgress && rebuildProgress.percent < 100) || (recalcScope !== "all" && !canRecalcScope)}
                 className="rounded-lg bg-[#A6A181] px-4 py-2 text-sm font-semibold text-[#141A26] transition hover:brightness-110 disabled:opacity-50"
-                title="Recalcul avec les paramètres ci-dessus (horizon et scénario éventuellement modifiés)"
+                title={recalcScope === "all" ? "Recalcul complet avec l'horizon ci-dessus" : "Re-résout la projection de ce périmètre à partir des hypothèses mensuelles enregistrées"}
               >
-                {recalcScope === "all" ? "Recalculer tout (param.)" : `Recalculer ${recalcScope === "famille" ? "cette famille" : "cette famille macro"}`}
+                {recalcScope === "all" ? "Recalculer tout (horizon)" : `Recalculer ${recalcScope === "famille" ? "cette famille" : "cette famille macro"}`}
               </button>
             </div>
           </div>
@@ -910,18 +875,6 @@ export default function StocksDisponibilites2Page() {
       <div className="w-full px-6 py-8 md:px-10">
         {error && <div className="mb-6 rounded-lg border border-[#C1683C]/40 bg-[#C1683C]/10 px-4 py-3 text-sm text-[#e0a685]">{error}</div>}
 
-        {scopeNotice && (
-          <div className="mb-6 flex items-start justify-between gap-4 rounded-lg border border-[#4B92AC]/40 bg-[#4B92AC]/10 px-4 py-3 text-sm text-[#9ecadb]">
-            <span>{scopeNotice}</span>
-            <button
-              onClick={() => setScopeNotice(null)}
-              className="shrink-0 text-xs font-medium text-white/50 transition hover:text-white"
-            >
-              Fermer
-            </button>
-          </div>
-        )}
-
         {loading ? (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
             {Array.from({ length: 8 }).map((_, i) => (
@@ -955,6 +908,19 @@ export default function StocksDisponibilites2Page() {
               <span className="text-xs text-white/40">
                 {search.trim() ? `${familleArticles.length} / ${familleArticlesAll.length} référence(s) filtrée(s)` : `${familleArticlesAll.length} référence(s)`}
               </span>
+
+              {/* Ouvre la grille d'hypothèses mensuelles filtrée sur cette
+                  famille ; à la sauvegarde, la projection de cette famille
+                  est recalculée automatiquement puis on revient ici. */}
+              {selectedFamille && (
+                <button
+                  onClick={() => { setHypoFamilleScope(selectedFamille); setHypoOpen(true); }}
+                  className="rounded-lg border border-[#A6A181]/50 bg-[#A6A181]/10 px-3 py-1.5 text-xs font-semibold text-[#A6A181] transition hover:bg-[#A6A181]/20"
+                  title="Revoir et ajuster les hypothèses mensuelles de cette famille"
+                >
+                  📅 Ajuster les hypothèses de cette famille
+                </button>
+              )}
 
               <div className="ml-auto flex items-center gap-2">
                 <select
@@ -1131,68 +1097,6 @@ export default function StocksDisponibilites2Page() {
         )}
       </div>
 
-      {scopeOverrideAsk && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#060A12]/70 p-4">
-          <div className="w-full max-w-lg rounded-2xl border border-white/10 bg-[#101A2E] p-6 shadow-2xl">
-            <h3 className="font-[var(--font-display)] text-lg font-semibold text-white">
-              Des % d&rsquo;évolutions sont spécifiques dans cette famille
-            </h3>
-            <p className="mt-3 text-sm leading-relaxed text-white/70">
-              Voulez-vous écraser les hypothèses actuelles par celle-ci&nbsp;?
-            </p>
-
-            <div className="mt-4 rounded-xl border border-white/10 bg-white/[0.04] p-4 text-xs text-white/60">
-              <div className="flex justify-between gap-4">
-                <span>Périmètre</span>
-                <span className="font-[var(--font-mono)] text-white/85">{scopeOverrideAsk.cle}</span>
-              </div>
-              <div className="mt-2 flex justify-between gap-4">
-                <span>Références avec hypothèse propre</span>
-                <span className="font-[var(--font-mono)] text-white/85">
-                  {scopeOverrideAsk.articlesSpecifiques} / {scopeOverrideAsk.articlesTotal}
-                </span>
-              </div>
-              {scopeOverrideAsk.coefficients.length > 0 && (
-                <div className="mt-2 flex justify-between gap-4">
-                  <span>Coefficients en place</span>
-                  <span className="font-[var(--font-mono)] text-white/85">
-                    {scopeOverrideAsk.coefficients.map((c) => `×${c.toFixed(2)}`).join(" · ")}
-                  </span>
-                </div>
-              )}
-              <div className="mt-2 flex justify-between gap-4">
-                <span>Nouvelle hypothèse</span>
-                <span className="font-[var(--font-mono)] text-[#A6A181]">×{(scenarioPct / 100).toFixed(2)}</span>
-              </div>
-              {scopeOverrideAsk.references.length > 0 && (
-                <div className="mt-3 border-t border-white/10 pt-3 font-[var(--font-mono)] text-[11px] leading-relaxed text-white/45">
-                  {scopeOverrideAsk.references.join(", ")}
-                  {scopeOverrideAsk.referencesTronquees ? "…" : ""}
-                </div>
-              )}
-            </div>
-
-            <div className="mt-5 flex justify-end gap-3">
-              <button
-                onClick={() => {
-                  setScopeOverrideAsk(null);
-                  setScopeNotice("Modifier dans ce cas chaque article selon vos souhaits.");
-                }}
-                className="rounded-lg border border-white/15 px-4 py-2 text-sm font-medium text-white/70 transition hover:bg-white/5 hover:text-white"
-              >
-                Non
-              </button>
-              <button
-                onClick={() => void executeRecalculerScope(true)}
-                className="rounded-lg bg-[#A6A181] px-4 py-2 text-sm font-semibold text-[#141A26] transition hover:brightness-110"
-              >
-                Oui, écraser et appliquer
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {remplacementPour && (
         <PanneauRemplacements
           referenceSource={remplacementPour.reference}
@@ -1207,6 +1111,21 @@ export default function StocksDisponibilites2Page() {
         />
       )}
 
+      {hypoOpen && (
+        <MonthlyHypothesesMatrix
+          familleFilter={hypoFamilleScope}
+          runId={runId}
+          nbMois={24}
+          onClose={() => setHypoOpen(false)}
+          onSaved={() => {
+            // Les hypothèses (et, si scopées à une famille, la projection de
+            // cette famille) viennent d'être mises à jour en base.
+            loadMainData();
+            setRefreshKey((k) => k + 1);
+          }}
+        />
+      )}
+
       {selectedArticle && (
         <ArticleDrawer
           article={selectedArticle}
@@ -1215,6 +1134,7 @@ export default function StocksDisponibilites2Page() {
           onIncludeRetardChange={setIncludeRetard}
           onClose={() => setSelectedArticle(null)}
           substitutionByRef={substitutionByRef}
+          onOpenHypotheses={(famille) => { setHypoFamilleScope(famille); setHypoOpen(true); }}
         />
       )}
     </div>
@@ -1463,7 +1383,7 @@ function MonthlySortiesChart({
         <span><span className="mr-1 inline-block h-0.5 w-3 bg-[#8A93A6] align-middle" /> N-1</span>
       </div>
       <p className="mt-1.5 text-[10px] italic text-[#141A26]/40">
-        Le prévisionnel inclut les CDC fermes, qui ne sont pas affectées par le % d&rsquo;évolution — c&rsquo;est pourquoi il peut dépasser N-1 même à 100%. Détail visible dans le graphique de droite.
+        Le prévisionnel inclut les CDC fermes, qui ne sont pas affectées par l&rsquo;hypothèse mensuelle — c&rsquo;est pourquoi il peut dépasser N-1 même à 100%. Détail visible dans le graphique de droite.
       </p>
     </div>
   );
@@ -1676,6 +1596,7 @@ function ArticleDrawer({
   onIncludeRetardChange,
   onClose,
   substitutionByRef,
+  onOpenHypotheses,
 }: {
   article: AlertRow;
   runId: string | null;
@@ -1683,6 +1604,7 @@ function ArticleDrawer({
   onIncludeRetardChange: (value: boolean) => void;
   onClose: () => void;
   substitutionByRef: Map<string, { statut: string; entrante: number; origineBase: number }>;
+  onOpenHypotheses: (famille: string) => void;
 }) {
   const [rows, setRows] = useState<ProjectionRow[]>([]);
   const [fournisseurs, setFournisseurs] = useState<FournisseurRow[]>([]);
@@ -1923,7 +1845,7 @@ function ArticleDrawer({
               </div>
             </div>
 
-            <ForecastOverridePanel article={article} runId={runId} periods={rows.map((r) => r.periode_debut)} />
+            <ForecastOverridePanel article={article} runId={runId} periods={rows.map((r) => r.periode_debut)} onOpenHypotheses={onOpenHypotheses} />
           </>
         )}
       </div>
@@ -1931,14 +1853,16 @@ function ArticleDrawer({
   );
 }
 
-function ForecastOverridePanel({ article, runId, periods }: { article: AlertRow; runId: string | null; periods: string[] }) {
-  const [level, setLevel] = useState<"reference" | "famille" | "famille_macro">("reference");
+function ForecastOverridePanel({ article, runId, periods, onOpenHypotheses }: { article: AlertRow; runId: string | null; periods: string[]; onOpenHypotheses: (famille: string) => void }) {
   const [pct, setPct] = useState(100);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState<string | null>(null);
 
+  // Exception ARTICLE UNIQUEMENT : reste prioritaire dans la cascade sur
+  // l'hypothèse mensuelle de la famille. Le réglage par famille / famille
+  // macro se fait désormais via la grille "Hypothèses mensuelles", pas ici.
   async function handleSave() {
-    if (level === "reference" && !runId) {
+    if (!runId) {
       setSaved("Erreur : aucun run actif — relancez un recalcul complet.");
       return;
     }
@@ -1951,35 +1875,25 @@ function ForecastOverridePanel({ article, runId, periods }: { article: AlertRow;
     try {
       const session = await supabase.auth.getSession();
       const token = session.data.session?.access_token;
-      const action = level === "reference" ? "weekly_assumptions" : level === "famille" ? "weekly_assumptions_famille" : "weekly_assumptions_famille_macro";
       // Applique le coefficient à TOUTES les semaines de l'horizon affiché,
       // pas seulement à la semaine en cours — sinon les autres semaines
-      // retombent silencieusement sur le scénario % par défaut au recalcul.
+      // retombent silencieusement sur l'hypothèse mensuelle de la famille au
+      // recalcul.
       const bodyReq: Record<string, unknown> = {
-        action,
+        action: "weekly_assumptions",
         assumptions: periods.map((periode_debut) => ({ periode_debut, coefficient_prevision: pct / 100, quantite_prevision_forcee: null })),
+        run_id: runId,
+        reference_article: article.reference_article,
+        depot: article.depot || "GLOBAL",
       };
-      if (level === "reference") {
-        bodyReq.run_id = runId;
-        bodyReq.reference_article = article.reference_article;
-        bodyReq.depot = article.depot || "GLOBAL";
-      } else {
-        bodyReq.cle = level === "famille" ? article.famille : article.macro_famille;
-        bodyReq.depot = "GLOBAL";
-      }
       const res = await fetch("/api/stocks-disponibilites/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify(bodyReq),
       });
-      const payload = (await res.json()) as { success: boolean; message?: string; requires_full_rebuild?: boolean; updated_weeks?: number };
+      const payload = (await res.json()) as { success: boolean; message?: string; updated_weeks?: number };
       if (!res.ok || !payload.success) throw new Error(payload?.message || "Échec de l'enregistrement");
-      const weeksMsg = `${periods.length} semaine(s) mises à jour.`;
-      setSaved(
-        payload.requires_full_rebuild
-          ? `${weeksMsg} Utilisez « Recalculer cette famille/famille macro » (en haut de page) pour l'appliquer.`
-          : `${weeksMsg} Recalculé.`,
-      );
+      setSaved(`${periods.length} semaine(s) mises à jour et recalculées.`);
     } catch (e) {
       setSaved(`Erreur : ${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -1989,14 +1903,7 @@ function ForecastOverridePanel({ article, runId, periods }: { article: AlertRow;
 
   return (
     <div className="rounded-xl border border-white/10 bg-white/[0.04] p-5">
-      <h3 className="mb-3 font-[var(--font-display)] text-base font-semibold text-white">Ajuster la prévision</h3>
-      <div className="mb-3 flex flex-wrap gap-2">
-        {(["reference", "famille", "famille_macro"] as const).map((l) => (
-          <button key={l} onClick={() => setLevel(l)} className={`rounded-full px-3 py-1.5 text-xs font-medium transition ${level === l ? "bg-[#A6A181] text-[#141A26]" : "bg-white/5 text-white/50 hover:text-white/80"}`}>
-            {l === "reference" ? "Cette référence" : l === "famille" ? `Famille ${article.famille}` : `Famille macro ${article.macro_famille}`}
-          </button>
-        ))}
-      </div>
+      <h3 className="mb-3 font-[var(--font-display)] text-base font-semibold text-white">Ajuster la prévision de cette référence</h3>
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-2">
           <label className="text-xs uppercase tracking-wide text-white/40">Évolution vs N-1</label>
@@ -2007,11 +1914,13 @@ function ForecastOverridePanel({ article, runId, periods }: { article: AlertRow;
           {saving ? "Enregistrement…" : "Enregistrer"}
         </button>
       </div>
-      {level !== "reference" && (
-        <p className="mt-2 text-xs text-[#D69A4A]">
-          Utilisez ensuite le sélecteur « Périmètre » en haut de page et le bouton « Recalculer cette famille/famille macro » pour l&rsquo;appliquer — chaque article garde sa propre hypothèse si elle est plus spécifique.
-        </p>
-      )}
+      <p className="mt-2 text-xs text-white/45">
+        Cette exception ne s&rsquo;applique qu&rsquo;à <strong className="text-white/70">{article.reference_article}</strong> et reste prioritaire sur l&rsquo;hypothèse mensuelle de la famille.
+        Pour ajuster toute la famille <strong className="text-white/70">{article.famille}</strong>, utilisez plutôt{" "}
+        <button onClick={() => onOpenHypotheses(article.famille || "")} className="underline decoration-dotted text-[#A6A181] hover:text-white">
+          les hypothèses mensuelles
+        </button>.
+      </p>
       {saved && <p className="mt-2 text-xs text-white/60">{saved}</p>}
     </div>
   );
