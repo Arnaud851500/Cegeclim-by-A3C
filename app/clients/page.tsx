@@ -1,6 +1,7 @@
 'use client'
 
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react'
+import type React from 'react'
 import Papa from 'papaparse'
 import { supabase } from '@/lib/supabaseClient'
 import { useSocieteFilter } from '@/components/SocieteFilterContext'
@@ -67,7 +68,6 @@ type SireneParamsForm = {
   dateMajMin: string
   dateMajMax: string
 }
-
 
 type ClientMaintenanceRunRow = {
   id: string
@@ -162,8 +162,14 @@ type ClientUpsertRow = {
   prospect_comment: string | null
 }
 
+/** Compte rendu d'exécution : remplace les alert() à rallonge par un panneau lisible. */
+type ReportLine = { label: string; value: string | number; emphasis?: boolean }
+type RunReport = { title: string; subtitle?: string; tone: 'success' | 'error'; lines: ReportLine[] } | null
+type ToastState = { tone: 'success' | 'error'; text: string } | null
+
 const UPSERT_CHUNK_SIZE = 500
 const IMPORT_TYPES = ['entreprise_france', 'api_sirene', 'api_sirene_cessation']
+const SIRENE_EXPORT_URL = 'https://annuaire-entreprises.data.gouv.fr/export-sirene'
 
 function normalizeSiret(value: unknown): string {
   return String(value ?? '').replace(/\D/g, '').trim()
@@ -279,12 +285,16 @@ function formatDateFr(dateStr: string | null | undefined): string {
   return d.toLocaleDateString('fr-FR')
 }
 
-
 function formatDateTimeFr(dateStr: string | null | undefined): string {
   if (!dateStr) return '—'
   const d = new Date(dateStr)
   if (Number.isNaN(d.getTime())) return '—'
   return d.toLocaleString('fr-FR')
+}
+
+function formatNumber(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(Number(value))) return '—'
+  return new Intl.NumberFormat('fr-FR').format(Number(value))
 }
 
 function formatDuration(start: string | null | undefined, end: string | null | undefined): string {
@@ -302,7 +312,9 @@ function formatDuration(start: string | null | undefined, end: string | null | u
   return `${hours}h ${remainingMinutes}m`
 }
 
-function getMaintenanceStatusLabel(status: ClientMaintenanceRunRow['status'] | ClientMaintenanceStepRow['status'] | null | undefined): string {
+function getMaintenanceStatusLabel(
+  status: ClientMaintenanceRunRow['status'] | ClientMaintenanceStepRow['status'] | null | undefined
+): string {
   if (status === 'queued') return 'En attente'
   if (status === 'running') return 'En cours'
   if (status === 'done') return 'Terminé'
@@ -313,13 +325,25 @@ function getMaintenanceStatusLabel(status: ClientMaintenanceRunRow['status'] | C
   return '—'
 }
 
-function getMaintenanceStatusStyle(status: string | null | undefined): React.CSSProperties {
-  if (status === 'done') return { background: '#dcfce7', color: '#166534', borderColor: '#86efac' }
-  if (status === 'running') return { background: '#dbeafe', color: '#1d4ed8', borderColor: '#93c5fd' }
-  if (status === 'queued') return { background: '#fef9c3', color: '#854d0e', borderColor: '#fde68a' }
-  if (status === 'partial') return { background: '#ffedd5', color: '#9a3412', borderColor: '#fdba74' }
-  if (status === 'error') return { background: '#fee2e2', color: '#991b1b', borderColor: '#fca5a5' }
-  return { background: '#f1f5f9', color: '#334155', borderColor: '#cbd5e1' }
+/** Un statut = une couleur, la même partout : pastille, rail et tableau. */
+function getStatusClasses(status: string | null | undefined): string {
+  if (status === 'done') return 'bg-[#E7F1EA] text-[#1F5B44] ring-1 ring-[#BFDCCE]'
+  if (status === 'running') return 'bg-[#FDF2DE] text-[#8A5A11] ring-1 ring-[#EBD8AE]'
+  if (status === 'queued') return 'bg-[#F1EFEA] text-[#6B6355] ring-1 ring-[#DFDACF]'
+  if (status === 'partial') return 'bg-[#FBEEE2] text-[#964E10] ring-1 ring-[#EFCFAF]'
+  if (status === 'error') return 'bg-[#FBE9E9] text-[#A32C2C] ring-1 ring-[#F0C7C7]'
+  if (status === 'skipped') return 'bg-[#F1EFEA] text-[#8A8375] ring-1 ring-[#DFDACF]'
+  if (status === 'cancelled') return 'bg-[#F1EFEA] text-[#6B6355] ring-1 ring-[#DFDACF]'
+  return 'bg-[#F1EFEA] text-[#6B6355] ring-1 ring-[#DFDACF]'
+}
+
+function getStatusDotClass(status: string | null | undefined): string {
+  if (status === 'done') return 'bg-[#2F6B4F]'
+  if (status === 'running') return 'bg-[#B4761A]'
+  if (status === 'partial') return 'bg-[#C2701C]'
+  if (status === 'error') return 'bg-[#A32C2C]'
+  if (status === 'queued') return 'bg-[#CBC5B8]'
+  return 'bg-[#CBC5B8]'
 }
 
 function buildDefaultSireneParams(lastImport: ImportRow | null): SireneParamsForm {
@@ -332,15 +356,6 @@ function buildDefaultSireneParams(lastImport: ImportRow | null): SireneParamsFor
     dateMajMin: '',
     dateMajMax: '',
   }
-}
-
-function StatCard({ title, value }: { title: string; value: string | number }) {
-  return (
-    <div style={styles.statCard}>
-      <div style={styles.statTitle}>{title}</div>
-      <div style={styles.statValue}>{value}</div>
-    </div>
-  )
 }
 
 export default function ClientsPage() {
@@ -360,6 +375,9 @@ export default function ClientsPage() {
   const [maintenanceSteps, setMaintenanceSteps] = useState<ClientMaintenanceStepRow[]>([])
   const [maintenanceLogs, setMaintenanceLogs] = useState<ClientMaintenanceLogRow[]>([])
   const [showMaintenanceLogs, setShowMaintenanceLogs] = useState(false)
+  const [logLevelFilter, setLogLevelFilter] = useState<'all' | 'warning' | 'error'>('all')
+  const [selectedRunId, setSelectedRunId] = useState<string>('')
+  const [lastMonitorAt, setLastMonitorAt] = useState<Date | null>(null)
 
   const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(null)
   const [allowedDepartements, setAllowedDepartements] = useState<string[]>([])
@@ -371,14 +389,27 @@ export default function ClientsPage() {
   const [lastImport, setLastImport] = useState<ImportRow | null>(null)
   const [lastApiImportAt, setLastApiImportAt] = useState<string | null>(null)
   const [sireneConfigId, setSireneConfigId] = useState<string | null>(null)
-  const [showImportsSection, setShowImportsSection] = useState(true)
 
   const [sireneParams, setSireneParams] = useState<SireneParamsForm>(buildDefaultSireneParams(null))
+  const [savedSireneSignature, setSavedSireneSignature] = useState<string>('')
+
+  const [report, setReport] = useState<RunReport>(null)
+  const [toast, setToast] = useState<ToastState>(null)
 
   const normalizedSocieteFilter = useMemo(() => normalizeScopeValue(societeFilter), [societeFilter])
 
+  const busy =
+    importingApi || importingCessationsApi || uploadingCsv || refreshingRge || refreshingCapacite || startingMaintenance
+
+  useEffect(() => {
+    if (!toast) return
+    const timer = window.setTimeout(() => setToast(null), 5200)
+    return () => window.clearTimeout(timer)
+  }, [toast])
+
   useEffect(() => {
     void loadPage()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
@@ -388,6 +419,7 @@ export default function ClientsPage() {
     }, 15000)
 
     return () => window.clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   async function loadPage() {
@@ -449,17 +481,21 @@ export default function ClientsPage() {
 
       if (sireneConfig) {
         setSireneConfigId(sireneConfig.id)
-        setSireneParams({
-        codesApe: (sireneConfig.codes_ape || []).join(', '),
-        departements: (sireneConfig.departements || []).join(', '),
-        dateCreationMin: latestApiImport || formatDateInput(sireneConfig.date_creation_min),
-        dateCreationMax: formatDateInput(sireneConfig.date_creation_max),
-        dateMajMin: formatDateInput(sireneConfig.date_modification_min),
-        dateMajMax: formatDateInput(sireneConfig.date_modification_max),
-})
+        const nextParams: SireneParamsForm = {
+          codesApe: (sireneConfig.codes_ape || []).join(', '),
+          departements: (sireneConfig.departements || []).join(', '),
+          dateCreationMin: latestApiImport || formatDateInput(sireneConfig.date_creation_min),
+          dateCreationMax: formatDateInput(sireneConfig.date_creation_max),
+          dateMajMin: formatDateInput(sireneConfig.date_modification_min),
+          dateMajMax: formatDateInput(sireneConfig.date_modification_max),
+        }
+        setSireneParams(nextParams)
+        setSavedSireneSignature(JSON.stringify(nextParams))
       } else {
         setSireneConfigId(null)
-        setSireneParams(buildDefaultSireneParams(latestImport))
+        const nextParams = buildDefaultSireneParams(latestImport)
+        setSireneParams(nextParams)
+        setSavedSireneSignature(JSON.stringify(nextParams))
       }
 
       const userAccess = (userAccessRes as any).data as UserDepartmentAccessRow | null
@@ -470,12 +506,11 @@ export default function ClientsPage() {
       )
     } catch (error: any) {
       console.error(error)
-      alert("Erreur lors du chargement de l'écran.")
+      setToast({ tone: 'error', text: `Chargement impossible : ${error?.message || String(error)}` })
     } finally {
       setLoading(false)
     }
   }
-
 
   async function loadMaintenanceMonitor(showLoader = true) {
     if (showLoader) setMaintenanceLoading(true)
@@ -490,8 +525,10 @@ export default function ClientsPage() {
       setMaintenanceRuns(data.runs || [])
       setMaintenanceSteps(data.steps || [])
       setMaintenanceLogs(data.logs || [])
+      setLastMonitorAt(new Date())
     } catch (error) {
       console.error('Erreur monitoring maintenance clients:', error)
+      if (showLoader) setToast({ tone: 'error', text: 'Le suivi de maintenance n’a pas pu être actualisé.' })
     } finally {
       if (showLoader) setMaintenanceLoading(false)
     }
@@ -508,6 +545,7 @@ export default function ClientsPage() {
     setStartingMaintenance(true)
     try {
       await persistSireneParams(sireneParams)
+      setSavedSireneSignature(JSON.stringify(sireneParams))
 
       const res = await fetch('/api/client-maintenance/start-ui', {
         method: 'POST',
@@ -532,10 +570,10 @@ export default function ClientsPage() {
       }
 
       await loadMaintenanceMonitor()
-      alert('Maintenance clients planifiée. Le suivi est disponible dans le bloc de monitoring.')
+      setToast({ tone: 'success', text: 'Maintenance planifiée. Le rail ci-dessus se met à jour toutes les 15 secondes.' })
     } catch (error: any) {
       console.error(error)
-      alert('Erreur lancement maintenance clients : ' + (error?.message || String(error)))
+      setToast({ tone: 'error', text: `La maintenance n’a pas démarré : ${error?.message || String(error)}` })
     } finally {
       setStartingMaintenance(false)
     }
@@ -567,35 +605,35 @@ export default function ClientsPage() {
     setSavingSireneParams(true)
     try {
       await persistSireneParams(sireneParams)
-      alert('Paramètres API Sirene enregistrés.')
-    } catch (error) {
+      setSavedSireneSignature(JSON.stringify(sireneParams))
+      setToast({ tone: 'success', text: 'Paramètres SIRENE enregistrés.' })
+    } catch (error: any) {
       console.error(error)
-      alert('Erreur lors de la sauvegarde des paramètres API Sirene.')
+      setToast({ tone: 'error', text: `Les paramètres n’ont pas été enregistrés : ${error?.message || String(error)}` })
     } finally {
       setSavingSireneParams(false)
     }
   }
 
   async function finalizeSireneParamsAfterApiImport(importDate: string, sourceParams: SireneParamsForm) {
-  const nextParams: SireneParamsForm = {
-    ...sourceParams,
-    dateCreationMin: importDate,
-    dateCreationMax: '',
-  }
+    const nextParams: SireneParamsForm = {
+      ...sourceParams,
+      dateCreationMin: importDate,
+      dateCreationMax: '',
+    }
 
-  await persistSireneParams(nextParams, importDate)
-  setLastApiImportAt(importDate)
-  setSireneParams(nextParams)
-}
+    await persistSireneParams(nextParams, importDate)
+    setLastApiImportAt(importDate)
+    setSireneParams(nextParams)
+    setSavedSireneSignature(JSON.stringify(nextParams))
+  }
 
   async function launchImportSirene() {
     setImportingApi(true)
     setSavingSireneParams(true)
 
     try {
-      const paramsBeforeImport: SireneParamsForm = {
-  ...sireneParams,
-}
+      const paramsBeforeImport: SireneParamsForm = { ...sireneParams }
 
       setSireneParams(paramsBeforeImport)
       await persistSireneParams(paramsBeforeImport)
@@ -614,29 +652,36 @@ export default function ClientsPage() {
         throw new Error(data?.error || 'Erreur import SIRENE')
       }
 
-      alert(
-  `Import terminé\n` +
-  `Importés : ${data.imported ?? 0}\n` +
-  `Déjà présents : ${data.already_present ?? 0}\n` +
-  `Rejets filtres : ${data.rejected_by_filter ?? 0}\n` +
-  `Rejets totaux : ${data.rejected_total ?? 0}\n` +
-  `Pages lues : ${data.pages ?? 0}\n` +
-  `Parcourus API : ${data.fetched ?? 0}\n` +
-  `Total API annoncé : ${data.api_total ?? 'n/a'}\n` +
-  `Après filtre départements : ${data.total_api_after_department_filter ?? 0}`
-)
+      setReport({
+        title: 'Import SIRENE terminé',
+        subtitle: 'Créations d’établissements récupérées depuis l’API Sirene.',
+        tone: 'success',
+        lines: [
+          { label: 'Importés', value: formatNumber(data.imported ?? 0), emphasis: true },
+          { label: 'Déjà présents', value: formatNumber(data.already_present ?? 0) },
+          { label: 'Rejets filtres', value: formatNumber(data.rejected_by_filter ?? 0) },
+          { label: 'Rejets totaux', value: formatNumber(data.rejected_total ?? 0) },
+          { label: 'Pages lues', value: formatNumber(data.pages ?? 0) },
+          { label: 'Parcourus API', value: formatNumber(data.fetched ?? 0) },
+          { label: 'Total API annoncé', value: data.api_total != null ? formatNumber(data.api_total) : 'n/a' },
+          { label: 'Après filtre départements', value: formatNumber(data.total_api_after_department_filter ?? 0) },
+        ],
+      })
 
       await finalizeSireneParamsAfterApiImport(new Date().toISOString().slice(0, 10), paramsBeforeImport)
       await loadPage()
     } catch (error: any) {
       console.error(error)
-      alert('Erreur import : ' + (error?.message || String(error)))
+      setReport({
+        title: 'L’import SIRENE a échoué',
+        tone: 'error',
+        lines: [{ label: 'Détail', value: error?.message || String(error) }],
+      })
     } finally {
       setSavingSireneParams(false)
       setImportingApi(false)
     }
   }
-
 
   async function launchImportSireneCessations() {
     const confirmed = window.confirm(
@@ -651,9 +696,7 @@ export default function ClientsPage() {
     setSavingSireneParams(true)
 
     try {
-      const paramsBeforeImport: SireneParamsForm = {
-        ...sireneParams,
-      }
+      const paramsBeforeImport: SireneParamsForm = { ...sireneParams }
 
       await persistSireneParams(paramsBeforeImport)
 
@@ -680,32 +723,39 @@ export default function ClientsPage() {
       await persistSireneParams(paramsBeforeImport, importDate)
       setLastApiImportAt(importDate)
 
-      alert(
-        `Import cessations SIRENE terminé\n` +
-          `Fermetures valides : ${data.closed_candidates ?? 0}\n` +
-          `SIRET supprimés de clients : ${data.deleted_from_clients ?? 0}\n` +
-          `Clients CEGECLIM marqués fermés : ${data.cegeclim_alerts_updated ?? 0}\n` +
-          `Déjà absents de clients : ${data.already_absent ?? 0}\n` +
-          `Rejets filtres : ${data.rejected_by_filter ?? 0}\n` +
-          `Rejets totaux : ${data.rejected_total ?? 0}\n` +
-          `Batchs journaliers : ${data.daily_batch_count ?? 0}\n` +
-          `Unités de requête : ${data.query_unit_count ?? 0}\n` +
-          `Découpage par code APE : ${data.split_by_ape ? 'oui' : 'non'}\n` +
-          `Pages lues : ${data.pages ?? 0}\n` +
-          `Parcourus API : ${data.fetched ?? 0}\n` +
-          `Total API annoncé : ${data.api_total ?? 'n/a'}`
-      )
+      setReport({
+        title: 'Import des cessations terminé',
+        subtitle: 'Les établissements fermés ont été retirés, sauf les clients CEGECLIM qui restent marqués fermés.',
+        tone: 'success',
+        lines: [
+          { label: 'Fermetures valides', value: formatNumber(data.closed_candidates ?? 0), emphasis: true },
+          { label: 'SIRET supprimés de clients', value: formatNumber(data.deleted_from_clients ?? 0), emphasis: true },
+          { label: 'Clients CEGECLIM marqués fermés', value: formatNumber(data.cegeclim_alerts_updated ?? 0) },
+          { label: 'Déjà absents de clients', value: formatNumber(data.already_absent ?? 0) },
+          { label: 'Rejets filtres', value: formatNumber(data.rejected_by_filter ?? 0) },
+          { label: 'Rejets totaux', value: formatNumber(data.rejected_total ?? 0) },
+          { label: 'Batchs journaliers', value: formatNumber(data.daily_batch_count ?? 0) },
+          { label: 'Unités de requête', value: formatNumber(data.query_unit_count ?? 0) },
+          { label: 'Découpage par code APE', value: data.split_by_ape ? 'oui' : 'non' },
+          { label: 'Pages lues', value: formatNumber(data.pages ?? 0) },
+          { label: 'Parcourus API', value: formatNumber(data.fetched ?? 0) },
+          { label: 'Total API annoncé', value: data.api_total != null ? formatNumber(data.api_total) : 'n/a' },
+        ],
+      })
 
       await loadPage()
     } catch (error: any) {
       console.error(error)
-      alert('Erreur import cessations SIRENE : ' + (error?.message || String(error)))
+      setReport({
+        title: 'L’import des cessations a échoué',
+        tone: 'error',
+        lines: [{ label: 'Détail', value: error?.message || String(error) }],
+      })
     } finally {
       setSavingSireneParams(false)
       setImportingCessationsApi(false)
     }
   }
-
 
   async function launchRgeRefresh() {
     setRefreshingRge(true)
@@ -717,25 +767,32 @@ export default function ClientsPage() {
         throw new Error(data?.error || 'Erreur lors de la mise à jour RGE')
       }
 
-      alert(
-        `Mise à jour RGE terminée\n` +
-          `Lignes source : ${data.stats?.sourceRows ?? 0}\n` +
-          `SIRET RGE agrégés : ${data.stats?.cacheRows ?? 0}\n` +
-          `Nouveaux cache : ${data.stats?.cacheInserted ?? 0}\n` +
-          `Cache déjà existant : ${data.stats?.cacheUpdated ?? 0}\n` +
-          `Cache supprimé : ${data.stats?.cacheDeleted ?? 0}\n` +
-          `Clients mis à jour : ${data.stats?.clientsUpdated ?? 0}`
-      )
+      setReport({
+        title: 'Référentiel RGE à jour',
+        subtitle: 'Source : ADEME. Le cache RGE puis la table clients ont été rafraîchis.',
+        tone: 'success',
+        lines: [
+          { label: 'Clients mis à jour', value: formatNumber(data.stats?.clientsUpdated ?? 0), emphasis: true },
+          { label: 'Lignes source', value: formatNumber(data.stats?.sourceRows ?? 0) },
+          { label: 'SIRET RGE agrégés', value: formatNumber(data.stats?.cacheRows ?? 0) },
+          { label: 'Nouveaux en cache', value: formatNumber(data.stats?.cacheInserted ?? 0) },
+          { label: 'Cache déjà existant', value: formatNumber(data.stats?.cacheUpdated ?? 0) },
+          { label: 'Cache supprimé', value: formatNumber(data.stats?.cacheDeleted ?? 0) },
+        ],
+      })
 
       await loadPage()
     } catch (error: any) {
       console.error(error)
-      alert('Erreur MAJ RGE : ' + (error?.message || String(error)))
+      setReport({
+        title: 'La mise à jour RGE a échoué',
+        tone: 'error',
+        lines: [{ label: 'Détail', value: error?.message || String(error) }],
+      })
     } finally {
       setRefreshingRge(false)
     }
   }
-
 
   async function launchCapaciteRefresh() {
     setRefreshingCapacite(true)
@@ -747,20 +804,28 @@ export default function ClientsPage() {
         throw new Error(data?.error || 'Erreur lors de la mise à jour capacité ADEME')
       }
 
-      alert(
-        `Mise à jour capacité froid/clim ADEME terminée\n` +
-          `Lignes source : ${data.nb_rows_source ?? 0}\n` +
-          `Lignes cible froid/clim : ${data.nb_rows_target ?? 0}\n` +
-          `Lignes cache agrégées : ${data.nb_rows_imported ?? 0}\n` +
-          `Clients mis à jour : ${data.nb_rows_updated ?? 0}\n` +
-          `Lignes avec date délivrance : ${data.nb_target_rows_with_date_delivrance ?? 0}\n` +
-          `Lignes avec date fin validité : ${data.nb_target_rows_with_date_fin_validite ?? 0}`
-      )
+      setReport({
+        title: 'Capacité froid/clim à jour',
+        subtitle: 'Source : ADEME, opérateurs attestés gaz fluorés, secteur froid et climatisation.',
+        tone: 'success',
+        lines: [
+          { label: 'Clients mis à jour', value: formatNumber(data.nb_rows_updated ?? 0), emphasis: true },
+          { label: 'Lignes source', value: formatNumber(data.nb_rows_source ?? 0) },
+          { label: 'Lignes cible froid/clim', value: formatNumber(data.nb_rows_target ?? 0) },
+          { label: 'Lignes cache agrégées', value: formatNumber(data.nb_rows_imported ?? 0) },
+          { label: 'Avec date de délivrance', value: formatNumber(data.nb_target_rows_with_date_delivrance ?? 0) },
+          { label: 'Avec date de fin de validité', value: formatNumber(data.nb_target_rows_with_date_fin_validite ?? 0) },
+        ],
+      })
 
       await loadPage()
     } catch (error: any) {
       console.error(error)
-      alert('Erreur MAJ capacité ADEME : ' + (error?.message || String(error)))
+      setReport({
+        title: 'La mise à jour capacité a échoué',
+        tone: 'error',
+        lines: [{ label: 'Détail', value: error?.message || String(error) }],
+      })
     } finally {
       setRefreshingCapacite(false)
     }
@@ -919,32 +984,70 @@ export default function ClientsPage() {
 
       if (updateHeaderError) throw updateHeaderError
 
-      alert(
-        `Import CSV terminé\n` +
-          `Lignes source : ${rows.length}\n` +
-          `Insérés : ${insertedCount}\n` +
-          `Mis à jour : ${updatedCount}\n` +
-          `Rejets : ${rejects.length}`
-      )
+      setReport({
+        title: 'Import du fichier terminé',
+        subtitle: file.name,
+        tone: 'success',
+        lines: [
+          { label: 'Insérés', value: formatNumber(insertedCount), emphasis: true },
+          { label: 'Mis à jour', value: formatNumber(updatedCount), emphasis: true },
+          { label: 'Rejets', value: formatNumber(rejects.length) },
+          { label: 'Lignes du fichier', value: formatNumber(rows.length) },
+        ],
+      })
 
       await loadPage()
     } catch (error: any) {
       console.error(error)
-      alert('Erreur import CSV : ' + (error?.message || String(error)))
+      setReport({
+        title: 'L’import du fichier a échoué',
+        subtitle: file.name,
+        tone: 'error',
+        lines: [{ label: 'Détail', value: error?.message || String(error) }],
+      })
     } finally {
       setUploadingCsv(false)
     }
   }
 
+  /* ------------------------------------------------------------------ */
+  /* Données dérivées                                                    */
+  /* ------------------------------------------------------------------ */
 
-  const latestMaintenanceRun = maintenanceRuns[0] || null
   const activeMaintenanceRun = maintenanceRuns.find((run) => ['queued', 'running'].includes(run.status)) || null
-  const latestMaintenanceSteps = latestMaintenanceRun
-    ? maintenanceSteps.filter((step) => step.run_id === latestMaintenanceRun.id).sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0))
-    : []
-  const latestMaintenanceLogs = latestMaintenanceRun
-    ? maintenanceLogs.filter((log) => log.run_id === latestMaintenanceRun.id)
-    : []
+
+  const displayedRun = useMemo(() => {
+    if (selectedRunId) {
+      const found = maintenanceRuns.find((run) => run.id === selectedRunId)
+      if (found) return found
+    }
+    return maintenanceRuns[0] || null
+  }, [maintenanceRuns, selectedRunId])
+
+  const displayedSteps = useMemo(() => {
+    if (!displayedRun) return []
+    return maintenanceSteps
+      .filter((step) => step.run_id === displayedRun.id)
+      .sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0))
+  }, [maintenanceSteps, displayedRun])
+
+  const displayedLogs = useMemo(() => {
+    if (!displayedRun) return []
+    return maintenanceLogs
+      .filter((log) => log.run_id === displayedRun.id)
+      .filter((log) => (logLevelFilter === 'all' ? true : logLevelFilter === 'warning' ? log.level !== 'info' : log.level === 'error'))
+  }, [maintenanceLogs, displayedRun, logLevelFilter])
+
+  const stepProgress = useMemo(() => {
+    if (displayedSteps.length === 0) return 0
+    const finished = displayedSteps.filter((step) => ['done', 'skipped', 'error'].includes(step.status)).length
+    return Math.round((finished / displayedSteps.length) * 100)
+  }, [displayedSteps])
+
+  const runErrorCount = useMemo(
+    () => displayedSteps.reduce((total, step) => total + Number(step.error_count || 0), 0),
+    [displayedSteps]
+  )
 
   const scopedDepartmentSet = useMemo(() => {
     if (normalizedSocieteFilter === 'global') return null
@@ -975,6 +1078,7 @@ export default function ClientsPage() {
       const dep = getDepartmentFromPostalCode(row.codePostalEtablissement) || String(row.departement || '').trim()
       return isAllowedDepartment(dep)
     })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clientRows, scopedDepartmentSet, profileDepartmentSet])
 
   const scopedCegeclimRows = useMemo(() => {
@@ -982,12 +1086,11 @@ export default function ClientsPage() {
       const dep = getDepartmentFromPostalCode(row.cp_sage)
       return isAllowedDepartment(dep)
     })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clientCegeclimRows, scopedDepartmentSet, profileDepartmentSet])
 
   const clientKpis = useMemo(() => {
-    const clientSiretSet = new Set(
-      scopedClientRows.map((row) => normalizeSiret(row.siret)).filter(Boolean)
-    )
+    const clientSiretSet = new Set(scopedClientRows.map((row) => normalizeSiret(row.siret)).filter(Boolean))
 
     const cegeclimMissing = scopedCegeclimRows.filter((row) => {
       const siret = normalizeSiret(row.siret)
@@ -1001,574 +1104,816 @@ export default function ClientsPage() {
     }
   }, [scopedClientRows, scopedCegeclimRows])
 
+  const sireneDirty = savedSireneSignature !== '' && savedSireneSignature !== JSON.stringify(sireneParams)
+  const apeCodes = normalizeArray(sireneParams.codesApe)
+
   if (loading) {
-    return <div style={{ padding: 24 }}>Chargement de la page...</div>
+    return (
+      <div className="min-h-screen bg-[#F4F3F0] p-6">
+        <div className="mx-auto max-w-[1600px] rounded-2xl border border-[#E2DFD8] bg-white p-16 text-center text-sm text-slate-500">
+          Chargement de la base clients…
+        </div>
+      </div>
+    )
   }
 
   return (
-    <section style={styles.page}>
-      <div style={styles.pageHeader}>
-        <h1 style={styles.pageTitle}>Mise à jour Base Clients</h1>
-        <div style={styles.pageSubline}>
-          Départements visibles selon votre profil : {allowedDepartements.join(', ') || 'Tous'} • {currentUserEmail || ''}
-        </div>
-      </div>
-
-      <div style={styles.card}>
-        <h2 style={styles.sectionTitle}>Synthèse</h2>
-        <div style={styles.kpiGrid}>
-          <StatCard title="Entreprises base Clients" value={clientKpis.clientsCount} />
-          <StatCard title="Entreprise base CEGECLIM" value={clientKpis.cegeclimCount} />
-          <StatCard title="Clients CEGECLIM absent base Clients" value={clientKpis.cegeclimMissingCount} />
-        </div>
-      </div>
-
-      <div style={styles.card}>
-        <div style={styles.sectionHeaderRow}>
+    <div className="min-h-screen bg-[#F4F3F0] pb-16">
+      <header className="border-b border-[#1E2833] bg-[#111820]">
+        <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-6 px-4 py-6 md:px-8 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <h2 style={styles.sectionTitle}>Maintenance automatique clients</h2>
-            <div style={styles.optionText}>
-              Pipeline quotidien : création / mise à jour SIRENE, cessations, RGE, capacité froid/clim et enrichissement.
-            </div>
+            <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[#B4761A]">Données</div>
+            <h1 className="mt-2 text-[28px] font-bold leading-tight text-white md:text-[32px]">Base clients</h1>
+            <p className="mt-2 max-w-3xl text-sm leading-relaxed text-slate-300">
+              Alimentation et entretien du référentiel : SIRENE, cessations, RGE et capacité froid/clim.
+              Le pipeline tourne chaque nuit ; les mises à jour ponctuelles se lancent ci-dessous.
+            </p>
+            <p className="mt-3 text-xs text-slate-400">
+              Départements visibles selon votre profil : {allowedDepartements.join(', ') || 'tous'}
+              {currentUserEmail ? ` · ${currentUserEmail}` : ''}
+            </p>
           </div>
-          <div style={styles.buttonRow}>
+
+          <div className="flex flex-wrap items-end gap-3">
+            <HeaderStat label="Base clients" value={clientKpis.clientsCount} />
+            <HeaderStat label="Base CEGECLIM" value={clientKpis.cegeclimCount} />
+            <HeaderStat
+              label="CEGECLIM absents"
+              value={clientKpis.cegeclimMissingCount}
+              tone={clientKpis.cegeclimMissingCount > 0 ? 'warn' : 'default'}
+            />
             <button
               type="button"
-              onClick={() => void loadMaintenanceMonitor()}
-              style={styles.secondaryButton}
-              disabled={maintenanceLoading}
+              onClick={() => void loadPage()}
+              className="h-[52px] rounded-xl border border-[#2C3946] px-4 text-sm font-semibold text-slate-200 transition hover:border-[#B4761A] hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A]"
             >
-              {maintenanceLoading ? 'Actualisation...' : 'Actualiser'}
-            </button>
-            <button
-              type="button"
-              onClick={startClientMaintenance}
-              style={styles.primaryButton}
-              disabled={startingMaintenance || Boolean(activeMaintenanceRun)}
-            >
-              {startingMaintenance ? 'Planification...' : activeMaintenanceRun ? 'Traitement en cours' : 'Lancer maintenant'}
+              Recharger
             </button>
           </div>
         </div>
+      </header>
 
-        {latestMaintenanceRun ? (
-          <>
-            <div style={styles.maintenanceSummaryGrid}>
-              <div style={styles.maintenanceSummaryCard}>
-                <div style={styles.statTitle}>Dernier statut</div>
-                <span style={{ ...styles.statusPill, ...getMaintenanceStatusStyle(latestMaintenanceRun.status) }}>
-                  {getMaintenanceStatusLabel(latestMaintenanceRun.status)}
-                </span>
-              </div>
-              <div style={styles.maintenanceSummaryCard}>
-                <div style={styles.statTitle}>Début</div>
-                <div style={styles.smallValue}>{formatDateTimeFr(latestMaintenanceRun.started_at || latestMaintenanceRun.created_at)}</div>
-              </div>
-              <div style={styles.maintenanceSummaryCard}>
-                <div style={styles.statTitle}>Durée</div>
-                <div style={styles.smallValue}>{formatDuration(latestMaintenanceRun.started_at || latestMaintenanceRun.created_at, latestMaintenanceRun.finished_at)}</div>
-              </div>
-              <div style={styles.maintenanceSummaryCard}>
-                <div style={styles.statTitle}>Étape en cours</div>
-                <div style={styles.smallValue}>{latestMaintenanceRun.current_step || '—'}</div>
-              </div>
+      <main className="mx-auto w-full max-w-[1600px] space-y-5 px-4 py-6 md:px-8">
+        {/* ============================================================ Pipeline */}
+        <section className="overflow-hidden rounded-2xl border border-[#E2DFD8] bg-white">
+          <div className="flex flex-col gap-3 border-b border-[#EFEDE8] px-5 py-4 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <Eyebrow>Chaîne de traitement</Eyebrow>
+              <h2 className="mt-1 text-lg font-bold text-slate-900">Maintenance automatique</h2>
+              <p className="mt-1 max-w-3xl text-sm text-slate-600">
+                Cinq étapes enchaînées : création et mise à jour SIRENE, cessations, RGE, capacité froid/clim, puis enrichissement.
+              </p>
             </div>
 
-            {latestMaintenanceRun.message && <div style={styles.maintenanceMessage}>{latestMaintenanceRun.message}</div>}
-            {latestMaintenanceRun.error_message && <div style={styles.maintenanceError}>{latestMaintenanceRun.error_message}</div>}
-
-            <div style={styles.tableWrap}>
-              <table style={styles.maintenanceTable}>
-                <thead>
-                  <tr>
-                    <th style={styles.th}>Étape</th>
-                    <th style={styles.th}>Statut</th>
-                    <th style={styles.thRight}>Traité</th>
-                    <th style={styles.thRight}>Créés</th>
-                    <th style={styles.thRight}>Mis à jour</th>
-                    <th style={styles.thRight}>Rejets</th>
-                    <th style={styles.thRight}>Erreurs</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {latestMaintenanceSteps.map((step) => (
-                    <tr key={step.id}>
-                      <td style={styles.td}>{step.step_label}</td>
-                      <td style={styles.td}>
-                        <span style={{ ...styles.statusPill, ...getMaintenanceStatusStyle(step.status) }}>
-                          {getMaintenanceStatusLabel(step.status)}
-                        </span>
-                      </td>
-                      <td style={styles.tdRight}>{step.processed_count ?? 0}</td>
-                      <td style={styles.tdRight}>{step.inserted_count ?? 0}</td>
-                      <td style={styles.tdRight}>{step.updated_count ?? 0}</td>
-                      <td style={styles.tdRight}>{step.rejected_count ?? 0}</td>
-                      <td style={styles.tdRight}>{step.error_count ?? 0}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="flex shrink-0 flex-col items-start gap-2 lg:items-end">
+              <div className="flex gap-2">
+                <GhostButton onClick={() => void loadMaintenanceMonitor()} disabled={maintenanceLoading}>
+                  {maintenanceLoading ? 'Actualisation…' : 'Actualiser'}
+                </GhostButton>
+                <PrimaryButton
+                  onClick={() => void startClientMaintenance()}
+                  disabled={startingMaintenance || Boolean(activeMaintenanceRun)}
+                >
+                  {startingMaintenance
+                    ? 'Planification…'
+                    : activeMaintenanceRun
+                      ? 'Traitement en cours'
+                      : 'Lancer maintenant'}
+                </PrimaryButton>
+              </div>
+              <LiveIndicator lastAt={lastMonitorAt} running={Boolean(activeMaintenanceRun)} />
             </div>
+          </div>
 
-            <div style={{ marginTop: 12, display: 'flex', justifyContent: 'space-between', gap: 12 }}>
-              <button type="button" onClick={() => setShowMaintenanceLogs((prev) => !prev)} style={styles.secondaryButton}>
-                {showMaintenanceLogs ? 'Masquer les logs' : 'Afficher les logs'}
-              </button>
-              <div style={styles.helpText}>Actualisation automatique toutes les 15 secondes.</div>
+          {!displayedRun ? (
+            <div className="px-5 py-14 text-center">
+              <p className="text-sm font-semibold text-slate-900">Aucune exécution enregistrée</p>
+              <p className="mx-auto mt-2 max-w-md text-sm text-slate-600">
+                Lancez la maintenance pour créer la première exécution. Chaque étape sera suivie ici, avec ses compteurs et ses logs.
+              </p>
             </div>
+          ) : (
+            <>
+              {maintenanceRuns.length > 1 && (
+                <div className="flex flex-wrap items-center gap-2 border-b border-[#EFEDE8] bg-[#FAF9F7] px-5 py-3">
+                  <span className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Exécutions</span>
+                  {maintenanceRuns.map((run) => {
+                    const active = run.id === displayedRun.id
+                    return (
+                      <button
+                        type="button"
+                        key={run.id}
+                        onClick={() => setSelectedRunId(run.id)}
+                        className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition focus:outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A] ${
+                          active
+                            ? 'border-[#111820] bg-[#111820] text-white'
+                            : 'border-[#E2DFD8] bg-white text-slate-600 hover:border-[#B4761A]'
+                        }`}
+                      >
+                        <span className={`h-2 w-2 rounded-full ${getStatusDotClass(run.status)}`} />
+                        {formatDateTimeFr(run.started_at || run.created_at)}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
 
-            {showMaintenanceLogs && (
-              <div style={styles.logsBox}>
-                {latestMaintenanceLogs.length === 0 ? (
-                  <div style={styles.helpText}>Aucun log disponible.</div>
+              <div className="grid grid-cols-2 gap-px border-b border-[#EFEDE8] bg-[#EFEDE8] lg:grid-cols-5">
+                <RunFact label="Statut">
+                  <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-bold ${getStatusClasses(displayedRun.status)}`}>
+                    {getMaintenanceStatusLabel(displayedRun.status)}
+                  </span>
+                </RunFact>
+                <RunFact label="Début">
+                  <span className="text-sm font-semibold text-slate-900">
+                    {formatDateTimeFr(displayedRun.started_at || displayedRun.created_at)}
+                  </span>
+                </RunFact>
+                <RunFact label="Durée">
+                  <span className="text-sm font-semibold tabular-nums text-slate-900">
+                    {formatDuration(displayedRun.started_at || displayedRun.created_at, displayedRun.finished_at)}
+                  </span>
+                </RunFact>
+                <RunFact label="Étape en cours">
+                  <span className="text-sm font-semibold text-slate-900">{displayedRun.current_step || '—'}</span>
+                </RunFact>
+                <RunFact label="Erreurs">
+                  <span className={`text-sm font-semibold tabular-nums ${runErrorCount > 0 ? 'text-[#A32C2C]' : 'text-slate-900'}`}>
+                    {formatNumber(runErrorCount)}
+                  </span>
+                </RunFact>
+              </div>
+
+              {/* --- Rail des étapes : l'élément central de l'écran --- */}
+              <div className="px-5 pt-5">
+                <div className="mb-3 flex items-center gap-3">
+                  <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-[#EFEDE8]">
+                    <div
+                      className="h-full rounded-full bg-[#B4761A] transition-all duration-500"
+                      style={{ width: `${stepProgress}%` }}
+                    />
+                  </div>
+                  <span className="shrink-0 text-xs font-bold tabular-nums text-slate-500">{stepProgress}%</span>
+                </div>
+
+                {displayedSteps.length === 0 ? (
+                  <p className="pb-5 text-sm text-slate-500">Les étapes apparaîtront dès le démarrage du traitement.</p>
                 ) : (
-                  latestMaintenanceLogs.slice(0, 80).map((log) => (
-                    <div key={log.id} style={styles.logLine}>
-                      <span style={{ fontWeight: 800 }}>{formatDateTimeFr(log.created_at)}</span>
-                      <span style={{ marginLeft: 8, textTransform: 'uppercase' }}>{log.level}</span>
-                      <span style={{ marginLeft: 8 }}>{log.message}</span>
-                    </div>
-                  ))
+                  <ol className="flex flex-wrap gap-2">
+                    {displayedSteps.map((step, index) => (
+                      <li
+                        key={step.id}
+                        className={`min-w-[190px] flex-1 rounded-xl border bg-white p-3 ${
+                          step.status === 'running' ? 'border-[#B4761A] shadow-sm' : 'border-[#E7E4DD]'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${getStatusDotClass(step.status)}`} />
+                          <span className="truncate text-sm font-semibold text-slate-900">{step.step_label}</span>
+                        </div>
+                        <div className="mt-1.5 flex items-center justify-between gap-2">
+                          <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-bold ${getStatusClasses(step.status)}`}>
+                            {getMaintenanceStatusLabel(step.status)}
+                          </span>
+                          <span className="text-[11px] tabular-nums text-slate-500">
+                            {formatDuration(step.started_at, step.finished_at)}
+                          </span>
+                        </div>
+                        <div className="mt-2 text-[11px] tabular-nums text-slate-500">
+                          {formatNumber(step.processed_count ?? 0)} traité{Number(step.processed_count || 0) > 1 ? 's' : ''}
+                          {Number(step.error_count || 0) > 0 && (
+                            <span className="ml-1.5 font-bold text-[#A32C2C]">
+                              · {formatNumber(step.error_count)} erreur{Number(step.error_count) > 1 ? 's' : ''}
+                            </span>
+                          )}
+                        </div>
+                        <div className="mt-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                          Étape {index + 1}
+                        </div>
+                      </li>
+                    ))}
+                  </ol>
                 )}
               </div>
-            )}
-          </>
-        ) : (
-          <div style={styles.maintenanceMessage}>Aucune maintenance clients historisée pour le moment.</div>
-        )}
-      </div>
 
-      <div style={styles.card}>
-        <div style={styles.sectionHeaderRow}>
-          <h2 style={styles.sectionTitle}>Section Imports</h2>
-          <button
-            type="button"
-            onClick={() => setShowImportsSection((prev) => !prev)}
-            style={styles.secondaryButton}
-          >
-            {showImportsSection ? 'Réduire' : 'Afficher'}
-          </button>
+              {displayedRun.message && (
+                <div className="mx-5 mt-4 rounded-xl border border-[#E7E4DD] bg-[#FAF9F7] px-4 py-3 text-sm text-slate-700">
+                  {displayedRun.message}
+                </div>
+              )}
+              {displayedRun.error_message && (
+                <div className="mx-5 mt-3 rounded-xl border border-[#F0C7C7] bg-[#FBE9E9] px-4 py-3 text-sm font-semibold text-[#A32C2C]">
+                  {displayedRun.error_message}
+                </div>
+              )}
+
+              {displayedSteps.length > 0 && (
+                <div className="mt-5 px-5">
+                  <div className="overflow-x-auto rounded-xl border border-[#E7E4DD]">
+                    <table className="w-full border-collapse text-sm">
+                      <thead>
+                        <tr className="bg-[#FAF9F7]">
+                          <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Étape</th>
+                          <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Statut</th>
+                          <NumHead>Traité</NumHead>
+                          <NumHead>Créés</NumHead>
+                          <NumHead>Mis à jour</NumHead>
+                          <NumHead>Rejets</NumHead>
+                          <NumHead>Erreurs</NumHead>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {displayedSteps.map((step) => (
+                          <tr key={step.id} className="border-t border-[#EFEDE8] hover:bg-[#FAF9F7]">
+                            <td className="px-3 py-2.5 font-medium text-slate-900">{step.step_label}</td>
+                            <td className="px-3 py-2.5">
+                              <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-bold ${getStatusClasses(step.status)}`}>
+                                {getMaintenanceStatusLabel(step.status)}
+                              </span>
+                            </td>
+                            <NumCell value={step.processed_count} />
+                            <NumCell value={step.inserted_count} />
+                            <NumCell value={step.updated_count} />
+                            <NumCell value={step.rejected_count} />
+                            <NumCell value={step.error_count} danger />
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-3 px-5 pb-5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <GhostButton onClick={() => setShowMaintenanceLogs((prev) => !prev)}>
+                    {showMaintenanceLogs ? 'Masquer les logs' : 'Afficher les logs'}
+                  </GhostButton>
+                  {showMaintenanceLogs && (
+                    <div className="inline-flex rounded-lg border border-[#D8D3C8] bg-white p-1">
+                      {(['all', 'warning', 'error'] as const).map((level) => (
+                        <button
+                          type="button"
+                          key={level}
+                          onClick={() => setLogLevelFilter(level)}
+                          className={`rounded-md px-2.5 py-1 text-xs font-semibold transition ${
+                            logLevelFilter === level ? 'bg-[#111820] text-white' : 'text-slate-600 hover:text-slate-900'
+                          }`}
+                        >
+                          {level === 'all' ? 'Tout' : level === 'warning' ? 'Alertes' : 'Erreurs'}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <span className="text-xs text-slate-500">{displayedLogs.length} ligne(s) de log</span>
+              </div>
+
+              {showMaintenanceLogs && (
+                <div className="mx-5 mb-5 max-h-[320px] overflow-auto rounded-xl bg-[#111820] p-3 font-mono text-xs leading-relaxed text-slate-300">
+                  {displayedLogs.length === 0 ? (
+                    <p className="p-3 text-slate-400">Aucun log pour ce filtre.</p>
+                  ) : (
+                    displayedLogs.slice(0, 200).map((log) => (
+                      <div key={log.id} className="border-b border-white/5 py-1.5 last:border-0">
+                        <span className="text-slate-500">{formatDateTimeFr(log.created_at)}</span>
+                        <span
+                          className={`mx-2 font-bold uppercase ${
+                            log.level === 'error' ? 'text-[#F09A9A]' : log.level === 'warning' ? 'text-[#E0A961]' : 'text-slate-500'
+                          }`}
+                        >
+                          {log.level}
+                        </span>
+                        <span className="text-slate-200">{log.message}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </section>
+
+        {/* ============================================================ Sources */}
+        <section className="rounded-2xl border border-[#E2DFD8] bg-white">
+          <div className="border-b border-[#EFEDE8] px-5 py-4">
+            <Eyebrow>Mises à jour ponctuelles</Eyebrow>
+            <h2 className="mt-1 text-lg font-bold text-slate-900">Sources de données</h2>
+            <p className="mt-1 max-w-3xl text-sm text-slate-600">
+              Chaque source peut être relancée seule, en dehors du pipeline nocturne.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 p-5 xl:grid-cols-2">
+            {/* --- API Sirene --- */}
+            <SourceCard
+              source="API Sirene"
+              title="Créations et cessations d’établissements"
+              description="L’import classique s’appuie sur les dates de création. L’import des cessations utilise les dates de modification si elles sont renseignées, sinon les dates de création."
+              meta={lastApiImportAt ? `Dernier appel : ${formatDateFr(lastApiImportAt)}` : 'Jamais appelée'}
+              className="xl:col-span-2"
+            >
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <DateRangeField
+                  legend="Établissements créés entre"
+                  from={sireneParams.dateCreationMin}
+                  to={sireneParams.dateCreationMax}
+                  onFrom={(value) => setSireneParams((prev) => ({ ...prev, dateCreationMin: value }))}
+                  onTo={(value) => setSireneParams((prev) => ({ ...prev, dateCreationMax: value }))}
+                />
+                <DateRangeField
+                  legend="Modifiés entre"
+                  hint="Utilisé en priorité pour les cessations."
+                  from={sireneParams.dateMajMin}
+                  to={sireneParams.dateMajMax}
+                  onFrom={(value) => setSireneParams((prev) => ({ ...prev, dateMajMin: value }))}
+                  onTo={(value) => setSireneParams((prev) => ({ ...prev, dateMajMax: value }))}
+                />
+              </div>
+
+              <div className="mt-4">
+                <span className="mb-1.5 block text-sm font-semibold text-slate-800">Codes APE retenus</span>
+                <ChipsField
+                  values={apeCodes}
+                  onChange={(values) => setSireneParams((prev) => ({ ...prev, codesApe: values.join(', ') }))}
+                  placeholder="4322B, 4321A…"
+                />
+                <span className="mt-1.5 block text-xs text-slate-500">
+                  Vide = tous les codes. Entrée ou virgule pour ajouter.
+                </span>
+              </div>
+
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                <PrimaryButton onClick={() => void saveSireneParams()} disabled={savingSireneParams || busy}>
+                  {savingSireneParams && !importingApi && !importingCessationsApi ? 'Enregistrement…' : 'Enregistrer les paramètres'}
+                </PrimaryButton>
+                <SecondaryButton onClick={() => void launchImportSirene()} disabled={savingSireneParams || busy}>
+                  {importingApi ? 'Import en cours…' : 'Importer les créations'}
+                </SecondaryButton>
+                <DangerButton onClick={() => void launchImportSireneCessations()} disabled={savingSireneParams || busy}>
+                  {importingCessationsApi ? 'Import cessations…' : 'Importer les cessations'}
+                </DangerButton>
+
+                {sireneDirty && (
+                  <span className="flex items-center gap-2 text-xs font-semibold text-[#8A5A11]">
+                    <span className="h-2 w-2 rounded-full bg-[#B4761A]" />
+                    Paramètres modifiés, pensez à les enregistrer
+                  </span>
+                )}
+              </div>
+
+              <p className="mt-3 text-xs text-slate-500">
+                L’import des cessations supprime les SIRET fermés de la table clients. Les clients CEGECLIM sont conservés et marqués fermés.
+              </p>
+            </SourceCard>
+
+            {/* --- CSV --- */}
+            <SourceCard
+              source="Fichier"
+              title="Export Entreprise France (CSV)"
+              description="Alimente la table clients à partir d’un export téléchargé manuellement. Les SIRET déjà connus sont mis à jour, les autres créés."
+              meta={
+                lastImport
+                  ? `Dernier fichier : ${lastImport.nom_fichier} · ${formatDateFr(lastImport.date_import)}`
+                  : 'Aucun fichier importé'
+              }
+            >
+              <div className="flex flex-wrap items-center gap-3">
+                <PrimaryButton onClick={() => fileInputRef.current?.click()} disabled={uploadingCsv || busy}>
+                  {uploadingCsv ? 'Import en cours…' : 'Choisir un fichier CSV'}
+                </PrimaryButton>
+                <a
+                  href={SIRENE_EXPORT_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-sm font-semibold text-[#8A5A11] underline decoration-[#EBD8AE] underline-offset-4 transition hover:decoration-[#B4761A]"
+                >
+                  Télécharger un export sur annuaire-entreprises.data.gouv.fr
+                </a>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".csv,text/csv"
+                  onChange={handleCsvSelected}
+                  className="hidden"
+                />
+              </div>
+
+              {lastImport && (
+                <div className="mt-4 grid grid-cols-3 gap-2">
+                  <MiniStat label="Insérés" value={lastImport.nb_importees ?? 0} />
+                  <MiniStat label="Mis à jour" value={lastImport.nb_mises_a_jour ?? 0} />
+                  <MiniStat label="Rejets" value={lastImport.nb_rejets ?? 0} danger={Number(lastImport.nb_rejets || 0) > 0} />
+                </div>
+              )}
+            </SourceCard>
+
+            {/* --- RGE + capacité --- */}
+            <div className="grid grid-cols-1 gap-4">
+              <SourceCard
+                source="ADEME"
+                title="Qualification RGE"
+                description="Recharge le référentiel RGE, reconstruit le cache puis met à jour les champs RGE des clients."
+              >
+                <PrimaryButton onClick={() => void launchRgeRefresh()} disabled={refreshingRge || busy}>
+                  {refreshingRge ? 'Mise à jour…' : 'Mettre à jour le RGE'}
+                </PrimaryButton>
+              </SourceCard>
+
+              <SourceCard
+                source="ADEME"
+                title="Capacité froid/clim"
+                description="Récupère les opérateurs attestés gaz fluorés, filtre le secteur froid et climatisation, puis met à jour les attestations des clients."
+              >
+                <PrimaryButton onClick={() => void launchCapaciteRefresh()} disabled={refreshingCapacite || busy}>
+                  {refreshingCapacite ? 'Mise à jour…' : 'Mettre à jour la capacité'}
+                </PrimaryButton>
+              </SourceCard>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      {/* ============================================================ Compte rendu */}
+      {report && (
+        <div
+          className="fixed inset-0 z-[10000] flex items-start justify-center overflow-y-auto bg-[#111820]/55 p-4 py-10"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setReport(null)
+          }}
+        >
+          <div className="w-full max-w-xl rounded-2xl border border-[#E2DFD8] bg-white shadow-2xl">
+            <div
+              className={`flex items-start justify-between gap-4 rounded-t-2xl px-5 py-4 ${
+                report.tone === 'success' ? 'bg-[#FDF7EA]' : 'bg-[#FBE9E9]'
+              }`}
+            >
+              <div>
+                <h3 className={`text-lg font-bold ${report.tone === 'success' ? 'text-slate-900' : 'text-[#A32C2C]'}`}>
+                  {report.title}
+                </h3>
+                {report.subtitle && <p className="mt-1 text-sm text-slate-600">{report.subtitle}</p>}
+              </div>
+              <button
+                type="button"
+                onClick={() => setReport(null)}
+                className="shrink-0 rounded px-1 text-slate-500 transition hover:text-slate-900"
+                aria-label="Fermer le compte rendu"
+              >
+                ✕
+              </button>
+            </div>
+
+            <dl className="divide-y divide-[#EFEDE8] px-5">
+              {report.lines.map((line) => (
+                <div key={line.label} className="flex items-baseline justify-between gap-4 py-2.5">
+                  <dt className={`text-sm ${line.emphasis ? 'font-semibold text-slate-900' : 'text-slate-600'}`}>
+                    {line.label}
+                  </dt>
+                  <dd
+                    className={`text-right tabular-nums ${
+                      line.emphasis ? 'text-lg font-bold text-slate-900' : 'text-sm font-semibold text-slate-700'
+                    }`}
+                  >
+                    {line.value}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+
+            <div className="flex justify-end px-5 py-4">
+              <PrimaryButton onClick={() => setReport(null)}>Fermer</PrimaryButton>
+            </div>
+          </div>
         </div>
+      )}
 
-        {showImportsSection && (
-          <>
-            <div style={styles.importHeaderText}>Données relatives à la dernière importation du fichier</div>
-
-            <div style={styles.kpiGrid}>
-              <StatCard title="Date dernier import" value={lastImport ? formatDateFr(lastImport.date_import) : '—'} />
-              <StatCard title="Nb enreg. insérées dernier import" value={lastImport?.nb_importees ?? 0} />
-              <StatCard title="Nb enreg. rejetées dernier import" value={lastImport?.nb_rejets ?? 0} />
-            </div>
-
-            <div style={styles.importOptionsGrid}>
-              <div style={styles.importBox}>
-                <h3 style={styles.optionTitle}>Option 1 : Import automatique via API Sirene</h3>
-                <div style={styles.optionText}>
-                  Prépare les paramètres à stocker en base avant de brancher l’API. L’import classique utilise les dates de création.
-                  L’import cessations utilise les dates de modification si elles sont renseignées, sinon les dates de création.
-                </div>
-
-                <div style={styles.formGrid}>
-                  <div>
-                    <label style={styles.label}>Date création min</label>
-                    <input
-                      type="date"
-                      value={sireneParams.dateCreationMin}
-                      onChange={(e) => setSireneParams((prev) => ({ ...prev, dateCreationMin: e.target.value }))}
-                      style={styles.input}
-                    />
-                  </div>
-
-                  <div>
-                    <label style={styles.label}>Date création max</label>
-                    <input
-                      type="date"
-                      value={sireneParams.dateCreationMax}
-                      onChange={(e) => setSireneParams((prev) => ({ ...prev, dateCreationMax: e.target.value }))}
-                      style={styles.input}
-                    />
-                  </div>
-
-                  <div>
-                    <label style={styles.label}>Date modification min</label>
-                    <input
-                      type="date"
-                      value={sireneParams.dateMajMin}
-                      onChange={(e) => setSireneParams((prev) => ({ ...prev, dateMajMin: e.target.value }))}
-                      style={styles.input}
-                    />
-                  </div>
-
-                  <div>
-                    <label style={styles.label}>Date modification max</label>
-                    <input
-                      type="date"
-                      value={sireneParams.dateMajMax}
-                      onChange={(e) => setSireneParams((prev) => ({ ...prev, dateMajMax: e.target.value }))}
-                      style={styles.input}
-                    />
-                  </div>
-
-                  <div style={{ gridColumn: '1 / span 2' }}>
-                    <label style={styles.label}>Codes APE</label>
-                    <input
-                      value={sireneParams.codesApe}
-                      onChange={(e) => setSireneParams((prev) => ({ ...prev, codesApe: e.target.value }))}
-                      style={styles.input}
-                    />
-                    <div style={styles.helpText}>Valeurs séparées par des virgules.</div>
-                  </div>
-                </div>
-
-                <div style={styles.buttonRow}>
-                  <button type="button" onClick={saveSireneParams} style={styles.primaryButton} disabled={savingSireneParams || importingApi || importingCessationsApi}>
-                    {savingSireneParams && !importingApi ? 'Enregistrement...' : 'Enregistrer les paramètres'}
-                  </button>
-                  <button type="button" onClick={launchImportSirene} style={styles.secondaryButton} disabled={savingSireneParams || importingApi || importingCessationsApi}>
-                    {importingApi ? 'Import en cours...' : 'Lancer import API'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={launchImportSireneCessations}
-                    style={styles.dangerOutlineButton}
-                    disabled={savingSireneParams || importingApi || importingCessationsApi}
-                  >
-                    {importingCessationsApi ? 'Import cessations...' : 'Importer cessations SIRENE'}
-                  </button>
-                </div>
-              </div>
-
-              <div style={styles.importBox}>
-                <h3 style={styles.optionTitle}>Option 2 : Import manuel via CSV</h3>
-                <div style={styles.optionText}>Conserve le fonctionnement actuel pour alimenter la table clients.</div>
-
-                <div style={styles.uploadRow}>
-                  <div style={styles.uploadLabel}>Importer un CSV Entreprise France</div>
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    style={styles.primaryButton}
-                    disabled={uploadingCsv}
-                  >
-                    {uploadingCsv ? 'Import en cours...' : 'Choisir un fichier'}
-                  </button>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept=".csv,text/csv"
-                    onChange={handleCsvSelected}
-                    style={{ display: 'none' }}
-                  />
-                </div>
-
-                <div style={{ marginTop: 18 }}>
-                  https://annuaire-entreprises.data.gouv.fr/export-sirene
-                </div>
-              </div>
-
-              <div style={{ ...styles.importBox, gridColumn: '1 / span 2' }}>
-                <h3 style={styles.optionTitle}>Option 3 : MAJ RGE</h3>
-                <div style={styles.optionText}>
-                  Télécharge le référentiel RGE ADEME, alimente la table cache RGE puis met à jour les champs RGE de la table clients.
-                </div>
-
-                <div style={styles.buttonRow}>
-                  <button
-                    type="button"
-                    onClick={launchRgeRefresh}
-                    style={styles.primaryButton}
-                    disabled={refreshingRge}
-                  >
-                    {refreshingRge ? 'MAJ RGE en cours...' : 'MAJ RGE'}
-                  </button>
-                </div>
-              </div>
-
-
-              <div style={{ ...styles.importBox, gridColumn: '1 / span 2' }}>
-                <h3 style={styles.optionTitle}>Option 4 : MAJ capacité froid/clim ADEME</h3>
-                <div style={styles.optionText}>
-                  Télécharge le référentiel ADEME des opérateurs attestés gaz fluorés, filtre le secteur froid et climatisation, alimente la table cache capacité puis met à jour les champs capacité de la table clients.
-                </div>
-
-                <div style={styles.buttonRow}>
-                  <button
-                    type="button"
-                    onClick={launchCapaciteRefresh}
-                    style={styles.primaryButton}
-                    disabled={refreshingCapacite}
-                  >
-                    {refreshingCapacite ? 'MAJ capacité en cours...' : 'MAJ capacité'}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </>
-        )}
-      </div>
-    </section>
+      {toast && (
+        <div className="pointer-events-none fixed inset-x-0 bottom-6 z-[10000] flex justify-center px-4">
+          <div
+            role="status"
+            className={`pointer-events-auto flex max-w-2xl items-start gap-3 rounded-xl px-4 py-3 text-sm shadow-xl ${
+              toast.tone === 'success' ? 'bg-[#111820] text-white' : 'bg-[#7F1D1D] text-white'
+            }`}
+          >
+            <span className="flex-1 leading-relaxed">{toast.text}</span>
+            <button
+              type="button"
+              onClick={() => setToast(null)}
+              className="shrink-0 rounded px-1 text-white/70 transition hover:text-white"
+              aria-label="Fermer le message"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   )
 }
 
-const styles: Record<string, React.CSSProperties> = {
-  page: { padding: 20 },
-  pageHeader: {
-    marginBottom: 16,
-    borderBottom: '2px solid #111827',
-    paddingBottom: 8,
-  },
-  pageTitle: {
-    margin: 0,
-    fontSize: 26,
-    fontWeight: 800,
-    color: '#111827',
-  },
-  pageSubline: {
-    marginTop: 8,
-    color: '#475569',
-    fontSize: 14,
-  },
-  card: {
-    background: '#ffffff',
-    border: '1px solid #e2e8f0',
-    borderRadius: 22,
-    padding: 18,
-    boxShadow: '0 8px 24px rgba(15,23,42,0.06)',
-    marginBottom: 16,
-  },
-  sectionHeaderRow: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
-  },
-  sectionTitle: {
-    margin: 0,
-    fontSize: 20,
-    fontWeight: 800,
-    color: '#111827',
-  },
-  importHeaderText: {
-    marginTop: 10,
-    marginBottom: 14,
-    color: '#374151',
-    fontWeight: 600,
-  },
-  kpiGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(3, minmax(220px, 1fr))',
-    gap: 16,
-    marginTop: 12,
-  },
-  statCard: {
-    background: '#f8fafc',
-    border: '1px solid #dbe2ea',
-    borderRadius: 18,
-    padding: '14px 18px',
-    minHeight: 82,
-  },
-  statTitle: {
-    fontSize: 14,
-    fontWeight: 700,
-    color: '#111827',
-    marginBottom: 6,
-  },
-  statValue: {
-    fontSize: 22,
-    fontWeight: 800,
-    color: '#111827',
-  },
-  importOptionsGrid: {
-    display: 'grid',
-    gridTemplateColumns: '1fr 1fr',
-    gap: 18,
-    marginTop: 18,
-  },
-  importBox: {
-    border: '1px solid #dbe2ea',
-    borderRadius: 18,
-    background: '#f8fafc',
-    padding: 18,
-  },
-  optionTitle: {
-    margin: 0,
-    fontSize: 18,
-    fontWeight: 800,
-    color: '#111827',
-  },
-  optionText: {
-    marginTop: 8,
-    color: '#475569',
-  },
-  formGrid: {
-    display: 'grid',
-    gridTemplateColumns: '1fr 1fr',
-    gap: 16,
-    marginTop: 18,
-  },
-  label: {
-    display: 'block',
-    marginBottom: 6,
-    fontWeight: 700,
-    color: '#111827',
-  },
-  input: {
-    width: '100%',
-    borderRadius: 12,
-    border: '1px solid #cbd5e1',
-    padding: '11px 12px',
-    fontSize: 16,
-    background: '#fff',
-  },
-  helpText: {
-    marginTop: 6,
-    color: '#64748b',
-    fontSize: 13,
-  },
-  buttonRow: {
-    display: 'flex',
-    gap: 10,
-    marginTop: 18,
-  },
-  primaryButton: {
-    border: '1px solid #54708b',
-    background: '#6b7280',
-    color: '#fff',
-    borderRadius: 10,
-    padding: '10px 14px',
-    cursor: 'pointer',
-    fontWeight: 700,
-  },
-  secondaryButton: {
-    border: '1px solid #cbd5e1',
-    background: '#fff',
-    color: '#111827',
-    borderRadius: 10,
-    padding: '10px 14px',
-    cursor: 'pointer',
-    fontWeight: 700,
-  },
-  dangerOutlineButton: {
-    border: '1px solid #ef4444',
-    background: '#fff',
-    color: '#b91c1c',
-    borderRadius: 10,
-    padding: '10px 14px',
-    cursor: 'pointer',
-    fontWeight: 800,
-  },
-  uploadRow: {
-    marginTop: 20,
-    display: 'flex',
-    alignItems: 'center',
-    gap: 16,
-    background: '#eef2f7',
-    padding: 14,
-  },
-  uploadLabel: {
-    fontSize: 16,
-    color: '#111827',
-  },
-  maintenanceSummaryGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(4, minmax(180px, 1fr))',
-    gap: 12,
-    marginTop: 14,
-  },
-  maintenanceSummaryCard: {
-    background: '#f8fafc',
-    border: '1px solid #dbe2ea',
-    borderRadius: 16,
-    padding: 12,
-    minHeight: 72,
-  },
-  smallValue: {
-    fontSize: 14,
-    color: '#111827',
-    fontWeight: 800,
-    marginTop: 6,
-  },
-  maintenanceMessage: {
-    marginTop: 12,
-    background: '#eff6ff',
-    border: '1px solid #bfdbfe',
-    color: '#1e3a8a',
-    borderRadius: 14,
-    padding: 12,
-    fontWeight: 700,
-  },
-  maintenanceError: {
-    marginTop: 12,
-    background: '#fef2f2',
-    border: '1px solid #fecaca',
-    color: '#991b1b',
-    borderRadius: 14,
-    padding: 12,
-    fontWeight: 700,
-  },
-  tableWrap: {
-    marginTop: 14,
-    overflowX: 'auto',
-    border: '1px solid #e2e8f0',
-    borderRadius: 14,
-  },
-  maintenanceTable: {
-    width: '100%',
-    borderCollapse: 'collapse',
-    fontSize: 13,
-  },
-  th: {
-    textAlign: 'left',
-    background: '#f8fafc',
-    color: '#334155',
-    padding: '10px 12px',
-    borderBottom: '1px solid #e2e8f0',
-    fontWeight: 800,
-  },
-  thRight: {
-    textAlign: 'right',
-    background: '#f8fafc',
-    color: '#334155',
-    padding: '10px 12px',
-    borderBottom: '1px solid #e2e8f0',
-    fontWeight: 800,
-  },
-  td: {
-    padding: '10px 12px',
-    borderBottom: '1px solid #e2e8f0',
-    color: '#111827',
-  },
-  tdRight: {
-    padding: '10px 12px',
-    borderBottom: '1px solid #e2e8f0',
-    color: '#111827',
-    textAlign: 'right',
-    fontVariantNumeric: 'tabular-nums',
-  },
-  statusPill: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    minWidth: 84,
-    border: '1px solid',
-    borderRadius: 999,
-    padding: '4px 9px',
-    fontWeight: 800,
-    fontSize: 12,
-  },
-  logsBox: {
-    marginTop: 12,
-    background: '#0f172a',
-    color: '#e5e7eb',
-    borderRadius: 14,
-    padding: 12,
-    maxHeight: 280,
-    overflow: 'auto',
-    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-    fontSize: 12,
-  },
-  logLine: {
-    padding: '4px 0',
-    borderBottom: '1px solid rgba(255,255,255,0.08)',
-  },
+/* ------------------------------------------------------------------ */
+/* Briques d'interface                                                  */
+/* ------------------------------------------------------------------ */
+
+function HeaderStat({ label, value, tone = 'default' }: { label: string; value: number; tone?: 'default' | 'warn' }) {
+  const alert = tone === 'warn' && value > 0
+  return (
+    <div className={`min-w-[124px] rounded-xl border px-4 py-2.5 ${alert ? 'border-[#B4761A] bg-[#1B1710]' : 'border-[#2C3946] bg-[#161F29]'}`}>
+      <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">{label}</div>
+      <div className={`mt-0.5 text-2xl font-bold tabular-nums ${alert ? 'text-[#E0A961]' : 'text-white'}`}>
+        {formatNumber(value)}
+      </div>
+    </div>
+  )
+}
+
+function Eyebrow({ children }: { children: React.ReactNode }) {
+  return <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#8A5A11]">{children}</div>
+}
+
+/** Horloge discrète : on sait toujours de quand datent les chiffres affichés. */
+function LiveIndicator({ lastAt, running }: { lastAt: Date | null; running: boolean }) {
+  const [, setTick] = useState(0)
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setTick((value) => value + 1), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  if (!lastAt) return <span className="text-xs text-slate-400">Suivi non chargé</span>
+
+  const seconds = Math.max(0, Math.round((Date.now() - lastAt.getTime()) / 1000))
+
+  return (
+    <span className="flex items-center gap-2 text-xs text-slate-500">
+      <span className={`h-2 w-2 rounded-full ${running ? 'animate-pulse bg-[#B4761A]' : 'bg-[#CBC5B8]'}`} />
+      {running ? 'Traitement en cours · ' : ''}
+      actualisé il y a {seconds}s
+    </span>
+  )
+}
+
+function RunFact({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="bg-white px-4 py-3">
+      <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">{label}</div>
+      <div className="mt-1.5">{children}</div>
+    </div>
+  )
+}
+
+function NumHead({ children }: { children: React.ReactNode }) {
+  return (
+    <th className="px-3 py-2.5 text-right text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+      {children}
+    </th>
+  )
+}
+
+function NumCell({ value, danger = false }: { value: number | null | undefined; danger?: boolean }) {
+  const numeric = Number(value || 0)
+  return (
+    <td
+      className={`px-3 py-2.5 text-right tabular-nums ${
+        danger && numeric > 0 ? 'font-bold text-[#A32C2C]' : numeric === 0 ? 'text-slate-400' : 'text-slate-800'
+      }`}
+    >
+      {formatNumber(numeric)}
+    </td>
+  )
+}
+
+function MiniStat({ label, value, danger = false }: { label: string; value: number; danger?: boolean }) {
+  return (
+    <div className="rounded-lg border border-[#E7E4DD] bg-white px-3 py-2">
+      <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">{label}</div>
+      <div className={`mt-0.5 text-lg font-bold tabular-nums ${danger ? 'text-[#A32C2C]' : 'text-slate-900'}`}>
+        {formatNumber(value)}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Une carte par source réelle (API Sirene, fichier, ADEME) plutôt qu'une
+ * numérotation « Option 1 / 2 / 3 » : ces traitements ne s'enchaînent pas.
+ */
+function SourceCard({
+  source,
+  title,
+  description,
+  meta,
+  className = '',
+  children,
+}: {
+  source: string
+  title: string
+  description: string
+  meta?: string
+  className?: string
+  children: React.ReactNode
+}) {
+  return (
+    <article className={`flex flex-col rounded-2xl border border-[#E7E4DD] bg-[#FAF9F7] p-5 ${className}`}>
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <span className="rounded-md bg-[#EDEAE3] px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-600">
+          {source}
+        </span>
+        {meta && <span className="text-xs text-slate-500">{meta}</span>}
+      </div>
+      <h3 className="mt-3 text-base font-bold text-slate-900">{title}</h3>
+      <p className="mt-1.5 text-sm leading-relaxed text-slate-600">{description}</p>
+      <div className="mt-4">{children}</div>
+    </article>
+  )
+}
+
+function DateRangeField({
+  legend,
+  hint,
+  from,
+  to,
+  onFrom,
+  onTo,
+}: {
+  legend: string
+  hint?: string
+  from: string
+  to: string
+  onFrom: (value: string) => void
+  onTo: (value: string) => void
+}) {
+  return (
+    <fieldset className="min-w-0">
+      <legend className="mb-1.5 text-sm font-semibold text-slate-800">{legend}</legend>
+      <div className="flex items-center gap-2">
+        <DateInput value={from} onChange={onFrom} label={`${legend} — début`} />
+        <span className="shrink-0 text-sm text-slate-400">→</span>
+        <DateInput value={to} onChange={onTo} label={`${legend} — fin`} />
+      </div>
+      {hint && <p className="mt-1.5 text-xs text-slate-500">{hint}</p>}
+    </fieldset>
+  )
+}
+
+function DateInput({ value, onChange, label }: { value: string; onChange: (value: string) => void; label: string }) {
+  return (
+    <input
+      type="date"
+      value={value}
+      aria-label={label}
+      onChange={(event) => onChange(event.target.value)}
+      className="h-[42px] w-full min-w-0 rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-[#B4761A] focus:ring-2 focus:ring-[#B4761A]/25"
+    />
+  )
+}
+
+/** Saisie en étiquettes : on voit ce qui est réellement enregistré. */
+function ChipsField({
+  values,
+  onChange,
+  placeholder = '',
+}: {
+  values: string[]
+  onChange: (values: string[]) => void
+  placeholder?: string
+}) {
+  const [draft, setDraft] = useState('')
+
+  function commit(raw: string) {
+    const additions = normalizeArray(raw.replace(/[;|\n]/g, ','))
+    if (!additions.length) return
+    onChange(Array.from(new Set([...values, ...additions])))
+    setDraft('')
+  }
+
+  function removeAt(index: number) {
+    onChange(values.filter((_, position) => position !== index))
+  }
+
+  return (
+    <div className="rounded-xl border border-[#D8D3C8] bg-white p-2 transition focus-within:border-[#B4761A] focus-within:ring-2 focus-within:ring-[#B4761A]/25">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {values.map((value, index) => (
+          <span
+            key={`${value}-${index}`}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-[#EDEAE3] py-1 pl-2.5 pr-1.5 font-mono text-xs font-semibold text-slate-700"
+          >
+            {value}
+            <button
+              type="button"
+              onClick={() => removeAt(index)}
+              className="rounded text-slate-500 transition hover:text-[#A32C2C]"
+              aria-label={`Retirer ${value}`}
+            >
+              ✕
+            </button>
+          </span>
+        ))}
+        <input
+          value={draft}
+          onChange={(event) => {
+            const raw = event.target.value
+            if (/[;,|]/.test(raw)) commit(raw)
+            else setDraft(raw)
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              commit(draft)
+            }
+            if (event.key === 'Backspace' && !draft && values.length) removeAt(values.length - 1)
+          }}
+          onBlur={() => commit(draft)}
+          placeholder={values.length ? '' : placeholder}
+          className="min-w-[120px] flex-1 border-0 bg-transparent px-1.5 py-1 font-mono text-sm outline-none placeholder:font-sans placeholder:text-slate-400"
+        />
+      </div>
+    </div>
+  )
+}
+
+function PrimaryButton({
+  onClick,
+  disabled = false,
+  children,
+}: {
+  onClick: () => void
+  disabled?: boolean
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="rounded-xl bg-[#111820] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[#25313D] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A] disabled:cursor-not-allowed disabled:opacity-40"
+    >
+      {children}
+    </button>
+  )
+}
+
+function SecondaryButton({
+  onClick,
+  disabled = false,
+  children,
+}: {
+  onClick: () => void
+  disabled?: boolean
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="rounded-xl border border-[#D8D3C8] bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 transition hover:border-[#B4761A] hover:text-[#8A5A11] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A] disabled:cursor-not-allowed disabled:opacity-40"
+    >
+      {children}
+    </button>
+  )
+}
+
+function DangerButton({
+  onClick,
+  disabled = false,
+  children,
+}: {
+  onClick: () => void
+  disabled?: boolean
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="rounded-xl border border-[#E2B4B4] bg-white px-4 py-2.5 text-sm font-semibold text-[#A32C2C] transition hover:border-[#A32C2C] hover:bg-[#FBE9E9] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#A32C2C] disabled:cursor-not-allowed disabled:opacity-40"
+    >
+      {children}
+    </button>
+  )
+}
+
+function GhostButton({
+  onClick,
+  disabled = false,
+  children,
+}: {
+  onClick: () => void
+  disabled?: boolean
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="rounded-lg border border-[#D8D3C8] bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:border-[#B4761A] hover:text-[#8A5A11] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A] disabled:cursor-not-allowed disabled:opacity-40"
+    >
+      {children}
+    </button>
+  )
 }
