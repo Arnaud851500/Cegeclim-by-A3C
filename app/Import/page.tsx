@@ -1,6 +1,7 @@
 'use client'
 
 import { ChangeEvent, useEffect, useMemo, useState } from 'react'
+import type React from 'react'
 import * as XLSX from 'xlsx'
 import { supabase } from '@/lib/supabaseClient'
 
@@ -36,6 +37,7 @@ type TableConfig = {
   primaryKey: string
   secondaryKeys?: string[]
   description: string
+  family: 'Référentiels' | 'Documents' | 'Stock'
   columns: ColumnConfig[]
 }
 
@@ -97,6 +99,9 @@ type PendingReferentialImport = {
   identicalIgnored: number
 }
 
+/** Onglets : cet écran porte quatre métiers distincts, ils ne se lisent pas d'affilée. */
+type WorkspaceTab = 'pipeline' | 'manual' | 'aggregates' | 'controls'
+
 const PREVIEW_LIMIT = 100
 
 // Performance import : le contrôle de doublons travaille par lots de hash.
@@ -126,6 +131,7 @@ const TABLES: TableConfig[] = [
     key: 'ref_familles',
     label: 'Familles',
     primaryKey: 'famille',
+    family: 'Référentiels',
     description: 'Référentiel familles articles / tiers.',
     columns: [
       { db: 'famille', label: 'Famille', required: true },
@@ -147,6 +153,7 @@ const TABLES: TableConfig[] = [
     key: 'ref_code_naf',
     label: 'Codes NAF',
     primaryKey: 'code_naf',
+    family: 'Référentiels',
     description: 'Référentiel codes NAF.',
     columns: [
       { db: 'code_naf', label: 'Code NAF', required: true },
@@ -158,6 +165,7 @@ const TABLES: TableConfig[] = [
     key: 'ref_collaborateurs',
     label: 'Collaborateurs',
     primaryKey: 'nom',
+    family: 'Référentiels',
     description: 'Référentiel collaborateurs.',
     columns: [
       { db: 'nom', label: 'Nom', required: true },
@@ -173,6 +181,7 @@ const TABLES: TableConfig[] = [
     key: 'ref_articles',
     label: 'Articles',
     primaryKey: 'reference_article',
+    family: 'Référentiels',
     description: 'Référentiel articles avec relation famille.',
     columns: [
       { db: 'reference_article', label: 'Référence article', required: true },
@@ -204,6 +213,7 @@ const TABLES: TableConfig[] = [
     key: 'ref_tiers',
     label: 'Tiers',
     primaryKey: 'numero',
+    family: 'Référentiels',
     description: 'Référentiel clients / prospects / tiers.',
     columns: [
       { db: 'numero', label: 'Numéro', required: true },
@@ -288,6 +298,7 @@ const TABLES: TableConfig[] = [
     label: 'Lignes de factures',
     primaryKey: 'ligne_hash',
     secondaryKeys: ['numero_piece', 'reference_article', 'designation'],
+    family: 'Documents',
     description: 'Table centrale : une ligne par ligne de facture.',
     columns: [
       { db: 'ligne_hash', label: 'Clé ligne', readonly: true },
@@ -361,6 +372,7 @@ const TABLES: TableConfig[] = [
     label: 'Lignes de devis',
     primaryKey: 'ligne_hash',
     secondaryKeys: ['numero_piece', 'reference_article', 'designation'],
+    family: 'Documents',
     description: 'Table centrale : une ligne par ligne de devis.',
     columns: [
       { db: 'ligne_hash', label: 'Clé ligne', readonly: true },
@@ -434,6 +446,7 @@ const TABLES: TableConfig[] = [
     label: 'Activités',
     primaryKey: 'ligne_hash',
     secondaryKeys: ['numero_piece', 'reference_article', 'designation'],
+    family: 'Documents',
     description: 'Activité commerciale issue des documents de vente.',
     columns: [
       { db: 'ligne_hash', label: 'Clé ligne', readonly: true },
@@ -485,6 +498,7 @@ const TABLES: TableConfig[] = [
     label: 'Activité entêtes',
     primaryKey: 'numero_piece',
     secondaryKeys: ['numero_tiers', 'reference', 'expedition'],
+    family: 'Documents',
     description: 'Une ligne par entête de BL / PL. La table est vidée avant chaque nouvel import.',
     columns: [
       { db: 'type_document', label: 'Type' },
@@ -541,6 +555,7 @@ const TABLES: TableConfig[] = [
     label: "Modes d'expédition",
     primaryKey: 'mode_expedition',
     secondaryKeys: ['base_calcul', 'frais_port_ht'],
+    family: 'Référentiels',
     description: "Référentiel du forfait de port théorique par mode d'expédition. La table est vidée avant chaque import.",
     columns: [
       { db: 'mode_expedition', label: "Mode d'expédition", required: true },
@@ -553,6 +568,7 @@ const TABLES: TableConfig[] = [
     label: 'Stock articles',
     primaryKey: 'reference_article',
     secondaryKeys: ['designation', 'famille', 'fournisseur_principal'],
+    family: 'Stock',
     description: 'Photo du stock article issue du fichier Article stock.xlsx.',
     columns: [
       { db: 'reference_article', label: 'Référence article', required: true },
@@ -603,6 +619,7 @@ const TABLES: TableConfig[] = [
     label: 'Commandes fournisseurs ouvertes',
     primaryKey: 'row_number',
     secondaryKeys: ['numero_piece', 'reference_article', 'designation'],
+    family: 'Stock',
     description: 'BDCF : commandes fournisseurs ouvertes utilisées comme entrées futures de stock.',
     columns: [
       { db: 'row_number', label: 'N° ligne import', type: 'number', readonly: true },
@@ -669,10 +686,10 @@ const TABLES: TableConfig[] = [
       { db: 'marge_pourcent', label: 'Marge en %', type: 'number', numberFormat: 'percent_ratio', aliases: ['Marge %', 'Marge pourcent'] },
       { db: 'projet', label: 'Projet' },
     ],
-  }
-
+  },
 ]
 
+const TABLE_FAMILIES: Array<TableConfig['family']> = ['Documents', 'Référentiels', 'Stock']
 
 const LINE_TABLE_KEYS: TableKey[] = ['facture_lignes', 'devis_lignes', 'activite_lignes']
 const FULL_REPLACEMENT_TABLE_KEYS: TableKey[] = ['activite_entete', 'modes_expedition']
@@ -1110,7 +1127,7 @@ function normalizeNumber(value: any) {
   const isNegativeWithParentheses = /^\(.*\)$/.test(cleaned)
 
   cleaned = cleaned
-    .replace(/ /g, ' ')
+    .replace(/ /g, ' ')
     .replace(/\s/g, '')
     .replace(/[€%]/g, '')
     .replace(/[A-Za-z]/g, '')
@@ -1412,7 +1429,11 @@ function formatDateTime(value: string | null) {
   }).format(new Date(value))
 }
 
-
+function formatCount(value: number | null | undefined) {
+  const n = Number(value ?? 0)
+  if (!Number.isFinite(n)) return '—'
+  return new Intl.NumberFormat('fr-FR').format(n)
+}
 
 function detectAutoImportFileKind(fileName: string): AutoImportFileKind {
   const baseName = String(fileName || '').replace(/\.[^.]+$/, '')
@@ -1467,7 +1488,6 @@ function autoImportKindBaseName(kind: AutoImportFileKind) {
   if (kind === 'Devis') return 'Devis'
   return 'Import'
 }
-
 
 type AutoImportNamedFileForValidation = {
   name: string
@@ -1823,30 +1843,44 @@ function isAutoImportRunError(status: any) {
   return ['error', 'failed', 'ko', 'cancelled', 'canceled'].includes(s)
 }
 
+/* ------------------------------------------------------------------ */
+/* Jetons visuels : encre + ambre, un seul accent, statuts codés une fois */
+/* ------------------------------------------------------------------ */
+
 function statusBadgeClass(status: any) {
-  if (isAutoImportRunSuccess(status)) return 'border-emerald-200 bg-emerald-50 text-emerald-800'
-  if (isAutoImportRunRunning(status)) return 'border-blue-200 bg-blue-50 text-blue-800'
-  if (isAutoImportRunError(status)) return 'border-red-200 bg-red-50 text-red-800'
-  return 'border-slate-200 bg-slate-50 text-slate-700'
+  if (isAutoImportRunSuccess(status)) return 'bg-[#E7F1EA] text-[#1F5B44] ring-1 ring-[#BFDCCE]'
+  if (isAutoImportRunRunning(status)) return 'bg-[#FDF2DE] text-[#8A5A11] ring-1 ring-[#EBD8AE]'
+  if (isAutoImportRunError(status)) return 'bg-[#FBE9E9] text-[#A32C2C] ring-1 ring-[#F0C7C7]'
+  return 'bg-[#F1EFEA] text-[#6B6355] ring-1 ring-[#DFDACF]'
+}
+
+function statusDotClass(status: any) {
+  if (isAutoImportRunSuccess(status)) return 'bg-[#2F6B4F]'
+  if (isAutoImportRunRunning(status)) return 'bg-[#B4761A]'
+  if (isAutoImportRunError(status)) return 'bg-[#A32C2C]'
+  return 'bg-[#CBC5B8]'
 }
 
 function folderBadgeClass(folder: AutoImportFolder) {
-  if (folder === 'pending') return 'border-amber-200 bg-amber-50 text-amber-800'
-  if (folder === 'processing') return 'border-blue-200 bg-blue-50 text-blue-800'
-  if (folder === 'rejected') return 'border-red-200 bg-red-50 text-red-800'
-  return 'border-emerald-200 bg-emerald-50 text-emerald-800'
+  if (folder === 'pending') return 'bg-[#FDF2DE] text-[#8A5A11] ring-1 ring-[#EBD8AE]'
+  if (folder === 'processing') return 'bg-[#111820] text-white ring-1 ring-[#111820]'
+  if (folder === 'rejected') return 'bg-[#FBE9E9] text-[#A32C2C] ring-1 ring-[#F0C7C7]'
+  return 'bg-[#E7F1EA] text-[#1F5B44] ring-1 ring-[#BFDCCE]'
 }
 
-function fileKindBadgeClass(kind: AutoImportFileKind) {
-  if (kind === 'StockArticle') return 'border-sky-200 bg-sky-50 text-sky-800'
-  if (kind === 'BDCF') return 'border-violet-200 bg-violet-50 text-violet-800'
-  if (kind === 'ModesExpedition') return 'border-cyan-200 bg-cyan-50 text-cyan-800'
-  if (kind === 'ActiviteEntete') return 'border-fuchsia-200 bg-fuchsia-50 text-fuchsia-800'
-  if (kind === 'Activite') return 'border-indigo-200 bg-indigo-50 text-indigo-800'
-  if (kind === 'Facture') return 'border-emerald-200 bg-emerald-50 text-emerald-800'
-  if (kind === 'Devis') return 'border-orange-200 bg-orange-50 text-orange-800'
-  return 'border-red-200 bg-red-50 text-red-800'
+function folderLabel(folder: AutoImportFolder) {
+  if (folder === 'pending') return 'À traiter'
+  if (folder === 'processing') return 'En cours'
+  if (folder === 'rejected') return 'Rejeté'
+  return 'Archivé'
 }
+
+// Les types de fichiers ne portent pas de sémantique de gravité : une seule teinte neutre suffit.
+function fileKindBadgeClass(kind: AutoImportFileKind) {
+  if (kind === 'Invalide') return 'bg-[#FBE9E9] text-[#A32C2C] ring-1 ring-[#F0C7C7]'
+  return 'bg-[#EDEAE3] text-[#4A443A] ring-1 ring-[#DFDACF]'
+}
+
 function getPipelineRunReport(run: ImportPipelineRun | null, tab: AutoImportReportTab) {
   if (!run) return 'Aucun run disponible.'
 
@@ -1887,6 +1921,7 @@ function rpcSignatureMismatch(error: any) {
     message.includes('schema cache')
   )
 }
+
 function tableDisplayKey(row: GenericRow, config: TableConfig) {
   const value = row[config.primaryKey]
   if (value) return String(value)
@@ -1912,7 +1947,6 @@ function tableReactKey(row: GenericRow, config: TableConfig, index: number) {
 
   return `${config.key}-row-${index}`
 }
-
 
 function previewOrderColumn(config: TableConfig) {
   if (isLineTableKey(config.key)) return 'imported_at'
@@ -2213,7 +2247,6 @@ type ReconciliationRow = {
   ecart_smc_devis_vs_indicateur: number | null
 }
 
-
 type ReconciliationRunSummary = {
   run_id: number
   status: string
@@ -2284,7 +2317,6 @@ type SmcReconciliationAnnualRow = {
 const TOLERANCE = 0.01
 const FLUX_ARTICLES_FRONT_REBUILD_RPC = 'rebuild_indicateur_flux_articles_mensuel_periode_front'
 
-
 type SmcRpcPeriod = {
   p_date_debut: string
   p_date_fin: string
@@ -2319,7 +2351,6 @@ const SMC_BACKGROUND_DEFAULT_BATCH_SIZE = 25
 const SMC_BACKGROUND_MIN_BATCH_SIZE = 1
 const SMC_BACKGROUND_MAX_BATCH_SIZE = 200
 const SMC_BACKGROUND_POLL_MS = 5000
-
 
 type AutoImportFolder = 'pending' | 'processing' | 'rejected' | 'archive'
 type AutoImportFileKind = 'StockArticle' | 'BDCF' | 'ModesExpedition' | 'ActiviteEntete' | 'Activite' | 'Facture' | 'Devis' | 'Invalide'
@@ -2375,6 +2406,25 @@ const AUTO_IMPORT_PIPELINE_RPC_CANDIDATES = [
 const AUTO_IMPORT_POLL_MS = 10000
 const AUTO_IMPORT_FLUX_ARTICLES_MONTHS_BACK = 10
 const AUTO_IMPORT_EDGE_FUNCTION_NAME = 'import-pipeline-global'
+
+/** Phases du job serveur : le statut brut ne dit pas où on en est dans la chaîne. */
+const AUTO_IMPORT_PHASES: Array<{ key: string; label: string; statuses: string[] }> = [
+  { key: 'files', label: 'Import des fichiers', statuses: ['queued', 'running', 'processing', 'started'] },
+  { key: 'flux', label: 'Flux articles', statuses: ['running', 'processing'] },
+  { key: 'report', label: 'Rapport avant SMC', statuses: ['pre_smc_done'] },
+  { key: 'smc', label: 'Synthèse multi-clients', statuses: ['smc_running'] },
+  { key: 'done', label: 'Terminé', statuses: ['done', 'success', 'finished', 'completed', 'ok'] },
+]
+
+function getAutoImportPhaseIndex(run: ImportPipelineRun | null) {
+  if (!run) return -1
+  const status = String(run.status || '').toLowerCase()
+  if (isAutoImportRunSuccess(status)) return 4
+  if (status === 'smc_running') return 3
+  if (status === 'pre_smc_done') return 2
+  if (isAutoImportRunError(status)) return -2
+  return 0
+}
 
 const SMC_BATCH_SIZE = 1
 const SMC_MAX_LOOPS = 10000
@@ -2547,7 +2597,6 @@ function monthLabel(row: ReconciliationRow) {
   return `${String(row.mois).padStart(2, '0')}/${row.annee}`
 }
 
-
 function mapStoredReconciliationRow(row: ReconciliationStoredRow): ReconciliationRow {
   return {
     annee: row.annee,
@@ -2584,13 +2633,13 @@ function mapStoredReconciliationRow(row: ReconciliationStoredRow): Reconciliatio
 
 function getEcartClass(value: any) {
   return absEcart(value) > TOLERANCE
-    ? 'bg-red-50 text-red-700 font-black'
-    : 'bg-emerald-50 text-emerald-700 font-bold'
+    ? 'bg-[#FBE9E9] text-[#A32C2C] font-bold'
+    : 'text-[#1F5B44] font-semibold'
 }
 
 function getValueClass(reference: any, compared: any) {
   const ecart = toNumber(compared) - toNumber(reference)
-  return absEcart(ecart) > TOLERANCE ? 'text-red-700 font-black' : 'text-slate-800'
+  return absEcart(ecart) > TOLERANCE ? 'text-[#A32C2C] font-bold' : 'text-slate-700'
 }
 
 function computeRowIssues(row: ReconciliationRow) {
@@ -2706,6 +2755,7 @@ function DataReconciliationPanel() {
   const [hasRun, setHasRun] = useState(false)
   const [runSummary, setRunSummary] = useState<ReconciliationRunSummary | null>(null)
   const [smcRows, setSmcRows] = useState<SmcReconciliationAnnualRow[]>([])
+  const [onlyKo, setOnlyKo] = useState(false)
 
   const summary = useMemo(() => {
     const koRows = rows.filter((row) => computeRowIssues(row).length > 0)
@@ -2746,6 +2796,11 @@ function DataReconciliationPanel() {
       maxAbsEcart: smcRows.reduce((max, row) => Math.max(max, absEcart(row.ecart)), 0),
     }
   }, [smcRows])
+
+  const visibleRows = useMemo(
+    () => (onlyKo ? rows.filter((row) => computeRowIssues(row).length > 0) : rows),
+    [rows, onlyKo]
+  )
 
   async function loadReconciliation() {
     setLoading(true)
@@ -2857,231 +2912,251 @@ function DataReconciliationPanel() {
   }
 
   return (
-    <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <h2 className="text-sm font-black uppercase tracking-wide text-slate-700">Contrôle cohérence agrégats</h2>
-          <p className="mt-1 text-xs font-semibold text-slate-500">
-            Compare les lignes sources, les caches, les indicateurs et le flux articles mois par mois. La SMC est exclue du contrôle mensuel et contrôlée à part via un wrapper avec timeout long.
+    <div className="space-y-5">
+      <section className="rounded-2xl border border-[#E2DFD8] bg-white">
+        <div className="flex flex-col gap-4 border-b border-[#EFEDE8] px-5 py-4 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <Eyebrow>Cohérence</Eyebrow>
+            <h2 className="mt-1 text-lg font-bold text-slate-900">Contrôle des agrégats</h2>
+            <p className="mt-1 max-w-3xl text-sm text-slate-600">
+              Compare mois par mois les lignes sources, les caches, les indicateurs et le flux articles.
+              La synthèse multi-clients est contrôlée à part, en vision année / YTD.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-end gap-2">
+            <LabelledDate label="Du" value={startDate} onChange={setStartDate} />
+            <LabelledDate label="Au" value={endDate} onChange={setEndDate} />
+            <PrimaryButton onClick={() => void loadReconciliation()} disabled={loading}>
+              {loading ? 'Contrôle…' : 'Lancer le contrôle'}
+            </PrimaryButton>
+            <SecondaryButton
+              onClick={() => exportRows(rows, smcRows)}
+              disabled={(!rows.length && !smcRows.length) || loading}
+            >
+              Export Excel
+            </SecondaryButton>
+          </div>
+        </div>
+
+        {error && (
+          <div className="mx-5 mt-4 rounded-xl border border-[#F0C7C7] bg-[#FBE9E9] px-4 py-3 text-sm font-semibold text-[#A32C2C]">
+            Contrôle impossible : {error}
+          </div>
+        )}
+
+        {runSummary && (
+          <div
+            className={`mx-5 mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xl px-4 py-3 text-sm ${
+              runSummary.status === 'ok'
+                ? 'bg-[#E7F1EA] text-[#1F5B44] ring-1 ring-[#BFDCCE]'
+                : 'bg-[#FBE9E9] text-[#A32C2C] ring-1 ring-[#F0C7C7]'
+            }`}
+          >
+            <span className="font-bold">Contrôle #{runSummary.run_id}</span>
+            <span>{runSummary.ok_months} mois alignés</span>
+            <span>{runSummary.ko_months} mois en écart</span>
+            <span className="tabular-nums">écart maximal {formatMoney(runSummary.max_abs_ecart)} €</span>
+          </div>
+        )}
+
+        {hasRun && !error && (
+          <>
+            <div className="mt-4 grid grid-cols-2 gap-px border-y border-[#EFEDE8] bg-[#EFEDE8] md:grid-cols-5">
+              <RunFact label="Mois contrôlés">
+                <span className="text-lg font-bold tabular-nums text-slate-900">{summary.total}</span>
+              </RunFact>
+              <RunFact label="Alignés">
+                <span className="text-lg font-bold tabular-nums text-[#2F6B4F]">{summary.ok}</span>
+              </RunFact>
+              <RunFact label="En écart">
+                <span className={`text-lg font-bold tabular-nums ${summary.ko ? 'text-[#A32C2C]' : 'text-slate-900'}`}>
+                  {summary.ko}
+                </span>
+              </RunFact>
+              <RunFact label="Dont factures">
+                <span className={`text-lg font-bold tabular-nums ${summary.facturesKo ? 'text-[#A32C2C]' : 'text-slate-400'}`}>
+                  {summary.facturesKo}
+                </span>
+              </RunFact>
+              <RunFact label="Dont devis">
+                <span className={`text-lg font-bold tabular-nums ${summary.devisKo ? 'text-[#A32C2C]' : 'text-slate-400'}`}>
+                  {summary.devisKo}
+                </span>
+              </RunFact>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3">
+              <p className="max-w-3xl text-xs text-slate-500">
+                La SMC est exclue du contrôle mensuel : elle se lit en année / YTD. Les écarts ci-dessous portent sur
+                factures, devis, CDC, BL et flux articles.
+              </p>
+              <label className="flex cursor-pointer items-center gap-2 text-sm font-semibold text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={onlyKo}
+                  onChange={(event) => setOnlyKo(event.target.checked)}
+                  className="h-4 w-4 accent-[#B4761A]"
+                />
+                N’afficher que les mois en écart
+              </label>
+            </div>
+          </>
+        )}
+
+        {rows.length ? (
+          <div className="mx-5 mb-5 max-h-[560px] overflow-auto rounded-xl border border-[#E7E4DD]">
+            <table className="min-w-[1900px] border-collapse text-xs">
+              <thead className="sticky top-0 z-10 bg-[#111820] text-white">
+                <tr>
+                  <th className="px-2 py-2.5 text-left font-semibold">Période</th>
+                  <th className="px-2 py-2.5 text-left font-semibold">Statut</th>
+                  <th className="px-2 py-2.5 text-right font-semibold">Fact. lignes</th>
+                  <th className="px-2 py-2.5 text-right font-semibold">Fact. cache</th>
+                  <th className="px-2 py-2.5 text-right font-semibold">Fact. indic.</th>
+                  <th className="px-2 py-2.5 text-right font-semibold">Fact. flux</th>
+                  <th className="px-2 py-2.5 text-right font-semibold">Écart flux</th>
+                  <th className="px-2 py-2.5 text-right font-semibold">Devis lignes</th>
+                  <th className="px-2 py-2.5 text-right font-semibold">Devis cache</th>
+                  <th className="px-2 py-2.5 text-right font-semibold">Devis indic.</th>
+                  <th className="px-2 py-2.5 text-right font-semibold">Devis flux</th>
+                  <th className="px-2 py-2.5 text-right font-semibold">Écart flux</th>
+                  <th className="px-2 py-2.5 text-right font-semibold">CDC depuis fact</th>
+                  <th className="px-2 py-2.5 text-right font-semibold">CDC depuis activité</th>
+                  <th className="px-2 py-2.5 text-right font-semibold">CDC flux</th>
+                  <th className="px-2 py-2.5 text-right font-semibold">Écart CDC</th>
+                  <th className="px-2 py-2.5 text-right font-semibold">BL depuis fact</th>
+                  <th className="px-2 py-2.5 text-right font-semibold">BL depuis activité</th>
+                  <th className="px-2 py-2.5 text-right font-semibold">BL flux</th>
+                  <th className="px-2 py-2.5 text-right font-semibold">Écart BL</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleRows.map((row) => {
+                  const issues = computeRowIssues(row)
+                  const facturesLignes = toNumber(row.factures_lignes)
+                  const devisLignes = toNumber(row.devis_lignes)
+                  const cdcDepuisFact = toNumber(row.cdc_source_activite_plus_factures)
+                  const blDepuisFact = toNumber(row.bl_source_activite_plus_factures)
+
+                  return (
+                    <tr key={`${row.annee}-${row.mois}`} className="border-b border-[#EFEDE8] hover:bg-[#FAF9F7]">
+                      <td className="whitespace-nowrap px-2 py-2 font-bold tabular-nums">{monthLabel(row)}</td>
+                      <td className="px-2 py-2">
+                        <span
+                          className={`rounded-full px-2 py-1 text-[11px] font-bold ${
+                            issues.length
+                              ? 'bg-[#FBE9E9] text-[#A32C2C] ring-1 ring-[#F0C7C7]'
+                              : 'bg-[#E7F1EA] text-[#1F5B44] ring-1 ring-[#BFDCCE]'
+                          }`}
+                          title={issues.join(', ') || 'Tous les contrôles sont alignés'}
+                        >
+                          {issues.length ? `Écart (${issues.length})` : 'Aligné'}
+                        </span>
+                      </td>
+
+                      <td className="px-2 py-2 text-right font-semibold tabular-nums">{formatMoney(facturesLignes)}</td>
+                      <td className={`px-2 py-2 text-right tabular-nums ${getValueClass(facturesLignes, row.factures_cache)}`}>{formatMoney(row.factures_cache)}</td>
+                      <td className={`px-2 py-2 text-right tabular-nums ${getValueClass(facturesLignes, row.factures_indicateur)}`}>{formatMoney(row.factures_indicateur)}</td>
+                      <td className={`px-2 py-2 text-right tabular-nums ${getValueClass(facturesLignes, row.factures_flux)}`}>{formatMoney(row.factures_flux)}</td>
+                      <td className={`px-2 py-2 text-right tabular-nums ${getEcartClass(toNumber(row.factures_flux) - facturesLignes)}`}>{formatSigned(toNumber(row.factures_flux) - facturesLignes)}</td>
+                      <td className="px-2 py-2 text-right font-semibold tabular-nums">{formatMoney(devisLignes)}</td>
+                      <td className={`px-2 py-2 text-right tabular-nums ${getValueClass(devisLignes, row.devis_cache)}`}>{formatMoney(row.devis_cache)}</td>
+                      <td className={`px-2 py-2 text-right tabular-nums ${getValueClass(devisLignes, row.devis_indicateur)}`}>{formatMoney(row.devis_indicateur)}</td>
+                      <td className={`px-2 py-2 text-right tabular-nums ${getValueClass(devisLignes, row.devis_flux)}`}>{formatMoney(row.devis_flux)}</td>
+                      <td className={`px-2 py-2 text-right tabular-nums ${getEcartClass(toNumber(row.devis_flux) - devisLignes)}`}>{formatSigned(toNumber(row.devis_flux) - devisLignes)}</td>
+                      <td className="px-2 py-2 text-right font-semibold tabular-nums">{formatMoney(cdcDepuisFact)}</td>
+                      <td className="px-2 py-2 text-right font-semibold tabular-nums">{formatMoney(row.cdc_indicateur_activite)}</td>
+                      <td className={`px-2 py-2 text-right tabular-nums ${getEcartClass(row.ecart_cdc_source_vs_flux)}`}>{formatMoney(row.cdc_flux)}</td>
+                      <td className={`px-2 py-2 text-right tabular-nums ${getEcartClass(row.ecart_cdc_source_vs_flux)}`}>{formatSigned(row.ecart_cdc_source_vs_flux)}</td>
+
+                      <td className="px-2 py-2 text-right font-semibold tabular-nums">{formatMoney(blDepuisFact)}</td>
+                      <td className="px-2 py-2 text-right font-semibold tabular-nums">{formatMoney(row.bl_indicateur_activite)}</td>
+                      <td className={`px-2 py-2 text-right tabular-nums ${getEcartClass(row.ecart_bl_source_vs_flux)}`}>{formatMoney(row.bl_flux)}</td>
+                      <td className={`px-2 py-2 text-right tabular-nums ${getEcartClass(row.ecart_bl_source_vs_flux)}`}>{formatSigned(row.ecart_bl_source_vs_flux)}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : hasRun && !loading && !error ? (
+          <p className="px-5 pb-6 text-sm text-slate-500">Aucun résultat retourné pour cette période.</p>
+        ) : !hasRun ? (
+          <p className="px-5 pb-6 text-sm text-slate-500">
+            Choisissez une période et lancez le contrôle. Le résultat est historisé côté base.
           </p>
-        </div>
+        ) : null}
+      </section>
 
-        <div className="flex flex-wrap items-end gap-2">
-          <label className="text-xs font-bold uppercase text-slate-500">
-            Du
-            <input
-              type="date"
-              value={startDate}
-              onChange={(event) => setStartDate(event.target.value)}
-              className="mt-1 block h-10 rounded-xl border border-slate-300 bg-white px-3 text-sm font-bold text-slate-900"
-            />
-          </label>
-          <label className="text-xs font-bold uppercase text-slate-500">
-            Au
-            <input
-              type="date"
-              value={endDate}
-              onChange={(event) => setEndDate(event.target.value)}
-              className="mt-1 block h-10 rounded-xl border border-slate-300 bg-white px-3 text-sm font-bold text-slate-900"
-            />
-          </label>
-          <button
-            type="button"
-            onClick={loadReconciliation}
-            disabled={loading}
-            className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-black text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {loading ? 'Contrôle…' : 'Contrôler'}
-          </button>
-          <button
-            type="button"
-            onClick={() => exportRows(rows, smcRows)}
-            disabled={(!rows.length && !smcRows.length) || loading}
-            className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-bold hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            Export Excel
-          </button>
-        </div>
-      </div>
-
-      {error ? (
-        <div className="mt-3 rounded-xl bg-red-50 p-3 text-sm font-bold text-red-700">
-          Contrôle impossible : {error}
-        </div>
-      ) : null}
-
-      {runSummary ? (
-        <div className={`mt-3 rounded-xl border p-3 text-sm font-bold ${runSummary.status === 'ok' ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-red-200 bg-red-50 text-red-800'}`}>
-          Contrôle historisé #{runSummary.run_id} — statut {runSummary.status.toUpperCase()} — {runSummary.ok_months} mois OK / {runSummary.ko_months} mois KO — écart max {formatMoney(runSummary.max_abs_ecart)}.
-        </div>
-      ) : null}
-
-      {hasRun && !error ? (
-        <div className="mt-4 grid gap-3 md:grid-cols-5">
-          <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-            <div className="text-xs font-bold uppercase text-slate-500">Périodes contrôlées</div>
-            <div className="mt-1 text-xl font-black text-slate-900">{summary.total}</div>
-          </div>
-          <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3">
-            <div className="text-xs font-bold uppercase text-emerald-700">Mois OK</div>
-            <div className="mt-1 text-xl font-black text-emerald-800">{summary.ok}</div>
-          </div>
-          <div className="rounded-xl border border-red-200 bg-red-50 p-3">
-            <div className="text-xs font-bold uppercase text-red-700">Mois KO</div>
-            <div className="mt-1 text-xl font-black text-red-800">{summary.ko}</div>
-          </div>
-          <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
-            <div className="text-xs font-bold uppercase text-amber-700">Factures KO</div>
-            <div className="mt-1 text-xl font-black text-amber-800">{summary.facturesKo}</div>
-          </div>
-          <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
-            <div className="text-xs font-bold uppercase text-amber-700">Devis KO</div>
-            <div className="mt-1 text-xl font-black text-amber-800">{summary.devisKo}</div>
-          </div>
-        </div>
-      ) : null}
-
-      {hasRun && !error ? (
-        <div className="mt-3 rounded-xl border border-sky-200 bg-sky-50 p-3 text-xs font-semibold text-sky-800">
-          SMC exclue du contrôle mensuel : la synthèse multi-clients est considérée comme une vue année / YTD. Les contrôles KO ci-dessous portent uniquement sur Factures, Devis, CDC, BL et Flux articles mois par mois.
-        </div>
-      ) : null}
-
-      {rows.length ? (
-        <div className="mt-4 max-h-[560px] overflow-auto rounded-xl border border-slate-200">
-          <table className="min-w-[1900px] border-collapse text-xs">
-            <thead className="sticky top-0 z-10 bg-slate-900 text-white">
-              <tr>
-                <th className="px-2 py-2 text-left">Période</th>
-                <th className="px-2 py-2 text-left">Statut</th>
-                <th className="px-2 py-2 text-right">Fact. lignes</th>
-                <th className="px-2 py-2 text-right">Fact. cache</th>
-                <th className="px-2 py-2 text-right">Fact. indic.</th>
-                <th className="px-2 py-2 text-right">Fact. flux</th>
-                <th className="px-2 py-2 text-right">Écart flux</th>
-                <th className="px-2 py-2 text-right">Devis lignes</th>
-                <th className="px-2 py-2 text-right">Devis cache</th>
-                <th className="px-2 py-2 text-right">Devis indic.</th>
-                <th className="px-2 py-2 text-right">Devis flux</th>
-                <th className="px-2 py-2 text-right">Écart flux</th>
-                <th className="px-2 py-2 text-right">CDC depuis fact</th>
-                <th className="px-2 py-2 text-right">CDC depuis activité</th>
-                <th className="px-2 py-2 text-right">CDC flux</th>
-                <th className="px-2 py-2 text-right">Écart CDC</th>
-                <th className="px-2 py-2 text-right">BL depuis fact</th>
-                <th className="px-2 py-2 text-right">BL depuis activité</th>
-                <th className="px-2 py-2 text-right">BL flux</th>
-                <th className="px-2 py-2 text-right">Écart BL</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => {
-                const issues = computeRowIssues(row)
-                const facturesLignes = toNumber(row.factures_lignes)
-                const devisLignes = toNumber(row.devis_lignes)
-                const cdcDepuisFact = toNumber(row.cdc_source_activite_plus_factures)
-                const cdcAttendu = cdcDepuisFact + toNumber(row.cdc_indicateur_activite)
-                const blDepuisFact = toNumber(row.bl_source_activite_plus_factures)
-                const blAttendu = blDepuisFact + toNumber(row.bl_indicateur_activite)
-
-                return (
-                  <tr key={`${row.annee}-${row.mois}`} className="border-b border-slate-100 hover:bg-slate-50">
-                    <td className="whitespace-nowrap px-2 py-2 font-black">{monthLabel(row)}</td>
-                    <td className="px-2 py-2">
-                      <span
-                        className={`rounded-full px-2 py-1 text-[11px] font-black ${
-                          issues.length ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'
-                        }`}
-                        title={issues.join(', ') || 'Tous les contrôles sont alignés'}
-                      >
-                        {issues.length ? `KO (${issues.length})` : 'OK'}
-                      </span>
-                    </td>
-
-                    <td className="px-2 py-2 text-right font-bold">{formatMoney(facturesLignes)}</td>
-                    <td className={`px-2 py-2 text-right ${getValueClass(facturesLignes, row.factures_cache)}`}>{formatMoney(row.factures_cache)}</td>
-                    <td className={`px-2 py-2 text-right ${getValueClass(facturesLignes, row.factures_indicateur)}`}>{formatMoney(row.factures_indicateur)}</td>
-                    <td className={`px-2 py-2 text-right ${getValueClass(facturesLignes, row.factures_flux)}`}>{formatMoney(row.factures_flux)}</td>
-                    <td className={`px-2 py-2 text-right ${getEcartClass(toNumber(row.factures_flux) - facturesLignes)}`}>{formatSigned(toNumber(row.factures_flux) - facturesLignes)}</td>
-                    <td className="px-2 py-2 text-right font-bold">{formatMoney(devisLignes)}</td>
-                    <td className={`px-2 py-2 text-right ${getValueClass(devisLignes, row.devis_cache)}`}>{formatMoney(row.devis_cache)}</td>
-                    <td className={`px-2 py-2 text-right ${getValueClass(devisLignes, row.devis_indicateur)}`}>{formatMoney(row.devis_indicateur)}</td>
-                    <td className={`px-2 py-2 text-right ${getValueClass(devisLignes, row.devis_flux)}`}>{formatMoney(row.devis_flux)}</td>
-                    <td className={`px-2 py-2 text-right ${getEcartClass(toNumber(row.devis_flux) - devisLignes)}`}>{formatSigned(toNumber(row.devis_flux) - devisLignes)}</td>
-                    <td className="px-2 py-2 text-right font-bold">{formatMoney(cdcDepuisFact)}</td>
-                    <td className="px-2 py-2 text-right font-bold">{formatMoney(row.cdc_indicateur_activite)}</td>
-                    <td className={`px-2 py-2 text-right ${getEcartClass(row.ecart_cdc_source_vs_flux)}`}>{formatMoney(row.cdc_flux)}</td>
-                    <td className={`px-2 py-2 text-right ${getEcartClass(row.ecart_cdc_source_vs_flux)}`}>{formatSigned(row.ecart_cdc_source_vs_flux)}</td>
-
-                    <td className="px-2 py-2 text-right font-bold">{formatMoney(blDepuisFact)}</td>
-                    <td className="px-2 py-2 text-right font-bold">{formatMoney(row.bl_indicateur_activite)}</td>
-                    <td className={`px-2 py-2 text-right ${getEcartClass(row.ecart_bl_source_vs_flux)}`}>{formatMoney(row.bl_flux)}</td>
-                    <td className={`px-2 py-2 text-right ${getEcartClass(row.ecart_bl_source_vs_flux)}`}>{formatSigned(row.ecart_bl_source_vs_flux)}</td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
-      ) : hasRun && !loading && !error ? (
-        <div className="mt-4 rounded-xl bg-slate-50 p-4 text-sm font-bold text-slate-500">
-          Aucun résultat retourné pour cette période.
-        </div>
-      ) : null}
-
-      {hasRun && !error ? (
-        <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-          <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+      {hasRun && !error && (
+        <section className="rounded-2xl border border-[#E2DFD8] bg-white">
+          <div className="flex flex-col gap-3 border-b border-[#EFEDE8] px-5 py-4 md:flex-row md:items-start md:justify-between">
             <div>
-              <h3 className="text-sm font-black uppercase tracking-wide text-slate-700">Contrôle cohérence SMC annuel / YTD</h3>
-              <p className="mt-1 text-xs font-semibold text-slate-500">
-                Compare la ligne annuelle client de synthèse_multi_clients_cache avec les indicateurs mensuels cumulés.
-                Seules les lignes SMC mois NULL et row_kind client sont contrôlées côté SQL.
+              <Eyebrow>Année / YTD</Eyebrow>
+              <h3 className="mt-1 text-lg font-bold text-slate-900">Cohérence synthèse multi-clients</h3>
+              <p className="mt-1 max-w-3xl text-sm text-slate-600">
+                Compare la ligne annuelle client du cache SMC avec les indicateurs mensuels cumulés.
+                Seules les lignes mois NULL et row_kind client sont contrôlées côté SQL.
               </p>
             </div>
-            <div className={`rounded-xl border px-3 py-2 text-xs font-black ${smcSummary.status === 'ok' ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-red-200 bg-red-50 text-red-800'}`}>
-              {smcSummary.total ? `${smcSummary.ok} OK / ${smcSummary.ko} KO — écart max ${formatMoney(smcSummary.maxAbsEcart)}` : 'Non contrôlé'}
+            <div
+              className={`shrink-0 rounded-xl px-3 py-2 text-xs font-bold ${
+                smcSummary.status === 'ok'
+                  ? 'bg-[#E7F1EA] text-[#1F5B44] ring-1 ring-[#BFDCCE]'
+                  : 'bg-[#FBE9E9] text-[#A32C2C] ring-1 ring-[#F0C7C7]'
+              }`}
+            >
+              {smcSummary.total
+                ? `${smcSummary.ok} aligné(s) / ${smcSummary.ko} en écart · max ${formatMoney(smcSummary.maxAbsEcart)} €`
+                : 'Non contrôlé'}
             </div>
           </div>
 
           {smcRows.length ? (
-            <div className="mt-3 overflow-auto rounded-xl border border-slate-200 bg-white">
+            <div className="m-5 overflow-auto rounded-xl border border-[#E7E4DD]">
               <table className="min-w-[1250px] border-collapse text-xs">
-                <thead className="bg-slate-900 text-white">
+                <thead className="bg-[#111820] text-white">
                   <tr>
-                    <th className="px-2 py-2 text-left">Type</th>
-                    <th className="px-2 py-2 text-left">Période</th>
-                    <th className="px-2 py-2 text-right">Année</th>
-                    <th className="px-2 py-2 text-left">Début</th>
-                    <th className="px-2 py-2 text-left">Fin exclue</th>
-                    <th className="px-2 py-2 text-right">Lignes SMC</th>
-                    <th className="px-2 py-2 text-right">Clients SMC</th>
-                    <th className="px-2 py-2 text-right">Indicateur</th>
-                    <th className="px-2 py-2 text-right">SMC</th>
-                    <th className="px-2 py-2 text-right">Écart</th>
-                    <th className="px-2 py-2 text-right">Ratio</th>
-                    <th className="px-2 py-2 text-left">Statut</th>
+                    <th className="px-2 py-2.5 text-left font-semibold">Type</th>
+                    <th className="px-2 py-2.5 text-left font-semibold">Période</th>
+                    <th className="px-2 py-2.5 text-right font-semibold">Année</th>
+                    <th className="px-2 py-2.5 text-left font-semibold">Début</th>
+                    <th className="px-2 py-2.5 text-left font-semibold">Fin exclue</th>
+                    <th className="px-2 py-2.5 text-right font-semibold">Lignes SMC</th>
+                    <th className="px-2 py-2.5 text-right font-semibold">Clients SMC</th>
+                    <th className="px-2 py-2.5 text-right font-semibold">Indicateur</th>
+                    <th className="px-2 py-2.5 text-right font-semibold">SMC</th>
+                    <th className="px-2 py-2.5 text-right font-semibold">Écart</th>
+                    <th className="px-2 py-2.5 text-right font-semibold">Ratio</th>
+                    <th className="px-2 py-2.5 text-left font-semibold">Statut</th>
                   </tr>
                 </thead>
                 <tbody>
                   {smcRows.map((row) => {
                     const isOk = String(row.statut || '').toUpperCase() === 'OK'
                     return (
-                      <tr key={`${row.type_controle}-${row.annee}-${row.periode}`} className="border-b border-slate-100 hover:bg-slate-50">
-                        <td className="px-2 py-2 font-black">{row.type_controle}</td>
-                        <td className="px-2 py-2 font-bold">{row.periode}</td>
-                        <td className="px-2 py-2 text-right font-bold">{row.annee}</td>
-                        <td className="px-2 py-2">{row.date_debut}</td>
-                        <td className="px-2 py-2">{row.date_fin_exclue}</td>
-                        <td className="px-2 py-2 text-right">{toNumber(row.nb_lignes_smc).toLocaleString('fr-FR')}</td>
-                        <td className="px-2 py-2 text-right">{toNumber(row.nb_clients_smc).toLocaleString('fr-FR')}</td>
-                        <td className="px-2 py-2 text-right font-bold">{formatMoney(row.valeur_indicateur)}</td>
-                        <td className="px-2 py-2 text-right font-bold">{formatMoney(row.valeur_smc)}</td>
-                        <td className={`px-2 py-2 text-right ${getEcartClass(row.ecart)}`}>{formatSigned(row.ecart)}</td>
-                        <td className="px-2 py-2 text-right font-bold">{toNumber(row.ratio).toFixed(6)}</td>
+                      <tr key={`${row.type_controle}-${row.annee}-${row.periode}`} className="border-b border-[#EFEDE8] hover:bg-[#FAF9F7]">
+                        <td className="px-2 py-2 font-bold">{row.type_controle}</td>
+                        <td className="px-2 py-2 font-semibold">{row.periode}</td>
+                        <td className="px-2 py-2 text-right font-semibold tabular-nums">{row.annee}</td>
+                        <td className="px-2 py-2 tabular-nums">{row.date_debut}</td>
+                        <td className="px-2 py-2 tabular-nums">{row.date_fin_exclue}</td>
+                        <td className="px-2 py-2 text-right tabular-nums">{toNumber(row.nb_lignes_smc).toLocaleString('fr-FR')}</td>
+                        <td className="px-2 py-2 text-right tabular-nums">{toNumber(row.nb_clients_smc).toLocaleString('fr-FR')}</td>
+                        <td className="px-2 py-2 text-right font-semibold tabular-nums">{formatMoney(row.valeur_indicateur)}</td>
+                        <td className="px-2 py-2 text-right font-semibold tabular-nums">{formatMoney(row.valeur_smc)}</td>
+                        <td className={`px-2 py-2 text-right tabular-nums ${getEcartClass(row.ecart)}`}>{formatSigned(row.ecart)}</td>
+                        <td className="px-2 py-2 text-right font-semibold tabular-nums">{toNumber(row.ratio).toFixed(6)}</td>
                         <td className="px-2 py-2">
-                          <span className={`rounded-full px-2 py-1 text-[11px] font-black ${isOk ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
-                            {isOk ? 'OK' : 'KO'}
+                          <span
+                            className={`rounded-full px-2 py-1 text-[11px] font-bold ${
+                              isOk
+                                ? 'bg-[#E7F1EA] text-[#1F5B44] ring-1 ring-[#BFDCCE]'
+                                : 'bg-[#FBE9E9] text-[#A32C2C] ring-1 ring-[#F0C7C7]'
+                            }`}
+                          >
+                            {isOk ? 'Aligné' : 'Écart'}
                           </span>
                         </td>
                       </tr>
@@ -3091,17 +3166,19 @@ function DataReconciliationPanel() {
               </table>
             </div>
           ) : loading ? (
-            <div className="mt-3 rounded-xl bg-white p-4 text-sm font-bold text-slate-500">Contrôle SMC en cours…</div>
+            <p className="px-5 pb-6 text-sm text-slate-500">Contrôle SMC en cours…</p>
           ) : (
-            <div className="mt-3 rounded-xl bg-white p-4 text-sm font-bold text-slate-500">Aucun résultat SMC retourné pour cette période.</div>
+            <p className="px-5 pb-6 text-sm text-slate-500">Aucun résultat SMC retourné pour cette période.</p>
           )}
-        </div>
-      ) : null}
+        </section>
+      )}
     </div>
   )
 }
 
 export default function ImportsParametragePage() {
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>('pipeline')
+
   const [selectedTableKey, setSelectedTableKey] = useState<TableKey>('facture_lignes')
   const [stats, setStats] = useState<Record<TableKey, TableStats>>({} as Record<TableKey, TableStats>)
   const [rows, setRows] = useState<GenericRow[]>([])
@@ -3129,6 +3206,21 @@ export default function ImportsParametragePage() {
   const [autoImportReportTab, setAutoImportReportTab] = useState<AutoImportReportTab>('pre_smc')
   const [autoImportReportEmailTo, setAutoImportReportEmailTo] = useState('')
   const [autoImportSendReportEmail, setAutoImportSendReportEmail] = useState(false)
+  const [autoImportFolderFilter, setAutoImportFolderFilter] = useState<AutoImportFolder | 'all'>('pending')
+
+  const [maintenanceLoading, setMaintenanceLoading] = useState(false)
+  const [maintenanceMessage, setMaintenanceMessage] = useState<string | null>(null)
+  const [smcBackgroundState, setSmcBackgroundState] = useState<SmcBackgroundJobState | null>(null)
+  const [smcBackgroundBusy, setSmcBackgroundBusy] = useState(false)
+  const [smcBackgroundBatchSize, setSmcBackgroundBatchSize] = useState(SMC_BACKGROUND_DEFAULT_BATCH_SIZE)
+  const [manualStartDate, setManualStartDate] = useState(() => {
+    const now = new Date()
+    return formatDateForSql(new Date(now.getFullYear(), now.getMonth() - 2, 1))
+  })
+  const [manualEndDate, setManualEndDate] = useState(() => {
+    const now = new Date()
+    return formatDateForSql(new Date(now.getFullYear(), now.getMonth(), now.getDate()))
+  })
 
   const selectedConfig = useMemo(
     () => TABLES.find((t) => t.key === selectedTableKey) || TABLES[0],
@@ -3236,14 +3328,14 @@ export default function ImportsParametragePage() {
     }
   }
 
-
   useEffect(() => {
     loadStats()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-
 
   useEffect(() => {
     void loadAutomaticImportDashboard(false)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
@@ -3256,6 +3348,7 @@ export default function ImportsParametragePage() {
     }, AUTO_IMPORT_POLL_MS)
 
     return () => window.clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoImportPipelineRuns[0]?.id, autoImportPipelineRuns[0]?.status])
 
   useEffect(() => {
@@ -3264,6 +3357,7 @@ export default function ImportsParametragePage() {
     setSortColumn('')
     setEditingRow(null)
     setPendingReferentialImport(null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedConfig.key])
 
   function buildHeaderMap(headers: string[], config: TableConfig) {
@@ -3471,7 +3565,6 @@ export default function ImportsParametragePage() {
     return counts
   }
 
-
   function collectReferencedTiers(rows: GenericRow[]) {
     const tiersByNumero = new Map<string, GenericRow>()
 
@@ -3499,7 +3592,6 @@ export default function ImportsParametragePage() {
     return Array.from(tiersByNumero.values())
   }
 
-
   async function resetActivityTablesBeforeImport(onProgress?: (detail: string) => void) {
     onProgress?.('Vidage de activite_lignes et indicateur_activite_mensuel avant chargement')
 
@@ -3514,7 +3606,6 @@ export default function ImportsParametragePage() {
 
     return { ok: true }
   }
-
 
   function isStockAvailabilityImportTable(key: TableKey) {
     return key === 'stock_articles_snapshot' || key === 'commandes_fournisseurs_lignes'
@@ -3749,7 +3840,6 @@ export default function ImportsParametragePage() {
     }
   }
 
-
   function getAutoImportFluxArticlesPeriod(): SmcRpcPeriod {
     const now = new Date()
     // Pipeline automatique : après les imports, les agrégats rapides sont déjà gérés
@@ -3916,7 +4006,6 @@ export default function ImportsParametragePage() {
         p_depot_mode: 'GLOBAL',
         p_commentaire: `Projection stock automatique après import manuel ${config.label}`,
       })
-    
 
       if (error) {
         throw new Error(
@@ -3924,7 +4013,7 @@ export default function ImportsParametragePage() {
             `Crée ou vérifie la fonction SQL public.rebuild_stock_projection_hebdo_front().`
         )
       }
-  // Refresh des vues matérialisées contrôle frais de port
+      // Refresh des vues matérialisées contrôle frais de port
       await supabase.rpc('refresh_controle_frais_port_materialized')
       return `Stock / BDCF importé. Projection hebdomadaire stock recalculée sur 16 semaines, scénario historique BL x 120 %. Run : ${data || 'créé'}.`
     }
@@ -3975,7 +4064,6 @@ export default function ImportsParametragePage() {
     return { upserted, skipped: false }
   }
 
-
   function collectReferencedArticles(rows: GenericRow[]) {
     const articlesByReference = new Map<string, GenericRow>()
 
@@ -4004,7 +4092,6 @@ export default function ImportsParametragePage() {
 
     return Array.from(articlesByReference.values())
   }
-
 
   async function ensureReferencedArticles(
     rows: GenericRow[],
@@ -4080,8 +4167,6 @@ export default function ImportsParametragePage() {
 
     return { checked: articles.length, created, skipped: false }
   }
-
-
 
   function collectReferencedCodeNaf(rows: GenericRow[]) {
     const codes = new Set<string>()
@@ -4289,7 +4374,6 @@ export default function ImportsParametragePage() {
     return { rowsToInsert, duplicateRejects }
   }
 
-
   async function writeChunk(rows: GenericRow[], config: TableConfig) {
     const cleanRows = rows.map(stripTechnicalImportFields)
 
@@ -4309,8 +4393,6 @@ export default function ImportsParametragePage() {
     if (upsertError) throw upsertError
     return cleanRows.length
   }
-
-
 
   async function setImportTriggersEnabled(config: TableConfig, enabled: boolean) {
     if (!isLineTableKey(config.key)) return { ok: true, message: 'Pas de trigger à piloter pour cette table' }
@@ -4836,7 +4918,6 @@ export default function ImportsParametragePage() {
     }
   }
 
-
   function exportRejectsExcel() {
     if (!lastRejects.length) return
 
@@ -4945,21 +5026,6 @@ export default function ImportsParametragePage() {
     }
   }
 
-
-  const [maintenanceLoading, setMaintenanceLoading] = useState(false)
-  const [maintenanceMessage, setMaintenanceMessage] = useState<string | null>(null)
-  const [smcBackgroundState, setSmcBackgroundState] = useState<SmcBackgroundJobState | null>(null)
-  const [smcBackgroundBusy, setSmcBackgroundBusy] = useState(false)
-  const [smcBackgroundBatchSize, setSmcBackgroundBatchSize] = useState(SMC_BACKGROUND_DEFAULT_BATCH_SIZE)
-  const [manualStartDate, setManualStartDate] = useState(() => {
-    const now = new Date()
-    return formatDateForSql(new Date(now.getFullYear(), now.getMonth() - 2, 1))
-  })
-  const [manualEndDate, setManualEndDate] = useState(() => {
-    const now = new Date()
-    return formatDateForSql(new Date(now.getFullYear(), now.getMonth(), now.getDate()))
-  })
-
   async function loadSmcBackgroundJobState(showMessage = false) {
     const { data, error: stateError } = await supabase
       .from('smc_batch_job_state')
@@ -4999,6 +5065,7 @@ export default function ImportsParametragePage() {
 
   useEffect(() => {
     loadSmcBackgroundJobState(false)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
@@ -5009,6 +5076,7 @@ export default function ImportsParametragePage() {
     }, SMC_BACKGROUND_POLL_MS)
 
     return () => window.clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [smcBackgroundState?.status])
 
   function getSmcBackgroundProgressPercent() {
@@ -5362,7 +5430,6 @@ export default function ImportsParametragePage() {
     }
   }
 
-
   async function fetchAutoImportStorageFiles() {
     const allFiles: AutoImportStorageFile[] = []
 
@@ -5531,7 +5598,6 @@ export default function ImportsParametragePage() {
       setAutoImportUploading(false)
     }
   }
-
 
   function sortAutoImportFilesForPipeline(files: AutoImportStorageFile[]) {
     const order: Record<AutoImportFileKind, number> = {
@@ -6083,8 +6149,6 @@ export default function ImportsParametragePage() {
     )
   }
 
-
-
   const latestAutoImportRun = autoImportPipelineRuns[0] || null
   const latestSuccessfulAutoImportRun = autoImportPipelineRuns.find((run) => isAutoImportRunSuccess(run.status)) || null
   const autoImportPendingFiles = autoImportStorageFiles.filter((file) => file.folder === 'pending')
@@ -6093,546 +6157,363 @@ export default function ImportsParametragePage() {
   const autoImportArchivedFiles = autoImportStorageFiles.filter((file) => file.folder === 'archive')
   const autoImportBusy = autoImportLoading || autoImportUploading || autoImportRunning
   const latestAutoImportReport = getPipelineRunReport(latestAutoImportRun, autoImportReportTab)
+  const autoImportPhaseIndex = getAutoImportPhaseIndex(latestAutoImportRun)
+
+  const visibleStorageFiles = useMemo(
+    () =>
+      autoImportFolderFilter === 'all'
+        ? autoImportStorageFiles
+        : autoImportStorageFiles.filter((file) => file.folder === autoImportFolderFilter),
+    [autoImportStorageFiles, autoImportFolderFilter]
+  )
+
+  const folderCounts: Record<AutoImportFolder, number> = {
+    pending: autoImportPendingFiles.length,
+    processing: autoImportProcessingFiles.length,
+    rejected: autoImportRejectedFiles.length,
+    archive: autoImportArchivedFiles.length,
+  }
 
   const currentStats = stats[selectedConfig.key]
+  const globalBusy = importing || maintenanceLoading || autoImportBusy
 
   return (
-    <main className="min-h-screen bg-slate-50 p-6 text-slate-900">
-      <div className="mx-auto max-w-[1800px] space-y-6">
-        <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-            <div>
-              <h1 className="text-2xl font-bold tracking-tight">Imports & paramétrage</h1>
-              <p className="mt-2 max-w-3xl text-sm text-slate-600">
-                Import Excel intelligent, mise à jour des référentiels, consultation et modification directe des lignes.
-              </p>
-            </div>
-
-            <div className="flex flex-wrap gap-2">
-              <label className="cursor-pointer rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-slate-800">
-                {importing ? 'Import en cours…' : 'Importer Excel'}
-                <input
-                  type="file"
-                  accept=".xlsx,.xls"
-                  className="hidden"
-                  onChange={handleFileImport}
-                  disabled={importing}
-                />
-              </label>
-              <button
-                type="button"
-                onClick={startNewRow}
-                className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold hover:bg-slate-100"
-              >
-                + Créer une ligne
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  loadStats()
-                  loadRows(selectedConfig)
-                }}
-                className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold hover:bg-slate-100"
-              >
-                Actualiser
-              </button>
-              <button
-                type="button"
-                onClick={() => handleManualRecentMonthsRebuild(2)}
-                disabled={maintenanceLoading || importing}
-                className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {maintenanceLoading ? 'Rebuild…' : 'Rebuild agrégats rapides M-1 + M'}
-              </button>
-              <button
-                type="button"
-                onClick={handleManualRecentSmcRebuild}
-                disabled={maintenanceLoading || importing || smcBackgroundBusy}
-                className="rounded-xl border border-cyan-300 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-800 hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                SMC M-1 + M arrière-plan
-              </button>
-              <button
-                type="button"
-                onClick={() => handleManualRecentMonthsRebuild(2, 'previous_month')}
-                disabled={maintenanceLoading || importing}
-                className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                BL M-x → M-1 (léger)
-              </button>
-              <button
-                type="button"
-                onClick={() => handleManualRecentMonthsRebuild(2, 'current_month')}
-                disabled={maintenanceLoading || importing}
-                className="rounded-xl border border-sky-300 bg-sky-50 px-4 py-2 text-sm font-semibold text-sky-800 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                BL M-x → M (léger)
-              </button>
-              {lastRejects.length > 0 && (
-                <button
-                  type="button"
-                  onClick={exportRejectsExcel}
-                  className="rounded-xl border border-red-300 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 hover:bg-red-100"
-                >
-                  Export rejets
-                </button>
-              )}
-            </div>
+    <div className="min-h-screen bg-[#F4F3F0] pb-16">
+      {/* ============================================================ Bandeau */}
+      <header className="border-b border-[#1E2833] bg-[#111820]">
+        <div className="mx-auto flex w-full max-w-[1760px] flex-col gap-6 px-4 py-6 md:px-8 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[#B4761A]">Données commerciales</div>
+            <h1 className="mt-2 text-[28px] font-bold leading-tight text-white md:text-[32px]">Imports & paramétrage</h1>
+            <p className="mt-2 max-w-3xl text-sm leading-relaxed text-slate-300">
+              Chaîne automatique serveur, imports Excel manuels, reconstruction des agrégats et contrôle de cohérence.
+              Quatre métiers distincts, un onglet chacun.
+            </p>
           </div>
 
-          <div className="mt-4 flex flex-wrap items-end gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-            <label className="text-xs font-bold uppercase text-slate-500">
-              Rebuilds période — du
-              <input
-                type="date"
-                value={manualStartDate}
-                onChange={(event) => setManualStartDate(event.target.value)}
-                className="mt-1 block h-10 rounded-xl border border-slate-300 bg-white px-3 text-sm font-bold text-slate-900"
-              />
-            </label>
-            <label className="text-xs font-bold uppercase text-slate-500">
-              au
-              <input
-                type="date"
-                value={manualEndDate}
-                onChange={(event) => setManualEndDate(event.target.value)}
-                className="mt-1 block h-10 rounded-xl border border-slate-300 bg-white px-3 text-sm font-bold text-slate-900"
-              />
-            </label>
-            <label className="text-xs font-bold uppercase text-slate-500">
-              Lot SMC
-              <input
-                type="number"
-                min={SMC_BACKGROUND_MIN_BATCH_SIZE}
-                max={SMC_BACKGROUND_MAX_BATCH_SIZE}
-                value={smcBackgroundBatchSize}
-                onChange={(event) => setSmcBackgroundBatchSize(Number(event.target.value || SMC_BACKGROUND_DEFAULT_BATCH_SIZE))}
-                className="mt-1 block h-10 w-24 rounded-xl border border-slate-300 bg-white px-3 text-sm font-black text-slate-900"
-              />
-            </label>
+          <div className="flex flex-wrap items-end gap-3">
+            <HeaderStat label="Dernier job" value={latestAutoImportRun?.status || '—'} tone={
+              isAutoImportRunError(latestAutoImportRun?.status)
+                ? 'warn'
+                : isAutoImportRunRunning(latestAutoImportRun?.status)
+                  ? 'active'
+                  : 'default'
+            } />
+            <HeaderStat label="À traiter" value={String(autoImportPendingFiles.length)} tone={autoImportPendingFiles.length ? 'active' : 'default'} />
+            <HeaderStat label="Rejetés" value={String(autoImportRejectedFiles.length)} tone={autoImportRejectedFiles.length ? 'warn' : 'default'} />
             <button
               type="button"
-              onClick={handleManualPeriodRebuild}
-              disabled={maintenanceLoading || importing}
-              className="rounded-xl border border-indigo-300 bg-indigo-50 px-4 py-2 text-sm font-semibold text-indigo-800 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-60"
+              onClick={() => {
+                void loadAutomaticImportDashboard(true)
+                void loadStats()
+              }}
+              disabled={autoImportBusy}
+              className="h-[52px] rounded-xl border border-[#2C3946] px-4 text-sm font-semibold text-slate-200 transition hover:border-[#B4761A] hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A] disabled:opacity-40"
             >
-              Rebuild agrégats rapides période
+              {autoImportLoading ? 'Actualisation…' : 'Actualiser'}
             </button>
-            <button
-              type="button"
-              onClick={handleManualPeriodFluxRebuild}
-              disabled={maintenanceLoading || importing}
-              className="rounded-xl border border-orange-300 bg-orange-50 px-4 py-2 text-sm font-semibold text-orange-800 hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              Rebuild flux articles période
-            </button>
-            <button
-              type="button"
-              onClick={handleManualPeriodSmcRebuild}
-              disabled={maintenanceLoading || importing || smcBackgroundBusy}
-              className="rounded-xl border border-cyan-300 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-800 hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              SMC période depuis début
-            </button>
-            <button
-              type="button"
-              onClick={() => resumeSmcBackgroundJob('SMC période')}
-              disabled={maintenanceLoading || importing || smcBackgroundBusy || !smcBackgroundState}
-              className="rounded-xl border border-blue-300 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-800 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              Reprendre SMC au point d'arrêt
-            </button>
-            <button
-              type="button"
-              onClick={handleManualPeriodQuantitesPertinentes}
-              disabled={maintenanceLoading || importing}
-              className="rounded-xl border border-violet-300 bg-violet-50 px-4 py-2 text-sm font-semibold text-violet-800 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              Recalcul qté pertinentes période
-            </button>
-            <div className="text-xs font-semibold text-slate-500">
-              La date de fin est traitée comme mois inclus. Les agrégats rapides et le flux articles restent découpés par mois. SMC est lancé en arrière-plan via pg_cron, par lots de clients paramétrables. La reprise conserve les clients déjà traités.
-            </div>
           </div>
+        </div>
 
-          {maintenanceMessage && <div className="mt-4 rounded-xl bg-emerald-50 p-3 text-sm font-bold text-emerald-800">{maintenanceMessage}</div>}
+        <div className="mx-auto flex w-full max-w-[1760px] gap-1 overflow-x-auto px-4 md:px-8">
+          <TabButton active={activeTab === 'pipeline'} onClick={() => setActiveTab('pipeline')}>Chaîne automatique</TabButton>
+          <TabButton active={activeTab === 'manual'} onClick={() => setActiveTab('manual')}>Import manuel</TabButton>
+          <TabButton active={activeTab === 'aggregates'} onClick={() => setActiveTab('aggregates')}>Agrégats & SMC</TabButton>
+          <TabButton active={activeTab === 'controls'} onClick={() => setActiveTab('controls')}>Contrôles</TabButton>
+        </div>
+      </header>
 
-          {smcBackgroundState && (
-            <div className="mt-4 rounded-2xl border border-cyan-200 bg-cyan-50 p-4">
-              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                <div className="min-w-0 flex-1">
-                  <div className="text-xs font-black uppercase tracking-wide text-cyan-900">
-                    Job SMC arrière-plan
-                  </div>
-                  <div className="mt-1 text-sm font-bold text-cyan-950">
-                    Statut : {smcBackgroundState.status || '—'} — {Number(smcBackgroundState.processed_clients || 0)} / {Number(smcBackgroundState.total_clients || 0)} client(s)
-                  </div>
-                  <div className="mt-2 h-3 overflow-hidden rounded-full bg-white">
-                    <div
-                      className="h-full rounded-full bg-cyan-700 transition-all"
-                      style={{ width: `${getSmcBackgroundProgressPercent()}%` }}
-                    />
-                  </div>
-                  <div className="mt-2 grid gap-1 text-xs font-semibold text-cyan-900 sm:grid-cols-2 lg:grid-cols-4">
-                    <div>Dernier rang : {smcBackgroundState.last_rn || 0}</div>
-                    <div>Lot en base : {smcBackgroundState.batch_size || '—'} clients</div>
-                    <div>Lot demandé : {getSafeSmcBackgroundBatchSize()} clients</div>
-                    <div>Début : {formatDateTime(smcBackgroundState.started_at || null)}</div>
-                    <div>Fin : {formatDateTime(smcBackgroundState.finished_at || null)}</div>
-                  </div>
-                  {smcBackgroundState.last_error && (
-                    <pre className="mt-2 whitespace-pre-wrap rounded-xl bg-red-50 p-2 text-xs font-semibold text-red-700">
-                      {smcBackgroundState.last_error}
+      <main className="mx-auto w-full max-w-[1760px] space-y-5 px-4 py-6 md:px-8">
+        {globalBusy && (
+          <div className="flex items-center gap-3 rounded-xl border border-[#EBD8AE] bg-[#FDF7EA] px-4 py-2.5 text-sm font-semibold text-[#8A5A11]">
+            <span className="h-2 w-2 animate-pulse rounded-full bg-[#B4761A]" />
+            Traitement en cours — évitez de fermer l’onglet tant qu’il n’est pas terminé.
+          </div>
+        )}
+
+        {/* ======================================================== Onglet pipeline */}
+        {activeTab === 'pipeline' && (
+          <div className="space-y-5">
+            <section className="rounded-2xl border border-[#E2DFD8] bg-white">
+              <div className="flex flex-col gap-3 border-b border-[#EFEDE8] px-5 py-4 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <Eyebrow>Job serveur</Eyebrow>
+                  <h2 className="mt-1 text-lg font-bold text-slate-900">Chaîne automatique</h2>
+                  <p className="mt-1 max-w-3xl text-sm text-slate-600">
+                    Les fichiers déposés sont convertis en CSV de moins de {formatFileSize(AUTO_IMPORT_MAX_CSV_CHUNK_BYTES)},
+                    sans jamais couper un document en deux. Le serveur les importe un morceau à la fois, reconstruit le flux
+                    articles sur {AUTO_IMPORT_FLUX_ARTICLES_MONTHS_BACK} mois, régénère le Focus Mensuel et son PDF, puis
+                    produit le rapport avant SMC.
+                  </p>
+                </div>
+
+                <div className="flex shrink-0 flex-wrap gap-2">
+                  <SecondaryButton onClick={() => handleStartAutoImportPipeline(false)} disabled={autoImportBusy || importing || maintenanceLoading || autoImportPendingFiles.length === 0}>
+                    {autoImportRunning ? 'Lancement…' : 'Lancer sans SMC'}
+                  </SecondaryButton>
+                  <PrimaryButton onClick={() => handleStartAutoImportPipeline(true)} disabled={autoImportBusy || importing || maintenanceLoading || autoImportPendingFiles.length === 0}>
+                    {autoImportRunning ? 'Lancement…' : 'Lancer avec SMC'}
+                  </PrimaryButton>
+                </div>
+              </div>
+
+              {/* Rail de phases : le statut brut ne dit pas où on en est. */}
+              <div className="border-b border-[#EFEDE8] px-5 py-4">
+                <ol className="flex flex-wrap gap-2">
+                  {AUTO_IMPORT_PHASES.map((phase, index) => {
+                    const isError = autoImportPhaseIndex === -2
+                    const done = autoImportPhaseIndex > index
+                    const current = autoImportPhaseIndex === index
+                    return (
+                      <li
+                        key={phase.key}
+                        className={`min-w-[168px] flex-1 rounded-xl border p-3 ${
+                          current && !isError ? 'border-[#B4761A] bg-[#FDF7EA]' : 'border-[#E7E4DD] bg-white'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`h-2.5 w-2.5 shrink-0 rounded-full ${
+                              isError && current ? 'bg-[#A32C2C]' : done ? 'bg-[#2F6B4F]' : current ? 'bg-[#B4761A]' : 'border border-[#D8D3C8]'
+                            }`}
+                          />
+                          <span className="truncate text-sm font-semibold text-slate-900">{phase.label}</span>
+                        </div>
+                        <div className="mt-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                          Phase {index + 1}
+                        </div>
+                      </li>
+                    )
+                  })}
+                </ol>
+              </div>
+
+              <div className="grid grid-cols-2 gap-px border-b border-[#EFEDE8] bg-[#EFEDE8] lg:grid-cols-5">
+                <RunFact label="Statut">
+                  <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-bold ${statusBadgeClass(latestAutoImportRun?.status)}`}>
+                    {latestAutoImportRun?.status || 'Aucun run'}
+                  </span>
+                </RunFact>
+                <RunFact label="Étape">
+                  <span className="text-sm font-semibold text-slate-900">{latestAutoImportRun?.current_step || '—'}</span>
+                </RunFact>
+                <RunFact label="Début">
+                  <span className="text-sm font-semibold text-slate-900">{formatDateTime(latestAutoImportRun?.started_at || null)}</span>
+                </RunFact>
+                <RunFact label="Durée">
+                  <span className="text-sm font-semibold tabular-nums text-slate-900">{getAutoImportRunDuration(latestAutoImportRun)}</span>
+                </RunFact>
+                <RunFact label="Dernier succès">
+                  <span className="text-sm font-semibold text-slate-900">
+                    {latestSuccessfulAutoImportRun
+                      ? formatDateTime(
+                          latestSuccessfulAutoImportRun.finished_at ||
+                            latestSuccessfulAutoImportRun.smc_finished_at ||
+                            latestSuccessfulAutoImportRun.started_at ||
+                            null
+                        )
+                      : '—'}
+                  </span>
+                </RunFact>
+              </div>
+
+              {(autoImportMessage || autoImportError) && (
+                <div className="space-y-2 px-5 pt-4">
+                  {autoImportMessage && (
+                    <div className="rounded-xl border border-[#E7E4DD] bg-[#FAF9F7] px-4 py-3 text-sm text-slate-700">
+                      {autoImportMessage}
+                    </div>
+                  )}
+                  {autoImportError && (
+                    <pre className="whitespace-pre-wrap rounded-xl border border-[#F0C7C7] bg-[#FBE9E9] px-4 py-3 text-sm font-semibold text-[#A32C2C]">
+                      {autoImportError}
                     </pre>
                   )}
                 </div>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => loadSmcBackgroundJobState(true)}
-                    disabled={smcBackgroundBusy}
-                    className="rounded-xl border border-cyan-300 bg-white px-3 py-2 text-xs font-bold text-cyan-900 hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    Actualiser statut
-                  </button>
-                  {smcBackgroundState.status !== 'done' && (
-                    <button
-                      type="button"
-                      onClick={handleRunSmcBackgroundBatchNow}
-                      disabled={smcBackgroundBusy || importing}
-                      className="rounded-xl border border-cyan-300 bg-white px-3 py-2 text-xs font-bold text-cyan-900 hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      Lancer le prochain lot
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => resumeSmcBackgroundJob('SMC')}
-                    disabled={smcBackgroundBusy || importing}
-                    className="rounded-xl border border-blue-300 bg-white px-3 py-2 text-xs font-bold text-blue-800 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    Reprendre au point d'arrêt
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const start = smcBackgroundState.date_debut || manualStartDate
-                      const end = smcBackgroundState.date_fin || manualEndDate
-                      void startSmcBackgroundJob(
-                        { p_date_debut: start, p_date_fin: end, label: `${start} → ${end}` },
-                        'SMC',
-                        'restart'
-                      )
-                    }}
-                    disabled={smcBackgroundBusy || importing}
-                    className="rounded-xl border border-amber-300 bg-white px-3 py-2 text-xs font-bold text-amber-800 hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    Relancer depuis début
-                  </button>
-                  {smcBackgroundState.status === 'running' && (
-                    <button
-                      type="button"
-                      onClick={handleStopSmcBackgroundCron}
-                      disabled={smcBackgroundBusy}
-                      className="rounded-xl border border-red-300 bg-white px-3 py-2 text-xs font-bold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      Stopper proprement
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-        </section>
-
-
-        <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-            <div>
-              <h2 className="text-lg font-black tracking-tight">Pipeline automatique serveur — fichiers & job global</h2>
-              <p className="mt-1 max-w-4xl text-sm text-slate-600">
-                Dépôt dans le bucket <b>{AUTO_IMPORT_BUCKET}</b>, dossier <b>pending</b>. Les fichiers attendus sont <b>Article stock.xlsx</b>, <b>BDCF.xlsx</b>, <b>modes_expedition.xlsx</b>, <b>Entete.xlsx</b>, <b>Activite.xlsx</b>, <b>Facture.xlsx</b> et <b>Devis.xlsx</b>.
-                Les fichiers Excel sont automatiquement convertis et découpés en plusieurs <b>.csv</b> de moins de <b>500 Ko</b>, en conservant la ligne d’entête. Les fichiers de documents ne coupent pas un même numéro de document entre deux morceaux ; le fichier stock, lui, peut être découpé ligne par ligne. Les imports manuels existants ne sont pas modifiés :
-                ce bloc ne fait que charger les fichiers découpés, lancer le job global et afficher les rapports.
-                Le pipeline serveur traite ensuite <b>un seul morceau par invocation</b>, pour éviter les limites CPU/mémoire, puis relance <b>flux_articles</b> sur les <b>{AUTO_IMPORT_FLUX_ARTICLES_MONTHS_BACK} derniers mois</b>, reconstruit le <b>cache Focus Mensuel du mois courant</b>, génère le PDF <b>reports/focus-mensuel/Rapport d'activité quotidien.pdf</b> en écrasant l'ancien fichier, génère le rapport avant SMC, puis lance ou non SMC selon le bouton choisi.
-              </p>
-              <div className="mt-3 flex flex-col gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center">
-                <label className="flex items-center gap-2 text-xs font-bold text-slate-700">
-                  <input
-                    type="checkbox"
-                    checked={autoImportSendReportEmail}
-                    onChange={(event) => setAutoImportSendReportEmail(event.target.checked)}
-                    disabled={autoImportBusy || importing || maintenanceLoading}
-                  />
-                  Envoyer le rapport avant SMC + PDF Focus Mensuel par email
-                </label>
-                <input
-                  type="text"
-                  value={autoImportReportEmailTo}
-                  onChange={(event) => setAutoImportReportEmailTo(event.target.value)}
-                  placeholder="adresse1@domaine.fr; adresse2@domaine.fr"
-                  disabled={!autoImportSendReportEmail || autoImportBusy || importing || maintenanceLoading}
-                  className="min-w-[320px] rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-semibold outline-none focus:border-blue-400 disabled:bg-slate-100"
-                />
-                <span className="text-[11px] font-semibold text-slate-500">Plusieurs adresses possibles, séparées par ; ou ,</span>
-              </div>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <label className="cursor-pointer rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-slate-800">
-                {autoImportUploading ? 'Chargement…' : 'Charger fichier(s) pending'}
-                <input
-                  type="file"
-                  accept=".xlsx"
-                  multiple
-                  className="hidden"
-                  onChange={handleAutoImportFileUpload}
-                  disabled={autoImportBusy || importing || maintenanceLoading}
-                />
-              </label>
-              <button
-                type="button"
-                onClick={() => handleStartAutoImportPipeline(false)}
-                disabled={autoImportBusy || importing || maintenanceLoading || autoImportPendingFiles.length === 0}
-                className="rounded-xl border border-sky-300 bg-sky-50 px-4 py-2 text-sm font-semibold text-sky-800 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {autoImportRunning ? 'Job global…' : 'Job global sans SMC'}
-              </button>
-              <button
-                type="button"
-                onClick={() => handleStartAutoImportPipeline(true)}
-                disabled={autoImportBusy || importing || maintenanceLoading || autoImportPendingFiles.length === 0}
-                className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {autoImportRunning ? 'Job global…' : 'Job global avec SMC'}
-              </button>
-              <button
-                type="button"
-                onClick={() => loadAutomaticImportDashboard(true)}
-                disabled={autoImportBusy}
-                className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                Actualiser statut
-              </button>
-            </div>
-          </div>
-
-          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="text-xs font-black uppercase tracking-wide text-slate-500">Dernier job global</div>
-              <div className="mt-2 flex items-center gap-2">
-                <span className={`rounded-full border px-2.5 py-1 text-xs font-black ${statusBadgeClass(latestAutoImportRun?.status)}`}>
-                  {latestAutoImportRun?.status || 'Aucun'}
-                </span>
-                {latestAutoImportRun?.current_step && (
-                  <span className="truncate text-xs font-bold text-slate-600">{latestAutoImportRun.current_step}</span>
-                )}
-              </div>
-              <div className="mt-2 text-sm font-bold text-slate-900">
-                Début : {formatDateTime(latestAutoImportRun?.started_at || null)}
-              </div>
-              <div className="text-xs font-semibold text-slate-500">
-                Fin : {formatDateTime(latestAutoImportRun?.finished_at || null)} · Durée : {getAutoImportRunDuration(latestAutoImportRun)}
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
-              <div className="text-xs font-black uppercase tracking-wide text-emerald-800">Dernière bonne exécution</div>
-              <div className="mt-2 text-lg font-black text-emerald-950">
-                {latestSuccessfulAutoImportRun
-                  ? formatDateTime(latestSuccessfulAutoImportRun.finished_at || latestSuccessfulAutoImportRun.smc_finished_at || latestSuccessfulAutoImportRun.started_at || null)
-                  : '—'}
-              </div>
-              <div className="mt-1 text-xs font-semibold text-emerald-700">
-                {latestSuccessfulAutoImportRun
-                  ? `Run n°${latestSuccessfulAutoImportRun.id || '—'} · ${latestSuccessfulAutoImportRun.status || 'OK'}`
-                  : 'Aucun run terminé avec succès dans les derniers runs.'}
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
-              <div className="text-xs font-black uppercase tracking-wide text-amber-800">Fichiers pending</div>
-              <div className="mt-2 text-lg font-black text-amber-950">{autoImportPendingFiles.length}</div>
-              <div className="mt-1 text-xs font-semibold text-amber-700">
-                {autoImportPendingFiles.length
-                  ? autoImportPendingFiles.map((file) => `${file.kind}: ${file.name}`).join(' · ')
-                  : 'Aucun fichier en attente.'}
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
-              <div className="text-xs font-black uppercase tracking-wide text-blue-800">Processing / rejetés / archive</div>
-              <div className="mt-2 text-lg font-black text-blue-950">
-                {autoImportProcessingFiles.length} / {autoImportRejectedFiles.length} / {autoImportArchivedFiles.length}
-              </div>
-              <div className="mt-1 text-xs font-semibold text-blue-700">
-                Suivi direct du bucket {AUTO_IMPORT_BUCKET}.
-              </div>
-            </div>
-          </div>
-
-          {(autoImportMessage || autoImportError) && (
-            <div className="mt-4 space-y-2">
-              {autoImportMessage && (
-                <div className="rounded-xl bg-emerald-50 p-3 text-sm font-bold text-emerald-800">
-                  {autoImportMessage}
-                </div>
               )}
-              {autoImportError && (
-                <pre className="whitespace-pre-wrap rounded-xl bg-red-50 p-3 text-sm font-bold text-red-700">
-                  {autoImportError}
-                </pre>
-              )}
-            </div>
-          )}
 
-          <div className="mt-4 grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <div>
-                  <h3 className="text-sm font-black uppercase tracking-wide text-slate-700">Fichiers du bucket</h3>
-                  <p className="text-xs text-slate-500">Le job ne consomme que le dossier pending. Les autres dossiers sont affichés pour contrôle.</p>
+              <div className="grid grid-cols-1 gap-4 p-5 xl:grid-cols-2">
+                <div className="rounded-2xl border border-[#E7E4DD] bg-[#FAF9F7] p-4">
+                  <h3 className="text-sm font-bold text-slate-900">Déposer des fichiers</h3>
+                  <p className="mt-1 text-sm text-slate-600">
+                    Attendus : Article stock, BDCF, modes_expedition, Entete, Activite, Facture, Devis.
+                  </p>
+
+                  <label
+                    className={`mt-3 inline-flex cursor-pointer items-center justify-center rounded-xl bg-[#111820] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[#25313D] ${
+                      autoImportBusy || importing || maintenanceLoading ? 'pointer-events-none opacity-40' : ''
+                    }`}
+                  >
+                    {autoImportUploading ? 'Chargement…' : 'Choisir les fichiers'}
+                    <input
+                      type="file"
+                      accept=".xlsx"
+                      multiple
+                      className="hidden"
+                      onChange={handleAutoImportFileUpload}
+                      disabled={autoImportBusy || importing || maintenanceLoading}
+                    />
+                  </label>
+
+                  <div className="mt-4 border-t border-[#E7E4DD] pt-4">
+                    <label className="flex cursor-pointer items-center gap-2 text-sm font-semibold text-slate-800">
+                      <input
+                        type="checkbox"
+                        checked={autoImportSendReportEmail}
+                        onChange={(event) => setAutoImportSendReportEmail(event.target.checked)}
+                        disabled={autoImportBusy || importing || maintenanceLoading}
+                        className="h-4 w-4 accent-[#B4761A]"
+                      />
+                      Envoyer le rapport avant SMC et le PDF par email
+                    </label>
+                    <input
+                      type="text"
+                      value={autoImportReportEmailTo}
+                      onChange={(event) => setAutoImportReportEmailTo(event.target.value)}
+                      placeholder="adresse1@domaine.fr ; adresse2@domaine.fr"
+                      disabled={!autoImportSendReportEmail || autoImportBusy || importing || maintenanceLoading}
+                      className="mt-2 h-[42px] w-full rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm outline-none transition focus:border-[#B4761A] focus:ring-2 focus:ring-[#B4761A]/25 disabled:bg-[#F1EFEA] disabled:text-slate-400"
+                    />
+                    <p className="mt-1.5 text-xs text-slate-500">Plusieurs adresses possibles, séparées par ; ou ,</p>
+                  </div>
                 </div>
-                {autoImportLoading && <span className="rounded-full bg-blue-100 px-3 py-1 text-xs font-bold text-blue-700">Lecture…</span>}
-              </div>
 
-              <div className="max-h-[360px] overflow-auto rounded-xl border border-slate-200 bg-white">
-                <table className="min-w-full border-collapse text-xs">
-                  <thead className="sticky top-0 bg-slate-100">
-                    <tr>
-                      <th className="border-b border-slate-200 px-3 py-2 text-left">Dossier</th>
-                      <th className="border-b border-slate-200 px-3 py-2 text-left">Type</th>
-                      <th className="border-b border-slate-200 px-3 py-2 text-left">Fichier</th>
-                      <th className="border-b border-slate-200 px-3 py-2 text-right">Taille</th>
-                      <th className="border-b border-slate-200 px-3 py-2 text-left">MAJ</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {autoImportStorageFiles.length === 0 ? (
-                      <tr>
-                        <td colSpan={5} className="px-3 py-6 text-center font-semibold text-slate-500">
-                          Aucun fichier détecté dans pending / processing / rejected / archive.
-                        </td>
-                      </tr>
-                    ) : (
-                      autoImportStorageFiles.map((file) => (
-                        <tr key={file.path} className="hover:bg-slate-50">
-                          <td className="whitespace-nowrap border-b border-slate-100 px-3 py-2">
-                            <span className={`rounded-full border px-2 py-0.5 text-xs font-black ${folderBadgeClass(file.folder)}`}>
-                              {file.folder}
-                            </span>
-                          </td>
-                          <td className="whitespace-nowrap border-b border-slate-100 px-3 py-2">
-                            <span className={`rounded-full border px-2 py-0.5 text-xs font-black ${fileKindBadgeClass(file.kind)}`}>
-                              {file.kind}
-                            </span>
-                          </td>
-                          <td className="max-w-[360px] truncate border-b border-slate-100 px-3 py-2 font-semibold" title={file.path}>
-                            {file.name}
-                          </td>
-                          <td className="whitespace-nowrap border-b border-slate-100 px-3 py-2 text-right font-semibold">
-                            {formatFileSize(file.size)}
-                          </td>
-                          <td className="whitespace-nowrap border-b border-slate-100 px-3 py-2 text-slate-500">
-                            {formatDateTime(file.updated_at || file.created_at)}
-                          </td>
+                <div className="rounded-2xl border border-[#E7E4DD] bg-[#FAF9F7] p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <h3 className="text-sm font-bold text-slate-900">Fichiers du bucket</h3>
+                    <div className="inline-flex flex-wrap rounded-lg border border-[#D8D3C8] bg-white p-1">
+                      {(['pending', 'processing', 'rejected', 'archive', 'all'] as const).map((folder) => (
+                        <button
+                          type="button"
+                          key={folder}
+                          onClick={() => setAutoImportFolderFilter(folder)}
+                          className={`rounded-md px-2.5 py-1 text-xs font-semibold transition ${
+                            autoImportFolderFilter === folder ? 'bg-[#111820] text-white' : 'text-slate-600 hover:text-slate-900'
+                          }`}
+                        >
+                          {folder === 'all' ? 'Tout' : `${folderLabel(folder)} ${folderCounts[folder]}`}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="mt-3 max-h-[320px] overflow-auto rounded-xl border border-[#E7E4DD] bg-white">
+                    <table className="min-w-full border-collapse text-xs">
+                      <thead className="sticky top-0 bg-[#FAF9F7]">
+                        <tr>
+                          <th className="border-b border-[#EFEDE8] px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Dossier</th>
+                          <th className="border-b border-[#EFEDE8] px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Type</th>
+                          <th className="border-b border-[#EFEDE8] px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Fichier</th>
+                          <th className="border-b border-[#EFEDE8] px-3 py-2 text-right text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Taille</th>
+                          <th className="border-b border-[#EFEDE8] px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">MAJ</th>
                         </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
+                      </thead>
+                      <tbody>
+                        {visibleStorageFiles.length === 0 ? (
+                          <tr>
+                            <td colSpan={5} className="px-3 py-8 text-center text-slate-500">
+                              Aucun fichier dans cette vue.
+                            </td>
+                          </tr>
+                        ) : (
+                          visibleStorageFiles.map((file) => (
+                            <tr key={file.path} className="hover:bg-[#FAF9F7]">
+                              <td className="whitespace-nowrap border-b border-[#EFEDE8] px-3 py-2">
+                                <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${folderBadgeClass(file.folder)}`}>
+                                  {folderLabel(file.folder)}
+                                </span>
+                              </td>
+                              <td className="whitespace-nowrap border-b border-[#EFEDE8] px-3 py-2">
+                                <span className={`rounded-md px-2 py-0.5 text-[11px] font-bold ${fileKindBadgeClass(file.kind)}`}>
+                                  {file.kind}
+                                </span>
+                              </td>
+                              <td className="max-w-[320px] truncate border-b border-[#EFEDE8] px-3 py-2 font-medium" title={file.path}>
+                                {file.name}
+                              </td>
+                              <td className="whitespace-nowrap border-b border-[#EFEDE8] px-3 py-2 text-right tabular-nums">
+                                {formatFileSize(file.size)}
+                              </td>
+                              <td className="whitespace-nowrap border-b border-[#EFEDE8] px-3 py-2 text-slate-500">
+                                {formatDateTime(file.updated_at || file.created_at)}
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               </div>
-            </div>
+            </section>
 
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <section className="rounded-2xl border border-[#E2DFD8] bg-white">
+              <div className="flex flex-col gap-3 border-b border-[#EFEDE8] px-5 py-4 lg:flex-row lg:items-start lg:justify-between">
                 <div>
-                  <h3 className="text-sm font-black uppercase tracking-wide text-slate-700">Rapports du dernier job</h3>
-                  <p className="text-xs text-slate-500">
-                    Rapport intermédiaire avant SMC, rapport final et erreurs remontées par le run.
+                  <Eyebrow>Traçabilité</Eyebrow>
+                  <h2 className="mt-1 text-lg font-bold text-slate-900">Rapports du dernier job</h2>
+                  <p className="mt-1 text-sm text-slate-600">
+                    Run n°{latestAutoImportRun?.id || '—'} · rapport avant SMC {formatDateTime(latestAutoImportRun?.pre_smc_report_at || null)} ·
+                    fin SMC {formatDateTime(latestAutoImportRun?.smc_finished_at || null)}
+                    {latestAutoImportRun?.report_email_status ? ` · email ${latestAutoImportRun.report_email_status}` : ''}
                   </p>
                 </div>
-                <div className="flex flex-wrap gap-2">
-                  {(['pre_smc', 'final', 'errors'] as AutoImportReportTab[]).map((tab) => {
-                    const label = tab === 'pre_smc' ? 'Avant SMC' : tab === 'final' ? 'Final' : 'Erreurs'
-                    return (
-                      <button
-                        key={tab}
-                        type="button"
-                        onClick={() => setAutoImportReportTab(tab)}
-                        className={`rounded-xl border px-3 py-2 text-xs font-black ${
-                          autoImportReportTab === tab
-                            ? 'border-slate-900 bg-slate-900 text-white'
-                            : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-100'
-                        }`}
-                      >
-                        {label}
-                      </button>
-                    )
-                  })}
+                <div className="inline-flex shrink-0 rounded-lg border border-[#D8D3C8] bg-white p-1">
+                  {(['pre_smc', 'final', 'errors'] as AutoImportReportTab[]).map((tab) => (
+                    <button
+                      key={tab}
+                      type="button"
+                      onClick={() => setAutoImportReportTab(tab)}
+                      className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
+                        autoImportReportTab === tab ? 'bg-[#111820] text-white' : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      {tab === 'pre_smc' ? 'Avant SMC' : tab === 'final' ? 'Final' : 'Erreurs'}
+                    </button>
+                  ))}
                 </div>
               </div>
 
-              <div className="rounded-xl border border-slate-200 bg-white p-3">
-                <div className="mb-2 flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-500">
-                  <span>Run n°{latestAutoImportRun?.id || '—'}</span>
-                  <span>·</span>
-                  <span>Rapport avant SMC : {formatDateTime(latestAutoImportRun?.pre_smc_report_at || null)}</span>
-                  <span>·</span>
-                  <span>SMC fin : {formatDateTime(latestAutoImportRun?.smc_finished_at || null)}</span>
-                  {latestAutoImportRun?.focus_pdf_path && (
-                    <>
-                      <span>·</span>
-                      <span>PDF Focus : {latestAutoImportRun.focus_pdf_path}</span>
-                    </>
-                  )}
-                  {latestAutoImportRun?.report_email_status && (
-                    <>
-                      <span>·</span>
-                      <span>Email : {latestAutoImportRun.report_email_status}</span>
-                    </>
-                  )}
-                </div>
-                <pre className="max-h-[260px] overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950 p-3 text-xs font-semibold text-slate-50">
+              <div className="p-5">
+                {latestAutoImportRun?.focus_pdf_path && (
+                  <p className="mb-3 font-mono text-xs text-slate-500">PDF Focus : {latestAutoImportRun.focus_pdf_path}</p>
+                )}
+                <pre className="max-h-[300px] overflow-auto whitespace-pre-wrap rounded-xl bg-[#111820] p-4 font-mono text-xs leading-relaxed text-slate-200">
                   {latestAutoImportReport}
                 </pre>
-              </div>
 
-              <div className="mt-3 rounded-xl border border-slate-200 bg-white">
-                <div className="border-b border-slate-200 px-3 py-2 text-xs font-black uppercase tracking-wide text-slate-600">
-                  Fichiers rattachés au dernier run
-                </div>
-                <div className="max-h-[190px] overflow-auto">
+                <div className="mt-4 overflow-auto rounded-xl border border-[#E7E4DD]">
                   <table className="min-w-full border-collapse text-xs">
-                    <thead className="sticky top-0 bg-slate-100">
+                    <thead className="bg-[#FAF9F7]">
                       <tr>
-                        <th className="border-b border-slate-200 px-3 py-2 text-left">Type</th>
-                        <th className="border-b border-slate-200 px-3 py-2 text-left">Statut</th>
-                        <th className="border-b border-slate-200 px-3 py-2 text-left">Fichier</th>
-                        <th className="border-b border-slate-200 px-3 py-2 text-left">Erreur</th>
+                        <th className="border-b border-[#EFEDE8] px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Type</th>
+                        <th className="border-b border-[#EFEDE8] px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Statut</th>
+                        <th className="border-b border-[#EFEDE8] px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Fichier</th>
+                        <th className="border-b border-[#EFEDE8] px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Erreur</th>
                       </tr>
                     </thead>
                     <tbody>
                       {autoImportPipelineFiles.length === 0 ? (
                         <tr>
-                          <td colSpan={4} className="px-3 py-4 text-center font-semibold text-slate-500">
+                          <td colSpan={4} className="px-3 py-6 text-center text-slate-500">
                             Aucun fichier rattaché au dernier run.
                           </td>
                         </tr>
                       ) : (
                         autoImportPipelineFiles.map((file) => (
-                          <tr key={file.id || `${file.run_id}-${file.original_filename}`} className="align-top hover:bg-slate-50">
-                            <td className="whitespace-nowrap border-b border-slate-100 px-3 py-2 font-bold">
+                          <tr key={file.id || `${file.run_id}-${file.original_filename}`} className="align-top hover:bg-[#FAF9F7]">
+                            <td className="whitespace-nowrap border-b border-[#EFEDE8] px-3 py-2 font-semibold">
                               {file.file_type || '—'}
                             </td>
-                            <td className="whitespace-nowrap border-b border-slate-100 px-3 py-2">
-                              <span className={`rounded-full border px-2 py-0.5 text-xs font-black ${statusBadgeClass(file.status)}`}>
+                            <td className="whitespace-nowrap border-b border-[#EFEDE8] px-3 py-2">
+                              <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${statusBadgeClass(file.status)}`}>
                                 {file.status || '—'}
                               </span>
                             </td>
-                            <td className="max-w-[260px] truncate border-b border-slate-100 px-3 py-2 font-semibold" title={getAutoImportFileDisplayPath(file)}>
+                            <td className="max-w-[280px] truncate border-b border-[#EFEDE8] px-3 py-2 font-mono" title={getAutoImportFileDisplayPath(file)}>
                               {getAutoImportFileDisplayPath(file)}
                             </td>
-                            <td className="max-w-[360px] border-b border-slate-100 px-3 py-2 text-red-700">
+                            <td className="max-w-[360px] border-b border-[#EFEDE8] px-3 py-2 text-[#A32C2C]">
                               {file.error_message || '—'}
                             </td>
                           </tr>
@@ -6642,311 +6523,571 @@ export default function ImportsParametragePage() {
                   </table>
                 </div>
               </div>
-            </div>
+            </section>
           </div>
-        </section>
+        )}
 
-        <DataReconciliationPanel />
-
-        <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Table sélectionnée</div>
-            <div className="mt-2 text-xl font-bold">{selectedConfig.label}</div>
-            <div className="mt-1 text-sm text-slate-500">Clé : {selectedConfig.primaryKey}</div>
-          </div>
-          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Nb enregistrements</div>
-            <div className="mt-2 text-xl font-bold">{currentStats?.count ?? '—'}</div>
-          </div>
-          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Dernier import / MAJ</div>
-            <div className="mt-2 text-xl font-bold">{formatDateTime(currentStats?.lastImportAt || null)}</div>
-          </div>
-          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Dernier enregistrement créé</div>
-            <div className="mt-2 truncate text-xl font-bold">{currentStats?.lastCreatedKey || '—'}</div>
-            <div className="mt-1 text-sm text-slate-500">{formatDateTime(currentStats?.lastCreatedAt || null)}</div>
-          </div>
-        </section>
-
-        <section className="grid gap-6 xl:grid-cols-[320px_1fr]">
-          <aside className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-            <h2 className="mb-3 text-sm font-bold uppercase tracking-wide text-slate-500">Tables</h2>
-            <div className="space-y-2">
-              {TABLES.map((table) => {
-                const selected = table.key === selectedTableKey
-                const tableStats = stats[table.key]
-                return (
-                  <button
-                    key={table.key}
-                    type="button"
-                    onClick={() => setSelectedTableKey(table.key)}
-                    className={`w-full rounded-xl border p-3 text-left transition ${
-                      selected
-                        ? 'border-slate-900 bg-slate-900 text-white'
-                        : 'border-slate-200 bg-white hover:bg-slate-50'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="font-semibold">{table.label}</span>
-                      <span className={`rounded-full px-2 py-0.5 text-xs ${selected ? 'bg-white/20' : 'bg-slate-100'}`}>
-                        {tableStats?.count ?? 0}
-                      </span>
-                    </div>
-                    <div className={`mt-1 text-xs ${selected ? 'text-white/70' : 'text-slate-500'}`}>
-                      {table.description}
-                    </div>
-                  </button>
-                )
-              })}
-            </div>
-          </aside>
-
-          <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div className="flex flex-col gap-3 border-b border-slate-200 pb-4 lg:flex-row lg:items-center lg:justify-between">
-              <div>
-                <h2 className="text-lg font-bold">{selectedConfig.label}</h2>
-                <p className="text-sm text-slate-500">{selectedConfig.description}</p>
+        {/* ======================================================== Onglet import manuel */}
+        {activeTab === 'manual' && (
+          <div className="grid grid-cols-1 gap-5 xl:grid-cols-[300px_1fr]">
+            <aside className="rounded-2xl border border-[#E2DFD8] bg-white">
+              <div className="border-b border-[#EFEDE8] px-4 py-3">
+                <Eyebrow>Destination</Eyebrow>
+                <h2 className="mt-1 text-base font-bold text-slate-900">Table à charger</h2>
               </div>
+              <div className="max-h-[640px] overflow-auto p-2">
+                {TABLE_FAMILIES.map((family) => {
+                  const familyTables = TABLES.filter((table) => table.family === family)
+                  if (!familyTables.length) return null
+                  return (
+                    <div key={family} className="mb-3">
+                      <div className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                        {family}
+                      </div>
+                      <div className="space-y-1">
+                        {familyTables.map((table) => {
+                          const selected = table.key === selectedTableKey
+                          const tableStats = stats[table.key]
+                          return (
+                            <button
+                              key={table.key}
+                              type="button"
+                              onClick={() => setSelectedTableKey(table.key)}
+                              className={`flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A] ${
+                                selected ? 'bg-[#111820] text-white' : 'text-slate-700 hover:bg-[#FAF9F7]'
+                              }`}
+                            >
+                              <span className="truncate text-sm font-semibold">{table.label}</span>
+                              <span className={`shrink-0 text-xs tabular-nums ${selected ? 'text-slate-300' : 'text-slate-400'}`}>
+                                {formatCount(tableStats?.count)}
+                              </span>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </aside>
 
-              <input
-                value={filter}
-                onChange={(e) => setFilter(e.target.value)}
-                placeholder="Filtrer dans les lignes affichées…"
-                className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-900 lg:w-96"
-              />
-            </div>
-
-            {message && <div className="mt-4 rounded-xl bg-emerald-50 p-3 text-sm text-emerald-800">{message}</div>}
-            {error && <pre className="mt-4 whitespace-pre-wrap rounded-xl bg-red-50 p-3 text-sm text-red-700">{error}</pre>}
-
-            {pendingReferentialImport && (
-              <div className="mt-4 rounded-2xl border border-amber-300 bg-amber-50 p-4">
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <section className="space-y-5">
+              <div className="rounded-2xl border border-[#E2DFD8] bg-white">
+                <div className="flex flex-col gap-3 border-b border-[#EFEDE8] px-5 py-4 lg:flex-row lg:items-start lg:justify-between">
                   <div>
-                    <h3 className="text-sm font-black uppercase tracking-wide text-amber-900">
-                      Arbitrage avant import — {pendingReferentialImport.configLabel}
-                    </h3>
-                    <p className="mt-1 text-sm text-amber-900">
-                      Les lignes ci-dessous existent déjà en base mais contiennent au moins un champ différent.
-                      Coche les lignes à importer pour écraser les valeurs en base par celles du fichier.
-                    </p>
-                    <p className="mt-1 text-xs text-amber-800">
-                      Nouveaux enregistrements prêts à importer : {pendingReferentialImport.rowsWithoutConflicts.length}.
-                      Identiques ignorés : {pendingReferentialImport.identicalIgnored}.
-                    </p>
+                    <Eyebrow>{selectedConfig.family}</Eyebrow>
+                    <h2 className="mt-1 text-lg font-bold text-slate-900">{selectedConfig.label}</h2>
+                    <p className="mt-1 max-w-2xl text-sm text-slate-600">{selectedConfig.description}</p>
                   </div>
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setAllPendingConflicts(true)}
-                      className="rounded-xl border border-amber-400 bg-white px-3 py-2 text-xs font-bold text-amber-900 hover:bg-amber-100"
+                  <div className="flex shrink-0 flex-wrap gap-2">
+                    <label
+                      className={`inline-flex cursor-pointer items-center justify-center rounded-xl bg-[#111820] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[#25313D] ${
+                        importing ? 'pointer-events-none opacity-40' : ''
+                      }`}
                     >
-                      Tout importer
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setAllPendingConflicts(false)}
-                      className="rounded-xl border border-amber-400 bg-white px-3 py-2 text-xs font-bold text-amber-900 hover:bg-amber-100"
-                    >
-                      Tout ignorer
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setPendingReferentialImport(null)
-                        setMessage('Import annulé avant écrasement des enregistrements existants.')
-                      }}
-                      className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-100"
-                    >
-                      Annuler
-                    </button>
-                    <button
-                      type="button"
-                      onClick={confirmPendingReferentialImport}
-                      disabled={importing}
-                      className="rounded-xl bg-slate-900 px-3 py-2 text-xs font-bold text-white hover:bg-slate-800 disabled:opacity-50"
-                    >
-                      Importer la sélection
-                    </button>
+                      {importing ? 'Import en cours…' : 'Importer un fichier Excel'}
+                      <input type="file" accept=".xlsx,.xls" className="hidden" onChange={handleFileImport} disabled={importing} />
+                    </label>
+                    <SecondaryButton onClick={startNewRow}>Créer une ligne</SecondaryButton>
+                    {lastRejects.length > 0 && (
+                      <SecondaryButton onClick={exportRejectsExcel}>Export des rejets</SecondaryButton>
+                    )}
                   </div>
                 </div>
 
-                <div className="mt-4 max-h-[420px] overflow-auto rounded-xl border border-amber-200 bg-white">
-                  <table className="min-w-full border-collapse text-xs">
-                    <thead className="sticky top-0 bg-amber-100 text-amber-950">
+                <div className="grid grid-cols-2 gap-px bg-[#EFEDE8] md:grid-cols-4">
+                  <RunFact label="Enregistrements">
+                    <span className="text-lg font-bold tabular-nums text-slate-900">{formatCount(currentStats?.count)}</span>
+                  </RunFact>
+                  <RunFact label="Clé primaire">
+                    <span className="font-mono text-sm text-slate-900">{selectedConfig.primaryKey}</span>
+                  </RunFact>
+                  <RunFact label="Dernier import / MAJ">
+                    <span className="text-sm font-semibold text-slate-900">{formatDateTime(currentStats?.lastImportAt || null)}</span>
+                  </RunFact>
+                  <RunFact label="Dernier enregistrement">
+                    <span className="block truncate text-sm font-semibold text-slate-900" title={currentStats?.lastCreatedKey || ''}>
+                      {currentStats?.lastCreatedKey || '—'}
+                    </span>
+                  </RunFact>
+                </div>
+
+                {(message || error) && (
+                  <div className="space-y-2 px-5 pt-4">
+                    {message && (
+                      <div className="rounded-xl border border-[#BFDCCE] bg-[#E7F1EA] px-4 py-3 text-sm font-semibold text-[#1F5B44]">
+                        {message}
+                      </div>
+                    )}
+                    {error && (
+                      <pre className="max-h-[220px] overflow-auto whitespace-pre-wrap rounded-xl border border-[#F0C7C7] bg-[#FBE9E9] px-4 py-3 text-xs font-semibold text-[#A32C2C]">
+                        {error}
+                      </pre>
+                    )}
+                  </div>
+                )}
+
+                {importSteps.length > 0 && (
+                  <div className="px-5 py-4">
+                    <div className="mb-3 flex items-center justify-between gap-3">
+                      <h3 className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                        Déroulé du chargement
+                      </h3>
+                      {importing && (
+                        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#8A5A11]">
+                          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#B4761A]" />
+                          en cours
+                        </span>
+                      )}
+                    </div>
+                    <ol className="grid gap-2 md:grid-cols-2 xl:grid-cols-5">
+                      {importSteps.map((step) => (
+                        <li
+                          key={step.key}
+                          className={`rounded-xl border p-3 ${
+                            step.status === 'running' ? 'border-[#B4761A] bg-[#FDF7EA]' : 'border-[#E7E4DD] bg-[#FAF9F7]'
+                          }`}
+                        >
+                          <div className="flex items-start gap-2">
+                            <span
+                              className={`mt-1 h-2 w-2 shrink-0 rounded-full ${
+                                step.status === 'done'
+                                  ? 'bg-[#2F6B4F]'
+                                  : step.status === 'running'
+                                    ? 'bg-[#B4761A]'
+                                    : step.status === 'error'
+                                      ? 'bg-[#A32C2C]'
+                                      : 'border border-[#D8D3C8]'
+                              }`}
+                            />
+                            <span className="text-xs font-semibold leading-snug text-slate-900">{step.label}</span>
+                          </div>
+                          {step.detail && <p className="mt-1.5 pl-4 text-[11px] leading-snug text-slate-500">{step.detail}</p>}
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                )}
+              </div>
+
+              {pendingReferentialImport && (
+                <div className="rounded-2xl border-2 border-[#B4761A] bg-white">
+                  <div className="flex flex-col gap-3 border-b border-[#EFEDE8] bg-[#FDF7EA] px-5 py-4 lg:flex-row lg:items-start lg:justify-between">
+                    <div>
+                      <Eyebrow>Arbitrage requis</Eyebrow>
+                      <h3 className="mt-1 text-lg font-bold text-slate-900">
+                        {pendingReferentialImport.conflicts.length} enregistrement(s) déjà en base, avec des différences
+                      </h3>
+                      <p className="mt-1 max-w-3xl text-sm text-slate-700">
+                        Cochez les lignes dont vous voulez écraser les valeurs en base par celles du fichier.
+                        {' '}{pendingReferentialImport.rowsWithoutConflicts.length} nouvel(aux) enregistrement(s) seront importés dans tous les cas,
+                        {' '}{pendingReferentialImport.identicalIgnored} identique(s) sont ignoré(s).
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 flex-wrap gap-2">
+                      <GhostButton onClick={() => setAllPendingConflicts(true)}>Tout cocher</GhostButton>
+                      <GhostButton onClick={() => setAllPendingConflicts(false)}>Tout décocher</GhostButton>
+                      <SecondaryButton
+                        onClick={() => {
+                          setPendingReferentialImport(null)
+                          setMessage('Import annulé avant écrasement des enregistrements existants.')
+                        }}
+                      >
+                        Annuler
+                      </SecondaryButton>
+                      <PrimaryButton onClick={confirmPendingReferentialImport} disabled={importing}>
+                        Importer la sélection
+                      </PrimaryButton>
+                    </div>
+                  </div>
+
+                  <div className="max-h-[420px] overflow-auto">
+                    <table className="min-w-full border-collapse text-xs">
+                      <thead className="sticky top-0 bg-[#FAF9F7]">
+                        <tr>
+                          <th className="w-16 border-b border-[#EFEDE8] px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Écraser</th>
+                          <th className="border-b border-[#EFEDE8] px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Clé</th>
+                          <th className="border-b border-[#EFEDE8] px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Libellé</th>
+                          <th className="border-b border-[#EFEDE8] px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Base → fichier</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pendingReferentialImport.conflicts.map((conflict) => (
+                          <tr key={conflict.primaryKeyValue} className="align-top hover:bg-[#FAF9F7]">
+                            <td className="border-b border-[#EFEDE8] px-3 py-2.5">
+                              <input
+                                type="checkbox"
+                                checked={conflict.selected}
+                                onChange={(e) => togglePendingConflict(conflict.primaryKeyValue, e.target.checked)}
+                                className="h-4 w-4 accent-[#B4761A]"
+                              />
+                            </td>
+                            <td className="whitespace-nowrap border-b border-[#EFEDE8] px-3 py-2.5 font-mono font-semibold">
+                              {conflict.primaryKeyValue}
+                            </td>
+                            <td className="border-b border-[#EFEDE8] px-3 py-2.5 font-semibold">{conflict.displayLabel}</td>
+                            <td className="border-b border-[#EFEDE8] px-3 py-2.5">
+                              <div className="flex flex-wrap gap-1.5">
+                                {conflict.differences.map((diff) => {
+                                  const column = TABLES
+                                    .find((table) => table.key === conflict.tableKey)
+                                    ?.columns.find((col) => col.db === diff.db)
+                                  return (
+                                    <span
+                                      key={diff.db}
+                                      className="rounded-md border border-[#E7E4DD] bg-[#FAF9F7] px-2 py-1"
+                                      title={`${diff.label} : ${formatCellValue(diff.currentValue, column)} → ${formatCellValue(diff.importedValue, column)}`}
+                                    >
+                                      <span className="font-semibold text-slate-900">{diff.label}</span>
+                                      <span className="text-slate-400"> · </span>
+                                      <span className="text-slate-500 line-through">{formatCellValue(diff.currentValue, column)}</span>
+                                      <span className="text-slate-400"> → </span>
+                                      <span className="font-semibold text-[#8A5A11]">{formatCellValue(diff.importedValue, column)}</span>
+                                    </span>
+                                  )
+                                })}
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              <div className="rounded-2xl border border-[#E2DFD8] bg-white">
+                <div className="flex flex-col gap-3 border-b border-[#EFEDE8] px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
+                  <div>
+                    <Eyebrow>Aperçu</Eyebrow>
+                    <h3 className="mt-1 text-base font-bold text-slate-900">
+                      {PREVIEW_LIMIT} dernières lignes
+                      <span className="ml-2 text-sm font-normal text-slate-500">
+                        {visibleRows.length} affichée(s)
+                      </span>
+                    </h3>
+                  </div>
+                  <input
+                    value={filter}
+                    onChange={(e) => setFilter(e.target.value)}
+                    placeholder="Filtrer dans les lignes affichées…"
+                    className="h-[42px] w-full rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm outline-none transition focus:border-[#B4761A] focus:ring-2 focus:ring-[#B4761A]/25 lg:w-96"
+                  />
+                </div>
+
+                <div className="overflow-auto">
+                  <table className="min-w-full border-collapse text-sm">
+                    <thead className="sticky top-0 z-10 bg-[#FAF9F7]">
                       <tr>
-                        <th className="border-b border-amber-200 px-3 py-2 text-left">Importer</th>
-                        <th className="border-b border-amber-200 px-3 py-2 text-left">Clé</th>
-                        <th className="border-b border-amber-200 px-3 py-2 text-left">Client / libellé</th>
-                        <th className="border-b border-amber-200 px-3 py-2 text-left">Champs différents — valeur base → valeur fichier</th>
+                        <th className="border-b border-[#EFEDE8] px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Actions</th>
+                        {selectedConfig.columns.slice(0, 16).map((col) => (
+                          <th
+                            key={col.db}
+                            className="cursor-pointer whitespace-nowrap border-b border-[#EFEDE8] px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500 transition hover:text-[#8A5A11]"
+                            onClick={() => handleSort(col.db)}
+                          >
+                            {col.label}
+                            {sortColumn === col.db ? (sortDirection === 'asc' ? ' ▲' : ' ▼') : ''}
+                          </th>
+                        ))}
                       </tr>
                     </thead>
                     <tbody>
-                      {pendingReferentialImport.conflicts.map((conflict) => (
-                        <tr key={conflict.primaryKeyValue} className="align-top hover:bg-amber-50">
-                          <td className="border-b border-amber-100 px-3 py-2">
-                            <input
-                              type="checkbox"
-                              checked={conflict.selected}
-                              onChange={(e) => togglePendingConflict(conflict.primaryKeyValue, e.target.checked)}
-                            />
-                          </td>
-                          <td className="whitespace-nowrap border-b border-amber-100 px-3 py-2 font-bold">
-                            {conflict.primaryKeyValue}
-                          </td>
-                          <td className="border-b border-amber-100 px-3 py-2 font-semibold">
-                            {conflict.displayLabel}
-                          </td>
-                          <td className="border-b border-amber-100 px-3 py-2">
-                            <div className="flex flex-wrap gap-1.5">
-                              {conflict.differences.map((diff) => {
-                                const column = TABLES
-                                  .find((table) => table.key === conflict.tableKey)
-                                  ?.columns.find((col) => col.db === diff.db)
-                                return (
-                                  <span
-                                    key={diff.db}
-                                    className="rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 text-amber-950"
-                                    title={`${diff.label} : ${formatCellValue(diff.currentValue, column)} → ${formatCellValue(diff.importedValue, column)}`}
-                                  >
-                                    <strong>{diff.label}</strong> : {formatCellValue(diff.currentValue, column)} → {formatCellValue(diff.importedValue, column)}
-                                  </span>
-                                )
-                              })}
-                            </div>
+                      {loading ? (
+                        <tr>
+                          <td className="px-3 py-10 text-center text-slate-500" colSpan={17}>
+                            Chargement…
                           </td>
                         </tr>
-                      ))}
+                      ) : visibleRows.length === 0 ? (
+                        <tr>
+                          <td className="px-3 py-10 text-center text-slate-500" colSpan={17}>
+                            Aucun enregistrement affiché.
+                          </td>
+                        </tr>
+                      ) : (
+                        visibleRows.map((row, rowIndex) => (
+                          <tr key={tableReactKey(row, selectedConfig, rowIndex)} className="hover:bg-[#FAF9F7]">
+                            <td className="whitespace-nowrap border-b border-[#EFEDE8] px-3 py-2">
+                              <button
+                                type="button"
+                                onClick={() => startEdit(row)}
+                                className="rounded-lg border border-[#D8D3C8] px-2.5 py-1 text-xs font-semibold text-slate-700 transition hover:border-[#B4761A] hover:text-[#8A5A11] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A]"
+                              >
+                                Modifier
+                              </button>
+                            </td>
+                            {selectedConfig.columns.slice(0, 16).map((col) => (
+                              <td
+                                key={col.db}
+                                className={`max-w-[280px] truncate border-b border-[#EFEDE8] px-3 py-2 ${
+                                  col.type === 'number' ? 'text-right tabular-nums' : ''
+                                }`}
+                              >
+                                {col.type === 'boolean' ? (row[col.db] ? 'Oui' : 'Non') : String(row[col.db] ?? '')}
+                              </td>
+                            ))}
+                          </tr>
+                        ))
+                      )}
                     </tbody>
                   </table>
                 </div>
+
+                <p className="border-t border-[#EFEDE8] px-5 py-3 text-xs text-slate-500">
+                  L’aperçu se limite aux {PREVIEW_LIMIT} dernières lignes pour garder la page rapide. L’import, lui, traite
+                  le fichier complet.
+                </p>
+              </div>
+            </section>
+          </div>
+        )}
+
+        {/* ======================================================== Onglet agrégats & SMC */}
+        {activeTab === 'aggregates' && (
+          <div className="space-y-5">
+            {maintenanceMessage && (
+              <div className="rounded-xl border border-[#E7E4DD] bg-white px-4 py-3 text-sm text-slate-700">
+                {maintenanceMessage}
               </div>
             )}
+            {error && activeTab === 'aggregates' && (
+              <pre className="max-h-[220px] overflow-auto whitespace-pre-wrap rounded-xl border border-[#F0C7C7] bg-[#FBE9E9] px-4 py-3 text-xs font-semibold text-[#A32C2C]">
+                {error}
+              </pre>
+            )}
 
-            {importSteps.length > 0 && (
-              <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                <div className="mb-3 flex items-center justify-between gap-3">
-                  <div>
-                    <h3 className="text-sm font-black uppercase tracking-wide text-slate-700">Contrôle temps réel du chargement</h3>
-                    <p className="text-xs text-slate-500">Suivi des étapes : lecture, contrôle doublons, insertion, refresh et actualisation.</p>
+            <section className="rounded-2xl border border-[#E2DFD8] bg-white">
+              <div className="border-b border-[#EFEDE8] px-5 py-4">
+                <Eyebrow>Recalculs</Eyebrow>
+                <h2 className="mt-1 text-lg font-bold text-slate-900">Reconstruction des agrégats</h2>
+                <p className="mt-1 max-w-3xl text-sm text-slate-600">
+                  Les recalculs courants portent sur M-1 et M. Pour une période plus large, saisissez-la ci-dessous : la date
+                  de fin est traitée comme mois inclus, et chaque traitement est découpé mois par mois.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-end gap-3 border-b border-[#EFEDE8] bg-[#FAF9F7] px-5 py-4">
+                <LabelledDate label="Période — du" value={manualStartDate} onChange={setManualStartDate} />
+                <LabelledDate label="au" value={manualEndDate} onChange={setManualEndDate} />
+                <label className="block">
+                  <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Lot SMC</span>
+                  <input
+                    type="number"
+                    min={SMC_BACKGROUND_MIN_BATCH_SIZE}
+                    max={SMC_BACKGROUND_MAX_BATCH_SIZE}
+                    value={smcBackgroundBatchSize}
+                    onChange={(event) => setSmcBackgroundBatchSize(Number(event.target.value || SMC_BACKGROUND_DEFAULT_BATCH_SIZE))}
+                    className="h-[42px] w-24 rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm font-semibold tabular-nums outline-none transition focus:border-[#B4761A] focus:ring-2 focus:ring-[#B4761A]/25"
+                  />
+                </label>
+              </div>
+
+              <div className="grid grid-cols-1 gap-px bg-[#EFEDE8] md:grid-cols-2 xl:grid-cols-4">
+                <div className="bg-white p-4">
+                  <h3 className="text-sm font-bold text-slate-900">Agrégats rapides</h3>
+                  <p className="mt-1 text-xs leading-relaxed text-slate-500">
+                    Caches et indicateurs factures, devis et activité. Flux articles et SMC exclus.
+                  </p>
+                  <div className="mt-3 space-y-2">
+                    <SecondaryButton onClick={() => handleManualRecentMonthsRebuild(2)} disabled={maintenanceLoading || importing} full>
+                      {maintenanceLoading ? 'Rebuild…' : 'M-1 et M'}
+                    </SecondaryButton>
+                    <SecondaryButton onClick={handleManualPeriodRebuild} disabled={maintenanceLoading || importing} full>
+                      Sur la période saisie
+                    </SecondaryButton>
                   </div>
-                  {importing && <span className="rounded-full bg-blue-100 px-3 py-1 text-xs font-bold text-blue-700">Import en cours</span>}
                 </div>
-                <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-                  {importSteps.map((step) => (
-                    <div key={step.key} className="rounded-xl border border-slate-200 bg-white p-3">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`h-2.5 w-2.5 rounded-full ${
-                            step.status === 'done'
-                              ? 'bg-emerald-500'
-                              : step.status === 'running'
-                                ? 'bg-blue-500'
-                                : step.status === 'error'
-                                  ? 'bg-red-500'
-                                  : 'bg-slate-300'
-                          }`}
-                        />
-                        <span className="text-xs font-bold text-slate-800">{step.label}</span>
-                      </div>
-                      {step.detail && <div className="mt-1 text-xs text-slate-500">{step.detail}</div>}
-                    </div>
-                  ))}
+
+                <div className="bg-white p-4">
+                  <h3 className="text-sm font-bold text-slate-900">Flux articles</h3>
+                  <p className="mt-1 text-xs leading-relaxed text-slate-500">
+                    Traitement plus lourd, passé par le wrapper SQL à timeout long.
+                  </p>
+                  <div className="mt-3 space-y-2">
+                    <SecondaryButton onClick={handleManualPeriodFluxRebuild} disabled={maintenanceLoading || importing} full>
+                      Sur la période saisie
+                    </SecondaryButton>
+                  </div>
+                </div>
+
+                <div className="bg-white p-4">
+                  <h3 className="text-sm font-bold text-slate-900">Quantités pertinentes</h3>
+                  <p className="mt-1 text-xs leading-relaxed text-slate-500">
+                    À relancer après une modification du référentiel Familles.
+                  </p>
+                  <div className="mt-3 space-y-2">
+                    <SecondaryButton onClick={handleManualPeriodQuantitesPertinentes} disabled={maintenanceLoading || importing} full>
+                      Sur la période saisie
+                    </SecondaryButton>
+                  </div>
+                </div>
+
+                <div className="bg-white p-4">
+                  <h3 className="text-sm font-bold text-slate-900">Rattachement BL M-x</h3>
+                  <p className="mt-1 text-xs leading-relaxed text-slate-500">
+                    Bascule le mois de rattachement des BL, puis recalcule le flux articles sur M-1/M.
+                  </p>
+                  <div className="mt-3 space-y-2">
+                    <SecondaryButton onClick={() => handleManualRecentMonthsRebuild(2, 'previous_month')} disabled={maintenanceLoading || importing} full>
+                      Rattacher au mois précédent
+                    </SecondaryButton>
+                    <SecondaryButton onClick={() => handleManualRecentMonthsRebuild(2, 'current_month')} disabled={maintenanceLoading || importing} full>
+                      Rattacher au mois courant
+                    </SecondaryButton>
+                  </div>
                 </div>
               </div>
-            )}
+            </section>
 
-            <div className="mt-4 overflow-auto rounded-xl border border-slate-200">
-              <table className="min-w-full border-collapse text-sm">
-                <thead className="sticky top-0 z-10 bg-slate-100">
-                  <tr>
-                    <th className="border-b border-slate-200 px-3 py-2 text-left font-semibold">Actions</th>
-                    {selectedConfig.columns.slice(0, 16).map((col) => (
-                      <th
-                        key={col.db}
-                        className="cursor-pointer whitespace-nowrap border-b border-slate-200 px-3 py-2 text-left font-semibold hover:bg-slate-200"
-                        onClick={() => handleSort(col.db)}
-                      >
-                        {col.label}
-                        {sortColumn === col.db ? (sortDirection === 'asc' ? ' ▲' : ' ▼') : ''}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {loading ? (
-                    <tr>
-                      <td className="px-3 py-6 text-center text-slate-500" colSpan={selectedConfig.columns.length + 1}>
-                        Chargement…
-                      </td>
-                    </tr>
-                  ) : visibleRows.length === 0 ? (
-                    <tr>
-                      <td className="px-3 py-6 text-center text-slate-500" colSpan={selectedConfig.columns.length + 1}>
-                        Aucun enregistrement affiché.
-                      </td>
-                    </tr>
-                  ) : (
-                    visibleRows.map((row, rowIndex) => (
-                      <tr key={tableReactKey(row, selectedConfig, rowIndex)} className="hover:bg-slate-50">
-                        <td className="whitespace-nowrap border-b border-slate-100 px-3 py-2">
-                          <button
-                            type="button"
-                            onClick={() => startEdit(row)}
-                            className="rounded-lg border border-slate-300 px-2 py-1 text-xs font-semibold hover:bg-slate-100"
-                          >
-                            Modifier
-                          </button>
-                        </td>
-                        {selectedConfig.columns.slice(0, 16).map((col) => (
-                          <td key={col.db} className="max-w-[280px] truncate border-b border-slate-100 px-3 py-2">
-                            {col.type === 'boolean' ? (row[col.db] ? 'Oui' : 'Non') : String(row[col.db] ?? '')}
-                          </td>
-                        ))}
-                      </tr>
-                    ))
+            <section className="rounded-2xl border border-[#E2DFD8] bg-white">
+              <div className="flex flex-col gap-3 border-b border-[#EFEDE8] px-5 py-4 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <Eyebrow>Arrière-plan</Eyebrow>
+                  <h2 className="mt-1 text-lg font-bold text-slate-900">Synthèse multi-clients</h2>
+                  <p className="mt-1 max-w-3xl text-sm text-slate-600">
+                    Le traitement s’exécute côté base par lots de clients via pg_cron. Il peut être arrêté et repris au point
+                    d’arrêt sans reprendre les clients déjà traités.
+                  </p>
+                </div>
+                <div className="flex shrink-0 flex-wrap gap-2">
+                  <SecondaryButton onClick={handleManualRecentSmcRebuild} disabled={maintenanceLoading || importing || smcBackgroundBusy}>
+                    Lancer sur M-1 et M
+                  </SecondaryButton>
+                  <PrimaryButton onClick={handleManualPeriodSmcRebuild} disabled={maintenanceLoading || importing || smcBackgroundBusy}>
+                    Lancer sur la période
+                  </PrimaryButton>
+                </div>
+              </div>
+
+              {smcBackgroundState ? (
+                <div className="p-5">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <span className={`h-2.5 w-2.5 rounded-full ${
+                        smcBackgroundState.status === 'running'
+                          ? 'animate-pulse bg-[#B4761A]'
+                          : smcBackgroundState.status === 'done'
+                            ? 'bg-[#2F6B4F]'
+                            : 'bg-[#CBC5B8]'
+                      }`} />
+                      <span className="text-sm font-bold text-slate-900">Statut : {smcBackgroundState.status || '—'}</span>
+                    </div>
+                    <span className="text-sm font-semibold tabular-nums text-slate-700">
+                      {formatCount(smcBackgroundState.processed_clients)} / {formatCount(smcBackgroundState.total_clients)} clients
+                      <span className="ml-2 text-[#8A5A11]">{getSmcBackgroundProgressPercent()} %</span>
+                    </span>
+                  </div>
+
+                  <div className="mt-3 h-2 overflow-hidden rounded-full bg-[#EFEDE8]">
+                    <div
+                      className="h-full rounded-full bg-[#B4761A] transition-all duration-500"
+                      style={{ width: `${getSmcBackgroundProgressPercent()}%` }}
+                    />
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-2 gap-px bg-[#EFEDE8] md:grid-cols-5">
+                    <RunFact label="Dernier rang">
+                      <span className="text-sm font-semibold tabular-nums text-slate-900">{smcBackgroundState.last_rn || 0}</span>
+                    </RunFact>
+                    <RunFact label="Lot en base">
+                      <span className="text-sm font-semibold tabular-nums text-slate-900">{smcBackgroundState.batch_size || '—'}</span>
+                    </RunFact>
+                    <RunFact label="Lot demandé">
+                      <span className="text-sm font-semibold tabular-nums text-slate-900">{getSafeSmcBackgroundBatchSize()}</span>
+                    </RunFact>
+                    <RunFact label="Début">
+                      <span className="text-sm font-semibold text-slate-900">{formatDateTime(smcBackgroundState.started_at || null)}</span>
+                    </RunFact>
+                    <RunFact label="Fin">
+                      <span className="text-sm font-semibold text-slate-900">{formatDateTime(smcBackgroundState.finished_at || null)}</span>
+                    </RunFact>
+                  </div>
+
+                  {smcBackgroundState.last_error && (
+                    <pre className="mt-3 whitespace-pre-wrap rounded-xl border border-[#F0C7C7] bg-[#FBE9E9] px-4 py-3 text-xs font-semibold text-[#A32C2C]">
+                      {smcBackgroundState.last_error}
+                    </pre>
                   )}
-                </tbody>
-              </table>
-            </div>
 
-            <div className="mt-3 text-xs text-slate-500">
-              Affichage limité aux {PREVIEW_LIMIT} dernières lignes pour garder une page rapide. L’import traite le fichier complet.
-            </div>
-          </section>
-        </section>
-      </div>
+                  <div className="mt-4 flex flex-wrap gap-2 border-t border-[#EFEDE8] pt-4">
+                    <GhostButton onClick={() => loadSmcBackgroundJobState(true)} disabled={smcBackgroundBusy}>
+                      Actualiser le statut
+                    </GhostButton>
+                    {smcBackgroundState.status !== 'done' && (
+                      <GhostButton onClick={handleRunSmcBackgroundBatchNow} disabled={smcBackgroundBusy || importing}>
+                        Lancer le prochain lot
+                      </GhostButton>
+                    )}
+                    <GhostButton onClick={() => resumeSmcBackgroundJob('SMC')} disabled={smcBackgroundBusy || importing}>
+                      Reprendre au point d’arrêt
+                    </GhostButton>
+                    <GhostButton
+                      onClick={() => {
+                        const start = smcBackgroundState.date_debut || manualStartDate
+                        const end = smcBackgroundState.date_fin || manualEndDate
+                        void startSmcBackgroundJob(
+                          { p_date_debut: start, p_date_fin: end, label: `${start} → ${end}` },
+                          'SMC',
+                          'restart'
+                        )
+                      }}
+                      disabled={smcBackgroundBusy || importing}
+                    >
+                      Relancer depuis le début
+                    </GhostButton>
+                    {smcBackgroundState.status === 'running' && (
+                      <DangerButton onClick={handleStopSmcBackgroundCron} disabled={smcBackgroundBusy}>
+                        Stopper proprement
+                      </DangerButton>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <p className="px-5 py-8 text-center text-sm text-slate-500">
+                  Aucun job SMC en base. Lancez-en un sur M-1/M ou sur la période saisie ci-dessus.
+                </p>
+              )}
+            </section>
+          </div>
+        )}
 
+        {/* ======================================================== Onglet contrôles */}
+        {activeTab === 'controls' && <DataReconciliationPanel />}
+      </main>
+
+      {/* ============================================================ Modale d'édition */}
       {editingRow && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="max-h-[90vh] w-full max-w-5xl overflow-hidden rounded-2xl bg-white shadow-2xl">
-            <div className="flex items-center justify-between border-b border-slate-200 p-5">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#111820]/50 p-4">
+          <div className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between gap-4 border-b border-[#EFEDE8] px-5 py-4">
               <div>
-                <h3 className="text-lg font-bold">Modifier / créer — {selectedConfig.label}</h3>
-                <p className="text-sm text-slate-500">Clé : {selectedConfig.primaryKey}</p>
+                <Eyebrow>{selectedConfig.family}</Eyebrow>
+                <h3 className="mt-1 text-lg font-bold text-slate-900">{selectedConfig.label}</h3>
+                <p className="mt-0.5 font-mono text-xs text-slate-500">clé : {selectedConfig.primaryKey}</p>
               </div>
               <button
                 type="button"
                 onClick={() => setEditingRow(null)}
-                className="rounded-xl border border-slate-300 px-3 py-2 text-sm font-semibold hover:bg-slate-100"
+                className="rounded-xl border border-[#D8D3C8] px-3 py-2 text-sm font-semibold text-slate-700 transition hover:border-[#B4761A] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A]"
               >
                 Fermer
               </button>
             </div>
 
-            <div className="max-h-[65vh] overflow-auto p-5">
+            <div className="flex-1 overflow-auto p-5">
               <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                 {editableColumns.map((col) => (
                   <label key={col.db} className="block">
-                    <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                      {col.label} {col.required ? '*' : ''}
+                    <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                      {col.label}
+                      {col.required ? <span className="ml-1 text-[#B4761A]">*</span> : null}
                     </span>
                     {col.type === 'boolean' ? (
                       <select
                         value={editingRow[col.db] ? 'true' : 'false'}
                         onChange={(e) => updateEditingValue(col, e.target.value === 'true')}
-                        className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-900"
+                        className="h-[42px] w-full rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm outline-none transition focus:border-[#B4761A] focus:ring-2 focus:ring-[#B4761A]/25"
                       >
                         <option value="false">Non</option>
                         <option value="true">Oui</option>
@@ -6956,7 +7097,7 @@ export default function ImportsParametragePage() {
                         type={col.type === 'number' ? 'number' : col.type === 'date' ? 'date' : 'text'}
                         value={editingRow[col.db] ?? ''}
                         onChange={(e) => updateEditingValue(col, e.target.value)}
-                        className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-slate-900"
+                        className="h-[42px] w-full rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm outline-none transition focus:border-[#B4761A] focus:ring-2 focus:ring-[#B4761A]/25"
                       />
                     )}
                   </label>
@@ -6964,26 +7105,191 @@ export default function ImportsParametragePage() {
               </div>
             </div>
 
-            <div className="flex justify-end gap-3 border-t border-slate-200 p-5">
-              <button
-                type="button"
-                onClick={() => setEditingRow(null)}
-                className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold hover:bg-slate-100"
-              >
-                Annuler 
-              </button>
-              <button
-                type="button"
-                onClick={saveEditingRow}
-                disabled={!!savingId}
-                className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
-              >
+            <div className="flex justify-end gap-3 border-t border-[#EFEDE8] bg-[#FAF9F7] px-5 py-4">
+              <SecondaryButton onClick={() => setEditingRow(null)}>Annuler</SecondaryButton>
+              <PrimaryButton onClick={saveEditingRow} disabled={!!savingId}>
                 {savingId ? 'Sauvegarde…' : 'Sauvegarder'}
-              </button>
+              </PrimaryButton>
             </div>
           </div>
         </div>
       )}
-    </main>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Composants d'interface partagés                                     */
+/* ------------------------------------------------------------------ */
+
+function HeaderStat({
+  label,
+  value,
+  tone = 'default',
+}: {
+  label: string
+  value: string
+  tone?: 'default' | 'active' | 'warn'
+}) {
+  const valueColor =
+    tone === 'warn' ? 'text-[#E8A0A0]' : tone === 'active' ? 'text-[#E0A94A]' : 'text-white'
+
+  return (
+    <div className="min-w-[110px] rounded-xl border border-[#2C3946] px-3 py-2">
+      <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">{label}</div>
+      <div className={`mt-0.5 truncate text-lg font-bold tabular-nums ${valueColor}`}>{value}</div>
+    </div>
+  )
+}
+
+function Eyebrow({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[#8A5A11]">{children}</div>
+  )
+}
+
+function TabButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean
+  onClick: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`relative whitespace-nowrap px-4 py-3 text-sm font-semibold transition focus:outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A] ${
+        active ? 'text-white' : 'text-slate-400 hover:text-slate-200'
+      }`}
+    >
+      {children}
+      {active && <span className="absolute inset-x-3 bottom-0 h-0.5 rounded-full bg-[#B4761A]" />}
+    </button>
+  )
+}
+
+function RunFact({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="bg-white px-4 py-3">
+      <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">{label}</div>
+      <div className="mt-1">{children}</div>
+    </div>
+  )
+}
+
+function PrimaryButton({
+  children,
+  onClick,
+  disabled,
+  full,
+}: {
+  children: React.ReactNode
+  onClick?: () => void
+  disabled?: boolean
+  full?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`rounded-xl bg-[#111820] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[#25313D] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-40 ${
+        full ? 'w-full' : ''
+      }`}
+    >
+      {children}
+    </button>
+  )
+}
+
+function SecondaryButton({
+  children,
+  onClick,
+  disabled,
+  full,
+}: {
+  children: React.ReactNode
+  onClick?: () => void
+  disabled?: boolean
+  full?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`rounded-xl border border-[#D8D3C8] bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 transition hover:border-[#B4761A] hover:text-[#8A5A11] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A] disabled:cursor-not-allowed disabled:opacity-40 ${
+        full ? 'w-full' : ''
+      }`}
+    >
+      {children}
+    </button>
+  )
+}
+
+function GhostButton({
+  children,
+  onClick,
+  disabled,
+}: {
+  children: React.ReactNode
+  onClick?: () => void
+  disabled?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="rounded-lg px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-[#FAF9F7] hover:text-[#8A5A11] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A] disabled:cursor-not-allowed disabled:opacity-40"
+    >
+      {children}
+    </button>
+  )
+}
+
+function DangerButton({
+  children,
+  onClick,
+  disabled,
+}: {
+  children: React.ReactNode
+  onClick?: () => void
+  disabled?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="rounded-lg border border-[#F0C7C7] px-3 py-2 text-xs font-semibold text-[#A32C2C] transition hover:bg-[#FBE9E9] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#A32C2C] disabled:cursor-not-allowed disabled:opacity-40"
+    >
+      {children}
+    </button>
+  )
+}
+
+function LabelledDate({
+  label,
+  value,
+  onChange,
+}: {
+  label: string
+  value: string
+  onChange: (value: string) => void
+}) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">{label}</span>
+      <input
+        type="date"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="h-[42px] rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm font-semibold tabular-nums outline-none transition focus:border-[#B4761A] focus:ring-2 focus:ring-[#B4761A]/25"
+      />
+    </label>
   )
 }
