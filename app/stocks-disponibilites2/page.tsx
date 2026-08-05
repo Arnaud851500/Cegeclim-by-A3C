@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * PROJECTIONS STOCK — V2.3
+ * PROJECTIONS STOCK — V2.3.2
  * ------------------------------------------------------------------------
  * Suite de la V2.2. Cette révision remplace le "scénario % global" par des
  * hypothèses mensuelles PAR FAMILLE, éditables dans une grille dédiée :
@@ -25,6 +25,32 @@
  *    plus de % en paramètre : il re-résout simplement la cascade à partir
  *    des hypothèses mensuelles enregistrées (plus de dialogue d'écrasement
  *    des hypothèses spécifiques, qui n'a plus lieu d'être).
+ *
+ * V2.3.1 :
+ *  - FIX TIMEOUT : "Recalculer la projection" appelait un endpoint unique
+ *    (/lancer-projection) en un seul aller-retour HTTP, qui timeoutait dès
+ *    que le calcul dépassait la limite de l'infra. Il utilise désormais le
+ *    même chemin par tranches ("/rebuild" + continuation, avec barre de
+ *    progression) que "Recalculer tout" — voir handleLancerProjection.
+ *  - Refonte du 1er pavé KPI de l'écran famille : "Ruptures" (nombre actuel
+ *    + 5 mini-carrés ≤8/12/16/20/24 sem.) devient "Alerte : nb de référence
+ *    tombant en rupture dans l'horizon affiché", avec 4 compteurs à
+ *    4 / 8 / 12 / 16 semaines — voir ruptureHorizonCounts + FamilleKpiPanel.
+ *
+ * V2.3.2 (cette révision) :
+ *  - Suppression du doublon "Horizon famille" : ce réglage (nombre de
+ *    semaines affichées pour une famille) n'est plus éditable que dans la
+ *    grille "Hypothèses mensuelles" (colonne Horizon) — cohérent avec le
+ *    fait que la grille édite déjà, famille par famille, tout ce qui pilote
+ *    l'affichage de sa projection. L'écran famille se contente désormais
+ *    d'afficher cette valeur en lecture seule, avec un renvoi vers la
+ *    grille pour la modifier.
+ *  - L'horizon de recalcul GLOBAL ("Horizon (sem.)" en haut de l'écran, qui
+ *    pilote combien de semaines sont effectivement calculées lors d'un
+ *    recalcul complet) passe par défaut de 26 à 52 semaines. L'affichage
+ *    par famille reste indépendant et suit toujours la valeur mémorisée
+ *    pour chaque famille dans la grille — un recalcul sur 52 semaines
+ *    n'oblige donc pas à regarder 52 semaines sur chaque famille.
  * ------------------------------------------------------------------------
  */
 
@@ -214,13 +240,19 @@ export default function StocksDisponibilites2Page() {
   const [hypoOpen, setHypoOpen] = useState(false);
   const [hypoFamilleScope, setHypoFamilleScope] = useState<string | null>(null);
 
+  const [refreshKey, setRefreshKey] = useState(0);
+
   // Horizon de projection MÉMORISÉ PAR FAMILLE (distinct de l'horizon global
   // de recalcul en haut de page). Chargé dès qu'on entre dans une famille, il
   // pilote l'affichage du graphe hebdomadaire, du graphe mensuel et des KPI
   // de cet écran — sans avoir à le ressaisir à chaque visite.
+  //
+  // V2.3.2 : ce réglage n'est plus éditable ici — uniquement dans la grille
+  // "Hypothèses mensuelles" (colonne Horizon), pour ne plus avoir deux
+  // endroits différents qui écrivent la même valeur. On garde juste la
+  // lecture, pour piloter l'affichage de cet écran, et on la rafraîchit
+  // aussi quand refreshKey change (ex. après une sauvegarde dans la grille).
   const [familleHorizonWeeks, setFamilleHorizonWeeks] = useState(26);
-  const [familleHorizonInput, setFamilleHorizonInput] = useState("26");
-  const [familleHorizonSaving, setFamilleHorizonSaving] = useState(false);
 
   useEffect(() => {
     if (!selectedFamille) return;
@@ -230,30 +262,13 @@ export default function StocksDisponibilites2Page() {
       if (cancelled) return;
       if (!err && typeof data === "number") {
         setFamilleHorizonWeeks(data);
-        setFamilleHorizonInput(String(data));
       }
     }
     loadHorizon();
     return () => {
       cancelled = true;
     };
-  }, [selectedFamille]);
-
-  async function handleSaveFamilleHorizon() {
-    if (!selectedFamille) return;
-    const valeur = Math.max(1, Math.min(104, Number(familleHorizonInput) || 26));
-    setFamilleHorizonSaving(true);
-    try {
-      const { error: err } = await supabase.rpc("set_stock_famille_horizon", { p_famille: selectedFamille, p_horizon_semaines: valeur });
-      if (err) throw new Error(err.message);
-      setFamilleHorizonWeeks(valeur);
-      setFamilleHorizonInput(String(valeur));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setFamilleHorizonSaving(false);
-    }
-  }
+  }, [selectedFamille, refreshKey]);
 
   // Référence dont on gère les remplaçantes. Null = panneau fermé.
   const [remplacementPour, setRemplacementPour] = useState<{ reference: string; designation: string } | null>(null);
@@ -288,12 +303,18 @@ export default function StocksDisponibilites2Page() {
     }
   }
 
-  const [horizonWeeks, setHorizonWeeks] = useState(26);
+  // Horizon de RECALCUL GLOBAL : passe par défaut à 52 semaines (V2.3.2, au
+  // lieu de 26). C'est le nombre de semaines effectivement calculées lors
+  // d'un recalcul complet ("Recalculer tout (horizon)" ou "Recalculer la
+  // projection") — indépendant de familleHorizonWeeks ci-dessus, qui ne
+  // fait que tronquer l'AFFICHAGE d'une famille sur ce qui a été calculé.
+  const [horizonWeeks, setHorizonWeeks] = useState(52);
 
   // Au chargement de l'écran, aligne la valeur par défaut du champ "Horizon
-  // (sem.)" sur la plus grande plage mémorisée par famille — simple confort
-  // d'affichage : le recalcul complet applique de toute façon ce maximum
-  // même si l'utilisateur modifie ensuite ce champ à la baisse.
+  // (sem.)" sur la plus grande plage mémorisée par famille SI celle-ci
+  // dépasse 52 — simple confort d'affichage : le recalcul complet applique
+  // de toute façon ce maximum même si l'utilisateur modifie ensuite ce champ
+  // à la baisse.
   useEffect(() => {
     supabase.rpc("get_stock_max_famille_horizon").then(({ data }) => {
       const v = Number(data);
@@ -308,8 +329,6 @@ export default function StocksDisponibilites2Page() {
     else if (level === "famille") setRecalcScope("famille_macro");
     else setRecalcScope("all");
   }, [level]);
-
-  const [refreshKey, setRefreshKey] = useState(0);
 
   async function loadMainData() {
     setLoading(true);
@@ -390,13 +409,15 @@ export default function StocksDisponibilites2Page() {
     [familleArticles, onlyRupture, masquerRemplacees],
   );
 
+  // Pavé "Alerte" : nombre de références qui tombent en rupture dans
+  // l'horizon affiché, avec un détail à 4 / 8 / 12 / 16 semaines. On n'expose
+  // plus de compteur "actuellement" ni les anciens mini-carrés ≤20/≤24 sem.
   const ruptureHorizonCounts = useMemo(() => {
-    const horizons = [8, 12, 16, 20, 24];
+    const horizons = [4, 8, 12, 16];
     const enRupture = familleArticles.filter((a) => isCurrentRupture(a));
     const prochaineRupture = familleArticles.map((a) => a.date_rupture).filter((d): d is string => !!d).sort()[0];
     const prochaineLevee = enRupture.map((a) => a.date_retour_dispo).filter((d): d is string => !!d).sort()[0];
     return {
-      actuel: enRupture.length,
       parHorizon: horizons.map((sem) => ({ semaines: sem, count: familleArticles.filter((a) => isRuptureWithinWeeks(a, sem)).length })),
       prochaineRupture,
       prochaineLevee,
@@ -763,10 +784,11 @@ export default function StocksDisponibilites2Page() {
       const session = await supabase.auth.getSession();
       const token = session.data.session?.access_token;
       // Le recalcul complet doit toujours couvrir la plus grande plage
-      // nécessaire : celle du champ "Horizon (sem.)" ci-dessus OU l'horizon
-      // le plus grand mémorisé pour une famille, si celui-ci est supérieur.
-      // Chaque écran famille se charge ensuite de tronquer l'affichage à son
-      // propre horizon (cf. "Horizon famille").
+      // nécessaire : celle du champ "Horizon (sem.)" ci-dessus (52 sem. par
+      // défaut désormais) OU l'horizon le plus grand mémorisé pour une
+      // famille, si celui-ci est supérieur. Chaque écran famille se charge
+      // ensuite de tronquer l'affichage à son propre horizon (réglable
+      // uniquement dans la grille "Hypothèses mensuelles").
       const { data: maxFamilleHorizon } = await supabase.rpc("get_stock_max_famille_horizon");
       const nbSemaines = Math.max(horizonWeeks, Number(maxFamilleHorizon) || 26);
       // scenario_prevision_pct est conservé dans l'appel pour compatibilité de
@@ -804,44 +826,29 @@ export default function StocksDisponibilites2Page() {
    * (horizon, dépôt) du dernier run enregistré en base. Aucun paramètre à
    * saisir — hypothèses mensuelles et substitutions appliquées automatiquement.
    *
-   * Avant de réutiliser tel quel l'horizon du dernier run, on vérifie qu'il
-   * couvre bien la plus grande plage mémorisée par famille : si une famille a
-   * depuis reçu un horizon plus grand que ce que le dernier run a calculé, on
-   * bascule sur un recalcul complet avec le bon horizon plutôt que de relancer
-   * "à l'identique" et de laisser cette famille sans assez de semaines.
+   * FIX TIMEOUT (V2.3.1) : cette action délègue désormais TOUJOURS à
+   * handleRecalculerGlobal, qui reconstruit par tranches via "/rebuild" +
+   * continuation (avec barre de progression). L'ancienne version appelait
+   * "/api/stocks-disponibilites/lancer-projection" en un seul aller-retour
+   * HTTP, qui provoquait un "upstream request timeout" dès que le calcul
+   * dépassait la limite de l'infra. On calcule ici le même horizon "requis"
+   * qu'avant (le plus grand entre l'horizon du dernier run et l'horizon max
+   * mémorisé par famille, avec un plancher à 52 sem. — voir horizonWeeks),
+   * on le pousse dans le champ "Horizon (sem.)", puis on appelle le chemin
+   * chunké — qui ne timeoute jamais puisqu'il boucle par tranches.
    */
   async function handleLancerProjection() {
-    setRebuildProgress({ percent: 0, message: "Démarrage de la projection…" });
-    window.addEventListener("beforeunload", (e) => { e.preventDefault(); e.returnValue = ""; });
+    setRebuildProgress({ percent: 0, message: "Préparation de la projection…" });
     try {
       const [{ data: maxFamilleHorizon }, { data: dernierRun }] = await Promise.all([
         supabase.rpc("get_stock_max_famille_horizon"),
         runId ? supabase.from("stock_projection_runs").select("nb_semaines").eq("id", runId).maybeSingle() : Promise.resolve({ data: null as { nb_semaines?: number } | null }),
       ]);
-      const horizonRequis = Number(maxFamilleHorizon) || 26;
-      const horizonDernierRun = Number(dernierRun?.nb_semaines) || 0;
-      if (horizonRequis > horizonDernierRun) {
-        // Le dernier run ne couvre pas l'horizon désormais requis par au
-        // moins une famille : on force le champ horizon en conséquence et on
-        // bascule sur le recalcul complet (qui, lui, prend l'horizon en compte).
-        setHorizonWeeks(horizonRequis);
-        await handleRecalculerGlobal();
-        return;
-      }
-
-      const { data: { session } } = await supabase.auth.getSession();
-      const token = session?.access_token;
-      const res = await fetch("/api/stocks-disponibilites/lancer-projection", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-      });
-      setRebuildProgress({ percent: 50, message: "Projection en cours…" });
-      const payload = await res.json() as { success: boolean; message?: string; run_id?: string; nb_semaines?: number };
-      if (!res.ok || !payload.success) throw new Error(payload?.message || "Échec");
-      setRebuildProgress({ percent: 100, message: `Terminé — ${payload.nb_semaines} sem. · hypothèses mensuelles et substitutions appliquées` });
-      await loadMainData();
-      setRefreshKey((k) => k + 1);
-      setTimeout(() => setRebuildProgress(null), 3000);
+      const horizonRequis = Math.max(Number(maxFamilleHorizon) || 52, Number(dernierRun?.nb_semaines) || 52);
+      setHorizonWeeks(horizonRequis);
+      // handleRecalculerGlobal gère lui-même son propre listener
+      // "beforeunload", sa propre progression et ses propres erreurs.
+      await handleRecalculerGlobal();
     } catch (e) {
       setRebuildProgress(null);
       setError(e instanceof Error ? e.message : String(e));
@@ -922,7 +929,9 @@ export default function StocksDisponibilites2Page() {
             </div>
             <div className="flex flex-wrap items-center gap-3">
               <div className="flex items-center gap-2">
-                <label className="text-xs uppercase tracking-wide text-white/40">Horizon (sem.)</label>
+                <label className="text-xs uppercase tracking-wide text-white/40" title="Nombre de semaines réellement calculées lors d'un recalcul complet — 52 sem. par défaut. Distinct de l'horizon d'affichage de chaque famille, réglable dans la grille « Hypothèses mensuelles »">
+                  Horizon recalcul (sem.)
+                </label>
                 <input type="number" min={1} max={104} value={horizonWeeks} onChange={(e) => setHorizonWeeks(Number(e.target.value))} className="w-20 rounded-lg border border-white/15 bg-white/5 px-2 py-1.5 text-sm text-white outline-none focus:border-[#A6A181]" />
                 {selectedFamille && familleWeekly.length > 0 && familleWeekly.length !== horizonWeeks && (
                   <span className="text-[11px] text-[#D69A4A]" title="Les données affichées viennent du dernier recalcul terminé, pas forcément de ce réglage">
@@ -933,11 +942,12 @@ export default function StocksDisponibilites2Page() {
 
               {/* Bouton hypothèses mensuelles : remplace le champ "Scénario %"
                   global — il n'existe plus d'hypothèse unique pour toutes les
-                  familles. */}
+                  familles. C'est aussi ici, et ici seulement, que se règle
+                  l'horizon d'affichage de chaque famille (colonne Horizon). */}
               <button
                 onClick={() => { setHypoFamilleScope(null); setHypoOpen(true); }}
                 className="rounded-lg border border-[#A6A181]/50 bg-[#A6A181]/10 px-4 py-2 text-sm font-semibold text-[#A6A181] transition hover:bg-[#A6A181]/20"
-                title="Éditer, famille par famille et mois par mois, l'hypothèse d'évolution des ventes vs N-1"
+                title="Éditer, famille par famille et mois par mois, l'hypothèse d'évolution des ventes vs N-1 — ainsi que l'horizon d'affichage de chaque famille"
               >
                 📅 Hypothèses mensuelles
               </button>
@@ -956,7 +966,7 @@ export default function StocksDisponibilites2Page() {
                 disabled={!!rebuildProgress && rebuildProgress.percent < 100}
                 className="rounded-lg px-4 py-2 text-sm font-semibold text-[#141A26] transition hover:brightness-110 disabled:opacity-50"
                 style={{ background: "#3F9142" }}
-                title="Relance la projection complète en conservant les paramètres du dernier recalcul (horizon, dépôt). Hypothèses mensuelles et substitutions sont appliquées automatiquement."
+                title="Relance la projection complète en conservant les paramètres du dernier recalcul (horizon, dépôt). Hypothèses mensuelles et substitutions sont appliquées automatiquement. Recalcul par tranches : pas de timeout même sur un run long."
               >
                 ↺ Recalculer la projection
               </button>
@@ -1047,43 +1057,35 @@ export default function StocksDisponibilites2Page() {
 
               {/* Ouvre la grille d'hypothèses mensuelles filtrée sur cette
                   famille ; à la sauvegarde, la projection de cette famille
-                  est recalculée automatiquement puis on revient ici. */}
+                  est recalculée automatiquement puis on revient ici. C'est
+                  aussi là (colonne "Horizon") que se règle désormais
+                  familleHorizonWeeks — voir badge en lecture seule ci-après. */}
               {selectedFamille && (
                 <button
                   onClick={() => { setHypoFamilleScope(selectedFamille); setHypoOpen(true); }}
                   className="rounded-lg border border-[#A6A181]/50 bg-[#A6A181]/10 px-3 py-1.5 text-xs font-semibold text-[#A6A181] transition hover:bg-[#A6A181]/20"
-                  title="Revoir et ajuster les hypothèses mensuelles de cette famille"
+                  title="Revoir et ajuster les hypothèses mensuelles de cette famille, ainsi que son horizon d'affichage"
                 >
                   📅 Ajuster les hypothèses de cette famille
                 </button>
               )}
 
-              {/* Horizon de projection MÉMORISÉ pour cette famille : pilote le
-                  graphe hebdomadaire, le graphe mensuel et les KPI de cet
-                  écran. Distinct de l'horizon global de recalcul en haut de
-                  page, et conservé d'une visite à l'autre. */}
+              {/* V2.3.2 : "Horizon famille" n'est plus éditable ici — juste
+                  affiché en lecture seule. Le réglage se fait exclusivement
+                  dans la grille "Hypothèses mensuelles" (colonne Horizon),
+                  pour ne plus avoir deux champs qui écrivent la même valeur
+                  (set_stock_famille_horizon). Clic → ouvre la grille scopée
+                  sur cette famille, comme le bouton juste au-dessus. */}
               {selectedFamille && (
-                <div className="flex items-center gap-1.5 rounded-lg border border-white/15 bg-white/5 px-2 py-1">
-                  <label className="text-[11px] uppercase tracking-wide text-white/40">Horizon famille</label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={104}
-                    value={familleHorizonInput}
-                    onChange={(e) => setFamilleHorizonInput(e.target.value)}
-                    className="w-14 rounded border border-white/15 bg-transparent px-1.5 py-1 text-center text-xs text-white outline-none focus:border-[#A6A181]"
-                  />
-                  <span className="text-[11px] text-white/40">sem.</span>
-                  {Number(familleHorizonInput) !== familleHorizonWeeks && (
-                    <button
-                      onClick={() => void handleSaveFamilleHorizon()}
-                      disabled={familleHorizonSaving}
-                      className="rounded bg-[#A6A181] px-2 py-1 text-[11px] font-semibold text-[#141A26] disabled:opacity-50"
-                    >
-                      {familleHorizonSaving ? "…" : "OK"}
-                    </button>
-                  )}
-                </div>
+                <button
+                  onClick={() => { setHypoFamilleScope(selectedFamille); setHypoOpen(true); }}
+                  className="flex items-center gap-1.5 rounded-lg border border-white/15 bg-white/5 px-2.5 py-1.5 text-xs text-white/60 transition hover:border-[#A6A181]/50 hover:text-white"
+                  title="Réglable dans la grille « Hypothèses mensuelles » de cette famille (colonne Horizon) — cliquer pour l'ouvrir"
+                >
+                  <span className="uppercase tracking-wide text-white/40">Horizon famille</span>
+                  <span className="font-[var(--font-mono)] font-semibold text-white">{familleHorizonWeeks} sem.</span>
+                  <span className="text-white/30">✎</span>
+                </button>
               )}
 
               <div className="ml-auto flex items-center gap-2">
@@ -1114,7 +1116,6 @@ export default function StocksDisponibilites2Page() {
 
             <FamilleKpiPanel
               nbArticles={familleArticles.length}
-              ruptureActuel={ruptureHorizonCounts.actuel}
               parHorizon={ruptureHorizonCounts.parHorizon}
               prochaineRupture={ruptureHorizonCounts.prochaineRupture}
               prochaineLevee={ruptureHorizonCounts.prochaineLevee}
@@ -1305,7 +1306,9 @@ export default function StocksDisponibilites2Page() {
           onClose={() => setHypoOpen(false)}
           onSaved={() => {
             // Les hypothèses (et, si scopées à une famille, la projection de
-            // cette famille) viennent d'être mises à jour en base.
+            // cette famille et son horizon d'affichage) viennent d'être
+            // mises à jour en base : refreshKey déclenche aussi le
+            // rechargement de familleHorizonWeeks (voir loadHorizon).
             loadMainData();
             setRefreshKey((k) => k + 1);
           }}
@@ -1363,11 +1366,10 @@ function EvolBadge({ pct }: { pct: number | null }) {
 }
 
 function FamilleKpiPanel({
-  nbArticles, ruptureActuel, parHorizon, prochaineRupture, prochaineLevee, blYtd, sortiesHorizon, stockEvolution, horizonWeeks,
+  nbArticles, parHorizon, prochaineRupture, prochaineLevee, blYtd, sortiesHorizon, stockEvolution, horizonWeeks,
   retardTotal, includeRetard, onToggleRetard,
 }: {
   nbArticles: number;
-  ruptureActuel: number;
   parHorizon: Array<{ semaines: number; count: number }>;
   prochaineRupture?: string;
   prochaineLevee?: string;
@@ -1381,20 +1383,21 @@ function FamilleKpiPanel({
 }) {
   return (
     <div className="mb-6 grid grid-cols-1 gap-4 lg:grid-cols-2 xl:grid-cols-4">
-      {/* 1 — Ruptures */}
+      {/* 1 — Alerte : nb de référence tombant en rupture dans l'horizon
+          affiché. Remplace l'ancien pavé "Ruptures" (compteur "actuellement"
+          + 5 mini-carrés ≤8/12/16/20/24 sem.) par 4 compteurs à
+          4 / 8 / 12 / 16 semaines, sans mini-carrés. */}
       <div className="rounded-xl border border-white/10 bg-white/[0.04] p-5">
-        <div className="mb-3 text-[11px] font-medium uppercase tracking-wide text-white/40">Ruptures — {nbArticles} article(s)</div>
-        <div className="mb-2 flex items-baseline gap-2">
-          <span className="font-[var(--font-mono)] text-[2.25rem] font-semibold leading-none text-[#C1683C]">{ruptureActuel}</span>
-          <span className="text-xs text-white/40">actuellement</span>
+        <div className="mb-3 text-[11px] font-medium uppercase tracking-wide text-white/40">
+          Alerte : nb de référence tombant en rupture dans l&rsquo;horizon affiché — {nbArticles} article(s)
         </div>
         {prochaineRupture && <div className="mb-1 text-xs text-white/50">Prochaine : {formatDate(prochaineRupture)}</div>}
         {prochaineLevee && <div className="mb-3 text-xs text-[#4B92AC]">Prochaine levée : {formatDate(prochaineLevee)}</div>}
-        <div className="grid grid-cols-5 gap-1.5">
+        <div className="grid grid-cols-4 gap-2">
           {parHorizon.map((h) => (
-            <div key={h.semaines} className="rounded-lg bg-white/5 p-1.5 text-center">
-              <div className="font-[var(--font-mono)] text-base font-semibold text-white">{h.count}</div>
-              <div className="text-[9px] text-white/35">≤{h.semaines}s</div>
+            <div key={h.semaines} className="rounded-lg bg-white/5 p-2.5 text-center">
+              <div className="font-[var(--font-mono)] text-2xl font-semibold text-[#C1683C]">{h.count}</div>
+              <div className="text-[10px] text-white/40">≤ {h.semaines} sem.</div>
             </div>
           ))}
         </div>

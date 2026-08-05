@@ -16,6 +16,19 @@ export const maxDuration = 30
 // Quantités BL réelles mois par mois (N et N-1), pour construire la partie
 // "réel" du graphique de sorties mensuelles — la vue de projection ne
 // couvre que les semaines futures, elle ne contient pas l'historique.
+//
+// FIX CASCADE N-1 (2026-08) : la lecture directe de
+// indicateur_flux_articles_mensuel filtrée par famille ne reflétait que
+// l'historique propre à chaque référence. Pour une référence remplaçante,
+// le N-1 doit inclure l'historique des références qu'elle a remplacées
+// (en cascade sur plusieurs niveaux si besoin, pondéré par le pourcentage
+// réellement transféré) — exactement comme la projection hebdomadaire
+// (apply_stock_substitutions_to_run) et les stats YTD
+// (v_stock_article_sorties_stats_cascade) le font déjà. On appelle donc la
+// RPC get_stock_famille_mensuel_reel_cascade, qui fait ce travail côté base
+// et renvoie les lignes déjà ré-attribuées à la référence active/finale.
+// Le N (année en cours) n'est jamais cascadé : ces ventes sont déjà
+// naturellement enregistrées sous la référence active.
 
 export async function GET(req: NextRequest) {
   const traceId = resolveTraceId(req, 'STOCK-FAMILLE-MENSUEL-REEL')
@@ -40,20 +53,17 @@ export async function GET(req: NextRequest) {
 
     const response: any = await trace.runStep(
       {
-        layer: 'supabase_rest',
-        step: 'read_flux_mensuel',
-        objectName: 'public.indicateur_flux_articles_mensuel',
+        layer: 'supabase_rpc',
+        step: 'read_flux_mensuel_cascade',
+        objectName: 'public.get_stock_famille_mensuel_reel_cascade',
         context: { famille, annee },
         rowCount: (data) => (Array.isArray(data) ? data.length : 0),
       },
       () =>
-        admin
-          .from('indicateur_flux_articles_mensuel')
-          .select('annee,mois,reference_article,quantite,quantite_pertinente,hors_statistique')
-          .eq('famille', famille)
-          .eq('flux', 'BL')
-          .in('annee', [annee, annee - 1])
-          .eq('hors_statistique', false),
+        admin.rpc('get_stock_famille_mensuel_reel_cascade', {
+          p_famille: famille,
+          p_annee: annee,
+        }),
     )
 
     if (response.error) {
