@@ -1,15 +1,18 @@
 "use client";
 
 /**
- * TodoDenseList — V2
+ * TodoDenseList — V3
  * ------------------------------------------------------------------------
  * Vue dense de todo_actions, filtrée sur les tâches ACCESSIBLES à
- * l'utilisateur connecté — même logique que refreshTodoSignal() dans
- * AppShell (layout.tsx) : assigné à son email, OU à son display_name
- * (ancien format, avant migration vers l'email comme identifiant).
+ * l'utilisateur connecté :
+ *   - assignées à lui (assigned_to = son email OU son display_name, ancien
+ *     format, même logique que refreshTodoSignal() dans AppShell) ;
+ *   - OU créées par lui (created_by_email), même s'il les a confiées à
+ *     quelqu'un d'autre — c'est ce qui manquait, cf. l'onglet "Créées par
+ *     moi" de l'écran /todo complet.
  *
  * Colonnes : domaine (mission_project) / description (description_action) /
- * qui (assigned_to) / quand (due_date), triable par colonne.
+ * confiée à (assigned_to) / quand (due_date), triable par colonne.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -21,6 +24,7 @@ type TodoRow = {
   mission_project: string | null;
   description_action: string | null;
   assigned_to: string | null;
+  created_by_email: string | null;
   due_date: string | null;
   status: string | null;
 };
@@ -77,10 +81,16 @@ export default function TodoDenseList() {
 
         if (!assigneeValues.length) { if (!cancelled) { setRows([]); setLoading(false); } return; }
 
-        const orFilter = assigneeValues.map((v) => `assigned_to.eq.${v.replace(/,/g, "\\,")}`).join(",");
+        // Assigné à moi (email ou ancien display_name) OU créé par moi —
+        // même si je l'ai confié à quelqu'un d'autre.
+        const orParts = [
+          ...assigneeValues.map((v) => `assigned_to.eq.${v.replace(/,/g, "\\,")}`),
+          `created_by_email.eq.${email.replace(/,/g, "\\,")}`,
+        ];
+        const orFilter = orParts.join(",");
         const { data, error: err } = await supabase
           .from("todo_actions")
-          .select("id, mission_project, description_action, assigned_to, due_date, status")
+          .select("id, mission_project, description_action, assigned_to, created_by_email, due_date, status")
           .or(orFilter)
           .order("due_date", { ascending: true, nullsFirst: false });
         if (cancelled) return;
@@ -136,6 +146,9 @@ export default function TodoDenseList() {
                   Domaine {sortKey === "mission_project" && (sortAsc ? "▲" : "▼")}
                 </th>
                 <th className="px-1.5 py-1">Description</th>
+                <th className="cursor-pointer whitespace-nowrap px-1.5 py-1" onClick={() => toggleSort("assigned_to")}>
+                  Confiée à {sortKey === "assigned_to" && (sortAsc ? "▲" : "▼")}
+                </th>
                 <th className="cursor-pointer whitespace-nowrap px-1.5 py-1" onClick={() => toggleSort("due_date")}>
                   Quand {sortKey === "due_date" && (sortAsc ? "▲" : "▼")}
                 </th>
@@ -145,14 +158,15 @@ export default function TodoDenseList() {
               {visibleRows.map((r) => (
                 <tr key={r.id} className={isEnRetard(r.due_date, r.status) ? "bg-[#C1683C]/[0.06]" : undefined}>
                   <td className="whitespace-nowrap px-1.5 py-1 text-[#141A26]/75">{r.mission_project || "—"}</td>
-                  <td className="max-w-[160px] truncate px-1.5 py-1 text-[#141A26]" title={r.description_action || ""}>{r.description_action || "—"}</td>
+                  <td className="max-w-[140px] truncate px-1.5 py-1 text-[#141A26]" title={r.description_action || ""}>{r.description_action || "—"}</td>
+                  <td className="whitespace-nowrap px-1.5 py-1 text-[#141A26]/70">{r.assigned_to || "—"}</td>
                   <td className={`whitespace-nowrap px-1.5 py-1 font-medium ${isEnRetard(r.due_date, r.status) ? "text-[#C1683C]" : "text-[#141A26]/70"}`}>
                     {formatDate(r.due_date)}
                   </td>
                 </tr>
               ))}
               {visibleRows.length === 0 && (
-                <tr><td colSpan={3} className="px-2 py-6 text-center text-[#141A26]/40">Aucune tâche.</td></tr>
+                <tr><td colSpan={4} className="px-2 py-6 text-center text-[#141A26]/40">Aucune tâche.</td></tr>
               )}
             </tbody>
           </table>

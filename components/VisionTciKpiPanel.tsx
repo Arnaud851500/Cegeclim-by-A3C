@@ -116,7 +116,7 @@ function CardShell({
 }) {
   return (
     <div
-      className={`relative rounded-xl border border-white/10 bg-[#141A26] ${compact ? "p-2" : "p-3"} ${onClick ? "cursor-pointer hover:border-white/25 hover:bg-[#182034]" : ""}`}
+      className={`relative flex h-full flex-col rounded-xl border border-white/10 bg-[#141A26] ${compact ? "p-2" : "p-3"} ${onClick ? "cursor-pointer hover:border-white/25 hover:bg-[#182034]" : ""}`}
       style={{ borderTopColor: color, borderTopWidth: 3 }}
       onClick={onClick}
       title={clickHint}
