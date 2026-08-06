@@ -385,11 +385,38 @@ export default function StocksDisponibilites2Page() {
     };
   }, [familleArticles]);
 
-  const blYtdKpi = useMemo(() => {
-    const n = familleArticles.reduce((s, a) => s + toNumber(a.sorties_ytd_n), 0);
-    const n1 = familleArticles.reduce((s, a) => s + toNumber(a.sorties_ytd_n1), 0);
-    return { n, n1, evolPct: n1 > 0 ? ((n - n1) / n1) * 100 : null };
-  }, [familleArticles]);
+  // KPI "BL depuis le 1er janvier" : réconcilié avec l'export Excel — calculé
+  // sur TOUTES les références de la famille (via get_stock_famille_ytd_cascade,
+  // cascadé pour les substitutions), pas seulement celles retenues dans le
+  // dernier run de projection. Volontairement différent de familleArticles
+  // (qui reste limité aux références projetées) : contrairement aux 3 autres
+  // KPI de cet écran (liés à la projection future), celui-ci est purement
+  // rétrospectif, donc rien n'empêche de le compléter avec tout l'historique
+  // réel de la famille.
+  const [blYtdKpi, setBlYtdKpi] = useState<{ n: number; n1: number; evolPct: number | null }>({ n: 0, n1: 0, evolPct: null });
+  const [familleNbReferencesReel, setFamilleNbReferencesReel] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!selectedFamille) {
+      setBlYtdKpi({ n: 0, n1: 0, evolPct: null });
+      setFamilleNbReferencesReel(null);
+      return;
+    }
+    let cancelled = false;
+    async function loadYtdReel() {
+      const { data, error: err } = await supabase.rpc("get_stock_famille_ytd_cascade", { p_famille: selectedFamille });
+      if (cancelled || err) return;
+      const row = (Array.isArray(data) ? data[0] : data) as { sorties_ytd_n?: number; sorties_ytd_n1?: number; nb_references?: number } | null;
+      const n = Number(row?.sorties_ytd_n) || 0;
+      const n1 = Number(row?.sorties_ytd_n1) || 0;
+      setBlYtdKpi({ n, n1, evolPct: n1 > 0 ? ((n - n1) / n1) * 100 : null });
+      setFamilleNbReferencesReel(Number(row?.nb_references) || null);
+    }
+    loadYtdReel();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedFamille, refreshKey]);
 
   const [familleWeeklyRaw, setFamilleWeeklyRaw] = useState<
     Array<{ reference_article: string; periode_debut: string; stock_projete: number; prevision_ventes: number; prevision_base_n1: number; besoins_clients_fermes: number; commandes_fournisseurs_attendues: number; niveau_alerte: string }>
@@ -968,6 +995,22 @@ export default function StocksDisponibilites2Page() {
               <span className="text-xs text-white/40">
                 {search.trim() ? `${familleArticles.length} / ${familleArticlesAll.length} référence(s) filtrée(s)` : `${familleArticlesAll.length} référence(s)`}
               </span>
+              {/* Repère de périmètre : le nombre de références PROJETÉES
+                  (celles ci-dessus, avec stock/commandes/besoins/vente N-1
+                  dans la fenêtre de l'horizon) est souvent inférieur au
+                  nombre RÉEL de références de la famille — celles-ci
+                  n'apparaissent nulle part sur cet écran ni dans les 3 KPI
+                  liés à la projection, seulement dans "BL depuis le 1er
+                  janvier" (réconcilié) et dans l'export Excel. Rendu visible
+                  plutôt que silencieux. */}
+              {familleNbReferencesReel !== null && familleNbReferencesReel > familleArticlesAll.length && (
+                <span
+                  className="rounded-full border border-[#D69A4A]/40 bg-[#D69A4A]/10 px-2 py-0.5 text-[11px] text-[#D69A4A]"
+                  title={`${familleArticlesAll.length} référence(s) apparaissent dans le dernier run de projection (stock, commande ou besoin en cours, ou vente N-1 dans la fenêtre de l'horizon). ${familleNbReferencesReel} référence(s) au total ont un historique de vente réel sur cette famille — ce total plus large est celui utilisé par le KPI "BL depuis le 1er janvier" et par l'export Excel.`}
+                >
+                  {familleArticlesAll.length}/{familleNbReferencesReel} réf. projetées
+                </span>
+              )}
 
               {/* V2.4 : un seul bouton (au lieu de "Ajuster les hypothèses de
                   cette famille" + badge "Horizon famille" séparé — vérifié :
