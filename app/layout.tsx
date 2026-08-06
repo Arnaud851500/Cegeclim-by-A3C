@@ -564,7 +564,8 @@
       {
         label: 'Tableaux de bord',
         items: [
-          {label: '1 : Activite Quotidienne',activeLabel: 'Focus_mensuel',path: '/focus_mensuel2',accessKey: 'can_dashboard',},
+          {label: '1 : OnePage TCI',activeLabel: 'OnePage TCI',path: '/tableaux-de-bord/vision-tci',accessKey: 'can_autorisation',},
+          {label: '1 : Activite Quotidienne',activeLabel: 'Activite Quotidienne',path: '/focus_mensuel2',accessKey: 'can_dashboard',},
           { label: '2 : Suivi Multi Clients', path: '/synthese_multi_clients', accessKey: 'can_dashboard' },
           { label: '3 : Tableaux de bord', path: '/atelier-analyse', accessKey: 'can_autorisation' },
           { label: '4 : Portefeuille cde', path: '/portefeuille-livraison', accessKey: 'can_dashboard' },
