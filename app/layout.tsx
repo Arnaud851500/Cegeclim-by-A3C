@@ -789,6 +789,18 @@
     }, [])
 
     useEffect(() => {
+  function handleOpenCerfaKo() {
+    void openCerfaModal();
+  }
+
+  window.addEventListener('cegeclim:open-cerfa-ko', handleOpenCerfaKo);
+
+  return () => {
+    window.removeEventListener('cegeclim:open-cerfa-ko', handleOpenCerfaKo);
+  };
+}, [])
+
+    useEffect(() => {
       if (!sessionChecked || accessLoading || !hasSession || !email) return
       if (isLoginPage || isUnauthorizedPage || isPdfPrintPage) return
       if (access.loading) return

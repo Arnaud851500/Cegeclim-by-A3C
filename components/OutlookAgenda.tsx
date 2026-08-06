@@ -420,7 +420,7 @@ export default function OutlookAgenda({
   const currentAutorisation = autorisations.find((a) => a.email_outlook === selectedEmail);
 
   return (
-    <div className="flex h-full flex-col rounded-2xl border border-white/10 bg-gradient-to-br from-[#5B8DEF] to-[#2E5BB8] p-4 text-white">
+    <div className="flex h-full flex-col rounded-2xl border border-black/10 bg-[#F5F3EC] p-3 text-[#141A26]">
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <h3 className="font-[var(--font-display,inherit)] text-base font-bold">Agenda</h3>
         {useMockData && (
@@ -432,10 +432,10 @@ export default function OutlookAgenda({
         <select
           value={selectedEmail}
           onChange={(e) => setSelectedEmail(e.target.value)}
-          className="rounded-lg border border-white/25 bg-white/10 px-2 py-1 text-xs text-white outline-none"
+          className="rounded-lg border border-black/15 bg-black/[0.05] px-2 py-1 text-xs text-[#141A26] outline-none"
         >
           {autorisations.filter((a) => a.actif || a.email_outlook === selectedEmail).map((a) => (
-            <option key={a.id} value={a.email_outlook} className="bg-[#1a3a7a] text-white">
+            <option key={a.id} value={a.email_outlook} className="bg-[#1a3a7a] text-[#141A26]">
               {a.collaborateur}{!a.actif ? " (inactif)" : ""}
             </option>
           ))}
@@ -445,29 +445,29 @@ export default function OutlookAgenda({
         <div className="ml-auto flex items-center gap-1">
           <button
             onClick={() => setAnchorMonday((d) => addDays(d, -7))}
-            className="flex h-6 w-6 items-center justify-center rounded-full bg-white/15 text-sm hover:bg-white/25"
+            className="flex h-6 w-6 items-center justify-center rounded-full bg-black/[0.06] text-sm hover:bg-black/[0.12]"
             title="Semaine précédente"
           >
             −
           </button>
-          <span className="min-w-[110px] text-center text-[11px] text-white/80">{rangeLabel}</span>
+          <span className="min-w-[110px] text-center text-[11px] text-[#141A26]/75">{rangeLabel}</span>
           <button
             onClick={() => setAnchorMonday((d) => addDays(d, 7))}
-            className="flex h-6 w-6 items-center justify-center rounded-full bg-white/15 text-sm hover:bg-white/25"
+            className="flex h-6 w-6 items-center justify-center rounded-full bg-black/[0.06] text-sm hover:bg-black/[0.12]"
             title="Semaine suivante"
           >
             +
           </button>
           <button
             onClick={() => setAnchorMonday(mondayOf(new Date()))}
-            className="ml-1 rounded-full bg-white/15 px-2 py-1 text-[10px] hover:bg-white/25"
+            className="ml-1 rounded-full bg-black/[0.06] px-2 py-1 text-[10px] hover:bg-black/[0.12]"
             title="Revenir à aujourd'hui"
           >
             Auj.
           </button>
           <button
             onClick={() => setAdminOpen((v) => !v)}
-            className="ml-1 flex h-6 w-6 items-center justify-center rounded-full bg-white/15 text-xs hover:bg-white/25"
+            className="ml-1 flex h-6 w-6 items-center justify-center rounded-full bg-black/[0.06] text-xs hover:bg-black/[0.12]"
             title="Gérer les agendas autorisés"
           >
             ⚙
@@ -476,7 +476,7 @@ export default function OutlookAgenda({
             onClick={() => void toggleMockData()}
             title="Basculer entre données réelles et données fictives (pour tester l'affichage)"
             className={`ml-1 rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${
-              useMockData ? "bg-amber-400/90 text-[#141A26]" : "bg-white/10 text-white/50 hover:bg-white/20"
+              useMockData ? "bg-amber-400/90 text-[#141A26]" : "bg-black/[0.05] text-[#141A26]/50 hover:bg-black/10"
             }`}
           >
             {useMockData ? "Fictif" : "Réel"}
@@ -500,14 +500,14 @@ export default function OutlookAgenda({
               tenant Cegeclim (personnel) ou un agenda Cegeclim tant que le
               consentement app-only n'est pas en place. Redirige vers l'écran
               de login Microsoft, puis revient ici automatiquement. */}
-          <div className="mb-3 rounded-lg border border-white/20 bg-white/5 p-2.5">
+          <div className="mb-3 rounded-lg border border-black/10 bg-black/[0.04] p-2.5">
             <div className="mb-1.5 font-semibold">Connecter un agenda (recommandé)</div>
             <div className="flex flex-wrap items-center gap-2">
               <input
                 value={connectCollaborateur}
                 onChange={(e) => setConnectCollaborateur(e.target.value)}
                 placeholder="Nom du collaborateur"
-                className="rounded border border-white/25 bg-white/10 px-2 py-1 text-xs outline-none placeholder:text-white/40"
+                className="rounded border border-black/15 bg-black/[0.05] px-2 py-1 text-xs outline-none placeholder:text-[#141A26]/40"
               />
               <button
                 onClick={() => void handleConnectMicrosoft()}
@@ -517,7 +517,7 @@ export default function OutlookAgenda({
                 {connecting ? "Redirection…" : "Se connecter avec Microsoft"}
               </button>
             </div>
-            <p className="mt-1.5 text-[10px] text-white/50">
+            <p className="mt-1.5 text-[10px] text-[#141A26]/50">
               Ouvre l&rsquo;écran de connexion Microsoft dans cet onglet. Fonctionne avec n&rsquo;importe quel compte
               (personnel ou professionnel) — c&rsquo;est la personne qui va se connecter qui doit cliquer sur ce bouton.
             </p>
@@ -526,12 +526,12 @@ export default function OutlookAgenda({
           <div className="mb-2 font-semibold">Agendas autorisés</div>
           <div className="mb-3 space-y-1">
             {autorisations.map((a) => (
-              <div key={a.id} className="flex items-center gap-2 rounded bg-white/5 px-2 py-1">
+              <div key={a.id} className="flex items-center gap-2 rounded bg-black/[0.04] px-2 py-1">
                 <span className="flex-1 truncate">{a.collaborateur} — {a.email_outlook}</span>
                 <button
                   onClick={() => void handleToggleActif(a)}
                   disabled={adminSaving}
-                  className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${a.actif ? "bg-emerald-400/30 text-emerald-100" : "bg-white/10 text-white/50"}`}
+                  className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${a.actif ? "bg-emerald-400/30 text-emerald-100" : "bg-black/[0.05] text-[#141A26]/50"}`}
                 >
                   {a.actif ? "Actif" : "Inactif"}
                 </button>
@@ -544,10 +544,10 @@ export default function OutlookAgenda({
                 </button>
               </div>
             ))}
-            {autorisations.length === 0 && <p className="text-white/50">Aucun agenda autorisé pour l&rsquo;instant.</p>}
+            {autorisations.length === 0 && <p className="text-[#141A26]/50">Aucun agenda autorisé pour l&rsquo;instant.</p>}
           </div>
-          <p className="mb-1 text-white/50">
-            Ajout manuel — pour une messagerie Cegeclim <strong className="text-white/70">déjà couverte par le
+          <p className="mb-1 text-[#141A26]/50">
+            Ajout manuel — pour une messagerie Cegeclim <strong className="text-[#141A26]/70">déjà couverte par le
             consentement app-only</strong> (pas encore en place), OU un lien ICS (Yahoo Agenda, Google Calendar…)
             pour tester sans attendre Microsoft.
           </p>
@@ -556,24 +556,24 @@ export default function OutlookAgenda({
               value={formCollaborateur}
               onChange={(e) => setFormCollaborateur(e.target.value)}
               placeholder="Nom du collaborateur"
-              className="rounded border border-white/25 bg-white/10 px-2 py-1 text-xs outline-none placeholder:text-white/40"
+              className="rounded border border-black/15 bg-black/[0.05] px-2 py-1 text-xs outline-none placeholder:text-[#141A26]/40"
             />
             <input
               value={formEmail}
               onChange={(e) => setFormEmail(e.target.value)}
               placeholder="adresse@cegeclim.fr (identifiant, peut être fictif si lien ICS renseigné)"
-              className="w-64 rounded border border-white/25 bg-white/10 px-2 py-1 text-xs outline-none placeholder:text-white/40"
+              className="w-64 rounded border border-black/15 bg-black/[0.05] px-2 py-1 text-xs outline-none placeholder:text-[#141A26]/40"
             />
             <input
               value={formIcsUrl}
               onChange={(e) => setFormIcsUrl(e.target.value)}
               placeholder="Lien ICS (optionnel — Yahoo Agenda, Google Calendar…)"
-              className="w-72 rounded border border-white/25 bg-white/10 px-2 py-1 text-xs outline-none placeholder:text-white/40"
+              className="w-72 rounded border border-black/15 bg-black/[0.05] px-2 py-1 text-xs outline-none placeholder:text-[#141A26]/40"
             />
             <button
               onClick={() => void handleAddAutorisation()}
               disabled={adminSaving || !formCollaborateur.trim() || !formEmail.trim()}
-              className="rounded bg-white/20 px-3 py-1 text-xs font-semibold hover:bg-white/30 disabled:opacity-40"
+              className="rounded bg-black/10 px-3 py-1 text-xs font-semibold hover:bg-black/[0.14] disabled:opacity-40"
             >
               Ajouter
             </button>
@@ -583,48 +583,58 @@ export default function OutlookAgenda({
 
       <div className="flex flex-1 flex-col gap-3 overflow-auto">
         {semaines.map((s, si) => (
-          <div key={si} className="rounded-xl bg-white/10 p-2.5">
-            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-white/40">
+          <div key={si} className="rounded-xl bg-black/[0.05] p-2.5">
+            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[#141A26]/40">
               Semaine du {s.jours[0].date.toLocaleDateString("fr-FR", { day: "2-digit", month: "long" })}
             </div>
-            <div className="grid grid-cols-5 gap-1 text-xs font-medium text-white/70">
+            <div className="grid grid-cols-[34px_repeat(5,1fr)] gap-1 text-xs font-medium text-[#141A26]/70">
+              <div />
               {s.jours.map((j) => (
                 <div key={j.label} className="text-center">
                   {j.label} {j.date.getDate()}
                 </div>
               ))}
             </div>
-            <div className="relative mt-1 grid grid-cols-5 gap-1" style={{ height: 340 }}>
-              {/* Repères horaires en fond */}
-              <div className="pointer-events-none absolute inset-0 flex flex-col justify-between py-0.5 text-[9px] text-white/30">
+            <div className="grid grid-cols-[34px_repeat(5,1fr)] gap-1" style={{ height: 200 }}>
+              {/* Colonne des heures — séparée de la grille des jours, ne peut
+                  donc plus jamais être masquée par un rendez-vous du lundi. */}
+              <div className="flex flex-col justify-between py-0.5 text-right text-[9px] text-[#141A26]/45">
                 {Array.from({ length: HOUR_END - HOUR_START + 1 }).map((_, i) => (
-                  <div key={i} className="border-t border-white/10">{HOUR_START + i}h</div>
+                  <div key={i}>{HOUR_START + i}h</div>
                 ))}
               </div>
-              {s.jours.map((j) => {
-                const iso = toIsoDate(j.date);
-                const dayEvents = eventsByDay.get(iso) || [];
-                return (
-                  <div key={iso} className="relative border-l border-white/5 first:border-l-0">
-                    {dayEvents.filter((e) => !e.isAllDay).map((e) => (
-                      <button
-                        key={e.id}
-                        onClick={() => onActivityClick?.(e)}
-                        title={`${e.subject}${e.location ? " · " + e.location : ""}`}
-                        style={eventStyle(e, currentAutorisation?.couleur_defaut || null)}
-                        className="absolute left-0.5 right-0.5 overflow-hidden rounded-md px-1.5 py-1 text-left text-[11px] leading-tight text-white shadow hover:brightness-110"
-                      >
-                        <div className="truncate font-medium">{e.subject}</div>
-                        {e.location && <div className="truncate text-[9px] opacity-80">{e.location}</div>}
-                      </button>
-                    ))}
-                  </div>
-                );
-              })}
+              <div className="relative col-span-5 grid grid-cols-5 gap-1">
+                {/* Repères horaires en fond, alignés sur la colonne des heures */}
+                <div className="pointer-events-none absolute inset-0 flex flex-col justify-between py-0.5">
+                  {Array.from({ length: HOUR_END - HOUR_START + 1 }).map((_, i) => (
+                    <div key={i} className="border-t border-black/10" />
+                  ))}
+                </div>
+                {s.jours.map((j) => {
+                  const iso = toIsoDate(j.date);
+                  const dayEvents = eventsByDay.get(iso) || [];
+                  return (
+                    <div key={iso} className="relative border-l border-black/5 first:border-l-0">
+                      {dayEvents.filter((e) => !e.isAllDay).map((e) => (
+                        <button
+                          key={e.id}
+                          onClick={() => onActivityClick?.(e)}
+                          title={`${e.subject}${e.location ? " · " + e.location : ""}`}
+                          style={eventStyle(e, currentAutorisation?.couleur_defaut || null)}
+                          className="absolute left-0.5 right-0.5 overflow-hidden rounded-md px-1.5 py-0.5 text-left text-[10px] leading-tight text-white shadow hover:brightness-110"
+                        >
+                          <div className="truncate font-medium">{e.subject}</div>
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
             {/* Évènements journée entière, listés sous la grille horaire */}
             {s.jours.some((j) => (eventsByDay.get(toIsoDate(j.date)) || []).some((e) => e.isAllDay)) && (
-              <div className="mt-1 grid grid-cols-5 gap-1">
+              <div className="mt-1 grid grid-cols-[34px_repeat(5,1fr)] gap-1">
+                <div />
                 {s.jours.map((j) => {
                   const iso = toIsoDate(j.date);
                   const allDay = (eventsByDay.get(iso) || []).filter((e) => e.isAllDay);
@@ -650,7 +660,7 @@ export default function OutlookAgenda({
         ))}
       </div>
 
-      {loading && <div className="mt-2 text-center text-[10px] text-white/60">Chargement de l&rsquo;agenda…</div>}
+      {loading && <div className="mt-2 text-center text-[10px] text-[#141A26]/60">Chargement de l&rsquo;agenda…</div>}
     </div>
   );
 }
