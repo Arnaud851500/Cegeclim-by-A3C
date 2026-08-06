@@ -25,7 +25,6 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { usePageFilterAccess } from "@/lib/pageAccessFilters";
 import { useAccess } from "@/components/AccessContext";
@@ -145,9 +144,8 @@ function CardShell({
 // ── Pavé FLUX ─────────────────────────────────────────────────────────────
 
 function FluxCard({
-  config, effectiveAgence, utiliserJMoins1, onRemove,
-}: { config: KpiCardConfig; effectiveAgence: string | null; utiliserJMoins1: boolean; onRemove: () => void }) {
-  const router = useRouter();
+  config, effectiveAgence, effectiveCollaborateur, utiliserJMoins1, onRemove,
+}: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; utiliserJMoins1: boolean; onRemove: () => void }) {
   const famille = config.cle as FamilleFlux;
   const [values, setValues] = useState<FluxValues | null>(null);
   const [loading, setLoading] = useState(true);
@@ -164,7 +162,7 @@ function FluxCard({
         p_famille: famille,
         p_famille_macro: config.famille_macro,
         p_agence: effectiveAgence,
-        p_collaborateur: null,
+        p_collaborateur: effectiveCollaborateur,
         p_utiliser_j_moins_1: utiliserJMoins1,
       });
       if (cancelled) return;
@@ -174,12 +172,12 @@ function FluxCard({
     }
     load();
     return () => { cancelled = true; };
-  }, [famille, config.famille_macro, effectiveAgence, utiliserJMoins1]);
+  }, [famille, config.famille_macro, effectiveAgence, effectiveCollaborateur, utiliserJMoins1]);
 
   function handleClick() {
-    if (famille === "BL" || famille === "CDC" || famille === "Factures") router.push("/focus_mensuel2");
-    else if (famille === "Devis") router.push("/cycle-documents");
-    else if (famille === "Marge") router.push("/atelier-analyse?raccourci=analyse-marge");
+    if (famille === "BL" || famille === "CDC" || famille === "Factures") window.open("/focus_mensuel2", "_blank", "noopener,noreferrer");
+    else if (famille === "Devis") window.open("/cycle-documents", "_blank", "noopener,noreferrer");
+    else if (famille === "Marge") window.open("/atelier-analyse?raccourci=analyse-marge", "_blank", "noopener,noreferrer");
   }
 
   const fmt = estMarge ? formatPct : formatMontant;
@@ -227,9 +225,8 @@ function FluxCard({
 const CA_BAND_ORDER = ["400K€", "150K€", "80K€", "20K€", "vide"] as const;
 
 function CompteurCard({
-  config, effectiveAgence, onRemove,
-}: { config: KpiCardConfig; effectiveAgence: string | null; onRemove: () => void }) {
-  const router = useRouter();
+  config, effectiveAgence, effectiveCollaborateur, onRemove,
+}: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; onRemove: () => void }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [total, setTotal] = useState<number | null>(null);
@@ -248,8 +245,8 @@ function CompteurCard({
       try {
         if (config.cle === "clients_actifs") {
           const [actifsRes, creesRes] = await Promise.all([
-            supabase.rpc("get_vision_tci_clients_actifs", { p_agence: effectiveAgence, p_collaborateur: null }),
-            supabase.rpc("get_vision_tci_clients_crees_n", { p_agence: effectiveAgence, p_collaborateur: null }),
+            supabase.rpc("get_vision_tci_clients_actifs", { p_agence: effectiveAgence, p_collaborateur: effectiveCollaborateur }),
+            supabase.rpc("get_vision_tci_clients_crees_n", { p_agence: effectiveAgence, p_collaborateur: effectiveCollaborateur }),
           ]);
           if (actifsRes.error) throw actifsRes.error;
           if (creesRes.error) throw creesRes.error;
@@ -262,7 +259,7 @@ function CompteurCard({
             setClientsCreesN(Number(creesRes.data) || 0);
           }
         } else if (config.cle === "clients_crees_n") {
-          const { data, error: err } = await supabase.rpc("get_vision_tci_clients_crees_n", { p_agence: effectiveAgence, p_collaborateur: null });
+          const { data, error: err } = await supabase.rpc("get_vision_tci_clients_crees_n", { p_agence: effectiveAgence, p_collaborateur: effectiveCollaborateur });
           if (err) throw err;
           if (!cancelled) setTotal(Number(data) || 0);
         } else if (config.cle === "cerfa_ko") {
@@ -274,7 +271,7 @@ function CompteurCard({
           const n = Array.isArray(data) ? Number((data[0] as any)?.count ?? (data[0] as any)?.nb_lignes ?? 0) : Number(data ?? 0);
           if (!cancelled) setTotal(Number.isFinite(n) ? n : 0);
         } else if (config.cle === "cdc_avant_2026") {
-          const { data, error: err } = await supabase.rpc("get_vision_tci_cdc_avant_2026", { p_agence: effectiveAgence, p_collaborateur: null });
+          const { data, error: err } = await supabase.rpc("get_vision_tci_cdc_avant_2026", { p_agence: effectiveAgence, p_collaborateur: effectiveCollaborateur });
           if (err) throw err;
           if (!cancelled) setTotal(Number(data) || 0);
         } else if (config.cle === "factures_retard") {
@@ -289,12 +286,12 @@ function CompteurCard({
     load();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [config.cle, effectiveAgence]);
+  }, [config.cle, effectiveAgence, effectiveCollaborateur]);
 
   function handleClick() {
-    if (config.cle === "clients_actifs" || config.cle === "clients_crees_n") router.push("/synthese_multi_clients");
+    if (config.cle === "clients_actifs" || config.cle === "clients_crees_n") window.open("/synthese_multi_clients", "_blank", "noopener,noreferrer");
     else if (config.cle === "cerfa_ko") window.dispatchEvent(new CustomEvent("cegeclim:open-cerfa-ko"));
-    else if (config.cle === "cdc_avant_2026") router.push("/portefeuille-livraison");
+    else if (config.cle === "cdc_avant_2026") window.open("/portefeuille-livraison", "_blank", "noopener,noreferrer");
   }
 
   const isMontant = config.cle === "factures_retard";
@@ -334,9 +331,8 @@ function CompteurCard({
 // ── Pavé TAUX (réduit : 1 colonne sur 4) ────────────────────────────────
 
 function TauxCard({
-  config, effectiveAgence, onRemove,
-}: { config: KpiCardConfig; effectiveAgence: string | null; onRemove: () => void }) {
-  const router = useRouter();
+  config, effectiveAgence, effectiveCollaborateur, onRemove,
+}: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; onRemove: () => void }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [taux, setTaux] = useState<number | null>(null);
@@ -351,7 +347,7 @@ function TauxCard({
       const fin = new Date(now.getFullYear(), now.getMonth() + 1, 1).toISOString().slice(0, 10);
       const { data, error: err } = await supabase.rpc("get_cycle_documents_kpis", {
         p_date_debut: debut, p_date_fin: fin,
-        p_agence: effectiveAgence, p_collaborateur: null,
+        p_agence: effectiveAgence, p_collaborateur: effectiveCollaborateur,
         p_famille_macro: config.famille_macro, p_famille: null, p_client: null,
         p_include_hors_stat: false, p_age_risque_jours: 30, p_montant_risque: 15000,
       });
@@ -362,11 +358,11 @@ function TauxCard({
     }
     load();
     return () => { cancelled = true; };
-  }, [effectiveAgence, config.famille_macro]);
+  }, [effectiveAgence, effectiveCollaborateur, config.famille_macro]);
 
   return (
     <div className="col-span-2 sm:col-span-1">
-      <CardShell color="#D69A4A" badgeLabel="Taux transfo devis" onRemove={onRemove} onClick={() => router.push("/cycle-documents")} clickHint="Ouvrir Analyse Devis" compact>
+      <CardShell color="#D69A4A" badgeLabel="Taux transfo devis" onRemove={onRemove} onClick={() => window.open("/cycle-documents", "_blank", "noopener,noreferrer")} clickHint="Ouvrir Analyse Devis" compact>
         {loading ? (
           <div className="h-8 animate-pulse rounded bg-white/5" />
         ) : error ? (
@@ -542,9 +538,16 @@ export default function VisionTciKpiPanel() {
   useEffect(() => { void loadPrefs(); }, [loadPrefs]);
 
   const agenceForcee = access.hasAgenceRestriction && access.allowedAgences.length > 0 ? access.allowedAgences[0] : null;
+  // Un utilisateur peut être restreint sur l'agence ET le collaborateur en
+  // même temps (cas courant : un commercial rattaché à une agence). Les deux
+  // s'appliquent ensemble, jamais l'un au détriment de l'autre.
+  const collaborateurForcee = access.hasCollaborateurRestriction && access.allowedCollaborateurs.length > 0 ? access.allowedCollaborateurs[0] : null;
 
   function effectiveAgenceFor(card: KpiCardConfig): string | null {
     return agenceForcee || card.agence;
+  }
+  function effectiveCollaborateurFor(_card: KpiCardConfig): string | null {
+    return collaborateurForcee;
   }
 
   // Toute modification manuelle rend la disposition "personnalisée" — elle
@@ -629,13 +632,13 @@ export default function VisionTciKpiPanel() {
       <div className="mb-3 grid grid-cols-4 gap-3">
         {cards.map((c) =>
           c.kind === "flux" ? (
-            <FluxCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} utiliserJMoins1={utiliserJMoins1} onRemove={() => handleRemove(c.id)} />
+            <FluxCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} utiliserJMoins1={utiliserJMoins1} onRemove={() => handleRemove(c.id)} />
           ) : c.kind === "taux" ? (
-            <TauxCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} onRemove={() => handleRemove(c.id)} />
+            <TauxCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} onRemove={() => handleRemove(c.id)} />
           ) : c.kind === "spacer" ? (
             <SpacerCard key={c.id} span={c.cle === "2" ? 2 : 1} onRemove={() => handleRemove(c.id)} />
           ) : (
-            <CompteurCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} onRemove={() => handleRemove(c.id)} />
+            <CompteurCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} onRemove={() => handleRemove(c.id)} />
           ),
         )}
       </div>

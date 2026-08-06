@@ -15,7 +15,7 @@ import TodoDenseList from "@/components/TodoDenseList";
 export default function VisionTciPage() {
   return (
     <div className="min-h-screen w-full bg-[#0B1220] p-6">
-      <h1 className="mb-4 text-xl font-bold text-white">Vision One page TCI</h1>
+      <h1 className="mb-4 text-xl font-bold text-white">ONE PAGE</h1>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         <VisionTciKpiPanel />
