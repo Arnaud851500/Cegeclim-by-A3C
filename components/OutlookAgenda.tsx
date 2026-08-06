@@ -207,14 +207,56 @@ export default function OutlookAgenda({
     return `${fmt(anchorMonday)} → ${fmt(fin)}`;
   }, [anchorMonday]);
 
-  // Mode "données fictives" (?mock=1 dans l'URL) — pour tester l'affichage,
-  // la navigation et les couleurs indépendamment de toute connexion réelle
-  // (Microsoft en attente de l'IT, Yahoo qui ne renvoie pas encore le bon
-  // format). À retirer une fois une vraie source branchée et validée.
-  const [useMockData] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return new URLSearchParams(window.location.search).get("mock") === "1";
-  });
+  // Mode "données fictives" — persisté en base par utilisateur
+  // (vision_tci_preferences.mock_agenda), plus besoin de ?mock=1 à chaque
+  // visite. ?mock=1 / ?mock=0 dans l'URL reste utilisable comme bascule
+  // rapide et met aussi à jour la préférence enregistrée.
+  const [useMockData, setUseMockData] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    async function loadMockPref() {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const email = sessionData.session?.user?.email?.toLowerCase();
+      if (!email) return;
+
+      const params = new URLSearchParams(window.location.search);
+      const overrideParam = params.get("mock");
+
+      if (overrideParam === "1" || overrideParam === "0") {
+        const value = overrideParam === "1";
+        if (!cancelled) setUseMockData(value);
+        await supabase.from("vision_tci_preferences").upsert({
+          user_email: email,
+          mock_agenda: value,
+          updated_at: new Date().toISOString(),
+        });
+        // Nettoie l'URL pour ne pas avoir à s'en souvenir la prochaine fois.
+        params.delete("mock");
+        window.history.replaceState({}, "", window.location.pathname + (params.toString() ? `?${params}` : ""));
+        return;
+      }
+
+      const { data } = await supabase.from("vision_tci_preferences").select("mock_agenda").eq("user_email", email).maybeSingle();
+      if (!cancelled) setUseMockData(Boolean(data?.mock_agenda));
+    }
+    loadMockPref();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function toggleMockData() {
+    const next = !useMockData;
+    setUseMockData(next);
+    const { data: sessionData } = await supabase.auth.getSession();
+    const email = sessionData.session?.user?.email?.toLowerCase();
+    if (!email) return;
+    await supabase.from("vision_tci_preferences").upsert({
+      user_email: email,
+      mock_agenda: next,
+      updated_at: new Date().toISOString(),
+    });
+  }
 
   function buildMockEvents(weekStart: Date): OutlookEvent[] {
     const mk = (dayOffset: number, hStart: number, hEnd: number, subject: string, colorHex: string, allDay = false): OutlookEvent => {
@@ -424,6 +466,15 @@ export default function OutlookAgenda({
             title="Gérer les agendas autorisés"
           >
             ⚙
+          </button>
+          <button
+            onClick={() => void toggleMockData()}
+            title="Basculer entre données réelles et données fictives (pour tester l'affichage)"
+            className={`ml-1 rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${
+              useMockData ? "bg-amber-400/90 text-[#141A26]" : "bg-white/10 text-white/50 hover:bg-white/20"
+            }`}
+          >
+            {useMockData ? "Fictif" : "Réel"}
           </button>
         </div>
       </div>
