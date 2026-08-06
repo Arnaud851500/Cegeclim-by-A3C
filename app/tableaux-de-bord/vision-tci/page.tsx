@@ -19,7 +19,7 @@ export default function VisionTciPage() {
       <h1 className="mb-4 text-xl font-bold text-white">Vision One page TCI</h1>
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.1fr_1fr]">
         <VisionTciKpiPanel />
-        <div className="h-[600px]">
+        <div className="h-[900px]">
           <OutlookAgenda />
         </div>
       </div>

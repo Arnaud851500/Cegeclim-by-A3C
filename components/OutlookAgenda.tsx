@@ -4,7 +4,8 @@
  * OutlookAgenda
  * ------------------------------------------------------------------------
  * Bloc "AGENDA" du mockup "Vision One page TCI" :
- *  - 15 jours (3 semaines, lundi→vendredi), une colonne par semaine
+ *  - 10 jours (2 semaines glissantes et superposées, lundi→vendredi),
+ *    empilées en pleine largeur — plus de place pour lire les rendez-vous
  *  - navigation +/- pour glisser d'une semaine
  *  - vision horaire 8h→18h
  *  - couleurs Outlook (catégories, résolues côté serveur)
@@ -190,9 +191,13 @@ export default function OutlookAgenda({
     }
   }
 
-  // 3 semaines affichées à partir de anchorMonday
+  // 2 semaines glissantes et superposées à partir de anchorMonday — pas 3
+  // côte à côte : moins de colonnes en largeur = chaque jour est bien plus
+  // large, donc plus lisible pour y positionner des rendez-vous. Naviguer
+  // d'une semaine (+/-) fait glisser la fenêtre d'un cran, avec toujours une
+  // semaine commune entre deux vues consécutives ("glissantes superposées").
   const semaines = useMemo(() => {
-    return [0, 1, 2].map((w) => {
+    return [0, 1].map((w) => {
       const debut = addDays(anchorMonday, w * 7);
       return {
         debut,
@@ -202,7 +207,7 @@ export default function OutlookAgenda({
   }, [anchorMonday]);
 
   const rangeLabel = useMemo(() => {
-    const fin = addDays(anchorMonday, 18); // vendredi de la 3e semaine
+    const fin = addDays(anchorMonday, 11); // vendredi de la 2e semaine
     const fmt = (d: Date) => d.toLocaleDateString("fr-FR", { day: "2-digit", month: "short" });
     return `${fmt(anchorMonday)} → ${fmt(fin)}`;
   }, [anchorMonday]);
@@ -281,7 +286,7 @@ export default function OutlookAgenda({
       mk(2, 10, 12, "Visite agence", "#27AE60"),
       mk(4, 16, 17, "Bilan hebdo", "#8E44AD"),
       mk(7, 9, 9.5, "Appel fournisseur", "#D68910"),
-      mk(9, 14, 15, "Vision TCI — démo", "#3498DB"),
+      mk(8, 14, 15, "Vision TCI — démo", "#3498DB"),
     ];
   }
 
@@ -301,7 +306,7 @@ export default function OutlookAgenda({
         const session = await supabase.auth.getSession();
         const token = session.data.session?.access_token;
         const start = toIsoDate(anchorMonday);
-        const end = toIsoDate(addDays(anchorMonday, 19)); // exclusif, couvre le vendredi de la 3e semaine
+        const end = toIsoDate(addDays(anchorMonday, 12)); // exclusif, couvre le vendredi de la 2e semaine
         const params = new URLSearchParams({ email: selectedEmail, start, end });
         const res = await fetch(`/api/outlook/calendar?${params}`, {
           headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -576,19 +581,22 @@ export default function OutlookAgenda({
         </div>
       )}
 
-      <div className="grid flex-1 grid-cols-3 gap-2 overflow-auto">
+      <div className="flex flex-1 flex-col gap-3 overflow-auto">
         {semaines.map((s, si) => (
-          <div key={si} className="rounded-xl bg-white/10 p-1.5">
-            <div className="grid grid-cols-5 gap-0.5 text-[10px] font-medium text-white/70">
+          <div key={si} className="rounded-xl bg-white/10 p-2.5">
+            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-white/40">
+              Semaine du {s.jours[0].date.toLocaleDateString("fr-FR", { day: "2-digit", month: "long" })}
+            </div>
+            <div className="grid grid-cols-5 gap-1 text-xs font-medium text-white/70">
               {s.jours.map((j) => (
                 <div key={j.label} className="text-center">
                   {j.label} {j.date.getDate()}
                 </div>
               ))}
             </div>
-            <div className="relative mt-1 grid grid-cols-5 gap-0.5" style={{ height: 220 }}>
+            <div className="relative mt-1 grid grid-cols-5 gap-1" style={{ height: 340 }}>
               {/* Repères horaires en fond */}
-              <div className="pointer-events-none absolute inset-0 flex flex-col justify-between py-0.5 text-[8px] text-white/30">
+              <div className="pointer-events-none absolute inset-0 flex flex-col justify-between py-0.5 text-[9px] text-white/30">
                 {Array.from({ length: HOUR_END - HOUR_START + 1 }).map((_, i) => (
                   <div key={i} className="border-t border-white/10">{HOUR_START + i}h</div>
                 ))}
@@ -597,16 +605,17 @@ export default function OutlookAgenda({
                 const iso = toIsoDate(j.date);
                 const dayEvents = eventsByDay.get(iso) || [];
                 return (
-                  <div key={iso} className="relative">
+                  <div key={iso} className="relative border-l border-white/5 first:border-l-0">
                     {dayEvents.filter((e) => !e.isAllDay).map((e) => (
                       <button
                         key={e.id}
                         onClick={() => onActivityClick?.(e)}
                         title={`${e.subject}${e.location ? " · " + e.location : ""}`}
                         style={eventStyle(e, currentAutorisation?.couleur_defaut || null)}
-                        className="absolute left-0 right-0 overflow-hidden rounded px-0.5 text-left text-[8px] leading-tight text-white shadow hover:brightness-110"
+                        className="absolute left-0.5 right-0.5 overflow-hidden rounded-md px-1.5 py-1 text-left text-[11px] leading-tight text-white shadow hover:brightness-110"
                       >
-                        {e.subject}
+                        <div className="truncate font-medium">{e.subject}</div>
+                        {e.location && <div className="truncate text-[9px] opacity-80">{e.location}</div>}
                       </button>
                     ))}
                   </div>
@@ -615,7 +624,7 @@ export default function OutlookAgenda({
             </div>
             {/* Évènements journée entière, listés sous la grille horaire */}
             {s.jours.some((j) => (eventsByDay.get(toIsoDate(j.date)) || []).some((e) => e.isAllDay)) && (
-              <div className="mt-1 grid grid-cols-5 gap-0.5">
+              <div className="mt-1 grid grid-cols-5 gap-1">
                 {s.jours.map((j) => {
                   const iso = toIsoDate(j.date);
                   const allDay = (eventsByDay.get(iso) || []).filter((e) => e.isAllDay);
@@ -627,7 +636,7 @@ export default function OutlookAgenda({
                           onClick={() => onActivityClick?.(e)}
                           title={e.subject}
                           style={{ background: e.colorHex || currentAutorisation?.couleur_defaut || DEFAULT_COLOR }}
-                          className="w-full truncate rounded px-1 py-0.5 text-left text-[8px] text-white"
+                          className="w-full truncate rounded px-1.5 py-1 text-left text-[10px] text-white"
                         >
                           {e.subject}
                         </button>

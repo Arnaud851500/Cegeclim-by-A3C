@@ -27,16 +27,19 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 
-// ⚠️ Provisoire — à remplacer par les couleurs exactes de Focus Mensuel V3.
+// ⚠️ BL/Devis/CDC/Factures : PROVISOIRE, à remplacer par DOC_COLORS de
+// app/focus_mensuel/page.tsx (pas pu le vérifier — colle-moi cet export et
+// je corrige en une fois). Marge : hors périmètre de Focus Mensuel, pas de
+// couleur de référence existante — couleur libre en attendant ton avis.
 export const FOCUS_MENSUEL_COLORS: Record<string, string> = {
   BL: "#4B92AC",
   Devis: "#D69A4A",
   CDC: "#7A5EA8",
-  Facturation: "#3F9142",
+  Factures: "#3F9142",
   Marge: "#C1683C",
 };
 
-const FAMILLES_KPI = ["BL", "Devis", "CDC", "Facturation", "Marge"] as const;
+const FAMILLES_KPI = ["BL", "Devis", "CDC", "Factures", "Marge"] as const;
 type FamilleKpi = (typeof FAMILLES_KPI)[number];
 
 type KpiCardConfig = {
