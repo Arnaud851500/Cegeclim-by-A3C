@@ -11,6 +11,17 @@
  *   granularite  — "mensuel" (défaut) | "hebdo"
  *
  * Prérequis : npm install exceljs
+ *
+ * FIX (2026-08) : la feuille "Ventes N-N-1" affichait "$NaN Invalid Date" (ou
+ * équivalent) sur les en-têtes de semaine en granularité hebdo. Cause : le
+ * champ "periode" renvoyé par la RPC get_stock_ventes_historique n'est PAS
+ * une date en hebdo — c'est une chaîne ISO semaine du type "2026-W32"
+ * (to_char(..., 'IYYY-"W"IW') côté SQL), alors que labelPeriode() faisait
+ * `new Date(pd)` en supposant une vraie date. Ça fonctionnait par coïncidence
+ * pour l'onglet "Projection stock" (son periode_debut EST une vraie date en
+ * hebdo, et un "YYYY-MM" en mensuel), mais pas pour la feuille des ventes.
+ * Ajout de labelPeriodeVente(), dédiée à cette feuille, qui reconnaît le
+ * format "AAAA-Wss" au lieu d'essayer de le parser comme une date.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -134,6 +145,8 @@ function agrMensuel(rows: Row[]): Row[] {
   return [...agg.values()];
 }
 
+// Utilisée par l'onglet "Projection stock" : periode_debut y est toujours
+// soit une vraie date (hebdo), soit un "YYYY-MM" (mensuel, après agrMensuel).
 function labelPeriode(pd: string, granularite: string): string {
   try {
     if (granularite === "hebdo") {
@@ -141,6 +154,23 @@ function labelPeriode(pd: string, granularite: string): string {
       const jan = new Date(d.getFullYear(), 0, 1);
       const wk  = Math.ceil(((d.getTime() - jan.getTime()) / 86400000 + jan.getDay() + 1) / 7);
       return `S${String(wk).padStart(2,"0")} ${d.toLocaleDateString("fr-FR",{day:"2-digit",month:"2-digit"})}`;
+    }
+    return new Date(pd + "-01").toLocaleDateString("fr-FR",{ month:"short", year:"numeric" });
+  } catch { return pd; }
+}
+
+// Utilisée UNIQUEMENT par l'onglet "Ventes N-N-1" : le champ "periode" renvoyé
+// par get_stock_ventes_historique n'est pas une date en hebdo, c'est une
+// chaîne ISO semaine "AAAA-Wss" (ex. "2026-W32", to_char(..., 'IYYY-"W"IW')
+// côté SQL) — passer ça à `new Date()` produit un Invalid Date. On lit donc
+// directement l'année et le n° de semaine dans la chaîne, sans tenter de la
+// parser comme une date.
+function labelPeriodeVente(pd: string, granularite: string): string {
+  try {
+    if (granularite === "hebdo") {
+      const m = pd.match(/^(\d{4})-W(\d{2})$/);
+      if (m) return `S${m[2]} ${m[1]}`;
+      return pd; // filet de sécurité si le format renvoyé par la RPC change un jour
     }
     return new Date(pd + "-01").toLocaleDateString("fr-FR",{ month:"short", year:"numeric" });
   } catch { return pd; }
@@ -437,7 +467,9 @@ export async function GET(req: NextRequest) {
     const startC = V_INFO_N + 1 + pi * 2;
     wv.mergeCells(2, startC, 2, startC + 1);
     const c = vr2.getCell(startC);
-    c.value     = labelPeriode(pd, granularite);
+    // FIX : labelPeriodeVente() au lieu de labelPeriode() — pd est ici une
+    // chaîne ISO semaine ("2026-W32") en hebdo, pas une date.
+    c.value     = labelPeriodeVente(pd, granularite);
     c.font      = { name:"Arial", bold:true, size:7, color:{ argb:"FFFFFFFF" } };
     c.fill      = { type:"pattern", pattern:"solid", fgColor:{ argb:"FFA6A181" } };
     c.alignment = { horizontal:"center", vertical:"middle", wrapText:true };
