@@ -799,11 +799,25 @@
     window.removeEventListener('cegeclim:open-cerfa-ko', handleOpenCerfaKo);
   };
 }, [])
-
+const lastAppliedScopeSignatureRef = useRef<string | null>(null)
     useEffect(() => {
       if (!sessionChecked || accessLoading || !hasSession || !email) return
       if (isLoginPage || isUnauthorizedPage || isPdfPrintPage) return
       if (access.loading) return
+
+      const scopeSignature = [
+        email,
+        access.allowedAgences.join('|'),
+        access.allowedCollaborateurs.join('|'),
+        statusScopeOverride?.agences && Array.isArray(statusScopeOverride.agences) ? statusScopeOverride.agences.join('|') : String(statusScopeOverride?.agences || ''),
+        statusScopeOverride?.collaborateurs && Array.isArray(statusScopeOverride.collaborateurs) ? statusScopeOverride.collaborateurs.join('|') : String(statusScopeOverride?.collaborateurs || ''),
+      ].join('::')
+
+      // Le périmètre effectif n'a pas changé depuis le dernier calcul :
+      // rien à refaire, même si access.loading a fait un aller-retour
+      // (ex. revalidation au retour de focus sur la fenêtre).
+      if (lastAppliedScopeSignatureRef.current === scopeSignature) return
+      lastAppliedScopeSignatureRef.current = scopeSignature
 
       const timer = setTimeout(() => {
         void refreshStatusIndicators({ force: true })

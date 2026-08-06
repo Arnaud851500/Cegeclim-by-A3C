@@ -281,12 +281,12 @@ export default function OutlookAgenda({
       };
     };
     return [
-      mk(0, 9, 10, "Point équipe", "#3498DB"),
+      mk(0, 9, 10.5, "Point équipe", "#3498DB"),
       mk(0, 14, 15.5, "RDV client — A0050 ABADI", "#E74C3C"),
       mk(2, 10, 12, "Visite agence", "#27AE60"),
-      mk(4, 16, 17, "Bilan hebdo", "#8E44AD"),
-      mk(7, 9, 9.5, "Appel fournisseur", "#D68910"),
-      mk(8, 14, 15, "Vision TCI — démo", "#3498DB"),
+      mk(4, 16, 17.5, "Bilan hebdo", "#8E44AD"),
+      mk(7, 9, 10.5, "Appel fournisseur", "#D68910"),
+      mk(8, 14, 15.5, "Vision TCI — démo", "#3498DB"),
     ];
   }
 
