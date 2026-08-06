@@ -132,11 +132,10 @@ export function parseIcs(raw: string): IcsEvent[] {
  * parfaitement valide. On simule donc un vrai navigateur (User-Agent,
  * Accept, Accept-Language) pour maximiser les chances de passer.
  */
-export async function fetchIcsEvents(url: string): Promise<IcsEvent[]> {
-  // "webcal://" n'est qu'un raccourci d'affichage pour les clients de
-  // messagerie — le contenu est servi en https classique.
+export async function fetchIcsRaw(url: string): Promise<{ text: string; contentType: string | null; status: number }> {
   const httpUrl = url.replace(/^webcal:\/\//i, "https://");
   const res = await fetch(httpUrl, {
+    redirect: "follow",
     headers: {
       Accept: "text/calendar, text/plain, */*",
       "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
@@ -144,16 +143,20 @@ export async function fetchIcsEvents(url: string): Promise<IcsEvent[]> {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     },
   });
+  const text = await res.text().catch(() => "");
   if (!res.ok) {
-    const bodySnippet = await res.text().catch(() => "");
     throw new Error(
       `Lecture du flux ICS impossible (HTTP ${res.status})${
         res.status === 403
-          ? " — le fournisseur bloque probablement les requêtes serveur (pare-feu anti-robots). Vérifie que le lien est toujours actif, ou essaie de le régénérer."
+          ? " — le fournisseur bloque probablement les requêtes serveur (pare-feu anti-robots)."
           : ""
-      }${bodySnippet ? ` : ${bodySnippet.slice(0, 200)}` : ""}`,
+      }${text ? ` : ${text.slice(0, 200)}` : ""}`,
     );
   }
-  const text = await res.text();
+  return { text, contentType: res.headers.get("content-type"), status: res.status };
+}
+
+export async function fetchIcsEvents(url: string): Promise<IcsEvent[]> {
+  const { text } = await fetchIcsRaw(url);
   return parseIcs(text);
 }
