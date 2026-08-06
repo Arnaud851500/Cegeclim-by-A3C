@@ -123,14 +123,36 @@ export function parseIcs(raw: string): IcsEvent[] {
   return events;
 }
 
-/** Récupère et parse un flux ICS distant (lien de partage Yahoo/Google/etc.). */
+/**
+ * Récupère et parse un flux ICS distant (lien de partage Yahoo/Google/etc.).
+ *
+ * Certains fournisseurs (Yahoo en tête, protégé par un pare-feu anti-robots
+ * de type Akamai/PerimeterX) renvoient un 403 aux requêtes serveur-à-serveur
+ * sans en-têtes de navigateur — même sur un lien de partage public/privé
+ * parfaitement valide. On simule donc un vrai navigateur (User-Agent,
+ * Accept, Accept-Language) pour maximiser les chances de passer.
+ */
 export async function fetchIcsEvents(url: string): Promise<IcsEvent[]> {
   // "webcal://" n'est qu'un raccourci d'affichage pour les clients de
   // messagerie — le contenu est servi en https classique.
   const httpUrl = url.replace(/^webcal:\/\//i, "https://");
-  const res = await fetch(httpUrl, { headers: { Accept: "text/calendar" } });
+  const res = await fetch(httpUrl, {
+    headers: {
+      Accept: "text/calendar, text/plain, */*",
+      "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    },
+  });
   if (!res.ok) {
-    throw new Error(`Lecture du flux ICS impossible (HTTP ${res.status})`);
+    const bodySnippet = await res.text().catch(() => "");
+    throw new Error(
+      `Lecture du flux ICS impossible (HTTP ${res.status})${
+        res.status === 403
+          ? " — le fournisseur bloque probablement les requêtes serveur (pare-feu anti-robots). Vérifie que le lien est toujours actif, ou essaie de le régénérer."
+          : ""
+      }${bodySnippet ? ` : ${bodySnippet.slice(0, 200)}` : ""}`,
+    );
   }
   const text = await res.text();
   return parseIcs(text);
