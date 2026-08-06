@@ -43,7 +43,7 @@ export const FOCUS_MENSUEL_COLORS: Record<string, string> = {
 const FAMILLES_FLUX = ["BL", "Devis", "CDC", "Factures", "Marge"] as const;
 type FamilleFlux = (typeof FAMILLES_FLUX)[number];
 
-type KpiKind = "flux" | "compteur" | "taux";
+type KpiKind = "flux" | "compteur" | "taux" | "spacer";
 
 type KpiCardConfig = {
   id: string;
@@ -54,8 +54,9 @@ type KpiCardConfig = {
 };
 
 const COMPTEUR_OPTIONS = [
+  // "Clients créés cette année" n'est plus un pavé séparé — intégré comme
+  // sous-mesure de "Clients actifs" (cf. CompteurCard).
   { cle: "clients_actifs", label: "Clients actifs", isAlerte: false },
-  { cle: "clients_crees_n", label: "Clients créés cette année", isAlerte: false },
   { cle: "cerfa_ko", label: "CERFA non à jour", isAlerte: true },
   { cle: "cdc_avant_2026", label: "CDC livraison < 2026", isAlerte: true },
   { cle: "factures_retard", label: "Factures en retard", isAlerte: true },
@@ -231,9 +232,10 @@ function CompteurCard({
   const [total, setTotal] = useState<number | null>(null);
   const [bands, setBands] = useState<Record<string, number> | null>(null);
 
-  const meta = COMPTEUR_OPTIONS.find((o) => o.cle === config.cle);
+  const meta = COMPTEUR_OPTIONS.find((o) => o.cle === config.cle) || (config.cle === "clients_crees_n" ? { cle: "clients_crees_n", label: "Clients créés cette année", isAlerte: false } : undefined);
   const label = meta?.label || config.cle;
   const isAlerte = meta?.isAlerte ?? false;
+  const [clientsCreesN, setClientsCreesN] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -242,12 +244,20 @@ function CompteurCard({
       setError(null);
       try {
         if (config.cle === "clients_actifs") {
-          const { data, error: err } = await supabase.rpc("get_vision_tci_clients_actifs", { p_agence: effectiveAgence, p_collaborateur: null });
-          if (err) throw err;
-          const rows = (data || []) as Array<{ band: string; nb_clients: number }>;
+          const [actifsRes, creesRes] = await Promise.all([
+            supabase.rpc("get_vision_tci_clients_actifs", { p_agence: effectiveAgence, p_collaborateur: null }),
+            supabase.rpc("get_vision_tci_clients_crees_n", { p_agence: effectiveAgence, p_collaborateur: null }),
+          ]);
+          if (actifsRes.error) throw actifsRes.error;
+          if (creesRes.error) throw creesRes.error;
+          const rows = (actifsRes.data || []) as Array<{ band: string; nb_clients: number }>;
           const map: Record<string, number> = {};
           rows.forEach((r) => { map[r.band] = r.nb_clients; });
-          if (!cancelled) { setBands(map); setTotal(rows.reduce((s, r) => s + r.nb_clients, 0)); }
+          if (!cancelled) {
+            setBands(map);
+            setTotal(rows.reduce((s, r) => s + r.nb_clients, 0));
+            setClientsCreesN(Number(creesRes.data) || 0);
+          }
         } else if (config.cle === "clients_crees_n") {
           const { data, error: err } = await supabase.rpc("get_vision_tci_clients_crees_n", { p_agence: effectiveAgence, p_collaborateur: null });
           if (err) throw err;
@@ -299,6 +309,11 @@ function CompteurCard({
             <div className="font-[var(--font-mono,monospace)] text-lg font-semibold" style={{ color: valueColor }}>
               {isMontant ? formatMontant(total || 0) : (total ?? 0).toLocaleString("fr-FR")}
             </div>
+            {config.cle === "clients_actifs" && clientsCreesN !== null && (
+              <div className="mt-0.5 text-[9px] text-white/50">
+                dont <span className="font-semibold text-white/80">{clientsCreesN.toLocaleString("fr-FR")}</span> créés cette année
+              </div>
+            )}
             {bands && (
               <div className="mt-1 flex flex-wrap gap-1">
                 {CA_BAND_ORDER.filter((b) => bands[b]).slice(0, 3).map((b) => (
@@ -363,14 +378,32 @@ function TauxCard({
   );
 }
 
+// ── Pavé vide (mise en forme uniquement, pas de bordure ni de données) ───
+
+function SpacerCard({ span, onRemove }: { span: 1 | 2; onRemove: () => void }) {
+  return (
+    <div className={span === 2 ? "col-span-4 sm:col-span-2" : "col-span-2 sm:col-span-1"}>
+      <div className="group relative flex h-full min-h-[64px] items-center justify-center rounded-xl">
+        <button
+          onClick={onRemove}
+          title="Retirer cet espace"
+          className="absolute right-1.5 top-1.5 text-white/0 group-hover:text-white/30 hover:!text-white/70"
+        >
+          ✕
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── Formulaire d'ajout ───────────────────────────────────────────────────
 
 function AjouterKpiForm({
-  famillesMacro, agenceForcee, agencesAutorisees, onAdd, onCancel,
+  famillesMacro, agenceForcee, agencesDisponibles, onAdd, onCancel,
 }: {
   famillesMacro: string[];
   agenceForcee: string | null;
-  agencesAutorisees: string[] | null;
+  agencesDisponibles: string[];
   onAdd: (c: Omit<KpiCardConfig, "id">) => void;
   onCancel: () => void;
 }) {
@@ -378,12 +411,13 @@ function AjouterKpiForm({
   const [cle, setCle] = useState<string>("BL");
   const [familleMacro, setFamilleMacro] = useState("");
   const [agence, setAgence] = useState(agenceForcee || "");
+  const [spacerSpan, setSpacerSpan] = useState<1 | 2>(1);
 
   function handleKindChange(next: KpiKind) {
     setKind(next);
     if (next === "flux") setCle("BL");
     else if (next === "compteur") setCle(COMPTEUR_OPTIONS[0].cle);
-    else setCle(TAUX_OPTIONS[0].cle);
+    else if (next === "taux") setCle(TAUX_OPTIONS[0].cle);
   }
 
   return (
@@ -393,6 +427,7 @@ function AjouterKpiForm({
           <option value="flux">Flux (BL/Devis/CDC/Factures/Marge)</option>
           <option value="compteur">Compteur</option>
           <option value="taux">Taux</option>
+          <option value="spacer">Espace vide (mise en forme)</option>
         </select>
 
         {kind === "flux" && (
@@ -410,6 +445,12 @@ function AjouterKpiForm({
             {TAUX_OPTIONS.map((o) => <option key={o.cle} value={o.cle}>{o.label}</option>)}
           </select>
         )}
+        {kind === "spacer" && (
+          <select value={spacerSpan} onChange={(e) => setSpacerSpan(Number(e.target.value) as 1 | 2)} className="rounded border border-white/20 bg-[#141A26] px-2 py-1 text-xs text-white">
+            <option value={1}>Petit (largeur d&rsquo;un compteur)</option>
+            <option value={2}>Grand (largeur d&rsquo;un flux)</option>
+          </select>
+        )}
 
         {kind === "flux" && (
           <select value={familleMacro} onChange={(e) => setFamilleMacro(e.target.value)} className="rounded border border-white/20 bg-[#141A26] px-2 py-1 text-xs text-white">
@@ -418,23 +459,31 @@ function AjouterKpiForm({
           </select>
         )}
 
-        {/* Sélecteur d'agence : verrouillé si l'utilisateur a une restriction
-            (même comportement que FilterSelect ailleurs dans l'appli). */}
-        <select
-          value={agenceForcee || agence}
-          disabled={Boolean(agenceForcee)}
-          onChange={(e) => setAgence(e.target.value)}
-          className="rounded border border-white/20 bg-[#141A26] px-2 py-1 text-xs text-white disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          {!agenceForcee && <option value="">Toutes agences autorisées</option>}
-          {(agencesAutorisees ?? []).map((a) => <option key={a} value={a}>{a}</option>)}
-        </select>
-        {agenceForcee && <span className="text-[10px] uppercase tracking-wide text-[#A6A181]">périmètre 🔒</span>}
+        {/* Liste complète des agences (pas seulement celles auxquelles
+            l'utilisateur courant est restreint) — la restriction éventuelle
+            de l'utilisateur reste appliquée à l'affichage quoi qu'il choisisse
+            ici (cf. agenceForcee / effectiveAgenceFor dans le composant parent). */}
+        {kind !== "spacer" && (
+          <select
+            value={agenceForcee || agence}
+            disabled={Boolean(agenceForcee)}
+            onChange={(e) => setAgence(e.target.value)}
+            className="rounded border border-white/20 bg-[#141A26] px-2 py-1 text-xs text-white disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {!agenceForcee && <option value="">Toutes agences</option>}
+            {agencesDisponibles.map((a) => <option key={a} value={a}>{a}</option>)}
+          </select>
+        )}
+        {agenceForcee && kind !== "spacer" && <span className="text-[10px] uppercase tracking-wide text-[#A6A181]">périmètre 🔒</span>}
       </div>
       <div className="flex justify-end gap-2">
         <button onClick={onCancel} className="rounded px-3 py-1 text-xs text-white/60 hover:text-white">Annuler</button>
         <button
-          onClick={() => onAdd({ kind, cle, famille_macro: kind === "flux" ? (familleMacro || null) : null, agence: agenceForcee || agence || null })}
+          onClick={() =>
+            kind === "spacer"
+              ? onAdd({ kind, cle: String(spacerSpan), famille_macro: null, agence: null })
+              : onAdd({ kind, cle, famille_macro: kind === "flux" ? (familleMacro || null) : null, agence: agenceForcee || agence || null })
+          }
           className="rounded bg-white/20 px-3 py-1 text-xs font-semibold text-white hover:bg-white/30"
         >
           Ajouter
@@ -450,6 +499,7 @@ export default function VisionTciKpiPanel() {
   const access = usePageFilterAccess();
   const [cards, setCards] = useState<KpiCardConfig[]>([]);
   const [famillesMacro, setFamillesMacro] = useState<string[]>([]);
+  const [agencesDisponibles, setAgencesDisponibles] = useState<string[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [loading, setLoading] = useState(true);
 
@@ -458,9 +508,13 @@ export default function VisionTciKpiPanel() {
     const email = sessionData.session?.user?.email?.toLowerCase();
     if (!email) { setLoading(false); return; }
 
-    const [{ data: prefs }, { data: fams }] = await Promise.all([
+    const [{ data: prefs }, { data: fams }, { data: agences }] = await Promise.all([
       supabase.from("vision_tci_preferences").select("kpi_cards").eq("user_email", email).maybeSingle(),
       supabase.from("ref_familles").select("famille_macro"),
+      // Liste complète des agences (pas "autorisées" : la restriction de
+      // l'utilisateur reste appliquée à l'affichage via agenceForcee, quel
+      // que soit ce qui est proposé ici dans le sélecteur).
+      supabase.from("ref_collaborateurs").select("agence"),
     ]);
 
     const raw = (prefs?.kpi_cards as any[] | null) || [];
@@ -470,6 +524,7 @@ export default function VisionTciKpiPanel() {
     }));
     setCards(normalized);
     setFamillesMacro(Array.from(new Set(((fams || []) as Array<{ famille_macro: string | null }>).map((f) => f.famille_macro).filter((v): v is string => Boolean(v)))).sort());
+    setAgencesDisponibles(Array.from(new Set(((agences || []) as Array<{ agence: string | null }>).map((a) => a.agence).filter((v): v is string => Boolean(v)))).sort());
     setLoading(false);
   }, []);
 
@@ -507,18 +562,14 @@ export default function VisionTciKpiPanel() {
 
   return (
     <div>
-      {access.accessBadge && (
-        <div className="mb-3 rounded-lg border border-[#A6A181]/30 bg-[#A6A181]/10 px-3 py-1.5 text-[11px] text-[#A6A181]">
-          Périmètre utilisateur appliqué : {access.accessBadge}
-        </div>
-      )}
-
       <div className="mb-3 grid grid-cols-4 gap-3">
         {cards.map((c) =>
           c.kind === "flux" ? (
             <FluxCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} onRemove={() => handleRemove(c.id)} />
           ) : c.kind === "taux" ? (
             <TauxCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} onRemove={() => handleRemove(c.id)} />
+          ) : c.kind === "spacer" ? (
+            <SpacerCard key={c.id} span={c.cle === "2" ? 2 : 1} onRemove={() => handleRemove(c.id)} />
           ) : (
             <CompteurCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} onRemove={() => handleRemove(c.id)} />
           ),
@@ -529,7 +580,7 @@ export default function VisionTciKpiPanel() {
         <AjouterKpiForm
           famillesMacro={famillesMacro}
           agenceForcee={agenceForcee}
-          agencesAutorisees={access.hasAgenceRestriction ? access.allowedAgences : null}
+          agencesDisponibles={agencesDisponibles}
           onAdd={handleAdd}
           onCancel={() => setShowForm(false)}
         />
