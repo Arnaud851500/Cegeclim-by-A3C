@@ -207,7 +207,49 @@ export default function OutlookAgenda({
     return `${fmt(anchorMonday)} → ${fmt(fin)}`;
   }, [anchorMonday]);
 
+  // Mode "données fictives" (?mock=1 dans l'URL) — pour tester l'affichage,
+  // la navigation et les couleurs indépendamment de toute connexion réelle
+  // (Microsoft en attente de l'IT, Yahoo qui ne renvoie pas encore le bon
+  // format). À retirer une fois une vraie source branchée et validée.
+  const [useMockData] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("mock") === "1";
+  });
+
+  function buildMockEvents(weekStart: Date): OutlookEvent[] {
+    const mk = (dayOffset: number, hStart: number, hEnd: number, subject: string, colorHex: string, allDay = false): OutlookEvent => {
+      const d = addDays(weekStart, dayOffset);
+      const start = new Date(d); start.setHours(hStart, 0, 0, 0);
+      const end = new Date(d); end.setHours(hEnd, 0, 0, 0);
+      return {
+        id: `mock-${dayOffset}-${hStart}-${subject}`,
+        subject,
+        start: start.toISOString().slice(0, 19),
+        end: end.toISOString().slice(0, 19),
+        isAllDay: allDay,
+        location: null,
+        categories: [],
+        colorHex,
+        webLink: null,
+      };
+    };
+    return [
+      mk(0, 9, 10, "Point équipe", "#3498DB"),
+      mk(0, 14, 15.5, "RDV client — A0050 ABADI", "#E74C3C"),
+      mk(2, 10, 12, "Visite agence", "#27AE60"),
+      mk(4, 16, 17, "Bilan hebdo", "#8E44AD"),
+      mk(7, 9, 9.5, "Appel fournisseur", "#D68910"),
+      mk(9, 14, 15, "Vision TCI — démo", "#3498DB"),
+    ];
+  }
+
   useEffect(() => {
+    if (useMockData) {
+      setLoading(false);
+      setError(null);
+      setEvents(buildMockEvents(anchorMonday));
+      return;
+    }
     if (!selectedEmail) return;
     let cancelled = false;
     async function loadEvents() {
@@ -242,7 +284,7 @@ export default function OutlookAgenda({
     return () => {
       cancelled = true;
     };
-  }, [selectedEmail, anchorMonday]);
+  }, [selectedEmail, anchorMonday, useMockData]);
 
   const eventsByDay = useMemo(() => {
     const map = new Map<string, OutlookEvent[]>();
@@ -334,6 +376,11 @@ export default function OutlookAgenda({
     <div className="flex h-full flex-col rounded-2xl border border-white/10 bg-gradient-to-br from-[#5B8DEF] to-[#2E5BB8] p-4 text-white">
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <h3 className="font-[var(--font-display,inherit)] text-base font-bold">Agenda</h3>
+        {useMockData && (
+          <span className="rounded-full bg-amber-400/90 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#141A26]">
+            Données fictives
+          </span>
+        )}
 
         <select
           value={selectedEmail}
