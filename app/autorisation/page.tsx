@@ -35,7 +35,10 @@ type AccessProfile = Record<PermissionKey | AlertKey, boolean> & {
   is_active: boolean
   default_landing_page: string
   user_count: number
+  default_vision_tci_layout_id: string | null
 }
+
+type VisionTciLayout = { id: string; nom: string }
 
 type UserAccess = {
   email: string
@@ -146,6 +149,7 @@ const EMPTY_PROFILE: AccessProfile = {
   is_active: true,
   default_landing_page: '/accueil',
   user_count: 0,
+  default_vision_tci_layout_id: null,
   can_dashboard: false,
   can_territoire: false,
   can_cartographie: false,
@@ -218,6 +222,7 @@ function profileSignature(profile: AccessProfile) {
     description: profile.description,
     is_active: profile.is_active,
     default_landing_page: profile.default_landing_page,
+    default_vision_tci_layout_id: profile.default_vision_tci_layout_id,
     permissions: PERMISSIONS.map(({ key }) => profile[key]),
     alerts: ALERTS.map(({ key }) => profile[key]),
   })
@@ -254,6 +259,7 @@ function perimeterSummary(user: UserAccess) {
 export default function AutorisationPage() {
   const [profiles, setProfiles] = useState<AccessProfile[]>([])
   const [users, setUsers] = useState<UserAccess[]>([])
+  const [visionTciLayouts, setVisionTciLayouts] = useState<VisionTciLayout[]>([])
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState<TabKey>('profiles')
 
@@ -281,13 +287,15 @@ export default function AutorisationPage() {
   async function loadData(options?: { profileId?: string; userEmail?: string }) {
     setLoading(true)
 
-    const [{ data: profileData, error: profileError }, { data: userData, error: userError }] = await Promise.all([
+    const [{ data: profileData, error: profileError }, { data: userData, error: userError }, { data: layoutData }] = await Promise.all([
       supabase.from('access_profiles').select('*').order('name', { ascending: true }),
       supabase
         .from('user_page_access')
         .select('email, display_name, access_profile_id, allowed_scopes, allowed_agences, allowed_collaborateurs, allowed_departements, allowed_codes_postaux')
         .order('email', { ascending: true }),
+      supabase.from('vision_tci_layouts').select('id, nom').order('nom', { ascending: true }),
     ])
+    setVisionTciLayouts(((layoutData || []) as any[]).map((row) => ({ id: String(row.id), nom: String(row.nom || 'Sans nom') })))
 
     if (profileError || userError) {
       setToast({ tone: 'error', text: `Chargement impossible : ${profileError?.message || userError?.message}` })
@@ -323,6 +331,7 @@ export default function AutorisationPage() {
       is_active: row.is_active !== false,
       default_landing_page: String(row.default_landing_page || '/accueil').trim() || '/accueil',
       user_count: countByProfile.get(String(row.id || '')) || 0,
+      default_vision_tci_layout_id: row.default_vision_tci_layout_id ? String(row.default_vision_tci_layout_id) : null,
       ...Object.fromEntries(PERMISSIONS.map(({ key }) => [key, !!row[key]])),
       ...Object.fromEntries(ALERTS.map(({ key }) => [key, !!row[key]])),
     })) as AccessProfile[]
@@ -450,6 +459,7 @@ export default function AutorisationPage() {
       description: profileDraft.description.trim(),
       is_active: profileDraft.is_active,
       default_landing_page: profileDraft.default_landing_page || '/accueil',
+      default_vision_tci_layout_id: profileDraft.default_vision_tci_layout_id || null,
     }
     PERMISSIONS.forEach(({ key }) => { payload[key] = profileDraft[key] })
     ALERTS.forEach(({ key }) => { payload[key] = profileDraft[key] })
@@ -488,6 +498,7 @@ export default function AutorisationPage() {
       description: newProfile.description.trim(),
       is_active: newProfile.is_active,
       default_landing_page: newProfile.default_landing_page || '/accueil',
+      default_vision_tci_layout_id: newProfile.default_vision_tci_layout_id || null,
     }
     PERMISSIONS.forEach(({ key }) => { payload[key] = newProfile[key] })
     ALERTS.forEach(({ key }) => { payload[key] = newProfile[key] })
@@ -726,6 +737,19 @@ export default function AutorisationPage() {
                         value={profileDraft.default_landing_page}
                         onChange={(value) => patchProfileDraft({ default_landing_page: value })}
                         options={LANDING_PAGES}
+                      />
+                    </Field>
+                    <Field
+                      label="Vision One page TCI par défaut"
+                      hint="Disposition de pavés KPI proposée par défaut aux utilisateurs de ce profil — chacun peut ensuite la personnaliser pour lui-même sans affecter les autres."
+                    >
+                      <SelectField
+                        value={profileDraft.default_vision_tci_layout_id || ''}
+                        onChange={(value) => patchProfileDraft({ default_vision_tci_layout_id: value || null })}
+                        options={[
+                          { value: '', label: 'Aucune (page vide par défaut)' },
+                          ...visionTciLayouts.map((layout) => ({ value: layout.id, label: layout.nom })),
+                        ]}
                       />
                     </Field>
                     <Field label="Disponibilité">
