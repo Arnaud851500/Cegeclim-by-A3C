@@ -9,19 +9,24 @@
  *   famille      — filtre famille (optionnel)
  *   macro        — filtre famille macro (optionnel)
  *   granularite  — "mensuel" (défaut) | "hebdo"
+ *   cascade      — "1" pour cumuler les ventes N/N-1 des références
+ *                  remplacées sur leur remplaçante (défaut "0" = comportement
+ *                  historique, chaque référence garde ses propres ventes)
  *
  * Prérequis : npm install exceljs
  *
- * FIX (2026-08) : la feuille "Ventes N-N-1" affichait "$NaN Invalid Date" (ou
- * équivalent) sur les en-têtes de semaine en granularité hebdo. Cause : le
- * champ "periode" renvoyé par la RPC get_stock_ventes_historique n'est PAS
- * une date en hebdo — c'est une chaîne ISO semaine du type "2026-W32"
- * (to_char(..., 'IYYY-"W"IW') côté SQL), alors que labelPeriode() faisait
- * `new Date(pd)` en supposant une vraie date. Ça fonctionnait par coïncidence
- * pour l'onglet "Projection stock" (son periode_debut EST une vraie date en
- * hebdo, et un "YYYY-MM" en mensuel), mais pas pour la feuille des ventes.
- * Ajout de labelPeriodeVente(), dédiée à cette feuille, qui reconnaît le
- * format "AAAA-Wss" au lieu d'essayer de le parser comme une date.
+ * FIX (2026-08) : la feuille "Ventes N-N-1" affichait "$NaN Invalid Date" sur
+ * les en-têtes de semaine en granularité hebdo. Cause : le champ "periode"
+ * renvoyé par get_stock_ventes_historique n'est pas une date en hebdo — c'est
+ * une chaîne ISO semaine "AAAA-Wss" (ex. "2026-W32"), alors que labelPeriode()
+ * faisait `new Date(pd)` en supposant une vraie date. Ajout de
+ * labelPeriodeVente(), dédiée à cette feuille, qui reconnaît ce format.
+ *
+ * AJOUT (2026-08) : paramètre "cascade", transmis à get_stock_ventes_historique
+ * (p_cascade_substitutions) — cumule dans l'export les ventes N et N-1 d'une
+ * référence remplacée sur sa remplaçante, en cascade récursive pondérée par
+ * le pourcentage transféré à chaque saut (même logique que le KPI "BL depuis
+ * le 1er janvier" et que le module Stock en général).
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -190,6 +195,11 @@ export async function GET(req: NextRequest) {
   const famille     = searchParams.get("famille")     ?? "";
   const macro       = searchParams.get("macro")       ?? "";
   const granularite = searchParams.get("granularite") ?? "mensuel";
+  // "1"/"true" → cumule les ventes N/N-1 des références remplacées sur leur
+  // remplaçante dans la feuille "Ventes N-N-1". Défaut : comportement
+  // historique (chaque référence garde ses propres ventes).
+  const cascadeParam = (searchParams.get("cascade") ?? "0").toLowerCase();
+  const cascadeSubstitutions = cascadeParam === "1" || cascadeParam === "true";
 
   // ── 1. Données projection ────────────────────────────────────────────────
   let projQuery = supabase.from("v_stock_projection_hebdo_latest").select(SELECT_COLS)
@@ -199,9 +209,10 @@ export async function GET(req: NextRequest) {
 
   // ── 2. Données ventes historiques ────────────────────────────────────────
   const ventesQuery = supabase.rpc("get_stock_ventes_historique", {
-    p_famille:       famille || null,
-    p_famille_macro: (!famille && macro) ? macro : null,
-    p_granularite:   granularite,
+    p_famille:                famille || null,
+    p_famille_macro:          (!famille && macro) ? macro : null,
+    p_granularite:            granularite,
+    p_cascade_substitutions:  cascadeSubstitutions,
   });
 
   const [{ data: projData, error: projErr }, { data: ventesData, error: ventesErr }] =
@@ -442,11 +453,12 @@ export async function GET(req: NextRequest) {
     ...Array<{ width: number }>(NP * 2).fill({ width: 8 }),
   ];
 
-  // Titre
+  // Titre — précise si la cascade substitutions est active
   wv.mergeCells(1, 1, 1, V_INFO_N + NP * 2);
   const vr1 = wv.getRow(1); vr1.height = 26;
   const vc1 = vr1.getCell(1);
-  vc1.value     = (famille || macro || "Toutes familles") + " — Ventes BL " + granularite.toUpperCase();
+  vc1.value     = (famille || macro || "Toutes familles") + " — Ventes BL " + granularite.toUpperCase()
+    + (cascadeSubstitutions ? " (remplacées cumulées sur remplaçantes)" : "");
   vc1.font      = { name:"Arial", bold:true, size:13, color:{ argb:"FFFFFFFF" } };
   vc1.fill      = { type:"pattern", pattern:"solid", fgColor:{ argb:"FF0B1220" } };
   vc1.alignment = { horizontal:"left", vertical:"middle", indent:1 };
@@ -592,6 +604,7 @@ export async function GET(req: NextRequest) {
     [null,"REMPLACEE","Besoins transférés, prévision 0 (grisé)"],[null,"REMPLACANTE","Reprend l'historique d'une ou plusieurs ref."],[null,"ACTIVE","Référence courante"],
     [null,null,null],["PÉRIMÈTRE",null,null],
     [null,"Famille macro",macro||"(toutes)"],[null,"Famille",famille||"(toutes)"],[null,"Granularité",granularite],
+    [null,"Ventes remplacées cumulées",cascadeSubstitutions ? "Oui" : "Non"],
   ];
   legRows.forEach((lr, i) => {
     const row = leg.getRow(i+1);

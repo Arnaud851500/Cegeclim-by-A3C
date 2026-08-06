@@ -210,6 +210,10 @@ export default function StocksDisponibilites2Page() {
   const [masquerRemplacees, setMasquerRemplacees] = useState(false);
   const [exportEnCours, setExportEnCours] = useState(false);
   const [exportGranularite, setExportGranularite] = useState<"mensuel"|"hebdo">("mensuel");
+  // Cumuler les ventes N/N-1 des références remplacées sur leur remplaçante
+  // dans l'export Excel (case décochée par défaut = comportement historique,
+  // chaque référence garde ses propres ventes sans cascade).
+  const [exportCascadeSubstitutions, setExportCascadeSubstitutions] = useState(false);
 
   // Grille d'hypothèses mensuelles (remplace l'ancien scénario % global).
   // hypoFamilleScope = null → écran plein (toutes familles), ouvert depuis
@@ -252,7 +256,7 @@ export default function StocksDisponibilites2Page() {
     try {
       const session = await supabase.auth.getSession();
       const token   = session.data.session?.access_token;
-      const params  = new URLSearchParams({ granularite: exportGranularite });
+      const params  = new URLSearchParams({ granularite: exportGranularite, cascade: exportCascadeSubstitutions ? "1" : "0" });
       if (selectedFamille) params.set("famille", selectedFamille as string);
       else if (selectedMacro) params.set("macro", selectedMacro as string);
       const res = await fetch(`/api/stocks-disponibilites/export-excel?${params}`,
@@ -828,6 +832,23 @@ export default function StocksDisponibilites2Page() {
                   <option value="mensuel" className="bg-[#101A2E]">Mensuel</option>
                   <option value="hebdo" className="bg-[#101A2E]">Hebdomadaire</option>
                 </select>
+                {/* Cumule dans l'export les ventes N/N-1 d'une référence
+                    remplacée sur sa remplaçante (cascade récursive, même
+                    logique que le KPI "BL depuis le 1er janvier" à l'écran).
+                    Décochée = comportement historique, chaque référence
+                    garde ses propres ventes sans regroupement. */}
+                <label
+                  className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-white/15 bg-white/5 px-2.5 py-2 text-xs text-white/70"
+                  title="Cumuler dans l'export les ventes N et N-1 des références remplacées sur leur remplaçante"
+                >
+                  <input
+                    type="checkbox"
+                    checked={exportCascadeSubstitutions}
+                    onChange={(e) => setExportCascadeSubstitutions(e.target.checked)}
+                    className="h-3.5 w-3.5 rounded border-white/20 bg-transparent accent-[#A6A181]"
+                  />
+                  Cumuler remplacées
+                </label>
                 <button
                   onClick={() => void handleExport()}
                   disabled={exportEnCours || !runId}
