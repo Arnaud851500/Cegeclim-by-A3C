@@ -14,7 +14,7 @@
 // Section "à enrichir" prévue pour les infos à venir (dernière/prochaine
 // visite, validité certificat gaz déjà affichée, RGE déjà affiché…).
 
-import { useEffect, useMemo, useState } from 'react'
+import { Suspense, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 
@@ -227,7 +227,7 @@ function MonthlyLineChart({
 
 // ── Composant principal ──────────────────────────────────────────────────
 
-export default function VisionClientPage() {
+function VisionClientPageInner() {
   const searchParams = useSearchParams()
   const numero = searchParams.get('numero') || ''
 
@@ -459,6 +459,18 @@ function DocumentsMiniTable({ title, rows, accent }: { title: string; rows: Dern
         </table>
       )}
     </div>
+  )
+}
+
+// useSearchParams() exige une frontière Suspense pour le pré-rendu (build
+// Next.js) — sans ça, `next build` échoue avec "Error occurred prerendering
+// page /vision-client". Le composant réel reste inchangé, seul l'export par
+// défaut change pour l'envelopper.
+export default function VisionClientPage() {
+  return (
+    <Suspense fallback={<main className="page"><div className="loadingBox">Chargement de la fiche client…</div><style jsx>{pageStyles}</style></main>}>
+      <VisionClientPageInner />
+    </Suspense>
   )
 }
 

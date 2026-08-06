@@ -577,7 +577,13 @@
           { label: '11 : Indicateurs', path: '/Indicateurs', accessKey: 'can_autorisation' },
         ],
       },
-
+ {
+        label: 'TODO List',
+        items: [
+          { label: '1 : Todo List', path: '/todo', accessKey: 'can_todo' },
+          { label: '2: Documents', path: '/documents', accessKey: 'can_documents' },
+        ],
+      },
       {
         label: 'Admin',
         items: [
@@ -585,8 +591,7 @@
           { label: '2 : MAJ Base clients', path: '/clients', accessKey: 'can_autorisation' },
           { label: '3 : MAJ Données Activité', path: '/Import', accessKey: 'can_autorisation' },
           { label: '4 : Job scheduling', path: '/admin/planification', accessKey: 'can_autorisation' },
-          { label: '5 : Todo List', path: '/todo', accessKey: 'can_todo' },
-          { label: '6: Documents', path: '/documents', accessKey: 'can_documents' },
+
         ],
       },
     ]
