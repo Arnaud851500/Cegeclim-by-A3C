@@ -12,7 +12,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { getCalendarEvents } from "@/lib/server/microsoftGraph";
-import { fetchIcsEvents } from "@/lib/server/icsParser";
+import { fetchIcsRaw, parseIcs } from "@/lib/server/icsParser";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -72,7 +72,8 @@ export async function GET(req: NextRequest) {
     // Graph pour cette entrée. Pratique pour tester avant que l'inscription
     // Azure AD ne soit prête.
     if (autorisation.ics_url) {
-      const tousLesEvenements = await fetchIcsEvents(autorisation.ics_url);
+      const { text: rawText, contentType } = await fetchIcsRaw(autorisation.ics_url);
+      const tousLesEvenements = parseIcs(rawText);
       // Comparaison en chaînes "YYYY-MM-DD" plutôt qu'avec des objets Date :
       // évite tout piège de fuseau horaire entre une chaîne date-only
       // ("2026-08-03", toujours interprétée en UTC par `new Date()`) et une
@@ -95,6 +96,9 @@ export async function GET(req: NextRequest) {
           evenements_apres_filtre: events.length,
           plage_demandee: { start, end },
           premiers_evenements_bruts: tousLesEvenements.slice(0, 3).map((e) => ({ subject: e.subject, start: e.start, end: e.end })),
+          content_type_recu: contentType,
+          taille_reponse_octets: rawText.length,
+          apercu_reponse_brute: rawText.slice(0, 400),
         },
       });
     }
