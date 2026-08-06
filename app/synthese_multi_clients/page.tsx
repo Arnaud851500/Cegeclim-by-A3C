@@ -1146,6 +1146,31 @@ function buildSummaryForNumero(tier: TiersRow | null, factures: AggRow[], devis:
   }
 }
 
+// ── Colonnes optionnelles (pastilles afficher/masquer) ──────────────────
+// Tout sauf Remarque / Profil CA 12M / QRC N est masqué par défaut. Ce
+// filtrage s'applique UNIQUEMENT à l'affichage écran — buildColumns()
+// reste inchangée, et l'export Excel appelle sa propre buildColumns(true, …)
+// indépendamment de cet état, donc il n'est jamais affecté.
+const TOGGLEABLE_COLUMN_LABELS: Record<string, string> = {
+  codePostal: 'Code postal',
+  libelleNaf: 'Désignation Naf',
+  dateCreation: 'Date Création',
+  prospectLabel: 'Prospect OUI/NON',
+  caBandN2: 'Profil CA N-2',
+  caBandN1: 'Profil CA N-1',
+  caBandN: 'Profil CA 12M',
+  remarque: 'Remarque',
+  caN3: `CA ${N - 3}`,
+  caN2: `CA ${N - 2}`,
+  qrcN1: `QRC ${N - 1}`,
+  frequenceCommande: 'Fréquence commande',
+  niveauExclusivite: 'Niveau exclusivité',
+  comNotreFaveur: 'Com en notre faveur',
+  garantie: 'Garantie',
+  qrcN: `QRC ${N}`,
+}
+const DEFAULT_VISIBLE_TOGGLEABLE_COLUMNS = new Set(['remarque', 'caBandN', 'qrcN'])
+
 function buildColumns(showFamilies: boolean, showCollaborateurColumn = false, encoursDetailMode: EncoursDetailMode = 'macro'): ColumnDef[] {
   const cols: ColumnDef[] = []
 
@@ -2094,6 +2119,9 @@ export default function SyntheseMultiClientsPage() {
   const [savingKey, setSavingKey] = useState<string | null>(null)
   const [loadingMonths, setLoadingMonths] = useState<Set<string>>(new Set())
   const [cacheStatus, setCacheStatus] = useState('')
+  // Colonnes optionnelles affichées à l'écran (pastilles sous les KPI) —
+  // n'affecte jamais l'export Excel, qui reconstruit ses propres colonnes.
+  const [visibleOptionalCols, setVisibleOptionalCols] = useState<Set<string>>(new Set(DEFAULT_VISIBLE_TOGGLEABLE_COLUMNS))
 
   const hasSelection = Boolean(selected)
   const showCollaborateurColumn = mode === 'collaborateur' && selected === ALL_COLLABORATEURS_VALUE
@@ -2107,6 +2135,29 @@ export default function SyntheseMultiClientsPage() {
   }, [objectiveRows])
 
   const columns = useMemo(() => buildColumns(showFamilies, showCollaborateurColumn, encoursDetailMode), [showFamilies, showCollaborateurColumn, encoursDetailMode])
+
+  // Colonnes réellement rendues à l'écran : toutes les colonnes SAUF celles
+  // de la liste "optionnelle" qui n'ont pas été explicitement activées.
+  // L'export Excel (exportExcel ci-dessous) n'utilise jamais cette variable.
+  const displayedColumns = useMemo(
+    () => columns.filter((col) => !(col.key in TOGGLEABLE_COLUMN_LABELS) || visibleOptionalCols.has(col.key)),
+    [columns, visibleOptionalCols]
+  )
+
+  function toggleOptionalColumn(key: string) {
+    setVisibleOptionalCols((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  function openVisionClient(numero: string) {
+    if (!numero || numero === 'TOTAL') return
+    window.open(`/vision-client?numero=${encodeURIComponent(numero)}`, '_blank', 'noopener,noreferrer')
+  }
+
   const allowedAgences = access.allowedAgences || []
   const allowedCollaborateurs = access.allowedCollaborateurs || []
   const restrictedSelectionOptions = useMemo(
@@ -2621,6 +2672,8 @@ export default function SyntheseMultiClientsPage() {
     const XLSX = await import('xlsx-js-style')
     // L'export Excel contient systématiquement le détail Famille macro, même si l'écran l'a masqué.
     // Les colonnes de détail sont ensuite groupées et réduites par défaut dans le fichier.
+    // Reconstruction indépendante de l'écran : jamais affectée par les pastilles
+    // "afficher/masquer" ci-dessus, qui ne pilotent que displayedColumns.
     const exportColumns = buildColumns(true, showCollaborateurColumn, encoursDetailMode)
 
     const sortCol = exportColumns.find((c) => c.key === sort.key) || exportColumns.find((c) => c.key === 'caN1')!
@@ -2905,14 +2958,33 @@ export default function SyntheseMultiClientsPage() {
             <div><span>Réalisé / objectif</span><strong>{formatPct(totalRow.realiseObjectif)}</strong></div>
           </section>
 
+          {/* Pastilles afficher/masquer — n'affecte que l'écran, jamais l'export Excel. */}
+          <section className="columnToggleBar">
+            <span className="columnToggleLabel">Colonnes :</span>
+            {Object.entries(TOGGLEABLE_COLUMN_LABELS).map(([key, label]) => {
+              const active = visibleOptionalCols.has(key)
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  className={`columnTogglePill ${active ? 'active' : ''}`}
+                  onClick={() => toggleOptionalColumn(key)}
+                  aria-pressed={active}
+                >
+                  {label}
+                </button>
+              )
+            })}
+          </section>
+
           <div className="tableShell">
         <table className={`synthTable ${showCollaborateurColumn ? 'withCollaborateur' : ''}`}>
           <thead>
             <tr className="groupRow">
-              {columns.map((col) => <th key={`${col.key}-g`} className={`group ${groupClass(col.group)} ${stickyClass(col.sticky)}`} style={{ width: col.width, minWidth: col.width }}>{col.group}</th>)}
+              {displayedColumns.map((col) => <th key={`${col.key}-g`} className={`group ${groupClass(col.group)} ${stickyClass(col.sticky)}`} style={{ width: col.width, minWidth: col.width }}>{col.group}</th>)}
             </tr>
             <tr className="headerRow">
-              {columns.map((col) => (
+              {displayedColumns.map((col) => (
                 <th key={col.key} className={`${col.className || ''} ${stickyClass(col.sticky)} ${col.rotate ? 'rotate' : ''}`} style={{ width: col.width, minWidth: col.width }} onClick={() => toggleSort(col.key)} title="Cliquer pour trier">
                   <span>{col.label}</span>
                   {sort.key === col.key ? <b>{sort.direction === 'asc' ? '▲' : '▼'}</b> : null}
@@ -2920,7 +2992,7 @@ export default function SyntheseMultiClientsPage() {
               ))}
             </tr>
             <tr className="filterRow">
-              {columns.map((col) => {
+              {displayedColumns.map((col) => {
                 const isFilterableColumn = ['collaborateur', 'numero', 'intitule', 'totalMois', 'codePostal', 'libelleNaf', 'prospectLabel', 'caBandN2', 'caBandN1', 'caBandN'].includes(col.key)
 
                 return (
@@ -2938,9 +3010,14 @@ export default function SyntheseMultiClientsPage() {
           <tbody>
             {visibleRows.map((row) => (
               <tr key={row.id} className={`${row.kind} ${row.level ? 'child' : ''}`}>
-                {columns.map((col) => {
+                {displayedColumns.map((col) => {
                   const canEdit = row.kind === 'client' && Boolean(col.editable)
                   const saveKey = col.editable ? objectiveKey(row.numero, N, col.editable.domaine, col.editable.rubrique) : ''
+                  // Numéro et intitulé du client : cliquables (bleu) sur les
+                  // lignes clients, ouvrent la fiche Vision Client dans un
+                  // nouvel onglet. La ligne TOTAL et les lignes mensuelles
+                  // développées ne sont pas cliquables (pas de fiche dédiée).
+                  const isClientLinkColumn = row.kind === 'client' && (col.key === 'numero' || col.key === 'intitule')
                   return (
                     <td key={`${row.id}-${col.key}`} className={`${col.className || ''} ${stickyClass(col.sticky)} ${['keur', 'keurBlank', 'keurCompare', 'pct', 'pctBlank', 'pctCompare', 'points', 'number'].includes(col.format || '') ? 'num' : ''}`} style={{ width: col.width, minWidth: col.width }}>
                       {col.key === 'numero' && row.kind === 'client' ? (
@@ -2955,6 +3032,15 @@ export default function SyntheseMultiClientsPage() {
                           saving={savingKey === saveKey}
                           onSave={(value) => saveObjective(row.numero, col.editable!, value)}
                         />
+                      ) : isClientLinkColumn ? (
+                        <button
+                          type="button"
+                          className="clientLink"
+                          onClick={() => openVisionClient(row.numero)}
+                          title="Ouvrir la fiche client (Vision Client) dans un nouvel onglet"
+                        >
+                          {displayValue(col, row, objectiveMap)}
+                        </button>
                       ) : (
                         <span>{displayValue(col, row, objectiveMap)}</span>
                       )}
@@ -3235,11 +3321,20 @@ export default function SyntheseMultiClientsPage() {
         .error { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; padding: 10px 12px; border-radius: 10px; margin-bottom: 10px; font-weight: 700; }
         .accessBadge { background: #fffbeb; color: #92400e; border: 1px solid #fcd34d; padding: 10px 12px; border-radius: 10px; margin-bottom: 10px; font-weight: 900; }
         .loading { position: fixed; right: 18px; bottom: 18px; background: #0f172a; color: white; padding: 8px 12px; border-radius: 999px; z-index: 20; font-weight: 900; }
-        .kpis { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 8px; margin-bottom: 12px; }
-        .kpis div { background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 10px 12px; box-shadow: 0 2px 8px rgba(15,23,42,.05); }
-        .kpis span { display: block; color: #64748b; font-size: 11px; font-weight: 900; text-transform: uppercase; }
-        .kpis strong { display: block; margin-top: 2px; font-size: 18px; font-weight: 950; }
-        .tableShell { overflow: auto; height: calc(100vh - 210px); border: 2px solid #0f172a; background: white; box-shadow: 0 10px 30px rgba(15,23,42,.08); }
+        /* 6 pavés (Tiers, CA N-1, CA réel N, Encours, Marge réel N, Réalisé/objectif)
+           sur UNE seule ligne — avant : repeat(5,...) avec 6 enfants, le 6e
+           passait donc à la ligne suivante. */
+        .kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px; }
+        .kpis div { background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 8px 10px; box-shadow: 0 2px 8px rgba(15,23,42,.05); min-width: 0; }
+        .kpis span { display: block; color: #64748b; font-size: 10px; font-weight: 900; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .kpis strong { display: block; margin-top: 2px; font-size: 16px; font-weight: 950; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .columnToggleBar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
+        .columnToggleLabel { font-size: 11px; font-weight: 900; text-transform: uppercase; color: #64748b; margin-right: 2px; }
+        .columnTogglePill { border-radius: 999px; padding: 5px 11px; font-size: 11px; font-weight: 800; background: white; color: #64748b; border: 1px solid #cbd5e1; }
+        .columnTogglePill.active { background: #0f172a; color: white; border-color: #0f172a; }
+        .clientLink { background: none; border: none; padding: 0; margin: 0; font: inherit; color: #1d4ed8; text-decoration: none; cursor: pointer; text-align: left; }
+        .clientLink:hover { text-decoration: underline; }
+        .tableShell { overflow: auto; height: calc(100vh - 260px); border: 2px solid #0f172a; background: white; box-shadow: 0 10px 30px rgba(15,23,42,.08); }
         .synthTable { border-collapse: separate; border-spacing: 0; font-size: 11px; table-layout: fixed; }
         th, td { border-right: 1px solid #111827; border-bottom: 1px solid #111827; padding: 2px 4px; height: 24px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: #fffdf3; }
         thead th { position: sticky; top: 0; z-index: 5; background: #f8fafc; text-align: center; font-weight: 950; }
