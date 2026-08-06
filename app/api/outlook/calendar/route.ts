@@ -72,11 +72,16 @@ export async function GET(req: NextRequest) {
     // Graph pour cette entrée. Pratique pour tester avant que l'inscription
     // Azure AD ne soit prête.
     if (autorisation.ics_url) {
-      const startDate = new Date(start);
-      const endDate = new Date(end);
-      const icsEvents = (await fetchIcsEvents(autorisation.ics_url)).filter((e) => {
-        const evStart = new Date(e.start);
-        return evStart >= startDate && evStart < endDate;
+      const tousLesEvenements = await fetchIcsEvents(autorisation.ics_url);
+      // Comparaison en chaînes "YYYY-MM-DD" plutôt qu'avec des objets Date :
+      // évite tout piège de fuseau horaire entre une chaîne date-only
+      // ("2026-08-03", toujours interprétée en UTC par `new Date()`) et une
+      // chaîne date-heure locale sans "Z" issue du parseur ICS (interprétée,
+      // elle, dans le fuseau du serveur) — les deux pouvaient diverger de
+      // plusieurs heures et faire disparaître des évènements du filtre.
+      const icsEvents = tousLesEvenements.filter((e) => {
+        const jour = e.start.slice(0, 10);
+        return jour >= start && jour < end;
       });
       const events = icsEvents.map((e) => ({ ...e, colorHex: autorisation.couleur_defaut || null, webLink: null }));
       return NextResponse.json({
@@ -84,6 +89,13 @@ export async function GET(req: NextRequest) {
         collaborateur: autorisation.collaborateur,
         couleur_defaut: autorisation.couleur_defaut,
         events,
+        debug: {
+          source: "ics",
+          evenements_bruts_total: tousLesEvenements.length,
+          evenements_apres_filtre: events.length,
+          plage_demandee: { start, end },
+          premiers_evenements_bruts: tousLesEvenements.slice(0, 3).map((e) => ({ subject: e.subject, start: e.start, end: e.end })),
+        },
       });
     }
 

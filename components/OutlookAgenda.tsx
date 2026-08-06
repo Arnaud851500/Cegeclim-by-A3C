@@ -222,8 +222,12 @@ export default function OutlookAgenda({
         const res = await fetch(`/api/outlook/calendar?${params}`, {
           headers: token ? { Authorization: `Bearer ${token}` } : {},
         });
-        const payload = (await res.json()) as { success: boolean; message?: string; events?: OutlookEvent[] };
+        const payload = (await res.json()) as { success: boolean; message?: string; events?: OutlookEvent[]; debug?: unknown };
         if (!res.ok || !payload.success) throw new Error(payload?.message || "Erreur inconnue");
+        if (payload.debug) {
+          // eslint-disable-next-line no-console
+          console.log("[OutlookAgenda] diagnostic ICS :", payload.debug);
+        }
         if (!cancelled) setEvents(payload.events || []);
       } catch (e) {
         if (!cancelled) {
