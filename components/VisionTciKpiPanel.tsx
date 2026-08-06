@@ -1,33 +1,35 @@
 "use client";
 
 /**
- * VisionTciKpiPanel — V3
+ * VisionTciKpiPanel — V4
  * ------------------------------------------------------------------------
- * Changements vs V2 :
+ * Changements vs V3 :
  *
- *  - FILTRAGE PAR AUTORISATIONS (correctif prioritaire) : branché sur
- *    usePageFilterAccess(), le même hook que focus_mensuel3 /
- *    cycle-documents / synthese_multi_clients. Si l'utilisateur a une
- *    restriction d'agence (user_page_access), elle est appliquée à TOUS
- *    les pavés, quel que soit ce qui a été choisi dans le formulaire
- *    d'ajout — un utilisateur restreint ne peut pas se donner à lui-même
- *    un périmètre plus large en configurant un pavé. Le sélecteur d'agence
- *    du formulaire se verrouille sur la valeur imposée, comme ailleurs
- *    dans l'appli (🔒).
+ *  - BASCULE JOUR / J-1 en en-tête : pilote le "p_utiliser_j_moins_1" de
+ *    get_vision_tci_kpi pour tous les pavés flux d'un coup.
  *
- *  - GRILLE 4 COLONNES : les pavés "flux" gardent leur taille (2 colonnes
- *    sur 4, donc 2 par ligne comme avant) ; les pavés "compteur" et "taux"
- *    passent à 1 colonne sur 4 (4 par ligne), contenu resserré.
+ *  - MISE EN PAGE PAR PROFIL : résolution en cascade — préférences
+ *    personnelles (vision_tci_preferences, si personnalise=true) sinon
+ *    disposition par défaut du profil de l'utilisateur
+ *    (access_profiles.default_vision_tci_layout_id → vision_tci_layouts),
+ *    sinon vide. Toute modification manuelle bascule automatiquement
+ *    l'utilisateur en "personnalisé" (n'affecte jamais les autres
+ *    utilisateurs du même profil). Un bouton permet de revenir à la
+ *    disposition du profil. Les administrateurs (can_autorisation)
+ *    peuvent en plus enregistrer la disposition courante comme modèle
+ *    nommé réutilisable, pour l'affecter à un profil depuis l'écran
+ *    Autorisation.
  *
- *  - COLOR CODING : pour les compteurs D'ALERTE (CERFA KO, CDC < 2026,
- *    Factures en retard) — pas les compteurs "Clients", purement
- *    informatifs — la valeur s'affiche en rouge si > 0, en vert si = 0.
+ *  - Le reste (grille 4 colonnes, color coding, filtrage agence) reprend
+ *    le comportement de la V3.
  */
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { usePageFilterAccess } from "@/lib/pageAccessFilters";
+import { useAccess } from "@/components/AccessContext";
+
 
 // ⚠️ BL et CDC confirmés (CUMUL_BL_COLOR / CUMUL_CDC_COLOR dans
 // focus_mensuel3/page.tsx). Devis/Factures/Marge non vérifiés contre
@@ -143,8 +145,8 @@ function CardShell({
 // ── Pavé FLUX ─────────────────────────────────────────────────────────────
 
 function FluxCard({
-  config, effectiveAgence, onRemove,
-}: { config: KpiCardConfig; effectiveAgence: string | null; onRemove: () => void }) {
+  config, effectiveAgence, utiliserJMoins1, onRemove,
+}: { config: KpiCardConfig; effectiveAgence: string | null; utiliserJMoins1: boolean; onRemove: () => void }) {
   const router = useRouter();
   const famille = config.cle as FamilleFlux;
   const [values, setValues] = useState<FluxValues | null>(null);
@@ -163,6 +165,7 @@ function FluxCard({
         p_famille_macro: config.famille_macro,
         p_agence: effectiveAgence,
         p_collaborateur: null,
+        p_utiliser_j_moins_1: utiliserJMoins1,
       });
       if (cancelled) return;
       if (err) setError(err.message);
@@ -171,7 +174,7 @@ function FluxCard({
     }
     load();
     return () => { cancelled = true; };
-  }, [famille, config.famille_macro, effectiveAgence]);
+  }, [famille, config.famille_macro, effectiveAgence, utiliserJMoins1]);
 
   function handleClick() {
     if (famille === "BL" || famille === "CDC" || famille === "Factures") router.push("/focus_mensuel2");
@@ -198,7 +201,7 @@ function FluxCard({
         ) : values ? (
           <div className="grid grid-cols-3 gap-2 text-white">
             <div>
-              <div className="text-[9px] uppercase tracking-wide text-white/40">Jour</div>
+              <div className="text-[9px] uppercase tracking-wide text-white/40">{utiliserJMoins1 ? "Jour (J-1)" : "Jour"}</div>
               <div className="font-[var(--font-mono,monospace)] text-sm font-semibold">{fmt(values.jour_valeur)}</div>
               <EvolBadge valeur={values.jour_valeur} n1={values.jour_n1} unite={estMarge ? "points" : "montant"} />
             </div>
@@ -497,55 +500,85 @@ function AjouterKpiForm({
 
 export default function VisionTciKpiPanel() {
   const access = usePageFilterAccess();
+  const { rights, email: userEmail } = useAccess();
   const [cards, setCards] = useState<KpiCardConfig[]>([]);
+  const [personnalise, setPersonnalise] = useState(false);
   const [famillesMacro, setFamillesMacro] = useState<string[]>([]);
   const [agencesDisponibles, setAgencesDisponibles] = useState<string[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [utiliserJMoins1, setUtiliserJMoins1] = useState(true);
+
+  // Modèles nommés (réservé aux administrateurs, can_autorisation) — pour
+  // enregistrer la disposition courante comme modèle affectable à un profil
+  // depuis l'écran Autorisation.
+  const [nomModele, setNomModele] = useState("");
+  const [savingModele, setSavingModele] = useState(false);
+  const [modeleMessage, setModeleMessage] = useState<string | null>(null);
 
   const loadPrefs = useCallback(async () => {
-    const { data: sessionData } = await supabase.auth.getSession();
-    const email = sessionData.session?.user?.email?.toLowerCase();
+    const email = (userEmail || (await supabase.auth.getSession()).data.session?.user?.email || "").toLowerCase();
     if (!email) { setLoading(false); return; }
 
-    const [{ data: prefs }, { data: fams }, { data: agences }] = await Promise.all([
-      supabase.from("vision_tci_preferences").select("kpi_cards").eq("user_email", email).maybeSingle(),
+    const [{ data: prefsRow }, { data: effectiveCards }, { data: fams }, { data: agences }] = await Promise.all([
+      supabase.from("vision_tci_preferences").select("kpi_cards, personnalise").eq("user_email", email).maybeSingle(),
+      supabase.rpc("get_vision_tci_effective_layout", { p_email: email }),
       supabase.from("ref_familles").select("famille_macro"),
-      // Liste complète des agences (pas "autorisées" : la restriction de
-      // l'utilisateur reste appliquée à l'affichage via agenceForcee, quel
-      // que soit ce qui est proposé ici dans le sélecteur).
       supabase.from("ref_collaborateurs").select("agence"),
     ]);
 
-    const raw = (prefs?.kpi_cards as any[] | null) || [];
+    const raw = (effectiveCards as any[] | null) || [];
     const normalized: KpiCardConfig[] = raw.map((c) => ({
       id: c.id, kind: c.kind || "flux", cle: c.cle || c.famille || "BL",
       famille_macro: c.famille_macro ?? null, agence: c.agence ?? null,
     }));
     setCards(normalized);
+    setPersonnalise(Boolean(prefsRow?.personnalise));
     setFamillesMacro(Array.from(new Set(((fams || []) as Array<{ famille_macro: string | null }>).map((f) => f.famille_macro).filter((v): v is string => Boolean(v)))).sort());
     setAgencesDisponibles(Array.from(new Set(((agences || []) as Array<{ agence: string | null }>).map((a) => a.agence).filter((v): v is string => Boolean(v)))).sort());
     setLoading(false);
-  }, []);
+  }, [userEmail]);
 
   useEffect(() => { void loadPrefs(); }, [loadPrefs]);
 
-  // Périmètre imposé par les autorisations : prioritaire sur ce qui a été
-  // choisi dans le formulaire d'ajout, pour CHAQUE pavé, sans exception.
   const agenceForcee = access.hasAgenceRestriction && access.allowedAgences.length > 0 ? access.allowedAgences[0] : null;
 
   function effectiveAgenceFor(card: KpiCardConfig): string | null {
     return agenceForcee || card.agence;
   }
 
+  // Toute modification manuelle rend la disposition "personnalisée" — elle
+  // n'affecte plus jamais que cet utilisateur, même si son profil change
+  // de disposition par défaut par la suite.
   async function persistCards(next: KpiCardConfig[]) {
     setCards(next);
-    const { data: sessionData } = await supabase.auth.getSession();
-    const email = sessionData.session?.user?.email?.toLowerCase();
+    setPersonnalise(true);
+    const email = (userEmail || (await supabase.auth.getSession()).data.session?.user?.email || "").toLowerCase();
     if (!email) return;
     await supabase.from("vision_tci_preferences").upsert({
-      user_email: email, kpi_cards: next, updated_at: new Date().toISOString(),
+      user_email: email, kpi_cards: next, personnalise: true, updated_at: new Date().toISOString(),
     });
+  }
+
+  async function revenirAuProfil() {
+    const email = (userEmail || (await supabase.auth.getSession()).data.session?.user?.email || "").toLowerCase();
+    if (!email) return;
+    await supabase.from("vision_tci_preferences").upsert({
+      user_email: email, kpi_cards: [], personnalise: false, updated_at: new Date().toISOString(),
+    });
+    await loadPrefs();
+  }
+
+  async function enregistrerCommeModele() {
+    if (!nomModele.trim()) return;
+    setSavingModele(true);
+    setModeleMessage(null);
+    const { error } = await supabase.from("vision_tci_layouts").upsert(
+      { nom: nomModele.trim(), kpi_cards: cards, created_by: userEmail || null, updated_at: new Date().toISOString() },
+      { onConflict: "nom" },
+    );
+    setSavingModele(false);
+    setModeleMessage(error ? `Erreur : ${error.message}` : `Modèle "${nomModele.trim()}" enregistré — à affecter à un profil depuis Autorisation.`);
   }
 
   function handleAdd(c: Omit<KpiCardConfig, "id">) {
@@ -562,10 +595,41 @@ export default function VisionTciKpiPanel() {
 
   return (
     <div>
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        {/* Bascule Jour / J-1 : pilote tous les pavés flux d'un coup. */}
+        <div className="flex items-center rounded-full border border-white/15 bg-white/5 p-0.5 text-xs">
+          <button
+            onClick={() => setUtiliserJMoins1(false)}
+            className={`rounded-full px-2.5 py-1 font-semibold ${!utiliserJMoins1 ? "bg-[#A6A181] text-[#141A26]" : "text-white/50"}`}
+          >
+            Jour
+          </button>
+          <button
+            onClick={() => setUtiliserJMoins1(true)}
+            className={`rounded-full px-2.5 py-1 font-semibold ${utiliserJMoins1 ? "bg-[#A6A181] text-[#141A26]" : "text-white/50"}`}
+          >
+            J-1
+          </button>
+        </div>
+
+        {personnalise && (
+          <button
+            onClick={() => void revenirAuProfil()}
+            className="rounded-full border border-white/15 px-2.5 py-1 text-[11px] text-white/60 hover:bg-white/5 hover:text-white"
+            title="Abandonner ma personnalisation et revenir à la disposition par défaut de mon profil"
+          >
+            ↺ Revenir à la disposition du profil
+          </button>
+        )}
+        {!personnalise && (
+          <span className="text-[11px] text-white/35">Disposition du profil (non personnalisée)</span>
+        )}
+      </div>
+
       <div className="mb-3 grid grid-cols-4 gap-3">
         {cards.map((c) =>
           c.kind === "flux" ? (
-            <FluxCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} onRemove={() => handleRemove(c.id)} />
+            <FluxCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} utiliserJMoins1={utiliserJMoins1} onRemove={() => handleRemove(c.id)} />
           ) : c.kind === "taux" ? (
             <TauxCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} onRemove={() => handleRemove(c.id)} />
           ) : c.kind === "spacer" ? (
@@ -593,8 +657,38 @@ export default function VisionTciKpiPanel() {
         </button>
       )}
 
-      {/* Bloc sous les KPI — encore à définir (cf. mockup "À définir plus
-          tard"). Rien construit ici volontairement pour l'instant. */}
+      {/* Réservé aux administrateurs (can_autorisation) : enregistrer la
+          disposition courante comme modèle nommé, réutilisable comme
+          disposition par défaut d'un profil depuis l'écran Autorisation.
+          L'affectation elle-même (modèle → profil) se fait dans cet écran,
+          pas ici — voir le composant fourni séparément à y intégrer. */}
+      {rights?.can_autorisation && (
+        <div className="mt-4 rounded-xl border border-[#A6A181]/25 bg-[#A6A181]/[0.05] p-3">
+          <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[#A6A181]">
+            Administrateur — enregistrer comme modèle nommé
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              value={nomModele}
+              onChange={(e) => setNomModele(e.target.value)}
+              placeholder='Nom du modèle (ex. "TCI", "Direction", "Chef d&apos;agence")'
+              className="min-w-[220px] flex-1 rounded border border-white/20 bg-[#141A26] px-2 py-1.5 text-xs text-white outline-none"
+            />
+            <button
+              onClick={() => void enregistrerCommeModele()}
+              disabled={savingModele || !nomModele.trim()}
+              className="rounded bg-[#A6A181] px-3 py-1.5 text-xs font-semibold text-[#141A26] hover:brightness-110 disabled:opacity-50"
+            >
+              {savingModele ? "Enregistrement…" : "Enregistrer le modèle"}
+            </button>
+          </div>
+          {modeleMessage && <p className="mt-1.5 text-[10px] text-white/60">{modeleMessage}</p>}
+          <p className="mt-1.5 text-[10px] text-white/35">
+            Enregistre la disposition actuelle (celle affichée ci-dessus) comme modèle réutilisable. L&rsquo;affectation
+            à un profil se fait ensuite depuis Admin → Profils et autorisation.
+          </p>
+        </div>
+      )}
     </div>
   );
 }
