@@ -593,40 +593,49 @@ export default function VisionTciKpiPanel() {
   }
 
   if (loading || access.loading) {
-    return <div className="grid grid-cols-4 gap-3">{Array.from({ length: 4 }).map((_, i) => <div key={i} className="col-span-2 h-28 animate-pulse rounded-xl bg-white/5" />)}</div>;
+    return (
+      <div>
+        <h1 className="mb-3 text-xl font-bold text-white">Vision One page TCI</h1>
+        <div className="grid grid-cols-4 gap-3">{Array.from({ length: 4 }).map((_, i) => <div key={i} className="col-span-2 h-28 animate-pulse rounded-xl bg-white/5" />)}</div>
+      </div>
+    );
   }
 
   return (
     <div>
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        {/* Bascule Jour / J-1 : pilote tous les pavés flux d'un coup. */}
-        <div className="flex items-center rounded-full border border-white/15 bg-white/5 p-0.5 text-xs">
-          <button
-            onClick={() => setUtiliserJMoins1(false)}
-            className={`rounded-full px-2.5 py-1 font-semibold ${!utiliserJMoins1 ? "bg-[#A6A181] text-[#141A26]" : "text-white/50"}`}
-          >
-            Jour
-          </button>
-          <button
-            onClick={() => setUtiliserJMoins1(true)}
-            className={`rounded-full px-2.5 py-1 font-semibold ${utiliserJMoins1 ? "bg-[#A6A181] text-[#141A26]" : "text-white/50"}`}
-          >
-            J-1
-          </button>
-        </div>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h1 className="text-xl font-bold text-white">Vision One page TCI</h1>
 
-        {personnalise && (
-          <button
-            onClick={() => void revenirAuProfil()}
-            className="rounded-full border border-white/15 px-2.5 py-1 text-[11px] text-white/60 hover:bg-white/5 hover:text-white"
-            title="Abandonner ma personnalisation et revenir à la disposition par défaut de mon profil"
-          >
-            ↺ Revenir à la disposition du profil
-          </button>
-        )}
-        {!personnalise && (
-          <span className="text-[11px] text-white/35">Disposition du profil (non personnalisée)</span>
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Bascule Jour / J-1 : pilote tous les pavés flux d'un coup. */}
+          <div className="flex items-center rounded-full border border-white/15 bg-white/5 p-0.5 text-xs">
+            <button
+              onClick={() => setUtiliserJMoins1(false)}
+              className={`rounded-full px-2.5 py-1 font-semibold ${!utiliserJMoins1 ? "bg-[#A6A181] text-[#141A26]" : "text-white/50"}`}
+            >
+              Jour
+            </button>
+            <button
+              onClick={() => setUtiliserJMoins1(true)}
+              className={`rounded-full px-2.5 py-1 font-semibold ${utiliserJMoins1 ? "bg-[#A6A181] text-[#141A26]" : "text-white/50"}`}
+            >
+              J-1
+            </button>
+          </div>
+
+          {personnalise && (
+            <button
+              onClick={() => void revenirAuProfil()}
+              className="rounded-full border border-white/15 px-2.5 py-1 text-[11px] text-white/60 hover:bg-white/5 hover:text-white"
+              title="Abandonner ma personnalisation et revenir à la disposition par défaut de mon profil"
+            >
+              ↺ Revenir à la disposition du profil
+            </button>
+          )}
+          {!personnalise && (
+            <span className="text-[11px] text-white/35">Disposition du profil (non personnalisée)</span>
+          )}
+        </div>
       </div>
 
       <div className="mb-3 grid grid-cols-4 gap-3">
