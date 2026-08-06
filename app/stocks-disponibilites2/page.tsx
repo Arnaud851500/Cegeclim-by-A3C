@@ -695,9 +695,14 @@ export default function StocksDisponibilites2Page() {
   }, [monthlyChartData, todayIso]);
 
   const [hypoStrip, setHypoStrip] = useState<Array<{ mois: string; coefficient: number }>>([]);
+  // Références dont la valeur d'un mois diffère de la valeur famille — pour
+  // afficher une étoile sur la pastille du mois concerné (une famille
+  // "homogène" un mois donné n'a aucune entrée ici pour ce mois).
+  const [hypoHeterogene, setHypoHeterogene] = useState<Map<string, Array<{ reference_article: string; pct: number }>>>(new Map());
   useEffect(() => {
     if (!selectedFamille) {
       setHypoStrip([]);
+      setHypoHeterogene(new Map());
       return;
     }
     let cancelled = false;
@@ -705,9 +710,26 @@ export default function StocksDisponibilites2Page() {
       const horizonFin = new Date(todayIso + "T00:00:00");
       horizonFin.setDate(horizonFin.getDate() + familleHorizonWeeks * 7);
       const nbMoisAVenir = Math.max(1, Math.min(24, (horizonFin.getFullYear() - currentYear) * 12 + horizonFin.getMonth() - (Number(todayIso.slice(5, 7)) - 1) + 1));
-      const { data, error: err } = await supabase.rpc("get_stock_hypotheses_matrice", { p_nb_mois: nbMoisAVenir, p_famille: selectedFamille });
-      if (cancelled || err) return;
-      setHypoStrip(((data || []) as Array<{ mois: string; coefficient: number }>).map((r) => ({ mois: r.mois, coefficient: Number(r.coefficient) })));
+      const [{ data, error: err }, { data: dataArticles, error: errArticles }] = await Promise.all([
+        supabase.rpc("get_stock_hypotheses_matrice", { p_nb_mois: nbMoisAVenir, p_famille: selectedFamille }),
+        supabase.rpc("get_stock_hypotheses_matrice_articles", { p_famille: selectedFamille, p_nb_mois: nbMoisAVenir }),
+      ]);
+      if (cancelled) return;
+      if (!err) {
+        setHypoStrip(((data || []) as Array<{ mois: string; coefficient: number }>).map((r) => ({ mois: r.mois, coefficient: Number(r.coefficient) })));
+      }
+      if (!errArticles) {
+        const heterogene = new Map<string, Array<{ reference_article: string; pct: number }>>();
+        ((dataArticles || []) as Array<{ reference_article: string; mois: string; coefficient: number; is_override: boolean; coefficient_famille: number }>).forEach((r) => {
+          const pct = Math.round(Number(r.coefficient) * 100);
+          const pctFamille = Math.round(Number(r.coefficient_famille) * 100);
+          if (pct === pctFamille) return; // suit la famille, rien à signaler
+          const list = heterogene.get(r.mois) || [];
+          list.push({ reference_article: r.reference_article, pct });
+          heterogene.set(r.mois, list);
+        });
+        setHypoHeterogene(heterogene);
+      }
     }
     loadStrip();
     return () => {
@@ -1047,19 +1069,40 @@ export default function StocksDisponibilites2Page() {
                 {hypoStrip.map((h) => {
                   const pct = Math.round(h.coefficient * 100);
                   const d = new Date(h.mois + "T00:00:00");
+                  // Références dont la valeur, ce mois-ci, diffère de la
+                  // famille — s'il y en a, une étoile apparaît sur la
+                  // pastille avec le détail en info-bulle.
+                  const refsDifferentes = hypoHeterogene.get(h.mois) || [];
+                  const aUneValeurDifferente = refsDifferentes.length > 0;
+                  const tooltip = aUneValeurDifferente
+                    ? `Famille : ${pct}%. Références avec une valeur propre : ${refsDifferentes.map((r) => `${r.reference_article} (${r.pct}%)`).join(", ")}. Cliquer pour ajuster.`
+                    : "Cliquer pour ajuster les hypothèses mensuelles de cette famille";
                   return (
                     <button
                       key={h.mois}
                       onClick={() => { setHypoFamilleScope(selectedFamille); setHypoOpen(true); }}
-                      title="Cliquer pour ajuster les hypothèses mensuelles de cette famille"
-                      className={`rounded-md px-2 py-1 text-[11px] font-[var(--font-mono)] font-medium transition hover:brightness-110 ${
+                      title={tooltip}
+                      className={`relative rounded-md px-2 py-1 text-[11px] font-[var(--font-mono)] font-medium transition hover:brightness-110 ${
                         pct === 100 ? "bg-white/10 text-white/50" : "bg-[#A6A181]/25 text-[#A6A181]"
                       }`}
                     >
+                      {aUneValeurDifferente && (
+                        <span
+                          className="absolute -right-1 -top-1.5 text-[10px] leading-none text-[#D69A4A]"
+                          aria-hidden="true"
+                        >
+                          ★
+                        </span>
+                      )}
                       {d.toLocaleDateString("fr-FR", { month: "short", year: "2-digit" })} · {pct}%
                     </button>
                   );
                 })}
+                {Array.from(hypoHeterogene.values()).some((l) => l.length > 0) && (
+                  <span className="ml-2 text-[10px] text-white/35">
+                    <span className="text-[#D69A4A]">★</span> = au moins une référence a une valeur propre ce mois-là (voir "Paramétrage hypothèses de cette famille")
+                  </span>
+                )}
               </div>
             )}
 
