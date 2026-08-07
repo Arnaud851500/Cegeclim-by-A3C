@@ -621,7 +621,7 @@ export default function VisionTciKpiPanel() {
   if (loading || access.loading) {
     return (
       <div>
-        <h1 className="mb-3 text-xl font-bold text-white">Vision One page TCI</h1>
+        <h1 className="mb-3 text-xl font-bold text-white">Vision ONE PAGE</h1>
         <div className="grid grid-cols-4 gap-3">{Array.from({ length: 4 }).map((_, i) => <div key={i} className="col-span-2 h-28 animate-pulse rounded-xl bg-white/5" />)}</div>
       </div>
     );
