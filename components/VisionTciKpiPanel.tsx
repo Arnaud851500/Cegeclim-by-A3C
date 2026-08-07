@@ -630,7 +630,7 @@ export default function VisionTciKpiPanel() {
   return (
     <div>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-xl font-bold text-white">Vision One page TCI</h1>
+        <h1 className="text-xl font-bold text-white">Vision ONE PAGE</h1>
 
         <div className="flex flex-wrap items-center gap-2">
           <button
