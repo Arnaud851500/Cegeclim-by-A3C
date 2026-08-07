@@ -186,7 +186,7 @@ function MonthlyStackedCaChart({ rows }: { rows: CaMensuelRow[] }) {
           const yBottom = y(cumulative)
           cumulative += v
           if (v <= 0) return null
-          return <rect key={fm} x={x} y={yTop} width={barWidth} height={Math.max(0, yBottom - yTop)} fill={MACRO_COLORS[fm]} />
+          return <rect key={fm} x={x} y={yTop} width={barWidth} height={Math.max(0, yBottom - yTop)} fill={MACRO_COLORS[fm]} opacity={annee === N ? 1 : 0.4} />
         })}
       </g>
     )
@@ -277,7 +277,7 @@ function MonthlyLineChart({
             <text x={padding.left - 6} y={y(t) + 3} fontSize={10} textAnchor="end" fill="#64748b">{formatValue(t)}</text>
           </g>
         ))}
-        <path d={path(seriesN1)} fill="none" stroke={color} strokeWidth={1.5} strokeDasharray="5 4" opacity={0.55} />
+        <path d={path(seriesN1)} fill="none" stroke={color} strokeWidth={1.5} strokeDasharray="5 4" opacity={0.4} />
         <path d={path(seriesN)} fill="none" stroke={color} strokeWidth={2.5} />
         {seriesN.map((v, i) => (
           <g key={i} onMouseMove={(e) => handleHover(e, i)} onMouseLeave={() => setTooltip(null)} style={{ cursor: 'default' }}>
@@ -434,7 +434,34 @@ function VisionClientPageInner() {
   if (error || !identity) {
     return (
       <main className="page">
-        <div className="errorBox">{error || `Client "${numero}" introuvable.`}</div>
+        <header className="clientHeader">
+          <div>
+            <div className="eyebrow">Vision Client</div>
+            <h1>{numero ? 'Client introuvable' : 'Choisir un client'}</h1>
+            <p>{error || (numero ? `"${numero}" ne correspond à aucun client.` : 'Utilise la recherche pour ouvrir la fiche d\'un client.')}</p>
+          </div>
+          <div className="clientSearch">
+            <input
+              value={searchQuery}
+              onChange={(e) => { setSearchQuery(e.target.value); setSearchOpen(true) }}
+              onFocus={() => setSearchOpen(true)}
+              onBlur={() => setTimeout(() => setSearchOpen(false), 150)}
+              placeholder="Rechercher un client — code ou nom…"
+              className="clientSearchInput"
+              autoFocus
+            />
+            {searchOpen && searchResults.length > 0 && (
+              <div className="clientSearchResults">
+                {searchResults.map((r) => (
+                  <button key={r.numero} type="button" className="clientSearchResult" onMouseDown={() => goToClient(r.numero)}>
+                    <span className="mono">{r.numero}</span>
+                    <span>{r.intitule}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </header>
         <style jsx>{pageStyles}</style>
       </main>
     )
@@ -523,8 +550,8 @@ function VisionClientPageInner() {
         <div className="kpiCard">
           <span>Visites <em className="fictifTag">fictif</em></span>
           <div className="visitesLines">
-            <div><span className="visiteLabel">Dern. visite :</span> {formatDateFr(derniereVisiteFictive)}</div>
-            <div><span className="visiteLabel">Proch. visite :</span> {formatDateFr(prochaineVisiteFictive)}</div>
+            <div><span className="visiteLabel">Dern. visite :</span> <span className="visiteDate">{formatDateFr(derniereVisiteFictive)}</span></div>
+            <div><span className="visiteLabel">Proch. visite :</span> <span className="visiteDate">{formatDateFr(prochaineVisiteFictive)}</span></div>
           </div>
         </div>
       </section>
@@ -720,7 +747,8 @@ const pageStyles = `
 
   /* ── Pavé visites (fictif) ── */
   .visitesLines { margin-top: 4px; font-size: 12px; font-weight: 700; color: #0f172a; }
-  .visitesLines div { margin-top: 2px; }
+  .visitesLines div { margin-top: 6px; white-space: nowrap; }
+  .visiteDate { font-size: 17px; font-weight: 900; margin-left: 2px; }
   .visiteLabel { color: #64748b; font-weight: 800; text-transform: uppercase; font-size: 10px; margin-right: 4px; }
 
   /* ── Rangée CA mensuel + panneau YTD ── */
