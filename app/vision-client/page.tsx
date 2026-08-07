@@ -14,8 +14,8 @@
 // Section "à enrichir" prévue pour les infos à venir (dernière/prochaine
 // visite, validité certificat gaz déjà affichée, RGE déjà affiché…).
 
-import { Suspense, useEffect, useMemo, useState } from 'react'
-import { useSearchParams } from 'next/navigation'
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 
 const FAMILY_MACROS = ['R/R', 'R/O', 'ECS', 'DRV', 'R_zone', 'Accessoire', 'PV', 'Autres']
@@ -97,6 +97,32 @@ function daysUntil(value: string | null | undefined): number | null {
   return Math.round((d.getTime() - Date.now()) / 86400000)
 }
 
+// ── Tooltip flottant partagé par les 3 graphes ───────────────────────────
+
+type TooltipState = { x: number; y: number; lines: string[] } | null
+
+function ChartTooltip({ tooltip }: { tooltip: TooltipState }) {
+  if (!tooltip) return null
+  return (
+    <div className="chartTooltip" style={{ left: tooltip.x, top: tooltip.y }}>
+      {tooltip.lines.map((line, i) => (
+        <div key={i} className={i === 0 ? 'chartTooltipTitle' : ''}>{line}</div>
+      ))}
+    </div>
+  )
+}
+
+// ── Pastille d'évolution YTD vs N-1 (même date), colorée ─────────────────
+
+function EvolutionBadge({ value, unit }: { value: number | null; unit: 'pct' | 'points' }) {
+  if (value === null || !Number.isFinite(value)) return <span className="evolutionBadge neutral">—</span>
+  const up = value >= 0
+  const label = unit === 'pct'
+    ? `${up ? '▲' : '▼'} ${Math.abs(value).toFixed(1)} %`
+    : `${up ? '▲' : '▼'} ${Math.abs(value).toFixed(1)} pts`
+  return <span className={`evolutionBadge ${up ? 'up' : 'down'}`}>{label}</span>
+}
+
 // ── Graphe CA mensuel : barres groupées N / N-1, empilées par famille macro ──
 
 function MonthlyStackedCaChart({ rows }: { rows: CaMensuelRow[] }) {
@@ -105,6 +131,8 @@ function MonthlyStackedCaChart({ rows }: { rows: CaMensuelRow[] }) {
   const padding = { top: 16, right: 16, bottom: 30, left: 60 }
   const innerW = width - padding.left - padding.right
   const innerH = height - padding.top - padding.bottom
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [tooltip, setTooltip] = useState<TooltipState>(null)
 
   const byMonth = useMemo(() => {
     const out: Array<{ mois: number; n: Record<string, number>; n1: Record<string, number>; totalN: number; totalN1: number }> = []
@@ -132,22 +160,42 @@ function MonthlyStackedCaChart({ rows }: { rows: CaMensuelRow[] }) {
     return padding.top + innerH - (v / maxVal) * innerH
   }
 
-  function stackedBar(x: number, values: Record<string, number>) {
+  function handleHover(e: React.MouseEvent, annee: number, mois: number, values: Record<string, number>, total: number) {
+    const rect = containerRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const lines = [
+      `${MONTH_LABELS[mois - 1]} ${annee} — ${formatEur(total)}`,
+      ...FAMILY_MACROS.filter((fm) => (values[fm] || 0) > 0).map((fm) => `${fm} : ${formatEur(values[fm])}`),
+    ]
+    setTooltip({ x: e.clientX - rect.left + 14, y: e.clientY - rect.top + 10, lines })
+  }
+
+  function stackedBar(x: number, values: Record<string, number>, annee: number, mois: number, total: number) {
     let cumulative = 0
-    return FAMILY_MACROS.map((fm) => {
-      const v = values[fm] || 0
-      const yTop = y(cumulative + v)
-      const yBottom = y(cumulative)
-      cumulative += v
-      if (v <= 0) return null
-      return <rect key={fm} x={x} y={yTop} width={barWidth} height={Math.max(0, yBottom - yTop)} fill={MACRO_COLORS[fm]} />
-    })
+    return (
+      <g
+        onMouseMove={(e) => handleHover(e, annee, mois, values, total)}
+        onMouseLeave={() => setTooltip(null)}
+        style={{ cursor: 'default' }}
+      >
+        {/* Rectangle invisible sur toute la hauteur : évite les trous de survol entre segments. */}
+        <rect x={x} y={padding.top} width={barWidth} height={innerH} fill="transparent" />
+        {FAMILY_MACROS.map((fm) => {
+          const v = values[fm] || 0
+          const yTop = y(cumulative + v)
+          const yBottom = y(cumulative)
+          cumulative += v
+          if (v <= 0) return null
+          return <rect key={fm} x={x} y={yTop} width={barWidth} height={Math.max(0, yBottom - yTop)} fill={MACRO_COLORS[fm]} />
+        })}
+      </g>
+    )
   }
 
   const ticks = [0, maxVal / 2, maxVal]
 
   return (
-    <div>
+    <div className="chartContainer" ref={containerRef}>
       <svg viewBox={`0 0 ${width} ${height}`} className="w-full">
         {ticks.map((t, i) => (
           <g key={i}>
@@ -159,8 +207,8 @@ function MonthlyStackedCaChart({ rows }: { rows: CaMensuelRow[] }) {
           const groupX = padding.left + i * groupWidth + (groupWidth - barWidth * 2 - 4) / 2
           return (
             <g key={m.mois}>
-              {stackedBar(groupX, m.n)}
-              {stackedBar(groupX + barWidth + 4, m.n1)}
+              {stackedBar(groupX, m.n, N, m.mois, m.totalN)}
+              {stackedBar(groupX + barWidth + 4, m.n1, N - 1, m.mois, m.totalN1)}
               <text x={groupX + barWidth + 2} y={height - padding.bottom + 14} fontSize={10} textAnchor="middle" fill="#475569">
                 {MONTH_LABELS[m.mois - 1]}
               </text>
@@ -168,6 +216,7 @@ function MonthlyStackedCaChart({ rows }: { rows: CaMensuelRow[] }) {
           )
         })}
       </svg>
+      <ChartTooltip tooltip={tooltip} />
       <div className="chartLegend">
         {FAMILY_MACROS.map((fm) => (
           <span key={fm}><span className="dot" style={{ background: MACRO_COLORS[fm] }} />{fm}</span>
@@ -195,6 +244,8 @@ function MonthlyLineChart({
   const padding = { top: 14, right: 16, bottom: 26, left: 60 }
   const innerW = width - padding.left - padding.right
   const innerH = height - padding.top - padding.bottom
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [tooltip, setTooltip] = useState<TooltipState>(null)
 
   const maxVal = Math.max(1, ...seriesN, ...seriesN1)
   const minVal = Math.min(0, ...seriesN, ...seriesN1)
@@ -205,29 +256,49 @@ function MonthlyLineChart({
     return series.map((v, i) => `${i === 0 ? 'M' : 'L'} ${x(i)} ${y(v)}`).join(' ')
   }
 
+  function handleHover(e: React.MouseEvent, i: number) {
+    const rect = containerRef.current?.getBoundingClientRect()
+    if (!rect) return
+    setTooltip({
+      x: e.clientX - rect.left + 14,
+      y: e.clientY - rect.top + 10,
+      lines: [MONTH_LABELS[i], `${N} : ${formatValue(seriesN[i])}`, `${N - 1} : ${formatValue(seriesN1[i])}`],
+    })
+  }
+
   const ticks = [minVal, (minVal + maxVal) / 2, maxVal]
 
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="w-full">
-      {ticks.map((t, i) => (
-        <g key={i}>
-          <line x1={padding.left} y1={y(t)} x2={width - padding.right} y2={y(t)} stroke="#e2e8f0" strokeDasharray={i === 0 ? undefined : '3 3'} />
-          <text x={padding.left - 6} y={y(t) + 3} fontSize={10} textAnchor="end" fill="#64748b">{formatValue(t)}</text>
-        </g>
-      ))}
-      <path d={path(seriesN1)} fill="none" stroke={color} strokeWidth={1.5} strokeDasharray="5 4" opacity={0.55} />
-      <path d={path(seriesN)} fill="none" stroke={color} strokeWidth={2.5} />
-      {seriesN.map((v, i) => <circle key={i} cx={x(i)} cy={y(v)} r={i === seriesN.length - 1 ? 4 : 2.5} fill={color} />)}
-      {MONTH_LABELS.map((label, i) => (
-        <text key={label} x={x(i)} y={height - 6} fontSize={10} textAnchor="middle" fill="#475569">{label}</text>
-      ))}
-    </svg>
+    <div className="chartContainer" ref={containerRef}>
+      <svg viewBox={`0 0 ${width} ${height}`} className="w-full">
+        {ticks.map((t, i) => (
+          <g key={i}>
+            <line x1={padding.left} y1={y(t)} x2={width - padding.right} y2={y(t)} stroke="#e2e8f0" strokeDasharray={i === 0 ? undefined : '3 3'} />
+            <text x={padding.left - 6} y={y(t) + 3} fontSize={10} textAnchor="end" fill="#64748b">{formatValue(t)}</text>
+          </g>
+        ))}
+        <path d={path(seriesN1)} fill="none" stroke={color} strokeWidth={1.5} strokeDasharray="5 4" opacity={0.55} />
+        <path d={path(seriesN)} fill="none" stroke={color} strokeWidth={2.5} />
+        {seriesN.map((v, i) => (
+          <g key={i} onMouseMove={(e) => handleHover(e, i)} onMouseLeave={() => setTooltip(null)} style={{ cursor: 'default' }}>
+            {/* Zone de survol invisible, plus large que le point pour rester facile à cibler à la souris. */}
+            <rect x={x(i) - (innerW / 22)} y={padding.top} width={innerW / 11} height={innerH} fill="transparent" />
+            <circle cx={x(i)} cy={y(v)} r={i === seriesN.length - 1 ? 4 : 2.5} fill={color} />
+          </g>
+        ))}
+        {MONTH_LABELS.map((label, i) => (
+          <text key={label} x={x(i)} y={height - 6} fontSize={10} textAnchor="middle" fill="#475569">{label}</text>
+        ))}
+      </svg>
+      <ChartTooltip tooltip={tooltip} />
+    </div>
   )
 }
 
 // ── Composant principal ──────────────────────────────────────────────────
 
 function VisionClientPageInner() {
+  const router = useRouter()
   const searchParams = useSearchParams()
   const numero = searchParams.get('numero') || ''
 
@@ -241,6 +312,11 @@ function VisionClientPageInner() {
   const [derniersDocuments, setDerniersDocuments] = useState<DernierDocument[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  // Recherche pour changer de client sans repasser par la Synthèse multi-clients.
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState<Array<{ numero: string; intitule: string }>>([])
+  const [searchOpen, setSearchOpen] = useState(false)
 
   useEffect(() => {
     if (!numero) { setLoading(false); setError('Aucun numéro de client fourni.'); return }
@@ -283,6 +359,30 @@ function VisionClientPageInner() {
     return () => { cancelled = true }
   }, [numero])
 
+  // Recherche client : débounce simple, sur numero ou intitule.
+  useEffect(() => {
+    const term = searchQuery.trim()
+    if (term.length < 2) { setSearchResults([]); return }
+    let cancelled = false
+    const timer = setTimeout(async () => {
+      const { data, error: searchError } = await supabase
+        .from('ref_tiers')
+        .select('numero, intitule')
+        .or(`numero.ilike.%${term}%,intitule.ilike.%${term}%`)
+        .limit(8)
+      if (cancelled || searchError) return
+      setSearchResults((data || []) as Array<{ numero: string; intitule: string }>)
+    }, 250)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [searchQuery])
+
+  function goToClient(nextNumero: string) {
+    setSearchQuery('')
+    setSearchResults([])
+    setSearchOpen(false)
+    router.push(`/vision-client?numero=${encodeURIComponent(nextNumero)}`)
+  }
+
   const devisSeriesN = useMemo(() => Array.from({ length: 12 }, (_, i) => devisRows.find((r) => r.annee === N && r.mois === i + 1)?.montant || 0), [devisRows])
   const devisSeriesN1 = useMemo(() => Array.from({ length: 12 }, (_, i) => devisRows.find((r) => r.annee === N - 1 && r.mois === i + 1)?.montant || 0), [devisRows])
   const margeSeriesN = useMemo(() => Array.from({ length: 12 }, (_, i) => devisNullToZero(margeRows.find((r) => r.annee === N && r.mois === i + 1)?.marge_pct)), [margeRows])
@@ -295,6 +395,32 @@ function VisionClientPageInner() {
   const derniersDevis = useMemo(() => derniersDocuments.filter((d) => d.type_document === 'Devis').slice(0, 10), [derniersDocuments])
   const dernieresCommandes = useMemo(() => derniersDocuments.filter((d) => d.type_document === 'Bon de commande').slice(0, 10), [derniersDocuments])
   const derniersBl = useMemo(() => derniersDocuments.filter((d) => d.type_document === 'Bon de livraison').slice(0, 10), [derniersDocuments])
+
+  const currentMonth = new Date().getMonth() + 1
+
+  // CA YTD : cumul jusqu'au mois en cours, N vs N-1 à la même date.
+  const caYtdN = useMemo(() => caRows.filter((r) => r.annee === N && r.mois <= currentMonth).reduce((s, r) => s + r.ca, 0), [caRows, currentMonth])
+  const caYtdN1 = useMemo(() => caRows.filter((r) => r.annee === N - 1 && r.mois <= currentMonth).reduce((s, r) => s + r.ca, 0), [caRows, currentMonth])
+  const caYtdEvolPct = caYtdN1 !== 0 ? ((caYtdN - caYtdN1) / Math.abs(caYtdN1)) * 100 : null
+
+  // Devis YTD : évolution en %.
+  const devisYtdN = useMemo(() => devisSeriesN.slice(0, currentMonth).reduce((s, v) => s + v, 0), [devisSeriesN, currentMonth])
+  const devisYtdN1 = useMemo(() => devisSeriesN1.slice(0, currentMonth).reduce((s, v) => s + v, 0), [devisSeriesN1, currentMonth])
+  const devisYtdEvolPct = devisYtdN1 !== 0 ? ((devisYtdN - devisYtdN1) / Math.abs(devisYtdN1)) * 100 : null
+
+  // Marge YTD : évolution en points (moyenne des % mensuels réellement renseignés jusqu'au mois en cours).
+  const margeYtdMoyenne = (annee: number) => {
+    const values = margeRows.filter((r) => r.annee === annee && r.mois <= currentMonth && r.marge_pct !== null).map((r) => r.marge_pct as number)
+    if (!values.length) return null
+    return values.reduce((s, v) => s + v, 0) / values.length
+  }
+  const margeYtdN = margeYtdMoyenne(N)
+  const margeYtdN1 = margeYtdMoyenne(N - 1)
+  const margeYtdEvolPoints = margeYtdN !== null && margeYtdN1 !== null ? margeYtdN - margeYtdN1 : null
+
+  // Dernière/prochaine visite — données fictives, en attendant le champ réel côté CRM.
+  const derniereVisiteFictive = '2026-06-18'
+  const prochaineVisiteFictive = '2026-09-02'
 
   const capaciteJours = daysUntil(identity?.capacite_expiration)
   // Fictif, demandé explicitement — pas de colonne d'échéance de paiement
@@ -322,6 +448,29 @@ function VisionClientPageInner() {
           <h1>{identity.intitule} <span className="numeroTag">{identity.numero}</span></h1>
           <p>{identity.representant || 'Représentant non renseigné'} · {identity.agence || 'Agence non renseignée'}</p>
         </div>
+
+        {/* Recherche pour basculer sur un autre client sans repasser par la SMC. */}
+        <div className="clientSearch">
+          <input
+            value={searchQuery}
+            onChange={(e) => { setSearchQuery(e.target.value); setSearchOpen(true) }}
+            onFocus={() => setSearchOpen(true)}
+            onBlur={() => setTimeout(() => setSearchOpen(false), 150)}
+            placeholder="Changer de client — code ou nom…"
+            className="clientSearchInput"
+          />
+          {searchOpen && searchResults.length > 0 && (
+            <div className="clientSearchResults">
+              {searchResults.map((r) => (
+                <button key={r.numero} type="button" className="clientSearchResult" onMouseDown={() => goToClient(r.numero)}>
+                  <span className="mono">{r.numero}</span>
+                  <span>{r.intitule}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
         {identity.lien_blg_tiers && (
           <a href={identity.lien_blg_tiers} target="_blank" rel="noopener noreferrer" className="blgLink">Ouvrir la fiche CRM ↗</a>
         )}
@@ -371,21 +520,57 @@ function VisionClientPageInner() {
           <span>Factures en retard de paiement <em className="fictifTag">fictif</em></span>
           <strong className="danger">{formatEur(facturesRetardFictif)}</strong>
         </div>
+        <div className="kpiCard">
+          <span>Visites <em className="fictifTag">fictif</em></span>
+          <div className="visitesLines">
+            <div><span className="visiteLabel">Dern. visite :</span> {formatDateFr(derniereVisiteFictive)}</div>
+            <div><span className="visiteLabel">Proch. visite :</span> {formatDateFr(prochaineVisiteFictive)}</div>
+          </div>
+        </div>
       </section>
 
-      {/* ── CA mensuel empilé ── */}
-      <section className="card">
-        <h2>CA mensuel par famille macro — {N} vs {N - 1}</h2>
-        <MonthlyStackedCaChart rows={caRows} />
-      </section>
+      {/* ── CA mensuel empilé + panneau YTD ── */}
+      <div className="caChartRow">
+        <section className="card caChartCard">
+          <h2>CA mensuel par famille macro — {N} vs {N - 1}</h2>
+          <MonthlyStackedCaChart rows={caRows} />
+        </section>
+        <section className="card caYtdCard">
+          <h3>CA cumulé depuis le 1er janvier</h3>
+          <div className="ytdBlock">
+            <span className="ytdLabel">{N} (jusqu'au mois en cours)</span>
+            <strong className="ytdValue">{formatEur(caYtdN)}</strong>
+          </div>
+          <div className="ytdBlock">
+            <span className="ytdLabel">{N - 1} (même période)</span>
+            <strong className="ytdValueSecondary">{formatEur(caYtdN1)}</strong>
+          </div>
+          <div className="ytdEvolWrap">
+            <span className="ytdLabel">Évolution</span>
+            <EvolutionBadge value={caYtdEvolPct} unit="pct" />
+          </div>
+        </section>
+      </div>
 
       <div className="chartGrid">
         <section className="card">
-          <h2>Devis mensuel — {N} vs {N - 1}</h2>
+          <div className="chartCardHeader">
+            <h2>Devis mensuel — {N} vs {N - 1}</h2>
+            <span className="chartCardHeaderRight">
+              <span className="ytdMiniLabel">YTD vs N-1</span>
+              <EvolutionBadge value={devisYtdEvolPct} unit="pct" />
+            </span>
+          </div>
           <MonthlyLineChart seriesN={devisSeriesN} seriesN1={devisSeriesN1} color="#D69A4A" formatValue={formatKEur} />
         </section>
         <section className="card">
-          <h2>Marge mensuelle (%) — {N} vs {N - 1}</h2>
+          <div className="chartCardHeader">
+            <h2>Marge mensuelle (%) — {N} vs {N - 1}</h2>
+            <span className="chartCardHeaderRight">
+              <span className="ytdMiniLabel">YTD vs N-1</span>
+              <EvolutionBadge value={margeYtdEvolPoints} unit="points" />
+            </span>
+          </div>
           <MonthlyLineChart seriesN={margeSeriesN} seriesN1={margeSeriesN1} color="#7A5EA8" formatValue={(v) => `${v.toFixed(0)} %`} />
         </section>
       </div>
@@ -475,10 +660,11 @@ export default function VisionClientPage() {
 }
 
 const pageStyles = `
-  .page { padding: 20px 24px 40px; background: #f6f8fb; min-height: 100vh; color: #0f172a; max-width: 1200px; margin: 0 auto; }
+  .page { padding: 20px 28px 40px; background: #f6f8fb; min-height: 100vh; color: #0f172a; width: 100%; }
   .loadingBox, .errorBox { background: white; border-radius: 14px; padding: 40px; text-align: center; font-weight: 800; color: #64748b; }
   .errorBox { color: #991b1b; background: #fee2e2; }
   .clientHeader { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 18px; }
+  .clientHeader > div:first-child { flex: 1 1 auto; min-width: 0; }
   .eyebrow { font-size: 11px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.14em; color: #64748b; }
   h1 { margin: 2px 0 4px; font-size: 26px; font-weight: 900; letter-spacing: -0.02em; }
   .numeroTag { font-family: monospace; font-size: 15px; font-weight: 700; color: #64748b; background: #e2e8f0; border-radius: 6px; padding: 2px 8px; margin-left: 8px; vertical-align: middle; }
@@ -494,7 +680,7 @@ const pageStyles = `
   .identityGrid strong.danger { color: #dc2626; }
   .identityGrid strong.muted { color: #94a3b8; }
   .futureNote { margin: 14px 0 0; padding-top: 10px; border-top: 1px dashed #e2e8f0; font-size: 11px; color: #94a3b8; font-style: italic; }
-  .kpiRow { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
+  .kpiRow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
   .kpiCard { display: block; background: white; border: 1px solid #e2e8f0; border-radius: 14px; padding: 14px 16px; box-shadow: 0 2px 8px rgba(15,23,42,.05); text-decoration: none; color: inherit; }
   .kpiCard span { display: block; font-size: 11px; font-weight: 900; text-transform: uppercase; color: #64748b; }
   .kpiCard strong { display: block; margin-top: 4px; font-size: 22px; font-weight: 950; }
@@ -522,4 +708,46 @@ const pageStyles = `
   .documentsMiniTable td.num, .documentsMiniTable th.num { text-align: right; }
   .documentsMiniTable td.mono { font-family: monospace; font-weight: 700; }
   .documentsEmpty { font-size: 12px; color: #94a3b8; font-style: italic; margin: 0; }
+
+  /* ── Recherche client (en-tête) ── */
+  .clientSearch { position: relative; flex: 0 0 300px; }
+  .clientSearchInput { width: 100%; height: 40px; border: 1px solid #cbd5e1; border-radius: 10px; padding: 0 12px; font-size: 13px; outline: none; background: white; }
+  .clientSearchInput:focus { border-color: #0f172a; }
+  .clientSearchResults { position: absolute; top: 44px; left: 0; right: 0; z-index: 20; background: white; border: 1px solid #e2e8f0; border-radius: 10px; box-shadow: 0 12px 30px rgba(15,23,42,.15); overflow: hidden; max-height: 320px; overflow-y: auto; }
+  .clientSearchResult { display: flex; gap: 10px; align-items: baseline; width: 100%; text-align: left; padding: 8px 12px; border: 0; background: white; cursor: pointer; font-size: 12.5px; border-bottom: 1px solid #f1f5f9; }
+  .clientSearchResult:hover { background: #f1f5f9; }
+  .clientSearchResult .mono { font-family: monospace; font-weight: 800; color: #64748b; flex-shrink: 0; }
+
+  /* ── Pavé visites (fictif) ── */
+  .visitesLines { margin-top: 4px; font-size: 12px; font-weight: 700; color: #0f172a; }
+  .visitesLines div { margin-top: 2px; }
+  .visiteLabel { color: #64748b; font-weight: 800; text-transform: uppercase; font-size: 10px; margin-right: 4px; }
+
+  /* ── Rangée CA mensuel + panneau YTD ── */
+  .caChartRow { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 16px; align-items: stretch; margin-bottom: 16px; }
+  .caChartCard { margin-bottom: 0; }
+  .caYtdCard { margin-bottom: 0; display: flex; flex-direction: column; justify-content: center; gap: 16px; }
+  .caYtdCard h3 { margin: 0 0 4px; font-size: 12px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.04em; color: #334155; }
+  .ytdBlock { display: flex; flex-direction: column; gap: 2px; }
+  .ytdLabel { font-size: 10.5px; font-weight: 800; text-transform: uppercase; color: #94a3b8; }
+  .ytdValue { font-size: 24px; font-weight: 950; color: #0f172a; }
+  .ytdValueSecondary { font-size: 17px; font-weight: 800; color: #64748b; }
+  .ytdEvolWrap { display: flex; flex-direction: column; gap: 4px; padding-top: 8px; border-top: 1px dashed #e2e8f0; }
+
+  /* ── En-têtes de graphe avec pastille d'évolution YTD ── */
+  .chartCardHeader { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+  .chartCardHeader h2 { margin: 0; }
+  .chartCardHeaderRight { display: inline-flex; align-items: center; gap: 6px; }
+  .ytdMiniLabel { font-size: 9.5px; font-weight: 800; text-transform: uppercase; color: #94a3b8; }
+
+  /* ── Pastille d'évolution, code couleur ── */
+  .evolutionBadge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 900; white-space: nowrap; }
+  .evolutionBadge.up { background: #dcfce7; color: #047857; }
+  .evolutionBadge.down { background: #fee2e2; color: #dc2626; }
+  .evolutionBadge.neutral { background: #e5e7eb; color: #64748b; }
+
+  /* ── Conteneurs de graphe + tooltip flottant au survol ── */
+  .chartContainer { position: relative; }
+  .chartTooltip { position: absolute; z-index: 30; background: #0f172a; color: white; border-radius: 8px; padding: 8px 10px; font-size: 11px; line-height: 1.5; pointer-events: none; white-space: nowrap; box-shadow: 0 10px 24px rgba(15,23,42,.35); }
+  .chartTooltipTitle { font-weight: 900; margin-bottom: 2px; }
 `
