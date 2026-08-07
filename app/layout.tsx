@@ -846,15 +846,6 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
       statusScopeOverride?.collaborateurs && Array.isArray(statusScopeOverride.collaborateurs) ? statusScopeOverride.collaborateurs.join('|') : String(statusScopeOverride?.collaborateurs || ''),
     ])
 
-    useEffect(() => {
-      function handleWindowFocus() {
-        void refreshStatusIndicators({ force: true })
-      }
-
-      window.addEventListener('focus', handleWindowFocus)
-      return () => window.removeEventListener('focus', handleWindowFocus)
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [email, sessionChecked, hasSession])
 
     useEffect(() => {
       if (!sessionChecked || accessLoading || !hasSession || !email) return
