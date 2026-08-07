@@ -144,8 +144,8 @@ function CardShell({
 // ── Pavé FLUX ─────────────────────────────────────────────────────────────
 
 function FluxCard({
-  config, effectiveAgence, effectiveCollaborateur, utiliserJMoins1, onRemove,
-}: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; utiliserJMoins1: boolean; onRemove: () => void }) {
+  config, effectiveAgence, effectiveCollaborateur, utiliserJMoins1, refreshTick, onRemove,
+}: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; utiliserJMoins1: boolean; refreshTick: number; onRemove: () => void }) {
   const famille = config.cle as FamilleFlux;
   const [values, setValues] = useState<FluxValues | null>(null);
   const [loading, setLoading] = useState(true);
@@ -172,7 +172,7 @@ function FluxCard({
     }
     load();
     return () => { cancelled = true; };
-  }, [famille, config.famille_macro, effectiveAgence, effectiveCollaborateur, utiliserJMoins1]);
+  }, [famille, config.famille_macro, effectiveAgence, effectiveCollaborateur, utiliserJMoins1, refreshTick]);
 
   function handleClick() {
     if (famille === "BL" || famille === "CDC" || famille === "Factures") window.open("/focus_mensuel2", "_blank", "noopener,noreferrer");
@@ -225,8 +225,8 @@ function FluxCard({
 const CA_BAND_ORDER = ["400K€", "150K€", "80K€", "20K€", "vide"] as const;
 
 function CompteurCard({
-  config, effectiveAgence, effectiveCollaborateur, onRemove,
-}: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; onRemove: () => void }) {
+  config, effectiveAgence, effectiveCollaborateur, refreshTick, onRemove,
+}: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; onRemove: () => void }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [total, setTotal] = useState<number | null>(null);
@@ -286,7 +286,7 @@ function CompteurCard({
     load();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [config.cle, effectiveAgence, effectiveCollaborateur]);
+  }, [config.cle, effectiveAgence, effectiveCollaborateur, refreshTick]);
 
   function handleClick() {
     if (config.cle === "clients_actifs" || config.cle === "clients_crees_n") window.open("/synthese_multi_clients", "_blank", "noopener,noreferrer");
@@ -331,8 +331,8 @@ function CompteurCard({
 // ── Pavé TAUX (réduit : 1 colonne sur 4) ────────────────────────────────
 
 function TauxCard({
-  config, effectiveAgence, effectiveCollaborateur, onRemove,
-}: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; onRemove: () => void }) {
+  config, effectiveAgence, effectiveCollaborateur, refreshTick, onRemove,
+}: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; onRemove: () => void }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [taux, setTaux] = useState<number | null>(null);
@@ -358,7 +358,7 @@ function TauxCard({
     }
     load();
     return () => { cancelled = true; };
-  }, [effectiveAgence, effectiveCollaborateur, config.famille_macro]);
+  }, [effectiveAgence, effectiveCollaborateur, config.famille_macro, refreshTick]);
 
   return (
     <div className="col-span-2 sm:col-span-1">
@@ -505,6 +505,32 @@ export default function VisionTciKpiPanel() {
   const [loading, setLoading] = useState(true);
   const [utiliserJMoins1, setUtiliserJMoins1] = useState(true);
 
+  // Rafraîchissement périodique des valeurs — uniquement pendant que l'onglet
+  // est visible. Rien ne se déclenche en arrière-plan : ça évite exactement
+  // le désagrément inverse (rafraîchir alors que l'utilisateur ne regarde
+  // pas l'écran). Toutes les 90s pendant que c'est affiché, sinon en pause.
+  const [refreshTick, setRefreshTick] = useState(0);
+  useEffect(() => {
+    let interval: ReturnType<typeof setInterval> | null = null;
+    function start() {
+      if (interval) return;
+      interval = setInterval(() => setRefreshTick((t) => t + 1), 90_000);
+    }
+    function stop() {
+      if (interval) { clearInterval(interval); interval = null; }
+    }
+    if (document.visibilityState === "visible") start();
+    function handleVisibility() {
+      if (document.visibilityState === "visible") start();
+      else stop();
+    }
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, []);
+
   // Modèles nommés (réservé aux administrateurs, can_autorisation) — pour
   // enregistrer la disposition courante comme modèle affectable à un profil
   // depuis l'écran Autorisation.
@@ -607,6 +633,14 @@ export default function VisionTciKpiPanel() {
         <h1 className="text-xl font-bold text-white">Vision One page TCI</h1>
 
         <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => setRefreshTick((t) => t + 1)}
+            title="Actualiser toutes les valeurs maintenant"
+            className="rounded-full border border-white/15 px-2.5 py-1 text-[11px] text-white/60 hover:bg-white/5 hover:text-white"
+          >
+            ↻ Actualiser
+          </button>
+
           {/* Bascule Jour / J-1 : pilote tous les pavés flux d'un coup. */}
           <div className="flex items-center rounded-full border border-white/15 bg-white/5 p-0.5 text-xs">
             <button
@@ -641,13 +675,13 @@ export default function VisionTciKpiPanel() {
       <div className="mb-3 grid grid-cols-4 gap-3">
         {cards.map((c) =>
           c.kind === "flux" ? (
-            <FluxCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} utiliserJMoins1={utiliserJMoins1} onRemove={() => handleRemove(c.id)} />
+            <FluxCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} utiliserJMoins1={utiliserJMoins1} refreshTick={refreshTick} onRemove={() => handleRemove(c.id)} />
           ) : c.kind === "taux" ? (
-            <TauxCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} onRemove={() => handleRemove(c.id)} />
+            <TauxCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} refreshTick={refreshTick} onRemove={() => handleRemove(c.id)} />
           ) : c.kind === "spacer" ? (
             <SpacerCard key={c.id} span={c.cle === "2" ? 2 : 1} onRemove={() => handleRemove(c.id)} />
           ) : (
-            <CompteurCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} onRemove={() => handleRemove(c.id)} />
+            <CompteurCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} refreshTick={refreshTick} onRemove={() => handleRemove(c.id)} />
           ),
         )}
       </div>
