@@ -26,6 +26,12 @@ const CircleMarker: any = dynamic(
   { ssr: false }
 )
 
+// NOUVEAU (test géolocalisation) : cercle de rayon autour de la position utilisateur.
+const Circle: any = dynamic(
+  () => import('react-leaflet').then((mod) => mod.Circle as any),
+  { ssr: false }
+)
+
 const Tooltip: any = dynamic(
   () => import('react-leaflet').then((mod) => mod.Tooltip as any),
   { ssr: false }
@@ -297,6 +303,13 @@ type DashboardKpiRow = {
   departements: number
 }
 
+// NOUVEAU (test géolocalisation)
+type UserPosition = {
+  lat: number
+  lng: number
+  accuracy: number | null
+}
+
 type ScreenMode = 'clients' | 'cegeclim_absents'
 type SortDirection = 'asc' | 'desc'
 
@@ -330,6 +343,12 @@ const CLIENTS_PAGE_SIZE = 200
 const SUPABASE_FETCH_BATCH = 50000
 const INITIAL_CLIENTS_BATCH = 50000
 const MAX_BATCH_ENRICH = 5000
+
+// NOUVEAU (test géolocalisation) : passer GEO_RADIUS_FEATURE à false pour
+// désactiver entièrement le bloc "Autour de moi" sans toucher au reste du code.
+const GEO_RADIUS_FEATURE = true
+const GEO_RADIUS_MIN_KM = 1
+const GEO_RADIUS_MAX_KM = 200
 
 const PROSPECT_STATUS_OPTIONS: ProspectStatusValue[] = [
   '1 : A contacter',
@@ -468,6 +487,46 @@ function distanceKmLambert(
   const dy = Number(y1) - Number(y2)
   const meters = Math.sqrt(dx * dx + dy * dy)
   return Math.round((meters / 1000) * 10) / 10
+}
+
+// NOUVEAU (test géolocalisation) : distance orthodromique en km entre deux points WGS84.
+function distanceKmWgs84(
+  lat1: number | null | undefined,
+  lon1: number | null | undefined,
+  lat2: number | null | undefined,
+  lon2: number | null | undefined
+): number | null {
+  if (lat1 == null || lon1 == null || lat2 == null || lon2 == null) return null
+
+  const a1 = Number(lat1)
+  const o1 = Number(lon1)
+  const a2 = Number(lat2)
+  const o2 = Number(lon2)
+
+  if (![a1, o1, a2, o2].every((v) => Number.isFinite(v))) return null
+
+  const toRad = (v: number) => (v * Math.PI) / 180
+  const R = 6371
+
+  const dLat = toRad(a2 - a1)
+  const dLon = toRad(o2 - o1)
+
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(a1)) * Math.cos(toRad(a2)) * Math.sin(dLon / 2) ** 2
+
+  const d = 2 * R * Math.asin(Math.min(1, Math.sqrt(h)))
+  return Math.round(d * 10) / 10
+}
+
+// NOUVEAU (test géolocalisation) : zoom Leaflet cohérent avec le rayon choisi.
+function zoomForRadiusKm(radiusKm: number): number {
+  if (radiusKm <= 5) return 12
+  if (radiusKm <= 15) return 11
+  if (radiusKm <= 30) return 10
+  if (radiusKm <= 60) return 9
+  if (radiusKm <= 120) return 8
+  return 7
 }
 
 function lambert93ToWgs84(
@@ -1435,7 +1494,15 @@ export default function ClientsPage() {
   const [mapAgeSliderMax, setMapAgeSliderMax] = useState(daysToSlider(MAX_AGE_DAYS))
   const [showMapListPanel, setShowMapListPanel] = useState(true)
   const [showCegeclimPresenceModal, setShowCegeclimPresenceModal] = useState(false)
-  
+
+  // NOUVEAU (test géolocalisation) : position navigateur + jauge de rayon.
+  const [userPosition, setUserPosition] = useState<UserPosition | null>(null)
+  const [geoLocating, setGeoLocating] = useState(false)
+  const [geoError, setGeoError] = useState<string | null>(null)
+  const [geoRadiusEnabled, setGeoRadiusEnabled] = useState(false)
+  const [geoRadiusKm, setGeoRadiusKm] = useState(25)
+  const [geoRadiusProspectsOnly, setGeoRadiusProspectsOnly] = useState(false)
+
   function openPreviousClient() {
   if (!previousClient) return
   setSelectedClient(previousClient)
@@ -2014,6 +2081,62 @@ function isRowCapaciteGaz(row: any) {
     }
   }
 
+  // NOUVEAU (test géolocalisation) : demande de position au navigateur.
+  function locateUserOnMap() {
+    if (typeof window === 'undefined' || !navigator.geolocation) {
+      setGeoError("La géolocalisation n'est pas disponible sur ce navigateur.")
+      return
+    }
+
+    setGeoLocating(true)
+    setGeoError(null)
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const next: UserPosition = {
+          lat: position.coords.latitude,
+          lng: position.coords.longitude,
+          accuracy: Number.isFinite(position.coords.accuracy) ? position.coords.accuracy : null,
+        }
+
+        setUserPosition(next)
+        setGeoRadiusEnabled(true)
+        setGeoLocating(false)
+
+        const map = leafletMapRef.current
+        if (map && typeof map.setView === 'function') {
+          try {
+            map.setView([next.lat, next.lng], zoomForRadiusKm(geoRadiusKm))
+          } catch {}
+        }
+      },
+      (error) => {
+        setGeoLocating(false)
+        const messages: Record<number, string> = {
+          1: 'Accès refusé : autorisez la localisation dans le navigateur (site en HTTPS obligatoire).',
+          2: 'Position indisponible. Vérifiez le GPS ou la connexion réseau.',
+          3: 'Délai dépassé lors de la localisation. Réessayez.',
+        }
+        setGeoError(messages[error.code] || 'Erreur de géolocalisation.')
+      },
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 }
+    )
+  }
+
+  function recenterOnUser() {
+    const map = leafletMapRef.current
+    if (!map || !userPosition) return
+    try {
+      map.setView([userPosition.lat, userPosition.lng], zoomForRadiusKm(geoRadiusKm))
+    } catch {}
+  }
+
+  function clearUserPosition() {
+    setUserPosition(null)
+    setGeoRadiusEnabled(false)
+    setGeoError(null)
+  }
+
   const normalizedSocieteFilter = useMemo(
     () => normalizeScopeValue(societeFilter),
     [societeFilter]
@@ -2216,6 +2339,12 @@ function isRowCapaciteGaz(row: any) {
     if (sommeilRow) return sommeilRow.numero_client_sage || 'SOMMEIL'
 
     return 'NON'
+  }
+
+  // NOUVEAU (test géolocalisation) : distance entre ma position et une entreprise.
+  function getDistanceFromUserKm(row: Pick<ClientRow, 'latitude' | 'longitude'>): number | null {
+    if (!userPosition) return null
+    return distanceKmWgs84(userPosition.lat, userPosition.lng, row.latitude, row.longitude)
   }
 
 
@@ -2504,6 +2633,16 @@ const mapLegendSectors = useMemo(() => {
     []
   )
 
+  // NOUVEAU (test géolocalisation) : style dédié à la jauge de rayon (simple curseur).
+  const geoRadiusSliderStyle = useMemo<React.CSSProperties>(
+    () => ({
+      ...dualRangeStyle,
+      pointerEvents: 'auto',
+      zIndex: 6,
+    }),
+    []
+  )
+
 const visibleMapPoints = useMemo(() => {
   return [
     ...(showMapCegeclim ? mapCegeclimPoints : []),
@@ -2521,6 +2660,22 @@ const visibleMapPoints = useMemo(() => {
       if (ageDays < mapAgeDaysMin || ageDays > mapAgeDaysMax) return false
     }
 
+    // NOUVEAU (test géolocalisation) : filtre par rayon autour de ma position.
+    if (GEO_RADIUS_FEATURE && geoRadiusEnabled && userPosition) {
+      const appliesToRow = !geoRadiusProspectsOnly || !isCegeclimAny
+
+      if (appliesToRow) {
+        const distanceToUser = distanceKmWgs84(
+          userPosition.lat,
+          userPosition.lng,
+          client.latitude,
+          client.longitude
+        )
+
+        if (distanceToUser == null || distanceToUser > geoRadiusKm) return false
+      }
+    }
+
     return true
   })
 }, [
@@ -2535,6 +2690,10 @@ const visibleMapPoints = useMemo(() => {
   mapAgeDaysMax,
   activeCegeclimBySiret,
   sommeilCegeclimBySiret,
+  geoRadiusEnabled,
+  geoRadiusKm,
+  geoRadiusProspectsOnly,
+  userPosition,
 ])
 
 const mapRenderPoints = useDeferredValue(visibleMapPoints)
@@ -2543,10 +2702,20 @@ const visibleMapCount = mapRenderPoints.length
 const visibleMapRows = useMemo(() => {
   if (!showMapListPanel) return []
 
+  // NOUVEAU (test géolocalisation) : quand ma position est connue,
+  // la liste latérale est triée du plus proche au plus éloigné.
+  if (userPosition) {
+    return [...mapRenderPoints].sort((a, b) => {
+      const da = distanceKmWgs84(userPosition.lat, userPosition.lng, a.latitude, a.longitude) ?? 999999
+      const db = distanceKmWgs84(userPosition.lat, userPosition.lng, b.latitude, b.longitude) ?? 999999
+      return da - db
+    })
+  }
+
   return [...mapRenderPoints].sort((a, b) =>
     String(a.raison_sociale_affichee || '').localeCompare(String(b.raison_sociale_affichee || ''), 'fr')
   )
-}, [mapRenderPoints, showMapListPanel])
+}, [mapRenderPoints, showMapListPanel, userPosition])
 
 const mapBoundsSignature = useMemo(() => {
   if (!mapOpen || mapRenderPoints.length === 0) return ''
@@ -2598,7 +2767,8 @@ useEffect(() => {
 
 useEffect(() => {
   if (!mapOpen) return
-  if (!mapRenderPoints.length) return
+  // NOUVEAU (test géolocalisation) : on cadre aussi quand seule ma position est affichée.
+  if (!mapRenderPoints.length && !(userPosition && geoRadiusEnabled)) return
 
   let cancelled = false
   let attempts = 0
@@ -2632,23 +2802,26 @@ useEffect(() => {
         return
       }
 
-      if (mapRenderPoints.length === 1) {
-        map.setView(
-          [
-            mapRenderPoints[0].latitude as number,
-            mapRenderPoints[0].longitude as number,
-          ],
-          12
-        )
-        return
-      }
-
-      const bounds = mapRenderPoints.map((client) => [
+      const boundsPoints: [number, number][] = mapRenderPoints.map((client) => [
         client.latitude as number,
         client.longitude as number,
       ])
 
-      map.fitBounds(bounds, { padding: [30, 30] })
+      if (userPosition && geoRadiusEnabled) {
+        boundsPoints.push([userPosition.lat, userPosition.lng])
+      }
+
+      if (boundsPoints.length === 0) return
+
+      if (boundsPoints.length === 1) {
+        map.setView(
+          boundsPoints[0],
+          userPosition && geoRadiusEnabled ? zoomForRadiusKm(geoRadiusKm) : 12
+        )
+        return
+      }
+
+      map.fitBounds(boundsPoints, { padding: [30, 30] })
     } catch (e) {
       if (attempts < 10) {
         attempts += 1
@@ -2663,7 +2836,7 @@ useEffect(() => {
     cancelled = true
     window.clearTimeout(timeout)
   }
-}, [mapOpen, mapBoundsSignature, showMapListPanel])
+}, [mapOpen, mapBoundsSignature, showMapListPanel, userPosition, geoRadiusEnabled, geoRadiusKm])
 
 useEffect(() => {
   if (mapOpen) return
@@ -4867,7 +5040,6 @@ const selectedClientMapReason = useMemo(() => {
                 </section>
               )}
 
-
             {mapOpen && (
               <div style={mapOverlayStyle}>
                 <div style={mapModalStyle}>
@@ -4888,6 +5060,11 @@ const selectedClientMapReason = useMemo(() => {
                         <h2 style={{ margin: 0, fontSize: 18, lineHeight: 1.15 }}>{mapTitle}</h2>
                         <span style={mapCountBadgeStyle}>{visibleMapCount} visibles</span>
                         <span style={mapInfoTextStyle}>Ancienneté appliquée uniquement aux prospects</span>
+                        {GEO_RADIUS_FEATURE && geoRadiusEnabled && userPosition && (
+                          <span style={mapGeoBadgeStyle}>
+                            Rayon actif : {geoRadiusKm} km{geoRadiusProspectsOnly ? ' (prospects)' : ''}
+                          </span>
+                        )}
                       </div>
 
                       <div style={mapToolbarStyle}>
@@ -5076,6 +5253,190 @@ const selectedClientMapReason = useMemo(() => {
                             </div>
                           </div>
                         </details>
+
+                        {/* NOUVEAU (test géolocalisation) : jauge de rayon autour de ma position. */}
+                        {GEO_RADIUS_FEATURE && (
+                          <details style={mapDropdownStyle}>
+                            <summary
+                              style={{
+                                ...mapFilterButtonStyle,
+                                borderColor: geoRadiusEnabled && userPosition ? '#0ea5e9' : '#6aa0ff',
+                                background: geoRadiusEnabled && userPosition ? '#e0f2fe' : '#ffffff',
+                              }}
+                            >
+                              Autour de moi
+                              {geoRadiusEnabled && userPosition ? ` : ${geoRadiusKm} km` : ' : inactif'} ▾
+                            </summary>
+
+                            <div style={{ ...mapDropdownPanelStyle, width: 380, maxWidth: '54vw' }}>
+                              <div style={{ fontWeight: 800, marginBottom: 8 }}>Filtre géographique (test)</div>
+
+                              <button
+                                type="button"
+                                onClick={locateUserOnMap}
+                                disabled={geoLocating}
+                                style={{
+                                  ...mapActionButtonStyle,
+                                  width: '100%',
+                                  marginBottom: 10,
+                                  cursor: geoLocating ? 'wait' : 'pointer',
+                                }}
+                              >
+                                {geoLocating
+                                  ? 'Localisation en cours…'
+                                  : userPosition
+                                    ? 'Actualiser ma position'
+                                    : '📍 Me géolocaliser'}
+                              </button>
+
+                              {geoError && (
+                                <div
+                                  style={{
+                                    fontSize: 12,
+                                    color: '#b91c1c',
+                                    marginBottom: 10,
+                                    lineHeight: 1.35,
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  {geoError}
+                                </div>
+                              )}
+
+                              {userPosition ? (
+                                <>
+                                  <label
+                                    style={{
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      gap: 8,
+                                      fontSize: 13,
+                                      fontWeight: 700,
+                                      marginBottom: 12,
+                                      cursor: 'pointer',
+                                    }}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={geoRadiusEnabled}
+                                      onChange={(e) => setGeoRadiusEnabled(e.target.checked)}
+                                    />
+                                    Activer le filtre par rayon
+                                  </label>
+
+                                  <div style={{ position: 'relative', height: 34 }}>
+                                    <div
+                                      style={{
+                                        position: 'absolute',
+                                        left: 0,
+                                        right: 0,
+                                        top: 14,
+                                        height: 6,
+                                        borderRadius: 999,
+                                        background: '#d1d5db',
+                                      }}
+                                    />
+                                    <div
+                                      style={{
+                                        position: 'absolute',
+                                        left: 0,
+                                        top: 14,
+                                        height: 6,
+                                        borderRadius: 999,
+                                        background: geoRadiusEnabled ? '#0ea5e9' : '#94a3b8',
+                                        width: `${
+                                          ((geoRadiusKm - GEO_RADIUS_MIN_KM) /
+                                            (GEO_RADIUS_MAX_KM - GEO_RADIUS_MIN_KM)) *
+                                          100
+                                        }%`,
+                                      }}
+                                    />
+                                    <input
+                                      type="range"
+                                      min={GEO_RADIUS_MIN_KM}
+                                      max={GEO_RADIUS_MAX_KM}
+                                      step={1}
+                                      value={geoRadiusKm}
+                                      onChange={(e) => {
+                                        setGeoRadiusKm(Number(e.target.value))
+                                        setGeoRadiusEnabled(true)
+                                      }}
+                                      style={geoRadiusSliderStyle}
+                                    />
+                                  </div>
+
+                                  <div style={{ marginTop: 4, fontSize: 13, fontWeight: 800, color: '#0f172a' }}>
+                                    Rayon : {geoRadiusKm} km • {visibleMapCount} entreprise(s) affichée(s)
+                                  </div>
+
+                                  <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+                                    {[5, 10, 25, 50, 100].map((preset) => (
+                                      <button
+                                        key={`geo-preset-${preset}`}
+                                        type="button"
+                                        onClick={() => {
+                                          setGeoRadiusKm(preset)
+                                          setGeoRadiusEnabled(true)
+                                        }}
+                                        style={{
+                                          ...miniButtonStyle,
+                                          fontWeight: geoRadiusKm === preset ? 800 : 500,
+                                          background: geoRadiusKm === preset ? '#e0f2fe' : '#fff',
+                                          borderColor: geoRadiusKm === preset ? '#0ea5e9' : '#999',
+                                        }}
+                                      >
+                                        {preset} km
+                                      </button>
+                                    ))}
+                                  </div>
+
+                                  <label
+                                    style={{
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      gap: 8,
+                                      fontSize: 13,
+                                      fontWeight: 700,
+                                      marginTop: 12,
+                                      cursor: 'pointer',
+                                    }}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={geoRadiusProspectsOnly}
+                                      onChange={(e) => setGeoRadiusProspectsOnly(e.target.checked)}
+                                    />
+                                    Appliquer aux prospects uniquement
+                                  </label>
+
+                                  <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+                                    <button type="button" onClick={recenterOnUser} style={miniButtonStyle}>
+                                      Recentrer sur moi
+                                    </button>
+                                    <button type="button" onClick={clearUserPosition} style={miniButtonStyle}>
+                                      Effacer ma position
+                                    </button>
+                                  </div>
+
+                                  <div style={{ marginTop: 10, fontSize: 12, color: '#64748b', lineHeight: 1.35 }}>
+                                    Précision GPS :{' '}
+                                    {userPosition.accuracy != null
+                                      ? `±${Math.round(userPosition.accuracy)} m`
+                                      : 'NC'}
+                                    <br />
+                                    Le rayon s'applique après tous les autres filtres de la carte.
+                                  </div>
+                                </>
+                              ) : (
+                                <div style={{ fontSize: 12, color: '#64748b', lineHeight: 1.35 }}>
+                                  Lancez la géolocalisation pour activer la jauge de rayon.
+                                  <br />
+                                  La localisation navigateur nécessite un accès en HTTPS.
+                                </div>
+                              )}
+                            </div>
+                          </details>
+                        )}
                       </div>
                     </div>
 
@@ -5129,6 +5490,25 @@ const selectedClientMapReason = useMemo(() => {
                         />
                       </div>
 
+                      {/* NOUVEAU (test géolocalisation) : bouton principal "Me localiser". */}
+                      {GEO_RADIUS_FEATURE && (
+                        <button
+                          type="button"
+                          onClick={locateUserOnMap}
+                          disabled={geoLocating}
+                          style={{
+                            ...mapActionButtonStyle,
+                            borderColor: userPosition ? '#0ea5e9' : '#cbd5e1',
+                            background: userPosition ? '#e0f2fe' : '#ffffff',
+                            color: userPosition ? '#075985' : '#0f172a',
+                            cursor: geoLocating ? 'wait' : 'pointer',
+                          }}
+                          title="Centrer la carte sur ma position (HTTPS requis)"
+                        >
+                          {geoLocating ? 'Localisation…' : userPosition ? '📍 Position OK' : '📍 Me localiser'}
+                        </button>
+                      )}
+
                       <button
                         type="button"
                         onClick={() => setShowMapListPanel((prev) => !prev)}
@@ -5169,7 +5549,7 @@ const selectedClientMapReason = useMemo(() => {
                       >
                         Chargement...
                       </div>
-                    ) : visibleMapCount === 0 ? (
+                    ) : visibleMapCount === 0 && !(GEO_RADIUS_FEATURE && userPosition && geoRadiusEnabled) ? (
                       <div
                         style={{
                           flex: 1,
@@ -5219,6 +5599,49 @@ const selectedClientMapReason = useMemo(() => {
                               url="https://api.thunderforest.com/neighbourhood/{z}/{x}/{y}.png?apikey=3750cd83dca34199969e6b9e2dcdca40"
                             />
 
+                            {/* NOUVEAU (test géolocalisation) : cercle de rayon + marqueur position. */}
+                            {GEO_RADIUS_FEATURE && userPosition && (
+                              <>
+                                {geoRadiusEnabled && (
+                                  <Circle
+                                    center={[userPosition.lat, userPosition.lng] as any}
+                                    radius={geoRadiusKm * 1000}
+                                    pathOptions={{
+                                      color: '#0ea5e9',
+                                      fillColor: '#0ea5e9',
+                                      fillOpacity: 0.08,
+                                      weight: 2,
+                                      dashArray: '6 6',
+                                    }}
+                                  />
+                                )}
+
+                                <CircleMarker
+                                  center={[userPosition.lat, userPosition.lng] as any}
+                                  radius={8}
+                                  pathOptions={{
+                                    color: '#ffffff',
+                                    fillColor: '#0ea5e9',
+                                    fillOpacity: 1,
+                                    weight: 3,
+                                  }}
+                                >
+                                  <Tooltip direction="top" offset={[0, -10]} opacity={1}>
+                                    <div style={{ fontSize: 13, lineHeight: 1.4 }}>
+                                      <div style={{ fontWeight: 800 }}>Ma position</div>
+                                      <div>Rayon : {geoRadiusEnabled ? `${geoRadiusKm} km` : 'filtre inactif'}</div>
+                                      <div>
+                                        Précision :{' '}
+                                        {userPosition.accuracy != null
+                                          ? `±${Math.round(userPosition.accuracy)} m`
+                                          : 'NC'}
+                                      </div>
+                                    </div>
+                                  </Tooltip>
+                                </CircleMarker>
+                              </>
+                            )}
+
                             {mapRenderPoints.map((client) => {
                               const isCegeclim = isClientPresentInCegeclim(client, activeCegeclimBySiret)
                               const isCegeclimSommeil = isClientInCegeclimSommeil(client)
@@ -5226,6 +5649,7 @@ const selectedClientMapReason = useMemo(() => {
                               const markerColor = getSectorColor(sectorLabel)
                               const markerBorderColor = isCegeclim ? '#facc15' : isCegeclimSommeil ? '#dc2626' : '#334155'
                               const markerWeight = isCegeclim || isCegeclimSommeil ? 3 : 1.5
+                              const distanceFromUser = getDistanceFromUserKm(client)
 
                               return (
                                 <CircleMarker
@@ -5258,6 +5682,9 @@ const selectedClientMapReason = useMemo(() => {
                                       <div><b>Tél :</b> {client.telephone || 'NC'}</div>
                                       <div><b>Capital social :</b> {client.capital_social || 'NC'}</div>
                                       <div><b>Dirigeant :</b> {client.nom_dirigeant || 'NC'}</div>
+                                      {distanceFromUser != null && (
+                                        <div><b>Distance :</b> {distanceFromUser} km</div>
+                                      )}
                                     </div>
                                   </Tooltip>
                                 </CircleMarker>
@@ -5288,13 +5715,18 @@ const selectedClientMapReason = useMemo(() => {
                             }}
                           >
                             Entreprises visibles ({visibleMapRows.length})
+                            {userPosition && (
+                              <span style={{ marginLeft: 8, fontSize: 12, fontWeight: 600, color: '#0369a1' }}>
+                                triées par distance
+                              </span>
+                            )}
                           </div>
 
                           <div style={{ padding: '8px 10px', borderBottom: '1px solid #e2e8f0', background: '#f8fafc' }}>
                             <div
                               style={{
                                 display: 'grid',
-                                gridTemplateColumns: '1fr 110px 80px',
+                                gridTemplateColumns: userPosition ? '1fr 100px 70px 60px' : '1fr 110px 80px',
                                 gap: 10,
                                 fontWeight: 800,
                                 fontSize: 12,
@@ -5304,6 +5736,7 @@ const selectedClientMapReason = useMemo(() => {
                               <div>Désignation</div>
                               <div>Ville</div>
                               <div>Créée le</div>
+                              {userPosition && <div>Dist.</div>}
                             </div>
                           </div>
 
@@ -5313,6 +5746,7 @@ const selectedClientMapReason = useMemo(() => {
                               const isCegeclimSommeil = isClientInCegeclimSommeil(client)
                               const sectorLabel = getClientSectorLabel(client)
                               const markerBorder = isCegeclim ? '2px solid #facc15' : isCegeclimSommeil ? '2px solid #dc2626' : '2px solid #64748b'
+                              const distanceFromUser = getDistanceFromUserKm(client)
 
                               return (
                                 <button
@@ -5332,7 +5766,7 @@ const selectedClientMapReason = useMemo(() => {
                                   <div
                                     style={{
                                       display: 'grid',
-                                      gridTemplateColumns: '1fr 110px 80px',
+                                      gridTemplateColumns: userPosition ? '1fr 100px 70px 60px' : '1fr 110px 80px',
                                       gap: 10,
                                       alignItems: 'center',
                                       fontSize: 13,
@@ -5372,6 +5806,12 @@ const selectedClientMapReason = useMemo(() => {
                                     </div>
 
                                     <div>{client.dateCreationEtablissement || '—'}</div>
+
+                                    {userPosition && (
+                                      <div style={{ fontWeight: 700, color: '#0369a1', whiteSpace: 'nowrap' }}>
+                                        {distanceFromUser != null ? `${distanceFromUser} km` : '—'}
+                                      </div>
+                                    )}
                                   </div>
                                 </button>
                               )
@@ -5558,6 +5998,14 @@ const selectedClientMapReason = useMemo(() => {
                       <div><b>Département :</b> {getClientDepartment(selectedClient) || 'NC'}</div>
                       <div><b>Coordonnée X :</b> {selectedClient.coordonneeLambertAbscisseEtablissement ?? 'NC'}</div>
                       <div><b>Coordonnée Y :</b> {selectedClient.coordonneeLambertOrdonneeEtablissement ?? 'NC'}</div>
+                      {GEO_RADIUS_FEATURE && userPosition && (
+                        <div>
+                          <b>Distance depuis ma position :</b>{' '}
+                          {getDistanceFromUserKm(selectedClient) != null
+                            ? `${getDistanceFromUserKm(selectedClient)} km`
+                            : 'NC'}
+                        </div>
+                      )}
                       <div style={{ marginTop: 10 }}>
                         <strong>Raison :</strong> {selectedClientMapReason}
                       </div>
@@ -6476,6 +6924,19 @@ const mapCountBadgeStyle: React.CSSProperties = {
   borderRadius: 999,
   padding: '4px 10px',
   background: '#0f172a',
+  color: '#ffffff',
+  fontSize: 12,
+  fontWeight: 800,
+  whiteSpace: 'nowrap',
+}
+
+// NOUVEAU (test géolocalisation) : badge d'information "rayon actif".
+const mapGeoBadgeStyle: React.CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  borderRadius: 999,
+  padding: '4px 10px',
+  background: '#0ea5e9',
   color: '#ffffff',
   fontSize: 12,
   fontWeight: 800,
