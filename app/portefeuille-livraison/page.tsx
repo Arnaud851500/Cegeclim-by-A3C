@@ -191,6 +191,8 @@ type SyntheseRow = {
   total_montant_actions_ht: number
 }
 
+type SyntheseGroupBy = 'agence' | 'famille'
+
 type DetailSelection = {
   representant?: string
   agence?: string
@@ -892,12 +894,19 @@ export default function PortefeuilleLivraisonPage() {
     })
   }, [documentsFiltresControle])
 
+  const [syntheseGroupBy, setSyntheseGroupBy] = useState<SyntheseGroupBy>('agence')
+
   const synthese = useMemo<SyntheseRow[]>(() => {
     const map = new Map<string, SyntheseRow>()
     for (const doc of documentsFiltresControle) {
-      const key = [doc.representant, doc.agence, doc.type_document].join('::')
+      // Par famille macro : un document qui couvre plusieurs familles (rare,
+      // ex. "PV, R/R") forme sa propre ligne avec le libellé joint — pas de
+      // double-compte du document, pas d'approximation sur son montant.
+      const groupAgence = syntheseGroupBy === 'famille' ? safeText(doc.familles_macro, 'Sans famille macro') : doc.agence
+      const groupRepresentant = syntheseGroupBy === 'famille' ? '' : doc.representant
+      const key = [groupRepresentant, groupAgence, doc.type_document].join('::')
       const mois = doc.mois_livraison || 'SANS_DATE_LIVRAISON'
-      if (!map.has(key)) map.set(key, { key, representant: doc.representant, agence: doc.agence, type_document: doc.type_document, byMonth: {}, total_nb_documents: 0, total_montant_ht: 0, total_nb_anomalies: 0, total_nb_frais_port_manquant: 0, total_nb_bl_a_supprimer: 0, total_montant_actions_ht: 0 })
+      if (!map.has(key)) map.set(key, { key, representant: groupRepresentant, agence: groupAgence, type_document: doc.type_document, byMonth: {}, total_nb_documents: 0, total_montant_ht: 0, total_nb_anomalies: 0, total_nb_frais_port_manquant: 0, total_nb_bl_a_supprimer: 0, total_montant_actions_ht: 0 })
       const row = map.get(key)!
       if (!row.byMonth[mois]) row.byMonth[mois] = { nb_documents: 0, montant_ht: 0, nb_anomalies: 0, nb_frais_port_manquant: 0, nb_bl_a_supprimer: 0, montant_actions_ht: 0 }
       const isAnomaly = isDirectControlAction(doc.action_recommandee)
@@ -912,7 +921,25 @@ export default function PortefeuilleLivraisonPage() {
       row.total_nb_bl_a_supprimer += isPortToRemove ? 1 : 0; row.total_montant_actions_ht += actionAmount
     }
     return Array.from(map.values()).sort((a, b) => a.agence.localeCompare(b.agence, 'fr') || a.representant.localeCompare(b.representant, 'fr') || a.type_document.localeCompare(b.type_document, 'fr'))
-  }, [documentsFiltresControle])
+  }, [documentsFiltresControle, syntheseGroupBy])
+
+  // Ligne TOTAL du tableau de synthèse : même structure qu'une ligne normale,
+  // simple somme de toutes les lignes affichées (déjà filtrées).
+  const syntheseTotal = useMemo<SyntheseRow>(() => {
+    const total: SyntheseRow = { key: '__TOTAL__', representant: '', agence: '', type_document: '', byMonth: {}, total_nb_documents: 0, total_montant_ht: 0, total_nb_anomalies: 0, total_nb_frais_port_manquant: 0, total_nb_bl_a_supprimer: 0, total_montant_actions_ht: 0 }
+    for (const row of synthese) {
+      for (const [mois, cell] of Object.entries(row.byMonth)) {
+        if (!total.byMonth[mois]) total.byMonth[mois] = { nb_documents: 0, montant_ht: 0, nb_anomalies: 0, nb_frais_port_manquant: 0, nb_bl_a_supprimer: 0, montant_actions_ht: 0 }
+        total.byMonth[mois].nb_documents += cell.nb_documents; total.byMonth[mois].montant_ht += cell.montant_ht
+        total.byMonth[mois].nb_anomalies += cell.nb_anomalies; total.byMonth[mois].nb_frais_port_manquant += cell.nb_frais_port_manquant
+        total.byMonth[mois].nb_bl_a_supprimer += cell.nb_bl_a_supprimer; total.byMonth[mois].montant_actions_ht += cell.montant_actions_ht
+      }
+      total.total_nb_documents += row.total_nb_documents; total.total_montant_ht += row.total_montant_ht
+      total.total_nb_anomalies += row.total_nb_anomalies; total.total_nb_frais_port_manquant += row.total_nb_frais_port_manquant
+      total.total_nb_bl_a_supprimer += row.total_nb_bl_a_supprimer; total.total_montant_actions_ht += row.total_montant_actions_ht
+    }
+    return total
+  }, [synthese])
 
   const representants = useMemo(() => {
     const values = Array.from(new Set(lignes.map((l) => safeText(l.representant, 'Sans représentant')))).sort()
@@ -953,10 +980,16 @@ export default function PortefeuilleLivraisonPage() {
     return documentsFiltresControle.filter((doc) => {
       if (selection.totalType === 'general') return true
       if (selection.totalType === 'colonne') return doc.mois_livraison === selection.mois_livraison
-      if (selection.totalType === 'ligne') return doc.representant === selection.representant && doc.agence === selection.agence && doc.type_document === selection.type_document
-      return doc.representant === selection.representant && doc.agence === selection.agence && doc.type_document === selection.type_document && doc.mois_livraison === selection.mois_livraison
+      // En mode "par famille macro", `selection.agence` porte en réalité la
+      // valeur de familles_macro (déjà mise à la place de agence lors de la
+      // construction de la ligne de synthèse) — on compare donc au bon champ.
+      const groupMatches = syntheseGroupBy === 'famille'
+        ? doc.familles_macro === selection.agence
+        : doc.representant === selection.representant && doc.agence === selection.agence
+      if (selection.totalType === 'ligne') return groupMatches && doc.type_document === selection.type_document
+      return groupMatches && doc.type_document === selection.type_document && doc.mois_livraison === selection.mois_livraison
     })
-  }, [documentsFiltresControle, selection])
+  }, [documentsFiltresControle, selection, syntheseGroupBy])
 
   const selectedDocumentKeys = useMemo(() => new Set(selectedDocuments.map((doc) => doc.key)), [selectedDocuments])
 
@@ -1320,14 +1353,32 @@ export default function PortefeuilleLivraisonPage() {
               <h2 className="text-lg font-semibold">Tableau de synthèse</h2>
               <p className="text-sm text-slate-500">Clique sur une cellule, une ligne, une colonne ou le total général pour afficher le détail en dessous.</p>
             </div>
-            <button type="button" onClick={() => applyDetailSelection(null)} className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700">Réinitialiser détail</button>
+            <div className="flex items-center gap-2">
+              <div className="flex rounded-xl border border-slate-300 bg-slate-50 p-1 text-sm">
+                <button
+                  type="button"
+                  onClick={() => { setSyntheseGroupBy('agence'); applyDetailSelection(null) }}
+                  className={['rounded-lg px-3 py-1.5 font-medium', syntheseGroupBy === 'agence' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'].join(' ')}
+                >
+                  Par agence &amp; collaborateur
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setSyntheseGroupBy('famille'); applyDetailSelection(null) }}
+                  className={['rounded-lg px-3 py-1.5 font-medium', syntheseGroupBy === 'famille' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'].join(' ')}
+                >
+                  Par famille macro
+                </button>
+              </div>
+              <button type="button" onClick={() => applyDetailSelection(null)} className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700">Réinitialiser détail</button>
+            </div>
           </div>
           <div className="max-h-[580px] overflow-auto">
             <table className="min-w-full border-collapse text-sm">
               <thead className="sticky top-0 z-10 bg-slate-100">
                 <tr>
-                  <th className="sticky left-0 z-20 whitespace-nowrap border-b border-r border-slate-200 bg-slate-100 px-3 py-2 text-left">Agence</th>
-                  <th className="whitespace-nowrap border-b border-r border-slate-200 px-2 py-2 text-left">Représentant</th>
+                  <th className="sticky left-0 z-20 whitespace-nowrap border-b border-r border-slate-200 bg-slate-100 px-3 py-2 text-left">{syntheseGroupBy === 'famille' ? 'Famille macro' : 'Agence'}</th>
+                  {syntheseGroupBy === 'agence' && <th className="whitespace-nowrap border-b border-r border-slate-200 px-2 py-2 text-left">Représentant</th>}
                   <th className="whitespace-nowrap border-b border-r border-slate-200 px-2 py-2 text-left">Type doc</th>
                   {isBlSelected && (
                     <>
@@ -1346,7 +1397,7 @@ export default function PortefeuilleLivraisonPage() {
                 {synthese.map((row) => (
                   <tr key={row.key} className="hover:bg-slate-50">
                     <td className="sticky left-0 border-b border-r border-slate-200 bg-white px-3 py-2 font-medium">{row.agence}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{row.representant}</td>
+                    {syntheseGroupBy === 'agence' && <td className="border-b border-r border-slate-200 px-2 py-2">{row.representant}</td>}
                     <td className="border-b border-r border-slate-200 px-2 py-2">{row.type_document}</td>
                     {isBlSelected && (
                       <>
@@ -1386,8 +1437,46 @@ export default function PortefeuilleLivraisonPage() {
                     </td>
                   </tr>
                 ))}
-                {synthese.length === 0 && <tr><td colSpan={(isBlSelected ? 7 : 4) + moisLivraison.length} className="px-4 py-8 text-center text-slate-500">Aucune donnée trouvée avec les filtres sélectionnés.</td></tr>}
+                {synthese.length === 0 && <tr><td colSpan={(isBlSelected ? 7 : 4) - (syntheseGroupBy === 'famille' ? 1 : 0) + moisLivraison.length} className="px-4 py-8 text-center text-slate-500">Aucune donnée trouvée avec les filtres sélectionnés.</td></tr>}
               </tbody>
+              {synthese.length > 0 && (
+                <tfoot className="sticky bottom-0 z-10 bg-slate-800 text-white">
+                  <tr>
+                    <td className="sticky left-0 z-20 border-t border-slate-700 bg-slate-800 px-3 py-2 font-semibold" colSpan={syntheseGroupBy === 'agence' ? 2 : 1}>TOTAL</td>
+                    <td className="border-t border-slate-700 px-2 py-2"></td>
+                    {isBlSelected && (
+                      <>
+                        <td className="border-t border-slate-700 px-2 py-2 text-right font-semibold">{syntheseTotal.total_nb_anomalies.toLocaleString('fr-FR')}</td>
+                        <td className="border-t border-slate-700 px-2 py-2 text-right font-semibold">{syntheseTotal.total_nb_frais_port_manquant.toLocaleString('fr-FR')}</td>
+                        <td className="border-t border-slate-700 px-2 py-2 text-right font-semibold">
+                          <div>{syntheseTotal.total_nb_bl_a_supprimer.toLocaleString('fr-FR')}</div>
+                          {syntheseTotal.total_montant_actions_ht > 0 && <div className="text-[11px] font-medium">{formatMoneyCents(syntheseTotal.total_montant_actions_ht)}</div>}
+                        </td>
+                      </>
+                    )}
+                    {moisLivraison.map((mois) => {
+                      const cell = syntheseTotal.byMonth[mois]
+                      const hasValue = Boolean(cell && cell.nb_documents > 0)
+                      return (
+                        <td key={`total-${mois}`} onClick={() => applyDetailSelection({ mois_livraison: mois, totalType: 'colonne' })} className="cursor-pointer border-t border-slate-700 px-2 py-2 text-right hover:bg-slate-700">
+                          {hasValue ? (
+                            <div className="leading-tight">
+                              <div className="whitespace-nowrap font-semibold">{cell.nb_documents.toLocaleString('fr-FR')} docs</div>
+                              <div className="whitespace-nowrap text-xs text-slate-300">{formatMoneyCompact(cell.montant_ht)}</div>
+                            </div>
+                          ) : '-'}
+                        </td>
+                      )
+                    })}
+                    <td onClick={() => applyDetailSelection({ totalType: 'general' })} className="cursor-pointer border-t border-slate-700 px-3 py-2 text-right hover:bg-slate-700">
+                      <div className="leading-tight">
+                        <div className="whitespace-nowrap font-semibold">{syntheseTotal.total_nb_documents.toLocaleString('fr-FR')} docs</div>
+                        <div className="whitespace-nowrap text-xs text-slate-300">{formatMoneyCompact(syntheseTotal.total_montant_ht)}</div>
+                      </div>
+                    </td>
+                  </tr>
+                </tfoot>
+              )}
             </table>
           </div>
         </section>
