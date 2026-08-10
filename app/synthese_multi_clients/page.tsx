@@ -1851,19 +1851,20 @@ function recomputeClientN1ComparisonFromMonths(row: SummaryRow, monthRows: Summa
   const devisCompareRowsN1 = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= N1_COMPARISON_MONTH)
   const caRowsN = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= CA_CLOSED_MONTH)
   const caCompareRowsN1 = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= CA_N1_COMPARISON_MONTH)
-  const encoursRowsN = devisRowsN
+  // Encours commande : PAS de recalcul ici. C'est un instantané ("où en est le
+  // portefeuille aujourd'hui"), pas une donnée à comparer par période comme
+  // Devis/CA/Marge — il n'a jamais eu besoin d'entrer dans cette fonction.
+  // row.encoursCommandeN / ByMacro / ByType viennent déjà de la ligne
+  // row_kind='client' en base (le vrai total, sans borne d'année), et le
+  // spread `...row` plus bas les laisse passer tels quels. Le recalcul
+  // précédent, à partir des lignes mensuelles (bornées à l'année N), écrasait
+  // silencieusement ce bon total par un total tronqué à l'année en cours —
+  // c'est la cause du pavé "Encours commande" incohérent avec Focus Mensuel.
 
   const devisYtdNByMacro = sumMacro(devisRowsN, (monthRow) => monthRow.devisYtdNByMacro)
   const devisYtdN = sumSummaryAmount(devisRowsN, (monthRow) => monthRow.devisYtdN)
   const devisYtdN1ByMacro = sumMacro(devisCompareRowsN1, (monthRow) => monthRow.devisN1ByMacro)
   const devisYtdN1 = sumSummaryAmount(devisCompareRowsN1, (monthRow) => monthRow.devisN1)
-
-  const encoursCommandeN = sumSummaryAmount(encoursRowsN, (monthRow) => monthRow.encoursCommandeN)
-  const encoursCommandeNByMacro = sumMacro(encoursRowsN, (monthRow) => monthRow.encoursCommandeNByMacro)
-  const encoursCommandeNByType = ENCOURS_DOCUMENT_TYPES.reduce((acc, type) => {
-    acc[type] = encoursRowsN.reduce((sum, monthRow) => sum + safeNumber(monthRow.encoursCommandeNByType[type]), 0)
-    return acc
-  }, emptyEncoursByType())
 
   const caYtdNByMacro = sumMacro(caRowsN, (monthRow) => monthRow.caYtdNByMacro)
   const margeYtdNValueByMacro = sumMacro(caRowsN, (monthRow) => monthRow.margeYtdNValueByMacro)
@@ -1885,9 +1886,6 @@ function recomputeClientN1ComparisonFromMonths(row: SummaryRow, monthRows: Summa
     devisYtdNByMacro,
     devisYtdN1,
     devisYtdN1ByMacro,
-    encoursCommandeN,
-    encoursCommandeNByMacro,
-    encoursCommandeNByType,
     caYtdN,
     caYtdNByMacro,
     margePctYtdN,
