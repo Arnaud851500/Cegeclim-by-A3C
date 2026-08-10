@@ -173,6 +173,28 @@ type LastBusinessDates = {
   bl: string | null
 }
 
+type UserScope = {
+  loaded: boolean
+  displayName: string
+  profilName: string
+  allowedAgences: string[]
+  allowedDepartements: string[]
+  allowedCollaborateurs: string[]
+  canChangeScope: boolean
+  canAutorisation: boolean
+}
+
+const DEFAULT_USER_SCOPE: UserScope = {
+  loaded: false,
+  displayName: '',
+  profilName: '',
+  allowedAgences: [],
+  allowedDepartements: [],
+  allowedCollaborateurs: [],
+  canChangeScope: true, // par défaut non restrictif tant que le périmètre n'est pas chargé
+  canAutorisation: false,
+}
+
 type AggregatedValue = {
   ca_ht: number
   marge_valeur: number
@@ -854,11 +876,13 @@ function MultiSelect({
   values,
   selected,
   onChange,
+  locked,
 }: {
   label: string
   values: string[]
   selected: string[]
   onChange: (values: string[]) => void
+  locked?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState('')
@@ -873,6 +897,16 @@ function MultiSelect({
     else onChange([...selected, value])
   }
 
+  if (locked) {
+    return (
+      <div className="relative" title="Périmètre figé par votre profil d’accès">
+        <div className="flex h-11 w-full cursor-not-allowed items-center justify-between rounded-xl border border-slate-200 bg-slate-100 px-3 text-left text-sm font-semibold text-slate-500 shadow-sm">
+          <span className="truncate">{label} {selected.length ? `(${selected.length})` : ''}</span>
+          <span className="text-slate-400">🔒</span>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="relative">
@@ -2450,6 +2484,7 @@ function WidgetRenderer({ rows, widget, onUpdate }: { rows: StudioRow[]; widget:
 export default function AtelierAnalysePage() {
   const [rows, setRows] = useState<StudioRow[]>([])
   const [availableYearsAllTime, setAvailableYearsAllTime] = useState<number[]>([])
+  const [userScope, setUserScope] = useState<UserScope>(DEFAULT_USER_SCOPE)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [globalFilters, setGlobalFilters] = useState<GlobalFilters>(DEFAULT_FILTERS)
@@ -2576,6 +2611,53 @@ export default function AtelierAnalysePage() {
     }
   }
 
+  async function loadUserScope() {
+    try {
+      const { data: authData } = await supabase.auth.getUser()
+      const email = (authData?.user?.email || '').toLowerCase().trim()
+      if (!email) return
+
+      const { data, error } = await supabase
+        .from('user_page_access')
+        .select('display_name, can_change_scope, can_autorisation, allowed_agences, allowed_departements, allowed_collaborateurs, access_profiles ( name )')
+        .eq('email', email)
+        .maybeSingle()
+      if (error) throw error
+      if (!data) return
+
+      const allowedAgences = ((data as any).allowed_agences || []).filter(Boolean)
+      const allowedDepartements = ((data as any).allowed_departements || []).filter(Boolean)
+      const codes = ((data as any).allowed_collaborateurs || [])
+        .map((c: string) => safeText(c, '').trim().toUpperCase())
+        .filter(Boolean)
+
+      // Le périmètre est saisi en CODES (« AAMENA »), les widgets filtrent sur le NOM COMPLET
+      // (« AAMENA Damien »). On résout via ref_collaborateurs, comme le fait my_allowed_collaborateurs_set() côté RLS.
+      let allowedCollaborateurs: string[] = []
+      if (codes.length) {
+        const { data: collabRows } = await supabase.from('ref_collaborateurs').select('nom, nom_prenom')
+        allowedCollaborateurs = (collabRows || [])
+          .filter((r: any) => codes.includes(safeText(r.nom, '').trim().toUpperCase()))
+          .map((r: any) => safeText(r.nom_prenom, '').trim())
+          .filter(Boolean)
+      }
+
+      setUserScope({
+        loaded: true,
+        displayName: safeText((data as any).display_name, ''),
+        profilName: safeText((data as any).access_profiles?.name, ''),
+        allowedAgences,
+        allowedDepartements,
+        allowedCollaborateurs,
+        canChangeScope: !!(data as any).can_change_scope,
+        canAutorisation: !!(data as any).can_autorisation,
+      })
+    } catch (_e) {
+      // Silencieux : en cas d'échec, l'atelier reste utilisable sans verrouillage visuel
+      // (les policies RLS protègent déjà les données côté base dans tous les cas).
+    }
+  }
+
   async function loadAvailableYearsAllTime() {
     try {
       const { data, error } = await supabase.rpc('get_available_years_atelier')
@@ -2640,6 +2722,7 @@ export default function AtelierAnalysePage() {
 
     async function bootstrapSavedViews() {
       loadAvailableYearsAllTime()
+      loadUserScope()
       const views = await loadSavedViews()
       if (cancelled) return
 
@@ -2669,6 +2752,20 @@ export default function AtelierAnalysePage() {
     globalFilters.horsStatistique,
     savedViewBootstrapped,
   ])
+
+  const scopeLocked = userScope.loaded && !userScope.canChangeScope && !userScope.canAutorisation
+
+  useEffect(() => {
+    if (!scopeLocked) return
+    setGlobalFilters((prev) => ({
+      ...prev,
+      agences: userScope.allowedAgences.length ? userScope.allowedAgences : prev.agences,
+      departementsTiers: userScope.allowedDepartements.length ? userScope.allowedDepartements : prev.departementsTiers,
+      collaborateursFacture: userScope.allowedCollaborateurs.length ? userScope.allowedCollaborateurs : prev.collaborateursFacture,
+      collaborateurs: userScope.allowedCollaborateurs.length ? userScope.allowedCollaborateurs : prev.collaborateurs,
+    }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopeLocked, userScope.allowedAgences.join('|'), userScope.allowedDepartements.join('|'), userScope.allowedCollaborateurs.join('|')])
 
   const available = useMemo(() => {
     const loadedYears = uniqueSorted(rows.map((r) => r.annee)).sort((a, b) => Number(b) - Number(a)).map(Number)
@@ -3102,6 +3199,14 @@ export default function AtelierAnalysePage() {
               <p className="mt-2 text-xs font-semibold text-slate-500">Les boutons BL M-x ne relancent plus les rebuilds lourds : ils déplacent uniquement les lignes BL/BR concernées dans l’agrégat activité.</p>
             </div>
           )}
+          {scopeLocked && (
+            <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm font-bold text-amber-900">
+              Périmètre utilisateur appliqué : Profil : {userScope.profilName || '—'}
+              {userScope.allowedAgences.length ? ` · Agences : ${userScope.allowedAgences.join(', ')}` : ''}
+              {userScope.allowedDepartements.length ? ` · Dép. : ${userScope.allowedDepartements.join(', ')}` : ''}
+              {userScope.allowedCollaborateurs.length ? ` · Collaborateurs : ${userScope.allowedCollaborateurs.join(', ')}` : ''}
+            </div>
+          )}
           {saveMessage && <div className="mt-4 rounded-xl bg-blue-50 p-3 text-sm font-bold text-blue-700">{saveMessage}</div>}
           {maintenanceMessage && <div className="mt-4 rounded-xl bg-emerald-50 p-3 text-sm font-bold text-emerald-800">{maintenanceMessage}</div>}
           {error && <div className="mt-4 rounded-xl bg-red-50 p-3 text-sm font-bold text-red-700">{error}</div>}
@@ -3111,11 +3216,11 @@ export default function AtelierAnalysePage() {
           <MultiSelect label="Source" values={['factures', 'activite', 'devis', 'mixte']} selected={globalFilters.sources} onChange={(v) => setGlobalFilters((p) => ({ ...p, sources: v as DataSource[] }))} />
           <MultiSelect label="Année" values={available.years.map(String)} selected={globalFilters.years.map(String)} onChange={(v) => setGlobalFilters((p) => ({ ...p, years: v.map(Number) }))} />
           <MultiSelect label="Mois" values={available.months.map((m) => `${m} - ${monthLabel(m)}`)} selected={globalFilters.months.map((m) => `${m} - ${monthLabel(m)}`)} onChange={(v) => setGlobalFilters((p) => ({ ...p, months: v.map((x) => Number(x.split(' - ')[0])) }))} />
-          <MultiSelect label="Agence" values={available.agences} selected={globalFilters.agences} onChange={(v) => setGlobalFilters((p) => ({ ...p, agences: v }))} />
+          <MultiSelect label="Agence" values={available.agences} selected={globalFilters.agences} onChange={(v) => setGlobalFilters((p) => ({ ...p, agences: v }))} locked={scopeLocked && userScope.allowedAgences.length > 0} />
           <MultiSelect label="Dépôt" values={available.depots} selected={globalFilters.depots || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, depots: v }))} />
-          <MultiSelect label="Collab. facture" values={available.collaborateursFacture} selected={globalFilters.collaborateursFacture || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, collaborateursFacture: v, collaborateurs: v }))} />
+          <MultiSelect label="Collab. facture" values={available.collaborateursFacture} selected={globalFilters.collaborateursFacture || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, collaborateursFacture: v, collaborateurs: v }))} locked={scopeLocked && userScope.allowedCollaborateurs.length > 0} />
           <MultiSelect label="Collab. tiers" values={available.collaborateursTiers} selected={globalFilters.collaborateursTiers || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, collaborateursTiers: v }))} />
-          <MultiSelect label="Dépt tiers" values={available.departementsTiers} selected={globalFilters.departementsTiers || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, departementsTiers: v }))} />
+          <MultiSelect label="Dépt tiers" values={available.departementsTiers} selected={globalFilters.departementsTiers || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, departementsTiers: v }))} locked={scopeLocked && userScope.allowedDepartements.length > 0} />
           <MultiSelect label="Famille macro" values={available.famillesMacro} selected={globalFilters.famillesMacro} onChange={(v) => setGlobalFilters((p) => ({ ...p, famillesMacro: v }))} />
           <MultiSelect label="Type document" values={relevantDocumentTypes(globalFilters.sources.includes('mixte') || globalFilters.sources.length !== 1 ? 'mixte' : globalFilters.sources[0], available.typesDocument)} selected={globalFilters.typesDocument} onChange={(v) => setGlobalFilters((p) => ({ ...p, typesDocument: v }))} />
           <FilterSelect
