@@ -37,6 +37,10 @@ type MeasureKey =
 type DimensionKey =
   | 'annee'
   | 'mois'
+  | 'annee_creation'
+  | 'mois_creation'
+  | 'annee_livraison'
+  | 'mois_livraison'
   | 'type_document'
   | 'agence_collaborateur'
   | 'depot'
@@ -61,6 +65,10 @@ type StudioRow = {
   source: Exclude<DataSource, 'mixte'>
   annee: number
   mois: number
+  annee_creation: number
+  mois_creation: number
+  annee_livraison: number
+  mois_livraison: number
   type_document: string
   collaborateur: string // compatibilité vues existantes : correspond au collaborateur facture
   collaborateur_facture: string
@@ -215,7 +223,7 @@ const ATELIER_COMMON_SELECT = [
 
 const ATELIER_SELECT_BY_SOURCE: Record<Exclude<DataSource, 'mixte'>, string> = {
   factures: ATELIER_COMMON_SELECT.join(','),
-  activite: [...ATELIER_COMMON_SELECT, 'type_document'].join(','),
+  activite: [...ATELIER_COMMON_SELECT, 'type_document', 'annee_creation', 'mois_creation', 'annee_livraison', 'mois_livraison'].join(','),
   devis: ATELIER_COMMON_SELECT.join(','),
 }
 const ATELIER_FRONT_VERSION = 'V2026-06-02-FAST-SCOPE-LOAD-01'
@@ -259,6 +267,10 @@ const MEASURES: Array<{ key: MeasureKey; label: string; kind: 'currency' | 'perc
 const DIMENSIONS: Array<{ key: DimensionKey; label: string }> = [
   { key: 'annee', label: 'Année' },
   { key: 'mois', label: 'Mois' },
+  { key: 'annee_creation', label: 'Année (création doc.)' },
+  { key: 'mois_creation', label: 'Mois (création doc.)' },
+  { key: 'annee_livraison', label: 'Année (livraison prévue)' },
+  { key: 'mois_livraison', label: 'Mois (livraison prévue)' },
   { key: 'source', label: 'Source' },
   { key: 'type_document', label: 'Type document' },
   { key: 'agence_collaborateur', label: 'Agence' },
@@ -451,10 +463,20 @@ function findDefaultSavedView(views: SavedView[]) {
 function normalizeAggRow(row: Record<string, any>, source: Exclude<DataSource, 'mixte'>): StudioRow {
   const annee = safeNumber(row.annee || row.year || row.exercice)
   const mois = safeNumber(row.mois || row.month)
+  // annee_creation/annee_livraison ne sont calculées que pour la source 'activite' (colonne absente pour devis/factures) :
+  // on retombe alors sur l'année/mois de référence habituels.
+  const annee_creation = safeNumber(row.annee_creation) || annee
+  const mois_creation = safeNumber(row.mois_creation) || mois
+  const annee_livraison = safeNumber(row.annee_livraison) || annee
+  const mois_livraison = safeNumber(row.mois_livraison) || mois
   return {
     source,
     annee,
     mois,
+    annee_creation,
+    mois_creation,
+    annee_livraison,
+    mois_livraison,
     type_document: source === 'factures' ? 'FACTURE' : source === 'devis' ? 'DEVIS' : safeText(row.type_document, 'NON RENSEIGNE'),
     collaborateur: safeText(row.collaborateur_facture || row.collaborateur, 'NON AFFECTE'),
     collaborateur_facture: safeText(row.collaborateur_facture || row.collaborateur, 'NON AFFECTE'),
@@ -549,6 +571,10 @@ function uniqueSorted<T extends string | number>(values: T[]) {
 function getDimensionValue(row: StudioRow, dimension: DimensionKey): string {
   if (dimension === 'annee') return String(row.annee)
   if (dimension === 'mois') return monthLabel(row.mois)
+  if (dimension === 'annee_creation') return String(row.annee_creation)
+  if (dimension === 'mois_creation') return monthLabel(row.mois_creation)
+  if (dimension === 'annee_livraison') return String(row.annee_livraison)
+  if (dimension === 'mois_livraison') return monthLabel(row.mois_livraison)
   if (dimension === 'source') return sourceLabel(row.source)
   return safeText((row as any)[dimension], 'NON RENSEIGNE')
 }
@@ -1726,8 +1752,8 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
   }
 
   function compareDimensionPart(a: string, b: string, dimension: DimensionKey) {
-    if (dimension === 'mois') return MONTHS.indexOf(a) - MONTHS.indexOf(b)
-    if (dimension === 'annee') return Number(a) - Number(b)
+    if (dimension === 'mois' || dimension === 'mois_creation' || dimension === 'mois_livraison') return MONTHS.indexOf(a) - MONTHS.indexOf(b)
+    if (dimension === 'annee' || dimension === 'annee_creation' || dimension === 'annee_livraison') return Number(a) - Number(b)
     return a.localeCompare(b, 'fr', { numeric: true, sensitivity: 'base' })
   }
 
