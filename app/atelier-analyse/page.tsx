@@ -2449,6 +2449,7 @@ function WidgetRenderer({ rows, widget, onUpdate }: { rows: StudioRow[]; widget:
 
 export default function AtelierAnalysePage() {
   const [rows, setRows] = useState<StudioRow[]>([])
+  const [availableYearsAllTime, setAvailableYearsAllTime] = useState<number[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [globalFilters, setGlobalFilters] = useState<GlobalFilters>(DEFAULT_FILTERS)
@@ -2575,6 +2576,17 @@ export default function AtelierAnalysePage() {
     }
   }
 
+  async function loadAvailableYearsAllTime() {
+    try {
+      const { data, error } = await supabase.rpc('get_available_years_atelier')
+      if (error) throw error
+      const years = uniqueSorted((data || []).map((r: any) => r.annee)).sort((a, b) => Number(b) - Number(a)).map(Number)
+      if (years.length) setAvailableYearsAllTime(years)
+    } catch (_e) {
+      // Silencieux : en cas d'échec, le sélecteur retombe sur les années déjà chargées (comportement historique).
+    }
+  }
+
   async function loadData(filtersOverride?: GlobalFilters) {
     const filtersForLoad = filtersOverride || globalFilters
     const yearsToLoad = yearsForAtelierLoad(filtersForLoad.years)
@@ -2627,6 +2639,7 @@ export default function AtelierAnalysePage() {
     let cancelled = false
 
     async function bootstrapSavedViews() {
+      loadAvailableYearsAllTime()
       const views = await loadSavedViews()
       if (cancelled) return
 
@@ -2658,8 +2671,9 @@ export default function AtelierAnalysePage() {
   ])
 
   const available = useMemo(() => {
+    const loadedYears = uniqueSorted(rows.map((r) => r.annee)).sort((a, b) => Number(b) - Number(a)).map(Number)
     return {
-      years: uniqueSorted(rows.map((r) => r.annee)).sort((a, b) => Number(b) - Number(a)).map(Number),
+      years: availableYearsAllTime.length ? availableYearsAllTime : loadedYears,
       months: Array.from({ length: 12 }, (_v, i) => i + 1),
       agences: uniqueSorted(rows.map((r) => r.agence_collaborateur)),
       depots: uniqueSorted(rows.map((r) => r.depot)),
@@ -2671,7 +2685,7 @@ export default function AtelierAnalysePage() {
       typesDocument: uniqueSorted(rows.map((r) => r.type_document)),
       clients: uniqueSorted(rows.map((r) => clientKey(r))),
     }
-  }, [rows])
+  }, [rows, availableYearsAllTime])
 
   const selectedWidget = selectedWidgetId ? widgets.find((w) => w.id === selectedWidgetId) || null : null
   const lastBusinessDatesLabel = useMemo(() => formatLastBusinessDatesLabel(lastBusinessDates), [lastBusinessDates])
