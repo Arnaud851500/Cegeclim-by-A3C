@@ -2634,20 +2634,13 @@ export default function AtelierAnalysePage() {
 
       const allowedAgences = ((data as any).allowed_agences || []).filter(Boolean)
       const allowedDepartements = ((data as any).allowed_departements || []).filter(Boolean)
-      const codes = ((data as any).allowed_collaborateurs || [])
+
+      // Le filtre verrouillé cible désormais "Collab. tiers" (collaborateur_tiers), qui stocke
+      // le CODE brut du représentant (ex. « AAMENA »), pas le nom complet « AAMENA Damien ».
+      // On utilise donc directement le périmètre saisi tel quel, sans résolution via ref_collaborateurs.
+      const allowedCollaborateurs = ((data as any).allowed_collaborateurs || [])
         .map((c: string) => safeText(c, '').trim().toUpperCase())
         .filter(Boolean)
-
-      // Le périmètre est saisi en CODES (« AAMENA »), les widgets filtrent sur le NOM COMPLET
-      // (« AAMENA Damien »). On résout via ref_collaborateurs, comme le fait my_allowed_collaborateurs_set() côté RLS.
-      let allowedCollaborateurs: string[] = []
-      if (codes.length) {
-        const { data: collabRows } = await supabase.from('ref_collaborateurs').select('nom, nom_prenom')
-        allowedCollaborateurs = (collabRows || [])
-          .filter((r: any) => codes.includes(safeText(r.nom, '').trim().toUpperCase()))
-          .map((r: any) => safeText(r.nom_prenom, '').trim())
-          .filter(Boolean)
-      }
 
       setUserScope({
         loaded: true,
