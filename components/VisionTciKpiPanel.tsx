@@ -24,7 +24,7 @@
  *    le comportement de la V3.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { usePageFilterAccess } from "@/lib/pageAccessFilters";
 import { useAccess } from "@/components/AccessContext";
@@ -563,6 +563,19 @@ export default function VisionTciKpiPanel() {
 
   useEffect(() => { void loadPrefs(); }, [loadPrefs]);
 
+  // Le panneau ne doit afficher le squelette qu'au tout premier chargement.
+  // `access.loading` repasse brièvement à `true` à chaque revalidation de
+  // session (notamment au retour de focus sur la fenêtre, cf. layout.tsx) —
+  // sans ce garde, chaque flicker démonte puis remonte toute la grille de
+  // cartes, ce qui relance TOUS les appels RPC de TOUTES les cartes alors
+  // que rien n'a réellement changé. Une fois le premier affichage réussi,
+  // on ignore les flickers suivants et on continue d'afficher les cartes
+  // (elles gèrent déjà leur propre état de chargement individuellement).
+  const hasLoadedOnceRef = useRef(false);
+  useEffect(() => {
+    if (!loading && !access.loading) hasLoadedOnceRef.current = true;
+  });
+
   const agenceForcee = access.hasAgenceRestriction && access.allowedAgences.length > 0 ? access.allowedAgences[0] : null;
   // Un utilisateur peut être restreint sur l'agence ET le collaborateur en
   // même temps (cas courant : un commercial rattaché à une agence). Les deux
@@ -618,7 +631,7 @@ export default function VisionTciKpiPanel() {
     void persistCards(cards.filter((c) => c.id !== id));
   }
 
-  if (loading || access.loading) {
+  if ((loading || access.loading) && !hasLoadedOnceRef.current) {
     return (
       <div>
         <h1 className="mb-3 text-xl font-bold text-white">Vision ONE PAGE</h1>
