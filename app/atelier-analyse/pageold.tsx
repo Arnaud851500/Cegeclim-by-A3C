@@ -900,9 +900,9 @@ function MultiSelect({
   if (locked) {
     return (
       <div className="relative" title="Périmètre figé par votre profil d’accès">
-        <div className="flex h-10 w-full cursor-not-allowed items-center justify-between rounded-lg border border-[#E5E1D8] bg-[#EDEAE1] px-3 text-left text-[13px] font-semibold text-[#8A8474]">
+        <div className="flex h-11 w-full cursor-not-allowed items-center justify-between rounded-xl border border-slate-200 bg-slate-100 px-3 text-left text-sm font-semibold text-slate-500 shadow-sm">
           <span className="truncate">{label} {selected.length ? `(${selected.length})` : ''}</span>
-          <span className="text-[#8A8474]">🔒</span>
+          <span className="text-slate-400">🔒</span>
         </div>
       </div>
     )
@@ -913,35 +913,30 @@ function MultiSelect({
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className={`flex h-10 w-full items-center justify-between rounded-lg border px-3 text-left text-[13px] font-semibold shadow-sm transition-colors ${
-          selected.length
-            ? 'border-[#B4761A]/40 bg-[#B4761A]/[0.06] text-[#111820]'
-            : 'border-[#E5E1D8] bg-white text-[#3A362E] hover:bg-[#F4F3F0]'
-        }`}
+        className="flex h-11 w-full items-center justify-between rounded-xl border border-slate-200 bg-white px-3 text-left text-sm font-semibold text-slate-800 shadow-sm hover:bg-slate-50"
       >
-        <span className="truncate">{label}{selected.length ? ` · ${selected.length}` : ''}</span>
-        <span className={`text-[10px] transition-transform ${open ? 'rotate-180' : ''} text-[#8A8474]`}>▼</span>
+        <span className="truncate">{label} {selected.length ? `(${selected.length})` : ''}</span>
+        <span className="text-slate-400">▼</span>
       </button>
       {open && (
-        <div onMouseLeave={() => setOpen(false)} className="absolute left-0 top-11 z-50 w-80 rounded-xl border border-[#E5E1D8] bg-white p-3 shadow-xl">
+        <div onMouseLeave={() => setOpen(false)} className="absolute left-0 top-12 z-50 w-80 rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl">
           <div className="mb-2 flex items-center justify-between gap-2">
-            <div className="text-[13px] font-bold text-[#111820]">{label}</div>
-            <button type="button" onClick={() => onChange([])} className="text-xs font-bold text-[#B4761A] hover:text-[#96600F]">Tout afficher</button>
+            <div className="text-sm font-black text-slate-800">{label}</div>
+            <button type="button" onClick={() => onChange([])} className="text-xs font-bold text-blue-600 hover:text-blue-800">Tout afficher</button>
           </div>
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Rechercher"
-            className="mb-3 w-full rounded-lg border border-[#E5E1D8] px-3 py-2 text-sm outline-none focus:border-[#B4761A]"
+            className="mb-3 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
           />
-          <div className="max-h-72 space-y-0.5 overflow-auto pr-1">
+          <div className="max-h-72 space-y-1 overflow-auto pr-1">
             {filteredValues.map((value) => (
-              <label key={value} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-[#3A362E] hover:bg-[#F4F3F0]">
-                <input type="checkbox" checked={selected.includes(value)} onChange={() => toggle(value)} className="accent-[#B4761A]" />
+              <label key={value} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 text-sm hover:bg-slate-50">
+                <input type="checkbox" checked={selected.includes(value)} onChange={() => toggle(value)} />
                 <span className="truncate">{value}</span>
               </label>
             ))}
-            {filteredValues.length === 0 && <div className="px-2 py-3 text-center text-xs text-[#8A8474]">Aucun résultat</div>}
           </div>
         </div>
       )}
@@ -952,11 +947,11 @@ function MultiSelect({
 function SelectField({ label, value, onChange, options }: { label: string; value: string | number; onChange: (v: string) => void; options: Array<{ value: string | number; label: string }> }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">{label}</span>
+      <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">{label}</span>
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="h-10 w-full rounded-lg border border-[#E5E1D8] bg-white px-3 text-sm font-semibold text-[#111820] shadow-sm outline-none focus:border-[#B4761A]"
+        className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-800 shadow-sm outline-none focus:border-blue-500"
       >
         {options.map((option) => (
           <option key={String(option.value)} value={option.value}>{option.label}</option>
@@ -972,7 +967,7 @@ function FilterSelect({ label, value, onChange, options }: { label: string; valu
       aria-label={label}
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className="h-10 w-full rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E] shadow-sm outline-none hover:bg-[#F4F3F0] focus:border-[#B4761A]"
+      className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-800 shadow-sm outline-none hover:bg-slate-50 focus:border-blue-500"
     >
       {options.map((option) => (
         <option key={String(option.value)} value={option.value}>{label} : {option.label}</option>
@@ -1002,21 +997,19 @@ function WidgetShell({
   const sizeClass = widget.size === 'small' ? 'xl:col-span-1' : widget.size === 'medium' ? 'xl:col-span-2' : widget.size === 'large' ? 'xl:col-span-3' : 'xl:col-span-4'
   return (
     <section
-      className={`group ${sizeClass} rounded-xl border bg-white p-4 transition-all ${
-        selected ? 'border-[#B4761A] shadow-[0_0_0_3px_rgba(180,118,26,0.12)]' : 'border-[#E5E1D8] hover:border-[#D8D2C2] hover:shadow-sm'
-      }`}
+      className={`${sizeClass} rounded-2xl border bg-white p-4 shadow-sm transition ${selected ? 'border-blue-500 ring-2 ring-blue-100' : 'border-slate-200 hover:border-blue-300'}`}
     >
       <div className="mb-3 flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <h3 className="truncate text-[13px] font-bold text-[#111820]">{widget.title}</h3>
-          <p className="mt-0.5 text-[11px] font-medium text-[#8A8474]">{sourceLabel(widget.source)} · {getMeasureLabel(widget.measure)}</p>
+        <div>
+          <h3 className="text-sm font-black text-slate-900">{widget.title}</h3>
+          <p className="text-xs text-slate-500">{sourceLabel(widget.source)} · {getMeasureLabel(widget.measure)}</p>
         </div>
-        <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
-          <button title="Configurer le widget" type="button" onClick={onConfigure} className="rounded-md border border-[#B4761A]/30 bg-[#B4761A]/[0.08] px-1.5 py-1 text-[11px] font-bold text-[#96600F] hover:bg-[#B4761A]/[0.15]">⚙</button>
-          <button title="Monter" type="button" onClick={() => onMove(-1)} className="rounded-md border border-[#E5E1D8] px-1.5 py-1 text-[11px] font-bold text-[#3A362E] hover:bg-[#F4F3F0]">↑</button>
-          <button title="Descendre" type="button" onClick={() => onMove(1)} className="rounded-md border border-[#E5E1D8] px-1.5 py-1 text-[11px] font-bold text-[#3A362E] hover:bg-[#F4F3F0]">↓</button>
-          <button title="Dupliquer" type="button" onClick={onDuplicate} className="rounded-md border border-[#E5E1D8] px-1.5 py-1 text-[11px] font-bold text-[#3A362E] hover:bg-[#F4F3F0]">⧉</button>
-          <button title="Supprimer" type="button" onClick={onRemove} className="rounded-md border border-red-200 px-1.5 py-1 text-[11px] font-bold text-red-600 hover:bg-red-50">✕</button>
+        <div className="flex items-center gap-1">
+          <button title="Configurer le widget" type="button" onClick={onConfigure} className="rounded-lg border border-blue-200 bg-blue-50 px-2 py-1 text-xs font-bold text-blue-700 hover:bg-blue-100">⚙</button>
+          <button type="button" onClick={() => onMove(-1)} className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-bold hover:bg-slate-50">↑</button>
+          <button type="button" onClick={() => onMove(1)} className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-bold hover:bg-slate-50">↓</button>
+          <button type="button" onClick={onDuplicate} className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-bold hover:bg-slate-50">Dupliquer</button>
+          <button type="button" onClick={onRemove} className="rounded-lg border border-red-200 px-2 py-1 text-xs font-bold text-red-600 hover:bg-red-50">Suppr.</button>
         </div>
       </div>
       {children}
@@ -1066,17 +1059,17 @@ function KpiWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetConfig }
 
 
   return (
-    <div className="rounded-lg bg-[#F4F3F0] p-4">
+    <div className="rounded-2xl bg-slate-50 p-4">
       <div className="flex items-start justify-between gap-3">
-        <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">{getMeasureLabel(widget.measure)}</div>
-        <div className="rounded-full bg-white px-2 py-0.5 text-[10px] font-bold text-[#8A8474]">{periodText}</div>
+        <div className="text-xs font-black uppercase tracking-wide text-slate-500">{getMeasureLabel(widget.measure)}</div>
+        <div className="rounded-full bg-white px-2 py-1 text-[10px] font-black text-slate-500">{periodText}</div>
       </div>
-      <div className="mt-2 text-[32px] font-bold leading-none tracking-tight text-[#111820]">{formatMeasure(value, widget.measure)}</div>
-      <div className="mt-3 flex flex-wrap items-center gap-2 text-xs font-semibold text-[#8A8474]">
+      <div className="mt-2 text-3xl font-black text-slate-900">{formatMeasure(value, widget.measure)}</div>
+      <div className="mt-3 flex flex-wrap items-center gap-2 text-xs font-bold text-slate-500">
         <span>{widget.compareMode === 'dimension' ? `vs ${getDimensionLabel(widget.compareDimension as DimensionKey)} ${widget.compareValue || ''}` : `vs ${previousYear} · même période`}</span>
-        {evo && <span className={`rounded-full px-2 py-0.5 ${evolutionClass(value, previousValue)}`}>{evo}</span>}
+        {evo && <span className={`rounded-full px-2 py-1 ${evolutionClass(value, previousValue)}`}>{evo}</span>}
       </div>
-      <div className="mt-1 text-xs text-[#8A8474]">Base comparaison : {formatMeasure(previousValue, widget.secondMeasure || widget.measure)}</div>
+      <div className="mt-1 text-xs text-slate-500">Base comparaison : {formatMeasure(previousValue, widget.secondMeasure || widget.measure)}</div>
     </div>
   )
 }
@@ -2767,10 +2760,12 @@ export default function AtelierAnalysePage() {
     setGlobalFilters((prev) => ({
       ...prev,
       agences: userScope.allowedAgences.length ? userScope.allowedAgences : prev.agences,
-      collaborateursTiers: userScope.allowedCollaborateurs.length ? userScope.allowedCollaborateurs : prev.collaborateursTiers,
+      departementsTiers: userScope.allowedDepartements.length ? userScope.allowedDepartements : prev.departementsTiers,
+      collaborateursFacture: userScope.allowedCollaborateurs.length ? userScope.allowedCollaborateurs : prev.collaborateursFacture,
+      collaborateurs: userScope.allowedCollaborateurs.length ? userScope.allowedCollaborateurs : prev.collaborateurs,
     }))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scopeLocked, userScope.allowedAgences.join('|'), userScope.allowedCollaborateurs.join('|')])
+  }, [scopeLocked, userScope.allowedAgences.join('|'), userScope.allowedDepartements.join('|'), userScope.allowedCollaborateurs.join('|')])
 
   const available = useMemo(() => {
     const loadedYears = uniqueSorted(rows.map((r) => r.annee)).sort((a, b) => Number(b) - Number(a)).map(Number)
@@ -3171,110 +3166,61 @@ export default function AtelierAnalysePage() {
 
 
 
-  // Recalculé uniquement quand widgets, rows ou globalFilters changent réellement —
-  // pas à chaque render de la page (ex. ouvrir un panneau, taper dans un champ non lié).
-  const widgetsWithRows = useMemo(
-    () => widgets.map((widget) => ({ widget, rows: applyWidgetFilters(rows, widget, globalFilters) })),
-    [widgets, rows, globalFilters]
-  )
-
   return (
-    <main className="min-h-screen bg-[#F4F3F0] p-6 text-[#111820]" style={{ fontFeatureSettings: '"tnum"' }}>
-      <div className="mx-auto max-w-[2100px] space-y-4">
-        <section className="rounded-xl border border-[#E5E1D8] bg-white p-5">
+    <main className="min-h-screen bg-slate-50 p-6 text-slate-900">
+      <div className="mx-auto max-w-[2100px] space-y-5">
+        <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
           <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
             <div>
               <div className="flex flex-wrap items-center gap-3">
-                <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#B4761A]">CEGECLIM — Analyse</p>
+                <h1 className="text-3xl font-black tracking-tight">Atelier d’analyse</h1>
+                <span className="inline-flex rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-black text-slate-600 shadow-sm">Dernières pièces : {lastBusinessDatesLabel}</span>
               </div>
-              <h1 className="mt-0.5 text-[26px] font-bold tracking-tight text-[#111820]">Atelier d’analyse</h1>
-              <div className="mt-2 flex flex-wrap items-center gap-2">
-                <span className="inline-flex rounded-full border border-[#E5E1D8] bg-[#F4F3F0] px-3 py-1 text-xs font-semibold text-[#5A5548]">
-                  Dernières pièces : {lastBusinessDatesLabel}
-                </span>
-              </div>
+              <p className="mt-2 text-sm text-slate-600">Créez vos propres widgets à partir des indicateurs factures et activité.</p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <input
-                value={viewName}
-                onChange={(e) => setViewName(e.target.value)}
-                className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-sm font-semibold text-[#111820] outline-none focus:border-[#B4761A]"
-              />
-              <button type="button" onClick={saveView} className="h-10 rounded-lg bg-[#111820] px-4 text-sm font-bold text-white hover:bg-[#252E3D]">
-                Enregistrer la vue
-              </button>
-              <button
-                type="button"
-                onClick={duplicateCurrentView}
-                disabled={!widgets.length}
-                className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-4 text-sm font-bold text-[#3A362E] hover:bg-[#F4F3F0] disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                Dupliquer
-              </button>
-              <button
-                type="button"
-                onClick={() => { setCurrentViewId(null); setViewName('Nouvelle vue'); setWidgets([]); setSelectedWidgetId(null); setSaveMessage(null) }}
-                className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-4 text-sm font-bold text-[#3A362E] hover:bg-[#F4F3F0]"
-              >
-                Nouvelle vue
-              </button>
-              <button
-                type="button"
-                onClick={async () => { await loadData(globalFilters); await loadLastBusinessDates(globalFilters) }}
-                disabled={loading}
-                className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-4 text-sm font-bold text-[#3A362E] hover:bg-[#F4F3F0] disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                {loading ? 'Actualisation…' : '↻ Actualiser'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowMaintenancePanel((value) => !value)}
-                className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-xs font-bold text-[#8A8474] hover:bg-[#F4F3F0]"
-              >
-                Technique {showMaintenancePanel ? '▲' : '▼'}
-              </button>
+              <input value={viewName} onChange={(e) => setViewName(e.target.value)} className="h-11 rounded-xl border border-slate-200 px-3 text-sm font-bold outline-none focus:border-blue-500" />
+              <button type="button" onClick={saveView} className="rounded-xl bg-blue-600 px-4 py-3 text-sm font-black text-white shadow-sm hover:bg-blue-700">Enregistrer la vue</button>
+              <button type="button" onClick={duplicateCurrentView} disabled={!widgets.length} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50">Dupliquer la vue</button>
+              <button type="button" onClick={() => { setCurrentViewId(null); setViewName('Nouvelle vue'); setWidgets([]); setSelectedWidgetId(null); setSaveMessage(null) }} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50">Nouvelle vue</button>
+              <button type="button" onClick={() => setShowMaintenancePanel((value) => !value)} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50">Actions techniques {showMaintenancePanel ? '▲' : '▼'}</button>
+              <button type="button" onClick={async () => { await loadData(globalFilters); await loadLastBusinessDates(globalFilters) }} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-black hover:bg-slate-50">Actualiser</button>
             </div>
           </div>
-
           {showMaintenancePanel && (
-            <div className="mt-4 rounded-lg border border-[#E5E1D8] bg-[#F4F3F0] p-4">
-              <div className="mb-3 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Actions techniques — masquées par défaut</div>
+            <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <div className="mb-3 text-xs font-black uppercase tracking-wide text-slate-500">Actions techniques — masquées par défaut</div>
               <div className="flex flex-wrap items-center gap-2">
-                <button type="button" onClick={() => handleRebuildRecentMonths(2)} disabled={maintenanceLoading} className="rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60">{maintenanceLoading ? 'Rebuild…' : 'Rebuild 2 mois'}</button>
-                <button type="button" onClick={() => handleRebuildRecentMonths(3)} disabled={maintenanceLoading} className="rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60">{maintenanceLoading ? 'Rebuild…' : 'Rebuild 3 mois'}</button>
-                <button type="button" onClick={() => handleRebuildRecentMonths(3, 'previous_month')} disabled={maintenanceLoading} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60">BL M-x → M-1 (léger)</button>
-                <button type="button" onClick={() => handleRebuildRecentMonths(3, 'current_month')} disabled={maintenanceLoading} className="rounded-lg border border-sky-300 bg-sky-50 px-3 py-2 text-xs font-bold text-sky-800 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60">BL M-x → M (léger)</button>
+                <button type="button" onClick={() => handleRebuildRecentMonths(2)} disabled={maintenanceLoading} className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm font-black text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60">{maintenanceLoading ? 'Rebuild…' : 'Rebuild 2 mois'}</button>
+                <button type="button" onClick={() => handleRebuildRecentMonths(3)} disabled={maintenanceLoading} className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm font-black text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60">{maintenanceLoading ? 'Rebuild…' : 'Rebuild 3 mois'}</button>
+                <button type="button" onClick={() => handleRebuildRecentMonths(3, 'previous_month')} disabled={maintenanceLoading} className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-black text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60">BL M-x → M-1 (léger)</button>
+                <button type="button" onClick={() => handleRebuildRecentMonths(3, 'current_month')} disabled={maintenanceLoading} className="rounded-xl border border-sky-300 bg-sky-50 px-4 py-3 text-sm font-black text-sky-800 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60">BL M-x → M (léger)</button>
               </div>
-              <p className="mt-2 text-xs font-medium text-[#8A8474]">Les boutons BL M-x ne relancent plus les rebuilds lourds : ils déplacent uniquement les lignes BL/BR concernées dans l’agrégat activité.</p>
+              <p className="mt-2 text-xs font-semibold text-slate-500">Les boutons BL M-x ne relancent plus les rebuilds lourds : ils déplacent uniquement les lignes BL/BR concernées dans l’agrégat activité.</p>
             </div>
           )}
-
           {scopeLocked && (
-            <div className="mt-4 flex items-center gap-2 rounded-lg border border-[#B4761A]/30 bg-[#B4761A]/[0.06] px-3 py-2.5 text-[13px] font-semibold text-[#5A4321]">
-              <span aria-hidden>🔒</span>
-              <span>
-                Périmètre appliqué — Profil : {userScope.profilName || '—'}
-                {userScope.allowedAgences.length ? ` · Agences : ${userScope.allowedAgences.join(', ')}` : ''}
-                {userScope.allowedCollaborateurs.length ? ` · Collaborateurs : ${userScope.allowedCollaborateurs.join(', ')}` : ''}
-              </span>
+            <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm font-bold text-amber-900">
+              Périmètre utilisateur appliqué : Profil : {userScope.profilName || '—'}
+              {userScope.allowedAgences.length ? ` · Agences : ${userScope.allowedAgences.join(', ')}` : ''}
+              {userScope.allowedDepartements.length ? ` · Dép. : ${userScope.allowedDepartements.join(', ')}` : ''}
+              {userScope.allowedCollaborateurs.length ? ` · Collaborateurs : ${userScope.allowedCollaborateurs.join(', ')}` : ''}
             </div>
           )}
-          {saveMessage && <div className="mt-4 rounded-lg border border-[#B4761A]/25 bg-[#B4761A]/[0.06] px-3 py-2.5 text-[13px] font-semibold text-[#5A4321]">{saveMessage}</div>}
-          {maintenanceMessage && <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-[13px] font-semibold text-emerald-800">{maintenanceMessage}</div>}
-          {error && <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-[13px] font-semibold text-red-700">{error}</div>}
+          {saveMessage && <div className="mt-4 rounded-xl bg-blue-50 p-3 text-sm font-bold text-blue-700">{saveMessage}</div>}
+          {maintenanceMessage && <div className="mt-4 rounded-xl bg-emerald-50 p-3 text-sm font-bold text-emerald-800">{maintenanceMessage}</div>}
+          {error && <div className="mt-4 rounded-xl bg-red-50 p-3 text-sm font-bold text-red-700">{error}</div>}
         </section>
 
-        <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
-          <div className="mb-3 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Filtres</div>
-          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-10">
+        <section className="grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm md:grid-cols-2 xl:grid-cols-10">
           <MultiSelect label="Source" values={['factures', 'activite', 'devis', 'mixte']} selected={globalFilters.sources} onChange={(v) => setGlobalFilters((p) => ({ ...p, sources: v as DataSource[] }))} />
           <MultiSelect label="Année" values={available.years.map(String)} selected={globalFilters.years.map(String)} onChange={(v) => setGlobalFilters((p) => ({ ...p, years: v.map(Number) }))} />
           <MultiSelect label="Mois" values={available.months.map((m) => `${m} - ${monthLabel(m)}`)} selected={globalFilters.months.map((m) => `${m} - ${monthLabel(m)}`)} onChange={(v) => setGlobalFilters((p) => ({ ...p, months: v.map((x) => Number(x.split(' - ')[0])) }))} />
           <MultiSelect label="Agence" values={available.agences} selected={globalFilters.agences} onChange={(v) => setGlobalFilters((p) => ({ ...p, agences: v }))} locked={scopeLocked && userScope.allowedAgences.length > 0} />
           <MultiSelect label="Dépôt" values={available.depots} selected={globalFilters.depots || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, depots: v }))} />
-          <MultiSelect label="Collab. facture" values={available.collaborateursFacture} selected={globalFilters.collaborateursFacture || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, collaborateursFacture: v, collaborateurs: v }))} />
-          <MultiSelect label="Collab. tiers" values={available.collaborateursTiers} selected={globalFilters.collaborateursTiers || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, collaborateursTiers: v }))} locked={scopeLocked && userScope.allowedCollaborateurs.length > 0} />
-          <MultiSelect label="Dépt tiers" values={available.departementsTiers} selected={globalFilters.departementsTiers || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, departementsTiers: v }))} />
+          <MultiSelect label="Collab. facture" values={available.collaborateursFacture} selected={globalFilters.collaborateursFacture || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, collaborateursFacture: v, collaborateurs: v }))} locked={scopeLocked && userScope.allowedCollaborateurs.length > 0} />
+          <MultiSelect label="Collab. tiers" values={available.collaborateursTiers} selected={globalFilters.collaborateursTiers || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, collaborateursTiers: v }))} />
+          <MultiSelect label="Dépt tiers" values={available.departementsTiers} selected={globalFilters.departementsTiers || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, departementsTiers: v }))} locked={scopeLocked && userScope.allowedDepartements.length > 0} />
           <MultiSelect label="Famille macro" values={available.famillesMacro} selected={globalFilters.famillesMacro} onChange={(v) => setGlobalFilters((p) => ({ ...p, famillesMacro: v }))} />
           <MultiSelect label="Type document" values={relevantDocumentTypes(globalFilters.sources.includes('mixte') || globalFilters.sources.length !== 1 ? 'mixte' : globalFilters.sources[0], available.typesDocument)} selected={globalFilters.typesDocument} onChange={(v) => setGlobalFilters((p) => ({ ...p, typesDocument: v }))} />
           <FilterSelect
@@ -3287,52 +3233,52 @@ export default function AtelierAnalysePage() {
           <button
             type="button"
             onClick={() => setShowClientFilters((value) => !value)}
-            className={`flex h-10 items-center justify-between rounded-lg border px-3 text-[13px] font-bold transition-colors ${showClientFilters ? 'border-[#B4761A] bg-[#B4761A]/[0.08] text-[#96600F]' : 'border-[#E5E1D8] bg-white text-[#3A362E] hover:bg-[#F4F3F0]'}`}
+            className={`flex h-11 items-center justify-between rounded-xl border px-3 text-sm font-black shadow-sm ${showClientFilters ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'}`}
           >
-            <span>Tiers {globalFilters.clients?.length ? `· ${globalFilters.clients.length}` : ''}</span>
-            <span className="text-[10px]">{showClientFilters ? '▲' : '▼'}</span>
+            <span>Tiers {globalFilters.clients?.length ? `(${globalFilters.clients.length})` : ''}</span>
+            <span>{showClientFilters ? '▲' : '▼'}</span>
           </button>
 
           <button
             type="button"
             onClick={() => setShowAiPanel((value) => !value)}
-            className={`flex h-10 items-center justify-between rounded-lg border px-3 text-[13px] font-bold transition-colors ${showAiPanel ? 'border-[#111820] bg-[#111820]/[0.04] text-[#111820]' : 'border-[#E5E1D8] bg-white text-[#3A362E] hover:bg-[#F4F3F0]'}`}
+            className={`flex h-11 items-center justify-between rounded-xl border px-3 text-sm font-black shadow-sm ${showAiPanel ? 'border-indigo-500 bg-indigo-50 text-indigo-700' : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'}`}
           >
-            <span>Assistant IA {aiWidgetProposals.length ? `· ${aiWidgetProposals.length}` : ''}</span>
-            <span className="text-[10px]">{showAiPanel ? '▲' : '▼'}</span>
+            <span>Contexte IA {aiWidgetProposals.length ? `(${aiWidgetProposals.length})` : ''}</span>
+            <span>{showAiPanel ? '▲' : '▼'}</span>
           </button>
 
           {showClientFilters && (
-            <div className="md:col-span-2 xl:col-span-10 rounded-lg border border-[#E5E1D8] bg-[#F4F3F0] p-3">
+            <div className="md:col-span-2 xl:col-span-10 rounded-2xl border border-slate-200 bg-slate-50 p-3">
               <div className="grid gap-3 md:grid-cols-[220px_1fr]">
                 <label className="block">
-                  <span className="mb-1 block text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Filtre clients / tiers</span>
-                  <select value={globalFilters.clientMode} onChange={(e) => setGlobalFilters((p) => ({ ...p, clientMode: e.target.value as ClientFilterMode }))} className="h-10 w-full rounded-lg border border-[#E5E1D8] bg-white px-3 text-sm font-semibold">
+                  <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Filtre clients / tiers</span>
+                  <select value={globalFilters.clientMode} onChange={(e) => setGlobalFilters((p) => ({ ...p, clientMode: e.target.value as ClientFilterMode }))} className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-bold">
                     <option value="include">Sélectionner uniquement</option>
                     <option value="exclude">Exclure les clients</option>
                   </select>
                 </label>
                 <MultiSelect label="Numéro tiers / nom client" values={available.clients} selected={globalFilters.clients || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, clients: v }))} />
               </div>
-              <p className="mt-2 text-xs font-medium text-[#8A8474]">Laisse vide pour afficher tous les clients. Utilise la recherche pour sélectionner ou exclure plusieurs clients.</p>
+              <p className="mt-2 text-xs font-semibold text-slate-500">Laissez vide pour afficher tous les clients. Utilisez la recherche pour sélectionner ou exclure plusieurs clients.</p>
             </div>
           )}
 
           {showAiPanel && (
-            <div className="md:col-span-2 xl:col-span-10 rounded-lg border border-[#E5E1D8] bg-[#F4F3F0] p-3">
+            <div className="md:col-span-2 xl:col-span-10 rounded-2xl border border-indigo-200 bg-indigo-50/40 p-3">
               <div className="flex flex-col gap-3 xl:flex-row xl:items-start">
                 <div className="xl:w-72">
                   <div className="flex items-center gap-2">
-                    <h2 className="text-[15px] font-bold text-[#111820]">Assistant IA Atelier</h2>
-                    <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-bold text-[#8A8474]">{ATELIER_AI_VERSION}</span>
+                    <h2 className="text-base font-black text-slate-900">Assistant IA Atelier</h2>
+                    <span className="rounded-full bg-white px-2 py-1 text-[10px] font-black text-indigo-700">{ATELIER_AI_VERSION}</span>
                   </div>
-                  <p className="mt-1 text-xs leading-5 text-[#5A5548]">
-                    Les widgets proposés héritent de la période active : {getActiveTemporalContext().periodLabel} · {getActiveTemporalContext().yearN1} → {getActiveTemporalContext().yearN}.
+                  <p className="mt-1 text-xs leading-5 text-slate-600">
+                    Les widgets proposés héritent maintenant de la période active : {getActiveTemporalContext().periodLabel} · {getActiveTemporalContext().yearN1} → {getActiveTemporalContext().yearN}.
                   </p>
                   <div className="mt-3 flex flex-wrap gap-2">
-                    <button type="button" onClick={() => askAtelierAi('Analyse la vue active et dis-moi les points d’attention à regarder en priorité.')} className="rounded-full border border-[#B4761A]/30 bg-white px-3 py-1.5 text-xs font-bold text-[#96600F] hover:bg-[#B4761A]/[0.08]">Analyser la vue</button>
-                    <button type="button" onClick={() => askAtelierAi('Explique les filtres actuellement appliqués et leur impact probable sur les widgets.')} className="rounded-full border border-[#E5E1D8] bg-white px-3 py-1.5 text-xs font-bold text-[#3A362E] hover:bg-[#F4F3F0]">Expliquer les filtres</button>
-                    <button type="button" onClick={() => askAtelierAi('Propose 2 ou 3 widgets complémentaires applicables pour mieux comprendre cette vue.')} className="rounded-full border border-[#E5E1D8] bg-white px-3 py-1.5 text-xs font-bold text-[#3A362E] hover:bg-[#F4F3F0]">Proposer des widgets</button>
+                    <button type="button" onClick={() => askAtelierAi('Analyse la vue active et dis-moi les points d’attention à regarder en priorité.')} className="rounded-full border border-indigo-200 bg-white px-3 py-1.5 text-xs font-black text-indigo-700 hover:bg-indigo-100">Analyser la vue</button>
+                    <button type="button" onClick={() => askAtelierAi('Explique les filtres actuellement appliqués et leur impact probable sur les widgets.')} className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-black text-slate-700 hover:bg-slate-50">Expliquer les filtres</button>
+                    <button type="button" onClick={() => askAtelierAi('Propose 2 ou 3 widgets complémentaires applicables pour mieux comprendre cette vue.')} className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-black text-slate-700 hover:bg-slate-50">Proposer des widgets</button>
                   </div>
                 </div>
 
@@ -3341,37 +3287,37 @@ export default function AtelierAnalysePage() {
                     ref={aiTextareaRef}
                     defaultValue={aiQuestion}
                     placeholder="Ex : Pourquoi le CA baisse-t-il par rapport à N-1 ? Quels widgets ajouter pour expliquer l’écart ?"
-                    className="min-h-[72px] w-full rounded-lg border border-[#E5E1D8] bg-white p-3 text-sm font-medium outline-none focus:border-[#B4761A]"
+                    className="min-h-[72px] w-full rounded-xl border border-slate-200 bg-white p-3 text-sm font-semibold outline-none focus:border-indigo-500"
                   />
                   <div className="flex flex-wrap items-center gap-2">
-                    <button type="button" onClick={() => askAtelierAi()} disabled={aiLoading} className="rounded-lg bg-[#111820] px-4 py-2 text-sm font-bold text-white hover:bg-[#252E3D] disabled:cursor-not-allowed disabled:opacity-60">
-                      {aiLoading ? 'Analyse en cours…' : 'Envoyer à l’assistant'}
+                    <button type="button" onClick={() => askAtelierAi()} disabled={aiLoading} className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-black text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60">
+                      {aiLoading ? 'Analyse en cours…' : 'Envoyer à l’assistant IA'}
                     </button>
-                    <button type="button" onClick={() => { if (aiTextareaRef.current) aiTextareaRef.current.value = ''; setAiQuestion(''); setAiAnswer(null); setAiError(null); setAiWidgetProposals([]) }} className="rounded-lg border border-[#E5E1D8] bg-white px-4 py-2 text-sm font-bold text-[#3A362E] hover:bg-[#F4F3F0]">Effacer</button>
-                    <span className="text-xs font-medium text-[#8A8474]">Contexte transmis : vue, filtres, widgets + période active.</span>
+                    <button type="button" onClick={() => { if (aiTextareaRef.current) aiTextareaRef.current.value = ''; setAiQuestion(''); setAiAnswer(null); setAiError(null); setAiWidgetProposals([]) }} className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-black text-slate-700 hover:bg-slate-50">Effacer</button>
+                    <span className="text-xs font-semibold text-slate-500">Contexte transmis : vue, filtres, widgets + période active.</span>
                   </div>
-                  {aiError && <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-700">{aiError}</div>}
+                  {aiError && <div className="rounded-xl bg-red-50 p-3 text-sm font-bold text-red-700">{aiError}</div>}
                   {aiAnswer && (
-                    <div className="rounded-lg border border-[#E5E1D8] bg-white p-3">
-                      <div className="mb-1 text-[11px] font-bold uppercase tracking-wide text-[#B4761A]">Réponse de l’assistant</div>
-                      <div className="whitespace-pre-wrap text-sm leading-6 text-[#3A362E]">{aiAnswer}</div>
+                    <div className="rounded-xl border border-indigo-100 bg-white p-3">
+                      <div className="mb-1 text-xs font-black uppercase tracking-wide text-indigo-700">Réponse de l’assistant</div>
+                      <div className="whitespace-pre-wrap text-sm leading-6 text-slate-800">{aiAnswer}</div>
                     </div>
                   )}
                   {aiWidgetProposals.length > 0 && (
-                    <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+                    <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3">
                       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                         <div>
-                          <div className="text-[11px] font-bold uppercase tracking-wide text-emerald-700">Widgets proposés par l’IA</div>
-                          <p className="mt-1 text-xs font-medium text-emerald-800">Application avec période active : {getActiveTemporalContext().periodLabel} · {getActiveTemporalContext().yearN1} → {getActiveTemporalContext().yearN}.</p>
+                          <div className="text-xs font-black uppercase tracking-wide text-emerald-700">Widgets proposés par l’IA</div>
+                          <p className="mt-1 text-xs font-semibold text-emerald-800">Application avec période active : {getActiveTemporalContext().periodLabel} · {getActiveTemporalContext().yearN1} → {getActiveTemporalContext().yearN}.</p>
                         </div>
-                        <button type="button" onClick={applyAllAiWidgetProposals} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-bold text-white hover:bg-emerald-700">
+                        <button type="button" onClick={applyAllAiWidgetProposals} className="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-black text-white shadow-sm hover:bg-emerald-700">
                           Appliquer toutes les propositions
                         </button>
                       </div>
 
                       <div className="mt-3 grid gap-3 lg:grid-cols-3">
                         {aiWidgetProposals.map((proposal, index) => (
-                          <div key={`${proposal.title || 'proposal'}-${index}`} className="rounded-lg border border-emerald-200 bg-white p-3 shadow-sm">
+                          <div key={`${proposal.title || 'proposal'}-${index}`} className="rounded-xl border border-emerald-200 bg-white p-3 shadow-sm">
                             <div className="text-sm font-black text-slate-900">{proposal.title || `Widget proposé ${index + 1}`}</div>
                             <div className="mt-1 text-xs font-semibold text-slate-500">
                               {proposal.type || 'tableau'} · {proposal.source || 'factures'} · {proposal.measure || 'ca_ht'} · {getActiveTemporalContext().periodLabel}
@@ -3389,20 +3335,19 @@ export default function AtelierAnalysePage() {
               </div>
             </div>
           )}
-          </div>
         </section>
 
-        <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
+        <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
-            <div className="relative shrink-0">
-              <button type="button" onClick={() => setAddMenuOpen((v) => !v)} className="rounded-lg bg-[#B4761A] px-4 py-2.5 text-sm font-bold text-white hover:bg-[#96600F]">+ Ajouter un widget</button>
+            <div className="relative">
+              <button type="button" onClick={() => setAddMenuOpen((v) => !v)} className="rounded-xl bg-slate-900 px-4 py-3 text-sm font-black text-white shadow-sm hover:bg-slate-800">+ Ajouter un widget</button>
               {addMenuOpen && (
-                <div className="absolute left-0 top-12 z-50 w-80 rounded-xl border border-[#E5E1D8] bg-white p-3 shadow-xl">
-                  <div className="mb-2 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Bibliothèque de widgets</div>
-                  <div className="space-y-1.5">
+                <div className="absolute left-0 top-14 z-50 w-80 rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl">
+                  <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Bibliothèque de widgets</div>
+                  <div className="space-y-2">
                     {widgetCatalog.map(([type, label, helper]) => (
-                      <button key={type} type="button" onClick={() => addWidget(type)} className="flex w-full items-center justify-between rounded-lg border border-[#E5E1D8] bg-white p-2.5 text-left hover:border-[#B4761A]/40 hover:bg-[#B4761A]/[0.05]">
-                        <span><span className="block text-[13px] font-bold text-[#111820]">+ {label}</span><span className="block text-xs text-[#8A8474]">{helper}</span></span>
+                      <button key={type} type="button" onClick={() => addWidget(type)} className="flex w-full items-center justify-between rounded-xl border border-slate-200 bg-white p-3 text-left hover:border-blue-300 hover:bg-blue-50">
+                        <span><span className="block text-sm font-black text-slate-900">+ {label}</span><span className="block text-xs text-slate-500">{helper}</span></span>
                       </button>
                     ))}
                   </div>
@@ -3411,20 +3356,13 @@ export default function AtelierAnalysePage() {
             </div>
 
             <div className="min-w-0 flex-1">
-              <div className="mb-2 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Vues enregistrées</div>
+              <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Vues enregistrées</div>
               <div className="flex gap-2 overflow-x-auto pb-1">
-                {savedViews.length === 0 && <div className="whitespace-nowrap rounded-lg bg-[#F4F3F0] px-3 py-2 text-xs text-[#8A8474]">Aucune vue enregistrée</div>}
+                {savedViews.length === 0 && <div className="whitespace-nowrap rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-500">Aucune vue enregistrée</div>}
                 {savedViews.map((view) => (
-                  <button
-                    key={view.id}
-                    type="button"
-                    onClick={() => loadView(view)}
-                    className={`min-w-[150px] rounded-lg border px-3 py-2 text-left text-xs transition-colors ${
-                      currentViewId === view.id ? 'border-[#B4761A] bg-[#B4761A]/[0.08]' : 'border-[#E5E1D8] bg-white hover:bg-[#F4F3F0]'
-                    }`}
-                  >
-                    <span className="block truncate font-bold text-[#111820]">{view.name}</span>
-                    <span className="block truncate text-[10px] text-[#8A8474]">{view.updated_at ? new Date(view.updated_at).toLocaleDateString('fr-FR') : ''}</span>
+                  <button key={view.id} type="button" onClick={() => loadView(view)} className={`min-w-[150px] rounded-xl border px-3 py-2 text-left text-xs hover:bg-slate-50 ${currentViewId === view.id ? 'border-blue-500 bg-blue-50' : 'border-slate-200'}`}>
+                    <span className="block truncate font-black">{view.name}</span>
+                    <span className="block truncate text-[10px] text-slate-500">{view.updated_at ? new Date(view.updated_at).toLocaleDateString('fr-FR') : ''}</span>
                   </button>
                 ))}
               </div>
@@ -3432,22 +3370,23 @@ export default function AtelierAnalysePage() {
           </div>
         </section>
 
-        <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
+        <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="mb-4 flex items-center justify-between gap-3">
             <div>
-              <h2 className="max-w-[900px] truncate text-[17px] font-bold text-[#111820]">{viewName?.trim() || 'Vue sans nom'}</h2>
-              <p className="text-[13px] text-[#8A8474]">{loading ? 'Chargement des données…' : `${formatNumber(rows.length)} lignes agrégées chargées`}</p>
+              <h2 className="max-w-[900px] truncate text-lg font-black">{viewName?.trim() || 'Vue sans nom'}</h2>
+              <p className="text-sm text-slate-500">{loading ? 'Chargement des données…' : `${formatNumber(rows.length)} lignes agrégées chargées`}</p>
             </div>
-            <div className="text-xs font-semibold text-[#8A8474]">Survole un widget pour le configurer, le déplacer ou le supprimer.</div>
+            <div className="text-xs font-bold text-slate-500">Cliquez sur la roue dentée d’un widget pour le configurer.</div>
           </div>
           {widgets.length === 0 ? (
-            <div className="rounded-xl border-2 border-dashed border-[#E5E1D8] p-12 text-center">
-              <div className="text-lg font-bold text-[#3A362E]">Ajoute ton premier widget</div>
-              <p className="mt-2 text-sm text-[#8A8474]">Utilise le bouton « + Ajouter un widget » ci-dessus.</p>
+            <div className="rounded-2xl border-2 border-dashed border-slate-300 p-12 text-center">
+              <div className="text-xl font-black text-slate-700">Ajoutez votre premier widget</div>
+              <p className="mt-2 text-sm text-slate-500">Utilisez le bouton « Ajouter un widget » au-dessus de la page.</p>
             </div>
           ) : (
-            <div className="grid grid-cols-1 gap-3 xl:grid-cols-4">
-              {widgetsWithRows.map(({ widget, rows: widgetRows }) => {
+            <div className="grid grid-cols-1 gap-4 xl:grid-cols-4">
+              {widgets.map((widget) => {
+                const widgetRows = applyWidgetFilters(rows, widget, globalFilters)
                 return (
                   <WidgetShell
                     key={widget.id}
