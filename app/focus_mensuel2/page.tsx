@@ -117,13 +117,34 @@ function useSiteHeaderOffset() {
     if (!el) return;
 
     let raf = 0;
-    function update() {
+
+    function measure() {
+      raf = 0;
       const rect = el!.getBoundingClientRect();
-      setOffset(Math.max(0, rect.bottom));
-      raf = requestAnimationFrame(update);
+      const next = Math.max(0, rect.bottom);
+      setOffset((prev) => (prev === next ? prev : next));
     }
-    raf = requestAnimationFrame(update);
-    return () => cancelAnimationFrame(raf);
+
+    // Une seule mesure par frame au maximum, déclenchée par un vrai événement
+    // (scroll/resize/redimensionnement du bandeau) — plus de boucle perpétuelle.
+    function schedule() {
+      if (raf) return;
+      raf = requestAnimationFrame(measure);
+    }
+
+    schedule();
+    window.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("resize", schedule);
+
+    const resizeObserver = typeof ResizeObserver !== "undefined" ? new ResizeObserver(schedule) : null;
+    resizeObserver?.observe(el);
+
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      window.removeEventListener("scroll", schedule);
+      window.removeEventListener("resize", schedule);
+      resizeObserver?.disconnect();
+    };
   }, []);
 
   return offset;
@@ -480,7 +501,7 @@ export default function FocusMensuel3Page() {
                 CEGECLIM — Pilotage commercial
               </div>
               <h1 className="font-[var(--font-display)] text-2xl font-bold text-white md:text-3xl">
-                Focus mensuel
+                Activité Quotidienne
               </h1>
             </div>
             <div className="flex flex-wrap items-center gap-4">
