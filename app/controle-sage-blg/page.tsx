@@ -89,6 +89,29 @@ type SyncLogEntry = {
   finished_at: string
 }
 
+type Operateur = 'egal' | 'contient' | 'ne_contient_pas' | 'commence_par' | 'est_vide' | 'non_vide'
+
+type FiltreCondition = {
+  id: string
+  cote: 'sage' | 'blg'
+  champ: string
+  operateur: Operateur
+  valeur: string
+}
+
+const OPERATEUR_LABELS: Record<Operateur, string> = {
+  egal: 'est égal à',
+  contient: 'contient',
+  ne_contient_pas: 'ne contient pas',
+  commence_par: 'commence par',
+  est_vide: 'est vide',
+  non_vide: "n'est pas vide",
+}
+
+function nouvelleCondition(): FiltreCondition {
+  return { id: Math.random().toString(36).slice(2), cote: 'sage', champ: '', operateur: 'contient', valeur: '' }
+}
+
 const CHAMP_LABELS: Record<string, string> = {
   intitule: 'Intitulé', siret: 'SIRET', code_naf: 'Code NAF', code_postal: 'Code postal', ville: 'Ville',
   representant: 'Représentant', encours: "Encours autorisé", assurance_credit: 'Assurance crédit',
@@ -111,10 +134,12 @@ export default function ControleSageBlgPage() {
   const [onlyEcarts, setOnlyEcarts] = useState(false)
   const [champFilter, setChampFilter] = useState<string | null>(null)
 
-  // Filtre générique sur un champ SAGE ou BLG arbitraire (pas seulement ceux déjà comparés)
-  const [advCote, setAdvCote] = useState<'sage' | 'blg' | ''>('')
-  const [advChamp, setAdvChamp] = useState('')
-  const [advValeur, setAdvValeur] = useState('')
+  // Filtre fixe : exclure les clients en sommeil côté SAGE (activé par défaut)
+  const [exclureSommeil, setExclureSommeil] = useState(true)
+
+  // Filtres avancés multiples, avec opérateur et logique ET/OU
+  const [conditions, setConditions] = useState<FiltreCondition[]>([])
+  const [logiqueConditions, setLogiqueConditions] = useState<'et' | 'ou'>('et')
 
   const [selected, setSelected] = useState<ControleRow | null>(null)
   const [selectedSageFull, setSelectedSageFull] = useState<Record<string, unknown>>({})
@@ -131,10 +156,13 @@ export default function ControleSageBlgPage() {
   const [syncLog, setSyncLog] = useState<SyncLogEntry[]>([])
   const [showSyncLog, setShowSyncLog] = useState(false)
 
-  const advFiltreActif = advCote !== '' && advChamp !== '' && advValeur.trim() !== ''
+  const conditionsValides = useMemo(
+    () => conditions.filter((c) => c.champ && (c.operateur === 'est_vide' || c.operateur === 'non_vide' || c.valeur.trim() !== '')),
+    [conditions]
+  )
 
   useEffect(() => { void loadMappingPanel() }, [])
-  useEffect(() => { void loadSummary(); void loadRows() }, [search, statutFilter, onlyEcarts, champFilter, advCote, advChamp, advValeur]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { void loadSummary(); void loadRows() }, [search, statutFilter, onlyEcarts, champFilter, exclureSommeil, conditionsValides, logiqueConditions]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!selected || selected.statut_appariement !== 'apparie' || !selected.blg_partner_id) {
@@ -154,9 +182,9 @@ export default function ControleSageBlgPage() {
 
   function filtreParams() {
     return {
-      p_filtre_cote: advFiltreActif ? advCote : null,
-      p_filtre_champ: advFiltreActif ? advChamp : null,
-      p_filtre_valeur: advFiltreActif ? advValeur.trim() : null,
+      p_exclure_sommeil: exclureSommeil,
+      p_filtres: conditionsValides.map((c) => ({ cote: c.cote, champ: c.champ, operateur: c.operateur, valeur: c.valeur })),
+      p_combinateur: logiqueConditions.toUpperCase(),
     }
   }
 
@@ -301,11 +329,17 @@ export default function ControleSageBlgPage() {
             </div>
           )}
 
-          <div className="mt-4 flex flex-wrap gap-2">
-            <DomaineTab active={domaine === 'client'} onClick={() => setDomaine('client')} label="Fiche client" />
-            <DomaineTab active={false} disabled label="Fiche article" note="bientôt" />
-            <DomaineTab active={false} disabled label="Devis" note="bientôt" />
-            <DomaineTab active={false} disabled label="Factures" note="bientôt" />
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap gap-2">
+              <DomaineTab active={domaine === 'client'} onClick={() => setDomaine('client')} label="Fiche client" />
+              <DomaineTab active={false} disabled label="Fiche article" note="bientôt" />
+              <DomaineTab active={false} disabled label="Devis" note="bientôt" />
+              <DomaineTab active={false} disabled label="Factures" note="bientôt" />
+            </div>
+            <label className="flex items-center gap-2 rounded-lg border border-[#E5E1D8] bg-[#F4F3F0] px-3 py-2 text-[13px] font-bold text-[#3A362E]">
+              <input type="checkbox" checked={exclureSommeil} onChange={(e) => setExclureSommeil(e.target.checked)} className="accent-[#B4761A]" />
+              Exclure les tiers en sommeil (SAGE)
+            </label>
           </div>
         </section>
 
@@ -392,32 +426,53 @@ export default function ControleSageBlgPage() {
                 </div>
               )}
 
-              {/* Filtre avancé : n'importe quel champ SAGE ou BLG, même non comparé automatiquement */}
+              {/* Filtres avancés multiples : n'importe quel champ SAGE ou BLG, avec opérateur */}
               <div className="mt-3 border-t border-[#E5E1D8] pt-3">
-                <div className="mb-2 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Filtre avancé sur un champ</div>
-                <div className="grid gap-2 md:grid-cols-4">
-                  <select value={advCote} onChange={(e) => { setAdvCote(e.target.value as typeof advCote); setAdvChamp('') }}
-                    className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
-                    <option value="">Côté…</option>
-                    <option value="sage">Champ SAGE</option>
-                    <option value="blg">Champ BLG</option>
-                  </select>
-                  <select value={advChamp} onChange={(e) => setAdvChamp(e.target.value)} disabled={!advCote}
-                    className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E] disabled:bg-[#F4F3F0] disabled:text-[#B3AD9E]">
-                    <option value="">Champ…</option>
-                    {(advCote === 'sage' ? sageInventaire : advCote === 'blg' ? blgInventaire : []).map((c) => (
-                      <option key={c.colonne} value={c.colonne}>{c.colonne}</option>
-                    ))}
-                  </select>
-                  <input value={advValeur} onChange={(e) => setAdvValeur(e.target.value)} disabled={!advChamp} placeholder="Valeur (contient…)"
-                    className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-sm font-medium outline-none focus:border-[#B4761A] disabled:bg-[#F4F3F0] md:col-span-2" />
+                <div className="mb-2 flex items-center justify-between">
+                  <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Filtres avancés</div>
+                  {conditions.length >= 2 && (
+                    <div className="flex items-center gap-1 text-[12px] font-semibold text-[#3A362E]">
+                      Combiner avec :
+                      <button type="button" onClick={() => setLogiqueConditions('et')}
+                        className={`rounded px-2 py-0.5 ${logiqueConditions === 'et' ? 'bg-[#111820] text-white' : 'bg-[#F4F3F0]'}`}>ET</button>
+                      <button type="button" onClick={() => setLogiqueConditions('ou')}
+                        className={`rounded px-2 py-0.5 ${logiqueConditions === 'ou' ? 'bg-[#111820] text-white' : 'bg-[#F4F3F0]'}`}>OU</button>
+                    </div>
+                  )}
                 </div>
-                {advFiltreActif && (
-                  <div className="mt-2 flex items-center gap-2 text-[12px] text-[#8A8474]">
-                    Filtré sur : <span className="font-bold text-[#96600F]">{advCote === 'sage' ? 'SAGE' : 'BLG'}.{advChamp}</span> contient <span className="font-bold text-[#96600F]">« {advValeur} »</span>
-                    <button type="button" onClick={() => { setAdvCote(''); setAdvChamp(''); setAdvValeur('') }} className="font-bold text-[#B4761A] hover:underline">Retirer</button>
-                  </div>
-                )}
+
+                <div className="space-y-2">
+                  {conditions.map((c) => (
+                    <div key={c.id} className="grid grid-cols-[110px_1fr_160px_1fr_32px] gap-2">
+                      <select value={c.cote} onChange={(e) => setConditions((prev) => prev.map((x) => x.id === c.id ? { ...x, cote: e.target.value as 'sage' | 'blg', champ: '' } : x))}
+                        className="h-9 rounded-lg border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold text-[#3A362E]">
+                        <option value="sage">SAGE</option>
+                        <option value="blg">BLG</option>
+                      </select>
+                      <select value={c.champ} onChange={(e) => setConditions((prev) => prev.map((x) => x.id === c.id ? { ...x, champ: e.target.value } : x))}
+                        className="h-9 rounded-lg border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold text-[#3A362E]">
+                        <option value="">Champ…</option>
+                        {(c.cote === 'sage' ? sageInventaire : blgInventaire).map((col) => (
+                          <option key={col.colonne} value={col.colonne}>{col.colonne}</option>
+                        ))}
+                      </select>
+                      <select value={c.operateur} onChange={(e) => setConditions((prev) => prev.map((x) => x.id === c.id ? { ...x, operateur: e.target.value as Operateur } : x))}
+                        className="h-9 rounded-lg border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold text-[#3A362E]">
+                        {(Object.entries(OPERATEUR_LABELS) as [Operateur, string][]).map(([op, label]) => (
+                          <option key={op} value={op}>{label}</option>
+                        ))}
+                      </select>
+                      <input value={c.valeur} onChange={(e) => setConditions((prev) => prev.map((x) => x.id === c.id ? { ...x, valeur: e.target.value } : x))}
+                        disabled={c.operateur === 'est_vide' || c.operateur === 'non_vide'} placeholder="Valeur…"
+                        className="h-9 rounded-lg border border-[#E5E1D8] bg-white px-2 text-[12px] font-medium outline-none focus:border-[#B4761A] disabled:bg-[#F4F3F0]" />
+                      <button type="button" onClick={() => setConditions((prev) => prev.filter((x) => x.id !== c.id))}
+                        className="flex h-9 items-center justify-center rounded-lg border border-[#E5E1D8] text-[#8A8474] hover:border-red-300 hover:text-red-600">✕</button>
+                    </div>
+                  ))}
+                </div>
+
+                <button type="button" onClick={() => setConditions((prev) => [...prev, nouvelleCondition()])}
+                  className="mt-2 text-[12px] font-bold text-[#B4761A] hover:underline">+ Ajouter une condition</button>
               </div>
             </section>
 
