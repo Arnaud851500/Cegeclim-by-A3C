@@ -96,48 +96,6 @@ const CHAMP_LABELS: Record<string, string> = {
   type_facture: 'Type de facture', capacite_expiration: 'Capacité expiration',
 }
 
-const FIELD_PAIRS: Array<{ key: string; label: string; sage: keyof ControleRow; blg: keyof ControleRow; format?: (v: unknown) => string }> = [
-  { key: 'intitule', label: 'Intitulé', sage: 'sage_intitule', blg: 'blg_intitule' },
-  { key: 'siret', label: 'SIRET', sage: 'sage_siret', blg: 'blg_siret' },
-  { key: 'code_naf', label: 'Code NAF', sage: 'sage_code_naf', blg: 'blg_code_naf' },
-  { key: 'code_postal', label: 'Code postal', sage: 'sage_code_postal', blg: 'blg_code_postal' },
-  { key: 'ville', label: 'Ville', sage: 'sage_ville', blg: 'blg_ville' },
-  { key: 'representant', label: 'Représentant', sage: 'sage_representant', blg: 'blg_commercial' },
-  { key: 'encours', label: 'Encours autorisé', sage: 'sage_encours', blg: 'blg_encours', format: formatMontant },
-  { key: 'assurance_credit', label: 'Assurance crédit', sage: 'sage_assurance_credit', blg: 'blg_assurance_credit', format: formatMontant },
-  { key: 'famille', label: 'Famille', sage: 'sage_famille', blg: 'blg_famille' },
-  { key: 'frais_facturation', label: 'Frais de facturation', sage: 'sage_frais_facturation', blg: 'blg_frais_facturation' },
-  { key: 'routage_promo', label: 'Routage promo', sage: 'sage_routage_promo', blg: 'blg_routage_promo' },
-  { key: 'facture_email', label: 'Facture électronique', sage: 'sage_facture_email', blg: 'blg_facture_electronique' },
-  { key: 'releve_facture', label: 'Relevé de facture', sage: 'sage_releve_facture', blg: 'blg_releve_facture' },
-  { key: 'type_facture', label: 'Type de facture', sage: 'sage_type_facture', blg: 'blg_type_facture' },
-  { key: 'capacite_expiration', label: 'Capacité expiration', sage: 'sage_capacite_expiration', blg: 'blg_capacite_expiration', format: formatDate },
-]
-
-// Champs affichés côte à côte mais non comparés automatiquement (formats trop
-// différents entre SAGE et BLG pour un diff fiable — à l'œil pour l'instant).
-const INFO_PAIRS: Array<{ label: string; sage: keyof ControleRow; blg: keyof ControleRow; formatBlg?: (v: unknown) => string }> = [
-  { label: 'Abrégé / Nom court', sage: 'sage_abrege', blg: 'blg_nom_court' },
-  { label: 'Qualité / Tags', sage: 'sage_qualite', blg: 'blg_tags', formatBlg: (v) => (Array.isArray(v) ? v.join(', ') : '—') },
-  { label: 'Interlocuteur / Contact principal', sage: 'sage_contact', blg: 'blg_contact_principal' },
-]
-
-function formatMontant(v: unknown): string {
-  if (v === null || v === undefined || v === '') return '—'
-  const n = Number(v)
-  if (!Number.isFinite(n)) return String(v)
-  return `${n.toLocaleString('fr-FR')} €`
-}
-function formatDate(v: unknown): string {
-  if (!v) return '—'
-  try { return new Date(String(v)).toLocaleDateString('fr-FR') } catch { return String(v) }
-}
-function displayValue(v: unknown, format?: (v: unknown) => string): string {
-  if (format) return format(v)
-  if (v === null || v === undefined || v === '') return '—'
-  return String(v)
-}
-
 // ── Page ─────────────────────────────────────────────────────────────────
 
 export default function ControleSageBlgPage() {
@@ -153,7 +111,15 @@ export default function ControleSageBlgPage() {
   const [onlyEcarts, setOnlyEcarts] = useState(false)
   const [champFilter, setChampFilter] = useState<string | null>(null)
 
+  // Filtre générique sur un champ SAGE ou BLG arbitraire (pas seulement ceux déjà comparés)
+  const [advCote, setAdvCote] = useState<'sage' | 'blg' | ''>('')
+  const [advChamp, setAdvChamp] = useState('')
+  const [advValeur, setAdvValeur] = useState('')
+
   const [selected, setSelected] = useState<ControleRow | null>(null)
+  const [selectedSageFull, setSelectedSageFull] = useState<Record<string, unknown>>({})
+  const [selectedBlgFull, setSelectedBlgFull] = useState<Record<string, unknown>>({})
+  const [loadingSelected, setLoadingSelected] = useState(false)
 
   const [showMapping, setShowMapping] = useState(false)
   const [inventaire, setInventaire] = useState<ChampInventaire[]>([])
@@ -165,12 +131,44 @@ export default function ControleSageBlgPage() {
   const [syncLog, setSyncLog] = useState<SyncLogEntry[]>([])
   const [showSyncLog, setShowSyncLog] = useState(false)
 
-  useEffect(() => { void loadSummary() }, [])
-  useEffect(() => { void loadRows() }, [search, statutFilter, onlyEcarts, champFilter]) // eslint-disable-line react-hooks/exhaustive-deps
+  const advFiltreActif = advCote !== '' && advChamp !== '' && advValeur.trim() !== ''
+
+  useEffect(() => { void loadMappingPanel() }, [])
+  useEffect(() => { void loadSummary(); void loadRows() }, [search, statutFilter, onlyEcarts, champFilter, advCote, advChamp, advValeur]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!selected || selected.statut_appariement !== 'apparie' || !selected.blg_partner_id) {
+      setSelectedSageFull({}); setSelectedBlgFull({})
+      return
+    }
+    setLoadingSelected(true)
+    Promise.all([
+      supabase.rpc('get_tiers_sage_full', { p_numero: selected.numero_tiers }),
+      supabase.rpc('get_tiers_blg_full', { p_partner_id: selected.blg_partner_id }),
+    ]).then(([{ data: sage }, { data: blg }]) => {
+      setSelectedSageFull((sage as Record<string, unknown>) || {})
+      setSelectedBlgFull((blg as Record<string, unknown>) || {})
+      setLoadingSelected(false)
+    })
+  }, [selected])
+
+  function filtreParams() {
+    return {
+      p_filtre_cote: advFiltreActif ? advCote : null,
+      p_filtre_champ: advFiltreActif ? advChamp : null,
+      p_filtre_valeur: advFiltreActif ? advValeur.trim() : null,
+    }
+  }
 
   async function loadSummary() {
     setLoadingSummary(true)
-    const { data, error: err } = await supabase.rpc('get_controle_tiers_summary')
+    const { data, error: err } = await supabase.rpc('get_controle_tiers_summary', {
+      p_statut: statutFilter === 'tous' ? null : statutFilter,
+      p_only_ecarts: onlyEcarts,
+      p_champ: champFilter,
+      p_search: search.trim() || null,
+      ...filtreParams(),
+    })
     if (err) setError(err.message)
     else setSummary(Array.isArray(data) ? data[0] : data)
     setLoadingSummary(false)
@@ -185,6 +183,7 @@ export default function ControleSageBlgPage() {
       p_search: search.trim() || null,
       p_limit: 300,
       p_offset: 0,
+      ...filtreParams(),
     })
     if (err) setError(err.message)
     else { setRows((data || []) as ControleRow[]); setError(null) }
@@ -203,12 +202,29 @@ export default function ControleSageBlgPage() {
   }
 
   function toggleMappingPanel() {
-    const next = !showMapping
-    setShowMapping(next)
-    if (next && inventaire.length === 0) void loadMappingPanel()
+    setShowMapping((v) => !v)
   }
 
   const blgInventaire = useMemo(() => inventaire.filter((c) => c.cote === 'blg'), [inventaire])
+  const sageInventaire = useMemo(() => inventaire.filter((c) => c.cote === 'sage'), [inventaire])
+
+  // Compare deux valeurs de façon tolérante (espaces, casse) pour surligner les
+  // écarts sur N'IMPORTE QUEL champ mappé — pas seulement ceux calculés côté SQL.
+  function valuesDiffer(a: unknown, b: unknown): boolean {
+    const na = normalizeForCompare(a)
+    const nb = normalizeForCompare(b)
+    if (na === '' || nb === '') return false // l'un des deux est vide : pas assez fiable pour signaler un écart
+    return na !== nb
+  }
+  function normalizeForCompare(v: unknown): string {
+    if (v === null || v === undefined) return ''
+    if (typeof v === 'boolean') return v ? 'oui' : 'non'
+    if (Array.isArray(v)) return v.map(String).join(',').toUpperCase().replace(/\s+/g, ' ').trim()
+    return String(v).toUpperCase().replace(/\s+/g, ' ').trim()
+  }
+
+  const mappedFields = useMemo(() => mapping.filter((m) => m.champ_blg), [mapping])
+  const unmappedFields = useMemo(() => mapping.filter((m) => !m.champ_blg), [mapping])
 
   async function lancerSynchro() {
     setSyncLoading(true)
@@ -375,57 +391,88 @@ export default function ControleSageBlgPage() {
                   <button type="button" onClick={() => setChampFilter(null)} className="font-bold text-[#B4761A] hover:underline">Retirer</button>
                 </div>
               )}
+
+              {/* Filtre avancé : n'importe quel champ SAGE ou BLG, même non comparé automatiquement */}
+              <div className="mt-3 border-t border-[#E5E1D8] pt-3">
+                <div className="mb-2 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Filtre avancé sur un champ</div>
+                <div className="grid gap-2 md:grid-cols-4">
+                  <select value={advCote} onChange={(e) => { setAdvCote(e.target.value as typeof advCote); setAdvChamp('') }}
+                    className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
+                    <option value="">Côté…</option>
+                    <option value="sage">Champ SAGE</option>
+                    <option value="blg">Champ BLG</option>
+                  </select>
+                  <select value={advChamp} onChange={(e) => setAdvChamp(e.target.value)} disabled={!advCote}
+                    className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E] disabled:bg-[#F4F3F0] disabled:text-[#B3AD9E]">
+                    <option value="">Champ…</option>
+                    {(advCote === 'sage' ? sageInventaire : advCote === 'blg' ? blgInventaire : []).map((c) => (
+                      <option key={c.colonne} value={c.colonne}>{c.colonne}</option>
+                    ))}
+                  </select>
+                  <input value={advValeur} onChange={(e) => setAdvValeur(e.target.value)} disabled={!advChamp} placeholder="Valeur (contient…)"
+                    className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-sm font-medium outline-none focus:border-[#B4761A] disabled:bg-[#F4F3F0] md:col-span-2" />
+                </div>
+                {advFiltreActif && (
+                  <div className="mt-2 flex items-center gap-2 text-[12px] text-[#8A8474]">
+                    Filtré sur : <span className="font-bold text-[#96600F]">{advCote === 'sage' ? 'SAGE' : 'BLG'}.{advChamp}</span> contient <span className="font-bold text-[#96600F]">« {advValeur} »</span>
+                    <button type="button" onClick={() => { setAdvCote(''); setAdvChamp(''); setAdvValeur('') }} className="font-bold text-[#B4761A] hover:underline">Retirer</button>
+                  </div>
+                )}
+              </div>
             </section>
 
             {/* Liste + détail */}
-            <section className="grid gap-4 lg:grid-cols-[1fr_560px]">
+            <section className="grid gap-4 lg:grid-cols-[1fr_2fr]">
               <div className="rounded-xl border border-[#E5E1D8] bg-white p-4">
                 <div className="mb-3 flex items-center justify-between">
                   <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">{loading ? 'Chargement…' : `${rows.length} résultat${rows.length > 1 ? 's' : ''}`}</div>
                   {error && <div className="text-[12px] font-semibold text-red-600">{error}</div>}
                 </div>
-                <div className="max-h-[640px] overflow-auto rounded-lg border border-[#E5E1D8]">
+                <div className="max-h-[760px] overflow-auto rounded-lg border border-[#E5E1D8]">
                   <table className="w-full text-left text-[13px]">
                     <thead className="sticky top-0 bg-[#F4F3F0] text-[11px] uppercase tracking-wide text-[#8A8474]">
-                      <tr><th className="px-3 py-2 font-bold">N° tiers</th><th className="px-3 py-2 font-bold">Intitulé</th><th className="px-3 py-2 font-bold">Statut</th><th className="px-3 py-2 font-bold">Écarts</th></tr>
+                      <tr><th className="px-3 py-2 font-bold">N° tiers</th><th className="px-3 py-2 font-bold">Statut</th></tr>
                     </thead>
                     <tbody>
                       {rows.map((r) => (
                         <tr key={r.numero_tiers} onClick={() => setSelected(r)}
                           className={`cursor-pointer border-t border-[#E5E1D8] transition-colors hover:bg-[#F4F3F0] ${selected?.numero_tiers === r.numero_tiers ? 'bg-[#B4761A]/[0.06]' : ''}`}>
-                          <td className="px-3 py-2 font-mono text-[12px] font-semibold text-[#3A362E]">{r.numero_tiers}</td>
-                          <td className="px-3 py-2 text-[#111820]">{r.sage_intitule || r.blg_intitule || '—'}</td>
+                          <td className="px-3 py-2">
+                            <div className="font-mono text-[12px] font-semibold text-[#3A362E]">{r.numero_tiers}</div>
+                            <div className="truncate text-[12px] text-[#111820]">{r.sage_intitule || r.blg_intitule || '—'}</div>
+                          </td>
                           <td className="px-3 py-2">
                             {r.statut_appariement === 'manquant_blg' ? (
                               <span className="rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-bold text-red-700">Manquant BLG</span>
                             ) : r.champs_en_ecart.length === 0 ? (
                               <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-bold text-emerald-700">OK</span>
                             ) : (
-                              <span className="rounded-full bg-[#B4761A]/[0.1] px-2 py-0.5 text-[11px] font-bold text-[#96600F]">À vérifier</span>
+                              <span className="rounded-full bg-[#B4761A]/[0.1] px-2 py-0.5 text-[11px] font-bold text-[#96600F]">{r.champs_en_ecart.length} écart{r.champs_en_ecart.length > 1 ? 's' : ''}</span>
                             )}
                           </td>
-                          <td className="px-3 py-2 text-[#8A8474]">{r.champs_en_ecart.length === 0 ? '—' : r.champs_en_ecart.map((c) => CHAMP_LABELS[c] || c).join(', ')}</td>
                         </tr>
                       ))}
-                      {!loading && rows.length === 0 && <tr><td colSpan={4} className="px-3 py-8 text-center text-[#8A8474]">Aucun résultat pour ces filtres.</td></tr>}
+                      {!loading && rows.length === 0 && <tr><td colSpan={2} className="px-3 py-8 text-center text-[#8A8474]">Aucun résultat pour ces filtres.</td></tr>}
                     </tbody>
                   </table>
                 </div>
               </div>
 
-              {/* Détail comparatif */}
+              {/* Détail comparatif — dynamique, basé sur la table de mapping réelle */}
               <div className="rounded-xl border border-[#E5E1D8] bg-white p-4">
-                <div className="mb-3 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Comparaison détaillée</div>
+                <div className="mb-3 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Comparaison détaillée (tous les champs mappés)</div>
                 {!selected ? (
                   <div className="flex h-64 items-center justify-center text-center text-[13px] text-[#8A8474]">Sélectionne un tiers dans la liste pour voir le détail champ par champ.</div>
                 ) : (
                   <div>
-                    <div className="mb-3 border-b border-[#E5E1D8] pb-3">
-                      <div className="font-mono text-[12px] font-bold text-[#8A8474]">{selected.numero_tiers}</div>
-                      <div className="text-[15px] font-bold text-[#111820]">{selected.sage_intitule || selected.blg_intitule}</div>
+                    <div className="mb-3 flex items-center justify-between border-b border-[#E5E1D8] pb-3">
+                      <div>
+                        <div className="font-mono text-[12px] font-bold text-[#8A8474]">{selected.numero_tiers}</div>
+                        <div className="text-[15px] font-bold text-[#111820]">{selected.sage_intitule || selected.blg_intitule}</div>
+                      </div>
                       {selected.blg_partner_id && (
                         <a href={`https://app.blgcloud.com/cegeclim-test/?app/crm/company/${selected.blg_partner_id}#`} target="_blank" rel="noopener noreferrer"
-                          className="mt-1 inline-block text-[12px] font-semibold text-[#B4761A] hover:underline">Ouvrir dans BLG ↗</a>
+                          className="text-[12px] font-semibold text-[#B4761A] hover:underline">Ouvrir dans BLG ↗</a>
                       )}
                     </div>
 
@@ -433,55 +480,41 @@ export default function ControleSageBlgPage() {
                       <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-[13px] font-semibold text-red-700">
                         Ce tiers n'a pas de correspondance identifiée côté BLG (`blg_id_tiers` non renseigné ou introuvable).
                       </div>
+                    ) : loadingSelected ? (
+                      <div className="h-64 animate-pulse rounded-lg bg-[#F4F3F0]" />
                     ) : (
-                      <>
+                      <div className="max-h-[720px] overflow-auto">
+                        <div className="grid grid-cols-[1fr_1fr_1fr] gap-2 px-2 pb-1 text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">
+                          <span>Champ</span><span>SAGE</span><span>BLG</span>
+                        </div>
                         <div className="space-y-0.5">
-                          <div className="grid grid-cols-[1fr_1fr_1fr] gap-2 px-2 pb-1 text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">
-                            <span>Champ</span><span>SAGE</span><span>BLG</span>
-                          </div>
-                          {FIELD_PAIRS.map((f) => {
-                            const isEcart = selected.champs_en_ecart.includes(f.key)
+                          {mappedFields.map((m) => {
+                            const sageVal = selectedSageFull[m.champ_sage]
+                            const blgVal = selectedBlgFull[m.champ_blg as string]
+                            const isEcart = m.type_comparaison !== 'affichage_seul' && valuesDiffer(sageVal, blgVal)
                             return (
-                              <div key={f.key} className={`grid grid-cols-[1fr_1fr_1fr] gap-2 rounded-lg px-2 py-1.5 text-[13px] ${isEcart ? 'bg-[#B4761A]/[0.08]' : ''}`}>
-                                <span className="font-semibold text-[#3A362E]">{f.label}</span>
-                                <span className={isEcart ? 'font-bold text-[#96600F]' : 'text-[#111820]'}>{displayValue(selected[f.sage], f.format)}</span>
-                                <span className={isEcart ? 'font-bold text-[#96600F]' : 'text-[#111820]'}>{displayValue(selected[f.blg], f.format)}</span>
+                              <div key={m.id} className={`grid grid-cols-[1fr_1fr_1fr] gap-2 rounded-lg px-2 py-1.5 text-[13px] ${isEcart ? 'bg-[#B4761A]/[0.08]' : ''}`}>
+                                <span className="font-semibold text-[#3A362E]">{m.label || m.champ_sage}</span>
+                                <span className={isEcart ? 'font-bold text-[#96600F]' : 'text-[#111820]'}>{formatCellValue(sageVal)}</span>
+                                <span className={isEcart ? 'font-bold text-[#96600F]' : 'text-[#111820]'}>{formatCellValue(blgVal)}</span>
                               </div>
                             )
                           })}
                         </div>
 
-                        <div className="mt-4 border-t border-[#E5E1D8] pt-3">
-                          <div className="mb-2 text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">Informations complémentaires (affichage, non comparé automatiquement)</div>
+                        <div className="mt-4 border-t border-[#E5E1D8] pt-2">
+                          <div className="mb-1 text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">Champs SAGE non mappés côté BLG ({unmappedFields.length})</div>
                           <div className="space-y-0.5">
-                            <div className="grid grid-cols-[1fr_1fr_1fr] gap-2 px-2 pb-1 text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">
-                              <span>Champ</span><span>SAGE</span><span>BLG</span>
-                            </div>
-                            {INFO_PAIRS.map((f) => (
-                              <div key={f.label} className="grid grid-cols-[1fr_1fr_1fr] gap-2 rounded-lg px-2 py-1.5 text-[13px]">
-                                <span className="font-semibold text-[#3A362E]">{f.label}</span>
-                                <span className="text-[#111820]">{displayValue(selected[f.sage])}</span>
-                                <span className="text-[#111820]">{displayValue(selected[f.blg], f.formatBlg)}</span>
+                            {unmappedFields.map((m) => (
+                              <div key={m.id} className="grid grid-cols-[1fr_1fr_1fr] gap-2 rounded-lg px-2 py-1 text-[13px] opacity-70">
+                                <span className="font-semibold text-[#3A362E]">{m.label || m.champ_sage}</span>
+                                <span className="text-[#111820]">{formatCellValue(selectedSageFull[m.champ_sage])}</span>
+                                <span className="text-[#B3AD9E]">— non mappé —</span>
                               </div>
                             ))}
-                            <div className="grid grid-cols-[1fr_1fr_1fr] gap-2 rounded-lg px-2 py-1.5 text-[13px]">
-                              <span className="font-semibold text-[#3A362E]">Agence de rattachement (SAGE)</span>
-                              <span className="text-[#111820]">{displayValue(selected.sage_agence_rattachement)}</span>
-                              <span className="text-[#8A8474]">Pas d'équivalent identifié — voir mapping</span>
-                            </div>
-                            <div className="grid grid-cols-[1fr_1fr_1fr] gap-2 rounded-lg px-2 py-1.5 text-[13px]">
-                              <span className="font-semibold text-[#3A362E]">Contacts rattachés (BLG)</span>
-                              <span className="text-[#8A8474]">—</span>
-                              <span className="text-[#111820]">{selected.blg_nb_contacts ?? 0} — {selected.blg_contacts_resume || '—'}</span>
-                            </div>
-                            <div className="grid grid-cols-[1fr_1fr_1fr] gap-2 rounded-lg px-2 py-1.5 text-[13px]">
-                              <span className="font-semibold text-[#3A362E]">IBAN / Banque (BLG)</span>
-                              <span className="text-[#8A8474]">—</span>
-                              <span className="text-[#111820]">{selected.blg_iban || '—'} {selected.blg_banque ? `(${selected.blg_banque})` : ''}</span>
-                            </div>
                           </div>
                         </div>
-                      </>
+                      </div>
                     )}
                   </div>
                 )}
