@@ -594,6 +594,14 @@
 
         ],
       },
+      {
+        label: 'Projet BLG',
+        items: [
+          { label: '1 : Contrôle cohérence SAGE-BLG', path: '/controle-sage-blg', accessKey: 'can_autorisation' },
+
+
+        ],
+      },
     ]
 
     useEffect(() => {
