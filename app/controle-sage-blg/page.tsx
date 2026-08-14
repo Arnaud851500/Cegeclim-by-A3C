@@ -208,20 +208,7 @@ export default function ControleSageBlgPage() {
     if (next && inventaire.length === 0) void loadMappingPanel()
   }
 
-  async function updateMapping(row: ChampMapping, patch: Partial<ChampMapping>) {
-    const next = { ...row, ...patch }
-    setMapping((prev) => prev.map((m) => (m.id === row.id ? next : m)))
-    await supabase.from('champ_mapping_sage_blg').update({
-      champ_blg: next.champ_blg,
-      type_comparaison: next.type_comparaison,
-      notes: next.notes,
-    }).eq('id', row.id)
-  }
-
-  const sageInventaire = useMemo(() => inventaire.filter((c) => c.cote === 'sage'), [inventaire])
   const blgInventaire = useMemo(() => inventaire.filter((c) => c.cote === 'blg'), [inventaire])
-  const champsMappes = useMemo(() => new Set(mapping.map((m) => m.champ_sage)), [mapping])
-  const champsSansMapping = useMemo(() => sageInventaire.filter((c) => !champsMappes.has(c.colonne)), [sageInventaire, champsMappes])
 
   async function lancerSynchro() {
     setSyncLoading(true)
@@ -350,7 +337,7 @@ export default function ControleSageBlgPage() {
               <button type="button" onClick={toggleMappingPanel} className="flex w-full items-center justify-between text-left">
                 <div>
                   <div className="text-[13px] font-bold text-[#111820]">Mapping des champs (SAGE ↔ BLG)</div>
-                  <p className="text-[12px] text-[#8A8474]">Documente manuellement la correspondance pour les champs pas encore couverts automatiquement.</p>
+                  <p className="text-[12px] text-[#8A8474]">Choisis un client exemple, clique un champ SAGE puis le champ BLG correspondant pour les associer.</p>
                 </div>
                 <span className="text-[#8A8474]">{showMapping ? '▲' : '▼'}</span>
               </button>
@@ -360,79 +347,7 @@ export default function ControleSageBlgPage() {
                   {loadingMapping ? (
                     <div className="h-32 animate-pulse rounded bg-[#F4F3F0]" />
                   ) : (
-                    <>
-                      <div className="max-h-[400px] overflow-auto rounded-lg border border-[#E5E1D8]">
-                        <table className="w-full text-left text-[13px]">
-                          <thead className="sticky top-0 bg-[#F4F3F0] text-[11px] uppercase tracking-wide text-[#8A8474]">
-                            <tr>
-                              <th className="px-3 py-2 font-bold">Champ SAGE</th>
-                              <th className="px-3 py-2 font-bold">Libellé</th>
-                              <th className="px-3 py-2 font-bold">Champ BLG</th>
-                              <th className="px-3 py-2 font-bold">Type</th>
-                              <th className="px-3 py-2 font-bold">Notes</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {mapping.map((m) => (
-                              <tr key={m.id} className="border-t border-[#E5E1D8]">
-                                <td className="px-3 py-1.5 font-mono text-[12px] text-[#3A362E]">{m.champ_sage}</td>
-                                <td className="px-3 py-1.5 text-[#111820]">{m.label}</td>
-                                <td className="px-3 py-1.5">
-                                  <select
-                                    value={m.champ_blg || ''}
-                                    onChange={(e) => void updateMapping(m, { champ_blg: e.target.value || null })}
-                                    className="h-8 w-full rounded border border-[#E5E1D8] bg-white px-2 text-[12px]"
-                                  >
-                                    <option value="">— non mappé —</option>
-                                    {blgInventaire.map((c) => (
-                                      <option key={c.colonne} value={c.colonne}>{c.colonne}</option>
-                                    ))}
-                                  </select>
-                                </td>
-                                <td className="px-3 py-1.5">
-                                  <select
-                                    value={m.type_comparaison}
-                                    onChange={(e) => void updateMapping(m, { type_comparaison: e.target.value as ChampMapping['type_comparaison'] })}
-                                    className="h-8 rounded border border-[#E5E1D8] bg-white px-2 text-[12px]"
-                                  >
-                                    <option value="auto">Auto (déjà comparé)</option>
-                                    <option value="manuel">Manuel / à revoir</option>
-                                    <option value="affichage_seul">Affichage seul</option>
-                                    <option value="non_comparable">Non comparable</option>
-                                  </select>
-                                </td>
-                                <td className="px-3 py-1.5">
-                                  <input
-                                    defaultValue={m.notes || ''}
-                                    onBlur={(e) => void updateMapping(m, { notes: e.target.value || null })}
-                                    placeholder="—"
-                                    className="h-8 w-full rounded border border-[#E5E1D8] bg-white px-2 text-[12px]"
-                                  />
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-
-                      <div className="mt-3 grid gap-3 md:grid-cols-2">
-                        <div className="rounded-lg border border-[#E5E1D8] bg-[#F4F3F0] p-3">
-                          <div className="mb-1 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Champs SAGE ({sageInventaire.length} au total)</div>
-                          <p className="text-[12px] text-[#8A8474]">Tous documentés dans le tableau ci-dessus.</p>
-                        </div>
-                        <div className="rounded-lg border border-[#E5E1D8] bg-[#F4F3F0] p-3">
-                          <div className="mb-1 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Champs BLG disponibles ({blgInventaire.length})</div>
-                          <div className="flex max-h-24 flex-wrap gap-1 overflow-auto">
-                            {blgInventaire.map((c) => (
-                              <span key={c.colonne} className="rounded bg-white px-1.5 py-0.5 font-mono text-[11px] text-[#3A362E]">{c.colonne}</span>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                      {champsSansMapping.length > 0 && (
-                        <p className="mt-2 text-[12px] font-semibold text-red-600">{champsSansMapping.length} champ(s) SAGE sans ligne de mapping — la table a peut-être évolué depuis l'amorçage initial.</p>
-                      )}
-                    </>
+                    <MappingBuilder mapping={mapping} blgInventaire={blgInventaire} onMappingChange={setMapping} />
                   )}
                 </div>
               )}
@@ -600,6 +515,195 @@ function KpiCard({ label, value, loading, tone }: { label: string; value: number
       <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">{label}</div>
       {loading ? <div className="mt-2 h-8 w-16 animate-pulse rounded bg-[#F4F3F0]" /> : (
         <div className="mt-1 text-[28px] font-bold tracking-tight" style={{ color }}>{value !== undefined ? value.toLocaleString('fr-FR') : '—'}</div>
+      )}
+    </div>
+  )
+}
+
+// ── Sélecteur de mapping interactif ─────────────────────────────────────
+//
+// Choisis un client exemple, puis clique un champ SAGE (colonne de gauche)
+// et le champ BLG correspondant (colonne de droite) pour les associer. Les
+// paires déjà mappées s'affichent alignées en haut ; les champs non mappés
+// suivent en dessous, chacun avec sa valeur réelle pour ce client.
+
+function formatCellValue(v: unknown): string {
+  if (v === null || v === undefined || v === '') return '—'
+  if (typeof v === 'boolean') return v ? 'Oui' : 'Non'
+  if (Array.isArray(v)) return v.length ? v.map((x) => (typeof x === 'object' ? JSON.stringify(x) : String(x))).join(', ') : '—'
+  if (typeof v === 'object') return JSON.stringify(v)
+  return String(v)
+}
+
+function MappingBuilder({
+  mapping,
+  blgInventaire,
+  onMappingChange,
+}: {
+  mapping: ChampMapping[]
+  blgInventaire: ChampInventaire[]
+  onMappingChange: (m: ChampMapping[]) => void
+}) {
+  const [clientSearch, setClientSearch] = useState('')
+  const [clientResults, setClientResults] = useState<{ numero_tiers: string; blg_partner_id: number | null; sage_intitule: string | null }[]>([])
+  const [selectedClient, setSelectedClient] = useState<{ numero: string; partnerId: number } | null>(null)
+
+  const [sageValues, setSageValues] = useState<Record<string, unknown>>({})
+  const [blgValues, setBlgValues] = useState<Record<string, unknown>>({})
+  const [loadingClient, setLoadingClient] = useState(false)
+
+  const [pendingSageField, setPendingSageField] = useState<string | null>(null)
+
+  useEffect(() => {
+    const q = clientSearch.trim()
+    if (q.length < 2) { setClientResults([]); return }
+    const t = setTimeout(async () => {
+      const { data } = await supabase.rpc('get_controle_tiers_sage_blg', {
+        p_statut: 'apparie', p_only_ecarts: false, p_champ: null, p_search: q, p_limit: 8, p_offset: 0,
+      })
+      setClientResults(((data || []) as ControleRow[]).map((r) => ({ numero_tiers: r.numero_tiers, blg_partner_id: r.blg_partner_id, sage_intitule: r.sage_intitule })))
+    }, 200)
+    return () => clearTimeout(t)
+  }, [clientSearch])
+
+  async function pickClient(numero: string, partnerId: number | null) {
+    if (!partnerId) return
+    setSelectedClient({ numero, partnerId })
+    setClientResults([])
+    setClientSearch('')
+    setPendingSageField(null)
+    setLoadingClient(true)
+    const [{ data: sage }, { data: blg }] = await Promise.all([
+      supabase.rpc('get_tiers_sage_full', { p_numero: numero }),
+      supabase.rpc('get_tiers_blg_full', { p_partner_id: partnerId }),
+    ])
+    setSageValues((sage as Record<string, unknown>) || {})
+    setBlgValues((blg as Record<string, unknown>) || {})
+    setLoadingClient(false)
+  }
+
+  async function setChampBlg(row: ChampMapping, champBlg: string | null) {
+    const next = mapping.map((m) => (m.id === row.id ? { ...m, champ_blg: champBlg, type_comparaison: champBlg ? ('manuel' as const) : m.type_comparaison } : m))
+    onMappingChange(next)
+    await supabase.from('champ_mapping_sage_blg').update({ champ_blg: champBlg }).eq('id', row.id)
+  }
+
+  function handleSageClick(m: ChampMapping) {
+    if (pendingSageField === m.champ_sage) { setPendingSageField(null); return }
+    setPendingSageField(m.champ_sage)
+  }
+
+  function handleBlgClick(colonne: string) {
+    if (!pendingSageField) return
+    const row = mapping.find((m) => m.champ_sage === pendingSageField)
+    if (row) void setChampBlg(row, colonne)
+    setPendingSageField(null)
+  }
+
+  const mappedRows = mapping.filter((m) => m.champ_blg)
+  const unmappedRows = mapping.filter((m) => !m.champ_blg)
+  const blgUsed = new Set(mapping.map((m) => m.champ_blg).filter(Boolean) as string[])
+  const blgAvailable = blgInventaire.filter((c) => !blgUsed.has(c.colonne))
+
+  return (
+    <div>
+      {/* Sélecteur de client */}
+      <div className="relative mb-4">
+        <input
+          value={selectedClient ? `${selectedClient.numero}` : clientSearch}
+          onChange={(e) => { setClientSearch(e.target.value); setSelectedClient(null) }}
+          placeholder="Rechercher un client exemple (n° tiers ou raison sociale)…"
+          className="h-10 w-full max-w-md rounded-lg border border-[#E5E1D8] bg-white px-3 text-sm font-medium outline-none focus:border-[#B4761A]"
+        />
+        {clientResults.length > 0 && (
+          <div className="absolute z-10 mt-1 w-full max-w-md rounded-lg border border-[#E5E1D8] bg-white shadow-lg">
+            {clientResults.map((c) => (
+              <button key={c.numero_tiers} type="button" onClick={() => void pickClient(c.numero_tiers, c.blg_partner_id)}
+                className="flex w-full items-center justify-between px-3 py-2 text-left text-[13px] hover:bg-[#F4F3F0]">
+                <span className="font-mono text-[12px] text-[#8A8474]">{c.numero_tiers}</span>
+                <span className="text-[#111820]">{c.sage_intitule || '—'}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {!selectedClient ? (
+        <div className="flex h-40 items-center justify-center rounded-lg border border-dashed border-[#E5E1D8] text-center text-[13px] text-[#8A8474]">
+          Choisis un client ci-dessus pour voir ses valeurs et construire le mapping.
+        </div>
+      ) : loadingClient ? (
+        <div className="h-40 animate-pulse rounded-lg bg-[#F4F3F0]" />
+      ) : (
+        <>
+          {pendingSageField && (
+            <div className="mb-3 flex items-center justify-between rounded-lg border border-[#B4761A]/30 bg-[#B4761A]/[0.08] px-3 py-2 text-[13px] font-semibold text-[#96600F]">
+              <span>Champ SAGE sélectionné : <span className="font-mono">{pendingSageField}</span> — clique un champ BLG à droite pour l'associer.</span>
+              <button type="button" onClick={() => setPendingSageField(null)} className="font-bold hover:underline">Annuler</button>
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-3 border-b border-[#E5E1D8] pb-2 text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">
+            <span>SAGE</span>
+            <span>BLG</span>
+          </div>
+
+          {/* Paires déjà mappées, alignées */}
+          <div className="max-h-[420px] overflow-auto">
+            {mappedRows.map((m) => {
+              const isPending = pendingSageField === m.champ_sage
+              return (
+                <div key={m.id} className="grid grid-cols-2 gap-3 border-b border-[#F4F3F0] py-1.5">
+                  <button type="button" onClick={() => handleSageClick(m)}
+                    className={`flex items-center justify-between rounded px-2 py-1 text-left text-[13px] transition-colors ${isPending ? 'bg-[#B4761A]/[0.15]' : 'hover:bg-[#F4F3F0]'}`}>
+                    <span className="font-semibold text-[#3A362E]">{m.label || m.champ_sage}</span>
+                    <span className="ml-2 truncate text-[#111820]">{formatCellValue(sageValues[m.champ_sage])}</span>
+                  </button>
+                  <div className="flex items-center justify-between rounded bg-emerald-50/60 px-2 py-1 text-[13px]">
+                    <span className="flex items-center gap-1.5">
+                      <span className="font-mono text-[11px] text-emerald-700">{m.champ_blg}</span>
+                      <span className="truncate text-[#111820]">{formatCellValue(blgValues[m.champ_blg as string])}</span>
+                    </span>
+                    <button type="button" onClick={() => void setChampBlg(m, null)} title="Dissocier" className="ml-2 shrink-0 text-[11px] font-bold text-[#8A8474] hover:text-red-600">✕</button>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+
+          {/* Champs non mappés */}
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <div>
+              <div className="mb-1 text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">Champs SAGE non mappés ({unmappedRows.length})</div>
+              <div className="max-h-[320px] space-y-0.5 overflow-auto rounded-lg border border-[#E5E1D8] p-1">
+                {unmappedRows.map((m) => {
+                  const isPending = pendingSageField === m.champ_sage
+                  return (
+                    <button key={m.id} type="button" onClick={() => handleSageClick(m)}
+                      className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-[13px] transition-colors ${isPending ? 'bg-[#B4761A]/[0.15]' : 'hover:bg-[#F4F3F0]'}`}>
+                      <span className="font-semibold text-[#3A362E]">{m.label || m.champ_sage}</span>
+                      <span className="ml-2 truncate text-[#8A8474]">{formatCellValue(sageValues[m.champ_sage])}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+            <div>
+              <div className="mb-1 text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">Champs BLG disponibles ({blgAvailable.length})</div>
+              <div className={`max-h-[320px] space-y-0.5 overflow-auto rounded-lg border p-1 ${pendingSageField ? 'border-[#B4761A]' : 'border-[#E5E1D8]'}`}>
+                {blgAvailable.map((c) => (
+                  <button key={c.colonne} type="button" onClick={() => handleBlgClick(c.colonne)} disabled={!pendingSageField}
+                    className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-[13px] transition-colors ${
+                      pendingSageField ? 'hover:bg-[#B4761A]/[0.1]' : 'cursor-default'
+                    }`}>
+                    <span className="font-mono text-[11px] text-[#3A362E]">{c.colonne}</span>
+                    <span className="ml-2 truncate text-[#8A8474]">{formatCellValue(blgValues[c.colonne])}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </>
       )}
     </div>
   )
