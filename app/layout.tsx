@@ -10,6 +10,7 @@
   import { Analytics } from '@vercel/analytics/next'
   import AutoLogout from '@/components/autologout'
   import { usePageFilterAccess } from '@/lib/pageAccessFilters'
+  import { useViewport } from '@/lib/useViewport'
   import './globals.css'
   import { SpeedInsights } from "@vercel/speed-insights/next"
 
@@ -202,6 +203,40 @@
     )
   }
 
+  /**
+   * Mini bandeau mobile : remplace intégralement le bandeau desktop
+   * (logo + accroche + navigation + réglette d'alertes) qui n'a pas sa place
+   * sur un petit écran. Garde uniquement l'identité CEGECLIM et un accès
+   * rapide à la déconnexion — la navigation elle-même vit dans MobileShell
+   * (bouton "← Menu" / "← Accueil" propre à chaque écran mobile).
+   *
+   * Conserve l'attribut data-cegeclim-header="true" : certaines pages
+   * desktop (focus_mensuel3...) s'appuient dessus pour caler leur propre
+   * bandeau sticky. Sans incidence ici puisque ces pages basculent elles-
+   * mêmes vers leur écran mobile avant d'atteindre ce code.
+   */
+  function MobileTopBar({ onLogout }: { onLogout: () => void }) {
+    return (
+      <div
+        data-cegeclim-header="true"
+        style={styles.mobileHeader}
+      >
+        <div style={styles.mobileHeaderBrand}>
+          <img
+            src="https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/cegecilm%20officiel.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL2NlZ2VjaWxtIG9mZmljaWVsLmpwZyIsImlhdCI6MTc3NDY1MTM3OSwiZXhwIjo0ODk2NzE1Mzc5fQ.ePcMFHir7RsvdR-cR7nwh83H03S8oihNKwVgK2eCmy0"
+            alt="CEGECLIM"
+            style={styles.mobileHeaderLogo}
+          />
+          <div style={styles.mobileHeaderName}>Le compagnon CEGECLIM</div>
+        </div>
+
+        <button onClick={onLogout} className="cgcLogout" style={styles.mobileHeaderLogout}>
+          Déconnexion
+        </button>
+      </div>
+    )
+  }
+
   function normalizeLoose(value: any) {
     return String(value ?? '').trim().toLowerCase()
   }
@@ -347,6 +382,10 @@
     const lastLoggedPathRef = useRef<string | null>(null)
     const lastStatusRefreshRef = useRef(0)
     const access = usePageFilterAccess()
+    // Bascule mobile : voir MobileTopBar (remplace le bandeau desktop) et le
+    // <main> plus bas (padding retiré, les écrans mobiles gèrent leur propre
+    // mise en page pleine largeur).
+    const { isMobile } = useViewport()
     const [statusScopeOverride, setStatusScopeOverride] = useState<StatusScopeOverride | null>(null)
     const isLoginPage = pathname === '/login'
     const isUnauthorizedPage = pathname === '/unauthorized'
@@ -1452,210 +1491,214 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
         `}</style>
 
         <div style={styles.overlay}>
-          <header
-            data-cegeclim-header="true"
-            style={{
-              ...styles.header,
-              ...((pageFloatingLayerOpen || headerHiddenForScroll) ? styles.headerHiddenForFloatingLayer : {}),
-            }}
-          >
-            <div style={styles.top}>
-              <div style={styles.left}>
-                <img
-                  src="https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/cegecilm%20officiel.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL2NlZ2VjaWxtIG9mZmljaWVsLmpwZyIsImlhdCI6MTc3NDY1MTM3OSwiZXhwIjo0ODk2NzE1Mzc5fQ.ePcMFHir7RsvdR-cR7nwh83H03S8oihNKwVgK2eCmy0"
-                  style={styles.logo}
-                  alt="CEGECLIM"
-                />
-                <div>
-                  <div style={styles.subtitle}>
-                    Concessionnaire agréé de Bosch Home Comfort Group
+          {isMobile ? (
+            <MobileTopBar onLogout={handleLogout} />
+          ) : (
+            <header
+              data-cegeclim-header="true"
+              style={{
+                ...styles.header,
+                ...((pageFloatingLayerOpen || headerHiddenForScroll) ? styles.headerHiddenForFloatingLayer : {}),
+              }}
+            >
+              <div style={styles.top}>
+                <div style={styles.left}>
+                  <img
+                    src="https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/cegecilm%20officiel.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL2NlZ2VjaWxtIG9mZmljaWVsLmpwZyIsImlhdCI6MTc3NDY1MTM3OSwiZXhwIjo0ODk2NzE1Mzc5fQ.ePcMFHir7RsvdR-cR7nwh83H03S8oihNKwVgK2eCmy0"
+                    style={styles.logo}
+                    alt="CEGECLIM"
+                  />
+                  <div>
+                    <div style={styles.subtitle}>
+                      Concessionnaire agréé de Bosch Home Comfort Group
+                    </div>
+                    <div style={styles.title}>Hitachi Cooling &amp; Heating</div>
                   </div>
-                  <div style={styles.title}>Hitachi Cooling &amp; Heating</div>
+                </div>
+
+                <div style={styles.center}>Suivi commercial &amp; prospect</div>
+
+                <div style={styles.right}>
+                  {email && <div style={styles.userEmail}>{email}</div>}
+                  <span style={styles.userProfile}>
+                    {rights.profile_name || 'Aucun profil'}
+                  </span>
+                  <button onClick={handleLogout} className="cgcLogout" style={styles.logout}>
+                    Se déconnecter
+                  </button>
                 </div>
               </div>
 
-              <div style={styles.center}>Suivi commercial &amp; prospect</div>
+              {(menuGroups.some(isGroupVisible) || hasVisibleStatusLights) && (
+                <div style={styles.nav}>
+                  <div style={styles.navMenu}>
+                    {menuGroups.filter(isGroupVisible).map((group) => {
+                      const visibleItems = getVisibleItems(group)
+                      const activeItem = getActiveMenuItem(group)
 
-              <div style={styles.right}>
-                {email && <div style={styles.userEmail}>{email}</div>}
-                <span style={styles.userProfile}>
-                  {rights.profile_name || 'Aucun profil'}
-                </span>
-                <button onClick={handleLogout} className="cgcLogout" style={styles.logout}>
-                  Se déconnecter
-                </button>
-              </div>
-            </div>
-
-            {(menuGroups.some(isGroupVisible) || hasVisibleStatusLights) && (
-              <div style={styles.nav}>
-                <div style={styles.navMenu}>
-                  {menuGroups.filter(isGroupVisible).map((group) => {
-                    const visibleItems = getVisibleItems(group)
-                    const activeItem = getActiveMenuItem(group)
-
-                    return (
-                      <div
-                        key={group.label}
-                        style={styles.menuWrapper}
-                        onMouseEnter={() => {
-                          if (hoverTimeout) clearTimeout(hoverTimeout)
-                          setOpenGroup(group.label)
-                        }}
-                        onMouseLeave={() => {
-                          const t = setTimeout(() => setOpenGroup(null), 150)
-                          setHoverTimeout(t)
-                        }}
-                      >
-                        <button
-                          type="button"
-                          className="cgcNavBtn"
-                          aria-expanded={openGroup === group.label}
-                          style={{
-                            ...styles.navBtn,
-                            ...(activeItem ? styles.navBtnActive : {}),
+                      return (
+                        <div
+                          key={group.label}
+                          style={styles.menuWrapper}
+                          onMouseEnter={() => {
+                            if (hoverTimeout) clearTimeout(hoverTimeout)
+                            setOpenGroup(group.label)
+                          }}
+                          onMouseLeave={() => {
+                            const t = setTimeout(() => setOpenGroup(null), 150)
+                            setHoverTimeout(t)
                           }}
                         >
-                          <span
-                            className="cgcNavLabel"
+                          <button
+                            type="button"
+                            className="cgcNavBtn"
+                            aria-expanded={openGroup === group.label}
                             style={{
-                              ...styles.navBtnGroupLabel,
-                              ...(activeItem ? styles.navBtnGroupLabelActive : {}),
+                              ...styles.navBtn,
+                              ...(activeItem ? styles.navBtnActive : {}),
                             }}
                           >
-                            {group.label}
-                          </span>
-                          <span style={styles.navBtnCurrentPage}>
-                            {activeItem
-                              ? (activeItem.activeLabel || activeItem.label)
-                              : `${visibleItems.length} écran${visibleItems.length > 1 ? 's' : ''}`}
-                          </span>
-                        </button>
+                            <span
+                              className="cgcNavLabel"
+                              style={{
+                                ...styles.navBtnGroupLabel,
+                                ...(activeItem ? styles.navBtnGroupLabelActive : {}),
+                              }}
+                            >
+                              {group.label}
+                            </span>
+                            <span style={styles.navBtnCurrentPage}>
+                              {activeItem
+                                ? (activeItem.activeLabel || activeItem.label)
+                                : `${visibleItems.length} écran${visibleItems.length > 1 ? 's' : ''}`}
+                            </span>
+                          </button>
 
-                        {openGroup === group.label && (
-                          <div style={styles.dropdown}>
-                            {visibleItems.map((item) => {
-                              const itemActive = isMenuItemActive(item)
+                          {openGroup === group.label && (
+                            <div style={styles.dropdown}>
+                              {visibleItems.map((item) => {
+                                const itemActive = isMenuItemActive(item)
 
-                              return (
-                                <div
-                                  key={item.path}
-                                  className="cgcMenuItem"
-                                  aria-current={itemActive ? 'page' : undefined}
-                                  style={{
-                                    ...styles.dropdownItem,
-                                    ...(itemActive ? styles.dropdownItemActive : {}),
-                                  }}
-                                  onClick={() => {
-                                    setOpenGroup(null)
-                                    router.push(item.path)
-                                  }}
-                                >
-                                  {item.label}
-                                </div>
-                              )
-                            })}
-                          </div>
+                                return (
+                                  <div
+                                    key={item.path}
+                                    className="cgcMenuItem"
+                                    aria-current={itemActive ? 'page' : undefined}
+                                    style={{
+                                      ...styles.dropdownItem,
+                                      ...(itemActive ? styles.dropdownItemActive : {}),
+                                    }}
+                                    onClick={() => {
+                                      setOpenGroup(null)
+                                      router.push(item.path)
+                                    }}
+                                  >
+                                    {item.label}
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+
+                  {hasVisibleStatusLights && (
+                    <div style={styles.alertsPanel}>
+                      <div style={styles.alertsPanelHeading}>
+                        <span style={styles.alertsPanelTitle}>Mes alertes</span>
+                        <span style={styles.alertsPanelSubtitle}>
+                          {visibleAlertCount} active{visibleAlertCount > 1 ? 's' : ''}
+                        </span>
+                      </div>
+
+                      <span aria-hidden="true" style={styles.alertsPanelDivider} />
+
+                      <div style={styles.alertsGrid}>
+                        {rights.show_alert_cerfa_ko && (
+                          <StatusLight
+                            compact
+                            label="CERFA"
+                            status={cerfaKoCount > 0 ? 'red' : 'green'}
+                            count={cerfaKoCount}
+                            blink={cerfaKoCount > 0 && statusBlinkOn}
+                            clickable={cerfaKoCount > 0}
+                            onClick={openCerfaModal}
+                            title={cerfaKoCount > 0 ? 'Ouvrir la liste des CERFA KO en attente de régularisation' : 'Aucun CERFA KO'}
+                          />
+                        )}
+
+                        {rights.show_alert_cdc_liv_avant_2026 && (
+                          <StatusLight
+                            compact
+                            label="CDC < 2026"
+                            status={cdcLivAvant2026Signal.status}
+                            count={cdcLivAvant2026Signal.count}
+                            blink={cdcLivAvant2026Signal.status === 'red' && statusBlinkOn}
+                            clickable={cdcLivAvant2026Signal.count > 0}
+                            onClick={openCdcLivAvant2026}
+                            title={
+                              cdcLivAvant2026Signal.count > 0
+                                ? `${cdcLivAvant2026Signal.count} CDC avec livraison avant 2026`
+                                : 'Aucun CDC avec livraison avant 2026'
+                            }
+                          />
+                        )}
+
+                        {rights.show_alert_controle_frais_port && (
+                          <StatusLight
+                            compact
+                            label="Frais de port"
+                            status={controleFraisPortSignal.status}
+                            count={controleFraisPortSignal.count}
+                            blink={controleFraisPortSignal.status !== 'green' && statusBlinkOn}
+                            clickable
+                            onClick={openControleFraisPort}
+                            title={
+                              controleFraisPortSignal.count > 0
+                                ? `${controleFraisPortSignal.count} action(s) : ${controleFraisPortSignal.missingGroups} groupe(s) sans port, ${controleFraisPortSignal.blToRemove} BL à supprimer, ${controleFraisPortSignal.otherGroups} autre(s) groupe(s) à vérifier — cliquer pour afficher`
+                                : 'Ouvrir le contrôle groupé des frais de port dans le portefeuille livraison'
+                            }
+                          />
+                        )}
+
+                        {rights.show_alert_capacite_gaz && (
+                          <StatusLight
+                            compact
+                            label="Capacité gaz"
+                            status={certificationSignals.capacite.status}
+                            count={certificationSignals.capacite.count}
+                            blink={certificationSignals.capacite.status === 'orange' && statusBlinkOn}
+                            clickable={certificationSignals.capacite.count > 0}
+                            onClick={() => openCertificationModal('capacite')}
+                            title={
+                              certificationSignals.capacite.count > 0
+                                ? `Capacité gaz : ${certificationSignals.capacite.count} validité(s) à moins d’un mois sur le périmètre actif`
+                                : 'Aucune capacité gaz à échéance dans moins d’un mois'
+                            }
+                          />
+                        )}
+
+                        {rights.show_alert_todo && (
+                          <StatusLight
+                            compact
+                            label="À faire"
+                            status={todoSignal.status}
+                            count={todoSignal.count}
+                            blink={todoSignal.status === 'red' && statusBlinkOn}
+                            clickable
+                            onClick={openTodoList}
+                            title={todoSignal.count > 0 ? 'Ouvrir la TODO List dans un nouvel onglet' : 'Aucune tâche à faire — cliquer pour ouvrir la TODO List'}
+                          />
                         )}
                       </div>
-                    )
-                  })}
+                    </div>
+                  )}
                 </div>
-
-                {hasVisibleStatusLights && (
-                  <div style={styles.alertsPanel}>
-                    <div style={styles.alertsPanelHeading}>
-                      <span style={styles.alertsPanelTitle}>Mes alertes</span>
-                      <span style={styles.alertsPanelSubtitle}>
-                        {visibleAlertCount} active{visibleAlertCount > 1 ? 's' : ''}
-                      </span>
-                    </div>
-
-                    <span aria-hidden="true" style={styles.alertsPanelDivider} />
-
-                    <div style={styles.alertsGrid}>
-                      {rights.show_alert_cerfa_ko && (
-                        <StatusLight
-                          compact
-                          label="CERFA"
-                          status={cerfaKoCount > 0 ? 'red' : 'green'}
-                          count={cerfaKoCount}
-                          blink={cerfaKoCount > 0 && statusBlinkOn}
-                          clickable={cerfaKoCount > 0}
-                          onClick={openCerfaModal}
-                          title={cerfaKoCount > 0 ? 'Ouvrir la liste des CERFA KO en attente de régularisation' : 'Aucun CERFA KO'}
-                        />
-                      )}
-
-                      {rights.show_alert_cdc_liv_avant_2026 && (
-                        <StatusLight
-                          compact
-                          label="CDC < 2026"
-                          status={cdcLivAvant2026Signal.status}
-                          count={cdcLivAvant2026Signal.count}
-                          blink={cdcLivAvant2026Signal.status === 'red' && statusBlinkOn}
-                          clickable={cdcLivAvant2026Signal.count > 0}
-                          onClick={openCdcLivAvant2026}
-                          title={
-                            cdcLivAvant2026Signal.count > 0
-                              ? `${cdcLivAvant2026Signal.count} CDC avec livraison avant 2026`
-                              : 'Aucun CDC avec livraison avant 2026'
-                          }
-                        />
-                      )}
-
-                      {rights.show_alert_controle_frais_port && (
-                        <StatusLight
-                          compact
-                          label="Frais de port"
-                          status={controleFraisPortSignal.status}
-                          count={controleFraisPortSignal.count}
-                          blink={controleFraisPortSignal.status !== 'green' && statusBlinkOn}
-                          clickable
-                          onClick={openControleFraisPort}
-                          title={
-                            controleFraisPortSignal.count > 0
-                              ? `${controleFraisPortSignal.count} action(s) : ${controleFraisPortSignal.missingGroups} groupe(s) sans port, ${controleFraisPortSignal.blToRemove} BL à supprimer, ${controleFraisPortSignal.otherGroups} autre(s) groupe(s) à vérifier — cliquer pour afficher`
-                              : 'Ouvrir le contrôle groupé des frais de port dans le portefeuille livraison'
-                          }
-                        />
-                      )}
-
-                      {rights.show_alert_capacite_gaz && (
-                        <StatusLight
-                          compact
-                          label="Capacité gaz"
-                          status={certificationSignals.capacite.status}
-                          count={certificationSignals.capacite.count}
-                          blink={certificationSignals.capacite.status === 'orange' && statusBlinkOn}
-                          clickable={certificationSignals.capacite.count > 0}
-                          onClick={() => openCertificationModal('capacite')}
-                          title={
-                            certificationSignals.capacite.count > 0
-                              ? `Capacité gaz : ${certificationSignals.capacite.count} validité(s) à moins d’un mois sur le périmètre actif`
-                              : 'Aucune capacité gaz à échéance dans moins d’un mois'
-                          }
-                        />
-                      )}
-
-                      {rights.show_alert_todo && (
-                        <StatusLight
-                          compact
-                          label="À faire"
-                          status={todoSignal.status}
-                          count={todoSignal.count}
-                          blink={todoSignal.status === 'red' && statusBlinkOn}
-                          clickable
-                          onClick={openTodoList}
-                          title={todoSignal.count > 0 ? 'Ouvrir la TODO List dans un nouvel onglet' : 'Aucune tâche à faire — cliquer pour ouvrir la TODO List'}
-                        />
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </header>
+              )}
+            </header>
+          )}
 
           {cerfaModalOpen && (
             <div style={styles.modalBackdrop}>
@@ -1842,6 +1885,7 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
             style={{
               ...styles.content,
               ...(isPortefeuilleLivraisonPage ? styles.contentFullWidth : {}),
+              ...(isMobile ? styles.contentMobile : {}),
             }}
           >
             {children}
@@ -1905,6 +1949,63 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
       // Toujours pas de backdrop-filter ici : il créerait un contexte
       // d'empilement et enfermerait les modales des pages sous le bandeau.
       minHeight: '100vh',
+    },
+
+    /* ---- Bandeau mobile ---------------------------------------------------- */
+
+    mobileHeader: {
+      position: 'sticky',
+      top: 0,
+      zIndex: 30,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 10,
+      padding: '10px 14px',
+      background: 'rgba(11,18,32,0.96)',
+      backdropFilter: 'blur(14px)',
+      WebkitBackdropFilter: 'blur(14px)',
+      borderBottom: '1px solid rgba(255,255,255,0.10)',
+    },
+
+    mobileHeaderBrand: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      minWidth: 0,
+    },
+
+    mobileHeaderLogo: {
+      width: 34,
+      height: 34,
+      borderRadius: 8,
+      background: '#fff',
+      objectFit: 'contain',
+      padding: 3,
+      flexShrink: 0,
+    },
+
+    mobileHeaderName: {
+      fontFamily: 'var(--font-display)',
+      fontWeight: 700,
+      fontSize: 14.5,
+      color: '#ffffff',
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+    },
+
+    mobileHeaderLogout: {
+      flexShrink: 0,
+      fontFamily: 'var(--font-body)',
+      fontSize: 12,
+      fontWeight: 600,
+      color: 'rgba(255,255,255,0.65)',
+      background: 'transparent',
+      border: '1px solid rgba(255,255,255,0.16)',
+      borderRadius: 9,
+      padding: '6px 10px',
+      cursor: 'pointer',
     },
 
     /* ---- Bandeau ---------------------------------------------------------- */
@@ -2523,5 +2624,13 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
       padding: '4px 2px 16px',
       maxWidth: 'none',
       overflowX: 'hidden',
+    },
+
+    contentMobile: {
+      // Les écrans mobiles (MobileShell, MobileStandaloneActivite...) gèrent
+      // leur propre pleine largeur et leur propre couleur de fond (#0B1220) :
+      // pas de cadre supplémentaire à ajouter ici.
+      padding: 0,
+      color: '#fff',
     },
   }
