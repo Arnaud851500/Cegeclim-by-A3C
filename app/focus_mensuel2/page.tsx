@@ -15,6 +15,13 @@
  * activite_lignes...) trop profonde pour être branchée à l'aveugle sans
  * pouvoir exécuter l'app et vérifier les chiffres. Voir le placeholder en
  * bas de fichier — à finaliser ensemble une fois cette base validée.
+ *
+ * MOBILE — Sur téléphone (largeur < 768px), cette page bascule vers
+ * MobileStandaloneActivite (le même écran "Mon activité" que le menu
+ * MobileShell), plutôt que d'afficher ce gabarit desktop compressé.
+ * Les RPC desktop (portefeuille, projection, highlights, comparatifs...)
+ * ne sont pas déclenchées dans ce cas — inutile de les charger si elles ne
+ * sont pas affichées.
  * ------------------------------------------------------------------------
  */
 
@@ -22,6 +29,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Space_Grotesk, IBM_Plex_Sans, IBM_Plex_Mono } from "next/font/google";
 import { supabase } from "@/lib/supabaseClient";
 import { usePageFilterAccess } from "@/lib/pageAccessFilters";
+import { useViewport } from "@/lib/useViewport";
+import MobileStandaloneActivite from "@/components/mobile/MobileStandaloneActivite";
 
 // ---- Réutilisation stricte de la page existante (mêmes calculs) ----------
 import {
@@ -211,6 +220,12 @@ export default function FocusMensuel3Page() {
   const access = usePageFilterAccess();
   const headerOffset = useSiteHeaderOffset();
 
+  // Bascule mobile : voir le bloc `if (isMobile)` juste avant le rendu
+  // desktop, tout en bas de ce composant. Placée ici (avant tout hook) pour
+  // pouvoir être lue par l'effet de chargement ci-dessous et éviter les
+  // appels RPC desktop quand ils ne servent à rien sur mobile.
+  const { isMobile } = useViewport();
+
   const [tab, setTab] = useState<TabKey>("vue");
   const [useProjectedCaInRolling, setUseProjectedCaInRolling] = useState(true);
   const [month, setMonth] = useState(currentMonthStr());
@@ -246,6 +261,15 @@ export default function FocusMensuel3Page() {
 
   useEffect(() => {
     if (access.loading) return;
+    // Sur mobile, cette page rend MobileStandaloneActivite (voir plus bas),
+    // qui charge ses propres données via focus_mensuel/page. Inutile de
+    // déclencher ici les 5 RPC desktop (portefeuille, projection,
+    // highlights, comparatifs agence/famille, rolling 12) qui ne seront
+    // jamais affichées dans ce cas.
+    if (isMobile) {
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
 
     async function load() {
@@ -336,7 +360,7 @@ export default function FocusMensuel3Page() {
     return () => {
       cancelled = true;
     };
-  }, [access.loading, month, focusDay, agence, familleMacro, collaborateur, includeHorsStats]);
+  }, [access.loading, isMobile, month, focusDay, agence, familleMacro, collaborateur, includeHorsStats]);
 
   const availableAgences = useMemo(() => {
     if (access.hasAgenceRestriction) return access.allowedAgences;
@@ -473,6 +497,13 @@ export default function FocusMensuel3Page() {
     () => new Date(focusDay).toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" }),
     [focusDay],
   );
+
+  // Rendu mobile : écran "Mon activité" (mêmes contenus/RPC que le bouton 1
+  // du menu MobileShell), avec un lien de retour vers /accueil. Court-circuite
+  // tout le gabarit desktop à onglets ci-dessous.
+  if (isMobile) {
+    return <MobileStandaloneActivite />;
+  }
 
   return (
     <div

@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation'
 import { Montserrat } from 'next/font/google'
 import { useAccess, type AccessRights } from '@/components/AccessContext'
 import { useSocieteFilter } from '@/components/SocieteFilterContext'
+import { useViewport } from '@/lib/useViewport'
+import MobileShell from '@/components/mobile/MobileShell'
 
 const montserrat = Montserrat({
   subsets: ['latin'],
@@ -31,6 +33,13 @@ export default function AccueilPage() {
   const router = useRouter()
   const { rights } = useAccess()
   const { societeFilter } = useSocieteFilter()
+
+  // Bascule mobile : dès que le viewport passe sous le seuil défini dans
+  // useViewport (768px), on affiche l'interface mobile (menu 4 boutons +
+  // navigation interne) à la place de la grille de liens desktop ci-dessous.
+  // Rien d'autre sur cette page n'est affecté : le hook ne fait que décider
+  // quel rendu produire.
+  const { isMobile } = useViewport()
 
   const quickLinkSections = useMemo<QuickLinkSection[]>(() => {
     const sections: QuickLinkSection[] = [
@@ -158,6 +167,13 @@ export default function AccueilPage() {
   }, [rights])
 
   const nbRubriques = quickLinkSections.reduce((sum, section) => sum + section.items.length, 0)
+
+  // Rendu mobile : menu 4 boutons + navigation interne (Mon activité / Mes
+  // clients / Mes rdv / Mes alertes). Court-circuite tout le reste de la
+  // page desktop ci-dessous.
+  if (isMobile) {
+    return <MobileShell />
+  }
 
   return (
     <div className={montserrat.className} style={styles.page}>
