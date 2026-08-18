@@ -1,72 +1,57 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { usePageFilterAccess } from '@/lib/pageAccessFilters'
-// ⚠️ Ajuster ce chemin relatif à l'emplacement réel de ce composant dans
-// l'arborescence (ex: si ce fichier vit dans components/mobile/, le chemin
-// vers app/focus_mensuel/page.tsx sera probablement "@/app/focus_mensuel/page"
-// selon ta config tsconfig, sinon un chemin relatif "../../app/focus_mensuel/page").
-import { DOC_TYPES, DOC_COLORS, formatMoney, type DailyRow, type DocType } from '@/app/focus_mensuel/page'
 
-// Widgets additionnels accessibles via "Voir plus" — noms provisoires.
-// À faire correspondre aux vrais écrans une fois vision-tci (One Page)
-// transmis, pour brancher les bonnes RPC derrière chaque entrée.
-const MORE_WIDGETS: { key: string; label: string }[] = [
-  { key: 'portefeuille', label: 'Portefeuille de commandes' },
-  { key: 'projection', label: 'Projection du CA' },
-  { key: 'rolling12', label: 'Rolling 12 mois' },
-  { key: 'top20', label: 'TOP 20 documents' },
-]
+// ─────────────────────────────────────────────────────────────────────────
+// Reprend telle quelle la logique de components/VisionTciKpiPanel.tsx
+// (fourni par Arnaud) plutôt que de reconstruire les totaux jour/mois/année
+// côté client à partir de get_focus_mensuel_daily_summary_metier — c'est ce
+// qui causait les valeurs fausses (0€ sur Jour/Mois, total incohérent sur
+// Année). get_vision_tci_kpi renvoie déjà les 3 périodes + comparatif N-1,
+// calculés côté serveur, pour chaque famille (BL/Devis/CDC/Factures/Marge).
+// ─────────────────────────────────────────────────────────────────────────
 
-// ---------------------------------------------------------------------------
-// Utilitaires de dates locales (mêmes conventions que les pages desktop :
-// chaînes ISO "YYYY-MM-DD", comparables lexicographiquement)
-// ---------------------------------------------------------------------------
-
-function pad2(n: number) {
-  return String(n).padStart(2, '0')
-}
-function toIso(d: Date) {
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
-}
-function addDaysIso(iso: string, delta: number) {
-  const d = new Date(`${iso}T00:00:00`)
-  d.setDate(d.getDate() + delta)
-  return toIso(d)
-}
-function shiftYearIso(iso: string, deltaYears: number) {
-  const [y, m, day] = iso.split('-').map(Number)
-  return toIso(new Date(y + deltaYears, m - 1, day))
-}
-function yearStartIso(iso: string) {
-  return `${iso.slice(0, 4)}-01-01`
-}
-function monthStartIso(iso: string) {
-  return `${iso.slice(0, 7)}-01`
+const FOCUS_MENSUEL_COLORS: Record<string, string> = {
+  BL: '#4B92AC',
+  Devis: '#D69A4A',
+  CDC: '#C1683C',
+  Factures: '#3F9142',
+  Marge: '#7A5EA8',
 }
 
-function sumByTypeAndRange(rows: DailyRow[], type: DocType, fromIso: string, toIsoBound: string) {
-  return rows
-    .filter((r) => r.type_document === type && r.jour >= fromIso && r.jour <= toIsoBound)
-    .reduce((sum, r) => sum + Number(r.montant_ht || 0), 0)
+// Ordre d'affichage demandé initialement (Devis/CDC/BL/Factures), Marge à part.
+const DISPLAY_ORDER = ['Devis', 'CDC', 'BL', 'Factures'] as const
+type Famille = 'BL' | 'Devis' | 'CDC' | 'Factures' | 'Marge'
+
+type FluxValues = {
+  jour_valeur: number; jour_n1: number
+  mois_valeur: number; mois_n1: number
+  annee_valeur: number; annee_n1: number
 }
 
-function evolPct(value: number, valueN1: number): number | null {
-  if (!valueN1) return null
-  return ((value - valueN1) / valueN1) * 100
+function formatMontant(n: number): string {
+  const abs = Math.abs(n)
+  if (abs >= 1_000_000) return `${(n / 1_000_000).toLocaleString('fr-FR', { maximumFractionDigits: 2 })} M€`
+  if (abs >= 1_000) return `${(n / 1_000).toLocaleString('fr-FR', { maximumFractionDigits: 0 })} K€`
+  return `${n.toLocaleString('fr-FR', { maximumFractionDigits: 0 })} €`
+}
+function formatPct(n: number): string {
+  return `${n.toLocaleString('fr-FR', { maximumFractionDigits: 1 })} %`
 }
 
 export default function MobileActivite() {
   const access = usePageFilterAccess()
-  const [showYesterday, setShowYesterday] = useState(false)
-  const [rowsN, setRowsN] = useState<DailyRow[]>([])
-  const [rowsN1, setRowsN1] = useState<DailyRow[]>([])
+  const [useYesterday, setUseYesterday] = useState(false)
+  const [values, setValues] = useState<Record<Famille, FluxValues | null>>({
+    BL: null, Devis: null, CDC: null, Factures: null, Marge: null,
+  })
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [showMore, setShowMore] = useState(false)
 
-  const todayIsoValue = useMemo(() => toIso(new Date()), [])
+  const agenceForcee = access.hasAgenceRestriction && access.allowedAgences.length > 0 ? access.allowedAgences[0] : null
+  const collaborateurForcee = access.hasCollaborateurRestriction && access.allowedCollaborateurs.length > 0 ? access.allowedCollaborateurs[0] : null
 
   useEffect(() => {
     if (access.loading) return
@@ -76,39 +61,34 @@ export default function MobileActivite() {
       setLoading(true)
       setError(null)
       try {
-        const todayIsoN1 = shiftYearIso(todayIsoValue, -1)
-        const commonParams = {
-          p_agence: access.hasAgenceRestriction ? access.allowedAgences[0] ?? null : null,
-          p_famille_macro: null,
-          p_collaborateur: access.hasCollaborateurRestriction ? access.allowedCollaborateurs[0] ?? null : null,
-          p_include_hors_statistiques: true,
-        }
+        const familles: Famille[] = ['Devis', 'CDC', 'BL', 'Factures', 'Marge']
+        const results = await Promise.all(
+          familles.map((famille) =>
+            supabase.rpc('get_vision_tci_kpi', {
+              p_famille: famille,
+              p_famille_macro: null,
+              p_agence: agenceForcee,
+              p_collaborateur: collaborateurForcee,
+              p_utiliser_j_moins_1: useYesterday,
+            }),
+          ),
+        )
 
-        // Deux appels seulement : l'année en cours du 1er janvier à
-        // aujourd'hui, et son équivalent exact un an plus tôt. Le jour, le
-        // mois en cours et l'année en cours (N et N-1) sont ensuite tous
-        // dérivés de ces deux jeux de données côté client — pas d'appel RPC
-        // supplémentaire par indicateur.
-        const [resN, resN1] = await Promise.all([
-          supabase.rpc('get_focus_mensuel_daily_summary_metier', {
-            p_date_debut: yearStartIso(todayIsoValue),
-            p_date_fin: todayIsoValue,
-            ...commonParams,
-          }),
-          supabase.rpc('get_focus_mensuel_daily_summary_metier', {
-            p_date_debut: yearStartIso(todayIsoN1),
-            p_date_fin: todayIsoN1,
-            ...commonParams,
-          }),
-        ])
+        if (cancelled) return
 
-        if (resN.error) throw resN.error
-        if (resN1.error) throw resN1.error
+        const next: Record<Famille, FluxValues | null> = { BL: null, Devis: null, CDC: null, Factures: null, Marge: null }
+        results.forEach((res, i) => {
+          const famille = familles[i]
+          if (res.error) {
+            console.error(`[MobileActivite] get_vision_tci_kpi(${famille})`, res.error)
+            return
+          }
+          next[famille] = (Array.isArray(res.data) ? res.data[0] : res.data) as FluxValues
+        })
+        setValues(next)
 
-        if (!cancelled) {
-          setRowsN((resN.data as DailyRow[]) || [])
-          setRowsN1((resN1.data as DailyRow[]) || [])
-        }
+        const firstError = results.find((r) => r.error)
+        if (firstError?.error) setError(firstError.error.message)
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e))
       } finally {
@@ -116,237 +96,188 @@ export default function MobileActivite() {
       }
     }
 
-    void load()
+    load()
     return () => {
       cancelled = true
     }
-  }, [access.loading, access.hasAgenceRestriction, access.hasCollaborateurRestriction, todayIsoValue])
-
-  const metrics = useMemo(() => {
-    const dayIso = showYesterday ? addDaysIso(todayIsoValue, -1) : todayIsoValue
-    const dayIsoN1 = shiftYearIso(dayIso, -1)
-    const monthFromIso = monthStartIso(todayIsoValue)
-    const monthFromIsoN1 = monthStartIso(shiftYearIso(todayIsoValue, -1))
-    const yearFromIso = yearStartIso(todayIsoValue)
-    const yearFromIsoN1 = yearStartIso(shiftYearIso(todayIsoValue, -1))
-    const todayIsoN1 = shiftYearIso(todayIsoValue, -1)
-
-    const result: Record<DocType, {
-      day: number; dayN1: number
-      month: number; monthN1: number
-      year: number; yearN1: number
-    }> = {} as any
-
-    DOC_TYPES.forEach((type) => {
-      result[type] = {
-        day: sumByTypeAndRange(rowsN, type, dayIso, dayIso),
-        dayN1: sumByTypeAndRange(rowsN1, type, dayIsoN1, dayIsoN1),
-        month: sumByTypeAndRange(rowsN, type, monthFromIso, todayIsoValue),
-        monthN1: sumByTypeAndRange(rowsN1, type, monthFromIsoN1, todayIsoN1),
-        year: sumByTypeAndRange(rowsN, type, yearFromIso, todayIsoValue),
-        yearN1: sumByTypeAndRange(rowsN1, type, yearFromIsoN1, todayIsoN1),
-      }
-    })
-
-    return result
-  }, [rowsN, rowsN1, showYesterday, todayIsoValue])
-
-  const dayLabel = showYesterday ? 'Hier' : "Aujourd'hui"
+  }, [useYesterday, access.loading, agenceForcee, collaborateurForcee])
 
   return (
-    <div style={{ flex: 1, padding: '16px 14px 32px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', lineHeight: 1.4 }}>
-        Mois et année comparés à la même période N-1 (mêmes dates de début/fin).
-      </div>
-
+    <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
       <label
         style={{
           display: 'flex',
           alignItems: 'center',
           gap: 8,
-          border: '1px solid rgba(255,255,255,0.12)',
-          background: 'rgba(255,255,255,0.04)',
-          borderRadius: 12,
-          padding: '10px 12px',
           fontSize: 13,
-          color: '#fff',
+          color: 'rgba(255,255,255,0.65)',
+          padding: '2px 2px 6px',
         }}
       >
         <input
           type="checkbox"
-          checked={showYesterday}
-          onChange={(e) => setShowYesterday(e.target.checked)}
-          style={{ width: 16, height: 16 }}
+          checked={useYesterday}
+          onChange={(e) => setUseYesterday(e.target.checked)}
+          style={{ width: 16, height: 16, accentColor: '#A6A181' }}
         />
-        Afficher hier (J-1) au lieu d'aujourd'hui pour la colonne « Jour »
+        Afficher hier (J-1) au lieu d'aujourd'hui
       </label>
 
-      {error && <div style={{ color: '#e0a685', fontSize: 13 }}>Erreur de chargement : {error}</div>}
+      {error && (
+        <div
+          style={{
+            borderRadius: 10,
+            border: '1px solid rgba(193,104,60,0.4)',
+            background: 'rgba(193,104,60,0.12)',
+            color: '#e0a685',
+            fontSize: 13,
+            padding: '10px 12px',
+          }}
+        >
+          Impossible de charger les données : {error}
+        </div>
+      )}
 
       {loading
-        ? DOC_TYPES.map((t) => <SkeletonCard key={t} />)
-        : DOC_TYPES.map((type) => (
+        ? DISPLAY_ORDER.map((f) => <CardSkeleton key={f} />)
+        : DISPLAY_ORDER.map((famille) => (
             <ActiviteCard
-              key={type}
-              label={`Suivi des ${type}`}
-              color={DOC_COLORS[type]}
-              dayLabel={dayLabel}
-              day={metrics[type].day}
-              dayN1={metrics[type].dayN1}
-              month={metrics[type].month}
-              monthN1={metrics[type].monthN1}
-              year={metrics[type].year}
-              yearN1={metrics[type].yearN1}
+              key={famille}
+              famille={famille}
+              dayLabel={useYesterday ? 'J-1' : 'Jour'}
+              values={values[famille]}
             />
           ))}
 
-      {/* Marge : source de données à confirmer — pas présente dans
-          get_focus_mensuel_daily_summary_metier. Placeholder en attendant
-          la table/RPC correspondante. */}
-      <div
+      <ActiviteCard famille="Marge" dayLabel={useYesterday ? 'J-1' : 'Jour'} values={values.Marge} isMarge />
+    </div>
+  )
+}
+
+function evolPct(valeur: number, n1: number) {
+  if (!n1) return null
+  return ((valeur - n1) / Math.abs(n1)) * 100
+}
+function evolPoints(valeur: number, n1: number) {
+  if (!Number.isFinite(valeur) || !Number.isFinite(n1)) return null
+  return valeur - n1
+}
+
+function EvolBadge({ valeur, n1, isMarge }: { valeur: number; n1: number; isMarge?: boolean }) {
+  if (isMarge) {
+    const delta = evolPoints(valeur, n1)
+    if (delta === null) return <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)' }}>—</span>
+    const up = delta >= 0
+    return (
+      <span
         style={{
-          border: '1px solid rgba(255,255,255,0.10)',
-          borderRadius: 16,
-          padding: '16px',
-          background: 'rgba(255,255,255,0.04)',
+          display: 'inline-block', fontSize: 10.5, fontWeight: 600, borderRadius: 999, padding: '2px 6px',
+          color: up ? '#8fd4a8' : '#e0a685', background: up ? 'rgba(63,145,66,0.16)' : 'rgba(193,104,60,0.16)',
         }}
       >
-        <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.14em', color: '#A6A181' }}>
-          Suivi de la marge
-        </div>
-        <div style={{ marginTop: 6, fontSize: 13, color: 'rgba(255,255,255,0.35)' }}>
-          Source de données à connecter.
-        </div>
-      </div>
+        {up ? '▲' : '▼'} {Math.abs(delta).toFixed(1)} pts
+      </span>
+    )
+  }
 
-      <button
-        onClick={() => setShowMore((v) => !v)}
+  const pct = evolPct(valeur, n1)
+  if (pct === null) return <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)' }}>—</span>
+  const up = pct >= 0
+  return (
+    <span
+      style={{
+        display: 'inline-block', fontSize: 10.5, fontWeight: 600, borderRadius: 999, padding: '2px 6px',
+        color: up ? '#8fd4a8' : '#e0a685', background: up ? 'rgba(63,145,66,0.16)' : 'rgba(193,104,60,0.16)',
+      }}
+    >
+      {up ? '▲' : '▼'} {Math.abs(pct).toFixed(1)}%
+    </span>
+  )
+}
+
+function ActiviteCard({
+  famille, dayLabel, values, isMarge,
+}: { famille: Famille; dayLabel: string; values: FluxValues | null; isMarge?: boolean }) {
+  const color = FOCUS_MENSUEL_COLORS[famille]
+  const fmt = isMarge ? formatPct : formatMontant
+
+  return (
+    <div
+      style={{
+        borderRadius: 14,
+        border: '1px solid rgba(255,255,255,0.10)',
+        background: 'rgba(255,255,255,0.04)',
+        padding: '14px 14px 12px',
+      }}
+    >
+      <span
         style={{
-          marginTop: 8,
-          border: '1px dashed rgba(255,255,255,0.25)',
-          background: 'transparent',
-          color: 'rgba(255,255,255,0.7)',
-          borderRadius: 12,
-          padding: '12px',
-          fontSize: 13,
+          display: 'inline-block', fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em',
+          color, background: `${color}22`, borderRadius: 6, padding: '3px 8px', marginBottom: 10,
         }}
       >
-        {showMore ? 'Masquer les autres widgets' : 'Voir d’autres widgets KPI'}
-      </button>
+        {famille}
+      </span>
 
-      {showMore && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {MORE_WIDGETS.map((w) => (
-            <button
-              key={w.key}
-              style={{
-                textAlign: 'left',
-                border: '1px solid rgba(255,255,255,0.10)',
-                background: 'rgba(255,255,255,0.03)',
-                borderRadius: 12,
-                padding: '12px 14px',
-                color: 'rgba(255,255,255,0.75)',
-                fontSize: 13.5,
-              }}
-              onClick={() => {
-                // TODO: brancher sur l'écran détail correspondant une fois
-                // les RPC vision-tci identifiées.
-              }}
-            >
-              {w.label}
-            </button>
-          ))}
+      {!values ? (
+        <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Donnée indisponible.</div>
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
+          <Column label={dayLabel} value={values.jour_valeur} n1={values.jour_n1} fmt={fmt} isMarge={isMarge} />
+          <Column label="Mois" value={values.mois_valeur} n1={values.mois_n1} fmt={fmt} isMarge={isMarge} />
+          <Column label="Année" value={values.annee_valeur} n1={values.annee_n1} fmt={fmt} isMarge={isMarge} />
         </div>
       )}
     </div>
   )
 }
 
-function ActiviteCard({
-  label, color, dayLabel, day, dayN1, month, monthN1, year, yearN1,
-}: {
-  label: string
-  color: string
-  dayLabel: string
-  day: number
-  dayN1: number
-  month: number
-  monthN1: number
-  year: number
-  yearN1: number
-}) {
+function Column({
+  label, value, n1, fmt, isMarge,
+}: { label: string; value: number; n1: number; fmt: (n: number) => string; isMarge?: boolean }) {
+  return (
+    <div style={{ minWidth: 0, textAlign: 'left' }}>
+      <div
+        style={{
+          fontSize: 9.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.35)',
+          marginBottom: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+        }}
+      >
+        {label}
+      </div>
+      <div
+        style={{
+          fontFamily: 'var(--font-mono)', fontSize: 15.5, fontWeight: 600, color: '#fff', lineHeight: 1.15,
+          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+        }}
+      >
+        {fmt(value)}
+      </div>
+      <div style={{ marginTop: 4 }}>
+        <EvolBadge valeur={value} n1={n1} isMarge={isMarge} />
+      </div>
+    </div>
+  )
+}
+
+function CardSkeleton() {
   return (
     <div
       style={{
-        border: '1px solid rgba(255,255,255,0.10)',
-        borderRadius: 16,
-        padding: '14px 12px 16px',
-        background: 'rgba(255,255,255,0.04)',
+        borderRadius: 14, border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.03)',
+        padding: '14px 14px 12px',
       }}
     >
-      <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.14em', color, marginBottom: 10 }}>
-        {label}
-      </div>
-      <div style={{ display: 'flex', gap: 6 }}>
-        <MetricColumn label={dayLabel} value={day} valueN1={dayN1} />
-        <MetricColumn label="Depuis le 1er du mois" value={month} valueN1={monthN1} />
-        <MetricColumn label="Depuis le 1er janvier" value={year} valueN1={yearN1} />
-      </div>
-    </div>
-  )
-}
-
-function MetricColumn({ label, value, valueN1 }: { label: string; value: number; valueN1: number }) {
-  const pct = evolPct(value, valueN1)
-  const isUp = (pct ?? 0) >= 0
-
-  return (
-    <div style={{ flex: 1, minWidth: 0, textAlign: 'center' }}>
-      <div
-        style={{
-          fontSize: 9.5,
-          textTransform: 'uppercase',
-          letterSpacing: '0.06em',
-          color: 'rgba(255,255,255,0.35)',
-          marginBottom: 4,
-          lineHeight: 1.2,
-          minHeight: 22,
-        }}
-      >
-        {label}
-      </div>
-      <div
-        style={{
-          fontFamily: 'var(--font-mono)',
-          fontSize: 15,
-          fontWeight: 600,
-          color: '#fff',
-          whiteSpace: 'nowrap',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-        }}
-      >
-        {formatMoney(value)}
-      </div>
-      <div style={{ marginTop: 4 }}>
-        {pct === null ? (
-          <span style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.25)' }}>—</span>
-        ) : (
-          <span
-            style={{
-              fontSize: 10.5,
-              fontWeight: 600,
-              color: isUp ? '#e0a685' : '#8fc0d4',
-            }}
-          >
-            {isUp ? '▲' : '▼'} {Math.abs(pct).toFixed(1)}%
-          </span>
-        )}
+      <div style={{ width: 60, height: 18, borderRadius: 6, background: 'rgba(255,255,255,0.08)', marginBottom: 12 }} />
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
+        {[0, 1, 2].map((i) => (
+          <div key={i}>
+            <div style={{ width: '80%', height: 8, borderRadius: 4, background: 'rgba(255,255,255,0.06)', marginBottom: 6 }} />
+            <div style={{ width: '90%', height: 16, borderRadius: 4, background: 'rgba(255,255,255,0.08)', marginBottom: 6 }} />
+            <div style={{ width: '60%', height: 12, borderRadius: 4, background: 'rgba(255,255,255,0.06)' }} />
+          </div>
+        ))}
       </div>
     </div>
   )
-}
-
-function SkeletonCard() {
-  return <div style={{ height: 120, borderRadius: 16, background: 'rgba(255,255,255,0.05)' }} />
 }
