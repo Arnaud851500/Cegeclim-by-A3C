@@ -18,7 +18,7 @@ const SEARCH_FIELDS = [
   { key: 'numero_piece', label: 'N° de pièce' },
   { key: 'reference_article', label: 'Référence' },
   { key: 'reference', label: 'Référence' },
-  { key: 'numero_tiers', label: 'N° tiers' },
+  // numero_tiers confirmé INEXISTANT sur facture_lignes (erreur Postgres) — retiré.
   { key: 'numero_tiers_entete', label: 'N° tiers' },
 ]
 
@@ -86,13 +86,13 @@ export default function MobileRdv() {
       rawResultsPerField.flat().forEach((row) => {
         const numero = safeText(pick(row, ['numero_document', 'numero_piece', 'num_piece']))
         const type = safeText(row.type_document)
-        const key = `${type}-${numero}-${safeText(pick(row, ['numero_tiers', 'numero_tiers_entete']))}`
+        const key = `${type}-${numero}-${safeText(pick(row, ['numero_tiers_entete']))}`
         if (merged.has(key)) return
         merged.set(key, {
           key,
           type,
           numero,
-          tiers: safeText(pick(row, ['numero_tiers', 'numero_tiers_entete'])),
+          tiers: safeText(pick(row, ['numero_tiers_entete'])),
           reference: safeText(pick(row, ['reference_article', 'reference'])),
           date: normalizeDateIso(pick(row, ['date_document', 'date_facture', 'date_piece'])),
           montant_ht: Number(row.montant_ht || 0),

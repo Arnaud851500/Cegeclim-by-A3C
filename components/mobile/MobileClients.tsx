@@ -7,19 +7,28 @@ import { formatMoney } from '@/app/focus_mensuel/page'
 // ─────────────────────────────────────────────────────────────────────────
 // Schéma confirmé via synthese_multi_clients/page.tsx :
 // - Table clients : synthese_multi_clients_cache, row_kind = 'client', annee = N.
+//   Colonne tiers réelle sur CETTE table : numero_tiers (confirmée, aucune erreur).
 // - "Profil CA 12MG" : calculé côté client (caBand), pas une colonne stockée.
 // - Dates de visite : objectif_tiers, domaine='Visite', 24 rubriques, valeur_date.
-// - Actions client : todo_actions.numero_tiers (nouvelle colonne, cf.
-//   supabase/migrations/add_numero_tiers_to_todo_actions.sql — à appliquer).
+// - Actions client : todo_actions.numero_tiers (migration à appliquer).
 //
-// Commandes/devis : facture_lignes. Colonnes confirmées : type_document,
-// numero_document, numero_tiers, date_document, montant_ht — MAIS certaines
-// lignes (autre pipeline d'import) renseignent numero_tiers_entete au lieu de
-// numero_tiers (cf. le contournement déjà en place pour CERFA dans
-// layout.tsx). D'où le .or() ci-dessous plutôt qu'un simple .eq().
+// - facture_lignes : erreur confirmée en prod → "numero_tiers" N'EXISTE PAS
+//   sur cette table. Seule numero_tiers_entete existe. Colonnes de date
+//   (date_document / date_facture / date_piece) toujours non confirmées :
+//   plus aucun filtre/tri serveur dessus, tout est fait côté client sur les
+//   lignes déjà récupérées (impossible de planter sur un nom de colonne
+//   inconnu quand on ne fait que lire des clés d'objet).
+//
+// - Devis N-1 (comparaison) : la valeur brute du cache au niveau client
+//   (devis_ytd_n1) est fausse/à 0 pour certains clients — le desktop la
+//   recalcule à partir des lignes mensuelles du cache
+//   (recomputeClientN1ComparisonFromMonths). Reproduit ici pour Devis
+//   uniquement — CA et Marge N-1 du cache client correspondent déjà
+//   exactement au desktop, testé sur DUPRE HABITAT ENERGIES.
 // ─────────────────────────────────────────────────────────────────────────
 
 const N = new Date().getFullYear()
+const CURRENT_MONTH = new Date().getMonth() + 1
 const CA_PROFILE_BANDS = ['400K€', '150K€', '80K€', '20K€', 'vide'] as const
 type CaBand = typeof CA_PROFILE_BANDS[number]
 
@@ -64,10 +73,6 @@ function formatDateFr(iso: string) {
   const [y, m, d] = iso.split('-')
   return `${d}/${m}/${y}`
 }
-function escapeSupabaseValue(value: string) {
-  return String(value || '').replace(/,/g, '\\,')
-}
-/** Lit une valeur parmi plusieurs noms de colonnes candidats (variantes de pipeline). */
 function pick(row: Record<string, any>, keys: string[]) {
   for (const key of keys) {
     const v = row?.[key]
@@ -77,7 +82,6 @@ function pick(row: Record<string, any>, keys: string[]) {
 }
 const NUMERO_KEYS = ['numero_document', 'numero_piece', 'num_piece', 'facture', 'piece']
 const DATE_KEYS = ['date_document', 'date_facture', 'date_piece', 'date']
-const TIERS_KEYS = ['numero_tiers', 'numero_tiers_entete']
 
 async function fetchAllCache(select: string, apply?: (q: any) => any) {
   const output: Record<string, any>[] = []
@@ -96,12 +100,6 @@ async function fetchAllCache(select: string, apply?: (q: any) => any) {
   return output
 }
 
-/** Filtre tiers résilient : essaie numero_tiers puis numero_tiers_entete. */
-function tiersOrFilter(numero: string) {
-  const escaped = escapeSupabaseValue(numero)
-  return TIERS_KEYS.map((key) => `${key}.eq.${escaped}`).join(',')
-}
-
 type ClientRow = {
   numero: string
   nom: string
@@ -112,7 +110,6 @@ type ClientRow = {
   ca12m: number
   band: CaBand
   devisYtdN: number
-  devisYtdN1: number
   margePctYtdN: number | null
   margePctYtdN1: number | null
 }
@@ -124,6 +121,7 @@ type ClientDetail = {
   actions: { id: string; libelle: string; status: string; due_date: string | null }[]
   derniereVisite: string
   prochaineVisite: string
+  devisYtdN1: number
   loadErrors: string[]
 }
 
@@ -142,7 +140,7 @@ export default function MobileClients() {
     async function load() {
       try {
         const rows = await fetchAllCache(
-          'numero_tiers,intitule_tiers,date_creation,ca_n1,ca_ytd_n,ca_ytd_n1,devis_ytd_n,devis_ytd_n1,marge_pct_ytd_n,marge_ytd_n1_value',
+          'numero_tiers,intitule_tiers,date_creation,ca_n1,ca_ytd_n,ca_ytd_n1,devis_ytd_n,marge_pct_ytd_n,marge_ytd_n1_value',
           (q) => q.eq('annee', N).eq('row_kind', 'client'),
         )
         if (cancelled) return
@@ -163,7 +161,6 @@ export default function MobileClients() {
             ca12m,
             band: caBand(ca12m),
             devisYtdN: safeNumber(row.devis_ytd_n),
-            devisYtdN1: safeNumber(row.devis_ytd_n1),
             margePctYtdN: row.marge_pct_ytd_n === null || row.marge_pct_ytd_n === undefined ? null : safeNumber(row.marge_pct_ytd_n),
             margePctYtdN1: caYtdN1 ? (margeYtdN1Value / caYtdN1) * 100 : null,
           }
@@ -211,24 +208,20 @@ export default function MobileClients() {
 
     try {
       const twoMonthsAgo = monthsAgoIso(2)
-      const tiersFilter = tiersOrFilter(client.numero)
 
-      const [cdcRes, devisRes, visitesRes, actionsRes] = await Promise.all([
+      const [cdcRes, devisRes, visitesRes, actionsRes, monthRes] = await Promise.all([
         supabase
           .from('facture_lignes')
           .select('*')
           .eq('type_document', 'CDC')
-          .or(tiersFilter)
-          .order('date_document', { ascending: false })
-          .limit(20),
+          .eq('numero_tiers_entete', client.numero)
+          .limit(200),
         supabase
           .from('facture_lignes')
           .select('*')
           .eq('type_document', 'Devis')
-          .or(tiersFilter)
-          .gte('date_document', twoMonthsAgo)
-          .order('date_document', { ascending: false })
-          .limit(50),
+          .eq('numero_tiers_entete', client.numero)
+          .limit(300),
         supabase
           .from('objectif_tiers')
           .select('valeur_date')
@@ -242,18 +235,33 @@ export default function MobileClients() {
           .eq('numero_tiers', client.numero)
           .order('due_date', { ascending: true })
           .limit(30),
+        // Recalcul du Devis N-1 comparable, comme le fait le desktop
+        // (recomputeClientN1ComparisonFromMonths) : la valeur brute au
+        // niveau client (devis_ytd_n1) n'est pas fiable pour Devis.
+        supabase
+          .from('synthese_multi_clients_cache')
+          .select('mois,devis_n1')
+          .eq('annee', N)
+          .eq('row_kind', 'month')
+          .eq('numero_tiers', client.numero),
       ])
 
-      const mapDocs = (res: { data: any[] | null; error: any }): DocLigne[] => {
+      // Tri + filtrage "2 derniers mois" côté client : aucune colonne de
+      // date de facture_lignes n'est confirmée, donc aucun .order()/.gte()
+      // serveur dessus (ça avait fait planter la requête précédemment).
+      function mapAndSortDocs(res: { data: any[] | null; error: any }, sinceIso?: string): DocLigne[] {
         if (res.error) {
           loadErrors.push(res.error.message)
           return []
         }
-        return (res.data || []).map((r) => ({
+        let docs = (res.data || []).map((r) => ({
           numero: safeText(pick(r, NUMERO_KEYS)),
           date: normalizeDateIso(pick(r, DATE_KEYS)),
           montant_ht: safeNumber(r.montant_ht),
         }))
+        if (sinceIso) docs = docs.filter((d) => !d.date || d.date >= sinceIso)
+        docs.sort((a, b) => (b.date || '').localeCompare(a.date || ''))
+        return docs
       }
 
       const visitDates = visitesRes.error
@@ -269,9 +277,18 @@ export default function MobileClients() {
 
       if (actionsRes.error) loadErrors.push(actionsRes.error.message)
 
+      let devisYtdN1 = 0
+      if (monthRes.error) {
+        loadErrors.push(monthRes.error.message)
+      } else {
+        devisYtdN1 = (monthRes.data || [])
+          .filter((r: any) => Number(r.mois || 0) <= CURRENT_MONTH)
+          .reduce((sum: number, r: any) => sum + safeNumber(r.devis_n1), 0)
+      }
+
       setDetail({
-        commandes: mapDocs(cdcRes),
-        devis: mapDocs(devisRes),
+        commandes: mapAndSortDocs(cdcRes).slice(0, 20),
+        devis: mapAndSortDocs(devisRes, twoMonthsAgo).slice(0, 50),
         actions: actionsRes.error
           ? []
           : (actionsRes.data || []).map((r: any) => ({
@@ -282,12 +299,13 @@ export default function MobileClients() {
             })),
         derniereVisite: past.length ? formatDateFr(past[past.length - 1]) : '',
         prochaineVisite: future.length ? formatDateFr(future[0]) : '',
+        devisYtdN1,
         loadErrors,
       })
     } catch (e) {
       console.error('[MobileClients] erreur chargement fiche client', e)
       setDetail({
-        commandes: [], devis: [], actions: [], derniereVisite: '', prochaineVisite: '',
+        commandes: [], devis: [], actions: [], derniereVisite: '', prochaineVisite: '', devisYtdN1: 0,
         loadErrors: [e instanceof Error ? e.message : String(e)],
       })
     } finally {
@@ -451,8 +469,6 @@ function ClientDetailScreen({
   loading: boolean
   onBack: () => void
 }) {
-  const pct = client.caYtdN1 > 0 ? ((client.caYtdN - client.caYtdN1) / client.caYtdN1) * 100 : null
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column' }}>
       <button
@@ -519,7 +535,11 @@ function ClientDetailScreen({
               {formatMoney(client.devisYtdN)}
             </div>
             <div style={{ marginTop: 5, fontSize: 11 }}>
-              <EvolLine value={client.devisYtdN} n1={client.devisYtdN1} />
+              {loading || !detail ? (
+                <span style={{ color: 'rgba(255,255,255,0.4)' }}>…</span>
+              ) : (
+                <EvolLine value={client.devisYtdN} n1={detail.devisYtdN1} />
+              )}
             </div>
           </div>
         </div>
