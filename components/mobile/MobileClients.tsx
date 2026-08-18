@@ -5,17 +5,18 @@ import { supabase } from '@/lib/supabaseClient'
 import { formatMoney } from '@/app/focus_mensuel/page'
 
 // ─────────────────────────────────────────────────────────────────────────
-// Schéma confirmé via synthese_multi_clients/page.tsx (fourni par Arnaud) :
+// Schéma confirmé via synthese_multi_clients/page.tsx :
 // - Table clients : synthese_multi_clients_cache, row_kind = 'client', annee = N.
-// - "Profil CA 12MG" : PAS une colonne stockée — calculé côté client à partir
-//   de ca12m = ca_ytd_n + max(0, ca_n1 - ca_ytd_n1), seuils identiques à la
-//   fonction caBand() du fichier fourni (400K/150K/80K/20K/vide).
-// - Dates de visite : table objectif_tiers, domaine='Visite', 24 rubriques
-//   "Visite n°1".."Visite n°24", valeur_date. Dernière = max date passée,
-//   prochaine = min date future.
-// - Actions liées au client : todo_actions — lien exact vers le client
-//   toujours non confirmé (⚠️ seul point encore en suspens sur cet écran).
-// CA/commandes/devis : facture_lignes, schéma déjà validé ailleurs dans l'app.
+// - "Profil CA 12MG" : calculé côté client (caBand), pas une colonne stockée.
+// - Dates de visite : objectif_tiers, domaine='Visite', 24 rubriques, valeur_date.
+// - Actions client : todo_actions.numero_tiers (nouvelle colonne, cf.
+//   supabase/migrations/add_numero_tiers_to_todo_actions.sql — à appliquer).
+//
+// Commandes/devis : facture_lignes. Colonnes confirmées : type_document,
+// numero_document, numero_tiers, date_document, montant_ht — MAIS certaines
+// lignes (autre pipeline d'import) renseignent numero_tiers_entete au lieu de
+// numero_tiers (cf. le contournement déjà en place pour CERFA dans
+// layout.tsx). D'où le .or() ci-dessous plutôt qu'un simple .eq().
 // ─────────────────────────────────────────────────────────────────────────
 
 const N = new Date().getFullYear()
@@ -63,6 +64,20 @@ function formatDateFr(iso: string) {
   const [y, m, d] = iso.split('-')
   return `${d}/${m}/${y}`
 }
+function escapeSupabaseValue(value: string) {
+  return String(value || '').replace(/,/g, '\\,')
+}
+/** Lit une valeur parmi plusieurs noms de colonnes candidats (variantes de pipeline). */
+function pick(row: Record<string, any>, keys: string[]) {
+  for (const key of keys) {
+    const v = row?.[key]
+    if (v !== null && v !== undefined && String(v).trim() !== '') return v
+  }
+  return null
+}
+const NUMERO_KEYS = ['numero_document', 'numero_piece', 'num_piece', 'facture', 'piece']
+const DATE_KEYS = ['date_document', 'date_facture', 'date_piece', 'date']
+const TIERS_KEYS = ['numero_tiers', 'numero_tiers_entete']
 
 async function fetchAllCache(select: string, apply?: (q: any) => any) {
   const output: Record<string, any>[] = []
@@ -81,6 +96,12 @@ async function fetchAllCache(select: string, apply?: (q: any) => any) {
   return output
 }
 
+/** Filtre tiers résilient : essaie numero_tiers puis numero_tiers_entete. */
+function tiersOrFilter(numero: string) {
+  const escaped = escapeSupabaseValue(numero)
+  return TIERS_KEYS.map((key) => `${key}.eq.${escaped}`).join(',')
+}
+
 type ClientRow = {
   numero: string
   nom: string
@@ -90,15 +111,20 @@ type ClientRow = {
   caN1: number
   ca12m: number
   band: CaBand
+  devisYtdN: number
+  devisYtdN1: number
+  margePctYtdN: number | null
+  margePctYtdN1: number | null
 }
 
-type DocLigne = { numero_document: string; date_document: string; montant_ht: number }
+type DocLigne = { numero: string; date: string; montant_ht: number }
 type ClientDetail = {
   commandes: DocLigne[]
   devis: DocLigne[]
   actions: { id: string; libelle: string; status: string; due_date: string | null }[]
   derniereVisite: string
   prochaineVisite: string
+  loadErrors: string[]
 }
 
 export default function MobileClients() {
@@ -109,7 +135,6 @@ export default function MobileClients() {
   const [selected, setSelected] = useState<ClientRow | null>(null)
   const [detail, setDetail] = useState<ClientDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
-  const [detailError, setDetailError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -117,7 +142,7 @@ export default function MobileClients() {
     async function load() {
       try {
         const rows = await fetchAllCache(
-          'numero_tiers,intitule_tiers,date_creation,ca_n1,ca_ytd_n,ca_ytd_n1',
+          'numero_tiers,intitule_tiers,date_creation,ca_n1,ca_ytd_n,ca_ytd_n1,devis_ytd_n,devis_ytd_n1,marge_pct_ytd_n,marge_ytd_n1_value',
           (q) => q.eq('annee', N).eq('row_kind', 'client'),
         )
         if (cancelled) return
@@ -127,6 +152,7 @@ export default function MobileClients() {
           const caYtdN1 = safeNumber(row.ca_ytd_n1)
           const caN1 = safeNumber(row.ca_n1)
           const ca12m = caYtdN + Math.max(0, caN1 - caYtdN1)
+          const margeYtdN1Value = safeNumber(row.marge_ytd_n1_value)
           return {
             numero: safeText(row.numero_tiers),
             nom: safeText(row.intitule_tiers),
@@ -136,6 +162,10 @@ export default function MobileClients() {
             caN1,
             ca12m,
             band: caBand(ca12m),
+            devisYtdN: safeNumber(row.devis_ytd_n),
+            devisYtdN1: safeNumber(row.devis_ytd_n1),
+            margePctYtdN: row.marge_pct_ytd_n === null || row.marge_pct_ytd_n === undefined ? null : safeNumber(row.marge_pct_ytd_n),
+            margePctYtdN1: caYtdN1 ? (margeYtdN1Value / caYtdN1) * 100 : null,
           }
         })
         setAllClients(mapped)
@@ -175,26 +205,27 @@ export default function MobileClients() {
   async function openClient(client: ClientRow) {
     setSelected(client)
     setDetail(null)
-    setDetailError(null)
     setDetailLoading(true)
 
+    const loadErrors: string[] = []
+
     try {
-      const today = todayIso()
       const twoMonthsAgo = monthsAgoIso(2)
+      const tiersFilter = tiersOrFilter(client.numero)
 
       const [cdcRes, devisRes, visitesRes, actionsRes] = await Promise.all([
         supabase
           .from('facture_lignes')
-          .select('numero_document,date_document,montant_ht')
+          .select('*')
           .eq('type_document', 'CDC')
-          .eq('numero_tiers', client.numero)
+          .or(tiersFilter)
           .order('date_document', { ascending: false })
           .limit(20),
         supabase
           .from('facture_lignes')
-          .select('numero_document,date_document,montant_ht')
+          .select('*')
           .eq('type_document', 'Devis')
-          .eq('numero_tiers', client.numero)
+          .or(tiersFilter)
           .gte('date_document', twoMonthsAgo)
           .order('date_document', { ascending: false })
           .limit(50),
@@ -205,23 +236,25 @@ export default function MobileClients() {
           .eq('annee', N)
           .eq('domaine', 'Visite')
           .not('valeur_date', 'is', null),
-        // ⚠️ Seule hypothèse restante sur cet écran : le lien action↔client.
         supabase
           .from('todo_actions')
-          .select('id,libelle,status,due_date')
+          .select('id,description_action,status,due_date')
           .eq('numero_tiers', client.numero)
           .order('due_date', { ascending: true })
           .limit(30),
       ])
 
-      const mapDocs = (res: { data: any[] | null; error: any }): DocLigne[] =>
-        res.error
-          ? []
-          : (res.data || []).map((r) => ({
-              numero_document: String(r.numero_document || ''),
-              date_document: String(r.date_document || ''),
-              montant_ht: Number(r.montant_ht || 0),
-            }))
+      const mapDocs = (res: { data: any[] | null; error: any }): DocLigne[] => {
+        if (res.error) {
+          loadErrors.push(res.error.message)
+          return []
+        }
+        return (res.data || []).map((r) => ({
+          numero: safeText(pick(r, NUMERO_KEYS)),
+          date: normalizeDateIso(pick(r, DATE_KEYS)),
+          montant_ht: safeNumber(r.montant_ht),
+        }))
+      }
 
       const visitDates = visitesRes.error
         ? []
@@ -230,9 +263,11 @@ export default function MobileClients() {
             .filter(Boolean)
             .sort()
 
-      const today0 = today
+      const today0 = todayIso()
       const past = visitDates.filter((d) => d <= today0)
       const future = visitDates.filter((d) => d > today0)
+
+      if (actionsRes.error) loadErrors.push(actionsRes.error.message)
 
       setDetail({
         commandes: mapDocs(cdcRes),
@@ -241,16 +276,20 @@ export default function MobileClients() {
           ? []
           : (actionsRes.data || []).map((r: any) => ({
               id: String(r.id),
-              libelle: String(r.libelle || ''),
+              libelle: String(r.description_action || ''),
               status: String(r.status || ''),
               due_date: r.due_date || null,
             })),
         derniereVisite: past.length ? formatDateFr(past[past.length - 1]) : '',
         prochaineVisite: future.length ? formatDateFr(future[0]) : '',
+        loadErrors,
       })
     } catch (e) {
       console.error('[MobileClients] erreur chargement fiche client', e)
-      setDetailError(e instanceof Error ? e.message : String(e))
+      setDetail({
+        commandes: [], devis: [], actions: [], derniereVisite: '', prochaineVisite: '',
+        loadErrors: [e instanceof Error ? e.message : String(e)],
+      })
     } finally {
       setDetailLoading(false)
     }
@@ -262,7 +301,6 @@ export default function MobileClients() {
         client={selected}
         detail={detail}
         loading={detailLoading}
-        error={detailError}
         onBack={() => {
           setSelected(null)
           setDetail(null)
@@ -388,13 +426,29 @@ function StatCard({ label, value }: { label: string; value: number | null }) {
   )
 }
 
+function EvolLine({ value, n1, isPoints }: { value: number | null; n1: number | null; isPoints?: boolean }) {
+  if (value === null || n1 === null) return <span style={{ color: 'rgba(255,255,255,0.4)' }}>N-1 : —</span>
+  const delta = isPoints ? value - n1 : n1 ? ((value - n1) / Math.abs(n1)) * 100 : null
+  return (
+    <>
+      {delta !== null && (
+        <span style={{ color: delta >= 0 ? '#8fd4a8' : '#e0a685', fontWeight: 600 }}>
+          {delta >= 0 ? '▲' : '▼'} {Math.abs(delta).toFixed(1)}{isPoints ? ' pts' : '%'}
+        </span>
+      )}
+      <span style={{ color: 'rgba(255,255,255,0.4)' }}>
+        {' '}N-1 : {isPoints ? `${n1.toFixed(1)} %` : formatMoney(n1)}
+      </span>
+    </>
+  )
+}
+
 function ClientDetailScreen({
-  client, detail, loading, error, onBack,
+  client, detail, loading, onBack,
 }: {
   client: ClientRow
   detail: ClientDetail | null
   loading: boolean
-  error: string | null
   onBack: () => void
 }) {
   const pct = client.caYtdN1 > 0 ? ((client.caYtdN - client.caYtdN1) / client.caYtdN1) * 100 : null
@@ -423,34 +477,67 @@ function ClientDetailScreen({
           <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>N° {client.numero}</div>
         </div>
 
-        {error && <div style={{ fontSize: 12.5, color: '#e0a685' }}>{error}</div>}
+        {detail && detail.loadErrors.length > 0 && (
+          <div style={{ fontSize: 12, color: '#e0a685' }}>
+            {detail.loadErrors.join(' · ')}
+          </div>
+        )}
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
           <MiniCard label="Dernière visite" value={loading ? '…' : detail?.derniereVisite || 'Non renseigné'} />
           <MiniCard label="Prochaine visite" value={loading ? '…' : detail?.prochaineVisite || 'Non renseigné'} />
         </div>
 
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          <div
+            style={{
+              borderRadius: 14, border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.04)',
+              padding: '12px 13px',
+            }}
+          >
+            <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
+              CA depuis le 1er janvier
+            </div>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 19, fontWeight: 700, color: '#fff', marginTop: 4 }}>
+              {formatMoney(client.caYtdN)}
+            </div>
+            <div style={{ marginTop: 5, fontSize: 11 }}>
+              <EvolLine value={client.caYtdN} n1={client.caYtdN1} />
+            </div>
+          </div>
+
+          <div
+            style={{
+              borderRadius: 14, border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.04)',
+              padding: '12px 13px',
+            }}
+          >
+            <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
+              Devis depuis le 1er janvier
+            </div>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 19, fontWeight: 700, color: '#fff', marginTop: 4 }}>
+              {formatMoney(client.devisYtdN)}
+            </div>
+            <div style={{ marginTop: 5, fontSize: 11 }}>
+              <EvolLine value={client.devisYtdN} n1={client.devisYtdN1} />
+            </div>
+          </div>
+        </div>
+
         <div
           style={{
-            borderRadius: 14,
-            border: '1px solid rgba(255,255,255,0.10)',
-            background: 'rgba(255,255,255,0.04)',
-            padding: '14px',
+            borderRadius: 14, border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.04)',
+            padding: '12px 13px',
           }}
         >
-          <div style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
-            CA depuis le 1er janvier
+          <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
+            Marge depuis le 1er janvier
           </div>
-          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 24, fontWeight: 700, color: '#fff', marginTop: 4 }}>
-            {formatMoney(client.caYtdN)}
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 19, fontWeight: 700, color: '#fff', marginTop: 4 }}>
+            {client.margePctYtdN === null ? '—' : `${client.margePctYtdN.toFixed(1)} %`}
           </div>
-          <div style={{ marginTop: 6, display: 'flex', gap: 8, alignItems: 'center', fontSize: 12 }}>
-            {pct !== null && (
-              <span style={{ color: pct >= 0 ? '#e0a685' : '#8fc0d4', fontWeight: 600 }}>
-                {pct >= 0 ? '▲' : '▼'} {Math.abs(pct).toFixed(1)}%
-              </span>
-            )}
-            <span style={{ color: 'rgba(255,255,255,0.4)' }}>N-1 : {formatMoney(client.caYtdN1)}</span>
+          <div style={{ marginTop: 5, fontSize: 11 }}>
+            <EvolLine value={client.margePctYtdN} n1={client.margePctYtdN1} isPoints />
           </div>
         </div>
 
@@ -477,13 +564,8 @@ function ClientDetailScreen({
           ) : !detail || detail.commandes.length === 0 ? (
             <Empty text="Aucune commande." />
           ) : (
-            detail.commandes.map((d) => (
-              <RowItem
-                key={d.numero_document}
-                title={d.numero_document || '—'}
-                subtitle={formatDateFr(normalizeDateIso(d.date_document))}
-                trailing={formatMoney(d.montant_ht)}
-              />
+            detail.commandes.map((d, i) => (
+              <RowItem key={`${d.numero}-${i}`} title={d.numero || '—'} subtitle={formatDateFr(d.date)} trailing={formatMoney(d.montant_ht)} />
             ))
           )}
         </Section>
@@ -494,13 +576,8 @@ function ClientDetailScreen({
           ) : !detail || detail.devis.length === 0 ? (
             <Empty text="Aucun devis sur la période." />
           ) : (
-            detail.devis.map((d) => (
-              <RowItem
-                key={d.numero_document}
-                title={d.numero_document || '—'}
-                subtitle={formatDateFr(normalizeDateIso(d.date_document))}
-                trailing={formatMoney(d.montant_ht)}
-              />
+            detail.devis.map((d, i) => (
+              <RowItem key={`${d.numero}-${i}`} title={d.numero || '—'} subtitle={formatDateFr(d.date)} trailing={formatMoney(d.montant_ht)} />
             ))
           )}
         </Section>

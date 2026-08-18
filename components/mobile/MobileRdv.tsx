@@ -2,181 +2,215 @@
 
 import { useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
+import { formatMoney } from '@/app/focus_mensuel/page'
 
-interface DocSearchResult {
+// ─────────────────────────────────────────────────────────────────────────
+// Recherche de document résiliente : facture_lignes a des colonnes qui
+// varient selon le pipeline d'import (numero_document / numero_piece,
+// numero_tiers / numero_tiers_entete...). Chaque champ candidat est
+// interrogé séparément et isolé par son propre try/catch : si une colonne
+// n'existe pas dans la table, seule cette requête échoue silencieusement,
+// les autres candidats continuent de fonctionner.
+// ─────────────────────────────────────────────────────────────────────────
+
+const SEARCH_FIELDS = [
+  { key: 'numero_document', label: 'N° de pièce' },
+  { key: 'numero_piece', label: 'N° de pièce' },
+  { key: 'reference_article', label: 'Référence' },
+  { key: 'reference', label: 'Référence' },
+  { key: 'numero_tiers', label: 'N° tiers' },
+  { key: 'numero_tiers_entete', label: 'N° tiers' },
+]
+
+function safeText(value: any) {
+  return String(value ?? '').trim()
+}
+function pick(row: Record<string, any>, keys: string[]) {
+  for (const key of keys) {
+    const v = row?.[key]
+    if (v !== null && v !== undefined && String(v).trim() !== '') return v
+  }
+  return null
+}
+function normalizeDateIso(value: any) {
+  const text = safeText(value)
+  const iso = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/)
+  if (iso) return `${iso[1]}-${iso[2].padStart(2, '0')}-${iso[3].padStart(2, '0')}`
+  return ''
+}
+function formatDateFr(iso: string) {
+  if (!iso) return ''
+  const [y, m, d] = iso.split('-')
+  return `${d}/${m}/${y}`
+}
+
+type DocResult = {
+  key: string
   type: string
   numero: string
   tiers: string
+  reference: string
   date: string
-  montant: number
+  montant_ht: number
 }
 
-const money = new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 })
+async function searchByField(field: string, term: string) {
+  try {
+    const { data, error } = await supabase
+      .from('facture_lignes')
+      .select('*')
+      .ilike(field, `%${term}%`)
+      .limit(30)
+    if (error) return []
+    return (data || []) as Record<string, any>[]
+  } catch {
+    return []
+  }
+}
 
 export default function MobileRdv() {
-  const [query, setQuery] = useState('')
-  const [results, setResults] = useState<DocSearchResult[]>([])
-  const [searching, setSearching] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [term, setTerm] = useState('')
+  const [results, setResults] = useState<DocResult[] | null>(null)
+  const [loading, setLoading] = useState(false)
 
   async function runSearch() {
-    const term = query.trim()
-    if (!term) {
-      setResults([])
+    const q = term.trim()
+    if (!q) {
+      setResults(null)
       return
     }
-    setSearching(true)
-    setError(null)
+    setLoading(true)
     try {
-      // ⚠️ Requête provisoire sur facture_lignes (type_document couvre en
-      // principe Devis/CDC/BL/Factures selon focus_mensuel/page.tsx).
-      // À remplacer par une RPC de recherche documentaire dédiée si le volume
-      // ou le périmètre d'accès (agence/collaborateur) doit être filtré
-      // côté serveur plutôt que par une requête directe.
-      const { data, error } = await supabase
-        .from('facture_lignes')
-        .select('type_document,numero_document,numero_tiers,date_document,montant_ht')
-        .or(`numero_document.ilike.%${term}%,numero_tiers.ilike.%${term}%`)
-        .limit(20)
-      if (error) throw error
-      setResults(
-        (data || []).map((r: any) => ({
-          type: r.type_document,
-          numero: r.numero_document,
-          tiers: r.numero_tiers,
-          date: r.date_document,
-          montant: Number(r.montant_ht || 0),
-        })),
-      )
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      const rawResultsPerField = await Promise.all(SEARCH_FIELDS.map((f) => searchByField(f.key, q)))
+      const merged = new Map<string, DocResult>()
+      rawResultsPerField.flat().forEach((row) => {
+        const numero = safeText(pick(row, ['numero_document', 'numero_piece', 'num_piece']))
+        const type = safeText(row.type_document)
+        const key = `${type}-${numero}-${safeText(pick(row, ['numero_tiers', 'numero_tiers_entete']))}`
+        if (merged.has(key)) return
+        merged.set(key, {
+          key,
+          type,
+          numero,
+          tiers: safeText(pick(row, ['numero_tiers', 'numero_tiers_entete'])),
+          reference: safeText(pick(row, ['reference_article', 'reference'])),
+          date: normalizeDateIso(pick(row, ['date_document', 'date_facture', 'date_piece'])),
+          montant_ht: Number(row.montant_ht || 0),
+        })
+      })
+      setResults(Array.from(merged.values()).slice(0, 40))
     } finally {
-      setSearching(false)
+      setLoading(false)
     }
   }
 
   return (
-    <div style={{ flex: 1, padding: '18px 16px 32px', display: 'flex', flexDirection: 'column', gap: 20 }}>
-      <section>
-        <SectionTitle>Prochains rendez-vous</SectionTitle>
-        <div
-          style={{
-            border: '1px dashed rgba(255,255,255,0.2)',
-            borderRadius: 14,
-            padding: 16,
-            color: 'rgba(255,255,255,0.5)',
-            fontSize: 13,
-          }}
-        >
-          Aucune source de données RDV connectée pour l’instant — à définir
-          (table Supabase dédiée, ou agenda existant à brancher).
+    <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* ---- Rendez-vous : pas de table identifiée à ce jour. ---- */}
+      <div
+        style={{
+          borderRadius: 14,
+          border: '1px solid rgba(255,255,255,0.10)',
+          background: 'rgba(255,255,255,0.04)',
+          padding: '14px 16px',
+        }}
+      >
+        <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 6 }}>
+          Rendez-vous
         </div>
-      </section>
+        <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>
+          Source de données à connecter (table des rendez-vous non identifiée).
+        </div>
+      </div>
 
-      <section>
-        <SectionTitle>Assistant vocal — compte rendu de visite</SectionTitle>
-        <button
-          disabled
-          style={{
-            width: '100%',
-            border: '1px solid rgba(255,255,255,0.12)',
-            borderRadius: 14,
-            padding: '16px',
-            background: 'rgba(255,255,255,0.03)',
-            color: 'rgba(255,255,255,0.35)',
-            fontSize: 13.5,
-            textAlign: 'left',
-          }}
-        >
-          🎙️ Bientôt disponible — écoute, résumé, et proposition d’actions
-          TODO avec confirmation orale.
-        </button>
-      </section>
+      {/* ---- Assistant vocal : à venir. ---- */}
+      <button
+        disabled
+        style={{
+          borderRadius: 14,
+          border: '1px dashed rgba(255,255,255,0.15)',
+          background: 'transparent',
+          color: 'rgba(255,255,255,0.35)',
+          padding: '14px 16px',
+          fontSize: 13,
+          textAlign: 'left',
+        }}
+      >
+        🎙️ Assistant visite (résumé vocal + actions) — Bientôt disponible
+      </button>
 
-      <section>
-        <SectionTitle>Recherche de documents</SectionTitle>
+      {/* ---- Recherche de document ---- */}
+      <div>
+        <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 8 }}>
+          Rechercher un document
+        </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') runSearch()
-            }}
-            placeholder="N° devis, BL, tiers…"
+            value={term}
+            onChange={(e) => setTerm(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && runSearch()}
+            placeholder="N° de pièce, référence chantier, n° client…"
             style={{
               flex: 1,
               borderRadius: 12,
               border: '1px solid rgba(255,255,255,0.15)',
               background: 'rgba(255,255,255,0.05)',
               color: '#fff',
-              padding: '10px 12px',
+              padding: '11px 13px',
               fontSize: 14,
+              outline: 'none',
             }}
           />
           <button
             onClick={runSearch}
             style={{
               borderRadius: 12,
-              border: 'none',
-              background: '#A6A181',
-              color: '#141A26',
-              padding: '10px 16px',
-              fontWeight: 600,
+              border: '1px solid rgba(166,161,129,0.4)',
+              background: 'rgba(166,161,129,0.15)',
+              color: '#e4dfc9',
+              padding: '0 16px',
               fontSize: 13,
+              fontWeight: 600,
             }}
           >
-            {searching ? '…' : 'OK'}
+            Chercher
           </button>
         </div>
 
-        {error && <div style={{ marginTop: 8, color: '#e0a685', fontSize: 12.5 }}>{error}</div>}
-
-        <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {results.map((r, i) => (
-            <div
-              key={i}
-              style={{
-                border: '1px solid rgba(255,255,255,0.10)',
-                borderRadius: 12,
-                padding: '10px 12px',
-                display: 'flex',
-                justifyContent: 'space-between',
-                color: '#fff',
-                fontSize: 13,
-              }}
-            >
-              <div>
-                <div style={{ fontWeight: 600 }}>
-                  {r.type} {r.numero}
+        <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {loading ? (
+            <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Recherche…</div>
+          ) : results === null ? null : results.length === 0 ? (
+            <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Aucun document trouvé.</div>
+          ) : (
+            results.map((r) => (
+              <div
+                key={r.key}
+                style={{
+                  borderRadius: 12,
+                  border: '1px solid rgba(255,255,255,0.08)',
+                  background: 'rgba(255,255,255,0.03)',
+                  padding: '10px 12px',
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                  <span style={{ fontSize: 13.5, fontWeight: 600, color: '#fff' }}>{r.numero || '—'}</span>
+                  {r.montant_ht > 0 && (
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, color: 'rgba(255,255,255,0.75)' }}>
+                      {formatMoney(r.montant_ht)}
+                    </span>
+                  )}
                 </div>
-                <div style={{ color: 'rgba(255,255,255,0.45)', fontSize: 11.5 }}>
-                  {r.tiers} · {r.date}
+                <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginTop: 3 }}>
+                  {[r.type, r.tiers && `Client ${r.tiers}`, r.date && formatDateFr(r.date), r.reference]
+                    .filter(Boolean)
+                    .join(' · ')}
                 </div>
               </div>
-              <div style={{ fontFamily: 'var(--font-mono)' }}>{money.format(r.montant)}</div>
-            </div>
-          ))}
-          {!searching && query.trim() && results.length === 0 && (
-            <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: 12.5 }}>Aucun résultat.</div>
+            ))
           )}
         </div>
-      </section>
-    </div>
-  )
-}
-
-function SectionTitle({ children }: { children: React.ReactNode }) {
-  return (
-    <div
-      style={{
-        fontSize: 11,
-        textTransform: 'uppercase',
-        letterSpacing: '0.14em',
-        color: 'rgba(255,255,255,0.4)',
-        marginBottom: 8,
-      }}
-    >
-      {children}
+      </div>
     </div>
   )
 }

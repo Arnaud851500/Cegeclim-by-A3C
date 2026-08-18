@@ -26,6 +26,11 @@ type TodoRow = {
   status: TodoStatus
   comment_progress: string | null
   sort_order: number
+  // Lien optionnel vers un client (numero_tiers) — ajouté pour permettre de
+  // retrouver les actions liées à un client donné depuis sa fiche (desktop
+  // Vision Client / mobile "Mes clients"). Nécessite la migration
+  // supabase/migrations/add_numero_tiers_to_todo_actions.sql.
+  numero_tiers: string | null
 }
 
 /** Personne à qui une action peut être confiée. Le nom vient de l'écran Autorisations. */
@@ -371,6 +376,7 @@ export default function TodoPage() {
         row.description_action,
         row.comment_progress,
         row.created_by_name,
+        row.numero_tiers,
         assigneeLabel(row.assigned_to),
         formatDateFr(row.due_date),
       ]
@@ -471,6 +477,7 @@ export default function TodoPage() {
       status: 'Non débuté' as TodoStatus,
       comment_progress: '',
       sort_order: maxSort + 1,
+      numero_tiers: null,
     }
 
     const { data, error } = await supabase.from('todo_actions').insert(payload).select('*').single()
@@ -773,6 +780,12 @@ export default function TodoPage() {
                                     </span>
                                   )}
 
+                                  {row.numero_tiers && (
+                                    <span className="max-w-[160px] truncate rounded-md bg-[#E6EEF3] px-2 py-0.5 font-medium text-[#2C6F88]">
+                                      Client {row.numero_tiers}
+                                    </span>
+                                  )}
+
                                   <span className="inline-flex items-center gap-1.5">
                                     <span className="flex h-4 w-4 items-center justify-center rounded-full bg-[#EDEAE3] text-[8px] font-bold text-slate-600">
                                       {initialsOf(assignee?.name || '?')}
@@ -827,14 +840,25 @@ export default function TodoPage() {
                     />
                   </Field>
 
-                  <Field label="Mission ou projet">
-                    <input
-                      value={selectedRow.mission_project || ''}
-                      onChange={(event) => queueSave(selectedRow.id, { mission_project: event.target.value })}
-                      placeholder="Projections stock, Focus mensuel…"
-                      className="h-[42px] w-full rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-[#B4761A] focus:ring-2 focus:ring-[#B4761A]/25"
-                    />
-                  </Field>
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <Field label="Mission ou projet">
+                      <input
+                        value={selectedRow.mission_project || ''}
+                        onChange={(event) => queueSave(selectedRow.id, { mission_project: event.target.value })}
+                        placeholder="Projections stock, Focus mensuel…"
+                        className="h-[42px] w-full rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-[#B4761A] focus:ring-2 focus:ring-[#B4761A]/25"
+                      />
+                    </Field>
+
+                    <Field label="Client (n° tiers)">
+                      <input
+                        value={selectedRow.numero_tiers || ''}
+                        onChange={(event) => queueSave(selectedRow.id, { numero_tiers: event.target.value || null })}
+                        placeholder="Ex. DB0079"
+                        className="h-[42px] w-full rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-[#B4761A] focus:ring-2 focus:ring-[#B4761A]/25"
+                      />
+                    </Field>
+                  </div>
 
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                     <Field label="Confiée à">
