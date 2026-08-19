@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { formatMoney } from '@/app/focus_mensuel/page'
+import MobileDetailSheet, { type DetailField } from './MobileDetailSheet'
 
 // ─────────────────────────────────────────────────────────────────────────
 // Schéma confirmé via synthese_multi_clients/page.tsx :
@@ -469,6 +470,33 @@ function ClientDetailScreen({
   loading: boolean
   onBack: () => void
 }) {
+  const [openDetail, setOpenDetail] = useState<{ title: string; subtitle?: string; fields: DetailField[] } | null>(null)
+
+  function openActionDetail(a: NonNullable<ClientDetail>['actions'][number]) {
+    setOpenDetail({
+      title: a.libelle || '(sans libellé)',
+      subtitle: 'Action',
+      fields: [
+        { label: 'Statut', value: a.status },
+        { label: 'Échéance', value: a.due_date ? formatDateFr(normalizeDateIso(a.due_date)) : 'Non renseignée' },
+        { label: 'Client', value: `${client.nom} (${client.numero})` },
+      ],
+    })
+  }
+
+  function openDocDetail(d: DocLigne, type: 'Commande (CDC)' | 'Devis') {
+    setOpenDetail({
+      title: d.numero || '(sans numéro)',
+      subtitle: type,
+      fields: [
+        { label: 'N° de pièce', value: d.numero },
+        { label: 'Date', value: formatDateFr(d.date) },
+        { label: 'Montant HT', value: formatMoney(d.montant_ht) },
+        { label: 'Client', value: `${client.nom} (${client.numero})` },
+      ],
+    })
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column' }}>
       <button
@@ -573,6 +601,7 @@ function ClientDetailScreen({
                 title={a.libelle || '(sans libellé)'}
                 subtitle={a.due_date ? `Échéance ${formatDateFr(normalizeDateIso(a.due_date))}` : ''}
                 trailing={a.status}
+                onClick={() => openActionDetail(a)}
               />
             ))
           )}
@@ -585,7 +614,13 @@ function ClientDetailScreen({
             <Empty text="Aucune commande." />
           ) : (
             detail.commandes.map((d, i) => (
-              <RowItem key={`${d.numero}-${i}`} title={d.numero || '—'} subtitle={formatDateFr(d.date)} trailing={formatMoney(d.montant_ht)} />
+              <RowItem
+                key={`${d.numero}-${i}`}
+                title={d.numero || '—'}
+                subtitle={formatDateFr(d.date)}
+                trailing={formatMoney(d.montant_ht)}
+                onClick={() => openDocDetail(d, 'Commande (CDC)')}
+              />
             ))
           )}
         </Section>
@@ -597,11 +632,26 @@ function ClientDetailScreen({
             <Empty text="Aucun devis sur la période." />
           ) : (
             detail.devis.map((d, i) => (
-              <RowItem key={`${d.numero}-${i}`} title={d.numero || '—'} subtitle={formatDateFr(d.date)} trailing={formatMoney(d.montant_ht)} />
+              <RowItem
+                key={`${d.numero}-${i}`}
+                title={d.numero || '—'}
+                subtitle={formatDateFr(d.date)}
+                trailing={formatMoney(d.montant_ht)}
+                onClick={() => openDocDetail(d, 'Devis')}
+              />
             ))
           )}
         </Section>
       </div>
+
+      {openDetail && (
+        <MobileDetailSheet
+          title={openDetail.title}
+          subtitle={openDetail.subtitle}
+          fields={openDetail.fields}
+          onClose={() => setOpenDetail(null)}
+        />
+      )}
     </div>
   )
 }
@@ -635,9 +685,12 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
-function RowItem({ title, subtitle, trailing }: { title: string; subtitle?: string; trailing?: string }) {
+function RowItem({
+  title, subtitle, trailing, onClick,
+}: { title: string; subtitle?: string; trailing?: string; onClick?: () => void }) {
   return (
     <div
+      onClick={onClick}
       style={{
         display: 'flex',
         justifyContent: 'space-between',
@@ -646,6 +699,7 @@ function RowItem({ title, subtitle, trailing }: { title: string; subtitle?: stri
         border: '1px solid rgba(255,255,255,0.08)',
         background: 'rgba(255,255,255,0.03)',
         padding: '9px 12px',
+        cursor: onClick ? 'pointer' : 'default',
       }}
     >
       <div style={{ minWidth: 0 }}>

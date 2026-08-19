@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { formatMoney } from '@/app/focus_mensuel/page'
+import MobileDetailSheet, { type DetailField } from './MobileDetailSheet'
 
 // ─────────────────────────────────────────────────────────────────────────
 // Recherche de document résiliente : facture_lignes a des colonnes qui
@@ -72,6 +73,22 @@ export default function MobileRdv() {
   const [term, setTerm] = useState('')
   const [results, setResults] = useState<DocResult[] | null>(null)
   const [loading, setLoading] = useState(false)
+  const [openDetail, setOpenDetail] = useState<{ title: string; subtitle?: string; fields: DetailField[] } | null>(null)
+
+  function openResultDetail(r: DocResult) {
+    setOpenDetail({
+      title: r.numero || '(sans numéro)',
+      subtitle: r.type || 'Document',
+      fields: [
+        { label: 'Type', value: r.type },
+        { label: 'N° de pièce', value: r.numero },
+        { label: 'Client', value: r.tiers },
+        { label: 'Référence', value: r.reference },
+        { label: 'Date', value: r.date ? formatDateFr(r.date) : '' },
+        { label: 'Montant HT', value: r.montant_ht ? formatMoney(r.montant_ht) : '' },
+      ],
+    })
+  }
 
   async function runSearch() {
     const q = term.trim()
@@ -186,11 +203,13 @@ export default function MobileRdv() {
             results.map((r) => (
               <div
                 key={r.key}
+                onClick={() => openResultDetail(r)}
                 style={{
                   borderRadius: 12,
                   border: '1px solid rgba(255,255,255,0.08)',
                   background: 'rgba(255,255,255,0.03)',
                   padding: '10px 12px',
+                  cursor: 'pointer',
                 }}
               >
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
@@ -211,6 +230,15 @@ export default function MobileRdv() {
           )}
         </div>
       </div>
+
+      {openDetail && (
+        <MobileDetailSheet
+          title={openDetail.title}
+          subtitle={openDetail.subtitle}
+          fields={openDetail.fields}
+          onClose={() => setOpenDetail(null)}
+        />
+      )}
     </div>
   )
 }
