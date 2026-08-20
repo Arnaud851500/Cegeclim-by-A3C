@@ -421,6 +421,7 @@ export default function OutlookAgenda({
       const end = toIsoDate(addDays(anchorMonday, 12));
 
       const { data, error: err } = await supabase
+        .schema("blg")
         .from("crm_base_activity")
         .select("*")
         .eq("internal_tag", "normal")

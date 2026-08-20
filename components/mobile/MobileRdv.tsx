@@ -143,6 +143,7 @@ export default function MobileRdv() {
         const end = later.toISOString().slice(0, 10)
 
         const { data, error } = await supabase
+          .schema('blg')
           .from('crm_base_activity')
           .select('*')
           .eq('internal_tag', 'normal')
