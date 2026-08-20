@@ -8,6 +8,7 @@ import { supabase } from '@/lib/supabaseClient'
 import { logUserEvent } from '@/lib/audit'
 import { AccessProvider, useAccess, type AccessRights } from '@/components/AccessContext'
 import { Analytics } from '@vercel/analytics/next'
+import { SpeedInsights } from '@vercel/speed-insights/next'
 import AutoLogout from '@/components/autologout'
 import { usePageFilterAccess } from '@/lib/pageAccessFilters'
 import { useViewport } from '@/lib/useViewport'
@@ -1858,6 +1859,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <body>
           {children}
           <Analytics />
+          <SpeedInsights />
         </body>
       </html>
     )
@@ -1871,6 +1873,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <AppShell>{children}</AppShell>
           </SocieteFilterProvider>
         </AccessProvider>
+        <SpeedInsights />
       </body>
     </html>
   )
