@@ -6,21 +6,27 @@ import { formatMoney } from '@/app/focus_mensuel/page'
 import MobileDetailSheet, { type DetailField } from './MobileDetailSheet'
 
 // ─────────────────────────────────────────────────────────────────────────
-// Recherche de document résiliente : facture_lignes a des colonnes qui
-// varient selon le pipeline d'import (numero_document / numero_piece,
-// numero_tiers / numero_tiers_entete...). Chaque champ candidat est
-// interrogé séparément et isolé par son propre try/catch : si une colonne
-// n'existe pas dans la table, seule cette requête échoue silencieusement,
-// les autres candidats continuent de fonctionner.
+// Confirmé (Supabase Table Editor, table activite_lignes) : les documents
+// sont répartis sur TROIS tables distinctes, pas une seule table générique :
+//   - devis_lignes    : Devis
+//   - facture_lignes  : Factures (confirmé fonctionnel ailleurs dans l'app)
+//   - activite_lignes : Bon de commande / Bon de livraison / Bon de retour
+//     (CDC/BL/BR). Colonnes confirmées sur cette table : numero_piece,
+//     numero_tiers_entete, intitule_tiers_entete, type_document, ligne_hash.
+// D'où la recherche multi-tables ci-dessous. Chaque table × champ est
+// interrogée séparément et isolée par son propre try/catch : une colonne ou
+// une table qui n'existe pas dans une combinaison n'empêche pas les autres
+// de fonctionner.
 // ─────────────────────────────────────────────────────────────────────────
 
+const SEARCH_TABLES = ['activite_lignes', 'facture_lignes', 'devis_lignes']
+
 const SEARCH_FIELDS = [
-  { key: 'numero_document', label: 'N° de pièce' },
-  { key: 'numero_piece', label: 'N° de pièce' },
-  { key: 'reference_article', label: 'Référence' },
-  { key: 'reference', label: 'Référence' },
-  // numero_tiers confirmé INEXISTANT sur facture_lignes (erreur Postgres) — retiré.
-  { key: 'numero_tiers_entete', label: 'N° tiers' },
+  { key: 'numero_piece' },
+  { key: 'numero_document' },
+  { key: 'reference_article' },
+  { key: 'reference' },
+  { key: 'numero_tiers_entete' },
 ]
 
 function safeText(value: any) {
@@ -55,10 +61,10 @@ type DocResult = {
   montant_ht: number
 }
 
-async function searchByField(field: string, term: string) {
+async function searchByField(table: string, field: string, term: string) {
   try {
     const { data, error } = await supabase
-      .from('facture_lignes')
+      .from(table)
       .select('*')
       .ilike(field, `%${term}%`)
       .limit(30)
@@ -98,20 +104,30 @@ export default function MobileRdv() {
     }
     setLoading(true)
     try {
-      const rawResultsPerField = await Promise.all(SEARCH_FIELDS.map((f) => searchByField(f.key, q)))
+      const calls: Promise<Record<string, any>[]>[] = []
+      SEARCH_TABLES.forEach((table) => {
+        SEARCH_FIELDS.forEach((f) => calls.push(searchByField(table, f.key, q)))
+      })
+      const rawResultsPerCall = await Promise.all(calls)
+
       const merged = new Map<string, DocResult>()
-      rawResultsPerField.flat().forEach((row) => {
-        const numero = safeText(pick(row, ['numero_document', 'numero_piece', 'num_piece']))
+      rawResultsPerCall.flat().forEach((row) => {
+        const numero = safeText(pick(row, ['numero_piece', 'numero_document', 'num_piece']))
         const type = safeText(row.type_document)
-        const key = `${type}-${numero}-${safeText(pick(row, ['numero_tiers_entete']))}`
+        const tiers = safeText(pick(row, ['numero_tiers_entete']))
+        const key = `${type}-${numero}-${tiers}`
         if (merged.has(key)) return
         merged.set(key, {
           key,
           type,
           numero,
-          tiers: safeText(pick(row, ['numero_tiers_entete'])),
+          tiers,
           reference: safeText(pick(row, ['reference_article', 'reference'])),
-          date: normalizeDateIso(pick(row, ['date_document', 'date_facture', 'date_piece'])),
+          date: normalizeDateIso(pick(row, [
+            'date_document', 'date_facture', 'date_piece',
+            'date_bl', 'date_piece_bl', 'date_livraison_bl', 'date_livraison',
+            'date_devis',
+          ])),
           montant_ht: Number(row.montant_ht || 0),
         })
       })

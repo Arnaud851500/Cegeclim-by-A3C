@@ -81,8 +81,8 @@ function pick(row: Record<string, any>, keys: string[]) {
   }
   return null
 }
-const NUMERO_KEYS = ['numero_document', 'numero_piece', 'num_piece', 'facture', 'piece']
-const DATE_KEYS = ['date_document', 'date_facture', 'date_piece', 'date']
+const NUMERO_KEYS = ['numero_piece', 'numero_document', 'num_piece', 'facture', 'piece']
+const DATE_KEYS = ['date_document', 'date_facture', 'date_piece', 'date_bl', 'date_piece_bl', 'date_livraison_bl', 'date_livraison', 'date_devis', 'date']
 
 async function fetchAllCache(select: string, apply?: (q: any) => any) {
   const output: Record<string, any>[] = []
@@ -211,16 +211,19 @@ export default function MobileClients() {
       const twoMonthsAgo = monthsAgoIso(2)
 
       const [cdcRes, devisRes, visitesRes, actionsRes, monthRes] = await Promise.all([
+        // Confirmé : les commandes (CDC) sont dans activite_lignes, avec le
+        // libellé complet "Bon de commande" — pas dans facture_lignes.
         supabase
-          .from('facture_lignes')
+          .from('activite_lignes')
           .select('*')
-          .eq('type_document', 'CDC')
+          .eq('type_document', 'Bon de commande')
           .eq('numero_tiers_entete', client.numero)
           .limit(200),
+        // Devis : table dédiée devis_lignes (cf. synthese_multi_clients/page.tsx,
+        // qui va y chercher les dates), pas facture_lignes.
         supabase
-          .from('facture_lignes')
+          .from('devis_lignes')
           .select('*')
-          .eq('type_document', 'Devis')
           .eq('numero_tiers_entete', client.numero)
           .limit(300),
         supabase
