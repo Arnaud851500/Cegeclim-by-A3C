@@ -36,6 +36,11 @@ const SEARCH_FIELDS = [
 // blg_partner_id, cf. migration add_blg_partner_id_to_user_page_access.sql).
 // Si ce champ n'est pas renseigné pour l'utilisateur, la liste reste vide
 // avec un message explicite plutôt que planter.
+//
+// NOTE SCHEMA : le schéma Postgres réel est `blg`, mais PostgREST
+// n'expose que `public` et `sage`. On passe donc par une vue miroir
+// `public.crm_base_activity` (CREATE VIEW ... AS SELECT * FROM blg.crm_base_activity)
+// et on interroge cette vue directement sans .schema('blg').
 const RDV_TYPES = ['meeting', 'phoneCall', 'reminder']
 const RDV_TYPE_COLORS: Record<string, string> = {
   meeting: '#2E5BB8',
@@ -143,7 +148,6 @@ export default function MobileRdv() {
         const end = later.toISOString().slice(0, 10)
 
         const { data, error } = await supabase
-          .schema('blg')
           .from('crm_base_activity')
           .select('*')
           .eq('internal_tag', 'normal')
