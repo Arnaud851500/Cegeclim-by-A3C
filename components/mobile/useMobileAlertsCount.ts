@@ -77,5 +77,44 @@ export function useMobileAlertsCount() {
   }, [email, rights.show_alert_todo, rights.show_alert_cerfa_ko])
 
   const total = detail.reduce((sum, d) => sum + d.count, 0)
-  return { total, detail, loading }
+
+  /** Liste complète des tâches TODO ouvertes — pour le tiroir de détail. */
+  async function fetchTodoList() {
+    if (!email) return []
+    const { data, error } = await supabase
+      .from('todo_actions')
+      .select('id,description_action,status,due_date,numero_tiers')
+      .or(`assigned_to.eq.${email}`)
+      .not('status', 'in', '("Terminé","Annulé")')
+      .order('due_date', { ascending: true, nullsFirst: false })
+      .limit(200)
+    if (error) {
+      console.error('fetchTodoList', error)
+      return []
+    }
+    return (data || []) as {
+      id: string
+      description_action: string | null
+      status: string
+      due_date: string | null
+      numero_tiers: string | null
+    }[]
+  }
+
+  /** Liste complète des CERFA KO — même RPC que le panneau desktop (AppShell). */
+  async function fetchCerfaList() {
+    if (!email) return []
+    const { data, error } = await supabase.rpc('get_cerfa_ko_rows_for_user', {
+      p_email: email,
+      p_allowed_agences: null,
+      p_limit: 200,
+    })
+    if (error) {
+      console.error('fetchCerfaList', error)
+      return []
+    }
+    return (data || []) as Record<string, any>[]
+  }
+
+  return { total, detail, loading, fetchTodoList, fetchCerfaList }
 }
