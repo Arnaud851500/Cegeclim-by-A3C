@@ -383,21 +383,37 @@ function BreakdownModal({
       setLoading(true)
     }
 
+    // Lancer les N appels (un par famille macro ou par agence) tous en
+    // parallèle sature la base — confirmé par les logs Postgres
+    // ("canceling statement due to statement timeout", code 57014) sous
+    // charge simultanée. On les regroupe par lots de 2, chaque lot attendu
+    // avant de lancer le suivant : plus lent à l'ouverture, mais fiable.
+    async function loadInBatches(dims: string[], effectiveMode: BreakdownMode) {
+      const batchSize = 2
+      const results: Array<{ data: any; error: any }> = []
+      for (let i = 0; i < dims.length; i += batchSize) {
+        const batch = dims.slice(i, i + batchSize)
+        const batchResults = await Promise.all(
+          batch.map((dim) =>
+            supabase.rpc('get_vision_tci_kpi', {
+              p_famille: famille,
+              p_famille_macro: effectiveMode === 'macro' ? dim : null,
+              p_agence: effectiveMode === 'agence' ? dim : agenceForcee,
+              p_collaborateur: collaborateurForcee,
+              p_utiliser_j_moins_1: useYesterday,
+            }),
+          ),
+        )
+        results.push(...batchResults)
+      }
+      return results
+    }
+
     async function load() {
       const effectiveMode = mode === 'agence' && !canBreakdownByAgence ? 'macro' : mode
       const dims = effectiveMode === 'macro' ? famillesMacro : agences
 
-      const results = await Promise.all(
-        dims.map((dim) =>
-          supabase.rpc('get_vision_tci_kpi', {
-            p_famille: famille,
-            p_famille_macro: effectiveMode === 'macro' ? dim : null,
-            p_agence: effectiveMode === 'agence' ? dim : agenceForcee,
-            p_collaborateur: collaborateurForcee,
-            p_utiliser_j_moins_1: useYesterday,
-          }),
-        ),
-      )
+      const results = await loadInBatches(dims, effectiveMode)
 
       if (cancelled) return
 
