@@ -25,6 +25,11 @@
  *    via select('*') + repli sur plusieurs noms candidats, jamais de
  *    filtre WHERE dessus — donc aucun risque de plantage si le nom diffère.
  *
+ * NOTE SCHEMA : le schéma Postgres réel est `blg`, mais PostgREST n'expose
+ * que `public` et `sage`. On passe donc par une vue miroir
+ * `public.crm_base_activity` (CREATE VIEW ... AS SELECT * FROM blg.crm_base_activity)
+ * et on interroge cette vue directement, sans .schema('blg').
+ *
  * Contient aussi un petit panneau d'administration (icône ⚙) pour gérer
  * outlook_calendar_autorisations : qui peut voir quel agenda, visible
  * uniquement si l'utilisateur a le droit can_autorisation (la policy RLS
@@ -421,7 +426,6 @@ export default function OutlookAgenda({
       const end = toIsoDate(addDays(anchorMonday, 12));
 
       const { data, error: err } = await supabase
-        .schema("blg")
         .from("crm_base_activity")
         .select("*")
         .eq("internal_tag", "normal")
