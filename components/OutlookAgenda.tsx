@@ -12,6 +12,19 @@
  *  - clic sur un évènement → callback onActivityClick (à brancher sur le
  *    mur d'activité BLG — je n'ai pas cette route, donc callback ouvert)
  *
+ * NOUVEAU — Activités BLG fusionnées dans la grille :
+ *  - Source : crm_base_activity, filtrée sur internal_tag='normal' et
+ *    type in ('meeting','phoneCall','reminder'), et from_fk = l'identifiant
+ *    partner BLG de l'utilisateur courant (user_page_access.blg_partner_id,
+ *    cf. supabase/migrations/add_blg_partner_id_to_user_page_access.sql).
+ *  - Si blg_partner_id n'est pas renseigné pour l'utilisateur, cette source
+ *    est simplement ignorée (aucune erreur affichée) — seul l'agenda
+ *    Outlook reste visible, comme avant.
+ *  - Le nom exact de la colonne "objet" de crm_base_activity n'est pas
+ *    confirmé (tronqué "su…" dans l'aperçu Supabase) : lecture résiliente
+ *    via select('*') + repli sur plusieurs noms candidats, jamais de
+ *    filtre WHERE dessus — donc aucun risque de plantage si le nom diffère.
+ *
  * Contient aussi un petit panneau d'administration (icône ⚙) pour gérer
  * outlook_calendar_autorisations : qui peut voir quel agenda, visible
  * uniquement si l'utilisateur a le droit can_autorisation (la policy RLS
@@ -42,12 +55,26 @@ type OutlookEvent = {
   categories: string[];
   colorHex: string | null;
   webLink: string | null;
+  /** Présent uniquement pour les évènements BLG fusionnés — absent pour les évènements Outlook. */
+  source?: "outlook" | "blg";
 };
 
 const HOUR_START = 8;
 const HOUR_END = 18;
 const JOURS = ["Lun", "Mar", "Mer", "Jeu", "Ven"];
 const DEFAULT_COLOR = "#4B92AC";
+
+const BLG_ACTIVITY_TYPES = ["meeting", "phoneCall", "reminder"] as const;
+const BLG_TYPE_COLORS: Record<string, string> = {
+  meeting: "#2E5BB8",
+  phoneCall: "#D68910",
+  reminder: "#8E44AD",
+};
+const BLG_TYPE_LABELS: Record<string, string> = {
+  meeting: "RDV",
+  phoneCall: "Appel",
+  reminder: "Rappel",
+};
 
 function toIsoDate(d: Date) {
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -69,6 +96,38 @@ function addDays(d: Date, n: number) {
   return copy;
 }
 
+/** Lit une valeur parmi plusieurs noms de colonnes candidats — jamais utilisé dans un filtre WHERE, uniquement en lecture sur des lignes déjà récupérées. */
+function pickField(row: Record<string, any> | null | undefined, keys: string[]) {
+  if (!row) return null;
+  for (const key of keys) {
+    const v = row[key];
+    if (v !== null && v !== undefined && String(v).trim() !== "") return v;
+  }
+  return null;
+}
+
+function mapBlgActivityToEvent(row: Record<string, any>): OutlookEvent {
+  const type = String(row.type || "");
+  const subject = String(
+    pickField(row, ["subject", "title", "name", "label"]) || BLG_TYPE_LABELS[type] || "Activité BLG"
+  );
+  const start = String(row.start_date || "").slice(0, 19);
+  const end = String(row.end_date || row.start_date || "").slice(0, 19);
+
+  return {
+    id: `blg-${row.id}`,
+    subject,
+    start,
+    end,
+    isAllDay: Boolean(row.all_day),
+    location: null,
+    categories: type ? [type] : [],
+    colorHex: BLG_TYPE_COLORS[type] || "#7A5EA8",
+    webLink: null,
+    source: "blg",
+  };
+}
+
 export default function OutlookAgenda({
   onActivityClick,
 }: {
@@ -78,7 +137,8 @@ export default function OutlookAgenda({
   const [autorisations, setAutorisations] = useState<Autorisation[]>([]);
   const [selectedEmail, setSelectedEmail] = useState<string>("");
   const [anchorMonday, setAnchorMonday] = useState<Date>(() => mondayOf(new Date()));
-  const [events, setEvents] = useState<OutlookEvent[]>([]);
+  const [outlookEvents, setOutlookEvents] = useState<OutlookEvent[]>([]);
+  const [blgEvents, setBlgEvents] = useState<OutlookEvent[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -296,7 +356,7 @@ export default function OutlookAgenda({
     if (useMockData) {
       setLoading(false);
       setError(null);
-      setEvents(buildMockEvents(anchorMonday));
+      setOutlookEvents(buildMockEvents(anchorMonday));
       return;
     }
     if (!selectedEmail) return;
@@ -319,11 +379,11 @@ export default function OutlookAgenda({
           // eslint-disable-next-line no-console
           console.log("[OutlookAgenda] diagnostic ICS :", payload.debug);
         }
-        if (!cancelled) setEvents(payload.events || []);
+        if (!cancelled) setOutlookEvents(payload.events || []);
       } catch (e) {
         if (!cancelled) {
           setError(e instanceof Error ? e.message : String(e));
-          setEvents([]);
+          setOutlookEvents([]);
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -334,6 +394,58 @@ export default function OutlookAgenda({
       cancelled = true;
     };
   }, [selectedEmail, anchorMonday, useMockData]);
+
+  // ── Activités BLG (crm_base_activity), fusionnées dans la même grille ───
+  // Source indépendante de l'agenda Outlook ci-dessus : ignorée en silence
+  // si l'utilisateur n'a pas de blg_partner_id renseigné (pas d'erreur
+  // affichée, juste rien à fusionner).
+  useEffect(() => {
+    let cancelled = false;
+    async function loadBlgActivities() {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const email = sessionData.session?.user?.email?.toLowerCase();
+      if (!email) return;
+
+      const { data: access, error: accessErr } = await supabase
+        .from("user_page_access")
+        .select("blg_partner_id")
+        .eq("email", email)
+        .maybeSingle();
+
+      if (accessErr || !access?.blg_partner_id) {
+        if (!cancelled) setBlgEvents([]);
+        return;
+      }
+
+      const start = toIsoDate(anchorMonday);
+      const end = toIsoDate(addDays(anchorMonday, 12));
+
+      const { data, error: err } = await supabase
+        .from("crm_base_activity")
+        .select("*")
+        .eq("internal_tag", "normal")
+        .in("type", BLG_ACTIVITY_TYPES as unknown as string[])
+        .eq("from_fk", access.blg_partner_id)
+        .gte("start_date", start)
+        .lt("start_date", end);
+
+      if (cancelled) return;
+
+      if (err) {
+        console.error("[OutlookAgenda] crm_base_activity", err);
+        setBlgEvents([]);
+        return;
+      }
+
+      setBlgEvents(((data || []) as Record<string, any>[]).map(mapBlgActivityToEvent));
+    }
+    void loadBlgActivities();
+    return () => {
+      cancelled = true;
+    };
+  }, [anchorMonday]);
+
+  const events = useMemo(() => [...outlookEvents, ...blgEvents], [outlookEvents, blgEvents]);
 
   const eventsByDay = useMemo(() => {
     const map = new Map<string, OutlookEvent[]>();
@@ -428,6 +540,11 @@ export default function OutlookAgenda({
         {useMockData && (
           <span className="rounded-full bg-amber-400/90 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#141A26]">
             Données fictives
+          </span>
+        )}
+        {blgEvents.length > 0 && (
+          <span className="rounded-full bg-[#7A5EA8]/20 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#7A5EA8]">
+            + {blgEvents.length} activité{blgEvents.length > 1 ? "s" : ""} BLG
           </span>
         )}
 
