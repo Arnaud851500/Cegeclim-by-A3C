@@ -23,7 +23,7 @@ export type MobileScreen = 'home' | 'activite' | 'clients' | 'rdv' | 'alertes'
 export default function MobileShell() {
   const [screen, setScreen] = useState<MobileScreen>('home')
   const { rights, email } = useAccess()
-  const { total, detail, loading } = useMobileAlertsCount()
+  const { total, detail, loading, fetchTodoList, fetchCerfaList } = useMobileAlertsCount()
 
   function goHome() {
     setScreen('home')
@@ -47,7 +47,7 @@ export default function MobileShell() {
       {screen === 'activite' && <MobileActivite />}
       {screen === 'clients' && <MobileClients />}
       {screen === 'rdv' && <MobileRdv />}
-      {screen === 'alertes' && <MobileAlertes detail={detail} loading={loading} />}
+      {screen === 'alertes' && <MobileAlertes detail={detail} loading={loading} fetchTodoList={fetchTodoList} fetchCerfaList={fetchCerfaList} />}
     </div>
   )
 }

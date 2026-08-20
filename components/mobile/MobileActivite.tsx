@@ -159,6 +159,18 @@ export default function MobileActivite() {
 
   return (
     <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <style>{`
+        @keyframes cgcBlinkRed {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.25; }
+        }
+        .cgcBlinkingRefresh {
+          font-size: 10.5px;
+          font-weight: 700;
+          color: #FF3B30;
+          animation: cgcBlinkRed 0.8s ease-in-out infinite;
+        }
+      `}</style>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
         <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'rgba(255,255,255,0.65)' }}>
           <input
@@ -169,7 +181,7 @@ export default function MobileActivite() {
           />
           Afficher hier (J-1) au lieu d'aujourd'hui
         </label>
-        {refreshing && <span style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.3)' }}>Actualisation…</span>}
+        {refreshing && <span className="cgcBlinkingRefresh">Actualisation…</span>}
       </div>
 
       {error && (
@@ -344,6 +356,7 @@ function BreakdownModal({
   const [mode, setMode] = useState<BreakdownMode>('macro')
   const [rows, setRows] = useState<BreakdownRow[] | null>(null)
   const [loading, setLoading] = useState(true)
+  const [refreshingBreakdown, setRefreshingBreakdown] = useState(false)
   const isMarge = famille === 'Marge'
   const color = FOCUS_MENSUEL_COLORS[famille]
   const fmt = isMarge ? formatPct : formatMontant
@@ -354,8 +367,23 @@ function BreakdownModal({
 
   useEffect(() => {
     let cancelled = false
-    async function load() {
+    const effectiveModeForCache = mode === 'agence' && !canBreakdownByAgence ? 'macro' : mode
+    const cacheKey = `${CACHE_PREFIX}breakdown:${famille}:${effectiveModeForCache}:${useYesterday ? 'j1' : 'j'}:${agenceForcee || ''}:${collaborateurForcee || ''}`
+
+    // Même principe que le cache des widgets principaux : affichage immédiat
+    // de la dernière ventilation connue pendant qu'un rafraîchissement tourne
+    // en tâche de fond. C'est ce qui manquait ici — chaque ouverture relançait
+    // tous les appels RPC à vide, d'où la lenteur perçue.
+    const cached = loadCache(cacheKey) as unknown as BreakdownRow[] | null
+    if (cached) {
+      setRows(cached)
+      setLoading(false)
+      setRefreshingBreakdown(true)
+    } else {
       setLoading(true)
+    }
+
+    async function load() {
       const effectiveMode = mode === 'agence' && !canBreakdownByAgence ? 'macro' : mode
       const dims = effectiveMode === 'macro' ? famillesMacro : agences
 
@@ -384,7 +412,9 @@ function BreakdownModal({
       })
       next.sort((a, b) => (b.values.annee_valeur || 0) - (a.values.annee_valeur || 0))
       setRows(next)
+      saveCache(cacheKey, next as unknown as Record<Famille, FluxValues | null>)
       setLoading(false)
+      setRefreshingBreakdown(false)
     }
     load()
     return () => { cancelled = true }
@@ -442,6 +472,12 @@ function BreakdownModal({
             </button>
           </div>
         </div>
+
+        {refreshingBreakdown && (
+          <div style={{ padding: '0 18px 8px', flexShrink: 0 }}>
+            <span className="cgcBlinkingRefresh">Actualisation…</span>
+          </div>
+        )}
 
         <div style={{ overflowY: 'auto', padding: '0 18px 24px', display: 'flex', flexDirection: 'column', gap: 8 }}>
           {loading ? (
