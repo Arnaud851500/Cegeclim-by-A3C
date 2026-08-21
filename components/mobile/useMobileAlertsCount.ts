@@ -98,6 +98,7 @@ export function useMobileAlertsCount() {
       status: string
       due_date: string | null
       numero_tiers: string | null
+      assigned_to: string | null
     }[]
   }
 
