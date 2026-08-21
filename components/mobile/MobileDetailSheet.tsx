@@ -6,6 +6,13 @@ export type DetailField = { label: string; value: string }
  * Fenêtre de détail générique en "bottom sheet", ouverte au tap sur une
  * ligne de liste (document, action...) — réutilisée par MobileClients et
  * MobileRdv plutôt que dupliquée.
+ *
+ * Layout empilé (libellé au-dessus, valeur en dessous) plutôt que côte à
+ * côte : sur les lignes de documents commerciaux, le libellé (référence +
+ * désignation article) peut être long, et un layout en colonnes forçait la
+ * valeur ("30 × 296 €") dans une colonne trop étroite qui cassait mot par
+ * mot / chiffre par chiffre. Empilé, chaque ligne s'étale sur toute la
+ * largeur et reste lisible quelle que soit sa longueur, sans scroll horizontal.
  */
 export default function MobileDetailSheet({
   title, subtitle, fields, onClose,
@@ -22,7 +29,7 @@ export default function MobileDetailSheet({
     >
       <div
         style={{
-          width: '100%', maxWidth: 480, maxHeight: '80vh', overflowY: 'auto',
+          width: '100%', maxWidth: 480, maxHeight: '85vh', overflowY: 'auto',
           background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20,
           border: '1px solid rgba(255,255,255,0.08)', borderBottom: 'none',
           padding: '12px 18px 26px',
@@ -31,17 +38,42 @@ export default function MobileDetailSheet({
       >
         <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 14px' }} />
 
-        <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>{title}</div>
-        {subtitle && <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>{subtitle}</div>}
+        <div style={{ fontSize: 16, fontWeight: 700, color: '#fff', lineHeight: 1.3 }}>{title}</div>
+        {subtitle && <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginTop: 3 }}>{subtitle}</div>}
 
         <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {fields.map((f) => (
+          {fields.map((f, i) => (
             <div
-              key={f.label}
-              style={{ display: 'flex', justifyContent: 'space-between', gap: 12, borderBottom: '1px solid rgba(255,255,255,0.06)', paddingBottom: 8 }}
+              key={`${f.label}-${i}`}
+              style={{
+                borderRadius: 10,
+                border: '1px solid rgba(255,255,255,0.07)',
+                background: 'rgba(255,255,255,0.03)',
+                padding: '8px 10px',
+              }}
             >
-              <span style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.5)', flexShrink: 0 }}>{f.label}</span>
-              <span style={{ fontSize: 13.5, color: '#fff', fontWeight: 600, textAlign: 'right' }}>{f.value || '—'}</span>
+              <div
+                style={{
+                  fontSize: 12,
+                  lineHeight: 1.4,
+                  color: 'rgba(255,255,255,0.55)',
+                  wordBreak: 'break-word',
+                }}
+              >
+                {f.label}
+              </div>
+              <div
+                style={{
+                  fontSize: 14,
+                  lineHeight: 1.4,
+                  color: '#fff',
+                  fontWeight: 600,
+                  marginTop: 3,
+                  wordBreak: 'break-word',
+                }}
+              >
+                {f.value || '—'}
+              </div>
             </div>
           ))}
         </div>
