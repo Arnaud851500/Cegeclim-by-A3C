@@ -13,7 +13,7 @@ type ButtonConfig = {
 
 const BUTTONS: ButtonConfig[] = [
   { key: 'activite', label: 'Mon activité', sub: 'Devis · CDC · BL · Factures · Marge', accessKey: 'can_dashboard' },
-  { key: 'clients', label: 'Mes clients', sub: 'Fiches et suivi client', accessKey: 'can_clients' },
+  { key: 'clients', label: 'Mes clients', sub: 'Fiches et suivi client', accessKey: 'can_dashboard' },
   { key: 'rdv', label: 'Mes rdv', sub: 'Agenda, comptes rendus, recherche documents' },
   { key: 'alertes', label: 'Mes alertes', sub: 'À traiter en priorité' },
 ]
