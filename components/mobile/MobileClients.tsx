@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { formatMoney } from '@/app/focus_mensuel/page'
 import MobileDetailSheet, { type DetailField } from './MobileDetailSheet'
+import MobileTaskDetailSheet, { type TaskRow } from './MobileTaskDetailSheet'
 
 // ─────────────────────────────────────────────────────────────────────────
 // Schéma confirmé via synthese_multi_clients/page.tsx :
@@ -26,6 +27,10 @@ import MobileDetailSheet, { type DetailField } from './MobileDetailSheet'
 //   (recomputeClientN1ComparisonFromMonths). Reproduit ici pour Devis
 //   uniquement — CA et Marge N-1 du cache client correspondent déjà
 //   exactement au desktop, testé sur DUPRE HABITAT ENERGIES.
+//
+// - Actions (todo_actions) : désormais éditables au tap (assigned_to,
+//   status, due_date, description_action) via MobileTaskDetailSheet,
+//   au lieu du MobileDetailSheet générique en lecture seule.
 // ─────────────────────────────────────────────────────────────────────────
 
 const N = new Date().getFullYear()
@@ -116,10 +121,11 @@ type ClientRow = {
 }
 
 type DocLigne = { numero: string; date: string; montant_ht: number }
+type ActionRow = { id: string; libelle: string; status: string; due_date: string | null; assigned_to: string | null }
 type ClientDetail = {
   commandes: DocLigne[]
   devis: DocLigne[]
-  actions: { id: string; libelle: string; status: string; due_date: string | null }[]
+  actions: ActionRow[]
   derniereVisite: string
   prochaineVisite: string
   devisYtdN1: number
@@ -191,6 +197,8 @@ export default function MobileClients() {
     return { total: allClients.length, nouveaux, parProfil }
   }, [allClients])
 
+  // Recherche : pas de limite basse ici (slice(0, 40) large), la liste
+  // complète des clients est chargée en mémoire dès le montage.
   const results = useMemo(() => {
     if (!allClients) return []
     const term = search.trim().toLowerCase()
@@ -235,7 +243,7 @@ export default function MobileClients() {
           .not('valeur_date', 'is', null),
         supabase
           .from('todo_actions')
-          .select('id,description_action,status,due_date')
+          .select('id,description_action,status,due_date,assigned_to')
           .eq('numero_tiers', client.numero)
           .order('due_date', { ascending: true })
           .limit(30),
@@ -300,6 +308,7 @@ export default function MobileClients() {
               libelle: String(r.description_action || ''),
               status: String(r.status || ''),
               due_date: r.due_date || null,
+              assigned_to: r.assigned_to || null,
             })),
         derniereVisite: past.length ? formatDateFr(past[past.length - 1]) : '',
         prochaineVisite: future.length ? formatDateFr(future[0]) : '',
@@ -326,6 +335,25 @@ export default function MobileClients() {
         onBack={() => {
           setSelected(null)
           setDetail(null)
+        }}
+        onActionSaved={(updated) => {
+          setDetail((cur) => {
+            if (!cur) return cur
+            return {
+              ...cur,
+              actions: cur.actions.map((a) =>
+                a.id === updated.id
+                  ? {
+                      id: updated.id,
+                      libelle: updated.description_action || '',
+                      status: updated.status,
+                      due_date: updated.due_date,
+                      assigned_to: updated.assigned_to,
+                    }
+                  : a,
+              ),
+            }
+          })
         }}
       />
     )
@@ -466,24 +494,25 @@ function EvolLine({ value, n1, isPoints }: { value: number | null; n1: number | 
 }
 
 function ClientDetailScreen({
-  client, detail, loading, onBack,
+  client, detail, loading, onBack, onActionSaved,
 }: {
   client: ClientRow
   detail: ClientDetail | null
   loading: boolean
   onBack: () => void
+  onActionSaved: (updated: TaskRow) => void
 }) {
   const [openDetail, setOpenDetail] = useState<{ title: string; subtitle?: string; fields: DetailField[] } | null>(null)
+  const [openTask, setOpenTask] = useState<TaskRow | null>(null)
 
-  function openActionDetail(a: NonNullable<ClientDetail>['actions'][number]) {
-    setOpenDetail({
-      title: a.libelle || '(sans libellé)',
-      subtitle: 'Action',
-      fields: [
-        { label: 'Statut', value: a.status },
-        { label: 'Échéance', value: a.due_date ? formatDateFr(normalizeDateIso(a.due_date)) : 'Non renseignée' },
-        { label: 'Client', value: `${client.nom} (${client.numero})` },
-      ],
+  function openActionDetail(a: ActionRow) {
+    setOpenTask({
+      id: a.id,
+      description_action: a.libelle,
+      status: a.status,
+      due_date: a.due_date,
+      numero_tiers: client.numero,
+      assigned_to: a.assigned_to,
     })
   }
 
@@ -602,7 +631,12 @@ function ClientDetailScreen({
               <RowItem
                 key={a.id}
                 title={a.libelle || '(sans libellé)'}
-                subtitle={a.due_date ? `Échéance ${formatDateFr(normalizeDateIso(a.due_date))}` : ''}
+                subtitle={[
+                  a.due_date ? `Échéance ${formatDateFr(normalizeDateIso(a.due_date))}` : '',
+                  a.assigned_to ? `Assigné : ${a.assigned_to}` : '',
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
                 trailing={a.status}
                 onClick={() => openActionDetail(a)}
               />
@@ -653,6 +687,14 @@ function ClientDetailScreen({
           subtitle={openDetail.subtitle}
           fields={openDetail.fields}
           onClose={() => setOpenDetail(null)}
+        />
+      )}
+
+      {openTask && (
+        <MobileTaskDetailSheet
+          task={openTask}
+          onClose={() => setOpenTask(null)}
+          onSaved={onActionSaved}
         />
       )}
     </div>

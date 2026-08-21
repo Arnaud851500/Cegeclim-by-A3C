@@ -83,7 +83,7 @@ export function useMobileAlertsCount() {
     if (!email) return []
     const { data, error } = await supabase
       .from('todo_actions')
-      .select('id,description_action,status,due_date,numero_tiers')
+      .select('id,description_action,status,due_date,numero_tiers,assigned_to')
       .or(`assigned_to.eq.${email}`)
       .not('status', 'in', '("Terminé","Annulé")')
       .order('due_date', { ascending: true, nullsFirst: false })

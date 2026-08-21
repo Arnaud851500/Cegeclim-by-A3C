@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import MobileListSheet, { type ListSheetItem } from './MobileListSheet'
 import MobileDetailSheet, { type DetailField } from './MobileDetailSheet'
+import MobileTaskDetailSheet, { type TaskRow } from './MobileTaskDetailSheet'
 
 export interface AlertDetailItem {
   label: string
@@ -11,7 +12,19 @@ export interface AlertDetailItem {
   onOpen?: () => void
 }
 
-type TodoRow = { id: string; description_action: string | null; status: string; due_date: string | null; numero_tiers: string | null }
+// NOTE : assigned_to ajouté -- si fetchTodoList() (défini côté parent, ex.
+// MobileShell.tsx) ne sélectionne pas encore cette colonne dans sa requête
+// Supabase, elle arrivera à `undefined`/`null` ici sans planter, mais il
+// faut ajouter `assigned_to` au .select() côté parent pour qu'elle
+// s'affiche réellement.
+type TodoRow = {
+  id: string
+  description_action: string | null
+  status: string
+  due_date: string | null
+  numero_tiers: string | null
+  assigned_to: string | null
+}
 
 function safeText(value: any) {
   return String(value ?? '').trim()
@@ -54,30 +67,40 @@ export default function MobileAlertes({
   const [listOpen, setListOpen] = useState<{ title: string; items: ListSheetItem[] } | null>(null)
   const [listLoading, setListLoading] = useState(false)
   const [openDetail, setOpenDetail] = useState<{ title: string; subtitle?: string; fields: DetailField[] } | null>(null)
+  const [openTask, setOpenTask] = useState<TaskRow | null>(null)
+  const [todoRows, setTodoRows] = useState<TodoRow[]>([])
+
+  function buildTodoItems(rows: TodoRow[]): ListSheetItem[] {
+    return rows.map((r) => ({
+      id: r.id,
+      primary: r.description_action || '(sans libellé)',
+      secondary: [
+        r.due_date ? `Échéance ${formatDateFr(r.due_date)}` : 'Sans échéance',
+        r.assigned_to ? `Assigné : ${r.assigned_to}` : null,
+      ]
+        .filter(Boolean)
+        .join(' · '),
+      trailing: r.status,
+      onClick: () => setOpenTask(r),
+    }))
+  }
 
   async function openTodoDrawer() {
     setListOpen({ title: 'À faire', items: [] })
     setListLoading(true)
     const rows = await fetchTodoList()
     setListLoading(false)
-    setListOpen({
-      title: 'À faire',
-      items: rows.map((r) => ({
-        id: r.id,
-        primary: r.description_action || '(sans libellé)',
-        secondary: r.due_date ? `Échéance ${formatDateFr(r.due_date)}` : 'Sans échéance',
-        trailing: r.status,
-        onClick: () =>
-          setOpenDetail({
-            title: r.description_action || '(sans libellé)',
-            subtitle: 'Action',
-            fields: [
-              { label: 'Statut', value: r.status },
-              { label: 'Échéance', value: r.due_date ? formatDateFr(r.due_date) : 'Non renseignée' },
-              { label: 'Client', value: r.numero_tiers || 'Non renseigné' },
-            ],
-          }),
-      })),
+    setTodoRows(rows)
+    setListOpen({ title: 'À faire', items: buildTodoItems(rows) })
+  }
+
+  // Mise à jour optimiste : après édition d'une tâche, on met à jour la
+  // ligne concernée dans la liste déjà affichée sans tout recharger.
+  function handleTaskSaved(updated: TaskRow) {
+    setTodoRows((prev) => {
+      const next = prev.map((r) => (r.id === updated.id ? { ...r, ...updated } : r))
+      setListOpen((cur) => (cur ? { ...cur, items: buildTodoItems(next) } : cur))
+      return next
     })
   }
 
@@ -179,6 +202,14 @@ export default function MobileAlertes({
           subtitle={openDetail.subtitle}
           fields={openDetail.fields}
           onClose={() => setOpenDetail(null)}
+        />
+      )}
+
+      {openTask && (
+        <MobileTaskDetailSheet
+          task={openTask}
+          onClose={() => setOpenTask(null)}
+          onSaved={handleTaskSaved}
         />
       )}
     </div>
