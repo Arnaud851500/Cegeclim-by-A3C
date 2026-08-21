@@ -16,12 +16,13 @@
  * pouvoir exécuter l'app et vérifier les chiffres. Voir le placeholder en
  * bas de fichier — à finaliser ensemble une fois cette base validée.
  *
- * MOBILE — Sur téléphone (largeur < 768px), cette page bascule vers
- * MobileStandaloneActivite (le même écran "Mon activité" que le menu
- * MobileShell), plutôt que d'afficher ce gabarit desktop compressé.
- * Les RPC desktop (portefeuille, projection, highlights, comparatifs...)
- * ne sont pas déclenchées dans ce cas — inutile de les charger si elles ne
- * sont pas affichées.
+ * MOBILE — Sur téléphone (largeur < 768px), cette page bascule désormais
+ * vers MobileShell (le menu d'accueil mobile), et non plus directement vers
+ * MobileStandaloneActivite. Ouvrir cette URL sur mobile ramène donc
+ * l'utilisateur au menu ("Mon activité" / "Mes clients" / "Mes rdv" /
+ * "Mes alertes"), à charge pour lui de taper "Mon activité" s'il veut cet
+ * écran précis — cohérent avec la navigation mobile du reste de l'app,
+ * plutôt qu'un court-circuit direct vers un seul écran.
  * ------------------------------------------------------------------------
  */
 
@@ -30,7 +31,8 @@ import { Space_Grotesk, IBM_Plex_Sans, IBM_Plex_Mono } from "next/font/google";
 import { supabase } from "@/lib/supabaseClient";
 import { usePageFilterAccess } from "@/lib/pageAccessFilters";
 import { useViewport } from "@/lib/useViewport";
-import MobileStandaloneActivite from "@/components/mobile/MobileStandaloneActivite";
+import MobileShell from "@/components/mobile/MobileShell";
+import LastSyncBadge from "@/components/LastSyncBadge";
 
 // ---- Réutilisation stricte de la page existante (mêmes calculs) ----------
 import {
@@ -261,11 +263,10 @@ export default function FocusMensuel3Page() {
 
   useEffect(() => {
     if (access.loading) return;
-    // Sur mobile, cette page rend MobileStandaloneActivite (voir plus bas),
-    // qui charge ses propres données via focus_mensuel/page. Inutile de
-    // déclencher ici les 5 RPC desktop (portefeuille, projection,
-    // highlights, comparatifs agence/famille, rolling 12) qui ne seront
-    // jamais affichées dans ce cas.
+    // Sur mobile, cette page rend désormais MobileShell (le menu), qui gère
+    // son propre chargement — inutile de déclencher ici les 5 RPC desktop
+    // (portefeuille, projection, highlights, comparatifs agence/famille,
+    // rolling 12) qui ne seront jamais affichées dans ce cas.
     if (isMobile) {
       setLoading(false);
       return;
@@ -498,11 +499,13 @@ export default function FocusMensuel3Page() {
     [focusDay],
   );
 
-  // Rendu mobile : écran "Mon activité" (mêmes contenus/RPC que le bouton 1
-  // du menu MobileShell), avec un lien de retour vers /accueil. Court-circuite
-  // tout le gabarit desktop à onglets ci-dessous.
+  // Rendu mobile : atterrit désormais sur le MENU mobile (MobileShell),
+  // et non plus directement sur l'écran "Mon activité". L'utilisateur
+  // choisit explicitement où aller depuis le menu, comme pour toute autre
+  // entrée du site consultée depuis un mobile. Court-circuite tout le
+  // gabarit desktop à onglets ci-dessous.
   if (isMobile) {
-    return <MobileStandaloneActivite />;
+    return <MobileShell />;
   }
 
   return (
@@ -534,6 +537,9 @@ export default function FocusMensuel3Page() {
               <h1 className="font-[var(--font-display)] text-2xl font-bold text-white md:text-3xl">
                 Activité Quotidienne
               </h1>
+              <div className="mt-1.5">
+                <LastSyncBadge />
+              </div>
             </div>
             <div className="flex flex-wrap items-center gap-4">
               <div className="flex items-center gap-2">

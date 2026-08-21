@@ -2,6 +2,7 @@
 
 import type { AccessRights } from '@/components/AccessContext'
 import type { MobileScreen } from './MobileShell'
+import LastSyncBadge from '@/components/LastSyncBadge'
 
 type ButtonConfig = {
   key: MobileScreen
@@ -46,6 +47,9 @@ export default function MobileHome({
         </div>
         <div style={{ fontFamily: 'var(--font-display)', fontSize: 23, fontWeight: 700, marginTop: 4 }}>
           Bonjour{email ? `, ${email.split('@')[0]}` : ''}
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <LastSyncBadge />
         </div>
       </div>
 

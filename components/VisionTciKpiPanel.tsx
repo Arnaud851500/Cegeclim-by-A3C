@@ -22,12 +22,17 @@
  *
  *  - Le reste (grille 4 colonnes, color coding, filtrage agence) reprend
  *    le comportement de la V3.
+ *
+ *  - V4.1 : badge "dernière synchro SAGE" dans l'en-tête (LastSyncBadge),
+ *    pour que l'utilisateur sache à quel point les chiffres affichés sont
+ *    frais sans avoir à le deviner.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { usePageFilterAccess } from "@/lib/pageAccessFilters";
 import { useAccess } from "@/components/AccessContext";
+import LastSyncBadge from "@/components/LastSyncBadge";
 
 
 // ⚠️ BL et CDC confirmés (CUMUL_BL_COLOR / CUMUL_CDC_COLOR dans
@@ -643,7 +648,12 @@ export default function VisionTciKpiPanel() {
   return (
     <div>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-xl font-bold text-white">Vision ONE PAGE</h1>
+        <div>
+          <h1 className="text-xl font-bold text-white">Vision ONE PAGE</h1>
+          <div className="mt-1">
+            <LastSyncBadge compact />
+          </div>
+        </div>
 
         <div className="flex flex-wrap items-center gap-2">
           <button
