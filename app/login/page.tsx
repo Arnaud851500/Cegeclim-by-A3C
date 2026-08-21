@@ -265,7 +265,7 @@ export default function LoginPage() {
           backgroundImage: `linear-gradient(180deg, rgba(11,18,32,0.70), rgba(11,18,32,0.93)), url("${backgroundImageUrl}")`,
         }}
       >
-        <div style={styles.marque}>
+        <div style={styles.marque} className="loginMarque">
           <img src={logoCegeclim} alt="CEGECLIM Énergies" style={styles.logo} className="loginLogo" />
           <div>
             <div style={styles.marqueSur} className="loginMarqueSur">
@@ -284,8 +284,8 @@ export default function LoginPage() {
           Distributeur de solutions <span style={styles.signatureAccent}>durables</span>
         </div>
 
-        <div style={styles.visuelBas}>
-          <div style={styles.eyebrow}>Suivi commercial &amp; prospect</div>
+        <div style={styles.visuelBas} className="loginVisuelBas">
+          <div style={styles.eyebrow} className="loginEyebrow">Suivi commercial &amp; prospect</div>
           <h1 style={styles.titre} className="loginTitre">Le pilotage commercial CEGECLIM</h1>
           <p style={styles.sousTitre} className="loginSousTitre">
             Activité quotidienne, portefeuille de commandes, projection de stock et indicateurs d&rsquo;agence,
@@ -312,12 +312,12 @@ export default function LoginPage() {
       {/* --- Volet formulaire --------------------------------------------- */}
       <section style={styles.voletForm} className="loginVolet">
         <div style={styles.carte} className="loginCarte">
-          <div style={styles.formTitre}>Connexion</div>
-          <div style={styles.formAide}>Utilisez l&rsquo;adresse professionnelle associée à votre profil.</div>
+          <div style={styles.formTitre} className="loginFormTitre">Connexion</div>
+          <div style={styles.formAide} className="loginFormAide">Utilisez l&rsquo;adresse professionnelle associée à votre profil.</div>
 
-          <form onSubmit={handleLogin} style={{ marginTop: 4 }}>
-            <div style={styles.champ}>
-              <label htmlFor="email" style={styles.label}>Identifiant</label>
+          <form onSubmit={handleLogin} style={{ marginTop: 4 }} className="loginForm">
+            <div style={styles.champ} className="loginChamp">
+              <label htmlFor="email" style={styles.label} className="loginLabel">Identifiant</label>
               <input
                 id="email"
                 type="email"
@@ -330,8 +330,8 @@ export default function LoginPage() {
               />
             </div>
 
-            <div style={styles.champ}>
-              <label htmlFor="password" style={styles.label}>Mot de passe</label>
+            <div style={styles.champ} className="loginChamp">
+              <label htmlFor="password" style={styles.label} className="loginLabel">Mot de passe</label>
               <input
                 id="password"
                 type="password"
@@ -351,7 +351,7 @@ export default function LoginPage() {
             {!!errorMsg && <div style={styles.erreur} role="alert">{errorMsg}</div>}
           </form>
 
-          <div style={styles.pied}>Profil et périmètre appliqués automatiquement à la connexion.</div>
+          <div style={styles.pied} className="loginPied">Profil et périmètre appliqués automatiquement à la connexion.</div>
         </div>
       </section>
 
@@ -381,14 +381,80 @@ export default function LoginPage() {
           .loginVolet { padding: 30px 20px !important; }
         }
 
+        /* ---- Mobile : tout tient dans la hauteur d'écran, sans scroll. ----
+           On passe en répartition par vh (au lieu de paddings fixes empilés),
+           on retire les blocs non essentiels (rail déjà masqué, sous-titre et
+           pied de carte allégés), et le titre passe sur une seule ligne via
+           un corps de police qui s'ajuste à la largeur disponible. */
         @media (max-width: 600px) {
-          .loginLogo { width: 150px !important; }
-          .loginMarqueSur { font-size: 13px !important; }
-          .loginMarqueNom { font-size: 20px !important; }
-          .loginVisuel { min-height: 230px; }
-          .loginSousTitre { font-size: 15px !important; }
-          .loginSignature { font-size: 15px !important; margin-top: 16px !important; }
-          .loginCarte { padding: 28px 24px 24px !important; }
+          html, body { height: 100%; overflow: hidden; }
+
+          .loginPage {
+            height: 100dvh;
+            min-height: 100dvh;
+            overflow: hidden;
+            grid-template-rows: auto 1fr;
+          }
+
+          .loginVisuel {
+            min-height: 0;
+            height: 38dvh;
+            padding: 16px 20px 14px !important;
+            justify-content: space-between;
+          }
+
+          .loginMarque { gap: 12px !important; }
+          .loginLogo { width: 96px !important; padding: 5px 8px !important; border-radius: 8px !important; }
+          .loginMarqueSur { font-size: 10.5px !important; line-height: 1.2 !important; }
+          .loginMarqueNom { font-size: 15px !important; margin-top: 2px !important; }
+
+          .loginSignature { display: none !important; }
+
+          .loginVisuelBas { margin-top: 0 !important; }
+          .loginEyebrow { font-size: 10px !important; letter-spacing: 0.18em !important; }
+
+          .loginTitre {
+            font-size: clamp(15px, 5.6vw, 22px) !important;
+            line-height: 1.08 !important;
+            margin: 6px 0 0 !important;
+            max-width: none !important;
+            white-space: nowrap !important;
+          }
+
+          .loginSousTitre { display: none !important; }
+
+          .loginVolet {
+            padding: 16px !important;
+            height: 62dvh;
+            overflow: hidden;
+          }
+
+          .loginCarte {
+            max-width: 100% !important;
+            padding: 20px 20px 16px !important;
+            border-radius: 16px !important;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            height: 100%;
+            box-sizing: border-box;
+          }
+
+          .loginFormTitre { font-size: 24px !important; }
+          .loginFormAide { font-size: 13.5px !important; margin-top: 6px !important; }
+
+          .loginChamp { margin-top: 14px !important; }
+          .loginLabel { font-size: 11px !important; margin-bottom: 6px !important; }
+          .loginInput { height: 46px !important; font-size: 15px !important; padding: 0 14px !important; }
+
+          .loginBouton { height: 48px !important; margin-top: 18px !important; font-size: 15px !important; }
+
+          .loginPied { display: none !important; }
+        }
+
+        @media (max-width: 600px) and (max-height: 700px) {
+          .loginVisuel { height: 32dvh; }
+          .loginVolet { height: 68dvh; }
         }
 
         @media (prefers-reduced-motion: reduce) {
