@@ -43,6 +43,34 @@ import MobileTaskDetailSheet, { type TaskRow } from './MobileTaskDetailSheet'
 //   mise en place du pipeline SAGE temps réel) et donnerait des listes
 //   incomplètes/périmées. Clic sur un document -> détail des lignes
 //   (référence, désignation, qté, montant HT).
+//
+// - BL / CA "depuis le 1er janvier" (cases stats) : NE PAS calculer en
+//   filtrant simplement activite_lignes/facture_lignes côté client comme
+//   avant (donnait un BL sous-évalué, ex. 14,2 K€ au lieu de ~50,9 K€ pour
+//   DUPRE HABITAT ENERGIES) -- activite_lignes seule est un état courant
+//   côté SAGE et ne reflète pas tout le flux annuel une fois les documents
+//   soldés/facturés. On réutilise désormais EXACTEMENT la même convention
+//   que l'écran Activité (get_vision_tci_kpi / get_focus_mensuel_daily_
+//   summary_metier / rebuild_focus_mensuel_agency_activity_cache), via la
+//   fonction SQL dédiée public.get_client_flux_ytd(numero_tiers, debut, fin) :
+//     - BL = activite_lignes "Bon de livraison" (+) et "Bon de retour" (-)
+//       sur date_bl, PLUS facture_lignes sur leur date_bl (même règle de
+//       signe que Factures ci-dessous) -- capte le BL une fois le document
+//       facturé et sorti d'activite_lignes.
+//     - CA = facture_lignes sur date_facture, numero_piece ILIKE 'FA0%' =
+//       facture (+), sinon (ex. "FAR..." = avoir) = négatif. Intègre donc
+//       bien les avoirs, conformément à la demande.
+//   La case "Factures" dédiée est supprimée (elle faisait doublon avec CA,
+//   qui couvre déjà exactement le même flux avec avoirs).
+//
+// - Badge contacts (à côté du nom client) : partner_base_partner filtré sur
+//   reference LIKE '<numero_tiers>-%' ET reference NOT ILIKE '%-liv' (les
+//   entrées '-liv' sont des adresses de livraison, pas des contacts -- même
+//   principe que le filtre "-liv" exclu partout ailleurs sur cette table ;
+//   confirmé empiriquement : type='contact' pour les vraies personnes,
+//   type='company' pour la fiche société elle-même et les adresses '-liv').
+//   phone/mail sont des colonnes text contenant du JSON (tableau d'objets
+//   {value,...}) -- on affiche la première valeur.
 // ─────────────────────────────────────────────────────────────────────────
 
 const N = new Date().getFullYear()
@@ -82,6 +110,16 @@ function todayIso() {
 function yearStartIso() {
   return `${N}-01-01`
 }
+function yearStartN1Iso() {
+  return `${N - 1}-01-01`
+}
+/** Même jour calendaire, un an plus tôt (convention utilisée par
+ * get_vision_tci_kpi côté SQL pour les comparaisons N-1). */
+function sameDayLastYearIso() {
+  const d = new Date()
+  d.setFullYear(d.getFullYear() - 1)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
 function normalizeDateIso(value: any) {
   const text = safeText(value)
   const iso = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/)
@@ -94,6 +132,24 @@ function formatDateFr(iso: string) {
   if (!iso) return ''
   const [y, m, d] = iso.split('-')
   return `${d}/${m}/${y}`
+}
+/** partner_base_partner.phone / .mail sont des colonnes text contenant du
+ * JSON (tableau d'objets { value, type/category, label }). Renvoie la
+ * première valeur exploitable, ou une chaîne vide. */
+function parseFirstJsonValue(raw: any): string {
+  const text = safeText(raw)
+  if (!text || text === '[]') return ''
+  try {
+    const arr = JSON.parse(text)
+    if (Array.isArray(arr) && arr.length > 0 && arr[0]?.value) return String(arr[0].value)
+    return ''
+  } catch {
+    // Valeur déjà en texte brut (pas du JSON) -> on la renvoie telle quelle.
+    return text
+  }
+}
+function cleanJobTitle(raw: any): string {
+  return safeText(raw).replace(/\|/g, ' ').trim()
 }
 function pick(row: Record<string, any>, keys: string[]) {
   for (const key of keys) {
@@ -159,6 +215,13 @@ type VisiteEvent = {
   end: string
   allDay: boolean
 }
+type ContactRow = {
+  id: string
+  nom: string
+  jobTitle: string
+  phone: string
+  mail: string
+}
 type ClientDetail = {
   commandes: DocAgrege[] // CDC
   preparations: DocAgrege[] // PL
@@ -167,7 +230,9 @@ type ClientDetail = {
   devis: DocAgrege[]
   actions: ActionRow[]
   blYtd: number
-  facturesYtd: number
+  caYtd: number
+  caYtdN1: number
+  contacts: ContactRow[]
   derniereVisite: VisiteEvent | null
   prochaineVisite: VisiteEvent | null
   devisYtdN1: number
@@ -290,10 +355,12 @@ export default function MobileClients() {
     try {
       const ys = yearStartIso()
       const today = todayIso()
+      const ysN1 = yearStartN1Iso()
+      const sameDayN1 = sameDayLastYearIso()
 
       const [
         activiteRes, devisRes, actionsRes, monthRes,
-        blYtdRes, facturesYtdRes, partnerRes,
+        fluxNRes, fluxN1Res, partnerRes, contactsRes,
       ] = await Promise.all([
         // CDC + PL + BL + BR en une seule requête (mêmes colonnes, types
         // filtrés) -- agrégation par document faite ensuite côté client.
@@ -323,19 +390,12 @@ export default function MobileClients() {
           .eq('annee', N)
           .eq('row_kind', 'month')
           .eq('numero_tiers', client.numero),
-        // BL depuis le 1er janvier
-        supabase
-          .from('activite_lignes')
-          .select('montant_ht')
-          .eq('type_document', 'Bon de livraison')
-          .eq('numero_tiers_entete', client.numero)
-          .gte('date_bl', ys),
-        // Factures depuis le 1er janvier
-        supabase
-          .from('facture_lignes')
-          .select('montant_ht')
-          .eq('numero_tiers_entete', client.numero)
-          .gte('date_facture', ys),
+        // BL + CA (avec avoirs) depuis le 1er janvier -- même convention que
+        // l'écran Activité (get_vision_tci_kpi), via la fonction dédiée
+        // qui filtre par client au lieu d'agréger par agence/famille macro.
+        supabase.rpc('get_client_flux_ytd', { p_numero_tiers: client.numero, p_date_debut: ys, p_date_fin: today }),
+        // Même période, N-1, pour l'évolution affichée sur la case CA.
+        supabase.rpc('get_client_flux_ytd', { p_numero_tiers: client.numero, p_date_debut: ysN1, p_date_fin: sameDayN1 }),
         // Résolution du lien client -> entreprise BLG. Match EXACT sur
         // "reference" (le numéro tiers seul, sans suffixe "-XXXX" qui
         // identifie un contact individuel plutôt que l'entreprise).
@@ -344,13 +404,23 @@ export default function MobileClients() {
           .select('id')
           .eq('reference', client.numero)
           .limit(1),
+        // Contacts individuels rattachés au client : reference "<numero>-xxxx",
+        // en excluant les adresses de livraison ("-liv").
+        supabase
+          .from('partner_base_partner')
+          .select('id,first_name,last_name,company_name,job_title,phone,mail')
+          .ilike('reference', `${client.numero}-%`)
+          .not('reference', 'ilike', '%-liv')
+          .order('last_name', { ascending: true })
+          .limit(50),
       ])
 
       if (activiteRes.error) loadErrors.push(activiteRes.error.message)
       if (devisRes.error) loadErrors.push(devisRes.error.message)
       if (actionsRes.error) loadErrors.push(actionsRes.error.message)
-      if (blYtdRes.error) loadErrors.push(blYtdRes.error.message)
-      if (facturesYtdRes.error) loadErrors.push(facturesYtdRes.error.message)
+      if (fluxNRes.error) loadErrors.push(fluxNRes.error.message)
+      if (fluxN1Res.error) loadErrors.push(fluxN1Res.error.message)
+      if (contactsRes.error) loadErrors.push(contactsRes.error.message)
 
       const activiteRows = activiteRes.data || []
       const byType = (t: string) => activiteRows.filter((r: any) => r.type_document === t)
@@ -364,8 +434,19 @@ export default function MobileClients() {
         ['date_devis'],
       )
 
-      const blYtd = (blYtdRes.data || []).reduce((s: number, r: any) => s + safeNumber(r.montant_ht), 0)
-      const facturesYtd = (facturesYtdRes.data || []).reduce((s: number, r: any) => s + safeNumber(r.montant_ht), 0)
+      const fluxN = Array.isArray(fluxNRes.data) ? fluxNRes.data[0] : fluxNRes.data
+      const fluxN1 = Array.isArray(fluxN1Res.data) ? fluxN1Res.data[0] : fluxN1Res.data
+      const blYtd = safeNumber(fluxN?.bl_ytd)
+      const caYtd = safeNumber(fluxN?.ca_ytd)
+      const caYtdN1 = safeNumber(fluxN1?.ca_ytd)
+
+      const contacts: ContactRow[] = (contactsRes.data || []).map((r: any) => ({
+        id: String(r.id),
+        nom: [safeText(r.first_name), safeText(r.last_name)].filter(Boolean).join(' ') || safeText(r.company_name) || 'Contact',
+        jobTitle: cleanJobTitle(r.job_title),
+        phone: parseFirstJsonValue(r.phone),
+        mail: parseFirstJsonValue(r.mail),
+      }))
 
       let devisYtdN1 = 0
       if (monthRes.error) {
@@ -434,7 +515,9 @@ export default function MobileClients() {
               assigned_to: r.assigned_to || null,
             })),
         blYtd,
-        facturesYtd,
+        caYtd,
+        caYtdN1,
+        contacts,
         derniereVisite,
         prochaineVisite,
         devisYtdN1,
@@ -444,7 +527,7 @@ export default function MobileClients() {
       console.error('[MobileClients] erreur chargement fiche client', e)
       setDetail({
         commandes: [], preparations: [], livraisons: [], retours: [], devis: [], actions: [],
-        blYtd: 0, facturesYtd: 0, derniereVisite: null, prochaineVisite: null, devisYtdN1: 0,
+        blYtd: 0, caYtd: 0, caYtdN1: 0, contacts: [], derniereVisite: null, prochaineVisite: null, devisYtdN1: 0,
         loadErrors: [e instanceof Error ? e.message : String(e)],
       })
     } finally {
@@ -663,6 +746,20 @@ function ClientDetailScreen({
     })
   }
 
+  function openContactsDetail() {
+    const contacts = detail?.contacts || []
+    setOpenDetail({
+      title: 'Contacts',
+      subtitle: client.nom || client.numero,
+      fields: contacts.length > 0
+        ? contacts.map((c) => ({
+            label: c.jobTitle ? `${c.nom} (${c.jobTitle})` : c.nom,
+            value: [c.phone, c.mail].filter(Boolean).join(' · ') || '—',
+          }))
+        : [{ label: 'Aucun contact', value: '—' }],
+    })
+  }
+
   function openVisiteDetail(v: VisiteEvent) {
     const startDate = v.start ? new Date(v.start) : null
     const endDate = v.end ? new Date(v.end) : null
@@ -699,7 +796,22 @@ function ClientDetailScreen({
 
       <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div>
-          <div style={{ fontSize: 19, fontWeight: 700, color: '#fff' }}>{client.nom || '(nom non renseigné)'}</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <div style={{ fontSize: 19, fontWeight: 700, color: '#fff' }}>{client.nom || '(nom non renseigné)'}</div>
+            {!loading && detail && (
+              <button
+                onClick={openContactsDetail}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4, borderRadius: 999,
+                  border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.06)',
+                  color: 'rgba(255,255,255,0.75)', fontSize: 11.5, fontWeight: 600, padding: '3px 9px',
+                  cursor: 'pointer',
+                }}
+              >
+                👤 {detail.contacts.length}
+              </button>
+            )}
+          </div>
           <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>N° {client.numero}</div>
         </div>
 
@@ -723,18 +835,15 @@ function ClientDetailScreen({
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-          <StatMini label="CA depuis le 1er janvier" value={formatMoney(client.caYtdN)}>
-            <EvolLine value={client.caYtdN} n1={client.caYtdN1} />
+          <StatMini label="CA depuis le 1er janvier (avoirs inclus)" value={loading || !detail ? '…' : formatMoney(detail.caYtd)}>
+            {loading || !detail ? <span style={{ color: 'rgba(255,255,255,0.4)' }}>…</span> : <EvolLine value={detail.caYtd} n1={detail.caYtdN1} />}
           </StatMini>
           <StatMini label="Devis depuis le 1er janvier" value={formatMoney(client.devisYtdN)}>
             {loading || !detail ? <span style={{ color: 'rgba(255,255,255,0.4)' }}>…</span> : <EvolLine value={client.devisYtdN} n1={detail.devisYtdN1} />}
           </StatMini>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-          <StatMini label="BL depuis le 1er janvier" value={loading || !detail ? '…' : formatMoney(detail.blYtd)} />
-          <StatMini label="Factures depuis le 1er janvier" value={loading || !detail ? '…' : formatMoney(detail.facturesYtd)} />
-        </div>
+        <StatMini label="BL depuis le 1er janvier" value={loading || !detail ? '…' : formatMoney(detail.blYtd)} />
 
         <div
           style={{
