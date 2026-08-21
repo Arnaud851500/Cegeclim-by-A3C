@@ -94,7 +94,17 @@ async function fetchAllCache(select: string, apply?: (q: any) => any) {
   const chunkSize = 1000
   let from = 0
   while (true) {
-    let query = supabase.from('synthese_multi_clients_cache').select(select).range(from, from + chunkSize - 1)
+    // IMPORTANT : .order() est indispensable ici. Sans tri explicite,
+    // Postgres/PostgREST ne garantit pas un ordre stable entre deux appels
+    // .range() successifs -- surtout si la table est réécrite pendant la
+    // pagination (ex: un rebuild de cache concurrent). Ça provoquait des
+    // clients "invisibles" de façon aléatoire (lignes sautées entre deux
+    // pages), ex: DB0079 absent de la recherche alors que la donnée existe.
+    let query = supabase
+      .from('synthese_multi_clients_cache')
+      .select(select)
+      .order('numero_tiers', { ascending: true })
+      .range(from, from + chunkSize - 1)
     if (apply) query = apply(query)
     const { data, error } = await query
     if (error) throw error
