@@ -31,8 +31,7 @@ const SEARCH_FIELDS = [
 
 // ── Rendez-vous BLG (crm_base_activity) — même source que l'agenda du
 // OnePage desktop (components/OutlookAgenda.tsx). Filtrée sur
-// internal_tag='normal', type in (4, 7, 9) [meeting, phoneCall, reminder —
-// IDs confirmés dans blg.activity_type], et
+// internal_tag='normal', type in ('meeting','phoneCall','reminder'), et
 // from_fk = l'identifiant partner de l'utilisateur (user_page_access.
 // blg_partner_id, cf. migration add_blg_partner_id_to_user_page_access.sql).
 // Si ce champ n'est pas renseigné pour l'utilisateur, la liste reste vide
@@ -42,19 +41,30 @@ const SEARCH_FIELDS = [
 // n'expose que `public` et `sage`. On passe donc par une vue miroir
 // `public.crm_base_activity` (CREATE VIEW ... AS SELECT * FROM blg.crm_base_activity)
 // et on interroge cette vue directement sans .schema('blg').
-// Identifiants numériques confirmés dans la table de référence
-// blg.activity_type (Supabase Table Editor) : 4 = meeting, 7 = phoneCall,
-// 9 = reminder. crm_base_activity.type stocke cet ID, pas le nom texte.
-const RDV_TYPE_IDS = [4, 7, 9]
-const RDV_TYPE_ID_COLORS: Record<number, string> = {
-  4: '#2E5BB8',
-  7: '#D68910',
-  9: '#8E44AD',
+//
+// NOTE TYPE : confirmé empiriquement que crm_base_activity.type stocke le
+// nom texte ('meeting', 'phoneCall', 'reminder'), pas l'ID numérique de la
+// table de référence blg.activity_type (4/7/9 correspondent bien aux mêmes
+// types, mais ce sont les libellés texte qui sont stockés sur cette colonne).
+// On filtre donc sur le texte — les IDs numériques sont ajoutés au filtre en
+// plus par sécurité, au cas où certaines lignes utiliseraient l'ID en texte
+// ('4', '7', '9') ; ça ne retire jamais de résultat, ça ne peut qu'en ajouter.
+const RDV_TYPE_KEYS = ['meeting', 'phoneCall', 'reminder', '4', '7', '9']
+const RDV_TYPE_COLORS: Record<string, string> = {
+  meeting: '#2E5BB8',
+  phoneCall: '#D68910',
+  reminder: '#8E44AD',
+  '4': '#2E5BB8',
+  '7': '#D68910',
+  '9': '#8E44AD',
 }
-const RDV_TYPE_ID_LABELS: Record<number, string> = {
-  4: 'RDV',
-  7: 'Appel',
-  9: 'Rappel',
+const RDV_TYPE_LABELS: Record<string, string> = {
+  meeting: 'RDV',
+  phoneCall: 'Appel',
+  reminder: 'Rappel',
+  '4': 'RDV',
+  '7': 'Appel',
+  '9': 'Rappel',
 }
 
 type BlgActivity = {
@@ -155,7 +165,7 @@ export default function MobileRdv() {
           .from('crm_base_activity')
           .select('*')
           .eq('internal_tag', 'normal')
-          .in('type', RDV_TYPE_IDS)
+          .in('type', RDV_TYPE_KEYS)
           .eq('from_fk', access.blg_partner_id)
           .gte('start_date', start)
           .lt('start_date', end)
@@ -174,7 +184,7 @@ export default function MobileRdv() {
           ((data || []) as Record<string, any>[]).map((row) => ({
             id: String(row.id),
             type: String(row.type ?? ''),
-            subject: String(pick(row, ['subject', 'title', 'name', 'label']) || RDV_TYPE_ID_LABELS[Number(row.type)] || 'Activité'),
+            subject: String(pick(row, ['subject', 'title', 'name', 'label']) || RDV_TYPE_LABELS[String(row.type ?? '')] || 'Activité'),
             start: String(row.start_date || '').slice(0, 19),
             end: String(row.end_date || row.start_date || '').slice(0, 19),
             allDay: Boolean(row.all_day),
@@ -196,7 +206,7 @@ export default function MobileRdv() {
     const fmtTime = (d: Date | null) => (d ? d.toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '')
     setOpenDetail({
       title: r.subject,
-      subtitle: RDV_TYPE_ID_LABELS[Number(r.type)] || r.type || 'Activité',
+      subtitle: RDV_TYPE_LABELS[r.type] || r.type || 'Activité',
       fields: [
         { label: 'Début', value: r.allDay ? (startDate ? startDate.toLocaleDateString('fr-FR') : '') : fmtTime(startDate) },
         { label: 'Fin', value: r.allDay ? (endDate ? endDate.toLocaleDateString('fr-FR') : '') : fmtTime(endDate) },
@@ -287,7 +297,7 @@ export default function MobileRdv() {
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {rdvList.map((r) => {
-              const color = RDV_TYPE_ID_COLORS[Number(r.type)] || '#7A5EA8'
+              const color = RDV_TYPE_COLORS[r.type] || '#7A5EA8'
               const d = r.start ? new Date(r.start) : null
               const dateLabel = d
                 ? r.allDay
@@ -310,7 +320,7 @@ export default function MobileRdv() {
                       {r.subject}
                     </div>
                     <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginTop: 1 }}>
-                      {[RDV_TYPE_ID_LABELS[Number(r.type)] || r.type, dateLabel].filter(Boolean).join(' · ')}
+                      {[RDV_TYPE_LABELS[r.type] || r.type, dateLabel].filter(Boolean).join(' · ')}
                     </div>
                   </div>
                 </div>
