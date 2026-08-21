@@ -69,16 +69,21 @@ const HOUR_END = 18;
 const JOURS = ["Lun", "Mar", "Mer", "Jeu", "Ven"];
 const DEFAULT_COLOR = "#4B92AC";
 
-const BLG_ACTIVITY_TYPES = ["meeting", "phoneCall", "reminder"] as const;
-const BLG_TYPE_COLORS: Record<string, string> = {
-  meeting: "#2E5BB8",
-  phoneCall: "#D68910",
-  reminder: "#8E44AD",
+// Types d'activité BLG à afficher dans l'agenda — identifiés par leur ID
+// numérique dans la table de référence blg.activity_type (confirmée dans
+// Supabase Table Editor) : 4 = meeting, 7 = phoneCall, 9 = reminder.
+// La colonne crm_base_activity.type stocke cet identifiant numérique, pas
+// le nom du type — d'où le filtre et le mapping par ID plutôt que par texte.
+const BLG_ACTIVITY_TYPE_IDS = [4, 7, 9] as const;
+const BLG_TYPE_ID_LABELS: Record<number, string> = {
+  4: "RDV",
+  7: "Appel",
+  9: "Rappel",
 };
-const BLG_TYPE_LABELS: Record<string, string> = {
-  meeting: "RDV",
-  phoneCall: "Appel",
-  reminder: "Rappel",
+const BLG_TYPE_ID_COLORS: Record<number, string> = {
+  4: "#2E5BB8",
+  7: "#D68910",
+  9: "#8E44AD",
 };
 
 function toIsoDate(d: Date) {
@@ -112,9 +117,9 @@ function pickField(row: Record<string, any> | null | undefined, keys: string[]) 
 }
 
 function mapBlgActivityToEvent(row: Record<string, any>): OutlookEvent {
-  const type = String(row.type || "");
+  const typeId = Number(row.type);
   const subject = String(
-    pickField(row, ["subject", "title", "name", "label"]) || BLG_TYPE_LABELS[type] || "Activité BLG"
+    pickField(row, ["subject", "title", "name", "label"]) || BLG_TYPE_ID_LABELS[typeId] || "Activité BLG"
   );
   const start = String(row.start_date || "").slice(0, 19);
   const end = String(row.end_date || row.start_date || "").slice(0, 19);
@@ -126,8 +131,8 @@ function mapBlgActivityToEvent(row: Record<string, any>): OutlookEvent {
     end,
     isAllDay: Boolean(row.all_day),
     location: null,
-    categories: type ? [type] : [],
-    colorHex: BLG_TYPE_COLORS[type] || "#7A5EA8",
+    categories: Number.isFinite(typeId) ? [String(typeId)] : [],
+    colorHex: BLG_TYPE_ID_COLORS[typeId] || "#7A5EA8",
     webLink: null,
     source: "blg",
   };
@@ -429,7 +434,7 @@ export default function OutlookAgenda({
         .from("crm_base_activity")
         .select("*")
         .eq("internal_tag", "normal")
-        .in("type", BLG_ACTIVITY_TYPES as unknown as string[])
+        .in("type", BLG_ACTIVITY_TYPE_IDS as unknown as number[])
         .eq("from_fk", access.blg_partner_id)
         .gte("start_date", start)
         .lt("start_date", end);

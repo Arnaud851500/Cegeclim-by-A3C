@@ -396,15 +396,20 @@ export default function LoginPage() {
             grid-template-rows: auto 1fr;
           }
 
+          /* Hauteur qui s'ajuste au contenu (logo + titre) plutôt qu'un
+             pourcentage fixe d'écran : évite la bande vide entre le titre et
+             la carte quand le contenu est plus court que l'espace alloué.
+             Le contenu est centré verticalement dans cette bande. */
           .loginVisuel {
             min-height: 0;
-            height: 38dvh;
-            padding: 16px 20px 14px !important;
-            justify-content: space-between;
+            height: auto;
+            padding: 22px 20px !important;
+            justify-content: center;
+            gap: 16px;
           }
 
           .loginMarque { gap: 12px !important; }
-          .loginLogo { width: 96px !important; padding: 5px 8px !important; border-radius: 8px !important; }
+          .loginLogo { width: 92px !important; padding: 5px 8px !important; border-radius: 8px !important; }
           .loginMarqueSur { font-size: 10.5px !important; line-height: 1.2 !important; }
           .loginMarqueNom { font-size: 15px !important; margin-top: 2px !important; }
 
@@ -423,38 +428,44 @@ export default function LoginPage() {
 
           .loginSousTitre { display: none !important; }
 
+          /* Le volet formulaire prend tout l'espace restant (grid 1fr) et
+             centre la carte dedans : plus de gap fixe qui pouvait laisser du
+             vide, la carte respire toujours de façon équilibrée. */
           .loginVolet {
-            padding: 16px !important;
-            height: 62dvh;
+            padding: 20px !important;
+            height: auto;
             overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
           }
 
           .loginCarte {
             max-width: 100% !important;
-            padding: 20px 20px 16px !important;
-            border-radius: 16px !important;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            height: 100%;
+            width: 100%;
+            padding: 26px 20px 22px !important;
+            border-radius: 18px !important;
             box-sizing: border-box;
           }
 
           .loginFormTitre { font-size: 24px !important; }
           .loginFormAide { font-size: 13.5px !important; margin-top: 6px !important; }
 
-          .loginChamp { margin-top: 14px !important; }
+          .loginChamp { margin-top: 16px !important; }
           .loginLabel { font-size: 11px !important; margin-bottom: 6px !important; }
           .loginInput { height: 46px !important; font-size: 15px !important; padding: 0 14px !important; }
 
-          .loginBouton { height: 48px !important; margin-top: 18px !important; font-size: 15px !important; }
+          .loginBouton { height: 48px !important; margin-top: 20px !important; font-size: 15px !important; }
 
           .loginPied { display: none !important; }
         }
 
-        @media (max-width: 600px) and (max-height: 700px) {
-          .loginVisuel { height: 32dvh; }
-          .loginVolet { height: 68dvh; }
+        @media (max-width: 600px) and (max-height: 640px) {
+          .loginVisuel { padding: 14px 20px !important; gap: 10px; }
+          .loginLogo { width: 78px !important; }
+          .loginChamp { margin-top: 12px !important; }
+          .loginInput { height: 42px !important; }
+          .loginBouton { height: 44px !important; margin-top: 14px !important; }
         }
 
         @media (prefers-reduced-motion: reduce) {
