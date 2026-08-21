@@ -62,6 +62,8 @@ type OutlookEvent = {
   webLink: string | null;
   /** Présent uniquement pour les évènements BLG fusionnés — absent pour les évènements Outlook. */
   source?: "outlook" | "blg";
+  /** Nom d'entreprise liée (crm_activity_company -> partner_base_partner.company_name), BLG uniquement. */
+  company?: string | null;
 };
 
 const HOUR_START = 8;
@@ -125,13 +127,25 @@ function pickField(row: Record<string, any> | null | undefined, keys: string[]) 
   return null;
 }
 
-function mapBlgActivityToEvent(row: Record<string, any>): OutlookEvent {
+function mapBlgActivityToEvent(row: Record<string, any>, companyName?: string | null): OutlookEvent {
   const type = String(row.type ?? "");
+  // "comment" est la colonne réelle du texte descriptif sur crm_base_activity
+  // (confirmé via information_schema — il n'y a pas de colonne subject/title/
+  // name/label sur cette table). On la garde en priorité, avec repli sur les
+  // noms candidats au cas où une autre variante existerait, puis sur le
+  // libellé du type.
   const subject = String(
-    pickField(row, ["subject", "title", "name", "label"]) || BLG_TYPE_LABELS[type] || "Activité BLG"
+    pickField(row, ["comment", "subject", "title", "name", "label"]) || BLG_TYPE_LABELS[type] || "Activité BLG"
   );
-  const start = String(row.start_date || "").slice(0, 19);
-  const end = String(row.end_date || row.start_date || "").slice(0, 19);
+  // NE PAS tronquer le timestamp (garder le fuseau horaire, ex. "+00") : un
+  // .slice(0, 19) sur "2026-08-23T22:00:00+00:00" donnait
+  // "2026-08-23T22:00:00", ensuite réinterprété par `new Date()` comme
+  // 22h locale plutôt que 22h UTC (= 00h locale le lendemain) — d'où des
+  // évènements "toute la journée" classés sur le mauvais jour (souvent la
+  // veille), au point de disparaître complètement si ce jour n'est pas
+  // affiché dans la semaine visible.
+  const start = String(row.start_date || "");
+  const end = String(row.end_date || row.start_date || "");
 
   return {
     id: `blg-${row.id}`,
@@ -144,6 +158,7 @@ function mapBlgActivityToEvent(row: Record<string, any>): OutlookEvent {
     colorHex: BLG_TYPE_COLORS[type] || "#7A5EA8",
     webLink: null,
     source: "blg",
+    company: companyName || null,
   };
 }
 
@@ -456,7 +471,50 @@ export default function OutlookAgenda({
         return;
       }
 
-      setBlgEvents(((data || []) as Record<string, any>[]).map(mapBlgActivityToEvent));
+      const rows = (data || []) as Record<string, any>[];
+
+      // Nom d'entreprise liée : crm_activity_company (activity_fk, company_fk)
+      // -> partner_base_partner.id / company_name. Résolu en 2 requêtes
+      // batch (pas une par activité) pour rester léger. Une activité sans
+      // entreprise liée, ou une erreur sur ces requêtes annexes, ne doit
+      // jamais empêcher l'affichage des rendez-vous eux-mêmes — on retombe
+      // simplement sur "pas de nom d'entreprise" en silence.
+      const companyByActivity = new Map<number, string>();
+      try {
+        const activityIds = rows.map((r) => r.id).filter((v) => v !== null && v !== undefined);
+        if (activityIds.length > 0) {
+          const { data: links } = await supabase
+            .from("crm_activity_company")
+            .select("activity_fk, company_fk")
+            .in("activity_fk", activityIds);
+
+          const companyIds = Array.from(
+            new Set(((links || []) as Record<string, any>[]).map((l) => l.company_fk).filter((v) => v !== null && v !== undefined))
+          );
+
+          if (companyIds.length > 0) {
+            const { data: companies } = await supabase
+              .from("partner_base_partner")
+              .select("id, company_name")
+              .in("id", companyIds);
+
+            const nameById = new Map(
+              ((companies || []) as Record<string, any>[]).map((c) => [c.id, String(c.company_name || "").trim()])
+            );
+
+            ((links || []) as Record<string, any>[]).forEach((l) => {
+              const name = nameById.get(l.company_fk);
+              if (name) companyByActivity.set(l.activity_fk, name);
+            });
+          }
+        }
+      } catch (e) {
+        console.warn("[OutlookAgenda] résolution entreprise liée impossible :", e);
+      }
+
+      if (cancelled) return;
+
+      setBlgEvents(rows.map((row) => mapBlgActivityToEvent(row, companyByActivity.get(row.id) || null)));
     }
     void loadBlgActivities();
     return () => {
@@ -469,7 +527,12 @@ export default function OutlookAgenda({
   const eventsByDay = useMemo(() => {
     const map = new Map<string, OutlookEvent[]>();
     events.forEach((e) => {
-      const key = e.start.slice(0, 10);
+      // Regroupement par jour LOCAL réel (Europe/Paris, fuseau du navigateur
+      // des utilisateurs) — et non par simple découpage de la chaîne ISO,
+      // qui donnait le jour en UTC et faisait glisser les évènements de fin
+      // de journée (ex. 22h UTC = minuit local) sur la mauvaise date.
+      const parsed = new Date(e.start);
+      const key = Number.isNaN(parsed.getTime()) ? e.start.slice(0, 10) : toIsoDate(parsed);
       const list = map.get(key) || [];
       list.push(e);
       map.set(key, list);
@@ -757,10 +820,15 @@ export default function OutlookAgenda({
                         <button
                           key={e.id}
                           onClick={() => onActivityClick?.(e)}
-                          title={`${e.subject}${e.location ? " · " + e.location : ""}`}
+                          title={`${e.company ? e.company + " — " : ""}${e.subject}${e.location ? " · " + e.location : ""}`}
                           style={eventStyle(e, currentAutorisation?.couleur_defaut || null)}
                           className="absolute left-0.5 right-0.5 overflow-hidden rounded-md px-1.5 py-0.5 text-left text-[10px] leading-tight text-white shadow hover:brightness-110"
                         >
+                          {e.company && (
+                            <div className="truncate text-[8.5px] font-semibold uppercase tracking-wide text-[#FFC98B]">
+                              {e.company}
+                            </div>
+                          )}
                           <div className="truncate font-medium">{e.subject}</div>
                         </button>
                       ))}
@@ -782,10 +850,15 @@ export default function OutlookAgenda({
                         <button
                           key={e.id}
                           onClick={() => onActivityClick?.(e)}
-                          title={e.subject}
+                          title={`${e.company ? e.company + " — " : ""}${e.subject}`}
                           style={{ background: e.colorHex || currentAutorisation?.couleur_defaut || DEFAULT_COLOR }}
                           className="w-full truncate rounded px-1.5 py-1 text-left text-[10px] text-white"
                         >
+                          {e.company && (
+                            <span className="mr-1 font-semibold uppercase tracking-wide text-[#FFC98B]">
+                              {e.company} ·
+                            </span>
+                          )}
                           {e.subject}
                         </button>
                       ))}

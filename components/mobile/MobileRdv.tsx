@@ -71,6 +71,7 @@ type BlgActivity = {
   id: string
   type: string
   subject: string
+  company: string | null
   start: string
   end: string
   allDay: boolean
@@ -179,14 +180,64 @@ export default function MobileRdv() {
           return
         }
 
+        const rows = (data || []) as Record<string, any>[]
+
+        // Nom d'entreprise liée : crm_activity_company (activity_fk, company_fk)
+        // -> partner_base_partner.id / company_name. Résolu en 2 requêtes
+        // batch. Une erreur ici ne doit jamais empêcher l'affichage des
+        // rendez-vous eux-mêmes — repli silencieux sur "pas d'entreprise".
+        const companyByActivity = new Map<number, string>()
+        try {
+          const activityIds = rows.map((r) => r.id).filter((v) => v !== null && v !== undefined)
+          if (activityIds.length > 0) {
+            const { data: links } = await supabase
+              .from('crm_activity_company')
+              .select('activity_fk, company_fk')
+              .in('activity_fk', activityIds)
+
+            const companyIds = Array.from(
+              new Set(((links || []) as Record<string, any>[]).map((l) => l.company_fk).filter((v) => v !== null && v !== undefined)),
+            )
+
+            if (companyIds.length > 0) {
+              const { data: companies } = await supabase
+                .from('partner_base_partner')
+                .select('id, company_name')
+                .in('id', companyIds)
+
+              const nameById = new Map(
+                ((companies || []) as Record<string, any>[]).map((c) => [c.id, String(c.company_name || '').trim()]),
+              )
+
+              ;((links || []) as Record<string, any>[]).forEach((l) => {
+                const name = nameById.get(l.company_fk)
+                if (name) companyByActivity.set(l.activity_fk, name)
+              })
+            }
+          }
+        } catch (e) {
+          console.warn('[MobileRdv] résolution entreprise liée impossible :', e)
+        }
+
+        if (cancelled) return
+
         setRdvUnconfigured(false)
         setRdvList(
-          ((data || []) as Record<string, any>[]).map((row) => ({
+          rows.map((row) => ({
             id: String(row.id),
             type: String(row.type ?? ''),
-            subject: String(pick(row, ['subject', 'title', 'name', 'label']) || RDV_TYPE_LABELS[String(row.type ?? '')] || 'Activité'),
-            start: String(row.start_date || '').slice(0, 19),
-            end: String(row.end_date || row.start_date || '').slice(0, 19),
+            // "comment" est la colonne réelle du texte descriptif sur
+            // crm_base_activity (confirmé via information_schema — pas de
+            // colonne subject/title/name/label sur cette table).
+            subject: String(pick(row, ['comment', 'subject', 'title', 'name', 'label']) || RDV_TYPE_LABELS[String(row.type ?? '')] || 'Activité'),
+            company: companyByActivity.get(row.id) || null,
+            // NE PAS tronquer le timestamp (garder le fuseau horaire) : un
+            // .slice(0, 19) sur "2026-08-23T22:00:00+00:00" donnait
+            // "2026-08-23T22:00:00", réinterprété par `new Date()` comme 22h
+            // locale plutôt que 22h UTC (= 00h locale le lendemain) — ce qui
+            // décalait la date/heure affichée d'environ 2h en été.
+            start: String(row.start_date || ''),
+            end: String(row.end_date || row.start_date || ''),
             allDay: Boolean(row.all_day),
           })),
         )
@@ -208,6 +259,7 @@ export default function MobileRdv() {
       title: r.subject,
       subtitle: RDV_TYPE_LABELS[r.type] || r.type || 'Activité',
       fields: [
+        ...(r.company ? [{ label: 'Entreprise', value: r.company }] : []),
         { label: 'Début', value: r.allDay ? (startDate ? startDate.toLocaleDateString('fr-FR') : '') : fmtTime(startDate) },
         { label: 'Fin', value: r.allDay ? (endDate ? endDate.toLocaleDateString('fr-FR') : '') : fmtTime(endDate) },
         { label: 'Toute la journée', value: r.allDay ? 'Oui' : 'Non' },
@@ -316,6 +368,14 @@ export default function MobileRdv() {
                 >
                   <span style={{ width: 4, alignSelf: 'stretch', borderRadius: 2, background: color, flexShrink: 0 }} />
                   <div style={{ minWidth: 0, flex: 1 }}>
+                    {r.company && (
+                      <div style={{
+                        fontSize: 10.5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.02em',
+                        color: '#E8A96A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                      }}>
+                        {r.company}
+                      </div>
+                    )}
                     <div style={{ fontSize: 13.5, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                       {r.subject}
                     </div>
