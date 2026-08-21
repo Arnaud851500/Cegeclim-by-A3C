@@ -11,15 +11,13 @@ import MobileTaskDetailSheet, { type TaskRow } from './MobileTaskDetailSheet'
 // - Table clients : synthese_multi_clients_cache, row_kind = 'client', annee = N.
 //   Colonne tiers réelle sur CETTE table : numero_tiers (confirmée, aucune erreur).
 // - "Profil CA 12MG" : calculé côté client (caBand), pas une colonne stockée.
-// - Dates de visite : objectif_tiers, domaine='Visite', 24 rubriques, valeur_date.
-// - Actions client : todo_actions.numero_tiers (migration à appliquer).
+// - Dates de visite : REMPLACÉ (cf. plus bas) — ne vient plus de objectif_tiers
+//   mais de crm_base_activity (BLG), pour refléter les vrais RDV/appels.
+// - Actions client : todo_actions.numero_tiers, désormais filtrées sur les
+//   statuts non terminés (Non débuté / En cours), et éditables au tap.
 //
 // - facture_lignes : erreur confirmée en prod → "numero_tiers" N'EXISTE PAS
-//   sur cette table. Seule numero_tiers_entete existe. Colonnes de date
-//   (date_document / date_facture / date_piece) toujours non confirmées :
-//   plus aucun filtre/tri serveur dessus, tout est fait côté client sur les
-//   lignes déjà récupérées (impossible de planter sur un nom de colonne
-//   inconnu quand on ne fait que lire des clés d'objet).
+//   sur cette table. Seule numero_tiers_entete existe.
 //
 // - Devis N-1 (comparaison) : la valeur brute du cache au niveau client
 //   (devis_ytd_n1) est fausse/à 0 pour certains clients — le desktop la
@@ -28,15 +26,38 @@ import MobileTaskDetailSheet, { type TaskRow } from './MobileTaskDetailSheet'
 //   uniquement — CA et Marge N-1 du cache client correspondent déjà
 //   exactement au desktop, testé sur DUPRE HABITAT ENERGIES.
 //
-// - Actions (todo_actions) : désormais éditables au tap (assigned_to,
-//   status, due_date, description_action) via MobileTaskDetailSheet,
-//   au lieu du MobileDetailSheet générique en lecture seule.
+// - Visites (dernière/prochaine) : le lien client -> entreprise BLG se fait
+//   via partner_base_partner.reference = numero_tiers du client (match EXACT,
+//   confirmé empiriquement : "DB0079" -> company_name renseigné, alors que
+//   "DB0079-9430" etc. sont des contacts individuels liés à cette même
+//   entreprise, à exclure). Puis crm_activity_company (company_fk) donne les
+//   activity_fk liées, et crm_base_activity (internal_tag='normal', type in
+//   meeting/phoneCall) donne les RDV/appels. Même filtre de type que
+//   MobileRdv.tsx, pour rester cohérent avec l'écran "Mes rdv".
+//
+// - Documents (CDC/PL/BL/BR/Devis) : agrégés en 1 ligne par document
+//   (numero_piece), montant total + référence chantier, calculés à partir
+//   des LIGNES (activite_lignes / devis_lignes) plutôt que de
+//   public.activite_entete — cette dernière est une table historique figée
+//   (dernier import classique, ne contient aucun document créé depuis la
+//   mise en place du pipeline SAGE temps réel) et donnerait des listes
+//   incomplètes/périmées. Clic sur un document -> détail des lignes
+//   (référence, désignation, qté, montant HT).
 // ─────────────────────────────────────────────────────────────────────────
 
 const N = new Date().getFullYear()
 const CURRENT_MONTH = new Date().getMonth() + 1
 const CA_PROFILE_BANDS = ['400K€', '150K€', '80K€', '20K€', 'vide'] as const
 type CaBand = typeof CA_PROFILE_BANDS[number]
+
+// Mêmes clés/libellés que MobileRdv.tsx, pour une cohérence totale entre les
+// deux écrans (type stocké en texte sur crm_base_activity, IDs numériques
+// ajoutés par sécurité).
+const RDV_TYPE_KEYS = ['meeting', 'phoneCall', 'reminder', '4', '7', '9']
+const RDV_TYPE_LABELS: Record<string, string> = {
+  meeting: 'RDV', phoneCall: 'Appel', reminder: 'Rappel',
+  '4': 'RDV', '7': 'Appel', '9': 'Rappel',
+}
 
 function safeNumber(value: any) {
   if (value === null || value === undefined || value === '') return 0
@@ -61,11 +82,6 @@ function todayIso() {
 function yearStartIso() {
   return `${N}-01-01`
 }
-function monthsAgoIso(months: number) {
-  const d = new Date()
-  d.setMonth(d.getMonth() - months)
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-}
 function normalizeDateIso(value: any) {
   const text = safeText(value)
   const iso = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/)
@@ -86,20 +102,16 @@ function pick(row: Record<string, any>, keys: string[]) {
   }
   return null
 }
-const NUMERO_KEYS = ['numero_piece', 'numero_document', 'num_piece', 'facture', 'piece']
-const DATE_KEYS = ['date_document', 'date_facture', 'date_piece', 'date_bl', 'date_piece_bl', 'date_livraison_bl', 'date_livraison', 'date_devis', 'date']
 
 async function fetchAllCache(select: string, apply?: (q: any) => any) {
   const output: Record<string, any>[] = []
   const chunkSize = 1000
   let from = 0
   while (true) {
-    // IMPORTANT : .order() est indispensable ici. Sans tri explicite,
-    // Postgres/PostgREST ne garantit pas un ordre stable entre deux appels
-    // .range() successifs -- surtout si la table est réécrite pendant la
-    // pagination (ex: un rebuild de cache concurrent). Ça provoquait des
-    // clients "invisibles" de façon aléatoire (lignes sautées entre deux
-    // pages), ex: DB0079 absent de la recherche alors que la donnée existe.
+    // .order() indispensable pour une pagination .range() stable — sans lui,
+    // Postgres/PostgREST ne garantit pas un ordre cohérent entre deux appels
+    // successifs (des lignes peuvent être sautées, notamment si la table est
+    // réécrite pendant la pagination par un rebuild de cache concurrent).
     let query = supabase
       .from('synthese_multi_clients_cache')
       .select(select)
@@ -130,16 +142,68 @@ type ClientRow = {
   margePctYtdN1: number | null
 }
 
-type DocLigne = { numero: string; date: string; montant_ht: number }
+// Une ligne agrégée = 1 document (CDC/PL/BL/BR/Devis), pas une ligne d'article.
+type DocAgrege = {
+  numeroPiece: string
+  date: string
+  reference: string
+  montantHt: number
+  lignes: { reference_article: string; designation: string; quantite: number; montant_ht: number }[]
+}
 type ActionRow = { id: string; libelle: string; status: string; due_date: string | null; assigned_to: string | null }
+type VisiteEvent = {
+  id: string
+  type: string
+  subject: string
+  start: string
+  end: string
+  allDay: boolean
+}
 type ClientDetail = {
-  commandes: DocLigne[]
-  devis: DocLigne[]
+  commandes: DocAgrege[] // CDC
+  preparations: DocAgrege[] // PL
+  livraisons: DocAgrege[] // BL
+  retours: DocAgrege[] // BR
+  devis: DocAgrege[]
   actions: ActionRow[]
-  derniereVisite: string
-  prochaineVisite: string
+  blYtd: number
+  facturesYtd: number
+  derniereVisite: VisiteEvent | null
+  prochaineVisite: VisiteEvent | null
   devisYtdN1: number
   loadErrors: string[]
+}
+
+/** Regroupe des lignes brutes (activite_lignes ou devis_lignes) en 1 ligne par numero_piece. */
+function aggregateByDocument(
+  rows: Record<string, any>[],
+  dateFields: string[],
+): DocAgrege[] {
+  const byPiece = new Map<string, DocAgrege>()
+  for (const r of rows) {
+    const numeroPiece = safeText(r.numero_piece)
+    if (!numeroPiece) continue
+    const existing = byPiece.get(numeroPiece)
+    const ligne = {
+      reference_article: safeText(r.reference_article),
+      designation: safeText(r.designation),
+      quantite: safeNumber(r.quantite),
+      montant_ht: safeNumber(r.montant_ht),
+    }
+    if (existing) {
+      existing.montantHt += ligne.montant_ht
+      existing.lignes.push(ligne)
+    } else {
+      byPiece.set(numeroPiece, {
+        numeroPiece,
+        date: normalizeDateIso(pick(r, dateFields)),
+        reference: safeText(r.reference),
+        montantHt: ligne.montant_ht,
+        lignes: [ligne],
+      })
+    }
+  }
+  return Array.from(byPiece.values()).sort((a, b) => (b.date || '').localeCompare(a.date || ''))
 }
 
 export default function MobileClients() {
@@ -207,8 +271,6 @@ export default function MobileClients() {
     return { total: allClients.length, nouveaux, parProfil }
   }, [allClients])
 
-  // Recherche : pas de limite basse ici (slice(0, 40) large), la liste
-  // complète des clients est chargée en mémoire dès le montage.
   const results = useMemo(() => {
     if (!allClients) return []
     const term = search.trim().toLowerCase()
@@ -226,78 +288,84 @@ export default function MobileClients() {
     const loadErrors: string[] = []
 
     try {
-      const twoMonthsAgo = monthsAgoIso(2)
+      const ys = yearStartIso()
+      const today = todayIso()
 
-      const [cdcRes, devisRes, visitesRes, actionsRes, monthRes] = await Promise.all([
-        // Confirmé : les commandes (CDC) sont dans activite_lignes, avec le
-        // libellé complet "Bon de commande" — pas dans facture_lignes.
+      const [
+        activiteRes, devisRes, actionsRes, monthRes,
+        blYtdRes, facturesYtdRes, partnerRes,
+      ] = await Promise.all([
+        // CDC + PL + BL + BR en une seule requête (mêmes colonnes, types
+        // filtrés) -- agrégation par document faite ensuite côté client.
         supabase
           .from('activite_lignes')
-          .select('*')
-          .eq('type_document', 'Bon de commande')
+          .select('numero_piece,type_document,reference,date_piece,date_bc,date_pl,date_bl,reference_article,designation,quantite,montant_ht')
+          .in('type_document', ['Bon de commande', 'Préparation de livraison', 'Bon de livraison', 'Bon de retour'])
           .eq('numero_tiers_entete', client.numero)
-          .limit(200),
-        // Devis : table dédiée devis_lignes (cf. synthese_multi_clients/page.tsx,
-        // qui va y chercher les dates), pas facture_lignes.
+          .limit(600),
         supabase
           .from('devis_lignes')
-          .select('*')
+          .select('numero_piece,reference_client,date_devis,reference_article,designation,quantite,montant_ht')
           .eq('numero_tiers_entete', client.numero)
+          .order('date_devis', { ascending: false })
           .limit(300),
-        supabase
-          .from('objectif_tiers')
-          .select('valeur_date')
-          .eq('numero_tiers', client.numero)
-          .eq('annee', N)
-          .eq('domaine', 'Visite')
-          .not('valeur_date', 'is', null),
+        // Uniquement les tâches NON terminées (ni "Terminé" ni "Annulé").
         supabase
           .from('todo_actions')
           .select('id,description_action,status,due_date,assigned_to')
           .eq('numero_tiers', client.numero)
+          .not('status', 'in', '("Terminé","Annulé")')
           .order('due_date', { ascending: true })
           .limit(30),
-        // Recalcul du Devis N-1 comparable, comme le fait le desktop
-        // (recomputeClientN1ComparisonFromMonths) : la valeur brute au
-        // niveau client (devis_ytd_n1) n'est pas fiable pour Devis.
         supabase
           .from('synthese_multi_clients_cache')
           .select('mois,devis_n1')
           .eq('annee', N)
           .eq('row_kind', 'month')
           .eq('numero_tiers', client.numero),
+        // BL depuis le 1er janvier
+        supabase
+          .from('activite_lignes')
+          .select('montant_ht')
+          .eq('type_document', 'Bon de livraison')
+          .eq('numero_tiers_entete', client.numero)
+          .gte('date_bl', ys),
+        // Factures depuis le 1er janvier
+        supabase
+          .from('facture_lignes')
+          .select('montant_ht')
+          .eq('numero_tiers_entete', client.numero)
+          .gte('date_facture', ys),
+        // Résolution du lien client -> entreprise BLG. Match EXACT sur
+        // "reference" (le numéro tiers seul, sans suffixe "-XXXX" qui
+        // identifie un contact individuel plutôt que l'entreprise).
+        supabase
+          .from('partner_base_partner')
+          .select('id')
+          .eq('reference', client.numero)
+          .limit(1),
       ])
 
-      // Tri + filtrage "2 derniers mois" côté client : aucune colonne de
-      // date de facture_lignes n'est confirmée, donc aucun .order()/.gte()
-      // serveur dessus (ça avait fait planter la requête précédemment).
-      function mapAndSortDocs(res: { data: any[] | null; error: any }, sinceIso?: string): DocLigne[] {
-        if (res.error) {
-          loadErrors.push(res.error.message)
-          return []
-        }
-        let docs = (res.data || []).map((r) => ({
-          numero: safeText(pick(r, NUMERO_KEYS)),
-          date: normalizeDateIso(pick(r, DATE_KEYS)),
-          montant_ht: safeNumber(r.montant_ht),
-        }))
-        if (sinceIso) docs = docs.filter((d) => !d.date || d.date >= sinceIso)
-        docs.sort((a, b) => (b.date || '').localeCompare(a.date || ''))
-        return docs
-      }
-
-      const visitDates = visitesRes.error
-        ? []
-        : (visitesRes.data || [])
-            .map((r: any) => normalizeDateIso(r.valeur_date))
-            .filter(Boolean)
-            .sort()
-
-      const today0 = todayIso()
-      const past = visitDates.filter((d) => d <= today0)
-      const future = visitDates.filter((d) => d > today0)
-
+      if (activiteRes.error) loadErrors.push(activiteRes.error.message)
+      if (devisRes.error) loadErrors.push(devisRes.error.message)
       if (actionsRes.error) loadErrors.push(actionsRes.error.message)
+      if (blYtdRes.error) loadErrors.push(blYtdRes.error.message)
+      if (facturesYtdRes.error) loadErrors.push(facturesYtdRes.error.message)
+
+      const activiteRows = activiteRes.data || []
+      const byType = (t: string) => activiteRows.filter((r: any) => r.type_document === t)
+
+      const commandes = aggregateByDocument(byType('Bon de commande'), ['date_bc', 'date_piece'])
+      const preparations = aggregateByDocument(byType('Préparation de livraison'), ['date_pl', 'date_piece'])
+      const livraisons = aggregateByDocument(byType('Bon de livraison'), ['date_bl', 'date_piece'])
+      const retours = aggregateByDocument(byType('Bon de retour'), ['date_bl', 'date_piece'])
+      const devis = aggregateByDocument(
+        (devisRes.data || []).map((r: any) => ({ ...r, reference: r.reference_client })),
+        ['date_devis'],
+      )
+
+      const blYtd = (blYtdRes.data || []).reduce((s: number, r: any) => s + safeNumber(r.montant_ht), 0)
+      const facturesYtd = (facturesYtdRes.data || []).reduce((s: number, r: any) => s + safeNumber(r.montant_ht), 0)
 
       let devisYtdN1 = 0
       if (monthRes.error) {
@@ -308,9 +376,54 @@ export default function MobileClients() {
           .reduce((sum: number, r: any) => sum + safeNumber(r.devis_n1), 0)
       }
 
+      // Dernière / prochaine visite via BLG (crm_base_activity), liée par
+      // l'entreprise partner_base_partner résolue ci-dessus.
+      let derniereVisite: VisiteEvent | null = null
+      let prochaineVisite: VisiteEvent | null = null
+      if (partnerRes.error) {
+        loadErrors.push(partnerRes.error.message)
+      } else {
+        const partnerId = partnerRes.data?.[0]?.id
+        if (partnerId) {
+          const { data: links, error: linksErr } = await supabase
+            .from('crm_activity_company')
+            .select('activity_fk')
+            .eq('company_fk', partnerId)
+          if (linksErr) {
+            loadErrors.push(linksErr.message)
+          } else {
+            const activityIds = (links || []).map((l: any) => l.activity_fk).filter((v: any) => v !== null && v !== undefined)
+            if (activityIds.length > 0) {
+              const { data: activities, error: actErr } = await supabase
+                .from('crm_base_activity')
+                .select('*')
+                .in('id', activityIds)
+                .eq('internal_tag', 'normal')
+                .in('type', RDV_TYPE_KEYS)
+                .order('start_date', { ascending: true })
+              if (actErr) {
+                loadErrors.push(actErr.message)
+              } else {
+                const mapped = (activities || []).map((row: any) => ({
+                  id: String(row.id),
+                  type: String(row.type ?? ''),
+                  subject: String(pick(row, ['comment', 'subject', 'title', 'name', 'label']) || RDV_TYPE_LABELS[String(row.type ?? '')] || 'Activité'),
+                  start: String(row.start_date || ''),
+                  end: String(row.end_date || row.start_date || ''),
+                  allDay: Boolean(row.all_day),
+                }))
+                const past = mapped.filter((e) => e.start && e.start.slice(0, 10) < today)
+                const future = mapped.filter((e) => e.start && e.start.slice(0, 10) >= today)
+                derniereVisite = past.length ? past[past.length - 1] : null
+                prochaineVisite = future.length ? future[0] : null
+              }
+            }
+          }
+        }
+      }
+
       setDetail({
-        commandes: mapAndSortDocs(cdcRes).slice(0, 20),
-        devis: mapAndSortDocs(devisRes, twoMonthsAgo).slice(0, 50),
+        commandes, preparations, livraisons, retours, devis,
         actions: actionsRes.error
           ? []
           : (actionsRes.data || []).map((r: any) => ({
@@ -320,15 +433,18 @@ export default function MobileClients() {
               due_date: r.due_date || null,
               assigned_to: r.assigned_to || null,
             })),
-        derniereVisite: past.length ? formatDateFr(past[past.length - 1]) : '',
-        prochaineVisite: future.length ? formatDateFr(future[0]) : '',
+        blYtd,
+        facturesYtd,
+        derniereVisite,
+        prochaineVisite,
         devisYtdN1,
         loadErrors,
       })
     } catch (e) {
       console.error('[MobileClients] erreur chargement fiche client', e)
       setDetail({
-        commandes: [], devis: [], actions: [], derniereVisite: '', prochaineVisite: '', devisYtdN1: 0,
+        commandes: [], preparations: [], livraisons: [], retours: [], devis: [], actions: [],
+        blYtd: 0, facturesYtd: 0, derniereVisite: null, prochaineVisite: null, devisYtdN1: 0,
         loadErrors: [e instanceof Error ? e.message : String(e)],
       })
     } finally {
@@ -349,19 +465,24 @@ export default function MobileClients() {
         onActionSaved={(updated) => {
           setDetail((cur) => {
             if (!cur) return cur
+            const isNowDone = updated.status === 'Terminé' || updated.status === 'Annulé'
             return {
               ...cur,
-              actions: cur.actions.map((a) =>
-                a.id === updated.id
-                  ? {
-                      id: updated.id,
-                      libelle: updated.description_action || '',
-                      status: updated.status,
-                      due_date: updated.due_date,
-                      assigned_to: updated.assigned_to,
-                    }
-                  : a,
-              ),
+              // Une tâche qui passe en Terminé/Annulé disparaît de la liste
+              // (au lieu d'y rester avec son nouveau statut affiché).
+              actions: isNowDone
+                ? cur.actions.filter((a) => a.id !== updated.id)
+                : cur.actions.map((a) =>
+                    a.id === updated.id
+                      ? {
+                          id: updated.id,
+                          libelle: updated.description_action || '',
+                          status: updated.status,
+                          due_date: updated.due_date,
+                          assigned_to: updated.assigned_to,
+                        }
+                      : a,
+                  ),
             }
           })
         }}
@@ -526,15 +647,34 @@ function ClientDetailScreen({
     })
   }
 
-  function openDocDetail(d: DocLigne, type: 'Commande (CDC)' | 'Devis') {
+  function openDocDetail(d: DocAgrege, type: string) {
     setOpenDetail({
-      title: d.numero || '(sans numéro)',
-      subtitle: type,
+      title: d.numeroPiece || '(sans numéro)',
+      subtitle: `${type} · ${formatMoney(d.montantHt)}`,
       fields: [
-        { label: 'N° de pièce', value: d.numero },
         { label: 'Date', value: formatDateFr(d.date) },
-        { label: 'Montant HT', value: formatMoney(d.montant_ht) },
+        { label: 'Référence chantier', value: d.reference || '—' },
+        { label: 'Montant total HT', value: formatMoney(d.montantHt) },
+        ...d.lignes.map((l, i) => ({
+          label: `${l.reference_article || '—'}${l.designation ? ` — ${l.designation}` : ''}`,
+          value: `${l.quantite} × ${formatMoney(l.montant_ht)}`,
+        })),
+      ],
+    })
+  }
+
+  function openVisiteDetail(v: VisiteEvent) {
+    const startDate = v.start ? new Date(v.start) : null
+    const endDate = v.end ? new Date(v.end) : null
+    const fmtTime = (d: Date | null) => (d ? d.toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '')
+    setOpenDetail({
+      title: v.subject,
+      subtitle: RDV_TYPE_LABELS[v.type] || v.type || 'Activité',
+      fields: [
         { label: 'Client', value: `${client.nom} (${client.numero})` },
+        { label: 'Début', value: v.allDay ? (startDate ? startDate.toLocaleDateString('fr-FR') : '') : fmtTime(startDate) },
+        { label: 'Fin', value: v.allDay ? (endDate ? endDate.toLocaleDateString('fr-FR') : '') : fmtTime(endDate) },
+        { label: 'Toute la journée', value: v.allDay ? 'Oui' : 'Non' },
       ],
     })
   }
@@ -570,48 +710,30 @@ function ClientDetailScreen({
         )}
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-          <MiniCard label="Dernière visite" value={loading ? '…' : detail?.derniereVisite || 'Non renseigné'} />
-          <MiniCard label="Prochaine visite" value={loading ? '…' : detail?.prochaineVisite || 'Non renseigné'} />
+          <MiniCard
+            label="Dernière visite"
+            value={loading ? '…' : detail?.derniereVisite ? formatDateFr(detail.derniereVisite.start.slice(0, 10)) : 'Non renseigné'}
+            onClick={detail?.derniereVisite ? () => openVisiteDetail(detail.derniereVisite!) : undefined}
+          />
+          <MiniCard
+            label="Prochaine visite"
+            value={loading ? '…' : detail?.prochaineVisite ? formatDateFr(detail.prochaineVisite.start.slice(0, 10)) : 'Non renseigné'}
+            onClick={detail?.prochaineVisite ? () => openVisiteDetail(detail.prochaineVisite!) : undefined}
+          />
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-          <div
-            style={{
-              borderRadius: 14, border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.04)',
-              padding: '12px 13px',
-            }}
-          >
-            <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
-              CA depuis le 1er janvier
-            </div>
-            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 19, fontWeight: 700, color: '#fff', marginTop: 4 }}>
-              {formatMoney(client.caYtdN)}
-            </div>
-            <div style={{ marginTop: 5, fontSize: 11 }}>
-              <EvolLine value={client.caYtdN} n1={client.caYtdN1} />
-            </div>
-          </div>
+          <StatMini label="CA depuis le 1er janvier" value={formatMoney(client.caYtdN)}>
+            <EvolLine value={client.caYtdN} n1={client.caYtdN1} />
+          </StatMini>
+          <StatMini label="Devis depuis le 1er janvier" value={formatMoney(client.devisYtdN)}>
+            {loading || !detail ? <span style={{ color: 'rgba(255,255,255,0.4)' }}>…</span> : <EvolLine value={client.devisYtdN} n1={detail.devisYtdN1} />}
+          </StatMini>
+        </div>
 
-          <div
-            style={{
-              borderRadius: 14, border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.04)',
-              padding: '12px 13px',
-            }}
-          >
-            <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
-              Devis depuis le 1er janvier
-            </div>
-            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 19, fontWeight: 700, color: '#fff', marginTop: 4 }}>
-              {formatMoney(client.devisYtdN)}
-            </div>
-            <div style={{ marginTop: 5, fontSize: 11 }}>
-              {loading || !detail ? (
-                <span style={{ color: 'rgba(255,255,255,0.4)' }}>…</span>
-              ) : (
-                <EvolLine value={client.devisYtdN} n1={detail.devisYtdN1} />
-              )}
-            </div>
-          </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          <StatMini label="BL depuis le 1er janvier" value={loading || !detail ? '…' : formatMoney(detail.blYtd)} />
+          <StatMini label="Factures depuis le 1er janvier" value={loading || !detail ? '…' : formatMoney(detail.facturesYtd)} />
         </div>
 
         <div
@@ -635,7 +757,7 @@ function ClientDetailScreen({
           {loading ? (
             <Loading />
           ) : !detail || detail.actions.length === 0 ? (
-            <Empty text="Aucune action liée à ce client." />
+            <Empty text="Aucune action en cours pour ce client." />
           ) : (
             detail.actions.map((a) => (
               <RowItem
@@ -644,9 +766,7 @@ function ClientDetailScreen({
                 subtitle={[
                   a.due_date ? `Échéance ${formatDateFr(normalizeDateIso(a.due_date))}` : '',
                   a.assigned_to ? `Assigné : ${a.assigned_to}` : '',
-                ]
-                  .filter(Boolean)
-                  .join(' · ')}
+                ].filter(Boolean).join(' · ')}
                 trailing={a.status}
                 onClick={() => openActionDetail(a)}
               />
@@ -654,41 +774,11 @@ function ClientDetailScreen({
           )}
         </Section>
 
-        <Section title="Commandes (CDC)">
-          {loading ? (
-            <Loading />
-          ) : !detail || detail.commandes.length === 0 ? (
-            <Empty text="Aucune commande." />
-          ) : (
-            detail.commandes.map((d, i) => (
-              <RowItem
-                key={`${d.numero}-${i}`}
-                title={d.numero || '—'}
-                subtitle={formatDateFr(d.date)}
-                trailing={formatMoney(d.montant_ht)}
-                onClick={() => openDocDetail(d, 'Commande (CDC)')}
-              />
-            ))
-          )}
-        </Section>
-
-        <Section title="Devis (2 derniers mois)">
-          {loading ? (
-            <Loading />
-          ) : !detail || detail.devis.length === 0 ? (
-            <Empty text="Aucun devis sur la période." />
-          ) : (
-            detail.devis.map((d, i) => (
-              <RowItem
-                key={`${d.numero}-${i}`}
-                title={d.numero || '—'}
-                subtitle={formatDateFr(d.date)}
-                trailing={formatMoney(d.montant_ht)}
-                onClick={() => openDocDetail(d, 'Devis')}
-              />
-            ))
-          )}
-        </Section>
+        <DocumentSection title="Commandes (CDC)" loading={loading} docs={detail?.commandes} onOpen={(d) => openDocDetail(d, 'Bon de commande')} />
+        <DocumentSection title="Préparations de livraison (PL)" loading={loading} docs={detail?.preparations} onOpen={(d) => openDocDetail(d, 'Préparation de livraison')} />
+        <DocumentSection title="Bons de livraison (BL)" loading={loading} docs={detail?.livraisons} onOpen={(d) => openDocDetail(d, 'Bon de livraison')} />
+        <DocumentSection title="Bons de retour (BR)" loading={loading} docs={detail?.retours} onOpen={(d) => openDocDetail(d, 'Bon de retour')} />
+        <DocumentSection title="Devis" loading={loading} docs={detail?.devis} onOpen={(d) => openDocDetail(d, 'Devis')} />
       </div>
 
       {openDetail && (
@@ -711,14 +801,59 @@ function ClientDetailScreen({
   )
 }
 
-function MiniCard({ label, value }: { label: string; value: string }) {
+function DocumentSection({
+  title, loading, docs, onOpen,
+}: { title: string; loading: boolean; docs: DocAgrege[] | undefined; onOpen: (d: DocAgrege) => void }) {
+  return (
+    <Section title={title}>
+      {loading ? (
+        <Loading />
+      ) : !docs || docs.length === 0 ? (
+        <Empty text="Aucun document." />
+      ) : (
+        docs.map((d) => (
+          <RowItem
+            key={d.numeroPiece}
+            title={d.numeroPiece}
+            subtitle={[formatDateFr(d.date), d.reference].filter(Boolean).join(' · ')}
+            trailing={formatMoney(d.montantHt)}
+            onClick={() => onOpen(d)}
+          />
+        ))
+      )}
+    </Section>
+  )
+}
+
+function StatMini({ label, value, children }: { label: string; value: string; children?: React.ReactNode }) {
   return (
     <div
+      style={{
+        borderRadius: 14, border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.04)',
+        padding: '12px 13px',
+      }}
+    >
+      <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
+        {label}
+      </div>
+      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 19, fontWeight: 700, color: '#fff', marginTop: 4 }}>
+        {value}
+      </div>
+      {children && <div style={{ marginTop: 5, fontSize: 11 }}>{children}</div>}
+    </div>
+  )
+}
+
+function MiniCard({ label, value, onClick }: { label: string; value: string; onClick?: () => void }) {
+  return (
+    <div
+      onClick={onClick}
       style={{
         borderRadius: 14,
         border: '1px solid rgba(255,255,255,0.10)',
         background: 'rgba(255,255,255,0.04)',
         padding: '11px 13px',
+        cursor: onClick ? 'pointer' : 'default',
       }}
     >
       <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
