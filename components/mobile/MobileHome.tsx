@@ -18,13 +18,7 @@ const BUTTONS: ButtonConfig[] = [
   { key: 'clients', label: 'Mes clients', sub: 'Fiches et suivi client', accessKey: 'can_dashboard' },
   { key: 'rdv', label: 'Mes rdv', sub: 'Agenda, comptes rendus, recherche documents' },
   { key: 'alertes', label: 'Mes alertes / Ma Todo liste', sub: 'À traiter en priorité' },
-  // NOTE : écran pas encore construit -- la clé 'prospects' doit être
-  // ajoutée au type MobileScreen ainsi qu'au routing dans MobileShell.tsx
-  // (elle pointait par erreur vers 'alertes', copié-collé de la ligne du
-  // dessus, ce qui aurait ouvert l'écran alertes en cliquant ici). En
-  // attente de préciser : source des données prospects, affichage liste ou
-  // carte, rayon de recherche fixe ou ajustable.
-  { key: 'prospects' as MobileScreen, label: 'Prospects', sub: 'Trouver un prospect autour de moi' },
+  { key: 'prospects', label: 'Prospects', sub: 'Trouver un prospect autour de moi' },
 ]
 
 export default function MobileHome({
@@ -63,14 +57,18 @@ export default function MobileHome({
       </div>
 
       {/* ---- Actions rapides : nouvelle tâche vocale + résumé vocal ---- */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <VoiceReportButtons
-          modeUnique="tache"
-          labelBouton="Nouvelle tâche"
-          userEmail={email || ''}
-          userName={email ? email.split('@')[0] : ''}
-        />
-        <MobileHomeSummary userEmail={email} />
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <VoiceReportButtons
+            modeUnique="tache"
+            labelBouton="Nouvelle tâche"
+            userEmail={email || ''}
+            userName={email ? email.split('@')[0] : ''}
+          />
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <MobileHomeSummary userEmail={email} />
+        </div>
       </div>
 
       {visibleButtons.map((b) => (

@@ -166,6 +166,8 @@ export default function VoiceReportButtons({
   const chunksRef = useRef<Blob[]>([])
   const streamRef = useRef<MediaStream | null>(null)
   const dernierResultatRef = useRef<{ transcript: string; resume: string; taches: Tache[] } | null>(null)
+  const audioEnCoursRef = useRef<HTMLAudioElement | null>(null)
+  const resolveLectureRef = useRef<(() => void) | null>(null)
 
   async function chargerComptesRendus() {
     if (modeUnique || !rdvActivityId) {
@@ -219,7 +221,9 @@ export default function VoiceReportButtons({
       const blob = await res.blob()
       const url = URL.createObjectURL(blob)
       const audio = new Audio(url)
+      audioEnCoursRef.current = audio
       await new Promise<void>((resolve) => {
+        resolveLectureRef.current = resolve
         audio.onended = () => resolve()
         audio.onerror = () => resolve()
         void audio.play().catch(() => resolve())
@@ -228,7 +232,23 @@ export default function VoiceReportButtons({
     } catch {
       // silencieux : le texte reste affiché à l'écran dans tous les cas.
     } finally {
+      audioEnCoursRef.current = null
+      resolveLectureRef.current = null
       setLectureEnCours(false)
+    }
+  }
+
+  /** Coupe la lecture en cours à tout moment (bouton "⏹ Stop" affiché tant
+   * que lectureEnCours est vrai). pause() ne déclenche pas onended, donc on
+   * résout manuellement la promesse en attente pour laisser le flux
+   * continuer normalement (ex. passer à l'écoute de confirmation). */
+  function arreterLecture() {
+    if (audioEnCoursRef.current) {
+      try { audioEnCoursRef.current.pause() } catch {}
+    }
+    if (resolveLectureRef.current) {
+      resolveLectureRef.current()
+      resolveLectureRef.current = null
     }
   }
 
@@ -416,6 +436,23 @@ export default function VoiceReportButtons({
 
   return (
     <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {/* Visible à tout moment pendant une lecture, quelle que soit l'étape
+         du flux (annonce, résumé, confirmation, message final). */}
+      {lectureEnCours && (
+        <button
+          type="button"
+          onClick={arreterLecture}
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+            padding: '7px 10px', borderRadius: 999, border: '1px solid rgba(255,255,255,0.22)',
+            background: 'rgba(255,255,255,0.08)', color: '#fff', fontSize: 11.5, fontWeight: 700,
+            cursor: 'pointer', alignSelf: 'flex-start',
+          }}
+        >
+          ⏹ Stop
+        </button>
+      )}
+
       {/* ---- Compte(s)-rendu(s) déjà enregistré(s) pour ce rdv ---- */}
       {comptesRendusExistants && comptesRendusExistants.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -459,7 +496,7 @@ export default function VoiceReportButtons({
 
       {/* ---- Boutons de lancement ---- */}
       {etape === 'idle' && modeUnique && (
-        <button type="button" onClick={() => void lancer('tache')} style={{ ...boutonStyle('#A6A181'), width: '100%' }}>
+        <button type="button" onClick={() => void lancer('tache')} style={boutonStyle('#A6A181')}>
           🎙️ {labelBouton || 'Nouvelle tâche vocale'}
         </button>
       )}
@@ -574,15 +611,17 @@ function boutonStyle(color: string): React.CSSProperties {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
-    padding: '10px 12px',
+    gap: 5,
+    padding: '9px 8px',
     borderRadius: 10,
     border: `1px solid ${color}55`,
     background: `${color}1F`,
     color: '#fff',
-    fontSize: 12.5,
+    fontSize: 11.5,
     fontWeight: 600,
     cursor: 'pointer',
+    textAlign: 'center',
+    lineHeight: 1.25,
   }
 }
 

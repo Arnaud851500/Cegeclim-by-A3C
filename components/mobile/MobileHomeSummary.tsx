@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 
 /**
@@ -49,6 +49,8 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
   const [texte, setTexte] = useState('')
   const [erreur, setErreur] = useState('')
   const [lectureEnCours, setLectureEnCours] = useState(false)
+  const audioEnCoursRef = useRef<HTMLAudioElement | null>(null)
+  const resolveLectureRef = useRef<(() => void) | null>(null)
 
   async function jouerTexte(texte: string) {
     if (!texte) return
@@ -63,7 +65,9 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       const blob = await res.blob()
       const url = URL.createObjectURL(blob)
       const audio = new Audio(url)
+      audioEnCoursRef.current = audio
       await new Promise<void>((resolve) => {
+        resolveLectureRef.current = resolve
         audio.onended = () => resolve()
         audio.onerror = () => resolve()
         void audio.play().catch(() => resolve())
@@ -72,7 +76,21 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
     } catch {
       // silencieux : le texte reste affiché à l'écran dans tous les cas.
     } finally {
+      audioEnCoursRef.current = null
+      resolveLectureRef.current = null
       setLectureEnCours(false)
+    }
+  }
+
+  /** Coupe la lecture à tout moment. pause() ne déclenche pas onended, donc
+   * on résout manuellement la promesse en attente. */
+  function arreterLecture() {
+    if (audioEnCoursRef.current) {
+      try { audioEnCoursRef.current.pause() } catch {}
+    }
+    if (resolveLectureRef.current) {
+      resolveLectureRef.current()
+      resolveLectureRef.current = null
     }
   }
 
@@ -174,10 +192,10 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         type="button"
         onClick={() => setOuvert(true)}
         style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-          width: '100%', padding: '10px 12px', borderRadius: 10,
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+          width: '100%', padding: '9px 8px', borderRadius: 10,
           border: '1px solid rgba(75,146,172,0.4)', background: 'rgba(75,146,172,0.14)',
-          color: '#fff', fontSize: 12.5, fontWeight: 600, cursor: 'pointer',
+          color: '#fff', fontSize: 11.5, fontWeight: 600, cursor: 'pointer', lineHeight: 1.25,
         }}
       >
         🔊 Résumé vocal
@@ -191,9 +209,24 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.45)' }}>
           Résumé vocal
         </div>
-        <button type="button" onClick={fermer} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)', fontSize: 18, lineHeight: 1, cursor: 'pointer' }}>
-          ✕
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          {lectureEnCours && (
+            <button
+              type="button"
+              onClick={arreterLecture}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 5, padding: '5px 9px', borderRadius: 999,
+                border: '1px solid rgba(255,255,255,0.22)', background: 'rgba(255,255,255,0.08)',
+                color: '#fff', fontSize: 11, fontWeight: 700, cursor: 'pointer',
+              }}
+            >
+              ⏹ Stop
+            </button>
+          )}
+          <button type="button" onClick={fermer} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)', fontSize: 18, lineHeight: 1, cursor: 'pointer' }}>
+            ✕
+          </button>
+        </div>
       </div>
 
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>

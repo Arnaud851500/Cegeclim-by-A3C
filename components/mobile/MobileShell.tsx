@@ -8,8 +8,9 @@ import MobileActivite from './MobileActivite'
 import MobileClients from './MobileClients'
 import MobileRdv from './MobileRdv'
 import MobileAlertes from './MobileAlertes'
+import MobileProspects from './MobileProspects'
 
-export type MobileScreen = 'home' | 'activite' | 'clients' | 'rdv' | 'alertes'
+export type MobileScreen = 'home' | 'activite' | 'clients' | 'rdv' | 'alertes' | 'prospects'
 
 /**
  * Point d'entrée de l'expérience mobile, une fois l'utilisateur authentifié.
@@ -48,6 +49,7 @@ export default function MobileShell() {
       {screen === 'clients' && <MobileClients />}
       {screen === 'rdv' && <MobileRdv />}
       {screen === 'alertes' && <MobileAlertes detail={detail} loading={loading} fetchTodoList={fetchTodoList} fetchCerfaList={fetchCerfaList} />}
+      {screen === 'prospects' && <MobileProspects />}
     </div>
   )
 }
@@ -62,6 +64,8 @@ function screenTitle(screen: MobileScreen) {
       return 'Mes rdv'
     case 'alertes':
       return 'Mes alertes'
+    case 'prospects':
+      return 'Prospects'
     default:
       return ''
   }
