@@ -11,14 +11,16 @@ type ButtonConfig = {
   label: string
   sub: string
   accessKey?: keyof AccessRights
+  icon: string
+  color: string
 }
 
 const BUTTONS: ButtonConfig[] = [
-  { key: 'activite', label: 'Mon activité', sub: 'Devis · CDC · BL · Factures · Marge', accessKey: 'can_dashboard' },
-  { key: 'clients', label: 'Mes clients', sub: 'Fiches et suivi client', accessKey: 'can_dashboard' },
-  { key: 'rdv', label: 'Mes rdv', sub: 'Agenda, comptes rendus, recherche documents' },
-  { key: 'alertes', label: 'Mes tâches - alertes', sub: 'À traiter en priorité' },
-  { key: 'prospects', label: 'Carte Prospects & Clients', sub: 'Trouver un prospect ou un client autour de moi' },
+  { key: 'activite', label: 'Mon activité', sub: 'Devis · CDC · BL · Factures · Marge', accessKey: 'can_dashboard', icon: '📊', color: '#4B92AC' },
+  { key: 'clients', label: 'Mes clients', sub: 'Fiches et suivi client', accessKey: 'can_dashboard', icon: '👥', color: '#A6A181' },
+  { key: 'rdv', label: 'Mes rdv', sub: 'Agenda, comptes rendus, recherche documents', icon: '📅', color: '#7A5EA8' },
+  { key: 'alertes', label: 'Mes tâches - alertes', sub: 'À traiter en priorité', icon: '✅', color: '#C1683C' },
+  { key: 'prospects', label: 'Carte Prospects & Clients', sub: 'Trouver un prospect ou un client autour de moi', icon: '🗺️', color: '#3F9142' },
 ]
 
 // Marge horizontale de l'écran -- réduite (18px -> 10px de chaque côté) :
@@ -95,8 +97,8 @@ export default function MobileHome({
                 alignItems: 'center',
                 justifyContent: 'center',
                 textAlign: 'center',
-                border: '1px solid rgba(255,255,255,0.12)',
-                background: 'rgba(255,255,255,0.045)',
+                border: `1px solid ${b.color}55`,
+                background: `${b.color}1A`,
                 borderRadius: 18,
                 padding: '20px 14px',
                 height: 148,
@@ -106,6 +108,15 @@ export default function MobileHome({
               }}
             >
               <span style={{ position: 'absolute', top: 12, right: 14, fontSize: 20, color: 'rgba(255,255,255,0.3)' }}>›</span>
+              <div
+                style={{
+                  width: 44, height: 44, borderRadius: 14, background: `${b.color}33`,
+                  border: `1px solid ${b.color}66`, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 22, marginBottom: 10,
+                }}
+              >
+                {b.icon}
+              </div>
               <div style={{ fontFamily: 'var(--font-display)', fontSize: 19, fontWeight: 700, lineHeight: 1.25 }}>
                 {b.label}
                 {b.key === 'alertes' && alertsCount > 0 ? ` (${alertsCount})` : ''}
