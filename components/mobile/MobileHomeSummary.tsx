@@ -65,6 +65,108 @@ function normaliser(value: string) {
   return String(value || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
 }
 
+// Table complète des nombres français 0-99 (formes correctes y compris
+// les irrégularités 70-79/80-99), sans accents et tirets remplacés par
+// des espaces -- générée une fois pour toutes, pas d'heuristique risquée.
+const NOMBRES_FR_0_99 = [
+  'zero', 'un', 'deux', 'trois', 'quatre', 'cinq', 'six', 'sept', 'huit', 'neuf',
+  'dix', 'onze', 'douze', 'treize', 'quatorze', 'quinze', 'seize', 'dix sept', 'dix huit', 'dix neuf',
+  'vingt', 'vingt et un', 'vingt deux', 'vingt trois', 'vingt quatre', 'vingt cinq', 'vingt six', 'vingt sept', 'vingt huit', 'vingt neuf',
+  'trente', 'trente et un', 'trente deux', 'trente trois', 'trente quatre', 'trente cinq', 'trente six', 'trente sept', 'trente huit', 'trente neuf',
+  'quarante', 'quarante et un', 'quarante deux', 'quarante trois', 'quarante quatre', 'quarante cinq', 'quarante six', 'quarante sept', 'quarante huit', 'quarante neuf',
+  'cinquante', 'cinquante et un', 'cinquante deux', 'cinquante trois', 'cinquante quatre', 'cinquante cinq', 'cinquante six', 'cinquante sept', 'cinquante huit', 'cinquante neuf',
+  'soixante', 'soixante et un', 'soixante deux', 'soixante trois', 'soixante quatre', 'soixante cinq', 'soixante six', 'soixante sept', 'soixante huit', 'soixante neuf',
+  'soixante dix', 'soixante et onze', 'soixante douze', 'soixante treize', 'soixante quatorze', 'soixante quinze', 'soixante seize', 'soixante dix sept', 'soixante dix huit', 'soixante dix neuf',
+  'quatre vingts', 'quatre vingt un', 'quatre vingt deux', 'quatre vingt trois', 'quatre vingt quatre', 'quatre vingt cinq', 'quatre vingt six', 'quatre vingt sept', 'quatre vingt huit', 'quatre vingt neuf',
+  'quatre vingt dix', 'quatre vingt onze', 'quatre vingt douze', 'quatre vingt treize', 'quatre vingt quatorze', 'quatre vingt quinze', 'quatre vingt seize', 'quatre vingt dix sept', 'quatre vingt dix huit', 'quatre vingt dix neuf',
+]
+// Table inversée "mots -> valeur", triée par nombre de mots décroissant
+// pour matcher en priorité les formes les plus longues (ex. "quatre
+// vingt dix sept" avant "quatre vingt dix" avant "quatre").
+const MOTS_VERS_NOMBRE = new Map<string, number>(NOMBRES_FR_0_99.map((mots, n) => [mots, n]))
+const FORMES_TRIEES = [...NOMBRES_FR_0_99].sort((a, b) => b.split(' ').length - a.split(' ').length)
+
+/** Convertit une suite de mots FR normalisés (ex. "zero cent soixante
+ * deux" ou "c zero cent soixante deux") en une chaîne de chiffres (ex.
+ * "0162"), en conservant les préfixes alphabétiques tels quels (lettres
+ * de code SAGE : "C", "DB", ...).
+ *
+ * Principe : "zéro" démarre toujours un nouveau groupe de chiffres à lui
+ * seul (c'est comme ça qu'on dicte naturellement un code composé :
+ * "zéro" puis "cent soixante-deux" = deux groupes "0" et "162" qu'on
+ * concatène, pas une addition). À l'intérieur d'un groupe, "cent" se
+ * combine avec ce qui l'entoure ("deux cent" = 200, "cent soixante
+ * deux" = 162) plutôt que d'être ignoré.
+ */
+function motsVersNumeroClient(texte: string): string {
+  const mots = normaliser(texte).replace(/-/g, ' ').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean)
+  const sortie: string[] = []
+  let i = 0
+
+  function matcherForme0a99(depart: number): { valeur: number; longueur: number } | null {
+    for (const forme of FORMES_TRIEES) {
+      const longueur = forme.split(' ').length
+      if (mots.slice(depart, depart + longueur).join(' ') === forme) {
+        return { valeur: MOTS_VERS_NOMBRE.get(forme) as number, longueur }
+      }
+    }
+    return null
+  }
+
+  while (i < mots.length) {
+    // Lettre isolée (préfixe de code SAGE, ex. "C", "D") -> conservée telle quelle.
+    if (/^[a-z]$/.test(mots[i])) {
+      sortie.push(mots[i].toUpperCase())
+      i += 1
+      continue
+    }
+
+    if (mots[i] === 'zero') {
+      sortie.push('0')
+      i += 1
+      continue
+    }
+
+    // "<0-9> cent" (ex. "deux cent" = 200) : le petit nombre juste avant
+    // "cent" est un multiplicateur, pas un chiffre isolé.
+    const avantCent = matcherForme0a99(i)
+    if (avantCent && avantCent.valeur <= 9 && mots[i + avantCent.longueur] === 'cent') {
+      let valeur = avantCent.valeur * 100
+      let j = i + avantCent.longueur + 1
+      const apres = matcherForme0a99(j)
+      if (apres) { valeur += apres.valeur; j += apres.longueur }
+      sortie.push(String(valeur))
+      i = j
+      continue
+    }
+
+    // "cent" seul en tête (ex. "cent soixante deux" = 162).
+    if (mots[i] === 'cent') {
+      let valeur = 100
+      let j = i + 1
+      const apres = matcherForme0a99(j)
+      if (apres) { valeur += apres.valeur; j += apres.longueur }
+      sortie.push(String(valeur))
+      i = j
+      continue
+    }
+
+    // Nombre simple 0-99 (forme la plus longue en priorité).
+    const simple = matcherForme0a99(i)
+    if (simple) {
+      sortie.push(String(simple.valeur))
+      i += simple.longueur
+      continue
+    }
+
+    // Mot non reconnu (bruit de transcription) : ignoré, on continue
+    // plutôt que de tout faire échouer.
+    i += 1
+  }
+
+  return sortie.join('')
+}
+
 /** Interprète la réponse parlée par mots-clés -- pas besoin d'IA pour un
  * choix parmi quelques options fixes. Renvoie null si rien de
  * reconnaissable, auquel cas l'agent redemande plutôt que de deviner.
@@ -604,23 +706,46 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
     const q = texte.trim()
     if (!q) return []
 
-    // Essai 1 : numéro exact ou en préfixe (utile si l'utilisateur dicte
-    // un numéro de tiers).
-    const { data: parNumero } = await supabase
+    // Essai 1 : numéro dicté ("C zéro cent soixante-deux") converti en
+    // chiffres ("C0162") avant recherche -- Whisper transcrit les nombres
+    // en toutes lettres, jamais en chiffres, donc une recherche brute sur
+    // le texte parlé ne matchait jamais un vrai numéro de tiers.
+    const numeroConverti = motsVersNumeroClient(q)
+    if (numeroConverti) {
+      const { data: parNumero } = await supabase
+        .from('ref_tiers')
+        .select('numero, intitule')
+        .ilike('numero', `${numeroConverti}%`)
+        .limit(5)
+      if (parNumero && parNumero.length > 0) {
+        return parNumero.map((r: any) => ({ numero: safeText(r.numero), nom: safeText(r.intitule) }))
+      }
+    }
+
+    // Essai 2 : numéro tel quel (au cas où le transcript contiendrait déjà
+    // des chiffres, ex. dictée avec Siri/clavier vocal qui écrit "0162").
+    const { data: parNumeroBrut } = await supabase
       .from('ref_tiers')
       .select('numero, intitule')
       .ilike('numero', `${q}%`)
       .limit(5)
-    if (parNumero && parNumero.length > 0) {
-      return parNumero.map((r: any) => ({ numero: safeText(r.numero), nom: safeText(r.intitule) }))
+    if (parNumeroBrut && parNumeroBrut.length > 0) {
+      return parNumeroBrut.map((r: any) => ({ numero: safeText(r.numero), nom: safeText(r.intitule) }))
     }
 
-    // Essai 2 : recherche par nom (contient).
-    const { data: parNom } = await supabase
-      .from('ref_tiers')
-      .select('numero, intitule')
-      .ilike('intitule', `%${q}%`)
-      .limit(5)
+    // Essai 3 : recherche par nom, tolérante à l'ordre des mots -- "Pascal
+    // Cuburu" doit matcher "EURL PASCAL CUBURU" même si l'ordre ou les
+    // mots autour diffèrent. On exige que TOUS les mots significatifs
+    // dictés (3 lettres ou plus, pour ignorer "le", "de", "du"...) se
+    // retrouvent quelque part dans l'intitulé, dans n'importe quel ordre.
+    const motsSignificatifs = normaliser(q).split(/\s+/).filter((m) => m.length >= 3)
+    if (motsSignificatifs.length === 0) return []
+
+    let requete = supabase.from('ref_tiers').select('numero, intitule')
+    for (const mot of motsSignificatifs) {
+      requete = requete.ilike('intitule', `%${mot}%`)
+    }
+    const { data: parNom } = await requete.limit(5)
     return (parNom || []).map((r: any) => ({ numero: safeText(r.numero), nom: safeText(r.intitule) }))
   }
 
