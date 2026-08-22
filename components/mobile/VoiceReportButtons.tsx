@@ -441,6 +441,20 @@ export default function VoiceReportButtons({
 
   const dernierCompteRendu = comptesRendusExistants && comptesRendusExistants.length > 0 ? comptesRendusExistants[0] : null
 
+  // Cas particulier : bouton "idle" en mode unique (accueil), rendu comme
+  // un simple <button> sans wrapper ni marge -- exactement comme celui de
+  // MobileHomeSummary à côté duquel il est affiché. Le reste du composant
+  // passe par `corps`, enveloppé dans un <div style={{marginTop:10,...}}>
+  // qui décalait ce bouton vers le bas et le faisait paraître plus petit/
+  // désaligné par rapport à son voisin.
+  if (etape === 'idle' && modeUnique) {
+    return (
+      <button type="button" onClick={() => void lancer('tache')} style={boutonStyle('#A6A181')}>
+        🎙️ {labelBouton || 'Nouvelle tâche vocale'}
+      </button>
+    )
+  }
+
   const corps = (
     <>
       {/* Visible à tout moment pendant une lecture, quelle que soit l'étape
@@ -501,13 +515,9 @@ export default function VoiceReportButtons({
         </div>
       )}
 
-      {/* ---- Boutons de lancement ---- */}
-      {etape === 'idle' && modeUnique && (
-        <button type="button" onClick={() => void lancer('tache')} style={boutonStyle('#A6A181')}>
-          🎙️ {labelBouton || 'Nouvelle tâche vocale'}
-        </button>
-      )}
-
+      {/* ---- Boutons de lancement ----
+         Le cas "idle && modeUnique" est court-circuité en tête de fonction
+         (rendu sans wrapper), donc pas répété ici. */}
       {etape === 'idle' && !modeUnique && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div style={{ display: 'flex', gap: 8 }}>
