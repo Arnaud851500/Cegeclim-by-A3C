@@ -155,6 +155,7 @@ export default function VoiceReportButtons({
    * de tâche depuis l'accueil. Laissé à false dans les fiches RDV/client,
    * où le composant est déjà inline dans une sheet existante (pas besoin
    * d'une seconde sheet par-dessus). */
+  pleinEcran?: boolean
 }) {
   const [modeActif, setModeActif] = useState<Mode | null>(null)
   const [etape, setEtape] = useState<Etape>('idle')
