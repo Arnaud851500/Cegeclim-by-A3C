@@ -318,6 +318,38 @@ export default function MobileProspects() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // CORRECTIF carte blanche : Leaflet calcule la taille de son canevas une
+  // seule fois, au moment précis de son initialisation -- si le conteneur
+  // n'a pas encore sa taille finale à cet instant (mise en page flex pas
+  // encore stabilisée, montage via dynamic()/ssr:false qui ajoute un cycle
+  // de rendu supplémentaire), la carte reste vide et ne se redessine
+  // jamais toute seule. On force plusieurs invalidateSize() sur ~1,5s après
+  // l'affichage de l'écran carte, jusqu'à ce que la taille soit stable --
+  // même principe que côté desktop (app/clients/page.tsx, fonction runFit).
+  useEffect(() => {
+    if (!filtresValides || !position) return
+    let cancelled = false
+    let attempts = 0
+
+    function tryInvalidate() {
+      if (cancelled) return
+      const map = mapRef.current
+      if (map && typeof map.invalidateSize === 'function') {
+        try { map.invalidateSize() } catch {}
+      }
+      attempts += 1
+      if (attempts < 10) {
+        window.setTimeout(tryInvalidate, 150)
+      }
+    }
+
+    const t = window.setTimeout(tryInvalidate, 80)
+    return () => {
+      cancelled = true
+      window.clearTimeout(t)
+    }
+  }, [filtresValides, position])
+
   useEffect(() => {
     if (!position || !filtresValides) return
     let cancelled = false
