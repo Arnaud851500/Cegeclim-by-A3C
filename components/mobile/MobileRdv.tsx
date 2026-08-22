@@ -148,15 +148,122 @@ export default function MobileRdv() {
   const [rdvList, setRdvList] = useState<BlgActivity[] | null>(null)
   const [rdvLoading, setRdvLoading] = useState(true)
   const [rdvUnconfigured, setRdvUnconfigured] = useState(false)
+  const [blgPartnerId, setBlgPartnerId] = useState<string | null>(null)
+
+  // Période affichée -- par défaut les 30 prochains jours, mais
+  // sélectionnable via le bouton "📅 Agenda" (raccourcis semaine ou dates
+  // libres, passées ou futures).
+  const [periodeLabel, setPeriodeLabel] = useState('30 prochains jours')
+  const [agendaOuvert, setAgendaOuvert] = useState(false)
+  const [dateDebutInput, setDateDebutInput] = useState('')
+  const [dateFinInput, setDateFinInput] = useState('')
 
   // Identité de l'utilisateur courant — nécessaire pour VoiceReportButtons
   // (created_by des tâches/compte-rendu créés depuis un RDV).
   const [currentEmail, setCurrentEmail] = useState('')
   const [currentName, setCurrentName] = useState('')
 
+  /** Charge les rendez-vous pour une période donnée [debut, fin[ (fin
+   * exclusive) -- réutilisée au montage (30 prochains jours par défaut) et
+   * à chaque changement de période via le bouton "Agenda". */
+  async function chargerRdv(partnerId: string, debut: Date, fin: Date) {
+    setRdvLoading(true)
+    try {
+      const start = debut.toISOString().slice(0, 10)
+      const end = fin.toISOString().slice(0, 10)
+
+      const { data, error } = await supabase
+        .from('crm_base_activity')
+        .select('*')
+        .eq('internal_tag', 'normal')
+        .in('type', RDV_TYPE_KEYS)
+        .eq('from_fk', partnerId)
+        .gte('start_date', start)
+        .lt('start_date', end)
+        .order('start_date', { ascending: true })
+        .limit(200)
+
+      if (error) {
+        console.error('[MobileRdv] crm_base_activity', error)
+        setRdvList([])
+        return
+      }
+
+      const rows = (data || []) as Record<string, any>[]
+
+      // Nom d'entreprise ET numéro tiers liés : crm_activity_company
+      // (activity_fk, company_fk) -> partner_base_partner.id /
+      // company_name / reference (= numéro tiers SAGE). Résolu en 2
+      // requêtes batch. Une erreur ici ne doit jamais empêcher l'affichage
+      // des rendez-vous eux-mêmes — repli silencieux sur "pas d'entreprise".
+      const companyByActivity = new Map<number, { name: string; numeroTiers: string | null }>()
+      try {
+        const activityIds = rows.map((r) => r.id).filter((v) => v !== null && v !== undefined)
+        if (activityIds.length > 0) {
+          const { data: links } = await supabase
+            .from('crm_activity_company')
+            .select('activity_fk, company_fk')
+            .in('activity_fk', activityIds)
+
+          const companyIds = Array.from(
+            new Set(((links || []) as Record<string, any>[]).map((l) => l.company_fk).filter((v) => v !== null && v !== undefined)),
+          )
+
+          if (companyIds.length > 0) {
+            const { data: companies } = await supabase
+              .from('partner_base_partner')
+              .select('id, company_name, reference')
+              .in('id', companyIds)
+
+            const infoById = new Map(
+              ((companies || []) as Record<string, any>[]).map((c) => [
+                c.id,
+                { name: String(c.company_name || '').trim(), numeroTiers: String(c.reference || '').trim() || null },
+              ]),
+            )
+
+            ;((links || []) as Record<string, any>[]).forEach((l) => {
+              const info = infoById.get(l.company_fk)
+              if (info?.name) companyByActivity.set(l.activity_fk, info)
+            })
+          }
+        }
+      } catch (e) {
+        console.warn('[MobileRdv] résolution entreprise liée impossible :', e)
+      }
+
+      setRdvUnconfigured(false)
+      setRdvList(
+        rows.map((row) => {
+          const info = companyByActivity.get(row.id)
+          return {
+            id: String(row.id),
+            type: String(row.type ?? ''),
+            // "comment" est la colonne réelle du texte descriptif sur
+            // crm_base_activity (confirmé via information_schema — pas de
+            // colonne subject/title/name/label sur cette table).
+            subject: String(pick(row, ['comment', 'subject', 'title', 'name', 'label']) || RDV_TYPE_LABELS[String(row.type ?? '')] || 'Activité'),
+            company: info?.name || null,
+            numeroTiers: info?.numeroTiers || null,
+            // NE PAS tronquer le timestamp (garder le fuseau horaire) : un
+            // .slice(0, 19) sur "2026-08-23T22:00:00+00:00" donnait
+            // "2026-08-23T22:00:00", réinterprété par `new Date()` comme 22h
+            // locale plutôt que 22h UTC (= 00h locale le lendemain) — ce qui
+            // décalait la date/heure affichée d'environ 2h en été.
+            start: String(row.start_date || ''),
+            end: String(row.end_date || row.start_date || ''),
+            allDay: Boolean(row.all_day),
+          }
+        }),
+      )
+    } finally {
+      setRdvLoading(false)
+    }
+  }
+
   useEffect(() => {
     let cancelled = false
-    async function loadRdv() {
+    async function init() {
       setRdvLoading(true)
       try {
         const { data: sessionData } = await supabase.auth.getSession()
@@ -169,121 +276,90 @@ export default function MobileRdv() {
           .eq('email', email)
           .maybeSingle()
 
-        if (!cancelled) {
-          setCurrentEmail(email)
-          setCurrentName(String(access?.display_name || '').trim() || fallbackNameFromEmail(email))
-        }
+        if (cancelled) return
+        setCurrentEmail(email)
+        setCurrentName(String(access?.display_name || '').trim() || fallbackNameFromEmail(email))
 
         if (!access?.blg_partner_id) {
-          if (!cancelled) {
-            setRdvUnconfigured(true)
-            setRdvList([])
-          }
-          return
-        }
-
-        const today = new Date()
-        const start = today.toISOString().slice(0, 10)
-        const later = new Date(today)
-        later.setDate(later.getDate() + 30)
-        const end = later.toISOString().slice(0, 10)
-
-        const { data, error } = await supabase
-          .from('crm_base_activity')
-          .select('*')
-          .eq('internal_tag', 'normal')
-          .in('type', RDV_TYPE_KEYS)
-          .eq('from_fk', access.blg_partner_id)
-          .gte('start_date', start)
-          .lt('start_date', end)
-          .order('start_date', { ascending: true })
-          .limit(100)
-
-        if (cancelled) return
-        if (error) {
-          console.error('[MobileRdv] crm_base_activity', error)
+          setRdvUnconfigured(true)
           setRdvList([])
           return
         }
 
-        const rows = (data || []) as Record<string, any>[]
+        setBlgPartnerId(access.blg_partner_id)
 
-        // Nom d'entreprise ET numéro tiers liés : crm_activity_company
-        // (activity_fk, company_fk) -> partner_base_partner.id /
-        // company_name / reference (= numéro tiers SAGE). Résolu en 2
-        // requêtes batch. Une erreur ici ne doit jamais empêcher l'affichage
-        // des rendez-vous eux-mêmes — repli silencieux sur "pas d'entreprise".
-        const companyByActivity = new Map<number, { name: string; numeroTiers: string | null }>()
-        try {
-          const activityIds = rows.map((r) => r.id).filter((v) => v !== null && v !== undefined)
-          if (activityIds.length > 0) {
-            const { data: links } = await supabase
-              .from('crm_activity_company')
-              .select('activity_fk, company_fk')
-              .in('activity_fk', activityIds)
-
-            const companyIds = Array.from(
-              new Set(((links || []) as Record<string, any>[]).map((l) => l.company_fk).filter((v) => v !== null && v !== undefined)),
-            )
-
-            if (companyIds.length > 0) {
-              const { data: companies } = await supabase
-                .from('partner_base_partner')
-                .select('id, company_name, reference')
-                .in('id', companyIds)
-
-              const infoById = new Map(
-                ((companies || []) as Record<string, any>[]).map((c) => [
-                  c.id,
-                  { name: String(c.company_name || '').trim(), numeroTiers: String(c.reference || '').trim() || null },
-                ]),
-              )
-
-              ;((links || []) as Record<string, any>[]).forEach((l) => {
-                const info = infoById.get(l.company_fk)
-                if (info?.name) companyByActivity.set(l.activity_fk, info)
-              })
-            }
-          }
-        } catch (e) {
-          console.warn('[MobileRdv] résolution entreprise liée impossible :', e)
-        }
-
-        if (cancelled) return
-
-        setRdvUnconfigured(false)
-        setRdvList(
-          rows.map((row) => {
-            const info = companyByActivity.get(row.id)
-            return {
-              id: String(row.id),
-              type: String(row.type ?? ''),
-              // "comment" est la colonne réelle du texte descriptif sur
-              // crm_base_activity (confirmé via information_schema — pas de
-              // colonne subject/title/name/label sur cette table).
-              subject: String(pick(row, ['comment', 'subject', 'title', 'name', 'label']) || RDV_TYPE_LABELS[String(row.type ?? '')] || 'Activité'),
-              company: info?.name || null,
-              numeroTiers: info?.numeroTiers || null,
-              // NE PAS tronquer le timestamp (garder le fuseau horaire) : un
-              // .slice(0, 19) sur "2026-08-23T22:00:00+00:00" donnait
-              // "2026-08-23T22:00:00", réinterprété par `new Date()` comme 22h
-              // locale plutôt que 22h UTC (= 00h locale le lendemain) — ce qui
-              // décalait la date/heure affichée d'environ 2h en été.
-              start: String(row.start_date || ''),
-              end: String(row.end_date || row.start_date || ''),
-              allDay: Boolean(row.all_day),
-            }
-          }),
-        )
+        const today = new Date()
+        const later = new Date(today)
+        later.setDate(later.getDate() + 30)
+        await chargerRdv(access.blg_partner_id, today, later)
       } finally {
         if (!cancelled) setRdvLoading(false)
       }
     }
-    void loadRdv()
+    void init()
     return () => {
       cancelled = true
     }
   }, [])
+
+  /** Raccourcis "Agenda" : semaine dernière / cette semaine / semaine
+   * prochaine / retour aux 30 prochains jours par défaut. */
+  function selectionnerPeriode(preset: 'semaine_derniere' | 'semaine_courante' | 'semaine_prochaine' | 'defaut') {
+    if (!blgPartnerId) return
+    const aujourdHui = new Date()
+    const jourSemaine = aujourdHui.getDay() || 7 // lundi = 1 ... dimanche = 7
+    const lundiCourant = new Date(aujourdHui)
+    lundiCourant.setDate(aujourdHui.getDate() - (jourSemaine - 1))
+    lundiCourant.setHours(0, 0, 0, 0)
+
+    let debut: Date
+    let fin: Date
+    let label: string
+
+    if (preset === 'defaut') {
+      debut = new Date(aujourdHui)
+      fin = new Date(aujourdHui)
+      fin.setDate(fin.getDate() + 30)
+      label = '30 prochains jours'
+    } else if (preset === 'semaine_derniere') {
+      debut = new Date(lundiCourant)
+      debut.setDate(debut.getDate() - 7)
+      fin = new Date(lundiCourant)
+      label = 'Semaine dernière'
+    } else if (preset === 'semaine_courante') {
+      debut = new Date(lundiCourant)
+      fin = new Date(lundiCourant)
+      fin.setDate(fin.getDate() + 7)
+      label = 'Cette semaine'
+    } else {
+      debut = new Date(lundiCourant)
+      debut.setDate(debut.getDate() + 7)
+      fin = new Date(lundiCourant)
+      fin.setDate(fin.getDate() + 14)
+      label = 'Semaine prochaine'
+    }
+
+    setPeriodeLabel(label)
+    setAgendaOuvert(false)
+    void chargerRdv(blgPartnerId, debut, fin)
+  }
+
+  /** Dates libres, passées ou futures -- saisies via les deux champs date. */
+  function appliquerPeriodePersonnalisee() {
+    if (!blgPartnerId || !dateDebutInput || !dateFinInput) return
+    const debut = new Date(`${dateDebutInput}T00:00:00`)
+    const finSaisie = new Date(`${dateFinInput}T00:00:00`)
+    if (Number.isNaN(debut.getTime()) || Number.isNaN(finSaisie.getTime())) return
+    // Fin exclusive côté requête -- on ajoute un jour pour inclure la date
+    // de fin choisie par l'utilisateur dans les résultats.
+    const fin = new Date(finSaisie)
+    fin.setDate(fin.getDate() + 1)
+
+    const fmt = (d: Date) => d.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: '2-digit' })
+    setPeriodeLabel(`${fmt(debut)} → ${fmt(finSaisie)}`)
+    setAgendaOuvert(false)
+    void chargerRdv(blgPartnerId, debut, fin)
+  }
 
   function openRdvDetail(r: BlgActivity) {
     const startDate = r.start ? new Date(r.start) : null
@@ -380,8 +456,22 @@ export default function MobileRdv() {
           padding: '14px 16px',
         }}
       >
-        <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 10 }}>
-          Rendez-vous — 30 prochains jours
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+          <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
+            Rendez-vous — {periodeLabel}
+          </div>
+          <button
+            type="button"
+            onClick={() => setAgendaOuvert(true)}
+            disabled={!blgPartnerId}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6, padding: '6px 11px', borderRadius: 999,
+              border: '1px solid rgba(75,146,172,0.4)', background: 'rgba(75,146,172,0.14)',
+              color: '#8FC7DA', fontSize: 12, fontWeight: 700, opacity: blgPartnerId ? 1 : 0.4,
+            }}
+          >
+            📅 Agenda
+          </button>
         </div>
 
         {rdvLoading ? (
@@ -391,7 +481,7 @@ export default function MobileRdv() {
             Identifiant partner BLG non renseigné pour ce compte (user_page_access.blg_partner_id).
           </div>
         ) : !rdvList || rdvList.length === 0 ? (
-          <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Aucun rendez-vous sur les 30 prochains jours.</div>
+          <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Aucun rendez-vous sur cette période ({periodeLabel}).</div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {rdvList.map((r) => {
@@ -511,6 +601,82 @@ export default function MobileRdv() {
         </div>
       </div>
 
+      {agendaOuvert && (
+        <div
+          style={{ position: 'fixed', inset: 0, zIndex: 2100, background: 'rgba(6,10,18,0.65)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
+          onClick={() => setAgendaOuvert(false)}
+        >
+          <div
+            style={{ width: '100%', maxWidth: 480, background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.1)', padding: '12px 18px 26px', display: 'flex', flexDirection: 'column', gap: 14 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 2px' }} />
+            <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Choisir une période</div>
+
+            <div>
+              <div style={{ fontSize: 11.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 8 }}>
+                Raccourcis
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button type="button" onClick={() => selectionnerPeriode('semaine_derniere')} style={periodeChipStyle(periodeLabel === 'Semaine dernière')}>
+                  Semaine dernière
+                </button>
+                <button type="button" onClick={() => selectionnerPeriode('semaine_courante')} style={periodeChipStyle(periodeLabel === 'Cette semaine')}>
+                  Cette semaine
+                </button>
+                <button type="button" onClick={() => selectionnerPeriode('semaine_prochaine')} style={periodeChipStyle(periodeLabel === 'Semaine prochaine')}>
+                  Semaine prochaine
+                </button>
+                <button type="button" onClick={() => selectionnerPeriode('defaut')} style={periodeChipStyle(periodeLabel === '30 prochains jours')}>
+                  30 prochains jours
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <div style={{ fontSize: 11.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 8 }}>
+                Dates libres (passées ou futures)
+              </div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <input
+                  type="date"
+                  value={dateDebutInput}
+                  onChange={(e) => setDateDebutInput(e.target.value)}
+                  style={{ flex: 1, height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 13.5 }}
+                />
+                <span style={{ color: 'rgba(255,255,255,0.4)', fontSize: 13 }}>→</span>
+                <input
+                  type="date"
+                  value={dateFinInput}
+                  onChange={(e) => setDateFinInput(e.target.value)}
+                  style={{ flex: 1, height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 13.5 }}
+                />
+              </div>
+              <button
+                type="button"
+                onClick={appliquerPeriodePersonnalisee}
+                disabled={!dateDebutInput || !dateFinInput}
+                style={{
+                  marginTop: 10, width: '100%', padding: '12px', borderRadius: 12, border: 'none',
+                  background: dateDebutInput && dateFinInput ? '#A6A181' : 'rgba(166,161,129,0.3)',
+                  color: '#141A26', fontSize: 14, fontWeight: 700,
+                }}
+              >
+                Voir cette période
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setAgendaOuvert(false)}
+              style={{ padding: '11px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: 'transparent', color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: 600 }}
+            >
+              Fermer
+            </button>
+          </div>
+        </div>
+      )}
+
       {openDetail && (
         <MobileDetailSheet
           title={openDetail.title}
@@ -522,4 +688,12 @@ export default function MobileRdv() {
       )}
     </div>
   )
+}
+
+function periodeChipStyle(actif: boolean): React.CSSProperties {
+  return {
+    padding: '9px 14px', borderRadius: 999, border: `1px solid ${actif ? 'rgba(75,146,172,0.6)' : 'rgba(255,255,255,0.15)'}`,
+    background: actif ? 'rgba(75,146,172,0.3)' : 'rgba(255,255,255,0.04)',
+    color: '#fff', fontSize: 13, fontWeight: 600,
+  }
 }
