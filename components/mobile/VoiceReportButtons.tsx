@@ -6,24 +6,23 @@ import { supabase } from '@/lib/supabaseClient'
 /**
  * Deux boutons vocaux à insérer dans la sheet de détail d'un RDV (ou dans
  * la fiche client, juste après "prochaine visite") :
- * - "Compte-rendu vocal" : dicter le compte-rendu de la visite, l'IA le
- *   structure et détecte les tâches à créer.
+ * - "Compte-rendu vocal" (ou "Compléter" si un compte-rendu existe déjà) :
+ *   dicter le compte-rendu, l'IA le structure et détecte les tâches.
  * - "Ajouter une tâche vocale" : dicter une seule tâche liée au client.
  *
- * Flux : appui -> annonce vocale + gros bouton d'écoute -> nouvel appui
- * pour arrêter -> transcription + structuration
- * (POST /api/atelier-ai/voice-report) -> résumé affiché À L'ÉCRAN (et lu à
- * voix haute en best-effort) -> nouvel enregistrement pour confirmer ->
- * POST .../confirm qui écrit réellement en base si "oui".
+ * Flux entièrement mains libres après le premier appui : annonce -> gros
+ * bouton d'écoute -> nouvel appui pour arrêter -> transcription +
+ * structuration -> résumé affiché ET énoncé -> ré-écoute automatique pour
+ * la confirmation orale ("oui"/"non") -> écriture en base si "oui". Tout
+ * est aussi affiché à l'écran en toutes circonstances (l'audio est un
+ * plus, jamais le seul canal d'information).
  *
- * Tout est affiché visuellement à chaque étape : la lecture audio est un
- * plus, jamais le seul moyen de savoir ce qui se passe (Safari iOS peut
- * bloquer un play() qui ne part pas directement d'un geste utilisateur —
- * dans ce cas le bouton "🔊 Écouter" permet de rejouer manuellement).
- *
- * Au montage, si rdvActivityId est fourni, le(s) compte(s)-rendu(s) déjà
- * enregistré(s) pour ce rdv sont chargés et affichés en premier (lecture +
- * écoute), avant les boutons d'enregistrement.
+ * IMPORTANT — conversion WAV avant envoi : Safari iOS produit parfois, via
+ * MediaRecorder en 'audio/mp4', un fichier sans métadonnées de durée que
+ * les décodeurs serveur (dont l'API de transcription) rejettent comme
+ * "corrompu". On redécode donc systématiquement l'enregistrement via
+ * l'API Web Audio et on le ré-encode en WAV PCM 16 bits avant l'upload —
+ * ça garantit un fichier propre quel que soit le navigateur.
  */
 
 type Tache = { description: string; echeance: string | null; assigned_to_email: string | null }
@@ -48,6 +47,75 @@ type CompteRenduExistant = {
   taches_detectees: Tache[]
 }
 
+/** Redécode un blob audio quelconque puis le ré-encode en WAV PCM 16 bits —
+ * fichier toujours valide, indépendamment des quirks du conteneur d'origine
+ * (cf. note en tête de fichier sur le bug Safari). En cas d'échec de
+ * décodage (rare), on retombe sur le blob d'origine plutôt que de bloquer
+ * l'envoi. */
+async function convertirEnWav(blob: Blob): Promise<Blob> {
+  try {
+    const arrayBuffer = await blob.arrayBuffer()
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext
+    const audioCtx = new AudioContextClass()
+    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0))
+    const wav = audioBufferToWav(audioBuffer)
+    void audioCtx.close()
+    return new Blob([wav], { type: 'audio/wav' })
+  } catch (e) {
+    console.warn('[VoiceReportButtons] conversion WAV impossible, envoi du format brut', e)
+    return blob
+  }
+}
+
+function audioBufferToWav(buffer: AudioBuffer): ArrayBuffer {
+  const numChannels = buffer.numberOfChannels
+  const sampleRate = buffer.sampleRate
+  const bitDepth = 16
+
+  let interleaved: Float32Array
+  if (numChannels === 2) {
+    const ch0 = buffer.getChannelData(0)
+    const ch1 = buffer.getChannelData(1)
+    interleaved = new Float32Array(ch0.length * 2)
+    for (let i = 0; i < ch0.length; i++) {
+      interleaved[i * 2] = ch0[i]
+      interleaved[i * 2 + 1] = ch1[i]
+    }
+  } else {
+    interleaved = buffer.getChannelData(0)
+  }
+
+  const dataLength = interleaved.length * (bitDepth / 8)
+  const bufferOut = new ArrayBuffer(44 + dataLength)
+  const view = new DataView(bufferOut)
+
+  function writeString(offset: number, s: string) {
+    for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i))
+  }
+
+  writeString(0, 'RIFF')
+  view.setUint32(4, 36 + dataLength, true)
+  writeString(8, 'WAVE')
+  writeString(12, 'fmt ')
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, numChannels, true)
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, sampleRate * numChannels * (bitDepth / 8), true)
+  view.setUint16(32, numChannels * (bitDepth / 8), true)
+  view.setUint16(34, bitDepth, true)
+  writeString(36, 'data')
+  view.setUint32(40, dataLength, true)
+
+  let offset = 44
+  for (let i = 0; i < interleaved.length; i++, offset += 2) {
+    const s = Math.max(-1, Math.min(1, interleaved[i]))
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true)
+  }
+
+  return bufferOut
+}
+
 export default function VoiceReportButtons({
   numeroTiers,
   clientNom,
@@ -70,6 +138,7 @@ export default function VoiceReportButtons({
   const [spokenAffiche, setSpokenAffiche] = useState('')
   const [tachesAffichees, setTachesAffichees] = useState<Tache[]>([])
   const [lectureEnCours, setLectureEnCours] = useState(false)
+  const [compteRenduIdCible, setCompteRenduIdCible] = useState<string | null>(null)
 
   const [comptesRendusExistants, setComptesRendusExistants] = useState<CompteRenduExistant[] | null>(null)
 
@@ -78,29 +147,32 @@ export default function VoiceReportButtons({
   const streamRef = useRef<MediaStream | null>(null)
   const dernierResultatRef = useRef<{ transcript: string; resume: string; taches: Tache[] } | null>(null)
 
-  // Charge le(s) compte(s)-rendu(s) déjà enregistré(s) pour ce rdv.
+  async function chargerComptesRendus() {
+    if (!rdvActivityId) {
+      setComptesRendusExistants([])
+      return
+    }
+    const { data, error } = await supabase
+      .from('client_comptes_rendus')
+      .select('id, created_at, resume, taches_detectees')
+      .eq('rdv_activity_id', rdvActivityId)
+      .order('created_at', { ascending: false })
+    if (error) {
+      console.warn('[VoiceReportButtons] lecture comptes-rendus impossible :', error.message)
+      setComptesRendusExistants([])
+      return
+    }
+    setComptesRendusExistants((data || []) as CompteRenduExistant[])
+  }
+
   useEffect(() => {
     let cancelled = false
-    async function charger() {
-      if (!rdvActivityId) {
-        setComptesRendusExistants([])
-        return
-      }
-      const { data, error } = await supabase
-        .from('client_comptes_rendus')
-        .select('id, created_at, resume, taches_detectees')
-        .eq('rdv_activity_id', rdvActivityId)
-        .order('created_at', { ascending: false })
-      if (cancelled) return
-      if (error) {
-        console.warn('[VoiceReportButtons] lecture comptes-rendus impossible :', error.message)
-        setComptesRendusExistants([])
-        return
-      }
-      setComptesRendusExistants((data || []) as CompteRenduExistant[])
+    async function run() {
+      await chargerComptesRendus()
     }
-    void charger()
+    void run()
     return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rdvActivityId])
 
   function mimeTypeSupporte() {
@@ -111,7 +183,9 @@ export default function VoiceReportButtons({
   }
 
   /** Best-effort : ne bloque jamais le flux si la lecture est refusée
-   * (politique autoplay iOS). Le texte est de toute façon déjà affiché. */
+   * (politique autoplay du navigateur). Le texte est de toute façon déjà
+   * affiché à l'écran. Attend la fin de la lecture (ou l'échec) avant de
+   * résoudre, pour permettre d'enchaîner ensuite sur l'écoute. */
   async function jouerTexte(texte: string) {
     if (!texte) return
     setLectureEnCours(true)
@@ -167,19 +241,22 @@ export default function VoiceReportButtons({
     })
   }
 
-  async function lancer(mode: Mode) {
+  async function lancer(mode: Mode, completer?: string) {
     setModeActif(mode)
     setMessageFinal('')
     setResumeAffiche('')
     setSpokenAffiche('')
     setTachesAffichees([])
+    setCompteRenduIdCible(completer || null)
     dernierResultatRef.current = null
 
     try {
       setEtape('annonce')
       const phraseAccueil =
         mode === 'compte_rendu'
-          ? 'Je t’écoute pour synthétiser le compte rendu de ta visite.'
+          ? completer
+            ? 'Je t’écoute pour compléter le compte rendu de ta visite.'
+            : 'Je t’écoute pour synthétiser le compte rendu de ta visite.'
           : 'Je t’écoute, décris la tâche à ajouter.'
       void jouerTexte(phraseAccueil) // n'attend pas la fin : le micro peut démarrer pendant l'annonce
 
@@ -195,11 +272,12 @@ export default function VoiceReportButtons({
   async function stopperEtEnvoyer() {
     if (!modeActif) return
     try {
-      const blob = await arreterEnregistrement()
+      const blobBrut = await arreterEnregistrement()
       setEtape('traitement')
+      const blobWav = await convertirEnWav(blobBrut)
 
       const form = new FormData()
-      form.append('audio', blob, blob.type.includes('mp4') ? 'audio.mp4' : 'audio.webm')
+      form.append('audio', blobWav, 'audio.wav')
       form.append('mode', modeActif)
       form.append('numero_tiers', numeroTiers)
       form.append('client_nom', clientNom)
@@ -214,9 +292,14 @@ export default function VoiceReportButtons({
       setResumeAffiche(data.resume || '')
       setSpokenAffiche(data.spoken_summary || '')
       setTachesAffichees(data.taches || [])
-
       setEtape('resume_pret')
-      void jouerTexte(data.spoken_summary)
+
+      // Mains libres : on énonce le résumé PUIS on relance automatiquement
+      // l'écoute pour la confirmation orale, sans exiger de toucher
+      // l'écran. Si la lecture est bloquée par le navigateur, l'écoute
+      // démarre quand même (le résumé reste affiché à l'écran).
+      await jouerTexte(data.spoken_summary)
+      await demarrerConfirmation()
     } catch (err: any) {
       console.error(err)
       setEtape('erreur')
@@ -238,15 +321,17 @@ export default function VoiceReportButtons({
   async function stopperConfirmationEtEnvoyer() {
     if (!modeActif || !dernierResultatRef.current) return
     try {
-      const blob = await arreterEnregistrement()
+      const blobBrut = await arreterEnregistrement()
       setEtape('traitement_confirmation')
+      const blobWav = await convertirEnWav(blobBrut)
 
       const form = new FormData()
-      form.append('audio', blob, blob.type.includes('mp4') ? 'audio.mp4' : 'audio.webm')
+      form.append('audio', blobWav, 'audio.wav')
       form.append('mode', modeActif)
       form.append('numero_tiers', numeroTiers)
       if (rdvActivityId) form.append('rdv_activity_id', rdvActivityId)
       if (rdvLabel) form.append('rdv_label', rdvLabel)
+      if (compteRenduIdCible) form.append('compte_rendu_id', compteRenduIdCible)
       form.append('user_email', userEmail)
       form.append('user_name', userName)
       form.append('transcript_original', dernierResultatRef.current.transcript)
@@ -259,8 +344,8 @@ export default function VoiceReportButtons({
 
       if (data.confirme === null) {
         setMessageFinal(data.message)
-        setEtape('resume_pret') // on repropose le bouton de confirmation
-        void jouerTexte(data.message)
+        await jouerTexte(data.message)
+        await demarrerConfirmation() // redemande, toujours sans toucher l'écran
         return
       }
 
@@ -269,14 +354,7 @@ export default function VoiceReportButtons({
       void jouerTexte(data.message)
 
       if (data.confirme && modeActif === 'compte_rendu') {
-        // Recharge la liste des comptes-rendus pour que celui qu'on vient
-        // de créer apparaisse immédiatement si on rouvre ce RDV.
-        const { data: refreshed } = await supabase
-          .from('client_comptes_rendus')
-          .select('id, created_at, resume, taches_detectees')
-          .eq('rdv_activity_id', rdvActivityId || '')
-          .order('created_at', { ascending: false })
-        setComptesRendusExistants((refreshed || []) as CompteRenduExistant[])
+        await chargerComptesRendus()
       }
     } catch (err: any) {
       console.error(err)
@@ -292,8 +370,11 @@ export default function VoiceReportButtons({
     setResumeAffiche('')
     setSpokenAffiche('')
     setTachesAffichees([])
+    setCompteRenduIdCible(null)
     dernierResultatRef.current = null
   }
+
+  const dernierCompteRendu = comptesRendusExistants && comptesRendusExistants.length > 0 ? comptesRendusExistants[0] : null
 
   return (
     <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -314,19 +395,24 @@ export default function VoiceReportButtons({
               <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginBottom: 4 }}>
                 {new Date(cr.created_at).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
               </div>
-              <div style={{ fontSize: 13, color: '#fff', lineHeight: 1.5 }}>{cr.resume}</div>
+              <div style={{ fontSize: 13, color: '#fff', lineHeight: 1.5, whiteSpace: 'pre-line' }}>{cr.resume}</div>
               {cr.taches_detectees?.length > 0 && (
                 <div style={{ marginTop: 6, fontSize: 12, color: 'rgba(255,255,255,0.55)' }}>
                   {cr.taches_detectees.length} tâche{cr.taches_detectees.length > 1 ? 's' : ''} créée{cr.taches_detectees.length > 1 ? 's' : ''} : {cr.taches_detectees.map((t) => t.description).join(' · ')}
                 </div>
               )}
+              {/* Gros bouton tactile — remplace l'ancien lien texte minuscule. */}
               <button
                 type="button"
                 onClick={() => void jouerTexte(cr.resume)}
                 disabled={lectureEnCours}
-                style={{ marginTop: 8, background: 'none', border: 'none', color: '#C9BEEF', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: 0 }}
+                style={{
+                  marginTop: 10, width: '100%', padding: '11px', borderRadius: 10,
+                  border: '1px solid rgba(201,190,239,0.4)', background: 'rgba(201,190,239,0.14)',
+                  color: '#C9BEEF', fontSize: 13.5, fontWeight: 700, cursor: 'pointer',
+                }}
               >
-                🔊 {lectureEnCours ? 'Lecture…' : 'Écouter'}
+                🔊 {lectureEnCours ? 'Lecture…' : 'Écouter le compte-rendu'}
               </button>
             </div>
           ))}
@@ -335,13 +421,20 @@ export default function VoiceReportButtons({
 
       {/* ---- Boutons de lancement ---- */}
       {etape === 'idle' && (
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button type="button" onClick={() => void lancer('compte_rendu')} style={boutonStyle('#7A5EA8')}>
-            🎙️ Compte-rendu vocal
-          </button>
-          <button type="button" onClick={() => void lancer('tache')} style={boutonStyle('#A6A181')}>
-            🎙️ Tâche vocale
-          </button>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button type="button" onClick={() => void lancer('compte_rendu')} style={boutonStyle('#7A5EA8')}>
+              🎙️ {dernierCompteRendu ? 'Nouveau compte-rendu' : 'Compte-rendu vocal'}
+            </button>
+            <button type="button" onClick={() => void lancer('tache')} style={boutonStyle('#A6A181')}>
+              🎙️ Tâche vocale
+            </button>
+          </div>
+          {dernierCompteRendu && (
+            <button type="button" onClick={() => void lancer('compte_rendu', dernierCompteRendu.id)} style={boutonStyle('#4B92AC')}>
+              ➕ Compléter le compte-rendu
+            </button>
+          )}
         </div>
       )}
 
@@ -353,52 +446,38 @@ export default function VoiceReportButtons({
 
       {etape === 'traitement' && <StatutLigne texte="Analyse en cours…" />}
 
-      {etape === 'resume_pret' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <div style={{ borderRadius: 10, border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(255,255,255,0.05)', padding: '12px 14px' }}>
-            <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 6 }}>
-              Résumé
-            </div>
-            <div style={{ fontSize: 13.5, color: '#fff', lineHeight: 1.55 }}>{resumeAffiche}</div>
-
-            {tachesAffichees.length > 0 && (
-              <div style={{ marginTop: 10 }}>
-                <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 6 }}>
-                  {tachesAffichees.length} tâche{tachesAffichees.length > 1 ? 's' : ''} détectée{tachesAffichees.length > 1 ? 's' : ''}
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-                  {tachesAffichees.map((t, i) => (
-                    <div key={i} style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.8)' }}>
-                      • {t.description}{t.echeance ? ` (${new Date(t.echeance).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' })})` : ''}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <button
-              type="button"
-              onClick={() => void jouerTexte(spokenAffiche)}
-              disabled={lectureEnCours}
-              style={{ marginTop: 10, background: 'none', border: 'none', color: '#E4C98A', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: 0 }}
-            >
-              🔊 {lectureEnCours ? 'Lecture…' : 'Réécouter le résumé'}
-            </button>
+      {/* Le résumé reste affiché pendant toute la suite du flux (écoute de
+         confirmation, traitement, fin) — pas seulement à l'étape où il
+         vient d'arriver. */}
+      {resumeAffiche && (etape === 'resume_pret' || etape === 'enregistrement_confirmation' || etape === 'traitement_confirmation' || etape === 'termine') && (
+        <div style={{ borderRadius: 10, border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(255,255,255,0.05)', padding: '12px 14px' }}>
+          <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 6 }}>
+            Résumé
           </div>
+          <div style={{ fontSize: 13.5, color: '#fff', lineHeight: 1.55 }}>{resumeAffiche}</div>
 
-          {messageFinal && (
-            <div style={{ fontSize: 12.5, color: '#e0a685' }}>{messageFinal}</div>
+          {tachesAffichees.length > 0 && (
+            <div style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 6 }}>
+                {tachesAffichees.length} tâche{tachesAffichees.length > 1 ? 's' : ''} détectée{tachesAffichees.length > 1 ? 's' : ''}
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                {tachesAffichees.map((t, i) => (
+                  <div key={i} style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.8)' }}>
+                    • {t.description}{t.echeance ? ` (${new Date(t.echeance).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' })})` : ''}
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
 
           <button
             type="button"
-            onClick={() => void demarrerConfirmation()}
-            style={{
-              ...boutonStyle('#3F9142'),
-              width: '100%',
-            }}
+            onClick={() => void jouerTexte(spokenAffiche)}
+            disabled={lectureEnCours}
+            style={{ marginTop: 10, background: 'none', border: 'none', color: '#E4C98A', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: 0 }}
           >
-            🎙️ Dire « oui, c’est correct » ou « non »
+            🔊 {lectureEnCours ? 'Lecture…' : 'Réécouter le résumé'}
           </button>
         </div>
       )}
@@ -461,7 +540,7 @@ function StatutLigne({ texte }: { texte: string }) {
 }
 
 /** Gros bouton rond, pensé pour être facile à retrouver et à taper d'un
- * pouce pour arrêter l'écoute — remplace le petit bandeau discret d'avant. */
+ * pouce pour arrêter l'écoute. */
 function GrandBoutonEcoute({ texte, onClick }: { texte: string; onClick: () => void }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, padding: '18px 0' }}>

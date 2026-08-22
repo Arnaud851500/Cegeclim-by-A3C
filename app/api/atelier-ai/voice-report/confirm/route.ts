@@ -67,6 +67,10 @@ export async function POST(req: NextRequest) {
     const transcriptOriginal = String(form.get('transcript_original') || '').trim()
     const resume = String(form.get('resume') || '').trim()
     const tachesRaw = String(form.get('taches') || '[]')
+    // Si renseigné : on complète ce compte-rendu existant (UPDATE) au lieu
+    // d'en créer un nouveau (INSERT) — cf. bouton "Compléter le
+    // compte-rendu" côté VoiceReportButtons.
+    const compteRenduIdCible = String(form.get('compte_rendu_id') || '').trim() || null
 
     if (!audio) return NextResponse.json({ error: 'Aucun audio reçu.' }, { status: 400 })
 
@@ -127,17 +131,47 @@ export async function POST(req: NextRequest) {
     }
 
     if (mode === 'compte_rendu') {
-      const { error: crError } = await supabaseAdmin.from('client_comptes_rendus').insert({
-        numero_tiers: numeroTiers,
-        rdv_activity_id: rdvActivityId,
-        rdv_label: rdvLabel,
-        created_by_email: userEmail,
-        created_by_name: userName,
-        transcript: transcriptOriginal,
-        resume,
-        taches_detectees: taches,
-      })
-      if (crError) throw crError
+      if (compteRenduIdCible) {
+        // --- Complément d'un compte-rendu existant : on fusionne plutôt
+        // que de créer un doublon déconnecté. Concaténation simple (pas
+        // d'appel IA supplémentaire) : plus prévisible, aucun risque que
+        // l'IA "oublie" ou reformule mal le contenu déjà validé.
+        const { data: existant, error: fetchError } = await supabaseAdmin
+          .from('client_comptes_rendus')
+          .select('resume, taches_detectees, transcript')
+          .eq('id', compteRenduIdCible)
+          .maybeSingle()
+        if (fetchError) throw fetchError
+
+        const horodatage = new Date().toLocaleString('fr-FR', {
+          day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
+        })
+        const resumeFusionne = existant?.resume
+          ? `${existant.resume}\n\n— Complément du ${horodatage} —\n${resume}`
+          : resume
+        const tachesFusionnees = [...((existant?.taches_detectees as any[]) || []), ...taches]
+        const transcriptFusionne = existant?.transcript
+          ? `${existant.transcript}\n\n${transcriptOriginal}`
+          : transcriptOriginal
+
+        const { error: updateError } = await supabaseAdmin
+          .from('client_comptes_rendus')
+          .update({ resume: resumeFusionne, taches_detectees: tachesFusionnees, transcript: transcriptFusionne })
+          .eq('id', compteRenduIdCible)
+        if (updateError) throw updateError
+      } else {
+        const { error: crError } = await supabaseAdmin.from('client_comptes_rendus').insert({
+          numero_tiers: numeroTiers,
+          rdv_activity_id: rdvActivityId,
+          rdv_label: rdvLabel,
+          created_by_email: userEmail,
+          created_by_name: userName,
+          transcript: transcriptOriginal,
+          resume,
+          taches_detectees: taches,
+        })
+        if (crError) throw crError
+      }
     }
 
     return NextResponse.json({

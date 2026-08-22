@@ -28,6 +28,8 @@ export async function POST(req: NextRequest) {
         voice: 'nova',
         input: cleanText,
         response_format: 'mp3',
+        // >1.0 = plus rapide. 1.15 reste naturel tout en abrégeant l'attente.
+        speed: 1.15,
       }),
     })
 
