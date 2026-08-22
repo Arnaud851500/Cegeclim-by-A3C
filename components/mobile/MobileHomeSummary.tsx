@@ -27,11 +27,17 @@ const RDV_TYPE_KEYS = ['meeting', 'phoneCall', 'reminder', '4', '7', '9']
 function safeText(value: any) {
   return String(value ?? '').trim()
 }
-function formatDateCourte(value: any) {
+const MOIS_FR = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre']
+/** Date lisible ET dite à voix haute clairement -- "(04/08)" est illisible
+ * en synthèse vocale (chiffres lus un par un), alors que "le 4 août" est
+ * naturel aussi bien à l'écran qu'à l'oral. */
+function formatDateParlee(value: any) {
   const text = safeText(value)
   const m = text.match(/^(\d{4})-(\d{2})-(\d{2})/)
-  if (!m) return text
-  return `${m[3]}/${m[2]}`
+  if (!m) return ''
+  const jour = Number(m[3])
+  const mois = MOIS_FR[Number(m[2]) - 1]
+  return mois ? `le ${jour} ${mois}` : ''
 }
 function finDeSemaineIso() {
   const d = new Date()
@@ -164,10 +170,12 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         if (!rows || rows.length === 0) {
           resultat = `Tu n'as aucune tâche ${periodeTexte}.`
         } else {
-          const lignes = rows.map(
-            (r: any, i: number) => `${i + 1}. ${safeText(r.description_action) || '(sans libellé)'} (${formatDateCourte(r.due_date)})`,
-          )
-          resultat = `Tu as ${rows.length} tâche${rows.length > 1 ? 's' : ''} ${periodeTexte} :\n${lignes.join('\n')}`
+          const lignes = rows.map((r: any, i: number) => {
+            const echeance = formatDateParlee(r.due_date)
+            return `${i + 1}. ${safeText(r.description_action) || '(sans libellé)'}${echeance ? `, échéance ${echeance}` : ''}`
+          })
+          const compte = rows.length === 1 ? 'une' : String(rows.length)
+          resultat = `Tu as ${compte} tâche${rows.length > 1 ? 's' : ''} ${periodeTexte} :\n${lignes.join('\n')}`
         }
       }
 

@@ -17,9 +17,15 @@ const BUTTONS: ButtonConfig[] = [
   { key: 'activite', label: 'Mon activité', sub: 'Devis · CDC · BL · Factures · Marge', accessKey: 'can_dashboard' },
   { key: 'clients', label: 'Mes clients', sub: 'Fiches et suivi client', accessKey: 'can_dashboard' },
   { key: 'rdv', label: 'Mes rdv', sub: 'Agenda, comptes rendus, recherche documents' },
-  { key: 'alertes', label: 'Mes alertes / Ma Todo liste', sub: 'À traiter en priorité' },
+  { key: 'alertes', label: 'Mes tâches - alertes', sub: 'À traiter en priorité' },
   { key: 'prospects', label: 'Prospects', sub: 'Trouver un prospect autour de moi' },
 ]
+
+// Marge horizontale de l'écran -- réduite (18px -> 10px de chaque côté) :
+// avec l'ancienne valeur, les cartes perdaient près d'un centimètre cumulé
+// entre les deux bords de l'écran (18px de marge + leur propre padding
+// interne), ce qui gâchait de la largeur utile sur un petit écran.
+const MARGE_ECRAN = 10
 
 export default function MobileHome({
   email,
@@ -35,8 +41,8 @@ export default function MobileHome({
   const visibleButtons = BUTTONS.filter((b) => !b.accessKey || rights[b.accessKey])
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '28px 18px', gap: 14 }}>
-      <div style={{ marginBottom: 10 }}>
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: `28px ${MARGE_ECRAN}px`, gap: 14 }}>
+      <div style={{ marginBottom: 10, padding: '0 4px' }}>
         <div
           style={{
             fontSize: 11,
@@ -83,7 +89,7 @@ export default function MobileHome({
             border: '1px solid rgba(255,255,255,0.12)',
             background: 'rgba(255,255,255,0.045)',
             borderRadius: 16,
-            padding: '18px 18px',
+            padding: '18px 16px',
             color: '#fff',
             fontFamily: 'var(--font-body)',
           }}

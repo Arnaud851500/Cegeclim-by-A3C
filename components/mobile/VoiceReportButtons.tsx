@@ -140,6 +140,7 @@ export default function VoiceReportButtons({
   // la création rapide de tâche depuis l'accueil, sans client/rdv associé.
   modeUnique,
   labelBouton,
+  pleinEcran,
 }: {
   numeroTiers?: string
   clientNom?: string
@@ -149,6 +150,11 @@ export default function VoiceReportButtons({
   userName: string
   modeUnique?: 'tache'
   labelBouton?: string
+  /** Quand vrai, tout le flux (une fois lancé) s'affiche dans un panneau
+   * quasi plein écran plutôt qu'inline -- utilisé pour la création rapide
+   * de tâche depuis l'accueil. Laissé à false dans les fiches RDV/client,
+   * où le composant est déjà inline dans une sheet existante (pas besoin
+   * d'une seconde sheet par-dessus). */
 }) {
   const [modeActif, setModeActif] = useState<Mode | null>(null)
   const [etape, setEtape] = useState<Etape>('idle')
@@ -434,8 +440,8 @@ export default function VoiceReportButtons({
 
   const dernierCompteRendu = comptesRendusExistants && comptesRendusExistants.length > 0 ? comptesRendusExistants[0] : null
 
-  return (
-    <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>
+  const corps = (
+    <>
       {/* Visible à tout moment pendant une lecture, quelle que soit l'étape
          du flux (annonce, résumé, confirmation, message final). */}
       {lectureEnCours && (
@@ -601,6 +607,40 @@ export default function VoiceReportButtons({
           </button>
         </div>
       )}
+</>
+  )
+
+  // Mode plein écran (accueil, création de tâche libre) : une fois le flux
+  // lancé, tout s'affiche dans un panneau quasi plein écran plutôt qu'en
+  // ligne -- même principe que MobileHomeSummary. Le bouton "idle" (avant
+  // lancement) reste toujours affiché en ligne, dans les deux modes.
+  if (pleinEcran && etape !== 'idle') {
+    return (
+      <div
+        style={{ position: 'fixed', inset: 0, zIndex: 230, background: 'rgba(6,10,18,0.7)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
+        onClick={etape === 'termine' || etape === 'erreur' ? reinitialiser : undefined}
+      >
+        <div
+          style={{
+            width: '100%', maxWidth: 520, height: '92vh', maxHeight: '92vh',
+            background: '#141A26', borderTopLeftRadius: 24, borderTopRightRadius: 24,
+            border: '1px solid rgba(122,94,168,0.3)', display: 'flex', flexDirection: 'column',
+            overflow: 'hidden', padding: '14px 20px 24px',
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div style={{ width: 40, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 14px', flexShrink: 0 }} />
+          <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 14 }}>
+            {corps}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {corps}
     </div>
   )
 }

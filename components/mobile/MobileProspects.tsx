@@ -2,26 +2,28 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import dynamic from 'next/dynamic'
+// CORRECTIF carte invisible : react-leaflet a besoin de son propre CSS pour
+// positionner les tuiles et donner une hauteur réelle au conteneur -- sans
+// cet import, la carte reste vide/collabsée même quand tout le reste
+// (position, requête, marqueurs) fonctionne. Le desktop doit le charger
+// globalement ailleurs dans l'app ; ce fichier mobile ne l'avait jamais.
+import 'leaflet/dist/leaflet.css'
 import { supabase } from '@/lib/supabaseClient'
 
 // ─────────────────────────────────────────────────────────────────────────
 // Version mobile de "Prospects autour de moi", branchée sur les mêmes
-// principes que la carte de l'écran Clients desktop (app/clients/page.tsx) :
-// visualisation carte, filtres, détail client au clic.
+// principes que la carte de l'écran Clients desktop (app/clients/page.tsx).
 //
-// CORRECTIF IMPORTANT (v2) : la première version interrogeait uniquement
-// les colonnes latitude/longitude, qui sont vides sur la plupart des
-// fiches (seules les coordonnées Lambert93 sont systématiquement
-// renseignées à l'import SIRENE -- cf. lambert93ToWgs84 côté desktop, qui
-// doit convertir à la volée pour la quasi-totalité des lignes). Résultat :
-// "0 prospect" presque partout. On interroge maintenant en Lambert93
-// (bien mieux renseigné, et boîte englobante triviale car c'est une
-// projection métrique), puis on convertit en WGS84 pour l'affichage et le
-// calcul de distance exact.
-//
-// Flux repensé : les filtres (rayon, secteur, ancienneté, RGE) sont
-// présentés AVANT la carte, pas seulement dans un tiroir après coup --
-// l'utilisateur voit et règle explicitement ce qui va être cherché.
+// v2 -> v3 :
+// - Requête basée sur les coordonnées Lambert93 (bien mieux renseignées que
+//   latitude/longitude), avec conversion à la volée -- corrige le "0
+//   prospect" quasi partout de la v1.
+// - leaflet.css importé -- corrige la carte invisible malgré des données
+//   chargées.
+// - Filtres étendus : capacité gaz et capital social, en plus de secteur/
+//   type d'activité, RGE et ancienneté -- disponibles avant la carte
+//   (options fixes, ne dépendent pas des données chargées) ET dans le
+//   tiroir une fois la carte affichée.
 // ─────────────────────────────────────────────────────────────────────────
 
 const MapContainer: any = dynamic(() => import('react-leaflet').then((m) => m.MapContainer as any), { ssr: false })
@@ -51,6 +53,7 @@ type ProspectRow = {
   etatAdministratifUniteLegale: string | null
   rge: boolean | null
   capacite_gaz: boolean | null
+  capital_social: string | null
 }
 
 /** Fiche enrichie avec des coordonnées WGS84 garanties (natives ou
@@ -88,6 +91,35 @@ const ANCIENNETE_PRESETS: AnciennetePreset[] = [
   { key: '1a', label: '< 1 an', maxDays: 365 },
   { key: '3a', label: '< 3 ans', maxDays: 1095 },
 ]
+
+// Mêmes tranches que côté desktop (app/clients/page.tsx,
+// CAPITAL_SOCIAL_FILTER_OPTIONS) -- à garder synchronisées si elles changent
+// là-bas.
+type CapitalSocialOption = 'NC' | '<= 1 000€' | '>1 000€' | '>5000€' | '>9999€'
+const CAPITAL_SOCIAL_OPTIONS: CapitalSocialOption[] = ['NC', '<= 1 000€', '>1 000€', '>5000€', '>9999€']
+
+function parseCapitalSocialNumber(value: string | null | undefined): number | null {
+  const raw = String(value || '').trim().toUpperCase()
+  if (!raw) return null
+  const cleaned = raw.replace('EUR', '').replace(/\s/g, '').replace(',', '.').trim()
+  const amount = Number(cleaned)
+  return Number.isFinite(amount) ? amount : null
+}
+function matchesCapitalSocial(value: string | null | undefined, selected: Set<CapitalSocialOption>): boolean {
+  if (selected.size === 0) return true
+  const amount = parseCapitalSocialNumber(value)
+  const isNc = amount == null
+  return Array.from(selected).some((filter) => {
+    switch (filter) {
+      case 'NC': return isNc
+      case '<= 1 000€': return amount != null && amount <= 1000
+      case '>1 000€': return amount != null && amount > 1000
+      case '>5000€': return amount != null && amount > 5000
+      case '>9999€': return amount != null && amount > 9999
+      default: return true
+    }
+  })
+}
 
 // Mêmes secteurs suivis et mêmes couleurs que côté desktop
 // (app/clients/page.tsx, TRACKED_SECTORS) -- à garder synchronisés si
@@ -164,11 +196,6 @@ function formatDateFr(value: string | null | undefined): string {
 }
 
 // ── Projection Lambert93 (RGF93) <-> WGS84 ─────────────────────────────
-// Mêmes constantes que lambert93ToWgs84 côté desktop (app/clients/page.tsx)
-// -- à garder synchronisées si elles changent là-bas. La fonction inverse
-// (WGS84 -> Lambert93) est ajoutée ici pour pouvoir borner la requête
-// Supabase directement en Lambert (bien mieux renseigné que latitude/
-// longitude sur la table clients).
 const LAMBERT_N = 0.725607765053267
 const LAMBERT_C = 11754255.426096
 const LAMBERT_XS = 700000
@@ -219,9 +246,6 @@ function wgs84ToLambert93(latDeg: number, lonDeg: number): { x: number; y: numbe
   }
 }
 
-/** Coordonnées WGS84 effectives d'une fiche : natives si présentes, sinon
- * converties depuis Lambert93. Renvoie null si aucune des deux n'est
- * exploitable. */
 function coordonneesEffectives(row: ProspectRow): { lat: number; lon: number } | null {
   if (typeof row.latitude === 'number' && Number.isFinite(row.latitude) && typeof row.longitude === 'number' && Number.isFinite(row.longitude)) {
     return { lat: row.latitude, lon: row.longitude }
@@ -236,12 +260,17 @@ export default function MobileProspects() {
   const [locating, setLocating] = useState(false)
   const [geoError, setGeoError] = useState<string | null>(null)
 
-  // Filtres réglés AVANT d'afficher la carte.
+  // Filtres réglés AVANT d'afficher la carte -- tous à options fixes,
+  // aucun ne dépend des données chargées (contrairement au secteur, qui
+  // n'est connu qu'une fois les résultats arrivés).
   const [filtresValides, setFiltresValides] = useState(false)
   const [radiusKm, setRadiusKm] = useState(25)
-  const [secteursActifs, setSecteursActifs] = useState<Set<string>>(new Set())
   const [rgeSeul, setRgeSeul] = useState(false)
+  const [capaciteGazSeul, setCapaciteGazSeul] = useState(false)
   const [ancienneteMax, setAncienneteMax] = useState<AnciennetePreset>(ANCIENNETE_PRESETS[0]) // "Tout" par défaut
+  const [capitalSocialActifs, setCapitalSocialActifs] = useState<Set<CapitalSocialOption>>(new Set())
+
+  const [secteursActifs, setSecteursActifs] = useState<Set<string>>(new Set())
 
   const [prospects, setProspects] = useState<ProspectRowGeo[]>([])
   const [loading, setLoading] = useState(false)
@@ -297,16 +326,13 @@ export default function MobileProspects() {
       setLoading(true)
       setLoadError(null)
       try {
-        // Boîte englobante en Lambert93 : projection métrique, donc un
-        // rayon en km se traduit directement en mètres, sans les
-        // approximations de longitude/latitude en degrés.
         const { x: x0, y: y0 } = wgs84ToLambert93(position!.lat, position!.lng)
         const rayonM = radiusKm * 1000
 
         const { data, error } = await supabase
           .from('clients')
           .select(
-            'id, siret, raison_sociale_affichee, activitePrincipaleEtablissement, naf_libelle_traduit, codePostalEtablissement, libelleCommuneEtablissement, latitude, longitude, coordonneeLambertAbscisseEtablissement, coordonneeLambertOrdonneeEtablissement, telephone, email, nom_dirigeant, prospect_status, prospect_comment, present_dans_cegeclim, dateCreationEtablissement, etatAdministratifUniteLegale, rge, capacite_gaz',
+            'id, siret, raison_sociale_affichee, activitePrincipaleEtablissement, naf_libelle_traduit, codePostalEtablissement, libelleCommuneEtablissement, latitude, longitude, coordonneeLambertAbscisseEtablissement, coordonneeLambertOrdonneeEtablissement, telephone, email, nom_dirigeant, prospect_status, prospect_comment, present_dans_cegeclim, dateCreationEtablissement, etatAdministratifUniteLegale, rge, capacite_gaz, capital_social',
           )
           .not('coordonneeLambertAbscisseEtablissement', 'is', null)
           .not('coordonneeLambertOrdonneeEtablissement', 'is', null)
@@ -321,8 +347,6 @@ export default function MobileProspects() {
 
         const rawRows = (data || []) as ProspectRow[]
 
-        // Croisement ref_tiers (comme le desktop) : exclut les entreprises
-        // déjà clientes CEGECLIM, actives OU en sommeil.
         const siretsEnvisages = Array.from(new Set(rawRows.map((r) => normalizeSiret(r.siret)).filter(Boolean)))
         let siretsDejaCegeclim = new Set<string>()
         if (siretsEnvisages.length > 0) {
@@ -377,19 +401,29 @@ export default function MobileProspects() {
       const sector = getSectorLabel(p)
       if (secteursActifs.size > 0 && !secteursActifs.has(sector)) return false
       if (rgeSeul && !p.rge) return false
+      if (capaciteGazSeul && !p.capacite_gaz) return false
+      if (!matchesCapitalSocial(p.capital_social, capitalSocialActifs)) return false
       if (ancienneteMax.maxDays != null) {
         const age = diffDaysFromToday(p.dateCreationEtablissement)
         if (age == null || age < 0 || age > ancienneteMax.maxDays) return false
       }
       return true
     })
-  }, [prospects, secteursActifs, rgeSeul, ancienneteMax])
+  }, [prospects, secteursActifs, rgeSeul, capaciteGazSeul, capitalSocialActifs, ancienneteMax])
 
   function toggleSecteur(sector: string) {
     setSecteursActifs((prev) => {
       const next = new Set(prev)
       if (next.has(sector)) next.delete(sector)
       else next.add(sector)
+      return next
+    })
+  }
+  function toggleCapitalSocial(option: CapitalSocialOption) {
+    setCapitalSocialActifs((prev) => {
+      const next = new Set(prev)
+      if (next.has(option)) next.delete(option)
+      else next.add(option)
       return next
     })
   }
@@ -421,6 +455,60 @@ export default function MobileProspects() {
     }
   }
 
+  // Bloc de filtres réutilisé (options fixes) sur l'écran d'avant-carte ET
+  // dans le tiroir sur la carte, pour rester cohérent.
+  function BlocFiltresFixes({ compact }: { compact: boolean }) {
+    const padBtn = compact ? '8px 14px' : '10px 16px'
+    const fontBtn = compact ? 13 : 14
+    return (
+      <>
+        <div>
+          <div style={filtreTitreStyle}>Rayon de recherche</div>
+          <div style={{ display: 'flex', gap: compact ? 6 : 8, flexWrap: 'wrap' }}>
+            {RADIUS_PRESETS_KM.map((km) => (
+              <button key={km} type="button" onClick={() => setRadiusKm(km)} style={chipStyle(radiusKm === km, '75,146,172', padBtn, fontBtn)}>
+                {km} km
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <div style={filtreTitreStyle}>Ancienneté</div>
+          <div style={{ display: 'flex', gap: compact ? 6 : 8, flexWrap: 'wrap' }}>
+            {ANCIENNETE_PRESETS.map((preset) => (
+              <button key={preset.key} type="button" onClick={() => setAncienneteMax(preset)} style={chipStyle(ancienneteMax.key === preset.key, '166,161,129', padBtn, fontBtn)}>
+                {preset.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <div style={filtreTitreStyle}>Capital social</div>
+          <div style={{ display: 'flex', gap: compact ? 6 : 8, flexWrap: 'wrap' }}>
+            {CAPITAL_SOCIAL_OPTIONS.map((option) => (
+              <button key={option} type="button" onClick={() => toggleCapitalSocial(option)} style={chipStyle(capitalSocialActifs.has(option), '224,169,74', padBtn, fontBtn)}>
+                {option}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: compact ? 13.5 : 14.5, color: '#fff', fontWeight: 600 }}>
+            <input type="checkbox" checked={rgeSeul} onChange={(e) => setRgeSeul(e.target.checked)} style={{ width: compact ? 18 : 20, height: compact ? 18 : 20 }} />
+            RGE uniquement
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: compact ? 13.5 : 14.5, color: '#fff', fontWeight: 600 }}>
+            <input type="checkbox" checked={capaciteGazSeul} onChange={(e) => setCapaciteGazSeul(e.target.checked)} style={{ width: compact ? 18 : 20, height: compact ? 18 : 20 }} />
+            Capacité gaz uniquement
+          </label>
+        </div>
+      </>
+    )
+  }
+
   // ── Écran 1 : filtres, affiché AVANT la carte ─────────────────────────
   if (!filtresValides) {
     return (
@@ -438,53 +526,10 @@ export default function MobileProspects() {
           </div>
         )}
 
-        <div>
-          <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 10 }}>Rayon de recherche</div>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {RADIUS_PRESETS_KM.map((km) => (
-              <button
-                key={km}
-                type="button"
-                onClick={() => setRadiusKm(km)}
-                style={{
-                  padding: '10px 16px', borderRadius: 999, border: '1px solid rgba(75,146,172,0.4)',
-                  background: radiusKm === km ? 'rgba(75,146,172,0.35)' : 'rgba(75,146,172,0.1)',
-                  color: '#fff', fontSize: 14, fontWeight: 700,
-                }}
-              >
-                {km} km
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div>
-          <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 10 }}>Ancienneté de l'entreprise</div>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {ANCIENNETE_PRESETS.map((preset) => (
-              <button
-                key={preset.key}
-                type="button"
-                onClick={() => setAncienneteMax(preset)}
-                style={{
-                  padding: '10px 16px', borderRadius: 999, border: '1px solid rgba(166,161,129,0.4)',
-                  background: ancienneteMax.key === preset.key ? 'rgba(166,161,129,0.35)' : 'rgba(166,161,129,0.1)',
-                  color: '#fff', fontSize: 14, fontWeight: 700,
-                }}
-              >
-                {preset.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <label style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 14.5, color: '#fff', fontWeight: 600 }}>
-          <input type="checkbox" checked={rgeSeul} onChange={(e) => setRgeSeul(e.target.checked)} style={{ width: 20, height: 20 }} />
-          RGE uniquement
-        </label>
+        <BlocFiltresFixes compact={false} />
 
         <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', lineHeight: 1.5 }}>
-          Le secteur d'activité pourra être filtré une fois les résultats chargés, depuis le bouton "Filtres" sur la carte.
+          Le secteur / type d'activité pourra être filtré une fois les résultats chargés, depuis le bouton "Filtres" sur la carte.
         </div>
 
         <button
@@ -513,7 +558,7 @@ export default function MobileProspects() {
           onClick={() => setFiltresValides(false)}
           style={{ border: '1px solid rgba(255,255,255,0.18)', background: 'transparent', color: 'rgba(255,255,255,0.7)', borderRadius: 10, padding: '7px 10px', fontSize: 12 }}
         >
-          ← Rayon/ancienneté
+          ← Filtres
         </button>
         <div style={{ flex: 1, fontSize: 12.5, color: 'rgba(255,255,255,0.6)' }}>
           {loading ? 'Recherche…' : loadError ? loadError : `${prospectsFiltres.length} prospect${prospectsFiltres.length > 1 ? 's' : ''} · ${radiusKm} km`}
@@ -523,11 +568,13 @@ export default function MobileProspects() {
           onClick={() => setFiltresOuverts(true)}
           style={{ border: '1px solid rgba(255,255,255,0.18)', background: 'rgba(255,255,255,0.06)', color: '#fff', borderRadius: 10, padding: '7px 12px', fontSize: 12.5, fontWeight: 600 }}
         >
-          ⚙️ Filtres
+          ⚙️ Secteur
         </button>
       </div>
 
-      <div style={{ flex: 1, minHeight: 0 }}>
+      {/* Hauteur explicite en secours, en plus de flex:1 -- garantit que
+         Leaflet dispose toujours d'une hauteur non nulle au montage. */}
+      <div style={{ flex: 1, minHeight: 320, position: 'relative' }}>
         {position && (
           <MapContainer
             center={[position.lat, position.lng] as any}
@@ -568,87 +615,50 @@ export default function MobileProspects() {
         )}
       </div>
 
-      {/* ---- Tiroir filtres (secteur + RGE + ancienneté, rayon incl.) ---- */}
+      {/* ---- Tiroir filtres (fixes + secteur) ---- */}
       {filtresOuverts && (
         <div
           style={{ position: 'fixed', inset: 0, zIndex: 210, background: 'rgba(6,10,18,0.62)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
           onClick={() => setFiltresOuverts(false)}
         >
           <div
-            style={{ width: '100%', maxWidth: 480, maxHeight: '80vh', overflowY: 'auto', background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.08)', padding: '12px 18px 26px' }}
+            style={{ width: '100%', maxWidth: 480, maxHeight: '85vh', overflowY: 'auto', background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.08)', padding: '12px 18px 26px', display: 'flex', flexDirection: 'column', gap: 16 }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 14px' }} />
-            <div style={{ fontSize: 16, fontWeight: 700, color: '#fff', marginBottom: 14 }}>Filtres</div>
+            <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 2px' }} />
+            <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Filtres</div>
 
-            <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 8 }}>Rayon de recherche</div>
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 18 }}>
-              {RADIUS_PRESETS_KM.map((km) => (
-                <button
-                  key={km}
-                  type="button"
-                  onClick={() => setRadiusKm(km)}
-                  style={{
-                    padding: '8px 14px', borderRadius: 999, border: '1px solid rgba(75,146,172,0.4)',
-                    background: radiusKm === km ? 'rgba(75,146,172,0.35)' : 'rgba(75,146,172,0.1)',
-                    color: '#fff', fontSize: 13, fontWeight: 700,
-                  }}
-                >
-                  {km} km
-                </button>
-              ))}
-            </div>
+            <BlocFiltresFixes compact />
 
-            <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 8 }}>Ancienneté</div>
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 18 }}>
-              {ANCIENNETE_PRESETS.map((preset) => (
-                <button
-                  key={preset.key}
-                  type="button"
-                  onClick={() => setAncienneteMax(preset)}
-                  style={{
-                    padding: '8px 14px', borderRadius: 999, border: '1px solid rgba(166,161,129,0.4)',
-                    background: ancienneteMax.key === preset.key ? 'rgba(166,161,129,0.35)' : 'rgba(166,161,129,0.1)',
-                    color: '#fff', fontSize: 13, fontWeight: 700,
-                  }}
-                >
-                  {preset.label}
-                </button>
-              ))}
-            </div>
-
-            <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 8 }}>Secteur d'activité</div>
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 18 }}>
-              {secteursDisponibles.map((sector) => {
-                const actif = secteursActifs.has(sector)
-                return (
-                  <button
-                    key={sector}
-                    type="button"
-                    onClick={() => toggleSecteur(sector)}
-                    style={{
-                      display: 'inline-flex', alignItems: 'center', gap: 6, padding: '7px 12px', borderRadius: 999,
-                      border: `1px solid ${actif ? getSectorColor(sector) : 'rgba(255,255,255,0.18)'}`,
-                      background: actif ? `${getSectorColor(sector)}33` : 'rgba(255,255,255,0.04)',
-                      color: '#fff', fontSize: 12.5, fontWeight: 600,
-                    }}
-                  >
-                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: getSectorColor(sector) }} />
-                    {sector}
+            <div>
+              <div style={filtreTitreStyle}>Secteur / type d'activité</div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {secteursDisponibles.map((sector) => {
+                  const actif = secteursActifs.has(sector)
+                  return (
+                    <button
+                      key={sector}
+                      type="button"
+                      onClick={() => toggleSecteur(sector)}
+                      style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 6, padding: '7px 12px', borderRadius: 999,
+                        border: `1px solid ${actif ? getSectorColor(sector) : 'rgba(255,255,255,0.18)'}`,
+                        background: actif ? `${getSectorColor(sector)}33` : 'rgba(255,255,255,0.04)',
+                        color: '#fff', fontSize: 12.5, fontWeight: 600,
+                      }}
+                    >
+                      <span style={{ width: 8, height: 8, borderRadius: '50%', background: getSectorColor(sector) }} />
+                      {sector}
+                    </button>
+                  )
+                })}
+                {secteursActifs.size > 0 && (
+                  <button type="button" onClick={() => setSecteursActifs(new Set())} style={{ padding: '7px 12px', borderRadius: 999, border: '1px solid rgba(255,255,255,0.18)', background: 'transparent', color: 'rgba(255,255,255,0.6)', fontSize: 12.5 }}>
+                    Effacer
                   </button>
-                )
-              })}
-              {secteursActifs.size > 0 && (
-                <button type="button" onClick={() => setSecteursActifs(new Set())} style={{ padding: '7px 12px', borderRadius: 999, border: '1px solid rgba(255,255,255,0.18)', background: 'transparent', color: 'rgba(255,255,255,0.6)', fontSize: 12.5 }}>
-                  Effacer
-                </button>
-              )}
+                )}
+              </div>
             </div>
-
-            <label style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13.5, color: '#fff', fontWeight: 600, marginBottom: 20 }}>
-              <input type="checkbox" checked={rgeSeul} onChange={(e) => setRgeSeul(e.target.checked)} style={{ width: 18, height: 18 }} />
-              RGE uniquement
-            </label>
 
             <button
               type="button"
@@ -686,6 +696,8 @@ export default function MobileProspects() {
                 ['Créée le', formatDateFr(selected.dateCreationEtablissement)],
                 ['Distance', `${distanceKmWgs84(position!.lat, position!.lng, selected.latEff, selected.lonEff)} km`],
                 ['RGE', selected.rge ? 'Oui' : 'Non'],
+                ['Capacité gaz', selected.capacite_gaz ? 'Oui' : 'Non'],
+                ['Capital social', selected.capital_social || '—'],
               ].map(([label, value]) => (
                 <div key={label} style={{ borderRadius: 10, border: '1px solid rgba(255,255,255,0.07)', background: 'rgba(255,255,255,0.03)', padding: '8px 10px' }}>
                   <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}>{label}</div>
@@ -739,4 +751,16 @@ export default function MobileProspects() {
       )}
     </div>
   )
+}
+
+const filtreTitreStyle: React.CSSProperties = {
+  fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 8,
+}
+
+function chipStyle(actif: boolean, rgb: string, padding: string, fontSize: number): React.CSSProperties {
+  return {
+    padding, borderRadius: 999, border: `1px solid rgba(${rgb},0.4)`,
+    background: actif ? `rgba(${rgb},0.35)` : `rgba(${rgb},0.1)`,
+    color: '#fff', fontSize, fontWeight: 700,
+  }
 }
