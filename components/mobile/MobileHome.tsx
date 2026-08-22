@@ -18,7 +18,7 @@ const BUTTONS: ButtonConfig[] = [
   { key: 'clients', label: 'Mes clients', sub: 'Fiches et suivi client', accessKey: 'can_dashboard' },
   { key: 'rdv', label: 'Mes rdv', sub: 'Agenda, comptes rendus, recherche documents' },
   { key: 'alertes', label: 'Mes tâches - alertes', sub: 'À traiter en priorité' },
-  { key: 'prospects', label: 'Prospects', sub: 'Trouver un prospect autour de moi' },
+  { key: 'prospects', label: 'Carte Prospects & Clients', sub: 'Trouver un prospect ou un client autour de moi' },
 ]
 
 // Marge horizontale de l'écran -- réduite (18px -> 10px de chaque côté) :
@@ -62,26 +62,26 @@ export default function MobileHome({
         </div>
       </div>
 
-      {/* ---- Actions rapides : nouvelle tâche vocale + résumé vocal ---- */}
-      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <VoiceReportButtons
-            modeUnique="tache"
-            labelBouton="Nouvelle tâche"
-            userEmail={email || ''}
-            userName={email ? email.split('@')[0] : ''}
-          />
-        </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <MobileHomeSummary userEmail={email} />
-        </div>
-      </div>
-
-      {/* Grille 2 colonnes, cartes plus hautes -- cible tactile plus
-         généreuse que l'ancien empilement plein-largeur. Si le nombre de
-         cartes est impair, la dernière prend toute la largeur pour ne pas
-         laisser une case à moitié vide. */}
+      {/* Une seule grille 2 colonnes pour TOUT (boutons vocaux inclus) --
+         garantit une largeur strictement identique entre "Nouvelle tâche"
+         et les cartes de navigation en dessous (avant : deux systèmes de
+         mise en page différents -- flex ici, grid plus bas -- donnaient
+         des largeurs légèrement différentes selon le contenu).
+         Hauteur FIXE (pas minHeight) sur les cartes de navigation : sans
+         ça, une carte au sous-titre plus long (ex. "Mes rdv" sur 3 lignes)
+         s'étire plus que ses voisines, et comme le titre est ancré au
+         centre, ça décale visuellement les titres d'une carte à l'autre.
+         Avec une hauteur fixe, tous les titres tombent exactement à la
+         même hauteur, alignés entre les cases. */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <VoiceReportButtons
+          modeUnique="tache"
+          labelBouton="Nouvelle tâche"
+          userEmail={email || ''}
+          userName={email ? email.split('@')[0] : ''}
+        />
+        <MobileHomeSummary userEmail={email} />
+
         {visibleButtons.map((b, i) => {
           const seule = i === visibleButtons.length - 1 && visibleButtons.length % 2 !== 0
           return (
@@ -89,28 +89,28 @@ export default function MobileHome({
               key={b.key}
               onClick={() => onNavigate(b.key)}
               style={{
+                position: 'relative',
                 display: 'flex',
                 flexDirection: 'column',
-                justifyContent: 'space-between',
-                textAlign: 'left',
+                alignItems: 'center',
+                justifyContent: 'center',
+                textAlign: 'center',
                 border: '1px solid rgba(255,255,255,0.12)',
                 background: 'rgba(255,255,255,0.045)',
                 borderRadius: 18,
-                padding: '18px 16px',
-                minHeight: 128,
+                padding: '20px 14px',
+                height: 148,
                 color: '#fff',
                 fontFamily: 'var(--font-body)',
                 gridColumn: seule ? '1 / -1' : undefined,
               }}
             >
-              <span style={{ fontSize: 22, color: 'rgba(255,255,255,0.3)', alignSelf: 'flex-end' }}>›</span>
-              <div>
-                <div style={{ fontFamily: 'var(--font-display)', fontSize: 17, fontWeight: 700, lineHeight: 1.25 }}>
-                  {b.label}
-                  {b.key === 'alertes' && alertsCount > 0 ? ` (${alertsCount})` : ''}
-                </div>
-                <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.45)', marginTop: 4 }}>{b.sub}</div>
+              <span style={{ position: 'absolute', top: 12, right: 14, fontSize: 20, color: 'rgba(255,255,255,0.3)' }}>›</span>
+              <div style={{ fontFamily: 'var(--font-display)', fontSize: 19, fontWeight: 700, lineHeight: 1.25 }}>
+                {b.label}
+                {b.key === 'alertes' && alertsCount > 0 ? ` (${alertsCount})` : ''}
               </div>
+              <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.45)', marginTop: 6 }}>{b.sub}</div>
             </button>
           )
         })}

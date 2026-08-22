@@ -60,7 +60,18 @@ type ProspectRow = {
 
 /** Fiche enrichie avec des coordonnées WGS84 garanties (natives ou
  * converties depuis Lambert93), prête pour affichage/calcul de distance. */
-type ProspectRowGeo = ProspectRow & { latEff: number; lonEff: number }
+type ProspectRowGeo = ProspectRow & {
+  latEff: number
+  lonEff: number
+  /** true si l'entreprise est déjà cliente CEGECLIM (trouvée dans ref_tiers
+   * par SIRET, active ou en sommeil) -- avant, ces fiches étaient
+   * simplement exclues ; l'écran "Carte Prospects & Clients" les affiche
+   * maintenant aussi, togglable via le filtre "Client CEGECLIM". */
+  estClientCegeclim: boolean
+  /** Collaborateur en charge (ref_tiers.representant), uniquement pour
+   * les fiches déjà clientes -- null pour un prospect pur. */
+  representant: string | null
+}
 
 type UserPosition = { lat: number; lng: number; accuracy: number | null }
 
@@ -156,7 +167,7 @@ function getSectorColor(sector: string): string {
   return TRACKED_SECTORS.find((s) => s.label === sector)?.color || '#d9d9d9'
 }
 
-type RefTiersRow = { siret: string | null; mise_en_sommeil: string | boolean | null }
+type RefTiersRow = { siret: string | null; mise_en_sommeil: string | boolean | null; representant: string | null }
 
 function normalizeSiret(value: unknown): string {
   return String(value ?? '').replace(/\D/g, '').trim()
@@ -276,6 +287,14 @@ export default function MobileProspects() {
   const [capaciteGazSeul, setCapaciteGazSeul] = useState(false)
   const [ancienneteMax, setAncienneteMax] = useState<AnciennetePreset>(ANCIENNETE_PRESETS[0]) // "Tout" par défaut
   const [capitalSocialActifs, setCapitalSocialActifs] = useState<Set<CapitalSocialOption>>(new Set())
+  // Le pavé d'accueil s'appelle désormais "Carte Prospects & Clients" :
+  // l'écran affiche maintenant les deux catégories, chacune togglable
+  // indépendamment (avant : les clients CEGECLIM étaient toujours exclus
+  // sans possibilité de les afficher).
+  const [afficherProspects, setAfficherProspects] = useState(true)
+  const [afficherClients, setAfficherClients] = useState(true)
+  const [collaborateurFiltre, setCollaborateurFiltre] = useState('')
+  const [collaborateursDisponibles, setCollaborateursDisponibles] = useState<string[]>([])
 
   const [secteursActifs, setSecteursActifs] = useState<Set<string>>(new Set())
 
@@ -338,6 +357,25 @@ export default function MobileProspects() {
   useEffect(() => {
     localiser()
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Liste des collaborateurs pour le filtre "Collaborateur" -- chargée une
+  // seule fois (liste de référence indépendante du rayon/position), à
+  // partir des clients CEGECLIM déjà connus en base (ref_tiers.representant).
+  useEffect(() => {
+    let cancelled = false
+    async function charger() {
+      const { data, error } = await supabase
+        .from('ref_tiers')
+        .select('representant')
+        .not('representant', 'is', null)
+        .not('representant', 'eq', '')
+      if (cancelled || error) return
+      const distincts = Array.from(new Set((data || []).map((r: any) => String(r.representant || '').trim()).filter(Boolean))).sort()
+      setCollaborateursDisponibles(distincts)
+    }
+    void charger()
+    return () => { cancelled = true }
   }, [])
 
   // CORRECTIF carte blanche, cette fois confirmé par le diagnostic à
@@ -424,18 +462,25 @@ export default function MobileProspects() {
         const rawRows = (data || []) as ProspectRow[]
 
         const siretsEnvisages = Array.from(new Set(rawRows.map((r) => normalizeSiret(r.siret)).filter(Boolean)))
-        let siretsDejaCegeclim = new Set<string>()
+        // Map siret -> representant plutôt qu'un simple Set : on n'exclut
+        // plus les clients CEGECLIM ici, on les annote pour que
+        // prospectsFiltres puisse les inclure/exclure dynamiquement selon
+        // les filtres "Client CEGECLIM" / "Collaborateur" (togglables sans
+        // recharger les données).
+        let clientsCegeclimParSiret = new Map<string, string | null>()
         if (siretsEnvisages.length > 0) {
           const { data: refTiersData, error: refTiersError } = await supabase
             .from('ref_tiers')
-            .select('siret, mise_en_sommeil')
+            .select('siret, mise_en_sommeil, representant')
             .in('siret', siretsEnvisages)
 
           if (refTiersError) {
             console.warn('[MobileProspects] lecture ref_tiers impossible :', refTiersError.message)
           } else {
-            siretsDejaCegeclim = new Set(
-              ((refTiersData || []) as RefTiersRow[]).map((row) => normalizeSiret(row.siret)).filter(Boolean),
+            clientsCegeclimParSiret = new Map(
+              ((refTiersData || []) as RefTiersRow[])
+                .map((row) => [normalizeSiret(row.siret), row.representant ? String(row.representant).trim() : null] as const)
+                .filter(([siret]) => Boolean(siret)),
             )
           }
         }
@@ -445,7 +490,8 @@ export default function MobileProspects() {
           if (String(r.etatAdministratifUniteLegale || '').trim().toUpperCase() === 'C') continue
 
           const siret = normalizeSiret(r.siret)
-          if (siret && siretsDejaCegeclim.has(siret)) continue
+          const estClientCegeclim = siret ? clientsCegeclimParSiret.has(siret) : false
+          const representant = siret ? clientsCegeclimParSiret.get(siret) ?? null : null
 
           const coords = coordonneesEffectives(r)
           if (!coords) continue
@@ -453,7 +499,7 @@ export default function MobileProspects() {
           const dist = distanceKmWgs84(position!.lat, position!.lng, coords.lat, coords.lon)
           if (dist > radiusKm) continue
 
-          rows.push({ ...r, latEff: coords.lat, lonEff: coords.lon })
+          rows.push({ ...r, latEff: coords.lat, lonEff: coords.lon, estClientCegeclim, representant })
         }
 
         setProspects(rows)
@@ -470,6 +516,16 @@ export default function MobileProspects() {
 
   const prospectsFiltres = useMemo(() => {
     return prospects.filter((p) => {
+      // Client CEGECLIM / Prospect : deux interrupteurs indépendants,
+      // pas un choix exclusif -- si les deux sont éteints, rien ne
+      // s'affiche (comportement attendu, pas un bug).
+      if (p.estClientCegeclim) {
+        if (!afficherClients) return false
+        if (collaborateurFiltre && p.representant !== collaborateurFiltre) return false
+      } else {
+        if (!afficherProspects) return false
+      }
+
       const sector = getSectorLabel(p)
       if (secteursActifs.size > 0 && !secteursActifs.has(sector)) return false
       if (rgeSeul && !p.rge) return false
@@ -481,7 +537,7 @@ export default function MobileProspects() {
       }
       return true
     })
-  }, [prospects, secteursActifs, rgeSeul, capaciteGazSeul, capitalSocialActifs, ancienneteMax])
+  }, [prospects, secteursActifs, rgeSeul, capaciteGazSeul, capitalSocialActifs, ancienneteMax, afficherClients, afficherProspects, collaborateurFiltre])
 
   function toggleSecteur(sector: string) {
     setSecteursActifs((prev) => {
@@ -530,74 +586,40 @@ export default function MobileProspects() {
   // Bloc de filtres réutilisé (options fixes) sur l'écran d'avant-carte ET
   // dans le tiroir sur la carte, pour rester cohérent.
   function BlocFiltresFixes({ compact }: { compact: boolean }) {
-    const padBtn = compact ? '8px 14px' : '10px 16px'
-    const fontBtn = compact ? 13 : 14
+    const [dimensionOuverte, setDimensionOuverte] = useState<
+      null | 'rayon' | 'anciennete' | 'capital' | 'secteur' | 'collaborateur'
+    >(null)
+
+    const resumeRayon = `${radiusKm} km`
+    const resumeAnciennete = ancienneteMax.label
+    const resumeCapital = capitalSocialActifs.size === 0 ? 'Tous' : `${capitalSocialActifs.size} sélection${capitalSocialActifs.size > 1 ? 's' : ''}`
+    const resumeSecteur = secteursActifs.size === 0 ? 'Tous' : `${secteursActifs.size} sélection${secteursActifs.size > 1 ? 's' : ''}`
+    const resumeCollaborateur = collaborateurFiltre || 'Tous'
+
     return (
       <>
-        <div>
-          <div style={filtreTitreStyle}>Rayon de recherche</div>
-          <div style={{ display: 'flex', gap: compact ? 6 : 8, flexWrap: 'wrap' }}>
-            {RADIUS_PRESETS_KM.map((km) => (
-              <button key={km} type="button" onClick={() => setRadiusKm(km)} style={chipStyle(radiusKm === km, '75,146,172', padBtn, fontBtn)}>
-                {km} km
-              </button>
-            ))}
-          </div>
-        </div>
+        {/* Client CEGECLIM / Prospect : deux interrupteurs simples, pas
+           besoin d'un sous-tiroir pour un Oui/Non. */}
+        <LigneInterrupteur label="Client CEGECLIM" valeur={afficherClients} onChange={setAfficherClients} compact={compact} />
+        <LigneInterrupteur label="Prospect" valeur={afficherProspects} onChange={setAfficherProspects} compact={compact} />
 
-        <div>
-          <div style={filtreTitreStyle}>Ancienneté</div>
-          <div style={{ display: 'flex', gap: compact ? 6 : 8, flexWrap: 'wrap' }}>
-            {ANCIENNETE_PRESETS.map((preset) => (
-              <button key={preset.key} type="button" onClick={() => setAncienneteMax(preset)} style={chipStyle(ancienneteMax.key === preset.key, '166,161,129', padBtn, fontBtn)}>
-                {preset.label}
-              </button>
-            ))}
-          </div>
-        </div>
+        {/* Collaborateur : ne filtre que les clients CEGECLIM (les
+           prospects n'ont pas de représentant assigné) -- grisé si les
+           clients CEGECLIM sont masqués, pour que ce soit clair. */}
+        <LigneDimension
+          label="Collaborateur"
+          valeur={resumeCollaborateur}
+          onClick={() => afficherClients && setDimensionOuverte('collaborateur')}
+          compact={compact}
+          desactive={!afficherClients}
+        />
 
-        <div>
-          <div style={filtreTitreStyle}>Capital social</div>
-          <div style={{ display: 'flex', gap: compact ? 6 : 8, flexWrap: 'wrap' }}>
-            {CAPITAL_SOCIAL_OPTIONS.map((option) => (
-              <button key={option} type="button" onClick={() => toggleCapitalSocial(option)} style={chipStyle(capitalSocialActifs.has(option), '224,169,74', padBtn, fontBtn)}>
-                {option}
-              </button>
-            ))}
-          </div>
-        </div>
+        <LigneDimension label="Rayon de recherche" valeur={resumeRayon} onClick={() => setDimensionOuverte('rayon')} compact={compact} />
+        <LigneDimension label="Ancienneté" valeur={resumeAnciennete} onClick={() => setDimensionOuverte('anciennete')} compact={compact} />
+        <LigneDimension label="Capital social" valeur={resumeCapital} onClick={() => setDimensionOuverte('capital')} compact={compact} />
+        <LigneDimension label="Secteur / type d'activité" valeur={resumeSecteur} onClick={() => setDimensionOuverte('secteur')} compact={compact} />
 
-        <div>
-          <div style={filtreTitreStyle}>Secteur / type d'activité</div>
-          <div style={{ display: 'flex', gap: compact ? 6 : 8, flexWrap: 'wrap' }}>
-            {TRACKED_SECTORS.map((sector) => {
-              const actif = secteursActifs.has(sector.label)
-              return (
-                <button
-                  key={sector.label}
-                  type="button"
-                  onClick={() => toggleSecteur(sector.label)}
-                  style={{
-                    display: 'inline-flex', alignItems: 'center', gap: 6, padding: padBtn, borderRadius: 999,
-                    border: `1px solid ${actif ? sector.color : 'rgba(255,255,255,0.18)'}`,
-                    background: actif ? `${sector.color}33` : 'rgba(255,255,255,0.04)',
-                    color: '#fff', fontSize: fontBtn, fontWeight: 700,
-                  }}
-                >
-                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: sector.color }} />
-                  {sector.label}
-                </button>
-              )
-            })}
-            {secteursActifs.size > 0 && (
-              <button type="button" onClick={() => setSecteursActifs(new Set())} style={{ padding: padBtn, borderRadius: 999, border: '1px solid rgba(255,255,255,0.18)', background: 'transparent', color: 'rgba(255,255,255,0.6)', fontSize: fontBtn }}>
-                Effacer
-              </button>
-            )}
-          </div>
-        </div>
-
-        <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', marginTop: 4 }}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: compact ? 13.5 : 14.5, color: '#fff', fontWeight: 600 }}>
             <input type="checkbox" checked={rgeSeul} onChange={(e) => setRgeSeul(e.target.checked)} style={{ width: compact ? 18 : 20, height: compact ? 18 : 20 }} />
             RGE uniquement
@@ -607,6 +629,126 @@ export default function MobileProspects() {
             Capacité gaz uniquement
           </label>
         </div>
+
+        {/* ---- Sous-tiroir de détail, un seul à la fois ---- */}
+        {dimensionOuverte && (
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 2200, background: 'rgba(6,10,18,0.7)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
+            onClick={() => setDimensionOuverte(null)}
+          >
+            <div
+              style={{ width: '100%', maxWidth: 480, maxHeight: '75vh', overflowY: 'auto', background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.1)', padding: '12px 18px 26px', display: 'flex', flexDirection: 'column', gap: 14 }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 2px' }} />
+
+              {dimensionOuverte === 'rayon' && (
+                <>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Rayon de recherche</div>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    {RADIUS_PRESETS_KM.map((km) => (
+                      <button key={km} type="button" onClick={() => setRadiusKm(km)} style={chipStyle(radiusKm === km, '75,146,172', '10px 16px', 14)}>
+                        {km} km
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              {dimensionOuverte === 'anciennete' && (
+                <>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Ancienneté</div>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    {ANCIENNETE_PRESETS.map((preset) => (
+                      <button key={preset.key} type="button" onClick={() => setAncienneteMax(preset)} style={chipStyle(ancienneteMax.key === preset.key, '166,161,129', '10px 16px', 14)}>
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              {dimensionOuverte === 'capital' && (
+                <>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Capital social</div>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    {CAPITAL_SOCIAL_OPTIONS.map((option) => (
+                      <button key={option} type="button" onClick={() => toggleCapitalSocial(option)} style={chipStyle(capitalSocialActifs.has(option), '224,169,74', '10px 16px', 14)}>
+                        {option}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              {dimensionOuverte === 'secteur' && (
+                <>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Secteur / type d'activité</div>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {TRACKED_SECTORS.map((sector) => {
+                      const actif = secteursActifs.has(sector.label)
+                      return (
+                        <button
+                          key={sector.label}
+                          type="button"
+                          onClick={() => toggleSecteur(sector.label)}
+                          style={{
+                            display: 'inline-flex', alignItems: 'center', gap: 6, padding: '9px 14px', borderRadius: 999,
+                            border: `1px solid ${actif ? sector.color : 'rgba(255,255,255,0.18)'}`,
+                            background: actif ? `${sector.color}33` : 'rgba(255,255,255,0.04)',
+                            color: '#fff', fontSize: 13.5, fontWeight: 700,
+                          }}
+                        >
+                          <span style={{ width: 8, height: 8, borderRadius: '50%', background: sector.color }} />
+                          {sector.label}
+                        </button>
+                      )
+                    })}
+                    {secteursActifs.size > 0 && (
+                      <button type="button" onClick={() => setSecteursActifs(new Set())} style={{ padding: '9px 14px', borderRadius: 999, border: '1px solid rgba(255,255,255,0.18)', background: 'transparent', color: 'rgba(255,255,255,0.6)', fontSize: 13.5 }}>
+                        Effacer
+                      </button>
+                    )}
+                  </div>
+                </>
+              )}
+
+              {dimensionOuverte === 'collaborateur' && (
+                <>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Collaborateur</div>
+                  <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', marginTop: -8 }}>
+                    Filtre uniquement les clients CEGECLIM affichés -- sans effet sur les prospects.
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <button
+                      type="button"
+                      onClick={() => setCollaborateurFiltre('')}
+                      style={{ ...ligneOptionStyle(collaborateurFiltre === '') }}
+                    >
+                      Tous
+                    </button>
+                    {collaborateursDisponibles.map((c) => (
+                      <button key={c} type="button" onClick={() => setCollaborateurFiltre(c)} style={ligneOptionStyle(collaborateurFiltre === c)}>
+                        {c}
+                      </button>
+                    ))}
+                    {collaborateursDisponibles.length === 0 && (
+                      <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)' }}>Aucun collaborateur trouvé.</div>
+                    )}
+                  </div>
+                </>
+              )}
+
+              <button
+                type="button"
+                onClick={() => setDimensionOuverte(null)}
+                style={{ marginTop: 6, padding: '12px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: '#A6A181', color: '#141A26', fontSize: 14, fontWeight: 700 }}
+              >
+                OK
+              </button>
+            </div>
+          </div>
+        )}
       </>
     )
   }
@@ -712,10 +854,22 @@ export default function MobileProspects() {
                       onClick={() => ouvrirDetail(p)}
                       style={{ display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left', flex: 1, minWidth: 0, background: 'none', border: 'none', padding: 0 }}
                     >
-                      <span style={{ width: 10, height: 10, borderRadius: '50%', background: getSectorColor(sector), flexShrink: 0 }} />
+                      <span
+                        style={{
+                          width: 10, height: 10, borderRadius: '50%', background: getSectorColor(sector), flexShrink: 0,
+                          boxShadow: p.estClientCegeclim ? '0 0 0 2px #FFC98B' : 'none',
+                        }}
+                      />
                       <div style={{ minWidth: 0, flex: 1 }}>
-                        <div style={{ fontSize: 14, fontWeight: 700, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                          {p.raison_sociale_affichee || '(sans nom)'}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                          <div style={{ fontSize: 14, fontWeight: 700, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {p.raison_sociale_affichee || '(sans nom)'}
+                          </div>
+                          {p.estClientCegeclim && (
+                            <span style={{ flexShrink: 0, fontSize: 9.5, fontWeight: 700, color: '#141A26', background: '#FFC98B', borderRadius: 999, padding: '2px 6px' }}>
+                              CLIENT
+                            </span>
+                          )}
                         </div>
                         <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                           {formatAdresseComplete(p) || sector}
@@ -805,7 +959,11 @@ export default function MobileProspects() {
                     key={p.id}
                     center={[p.latEff, p.lonEff]}
                     radius={7}
-                    pathOptions={{ color: '#0f172a', fillColor: getSectorColor(sector), fillOpacity: 0.95, weight: 1.5 }}
+                    pathOptions={{
+                      color: p.estClientCegeclim ? '#FFC98B' : '#0f172a',
+                      fillColor: getSectorColor(sector), fillOpacity: 0.95,
+                      weight: p.estClientCegeclim ? 3 : 1.5,
+                    }}
                     eventHandlers={{ click: () => ouvrirDetail(p) }}
                   />
                 )
@@ -921,8 +1079,17 @@ export default function MobileProspects() {
           >
             <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 14px' }} />
 
-            <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>{selected.raison_sociale_affichee || '(sans nom)'}</div>
-            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>{getSectorLabel(selected)}</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>{selected.raison_sociale_affichee || '(sans nom)'}</div>
+              {selected.estClientCegeclim && (
+                <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 700, color: '#141A26', background: '#FFC98B', borderRadius: 999, padding: '2px 8px' }}>
+                  CLIENT CEGECLIM
+                </span>
+              )}
+            </div>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>
+              {getSectorLabel(selected)}{selected.estClientCegeclim && selected.representant ? ` · ${selected.representant}` : ''}
+            </div>
 
             <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
               <button
@@ -1020,8 +1187,86 @@ export default function MobileProspects() {
   )
 }
 
-const filtreTitreStyle: React.CSSProperties = {
-  fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 8,
+function LigneDimension({
+  label,
+  valeur,
+  onClick,
+  compact,
+  desactive,
+}: {
+  label: string
+  valeur: string
+  onClick: () => void
+  compact: boolean
+  desactive?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={desactive}
+      style={{
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%',
+        padding: compact ? '11px 2px' : '13px 2px',
+        background: 'none', border: 'none', borderBottom: '1px solid rgba(255,255,255,0.08)',
+        opacity: desactive ? 0.4 : 1,
+      }}
+    >
+      <span style={{ fontSize: compact ? 13.5 : 14.5, fontWeight: 600, color: '#fff' }}>{label}</span>
+      <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: compact ? 12.5 : 13.5, color: 'rgba(255,255,255,0.55)' }}>
+        {valeur}
+        <span style={{ fontSize: 16, color: 'rgba(255,255,255,0.3)' }}>›</span>
+      </span>
+    </button>
+  )
+}
+
+function LigneInterrupteur({
+  label,
+  valeur,
+  onChange,
+  compact,
+}: {
+  label: string
+  valeur: boolean
+  onChange: (v: boolean) => void
+  compact: boolean
+}) {
+  return (
+    <div
+      style={{
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%',
+        padding: compact ? '11px 2px' : '13px 2px', borderBottom: '1px solid rgba(255,255,255,0.08)',
+      }}
+    >
+      <span style={{ fontSize: compact ? 13.5 : 14.5, fontWeight: 600, color: '#fff' }}>{label}</span>
+      <button
+        type="button"
+        onClick={() => onChange(!valeur)}
+        aria-label={label}
+        style={{
+          width: 46, height: 27, borderRadius: 999, border: 'none', position: 'relative', flexShrink: 0,
+          background: valeur ? '#A6A181' : 'rgba(255,255,255,0.15)',
+        }}
+      >
+        <span
+          style={{
+            position: 'absolute', top: 2.5, left: valeur ? 21 : 2.5, width: 22, height: 22, borderRadius: '50%',
+            background: '#fff', transition: 'left 0.15s ease',
+          }}
+        />
+      </button>
+    </div>
+  )
+}
+
+function ligneOptionStyle(actif: boolean): React.CSSProperties {
+  return {
+    textAlign: 'left', padding: '12px 14px', borderRadius: 10,
+    border: `1px solid ${actif ? 'rgba(166,161,129,0.5)' : 'rgba(255,255,255,0.1)'}`,
+    background: actif ? 'rgba(166,161,129,0.18)' : 'rgba(255,255,255,0.03)',
+    color: '#fff', fontSize: 14, fontWeight: actif ? 700 : 500,
+  }
 }
 
 function chipStyle(actif: boolean, rgb: string, padding: string, fontSize: number): React.CSSProperties {
