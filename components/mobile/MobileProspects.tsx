@@ -7,18 +7,21 @@ import { supabase } from '@/lib/supabaseClient'
 // ─────────────────────────────────────────────────────────────────────────
 // Version mobile de "Prospects autour de moi", branchée sur les mêmes
 // principes que la carte de l'écran Clients desktop (app/clients/page.tsx) :
-// visualisation carte, filtres, détail client au clic. Réécrite pour un
-// écran de téléphone : carte plein écran (pas de liste latérale), filtres
-// dans un tiroir plutôt qu'une barre d'outils, fiche de détail en bottom
-// sheet.
+// visualisation carte, filtres, détail client au clic.
 //
-// SIMPLIFICATION ASSUMÉE (v1) : au lieu de charger toute la table clients
-// (comme le fait le desktop, adapté à un poste de travail), on interroge
-// uniquement une boîte englobante autour de la position GPS de
-// l'utilisateur -- plus léger sur mobile/4G. Conséquence : seules les
-// fiches ayant déjà latitude/longitude renseignées apparaissent (celles
-// avec uniquement des coordonnées Lambert ne remontent pas tant qu'un job
-// de fond ne les aura pas converties, cf. lambert93ToWgs84 côté desktop).
+// CORRECTIF IMPORTANT (v2) : la première version interrogeait uniquement
+// les colonnes latitude/longitude, qui sont vides sur la plupart des
+// fiches (seules les coordonnées Lambert93 sont systématiquement
+// renseignées à l'import SIRENE -- cf. lambert93ToWgs84 côté desktop, qui
+// doit convertir à la volée pour la quasi-totalité des lignes). Résultat :
+// "0 prospect" presque partout. On interroge maintenant en Lambert93
+// (bien mieux renseigné, et boîte englobante triviale car c'est une
+// projection métrique), puis on convertit en WGS84 pour l'affichage et le
+// calcul de distance exact.
+//
+// Flux repensé : les filtres (rayon, secteur, ancienneté, RGE) sont
+// présentés AVANT la carte, pas seulement dans un tiroir après coup --
+// l'utilisateur voit et règle explicitement ce qui va être cherché.
 // ─────────────────────────────────────────────────────────────────────────
 
 const MapContainer: any = dynamic(() => import('react-leaflet').then((m) => m.MapContainer as any), { ssr: false })
@@ -36,6 +39,8 @@ type ProspectRow = {
   libelleCommuneEtablissement: string | null
   latitude: number | null
   longitude: number | null
+  coordonneeLambertAbscisseEtablissement: number | null
+  coordonneeLambertOrdonneeEtablissement: number | null
   telephone: string | null
   email: string | null
   nom_dirigeant: string | null
@@ -47,6 +52,10 @@ type ProspectRow = {
   rge: boolean | null
   capacite_gaz: boolean | null
 }
+
+/** Fiche enrichie avec des coordonnées WGS84 garanties (natives ou
+ * converties depuis Lambert93), prête pour affichage/calcul de distance. */
+type ProspectRowGeo = ProspectRow & { latEff: number; lonEff: number }
 
 type UserPosition = { lat: number; lng: number; accuracy: number | null }
 
@@ -71,6 +80,14 @@ const PROSPECT_STATUS_OPTIONS: ProspectStatusValue[] = [
 ]
 
 const RADIUS_PRESETS_KM = [5, 10, 25, 50, 100]
+
+type AnciennetePreset = { key: string; label: string; maxDays: number | null }
+const ANCIENNETE_PRESETS: AnciennetePreset[] = [
+  { key: 'tout', label: 'Tout', maxDays: null },
+  { key: '3m', label: '< 3 mois', maxDays: 90 },
+  { key: '1a', label: '< 1 an', maxDays: 365 },
+  { key: '3a', label: '< 3 ans', maxDays: 1095 },
+]
 
 // Mêmes secteurs suivis et mêmes couleurs que côté desktop
 // (app/clients/page.tsx, TRACKED_SECTORS) -- à garder synchronisés si
@@ -105,9 +122,10 @@ function getSectorColor(sector: string): string {
   return TRACKED_SECTORS.find((s) => s.label === sector)?.color || '#d9d9d9'
 }
 
-function isPresentDansCegeclim(value: unknown): boolean {
-  const raw = String(value ?? '').trim().toUpperCase()
-  return raw !== '' && raw !== 'NON' && raw !== 'FALSE' && raw !== '0' && raw !== 'NULL'
+type RefTiersRow = { siret: string | null; mise_en_sommeil: string | boolean | null }
+
+function normalizeSiret(value: unknown): string {
+  return String(value ?? '').replace(/\D/g, '').trim()
 }
 
 function distanceKmWgs84(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -127,6 +145,17 @@ function zoomForRadiusKm(km: number): number {
   return 8
 }
 
+function diffDaysFromToday(dateStr: string | null): number | null {
+  if (!dateStr) return null
+  const d = new Date(dateStr)
+  if (Number.isNaN(d.getTime())) return null
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const ref = new Date(d)
+  ref.setHours(0, 0, 0, 0)
+  return Math.floor((today.getTime() - ref.getTime()) / (1000 * 60 * 60 * 24))
+}
+
 function formatDateFr(value: string | null | undefined): string {
   if (!value) return '—'
   const d = new Date(value)
@@ -134,21 +163,92 @@ function formatDateFr(value: string | null | undefined): string {
   return d.toLocaleDateString('fr-FR')
 }
 
+// ── Projection Lambert93 (RGF93) <-> WGS84 ─────────────────────────────
+// Mêmes constantes que lambert93ToWgs84 côté desktop (app/clients/page.tsx)
+// -- à garder synchronisées si elles changent là-bas. La fonction inverse
+// (WGS84 -> Lambert93) est ajoutée ici pour pouvoir borner la requête
+// Supabase directement en Lambert (bien mieux renseigné que latitude/
+// longitude sur la table clients).
+const LAMBERT_N = 0.725607765053267
+const LAMBERT_C = 11754255.426096
+const LAMBERT_XS = 700000
+const LAMBERT_YS = 12655612.049876
+const LAMBERT_LON0 = (3 * Math.PI) / 180
+const LAMBERT_E = 0.0818191910428158
+
+function lambert93ToWgs84(x: number | null | undefined, y: number | null | undefined): { latitude: number; longitude: number } | null {
+  if (x == null || y == null) return null
+  const X = Number(x)
+  const Y = Number(y)
+  if (!Number.isFinite(X) || !Number.isFinite(Y)) return null
+
+  const dx = X - LAMBERT_XS
+  const dy = Y - LAMBERT_YS
+  const R = Math.sqrt(dx * dx + dy * dy)
+  if (!Number.isFinite(R) || R === 0) return null
+
+  const gamma = Math.atan(dx / (LAMBERT_YS - Y))
+  const lonRad = LAMBERT_LON0 + gamma / LAMBERT_N
+  const latIso = -Math.log(Math.abs(R / LAMBERT_C)) / LAMBERT_N
+
+  let latRad = 2 * Math.atan(Math.exp(latIso)) - Math.PI / 2
+  for (let i = 0; i < 6; i += 1) {
+    latRad =
+      2 *
+        Math.atan(
+          Math.pow((1 + LAMBERT_E * Math.sin(latRad)) / (1 - LAMBERT_E * Math.sin(latRad)), LAMBERT_E / 2) *
+            Math.exp(latIso),
+        ) -
+      Math.PI / 2
+  }
+
+  return { latitude: (latRad * 180) / Math.PI, longitude: (lonRad * 180) / Math.PI }
+}
+
+function wgs84ToLambert93(latDeg: number, lonDeg: number): { x: number; y: number } {
+  const phi = (latDeg * Math.PI) / 180
+  const lambda = (lonDeg * Math.PI) / 180
+
+  const latIso = Math.atanh(Math.sin(phi)) - LAMBERT_E * Math.atanh(LAMBERT_E * Math.sin(phi))
+  const R = LAMBERT_C * Math.exp(-LAMBERT_N * latIso)
+  const gamma = LAMBERT_N * (lambda - LAMBERT_LON0)
+
+  return {
+    x: LAMBERT_XS + R * Math.sin(gamma),
+    y: LAMBERT_YS - R * Math.cos(gamma),
+  }
+}
+
+/** Coordonnées WGS84 effectives d'une fiche : natives si présentes, sinon
+ * converties depuis Lambert93. Renvoie null si aucune des deux n'est
+ * exploitable. */
+function coordonneesEffectives(row: ProspectRow): { lat: number; lon: number } | null {
+  if (typeof row.latitude === 'number' && Number.isFinite(row.latitude) && typeof row.longitude === 'number' && Number.isFinite(row.longitude)) {
+    return { lat: row.latitude, lon: row.longitude }
+  }
+  const converted = lambert93ToWgs84(row.coordonneeLambertAbscisseEtablissement, row.coordonneeLambertOrdonneeEtablissement)
+  if (!converted) return null
+  return { lat: converted.latitude, lon: converted.longitude }
+}
+
 export default function MobileProspects() {
   const [position, setPosition] = useState<UserPosition | null>(null)
   const [locating, setLocating] = useState(false)
   const [geoError, setGeoError] = useState<string | null>(null)
-  const [radiusKm, setRadiusKm] = useState(25)
 
-  const [prospects, setProspects] = useState<ProspectRow[]>([])
+  // Filtres réglés AVANT d'afficher la carte.
+  const [filtresValides, setFiltresValides] = useState(false)
+  const [radiusKm, setRadiusKm] = useState(25)
+  const [secteursActifs, setSecteursActifs] = useState<Set<string>>(new Set())
+  const [rgeSeul, setRgeSeul] = useState(false)
+  const [ancienneteMax, setAncienneteMax] = useState<AnciennetePreset>(ANCIENNETE_PRESETS[0]) // "Tout" par défaut
+
+  const [prospects, setProspects] = useState<ProspectRowGeo[]>([])
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
 
   const [filtresOuverts, setFiltresOuverts] = useState(false)
-  const [secteursActifs, setSecteursActifs] = useState<Set<string>>(new Set())
-  const [rgeSeul, setRgeSeul] = useState(false)
-
-  const [selected, setSelected] = useState<ProspectRow | null>(null)
+  const [selected, setSelected] = useState<ProspectRowGeo | null>(null)
   const [statutBrouillon, setStatutBrouillon] = useState<ProspectStatusValue>('')
   const [commentaireBrouillon, setCommentaireBrouillon] = useState('')
   const [saving, setSaving] = useState(false)
@@ -190,38 +290,71 @@ export default function MobileProspects() {
   }, [])
 
   useEffect(() => {
-    if (!position) return
+    if (!position || !filtresValides) return
     let cancelled = false
 
     async function charger() {
       setLoading(true)
       setLoadError(null)
       try {
-        const latDelta = radiusKm / 111
-        const lonDelta = radiusKm / (111 * Math.max(0.2, Math.cos((position!.lat * Math.PI) / 180)))
+        // Boîte englobante en Lambert93 : projection métrique, donc un
+        // rayon en km se traduit directement en mètres, sans les
+        // approximations de longitude/latitude en degrés.
+        const { x: x0, y: y0 } = wgs84ToLambert93(position!.lat, position!.lng)
+        const rayonM = radiusKm * 1000
 
         const { data, error } = await supabase
           .from('clients')
           .select(
-            'id, siret, raison_sociale_affichee, activitePrincipaleEtablissement, naf_libelle_traduit, codePostalEtablissement, libelleCommuneEtablissement, latitude, longitude, telephone, email, nom_dirigeant, prospect_status, prospect_comment, present_dans_cegeclim, dateCreationEtablissement, etatAdministratifUniteLegale, rge, capacite_gaz',
+            'id, siret, raison_sociale_affichee, activitePrincipaleEtablissement, naf_libelle_traduit, codePostalEtablissement, libelleCommuneEtablissement, latitude, longitude, coordonneeLambertAbscisseEtablissement, coordonneeLambertOrdonneeEtablissement, telephone, email, nom_dirigeant, prospect_status, prospect_comment, present_dans_cegeclim, dateCreationEtablissement, etatAdministratifUniteLegale, rge, capacite_gaz',
           )
-          .not('latitude', 'is', null)
-          .not('longitude', 'is', null)
-          .gte('latitude', position!.lat - latDelta)
-          .lte('latitude', position!.lat + latDelta)
-          .gte('longitude', position!.lng - lonDelta)
-          .lte('longitude', position!.lng + lonDelta)
+          .not('coordonneeLambertAbscisseEtablissement', 'is', null)
+          .not('coordonneeLambertOrdonneeEtablissement', 'is', null)
+          .gte('coordonneeLambertAbscisseEtablissement', x0 - rayonM)
+          .lte('coordonneeLambertAbscisseEtablissement', x0 + rayonM)
+          .gte('coordonneeLambertOrdonneeEtablissement', y0 - rayonM)
+          .lte('coordonneeLambertOrdonneeEtablissement', y0 + rayonM)
           .limit(3000)
 
         if (cancelled) return
         if (error) throw error
 
-        const rows = ((data || []) as ProspectRow[]).filter((r) => {
-          if (String(r.etatAdministratifUniteLegale || '').trim().toUpperCase() === 'C') return false
-          if (isPresentDansCegeclim(r.present_dans_cegeclim)) return false
-          const dist = distanceKmWgs84(position!.lat, position!.lng, r.latitude as number, r.longitude as number)
-          return dist <= radiusKm
-        })
+        const rawRows = (data || []) as ProspectRow[]
+
+        // Croisement ref_tiers (comme le desktop) : exclut les entreprises
+        // déjà clientes CEGECLIM, actives OU en sommeil.
+        const siretsEnvisages = Array.from(new Set(rawRows.map((r) => normalizeSiret(r.siret)).filter(Boolean)))
+        let siretsDejaCegeclim = new Set<string>()
+        if (siretsEnvisages.length > 0) {
+          const { data: refTiersData, error: refTiersError } = await supabase
+            .from('ref_tiers')
+            .select('siret, mise_en_sommeil')
+            .in('siret', siretsEnvisages)
+
+          if (refTiersError) {
+            console.warn('[MobileProspects] lecture ref_tiers impossible :', refTiersError.message)
+          } else {
+            siretsDejaCegeclim = new Set(
+              ((refTiersData || []) as RefTiersRow[]).map((row) => normalizeSiret(row.siret)).filter(Boolean),
+            )
+          }
+        }
+
+        const rows: ProspectRowGeo[] = []
+        for (const r of rawRows) {
+          if (String(r.etatAdministratifUniteLegale || '').trim().toUpperCase() === 'C') continue
+
+          const siret = normalizeSiret(r.siret)
+          if (siret && siretsDejaCegeclim.has(siret)) continue
+
+          const coords = coordonneesEffectives(r)
+          if (!coords) continue
+
+          const dist = distanceKmWgs84(position!.lat, position!.lng, coords.lat, coords.lon)
+          if (dist > radiusKm) continue
+
+          rows.push({ ...r, latEff: coords.lat, lonEff: coords.lon })
+        }
 
         setProspects(rows)
       } catch (e: any) {
@@ -233,7 +366,7 @@ export default function MobileProspects() {
 
     void charger()
     return () => { cancelled = true }
-  }, [position, radiusKm])
+  }, [position, filtresValides, radiusKm])
 
   const secteursDisponibles = useMemo(() => {
     return Array.from(new Set(prospects.map((p) => getSectorLabel(p)))).sort()
@@ -244,9 +377,13 @@ export default function MobileProspects() {
       const sector = getSectorLabel(p)
       if (secteursActifs.size > 0 && !secteursActifs.has(sector)) return false
       if (rgeSeul && !p.rge) return false
+      if (ancienneteMax.maxDays != null) {
+        const age = diffDaysFromToday(p.dateCreationEtablissement)
+        if (age == null || age < 0 || age > ancienneteMax.maxDays) return false
+      }
       return true
     })
-  }, [prospects, secteursActifs, rgeSeul])
+  }, [prospects, secteursActifs, rgeSeul, ancienneteMax])
 
   function toggleSecteur(sector: string) {
     setSecteursActifs((prev) => {
@@ -257,7 +394,7 @@ export default function MobileProspects() {
     })
   }
 
-  function ouvrirDetail(p: ProspectRow) {
+  function ouvrirDetail(p: ProspectRowGeo) {
     setSelected(p)
     setStatutBrouillon((p.prospect_status as ProspectStatusValue) || '')
     setCommentaireBrouillon(p.prospect_comment || '')
@@ -284,43 +421,114 @@ export default function MobileProspects() {
     }
   }
 
+  // ── Écran 1 : filtres, affiché AVANT la carte ─────────────────────────
+  if (!filtresValides) {
+    return (
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '16px 18px 28px', gap: 18, overflowY: 'auto' }}>
+        {geoError ? (
+          <div style={{ padding: '10px 12px', borderRadius: 10, background: 'rgba(193,104,60,0.14)', border: '1px solid rgba(193,104,60,0.32)', color: '#e0a685', fontSize: 12.5 }}>
+            {geoError}
+            <button type="button" onClick={localiser} style={{ display: 'block', marginTop: 6, background: 'none', border: 'none', color: '#fff', fontSize: 12, fontWeight: 700, textDecoration: 'underline', cursor: 'pointer', padding: 0 }}>
+              Réessayer
+            </button>
+          </div>
+        ) : (
+          <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.55)' }}>
+            {locating ? 'Localisation en cours…' : position ? 'Position trouvée.' : 'En attente de la position…'}
+          </div>
+        )}
+
+        <div>
+          <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 10 }}>Rayon de recherche</div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {RADIUS_PRESETS_KM.map((km) => (
+              <button
+                key={km}
+                type="button"
+                onClick={() => setRadiusKm(km)}
+                style={{
+                  padding: '10px 16px', borderRadius: 999, border: '1px solid rgba(75,146,172,0.4)',
+                  background: radiusKm === km ? 'rgba(75,146,172,0.35)' : 'rgba(75,146,172,0.1)',
+                  color: '#fff', fontSize: 14, fontWeight: 700,
+                }}
+              >
+                {km} km
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 10 }}>Ancienneté de l'entreprise</div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {ANCIENNETE_PRESETS.map((preset) => (
+              <button
+                key={preset.key}
+                type="button"
+                onClick={() => setAncienneteMax(preset)}
+                style={{
+                  padding: '10px 16px', borderRadius: 999, border: '1px solid rgba(166,161,129,0.4)',
+                  background: ancienneteMax.key === preset.key ? 'rgba(166,161,129,0.35)' : 'rgba(166,161,129,0.1)',
+                  color: '#fff', fontSize: 14, fontWeight: 700,
+                }}
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <label style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 14.5, color: '#fff', fontWeight: 600 }}>
+          <input type="checkbox" checked={rgeSeul} onChange={(e) => setRgeSeul(e.target.checked)} style={{ width: 20, height: 20 }} />
+          RGE uniquement
+        </label>
+
+        <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', lineHeight: 1.5 }}>
+          Le secteur d'activité pourra être filtré une fois les résultats chargés, depuis le bouton "Filtres" sur la carte.
+        </div>
+
+        <button
+          type="button"
+          onClick={() => setFiltresValides(true)}
+          disabled={!position}
+          style={{
+            marginTop: 'auto', width: '100%', padding: '15px', borderRadius: 14,
+            border: 'none', background: position ? '#A6A181' : 'rgba(166,161,129,0.3)',
+            color: '#141A26', fontSize: 15.5, fontWeight: 700,
+            cursor: position ? 'pointer' : 'default',
+          }}
+        >
+          {position ? 'Voir la carte' : 'En attente de la position…'}
+        </button>
+      </div>
+    )
+  }
+
+  // ── Écran 2 : carte ────────────────────────────────────────────────────
   return (
     <div style={{ position: 'relative', flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-      {/* ---- Bandeau haut : statut + bouton filtres ---- */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px' }}>
+        <button
+          type="button"
+          onClick={() => setFiltresValides(false)}
+          style={{ border: '1px solid rgba(255,255,255,0.18)', background: 'transparent', color: 'rgba(255,255,255,0.7)', borderRadius: 10, padding: '7px 10px', fontSize: 12 }}
+        >
+          ← Rayon/ancienneté
+        </button>
         <div style={{ flex: 1, fontSize: 12.5, color: 'rgba(255,255,255,0.6)' }}>
-          {loading
-            ? 'Recherche…'
-            : loadError
-              ? loadError
-              : position
-                ? `${prospectsFiltres.length} prospect${prospectsFiltres.length > 1 ? 's' : ''} dans un rayon de ${radiusKm} km`
-                : 'Position non disponible'}
+          {loading ? 'Recherche…' : loadError ? loadError : `${prospectsFiltres.length} prospect${prospectsFiltres.length > 1 ? 's' : ''} · ${radiusKm} km`}
         </div>
         <button
           type="button"
           onClick={() => setFiltresOuverts(true)}
-          style={{
-            border: '1px solid rgba(255,255,255,0.18)', background: 'rgba(255,255,255,0.06)',
-            color: '#fff', borderRadius: 10, padding: '7px 12px', fontSize: 12.5, fontWeight: 600,
-          }}
+          style={{ border: '1px solid rgba(255,255,255,0.18)', background: 'rgba(255,255,255,0.06)', color: '#fff', borderRadius: 10, padding: '7px 12px', fontSize: 12.5, fontWeight: 600 }}
         >
           ⚙️ Filtres
         </button>
       </div>
 
-      {geoError && (
-        <div style={{ margin: '0 14px 10px', padding: '10px 12px', borderRadius: 10, background: 'rgba(193,104,60,0.14)', border: '1px solid rgba(193,104,60,0.32)', color: '#e0a685', fontSize: 12.5 }}>
-          {geoError}
-          <button type="button" onClick={localiser} style={{ display: 'block', marginTop: 6, background: 'none', border: 'none', color: '#fff', fontSize: 12, fontWeight: 700, textDecoration: 'underline', cursor: 'pointer', padding: 0 }}>
-            Réessayer
-          </button>
-        </div>
-      )}
-
-      {/* ---- Carte plein écran ---- */}
       <div style={{ flex: 1, minHeight: 0 }}>
-        {position ? (
+        {position && (
           <MapContainer
             center={[position.lat, position.lng] as any}
             zoom={zoomForRadiusKm(radiusKm)}
@@ -349,7 +557,7 @@ export default function MobileProspects() {
               return (
                 <CircleMarker
                   key={p.id}
-                  center={[p.latitude as number, p.longitude as number]}
+                  center={[p.latEff, p.lonEff]}
                   radius={7}
                   pathOptions={{ color: '#0f172a', fillColor: getSectorColor(sector), fillOpacity: 0.95, weight: 1.5 }}
                   eventHandlers={{ click: () => ouvrirDetail(p) }}
@@ -357,14 +565,10 @@ export default function MobileProspects() {
               )
             })}
           </MapContainer>
-        ) : (
-          <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.4)', fontSize: 13, textAlign: 'center', padding: 24 }}>
-            {locating ? 'Localisation en cours…' : 'Active la localisation pour voir les prospects autour de toi.'}
-          </div>
         )}
       </div>
 
-      {/* ---- Tiroir filtres ---- */}
+      {/* ---- Tiroir filtres (secteur + RGE + ancienneté, rayon incl.) ---- */}
       {filtresOuverts && (
         <div
           style={{ position: 'fixed', inset: 0, zIndex: 210, background: 'rgba(6,10,18,0.62)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
@@ -391,6 +595,24 @@ export default function MobileProspects() {
                   }}
                 >
                   {km} km
+                </button>
+              ))}
+            </div>
+
+            <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 8 }}>Ancienneté</div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 18 }}>
+              {ANCIENNETE_PRESETS.map((preset) => (
+                <button
+                  key={preset.key}
+                  type="button"
+                  onClick={() => setAncienneteMax(preset)}
+                  style={{
+                    padding: '8px 14px', borderRadius: 999, border: '1px solid rgba(166,161,129,0.4)',
+                    background: ancienneteMax.key === preset.key ? 'rgba(166,161,129,0.35)' : 'rgba(166,161,129,0.1)',
+                    color: '#fff', fontSize: 13, fontWeight: 700,
+                  }}
+                >
+                  {preset.label}
                 </button>
               ))}
             </div>
@@ -462,7 +684,7 @@ export default function MobileProspects() {
                 ['Email', selected.email || '—'],
                 ['Dirigeant', selected.nom_dirigeant || '—'],
                 ['Créée le', formatDateFr(selected.dateCreationEtablissement)],
-                ['Distance', position ? `${distanceKmWgs84(position.lat, position.lng, selected.latitude as number, selected.longitude as number)} km` : '—'],
+                ['Distance', `${distanceKmWgs84(position!.lat, position!.lng, selected.latEff, selected.lonEff)} km`],
                 ['RGE', selected.rge ? 'Oui' : 'Non'],
               ].map(([label, value]) => (
                 <div key={label} style={{ borderRadius: 10, border: '1px solid rgba(255,255,255,0.07)', background: 'rgba(255,255,255,0.03)', padding: '8px 10px' }}>

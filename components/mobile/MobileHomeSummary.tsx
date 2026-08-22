@@ -192,10 +192,10 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         type="button"
         onClick={() => setOuvert(true)}
         style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-          width: '100%', padding: '9px 8px', borderRadius: 10,
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
+          width: '100%', height: 52, padding: '0 10px', borderRadius: 12,
           border: '1px solid rgba(75,146,172,0.4)', background: 'rgba(75,146,172,0.14)',
-          color: '#fff', fontSize: 11.5, fontWeight: 600, cursor: 'pointer', lineHeight: 1.25,
+          color: '#fff', fontSize: 13.5, fontWeight: 700, cursor: 'pointer', lineHeight: 1.25,
         }}
       >
         🔊 Résumé vocal
@@ -204,64 +204,82 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
   }
 
   return (
-    <div style={{ borderRadius: 12, border: '1px solid rgba(75,146,172,0.3)', background: 'rgba(75,146,172,0.08)', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.45)' }}>
-          Résumé vocal
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          {lectureEnCours && (
-            <button
-              type="button"
-              onClick={arreterLecture}
-              style={{
-                display: 'flex', alignItems: 'center', gap: 5, padding: '5px 9px', borderRadius: 999,
-                border: '1px solid rgba(255,255,255,0.22)', background: 'rgba(255,255,255,0.08)',
-                color: '#fff', fontSize: 11, fontWeight: 700, cursor: 'pointer',
-              }}
-            >
-              ⏹ Stop
+    <div
+      style={{ position: 'fixed', inset: 0, zIndex: 230, background: 'rgba(6,10,18,0.7)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
+      onClick={fermer}
+    >
+      <div
+        style={{
+          width: '100%', maxWidth: 520, height: '92vh', maxHeight: '92vh',
+          background: '#141A26', borderTopLeftRadius: 24, borderTopRightRadius: 24,
+          border: '1px solid rgba(75,146,172,0.3)', display: 'flex', flexDirection: 'column',
+          overflow: 'hidden',
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ width: 40, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '14px auto 6px', flexShrink: 0 }} />
+
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 20px 16px', flexShrink: 0 }}>
+          <div style={{ fontSize: 20, fontWeight: 700, color: '#fff' }}>
+            🔊 Résumé vocal
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {lectureEnCours && (
+              <button
+                type="button"
+                onClick={arreterLecture}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px', borderRadius: 999,
+                  border: '1px solid rgba(255,255,255,0.25)', background: 'rgba(255,255,255,0.1)',
+                  color: '#fff', fontSize: 13.5, fontWeight: 700, cursor: 'pointer',
+                }}
+              >
+                ⏹ Stop
+              </button>
+            )}
+            <button type="button" onClick={fermer} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.5)', fontSize: 28, lineHeight: 1, cursor: 'pointer' }}>
+              ✕
             </button>
+          </div>
+        </div>
+
+        <div style={{ flex: 1, overflowY: 'auto', padding: '0 20px 28px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            {CHOIX.map((c) => (
+              <button
+                key={c.portee}
+                type="button"
+                onClick={() => void genererResume(c.portee)}
+                disabled={chargement !== null}
+                style={{
+                  flex: '1 1 30%', minWidth: 100, padding: '16px 10px', borderRadius: 14,
+                  border: '1px solid rgba(75,146,172,0.4)',
+                  background: chargement === c.portee ? 'rgba(75,146,172,0.4)' : 'rgba(75,146,172,0.14)',
+                  color: '#fff', fontSize: 15.5, fontWeight: 700, cursor: 'pointer',
+                }}
+              >
+                {chargement === c.portee ? '…' : c.label}
+              </button>
+            ))}
+          </div>
+
+          {erreur && <div style={{ fontSize: 14, color: '#e0a685' }}>{erreur}</div>}
+
+          {texte && (
+            <div style={{ borderRadius: 14, border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(255,255,255,0.05)', padding: '18px 16px' }}>
+              <div style={{ fontSize: 17, color: '#fff', lineHeight: 1.7, whiteSpace: 'pre-line' }}>{texte}</div>
+              <button
+                type="button"
+                onClick={() => void jouerTexte(texte)}
+                disabled={lectureEnCours}
+                style={{ marginTop: 16, width: '100%', padding: '14px', borderRadius: 12, border: '1px solid rgba(143,199,218,0.4)', background: 'rgba(143,199,218,0.14)', color: '#8FC7DA', fontSize: 15, fontWeight: 700, cursor: 'pointer' }}
+              >
+                🔊 {lectureEnCours ? 'Lecture…' : 'Réécouter'}
+              </button>
+            </div>
           )}
-          <button type="button" onClick={fermer} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)', fontSize: 18, lineHeight: 1, cursor: 'pointer' }}>
-            ✕
-          </button>
         </div>
       </div>
-
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-        {CHOIX.map((c) => (
-          <button
-            key={c.portee}
-            type="button"
-            onClick={() => void genererResume(c.portee)}
-            disabled={chargement !== null}
-            style={{
-              padding: '8px 12px', borderRadius: 999, border: '1px solid rgba(75,146,172,0.4)',
-              background: chargement === c.portee ? 'rgba(75,146,172,0.35)' : 'rgba(75,146,172,0.12)',
-              color: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer',
-            }}
-          >
-            {chargement === c.portee ? '…' : c.label}
-          </button>
-        ))}
-      </div>
-
-      {erreur && <div style={{ fontSize: 12.5, color: '#e0a685' }}>{erreur}</div>}
-
-      {texte && (
-        <div style={{ borderRadius: 10, border: '1px solid rgba(255,255,255,0.1)', background: 'rgba(255,255,255,0.04)', padding: '10px 12px' }}>
-          <div style={{ fontSize: 13, color: '#fff', lineHeight: 1.6, whiteSpace: 'pre-line' }}>{texte}</div>
-          <button
-            type="button"
-            onClick={() => void jouerTexte(texte)}
-            disabled={lectureEnCours}
-            style={{ marginTop: 8, background: 'none', border: 'none', color: '#8FC7DA', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: 0 }}
-          >
-            🔊 {lectureEnCours ? 'Lecture…' : 'Réécouter'}
-          </button>
-        </div>
-      )}
     </div>
   )
 }

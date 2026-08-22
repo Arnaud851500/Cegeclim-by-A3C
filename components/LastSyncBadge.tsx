@@ -77,7 +77,7 @@ export default function LastSyncBadge({
 
   const label = compact
     ? `Synchro ${formatTime(status.last_synced_at)}`
-    : `Dernière synchro SAGE : ${formatTime(status.last_synced_at)} (${formatRelative(status.minutes_ago)})`
+    : `Der. sync. SAGE : ${formatTime(status.last_synced_at)} (${formatRelative(status.minutes_ago)})`
 
   return (
     <div
