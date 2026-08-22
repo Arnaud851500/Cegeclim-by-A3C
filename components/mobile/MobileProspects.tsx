@@ -327,8 +327,17 @@ export default function MobileProspects() {
   // jamais toute seule. On force plusieurs invalidateSize() sur ~1,5s après
   // l'affichage de l'écran carte, jusqu'à ce que la taille soit stable --
   // même principe que côté desktop (app/clients/page.tsx, fonction runFit).
+  //
+  // BUG CORRIGÉ : cet effet dépendait de [filtresValides, position], donc
+  // se déclenchait dès le chargement des données -- AVANT que la carte
+  // soit montée, puisque "Liste" est désormais la vue par défaut
+  // (MapContainer n'existe dans le DOM que si vue === 'carte'). Résultat :
+  // les 10 tentatives s'épuisaient dans le vide (mapRef.current toujours
+  // null) et ne se redéclenchaient jamais en basculant sur "Carte" par la
+  // suite. Il faut que `vue` soit dans les dépendances, pour que la salve
+  // reparte à chaque fois que la carte est (re)montée.
   useEffect(() => {
-    if (!filtresValides || !position) return
+    if (vue !== 'carte' || !filtresValides || !position) return
     let cancelled = false
     let attempts = 0
 
@@ -349,7 +358,7 @@ export default function MobileProspects() {
       cancelled = true
       window.clearTimeout(t)
     }
-  }, [filtresValides, position])
+  }, [vue, filtresValides, position])
 
   useEffect(() => {
     if (!position || !filtresValides) return
@@ -587,19 +596,35 @@ export default function MobileProspects() {
 
         <BlocFiltresFixes compact={false} />
 
-        <button
-          type="button"
-          onClick={() => setFiltresValides(true)}
-          disabled={!position}
-          style={{
-            marginTop: 'auto', width: '100%', padding: '15px', borderRadius: 14,
-            border: 'none', background: position ? '#A6A181' : 'rgba(166,161,129,0.3)',
-            color: '#141A26', fontSize: 15.5, fontWeight: 700,
-            cursor: position ? 'pointer' : 'default',
-          }}
-        >
-          {position ? 'Voir la carte' : 'En attente de la position…'}
-        </button>
+        <div style={{ marginTop: 'auto', display: 'flex', gap: 10 }}>
+          <button
+            type="button"
+            onClick={() => { setVue('liste'); setFiltresValides(true) }}
+            disabled={!position}
+            style={{
+              flex: 1, padding: '15px', borderRadius: 14,
+              border: 'none', background: position ? '#A6A181' : 'rgba(166,161,129,0.3)',
+              color: '#141A26', fontSize: 15, fontWeight: 700,
+              cursor: position ? 'pointer' : 'default',
+            }}
+          >
+            {position ? '📋 Voir la liste' : '…'}
+          </button>
+          <button
+            type="button"
+            onClick={() => { setVue('carte'); setFiltresValides(true) }}
+            disabled={!position}
+            style={{
+              flex: 1, padding: '15px', borderRadius: 14,
+              border: `1px solid ${position ? 'rgba(75,146,172,0.5)' : 'rgba(75,146,172,0.2)'}`,
+              background: position ? 'rgba(75,146,172,0.18)' : 'rgba(75,146,172,0.06)',
+              color: '#fff', fontSize: 15, fontWeight: 700,
+              cursor: position ? 'pointer' : 'default',
+            }}
+          >
+            {position ? '🗺️ Voir la carte' : 'En attente…'}
+          </button>
+        </div>
       </div>
     )
   }
