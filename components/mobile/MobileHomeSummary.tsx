@@ -99,7 +99,15 @@ const FORMES_TRIEES = [...NOMBRES_FR_0_99].sort((a, b) => b.split(' ').length - 
  * deux" = 162) plutôt que d'être ignoré.
  */
 function motsVersNumeroClient(texte: string): string {
-  const mots = normaliser(texte).replace(/-/g, ' ').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean)
+  // CORRECTIF : Whisper transcrit très souvent une lettre isolée dictée
+  // ("C") comme le mot homophone le plus courant ("c'est"), en tout début
+  // de phrase -- confirmé en usage réel ("C zéro cent..." transcrit
+  // "C'est zéro cent..."). On corrige ces confusions connues avant tout
+  // découpage, uniquement en tout début de texte pour limiter le risque
+  // de faux positif sur un usage normal du mot ailleurs dans la phrase.
+  const texteCorrige = texte.replace(/^\s*(c'est|ces|ses|sait|s'est)\b/i, 'C')
+
+  const mots = normaliser(texteCorrige).replace(/-/g, ' ').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean)
   const sortie: string[] = []
   let i = 0
 
@@ -245,6 +253,13 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
   const [etape, setEtape] = useState<Etape>('idle')
   const [texte, setTexte] = useState('')
   const [messageIncompris, setMessageIncompris] = useState('')
+  // Solution de secours fiable : la reconnaissance vocale d'un code
+  // alphanumérique ou d'un nom propre a des limites dures (lettres
+  // isolées confondues avec des mots, variantes phonétiques de noms
+  // propres) -- taper directement lève toute ambiguïté.
+  const [saisieClientTexte, setSaisieClientTexte] = useState('')
+  const [saisieClientEnCours, setSaisieClientEnCours] = useState(false)
+  const [modeClient, setModeClient] = useState(false)
   const [erreur, setErreur] = useState('')
   const [lectureEnCours, setLectureEnCours] = useState(false)
 
@@ -444,6 +459,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
     setTexte('')
     setMessageIncompris('')
     setErreur('')
+    setModeClient(false)
     try {
       setEtape('question')
       await jouerTexte(QUESTION)
@@ -683,6 +699,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
     setTexte('')
     setMessageIncompris('')
     setErreur('')
+    setModeClient(false)
   }
 
   /** Sous-flux "compte-rendu d'un client" : demande le nom/numéro à la
@@ -690,6 +707,8 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
    * compte-rendu en précisant bien numéro + nom (demande explicite). */
   async function demanderClient() {
     setMessageIncompris('')
+    setSaisieClientTexte('')
+    setModeClient(true)
     try {
       setEtape('question_client')
       await jouerTexte('De quel client veux-tu le dernier compte-rendu ? Dis son nom ou son numéro.')
@@ -720,6 +739,24 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       if (parNumero && parNumero.length > 0) {
         return parNumero.map((r: any) => ({ numero: safeText(r.numero), nom: safeText(r.intitule) }))
       }
+
+      // La lettre de préfixe est la partie la plus fragile de la
+      // reconnaissance vocale (une lettre isolée est facilement confondue
+      // avec un mot -- "C" / "c'est", etc.) : si le numéro complet ne
+      // matche rien, on retente sur les CHIFFRES seuls, où qu'ils soient
+      // dans le numéro, en ignorant une lettre de préfixe potentiellement
+      // mal transcrite.
+      const chiffresSeuls = numeroConverti.replace(/[^0-9]/g, '')
+      if (chiffresSeuls.length >= 2) {
+        const { data: parChiffres } = await supabase
+          .from('ref_tiers')
+          .select('numero, intitule')
+          .ilike('numero', `%${chiffresSeuls}%`)
+          .limit(5)
+        if (parChiffres && parChiffres.length > 0) {
+          return parChiffres.map((r: any) => ({ numero: safeText(r.numero), nom: safeText(r.intitule) }))
+        }
+      }
     }
 
     // Essai 2 : numéro tel quel (au cas où le transcript contiendrait déjà
@@ -733,20 +770,76 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       return parNumeroBrut.map((r: any) => ({ numero: safeText(r.numero), nom: safeText(r.intitule) }))
     }
 
-    // Essai 3 : recherche par nom, tolérante à l'ordre des mots -- "Pascal
-    // Cuburu" doit matcher "EURL PASCAL CUBURU" même si l'ordre ou les
-    // mots autour diffèrent. On exige que TOUS les mots significatifs
-    // dictés (3 lettres ou plus, pour ignorer "le", "de", "du"...) se
-    // retrouvent quelque part dans l'intitulé, dans n'importe quel ordre.
+    // Essai 3 : recherche par nom, PAR SCORE plutôt que par correspondance
+    // exacte de tous les mots -- la transcription vocale d'un nom propre
+    // (ex. "Cuburu") peut différer légèrement de l'orthographe réelle
+    // (accents, doublons de lettres...). On récupère un lot de candidats
+    // sur CHAQUE mot significatif pris séparément (OR), puis on classe
+    // côté client par nombre de mots effectivement retrouvés -- le
+    // meilleur candidat remonte en premier même sans correspondance
+    // parfaite sur 100% des mots dictés.
     const motsSignificatifs = normaliser(q).split(/\s+/).filter((m) => m.length >= 3)
     if (motsSignificatifs.length === 0) return []
 
-    let requete = supabase.from('ref_tiers').select('numero, intitule')
-    for (const mot of motsSignificatifs) {
-      requete = requete.ilike('intitule', `%${mot}%`)
+    const orFilter = motsSignificatifs.map((mot) => `intitule.ilike.%${mot}%`).join(',')
+    const { data: candidats } = await supabase
+      .from('ref_tiers')
+      .select('numero, intitule')
+      .or(orFilter)
+      .limit(30)
+
+    if (!candidats || candidats.length === 0) return []
+
+    const scored = candidats.map((r: any) => {
+      const intituleNorm = normaliser(safeText(r.intitule))
+      const score = motsSignificatifs.filter((mot) => intituleNorm.includes(mot)).length
+      return { numero: safeText(r.numero), nom: safeText(r.intitule), score }
+    })
+    scored.sort((a, b) => b.score - a.score)
+    return scored.slice(0, 5).map(({ numero, nom }) => ({ numero, nom }))
+  }
+
+  /** Logique commune, partagée entre la reconnaissance vocale et la
+   * saisie manuelle : cherche le client à partir d'un texte déjà obtenu,
+   * et enchaîne sur la lecture de son dernier compte-rendu. */
+  async function resoudreClientEtLire(texteEntendu: string, viaVoix: boolean) {
+    const resultats = await rechercherClient(texteEntendu)
+
+    if (resultats.length === 0) {
+      setMessageIncompris(`Je n'ai trouvé aucun client correspondant à "${texteEntendu || '...'}".`)
+      if (!viaVoix) {
+        // Saisie manuelle : on reste sur le formulaire, pas de redemande vocale.
+        setEtape('question_client')
+        return
+      }
+      setEtape('incompris')
+      await jouerTexte("Je n'ai trouvé aucun client correspondant. Peux-tu redire le nom ou le numéro ?")
+      setEtape('ecoute_client')
+      const blobRetente = await enregistrerAvecDetectionSilence(forceStopRef)
+      await interpreterClient(blobRetente)
+      return
     }
-    const { data: parNom } = await requete.limit(5)
-    return (parNom || []).map((r: any) => ({ numero: safeText(r.numero), nom: safeText(r.intitule) }))
+
+    // Plusieurs clients possibles : on prend le premier (meilleur score/
+    // préfixe) mais on l'annonce clairement pour que l'utilisateur puisse
+    // se rendre compte d'une erreur d'aiguillage.
+    await genererDernierCompteRendu(resultats[0])
+  }
+
+  async function chercherClientManuellement() {
+    const texte = saisieClientTexte.trim()
+    if (!texte) return
+    setSaisieClientEnCours(true)
+    setMessageIncompris('')
+    try {
+      setEtape('traitement_client')
+      await resoudreClientEtLire(texte, false)
+    } catch (e: any) {
+      setEtape('erreur')
+      setErreur(e?.message || 'Une erreur est survenue.')
+    } finally {
+      setSaisieClientEnCours(false)
+    }
   }
 
   async function interpreterClient(blobBrut: Blob) {
@@ -761,22 +854,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       if (!res.ok) throw new Error(data?.error || 'Erreur de transcription.')
 
       const texteEntendu = String(data.transcript || '').trim()
-      const resultats = await rechercherClient(texteEntendu)
-
-      if (resultats.length === 0) {
-        setMessageIncompris(`Je n'ai trouvé aucun client correspondant à "${texteEntendu || '...'}".`)
-        setEtape('incompris')
-        await jouerTexte("Je n'ai trouvé aucun client correspondant. Peux-tu redire le nom ou le numéro ?")
-        setEtape('ecoute_client')
-        const blobRetente = await enregistrerAvecDetectionSilence(forceStopRef)
-        await interpreterClient(blobRetente)
-        return
-      }
-
-      // Plusieurs clients possibles : on prend le premier (meilleur match
-      // alphabétique/préfixe) mais on l'annonce clairement pour que
-      // l'utilisateur puisse se rendre compte d'une erreur d'aiguillage.
-      await genererDernierCompteRendu(resultats[0])
+      await resoudreClientEtLire(texteEntendu, true)
     } catch (e: any) {
       setEtape('erreur')
       setErreur(e?.message || 'Une erreur est survenue.')
@@ -886,6 +964,32 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
 
           {erreur && (
             <div style={{ fontSize: 14, color: '#e0a685' }}>{erreur}</div>
+          )}
+
+          {modeClient && etape !== 'resultat' && etape !== 'erreur' && etape !== 'traitement_client' && (
+            <div style={{ borderRadius: 14, border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(255,255,255,0.04)', padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.5)' }}>
+                La voix pas fiable pour un nom ou un numéro précis ? Tape-le directement :
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <input
+                  type="text"
+                  value={saisieClientTexte}
+                  onChange={(e) => setSaisieClientTexte(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') void chercherClientManuellement() }}
+                  placeholder="Nom ou numéro (ex. C0162)"
+                  style={{ flex: 1, height: 44, borderRadius: 10, border: '1px solid rgba(255,255,255,0.18)', background: 'rgba(255,255,255,0.06)', color: '#fff', padding: '0 12px', fontSize: 14.5 }}
+                />
+                <button
+                  type="button"
+                  onClick={() => void chercherClientManuellement()}
+                  disabled={saisieClientEnCours || !saisieClientTexte.trim()}
+                  style={{ padding: '0 18px', borderRadius: 10, border: 'none', background: '#A6A181', color: '#141A26', fontSize: 14, fontWeight: 700 }}
+                >
+                  {saisieClientEnCours ? '…' : 'OK'}
+                </button>
+              </div>
+            </div>
           )}
 
           {texte && etape === 'resultat' && (
