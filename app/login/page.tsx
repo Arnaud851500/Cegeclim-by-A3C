@@ -385,7 +385,13 @@ export default function LoginPage() {
            On passe en répartition par vh (au lieu de paddings fixes empilés),
            on retire les blocs non essentiels (rail déjà masqué, sous-titre et
            pied de carte allégés), et le titre passe sur une seule ligne via
-           un corps de police qui s'ajuste à la largeur disponible. */
+           un corps de police qui s'ajuste à la largeur disponible.
+           Le bandeau photo est volontairement réduit (42dvh, au lieu de
+           54dvh) pour que le bloc logo, ancré en bas de ce bandeau, remonte
+           au-dessus du toit de la maison plutôt que de le chevaucher ; la
+           carte de connexion récupère cet espace libéré et se recentre
+           verticalement dans sa zone (align-items: center) au lieu de
+           rester plaquée en haut. */
         @media (max-width: 600px) {
           html, body { height: 100%; overflow: hidden; }
 
@@ -402,7 +408,7 @@ export default function LoginPage() {
              au lieu de laisser un grand vide sombre entre les deux. */
           .loginVisuel {
             min-height: 0;
-            height: 54dvh;
+            height: 42dvh;
             padding: 20px 20px 18px !important;
             justify-content: flex-end;
             gap: 14px;
@@ -429,14 +435,15 @@ export default function LoginPage() {
           .loginSousTitre { display: none !important; }
 
           /* Le volet formulaire prend l'espace restant (grid 1fr) ; la carte
-             est ancrée en haut de cette zone (juste sous le bandeau) plutôt
-             que centrée dans tout l'espace, pour ne pas recréer un vide. */
+             est désormais centrée verticalement dans cette zone (plutôt que
+             plaquée en haut) pour occuper l'espace libéré par la réduction
+             du bandeau photo ci-dessus. */
           .loginVolet {
             padding: 18px 20px !important;
             height: auto;
             overflow: hidden;
             display: flex;
-            align-items: flex-start;
+            align-items: center;
             justify-content: center;
           }
 
@@ -461,7 +468,7 @@ export default function LoginPage() {
         }
 
         @media (max-width: 600px) and (max-height: 640px) {
-          .loginVisuel { height: 46dvh; padding: 14px 20px 14px !important; gap: 10px; }
+          .loginVisuel { height: 34dvh; padding: 14px 20px 14px !important; gap: 10px; }
           .loginLogo { width: 78px !important; }
           .loginChamp { margin-top: 12px !important; }
           .loginInput { height: 42px !important; }
