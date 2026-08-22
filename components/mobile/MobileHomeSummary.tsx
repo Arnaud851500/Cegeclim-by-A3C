@@ -508,6 +508,42 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
     }
   }
 
+  /** Résout le nom d'entreprise lié à chaque RDV (crm_activity_company ->
+   * partner_base_partner.company_name), même logique que MobileRdv.tsx --
+   * en 2 requêtes batch, jamais bloquant (repli silencieux sur "sans
+   * entreprise associée" en cas d'erreur ou d'absence de lien). */
+  async function resoudreEntreprisesRdv(rows: { id: number }[]): Promise<Map<number, string>> {
+    const companyByActivity = new Map<number, string>()
+    try {
+      const activityIds = rows.map((r) => r.id).filter((v) => v !== null && v !== undefined)
+      if (activityIds.length === 0) return companyByActivity
+
+      const { data: links } = await supabase
+        .from('crm_activity_company')
+        .select('activity_fk, company_fk')
+        .in('activity_fk', activityIds)
+
+      const companyIds = Array.from(
+        new Set(((links || []) as any[]).map((l) => l.company_fk).filter((v) => v !== null && v !== undefined)),
+      )
+      if (companyIds.length === 0) return companyByActivity
+
+      const { data: companies } = await supabase
+        .from('partner_base_partner')
+        .select('id, company_name')
+        .in('id', companyIds)
+
+      const nameById = new Map(((companies || []) as any[]).map((c) => [c.id, String(c.company_name || '').trim()]))
+      ;((links || []) as any[]).forEach((l) => {
+        const name = nameById.get(l.company_fk)
+        if (name) companyByActivity.set(l.activity_fk, name)
+      })
+    } catch (e) {
+      console.warn('[MobileHomeSummary] résolution entreprise liée impossible :', e)
+    }
+    return companyByActivity
+  }
+
   async function genererResume(portee: Portee) {
     try {
       const email = String(userEmail || '').toLowerCase().trim()
@@ -527,7 +563,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
 
         const { data: rows, error } = await supabase
           .from('crm_base_activity')
-          .select('type, comment, start_date')
+          .select('id, type, comment, start_date')
           .eq('internal_tag', 'normal')
           .in('type', RDV_TYPE_KEYS)
           .eq('from_fk', access.blg_partner_id)
@@ -539,12 +575,13 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         if (!rows || rows.length === 0) {
           resultat = "Tu n'as aucun rendez-vous à venir."
         } else {
+          const entreprisesParActivite = await resoudreEntreprisesRdv(rows as any[])
           const lignes = rows.map((r: any, i: number) => {
             const d = new Date(r.start_date)
             const dateLabel = d.toLocaleDateString('fr-FR', { weekday: 'long', day: '2-digit', month: '2-digit' })
             const heure = d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
-            const sujet = safeText(r.comment) || 'sans sujet précisé'
-            return `${i + 1}. ${dateLabel} à ${heure} — ${sujet}`
+            const entreprise = entreprisesParActivite.get(r.id) || 'sans entreprise associée'
+            return `${i + 1}. ${dateLabel} à ${heure} — ${entreprise}`
           })
           const compte = rows.length === 1 ? 'un' : String(rows.length)
           resultat = `Voici tes ${compte} prochain${rows.length > 1 ? 's' : ''} rendez-vous :\n${lignes.join('\n')}`
@@ -557,7 +594,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
 
         const { data: rows, error } = await supabase
           .from('crm_base_activity')
-          .select('type, comment, start_date')
+          .select('id, type, comment, start_date')
           .eq('internal_tag', 'normal')
           .in('type', RDV_TYPE_KEYS)
           .eq('from_fk', access.blg_partner_id)
@@ -570,12 +607,13 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         if (!rows || rows.length === 0) {
           resultat = "Tu n'as aucun rendez-vous prévu la semaine prochaine."
         } else {
+          const entreprisesParActivite = await resoudreEntreprisesRdv(rows as any[])
           const lignes = rows.map((r: any, i: number) => {
             const d = new Date(r.start_date)
             const dateLabel = d.toLocaleDateString('fr-FR', { weekday: 'long', day: '2-digit', month: '2-digit' })
             const heure = d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
-            const sujet = safeText(r.comment) || 'sans sujet précisé'
-            return `${i + 1}. ${dateLabel} à ${heure} — ${sujet}`
+            const entreprise = entreprisesParActivite.get(r.id) || 'sans entreprise associée'
+            return `${i + 1}. ${dateLabel} à ${heure} — ${entreprise}`
           })
           const compte = rows.length === 1 ? 'un' : String(rows.length)
           resultat = `Tu as ${compte} rendez-vous${rows.length > 1 ? '' : ''} la semaine prochaine :\n${lignes.join('\n')}`

@@ -118,7 +118,7 @@ async function structurer(params: {
   const consigneMode =
     mode === 'compte_rendu'
       ? `L'utilisateur vient de dicter le compte-rendu oral de sa visite chez ce client. Rédige un résumé structuré (3 à 6 phrases, clair et professionnel) et détecte TOUTES les actions/tâches à créer qui ressortent du récit (relances, envois de documents, rappels, devis à faire...).`
-      : `L'utilisateur vient de dicter UNE SEULE tâche à ajouter${clientNom ? ' pour ce client' : ''} (pas un compte-rendu de visite). Le "resume" doit être une reformulation courte d'une phrase de cette tâche. Détecte exactement une tâche (ou zéro si la dictée ne décrit pas une action claire).`
+      : `L'utilisateur vient de dicter une ou plusieurs tâches à ajouter${clientNom ? ' pour ce client' : ''} (pas un compte-rendu de visite). Le "resume" doit être une reformulation courte (une phrase par tâche si plusieurs) de ce qui a été dicté. Détecte TOUTES les tâches distinctes évoquées dans la dictée (zéro si la dictée ne décrit aucune action claire, une seule si une seule est dictée, plusieurs si plusieurs sont dictées à la suite).`
 
   const prompt = `${consigneMode}
 ${clientNom ? `\nClient concerné : ${clientNom}${numeroTiers ? ` (n° ${numeroTiers})` : ''}` : ''}${rdvLabel ? `\nRendez-vous concerné : ${rdvLabel}` : ''}

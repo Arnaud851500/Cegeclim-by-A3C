@@ -32,6 +32,9 @@ type Etape =
   | 'annonce'
   | 'enregistrement'
   | 'traitement'
+  | 'echeance_question'
+  | 'echeance_ecoute'
+  | 'echeance_traitement'
   | 'resume_pret'
   | 'enregistrement_confirmation'
   | 'traitement_confirmation'
@@ -126,6 +129,140 @@ function audioBufferToWav(buffer: AudioBuffer): ArrayBuffer {
   }
 
   return bufferOut
+}
+
+// ── Comprend une échéance dictée en français ────────────────────────────
+// Table complète des nombres français 0-31 (mêmes formes que dans
+// MobileHomeSummary.tsx, dupliquée ici car fichiers séparés) -- utilisée
+// pour reconnaître un jour du mois dicté en toutes lettres ("le quinze
+// septembre"), en plus des chiffres classiques ("15 septembre").
+const NOMBRES_FR_0_31 = [
+  'zero', 'un', 'deux', 'trois', 'quatre', 'cinq', 'six', 'sept', 'huit', 'neuf',
+  'dix', 'onze', 'douze', 'treize', 'quatorze', 'quinze', 'seize', 'dix sept', 'dix huit', 'dix neuf',
+  'vingt', 'vingt et un', 'vingt deux', 'vingt trois', 'vingt quatre', 'vingt cinq', 'vingt six', 'vingt sept', 'vingt huit', 'vingt neuf',
+  'trente', 'trente et un',
+]
+const MOTS_VERS_NOMBRE = new Map<string, number>(NOMBRES_FR_0_31.map((mots, n) => [mots, n]))
+const FORMES_TRIEES = [...NOMBRES_FR_0_31].sort((a, b) => b.split(' ').length - a.split(' ').length)
+const MOIS_FR_LISTE = ['janvier', 'fevrier', 'mars', 'avril', 'mai', 'juin', 'juillet', 'aout', 'septembre', 'octobre', 'novembre', 'decembre']
+const JOURS_SEMAINE = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'] // index = Date.getDay()
+
+function normaliserPourDate(texte: string) {
+  return String(texte || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/-/g, ' ')
+}
+
+function matcherNombreDepuis(mots: string[], depart: number): { valeur: number; longueur: number } | null {
+  for (const forme of FORMES_TRIEES) {
+    const longueur = forme.split(' ').length
+    if (mots.slice(depart, depart + longueur).join(' ') === forme) {
+      return { valeur: MOTS_VERS_NOMBRE.get(forme) as number, longueur }
+    }
+  }
+  return null
+}
+
+function isoDepuisDate(d: Date) {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+/** Construit une date à partir d'un jour + mois, en choisissant l'année en
+ * cours si la date n'est pas encore passée, sinon l'année suivante (une
+ * échéance dictée est presque toujours dans le futur). */
+function construireDateJourMois(jour: number, moisIndex: number): Date {
+  const aujourdHui = new Date()
+  aujourdHui.setHours(0, 0, 0, 0)
+  let annee = aujourdHui.getFullYear()
+  let d = new Date(annee, moisIndex, jour)
+  if (d.getTime() < aujourdHui.getTime()) {
+    annee += 1
+    d = new Date(annee, moisIndex, jour)
+  }
+  return d
+}
+
+/** Interprète une échéance dictée en français (relative ou absolue) et
+ * renvoie une date ISO, ou null si rien de reconnaissable -- dans ce cas
+ * l'appelant redemande plutôt que de deviner ou d'enregistrer une date
+ * fausse. Gère : aujourd'hui/demain/après-demain, jours de la semaine
+ * ("vendredi" = le prochain vendredi), "dans X jours", "la semaine
+ * prochaine", jour+mois en chiffres ("15 septembre") ou en toutes lettres
+ * ("le quinze septembre"), et JJ/MM. */
+function parserEcheanceParlee(texteBrut: string): string | null {
+  const texteNettoye = normaliserPourDate(texteBrut).replace(/'/g, '').replace(/[^a-z0-9\s\/]/g, ' ')
+  const mots = texteNettoye.split(/\s+/).filter(Boolean)
+  const texteJoin = mots.join(' ')
+  const aujourdHui = new Date()
+  aujourdHui.setHours(0, 0, 0, 0)
+
+  if (/\baujourdhui\b/.test(texteJoin)) return isoDepuisDate(aujourdHui)
+  if (/\bapres\s?demain\b/.test(texteJoin)) {
+    const d = new Date(aujourdHui); d.setDate(d.getDate() + 2); return isoDepuisDate(d)
+  }
+  if (/\bdemain\b/.test(texteJoin)) {
+    const d = new Date(aujourdHui); d.setDate(d.getDate() + 1); return isoDepuisDate(d)
+  }
+
+  for (let i = 0; i < JOURS_SEMAINE.length; i++) {
+    if (new RegExp(`\\b${JOURS_SEMAINE[i]}\\b`).test(texteJoin)) {
+      const d = new Date(aujourdHui)
+      let delta = (i - d.getDay() + 7) % 7
+      if (delta === 0) delta = 7 // dicter "vendredi" un vendredi -> vendredi PROCHAIN
+      d.setDate(d.getDate() + delta)
+      return isoDepuisDate(d)
+    }
+  }
+
+  if (/semaine\s+prochaine/.test(texteJoin)) {
+    const d = new Date(aujourdHui)
+    const jourSemaine = d.getDay() || 7
+    d.setDate(d.getDate() + (7 - jourSemaine) + 1)
+    return isoDepuisDate(d)
+  }
+
+  const matchDansJours = texteJoin.match(/dans\s+(\d+|[a-z\s]+?)\s+jours?/)
+  if (matchDansJours) {
+    const brut = matchDansJours[1].trim()
+    let n: number | null = /^\d+$/.test(brut) ? parseInt(brut, 10) : null
+    if (n === null) {
+      const m = matcherNombreDepuis(brut.split(/\s+/), 0)
+      if (m) n = m.valeur
+    }
+    if (n !== null) {
+      const d = new Date(aujourdHui); d.setDate(d.getDate() + n); return isoDepuisDate(d)
+    }
+  }
+
+  const matchChiffres = texteJoin.match(/\b(\d{1,2})\s*[\/\s]\s*(\d{1,2})\b/)
+  if (matchChiffres) {
+    const jour = parseInt(matchChiffres[1], 10)
+    const mois = parseInt(matchChiffres[2], 10)
+    if (jour >= 1 && jour <= 31 && mois >= 1 && mois <= 12) {
+      return isoDepuisDate(construireDateJourMois(jour, mois - 1))
+    }
+  }
+
+  for (let mi = 0; mi < MOIS_FR_LISTE.length; mi++) {
+    const idx = mots.indexOf(MOIS_FR_LISTE[mi])
+    if (idx === -1) continue
+    let jour: number | null = null
+    const motAvant = mots[idx - 1]
+    if (motAvant && /^\d{1,2}$/.test(motAvant)) {
+      jour = parseInt(motAvant, 10)
+    } else {
+      for (let longueur = 3; longueur >= 1; longueur--) {
+        const depart = idx - longueur
+        if (depart < 0) continue
+        const m = matcherNombreDepuis(mots, depart)
+        if (m && m.longueur === longueur && depart + longueur === idx) { jour = m.valeur; break }
+      }
+    }
+    if (jour !== null && jour >= 1 && jour <= 31) {
+      return isoDepuisDate(construireDateJourMois(jour, mi))
+    }
+  }
+
+  return null
 }
 
 export default function VoiceReportButtons({
@@ -499,6 +636,15 @@ export default function VoiceReportButtons({
       setTranscriptAffiche(data.transcript || '')
       setSpokenAffiche(data.spoken_summary || '')
       setTachesAffichees(data.taches || [])
+
+      // Aucune tâche ne doit être enregistrée sans échéance -- si l'IA n'en
+      // a détecté aucune pour une ou plusieurs tâches, on les redemande
+      // une par une, à la voix, AVANT de proposer le résumé/la
+      // confirmation. dernierResultatRef.current.taches est mis à jour au
+      // fur et à mesure : c'est bien ce tableau complété qui part ensuite
+      // dans /confirm.
+      await completerEcheancesManquantes()
+
       setEtape('resume_pret')
 
       // Mains libres : on énonce le résumé PUIS on relance automatiquement
@@ -511,6 +657,55 @@ export default function VoiceReportButtons({
       console.error(err)
       setEtape('erreur')
       setMessageFinal(err?.name ? `${err.name} : ${err.message}` : (err?.message || 'Une erreur est survenue.'))
+    }
+  }
+
+  /** Aucune tâche ne doit être enregistrée sans échéance -- redemande
+   * chacune manquante, une par une, à la voix, mains libres. Met à jour
+   * dernierResultatRef.current.taches ET tachesAffichees (affichage) au
+   * fur et à mesure. Redemande en boucle tant que la réponse n'est pas
+   * compréhensible comme une date, plutôt que d'abandonner ou de deviner. */
+  async function completerEcheancesManquantes() {
+    const taches = dernierResultatRef.current?.taches || []
+    for (let i = 0; i < taches.length; i++) {
+      if (taches[i].echeance) continue
+
+      let echeanceTrouvee: string | null = null
+      let tentatives = 0
+
+      while (!echeanceTrouvee && tentatives < 5) {
+        tentatives += 1
+        setEtape('echeance_question')
+        await jouerTexte(
+          tentatives === 1
+            ? `Quelle échéance pour : ${taches[i].description} ?`
+            : "Je n'ai pas compris de date. Redis-la autrement, par exemple « demain », « vendredi », ou « le 15 septembre »."
+        )
+        setEtape('echeance_ecoute')
+        const blob = await enregistrerAvecDetectionSilence(forceStopConfirmationRef)
+        setEtape('echeance_traitement')
+        const blobWav = await convertirEnWav(blob)
+
+        const form = new FormData()
+        form.append('audio', blobWav, 'audio.wav')
+        try {
+          const res = await fetch('/api/atelier-ai/transcribe', { method: 'POST', body: form })
+          const data = await res.json()
+          if (res.ok) {
+            echeanceTrouvee = parserEcheanceParlee(String(data.transcript || ''))
+          }
+        } catch {
+          // silencieux : echeanceTrouvee reste null, on redemande.
+        }
+      }
+
+      if (echeanceTrouvee && dernierResultatRef.current) {
+        dernierResultatRef.current.taches[i] = { ...taches[i], echeance: echeanceTrouvee }
+        setTachesAffichees((prev) => prev.map((t, idx) => (idx === i ? { ...t, echeance: echeanceTrouvee } : t)))
+      }
+      // Après 5 tentatives infructueuses : on n'insiste pas indéfiniment,
+      // la tâche part sans échéance plutôt que de bloquer tout le flux --
+      // l'utilisateur pourra la compléter plus tard depuis "Mes tâches".
     }
   }
 
@@ -680,6 +875,15 @@ export default function VoiceReportButtons({
       )}
 
       {etape === 'traitement' && <StatutLigne texte="Analyse en cours…" />}
+
+      {etape === 'echeance_question' && <StatutLigne texte="L’agent parle…" />}
+      {etape === 'echeance_ecoute' && (
+        <IndicateurEcouteAuto
+          texte="Dis une échéance… je m’arrête tout seul dès que tu as fini"
+          onForcerArret={() => forceStopConfirmationRef.current?.()}
+        />
+      )}
+      {etape === 'echeance_traitement' && <StatutLigne texte="Interprétation de la date…" />}
 
       {/* Le résumé reste affiché pendant toute la suite du flux (écoute de
          confirmation, traitement, fin) — pas seulement à l'étape où il
