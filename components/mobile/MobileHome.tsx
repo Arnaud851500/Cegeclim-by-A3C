@@ -77,33 +77,44 @@ export default function MobileHome({
         </div>
       </div>
 
-      {visibleButtons.map((b) => (
-        <button
-          key={b.key}
-          onClick={() => onNavigate(b.key)}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            textAlign: 'left',
-            border: '1px solid rgba(255,255,255,0.12)',
-            background: 'rgba(255,255,255,0.045)',
-            borderRadius: 16,
-            padding: '18px 16px',
-            color: '#fff',
-            fontFamily: 'var(--font-body)',
-          }}
-        >
-          <div>
-            <div style={{ fontFamily: 'var(--font-display)', fontSize: 17, fontWeight: 700 }}>
-              {b.label}
-              {b.key === 'alertes' && alertsCount > 0 ? ` (${alertsCount})` : ''}
-            </div>
-            <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.45)', marginTop: 3 }}>{b.sub}</div>
-          </div>
-          <span style={{ fontSize: 22, color: 'rgba(255,255,255,0.3)' }}>›</span>
-        </button>
-      ))}
+      {/* Grille 2 colonnes, cartes plus hautes -- cible tactile plus
+         généreuse que l'ancien empilement plein-largeur. Si le nombre de
+         cartes est impair, la dernière prend toute la largeur pour ne pas
+         laisser une case à moitié vide. */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        {visibleButtons.map((b, i) => {
+          const seule = i === visibleButtons.length - 1 && visibleButtons.length % 2 !== 0
+          return (
+            <button
+              key={b.key}
+              onClick={() => onNavigate(b.key)}
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                justifyContent: 'space-between',
+                textAlign: 'left',
+                border: '1px solid rgba(255,255,255,0.12)',
+                background: 'rgba(255,255,255,0.045)',
+                borderRadius: 18,
+                padding: '18px 16px',
+                minHeight: 128,
+                color: '#fff',
+                fontFamily: 'var(--font-body)',
+                gridColumn: seule ? '1 / -1' : undefined,
+              }}
+            >
+              <span style={{ fontSize: 22, color: 'rgba(255,255,255,0.3)', alignSelf: 'flex-end' }}>›</span>
+              <div>
+                <div style={{ fontFamily: 'var(--font-display)', fontSize: 17, fontWeight: 700, lineHeight: 1.25 }}>
+                  {b.label}
+                  {b.key === 'alertes' && alertsCount > 0 ? ` (${alertsCount})` : ''}
+                </div>
+                <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.45)', marginTop: 4 }}>{b.sub}</div>
+              </div>
+            </button>
+          )
+        })}
+      </div>
 
       {visibleButtons.length === 0 && (
         <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: 13, marginTop: 20 }}>
