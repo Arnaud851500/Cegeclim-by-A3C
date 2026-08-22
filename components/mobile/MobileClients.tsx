@@ -275,7 +275,21 @@ function aggregateByDocument(
   return Array.from(byPiece.values()).sort((a, b) => (b.date || '').localeCompare(a.date || ''))
 }
 
-export default function MobileClients() {
+export default function MobileClients({
+  cibleNumero,
+  cibleNom,
+  onCibleConsommee,
+}: {
+  /** Numéro de tiers à ouvrir directement au montage/à la mise à jour --
+   * utilisé pour la navigation depuis un autre écran (ex. "Mes rdv" ->
+   * clic sur l'entreprise d'un rendez-vous). */
+  cibleNumero?: string | null
+  cibleNom?: string | null
+  /** Appelé une fois la cible consommée (fiche ouverte), pour que l'écran
+   * appelant efface son état de navigation et ne redéclenche pas
+   * l'ouverture si l'utilisateur revient plus tard sur cet écran. */
+  onCibleConsommee?: () => void
+}) {
   const [allClients, setAllClients] = useState<ClientRow[] | null>(null)
   const [clientsError, setClientsError] = useState<string | null>(null)
 
@@ -372,6 +386,32 @@ export default function MobileClients() {
       .filter((c) => c.numero.toLowerCase().includes(term) || c.nom.toLowerCase().includes(term))
       .slice(0, 40)
   }, [allClients, search])
+
+  // Ouverture directe sur un client cible (navigation depuis un autre
+  // écran, ex. "Mes rdv") -- attend que allClients soit chargé pour
+  // pouvoir reprendre la fiche complète du cache (CA, marge...) si connue,
+  // sinon ouvre quand même avec une fiche minimale (numéro + nom) : le
+  // détail complet se charge de toute façon en direct dans openClient.
+  useEffect(() => {
+    if (!cibleNumero || !allClients) return
+    const trouve = allClients.find((c) => c.numero === cibleNumero)
+    const client: ClientRow = trouve || {
+      numero: cibleNumero,
+      nom: cibleNom || cibleNumero,
+      dateCreationIso: '',
+      caYtdN: 0,
+      caYtdN1: 0,
+      caN1: 0,
+      ca12m: 0,
+      band: CA_PROFILE_BANDS[0],
+      devisYtdN: 0,
+      margePctYtdN: null,
+      margePctYtdN1: null,
+    }
+    void openClient(client)
+    onCibleConsommee?.()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cibleNumero, allClients])
 
   async function openClient(client: ClientRow) {
     setSelected(client)
