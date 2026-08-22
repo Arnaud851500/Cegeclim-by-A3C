@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { formatMoney } from '@/app/focus_mensuel/page'
 import MobileDetailSheet, { type DetailField } from './MobileDetailSheet'
+import VoiceReportButtons from './VoiceReportButtons'
 import MobileTaskDetailSheet, { type TaskRow } from './MobileTaskDetailSheet'
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -275,6 +276,30 @@ export default function MobileClients() {
   const [allClients, setAllClients] = useState<ClientRow[] | null>(null)
   const [clientsError, setClientsError] = useState<string | null>(null)
 
+  // Identité de l'utilisateur courant — nécessaire pour VoiceReportButtons
+  // (created_by des tâches/compte-rendu créés depuis "prochaine visite").
+  const [currentEmail, setCurrentEmail] = useState('')
+  const [currentName, setCurrentName] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    async function loadIdentity() {
+      const { data: sessionData } = await supabase.auth.getSession()
+      const email = sessionData.session?.user?.email?.toLowerCase()
+      if (!email || cancelled) return
+      const { data: access } = await supabase
+        .from('user_page_access')
+        .select('display_name')
+        .eq('email', email)
+        .maybeSingle()
+      if (cancelled) return
+      setCurrentEmail(email)
+      setCurrentName(String(access?.display_name || '').trim() || email.split('@')[0])
+    }
+    void loadIdentity()
+    return () => { cancelled = true }
+  }, [])
+
   const [search, setSearch] = useState('')
   const [selected, setSelected] = useState<ClientRow | null>(null)
   const [detail, setDetail] = useState<ClientDetail | null>(null)
@@ -541,6 +566,8 @@ export default function MobileClients() {
         client={selected}
         detail={detail}
         loading={detailLoading}
+        currentEmail={currentEmail}
+        currentName={currentName}
         onBack={() => {
           setSelected(null)
           setDetail(null)
@@ -708,15 +735,17 @@ function EvolLine({ value, n1, isPoints }: { value: number | null; n1: number | 
 }
 
 function ClientDetailScreen({
-  client, detail, loading, onBack, onActionSaved,
+  client, detail, loading, currentEmail, currentName, onBack, onActionSaved,
 }: {
   client: ClientRow
   detail: ClientDetail | null
   loading: boolean
+  currentEmail: string
+  currentName: string
   onBack: () => void
   onActionSaved: (updated: TaskRow) => void
 }) {
-  const [openDetail, setOpenDetail] = useState<{ title: string; subtitle?: string; fields: DetailField[] } | null>(null)
+  const [openDetail, setOpenDetail] = useState<{ title: string; subtitle?: string; fields: DetailField[]; footer?: React.ReactNode } | null>(null)
   const [openTask, setOpenTask] = useState<TaskRow | null>(null)
 
   function openActionDetail(a: ActionRow) {
@@ -773,6 +802,16 @@ function ClientDetailScreen({
         { label: 'Fin', value: v.allDay ? (endDate ? endDate.toLocaleDateString('fr-FR') : '') : fmtTime(endDate) },
         { label: 'Toute la journée', value: v.allDay ? 'Oui' : 'Non' },
       ],
+      footer: (
+        <VoiceReportButtons
+          numeroTiers={client.numero}
+          clientNom={client.nom}
+          rdvActivityId={v.id}
+          rdvLabel={v.subject}
+          userEmail={currentEmail}
+          userName={currentName}
+        />
+      ),
     })
   }
 
@@ -895,6 +934,7 @@ function ClientDetailScreen({
           title={openDetail.title}
           subtitle={openDetail.subtitle}
           fields={openDetail.fields}
+          footer={openDetail.footer}
           onClose={() => setOpenDetail(null)}
         />
       )}

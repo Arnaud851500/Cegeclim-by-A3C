@@ -16,7 +16,8 @@ export interface AlertDetailItem {
 // MobileShell.tsx) ne sélectionne pas encore cette colonne dans sa requête
 // Supabase, elle arrivera à `undefined`/`null` ici sans planter, mais il
 // faut ajouter `assigned_to` au .select() côté parent pour qu'elle
-// s'affiche réellement.
+// s'affiche réellement. Même chose pour `numero_tiers`, utilisé ci-dessous
+// pour l'afficher juste après la date d'échéance.
 type TodoRow = {
   id: string
   description_action: string | null
@@ -50,6 +51,31 @@ function formatDateFr(value: any) {
   const [y, m, d] = iso.split('-')
   return `${d}/${m}/${y}`
 }
+/** Format court jour/mois pour la colonne de droite de la liste "À faire". */
+function formatDateCourte(value: any) {
+  const iso = normalizeDateIso(value)
+  if (!iso) return ''
+  const [, m, d] = iso.split('-')
+  return `${d}/${m}`
+}
+
+/**
+ * Pastille de couleur devant la description d'une tâche :
+ * - verte : tâche débutée ("En cours"), OU échéance dans le futur/aujourd'hui
+ * - rouge : échéance dans le passé (et pas encore débutée)
+ * - orange : pas d'échéance renseignée
+ * "Débuté" est prioritaire sur la date : une tâche en cours reste verte
+ * même si sa date est dépassée, elle n'est pas "en retard" au sens propre
+ * puisqu'elle avance.
+ */
+function statutPastille(row: TodoRow): string {
+  if (row.status === 'En cours') return '🟢'
+  if (!row.due_date) return '🟠'
+  const iso = normalizeDateIso(row.due_date)
+  const today = new Date().toISOString().slice(0, 10)
+  if (iso && iso < today) return '🔴'
+  return '🟢'
+}
 
 export default function MobileAlertes({
   detail,
@@ -73,14 +99,13 @@ export default function MobileAlertes({
   function buildTodoItems(rows: TodoRow[]): ListSheetItem[] {
     return rows.map((r) => ({
       id: r.id,
-      primary: r.description_action || '(sans libellé)',
-      secondary: [
-        r.due_date ? `Échéance ${formatDateFr(r.due_date)}` : 'Sans échéance',
-        r.assigned_to ? `Assigné : ${r.assigned_to}` : null,
-      ]
-        .filter(Boolean)
-        .join(' · '),
-      trailing: r.status,
+      // Pastille de statut directement devant la description (voir
+      // statutPastille ci-dessus) — remplace le badge de statut texte.
+      primary: `${statutPastille(r)} ${r.description_action || '(sans libellé)'}`,
+      secondary: r.assigned_to ? `Assigné : ${r.assigned_to}` : '',
+      // À la place du statut : date d'échéance (jour/mois) puis code
+      // client, dans cet ordre précis.
+      trailing: [formatDateCourte(r.due_date) || '—', r.numero_tiers].filter(Boolean).join('  '),
       onClick: () => setOpenTask(r),
     }))
   }
