@@ -175,6 +175,54 @@ export default function VoiceReportButtons({
   const dernierResultatRef = useRef<{ transcript: string; resume: string; taches: Tache[] } | null>(null)
   const audioEnCoursRef = useRef<HTMLAudioElement | null>(null)
   const resolveLectureRef = useRef<(() => void) | null>(null)
+  // Élément <audio> réutilisé pour toute la session -- voir debloquerAudio().
+  const audioElementRef = useRef<HTMLAudioElement | null>(null)
+  const audioDeverrouilleRef = useRef(false)
+  const forceStopConfirmationRef = useRef<(() => void) | null>(null)
+
+  /** Minuscule WAV silencieux généré à la volée (pas de fichier binaire à
+   * livrer) -- sert uniquement à "débloquer" l'élément <audio> ci-dessous. */
+  function creerAudioSilencieux(): string {
+    const sampleRate = 8000
+    const numSamples = 8
+    const dataLength = numSamples * 2
+    const buffer = new ArrayBuffer(44 + dataLength)
+    const view = new DataView(buffer)
+    function writeString(offset: number, s: string) {
+      for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i))
+    }
+    writeString(0, 'RIFF'); view.setUint32(4, 36 + dataLength, true); writeString(8, 'WAVE')
+    writeString(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true)
+    view.setUint16(22, 1, true); view.setUint32(24, sampleRate, true)
+    view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true)
+    writeString(36, 'data'); view.setUint32(40, dataLength, true)
+    // Les échantillons restent à 0 (silence) -- ArrayBuffer est initialisé à zéro.
+    const bytes = new Uint8Array(buffer)
+    let binary = ''
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
+    return 'data:audio/wav;base64,' + btoa(binary)
+  }
+
+  /** CORRECTIF lecture auto bloquée par Safari : entre le tap initial et le
+   * moment où le résumé est prêt, plusieurs secondes s'écoulent (appels
+   * réseau STT + IA) -- assez pour que Safari considère que le "geste
+   * utilisateur" a expiré et bloque silencieusement les play() suivants.
+   * Un élément <audio> ayant déjà joué un son avec succès DANS la pile
+   * d'appel synchrone du clic reste ensuite autorisé à rejouer (changement
+   * de src + play()) même depuis un contexte asynchrone -- c'est le
+   * mécanisme de déblocage standard sur mobile. Doit être appelé en tout
+   * premier, avant tout `await`, dans le handler de clic. */
+  function debloquerAudio() {
+    if (audioDeverrouilleRef.current) return
+    try {
+      const el = new Audio(creerAudioSilencieux())
+      audioElementRef.current = el
+      void el.play().catch(() => {})
+      audioDeverrouilleRef.current = true
+    } catch {
+      // Si ça échoue, jouerTexte retombera sur un nouvel Audio() classique.
+    }
+  }
 
   async function chargerComptesRendus() {
     if (modeUnique || !rdvActivityId) {
@@ -214,7 +262,10 @@ export default function VoiceReportButtons({
   /** Best-effort : ne bloque jamais le flux si la lecture est refusée
    * (politique autoplay du navigateur). Le texte est de toute façon déjà
    * affiché à l'écran. Attend la fin de la lecture (ou l'échec) avant de
-   * résoudre, pour permettre d'enchaîner ensuite sur l'écoute. */
+   * résoudre, pour permettre d'enchaîner ensuite sur l'écoute. Réutilise
+   * le même élément <audio> débloqué au tap initial (voir debloquerAudio)
+   * plutôt que d'en créer un nouveau, sinon celui-ci retombe sous le coup
+   * de la politique autoplay pour tout appel un peu tardif. */
   async function jouerTexte(texte: string) {
     if (!texte) return
     setLectureEnCours(true)
@@ -227,7 +278,9 @@ export default function VoiceReportButtons({
       if (!res.ok) return
       const blob = await res.blob()
       const url = URL.createObjectURL(blob)
-      const audio = new Audio(url)
+      const audio = audioElementRef.current || new Audio()
+      audioElementRef.current = audio
+      audio.src = url
       audioEnCoursRef.current = audio
       await new Promise<void>((resolve) => {
         resolveLectureRef.current = resolve
@@ -299,7 +352,97 @@ export default function VoiceReportButtons({
     })
   }
 
+  /** Enregistrement mains libres pour une réponse courte (oui/non) :
+   * démarre le micro et s'arrête TOUT SEUL dès qu'un silence d'environ
+   * 1,3s suit un moment de parole détecté -- pas de bouton "stop" requis.
+   * Filet de sécurité à 12s pour ne jamais rester bloqué si le micro ne
+   * détecte jamais de silence net. */
+  async function enregistrerAvecDetectionSilence(forceStopRef?: { current: (() => void) | null }): Promise<Blob> {
+    const SEUIL_RMS = 0.02
+    const SILENCE_MS = 1300
+    const DUREE_MAX_MS = 12000
+
+    let stream: MediaStream
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    } catch (e: any) {
+      throw new Error(`[micro] ${e?.name || 'Erreur'} : ${e?.message || e}`)
+    }
+    streamRef.current = stream
+
+    const mimeType = mimeTypeSupporte()
+    const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream)
+    const chunks: Blob[] = []
+    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data) }
+    mediaRecorderRef.current = recorder
+
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext
+    const audioCtx = new AudioContextClass()
+    const source = audioCtx.createMediaStreamSource(stream)
+    const analyser = audioCtx.createAnalyser()
+    analyser.fftSize = 2048
+    source.connect(analyser)
+    const donnees = new Uint8Array(analyser.fftSize)
+
+    return new Promise((resolve) => {
+      let arrete = false
+      let dernierSonTs = Date.now()
+      let aParle = false
+      const debutTs = Date.now()
+      let frameId = 0
+
+      function terminer() {
+        if (arrete) return
+        arrete = true
+        if (frameId) cancelAnimationFrame(frameId)
+        recorder.onstop = () => {
+          const type = recorder.mimeType || 'audio/webm'
+          resolve(new Blob(chunks, { type }))
+          stream.getTracks().forEach((t) => t.stop())
+          try { audioCtx.close() } catch {}
+        }
+        if (recorder.state !== 'inactive') recorder.stop()
+        else {
+          resolve(new Blob(chunks, { type: recorder.mimeType || 'audio/webm' }))
+          stream.getTracks().forEach((t) => t.stop())
+          try { audioCtx.close() } catch {}
+        }
+      }
+
+      function boucle() {
+        if (arrete) return
+        analyser.getByteTimeDomainData(donnees)
+        let somme = 0
+        for (let i = 0; i < donnees.length; i++) {
+          const v = (donnees[i] - 128) / 128
+          somme += v * v
+        }
+        const rms = Math.sqrt(somme / donnees.length)
+
+        if (rms > SEUIL_RMS) {
+          dernierSonTs = Date.now()
+          aParle = true
+        }
+
+        const maintenant = Date.now()
+        if ((aParle && maintenant - dernierSonTs > SILENCE_MS) || maintenant - debutTs > DUREE_MAX_MS) {
+          terminer()
+          return
+        }
+        frameId = requestAnimationFrame(boucle)
+      }
+
+      recorder.start()
+      frameId = requestAnimationFrame(boucle)
+      if (forceStopRef) forceStopRef.current = terminer
+    })
+  }
+
   async function lancer(mode: Mode, completer?: string) {
+    // Doit être la toute première instruction, avant tout `await` -- voir
+    // le commentaire de debloquerAudio() plus haut.
+    debloquerAudio()
+
     setModeActif(mode)
     setMessageFinal('')
     setResumeAffiche('')
@@ -363,7 +506,7 @@ export default function VoiceReportButtons({
       // l'écran. Si la lecture est bloquée par le navigateur, l'écoute
       // démarre quand même (le résumé reste affiché à l'écran).
       await jouerTexte(data.spoken_summary)
-      await demarrerConfirmation()
+      await ecouterConfirmation()
     } catch (err: any) {
       console.error(err)
       setEtape('erreur')
@@ -371,36 +514,30 @@ export default function VoiceReportButtons({
     }
   }
 
-  async function demarrerConfirmation() {
+  /** Confirmation orale mains libres : écoute automatiquement, s'arrête
+   * seule au silence (voir enregistrerAvecDetectionSilence), puis envoie
+   * directement -- plus besoin de taper sur un bouton pour dire "oui" ou
+   * "non". `forceStopConfirmationRef` permet quand même de forcer l'arrêt
+   * plus tôt en tapant l'indicateur à l'écran, en secours. */
+  async function ecouterConfirmation() {
     try {
       setEtape('enregistrement_confirmation')
-      await demarrerEnregistrement()
-    } catch (err: any) {
-      console.error(err)
-      setEtape('erreur')
-      setMessageFinal(err?.message || "Impossible d'accéder au micro. Vérifie les autorisations du navigateur.")
-    }
-  }
-
-  async function stopperConfirmationEtEnvoyer() {
-    if (!modeActif || !dernierResultatRef.current) return
-    try {
-      const blobBrut = await arreterEnregistrement()
+      const blobBrut = await enregistrerAvecDetectionSilence(forceStopConfirmationRef)
       setEtape('traitement_confirmation')
       const blobWav = await convertirEnWav(blobBrut)
 
       const form = new FormData()
       form.append('audio', blobWav, 'audio.wav')
-      form.append('mode', modeActif)
+      form.append('mode', modeActif as Mode)
       form.append('numero_tiers', numeroTiers)
       if (rdvActivityId) form.append('rdv_activity_id', rdvActivityId)
       if (rdvLabel) form.append('rdv_label', rdvLabel)
       if (compteRenduIdCible) form.append('compte_rendu_id', compteRenduIdCible)
       form.append('user_email', userEmail)
       form.append('user_name', userName)
-      form.append('transcript_original', dernierResultatRef.current.transcript)
-      form.append('resume', dernierResultatRef.current.resume)
-      form.append('taches', JSON.stringify(dernierResultatRef.current.taches))
+      form.append('transcript_original', dernierResultatRef.current?.transcript || '')
+      form.append('resume', dernierResultatRef.current?.resume || '')
+      form.append('taches', JSON.stringify(dernierResultatRef.current?.taches || []))
 
       const res = await fetch('/api/atelier-ai/voice-report/confirm', { method: 'POST', body: form })
       const data = await res.json()
@@ -409,7 +546,7 @@ export default function VoiceReportButtons({
       if (data.confirme === null) {
         setMessageFinal(data.message)
         await jouerTexte(data.message)
-        await demarrerConfirmation() // redemande, toujours sans toucher l'écran
+        await ecouterConfirmation() // redemande, toujours sans toucher l'écran
         return
       }
 
@@ -592,7 +729,10 @@ export default function VoiceReportButtons({
       )}
 
       {etape === 'enregistrement_confirmation' && (
-        <GrandBoutonEcoute texte="Dis « oui » ou « non » — appuie pour arrêter" onClick={() => void stopperConfirmationEtEnvoyer()} />
+        <IndicateurEcouteAuto
+          texte="Dis « oui, c’est correct » ou « non »… je m’arrête tout seul dès que tu as fini"
+          onForcerArret={() => forceStopConfirmationRef.current?.()}
+        />
       )}
 
       {etape === 'traitement_confirmation' && <StatutLigne texte="Enregistrement…" />}
@@ -715,6 +855,42 @@ function GrandBoutonEcoute({ texte, onClick }: { texte: string; onClick: () => v
       <div style={{ fontSize: 13.5, fontWeight: 600, color: '#e0a685', textAlign: 'center', maxWidth: 220 }}>{texte}</div>
       <style>{`
         @keyframes cgcPulseRec { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.07); opacity: 0.75; } }
+      `}</style>
+    </div>
+  )
+}
+
+/** Indicateur d'écoute mains libres : ne nécessite AUCUN tap (l'arrêt est
+ * automatique, dès le silence détecté). Reste tapable en secours pour
+ * forcer l'arrêt plus tôt si la détection tarde. */
+function IndicateurEcouteAuto({ texte, onForcerArret }: { texte: string; onForcerArret: () => void }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, padding: '18px 0' }}>
+      <button
+        type="button"
+        onClick={onForcerArret}
+        aria-label="Forcer l'arrêt de l'écoute (facultatif, ça s'arrête normalement tout seul)"
+        style={{
+          width: 108,
+          height: 108,
+          borderRadius: '50%',
+          border: '2px solid rgba(63,145,66,0.6)',
+          background: 'rgba(63,145,66,0.20)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontSize: 44,
+          lineHeight: 1,
+          cursor: 'pointer',
+          animation: 'cgcPulseEcouteAuto 1.1s ease-in-out infinite',
+          flexShrink: 0,
+        }}
+      >
+        🎙️
+      </button>
+      <div style={{ fontSize: 13.5, fontWeight: 600, color: '#8fd4a8', textAlign: 'center', maxWidth: 240 }}>{texte}</div>
+      <style>{`
+        @keyframes cgcPulseEcouteAuto { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.07); opacity: 0.75; } }
       `}</style>
     </div>
   )

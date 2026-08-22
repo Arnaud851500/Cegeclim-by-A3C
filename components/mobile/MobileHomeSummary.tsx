@@ -55,9 +55,9 @@ function normaliser(value: string) {
  * cas l'agent redemande plutôt que de deviner. */
 function classifierChoix(transcript: string): Portee | null {
   const t = normaliser(transcript)
-  if (/\brdv\b|rendez[- ]?vous/.test(t)) return 'rdv'
-  if (/semaine/.test(t)) return 'semaine'
-  if (/retard|aujourd\s?hui|\bjour\b/.test(t)) return 'jour'
+  if (/\brdv\b|rendez[- ]?vous|reunion|reunions|agenda|planning|visites?\b/.test(t)) return 'rdv'
+  if (/semaine|hebdo/.test(t)) return 'semaine'
+  if (/retard|aujourd\s?hui|\bjour\b|jours|maintenant|taches?\b/.test(t)) return 'jour'
   return null
 }
 
@@ -125,7 +125,53 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
   const streamRef = useRef<MediaStream | null>(null)
   const audioEnCoursRef = useRef<HTMLAudioElement | null>(null)
   const resolveLectureRef = useRef<(() => void) | null>(null)
+  // Élément <audio> réutilisé pour toute la session -- voir debloquerAudio().
+  const audioElementRef = useRef<HTMLAudioElement | null>(null)
+  const audioDeverrouilleRef = useRef(false)
+  const forceStopRef = useRef<(() => void) | null>(null)
 
+  /** Minuscule WAV silencieux généré à la volée -- sert uniquement à
+   * "débloquer" l'élément <audio> ci-dessous (voir debloquerAudio). */
+  function creerAudioSilencieux(): string {
+    const sampleRate = 8000
+    const numSamples = 8
+    const dataLength = numSamples * 2
+    const buffer = new ArrayBuffer(44 + dataLength)
+    const view = new DataView(buffer)
+    function writeString(offset: number, s: string) {
+      for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i))
+    }
+    writeString(0, 'RIFF'); view.setUint32(4, 36 + dataLength, true); writeString(8, 'WAVE')
+    writeString(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true)
+    view.setUint16(22, 1, true); view.setUint32(24, sampleRate, true)
+    view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true)
+    writeString(36, 'data'); view.setUint32(40, dataLength, true)
+    const bytes = new Uint8Array(buffer)
+    let binary = ''
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
+    return 'data:audio/wav;base64,' + btoa(binary)
+  }
+
+  /** CORRECTIF lecture auto bloquée par Safari (voir VoiceReportButtons
+   * pour le détail) : joue un son silencieux DANS la pile synchrone du
+   * clic initial pour débloquer l'élément <audio>, réutilisé ensuite pour
+   * toute la session même depuis des contextes asynchrones tardifs. Doit
+   * rester la toute première instruction du handler de clic. */
+  function debloquerAudio() {
+    if (audioDeverrouilleRef.current) return
+    try {
+      const el = new Audio(creerAudioSilencieux())
+      audioElementRef.current = el
+      void el.play().catch(() => {})
+      audioDeverrouilleRef.current = true
+    } catch {
+      // Si ça échoue, jouerTexte retombera sur un nouvel Audio() classique.
+    }
+  }
+
+  /** Réutilise le même élément <audio> débloqué au tap initial plutôt que
+   * d'en créer un nouveau (qui retomberait sous le coup de la politique
+   * autoplay pour tout appel un peu tardif, ex. après transcription+IA). */
   async function jouerTexte(texte: string) {
     if (!texte) return
     setLectureEnCours(true)
@@ -138,7 +184,9 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       if (!res.ok) return
       const blob = await res.blob()
       const url = URL.createObjectURL(blob)
-      const audio = new Audio(url)
+      const audio = audioElementRef.current || new Audio()
+      audioElementRef.current = audio
+      audio.src = url
       audioEnCoursRef.current = audio
       await new Promise<void>((resolve) => {
         resolveLectureRef.current = resolve
@@ -173,7 +221,16 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
     return ''
   }
 
-  async function demarrerEnregistrement(): Promise<void> {
+  /** Enregistrement mains libres : démarre le micro et s'arrête TOUT SEUL
+   * dès qu'un silence d'environ 1,3s suit un moment de parole détecté --
+   * pas de bouton "stop" requis. `forceStopRef` permet de forcer l'arrêt
+   * plus tôt en tapant l'indicateur à l'écran, en secours. Filet de
+   * sécurité à 12s pour ne jamais rester bloqué. */
+  async function enregistrerAvecDetectionSilence(stopRef?: { current: (() => void) | null }): Promise<Blob> {
+    const SEUIL_RMS = 0.02
+    const SILENCE_MS = 1300
+    const DUREE_MAX_MS = 12000
+
     let stream: MediaStream
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true })
@@ -181,34 +238,81 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       throw new Error(`[micro] ${e?.name || 'Erreur'} : ${e?.message || e}`)
     }
     streamRef.current = stream
-    const mimeType = mimeTypeSupporte()
-    try {
-      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream)
-      chunksRef.current = []
-      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data) }
-      mediaRecorderRef.current = recorder
-      recorder.start()
-    } catch (e: any) {
-      stream.getTracks().forEach((t) => t.stop())
-      throw new Error(`[enregistreur] ${e?.name || 'Erreur'} : ${e?.message || e}`)
-    }
-  }
 
-  function arreterEnregistrement(): Promise<Blob> {
+    const mimeType = mimeTypeSupporte()
+    const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream)
+    const chunks: Blob[] = []
+    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data) }
+    mediaRecorderRef.current = recorder
+
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext
+    const audioCtx = new AudioContextClass()
+    const source = audioCtx.createMediaStreamSource(stream)
+    const analyser = audioCtx.createAnalyser()
+    analyser.fftSize = 2048
+    source.connect(analyser)
+    const donnees = new Uint8Array(analyser.fftSize)
+
     return new Promise((resolve) => {
-      const recorder = mediaRecorderRef.current
-      if (!recorder) { resolve(new Blob()); return }
-      recorder.onstop = () => {
-        const type = recorder.mimeType || 'audio/webm'
-        resolve(new Blob(chunksRef.current, { type }))
-        streamRef.current?.getTracks().forEach((t) => t.stop())
+      let arrete = false
+      let dernierSonTs = Date.now()
+      let aParle = false
+      const debutTs = Date.now()
+      let frameId = 0
+
+      function terminer() {
+        if (arrete) return
+        arrete = true
+        if (frameId) cancelAnimationFrame(frameId)
+        recorder.onstop = () => {
+          const type = recorder.mimeType || 'audio/webm'
+          resolve(new Blob(chunks, { type }))
+          stream.getTracks().forEach((t) => t.stop())
+          try { audioCtx.close() } catch {}
+        }
+        if (recorder.state !== 'inactive') recorder.stop()
+        else {
+          resolve(new Blob(chunks, { type: recorder.mimeType || 'audio/webm' }))
+          stream.getTracks().forEach((t) => t.stop())
+          try { audioCtx.close() } catch {}
+        }
       }
-      recorder.stop()
+
+      function boucle() {
+        if (arrete) return
+        analyser.getByteTimeDomainData(donnees)
+        let somme = 0
+        for (let i = 0; i < donnees.length; i++) {
+          const v = (donnees[i] - 128) / 128
+          somme += v * v
+        }
+        const rms = Math.sqrt(somme / donnees.length)
+
+        if (rms > SEUIL_RMS) {
+          dernierSonTs = Date.now()
+          aParle = true
+        }
+
+        const maintenant = Date.now()
+        if ((aParle && maintenant - dernierSonTs > SILENCE_MS) || maintenant - debutTs > DUREE_MAX_MS) {
+          terminer()
+          return
+        }
+        frameId = requestAnimationFrame(boucle)
+      }
+
+      recorder.start()
+      frameId = requestAnimationFrame(boucle)
+      if (stopRef) stopRef.current = terminer
     })
   }
 
-  /** Lance (ou relance) le cycle conversationnel : question -> écoute. */
+  /** Lance (ou relance) le cycle conversationnel : question -> écoute
+   * mains libres -> interprétation. */
   async function poserLaQuestion() {
+    // Doit être la toute première instruction, avant tout `await`.
+    debloquerAudio()
+
     setTexte('')
     setMessageIncompris('')
     setErreur('')
@@ -216,16 +320,16 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       setEtape('question')
       await jouerTexte(QUESTION)
       setEtape('ecoute')
-      await demarrerEnregistrement()
+      const blobBrut = await enregistrerAvecDetectionSilence(forceStopRef)
+      await interpreter(blobBrut)
     } catch (e: any) {
       setEtape('erreur')
       setErreur(e?.message || 'Une erreur est survenue.')
     }
   }
 
-  async function arreterEtInterpreter() {
+  async function interpreter(blobBrut: Blob) {
     try {
-      const blobBrut = await arreterEnregistrement()
       setEtape('traitement')
       const blobWav = await convertirEnWav(blobBrut)
 
@@ -243,7 +347,8 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         setEtape('incompris')
         await jouerTexte("Je n'ai pas bien compris. Peux-tu répéter ?")
         setEtape('ecoute')
-        await demarrerEnregistrement()
+        const blobRetente = await enregistrerAvecDetectionSilence(forceStopRef)
+        await interpreter(blobRetente)
         return
       }
 
@@ -397,18 +502,18 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
               )}
               <button
                 type="button"
-                onClick={() => void arreterEtInterpreter()}
-                aria-label="Arrêter l'écoute"
+                onClick={() => forceStopRef.current?.()}
+                aria-label="Forcer l'arrêt de l'écoute (facultatif, ça s'arrête normalement tout seul)"
                 style={{
-                  width: 116, height: 116, borderRadius: '50%', border: '2px solid rgba(75,146,172,0.6)',
-                  background: 'rgba(75,146,172,0.20)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  width: 116, height: 116, borderRadius: '50%', border: '2px solid rgba(63,145,66,0.6)',
+                  background: 'rgba(63,145,66,0.20)', display: 'flex', alignItems: 'center', justifyContent: 'center',
                   fontSize: 46, cursor: 'pointer', animation: 'cgcPulseSummary 1.1s ease-in-out infinite',
                 }}
               >
                 🎙️
               </button>
-              <div style={{ fontSize: 14.5, fontWeight: 600, color: '#8FC7DA', textAlign: 'center' }}>
-                Je t'écoute — appuie pour arrêter
+              <div style={{ fontSize: 14.5, fontWeight: 600, color: '#8fd4a8', textAlign: 'center' }}>
+                Je t'écoute… je m'arrête tout seul dès que tu as fini
               </div>
               <style>{`@keyframes cgcPulseSummary { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.06); opacity: 0.75; } }`}</style>
             </div>
