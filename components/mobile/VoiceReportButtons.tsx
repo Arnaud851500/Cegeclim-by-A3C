@@ -129,19 +129,26 @@ function audioBufferToWav(buffer: AudioBuffer): ArrayBuffer {
 }
 
 export default function VoiceReportButtons({
-  numeroTiers,
-  clientNom,
+  numeroTiers = '',
+  clientNom = '',
   rdvActivityId,
   rdvLabel,
   userEmail,
   userName,
+  // Quand fourni, n'affiche qu'un seul bouton de dictée (pas de
+  // compte-rendu, pas de section "compte-rendu existant") — utilisé pour
+  // la création rapide de tâche depuis l'accueil, sans client/rdv associé.
+  modeUnique,
+  labelBouton,
 }: {
-  numeroTiers: string
-  clientNom: string
+  numeroTiers?: string
+  clientNom?: string
   rdvActivityId?: string | null
   rdvLabel?: string | null
   userEmail: string
   userName: string
+  modeUnique?: 'tache'
+  labelBouton?: string
 }) {
   const [modeActif, setModeActif] = useState<Mode | null>(null)
   const [etape, setEtape] = useState<Etape>('idle')
@@ -161,7 +168,7 @@ export default function VoiceReportButtons({
   const dernierResultatRef = useRef<{ transcript: string; resume: string; taches: Tache[] } | null>(null)
 
   async function chargerComptesRendus() {
-    if (!rdvActivityId) {
+    if (modeUnique || !rdvActivityId) {
       setComptesRendusExistants([])
       return
     }
@@ -451,7 +458,13 @@ export default function VoiceReportButtons({
       )}
 
       {/* ---- Boutons de lancement ---- */}
-      {etape === 'idle' && (
+      {etape === 'idle' && modeUnique && (
+        <button type="button" onClick={() => void lancer('tache')} style={{ ...boutonStyle('#A6A181'), width: '100%' }}>
+          🎙️ {labelBouton || 'Nouvelle tâche vocale'}
+        </button>
+      )}
+
+      {etape === 'idle' && !modeUnique && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div style={{ display: 'flex', gap: 8 }}>
             <button type="button" onClick={() => void lancer('compte_rendu')} style={boutonStyle('#7A5EA8')}>

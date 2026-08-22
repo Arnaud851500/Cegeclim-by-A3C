@@ -43,6 +43,43 @@ type StructureResult = {
   taches: Tache[]
 }
 
+function normaliserTexte(value: string) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+}
+
+/** Filet de sécurité : si l'IA n'a pas su rattacher une tâche à un email
+ * (assigned_to_email = null), on recherche le prénom de chaque
+ * collaborateur connu dans le texte de la tâche PUIS dans la transcription
+ * complète — un simple rapprochement par mot entier suffit largement pour
+ * ce cas d'usage, et évite de dépendre entièrement du jugement du modèle
+ * sur une liste de noms parfois longue. */
+function completerAssignationParPrenom(
+  taches: Tache[],
+  assignees: Array<{ email: string; name: string }>,
+  transcript: string,
+): Tache[] {
+  const transcriptNorm = normaliserTexte(transcript)
+
+  return taches.map((tache) => {
+    if (tache.assigned_to_email) return tache
+
+    const descriptionNorm = normaliserTexte(tache.description)
+
+    for (const assignee of assignees) {
+      const prenom = normaliserTexte(assignee.name).split(/\s+/)[0]
+      if (!prenom || prenom.length < 3) continue
+      const motEntier = new RegExp(`\\b${prenom}\\b`)
+      if (motEntier.test(descriptionNorm) || motEntier.test(transcriptNorm)) {
+        return { ...tache, assigned_to_email: assignee.email }
+      }
+    }
+    return tache
+  })
+}
+
 async function transcrireAudio(file: File): Promise<string> {
   const form = new FormData()
   form.append('file', file)
@@ -81,11 +118,10 @@ async function structurer(params: {
   const consigneMode =
     mode === 'compte_rendu'
       ? `L'utilisateur vient de dicter le compte-rendu oral de sa visite chez ce client. Rédige un résumé structuré (3 à 6 phrases, clair et professionnel) et détecte TOUTES les actions/tâches à créer qui ressortent du récit (relances, envois de documents, rappels, devis à faire...).`
-      : `L'utilisateur vient de dicter UNE SEULE tâche à ajouter pour ce client (pas un compte-rendu de visite). Le "resume" doit être une reformulation courte d'une phrase de cette tâche. Détecte exactement une tâche (ou zéro si la dictée ne décrit pas une action claire).`
+      : `L'utilisateur vient de dicter UNE SEULE tâche à ajouter${clientNom ? ' pour ce client' : ''} (pas un compte-rendu de visite). Le "resume" doit être une reformulation courte d'une phrase de cette tâche. Détecte exactement une tâche (ou zéro si la dictée ne décrit pas une action claire).`
 
   const prompt = `${consigneMode}
-
-Client concerné : ${clientNom} (n° ${numeroTiers})${rdvLabel ? `\nRendez-vous concerné : ${rdvLabel}` : ''}
+${clientNom ? `\nClient concerné : ${clientNom}${numeroTiers ? ` (n° ${numeroTiers})` : ''}` : ''}${rdvLabel ? `\nRendez-vous concerné : ${rdvLabel}` : ''}
 Date du jour : ${dateAujourdhui}
 
 Personnes à qui une tâche peut être assignée (utilise l'email exact si l'une d'elles est nommée dans la dictée, sinon assigned_to_email = null pour laisser l'utilisateur assigné par défaut) :
@@ -165,7 +201,6 @@ export async function POST(req: NextRequest) {
 
     if (!audio) return NextResponse.json({ error: 'Aucun audio reçu.' }, { status: 400 })
     if (!userEmail) return NextResponse.json({ error: 'Utilisateur non identifié.' }, { status: 400 })
-    if (!numeroTiers) return NextResponse.json({ error: 'Client non identifié.' }, { status: 400 })
 
     const transcript = await transcrireAudio(audio)
     if (!transcript) {
@@ -203,6 +238,8 @@ export async function POST(req: NextRequest) {
       memoireRecente,
       dateAujourdhui,
     })
+
+    structure.taches = completerAssignationParPrenom(structure.taches, assignees, transcript)
 
     // Mémoire de conversation : tracée immédiatement, indépendamment de la
     // confirmation à venir (accès service-role uniquement, cf. migration).

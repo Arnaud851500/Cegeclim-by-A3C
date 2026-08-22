@@ -145,6 +145,7 @@ export async function POST(req: NextRequest) {
 
         const horodatage = new Date().toLocaleString('fr-FR', {
           day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
+          timeZone: 'Europe/Paris',
         })
         const resumeFusionne = existant?.resume
           ? `${existant.resume}\n\n— Complément du ${horodatage} —\n${resume}`
