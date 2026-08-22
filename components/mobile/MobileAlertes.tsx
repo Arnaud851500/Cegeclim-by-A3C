@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import MobileListSheet, { type ListSheetItem } from './MobileListSheet'
 import MobileDetailSheet, { type DetailField } from './MobileDetailSheet'
@@ -110,6 +110,12 @@ export default function MobileAlertes({
   const [ajoutMode, setAjoutMode] = useState<'menu' | 'manuel' | 'vocal' | null>(null)
   const [nouvelleDescription, setNouvelleDescription] = useState('')
   const [nouvelleEcheance, setNouvelleEcheance] = useState('')
+  const [nouvelleCategorie, setNouvelleCategorie] = useState('')
+  const [nouveauClientTexte, setNouveauClientTexte] = useState('')
+  const [nouveauClientNumero, setNouveauClientNumero] = useState<string | null>(null)
+  const [suggestionsClient, setSuggestionsClient] = useState<{ numero: string; nom: string }[]>([])
+  const [assigneesDisponibles, setAssigneesDisponibles] = useState<{ email: string; nom: string }[]>([])
+  const [nouvelAssigne, setNouvelAssigne] = useState('')
   const [ajoutEnCours, setAjoutEnCours] = useState(false)
   const [ajoutErreur, setAjoutErreur] = useState('')
 
@@ -146,6 +152,48 @@ export default function MobileAlertes({
     setListOpen({ title: 'À faire', items: buildTodoItems(rows) })
   }
 
+  /** Suggestions client au fil de la saisie -- numéro ou nom, comme la
+   * recherche du compte-rendu vocal (MobileHomeSummary). Champ optionnel :
+   * pas de suggestion trouvée ou champ vide n'empêche jamais de créer la
+   * tâche, numero_tiers part juste à null dans ce cas. */
+  useEffect(() => {
+    const q = nouveauClientTexte.trim()
+    if (!q || nouveauClientNumero) { setSuggestionsClient([]); return }
+    let cancelled = false
+    const t = window.setTimeout(async () => {
+      const { data } = await supabase
+        .from('ref_tiers')
+        .select('numero, intitule')
+        .or(`numero.ilike.${q}%,intitule.ilike.%${q}%`)
+        .limit(8)
+      if (!cancelled) {
+        setSuggestionsClient(((data || []) as any[]).map((r) => ({ numero: String(r.numero || ''), nom: String(r.intitule || '') })))
+      }
+    }, 250)
+    return () => { cancelled = true; window.clearTimeout(t) }
+  }, [nouveauClientTexte, nouveauClientNumero])
+
+  /** Liste des collaborateurs à qui une tâche peut être affectée (même
+   * source que la structuration IA côté vocal : user_page_access,
+   * can_todo=true), chargée une fois. Par défaut, la tâche s'affecte à
+   * soi-même -- initialisé dès que userEmail est connu. */
+  useEffect(() => {
+    let cancelled = false
+    async function charger() {
+      const { data } = await supabase.from('user_page_access').select('email, display_name').eq('can_todo', true)
+      if (cancelled) return
+      setAssigneesDisponibles(
+        ((data || []) as any[]).map((a) => ({ email: String(a.email || '').toLowerCase(), nom: String(a.display_name || a.email || '') })),
+      )
+    }
+    void charger()
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
+    if (userEmail && !nouvelAssigne) setNouvelAssigne(userEmail.toLowerCase())
+  }, [userEmail, nouvelAssigne])
+
   async function creerTacheManuelle() {
     const description = nouvelleDescription.trim()
     if (!description) {
@@ -156,14 +204,25 @@ export default function MobileAlertes({
     setAjoutErreur('')
     try {
       const { error } = await supabase.from('todo_actions').insert({
+        // CORRECTIF : created_by_email/created_by_name sont NOT NULL en
+        // base -- absents ici, ils faisaient échouer systématiquement la
+        // création manuelle ("null value in column created_by_email").
+        created_by_email: userEmail || null,
+        created_by_name: userName || userEmail || 'Mobile',
         description_action: description,
         due_date: nouvelleEcheance || null,
         status: 'A faire',
-        assigned_to: userEmail || userName || null,
+        assigned_to: nouvelAssigne || userEmail || userName || null,
+        mission_project: nouvelleCategorie.trim() || null,
+        numero_tiers: nouveauClientNumero || null,
       })
       if (error) throw error
       setNouvelleDescription('')
       setNouvelleEcheance('')
+      setNouvelleCategorie('')
+      setNouveauClientTexte('')
+      setNouveauClientNumero(null)
+      setNouvelAssigne(userEmail ? userEmail.toLowerCase() : '')
       setAjoutMode(null)
       await rafraichirApresAjout()
     } catch (e: any) {
@@ -456,6 +515,63 @@ export default function MobileAlertes({
                 onChange={(e) => setNouvelleEcheance(e.target.value)}
                 style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }}
               />
+            </div>
+
+            <div>
+              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Affecter à</div>
+              <select
+                value={nouvelAssigne}
+                onChange={(e) => setNouvelAssigne(e.target.value)}
+                style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }}
+              >
+                {userEmail && !assigneesDisponibles.some((a) => a.email === userEmail.toLowerCase()) && (
+                  <option value={userEmail.toLowerCase()}>Moi-même ({userName || userEmail})</option>
+                )}
+                {assigneesDisponibles.map((a) => (
+                  <option key={a.email} value={a.email}>
+                    {a.email === userEmail?.toLowerCase() ? `${a.nom} (moi-même)` : a.nom}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Catégorie (facultatif)</div>
+              <input
+                type="text"
+                value={nouvelleCategorie}
+                onChange={(e) => setNouvelleCategorie(e.target.value)}
+                placeholder="Ex. : Relance, Devis, SAV…"
+                style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }}
+              />
+            </div>
+
+            <div style={{ position: 'relative' }}>
+              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Client (facultatif)</div>
+              <input
+                type="text"
+                value={nouveauClientTexte}
+                onChange={(e) => { setNouveauClientTexte(e.target.value); setNouveauClientNumero(null) }}
+                placeholder="Nom ou numéro du client…"
+                style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }}
+              />
+              {nouveauClientNumero && (
+                <div style={{ fontSize: 11.5, color: '#8fd4a8', marginTop: 4 }}>✓ Client sélectionné : {nouveauClientNumero}</div>
+              )}
+              {suggestionsClient.length > 0 && !nouveauClientNumero && (
+                <div style={{ marginTop: 6, borderRadius: 10, border: '1px solid rgba(255,255,255,0.12)', background: '#0B1220', overflow: 'hidden' }}>
+                  {suggestionsClient.map((s) => (
+                    <button
+                      key={s.numero}
+                      type="button"
+                      onClick={() => { setNouveauClientNumero(s.numero); setNouveauClientTexte(`${s.nom} (${s.numero})`); setSuggestionsClient([]) }}
+                      style={{ display: 'block', width: '100%', textAlign: 'left', padding: '9px 12px', border: 'none', borderBottom: '1px solid rgba(255,255,255,0.06)', background: 'transparent', color: '#fff', fontSize: 13.5 }}
+                    >
+                      <span style={{ color: '#E8A96A', fontWeight: 700 }}>{s.numero}</span> · {s.nom}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
             {ajoutErreur && <div style={{ fontSize: 13, color: '#e0a685' }}>{ajoutErreur}</div>}
