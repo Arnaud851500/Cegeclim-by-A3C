@@ -15,11 +15,15 @@ export type DetailField = { label: string; value: string }
  * largeur et reste lisible quelle que soit sa longueur, sans scroll horizontal.
  */
 export default function MobileDetailSheet({
-  title, subtitle, fields, onClose,
+  title, subtitle, fields, footer, onClose,
 }: {
   title: string
   subtitle?: string
   fields: DetailField[]
+  /** Contenu optionnel affiché sous la liste des champs, avant "Fermer" —
+   * utilisé pour les boutons vocaux sur les RDV, sans impact sur les autres
+   * usages (documents, contacts) qui ne passent pas cette prop. */
+  footer?: React.ReactNode
   onClose: () => void
 }) {
   return (
@@ -77,6 +81,8 @@ export default function MobileDetailSheet({
             </div>
           ))}
         </div>
+
+        {footer}
 
         <button
           onClick={onClose}

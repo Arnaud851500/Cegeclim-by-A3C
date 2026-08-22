@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { formatMoney } from '@/app/focus_mensuel/page'
 import MobileDetailSheet, { type DetailField } from './MobileDetailSheet'
+import VoiceReportButtons from './VoiceReportButtons'
 
 // ─────────────────────────────────────────────────────────────────────────
 // Confirmé (Supabase Table Editor, table activite_lignes) : les documents
@@ -72,6 +73,10 @@ type BlgActivity = {
   type: string
   subject: string
   company: string | null
+  // Numéro tiers (SAGE) de l'entreprise liée, résolu via
+  // partner_base_partner.reference — nécessaire pour rattacher le
+  // compte-rendu/les tâches vocales au bon client (VoiceReportButtons).
+  numeroTiers: string | null
   start: string
   end: string
   allDay: boolean
@@ -97,6 +102,17 @@ function formatDateFr(iso: string) {
   if (!iso) return ''
   const [y, m, d] = iso.split('-')
   return `${d}/${m}/${y}`
+}
+
+/** Nom lisible par défaut quand user_page_access.display_name est vide —
+ * même convention que les autres écrans mobile (Todo, etc.). */
+function fallbackNameFromEmail(email: string) {
+  const local = String(email || '').split('@')[0] || email
+  return local
+    .split(/[._-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ') || email
 }
 
 type DocResult = {
@@ -127,11 +143,16 @@ export default function MobileRdv() {
   const [term, setTerm] = useState('')
   const [results, setResults] = useState<DocResult[] | null>(null)
   const [loading, setLoading] = useState(false)
-  const [openDetail, setOpenDetail] = useState<{ title: string; subtitle?: string; fields: DetailField[] } | null>(null)
+  const [openDetail, setOpenDetail] = useState<{ title: string; subtitle?: string; fields: DetailField[]; footer?: React.ReactNode } | null>(null)
 
   const [rdvList, setRdvList] = useState<BlgActivity[] | null>(null)
   const [rdvLoading, setRdvLoading] = useState(true)
   const [rdvUnconfigured, setRdvUnconfigured] = useState(false)
+
+  // Identité de l'utilisateur courant — nécessaire pour VoiceReportButtons
+  // (created_by des tâches/compte-rendu créés depuis un RDV).
+  const [currentEmail, setCurrentEmail] = useState('')
+  const [currentName, setCurrentName] = useState('')
 
   useEffect(() => {
     let cancelled = false
@@ -144,9 +165,14 @@ export default function MobileRdv() {
 
         const { data: access } = await supabase
           .from('user_page_access')
-          .select('blg_partner_id')
+          .select('blg_partner_id, display_name')
           .eq('email', email)
           .maybeSingle()
+
+        if (!cancelled) {
+          setCurrentEmail(email)
+          setCurrentName(String(access?.display_name || '').trim() || fallbackNameFromEmail(email))
+        }
 
         if (!access?.blg_partner_id) {
           if (!cancelled) {
@@ -182,11 +208,12 @@ export default function MobileRdv() {
 
         const rows = (data || []) as Record<string, any>[]
 
-        // Nom d'entreprise liée : crm_activity_company (activity_fk, company_fk)
-        // -> partner_base_partner.id / company_name. Résolu en 2 requêtes
-        // batch. Une erreur ici ne doit jamais empêcher l'affichage des
-        // rendez-vous eux-mêmes — repli silencieux sur "pas d'entreprise".
-        const companyByActivity = new Map<number, string>()
+        // Nom d'entreprise ET numéro tiers liés : crm_activity_company
+        // (activity_fk, company_fk) -> partner_base_partner.id /
+        // company_name / reference (= numéro tiers SAGE). Résolu en 2
+        // requêtes batch. Une erreur ici ne doit jamais empêcher l'affichage
+        // des rendez-vous eux-mêmes — repli silencieux sur "pas d'entreprise".
+        const companyByActivity = new Map<number, { name: string; numeroTiers: string | null }>()
         try {
           const activityIds = rows.map((r) => r.id).filter((v) => v !== null && v !== undefined)
           if (activityIds.length > 0) {
@@ -202,16 +229,19 @@ export default function MobileRdv() {
             if (companyIds.length > 0) {
               const { data: companies } = await supabase
                 .from('partner_base_partner')
-                .select('id, company_name')
+                .select('id, company_name, reference')
                 .in('id', companyIds)
 
-              const nameById = new Map(
-                ((companies || []) as Record<string, any>[]).map((c) => [c.id, String(c.company_name || '').trim()]),
+              const infoById = new Map(
+                ((companies || []) as Record<string, any>[]).map((c) => [
+                  c.id,
+                  { name: String(c.company_name || '').trim(), numeroTiers: String(c.reference || '').trim() || null },
+                ]),
               )
 
               ;((links || []) as Record<string, any>[]).forEach((l) => {
-                const name = nameById.get(l.company_fk)
-                if (name) companyByActivity.set(l.activity_fk, name)
+                const info = infoById.get(l.company_fk)
+                if (info?.name) companyByActivity.set(l.activity_fk, info)
               })
             }
           }
@@ -223,23 +253,27 @@ export default function MobileRdv() {
 
         setRdvUnconfigured(false)
         setRdvList(
-          rows.map((row) => ({
-            id: String(row.id),
-            type: String(row.type ?? ''),
-            // "comment" est la colonne réelle du texte descriptif sur
-            // crm_base_activity (confirmé via information_schema — pas de
-            // colonne subject/title/name/label sur cette table).
-            subject: String(pick(row, ['comment', 'subject', 'title', 'name', 'label']) || RDV_TYPE_LABELS[String(row.type ?? '')] || 'Activité'),
-            company: companyByActivity.get(row.id) || null,
-            // NE PAS tronquer le timestamp (garder le fuseau horaire) : un
-            // .slice(0, 19) sur "2026-08-23T22:00:00+00:00" donnait
-            // "2026-08-23T22:00:00", réinterprété par `new Date()` comme 22h
-            // locale plutôt que 22h UTC (= 00h locale le lendemain) — ce qui
-            // décalait la date/heure affichée d'environ 2h en été.
-            start: String(row.start_date || ''),
-            end: String(row.end_date || row.start_date || ''),
-            allDay: Boolean(row.all_day),
-          })),
+          rows.map((row) => {
+            const info = companyByActivity.get(row.id)
+            return {
+              id: String(row.id),
+              type: String(row.type ?? ''),
+              // "comment" est la colonne réelle du texte descriptif sur
+              // crm_base_activity (confirmé via information_schema — pas de
+              // colonne subject/title/name/label sur cette table).
+              subject: String(pick(row, ['comment', 'subject', 'title', 'name', 'label']) || RDV_TYPE_LABELS[String(row.type ?? '')] || 'Activité'),
+              company: info?.name || null,
+              numeroTiers: info?.numeroTiers || null,
+              // NE PAS tronquer le timestamp (garder le fuseau horaire) : un
+              // .slice(0, 19) sur "2026-08-23T22:00:00+00:00" donnait
+              // "2026-08-23T22:00:00", réinterprété par `new Date()` comme 22h
+              // locale plutôt que 22h UTC (= 00h locale le lendemain) — ce qui
+              // décalait la date/heure affichée d'environ 2h en été.
+              start: String(row.start_date || ''),
+              end: String(row.end_date || row.start_date || ''),
+              allDay: Boolean(row.all_day),
+            }
+          }),
         )
       } finally {
         if (!cancelled) setRdvLoading(false)
@@ -264,6 +298,18 @@ export default function MobileRdv() {
         { label: 'Fin', value: r.allDay ? (endDate ? endDate.toLocaleDateString('fr-FR') : '') : fmtTime(endDate) },
         { label: 'Toute la journée', value: r.allDay ? 'Oui' : 'Non' },
       ],
+      // Boutons vocaux uniquement si le RDV est bien rattaché à un client
+      // identifié (numéro tiers résolu) — sinon rien à rattacher en base.
+      footer: r.numeroTiers ? (
+        <VoiceReportButtons
+          numeroTiers={r.numeroTiers}
+          clientNom={r.company || ''}
+          rdvActivityId={r.id}
+          rdvLabel={r.subject}
+          userEmail={currentEmail}
+          userName={currentName}
+        />
+      ) : undefined,
     })
   }
 
@@ -390,22 +436,6 @@ export default function MobileRdv() {
         )}
       </div>
 
-      {/* ---- Assistant vocal : à venir. ---- */}
-      <button
-        disabled
-        style={{
-          borderRadius: 14,
-          border: '1px dashed rgba(255,255,255,0.15)',
-          background: 'transparent',
-          color: 'rgba(255,255,255,0.35)',
-          padding: '14px 16px',
-          fontSize: 13,
-          textAlign: 'left',
-        }}
-      >
-        🎙️ Assistant visite (résumé vocal + actions) — Bientôt disponible
-      </button>
-
       {/* ---- Recherche de document ---- */}
       <div>
         <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 8 }}>
@@ -486,6 +516,7 @@ export default function MobileRdv() {
           title={openDetail.title}
           subtitle={openDetail.subtitle}
           fields={openDetail.fields}
+          footer={openDetail.footer}
           onClose={() => setOpenDetail(null)}
         />
       )}
