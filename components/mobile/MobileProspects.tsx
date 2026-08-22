@@ -293,6 +293,8 @@ export default function MobileProspects() {
   const [appelVers, setAppelVers] = useState<string | null>(null)
 
   const mapRef = useRef<any>(null)
+  const mapWrapperRef = useRef<HTMLDivElement | null>(null)
+  const [mapHeightPx, setMapHeightPx] = useState(0)
   // Journal de diagnostic affiché à l'écran (bouton "🔧 Diagnostic" sous la
   // carte) -- après deux correctifs à l'aveugle sans succès (CSS manquant,
   // puis invalidateSize mal déclenché), la seule façon de vraiment
@@ -338,33 +340,28 @@ export default function MobileProspects() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // CORRECTIF carte blanche : Leaflet calcule la taille de son canevas une
-  // seule fois, au moment précis de son initialisation -- si le conteneur
-  // n'a pas encore sa taille finale à cet instant (mise en page flex pas
-  // encore stabilisée, montage via dynamic()/ssr:false qui ajoute un cycle
-  // de rendu supplémentaire), la carte reste vide et ne se redessine
-  // jamais toute seule. On force plusieurs invalidateSize() sur ~1,5s après
-  // l'affichage de l'écran carte, jusqu'à ce que la taille soit stable --
-  // même principe que côté desktop (app/clients/page.tsx, fonction runFit).
+  // CORRECTIF carte blanche, cette fois confirmé par le diagnostic à
+  // l'écran : Leaflet mesurait son conteneur à 362×0px au montage (hauteur
+  // nulle), alors que le <div> parent affichait déjà 362×689px au même
+  // instant -- la chaîne CSS "flex:1 -> height:100% -> height:100%" ne se
+  // résolvait jamais correctement (bug de timing/cascade CSS, confirmé par
+  // le fait qu'invalidateSize() tournait 10 fois sans jamais rien changer :
+  // la hauteur réelle du conteneur Leaflet restait 0 en continu, pas juste
+  // au tout premier instant).
   //
-  // BUG CORRIGÉ : cet effet dépendait de [filtresValides, position], donc
-  // se déclenchait dès le chargement des données -- AVANT que la carte
-  // soit montée, puisque "Liste" est désormais la vue par défaut
-  // (MapContainer n'existe dans le DOM que si vue === 'carte'). Résultat :
-  // les 10 tentatives s'épuisaient dans le vide (mapRef.current toujours
-  // null) et ne se redéclenchaient jamais en basculant sur "Carte" par la
-  // suite. Il faut que `vue` soit dans les dépendances, pour que la salve
-  // reparte à chaque fois que la carte est (re)montée.
+  // Solution robuste : ne plus dépendre du tout d'un height:100% en
+  // cascade. On mesure la hauteur RÉELLE du conteneur en pixels via JS, et
+  // on ne monte MapContainer qu'une fois cette mesure disponible, avec
+  // cette valeur fixe en pixels (pas de pourcentage) -- Leaflet reçoit
+  // alors une hauteur définitive dès son tout premier rendu.
   useEffect(() => {
-    if (vue !== 'carte' || !filtresValides || !position) return
-    let cancelled = false
-    let attempts = 0
+    if (vue !== 'carte' || !filtresValides || !position) {
+      setMapHeightPx(0)
+      return
+    }
 
-    logCarte('Écran carte affiché -- début du diagnostic')
+    logCarte('Écran carte affiché -- mesure directe de la hauteur en pixels')
 
-    // Capture toute erreur JS ou promesse rejetée pendant la durée
-    // d'affichage de la carte -- c'est le seul moyen d'avoir la VRAIE
-    // erreur sans brancher un Mac en debug distant.
     function surErreur(e: ErrorEvent) {
       logCarte(`❌ Erreur JS : ${e.message} (${e.filename?.split('/').pop() || '?'}:${e.lineno})`)
     }
@@ -374,35 +371,24 @@ export default function MobileProspects() {
     window.addEventListener('error', surErreur)
     window.addEventListener('unhandledrejection', surRejetNonGere)
 
-    function tryInvalidate() {
-      if (cancelled) return
-      const map = mapRef.current
-      const conteneur = document.getElementById('cgc-map-conteneur')
-      const rect = conteneur?.getBoundingClientRect()
-      if (attempts === 0 || attempts === 4 || attempts === 9) {
-        logCarte(
-          `Tentative ${attempts + 1}/10 -- mapRef=${map ? 'OK' : 'null'}, conteneur=${rect ? `${Math.round(rect.width)}×${Math.round(rect.height)}px` : 'introuvable'}`,
-        )
-      }
-      if (map && typeof map.invalidateSize === 'function') {
-        try {
-          map.invalidateSize()
-        } catch (e: any) {
-          logCarte(`❌ invalidateSize() a levé une exception : ${e?.message || e}`)
-        }
-      }
-      attempts += 1
-      if (attempts < 10) {
-        window.setTimeout(tryInvalidate, 150)
-      } else {
-        logCarte('Fin des tentatives invalidateSize().')
+    function mesurer() {
+      const h = mapWrapperRef.current?.getBoundingClientRect().height || 0
+      if (h > 0) {
+        setMapHeightPx(Math.round(h))
+        logCarte(`✅ Hauteur mesurée en pixels : ${Math.round(h)}px`)
       }
     }
 
-    const t = window.setTimeout(tryInvalidate, 80)
+    // Mesure immédiate + une seconde passe après le premier paint (au cas
+    // où la toute première mesure tombe encore avant la stabilisation du
+    // flex), + un écouteur resize pour suivre les rotations d'écran.
+    mesurer()
+    const t = window.setTimeout(mesurer, 150)
+    window.addEventListener('resize', mesurer)
+
     return () => {
-      cancelled = true
       window.clearTimeout(t)
+      window.removeEventListener('resize', mesurer)
       window.removeEventListener('error', surErreur)
       window.removeEventListener('unhandledrejection', surRejetNonGere)
     }
@@ -761,22 +747,28 @@ export default function MobileProspects() {
           )}
         </div>
       ) : (
-        // Hauteur explicite en secours, en plus de flex:1 -- garantit que
-        // Leaflet dispose toujours d'une hauteur non nulle au montage.
-        <div id="cgc-map-conteneur" style={{ flex: 1, minHeight: 320, position: 'relative', paddingBottom: 74 }}>
-          {position && (
+        // Hauteur mesurée en pixels par JS (voir l'effet plus haut) --
+        // remplace le height:100% en cascade qui ne se résolvait jamais
+        // (confirmé par le diagnostic à l'écran : 362×0px en continu).
+        <div ref={mapWrapperRef} id="cgc-map-conteneur" style={{ flex: 1, minHeight: 320, position: 'relative', paddingBottom: 74 }}>
+          {position && mapHeightPx === 0 && (
+            <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.4)', fontSize: 13 }}>
+              Préparation de la carte…
+            </div>
+          )}
+          {position && mapHeightPx > 0 && (
             <MapContainer
               center={[position.lat, position.lng] as any}
               zoom={zoomForRadiusKm(radiusKm)}
               preferCanvas
-              style={{ height: '100%', width: '100%' }}
+              style={{ height: mapHeightPx, width: '100%' }}
               ref={(m: any) => {
                 if (m && !mapRef.current) {
                   mapRef.current = m
                   logCarte('✅ MapContainer monté (ref reçue par Leaflet).')
                   try {
                     const size = m.getSize?.()
-                    logCarte(`Taille interne Leaflet à la ref : ${size ? `${size.x}×${size.y}px` : 'indisponible'}`)
+                    logCarte(`Taille interne Leaflet à la ref : ${size ? `${size.x}×${size.y}px` : 'indisponible'} (hauteur fixée à ${mapHeightPx}px)`)
                   } catch (e: any) {
                     logCarte(`❌ getSize() a levé : ${e?.message || e}`)
                   }
