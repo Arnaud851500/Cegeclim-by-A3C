@@ -277,6 +277,7 @@ export default function MobileProspects() {
   const [loadError, setLoadError] = useState<string | null>(null)
 
   const [filtresOuverts, setFiltresOuverts] = useState(false)
+  const [vue, setVue] = useState<'liste' | 'carte'>('liste')
   const [selected, setSelected] = useState<ProspectRowGeo | null>(null)
   const [statutBrouillon, setStatutBrouillon] = useState<ProspectStatusValue>('')
   const [commentaireBrouillon, setCommentaireBrouillon] = useState('')
@@ -424,10 +425,6 @@ export default function MobileProspects() {
     return () => { cancelled = true }
   }, [position, filtresValides, radiusKm])
 
-  const secteursDisponibles = useMemo(() => {
-    return Array.from(new Set(prospects.map((p) => getSectorLabel(p)))).sort()
-  }, [prospects])
-
   const prospectsFiltres = useMemo(() => {
     return prospects.filter((p) => {
       const sector = getSectorLabel(p)
@@ -527,6 +524,36 @@ export default function MobileProspects() {
           </div>
         </div>
 
+        <div>
+          <div style={filtreTitreStyle}>Secteur / type d'activité</div>
+          <div style={{ display: 'flex', gap: compact ? 6 : 8, flexWrap: 'wrap' }}>
+            {TRACKED_SECTORS.map((sector) => {
+              const actif = secteursActifs.has(sector.label)
+              return (
+                <button
+                  key={sector.label}
+                  type="button"
+                  onClick={() => toggleSecteur(sector.label)}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 6, padding: padBtn, borderRadius: 999,
+                    border: `1px solid ${actif ? sector.color : 'rgba(255,255,255,0.18)'}`,
+                    background: actif ? `${sector.color}33` : 'rgba(255,255,255,0.04)',
+                    color: '#fff', fontSize: fontBtn, fontWeight: 700,
+                  }}
+                >
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: sector.color }} />
+                  {sector.label}
+                </button>
+              )
+            })}
+            {secteursActifs.size > 0 && (
+              <button type="button" onClick={() => setSecteursActifs(new Set())} style={{ padding: padBtn, borderRadius: 999, border: '1px solid rgba(255,255,255,0.18)', background: 'transparent', color: 'rgba(255,255,255,0.6)', fontSize: fontBtn }}>
+                Effacer
+              </button>
+            )}
+          </div>
+        </div>
+
         <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: compact ? 13.5 : 14.5, color: '#fff', fontWeight: 600 }}>
             <input type="checkbox" checked={rgeSeul} onChange={(e) => setRgeSeul(e.target.checked)} style={{ width: compact ? 18 : 20, height: compact ? 18 : 20 }} />
@@ -560,10 +587,6 @@ export default function MobileProspects() {
 
         <BlocFiltresFixes compact={false} />
 
-        <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', lineHeight: 1.5 }}>
-          Le secteur / type d'activité pourra être filtré une fois les résultats chargés, depuis le bouton "Filtres" sur la carte.
-        </div>
-
         <button
           type="button"
           onClick={() => setFiltresValides(true)}
@@ -581,7 +604,7 @@ export default function MobileProspects() {
     )
   }
 
-  // ── Écran 2 : carte ────────────────────────────────────────────────────
+  // ── Écran 2 : résultats (liste par défaut, carte en option) ────────────
   return (
     <div style={{ position: 'relative', flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px' }}>
@@ -600,54 +623,120 @@ export default function MobileProspects() {
           onClick={() => setFiltresOuverts(true)}
           style={{ border: '1px solid rgba(255,255,255,0.18)', background: 'rgba(255,255,255,0.06)', color: '#fff', borderRadius: 10, padding: '7px 12px', fontSize: 12.5, fontWeight: 600 }}
         >
-          ⚙️ Secteur
+          ⚙️ Filtres
         </button>
       </div>
 
-      {/* Hauteur explicite en secours, en plus de flex:1 -- garantit que
-         Leaflet dispose toujours d'une hauteur non nulle au montage. */}
-      <div style={{ flex: 1, minHeight: 320, position: 'relative' }}>
-        {position && (
-          <MapContainer
-            center={[position.lat, position.lng] as any}
-            zoom={zoomForRadiusKm(radiusKm)}
-            preferCanvas
-            style={{ height: '100%', width: '100%' }}
-            ref={(m: any) => { if (m) mapRef.current = m }}
-          >
-            <TileLayer
-              attribution="&copy; OpenStreetMap contributors"
-              url="https://api.thunderforest.com/neighbourhood/{z}/{x}/{y}.png?apikey=3750cd83dca34199969e6b9e2dcdca40"
-            />
-
-            <Circle
+      {vue === 'liste' ? (
+        <div style={{ flex: 1, overflowY: 'auto', padding: '0 14px 90px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {loading ? (
+            <div style={{ padding: '30px 0', textAlign: 'center', fontSize: 13, color: 'rgba(255,255,255,0.4)' }}>Recherche…</div>
+          ) : prospectsFiltres.length === 0 ? (
+            <div style={{ padding: '30px 0', textAlign: 'center', fontSize: 13, color: 'rgba(255,255,255,0.4)' }}>Aucun prospect sur ce périmètre.</div>
+          ) : (
+            [...prospectsFiltres]
+              .sort((a, b) => distanceKmWgs84(position!.lat, position!.lng, a.latEff, a.lonEff) - distanceKmWgs84(position!.lat, position!.lng, b.latEff, b.lonEff))
+              .map((p) => {
+                const sector = getSectorLabel(p)
+                const distance = distanceKmWgs84(position!.lat, position!.lng, p.latEff, p.lonEff)
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => ouvrirDetail(p)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left',
+                      borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)',
+                      padding: '11px 12px',
+                    }}
+                  >
+                    <span style={{ width: 10, height: 10, borderRadius: '50%', background: getSectorColor(sector), flexShrink: 0 }} />
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {p.raison_sociale_affichee || '(sans nom)'}
+                      </div>
+                      <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginTop: 2 }}>
+                        {[sector, p.libelleCommuneEtablissement].filter(Boolean).join(' · ')}
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 12.5, fontWeight: 700, color: '#8FC7DA', flexShrink: 0 }}>{distance} km</div>
+                  </button>
+                )
+              })
+          )}
+        </div>
+      ) : (
+        // Hauteur explicite en secours, en plus de flex:1 -- garantit que
+        // Leaflet dispose toujours d'une hauteur non nulle au montage.
+        <div style={{ flex: 1, minHeight: 320, position: 'relative', paddingBottom: 74 }}>
+          {position && (
+            <MapContainer
               center={[position.lat, position.lng] as any}
-              radius={radiusKm * 1000}
-              pathOptions={{ color: '#0ea5e9', fillColor: '#0ea5e9', fillOpacity: 0.06, weight: 2, dashArray: '6 6' }}
-            />
-            <CircleMarker
-              center={[position.lat, position.lng] as any}
-              radius={8}
-              pathOptions={{ color: '#ffffff', fillColor: '#0ea5e9', fillOpacity: 1, weight: 3 }}
-            />
+              zoom={zoomForRadiusKm(radiusKm)}
+              preferCanvas
+              style={{ height: '100%', width: '100%' }}
+              ref={(m: any) => { if (m) mapRef.current = m }}
+            >
+              <TileLayer
+                attribution="&copy; OpenStreetMap contributors"
+                url="https://api.thunderforest.com/neighbourhood/{z}/{x}/{y}.png?apikey=3750cd83dca34199969e6b9e2dcdca40"
+              />
 
-            {prospectsFiltres.map((p) => {
-              const sector = getSectorLabel(p)
-              return (
-                <CircleMarker
-                  key={p.id}
-                  center={[p.latEff, p.lonEff]}
-                  radius={7}
-                  pathOptions={{ color: '#0f172a', fillColor: getSectorColor(sector), fillOpacity: 0.95, weight: 1.5 }}
-                  eventHandlers={{ click: () => ouvrirDetail(p) }}
-                />
-              )
-            })}
-          </MapContainer>
-        )}
+              <Circle
+                center={[position.lat, position.lng] as any}
+                radius={radiusKm * 1000}
+                pathOptions={{ color: '#0ea5e9', fillColor: '#0ea5e9', fillOpacity: 0.06, weight: 2, dashArray: '6 6' }}
+              />
+              <CircleMarker
+                center={[position.lat, position.lng] as any}
+                radius={8}
+                pathOptions={{ color: '#ffffff', fillColor: '#0ea5e9', fillOpacity: 1, weight: 3 }}
+              />
+
+              {prospectsFiltres.map((p) => {
+                const sector = getSectorLabel(p)
+                return (
+                  <CircleMarker
+                    key={p.id}
+                    center={[p.latEff, p.lonEff]}
+                    radius={7}
+                    pathOptions={{ color: '#0f172a', fillColor: getSectorColor(sector), fillOpacity: 0.95, weight: 1.5 }}
+                    eventHandlers={{ click: () => ouvrirDetail(p) }}
+                  />
+                )
+              })}
+            </MapContainer>
+          )}
+        </div>
+      )}
+
+      {/* ---- Bascule liste / carte, en bas de l'écran ---- */}
+      <div style={{ position: 'absolute', left: 14, right: 14, bottom: 14, display: 'flex', gap: 8, zIndex: 5 }}>
+        <button
+          type="button"
+          onClick={() => setVue('liste')}
+          style={{
+            flex: 1, padding: '13px', borderRadius: 12, border: '1px solid rgba(75,146,172,0.4)',
+            background: vue === 'liste' ? 'rgba(75,146,172,0.5)' : 'rgba(20,26,38,0.92)',
+            color: '#fff', fontSize: 14, fontWeight: 700, backdropFilter: 'blur(6px)',
+          }}
+        >
+          📋 Liste
+        </button>
+        <button
+          type="button"
+          onClick={() => setVue('carte')}
+          style={{
+            flex: 1, padding: '13px', borderRadius: 12, border: '1px solid rgba(75,146,172,0.4)',
+            background: vue === 'carte' ? 'rgba(75,146,172,0.5)' : 'rgba(20,26,38,0.92)',
+            color: '#fff', fontSize: 14, fontWeight: 700, backdropFilter: 'blur(6px)',
+          }}
+        >
+          🗺️ Carte
+        </button>
       </div>
 
-      {/* ---- Tiroir filtres (fixes + secteur) ---- */}
+      {/* ---- Tiroir filtres (rayon, ancienneté, capital social, secteur, RGE, capacité gaz) ---- */}
       {filtresOuverts && (
         <div
           style={{ position: 'fixed', inset: 0, zIndex: 210, background: 'rgba(6,10,18,0.62)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
@@ -661,36 +750,6 @@ export default function MobileProspects() {
             <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Filtres</div>
 
             <BlocFiltresFixes compact />
-
-            <div>
-              <div style={filtreTitreStyle}>Secteur / type d'activité</div>
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                {secteursDisponibles.map((sector) => {
-                  const actif = secteursActifs.has(sector)
-                  return (
-                    <button
-                      key={sector}
-                      type="button"
-                      onClick={() => toggleSecteur(sector)}
-                      style={{
-                        display: 'inline-flex', alignItems: 'center', gap: 6, padding: '7px 12px', borderRadius: 999,
-                        border: `1px solid ${actif ? getSectorColor(sector) : 'rgba(255,255,255,0.18)'}`,
-                        background: actif ? `${getSectorColor(sector)}33` : 'rgba(255,255,255,0.04)',
-                        color: '#fff', fontSize: 12.5, fontWeight: 600,
-                      }}
-                    >
-                      <span style={{ width: 8, height: 8, borderRadius: '50%', background: getSectorColor(sector) }} />
-                      {sector}
-                    </button>
-                  )
-                })}
-                {secteursActifs.size > 0 && (
-                  <button type="button" onClick={() => setSecteursActifs(new Set())} style={{ padding: '7px 12px', borderRadius: 999, border: '1px solid rgba(255,255,255,0.18)', background: 'transparent', color: 'rgba(255,255,255,0.6)', fontSize: 12.5 }}>
-                    Effacer
-                  </button>
-                )}
-              </div>
-            </div>
 
             <button
               type="button"
