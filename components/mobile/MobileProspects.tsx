@@ -301,6 +301,16 @@ export default function MobileProspects() {
   const [prospects, setProspects] = useState<ProspectRowGeo[]>([])
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [diagnosticRecherche, setDiagnosticRecherche] = useState<{
+    position: { lat: number; lng: number }
+    rayonKm: number
+    candidatsBruts: number
+    exclusFerme: number
+    exclusSansCoords: number
+    exclusDistance: number
+    apresFiltrageGeo: number
+  } | null>(null)
+  const [diagnosticRechercheOuvert, setDiagnosticRechercheOuvert] = useState(false)
 
   const [filtresOuverts, setFiltresOuverts] = useState(false)
   const [vue, setVue] = useState<'liste' | 'carte'>('liste')
@@ -508,22 +518,40 @@ export default function MobileProspects() {
           }
         }
 
+        // Diagnostic : compte combien de lignes sont écartées à chaque
+        // étape, pour voir précisément où le total tombe à zéro sans
+        // avoir à deviner. Affiché sur l'écran liste (bouton "🔧
+        // Diagnostic"), comme le panneau déjà présent sur l'écran carte.
+        let exclusFerme = 0
+        let exclusSansCoords = 0
+        let exclusDistance = 0
+
         const rows: ProspectRowGeo[] = []
         for (const r of rawRows) {
-          if (String(r.etatAdministratifUniteLegale || '').trim().toUpperCase() === 'C') continue
+          if (String(r.etatAdministratifUniteLegale || '').trim().toUpperCase() === 'C') { exclusFerme++; continue }
 
           const siret = normalizeSiret(r.siret)
           const estClientCegeclim = siret ? clientsCegeclimParSiret.has(siret) : false
           const representant = siret ? clientsCegeclimParSiret.get(siret) ?? null : null
 
           const coords = coordonneesEffectives(r)
-          if (!coords) continue
+          if (!coords) { exclusSansCoords++; continue }
 
           const dist = distanceKmWgs84(position!.lat, position!.lng, coords.lat, coords.lon)
-          if (dist > radiusKm) continue
+          if (dist > radiusKm) { exclusDistance++; continue }
 
           rows.push({ ...r, latEff: coords.lat, lonEff: coords.lon, estClientCegeclim, representant })
         }
+
+        setDiagnosticRecherche({
+          position: { lat: position!.lat, lng: position!.lng },
+          rayonKm: radiusKm,
+          candidatsBruts: rawRows.length,
+          exclusFerme,
+          exclusSansCoords,
+          exclusDistance,
+          apresFiltrageGeo: rows.length,
+        })
 
         setProspects(rows)
       } catch (e: any) {
@@ -849,7 +877,48 @@ export default function MobileProspects() {
         >
           ⚙️ Filtres
         </button>
+        <button
+          type="button"
+          onClick={() => setDiagnosticRechercheOuvert(true)}
+          style={{ border: '1px solid rgba(255,255,255,0.18)', background: 'transparent', color: 'rgba(255,255,255,0.5)', borderRadius: 10, padding: '7px 9px', fontSize: 12.5 }}
+        >
+          🔧
+        </button>
       </div>
+
+      {diagnosticRechercheOuvert && (
+        <div
+          style={{ position: 'fixed', inset: 0, zIndex: 2250, background: 'rgba(6,10,18,0.85)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
+          onClick={() => setDiagnosticRechercheOuvert(false)}
+        >
+          <div
+            style={{ width: '100%', maxWidth: 520, background: '#0B1220', borderTopLeftRadius: 18, borderTopRightRadius: 18, border: '1px solid rgba(255,255,255,0.12)', padding: '14px 16px 20px', display: 'flex', flexDirection: 'column', gap: 8 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: '#fff' }}>Diagnostic recherche</div>
+              <button type="button" onClick={() => setDiagnosticRechercheOuvert(false)} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.5)', fontSize: 22, lineHeight: 1 }}>✕</button>
+            </div>
+            <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginBottom: 4 }}>
+              Fais une capture d'écran de ce panneau et envoie-la.
+            </div>
+            {!diagnosticRecherche ? (
+              <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: 12.5 }}>Aucune recherche effectuée pour l'instant.</div>
+            ) : (
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: '#8fd4a8', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <div>Position utilisée : {diagnosticRecherche.position.lat.toFixed(5)}, {diagnosticRecherche.position.lng.toFixed(5)}</div>
+                <div>Rayon demandé : {diagnosticRecherche.rayonKm} km</div>
+                <div>Candidats bruts (boîte Lambert93) : {diagnosticRecherche.candidatsBruts}</div>
+                <div>Écartés (entreprise fermée) : {diagnosticRecherche.exclusFerme}</div>
+                <div>Écartés (pas de coordonnées exploitables) : {diagnosticRecherche.exclusSansCoords}</div>
+                <div>Écartés (distance exacte &gt; rayon) : {diagnosticRecherche.exclusDistance}</div>
+                <div style={{ color: '#fff', fontWeight: 700 }}>Restants après filtrage géo : {diagnosticRecherche.apresFiltrageGeo}</div>
+                <div>Après filtres actifs (Client/Prospect/secteur/RGE...) : {prospectsFiltres.length}</div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {vue === 'liste' ? (
         <div style={{ flex: 1, overflowY: 'auto', padding: '0 14px 90px', display: 'flex', flexDirection: 'column', gap: 8 }}>
