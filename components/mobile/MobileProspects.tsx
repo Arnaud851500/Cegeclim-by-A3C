@@ -9,6 +9,7 @@ import dynamic from 'next/dynamic'
 // globalement ailleurs dans l'app ; ce fichier mobile ne l'avait jamais.
 import 'leaflet/dist/leaflet.css'
 import { supabase } from '@/lib/supabaseClient'
+import { NavigationChoiceSheet, PhoneChoiceSheet } from './MobileActionSheets'
 
 // ─────────────────────────────────────────────────────────────────────────
 // Version mobile de "Prospects autour de moi", branchée sur les mêmes
@@ -39,6 +40,7 @@ type ProspectRow = {
   naf_libelle_traduit: string | null
   codePostalEtablissement: string | null
   libelleCommuneEtablissement: string | null
+  adresse_complete: string | null
   latitude: number | null
   longitude: number | null
   coordonneeLambertAbscisseEtablissement: number | null
@@ -195,6 +197,11 @@ function formatDateFr(value: string | null | undefined): string {
   return d.toLocaleDateString('fr-FR')
 }
 
+function formatAdresseComplete(row: Pick<ProspectRow, 'adresse_complete' | 'codePostalEtablissement' | 'libelleCommuneEtablissement'>): string {
+  if (row.adresse_complete && row.adresse_complete.trim()) return row.adresse_complete.trim()
+  return [row.codePostalEtablissement, row.libelleCommuneEtablissement].filter(Boolean).join(' ')
+}
+
 // ── Projection Lambert93 (RGF93) <-> WGS84 ─────────────────────────────
 const LAMBERT_N = 0.725607765053267
 const LAMBERT_C = 11754255.426096
@@ -282,8 +289,20 @@ export default function MobileProspects() {
   const [statutBrouillon, setStatutBrouillon] = useState<ProspectStatusValue>('')
   const [commentaireBrouillon, setCommentaireBrouillon] = useState('')
   const [saving, setSaving] = useState(false)
+  const [navigationVers, setNavigationVers] = useState<{ adresse: string; lat?: number | null; lon?: number | null } | null>(null)
+  const [appelVers, setAppelVers] = useState<string | null>(null)
 
   const mapRef = useRef<any>(null)
+  // Journal de diagnostic affiché à l'écran (bouton "🔧 Diagnostic" sous la
+  // carte) -- après deux correctifs à l'aveugle sans succès (CSS manquant,
+  // puis invalidateSize mal déclenché), la seule façon de vraiment
+  // résoudre le problème est de voir l'erreur réelle sans debug distant.
+  const [journalCarte, setJournalCarte] = useState<string[]>([])
+  const [diagnosticOuvert, setDiagnosticOuvert] = useState(false)
+  function logCarte(message: string) {
+    const ts = new Date().toLocaleTimeString('fr-FR')
+    setJournalCarte((prev) => [...prev.slice(-29), `${ts}  ${message}`])
+  }
 
   function localiser() {
     if (typeof window === 'undefined' || !navigator.geolocation) {
@@ -341,15 +360,42 @@ export default function MobileProspects() {
     let cancelled = false
     let attempts = 0
 
+    logCarte('Écran carte affiché -- début du diagnostic')
+
+    // Capture toute erreur JS ou promesse rejetée pendant la durée
+    // d'affichage de la carte -- c'est le seul moyen d'avoir la VRAIE
+    // erreur sans brancher un Mac en debug distant.
+    function surErreur(e: ErrorEvent) {
+      logCarte(`❌ Erreur JS : ${e.message} (${e.filename?.split('/').pop() || '?'}:${e.lineno})`)
+    }
+    function surRejetNonGere(e: PromiseRejectionEvent) {
+      logCarte(`❌ Promesse rejetée : ${String(e.reason?.message || e.reason || '?')}`)
+    }
+    window.addEventListener('error', surErreur)
+    window.addEventListener('unhandledrejection', surRejetNonGere)
+
     function tryInvalidate() {
       if (cancelled) return
       const map = mapRef.current
+      const conteneur = document.getElementById('cgc-map-conteneur')
+      const rect = conteneur?.getBoundingClientRect()
+      if (attempts === 0 || attempts === 4 || attempts === 9) {
+        logCarte(
+          `Tentative ${attempts + 1}/10 -- mapRef=${map ? 'OK' : 'null'}, conteneur=${rect ? `${Math.round(rect.width)}×${Math.round(rect.height)}px` : 'introuvable'}`,
+        )
+      }
       if (map && typeof map.invalidateSize === 'function') {
-        try { map.invalidateSize() } catch {}
+        try {
+          map.invalidateSize()
+        } catch (e: any) {
+          logCarte(`❌ invalidateSize() a levé une exception : ${e?.message || e}`)
+        }
       }
       attempts += 1
       if (attempts < 10) {
         window.setTimeout(tryInvalidate, 150)
+      } else {
+        logCarte('Fin des tentatives invalidateSize().')
       }
     }
 
@@ -357,6 +403,8 @@ export default function MobileProspects() {
     return () => {
       cancelled = true
       window.clearTimeout(t)
+      window.removeEventListener('error', surErreur)
+      window.removeEventListener('unhandledrejection', surRejetNonGere)
     }
   }, [vue, filtresValides, position])
 
@@ -374,7 +422,7 @@ export default function MobileProspects() {
         const { data, error } = await supabase
           .from('clients')
           .select(
-            'id, siret, raison_sociale_affichee, activitePrincipaleEtablissement, naf_libelle_traduit, codePostalEtablissement, libelleCommuneEtablissement, latitude, longitude, coordonneeLambertAbscisseEtablissement, coordonneeLambertOrdonneeEtablissement, telephone, email, nom_dirigeant, prospect_status, prospect_comment, present_dans_cegeclim, dateCreationEtablissement, etatAdministratifUniteLegale, rge, capacite_gaz, capital_social',
+            'id, siret, raison_sociale_affichee, activitePrincipaleEtablissement, naf_libelle_traduit, codePostalEtablissement, libelleCommuneEtablissement, adresse_complete, latitude, longitude, coordonneeLambertAbscisseEtablissement, coordonneeLambertOrdonneeEtablissement, telephone, email, nom_dirigeant, prospect_status, prospect_comment, present_dans_cegeclim, dateCreationEtablissement, etatAdministratifUniteLegale, rge, capacite_gaz, capital_social',
           )
           .not('coordonneeLambertAbscisseEtablissement', 'is', null)
           .not('coordonneeLambertOrdonneeEtablissement', 'is', null)
@@ -665,27 +713,49 @@ export default function MobileProspects() {
                 const sector = getSectorLabel(p)
                 const distance = distanceKmWgs84(position!.lat, position!.lng, p.latEff, p.lonEff)
                 return (
-                  <button
+                  <div
                     key={p.id}
-                    type="button"
-                    onClick={() => ouvrirDetail(p)}
                     style={{
-                      display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left',
+                      display: 'flex', alignItems: 'center', gap: 6,
                       borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)',
                       padding: '11px 12px',
                     }}
                   >
-                    <span style={{ width: 10, height: 10, borderRadius: '50%', background: getSectorColor(sector), flexShrink: 0 }} />
-                    <div style={{ minWidth: 0, flex: 1 }}>
-                      <div style={{ fontSize: 14, fontWeight: 700, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {p.raison_sociale_affichee || '(sans nom)'}
+                    <button
+                      type="button"
+                      onClick={() => ouvrirDetail(p)}
+                      style={{ display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left', flex: 1, minWidth: 0, background: 'none', border: 'none', padding: 0 }}
+                    >
+                      <span style={{ width: 10, height: 10, borderRadius: '50%', background: getSectorColor(sector), flexShrink: 0 }} />
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {p.raison_sociale_affichee || '(sans nom)'}
+                        </div>
+                        <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {formatAdresseComplete(p) || sector}
+                        </div>
                       </div>
-                      <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginTop: 2 }}>
-                        {[sector, p.libelleCommuneEtablissement].filter(Boolean).join(' · ')}
-                      </div>
-                    </div>
-                    <div style={{ fontSize: 12.5, fontWeight: 700, color: '#8FC7DA', flexShrink: 0 }}>{distance} km</div>
-                  </button>
+                    </button>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: '#8FC7DA', flexShrink: 0 }}>{distance} km</div>
+                    <button
+                      type="button"
+                      onClick={() => setNavigationVers({ adresse: formatAdresseComplete(p), lat: p.latEff, lon: p.lonEff })}
+                      aria-label="Naviguer vers"
+                      style={{ flexShrink: 0, width: 32, height: 32, borderRadius: 8, border: '1px solid rgba(75,146,172,0.4)', background: 'rgba(75,146,172,0.14)', fontSize: 15 }}
+                    >
+                      📍
+                    </button>
+                    {p.telephone && (
+                      <button
+                        type="button"
+                        onClick={() => setAppelVers(p.telephone as string)}
+                        aria-label="Appeler"
+                        style={{ flexShrink: 0, width: 32, height: 32, borderRadius: 8, border: '1px solid rgba(63,145,66,0.4)', background: 'rgba(63,145,66,0.14)', fontSize: 15 }}
+                      >
+                        📞
+                      </button>
+                    )}
+                  </div>
                 )
               })
           )}
@@ -693,18 +763,36 @@ export default function MobileProspects() {
       ) : (
         // Hauteur explicite en secours, en plus de flex:1 -- garantit que
         // Leaflet dispose toujours d'une hauteur non nulle au montage.
-        <div style={{ flex: 1, minHeight: 320, position: 'relative', paddingBottom: 74 }}>
+        <div id="cgc-map-conteneur" style={{ flex: 1, minHeight: 320, position: 'relative', paddingBottom: 74 }}>
           {position && (
             <MapContainer
               center={[position.lat, position.lng] as any}
               zoom={zoomForRadiusKm(radiusKm)}
               preferCanvas
               style={{ height: '100%', width: '100%' }}
-              ref={(m: any) => { if (m) mapRef.current = m }}
+              ref={(m: any) => {
+                if (m && !mapRef.current) {
+                  mapRef.current = m
+                  logCarte('✅ MapContainer monté (ref reçue par Leaflet).')
+                  try {
+                    const size = m.getSize?.()
+                    logCarte(`Taille interne Leaflet à la ref : ${size ? `${size.x}×${size.y}px` : 'indisponible'}`)
+                  } catch (e: any) {
+                    logCarte(`❌ getSize() a levé : ${e?.message || e}`)
+                  }
+                } else if (m) {
+                  mapRef.current = m
+                }
+              }}
+              whenReady={() => logCarte('✅ whenReady déclenché par Leaflet (carte prête côté lib).')}
             >
               <TileLayer
                 attribution="&copy; OpenStreetMap contributors"
                 url="https://api.thunderforest.com/neighbourhood/{z}/{x}/{y}.png?apikey=3750cd83dca34199969e6b9e2dcdca40"
+                eventHandlers={{
+                  tileerror: (e: any) => logCarte(`❌ Erreur de chargement tuile : ${e?.error?.message || e?.error || 'inconnue'}`),
+                  tileload: () => logCarte('✅ Au moins une tuile a chargé avec succès.'),
+                }}
               />
 
               <Circle
@@ -761,6 +849,48 @@ export default function MobileProspects() {
         </button>
       </div>
 
+      {/* ---- Diagnostic carte (temporaire) : journal visible à l'écran,
+         pour voir enfin l'erreur réelle sans debug distant sur Mac. ---- */}
+      {vue === 'carte' && (
+        <button
+          type="button"
+          onClick={() => setDiagnosticOuvert((v) => !v)}
+          style={{
+            position: 'absolute', right: 14, bottom: 76, zIndex: 6,
+            padding: '6px 10px', borderRadius: 999, border: '1px solid rgba(255,255,255,0.2)',
+            background: 'rgba(20,26,38,0.9)', color: 'rgba(255,255,255,0.7)', fontSize: 11, fontWeight: 600,
+          }}
+        >
+          🔧 Diagnostic
+        </button>
+      )}
+      {diagnosticOuvert && (
+        <div
+          style={{ position: 'fixed', inset: 0, zIndex: 250, background: 'rgba(6,10,18,0.85)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
+          onClick={() => setDiagnosticOuvert(false)}
+        >
+          <div
+            style={{ width: '100%', maxWidth: 520, maxHeight: '70vh', background: '#0B1220', borderTopLeftRadius: 18, borderTopRightRadius: 18, border: '1px solid rgba(255,255,255,0.12)', padding: '14px 16px 20px', display: 'flex', flexDirection: 'column', gap: 8 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: '#fff' }}>Diagnostic carte</div>
+              <button type="button" onClick={() => setDiagnosticOuvert(false)} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.5)', fontSize: 22, lineHeight: 1 }}>✕</button>
+            </div>
+            <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginBottom: 4 }}>
+              Fais une capture d'écran de ce panneau et envoie-la : ça montre exactement ce qui bloque.
+            </div>
+            <div style={{ overflowY: 'auto', flex: 1, fontFamily: 'var(--font-mono)', fontSize: 11, color: '#8fd4a8', display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {journalCarte.length === 0 ? (
+                <div style={{ color: 'rgba(255,255,255,0.4)' }}>Aucune entrée pour l'instant…</div>
+              ) : (
+                journalCarte.map((ligne, i) => <div key={i}>{ligne}</div>)
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ---- Tiroir filtres (rayon, ancienneté, capital social, secteur, RGE, capacité gaz) ---- */}
       {filtresOuverts && (
         <div
@@ -803,10 +933,34 @@ export default function MobileProspects() {
             <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>{getSectorLabel(selected)}</div>
 
             <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <button
+                type="button"
+                onClick={() => setNavigationVers({ adresse: formatAdresseComplete(selected), lat: selected.latEff, lon: selected.lonEff })}
+                style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', textAlign: 'left', borderRadius: 10, border: '1px solid rgba(75,146,172,0.3)', background: 'rgba(75,146,172,0.1)', padding: '8px 10px' }}
+              >
+                <div>
+                  <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}>Adresse</div>
+                  <div style={{ fontSize: 14, color: '#fff', fontWeight: 600, marginTop: 3 }}>{formatAdresseComplete(selected) || '—'}</div>
+                </div>
+                <span style={{ fontSize: 18, flexShrink: 0, marginLeft: 8 }}>📍</span>
+              </button>
+
+              {selected.telephone && (
+                <button
+                  type="button"
+                  onClick={() => setAppelVers(selected.telephone as string)}
+                  style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', textAlign: 'left', borderRadius: 10, border: '1px solid rgba(63,145,66,0.3)', background: 'rgba(63,145,66,0.1)', padding: '8px 10px' }}
+                >
+                  <div>
+                    <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}>Téléphone</div>
+                    <div style={{ fontSize: 14, color: '#fff', fontWeight: 600, marginTop: 3 }}>{selected.telephone}</div>
+                  </div>
+                  <span style={{ fontSize: 18, flexShrink: 0, marginLeft: 8 }}>📞</span>
+                </button>
+              )}
+
               {[
                 ['SIRET', selected.siret || '—'],
-                ['Adresse', [selected.codePostalEtablissement, selected.libelleCommuneEtablissement].filter(Boolean).join(' ') || '—'],
-                ['Téléphone', selected.telephone || '—'],
                 ['Email', selected.email || '—'],
                 ['Dirigeant', selected.nom_dirigeant || '—'],
                 ['Créée le', formatDateFr(selected.dateCreationEtablissement)],
@@ -865,6 +1019,11 @@ export default function MobileProspects() {
           </div>
         </div>
       )}
+
+      {navigationVers && (
+        <NavigationChoiceSheet adresse={navigationVers.adresse} lat={navigationVers.lat} lon={navigationVers.lon} onClose={() => setNavigationVers(null)} />
+      )}
+      {appelVers && <PhoneChoiceSheet telephone={appelVers} onClose={() => setAppelVers(null)} />}
     </div>
   )
 }

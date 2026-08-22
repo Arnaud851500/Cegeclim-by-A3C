@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { formatMoney } from '@/app/focus_mensuel/page'
 import MobileDetailSheet, { type DetailField } from './MobileDetailSheet'
+import { NavigationChoiceSheet, PhoneChoiceSheet } from './MobileActionSheets'
 import VoiceReportButtons from './VoiceReportButtons'
 import MobileTaskDetailSheet, { type TaskRow } from './MobileTaskDetailSheet'
 
@@ -223,6 +224,7 @@ type ContactRow = {
   phone: string
   mail: string
 }
+type AdresseClient = { ligne1: string; codePostal: string; ville: string; telephone: string } | null
 type ClientDetail = {
   commandes: DocAgrege[] // CDC
   preparations: DocAgrege[] // PL
@@ -234,6 +236,7 @@ type ClientDetail = {
   caYtd: number
   caYtdN1: number
   contacts: ContactRow[]
+  adresse: AdresseClient
   derniereVisite: VisiteEvent | null
   prochaineVisite: VisiteEvent | null
   devisYtdN1: number
@@ -385,7 +388,7 @@ export default function MobileClients() {
 
       const [
         activiteRes, devisRes, actionsRes, monthRes,
-        fluxNRes, fluxN1Res, partnerRes, contactsRes,
+        fluxNRes, fluxN1Res, partnerRes, contactsRes, adresseRes,
       ] = await Promise.all([
         // CDC + PL + BL + BR en une seule requête (mêmes colonnes, types
         // filtrés) -- agrégation par document faite ensuite côté client.
@@ -438,6 +441,12 @@ export default function MobileClients() {
           .not('reference', 'ilike', '%-liv')
           .order('last_name', { ascending: true })
           .limit(50),
+        // Adresse du siège (SAGE) -- pour le badge "naviguer vers".
+        supabase
+          .from('ref_tiers')
+          .select('adresse,complement_adresse,code_postal,ville,telephone')
+          .eq('numero', client.numero)
+          .maybeSingle(),
       ])
 
       if (activiteRes.error) loadErrors.push(activiteRes.error.message)
@@ -472,6 +481,16 @@ export default function MobileClients() {
         phone: parseFirstJsonValue(r.phone),
         mail: parseFirstJsonValue(r.mail),
       }))
+
+      const adresseRow: any = adresseRes && !('error' in adresseRes && adresseRes.error) ? adresseRes.data : null
+      const adresse: AdresseClient = adresseRow && safeText(adresseRow.adresse)
+        ? {
+            ligne1: [safeText(adresseRow.adresse), safeText(adresseRow.complement_adresse)].filter(Boolean).join(', '),
+            codePostal: safeText(adresseRow.code_postal),
+            ville: safeText(adresseRow.ville),
+            telephone: safeText(adresseRow.telephone),
+          }
+        : null
 
       let devisYtdN1 = 0
       if (monthRes.error) {
@@ -543,6 +562,7 @@ export default function MobileClients() {
         caYtd,
         caYtdN1,
         contacts,
+        adresse,
         derniereVisite,
         prochaineVisite,
         devisYtdN1,
@@ -552,7 +572,7 @@ export default function MobileClients() {
       console.error('[MobileClients] erreur chargement fiche client', e)
       setDetail({
         commandes: [], preparations: [], livraisons: [], retours: [], devis: [], actions: [],
-        blYtd: 0, caYtd: 0, caYtdN1: 0, contacts: [], derniereVisite: null, prochaineVisite: null, devisYtdN1: 0,
+        blYtd: 0, caYtd: 0, caYtdN1: 0, contacts: [], adresse: null, derniereVisite: null, prochaineVisite: null, devisYtdN1: 0,
         loadErrors: [e instanceof Error ? e.message : String(e)],
       })
     } finally {
@@ -747,6 +767,9 @@ function ClientDetailScreen({
 }) {
   const [openDetail, setOpenDetail] = useState<{ title: string; subtitle?: string; fields: DetailField[]; footer?: React.ReactNode } | null>(null)
   const [openTask, setOpenTask] = useState<TaskRow | null>(null)
+  const [contactsOuverts, setContactsOuverts] = useState(false)
+  const [navigationVers, setNavigationVers] = useState<{ adresse: string; lat?: number | null; lon?: number | null } | null>(null)
+  const [appelVers, setAppelVers] = useState<string | null>(null)
 
   function openActionDetail(a: ActionRow) {
     setOpenTask({
@@ -776,17 +799,7 @@ function ClientDetailScreen({
   }
 
   function openContactsDetail() {
-    const contacts = detail?.contacts || []
-    setOpenDetail({
-      title: 'Contacts',
-      subtitle: client.nom || client.numero,
-      fields: contacts.length > 0
-        ? contacts.map((c) => ({
-            label: c.jobTitle ? `${c.nom} (${c.jobTitle})` : c.nom,
-            value: [c.phone, c.mail].filter(Boolean).join(' · ') || '—',
-          }))
-        : [{ label: 'Aucun contact', value: '—' }],
-    })
+    setContactsOuverts(true)
   }
 
   function openVisiteDetail(v: VisiteEvent) {
@@ -848,6 +861,21 @@ function ClientDetailScreen({
                 }}
               >
                 👤 {detail.contacts.length}
+              </button>
+            )}
+            {!loading && detail && detail.adresse && (
+              <button
+                onClick={() => setNavigationVers({
+                  adresse: [detail.adresse!.ligne1, detail.adresse!.codePostal, detail.adresse!.ville].filter(Boolean).join(', '),
+                })}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4, borderRadius: 999,
+                  border: '1px solid rgba(75,146,172,0.3)', background: 'rgba(75,146,172,0.12)',
+                  color: '#8FC7DA', fontSize: 11.5, fontWeight: 600, padding: '3px 9px',
+                  cursor: 'pointer',
+                }}
+              >
+                📍 Adresse
               </button>
             )}
           </div>
@@ -946,6 +974,69 @@ function ClientDetailScreen({
           onSaved={onActionSaved}
         />
       )}
+
+      {contactsOuverts && (
+        <div
+          style={{ position: 'fixed', inset: 0, zIndex: 240, background: 'rgba(6,10,18,0.62)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
+          onClick={() => setContactsOuverts(false)}
+        >
+          <div
+            style={{ width: '100%', maxWidth: 480, maxHeight: '80vh', overflowY: 'auto', background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.08)', padding: '12px 18px 26px', display: 'flex', flexDirection: 'column', gap: 10 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 6px' }} />
+            <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Contacts</div>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', marginBottom: 4 }}>{client.nom || client.numero}</div>
+
+            {(detail?.contacts || []).length === 0 && (
+              <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', padding: '10px 0' }}>Aucun contact.</div>
+            )}
+
+            {(detail?.contacts || []).map((c) => (
+              <div key={c.id} style={{ borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={{ fontSize: 14.5, fontWeight: 700, color: '#fff' }}>
+                  {c.nom}{c.jobTitle ? <span style={{ fontWeight: 400, color: 'rgba(255,255,255,0.5)' }}> — {c.jobTitle}</span> : null}
+                </div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {c.phone && (
+                    <button
+                      type="button"
+                      onClick={() => setAppelVers(c.phone)}
+                      style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 11px', borderRadius: 999, border: '1px solid rgba(63,145,66,0.35)', background: 'rgba(63,145,66,0.12)', color: '#8fd4a8', fontSize: 12.5, fontWeight: 600 }}
+                    >
+                      📞 {c.phone}
+                    </button>
+                  )}
+                  {c.mail && (
+                    <a
+                      href={`mailto:${c.mail}`}
+                      style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 11px', borderRadius: 999, border: '1px solid rgba(75,146,172,0.35)', background: 'rgba(75,146,172,0.12)', color: '#8FC7DA', fontSize: 12.5, fontWeight: 600, textDecoration: 'none' }}
+                    >
+                      ✉️ {c.mail}
+                    </a>
+                  )}
+                  {!c.phone && !c.mail && (
+                    <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.35)' }}>Pas de coordonnées</span>
+                  )}
+                </div>
+              </div>
+            ))}
+
+            <button
+              type="button"
+              onClick={() => setContactsOuverts(false)}
+              style={{ marginTop: 8, padding: '12px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: 'transparent', color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: 600 }}
+            >
+              Fermer
+            </button>
+          </div>
+        </div>
+      )}
+
+      {navigationVers && (
+        <NavigationChoiceSheet adresse={navigationVers.adresse} lat={navigationVers.lat} lon={navigationVers.lon} onClose={() => setNavigationVers(null)} />
+      )}
+      {appelVers && <PhoneChoiceSheet telephone={appelVers} onClose={() => setAppelVers(null)} />}
     </div>
   )
 }

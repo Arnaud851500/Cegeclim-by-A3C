@@ -1,9 +1,11 @@
 'use client'
 
 import { useState } from 'react'
+import { supabase } from '@/lib/supabaseClient'
 import MobileListSheet, { type ListSheetItem } from './MobileListSheet'
 import MobileDetailSheet, { type DetailField } from './MobileDetailSheet'
 import MobileTaskDetailSheet, { type TaskRow } from './MobileTaskDetailSheet'
+import VoiceReportButtons from './VoiceReportButtons'
 
 export interface AlertDetailItem {
   label: string
@@ -82,11 +84,21 @@ export default function MobileAlertes({
   loading,
   fetchTodoList,
   fetchCerfaList,
+  fetchCdcAvant2026List,
+  fetchFraisPortList,
+  fetchCapaciteGazList,
+  userEmail,
+  userName,
 }: {
   detail: AlertDetailItem[]
   loading: boolean
   fetchTodoList: () => Promise<TodoRow[]>
   fetchCerfaList: () => Promise<Record<string, any>[]>
+  fetchCdcAvant2026List: () => Promise<Record<string, any>[]>
+  fetchFraisPortList: () => Promise<Record<string, any>[]>
+  fetchCapaciteGazList: () => Promise<Record<string, any>[]>
+  userEmail: string
+  userName: string
 }) {
   const active = detail.filter((d) => d.count > 0)
 
@@ -95,6 +107,11 @@ export default function MobileAlertes({
   const [openDetail, setOpenDetail] = useState<{ title: string; subtitle?: string; fields: DetailField[] } | null>(null)
   const [openTask, setOpenTask] = useState<TaskRow | null>(null)
   const [todoRows, setTodoRows] = useState<TodoRow[]>([])
+  const [ajoutMode, setAjoutMode] = useState<'menu' | 'manuel' | 'vocal' | null>(null)
+  const [nouvelleDescription, setNouvelleDescription] = useState('')
+  const [nouvelleEcheance, setNouvelleEcheance] = useState('')
+  const [ajoutEnCours, setAjoutEnCours] = useState(false)
+  const [ajoutErreur, setAjoutErreur] = useState('')
 
   function buildTodoItems(rows: TodoRow[]): ListSheetItem[] {
     return rows.map((r) => ({
@@ -117,6 +134,43 @@ export default function MobileAlertes({
     setListLoading(false)
     setTodoRows(rows)
     setListOpen({ title: 'À faire', items: buildTodoItems(rows) })
+  }
+
+  /** Recharge la liste après un ajout (manuel ou vocal), sans fermer le
+   * tiroir "À faire" qui reste ouvert derrière le panneau d'ajout. */
+  async function rafraichirApresAjout() {
+    setListLoading(true)
+    const rows = await fetchTodoList()
+    setListLoading(false)
+    setTodoRows(rows)
+    setListOpen({ title: 'À faire', items: buildTodoItems(rows) })
+  }
+
+  async function creerTacheManuelle() {
+    const description = nouvelleDescription.trim()
+    if (!description) {
+      setAjoutErreur('Décris la tâche avant de valider.')
+      return
+    }
+    setAjoutEnCours(true)
+    setAjoutErreur('')
+    try {
+      const { error } = await supabase.from('todo_actions').insert({
+        description_action: description,
+        due_date: nouvelleEcheance || null,
+        status: 'A faire',
+        assigned_to: userEmail || userName || null,
+      })
+      if (error) throw error
+      setNouvelleDescription('')
+      setNouvelleEcheance('')
+      setAjoutMode(null)
+      await rafraichirApresAjout()
+    } catch (e: any) {
+      setAjoutErreur(e?.message || "Erreur lors de la création de la tâche.")
+    } finally {
+      setAjoutEnCours(false)
+    }
   }
 
   // Mise à jour optimiste : après édition d'une tâche, on met à jour la
@@ -169,9 +223,127 @@ export default function MobileAlertes({
     })
   }
 
+  async function openCdcDrawer() {
+    setListOpen({ title: 'CDC < 2026', items: [] })
+    setListLoading(true)
+    const rows = await fetchCdcAvant2026List()
+    setListLoading(false)
+    setListOpen({
+      title: 'CDC < 2026',
+      items: rows.map((row, i) => {
+        const numeroDocument = safeText(pick(row, ['numero_document']))
+        const numeroTiers = safeText(pick(row, ['numero_tiers']))
+        const agence = safeText(pick(row, ['agence']))
+        const representant = safeText(pick(row, ['representant']))
+        const dateLivraison = pick(row, ['date_livraison'])
+        const moisLivraison = safeText(pick(row, ['mois_livraison']))
+
+        return {
+          id: numeroDocument || String(i),
+          primary: numeroDocument || '(sans numéro)',
+          secondary: [numeroTiers && `Client ${numeroTiers}`, agence].filter(Boolean).join(' · '),
+          trailing: dateLivraison ? formatDateFr(dateLivraison) : moisLivraison,
+          onClick: () =>
+            setOpenDetail({
+              title: numeroDocument || '(sans numéro)',
+              subtitle: 'CDC avec livraison avant 2026',
+              fields: [
+                { label: 'Client', value: numeroTiers },
+                { label: 'Date de livraison', value: dateLivraison ? formatDateFr(dateLivraison) : moisLivraison },
+                { label: 'Agence', value: agence },
+                { label: 'Représentant', value: representant },
+              ],
+            }),
+        }
+      }),
+    })
+  }
+
+  async function openFraisPortDrawer() {
+    setListOpen({ title: 'Frais de port', items: [] })
+    setListLoading(true)
+    const rows = await fetchFraisPortList()
+    setListLoading(false)
+    setListOpen({
+      title: 'Frais de port',
+      items: rows.map((row, i) => {
+        const agences = safeText(pick(row, ['agences']))
+        const representants = safeText(pick(row, ['representants']))
+        const statut = safeText(pick(row, ['statut_groupe']))
+        const nbBlASupprimer = Number(row.nb_bl_a_supprimer || 0)
+        const nbActions = Number(row.nb_actions || 0)
+
+        const statutLabel = statut === 'FRAIS_PORT_MANQUANT' ? 'Frais de port manquant' : statut || 'À vérifier'
+
+        return {
+          id: String(i),
+          primary: agences || '(agence non renseignée)',
+          secondary: representants,
+          trailing: statutLabel,
+          onClick: () =>
+            setOpenDetail({
+              title: agences || '(agence non renseignée)',
+              subtitle: 'Contrôle frais de port',
+              fields: [
+                { label: 'Représentant(s)', value: representants },
+                { label: 'Statut', value: statutLabel },
+                { label: 'BL à supprimer', value: String(nbBlASupprimer) },
+                { label: "Nombre d'actions", value: String(nbActions) },
+              ],
+            }),
+        }
+      }),
+    })
+  }
+
+  async function openCapaciteGazDrawer() {
+    setListOpen({ title: 'Capacité gaz', items: [] })
+    setListLoading(true)
+    const rows = await fetchCapaciteGazList()
+    setListLoading(false)
+    setListOpen({
+      title: 'Capacité gaz',
+      items: rows.map((row, i) => {
+        const numeroTiers = safeText(pick(row, ['numero_tiers']))
+        const designation = safeText(pick(row, ['designation']))
+        const agence = safeText(pick(row, ['agence', 'agence_rattachement', 'agence_collaborateur']))
+        const representant = safeText(pick(row, ['representant']))
+        const dateValidite = pick(row, ['date_validite_client', 'date_validite'])
+        const alertStatus = safeText(pick(row, ['alert_status']))
+        const joursEcart = Number(row.jours_ecart || 0)
+        const siret = safeText(pick(row, ['siret']))
+
+        const statutLabel = alertStatus.toLowerCase() === 'expired' ? 'Expirée' : `Expire dans ${joursEcart} j`
+
+        return {
+          id: numeroTiers || String(i),
+          primary: designation || numeroTiers || '(client)',
+          secondary: numeroTiers ? `Client ${numeroTiers}` : '',
+          trailing: statutLabel,
+          onClick: () =>
+            setOpenDetail({
+              title: designation || '(client)',
+              subtitle: 'Capacité gaz',
+              fields: [
+                { label: 'Client', value: numeroTiers },
+                { label: 'Date de validité', value: dateValidite ? formatDateFr(dateValidite) : '' },
+                { label: 'Statut', value: statutLabel },
+                { label: 'Agence', value: agence },
+                { label: 'Représentant', value: representant },
+                { label: 'SIRET', value: siret },
+              ],
+            }),
+        }
+      }),
+    })
+  }
+
   function handleOpen(label: string) {
     if (label === 'À faire') void openTodoDrawer()
     else if (label === 'CERFA à régulariser') void openCerfaDrawer()
+    else if (label === 'CDC < 2026') void openCdcDrawer()
+    else if (label === 'Frais de port') void openFraisPortDrawer()
+    else if (label === 'Capacité gaz') void openCapaciteGazDrawer()
   }
 
   return (
@@ -219,6 +391,117 @@ export default function MobileAlertes({
           loading={listLoading}
           onClose={() => setListOpen(null)}
         />
+      )}
+
+      {/* ---- Bouton flottant "Ajouter", visible au-dessus du tiroir "À faire" ---- */}
+      {listOpen?.title === 'À faire' && !ajoutMode && (
+        <button
+          type="button"
+          onClick={() => { setAjoutErreur(''); setAjoutMode('menu') }}
+          aria-label="Ajouter une tâche"
+          style={{
+            position: 'fixed', right: 20, bottom: 28, zIndex: 245,
+            width: 56, height: 56, borderRadius: '50%', border: 'none',
+            background: '#A6A181', color: '#141A26', fontSize: 28, fontWeight: 700,
+            boxShadow: '0 4px 14px rgba(0,0,0,0.4)', lineHeight: 1,
+          }}
+        >
+          +
+        </button>
+      )}
+
+      {/* ---- Menu de choix : manuelle ou vocale ---- */}
+      {ajoutMode === 'menu' && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 250, background: 'rgba(6,10,18,0.62)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }} onClick={() => setAjoutMode(null)}>
+          <div style={{ width: '100%', maxWidth: 480, background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.08)', padding: '12px 18px 26px', display: 'flex', flexDirection: 'column', gap: 10 }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 6px' }} />
+            <div style={{ fontSize: 16, fontWeight: 700, color: '#fff', marginBottom: 4 }}>Nouvelle tâche</div>
+            <button type="button" onClick={() => setAjoutMode('manuel')} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '14px 12px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.04)', color: '#fff', fontSize: 15, fontWeight: 600, textAlign: 'left' }}>
+              ✍️ Saisie manuelle
+            </button>
+            <button type="button" onClick={() => setAjoutMode('vocal')} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '14px 12px', borderRadius: 12, border: '1px solid rgba(166,161,129,0.35)', background: 'rgba(166,161,129,0.12)', color: '#fff', fontSize: 15, fontWeight: 600, textAlign: 'left' }}>
+              🎙️ Dictée vocale
+            </button>
+            <button type="button" onClick={() => setAjoutMode(null)} style={{ marginTop: 4, padding: '11px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: 'transparent', color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: 600 }}>
+              Annuler
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ---- Formulaire manuel ---- */}
+      {ajoutMode === 'manuel' && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 250, background: 'rgba(6,10,18,0.62)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }} onClick={() => !ajoutEnCours && setAjoutMode(null)}>
+          <div style={{ width: '100%', maxWidth: 480, background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.08)', padding: '12px 18px 26px', display: 'flex', flexDirection: 'column', gap: 12 }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 6px' }} />
+            <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Nouvelle tâche</div>
+
+            <div>
+              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Description</div>
+              <textarea
+                value={nouvelleDescription}
+                onChange={(e) => setNouvelleDescription(e.target.value)}
+                rows={3}
+                placeholder="Ex. : Relancer client pour devis PAC…"
+                autoFocus
+                style={{ width: '100%', borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '10px', fontSize: 14.5, resize: 'vertical' }}
+              />
+            </div>
+
+            <div>
+              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Échéance (facultatif)</div>
+              <input
+                type="date"
+                value={nouvelleEcheance}
+                onChange={(e) => setNouvelleEcheance(e.target.value)}
+                style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }}
+              />
+            </div>
+
+            {ajoutErreur && <div style={{ fontSize: 13, color: '#e0a685' }}>{ajoutErreur}</div>}
+
+            <button
+              type="button"
+              onClick={() => void creerTacheManuelle()}
+              disabled={ajoutEnCours}
+              style={{ padding: '13px', borderRadius: 12, border: 'none', background: '#A6A181', color: '#141A26', fontSize: 14.5, fontWeight: 700 }}
+            >
+              {ajoutEnCours ? 'Création…' : 'Créer la tâche'}
+            </button>
+            <button
+              type="button"
+              onClick={() => !ajoutEnCours && setAjoutMode(null)}
+              style={{ padding: '11px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: 'transparent', color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: 600 }}
+            >
+              Annuler
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ---- Dictée vocale (plein écran, mêmes composants que l'accueil) ---- */}
+      {ajoutMode === 'vocal' && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 250 }}>
+          <VoiceReportButtons
+            modeUnique="tache"
+            labelBouton="Nouvelle tâche"
+            pleinEcran
+            userEmail={userEmail}
+            userName={userName}
+          />
+          <button
+            type="button"
+            onClick={() => { setAjoutMode(null); void rafraichirApresAjout() }}
+            aria-label="Fermer"
+            style={{
+              position: 'fixed', top: 18, right: 18, zIndex: 260,
+              width: 40, height: 40, borderRadius: '50%', border: '1px solid rgba(255,255,255,0.25)',
+              background: 'rgba(20,26,38,0.9)', color: '#fff', fontSize: 20, lineHeight: 1,
+            }}
+          >
+            ✕
+          </button>
+        </div>
       )}
 
       {openDetail && (
