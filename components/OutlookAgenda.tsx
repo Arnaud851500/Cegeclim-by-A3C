@@ -4,15 +4,18 @@
  * OutlookAgenda
  * ------------------------------------------------------------------------
  * Bloc "AGENDA" du mockup "Vision One page TCI" :
- *  - 10 jours (2 semaines glissantes et superposées, lundi→vendredi),
- *    empilées en pleine largeur — plus de place pour lire les rendez-vous
- *  - navigation +/- pour glisser d'une semaine
+ *  - fenêtre glissante des 7 PROCHAINS JOURS (pas une semaine calendaire
+ *    lundi→vendredi) : par défaut, toujours aujourd'hui + 6 jours suivants,
+ *    week-ends inclus s'ils tombent dans la fenêtre — une seule grille,
+ *    plus large, plus lisible pour chaque jour (avant : 2 semaines
+ *    lun→ven empilées, colonnes plus étroites)
+ *  - navigation +/- pour glisser la fenêtre de 7 jours en 7 jours
  *  - vision horaire 8h→18h
  *  - couleurs Outlook (catégories, résolues côté serveur)
  *  - clic sur un évènement → callback onActivityClick (à brancher sur le
  *    mur d'activité BLG — je n'ai pas cette route, donc callback ouvert)
  *
- * NOUVEAU — Activités BLG fusionnées dans la grille :
+ * Activités BLG fusionnées dans la grille :
  *  - Source : crm_base_activity, filtrée sur internal_tag='normal' et
  *    type in ('meeting','phoneCall','reminder'), et from_fk = l'identifiant
  *    partner BLG de l'utilisateur courant (user_page_access.blg_partner_id,
@@ -68,7 +71,7 @@ type OutlookEvent = {
 
 const HOUR_START = 8;
 const HOUR_END = 18;
-const JOURS = ["Lun", "Mar", "Mer", "Jeu", "Ven"];
+const JOURS_LABELS = ["Dim", "Lun", "Mar", "Mer", "Jeu", "Ven", "Sam"]; // index = Date.getDay()
 const DEFAULT_COLOR = "#4B92AC";
 
 // Types d'activité BLG à afficher dans l'agenda. Confirmé empiriquement que
@@ -102,11 +105,8 @@ function toIsoDate(d: Date) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-function mondayOf(d: Date) {
+function startOfDay(d: Date) {
   const copy = new Date(d);
-  const day = copy.getDay(); // 0 = dimanche
-  const diff = day === 0 ? -6 : 1 - day;
-  copy.setDate(copy.getDate() + diff);
   copy.setHours(0, 0, 0, 0);
   return copy;
 }
@@ -170,7 +170,10 @@ export default function OutlookAgenda({
 }) {
   const [autorisations, setAutorisations] = useState<Autorisation[]>([]);
   const [selectedEmail, setSelectedEmail] = useState<string>("");
-  const [anchorMonday, setAnchorMonday] = useState<Date>(() => mondayOf(new Date()));
+  // Ancre de la fenêtre glissante de 7 jours -- PAR DÉFAUT AUJOURD'HUI, pas
+  // le lundi de la semaine courante. "Auj." et le montage initial repartent
+  // toujours d'aujourd'hui ; +/- glisse la fenêtre de 7 jours à la fois.
+  const [anchorDate, setAnchorDate] = useState<Date>(() => startOfDay(new Date()));
   const [outlookEvents, setOutlookEvents] = useState<OutlookEvent[]>([]);
   const [blgEvents, setBlgEvents] = useState<OutlookEvent[]>([]);
   const [loading, setLoading] = useState(false);
@@ -285,26 +288,23 @@ export default function OutlookAgenda({
     }
   }
 
-  // 2 semaines glissantes et superposées à partir de anchorMonday — pas 3
-  // côte à côte : moins de colonnes en largeur = chaque jour est bien plus
-  // large, donc plus lisible pour y positionner des rendez-vous. Naviguer
-  // d'une semaine (+/-) fait glisser la fenêtre d'un cran, avec toujours une
-  // semaine commune entre deux vues consécutives ("glissantes superposées").
-  const semaines = useMemo(() => {
-    return [0, 1].map((w) => {
-      const debut = addDays(anchorMonday, w * 7);
-      return {
-        debut,
-        jours: JOURS.map((label, i) => ({ label, date: addDays(debut, i) })),
-      };
+  // Fenêtre glissante de 7 jours à partir de anchorDate (aujourd'hui par
+  // défaut) -- plus de découpage lundi→vendredi : les 7 prochains jours
+  // tels quels, week-ends compris s'ils tombent dans la fenêtre. Une seule
+  // grille (avant : 2 semaines empilées) = colonnes bien plus larges, donc
+  // plus lisibles pour y positionner des rendez-vous.
+  const jours = useMemo(() => {
+    return Array.from({ length: 7 }, (_, i) => {
+      const date = addDays(anchorDate, i);
+      return { label: JOURS_LABELS[date.getDay()], date };
     });
-  }, [anchorMonday]);
+  }, [anchorDate]);
 
   const rangeLabel = useMemo(() => {
-    const fin = addDays(anchorMonday, 11); // vendredi de la 2e semaine
+    const fin = addDays(anchorDate, 6);
     const fmt = (d: Date) => d.toLocaleDateString("fr-FR", { day: "2-digit", month: "short" });
-    return `${fmt(anchorMonday)} → ${fmt(fin)}`;
-  }, [anchorMonday]);
+    return `${fmt(anchorDate)} → ${fmt(fin)}`;
+  }, [anchorDate]);
 
   // Mode "données fictives" — persisté en base par utilisateur
   // (vision_tci_preferences.mock_agenda), plus besoin de ?mock=1 à chaque
@@ -357,9 +357,9 @@ export default function OutlookAgenda({
     });
   }
 
-  function buildMockEvents(weekStart: Date): OutlookEvent[] {
+  function buildMockEvents(windowStart: Date): OutlookEvent[] {
     const mk = (dayOffset: number, hStart: number, hEnd: number, subject: string, colorHex: string, allDay = false): OutlookEvent => {
-      const d = addDays(weekStart, dayOffset);
+      const d = addDays(windowStart, dayOffset);
       const start = new Date(d); start.setHours(hStart, 0, 0, 0);
       const end = new Date(d); end.setHours(hEnd, 0, 0, 0);
       return {
@@ -381,8 +381,7 @@ export default function OutlookAgenda({
       mk(4, 16, 18, "RDV Client - A0012 TRIBOT", "#E74C3C"),
       mk(3, 14, 16, "RDV Client - AA042 BASQUE CVC", "#E74C3C"),
       mk(5, 10, 12, "Bilan hebdo", "#8E44AD"),
-      mk(7, 9, 11, "Appel fournisseur", "#D68910"),
-      mk(8, 14, 16, "Vision TCI — démo", "#3498DB"),
+      mk(6, 9, 11, "Appel fournisseur", "#D68910"),
     ];
   }
 
@@ -390,7 +389,7 @@ export default function OutlookAgenda({
     if (useMockData) {
       setLoading(false);
       setError(null);
-      setOutlookEvents(buildMockEvents(anchorMonday));
+      setOutlookEvents(buildMockEvents(anchorDate));
       return;
     }
     if (!selectedEmail) return;
@@ -401,8 +400,8 @@ export default function OutlookAgenda({
       try {
         const session = await supabase.auth.getSession();
         const token = session.data.session?.access_token;
-        const start = toIsoDate(anchorMonday);
-        const end = toIsoDate(addDays(anchorMonday, 12)); // exclusif, couvre le vendredi de la 2e semaine
+        const start = toIsoDate(anchorDate);
+        const end = toIsoDate(addDays(anchorDate, 7)); // exclusif, couvre les 7 jours de la fenêtre
         const params = new URLSearchParams({ email: selectedEmail, start, end });
         const res = await fetch(`/api/outlook/calendar?${params}`, {
           headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -427,7 +426,7 @@ export default function OutlookAgenda({
     return () => {
       cancelled = true;
     };
-  }, [selectedEmail, anchorMonday, useMockData]);
+  }, [selectedEmail, anchorDate, useMockData]);
 
   // ── Activités BLG (crm_base_activity), fusionnées dans la même grille ───
   // Source indépendante de l'agenda Outlook ci-dessus : ignorée en silence
@@ -451,8 +450,8 @@ export default function OutlookAgenda({
         return;
       }
 
-      const start = toIsoDate(anchorMonday);
-      const end = toIsoDate(addDays(anchorMonday, 12));
+      const start = toIsoDate(anchorDate);
+      const end = toIsoDate(addDays(anchorDate, 7));
 
       const { data, error: err } = await supabase
         .from("crm_base_activity")
@@ -520,7 +519,7 @@ export default function OutlookAgenda({
     return () => {
       cancelled = true;
     };
-  }, [anchorMonday]);
+  }, [anchorDate]);
 
   const events = useMemo(() => [...outlookEvents, ...blgEvents], [outlookEvents, blgEvents]);
 
@@ -614,6 +613,7 @@ export default function OutlookAgenda({
   }
 
   const currentAutorisation = autorisations.find((a) => a.email_outlook === selectedEmail);
+  const aujourdHuiIso = toIsoDate(new Date());
 
   return (
     <div className="flex h-full flex-col rounded-2xl border border-black/10 bg-[#F5F3EC] p-3 text-[#141A26]">
@@ -645,22 +645,22 @@ export default function OutlookAgenda({
 
         <div className="ml-auto flex items-center gap-1">
           <button
-            onClick={() => setAnchorMonday((d) => addDays(d, -7))}
+            onClick={() => setAnchorDate((d) => addDays(d, -7))}
             className="flex h-6 w-6 items-center justify-center rounded-full bg-black/[0.06] text-sm hover:bg-black/[0.12]"
-            title="Semaine précédente"
+            title="7 jours précédents"
           >
             −
           </button>
           <span className="min-w-[110px] text-center text-[11px] text-[#141A26]/75">{rangeLabel}</span>
           <button
-            onClick={() => setAnchorMonday((d) => addDays(d, 7))}
+            onClick={() => setAnchorDate((d) => addDays(d, 7))}
             className="flex h-6 w-6 items-center justify-center rounded-full bg-black/[0.06] text-sm hover:bg-black/[0.12]"
-            title="Semaine suivante"
+            title="7 jours suivants"
           >
             +
           </button>
           <button
-            onClick={() => setAnchorMonday(mondayOf(new Date()))}
+            onClick={() => setAnchorDate(startOfDay(new Date()))}
             className="ml-1 rounded-full bg-black/[0.06] px-2 py-1 text-[10px] hover:bg-black/[0.12]"
             title="Revenir à aujourd'hui"
           >
@@ -782,93 +782,95 @@ export default function OutlookAgenda({
         </div>
       )}
 
-      <div className="flex flex-1 flex-col gap-3 overflow-auto">
-        {semaines.map((s, si) => (
-          <div key={si} className="rounded-xl bg-black/[0.05] p-2.5">
-            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[#141A26]/40">
-              Semaine du {s.jours[0].date.toLocaleDateString("fr-FR", { day: "2-digit", month: "long" })}
-            </div>
-            <div className="grid grid-cols-[34px_repeat(5,1fr)] gap-1 text-xs font-medium text-[#141A26]/70">
-              <div />
-              {s.jours.map((j) => (
-                <div key={j.label} className="text-center">
+      <div className="flex flex-1 flex-col overflow-auto">
+        <div className="rounded-xl bg-black/[0.05] p-2.5">
+          <div className="grid grid-cols-[34px_repeat(7,1fr)] gap-1 text-xs font-medium text-[#141A26]/70">
+            <div />
+            {jours.map((j) => {
+              const iso = toIsoDate(j.date);
+              const estAujourdHui = iso === aujourdHuiIso;
+              return (
+                <div
+                  key={iso}
+                  className={`text-center ${estAujourdHui ? "font-bold text-[#2E5BB8]" : ""}`}
+                >
                   {j.label} {j.date.getDate()}
                 </div>
+              );
+            })}
+          </div>
+          <div className="grid grid-cols-[34px_repeat(7,1fr)] gap-1" style={{ height: 420 }}>
+            {/* Colonne des heures — séparée de la grille des jours, ne peut
+                donc plus jamais être masquée par un rendez-vous. */}
+            <div className="flex flex-col justify-between py-0.5 text-right text-[10px] text-[#141A26]/45">
+              {Array.from({ length: HOUR_END - HOUR_START + 1 }).map((_, i) => (
+                <div key={i}>{HOUR_START + i}h</div>
               ))}
             </div>
-            <div className="grid grid-cols-[34px_repeat(5,1fr)] gap-1" style={{ height: 200 }}>
-              {/* Colonne des heures — séparée de la grille des jours, ne peut
-                  donc plus jamais être masquée par un rendez-vous du lundi. */}
-              <div className="flex flex-col justify-between py-0.5 text-right text-[9px] text-[#141A26]/45">
+            <div className="relative col-span-7 grid grid-cols-7 gap-1">
+              {/* Repères horaires en fond, alignés sur la colonne des heures */}
+              <div className="pointer-events-none absolute inset-0 flex flex-col justify-between py-0.5">
                 {Array.from({ length: HOUR_END - HOUR_START + 1 }).map((_, i) => (
-                  <div key={i}>{HOUR_START + i}h</div>
+                  <div key={i} className="border-t border-black/10" />
                 ))}
               </div>
-              <div className="relative col-span-5 grid grid-cols-5 gap-1">
-                {/* Repères horaires en fond, alignés sur la colonne des heures */}
-                <div className="pointer-events-none absolute inset-0 flex flex-col justify-between py-0.5">
-                  {Array.from({ length: HOUR_END - HOUR_START + 1 }).map((_, i) => (
-                    <div key={i} className="border-t border-black/10" />
-                  ))}
-                </div>
-                {s.jours.map((j) => {
-                  const iso = toIsoDate(j.date);
-                  const dayEvents = eventsByDay.get(iso) || [];
-                  return (
-                    <div key={iso} className="relative border-l border-black/5 first:border-l-0">
-                      {dayEvents.filter((e) => !e.isAllDay).map((e) => (
-                        <button
-                          key={e.id}
-                          onClick={() => onActivityClick?.(e)}
-                          title={`${e.company ? e.company + " — " : ""}${e.subject}${e.location ? " · " + e.location : ""}`}
-                          style={eventStyle(e, currentAutorisation?.couleur_defaut || null)}
-                          className="absolute left-0.5 right-0.5 overflow-hidden rounded-md px-1.5 py-0.5 text-left text-[10px] leading-tight text-white shadow hover:brightness-110"
-                        >
-                          {e.company && (
-                            <div className="truncate text-[8.5px] font-semibold uppercase tracking-wide text-[#FFC98B]">
-                              {e.company}
-                            </div>
-                          )}
-                          <div className="truncate font-medium">{e.subject}</div>
-                        </button>
-                      ))}
-                    </div>
-                  );
-                })}
-              </div>
+              {jours.map((j) => {
+                const iso = toIsoDate(j.date);
+                const dayEvents = eventsByDay.get(iso) || [];
+                return (
+                  <div key={iso} className="relative border-l border-black/5 first:border-l-0">
+                    {dayEvents.filter((e) => !e.isAllDay).map((e) => (
+                      <button
+                        key={e.id}
+                        onClick={() => onActivityClick?.(e)}
+                        title={`${e.company ? e.company + " — " : ""}${e.subject}${e.location ? " · " + e.location : ""}`}
+                        style={eventStyle(e, currentAutorisation?.couleur_defaut || null)}
+                        className="absolute left-0.5 right-0.5 overflow-hidden rounded-md px-1.5 py-0.5 text-left text-[10px] leading-tight text-white shadow hover:brightness-110"
+                      >
+                        {e.company && (
+                          <div className="truncate text-[8.5px] font-semibold uppercase tracking-wide text-[#FFC98B]">
+                            {e.company}
+                          </div>
+                        )}
+                        <div className="truncate font-medium">{e.subject}</div>
+                      </button>
+                    ))}
+                  </div>
+                );
+              })}
             </div>
-            {/* Évènements journée entière, listés sous la grille horaire */}
-            {s.jours.some((j) => (eventsByDay.get(toIsoDate(j.date)) || []).some((e) => e.isAllDay)) && (
-              <div className="mt-1 grid grid-cols-[34px_repeat(5,1fr)] gap-1">
-                <div />
-                {s.jours.map((j) => {
-                  const iso = toIsoDate(j.date);
-                  const allDay = (eventsByDay.get(iso) || []).filter((e) => e.isAllDay);
-                  return (
-                    <div key={iso} className="space-y-0.5">
-                      {allDay.map((e) => (
-                        <button
-                          key={e.id}
-                          onClick={() => onActivityClick?.(e)}
-                          title={`${e.company ? e.company + " — " : ""}${e.subject}`}
-                          style={{ background: e.colorHex || currentAutorisation?.couleur_defaut || DEFAULT_COLOR }}
-                          className="w-full truncate rounded px-1.5 py-1 text-left text-[10px] text-white"
-                        >
-                          {e.company && (
-                            <span className="mr-1 font-semibold uppercase tracking-wide text-[#FFC98B]">
-                              {e.company} ·
-                            </span>
-                          )}
-                          {e.subject}
-                        </button>
-                      ))}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
           </div>
-        ))}
+          {/* Évènements journée entière, listés sous la grille horaire */}
+          {jours.some((j) => (eventsByDay.get(toIsoDate(j.date)) || []).some((e) => e.isAllDay)) && (
+            <div className="mt-1 grid grid-cols-[34px_repeat(7,1fr)] gap-1">
+              <div />
+              {jours.map((j) => {
+                const iso = toIsoDate(j.date);
+                const allDay = (eventsByDay.get(iso) || []).filter((e) => e.isAllDay);
+                return (
+                  <div key={iso} className="space-y-0.5">
+                    {allDay.map((e) => (
+                      <button
+                        key={e.id}
+                        onClick={() => onActivityClick?.(e)}
+                        title={`${e.company ? e.company + " — " : ""}${e.subject}`}
+                        style={{ background: e.colorHex || currentAutorisation?.couleur_defaut || DEFAULT_COLOR }}
+                        className="w-full truncate rounded px-1.5 py-1 text-left text-[10px] text-white"
+                      >
+                        {e.company && (
+                          <span className="mr-1 font-semibold uppercase tracking-wide text-[#FFC98B]">
+                            {e.company} ·
+                          </span>
+                        )}
+                        {e.subject}
+                      </button>
+                    ))}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
 
       {loading && <div className="mt-2 text-center text-[10px] text-[#141A26]/60">Chargement de l&rsquo;agenda…</div>}
