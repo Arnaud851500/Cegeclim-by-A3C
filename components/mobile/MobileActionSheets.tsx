@@ -14,7 +14,7 @@
  */
 
 function sheetOverlayStyle(): React.CSSProperties {
-  return { position: 'fixed', inset: 0, zIndex: 260, background: 'rgba(6,10,18,0.62)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }
+  return { position: 'fixed', inset: 0, zIndex: 2060, background: 'rgba(6,10,18,0.62)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }
 }
 function sheetPanelStyle(): React.CSSProperties {
   return { width: '100%', maxWidth: 480, background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.08)', padding: '12px 18px 26px', display: 'flex', flexDirection: 'column', gap: 8 }

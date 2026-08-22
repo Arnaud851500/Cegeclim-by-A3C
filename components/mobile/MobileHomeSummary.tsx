@@ -19,11 +19,13 @@ import { supabase } from '@/lib/supabaseClient'
  * bouton "⏹ Stop" reste disponible à tout moment pendant une lecture.
  */
 
-type Portee = 'jour' | 'semaine' | 'rdv'
+type Portee = 'jour' | 'semaine' | 'semaine_prochaine' | 'rdv' | 'rdv_semaine_prochaine' | 'compte_rendu' | 'alertes'
 type Etape = 'idle' | 'question' | 'ecoute' | 'traitement' | 'incompris' | 'resultat' | 'erreur'
+  | 'question_client' | 'ecoute_client' | 'traitement_client'
 
 const RDV_TYPE_KEYS = ['meeting', 'phoneCall', 'reminder', '4', '7', '9']
-const QUESTION = 'Souhaites-tu connaître tes tâches en retard, tes tâches de la semaine, ou tes prochains rendez-vous ?'
+const QUESTION =
+  'Souhaites-tu connaître tes tâches en retard, tes tâches de la semaine, tes tâches ou rendez-vous de la semaine prochaine, tes prochains rendez-vous, le dernier compte-rendu d’un client, ou tes alertes en cours ?'
 
 function safeText(value: any) {
   return String(value ?? '').trim()
@@ -43,6 +45,19 @@ function finDeSemaineIso() {
   d.setDate(d.getDate() + (7 - jour))
   return d.toISOString().slice(0, 10)
 }
+/** Lundi de la semaine prochaine. */
+function debutSemaineProchaineIso() {
+  const d = new Date()
+  const jour = d.getDay() || 7
+  d.setDate(d.getDate() + (7 - jour) + 1)
+  return d.toISOString().slice(0, 10)
+}
+/** Dimanche de la semaine prochaine. */
+function finSemaineProchaineIso() {
+  const d = new Date(debutSemaineProchaineIso())
+  d.setDate(d.getDate() + 6)
+  return d.toISOString().slice(0, 10)
+}
 function todayIso() {
   return new Date().toISOString().slice(0, 10)
 }
@@ -51,11 +66,22 @@ function normaliser(value: string) {
 }
 
 /** Interprète la réponse parlée par mots-clés -- pas besoin d'IA pour un
- * choix entre 3 options. Renvoie null si rien de reconnaissable, auquel
- * cas l'agent redemande plutôt que de deviner. */
+ * choix parmi quelques options fixes. Renvoie null si rien de
+ * reconnaissable, auquel cas l'agent redemande plutôt que de deviner.
+ * Ordre important : motifs spécifiques testés avant les motifs génériques
+ * qu'ils contiennent aussi (ex. "rdv de la semaine prochaine" contient à
+ * la fois "rdv" et "semaine"). */
 function classifierChoix(transcript: string): Portee | null {
   const t = normaliser(transcript)
-  if (/\brdv\b|rendez[- ]?vous|reunion|reunions|agenda|planning|visites?\b/.test(t)) return 'rdv'
+  if (/compte[- ]?rendu/.test(t)) return 'compte_rendu'
+  if (/alerte/.test(t)) return 'alertes'
+
+  const estSemaineProchaine = /semaine\s+prochaine|prochaine\s+semaine/.test(t)
+  const estRdv = /\brdv\b|rendez[- ]?vous|reunion|reunions|agenda|planning|visites?\b/.test(t)
+
+  if (estSemaineProchaine && estRdv) return 'rdv_semaine_prochaine'
+  if (estSemaineProchaine) return 'semaine_prochaine'
+  if (estRdv) return 'rdv'
   if (/semaine|hebdo/.test(t)) return 'semaine'
   if (/retard|aujourd\s?hui|\bjour\b|jours|maintenant|taches?\b/.test(t)) return 'jour'
   return null
@@ -342,13 +368,18 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       const portee = classifierChoix(data.transcript || '')
       if (!portee) {
         setMessageIncompris(
-          `Je n'ai pas compris "${data.transcript || '...'}". Dis par exemple "mes tâches en retard", "cette semaine", ou "mes rendez-vous".`,
+          `Je n'ai pas compris "${data.transcript || '...'}". Dis par exemple "mes tâches en retard", "cette semaine", "la semaine prochaine", "mes rendez-vous", "le compte-rendu d'un client", ou "mes alertes".`,
         )
         setEtape('incompris')
         await jouerTexte("Je n'ai pas bien compris. Peux-tu répéter ?")
         setEtape('ecoute')
         const blobRetente = await enregistrerAvecDetectionSilence(forceStopRef)
         await interpreter(blobRetente)
+        return
+      }
+
+      if (portee === 'compte_rendu') {
+        await demanderClient()
         return
       }
 
@@ -400,7 +431,38 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
           const compte = rows.length === 1 ? 'un' : String(rows.length)
           resultat = `Voici tes ${compte} prochain${rows.length > 1 ? 's' : ''} rendez-vous :\n${lignes.join('\n')}`
         }
-      } else {
+      } else if (portee === 'rdv_semaine_prochaine') {
+        if (!access?.blg_partner_id) throw new Error('Identifiant partner BLG non renseigné pour ce compte.')
+
+        const debut = debutSemaineProchaineIso()
+        const fin = finSemaineProchaineIso()
+
+        const { data: rows, error } = await supabase
+          .from('crm_base_activity')
+          .select('type, comment, start_date')
+          .eq('internal_tag', 'normal')
+          .in('type', RDV_TYPE_KEYS)
+          .eq('from_fk', access.blg_partner_id)
+          .gte('start_date', `${debut}T00:00:00`)
+          .lte('start_date', `${fin}T23:59:59`)
+          .order('start_date', { ascending: true })
+          .limit(20)
+        if (error) throw error
+
+        if (!rows || rows.length === 0) {
+          resultat = "Tu n'as aucun rendez-vous prévu la semaine prochaine."
+        } else {
+          const lignes = rows.map((r: any, i: number) => {
+            const d = new Date(r.start_date)
+            const dateLabel = d.toLocaleDateString('fr-FR', { weekday: 'long', day: '2-digit', month: '2-digit' })
+            const heure = d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
+            const sujet = safeText(r.comment) || 'sans sujet précisé'
+            return `${i + 1}. ${dateLabel} à ${heure} — ${sujet}`
+          })
+          const compte = rows.length === 1 ? 'un' : String(rows.length)
+          resultat = `Tu as ${compte} rendez-vous${rows.length > 1 ? '' : ''} la semaine prochaine :\n${lignes.join('\n')}`
+        }
+      } else if (portee === 'jour' || portee === 'semaine') {
         const identities = Array.from(new Set([email, displayName]))
         const assignedFilter = identities.map((v) => `assigned_to.eq.${v.replace(/,/g, '\\,')}`).join(',')
         const fin = portee === 'jour' ? todayIso() : finDeSemaineIso()
@@ -428,6 +490,81 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
           const compte = rows.length === 1 ? 'une' : String(rows.length)
           resultat = `Tu as ${compte} tâche${rows.length > 1 ? 's' : ''} ${periodeTexte} :\n${lignes.join('\n')}`
         }
+      } else if (portee === 'semaine_prochaine') {
+        // Vraie plage de dates (lundi -> dimanche prochain), contrairement
+        // à jour/semaine qui incluent aussi le retard -- ici on ne veut
+        // QUE la semaine prochaine, pas le passé.
+        const identities = Array.from(new Set([email, displayName]))
+        const assignedFilter = identities.map((v) => `assigned_to.eq.${v.replace(/,/g, '\\,')}`).join(',')
+        const debut = debutSemaineProchaineIso()
+        const fin = finSemaineProchaineIso()
+
+        const { data: rows, error } = await supabase
+          .from('todo_actions')
+          .select('description_action, due_date')
+          .or(assignedFilter)
+          .not('status', 'in', '("Terminé","Annulé")')
+          .gte('due_date', debut)
+          .lte('due_date', fin)
+          .order('due_date', { ascending: true })
+          .limit(30)
+        if (error) throw error
+
+        if (!rows || rows.length === 0) {
+          resultat = "Tu n'as aucune tâche prévue la semaine prochaine."
+        } else {
+          const lignes = rows.map((r: any, i: number) => {
+            const echeance = formatDateParlee(r.due_date)
+            return `${i + 1}. ${safeText(r.description_action) || '(sans libellé)'}${echeance ? `, échéance ${echeance}` : ''}`
+          })
+          const compte = rows.length === 1 ? 'une' : String(rows.length)
+          resultat = `Tu as ${compte} tâche${rows.length > 1 ? 's' : ''} prévue${rows.length > 1 ? 's' : ''} la semaine prochaine :\n${lignes.join('\n')}`
+        }
+      } else {
+        // portee === 'alertes' : même logique que le bandeau desktop
+        // (AppShell) et le hook useMobileAlertsCount, mais réinterrogée
+        // ici directement -- ce composant n'a pas accès à ce hook (arbre
+        // de composants différent).
+        const alertesTexte: string[] = []
+
+        try {
+          const { data: cdcRows } = await supabase
+            .from('v_portefeuille_livraison_lignes')
+            .select('type_document,numero_document,numero_tiers')
+            .eq('type_document', 'CDC')
+            .or('mois_livraison.eq.AVANT_2026,date_livraison.lt.2026-01-01')
+            .limit(50000)
+          const distinctCdc = new Set(
+            (cdcRows || []).map((r: any) => [r.type_document, r.numero_document, r.numero_tiers].map((v) => String(v ?? '').trim()).join('::')),
+          )
+          if (distinctCdc.size > 0) alertesTexte.push(`${distinctCdc.size} CDC avec livraison avant 2026`)
+        } catch { /* signal optionnel, on continue même s'il échoue */ }
+
+        try {
+          const { data: fraisPortRows } = await supabase
+            .from('v_controle_frais_port_groupes')
+            .select('statut_groupe,nb_bl_a_supprimer')
+            .neq('statut_groupe', 'OK')
+            .limit(20000)
+          const rows = fraisPortRows || []
+          const manquants = rows.filter((r: any) => String(r.statut_groupe || '').trim() === 'FRAIS_PORT_MANQUANT').length
+          const blASupprimer = rows.reduce((s: number, r: any) => s + Number(r.nb_bl_a_supprimer || 0), 0)
+          const total = manquants + blASupprimer
+          if (total > 0) alertesTexte.push(`${total} écart${total > 1 ? 's' : ''} sur le contrôle des frais de port`)
+        } catch { /* idem */ }
+
+        try {
+          const { data: gazRows } = await supabase.rpc('get_client_certification_alert_rows', { p_kind: 'capacite', p_limit: 10000 })
+          const rows = gazRows || []
+          if (rows.length > 0) {
+            const expirees = rows.filter((r: any) => String(r.alert_status || '').toLowerCase() === 'expired').length
+            alertesTexte.push(`${rows.length} capacité${rows.length > 1 ? 's' : ''} gaz à surveiller${expirees > 0 ? `, dont ${expirees} déjà expirée${expirees > 1 ? 's' : ''}` : ''}`)
+          }
+        } catch { /* idem */ }
+
+        resultat = alertesTexte.length === 0
+          ? "Aucune alerte en cours. Tout est propre."
+          : `Voici tes alertes en cours :\n${alertesTexte.map((a, i) => `${i + 1}. ${a}`).join('\n')}`
       }
 
       setTexte(resultat)
@@ -444,6 +581,109 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
     setTexte('')
     setMessageIncompris('')
     setErreur('')
+  }
+
+  /** Sous-flux "compte-rendu d'un client" : demande le nom/numéro à la
+   * voix, cherche le client correspondant, puis lit son dernier
+   * compte-rendu en précisant bien numéro + nom (demande explicite). */
+  async function demanderClient() {
+    setMessageIncompris('')
+    try {
+      setEtape('question_client')
+      await jouerTexte('De quel client veux-tu le dernier compte-rendu ? Dis son nom ou son numéro.')
+      setEtape('ecoute_client')
+      const blob = await enregistrerAvecDetectionSilence(forceStopRef)
+      await interpreterClient(blob)
+    } catch (e: any) {
+      setEtape('erreur')
+      setErreur(e?.message || 'Une erreur est survenue.')
+    }
+  }
+
+  async function rechercherClient(texte: string): Promise<{ numero: string; nom: string }[]> {
+    const q = texte.trim()
+    if (!q) return []
+
+    // Essai 1 : numéro exact ou en préfixe (utile si l'utilisateur dicte
+    // un numéro de tiers).
+    const { data: parNumero } = await supabase
+      .from('ref_tiers')
+      .select('numero, intitule')
+      .ilike('numero', `${q}%`)
+      .limit(5)
+    if (parNumero && parNumero.length > 0) {
+      return parNumero.map((r: any) => ({ numero: safeText(r.numero), nom: safeText(r.intitule) }))
+    }
+
+    // Essai 2 : recherche par nom (contient).
+    const { data: parNom } = await supabase
+      .from('ref_tiers')
+      .select('numero, intitule')
+      .ilike('intitule', `%${q}%`)
+      .limit(5)
+    return (parNom || []).map((r: any) => ({ numero: safeText(r.numero), nom: safeText(r.intitule) }))
+  }
+
+  async function interpreterClient(blobBrut: Blob) {
+    try {
+      setEtape('traitement_client')
+      const blobWav = await convertirEnWav(blobBrut)
+
+      const form = new FormData()
+      form.append('audio', blobWav, 'audio.wav')
+      const res = await fetch('/api/atelier-ai/transcribe', { method: 'POST', body: form })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data?.error || 'Erreur de transcription.')
+
+      const texteEntendu = String(data.transcript || '').trim()
+      const resultats = await rechercherClient(texteEntendu)
+
+      if (resultats.length === 0) {
+        setMessageIncompris(`Je n'ai trouvé aucun client correspondant à "${texteEntendu || '...'}".`)
+        setEtape('incompris')
+        await jouerTexte("Je n'ai trouvé aucun client correspondant. Peux-tu redire le nom ou le numéro ?")
+        setEtape('ecoute_client')
+        const blobRetente = await enregistrerAvecDetectionSilence(forceStopRef)
+        await interpreterClient(blobRetente)
+        return
+      }
+
+      // Plusieurs clients possibles : on prend le premier (meilleur match
+      // alphabétique/préfixe) mais on l'annonce clairement pour que
+      // l'utilisateur puisse se rendre compte d'une erreur d'aiguillage.
+      await genererDernierCompteRendu(resultats[0])
+    } catch (e: any) {
+      setEtape('erreur')
+      setErreur(e?.message || 'Une erreur est survenue.')
+    }
+  }
+
+  async function genererDernierCompteRendu(client: { numero: string; nom: string }) {
+    try {
+      const { data, error } = await supabase
+        .from('client_comptes_rendus')
+        .select('resume, created_at')
+        .eq('numero_tiers', client.numero)
+        .order('created_at', { ascending: false })
+        .limit(1)
+      if (error) throw error
+
+      let resultat = ''
+      if (!data || data.length === 0) {
+        resultat = `Aucun compte-rendu enregistré pour ${client.nom || client.numero} (numéro ${client.numero}).`
+      } else {
+        const cr = data[0] as any
+        const dateTexte = formatDateParlee(cr.created_at)
+        resultat = `Dernier compte-rendu de ${client.nom || '(nom inconnu)'}, numéro ${client.numero}${dateTexte ? `, du ${dateTexte}` : ''} :\n${safeText(cr.resume)}`
+      }
+
+      setTexte(resultat)
+      setEtape('resultat')
+      await jouerTexte(resultat)
+    } catch (e: any) {
+      setEtape('erreur')
+      setErreur(e?.message || 'Erreur inattendue.')
+    }
   }
 
   if (etape === 'idle') {
@@ -489,13 +729,13 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         </div>
 
         <div style={{ flex: 1, overflowY: 'auto', padding: '0 20px 28px', display: 'flex', flexDirection: 'column', gap: 16 }}>
-          {(etape === 'question' || etape === 'traitement') && (
+          {(etape === 'question' || etape === 'traitement' || etape === 'question_client' || etape === 'traitement_client') && (
             <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.55)', textAlign: 'center', padding: '20px 0' }}>
-              {etape === 'question' ? "L'agent parle…" : 'Interprétation…'}
+              {etape === 'question' || etape === 'question_client' ? "L'agent parle…" : 'Interprétation…'}
             </div>
           )}
 
-          {(etape === 'ecoute') && (
+          {(etape === 'ecoute' || etape === 'ecoute_client') && (
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, padding: '18px 0' }}>
               {messageIncompris && (
                 <div style={{ fontSize: 13.5, color: '#e0a685', textAlign: 'center', lineHeight: 1.5 }}>{messageIncompris}</div>
@@ -513,7 +753,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
                 🎙️
               </button>
               <div style={{ fontSize: 14.5, fontWeight: 600, color: '#8fd4a8', textAlign: 'center' }}>
-                Je t'écoute… je m'arrête tout seul dès que tu as fini
+                {etape === 'ecoute_client' ? "Je t'écoute… dis le nom ou le numéro du client" : "Je t'écoute… je m'arrête tout seul dès que tu as fini"}
               </div>
               <style>{`@keyframes cgcPulseSummary { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.06); opacity: 0.75; } }`}</style>
             </div>

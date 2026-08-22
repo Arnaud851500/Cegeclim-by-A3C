@@ -816,7 +816,7 @@ export default function MobileProspects() {
       )}
 
       {/* ---- Bascule liste / carte, en bas de l'écran ---- */}
-      <div style={{ position: 'absolute', left: 14, right: 14, bottom: 14, display: 'flex', gap: 8, zIndex: 5 }}>
+      <div style={{ position: 'absolute', left: 14, right: 14, bottom: 14, display: 'flex', gap: 8, zIndex: 1500 }}>
         <button
           type="button"
           onClick={() => setVue('liste')}
@@ -848,7 +848,7 @@ export default function MobileProspects() {
           type="button"
           onClick={() => setDiagnosticOuvert((v) => !v)}
           style={{
-            position: 'absolute', right: 14, bottom: 76, zIndex: 6,
+            position: 'absolute', right: 14, bottom: 76, zIndex: 1501,
             padding: '6px 10px', borderRadius: 999, border: '1px solid rgba(255,255,255,0.2)',
             background: 'rgba(20,26,38,0.9)', color: 'rgba(255,255,255,0.7)', fontSize: 11, fontWeight: 600,
           }}
@@ -858,7 +858,7 @@ export default function MobileProspects() {
       )}
       {diagnosticOuvert && (
         <div
-          style={{ position: 'fixed', inset: 0, zIndex: 250, background: 'rgba(6,10,18,0.85)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
+          style={{ position: 'fixed', inset: 0, zIndex: 2050, background: 'rgba(6,10,18,0.85)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
           onClick={() => setDiagnosticOuvert(false)}
         >
           <div
@@ -886,7 +886,7 @@ export default function MobileProspects() {
       {/* ---- Tiroir filtres (rayon, ancienneté, capital social, secteur, RGE, capacité gaz) ---- */}
       {filtresOuverts && (
         <div
-          style={{ position: 'fixed', inset: 0, zIndex: 210, background: 'rgba(6,10,18,0.62)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
+          style={{ position: 'fixed', inset: 0, zIndex: 2010, background: 'rgba(6,10,18,0.62)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
           onClick={() => setFiltresOuverts(false)}
         >
           <div
@@ -912,7 +912,7 @@ export default function MobileProspects() {
       {/* ---- Fiche détail prospect ---- */}
       {selected && (
         <div
-          style={{ position: 'fixed', inset: 0, zIndex: 220, background: 'rgba(6,10,18,0.62)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
+          style={{ position: 'fixed', inset: 0, zIndex: 2020, background: 'rgba(6,10,18,0.62)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
           onClick={() => setSelected(null)}
         >
           <div
