@@ -1,6 +1,6 @@
 'use client'
 
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 
 /**
@@ -262,6 +262,21 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
   const [modeClient, setModeClient] = useState(false)
   const [erreur, setErreur] = useState('')
   const [lectureEnCours, setLectureEnCours] = useState(false)
+  // Voix choisie par l'utilisateur (écran d'accueil, "🎙️ Voix") --
+  // chargée une fois, réutilisée pour tous les appels /speak de ce
+  // composant. Repli sur 'nova' si aucune préférence enregistrée.
+  const [voixPreferee, setVoixPreferee] = useState('nova')
+  useEffect(() => {
+    let cancelled = false
+    async function charger() {
+      const email = String(userEmail || '').toLowerCase().trim()
+      if (!email) return
+      const { data } = await supabase.from('vision_tci_preferences').select('voix_assistant').eq('user_email', email).maybeSingle()
+      if (!cancelled) setVoixPreferee(String(data?.voix_assistant || 'nova'))
+    }
+    void charger()
+    return () => { cancelled = true }
+  }, [userEmail])
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
@@ -322,7 +337,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       const res = await fetch('/api/atelier-ai/speak', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: texte }),
+        body: JSON.stringify({ text: texte, voice: voixPreferee }),
       })
       if (!res.ok) return
       const blob = await res.blob()
@@ -578,7 +593,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
           const entreprisesParActivite = await resoudreEntreprisesRdv(rows as any[])
           const lignes = rows.map((r: any, i: number) => {
             const d = new Date(r.start_date)
-            const dateLabel = d.toLocaleDateString('fr-FR', { weekday: 'long', day: '2-digit', month: '2-digit' })
+            const dateLabel = d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' })
             const heure = d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
             const entreprise = entreprisesParActivite.get(r.id) || 'sans entreprise associée'
             return `${i + 1}. ${dateLabel} à ${heure} — ${entreprise}`
@@ -610,7 +625,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
           const entreprisesParActivite = await resoudreEntreprisesRdv(rows as any[])
           const lignes = rows.map((r: any, i: number) => {
             const d = new Date(r.start_date)
-            const dateLabel = d.toLocaleDateString('fr-FR', { weekday: 'long', day: '2-digit', month: '2-digit' })
+            const dateLabel = d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' })
             const heure = d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
             const entreprise = entreprisesParActivite.get(r.id) || 'sans entreprise associée'
             return `${i + 1}. ${dateLabel} à ${heure} — ${entreprise}`

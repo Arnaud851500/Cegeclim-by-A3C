@@ -591,9 +591,13 @@ export default function MobileProspects() {
           if (!coords) { exclusSansCoords++; continue }
 
           // Le filtre de distance exacte ne s'applique qu'en mode
-          // géolocalisé -- sans position, la boîte géographique n'existe
-          // pas non plus, donc rien à comparer à un rayon.
-          if (position) {
+          // géolocalisé actif -- BUG CORRIGÉ : la condition était juste
+          // `if (position)`, or la position se charge automatiquement dès
+          // le montage de l'écran, indépendamment de l'interrupteur
+          // "Géolocalisation". Résultat : même désactivée, ce filtre
+          // continuait de s'appliquer avec le rayon en cours, empêchant de
+          // voir un département éloigné de la position réelle.
+          if (geolocalisationActivee && position) {
             const dist = distanceKmWgs84(position.lat, position.lng, coords.lat, coords.lon)
             if (dist > radiusKm) { exclusDistance++; continue }
           }
@@ -980,7 +984,16 @@ export default function MobileProspects() {
           ← Filtres
         </button>
         <div style={{ flex: 1, fontSize: 12.5, color: 'rgba(255,255,255,0.6)' }}>
-          {loading ? 'Recherche…' : loadError ? loadError : `${prospectsFiltres.length} prospect${prospectsFiltres.length > 1 ? 's' : ''} · ${radiusKm} km`}
+          {loading
+            ? 'Recherche…'
+            : loadError
+              ? loadError
+              : `${prospectsFiltres.length} prospect${prospectsFiltres.length > 1 ? 's' : ''}` +
+                (geolocalisationActivee
+                  ? ` · ${radiusKm} km`
+                  : departementFiltre.trim()
+                    ? ` · dépt. ${departementFiltre.trim()}`
+                    : ' · toute la base')}
         </div>
         <button
           type="button"

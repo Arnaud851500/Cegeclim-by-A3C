@@ -211,7 +211,7 @@ export default function MobileAlertes({
         created_by_name: userName || userEmail || 'Mobile',
         description_action: description,
         due_date: nouvelleEcheance || null,
-        status: 'A faire',
+        status: 'Non débuté',
         assigned_to: nouvelAssigne || userEmail || userName || null,
         mission_project: nouvelleCategorie.trim() || null,
         numero_tiers: nouveauClientNumero || null,

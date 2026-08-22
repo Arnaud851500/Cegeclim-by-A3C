@@ -302,6 +302,20 @@ export default function VoiceReportButtons({
   const [spokenAffiche, setSpokenAffiche] = useState('')
   const [tachesAffichees, setTachesAffichees] = useState<Tache[]>([])
   const [lectureEnCours, setLectureEnCours] = useState(false)
+  // Voix choisie par l'utilisateur (écran d'accueil, "🎙️ Voix") --
+  // chargée une fois, réutilisée pour tous les appels /speak de ce
+  // composant. Repli sur 'nova' si aucune préférence enregistrée.
+  const [voixPreferee, setVoixPreferee] = useState('nova')
+  useEffect(() => {
+    let cancelled = false
+    async function charger() {
+      if (!userEmail) return
+      const { data } = await supabase.from('vision_tci_preferences').select('voix_assistant').eq('user_email', userEmail).maybeSingle()
+      if (!cancelled) setVoixPreferee(String(data?.voix_assistant || 'nova'))
+    }
+    void charger()
+    return () => { cancelled = true }
+  }, [userEmail])
   const [compteRenduIdCible, setCompteRenduIdCible] = useState<string | null>(null)
 
   const [comptesRendusExistants, setComptesRendusExistants] = useState<CompteRenduExistant[] | null>(null)
@@ -410,7 +424,7 @@ export default function VoiceReportButtons({
       const res = await fetch('/api/atelier-ai/speak', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: texte }),
+        body: JSON.stringify({ text: texte, voice: voixPreferee }),
       })
       if (!res.ok) return
       const blob = await res.blob()

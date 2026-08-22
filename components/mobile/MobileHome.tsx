@@ -32,6 +32,18 @@ const BUTTONS: ButtonConfig[] = [
 // interne), ce qui gâchait de la largeur utile sur un petit écran.
 const MARGE_ECRAN = 10
 
+// Les 6 timbres proposés par OpenAI TTS (moteur utilisé par
+// /api/atelier-ai/speak) -- pas d'accent régional possible avec ce
+// fournisseur, seulement des voix au grain différent.
+const VOIX_OPTIONS = [
+  { id: 'nova', label: 'Nova', description: 'Voix féminine, claire et dynamique (par défaut)' },
+  { id: 'alloy', label: 'Alloy', description: 'Voix neutre, posée' },
+  { id: 'echo', label: 'Echo', description: 'Voix masculine, grave' },
+  { id: 'fable', label: 'Fable', description: 'Voix chaleureuse, légèrement posée' },
+  { id: 'onyx', label: 'Onyx', description: 'Voix masculine, profonde et assurée' },
+  { id: 'shimmer', label: 'Shimmer', description: 'Voix féminine, douce' },
+]
+
 export default function MobileHome({
   email,
   rights,
@@ -67,6 +79,60 @@ export default function MobileHome({
 
   const nomAffiche = displayName || (email ? email.split('@')[0] : '')
 
+  // Choix de la voix de l'assistant vocal (OpenAI TTS ne propose pas
+  // d'accents régionaux -- seulement 6 timbres génériques, cf. discussion).
+  // Persisté dans vision_tci_preferences.voix_assistant, réutilisée telle
+  // quelle par VoiceReportButtons et MobileHomeSummary pour tous leurs
+  // appels à /api/atelier-ai/speak.
+  const [voixSelecteurOuvert, setVoixSelecteurOuvert] = useState(false)
+  const [voixActuelle, setVoixActuelle] = useState('nova')
+  const [voixEnCoursEcoute, setVoixEnCoursEcoute] = useState<string | null>(null)
+  const [voixSauvegardeEnCours, setVoixSauvegardeEnCours] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    async function charger() {
+      if (!email) return
+      const { data } = await supabase.from('vision_tci_preferences').select('voix_assistant').eq('user_email', email).maybeSingle()
+      if (!cancelled) setVoixActuelle(String(data?.voix_assistant || 'nova'))
+    }
+    void charger()
+    return () => { cancelled = true }
+  }, [email])
+
+  async function choisirVoix(voix: string) {
+    setVoixActuelle(voix)
+    setVoixSauvegardeEnCours(true)
+    try {
+      await supabase.from('vision_tci_preferences').upsert({ user_email: email, voix_assistant: voix, updated_at: new Date().toISOString() })
+    } finally {
+      setVoixSauvegardeEnCours(false)
+    }
+  }
+
+  async function ecouterExemple(voix: string) {
+    setVoixEnCoursEcoute(voix)
+    try {
+      const res = await fetch('/api/atelier-ai/speak', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: 'Bonjour, voici un exemple de ma voix pour tes résumés et comptes-rendus.', voice: voix }),
+      })
+      if (!res.ok) return
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const audio = new Audio(url)
+      await new Promise<void>((resolve) => {
+        audio.onended = () => resolve()
+        audio.onerror = () => resolve()
+        void audio.play().catch(() => resolve())
+      })
+      URL.revokeObjectURL(url)
+    } finally {
+      setVoixEnCoursEcoute(null)
+    }
+  }
+
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: `28px ${MARGE_ECRAN}px`, gap: 14 }}>
       <div style={{ marginBottom: 10, padding: '0 4px' }}>
@@ -84,10 +150,78 @@ export default function MobileHome({
         <div style={{ fontFamily: 'var(--font-display)', fontSize: 23, fontWeight: 700, marginTop: 4 }}>
           Bonjour{nomAffiche ? `, ${nomAffiche}` : ''}
         </div>
-        <div style={{ marginTop: 8 }}>
+        <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10 }}>
           <LastSyncBadge />
+          <button
+            type="button"
+            onClick={() => setVoixSelecteurOuvert(true)}
+            style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 5, padding: '5px 10px', borderRadius: 999, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: 'rgba(255,255,255,0.65)', fontSize: 11.5, fontWeight: 600 }}
+          >
+            🎙️ Voix
+          </button>
         </div>
       </div>
+
+      {voixSelecteurOuvert && (
+        <div
+          style={{ position: 'fixed', inset: 0, zIndex: 2300, background: 'rgba(6,10,18,0.7)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
+          onClick={() => setVoixSelecteurOuvert(false)}
+        >
+          <div
+            style={{ width: '100%', maxWidth: 480, background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.1)', padding: '12px 18px 26px', display: 'flex', flexDirection: 'column', gap: 10 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 2px' }} />
+            <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Voix de l'assistant</div>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', marginBottom: 4, lineHeight: 1.5 }}>
+              6 timbres proposés par le moteur vocal -- pas d'accent régional disponible, seulement des voix différentes.
+            </div>
+
+            {VOIX_OPTIONS.map((v) => {
+              const actif = voixActuelle === v.id
+              const enEcoute = voixEnCoursEcoute === v.id
+              return (
+                <div
+                  key={v.id}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderRadius: 12,
+                    border: `1px solid ${actif ? 'rgba(75,146,172,0.5)' : 'rgba(255,255,255,0.1)'}`,
+                    background: actif ? 'rgba(75,146,172,0.14)' : 'rgba(255,255,255,0.03)',
+                  }}
+                >
+                  <button
+                    type="button"
+                    onClick={() => void ecouterExemple(v.id)}
+                    disabled={enEcoute}
+                    aria-label={`Écouter un exemple de la voix ${v.label}`}
+                    style={{ flexShrink: 0, width: 36, height: 36, borderRadius: '50%', border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(255,255,255,0.06)', color: '#fff', fontSize: 15 }}
+                  >
+                    {enEcoute ? '…' : '▶️'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void choisirVoix(v.id)}
+                    disabled={voixSauvegardeEnCours}
+                    style={{ flex: 1, textAlign: 'left', background: 'none', border: 'none', padding: 0 }}
+                  >
+                    <div style={{ fontSize: 14.5, fontWeight: 700, color: '#fff' }}>{v.label}</div>
+                    <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)' }}>{v.description}</div>
+                  </button>
+                  {actif && <span style={{ color: '#8FC7DA', fontSize: 18, flexShrink: 0 }}>✓</span>}
+                </div>
+              )
+            })}
+
+            <button
+              type="button"
+              onClick={() => setVoixSelecteurOuvert(false)}
+              style={{ marginTop: 6, padding: '12px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: 'transparent', color: 'rgba(255,255,255,0.7)', fontSize: 13.5, fontWeight: 600 }}
+            >
+              Fermer
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Une seule grille 2 colonnes pour TOUT (boutons vocaux inclus) --
          garantit une largeur strictement identique entre "Nouvelle tâche"
