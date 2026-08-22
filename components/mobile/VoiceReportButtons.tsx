@@ -226,16 +226,27 @@ export default function VoiceReportButtons({
   }
 
   async function demarrerEnregistrement(): Promise<void> {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-    streamRef.current = stream
-    const mimeType = mimeTypeSupporte()
-    const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream)
-    chunksRef.current = []
-    recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) chunksRef.current.push(e.data)
+    let stream: MediaStream
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    } catch (e: any) {
+      throw new Error(`[micro] ${e?.name || 'Erreur'} : ${e?.message || e}`)
     }
-    mediaRecorderRef.current = recorder
-    recorder.start()
+    streamRef.current = stream
+
+    const mimeType = mimeTypeSupporte()
+    try {
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream)
+      chunksRef.current = []
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data)
+      }
+      mediaRecorderRef.current = recorder
+      recorder.start()
+    } catch (e: any) {
+      stream.getTracks().forEach((t) => t.stop())
+      throw new Error(`[enregistreur, mimeType="${mimeType || '(défaut)'}"] ${e?.name || 'Erreur'} : ${e?.message || e}`)
+    }
   }
 
   function arreterEnregistrement(): Promise<Blob> {
@@ -280,10 +291,10 @@ export default function VoiceReportButtons({
 
       setEtape('enregistrement')
       await demarrerEnregistrement()
-    } catch (err) {
+    } catch (err: any) {
       console.error(err)
       setEtape('erreur')
-      setMessageFinal("Impossible d'accéder au micro. Vérifie les autorisations du navigateur.")
+      setMessageFinal(err?.message || "Impossible d'accéder au micro. Vérifie les autorisations du navigateur.")
     }
   }
 
@@ -322,7 +333,7 @@ export default function VoiceReportButtons({
     } catch (err: any) {
       console.error(err)
       setEtape('erreur')
-      setMessageFinal(err?.message || 'Une erreur est survenue.')
+      setMessageFinal(err?.name ? `${err.name} : ${err.message}` : (err?.message || 'Une erreur est survenue.'))
     }
   }
 
@@ -330,10 +341,10 @@ export default function VoiceReportButtons({
     try {
       setEtape('enregistrement_confirmation')
       await demarrerEnregistrement()
-    } catch (err) {
+    } catch (err: any) {
       console.error(err)
       setEtape('erreur')
-      setMessageFinal("Impossible d'accéder au micro. Vérifie les autorisations du navigateur.")
+      setMessageFinal(err?.message || "Impossible d'accéder au micro. Vérifie les autorisations du navigateur.")
     }
   }
 
@@ -378,7 +389,7 @@ export default function VoiceReportButtons({
     } catch (err: any) {
       console.error(err)
       setEtape('erreur')
-      setMessageFinal(err?.message || 'Une erreur est survenue.')
+      setMessageFinal(err?.name ? `${err.name} : ${err.message}` : (err?.message || 'Une erreur est survenue.'))
     }
   }
 
