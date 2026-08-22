@@ -12,15 +12,16 @@ type ButtonConfig = {
   sub: string
   accessKey?: keyof AccessRights
   icon: string
-  color: string
+  gradient: string
+  subColor: string
 }
 
 const BUTTONS: ButtonConfig[] = [
-  { key: 'activite', label: 'Mon activité', sub: 'Devis · CDC · BL · Factures · Marge', accessKey: 'can_dashboard', icon: '📊', color: '#4B92AC' },
-  { key: 'clients', label: 'Mes clients', sub: 'Fiches et suivi client', accessKey: 'can_dashboard', icon: '👥', color: '#A6A181' },
-  { key: 'rdv', label: 'Mes rdv', sub: 'Agenda, comptes rendus, recherche documents', icon: '📅', color: '#7A5EA8' },
-  { key: 'alertes', label: 'Mes tâches - alertes', sub: 'À traiter en priorité', icon: '✅', color: '#C1683C' },
-  { key: 'prospects', label: 'Carte Prospects & Clients', sub: 'Trouver un prospect ou un client autour de moi', icon: '🗺️', color: '#3F9142' },
+  { key: 'activite', label: 'Mon activité', sub: 'Devis · CDC · BL · Factures · Marge', accessKey: 'can_dashboard', icon: '📊', gradient: 'linear-gradient(160deg, #185FA5, #0C447C)', subColor: '#B5D4F4' },
+  { key: 'clients', label: 'Mes clients', sub: 'Fiches et suivi client', accessKey: 'can_dashboard', icon: '👥', gradient: 'linear-gradient(160deg, #3B6D11, #27500A)', subColor: '#C0DD97' },
+  { key: 'rdv', label: 'Mes rdv', sub: 'Agenda, comptes rendus, recherche documents', icon: '📅', gradient: 'linear-gradient(160deg, #534AB7, #3C3489)', subColor: '#CECBF6' },
+  { key: 'alertes', label: 'Mes tâches - alertes', sub: 'À traiter en priorité', icon: '✅', gradient: 'linear-gradient(160deg, #993C1D, #712B13)', subColor: '#F5C4B3' },
+  { key: 'prospects', label: 'Carte Prospects & Clients', sub: 'Trouver un prospect ou un client autour de moi', icon: '🗺️', gradient: 'linear-gradient(160deg, #0F6E56, #085041)', subColor: '#9FE1CB' },
 ]
 
 // Marge horizontale de l'écran -- réduite (18px -> 10px de chaque côté) :
@@ -97,8 +98,8 @@ export default function MobileHome({
                 alignItems: 'center',
                 justifyContent: 'center',
                 textAlign: 'center',
-                border: `1px solid ${b.color}55`,
-                background: `${b.color}1A`,
+                border: '1px solid rgba(255,255,255,0.14)',
+                background: b.gradient,
                 borderRadius: 18,
                 padding: '20px 14px',
                 height: 148,
@@ -107,21 +108,21 @@ export default function MobileHome({
                 gridColumn: seule ? '1 / -1' : undefined,
               }}
             >
-              <span style={{ position: 'absolute', top: 12, right: 14, fontSize: 20, color: 'rgba(255,255,255,0.3)' }}>›</span>
+              <span style={{ position: 'absolute', top: 12, right: 14, fontSize: 20, color: 'rgba(255,255,255,0.55)' }}>›</span>
               <div
                 style={{
-                  width: 44, height: 44, borderRadius: 14, background: `${b.color}33`,
-                  border: `1px solid ${b.color}66`, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  width: 44, height: 44, borderRadius: 14, background: 'rgba(255,255,255,0.16)',
+                  border: '1px solid rgba(255,255,255,0.25)', display: 'flex', alignItems: 'center', justifyContent: 'center',
                   fontSize: 22, marginBottom: 10,
                 }}
               >
                 {b.icon}
               </div>
-              <div style={{ fontFamily: 'var(--font-display)', fontSize: 19, fontWeight: 700, lineHeight: 1.25 }}>
+              <div style={{ fontFamily: 'var(--font-display)', fontSize: 19, fontWeight: 700, lineHeight: 1.25, color: '#fff' }}>
                 {b.label}
                 {b.key === 'alertes' && alertsCount > 0 ? ` (${alertsCount})` : ''}
               </div>
-              <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.45)', marginTop: 6 }}>{b.sub}</div>
+              <div style={{ fontSize: 12.5, color: b.subColor, marginTop: 6 }}>{b.sub}</div>
             </button>
           )
         })}

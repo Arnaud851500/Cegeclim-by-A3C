@@ -23,6 +23,12 @@ export type MobileScreen = 'home' | 'activite' | 'clients' | 'rdv' | 'alertes' |
  */
 export default function MobileShell() {
   const [screen, setScreen] = useState<MobileScreen>('home')
+  // Cible de navigation "Mes rdv" -> "Mes clients" : numéro de tiers (et nom,
+  // en repli d'affichage) à ouvrir directement en arrivant sur l'écran
+  // clients. Réinitialisée une fois consommée par MobileClients, pour ne
+  // pas ré-ouvrir la même fiche si l'utilisateur revient plus tard sur cet
+  // écran par le menu normal.
+  const [cibleClient, setCibleClient] = useState<{ numero: string; nom: string } | null>(null)
   const { rights, email } = useAccess()
   const {
     total, detail, loading, fetchTodoList, fetchCerfaList,
@@ -31,6 +37,11 @@ export default function MobileShell() {
 
   function goHome() {
     setScreen('home')
+  }
+
+  function ouvrirClientDepuisRdv(numeroTiers: string, nom: string) {
+    setCibleClient({ numero: numeroTiers, nom })
+    setScreen('clients')
   }
 
   return (
@@ -49,8 +60,14 @@ export default function MobileShell() {
         <MobileHome email={email} rights={rights} alertsCount={total} onNavigate={setScreen} />
       )}
       {screen === 'activite' && <MobileActivite />}
-      {screen === 'clients' && <MobileClients />}
-      {screen === 'rdv' && <MobileRdv />}
+      {screen === 'clients' && (
+        <MobileClients
+          cibleNumero={cibleClient?.numero}
+          cibleNom={cibleClient?.nom}
+          onCibleConsommee={() => setCibleClient(null)}
+        />
+      )}
+      {screen === 'rdv' && <MobileRdv onOpenClient={ouvrirClientDepuisRdv} />}
       {screen === 'alertes' && (
         <MobileAlertes
           detail={detail}
@@ -80,7 +97,7 @@ function screenTitle(screen: MobileScreen) {
     case 'alertes':
       return 'Mes alertes'
     case 'prospects':
-      return 'Prospects'
+      return 'Carte Prospects & Clients'
     default:
       return ''
   }

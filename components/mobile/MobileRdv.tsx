@@ -139,7 +139,7 @@ async function searchByField(table: string, field: string, term: string) {
   }
 }
 
-export default function MobileRdv() {
+export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTiers: string, nom: string) => void }) {
   const [term, setTerm] = useState('')
   const [results, setResults] = useState<DocResult[] | null>(null)
   const [loading, setLoading] = useState(false)
@@ -215,11 +215,22 @@ export default function MobileRdv() {
               .select('id, company_name, reference')
               .in('id', companyIds)
 
+            // La référence d'une fiche "entreprise" est le numéro tiers nu
+            // ("C0162"), celle d'un "contact" rattaché est suffixée
+            // ("C0162-1", "C0162-liv"...) -- même convention que le tiroir
+            // contacts (MobileClients_v2). Si le RDV est en réalité lié à
+            // un CONTACT plutôt qu'à l'entreprise elle-même, on remonte au
+            // numéro tiers de l'entreprise parente (avant le tiret) pour
+            // que la navigation vers la fiche client pointe au bon endroit.
             const infoById = new Map(
-              ((companies || []) as Record<string, any>[]).map((c) => [
-                c.id,
-                { name: String(c.company_name || '').trim(), numeroTiers: String(c.reference || '').trim() || null },
-              ]),
+              ((companies || []) as Record<string, any>[]).map((c) => {
+                const reference = String(c.reference || '').trim()
+                const numeroEntreprise = reference.includes('-') ? reference.split('-')[0] : reference
+                return [
+                  c.id,
+                  { name: String(c.company_name || '').trim(), numeroTiers: numeroEntreprise || null },
+                ]
+              }),
             )
 
             ;((links || []) as Record<string, any>[]).forEach((l) => {
@@ -365,6 +376,7 @@ export default function MobileRdv() {
     const startDate = r.start ? new Date(r.start) : null
     const endDate = r.end ? new Date(r.end) : null
     const fmtTime = (d: Date | null) => (d ? d.toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '')
+    const peutNaviguer = Boolean(r.numeroTiers && onOpenClient)
     setOpenDetail({
       title: r.subject,
       subtitle: RDV_TYPE_LABELS[r.type] || r.type || 'Activité',
@@ -374,18 +386,39 @@ export default function MobileRdv() {
         { label: 'Fin', value: r.allDay ? (endDate ? endDate.toLocaleDateString('fr-FR') : '') : fmtTime(endDate) },
         { label: 'Toute la journée', value: r.allDay ? 'Oui' : 'Non' },
       ],
-      // Boutons vocaux uniquement si le RDV est bien rattaché à un client
-      // identifié (numéro tiers résolu) — sinon rien à rattacher en base.
-      footer: r.numeroTiers ? (
-        <VoiceReportButtons
-          numeroTiers={r.numeroTiers}
-          clientNom={r.company || ''}
-          rdvActivityId={r.id}
-          rdvLabel={r.subject}
-          userEmail={currentEmail}
-          userName={currentName}
-        />
-      ) : undefined,
+      footer: (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: r.numeroTiers ? 0 : undefined }}>
+          {peutNaviguer && (
+            <button
+              type="button"
+              onClick={() => {
+                setOpenDetail(null)
+                onOpenClient?.(r.numeroTiers as string, r.company || '')
+              }}
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                padding: '13px', borderRadius: 12, border: '1px solid rgba(75,146,172,0.4)',
+                background: 'rgba(75,146,172,0.14)', color: '#8FC7DA', fontSize: 14, fontWeight: 700,
+              }}
+            >
+              🏢 Voir la fiche client
+            </button>
+          )}
+          {/* Boutons vocaux uniquement si le RDV est bien rattaché à un
+             client identifié (numéro tiers résolu) — sinon rien à
+             rattacher en base. */}
+          {r.numeroTiers && (
+            <VoiceReportButtons
+              numeroTiers={r.numeroTiers}
+              clientNom={r.company || ''}
+              rdvActivityId={r.id}
+              rdvLabel={r.subject}
+              userEmail={currentEmail}
+              userName={currentName}
+            />
+          )}
+        </div>
+      ),
     })
   }
 
@@ -505,10 +538,20 @@ export default function MobileRdv() {
                   <span style={{ width: 4, alignSelf: 'stretch', borderRadius: 2, background: color, flexShrink: 0 }} />
                   <div style={{ minWidth: 0, flex: 1 }}>
                     {r.company && (
-                      <div style={{
-                        fontSize: 10.5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.02em',
-                        color: '#E8A96A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-                      }}>
+                      <div
+                        onClick={(e) => {
+                          if (r.numeroTiers && onOpenClient) {
+                            e.stopPropagation()
+                            onOpenClient(r.numeroTiers, r.company as string)
+                          }
+                        }}
+                        style={{
+                          fontSize: 10.5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.02em',
+                          color: '#E8A96A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                          textDecoration: r.numeroTiers && onOpenClient ? 'underline' : 'none',
+                          textUnderlineOffset: 2,
+                        }}
+                      >
                         {r.company}
                       </div>
                     )}
