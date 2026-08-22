@@ -14,6 +14,26 @@ import { useViewport } from '@/lib/useViewport'
 import MobileBrandBar from '@/components/mobile/MobileBrandBar'
 import './globals.css'
 import { SpeedInsights } from "@vercel/speed-insights/next"
+import type { Metadata, Viewport } from 'next'
+
+export const metadata: Metadata = {
+  title: 'Le compagnon CEGECLIM',
+  appleWebApp: {
+    title: 'Le compagnon CEGECLIM',
+    statusBarStyle: 'black-translucent',
+    // 'standalone' masque la barre d'adresse quand l'app est lancée
+    // depuis l'icône ajoutée à l'écran d'accueil (iOS Safari).
+    capable: true,
+  },
+}
+
+export const viewport: Viewport = {
+  themeColor: '#0B1220',
+  // Empêche le zoom accidentel au double-tap dans l'app "installée".
+  width: 'device-width',
+  initialScale: 1,
+  maximumScale: 1,
+}
 
 import {
   SocieteFilterProvider,
