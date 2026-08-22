@@ -58,8 +58,20 @@ async function convertirEnWav(blob: Blob): Promise<Blob> {
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext
     const audioCtx = new AudioContextClass()
     const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0))
-    const wav = audioBufferToWav(audioBuffer)
     void audioCtx.close()
+
+    // Garde-fou : un décodage "réussi" mais anormalement court (< 0.3s)
+    // pour un enregistrement qu'on sait plus long est le signe d'un
+    // décodage silencieusement défaillant (buffer quasi vide) plutôt que
+    // d'un vrai enregistrement court — dans ce cas, mieux vaut renvoyer le
+    // blob d'origine (qui a au moins une chance d'être correctement
+    // interprété côté serveur) qu'un WAV "valide" mais vide.
+    if (audioBuffer.duration < 0.3) {
+      console.warn('[VoiceReportButtons] durée décodée suspecte (', audioBuffer.duration, 's) — envoi du blob d’origine')
+      return blob
+    }
+
+    const wav = audioBufferToWav(audioBuffer)
     return new Blob([wav], { type: 'audio/wav' })
   } catch (e) {
     console.warn('[VoiceReportButtons] conversion WAV impossible, envoi du format brut', e)
@@ -135,6 +147,7 @@ export default function VoiceReportButtons({
   const [etape, setEtape] = useState<Etape>('idle')
   const [messageFinal, setMessageFinal] = useState('')
   const [resumeAffiche, setResumeAffiche] = useState('')
+  const [transcriptAffiche, setTranscriptAffiche] = useState('')
   const [spokenAffiche, setSpokenAffiche] = useState('')
   const [tachesAffichees, setTachesAffichees] = useState<Tache[]>([])
   const [lectureEnCours, setLectureEnCours] = useState(false)
@@ -245,6 +258,7 @@ export default function VoiceReportButtons({
     setModeActif(mode)
     setMessageFinal('')
     setResumeAffiche('')
+    setTranscriptAffiche('')
     setSpokenAffiche('')
     setTachesAffichees([])
     setCompteRenduIdCible(completer || null)
@@ -258,7 +272,11 @@ export default function VoiceReportButtons({
             ? 'Je t’écoute pour compléter le compte rendu de ta visite.'
             : 'Je t’écoute pour synthétiser le compte rendu de ta visite.'
           : 'Je t’écoute, décris la tâche à ajouter.'
-      void jouerTexte(phraseAccueil) // n'attend pas la fin : le micro peut démarrer pendant l'annonce
+      // On ATTEND la fin de l'annonce avant de démarrer le micro : sinon le
+      // micro capte l'annonce elle-même (bouclage haut-parleur -> micro) au
+      // lieu d'attendre la voix de l'utilisateur, ce qui produisait des
+      // enregistrements sans contenu exploitable.
+      await jouerTexte(phraseAccueil)
 
       setEtape('enregistrement')
       await demarrerEnregistrement()
@@ -290,6 +308,7 @@ export default function VoiceReportButtons({
 
       dernierResultatRef.current = { transcript: data.transcript, resume: data.resume, taches: data.taches || [] }
       setResumeAffiche(data.resume || '')
+      setTranscriptAffiche(data.transcript || '')
       setSpokenAffiche(data.spoken_summary || '')
       setTachesAffichees(data.taches || [])
       setEtape('resume_pret')
@@ -368,6 +387,7 @@ export default function VoiceReportButtons({
     setEtape('idle')
     setMessageFinal('')
     setResumeAffiche('')
+    setTranscriptAffiche('')
     setSpokenAffiche('')
     setTachesAffichees([])
     setCompteRenduIdCible(null)
@@ -479,6 +499,17 @@ export default function VoiceReportButtons({
           >
             🔊 {lectureEnCours ? 'Lecture…' : 'Réécouter le résumé'}
           </button>
+
+          {transcriptAffiche && (
+            <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+              <div style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.3)', marginBottom: 4 }}>
+                Transcription brute (ce qui a été entendu)
+              </div>
+              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)', lineHeight: 1.5, fontStyle: 'italic' }}>
+                « {transcriptAffiche} »
+              </div>
+            </div>
+          )}
         </div>
       )}
 
