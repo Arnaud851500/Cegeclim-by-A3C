@@ -1617,7 +1617,7 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
                           title={
                             certificationSignals.capacite.count > 0
                               ? `Capacité gaz : ${certificationSignals.capacite.count} validité(s) à moins d'un mois sur le périmètre actif`
-                              : 'Aucune capacité gaz à échéance dans moins d'un mois'
+                              : 'Aucune capacité gaz à échéance dans moins d’un mois'
                           }
                         />
                       )}
