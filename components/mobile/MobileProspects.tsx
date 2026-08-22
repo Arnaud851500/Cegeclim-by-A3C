@@ -454,10 +454,26 @@ export default function MobileProspects() {
           .lte('coordonneeLambertAbscisseEtablissement', x0 + rayonM)
           .gte('coordonneeLambertOrdonneeEtablissement', y0 - rayonM)
           .lte('coordonneeLambertOrdonneeEtablissement', y0 + rayonM)
-          .limit(3000)
+          // BUG CORRIGÉ : cette requête n'avait aucun tri, avec une limite
+          // à 3000. La boîte de recherche grandit avec le rayon (en
+          // surface, donc environ ×4 pour un rayon doublé) -- à 50 km, le
+          // nombre de candidats bruts avant filtrage exact par distance
+          // peut dépasser 3000, et sans tri, PostgREST retourne les lignes
+          // dans un ordre non garanti : des lignes pourtant plus proches
+          // (comme un client trouvé à 25 km) pouvaient être coupées
+          // arbitrairement par la limite alors qu'un rayon plus large
+          // aurait dû STRICTEMENT inclure tout ce qu'un rayon plus petit
+          // trouvait. Limite remontée largement au-dessus de ce qu'une
+          // zone réaliste peut contenir.
+          .limit(20000)
 
         if (cancelled) return
         if (error) throw error
+        if (data && data.length >= 20000) {
+          console.warn(
+            '[MobileProspects] La requête a atteint la limite de 20000 lignes -- des résultats pourraient encore manquer sur un très grand rayon dans une zone très dense. Augmenter la limite si ça se reproduit.',
+          )
+        }
 
         const rawRows = (data || []) as ProspectRow[]
 
@@ -473,6 +489,13 @@ export default function MobileProspects() {
             .from('ref_tiers')
             .select('siret, mise_en_sommeil, representant')
             .in('siret', siretsEnvisages)
+            // Sans limite explicite, PostgREST applique sa propre limite
+            // par défaut (souvent 1000) -- avec la remontée à 20000
+            // candidats bruts possibles sur la requête principale, ce
+            // croisement pouvait être tronqué silencieusement à grand
+            // rayon, faussant l'identification "client CEGECLIM" pour une
+            // partie des résultats.
+            .limit(siretsEnvisages.length)
 
           if (refTiersError) {
             console.warn('[MobileProspects] lecture ref_tiers impossible :', refTiersError.message)
