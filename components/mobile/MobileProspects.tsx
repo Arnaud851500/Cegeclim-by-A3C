@@ -913,7 +913,16 @@ export default function MobileProspects() {
                 <div>Écartés (pas de coordonnées exploitables) : {diagnosticRecherche.exclusSansCoords}</div>
                 <div>Écartés (distance exacte &gt; rayon) : {diagnosticRecherche.exclusDistance}</div>
                 <div style={{ color: '#fff', fontWeight: 700 }}>Restants après filtrage géo : {diagnosticRecherche.apresFiltrageGeo}</div>
-                <div>Après filtres actifs (Client/Prospect/secteur/RGE...) : {prospectsFiltres.length}</div>
+                <div style={{ marginTop: 6, color: 'rgba(255,255,255,0.5)' }}>— État des filtres actifs —</div>
+                <div>Client CEGECLIM affiché : {afficherClients ? 'OUI' : 'NON'}</div>
+                <div>Prospect affiché : {afficherProspects ? 'OUI' : 'NON'}</div>
+                <div>Collaborateur : {collaborateurFiltre || '(tous)'}</div>
+                <div>Secteurs sélectionnés : {secteursActifs.size === 0 ? '(tous)' : Array.from(secteursActifs).join(', ')}</div>
+                <div>RGE uniquement : {rgeSeul ? 'OUI' : 'NON'}</div>
+                <div>Capacité gaz uniquement : {capaciteGazSeul ? 'OUI' : 'NON'}</div>
+                <div>Capital social sélectionné : {capitalSocialActifs.size === 0 ? '(tous)' : Array.from(capitalSocialActifs).join(', ')}</div>
+                <div>Ancienneté : {ancienneteMax.label}</div>
+                <div style={{ color: '#fff', fontWeight: 700, marginTop: 4 }}>Après filtres actifs : {prospectsFiltres.length}</div>
               </div>
             )}
           </div>
