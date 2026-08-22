@@ -96,6 +96,10 @@ const PROSPECT_STATUS_OPTIONS: ProspectStatusValue[] = [
 ]
 
 const RADIUS_PRESETS_KM = [5, 10, 25, 50, 100]
+// Raccourcis pratiques (région d'activité habituelle) -- n'importe quel
+// autre département reste saisissable via le champ texte libre, ce n'est
+// pas une liste fermée.
+const DEPARTEMENTS_RACCOURCIS = ['85', '44', '49', '79', '17', '86']
 
 type AnciennetePreset = { key: string; label: string; maxDays: number | null }
 const ANCIENNETE_PRESETS: AnciennetePreset[] = [
@@ -277,6 +281,15 @@ export default function MobileProspects() {
   const [position, setPosition] = useState<UserPosition | null>(null)
   const [locating, setLocating] = useState(false)
   const [geoError, setGeoError] = useState<string | null>(null)
+  // Géolocalisation rendue optionnelle : par défaut activée (comportement
+  // inchangé), mais désactivable -- dans ce cas la recherche ne dépend
+  // plus d'un rayon autour d'une position, mais du filtre "Département"
+  // (ou de rien du tout si aucun département n'est choisi non plus,
+  // auquel cas toute la base suivie est interrogée, avec une limite de
+  // sécurité). La vue "Carte" nécessite toujours une position réelle pour
+  // avoir un centre : désactivée quand la géolocalisation est éteinte.
+  const [geolocalisationActivee, setGeolocalisationActivee] = useState(true)
+  const [departementFiltre, setDepartementFiltre] = useState('')
 
   // Filtres réglés AVANT d'afficher la carte -- tous à options fixes,
   // aucun ne dépend des données chargées (contrairement au secteur, qui
@@ -302,8 +315,9 @@ export default function MobileProspects() {
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [diagnosticRecherche, setDiagnosticRecherche] = useState<{
-    position: { lat: number; lng: number }
-    rayonKm: number
+    position: { lat: number; lng: number } | null
+    rayonKm: number | null
+    departement: string | null
     candidatsBruts: number
     exclusFerme: number
     exclusSansCoords: number
@@ -446,39 +460,55 @@ export default function MobileProspects() {
   }, [vue, filtresValides, position])
 
   useEffect(() => {
-    if (!position || !filtresValides) return
+    if (!filtresValides) return
+    // Si la géolocalisation est activée, on attend une position avant de
+    // charger quoi que ce soit (comme avant). Si elle est désactivée, on
+    // charge sans attendre -- la recherche repose alors sur le département
+    // (ou sur toute la base suivie si aucun département n'est choisi non
+    // plus).
+    if (geolocalisationActivee && !position) return
     let cancelled = false
 
     async function charger() {
       setLoading(true)
       setLoadError(null)
       try {
-        const { x: x0, y: y0 } = wgs84ToLambert93(position!.lat, position!.lng)
-        const rayonM = radiusKm * 1000
+        const champs =
+          'id, siret, raison_sociale_affichee, activitePrincipaleEtablissement, naf_libelle_traduit, codePostalEtablissement, libelleCommuneEtablissement, adresse_complete, latitude, longitude, coordonneeLambertAbscisseEtablissement, coordonneeLambertOrdonneeEtablissement, telephone, email, nom_dirigeant, prospect_status, prospect_comment, present_dans_cegeclim, dateCreationEtablissement, etatAdministratifUniteLegale, rge, capacite_gaz, capital_social'
 
-        const { data, error } = await supabase
-          .from('clients')
-          .select(
-            'id, siret, raison_sociale_affichee, activitePrincipaleEtablissement, naf_libelle_traduit, codePostalEtablissement, libelleCommuneEtablissement, adresse_complete, latitude, longitude, coordonneeLambertAbscisseEtablissement, coordonneeLambertOrdonneeEtablissement, telephone, email, nom_dirigeant, prospect_status, prospect_comment, present_dans_cegeclim, dateCreationEtablissement, etatAdministratifUniteLegale, rge, capacite_gaz, capital_social',
-          )
-          .not('coordonneeLambertAbscisseEtablissement', 'is', null)
-          .not('coordonneeLambertOrdonneeEtablissement', 'is', null)
-          .gte('coordonneeLambertAbscisseEtablissement', x0 - rayonM)
-          .lte('coordonneeLambertAbscisseEtablissement', x0 + rayonM)
-          .gte('coordonneeLambertOrdonneeEtablissement', y0 - rayonM)
-          .lte('coordonneeLambertOrdonneeEtablissement', y0 + rayonM)
-          // BUG CORRIGÉ : cette requête n'avait aucun tri, avec une limite
-          // à 3000. La boîte de recherche grandit avec le rayon (en
-          // surface, donc environ ×4 pour un rayon doublé) -- à 50 km, le
-          // nombre de candidats bruts avant filtrage exact par distance
-          // peut dépasser 3000, et sans tri, PostgREST retourne les lignes
-          // dans un ordre non garanti : des lignes pourtant plus proches
-          // (comme un client trouvé à 25 km) pouvaient être coupées
-          // arbitrairement par la limite alors qu'un rayon plus large
-          // aurait dû STRICTEMENT inclure tout ce qu'un rayon plus petit
-          // trouvait. Limite remontée largement au-dessus de ce qu'une
-          // zone réaliste peut contenir.
-          .limit(20000)
+        let requete = supabase.from('clients').select(champs)
+
+        if (geolocalisationActivee && position) {
+          // Mode géolocalisé : boîte Lambert93 autour de la position, comme
+          // avant. BUG CORRIGÉ précédemment : cette requête n'avait aucun
+          // tri, avec une limite à 3000 -- la boîte grandit avec le rayon
+          // (environ ×4 en surface pour un rayon doublé), et sans tri,
+          // PostgREST pouvait couper arbitrairement des lignes pourtant
+          // plus proches. Limite remontée à 20000.
+          const { x: x0, y: y0 } = wgs84ToLambert93(position.lat, position.lng)
+          const rayonM = radiusKm * 1000
+          requete = requete
+            .not('coordonneeLambertAbscisseEtablissement', 'is', null)
+            .not('coordonneeLambertOrdonneeEtablissement', 'is', null)
+            .gte('coordonneeLambertAbscisseEtablissement', x0 - rayonM)
+            .lte('coordonneeLambertAbscisseEtablissement', x0 + rayonM)
+            .gte('coordonneeLambertOrdonneeEtablissement', y0 - rayonM)
+            .lte('coordonneeLambertOrdonneeEtablissement', y0 + rayonM)
+            .limit(20000)
+        } else {
+          // Mode sans géolocalisation : pas de boîte géographique -- on
+          // filtre directement par département en base si renseigné
+          // (beaucoup plus efficace que de tout charger puis filtrer côté
+          // client), sinon on interroge toute la base suivie avec une
+          // limite de sécurité raisonnable (le volume total suivi tourne
+          // autour de quelques milliers de lignes, largement en dessous).
+          if (departementFiltre.trim()) {
+            requete = requete.ilike('codePostalEtablissement', `${departementFiltre.trim()}%`)
+          }
+          requete = requete.limit(6000)
+        }
+
+        const { data, error } = await requete
 
         if (cancelled) return
         if (error) throw error
@@ -560,15 +590,21 @@ export default function MobileProspects() {
           const coords = coordonneesEffectives(r)
           if (!coords) { exclusSansCoords++; continue }
 
-          const dist = distanceKmWgs84(position!.lat, position!.lng, coords.lat, coords.lon)
-          if (dist > radiusKm) { exclusDistance++; continue }
+          // Le filtre de distance exacte ne s'applique qu'en mode
+          // géolocalisé -- sans position, la boîte géographique n'existe
+          // pas non plus, donc rien à comparer à un rayon.
+          if (position) {
+            const dist = distanceKmWgs84(position.lat, position.lng, coords.lat, coords.lon)
+            if (dist > radiusKm) { exclusDistance++; continue }
+          }
 
           rows.push({ ...r, latEff: coords.lat, lonEff: coords.lon, estClientCegeclim, representant })
         }
 
         setDiagnosticRecherche({
-          position: { lat: position!.lat, lng: position!.lng },
-          rayonKm: radiusKm,
+          position: position ? { lat: position.lat, lng: position.lng } : null,
+          rayonKm: geolocalisationActivee && position ? radiusKm : null,
+          departement: departementFiltre.trim() || null,
           candidatsBruts: rawRows.length,
           exclusFerme,
           exclusSansCoords,
@@ -589,7 +625,7 @@ export default function MobileProspects() {
 
     void charger()
     return () => { cancelled = true }
-  }, [position, filtresValides, radiusKm])
+  }, [position, filtresValides, radiusKm, geolocalisationActivee, departementFiltre])
 
   const prospectsFiltres = useMemo(() => {
     return prospects.filter((p) => {
@@ -608,13 +644,14 @@ export default function MobileProspects() {
       if (rgeSeul && !p.rge) return false
       if (capaciteGazSeul && !p.capacite_gaz) return false
       if (!matchesCapitalSocial(p.capital_social, capitalSocialActifs)) return false
+      if (departementFiltre.trim() && !String(p.codePostalEtablissement || '').startsWith(departementFiltre.trim())) return false
       if (ancienneteMax.maxDays != null) {
         const age = diffDaysFromToday(p.dateCreationEtablissement)
         if (age == null || age < 0 || age > ancienneteMax.maxDays) return false
       }
       return true
     })
-  }, [prospects, secteursActifs, rgeSeul, capaciteGazSeul, capitalSocialActifs, ancienneteMax, afficherClients, afficherProspects, collaborateurFiltre])
+  }, [prospects, secteursActifs, rgeSeul, capaciteGazSeul, capitalSocialActifs, ancienneteMax, afficherClients, afficherProspects, collaborateurFiltre, departementFiltre])
 
   function toggleSecteur(sector: string) {
     setSecteursActifs((prev) => {
@@ -664,7 +701,7 @@ export default function MobileProspects() {
   // dans le tiroir sur la carte, pour rester cohérent.
   function BlocFiltresFixes({ compact }: { compact: boolean }) {
     const [dimensionOuverte, setDimensionOuverte] = useState<
-      null | 'rayon' | 'anciennete' | 'capital' | 'secteur' | 'collaborateur'
+      null | 'rayon' | 'anciennete' | 'capital' | 'secteur' | 'collaborateur' | 'departement'
     >(null)
 
     const resumeRayon = `${radiusKm} km`
@@ -672,6 +709,7 @@ export default function MobileProspects() {
     const resumeCapital = capitalSocialActifs.size === 0 ? 'Tous' : `${capitalSocialActifs.size} sélection${capitalSocialActifs.size > 1 ? 's' : ''}`
     const resumeSecteur = secteursActifs.size === 0 ? 'Tous' : `${secteursActifs.size} sélection${secteursActifs.size > 1 ? 's' : ''}`
     const resumeCollaborateur = collaborateurFiltre || 'Tous'
+    const resumeDepartement = departementFiltre.trim() || 'Tous'
 
     return (
       <>
@@ -679,6 +717,21 @@ export default function MobileProspects() {
            besoin d'un sous-tiroir pour un Oui/Non. */}
         <LigneInterrupteur label="Client CEGECLIM" valeur={afficherClients} onChange={setAfficherClients} compact={compact} />
         <LigneInterrupteur label="Prospect" valeur={afficherProspects} onChange={setAfficherProspects} compact={compact} />
+
+        {/* Géolocalisation : désactivable -- dans ce cas la recherche ne
+           dépend plus d'un rayon autour d'une position, mais du filtre
+           "Département" (ou de rien, auquel cas toute la base suivie est
+           interrogée). Le rayon est grisé quand la géolocalisation est
+           éteinte, puisqu'il ne s'applique plus. */}
+        <LigneInterrupteur label="Géolocalisation" valeur={geolocalisationActivee} onChange={setGeolocalisationActivee} compact={compact} />
+        <LigneDimension
+          label="Rayon de recherche"
+          valeur={geolocalisationActivee ? resumeRayon : 'Non applicable'}
+          onClick={() => geolocalisationActivee && setDimensionOuverte('rayon')}
+          compact={compact}
+          desactive={!geolocalisationActivee}
+        />
+        <LigneDimension label="Département" valeur={resumeDepartement} onClick={() => setDimensionOuverte('departement')} compact={compact} />
 
         {/* Collaborateur : ne filtre que les clients CEGECLIM (les
            prospects n'ont pas de représentant assigné) -- grisé si les
@@ -691,7 +744,6 @@ export default function MobileProspects() {
           desactive={!afficherClients}
         />
 
-        <LigneDimension label="Rayon de recherche" valeur={resumeRayon} onClick={() => setDimensionOuverte('rayon')} compact={compact} />
         <LigneDimension label="Ancienneté" valeur={resumeAnciennete} onClick={() => setDimensionOuverte('anciennete')} compact={compact} />
         <LigneDimension label="Capital social" valeur={resumeCapital} onClick={() => setDimensionOuverte('capital')} compact={compact} />
         <LigneDimension label="Secteur / type d'activité" valeur={resumeSecteur} onClick={() => setDimensionOuverte('secteur')} compact={compact} />
@@ -728,6 +780,33 @@ export default function MobileProspects() {
                         {km} km
                       </button>
                     ))}
+                  </div>
+                </>
+              )}
+
+              {dimensionOuverte === 'departement' && (
+                <>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Département</div>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <button type="button" onClick={() => setDepartementFiltre('')} style={chipStyle(departementFiltre.trim() === '', '166,161,129', '10px 16px', 14)}>
+                      Tous
+                    </button>
+                    {DEPARTEMENTS_RACCOURCIS.map((dept) => (
+                      <button key={dept} type="button" onClick={() => setDepartementFiltre(dept)} style={chipStyle(departementFiltre.trim() === dept, '166,161,129', '10px 16px', 14)}>
+                        {dept}
+                      </button>
+                    ))}
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)', marginBottom: 6 }}>Ou saisir un autre code (2 ou 3 chiffres)</div>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={departementFiltre}
+                      onChange={(e) => setDepartementFiltre(e.target.value.replace(/[^0-9]/g, '').slice(0, 3))}
+                      placeholder="Ex. 44"
+                      style={{ width: '100%', height: 44, borderRadius: 10, border: '1px solid rgba(255,255,255,0.18)', background: 'rgba(255,255,255,0.06)', color: '#fff', padding: '0 12px', fontSize: 15 }}
+                    />
                   </div>
                 </>
               )}
@@ -834,16 +913,22 @@ export default function MobileProspects() {
   if (!filtresValides) {
     return (
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '16px 18px 28px', gap: 18, overflowY: 'auto' }}>
-        {geoError ? (
-          <div style={{ padding: '10px 12px', borderRadius: 10, background: 'rgba(193,104,60,0.14)', border: '1px solid rgba(193,104,60,0.32)', color: '#e0a685', fontSize: 12.5 }}>
-            {geoError}
-            <button type="button" onClick={localiser} style={{ display: 'block', marginTop: 6, background: 'none', border: 'none', color: '#fff', fontSize: 12, fontWeight: 700, textDecoration: 'underline', cursor: 'pointer', padding: 0 }}>
-              Réessayer
-            </button>
-          </div>
+        {geolocalisationActivee ? (
+          geoError ? (
+            <div style={{ padding: '10px 12px', borderRadius: 10, background: 'rgba(193,104,60,0.14)', border: '1px solid rgba(193,104,60,0.32)', color: '#e0a685', fontSize: 12.5 }}>
+              {geoError}
+              <button type="button" onClick={localiser} style={{ display: 'block', marginTop: 6, background: 'none', border: 'none', color: '#fff', fontSize: 12, fontWeight: 700, textDecoration: 'underline', cursor: 'pointer', padding: 0 }}>
+                Réessayer
+              </button>
+            </div>
+          ) : (
+            <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.55)' }}>
+              {locating ? 'Localisation en cours…' : position ? 'Position trouvée.' : 'En attente de la position…'}
+            </div>
+          )
         ) : (
-          <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.55)' }}>
-            {locating ? 'Localisation en cours…' : position ? 'Position trouvée.' : 'En attente de la position…'}
+          <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.4)' }}>
+            Géolocalisation désactivée -- la recherche porte sur le département choisi ci-dessous (ou sur toute la base suivie si aucun n'est choisi).
           </div>
         )}
 
@@ -853,20 +938,21 @@ export default function MobileProspects() {
           <button
             type="button"
             onClick={() => { setVue('liste'); setFiltresValides(true) }}
-            disabled={!position}
+            disabled={geolocalisationActivee && !position}
             style={{
               flex: 1, padding: '15px', borderRadius: 14,
-              border: 'none', background: position ? '#A6A181' : 'rgba(166,161,129,0.3)',
+              border: 'none', background: (!geolocalisationActivee || position) ? '#A6A181' : 'rgba(166,161,129,0.3)',
               color: '#141A26', fontSize: 15, fontWeight: 700,
-              cursor: position ? 'pointer' : 'default',
+              cursor: (!geolocalisationActivee || position) ? 'pointer' : 'default',
             }}
           >
-            {position ? '📋 Voir la liste' : '…'}
+            {!geolocalisationActivee || position ? '📋 Voir la liste' : '…'}
           </button>
           <button
             type="button"
             onClick={() => { setVue('carte'); setFiltresValides(true) }}
             disabled={!position}
+            title={!geolocalisationActivee ? "La carte nécessite une position réelle -- réactive la géolocalisation pour l'utiliser." : undefined}
             style={{
               flex: 1, padding: '15px', borderRadius: 14,
               border: `1px solid ${position ? 'rgba(75,146,172,0.5)' : 'rgba(75,146,172,0.2)'}`,
@@ -875,7 +961,7 @@ export default function MobileProspects() {
               cursor: position ? 'pointer' : 'default',
             }}
           >
-            {position ? '🗺️ Voir la carte' : 'En attente…'}
+            {position ? '🗺️ Voir la carte' : !geolocalisationActivee ? '🗺️ Carte (géoloc requise)' : 'En attente…'}
           </button>
         </div>
       </div>
@@ -932,8 +1018,11 @@ export default function MobileProspects() {
               <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: 12.5 }}>Aucune recherche effectuée pour l'instant.</div>
             ) : (
               <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: '#8fd4a8', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <div>Position utilisée : {diagnosticRecherche.position.lat.toFixed(5)}, {diagnosticRecherche.position.lng.toFixed(5)}</div>
-                <div>Rayon demandé : {diagnosticRecherche.rayonKm} km</div>
+                <div>
+                  Position utilisée : {diagnosticRecherche.position ? `${diagnosticRecherche.position.lat.toFixed(5)}, ${diagnosticRecherche.position.lng.toFixed(5)}` : '(géolocalisation désactivée)'}
+                </div>
+                <div>Rayon demandé : {diagnosticRecherche.rayonKm != null ? `${diagnosticRecherche.rayonKm} km` : '(non applicable)'}</div>
+                <div>Département filtré : {diagnosticRecherche.departement || '(tous)'}</div>
                 <div>Candidats bruts (boîte Lambert93) : {diagnosticRecherche.candidatsBruts}</div>
                 <div>Écartés (entreprise fermée) : {diagnosticRecherche.exclusFerme}</div>
                 <div>Écartés (pas de coordonnées exploitables) : {diagnosticRecherche.exclusSansCoords}</div>
