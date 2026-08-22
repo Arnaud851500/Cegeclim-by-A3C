@@ -309,6 +309,9 @@ export default function MobileProspects() {
     exclusSansCoords: number
     exclusDistance: number
     apresFiltrageGeo: number
+    siretsVerifies: number
+    siretsReconnus: number
+    refTiersErreur: string | null
   } | null>(null)
   const [diagnosticRechercheOuvert, setDiagnosticRechercheOuvert] = useState(false)
 
@@ -493,29 +496,49 @@ export default function MobileProspects() {
         // prospectsFiltres puisse les inclure/exclure dynamiquement selon
         // les filtres "Client CEGECLIM" / "Collaborateur" (togglables sans
         // recharger les données).
+        //
+        // BUG CORRIGÉ : sur un grand rayon (ex. 2107 candidats bruts à
+        // 50 km, confirmé par le diagnostic à l'écran), un seul
+        // .in('siret', [...]) avec autant de valeurs produit une URL de
+        // dizaines de Ko -- au-delà de ce que la plupart des serveurs/
+        // proxys acceptent (souvent ~8 Ko). La requête échouait
+        // silencieusement (erreur juste logguée en console.warn), laissant
+        // la correspondance CEGECLIM entièrement vide : TOUTES les lignes
+        // retombaient à "prospect", et avec le filtre "Client CEGECLIM
+        // uniquement" activé, plus rien ne passait. Découpage en lots de
+        // 200 SIRET, en parallèle, pour rester largement sous toute limite
+        // d'URL quel que soit le nombre de candidats.
         let clientsCegeclimParSiret = new Map<string, string | null>()
+        let refTiersErreur: string | null = null
         if (siretsEnvisages.length > 0) {
-          const { data: refTiersData, error: refTiersError } = await supabase
-            .from('ref_tiers')
-            .select('siret, mise_en_sommeil, representant')
-            .in('siret', siretsEnvisages)
-            // Sans limite explicite, PostgREST applique sa propre limite
-            // par défaut (souvent 1000) -- avec la remontée à 20000
-            // candidats bruts possibles sur la requête principale, ce
-            // croisement pouvait être tronqué silencieusement à grand
-            // rayon, faussant l'identification "client CEGECLIM" pour une
-            // partie des résultats.
-            .limit(siretsEnvisages.length)
-
-          if (refTiersError) {
-            console.warn('[MobileProspects] lecture ref_tiers impossible :', refTiersError.message)
-          } else {
-            clientsCegeclimParSiret = new Map(
-              ((refTiersData || []) as RefTiersRow[])
-                .map((row) => [normalizeSiret(row.siret), row.representant ? String(row.representant).trim() : null] as const)
-                .filter(([siret]) => Boolean(siret)),
-            )
+          const TAILLE_LOT = 200
+          const lots: string[][] = []
+          for (let i = 0; i < siretsEnvisages.length; i += TAILLE_LOT) {
+            lots.push(siretsEnvisages.slice(i, i + TAILLE_LOT))
           }
+
+          const resultats = await Promise.all(
+            lots.map((lot) =>
+              supabase
+                .from('ref_tiers')
+                .select('siret, mise_en_sommeil, representant')
+                .in('siret', lot)
+                .limit(lot.length),
+            ),
+          )
+
+          const erreurs = resultats.filter((r) => r.error)
+          if (erreurs.length > 0) {
+            refTiersErreur = erreurs[0].error!.message
+            console.warn('[MobileProspects] lecture ref_tiers impossible sur au moins un lot :', erreurs.map((e) => e.error!.message))
+          }
+
+          const toutesLesLignes = resultats.flatMap((r) => (r.data || []) as RefTiersRow[])
+          clientsCegeclimParSiret = new Map(
+            toutesLesLignes
+              .map((row) => [normalizeSiret(row.siret), row.representant ? String(row.representant).trim() : null] as const)
+              .filter(([siret]) => Boolean(siret)),
+          )
         }
 
         // Diagnostic : compte combien de lignes sont écartées à chaque
@@ -551,6 +574,9 @@ export default function MobileProspects() {
           exclusSansCoords,
           exclusDistance,
           apresFiltrageGeo: rows.length,
+          siretsVerifies: siretsEnvisages.length,
+          siretsReconnus: clientsCegeclimParSiret.size,
+          refTiersErreur,
         })
 
         setProspects(rows)
@@ -913,6 +939,11 @@ export default function MobileProspects() {
                 <div>Écartés (pas de coordonnées exploitables) : {diagnosticRecherche.exclusSansCoords}</div>
                 <div>Écartés (distance exacte &gt; rayon) : {diagnosticRecherche.exclusDistance}</div>
                 <div style={{ color: '#fff', fontWeight: 700 }}>Restants après filtrage géo : {diagnosticRecherche.apresFiltrageGeo}</div>
+                <div>SIRET vérifiés vs ref_tiers : {diagnosticRecherche.siretsVerifies}</div>
+                <div>… dont reconnus clients CEGECLIM : {diagnosticRecherche.siretsReconnus}</div>
+                {diagnosticRecherche.refTiersErreur && (
+                  <div style={{ color: '#e0a685' }}>❌ Erreur ref_tiers : {diagnosticRecherche.refTiersErreur}</div>
+                )}
                 <div style={{ marginTop: 6, color: 'rgba(255,255,255,0.5)' }}>— État des filtres actifs —</div>
                 <div>Client CEGECLIM affiché : {afficherClients ? 'OUI' : 'NON'}</div>
                 <div>Prospect affiché : {afficherProspects ? 'OUI' : 'NON'}</div>

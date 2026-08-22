@@ -1,7 +1,9 @@
 'use client'
 
+import { useEffect, useState } from 'react'
 import type { AccessRights } from '@/components/AccessContext'
 import type { MobileScreen } from './MobileShell'
+import { supabase } from '@/lib/supabaseClient'
 import LastSyncBadge from '@/components/LastSyncBadge'
 import VoiceReportButtons from './VoiceReportButtons'
 import MobileHomeSummary from './MobileHomeSummary'
@@ -43,6 +45,28 @@ export default function MobileHome({
 }) {
   const visibleButtons = BUTTONS.filter((b) => !b.accessKey || rights[b.accessKey])
 
+  // "Arnaud V." (user_page_access.display_name) plutôt que "a.valanchauskas"
+  // (dérivé de l'email) -- même source que les autres écrans mobile
+  // (MobileRdv, MobileClients...). Repli sur l'email si display_name est
+  // vide, pour ne jamais afficher "Bonjour," tout court.
+  const [displayName, setDisplayName] = useState('')
+  useEffect(() => {
+    let cancelled = false
+    async function chargerNom() {
+      if (!email) return
+      const { data } = await supabase
+        .from('user_page_access')
+        .select('display_name')
+        .eq('email', email)
+        .maybeSingle()
+      if (!cancelled) setDisplayName(String(data?.display_name || '').trim())
+    }
+    void chargerNom()
+    return () => { cancelled = true }
+  }, [email])
+
+  const nomAffiche = displayName || (email ? email.split('@')[0] : '')
+
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: `28px ${MARGE_ECRAN}px`, gap: 14 }}>
       <div style={{ marginBottom: 10, padding: '0 4px' }}>
@@ -58,7 +82,7 @@ export default function MobileHome({
           CEGECLIM
         </div>
         <div style={{ fontFamily: 'var(--font-display)', fontSize: 23, fontWeight: 700, marginTop: 4 }}>
-          Bonjour{email ? `, ${email.split('@')[0]}` : ''}
+          Bonjour{nomAffiche ? `, ${nomAffiche}` : ''}
         </div>
         <div style={{ marginTop: 8 }}>
           <LastSyncBadge />
@@ -81,7 +105,7 @@ export default function MobileHome({
           modeUnique="tache"
           labelBouton="Nouvelle tâche"
           userEmail={email || ''}
-          userName={email ? email.split('@')[0] : ''}
+          userName={nomAffiche}
         />
         <MobileHomeSummary userEmail={email} />
 
