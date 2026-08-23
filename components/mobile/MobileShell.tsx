@@ -9,8 +9,9 @@ import MobileClients from './MobileClients'
 import MobileRdv from './MobileRdv'
 import MobileAlertes from './MobileAlertes'
 import MobileProspects from './MobileProspects'
+import MobileStockArticles from './MobileStockArticles'
 
-export type MobileScreen = 'home' | 'activite' | 'clients' | 'rdv' | 'alertes' | 'prospects'
+export type MobileScreen = 'home' | 'activite' | 'clients' | 'rdv' | 'alertes' | 'prospects' | 'stock'
 
 /**
  * Point d'entrée de l'expérience mobile, une fois l'utilisateur authentifié.
@@ -82,6 +83,7 @@ export default function MobileShell() {
         />
       )}
       {screen === 'prospects' && <MobileProspects />}
+      {screen === 'stock' && <MobileStockArticles />}
     </div>
   )
 }
@@ -98,6 +100,8 @@ function screenTitle(screen: MobileScreen) {
       return 'Mes alertes'
     case 'prospects':
       return 'Carte Prospects & Clients'
+    case 'stock':
+      return 'Stock articles'
     default:
       return ''
   }
