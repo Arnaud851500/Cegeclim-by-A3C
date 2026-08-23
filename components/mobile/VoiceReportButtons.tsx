@@ -842,10 +842,25 @@ export default function VoiceReportButtons({
       libererVerrou() // flux terminé -- plus aucune activité micro/écriture en cours
       setEtape('termine')
       setMessageFinal(data.message)
-      void jouerTexte(data.message)
+
+      // Laisse le message "Tâches créées" affiché au moins 1,4s (le temps
+      // de le lire) ET attend la fin de la lecture vocale si elle joue plus
+      // longtemps -- puis, en mode plein écran (bouton "Nouvelle tâche" de
+      // l'accueil), referme automatiquement la fenêtre pour revenir
+      // directement sur l'écran d'origine, sans exiger un tap sur
+      // "Fermer". Dans les fiches RDV/client (pleinEcran=false), on garde
+      // le comportement existant : l'utilisateur ferme lui-même, au cas où
+      // il veut relire le résumé ou enchaîner sur autre chose dans la
+      // même sheet.
+      const attenteMinimum = new Promise<void>((resolve) => { window.setTimeout(resolve, 1400) })
+      await Promise.all([jouerTexte(data.message), attenteMinimum])
 
       if (data.confirme && modeActif === 'compte_rendu') {
         await chargerComptesRendus()
+      }
+
+      if (data.confirme && pleinEcran) {
+        reinitialiser()
       }
     } catch (err: any) {
       console.error(err)
