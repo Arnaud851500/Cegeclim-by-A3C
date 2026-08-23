@@ -23,6 +23,10 @@ const BUTTONS: ButtonConfig[] = [
   { key: 'clients', label: 'Mes clients', sub: 'Fiches et suivi client', accessKey: 'can_dashboard', icon: '👥', gradient: 'linear-gradient(160deg, #3B6D11, #27500A)', subColor: '#C0DD97' },
   { key: 'rdv', label: 'Mes rdv', sub: 'Agenda, comptes rendus, recherche documents', icon: '📅', gradient: 'linear-gradient(160deg, #534AB7, #3C3489)', subColor: '#CECBF6' },
   { key: 'alertes', label: 'Mes tâches - alertes', sub: 'À traiter en priorité', icon: '✅', gradient: 'linear-gradient(160deg, #993C1D, #712B13)', subColor: '#F5C4B3' },
+  // Nouveau : recherche article, stock par dépôt, projection -- couleur
+  // "sauge" reprise de la charte CEGECLIM (#A6A181), pas encore utilisée
+  // par les autres cartes de cet écran.
+  { key: 'stock', label: 'Stock articles', sub: 'Recherche, dépôts, projection', accessKey: 'can_dashboard', icon: '📦', gradient: 'linear-gradient(160deg, #A6A181, #6E6A54)', subColor: '#EDE9D8' },
   { key: 'prospects', label: 'Carte Prospects & Clients', sub: 'Trouver un prospect ou un client autour de moi', icon: '🗺️', gradient: 'linear-gradient(160deg, #0F6E56, #085041)', subColor: '#9FE1CB' },
 ]
 
@@ -233,7 +237,14 @@ export default function MobileHome({
          s'étire plus que ses voisines, et comme le titre est ancré au
          centre, ça décale visuellement les titres d'une carte à l'autre.
          Avec une hauteur fixe, tous les titres tombent exactement à la
-         même hauteur, alignés entre les cases. */}
+         même hauteur, alignés entre les cases.
+
+         "Carte Prospects & Clients" repasse en demi-largeur avec l'ajout
+         de "Stock articles" : la règle "seule ? pleine largeur" ci-dessous
+         (i === visibleButtons.length - 1 && length % 2 !== 0) ne se
+         déclenche plus, puisque le total de cartes est désormais pair
+         (6 au lieu de 5) -- aucune logique à changer, juste un bouton de
+         plus dans BUTTONS. */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
         <VoiceReportButtons
           modeUnique="tache"
