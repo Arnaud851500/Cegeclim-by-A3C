@@ -43,6 +43,19 @@ type Etape =
 
 type Mode = 'compte_rendu' | 'tache'
 
+/**
+ * Verrou global partagé entre TOUTES les instances de VoiceReportButtons
+ * montées simultanément dans l'app (bouton "Nouvelle tâche" de l'accueil,
+ * fiche RDV, fiche client...) : empêche de démarrer une session d'écoute
+ * pendant qu'une autre est déjà active ailleurs, ce qui ouvrirait deux
+ * micros en parallèle et mélangerait les flux. Simple variable de module
+ * (pas de contexte React) : une seule page/onglet à la fois côté mobile,
+ * pas besoin de plus. Remise à null dès que la session propriétaire se
+ * termine, échoue, est stoppée manuellement, ou que son composant se
+ * démonte.
+ */
+let verrouSessionVocaleGlobal: { id: symbol } | null = null
+
 type CompteRenduExistant = {
   id: string
   created_at: string
@@ -330,6 +343,15 @@ export default function VoiceReportButtons({
   const audioElementRef = useRef<HTMLAudioElement | null>(null)
   const audioDeverrouilleRef = useRef(false)
   const forceStopConfirmationRef = useRef<(() => void) | null>(null)
+  // Identité stable de CETTE instance -- sert à savoir si c'est bien elle
+  // qui détient verrouSessionVocaleGlobal (et donc si elle peut le
+  // libérer / si elle doit refuser de démarrer une nouvelle session).
+  const idInstanceRef = useRef<symbol>(Symbol('voice-session'))
+  // Vrai dès que "Stop écoute" (arreterCompletement) a été déclenché --
+  // vérifié après chaque `await` des chaînes async longues pour cesser
+  // immédiatement toute suite du flux (pas d'écriture en base après un
+  // arrêt volontaire).
+  const annulerRef = useRef(false)
 
   /** Minuscule WAV silencieux généré à la volée (pas de fichier binaire à
    * livrer) -- sert uniquement à "débloquer" l'élément <audio> ci-dessous. */
@@ -463,6 +485,38 @@ export default function VoiceReportButtons({
     }
   }
 
+  /** Libère le verrou global SEULEMENT si cette instance le détient
+   * actuellement -- ne touche jamais à une session détenue par une autre
+   * instance. Appelé à chaque fin de flux (succès, erreur, arrêt manuel,
+   * démontage). */
+  function libererVerrou() {
+    if (verrouSessionVocaleGlobal?.id === idInstanceRef.current) {
+      verrouSessionVocaleGlobal = null
+    }
+  }
+
+  /** "Stop écoute" -- arrêt complet et immédiat de la session en cours,
+   * quelle que soit l'étape actuelle (annonce, enregistrement, traitement,
+   * écoute de confirmation...). Coupe le micro, l'enregistreur et toute
+   * lecture audio, empêche la suite du flux de continuer (annulerRef,
+   * vérifié après chaque await dans stopperEtEnvoyer/ecouterConfirmation/
+   * completerEcheancesManquantes -- aucune écriture en base après un
+   * arrêt volontaire), libère le verrou global, puis revient à l'état de
+   * repos. */
+  function arreterCompletement() {
+    annulerRef.current = true
+    try { forceStopConfirmationRef.current?.() } catch {}
+    try {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop()
+      }
+    } catch {}
+    try { streamRef.current?.getTracks().forEach((t) => t.stop()) } catch {}
+    arreterLecture()
+    libererVerrou()
+    reinitialiser()
+  }
+
   async function demarrerEnregistrement(): Promise<void> {
     let stream: MediaStream
     try {
@@ -590,9 +644,21 @@ export default function VoiceReportButtons({
   }
 
   async function lancer(mode: Mode, completer?: string) {
+    // Empêche de démarrer une 2e session pendant qu'une autre tourne déjà
+    // ailleurs dans l'app (accueil, fiche RDV, fiche client...) -- voir
+    // verrouSessionVocaleGlobal en tête de fichier.
+    if (verrouSessionVocaleGlobal && verrouSessionVocaleGlobal.id !== idInstanceRef.current) {
+      setEtape('erreur')
+      setMessageFinal("Une écoute est déjà en cours ailleurs dans l'application. Arrête-la (« Stop écoute ») avant d'en démarrer une nouvelle.")
+      return
+    }
+
     // Doit être la toute première instruction, avant tout `await` -- voir
     // le commentaire de debloquerAudio() plus haut.
     debloquerAudio()
+
+    annulerRef.current = false
+    verrouSessionVocaleGlobal = { id: idInstanceRef.current }
 
     setModeActif(mode)
     setMessageFinal('')
@@ -616,11 +682,13 @@ export default function VoiceReportButtons({
       // lieu d'attendre la voix de l'utilisateur, ce qui produisait des
       // enregistrements sans contenu exploitable.
       await jouerTexte(phraseAccueil)
+      if (annulerRef.current) return // "Stop écoute" pendant l'annonce
 
       setEtape('enregistrement')
       await demarrerEnregistrement()
     } catch (err: any) {
       console.error(err)
+      libererVerrou()
       setEtape('erreur')
       setMessageFinal(err?.message || "Impossible d'accéder au micro. Vérifie les autorisations du navigateur.")
     }
@@ -630,8 +698,10 @@ export default function VoiceReportButtons({
     if (!modeActif) return
     try {
       const blobBrut = await arreterEnregistrement()
+      if (annulerRef.current) return
       setEtape('traitement')
       const blobWav = await convertirEnWav(blobBrut)
+      if (annulerRef.current) return
 
       const form = new FormData()
       form.append('audio', blobWav, 'audio.wav')
@@ -643,6 +713,7 @@ export default function VoiceReportButtons({
 
       const res = await fetch('/api/atelier-ai/voice-report', { method: 'POST', body: form })
       const data = await res.json()
+      if (annulerRef.current) return
       if (!res.ok) throw new Error(data?.error || 'Erreur de traitement.')
 
       dernierResultatRef.current = { transcript: data.transcript, resume: data.resume, taches: data.taches || [] }
@@ -658,6 +729,7 @@ export default function VoiceReportButtons({
       // fur et à mesure : c'est bien ce tableau complété qui part ensuite
       // dans /confirm.
       await completerEcheancesManquantes()
+      if (annulerRef.current) return
 
       setEtape('resume_pret')
 
@@ -666,9 +738,11 @@ export default function VoiceReportButtons({
       // l'écran. Si la lecture est bloquée par le navigateur, l'écoute
       // démarre quand même (le résumé reste affiché à l'écran).
       await jouerTexte(data.spoken_summary)
+      if (annulerRef.current) return
       await ecouterConfirmation()
     } catch (err: any) {
       console.error(err)
+      libererVerrou()
       setEtape('erreur')
       setMessageFinal(err?.name ? `${err.name} : ${err.message}` : (err?.message || 'Une erreur est survenue.'))
     }
@@ -682,12 +756,14 @@ export default function VoiceReportButtons({
   async function completerEcheancesManquantes() {
     const taches = dernierResultatRef.current?.taches || []
     for (let i = 0; i < taches.length; i++) {
+      if (annulerRef.current) return // "Stop écoute" pendant la complétion des échéances
       if (taches[i].echeance) continue
 
       let echeanceTrouvee: string | null = null
       let tentatives = 0
 
       while (!echeanceTrouvee && tentatives < 5) {
+        if (annulerRef.current) return
         tentatives += 1
         setEtape('echeance_question')
         await jouerTexte(
@@ -732,8 +808,10 @@ export default function VoiceReportButtons({
     try {
       setEtape('enregistrement_confirmation')
       const blobBrut = await enregistrerAvecDetectionSilence(forceStopConfirmationRef)
+      if (annulerRef.current) return
       setEtape('traitement_confirmation')
       const blobWav = await convertirEnWav(blobBrut)
+      if (annulerRef.current) return
 
       const form = new FormData()
       form.append('audio', blobWav, 'audio.wav')
@@ -750,15 +828,18 @@ export default function VoiceReportButtons({
 
       const res = await fetch('/api/atelier-ai/voice-report/confirm', { method: 'POST', body: form })
       const data = await res.json()
+      if (annulerRef.current) return
       if (!res.ok) throw new Error(data?.error || 'Erreur de confirmation.')
 
       if (data.confirme === null) {
         setMessageFinal(data.message)
         await jouerTexte(data.message)
+        if (annulerRef.current) return
         await ecouterConfirmation() // redemande, toujours sans toucher l'écran
         return
       }
 
+      libererVerrou() // flux terminé -- plus aucune activité micro/écriture en cours
       setEtape('termine')
       setMessageFinal(data.message)
       void jouerTexte(data.message)
@@ -768,12 +849,14 @@ export default function VoiceReportButtons({
       }
     } catch (err: any) {
       console.error(err)
+      libererVerrou()
       setEtape('erreur')
       setMessageFinal(err?.name ? `${err.name} : ${err.message}` : (err?.message || 'Une erreur est survenue.'))
     }
   }
 
   function reinitialiser() {
+    libererVerrou()
     setModeActif(null)
     setEtape('idle')
     setMessageFinal('')
@@ -784,6 +867,25 @@ export default function VoiceReportButtons({
     setCompteRenduIdCible(null)
     dernierResultatRef.current = null
   }
+
+  // Nettoyage au démontage : si cette instance détient encore le verrou
+  // (navigation pendant une écoute active), on coupe micro/enregistreur/
+  // lecture en cours et on le libère -- sinon une session orpheline
+  // bloquerait indéfiniment toute autre instance de démarrer.
+  useEffect(() => {
+    return () => {
+      if (verrouSessionVocaleGlobal?.id === idInstanceRef.current) {
+        try {
+          if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+            mediaRecorderRef.current.stop()
+          }
+        } catch {}
+        try { streamRef.current?.getTracks().forEach((t) => t.stop()) } catch {}
+        try { audioEnCoursRef.current?.pause() } catch {}
+        verrouSessionVocaleGlobal = null
+      }
+    }
+  }, [])
 
   const dernierCompteRendu = comptesRendusExistants && comptesRendusExistants.length > 0 ? comptesRendusExistants[0] : null
 
@@ -803,6 +905,27 @@ export default function VoiceReportButtons({
 
   const corps = (
     <>
+      {/* "Stop écoute" -- visible à TOUTE étape active du flux (annonce,
+         enregistrement, traitement, écoute de confirmation...), pas
+         seulement pendant la lecture de la voix de l'agent. Contrairement
+         au "⏹ Stop" ci-dessous (qui ne coupe que la lecture audio en
+         cours), celui-ci arrête complètement la session : micro,
+         enregistreur, lecture, et sort du flux sans rien écrire en base. */}
+      {etape !== 'idle' && etape !== 'termine' && etape !== 'erreur' && (
+        <button
+          type="button"
+          onClick={arreterCompletement}
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+            padding: '9px 12px', borderRadius: 999, border: '1px solid rgba(193,104,60,0.5)',
+            background: 'rgba(193,104,60,0.15)', color: '#e0a685', fontSize: 12.5, fontWeight: 700,
+            cursor: 'pointer', alignSelf: 'flex-start',
+          }}
+        >
+          ⏹ Stop écoute
+        </button>
+      )}
+
       {/* Visible à tout moment pendant une lecture, quelle que soit l'étape
          du flux (annonce, résumé, confirmation, message final). */}
       {lectureEnCours && (

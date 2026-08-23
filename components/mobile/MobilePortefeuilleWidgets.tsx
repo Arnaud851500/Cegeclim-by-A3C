@@ -1,0 +1,545 @@
+'use client'
+
+import { useEffect, useState } from 'react'
+import { supabase } from '@/lib/supabaseClient'
+
+// ─────────────────────────────────────────────────────────────────────────
+// Deux cartes à intégrer dans MobileActivite.tsx, juste après les cartes
+// Devis/CDC/BL/Factures/Marge existantes :
+//
+// - "Portefeuille de commandes" : reprend get_focus_mensuel_agency_control_
+//   cached / get_focus_mensuel_famille_control_cached (mêmes fonctions que
+//   le tableau desktop "Portefeuille de commandes par agence").
+// - "Projection CA du mois" : mêmes fonctions, colonnes projection_ca /
+//   ca_n1 / evol_pct (mêmes chiffres que "Projection du CA par agence").
+//
+// Cliquer sur une carte ouvre une fenêtre flottante avec :
+//   1. Un graphique cumulé depuis le 1er janvier vs N-1 (get_focus_mensuel_
+//      cumul_journalier, léger -- une ligne par jour, pas le détail brut).
+//   2. Une bascule "Par agence" / "Par famille macro" pour le tableau de
+//      détail en dessous (mêmes deux fonctions RPC que ci-dessus, appelées
+//      une fois -- elles renvoient déjà toutes les lignes groupées, pas
+//      besoin d'un appel par ligne comme pour les widgets Devis/CDC/BL/...).
+//
+// Reprend telles quelles les conventions déjà en place dans
+// MobileActivite.tsx : cache localStorage, palette de couleurs, structure
+// de la fenêtre flottante (BreakdownModal).
+// ─────────────────────────────────────────────────────────────────────────
+
+const COULEUR_PORTEFEUILLE = '#C1683C' // même orange/brun que CDC ailleurs dans l'appli
+const COULEUR_PROJECTION = '#3F9142' // même vert que Factures ailleurs dans l'appli
+const COULEUR_BL = '#4B92AC'
+
+type LigneControle = {
+  label: string
+  cdc: number
+  cdc_liv_mx: number
+  pl: number
+  pl_liv_mplus: number
+  blbr_mx: number
+  blbr_m: number
+  total: number
+  factures: number
+  projection_flux_bl: number
+  valeur_bl_nf_4pct: number
+  projection_ca: number
+  ca_n1: number
+  evol_pct: number | null
+}
+
+type Vue = 'portefeuille' | 'projection'
+type ModeGroupe = 'agence' | 'famille'
+
+function formatMontant(n: number): string {
+  const abs = Math.abs(n)
+  if (abs >= 1_000_000) return `${(n / 1_000_000).toLocaleString('fr-FR', { maximumFractionDigits: 2 })} M€`
+  if (abs >= 1_000) return `${(n / 1_000).toLocaleString('fr-FR', { maximumFractionDigits: 0 })} K€`
+  return `${n.toLocaleString('fr-FR', { maximumFractionDigits: 0 })} €`
+}
+function formatPct(n: number | null): string {
+  if (n === null || !Number.isFinite(n)) return '—'
+  return `${n >= 0 ? '▲' : '▼'} ${Math.abs(n).toLocaleString('fr-FR', { maximumFractionDigits: 1 })} %`
+}
+
+const CACHE_PREFIX = 'cegeclim:mobilePortefeuille:'
+function loadCache<T>(key: string): T | null {
+  try {
+    const raw = localStorage.getItem(key)
+    return raw ? (JSON.parse(raw) as T) : null
+  } catch {
+    return null
+  }
+}
+function saveCache<T>(key: string, data: T) {
+  try {
+    localStorage.setItem(key, JSON.stringify(data))
+  } catch {
+    // Stockage indisponible (navigation privée, quota...) : tant pis, pas de cache.
+  }
+}
+
+function isoToday() {
+  return new Date().toISOString().slice(0, 10)
+}
+function isoDaysAgo(iso: string, days: number) {
+  const d = new Date(`${iso}T00:00:00`)
+  d.setDate(d.getDate() - days)
+  return d.toISOString().slice(0, 10)
+}
+function debutAnneeIso(annee: number) {
+  return `${annee}-01-01`
+}
+
+// ── Chargement + agrégation des lignes de contrôle (agence ou famille) ────
+
+async function chargerLignesControle(mode: ModeGroupe, agenceForcee: string | null, collaborateurForcee: string | null): Promise<LigneControle[]> {
+  const rpcName = mode === 'agence' ? 'get_focus_mensuel_agency_control_cached' : 'get_focus_mensuel_famille_control_cached'
+  const { data, error } = await supabase.rpc(rpcName, {
+    p_focus_date: isoToday(),
+    p_month: null,
+    p_agence: mode === 'agence' ? null : agenceForcee,
+    p_famille_macro: null,
+    p_collaborateur: collaborateurForcee,
+    p_include_hors_statistiques: true,
+  })
+  if (error) {
+    console.error(`[MobilePortefeuilleWidgets] ${rpcName}`, error)
+    return []
+  }
+  return (data || []) as LigneControle[]
+}
+
+function sommerLignes(lignes: LigneControle[]) {
+  const total = lignes.reduce(
+    (acc, l) => {
+      acc.cdc += Number(l.cdc) || 0
+      acc.pl += Number(l.pl) || 0
+      acc.blbr_mx += Number(l.blbr_mx) || 0
+      acc.blbr_m += Number(l.blbr_m) || 0
+      acc.total += Number(l.total) || 0
+      acc.projection_ca += Number(l.projection_ca) || 0
+      acc.ca_n1 += Number(l.ca_n1) || 0
+      acc.projection_flux_bl += Number(l.projection_flux_bl) || 0
+      return acc
+    },
+    { cdc: 0, pl: 0, blbr_mx: 0, blbr_m: 0, total: 0, projection_ca: 0, ca_n1: 0, projection_flux_bl: 0 },
+  )
+  const evol_pct = total.ca_n1 ? ((total.projection_ca - total.ca_n1) / Math.abs(total.ca_n1)) * 100 : null
+  return { ...total, evol_pct }
+}
+
+// ── Cartes ──────────────────────────────────────────────────────────────
+
+export function PortefeuilleCommandesCard({
+  agenceForcee, collaborateurForcee, onOpen,
+}: { agenceForcee: string | null; collaborateurForcee: string | null; onOpen: () => void }) {
+  const [resume, setResume] = useState<ReturnType<typeof sommerLignes> | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    const cacheKey = `${CACHE_PREFIX}resume:portefeuille:${agenceForcee || ''}:${collaborateurForcee || ''}`
+    const cached = loadCache<ReturnType<typeof sommerLignes>>(cacheKey)
+    if (cached) { setResume(cached); setLoading(false) }
+
+    async function load() {
+      const lignes = await chargerLignesControle('agence', agenceForcee, collaborateurForcee)
+      if (cancelled) return
+      const s = sommerLignes(lignes)
+      setResume(s)
+      saveCache(cacheKey, s)
+      setLoading(false)
+    }
+    void load()
+    return () => { cancelled = true }
+  }, [agenceForcee, collaborateurForcee])
+
+  return (
+    <button
+      onClick={onOpen}
+      style={{
+        textAlign: 'left', borderRadius: 14, border: '1px solid rgba(255,255,255,0.10)',
+        background: 'rgba(255,255,255,0.04)', padding: '14px 14px 12px', width: '100%',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+        <span
+          style={{
+            display: 'inline-block', fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em',
+            color: COULEUR_PORTEFEUILLE, background: `${COULEUR_PORTEFEUILLE}22`, borderRadius: 6, padding: '3px 8px',
+          }}
+        >
+          Portefeuille
+        </span>
+        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)' }}>Détail ›</span>
+      </div>
+
+      {loading || !resume ? (
+        <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Chargement…</div>
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6 }}>
+          <MiniStat label="Total" value={formatMontant(resume.total)} />
+          <MiniStat label="CDC" value={formatMontant(resume.cdc)} />
+          <MiniStat label="PL" value={formatMontant(resume.pl)} />
+          <MiniStat label="BL/BR" value={formatMontant(resume.blbr_mx + resume.blbr_m)} />
+        </div>
+      )}
+    </button>
+  )
+}
+
+export function ProjectionCaCard({
+  agenceForcee, collaborateurForcee, onOpen,
+}: { agenceForcee: string | null; collaborateurForcee: string | null; onOpen: () => void }) {
+  const [resume, setResume] = useState<ReturnType<typeof sommerLignes> | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    const cacheKey = `${CACHE_PREFIX}resume:projection:${agenceForcee || ''}:${collaborateurForcee || ''}`
+    const cached = loadCache<ReturnType<typeof sommerLignes>>(cacheKey)
+    if (cached) { setResume(cached); setLoading(false) }
+
+    async function load() {
+      const lignes = await chargerLignesControle('agence', agenceForcee, collaborateurForcee)
+      if (cancelled) return
+      const s = sommerLignes(lignes)
+      setResume(s)
+      saveCache(cacheKey, s)
+      setLoading(false)
+    }
+    void load()
+    return () => { cancelled = true }
+  }, [agenceForcee, collaborateurForcee])
+
+  return (
+    <button
+      onClick={onOpen}
+      style={{
+        textAlign: 'left', borderRadius: 14, border: '1px solid rgba(255,255,255,0.10)',
+        background: 'rgba(255,255,255,0.04)', padding: '14px 14px 12px', width: '100%',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+        <span
+          style={{
+            display: 'inline-block', fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em',
+            color: COULEUR_PROJECTION, background: `${COULEUR_PROJECTION}22`, borderRadius: 6, padding: '3px 8px',
+          }}
+        >
+          Projection CA du mois
+        </span>
+        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)' }}>Détail ›</span>
+      </div>
+
+      {loading || !resume ? (
+        <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Chargement…</div>
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
+          <MiniStat label="CA projeté" value={formatMontant(resume.projection_ca)} />
+          <MiniStat label="CA N-1" value={formatMontant(resume.ca_n1)} />
+          <MiniStat label="Évol." value={formatPct(resume.evol_pct)} accent={resume.evol_pct !== null ? (resume.evol_pct >= 0 ? '#8fd4a8' : '#e0a685') : undefined} />
+        </div>
+      )}
+    </button>
+  )
+}
+
+function MiniStat({ label, value, accent }: { label: string; value: string; accent?: string }) {
+  return (
+    <div style={{ minWidth: 0 }}>
+      <div style={{ fontSize: 9.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.35)', marginBottom: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        {label}
+      </div>
+      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 13.5, fontWeight: 600, color: accent || '#fff', lineHeight: 1.15, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        {value}
+      </div>
+    </div>
+  )
+}
+
+// ── Fenêtre flottante commune (Portefeuille ou Projection) ────────────────
+
+export function PortefeuilleProjectionModal({
+  vue, agenceForcee, collaborateurForcee, famillesMacro, agences, onClose,
+}: {
+  vue: Vue
+  agenceForcee: string | null
+  collaborateurForcee: string | null
+  famillesMacro: string[]
+  agences: string[]
+  onClose: () => void
+}) {
+  const [modeGroupe, setModeGroupe] = useState<ModeGroupe>('agence')
+  const [lignes, setLignes] = useState<LigneControle[] | null>(null)
+  const [loadingLignes, setLoadingLignes] = useState(true)
+  const [refreshingLignes, setRefreshingLignes] = useState(false)
+
+  const canGroupByAgence = !agenceForcee
+  const modeEffectif: ModeGroupe = modeGroupe === 'agence' && !canGroupByAgence ? 'famille' : modeGroupe
+
+  const color = vue === 'portefeuille' ? COULEUR_PORTEFEUILLE : COULEUR_PROJECTION
+  const titre = vue === 'portefeuille' ? 'Portefeuille de commandes' : 'Projection CA du mois'
+
+  useEffect(() => {
+    let cancelled = false
+    const cacheKey = `${CACHE_PREFIX}table:${vue}:${modeEffectif}:${agenceForcee || ''}:${collaborateurForcee || ''}`
+    const cached = loadCache<LigneControle[]>(cacheKey)
+    if (cached) { setLignes(cached); setLoadingLignes(false); setRefreshingLignes(true) } else { setLoadingLignes(true) }
+
+    async function load() {
+      const data = await chargerLignesControle(modeEffectif, agenceForcee, collaborateurForcee)
+      if (cancelled) return
+      setLignes(data)
+      saveCache(cacheKey, data)
+      setLoadingLignes(false)
+      setRefreshingLignes(false)
+    }
+    void load()
+    return () => { cancelled = true }
+  }, [vue, modeEffectif, agenceForcee, collaborateurForcee])
+
+  return (
+    <div
+      style={{ position: 'fixed', inset: 0, zIndex: 200, background: 'rgba(6,10,18,0.62)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
+      onClick={onClose}
+    >
+      <div
+        style={{
+          width: '100%', maxWidth: 480, maxHeight: '88vh', display: 'flex', flexDirection: 'column',
+          background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20,
+          border: '1px solid rgba(255,255,255,0.08)', borderBottom: 'none',
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '12px auto 10px', flexShrink: 0 }} />
+
+        <div style={{ padding: '0 18px 12px', flexShrink: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <span
+              style={{
+                display: 'inline-block', fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em',
+                color, background: `${color}22`, borderRadius: 6, padding: '4px 9px',
+              }}
+            >
+              {titre}
+            </span>
+            <button onClick={onClose} style={{ color: 'rgba(255,255,255,0.4)', fontSize: 20, lineHeight: 1, background: 'none', border: 'none' }}>✕</button>
+          </div>
+        </div>
+
+        <div style={{ overflowY: 'auto', padding: '0 18px 24px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <CumulDepuisJanvierChart vue={vue} agenceForcee={agenceForcee} collaborateurForcee={collaborateurForcee} />
+
+          <div>
+            <div style={{ display: 'inline-flex', borderRadius: 999, border: '1px solid rgba(255,255,255,0.15)', padding: 2, marginBottom: 10 }}>
+              <button
+                onClick={() => setModeGroupe('agence')}
+                disabled={!canGroupByAgence}
+                style={{
+                  borderRadius: 999, padding: '6px 12px', fontSize: 12, fontWeight: 600, border: 'none',
+                  background: modeEffectif === 'agence' ? '#A6A181' : 'transparent',
+                  color: modeEffectif === 'agence' ? '#141A26' : 'rgba(255,255,255,0.55)',
+                  opacity: canGroupByAgence ? 1 : 0.4,
+                }}
+              >
+                Par agence
+              </button>
+              <button
+                onClick={() => setModeGroupe('famille')}
+                style={{
+                  borderRadius: 999, padding: '6px 12px', fontSize: 12, fontWeight: 600, border: 'none',
+                  background: modeEffectif === 'famille' ? '#A6A181' : 'transparent',
+                  color: modeEffectif === 'famille' ? '#141A26' : 'rgba(255,255,255,0.55)',
+                }}
+              >
+                Par famille macro
+              </button>
+            </div>
+
+            {refreshingLignes && (
+              <div style={{ marginBottom: 8, fontSize: 10.5, fontWeight: 700, color: '#FF3B30' }}>Actualisation…</div>
+            )}
+
+            {loadingLignes ? (
+              <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)', padding: '20px 0', textAlign: 'center' }}>Chargement…</div>
+            ) : !lignes || lignes.length === 0 ? (
+              <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)', padding: '20px 0', textAlign: 'center' }}>Aucune donnée sur ce périmètre.</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {lignes.map((l) => (
+                  <div key={l.label} style={{ borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)', padding: '10px 12px' }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 600, color: '#fff', marginBottom: 8 }}>{l.label}</div>
+                    {vue === 'portefeuille' ? (
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6 }}>
+                        <MiniStat label="Total" value={formatMontant(l.total)} />
+                        <MiniStat label="CDC" value={formatMontant(l.cdc)} />
+                        <MiniStat label="PL" value={formatMontant(l.pl)} />
+                        <MiniStat label="BL/BR" value={formatMontant(l.blbr_mx + l.blbr_m)} />
+                      </div>
+                    ) : (
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6 }}>
+                        <MiniStat label="CA projeté" value={formatMontant(l.projection_ca)} />
+                        <MiniStat label="CA N-1" value={formatMontant(l.ca_n1)} />
+                        <MiniStat label="Évol." value={formatPct(l.evol_pct)} accent={l.evol_pct !== null ? (l.evol_pct >= 0 ? '#8fd4a8' : '#e0a685') : undefined} />
+                        <MiniStat label="BL à venir" value={formatMontant(l.projection_flux_bl)} />
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Graphique cumulé depuis le 1er janvier vs N-1 (SVG léger, sans lib) ──
+
+type PointCumul = { index: number; valeur: number }
+
+function construireCumul(rows: { jour: string; montant: number }[], dateDebutIso: string, nbJours: number): number[] {
+  const map = new Map<string, number>()
+  for (const r of rows) map.set(r.jour, Number(r.montant) || 0)
+  const cumul: number[] = []
+  let acc = 0
+  const debut = new Date(`${dateDebutIso}T00:00:00`)
+  for (let i = 0; i < nbJours; i++) {
+    const d = new Date(debut)
+    d.setDate(d.getDate() + i)
+    const iso = d.toISOString().slice(0, 10)
+    acc += map.get(iso) || 0
+    cumul.push(acc)
+  }
+  return cumul
+}
+
+function CumulDepuisJanvierChart({
+  vue, agenceForcee, collaborateurForcee,
+}: { vue: Vue; agenceForcee: string | null; collaborateurForcee: string | null }) {
+  const [series, setSeries] = useState<{ n: number[]; n1: number[] } | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    const cacheKey = `${CACHE_PREFIX}chart:${vue}:${agenceForcee || ''}:${collaborateurForcee || ''}`
+    const cached = loadCache<{ n: number[]; n1: number[] }>(cacheKey)
+    if (cached) { setSeries(cached); setLoading(false) }
+
+    async function load() {
+      const today = isoToday()
+      const anneeActuelle = Number(today.slice(0, 4))
+      const debutN = debutAnneeIso(anneeActuelle)
+      const nbJours = Math.floor((new Date(`${today}T00:00:00`).getTime() - new Date(`${debutN}T00:00:00`).getTime()) / 86400000) + 1
+      const debutN1 = debutAnneeIso(anneeActuelle - 1)
+      const finN1 = isoDaysAgo(today, 365)
+
+      const types: Array<'CDC' | 'BL' | 'FACTURES'> = vue === 'portefeuille' ? ['CDC', 'BL'] : ['FACTURES']
+
+      const appels = types.flatMap((t) => [
+        supabase.rpc('get_focus_mensuel_cumul_journalier', {
+          p_date_debut: debutN, p_date_fin: today, p_type: t,
+          p_agence: agenceForcee, p_famille_macro: null, p_collaborateur: collaborateurForcee,
+          p_include_hors_statistiques: true,
+        }),
+        supabase.rpc('get_focus_mensuel_cumul_journalier', {
+          p_date_debut: debutN1, p_date_fin: finN1, p_type: t,
+          p_agence: agenceForcee, p_famille_macro: null, p_collaborateur: collaborateurForcee,
+          p_include_hors_statistiques: true,
+        }),
+      ])
+
+      const resultats = await Promise.all(appels)
+      if (cancelled) return
+
+      // Combine les types (CDC + BL pour "portefeuille") en une seule courbe
+      // cumulée N et une seule N-1, plutôt que d'afficher 4 lignes distinctes
+      // -- plus lisible sur un petit écran.
+      let cumulN = new Array(nbJours).fill(0)
+      let cumulN1 = new Array(nbJours).fill(0)
+      types.forEach((_, i) => {
+        const rowsN = (resultats[i * 2]?.data || []) as { jour: string; montant: number }[]
+        const rowsN1 = (resultats[i * 2 + 1]?.data || []) as { jour: string; montant: number }[]
+        const cN = construireCumul(rowsN, debutN, nbJours)
+        const cN1 = construireCumul(rowsN1, debutN1, nbJours)
+        cumulN = cumulN.map((v, idx) => v + cN[idx])
+        cumulN1 = cumulN1.map((v, idx) => v + cN1[idx])
+      })
+
+      const next = { n: cumulN, n1: cumulN1 }
+      setSeries(next)
+      saveCache(cacheKey, next)
+      setLoading(false)
+    }
+    void load()
+    return () => { cancelled = true }
+  }, [vue, agenceForcee, collaborateurForcee])
+
+  if (loading || !series) {
+    return (
+      <div style={{ height: 140, borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.35)' }}>Chargement du graphique…</span>
+      </div>
+    )
+  }
+
+  const couleur = vue === 'portefeuille' ? COULEUR_BL : COULEUR_PROJECTION
+  const toutesValeurs = [...series.n, ...series.n1]
+  const max = Math.max(1, ...toutesValeurs)
+  const largeur = 300
+  const hauteur = 120
+  const marge = 8
+
+  function chemin(valeurs: number[]) {
+    const n = valeurs.length
+    if (n < 2) return ''
+    return valeurs
+      .map((v, i) => {
+        const x = marge + (i / (n - 1)) * (largeur - marge * 2)
+        const y = hauteur - marge - (v / max) * (hauteur - marge * 2)
+        return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`
+      })
+      .join(' ')
+  }
+
+  const cheminN = chemin(series.n)
+  const cheminN1 = chemin(series.n1)
+  const dernierN = series.n[series.n.length - 1] || 0
+  const dernierN1Comparable = series.n1[series.n.length - 1] || 0
+
+  return (
+    <div style={{ borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)', padding: '12px 14px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+        <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
+          Cumul depuis le 1er janvier
+        </div>
+        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>
+          vs N-1 <span style={{ color: 'rgba(255,255,255,0.6)' }}>{formatMontant(dernierN1Comparable)}</span>
+        </div>
+      </div>
+      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 20, fontWeight: 700, color: '#fff', marginBottom: 6 }}>
+        {formatMontant(dernierN)}
+      </div>
+      <svg viewBox={`0 0 ${largeur} ${hauteur}`} style={{ width: '100%', height: 100, display: 'block' }}>
+        <line x1={marge} y1={hauteur - marge} x2={largeur - marge} y2={hauteur - marge} stroke="rgba(255,255,255,0.12)" strokeWidth={1} />
+        <path d={cheminN1} fill="none" stroke={couleur} strokeWidth={1.5} strokeDasharray="4 3" opacity={0.55} />
+        <path d={cheminN} fill="none" stroke={couleur} strokeWidth={2} />
+      </svg>
+      <div style={{ display: 'flex', gap: 14, marginTop: 4 }}>
+        <LegendeLigne couleur={couleur} pointille={false} texte="Cette année" />
+        <LegendeLigne couleur={couleur} pointille texte="N-1 (même période)" />
+      </div>
+    </div>
+  )
+}
+
+function LegendeLigne({ couleur, pointille, texte }: { couleur: string; pointille: boolean; texte: string }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+      <svg width="16" height="6"><line x1="0" y1="3" x2="16" y2="3" stroke={couleur} strokeWidth={2} strokeDasharray={pointille ? '4 3' : undefined} opacity={pointille ? 0.55 : 1} /></svg>
+      <span style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.5)' }}>{texte}</span>
+    </div>
+  )
+}

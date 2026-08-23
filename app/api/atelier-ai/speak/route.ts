@@ -8,10 +8,26 @@ import { NextRequest, NextResponse } from 'next/server'
 
 export const runtime = 'nodejs'
 
+// Les 6 timbres proposés par OpenAI TTS (tts-1) -- doit rester synchronisé
+// avec VOIX_OPTIONS côté front (MobileHome.tsx). Filet de sécurité : si le
+// front envoie un identifiant inattendu (préférence corrompue, ancienne
+// valeur...), on retombe sur 'nova' plutôt que de faire échouer l'appel
+// OpenAI (qui rejetterait une valeur de "voice" non reconnue).
+const VOIX_AUTORISEES = new Set(['nova', 'alloy', 'echo', 'fable', 'onyx', 'shimmer'])
+
 export async function POST(req: NextRequest) {
   try {
-    const { text } = await req.json()
+    const { text, voice } = await req.json()
     const cleanText = String(text || '').trim().slice(0, 2000)
+
+    // CORRECTIF : le paramètre `voice` envoyé par le front (choix de
+    // l'utilisateur dans "🎙️ Voix", ou voixPreferee dans
+    // VoiceReportButtons/MobileHomeSummary) n'était jusqu'ici jamais lu --
+    // seul `text` était déstructuré, et 'nova' partait toujours en dur
+    // vers OpenAI ci-dessous. D'où le retour systématique de la même voix
+    // féminine quel que soit le timbre sélectionné à l'écran.
+    const voixDemandee = String(voice || '').trim().toLowerCase()
+    const voixFinale = VOIX_AUTORISEES.has(voixDemandee) ? voixDemandee : 'nova'
 
     if (!cleanText) {
       return NextResponse.json({ error: 'Texte manquant.' }, { status: 400 })
@@ -25,7 +41,7 @@ export async function POST(req: NextRequest) {
       },
       body: JSON.stringify({
         model: 'tts-1',
-        voice: 'nova',
+        voice: voixFinale,
         input: cleanText,
         response_format: 'mp3',
         // >1.0 = plus rapide. 1.15 reste naturel tout en abrégeant l'attente.

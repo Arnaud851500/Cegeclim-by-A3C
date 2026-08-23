@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { usePageFilterAccess } from '@/lib/pageAccessFilters'
+import { PortefeuilleCommandesCard, ProjectionCaCard, PortefeuilleProjectionModal } from './MobilePortefeuilleWidgets'
 
 // ─────────────────────────────────────────────────────────────────────────
 // Reprend la logique de components/VisionTciKpiPanel.tsx (get_vision_tci_kpi)
@@ -71,6 +72,7 @@ export default function MobileActivite() {
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [openFamille, setOpenFamille] = useState<Famille | null>(null)
+  const [openWidget, setOpenWidget] = useState<'portefeuille' | 'projection' | null>(null)
 
   const [famillesMacro, setFamillesMacro] = useState<string[]>([])
   const [agences, setAgences] = useState<string[]>([])
@@ -211,6 +213,21 @@ export default function MobileActivite() {
         <ActiviteCard famille="Marge" dayLabel={useYesterday ? 'J-1' : 'Jour'} values={values.Marge} isMarge onClick={() => setOpenFamille('Marge')} />
       )}
 
+      {!loading && (
+        <>
+          <PortefeuilleCommandesCard
+            agenceForcee={agenceForcee}
+            collaborateurForcee={collaborateurForcee}
+            onOpen={() => setOpenWidget('portefeuille')}
+          />
+          <ProjectionCaCard
+            agenceForcee={agenceForcee}
+            collaborateurForcee={collaborateurForcee}
+            onOpen={() => setOpenWidget('projection')}
+          />
+        </>
+      )}
+
       {openFamille && (
         <BreakdownModal
           famille={openFamille}
@@ -221,6 +238,17 @@ export default function MobileActivite() {
           famillesMacro={famillesMacro}
           agences={agences}
           onClose={() => setOpenFamille(null)}
+        />
+      )}
+
+      {openWidget && (
+        <PortefeuilleProjectionModal
+          vue={openWidget}
+          agenceForcee={agenceForcee}
+          collaborateurForcee={collaborateurForcee}
+          famillesMacro={famillesMacro}
+          agences={agences}
+          onClose={() => setOpenWidget(null)}
         />
       )}
     </div>
