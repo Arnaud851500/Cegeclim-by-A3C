@@ -145,7 +145,7 @@ export default function MobileStockArticles() {
         <textarea
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder={'Référence ou désignation…\nOu colle une liste de références (une par ligne, ou séparées par virgule)'}
+          placeholder={'Référence ou désignation'}
           rows={isListe ? 3 : 1}
           style={{
             width: '100%', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)',
