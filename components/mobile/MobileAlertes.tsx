@@ -62,20 +62,27 @@ function formatDateCourte(value: any) {
 }
 
 /**
- * Pastille de couleur devant la description d'une tâche :
- * - verte : tâche débutée ("En cours"), OU échéance dans le futur/aujourd'hui
- * - rouge : échéance dans le passé (et pas encore débutée)
- * - orange : pas d'échéance renseignée
- * "Débuté" est prioritaire sur la date : une tâche en cours reste verte
- * même si sa date est dépassée, elle n'est pas "en retard" au sens propre
- * puisqu'elle avance.
+ * Pastille de couleur devant la description d'une tâche, basée sur
+ * l'échéance :
+ * - rouge : échéance strictement dans le passé (échue)
+ * - orange : échéance aujourd'hui ou dans les 4 prochains jours
+ * - verte : échéance au-delà de 4 jours, ou pas d'échéance renseignée
+ * NOTE : le statut "En cours" ne prime plus sur la date -- la pastille
+ * reflète désormais uniquement l'urgence de l'échéance (demande explicite).
  */
 function statutPastille(row: TodoRow): string {
-  if (row.status === 'En cours') return '🟢'
-  if (!row.due_date) return '🟠'
+  if (!row.due_date) return '🟢'
   const iso = normalizeDateIso(row.due_date)
-  const today = new Date().toISOString().slice(0, 10)
-  if (iso && iso < today) return '🔴'
+  if (!iso) return '🟢'
+
+  const echeance = new Date(`${iso}T00:00:00`)
+  const aujourdHui = new Date()
+  aujourdHui.setHours(0, 0, 0, 0)
+
+  const diffJours = Math.round((echeance.getTime() - aujourdHui.getTime()) / (1000 * 60 * 60 * 24))
+
+  if (diffJours < 0) return '🔴'
+  if (diffJours <= 4) return '🟠'
   return '🟢'
 }
 
