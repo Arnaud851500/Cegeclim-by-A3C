@@ -34,6 +34,22 @@
  *    côté route API (déjà correcte).
  *  - Bouton "Hypothèses mensuelles" renommé "Paramétrage hypothèses
  *    mensuelles".
+ *
+ * V2.5 (cette révision) — correction de la source du stock de départ +
+ * ajout d'une vue "par dépôt" :
+ *  - stock_initial (colonne "Stock dispo" du tableau, et point de départ de
+ *    toute la projection) provient désormais de sage.stock_depot agrégé
+ *    sur TOUS les dépôts (au lieu de l'ancien import CSV "Article_stock",
+ *    qui ne couvrait en réalité que le dépôt FMS et intégrait déjà les
+ *    réservations/commandes fournisseurs de Sage — double-comptées avec
+ *    les besoins/commandes déjà modélisés semaine par semaine par le
+ *    moteur de projection). Correctif appliqué côté vue SQL
+ *    (v_stock_articles_latest) : aucun changement de contrat de données
+ *    ici, uniquement une nouvelle option de visualisation par dépôt.
+ *  - Nouveau bouton "🏬 Par dépôt" sur chaque ligne de référence et dans la
+ *    fiche article, ouvrant le détail du stock dépôt par dépôt (réel,
+ *    réservé, commandé fournisseur, préparé, disponible, à terme) —
+ *    équivalent de l'écran Sage "Interrogation du stock".
  * ------------------------------------------------------------------------
  */
 
@@ -187,6 +203,136 @@ function PastilleSubstitution({ statut }: { statut: string }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Vue "par dépôt" (V2.5) — équivalent de l'écran Sage "Interrogation du
+// stock" : réel / réservé / commandé fournisseur / préparé / disponible /
+// à terme, ligne par ligne pour chaque dépôt réel où l'article a une
+// position. Alimentée par la RPC get_stock_par_depot (vue
+// v_stock_par_depot_article, source sage.stock_depot).
+// ---------------------------------------------------------------------------
+
+type DepotStockRow = {
+  depot: string;
+  stock_reel: number;
+  stock_reserve: number;
+  stock_commande_fournisseur: number;
+  stock_prepare: number;
+  stock_disponible: number;
+  stock_a_terme: number;
+};
+
+function StockParDepotPanel({
+  reference, designation, onClose,
+}: { reference: string; designation: string; onClose: () => void }) {
+  const [rows, setRows] = useState<DepotStockRow[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      setError(null);
+      const { data, error: err } = await supabase.rpc("get_stock_par_depot", { p_reference_article: reference });
+      if (cancelled) return;
+      if (err) {
+        setError(err.message);
+        setRows([]);
+      } else {
+        setRows((data || []) as DepotStockRow[]);
+      }
+      setLoading(false);
+    }
+    load();
+    return () => { cancelled = true; };
+  }, [reference]);
+
+  const totaux = useMemo(() => {
+    if (!rows) return null;
+    return rows.reduce(
+      (acc, r) => ({
+        stock_reel: acc.stock_reel + toNumber(r.stock_reel),
+        stock_reserve: acc.stock_reserve + toNumber(r.stock_reserve),
+        stock_commande_fournisseur: acc.stock_commande_fournisseur + toNumber(r.stock_commande_fournisseur),
+        stock_prepare: acc.stock_prepare + toNumber(r.stock_prepare),
+        stock_disponible: acc.stock_disponible + toNumber(r.stock_disponible),
+        stock_a_terme: acc.stock_a_terme + toNumber(r.stock_a_terme),
+      }),
+      { stock_reel: 0, stock_reserve: 0, stock_commande_fournisseur: 0, stock_prepare: 0, stock_disponible: 0, stock_a_terme: 0 },
+    );
+  }, [rows]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
+      <div className="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-white/10 bg-[#0B1220] p-6" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-4 flex items-start justify-between">
+          <div>
+            <div className="mb-1 text-[11px] uppercase tracking-[0.2em] text-[#A6A181]">Stock par dépôt</div>
+            <h3 className="font-[var(--font-display)] text-lg font-bold text-white">{reference}</h3>
+            <div className="text-sm text-white/50">{designation}</div>
+          </div>
+          <button onClick={onClose} className="rounded-lg border border-white/15 px-3 py-1.5 text-sm text-white/70 hover:text-white">Fermer</button>
+        </div>
+
+        {error && <div className="mb-4 rounded-lg border border-[#C1683C]/40 bg-[#C1683C]/10 px-4 py-3 text-sm text-[#e0a685]">{error}</div>}
+
+        {loading ? (
+          <div className="h-40 animate-pulse rounded-xl border border-white/10 bg-white/[0.03]" />
+        ) : !rows || rows.length === 0 ? (
+          <p className="py-8 text-center text-sm text-white/40">Aucune position de stock trouvée pour cette référence.</p>
+        ) : (
+          <div className="overflow-x-auto rounded-xl border border-white/10 bg-[#F5F3EC]">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-black/10 text-left text-xs uppercase tracking-wide text-[#141A26]/50">
+                  <th className="whitespace-nowrap px-3 py-3">Dépôt</th>
+                  <th className="whitespace-nowrap px-3 py-3 text-right">Stock réel</th>
+                  <th className="whitespace-nowrap px-3 py-3 text-right">Réservé</th>
+                  <th className="whitespace-nowrap px-3 py-3 text-right">Cmd fourn.</th>
+                  <th className="whitespace-nowrap px-3 py-3 text-right">Préparé</th>
+                  <th className="whitespace-nowrap px-3 py-3 text-right">Disponible</th>
+                  <th className="whitespace-nowrap px-3 py-3 text-right">À terme</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-black/[0.06]">
+                {rows.map((r) => (
+                  <tr key={r.depot}>
+                    <td className="whitespace-nowrap px-3 py-2 text-[#141A26]">{r.depot}</td>
+                    <td className="whitespace-nowrap px-3 py-2 text-right font-[var(--font-mono)]">{formatNumber(toNumber(r.stock_reel))}</td>
+                    <td className="whitespace-nowrap px-3 py-2 text-right font-[var(--font-mono)] text-[#141A26]/60">{formatNumber(toNumber(r.stock_reserve))}</td>
+                    <td className="whitespace-nowrap px-3 py-2 text-right font-[var(--font-mono)] text-[#3F9142]">{formatNumber(toNumber(r.stock_commande_fournisseur))}</td>
+                    <td className="whitespace-nowrap px-3 py-2 text-right font-[var(--font-mono)] text-[#7A5EA8]">{formatNumber(toNumber(r.stock_prepare))}</td>
+                    <td className="whitespace-nowrap px-3 py-2 text-right font-[var(--font-mono)] font-semibold text-[#141A26]">{formatNumber(toNumber(r.stock_disponible))}</td>
+                    <td className={`whitespace-nowrap px-3 py-2 text-right font-[var(--font-mono)] ${toNumber(r.stock_a_terme) < 0 ? "text-[#C1683C]" : "text-[#141A26]"}`}>
+                      {formatNumber(toNumber(r.stock_a_terme))}
+                    </td>
+                  </tr>
+                ))}
+                {totaux && (
+                  <tr className="bg-black/5 font-semibold">
+                    <td className="whitespace-nowrap px-3 py-2 text-[#141A26]">Total</td>
+                    <td className="whitespace-nowrap px-3 py-2 text-right font-[var(--font-mono)]">{formatNumber(totaux.stock_reel)}</td>
+                    <td className="whitespace-nowrap px-3 py-2 text-right font-[var(--font-mono)] text-[#141A26]/60">{formatNumber(totaux.stock_reserve)}</td>
+                    <td className="whitespace-nowrap px-3 py-2 text-right font-[var(--font-mono)] text-[#3F9142]">{formatNumber(totaux.stock_commande_fournisseur)}</td>
+                    <td className="whitespace-nowrap px-3 py-2 text-right font-[var(--font-mono)] text-[#7A5EA8]">{formatNumber(totaux.stock_prepare)}</td>
+                    <td className="whitespace-nowrap px-3 py-2 text-right font-[var(--font-mono)]">{formatNumber(totaux.stock_disponible)}</td>
+                    <td className={`whitespace-nowrap px-3 py-2 text-right font-[var(--font-mono)] ${totaux.stock_a_terme < 0 ? "text-[#C1683C]" : "text-[#141A26]"}`}>
+                      {formatNumber(totaux.stock_a_terme)}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p className="mt-3 text-[11px] italic text-white/35">
+          "Disponible" (stock réel − préparé) sur la ligne Total est la valeur utilisée comme stock de départ de la projection. Les réservations (CDC) et commandes fournisseurs sont gérées séparément, semaine par semaine, plus bas dans la fiche article.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 export default function StocksDisponibilites2Page() {
   const headerOffset = useSiteHeaderOffset();
 
@@ -249,6 +395,10 @@ export default function StocksDisponibilites2Page() {
 
   // Référence dont on gère les remplaçantes. Null = panneau fermé.
   const [remplacementPour, setRemplacementPour] = useState<{ reference: string; designation: string } | null>(null);
+
+  // Référence dont on affiche le détail du stock par dépôt (V2.5). Null =
+  // panneau fermé.
+  const [stockDepotPour, setStockDepotPour] = useState<{ reference: string; designation: string } | null>(null);
 
   async function handleExport() {
     if (!runId) return;
@@ -1137,7 +1287,7 @@ export default function StocksDisponibilites2Page() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-black/10 text-left text-xs uppercase tracking-wide text-[#141A26]/50">
-                    <th className="w-7 px-1 py-3" />
+                    <th className="w-14 px-1 py-3" />
                     <th className="whitespace-nowrap px-4 py-3">Référence</th>
                     <th className="whitespace-nowrap px-4 py-3">Désignation</th>
                     <th className="whitespace-nowrap px-4 py-3 text-right">Stock dispo</th>
@@ -1165,16 +1315,25 @@ export default function StocksDisponibilites2Page() {
                           : undefined
                       }
                     >
-                      <td className="w-7 px-1 py-2 text-center">
-                        <button
-                          title="Gérer le remplacement de cette référence"
-                          onClick={(e) => { e.stopPropagation(); setRemplacementPour({ reference: a.reference_article, designation: a.designation || "" }); }}
-                          className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-black/15 text-[#141A26]/45 transition hover:border-[#A6A181] hover:text-[#141A26]"
-                        >
-                          <svg viewBox="0 0 14 14" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.7">
-                            <path d="M8.5 1.5C9.5.5 11.5.5 12.5 1.5S13.5 4.5 12.5 5.5L5 13H1V9Z"/>
-                          </svg>
-                        </button>
+                      <td className="w-14 px-1 py-2 text-center">
+                        <div className="flex items-center justify-center gap-1">
+                          <button
+                            title="Gérer le remplacement de cette référence"
+                            onClick={(e) => { e.stopPropagation(); setRemplacementPour({ reference: a.reference_article, designation: a.designation || "" }); }}
+                            className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-black/15 text-[#141A26]/45 transition hover:border-[#A6A181] hover:text-[#141A26]"
+                          >
+                            <svg viewBox="0 0 14 14" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.7">
+                              <path d="M8.5 1.5C9.5.5 11.5.5 12.5 1.5S13.5 4.5 12.5 5.5L5 13H1V9Z"/>
+                            </svg>
+                          </button>
+                          <button
+                            title="Voir le stock par dépôt de cette référence"
+                            onClick={(e) => { e.stopPropagation(); setStockDepotPour({ reference: a.reference_article, designation: a.designation || "" }); }}
+                            className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-black/15 text-[#141A26]/45 transition hover:border-[#A6A181] hover:text-[#141A26]"
+                          >
+                            🏬
+                          </button>
+                        </div>
                       </td>
                       <td className="whitespace-nowrap px-4 py-3 font-[var(--font-mono)] font-medium text-[#141A26]">
                         {a.reference_article}
@@ -1248,6 +1407,14 @@ export default function StocksDisponibilites2Page() {
         />
       )}
 
+      {stockDepotPour && (
+        <StockParDepotPanel
+          reference={stockDepotPour.reference}
+          designation={stockDepotPour.designation}
+          onClose={() => setStockDepotPour(null)}
+        />
+      )}
+
       {hypoOpen && (
         <MonthlyHypothesesMatrix
           familleFilter={hypoFamilleScope}
@@ -1270,6 +1437,7 @@ export default function StocksDisponibilites2Page() {
           onClose={() => setSelectedArticle(null)}
           substitutionByRef={substitutionByRef}
           onOpenHypotheses={(famille) => { setHypoFamilleScope(famille); setHypoOpen(true); }}
+          onOpenStockDepot={(reference, designation) => setStockDepotPour({ reference, designation })}
         />
       )}
     </div>
@@ -1717,6 +1885,7 @@ function ArticleDrawer({
   onClose,
   substitutionByRef,
   onOpenHypotheses,
+  onOpenStockDepot,
 }: {
   article: AlertRow;
   runId: string | null;
@@ -1725,6 +1894,7 @@ function ArticleDrawer({
   onClose: () => void;
   substitutionByRef: Map<string, { statut: string; entrante: number; origineBase: number }>;
   onOpenHypotheses: (famille: string) => void;
+  onOpenStockDepot: (reference: string, designation: string) => void;
 }) {
   const [rows, setRows] = useState<ProjectionRow[]>([]);
   const [fournisseurs, setFournisseurs] = useState<FournisseurRow[]>([]);
@@ -1820,6 +1990,13 @@ function ArticleDrawer({
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="font-[var(--font-display)] text-xl font-bold text-white">{article.reference_article}</h2>
               <PastilleSubstitution statut={substitutionByRef.get(article.reference_article)?.statut || "ACTIVE"} />
+              <button
+                onClick={() => onOpenStockDepot(article.reference_article, article.designation || "")}
+                className="inline-flex items-center gap-1 rounded-md border border-white/15 px-2 py-1 text-[11px] font-semibold text-white/70 transition hover:border-[#A6A181] hover:text-white"
+                title="Voir le détail du stock par dépôt"
+              >
+                🏬 Par dépôt
+              </button>
             </div>
             <div className="text-sm text-white/50">{article.designation}</div>
             {substitutionByRef.get(article.reference_article)?.statut === "REMPLACEE" && (
