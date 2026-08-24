@@ -30,26 +30,6 @@ const SEARCH_FIELDS = [
   { key: 'numero_tiers_entete' },
 ]
 
-// ── Rendez-vous BLG (crm_base_activity) — même source que l'agenda du
-// OnePage desktop (components/OutlookAgenda.tsx). Filtrée sur
-// internal_tag='normal', type in ('meeting','phoneCall','reminder'), et
-// from_fk = l'identifiant partner de l'utilisateur (user_page_access.
-// blg_partner_id, cf. migration add_blg_partner_id_to_user_page_access.sql).
-// Si ce champ n'est pas renseigné pour l'utilisateur, la liste reste vide
-// avec un message explicite plutôt que planter.
-//
-// NOTE SCHEMA : le schéma Postgres réel est `blg`, mais PostgREST
-// n'expose que `public` et `sage`. On passe donc par une vue miroir
-// `public.crm_base_activity` (CREATE VIEW ... AS SELECT * FROM blg.crm_base_activity)
-// et on interroge cette vue directement sans .schema('blg').
-//
-// NOTE TYPE : confirmé empiriquement que crm_base_activity.type stocke le
-// nom texte ('meeting', 'phoneCall', 'reminder'), pas l'ID numérique de la
-// table de référence blg.activity_type (4/7/9 correspondent bien aux mêmes
-// types, mais ce sont les libellés texte qui sont stockés sur cette colonne).
-// On filtre donc sur le texte — les IDs numériques sont ajoutés au filtre en
-// plus par sécurité, au cas où certaines lignes utiliseraient l'ID en texte
-// ('4', '7', '9') ; ça ne retire jamais de résultat, ça ne peut qu'en ajouter.
 const RDV_TYPE_KEYS = ['meeting', 'phoneCall', 'reminder', '4', '7', '9']
 const RDV_TYPE_COLORS: Record<string, string> = {
   meeting: '#2E5BB8',
@@ -73,9 +53,6 @@ type BlgActivity = {
   type: string
   subject: string
   company: string | null
-  // Numéro tiers (SAGE) de l'entreprise liée, résolu via
-  // partner_base_partner.reference — nécessaire pour rattacher le
-  // compte-rendu/les tâches vocales au bon client (VoiceReportButtons).
   numeroTiers: string | null
   start: string
   end: string
@@ -104,8 +81,6 @@ function formatDateFr(iso: string) {
   return `${d}/${m}/${y}`
 }
 
-/** Nom lisible par défaut quand user_page_access.display_name est vide —
- * même convention que les autres écrans mobile (Todo, etc.). */
 function fallbackNameFromEmail(email: string) {
   const local = String(email || '').split('@')[0] || email
   return local
@@ -150,22 +125,14 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
   const [rdvUnconfigured, setRdvUnconfigured] = useState(false)
   const [blgPartnerId, setBlgPartnerId] = useState<string | null>(null)
 
-  // Période affichée -- par défaut les 30 prochains jours, mais
-  // sélectionnable via le bouton "📅 Agenda" (raccourcis semaine ou dates
-  // libres, passées ou futures).
   const [periodeLabel, setPeriodeLabel] = useState('30 prochains jours')
   const [agendaOuvert, setAgendaOuvert] = useState(false)
   const [dateDebutInput, setDateDebutInput] = useState('')
   const [dateFinInput, setDateFinInput] = useState('')
 
-  // Identité de l'utilisateur courant — nécessaire pour VoiceReportButtons
-  // (created_by des tâches/compte-rendu créés depuis un RDV).
   const [currentEmail, setCurrentEmail] = useState('')
   const [currentName, setCurrentName] = useState('')
 
-  /** Charge les rendez-vous pour une période donnée [debut, fin[ (fin
-   * exclusive) -- réutilisée au montage (30 prochains jours par défaut) et
-   * à chaque changement de période via le bouton "Agenda". */
   async function chargerRdv(partnerId: string, debut: Date, fin: Date) {
     setRdvLoading(true)
     try {
@@ -191,11 +158,6 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
 
       const rows = (data || []) as Record<string, any>[]
 
-      // Nom d'entreprise ET numéro tiers liés : crm_activity_company
-      // (activity_fk, company_fk) -> partner_base_partner.id /
-      // company_name / reference (= numéro tiers SAGE). Résolu en 2
-      // requêtes batch. Une erreur ici ne doit jamais empêcher l'affichage
-      // des rendez-vous eux-mêmes — repli silencieux sur "pas d'entreprise".
       const companyByActivity = new Map<number, { name: string; numeroTiers: string | null }>()
       try {
         const activityIds = rows.map((r) => r.id).filter((v) => v !== null && v !== undefined)
@@ -215,13 +177,6 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
               .select('id, company_name, reference')
               .in('id', companyIds)
 
-            // La référence d'une fiche "entreprise" est le numéro tiers nu
-            // ("C0162"), celle d'un "contact" rattaché est suffixée
-            // ("C0162-1", "C0162-liv"...) -- même convention que le tiroir
-            // contacts (MobileClients_v2). Si le RDV est en réalité lié à
-            // un CONTACT plutôt qu'à l'entreprise elle-même, on remonte au
-            // numéro tiers de l'entreprise parente (avant le tiret) pour
-            // que la navigation vers la fiche client pointe au bon endroit.
             const infoById = new Map(
               ((companies || []) as Record<string, any>[]).map((c) => {
                 const reference = String(c.reference || '').trim()
@@ -250,17 +205,9 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
           return {
             id: String(row.id),
             type: String(row.type ?? ''),
-            // "comment" est la colonne réelle du texte descriptif sur
-            // crm_base_activity (confirmé via information_schema — pas de
-            // colonne subject/title/name/label sur cette table).
             subject: String(pick(row, ['comment', 'subject', 'title', 'name', 'label']) || RDV_TYPE_LABELS[String(row.type ?? '')] || 'Activité'),
             company: info?.name || null,
             numeroTiers: info?.numeroTiers || null,
-            // NE PAS tronquer le timestamp (garder le fuseau horaire) : un
-            // .slice(0, 19) sur "2026-08-23T22:00:00+00:00" donnait
-            // "2026-08-23T22:00:00", réinterprété par `new Date()` comme 22h
-            // locale plutôt que 22h UTC (= 00h locale le lendemain) — ce qui
-            // décalait la date/heure affichée d'environ 2h en été.
             start: String(row.start_date || ''),
             end: String(row.end_date || row.start_date || ''),
             allDay: Boolean(row.all_day),
@@ -313,12 +260,10 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
     }
   }, [])
 
-  /** Raccourcis "Agenda" : semaine dernière / cette semaine / semaine
-   * prochaine / retour aux 30 prochains jours par défaut. */
   function selectionnerPeriode(preset: 'semaine_derniere' | 'semaine_courante' | 'semaine_prochaine' | 'defaut') {
     if (!blgPartnerId) return
     const aujourdHui = new Date()
-    const jourSemaine = aujourdHui.getDay() || 7 // lundi = 1 ... dimanche = 7
+    const jourSemaine = aujourdHui.getDay() || 7
     const lundiCourant = new Date(aujourdHui)
     lundiCourant.setDate(aujourdHui.getDate() - (jourSemaine - 1))
     lundiCourant.setHours(0, 0, 0, 0)
@@ -355,14 +300,11 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
     void chargerRdv(blgPartnerId, debut, fin)
   }
 
-  /** Dates libres, passées ou futures -- saisies via les deux champs date. */
   function appliquerPeriodePersonnalisee() {
     if (!blgPartnerId || !dateDebutInput || !dateFinInput) return
     const debut = new Date(`${dateDebutInput}T00:00:00`)
     const finSaisie = new Date(`${dateFinInput}T00:00:00`)
     if (Number.isNaN(debut.getTime()) || Number.isNaN(finSaisie.getTime())) return
-    // Fin exclusive côté requête -- on ajoute un jour pour inclure la date
-    // de fin choisie par l'utilisateur dans les résultats.
     const fin = new Date(finSaisie)
     fin.setDate(fin.getDate() + 1)
 
@@ -404,9 +346,6 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
               🏢 Voir la fiche client
             </button>
           )}
-          {/* Boutons vocaux uniquement si le RDV est bien rattaché à un
-             client identifié (numéro tiers résolu) — sinon rien à
-             rattacher en base. */}
           {r.numeroTiers && (
             <VoiceReportButtons
               numeroTiers={r.numeroTiers}
@@ -479,8 +418,7 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
   }
 
   return (
-    <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {/* ---- Rendez-vous : crm_base_activity, filtrés sur l'identifiant partner BLG de l'utilisateur. ---- */}
+    <div style={{ padding: '16px 3px', display: 'flex', flexDirection: 'column', gap: 16 }}>
       <div
         style={{
           borderRadius: 14,
@@ -490,7 +428,7 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-          <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
+          <div style={{ fontSize: 11.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
             Rendez-vous — {periodeLabel}
           </div>
           <button
@@ -500,7 +438,7 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
             style={{
               display: 'flex', alignItems: 'center', gap: 6, padding: '6px 11px', borderRadius: 999,
               border: '1px solid rgba(75,146,172,0.4)', background: 'rgba(75,146,172,0.14)',
-              color: '#8FC7DA', fontSize: 12, fontWeight: 700, opacity: blgPartnerId ? 1 : 0.4,
+              color: '#8FC7DA', fontSize: 12.5, fontWeight: 700, opacity: blgPartnerId ? 1 : 0.4,
             }}
           >
             📅 Agenda
@@ -546,7 +484,7 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
                           }
                         }}
                         style={{
-                          fontSize: 10.5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.02em',
+                          fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.02em',
                           color: '#E8A96A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
                           textDecoration: r.numeroTiers && onOpenClient ? 'underline' : 'none',
                           textUnderlineOffset: 2,
@@ -555,10 +493,10 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
                         {r.company}
                       </div>
                     )}
-                    <div style={{ fontSize: 13.5, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    <div style={{ fontSize: 14.5, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                       {r.subject}
                     </div>
-                    <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginTop: 1 }}>
+                    <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.4)', marginTop: 1 }}>
                       {[RDV_TYPE_LABELS[r.type] || r.type, dateLabel].filter(Boolean).join(' · ')}
                     </div>
                   </div>
@@ -569,9 +507,8 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
         )}
       </div>
 
-      {/* ---- Recherche de document ---- */}
       <div>
-        <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 8 }}>
+        <div style={{ fontSize: 11.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 8 }}>
           Rechercher un document
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
@@ -587,7 +524,7 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
               background: 'rgba(255,255,255,0.05)',
               color: '#fff',
               padding: '11px 13px',
-              fontSize: 14,
+              fontSize: 14.5,
               outline: 'none',
             }}
           />
@@ -599,7 +536,7 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
               background: 'rgba(166,161,129,0.15)',
               color: '#e4dfc9',
               padding: '0 16px',
-              fontSize: 13,
+              fontSize: 13.5,
               fontWeight: 600,
             }}
           >
@@ -626,14 +563,14 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
                 }}
               >
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                  <span style={{ fontSize: 13.5, fontWeight: 600, color: '#fff' }}>{r.numero || '—'}</span>
+                  <span style={{ fontSize: 14.5, fontWeight: 600, color: '#fff' }}>{r.numero || '—'}</span>
                   {r.montant_ht > 0 && (
-                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, color: 'rgba(255,255,255,0.75)' }}>
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'rgba(255,255,255,0.75)' }}>
                       {formatMoney(r.montant_ht)}
                     </span>
                   )}
                 </div>
-                <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginTop: 3 }}>
+                <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginTop: 3 }}>
                   {[r.type, r.tiers && `Client ${r.tiers}`, r.date && formatDateFr(r.date), r.reference]
                     .filter(Boolean)
                     .join(' · ')}

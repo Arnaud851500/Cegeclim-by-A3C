@@ -8,81 +8,11 @@ import { NavigationChoiceSheet, PhoneChoiceSheet } from './MobileActionSheets'
 import VoiceReportButtons from './VoiceReportButtons'
 import MobileTaskDetailSheet, { type TaskRow } from './MobileTaskDetailSheet'
 
-// ─────────────────────────────────────────────────────────────────────────
-// Schéma confirmé via synthese_multi_clients/page.tsx :
-// - Table clients : synthese_multi_clients_cache, row_kind = 'client', annee = N.
-//   Colonne tiers réelle sur CETTE table : numero_tiers (confirmée, aucune erreur).
-// - "Profil CA 12MG" : calculé côté client (caBand), pas une colonne stockée.
-// - Dates de visite : REMPLACÉ (cf. plus bas) — ne vient plus de objectif_tiers
-//   mais de crm_base_activity (BLG), pour refléter les vrais RDV/appels.
-// - Actions client : todo_actions.numero_tiers, désormais filtrées sur les
-//   statuts non terminés (Non débuté / En cours), et éditables au tap.
-//
-// - facture_lignes : erreur confirmée en prod → "numero_tiers" N'EXISTE PAS
-//   sur cette table. Seule numero_tiers_entete existe.
-//
-// - Devis N-1 (comparaison) : la valeur brute du cache au niveau client
-//   (devis_ytd_n1) est fausse/à 0 pour certains clients — le desktop la
-//   recalcule à partir des lignes mensuelles du cache
-//   (recomputeClientN1ComparisonFromMonths). Reproduit ici pour Devis
-//   uniquement — CA et Marge N-1 du cache client correspondent déjà
-//   exactement au desktop, testé sur DUPRE HABITAT ENERGIES.
-//
-// - Visites (dernière/prochaine) : le lien client -> entreprise BLG se fait
-//   via partner_base_partner.reference = numero_tiers du client (match EXACT,
-//   confirmé empiriquement : "DB0079" -> company_name renseigné, alors que
-//   "DB0079-9430" etc. sont des contacts individuels liés à cette même
-//   entreprise, à exclure). Puis crm_activity_company (company_fk) donne les
-//   activity_fk liées, et crm_base_activity (internal_tag='normal', type in
-//   meeting/phoneCall) donne les RDV/appels. Même filtre de type que
-//   MobileRdv.tsx, pour rester cohérent avec l'écran "Mes rdv".
-//
-// - Documents (CDC/PL/BL/BR/Devis) : agrégés en 1 ligne par document
-//   (numero_piece), montant total + référence chantier, calculés à partir
-//   des LIGNES (activite_lignes / devis_lignes) plutôt que de
-//   public.activite_entete — cette dernière est une table historique figée
-//   (dernier import classique, ne contient aucun document créé depuis la
-//   mise en place du pipeline SAGE temps réel) et donnerait des listes
-//   incomplètes/périmées. Clic sur un document -> détail des lignes
-//   (référence, désignation, qté, montant HT).
-//
-// - BL / CA "depuis le 1er janvier" (cases stats) : NE PAS calculer en
-//   filtrant simplement activite_lignes/facture_lignes côté client comme
-//   avant (donnait un BL sous-évalué, ex. 14,2 K€ au lieu de ~50,9 K€ pour
-//   DUPRE HABITAT ENERGIES) -- activite_lignes seule est un état courant
-//   côté SAGE et ne reflète pas tout le flux annuel une fois les documents
-//   soldés/facturés. On réutilise désormais EXACTEMENT la même convention
-//   que l'écran Activité (get_vision_tci_kpi / get_focus_mensuel_daily_
-//   summary_metier / rebuild_focus_mensuel_agency_activity_cache), via la
-//   fonction SQL dédiée public.get_client_flux_ytd(numero_tiers, debut, fin) :
-//     - BL = activite_lignes "Bon de livraison" (+) et "Bon de retour" (-)
-//       sur date_bl, PLUS facture_lignes sur leur date_bl (même règle de
-//       signe que Factures ci-dessous) -- capte le BL une fois le document
-//       facturé et sorti d'activite_lignes.
-//     - CA = facture_lignes sur date_facture, numero_piece ILIKE 'FA0%' =
-//       facture (+), sinon (ex. "FAR..." = avoir) = négatif. Intègre donc
-//       bien les avoirs, conformément à la demande.
-//   La case "Factures" dédiée est supprimée (elle faisait doublon avec CA,
-//   qui couvre déjà exactement le même flux avec avoirs).
-//
-// - Badge contacts (à côté du nom client) : partner_base_partner filtré sur
-//   reference LIKE '<numero_tiers>-%' ET reference NOT ILIKE '%-liv' (les
-//   entrées '-liv' sont des adresses de livraison, pas des contacts -- même
-//   principe que le filtre "-liv" exclu partout ailleurs sur cette table ;
-//   confirmé empiriquement : type='contact' pour les vraies personnes,
-//   type='company' pour la fiche société elle-même et les adresses '-liv').
-//   phone/mail sont des colonnes text contenant du JSON (tableau d'objets
-//   {value,...}) -- on affiche la première valeur.
-// ─────────────────────────────────────────────────────────────────────────
-
 const N = new Date().getFullYear()
 const CURRENT_MONTH = new Date().getMonth() + 1
 const CA_PROFILE_BANDS = ['400K€', '150K€', '80K€', '20K€', 'vide'] as const
 type CaBand = typeof CA_PROFILE_BANDS[number]
 
-// Mêmes clés/libellés que MobileRdv.tsx, pour une cohérence totale entre les
-// deux écrans (type stocké en texte sur crm_base_activity, IDs numériques
-// ajoutés par sécurité).
 const RDV_TYPE_KEYS = ['meeting', 'phoneCall', 'reminder', '4', '7', '9']
 const RDV_TYPE_LABELS: Record<string, string> = {
   meeting: 'RDV', phoneCall: 'Appel', reminder: 'Rappel',
@@ -115,8 +45,6 @@ function yearStartIso() {
 function yearStartN1Iso() {
   return `${N - 1}-01-01`
 }
-/** Même jour calendaire, un an plus tôt (convention utilisée par
- * get_vision_tci_kpi côté SQL pour les comparaisons N-1). */
 function sameDayLastYearIso() {
   const d = new Date()
   d.setFullYear(d.getFullYear() - 1)
@@ -135,9 +63,6 @@ function formatDateFr(iso: string) {
   const [y, m, d] = iso.split('-')
   return `${d}/${m}/${y}`
 }
-/** partner_base_partner.phone / .mail sont des colonnes text contenant du
- * JSON (tableau d'objets { value, type/category, label }). Renvoie la
- * première valeur exploitable, ou une chaîne vide. */
 function parseFirstJsonValue(raw: any): string {
   const text = safeText(raw)
   if (!text || text === '[]') return ''
@@ -146,7 +71,6 @@ function parseFirstJsonValue(raw: any): string {
     if (Array.isArray(arr) && arr.length > 0 && arr[0]?.value) return String(arr[0].value)
     return ''
   } catch {
-    // Valeur déjà en texte brut (pas du JSON) -> on la renvoie telle quelle.
     return text
   }
 }
@@ -166,10 +90,6 @@ async function fetchAllCache(select: string, apply?: (q: any) => any) {
   const chunkSize = 1000
   let from = 0
   while (true) {
-    // .order() indispensable pour une pagination .range() stable — sans lui,
-    // Postgres/PostgREST ne garantit pas un ordre cohérent entre deux appels
-    // successifs (des lignes peuvent être sautées, notamment si la table est
-    // réécrite pendant la pagination par un rebuild de cache concurrent).
     let query = supabase
       .from('synthese_multi_clients_cache')
       .select(select)
@@ -200,7 +120,6 @@ type ClientRow = {
   margePctYtdN1: number | null
 }
 
-// Une ligne agrégée = 1 document (CDC/PL/BL/BR/Devis), pas une ligne d'article.
 type DocAgrege = {
   numeroPiece: string
   date: string
@@ -226,10 +145,10 @@ type ContactRow = {
 }
 type AdresseClient = { ligne1: string; codePostal: string; ville: string; telephone: string } | null
 type ClientDetail = {
-  commandes: DocAgrege[] // CDC
-  preparations: DocAgrege[] // PL
-  livraisons: DocAgrege[] // BL
-  retours: DocAgrege[] // BR
+  commandes: DocAgrege[]
+  preparations: DocAgrege[]
+  livraisons: DocAgrege[]
+  retours: DocAgrege[]
   devis: DocAgrege[]
   actions: ActionRow[]
   blYtd: number
@@ -243,7 +162,6 @@ type ClientDetail = {
   loadErrors: string[]
 }
 
-/** Regroupe des lignes brutes (activite_lignes ou devis_lignes) en 1 ligne par numero_piece. */
 function aggregateByDocument(
   rows: Record<string, any>[],
   dateFields: string[],
@@ -280,21 +198,13 @@ export default function MobileClients({
   cibleNom,
   onCibleConsommee,
 }: {
-  /** Numéro de tiers à ouvrir directement au montage/à la mise à jour --
-   * utilisé pour la navigation depuis un autre écran (ex. "Mes rdv" ->
-   * clic sur l'entreprise d'un rendez-vous). */
   cibleNumero?: string | null
   cibleNom?: string | null
-  /** Appelé une fois la cible consommée (fiche ouverte), pour que l'écran
-   * appelant efface son état de navigation et ne redéclenche pas
-   * l'ouverture si l'utilisateur revient plus tard sur cet écran. */
   onCibleConsommee?: () => void
 }) {
   const [allClients, setAllClients] = useState<ClientRow[] | null>(null)
   const [clientsError, setClientsError] = useState<string | null>(null)
 
-  // Identité de l'utilisateur courant — nécessaire pour VoiceReportButtons
-  // (created_by des tâches/compte-rendu créés depuis "prochaine visite").
   const [currentEmail, setCurrentEmail] = useState('')
   const [currentName, setCurrentName] = useState('')
 
@@ -387,11 +297,6 @@ export default function MobileClients({
       .slice(0, 40)
   }, [allClients, search])
 
-  // Ouverture directe sur un client cible (navigation depuis un autre
-  // écran, ex. "Mes rdv") -- attend que allClients soit chargé pour
-  // pouvoir reprendre la fiche complète du cache (CA, marge...) si connue,
-  // sinon ouvre quand même avec une fiche minimale (numéro + nom) : le
-  // détail complet se charge de toute façon en direct dans openClient.
   useEffect(() => {
     if (!cibleNumero || !allClients) return
     const trouve = allClients.find((c) => c.numero === cibleNumero)
@@ -430,8 +335,6 @@ export default function MobileClients({
         activiteRes, devisRes, actionsRes, monthRes,
         fluxNRes, fluxN1Res, partnerRes, contactsRes, adresseRes,
       ] = await Promise.all([
-        // CDC + PL + BL + BR en une seule requête (mêmes colonnes, types
-        // filtrés) -- agrégation par document faite ensuite côté client.
         supabase
           .from('activite_lignes')
           .select('numero_piece,type_document,reference,date_piece,date_bc,date_pl,date_bl,reference_article,designation,quantite,montant_ht')
@@ -444,7 +347,6 @@ export default function MobileClients({
           .eq('numero_tiers_entete', client.numero)
           .order('date_devis', { ascending: false })
           .limit(300),
-        // Uniquement les tâches NON terminées (ni "Terminé" ni "Annulé").
         supabase
           .from('todo_actions')
           .select('id,description_action,status,due_date,assigned_to')
@@ -458,22 +360,13 @@ export default function MobileClients({
           .eq('annee', N)
           .eq('row_kind', 'month')
           .eq('numero_tiers', client.numero),
-        // BL + CA (avec avoirs) depuis le 1er janvier -- même convention que
-        // l'écran Activité (get_vision_tci_kpi), via la fonction dédiée
-        // qui filtre par client au lieu d'agréger par agence/famille macro.
         supabase.rpc('get_client_flux_ytd', { p_numero_tiers: client.numero, p_date_debut: ys, p_date_fin: today }),
-        // Même période, N-1, pour l'évolution affichée sur la case CA.
         supabase.rpc('get_client_flux_ytd', { p_numero_tiers: client.numero, p_date_debut: ysN1, p_date_fin: sameDayN1 }),
-        // Résolution du lien client -> entreprise BLG. Match EXACT sur
-        // "reference" (le numéro tiers seul, sans suffixe "-XXXX" qui
-        // identifie un contact individuel plutôt que l'entreprise).
         supabase
           .from('partner_base_partner')
           .select('id')
           .eq('reference', client.numero)
           .limit(1),
-        // Contacts individuels rattachés au client : reference "<numero>-xxxx",
-        // en excluant les adresses de livraison ("-liv").
         supabase
           .from('partner_base_partner')
           .select('id,first_name,last_name,company_name,job_title,phone,mail')
@@ -481,7 +374,6 @@ export default function MobileClients({
           .not('reference', 'ilike', '%-liv')
           .order('last_name', { ascending: true })
           .limit(50),
-        // Adresse du siège (SAGE) -- pour le badge "naviguer vers".
         supabase
           .from('ref_tiers')
           .select('adresse,complement_adresse,code_postal,ville,telephone')
@@ -541,8 +433,6 @@ export default function MobileClients({
           .reduce((sum: number, r: any) => sum + safeNumber(r.devis_n1), 0)
       }
 
-      // Dernière / prochaine visite via BLG (crm_base_activity), liée par
-      // l'entreprise partner_base_partner résolue ci-dessus.
       let derniereVisite: VisiteEvent | null = null
       let prochaineVisite: VisiteEvent | null = null
       if (partnerRes.error) {
@@ -638,8 +528,6 @@ export default function MobileClients({
             const isNowDone = updated.status === 'Terminé' || updated.status === 'Annulé'
             return {
               ...cur,
-              // Une tâche qui passe en Terminé/Annulé disparaît de la liste
-              // (au lieu d'y rester avec son nouveau statut affiché).
               actions: isNowDone
                 ? cur.actions.filter((a) => a.id !== updated.id)
                 : cur.actions.map((a) =>
@@ -661,7 +549,7 @@ export default function MobileClients({
   }
 
   return (
-    <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 14 }}>
+    <div style={{ padding: '16px 3px', display: 'flex', flexDirection: 'column', gap: 14 }}>
       <input
         value={search}
         onChange={(e) => setSearch(e.target.value)}
@@ -673,7 +561,7 @@ export default function MobileClients({
           background: 'rgba(255,255,255,0.05)',
           color: '#fff',
           padding: '12px 14px',
-          fontSize: 15,
+          fontSize: 15.5,
           outline: 'none',
         }}
       />
@@ -701,7 +589,7 @@ export default function MobileClients({
           >
             <div
               style={{
-                fontSize: 10.5,
+                fontSize: 11,
                 textTransform: 'uppercase',
                 letterSpacing: '0.05em',
                 color: 'rgba(255,255,255,0.4)',
@@ -715,7 +603,7 @@ export default function MobileClients({
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {stats.parProfil.map((p) => (
-                  <div key={p.label} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13.5 }}>
+                  <div key={p.label} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14.5 }}>
                     <span style={{ color: 'rgba(255,255,255,0.75)' }}>{p.label}</span>
                     <span style={{ fontFamily: 'var(--font-mono)', color: '#fff' }}>{p.count}</span>
                   </div>
@@ -746,8 +634,8 @@ export default function MobileClients({
                   color: '#fff',
                 }}
               >
-                <div style={{ fontSize: 14.5, fontWeight: 600 }}>{c.nom || '(nom non renseigné)'}</div>
-                <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>N° {c.numero}</div>
+                <div style={{ fontSize: 15.5, fontWeight: 600 }}>{c.nom || '(nom non renseigné)'}</div>
+                <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>N° {c.numero}</div>
               </button>
             ))
           )}
@@ -767,10 +655,10 @@ function StatCard({ label, value }: { label: string; value: number | null }) {
         padding: '12px 14px',
       }}
     >
-      <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
+      <div style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
         {label}
       </div>
-      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 22, fontWeight: 600, color: '#fff', marginTop: 4 }}>
+      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 23, fontWeight: 600, color: '#fff', marginTop: 4 }}>
         {value === null ? '—' : value}
       </div>
     </div>
@@ -874,7 +762,7 @@ function ClientDetailScreen({
         onClick={onBack}
         style={{
           alignSelf: 'flex-start',
-          margin: '12px 0 4px 16px',
+          margin: '12px 0 4px 10px',
           border: '1px solid rgba(255,255,255,0.18)',
           borderRadius: 9,
           padding: '6px 11px',
@@ -886,17 +774,17 @@ function ClientDetailScreen({
         ← Recherche
       </button>
 
-      <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ padding: '16px 3px', display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            <div style={{ fontSize: 19, fontWeight: 700, color: '#fff' }}>{client.nom || '(nom non renseigné)'}</div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: '#fff' }}>{client.nom || '(nom non renseigné)'}</div>
             {!loading && detail && (
               <button
                 onClick={openContactsDetail}
                 style={{
                   display: 'inline-flex', alignItems: 'center', gap: 4, borderRadius: 999,
                   border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.06)',
-                  color: 'rgba(255,255,255,0.75)', fontSize: 11.5, fontWeight: 600, padding: '3px 9px',
+                  color: 'rgba(255,255,255,0.75)', fontSize: 12, fontWeight: 600, padding: '3px 9px',
                   cursor: 'pointer',
                 }}
               >
@@ -911,7 +799,7 @@ function ClientDetailScreen({
                 style={{
                   display: 'inline-flex', alignItems: 'center', gap: 4, borderRadius: 999,
                   border: '1px solid rgba(75,146,172,0.3)', background: 'rgba(75,146,172,0.12)',
-                  color: '#8FC7DA', fontSize: 11.5, fontWeight: 600, padding: '3px 9px',
+                  color: '#8FC7DA', fontSize: 12, fontWeight: 600, padding: '3px 9px',
                   cursor: 'pointer',
                 }}
               >
@@ -919,7 +807,7 @@ function ClientDetailScreen({
               </button>
             )}
           </div>
-          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>N° {client.numero}</div>
+          <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>N° {client.numero}</div>
         </div>
 
         {detail && detail.loadErrors.length > 0 && (
@@ -958,13 +846,13 @@ function ClientDetailScreen({
             padding: '12px 13px',
           }}
         >
-          <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
+          <div style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
             Marge depuis le 1er janvier
           </div>
-          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 19, fontWeight: 700, color: '#fff', marginTop: 4 }}>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 20, fontWeight: 700, color: '#fff', marginTop: 4 }}>
             {client.margePctYtdN === null ? '—' : `${client.margePctYtdN.toFixed(1)} %`}
           </div>
-          <div style={{ marginTop: 5, fontSize: 11 }}>
+          <div style={{ marginTop: 5, fontSize: 11.5 }}>
             <EvolLine value={client.margePctYtdN} n1={client.margePctYtdN1} isPoints />
           </div>
         </div>
@@ -1113,13 +1001,13 @@ function StatMini({ label, value, children }: { label: string; value: string; ch
         padding: '12px 13px',
       }}
     >
-      <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
+      <div style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
         {label}
       </div>
-      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 19, fontWeight: 700, color: '#fff', marginTop: 4 }}>
+      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 20, fontWeight: 700, color: '#fff', marginTop: 4 }}>
         {value}
       </div>
-      {children && <div style={{ marginTop: 5, fontSize: 11 }}>{children}</div>}
+      {children && <div style={{ marginTop: 5, fontSize: 11.5 }}>{children}</div>}
     </div>
   )
 }
@@ -1136,10 +1024,10 @@ function MiniCard({ label, value, onClick }: { label: string; value: string; onC
         cursor: onClick ? 'pointer' : 'default',
       }}
     >
-      <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
+      <div style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
         {label}
       </div>
-      <div style={{ fontSize: 13.5, color: '#fff', marginTop: 4 }}>{value}</div>
+      <div style={{ fontSize: 14.5, color: '#fff', marginTop: 4 }}>{value}</div>
     </div>
   )
 }
@@ -1147,7 +1035,7 @@ function MiniCard({ label, value, onClick }: { label: string; value: string; onC
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-      <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', padding: '0 2px' }}>
+      <div style={{ fontSize: 11.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', padding: '0 2px' }}>
         {title}
       </div>
       {children}
@@ -1173,13 +1061,13 @@ function RowItem({
       }}
     >
       <div style={{ minWidth: 0 }}>
-        <div style={{ fontSize: 13.5, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        <div style={{ fontSize: 14.5, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
           {title}
         </div>
-        {subtitle && <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginTop: 1 }}>{subtitle}</div>}
+        {subtitle && <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.4)', marginTop: 1 }}>{subtitle}</div>}
       </div>
       {trailing && (
-        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, color: 'rgba(255,255,255,0.75)', whiteSpace: 'nowrap', marginLeft: 10 }}>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'rgba(255,255,255,0.75)', whiteSpace: 'nowrap', marginLeft: 10 }}>
           {trailing}
         </div>
       )}
