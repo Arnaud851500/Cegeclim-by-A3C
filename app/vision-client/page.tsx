@@ -854,7 +854,10 @@ function VisionClientPageInner() {
       <header className="clientHeader">
         <div>
           <div className="eyebrow">Vision Client</div>
-          <h1>{identity.intitule} <span className="numeroTag">{identity.numero}</span></h1>
+          <div className="titleRow">
+            <h1>{identity.intitule} <span className="numeroTag">{identity.numero}</span></h1>
+            <button type="button" className="newRdvBtn" onClick={() => setNouveauRdvOuvert(true)}>+ Nouveau RDV</button>
+          </div>
           <p>{identity.representant || 'Représentant non renseigné'} · {identity.agence || 'Agence non renseignée'}</p>
         </div>
 
@@ -879,8 +882,6 @@ function VisionClientPageInner() {
             </div>
           )}
         </div>
-
-        <button type="button" className="newRdvBtn" onClick={() => setNouveauRdvOuvert(true)}>+ Nouveau RDV</button>
 
         {identity.lien_blg_tiers && (
           <a href={identity.lien_blg_tiers} target="_blank" rel="noopener noreferrer" className="blgLink">Ouvrir la fiche CRM ↗</a>
@@ -1135,10 +1136,12 @@ const pageStyles = `
   .clientHeader > div:first-child { flex: 1 1 auto; min-width: 0; }
   .eyebrow { font-size: 11px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.14em; color: #64748b; }
   h1 { margin: 2px 0 4px; font-size: 26px; font-weight: 900; letter-spacing: -0.02em; }
+  .titleRow { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .titleRow h1 { margin: 0; }
   .numeroTag { font-family: monospace; font-size: 15px; font-weight: 700; color: #64748b; background: #e2e8f0; border-radius: 6px; padding: 2px 8px; margin-left: 8px; vertical-align: middle; }
   .clientHeader p { margin: 0; color: #64748b; font-size: 13px; font-weight: 700; }
   .blgLink { align-self: center; background: #0f172a; color: white; border-radius: 10px; padding: 10px 16px; font-size: 13px; font-weight: 800; text-decoration: none; white-space: nowrap; }
-  .newRdvBtn { align-self: center; background: #2E5BB8; color: white; border: none; border-radius: 10px; padding: 10px 16px; font-size: 13px; font-weight: 800; white-space: nowrap; cursor: pointer; }
+  .newRdvBtn { flex-shrink: 0; background: #2E5BB8; color: white; border: none; border-radius: 9px; padding: 7px 14px; font-size: 12.5px; font-weight: 800; white-space: nowrap; cursor: pointer; }
   .newRdvBtn:hover { background: #244a96; }
   .card { background: white; border: 1px solid #e2e8f0; border-radius: 14px; padding: 16px 18px; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(15,23,42,.05); }
   .card h2 { margin: 0 0 12px; font-size: 15px; font-weight: 900; }

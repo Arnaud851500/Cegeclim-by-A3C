@@ -280,16 +280,22 @@ function RdvDetailModal({
 // ── Création d'un RDV "compagnon CEGECLIM" ────────────────────────────────
 
 function NouveauRdvModal({
-  currentEmail, currentName, onClose, onCreated,
-}: { currentEmail: string; currentName: string; onClose: () => void; onCreated: () => void }) {
+  currentEmail, currentName, initialDateTime, onClose, onCreated,
+}: { currentEmail: string; currentName: string; initialDateTime?: Date | null; onClose: () => void; onCreated: () => void }) {
   const [clientSearch, setClientSearch] = useState("");
   const [clientResults, setClientResults] = useState<Array<{ numero: string; intitule: string }>>([]);
   const [numeroTiers, setNumeroTiers] = useState<string | null>(null);
   const [intituleTiers, setIntituleTiers] = useState("");
   const [subject, setSubject] = useState("");
   const [type, setType] = useState<"meeting" | "phoneCall" | "reminder">("meeting");
-  const [date, setDate] = useState("");
-  const [heure, setHeure] = useState("09:00");
+  const [date, setDate] = useState(() => (initialDateTime ? toIsoDate(initialDateTime) : ""));
+  const [heure, setHeure] = useState(() => {
+    if (!initialDateTime) return "09:00";
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${pad(initialDateTime.getHours())}:${pad(initialDateTime.getMinutes())}`;
+  });
+  // Créneau par défaut : 60 minutes, y compris quand la date/heure vient
+  // d'un double-clic sur une case du calendrier.
   const [duree, setDuree] = useState(60);
   const [lieu, setLieu] = useState("");
   const [saving, setSaving] = useState(false);
@@ -344,57 +350,63 @@ function NouveauRdvModal({
           <button className="oaModalClose" onClick={onClose}>✕</button>
         </div>
         <div className="oaModalBody">
-          <div className="oaFormField oaClientSearchWrap">
-            <span>Client (facultatif)</span>
-            <input
-              value={numeroTiers ? `${intituleTiers} (${numeroTiers})` : clientSearch}
-              onChange={(e) => { setClientSearch(e.target.value); setNumeroTiers(null); }}
-              placeholder="Rechercher un client…"
-            />
-            {numeroTiers && (
-              <button type="button" className="oaClearClient" onClick={() => { setNumeroTiers(null); setClientSearch(""); }}>✕ Retirer</button>
-            )}
-            {clientResults.length > 0 && !numeroTiers && (
-              <div className="oaClientResults">
-                {clientResults.map((c) => (
-                  <button key={c.numero} type="button" onClick={() => { setNumeroTiers(c.numero); setIntituleTiers(c.intitule); setClientResults([]); }}>
-                    <span className="mono">{c.numero}</span><span>{c.intitule}</span>
-                  </button>
-                ))}
+          <div className="oaFieldsetBox">
+            <div className="oaFormField oaClientSearchWrap">
+              <span className="oaFieldLabel">Client (facultatif)</span>
+              <input
+                className="oaFieldInput"
+                value={numeroTiers ? `${intituleTiers} (${numeroTiers})` : clientSearch}
+                onChange={(e) => { setClientSearch(e.target.value); setNumeroTiers(null); }}
+                placeholder="Rechercher un client…"
+              />
+              {numeroTiers && (
+                <button type="button" className="oaClearClient" onClick={() => { setNumeroTiers(null); setClientSearch(""); }}>✕ Retirer</button>
+              )}
+              {clientResults.length > 0 && !numeroTiers && (
+                <div className="oaClientResults">
+                  {clientResults.map((c) => (
+                    <button key={c.numero} type="button" onClick={() => { setNumeroTiers(c.numero); setIntituleTiers(c.intitule); setClientResults([]); }}>
+                      <span className="mono">{c.numero}</span><span>{c.intitule}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="oaFormField">
+              <span className="oaFieldLabel">Objet</span>
+              <input className="oaFieldInput" value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Ex. : Visite chantier, appel de relance…" />
+            </div>
+
+            <div className="oaFormGrid">
+              <div className="oaFormField">
+                <span className="oaFieldLabel">Type</span>
+                <select className="oaFieldInput" value={type} onChange={(e) => setType(e.target.value as typeof type)}>
+                  <option value="meeting">RDV</option>
+                  <option value="phoneCall">Appel</option>
+                  <option value="reminder">Rappel</option>
+                </select>
               </div>
-            )}
+              <div className="oaFormField">
+                <span className="oaFieldLabel">Durée (min)</span>
+                <input className="oaFieldInput" type="number" value={duree} onChange={(e) => setDuree(Number(e.target.value) || 60)} min={15} step={15} />
+              </div>
+              <div className="oaFormField">
+                <span className="oaFieldLabel">Date</span>
+                <input className="oaFieldInput" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+              </div>
+              <div className="oaFormField">
+                <span className="oaFieldLabel">Heure</span>
+                <input className="oaFieldInput" type="time" value={heure} onChange={(e) => setHeure(e.target.value)} />
+              </div>
+            </div>
+
+            <div className="oaFormField">
+              <span className="oaFieldLabel">Lieu (facultatif)</span>
+              <input className="oaFieldInput" value={lieu} onChange={(e) => setLieu(e.target.value)} placeholder="Ex. : Chez le client, agence…" />
+            </div>
           </div>
 
-          <div className="oaFormGrid">
-            <label className="oaFormField">
-              <span>Objet</span>
-              <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Ex. : Visite chantier, appel de relance…" />
-            </label>
-            <label className="oaFormField">
-              <span>Type</span>
-              <select value={type} onChange={(e) => setType(e.target.value as typeof type)}>
-                <option value="meeting">RDV</option>
-                <option value="phoneCall">Appel</option>
-                <option value="reminder">Rappel</option>
-              </select>
-            </label>
-            <label className="oaFormField">
-              <span>Date</span>
-              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
-            </label>
-            <label className="oaFormField">
-              <span>Heure</span>
-              <input type="time" value={heure} onChange={(e) => setHeure(e.target.value)} />
-            </label>
-            <label className="oaFormField">
-              <span>Durée (min)</span>
-              <input type="number" value={duree} onChange={(e) => setDuree(Number(e.target.value) || 60)} min={15} step={15} />
-            </label>
-            <label className="oaFormField">
-              <span>Lieu (facultatif)</span>
-              <input value={lieu} onChange={(e) => setLieu(e.target.value)} placeholder="Ex. : Chez le client, agence…" />
-            </label>
-          </div>
           {error && <p className="oaError">{error}</p>}
           <div className="oaActions">
             <button className="oaSaveBtn" onClick={() => void creer()} disabled={saving}>{saving ? "Création…" : "Créer le RDV"}</button>
@@ -439,6 +451,7 @@ export default function OutlookAgenda({
   // Détail RDV (clic sur un évènement) + création d'un nouveau RDV compagnon.
   const [openEvent, setOpenEvent] = useState<OutlookEvent | null>(null);
   const [nouveauRdvOuvert, setNouveauRdvOuvert] = useState(false);
+  const [nouveauRdvPrefill, setNouveauRdvPrefill] = useState<Date | null>(null);
   const [currentEmail, setCurrentEmail] = useState("");
   const [currentName, setCurrentName] = useState("");
 
@@ -826,6 +839,24 @@ export default function OutlookAgenda({
     if (e.source === "blg" || e.source === "compagnon") setOpenEvent(e);
   }
 
+  /** Double-clic sur une case du calendrier -> ouvre la création de RDV,
+   * pré-remplie avec le jour cliqué et l'heure déduite de la position
+   * verticale du clic dans la colonne (arrondie au quart d'heure le plus
+   * proche), créneau de 60 min par défaut. */
+  function handleDayDoubleClick(date: Date, e: React.MouseEvent<HTMLDivElement>) {
+    if (e.target !== e.currentTarget) return // double-clic sur un évènement existant, pas sur la case vide
+    const rect = e.currentTarget.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
+    const totalH = HOUR_END - HOUR_START;
+    const hourFloat = HOUR_START + ratio * totalH;
+    const hour = Math.min(HOUR_END - 1, Math.floor(hourFloat));
+    const minute = Math.round(((hourFloat - hour) * 60) / 15) * 15;
+    const prefill = new Date(date);
+    prefill.setHours(hour, minute % 60, 0, 0);
+    setNouveauRdvPrefill(prefill);
+    setNouveauRdvOuvert(true);
+  }
+
   const currentAutorisation = autorisations.find((a) => a.email_outlook === selectedEmail);
   const aujourdHuiIso = toIsoDate(new Date());
 
@@ -858,7 +889,7 @@ export default function OutlookAgenda({
         </select>
 
         <button
-          onClick={() => setNouveauRdvOuvert(true)}
+          onClick={() => { setNouveauRdvPrefill(null); setNouveauRdvOuvert(true); }}
           className="rounded-lg bg-[#2E5BB8] px-2.5 py-1 text-xs font-bold text-white hover:bg-[#244a96]"
         >
           + Nouveau RDV
@@ -1039,7 +1070,12 @@ export default function OutlookAgenda({
                 const iso = toIsoDate(j.date);
                 const dayEvents = eventsByDay.get(iso) || [];
                 return (
-                  <div key={iso} className="relative border-l border-black/5 first:border-l-0">
+                  <div
+                    key={iso}
+                    className="relative border-l border-black/5 first:border-l-0 cursor-pointer"
+                    onDoubleClick={(e) => handleDayDoubleClick(j.date, e)}
+                    title="Double-clic pour créer un RDV à cette heure"
+                  >
                     {dayEvents.filter((e) => !e.isAllDay).map((e) => (
                       <button
                         key={e.id}
@@ -1111,7 +1147,8 @@ export default function OutlookAgenda({
         <NouveauRdvModal
           currentEmail={currentEmail}
           currentName={currentName}
-          onClose={() => setNouveauRdvOuvert(false)}
+          initialDateTime={nouveauRdvPrefill}
+          onClose={() => { setNouveauRdvOuvert(false); setNouveauRdvPrefill(null); }}
           onCreated={() => void loadRdvEvents()}
         />
       )}
@@ -1144,10 +1181,12 @@ export default function OutlookAgenda({
         .oaSaveBtn:disabled { opacity: .5; cursor: not-allowed; }
         .oaCancelBtn { border: 1px solid #e2e8f0; background: white; color: #64748b; font-size: 12px; font-weight: 800; padding: 8px 15px; border-radius: 9px; cursor: pointer; }
 
-        .oaFormGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
-        .oaFormField { display: flex; flex-direction: column; gap: 4px; font-size: 10.5px; font-weight: 800; text-transform: uppercase; color: #64748b; }
-        .oaFormField input, .oaFormField select { height: 36px; border: 1px solid #cbd5e1; border-radius: 9px; padding: 0 9px; font-size: 12.5px; font-weight: 600; color: #0f172a; text-transform: none; outline: none; font-family: inherit; }
-        .oaFormField input:focus, .oaFormField select:focus { border-color: #2E5BB8; }
+        .oaFieldsetBox { border: 1px solid #e2e8f0; background: #f8fafc; border-radius: 12px; padding: 14px 14px 4px; display: flex; flex-direction: column; gap: 12px; margin-bottom: 4px; }
+        .oaFormGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .oaFormField { display: flex; flex-direction: column; gap: 5px; }
+        .oaFieldLabel { font-size: 10.5px; font-weight: 900; text-transform: uppercase; letter-spacing: .04em; color: #475569; }
+        .oaFieldInput { height: 38px; border: 1px solid #cbd5e1; background: white; border-radius: 9px; padding: 0 10px; font-size: 13px; font-weight: 600; color: #0f172a; outline: none; font-family: inherit; }
+        .oaFieldInput:focus { border-color: #2E5BB8; box-shadow: 0 0 0 3px rgba(46,91,184,.12); }
         .oaClientSearchWrap { position: relative; }
         .oaClearClient { align-self: flex-start; border: none; background: none; color: #dc2626; font-size: 10.5px; font-weight: 800; cursor: pointer; padding: 2px 0; text-transform: none; }
         .oaClientResults { position: absolute; top: 100%; left: 0; right: 0; z-index: 10; background: white; border: 1px solid #e2e8f0; border-radius: 10px; box-shadow: 0 10px 24px rgba(15,23,42,.15); max-height: 220px; overflow-y: auto; }
