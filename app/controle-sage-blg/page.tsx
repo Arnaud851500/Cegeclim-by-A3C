@@ -183,7 +183,7 @@ function OngletSage() {
           .from('v_sage_clients_adresse_livraison')
           .select('*', { count: 'exact' })
           .order('numero_tiers', { ascending: true })
-          .limit(3000)
+          .limit(10000)
         query = appliquerFiltresSage(query, { search, onlyPrincipale, exclureSommeil, familleFilter, agenceFilter, expeditionFilters })
 
         const { data, count, error: err } = await query
