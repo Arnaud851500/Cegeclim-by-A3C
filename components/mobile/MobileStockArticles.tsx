@@ -205,7 +205,7 @@ export default function MobileStockArticles() {
 
       {results === null && !loading && (
         <div style={{ color: 'rgba(255,255,255,0.35)', fontSize: 12.5, padding: '20px 4px', lineHeight: 1.6 }}>
-          Tape une référence ou une désignation pour chercher un seul article, ou colle plusieurs références (une par ligne) pour vérifier une liste d&rsquo;un coup.
+          Tape une référence ou une désignation.
         </div>
       )}
 
