@@ -76,12 +76,6 @@ async function convertirEnWav(blob: Blob): Promise<Blob> {
     const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0))
     void audioCtx.close()
 
-    // Garde-fou : un décodage "réussi" mais anormalement court (< 0.3s)
-    // pour un enregistrement qu'on sait plus long est le signe d'un
-    // décodage silencieusement défaillant (buffer quasi vide) plutôt que
-    // d'un vrai enregistrement court — dans ce cas, mieux vaut renvoyer le
-    // blob d'origine (qui a au moins une chance d'être correctement
-    // interprété côté serveur) qu'un WAV "valide" mais vide.
     if (audioBuffer.duration < 0.3) {
       console.warn('[VoiceReportButtons] durée décodée suspecte (', audioBuffer.duration, 's) — envoi du blob d’origine')
       return blob
@@ -144,11 +138,6 @@ function audioBufferToWav(buffer: AudioBuffer): ArrayBuffer {
   return bufferOut
 }
 
-// ── Comprend une échéance dictée en français ────────────────────────────
-// Table complète des nombres français 0-31 (mêmes formes que dans
-// MobileHomeSummary.tsx, dupliquée ici car fichiers séparés) -- utilisée
-// pour reconnaître un jour du mois dicté en toutes lettres ("le quinze
-// septembre"), en plus des chiffres classiques ("15 septembre").
 const NOMBRES_FR_0_31 = [
   'zero', 'un', 'deux', 'trois', 'quatre', 'cinq', 'six', 'sept', 'huit', 'neuf',
   'dix', 'onze', 'douze', 'treize', 'quatorze', 'quinze', 'seize', 'dix sept', 'dix huit', 'dix neuf',
@@ -158,7 +147,7 @@ const NOMBRES_FR_0_31 = [
 const MOTS_VERS_NOMBRE = new Map<string, number>(NOMBRES_FR_0_31.map((mots, n) => [mots, n]))
 const FORMES_TRIEES = [...NOMBRES_FR_0_31].sort((a, b) => b.split(' ').length - a.split(' ').length)
 const MOIS_FR_LISTE = ['janvier', 'fevrier', 'mars', 'avril', 'mai', 'juin', 'juillet', 'aout', 'septembre', 'octobre', 'novembre', 'decembre']
-const JOURS_SEMAINE = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'] // index = Date.getDay()
+const JOURS_SEMAINE = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi']
 
 function normaliserPourDate(texte: string) {
   return String(texte || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/-/g, ' ')
@@ -179,9 +168,6 @@ function isoDepuisDate(d: Date) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 
-/** Construit une date à partir d'un jour + mois, en choisissant l'année en
- * cours si la date n'est pas encore passée, sinon l'année suivante (une
- * échéance dictée est presque toujours dans le futur). */
 function construireDateJourMois(jour: number, moisIndex: number): Date {
   const aujourdHui = new Date()
   aujourdHui.setHours(0, 0, 0, 0)
@@ -194,13 +180,6 @@ function construireDateJourMois(jour: number, moisIndex: number): Date {
   return d
 }
 
-/** Interprète une échéance dictée en français (relative ou absolue) et
- * renvoie une date ISO, ou null si rien de reconnaissable -- dans ce cas
- * l'appelant redemande plutôt que de deviner ou d'enregistrer une date
- * fausse. Gère : aujourd'hui/demain/après-demain, jours de la semaine
- * ("vendredi" = le prochain vendredi), "dans X jours", "la semaine
- * prochaine", jour+mois en chiffres ("15 septembre") ou en toutes lettres
- * ("le quinze septembre"), et JJ/MM. */
 function parserEcheanceParlee(texteBrut: string): string | null {
   const texteNettoye = normaliserPourDate(texteBrut).replace(/'/g, '').replace(/[^a-z0-9\s\/]/g, ' ')
   const mots = texteNettoye.split(/\s+/).filter(Boolean)
@@ -220,7 +199,7 @@ function parserEcheanceParlee(texteBrut: string): string | null {
     if (new RegExp(`\\b${JOURS_SEMAINE[i]}\\b`).test(texteJoin)) {
       const d = new Date(aujourdHui)
       let delta = (i - d.getDay() + 7) % 7
-      if (delta === 0) delta = 7 // dicter "vendredi" un vendredi -> vendredi PROCHAIN
+      if (delta === 0) delta = 7
       d.setDate(d.getDate() + delta)
       return isoDepuisDate(d)
     }
@@ -285,9 +264,6 @@ export default function VoiceReportButtons({
   rdvLabel,
   userEmail,
   userName,
-  // Quand fourni, n'affiche qu'un seul bouton de dictée (pas de
-  // compte-rendu, pas de section "compte-rendu existant") — utilisé pour
-  // la création rapide de tâche depuis l'accueil, sans client/rdv associé.
   modeUnique,
   labelBouton,
   pleinEcran,
@@ -300,11 +276,6 @@ export default function VoiceReportButtons({
   userName: string
   modeUnique?: 'tache'
   labelBouton?: string
-  /** Quand vrai, tout le flux (une fois lancé) s'affiche dans un panneau
-   * quasi plein écran plutôt qu'inline -- utilisé pour la création rapide
-   * de tâche depuis l'accueil. Laissé à false dans les fiches RDV/client,
-   * où le composant est déjà inline dans une sheet existante (pas besoin
-   * d'une seconde sheet par-dessus). */
   pleinEcran?: boolean
 }) {
   const [modeActif, setModeActif] = useState<Mode | null>(null)
@@ -315,16 +286,23 @@ export default function VoiceReportButtons({
   const [spokenAffiche, setSpokenAffiche] = useState('')
   const [tachesAffichees, setTachesAffichees] = useState<Tache[]>([])
   const [lectureEnCours, setLectureEnCours] = useState(false)
-  // Voix choisie par l'utilisateur (écran d'accueil, "🎙️ Voix") --
-  // chargée une fois, réutilisée pour tous les appels /speak de ce
-  // composant. Repli sur 'nova' si aucune préférence enregistrée.
+  // Voix, vitesse de lecture et mode "annonce courte" choisis par
+  // l'utilisateur (écran d'accueil, "🎙️ Voix"), tous les trois dans
+  // vision_tci_preferences -- chargés une fois, réutilisés pour tous les
+  // appels /speak de ce composant. Replis : 'nova' / 1.15 / false si
+  // aucune préférence enregistrée.
   const [voixPreferee, setVoixPreferee] = useState('nova')
+  const [vitesseLecture, setVitesseLecture] = useState(1.15)
+  const [annonceCourte, setAnnonceCourte] = useState(false)
   useEffect(() => {
     let cancelled = false
     async function charger() {
       if (!userEmail) return
-      const { data } = await supabase.from('vision_tci_preferences').select('voix_assistant').eq('user_email', userEmail).maybeSingle()
-      if (!cancelled) setVoixPreferee(String(data?.voix_assistant || 'nova'))
+      const { data } = await supabase.from('vision_tci_preferences').select('voix_assistant, vitesse_lecture, annonce_courte').eq('user_email', userEmail).maybeSingle()
+      if (cancelled) return
+      setVoixPreferee(String(data?.voix_assistant || 'nova'))
+      setVitesseLecture(data?.vitesse_lecture !== null && data?.vitesse_lecture !== undefined ? Number(data.vitesse_lecture) : 1.15)
+      setAnnonceCourte(Boolean(data?.annonce_courte))
     }
     void charger()
     return () => { cancelled = true }
@@ -339,22 +317,12 @@ export default function VoiceReportButtons({
   const dernierResultatRef = useRef<{ transcript: string; resume: string; taches: Tache[] } | null>(null)
   const audioEnCoursRef = useRef<HTMLAudioElement | null>(null)
   const resolveLectureRef = useRef<(() => void) | null>(null)
-  // Élément <audio> réutilisé pour toute la session -- voir debloquerAudio().
   const audioElementRef = useRef<HTMLAudioElement | null>(null)
   const audioDeverrouilleRef = useRef(false)
   const forceStopConfirmationRef = useRef<(() => void) | null>(null)
-  // Identité stable de CETTE instance -- sert à savoir si c'est bien elle
-  // qui détient verrouSessionVocaleGlobal (et donc si elle peut le
-  // libérer / si elle doit refuser de démarrer une nouvelle session).
   const idInstanceRef = useRef<symbol>(Symbol('voice-session'))
-  // Vrai dès que "Stop écoute" (arreterCompletement) a été déclenché --
-  // vérifié après chaque `await` des chaînes async longues pour cesser
-  // immédiatement toute suite du flux (pas d'écriture en base après un
-  // arrêt volontaire).
   const annulerRef = useRef(false)
 
-  /** Minuscule WAV silencieux généré à la volée (pas de fichier binaire à
-   * livrer) -- sert uniquement à "débloquer" l'élément <audio> ci-dessous. */
   function creerAudioSilencieux(): string {
     const sampleRate = 8000
     const numSamples = 8
@@ -369,22 +337,12 @@ export default function VoiceReportButtons({
     view.setUint16(22, 1, true); view.setUint32(24, sampleRate, true)
     view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true)
     writeString(36, 'data'); view.setUint32(40, dataLength, true)
-    // Les échantillons restent à 0 (silence) -- ArrayBuffer est initialisé à zéro.
     const bytes = new Uint8Array(buffer)
     let binary = ''
     for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
     return 'data:audio/wav;base64,' + btoa(binary)
   }
 
-  /** CORRECTIF lecture auto bloquée par Safari : entre le tap initial et le
-   * moment où le résumé est prêt, plusieurs secondes s'écoulent (appels
-   * réseau STT + IA) -- assez pour que Safari considère que le "geste
-   * utilisateur" a expiré et bloque silencieusement les play() suivants.
-   * Un élément <audio> ayant déjà joué un son avec succès DANS la pile
-   * d'appel synchrone du clic reste ensuite autorisé à rejouer (changement
-   * de src + play()) même depuis un contexte asynchrone -- c'est le
-   * mécanisme de déblocage standard sur mobile. Doit être appelé en tout
-   * premier, avant tout `await`, dans le handler de clic. */
   function debloquerAudio() {
     if (audioDeverrouilleRef.current) return
     try {
@@ -432,13 +390,8 @@ export default function VoiceReportButtons({
     return ''
   }
 
-  /** Best-effort : ne bloque jamais le flux si la lecture est refusée
-   * (politique autoplay du navigateur). Le texte est de toute façon déjà
-   * affiché à l'écran. Attend la fin de la lecture (ou l'échec) avant de
-   * résoudre, pour permettre d'enchaîner ensuite sur l'écoute. Réutilise
-   * le même élément <audio> débloqué au tap initial (voir debloquerAudio)
-   * plutôt que d'en créer un nouveau, sinon celui-ci retombe sous le coup
-   * de la politique autoplay pour tout appel un peu tardif. */
+  /** Transmet la vitesse de lecture préférée de l'utilisateur à chaque
+   * appel -- voir /api/atelier-ai/speak, qui l'applique côté OpenAI TTS. */
   async function jouerTexte(texte: string) {
     if (!texte) return
     setLectureEnCours(true)
@@ -446,7 +399,7 @@ export default function VoiceReportButtons({
       const res = await fetch('/api/atelier-ai/speak', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: texte, voice: voixPreferee }),
+        body: JSON.stringify({ text: texte, voice: voixPreferee, speed: vitesseLecture }),
       })
       if (!res.ok) return
       const blob = await res.blob()
@@ -471,10 +424,6 @@ export default function VoiceReportButtons({
     }
   }
 
-  /** Coupe la lecture en cours à tout moment (bouton "⏹ Stop" affiché tant
-   * que lectureEnCours est vrai). pause() ne déclenche pas onended, donc on
-   * résout manuellement la promesse en attente pour laisser le flux
-   * continuer normalement (ex. passer à l'écoute de confirmation). */
   function arreterLecture() {
     if (audioEnCoursRef.current) {
       try { audioEnCoursRef.current.pause() } catch {}
@@ -485,24 +434,12 @@ export default function VoiceReportButtons({
     }
   }
 
-  /** Libère le verrou global SEULEMENT si cette instance le détient
-   * actuellement -- ne touche jamais à une session détenue par une autre
-   * instance. Appelé à chaque fin de flux (succès, erreur, arrêt manuel,
-   * démontage). */
   function libererVerrou() {
     if (verrouSessionVocaleGlobal?.id === idInstanceRef.current) {
       verrouSessionVocaleGlobal = null
     }
   }
 
-  /** "Stop écoute" -- arrêt complet et immédiat de la session en cours,
-   * quelle que soit l'étape actuelle (annonce, enregistrement, traitement,
-   * écoute de confirmation...). Coupe le micro, l'enregistreur et toute
-   * lecture audio, empêche la suite du flux de continuer (annulerRef,
-   * vérifié après chaque await dans stopperEtEnvoyer/ecouterConfirmation/
-   * completerEcheancesManquantes -- aucune écriture en base après un
-   * arrêt volontaire), libère le verrou global, puis revient à l'état de
-   * repos. */
   function arreterCompletement() {
     annulerRef.current = true
     try { forceStopConfirmationRef.current?.() } catch {}
@@ -557,11 +494,6 @@ export default function VoiceReportButtons({
     })
   }
 
-  /** Enregistrement mains libres pour une réponse courte (oui/non) :
-   * démarre le micro et s'arrête TOUT SEUL dès qu'un silence d'environ
-   * 1,3s suit un moment de parole détecté -- pas de bouton "stop" requis.
-   * Filet de sécurité à 12s pour ne jamais rester bloqué si le micro ne
-   * détecte jamais de silence net. */
   async function enregistrerAvecDetectionSilence(forceStopRef?: { current: (() => void) | null }): Promise<Blob> {
     const SEUIL_RMS = 0.02
     const SILENCE_MS = 1300
@@ -644,17 +576,12 @@ export default function VoiceReportButtons({
   }
 
   async function lancer(mode: Mode, completer?: string) {
-    // Empêche de démarrer une 2e session pendant qu'une autre tourne déjà
-    // ailleurs dans l'app (accueil, fiche RDV, fiche client...) -- voir
-    // verrouSessionVocaleGlobal en tête de fichier.
     if (verrouSessionVocaleGlobal && verrouSessionVocaleGlobal.id !== idInstanceRef.current) {
       setEtape('erreur')
       setMessageFinal("Une écoute est déjà en cours ailleurs dans l'application. Arrête-la (« Stop écoute ») avant d'en démarrer une nouvelle.")
       return
     }
 
-    // Doit être la toute première instruction, avant tout `await` -- voir
-    // le commentaire de debloquerAudio() plus haut.
     debloquerAudio()
 
     annulerRef.current = false
@@ -671,18 +598,22 @@ export default function VoiceReportButtons({
 
     try {
       setEtape('annonce')
+      // "Annonce courte" (réglage utilisateur, vision_tci_preferences.
+      // annonce_courte) : ne raccourcit QUE la phrase d'accueil du mode
+      // "tâche" -- le compte-rendu garde toujours sa phrase complète
+      // (compléter/synthétiser), quel que soit ce réglage, car le contexte
+      // (avec ou sans compte-rendu existant) reste une information utile
+      // à l'oral avant de commencer à dicter.
       const phraseAccueil =
         mode === 'compte_rendu'
           ? completer
             ? 'Je t’écoute pour compléter le compte rendu de ta visite.'
             : 'Je t’écoute pour synthétiser le compte rendu de ta visite.'
-          : 'Je t’écoute, décris la tâche à ajouter.'
-      // On ATTEND la fin de l'annonce avant de démarrer le micro : sinon le
-      // micro capte l'annonce elle-même (bouclage haut-parleur -> micro) au
-      // lieu d'attendre la voix de l'utilisateur, ce qui produisait des
-      // enregistrements sans contenu exploitable.
+          : annonceCourte
+            ? "J'écoute tes tâches à rajouter."
+            : 'Je t’écoute, décris la tâche à ajouter.'
       await jouerTexte(phraseAccueil)
-      if (annulerRef.current) return // "Stop écoute" pendant l'annonce
+      if (annulerRef.current) return
 
       setEtape('enregistrement')
       await demarrerEnregistrement()
@@ -722,21 +653,11 @@ export default function VoiceReportButtons({
       setSpokenAffiche(data.spoken_summary || '')
       setTachesAffichees(data.taches || [])
 
-      // Aucune tâche ne doit être enregistrée sans échéance -- si l'IA n'en
-      // a détecté aucune pour une ou plusieurs tâches, on les redemande
-      // une par une, à la voix, AVANT de proposer le résumé/la
-      // confirmation. dernierResultatRef.current.taches est mis à jour au
-      // fur et à mesure : c'est bien ce tableau complété qui part ensuite
-      // dans /confirm.
       await completerEcheancesManquantes()
       if (annulerRef.current) return
 
       setEtape('resume_pret')
 
-      // Mains libres : on énonce le résumé PUIS on relance automatiquement
-      // l'écoute pour la confirmation orale, sans exiger de toucher
-      // l'écran. Si la lecture est bloquée par le navigateur, l'écoute
-      // démarre quand même (le résumé reste affiché à l'écran).
       await jouerTexte(data.spoken_summary)
       if (annulerRef.current) return
       await ecouterConfirmation()
@@ -748,15 +669,10 @@ export default function VoiceReportButtons({
     }
   }
 
-  /** Aucune tâche ne doit être enregistrée sans échéance -- redemande
-   * chacune manquante, une par une, à la voix, mains libres. Met à jour
-   * dernierResultatRef.current.taches ET tachesAffichees (affichage) au
-   * fur et à mesure. Redemande en boucle tant que la réponse n'est pas
-   * compréhensible comme une date, plutôt que d'abandonner ou de deviner. */
   async function completerEcheancesManquantes() {
     const taches = dernierResultatRef.current?.taches || []
     for (let i = 0; i < taches.length; i++) {
-      if (annulerRef.current) return // "Stop écoute" pendant la complétion des échéances
+      if (annulerRef.current) return
       if (taches[i].echeance) continue
 
       let echeanceTrouvee: string | null = null
@@ -793,17 +709,9 @@ export default function VoiceReportButtons({
         dernierResultatRef.current.taches[i] = { ...taches[i], echeance: echeanceTrouvee }
         setTachesAffichees((prev) => prev.map((t, idx) => (idx === i ? { ...t, echeance: echeanceTrouvee } : t)))
       }
-      // Après 5 tentatives infructueuses : on n'insiste pas indéfiniment,
-      // la tâche part sans échéance plutôt que de bloquer tout le flux --
-      // l'utilisateur pourra la compléter plus tard depuis "Mes tâches".
     }
   }
 
-  /** Confirmation orale mains libres : écoute automatiquement, s'arrête
-   * seule au silence (voir enregistrerAvecDetectionSilence), puis envoie
-   * directement -- plus besoin de taper sur un bouton pour dire "oui" ou
-   * "non". `forceStopConfirmationRef` permet quand même de forcer l'arrêt
-   * plus tôt en tapant l'indicateur à l'écran, en secours. */
   async function ecouterConfirmation() {
     try {
       setEtape('enregistrement_confirmation')
@@ -835,23 +743,14 @@ export default function VoiceReportButtons({
         setMessageFinal(data.message)
         await jouerTexte(data.message)
         if (annulerRef.current) return
-        await ecouterConfirmation() // redemande, toujours sans toucher l'écran
+        await ecouterConfirmation()
         return
       }
 
-      libererVerrou() // flux terminé -- plus aucune activité micro/écriture en cours
+      libererVerrou()
       setEtape('termine')
       setMessageFinal(data.message)
 
-      // Laisse le message "Tâches créées" affiché au moins 1,4s (le temps
-      // de le lire) ET attend la fin de la lecture vocale si elle joue plus
-      // longtemps -- puis, en mode plein écran (bouton "Nouvelle tâche" de
-      // l'accueil), referme automatiquement la fenêtre pour revenir
-      // directement sur l'écran d'origine, sans exiger un tap sur
-      // "Fermer". Dans les fiches RDV/client (pleinEcran=false), on garde
-      // le comportement existant : l'utilisateur ferme lui-même, au cas où
-      // il veut relire le résumé ou enchaîner sur autre chose dans la
-      // même sheet.
       const attenteMinimum = new Promise<void>((resolve) => { window.setTimeout(resolve, 1400) })
       await Promise.all([jouerTexte(data.message), attenteMinimum])
 
@@ -883,10 +782,6 @@ export default function VoiceReportButtons({
     dernierResultatRef.current = null
   }
 
-  // Nettoyage au démontage : si cette instance détient encore le verrou
-  // (navigation pendant une écoute active), on coupe micro/enregistreur/
-  // lecture en cours et on le libère -- sinon une session orpheline
-  // bloquerait indéfiniment toute autre instance de démarrer.
   useEffect(() => {
     return () => {
       if (verrouSessionVocaleGlobal?.id === idInstanceRef.current) {
@@ -904,12 +799,6 @@ export default function VoiceReportButtons({
 
   const dernierCompteRendu = comptesRendusExistants && comptesRendusExistants.length > 0 ? comptesRendusExistants[0] : null
 
-  // Cas particulier : bouton "idle" en mode unique (accueil), rendu comme
-  // un simple <button> sans wrapper ni marge -- exactement comme celui de
-  // MobileHomeSummary à côté duquel il est affiché. Le reste du composant
-  // passe par `corps`, enveloppé dans un <div style={{marginTop:10,...}}>
-  // qui décalait ce bouton vers le bas et le faisait paraître plus petit/
-  // désaligné par rapport à son voisin.
   if (etape === 'idle' && modeUnique) {
     return (
       <button type="button" onClick={() => void lancer('tache')} style={boutonStyle('#A6A181')}>
@@ -920,12 +809,6 @@ export default function VoiceReportButtons({
 
   const corps = (
     <>
-      {/* "Stop écoute" -- visible à TOUTE étape active du flux (annonce,
-         enregistrement, traitement, écoute de confirmation...), pas
-         seulement pendant la lecture de la voix de l'agent. Contrairement
-         au "⏹ Stop" ci-dessous (qui ne coupe que la lecture audio en
-         cours), celui-ci arrête complètement la session : micro,
-         enregistreur, lecture, et sort du flux sans rien écrire en base. */}
       {etape !== 'idle' && etape !== 'termine' && etape !== 'erreur' && (
         <button
           type="button"
@@ -941,8 +824,6 @@ export default function VoiceReportButtons({
         </button>
       )}
 
-      {/* Visible à tout moment pendant une lecture, quelle que soit l'étape
-         du flux (annonce, résumé, confirmation, message final). */}
       {lectureEnCours && (
         <button
           type="button"
@@ -958,7 +839,6 @@ export default function VoiceReportButtons({
         </button>
       )}
 
-      {/* ---- Compte(s)-rendu(s) déjà enregistré(s) pour ce rdv ---- */}
       {comptesRendusExistants && comptesRendusExistants.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
@@ -981,7 +861,6 @@ export default function VoiceReportButtons({
                   {cr.taches_detectees.length} tâche{cr.taches_detectees.length > 1 ? 's' : ''} créée{cr.taches_detectees.length > 1 ? 's' : ''} : {cr.taches_detectees.map((t) => t.description).join(' · ')}
                 </div>
               )}
-              {/* Gros bouton tactile — remplace l'ancien lien texte minuscule. */}
               <button
                 type="button"
                 onClick={() => void jouerTexte(cr.resume)}
@@ -999,9 +878,6 @@ export default function VoiceReportButtons({
         </div>
       )}
 
-      {/* ---- Boutons de lancement ----
-         Le cas "idle && modeUnique" est court-circuité en tête de fonction
-         (rendu sans wrapper), donc pas répété ici. */}
       {etape === 'idle' && !modeUnique && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div style={{ display: 'flex', gap: 8 }}>
@@ -1037,9 +913,6 @@ export default function VoiceReportButtons({
       )}
       {etape === 'echeance_traitement' && <StatutLigne texte="Interprétation de la date…" />}
 
-      {/* Le résumé reste affiché pendant toute la suite du flux (écoute de
-         confirmation, traitement, fin) — pas seulement à l'étape où il
-         vient d'arriver. */}
       {resumeAffiche && (etape === 'resume_pret' || etape === 'enregistrement_confirmation' || etape === 'traitement_confirmation' || etape === 'termine') && (
         <div style={{ borderRadius: 10, border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(255,255,255,0.05)', padding: '12px 14px' }}>
           <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 6 }}>
@@ -1117,10 +990,6 @@ export default function VoiceReportButtons({
 </>
   )
 
-  // Mode plein écran (accueil, création de tâche libre) : une fois le flux
-  // lancé, tout s'affiche dans un panneau quasi plein écran plutôt qu'en
-  // ligne -- même principe que MobileHomeSummary. Le bouton "idle" (avant
-  // lancement) reste toujours affiché en ligne, dans les deux modes.
   if (pleinEcran && etape !== 'idle') {
     return (
       <div
@@ -1181,8 +1050,6 @@ function StatutLigne({ texte }: { texte: string }) {
   )
 }
 
-/** Gros bouton rond, pensé pour être facile à retrouver et à taper d'un
- * pouce pour arrêter l'écoute. */
 function GrandBoutonEcoute({ texte, onClick }: { texte: string; onClick: () => void }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, padding: '18px 0' }}>
@@ -1216,9 +1083,6 @@ function GrandBoutonEcoute({ texte, onClick }: { texte: string; onClick: () => v
   )
 }
 
-/** Indicateur d'écoute mains libres : ne nécessite AUCUN tap (l'arrêt est
- * automatique, dès le silence détecté). Reste tapable en secours pour
- * forcer l'arrêt plus tôt si la détection tarde. */
 function IndicateurEcouteAuto({ texte, onForcerArret }: { texte: string; onForcerArret: () => void }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, padding: '18px 0' }}>

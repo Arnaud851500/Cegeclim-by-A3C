@@ -26,6 +26,11 @@ type Etape = 'idle' | 'question' | 'ecoute' | 'traitement' | 'incompris' | 'resu
 const RDV_TYPE_KEYS = ['meeting', 'phoneCall', 'reminder', '4', '7', '9']
 const QUESTION =
   'Souhaites-tu connaître tes tâches en retard, tes tâches de la semaine, tes tâches ou rendez-vous de la semaine prochaine, tes prochains rendez-vous, le dernier compte-rendu d’un client, ou tes alertes en cours ?'
+// Variante "annonce courte" (réglage utilisateur, vision_tci_preferences.
+// annonce_courte) -- ne remplace QUE cette question d'accueil, jamais les
+// questions de relance ("je n'ai pas compris...") ni les questions liées
+// au compte-rendu client, qui restent explicites quel que soit ce réglage.
+const QUESTION_COURTE = 'Que souhaites-tu savoir ?'
 
 function safeText(value: any) {
   return String(value ?? '').trim()
@@ -262,17 +267,24 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
   const [modeClient, setModeClient] = useState(false)
   const [erreur, setErreur] = useState('')
   const [lectureEnCours, setLectureEnCours] = useState(false)
-  // Voix choisie par l'utilisateur (écran d'accueil, "🎙️ Voix") --
-  // chargée une fois, réutilisée pour tous les appels /speak de ce
-  // composant. Repli sur 'nova' si aucune préférence enregistrée.
+  // Voix, vitesse de lecture et mode "annonce courte" choisis par
+  // l'utilisateur (écran d'accueil, "🎙️ Voix"), tous les trois dans
+  // vision_tci_preferences -- chargés une fois, réutilisés pour tous les
+  // appels /speak de ce composant. Replis : 'nova' / 1.15 / false si
+  // aucune préférence enregistrée.
   const [voixPreferee, setVoixPreferee] = useState('nova')
+  const [vitesseLecture, setVitesseLecture] = useState(1.15)
+  const [annonceCourte, setAnnonceCourte] = useState(false)
   useEffect(() => {
     let cancelled = false
     async function charger() {
       const email = String(userEmail || '').toLowerCase().trim()
       if (!email) return
-      const { data } = await supabase.from('vision_tci_preferences').select('voix_assistant').eq('user_email', email).maybeSingle()
-      if (!cancelled) setVoixPreferee(String(data?.voix_assistant || 'nova'))
+      const { data } = await supabase.from('vision_tci_preferences').select('voix_assistant, vitesse_lecture, annonce_courte').eq('user_email', email).maybeSingle()
+      if (cancelled) return
+      setVoixPreferee(String(data?.voix_assistant || 'nova'))
+      setVitesseLecture(data?.vitesse_lecture !== null && data?.vitesse_lecture !== undefined ? Number(data.vitesse_lecture) : 1.15)
+      setAnnonceCourte(Boolean(data?.annonce_courte))
     }
     void charger()
     return () => { cancelled = true }
@@ -329,7 +341,9 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
 
   /** Réutilise le même élément <audio> débloqué au tap initial plutôt que
    * d'en créer un nouveau (qui retomberait sous le coup de la politique
-   * autoplay pour tout appel un peu tardif, ex. après transcription+IA). */
+   * autoplay pour tout appel un peu tardif, ex. après transcription+IA).
+   * Transmet la vitesse de lecture préférée de l'utilisateur à chaque
+   * appel -- voir /api/atelier-ai/speak, qui l'applique côté OpenAI TTS. */
   async function jouerTexte(texte: string) {
     if (!texte) return
     setLectureEnCours(true)
@@ -337,7 +351,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       const res = await fetch('/api/atelier-ai/speak', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: texte, voice: voixPreferee }),
+        body: JSON.stringify({ text: texte, voice: voixPreferee, speed: vitesseLecture }),
       })
       if (!res.ok) return
       const blob = await res.blob()
@@ -477,7 +491,9 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
     setModeClient(false)
     try {
       setEtape('question')
-      await jouerTexte(QUESTION)
+      // "Annonce courte" (réglage utilisateur) : question d'accueil
+      // raccourcie -- ne touche à rien d'autre (relances, compte-rendu).
+      await jouerTexte(annonceCourte ? QUESTION_COURTE : QUESTION)
       setEtape('ecoute')
       const blobBrut = await enregistrerAvecDetectionSilence(forceStopRef)
       await interpreter(blobBrut)
@@ -757,7 +773,9 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
 
   /** Sous-flux "compte-rendu d'un client" : demande le nom/numéro à la
    * voix, cherche le client correspondant, puis lit son dernier
-   * compte-rendu en précisant bien numéro + nom (demande explicite). */
+   * compte-rendu en précisant bien numéro + nom (demande explicite).
+   * Volontairement PAS concerné par "annonce courte" -- cf. en-tête du
+   * composant. */
   async function demanderClient() {
     setMessageIncompris('')
     setSaisieClientTexte('')
