@@ -1,7 +1,9 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import { usePathname } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
+import { acquerirVerrouVocal, libererVerrouVocal, verrouVocalDetenuPar, verrouVocalDetenuParAutre } from '@/lib/voiceSessionLock'
 
 /**
  * Deux boutons vocaux à insérer dans la sheet de détail d'un RDV (ou dans
@@ -44,17 +46,11 @@ type Etape =
 type Mode = 'compte_rendu' | 'tache'
 
 /**
- * Verrou global partagé entre TOUTES les instances de VoiceReportButtons
- * montées simultanément dans l'app (bouton "Nouvelle tâche" de l'accueil,
- * fiche RDV, fiche client...) : empêche de démarrer une session d'écoute
- * pendant qu'une autre est déjà active ailleurs, ce qui ouvrirait deux
- * micros en parallèle et mélangerait les flux. Simple variable de module
- * (pas de contexte React) : une seule page/onglet à la fois côté mobile,
- * pas besoin de plus. Remise à null dès que la session propriétaire se
- * termine, échoue, est stoppée manuellement, ou que son composant se
- * démonte.
+ * Le verrou vocal partagé entre TOUTES les instances de VoiceReportButtons
+ * ET MobileHomeSummary vit désormais dans lib/voiceSessionLock.ts (voir ce
+ * fichier pour le détail) -- empêche deux sessions vocales de tourner en
+ * même temps, tous composants confondus.
  */
-let verrouSessionVocaleGlobal: { id: symbol } | null = null
 
 type CompteRenduExistant = {
   id: string
@@ -435,9 +431,7 @@ export default function VoiceReportButtons({
   }
 
   function libererVerrou() {
-    if (verrouSessionVocaleGlobal?.id === idInstanceRef.current) {
-      verrouSessionVocaleGlobal = null
-    }
+    libererVerrouVocal(idInstanceRef.current)
   }
 
   function arreterCompletement() {
@@ -576,7 +570,7 @@ export default function VoiceReportButtons({
   }
 
   async function lancer(mode: Mode, completer?: string) {
-    if (verrouSessionVocaleGlobal && verrouSessionVocaleGlobal.id !== idInstanceRef.current) {
+    if (verrouVocalDetenuParAutre(idInstanceRef.current)) {
       setEtape('erreur')
       setMessageFinal("Une écoute est déjà en cours ailleurs dans l'application. Arrête-la (« Stop écoute ») avant d'en démarrer une nouvelle.")
       return
@@ -585,7 +579,7 @@ export default function VoiceReportButtons({
     debloquerAudio()
 
     annulerRef.current = false
-    verrouSessionVocaleGlobal = { id: idInstanceRef.current }
+    acquerirVerrouVocal(idInstanceRef.current)
 
     setModeActif(mode)
     setMessageFinal('')
@@ -784,7 +778,7 @@ export default function VoiceReportButtons({
 
   useEffect(() => {
     return () => {
-      if (verrouSessionVocaleGlobal?.id === idInstanceRef.current) {
+      if (verrouVocalDetenuPar(idInstanceRef.current)) {
         try {
           if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
             mediaRecorderRef.current.stop()
@@ -792,10 +786,29 @@ export default function VoiceReportButtons({
         } catch {}
         try { streamRef.current?.getTracks().forEach((t) => t.stop()) } catch {}
         try { audioEnCoursRef.current?.pause() } catch {}
-        verrouSessionVocaleGlobal = null
+        libererVerrouVocal(idInstanceRef.current)
       }
     }
   }, [])
+
+  // Changement d'écran (route Next.js) : coupe immédiatement toute session
+  // vocale ACTIVE pour cette instance -- micro, enregistreur, lecture,
+  // verrou -- exactement comme "Stop écoute", mais déclenché automatiquement
+  // plutôt qu'au tap de l'utilisateur. Sans effet si aucune session n'était
+  // en cours (verrouVocalDetenuPar renvoie false). Complète le nettoyage au
+  // démontage ci-dessus pour les cas où la navigation ne démonte pas
+  // immédiatement le composant (ex. shell d'app qui garde les écrans en
+  // mémoire).
+  const pathname = usePathname()
+  const pathnamePrecedentRef = useRef(pathname)
+  useEffect(() => {
+    if (pathnamePrecedentRef.current === pathname) return
+    pathnamePrecedentRef.current = pathname
+    if (verrouVocalDetenuPar(idInstanceRef.current)) {
+      arreterCompletement()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname])
 
   const dernierCompteRendu = comptesRendusExistants && comptesRendusExistants.length > 0 ? comptesRendusExistants[0] : null
 

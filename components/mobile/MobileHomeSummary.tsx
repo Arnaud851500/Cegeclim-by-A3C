@@ -1,7 +1,9 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import { usePathname } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
+import { acquerirVerrouVocal, libererVerrouVocal, verrouVocalDetenuPar, verrouVocalDetenuParAutre } from '@/lib/voiceSessionLock'
 
 /**
  * Bouton "Résumé vocal" pour l'accueil : entièrement conversationnel — un
@@ -299,6 +301,18 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
   const audioElementRef = useRef<HTMLAudioElement | null>(null)
   const audioDeverrouilleRef = useRef(false)
   const forceStopRef = useRef<(() => void) | null>(null)
+  // Identité stable de CETTE instance -- sert à savoir si c'est bien elle
+  // qui détient le verrou vocal partagé (lib/voiceSessionLock), et donc si
+  // elle peut le libérer / doit refuser de démarrer une nouvelle session
+  // pendant qu'une autre (VoiceReportButtons ailleurs dans l'app) tourne.
+  const idInstanceRef = useRef<symbol>(Symbol('voice-session-summary'))
+  // Vrai dès qu'un arrêt forcé (changement d'écran, démontage) a été
+  // déclenché -- vérifié après chaque `await` des chaînes async longues
+  // (interpreter, genererResume, demanderClient...) pour cesser
+  // immédiatement toute suite du flux plutôt que de continuer à afficher
+  // un résultat ou relancer une écoute après que l'utilisateur a quitté
+  // l'écran.
+  const annulerRef = useRef(false)
 
   /** Minuscule WAV silencieux généré à la volée -- sert uniquement à
    * "débloquer" l'élément <audio> ci-dessous (voir debloquerAudio). */
@@ -385,6 +399,65 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       resolveLectureRef.current = null
     }
   }
+
+  /** "Stop" complet et immédiat de la session en cours, quelle que soit
+   * l'étape actuelle -- coupe le micro, l'enregistreur et toute lecture
+   * audio, empêche la suite du flux de continuer (annulerRef, vérifié
+   * après chaque await dans poserLaQuestion/interpreter/genererResume/
+   * demanderClient/interpreterClient/resoudreClientEtLire/
+   * genererDernierCompteRendu), libère le verrou vocal partagé, puis
+   * revient à l'état de repos. Utilisée à la fois pour un arrêt manuel
+   * éventuel et pour la coupure automatique au changement d'écran
+   * ci-dessous. */
+  function arreterCompletement() {
+    annulerRef.current = true
+    try { forceStopRef.current?.() } catch {}
+    try {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop()
+      }
+    } catch {}
+    try { streamRef.current?.getTracks().forEach((t) => t.stop()) } catch {}
+    arreterLecture()
+    libererVerrouVocal(idInstanceRef.current)
+    fermer()
+  }
+
+  // Nettoyage au démontage : si cette instance détient encore le verrou
+  // (navigation pendant une écoute active), on coupe micro/enregistreur/
+  // lecture en cours et on le libère -- sinon une session orpheline
+  // bloquerait indéfiniment VoiceReportButtons ailleurs dans l'app.
+  useEffect(() => {
+    return () => {
+      if (verrouVocalDetenuPar(idInstanceRef.current)) {
+        annulerRef.current = true
+        try {
+          if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+            mediaRecorderRef.current.stop()
+          }
+        } catch {}
+        try { streamRef.current?.getTracks().forEach((t) => t.stop()) } catch {}
+        try { audioEnCoursRef.current?.pause() } catch {}
+        libererVerrouVocal(idInstanceRef.current)
+      }
+    }
+  }, [])
+
+  // Changement d'écran (route Next.js) : coupe immédiatement toute session
+  // vocale ACTIVE pour cette instance -- micro, enregistreur, lecture,
+  // verrou -- sans attendre un éventuel démontage différé du composant
+  // (ex. shell d'app qui garde les écrans en mémoire). Sans effet si
+  // aucune session n'était en cours.
+  const pathname = usePathname()
+  const pathnamePrecedentRef = useRef(pathname)
+  useEffect(() => {
+    if (pathnamePrecedentRef.current === pathname) return
+    pathnamePrecedentRef.current = pathname
+    if (verrouVocalDetenuPar(idInstanceRef.current)) {
+      arreterCompletement()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname])
 
   function mimeTypeSupporte() {
     if (typeof MediaRecorder === 'undefined') return ''
@@ -482,8 +555,20 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
   /** Lance (ou relance) le cycle conversationnel : question -> écoute
    * mains libres -> interprétation. */
   async function poserLaQuestion() {
+    // Refuse de démarrer si une autre session vocale (VoiceReportButtons
+    // ailleurs dans l'app -- tâche, compte-rendu) tourne déjà -- évite
+    // deux micros/lectures TTS en parallèle.
+    if (verrouVocalDetenuParAutre(idInstanceRef.current)) {
+      setEtape('erreur')
+      setErreur("Une écoute est déjà en cours ailleurs dans l'application. Arrête-la avant d'en démarrer une nouvelle.")
+      return
+    }
+
     // Doit être la toute première instruction, avant tout `await`.
     debloquerAudio()
+
+    annulerRef.current = false
+    acquerirVerrouVocal(idInstanceRef.current)
 
     setTexte('')
     setMessageIncompris('')
@@ -494,10 +579,13 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       // "Annonce courte" (réglage utilisateur) : question d'accueil
       // raccourcie -- ne touche à rien d'autre (relances, compte-rendu).
       await jouerTexte(annonceCourte ? QUESTION_COURTE : QUESTION)
+      if (annulerRef.current) return // écran quitté pendant l'annonce
       setEtape('ecoute')
       const blobBrut = await enregistrerAvecDetectionSilence(forceStopRef)
+      if (annulerRef.current) return
       await interpreter(blobBrut)
     } catch (e: any) {
+      libererVerrouVocal(idInstanceRef.current)
       setEtape('erreur')
       setErreur(e?.message || 'Une erreur est survenue.')
     }
@@ -507,11 +595,13 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
     try {
       setEtape('traitement')
       const blobWav = await convertirEnWav(blobBrut)
+      if (annulerRef.current) return
 
       const form = new FormData()
       form.append('audio', blobWav, 'audio.wav')
       const res = await fetch('/api/atelier-ai/transcribe', { method: 'POST', body: form })
       const data = await res.json()
+      if (annulerRef.current) return
       if (!res.ok) throw new Error(data?.error || 'Erreur de transcription.')
 
       const portee = classifierChoix(data.transcript || '')
@@ -521,8 +611,10 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         )
         setEtape('incompris')
         await jouerTexte("Je n'ai pas bien compris. Peux-tu répéter ?")
+        if (annulerRef.current) return
         setEtape('ecoute')
         const blobRetente = await enregistrerAvecDetectionSilence(forceStopRef)
+        if (annulerRef.current) return
         await interpreter(blobRetente)
         return
       }
@@ -534,6 +626,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
 
       await genererResume(portee)
     } catch (e: any) {
+      libererVerrouVocal(idInstanceRef.current)
       setEtape('erreur')
       setErreur(e?.message || 'Une erreur est survenue.')
     }
@@ -756,14 +849,21 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
 
       setTexte(resultat)
       setEtape('resultat')
+      // Fin de l'activité micro/écriture pour cette demande -- le verrou
+      // est libéré ici (avant même la lecture du résultat) pour ne pas
+      // bloquer inutilement une autre session ailleurs pendant que
+      // l'utilisateur lit/écoute simplement la réponse.
+      libererVerrouVocal(idInstanceRef.current)
       await jouerTexte(resultat)
     } catch (e: any) {
+      libererVerrouVocal(idInstanceRef.current)
       setEtape('erreur')
       setErreur(e?.message || 'Erreur inattendue.')
     }
   }
 
   function fermer() {
+    libererVerrouVocal(idInstanceRef.current)
     setEtape('idle')
     setTexte('')
     setMessageIncompris('')
@@ -783,10 +883,13 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
     try {
       setEtape('question_client')
       await jouerTexte('De quel client veux-tu le dernier compte-rendu ? Dis son nom ou son numéro.')
+      if (annulerRef.current) return
       setEtape('ecoute_client')
       const blob = await enregistrerAvecDetectionSilence(forceStopRef)
+      if (annulerRef.current) return
       await interpreterClient(blob)
     } catch (e: any) {
+      libererVerrouVocal(idInstanceRef.current)
       setEtape('erreur')
       setErreur(e?.message || 'Une erreur est survenue.')
     }
@@ -875,6 +978,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
    * et enchaîne sur la lecture de son dernier compte-rendu. */
   async function resoudreClientEtLire(texteEntendu: string, viaVoix: boolean) {
     const resultats = await rechercherClient(texteEntendu)
+    if (annulerRef.current) return
 
     if (resultats.length === 0) {
       setMessageIncompris(`Je n'ai trouvé aucun client correspondant à "${texteEntendu || '...'}".`)
@@ -885,8 +989,10 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       }
       setEtape('incompris')
       await jouerTexte("Je n'ai trouvé aucun client correspondant. Peux-tu redire le nom ou le numéro ?")
+      if (annulerRef.current) return
       setEtape('ecoute_client')
       const blobRetente = await enregistrerAvecDetectionSilence(forceStopRef)
+      if (annulerRef.current) return
       await interpreterClient(blobRetente)
       return
     }
@@ -917,16 +1023,19 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
     try {
       setEtape('traitement_client')
       const blobWav = await convertirEnWav(blobBrut)
+      if (annulerRef.current) return
 
       const form = new FormData()
       form.append('audio', blobWav, 'audio.wav')
       const res = await fetch('/api/atelier-ai/transcribe', { method: 'POST', body: form })
       const data = await res.json()
+      if (annulerRef.current) return
       if (!res.ok) throw new Error(data?.error || 'Erreur de transcription.')
 
       const texteEntendu = String(data.transcript || '').trim()
       await resoudreClientEtLire(texteEntendu, true)
     } catch (e: any) {
+      libererVerrouVocal(idInstanceRef.current)
       setEtape('erreur')
       setErreur(e?.message || 'Une erreur est survenue.')
     }
@@ -953,8 +1062,10 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
 
       setTexte(resultat)
       setEtape('resultat')
+      libererVerrouVocal(idInstanceRef.current)
       await jouerTexte(resultat)
     } catch (e: any) {
+      libererVerrouVocal(idInstanceRef.current)
       setEtape('erreur')
       setErreur(e?.message || 'Erreur inattendue.')
     }
