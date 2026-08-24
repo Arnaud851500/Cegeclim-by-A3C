@@ -50,6 +50,10 @@ type ClientAdresseRow = {
   expedition_adresse_designation: string | null
   li_telephone: string | null
   li_contact: string | null
+  n_expedition_effectif: string | null
+  expedition_designation: string | null
+  expedition_base_calcul: string | null
+  expedition_frais_port_ht: number | null
 }
 
 function safeText(v: unknown) {
@@ -75,13 +79,7 @@ function appliquerFiltresSage(
   if (params.exclureSommeil) query = query.eq('en_sommeil', false)
   if (params.familleFilter) query = query.eq('famille', params.familleFilter)
   if (params.agenceFilter) query = query.ilike('agence_rattachement', `%${params.agenceFilter}%`)
-  if (params.expeditionFilters.length > 0) {
-    const orParts = params.expeditionFilters.flatMap((e) => [
-      `expedition_adresse_designation.eq.${e}`,
-      `expedition_defaut_designation.eq.${e}`,
-    ])
-    query = query.or(orParts.join(','))
-  }
+  if (params.expeditionFilters.length > 0) query = query.in('expedition_designation', params.expeditionFilters)
   return query
 }
 
@@ -96,8 +94,10 @@ const EXPORT_COLONNES_SAGE: Array<{ key: keyof ClientAdresseRow; label: string; 
   { key: 'en_sommeil', label: 'En sommeil', transform: (r) => (r.en_sommeil ? 'Oui' : 'Non') },
   { key: 'ville_siege', label: 'Ville du siège' },
   { key: 'code_postal_siege', label: 'Code postal siège' },
-  { key: 'n_expedition_defaut', label: 'Code expédition par défaut' },
-  { key: 'expedition_defaut_designation', label: 'Expédition par défaut' },
+  { key: 'n_expedition_effectif', label: "Code expédition (effectif)" },
+  { key: 'expedition_designation', label: "Mode d'expédition (effectif)" },
+  { key: 'expedition_base_calcul', label: 'Base de calcul frais de port' },
+  { key: 'expedition_frais_port_ht', label: 'Frais de port prévu HT' },
   { key: 'adresse_principale', label: 'Adresse principale', transform: (r) => (r.adresse_principale ? 'Oui' : 'Non') },
   { key: 'li_no', label: 'N° adresse' },
   { key: 'adresse_intitule', label: 'Intitulé adresse' },
@@ -109,7 +109,9 @@ const EXPORT_COLONNES_SAGE: Array<{ key: keyof ClientAdresseRow; label: string; 
   { key: 'li_contact', label: 'Contact livraison' },
   { key: 'li_telephone', label: 'Téléphone livraison' },
   { key: 'n_expedition_adresse', label: "Code expédition adresse" },
-  { key: 'expedition_adresse_designation', label: "Mode d'expédition (adresse)" },
+  { key: 'expedition_adresse_designation', label: "Mode d'expédition (adresse seule)" },
+  { key: 'n_expedition_defaut', label: 'Code expédition défaut client' },
+  { key: 'expedition_defaut_designation', label: "Mode d'expédition (défaut client seul)" },
 ]
 
 function OngletSage() {
@@ -148,7 +150,7 @@ function OngletSage() {
     async function loadOptions() {
       const { data, error: err } = await supabase
         .from('v_sage_clients_adresse_livraison')
-        .select('agence_rattachement,famille,expedition_adresse_designation,expedition_defaut_designation')
+        .select('agence_rattachement,famille,expedition_designation')
         .limit(6000)
       if (cancelled || err || !data) return
 
@@ -160,7 +162,7 @@ function OngletSage() {
         if (ag) agences.add(ag)
         const fam = safeText(r.famille)
         if (fam && fam !== 'Aucune') familles.add(fam)
-        const exp = safeText(r.expedition_adresse_designation) || safeText(r.expedition_defaut_designation)
+        const exp = safeText(r.expedition_designation)
         if (exp) expeditions.add(exp)
       })
       setAgenceOptions(Array.from(agences).sort())
@@ -374,13 +376,13 @@ function OngletSage() {
                   <th className="px-3 py-2 font-bold">N° tiers</th>
                   <th className="px-3 py-2 font-bold">Agence</th>
                   <th className="px-3 py-2 font-bold">Expédition</th>
+                  <th className="px-3 py-2 text-right font-bold">Frais de port</th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map((r, i) => {
                   const key = `${r.numero_tiers}-${r.li_no ?? i}`
                   const isSelected = selected && selected.numero_tiers === r.numero_tiers && selected.li_no === r.li_no
-                  const expedition = r.expedition_adresse_designation || r.expedition_defaut_designation
                   return (
                     <tr
                       key={key}
@@ -400,12 +402,15 @@ function OngletSage() {
                         <div className="truncate text-[12px] text-[#111820]">{r.intitule || '—'}</div>
                       </td>
                       <td className="px-3 py-2 text-[12px] text-[#3A362E]">{normaliserAgence(r.agence_rattachement) || '—'}</td>
-                      <td className="px-3 py-2 text-[12px] text-[#3A362E]">{expedition || '—'}</td>
+                      <td className="px-3 py-2 text-[12px] text-[#3A362E]">{r.expedition_designation || '—'}</td>
+                      <td className="px-3 py-2 text-right text-[12px] font-[var(--font-mono,monospace)] text-[#3A362E]">
+                        {r.expedition_frais_port_ht !== null ? `${Number(r.expedition_frais_port_ht).toFixed(2)} €` : '—'}
+                      </td>
                     </tr>
                   )
                 })}
                 {!loading && rows.length === 0 && (
-                  <tr><td colSpan={3} className="px-3 py-8 text-center text-[#8A8474]">Aucun résultat pour ces filtres.</td></tr>
+                  <tr><td colSpan={4} className="px-3 py-8 text-center text-[#8A8474]">Aucun résultat pour ces filtres.</td></tr>
                 )}
               </tbody>
             </table>
@@ -435,6 +440,13 @@ function OngletSage() {
                 </div>
               </div>
 
+              <DetailGroup title="Expédition retenue (adresse si renseignée, sinon défaut client)">
+                <DetailRow label="Mode d'expédition" value={selected.expedition_designation} />
+                <DetailRow label="Code" value={selected.n_expedition_effectif} />
+                <DetailRow label="Base de calcul frais de port" value={selected.expedition_base_calcul} />
+                <DetailRow label="Frais de port prévu HT" value={selected.expedition_frais_port_ht !== null ? `${Number(selected.expedition_frais_port_ht).toFixed(2)} €` : null} />
+              </DetailGroup>
+
               <DetailGroup title="Fiche client (SAGE)">
                 <DetailRow label="Type" value={selected.type_tiers} />
                 <DetailRow label="Qualité" value={selected.qualite} />
@@ -442,7 +454,7 @@ function OngletSage() {
                 <DetailRow label="Famille" value={selected.famille} />
                 <DetailRow label="Agence de rattachement" value={normaliserAgence(selected.agence_rattachement)} />
                 <DetailRow label="Ville du siège" value={[selected.code_postal_siege, selected.ville_siege].filter(Boolean).join(' ')} />
-                <DetailRow label="Mode d'expédition par défaut" value={selected.expedition_defaut_designation ? `${selected.expedition_defaut_designation} (code ${selected.n_expedition_defaut})` : selected.n_expedition_defaut} />
+                <DetailRow label="Mode d'expédition par défaut (client)" value={selected.expedition_defaut_designation ? `${selected.expedition_defaut_designation} (code ${selected.n_expedition_defaut})` : selected.n_expedition_defaut} />
               </DetailGroup>
 
               <DetailGroup title="Adresse de livraison">
@@ -454,7 +466,7 @@ function OngletSage() {
                 <DetailRow label="Contact" value={selected.li_contact} />
                 <DetailRow label="Téléphone" value={selected.li_telephone} />
                 <DetailRow
-                  label="Mode d'expédition (adresse)"
+                  label="Mode d'expédition (adresse seule)"
                   value={selected.expedition_adresse_designation ? `${selected.expedition_adresse_designation} (code ${selected.n_expedition_adresse})` : selected.n_expedition_adresse}
                 />
               </DetailGroup>
