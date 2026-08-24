@@ -12,26 +12,27 @@
  *  - navigation +/- pour glisser la fenêtre de 7 jours en 7 jours
  *  - vision horaire 8h→18h
  *  - couleurs Outlook (catégories, résolues côté serveur)
- *  - clic sur un évènement → callback onActivityClick (à brancher sur le
- *    mur d'activité BLG — je n'ai pas cette route, donc callback ouvert)
+ *  - clic sur un évènement -> fenêtre de détail intégrée (RDV + compte-rendu,
+ *    consultable ET modifiable à la main) -- callback onActivityClick
+ *    toujours disponible en plus, pour un usage externe éventuel.
  *
- * Activités BLG fusionnées dans la grille :
- *  - Source : crm_base_activity, filtrée sur internal_tag='normal' et
- *    type in ('meeting','phoneCall','reminder'), et from_fk = l'identifiant
- *    partner BLG de l'utilisateur courant (user_page_access.blg_partner_id,
- *    cf. supabase/migrations/add_blg_partner_id_to_user_page_access.sql).
- *  - Si blg_partner_id n'est pas renseigné pour l'utilisateur, cette source
- *    est simplement ignorée (aucune erreur affichée) — seul l'agenda
- *    Outlook reste visible, comme avant.
- *  - Le nom exact de la colonne "objet" de crm_base_activity n'est pas
- *    confirmé (tronqué "su…" dans l'aperçu Supabase) : lecture résiliente
- *    via select('*') + repli sur plusieurs noms candidats, jamais de
- *    filtre WHERE dessus — donc aucun risque de plantage si le nom diffère.
+ * V2 (cette révision) :
+ *  - Les activités affichées viennent désormais de v_rdv_unifie (BLG +
+ *    RDV "compagnon CEGECLIM" créés depuis l'app avant toute connexion
+ *    BLG/Outlook) au lieu de crm_base_activity seul -- résolution du nom
+ *    d'entreprise ET du numéro tiers déjà faite côté vue, plus besoin des
+ *    2 requêtes annexes crm_activity_company/partner_base_partner ici.
+ *  - Icône "compte-rendu" sur les évènements qui en ont un
+ *    (v_rdv_unifie.a_compte_rendu).
+ *  - Clic sur un évènement -> fenêtre de détail avec le compte-rendu
+ *    existant, éditable à la main directement ici (même logique que la
+ *    version mobile et que Vision Client).
+ *  - Bouton "+ Nouveau RDV" : crée un RDV "compagnon CEGECLIM"
+ *    (rdv_compagnon), avec recherche de client optionnelle.
  *
- * NOTE SCHEMA : le schéma Postgres réel est `blg`, mais PostgREST n'expose
- * que `public` et `sage`. On passe donc par une vue miroir
- * `public.crm_base_activity` (CREATE VIEW ... AS SELECT * FROM blg.crm_base_activity)
- * et on interroge cette vue directement, sans .schema('blg').
+ * NOTE SCHEMA : le schéma Postgres réel des activités BLG est `blg`, mais
+ * PostgREST n'expose que `public` et `sage`. v_rdv_unifie (public) fait
+ * déjà cette jointure et cette résolution, aucune vue miroir à gérer ici.
  *
  * Contient aussi un petit panneau d'administration (icône ⚙) pour gérer
  * outlook_calendar_autorisations : qui peut voir quel agenda, visible
@@ -63,10 +64,18 @@ type OutlookEvent = {
   categories: string[];
   colorHex: string | null;
   webLink: string | null;
-  /** Présent uniquement pour les évènements BLG fusionnés — absent pour les évènements Outlook. */
-  source?: "outlook" | "blg";
-  /** Nom d'entreprise liée (crm_activity_company -> partner_base_partner.company_name), BLG uniquement. */
+  /** Présent uniquement pour les évènements RDV fusionnés (BLG ou compagnon) — absent pour les évènements Outlook natifs. */
+  source?: "outlook" | "blg" | "compagnon";
+  /** Nom d'entreprise liée, RDV fusionnés uniquement. */
   company?: string | null;
+  /** Numéro tiers SAGE lié, RDV fusionnés uniquement — nécessaire pour ouvrir la fiche/le compte-rendu. */
+  numeroTiers?: string | null;
+  /** Identifiant technique côté BLG (crm_base_activity.id) ou côté compagnon (rdv_compagnon.id), selon `source`. */
+  blgActivityId?: string | null;
+  compagnonId?: string | null;
+  /** Vrai si un compte-rendu (client_comptes_rendus) existe déjà pour ce RDV. */
+  aCompteRendu?: boolean;
+  lieu?: string | null;
 };
 
 const HOUR_START = 8;
@@ -74,16 +83,7 @@ const HOUR_END = 18;
 const JOURS_LABELS = ["Dim", "Lun", "Mar", "Mer", "Jeu", "Ven", "Sam"]; // index = Date.getDay()
 const DEFAULT_COLOR = "#4B92AC";
 
-// Types d'activité BLG à afficher dans l'agenda. Confirmé empiriquement que
-// crm_base_activity.type stocke le nom texte ('meeting', 'phoneCall',
-// 'reminder'), pas l'ID numérique de la table de référence blg.activity_type
-// (4/7/9 désignent bien les mêmes types, mais c'est le libellé texte qui est
-// stocké sur cette colonne). On filtre donc sur le texte — les IDs sont
-// ajoutés au filtre par sécurité seulement : ça ne retire jamais de
-// résultat, ça peut seulement en ajouter si certaines lignes stockent l'ID
-// en texte ('4', '7', '9').
-const BLG_ACTIVITY_TYPE_KEYS = ["meeting", "phoneCall", "reminder", "4", "7", "9"];
-const BLG_TYPE_LABELS: Record<string, string> = {
+const RDV_TYPE_LABELS: Record<string, string> = {
   meeting: "RDV",
   phoneCall: "Appel",
   reminder: "Rappel",
@@ -91,7 +91,7 @@ const BLG_TYPE_LABELS: Record<string, string> = {
   "7": "Appel",
   "9": "Rappel",
 };
-const BLG_TYPE_COLORS: Record<string, string> = {
+const RDV_TYPE_COLORS: Record<string, string> = {
   meeting: "#2E5BB8",
   phoneCall: "#D68910",
   reminder: "#8E44AD",
@@ -117,55 +117,299 @@ function addDays(d: Date, n: number) {
   return copy;
 }
 
-/** Lit une valeur parmi plusieurs noms de colonnes candidats — jamais utilisé dans un filtre WHERE, uniquement en lecture sur des lignes déjà récupérées. */
-function pickField(row: Record<string, any> | null | undefined, keys: string[]) {
-  if (!row) return null;
-  for (const key of keys) {
-    const v = row[key];
-    if (v !== null && v !== undefined && String(v).trim() !== "") return v;
-  }
-  return null;
+function formatDateTimeFr(value: string | null | undefined, allDay?: boolean): string {
+  if (!value) return "—";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  return allDay
+    ? d.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit", year: "numeric" })
+    : d.toLocaleString("fr-FR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
-function mapBlgActivityToEvent(row: Record<string, any>, companyName?: string | null): OutlookEvent {
+/** Une ligne de public.v_rdv_unifie -> un évènement de la grille. */
+function mapUnifiedRdvToEvent(row: Record<string, any>): OutlookEvent {
   const type = String(row.type ?? "");
-  // "comment" est la colonne réelle du texte descriptif sur crm_base_activity
-  // (confirmé via information_schema — il n'y a pas de colonne subject/title/
-  // name/label sur cette table). On la garde en priorité, avec repli sur les
-  // noms candidats au cas où une autre variante existerait, puis sur le
-  // libellé du type.
-  const subject = String(
-    pickField(row, ["comment", "subject", "title", "name", "label"]) || BLG_TYPE_LABELS[type] || "Activité BLG"
-  );
-  // NE PAS tronquer le timestamp (garder le fuseau horaire, ex. "+00") : un
-  // .slice(0, 19) sur "2026-08-23T22:00:00+00:00" donnait
-  // "2026-08-23T22:00:00", ensuite réinterprété par `new Date()` comme
-  // 22h locale plutôt que 22h UTC (= 00h locale le lendemain) — d'où des
-  // évènements "toute la journée" classés sur le mauvais jour (souvent la
-  // veille), au point de disparaître complètement si ce jour n'est pas
-  // affiché dans la semaine visible.
-  const start = String(row.start_date || "");
-  const end = String(row.end_date || row.start_date || "");
-
   return {
-    id: `blg-${row.id}`,
-    subject,
-    start,
-    end,
+    id: row.rdv_id,
+    subject: row.subject || RDV_TYPE_LABELS[type] || "Activité",
+    start: String(row.start_date || ""),
+    end: String(row.end_date || row.start_date || ""),
     isAllDay: Boolean(row.all_day),
-    location: null,
+    location: row.lieu || null,
     categories: type ? [type] : [],
-    colorHex: BLG_TYPE_COLORS[type] || "#7A5EA8",
+    colorHex: RDV_TYPE_COLORS[type] || "#7A5EA8",
     webLink: null,
-    source: "blg",
-    company: companyName || null,
+    source: row.source === "compagnon" ? "compagnon" : "blg",
+    company: row.company_name || null,
+    numeroTiers: row.numero_tiers || null,
+    blgActivityId: row.blg_activity_id || null,
+    compagnonId: row.compagnon_id || null,
+    aCompteRendu: Boolean(row.a_compte_rendu),
+    lieu: row.lieu || null,
   };
+}
+
+// ── Fenêtre de détail générique (RDV + compte-rendu) ─────────────────────
+
+type CompteRendu = { id: string; resume: string | null; created_by_name: string | null; created_at: string };
+
+function RdvDetailModal({
+  evt, currentEmail, currentName, onClose, onChanged,
+}: {
+  evt: OutlookEvent
+  currentEmail: string
+  currentName: string
+  onClose: () => void
+  onChanged: () => void
+}) {
+  const [compteRendu, setCompteRendu] = useState<CompteRendu | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [editMode, setEditMode] = useState(false);
+  const [resumeEdit, setResumeEdit] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const activityId = evt.source === "compagnon" ? evt.compagnonId : evt.blgActivityId;
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      const { data } = await supabase
+        .from("client_comptes_rendus")
+        .select("id, resume, created_by_name, created_at")
+        .eq("rdv_activity_id", activityId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (cancelled) return;
+      setCompteRendu((data as CompteRendu) || null);
+      setResumeEdit((data as CompteRendu | null)?.resume || "");
+      setLoading(false);
+    }
+    if (activityId) void load();
+    else setLoading(false);
+    return () => { cancelled = true; };
+  }, [activityId]);
+
+  async function enregistrer() {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      if (compteRendu) {
+        const { error } = await supabase.from("client_comptes_rendus").update({ resume: resumeEdit }).eq("id", compteRendu.id);
+        if (error) throw error;
+        setCompteRendu({ ...compteRendu, resume: resumeEdit });
+      } else {
+        const { data, error } = await supabase
+          .from("client_comptes_rendus")
+          .insert({
+            numero_tiers: evt.numeroTiers,
+            rdv_activity_id: activityId,
+            rdv_label: evt.subject,
+            created_by_email: currentEmail,
+            created_by_name: currentName,
+            resume: resumeEdit,
+            transcript: null,
+          })
+          .select("id, resume, created_by_name, created_at")
+          .single();
+        if (error) throw error;
+        setCompteRendu(data as CompteRendu);
+      }
+      setEditMode(false);
+      onChanged();
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="oaModalOverlay" onClick={onClose}>
+      <div className="oaModalCard" onClick={(e) => e.stopPropagation()}>
+        <div className="oaModalHeader">
+          <div>
+            <div className="oaModalTitle">{evt.subject}</div>
+            <div className="oaModalSubtitle">
+              {RDV_TYPE_LABELS[evt.categories[0]] || evt.categories[0] || "Activité"} · {evt.source === "compagnon" ? "RDV compagnon CEGECLIM" : "Synchronisé BLG"}
+            </div>
+          </div>
+          <button className="oaModalClose" onClick={onClose}>✕</button>
+        </div>
+        <div className="oaModalBody">
+          {evt.company && <div className="oaFieldRow"><span>Entreprise</span><strong>{evt.company}</strong></div>}
+          <div className="oaFieldRow"><span>Début</span><strong>{formatDateTimeFr(evt.start, evt.isAllDay)}</strong></div>
+          <div className="oaFieldRow"><span>Fin</span><strong>{formatDateTimeFr(evt.end, evt.isAllDay)}</strong></div>
+          {evt.lieu && <div className="oaFieldRow"><span>Lieu</span><strong>{evt.lieu}</strong></div>}
+
+          <div className="oaCrBlock">
+            <div className="oaCrHeader">
+              <span>Compte-rendu</span>
+              {!editMode && (
+                <button className="oaCrEditBtn" onClick={() => setEditMode(true)}>{compteRendu ? "✎ Modifier" : "+ Ajouter"}</button>
+              )}
+            </div>
+            {loading ? (
+              <p className="oaMuted">Chargement…</p>
+            ) : editMode ? (
+              <div>
+                <textarea className="oaTextarea" rows={6} value={resumeEdit} onChange={(e) => setResumeEdit(e.target.value)} placeholder="Résumé du rendez-vous…" autoFocus />
+                {saveError && <p className="oaError">{saveError}</p>}
+                <div className="oaActions">
+                  <button className="oaSaveBtn" onClick={() => void enregistrer()} disabled={saving}>{saving ? "Enregistrement…" : "Enregistrer"}</button>
+                  <button className="oaCancelBtn" onClick={() => { setEditMode(false); setResumeEdit(compteRendu?.resume || ""); }} disabled={saving}>Annuler</button>
+                </div>
+              </div>
+            ) : compteRendu ? (
+              <div>
+                <p className="oaCrResume">{compteRendu.resume || "(résumé vide)"}</p>
+                <p className="oaCrMeta">{compteRendu.created_by_name ? `Par ${compteRendu.created_by_name} · ` : ""}{new Date(compteRendu.created_at).toLocaleString("fr-FR")}</p>
+              </div>
+            ) : (
+              <p className="oaMuted">Aucun compte-rendu pour ce rendez-vous.</p>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Création d'un RDV "compagnon CEGECLIM" ────────────────────────────────
+
+function NouveauRdvModal({
+  currentEmail, currentName, onClose, onCreated,
+}: { currentEmail: string; currentName: string; onClose: () => void; onCreated: () => void }) {
+  const [clientSearch, setClientSearch] = useState("");
+  const [clientResults, setClientResults] = useState<Array<{ numero: string; intitule: string }>>([]);
+  const [numeroTiers, setNumeroTiers] = useState<string | null>(null);
+  const [intituleTiers, setIntituleTiers] = useState("");
+  const [subject, setSubject] = useState("");
+  const [type, setType] = useState<"meeting" | "phoneCall" | "reminder">("meeting");
+  const [date, setDate] = useState("");
+  const [heure, setHeure] = useState("09:00");
+  const [duree, setDuree] = useState(60);
+  const [lieu, setLieu] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const q = clientSearch.trim();
+    if (q.length < 2 || numeroTiers) { setClientResults([]); return; }
+    const t = setTimeout(async () => {
+      const { data } = await supabase.from("ref_tiers").select("numero, intitule").or(`numero.ilike.%${q}%,intitule.ilike.%${q}%`).limit(8);
+      setClientResults((data || []) as Array<{ numero: string; intitule: string }>);
+    }, 220);
+    return () => clearTimeout(t);
+  }, [clientSearch, numeroTiers]);
+
+  async function creer() {
+    if (!subject.trim() || !date) { setError("Objet et date sont obligatoires."); return; }
+    setSaving(true);
+    setError(null);
+    try {
+      const start = new Date(`${date}T${heure}:00`);
+      const end = new Date(start.getTime() + duree * 60000);
+      const { error: err } = await supabase.from("rdv_compagnon").insert({
+        numero_tiers: numeroTiers,
+        type,
+        subject: subject.trim(),
+        start_date: start.toISOString(),
+        end_date: end.toISOString(),
+        all_day: false,
+        lieu: lieu.trim() || null,
+        created_by_email: currentEmail,
+        created_by_name: currentName,
+      });
+      if (err) throw err;
+      onCreated();
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="oaModalOverlay" onClick={onClose}>
+      <div className="oaModalCard" onClick={(e) => e.stopPropagation()}>
+        <div className="oaModalHeader">
+          <div>
+            <div className="oaModalTitle">Nouveau rendez-vous</div>
+            <div className="oaModalSubtitle">RDV compagnon CEGECLIM — indépendant de BLG/Outlook</div>
+          </div>
+          <button className="oaModalClose" onClick={onClose}>✕</button>
+        </div>
+        <div className="oaModalBody">
+          <div className="oaFormField oaClientSearchWrap">
+            <span>Client (facultatif)</span>
+            <input
+              value={numeroTiers ? `${intituleTiers} (${numeroTiers})` : clientSearch}
+              onChange={(e) => { setClientSearch(e.target.value); setNumeroTiers(null); }}
+              placeholder="Rechercher un client…"
+            />
+            {numeroTiers && (
+              <button type="button" className="oaClearClient" onClick={() => { setNumeroTiers(null); setClientSearch(""); }}>✕ Retirer</button>
+            )}
+            {clientResults.length > 0 && !numeroTiers && (
+              <div className="oaClientResults">
+                {clientResults.map((c) => (
+                  <button key={c.numero} type="button" onClick={() => { setNumeroTiers(c.numero); setIntituleTiers(c.intitule); setClientResults([]); }}>
+                    <span className="mono">{c.numero}</span><span>{c.intitule}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="oaFormGrid">
+            <label className="oaFormField">
+              <span>Objet</span>
+              <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Ex. : Visite chantier, appel de relance…" />
+            </label>
+            <label className="oaFormField">
+              <span>Type</span>
+              <select value={type} onChange={(e) => setType(e.target.value as typeof type)}>
+                <option value="meeting">RDV</option>
+                <option value="phoneCall">Appel</option>
+                <option value="reminder">Rappel</option>
+              </select>
+            </label>
+            <label className="oaFormField">
+              <span>Date</span>
+              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+            </label>
+            <label className="oaFormField">
+              <span>Heure</span>
+              <input type="time" value={heure} onChange={(e) => setHeure(e.target.value)} />
+            </label>
+            <label className="oaFormField">
+              <span>Durée (min)</span>
+              <input type="number" value={duree} onChange={(e) => setDuree(Number(e.target.value) || 60)} min={15} step={15} />
+            </label>
+            <label className="oaFormField">
+              <span>Lieu (facultatif)</span>
+              <input value={lieu} onChange={(e) => setLieu(e.target.value)} placeholder="Ex. : Chez le client, agence…" />
+            </label>
+          </div>
+          {error && <p className="oaError">{error}</p>}
+          <div className="oaActions">
+            <button className="oaSaveBtn" onClick={() => void creer()} disabled={saving}>{saving ? "Création…" : "Créer le RDV"}</button>
+            <button className="oaCancelBtn" onClick={onClose} disabled={saving}>Annuler</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export default function OutlookAgenda({
   onActivityClick,
 }: {
-  /** Appelé au clic sur un évènement — à brancher sur le mur d'activité BLG. */
+  /** Appelé au clic sur un évènement, EN PLUS de l'ouverture de la fenêtre de détail intégrée -- optionnel, pour un usage externe éventuel. */
   onActivityClick?: (evt: OutlookEvent) => void;
 }) {
   const [autorisations, setAutorisations] = useState<Autorisation[]>([]);
@@ -175,7 +419,7 @@ export default function OutlookAgenda({
   // toujours d'aujourd'hui ; +/- glisse la fenêtre de 7 jours à la fois.
   const [anchorDate, setAnchorDate] = useState<Date>(() => startOfDay(new Date()));
   const [outlookEvents, setOutlookEvents] = useState<OutlookEvent[]>([]);
-  const [blgEvents, setBlgEvents] = useState<OutlookEvent[]>([]);
+  const [rdvEvents, setRdvEvents] = useState<OutlookEvent[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -191,6 +435,24 @@ export default function OutlookAgenda({
   const [connectCollaborateur, setConnectCollaborateur] = useState("");
   const [connecting, setConnecting] = useState(false);
   const [notice, setNotice] = useState<{ type: "success" | "error"; message: string } | null>(null);
+
+  // Détail RDV (clic sur un évènement) + création d'un nouveau RDV compagnon.
+  const [openEvent, setOpenEvent] = useState<OutlookEvent | null>(null);
+  const [nouveauRdvOuvert, setNouveauRdvOuvert] = useState(false);
+  const [currentEmail, setCurrentEmail] = useState("");
+  const [currentName, setCurrentName] = useState("");
+
+  useEffect(() => {
+    async function loadIdentity() {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const email = sessionData.session?.user?.email?.toLowerCase();
+      if (!email) return;
+      const { data: access } = await supabase.from("user_page_access").select("display_name").eq("email", email).maybeSingle();
+      setCurrentEmail(email);
+      setCurrentName(String(access?.display_name || "").trim() || email.split("@")[0]);
+    }
+    void loadIdentity();
+  }, []);
 
   // Sélecteur (visible par tout utilisateur connecté) : vue restreinte,
   // sans le lien ICS ni l'email complet des détails sensibles — juste de
@@ -428,100 +690,44 @@ export default function OutlookAgenda({
     };
   }, [selectedEmail, anchorDate, useMockData]);
 
-  // ── Activités BLG (crm_base_activity), fusionnées dans la même grille ───
-  // Source indépendante de l'agenda Outlook ci-dessus : ignorée en silence
-  // si l'utilisateur n'a pas de blg_partner_id renseigné (pas d'erreur
-  // affichée, juste rien à fusionner).
-  useEffect(() => {
-    let cancelled = false;
-    async function loadBlgActivities() {
-      const { data: sessionData } = await supabase.auth.getSession();
-      const email = sessionData.session?.user?.email?.toLowerCase();
-      if (!email) return;
+  // ── RDV fusionnés (v_rdv_unifie = BLG + compagnon CEGECLIM) ─────────────
+  // Filtrés sur : mes RDV BLG (from_fk = mon partner id) OU mes RDV
+  // compagnon (created_by_email = mon email) -- même périmètre "mes RDV"
+  // qu'avant, étendu aux RDV créés depuis l'app avant toute connexion BLG.
+  async function loadRdvEvents() {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const email = sessionData.session?.user?.email?.toLowerCase();
+    if (!email) { setRdvEvents([]); return; }
 
-      const { data: access, error: accessErr } = await supabase
-        .from("user_page_access")
-        .select("blg_partner_id")
-        .eq("email", email)
-        .maybeSingle();
+    const { data: access } = await supabase.from("user_page_access").select("blg_partner_id").eq("email", email).maybeSingle();
 
-      if (accessErr || !access?.blg_partner_id) {
-        if (!cancelled) setBlgEvents([]);
-        return;
-      }
+    const start = toIsoDate(anchorDate);
+    const end = toIsoDate(addDays(anchorDate, 7));
 
-      const start = toIsoDate(anchorDate);
-      const end = toIsoDate(addDays(anchorDate, 7));
+    const orParts: string[] = [`created_by_email.eq.${email}`];
+    if (access?.blg_partner_id) orParts.push(`blg_partner_id.eq.${access.blg_partner_id}`);
 
-      const { data, error: err } = await supabase
-        .from("crm_base_activity")
-        .select("*")
-        .eq("internal_tag", "normal")
-        .in("type", BLG_ACTIVITY_TYPE_KEYS)
-        .eq("from_fk", access.blg_partner_id)
-        .gte("start_date", start)
-        .lt("start_date", end);
+    const { data, error: err } = await supabase
+      .from("v_rdv_unifie")
+      .select("*")
+      .gte("start_date", start)
+      .lt("start_date", end)
+      .or(orParts.join(","));
 
-      if (cancelled) return;
-
-      if (err) {
-        console.error("[OutlookAgenda] crm_base_activity", err);
-        setBlgEvents([]);
-        return;
-      }
-
-      const rows = (data || []) as Record<string, any>[];
-
-      // Nom d'entreprise liée : crm_activity_company (activity_fk, company_fk)
-      // -> partner_base_partner.id / company_name. Résolu en 2 requêtes
-      // batch (pas une par activité) pour rester léger. Une activité sans
-      // entreprise liée, ou une erreur sur ces requêtes annexes, ne doit
-      // jamais empêcher l'affichage des rendez-vous eux-mêmes — on retombe
-      // simplement sur "pas de nom d'entreprise" en silence.
-      const companyByActivity = new Map<number, string>();
-      try {
-        const activityIds = rows.map((r) => r.id).filter((v) => v !== null && v !== undefined);
-        if (activityIds.length > 0) {
-          const { data: links } = await supabase
-            .from("crm_activity_company")
-            .select("activity_fk, company_fk")
-            .in("activity_fk", activityIds);
-
-          const companyIds = Array.from(
-            new Set(((links || []) as Record<string, any>[]).map((l) => l.company_fk).filter((v) => v !== null && v !== undefined))
-          );
-
-          if (companyIds.length > 0) {
-            const { data: companies } = await supabase
-              .from("partner_base_partner")
-              .select("id, company_name")
-              .in("id", companyIds);
-
-            const nameById = new Map(
-              ((companies || []) as Record<string, any>[]).map((c) => [c.id, String(c.company_name || "").trim()])
-            );
-
-            ((links || []) as Record<string, any>[]).forEach((l) => {
-              const name = nameById.get(l.company_fk);
-              if (name) companyByActivity.set(l.activity_fk, name);
-            });
-          }
-        }
-      } catch (e) {
-        console.warn("[OutlookAgenda] résolution entreprise liée impossible :", e);
-      }
-
-      if (cancelled) return;
-
-      setBlgEvents(rows.map((row) => mapBlgActivityToEvent(row, companyByActivity.get(row.id) || null)));
+    if (err) {
+      console.error("[OutlookAgenda] v_rdv_unifie", err);
+      setRdvEvents([]);
+      return;
     }
-    void loadBlgActivities();
-    return () => {
-      cancelled = true;
-    };
+    setRdvEvents(((data || []) as Record<string, any>[]).map(mapUnifiedRdvToEvent));
+  }
+
+  useEffect(() => {
+    void loadRdvEvents();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [anchorDate]);
 
-  const events = useMemo(() => [...outlookEvents, ...blgEvents], [outlookEvents, blgEvents]);
+  const events = useMemo(() => [...outlookEvents, ...rdvEvents], [outlookEvents, rdvEvents]);
 
   const eventsByDay = useMemo(() => {
     const map = new Map<string, OutlookEvent[]>();
@@ -612,6 +818,14 @@ export default function OutlookAgenda({
     };
   }
 
+  function handleEventClick(e: OutlookEvent) {
+    onActivityClick?.(e);
+    // Fenêtre de détail intégrée uniquement pour les RDV fusionnés (BLG /
+    // compagnon) -- un évènement Outlook natif n'a ni compte-rendu ni
+    // fiche client à afficher.
+    if (e.source === "blg" || e.source === "compagnon") setOpenEvent(e);
+  }
+
   const currentAutorisation = autorisations.find((a) => a.email_outlook === selectedEmail);
   const aujourdHuiIso = toIsoDate(new Date());
 
@@ -624,9 +838,9 @@ export default function OutlookAgenda({
             Données fictives
           </span>
         )}
-        {blgEvents.length > 0 && (
+        {rdvEvents.length > 0 && (
           <span className="rounded-full bg-[#7A5EA8]/20 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#7A5EA8]">
-            + {blgEvents.length} activité{blgEvents.length > 1 ? "s" : ""} BLG
+            + {rdvEvents.length} RDV
           </span>
         )}
 
@@ -642,6 +856,13 @@ export default function OutlookAgenda({
           ))}
           {autorisations.length === 0 && <option value="">Aucun agenda autorisé</option>}
         </select>
+
+        <button
+          onClick={() => setNouveauRdvOuvert(true)}
+          className="rounded-lg bg-[#2E5BB8] px-2.5 py-1 text-xs font-bold text-white hover:bg-[#244a96]"
+        >
+          + Nouveau RDV
+        </button>
 
         <div className="ml-auto flex items-center gap-1">
           <button
@@ -822,11 +1043,12 @@ export default function OutlookAgenda({
                     {dayEvents.filter((e) => !e.isAllDay).map((e) => (
                       <button
                         key={e.id}
-                        onClick={() => onActivityClick?.(e)}
+                        onClick={() => handleEventClick(e)}
                         title={`${e.company ? e.company + " — " : ""}${e.subject}${e.location ? " · " + e.location : ""}`}
                         style={eventStyle(e, currentAutorisation?.couleur_defaut || null)}
                         className="absolute left-0.5 right-0.5 overflow-hidden rounded-md px-1.5 py-0.5 text-left text-[10px] leading-tight text-white shadow hover:brightness-110"
                       >
+                        {e.aCompteRendu && <span className="oaCrIcon" title="Compte-rendu disponible">📝</span>}
                         {e.company && (
                           <div className="truncate text-[8.5px] font-semibold uppercase tracking-wide text-[#FFC98B]">
                             {e.company}
@@ -852,11 +1074,12 @@ export default function OutlookAgenda({
                     {allDay.map((e) => (
                       <button
                         key={e.id}
-                        onClick={() => onActivityClick?.(e)}
+                        onClick={() => handleEventClick(e)}
                         title={`${e.company ? e.company + " — " : ""}${e.subject}`}
                         style={{ background: e.colorHex || currentAutorisation?.couleur_defaut || DEFAULT_COLOR }}
                         className="w-full truncate rounded px-1.5 py-1 text-left text-[10px] text-white"
                       >
+                        {e.aCompteRendu && <span className="oaCrIcon" title="Compte-rendu disponible">📝</span>}
                         {e.company && (
                           <span className="mr-1 font-semibold uppercase tracking-wide text-[#FFC98B]">
                             {e.company} ·
@@ -874,6 +1097,64 @@ export default function OutlookAgenda({
       </div>
 
       {loading && <div className="mt-2 text-center text-[10px] text-[#141A26]/60">Chargement de l&rsquo;agenda…</div>}
+
+      {openEvent && (
+        <RdvDetailModal
+          evt={openEvent}
+          currentEmail={currentEmail}
+          currentName={currentName}
+          onClose={() => setOpenEvent(null)}
+          onChanged={() => void loadRdvEvents()}
+        />
+      )}
+      {nouveauRdvOuvert && (
+        <NouveauRdvModal
+          currentEmail={currentEmail}
+          currentName={currentName}
+          onClose={() => setNouveauRdvOuvert(false)}
+          onCreated={() => void loadRdvEvents()}
+        />
+      )}
+
+      <style jsx>{`
+        .oaCrIcon { display: inline-block; margin-right: 3px; font-size: 9px; line-height: 1; filter: drop-shadow(0 0 1px rgba(0,0,0,.6)); }
+
+        .oaModalOverlay { position: fixed; inset: 0; z-index: 200; background: rgba(15,23,42,.45); display: flex; align-items: center; justify-content: center; padding: 20px; }
+        .oaModalCard { background: white; border-radius: 16px; width: 100%; max-width: 460px; max-height: 85vh; overflow-y: auto; box-shadow: 0 24px 60px rgba(15,23,42,.3); color: #0f172a; }
+        .oaModalHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 16px 18px 10px; border-bottom: 1px solid #f1f5f9; }
+        .oaModalTitle { font-size: 15.5px; font-weight: 900; }
+        .oaModalSubtitle { font-size: 11.5px; font-weight: 700; color: #64748b; margin-top: 2px; }
+        .oaModalClose { border: none; background: #f1f5f9; color: #64748b; width: 26px; height: 26px; border-radius: 999px; font-size: 13px; cursor: pointer; flex-shrink: 0; }
+        .oaModalBody { padding: 14px 18px 18px; }
+        .oaFieldRow { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid #f8fafc; font-size: 12.5px; }
+        .oaFieldRow span { color: #64748b; font-weight: 800; }
+        .oaFieldRow strong { color: #0f172a; font-weight: 700; text-align: right; }
+
+        .oaCrBlock { margin-top: 14px; padding-top: 12px; border-top: 1px dashed #e2e8f0; }
+        .oaCrHeader { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; font-size: 11.5px; font-weight: 900; text-transform: uppercase; letter-spacing: .04em; color: #334155; }
+        .oaCrEditBtn { border: none; background: #eef2ff; color: #3730a3; font-size: 11px; font-weight: 800; padding: 4px 9px; border-radius: 8px; cursor: pointer; text-transform: none; }
+        .oaMuted { font-size: 12px; color: #94a3b8; font-style: italic; margin: 0; }
+        .oaCrResume { font-size: 13px; color: #0f172a; line-height: 1.6; white-space: pre-wrap; margin: 0 0 6px; }
+        .oaCrMeta { font-size: 10.5px; color: #94a3b8; margin: 0; }
+        .oaTextarea { width: 100%; border: 1px solid #cbd5e1; border-radius: 10px; padding: 9px; font-size: 12.5px; font-family: inherit; resize: vertical; outline: none; color: #0f172a; }
+        .oaTextarea:focus { border-color: #2E5BB8; }
+        .oaError { color: #dc2626; font-size: 11.5px; font-weight: 700; margin: 6px 0 0; }
+        .oaActions { display: flex; gap: 8px; margin-top: 10px; }
+        .oaSaveBtn { border: none; background: #0f172a; color: white; font-size: 12px; font-weight: 800; padding: 8px 15px; border-radius: 9px; cursor: pointer; }
+        .oaSaveBtn:disabled { opacity: .5; cursor: not-allowed; }
+        .oaCancelBtn { border: 1px solid #e2e8f0; background: white; color: #64748b; font-size: 12px; font-weight: 800; padding: 8px 15px; border-radius: 9px; cursor: pointer; }
+
+        .oaFormGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+        .oaFormField { display: flex; flex-direction: column; gap: 4px; font-size: 10.5px; font-weight: 800; text-transform: uppercase; color: #64748b; }
+        .oaFormField input, .oaFormField select { height: 36px; border: 1px solid #cbd5e1; border-radius: 9px; padding: 0 9px; font-size: 12.5px; font-weight: 600; color: #0f172a; text-transform: none; outline: none; font-family: inherit; }
+        .oaFormField input:focus, .oaFormField select:focus { border-color: #2E5BB8; }
+        .oaClientSearchWrap { position: relative; }
+        .oaClearClient { align-self: flex-start; border: none; background: none; color: #dc2626; font-size: 10.5px; font-weight: 800; cursor: pointer; padding: 2px 0; text-transform: none; }
+        .oaClientResults { position: absolute; top: 100%; left: 0; right: 0; z-index: 10; background: white; border: 1px solid #e2e8f0; border-radius: 10px; box-shadow: 0 10px 24px rgba(15,23,42,.15); max-height: 220px; overflow-y: auto; }
+        .oaClientResults button { display: flex; gap: 8px; width: 100%; text-align: left; padding: 7px 10px; border: none; background: white; font-size: 12px; cursor: pointer; border-bottom: 1px solid #f1f5f9; text-transform: none; }
+        .oaClientResults button:hover { background: #f8fafc; }
+        .oaClientResults .mono { font-family: monospace; font-weight: 800; color: #64748b; }
+      `}</style>
     </div>
   );
 }

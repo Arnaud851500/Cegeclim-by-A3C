@@ -6,20 +6,6 @@ import { formatMoney } from '@/app/focus_mensuel/page'
 import MobileDetailSheet, { type DetailField } from './MobileDetailSheet'
 import VoiceReportButtons from './VoiceReportButtons'
 
-// ─────────────────────────────────────────────────────────────────────────
-// Confirmé (Supabase Table Editor, table activite_lignes) : les documents
-// sont répartis sur TROIS tables distinctes, pas une seule table générique :
-//   - devis_lignes    : Devis
-//   - facture_lignes  : Factures (confirmé fonctionnel ailleurs dans l'app)
-//   - activite_lignes : Bon de commande / Bon de livraison / Bon de retour
-//     (CDC/BL/BR). Colonnes confirmées sur cette table : numero_piece,
-//     numero_tiers_entete, intitule_tiers_entete, type_document, ligne_hash.
-// D'où la recherche multi-tables ci-dessous. Chaque table × champ est
-// interrogée séparément et isolée par son propre try/catch : une colonne ou
-// une table qui n'existe pas dans une combinaison n'empêche pas les autres
-// de fonctionner.
-// ─────────────────────────────────────────────────────────────────────────
-
 const SEARCH_TABLES = ['activite_lignes', 'facture_lignes', 'devis_lignes']
 
 const SEARCH_FIELDS = [
@@ -30,34 +16,32 @@ const SEARCH_FIELDS = [
   { key: 'numero_tiers_entete' },
 ]
 
-const RDV_TYPE_KEYS = ['meeting', 'phoneCall', 'reminder', '4', '7', '9']
-const RDV_TYPE_COLORS: Record<string, string> = {
-  meeting: '#2E5BB8',
-  phoneCall: '#D68910',
-  reminder: '#8E44AD',
-  '4': '#2E5BB8',
-  '7': '#D68910',
-  '9': '#8E44AD',
-}
 const RDV_TYPE_LABELS: Record<string, string> = {
-  meeting: 'RDV',
-  phoneCall: 'Appel',
-  reminder: 'Rappel',
-  '4': 'RDV',
-  '7': 'Appel',
-  '9': 'Rappel',
+  meeting: 'RDV', phoneCall: 'Appel', reminder: 'Rappel',
+  '4': 'RDV', '7': 'Appel', '9': 'Rappel',
+}
+const RDV_TYPE_COLORS: Record<string, string> = {
+  meeting: '#2E5BB8', phoneCall: '#D68910', reminder: '#8E44AD',
+  '4': '#2E5BB8', '7': '#D68910', '9': '#8E44AD',
 }
 
-type BlgActivity = {
-  id: string
+type RdvUnifie = {
+  rdv_id: string
+  source: 'blg' | 'compagnon'
+  blg_activity_id: string | null
+  compagnon_id: string | null
   type: string
   subject: string
-  company: string | null
-  numeroTiers: string | null
-  start: string
-  end: string
-  allDay: boolean
+  start_date: string
+  end_date: string
+  all_day: boolean
+  numero_tiers: string | null
+  company_name: string | null
+  lieu: string | null
+  a_compte_rendu: boolean
 }
+
+type CompteRendu = { id: string; resume: string | null; created_by_name: string | null; created_at: string }
 
 function safeText(value: any) {
   return String(value ?? '').trim()
@@ -120,100 +104,46 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
   const [loading, setLoading] = useState(false)
   const [openDetail, setOpenDetail] = useState<{ title: string; subtitle?: string; fields: DetailField[]; footer?: React.ReactNode } | null>(null)
 
-  const [rdvList, setRdvList] = useState<BlgActivity[] | null>(null)
+  const [rdvList, setRdvList] = useState<RdvUnifie[] | null>(null)
   const [rdvLoading, setRdvLoading] = useState(true)
-  const [rdvUnconfigured, setRdvUnconfigured] = useState(false)
   const [blgPartnerId, setBlgPartnerId] = useState<string | null>(null)
 
   const [periodeLabel, setPeriodeLabel] = useState('30 prochains jours')
   const [agendaOuvert, setAgendaOuvert] = useState(false)
   const [dateDebutInput, setDateDebutInput] = useState('')
   const [dateFinInput, setDateFinInput] = useState('')
+  const [periodeBornes, setPeriodeBornes] = useState<{ debut: Date; fin: Date } | null>(null)
+
+  const [nouveauRdvOuvert, setNouveauRdvOuvert] = useState(false)
 
   const [currentEmail, setCurrentEmail] = useState('')
   const [currentName, setCurrentName] = useState('')
 
-  async function chargerRdv(partnerId: string, debut: Date, fin: Date) {
+  async function chargerRdv(email: string, partnerId: string | null, debut: Date, fin: Date) {
     setRdvLoading(true)
+    setPeriodeBornes({ debut, fin })
     try {
       const start = debut.toISOString().slice(0, 10)
       const end = fin.toISOString().slice(0, 10)
 
+      const orParts = [`created_by_email.eq.${email}`]
+      if (partnerId) orParts.push(`blg_partner_id.eq.${partnerId}`)
+
       const { data, error } = await supabase
-        .from('crm_base_activity')
+        .from('v_rdv_unifie')
         .select('*')
-        .eq('internal_tag', 'normal')
-        .in('type', RDV_TYPE_KEYS)
-        .eq('from_fk', partnerId)
         .gte('start_date', start)
         .lt('start_date', end)
+        .or(orParts.join(','))
         .order('start_date', { ascending: true })
         .limit(200)
 
       if (error) {
-        console.error('[MobileRdv] crm_base_activity', error)
+        console.error('[MobileRdv] v_rdv_unifie', error)
         setRdvList([])
         return
       }
-
-      const rows = (data || []) as Record<string, any>[]
-
-      const companyByActivity = new Map<number, { name: string; numeroTiers: string | null }>()
-      try {
-        const activityIds = rows.map((r) => r.id).filter((v) => v !== null && v !== undefined)
-        if (activityIds.length > 0) {
-          const { data: links } = await supabase
-            .from('crm_activity_company')
-            .select('activity_fk, company_fk')
-            .in('activity_fk', activityIds)
-
-          const companyIds = Array.from(
-            new Set(((links || []) as Record<string, any>[]).map((l) => l.company_fk).filter((v) => v !== null && v !== undefined)),
-          )
-
-          if (companyIds.length > 0) {
-            const { data: companies } = await supabase
-              .from('partner_base_partner')
-              .select('id, company_name, reference')
-              .in('id', companyIds)
-
-            const infoById = new Map(
-              ((companies || []) as Record<string, any>[]).map((c) => {
-                const reference = String(c.reference || '').trim()
-                const numeroEntreprise = reference.includes('-') ? reference.split('-')[0] : reference
-                return [
-                  c.id,
-                  { name: String(c.company_name || '').trim(), numeroTiers: numeroEntreprise || null },
-                ]
-              }),
-            )
-
-            ;((links || []) as Record<string, any>[]).forEach((l) => {
-              const info = infoById.get(l.company_fk)
-              if (info?.name) companyByActivity.set(l.activity_fk, info)
-            })
-          }
-        }
-      } catch (e) {
-        console.warn('[MobileRdv] résolution entreprise liée impossible :', e)
-      }
-
-      setRdvUnconfigured(false)
-      setRdvList(
-        rows.map((row) => {
-          const info = companyByActivity.get(row.id)
-          return {
-            id: String(row.id),
-            type: String(row.type ?? ''),
-            subject: String(pick(row, ['comment', 'subject', 'title', 'name', 'label']) || RDV_TYPE_LABELS[String(row.type ?? '')] || 'Activité'),
-            company: info?.name || null,
-            numeroTiers: info?.numeroTiers || null,
-            start: String(row.start_date || ''),
-            end: String(row.end_date || row.start_date || ''),
-            allDay: Boolean(row.all_day),
-          }
-        }),
-      )
+      setRdvList((data || []) as RdvUnifie[])
     } finally {
       setRdvLoading(false)
     }
@@ -237,19 +167,12 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
         if (cancelled) return
         setCurrentEmail(email)
         setCurrentName(String(access?.display_name || '').trim() || fallbackNameFromEmail(email))
-
-        if (!access?.blg_partner_id) {
-          setRdvUnconfigured(true)
-          setRdvList([])
-          return
-        }
-
-        setBlgPartnerId(access.blg_partner_id)
+        setBlgPartnerId(access?.blg_partner_id || null)
 
         const today = new Date()
         const later = new Date(today)
         later.setDate(later.getDate() + 30)
-        await chargerRdv(access.blg_partner_id, today, later)
+        await chargerRdv(email, access?.blg_partner_id || null, today, later)
       } finally {
         if (!cancelled) setRdvLoading(false)
       }
@@ -260,8 +183,13 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
     }
   }, [])
 
+  async function rafraichirPeriode() {
+    if (!currentEmail || !periodeBornes) return
+    await chargerRdv(currentEmail, blgPartnerId, periodeBornes.debut, periodeBornes.fin)
+  }
+
   function selectionnerPeriode(preset: 'semaine_derniere' | 'semaine_courante' | 'semaine_prochaine' | 'defaut') {
-    if (!blgPartnerId) return
+    if (!currentEmail) return
     const aujourdHui = new Date()
     const jourSemaine = aujourdHui.getDay() || 7
     const lundiCourant = new Date(aujourdHui)
@@ -297,11 +225,11 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
 
     setPeriodeLabel(label)
     setAgendaOuvert(false)
-    void chargerRdv(blgPartnerId, debut, fin)
+    void chargerRdv(currentEmail, blgPartnerId, debut, fin)
   }
 
   function appliquerPeriodePersonnalisee() {
-    if (!blgPartnerId || !dateDebutInput || !dateFinInput) return
+    if (!currentEmail || !dateDebutInput || !dateFinInput) return
     const debut = new Date(`${dateDebutInput}T00:00:00`)
     const finSaisie = new Date(`${dateFinInput}T00:00:00`)
     if (Number.isNaN(debut.getTime()) || Number.isNaN(finSaisie.getTime())) return
@@ -311,31 +239,32 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
     const fmt = (d: Date) => d.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: '2-digit' })
     setPeriodeLabel(`${fmt(debut)} → ${fmt(finSaisie)}`)
     setAgendaOuvert(false)
-    void chargerRdv(blgPartnerId, debut, fin)
+    void chargerRdv(currentEmail, blgPartnerId, debut, fin)
   }
 
-  function openRdvDetail(r: BlgActivity) {
-    const startDate = r.start ? new Date(r.start) : null
-    const endDate = r.end ? new Date(r.end) : null
+  function openRdvDetail(r: RdvUnifie) {
+    const startDate = r.start_date ? new Date(r.start_date) : null
+    const endDate = r.end_date ? new Date(r.end_date) : null
     const fmtTime = (d: Date | null) => (d ? d.toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '')
-    const peutNaviguer = Boolean(r.numeroTiers && onOpenClient)
+    const peutNaviguer = Boolean(r.numero_tiers && onOpenClient)
+    const activityId = r.source === 'compagnon' ? r.compagnon_id : r.blg_activity_id
     setOpenDetail({
       title: r.subject,
-      subtitle: RDV_TYPE_LABELS[r.type] || r.type || 'Activité',
+      subtitle: `${RDV_TYPE_LABELS[r.type] || r.type || 'Activité'}${r.source === 'compagnon' ? ' · RDV compagnon' : ''}`,
       fields: [
-        ...(r.company ? [{ label: 'Entreprise', value: r.company }] : []),
-        { label: 'Début', value: r.allDay ? (startDate ? startDate.toLocaleDateString('fr-FR') : '') : fmtTime(startDate) },
-        { label: 'Fin', value: r.allDay ? (endDate ? endDate.toLocaleDateString('fr-FR') : '') : fmtTime(endDate) },
-        { label: 'Toute la journée', value: r.allDay ? 'Oui' : 'Non' },
+        ...(r.company_name ? [{ label: 'Entreprise', value: r.company_name }] : []),
+        { label: 'Début', value: r.all_day ? (startDate ? startDate.toLocaleDateString('fr-FR') : '') : fmtTime(startDate) },
+        { label: 'Fin', value: r.all_day ? (endDate ? endDate.toLocaleDateString('fr-FR') : '') : fmtTime(endDate) },
+        ...(r.lieu ? [{ label: 'Lieu', value: r.lieu }] : []),
       ],
       footer: (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: r.numeroTiers ? 0 : undefined }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {peutNaviguer && (
             <button
               type="button"
               onClick={() => {
                 setOpenDetail(null)
-                onOpenClient?.(r.numeroTiers as string, r.company || '')
+                onOpenClient?.(r.numero_tiers as string, r.company_name || '')
               }}
               style={{
                 display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
@@ -343,14 +272,22 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
                 background: 'rgba(75,146,172,0.14)', color: '#8FC7DA', fontSize: 14, fontWeight: 700,
               }}
             >
-              🏢 Voir la fiche client
+              Voir la fiche client
             </button>
           )}
-          {r.numeroTiers && (
+          <CompteRenduBlock
+            activityId={activityId}
+            numeroTiers={r.numero_tiers}
+            rdvLabel={r.subject}
+            currentEmail={currentEmail}
+            currentName={currentName}
+            onSaved={() => void rafraichirPeriode()}
+          />
+          {r.numero_tiers && (
             <VoiceReportButtons
-              numeroTiers={r.numeroTiers}
-              clientNom={r.company || ''}
-              rdvActivityId={r.id}
+              numeroTiers={r.numero_tiers}
+              clientNom={r.company_name || ''}
+              rdvActivityId={activityId || undefined}
               rdvLabel={r.subject}
               userEmail={currentEmail}
               userName={currentName}
@@ -427,45 +364,53 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
           padding: '14px 16px',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
           <div style={{ fontSize: 11.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
             Rendez-vous — {periodeLabel}
           </div>
-          <button
-            type="button"
-            onClick={() => setAgendaOuvert(true)}
-            disabled={!blgPartnerId}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 6, padding: '6px 11px', borderRadius: 999,
-              border: '1px solid rgba(75,146,172,0.4)', background: 'rgba(75,146,172,0.14)',
-              color: '#8FC7DA', fontSize: 12.5, fontWeight: 700, opacity: blgPartnerId ? 1 : 0.4,
-            }}
-          >
-            📅 Agenda
-          </button>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button
+              type="button"
+              onClick={() => setNouveauRdvOuvert(true)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6, padding: '6px 11px', borderRadius: 999,
+                border: '1px solid rgba(63,145,66,0.4)', background: 'rgba(63,145,66,0.14)',
+                color: '#8fd4a8', fontSize: 12.5, fontWeight: 700,
+              }}
+            >
+              + RDV
+            </button>
+            <button
+              type="button"
+              onClick={() => setAgendaOuvert(true)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6, padding: '6px 11px', borderRadius: 999,
+                border: '1px solid rgba(75,146,172,0.4)', background: 'rgba(75,146,172,0.14)',
+                color: '#8FC7DA', fontSize: 12.5, fontWeight: 700,
+              }}
+            >
+              Agenda
+            </button>
+          </div>
         </div>
 
         {rdvLoading ? (
           <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Chargement…</div>
-        ) : rdvUnconfigured ? (
-          <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>
-            Identifiant partner BLG non renseigné pour ce compte (user_page_access.blg_partner_id).
-          </div>
         ) : !rdvList || rdvList.length === 0 ? (
           <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Aucun rendez-vous sur cette période ({periodeLabel}).</div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {rdvList.map((r) => {
               const color = RDV_TYPE_COLORS[r.type] || '#7A5EA8'
-              const d = r.start ? new Date(r.start) : null
+              const d = r.start_date ? new Date(r.start_date) : null
               const dateLabel = d
-                ? r.allDay
+                ? r.all_day
                   ? d.toLocaleDateString('fr-FR', { weekday: 'short', day: '2-digit', month: '2-digit' })
                   : d.toLocaleDateString('fr-FR', { weekday: 'short', day: '2-digit', month: '2-digit' }) + ' · ' + d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
                 : ''
               return (
                 <div
-                  key={r.id}
+                  key={r.rdv_id}
                   onClick={() => openRdvDetail(r)}
                   style={{
                     display: 'flex', alignItems: 'center', gap: 10, borderRadius: 12,
@@ -475,29 +420,30 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
                 >
                   <span style={{ width: 4, alignSelf: 'stretch', borderRadius: 2, background: color, flexShrink: 0 }} />
                   <div style={{ minWidth: 0, flex: 1 }}>
-                    {r.company && (
+                    {r.company_name && (
                       <div
                         onClick={(e) => {
-                          if (r.numeroTiers && onOpenClient) {
+                          if (r.numero_tiers && onOpenClient) {
                             e.stopPropagation()
-                            onOpenClient(r.numeroTiers, r.company as string)
+                            onOpenClient(r.numero_tiers, r.company_name as string)
                           }
                         }}
                         style={{
                           fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.02em',
                           color: '#E8A96A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-                          textDecoration: r.numeroTiers && onOpenClient ? 'underline' : 'none',
+                          textDecoration: r.numero_tiers && onOpenClient ? 'underline' : 'none',
                           textUnderlineOffset: 2,
                         }}
                       >
-                        {r.company}
+                        {r.company_name}
                       </div>
                     )}
-                    <div style={{ fontSize: 14.5, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    <div style={{ fontSize: 14.5, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', display: 'flex', alignItems: 'center', gap: 5 }}>
+                      {r.a_compte_rendu && <span title="Compte-rendu disponible" style={{ fontSize: 11 }}>[CR]</span>}
                       {r.subject}
                     </div>
                     <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.4)', marginTop: 1 }}>
-                      {[RDV_TYPE_LABELS[r.type] || r.type, dateLabel].filter(Boolean).join(' · ')}
+                      {[RDV_TYPE_LABELS[r.type] || r.type, dateLabel, r.source === 'compagnon' ? 'Compagnon' : ''].filter(Boolean).join(' · ')}
                     </div>
                   </div>
                 </div>
@@ -657,6 +603,15 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
         </div>
       )}
 
+      {nouveauRdvOuvert && (
+        <NouveauRdvSheet
+          currentEmail={currentEmail}
+          currentName={currentName}
+          onClose={() => setNouveauRdvOuvert(false)}
+          onCreated={() => void rafraichirPeriode()}
+        />
+      )}
+
       {openDetail && (
         <MobileDetailSheet
           title={openDetail.title}
@@ -676,4 +631,292 @@ function periodeChipStyle(actif: boolean): React.CSSProperties {
     background: actif ? 'rgba(75,146,172,0.3)' : 'rgba(255,255,255,0.04)',
     color: '#fff', fontSize: 13, fontWeight: 600,
   }
+}
+
+function CompteRenduBlock({
+  activityId, numeroTiers, rdvLabel, currentEmail, currentName, onSaved,
+}: {
+  activityId: string | null
+  numeroTiers: string | null
+  rdvLabel: string
+  currentEmail: string
+  currentName: string
+  onSaved: () => void
+}) {
+  const [compteRendu, setCompteRendu] = useState<CompteRendu | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [editMode, setEditMode] = useState(false)
+  const [resumeEdit, setResumeEdit] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    async function load() {
+      if (!activityId) { setLoading(false); return }
+      setLoading(true)
+      const { data } = await supabase
+        .from('client_comptes_rendus')
+        .select('id, resume, created_by_name, created_at')
+        .eq('rdv_activity_id', activityId)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+      if (cancelled) return
+      setCompteRendu((data as CompteRendu) || null)
+      setResumeEdit((data as CompteRendu | null)?.resume || '')
+      setLoading(false)
+    }
+    void load()
+    return () => { cancelled = true }
+  }, [activityId])
+
+  async function enregistrer() {
+    if (!activityId) return
+    setSaving(true)
+    setError(null)
+    try {
+      if (compteRendu) {
+        const { error: err } = await supabase.from('client_comptes_rendus').update({ resume: resumeEdit }).eq('id', compteRendu.id)
+        if (err) throw err
+        setCompteRendu({ ...compteRendu, resume: resumeEdit })
+      } else {
+        const { data, error: err } = await supabase
+          .from('client_comptes_rendus')
+          .insert({
+            numero_tiers: numeroTiers,
+            rdv_activity_id: activityId,
+            rdv_label: rdvLabel,
+            created_by_email: currentEmail,
+            created_by_name: currentName,
+            resume: resumeEdit,
+            transcript: null,
+          })
+          .select('id, resume, created_by_name, created_at')
+          .single()
+        if (err) throw err
+        setCompteRendu(data as CompteRendu)
+      }
+      setEditMode(false)
+      onSaved()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (!activityId) return null
+
+  return (
+    <div style={{ borderRadius: 12, border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.03)', padding: '12px 14px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+        <span style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'rgba(255,255,255,0.5)' }}>Compte-rendu</span>
+        {!editMode && (
+          <button
+            type="button"
+            onClick={() => setEditMode(true)}
+            style={{ border: 'none', background: 'rgba(166,161,129,0.18)', color: '#e4dfc9', fontSize: 11.5, fontWeight: 700, padding: '4px 10px', borderRadius: 999 }}
+          >
+            {compteRendu ? 'Modifier' : '+ Ajouter'}
+          </button>
+        )}
+      </div>
+
+      {loading ? (
+        <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Chargement…</div>
+      ) : editMode ? (
+        <div>
+          <textarea
+            value={resumeEdit}
+            onChange={(e) => setResumeEdit(e.target.value)}
+            rows={5}
+            placeholder="Résumé du rendez-vous…"
+            autoFocus
+            style={{ width: '100%', borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '10px', fontSize: 13.5, resize: 'vertical' }}
+          />
+          {error && <div style={{ fontSize: 12, color: '#e0a685', marginTop: 6 }}>{error}</div>}
+          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+            <button
+              type="button"
+              onClick={() => void enregistrer()}
+              disabled={saving}
+              style={{ flex: 1, padding: '10px', borderRadius: 10, border: 'none', background: '#A6A181', color: '#141A26', fontSize: 13, fontWeight: 700 }}
+            >
+              {saving ? 'Enregistrement…' : 'Enregistrer'}
+            </button>
+            <button
+              type="button"
+              onClick={() => { setEditMode(false); setResumeEdit(compteRendu?.resume || '') }}
+              disabled={saving}
+              style={{ padding: '10px 14px', borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'transparent', color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: 600 }}
+            >
+              Annuler
+            </button>
+          </div>
+        </div>
+      ) : compteRendu ? (
+        <div>
+          <p style={{ fontSize: 13, color: '#fff', lineHeight: 1.6, whiteSpace: 'pre-wrap', margin: '0 0 6px' }}>{compteRendu.resume || '(résumé vide)'}</p>
+          <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', margin: 0 }}>
+            {compteRendu.created_by_name ? `Par ${compteRendu.created_by_name} · ` : ''}{new Date(compteRendu.created_at).toLocaleString('fr-FR')}
+          </p>
+        </div>
+      ) : (
+        <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Aucun compte-rendu pour ce rendez-vous.</div>
+      )}
+    </div>
+  )
+}
+
+function NouveauRdvSheet({
+  currentEmail, currentName, onClose, onCreated,
+}: { currentEmail: string; currentName: string; onClose: () => void; onCreated: () => void }) {
+  const [clientSearch, setClientSearch] = useState('')
+  const [clientResults, setClientResults] = useState<{ numero: string; intitule: string }[]>([])
+  const [numeroTiers, setNumeroTiers] = useState<string | null>(null)
+  const [intituleTiers, setIntituleTiers] = useState('')
+  const [subject, setSubject] = useState('')
+  const [type, setType] = useState<'meeting' | 'phoneCall' | 'reminder'>('meeting')
+  const [date, setDate] = useState('')
+  const [heure, setHeure] = useState('09:00')
+  const [duree, setDuree] = useState(60)
+  const [lieu, setLieu] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    const q = clientSearch.trim()
+    if (!q || numeroTiers) { setClientResults([]); return }
+    const t = window.setTimeout(async () => {
+      const { data } = await supabase.from('ref_tiers').select('numero, intitule').or(`numero.ilike.${q}%,intitule.ilike.%${q}%`).limit(8)
+      setClientResults(((data || []) as any[]).map((r) => ({ numero: String(r.numero || ''), intitule: String(r.intitule || '') })))
+    }, 250)
+    return () => window.clearTimeout(t)
+  }, [clientSearch, numeroTiers])
+
+  async function creer() {
+    if (!subject.trim() || !date) { setError('Objet et date sont obligatoires.'); return }
+    setSaving(true)
+    setError('')
+    try {
+      const start = new Date(`${date}T${heure}:00`)
+      const end = new Date(start.getTime() + duree * 60000)
+      const { error: err } = await supabase.from('rdv_compagnon').insert({
+        numero_tiers: numeroTiers,
+        type,
+        subject: subject.trim(),
+        start_date: start.toISOString(),
+        end_date: end.toISOString(),
+        all_day: false,
+        lieu: lieu.trim() || null,
+        created_by_email: currentEmail,
+        created_by_name: currentName,
+      })
+      if (err) throw err
+      onCreated()
+      onClose()
+    } catch (e: any) {
+      setError(e?.message || 'Erreur lors de la création du RDV.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 2200, background: 'rgba(6,10,18,0.65)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }} onClick={() => !saving && onClose()}>
+      <div style={{ width: '100%', maxWidth: 480, maxHeight: '88vh', overflowY: 'auto', background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.1)', padding: '12px 18px 26px', display: 'flex', flexDirection: 'column', gap: 12 }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 2px' }} />
+        <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Nouveau rendez-vous</div>
+        <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginTop: -6 }}>RDV compagnon CEGECLIM — indépendant de BLG/Outlook</div>
+
+        <div style={{ position: 'relative' }}>
+          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Client (facultatif)</div>
+          <input
+            value={numeroTiers ? `${intituleTiers} (${numeroTiers})` : clientSearch}
+            onChange={(e) => { setClientSearch(e.target.value); setNumeroTiers(null) }}
+            placeholder="Nom ou numéro du client…"
+            style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }}
+          />
+          {numeroTiers && (
+            <button type="button" onClick={() => { setNumeroTiers(null); setClientSearch('') }} style={{ marginTop: 4, background: 'none', border: 'none', color: '#e0a685', fontSize: 11.5, fontWeight: 600, padding: 0 }}>Retirer</button>
+          )}
+          {clientResults.length > 0 && !numeroTiers && (
+            <div style={{ marginTop: 6, borderRadius: 10, border: '1px solid rgba(255,255,255,0.12)', background: '#0B1220', overflow: 'hidden' }}>
+              {clientResults.map((c) => (
+                <button
+                  key={c.numero}
+                  type="button"
+                  onClick={() => { setNumeroTiers(c.numero); setIntituleTiers(c.intitule); setClientResults([]) }}
+                  style={{ display: 'block', width: '100%', textAlign: 'left', padding: '9px 12px', border: 'none', borderBottom: '1px solid rgba(255,255,255,0.06)', background: 'transparent', color: '#fff', fontSize: 13.5 }}
+                >
+                  <span style={{ color: '#E8A96A', fontWeight: 700 }}>{c.numero}</span> · {c.intitule}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div>
+          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Objet</div>
+          <textarea
+            value={subject}
+            onChange={(e) => setSubject(e.target.value)}
+            rows={2}
+            placeholder="Ex. : Visite chantier, appel de relance…"
+            style={{ width: '100%', borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '10px', fontSize: 14.5, resize: 'vertical' }}
+          />
+        </div>
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Type</div>
+            <select value={type} onChange={(e) => setType(e.target.value as typeof type)} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }}>
+              <option value="meeting">RDV</option>
+              <option value="phoneCall">Appel</option>
+              <option value="reminder">Rappel</option>
+            </select>
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Durée (min)</div>
+            <input type="number" value={duree} onChange={(e) => setDuree(Number(e.target.value) || 60)} min={15} step={15} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }} />
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Date</div>
+            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Heure</div>
+            <input type="time" value={heure} onChange={(e) => setHeure(e.target.value)} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }} />
+          </div>
+        </div>
+
+        <div>
+          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Lieu (facultatif)</div>
+          <input value={lieu} onChange={(e) => setLieu(e.target.value)} placeholder="Ex. : Chez le client, agence…" style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }} />
+        </div>
+
+        {error && <div style={{ fontSize: 13, color: '#e0a685' }}>{error}</div>}
+
+        <button
+          type="button"
+          onClick={() => void creer()}
+          disabled={saving}
+          style={{ padding: '13px', borderRadius: 12, border: 'none', background: '#A6A181', color: '#141A26', fontSize: 14.5, fontWeight: 700 }}
+        >
+          {saving ? 'Création…' : 'Créer le RDV'}
+        </button>
+        <button
+          type="button"
+          onClick={() => !saving && onClose()}
+          style={{ padding: '11px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: 'transparent', color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: 600 }}
+        >
+          Annuler
+        </button>
+      </div>
+    </div>
+  )
 }
