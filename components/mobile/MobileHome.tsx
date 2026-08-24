@@ -49,6 +49,17 @@ const VOIX_OPTIONS = [
   { id: 'shimmer', label: 'Shimmer', description: 'Voix féminine, douce' },
 ]
 
+// Vitesse de lecture TTS -- plage acceptée par OpenAI : 0.25 à 4.0.
+// 1.15 = valeur historique (celle qui était codée en dur avant que ce
+// réglage soit configurable).
+const VITESSE_OPTIONS = [
+  { valeur: 0.85, label: '0.85×', description: 'Plus lente' },
+  { valeur: 1.0, label: '1×', description: 'Normale' },
+  { valeur: 1.15, label: '1.15×', description: 'Par défaut' },
+  { valeur: 1.3, label: '1.3×', description: 'Rapide' },
+  { valeur: 1.5, label: '1.5×', description: 'Très rapide' },
+]
+
 export default function MobileHome({
   email,
   rights,
@@ -84,22 +95,27 @@ export default function MobileHome({
 
   const nomAffiche = displayName || (email ? email.split('@')[0] : '')
 
-  // Choix de la voix de l'assistant vocal (OpenAI TTS ne propose pas
-  // d'accents régionaux -- seulement 6 timbres génériques, cf. discussion).
-  // Persisté dans vision_tci_preferences.voix_assistant, réutilisée telle
-  // quelle par VoiceReportButtons et MobileHomeSummary pour tous leurs
-  // appels à /api/atelier-ai/speak.
+  // Choix de la voix, de la vitesse de lecture, et du mode "annonce
+  // courte" de l'assistant vocal -- tous les trois dans la même table
+  // (vision_tci_preferences), réutilisés tels quels par VoiceReportButtons
+  // et MobileHomeSummary pour tous leurs appels à /api/atelier-ai/speak.
   const [voixSelecteurOuvert, setVoixSelecteurOuvert] = useState(false)
   const [voixActuelle, setVoixActuelle] = useState('nova')
   const [voixEnCoursEcoute, setVoixEnCoursEcoute] = useState<string | null>(null)
   const [voixSauvegardeEnCours, setVoixSauvegardeEnCours] = useState(false)
+  const [vitesseActuelle, setVitesseActuelle] = useState(1.15)
+  const [annonceCourte, setAnnonceCourte] = useState(false)
+  const [preferencesSauvegardeEnCours, setPreferencesSauvegardeEnCours] = useState(false)
 
   useEffect(() => {
     let cancelled = false
     async function charger() {
       if (!email) return
-      const { data } = await supabase.from('vision_tci_preferences').select('voix_assistant').eq('user_email', email).maybeSingle()
-      if (!cancelled) setVoixActuelle(String(data?.voix_assistant || 'nova'))
+      const { data } = await supabase.from('vision_tci_preferences').select('voix_assistant, vitesse_lecture, annonce_courte').eq('user_email', email).maybeSingle()
+      if (cancelled) return
+      setVoixActuelle(String(data?.voix_assistant || 'nova'))
+      setVitesseActuelle(data?.vitesse_lecture !== null && data?.vitesse_lecture !== undefined ? Number(data.vitesse_lecture) : 1.15)
+      setAnnonceCourte(Boolean(data?.annonce_courte))
     }
     void charger()
     return () => { cancelled = true }
@@ -115,13 +131,34 @@ export default function MobileHome({
     }
   }
 
+  async function choisirVitesse(vitesse: number) {
+    setVitesseActuelle(vitesse)
+    setPreferencesSauvegardeEnCours(true)
+    try {
+      await supabase.from('vision_tci_preferences').upsert({ user_email: email, vitesse_lecture: vitesse, updated_at: new Date().toISOString() })
+    } finally {
+      setPreferencesSauvegardeEnCours(false)
+    }
+  }
+
+  async function basculerAnnonceCourte() {
+    const next = !annonceCourte
+    setAnnonceCourte(next)
+    setPreferencesSauvegardeEnCours(true)
+    try {
+      await supabase.from('vision_tci_preferences').upsert({ user_email: email, annonce_courte: next, updated_at: new Date().toISOString() })
+    } finally {
+      setPreferencesSauvegardeEnCours(false)
+    }
+  }
+
   async function ecouterExemple(voix: string) {
     setVoixEnCoursEcoute(voix)
     try {
       const res = await fetch('/api/atelier-ai/speak', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: 'Bonjour, voici un exemple de ma voix pour tes résumés et comptes-rendus.', voice: voix }),
+        body: JSON.stringify({ text: 'Bonjour, voici un exemple de ma voix pour tes résumés et comptes-rendus.', voice: voix, speed: vitesseActuelle }),
       })
       if (!res.ok) return
       const blob = await res.blob()
@@ -177,7 +214,7 @@ export default function MobileHome({
             onClick={(e) => e.stopPropagation()}
           >
             <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 2px' }} />
-            <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Voix de l'assistant</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Voix & lecture</div>
             <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', marginBottom: 4, lineHeight: 1.5 }}>
               6 timbres proposés par le moteur vocal -- pas d'accent régional disponible, seulement des voix différentes.
             </div>
@@ -216,6 +253,70 @@ export default function MobileHome({
                 </div>
               )
             })}
+
+            {/* Vitesse de lecture -- même préférence utilisateur que la voix
+               (vision_tci_preferences.vitesse_lecture), transmise à chaque
+               appel à /api/atelier-ai/speak. */}
+            <div style={{ fontSize: 14, fontWeight: 700, color: '#fff', marginTop: 8 }}>Vitesse de lecture</div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {VITESSE_OPTIONS.map((opt) => {
+                const actif = Math.abs(vitesseActuelle - opt.valeur) < 0.001
+                return (
+                  <button
+                    key={opt.valeur}
+                    type="button"
+                    onClick={() => void choisirVitesse(opt.valeur)}
+                    disabled={preferencesSauvegardeEnCours}
+                    style={{
+                      padding: '9px 13px', borderRadius: 999,
+                      border: `1px solid ${actif ? 'rgba(75,146,172,0.6)' : 'rgba(255,255,255,0.15)'}`,
+                      background: actif ? 'rgba(75,146,172,0.25)' : 'rgba(255,255,255,0.04)',
+                      color: '#fff', fontSize: 13, fontWeight: 700,
+                    }}
+                  >
+                    {opt.label}
+                  </button>
+                )
+              })}
+            </div>
+
+            {/* Annonce courte -- quand actif, VoiceReportButtons et
+               MobileHomeSummary doivent remplacer leur phrase d'accroche
+               habituelle par une version raccourcie ("J'écoute tes tâches
+               à rajouter" / "Que souhaites-tu savoir ?") avant de lancer
+               l'enregistrement, pour gagner du temps à l'usage. */}
+            <button
+              type="button"
+              onClick={() => void basculerAnnonceCourte()}
+              disabled={preferencesSauvegardeEnCours}
+              style={{
+                marginTop: 6, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10,
+                padding: '12px 14px', borderRadius: 12,
+                border: `1px solid ${annonceCourte ? 'rgba(75,146,172,0.5)' : 'rgba(255,255,255,0.1)'}`,
+                background: annonceCourte ? 'rgba(75,146,172,0.14)' : 'rgba(255,255,255,0.03)',
+                textAlign: 'left',
+              }}
+            >
+              <span>
+                <div style={{ fontSize: 14.5, fontWeight: 700, color: '#fff' }}>Annonce courte</div>
+                <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginTop: 2 }}>
+                  Raccourcit les phrases d'accueil pour "Nouvelle tâche" et "Résumé vocal"
+                </div>
+              </span>
+              <span
+                style={{
+                  flexShrink: 0, width: 42, height: 24, borderRadius: 999, position: 'relative',
+                  background: annonceCourte ? '#4B92AC' : 'rgba(255,255,255,0.15)', transition: 'background .15s',
+                }}
+              >
+                <span
+                  style={{
+                    position: 'absolute', top: 2, left: annonceCourte ? 20 : 2, width: 20, height: 20, borderRadius: '50%',
+                    background: '#fff', transition: 'left .15s',
+                  }}
+                />
+              </span>
+            </button>
 
             <button
               type="button"

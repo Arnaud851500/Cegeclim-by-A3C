@@ -15,9 +15,17 @@ export const runtime = 'nodejs'
 // OpenAI (qui rejetterait une valeur de "voice" non reconnue).
 const VOIX_AUTORISEES = new Set(['nova', 'alloy', 'echo', 'fable', 'onyx', 'shimmer'])
 
+// Plage acceptée par l'API OpenAI TTS pour "speed" -- même filet de
+// sécurité que pour la voix : une valeur hors plage ou absente retombe sur
+// 1.15 (vitesse par défaut historique de cette route) plutôt que de faire
+// échouer l'appel OpenAI.
+const VITESSE_MIN = 0.25
+const VITESSE_MAX = 4.0
+const VITESSE_DEFAUT = 1.15
+
 export async function POST(req: NextRequest) {
   try {
-    const { text, voice } = await req.json()
+    const { text, voice, speed } = await req.json()
     const cleanText = String(text || '').trim().slice(0, 2000)
 
     // CORRECTIF : le paramètre `voice` envoyé par le front (choix de
@@ -28,6 +36,15 @@ export async function POST(req: NextRequest) {
     // féminine quel que soit le timbre sélectionné à l'écran.
     const voixDemandee = String(voice || '').trim().toLowerCase()
     const voixFinale = VOIX_AUTORISEES.has(voixDemandee) ? voixDemandee : 'nova'
+
+    // Vitesse de lecture -- même principe que la voix : réglable par
+    // l'utilisateur (vision_tci_preferences.vitesse_lecture), transmise ici
+    // par le front à chaque appel. Repli sur la vitesse par défaut si
+    // absente ou hors plage OpenAI.
+    const vitesseDemandee = Number(speed)
+    const vitesseFinale = Number.isFinite(vitesseDemandee) && vitesseDemandee >= VITESSE_MIN && vitesseDemandee <= VITESSE_MAX
+      ? vitesseDemandee
+      : VITESSE_DEFAUT
 
     if (!cleanText) {
       return NextResponse.json({ error: 'Texte manquant.' }, { status: 400 })
@@ -44,8 +61,7 @@ export async function POST(req: NextRequest) {
         voice: voixFinale,
         input: cleanText,
         response_format: 'mp3',
-        // >1.0 = plus rapide. 1.15 reste naturel tout en abrégeant l'attente.
-        speed: 1.15,
+        speed: vitesseFinale,
       }),
     })
 
