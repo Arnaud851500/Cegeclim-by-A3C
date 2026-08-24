@@ -21,18 +21,42 @@ import { acquerirVerrouVocal, libererVerrouVocal, verrouVocalDetenuPar, verrouVo
  * bouton "⏹ Stop" reste disponible à tout moment pendant une lecture.
  */
 
-type Portee = 'jour' | 'semaine' | 'semaine_prochaine' | 'rdv' | 'rdv_semaine_prochaine' | 'compte_rendu' | 'alertes'
+// Intents reconnus par /api/atelier-ai/interpret-summary (LLM, remplace
+// l'ancienne classification par mots-clés -- voir classifierChoix plus
+// bas, conservée en solution de repli locale si l'appel réseau échoue).
+// Les nouveaux intents (rdv_prochains, taches_prochaines, ca_periode,
+// devis_montant, rdv_sans_compte_rendu) prennent des PARAMÈTRES (nombre,
+// seuil, période, famille) qu'une regex ne peut pas extraire de façon
+// fiable depuis une phrase dictée -- d'où le passage par un modèle.
+type Intent =
+  | 'jour' | 'semaine' | 'semaine_prochaine'
+  | 'rdv' | 'rdv_semaine_prochaine' | 'rdv_prochains'
+  | 'taches_prochaines'
+  | 'ca_periode' | 'devis_montant' | 'rdv_sans_compte_rendu'
+  | 'compte_rendu' | 'alertes'
+type IntentParams = {
+  n?: number
+  montant_min?: number
+  jours?: number
+  periode?: 'hier' | 'aujourdhui' | 'mois'
+  famille?: string | null
+}
 type Etape = 'idle' | 'question' | 'ecoute' | 'traitement' | 'incompris' | 'resultat' | 'erreur'
   | 'question_client' | 'ecoute_client' | 'traitement_client'
 
 const RDV_TYPE_KEYS = ['meeting', 'phoneCall', 'reminder', '4', '7', '9']
+// Familles connues côté get_ca_periode_par_famille -- pour un rapprochement
+// tolérant (accents/majuscules/variantes usuelles) entre ce que le modèle
+// d'interprétation renvoie et les libellés réels en base.
+const FAMILLES_CONNUES = ['R/R', 'R/O', 'ECS', 'DRV', 'R_ZONE', 'ACC', 'PV', 'TECH', 'SAV', 'AUTRES', 'DIV']
 const QUESTION =
-  'Souhaites-tu connaître tes tâches en retard, tes tâches de la semaine, tes tâches ou rendez-vous de la semaine prochaine, tes prochains rendez-vous, le dernier compte-rendu d’un client, ou tes alertes en cours ?'
+  'Que veux-tu savoir ? Tes tâches, tes prochains rendez-vous, ton chiffre d’affaires, tes derniers devis, les rendez-vous sans compte-rendu, ou tes alertes ?'
 // Variante "annonce courte" (réglage utilisateur, vision_tci_preferences.
 // annonce_courte) -- ne remplace QUE cette question d'accueil, jamais les
 // questions de relance ("je n'ai pas compris...") ni les questions liées
 // au compte-rendu client, qui restent explicites quel que soit ce réglage.
 const QUESTION_COURTE = 'Que souhaites-tu savoir ?'
+
 
 function safeText(value: any) {
   return String(value ?? '').trim()
@@ -68,6 +92,49 @@ function finSemaineProchaineIso() {
 function todayIso() {
   return new Date().toISOString().slice(0, 10)
 }
+/** Date ISO en fuseau LOCAL (pas UTC comme toISOString) -- pour les
+ * bornes de get_ca_periode_par_famille, où décaler le jour d'un fuseau
+ * changerait le résultat ("hier" ne doit jamais glisser sur "avant-hier"
+ * ou "aujourd'hui" selon l'heure de la requête). */
+function isoDepuisDateLocale(d: Date) {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+/** Rapproche un terme dicté ("pompes à chaleur", "photovoltaïque"...) du
+ * code de famille macro réellement utilisé en base -- la personne ne
+ * dicte jamais "R/R" ou "PV" directement. Le modèle d'interprétation
+ * fait déjà une partie de ce travail (voir le prompt système de
+ * /api/atelier-ai/interpret-summary), ce rapprochement est une seconde
+ * passe tolérante côté front, au cas où sa réponse ne matche pas
+ * exactement un code connu. */
+const FAMILLE_SYNONYMES: Record<string, string> = {
+  pac: 'R/R', 'pompe a chaleur': 'R/R', 'pompes a chaleur': 'R/R', reversible: 'R/R', refrigeration: 'R/R',
+  renouvellement: 'R/O',
+  ecs: 'ECS', 'eau chaude': 'ECS', 'eau chaude sanitaire': 'ECS', ballon: 'ECS',
+  drv: 'DRV', vrv: 'DRV',
+  zone: 'R_ZONE', multisplit: 'R_ZONE', 'multi split': 'R_ZONE', 'r zone': 'R_ZONE',
+  accessoire: 'ACC', accessoires: 'ACC',
+  photovoltaique: 'PV', pv: 'PV', 'panneaux solaires': 'PV', solaire: 'PV',
+  technique: 'TECH', presta: 'TECH', prestation: 'TECH', prestations: 'TECH',
+  sav: 'SAV', 'service apres vente': 'SAV',
+  divers: 'DIV',
+  autres: 'AUTRES',
+}
+function rapprocherFamille(saisie: string): string | null {
+  const n = normaliser(saisie).trim()
+  if (!n) return null
+  const exact = FAMILLES_CONNUES.find((f) => normaliser(f) === n)
+  if (exact) return exact
+  if (FAMILLE_SYNONYMES[n]) return FAMILLE_SYNONYMES[n]
+  const cle = Object.keys(FAMILLE_SYNONYMES).find((k) => n.includes(k) || k.includes(n))
+  return cle ? FAMILLE_SYNONYMES[cle] : null
+}
+/** Montant formaté pour la lecture vocale -- ex. "24 327 €", sans
+ * décimales (inutiles à l'oral). */
+function formatMontantParle(montant: number) {
+  return new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(montant || 0)
+}
+
 function normaliser(value: string) {
   return String(value || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
 }
@@ -182,26 +249,51 @@ function motsVersNumeroClient(texte: string): string {
   return sortie.join('')
 }
 
-/** Interprète la réponse parlée par mots-clés -- pas besoin d'IA pour un
- * choix parmi quelques options fixes. Renvoie null si rien de
- * reconnaissable, auquel cas l'agent redemande plutôt que de deviner.
- * Ordre important : motifs spécifiques testés avant les motifs génériques
- * qu'ils contiennent aussi (ex. "rdv de la semaine prochaine" contient à
- * la fois "rdv" et "semaine"). */
-function classifierChoix(transcript: string): Portee | null {
+/** Solution de repli LOCALE (mots-clés, aucun réseau) -- utilisée
+ * uniquement si l'appel à /api/atelier-ai/interpret-summary échoue
+ * (réseau coupé, API indisponible...), pour ne jamais bloquer les
+ * demandes simples les plus fréquentes. Ne couvre PAS les nouveaux
+ * intents paramétrés (rdv_prochains avec un nombre précis, devis_montant,
+ * ca_periode, rdv_sans_compte_rendu...) -- une regex ne peut pas extraire
+ * ces paramètres de façon fiable ; dans ce cas la personne obtient un
+ * comportement par défaut raisonnable plutôt qu'un blocage complet. */
+function classifierChoixRepli(transcript: string): { intent: Intent; params: IntentParams } | null {
   const t = normaliser(transcript)
-  if (/compte[- ]?rendu/.test(t)) return 'compte_rendu'
-  if (/alerte/.test(t)) return 'alertes'
+  if (/compte[- ]?rendu/.test(t)) return { intent: 'compte_rendu', params: {} }
+  if (/alerte/.test(t)) return { intent: 'alertes', params: {} }
 
   const estSemaineProchaine = /semaine\s+prochaine|prochaine\s+semaine/.test(t)
   const estRdv = /\brdv\b|rendez[- ]?vous|reunion|reunions|agenda|planning|visites?\b/.test(t)
 
-  if (estSemaineProchaine && estRdv) return 'rdv_semaine_prochaine'
-  if (estSemaineProchaine) return 'semaine_prochaine'
-  if (estRdv) return 'rdv'
-  if (/semaine|hebdo/.test(t)) return 'semaine'
-  if (/retard|aujourd\s?hui|\bjour\b|jours|maintenant|taches?\b/.test(t)) return 'jour'
+  if (estSemaineProchaine && estRdv) return { intent: 'rdv_semaine_prochaine', params: {} }
+  if (estSemaineProchaine) return { intent: 'semaine_prochaine', params: {} }
+  if (estRdv) return { intent: 'rdv', params: {} }
+  if (/semaine|hebdo/.test(t)) return { intent: 'semaine', params: {} }
+  if (/retard|aujourd\s?hui|\bjour\b|jours|maintenant|taches?\b/.test(t)) return { intent: 'jour', params: {} }
   return null
+}
+
+/** Interprète la demande dictée -- passe par le modèle
+ * (/api/atelier-ai/interpret-summary) pour reconnaître les tournures
+ * paramétrées ("mes 3 prochains rdv", "les 10 derniers devis de plus de
+ * 15000 euros"...), avec repli local en cas d'échec réseau. */
+async function interpreterDemande(transcript: string): Promise<{ intent: Intent; params: IntentParams } | null> {
+  try {
+    const res = await fetch('/api/atelier-ai/interpret-summary', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transcript }),
+    })
+    if (res.ok) {
+      const data = await res.json()
+      const intent = String(data?.intent || 'inconnu') as Intent | 'inconnu'
+      if (intent !== 'inconnu') return { intent: intent as Intent, params: (data?.params || {}) as IntentParams }
+      return null
+    }
+  } catch {
+    // silencieux -- repli local ci-dessous
+  }
+  return classifierChoixRepli(transcript)
 }
 
 /** Redécode l'audio et le ré-encode en WAV PCM 16 bits -- même correctif
@@ -353,22 +445,16 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
     }
   }
 
-  /** Réutilise le même élément <audio> débloqué au tap initial plutôt que
-   * d'en créer un nouveau (qui retomberait sous le coup de la politique
-   * autoplay pour tout appel un peu tardif, ex. après transcription+IA).
-   * Transmet la vitesse de lecture préférée de l'utilisateur à chaque
-   * appel -- voir /api/atelier-ai/speak, qui l'applique côté OpenAI TTS. */
-  async function jouerTexte(texte: string) {
-    if (!texte) return
+  /** Joue un blob audio déjà en mémoire (sans requête réseau) -- utilisé
+   * directement quand un blob a été préchargé (voir accueilPrechargeRef
+   * et jouerAccueil ci-dessous), sinon appelé en interne par jouerTexte
+   * après avoir récupéré l'audio depuis /api/atelier-ai/speak. Réutilise
+   * le même élément <audio> débloqué au tap initial plutôt que d'en créer
+   * un nouveau (qui retomberait sous le coup de la politique autoplay
+   * pour tout appel un peu tardif). */
+  async function jouerBlob(blob: Blob) {
     setLectureEnCours(true)
     try {
-      const res = await fetch('/api/atelier-ai/speak', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: texte, voice: voixPreferee, speed: vitesseLecture }),
-      })
-      if (!res.ok) return
-      const blob = await res.blob()
       const url = URL.createObjectURL(blob)
       const audio = audioElementRef.current || new Audio()
       audioElementRef.current = audio
@@ -388,6 +474,82 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       resolveLectureRef.current = null
       setLectureEnCours(false)
     }
+  }
+
+  /** Récupère l'audio depuis /api/atelier-ai/speak puis le joue. Transmet
+   * la vitesse de lecture préférée de l'utilisateur à chaque appel -- voir
+   * cette route, qui l'applique côté OpenAI TTS. */
+  async function jouerTexte(texte: string) {
+    if (!texte) return
+    setLectureEnCours(true)
+    try {
+      const res = await fetch('/api/atelier-ai/speak', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: texte, voice: voixPreferee, speed: vitesseLecture }),
+      })
+      if (!res.ok) return
+      const blob = await res.blob()
+      setLectureEnCours(false) // jouerBlob remet lectureEnCours à true -- évite un clignotement du bouton Stop
+      await jouerBlob(blob)
+    } catch {
+      // silencieux : le texte reste affiché à l'écran dans tous les cas.
+      setLectureEnCours(false)
+    }
+  }
+
+  /** Clé de cache de l'accueil -- dépend du texte exact (long/court selon
+   * "annonce courte"), de la voix et de la vitesse : un changement de
+   * n'importe lequel de ces réglages doit invalider le préchargement. */
+  function clePrechargeAccueil() {
+    return `${annonceCourte ? QUESTION_COURTE : QUESTION}::${voixPreferee}::${vitesseLecture}`
+  }
+
+  // CORRECTIF LATENCE : avant ce préchargement, chaque appui sur "Résumé
+  // vocal" attendait un aller-retour réseau complet vers OpenAI TTS
+  // (génération + transfert de l'audio, 1 à 3s typiquement) avant même de
+  // commencer à parler -- tout ce temps, l'utilisateur ne savait pas si
+  // son appui avait été pris en compte. La question d'accueil étant un
+  // texte fixe et connu à l'avance (long ou court selon "annonce
+  // courte"), on la génère et on la garde en mémoire dès que les
+  // préférences vocales sont chargées (et à chaque fois qu'elles
+  // changent) -- l'appui sur le bouton n'a alors plus qu'à LIRE ce blob
+  // déjà prêt, sans aucun aller-retour réseau. Si le préchargement n'a
+  // pas encore abouti au moment du tap (ex. réseau lent, premier accès),
+  // jouerAccueil() retombe simplement sur le chemin normal (jouerTexte).
+  const accueilPrechargeRef = useRef<{ cle: string; blob: Blob } | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    async function precharger() {
+      const cle = clePrechargeAccueil()
+      try {
+        const res = await fetch('/api/atelier-ai/speak', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: annonceCourte ? QUESTION_COURTE : QUESTION, voice: voixPreferee, speed: vitesseLecture }),
+        })
+        if (!res.ok || cancelled) return
+        const blob = await res.blob()
+        if (!cancelled) accueilPrechargeRef.current = { cle, blob }
+      } catch {
+        // silencieux -- jouerAccueil() retombera sur le chemin réseau normal.
+      }
+    }
+    void precharger()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voixPreferee, vitesseLecture, annonceCourte])
+
+  /** Joue la question d'accueil -- instantanément si le préchargement a
+   * abouti pour les réglages actuels, sinon via le chemin réseau normal. */
+  async function jouerAccueil() {
+    const cle = clePrechargeAccueil()
+    const precharge = accueilPrechargeRef.current
+    if (precharge && precharge.cle === cle) {
+      await jouerBlob(precharge.blob)
+      return
+    }
+    await jouerTexte(annonceCourte ? QUESTION_COURTE : QUESTION)
   }
 
   function arreterLecture() {
@@ -578,7 +740,9 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       setEtape('question')
       // "Annonce courte" (réglage utilisateur) : question d'accueil
       // raccourcie -- ne touche à rien d'autre (relances, compte-rendu).
-      await jouerTexte(annonceCourte ? QUESTION_COURTE : QUESTION)
+      // jouerAccueil() utilise le blob préchargé si disponible (latence
+      // quasi nulle) -- voir accueilPrechargeRef plus haut.
+      await jouerAccueil()
       if (annulerRef.current) return // écran quitté pendant l'annonce
       setEtape('ecoute')
       const blobBrut = await enregistrerAvecDetectionSilence(forceStopRef)
@@ -604,10 +768,11 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       if (annulerRef.current) return
       if (!res.ok) throw new Error(data?.error || 'Erreur de transcription.')
 
-      const portee = classifierChoix(data.transcript || '')
-      if (!portee) {
+      const choix = await interpreterDemande(data.transcript || '')
+      if (annulerRef.current) return
+      if (!choix) {
         setMessageIncompris(
-          `Je n'ai pas compris "${data.transcript || '...'}". Dis par exemple "mes tâches en retard", "cette semaine", "la semaine prochaine", "mes rendez-vous", "le compte-rendu d'un client", ou "mes alertes".`,
+          `Je n'ai pas compris "${data.transcript || '...'}". Dis par exemple "mes tâches", "mes prochains rendez-vous", "mon chiffre d'affaires d'aujourd'hui", "mes derniers devis de plus de 15000 euros", "le compte-rendu d'un client", ou "mes alertes".`,
         )
         setEtape('incompris')
         await jouerTexte("Je n'ai pas bien compris. Peux-tu répéter ?")
@@ -619,12 +784,12 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         return
       }
 
-      if (portee === 'compte_rendu') {
+      if (choix.intent === 'compte_rendu') {
         await demanderClient()
         return
       }
 
-      await genererResume(portee)
+      await genererResume(choix.intent, choix.params)
     } catch (e: any) {
       libererVerrouVocal(idInstanceRef.current)
       setEtape('erreur')
@@ -668,7 +833,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
     return companyByActivity
   }
 
-  async function genererResume(portee: Portee) {
+  async function genererResume(portee: Intent, params: IntentParams = {}) {
     try {
       const email = String(userEmail || '').toLowerCase().trim()
       if (!email) throw new Error('Utilisateur non identifié.')
@@ -682,8 +847,12 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
 
       let resultat = ''
 
-      if (portee === 'rdv') {
+      if (portee === 'rdv' || portee === 'rdv_prochains') {
         if (!access?.blg_partner_id) throw new Error('Identifiant partner BLG non renseigné pour ce compte.')
+        // "rdv" (mots-clés simples, sans nombre précisé) garde le
+        // comportement historique (10) ; "rdv_prochains" (via le modèle)
+        // porte le nombre dicté par la personne, ex. "mes 3 prochains rdv".
+        const n = portee === 'rdv_prochains' ? Math.max(1, Math.min(30, Math.round(Number(params.n) || 5))) : 10
 
         const { data: rows, error } = await supabase
           .from('crm_base_activity')
@@ -693,7 +862,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
           .eq('from_fk', access.blg_partner_id)
           .gte('start_date', new Date().toISOString())
           .order('start_date', { ascending: true })
-          .limit(10)
+          .limit(n)
         if (error) throw error
 
         if (!rows || rows.length === 0) {
@@ -800,8 +969,142 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
           const compte = rows.length === 1 ? 'une' : String(rows.length)
           resultat = `Tu as ${compte} tâche${rows.length > 1 ? 's' : ''} prévue${rows.length > 1 ? 's' : ''} la semaine prochaine :\n${lignes.join('\n')}`
         }
-      } else {
-        // portee === 'alertes' : même logique que le bandeau desktop
+      } else if (portee === 'taches_prochaines') {
+        // "Mes Y tâches à réaliser" -- nombre dicté, triées par échéance,
+        // SANS borne de date (contrairement à jour/semaine qui bornent à
+        // aujourd'hui/fin de semaine) : les Y prochaines tâches, point.
+        const n = Math.max(1, Math.min(30, Math.round(Number(params.n) || 5)))
+        const identities = Array.from(new Set([email, displayName]))
+        const assignedFilter = identities.map((v) => `assigned_to.eq.${v.replace(/,/g, '\\,')}`).join(',')
+
+        const { data: rows, error } = await supabase
+          .from('todo_actions')
+          .select('description_action, due_date')
+          .or(assignedFilter)
+          .not('status', 'in', '("Terminé","Annulé")')
+          .order('due_date', { ascending: true, nullsFirst: false })
+          .limit(n)
+        if (error) throw error
+
+        if (!rows || rows.length === 0) {
+          resultat = "Tu n'as aucune tâche en cours."
+        } else {
+          const lignes = rows.map((r: any, i: number) => {
+            const echeance = formatDateParlee(r.due_date)
+            return `${i + 1}. ${safeText(r.description_action) || '(sans libellé)'}${echeance ? `, échéance ${echeance}` : ', sans échéance'}`
+          })
+          const compte = rows.length === 1 ? 'ta' : `tes ${rows.length}`
+          resultat = `Voici ${compte} prochaine${rows.length > 1 ? 's' : ''} tâche${rows.length > 1 ? 's' : ''} :\n${lignes.join('\n')}`
+        }
+      } else if (portee === 'ca_periode') {
+        // "Quel CA ai-je fait hier/aujourd'hui/depuis le début du mois
+        // (sur telle famille) ?" -- s'appuie sur la RPC déjà utilisée
+        // ailleurs dans l'app (get_ca_periode_par_famille), filtrée côté
+        // client sur la famille si demandée (rapprochement tolérant, la
+        // personne ne dicte jamais le code exact "R/R").
+        const aujourdHui = new Date()
+        aujourdHui.setHours(0, 0, 0, 0)
+        let dateDebut: Date
+        let dateFin: Date
+        let periodeTexte: string
+        if (params.periode === 'hier') {
+          dateDebut = new Date(aujourdHui); dateDebut.setDate(dateDebut.getDate() - 1)
+          dateFin = dateDebut
+          periodeTexte = 'hier'
+        } else if (params.periode === 'mois') {
+          dateDebut = new Date(aujourdHui.getFullYear(), aujourdHui.getMonth(), 1)
+          dateFin = aujourdHui
+          periodeTexte = 'depuis le début du mois'
+        } else {
+          dateDebut = aujourdHui
+          dateFin = aujourdHui
+          periodeTexte = "aujourd'hui"
+        }
+
+        const { data: rows, error } = await supabase.rpc('get_ca_periode_par_famille', {
+          p_date_debut: isoDepuisDateLocale(dateDebut),
+          p_date_fin: isoDepuisDateLocale(dateFin),
+          p_collaborateur: null,
+        })
+        if (error) throw error
+
+        const toutesLesFamilles = (rows || []) as { famille_macro: string; montant_ht: number }[]
+        const familleDemandee = safeText(params.famille)
+        const familleRapprochee = familleDemandee ? rapprocherFamille(familleDemandee) : null
+
+        if (familleRapprochee) {
+          const ligne = toutesLesFamilles.find((r) => normaliser(r.famille_macro) === normaliser(familleRapprochee))
+          const montant = Number(ligne?.montant_ht || 0)
+          resultat = `Ton chiffre d'affaires ${periodeTexte} sur ${familleRapprochee} est de ${formatMontantParle(montant)}.`
+        } else {
+          const total = toutesLesFamilles.reduce((s, r) => s + Number(r.montant_ht || 0), 0)
+          if (toutesLesFamilles.length === 0) {
+            resultat = `Aucun chiffre d'affaires enregistré ${periodeTexte}.`
+          } else {
+            const detail = toutesLesFamilles
+              .filter((r) => Math.abs(Number(r.montant_ht || 0)) > 0.01)
+              .sort((a, b) => Number(b.montant_ht) - Number(a.montant_ht))
+              .map((r) => `${r.famille_macro} : ${formatMontantParle(Number(r.montant_ht))}`)
+              .join(', ')
+            resultat = `Ton chiffre d'affaires ${periodeTexte} est de ${formatMontantParle(total)}${detail ? `, dont ${detail}` : ''}.`
+          }
+        }
+      } else if (portee === 'devis_montant') {
+        // "Les N derniers devis de plus de X euros" -- RPC dédiée
+        // (get_devis_recents_montant_min), qui agrège par pièce côté base
+        // plutôt que ligne par ligne (numero_tiers_entete est très
+        // souvent vide sur les devis -- la RPC utilise numero_tiers_ligne).
+        const n = Math.max(1, Math.min(20, Math.round(Number(params.n) || 10)))
+        const montantMin = Math.max(0, Number(params.montant_min) || 15000)
+
+        const { data: rows, error } = await supabase.rpc('get_devis_recents_montant_min', {
+          p_montant_min: montantMin,
+          p_limit: n,
+        })
+        if (error) throw error
+
+        if (!rows || rows.length === 0) {
+          resultat = `Aucun devis de plus de ${formatMontantParle(montantMin)} trouvé.`
+        } else {
+          const lignes = (rows as any[]).map((r, i) => {
+            const dateLabel = formatDateParlee(r.date_devis)
+            const client = safeText(r.intitule) || safeText(r.numero_tiers) || 'client non renseigné'
+            return `${i + 1}. ${client}${dateLabel ? `, ${dateLabel}` : ''} — ${formatMontantParle(Number(r.montant))}`
+          })
+          resultat = `Voici les ${rows.length} derniers devis de plus de ${formatMontantParle(montantMin)} :\n${lignes.join('\n')}`
+        }
+      } else if (portee === 'rdv_sans_compte_rendu') {
+        // "Combien de rdv passés ces N derniers jours n'ont pas de
+        // compte-rendu ?" -- v_rdv_unifie porte déjà a_compte_rendu
+        // (fusion BLG + compagnon CEGECLIM), pas besoin de RPC dédiée.
+        const jours = Math.max(1, Math.min(90, Math.round(Number(params.jours) || 7)))
+        const depuis = new Date()
+        depuis.setDate(depuis.getDate() - jours)
+
+        const { data: rows, error } = await supabase
+          .from('v_rdv_unifie')
+          .select('subject, company_name, start_date, a_compte_rendu')
+          .lt('start_date', new Date().toISOString())
+          .gte('start_date', depuis.toISOString())
+          .order('start_date', { ascending: false })
+          .limit(200)
+        if (error) throw error
+
+        const sansCr = ((rows || []) as any[]).filter((r) => !r.a_compte_rendu)
+
+        if (sansCr.length === 0) {
+          resultat = `Tous les rendez-vous des ${jours} derniers jours ont un compte-rendu.`
+        } else {
+          const lignes = sansCr.slice(0, 10).map((r, i) => {
+            const d = new Date(r.start_date)
+            const dateLabel = d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long' })
+            const entreprise = safeText(r.company_name) || 'sans entreprise associée'
+            return `${i + 1}. ${dateLabel} — ${entreprise}`
+          })
+          const suffixe = sansCr.length > 10 ? `\n… et ${sansCr.length - 10} de plus` : ''
+          resultat = `${sansCr.length} rendez-vous des ${jours} derniers jours n'ont pas de compte-rendu :\n${lignes.join('\n')}${suffixe}`
+        }
+      } else if (portee === 'alertes') {
         // (AppShell) et le hook useMobileAlertsCount, mais réinterrogée
         // ici directement -- ce composant n'a pas accès à ce hook (arbre
         // de composants différent).
@@ -845,6 +1148,10 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         resultat = alertesTexte.length === 0
           ? "Aucune alerte en cours. Tout est propre."
           : `Voici tes alertes en cours :\n${alertesTexte.map((a, i) => `${i + 1}. ${a}`).join('\n')}`
+      } else {
+        // Filet de sécurité TypeScript -- ne devrait jamais arriver, tous
+        // les intents connus étant couverts ci-dessus.
+        resultat = "Je n'ai pas su traiter cette demande."
       }
 
       setTexte(resultat)
