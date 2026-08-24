@@ -35,6 +35,19 @@ function caBand(value: number | null | undefined): CaBand {
   if (n >= 20000) return '20K€'
   return 'vide'
 }
+/** "Damien MENA" -> "D. MENA" -- affiché à côté du numéro de client (liste
+ * + fiche), pour identifier le collaborateur qui suit ce client d'un coup
+ * d'œil sans ouvrir la fiche complète. Repli sur le nom tel quel si un
+ * seul mot (pas de prénom identifiable). */
+function formatCollaborateurCourt(nom: string): string {
+  const texte = safeText(nom)
+  if (!texte) return ''
+  const mots = texte.split(/\s+/).filter(Boolean)
+  if (mots.length < 2) return texte
+  const prenom = mots[0]
+  const reste = mots.slice(1).join(' ')
+  return `${prenom.charAt(0).toUpperCase()}. ${reste}`
+}
 function todayIso() {
   const d = new Date()
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
@@ -109,6 +122,7 @@ async function fetchAllCache(select: string, apply?: (q: any) => any) {
 type ClientRow = {
   numero: string
   nom: string
+  collaborateur: string
   dateCreationIso: string
   caYtdN: number
   caYtdN1: number
@@ -197,10 +211,16 @@ export default function MobileClients({
   cibleNumero,
   cibleNom,
   onCibleConsommee,
+  onOpenStock,
 }: {
   cibleNumero?: string | null
   cibleNom?: string | null
   onCibleConsommee?: () => void
+  /** Ouvre le détail stock d'une référence -- passé par MobileShell, qui
+   * bascule l'écran vers "Stock" avec cette référence pré-sélectionnée.
+   * Câblé ici sur les lignes d'articles des documents (CDC/PL/BL/BR/devis) :
+   * un tap sur une ligne emmène directement sur sa fiche stock. */
+  onOpenStock?: (reference: string, designation: string) => void
 }) {
   const [allClients, setAllClients] = useState<ClientRow[] | null>(null)
   const [clientsError, setClientsError] = useState<string | null>(null)
@@ -238,7 +258,7 @@ export default function MobileClients({
     async function load() {
       try {
         const rows = await fetchAllCache(
-          'numero_tiers,intitule_tiers,date_creation,ca_n1,ca_ytd_n,ca_ytd_n1,devis_ytd_n,marge_pct_ytd_n,marge_ytd_n1_value',
+          'numero_tiers,intitule_tiers,collaborateur,date_creation,ca_n1,ca_ytd_n,ca_ytd_n1,devis_ytd_n,marge_pct_ytd_n,marge_ytd_n1_value',
           (q) => q.eq('annee', N).eq('row_kind', 'client'),
         )
         if (cancelled) return
@@ -252,6 +272,7 @@ export default function MobileClients({
           return {
             numero: safeText(row.numero_tiers),
             nom: safeText(row.intitule_tiers),
+            collaborateur: safeText(row.collaborateur),
             dateCreationIso: normalizeDateIso(row.date_creation),
             caYtdN,
             caYtdN1,
@@ -303,6 +324,7 @@ export default function MobileClients({
     const client: ClientRow = trouve || {
       numero: cibleNumero,
       nom: cibleNom || cibleNumero,
+      collaborateur: '',
       dateCreationIso: '',
       caYtdN: 0,
       caYtdN1: 0,
@@ -518,6 +540,7 @@ export default function MobileClients({
         loading={detailLoading}
         currentEmail={currentEmail}
         currentName={currentName}
+        onOpenStock={onOpenStock}
         onBack={() => {
           setSelected(null)
           setDetail(null)
@@ -635,7 +658,10 @@ export default function MobileClients({
                 }}
               >
                 <div style={{ fontSize: 15.5, fontWeight: 600 }}>{c.nom || '(nom non renseigné)'}</div>
-                <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>N° {c.numero}</div>
+                <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>
+                  N° {c.numero}
+                  {c.collaborateur && <span style={{ color: 'rgba(166,161,129,0.9)' }}> ({formatCollaborateurCourt(c.collaborateur)})</span>}
+                </div>
               </button>
             ))
           )}
@@ -683,7 +709,7 @@ function EvolLine({ value, n1, isPoints }: { value: number | null; n1: number | 
 }
 
 function ClientDetailScreen({
-  client, detail, loading, currentEmail, currentName, onBack, onActionSaved,
+  client, detail, loading, currentEmail, currentName, onBack, onActionSaved, onOpenStock,
 }: {
   client: ClientRow
   detail: ClientDetail | null
@@ -692,6 +718,7 @@ function ClientDetailScreen({
   currentName: string
   onBack: () => void
   onActionSaved: (updated: TaskRow) => void
+  onOpenStock?: (reference: string, designation: string) => void
 }) {
   const [openDetail, setOpenDetail] = useState<{ title: string; subtitle?: string; fields: DetailField[]; footer?: React.ReactNode } | null>(null)
   const [openTask, setOpenTask] = useState<TaskRow | null>(null)
@@ -718,9 +745,14 @@ function ClientDetailScreen({
         { label: 'Date', value: formatDateFr(d.date) },
         { label: 'Référence chantier', value: d.reference || '—' },
         { label: 'Montant total HT', value: formatMoney(d.montantHt) },
-        ...d.lignes.map((l, i) => ({
+        // Lignes d'articles : tap -> détail stock de la référence (si
+        // onOpenStock a été fourni par MobileShell). Une ligne sans
+        // référence exploitable (rare, ligne de texte libre) reste non
+        // cliquable plutôt que d'ouvrir une fiche stock vide.
+        ...d.lignes.map((l) => ({
           label: `${l.reference_article || '—'}${l.designation ? ` — ${l.designation}` : ''}`,
           value: `${l.quantite} × ${formatMoney(l.montant_ht)}`,
+          onClick: onOpenStock && l.reference_article ? () => onOpenStock(l.reference_article, l.designation) : undefined,
         })),
       ],
     })
@@ -807,7 +839,10 @@ function ClientDetailScreen({
               </button>
             )}
           </div>
-          <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>N° {client.numero}</div>
+          <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>
+            N° {client.numero}
+            {client.collaborateur && <span style={{ color: 'rgba(166,161,129,0.9)' }}> ({formatCollaborateurCourt(client.collaborateur)})</span>}
+          </div>
         </div>
 
         {detail && detail.loadErrors.length > 0 && (

@@ -24,12 +24,27 @@ export type MobileScreen = 'home' | 'activite' | 'clients' | 'rdv' | 'alertes' |
  */
 export default function MobileShell() {
   const [screen, setScreen] = useState<MobileScreen>('home')
+  // Retour "un niveau" : quand on saute directement d'un écran A vers un
+  // écran B via une cible (ex. clic sur un client depuis un RDV, ou sur
+  // une référence depuis un devis), on retient A ici. Le bouton "← Menu"
+  // revient alors sur A plutôt que systématiquement sur l'accueil, PUIS
+  // oublie ce retour -- un seul niveau de mémoire, pas une vraie pile de
+  // navigation. Concrètement : Accueil -> Rdv -> (clic client) -> Clients
+  // -> "← Menu" -> Rdv -> "← Menu" -> Accueil. Mais Rdv -> Clients (clic
+  // client) -> Stock (clic référence) -> "← Menu" ne revient QUE sur
+  // Clients (le saut précédent, Rdv -> Clients, est oublié) -- limite
+  // acceptée du mécanisme à un seul niveau plutôt qu'une pile complète.
+  const [screenPrecedent, setScreenPrecedent] = useState<MobileScreen | null>(null)
   // Cible de navigation "Mes rdv" -> "Mes clients" : numéro de tiers (et nom,
   // en repli d'affichage) à ouvrir directement en arrivant sur l'écran
   // clients. Réinitialisée une fois consommée par MobileClients, pour ne
   // pas ré-ouvrir la même fiche si l'utilisateur revient plus tard sur cet
   // écran par le menu normal.
   const [cibleClient, setCibleClient] = useState<{ numero: string; nom: string } | null>(null)
+  // Même principe pour "Documents (devis/BL/CDC...)" -> "Stock" : référence
+  // article (et désignation, pour affichage immédiat sans requête
+  // supplémentaire) à ouvrir directement en arrivant sur l'écran stock.
+  const [cibleStock, setCibleStock] = useState<{ reference: string; designation: string } | null>(null)
   const { rights, email } = useAccess()
   const {
     total, detail, loading, fetchTodoList, fetchCerfaList,
@@ -38,11 +53,32 @@ export default function MobileShell() {
 
   function goHome() {
     setScreen('home')
+    setScreenPrecedent(null)
+  }
+
+  function goBack() {
+    if (screenPrecedent) {
+      setScreen(screenPrecedent)
+      setScreenPrecedent(null)
+    } else {
+      goHome()
+    }
   }
 
   function ouvrirClientDepuisRdv(numeroTiers: string, nom: string) {
     setCibleClient({ numero: numeroTiers, nom })
+    setScreenPrecedent(screen)
     setScreen('clients')
+  }
+
+  /** Ouvre le détail stock d'une référence depuis N'IMPORTE QUEL écran
+   * (câblé pour l'instant depuis Mes clients -- lignes d'articles des
+   * devis/CDC/PL/BL/BR ; à câbler de la même façon depuis Mon activité et
+   * Mes rdv si leurs fiches document exposent aussi des lignes d'articles). */
+  function ouvrirStockDepuisAilleurs(reference: string, designation: string) {
+    setCibleStock({ reference, designation })
+    setScreenPrecedent(screen)
+    setScreen('stock')
   }
 
   return (
@@ -55,7 +91,7 @@ export default function MobileShell() {
         color: '#fff',
       }}
     >
-      {screen !== 'home' && <MobileTopBar onBack={goHome} title={screenTitle(screen)} />}
+      {screen !== 'home' && <MobileTopBar onBack={goBack} title={screenTitle(screen)} />}
 
       {screen === 'home' && (
         <MobileHome email={email} rights={rights} alertsCount={total} onNavigate={setScreen} />
@@ -66,6 +102,7 @@ export default function MobileShell() {
           cibleNumero={cibleClient?.numero}
           cibleNom={cibleClient?.nom}
           onCibleConsommee={() => setCibleClient(null)}
+          onOpenStock={ouvrirStockDepuisAilleurs}
         />
       )}
       {screen === 'rdv' && <MobileRdv onOpenClient={ouvrirClientDepuisRdv} />}
@@ -83,7 +120,13 @@ export default function MobileShell() {
         />
       )}
       {screen === 'prospects' && <MobileProspects />}
-      {screen === 'stock' && <MobileStockArticles />}
+      {screen === 'stock' && (
+        <MobileStockArticles
+          cibleReference={cibleStock?.reference}
+          cibleDesignation={cibleStock?.designation}
+          onCibleConsommee={() => setCibleStock(null)}
+        />
+      )}
     </div>
   )
 }
@@ -117,24 +160,29 @@ function MobileTopBar({ onBack, title }: { onBack: () => void; title: string }) 
         display: 'flex',
         alignItems: 'center',
         gap: 10,
-        padding: '14px 16px',
+        padding: '10px 16px',
         background: 'rgba(11,18,32,0.96)',
         backdropFilter: 'blur(10px)',
         WebkitBackdropFilter: 'blur(10px)',
         borderBottom: '1px solid rgba(255,255,255,0.10)',
       }}
     >
+      {/* Agrandi (padding + taille de police) pour que le doigt ne rate pas
+         la cible sur mobile -- zone tactile ~44px de hauteur minimum,
+         recommandation standard iOS/Android. */}
       <button
         onClick={onBack}
-        aria-label="Retour au menu"
+        aria-label="Retour"
         style={{
           border: '1px solid rgba(255,255,255,0.18)',
           background: 'transparent',
           color: '#fff',
-          borderRadius: 10,
-          padding: '8px 12px',
-          fontSize: 14,
+          borderRadius: 12,
+          padding: '12px 18px',
+          fontSize: 16,
+          fontWeight: 600,
           fontFamily: 'var(--font-body)',
+          minHeight: 44,
         }}
       >
         ← Menu

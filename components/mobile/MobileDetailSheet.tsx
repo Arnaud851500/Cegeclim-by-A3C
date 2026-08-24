@@ -1,6 +1,15 @@
 'use client'
 
-export type DetailField = { label: string; value: string }
+export type DetailField = {
+  label: string
+  value: string
+  /** Rend la VALEUR de ce champ cliquable (soulignée, avec un chevron) --
+   * utilisé par exemple pour "Client : CB0048" -> ouvrir la fiche client,
+   * ou une ligne d'article -> ouvrir le détail stock de cette référence.
+   * Sans effet sur les autres champs (Date, Montant...), qui restent du
+   * texte simple. */
+  onClick?: () => void
+}
 
 /**
  * Fenêtre de détail générique en "bottom sheet", ouverte au tap sur une
@@ -49,35 +58,46 @@ export default function MobileDetailSheet({
           {fields.map((f, i) => (
             <div
               key={`${f.label}-${i}`}
+              onClick={f.onClick}
               style={{
                 borderRadius: 10,
-                border: '1px solid rgba(255,255,255,0.07)',
-                background: 'rgba(255,255,255,0.03)',
+                border: `1px solid ${f.onClick ? 'rgba(75,146,172,0.3)' : 'rgba(255,255,255,0.07)'}`,
+                background: f.onClick ? 'rgba(75,146,172,0.08)' : 'rgba(255,255,255,0.03)',
                 padding: '8px 10px',
+                cursor: f.onClick ? 'pointer' : 'default',
+                display: f.onClick ? 'flex' : 'block',
+                alignItems: f.onClick ? 'center' : undefined,
+                justifyContent: f.onClick ? 'space-between' : undefined,
+                gap: 8,
               }}
             >
-              <div
-                style={{
-                  fontSize: 12,
-                  lineHeight: 1.4,
-                  color: 'rgba(255,255,255,0.55)',
-                  wordBreak: 'break-word',
-                }}
-              >
-                {f.label}
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div
+                  style={{
+                    fontSize: 12,
+                    lineHeight: 1.4,
+                    color: 'rgba(255,255,255,0.55)',
+                    wordBreak: 'break-word',
+                  }}
+                >
+                  {f.label}
+                </div>
+                <div
+                  style={{
+                    fontSize: 14,
+                    lineHeight: 1.4,
+                    color: f.onClick ? '#8FC7DA' : '#fff',
+                    fontWeight: 600,
+                    marginTop: 3,
+                    wordBreak: 'break-word',
+                    textDecoration: f.onClick ? 'underline' : 'none',
+                    textDecorationColor: f.onClick ? 'rgba(143,199,218,0.4)' : undefined,
+                  }}
+                >
+                  {f.value || '—'}
+                </div>
               </div>
-              <div
-                style={{
-                  fontSize: 14,
-                  lineHeight: 1.4,
-                  color: '#fff',
-                  fontWeight: 600,
-                  marginTop: 3,
-                  wordBreak: 'break-word',
-                }}
-              >
-                {f.value || '—'}
-              </div>
+              {f.onClick && <span style={{ color: '#8FC7DA', fontSize: 15, flexShrink: 0 }}>›</span>}
             </div>
           ))}
         </div>
