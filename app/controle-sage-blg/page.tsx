@@ -67,6 +67,7 @@ function normaliserAgence(v: string | null): string | null {
 
 export default function ClientsSagePage() {
   const [rows, setRows] = useState<ClientAdresseRow[]>([])
+  const [totalCount, setTotalCount] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -122,9 +123,17 @@ export default function ClientsSagePage() {
       try {
         let query = supabase
           .from('v_sage_clients_adresse_livraison')
-          .select('*')
+          // count: 'exact' -- pour connaître le VRAI total correspondant aux
+          // filtres, indépendamment de la limite de lignes rapatriées
+          // ci-dessous (sinon impossible de savoir si la liste affichée est
+          // tronquée ou complète).
+          .select('*', { count: 'exact' })
           .order('numero_tiers', { ascending: true })
-          .limit(500)
+          // 3000 -- constaté ~2 240 lignes avec les filtres par défaut et
+          // ~3 520 adresses principales au total (toutes agences/familles) :
+          // 3000 couvre confortablement tous les cas réels, contrairement
+          // à l'ancienne limite de 500 qui tronquait systématiquement.
+          .limit(3000)
 
         const term = search.trim()
         if (term) {
@@ -142,10 +151,11 @@ export default function ClientsSagePage() {
           query = query.or(`expedition_adresse_designation.eq.${expeditionFilter},expedition_defaut_designation.eq.${expeditionFilter}`)
         }
 
-        const { data, error: err } = await query
+        const { data, count, error: err } = await query
         if (cancelled) return
         if (err) throw err
         setRows((data || []) as ClientAdresseRow[])
+        setTotalCount(typeof count === 'number' ? count : null)
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e))
       } finally {
@@ -255,7 +265,11 @@ export default function ClientsSagePage() {
           <div className="rounded-xl border border-[#E5E1D8] bg-white p-4">
             <div className="mb-3 flex items-center justify-between">
               <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">
-                {loading ? 'Chargement…' : `${rows.length} résultat${rows.length > 1 ? 's' : ''}${rows.length === 500 ? ' (limité à 500 — affinez la recherche)' : ''}`}
+                {loading
+                  ? 'Chargement…'
+                  : totalCount !== null && totalCount > rows.length
+                    ? `${rows.length} affiché(s) sur ${totalCount} au total — affinez la recherche pour voir le reste`
+                    : `${rows.length} résultat${rows.length > 1 ? 's' : ''}`}
               </div>
               {error && <div className="text-[12px] font-semibold text-red-600">{error}</div>}
             </div>
