@@ -140,7 +140,7 @@ export default function MobileStockArticles() {
   const isListe = refsSaisies.length > 1
 
   return (
-    <div style={{ flex: 1, padding: '18px 8px 32px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <div style={{ flex: 1, padding: '18px 3px 32px', display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div>
         <textarea
           value={query}

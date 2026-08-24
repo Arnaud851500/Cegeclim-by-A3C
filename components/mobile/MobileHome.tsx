@@ -27,16 +27,15 @@ const BUTTONS: ButtonConfig[] = [
   // "sauge" reprise de la charte CEGECLIM (#A6A181), pas encore utilisée
   // par les autres cartes de cet écran.
   { key: 'stock', label: 'Stock articles', sub: 'Recherche, dépôts, projection', accessKey: 'can_dashboard', icon: '📦', gradient: 'linear-gradient(160deg, #A6A181, #6E6A54)', subColor: '#EDE9D8' },
-  { key: 'prospects', label: 'Carte Prospects & Clients', sub: 'Trouver un prospect ou un client autour de moi', icon: '🗺️', gradient: 'linear-gradient(160deg, #0F6E56, #085041)', subColor: '#9FE1CB' },
+  { key: 'prospects', label: 'Carte Prospects & Clients', sub: '', icon: '🗺️', gradient: 'linear-gradient(160deg, #0F6E56, #085041)', subColor: '#9FE1CB' },
 ]
 
-// Marge horizontale de l'écran -- réduite une 2e fois (10px -> 6px de
-// chaque côté) : les cartes laissaient encore une bande visible sur les
-// deux bords, qui laissait voir l'arrière-plan derrière l'app. 6px reste
-// suffisant pour ne pas coller les cartes aux bords physiques de l'écran
-// (coins arrondis du téléphone, encoche...) tout en récupérant le
-// maximum de largeur utile.
-const MARGE_ECRAN = 6
+// Marge horizontale de l'écran -- resserrée une 3e fois (6px -> 3px de
+// chaque côté), pour se rapprocher du rendu "bord à bord" déjà obtenu sur
+// la liste "À faire" (MobileListSheet), qui n'a quasiment aucune marge
+// externe. 3px reste juste assez pour ne pas coller les cartes aux coins
+// arrondis du téléphone.
+const MARGE_ECRAN = 3
 
 // Les 6 timbres proposés par OpenAI TTS (moteur utilisé par
 // /api/atelier-ai/speak) -- pas d'accent régional possible avec ce

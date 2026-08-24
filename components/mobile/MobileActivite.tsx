@@ -160,7 +160,7 @@ export default function MobileActivite() {
   }, [useYesterday, access.loading, agenceForcee, collaborateurForcee])
 
   return (
-    <div style={{ padding: '16px 8px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <div style={{ padding: '16px 3px', display: 'flex', flexDirection: 'column', gap: 12 }}>
       <style>{`
         @keyframes cgcBlinkRed {
           0%, 100% { opacity: 1; }

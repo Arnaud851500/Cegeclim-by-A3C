@@ -413,7 +413,7 @@ export default function MobileAlertes({
   }
 
   return (
-    <div style={{ flex: 1, padding: '18px 8px 32px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+    <div style={{ flex: 1, padding: '18px 3px 32px', display: 'flex', flexDirection: 'column', gap: 10 }}>
       {loading && <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 13 }}>Chargement…</div>}
 
       {!loading && active.length === 0 && (
