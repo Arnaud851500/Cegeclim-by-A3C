@@ -27,14 +27,16 @@ const BUTTONS: ButtonConfig[] = [
   // "sauge" reprise de la charte CEGECLIM (#A6A181), pas encore utilisée
   // par les autres cartes de cet écran.
   { key: 'stock', label: 'Stock articles', sub: 'Recherche, dépôts, projection', accessKey: 'can_dashboard', icon: '📦', gradient: 'linear-gradient(160deg, #A6A181, #6E6A54)', subColor: '#EDE9D8' },
-  { key: 'prospects', label: 'Carte Prospects & Clients', sub: '', icon: '🗺️', gradient: 'linear-gradient(160deg, #0F6E56, #085041)', subColor: '#9FE1CB' },
+  { key: 'prospects', label: 'Carte Prospects & Clients', sub: 'Trouver un prospect ou un client autour de moi', icon: '🗺️', gradient: 'linear-gradient(160deg, #0F6E56, #085041)', subColor: '#9FE1CB' },
 ]
 
-// Marge horizontale de l'écran -- réduite (18px -> 10px de chaque côté) :
-// avec l'ancienne valeur, les cartes perdaient près d'un centimètre cumulé
-// entre les deux bords de l'écran (18px de marge + leur propre padding
-// interne), ce qui gâchait de la largeur utile sur un petit écran.
-const MARGE_ECRAN = 10
+// Marge horizontale de l'écran -- réduite une 2e fois (10px -> 6px de
+// chaque côté) : les cartes laissaient encore une bande visible sur les
+// deux bords, qui laissait voir l'arrière-plan derrière l'app. 6px reste
+// suffisant pour ne pas coller les cartes aux bords physiques de l'écran
+// (coins arrondis du téléphone, encoche...) tout en récupérant le
+// maximum de largeur utile.
+const MARGE_ECRAN = 6
 
 // Les 6 timbres proposés par OpenAI TTS (moteur utilisé par
 // /api/atelier-ai/speak) -- pas d'accent régional possible avec ce
@@ -142,7 +144,7 @@ export default function MobileHome({
       <div style={{ marginBottom: 10, padding: '0 4px' }}>
         <div
           style={{
-            fontSize: 11,
+            fontSize: 11.5,
             letterSpacing: '0.2em',
             textTransform: 'uppercase',
             color: 'rgba(255,255,255,0.4)',
@@ -151,7 +153,7 @@ export default function MobileHome({
         >
           CEGECLIM
         </div>
-        <div style={{ fontFamily: 'var(--font-display)', fontSize: 23, fontWeight: 700, marginTop: 4 }}>
+        <div style={{ fontFamily: 'var(--font-display)', fontSize: 25, fontWeight: 700, marginTop: 4 }}>
           Bonjour{nomAffiche ? `, ${nomAffiche}` : ''}
         </div>
         <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -287,11 +289,11 @@ export default function MobileHome({
               >
                 {b.icon}
               </div>
-              <div style={{ fontFamily: 'var(--font-display)', fontSize: 19, fontWeight: 700, lineHeight: 1.25, color: '#fff' }}>
+              <div style={{ fontFamily: 'var(--font-display)', fontSize: 20.5, fontWeight: 700, lineHeight: 1.25, color: '#fff' }}>
                 {b.label}
                 {b.key === 'alertes' && alertsCount > 0 ? ` (${alertsCount})` : ''}
               </div>
-              <div style={{ fontSize: 12.5, color: b.subColor, marginTop: 6 }}>{b.sub}</div>
+              <div style={{ fontSize: 13, color: b.subColor, marginTop: 6 }}>{b.sub}</div>
             </button>
           )
         })}

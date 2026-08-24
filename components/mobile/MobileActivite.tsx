@@ -160,7 +160,7 @@ export default function MobileActivite() {
   }, [useYesterday, access.loading, agenceForcee, collaborateurForcee])
 
   return (
-    <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <div style={{ padding: '16px 8px', display: 'flex', flexDirection: 'column', gap: 12 }}>
       <style>{`
         @keyframes cgcBlinkRed {
           0%, 100% { opacity: 1; }
@@ -297,7 +297,7 @@ function ActiviteCard({
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
         <span
           style={{
-            display: 'inline-block', fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em',
+            display: 'inline-block', fontSize: 11.5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em',
             color, background: `${color}22`, borderRadius: 6, padding: '3px 8px',
           }}
         >
@@ -326,7 +326,7 @@ function Column({
     <div style={{ minWidth: 0, textAlign: 'left' }}>
       <div
         style={{
-          fontSize: 9.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.35)',
+          fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.35)',
           marginBottom: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
         }}
       >
@@ -334,7 +334,7 @@ function Column({
       </div>
       <div
         style={{
-          fontFamily: 'var(--font-mono)', fontSize: 15.5, fontWeight: 600, color: '#fff', lineHeight: 1.15,
+          fontFamily: 'var(--font-mono)', fontSize: 17, fontWeight: 600, color: '#fff', lineHeight: 1.15,
           whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
         }}
       >

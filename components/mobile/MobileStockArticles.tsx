@@ -140,12 +140,12 @@ export default function MobileStockArticles() {
   const isListe = refsSaisies.length > 1
 
   return (
-    <div style={{ flex: 1, padding: '18px 16px 32px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <div style={{ flex: 1, padding: '18px 8px 32px', display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div>
         <textarea
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder={'Référence ou désignation'}
+          placeholder={'Référence ou désignation…\nOu colle une liste de références (une par ligne, ou séparées par virgule)'}
           rows={isListe ? 3 : 1}
           style={{
             width: '100%', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)',
@@ -183,7 +183,7 @@ export default function MobileStockArticles() {
               }}
             >
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13.5, fontWeight: 700, color: '#fff' }}>{r.reference_article}</span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14.5, fontWeight: 700, color: '#fff' }}>{r.reference_article}</span>
                 <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)' }}>Détail ›</span>
               </div>
               <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 8, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -224,7 +224,7 @@ function MiniStat({ label, value, accent }: { label: string; value: string; acce
   return (
     <div style={{ minWidth: 0 }}>
       <div style={{ fontSize: 9.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.35)', marginBottom: 2 }}>{label}</div>
-      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 600, color: accent || '#fff' }}>{value}</div>
+      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 15, fontWeight: 600, color: accent || '#fff' }}>{value}</div>
     </div>
   )
 }
