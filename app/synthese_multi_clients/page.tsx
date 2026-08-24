@@ -184,6 +184,15 @@ type SummaryRow = {
   qrcN: number
   visiteTheorique: number
   visiteRealise: number
+  // ── Visite réelle (v_rdv_unifie = RDV BLG + compagnon CEGECLIM) ────────
+  // Distincte du système existant (24 colonnes "Visite n°X" saisies à la
+  // main + visiteRealise ci-dessus, qui compte ces saisies) -- ajoutée en
+  // complément, sans toucher au mécanisme manuel existant. Uniquement
+  // renseignée sur les lignes row_kind='client' (vide sur TOTAL et sur les
+  // lignes mensuelles développées).
+  derniereVisiteReelle: string
+  prochaineVisiteReelle: string
+  nbVisitesReel: number
 }
 
 type ColumnDef = {
@@ -1143,6 +1152,9 @@ function buildSummaryForNumero(tier: TiersRow | null, factures: AggRow[], devis:
     qrcN: frequenceCommande + niveauExclusivite + comNotreFaveur + garantie,
     visiteTheorique: objectiveNumber(objectives, numero, 'Visite', 'Théorique'),
     visiteRealise,
+    derniereVisiteReelle: '',
+    prochaineVisiteReelle: '',
+    nbVisitesReel: 0,
   }
 }
 
@@ -1168,8 +1180,11 @@ const TOGGLEABLE_COLUMN_LABELS: Record<string, string> = {
   comNotreFaveur: 'Com en notre faveur',
   garantie: 'Garantie',
   qrcN: `QRC ${N}`,
+  derniereVisiteReelle: 'Dernière visite (réel)',
+  prochaineVisiteReelle: 'Prochaine visite (réel)',
+  nbVisitesReel: `Visites réalisées ${N} (réel)`,
 }
-const DEFAULT_VISIBLE_TOGGLEABLE_COLUMNS = new Set(['remarque', 'caBandN', 'qrcN'])
+const DEFAULT_VISIBLE_TOGGLEABLE_COLUMNS = new Set(['remarque', 'caBandN', 'qrcN', 'derniereVisiteReelle', 'prochaineVisiteReelle', 'nbVisitesReel'])
 
 function buildColumns(showFamilies: boolean, showCollaborateurColumn = false, encoursDetailMode: EncoursDetailMode = 'macro'): ColumnDef[] {
   const cols: ColumnDef[] = []
@@ -1263,6 +1278,13 @@ function buildColumns(showFamilies: boolean, showCollaborateurColumn = false, en
   cols.push(
     { key: 'visiteTheorique', label: 'Théorique', group: 'Fréquence visite', width: 76, rotate: true, value: (r) => r.visiteTheorique, editable: { domaine: 'Visite', rubrique: 'Théorique', type: 'nombre' }, format: 'number' },
     { key: 'visiteRealise', label: 'Réalisé', group: 'Fréquence visite', width: 76, rotate: true, className: 'redLabel', value: (r) => r.visiteRealise, format: 'number' },
+    // ── Visite réelle (RDV BLG + compagnon CEGECLIM, v_rdv_unifie) ────────
+    // Distinctes des 24 colonnes "Visite n°X" saisies à la main ci-dessous
+    // (mécanisme existant conservé tel quel) -- celles-ci reflètent les
+    // RDV réellement enregistrés dans l'agenda/l'app, tous canaux confondus.
+    { key: 'derniereVisiteReelle', label: 'Dernière visite (réel)', group: 'Fréquence visite', width: 92, rotate: true, value: (r) => r.derniereVisiteReelle, format: 'text' },
+    { key: 'prochaineVisiteReelle', label: 'Prochaine visite (réel)', group: 'Fréquence visite', width: 92, rotate: true, value: (r) => r.prochaineVisiteReelle, format: 'text' },
+    { key: 'nbVisitesReel', label: `Réalisé ${N} (réel)`, group: 'Fréquence visite', width: 76, rotate: true, className: 'redLabel', value: (r) => r.nbVisitesReel, format: 'number' },
   )
 
   VISITES.forEach((rubrique) => cols.push({
@@ -1477,6 +1499,42 @@ function cacheRowToSummary(row: CacheDbRow): SummaryRow {
     qrcN: safeNumber(row.qrc_n),
     visiteTheorique: safeNumber(row.visite_theorique),
     visiteRealise: safeNumber(row.visite_realise),
+    derniereVisiteReelle: '',
+    prochaineVisiteReelle: '',
+    nbVisitesReel: 0,
+  }
+}
+
+// ── Visite réelle (v_rdv_unifie) : chargement batch + application ────────
+
+type VisiteBatchInfo = { derniereVisite: string; prochaineVisite: string; nbVisitesAnnee: number }
+
+async function fetchVisitesReelles(annee: number): Promise<Map<string, VisiteBatchInfo>> {
+  const { data, error } = await supabase.rpc('get_smc_visites_batch', { p_annee: annee })
+  if (error) throw new Error(`get_smc_visites_batch : ${error.message}`)
+  const map = new Map<string, VisiteBatchInfo>()
+  ;((data || []) as Record<string, any>[]).forEach((row) => {
+    map.set(normalize(row.numero_tiers), {
+      derniereVisite: formatDateFr(row.derniere_visite),
+      prochaineVisite: formatDateFr(row.prochaine_visite),
+      nbVisitesAnnee: safeNumber(row.nb_visites_annee),
+    })
+  })
+  return map
+}
+
+/** Applique la dernière/prochaine visite réelle + le compteur réel sur une
+ * ligne client -- ne touche jamais aux lignes TOTAL ou mois (row_kind
+ * différent de 'client'), qui restent vides sur ces 3 champs. */
+function applyVisiteReelle(row: SummaryRow, visitesMap: Map<string, VisiteBatchInfo>): SummaryRow {
+  if (row.kind !== 'client') return row
+  const info = visitesMap.get(normalize(row.numero))
+  if (!info) return row
+  return {
+    ...row,
+    derniereVisiteReelle: info.derniereVisite,
+    prochaineVisiteReelle: info.prochaineVisite,
+    nbVisitesReel: info.nbVisitesAnnee,
   }
 }
 
@@ -1594,6 +1652,9 @@ function buildTotalFromRows(rows: SummaryRow[], showCollaborateurColumn: boolean
     qrcN: 0,
     visiteTheorique: rows.reduce((s, r) => s + r.visiteTheorique, 0),
     visiteRealise: rows.reduce((s, r) => s + r.visiteRealise, 0),
+    derniereVisiteReelle: '',
+    prochaineVisiteReelle: '',
+    nbVisitesReel: rows.reduce((s, r) => s + r.nbVisitesReel, 0),
   }
 
   total.margePctN1 = total.caN1 ? (total.margeN1Value / total.caN1) * 100 : null
@@ -2120,6 +2181,10 @@ export default function SyntheseMultiClientsPage() {
   // Colonnes optionnelles affichées à l'écran (pastilles sous les KPI) —
   // n'affecte jamais l'export Excel, qui reconstruit ses propres colonnes.
   const [visibleOptionalCols, setVisibleOptionalCols] = useState<Set<string>>(new Set(DEFAULT_VISIBLE_TOGGLEABLE_COLUMNS))
+  // Dernière/prochaine visite réelle + compteur (v_rdv_unifie) -- chargé
+  // une fois pour tous les clients (indépendant du filtre collaborateur/
+  // agence en cours), fusionné dans baseClientRows ci-dessous.
+  const [visitesReellesMap, setVisitesReellesMap] = useState<Map<string, VisiteBatchInfo>>(new Map())
 
   const hasSelection = Boolean(selected)
   const showCollaborateurColumn = mode === 'collaborateur' && selected === ALL_COLLABORATEURS_VALUE
@@ -2185,6 +2250,25 @@ export default function SyntheseMultiClientsPage() {
     return () => {
       alive = false
     }
+  }, [])
+
+  // Dernière/prochaine visite réelle + compteur -- une seule fois, pour
+  // tous les clients (v_rdv_unifie n'est pas filtrable par collaborateur/
+  // agence directement, donc chargé indépendamment de la sélection). Si la
+  // RPC n'est pas encore déployée, échoue silencieusement : les 3 colonnes
+  // restent simplement vides plutôt que de bloquer l'écran.
+  useEffect(() => {
+    let alive = true
+    async function loadVisitesReelles() {
+      try {
+        const map = await fetchVisitesReelles(N)
+        if (alive) setVisitesReellesMap(map)
+      } catch (err) {
+        console.warn('[SMC] get_smc_visites_batch indisponible :', err)
+      }
+    }
+    void loadVisitesReelles()
+    return () => { alive = false }
   }, [])
 
   useEffect(() => {
@@ -2314,7 +2398,10 @@ export default function SyntheseMultiClientsPage() {
     return () => { alive = false }
   }, [mode, selected, selectionOptions.agenceCollaborateurs, selectionOptions.collaborateurAgence, restrictedSelectionOptions.collaborateurs, access.hasAgenceRestriction, access.hasCollaborateurRestriction])
 
-  const baseClientRows = useMemo(() => cacheRows.map((row) => applyObjectiveOverrides(row, objectiveMap)), [cacheRows, objectiveMap])
+  const baseClientRows = useMemo(
+    () => cacheRows.map((row) => applyVisiteReelle(applyObjectiveOverrides(row, objectiveMap), visitesReellesMap)),
+    [cacheRows, objectiveMap, visitesReellesMap]
+  )
   const totalRow = useMemo(() => buildTotalFromRows(baseClientRows, showCollaborateurColumn), [baseClientRows, showCollaborateurColumn])
 
   const visibleRows = useMemo(() => {
