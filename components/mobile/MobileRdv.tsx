@@ -108,6 +108,12 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
   const [rdvLoading, setRdvLoading] = useState(true)
   const [blgPartnerId, setBlgPartnerId] = useState<string | null>(null)
 
+  // Numéros de tiers (clients) ayant au moins une tâche NON terminée en
+  // cours, assignée à l'utilisateur -- affiché comme alerte ⚠️ sur les rdv
+  // concernés (voir chargerTachesEnCours()), pour ne pas oublier un
+  // engagement pris avec ce client avant de le revoir.
+  const [tachesEnCoursParTiers, setTachesEnCoursParTiers] = useState<Set<string>>(new Set())
+
   const [periodeLabel, setPeriodeLabel] = useState('30 prochains jours')
   const [agendaOuvert, setAgendaOuvert] = useState(false)
   const [dateDebutInput, setDateDebutInput] = useState('')
@@ -119,7 +125,38 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
   const [currentEmail, setCurrentEmail] = useState('')
   const [currentName, setCurrentName] = useState('')
 
-  async function chargerRdv(email: string, partnerId: string | null, debut: Date, fin: Date) {
+  /** Charge, pour un lot de numéros de tiers, ceux qui ont au moins une
+   * tâche non terminée assignée à l'utilisateur -- utilisé pour l'alerte
+   * ⚠️ sur la liste de rdv. Jamais bloquant (repli silencieux sur "aucune
+   * alerte" en cas d'erreur). */
+  async function chargerTachesEnCours(email: string, name: string, numerosTiers: (string | null)[]) {
+    const uniques = Array.from(new Set(numerosTiers.filter((n): n is string => Boolean(n && n.trim()))))
+    if (uniques.length === 0) {
+      setTachesEnCoursParTiers(new Set())
+      return
+    }
+    try {
+      const identities = Array.from(new Set([email, name].filter(Boolean)))
+      const assignedFilter = identities.map((v) => `assigned_to.eq.${v.replace(/,/g, '\\,')}`).join(',')
+      const { data, error } = await supabase
+        .from('todo_actions')
+        .select('numero_tiers')
+        .or(assignedFilter)
+        .not('status', 'in', '("Terminé","Annulé")')
+        .in('numero_tiers', uniques)
+      if (error) {
+        console.warn('[MobileRdv] chargerTachesEnCours', error.message)
+        setTachesEnCoursParTiers(new Set())
+        return
+      }
+      setTachesEnCoursParTiers(new Set(((data || []) as any[]).map((r) => safeText(r.numero_tiers)).filter(Boolean)))
+    } catch (e) {
+      console.warn('[MobileRdv] chargerTachesEnCours', e)
+      setTachesEnCoursParTiers(new Set())
+    }
+  }
+
+  async function chargerRdv(email: string, name: string, partnerId: string | null, debut: Date, fin: Date) {
     setRdvLoading(true)
     setPeriodeBornes({ debut, fin })
     try {
@@ -141,9 +178,12 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
       if (error) {
         console.error('[MobileRdv] v_rdv_unifie', error)
         setRdvList([])
+        setTachesEnCoursParTiers(new Set())
         return
       }
-      setRdvList((data || []) as RdvUnifie[])
+      const rows = (data || []) as RdvUnifie[]
+      setRdvList(rows)
+      void chargerTachesEnCours(email, name, rows.map((r) => r.numero_tiers))
     } finally {
       setRdvLoading(false)
     }
@@ -165,14 +205,15 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
           .maybeSingle()
 
         if (cancelled) return
+        const nom = String(access?.display_name || '').trim() || fallbackNameFromEmail(email)
         setCurrentEmail(email)
-        setCurrentName(String(access?.display_name || '').trim() || fallbackNameFromEmail(email))
+        setCurrentName(nom)
         setBlgPartnerId(access?.blg_partner_id || null)
 
         const today = new Date()
         const later = new Date(today)
         later.setDate(later.getDate() + 30)
-        await chargerRdv(email, access?.blg_partner_id || null, today, later)
+        await chargerRdv(email, nom, access?.blg_partner_id || null, today, later)
       } finally {
         if (!cancelled) setRdvLoading(false)
       }
@@ -185,7 +226,7 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
 
   async function rafraichirPeriode() {
     if (!currentEmail || !periodeBornes) return
-    await chargerRdv(currentEmail, blgPartnerId, periodeBornes.debut, periodeBornes.fin)
+    await chargerRdv(currentEmail, currentName, blgPartnerId, periodeBornes.debut, periodeBornes.fin)
   }
 
   function selectionnerPeriode(preset: 'semaine_derniere' | 'semaine_courante' | 'semaine_prochaine' | 'defaut') {
@@ -225,7 +266,7 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
 
     setPeriodeLabel(label)
     setAgendaOuvert(false)
-    void chargerRdv(currentEmail, blgPartnerId, debut, fin)
+    void chargerRdv(currentEmail, currentName, blgPartnerId, debut, fin)
   }
 
   function appliquerPeriodePersonnalisee() {
@@ -239,7 +280,7 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
     const fmt = (d: Date) => d.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: '2-digit' })
     setPeriodeLabel(`${fmt(debut)} → ${fmt(finSaisie)}`)
     setAgendaOuvert(false)
-    void chargerRdv(currentEmail, blgPartnerId, debut, fin)
+    void chargerRdv(currentEmail, currentName, blgPartnerId, debut, fin)
   }
 
   function openRdvDetail(r: RdvUnifie) {
@@ -248,6 +289,7 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
     const fmtTime = (d: Date | null) => (d ? d.toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '')
     const peutNaviguer = Boolean(r.numero_tiers && onOpenClient)
     const activityId = r.source === 'compagnon' ? r.compagnon_id : r.blg_activity_id
+    const aTacheEnCours = Boolean(r.numero_tiers && tachesEnCoursParTiers.has(r.numero_tiers))
     setOpenDetail({
       title: r.subject,
       subtitle: `${RDV_TYPE_LABELS[r.type] || r.type || 'Activité'}${r.source === 'compagnon' ? ' · RDV compagnon' : ''}`,
@@ -259,6 +301,12 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
       ],
       footer: (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {aTacheEnCours && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, borderRadius: 10, border: '1px solid rgba(230,159,74,0.4)', background: 'rgba(230,159,74,0.12)', padding: '10px 12px' }}>
+              <span style={{ fontSize: 16 }}>⚠️</span>
+              <span style={{ fontSize: 12.5, color: '#E8A96A' }}>Une tâche non terminée est en cours pour ce client — engagement pris à ne pas oublier avant ce rendez-vous.</span>
+            </div>
+          )}
           {peutNaviguer && (
             <button
               type="button"
@@ -408,13 +456,15 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
                   ? d.toLocaleDateString('fr-FR', { weekday: 'short', day: '2-digit', month: '2-digit' })
                   : d.toLocaleDateString('fr-FR', { weekday: 'short', day: '2-digit', month: '2-digit' }) + ' · ' + d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
                 : ''
+              const aTacheEnCours = Boolean(r.numero_tiers && tachesEnCoursParTiers.has(r.numero_tiers))
               return (
                 <div
                   key={r.rdv_id}
                   onClick={() => openRdvDetail(r)}
                   style={{
                     display: 'flex', alignItems: 'center', gap: 10, borderRadius: 12,
-                    border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)',
+                    border: aTacheEnCours ? '1px solid rgba(230,159,74,0.45)' : '1px solid rgba(255,255,255,0.08)',
+                    background: aTacheEnCours ? 'rgba(230,159,74,0.07)' : 'rgba(255,255,255,0.03)',
                     padding: '9px 12px', cursor: 'pointer',
                   }}
                 >
@@ -440,6 +490,7 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
                     )}
                     <div style={{ fontSize: 14.5, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', display: 'flex', alignItems: 'center', gap: 5 }}>
                       {r.a_compte_rendu && <span title="Compte-rendu disponible" style={{ fontSize: 11 }}>[CR]</span>}
+                      {aTacheEnCours && <span title="Tâche non terminée en cours pour ce client" style={{ fontSize: 13, flexShrink: 0 }}>⚠️</span>}
                       {r.subject}
                     </div>
                     <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.4)', marginTop: 1 }}>

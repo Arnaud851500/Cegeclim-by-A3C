@@ -60,6 +60,17 @@ const QUESTION =
 // au compte-rendu client, qui restent explicites quel que soit ce réglage.
 const QUESTION_COURTE = 'Que souhaites-tu savoir ?'
 
+// Boutons rapides affichés pendant l'écoute -- court-circuitent la voix
+// pour les demandes les plus fréquentes (voir lancerRaccourci()).
+const RACCOURCIS_RAPIDES: { label: string; intent: Intent; params: IntentParams }[] = [
+  { label: 'Résumé jour', intent: 'resume_jour', params: {} },
+  { label: 'Résumé semaine', intent: 'resume_semaine', params: {} },
+  { label: 'Chiffres du jour', intent: 'ca_periode', params: { periode: 'aujourdhui' } },
+  { label: 'Chiffres du mois', intent: 'ca_periode', params: { periode: 'mois' } },
+  { label: 'Tâches en retard', intent: 'jour', params: {} },
+  { label: 'Rdv à venir', intent: 'rdv', params: {} },
+]
+
 
 function safeText(value: any) {
   return String(value ?? '').trim()
@@ -585,6 +596,12 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
   const audioElementRef = useRef<HTMLAudioElement | null>(null)
   const audioDeverrouilleRef = useRef(false)
   const forceStopRef = useRef<(() => void) | null>(null)
+  // Raccourci tapé (boutons rapides affichés pendant l'écoute, ex. "Résumé
+  // jour") -- posé juste avant de forcer l'arrêt de l'enregistrement en
+  // cours, lu juste après pour sauter directement à genererResume() sans
+  // repasser par la transcription/interprétation (la demande est déjà
+  // connue). Voir lancerRaccourci() et attendreAudioOuRaccourci().
+  const raccourciDemandeRef = useRef<{ intent: Intent; params: IntentParams } | null>(null)
   // Identité stable de CETTE instance -- sert à savoir si c'est bien elle
   // qui détient le verrou vocal partagé (lib/voiceSessionLock), et donc si
   // elle peut le libérer / doit refuser de démarrer une nouvelle session
@@ -912,6 +929,33 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
     })
   }
 
+  /** Attend soit un enregistrement mains libres classique, soit un
+   * raccourci tapé (bouton rapide affiché pendant l'écoute) -- voir
+   * lancerRaccourci(). Centralise la logique commune à poserLaQuestion()
+   * et continuerConversation(), qui affichent toutes deux l'écran
+   * d'écoute où ces boutons apparaissent. */
+  async function attendreAudioOuRaccourci(): Promise<
+    { type: 'audio'; blob: Blob } | { type: 'raccourci'; intent: Intent; params: IntentParams }
+  > {
+    const blob = await enregistrerAvecDetectionSilence(forceStopRef)
+    if (raccourciDemandeRef.current) {
+      const r = raccourciDemandeRef.current
+      raccourciDemandeRef.current = null
+      return { type: 'raccourci', intent: r.intent, params: r.params }
+    }
+    return { type: 'audio', blob }
+  }
+
+  /** Bouton rapide affiché pendant l'écoute (ex. "Résumé jour", "Chiffres
+   * du mois") : pose la demande déjà connue puis force l'arrêt de
+   * l'enregistrement en cours -- attendreAudioOuRaccourci() la récupère
+   * et saute directement à genererResume(), sans repasser par
+   * transcription + interprétation. */
+  function lancerRaccourci(intent: Intent, params: IntentParams = {}) {
+    raccourciDemandeRef.current = { intent, params }
+    forceStopRef.current?.()
+  }
+
   /** Lance (ou relance) le cycle conversationnel : question -> écoute
    * mains libres -> interprétation. */
   async function poserLaQuestion() {
@@ -948,9 +992,14 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       await jouerAccueil()
       if (annulerRef.current) return // écran quitté pendant l'annonce
       setEtape('ecoute')
-      const blobBrut = await enregistrerAvecDetectionSilence(forceStopRef)
+      const resultatEcoute = await attendreAudioOuRaccourci()
       if (annulerRef.current) return
-      await interpreter(blobBrut)
+      if (resultatEcoute.type === 'raccourci') {
+        setEtape('traitement')
+        await genererResume(resultatEcoute.intent, resultatEcoute.params)
+      } else {
+        await interpreter(resultatEcoute.blob)
+      }
     } catch (e: any) {
       libererVerrouVocal(idInstanceRef.current)
       setEtape('erreur')
@@ -1037,9 +1086,14 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
     const contexte = dernierChoixRef.current
     try {
       setEtape('ecoute')
-      const blob = await enregistrerAvecDetectionSilence(forceStopRef)
+      const resultatEcoute = await attendreAudioOuRaccourci()
       if (annulerRef.current) return
-      await interpreter(blob, contexte)
+      if (resultatEcoute.type === 'raccourci') {
+        setEtape('traitement')
+        await genererResume(resultatEcoute.intent, resultatEcoute.params)
+      } else {
+        await interpreter(resultatEcoute.blob, contexte)
+      }
     } catch (e: any) {
       libererVerrouVocal(idInstanceRef.current)
       setEtape('erreur')
@@ -1889,6 +1943,24 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
               <div style={{ fontSize: 14.5, fontWeight: 600, color: '#8fd4a8', textAlign: 'center' }}>
                 {etape === 'ecoute_client' ? "Je t'écoute… dis le nom ou le numéro du client" : "Je t'écoute… je m'arrête tout seul dès que tu as fini"}
               </div>
+              {etape === 'ecoute' && (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, width: '100%', marginTop: 4 }}>
+                  {RACCOURCIS_RAPIDES.map((r) => (
+                    <button
+                      key={r.label}
+                      type="button"
+                      onClick={() => lancerRaccourci(r.intent, r.params)}
+                      style={{
+                        padding: '11px 8px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.14)',
+                        background: 'rgba(255,255,255,0.05)', color: 'rgba(255,255,255,0.8)',
+                        fontSize: 12.5, fontWeight: 600, cursor: 'pointer', textAlign: 'center', lineHeight: 1.3,
+                      }}
+                    >
+                      {r.label}
+                    </button>
+                  ))}
+                </div>
+              )}
               <style>{`@keyframes cgcPulseSummary { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.06); opacity: 0.75; } }`}</style>
             </div>
           )}
