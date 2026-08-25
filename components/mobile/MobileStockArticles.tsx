@@ -27,6 +27,10 @@ import { supabase } from '@/lib/supabaseClient'
 //      Peut aussi s'ouvrir directement via `cibleReference` (venu d'un
 //      autre écran -- ex. tap sur une ligne d'article dans un devis/BL),
 //      sans repasser par la recherche.
+//
+//   CORRECTIF : "Stock par dépôt" affiche maintenant aussi le "réservé"
+//   (comme le tableau desktop équivalent) -- entre "réel" et "dispo",
+//   sans les colonnes "CMD FOURN." ni "PRÉPARÉ" (PL), pas demandées.
 // ─────────────────────────────────────────────────────────────────────────
 
 type StockRow = {
@@ -650,10 +654,11 @@ function StockArticleDetailSheet({
     return depotRows.reduce(
       (acc, r) => ({
         stock_reel: acc.stock_reel + toNumber(r.stock_reel),
+        stock_reserve: acc.stock_reserve + toNumber(r.stock_reserve),
         stock_prepare: acc.stock_prepare + toNumber(r.stock_prepare),
         stock_disponible: acc.stock_disponible + toNumber(r.stock_disponible),
       }),
-      { stock_reel: 0, stock_prepare: 0, stock_disponible: 0 },
+      { stock_reel: 0, stock_reserve: 0, stock_prepare: 0, stock_disponible: 0 },
     )
   }, [depotRows])
 
@@ -817,10 +822,13 @@ function StockArticleDetailSheet({
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {depotRows.map((r) => (
-                  <div key={r.depot} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderRadius: 10, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)', padding: '8px 12px' }}>
-                    <span style={{ fontSize: 12.5, color: '#fff', flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.depot}</span>
-                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, color: 'rgba(255,255,255,0.5)', marginRight: 10 }}>
+                  <div key={r.depot} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderRadius: 10, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)', padding: '8px 12px', flexWrap: 'wrap', rowGap: 4 }}>
+                    <span style={{ fontSize: 12.5, color: '#fff', flex: 1, minWidth: 90, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.depot}</span>
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'rgba(255,255,255,0.5)', marginRight: 8 }}>
                       réel {formatNumber(toNumber(r.stock_reel))}
+                    </span>
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'rgba(255,255,255,0.5)', marginRight: 8 }}>
+                      réservé {formatNumber(toNumber(r.stock_reserve))}
                     </span>
                     <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 600, color: '#fff' }}>
                       dispo {formatNumber(toNumber(r.stock_disponible))}
@@ -828,10 +836,13 @@ function StockArticleDetailSheet({
                   </div>
                 ))}
                 {totalDepot && (
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderRadius: 10, background: 'rgba(166,161,129,0.12)', border: '1px solid rgba(166,161,129,0.3)', padding: '8px 12px', marginTop: 2 }}>
-                    <span style={{ fontSize: 12.5, fontWeight: 700, color: '#A6A181' }}>Total</span>
-                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, color: 'rgba(255,255,255,0.6)', marginRight: 10 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderRadius: 10, background: 'rgba(166,161,129,0.12)', border: '1px solid rgba(166,161,129,0.3)', padding: '8px 12px', marginTop: 2, flexWrap: 'wrap', rowGap: 4 }}>
+                    <span style={{ fontSize: 12.5, fontWeight: 700, color: '#A6A181', flex: 1, minWidth: 90 }}>Total</span>
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'rgba(255,255,255,0.6)', marginRight: 8 }}>
                       réel {formatNumber(totalDepot.stock_reel)}
+                    </span>
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'rgba(255,255,255,0.6)', marginRight: 8 }}>
+                      réservé {formatNumber(totalDepot.stock_reserve)}
                     </span>
                     <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 700, color: '#fff' }}>
                       dispo {formatNumber(totalDepot.stock_disponible)}
