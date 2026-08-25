@@ -16,7 +16,7 @@
  *    consultable ET modifiable à la main) -- callback onActivityClick
  *    toujours disponible en plus, pour un usage externe éventuel.
  *
- * V2 (cette révision) :
+ * V2 :
  *  - Les activités affichées viennent désormais de v_rdv_unifie (BLG +
  *    RDV "compagnon CEGECLIM" créés depuis l'app avant toute connexion
  *    BLG/Outlook) au lieu de crm_base_activity seul -- résolution du nom
@@ -29,6 +29,19 @@
  *    version mobile et que Vision Client).
  *  - Bouton "+ Nouveau RDV" : crée un RDV "compagnon CEGECLIM"
  *    (rdv_compagnon), avec recherche de client optionnelle.
+ *
+ * V3 (cette révision) :
+ *  - Couleur des RDV (BLG + compagnon) basée sur le SECTEUR D'ACTIVITÉ du
+ *    client lié (même palette TRACKED_SECTORS que la carte "Prospects &
+ *    Clients" -- Installateur CVC, Plomberie, Electricité ENR...), au lieu
+ *    du type de RDV (meeting/phoneCall/reminder). v_rdv_unifie expose
+ *    désormais naf_code + naf_libelle_traduit (résolus côté vue via
+ *    numero_tiers -> ref_tiers.siret -> clients), sur le même principe que
+ *    le calcul déjà fait côté écran Clients desktop. Repli sur la couleur
+ *    par type de RDV (RDV_TYPE_COLORS) quand aucun secteur n'est
+ *    identifiable (client sans NAF connu, ou RDV sans client lié). Les
+ *    évènements Outlook natifs (ICS) ne sont pas concernés -- ils n'ont
+ *    pas de client associé -- et gardent leur couleur de catégorie.
  *
  * NOTE SCHEMA : le schéma Postgres réel des activités BLG est `blg`, mais
  * PostgREST n'expose que `public` et `sage`. v_rdv_unifie (public) fait
@@ -76,6 +89,8 @@ type OutlookEvent = {
   /** Vrai si un compte-rendu (client_comptes_rendus) existe déjà pour ce RDV. */
   aCompteRendu?: boolean;
   lieu?: string | null;
+  /** Secteur d'activité du client lié (même libellé que TRACKED_SECTORS côté carte Clients) — pour affichage/tooltip, RDV fusionnés uniquement. */
+  sectorLabel?: string | null;
 };
 
 const HOUR_START = 8;
@@ -91,6 +106,8 @@ const RDV_TYPE_LABELS: Record<string, string> = {
   "7": "Appel",
   "9": "Rappel",
 };
+// Repli uniquement : utilisé quand aucun secteur n'est identifiable pour le
+// client lié au RDV (voir TRACKED_SECTORS ci-dessous, désormais prioritaire).
 const RDV_TYPE_COLORS: Record<string, string> = {
   meeting: "#2E5BB8",
   phoneCall: "#D68910",
@@ -99,6 +116,47 @@ const RDV_TYPE_COLORS: Record<string, string> = {
   "7": "#D68910",
   "9": "#8E44AD",
 };
+
+// Mêmes secteurs suivis et mêmes couleurs que côté carte "Prospects &
+// Clients" (app/clients/page.tsx, TRACKED_SECTORS) -- à garder synchronisés
+// si la liste évolue là-bas. Dupliqué ici plutôt qu'importé : ce composant
+// n'a pas de dépendance vers app/clients/page.tsx, et cette liste change
+// rarement.
+type TrackedSectorDefinition = { prefixes: string[]; label: string; color: string };
+const TRACKED_SECTORS: TrackedSectorDefinition[] = [
+  { prefixes: ["43.21", "4321"], label: "Electricité ENR", color: "#a2cc88" },
+  { prefixes: ["43.22A", "4322A"], label: "Plomberie", color: "#c3b691" },
+  { prefixes: ["43.22B", "4322B"], label: "Installateur CVC", color: "#8ba9be" },
+  { prefixes: ["41.20", "4120"], label: "CMI", color: "#e0a961" },
+  { prefixes: ["28.25Z", "2825Z"], label: "Equipement Frigorifiques Indus.", color: "#00A3FF" },
+  { prefixes: ["33.20B", "3320B"], label: "Installation de machines mécaniques", color: "#4b5563" },
+  { prefixes: ["33.12Z", "3312Z"], label: "Réparation de machines", color: "#4b5563" },
+  { prefixes: ["43.29A", "4329A"], label: "Travaux d'isolation", color: "#f9a8d4" },
+  { prefixes: ["43.99", "4399"], label: "Bâtiment", color: "#8e9db3" },
+];
+
+function normalizeNafCode(value: string | null | undefined): string {
+  return String(value || "").replace(/\s/g, "").toUpperCase();
+}
+function findTrackedSectorByCode(code: string | null | undefined) {
+  const c = normalizeNafCode(code);
+  if (!c) return null;
+  return TRACKED_SECTORS.find((s) => s.prefixes.some((p) => c.startsWith(p))) || null;
+}
+function findTrackedSectorByLabel(label: string | null | undefined) {
+  const normalized = String(label || "").trim().toLowerCase();
+  if (!normalized) return null;
+  return TRACKED_SECTORS.find((s) => s.label.toLowerCase() === normalized) || null;
+}
+/** Même logique que getClientSectorLabel() côté écran Clients desktop :
+ * priorité au code NAF (le plus fiable), repli sur le libellé déjà stocké
+ * s'il correspond à un secteur suivi, sinon "AUTRES" (pas de couleur
+ * dédiée -- le RDV retombe alors sur RDV_TYPE_COLORS). */
+function resolveRdvSector(nafCode: string | null | undefined, nafLibelle: string | null | undefined): TrackedSectorDefinition | null {
+  const byCode = findTrackedSectorByCode(nafCode);
+  if (byCode) return byCode;
+  return findTrackedSectorByLabel(nafLibelle);
+}
 
 function toIsoDate(d: Date) {
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -129,6 +187,11 @@ function formatDateTimeFr(value: string | null | undefined, allDay?: boolean): s
 /** Une ligne de public.v_rdv_unifie -> un évènement de la grille. */
 function mapUnifiedRdvToEvent(row: Record<string, any>): OutlookEvent {
   const type = String(row.type ?? "");
+  // Secteur du client lié en priorité (même palette que la carte Clients) ;
+  // repli sur la couleur par type de RDV si aucun secteur identifiable
+  // (client sans NAF connu, ou RDV sans client lié du tout).
+  const secteur = resolveRdvSector(row.naf_code, row.naf_libelle_traduit);
+  const couleur = secteur?.color || RDV_TYPE_COLORS[type] || "#7A5EA8";
   return {
     id: row.rdv_id,
     subject: row.subject || RDV_TYPE_LABELS[type] || "Activité",
@@ -137,7 +200,7 @@ function mapUnifiedRdvToEvent(row: Record<string, any>): OutlookEvent {
     isAllDay: Boolean(row.all_day),
     location: row.lieu || null,
     categories: type ? [type] : [],
-    colorHex: RDV_TYPE_COLORS[type] || "#7A5EA8",
+    colorHex: couleur,
     webLink: null,
     source: row.source === "compagnon" ? "compagnon" : "blg",
     company: row.company_name || null,
@@ -146,6 +209,7 @@ function mapUnifiedRdvToEvent(row: Record<string, any>): OutlookEvent {
     compagnonId: row.compagnon_id || null,
     aCompteRendu: Boolean(row.a_compte_rendu),
     lieu: row.lieu || null,
+    sectorLabel: secteur?.label || null,
   };
 }
 
@@ -233,7 +297,8 @@ function RdvDetailModal({
           <div>
             <div className="oaModalTitle">{evt.subject}</div>
             <div className="oaModalSubtitle">
-              {RDV_TYPE_LABELS[evt.categories[0]] || evt.categories[0] || "Activité"} · {evt.source === "compagnon" ? "RDV compagnon CEGECLIM" : "Synchronisé BLG"}
+              {RDV_TYPE_LABELS[evt.categories[0]] || evt.categories[0] || "Activité"}
+              {evt.sectorLabel ? ` · ${evt.sectorLabel}` : ""} · {evt.source === "compagnon" ? "RDV compagnon CEGECLIM" : "Synchronisé BLG"}
             </div>
           </div>
           <button className="oaModalClose" onClick={onClose}>✕</button>
@@ -860,6 +925,15 @@ export default function OutlookAgenda({
   const currentAutorisation = autorisations.find((a) => a.email_outlook === selectedEmail);
   const aujourdHuiIso = toIsoDate(new Date());
 
+  // Légende des secteurs -- affichée sous la grille, uniquement les
+  // secteurs effectivement présents dans la fenêtre de 7 jours affichée
+  // (pas la liste complète des 9 secteurs suivis à chaque fois).
+  const secteursVisibles = useMemo(() => {
+    const labels = new Set<string>();
+    rdvEvents.forEach((e) => { if (e.sectorLabel) labels.add(e.sectorLabel); });
+    return TRACKED_SECTORS.filter((s) => labels.has(s.label));
+  }, [rdvEvents]);
+
   return (
     <div className="flex h-full flex-col rounded-2xl border border-black/10 bg-[#F5F3EC] p-3 text-[#141A26]">
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -1080,7 +1154,7 @@ export default function OutlookAgenda({
                       <button
                         key={e.id}
                         onClick={() => handleEventClick(e)}
-                        title={`${e.company ? e.company + " — " : ""}${e.subject}${e.location ? " · " + e.location : ""}`}
+                        title={`${e.company ? e.company + " — " : ""}${e.subject}${e.sectorLabel ? " · " + e.sectorLabel : ""}${e.location ? " · " + e.location : ""}`}
                         style={eventStyle(e, currentAutorisation?.couleur_defaut || null)}
                         className="absolute left-0.5 right-0.5 overflow-hidden rounded-md px-1.5 py-0.5 text-left text-[10px] leading-tight text-white shadow hover:brightness-110"
                       >
@@ -1111,7 +1185,7 @@ export default function OutlookAgenda({
                       <button
                         key={e.id}
                         onClick={() => handleEventClick(e)}
-                        title={`${e.company ? e.company + " — " : ""}${e.subject}`}
+                        title={`${e.company ? e.company + " — " : ""}${e.subject}${e.sectorLabel ? " · " + e.sectorLabel : ""}`}
                         style={{ background: e.colorHex || currentAutorisation?.couleur_defaut || DEFAULT_COLOR }}
                         className="w-full truncate rounded px-1.5 py-1 text-left text-[10px] text-white"
                       >
@@ -1127,6 +1201,20 @@ export default function OutlookAgenda({
                   </div>
                 );
               })}
+            </div>
+          )}
+
+          {/* Légende des secteurs -- uniquement ceux présents dans la
+             fenêtre affichée, pas la liste complète (souvent redondante). */}
+          {secteursVisibles.length > 0 && (
+            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 border-t border-black/10 pt-2">
+              {secteursVisibles.map((s) => (
+                <span key={s.label} className="flex items-center gap-1.5 text-[10.5px] font-semibold text-[#141A26]/70">
+                  <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: s.color }} />
+                  {s.label}
+                </span>
+              ))}
+              <span className="text-[10.5px] text-[#141A26]/40">Couleur = secteur d&rsquo;activité du client</span>
             </div>
           )}
         </div>
