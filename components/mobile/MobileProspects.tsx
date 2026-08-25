@@ -25,6 +25,12 @@ import { NavigationChoiceSheet, PhoneChoiceSheet } from './MobileActionSheets'
 //   type d'activité, RGE et ancienneté -- disponibles avant la carte
 //   (options fixes, ne dépendent pas des données chargées) ET dans le
 //   tiroir une fois la carte affichée.
+// v4 : retrait des deux boutons de diagnostic ("🔧 Diagnostic recherche"
+//   sur l'écran liste, "🔧 Diagnostic" sur la carte) -- outils temporaires
+//   qui ont servi à identifier le bug de carte invisible (résolu ci-dessus
+//   par l'import leaflet.css) et le bug de correspondance CEGECLIM sur
+//   grand rayon (résolu par le découpage en lots de SIRET). Plus besoin
+//   une fois le diagnostic terminé.
 // ─────────────────────────────────────────────────────────────────────────
 
 const MapContainer: any = dynamic(() => import('react-leaflet').then((m) => m.MapContainer as any), { ssr: false })
@@ -314,20 +320,6 @@ export default function MobileProspects() {
   const [prospects, setProspects] = useState<ProspectRowGeo[]>([])
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [diagnosticRecherche, setDiagnosticRecherche] = useState<{
-    position: { lat: number; lng: number } | null
-    rayonKm: number | null
-    departement: string | null
-    candidatsBruts: number
-    exclusFerme: number
-    exclusSansCoords: number
-    exclusDistance: number
-    apresFiltrageGeo: number
-    siretsVerifies: number
-    siretsReconnus: number
-    refTiersErreur: string | null
-  } | null>(null)
-  const [diagnosticRechercheOuvert, setDiagnosticRechercheOuvert] = useState(false)
 
   const [filtresOuverts, setFiltresOuverts] = useState(false)
   const [vue, setVue] = useState<'liste' | 'carte'>('liste')
@@ -341,16 +333,6 @@ export default function MobileProspects() {
   const mapRef = useRef<any>(null)
   const mapWrapperRef = useRef<HTMLDivElement | null>(null)
   const [mapHeightPx, setMapHeightPx] = useState(0)
-  // Journal de diagnostic affiché à l'écran (bouton "🔧 Diagnostic" sous la
-  // carte) -- après deux correctifs à l'aveugle sans succès (CSS manquant,
-  // puis invalidateSize mal déclenché), la seule façon de vraiment
-  // résoudre le problème est de voir l'erreur réelle sans debug distant.
-  const [journalCarte, setJournalCarte] = useState<string[]>([])
-  const [diagnosticOuvert, setDiagnosticOuvert] = useState(false)
-  function logCarte(message: string) {
-    const ts = new Date().toLocaleTimeString('fr-FR')
-    setJournalCarte((prev) => [...prev.slice(-29), `${ts}  ${message}`])
-  }
 
   function localiser() {
     if (typeof window === 'undefined' || !navigator.geolocation) {
@@ -405,43 +387,23 @@ export default function MobileProspects() {
     return () => { cancelled = true }
   }, [])
 
-  // CORRECTIF carte blanche, cette fois confirmé par le diagnostic à
-  // l'écran : Leaflet mesurait son conteneur à 362×0px au montage (hauteur
-  // nulle), alors que le <div> parent affichait déjà 362×689px au même
-  // instant -- la chaîne CSS "flex:1 -> height:100% -> height:100%" ne se
-  // résolvait jamais correctement (bug de timing/cascade CSS, confirmé par
-  // le fait qu'invalidateSize() tournait 10 fois sans jamais rien changer :
-  // la hauteur réelle du conteneur Leaflet restait 0 en continu, pas juste
-  // au tout premier instant).
-  //
-  // Solution robuste : ne plus dépendre du tout d'un height:100% en
-  // cascade. On mesure la hauteur RÉELLE du conteneur en pixels via JS, et
-  // on ne monte MapContainer qu'une fois cette mesure disponible, avec
-  // cette valeur fixe en pixels (pas de pourcentage) -- Leaflet reçoit
-  // alors une hauteur définitive dès son tout premier rendu.
+  // CORRECTIF carte blanche (résolu -- import leaflet.css en tête de
+  // fichier) : Leaflet mesurait son conteneur à hauteur nulle au montage
+  // tant que la cascade CSS "flex:1 -> height:100%" ne s'était pas
+  // stabilisée. Solution robuste conservée : on mesure la hauteur RÉELLE
+  // du conteneur en pixels via JS, et on ne monte MapContainer qu'une fois
+  // cette mesure disponible, avec cette valeur fixe en pixels (pas de
+  // pourcentage) -- Leaflet reçoit alors une hauteur définitive dès son
+  // tout premier rendu.
   useEffect(() => {
     if (vue !== 'carte' || !filtresValides || !position) {
       setMapHeightPx(0)
       return
     }
 
-    logCarte('Écran carte affiché -- mesure directe de la hauteur en pixels')
-
-    function surErreur(e: ErrorEvent) {
-      logCarte(`❌ Erreur JS : ${e.message} (${e.filename?.split('/').pop() || '?'}:${e.lineno})`)
-    }
-    function surRejetNonGere(e: PromiseRejectionEvent) {
-      logCarte(`❌ Promesse rejetée : ${String(e.reason?.message || e.reason || '?')}`)
-    }
-    window.addEventListener('error', surErreur)
-    window.addEventListener('unhandledrejection', surRejetNonGere)
-
     function mesurer() {
       const h = mapWrapperRef.current?.getBoundingClientRect().height || 0
-      if (h > 0) {
-        setMapHeightPx(Math.round(h))
-        logCarte(`✅ Hauteur mesurée en pixels : ${Math.round(h)}px`)
-      }
+      if (h > 0) setMapHeightPx(Math.round(h))
     }
 
     // Mesure immédiate + une seconde passe après le premier paint (au cas
@@ -454,8 +416,6 @@ export default function MobileProspects() {
     return () => {
       window.clearTimeout(t)
       window.removeEventListener('resize', mesurer)
-      window.removeEventListener('error', surErreur)
-      window.removeEventListener('unhandledrejection', surRejetNonGere)
     }
   }, [vue, filtresValides, position])
 
@@ -528,18 +488,14 @@ export default function MobileProspects() {
         // recharger les données).
         //
         // BUG CORRIGÉ : sur un grand rayon (ex. 2107 candidats bruts à
-        // 50 km, confirmé par le diagnostic à l'écran), un seul
-        // .in('siret', [...]) avec autant de valeurs produit une URL de
-        // dizaines de Ko -- au-delà de ce que la plupart des serveurs/
-        // proxys acceptent (souvent ~8 Ko). La requête échouait
-        // silencieusement (erreur juste logguée en console.warn), laissant
-        // la correspondance CEGECLIM entièrement vide : TOUTES les lignes
-        // retombaient à "prospect", et avec le filtre "Client CEGECLIM
-        // uniquement" activé, plus rien ne passait. Découpage en lots de
-        // 200 SIRET, en parallèle, pour rester largement sous toute limite
-        // d'URL quel que soit le nombre de candidats.
+        // 50 km), un seul .in('siret', [...]) avec autant de valeurs
+        // produit une URL de dizaines de Ko -- au-delà de ce que la
+        // plupart des serveurs/proxys acceptent (souvent ~8 Ko). La
+        // requête échouait silencieusement, laissant la correspondance
+        // CEGECLIM entièrement vide. Découpage en lots de 200 SIRET, en
+        // parallèle, pour rester largement sous toute limite d'URL quel
+        // que soit le nombre de candidats.
         let clientsCegeclimParSiret = new Map<string, string | null>()
-        let refTiersErreur: string | null = null
         if (siretsEnvisages.length > 0) {
           const TAILLE_LOT = 200
           const lots: string[][] = []
@@ -559,7 +515,6 @@ export default function MobileProspects() {
 
           const erreurs = resultats.filter((r) => r.error)
           if (erreurs.length > 0) {
-            refTiersErreur = erreurs[0].error!.message
             console.warn('[MobileProspects] lecture ref_tiers impossible sur au moins un lot :', erreurs.map((e) => e.error!.message))
           }
 
@@ -571,24 +526,16 @@ export default function MobileProspects() {
           )
         }
 
-        // Diagnostic : compte combien de lignes sont écartées à chaque
-        // étape, pour voir précisément où le total tombe à zéro sans
-        // avoir à deviner. Affiché sur l'écran liste (bouton "🔧
-        // Diagnostic"), comme le panneau déjà présent sur l'écran carte.
-        let exclusFerme = 0
-        let exclusSansCoords = 0
-        let exclusDistance = 0
-
         const rows: ProspectRowGeo[] = []
         for (const r of rawRows) {
-          if (String(r.etatAdministratifUniteLegale || '').trim().toUpperCase() === 'C') { exclusFerme++; continue }
+          if (String(r.etatAdministratifUniteLegale || '').trim().toUpperCase() === 'C') continue
 
           const siret = normalizeSiret(r.siret)
           const estClientCegeclim = siret ? clientsCegeclimParSiret.has(siret) : false
           const representant = siret ? clientsCegeclimParSiret.get(siret) ?? null : null
 
           const coords = coordonneesEffectives(r)
-          if (!coords) { exclusSansCoords++; continue }
+          if (!coords) continue
 
           // Le filtre de distance exacte ne s'applique qu'en mode
           // géolocalisé actif -- BUG CORRIGÉ : la condition était juste
@@ -599,25 +546,11 @@ export default function MobileProspects() {
           // voir un département éloigné de la position réelle.
           if (geolocalisationActivee && position) {
             const dist = distanceKmWgs84(position.lat, position.lng, coords.lat, coords.lon)
-            if (dist > radiusKm) { exclusDistance++; continue }
+            if (dist > radiusKm) continue
           }
 
           rows.push({ ...r, latEff: coords.lat, lonEff: coords.lon, estClientCegeclim, representant })
         }
-
-        setDiagnosticRecherche({
-          position: position ? { lat: position.lat, lng: position.lng } : null,
-          rayonKm: geolocalisationActivee && position ? radiusKm : null,
-          departement: departementFiltre.trim() || null,
-          candidatsBruts: rawRows.length,
-          exclusFerme,
-          exclusSansCoords,
-          exclusDistance,
-          apresFiltrageGeo: rows.length,
-          siretsVerifies: siretsEnvisages.length,
-          siretsReconnus: clientsCegeclimParSiret.size,
-          refTiersErreur,
-        })
 
         setProspects(rows)
       } catch (e: any) {
@@ -1002,65 +935,7 @@ export default function MobileProspects() {
         >
           ⚙️ Filtres
         </button>
-        <button
-          type="button"
-          onClick={() => setDiagnosticRechercheOuvert(true)}
-          style={{ border: '1px solid rgba(255,255,255,0.18)', background: 'transparent', color: 'rgba(255,255,255,0.5)', borderRadius: 10, padding: '7px 9px', fontSize: 12.5 }}
-        >
-          🔧
-        </button>
       </div>
-
-      {diagnosticRechercheOuvert && (
-        <div
-          style={{ position: 'fixed', inset: 0, zIndex: 2250, background: 'rgba(6,10,18,0.85)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
-          onClick={() => setDiagnosticRechercheOuvert(false)}
-        >
-          <div
-            style={{ width: '100%', maxWidth: 520, background: '#0B1220', borderTopLeftRadius: 18, borderTopRightRadius: 18, border: '1px solid rgba(255,255,255,0.12)', padding: '14px 16px 20px', display: 'flex', flexDirection: 'column', gap: 8 }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: '#fff' }}>Diagnostic recherche</div>
-              <button type="button" onClick={() => setDiagnosticRechercheOuvert(false)} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.5)', fontSize: 22, lineHeight: 1 }}>✕</button>
-            </div>
-            <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginBottom: 4 }}>
-              Fais une capture d'écran de ce panneau et envoie-la.
-            </div>
-            {!diagnosticRecherche ? (
-              <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: 12.5 }}>Aucune recherche effectuée pour l'instant.</div>
-            ) : (
-              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: '#8fd4a8', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <div>
-                  Position utilisée : {diagnosticRecherche.position ? `${diagnosticRecherche.position.lat.toFixed(5)}, ${diagnosticRecherche.position.lng.toFixed(5)}` : '(géolocalisation désactivée)'}
-                </div>
-                <div>Rayon demandé : {diagnosticRecherche.rayonKm != null ? `${diagnosticRecherche.rayonKm} km` : '(non applicable)'}</div>
-                <div>Département filtré : {diagnosticRecherche.departement || '(tous)'}</div>
-                <div>Candidats bruts (boîte Lambert93) : {diagnosticRecherche.candidatsBruts}</div>
-                <div>Écartés (entreprise fermée) : {diagnosticRecherche.exclusFerme}</div>
-                <div>Écartés (pas de coordonnées exploitables) : {diagnosticRecherche.exclusSansCoords}</div>
-                <div>Écartés (distance exacte &gt; rayon) : {diagnosticRecherche.exclusDistance}</div>
-                <div style={{ color: '#fff', fontWeight: 700 }}>Restants après filtrage géo : {diagnosticRecherche.apresFiltrageGeo}</div>
-                <div>SIRET vérifiés vs ref_tiers : {diagnosticRecherche.siretsVerifies}</div>
-                <div>… dont reconnus clients CEGECLIM : {diagnosticRecherche.siretsReconnus}</div>
-                {diagnosticRecherche.refTiersErreur && (
-                  <div style={{ color: '#e0a685' }}>❌ Erreur ref_tiers : {diagnosticRecherche.refTiersErreur}</div>
-                )}
-                <div style={{ marginTop: 6, color: 'rgba(255,255,255,0.5)' }}>— État des filtres actifs —</div>
-                <div>Client CEGECLIM affiché : {afficherClients ? 'OUI' : 'NON'}</div>
-                <div>Prospect affiché : {afficherProspects ? 'OUI' : 'NON'}</div>
-                <div>Collaborateur : {collaborateurFiltre || '(tous)'}</div>
-                <div>Secteurs sélectionnés : {secteursActifs.size === 0 ? '(tous)' : Array.from(secteursActifs).join(', ')}</div>
-                <div>RGE uniquement : {rgeSeul ? 'OUI' : 'NON'}</div>
-                <div>Capacité gaz uniquement : {capaciteGazSeul ? 'OUI' : 'NON'}</div>
-                <div>Capital social sélectionné : {capitalSocialActifs.size === 0 ? '(tous)' : Array.from(capitalSocialActifs).join(', ')}</div>
-                <div>Ancienneté : {ancienneteMax.label}</div>
-                <div style={{ color: '#fff', fontWeight: 700, marginTop: 4 }}>Après filtres actifs : {prospectsFiltres.length}</div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
 
       {vue === 'liste' ? (
         <div style={{ flex: 1, overflowY: 'auto', padding: '0 14px 90px', display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -1136,8 +1011,7 @@ export default function MobileProspects() {
         </div>
       ) : (
         // Hauteur mesurée en pixels par JS (voir l'effet plus haut) --
-        // remplace le height:100% en cascade qui ne se résolvait jamais
-        // (confirmé par le diagnostic à l'écran : 362×0px en continu).
+        // remplace le height:100% en cascade qui ne se résolvait jamais.
         <div ref={mapWrapperRef} id="cgc-map-conteneur" style={{ flex: 1, minHeight: 320, position: 'relative', paddingBottom: 74 }}>
           {position && mapHeightPx === 0 && (
             <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.4)', fontSize: 13 }}>
@@ -1150,29 +1024,11 @@ export default function MobileProspects() {
               zoom={zoomForRadiusKm(radiusKm)}
               preferCanvas
               style={{ height: mapHeightPx, width: '100%' }}
-              ref={(m: any) => {
-                if (m && !mapRef.current) {
-                  mapRef.current = m
-                  logCarte('✅ MapContainer monté (ref reçue par Leaflet).')
-                  try {
-                    const size = m.getSize?.()
-                    logCarte(`Taille interne Leaflet à la ref : ${size ? `${size.x}×${size.y}px` : 'indisponible'} (hauteur fixée à ${mapHeightPx}px)`)
-                  } catch (e: any) {
-                    logCarte(`❌ getSize() a levé : ${e?.message || e}`)
-                  }
-                } else if (m) {
-                  mapRef.current = m
-                }
-              }}
-              whenReady={() => logCarte('✅ whenReady déclenché par Leaflet (carte prête côté lib).')}
+              ref={(m: any) => { if (m) mapRef.current = m }}
             >
               <TileLayer
                 attribution="&copy; OpenStreetMap contributors"
                 url="https://api.thunderforest.com/neighbourhood/{z}/{x}/{y}.png?apikey=3750cd83dca34199969e6b9e2dcdca40"
-                eventHandlers={{
-                  tileerror: (e: any) => logCarte(`❌ Erreur de chargement tuile : ${e?.error?.message || e?.error || 'inconnue'}`),
-                  tileload: () => logCarte('✅ Au moins une tuile a chargé avec succès.'),
-                }}
               />
 
               <Circle
@@ -1232,48 +1088,6 @@ export default function MobileProspects() {
           🗺️ Carte
         </button>
       </div>
-
-      {/* ---- Diagnostic carte (temporaire) : journal visible à l'écran,
-         pour voir enfin l'erreur réelle sans debug distant sur Mac. ---- */}
-      {vue === 'carte' && (
-        <button
-          type="button"
-          onClick={() => setDiagnosticOuvert((v) => !v)}
-          style={{
-            position: 'absolute', right: 14, bottom: 76, zIndex: 1501,
-            padding: '6px 10px', borderRadius: 999, border: '1px solid rgba(255,255,255,0.2)',
-            background: 'rgba(20,26,38,0.9)', color: 'rgba(255,255,255,0.7)', fontSize: 11, fontWeight: 600,
-          }}
-        >
-          🔧 Diagnostic
-        </button>
-      )}
-      {diagnosticOuvert && (
-        <div
-          style={{ position: 'fixed', inset: 0, zIndex: 2050, background: 'rgba(6,10,18,0.85)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
-          onClick={() => setDiagnosticOuvert(false)}
-        >
-          <div
-            style={{ width: '100%', maxWidth: 520, maxHeight: '70vh', background: '#0B1220', borderTopLeftRadius: 18, borderTopRightRadius: 18, border: '1px solid rgba(255,255,255,0.12)', padding: '14px 16px 20px', display: 'flex', flexDirection: 'column', gap: 8 }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: '#fff' }}>Diagnostic carte</div>
-              <button type="button" onClick={() => setDiagnosticOuvert(false)} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.5)', fontSize: 22, lineHeight: 1 }}>✕</button>
-            </div>
-            <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginBottom: 4 }}>
-              Fais une capture d'écran de ce panneau et envoie-la : ça montre exactement ce qui bloque.
-            </div>
-            <div style={{ overflowY: 'auto', flex: 1, fontFamily: 'var(--font-mono)', fontSize: 11, color: '#8fd4a8', display: 'flex', flexDirection: 'column', gap: 4 }}>
-              {journalCarte.length === 0 ? (
-                <div style={{ color: 'rgba(255,255,255,0.4)' }}>Aucune entrée pour l'instant…</div>
-              ) : (
-                journalCarte.map((ligne, i) => <div key={i}>{ligne}</div>)
-              )}
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* ---- Tiroir filtres (rayon, ancienneté, capital social, secteur, RGE, capacité gaz) ---- */}
       {filtresOuverts && (

@@ -24,6 +24,27 @@ import { supabase } from '@/lib/supabaseClient'
 // Reprend telles quelles les conventions déjà en place dans
 // MobileActivite.tsx : cache localStorage, palette de couleurs, structure
 // de la fenêtre flottante (BreakdownModal).
+//
+// CORRECTIF (utilisateurs restreints par agence SEULE, sans collaborateur
+// -- ex. l.paroutot/BRIVE, v.voukotitch/LA ROCHELLE) : chargerLignesControle
+// forçait `p_agence: null` dès que mode === 'agence', quel que soit
+// agenceForcee. Or PortefeuilleCommandesCard et ProjectionCaCard appellent
+// TOUJOURS chargerLignesControle('agence', ...) pour leur résumé -- ce
+// `null` forcé annulait donc systématiquement la restriction d'agence pour
+// ces deux cartes, renvoyant le total TOUTE L'ENTREPRISE au lieu du
+// périmètre de l'utilisateur. Un utilisateur ayant AUSSI une restriction
+// de collaborateur (ex. d.mena) ne voyait pas le problème : p_collaborateur
+// continuait de filtrer correctement en parallèle, masquant le bug d'agence.
+//
+// Le `null` forcé n'a de sens que dans la fenêtre flottante, en vue
+// "Par agence" (énumérer TOUTES les agences pour les lister) -- et ce mode
+// n'est de toute façon accessible que quand agenceForcee est déjà null
+// (bouton désactivé sinon, via canGroupByAgence = !agenceForcee, plus bas).
+// Il est donc toujours correct de transmettre agenceForcee tel quel, sans
+// jamais le forcer à null : redondant là où l'ancien code était correct
+// (vue "Par agence" avec agenceForcee déjà null), et réparateur partout
+// ailleurs (cartes de résumé, vue "Par famille macro" avec une agence
+// imposée).
 // ─────────────────────────────────────────────────────────────────────────
 
 const COULEUR_PORTEFEUILLE = '#C1683C' // même orange/brun que CDC ailleurs dans l'appli
@@ -97,7 +118,10 @@ async function chargerLignesControle(mode: ModeGroupe, agenceForcee: string | nu
   const { data, error } = await supabase.rpc(rpcName, {
     p_focus_date: isoToday(),
     p_month: null,
-    p_agence: mode === 'agence' ? null : agenceForcee,
+    // CORRECTIF : ne plus jamais forcer null ici -- voir le commentaire en
+    // tête de fichier. agenceForcee reflète déjà la restriction réelle de
+    // l'utilisateur (ou null s'il n'en a pas), dans tous les cas d'usage.
+    p_agence: agenceForcee,
     p_famille_macro: null,
     p_collaborateur: collaborateurForcee,
     p_include_hors_statistiques: true,

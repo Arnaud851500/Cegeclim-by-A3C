@@ -18,11 +18,15 @@ type ButtonConfig = {
   subColor: string
 }
 
+// Ordre = position dans la grille 2 colonnes (après les 2 boutons vocaux
+// qui occupent toujours la 1re rangée) -- "Mes tâches - alertes" placé
+// juste après "Mes clients" pour retomber directement SOUS "Mon activité"
+// (même colonne, rangée suivante) plutôt qu'à côté.
 const BUTTONS: ButtonConfig[] = [
   { key: 'activite', label: 'Mon activité', sub: 'Devis · CDC · BL · Factures · Marge', accessKey: 'can_dashboard', icon: '📊', gradient: 'linear-gradient(160deg, #185FA5, #0C447C)', subColor: '#B5D4F4' },
   { key: 'clients', label: 'Mes clients', sub: 'Fiches et suivi client', accessKey: 'can_dashboard', icon: '👥', gradient: 'linear-gradient(160deg, #3B6D11, #27500A)', subColor: '#C0DD97' },
-  { key: 'rdv', label: 'Mes rdv', sub: 'Agenda, comptes rendus, recherche documents', icon: '📅', gradient: 'linear-gradient(160deg, #534AB7, #3C3489)', subColor: '#CECBF6' },
   { key: 'alertes', label: 'Mes tâches - alertes', sub: 'À traiter en priorité', icon: '✅', gradient: 'linear-gradient(160deg, #993C1D, #712B13)', subColor: '#F5C4B3' },
+  { key: 'rdv', label: 'Mes rdv', sub: 'Agenda, comptes rendus, recherche documents', icon: '📅', gradient: 'linear-gradient(160deg, #534AB7, #3C3489)', subColor: '#CECBF6' },
   // Nouveau : recherche article, stock par dépôt, projection -- couleur
   // "sauge" reprise de la charte CEGECLIM (#A6A181), pas encore utilisée
   // par les autres cartes de cet écran.
@@ -330,10 +334,11 @@ export default function MobileHome({
       )}
 
       {/* Une seule grille 2 colonnes pour TOUT (boutons vocaux inclus) --
-         garantit une largeur strictement identique entre "Nouvelle tâche"
-         et les cartes de navigation en dessous (avant : deux systèmes de
-         mise en page différents -- flex ici, grid plus bas -- donnaient
-         des largeurs légèrement différentes selon le contenu).
+         garantit une largeur strictement identique entre les cartes vocales
+         et les cartes de navigation en dessous. Résumé vocal à gauche,
+         Nouvelle tâche à droite (demande explicite) -- MobileHomeSummary
+         AVANT VoiceReportButtons dans le JSX, puisque la grille remplit
+         gauche -> droite.
          Hauteur FIXE (pas minHeight) sur les cartes de navigation : sans
          ça, une carte au sous-titre plus long (ex. "Mes rdv" sur 3 lignes)
          s'étire plus que ses voisines, et comme le titre est ancré au
@@ -348,13 +353,13 @@ export default function MobileHome({
          (6 au lieu de 5) -- aucune logique à changer, juste un bouton de
          plus dans BUTTONS. */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <MobileHomeSummary userEmail={email} />
         <VoiceReportButtons
           modeUnique="tache"
           labelBouton="Nouvelle tâche"
           userEmail={email || ''}
           userName={nomAffiche}
         />
-        <MobileHomeSummary userEmail={email} />
 
         {visibleButtons.map((b, i) => {
           const seule = i === visibleButtons.length - 1 && visibleButtons.length % 2 !== 0
