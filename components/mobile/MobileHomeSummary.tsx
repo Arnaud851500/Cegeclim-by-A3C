@@ -38,7 +38,7 @@ type IntentParams = {
   n?: number
   montant_min?: number
   jours?: number
-  periode?: 'hier' | 'aujourdhui' | 'mois'
+  periode?: 'hier' | 'aujourdhui' | 'mois' | 'annee'
   famille?: string | null
 }
 type Etape = 'idle' | 'question' | 'ecoute' | 'traitement' | 'incompris' | 'resultat' | 'erreur'
@@ -129,10 +129,32 @@ function rapprocherFamille(saisie: string): string | null {
   const cle = Object.keys(FAMILLE_SYNONYMES).find((k) => n.includes(k) || k.includes(n))
   return cle ? FAMILLE_SYNONYMES[cle] : null
 }
-/** Montant formaté pour la lecture vocale -- ex. "24 327 €", sans
- * décimales (inutiles à l'oral). */
+/** Montant formaté pour la lecture vocale -- ex. "424 K€", "12,22 M€",
+ * même convention que l'écran "Mon activité" (jamais de montant en euros
+ * bruts non arrondis à l'oral, illisible/interminable pour un gros
+ * chiffre). Sous 1000 €, affiché tel quel. */
 function formatMontantParle(montant: number) {
-  return new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(montant || 0)
+  const valeur = Number(montant) || 0
+  const abs = Math.abs(valeur)
+  if (abs >= 1_000_000) {
+    return `${(valeur / 1_000_000).toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} M€`
+  }
+  if (abs >= 1000) {
+    return `${Math.round(valeur / 1000).toLocaleString('fr-FR')} K€`
+  }
+  return new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(valeur)
+}
+
+/** Heure au format parlé ("16 heures 3") plutôt que "16:03" -- le second
+ * était lu par la synthèse vocale comme deux nombres séparés ("seize,
+ * zéro trois") au lieu d'une heure. Pas de minute quand elle vaut 0
+ * ("16 heures" plutôt que "16 heures 0"). Utilisé à la fois pour le texte
+ * affiché à l'écran et pour la version lue -- un seul format, cohérent
+ * dans les deux cas plutôt que deux représentations à maintenir. */
+function formatHeureParlee(d: Date): string {
+  const h = d.getHours()
+  const m = d.getMinutes()
+  return m === 0 ? `${h} heures` : `${h} heures ${m}`
 }
 
 function normaliser(value: string) {
@@ -279,6 +301,38 @@ function classifierChoixRepli(transcript: string): { intent: Intent; params: Int
   if (/semaine|hebdo/.test(t)) return { intent: 'semaine', params: {} }
   if (/retard|aujourd\s?hui|\bjour\b|jours|maintenant|taches?\b/.test(t)) return { intent: 'jour', params: {} }
   return null
+}
+
+/** Filet de sécurité pour les relances de conversation ("et depuis le
+ * début du mois ?") : si l'IA (avec contexte transmis) échoue quand même
+ * à classer la phrase, on tente une fusion locale par mots-clés avant
+ * d'abandonner. Ne couvre que ce qui est réellement changeable en relance
+ * aujourd'hui (période et famille du CA) -- un "je n'ai pas compris"
+ * franc reste préférable à une fusion hasardeuse sur autre chose. */
+function fusionnerRelanceLocale(
+  contexte: { intent: Intent; params: IntentParams },
+  transcript: string,
+): { intent: Intent; params: IntentParams } | null {
+  if (contexte.intent !== 'ca_periode') return null
+  const t = normaliser(transcript)
+
+  let periode: IntentParams['periode'] | undefined
+  if (/annee|an\b/.test(t)) periode = 'annee'
+  else if (/mois/.test(t)) periode = 'mois'
+  else if (/hier/.test(t)) periode = 'hier'
+  else if (/aujourd\s?hui/.test(t)) periode = 'aujourdhui'
+
+  const familleTrouvee = rapprocherFamille(transcript)
+
+  if (!periode && !familleTrouvee) return null // rien de reconnu, vraie incompréhension
+
+  return {
+    intent: 'ca_periode',
+    params: {
+      periode: periode || contexte.params.periode,
+      famille: familleTrouvee || contexte.params.famille || null,
+    },
+  }
 }
 
 /** Interprète la demande dictée -- passe par le modèle
@@ -802,8 +856,12 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       if (annulerRef.current) return
       if (!res.ok) throw new Error(data?.error || 'Erreur de transcription.')
 
-      const choix = await interpreterDemande(data.transcript || '', enChaineDepuis)
+      const choixBrut = await interpreterDemande(data.transcript || '', enChaineDepuis)
       if (annulerRef.current) return
+      // Si l'IA échoue à classer une relance ("et depuis le début du
+      // mois ?") malgré le contexte transmis, tente la fusion locale par
+      // mots-clés avant d'abandonner -- voir fusionnerRelanceLocale().
+      const choix = choixBrut || (enChaineDepuis ? fusionnerRelanceLocale(enChaineDepuis, data.transcript || '') : null)
       if (!choix) {
         setMessageIncompris(
           `Je n'ai pas compris "${data.transcript || '...'}". Dis par exemple "mes tâches", "mes prochains rendez-vous", "mon chiffre d'affaires d'aujourd'hui", "mes derniers devis de plus de 15000 euros", "le compte-rendu d'un client", ou "mes alertes".`,
@@ -898,6 +956,26 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
     return companyByActivity
   }
 
+  /** Résout le nom de tiers (ref_tiers.intitule) pour un lot de numéros --
+   * même principe que resoudreEntreprisesRdv, en une requête batch, jamais
+   * bloquant (repli silencieux si la résolution échoue). Utilisé pour
+   * afficher le client concerné sur les listes de tâches (todo_actions.numero_tiers). */
+  async function resoudreNomsTiers(numeros: (string | null)[]): Promise<Map<string, string>> {
+    const nomParNumero = new Map<string, string>()
+    try {
+      const uniques = Array.from(new Set(numeros.filter((n): n is string => Boolean(n && n.trim()))))
+      if (uniques.length === 0) return nomParNumero
+      const { data } = await supabase.from('ref_tiers').select('numero, intitule').in('numero', uniques)
+      ;((data || []) as any[]).forEach((r) => {
+        const nom = safeText(r.intitule)
+        if (nom) nomParNumero.set(safeText(r.numero), nom)
+      })
+    } catch (e) {
+      console.warn('[MobileHomeSummary] résolution nom tiers impossible :', e)
+    }
+    return nomParNumero
+  }
+
   async function genererResume(portee: Intent, params: IntentParams = {}) {
     try {
       const email = String(userEmail || '').toLowerCase().trim()
@@ -937,7 +1015,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
           const lignes = rows.map((r: any, i: number) => {
             const d = new Date(r.start_date)
             const dateLabel = d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' })
-            const heure = d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
+            const heure = formatHeureParlee(d)
             const entreprise = entreprisesParActivite.get(r.id) || 'sans entreprise associée'
             return `${i + 1}. ${dateLabel} à ${heure} — ${entreprise}`
           })
@@ -969,7 +1047,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
           const lignes = rows.map((r: any, i: number) => {
             const d = new Date(r.start_date)
             const dateLabel = d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' })
-            const heure = d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
+            const heure = formatHeureParlee(d)
             const entreprise = entreprisesParActivite.get(r.id) || 'sans entreprise associée'
             return `${i + 1}. ${dateLabel} à ${heure} — ${entreprise}`
           })
@@ -983,7 +1061,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
 
         const { data: rows, error } = await supabase
           .from('todo_actions')
-          .select('description_action, due_date')
+          .select('description_action, due_date, numero_tiers')
           .or(assignedFilter)
           .not('status', 'in', '("Terminé","Annulé")')
           .not('due_date', 'is', null)
@@ -997,9 +1075,11 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         if (!rows || rows.length === 0) {
           resultat = `Tu n'as aucune tâche ${periodeTexte}.`
         } else {
+          const nomsClients = await resoudreNomsTiers(rows.map((r: any) => r.numero_tiers))
           const lignes = rows.map((r: any, i: number) => {
             const echeance = formatDateParlee(r.due_date)
-            return `${i + 1}. ${safeText(r.description_action) || '(sans libellé)'}${echeance ? `, échéance ${echeance}` : ''}`
+            const client = nomsClients.get(safeText(r.numero_tiers))
+            return `${i + 1}. ${safeText(r.description_action) || '(sans libellé)'}${client ? ` — ${client}` : ''}${echeance ? `, échéance ${echeance}` : ''}`
           })
           const compte = rows.length === 1 ? 'une' : String(rows.length)
           resultat = `Tu as ${compte} tâche${rows.length > 1 ? 's' : ''} ${periodeTexte} :\n${lignes.join('\n')}`
@@ -1015,7 +1095,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
 
         const { data: rows, error } = await supabase
           .from('todo_actions')
-          .select('description_action, due_date')
+          .select('description_action, due_date, numero_tiers')
           .or(assignedFilter)
           .not('status', 'in', '("Terminé","Annulé")')
           .gte('due_date', debut)
@@ -1027,9 +1107,11 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         if (!rows || rows.length === 0) {
           resultat = "Tu n'as aucune tâche prévue la semaine prochaine."
         } else {
+          const nomsClients = await resoudreNomsTiers(rows.map((r: any) => r.numero_tiers))
           const lignes = rows.map((r: any, i: number) => {
             const echeance = formatDateParlee(r.due_date)
-            return `${i + 1}. ${safeText(r.description_action) || '(sans libellé)'}${echeance ? `, échéance ${echeance}` : ''}`
+            const client = nomsClients.get(safeText(r.numero_tiers))
+            return `${i + 1}. ${safeText(r.description_action) || '(sans libellé)'}${client ? ` — ${client}` : ''}${echeance ? `, échéance ${echeance}` : ''}`
           })
           const compte = rows.length === 1 ? 'une' : String(rows.length)
           resultat = `Tu as ${compte} tâche${rows.length > 1 ? 's' : ''} prévue${rows.length > 1 ? 's' : ''} la semaine prochaine :\n${lignes.join('\n')}`
@@ -1044,7 +1126,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
 
         const { data: rows, error } = await supabase
           .from('todo_actions')
-          .select('description_action, due_date')
+          .select('description_action, due_date, numero_tiers')
           .or(assignedFilter)
           .not('status', 'in', '("Terminé","Annulé")')
           .order('due_date', { ascending: true, nullsFirst: false })
@@ -1054,9 +1136,11 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         if (!rows || rows.length === 0) {
           resultat = "Tu n'as aucune tâche en cours."
         } else {
+          const nomsClients = await resoudreNomsTiers(rows.map((r: any) => r.numero_tiers))
           const lignes = rows.map((r: any, i: number) => {
             const echeance = formatDateParlee(r.due_date)
-            return `${i + 1}. ${safeText(r.description_action) || '(sans libellé)'}${echeance ? `, échéance ${echeance}` : ', sans échéance'}`
+            const client = nomsClients.get(safeText(r.numero_tiers))
+            return `${i + 1}. ${safeText(r.description_action) || '(sans libellé)'}${client ? ` — ${client}` : ''}${echeance ? `, échéance ${echeance}` : ', sans échéance'}`
           })
           const compte = rows.length === 1 ? 'ta' : `tes ${rows.length}`
           resultat = `Voici ${compte} prochaine${rows.length > 1 ? 's' : ''} tâche${rows.length > 1 ? 's' : ''} :\n${lignes.join('\n')}`
@@ -1082,6 +1166,10 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
           dateDebut = new Date(aujourdHui.getFullYear(), aujourdHui.getMonth(), 1)
           dateFin = aujourdHui
           periodeTexte = 'depuis le début du mois'
+        } else if (params.periode === 'annee') {
+          dateDebut = new Date(aujourdHui.getFullYear(), 0, 1)
+          dateFin = aujourdHui
+          periodeTexte = "depuis le début de l'année"
         } else {
           dateDebut = aujourdHui
           dateFin = aujourdHui
