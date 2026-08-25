@@ -34,12 +34,15 @@ type Intent =
   | 'taches_prochaines'
   | 'ca_periode' | 'devis_montant' | 'rdv_sans_compte_rendu'
   | 'compte_rendu' | 'alertes'
+  | 'resume_jour' | 'resume_semaine'
 type IntentParams = {
   n?: number
   montant_min?: number
   jours?: number
   periode?: 'hier' | 'aujourdhui' | 'mois' | 'annee'
   famille?: string | null
+  agence?: string | null
+  type_document?: 'devis' | 'commande' | 'bl'
 }
 type Etape = 'idle' | 'question' | 'ecoute' | 'traitement' | 'incompris' | 'resultat' | 'erreur'
   | 'question_client' | 'ecoute_client' | 'traitement_client'
@@ -129,6 +132,29 @@ function rapprocherFamille(saisie: string): string | null {
   const cle = Object.keys(FAMILLE_SYNONYMES).find((k) => n.includes(k) || k.includes(n))
   return cle ? FAMILLE_SYNONYMES[cle] : null
 }
+
+// Agences réelles (get_focus_mensuel_daily_summary_metier), hors "NON
+// AFFECTE" / "Sans agence" -- non sélectionnables à la voix. "LAROCHELLE"
+// est bien un seul mot côté données (pas d'espace), d'où le synonyme.
+const AGENCES_CONNUES = ['ANGLET', 'ANGOULEME', 'ARCACHON', 'ARTIGUES', 'BRIVE', 'DAX', 'LAROCHELLE', 'MARMANDE', 'MERIGNAC', 'PAU', 'PERIGUEUX', 'GDS COMPTES', 'SAV/JMLADEUIX']
+const AGENCE_SYNONYMES: Record<string, string> = {
+  'la rochelle': 'LAROCHELLE', rochelle: 'LAROCHELLE',
+  bordeaux: 'MERIGNAC', merignac: 'MERIGNAC',
+  perigueux: 'PERIGUEUX',
+  'grands comptes': 'GDS COMPTES', 'gds comptes': 'GDS COMPTES',
+  sav: 'SAV/JMLADEUIX',
+}
+function rapprocherAgence(saisie: string): string | null {
+  const n = normaliser(saisie).trim()
+  if (!n) return null
+  const exact = AGENCES_CONNUES.find((a) => normaliser(a) === n)
+  if (exact) return exact
+  if (AGENCE_SYNONYMES[n]) return AGENCE_SYNONYMES[n]
+  const cle = Object.keys(AGENCE_SYNONYMES).find((k) => n.includes(k) || k.includes(n))
+  if (cle) return AGENCE_SYNONYMES[cle]
+  const partiel = AGENCES_CONNUES.find((a) => n.includes(normaliser(a)))
+  return partiel || null
+}
 /** Montant formaté pour la lecture vocale -- ex. "424 K€", "12,22 M€",
  * même convention que l'écran "Mon activité" (jamais de montant en euros
  * bruts non arrondis à l'oral, illisible/interminable pour un gros
@@ -155,6 +181,78 @@ function formatHeureParlee(d: Date): string {
   const h = d.getHours()
   const m = d.getMinutes()
   return m === 0 ? `${h} heures` : `${h} heures ${m}`
+}
+
+/** Version ORALE d'un montant -- "12,2 millions d'euros" / "73 kilo
+ * euros" plutôt que "12,22 M€" / "73 K€" (affichage), que la synthèse
+ * vocale lisait mal ("M" et "K€" ne se prononcent pas naturellement).
+ * Utilisée UNIQUEMENT pour ce qui est passé à jouerTexte, jamais pour
+ * l'affichage à l'écran (qui garde la forme abrégée, cohérente avec
+ * "Mon activité"). */
+function formatMontantOral(montant: number): string {
+  const valeur = Number(montant) || 0
+  const abs = Math.abs(valeur)
+  if (abs >= 1_000_000) {
+    return `${(valeur / 1_000_000).toLocaleString('fr-FR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} millions d'euros`
+  }
+  if (abs >= 1000) {
+    return `${Math.round(valeur / 1000).toLocaleString('fr-FR')} kilo euros`
+  }
+  return `${Math.round(valeur).toLocaleString('fr-FR')} euros`
+}
+
+/** Évolution en % vs une période de comparaison (n-1), même principe que
+ * les badges ▲/▼ de l'écran "Mon activité". Renvoie null si la période de
+ * comparaison est à 0 (pourcentage non significatif -- division par
+ * zéro), auquel cas l'appelant omet simplement la mention plutôt que
+ * d'afficher un chiffre absurde. */
+function calculerEvolutionPct(actuel: number, precedent: number): number | null {
+  if (!precedent) return null
+  return ((actuel - precedent) / Math.abs(precedent)) * 100
+}
+function formatEvolutionAffichee(pct: number | null): string {
+  if (pct === null) return ''
+  const fleche = pct >= 0 ? '▲' : '▼'
+  return ` (${fleche} ${Math.abs(pct).toFixed(1)}%)`
+}
+function formatEvolutionOrale(pct: number | null): string {
+  if (pct === null) return ''
+  const sens = pct >= 0 ? 'en hausse de' : 'en baisse de'
+  return `, ${sens} ${Math.abs(pct).toFixed(0)} pour cent sur un an`
+}
+
+/** Détecte le mot de commande "stop" (dicté seul, éventuellement entouré
+ * de ponctuation/silence) pour interrompre l'écoute et toute boucle de
+ * relance en cours -- vérifié juste après transcription, avant toute
+ * interprétation. */
+function estCommandeStop(transcript: string): boolean {
+  const n = normaliser(transcript).replace(/[^a-z]/g, '').trim()
+  return n === 'stop' || n === 'stopstop'
+}
+
+/** Extrait un seuil monétaire dicté en toutes lettres ou en chiffres --
+ * repli LOCAL (sans réseau) pour les demandes "devis/commandes/BL de plus
+ * de X euros", utilisé par classifierChoixRepli. Couvre les tournures
+ * courantes ("trois mille euros", "quinze mille", "15000 euros") sans
+ * prétendre à un parseur français complet. */
+function extraireMontantMinDeTexte(texteBrut: string): number | null {
+  const t = normaliser(texteBrut)
+  const digitMatch = t.match(/(\d[\d\s]{0,9})\s*(?:€|euros?)/)
+  if (digitMatch) {
+    const n = parseInt(digitMatch[1].replace(/\s/g, ''), 10)
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  const milleMatch = t.match(/([a-z\s]*?)\bmille\b/)
+  if (milleMatch) {
+    const mots = milleMatch[1].trim()
+    if (!mots) return 1000
+    for (const forme of FORMES_TRIEES) {
+      if (mots === forme || mots.endsWith(' ' + forme)) {
+        return (MOTS_VERS_NOMBRE.get(forme) as number) * 1000
+      }
+    }
+  }
+  return null
 }
 
 function normaliser(value: string) {
@@ -291,6 +389,19 @@ function classifierChoixRepli(transcript: string): { intent: Intent; params: Int
   // retombe sur "aujourd'hui" par défaut quand params.periode n'est pas
   // fourni, donc pas besoin de le deviner ici.
   if (/chiffre.*affaires?/.test(t)) return { intent: 'ca_periode', params: {} }
+  // Repli local pour "mes derniers devis/commandes/BL de plus de X euros"
+  // -- indépendant de la route IA (qui peut être indisponible), couvre les
+  // 3 types de documents. Le montant est optionnel : à défaut,
+  // genererResume() retombe sur son propre défaut (15000).
+  const matchDoc = t.match(/\b(devis|commandes?|bons? de livraison|\bbl\b)\b/)
+  if (matchDoc) {
+    const mot = matchDoc[1]
+    const type_document: IntentParams['type_document'] = /commande/.test(mot) ? 'commande' : /livraison|^bl$/.test(mot) ? 'bl' : 'devis'
+    const montant = extraireMontantMinDeTexte(t)
+    return { intent: 'devis_montant', params: { type_document, montant_min: montant ?? undefined } }
+  }
+  if (/resume.*journee|resume.*jour\b/.test(t)) return { intent: 'resume_jour', params: {} }
+  if (/resume.*semaine/.test(t)) return { intent: 'resume_semaine', params: {} }
 
   const estSemaineProchaine = /semaine\s+prochaine|prochaine\s+semaine/.test(t)
   const estRdv = /\brdv\b|rendez[- ]?vous|reunion|reunions|agenda|planning|visites?\b/.test(t)
@@ -323,14 +434,16 @@ function fusionnerRelanceLocale(
   else if (/aujourd\s?hui/.test(t)) periode = 'aujourdhui'
 
   const familleTrouvee = rapprocherFamille(transcript)
+  const agenceTrouvee = rapprocherAgence(transcript)
 
-  if (!periode && !familleTrouvee) return null // rien de reconnu, vraie incompréhension
+  if (!periode && !familleTrouvee && !agenceTrouvee) return null // rien de reconnu, vraie incompréhension
 
   return {
     intent: 'ca_periode',
     params: {
       periode: periode || contexte.params.periode,
       famille: familleTrouvee || contexte.params.famille || null,
+      agence: agenceTrouvee || contexte.params.agence || null,
     },
   }
 }
@@ -426,6 +539,10 @@ async function convertirEnWav(blob: Blob): Promise<Blob> {
 export default function MobileHomeSummary({ userEmail }: { userEmail?: string | null }) {
   const [etape, setEtape] = useState<Etape>('idle')
   const [texte, setTexte] = useState('')
+  // Version ORALE du dernier résultat -- diffère du texte affiché quand
+  // celui-ci contient des montants abrégés (K€/M€), lus de travers par la
+  // synthèse vocale. Vide = pas de divergence, jouerTexte(texte) suffit.
+  const [texteOral, setTexteOral] = useState('')
   const [messageIncompris, setMessageIncompris] = useState('')
   // Solution de secours fiable : la reconnaissance vocale d'un code
   // alphanumérique ou d'un nom propre a des limites dures (lettres
@@ -814,6 +931,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
     acquerirVerrouVocal(idInstanceRef.current)
 
     setTexte('')
+    setTexteOral('')
     setMessageIncompris('')
     setErreur('')
     setModeClient(false)
@@ -855,6 +973,14 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       const data = await res.json()
       if (annulerRef.current) return
       if (!res.ok) throw new Error(data?.error || 'Erreur de transcription.')
+
+      // Mot de commande "stop" (dicté seul) : interrompt tout, y compris
+      // la boucle de relance en cas d'incompréhension -- vérifié avant
+      // toute tentative d'interprétation.
+      if (estCommandeStop(data.transcript || '')) {
+        arreterCompletement()
+        return
+      }
 
       const choixBrut = await interpreterDemande(data.transcript || '', enChaineDepuis)
       if (annulerRef.current) return
@@ -905,6 +1031,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
     annulerRef.current = false
     acquerirVerrouVocal(idInstanceRef.current)
     setTexte('')
+    setTexteOral('')
     setMessageIncompris('')
     setErreur('')
     const contexte = dernierChoixRef.current
@@ -989,27 +1116,43 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       const displayName = String(access?.display_name || '').trim() || email.split('@')[0]
 
       let resultat = ''
+      // Divergence oral/écrit -- seuls les branches qui en ont besoin
+      // (montants, essentiellement) l'assignent ; sinon la lecture réutilise
+      // simplement `resultat`.
+      let resultatOral: string | null = null
 
       if (portee === 'rdv' || portee === 'rdv_prochains') {
         if (!access?.blg_partner_id) throw new Error('Identifiant partner BLG non renseigné pour ce compte.')
         // "rdv" (mots-clés simples, sans nombre précisé) garde le
         // comportement historique (10) ; "rdv_prochains" (via le modèle)
-        // porte le nombre dicté par la personne, ex. "mes 3 prochains rdv".
-        const n = portee === 'rdv_prochains' ? Math.max(1, Math.min(30, Math.round(Number(params.n) || 5))) : 10
+        // porte soit un nombre précis ("mes 3 prochains rdv" -> n=3), soit
+        // une fenêtre en jours ("mes rdv des 2 prochains jours" -> jours=2,
+        // fenêtre = aujourd'hui + jours-1 inclus ; jours=3 élargit d'un
+        // jour de plus, etc.). Les deux sont mutuellement exclusifs --
+        // jours prend le pas s'il est fourni.
+        const fenetreJours = portee === 'rdv_prochains' && params.jours ? Math.max(1, Math.min(30, Math.round(Number(params.jours)))) : null
+        const n = fenetreJours ? 100 : (portee === 'rdv_prochains' ? Math.max(1, Math.min(30, Math.round(Number(params.n) || 5))) : 10)
 
-        const { data: rows, error } = await supabase
+        let requete = supabase
           .from('crm_base_activity')
           .select('id, type, comment, start_date')
           .eq('internal_tag', 'normal')
           .in('type', RDV_TYPE_KEYS)
           .eq('from_fk', access.blg_partner_id)
           .gte('start_date', new Date().toISOString())
-          .order('start_date', { ascending: true })
-          .limit(n)
+
+        if (fenetreJours) {
+          const finFenetre = new Date()
+          finFenetre.setDate(finFenetre.getDate() + fenetreJours - 1)
+          finFenetre.setHours(23, 59, 59, 999)
+          requete = requete.lte('start_date', finFenetre.toISOString())
+        }
+
+        const { data: rows, error } = await requete.order('start_date', { ascending: true }).limit(n)
         if (error) throw error
 
         if (!rows || rows.length === 0) {
-          resultat = "Tu n'as aucun rendez-vous à venir."
+          resultat = fenetreJours ? `Tu n'as aucun rendez-vous dans les ${fenetreJours} prochains jours.` : "Tu n'as aucun rendez-vous à venir."
         } else {
           const entreprisesParActivite = await resoudreEntreprisesRdv(rows as any[])
           const lignes = rows.map((r: any, i: number) => {
@@ -1019,8 +1162,12 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
             const entreprise = entreprisesParActivite.get(r.id) || 'sans entreprise associée'
             return `${i + 1}. ${dateLabel} à ${heure} — ${entreprise}`
           })
-          const compte = rows.length === 1 ? 'un' : String(rows.length)
-          resultat = `Voici tes ${compte} prochain${rows.length > 1 ? 's' : ''} rendez-vous :\n${lignes.join('\n')}`
+          if (fenetreJours) {
+            resultat = `Tes rendez-vous des ${fenetreJours} prochains jours :\n${lignes.join('\n')}`
+          } else {
+            const compte = rows.length === 1 ? 'un' : String(rows.length)
+            resultat = `Voici tes ${compte} prochain${rows.length > 1 ? 's' : ''} rendez-vous :\n${lignes.join('\n')}`
+          }
         }
       } else if (portee === 'rdv_semaine_prochaine') {
         if (!access?.blg_partner_id) throw new Error('Identifiant partner BLG non renseigné pour ce compte.')
@@ -1147,12 +1294,12 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         }
       } else if (portee === 'ca_periode') {
         // "Quel CA ai-je fait hier/aujourd'hui/depuis le début du mois
-        // (sur telle famille) ?" -- renvoie toujours les 3 étapes
-        // (prise de commande = Devis, Bon de livraison = BL, facturation
-        // = Factures), pas juste le facturé : get_ca_periode_multi_documents
-        // (indicateur_focus_journalier, mêmes filtres période/famille que
-        // l'ancienne RPC facture-seule). Famille : rapprochement tolérant,
-        // la personne ne dicte jamais le code exact "R/R".
+        // (sur telle famille / telle agence) ?" -- renvoie toujours les 3
+        // étapes (prise de commande = Devis, Bon de livraison = BL,
+        // facturation = Factures) via get_ca_periode_multi_documents
+        // (calcul en direct, pas de cache périmé). Famille et agence :
+        // rapprochement tolérant, la personne ne dicte jamais le code
+        // exact ("R/R") ni le nom exact en base ("LAROCHELLE").
         const aujourdHui = new Date()
         aujourdHui.setHours(0, 0, 0, 0)
         let dateDebut: Date
@@ -1176,55 +1323,109 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
           periodeTexte = "aujourd'hui"
         }
 
+        // Période de comparaison (n-1) -- même longueur de période, un cran
+        // plus tôt : la veille pour jour/hier, le même intervalle le mois
+        // précédent pour "mois", la même plage l'an dernier pour "année".
+        let dateDebutPrec: Date
+        let dateFinPrec: Date
+        if (params.periode === 'mois') {
+          dateDebutPrec = new Date(dateDebut); dateDebutPrec.setMonth(dateDebutPrec.getMonth() - 1)
+          dateFinPrec = new Date(dateFin); dateFinPrec.setMonth(dateFinPrec.getMonth() - 1)
+        } else if (params.periode === 'annee') {
+          dateDebutPrec = new Date(dateDebut); dateDebutPrec.setFullYear(dateDebutPrec.getFullYear() - 1)
+          dateFinPrec = new Date(dateFin); dateFinPrec.setFullYear(dateFinPrec.getFullYear() - 1)
+        } else {
+          dateDebutPrec = new Date(dateDebut); dateDebutPrec.setDate(dateDebutPrec.getDate() - 1)
+          dateFinPrec = dateDebutPrec
+        }
+
         const familleDemandee = safeText(params.famille)
         const familleRapprochee = familleDemandee ? rapprocherFamille(familleDemandee) : null
+        const agenceDemandee = safeText(params.agence)
+        const agenceRapprochee = agenceDemandee ? rapprocherAgence(agenceDemandee) : null
 
-        const { data: rows, error } = await supabase.rpc('get_ca_periode_multi_documents', {
-          p_date_debut: isoDepuisDateLocale(dateDebut),
-          p_date_fin: isoDepuisDateLocale(dateFin),
-          p_collaborateur: null,
-          p_famille_macro: familleRapprochee,
-        })
+        const [{ data: rows, error }, { data: rowsPrec, error: errorPrec }] = await Promise.all([
+          supabase.rpc('get_ca_periode_multi_documents', {
+            p_date_debut: isoDepuisDateLocale(dateDebut),
+            p_date_fin: isoDepuisDateLocale(dateFin),
+            p_collaborateur: null,
+            p_famille_macro: familleRapprochee,
+            p_agence: agenceRapprochee,
+          }),
+          supabase.rpc('get_ca_periode_multi_documents', {
+            p_date_debut: isoDepuisDateLocale(dateDebutPrec),
+            p_date_fin: isoDepuisDateLocale(dateFinPrec),
+            p_collaborateur: null,
+            p_famille_macro: familleRapprochee,
+            p_agence: agenceRapprochee,
+          }),
+        ])
         if (error) throw error
+        if (errorPrec) throw errorPrec
 
         const parType = new Map(((rows || []) as { type_document: string; montant_ht: number }[]).map((r) => [r.type_document, Number(r.montant_ht || 0)]))
+        const parTypePrec = new Map(((rowsPrec || []) as { type_document: string; montant_ht: number }[]).map((r) => [r.type_document, Number(r.montant_ht || 0)]))
         const montantDevis = parType.get('Devis') || 0
         const montantBl = parType.get('BL') || 0
         const montantFactures = parType.get('Factures') || 0
-        const suffixeFamille = familleRapprochee ? ` sur ${familleRapprochee}` : ''
+        const evoDevis = calculerEvolutionPct(montantDevis, parTypePrec.get('Devis') || 0)
+        const evoBl = calculerEvolutionPct(montantBl, parTypePrec.get('BL') || 0)
+        const evoFactures = calculerEvolutionPct(montantFactures, parTypePrec.get('Factures') || 0)
+
+        const clausesContexte: string[] = []
+        if (familleRapprochee) clausesContexte.push(`sur ${familleRapprochee}`)
+        if (agenceRapprochee) clausesContexte.push(`agence ${agenceRapprochee}`)
+        const suffixeContexte = clausesContexte.length ? ` (${clausesContexte.join(', ')})` : ''
 
         if (montantDevis === 0 && montantBl === 0 && montantFactures === 0) {
-          resultat = `Aucun chiffre d'affaires enregistré ${periodeTexte}${suffixeFamille}.`
+          resultat = `Aucun chiffre d'affaires enregistré ${periodeTexte}${suffixeContexte}.`
+          resultatOral = resultat
         } else {
           resultat =
-            `Ton chiffre d'affaires ${periodeTexte}${suffixeFamille} :\n` +
-            `1. Prise de commande (devis) : ${formatMontantParle(montantDevis)}\n` +
-            `2. Bons de livraison : ${formatMontantParle(montantBl)}\n` +
-            `3. Facturation : ${formatMontantParle(montantFactures)}`
+            `Ton chiffre d'affaires ${periodeTexte}${suffixeContexte} :\n` +
+            `1. Prise de commande (devis) : ${formatMontantParle(montantDevis)}${formatEvolutionAffichee(evoDevis)}\n` +
+            `2. Bons de livraison : ${formatMontantParle(montantBl)}${formatEvolutionAffichee(evoBl)}\n` +
+            `3. Facturation : ${formatMontantParle(montantFactures)}${formatEvolutionAffichee(evoFactures)}`
+          resultatOral =
+            `Ton chiffre d'affaires ${periodeTexte}${suffixeContexte} :\n` +
+            `1. Prise de commande, devis : ${formatMontantOral(montantDevis)}${formatEvolutionOrale(evoDevis)}\n` +
+            `2. Bons de livraison : ${formatMontantOral(montantBl)}${formatEvolutionOrale(evoBl)}\n` +
+            `3. Facturation : ${formatMontantOral(montantFactures)}${formatEvolutionOrale(evoFactures)}`
         }
       } else if (portee === 'devis_montant') {
-        // "Les N derniers devis de plus de X euros" -- RPC dédiée
-        // (get_devis_recents_montant_min), qui agrège par pièce côté base
-        // plutôt que ligne par ligne (numero_tiers_entete est très
-        // souvent vide sur les devis -- la RPC utilise numero_tiers_ligne).
+        // "Les N derniers devis/commandes/BL de plus de X euros" -- RPC
+        // généralisée (get_documents_recents_montant_min), qui agrège par
+        // pièce côté base plutôt que ligne par ligne. type_document :
+        // 'devis' (par défaut) | 'commande' | 'bl'.
         const n = Math.max(1, Math.min(20, Math.round(Number(params.n) || 10)))
         const montantMin = Math.max(0, Number(params.montant_min) || 15000)
+        const typeDoc = params.type_document || 'devis'
+        const libelleDoc = typeDoc === 'commande' ? 'commandes' : typeDoc === 'bl' ? 'bons de livraison' : 'devis'
+        const libelleDocSing = typeDoc === 'commande' ? 'commande' : typeDoc === 'bl' ? 'bon de livraison' : 'devis'
 
-        const { data: rows, error } = await supabase.rpc('get_devis_recents_montant_min', {
+        const { data: rows, error } = await supabase.rpc('get_documents_recents_montant_min', {
+          p_type_document: typeDoc,
           p_montant_min: montantMin,
           p_limit: n,
         })
         if (error) throw error
 
         if (!rows || rows.length === 0) {
-          resultat = `Aucun devis de plus de ${formatMontantParle(montantMin)} trouvé.`
+          resultat = `Aucun${typeDoc === 'commande' ? 'e commande' : typeDoc === 'bl' ? ' bon de livraison' : ' devis'} de plus de ${formatMontantParle(montantMin)} trouvé${typeDoc === 'commande' ? 'e' : ''}.`
+          resultatOral = `Aucun${typeDoc === 'commande' ? 'e commande' : typeDoc === 'bl' ? ' bon de livraison' : ' devis'} de plus de ${formatMontantOral(montantMin)} trouvé${typeDoc === 'commande' ? 'e' : ''}.`
         } else {
-          const lignes = (rows as any[]).map((r, i) => {
-            const dateLabel = formatDateParlee(r.date_devis)
+          const lignesAffichees = (rows as any[]).map((r, i) => {
+            const dateLabel = formatDateParlee(r.date_document)
             const client = safeText(r.intitule) || safeText(r.numero_tiers) || 'client non renseigné'
             return `${i + 1}. ${client}${dateLabel ? `, ${dateLabel}` : ''} — ${formatMontantParle(Number(r.montant))}`
           })
-          resultat = `Voici les ${rows.length} derniers devis de plus de ${formatMontantParle(montantMin)} :\n${lignes.join('\n')}`
+          const lignesOrales = (rows as any[]).map((r, i) => {
+            const dateLabel = formatDateParlee(r.date_document)
+            const client = safeText(r.intitule) || safeText(r.numero_tiers) || 'client non renseigné'
+            return `${i + 1}. ${client}${dateLabel ? `, ${dateLabel}` : ''} — ${formatMontantOral(Number(r.montant))}`
+          })
+          resultat = `Voici les ${rows.length} derniers ${libelleDoc} de plus de ${formatMontantParle(montantMin)} :\n${lignesAffichees.join('\n')}`
+          resultatOral = `Voici les ${rows.length} derniers ${libelleDoc} de plus de ${formatMontantOral(montantMin)} :\n${lignesOrales.join('\n')}`
         }
       } else if (portee === 'rdv_sans_compte_rendu') {
         // "Combien de MES rdv passés ces N derniers jours n'ont pas de
@@ -1309,6 +1510,73 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         resultat = alertesTexte.length === 0
           ? "Aucune alerte en cours. Tout est propre."
           : `Voici tes alertes en cours :\n${alertesTexte.map((a, i) => `${i + 1}. ${a}`).join('\n')}`
+      } else if (portee === 'resume_jour' || portee === 'resume_semaine') {
+        // "Résumé de la journée / de la semaine" -- combine tâches
+        // (en retard + à faire sur la période) et rendez-vous de la même
+        // période, avec une alerte si un rdv concerne un client qui a
+        // encore une tâche non terminée en cours (engagement pris avec ce
+        // client, à ne pas oublier avant de le revoir).
+        if (!access?.blg_partner_id) throw new Error('Identifiant partner BLG non renseigné pour ce compte.')
+        const estSemaine = portee === 'resume_semaine'
+        const finPeriode = estSemaine ? finDeSemaineIso() : todayIso()
+        const finPeriodeDate = new Date(`${finPeriode}T23:59:59`)
+
+        const identities = Array.from(new Set([email, displayName]))
+        const assignedFilter = identities.map((v) => `assigned_to.eq.${v.replace(/,/g, '\\,')}`).join(',')
+
+        const [{ data: taches, error: errTaches }, { data: rdvs, error: errRdv }] = await Promise.all([
+          supabase
+            .from('todo_actions')
+            .select('description_action, due_date, numero_tiers')
+            .or(assignedFilter)
+            .not('status', 'in', '("Terminé","Annulé")')
+            .not('due_date', 'is', null)
+            .lte('due_date', finPeriode)
+            .order('due_date', { ascending: true })
+            .limit(30),
+          supabase
+            .from('v_rdv_unifie')
+            .select('subject, company_name, start_date, numero_tiers')
+            .eq('blg_partner_id', access.blg_partner_id)
+            .gte('start_date', new Date().toISOString())
+            .lte('start_date', finPeriodeDate.toISOString())
+            .order('start_date', { ascending: true })
+            .limit(30),
+        ])
+        if (errTaches) throw errTaches
+        if (errRdv) throw errRdv
+
+        const tachesParTiers = new Set((taches || []).map((t: any) => safeText(t.numero_tiers)).filter(Boolean))
+        const nomsClients = await resoudreNomsTiers((taches || []).map((t: any) => t.numero_tiers))
+
+        const periodeTexteTaches = estSemaine ? 'cette semaine (ou en retard)' : "pour aujourd'hui (ou en retard)"
+        const periodeTexteRdv = estSemaine ? 'cette semaine' : "aujourd'hui"
+
+        const sectionTaches = !taches || taches.length === 0
+          ? `Aucune tâche ${periodeTexteTaches}.`
+          : taches.map((t: any, i: number) => {
+              const echeance = formatDateParlee(t.due_date)
+              const client = nomsClients.get(safeText(t.numero_tiers))
+              return `${i + 1}. ${safeText(t.description_action) || '(sans libellé)'}${client ? ` — ${client}` : ''}${echeance ? `, échéance ${echeance}` : ''}`
+            }).join('\n')
+
+        const sectionRdv = !rdvs || rdvs.length === 0
+          ? `Aucun rendez-vous ${periodeTexteRdv}.`
+          : rdvs.map((r: any, i: number) => {
+              const d = new Date(r.start_date)
+              const dateLabel = estSemaine ? d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' }) : ''
+              const heure = formatHeureParlee(d)
+              const entreprise = safeText(r.company_name) || 'sans entreprise associée'
+              const alerte = safeText(r.numero_tiers) && tachesParTiers.has(safeText(r.numero_tiers))
+                ? ' ⚠️ tâche en cours chez ce client'
+                : ''
+              return `${i + 1}. ${dateLabel ? `${dateLabel} à ` : ''}${heure} — ${entreprise}${alerte}`
+            }).join('\n')
+
+        resultat =
+          `Résumé ${estSemaine ? 'de la semaine' : 'de la journée'} :\n\n` +
+          `Tâches (${periodeTexteTaches}) :\n${sectionTaches}\n\n` +
+          `Rendez-vous (${periodeTexteRdv}) :\n${sectionRdv}`
       } else {
         // Filet de sécurité TypeScript -- ne devrait jamais arriver, tous
         // les intents connus étant couverts ci-dessus.
@@ -1316,6 +1584,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       }
 
       setTexte(resultat)
+      setTexteOral(resultatOral || resultat)
       setEtape('resultat')
       // Mémorise ce qui vient d'être compris pour permettre une relance
       // ("et depuis le début du mois ?") via le bouton "🎙️ Continuer" --
@@ -1327,7 +1596,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       // bloquer inutilement une autre session ailleurs pendant que
       // l'utilisateur lit/écoute simplement la réponse.
       libererVerrouVocal(idInstanceRef.current)
-      await jouerTexte(resultat)
+      await jouerTexte(resultatOral || resultat)
     } catch (e: any) {
       libererVerrouVocal(idInstanceRef.current)
       setEtape('erreur')
@@ -1339,6 +1608,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
     libererVerrouVocal(idInstanceRef.current)
     setEtape('idle')
     setTexte('')
+    setTexteOral('')
     setMessageIncompris('')
     setErreur('')
     setModeClient(false)
@@ -1506,6 +1776,11 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       if (annulerRef.current) return
       if (!res.ok) throw new Error(data?.error || 'Erreur de transcription.')
 
+      if (estCommandeStop(data.transcript || '')) {
+        arreterCompletement()
+        return
+      }
+
       const texteEntendu = String(data.transcript || '').trim()
       await resoudreClientEtLire(texteEntendu, true)
     } catch (e: any) {
@@ -1654,7 +1929,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
               <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
                 <button
                   type="button"
-                  onClick={() => void jouerTexte(texte)}
+                  onClick={() => void jouerTexte(texteOral || texte)}
                   disabled={lectureEnCours}
                   style={{ flex: 1, padding: '14px', borderRadius: 12, border: '1px solid rgba(143,199,218,0.4)', background: 'rgba(143,199,218,0.14)', color: '#8FC7DA', fontSize: 14.5, fontWeight: 700, cursor: 'pointer' }}
                 >
