@@ -10,8 +10,10 @@ import MobileRdv from './MobileRdv'
 import MobileAlertes from './MobileAlertes'
 import MobileProspects from './MobileProspects'
 import MobileStockArticles from './MobileStockArticles'
+import MobileAdminPanel from './MobileAdminPanel'
 
-export type MobileScreen = 'home' | 'activite' | 'clients' | 'rdv' | 'alertes' | 'prospects' | 'stock'
+
+export type MobileScreen = 'home' | 'activite' | 'clients' | 'rdv' | 'alertes' | 'prospects' | 'stock' | 'Admin'
 
 /**
  * Point d'entrée de l'expérience mobile, une fois l'utilisateur authentifié.
@@ -145,6 +147,8 @@ function screenTitle(screen: MobileScreen) {
       return 'Carte Prospects & Clients'
     case 'stock':
       return 'Stock articles'
+    case 'Admin':
+      return 'Admin'  
     default:
       return ''
   }

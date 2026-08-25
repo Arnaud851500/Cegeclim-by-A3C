@@ -32,6 +32,7 @@ const BUTTONS: ButtonConfig[] = [
   // par les autres cartes de cet écran.
   { key: 'stock', label: 'Stock articles', sub: 'Recherche, dépôts, projection', accessKey: 'can_dashboard', icon: '📦', gradient: 'linear-gradient(160deg, #A6A181, #6E6A54)', subColor: '#EDE9D8' },
   { key: 'prospects', label: 'Carte Prospects & Clients', sub: '', icon: '🗺️', gradient: 'linear-gradient(160deg, #0F6E56, #085041)', subColor: '#9FE1CB' },
+  { key: 'Admin', label: 'Admin', sub: '', icon: '🗺️', gradient: 'linear-gradient(160deg, #1b1e1d, #085041)', subColor: '#3b3e3d' },
 ]
 
 // Marge horizontale de l'écran -- resserrée une 3e fois (6px -> 3px de
