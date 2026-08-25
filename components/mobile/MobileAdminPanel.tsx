@@ -2,22 +2,16 @@
 
 // MobileAdminPanel.tsx
 //
-// À ADAPTER AVANT INTÉGRATION (3 points seulement) :
-//   1. Ligne d'import du client Supabase ci-dessous — remplacer par le chemin
-//      réel utilisé dans le reste du projet (ex: '@/lib/supabase', '@/lib/supabaseClient'...).
-//   2. Ajouter une entrée de navigation vers ce composant dans MobileShell
-//      (visible uniquement si l'utilisateur est admin — le composant fait
-//      de toute façon sa propre vérification via current_user_is_admin()).
-//   3. Le nom du bucket est 'sage-imports' — à ajuster si différent.
-//
+// Import du client Supabase déjà ajusté (@/lib/supabaseClient).
 // Sécurité : chaque action sensible (lancer le VPS, lancer un job pg_cron)
 // redemande le mot de passe du compte connecté et le revalide via
 // supabase.auth.signInWithPassword() avant d'écrire quoi que ce soit.
 // Le requêteur de tables est strictement lecture seule côté serveur
-// (fonction admin_query, SELECT uniquement, jamais d'INSERT/UPDATE/DELETE).
+// (fonction admin_query, SELECT uniquement, jamais d'INSERT/UPDATE/DELETE),
+// et couvre maintenant 3 schémas : public, sage, blg.
 
 import { useCallback, useEffect, useState } from "react";
-import { supabase } from "@/lib/supabaseClient"; // <-- (1) ajuster ce chemin
+import { supabase } from "@/lib/supabaseClient";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -32,13 +26,34 @@ type StorageObject = {
 
 type JobStatus = "pending" | "running" | "completed" | "error";
 
+type SchemaName = "public" | "sage" | "blg";
+
 type WhereCondition = {
   field: string;
   operator: "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "like" | "ilike" | "is_null" | "is_not_null";
   value: string;
 };
 
-const BUCKET_NAME = "sage-imports"; // <-- (3) ajuster si besoin
+const BUCKET_NAME = "sage-imports";
+
+const SCHEMAS: { id: SchemaName; label: string }[] = [
+  { id: "public", label: "Public (app)" },
+  { id: "sage", label: "Sage" },
+  { id: "blg", label: "BLG" },
+];
+
+const OPERATOR_LABELS: Record<WhereCondition["operator"], string> = {
+  eq: "= égal à",
+  neq: "≠ différent de",
+  gt: "> supérieur à",
+  gte: "≥ supérieur ou égal à",
+  lt: "< inférieur à",
+  lte: "≤ inférieur ou égal à",
+  like: "contient",
+  ilike: "contient (insensible à la casse)",
+  is_null: "est vide",
+  is_not_null: "n'est pas vide",
+};
 
 // ---------------------------------------------------------------------------
 // Composant : confirmation par mot de passe avant action sensible
@@ -113,6 +128,79 @@ function PasswordConfirmModal({
 }
 
 // ---------------------------------------------------------------------------
+// Composant : une condition WHERE, en carte empilée (lisible sur mobile)
+// ---------------------------------------------------------------------------
+
+function WhereConditionCard({
+  condition,
+  columns,
+  onChange,
+  onRemove,
+}: {
+  condition: WhereCondition;
+  columns: string[];
+  onChange: (patch: Partial<WhereCondition>) => void;
+  onRemove: () => void;
+}) {
+  const needsValue = condition.operator !== "is_null" && condition.operator !== "is_not_null";
+
+  return (
+    <div className="rounded-xl border border-[#0B1220]/12 bg-[#0B1220]/[0.02] p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-xs font-semibold uppercase tracking-wide text-[#0B1220]/40">
+          Condition
+        </span>
+        <button
+          onClick={onRemove}
+          className="rounded-lg px-2 py-1 text-sm font-medium text-[#C1683C]"
+          aria-label="Supprimer cette condition"
+        >
+          ✕ Retirer
+        </button>
+      </div>
+
+      <label className="mb-1 block text-xs font-medium text-[#0B1220]/60">Champ</label>
+      <select
+        value={condition.field}
+        onChange={(e) => onChange({ field: e.target.value })}
+        className="mb-2 w-full rounded-lg border border-[#0B1220]/15 bg-white px-3 py-2.5 text-sm text-[#0B1220]"
+      >
+        {columns.map((c) => (
+          <option key={c} value={c}>
+            {c}
+          </option>
+        ))}
+      </select>
+
+      <label className="mb-1 block text-xs font-medium text-[#0B1220]/60">Opérateur</label>
+      <select
+        value={condition.operator}
+        onChange={(e) => onChange({ operator: e.target.value as WhereCondition["operator"] })}
+        className="mb-2 w-full rounded-lg border border-[#0B1220]/15 bg-white px-3 py-2.5 text-sm text-[#0B1220]"
+      >
+        {(Object.keys(OPERATOR_LABELS) as WhereCondition["operator"][]).map((op) => (
+          <option key={op} value={op}>
+            {OPERATOR_LABELS[op]}
+          </option>
+        ))}
+      </select>
+
+      {needsValue && (
+        <>
+          <label className="mb-1 block text-xs font-medium text-[#0B1220]/60">Valeur</label>
+          <input
+            value={condition.value}
+            onChange={(e) => onChange({ value: e.target.value })}
+            placeholder="Valeur à comparer"
+            className="w-full rounded-lg border border-[#0B1220]/15 bg-white px-3 py-2.5 text-sm text-[#0B1220]"
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Composant principal
 // ---------------------------------------------------------------------------
 
@@ -132,12 +220,14 @@ export default function MobileAdminPanel() {
     onConfirmed: () => Promise<void>;
   } | null>(null);
 
+  const [selectedSchema, setSelectedSchema] = useState<SchemaName>("public");
   const [tables, setTables] = useState<string[]>([]);
   const [selectedTable, setSelectedTable] = useState<string>("");
   const [columns, setColumns] = useState<string[]>([]);
   const [selectedFields, setSelectedFields] = useState<string[]>([]);
   const [whereConditions, setWhereConditions] = useState<WhereCondition[]>([]);
   const [queryResults, setQueryResults] = useState<Record<string, any>[] | null>(null);
+  const [queryCount, setQueryCount] = useState<number | null>(null);
   const [queryLoading, setQueryLoading] = useState(false);
   const [queryError, setQueryError] = useState<string | null>(null);
 
@@ -172,17 +262,19 @@ export default function MobileAdminPanel() {
     if (isAdmin) loadBucket();
   }, [isAdmin, loadBucket]);
 
-  // -- Table listing pour le requêteur ----------------------------------------
+  // -- Table listing pour le requêteur (dépend du schéma choisi) --------------
   useEffect(() => {
     if (!isAdmin) return;
-    supabase.rpc("admin_list_tables").then(({ data, error }) => {
+    setSelectedTable("");
+    supabase.rpc("admin_list_tables", { p_schema: selectedSchema }).then(({ data, error }) => {
       if (error) {
         console.error(error);
+        setTables([]);
         return;
       }
       setTables((data || []).map((r: any) => r.table_name));
     });
-  }, [isAdmin]);
+  }, [isAdmin, selectedSchema]);
 
   useEffect(() => {
     if (!selectedTable) {
@@ -190,17 +282,19 @@ export default function MobileAdminPanel() {
       setSelectedFields([]);
       return;
     }
-    supabase.rpc("admin_list_columns", { p_table: selectedTable }).then(({ data, error }) => {
-      if (error) {
-        console.error(error);
-        return;
-      }
-      setColumns((data || []).map((r: any) => r.column_name));
-      setSelectedFields([]);
-      setWhereConditions([]);
-      setQueryResults(null);
-    });
-  }, [selectedTable]);
+    supabase
+      .rpc("admin_list_columns", { p_table: selectedTable, p_schema: selectedSchema })
+      .then(({ data, error }) => {
+        if (error) {
+          console.error(error);
+          return;
+        }
+        setColumns((data || []).map((r: any) => r.column_name));
+        setSelectedFields([]);
+        setWhereConditions([]);
+        setQueryResults(null);
+      });
+  }, [selectedTable, selectedSchema]);
 
   // -- Confirmation mot de passe -----------------------------------------------
   const requireConfirmation = (label: string, action: () => Promise<void>) => {
@@ -210,7 +304,6 @@ export default function MobileAdminPanel() {
         const { data: userData } = await supabase.auth.getUser();
         const email = userData?.user?.email;
         if (!email) throw new Error("Session expirée, reconnecte-toi.");
-        // password est fourni via le paramètre du modal — voir handlePasswordConfirm
         await action();
       },
     });
@@ -221,7 +314,6 @@ export default function MobileAdminPanel() {
     const email = userData?.user?.email;
     if (!email) throw new Error("Session expirée, reconnecte-toi.");
 
-    // Revalide le mot de passe sans perdre la session en cours.
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) throw new Error("Mot de passe incorrect.");
 
@@ -310,12 +402,14 @@ export default function MobileAdminPanel() {
     setQueryLoading(true);
     setQueryError(null);
     setQueryResults(null);
+    setQueryCount(null);
 
     const { data, error } = await supabase.rpc("admin_query", {
       p_table: selectedTable,
       p_fields: selectedFields,
       p_where: whereConditions.filter((c) => c.field && c.operator),
       p_limit: 100,
+      p_schema: selectedSchema,
     });
 
     setQueryLoading(false);
@@ -323,7 +417,12 @@ export default function MobileAdminPanel() {
       setQueryError(error.message);
       return;
     }
-    setQueryResults(data as Record<string, any>[]);
+    // admin_query renvoie { count, rows } : count = nombre total de lignes
+    // correspondant au filtre, rows = lignes réellement retournées
+    // (plafonnées à p_limit, donc rows.length peut être < count).
+    const result = data as { count: number; rows: Record<string, any>[] };
+    setQueryCount(result.count);
+    setQueryResults(result.rows);
   };
 
   // ---------------------------------------------------------------------------
@@ -472,11 +571,28 @@ export default function MobileAdminPanel() {
           Requêteur (lecture seule)
         </h2>
 
+        <label className="mb-1 block text-xs font-medium text-[#0B1220]/60">Environnement</label>
+        <div className="mb-3 grid grid-cols-3 gap-1.5">
+          {SCHEMAS.map((s) => (
+            <button
+              key={s.id}
+              onClick={() => setSelectedSchema(s.id)}
+              className={`rounded-lg py-2 text-xs font-semibold ${
+                selectedSchema === s.id
+                  ? "bg-[#0B1220] text-[#F5F3EC]"
+                  : "bg-[#0B1220]/5 text-[#0B1220]/70"
+              }`}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+
         <label className="mb-1 block text-xs font-medium text-[#0B1220]/60">Table</label>
         <select
           value={selectedTable}
           onChange={(e) => setSelectedTable(e.target.value)}
-          className="mb-3 w-full rounded-lg border border-[#0B1220]/15 bg-white px-3 py-2 text-sm text-[#0B1220]"
+          className="mb-3 w-full rounded-lg border border-[#0B1220]/15 bg-white px-3 py-2.5 text-sm text-[#0B1220]"
         >
           <option value="">— Choisir une table —</option>
           {tables.map((t) => (
@@ -491,12 +607,12 @@ export default function MobileAdminPanel() {
             <label className="mb-1 block text-xs font-medium text-[#0B1220]/60">
               Champs à retourner
             </label>
-            <div className="mb-3 flex flex-wrap gap-1.5">
+            <div className="mb-4 flex flex-wrap gap-1.5">
               {columns.map((c) => (
                 <button
                   key={c}
                   onClick={() => toggleField(c)}
-                  className={`rounded-full px-2.5 py-1 text-xs ${
+                  className={`rounded-full px-2.5 py-1.5 text-xs ${
                     selectedFields.includes(c)
                       ? "bg-[#7A5EA8] text-white"
                       : "bg-[#0B1220]/5 text-[#0B1220]/70"
@@ -507,55 +623,23 @@ export default function MobileAdminPanel() {
               ))}
             </div>
 
-            <label className="mb-1 block text-xs font-medium text-[#0B1220]/60">
+            <label className="mb-2 block text-xs font-medium text-[#0B1220]/60">
               Conditions (WHERE)
             </label>
-            <div className="mb-2 space-y-2">
+            <div className="mb-3 space-y-2.5">
               {whereConditions.map((cond, i) => (
-                <div key={i} className="flex items-center gap-1.5">
-                  <select
-                    value={cond.field}
-                    onChange={(e) => updateWhereCondition(i, { field: e.target.value })}
-                    className="rounded-lg border border-[#0B1220]/15 px-2 py-1.5 text-xs"
-                  >
-                    {columns.map((c) => (
-                      <option key={c} value={c}>
-                        {c}
-                      </option>
-                    ))}
-                  </select>
-                  <select
-                    value={cond.operator}
-                    onChange={(e) =>
-                      updateWhereCondition(i, { operator: e.target.value as WhereCondition["operator"] })
-                    }
-                    className="rounded-lg border border-[#0B1220]/15 px-2 py-1.5 text-xs"
-                  >
-                    <option value="eq">=</option>
-                    <option value="neq">≠</option>
-                    <option value="gt">&gt;</option>
-                    <option value="gte">&gt;=</option>
-                    <option value="lt">&lt;</option>
-                    <option value="lte">&lt;=</option>
-                    <option value="like">contient</option>
-                    <option value="ilike">contient (insensible casse)</option>
-                    <option value="is_null">est vide</option>
-                    <option value="is_not_null">n'est pas vide</option>
-                  </select>
-                  {cond.operator !== "is_null" && cond.operator !== "is_not_null" && (
-                    <input
-                      value={cond.value}
-                      onChange={(e) => updateWhereCondition(i, { value: e.target.value })}
-                      placeholder="valeur"
-                      className="min-w-0 flex-1 rounded-lg border border-[#0B1220]/15 px-2 py-1.5 text-xs"
-                    />
-                  )}
-                  <button onClick={() => removeWhereCondition(i)} className="text-[#C1683C]">
-                    ✕
-                  </button>
-                </div>
+                <WhereConditionCard
+                  key={i}
+                  condition={cond}
+                  columns={columns}
+                  onChange={(patch) => updateWhereCondition(i, patch)}
+                  onRemove={() => removeWhereCondition(i)}
+                />
               ))}
-              <button onClick={addWhereCondition} className="text-xs text-[#7A5EA8]">
+              <button
+                onClick={addWhereCondition}
+                className="w-full rounded-lg border border-dashed border-[#7A5EA8]/40 py-2.5 text-sm font-medium text-[#7A5EA8]"
+              >
                 + Ajouter une condition
               </button>
             </div>
@@ -563,7 +647,7 @@ export default function MobileAdminPanel() {
             <button
               onClick={runQuery}
               disabled={selectedFields.length === 0 || queryLoading}
-              className="mb-3 w-full rounded-lg bg-[#0B1220] py-2 text-sm font-medium text-[#F5F3EC] disabled:opacity-40"
+              className="mb-3 w-full rounded-lg bg-[#0B1220] py-2.5 text-sm font-medium text-[#F5F3EC] disabled:opacity-40"
             >
               {queryLoading ? "Exécution..." : "Exécuter"}
             </button>
@@ -574,7 +658,23 @@ export default function MobileAdminPanel() {
           <p className="mb-2 rounded-lg bg-[#C1683C]/10 p-2 text-xs text-[#C1683C]">{queryError}</p>
         )}
 
-        {queryResults && (
+        {queryCount !== null && (
+          <p className="mb-2 text-sm font-medium text-[#0B1220]">
+            {queryCount === 0
+              ? "Aucune occurrence trouvée"
+              : queryCount === 1
+                ? "1 occurrence trouvée"
+                : `${queryCount} occurrences trouvées`}
+            {queryResults && queryResults.length < queryCount && (
+              <span className="font-normal text-[#0B1220]/50">
+                {" "}
+                — {queryResults.length} affichées (limite 100)
+              </span>
+            )}
+          </p>
+        )}
+
+        {queryResults && queryResults.length > 0 && (
           <div className="overflow-x-auto rounded-lg border border-[#0B1220]/10">
             <table className="w-full text-left text-xs">
               <thead>
@@ -598,9 +698,6 @@ export default function MobileAdminPanel() {
                 ))}
               </tbody>
             </table>
-            {queryResults.length === 0 && (
-              <p className="p-2 text-xs text-[#0B1220]/50">Aucun résultat.</p>
-            )}
           </div>
         )}
       </section>
