@@ -24,34 +24,43 @@ import { acquerirVerrouVocal, libererVerrouVocal, verrouVocalDetenuPar, verrouVo
  * les décodeurs serveur (dont l'API de transcription) rejettent comme
  * "corrompu". On redécode donc systématiquement l'enregistrement via
  * l'API Web Audio et on le ré-encode en WAV PCM 16 bits avant l'upload —
- * ça garantit un fichier propre quel que soit le navigateur.
+ * ça garantit un fichier propre quel que soit le navigateur. CORRECTIF :
+ * ce ré-encodage se fait maintenant à 16 kHz mono (au lieu de la
+ * fréquence native du micro, souvent 44,1 kHz stéréo, ~10 Mo/minute) --
+ * un compte-rendu de réunion de plusieurs minutes dépassait la limite de
+ * taille de requête de la fonction serverless (HTTP 413 /
+ * FUNCTION_PAYLOAD_TOO_LARGE) bien avant toute limite de durée. 16 kHz
+ * mono suffit largement : Whisper (transcription) rééchantillonne de
+ * toute façon en interne à cette fréquence, aucune perte de qualité de
+ * transcription, juste ~5-6x moins de poids.
  *
  * CORRECTIF : les 3 appels réseau qui attendaient du JSON (voice-report,
  * transcribe, voice-report/confirm) faisaient `await res.json()`
- * directement -- si le serveur répond avec autre chose (page d'erreur
- * HTML d'un timeout de fonction serverless, le plus probable pour un
- * compte-rendu de réunion long où la transcription+structuration dépasse
- * le délai max autorisé), ça plantait avec un SyntaxError natif du
- * navigateur illisible ("The string did not match the expected
- * pattern."). parserReponseJson() ci-dessous lit le texte d'abord et
- * lève une erreur lisible (avec le code HTTP et un extrait de la
- * réponse) si ce n'est pas du JSON valide, au lieu de planter au hasard.
+ * directement -- si le serveur répond avec autre chose (page d'erreur du
+ * plateforme, ex. HTTP 413/FUNCTION_PAYLOAD_TOO_LARGE constaté en
+ * pratique sur un compte-rendu long, avant le correctif ci-dessus), ça
+ * plantait avec un SyntaxError natif du navigateur illisible ("The
+ * string did not match the expected pattern."). parserReponseJson()
+ * ci-dessous lit le texte d'abord et lève une erreur lisible (avec le
+ * code HTTP et un extrait de la réponse) si ce n'est pas du JSON valide,
+ * au lieu de planter au hasard.
  */
 
 /** Lit la réponse en texte puis tente de la parser en JSON -- si ce n'est
- * pas du JSON valide (page d'erreur HTML d'un timeout serveur, la cause la
- * plus probable pour un enregistrement long), lève une erreur lisible
- * plutôt que de laisser JSON.parse planter avec un message natif
- * cryptique. Voir note en tête de fichier. */
+ * pas du JSON valide (page d'erreur de la plateforme -- HTTP 413 pour un
+ * enregistrement trop volumineux, ou un timeout pour un traitement trop
+ * long), lève une erreur lisible plutôt que de laisser JSON.parse planter
+ * avec un message natif cryptique. Voir note en tête de fichier. */
 async function parserReponseJson(res: Response): Promise<any> {
   const texte = await res.text()
   try {
     return JSON.parse(texte)
   } catch {
     const extrait = texte.slice(0, 200).replace(/\s+/g, ' ').trim()
-    throw new Error(
-      `Réponse invalide du serveur (HTTP ${res.status}). Probablement un délai serveur dépassé (enregistrement trop long à traiter)${extrait ? ` — ${extrait}` : ''}.`
-    )
+    const cause = res.status === 413
+      ? 'enregistrement trop volumineux pour le serveur'
+      : 'probablement un délai serveur dépassé (traitement trop long)'
+    throw new Error(`Réponse invalide du serveur (HTTP ${res.status}) -- ${cause}${extrait ? ` : ${extrait}` : ''}.`)
   }
 }
 
@@ -92,20 +101,49 @@ type CompteRenduExistant = {
  * (cf. note en tête de fichier sur le bug Safari). En cas d'échec de
  * décodage (rare), on retombe sur le blob d'origine plutôt que de bloquer
  * l'envoi. */
+/** Fréquence cible du WAV envoyé au serveur -- Whisper (transcription)
+ * rééchantillonne de toute façon en interne à 16 kHz, donc envoyer plus
+ * haut n'apporte aucune qualité de transcription supplémentaire, juste du
+ * poids. CORRECTIF : avant ce rééchantillonnage, un enregistrement était
+ * réencodé en PCM brut à la fréquence native du micro (souvent 44,1 kHz
+ * stéréo, ~10 Mo/minute) -- un compte-rendu de réunion de plusieurs
+ * minutes dépassait largement la limite de taille de requête de la
+ * fonction serverless (HTTP 413 / FUNCTION_PAYLOAD_TOO_LARGE), plantant
+ * avant même d'atteindre une éventuelle limite de durée. À 16 kHz mono,
+ * le poids est divisé par ~5-6.
+ */
+const FREQUENCE_ECHANTILLONNAGE_CIBLE = 16000
+
 async function convertirEnWav(blob: Blob): Promise<Blob> {
   try {
     const arrayBuffer = await blob.arrayBuffer()
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext
     const audioCtx = new AudioContextClass()
-    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0))
+    const audioBufferOriginal = await audioCtx.decodeAudioData(arrayBuffer.slice(0))
     void audioCtx.close()
 
-    if (audioBuffer.duration < 0.3) {
-      console.warn('[VoiceReportButtons] durée décodée suspecte (', audioBuffer.duration, 's) — envoi du blob d’origine')
+    if (audioBufferOriginal.duration < 0.3) {
+      console.warn('[VoiceReportButtons] durée décodée suspecte (', audioBufferOriginal.duration, 's) — envoi du blob d’origine')
       return blob
     }
 
-    const wav = audioBufferToWav(audioBuffer)
+    // Rééchantillonnage à 16 kHz + réduction mono en un seul passage via
+    // OfflineAudioContext (le downmix stéréo->mono est automatique quand
+    // la destination n'a qu'1 canal, standard Web Audio API).
+    const dureeSecondes = audioBufferOriginal.duration
+    const OfflineAudioContextClass = window.OfflineAudioContext || (window as any).webkitOfflineAudioContext
+    const offlineCtx = new OfflineAudioContextClass(
+      1,
+      Math.ceil(dureeSecondes * FREQUENCE_ECHANTILLONNAGE_CIBLE),
+      FREQUENCE_ECHANTILLONNAGE_CIBLE,
+    )
+    const source = offlineCtx.createBufferSource()
+    source.buffer = audioBufferOriginal
+    source.connect(offlineCtx.destination)
+    source.start(0)
+    const audioBufferReechantillonne = await offlineCtx.startRendering()
+
+    const wav = audioBufferToWav(audioBufferReechantillonne)
     return new Blob([wav], { type: 'audio/wav' })
   } catch (e) {
     console.warn('[VoiceReportButtons] conversion WAV impossible, envoi du format brut', e)
