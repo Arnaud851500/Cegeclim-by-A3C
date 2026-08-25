@@ -125,6 +125,13 @@ export function useMobileAlertsCount() {
         }
 
         if (rights.show_alert_cdc_liv_avant_2026) {
+          // Toujours affichée, y compris à 0 (vert) -- avant, un compteur à
+          // 0 s'affichait bien (le push a toujours lieu quel que soit
+          // countValue), mais une ERREUR de requête faisait disparaître
+          // l'alerte entièrement et silencieusement (rien qu'en console).
+          // Le catch pousse maintenant un item quand même, avec un statut
+          // "orange" neutre (pas vert, pour ne pas faire croire à tort que
+          // tout va bien) plutôt que de la faire disparaître.
           try {
             let requete = supabase
               .from('v_portefeuille_livraison_lignes')
@@ -155,6 +162,7 @@ export function useMobileAlertsCount() {
             })
           } catch (e) {
             console.error('CDC livraison avant 2026 (mobile)', e)
+            items.push({ label: 'CDC < 2026', count: 0, status: 'orange' })
           }
         }
 
@@ -187,16 +195,29 @@ export function useMobileAlertsCount() {
         }
 
         if (rights.show_alert_capacite_gaz) {
+          // Repli sur l'ancienne RPC non filtrée si la nouvelle (filtrée
+          // périmètre) échoue -- ex. cache de schéma PostgREST pas encore
+          // à jour juste après sa création. Mieux vaut un chiffre non
+          // filtré que l'alerte qui disparaît entièrement.
           try {
-            // RPC filtrée périmètre (agence + collaborateur), plutôt que
-            // get_client_certification_alert_rows non filtrée -- voir
-            // note en tête de fichier.
-            const { data, error } = await supabase.rpc('get_client_certification_alert_rows_for_user', {
-              p_email: email,
-              p_kind: 'capacite',
-              p_limit: 10000,
-            })
-            if (error) throw error
+            let data: Record<string, any>[] | null = null
+            try {
+              const res = await supabase.rpc('get_client_certification_alert_rows_for_user', {
+                p_email: email,
+                p_kind: 'capacite',
+                p_limit: 10000,
+              })
+              if (res.error) throw res.error
+              data = res.data
+            } catch (erreurFiltree) {
+              console.warn('Capacité gaz (mobile) — repli sur la RPC non filtrée', erreurFiltree)
+              const res = await supabase.rpc('get_client_certification_alert_rows', {
+                p_kind: 'capacite',
+                p_limit: 10000,
+              })
+              if (res.error) throw res.error
+              data = res.data
+            }
 
             const rows = (data || []) as Record<string, any>[]
             const expiredCount = rows.filter((r) => String(r.alert_status || '').toLowerCase() === 'expired').length
@@ -209,6 +230,7 @@ export function useMobileAlertsCount() {
             })
           } catch (e) {
             console.error('Capacité gaz (mobile)', e)
+            items.push({ label: 'Capacité gaz', count: 0, status: 'orange' })
           }
         }
 
@@ -341,8 +363,16 @@ export function useMobileAlertsCount() {
       p_limit: 500,
     })
     if (error) {
-      console.error('fetchCapaciteGazList', error)
-      return []
+      console.warn('fetchCapaciteGazList — repli sur la RPC non filtrée', error)
+      const { data: dataRepli, error: erreurRepli } = await supabase.rpc('get_client_certification_alert_rows', {
+        p_kind: 'capacite',
+        p_limit: 500,
+      })
+      if (erreurRepli) {
+        console.error('fetchCapaciteGazList', erreurRepli)
+        return []
+      }
+      return (dataRepli || []) as Record<string, any>[]
     }
     return (data || []) as Record<string, any>[]
   }
