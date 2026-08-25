@@ -14,6 +14,25 @@
 // modèle rapide et bon marché (gpt-4o-mini, température 0, réponse JSON
 // contrainte), qui fait exactement ce travail de "slot filling".
 //
+// CORRECTIF (25/08) : trois désynchronisations entre les intents que ce
+// prompt pouvait renvoyer et ceux que MobileHomeSummary.genererResume()
+// sait réellement traiter -- toutes silencieuses (jamais d'erreur, juste
+// un "Je n'ai pas su traiter cette demande" ou un "inconnu" qui redemande
+// indéfiniment) :
+//   1. "compte_rendu_client" renvoyé ici, mais le front ne teste que
+//      "compte_rendu" (sans _client) -- jamais aiguillé vers demanderClient().
+//   2. "taches_periode" (avec params.periode) renvoyé ici, mais le front
+//      n'a AUCUNE branche pour cet intent -- seulement des intents "jour"
+//      et "semaine" directs, sans wrapper.
+//   3. "ca_periode" n'avait aucune valeur par défaut documentée pour
+//      "periode" -- une demande sans période explicite ("mon chiffre
+//      d'affaires", "quel est mon CA") pouvait être classée "inconnu"
+//      faute d'exemple couvrant ce cas précis, alors même que la phrase
+//      d'accueil de l'app invite justement à poser la question sous cette
+//      forme minimale ("ton chiffre d'affaires", sans période).
+// Les trois sont corrigés ci-dessous : noms d'intents alignés sur ceux
+// que le front sait traiter, et règle de défaut explicite pour "ca_periode".
+//
 // Échoue toujours en douceur : en cas d'erreur réseau/API, renvoie
 // {intent:"inconnu"} avec un statut 200 plutôt qu'une erreur HTTP -- le
 // front traite ça exactement comme "je n'ai pas compris" et redemande,
@@ -28,17 +47,19 @@ const SYSTEM_PROMPT = `Tu interprètes une demande orale (français) posée par 
 
 Intents disponibles :
 - "alertes" -- aucun paramètre. Ex. "mes alertes", "y a-t-il des soucis en cours".
-- "compte_rendu_client" -- aucun paramètre (le nom/numéro du client sera redemandé séparément). Ex. "le compte-rendu d'un client", "dernier compte-rendu de Dupont".
+- "compte_rendu" -- aucun paramètre (le nom/numéro du client sera redemandé séparément). Ex. "le compte-rendu d'un client", "dernier compte-rendu de Dupont".
 - "rdv_prochains" -- {"n": entier, défaut 5}. Ex. "mes 3 prochains rendez-vous" -> n=3. "mes prochains rdv" -> n=5.
 - "rdv_semaine_prochaine" -- aucun paramètre. Ex. "mes rdv de la semaine prochaine", "mon planning la semaine prochaine".
-- "taches_periode" -- {"periode": "jour" | "semaine"}. Ex. "mes tâches en retard" ou "d'aujourd'hui" -> jour. "mes tâches de cette semaine" -> semaine.
+- "jour" -- aucun paramètre. Tâches du jour (et en retard). Ex. "mes tâches", "mes tâches en retard", "mes tâches d'aujourd'hui", "qu'est-ce que j'ai à faire".
+- "semaine" -- aucun paramètre. Tâches de la semaine en cours (et en retard). Ex. "mes tâches de cette semaine", "mes tâches de la semaine".
+- "semaine_prochaine" -- aucun paramètre. Tâches de la semaine PROCHAINE uniquement. Ex. "mes tâches de la semaine prochaine".
 - "taches_prochaines" -- {"n": entier, défaut 5}. Ex. "mes 10 prochaines tâches", "mes tâches à réaliser triées par échéance", "mes 5 tâches".
-- "ca_periode" -- {"periode": "hier" | "aujourdhui" | "mois", "famille": chaîne ou null}. Ex. "quel CA ai-je fait hier" -> periode=hier. "mon chiffre d'affaires depuis le début du mois sur les pompes à chaleur" -> periode=mois, famille="R/R". Familles connues (choisis la plus proche du terme cité, sinon null) : R/R (pompes à chaleur air/eau ou eau/eau, réfrigération), PV (photovoltaïque), ACC (accessoires), TECH (prestations techniques), R_ZONE (multisplit/zone), SAV, ECS (eau chaude sanitaire), AUTRES, DIV.
+- "ca_periode" -- {"periode": "hier" | "aujourdhui" | "mois", "famille": chaîne ou null}. RÈGLE DE DÉFAUT IMPORTANTE : si aucune période n'est explicitement mentionnée dans la phrase, utilise TOUJOURS periode="aujourdhui" (ne réponds jamais "inconnu" pour une simple demande de chiffre d'affaires sans période précisée). Ex. "quel CA ai-je fait hier" -> periode=hier. "mon chiffre d'affaires depuis le début du mois sur les pompes à chaleur" -> periode=mois, famille="R/R". "mon chiffre d'affaires" -> periode=aujourdhui, famille=null. "quel est mon CA" -> periode=aujourdhui, famille=null. "combien j'ai facturé" -> periode=aujourdhui, famille=null. Familles connues (choisis la plus proche du terme cité, sinon null) : R/R (pompes à chaleur air/eau ou eau/eau, réfrigération), PV (photovoltaïque), ACC (accessoires), TECH (prestations techniques), R_ZONE (multisplit/zone), SAV, ECS (eau chaude sanitaire), AUTRES, DIV.
 - "devis_montant" -- {"n": entier défaut 10, "montant_min": nombre défaut 15000}. Ex. "les 10 derniers devis de plus de 15000 euros", "mes 5 derniers gros devis au-dessus de 20000".
 - "rdv_sans_compte_rendu" -- {"jours": entier défaut 7}. Ex. "combien de rdv passés ces 7 derniers jours n'ont pas de compte-rendu", "les rdv du mois sans compte-rendu" -> jours=30.
 - "inconnu" -- aucun paramètre, si la demande ne correspond clairement à rien ci-dessus.
 
-Convertis toujours les nombres dictés en toutes lettres en entiers (ex. "dix" -> 10, "quinze mille" -> 15000, "trois derniers jours" -> jours=3). Réponds STRICTEMENT en JSON valide.`
+Convertis toujours les nombres dictés en toutes lettres en entiers (ex. "dix" -> 10, "quinze mille" -> 15000, "trois derniers jours" -> jours=3). "CA" est l'abréviation usuelle de "chiffre d'affaires" -- traite-le comme un synonyme exact. Réponds STRICTEMENT en JSON valide.`
 
 export async function POST(req: NextRequest) {
   try {

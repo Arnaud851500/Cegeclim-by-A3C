@@ -254,13 +254,21 @@ function motsVersNumeroClient(texte: string): string {
  * (réseau coupé, API indisponible...), pour ne jamais bloquer les
  * demandes simples les plus fréquentes. Ne couvre PAS les nouveaux
  * intents paramétrés (rdv_prochains avec un nombre précis, devis_montant,
- * ca_periode, rdv_sans_compte_rendu...) -- une regex ne peut pas extraire
- * ces paramètres de façon fiable ; dans ce cas la personne obtient un
- * comportement par défaut raisonnable plutôt qu'un blocage complet. */
+ * ca_periode avec période/famille précises, rdv_sans_compte_rendu...) --
+ * une regex ne peut pas extraire ces paramètres de façon fiable ; dans ce
+ * cas la personne obtient un comportement par défaut raisonnable plutôt
+ * qu'un blocage complet. */
 function classifierChoixRepli(transcript: string): { intent: Intent; params: IntentParams } | null {
   const t = normaliser(transcript)
   if (/compte[- ]?rendu/.test(t)) return { intent: 'compte_rendu', params: {} }
   if (/alerte/.test(t)) return { intent: 'alertes', params: {} }
+  // CORRECTIF : "ca" seul est trop ambigu en repli local (se confond avec
+  // "ça" une fois les accents retirés par normaliser()) -- on exige la
+  // formulation explicite "chiffre d'affaires" pour ce chemin de secours
+  // sans réseau. periode volontairement absent des params : genererResume()
+  // retombe sur "aujourd'hui" par défaut quand params.periode n'est pas
+  // fourni, donc pas besoin de le deviner ici.
+  if (/chiffre.*affaires?/.test(t)) return { intent: 'ca_periode', params: {} }
 
   const estSemaineProchaine = /semaine\s+prochaine|prochaine\s+semaine/.test(t)
   const estRdv = /\brdv\b|rendez[- ]?vous|reunion|reunions|agenda|planning|visites?\b/.test(t)
