@@ -18,7 +18,11 @@ import { supabase } from '@/lib/supabaseClient'
 //   4. Fiche détail par référence : stock par dépôt (get_stock_par_depot,
 //      même RPC que l'écran desktop "Projections stock") + projection
 //      hebdomadaire (réutilise /api/stocks-disponibilites/detail, la même
-//      route que la fiche article desktop -- pas de nouvelle route créée).
+//      route que la fiche article desktop -- pas de nouvelle route créée)
+//      + prochaines livraisons fournisseurs attendues (dates + quantités,
+//      depuis v_commandes_fournisseurs_ouvertes_enrichies -- ce sont ces
+//      commandes qui produisent les remontées vertes du graphe de
+//      projection).
 //      Peut aussi s'ouvrir directement via `cibleReference` (venu d'un
 //      autre écran -- ex. tap sur une ligne d'article dans un devis/BL),
 //      sans repasser par la recherche.
@@ -57,6 +61,18 @@ type ProjectionWeekRow = {
 
 type FamilleRow = { famille: string; famille_macro: string; libelle_famille: string | null }
 
+// Une ligne de commande fournisseur ouverte (pas encore livrée) pour la
+// référence consultée -- c'est ce qui alimente les remontées vertes du
+// graphe de projection (commandes_fournisseurs_attendues, agrégées par
+// semaine). Ici on affiche le détail ligne à ligne, avec la date réelle.
+type CommandeFournisseurRow = {
+  numero_piece: string | null
+  fournisseur_nom: string | null
+  depot: string | null
+  date_livraison_calculee: string | null
+  quantite_attendue: number
+}
+
 const ALERT_COLOR: Record<string, string> = {
   ROUGE: '#C1683C',
   ORANGE: '#D69A4A',
@@ -72,6 +88,14 @@ const DEPOTS_PROPOSES = [
   'MARMANDE CEGECLIM', 'MERIGNAC CEGECLIM', 'PAU CEGECLIM',
 ]
 
+// SAGE utilise 1753-01-01 (date minimale DATETIME de SQL Server) comme
+// valeur "vide" quand la date de livraison n'a pas encore été confirmée
+// par le fournisseur -- pareil que la logique déjà en place côté
+// projection (cf_retard : ces commandes sont pinées en semaine 1, donc
+// traitées comme "à venir en premier" plutôt qu'ignorées). On applique le
+// même principe ici plutôt que d'afficher une date absurde.
+const SEUIL_DATE_VALIDE = '2000-01-01'
+
 function toNumber(v: unknown): number {
   const n = Number(v)
   return Number.isFinite(n) ? n : 0
@@ -83,6 +107,9 @@ function formatDateCourte(iso?: string | null): string {
   if (!iso) return '—'
   const [y, m, d] = iso.slice(0, 10).split('-')
   return `${d}/${m}/${y.slice(2)}`
+}
+function dateLivraisonValide(iso?: string | null): boolean {
+  return Boolean(iso) && iso! >= SEUIL_DATE_VALIDE
 }
 
 // Détecte une saisie "liste de références" (plusieurs lignes / virgules /
@@ -503,7 +530,7 @@ function MiniStat({ label, value, accent }: { label: string; value: string; acce
   )
 }
 
-// ── Fiche détail : stock par dépôt + projection hebdomadaire ─────────────
+// ── Fiche détail : stock par dépôt + projection hebdomadaire + livraisons ──
 
 function StockArticleDetailSheet({
   reference, designation, onClose,
@@ -516,6 +543,15 @@ function StockArticleDetailSheet({
   const [projLoading, setProjLoading] = useState(true)
   const [projError, setProjError] = useState<string | null>(null)
   const [designationResolue, setDesignationResolue] = useState(designation)
+
+  // Prochaines livraisons fournisseurs attendues pour cette référence --
+  // ce sont ces commandes ouvertes qui produisent les remontées vertes du
+  // graphe de projection (commandes_fournisseurs_attendues, agrégées par
+  // semaine) ; ici on affiche chaque commande individuellement avec sa
+  // date réelle et sa quantité.
+  const [livraisonsRows, setLivraisonsRows] = useState<CommandeFournisseurRow[] | null>(null)
+  const [livraisonsLoading, setLivraisonsLoading] = useState(true)
+  const [livraisonsError, setLivraisonsError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -557,6 +593,39 @@ function StockArticleDetailSheet({
     return () => { cancelled = true }
   }, [reference])
 
+  useEffect(() => {
+    let cancelled = false
+    async function loadLivraisons() {
+      setLivraisonsLoading(true)
+      setLivraisonsError(null)
+      const { data, error } = await supabase
+        .from('v_commandes_fournisseurs_ouvertes_enrichies')
+        .select('numero_piece, fournisseur_nom, depot, date_livraison_calculee, quantite_attendue')
+        .eq('reference_article', reference)
+        .gt('quantite_attendue', 0)
+        .order('date_livraison_calculee', { ascending: true })
+        .limit(20)
+      if (cancelled) return
+      if (error) {
+        setLivraisonsError(error.message)
+        setLivraisonsRows([])
+      } else {
+        setLivraisonsRows(
+          ((data || []) as any[]).map((r) => ({
+            numero_piece: r.numero_piece,
+            fournisseur_nom: r.fournisseur_nom,
+            depot: r.depot,
+            date_livraison_calculee: r.date_livraison_calculee,
+            quantite_attendue: toNumber(r.quantite_attendue),
+          })),
+        )
+      }
+      setLivraisonsLoading(false)
+    }
+    void loadLivraisons()
+    return () => { cancelled = true }
+  }, [reference])
+
   // Résout la désignation si arrivée vide (ex. ouverture directe via
   // cibleReference sans désignation connue à l'avance) -- lookup léger,
   // une seule fois, sans bloquer l'affichage du reste de la fiche.
@@ -588,6 +657,22 @@ function StockArticleDetailSheet({
     const r = projRows.find((r) => toNumber(r.stock_projete) < 0)
     return r?.periode_debut || null
   }, [projRows])
+
+  // Livraisons à date confirmée triées en premier, celles à "date à
+  // confirmer" (sentinelle SAGE 1753-01-01, cf. dateLivraisonValide)
+  // regroupées ensuite -- même traitement que la logique de projection
+  // (cf_retard), qui les considère comme imminentes plutôt que lointaines.
+  const livraisonsTriees = useMemo(() => {
+    if (!livraisonsRows) return []
+    const avecDate = livraisonsRows.filter((r) => dateLivraisonValide(r.date_livraison_calculee))
+    const sansDate = livraisonsRows.filter((r) => !dateLivraisonValide(r.date_livraison_calculee))
+    return [...avecDate, ...sansDate]
+  }, [livraisonsRows])
+
+  const totalQuantiteAttendue = useMemo(
+    () => livraisonsTriees.reduce((acc, r) => acc + r.quantite_attendue, 0),
+    [livraisonsTriees],
+  )
 
   const niveauActuel = projRows && projRows.length > 0 ? projRows[0].niveau_alerte || 'VERT' : null
 
@@ -637,6 +722,58 @@ function StockArticleDetailSheet({
               <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.35)', padding: '10px 0' }}>Aucune projection disponible pour cette référence.</div>
             ) : (
               <ProjectionMiniChart rows={projRows} />
+            )}
+          </div>
+
+          {/* ── Prochaines livraisons fournisseurs ── */}
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
+                Prochaines livraisons attendues
+              </div>
+              {livraisonsTriees.length > 0 && (
+                <div style={{ fontSize: 11.5, color: '#8FC7DA', fontWeight: 600 }}>
+                  Total {formatNumber(totalQuantiteAttendue)}
+                </div>
+              )}
+            </div>
+            {livraisonsError && (
+              <div style={{ marginBottom: 8, fontSize: 12, color: '#e0a685' }}>{livraisonsError}</div>
+            )}
+            {livraisonsLoading ? (
+              <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)', padding: '16px 0', textAlign: 'center' }}>Chargement…</div>
+            ) : livraisonsTriees.length === 0 ? (
+              <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)', padding: '16px 0', textAlign: 'center' }}>
+                Aucune commande fournisseur en cours pour cette référence.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {livraisonsTriees.map((r, i) => {
+                  const dateValide = dateLivraisonValide(r.date_livraison_calculee)
+                  return (
+                    <div
+                      key={`${r.numero_piece || 'cdf'}-${i}`}
+                      style={{
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
+                        borderRadius: 10, border: '1px solid rgba(75,146,172,0.25)', background: 'rgba(75,146,172,0.08)',
+                        padding: '9px 12px',
+                      }}
+                    >
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: dateValide ? '#8FC7DA' : '#D69A4A' }}>
+                          {dateValide ? formatDateCourte(r.date_livraison_calculee) : 'Date à confirmer'}
+                        </div>
+                        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginTop: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {[r.numero_piece, r.fournisseur_nom, r.depot].filter(Boolean).join(' · ') || '—'}
+                        </div>
+                      </div>
+                      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 15, fontWeight: 700, color: '#fff', flexShrink: 0 }}>
+                        + {formatNumber(r.quantite_attendue)}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
             )}
           </div>
 
