@@ -1172,7 +1172,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
 
       const { data: access } = await supabase
         .from('user_page_access')
-        .select('display_name, blg_partner_id')
+        .select('display_name, blg_partner_id, allowed_agences, allowed_collaborateurs')
         .eq('email', email)
         .maybeSingle()
       const displayName = String(access?.display_name || '').trim() || email.split('@')[0]
@@ -1537,18 +1537,26 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
           resultat = `${sansCr.length} de tes rendez-vous des ${jours} derniers jours n'ont pas de compte-rendu :\n${lignes.join('\n')}${suffixe}`
         }
       } else if (portee === 'alertes') {
-        // (AppShell) et le hook useMobileAlertsCount, mais réinterrogée
-        // ici directement -- ce composant n'a pas accès à ce hook (arbre
-        // de composants différent).
+        // Même filtrage périmètre (agence/collaborateur du profil) que
+        // l'écran "Mes alertes" (useMobileAlertsCount.ts) -- CORRECTIF :
+        // cette branche interrogeait les mêmes sources SANS ce filtre
+        // (logique dupliquée, ce composant n'a pas accès au hook), d'où
+        // un total remonté à la voix plus large que ce qu'affiche l'écran
+        // pour un profil restreint à certaines agences/collaborateurs.
         const alertesTexte: string[] = []
+        const allowedAgences = ((access?.allowed_agences || []) as string[]).map((v) => String(v || '').trim()).filter(Boolean)
+        const allowedCollaborateurs = ((access?.allowed_collaborateurs || []) as string[]).map((v) => String(v || '').trim()).filter(Boolean)
 
         try {
-          const { data: cdcRows } = await supabase
+          let requeteCdc = supabase
             .from('v_portefeuille_livraison_lignes')
             .select('type_document,numero_document,numero_tiers')
             .eq('type_document', 'CDC')
             .or('mois_livraison.eq.AVANT_2026,date_livraison.lt.2026-01-01')
             .limit(50000)
+          if (allowedAgences.length > 0) requeteCdc = requeteCdc.in('agence', allowedAgences)
+          if (allowedCollaborateurs.length > 0) requeteCdc = requeteCdc.in('code_representant', allowedCollaborateurs)
+          const { data: cdcRows } = await requeteCdc
           const distinctCdc = new Set(
             (cdcRows || []).map((r: any) => [r.type_document, r.numero_document, r.numero_tiers].map((v) => String(v ?? '').trim()).join('::')),
           )
@@ -1569,12 +1577,14 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         } catch { /* idem */ }
 
         try {
-          const { data: gazRows } = await supabase.rpc('get_client_certification_alert_rows', { p_kind: 'capacite', p_limit: 10000 })
+          const { data: gazRows } = await supabase.rpc('get_client_certification_alert_rows_for_user', {
+            p_email: email,
+            p_kind: 'capacite',
+            p_limit: 10000,
+          })
           const rows = gazRows || []
-          if (rows.length > 0) {
-            const expirees = rows.filter((r: any) => String(r.alert_status || '').toLowerCase() === 'expired').length
-            alertesTexte.push(`${rows.length} capacité${rows.length > 1 ? 's' : ''} gaz à surveiller${expirees > 0 ? `, dont ${expirees} déjà expirée${expirees > 1 ? 's' : ''}` : ''}`)
-          }
+          const expirees = rows.filter((r: any) => String(r.alert_status || '').toLowerCase() === 'expired').length
+          if (rows.length > 0) alertesTexte.push(`${rows.length} capacité${rows.length > 1 ? 's' : ''} gaz à surveiller${expirees > 0 ? `, dont ${expirees} déjà expirée${expirees > 1 ? 's' : ''}` : ''}`)
         } catch { /* idem */ }
 
         resultat = alertesTexte.length === 0

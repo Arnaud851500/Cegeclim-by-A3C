@@ -25,7 +25,35 @@ import { acquerirVerrouVocal, libererVerrouVocal, verrouVocalDetenuPar, verrouVo
  * "corrompu". On redécode donc systématiquement l'enregistrement via
  * l'API Web Audio et on le ré-encode en WAV PCM 16 bits avant l'upload —
  * ça garantit un fichier propre quel que soit le navigateur.
+ *
+ * CORRECTIF : les 3 appels réseau qui attendaient du JSON (voice-report,
+ * transcribe, voice-report/confirm) faisaient `await res.json()`
+ * directement -- si le serveur répond avec autre chose (page d'erreur
+ * HTML d'un timeout de fonction serverless, le plus probable pour un
+ * compte-rendu de réunion long où la transcription+structuration dépasse
+ * le délai max autorisé), ça plantait avec un SyntaxError natif du
+ * navigateur illisible ("The string did not match the expected
+ * pattern."). parserReponseJson() ci-dessous lit le texte d'abord et
+ * lève une erreur lisible (avec le code HTTP et un extrait de la
+ * réponse) si ce n'est pas du JSON valide, au lieu de planter au hasard.
  */
+
+/** Lit la réponse en texte puis tente de la parser en JSON -- si ce n'est
+ * pas du JSON valide (page d'erreur HTML d'un timeout serveur, la cause la
+ * plus probable pour un enregistrement long), lève une erreur lisible
+ * plutôt que de laisser JSON.parse planter avec un message natif
+ * cryptique. Voir note en tête de fichier. */
+async function parserReponseJson(res: Response): Promise<any> {
+  const texte = await res.text()
+  try {
+    return JSON.parse(texte)
+  } catch {
+    const extrait = texte.slice(0, 200).replace(/\s+/g, ' ').trim()
+    throw new Error(
+      `Réponse invalide du serveur (HTTP ${res.status}). Probablement un délai serveur dépassé (enregistrement trop long à traiter)${extrait ? ` — ${extrait}` : ''}.`
+    )
+  }
+}
 
 type Tache = { description: string; echeance: string | null; assigned_to_email: string | null }
 
@@ -282,11 +310,6 @@ export default function VoiceReportButtons({
   const [spokenAffiche, setSpokenAffiche] = useState('')
   const [tachesAffichees, setTachesAffichees] = useState<Tache[]>([])
   const [lectureEnCours, setLectureEnCours] = useState(false)
-  // Voix, vitesse de lecture et mode "annonce courte" choisis par
-  // l'utilisateur (écran d'accueil, "🎙️ Voix"), tous les trois dans
-  // vision_tci_preferences -- chargés une fois, réutilisés pour tous les
-  // appels /speak de ce composant. Replis : 'nova' / 1.15 / false si
-  // aucune préférence enregistrée.
   const [voixPreferee, setVoixPreferee] = useState('nova')
   const [vitesseLecture, setVitesseLecture] = useState(1.15)
   const [annonceCourte, setAnnonceCourte] = useState(false)
@@ -386,8 +409,6 @@ export default function VoiceReportButtons({
     return ''
   }
 
-  /** Transmet la vitesse de lecture préférée de l'utilisateur à chaque
-   * appel -- voir /api/atelier-ai/speak, qui l'applique côté OpenAI TTS. */
   async function jouerTexte(texte: string) {
     if (!texte) return
     setLectureEnCours(true)
@@ -592,12 +613,6 @@ export default function VoiceReportButtons({
 
     try {
       setEtape('annonce')
-      // "Annonce courte" (réglage utilisateur, vision_tci_preferences.
-      // annonce_courte) : ne raccourcit QUE la phrase d'accueil du mode
-      // "tâche" -- le compte-rendu garde toujours sa phrase complète
-      // (compléter/synthétiser), quel que soit ce réglage, car le contexte
-      // (avec ou sans compte-rendu existant) reste une information utile
-      // à l'oral avant de commencer à dicter.
       const phraseAccueil =
         mode === 'compte_rendu'
           ? completer
@@ -637,7 +652,7 @@ export default function VoiceReportButtons({
       form.append('user_email', userEmail)
 
       const res = await fetch('/api/atelier-ai/voice-report', { method: 'POST', body: form })
-      const data = await res.json()
+      const data = await parserReponseJson(res)
       if (annulerRef.current) return
       if (!res.ok) throw new Error(data?.error || 'Erreur de traitement.')
 
@@ -690,7 +705,7 @@ export default function VoiceReportButtons({
         form.append('audio', blobWav, 'audio.wav')
         try {
           const res = await fetch('/api/atelier-ai/transcribe', { method: 'POST', body: form })
-          const data = await res.json()
+          const data = await parserReponseJson(res)
           if (res.ok) {
             echeanceTrouvee = parserEcheanceParlee(String(data.transcript || ''))
           }
@@ -729,7 +744,7 @@ export default function VoiceReportButtons({
       form.append('taches', JSON.stringify(dernierResultatRef.current?.taches || []))
 
       const res = await fetch('/api/atelier-ai/voice-report/confirm', { method: 'POST', body: form })
-      const data = await res.json()
+      const data = await parserReponseJson(res)
       if (annulerRef.current) return
       if (!res.ok) throw new Error(data?.error || 'Erreur de confirmation.')
 
@@ -791,14 +806,6 @@ export default function VoiceReportButtons({
     }
   }, [])
 
-  // Changement d'écran (route Next.js) : coupe immédiatement toute session
-  // vocale ACTIVE pour cette instance -- micro, enregistreur, lecture,
-  // verrou -- exactement comme "Stop écoute", mais déclenché automatiquement
-  // plutôt qu'au tap de l'utilisateur. Sans effet si aucune session n'était
-  // en cours (verrouVocalDetenuPar renvoie false). Complète le nettoyage au
-  // démontage ci-dessus pour les cas où la navigation ne démonte pas
-  // immédiatement le composant (ex. shell d'app qui garde les écrans en
-  // mémoire).
   const pathname = usePathname()
   const pathnamePrecedentRef = useRef(pathname)
   useEffect(() => {
