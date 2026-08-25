@@ -19,13 +19,19 @@ import type { AlertDetailItem } from './MobileAlertes'
  * uniquement si le droit correspondant (show_alert_*) est activé pour le
  * profil de l'utilisateur — exactement comme le bandeau du haut côté PC.
  *
- * Recommandation pour la suite : extraire cette logique dans un hook
- * partagé (ex: useAlertSignals) consommé à la fois par AppShell (desktop)
- * et ce hook, pour ne pas maintenir deux implémentations qui risquent de
- * diverger, et pour récupérer le filtrage fin par agence/collaborateur
- * (actuellement absent ici : chaque signal remonte le total non filtré par
- * périmètre, ce qui peut afficher un chiffre plus large que côté desktop
- * pour un profil restreint à certaines agences).
+ * CORRECTIF (25/08) : CDC < 2026 et Capacité gaz appliquent désormais le
+ * même filtrage périmètre que le desktop -- allowed_agences ET
+ * allowed_collaborateurs du profil (user_page_access), restriction
+ * cumulative (chaque liste non vide réduit encore le résultat). Avant ce
+ * correctif, ces deux compteurs remontaient le total NON filtré, ce qui
+ * pouvait afficher un chiffre plus large côté mobile que côté desktop
+ * pour un profil restreint. Les deux tables/vues sous-jacentes stockent
+ * déjà le collaborateur sous forme de CODE (ex. "MPEYRE"), identique au
+ * format de allowed_collaborateurs -- pas de résolution de nom nécessaire
+ * côté CDC. Côté capacité gaz (cache sans colonne agence), la RPC dédiée
+ * get_client_certification_alert_rows_for_user fait la jointure vers
+ * ref_collaborateurs pour déduire l'agence. À faire, CERFA et Frais de
+ * port restent non filtrés par périmètre pour l'instant (hors demande).
  *
  * CORRECTIF : `assigned_to` peut contenir soit l'email soit le nom affiché
  * selon l'ancienneté de la ligne (même souci que côté desktop TodoPage.tsx,
@@ -47,18 +53,27 @@ export function useMobileAlertsCount() {
   // Identités (email + nom affiché) résolues une fois et réutilisées par
   // fetchTodoList — évite de re-résoudre le nom à chaque appel du tiroir.
   const identitiesRef = useRef<string[]>([])
+  // Périmètre agence/collaborateur (user_page_access.allowed_agences /
+  // allowed_collaborateurs) résolu une fois en même temps que les
+  // identités -- réutilisé par CDC<2026 et Capacité gaz (compteur ET
+  // tiroir de détail), pour rester cohérent avec le filtrage desktop.
+  const perimetreRef = useRef<{ agences: string[]; collaborateurs: string[] }>({ agences: [], collaborateurs: [] })
   const lastLoadRef = useRef(0)
 
   async function resolveIdentities(): Promise<string[]> {
     if (identitiesRef.current.length > 0) return identitiesRef.current
     const { data: access } = await supabase
       .from('user_page_access')
-      .select('display_name')
+      .select('display_name, allowed_agences, allowed_collaborateurs')
       .eq('email', email)
       .maybeSingle()
     const displayName = String(access?.display_name || '').trim()
     const identities = Array.from(new Set([email, displayName].map((v) => String(v || '').trim()).filter(Boolean)))
     identitiesRef.current = identities
+    perimetreRef.current = {
+      agences: ((access?.allowed_agences || []) as string[]).map((v) => String(v || '').trim()).filter(Boolean),
+      collaborateurs: ((access?.allowed_collaborateurs || []) as string[]).map((v) => String(v || '').trim()).filter(Boolean),
+    }
     return identities
   }
 
@@ -81,6 +96,7 @@ export function useMobileAlertsCount() {
       try {
         const identities = await resolveIdentities()
         const assignedFilter = buildAssignedFilter(identities)
+        const { agences: allowedAgences, collaborateurs: allowedCollaborateurs } = perimetreRef.current
 
         if (rights.show_alert_todo) {
           const { count } = await supabase
@@ -110,12 +126,20 @@ export function useMobileAlertsCount() {
 
         if (rights.show_alert_cdc_liv_avant_2026) {
           try {
-            const { data, error } = await supabase
+            let requete = supabase
               .from('v_portefeuille_livraison_lignes')
               .select('type_document,numero_document,numero_tiers')
               .eq('type_document', 'CDC')
               .or('mois_livraison.eq.AVANT_2026,date_livraison.lt.2026-01-01')
               .limit(50000)
+            // Périmètre agence/collaborateur, comme le bandeau desktop --
+            // agence et code_representant sont déjà dans le même format
+            // que allowed_agences/allowed_collaborateurs, pas de
+            // résolution de nom nécessaire.
+            if (allowedAgences.length > 0) requete = requete.in('agence', allowedAgences)
+            if (allowedCollaborateurs.length > 0) requete = requete.in('code_representant', allowedCollaborateurs)
+
+            const { data, error } = await requete
             if (error) throw error
 
             const distinctDocuments = new Set(
@@ -164,7 +188,11 @@ export function useMobileAlertsCount() {
 
         if (rights.show_alert_capacite_gaz) {
           try {
-            const { data, error } = await supabase.rpc('get_client_certification_alert_rows', {
+            // RPC filtrée périmètre (agence + collaborateur), plutôt que
+            // get_client_certification_alert_rows non filtrée -- voir
+            // note en tête de fichier.
+            const { data, error } = await supabase.rpc('get_client_certification_alert_rows_for_user', {
+              p_email: email,
               p_kind: 'capacite',
               p_limit: 10000,
             })
@@ -260,14 +288,23 @@ export function useMobileAlertsCount() {
     return (data || []) as Record<string, any>[]
   }
 
-  /** Liste des CDC dont la date de livraison est antérieure à 2026. */
+  /** Liste des CDC dont la date de livraison est antérieure à 2026 --
+   * filtrée sur le même périmètre agence/collaborateur que le compteur
+   * (voir load() ci-dessus). */
   async function fetchCdcAvant2026List() {
     if (!email) return []
-    const { data, error } = await supabase
+    await resolveIdentities()
+    const { agences: allowedAgences, collaborateurs: allowedCollaborateurs } = perimetreRef.current
+
+    let requete = supabase
       .from('v_portefeuille_livraison_lignes')
       .select('numero_document,numero_tiers,agence,representant,mois_livraison,date_livraison')
       .eq('type_document', 'CDC')
       .or('mois_livraison.eq.AVANT_2026,date_livraison.lt.2026-01-01')
+    if (allowedAgences.length > 0) requete = requete.in('agence', allowedAgences)
+    if (allowedCollaborateurs.length > 0) requete = requete.in('code_representant', allowedCollaborateurs)
+
+    const { data, error } = await requete
       .order('date_livraison', { ascending: true })
       .limit(500)
     if (error) {
@@ -294,10 +331,12 @@ export function useMobileAlertsCount() {
   }
 
   /** Liste des clients avec une capacité gaz expirée ou arrivant à
-   * échéance — même RPC que le panneau desktop (AppShell). */
+   * échéance — RPC filtrée périmètre (agence + collaborateur), même
+   * fonction que le compteur. */
   async function fetchCapaciteGazList() {
     if (!email) return []
-    const { data, error } = await supabase.rpc('get_client_certification_alert_rows', {
+    const { data, error } = await supabase.rpc('get_client_certification_alert_rows_for_user', {
+      p_email: email,
       p_kind: 'capacite',
       p_limit: 500,
     })
