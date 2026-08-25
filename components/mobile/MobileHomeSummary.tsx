@@ -226,15 +226,13 @@ function formatEvolutionAffichee(pct: number | null): string {
   const fleche = pct >= 0 ? '▲' : '▼'
   return ` (${fleche} ${Math.abs(pct).toFixed(1)}%)`
 }
-/** Libellé de la période de comparaison utilisée pour l'évolution --
- * dépend de la période demandée, PAS toujours "sur un an" (bug précédent :
- * une comparaison jour-vs-veille était quand même annoncée "sur un an").
- * hier/aujourd'hui se comparent à J-1 -> "hier" ; mois se compare au même
- * intervalle le mois précédent ; année à la même période l'an dernier. */
+/** Libellé de la période de comparaison pour l'évolution -- utilisée
+ * UNIQUEMENT pour mois/année (jour/hier n'affichent plus d'évolution du
+ * tout, comparaison trop bruitée). Toujours vs N-1 = l'année dernière sur
+ * le même intervalle, jamais vs le mois précédent. */
 function libelleComparaisonPeriode(periode?: IntentParams['periode']): string {
-  if (periode === 'mois') return 'le mois dernier'
-  if (periode === 'annee') return "l'année dernière"
-  return 'hier'
+  if (periode === 'mois') return "le même mois l'année dernière"
+  return "l'année dernière"
 }
 function formatEvolutionOrale(pct: number | null, periode?: IntentParams['periode']): string {
   if (pct === null) return ''
@@ -1387,20 +1385,18 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
           periodeTexte = "aujourd'hui"
         }
 
-        // Période de comparaison (n-1) -- même longueur de période, un cran
-        // plus tôt : la veille pour jour/hier, le même intervalle le mois
-        // précédent pour "mois", la même plage l'an dernier pour "année".
-        let dateDebutPrec: Date
-        let dateFinPrec: Date
-        if (params.periode === 'mois') {
-          dateDebutPrec = new Date(dateDebut); dateDebutPrec.setMonth(dateDebutPrec.getMonth() - 1)
-          dateFinPrec = new Date(dateFin); dateFinPrec.setMonth(dateFinPrec.getMonth() - 1)
-        } else if (params.periode === 'annee') {
+        // Comparaison N-1 -- UNIQUEMENT pour mois/année (vs la même période
+        // l'année dernière, jamais vs le mois précédent : une comparaison
+        // "mois en cours vs mois précédent" n'a pas de sens ici, on veut
+        // l'évolution réelle d'une année sur l'autre). Pas de comparaison
+        // du tout pour jour/hier : le jour-vs-veille n'est pas un
+        // indicateur pertinent (trop de bruit d'un jour à l'autre).
+        const comparaisonPertinente = params.periode === 'mois' || params.periode === 'annee'
+        let dateDebutPrec: Date | null = null
+        let dateFinPrec: Date | null = null
+        if (params.periode === 'mois' || params.periode === 'annee') {
           dateDebutPrec = new Date(dateDebut); dateDebutPrec.setFullYear(dateDebutPrec.getFullYear() - 1)
           dateFinPrec = new Date(dateFin); dateFinPrec.setFullYear(dateFinPrec.getFullYear() - 1)
-        } else {
-          dateDebutPrec = new Date(dateDebut); dateDebutPrec.setDate(dateDebutPrec.getDate() - 1)
-          dateFinPrec = dateDebutPrec
         }
 
         const familleDemandee = safeText(params.famille)
@@ -1416,13 +1412,15 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
             p_famille_macro: familleRapprochee,
             p_agence: agenceRapprochee,
           }),
-          supabase.rpc('get_ca_periode_multi_documents', {
-            p_date_debut: isoDepuisDateLocale(dateDebutPrec),
-            p_date_fin: isoDepuisDateLocale(dateFinPrec),
-            p_collaborateur: null,
-            p_famille_macro: familleRapprochee,
-            p_agence: agenceRapprochee,
-          }),
+          comparaisonPertinente && dateDebutPrec && dateFinPrec
+            ? supabase.rpc('get_ca_periode_multi_documents', {
+                p_date_debut: isoDepuisDateLocale(dateDebutPrec),
+                p_date_fin: isoDepuisDateLocale(dateFinPrec),
+                p_collaborateur: null,
+                p_famille_macro: familleRapprochee,
+                p_agence: agenceRapprochee,
+              })
+            : Promise.resolve({ data: [], error: null }),
         ])
         if (error) throw error
         if (errorPrec) throw errorPrec
@@ -1437,9 +1435,12 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         const montantDevis = parType.get('Devis') || 0
         const montantCdc = parType.get('CDC') || 0
         const montantBl = parType.get('BL') || 0
-        const evoDevis = calculerEvolutionPct(montantDevis, parTypePrec.get('Devis') || 0)
-        const evoCdc = calculerEvolutionPct(montantCdc, parTypePrec.get('CDC') || 0)
-        const evoBl = calculerEvolutionPct(montantBl, parTypePrec.get('BL') || 0)
+        // Pas d'évolution du tout pour jour/hier (comparaisonPertinente
+        // false) -- un jour vs la veille est trop bruité pour être un
+        // indicateur utile.
+        const evoDevis = comparaisonPertinente ? calculerEvolutionPct(montantDevis, parTypePrec.get('Devis') || 0) : null
+        const evoCdc = comparaisonPertinente ? calculerEvolutionPct(montantCdc, parTypePrec.get('CDC') || 0) : null
+        const evoBl = comparaisonPertinente ? calculerEvolutionPct(montantBl, parTypePrec.get('BL') || 0) : null
 
         const clausesContexte: string[] = []
         if (familleRapprochee) clausesContexte.push(`sur ${familleRapprochee}`)
