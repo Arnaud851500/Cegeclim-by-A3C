@@ -22,7 +22,8 @@ import { supabase } from '@/lib/supabaseClient'
 //      + prochaines livraisons fournisseurs attendues (dates + quantités,
 //      depuis v_commandes_fournisseurs_ouvertes_enrichies -- ce sont ces
 //      commandes qui produisent les remontées vertes du graphe de
-//      projection).
+//      projection ; section repliée par défaut, affiche juste le total,
+//      dépliable pour voir le détail ligne à ligne).
 //      Peut aussi s'ouvrir directement via `cibleReference` (venu d'un
 //      autre écran -- ex. tap sur une ligne d'article dans un devis/BL),
 //      sans repasser par la recherche.
@@ -552,6 +553,10 @@ function StockArticleDetailSheet({
   const [livraisonsRows, setLivraisonsRows] = useState<CommandeFournisseurRow[] | null>(null)
   const [livraisonsLoading, setLivraisonsLoading] = useState(true)
   const [livraisonsError, setLivraisonsError] = useState<string | null>(null)
+  // Repliée par défaut -- on ne montre que le total tant que l'utilisateur
+  // ne demande pas le détail ligne à ligne, pour ne pas noyer la fiche
+  // (une référence peut avoir une dizaine de commandes ouvertes).
+  const [livraisonsOuvertes, setLivraisonsOuvertes] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -725,28 +730,48 @@ function StockArticleDetailSheet({
             )}
           </div>
 
-          {/* ── Prochaines livraisons fournisseurs ── */}
+          {/* ── Prochaines livraisons fournisseurs (repliable) ── */}
           <div>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-              <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
-                Prochaines livraisons attendues
-              </div>
+            <button
+              type="button"
+              onClick={() => setLivraisonsOuvertes((v) => !v)}
+              disabled={livraisonsLoading || livraisonsTriees.length === 0}
+              style={{
+                width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                background: 'none', border: 'none', padding: 0, marginBottom: livraisonsOuvertes ? 8 : 0,
+              }}
+            >
+              <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
+                  Prochaines livraisons attendues
+                </span>
+                {!livraisonsLoading && livraisonsTriees.length > 0 && (
+                  <span
+                    style={{
+                      display: 'inline-block', transform: livraisonsOuvertes ? 'rotate(180deg)' : 'none',
+                      transition: 'transform .15s', color: 'rgba(255,255,255,0.4)', fontSize: 10,
+                    }}
+                  >
+                    ▾
+                  </span>
+                )}
+              </span>
               {livraisonsTriees.length > 0 && (
-                <div style={{ fontSize: 11.5, color: '#8FC7DA', fontWeight: 600 }}>
+                <span style={{ fontSize: 11.5, color: '#8FC7DA', fontWeight: 600 }}>
                   Total {formatNumber(totalQuantiteAttendue)}
-                </div>
+                </span>
               )}
-            </div>
+            </button>
             {livraisonsError && (
-              <div style={{ marginBottom: 8, fontSize: 12, color: '#e0a685' }}>{livraisonsError}</div>
+              <div style={{ marginTop: 8, fontSize: 12, color: '#e0a685' }}>{livraisonsError}</div>
             )}
             {livraisonsLoading ? (
               <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)', padding: '16px 0', textAlign: 'center' }}>Chargement…</div>
             ) : livraisonsTriees.length === 0 ? (
-              <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)', padding: '16px 0', textAlign: 'center' }}>
+              <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)', padding: '8px 0 0' }}>
                 Aucune commande fournisseur en cours pour cette référence.
               </div>
-            ) : (
+            ) : livraisonsOuvertes ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {livraisonsTriees.map((r, i) => {
                   const dateValide = dateLivraisonValide(r.date_livraison_calculee)
@@ -774,7 +799,7 @@ function StockArticleDetailSheet({
                   )
                 })}
               </div>
-            )}
+            ) : null}
           </div>
 
           {/* ── Par dépôt ── */}
