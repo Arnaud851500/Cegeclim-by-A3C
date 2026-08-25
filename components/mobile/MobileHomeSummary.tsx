@@ -226,10 +226,20 @@ function formatEvolutionAffichee(pct: number | null): string {
   const fleche = pct >= 0 ? '▲' : '▼'
   return ` (${fleche} ${Math.abs(pct).toFixed(1)}%)`
 }
-function formatEvolutionOrale(pct: number | null): string {
+/** Libellé de la période de comparaison utilisée pour l'évolution --
+ * dépend de la période demandée, PAS toujours "sur un an" (bug précédent :
+ * une comparaison jour-vs-veille était quand même annoncée "sur un an").
+ * hier/aujourd'hui se comparent à J-1 -> "hier" ; mois se compare au même
+ * intervalle le mois précédent ; année à la même période l'an dernier. */
+function libelleComparaisonPeriode(periode?: IntentParams['periode']): string {
+  if (periode === 'mois') return 'le mois dernier'
+  if (periode === 'annee') return "l'année dernière"
+  return 'hier'
+}
+function formatEvolutionOrale(pct: number | null, periode?: IntentParams['periode']): string {
   if (pct === null) return ''
   const sens = pct >= 0 ? 'en hausse de' : 'en baisse de'
-  return `, ${sens} ${Math.abs(pct).toFixed(0)} pour cent sur un an`
+  return `, ${sens} ${Math.abs(pct).toFixed(0)} pour cent par rapport à ${libelleComparaisonPeriode(periode)}`
 }
 
 /** Détecte le mot de commande "stop" (dicté seul, éventuellement entouré
@@ -1419,32 +1429,37 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
 
         const parType = new Map(((rows || []) as { type_document: string; montant_ht: number }[]).map((r) => [r.type_document, Number(r.montant_ht || 0)]))
         const parTypePrec = new Map(((rowsPrec || []) as { type_document: string; montant_ht: number }[]).map((r) => [r.type_document, Number(r.montant_ht || 0)]))
+        // CORRECTIF : "Devis" et "prise de commande" avaient été confondus
+        // en une seule ligne. Ce sont deux type_document distincts en base
+        // (Devis = devis créés, CDC = commande client = vraie prise de
+        // commande) -- 3 lignes désormais, Facturation retirée (mensuelle,
+        // sans intérêt à la maille jour/mois).
         const montantDevis = parType.get('Devis') || 0
+        const montantCdc = parType.get('CDC') || 0
         const montantBl = parType.get('BL') || 0
-        const montantFactures = parType.get('Factures') || 0
         const evoDevis = calculerEvolutionPct(montantDevis, parTypePrec.get('Devis') || 0)
+        const evoCdc = calculerEvolutionPct(montantCdc, parTypePrec.get('CDC') || 0)
         const evoBl = calculerEvolutionPct(montantBl, parTypePrec.get('BL') || 0)
-        const evoFactures = calculerEvolutionPct(montantFactures, parTypePrec.get('Factures') || 0)
 
         const clausesContexte: string[] = []
         if (familleRapprochee) clausesContexte.push(`sur ${familleRapprochee}`)
         if (agenceRapprochee) clausesContexte.push(`agence ${agenceRapprochee}`)
         const suffixeContexte = clausesContexte.length ? ` (${clausesContexte.join(', ')})` : ''
 
-        if (montantDevis === 0 && montantBl === 0 && montantFactures === 0) {
+        if (montantDevis === 0 && montantCdc === 0 && montantBl === 0) {
           resultat = `Aucun chiffre d'affaires enregistré ${periodeTexte}${suffixeContexte}.`
           resultatOral = resultat
         } else {
           resultat =
             `Ton chiffre d'affaires ${periodeTexte}${suffixeContexte} :\n` +
-            `1. Prise de commande (devis) : ${formatMontantParle(montantDevis)}${formatEvolutionAffichee(evoDevis)}\n` +
-            `2. Bons de livraison : ${formatMontantParle(montantBl)}${formatEvolutionAffichee(evoBl)}\n` +
-            `3. Facturation : ${formatMontantParle(montantFactures)}${formatEvolutionAffichee(evoFactures)}`
+            `Devis créés : ${formatMontantParle(montantDevis)}${formatEvolutionAffichee(evoDevis)}\n` +
+            `Prise de commande (CDC) : ${formatMontantParle(montantCdc)}${formatEvolutionAffichee(evoCdc)}\n` +
+            `Bon de livraison : ${formatMontantParle(montantBl)}${formatEvolutionAffichee(evoBl)}`
           resultatOral =
             `Ton chiffre d'affaires ${periodeTexte}${suffixeContexte} :\n` +
-            `1. Prise de commande, devis : ${formatMontantOral(montantDevis)}${formatEvolutionOrale(evoDevis)}\n` +
-            `2. Bons de livraison : ${formatMontantOral(montantBl)}${formatEvolutionOrale(evoBl)}\n` +
-            `3. Facturation : ${formatMontantOral(montantFactures)}${formatEvolutionOrale(evoFactures)}`
+            `Devis créés : ${formatMontantOral(montantDevis)}${formatEvolutionOrale(evoDevis, params.periode)}\n` +
+            `Prise de commande, CDC : ${formatMontantOral(montantCdc)}${formatEvolutionOrale(evoCdc, params.periode)}\n` +
+            `Bon de livraison : ${formatMontantOral(montantBl)}${formatEvolutionOrale(evoBl, params.periode)}`
         }
       } else if (portee === 'devis_montant') {
         // "Les N derniers devis/commandes/BL de plus de X euros" -- RPC
