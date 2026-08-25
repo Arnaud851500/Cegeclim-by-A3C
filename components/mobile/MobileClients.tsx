@@ -13,7 +13,6 @@ const CURRENT_MONTH = new Date().getMonth() + 1
 const CA_PROFILE_BANDS = ['400K€', '150K€', '80K€', '20K€', 'vide'] as const
 type CaBand = typeof CA_PROFILE_BANDS[number]
 
-const RDV_TYPE_KEYS = ['meeting', 'phoneCall', 'reminder', '4', '7', '9']
 const RDV_TYPE_LABELS: Record<string, string> = {
   meeting: 'RDV', phoneCall: 'Appel', reminder: 'Rappel',
   '4': 'RDV', '7': 'Appel', '9': 'Rappel',
@@ -142,8 +141,16 @@ type DocAgrege = {
   lignes: { reference_article: string; designation: string; quantite: number; montant_ht: number }[]
 }
 type ActionRow = { id: string; libelle: string; status: string; due_date: string | null; assigned_to: string | null }
+/** Visite unifiée (BLG synchronisé OU RDV "compagnon CEGECLIM") -- source
+ * v_rdv_unifie (voir CORRECTIF ci-dessous), pas crm_base_activity seul.
+ * blgActivityId/compagnonId : l'un des deux est rempli selon `source`,
+ * c'est celui-là (pas rdvId) qu'il faut passer à VoiceReportButtons pour
+ * lier un compte-rendu au bon rendez-vous (cf. openVisiteDetail). */
 type VisiteEvent = {
-  id: string
+  rdvId: string
+  source: 'blg' | 'compagnon'
+  blgActivityId: string | null
+  compagnonId: string | null
   type: string
   subject: string
   start: string
@@ -352,10 +359,12 @@ export default function MobileClients({
       const today = todayIso()
       const ysN1 = yearStartN1Iso()
       const sameDayN1 = sameDayLastYearIso()
+      const nowIso = new Date().toISOString()
 
       const [
         activiteRes, devisRes, actionsRes, monthRes,
-        fluxNRes, fluxN1Res, partnerRes, contactsRes, adresseRes,
+        fluxNRes, fluxN1Res, contactsRes, adresseRes,
+        visitePasseeRes, visiteFutureRes,
       ] = await Promise.all([
         supabase
           .from('activite_lignes')
@@ -386,11 +395,6 @@ export default function MobileClients({
         supabase.rpc('get_client_flux_ytd', { p_numero_tiers: client.numero, p_date_debut: ysN1, p_date_fin: sameDayN1 }),
         supabase
           .from('partner_base_partner')
-          .select('id')
-          .eq('reference', client.numero)
-          .limit(1),
-        supabase
-          .from('partner_base_partner')
           .select('id,first_name,last_name,company_name,job_title,phone,mail')
           .ilike('reference', `${client.numero}-%`)
           .not('reference', 'ilike', '%-liv')
@@ -401,6 +405,26 @@ export default function MobileClients({
           .select('adresse,complement_adresse,code_postal,ville,telephone')
           .eq('numero', client.numero)
           .maybeSingle(),
+        // CORRECTIF : dernière/prochaine visite venaient uniquement de
+        // crm_base_activity (RDV synchronisés BLG), donc invisibles pour
+        // les RDV "compagnon CEGECLIM" (créés dans l'app, indépendants de
+        // BLG/Outlook -- table rdv_compagnon). v_rdv_unifie combine les
+        // deux sources par numero_tiers, comme déjà fait dans
+        // MobileRdv.tsx -- même requête reprise ici.
+        supabase
+          .from('v_rdv_unifie')
+          .select('rdv_id,source,blg_activity_id,compagnon_id,type,subject,start_date,end_date,all_day')
+          .eq('numero_tiers', client.numero)
+          .lt('start_date', nowIso)
+          .order('start_date', { ascending: false })
+          .limit(1),
+        supabase
+          .from('v_rdv_unifie')
+          .select('rdv_id,source,blg_activity_id,compagnon_id,type,subject,start_date,end_date,all_day')
+          .eq('numero_tiers', client.numero)
+          .gte('start_date', nowIso)
+          .order('start_date', { ascending: true })
+          .limit(1),
       ])
 
       if (activiteRes.error) loadErrors.push(activiteRes.error.message)
@@ -409,6 +433,8 @@ export default function MobileClients({
       if (fluxNRes.error) loadErrors.push(fluxNRes.error.message)
       if (fluxN1Res.error) loadErrors.push(fluxN1Res.error.message)
       if (contactsRes.error) loadErrors.push(contactsRes.error.message)
+      if (visitePasseeRes.error) loadErrors.push(visitePasseeRes.error.message)
+      if (visiteFutureRes.error) loadErrors.push(visiteFutureRes.error.message)
 
       const activiteRows = activiteRes.data || []
       const byType = (t: string) => activiteRows.filter((r: any) => r.type_document === t)
@@ -455,49 +481,22 @@ export default function MobileClients({
           .reduce((sum: number, r: any) => sum + safeNumber(r.devis_n1), 0)
       }
 
-      let derniereVisite: VisiteEvent | null = null
-      let prochaineVisite: VisiteEvent | null = null
-      if (partnerRes.error) {
-        loadErrors.push(partnerRes.error.message)
-      } else {
-        const partnerId = partnerRes.data?.[0]?.id
-        if (partnerId) {
-          const { data: links, error: linksErr } = await supabase
-            .from('crm_activity_company')
-            .select('activity_fk')
-            .eq('company_fk', partnerId)
-          if (linksErr) {
-            loadErrors.push(linksErr.message)
-          } else {
-            const activityIds = (links || []).map((l: any) => l.activity_fk).filter((v: any) => v !== null && v !== undefined)
-            if (activityIds.length > 0) {
-              const { data: activities, error: actErr } = await supabase
-                .from('crm_base_activity')
-                .select('*')
-                .in('id', activityIds)
-                .eq('internal_tag', 'normal')
-                .in('type', RDV_TYPE_KEYS)
-                .order('start_date', { ascending: true })
-              if (actErr) {
-                loadErrors.push(actErr.message)
-              } else {
-                const mapped = (activities || []).map((row: any) => ({
-                  id: String(row.id),
-                  type: String(row.type ?? ''),
-                  subject: String(pick(row, ['comment', 'subject', 'title', 'name', 'label']) || RDV_TYPE_LABELS[String(row.type ?? '')] || 'Activité'),
-                  start: String(row.start_date || ''),
-                  end: String(row.end_date || row.start_date || ''),
-                  allDay: Boolean(row.all_day),
-                }))
-                const past = mapped.filter((e) => e.start && e.start.slice(0, 10) < today)
-                const future = mapped.filter((e) => e.start && e.start.slice(0, 10) >= today)
-                derniereVisite = past.length ? past[past.length - 1] : null
-                prochaineVisite = future.length ? future[0] : null
-              }
-            }
-          }
+      function mapVisite(row: any): VisiteEvent | null {
+        if (!row) return null
+        return {
+          rdvId: String(row.rdv_id ?? ''),
+          source: row.source === 'compagnon' ? 'compagnon' : 'blg',
+          blgActivityId: row.blg_activity_id ? String(row.blg_activity_id) : null,
+          compagnonId: row.compagnon_id ? String(row.compagnon_id) : null,
+          type: String(row.type ?? ''),
+          subject: String(row.subject || RDV_TYPE_LABELS[String(row.type ?? '')] || 'Activité'),
+          start: String(row.start_date || ''),
+          end: String(row.end_date || row.start_date || ''),
+          allDay: Boolean(row.all_day),
         }
       }
+      const derniereVisite = mapVisite((visitePasseeRes.data || [])[0])
+      const prochaineVisite = mapVisite((visiteFutureRes.data || [])[0])
 
       setDetail({
         commandes, preparations, livraisons, retours, devis,
@@ -766,9 +765,12 @@ function ClientDetailScreen({
     const startDate = v.start ? new Date(v.start) : null
     const endDate = v.end ? new Date(v.end) : null
     const fmtTime = (d: Date | null) => (d ? d.toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '')
+    // L'id à transmettre pour lier un compte-rendu dépend de la source --
+    // v_rdv_unifie ne remplit que l'un des deux (voir type VisiteEvent).
+    const activityId = v.source === 'compagnon' ? v.compagnonId : v.blgActivityId
     setOpenDetail({
       title: v.subject,
-      subtitle: RDV_TYPE_LABELS[v.type] || v.type || 'Activité',
+      subtitle: `${RDV_TYPE_LABELS[v.type] || v.type || 'Activité'}${v.source === 'compagnon' ? ' · RDV compagnon' : ''}`,
       fields: [
         { label: 'Client', value: `${client.nom} (${client.numero})` },
         { label: 'Début', value: v.allDay ? (startDate ? startDate.toLocaleDateString('fr-FR') : '') : fmtTime(startDate) },
@@ -779,7 +781,7 @@ function ClientDetailScreen({
         <VoiceReportButtons
           numeroTiers={client.numero}
           clientNom={client.nom}
-          rdvActivityId={v.id}
+          rdvActivityId={activityId}
           rdvLabel={v.subject}
           userEmail={currentEmail}
           userName={currentName}

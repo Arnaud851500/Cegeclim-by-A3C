@@ -120,8 +120,11 @@ type LastBusinessDates = {
 const MONTHS = ['Janv.', 'Févr.', 'Mars', 'Avr.', 'Mai', 'Juin', 'Juil.', 'Août', 'Sept.', 'Oct.', 'Nov.', 'Déc.']
 const MIN_YEAR_OPTION = 2023
 const FLUX_ORDER: Flux[] = ['DEVIS', 'CDC', 'BL', 'FACTURE']
-const DEFAULT_SELECTED_MACROS = ['ACC', 'DRV', 'ECS', 'PV', 'R_ZONE', 'R/O', 'R/R']
-const DEFAULT_SELECTED_MACRO_NORMALIZED = new Set(DEFAULT_SELECTED_MACROS.map((macro) => normalizeMacro(macro)))
+// Utilisée uniquement par le mode d'affichage condensé (priorityOnly) de
+// buildMatrixRows -- indépendante du filtre "Familles macro" lui-même, qui
+// n'a plus de présélection (voir famillesMacro plus bas : parti vide, donc
+// "toutes les familles" par défaut, pour rester cohérent avec les autres
+// tableaux de bord de l'app).
 const PRIORITY_MACRO_ORDER = ['R/R', 'R/O', 'R_ZONE', 'ECS', 'DRV', 'PV']
 const PRIORITY_FLUX_ORDER: Flux[] = ['DEVIS', 'FACTURE']
 
@@ -178,13 +181,6 @@ function uniqueSorted(values: string[]) {
   return Array.from(new Set(values.map((value) => safeText(value, '')).filter(Boolean))).sort((a, b) =>
     a.localeCompare(b, 'fr', { numeric: true })
   )
-}
-
-function defaultSelectedMacrosFromAvailable(values: string[]) {
-  const normalizedValueByMacro = new Map(values.map((value) => [normalizeMacro(value), value]))
-  return DEFAULT_SELECTED_MACROS
-    .map((macro) => normalizedValueByMacro.get(normalizeMacro(macro)) ?? macro)
-    .filter((macro, index, list) => list.findIndex((item) => normalizeMacro(item) === normalizeMacro(macro)) === index)
 }
 
 function currentComparisonMonthForYear(year: number) {
@@ -537,7 +533,12 @@ export default function ApprovisionnementsPage() {
 
   const [agences, setAgences] = useState<string[]>([])
   const [collaborateursTiers, setCollaborateursTiers] = useState<string[]>([])
-  const [famillesMacro, setFamillesMacro] = useState<string[]>(DEFAULT_SELECTED_MACROS)
+  // Vide = aucun filtre appliqué côté RPC (toutes les familles macro
+  // incluses) -- avant, présélectionné sur un sous-ensemble fixe
+  // (ACC/DRV/ECS/PV/R_ZONE/R/O/R/R), invisible à l'écran et à l'origine
+  // d'écarts inexpliqués avec les autres tableaux de bord (Activité
+  // Quotidienne, SMC...), qui eux n'ont jamais eu ce filtre par défaut.
+  const [famillesMacro, setFamillesMacro] = useState<string[]>([])
   const [familles, setFamilles] = useState<string[]>([])
   const [references, setReferences] = useState<string[]>([])
 
@@ -644,13 +645,9 @@ export default function ApprovisionnementsPage() {
         // Elles sont maintenant saisies librement dans le filtre Références.
         references: [],
       })
-
-      // Au chargement, on sélectionne par défaut les familles macro vues sur l'écran de référence
-      // sans écraser ensuite un choix utilisateur volontairement différent.
-      setFamillesMacro((current) => {
-        const currentIsDefault = !current.length || current.every((macro) => DEFAULT_SELECTED_MACRO_NORMALIZED.has(normalizeMacro(macro)))
-        return currentIsDefault ? defaultSelectedMacrosFromAvailable(nextFamillesMacro) : current
-      })
+      // famillesMacro n'est plus jamais réinitialisé ici -- vide au départ
+      // (= toutes les familles), et ensuite uniquement modifié par un choix
+      // explicite de l'utilisateur via le sélecteur.
     } catch (exception: any) {
       setError(`Chargement des filtres impossible : ${exception?.message || exception}`)
     } finally {
