@@ -284,13 +284,26 @@ function classifierChoixRepli(transcript: string): { intent: Intent; params: Int
 /** Interprète la demande dictée -- passe par le modèle
  * (/api/atelier-ai/interpret-summary) pour reconnaître les tournures
  * paramétrées ("mes 3 prochains rdv", "les 10 derniers devis de plus de
- * 15000 euros"...), avec repli local en cas d'échec réseau. */
-async function interpreterDemande(transcript: string): Promise<{ intent: Intent; params: IntentParams } | null> {
+ * 15000 euros"...), avec repli local en cas d'échec réseau.
+ *
+ * `contexte` (optionnel) : dernier intent/params compris lors de l'échange
+ * précédent -- transmis à la route pour les questions de relance ("et
+ * depuis le début du mois ?"). Le repli local ne sait PAS s'en servir (pas
+ * de logique de fusion de contexte sans réseau) : une relance qui tombe
+ * sur ce chemin de secours échoue proprement en "je n'ai pas compris"
+ * plutôt que de deviner. */
+async function interpreterDemande(
+  transcript: string,
+  contexte?: { intent: Intent; params: IntentParams } | null,
+): Promise<{ intent: Intent; params: IntentParams } | null> {
   try {
     const res = await fetch('/api/atelier-ai/interpret-summary', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ transcript }),
+      body: JSON.stringify({
+        transcript,
+        contexte_precedent: contexte ? { intent: contexte.intent, params: contexte.params } : undefined,
+      }),
     })
     if (res.ok) {
       const data = await res.json()
@@ -413,6 +426,12 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
   // un résultat ou relancer une écoute après que l'utilisateur a quitté
   // l'écran.
   const annulerRef = useRef(false)
+  // Dernier intent/params compris avec succès -- transmis au modèle lors
+  // d'une question de relance ("et depuis le début du mois ?") via le
+  // bouton "🎙️ Continuer" affiché sous le résultat. Remis à null par
+  // fermer() et par poserLaQuestion() (nouvelle question depuis zéro, pas
+  // une relance) -- ne persiste QUE dans une même ouverture de la sheet.
+  const dernierChoixRef = useRef<{ intent: Intent; params: IntentParams } | null>(null)
 
   /** Minuscule WAV silencieux généré à la volée -- sert uniquement à
    * "débloquer" l'élément <audio> ci-dessous (voir debloquerAudio). */
@@ -744,6 +763,10 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
     setMessageIncompris('')
     setErreur('')
     setModeClient(false)
+    // Nouvelle question depuis zéro (premier appui, ou "🎙️ Autre demande")
+    // -- pas une relance, donc pas de contexte hérité. continuerConversation()
+    // est le seul chemin qui doit transmettre dernierChoixRef.
+    dernierChoixRef.current = null
     try {
       setEtape('question')
       // "Annonce courte" (réglage utilisateur) : question d'accueil
@@ -763,7 +786,10 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
     }
   }
 
-  async function interpreter(blobBrut: Blob) {
+  /** `enChaineDepuis` : contexte de la question précédente, transmis
+   * uniquement quand cet appel vient du bouton "🎙️ Continuer" (relance) --
+   * jamais depuis poserLaQuestion() (nouvelle question, contexte vierge). */
+  async function interpreter(blobBrut: Blob, enChaineDepuis?: { intent: Intent; params: IntentParams } | null) {
     try {
       setEtape('traitement')
       const blobWav = await convertirEnWav(blobBrut)
@@ -776,7 +802,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       if (annulerRef.current) return
       if (!res.ok) throw new Error(data?.error || 'Erreur de transcription.')
 
-      const choix = await interpreterDemande(data.transcript || '')
+      const choix = await interpreterDemande(data.transcript || '', enChaineDepuis)
       if (annulerRef.current) return
       if (!choix) {
         setMessageIncompris(
@@ -788,16 +814,47 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         setEtape('ecoute')
         const blobRetente = await enregistrerAvecDetectionSilence(forceStopRef)
         if (annulerRef.current) return
-        await interpreter(blobRetente)
+        await interpreter(blobRetente, enChaineDepuis)
         return
       }
 
       if (choix.intent === 'compte_rendu') {
+        dernierChoixRef.current = null // pas de relance possible sur ce sous-flux
         await demanderClient()
         return
       }
 
       await genererResume(choix.intent, choix.params)
+    } catch (e: any) {
+      libererVerrouVocal(idInstanceRef.current)
+      setEtape('erreur')
+      setErreur(e?.message || 'Une erreur est survenue.')
+    }
+  }
+
+  /** Bouton "🎙️ Continuer" affiché sous un résultat : réécoute directement
+   * (sans rejouer la question d'accueil générique) et transmet le dernier
+   * intent/params comme contexte, pour que "et depuis le début du mois ?"
+   * ou "et sur les pompes à chaleur ?" soit compris comme une précision de
+   * la demande précédente plutôt qu'une nouvelle demande à classer seule. */
+  async function continuerConversation() {
+    if (verrouVocalDetenuParAutre(idInstanceRef.current)) {
+      setEtape('erreur')
+      setErreur("Une écoute est déjà en cours ailleurs dans l'application. Arrête-la avant d'en démarrer une nouvelle.")
+      return
+    }
+    debloquerAudio()
+    annulerRef.current = false
+    acquerirVerrouVocal(idInstanceRef.current)
+    setTexte('')
+    setMessageIncompris('')
+    setErreur('')
+    const contexte = dernierChoixRef.current
+    try {
+      setEtape('ecoute')
+      const blob = await enregistrerAvecDetectionSilence(forceStopRef)
+      if (annulerRef.current) return
+      await interpreter(blob, contexte)
     } catch (e: any) {
       libererVerrouVocal(idInstanceRef.current)
       setEtape('erreur')
@@ -1006,10 +1063,12 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         }
       } else if (portee === 'ca_periode') {
         // "Quel CA ai-je fait hier/aujourd'hui/depuis le début du mois
-        // (sur telle famille) ?" -- s'appuie sur la RPC déjà utilisée
-        // ailleurs dans l'app (get_ca_periode_par_famille), filtrée côté
-        // client sur la famille si demandée (rapprochement tolérant, la
-        // personne ne dicte jamais le code exact "R/R").
+        // (sur telle famille) ?" -- renvoie toujours les 3 étapes
+        // (prise de commande = Devis, Bon de livraison = BL, facturation
+        // = Factures), pas juste le facturé : get_ca_periode_multi_documents
+        // (indicateur_focus_journalier, mêmes filtres période/famille que
+        // l'ancienne RPC facture-seule). Famille : rapprochement tolérant,
+        // la personne ne dicte jamais le code exact "R/R".
         const aujourdHui = new Date()
         aujourdHui.setHours(0, 0, 0, 0)
         let dateDebut: Date
@@ -1029,33 +1088,31 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
           periodeTexte = "aujourd'hui"
         }
 
-        const { data: rows, error } = await supabase.rpc('get_ca_periode_par_famille', {
-          p_date_debut: isoDepuisDateLocale(dateDebut),
-          p_date_fin: isoDepuisDateLocale(dateFin),
-          p_collaborateur: null,
-        })
-        if (error) throw error
-
-        const toutesLesFamilles = (rows || []) as { famille_macro: string; montant_ht: number }[]
         const familleDemandee = safeText(params.famille)
         const familleRapprochee = familleDemandee ? rapprocherFamille(familleDemandee) : null
 
-        if (familleRapprochee) {
-          const ligne = toutesLesFamilles.find((r) => normaliser(r.famille_macro) === normaliser(familleRapprochee))
-          const montant = Number(ligne?.montant_ht || 0)
-          resultat = `Ton chiffre d'affaires ${periodeTexte} sur ${familleRapprochee} est de ${formatMontantParle(montant)}.`
+        const { data: rows, error } = await supabase.rpc('get_ca_periode_multi_documents', {
+          p_date_debut: isoDepuisDateLocale(dateDebut),
+          p_date_fin: isoDepuisDateLocale(dateFin),
+          p_collaborateur: null,
+          p_famille_macro: familleRapprochee,
+        })
+        if (error) throw error
+
+        const parType = new Map(((rows || []) as { type_document: string; montant_ht: number }[]).map((r) => [r.type_document, Number(r.montant_ht || 0)]))
+        const montantDevis = parType.get('Devis') || 0
+        const montantBl = parType.get('BL') || 0
+        const montantFactures = parType.get('Factures') || 0
+        const suffixeFamille = familleRapprochee ? ` sur ${familleRapprochee}` : ''
+
+        if (montantDevis === 0 && montantBl === 0 && montantFactures === 0) {
+          resultat = `Aucun chiffre d'affaires enregistré ${periodeTexte}${suffixeFamille}.`
         } else {
-          const total = toutesLesFamilles.reduce((s, r) => s + Number(r.montant_ht || 0), 0)
-          if (toutesLesFamilles.length === 0) {
-            resultat = `Aucun chiffre d'affaires enregistré ${periodeTexte}.`
-          } else {
-            const detail = toutesLesFamilles
-              .filter((r) => Math.abs(Number(r.montant_ht || 0)) > 0.01)
-              .sort((a, b) => Number(b.montant_ht) - Number(a.montant_ht))
-              .map((r) => `${r.famille_macro} : ${formatMontantParle(Number(r.montant_ht))}`)
-              .join(', ')
-            resultat = `Ton chiffre d'affaires ${periodeTexte} est de ${formatMontantParle(total)}${detail ? `, dont ${detail}` : ''}.`
-          }
+          resultat =
+            `Ton chiffre d'affaires ${periodeTexte}${suffixeFamille} :\n` +
+            `1. Prise de commande (devis) : ${formatMontantParle(montantDevis)}\n` +
+            `2. Bons de livraison : ${formatMontantParle(montantBl)}\n` +
+            `3. Facturation : ${formatMontantParle(montantFactures)}`
         }
       } else if (portee === 'devis_montant') {
         // "Les N derniers devis de plus de X euros" -- RPC dédiée
@@ -1082,16 +1139,24 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
           resultat = `Voici les ${rows.length} derniers devis de plus de ${formatMontantParle(montantMin)} :\n${lignes.join('\n')}`
         }
       } else if (portee === 'rdv_sans_compte_rendu') {
-        // "Combien de rdv passés ces N derniers jours n'ont pas de
+        // "Combien de MES rdv passés ces N derniers jours n'ont pas de
         // compte-rendu ?" -- v_rdv_unifie porte déjà a_compte_rendu
         // (fusion BLG + compagnon CEGECLIM), pas besoin de RPC dédiée.
+        // CORRECTIF : la requête ne filtrait sur AUCUN utilisateur --
+        // elle remontait les rdv de toute l'entreprise plutôt que "tes"
+        // rdv, ce qui rendait la réponse incohérente avec la question
+        // posée. Filtre maintenant sur blg_partner_id, comme les autres
+        // branches rdv de cette fonction (rdv/rdv_prochains/rdv_semaine_prochaine).
         const jours = Math.max(1, Math.min(90, Math.round(Number(params.jours) || 7)))
         const depuis = new Date()
         depuis.setDate(depuis.getDate() - jours)
 
+        if (!access?.blg_partner_id) throw new Error('Identifiant partner BLG non renseigné pour ce compte.')
+
         const { data: rows, error } = await supabase
           .from('v_rdv_unifie')
           .select('subject, company_name, start_date, a_compte_rendu')
+          .eq('blg_partner_id', access.blg_partner_id)
           .lt('start_date', new Date().toISOString())
           .gte('start_date', depuis.toISOString())
           .order('start_date', { ascending: false })
@@ -1101,7 +1166,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         const sansCr = ((rows || []) as any[]).filter((r) => !r.a_compte_rendu)
 
         if (sansCr.length === 0) {
-          resultat = `Tous les rendez-vous des ${jours} derniers jours ont un compte-rendu.`
+          resultat = `Tous tes rendez-vous des ${jours} derniers jours ont un compte-rendu.`
         } else {
           const lignes = sansCr.slice(0, 10).map((r, i) => {
             const d = new Date(r.start_date)
@@ -1110,7 +1175,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
             return `${i + 1}. ${dateLabel} — ${entreprise}`
           })
           const suffixe = sansCr.length > 10 ? `\n… et ${sansCr.length - 10} de plus` : ''
-          resultat = `${sansCr.length} rendez-vous des ${jours} derniers jours n'ont pas de compte-rendu :\n${lignes.join('\n')}${suffixe}`
+          resultat = `${sansCr.length} de tes rendez-vous des ${jours} derniers jours n'ont pas de compte-rendu :\n${lignes.join('\n')}${suffixe}`
         }
       } else if (portee === 'alertes') {
         // (AppShell) et le hook useMobileAlertsCount, mais réinterrogée
@@ -1164,6 +1229,11 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
 
       setTexte(resultat)
       setEtape('resultat')
+      // Mémorise ce qui vient d'être compris pour permettre une relance
+      // ("et depuis le début du mois ?") via le bouton "🎙️ Continuer" --
+      // voir continuerConversation() et la section "SUIVI DE CONVERSATION"
+      // du prompt de /api/atelier-ai/interpret-summary.
+      dernierChoixRef.current = { intent: portee, params }
       // Fin de l'activité micro/écriture pour cette demande -- le verrou
       // est libéré ici (avant même la lecture du résultat) pour ne pas
       // bloquer inutilement une autre session ailleurs pendant que
@@ -1184,6 +1254,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
     setMessageIncompris('')
     setErreur('')
     setModeClient(false)
+    dernierChoixRef.current = null
   }
 
   /** Sous-flux "compte-rendu d'un client" : demande le nom/numéro à la
@@ -1509,6 +1580,15 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
                   🎙️ Autre demande
                 </button>
               </div>
+              {dernierChoixRef.current && (
+                <button
+                  type="button"
+                  onClick={() => void continuerConversation()}
+                  style={{ width: '100%', marginTop: 10, padding: '13px', borderRadius: 12, border: '1px solid rgba(75,146,172,0.4)', background: 'rgba(75,146,172,0.14)', color: '#8fd4a8', fontSize: 13.5, fontWeight: 700, cursor: 'pointer' }}
+                >
+                  🎙️ Continuer sur ce sujet (ex. « et depuis le début du mois ? »)
+                </button>
+              )}
             </div>
           )}
         </div>
