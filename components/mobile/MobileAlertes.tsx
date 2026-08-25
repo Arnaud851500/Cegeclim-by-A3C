@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
+import { formatMoney } from '@/app/focus_mensuel/page'
 import MobileListSheet, { type ListSheetItem } from './MobileListSheet'
 import MobileDetailSheet, { type DetailField } from './MobileDetailSheet'
 import MobileTaskDetailSheet, { type TaskRow } from './MobileTaskDetailSheet'
@@ -27,6 +28,24 @@ type TodoRow = {
   due_date: string | null
   numero_tiers: string | null
   assigned_to: string | null
+}
+
+/** Un CDC agrégé (une ligne par pièce), avec le détail article ligne à
+ * ligne conservé pour la fiche détail -- même principe que
+ * aggregateByDocument dans MobileClients.tsx, appliqué ici à
+ * v_portefeuille_livraison_lignes (une ligne source par article de la
+ * pièce, à regrouper par numero_document avant affichage). */
+type CdcDocAgrege = {
+  numeroDocument: string
+  numeroTiers: string
+  nomTiers: string
+  agence: string
+  representant: string
+  dateLivraison: any
+  moisLivraison: string
+  reference: string
+  montantHt: number
+  lignes: { reference_article: string; designation: string; quantite: number; montant_ht: number }[]
 }
 
 function safeText(value: any) {
@@ -59,6 +78,49 @@ function formatDateCourte(value: any) {
   if (!iso) return ''
   const [, m, d] = iso.split('-')
   return `${d}/${m}`
+}
+
+/** Regroupe les lignes brutes de v_portefeuille_livraison_lignes (une ligne
+ * par article) par numero_document -- une seule pièce affichée dans la
+ * liste, montant total sommé, détail ligne à ligne conservé pour la fiche
+ * (ouverte au tap), exactement comme les sections Commandes/BL/Devis de la
+ * fiche client. Triées par date de livraison croissante (pièces sans date
+ * exploitable repoussées en fin de liste plutôt qu'en tête). */
+function aggregateCdcByDocument(rows: Record<string, any>[]): CdcDocAgrege[] {
+  const byDoc = new Map<string, CdcDocAgrege>()
+  for (const r of rows) {
+    const numeroDocument = safeText(pick(r, ['numero_document']))
+    if (!numeroDocument) continue
+    const ligne = {
+      reference_article: safeText(pick(r, ['reference_article'])),
+      designation: safeText(pick(r, ['designation_article'])),
+      quantite: Number(r.quantite || 0),
+      montant_ht: Number(r.montant_ht || 0),
+    }
+    const existing = byDoc.get(numeroDocument)
+    if (existing) {
+      existing.montantHt += ligne.montant_ht
+      existing.lignes.push(ligne)
+    } else {
+      byDoc.set(numeroDocument, {
+        numeroDocument,
+        numeroTiers: safeText(pick(r, ['numero_tiers'])),
+        nomTiers: safeText(pick(r, ['nom_tiers'])),
+        agence: safeText(pick(r, ['agence'])),
+        representant: safeText(pick(r, ['representant'])),
+        dateLivraison: pick(r, ['date_livraison']),
+        moisLivraison: safeText(pick(r, ['mois_livraison'])),
+        reference: safeText(pick(r, ['reference'])),
+        montantHt: ligne.montant_ht,
+        lignes: [ligne],
+      })
+    }
+  }
+  return Array.from(byDoc.values()).sort((a, b) => {
+    const da = normalizeDateIso(a.dateLivraison) || '9999-99-99'
+    const db = normalizeDateIso(b.dateLivraison) || '9999-99-99'
+    return da.localeCompare(db)
+  })
 }
 
 /**
@@ -294,34 +356,39 @@ export default function MobileAlertes({
     setListLoading(true)
     const rows = await fetchCdcAvant2026List()
     setListLoading(false)
+
+    // Regroupé par pièce (numero_document) -- une ligne par CDC dans la
+    // liste, comme les sections Commandes/BL/Devis de la fiche client,
+    // au lieu d'une ligne par article de la pièce.
+    const docs = aggregateCdcByDocument(rows)
+
     setListOpen({
       title: 'CDC < 2026',
-      items: rows.map((row, i) => {
-        const numeroDocument = safeText(pick(row, ['numero_document']))
-        const numeroTiers = safeText(pick(row, ['numero_tiers']))
-        const agence = safeText(pick(row, ['agence']))
-        const representant = safeText(pick(row, ['representant']))
-        const dateLivraison = pick(row, ['date_livraison'])
-        const moisLivraison = safeText(pick(row, ['mois_livraison']))
-
-        return {
-          id: numeroDocument || String(i),
-          primary: numeroDocument || '(sans numéro)',
-          secondary: [numeroTiers && `Client ${numeroTiers}`, agence].filter(Boolean).join(' · '),
-          trailing: dateLivraison ? formatDateFr(dateLivraison) : moisLivraison,
-          onClick: () =>
-            setOpenDetail({
-              title: numeroDocument || '(sans numéro)',
-              subtitle: 'CDC avec livraison avant 2026',
-              fields: [
-                { label: 'Client', value: numeroTiers },
-                { label: 'Date de livraison', value: dateLivraison ? formatDateFr(dateLivraison) : moisLivraison },
-                { label: 'Agence', value: agence },
-                { label: 'Représentant', value: representant },
-              ],
-            }),
-        }
-      }),
+      items: docs.map((d) => ({
+        id: d.numeroDocument,
+        primary: d.numeroDocument || '(sans numéro)',
+        // Référence chantier en avant, comme demandé -- puis le client.
+        secondary: [d.reference, d.nomTiers || (d.numeroTiers && `Client ${d.numeroTiers}`)].filter(Boolean).join(' · '),
+        trailing: d.dateLivraison ? formatDateFr(d.dateLivraison) : d.moisLivraison,
+        onClick: () =>
+          setOpenDetail({
+            title: d.numeroDocument || '(sans numéro)',
+            subtitle: `CDC avant 2026 · ${formatMoney(d.montantHt)}`,
+            fields: [
+              { label: 'Client', value: `${d.nomTiers}${d.numeroTiers ? ` (${d.numeroTiers})` : ''}` },
+              { label: 'Date de livraison', value: d.dateLivraison ? formatDateFr(d.dateLivraison) : d.moisLivraison },
+              { label: 'Référence chantier', value: d.reference || '—' },
+              { label: 'Agence', value: d.agence },
+              { label: 'Représentant', value: d.representant },
+              { label: 'Montant total HT', value: formatMoney(d.montantHt) },
+              // Lignes d'articles : référence, désignation, quantité × montant HT.
+              ...d.lignes.map((l) => ({
+                label: `${l.reference_article || '—'}${l.designation ? ` — ${l.designation}` : ''}`,
+                value: `${l.quantite} × ${formatMoney(l.montant_ht)}`,
+              })),
+            ],
+          }),
+      })),
     })
   }
 

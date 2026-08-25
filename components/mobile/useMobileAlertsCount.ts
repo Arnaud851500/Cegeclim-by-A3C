@@ -320,7 +320,7 @@ export function useMobileAlertsCount() {
 
     let requete = supabase
       .from('v_portefeuille_livraison_lignes')
-      .select('numero_document,numero_tiers,agence,representant,mois_livraison,date_livraison')
+      .select('numero_document,numero_tiers,nom_tiers,agence,representant,mois_livraison,date_livraison,reference,reference_article,designation_article,quantite,montant_ht')
       .eq('type_document', 'CDC')
       .or('mois_livraison.eq.AVANT_2026,date_livraison.lt.2026-01-01')
     if (allowedAgences.length > 0) requete = requete.in('agence', allowedAgences)
@@ -328,7 +328,7 @@ export function useMobileAlertsCount() {
 
     const { data, error } = await requete
       .order('date_livraison', { ascending: true })
-      .limit(500)
+      .limit(2000)
     if (error) {
       console.error('fetchCdcAvant2026List', error)
       return []
