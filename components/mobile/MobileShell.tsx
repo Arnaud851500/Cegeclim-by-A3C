@@ -129,6 +129,7 @@ export default function MobileShell() {
           onCibleConsommee={() => setCibleStock(null)}
         />
       )}
+      {screen === 'Admin' && <MobileAdminPanel />}
     </div>
   )
 }
