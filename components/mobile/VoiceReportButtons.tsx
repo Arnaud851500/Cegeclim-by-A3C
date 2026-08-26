@@ -377,6 +377,7 @@ export default function VoiceReportButtons({
   const audioElementRef = useRef<HTMLAudioElement | null>(null)
   const audioDeverrouilleRef = useRef(false)
   const forceStopConfirmationRef = useRef<(() => void) | null>(null)
+  const resolverEcheanceManuelleRef = useRef<((iso: string) => void) | null>(null)
   const idInstanceRef = useRef<symbol>(Symbol('voice-session'))
   const annulerRef = useRef(false)
 
@@ -548,9 +549,13 @@ export default function VoiceReportButtons({
   }
 
   async function enregistrerAvecDetectionSilence(forceStopRef?: { current: (() => void) | null }): Promise<Blob> {
-    const SEUIL_RMS = 0.02
-    const SILENCE_MS = 1300
-    const DUREE_MAX_MS = 12000
+    const SEUIL_RMS = 0.018
+    const SILENCE_MS = 1800
+    const DUREE_MAX_MS = 15000
+    // Empêche de couper sur un simple raclement de gorge / souffle initial :
+    // il faut au moins ce temps cumulé de son au-dessus du seuil avant que
+    // le silence qui suit soit considéré comme la fin de la phrase.
+    const DUREE_MIN_PAROLE_MS = 350
 
     let stream: MediaStream
     try {
@@ -578,6 +583,8 @@ export default function VoiceReportButtons({
       let arrete = false
       let dernierSonTs = Date.now()
       let aParle = false
+      let dureeParoleCumuleeMs = 0
+      let dernierFrameTs = Date.now()
       const debutTs = Date.now()
       let frameId = 0
 
@@ -601,6 +608,10 @@ export default function VoiceReportButtons({
 
       function boucle() {
         if (arrete) return
+        const maintenant = Date.now()
+        const deltaFrame = maintenant - dernierFrameTs
+        dernierFrameTs = maintenant
+
         analyser.getByteTimeDomainData(donnees)
         let somme = 0
         for (let i = 0; i < donnees.length; i++) {
@@ -610,12 +621,13 @@ export default function VoiceReportButtons({
         const rms = Math.sqrt(somme / donnees.length)
 
         if (rms > SEUIL_RMS) {
-          dernierSonTs = Date.now()
+          dernierSonTs = maintenant
           aParle = true
+          dureeParoleCumuleeMs += deltaFrame
         }
 
-        const maintenant = Date.now()
-        if ((aParle && maintenant - dernierSonTs > SILENCE_MS) || maintenant - debutTs > DUREE_MAX_MS) {
+        const silenceAssezLong = aParle && dureeParoleCumuleeMs >= DUREE_MIN_PAROLE_MS && maintenant - dernierSonTs > SILENCE_MS
+        if (silenceAssezLong || maintenant - debutTs > DUREE_MAX_MS) {
           terminer()
           return
         }
@@ -716,6 +728,51 @@ export default function VoiceReportButtons({
     }
   }
 
+  /** Attend une échéance soit via la voix (avec parsing), soit via un choix
+   * tactile (chip rapide ou <input type="date">) posé par l'utilisateur —
+   * la première réponse qui arrive gagne. C'est le secours direct au
+   * problème « je dis clairement une date et elle n'est pas comprise » :
+   * l'utilisateur n'est jamais bloqué à devoir re-parler indéfiniment. */
+  function attendreEcheance(): Promise<string | null> {
+    return new Promise<string | null>((resolve) => {
+      let tranche = false
+      const conclure = (iso: string | null) => {
+        if (tranche) return
+        tranche = true
+        resolverEcheanceManuelleRef.current = null
+        resolve(iso)
+      }
+
+      resolverEcheanceManuelleRef.current = (iso: string) => {
+        try { forceStopConfirmationRef.current?.() } catch {}
+        conclure(iso)
+      }
+
+      void (async () => {
+        try {
+          const blob = await enregistrerAvecDetectionSilence(forceStopConfirmationRef)
+          if (tranche || annulerRef.current) return
+          setEtape('echeance_traitement')
+          const blobWav = await convertirEnWav(blob)
+          if (tranche || annulerRef.current) return
+
+          const form = new FormData()
+          form.append('audio', blobWav, 'audio.wav')
+          const res = await fetch('/api/atelier-ai/transcribe', { method: 'POST', body: form })
+          const data = await parserReponseJson(res)
+          if (tranche) return
+          if (res.ok) {
+            conclure(parserEcheanceParlee(String(data.transcript || '')))
+          } else {
+            conclure(null)
+          }
+        } catch {
+          conclure(null)
+        }
+      })()
+    })
+  }
+
   async function completerEcheancesManquantes() {
     const taches = dernierResultatRef.current?.taches || []
     for (let i = 0; i < taches.length; i++) {
@@ -725,37 +782,115 @@ export default function VoiceReportButtons({
       let echeanceTrouvee: string | null = null
       let tentatives = 0
 
-      while (!echeanceTrouvee && tentatives < 5) {
+      while (!echeanceTrouvee && tentatives < 8) {
         if (annulerRef.current) return
         tentatives += 1
         setEtape('echeance_question')
         await jouerTexte(
           tentatives === 1
-            ? `Quelle échéance pour : ${taches[i].description} ?`
-            : "Je n'ai pas compris de date. Redis-la autrement, par exemple « demain », « vendredi », ou « le 15 septembre »."
+            ? `Quelle échéance pour : ${taches[i].description} ? Tu peux aussi la choisir directement à l’écran.`
+            : "Je n'ai pas compris de date. Redis-la, par exemple « demain », « le 15 septembre », ou choisis-la directement à l'écran."
         )
+        if (annulerRef.current) return
         setEtape('echeance_ecoute')
-        const blob = await enregistrerAvecDetectionSilence(forceStopConfirmationRef)
-        setEtape('echeance_traitement')
-        const blobWav = await convertirEnWav(blob)
-
-        const form = new FormData()
-        form.append('audio', blobWav, 'audio.wav')
-        try {
-          const res = await fetch('/api/atelier-ai/transcribe', { method: 'POST', body: form })
-          const data = await parserReponseJson(res)
-          if (res.ok) {
-            echeanceTrouvee = parserEcheanceParlee(String(data.transcript || ''))
-          }
-        } catch {
-          // silencieux : echeanceTrouvee reste null, on redemande.
-        }
+        echeanceTrouvee = await attendreEcheance()
       }
 
       if (echeanceTrouvee && dernierResultatRef.current) {
         dernierResultatRef.current.taches[i] = { ...taches[i], echeance: echeanceTrouvee }
         setTachesAffichees((prev) => prev.map((t, idx) => (idx === i ? { ...t, echeance: echeanceTrouvee } : t)))
       }
+    }
+  }
+
+  /** Traite le résultat renvoyé par /voice-report/confirm, que la réponse
+   * soit venue de la voix ou d'un bouton Oui/Non. En cas de refus, on ne
+   * termine plus le flux : on relance directement une dictée pour que
+   * l'utilisateur puisse corriger, sans avoir à ré-appuyer sur un bouton. */
+  async function apresReponseConfirmation(data: any) {
+    if (data.confirme === null) {
+      setMessageFinal(data.message)
+      await jouerTexte(data.message)
+      if (annulerRef.current) return
+      await ecouterConfirmation()
+      return
+    }
+
+    if (data.confirme === false) {
+      setMessageFinal('')
+      await jouerTexte('Compris, on reprend. Dis-moi à nouveau ce qu’il faut retenir.')
+      if (annulerRef.current) return
+      await redicter()
+      return
+    }
+
+    libererVerrou()
+    setEtape('termine')
+    setMessageFinal(data.message)
+
+    const attenteMinimum = new Promise<void>((resolve) => { window.setTimeout(resolve, 1400) })
+    await Promise.all([jouerTexte(data.message), attenteMinimum])
+
+    if (modeActif === 'compte_rendu') {
+      await chargerComptesRendus()
+    }
+
+    if (pleinEcran) {
+      reinitialiser()
+    }
+  }
+
+  /** Relance une dictée après un refus, sans relâcher le verrou vocal (on
+   * reste dans la même session) ni changer de mode (compte-rendu / tâche). */
+  async function redicter() {
+    setResumeAffiche('')
+    setTranscriptAffiche('')
+    setSpokenAffiche('')
+    setTachesAffichees([])
+    dernierResultatRef.current = null
+
+    try {
+      setEtape('enregistrement')
+      await demarrerEnregistrement()
+    } catch (err: any) {
+      console.error(err)
+      libererVerrou()
+      setEtape('erreur')
+      setMessageFinal(err?.message || "Impossible d'accéder au micro. Vérifie les autorisations du navigateur.")
+    }
+  }
+
+  /** Court-circuite entièrement la reconnaissance vocale pour la
+   * confirmation : appuyer sur le gros bouton Oui/Non envoie directement
+   * la réponse au serveur, sans passer par un enregistrement + Whisper. */
+  async function confirmerManuellement(reponse: 'oui' | 'non') {
+    try { forceStopConfirmationRef.current?.() } catch {}
+    setEtape('traitement_confirmation')
+    try {
+      const form = new FormData()
+      form.append('reponse_manuelle', reponse)
+      form.append('mode', modeActif as Mode)
+      form.append('numero_tiers', numeroTiers)
+      if (rdvActivityId) form.append('rdv_activity_id', rdvActivityId)
+      if (rdvLabel) form.append('rdv_label', rdvLabel)
+      if (compteRenduIdCible) form.append('compte_rendu_id', compteRenduIdCible)
+      form.append('user_email', userEmail)
+      form.append('user_name', userName)
+      form.append('transcript_original', dernierResultatRef.current?.transcript || '')
+      form.append('resume', dernierResultatRef.current?.resume || '')
+      form.append('taches', JSON.stringify(dernierResultatRef.current?.taches || []))
+
+      const res = await fetch('/api/atelier-ai/voice-report/confirm', { method: 'POST', body: form })
+      const data = await parserReponseJson(res)
+      if (annulerRef.current) return
+      if (!res.ok) throw new Error(data?.error || 'Erreur de confirmation.')
+
+      await apresReponseConfirmation(data)
+    } catch (err: any) {
+      console.error(err)
+      libererVerrou()
+      setEtape('erreur')
+      setMessageFinal(err?.name ? `${err.name} : ${err.message}` : (err?.message || 'Une erreur est survenue.'))
     }
   }
 
@@ -786,28 +921,7 @@ export default function VoiceReportButtons({
       if (annulerRef.current) return
       if (!res.ok) throw new Error(data?.error || 'Erreur de confirmation.')
 
-      if (data.confirme === null) {
-        setMessageFinal(data.message)
-        await jouerTexte(data.message)
-        if (annulerRef.current) return
-        await ecouterConfirmation()
-        return
-      }
-
-      libererVerrou()
-      setEtape('termine')
-      setMessageFinal(data.message)
-
-      const attenteMinimum = new Promise<void>((resolve) => { window.setTimeout(resolve, 1400) })
-      await Promise.all([jouerTexte(data.message), attenteMinimum])
-
-      if (data.confirme && modeActif === 'compte_rendu') {
-        await chargerComptesRendus()
-      }
-
-      if (data.confirme && pleinEcran) {
-        reinitialiser()
-      }
+      await apresReponseConfirmation(data)
     } catch (err: any) {
       console.error(err)
       libererVerrou()
@@ -964,10 +1078,13 @@ export default function VoiceReportButtons({
 
       {etape === 'echeance_question' && <StatutLigne texte="L’agent parle…" />}
       {etape === 'echeance_ecoute' && (
-        <IndicateurEcouteAuto
-          texte="Dis une échéance… je m’arrête tout seul dès que tu as fini"
-          onForcerArret={() => forceStopConfirmationRef.current?.()}
-        />
+        <>
+          <IndicateurEcouteAuto
+            texte="Dis une échéance… je m’arrête tout seul dès que tu as fini"
+            onForcerArret={() => forceStopConfirmationRef.current?.()}
+          />
+          <ChoixEcheanceRapide onChoisir={(iso) => resolverEcheanceManuelleRef.current?.(iso)} />
+        </>
       )}
       {etape === 'echeance_traitement' && <StatutLigne texte="Interprétation de la date…" />}
 
@@ -1009,6 +1126,32 @@ export default function VoiceReportButtons({
               </div>
               <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)', lineHeight: 1.5, fontStyle: 'italic' }}>
                 « {transcriptAffiche} »
+              </div>
+            </div>
+          )}
+
+          {(etape === 'resume_pret' || etape === 'enregistrement_confirmation' || etape === 'traitement_confirmation') && (
+            <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.1)' }}>
+              <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 8 }}>
+                C’est correct ?
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => void confirmerManuellement('oui')}
+                  disabled={etape === 'traitement_confirmation'}
+                  style={boutonConfirmStyle('#3F9142', etape === 'traitement_confirmation')}
+                >
+                  ✅ Oui, c’est correct
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void confirmerManuellement('non')}
+                  disabled={etape === 'traitement_confirmation'}
+                  style={boutonConfirmStyle('#C1683C', etape === 'traitement_confirmation')}
+                >
+                  ✏️ Non, à corriger
+                </button>
               </div>
             </div>
           )}
@@ -1098,6 +1241,74 @@ function boutonStyle(color: string): React.CSSProperties {
     textAlign: 'center',
     lineHeight: 1.25,
   }
+}
+
+function boutonConfirmStyle(color: string, disabled: boolean): React.CSSProperties {
+  return {
+    flex: 1,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+    height: 54,
+    padding: '0 10px',
+    borderRadius: 12,
+    border: `1.5px solid ${color}`,
+    background: `${color}2A`,
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: 800,
+    cursor: disabled ? 'default' : 'pointer',
+    opacity: disabled ? 0.5 : 1,
+    textAlign: 'center',
+    lineHeight: 1.25,
+  }
+}
+
+/** Raccourcis tactiles pour l'échéance : toujours plus fiables qu'une
+ * reconnaissance vocale sur un mot isolé. La voix reste active en
+ * parallèle (IndicateurEcouteAuto juste au-dessus) — le premier des deux
+ * qui répond gagne. */
+function ChoixEcheanceRapide({ onChoisir }: { onChoisir: (iso: string) => void }) {
+  function isoDeAujourdHuiPlus(jours: number) {
+    const d = new Date()
+    d.setHours(0, 0, 0, 0)
+    d.setDate(d.getDate() + jours)
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  }
+
+  const chipStyle: React.CSSProperties = {
+    padding: '8px 14px',
+    borderRadius: 999,
+    border: '1px solid rgba(255,255,255,0.22)',
+    background: 'rgba(255,255,255,0.08)',
+    color: '#fff',
+    fontSize: 12.5,
+    fontWeight: 700,
+    cursor: 'pointer',
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, marginTop: -6 }}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
+        <button type="button" onClick={() => onChoisir(isoDeAujourdHuiPlus(0))} style={chipStyle}>Aujourd’hui</button>
+        <button type="button" onClick={() => onChoisir(isoDeAujourdHuiPlus(1))} style={chipStyle}>Demain</button>
+        <button type="button" onClick={() => onChoisir(isoDeAujourdHuiPlus(7))} style={chipStyle}>Dans 1 semaine</button>
+      </div>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'rgba(255,255,255,0.55)' }}>
+        ou choisir une date :
+        <input
+          type="date"
+          onChange={(e) => { if (e.target.value) onChoisir(e.target.value) }}
+          style={{
+            border: '1px solid rgba(255,255,255,0.22)', background: 'rgba(255,255,255,0.06)',
+            color: '#fff', borderRadius: 8, padding: '6px 8px', fontSize: 12.5,
+          }}
+        />
+      </label>
+    </div>
+  )
 }
 
 function StatutLigne({ texte }: { texte: string }) {
