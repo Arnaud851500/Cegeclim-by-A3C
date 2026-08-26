@@ -569,6 +569,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
         { label: '9 : Projection Stock', path: '/stocks-disponibilites2', accessKey: 'can_stocks' },
         { label: '10 : Analyse Devis', path: '/cycle-documents', accessKey: 'can_dashboard' },
         { label: '11 : Indicateurs', path: '/Indicateurs', accessKey: 'can_autorisation' },
+        { label: '12 : Gestion des objectifs ', path: '/objectifs', accessKey: 'can_activites' },
       ],
     },
 {

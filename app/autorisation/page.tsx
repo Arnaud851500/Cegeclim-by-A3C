@@ -1,4 +1,4 @@
- 'use client'
+'use client'
 
 import { useEffect, useMemo, useState } from 'react'
 import type React from 'react'
@@ -19,6 +19,7 @@ type PermissionKey =
   | 'can_stocks'
   | 'can_activites'
   | 'can_change_scope'
+  | 'can_objectifs'
 
 type AlertKey =
   | 'show_alert_cerfa_ko'
@@ -49,6 +50,8 @@ type UserAccess = {
   allowed_collaborateurs: string[]
   allowed_departements: string[]
   allowed_codes_postaux: string[]
+  soumis_objectif: boolean
+  agence_objectif: string
 }
 
 type TabKey = 'profiles' | 'users' | 'matrix'
@@ -106,6 +109,7 @@ const PERMISSION_GROUPS: Array<{
     items: [
       { key: 'can_autorisation', label: 'Administration', description: 'Accès, imports, jobs, analyse devis et atelier.' },
       { key: 'can_change_scope', label: 'Changer de société', description: 'Autorise le changement de scope dans le bandeau.' },
+      { key: 'can_objectifs', label: 'Objectifs', description: 'Fixer et suivre les objectifs commerciaux (Direction).' },
     ],
   },
 ]
@@ -165,6 +169,7 @@ const EMPTY_PROFILE: AccessProfile = {
   can_stocks: false,
   can_activites: false,
   can_change_scope: false,
+  can_objectifs: false,
   show_alert_cerfa_ko: false,
   show_alert_cdc_liv_avant_2026: false,
   show_alert_controle_frais_port: false,
@@ -181,6 +186,8 @@ const EMPTY_USER: UserAccess = {
   allowed_collaborateurs: [],
   allowed_departements: [],
   allowed_codes_postaux: [],
+  soumis_objectif: false,
+  agence_objectif: '',
 }
 
 function normalizeList(value: unknown, fallback: string[] = []) {
@@ -238,6 +245,8 @@ function userSignature(user: UserAccess) {
     allowed_collaborateurs: [...user.allowed_collaborateurs].sort(),
     allowed_departements: [...user.allowed_departements].sort(),
     allowed_codes_postaux: [...user.allowed_codes_postaux].sort(),
+    soumis_objectif: user.soumis_objectif,
+    agence_objectif: user.agence_objectif,
   })
 }
 
@@ -292,7 +301,7 @@ export default function AutorisationPage() {
       supabase.from('access_profiles').select('*').order('name', { ascending: true }),
       supabase
         .from('user_page_access')
-        .select('email, display_name, access_profile_id, allowed_scopes, allowed_agences, allowed_collaborateurs, allowed_departements, allowed_codes_postaux')
+        .select('email, display_name, access_profile_id, allowed_scopes, allowed_agences, allowed_collaborateurs, allowed_departements, allowed_codes_postaux, soumis_objectif, agence_objectif')
         .order('email', { ascending: true }),
       supabase.from('vision_tci_layouts').select('id, nom').order('nom', { ascending: true }),
     ])
@@ -315,6 +324,8 @@ export default function AutorisationPage() {
       allowed_collaborateurs: normalizeList(row.allowed_collaborateurs),
       allowed_departements: normalizeList(row.allowed_departements),
       allowed_codes_postaux: normalizeList(row.allowed_codes_postaux),
+      soumis_objectif: !!row.soumis_objectif,
+      agence_objectif: String(row.agence_objectif || '').trim(),
     }))
 
     const countByProfile = new Map<string, number>()
@@ -538,6 +549,8 @@ export default function AutorisationPage() {
         allowed_collaborateurs: user.allowed_collaborateurs,
         allowed_departements: user.allowed_departements,
         allowed_codes_postaux: user.allowed_codes_postaux,
+        soumis_objectif: user.soumis_objectif,
+        agence_objectif: user.soumis_objectif ? user.agence_objectif.trim() : '',
       })
       .eq('email', email)
 
@@ -571,6 +584,8 @@ export default function AutorisationPage() {
       allowed_collaborateurs: newUser.allowed_collaborateurs,
       allowed_departements: newUser.allowed_departements,
       allowed_codes_postaux: newUser.allowed_codes_postaux,
+      soumis_objectif: newUser.soumis_objectif,
+      agence_objectif: newUser.soumis_objectif ? newUser.agence_objectif.trim() : '',
     })
 
     setSavingKey(null)
@@ -925,8 +940,19 @@ export default function AutorisationPage() {
                             {initialsOf(user)}
                           </span>
                           <span className="min-w-0 flex-1">
-                            <span className="block truncate text-sm font-semibold">
-                              {user.display_name || user.email}
+                            <span className="flex items-center gap-1.5">
+                              <span className="block truncate text-sm font-semibold">
+                                {user.display_name || user.email}
+                              </span>
+                              {user.soumis_objectif && (
+                                <span
+                                  className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide ${
+                                    active ? 'bg-[#B4761A] text-white' : 'bg-[#FDF7EA] text-[#8A5A11] ring-1 ring-[#EBD8AE]'
+                                  }`}
+                                >
+                                  Obj.
+                                </span>
+                              )}
                             </span>
                             <span className={`block truncate text-[11px] ${active ? 'text-slate-300' : 'text-slate-500'}`}>
                               {profile ? profile.name : 'Sans profil — aucun accès'}
@@ -978,6 +1004,26 @@ export default function AutorisationPage() {
                       ]}
                     />
                   </Field>
+                  <Field label="Soumis à objectif">
+                    <label className="flex h-[42px] cursor-pointer items-center gap-3 rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={newUser.soumis_objectif}
+                        onChange={(event) => setNewUser((current) => ({ ...current, soumis_objectif: event.target.checked }))}
+                        className="h-4 w-4 accent-[#B4761A]"
+                      />
+                      <span className="font-medium text-slate-800">Apparaît dans la page Objectifs</span>
+                    </label>
+                  </Field>
+                  {newUser.soumis_objectif && (
+                    <Field label="Agence de rattachement" hint="Sert à cumuler ses objectifs dans ceux de l’agence.">
+                      <TextField
+                        value={newUser.agence_objectif}
+                        onChange={(value) => setNewUser((current) => ({ ...current, agence_objectif: value }))}
+                        placeholder="ANGLET, BORDEAUX…"
+                      />
+                    </Field>
+                  )}
                 </div>
 
                 <div className="mt-5 flex gap-2">
@@ -1026,6 +1072,31 @@ export default function AutorisationPage() {
                         ]}
                       />
                     </Field>
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-1 gap-4 rounded-xl border border-[#E7E4DD] bg-[#FAF9F7] p-4 lg:grid-cols-2">
+                    <Field label="Soumis à objectif" hint="Fait apparaître cette personne dans la page Objectifs (Direction).">
+                      <label className="flex h-[42px] cursor-pointer items-center gap-3 rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={userDraft.soumis_objectif}
+                          onChange={(event) => patchUserDraft({ soumis_objectif: event.target.checked })}
+                          className="h-4 w-4 accent-[#B4761A]"
+                        />
+                        <span className="font-medium text-slate-800">
+                          {userDraft.soumis_objectif ? 'Suivi dans la page Objectifs' : 'Non suivi'}
+                        </span>
+                      </label>
+                    </Field>
+                    {userDraft.soumis_objectif && (
+                      <Field label="Agence de rattachement" hint="Ses objectifs individuels se cumulent dans ceux de cette agence.">
+                        <TextField
+                          value={userDraft.agence_objectif}
+                          onChange={(value) => patchUserDraft({ agence_objectif: value })}
+                          placeholder="ANGLET, BORDEAUX…"
+                        />
+                      </Field>
+                    )}
                   </div>
 
                   <ProfilePreview profile={profileById.get(userDraft.access_profile_id) || null} />
