@@ -11,10 +11,14 @@
  *    pour les tiers déjà appariés avec SAGE.
  *  - Comparaison : logique de contrôle de cohérence SAGE ↔ BLG restaurée
  *    telle quelle (comparatif champ par champ, panneau de mapping manuel,
- *    synchro à la demande).
+ *    synchro à la demande), avec export Excel de l'ensemble des champs
+ *    comparés SAGE ↔ BLG pour les clients filtrés à l'écran.
  *
- * Nécessite le paquet "xlsx" (SheetJS) pour l'export Excel de l'onglet
- * SAGE : `npm install xlsx` si ce n'est pas déjà fait dans le projet.
+ * Les 3 listes de gauche (SAGE / BLG / Comparaison) se naviguent au clavier
+ * avec les flèches ↑ / ↓ une fois la liste focus (clic ou tabulation dessus).
+ *
+ * Nécessite le paquet "xlsx" (SheetJS) pour l'export Excel :
+ * `npm install xlsx` si ce n'est pas déjà fait dans le projet.
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -114,6 +118,30 @@ const EXPORT_COLONNES_SAGE: Array<{ key: keyof ClientAdresseRow; label: string; 
   { key: 'expedition_defaut_designation', label: "Mode d'expédition (défaut client seul)" },
 ]
 
+/** Navigation clavier ↑/↓ générique pour les listes "N° tiers" à gauche.
+ * `getIndex` retrouve l'index de la ligne actuellement sélectionnée dans
+ * `rows` (comparaison propre à chaque onglet, ex. numero_tiers+li_no pour
+ * SAGE, numero_tiers seul pour BLG/Comparaison). */
+function creerHandlerNavigation<T>(
+  rows: T[],
+  selected: T | null,
+  setSelected: (r: T) => void,
+  getIndex: (rows: T[], selected: T | null) => number,
+  refs: React.MutableRefObject<Record<number, HTMLTableRowElement | null>>,
+) {
+  return (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
+    if (rows.length === 0) return
+    e.preventDefault()
+    const currentIndex = getIndex(rows, selected)
+    let nextIndex: number
+    if (currentIndex === -1) nextIndex = 0
+    else nextIndex = e.key === 'ArrowDown' ? Math.min(currentIndex + 1, rows.length - 1) : Math.max(currentIndex - 1, 0)
+    setSelected(rows[nextIndex])
+    refs.current[nextIndex]?.scrollIntoView({ block: 'nearest' })
+  }
+}
+
 function OngletSage() {
   const [rows, setRows] = useState<ClientAdresseRow[]>([])
   const [totalCount, setTotalCount] = useState<number | null>(null)
@@ -136,6 +164,7 @@ function OngletSage() {
   const [expeditionOptions, setExpeditionOptions] = useState<string[]>([])
 
   const expeditionRef = useRef<HTMLDivElement>(null)
+  const listRefs = useRef<Record<number, HTMLTableRowElement | null>>({})
 
   useEffect(() => {
     function onClickOutside(e: MouseEvent) {
@@ -213,6 +242,12 @@ function OngletSage() {
   function toggleExpedition(e: string) {
     setExpeditionFilters((prev) => (prev.includes(e) ? prev.filter((x) => x !== e) : [...prev, e]))
   }
+
+  function getIndexSage(list: ClientAdresseRow[], sel: ClientAdresseRow | null) {
+    if (!sel) return -1
+    return list.findIndex((r) => r.numero_tiers === sel.numero_tiers && r.li_no === sel.li_no)
+  }
+  const onListKeyDown = creerHandlerNavigation(rows, selected, setSelected, getIndexSage, listRefs)
 
   /** Export Excel : rapatrie TOUTES les lignes correspondant aux filtres
    * actuels (paginé par 1000, pas limité aux 3000 affichées à l'écran),
@@ -369,7 +404,11 @@ function OngletSage() {
             </div>
             {error && <div className="text-[12px] font-semibold text-red-600">{error}</div>}
           </div>
-          <div className="max-h-[760px] overflow-auto rounded-lg border border-[#E5E1D8]">
+          <div
+            tabIndex={0}
+            onKeyDown={onListKeyDown}
+            className="max-h-[760px] overflow-auto rounded-lg border border-[#E5E1D8] outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A]/50"
+          >
             <table className="w-full text-left text-[13px]">
               <thead className="sticky top-0 bg-[#F4F3F0] text-[11px] uppercase tracking-wide text-[#8A8474]">
                 <tr>
@@ -386,6 +425,7 @@ function OngletSage() {
                   return (
                     <tr
                       key={key}
+                      ref={(el) => { listRefs.current[i] = el }}
                       onClick={() => setSelected(r)}
                       className={`cursor-pointer border-t border-[#E5E1D8] transition-colors hover:bg-[#F4F3F0] ${isSelected ? 'bg-[#B4761A]/[0.06]' : ''}`}
                     >
@@ -598,6 +638,64 @@ function formatCellValue(v: unknown): string {
   return String(v)
 }
 
+/** Colonnes d'export pour l'onglet Comparaison : reprend l'ensemble des
+ * champs SAGE ↔ BLG déjà renvoyés par la RPC get_controle_tiers_sage_blg
+ * (les mêmes que ceux affichés dans le panneau "Comparaison détaillée"). */
+const EXPORT_COLONNES_COMPARAISON: Array<{ key: keyof ControleRow; label: string; transform?: (r: ControleRow) => string }> = [
+  { key: 'numero_tiers', label: 'N° tiers' },
+  { key: 'statut_appariement', label: 'Statut appariement', transform: (r) => (r.statut_appariement === 'apparie' ? 'Apparié' : 'Manquant BLG') },
+  { key: 'champs_en_ecart', label: 'Nb champs en écart', transform: (r) => String(r.champs_en_ecart?.length ?? 0) },
+  { key: 'champs_en_ecart', label: 'Champs en écart (détail)', transform: (r) => (r.champs_en_ecart || []).join(', ') },
+  { key: 'sage_intitule', label: 'Intitulé (SAGE)' },
+  { key: 'blg_intitule', label: 'Intitulé (BLG)' },
+  { key: 'sage_qualite', label: 'Qualité (SAGE)' },
+  { key: 'blg_tags', label: 'Qualité / tags (BLG)', transform: (r) => formatCellValue(r.blg_tags) },
+  { key: 'sage_siret', label: 'SIRET (SAGE)' },
+  { key: 'blg_siret', label: 'SIRET (BLG)' },
+  { key: 'sage_code_naf', label: 'Code NAF (SAGE)' },
+  { key: 'blg_code_naf', label: 'Code NAF (BLG)' },
+  { key: 'sage_code_postal', label: 'Code postal (SAGE)' },
+  { key: 'blg_code_postal', label: 'Code postal (BLG)' },
+  { key: 'sage_ville', label: 'Ville (SAGE)' },
+  { key: 'blg_ville', label: 'Ville (BLG)' },
+  { key: 'sage_representant', label: 'Représentant (SAGE)' },
+  { key: 'blg_commercial', label: 'Commercial (BLG)' },
+  { key: 'sage_encours', label: 'Encours autorisé (SAGE)', transform: (r) => formatCellValue(r.sage_encours) },
+  { key: 'blg_encours', label: 'Encours (BLG)', transform: (r) => formatCellValue(r.blg_encours) },
+  { key: 'sage_assurance_credit', label: 'Assurance crédit (SAGE)', transform: (r) => formatCellValue(r.sage_assurance_credit) },
+  { key: 'blg_assurance_credit', label: 'Assurance crédit (BLG)', transform: (r) => formatCellValue(r.blg_assurance_credit) },
+  { key: 'sage_famille', label: 'Famille (SAGE)' },
+  { key: 'blg_famille', label: 'Famille (BLG)' },
+  { key: 'sage_frais_facturation', label: 'Frais de facturation (SAGE)' },
+  { key: 'blg_frais_facturation', label: 'Frais de facturation (BLG)' },
+  { key: 'sage_routage_promo', label: 'Routage promo (SAGE)' },
+  { key: 'blg_routage_promo', label: 'Routage promo (BLG)' },
+  { key: 'sage_facture_email', label: 'Facture électronique (SAGE)' },
+  { key: 'blg_facture_electronique', label: 'Facture électronique (BLG)' },
+  { key: 'sage_releve_facture', label: 'Relevé de facture (SAGE)' },
+  { key: 'blg_releve_facture', label: 'Relevé de facture (BLG)' },
+  { key: 'sage_type_facture', label: 'Type de facture (SAGE)' },
+  { key: 'blg_type_facture', label: 'Type de facture (BLG)' },
+  { key: 'sage_capacite_expiration', label: 'Capacité expiration (SAGE)' },
+  { key: 'blg_capacite_expiration', label: 'Capacité expiration (BLG)' },
+  { key: 'sage_mise_en_sommeil', label: 'Mise en sommeil (SAGE)', transform: (r) => formatCellValue(r.sage_mise_en_sommeil) },
+  { key: 'blg_est_entite_interne', label: 'Entité interne (BLG)', transform: (r) => formatCellValue(r.blg_est_entite_interne) },
+  { key: 'blg_est_adresse_livraison', label: 'Adresse de livraison uniquement (BLG)', transform: (r) => formatCellValue(r.blg_est_adresse_livraison) },
+  { key: 'sage_contact', label: 'Contact (SAGE)' },
+  { key: 'blg_contact_principal', label: 'Contact principal (BLG)' },
+  { key: 'blg_contacts_resume', label: 'Contacts (BLG)' },
+  { key: 'blg_nb_contacts', label: 'Nb contacts (BLG)', transform: (r) => formatCellValue(r.blg_nb_contacts) },
+  { key: 'sage_agence_rattachement', label: 'Agence de rattachement (SAGE)' },
+  { key: 'blg_iban', label: 'IBAN (BLG)' },
+  { key: 'blg_banque', label: 'Banque (BLG)' },
+  { key: 'sage_abrege', label: 'Abrégé (SAGE)' },
+  { key: 'blg_nom_court', label: 'Nom court (BLG)' },
+  { key: 'blg_id_tiers', label: 'ID tiers (BLG, brut)' },
+  { key: 'blg_partner_id', label: 'Partner ID (BLG)', transform: (r) => formatCellValue(r.blg_partner_id) },
+  { key: 'sage_updated_at', label: 'Dernière mise à jour (SAGE)' },
+  { key: 'blg_last_update', label: 'Dernière mise à jour (BLG)' },
+]
+
 // ─────────────────────────────────────────────────────────────────────────
 // Onglet BLG (lecture seule côté BLG, pour les tiers déjà appariés)
 // ─────────────────────────────────────────────────────────────────────────
@@ -634,6 +732,7 @@ function OngletBlg() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<ControleRow | null>(null)
+  const listRefs = useRef<Record<number, HTMLTableRowElement | null>>({})
 
   useEffect(() => {
     let cancelled = false
@@ -654,6 +753,12 @@ function OngletBlg() {
     return () => { cancelled = true }
   }, [search])
 
+  function getIndexBlg(list: ControleRow[], sel: ControleRow | null) {
+    if (!sel) return -1
+    return list.findIndex((r) => r.numero_tiers === sel.numero_tiers)
+  }
+  const onListKeyDown = creerHandlerNavigation(rows, selected, setSelected, getIndexBlg, listRefs)
+
   return (
     <>
       <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
@@ -672,14 +777,18 @@ function OngletBlg() {
             <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">{loading ? 'Chargement…' : `${rows.length} résultat${rows.length > 1 ? 's' : ''}`}</div>
             {error && <div className="text-[12px] font-semibold text-red-600">{error}</div>}
           </div>
-          <div className="max-h-[760px] overflow-auto rounded-lg border border-[#E5E1D8]">
+          <div
+            tabIndex={0}
+            onKeyDown={onListKeyDown}
+            className="max-h-[760px] overflow-auto rounded-lg border border-[#E5E1D8] outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A]/50"
+          >
             <table className="w-full text-left text-[13px]">
               <thead className="sticky top-0 bg-[#F4F3F0] text-[11px] uppercase tracking-wide text-[#8A8474]">
                 <tr><th className="px-3 py-2 font-bold">N° tiers</th><th className="px-3 py-2 font-bold">Ville</th></tr>
               </thead>
               <tbody>
-                {rows.map((r) => (
-                  <tr key={r.numero_tiers} onClick={() => setSelected(r)}
+                {rows.map((r, i) => (
+                  <tr key={r.numero_tiers} ref={(el) => { listRefs.current[i] = el }} onClick={() => setSelected(r)}
                     className={`cursor-pointer border-t border-[#E5E1D8] transition-colors hover:bg-[#F4F3F0] ${selected?.numero_tiers === r.numero_tiers ? 'bg-[#B4761A]/[0.06]' : ''}`}>
                     <td className="px-3 py-2">
                       <div className="font-mono text-[12px] font-semibold text-[#3A362E]">{r.numero_tiers}</div>
@@ -760,6 +869,11 @@ function OngletComparaison() {
   const [syncMessage, setSyncMessage] = useState<string | null>(null)
   const [syncLog, setSyncLog] = useState<SyncLogEntry[]>([])
   const [showSyncLog, setShowSyncLog] = useState(false)
+
+  const [exportEnCours, setExportEnCours] = useState(false)
+  const [exportProgress, setExportProgress] = useState<{ done: number } | null>(null)
+
+  const listRefs = useRef<Record<number, HTMLTableRowElement | null>>({})
 
   const conditionsValides = useMemo(
     () => conditions.filter((c) => c.champ && (c.operateur === 'est_vide' || c.operateur === 'non_vide' || c.valeur.trim() !== '')),
@@ -871,6 +985,60 @@ function OngletComparaison() {
     void loadSummary()
     void loadRows()
   }
+
+  /** Export Excel : rapatrie TOUTES les lignes correspondant aux filtres
+   * actuels de l'onglet Comparaison (statut, écarts, champ, recherche,
+   * conditions avancées), paginé par 500 via la même RPC que la liste,
+   * puis génère un .xlsx avec l'ensemble des champs SAGE ↔ BLG comparés
+   * (EXPORT_COLONNES_COMPARAISON). */
+  async function exporterExcelComparaison() {
+    setExportEnCours(true)
+    setExportProgress({ done: 0 })
+    try {
+      const toutes: ControleRow[] = []
+      let offset = 0
+      const pageSize = 500
+      while (true) {
+        const { data, error: err } = await supabase.rpc('get_controle_tiers_sage_blg', {
+          p_statut: statutFilter === 'tous' ? null : statutFilter,
+          p_only_ecarts: onlyEcarts, p_champ: champFilter, p_search: search.trim() || null,
+          p_limit: pageSize, p_offset: offset,
+          ...filtreParams(),
+        })
+        if (err) throw err
+        const batch = (data || []) as ControleRow[]
+        toutes.push(...batch)
+        setExportProgress({ done: toutes.length })
+        if (batch.length < pageSize) break
+        offset += pageSize
+      }
+
+      const feuille = toutes.map((r) => {
+        const ligne: Record<string, string> = {}
+        EXPORT_COLONNES_COMPARAISON.forEach((c) => {
+          ligne[c.label] = c.transform ? c.transform(r) : safeText(r[c.key])
+        })
+        return ligne
+      })
+
+      const ws = XLSX.utils.json_to_sheet(feuille)
+      ws['!cols'] = EXPORT_COLONNES_COMPARAISON.map(() => ({ wch: 22 }))
+      const wb = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(wb, ws, 'Comparaison SAGE-BLG')
+      XLSX.writeFile(wb, `comparaison_sage_blg_${new Date().toISOString().slice(0, 10)}.xlsx`)
+    } catch (e) {
+      alert('Erreur export Excel : ' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      setExportEnCours(false)
+      setExportProgress(null)
+    }
+  }
+
+  function getIndexComparaison(list: ControleRow[], sel: ControleRow | null) {
+    if (!sel) return -1
+    return list.findIndex((r) => r.numero_tiers === sel.numero_tiers)
+  }
+  const onListKeyDown = creerHandlerNavigation(rows, selected, setSelected, getIndexComparaison, listRefs)
 
   const champsTries = useMemo(() => {
     if (!summary) return []
@@ -1054,6 +1222,20 @@ function OngletComparaison() {
               <button type="button" onClick={() => setConditions((prev) => [...prev, nouvelleCondition()])}
                 className="mt-2 text-[12px] font-bold text-[#B4761A] hover:underline">+ Ajouter une condition</button>
             </div>
+
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[#E5E1D8] pt-3">
+              <span className="text-[12px] text-[#8A8474]">
+                {exportProgress ? `Export en cours… ${exportProgress.done} client${exportProgress.done > 1 ? 's' : ''} récupéré${exportProgress.done > 1 ? 's' : ''}` : '\u00A0'}
+              </span>
+              <button
+                type="button"
+                onClick={() => void exporterExcelComparaison()}
+                disabled={exportEnCours || loading}
+                className="rounded-lg bg-[#111820] px-4 py-2 text-[13px] font-bold text-white hover:bg-[#252E3D] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {exportEnCours ? 'Export en cours…' : '⬇ Exporter en Excel (tous les champs SAGE + BLG)'}
+              </button>
+            </div>
           </section>
 
           <section className="grid gap-4 lg:grid-cols-[1fr_2fr]">
@@ -1062,14 +1244,18 @@ function OngletComparaison() {
                 <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">{loading ? 'Chargement…' : `${rows.length} résultat${rows.length > 1 ? 's' : ''}`}</div>
                 {error && <div className="text-[12px] font-semibold text-red-600">{error}</div>}
               </div>
-              <div className="max-h-[760px] overflow-auto rounded-lg border border-[#E5E1D8]">
+              <div
+                tabIndex={0}
+                onKeyDown={onListKeyDown}
+                className="max-h-[760px] overflow-auto rounded-lg border border-[#E5E1D8] outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A]/50"
+              >
                 <table className="w-full text-left text-[13px]">
                   <thead className="sticky top-0 bg-[#F4F3F0] text-[11px] uppercase tracking-wide text-[#8A8474]">
                     <tr><th className="px-3 py-2 font-bold">N° tiers</th><th className="px-3 py-2 font-bold">Statut</th></tr>
                   </thead>
                   <tbody>
-                    {rows.map((r) => (
-                      <tr key={r.numero_tiers} onClick={() => setSelected(r)}
+                    {rows.map((r, i) => (
+                      <tr key={r.numero_tiers} ref={(el) => { listRefs.current[i] = el }} onClick={() => setSelected(r)}
                         className={`cursor-pointer border-t border-[#E5E1D8] transition-colors hover:bg-[#F4F3F0] ${selected?.numero_tiers === r.numero_tiers ? 'bg-[#B4761A]/[0.06]' : ''}`}>
                         <td className="px-3 py-2">
                           <div className="font-mono text-[12px] font-semibold text-[#3A362E]">{r.numero_tiers}</div>
