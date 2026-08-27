@@ -2,8 +2,9 @@
  * GET /api/stocks-disponibilites/export-excel
  *
  * Génère un fichier Excel multi-onglets :
- *   1. "Projection stock" — données hebdo ou mensuelles avec sous-totaux par famille
- *   2. "Ventes N / N-1"   — historique mensuel ou hebdo des BL par référence
+ *   1. "Projection stock"   — données hebdo ou mensuelles avec sous-totaux par famille
+ *   2. "Ventes N / N-1"     — historique mensuel ou hebdo des BL par référence
+ *   3. "Stock par dépôt"    — stock actuel / disponible / réservé, total puis par dépôt
  *
  * Paramètres :
  *   famille      — filtre famille (optionnel)
@@ -27,6 +28,28 @@
  * référence remplacée sur sa remplaçante, en cascade récursive pondérée par
  * le pourcentage transféré à chaque saut (même logique que le KPI "BL depuis
  * le 1er janvier" et que le module Stock en général).
+ *
+ * FIX (2026-08) — familles macro absentes de l'export "tous les articles"
+ * (ex. R/R, R/O) :
+ *  - Cause : ni projQuery ni ventesQuery n'étaient paginées. PostgREST/
+ *    Supabase plafonne toute requête à 1000 lignes par défaut sans erreur
+ *    visible. Les deux requêtes sont triées/groupées en commençant par
+ *    macro_famille croissant — au-delà de 1000 lignes, tout ce qui vient
+ *    après alphabétiquement (R/R, R/O...) était donc silencieusement coupé.
+ *  - Correctif : fetchAllPages() récupère toutes les pages par tranches de
+ *    1000 lignes (.range()) jusqu'à épuisement, pour la requête de
+ *    projection ET pour l'appel RPC de ventes historiques.
+ *
+ * AJOUT (2026-08, cette révision) — onglet "Stock par dépôt" :
+ *  - Nouvel onglet, même structure de groupement/sous-totaux que les deux
+ *    premiers (macro > famille > référence). Colonnes : un groupe "TOTAL"
+ *    (tous dépôts confondus) suivi d'un groupe par dépôt réel, chacun avec
+ *    3 métriques : Stock actuel, Disponible, Réservé.
+ *  - Source : vue v_stock_par_depot_article (même source que le panneau
+ *    "🏬 Par dépôt" de la fiche article et de la RPC get_stock_par_depot),
+ *    interrogée pour toutes les références du périmètre en une passe,
+ *    paginée par lots de références (REF_CHUNK_SIZE) puis par lots de 1000
+ *    lignes (fetchAllPages) pour rester robuste sur un gros périmètre.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -67,6 +90,19 @@ type VenteRow = {
   annee: number;
   qte_n: number;
   qte_n1: number;
+};
+
+// Sous-ensemble de v_stock_par_depot_article utilisé par l'onglet "Stock par
+// dépôt" — seules les 3 métriques demandées (stock actuel / disponible /
+// réservé) sont sélectionnées ; stock_commande_fournisseur, stock_prepare et
+// stock_a_terme (visibles dans le panneau "🏬 Par dépôt" de la fiche article)
+// ne sont pas nécessaires ici.
+type DepotRow = {
+  reference_article: string;
+  depot: string;
+  stock_reel: number | null;
+  stock_reserve: number | null;
+  stock_disponible: number | null;
 };
 
 type FieldName = keyof Row;
@@ -121,6 +157,62 @@ const STATUT_COLOR: Record<string,string> = { REMPLACEE:"8A93A6", REMPLACANTE:"3
 const thin = (): ExcelJS.Border => ({ style:"thin", color:{ argb:"FFD0CAC0" } });
 const allB  = (): Partial<ExcelJS.Borders> => ({ left:thin(), right:thin(), top:thin(), bottom:thin() });
 const thickBottom = (): Partial<ExcelJS.Borders> => ({ left:thin(), right:thin(), top:thin(), bottom:{ style:"medium", color:{ argb:"FF0B1220" } } });
+
+// ── Pagination générique ────────────────────────────────────────────────────
+// PostgREST (Supabase) plafonne toute requête — y compris les appels RPC qui
+// renvoient un SETOF — à 1000 lignes par défaut, sans erreur. buildQuery doit
+// renvoyer un NOUVEAU query builder à chaque appel (avec les mêmes filtres/
+// tri), sur lequel on applique .range() pour tourner page par page jusqu'à
+// épuisement des résultats.
+const PAGE_SIZE = 1000;
+
+// buildQuery() doit renvoyer un NOUVEAU query builder Supabase à chaque appel
+// (mêmes filtres/tri que l'original). On le type en `any` côté requête car
+// les query builders Supabase (from().select()... comme rpc()) exposent
+// `.range()` avec une forme "thenable" que TS ne matche pas toujours
+// structurellement à une interface explicite — seul le T[] de sortie compte
+// pour l'appelant.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function fetchAllPages<T>(buildQuery: () => any): Promise<T[]> {
+  const all: T[] = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = (await buildQuery().range(from, from + PAGE_SIZE - 1)) as {
+      data: T[] | null;
+      error: { message: string } | null;
+    };
+    if (error) throw new Error(error.message);
+    const batch = data ?? [];
+    all.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return all;
+}
+
+// Nombre de références par lot pour l'onglet "Stock par dépôt" : un `.in()`
+// sur des centaines/milliers de références peut dépasser les limites
+// pratiques d'URL/requête PostgREST, donc on découpe en lots avant d'appliquer
+// fetchAllPages (qui gère la pagination 1000 lignes à l'intérieur de chaque lot).
+const REF_CHUNK_SIZE = 200;
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function fetchDepotRows(supabase: any, refs: string[]): Promise<DepotRow[]> {
+  const all: DepotRow[] = [];
+  for (let i = 0; i < refs.length; i += REF_CHUNK_SIZE) {
+    const chunk = refs.slice(i, i + REF_CHUNK_SIZE);
+    const buildQuery = () =>
+      supabase
+        .from("v_stock_par_depot_article")
+        .select("reference_article,depot,stock_reel,stock_reserve,stock_disponible")
+        .in("reference_article", chunk)
+        .order("reference_article")
+        .order("depot");
+    const chunkRows = await fetchAllPages<DepotRow>(buildQuery);
+    all.push(...chunkRows);
+  }
+  return all;
+}
 
 // ── Agrégation mensuelle ───────────────────────────────────────────────────
 function agrMensuel(rows: Row[]): Row[] {
@@ -201,30 +293,40 @@ export async function GET(req: NextRequest) {
   const cascadeParam = (searchParams.get("cascade") ?? "0").toLowerCase();
   const cascadeSubstitutions = cascadeParam === "1" || cascadeParam === "true";
 
-  // ── 1. Données projection ────────────────────────────────────────────────
-  let projQuery = supabase.from("v_stock_projection_hebdo_latest").select(SELECT_COLS)
-    .order("macro_famille").order("famille").order("reference_article").order("periode_debut");
-  if (famille)    projQuery = projQuery.eq("famille",       famille);
-  else if (macro) projQuery = projQuery.eq("macro_famille", macro);
+  // ── 1. Données projection (paginées) ─────────────────────────────────────
+  const buildProjQuery = () => {
+    let q = supabase.from("v_stock_projection_hebdo_latest").select(SELECT_COLS)
+      .order("macro_famille").order("famille").order("reference_article").order("periode_debut");
+    if (famille)    q = q.eq("famille",       famille);
+    else if (macro) q = q.eq("macro_famille", macro);
+    return q;
+  };
 
-  // ── 2. Données ventes historiques ────────────────────────────────────────
-  const ventesQuery = supabase.rpc("get_stock_ventes_historique", {
+  // ── 2. Données ventes historiques (paginées) ─────────────────────────────
+  const buildVentesQuery = () => supabase.rpc("get_stock_ventes_historique", {
     p_famille:                famille || null,
     p_famille_macro:          (!famille && macro) ? macro : null,
     p_granularite:            granularite,
     p_cascade_substitutions:  cascadeSubstitutions,
   });
 
-  const [{ data: projData, error: projErr }, { data: ventesData, error: ventesErr }] =
-    await Promise.all([projQuery, ventesQuery]);
+  let projData: Row[];
+  let ventesData: VenteRow[];
+  try {
+    [projData, ventesData] = await Promise.all([
+      fetchAllPages<Row>(buildProjQuery),
+      fetchAllPages<VenteRow>(buildVentesQuery),
+    ]);
+  } catch (e) {
+    return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });
+  }
 
-  if (projErr)         return NextResponse.json({ error: projErr.message }, { status: 500 });
-  if (!projData?.length) return NextResponse.json({ error: "Aucune donnée de projection" }, { status: 404 });
+  if (!projData.length) return NextResponse.json({ error: "Aucune donnée de projection" }, { status: 404 });
 
-  let rows: Row[] = projData as unknown as Row[];
+  let rows: Row[] = projData;
   if (granularite === "mensuel") rows = agrMensuel(rows);
 
-  const ventesRows: VenteRow[] = (ventesData ?? []) as unknown as VenteRow[];
+  const ventesRows: VenteRow[] = ventesData;
 
   const allPeriods = [...new Set(rows.map(r => r.periode_debut))].sort();
   const allMetrics = GROUPES.flatMap(g => g.fields);
@@ -243,6 +345,37 @@ export async function GET(req: NextRequest) {
     if (!refFirst.has(r.reference_article)) { refFirst.set(r.reference_article, r); refs.push(r.reference_article); }
   }
   const familles = [...new Set(refs.map(ref => refFirst.get(ref)!.famille))];
+
+  // ── 3. Données stock par dépôt (paginées, toutes les références du périmètre) ──
+  let depotRows: DepotRow[];
+  try {
+    depotRows = await fetchDepotRows(supabase, refs);
+  } catch (e) {
+    return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });
+  }
+
+  const depots = [...new Set(depotRows.map(d => d.depot))].sort();
+  const depotIdx = new Map<string, DepotRow>();
+  for (const d of depotRows) depotIdx.set(d.reference_article + "|" + d.depot, d);
+
+  const totalByRef = new Map<string, { stock_reel: number; stock_reserve: number; stock_disponible: number }>();
+  for (const d of depotRows) {
+    const acc = totalByRef.get(d.reference_article) ?? { stock_reel: 0, stock_reserve: 0, stock_disponible: 0 };
+    acc.stock_reel       += Number(d.stock_reel) || 0;
+    acc.stock_reserve    += Number(d.stock_reserve) || 0;
+    acc.stock_disponible += Number(d.stock_disponible) || 0;
+    totalByRef.set(d.reference_article, acc);
+  }
+
+  // { reel, dispo, reserve } pour un groupe donné ("TOTAL" ou un nom de dépôt)
+  function depotMetricsFor(ref: string, groupLabel: string): { reel: number | null; dispo: number | null; reserve: number | null } {
+    if (groupLabel === "TOTAL") {
+      const t = totalByRef.get(ref);
+      return t ? { reel: t.stock_reel, dispo: t.stock_disponible, reserve: t.stock_reserve } : { reel: null, dispo: null, reserve: null };
+    }
+    const d = depotIdx.get(ref + "|" + groupLabel);
+    return d ? { reel: d.stock_reel, dispo: d.stock_disponible, reserve: d.stock_reserve } : { reel: null, dispo: null, reserve: null };
+  }
 
   // ── Excel ─────────────────────────────────────────────────────────────────
   const wb = new ExcelJS.Workbook();
@@ -587,7 +720,161 @@ export async function GET(req: NextRequest) {
   wv.autoFilter = { from:{ row:3, column:1 }, to:{ row:3, column:V_INFO_N } };
 
   // ══════════════════════════════════════════════════════════════════════════
-  // ONGLET 3 — LÉGENDE
+  // ONGLET 3 — STOCK PAR DÉPÔT
+  // ══════════════════════════════════════════════════════════════════════════
+  const DEPOT_INFO = ["Fam. macro","Famille","Référence","Désignation"];
+  const DEPOT_INFO_WIDTHS = [14,14,18,44];
+  const DEPOT_METRIC_LABELS = ["Stock actuel","Disponible","Réservé"];
+  const DEPOT_INFO_N = DEPOT_INFO.length;
+  const nDM = DEPOT_METRIC_LABELS.length;
+
+  const depotGroupLabels = ["TOTAL", ...depots];
+  const nDepotGroups = depotGroupLabels.length;
+
+  const wd = wb.addWorksheet("Stock par dépôt", {
+    views: [{ state:"frozen", xSplit:DEPOT_INFO_N, ySplit:3 }],
+  });
+  wd.properties.showGridLines = false;
+
+  wd.columns = [
+    ...DEPOT_INFO_WIDTHS.map(w => ({ width: w })),
+    ...Array<{ width: number }>(nDM * nDepotGroups).fill({ width: 10 }),
+  ];
+
+  // Ligne 1 : titre
+  const totalColsD = DEPOT_INFO_N + nDM * nDepotGroups;
+  wd.mergeCells(1, 1, 1, totalColsD);
+  const dr1 = wd.getRow(1); dr1.height = 26;
+  const dc1 = dr1.getCell(1);
+  dc1.value     = (famille || macro || "Toutes familles") + " — Stock par dépôt";
+  dc1.font      = { name:"Arial", bold:true, size:13, color:{ argb:"FFFFFFFF" } };
+  dc1.fill      = { type:"pattern", pattern:"solid", fgColor:{ argb:"FF0B1220" } };
+  dc1.alignment = { horizontal:"left", vertical:"middle", indent:1 };
+  dr1.commit();
+
+  // Ligne 2 : colonnes info fusionnées + étiquettes groupes (TOTAL puis dépôts)
+  const dr2 = wd.getRow(2); dr2.height = 26;
+  for (let ci = 1; ci <= DEPOT_INFO_N; ci++) {
+    wd.mergeCells(2, ci, 3, ci);
+    const c = dr2.getCell(ci);
+    c.value     = DEPOT_INFO[ci - 1];
+    c.font      = { name:"Arial", bold:true, size:8, color:{ argb:"FFFFFFFF" } };
+    c.fill      = { type:"pattern", pattern:"solid", fgColor:{ argb:"FF0B1220" } };
+    c.alignment = { horizontal:"center", vertical:"middle", wrapText:true };
+    c.border    = allB();
+  }
+  depotGroupLabels.forEach((label, gi) => {
+    const startC = DEPOT_INFO_N + 1 + gi * nDM;
+    wd.mergeCells(2, startC, 2, startC + nDM - 1);
+    const c = dr2.getCell(startC);
+    c.value     = label;
+    c.font      = { name:"Arial", bold:true, size:7, color:{ argb:"FFFFFFFF" } };
+    c.fill      = { type:"pattern", pattern:"solid", fgColor:{ argb: gi === 0 ? "FF3F9142" : "FFA6A181" } };
+    c.alignment = { horizontal:"center", vertical:"middle", wrapText:true };
+    c.border    = allB();
+  });
+  dr2.commit();
+
+  // Ligne 3 : labels métriques (Stock actuel / Disponible / Réservé), par groupe
+  const dr3 = wd.getRow(3); dr3.height = 26;
+  depotGroupLabels.forEach((_, gi) => {
+    DEPOT_METRIC_LABELS.forEach((lbl, mi) => {
+      const c = dr3.getCell(DEPOT_INFO_N + 1 + gi * nDM + mi);
+      c.value     = lbl;
+      c.font      = { name:"Arial", bold:true, size:7, color:{ argb: gi === 0 ? "FF3F9142" : "FF141A26" } };
+      c.fill      = { type:"pattern", pattern:"solid", fgColor:{ argb: gi === 0 ? "FFE8F0E9" : "FFF5F3EC" } };
+      c.alignment = { horizontal:"center", vertical:"middle", wrapText:true };
+      c.border    = allB();
+    });
+  });
+  dr3.commit();
+
+  // ── Données par famille avec sous-totaux (même groupement que les autres onglets) ──
+  let dCurrentRow = 4;
+
+  for (const famille_key of familles) {
+    const famRefs = refs.filter(ref => refFirst.get(ref)!.famille === famille_key);
+    const firstRowOfFamille = dCurrentRow;
+
+    for (const ref of famRefs) {
+      const r0 = refFirst.get(ref)!;
+      const dataRow = wd.getRow(dCurrentRow);
+      dataRow.height = 15;
+
+      const infoVals: Array<string | null> = [r0.macro_famille, r0.famille, ref, r0.designation];
+      infoVals.forEach((val, ci) => {
+        const c = dataRow.getCell(ci + 1);
+        c.value     = val ?? "";
+        c.font      = { name:"Arial", size:8, bold: ci === 2, color:{ argb:"FF141A26" } };
+        c.fill      = { type:"pattern", pattern:"solid", fgColor:{ argb:"FFFFFFFF" } };
+        c.border    = allB();
+        c.alignment = { horizontal:"left", vertical:"middle" };
+      });
+
+      depotGroupLabels.forEach((label, gi) => {
+        const m = depotMetricsFor(ref, label);
+        const values: Array<number | null> = [m.reel, m.dispo, m.reserve];
+        values.forEach((num, mi) => {
+          const c = dataRow.getCell(DEPOT_INFO_N + 1 + gi * nDM + mi);
+          c.fill      = { type:"pattern", pattern:"solid", fgColor:{ argb: gi === 0 ? "FFE8F0E9" : "FFF5F3EC" } };
+          c.border    = allB();
+          c.alignment = { horizontal:"right", vertical:"middle" };
+          c.font      = { name:"Arial", size:8, color:{ argb:"FF141A26" } };
+          if (num === null) { c.value = ""; }
+          else {
+            c.value  = Math.round(num * 10) / 10;
+            c.numFmt = "#,##0.#";
+            // colonne "Disponible" = 2e métrique (mi === 1)
+            if (mi === 1 && num < 0) {
+              c.font = { name:"Arial", bold:true, size:8, color:{ argb:"FFC1683C" } };
+            }
+          }
+        });
+      });
+      dataRow.commit();
+      dCurrentRow++;
+    }
+
+    // ── Ligne de sous-total famille ──────────────────────────────────────────
+    const stRow = wd.getRow(dCurrentRow);
+    stRow.height = 16;
+    const dataStart = firstRowOfFamille;
+    const dataEnd   = dCurrentRow - 1;
+
+    const labelCell = stRow.getCell(1);
+    labelCell.value     = `Sous-total ${famille_key}`;
+    labelCell.font      = { name:"Arial", bold:true, size:8, color:{ argb:"FFFFFFFF" } };
+    labelCell.fill      = { type:"pattern", pattern:"solid", fgColor:{ argb:"FF0B1220" } };
+    labelCell.alignment = { horizontal:"left", vertical:"middle" };
+    labelCell.border    = thickBottom();
+    wd.mergeCells(dCurrentRow, 1, dCurrentRow, DEPOT_INFO_N);
+    for (let ci = 2; ci <= DEPOT_INFO_N; ci++) {
+      const c = stRow.getCell(ci);
+      c.fill   = { type:"pattern", pattern:"solid", fgColor:{ argb:"FF0B1220" } };
+      c.border = thickBottom();
+    }
+
+    depotGroupLabels.forEach((_, gi) => {
+      DEPOT_METRIC_LABELS.forEach((_lbl, mi) => {
+        const col = DEPOT_INFO_N + 1 + gi * nDM + mi;
+        const c   = stRow.getCell(col);
+        const colLetter = wd.getColumn(col).letter;
+        c.value  = { formula: `SUM(${colLetter}${dataStart}:${colLetter}${dataEnd})` };
+        c.numFmt = "#,##0.#";
+        c.fill   = { type:"pattern", pattern:"solid", fgColor:{ argb:"FF1A2742" } };
+        c.border = thickBottom();
+        c.alignment = { horizontal:"right", vertical:"middle" };
+        c.font   = { name:"Arial", bold:true, size:8, color:{ argb:"FFFFFFFF" } };
+      });
+    });
+    stRow.commit();
+    dCurrentRow++;
+  }
+
+  wd.autoFilter = { from:{ row:3, column:1 }, to:{ row:3, column:DEPOT_INFO_N } };
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ONGLET 4 — LÉGENDE
   // ══════════════════════════════════════════════════════════════════════════
   const leg = wb.addWorksheet("Légende");
   leg.getColumn(2).width = 30;
@@ -602,6 +889,11 @@ export async function GET(req: NextRequest) {
     [null,"ROUGE","Stock insuffisant"],[null,"ORANGE","Stock tendu"],[null,"JAUNE","À surveiller"],[null,"VERT","Satisfaisant"],
     [null,null,null],["STATUTS",null,null],
     [null,"REMPLACEE","Besoins transférés, prévision 0 (grisé)"],[null,"REMPLACANTE","Reprend l'historique d'une ou plusieurs ref."],[null,"ACTIVE","Référence courante"],
+    [null,null,null],["STOCK PAR DÉPÔT",null,null],
+    [null,"TOTAL","Somme de tous les dépôts réels"],
+    [null,"Stock actuel","Stock réel physique en dépôt"],
+    [null,"Disponible","Stock réel − préparé (= stock de départ de la projection)"],
+    [null,"Réservé","Quantité réservée sur commandes clients"],
     [null,null,null],["PÉRIMÈTRE",null,null],
     [null,"Famille macro",macro||"(toutes)"],[null,"Famille",famille||"(toutes)"],[null,"Granularité",granularite],
     [null,"Ventes remplacées cumulées",cascadeSubstitutions ? "Oui" : "Non"],
