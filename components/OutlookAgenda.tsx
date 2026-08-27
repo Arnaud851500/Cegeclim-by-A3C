@@ -17,7 +17,7 @@
  * Couleur des RDV basée sur le SECTEUR D'ACTIVITÉ du client lié (même
  * palette TRACKED_SECTORS que la carte "Prospects & Clients").
  *
- * CORRECTIF visuel (cette révision) : les fenêtres de détail RDV et de
+ * CORRECTIF visuel (révision précédente) : les fenêtres de détail RDV et de
  * création de RDV utilisaient un bloc `<style jsx>` scoped -- dans ce
  * contexte d'intégration, ces styles ne s'appliquaient pas du tout
  * (confirmé par capture d'écran : fenêtre affichée en flux normal, sans
@@ -27,11 +27,27 @@
  * fichier -- plus fiable, et visuellement plus soigné (flottantes,
  * arrondies, avec flou d'arrière-plan).
  *
- * AJOUTS (cette révision) :
+ * AJOUTS (révision précédente) :
  *  - Suppression d'un RDV "compagnon CEGECLIM" (uniquement ceux-là -- un
  *    RDV synchronisé depuis BLG ne peut pas être supprimé ici, il faut le
  *    faire côté BLG/Outlook).
  *  - Suppression d'un compte-rendu de visite.
+ *
+ * FIX (2026-08, cette révision) : la suppression d'un compte-rendu (et
+ * d'un RDV compagnon) semblait ne pas fonctionner -- le compte-rendu
+ * réapparaissait après réouverture de la fiche. Cause : `.delete().eq(...)`
+ * suivi d'une simple vérification de `error` ne suffit PAS avec Supabase --
+ * quand une policy RLS bloque un DELETE, ça ne renvoie PAS d'erreur, ça
+ * supprime silencieusement 0 ligne. Le code enchaînait alors
+ * `setCompteRendu(null)` comme si ça avait marché, sans que rien n'ait
+ * réellement changé en base. Correctif : `.select('id')` ajouté après
+ * chaque `.delete()`, pour vérifier ce qui a RÉELLEMENT été supprimé -- si
+ * le tableau retourné est vide, une erreur explicite est levée et affichée
+ * (`deleteError`) plutôt que de laisser l'UI mentir. Si cette erreur
+ * apparaît en pratique, c'est le signal qu'il manque une policy RLS DELETE
+ * sur la table concernée (client_comptes_rendus / rdv_compagnon) côté
+ * Supabase -- ce correctif ne peut pas se substituer à l'ajout de cette
+ * policy, il rend juste le problème visible au lieu de silencieux.
  * ------------------------------------------------------------------------
  */
 
@@ -254,14 +270,26 @@ function RdvDetailModal({
     }
   }
 
+  /** FIX (2026-08) : voir la note en tête de fichier -- `.select('id')`
+   * ajouté après le `.delete()` pour vérifier ce qui a RÉELLEMENT été
+   * supprimé. Sans ça, une policy RLS DELETE manquante ou trop stricte
+   * fait "réussir" silencieusement un delete qui n'a rien supprimé (0
+   * ligne, error === null), et l'UI se vidait à tort. */
   async function supprimerCompteRendu() {
     if (!compteRendu) return;
     if (!window.confirm("Supprimer ce compte-rendu ? Cette action est définitive.")) return;
     setDeletingCr(true);
     setDeleteError(null);
     try {
-      const { error } = await supabase.from("client_comptes_rendus").delete().eq("id", compteRendu.id);
+      const { data, error } = await supabase
+        .from("client_comptes_rendus")
+        .delete()
+        .eq("id", compteRendu.id)
+        .select("id");
       if (error) throw error;
+      if (!data || data.length === 0) {
+        throw new Error("Suppression refusée par la base (droits insuffisants) — le compte-rendu n'a pas été supprimé.");
+      }
       setCompteRendu(null);
       setResumeEdit("");
       onChanged();
@@ -272,14 +300,24 @@ function RdvDetailModal({
     }
   }
 
+  /** FIX (2026-08) : même correctif que supprimerCompteRendu() ci-dessus --
+   * `.select('id')` pour détecter un DELETE bloqué par RLS mais renvoyé
+   * sans erreur. */
   async function supprimerRdv() {
     if (evt.source !== "compagnon" || !evt.compagnonId) return;
     if (!window.confirm(`Supprimer le rendez-vous "${evt.subject}" ? Cette action est définitive.`)) return;
     setDeletingRdv(true);
     setDeleteError(null);
     try {
-      const { error } = await supabase.from("rdv_compagnon").delete().eq("id", evt.compagnonId);
+      const { data, error } = await supabase
+        .from("rdv_compagnon")
+        .delete()
+        .eq("id", evt.compagnonId)
+        .select("id");
       if (error) throw error;
+      if (!data || data.length === 0) {
+        throw new Error("Suppression refusée par la base (droits insuffisants) — le rendez-vous n'a pas été supprimé.");
+      }
       onChanged();
       onClose();
     } catch (e) {

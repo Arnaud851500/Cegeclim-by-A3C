@@ -700,6 +700,12 @@ function CompteRenduBlock({
   const [resumeEdit, setResumeEdit] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // FIX (2026-08) : bouton de suppression ajouté côté mobile -- il n'existait
+  // que dans OutlookAgenda.tsx (desktop). Voir aussi la note ci-dessous sur
+  // supprimer() : même correctif que côté desktop (vérification réelle du
+  // nombre de lignes supprimées, indispensable avec Supabase/RLS).
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -757,6 +763,37 @@ function CompteRenduBlock({
     }
   }
 
+  /** FIX (2026-08) : `.select('id')` ajouté après le `.delete()` -- sans ça,
+   * Supabase ne signale AUCUNE erreur quand une policy RLS bloque la
+   * suppression (0 ligne réellement supprimée, error === null). Le code
+   * vidait alors l'UI comme si ça avait marché, alors que rien n'était
+   * supprimé en base (le compte-rendu réapparaissait à la réouverture).
+   * Voir la même note dans OutlookAgenda.tsx (RdvDetailModal). */
+  async function supprimer() {
+    if (!compteRendu) return
+    if (!window.confirm('Supprimer ce compte-rendu ? Cette action est définitive.')) return
+    setDeleting(true)
+    setDeleteError(null)
+    try {
+      const { data, error: err } = await supabase
+        .from('client_comptes_rendus')
+        .delete()
+        .eq('id', compteRendu.id)
+        .select('id')
+      if (err) throw err
+      if (!data || data.length === 0) {
+        throw new Error("Suppression refusée par la base (droits insuffisants) — le compte-rendu n'a pas été supprimé.")
+      }
+      setCompteRendu(null)
+      setResumeEdit('')
+      onSaved()
+    } catch (e) {
+      setDeleteError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   if (!activityId) return null
 
   return (
@@ -764,13 +801,25 @@ function CompteRenduBlock({
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
         <span style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'rgba(255,255,255,0.5)' }}>Compte-rendu</span>
         {!editMode && (
-          <button
-            type="button"
-            onClick={() => setEditMode(true)}
-            style={{ border: 'none', background: 'rgba(166,161,129,0.18)', color: '#e4dfc9', fontSize: 11.5, fontWeight: 700, padding: '4px 10px', borderRadius: 999 }}
-          >
-            {compteRendu ? 'Modifier' : '+ Ajouter'}
-          </button>
+          <span style={{ display: 'flex', gap: 6 }}>
+            <button
+              type="button"
+              onClick={() => setEditMode(true)}
+              style={{ border: 'none', background: 'rgba(166,161,129,0.18)', color: '#e4dfc9', fontSize: 11.5, fontWeight: 700, padding: '4px 10px', borderRadius: 999 }}
+            >
+              {compteRendu ? 'Modifier' : '+ Ajouter'}
+            </button>
+            {compteRendu && (
+              <button
+                type="button"
+                onClick={() => void supprimer()}
+                disabled={deleting}
+                style={{ border: 'none', background: 'rgba(193,104,60,0.18)', color: '#e0a685', fontSize: 11.5, fontWeight: 700, padding: '4px 10px', borderRadius: 999, opacity: deleting ? 0.5 : 1 }}
+              >
+                {deleting ? '…' : '🗑 Supprimer'}
+              </button>
+            )}
+          </span>
         )}
       </div>
 
@@ -812,6 +861,7 @@ function CompteRenduBlock({
           <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', margin: 0 }}>
             {compteRendu.created_by_name ? `Par ${compteRendu.created_by_name} · ` : ''}{new Date(compteRendu.created_at).toLocaleString('fr-FR')}
           </p>
+          {deleteError && <p style={{ fontSize: 12, color: '#e0a685', marginTop: 8 }}>{deleteError}</p>}
         </div>
       ) : (
         <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Aucun compte-rendu pour ce rendez-vous.</div>
