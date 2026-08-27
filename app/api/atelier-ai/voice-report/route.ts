@@ -20,6 +20,19 @@
 // - rdv_activity_id : adapte le type/la colonne source si l'id BLG n'est
 //   pas un simple texte chez toi (vu que je n'ai pas le schéma exact de
 //   crm_base_activity).
+//
+// FIX (2026-08) : l'assignation automatique par prénom (filet de sécurité
+// quand l'IA laisse assigned_to_email=null) rattachait une tâche à un
+// collaborateur dès que son prénom apparaissait N'IMPORTE OÙ dans la
+// transcription -- y compris quand il s'agissait d'un contact client
+// mentionné en passant ("en présence de Jean-Marc"), pas d'une consigne
+// d'assignation. Ça avait rattaché à tort une tâche à un collaborateur
+// homonyme d'un contact client. completerAssignationParPrenom() exige
+// désormais un verbe d'assignation explicite ("affecte", "assigne",
+// "confie"...) à proximité immédiate (±6 mots) du prénom. Sans ça,
+// assigned_to_email reste null, et /voice-report/confirm assigne alors la
+// tâche à l'utilisateur qui a dicté (assigned_to: t.assigned_to_email ||
+// userEmail) -- comportement par défaut demandé.
 
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
@@ -50,12 +63,44 @@ function normaliserTexte(value: string) {
     .replace(/[\u0300-\u036f]/g, '')
 }
 
+/** Mots indiquant une assignation explicite d'une tâche à quelqu'un --
+ * utilisés uniquement pour repérer une fenêtre de mots autour du prénom
+ * dans assignationExpliciteDetectee(). Couvre "affecte/affecter",
+ * "assigne", "confie", "attribue" et leurs variantes de conjugaison/accord
+ * usuelles à l'oral. */
+const MOTS_ASSIGNATION = [
+  'affecte', 'affecter', 'affectee', 'affectees', 'affectes',
+  'assigne', 'assigner', 'assignee', 'assignees', 'assignes',
+  'confie', 'confier', 'confiee', 'confiees', 'confies',
+  'attribue', 'attribuer', 'attribuee', 'attribuees', 'attribues',
+]
+
+/** Vrai seulement si le prénom apparaît à proximité immédiate (±6 mots)
+ * d'un verbe d'assignation explicite dans le texte normalisé -- ex.
+ * "tâches à affecter à Jean-Marc". Une simple mention du prénom ailleurs
+ * dans le récit (ex. un contact client rencontré pendant la visite) ne
+ * suffit plus : voir le correctif du 2026-08 en tête de fichier. */
+function assignationExpliciteDetectee(texteNorm: string, prenomNorm: string): boolean {
+  if (!prenomNorm) return false
+  const mots = texteNorm.split(/\s+/).filter(Boolean)
+  for (let i = 0; i < mots.length; i++) {
+    if (mots[i] !== prenomNorm) continue
+    const debut = Math.max(0, i - 6)
+    const fin = Math.min(mots.length, i + 7)
+    if (mots.slice(debut, fin).some((m) => MOTS_ASSIGNATION.includes(m))) return true
+  }
+  return false
+}
+
 /** Filet de sécurité : si l'IA n'a pas su rattacher une tâche à un email
- * (assigned_to_email = null), on recherche le prénom de chaque
- * collaborateur connu dans le texte de la tâche PUIS dans la transcription
- * complète — un simple rapprochement par mot entier suffit largement pour
- * ce cas d'usage, et évite de dépendre entièrement du jugement du modèle
- * sur une liste de noms parfois longue. */
+ * (assigned_to_email = null), on ne l'assigne à un collaborateur connu que
+ * si son prénom apparaît accolé à un verbe d'assignation explicite
+ * ("affecte à Jean-Marc", "assigné à Sophie"...) dans la description de la
+ * tâche OU dans la transcription complète -- PAS sur la simple présence du
+ * prénom (cf. correctif 2026-08 en tête de fichier). Si aucune assignation
+ * explicite n'est détectée, assigned_to_email reste null : la tâche sera
+ * assignée par défaut à l'utilisateur qui a dicté, côté
+ * /voice-report/confirm. */
 function completerAssignationParPrenom(
   taches: Tache[],
   assignees: Array<{ email: string; name: string }>,
@@ -71,8 +116,10 @@ function completerAssignationParPrenom(
     for (const assignee of assignees) {
       const prenom = normaliserTexte(assignee.name).split(/\s+/)[0]
       if (!prenom || prenom.length < 3) continue
-      const motEntier = new RegExp(`\\b${prenom}\\b`)
-      if (motEntier.test(descriptionNorm) || motEntier.test(transcriptNorm)) {
+      if (
+        assignationExpliciteDetectee(descriptionNorm, prenom) ||
+        assignationExpliciteDetectee(transcriptNorm, prenom)
+      ) {
         return { ...tache, assigned_to_email: assignee.email }
       }
     }

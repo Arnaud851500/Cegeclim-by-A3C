@@ -44,6 +44,23 @@ import { acquerirVerrouVocal, libererVerrouVocal, verrouVocalDetenuPar, verrouVo
  * ci-dessous lit le texte d'abord et lève une erreur lisible (avec le
  * code HTTP et un extrait de la réponse) si ce n'est pas du JSON valide,
  * au lieu de planter au hasard.
+ *
+ * FIX (2026-08) : compte-rendu ET tâches enregistrés en double. Cause :
+ * pendant l'étape "enregistrement_confirmation", DEUX canaux de
+ * confirmation étaient actifs en même temps -- l'écoute vocale automatique
+ * (ecouterConfirmation(), qui s'arrête seule sur silence) ET les boutons
+ * ✅/✏️ restaient cliquables (confirmerManuellement()). Un tap sur un
+ * bouton appelait forceStopConfirmationRef.current?.() pour couper le
+ * micro, ce qui débloquait juste la promesse attendue par
+ * ecouterConfirmation() -- qui continuait alors sa propre chaîne (upload +
+ * appel à /voice-report/confirm) EN PARALLÈLE de l'appel déclenché par le
+ * bouton. Deux requêtes quasi simultanées vers /voice-report/confirm =
+ * un compte-rendu et un lot de tâches en double. Correctif :
+ * confirmationEnvoyeeRef sert de mutex -- le premier des deux canaux à
+ * vouloir soumettre "gagne" (pose le flag avant tout effet de bord),
+ * l'autre abandonne silencieusement dès qu'il constate le flag déjà posé.
+ * Remis à zéro à chaque nouvelle fenêtre de confirmation (juste avant
+ * setEtape('resume_pret') dans stopperEtEnvoyer()).
  */
 
 /** Lit la réponse en texte puis tente de la parser en JSON -- si ce n'est
@@ -380,6 +397,12 @@ export default function VoiceReportButtons({
   const resolverEcheanceManuelleRef = useRef<((iso: string) => void) | null>(null)
   const idInstanceRef = useRef<symbol>(Symbol('voice-session'))
   const annulerRef = useRef(false)
+  // Mutex anti double-soumission de la confirmation (voix ET boutons actifs
+  // en même temps pendant "enregistrement_confirmation") -- voir la note de
+  // correctif 2026-08 en tête de fichier. Remis à false à chaque nouvelle
+  // fenêtre de confirmation, dans stopperEtEnvoyer() juste avant
+  // setEtape('resume_pret').
+  const confirmationEnvoyeeRef = useRef(false)
 
   function creerAudioSilencieux(): string {
     const sampleRate = 8000
@@ -715,6 +738,11 @@ export default function VoiceReportButtons({
       await completerEcheancesManquantes()
       if (annulerRef.current) return
 
+      // Nouvelle fenêtre de confirmation : les deux canaux (voix
+      // automatique / boutons Oui-Non) redeviennent utilisables, le mutex
+      // anti double-soumission est remis à zéro ici, avant qu'aucun des
+      // deux ne puisse être déclenché.
+      confirmationEnvoyeeRef.current = false
       setEtape('resume_pret')
 
       await jouerTexte(data.spoken_summary)
@@ -862,8 +890,17 @@ export default function VoiceReportButtons({
 
   /** Court-circuite entièrement la reconnaissance vocale pour la
    * confirmation : appuyer sur le gros bouton Oui/Non envoie directement
-   * la réponse au serveur, sans passer par un enregistrement + Whisper. */
+   * la réponse au serveur, sans passer par un enregistrement + Whisper.
+   *
+   * Mutex anti double-soumission (voir note de correctif 2026-08 en tête de
+   * fichier) : si le canal vocal automatique (ecouterConfirmation) a déjà
+   * pris la main -- silence détecté pile au moment du tap -- on abandonne
+   * ici sans rien envoyer, pour ne jamais soumettre deux fois la même
+   * confirmation. */
   async function confirmerManuellement(reponse: 'oui' | 'non') {
+    if (confirmationEnvoyeeRef.current) return
+    confirmationEnvoyeeRef.current = true
+
     try { forceStopConfirmationRef.current?.() } catch {}
     setEtape('traitement_confirmation')
     try {
@@ -899,6 +936,15 @@ export default function VoiceReportButtons({
       setEtape('enregistrement_confirmation')
       const blobBrut = await enregistrerAvecDetectionSilence(forceStopConfirmationRef)
       if (annulerRef.current) return
+
+      // Mutex anti double-soumission (voir note de correctif 2026-08 en
+      // tête de fichier) : si les boutons Oui/Non ont déjà pris la main
+      // pendant qu'on enregistrait -- via forceStopConfirmationRef -- on
+      // abandonne silencieusement ce canal ; confirmerManuellement()
+      // gère déjà tout (état, requête, message).
+      if (confirmationEnvoyeeRef.current) return
+      confirmationEnvoyeeRef.current = true
+
       setEtape('traitement_confirmation')
       const blobWav = await convertirEnWav(blobBrut)
       if (annulerRef.current) return
