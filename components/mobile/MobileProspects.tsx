@@ -31,6 +31,11 @@ import { NavigationChoiceSheet, PhoneChoiceSheet } from './MobileActionSheets'
 //   par l'import leaflet.css) et le bug de correspondance CEGECLIM sur
 //   grand rayon (résolu par le découpage en lots de SIRET). Plus besoin
 //   une fois le diagnostic terminé.
+// v5 : ajout d'une recherche libre (désignation entreprise et/ou nom du
+//   gérant), insensible à la casse et aux accents -- s'applique en plus
+//   des autres filtres, sur liste et carte, sans recharger les données
+//   (filtrage côté client sur le lot déjà chargé, comme les autres
+//   filtres fixes).
 // ─────────────────────────────────────────────────────────────────────────
 
 const MapContainer: any = dynamic(() => import('react-leaflet').then((m) => m.MapContainer as any), { ssr: false })
@@ -183,6 +188,24 @@ function normalizeSiret(value: unknown): string {
   return String(value ?? '').replace(/\D/g, '').trim()
 }
 
+/** Normalise un texte pour la recherche libre : minuscule, accents retirés,
+ * espaces multiples réduits -- pour que "Général" matche "general" et
+ * inversement, sans exiger une saisie exacte. */
+function normalizeTexte(value: string | null | undefined): string {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+}
+
+function matchesRechercheLibre(p: Pick<ProspectRow, 'raison_sociale_affichee' | 'nom_dirigeant'>, requete: string): boolean {
+  if (!requete) return true
+  const cible = normalizeTexte(requete)
+  if (!cible) return true
+  return normalizeTexte(p.raison_sociale_affichee).includes(cible) || normalizeTexte(p.nom_dirigeant).includes(cible)
+}
+
 function distanceKmWgs84(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const toRad = (v: number) => (v * Math.PI) / 180
   const R = 6371
@@ -314,6 +337,10 @@ export default function MobileProspects() {
   const [afficherClients, setAfficherClients] = useState(true)
   const [collaborateurFiltre, setCollaborateurFiltre] = useState('')
   const [collaborateursDisponibles, setCollaborateursDisponibles] = useState<string[]>([])
+  // Recherche libre (désignation entreprise et/ou nom du gérant) -- ne
+  // déclenche aucun rechargement réseau, filtre côté client comme les
+  // autres filtres fixes (secteur, RGE, capital social...).
+  const [rechercheLibre, setRechercheLibre] = useState('')
 
   const [secteursActifs, setSecteursActifs] = useState<Set<string>>(new Set())
 
@@ -576,6 +603,8 @@ export default function MobileProspects() {
         if (!afficherProspects) return false
       }
 
+      if (!matchesRechercheLibre(p, rechercheLibre)) return false
+
       const sector = getSectorLabel(p)
       if (secteursActifs.size > 0 && !secteursActifs.has(sector)) return false
       if (rgeSeul && !p.rge) return false
@@ -588,7 +617,7 @@ export default function MobileProspects() {
       }
       return true
     })
-  }, [prospects, secteursActifs, rgeSeul, capaciteGazSeul, capitalSocialActifs, ancienneteMax, afficherClients, afficherProspects, collaborateurFiltre, departementFiltre])
+  }, [prospects, secteursActifs, rgeSeul, capaciteGazSeul, capitalSocialActifs, ancienneteMax, afficherClients, afficherProspects, collaborateurFiltre, departementFiltre, rechercheLibre])
 
   function toggleSecteur(sector: string) {
     setSecteursActifs((prev) => {
@@ -937,12 +966,46 @@ export default function MobileProspects() {
         </button>
       </div>
 
+      {/* ---- Recherche libre (désignation entreprise / nom du gérant) ----
+         Visible en permanence sur l'écran de résultats, liste comme carte,
+         puisqu'elle filtre prospectsFiltres utilisé par les deux vues. */}
+      <div style={{ padding: '0 14px 10px' }}>
+        <div style={{ position: 'relative' }}>
+          <input
+            type="text"
+            value={rechercheLibre}
+            onChange={(e) => setRechercheLibre(e.target.value)}
+            placeholder="Rechercher une entreprise ou un gérant…"
+            style={{
+              width: '100%', height: 42, borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)',
+              background: 'rgba(255,255,255,0.06)', color: '#fff', padding: '0 36px 0 12px', fontSize: 14,
+            }}
+          />
+          {rechercheLibre && (
+            <button
+              type="button"
+              onClick={() => setRechercheLibre('')}
+              aria-label="Effacer la recherche"
+              style={{
+                position: 'absolute', right: 6, top: '50%', transform: 'translateY(-50%)',
+                width: 28, height: 28, borderRadius: 8, border: 'none', background: 'rgba(255,255,255,0.1)',
+                color: 'rgba(255,255,255,0.7)', fontSize: 14, lineHeight: '28px', padding: 0,
+              }}
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      </div>
+
       {vue === 'liste' ? (
         <div style={{ flex: 1, overflowY: 'auto', padding: '0 14px 90px', display: 'flex', flexDirection: 'column', gap: 8 }}>
           {loading ? (
             <div style={{ padding: '30px 0', textAlign: 'center', fontSize: 13, color: 'rgba(255,255,255,0.4)' }}>Recherche…</div>
           ) : prospectsFiltres.length === 0 ? (
-            <div style={{ padding: '30px 0', textAlign: 'center', fontSize: 13, color: 'rgba(255,255,255,0.4)' }}>Aucun prospect sur ce périmètre.</div>
+            <div style={{ padding: '30px 0', textAlign: 'center', fontSize: 13, color: 'rgba(255,255,255,0.4)' }}>
+              {rechercheLibre ? 'Aucun résultat pour cette recherche.' : 'Aucun prospect sur ce périmètre.'}
+            </div>
           ) : (
             [...prospectsFiltres]
               .sort((a, b) => distanceKmWgs84(position!.lat, position!.lng, a.latEff, a.lonEff) - distanceKmWgs84(position!.lat, position!.lng, b.latEff, b.lonEff))
