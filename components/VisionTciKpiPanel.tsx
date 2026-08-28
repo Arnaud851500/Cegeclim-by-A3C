@@ -26,9 +26,28 @@
  *  - V4.1 : badge "dernière synchro SAGE" dans l'en-tête (LastSyncBadge),
  *    pour que l'utilisateur sache à quel point les chiffres affichés sont
  *    frais sans avoir à le deviner.
+ *
+ *  - V4.2 (2026-08) :
+ *    - Nouveau format de pavé flux "grand format" (option à l'ajout,
+ *      config.grand=true) : même largeur que le pavé flux compact, mais
+ *      deux fois plus haut, avec une courbe cumulée depuis le 1er janvier
+ *      (année en cours en trait plein, N-1 en pointillé, tooltip au
+ *      survol) en plus du total YTD affiché en gros. Alimenté par la
+ *      nouvelle RPC get_vision_tci_kpi_courbe_annuelle, qui réutilise
+ *      exactement les mêmes sous-fonctions par famille que
+ *      get_vision_tci_kpi (get_focus_mensuel_daily_summary_metier /
+ *      _factures_marge / _marge_bl) -- même nettage BR, mêmes chiffres
+ *      que le pavé compact, juste la série jour par jour au lieu d'un
+ *      seul total.
+ *    - Pavé "Clients actifs" (CompteurCard, cle="clients_actifs") :
+ *      largeur doublée (col-span-2 sm:col-span-1 -> col-span-4
+ *      sm:col-span-2) et chiffres agrandis, pour rester lisibles au
+ *      premier coup d'œil. S'applique directement aux pavés déjà en
+ *      place (déterminé par la clé du KPI, pas par une option à
+ *      resélectionner).
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { usePageFilterAccess } from "@/lib/pageAccessFilters";
 import { useAccess } from "@/components/AccessContext";
@@ -57,6 +76,9 @@ type KpiCardConfig = {
   cle: string;
   famille_macro: string | null;
   agence: string | null;
+  // Uniquement pour kind="flux" : pavé grand format avec courbe annuelle
+  // cumulée (voir FluxCardGrand) au lieu du pavé compact jour/mois/année.
+  grand?: boolean;
 };
 
 const COMPTEUR_OPTIONS = [
@@ -76,6 +98,8 @@ type FluxValues = {
   annee_valeur: number; annee_n1: number;
 };
 
+type CourbePoint = { jour_annee: number; valeur_n: number; valeur_n1: number };
+
 function formatMontant(n: number): string {
   const abs = Math.abs(n);
   if (abs >= 1_000_000) return `${(n / 1_000_000).toLocaleString("fr-FR", { maximumFractionDigits: 2 })} M€`;
@@ -84,6 +108,15 @@ function formatMontant(n: number): string {
 }
 function formatPct(n: number): string {
   return `${n.toLocaleString("fr-FR", { maximumFractionDigits: 1 })} %`;
+}
+
+// jour_annee (1 = 1er janvier de l'année en cours) -> Date réelle, pour les
+// libellés de mois et le tooltip de CourbeAnnuelleChart.
+function anneeCouranteDate(jourAnnee: number): Date {
+  const annee = new Date().getFullYear();
+  const d = new Date(annee, 0, 1);
+  d.setDate(d.getDate() + (jourAnnee - 1));
+  return d;
 }
 
 function EvolBadge({ valeur, n1, unite = "montant" }: { valeur: number; n1: number; unite?: "montant" | "points" }) {
@@ -146,7 +179,7 @@ function CardShell({
   );
 }
 
-// ── Pavé FLUX ─────────────────────────────────────────────────────────────
+// ── Pavé FLUX (compact) ──────────────────────────────────────────────────
 
 function FluxCard({
   config, effectiveAgence, effectiveCollaborateur, utiliserJMoins1, refreshTick, onRemove,
@@ -225,7 +258,213 @@ function FluxCard({
   );
 }
 
-// ── Pavé COMPTEUR (réduit : 1 colonne sur 4) ────────────────────────────
+// ── Pavé FLUX (grand format, courbe annuelle) ───────────────────────────
+// Même largeur que le pavé compact (col-span-4 sm:col-span-2), mais deux
+// fois plus haut : gros total YTD + courbe cumulée depuis le 1er janvier
+// (N plein, N-1 pointillé), tooltip au survol.
+
+function CourbeAnnuelleChart({ points, color, estMarge }: { points: CourbePoint[]; color: string; estMarge: boolean }) {
+  const width = 460;
+  const height = 168;
+  const padding = { top: 8, right: 8, bottom: 18, left: 50 };
+  const innerW = width - padding.left - padding.right;
+  const innerH = height - padding.top - padding.bottom;
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
+
+  const n = points.length;
+  const valuesN = points.map((p) => p.valeur_n);
+  const valuesN1 = points.map((p) => p.valeur_n1);
+  const maxVal = Math.max(1, ...valuesN, ...valuesN1);
+  const minVal = 0;
+  const x = (i: number) => padding.left + (n <= 1 ? 0 : (i / (n - 1)) * innerW);
+  const y = (v: number) => padding.top + innerH - ((v - minVal) / (maxVal - minVal || 1)) * innerH;
+
+  const pathN = points.map((p, i) => `${i === 0 ? "M" : "L"} ${x(i)} ${y(p.valeur_n)}`).join(" ");
+  const pathN1 = points.map((p, i) => `${i === 0 ? "M" : "L"} ${x(i)} ${y(p.valeur_n1)}`).join(" ");
+  const areaPath = n > 1 ? `${pathN} L ${x(n - 1)} ${y(0)} L ${x(0)} ${y(0)} Z` : "";
+  const gradientId = `courbe-annuelle-${color.replace("#", "")}`;
+
+  const ticks = [0, maxVal / 2, maxVal];
+
+  // Un libellé par mois, positionné au premier jour de ce mois rencontré
+  // dans la série (donc toujours présent quel que soit le point de départ
+  // de la fenêtre affichée).
+  const moisLabels = useMemo(() => {
+    const seen = new Set<number>();
+    const labels: { idx: number; label: string }[] = [];
+    points.forEach((p, i) => {
+      const d = anneeCouranteDate(p.jour_annee);
+      const mois = d.getMonth();
+      if (!seen.has(mois)) {
+        seen.add(mois);
+        labels.push({ idx: i, label: d.toLocaleDateString("fr-FR", { month: "short" }) });
+      }
+    });
+    return labels;
+  }, [points]);
+
+  function handleMove(e: React.MouseEvent<SVGSVGElement>) {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect || n === 0) return;
+    const relX = (e.clientX - rect.left) / rect.width;
+    const svgX = relX * width;
+    const idx = Math.round(((svgX - padding.left) / innerW) * (n - 1));
+    setHoverIdx(Math.max(0, Math.min(n - 1, idx)));
+  }
+
+  const hp = hoverIdx !== null ? points[hoverIdx] : null;
+  const hoverLeftPct = hoverIdx !== null ? (x(hoverIdx) / width) * 100 : null;
+
+  if (n === 0) return <div className="flex h-[168px] items-center justify-center text-[10px] text-white/30">Aucune donnée.</div>;
+
+  return (
+    <div className="relative">
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${width} ${height}`}
+        className="w-full cursor-crosshair"
+        onMouseMove={handleMove}
+        onMouseLeave={() => setHoverIdx(null)}
+      >
+        <defs>
+          <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={color} stopOpacity={0.28} />
+            <stop offset="100%" stopColor={color} stopOpacity={0} />
+          </linearGradient>
+        </defs>
+        {ticks.map((t, i) => (
+          <g key={i}>
+            <line x1={padding.left} y1={y(t)} x2={width - padding.right} y2={y(t)} stroke="#FFFFFF14" strokeDasharray={i === ticks.length - 1 ? undefined : "3 3"} />
+            <text x={padding.left - 4} y={y(t) + 3} fontSize={9} textAnchor="end" fill="#FFFFFF55">
+              {estMarge ? `${t.toFixed(0)}%` : formatMontant(t)}
+            </text>
+          </g>
+        ))}
+        {areaPath && <path d={areaPath} fill={`url(#${gradientId})`} />}
+        <path d={pathN1} fill="none" stroke={color} strokeWidth={1.5} strokeDasharray="5 4" opacity={0.55} />
+        <path d={pathN} fill="none" stroke={color} strokeWidth={2.25} strokeLinejoin="round" strokeLinecap="round" />
+        {hoverIdx !== null && (
+          <>
+            <line x1={x(hoverIdx)} y1={padding.top} x2={x(hoverIdx)} y2={height - padding.bottom} stroke="#FFFFFF33" strokeWidth={1} />
+            <circle cx={x(hoverIdx)} cy={y(points[hoverIdx].valeur_n)} r={3.5} fill={color} />
+            <circle cx={x(hoverIdx)} cy={y(points[hoverIdx].valeur_n1)} r={3} fill={color} opacity={0.55} />
+          </>
+        )}
+        {moisLabels.map(({ idx, label }) => (
+          <text key={idx} x={x(idx)} y={height - 3} fontSize={9} textAnchor="middle" fill="#FFFFFF55">{label}</text>
+        ))}
+      </svg>
+
+      {hp && hoverLeftPct !== null && (
+        <div
+          className="pointer-events-none absolute top-1 z-10 -translate-x-1/2 whitespace-nowrap rounded-lg border border-white/15 bg-[#0B1220] px-2.5 py-1.5 text-[10px] shadow-lg"
+          style={{ left: `${Math.min(92, Math.max(8, hoverLeftPct))}%` }}
+        >
+          <div className="mb-0.5 font-semibold text-white/80">
+            {anneeCouranteDate(hp.jour_annee).toLocaleDateString("fr-FR", { day: "2-digit", month: "short" })}
+          </div>
+          <div className="flex items-center gap-1.5 text-white">
+            <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: color }} />
+            N&nbsp;: <span className="font-[var(--font-mono,monospace)] font-semibold">{estMarge ? formatPct(hp.valeur_n) : formatMontant(hp.valeur_n)}</span>
+          </div>
+          <div className="flex items-center gap-1.5 text-white/60">
+            <span className="inline-block h-1.5 w-1.5 rounded-full border border-white/40" />
+            N-1&nbsp;: <span className="font-[var(--font-mono,monospace)]">{estMarge ? formatPct(hp.valeur_n1) : formatMontant(hp.valeur_n1)}</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FluxCardGrand({
+  config, effectiveAgence, effectiveCollaborateur, refreshTick, onRemove,
+}: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; onRemove: () => void }) {
+  const famille = config.cle as FamilleFlux;
+  const [points, setPoints] = useState<CourbePoint[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const color = FOCUS_MENSUEL_COLORS[famille] || "#4B92AC";
+  const estMarge = famille === "Marge";
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      setError(null);
+      const { data, error: err } = await supabase.rpc("get_vision_tci_kpi_courbe_annuelle", {
+        p_famille: famille,
+        p_famille_macro: config.famille_macro,
+        p_agence: effectiveAgence,
+        p_collaborateur: effectiveCollaborateur,
+      });
+      if (cancelled) return;
+      if (err) {
+        setError(err.message);
+      } else {
+        setPoints(((data || []) as CourbePoint[]).map((p) => ({
+          jour_annee: Number(p.jour_annee),
+          valeur_n: Number(p.valeur_n),
+          valeur_n1: Number(p.valeur_n1),
+        })));
+      }
+      setLoading(false);
+    }
+    load();
+    return () => { cancelled = true; };
+  }, [famille, config.famille_macro, effectiveAgence, effectiveCollaborateur, refreshTick]);
+
+  function handleClick() {
+    if (famille === "BL" || famille === "CDC" || famille === "Factures") window.open("/focus_mensuel2", "_blank", "noopener,noreferrer");
+    else if (famille === "Devis") window.open("/cycle-documents", "_blank", "noopener,noreferrer");
+    else if (famille === "Marge") window.open("/atelier-analyse?raccourci=analyse-marge", "_blank", "noopener,noreferrer");
+  }
+
+  const fmt = estMarge ? formatPct : formatMontant;
+  const dernier = points.length ? points[points.length - 1] : null;
+  const ytdN = dernier?.valeur_n ?? 0;
+  const ytdN1 = dernier?.valeur_n1 ?? 0;
+
+  return (
+    <div className="col-span-4 sm:col-span-2">
+      <CardShell
+        color={color}
+        badgeLabel={famille}
+        badges={[config.famille_macro, effectiveAgence].filter((v): v is string => Boolean(v)).map((v) => (v === config.famille_macro ? `Fam : ${v}` : v))}
+        onRemove={onRemove}
+        onClick={handleClick}
+        clickHint={famille === "Marge" ? "Ouvrir Atelier d'analyse — Analyse marge" : famille === "Devis" ? "Ouvrir Analyse Devis" : "Ouvrir Activité Quotidienne"}
+      >
+        {loading ? (
+          <div className="h-56 animate-pulse rounded bg-white/5" />
+        ) : error ? (
+          <p className="text-[10px] text-red-300">{error}</p>
+        ) : (
+          <div className="text-white">
+            <div className="flex items-end justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-[9px] uppercase tracking-wide text-white/40">Cumul depuis le 1er janvier</div>
+                <div className="whitespace-nowrap font-[var(--font-mono,monospace)] text-2xl font-semibold">{fmt(ytdN)}</div>
+              </div>
+              <div className="shrink-0 text-right">
+                <EvolBadge valeur={ytdN} n1={ytdN1} unite={estMarge ? "points" : "montant"} />
+                <div className="mt-0.5 text-[10px] text-white/40">N-1 : {fmt(ytdN1)}</div>
+              </div>
+            </div>
+            <div className="mt-2">
+              <CourbeAnnuelleChart points={points} color={color} estMarge={estMarge} />
+            </div>
+          </div>
+        )}
+      </CardShell>
+    </div>
+  );
+}
+
+// ── Pavé COMPTEUR ─────────────────────────────────────────────────────────
+// "Clients actifs" (cle="clients_actifs") est agrandi (largeur doublée,
+// chiffres plus gros) — les autres compteurs gardent le format compact.
 
 const CA_BAND_ORDER = ["400K€", "150K€", "80K€", "20K€", "vide"] as const;
 
@@ -241,6 +480,11 @@ function CompteurCard({
   const label = meta?.label || config.cle;
   const isAlerte = meta?.isAlerte ?? false;
   const [clientsCreesN, setClientsCreesN] = useState<number | null>(null);
+
+  // FIX (2026-08) : "Clients actifs" doit rester lisible en un coup d'œil —
+  // largeur doublée et chiffres agrandis, appliqué directement à ce pavé
+  // existant (déterminé par sa clé, pas par une option à ressélectionner).
+  const estClientsActifs = config.cle === "clients_actifs";
 
   useEffect(() => {
     let cancelled = false;
@@ -303,26 +547,34 @@ function CompteurCard({
   const valueColor = isAlerte ? ((total || 0) > 0 ? "#C1683C" : "#3F9142") : "#FFFFFF";
 
   return (
-    <div className="col-span-2 sm:col-span-1">
-      <CardShell color="#A6A181" badgeLabel={label} onRemove={onRemove} onClick={config.cle !== "factures_retard" ? handleClick : undefined} compact>
+    <div className={estClientsActifs ? "col-span-4 sm:col-span-2" : "col-span-2 sm:col-span-1"}>
+      <CardShell color="#A6A181" badgeLabel={label} onRemove={onRemove} onClick={config.cle !== "factures_retard" ? handleClick : undefined} compact={!estClientsActifs}>
         {loading ? (
-          <div className="h-8 animate-pulse rounded bg-white/5" />
+          <div className={estClientsActifs ? "h-14 animate-pulse rounded bg-white/5" : "h-8 animate-pulse rounded bg-white/5"} />
         ) : error ? (
           <p className="text-[9px] text-red-300">{error}</p>
         ) : (
           <>
-            <div className="font-[var(--font-mono,monospace)] text-lg font-semibold" style={{ color: valueColor }}>
+            <div
+              className={`font-[var(--font-mono,monospace)] font-semibold ${estClientsActifs ? "text-5xl" : "text-lg"}`}
+              style={{ color: valueColor }}
+            >
               {isMontant ? formatMontant(total || 0) : (total ?? 0).toLocaleString("fr-FR")}
             </div>
             {config.cle === "clients_actifs" && clientsCreesN !== null && (
-              <div className="mt-0.5 text-[9px] text-white/50">
-                dont <span className="font-semibold text-white/80">{clientsCreesN.toLocaleString("fr-FR")}</span> créés cette année
+              <div className={`mt-1 text-white/50 ${estClientsActifs ? "text-sm" : "text-[9px]"}`}>
+                dont <span className={`font-semibold text-white/80 ${estClientsActifs ? "text-base" : ""}`}>{clientsCreesN.toLocaleString("fr-FR")}</span> créés cette année
               </div>
             )}
             {bands && (
-              <div className="mt-1 flex flex-wrap gap-1">
+              <div className={`flex flex-wrap gap-1.5 ${estClientsActifs ? "mt-3" : "mt-1"}`}>
                 {CA_BAND_ORDER.filter((b) => bands[b]).slice(0, 3).map((b) => (
-                  <span key={b} className="rounded bg-white/10 px-1 py-0.5 text-[8px] text-white/60">{b}:{bands[b]}</span>
+                  <span
+                    key={b}
+                    className={`rounded bg-white/10 text-white/60 ${estClientsActifs ? "px-2.5 py-1 text-[12px]" : "px-1 py-0.5 text-[8px]"}`}
+                  >
+                    {b}:{bands[b]}
+                  </span>
                 ))}
               </div>
             )}
@@ -416,6 +668,7 @@ function AjouterKpiForm({
   const [familleMacro, setFamilleMacro] = useState("");
   const [agence, setAgence] = useState(agenceForcee || "");
   const [spacerSpan, setSpacerSpan] = useState<1 | 2>(1);
+  const [grand, setGrand] = useState(false);
 
   function handleKindChange(next: KpiKind) {
     setKind(next);
@@ -479,6 +732,13 @@ function AjouterKpiForm({
           </select>
         )}
         {agenceForcee && kind !== "spacer" && <span className="text-[10px] uppercase tracking-wide text-[#A6A181]">périmètre 🔒</span>}
+
+        {kind === "flux" && (
+          <label className="flex cursor-pointer items-center gap-1.5 rounded border border-white/20 bg-[#141A26] px-2 py-1 text-xs text-white/80">
+            <input type="checkbox" checked={grand} onChange={(e) => setGrand(e.target.checked)} className="h-3.5 w-3.5 accent-[#A6A181]" />
+            Grand format (courbe annuelle)
+          </label>
+        )}
       </div>
       <div className="flex justify-end gap-2">
         <button onClick={onCancel} className="rounded px-3 py-1 text-xs text-white/60 hover:text-white">Annuler</button>
@@ -486,7 +746,13 @@ function AjouterKpiForm({
           onClick={() =>
             kind === "spacer"
               ? onAdd({ kind, cle: String(spacerSpan), famille_macro: null, agence: null })
-              : onAdd({ kind, cle, famille_macro: kind === "flux" ? (familleMacro || null) : null, agence: agenceForcee || agence || null })
+              : onAdd({
+                  kind,
+                  cle,
+                  famille_macro: kind === "flux" ? (familleMacro || null) : null,
+                  agence: agenceForcee || agence || null,
+                  grand: kind === "flux" ? grand : undefined,
+                })
           }
           className="rounded bg-white/20 px-3 py-1 text-xs font-semibold text-white hover:bg-white/30"
         >
@@ -558,6 +824,7 @@ export default function VisionTciKpiPanel() {
     const normalized: KpiCardConfig[] = raw.map((c) => ({
       id: c.id, kind: c.kind || "flux", cle: c.cle || c.famille || "BL",
       famille_macro: c.famille_macro ?? null, agence: c.agence ?? null,
+      grand: Boolean(c.grand),
     }));
     setCards(normalized);
     setPersonnalise(Boolean(prefsRow?.personnalise));
@@ -664,7 +931,9 @@ export default function VisionTciKpiPanel() {
             ↻ Actualiser
           </button>
 
-          {/* Bascule Jour / J-1 : pilote tous les pavés flux d'un coup. */}
+          {/* Bascule Jour / J-1 : pilote tous les pavés flux compacts d'un
+              coup (les pavés grand format affichent le cumul YTD, non
+              concernés par cette bascule). */}
           <div className="flex items-center rounded-full border border-white/15 bg-white/5 p-0.5 text-xs">
             <button
               onClick={() => setUtiliserJMoins1(false)}
@@ -698,7 +967,11 @@ export default function VisionTciKpiPanel() {
       <div className="mb-3 grid grid-cols-4 gap-3">
         {cards.map((c) =>
           c.kind === "flux" ? (
-            <FluxCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} utiliserJMoins1={utiliserJMoins1} refreshTick={refreshTick} onRemove={() => handleRemove(c.id)} />
+            c.grand ? (
+              <FluxCardGrand key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} refreshTick={refreshTick} onRemove={() => handleRemove(c.id)} />
+            ) : (
+              <FluxCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} utiliserJMoins1={utiliserJMoins1} refreshTick={refreshTick} onRemove={() => handleRemove(c.id)} />
+            )
           ) : c.kind === "taux" ? (
             <TauxCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} refreshTick={refreshTick} onRemove={() => handleRemove(c.id)} />
           ) : c.kind === "spacer" ? (
