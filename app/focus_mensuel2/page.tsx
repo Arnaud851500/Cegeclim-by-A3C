@@ -23,6 +23,16 @@
  * "Mes alertes"), à charge pour lui de taper "Mon activité" s'il veut cet
  * écran précis — cohérent avec la navigation mobile du reste de l'app,
  * plutôt qu'un court-circuit direct vers un seul écran.
+ *
+ * FIX (2026-08, cette révision) :
+ *  - PortefeuilleTableCompact : suppression des mentions "dont retard" /
+ *    "dont M+" (colonnes CDC et PL), jugées trop fines pour ce tableau
+ *    condensé. Les colonnes CDC et PL redeviennent des montants simples.
+ *  - KpiCardJMA : la carte "BL" du pavé du haut précise désormais entre
+ *    parenthèses qu'elle intègre les BR -- cohérent avec
+ *    get_focus_mensuel_daily_summary_metier, qui nette déjà les bons de
+ *    retour dans le même type_document 'BL' (voir le flux bl_flux_lignes /
+ *    bl_summary de cette RPC, alimentant monthRows/monthRowsN1 ici).
  * ------------------------------------------------------------------------
  */
 
@@ -963,26 +973,13 @@ export function PortfolioTableCompact({ rows }: { rows: AgencyPortfolioRow[] }) 
               <tr key={r.label} className={r.label === "TOTAL AGENCE" ? "bg-black/[0.03] font-semibold" : ""}>
                 <td className="px-2 py-2 text-[#141A26]">{r.label}</td>
                 <td className="px-2 py-2 text-right font-[var(--font-mono)] text-[#141A26]">{formatMoney(r.total)}</td>
-                {/* cdcLivMx et plLivMPlus sont des SOUS-ENSEMBLES de cdc et pl,
-                    pas des compléments : les additionner double-comptait la part
-                    concernée et faisait passer la colonne CDC au-dessus du total.
-                    On affiche donc l'ensemble, et le sous-ensemble en mention. */}
-                <td className="px-2 py-2 text-right font-[var(--font-mono)] text-[#141A26]/80">
-                  <div>{formatMoney(r.cdc)}</div>
-                  {r.cdcLivMx > 0 && (
-                    <div className="text-[10px] font-normal text-[#C1683C]">
-                      dont retard {formatMoney(r.cdcLivMx)}
-                    </div>
-                  )}
-                </td>
-                <td className="px-2 py-2 text-right font-[var(--font-mono)] text-[#141A26]/80">
-                  <div>{formatMoney(r.pl)}</div>
-                  {r.plLivMPlus > 0 && (
-                    <div className="text-[10px] font-normal text-[#141A26]/45">
-                      dont M+ {formatMoney(r.plLivMPlus)}
-                    </div>
-                  )}
-                </td>
+                {/* FIX (2026-08) : mentions "dont retard" / "dont M+" retirées
+                    -- trop fines pour ce tableau condensé. cdcLivMx et
+                    plLivMPlus restent des sous-ensembles de cdc/pl (pas des
+                    compléments, cf. note ci-dessous conservée pour mémoire) ;
+                    on affiche désormais uniquement l'ensemble. */}
+                <td className="px-2 py-2 text-right font-[var(--font-mono)] text-[#141A26]/80">{formatMoney(r.cdc)}</td>
+                <td className="px-2 py-2 text-right font-[var(--font-mono)] text-[#141A26]/80">{formatMoney(r.pl)}</td>
                 <td className="px-2 py-2 text-right font-[var(--font-mono)] text-[#141A26]/80">{formatMoney(r.blMx + r.blM + r.brMx + r.brM)}</td>
               </tr>
             ))}
@@ -1097,10 +1094,18 @@ function KpiCardJMA({
 
   return (
     <div className="flex flex-col rounded-xl border border-white/10 bg-white/[0.04] p-5">
-      <div className="mb-4">
+      <div className="mb-4 flex items-center gap-2">
         <span className="rounded-md px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide" style={{ background: `${color}22`, color }}>
           {type}
         </span>
+        {/* FIX (2026-08) : la RPC get_focus_mensuel_daily_summary_metier nette
+            déjà les BR dans le même type_document 'BL' (voir bl_flux_lignes /
+            bl_summary côté base) -- cette carte agrège directement monthRows,
+            donc son "BL" est net des retours. Mention ajoutée pour que ce
+            soit visible à l'écran, pas seulement dans le code. */}
+        {type === "BL" && (
+          <span className="text-[10px] text-white/35">(intègre les BR)</span>
+        )}
       </div>
 
       {/* Jour et mois en cours sur la même ligne de base et à la même taille :
