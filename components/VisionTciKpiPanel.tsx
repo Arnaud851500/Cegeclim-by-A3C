@@ -6,7 +6,7 @@
  * Changements vs V3 :
  *
  *  - BASCULE JOUR / J-1 en en-tête : pilote le "p_utiliser_j_moins_1" de
- *    get_vision_tci_kpi pour tous les pavés flux d'un coup.
+ *    get_vision_tci_kpi pour tous les pavés flux compacts d'un coup.
  *
  *  - MISE EN PAGE PAR PROFIL : résolution en cascade — préférences
  *    personnelles (vision_tci_preferences, si personnalise=true) sinon
@@ -23,28 +23,36 @@
  *  - Le reste (grille 4 colonnes, color coding, filtrage agence) reprend
  *    le comportement de la V3.
  *
- *  - V4.1 : badge "dernière synchro SAGE" dans l'en-tête (LastSyncBadge),
- *    pour que l'utilisateur sache à quel point les chiffres affichés sont
- *    frais sans avoir à le deviner.
+ *  - V4.1 : badge "dernière synchro SAGE" dans l'en-tête (LastSyncBadge).
  *
- *  - V4.2 (2026-08) :
- *    - Nouveau format de pavé flux "grand format" (option à l'ajout,
- *      config.grand=true) : même largeur que le pavé flux compact, mais
- *      deux fois plus haut, avec une courbe cumulée depuis le 1er janvier
- *      (année en cours en trait plein, N-1 en pointillé, tooltip au
- *      survol) en plus du total YTD affiché en gros. Alimenté par la
- *      nouvelle RPC get_vision_tci_kpi_courbe_annuelle, qui réutilise
- *      exactement les mêmes sous-fonctions par famille que
- *      get_vision_tci_kpi (get_focus_mensuel_daily_summary_metier /
- *      _factures_marge / _marge_bl) -- même nettage BR, mêmes chiffres
- *      que le pavé compact, juste la série jour par jour au lieu d'un
- *      seul total.
- *    - Pavé "Clients actifs" (CompteurCard, cle="clients_actifs") :
- *      largeur doublée (col-span-2 sm:col-span-1 -> col-span-4
- *      sm:col-span-2) et chiffres agrandis, pour rester lisibles au
- *      premier coup d'œil. S'applique directement aux pavés déjà en
- *      place (déterminé par la clé du KPI, pas par une option à
- *      resélectionner).
+ *  - V4.2 : pavé flux "grand format" (option à l'ajout, config.grand=true) :
+ *    courbe cumulée depuis le 1er janvier (N plein, N-1 pointillé),
+ *    tooltip au survol, alimenté par get_vision_tci_kpi_courbe_annuelle.
+ *    Pavé "Clients actifs" agrandi (largeur doublée, chiffres plus gros).
+ *
+ *  - V4.3 (2026-08, cette révision) :
+ *    - Pavé flux grand format : bascule Cumulé / Mensuel (barres groupées
+ *      N vs N-1 par mois), calculée à partir des mêmes points cumulés déjà
+ *      chargés (pas d'appel RPC supplémentaire) -- désactivée pour "Marge"
+ *      (voir note ci-dessous).
+ *    - Ajout de la valeur "Jour" et du cumul "Mois (MTD)" à côté du cumul
+ *      "Année (YTD)" déjà présent -- dérivés eux aussi des points déjà
+ *      chargés (différences de cumuls, alignées jour par jour / 1er du
+ *      mois par 1er du mois). Pour "Marge" : Jour et MTD ne peuvent PAS se
+ *      déduire par simple soustraction du ratio cumulé (une différence de
+ *      deux ratios cumulés n'est pas le ratio de la période) -- ces deux
+ *      colonnes affichent donc "—" pour Marge, seul le cumul YTD (qui est
+ *      directement le ratio renvoyé par la RPC, donc correct) reste
+ *      affiché. Même raison pour la bascule Mensuel, désactivée sur Marge.
+ *    - Pastilles de macro-familles au-dessus du graphe, quand le pavé
+ *      n'est pas déjà filtré sur une seule famille macro -- liste
+ *      informative des familles macro existantes (pas une décomposition
+ *      de la courbe par famille, qui demanderait une RPC dédiée -- à
+ *      envisager en suite si c'est ce qui est réellement souhaité).
+ *    - L'axe du graphe (cumulé ET mensuel) couvre désormais toujours
+ *      l'année complète (janvier à décembre), pas seulement les jours
+ *      pour lesquels il y a des données -- les mois à venir restent
+ *      visibles (vides) sur l'axe.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -110,13 +118,65 @@ function formatPct(n: number): string {
   return `${n.toLocaleString("fr-FR", { maximumFractionDigits: 1 })} %`;
 }
 
-// jour_annee (1 = 1er janvier de l'année en cours) -> Date réelle, pour les
-// libellés de mois et le tooltip de CourbeAnnuelleChart.
+// jour_annee (1 = 1er janvier de l'année en cours) -> Date réelle.
 function anneeCouranteDate(jourAnnee: number): Date {
   const annee = new Date().getFullYear();
   const d = new Date(annee, 0, 1);
   d.setDate(d.getDate() + (jourAnnee - 1));
   return d;
+}
+// Date -> jour_annee (1-based), dans l'année de la date fournie.
+function jourAnneeDeDate(d: Date): number {
+  const debut = new Date(d.getFullYear(), 0, 1);
+  return Math.round((d.getTime() - debut.getTime()) / 86400000) + 1;
+}
+function joursDansAnnee(annee: number): number {
+  return new Date(annee, 1, 29).getMonth() === 1 ? 366 : 365;
+}
+
+/** Jour / MTD / YTD dérivés des points cumulés déjà chargés (aucun appel
+ * RPC supplémentaire) -- voir la note V4.3 en tête de fichier sur le cas
+ * particulier de "Marge" (jourN/jourN1/mtdN/mtdN1 non calculables par
+ * simple soustraction d'un ratio cumulé ; laissés à 0 et non affichés côté
+ * appelant pour ce cas). */
+function calculerAgregats(points: CourbePoint[]) {
+  if (points.length === 0) return { jourN: 0, jourN1: 0, mtdN: 0, mtdN1: 0, ytdN: 0, ytdN1: 0 };
+  const dernier = points[points.length - 1];
+  const avantDernier = points.length > 1 ? points[points.length - 2] : null;
+  const dateDernier = anneeCouranteDate(dernier.jour_annee);
+  const jourAnneeDebutMois = jourAnneeDeDate(new Date(dateDernier.getFullYear(), dateDernier.getMonth(), 1));
+  const pointVeilleDeMois = points.find((p) => p.jour_annee === jourAnneeDebutMois - 1);
+  const baseN = pointVeilleDeMois?.valeur_n ?? 0;
+  const baseN1 = pointVeilleDeMois?.valeur_n1 ?? 0;
+  return {
+    jourN: dernier.valeur_n - (avantDernier?.valeur_n ?? 0),
+    jourN1: dernier.valeur_n1 - (avantDernier?.valeur_n1 ?? 0),
+    mtdN: dernier.valeur_n - baseN,
+    mtdN1: dernier.valeur_n1 - baseN1,
+    ytdN: dernier.valeur_n,
+    ytdN1: dernier.valeur_n1,
+  };
+}
+
+type MoisTotal = { mois: number; n: number; n1: number };
+
+/** Totaux mensuels (flux de la période, pas cumul) dérivés des points
+ * cumulés déjà chargés -- delta entre deux points cumulés consécutifs,
+ * cumulé par mois. Non pertinent pour "Marge" (voir note V4.3), la
+ * bascule Mensuel est désactivée dans ce cas côté FluxCardGrand. */
+function totauxMensuelsDepuisPoints(points: CourbePoint[]): MoisTotal[] {
+  const totaux: MoisTotal[] = Array.from({ length: 12 }, (_, mois) => ({ mois, n: 0, n1: 0 }));
+  let prevN = 0;
+  let prevN1 = 0;
+  points.forEach((p) => {
+    const d = anneeCouranteDate(p.jour_annee);
+    const mois = d.getMonth();
+    totaux[mois].n += p.valeur_n - prevN;
+    totaux[mois].n1 += p.valeur_n1 - prevN1;
+    prevN = p.valeur_n;
+    prevN1 = p.valeur_n1;
+  });
+  return totaux;
 }
 
 function EvolBadge({ valeur, n1, unite = "montant" }: { valeur: number; n1: number; unite?: "montant" | "points" }) {
@@ -259,9 +319,26 @@ function FluxCard({
 }
 
 // ── Pavé FLUX (grand format, courbe annuelle) ───────────────────────────
-// Même largeur que le pavé compact (col-span-4 sm:col-span-2), mais deux
-// fois plus haut : gros total YTD + courbe cumulée depuis le 1er janvier
-// (N plein, N-1 pointillé), tooltip au survol.
+
+const PASTILLE_PALETTE = ["#4B92AC", "#D69A4A", "#C1683C", "#3F9142", "#7A5EA8", "#A6A181", "#8FC7DA", "#E8A96A"];
+
+// Liste informative des familles macro concernées par ce pavé -- affichée
+// uniquement quand le pavé n'est pas déjà filtré sur une seule famille (cf.
+// note V4.3 en tête de fichier : ce n'est PAS une décomposition de la
+// courbe par famille, juste un rappel du périmètre couvert).
+function PastillesFamilles({ familles }: { familles: string[] }) {
+  if (familles.length === 0) return null;
+  return (
+    <div className="mb-2 flex flex-wrap gap-x-3 gap-y-1" onClick={(e) => e.stopPropagation()}>
+      {familles.map((f, i) => (
+        <span key={f} className="flex items-center gap-1.5 text-[10px] text-white/50">
+          <span className="inline-block h-2 w-2 rounded-full" style={{ background: PASTILLE_PALETTE[i % PASTILLE_PALETTE.length] }} />
+          {f}
+        </span>
+      ))}
+    </div>
+  );
+}
 
 function CourbeAnnuelleChart({ points, color, estMarge }: { points: CourbePoint[]; color: string; estMarge: boolean }) {
   const width = 460;
@@ -272,49 +349,53 @@ function CourbeAnnuelleChart({ points, color, estMarge }: { points: CourbePoint[
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
 
+  const anneeCourante = new Date().getFullYear();
+  const totalJours = joursDansAnnee(anneeCourante);
+
   const n = points.length;
   const valuesN = points.map((p) => p.valeur_n);
   const valuesN1 = points.map((p) => p.valeur_n1);
   const maxVal = Math.max(1, ...valuesN, ...valuesN1);
   const minVal = 0;
-  const x = (i: number) => padding.left + (n <= 1 ? 0 : (i / (n - 1)) * innerW);
+  // FIX (2026-08) : l'axe couvre TOUJOURS l'année complète (jour 1 à
+  // totalJours), pas seulement les jours pour lesquels il y a des données —
+  // les mois à venir restent visibles (vides) sur l'axe.
+  const x = (jourAnnee: number) => padding.left + ((jourAnnee - 1) / (totalJours - 1)) * innerW;
   const y = (v: number) => padding.top + innerH - ((v - minVal) / (maxVal - minVal || 1)) * innerH;
 
-  const pathN = points.map((p, i) => `${i === 0 ? "M" : "L"} ${x(i)} ${y(p.valeur_n)}`).join(" ");
-  const pathN1 = points.map((p, i) => `${i === 0 ? "M" : "L"} ${x(i)} ${y(p.valeur_n1)}`).join(" ");
-  const areaPath = n > 1 ? `${pathN} L ${x(n - 1)} ${y(0)} L ${x(0)} ${y(0)} Z` : "";
+  const pathN = points.map((p, i) => `${i === 0 ? "M" : "L"} ${x(p.jour_annee)} ${y(p.valeur_n)}`).join(" ");
+  const pathN1 = points.map((p, i) => `${i === 0 ? "M" : "L"} ${x(p.jour_annee)} ${y(p.valeur_n1)}`).join(" ");
+  const areaPath = n > 1 ? `${pathN} L ${x(points[n - 1].jour_annee)} ${y(0)} L ${x(points[0].jour_annee)} ${y(0)} Z` : "";
   const gradientId = `courbe-annuelle-${color.replace("#", "")}`;
 
   const ticks = [0, maxVal / 2, maxVal];
 
-  // Un libellé par mois, positionné au premier jour de ce mois rencontré
-  // dans la série (donc toujours présent quel que soit le point de départ
-  // de la fenêtre affichée).
-  const moisLabels = useMemo(() => {
-    const seen = new Set<number>();
-    const labels: { idx: number; label: string }[] = [];
-    points.forEach((p, i) => {
-      const d = anneeCouranteDate(p.jour_annee);
-      const mois = d.getMonth();
-      if (!seen.has(mois)) {
-        seen.add(mois);
-        labels.push({ idx: i, label: d.toLocaleDateString("fr-FR", { month: "short" }) });
-      }
-    });
-    return labels;
-  }, [points]);
+  // Les 12 mois de l'année, y compris ceux sans données pour l'instant.
+  const moisLabels = useMemo(
+    () => Array.from({ length: 12 }, (_, mois) => {
+      const d = new Date(anneeCourante, mois, 1);
+      return { jourAnnee: jourAnneeDeDate(d), label: d.toLocaleDateString("fr-FR", { month: "short" }) };
+    }),
+    [anneeCourante],
+  );
 
   function handleMove(e: React.MouseEvent<SVGSVGElement>) {
     const rect = svgRef.current?.getBoundingClientRect();
     if (!rect || n === 0) return;
     const relX = (e.clientX - rect.left) / rect.width;
     const svgX = relX * width;
-    const idx = Math.round(((svgX - padding.left) / innerW) * (n - 1));
-    setHoverIdx(Math.max(0, Math.min(n - 1, idx)));
+    const jourAnneeApprox = ((svgX - padding.left) / innerW) * (totalJours - 1) + 1;
+    let meilleur = 0;
+    let meilleureDistance = Infinity;
+    points.forEach((p, i) => {
+      const d = Math.abs(p.jour_annee - jourAnneeApprox);
+      if (d < meilleureDistance) { meilleureDistance = d; meilleur = i; }
+    });
+    setHoverIdx(meilleur);
   }
 
   const hp = hoverIdx !== null ? points[hoverIdx] : null;
-  const hoverLeftPct = hoverIdx !== null ? (x(hoverIdx) / width) * 100 : null;
+  const hoverLeftPct = hp ? (x(hp.jour_annee) / width) * 100 : null;
 
   if (n === 0) return <div className="flex h-[168px] items-center justify-center text-[10px] text-white/30">Aucune donnée.</div>;
 
@@ -344,15 +425,15 @@ function CourbeAnnuelleChart({ points, color, estMarge }: { points: CourbePoint[
         {areaPath && <path d={areaPath} fill={`url(#${gradientId})`} />}
         <path d={pathN1} fill="none" stroke={color} strokeWidth={1.5} strokeDasharray="5 4" opacity={0.55} />
         <path d={pathN} fill="none" stroke={color} strokeWidth={2.25} strokeLinejoin="round" strokeLinecap="round" />
-        {hoverIdx !== null && (
+        {hp && (
           <>
-            <line x1={x(hoverIdx)} y1={padding.top} x2={x(hoverIdx)} y2={height - padding.bottom} stroke="#FFFFFF33" strokeWidth={1} />
-            <circle cx={x(hoverIdx)} cy={y(points[hoverIdx].valeur_n)} r={3.5} fill={color} />
-            <circle cx={x(hoverIdx)} cy={y(points[hoverIdx].valeur_n1)} r={3} fill={color} opacity={0.55} />
+            <line x1={x(hp.jour_annee)} y1={padding.top} x2={x(hp.jour_annee)} y2={height - padding.bottom} stroke="#FFFFFF33" strokeWidth={1} />
+            <circle cx={x(hp.jour_annee)} cy={y(hp.valeur_n)} r={3.5} fill={color} />
+            <circle cx={x(hp.jour_annee)} cy={y(hp.valeur_n1)} r={3} fill={color} opacity={0.55} />
           </>
         )}
-        {moisLabels.map(({ idx, label }) => (
-          <text key={idx} x={x(idx)} y={height - 3} fontSize={9} textAnchor="middle" fill="#FFFFFF55">{label}</text>
+        {moisLabels.map(({ jourAnnee, label }) => (
+          <text key={label} x={x(jourAnnee)} y={height - 3} fontSize={9} textAnchor="middle" fill="#FFFFFF55">{label}</text>
         ))}
       </svg>
 
@@ -378,13 +459,89 @@ function CourbeAnnuelleChart({ points, color, estMarge }: { points: CourbePoint[
   );
 }
 
+function BarMensuelChart({ points, color }: { points: CourbePoint[]; color: string }) {
+  const width = 460;
+  const height = 168;
+  const padding = { top: 8, right: 8, bottom: 18, left: 50 };
+  const innerW = width - padding.left - padding.right;
+  const innerH = height - padding.top - padding.bottom;
+  const baseline = padding.top + innerH;
+  const [hoverMois, setHoverMois] = useState<number | null>(null);
+  const anneeCourante = new Date().getFullYear();
+
+  const totaux = useMemo(() => totauxMensuelsDepuisPoints(points), [points]);
+  const maxVal = Math.max(1, ...totaux.map((t) => Math.max(t.n, t.n1)));
+  const groupWidth = innerW / 12;
+  const barWidth = groupWidth * 0.32;
+  const xGroup = (mois: number) => padding.left + mois * groupWidth + groupWidth / 2;
+  const y = (v: number) => padding.top + innerH - (v / maxVal) * innerH;
+  const ticks = [0, maxVal / 2, maxVal];
+
+  const moisLabels = useMemo(
+    () => Array.from({ length: 12 }, (_, mois) => new Date(anneeCourante, mois, 1).toLocaleDateString("fr-FR", { month: "short" })),
+    [anneeCourante],
+  );
+
+  const h = hoverMois !== null ? totaux[hoverMois] : null;
+  const hoverLeftPct = hoverMois !== null ? (xGroup(hoverMois) / width) * 100 : null;
+
+  return (
+    <div className="relative">
+      <svg viewBox={`0 0 ${width} ${height}`} className="w-full" onMouseLeave={() => setHoverMois(null)}>
+        {ticks.map((t, i) => (
+          <g key={i}>
+            <line x1={padding.left} y1={y(t)} x2={width - padding.right} y2={y(t)} stroke="#FFFFFF14" strokeDasharray={i === ticks.length - 1 ? undefined : "3 3"} />
+            <text x={padding.left - 4} y={y(t) + 3} fontSize={9} textAnchor="end" fill="#FFFFFF55">{formatMontant(t)}</text>
+          </g>
+        ))}
+        {totaux.map((t) => (
+          <g key={t.mois}>
+            <rect x={xGroup(t.mois) - barWidth - 1} y={y(t.n1)} width={barWidth} height={Math.max(0, baseline - y(t.n1))} fill={color} opacity={0.35} rx={2} />
+            <rect x={xGroup(t.mois) + 1} y={y(t.n)} width={barWidth} height={Math.max(0, baseline - y(t.n))} fill={color} rx={2} />
+            <rect
+              x={xGroup(t.mois) - barWidth - 1}
+              y={padding.top}
+              width={barWidth * 2 + 2}
+              height={innerH}
+              fill="transparent"
+              className="cursor-pointer"
+              onMouseEnter={() => setHoverMois(t.mois)}
+            />
+          </g>
+        ))}
+        {moisLabels.map((label, i) => (
+          <text key={label} x={xGroup(i)} y={height - 3} fontSize={9} textAnchor="middle" fill="#FFFFFF55">{label}</text>
+        ))}
+      </svg>
+
+      {h && hoverLeftPct !== null && (
+        <div
+          className="pointer-events-none absolute top-1 z-10 -translate-x-1/2 whitespace-nowrap rounded-lg border border-white/15 bg-[#0B1220] px-2.5 py-1.5 text-[10px] shadow-lg"
+          style={{ left: `${Math.min(92, Math.max(8, hoverLeftPct))}%` }}
+        >
+          <div className="mb-0.5 font-semibold text-white/80">{moisLabels[h.mois]}</div>
+          <div className="flex items-center gap-1.5 text-white">
+            <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: color }} />
+            N&nbsp;: <span className="font-[var(--font-mono,monospace)] font-semibold">{formatMontant(h.n)}</span>
+          </div>
+          <div className="flex items-center gap-1.5 text-white/60">
+            <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: color, opacity: 0.35 }} />
+            N-1&nbsp;: <span className="font-[var(--font-mono,monospace)]">{formatMontant(h.n1)}</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function FluxCardGrand({
-  config, effectiveAgence, effectiveCollaborateur, refreshTick, onRemove,
-}: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; onRemove: () => void }) {
+  config, effectiveAgence, effectiveCollaborateur, refreshTick, famillesMacro, onRemove,
+}: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; famillesMacro: string[]; onRemove: () => void }) {
   const famille = config.cle as FamilleFlux;
   const [points, setPoints] = useState<CourbePoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [mode, setMode] = useState<"cumule" | "mensuel">("cumule");
   const color = FOCUS_MENSUEL_COLORS[famille] || "#4B92AC";
   const estMarge = famille === "Marge";
 
@@ -422,9 +579,7 @@ function FluxCardGrand({
   }
 
   const fmt = estMarge ? formatPct : formatMontant;
-  const dernier = points.length ? points[points.length - 1] : null;
-  const ytdN = dernier?.valeur_n ?? 0;
-  const ytdN1 = dernier?.valeur_n1 ?? 0;
+  const agg = useMemo(() => calculerAgregats(points), [points]);
 
   return (
     <div className="col-span-4 sm:col-span-2">
@@ -437,23 +592,61 @@ function FluxCardGrand({
         clickHint={famille === "Marge" ? "Ouvrir Atelier d'analyse — Analyse marge" : famille === "Devis" ? "Ouvrir Analyse Devis" : "Ouvrir Activité Quotidienne"}
       >
         {loading ? (
-          <div className="h-56 animate-pulse rounded bg-white/5" />
+          <div className="h-64 animate-pulse rounded bg-white/5" />
         ) : error ? (
           <p className="text-[10px] text-red-300">{error}</p>
         ) : (
           <div className="text-white">
-            <div className="flex items-end justify-between gap-3">
-              <div className="min-w-0">
-                <div className="text-[9px] uppercase tracking-wide text-white/40">Cumul depuis le 1er janvier</div>
-                <div className="whitespace-nowrap font-[var(--font-mono,monospace)] text-2xl font-semibold">{fmt(ytdN)}</div>
+            <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <div className="text-[9px] uppercase tracking-wide text-white/40">Jour</div>
+                  {estMarge ? (
+                    <div className="text-base text-white/25">—</div>
+                  ) : (
+                    <>
+                      <div className="font-[var(--font-mono,monospace)] text-base font-semibold">{fmt(agg.jourN)}</div>
+                      <EvolBadge valeur={agg.jourN} n1={agg.jourN1} unite="montant" />
+                    </>
+                  )}
+                </div>
+                <div>
+                  <div className="text-[9px] uppercase tracking-wide text-white/40">Mois (MTD)</div>
+                  {estMarge ? (
+                    <div className="text-base text-white/25">—</div>
+                  ) : (
+                    <>
+                      <div className="font-[var(--font-mono,monospace)] text-base font-semibold">{fmt(agg.mtdN)}</div>
+                      <EvolBadge valeur={agg.mtdN} n1={agg.mtdN1} unite="montant" />
+                    </>
+                  )}
+                </div>
+                <div>
+                  <div className="text-[9px] uppercase tracking-wide text-white/40">Année (YTD)</div>
+                  <div className="font-[var(--font-mono,monospace)] text-base font-semibold">{fmt(agg.ytdN)}</div>
+                  <EvolBadge valeur={agg.ytdN} n1={agg.ytdN1} unite={estMarge ? "points" : "montant"} />
+                </div>
               </div>
-              <div className="shrink-0 text-right">
-                <EvolBadge valeur={ytdN} n1={ytdN1} unite={estMarge ? "points" : "montant"} />
-                <div className="mt-0.5 text-[10px] text-white/40">N-1 : {fmt(ytdN1)}</div>
-              </div>
+              {!estMarge && (
+                <div className="flex shrink-0 items-center rounded-full border border-white/15 bg-white/5 p-0.5 text-[10px]" onClick={(e) => e.stopPropagation()}>
+                  <button onClick={() => setMode("cumule")} className={`rounded-full px-2 py-1 font-semibold ${mode === "cumule" ? "bg-white/20 text-white" : "text-white/45"}`}>
+                    Cumulé
+                  </button>
+                  <button onClick={() => setMode("mensuel")} className={`rounded-full px-2 py-1 font-semibold ${mode === "mensuel" ? "bg-white/20 text-white" : "text-white/45"}`}>
+                    Mensuel
+                  </button>
+                </div>
+              )}
             </div>
-            <div className="mt-2">
-              <CourbeAnnuelleChart points={points} color={color} estMarge={estMarge} />
+
+            {config.famille_macro === null && <PastillesFamilles familles={famillesMacro} />}
+
+            <div className="mt-1" onClick={(e) => e.stopPropagation()}>
+              {estMarge || mode === "cumule" ? (
+                <CourbeAnnuelleChart points={points} color={color} estMarge={estMarge} />
+              ) : (
+                <BarMensuelChart points={points} color={color} />
+              )}
             </div>
           </div>
         )}
@@ -481,9 +674,6 @@ function CompteurCard({
   const isAlerte = meta?.isAlerte ?? false;
   const [clientsCreesN, setClientsCreesN] = useState<number | null>(null);
 
-  // FIX (2026-08) : "Clients actifs" doit rester lisible en un coup d'œil —
-  // largeur doublée et chiffres agrandis, appliqué directement à ce pavé
-  // existant (déterminé par sa clé, pas par une option à ressélectionner).
   const estClientsActifs = config.cle === "clients_actifs";
 
   useEffect(() => {
@@ -932,8 +1122,8 @@ export default function VisionTciKpiPanel() {
           </button>
 
           {/* Bascule Jour / J-1 : pilote tous les pavés flux compacts d'un
-              coup (les pavés grand format affichent le cumul YTD, non
-              concernés par cette bascule). */}
+              coup (les pavés grand format affichent Jour/MTD/YTD dérivés de
+              leur propre série, non concernés par cette bascule). */}
           <div className="flex items-center rounded-full border border-white/15 bg-white/5 p-0.5 text-xs">
             <button
               onClick={() => setUtiliserJMoins1(false)}
@@ -968,7 +1158,7 @@ export default function VisionTciKpiPanel() {
         {cards.map((c) =>
           c.kind === "flux" ? (
             c.grand ? (
-              <FluxCardGrand key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} refreshTick={refreshTick} onRemove={() => handleRemove(c.id)} />
+              <FluxCardGrand key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} refreshTick={refreshTick} famillesMacro={famillesMacro} onRemove={() => handleRemove(c.id)} />
             ) : (
               <FluxCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} utiliserJMoins1={utiliserJMoins1} refreshTick={refreshTick} onRemove={() => handleRemove(c.id)} />
             )

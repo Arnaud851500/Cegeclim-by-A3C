@@ -484,7 +484,33 @@ export default function FocusMensuel3Page() {
     return series;
   }, [rollingComparisonRows]);
 
+  // FIX (2026-08) : série N-1 pour la même tendance -- même source
+  // (rollingComparisonRows), juste amountN1 au lieu de amountN.
+  const annualSeriesN1ByType = useMemo(() => {
+    const monthlyRows = rollingComparisonRows.filter((r) => !r.label.startsWith("TOTAL"));
+    const series: Record<DocType, number[]> = { Devis: [], CDC: [], BL: [], Factures: [] };
+    DOC_TYPES.forEach((type) => {
+      series[type] = monthlyRows.map((r) => r.byType[type]?.amountN1 || 0);
+    });
+    return series;
+  }, [rollingComparisonRows]);
+
   const months12 = useMemo(() => last12Months(month), [month]);
+
+  // FIX (2026-08) : la tendance des cartes KPI passe de "12 derniers mois
+  // glissants" à "depuis le 1er janvier de l'année en cours". months12 et
+  // rollingComparisonRows restent construits à l'identique (toujours utilisés
+  // tels quels par l'onglet "Rolling 12 mois") -- on se contente ici de ne
+  // garder que les indices dont le mois appartient à l'année en cours ;
+  // rollingComparisonRows est aligné index par index avec months12 (même
+  // construction), donc filtrer par indice préserve l'alignement N/N-1 sans
+  // recalcul.
+  const anneeCouranteStr = String(new Date().getFullYear());
+  const ytdMonthIndices = useMemo(
+    () => months12.map((m, i) => ({ m, i })).filter(({ m }) => m.startsWith(anneeCouranteStr)).map(({ i }) => i),
+    [months12, anneeCouranteStr],
+  );
+  const ytdMonths = useMemo(() => ytdMonthIndices.map((i) => months12[i]), [ytdMonthIndices, months12]);
 
   /**
    * Ouvre la route d'impression avec l'état exact de l'écran. Les paramètres
@@ -642,8 +668,9 @@ export default function FocusMensuel3Page() {
                       dayLabel={focusDayLabel}
                       monthValue={monthTotals.byType[type].amountN}
                       monthValueN1={monthTotals.byType[type].amountN1}
-                      annualSeries={annualSeriesByType[type]}
-                      months={months12}
+                      annualSeries={ytdMonthIndices.map((i) => annualSeriesByType[type][i])}
+                      annualSeriesN1={ytdMonthIndices.map((i) => annualSeriesN1ByType[type][i])}
+                      months={ytdMonths}
                     />
                   ))}
             </section>
@@ -1078,7 +1105,7 @@ function FilterSelect({
 }
 
 function KpiCardJMA({
-  type, dayValue, dayLabel, monthValue, monthValueN1, annualSeries, months,
+  type, dayValue, dayLabel, monthValue, monthValueN1, annualSeries, annualSeriesN1, months,
 }: {
   type: DocType;
   dayValue: number;
@@ -1086,6 +1113,7 @@ function KpiCardJMA({
   monthValue: number;
   monthValueN1: number;
   annualSeries: number[];
+  annualSeriesN1?: number[];
   months: string[];
 }) {
   const color = DOC_COLORS[type];
@@ -1146,17 +1174,20 @@ function KpiCardJMA({
       </div>
 
       <div className="mt-4">
-        <div className="mb-1.5 text-[10px] uppercase tracking-[0.18em] text-white/35">Tendance · 12 derniers mois</div>
-        <KpiTrendChart values={annualSeries} months={months} color={color} />
+        <div className="mb-1.5 text-[10px] uppercase tracking-[0.18em] text-white/35">Tendance · depuis janvier</div>
+        <KpiTrendChart values={annualSeries} valuesN1={annualSeriesN1} months={months} color={color} />
       </div>
     </div>
   );
 }
 
 export function KpiTrendChart({
-  values, months, color, theme = 'dark',
+  values, valuesN1, months, color, theme = 'dark',
 }: {
   values: number[];
+  // FIX (2026-08) : série N-1, optionnelle -- tracée en pointillé, même
+  // couleur, comme le reste des courbes N-1 de ce fichier (CumulativeBlCdcChart).
+  valuesN1?: number[];
   months: string[];
   color: string;
   // Le document imprimé est sur fond blanc : les lignes de repère et les
@@ -1171,13 +1202,14 @@ export function KpiTrendChart({
   const innerW = width - padding.left - padding.right;
   const innerH = height - padding.top - padding.bottom;
 
-  const maxVal = Math.max(1, ...values);
-  const minVal = Math.min(0, ...values);
+  const maxVal = Math.max(1, ...values, ...(valuesN1 || []));
+  const minVal = Math.min(0, ...values, ...(valuesN1 || []));
   const x = (i: number) => padding.left + (values.length <= 1 ? 0 : (i / (values.length - 1)) * innerW);
   const y = (v: number) => padding.top + innerH - ((v - minVal) / (maxVal - minVal || 1)) * innerH;
 
   const ticks = [minVal, minVal + (maxVal - minVal) / 2, maxVal];
   const linePath = values.map((v, i) => `${i === 0 ? "M" : "L"} ${x(i)} ${y(v)}`).join(" ");
+  const linePathN1 = valuesN1 && valuesN1.length ? valuesN1.map((v, i) => `${i === 0 ? "M" : "L"} ${x(i)} ${y(v)}`).join(" ") : "";
   // Aplat sous la courbe : donne du corps à la sparkline maintenant qu'elle
   // dispose de plus de hauteur.
   const areaPath =
@@ -1202,6 +1234,7 @@ export function KpiTrendChart({
         </g>
       ))}
       {areaPath && <path d={areaPath} fill={`url(#${gradientId})`} />}
+      {linePathN1 && <path d={linePathN1} fill="none" stroke={color} strokeWidth={1.5} strokeDasharray="5 4" opacity={0.6} />}
       <path d={linePath} fill="none" stroke={color} strokeWidth={2.25} strokeLinejoin="round" strokeLinecap="round" />
       {values.map((v, i) => (
         <circle key={i} cx={x(i)} cy={y(v)} r={i === lastIndex ? 3.5 : 2} fill={color} />
