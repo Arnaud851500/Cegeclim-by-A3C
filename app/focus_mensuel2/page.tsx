@@ -36,7 +36,7 @@
  * ------------------------------------------------------------------------
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Space_Grotesk, IBM_Plex_Sans, IBM_Plex_Mono } from "next/font/google";
 import { supabase } from "@/lib/supabaseClient";
 import { usePageFilterAccess } from "@/lib/pageAccessFilters";
@@ -854,23 +854,102 @@ export function CumulativeBlCdcChart({ monthRows, monthRowsN1 }: { monthRows: Da
   const blDailyAvgN1 = daysWithBLN1 > 0 && blN1.length ? blN1[blN1.length - 1] / daysWithBLN1 : 0;
   const cdcDailyAvgN1 = daysWithBLN1 > 0 && cdcN1.length ? cdcN1[cdcN1.length - 1] / daysWithBLN1 : 0;
 
+  // FIX (2026-08) : survol -- crosshair + tooltip avec BL/CDC N et N-1 et
+  // l'écart en %, même comportement que Vision ONE PAGE. Chaque série peut
+  // avoir une longueur différente (jours avec mouvement différents) -- on
+  // clampe à la dernière valeur connue plutôt que 0, pour ne pas donner
+  // l'impression fausse que le cumul "retombe" à zéro après le dernier jour
+  // de données de cette série précise.
+  const [hoverDay, setHoverDay] = useState<number | null>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
+  function valeurAu(serie: number[], idx: number): number {
+    if (serie.length === 0) return 0;
+    return serie[Math.min(idx, serie.length - 1)];
+  }
+  function handleMove(e: React.MouseEvent<SVGSVGElement>) {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const relX = (e.clientX - rect.left) / rect.width;
+    const svgX = relX * width;
+    const idx = Math.round(((svgX - padding.left) / innerW) * (maxDays - 1));
+    setHoverDay(Math.max(0, Math.min(maxDays - 1, idx)));
+  }
+  function evolPct(v: number, v1: number): number | null {
+    return v1 !== 0 ? ((v - v1) / Math.abs(v1)) * 100 : null;
+  }
+  const hBlN = hoverDay !== null ? valeurAu(blN, hoverDay) : null;
+  const hBlN1 = hoverDay !== null ? valeurAu(blN1, hoverDay) : null;
+  const hCdcN = hoverDay !== null ? valeurAu(cdcN, hoverDay) : null;
+  const hCdcN1 = hoverDay !== null ? valeurAu(cdcN1, hoverDay) : null;
+  const hoverLeftPct = hoverDay !== null ? (x(hoverDay) / width) * 100 : null;
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <svg viewBox={`0 0 ${width} ${height}`} className="w-full">
-        <YAxisMoney maxVal={maxVal} height={height} top={padding.top} innerH={innerH} />
-        <path d={path(blN1)} fill="none" stroke={CUMUL_BL_COLOR} strokeWidth={1.5} strokeDasharray="5 4" opacity={0.6} />
-        <path d={path(cdcN1)} fill="none" stroke={CUMUL_CDC_COLOR} strokeWidth={1.5} strokeDasharray="5 4" opacity={0.6} />
-        <path d={path(blN)} fill="none" stroke={CUMUL_BL_COLOR} strokeWidth={2.5} />
-        <path d={path(cdcN)} fill="none" stroke={CUMUL_CDC_COLOR} strokeWidth={2.5} />
-        <line x1={padding.left} y1={y(0)} x2={width - padding.right} y2={y(0)} stroke="#00000022" />
-        {Array.from({ length: maxDays }, (_, i) => i + 1).map((day, i) =>
-          i % Math.ceil(maxDays / 10 || 1) === 0 ? (
-            <text key={day} x={x(i)} y={height - padding.bottom + 16} fontSize={9} textAnchor="middle" fill="#141A26aa">
-              {day}
-            </text>
-          ) : null,
+      <div className="relative">
+        <svg
+          ref={svgRef}
+          viewBox={`0 0 ${width} ${height}`}
+          className="w-full cursor-crosshair"
+          onMouseMove={handleMove}
+          onMouseLeave={() => setHoverDay(null)}
+        >
+          <YAxisMoney maxVal={maxVal} height={height} top={padding.top} innerH={innerH} />
+          <path d={path(blN1)} fill="none" stroke={CUMUL_BL_COLOR} strokeWidth={1.5} strokeDasharray="5 4" opacity={0.6} />
+          <path d={path(cdcN1)} fill="none" stroke={CUMUL_CDC_COLOR} strokeWidth={1.5} strokeDasharray="5 4" opacity={0.6} />
+          <path d={path(blN)} fill="none" stroke={CUMUL_BL_COLOR} strokeWidth={2.5} />
+          <path d={path(cdcN)} fill="none" stroke={CUMUL_CDC_COLOR} strokeWidth={2.5} />
+          <line x1={padding.left} y1={y(0)} x2={width - padding.right} y2={y(0)} stroke="#00000022" />
+          {hoverDay !== null && (
+            <>
+              <line x1={x(hoverDay)} y1={padding.top} x2={x(hoverDay)} y2={height - padding.bottom} stroke="#14192633" strokeWidth={1} />
+              {hBlN !== null && <circle cx={x(hoverDay)} cy={y(hBlN)} r={3.5} fill={CUMUL_BL_COLOR} />}
+              {hBlN1 !== null && <circle cx={x(hoverDay)} cy={y(hBlN1)} r={3} fill={CUMUL_BL_COLOR} opacity={0.55} />}
+              {hCdcN !== null && <circle cx={x(hoverDay)} cy={y(hCdcN)} r={3.5} fill={CUMUL_CDC_COLOR} />}
+              {hCdcN1 !== null && <circle cx={x(hoverDay)} cy={y(hCdcN1)} r={3} fill={CUMUL_CDC_COLOR} opacity={0.55} />}
+            </>
+          )}
+          {Array.from({ length: maxDays }, (_, i) => i + 1).map((day, i) =>
+            i % Math.ceil(maxDays / 10 || 1) === 0 ? (
+              <text key={day} x={x(i)} y={height - padding.bottom + 16} fontSize={9} textAnchor="middle" fill="#141A26aa">
+                {day}
+              </text>
+            ) : null,
+          )}
+        </svg>
+
+        {hoverDay !== null && hoverLeftPct !== null && (
+          <div
+            className="pointer-events-none absolute top-1 z-10 -translate-x-1/2 whitespace-nowrap rounded-lg border border-black/10 bg-white px-2.5 py-1.5 text-[10px] shadow-lg"
+            style={{ left: `${Math.min(92, Math.max(8, hoverLeftPct))}%` }}
+          >
+            <div className="mb-1 font-semibold text-[#141A26]/60">Jour {hoverDay + 1}</div>
+            {hBlN !== null && hBlN1 !== null && (
+              <div className="mb-0.5 flex items-center gap-1.5 text-[#141A26]">
+                <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: CUMUL_BL_COLOR }} />
+                BL&nbsp;: <span className="font-[var(--font-mono,monospace)] font-semibold">{formatMoney(hBlN)}</span>
+                <span className="text-[#141A26]/45">(N-1&nbsp;: {formatMoney(hBlN1)})</span>
+                {evolPct(hBlN, hBlN1) !== null && (
+                  <span className={(evolPct(hBlN, hBlN1) as number) >= 0 ? "font-medium text-[#C1683C]" : "font-medium text-[#4B92AC]"}>
+                    {(evolPct(hBlN, hBlN1) as number) >= 0 ? "▲" : "▼"} {Math.abs(evolPct(hBlN, hBlN1) as number).toFixed(1)}%
+                  </span>
+                )}
+              </div>
+            )}
+            {hCdcN !== null && hCdcN1 !== null && (
+              <div className="flex items-center gap-1.5 text-[#141A26]">
+                <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: CUMUL_CDC_COLOR }} />
+                CDC&nbsp;: <span className="font-[var(--font-mono,monospace)] font-semibold">{formatMoney(hCdcN)}</span>
+                <span className="text-[#141A26]/45">(N-1&nbsp;: {formatMoney(hCdcN1)})</span>
+                {evolPct(hCdcN, hCdcN1) !== null && (
+                  <span className={(evolPct(hCdcN, hCdcN1) as number) >= 0 ? "font-medium text-[#C1683C]" : "font-medium text-[#4B92AC]"}>
+                    {(evolPct(hCdcN, hCdcN1) as number) >= 0 ? "▲" : "▼"} {Math.abs(evolPct(hCdcN, hCdcN1) as number).toFixed(1)}%
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
         )}
-      </svg>
+      </div>
       <div className="mt-2 flex flex-wrap gap-4 text-[10px] text-[#141A26]/50">
         <span><span className="mr-1 inline-block h-0.5 w-3 align-middle" style={{ background: CUMUL_BL_COLOR }} /> BL (N)</span>
         <span><span className="mr-1 inline-block h-0.5 w-3 align-middle" style={{ background: CUMUL_CDC_COLOR }} /> CDC (N)</span>
@@ -1201,6 +1280,11 @@ export function KpiTrendChart({
   const padding = { top: 6, right: 6, bottom: 18, left: 46 };
   const innerW = width - padding.left - padding.right;
   const innerH = height - padding.top - padding.bottom;
+  // FIX (2026-08) : survol -- même comportement que CourbeAnnuelleChart de
+  // Vision ONE PAGE (crosshair + repères sur les deux courbes + tooltip
+  // avec la valeur N, la valeur N-1 et l'écart en %).
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
 
   const maxVal = Math.max(1, ...values, ...(valuesN1 || []));
   const minVal = Math.min(0, ...values, ...(valuesN1 || []));
@@ -1219,35 +1303,96 @@ export function KpiTrendChart({
   const gradientId = `kpi-trend-${color.replace("#", "")}`;
   const lastIndex = values.length - 1;
 
+  function handleMove(e: React.MouseEvent<SVGSVGElement>) {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect || values.length === 0) return;
+    const relX = (e.clientX - rect.left) / rect.width;
+    const svgX = relX * width;
+    const idx = Math.round(((svgX - padding.left) / innerW) * (values.length - 1));
+    setHoverIdx(Math.max(0, Math.min(values.length - 1, idx)));
+  }
+
+  const hLabel = hoverIdx !== null && months[hoverIdx]
+    ? new Date(months[hoverIdx] + "-01").toLocaleDateString("fr-FR", { month: "long", year: "numeric" })
+    : null;
+  const hVal = hoverIdx !== null ? values[hoverIdx] : null;
+  const hValN1 = hoverIdx !== null ? valuesN1?.[hoverIdx] : undefined;
+  const hEvolPct = hVal !== null && hValN1 !== undefined && hValN1 !== 0 ? ((hVal - hValN1) / Math.abs(hValN1)) * 100 : null;
+  const hoverLeftPct = hoverIdx !== null ? (x(hoverIdx) / width) * 100 : null;
+
+  const tooltipBg = theme === 'light' ? '#FFFFFF' : '#0B1220';
+  const tooltipBorder = theme === 'light' ? 'border-black/10' : 'border-white/15';
+  const tooltipTextMuted = theme === 'light' ? 'text-[#141A26]/60' : 'text-white/60';
+  const tooltipTextStrong = theme === 'light' ? 'text-[#141A26]' : 'text-white';
+
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="w-full">
-      <defs>
-        <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={color} stopOpacity={0.28} />
-          <stop offset="100%" stopColor={color} stopOpacity={0} />
-        </linearGradient>
-      </defs>
-      {ticks.map((t, i) => (
-        <g key={i}>
-          <line x1={padding.left} y1={y(t)} x2={width - padding.right} y2={y(t)} stroke={gridColor} strokeDasharray={i === ticks.length - 1 ? undefined : "3 3"} />
-          <text x={padding.left - 4} y={y(t) + 3} fontSize={9} textAnchor="end" fill={axisColor}>{formatMoney(t)}</text>
-        </g>
-      ))}
-      {areaPath && <path d={areaPath} fill={`url(#${gradientId})`} />}
-      {linePathN1 && <path d={linePathN1} fill="none" stroke={color} strokeWidth={1.5} strokeDasharray="5 4" opacity={0.6} />}
-      <path d={linePath} fill="none" stroke={color} strokeWidth={2.25} strokeLinejoin="round" strokeLinecap="round" />
-      {values.map((v, i) => (
-        <circle key={i} cx={x(i)} cy={y(v)} r={i === lastIndex ? 3.5 : 2} fill={color} />
-      ))}
-      {lastIndex >= 0 && <circle cx={x(lastIndex)} cy={y(values[lastIndex])} r={6} fill={color} opacity={0.22} />}
-      {months.map((m, i) =>
-        i % 2 === 0 ? (
-          <text key={m} x={x(i)} y={height - 3} fontSize={9} textAnchor="middle" fill={axisColor}>
-            {new Date(m + "-01").toLocaleDateString("fr-FR", { month: "short" })}
-          </text>
-        ) : null,
+    <div className="relative">
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${width} ${height}`}
+        className="w-full cursor-crosshair"
+        onMouseMove={handleMove}
+        onMouseLeave={() => setHoverIdx(null)}
+      >
+        <defs>
+          <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={color} stopOpacity={0.28} />
+            <stop offset="100%" stopColor={color} stopOpacity={0} />
+          </linearGradient>
+        </defs>
+        {ticks.map((t, i) => (
+          <g key={i}>
+            <line x1={padding.left} y1={y(t)} x2={width - padding.right} y2={y(t)} stroke={gridColor} strokeDasharray={i === ticks.length - 1 ? undefined : "3 3"} />
+            <text x={padding.left - 4} y={y(t) + 3} fontSize={9} textAnchor="end" fill={axisColor}>{formatMoney(t)}</text>
+          </g>
+        ))}
+        {areaPath && <path d={areaPath} fill={`url(#${gradientId})`} />}
+        {linePathN1 && <path d={linePathN1} fill="none" stroke={color} strokeWidth={1.5} strokeDasharray="5 4" opacity={0.6} />}
+        <path d={linePath} fill="none" stroke={color} strokeWidth={2.25} strokeLinejoin="round" strokeLinecap="round" />
+        {values.map((v, i) => (
+          <circle key={i} cx={x(i)} cy={y(v)} r={i === lastIndex ? 3.5 : 2} fill={color} />
+        ))}
+        {lastIndex >= 0 && <circle cx={x(lastIndex)} cy={y(values[lastIndex])} r={6} fill={color} opacity={0.22} />}
+        {hoverIdx !== null && (
+          <>
+            <line x1={x(hoverIdx)} y1={padding.top} x2={x(hoverIdx)} y2={height - padding.bottom} stroke={theme === 'light' ? '#14192633' : '#FFFFFF33'} strokeWidth={1} />
+            <circle cx={x(hoverIdx)} cy={y(values[hoverIdx])} r={3.5} fill={color} />
+            {hValN1 !== undefined && <circle cx={x(hoverIdx)} cy={y(hValN1)} r={3} fill={color} opacity={0.55} />}
+          </>
+        )}
+        {months.map((m, i) =>
+          i % 2 === 0 ? (
+            <text key={m} x={x(i)} y={height - 3} fontSize={9} textAnchor="middle" fill={axisColor}>
+              {new Date(m + "-01").toLocaleDateString("fr-FR", { month: "short" })}
+            </text>
+          ) : null,
+        )}
+      </svg>
+
+      {hoverIdx !== null && hLabel && hoverLeftPct !== null && (
+        <div
+          className={`pointer-events-none absolute top-1 z-10 -translate-x-1/2 whitespace-nowrap rounded-lg border ${tooltipBorder} px-2.5 py-1.5 text-[10px] shadow-lg`}
+          style={{ left: `${Math.min(92, Math.max(8, hoverLeftPct))}%`, background: tooltipBg }}
+        >
+          <div className={`mb-0.5 font-semibold ${tooltipTextMuted}`}>{hLabel}</div>
+          <div className={`flex items-center gap-1.5 ${tooltipTextStrong}`}>
+            <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: color }} />
+            N&nbsp;: <span className="font-[var(--font-mono,monospace)] font-semibold">{formatMoney(hVal ?? 0)}</span>
+          </div>
+          {hValN1 !== undefined && (
+            <div className={`flex items-center gap-1.5 ${tooltipTextMuted}`}>
+              <span className="inline-block h-1.5 w-1.5 rounded-full border" style={{ borderColor: color }} />
+              N-1&nbsp;: <span className="font-[var(--font-mono,monospace)]">{formatMoney(hValN1)}</span>
+              {hEvolPct !== null && (
+                <span className={hEvolPct >= 0 ? "font-medium text-[#C1683C]" : "font-medium text-[#4B92AC]"}>
+                  {hEvolPct >= 0 ? "▲" : "▼"} {Math.abs(hEvolPct).toFixed(1)}%
+                </span>
+              )}
+            </div>
+          )}
+        </div>
       )}
-    </svg>
+    </div>
   );
 }
 

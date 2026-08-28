@@ -322,19 +322,39 @@ function FluxCard({
 
 const PASTILLE_PALETTE = ["#4B92AC", "#D69A4A", "#C1683C", "#3F9142", "#7A5EA8", "#A6A181", "#8FC7DA", "#E8A96A"];
 
-// Liste informative des familles macro concernées par ce pavé -- affichée
-// uniquement quand le pavé n'est pas déjà filtré sur une seule famille (cf.
-// note V4.3 en tête de fichier : ce n'est PAS une décomposition de la
-// courbe par famille, juste un rappel du périmètre couvert).
-function PastillesFamilles({ familles }: { familles: string[] }) {
+// FIX (2026-08) : les pastilles de familles macro, jusque-là purement
+// informatives à l'intérieur de chaque pavé grand format, deviennent un
+// filtre global au-dessus de la grille de pavés -- cliquer une pastille
+// filtre TOUS les pavés flux grand format d'un coup (surcharge la famille
+// macro propre à chaque pavé quand elle est définie ; "Toutes" retombe sur
+// le réglage individuel de chaque pavé). Voir familleMacroFor() dans le
+// composant principal.
+function FamilleMacroFiltreRow({
+  familles, actif, onChange,
+}: { familles: string[]; actif: string | null; onChange: (f: string | null) => void }) {
   if (familles.length === 0) return null;
   return (
-    <div className="mb-2 flex flex-wrap gap-x-3 gap-y-1" onClick={(e) => e.stopPropagation()}>
+    <div className="mb-3 flex flex-wrap items-center gap-2">
+      <span className="mr-1 text-[11px] uppercase tracking-wide text-white/35">Famille macro :</span>
+      <button
+        onClick={() => onChange(null)}
+        className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold transition ${
+          actif === null ? "border-white/30 bg-white/15 text-white" : "border-white/10 text-white/50 hover:text-white/80"
+        }`}
+      >
+        Toutes
+      </button>
       {familles.map((f, i) => (
-        <span key={f} className="flex items-center gap-1.5 text-[10px] text-white/50">
+        <button
+          key={f}
+          onClick={() => onChange(f)}
+          className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold transition ${
+            actif === f ? "border-white/30 bg-white/15 text-white" : "border-white/10 text-white/50 hover:text-white/80"
+          }`}
+        >
           <span className="inline-block h-2 w-2 rounded-full" style={{ background: PASTILLE_PALETTE[i % PASTILLE_PALETTE.length] }} />
           {f}
-        </span>
+        </button>
       ))}
     </div>
   );
@@ -535,13 +555,14 @@ function BarMensuelChart({ points, color }: { points: CourbePoint[]; color: stri
 }
 
 function FluxCardGrand({
-  config, effectiveAgence, effectiveCollaborateur, refreshTick, famillesMacro, onRemove,
-}: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; famillesMacro: string[]; onRemove: () => void }) {
+  config, effectiveAgence, effectiveCollaborateur, refreshTick, familleMacroEffective, onRemove,
+}: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; familleMacroEffective: string | null; onRemove: () => void }) {
   const famille = config.cle as FamilleFlux;
   const [points, setPoints] = useState<CourbePoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [mode, setMode] = useState<"cumule" | "mensuel">("cumule");
+  // FIX (2026-08) : "Mensuel" par défaut (au lieu de "Cumulé").
+  const [mode, setMode] = useState<"cumule" | "mensuel">("mensuel");
   const color = FOCUS_MENSUEL_COLORS[famille] || "#4B92AC";
   const estMarge = famille === "Marge";
 
@@ -552,7 +573,7 @@ function FluxCardGrand({
       setError(null);
       const { data, error: err } = await supabase.rpc("get_vision_tci_kpi_courbe_annuelle", {
         p_famille: famille,
-        p_famille_macro: config.famille_macro,
+        p_famille_macro: familleMacroEffective,
         p_agence: effectiveAgence,
         p_collaborateur: effectiveCollaborateur,
       });
@@ -570,7 +591,7 @@ function FluxCardGrand({
     }
     load();
     return () => { cancelled = true; };
-  }, [famille, config.famille_macro, effectiveAgence, effectiveCollaborateur, refreshTick]);
+  }, [famille, familleMacroEffective, effectiveAgence, effectiveCollaborateur, refreshTick]);
 
   function handleClick() {
     if (famille === "BL" || famille === "CDC" || famille === "Factures") window.open("/focus_mensuel2", "_blank", "noopener,noreferrer");
@@ -586,7 +607,7 @@ function FluxCardGrand({
       <CardShell
         color={color}
         badgeLabel={famille}
-        badges={[config.famille_macro, effectiveAgence].filter((v): v is string => Boolean(v)).map((v) => (v === config.famille_macro ? `Fam : ${v}` : v))}
+        badges={[familleMacroEffective, effectiveAgence].filter((v): v is string => Boolean(v)).map((v) => (v === familleMacroEffective ? `Fam : ${v}` : v))}
         onRemove={onRemove}
         onClick={handleClick}
         clickHint={famille === "Marge" ? "Ouvrir Atelier d'analyse — Analyse marge" : famille === "Devis" ? "Ouvrir Analyse Devis" : "Ouvrir Activité Quotidienne"}
@@ -638,8 +659,6 @@ function FluxCardGrand({
                 </div>
               )}
             </div>
-
-            {config.famille_macro === null && <PastillesFamilles familles={famillesMacro} />}
 
             <div className="mt-1" onClick={(e) => e.stopPropagation()}>
               {estMarge || mode === "cumule" ? (
@@ -965,6 +984,11 @@ export default function VisionTciKpiPanel() {
   const [showForm, setShowForm] = useState(false);
   const [loading, setLoading] = useState(true);
   const [utiliserJMoins1, setUtiliserJMoins1] = useState(true);
+  // FIX (2026-08) : filtre global famille macro, au-dessus de la grille —
+  // remplace les pastilles jusque-là internes à chaque pavé grand format.
+  // null = "Toutes" -> chaque pavé retombe sur sa propre famille macro
+  // (config.famille_macro) si elle est définie.
+  const [familleMacroFiltre, setFamilleMacroFiltre] = useState<string | null>(null);
 
   // Rafraîchissement périodique des valeurs — uniquement pendant que l'onglet
   // est visible. Rien ne se déclenche en arrière-plan : ça évite exactement
@@ -1154,11 +1178,21 @@ export default function VisionTciKpiPanel() {
         </div>
       </div>
 
+      <FamilleMacroFiltreRow familles={famillesMacro} actif={familleMacroFiltre} onChange={setFamilleMacroFiltre} />
+
       <div className="mb-3 grid grid-cols-4 gap-3">
         {cards.map((c) =>
           c.kind === "flux" ? (
             c.grand ? (
-              <FluxCardGrand key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} refreshTick={refreshTick} famillesMacro={famillesMacro} onRemove={() => handleRemove(c.id)} />
+              <FluxCardGrand
+                key={c.id}
+                config={c}
+                effectiveAgence={effectiveAgenceFor(c)}
+                effectiveCollaborateur={effectiveCollaborateurFor(c)}
+                refreshTick={refreshTick}
+                familleMacroEffective={familleMacroFiltre ?? c.famille_macro}
+                onRemove={() => handleRemove(c.id)}
+              />
             ) : (
               <FluxCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} utiliserJMoins1={utiliserJMoins1} refreshTick={refreshTick} onRemove={() => handleRemove(c.id)} />
             )
