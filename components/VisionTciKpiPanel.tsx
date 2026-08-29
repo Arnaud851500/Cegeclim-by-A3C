@@ -75,7 +75,7 @@ export const FOCUS_MENSUEL_COLORS: Record<string, string> = {
 const FAMILLES_FLUX = ["BL", "Devis", "CDC", "Factures", "Marge"] as const;
 type FamilleFlux = (typeof FAMILLES_FLUX)[number];
 
-type KpiKind = "flux" | "compteur" | "taux" | "spacer";
+type KpiKind = "flux" | "compteur" | "taux" | "spacer" | "portefeuille" | "projection";
 
 type KpiCardConfig = {
   id: string;
@@ -871,6 +871,255 @@ function TauxCard({
   );
 }
 
+// ── Pavés PORTEFEUILLE / PROJECTION CA (agrégat entreprise, détail par
+// agence dans une fenêtre au clic -- même RPC que focus_mensuel3
+// (get_focus_mensuel_agency_control_cached), pas de logique dupliquée) ──
+
+type AgenceLigne = {
+  label: string;
+  cdc: number; cdcLivMx: number;
+  pl: number; plLivMPlus: number;
+  blMx: number; blM: number;
+  total: number;
+  blBrMx: number; blBrM: number;
+  factures: number;
+  projectionFluxBl: number;
+  valeurBlNf: number;
+  projectionCa: number;
+  caN1: number;
+  evolPct: number | null;
+};
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function fetchAgenceLignes(effectiveAgence: string | null, effectiveCollaborateur: string | null): Promise<AgenceLigne[]> {
+  const today = new Date();
+  const focusDate = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  const month = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
+  const { data, error } = await supabase.rpc("get_focus_mensuel_agency_control_cached", {
+    p_focus_date: focusDate,
+    p_month: month,
+    p_agence: effectiveAgence,
+    p_famille_macro: null,
+    p_collaborateur: effectiveCollaborateur,
+    p_include_hors_statistiques: true,
+  });
+  if (error) throw error;
+  return ((data || []) as any[]).map((row) => ({
+    label: String(row.label || "Sans agence"),
+    cdc: Number(row.cdc || 0), cdcLivMx: Number(row.cdc_liv_mx || 0),
+    pl: Number(row.pl || 0), plLivMPlus: Number(row.pl_liv_mplus || 0),
+    blMx: Number(row.blbr_mx || 0), blM: Number(row.blbr_m || 0),
+    total: Number(row.total || 0),
+    blBrMx: Number(row.blbr_mx || 0), blBrM: Number(row.blbr_m || 0),
+    factures: Number(row.factures || 0),
+    projectionFluxBl: Number(row.projection_flux_bl || 0),
+    valeurBlNf: Number(row.valeur_bl_nf_4pct || 0),
+    projectionCa: Number(row.projection_ca || 0),
+    caN1: Number(row.ca_n1 || 0),
+    evolPct: row.evol_pct === null || row.evol_pct === undefined ? null : Number(row.evol_pct),
+  }));
+}
+
+function AgenceModalShell({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+  return (
+    <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/60 p-5" onClick={onClose}>
+      <div className="max-h-[85vh] w-full max-w-3xl overflow-y-auto rounded-2xl bg-[#F5F3EC] p-5 text-[#141A26] shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <h3 className="text-lg font-bold">{title}</h3>
+          <button onClick={onClose} className="rounded-full bg-black/5 px-3 py-1.5 text-sm hover:bg-black/10">✕</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function PortefeuilleTable({ rows }: { rows: AgenceLigne[] }) {
+  const sansTotal = rows.filter((r) => r.label.toUpperCase() !== "TOTAL");
+  const total: AgenceLigne = {
+    label: "TOTAL AGENCE",
+    cdc: sansTotal.reduce((s, r) => s + r.cdc, 0), cdcLivMx: sansTotal.reduce((s, r) => s + r.cdcLivMx, 0),
+    pl: sansTotal.reduce((s, r) => s + r.pl, 0), plLivMPlus: sansTotal.reduce((s, r) => s + r.plLivMPlus, 0),
+    blMx: sansTotal.reduce((s, r) => s + r.blMx, 0), blM: sansTotal.reduce((s, r) => s + r.blM, 0),
+    total: sansTotal.reduce((s, r) => s + r.total, 0),
+    blBrMx: 0, blBrM: 0, factures: 0, projectionFluxBl: 0, valeurBlNf: 0, projectionCa: 0, caN1: 0, evolPct: null,
+  };
+  const display = sansTotal.length ? [total, ...[...sansTotal].sort((a, b) => b.total - a.total)] : [];
+  return (
+    <table className="w-full text-sm">
+      <thead>
+        <tr className="border-b border-black/10 text-left text-xs uppercase tracking-wide text-[#141A26]/50">
+          <th className="px-2 py-2">Agence</th>
+          <th className="px-2 py-2 text-right">Total</th>
+          <th className="px-2 py-2 text-right">CDC</th>
+          <th className="px-2 py-2 text-right">PL</th>
+          <th className="px-2 py-2 text-right">BL/BR</th>
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-black/[0.06]">
+        {display.map((r) => (
+          <tr key={r.label} className={r.label === "TOTAL AGENCE" ? "bg-black/[0.03] font-semibold" : ""}>
+            <td className="px-2 py-2">{r.label}</td>
+            <td className="px-2 py-2 text-right font-[var(--font-mono,monospace)]">{formatMontant(r.total)}</td>
+            <td className="px-2 py-2 text-right font-[var(--font-mono,monospace)] text-[#141A26]/80">{formatMontant(r.cdc)}</td>
+            <td className="px-2 py-2 text-right font-[var(--font-mono,monospace)] text-[#141A26]/80">{formatMontant(r.pl)}</td>
+            <td className="px-2 py-2 text-right font-[var(--font-mono,monospace)] text-[#141A26]/80">{formatMontant(r.blMx + r.blM)}</td>
+          </tr>
+        ))}
+        {display.length === 0 && <tr><td colSpan={5} className="px-2 py-6 text-center text-[#141A26]/40">Aucune donnée.</td></tr>}
+      </tbody>
+    </table>
+  );
+}
+
+function ProjectionTable({ rows }: { rows: AgenceLigne[] }) {
+  const sansTotal = rows.filter((r) => r.label.toUpperCase() !== "TOTAL");
+  const caN1Total = sansTotal.reduce((s, r) => s + r.caN1, 0);
+  const projectionCaTotal = sansTotal.reduce((s, r) => s + r.projectionCa, 0);
+  const total: AgenceLigne = {
+    label: "TOTAL AGENCE",
+    cdc: 0, cdcLivMx: 0, pl: 0, plLivMPlus: 0, blMx: 0, blM: 0, total: 0,
+    blBrMx: sansTotal.reduce((s, r) => s + r.blBrMx, 0), blBrM: sansTotal.reduce((s, r) => s + r.blBrM, 0),
+    factures: sansTotal.reduce((s, r) => s + r.factures, 0),
+    projectionFluxBl: sansTotal.reduce((s, r) => s + r.projectionFluxBl, 0),
+    valeurBlNf: sansTotal.reduce((s, r) => s + r.valeurBlNf, 0),
+    projectionCa: projectionCaTotal, caN1: caN1Total,
+    evolPct: caN1Total > 0 ? ((projectionCaTotal - caN1Total) / caN1Total) * 100 : null,
+  };
+  const display = sansTotal.length ? [total, ...[...sansTotal].sort((a, b) => b.projectionCa - a.projectionCa)] : [];
+  return (
+    <table className="w-full text-sm">
+      <thead>
+        <tr className="border-b border-black/10 text-left text-xs uppercase tracking-wide text-[#141A26]/50">
+          <th className="px-2 py-2">Agence</th>
+          <th className="px-2 py-2 text-right">CA projeté</th>
+          <th className="px-2 py-2 text-right">CA N-1</th>
+          <th className="px-2 py-2 text-right">Évol.</th>
+          <th className="px-2 py-2 text-right">BL/BR</th>
+          <th className="px-2 py-2 text-right">BL à venir</th>
+          <th className="px-2 py-2 text-right">BL NF</th>
+          <th className="px-2 py-2 text-right">Fact.</th>
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-black/[0.06]">
+        {display.map((r) => (
+          <tr key={r.label} className={r.label === "TOTAL AGENCE" ? "bg-black/[0.03] font-semibold" : ""}>
+            <td className="px-2 py-2">{r.label}</td>
+            <td className="px-2 py-2 text-right font-[var(--font-mono,monospace)] font-semibold">{formatMontant(r.projectionCa)}</td>
+            <td className="px-2 py-2 text-right font-[var(--font-mono,monospace)] text-[#141A26]/70">{formatMontant(r.caN1)}</td>
+            <td className="px-2 py-2 text-right">
+              {r.evolPct === null ? <span className="text-[#141A26]/30">—</span> : (
+                <span className={r.evolPct >= 0 ? "text-[#C1683C]" : "text-[#4B92AC]"}>{r.evolPct >= 0 ? "▲" : "▼"} {Math.abs(r.evolPct).toFixed(1)}%</span>
+              )}
+            </td>
+            <td className="px-2 py-2 text-right font-[var(--font-mono,monospace)] text-[#141A26]/80">{formatMontant(r.blBrMx + r.blBrM)}</td>
+            <td className="px-2 py-2 text-right font-[var(--font-mono,monospace)] text-[#141A26]/80">{formatMontant(r.projectionFluxBl)}</td>
+            <td className="px-2 py-2 text-right font-[var(--font-mono,monospace)] text-[#141A26]/80">{formatMontant(r.valeurBlNf)}</td>
+            <td className="px-2 py-2 text-right font-[var(--font-mono,monospace)] text-[#141A26]/80">{formatMontant(r.factures)}</td>
+          </tr>
+        ))}
+        {display.length === 0 && <tr><td colSpan={8} className="px-2 py-6 text-center text-[#141A26]/40">Aucune donnée.</td></tr>}
+      </tbody>
+    </table>
+  );
+}
+
+function PortefeuilleCard({
+  effectiveAgence, effectiveCollaborateur, refreshTick, onRemove,
+}: { effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; onRemove: () => void }) {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [rows, setRows] = useState<AgenceLigne[]>([]);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      setError(null);
+      try {
+        const r = await fetchAgenceLignes(effectiveAgence, effectiveCollaborateur);
+        if (!cancelled) setRows(r);
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, [effectiveAgence, effectiveCollaborateur, refreshTick]);
+
+  const totalGeneral = rows.filter((r) => r.label.toUpperCase() !== "TOTAL").reduce((s, r) => s + r.total, 0);
+
+  return (
+    <div className="col-span-2 sm:col-span-1">
+      <CardShell color="#4B92AC" badgeLabel="Portefeuille" onRemove={onRemove} onClick={() => setOpen(true)} clickHint="Voir le détail par agence" compact={false}>
+        {loading ? (
+          <div className="h-14 animate-pulse rounded bg-white/5" />
+        ) : error ? (
+          <p className="text-[10px] text-red-300">{error}</p>
+        ) : (
+          <div className="font-[var(--font-mono,monospace)] text-4xl font-semibold text-white">{formatMontant(totalGeneral)}</div>
+        )}
+      </CardShell>
+      {open && (
+        <AgenceModalShell title="Portefeuille de commandes par agence" onClose={() => setOpen(false)}>
+          <PortefeuilleTable rows={rows} />
+        </AgenceModalShell>
+      )}
+    </div>
+  );
+}
+
+function ProjectionCard({
+  effectiveAgence, effectiveCollaborateur, refreshTick, onRemove,
+}: { effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; onRemove: () => void }) {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [rows, setRows] = useState<AgenceLigne[]>([]);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      setError(null);
+      try {
+        const r = await fetchAgenceLignes(effectiveAgence, effectiveCollaborateur);
+        if (!cancelled) setRows(r);
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, [effectiveAgence, effectiveCollaborateur, refreshTick]);
+
+  const projectionTotal = rows.filter((r) => r.label.toUpperCase() !== "TOTAL").reduce((s, r) => s + r.projectionCa, 0);
+
+  return (
+    <div className="col-span-2 sm:col-span-1">
+      <CardShell color="#3F9142" badgeLabel="Projection CA" onRemove={onRemove} onClick={() => setOpen(true)} clickHint="Voir le détail par agence" compact={false}>
+        {loading ? (
+          <div className="h-14 animate-pulse rounded bg-white/5" />
+        ) : error ? (
+          <p className="text-[10px] text-red-300">{error}</p>
+        ) : (
+          <div className="font-[var(--font-mono,monospace)] text-4xl font-semibold text-white">{formatMontant(projectionTotal)}</div>
+        )}
+      </CardShell>
+      {open && (
+        <AgenceModalShell title="Projection du CA par agence" onClose={() => setOpen(false)}>
+          <ProjectionTable rows={rows} />
+        </AgenceModalShell>
+      )}
+    </div>
+  );
+}
+
 // ── Pavé vide (mise en forme uniquement, pas de bordure ni de données) ───
 
 function SpacerCard({ span, onRemove }: { span: 1 | 2; onRemove: () => void }) {
@@ -912,6 +1161,8 @@ function AjouterKpiForm({
     if (next === "flux") setCle("BL");
     else if (next === "compteur") setCle(COMPTEUR_OPTIONS[0].cle);
     else if (next === "taux") setCle(TAUX_OPTIONS[0].cle);
+    else if (next === "portefeuille") setCle("portefeuille");
+    else if (next === "projection") setCle("projection");
   }
 
   return (
@@ -921,6 +1172,8 @@ function AjouterKpiForm({
           <option value="flux">Flux (BL/Devis/CDC/Factures/Marge)</option>
           <option value="compteur">Compteur</option>
           <option value="taux">Taux</option>
+          <option value="portefeuille">Portefeuille de commandes</option>
+          <option value="projection">Projection CA</option>
           <option value="spacer">Espace vide (mise en forme)</option>
         </select>
 
@@ -1202,6 +1455,10 @@ export default function VisionTciKpiPanel() {
             )
           ) : c.kind === "taux" ? (
             <TauxCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} refreshTick={refreshTick} onRemove={() => handleRemove(c.id)} />
+          ) : c.kind === "portefeuille" ? (
+            <PortefeuilleCard key={c.id} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} refreshTick={refreshTick} onRemove={() => handleRemove(c.id)} />
+          ) : c.kind === "projection" ? (
+            <ProjectionCard key={c.id} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} refreshTick={refreshTick} onRemove={() => handleRemove(c.id)} />
           ) : c.kind === "spacer" ? (
             <SpacerCard key={c.id} span={c.cle === "2" ? 2 : 1} onRemove={() => handleRemove(c.id)} />
           ) : (

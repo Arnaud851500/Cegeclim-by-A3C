@@ -558,7 +558,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
     {
       label: 'Tableaux de bord',
       items: [
-        {label: '1 : OnePage',activeLabel: 'OnePage',path: '/tableaux-de-bord/vision-tci',accessKey: 'can_dashboard',},
+        {label: '1 : OnePage',activeLabel: 'Vision ONE PAGE',path: '/tableaux-de-bord/vision-tci',accessKey: 'can_dashboard',},
         {label: '2 : Activite Quotidienne',activeLabel: 'Activite Quotidienne',path: '/focus_mensuel2',accessKey: 'can_dashboard',},
         { label: '3 : Suivi Multi Clients', path: '/synthese_multi_clients', accessKey: 'can_dashboard' },
         {label: '4 : Vision client 360',activeLabel: 'Vision client',path: '/vision-client',accessKey: 'can_dashboard',},
@@ -598,6 +598,19 @@ function AppShell({ children }: { children: React.ReactNode }) {
       ],
     },
   ]
+
+  /** Titre de page dynamique pour le bandeau du haut -- reprend le libellé
+   * de l'élément de menu actif (activeLabel prioritaire sur label, avec la
+   * numérotation "N : " retirée en repli), tous groupes confondus. Retombe
+   * sur "Suivi commercial & prospect" pour les pages qui ne sont pas dans
+   * le menu (accueil, fiches, etc.). */
+  function getCurrentPageTitle(): string {
+    for (const group of menuGroups) {
+      const activeItem = getActiveMenuItem(group)
+      if (activeItem) return activeItem.activeLabel || activeItem.label.replace(/^\d+\s*:\s*/, '')
+    }
+    return 'Suivi commercial & prospect'
+  }
 
   useEffect(() => {
     let isMounted = true
@@ -1459,7 +1472,7 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
                 </div>
               </div>
 
-              <div style={styles.center}>Suivi commercial &amp; prospect</div>
+              <div style={styles.center}>{getCurrentPageTitle()}</div>
 
               <div style={styles.right}>
                 {email && <div style={styles.userEmail}>{email}</div>}
@@ -1474,86 +1487,97 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
 
             {(menuGroups.some(isGroupVisible) || hasVisibleStatusLights) && (
               <div style={styles.nav}>
-                <div style={styles.navMenu}>
-                  {menuGroups.filter(isGroupVisible).map((group) => {
-                    const visibleItems = getVisibleItems(group)
-                    const activeItem = getActiveMenuItem(group)
+                {menuGroups.some(isGroupVisible) && (
+                  <div style={styles.navSection}>
+                    <div style={styles.navSectionTag}>
+                      <span style={styles.navSectionTagIcon}>☰</span>
+                      <span style={styles.navSectionTagText}>Menu</span>
+                    </div>
+                    <div style={styles.navMenu}>
+                      {menuGroups.filter(isGroupVisible).map((group) => {
+                        const visibleItems = getVisibleItems(group)
+                        const activeItem = getActiveMenuItem(group)
 
-                    return (
-                      <div
-                        key={group.label}
-                        style={styles.menuWrapper}
-                        onMouseEnter={() => {
-                          if (hoverTimeout) clearTimeout(hoverTimeout)
-                          setOpenGroup(group.label)
-                        }}
-                        onMouseLeave={() => {
-                          const t = setTimeout(() => setOpenGroup(null), 150)
-                          setHoverTimeout(t)
-                        }}
-                      >
-                        <button
-                          type="button"
-                          className="cgcNavBtn"
-                          aria-expanded={openGroup === group.label}
-                          style={{
-                            ...styles.navBtn,
-                            ...(activeItem ? styles.navBtnActive : {}),
-                          }}
-                        >
-                          <span
-                            className="cgcNavLabel"
-                            style={{
-                              ...styles.navBtnGroupLabel,
-                              ...(activeItem ? styles.navBtnGroupLabelActive : {}),
+                        return (
+                          <div
+                            key={group.label}
+                            style={styles.menuWrapper}
+                            onMouseEnter={() => {
+                              if (hoverTimeout) clearTimeout(hoverTimeout)
+                              setOpenGroup(group.label)
+                            }}
+                            onMouseLeave={() => {
+                              const t = setTimeout(() => setOpenGroup(null), 150)
+                              setHoverTimeout(t)
                             }}
                           >
-                            {group.label}
-                          </span>
-                          <span style={styles.navBtnCurrentPage}>
-                            {activeItem
-                              ? (activeItem.activeLabel || activeItem.label)
-                              : `${visibleItems.length} écran${visibleItems.length > 1 ? 's' : ''}`}
-                          </span>
-                        </button>
+                            <button
+                              type="button"
+                              className="cgcNavBtn"
+                              aria-expanded={openGroup === group.label}
+                              style={{
+                                ...styles.navBtn,
+                                ...(activeItem ? styles.navBtnActive : {}),
+                              }}
+                            >
+                              <span
+                                className="cgcNavLabel"
+                                style={{
+                                  ...styles.navBtnGroupLabel,
+                                  ...(activeItem ? styles.navBtnGroupLabelActive : {}),
+                                }}
+                              >
+                                {group.label}
+                              </span>
+                              <span style={styles.navBtnCurrentPage}>
+                                {activeItem
+                                  ? (activeItem.activeLabel || activeItem.label)
+                                  : `${visibleItems.length} écran${visibleItems.length > 1 ? 's' : ''}`}
+                              </span>
+                            </button>
 
-                        {openGroup === group.label && (
-                          <div style={styles.dropdown}>
-                            {visibleItems.map((item) => {
-                              const itemActive = isMenuItemActive(item)
+                            {openGroup === group.label && (
+                              <div style={styles.dropdown}>
+                                {visibleItems.map((item) => {
+                                  const itemActive = isMenuItemActive(item)
 
-                              return (
-                                <div
-                                  key={item.path}
-                                  className="cgcMenuItem"
-                                  aria-current={itemActive ? 'page' : undefined}
-                                  style={{
-                                    ...styles.dropdownItem,
-                                    ...(itemActive ? styles.dropdownItemActive : {}),
-                                  }}
-                                  onClick={() => {
-                                    setOpenGroup(null)
-                                    router.push(item.path)
-                                  }}
-                                >
-                                  {item.label}
-                                </div>
-                              )
-                            })}
+                                  return (
+                                    <div
+                                      key={item.path}
+                                      className="cgcMenuItem"
+                                      aria-current={itemActive ? 'page' : undefined}
+                                      style={{
+                                        ...styles.dropdownItem,
+                                        ...(itemActive ? styles.dropdownItemActive : {}),
+                                      }}
+                                      onClick={() => {
+                                        setOpenGroup(null)
+                                        router.push(item.path)
+                                      }}
+                                    >
+                                      {item.label}
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                            )}
                           </div>
-                        )}
-                      </div>
-                    )
-                  })}
-                </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
 
                 {hasVisibleStatusLights && (
                   <div style={styles.alertsPanel}>
                     <div style={styles.alertsPanelHeading}>
-                      <span style={styles.alertsPanelTitle}>Mes alertes</span>
-                      <span style={styles.alertsPanelSubtitle}>
-                        {visibleAlertCount} active{visibleAlertCount > 1 ? 's' : ''}
-                      </span>
+                      <span style={styles.alertsPanelIcon}>🔔</span>
+                      <div>
+                        <div style={styles.alertsPanelTitle}>Mes alertes</div>
+                        <div style={styles.alertsPanelSubtitle}>
+                          {visibleAlertCount} active{visibleAlertCount > 1 ? 's' : ''}
+                        </div>
+                      </div>
                     </div>
 
                     <span aria-hidden="true" style={styles.alertsPanelDivider} />
@@ -1949,12 +1973,12 @@ const styles: Record<string, React.CSSProperties> = {
   center: {
     marginLeft: 'auto',
     marginRight: 'auto',
-    fontFamily: 'var(--font-mono)',
-    fontSize: 11,
-    fontWeight: 500,
-    letterSpacing: '0.28em',
-    textTransform: 'uppercase',
-    color: '#A6A181',
+    fontFamily: 'var(--font-display)',
+    fontSize: 21,
+    fontWeight: 800,
+    letterSpacing: '0.01em',
+    textTransform: 'none',
+    color: '#ffffff',
     whiteSpace: 'nowrap',
   },
 
@@ -2033,6 +2057,43 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   navWithAlerts: {},
+
+  // FIX (2026-08) : "Menu" identifié par une pastille dédiée (icône +
+  // libellé), sur le même principe que "Mes alertes" juste à droite --
+  // les deux zones du bandeau se distinguent maintenant clairement l'une
+  // de l'autre au lieu de se fondre dans une seule ligne de boutons.
+  navSection: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    pointerEvents: 'auto',
+  },
+
+  navSectionTag: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '5px 11px',
+    borderRadius: 8,
+    border: '1px solid rgba(166,161,129,0.40)',
+    background: 'rgba(166,161,129,0.10)',
+    alignSelf: 'stretch',
+  },
+
+  navSectionTagIcon: {
+    fontSize: 13,
+    lineHeight: 1,
+  },
+
+  navSectionTagText: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: 10.5,
+    fontWeight: 700,
+    letterSpacing: '0.14em',
+    textTransform: 'uppercase',
+    color: '#A6A181',
+    whiteSpace: 'nowrap',
+  },
 
   navMenu: {
     display: 'flex',
@@ -2127,39 +2188,50 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
   },
 
+  // FIX (2026-08) : panneau "Mes alertes" mieux identifié -- cadre teinté
+  // (ambre/rouge, cohérent avec les couleurs d'alerte déjà utilisées dans
+  // StatusLight), icône 🔔 devant le titre, titre agrandi.
   alertsPanel: {
     marginLeft: 'auto',
     display: 'flex',
     alignItems: 'center',
     gap: 10,
-    padding: '8px 0',
+    padding: '7px 14px',
+    borderRadius: 10,
+    border: '1px solid rgba(193,104,60,0.32)',
+    background: 'rgba(193,104,60,0.07)',
     pointerEvents: 'auto',
   },
 
   alertsPanelHeading: {
     display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'flex-end',
+    alignItems: 'center',
+    gap: 7,
     justifyContent: 'center',
+  },
+
+  alertsPanelIcon: {
+    fontSize: 15,
+    lineHeight: 1,
   },
 
   alertsPanelTitle: {
     fontFamily: 'var(--font-mono)',
-    fontSize: 9.5,
-    fontWeight: 500,
-    letterSpacing: '0.16em',
+    fontSize: 11.5,
+    fontWeight: 700,
+    letterSpacing: '0.1em',
     textTransform: 'uppercase',
-    color: 'rgba(255,255,255,0.55)',
+    color: '#E0A961',
     whiteSpace: 'nowrap',
   },
 
   alertsPanelSubtitle: {
-    marginTop: 3,
+    marginTop: 2,
     fontFamily: 'var(--font-mono)',
     fontSize: 9.5,
-    letterSpacing: '0.16em',
+    letterSpacing: '0.1em',
     textTransform: 'uppercase',
-    color: 'rgba(255,255,255,0.30)',
+    color: 'rgba(255,255,255,0.40)',
     whiteSpace: 'nowrap',
   },
 

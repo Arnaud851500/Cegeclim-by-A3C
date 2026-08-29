@@ -717,6 +717,11 @@ export default function OutlookAgenda({
     return {
       top: `${top}%`,
       height: `${height}%`,
+      // FIX (2026-08) : hauteur minimale en pixels en plus du pourcentage --
+      // un RDV court (30 min) ne s'écrase plus au point de rendre le texte
+      // illisible ; il déborde légèrement sur le créneau suivant plutôt que
+      // de se compresser, ce qui reste préférable pour la lisibilité.
+      minHeight: "30px",
       background: evt.colorHex || DEFAULT_COLOR,
     };
   }
@@ -809,7 +814,7 @@ export default function OutlookAgenda({
               );
             })}
           </div>
-          <div className="grid grid-cols-[34px_repeat(5,1fr)] gap-1" style={{ height: 420 }}>
+          <div className="grid grid-cols-[34px_repeat(5,1fr)] gap-1" style={{ height: 480 }}>
             <div className="flex flex-col justify-between py-0.5 text-right text-[10px] text-[#141A26]/45">
               {Array.from({ length: HOUR_END - HOUR_START + 1 }).map((_, i) => (
                 <div key={i}>{HOUR_START + i}h</div>
@@ -837,15 +842,15 @@ export default function OutlookAgenda({
                         onClick={() => handleEventClick(e)}
                         title={`${e.company ? e.company + " — " : ""}${e.subject}${e.sectorLabel ? " · " + e.sectorLabel : ""}${e.location ? " · " + e.location : ""}`}
                         style={eventStyle(e)}
-                        className="absolute left-0.5 right-0.5 overflow-hidden rounded-md px-1.5 py-0.5 text-left text-[10px] leading-tight text-white shadow hover:brightness-110"
+                        className="absolute left-0.5 right-0.5 z-10 overflow-hidden rounded-md px-2 py-1 text-left leading-snug text-white shadow hover:z-20 hover:brightness-110"
                       >
-                        {e.aCompteRendu && <span className="mr-0.5 text-[9px] leading-none drop-shadow" title="Compte-rendu disponible">📝</span>}
+                        {e.aCompteRendu && <span className="mr-1 text-[10px] leading-none drop-shadow" title="Compte-rendu disponible">📝</span>}
                         {e.company && (
-                          <div className="truncate text-[8.5px] font-semibold uppercase tracking-wide text-[#FFC98B]">
+                          <div className="truncate text-[10px] font-bold uppercase tracking-wide text-[#FFC98B]">
                             {e.company}
                           </div>
                         )}
-                        <div className="truncate font-medium">{e.subject}</div>
+                        <div className="truncate text-[12.5px] font-semibold">{e.subject}</div>
                       </button>
                     ))}
                   </div>
