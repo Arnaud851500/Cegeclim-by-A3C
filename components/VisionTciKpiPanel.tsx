@@ -1050,7 +1050,11 @@ function PortefeuilleCard({
     return () => { cancelled = true; };
   }, [effectiveAgence, effectiveCollaborateur, refreshTick]);
 
-  const totalGeneral = rows.filter((r) => r.label.toUpperCase() !== "TOTAL").reduce((s, r) => s + r.total, 0);
+  const sansTotal = rows.filter((r) => r.label.toUpperCase() !== "TOTAL");
+  const totalGeneral = sansTotal.reduce((s, r) => s + r.total, 0);
+  const totalCdc = sansTotal.reduce((s, r) => s + r.cdc, 0);
+  const totalPl = sansTotal.reduce((s, r) => s + r.pl, 0);
+  const totalBlBr = sansTotal.reduce((s, r) => s + r.blMx + r.blM, 0);
 
   return (
     <div className="col-span-2 sm:col-span-1">
@@ -1060,7 +1064,24 @@ function PortefeuilleCard({
         ) : error ? (
           <p className="text-[10px] text-red-300">{error}</p>
         ) : (
-          <div className="font-[var(--font-mono,monospace)] text-4xl font-semibold text-white">{formatMontant(totalGeneral)}</div>
+          <>
+            <div className="font-[var(--font-mono,monospace)] text-4xl font-semibold text-white">{formatMontant(totalGeneral)}</div>
+            {/* FIX (2026-08) : détail CDC / PL / BL-BR sous le gros chiffre. */}
+            <div className="mt-2 grid grid-cols-3 gap-2">
+              <div>
+                <div className="text-[9px] uppercase tracking-wide text-white/40">CDC</div>
+                <div className="font-[var(--font-mono,monospace)] text-sm font-semibold text-white/80">{formatMontant(totalCdc)}</div>
+              </div>
+              <div>
+                <div className="text-[9px] uppercase tracking-wide text-white/40">PL</div>
+                <div className="font-[var(--font-mono,monospace)] text-sm font-semibold text-white/80">{formatMontant(totalPl)}</div>
+              </div>
+              <div>
+                <div className="text-[9px] uppercase tracking-wide text-white/40">BL/BR</div>
+                <div className="font-[var(--font-mono,monospace)] text-sm font-semibold text-white/80">{formatMontant(totalBlBr)}</div>
+              </div>
+            </div>
+          </>
         )}
       </CardShell>
       {open && (
@@ -1098,7 +1119,12 @@ function ProjectionCard({
     return () => { cancelled = true; };
   }, [effectiveAgence, effectiveCollaborateur, refreshTick]);
 
-  const projectionTotal = rows.filter((r) => r.label.toUpperCase() !== "TOTAL").reduce((s, r) => s + r.projectionCa, 0);
+  const sansTotal = rows.filter((r) => r.label.toUpperCase() !== "TOTAL");
+  const projectionTotal = sansTotal.reduce((s, r) => s + r.projectionCa, 0);
+  const totalFactures = sansTotal.reduce((s, r) => s + r.factures, 0);
+  const totalBlBr = sansTotal.reduce((s, r) => s + r.blBrMx + r.blBrM, 0);
+  const totalBlAVenir = sansTotal.reduce((s, r) => s + r.projectionFluxBl, 0);
+  const totalBlNf = sansTotal.reduce((s, r) => s + r.valeurBlNf, 0);
 
   return (
     <div className="col-span-2 sm:col-span-1">
@@ -1108,7 +1134,32 @@ function ProjectionCard({
         ) : error ? (
           <p className="text-[10px] text-red-300">{error}</p>
         ) : (
-          <div className="font-[var(--font-mono,monospace)] text-4xl font-semibold text-white">{formatMontant(projectionTotal)}</div>
+          <>
+            <div className="font-[var(--font-mono,monospace)] text-4xl font-semibold text-white">{formatMontant(projectionTotal)}</div>
+            {/* FIX (2026-08) : détail BL/BR, Factures (du mois), BL à venir
+                et BL NF sous le gros chiffre -- reprend les composantes du
+                calcul de projection_ca côté RPC (facturé du mois + BL/BR +
+                flux BL à venir, moins la déduction NF à 4%), désormais
+                détaillées plutôt que résumées. */}
+            <div className="mt-2 grid grid-cols-4 gap-1.5">
+              <div>
+                <div className="text-[9px] uppercase tracking-wide text-white/40">BL/BR</div>
+                <div className="font-[var(--font-mono,monospace)] text-xs font-semibold text-white/80">{formatMontant(totalBlBr)}</div>
+              </div>
+              <div>
+                <div className="text-[9px] uppercase tracking-wide text-white/40">Fact. mois</div>
+                <div className="font-[var(--font-mono,monospace)] text-xs font-semibold text-white/80">{formatMontant(totalFactures)}</div>
+              </div>
+              <div>
+                <div className="text-[9px] uppercase tracking-wide text-white/40">BL à venir</div>
+                <div className="font-[var(--font-mono,monospace)] text-xs font-semibold text-white/80">{formatMontant(totalBlAVenir)}</div>
+              </div>
+              <div>
+                <div className="text-[9px] uppercase tracking-wide text-white/40">BL NF</div>
+                <div className="font-[var(--font-mono,monospace)] text-xs font-semibold text-white/80">{formatMontant(totalBlNf)}</div>
+              </div>
+            </div>
+          </>
         )}
       </CardShell>
       {open && (
