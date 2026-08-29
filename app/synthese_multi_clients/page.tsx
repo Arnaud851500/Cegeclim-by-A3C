@@ -163,6 +163,13 @@ type SummaryRow = {
   caBandN1: string
   caBandN2: string
   caYtdN: number
+  // FIX (2026-08) : CA facturé YTD "complet" (sans le gel à M-1 appliqué à
+  // caYtdN par recomputeClientN1ComparisonFromMonths) -- alimente
+  // uniquement le pavé "CA réel {N}" du bandeau supérieur, qui doit
+  // refléter la totalité du CA facturé à date (y compris le mois en
+  // cours). caYtdN lui-même (colonne "CA RÉEL 07-2026" du tableau) reste
+  // inchangé, gelé à M-1 comme avant.
+  caYtdNComplet: number
   caYtdN1: number
   caYtdNByMacro: Record<string, number>
   caYtdN1ByMacro: Record<string, number>
@@ -1127,6 +1134,7 @@ function buildSummaryForNumero(tier: TiersRow | null, factures: AggRow[], devis:
     devisYtdNByMacro: byMacro(devis, numero || null, N, { month, monthMax: month ? undefined : CLOSED_MONTH, metric: 'ca' }),
     devisYtdN1ByMacro: byMacro(devis, numero || null, N - 1, { month, monthMax: month ? undefined : N1_COMPARISON_MONTH, metric: 'ca' }),
     caYtdN,
+    caYtdNComplet: caYtdN,
     caYtdN1,
     caYtdNByMacro: byMacro(factures, numero || null, N, { month, monthMax: month ? undefined : CA_CLOSED_MONTH, metric: 'ca' }),
     caYtdN1ByMacro: byMacro(factures, numero || null, N - 1, { month, monthMax: month ? undefined : CA_N1_COMPARISON_MONTH, metric: 'ca' }),
@@ -1474,6 +1482,12 @@ function cacheRowToSummary(row: CacheDbRow): SummaryRow {
     devisYtdNByMacro: macroNumberPayload(row.devis_ytd_n_by_macro),
     devisYtdN1ByMacro: row.row_kind === 'month' ? macroNumberPayload(row.devis_n1_by_macro) : macroNumberPayload(row.devis_ytd_n1_by_macro),
     caYtdN: safeNumber(row.ca_ytd_n),
+    // FIX (2026-08) : valeur brute (non gelée) telle que renvoyée par le
+    // cache -- c'est celle-ci qui alimente le pavé "CA réel {N}" du
+    // bandeau supérieur. caYtdN, juste au-dessus, continue d'être gelée à
+    // M-1 plus bas par recomputeClientN1ComparisonFromMonths pour la
+    // colonne "CA RÉEL 07-2026" du tableau, comme avant.
+    caYtdNComplet: safeNumber(row.ca_ytd_n),
     caYtdN1: safeNumber(row.ca_ytd_n1),
     caYtdNByMacro: macroNumberPayload(row.ca_ytd_n_by_macro),
     caYtdN1ByMacro: row.row_kind === 'month' ? macroNumberPayload(row.ca_n1_by_macro) : macroNumberPayload(row.ca_ytd_n1_by_macro || row.ca_n1_by_macro),
@@ -1627,6 +1641,8 @@ function buildTotalFromRows(rows: SummaryRow[], showCollaborateurColumn: boolean
     devisYtdNByMacro: sumMacro(rows, (row) => row.devisYtdNByMacro),
     devisYtdN1ByMacro: sumMacro(rows, (row) => row.devisYtdN1ByMacro),
     caYtdN: rows.reduce((s, r) => s + r.caYtdN, 0),
+    // FIX (2026-08) : total séparé pour le pavé "CA réel {N}" (non gelé).
+    caYtdNComplet: rows.reduce((s, r) => s + r.caYtdNComplet, 0),
     caYtdN1: rows.reduce((s, r) => s + r.caYtdN1, 0),
     caYtdNByMacro,
     caYtdN1ByMacro,
@@ -1906,6 +1922,14 @@ function sumSummaryAmount(rows: SummaryRow[], getter: (row: SummaryRow) => numbe
 function recomputeClientN1ComparisonFromMonths(row: SummaryRow, monthRows: SummaryRow[]) {
   if (row.kind !== 'client' || monthRows.length === 0) return row
 
+  // FIX (2026-08) : la valeur "brute" reçue du cache (déjà présente sur
+  // caYtdN à ce stade, incluant le mois en cours) est capturée ici AVANT
+  // d'être remplacée plus bas par la version gelée à M-1 -- c'est elle qui
+  // alimente désormais le pavé "CA réel {N}" du bandeau supérieur.
+  // caYtdN continue d'être recalculée et gelée exactement comme avant : la
+  // colonne "CA RÉEL 07-2026" du tableau n'est pas touchée par ce correctif.
+  const caYtdNComplet = row.caYtdN
+
   // Devis : comparaison à M courant.
   // CA / marge : comparaison à M-1, pour éviter de comparer un mois courant partiellement facturé.
   const devisRowsN = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= CLOSED_MONTH)
@@ -1943,6 +1967,7 @@ function recomputeClientN1ComparisonFromMonths(row: SummaryRow, monthRows: Summa
 
   return {
     ...row,
+    caYtdNComplet,
     devisYtdN,
     devisYtdNByMacro,
     devisYtdN1,
@@ -3037,7 +3062,11 @@ export default function SyntheseMultiClientsPage() {
           <section className="kpis">
             <div><span>Tiers</span><strong>{baseClientRows.length}</strong></div>
             <div><span>CA {N - 1}</span><strong>{formatKEur(totalRow.caN1)}</strong></div>
-            <div><span>CA réel {N}</span><strong>{formatKEur(totalRow.caYtdN)}</strong></div>
+            {/* FIX (2026-08) : ce pavé affiche désormais caYtdNComplet (CA
+                facturé total à date, y compris le mois en cours) au lieu de
+                caYtdN (qui reste gelé à M-1 pour la colonne "CA RÉEL
+                07-2026" du tableau, inchangée). */}
+            <div><span>CA réel {N}</span><strong>{formatKEur(totalRow.caYtdNComplet)}</strong></div>
             <div><span>Encours commande</span><strong>{formatKEur(totalRow.encoursCommandeN)}</strong></div>
             <div><span>Marge réel {N}</span><strong>{formatPct(totalRow.margePctYtdN)}</strong></div>
             <div><span>Réalisé / objectif</span><strong>{formatPct(totalRow.realiseObjectif)}</strong></div>
