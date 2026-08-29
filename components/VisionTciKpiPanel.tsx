@@ -621,8 +621,13 @@ function FluxCardGrand({
           <p className="text-[10px] text-red-300">{error}</p>
         ) : (
           <div className="text-white">
-            <div className="mb-2 flex flex-wrap items-start justify-between gap-3">
-              <div className="grid grid-cols-3 gap-4">
+            <div className="mb-2 flex flex-nowrap items-start justify-between gap-3">
+              {/* FIX (2026-08) : gap resserré (gap-4 -> gap-3) pour rapprocher
+                  Mois (MTD) et Année (YTD) de Jour, et flex-nowrap sur la
+                  ligne entière pour que la bascule Cumulé/Mensuel ne passe
+                  plus jamais à la ligne suivante, même sur les cartes
+                  étroites (2 colonnes). */}
+              <div className="flex items-start gap-3">
                 <div>
                   <div className="text-[10px] uppercase tracking-wide text-white/40">Jour</div>
                   {estMarge ? (
@@ -652,7 +657,7 @@ function FluxCardGrand({
                 </div>
               </div>
               {!estMarge && (
-                <div className="flex shrink-0 items-center rounded-full border border-white/15 bg-white/5 p-0.5 text-[10px]" onClick={(e) => e.stopPropagation()}>
+                <div className="flex shrink-0 items-center whitespace-nowrap rounded-full border border-white/15 bg-white/5 p-0.5 text-[10px]" onClick={(e) => e.stopPropagation()}>
                   <button onClick={() => setMode("cumule")} className={`rounded-full px-2 py-1 font-semibold ${mode === "cumule" ? "bg-white/20 text-white" : "text-white/45"}`}>
                     Cumulé
                   </button>
