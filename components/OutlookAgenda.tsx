@@ -329,52 +329,52 @@ function RdvDetailModal({
   return (
     <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/55 p-5 backdrop-blur-sm" onClick={onClose}>
       <div
-        className="w-full max-w-md max-h-[85vh] overflow-y-auto rounded-2xl bg-white shadow-2xl ring-1 ring-black/5"
+        className="w-full max-w-2xl max-h-[85vh] overflow-y-auto rounded-2xl bg-white shadow-2xl ring-1 ring-black/5"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-5 pb-3 pt-5">
+        <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-6 pb-4 pt-6">
           <div className="min-w-0">
-            <div className="truncate text-[15.5px] font-extrabold text-slate-900">{evt.subject}</div>
-            <div className="mt-0.5 text-[11.5px] font-bold text-slate-500">
+            <div className="truncate text-[20px] font-extrabold text-slate-900">{evt.subject}</div>
+            <div className="mt-1 text-[13.5px] font-bold text-slate-500">
               {RDV_TYPE_LABELS[evt.categories[0]] || evt.categories[0] || "Activité"}
               {evt.sectorLabel ? ` · ${evt.sectorLabel}` : ""} · {evt.source === "compagnon" ? "RDV compagnon CEGECLIM" : "Synchronisé BLG"}
             </div>
           </div>
-          <button onClick={onClose} className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-100 text-sm text-slate-500 hover:bg-slate-200">✕</button>
+          <button onClick={onClose} className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-slate-100 text-base text-slate-500 hover:bg-slate-200">✕</button>
         </div>
 
-        <div className="px-5 pb-5 pt-3.5">
+        <div className="px-6 pb-6 pt-4">
           {evt.company && (
-            <div className="flex justify-between gap-3 border-b border-slate-50 py-1.5 text-[12.5px]">
+            <div className="flex justify-between gap-3 border-b border-slate-50 py-2 text-[14.5px]">
               <span className="font-extrabold text-slate-500">Entreprise</span>
               <strong className="text-right font-bold text-slate-900">{evt.company}</strong>
             </div>
           )}
-          <div className="flex justify-between gap-3 border-b border-slate-50 py-1.5 text-[12.5px]">
+          <div className="flex justify-between gap-3 border-b border-slate-50 py-2 text-[14.5px]">
             <span className="font-extrabold text-slate-500">Début</span>
             <strong className="text-right font-bold text-slate-900">{formatDateTimeFr(evt.start, evt.isAllDay)}</strong>
           </div>
-          <div className="flex justify-between gap-3 border-b border-slate-50 py-1.5 text-[12.5px]">
+          <div className="flex justify-between gap-3 border-b border-slate-50 py-2 text-[14.5px]">
             <span className="font-extrabold text-slate-500">Fin</span>
             <strong className="text-right font-bold text-slate-900">{formatDateTimeFr(evt.end, evt.isAllDay)}</strong>
           </div>
           {evt.lieu && (
-            <div className="flex justify-between gap-3 border-b border-slate-50 py-1.5 text-[12.5px]">
+            <div className="flex justify-between gap-3 border-b border-slate-50 py-2 text-[14.5px]">
               <span className="font-extrabold text-slate-500">Lieu</span>
               <strong className="text-right font-bold text-slate-900">{evt.lieu}</strong>
             </div>
           )}
 
-          <div className="mt-3.5 border-t border-dashed border-slate-200 pt-3">
-            <div className="mb-2 flex items-center justify-between text-[11.5px] font-black uppercase tracking-wide text-slate-700">
+          <div className="mt-5 border-t border-dashed border-slate-200 pt-4">
+            <div className="mb-3 flex items-center justify-between text-[13px] font-black uppercase tracking-wide text-slate-700">
               <span>Compte-rendu</span>
               {!editMode && (
-                <span className="flex gap-1.5">
-                  <button onClick={() => setEditMode(true)} className="rounded-lg bg-indigo-50 px-2.5 py-1 text-[11px] font-extrabold normal-case text-indigo-700 hover:bg-indigo-100">
+                <span className="flex gap-2">
+                  <button onClick={() => setEditMode(true)} className="rounded-lg bg-indigo-50 px-3 py-1.5 text-[13px] font-extrabold normal-case text-indigo-700 hover:bg-indigo-100">
                     {compteRendu ? "✎ Modifier" : "+ Ajouter"}
                   </button>
                   {compteRendu && (
-                    <button onClick={() => void supprimerCompteRendu()} disabled={deletingCr} className="rounded-lg bg-red-50 px-2.5 py-1 text-[11px] font-extrabold normal-case text-red-600 hover:bg-red-100 disabled:opacity-50">
+                    <button onClick={() => void supprimerCompteRendu()} disabled={deletingCr} className="rounded-lg bg-red-50 px-3 py-1.5 text-[13px] font-extrabold normal-case text-red-600 hover:bg-red-100 disabled:opacity-50">
                       {deletingCr ? "…" : "🗑 Supprimer"}
                     </button>
                   )}
@@ -382,46 +382,46 @@ function RdvDetailModal({
               )}
             </div>
             {loading ? (
-              <p className="m-0 text-xs italic text-slate-400">Chargement…</p>
+              <p className="m-0 text-sm italic text-slate-400">Chargement…</p>
             ) : editMode ? (
               <div>
                 <textarea
-                  className="w-full rounded-xl border border-slate-300 p-2.5 text-[12.5px] font-inherit outline-none focus:border-[#2E5BB8] focus:ring-2 focus:ring-[#2E5BB8]/15"
-                  rows={6}
+                  className="w-full rounded-xl border border-slate-300 p-3 text-[15px] font-inherit leading-relaxed outline-none focus:border-[#2E5BB8] focus:ring-2 focus:ring-[#2E5BB8]/15"
+                  rows={8}
                   value={resumeEdit}
                   onChange={(e) => setResumeEdit(e.target.value)}
                   placeholder="Résumé du rendez-vous…"
                   autoFocus
                 />
-                {saveError && <p className="m-0 mt-1.5 text-[11.5px] font-bold text-red-600">{saveError}</p>}
-                <div className="mt-2.5 flex gap-2">
-                  <button onClick={() => void enregistrer()} disabled={saving} className="rounded-xl bg-slate-900 px-4 py-2 text-xs font-extrabold text-white disabled:opacity-50">
+                {saveError && <p className="m-0 mt-2 text-[13px] font-bold text-red-600">{saveError}</p>}
+                <div className="mt-3 flex gap-2">
+                  <button onClick={() => void enregistrer()} disabled={saving} className="rounded-xl bg-slate-900 px-5 py-2.5 text-sm font-extrabold text-white disabled:opacity-50">
                     {saving ? "Enregistrement…" : "Enregistrer"}
                   </button>
-                  <button onClick={() => { setEditMode(false); setResumeEdit(compteRendu?.resume || ""); }} disabled={saving} className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-extrabold text-slate-500">
+                  <button onClick={() => { setEditMode(false); setResumeEdit(compteRendu?.resume || ""); }} disabled={saving} className="rounded-xl border border-slate-200 bg-white px-5 py-2.5 text-sm font-extrabold text-slate-500">
                     Annuler
                   </button>
                 </div>
               </div>
             ) : compteRendu ? (
               <div>
-                <p className="m-0 mb-1.5 whitespace-pre-wrap text-[13px] leading-relaxed text-slate-900">{compteRendu.resume || "(résumé vide)"}</p>
-                <p className="m-0 text-[10.5px] text-slate-400">
+                <p className="m-0 mb-2 whitespace-pre-wrap text-[16px] leading-relaxed text-slate-900">{compteRendu.resume || "(résumé vide)"}</p>
+                <p className="m-0 text-[12.5px] text-slate-400">
                   {compteRendu.created_by_name ? `Par ${compteRendu.created_by_name} · ` : ""}{new Date(compteRendu.created_at).toLocaleString("fr-FR")}
                 </p>
               </div>
             ) : (
-              <p className="m-0 text-xs italic text-slate-400">Aucun compte-rendu pour ce rendez-vous.</p>
+              <p className="m-0 text-sm italic text-slate-400">Aucun compte-rendu pour ce rendez-vous.</p>
             )}
           </div>
 
-          {deleteError && <p className="m-0 mt-3 text-[11.5px] font-bold text-red-600">{deleteError}</p>}
+          {deleteError && <p className="m-0 mt-4 text-[13px] font-bold text-red-600">{deleteError}</p>}
 
           {evt.source === "compagnon" && (
             <button
               onClick={() => void supprimerRdv()}
               disabled={deletingRdv}
-              className="mt-4 w-full rounded-xl border border-red-200 bg-red-50 px-4 py-2.5 text-xs font-extrabold text-red-600 hover:bg-red-100 disabled:opacity-50"
+              className="mt-5 w-full rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-extrabold text-red-600 hover:bg-red-100 disabled:opacity-50"
             >
               {deletingRdv ? "Suppression…" : "🗑 Supprimer ce rendez-vous"}
             </button>

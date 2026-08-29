@@ -55,11 +55,10 @@
  *      visibles (vides) sur l'axe.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { usePageFilterAccess } from "@/lib/pageAccessFilters";
 import { useAccess } from "@/components/AccessContext";
-import LastSyncBadge from "@/components/LastSyncBadge";
 
 
 // ⚠️ BL et CDC confirmés (CUMUL_BL_COLOR / CUMUL_CDC_COLOR dans
@@ -618,33 +617,33 @@ function FluxCardGrand({
           <p className="text-[10px] text-red-300">{error}</p>
         ) : (
           <div className="text-white">
-            <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
-              <div className="grid grid-cols-3 gap-3">
+            <div className="mb-2 flex flex-wrap items-start justify-between gap-3">
+              <div className="grid grid-cols-3 gap-4">
                 <div>
-                  <div className="text-[9px] uppercase tracking-wide text-white/40">Jour</div>
+                  <div className="text-[10px] uppercase tracking-wide text-white/40">Jour</div>
                   {estMarge ? (
-                    <div className="text-base text-white/25">—</div>
+                    <div className="text-2xl text-white/25">—</div>
                   ) : (
                     <>
-                      <div className="font-[var(--font-mono,monospace)] text-base font-semibold">{fmt(agg.jourN)}</div>
+                      <div className="font-[var(--font-mono,monospace)] text-2xl font-semibold leading-tight">{fmt(agg.jourN)}</div>
                       <EvolBadge valeur={agg.jourN} n1={agg.jourN1} unite="montant" />
                     </>
                   )}
                 </div>
                 <div>
-                  <div className="text-[9px] uppercase tracking-wide text-white/40">Mois (MTD)</div>
+                  <div className="text-[10px] uppercase tracking-wide text-white/40">Mois (MTD)</div>
                   {estMarge ? (
-                    <div className="text-base text-white/25">—</div>
+                    <div className="text-2xl text-white/25">—</div>
                   ) : (
                     <>
-                      <div className="font-[var(--font-mono,monospace)] text-base font-semibold">{fmt(agg.mtdN)}</div>
+                      <div className="font-[var(--font-mono,monospace)] text-2xl font-semibold leading-tight">{fmt(agg.mtdN)}</div>
                       <EvolBadge valeur={agg.mtdN} n1={agg.mtdN1} unite="montant" />
                     </>
                   )}
                 </div>
                 <div>
-                  <div className="text-[9px] uppercase tracking-wide text-white/40">Année (YTD)</div>
-                  <div className="font-[var(--font-mono,monospace)] text-base font-semibold">{fmt(agg.ytdN)}</div>
+                  <div className="text-[10px] uppercase tracking-wide text-white/40">Année (YTD)</div>
+                  <div className="font-[var(--font-mono,monospace)] text-2xl font-semibold leading-tight">{fmt(agg.ytdN)}</div>
                   <EvolBadge valeur={agg.ytdN} n1={agg.ytdN1} unite={estMarge ? "points" : "montant"} />
                 </div>
               </div>
@@ -755,39 +754,68 @@ function CompteurCard({
   const isMontant = config.cle === "factures_retard";
   const valueColor = isAlerte ? ((total || 0) > 0 ? "#C1683C" : "#3F9142") : "#FFFFFF";
 
-  return (
-    <div className={estClientsActifs ? "col-span-4 sm:col-span-2" : "col-span-2 sm:col-span-1"}>
-      <CardShell color="#A6A181" badgeLabel={label} onRemove={onRemove} onClick={config.cle !== "factures_retard" ? handleClick : undefined} compact={!estClientsActifs}>
-        {loading ? (
-          <div className={estClientsActifs ? "h-14 animate-pulse rounded bg-white/5" : "h-8 animate-pulse rounded bg-white/5"} />
-        ) : error ? (
-          <p className="text-[9px] text-red-300">{error}</p>
-        ) : (
-          <>
-            <div
-              className={`font-[var(--font-mono,monospace)] font-semibold ${estClientsActifs ? "text-5xl" : "text-lg"}`}
-              style={{ color: valueColor }}
-            >
-              {isMontant ? formatMontant(total || 0) : (total ?? 0).toLocaleString("fr-FR")}
-            </div>
-            {config.cle === "clients_actifs" && clientsCreesN !== null && (
-              <div className={`mt-1 text-white/50 ${estClientsActifs ? "text-sm" : "text-[9px]"}`}>
-                dont <span className={`font-semibold text-white/80 ${estClientsActifs ? "text-base" : ""}`}>{clientsCreesN.toLocaleString("fr-FR")}</span> créés cette année
+  // FIX (2026-08) : restructuration du pavé "Clients actifs" -- le nombre
+  // de clients créés cette année et les tranches de CA passent à droite du
+  // total, superposés en 4 lignes alignées (une grille CSS à 3 colonnes
+  // garantit l'alignement entre les lignes). Une colonne "Objectif" est
+  // prévue mais reste vide ("—") : les objectifs commerciaux existants
+  // (objectifs_commerciaux, nb_clients_gros/moyens/petits) utilisent un
+  // découpage en 3 catégories qui ne correspond pas telles quelles aux 5
+  // tranches de CA affichées ici (400K€/150K€/80K€/20K€/vide) -- la
+  // correspondance entre les deux est à définir avant de pouvoir remplir
+  // cette colonne avec de vraies valeurs.
+  //
+  // Les autres compteurs (Facture en retard, CERFA, CDC < 2026) et le taux
+  // de transformation (TauxCard) passent en format non compact avec une
+  // police bien plus grande, pour exploiter l'espace libre de la case.
+  if (estClientsActifs) {
+    const bandRows = bands ? CA_BAND_ORDER.filter((b) => bands[b]) : [];
+    return (
+      <div className="col-span-4 sm:col-span-2">
+        <CardShell color="#A6A181" badgeLabel={label} onRemove={onRemove} onClick={handleClick} compact={false}>
+          {loading ? (
+            <div className="h-20 animate-pulse rounded bg-white/5" />
+          ) : error ? (
+            <p className="text-[9px] text-red-300">{error}</p>
+          ) : (
+            <div className="flex items-start justify-between gap-4">
+              <div className="font-[var(--font-mono,monospace)] text-5xl font-semibold text-white">
+                {(total ?? 0).toLocaleString("fr-FR")}
               </div>
-            )}
-            {bands && (
-              <div className={`flex flex-wrap gap-1.5 ${estClientsActifs ? "mt-3" : "mt-1"}`}>
-                {CA_BAND_ORDER.filter((b) => bands[b]).slice(0, 3).map((b) => (
-                  <span
-                    key={b}
-                    className={`rounded bg-white/10 text-white/60 ${estClientsActifs ? "px-2.5 py-1 text-[12px]" : "px-1 py-0.5 text-[8px]"}`}
-                  >
-                    {b}:{bands[b]}
-                  </span>
+              <div className="grid grid-cols-[auto_auto_auto] items-baseline gap-x-3 gap-y-1.5">
+                {clientsCreesN !== null && (
+                  <>
+                    <span className="whitespace-nowrap text-right text-[11px] text-white/50">Créés cette année</span>
+                    <span className="text-right font-[var(--font-mono,monospace)] text-lg font-semibold text-white">{clientsCreesN.toLocaleString("fr-FR")}</span>
+                    <span className="text-right font-[var(--font-mono,monospace)] text-sm text-white/25" title="Objectif — correspondance avec les catégories gros/moyens/petits à définir">—</span>
+                  </>
+                )}
+                {bandRows.map((b) => (
+                  <React.Fragment key={b}>
+                    <span className="whitespace-nowrap text-right text-[11px] text-white/50">{b}</span>
+                    <span className="text-right font-[var(--font-mono,monospace)] text-lg font-semibold text-white">{bands![b]}</span>
+                    <span className="text-right font-[var(--font-mono,monospace)] text-sm text-white/25" title="Objectif — correspondance avec les catégories gros/moyens/petits à définir">—</span>
+                  </React.Fragment>
                 ))}
               </div>
-            )}
-          </>
+            </div>
+          )}
+        </CardShell>
+      </div>
+    );
+  }
+
+  return (
+    <div className="col-span-2 sm:col-span-1">
+      <CardShell color="#A6A181" badgeLabel={label} onRemove={onRemove} onClick={config.cle !== "factures_retard" ? handleClick : undefined} compact={false}>
+        {loading ? (
+          <div className="h-14 animate-pulse rounded bg-white/5" />
+        ) : error ? (
+          <p className="text-[10px] text-red-300">{error}</p>
+        ) : (
+          <div className={`font-[var(--font-mono,monospace)] font-semibold ${isMontant ? "text-4xl" : "text-4xl"}`} style={{ color: valueColor }}>
+            {isMontant ? formatMontant(total || 0) : (total ?? 0).toLocaleString("fr-FR")}
+          </div>
         )}
       </CardShell>
     </div>
@@ -828,13 +856,13 @@ function TauxCard({
 
   return (
     <div className="col-span-2 sm:col-span-1">
-      <CardShell color="#D69A4A" badgeLabel="Taux transfo devis" onRemove={onRemove} onClick={() => window.open("/cycle-documents", "_blank", "noopener,noreferrer")} clickHint="Ouvrir Analyse Devis" compact>
+      <CardShell color="#D69A4A" badgeLabel="Taux transfo devis" onRemove={onRemove} onClick={() => window.open("/cycle-documents", "_blank", "noopener,noreferrer")} clickHint="Ouvrir Analyse Devis" compact={false}>
         {loading ? (
-          <div className="h-8 animate-pulse rounded bg-white/5" />
+          <div className="h-14 animate-pulse rounded bg-white/5" />
         ) : error ? (
-          <p className="text-[9px] text-red-300">{error}</p>
+          <p className="text-[10px] text-red-300">{error}</p>
         ) : (
-          <div className="font-[var(--font-mono,monospace)] text-lg font-semibold text-white">
+          <div className="font-[var(--font-mono,monospace)] text-4xl font-semibold text-white">
             {taux === null ? "—" : formatPct(taux)}
           </div>
         )}
@@ -990,31 +1018,12 @@ export default function VisionTciKpiPanel() {
   // (config.famille_macro) si elle est définie.
   const [familleMacroFiltre, setFamilleMacroFiltre] = useState<string | null>(null);
 
-  // Rafraîchissement périodique des valeurs — uniquement pendant que l'onglet
-  // est visible. Rien ne se déclenche en arrière-plan : ça évite exactement
-  // le désagrément inverse (rafraîchir alors que l'utilisateur ne regarde
-  // pas l'écran). Toutes les 90s pendant que c'est affiché, sinon en pause.
+  // FIX (2026-08) : l'intervalle de rafraîchissement automatique (90s tant
+  // que l'onglet est visible) est retiré -- chargement à l'ouverture, puis
+  // uniquement sur clic du bouton "↻ Actualiser" ci-dessous. refreshTick
+  // reste la mécanique de déclenchement (les pavés se rechargent sur son
+  // changement), juste plus rien ne l'incrémente automatiquement.
   const [refreshTick, setRefreshTick] = useState(0);
-  useEffect(() => {
-    let interval: ReturnType<typeof setInterval> | null = null;
-    function start() {
-      if (interval) return;
-      interval = setInterval(() => setRefreshTick((t) => t + 1), 90_000);
-    }
-    function stop() {
-      if (interval) { clearInterval(interval); interval = null; }
-    }
-    if (document.visibilityState === "visible") start();
-    function handleVisibility() {
-      if (document.visibilityState === "visible") start();
-      else stop();
-    }
-    document.addEventListener("visibilitychange", handleVisibility);
-    return () => {
-      stop();
-      document.removeEventListener("visibilitychange", handleVisibility);
-    };
-  }, []);
 
   // Modèles nommés (réservé aux administrateurs, can_autorisation) — pour
   // enregistrer la disposition courante comme modèle affectable à un profil
@@ -1128,15 +1137,11 @@ export default function VisionTciKpiPanel() {
 
   return (
     <div>
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <h1 className="text-xl font-bold text-white">Vision ONE PAGE</h1>
-          <div className="mt-1">
-            <LastSyncBadge compact />
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
+      {/* FIX (2026-08) : le titre "Vision ONE PAGE" et le badge de synchro
+          sortent de ce panneau -- ils vivent désormais dans le bandeau de
+          VisionTciPage.tsx (au-dessus des sections colorées), pour ne plus
+          être noyés dans la section "Activité". */}
+      <div className="mb-3 flex flex-wrap items-center justify-end gap-2">
           <button
             onClick={() => setRefreshTick((t) => t + 1)}
             title="Actualiser toutes les valeurs maintenant"
@@ -1175,7 +1180,6 @@ export default function VisionTciKpiPanel() {
           {!personnalise && (
             <span className="text-[11px] text-white/35">Disposition du profil (non personnalisée)</span>
           )}
-        </div>
       </div>
 
       <FamilleMacroFiltreRow familles={famillesMacro} actif={familleMacroFiltre} onChange={setFamilleMacroFiltre} />
