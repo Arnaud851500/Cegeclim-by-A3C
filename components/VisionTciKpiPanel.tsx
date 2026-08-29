@@ -241,14 +241,18 @@ function CardShell({
 // ── Pavé FLUX (compact) ──────────────────────────────────────────────────
 
 function FluxCard({
-  config, effectiveAgence, effectiveCollaborateur, utiliserJMoins1, refreshTick, onRemove,
-}: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; utiliserJMoins1: boolean; refreshTick: number; onRemove: () => void }) {
+  config, effectiveAgence, effectiveCollaborateur, utiliserJMoins1, refreshTick, familleMacroFiltre, onRemove,
+}: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; utiliserJMoins1: boolean; refreshTick: number; familleMacroFiltre: string | null; onRemove: () => void }) {
   const famille = config.cle as FamilleFlux;
   const [values, setValues] = useState<FluxValues | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const color = FOCUS_MENSUEL_COLORS[famille] || "#4B92AC";
   const estMarge = famille === "Marge";
+  // FIX (2026-08) : le filtre global "Famille macro" surcharge la famille
+  // propre à ce pavé quand il est actif -- même mécanique que FluxCardGrand
+  // et désormais TauxCard/PortefeuilleCard/ProjectionCard.
+  const familleMacroEffective = familleMacroFiltre ?? config.famille_macro;
 
   useEffect(() => {
     let cancelled = false;
@@ -257,7 +261,7 @@ function FluxCard({
       setError(null);
       const { data, error: err } = await supabase.rpc("get_vision_tci_kpi", {
         p_famille: famille,
-        p_famille_macro: config.famille_macro,
+        p_famille_macro: familleMacroEffective,
         p_agence: effectiveAgence,
         p_collaborateur: effectiveCollaborateur,
         p_utiliser_j_moins_1: utiliserJMoins1,
@@ -269,7 +273,7 @@ function FluxCard({
     }
     load();
     return () => { cancelled = true; };
-  }, [famille, config.famille_macro, effectiveAgence, effectiveCollaborateur, utiliserJMoins1, refreshTick]);
+  }, [famille, familleMacroEffective, effectiveAgence, effectiveCollaborateur, utiliserJMoins1, refreshTick]);
 
   function handleClick() {
     if (famille === "BL" || famille === "CDC" || famille === "Factures") window.open("/focus_mensuel2", "_blank", "noopener,noreferrer");
@@ -284,7 +288,7 @@ function FluxCard({
       <CardShell
         color={color}
         badgeLabel={famille}
-        badges={[config.famille_macro, effectiveAgence].filter((v): v is string => Boolean(v)).map((v) => (v === config.famille_macro ? `Fam : ${v}` : v))}
+        badges={[familleMacroEffective, effectiveAgence].filter((v): v is string => Boolean(v)).map((v) => (v === familleMacroEffective ? `Fam : ${v}` : v))}
         onRemove={onRemove}
         onClick={handleClick}
         clickHint={famille === "Marge" ? "Ouvrir Atelier d'analyse — Analyse marge" : famille === "Devis" ? "Ouvrir Analyse Devis" : "Ouvrir Activité Quotidienne"}
@@ -825,11 +829,14 @@ function CompteurCard({
 // ── Pavé TAUX (réduit : 1 colonne sur 4) ────────────────────────────────
 
 function TauxCard({
-  config, effectiveAgence, effectiveCollaborateur, refreshTick, onRemove,
-}: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; onRemove: () => void }) {
+  config, effectiveAgence, effectiveCollaborateur, refreshTick, familleMacroFiltre, onRemove,
+}: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; familleMacroFiltre: string | null; onRemove: () => void }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [taux, setTaux] = useState<number | null>(null);
+  // FIX (2026-08) : le filtre global "Famille macro" surcharge la famille
+  // propre à ce pavé quand il est actif -- même mécanique que FluxCardGrand.
+  const familleMacroEffective = familleMacroFiltre ?? config.famille_macro;
 
   useEffect(() => {
     let cancelled = false;
@@ -842,7 +849,7 @@ function TauxCard({
       const { data, error: err } = await supabase.rpc("get_cycle_documents_kpis", {
         p_date_debut: debut, p_date_fin: fin,
         p_agence: effectiveAgence, p_collaborateur: effectiveCollaborateur,
-        p_famille_macro: config.famille_macro, p_famille: null, p_client: null,
+        p_famille_macro: familleMacroEffective, p_famille: null, p_client: null,
         p_include_hors_stat: false, p_age_risque_jours: 30, p_montant_risque: 15000,
       });
       if (cancelled) return;
@@ -852,11 +859,19 @@ function TauxCard({
     }
     load();
     return () => { cancelled = true; };
-  }, [effectiveAgence, effectiveCollaborateur, config.famille_macro, refreshTick]);
+  }, [effectiveAgence, effectiveCollaborateur, familleMacroEffective, refreshTick]);
 
   return (
     <div className="col-span-2 sm:col-span-1">
-      <CardShell color="#D69A4A" badgeLabel="Taux transfo devis" onRemove={onRemove} onClick={() => window.open("/cycle-documents", "_blank", "noopener,noreferrer")} clickHint="Ouvrir Analyse Devis" compact={false}>
+      <CardShell
+        color="#D69A4A"
+        badgeLabel="Taux transfo devis"
+        badges={familleMacroEffective ? [`Fam : ${familleMacroEffective}`] : undefined}
+        onRemove={onRemove}
+        onClick={() => window.open("/cycle-documents", "_blank", "noopener,noreferrer")}
+        clickHint="Ouvrir Analyse Devis"
+        compact={false}
+      >
         {loading ? (
           <div className="h-14 animate-pulse rounded bg-white/5" />
         ) : error ? (
@@ -891,7 +906,7 @@ type AgenceLigne = {
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function fetchAgenceLignes(effectiveAgence: string | null, effectiveCollaborateur: string | null): Promise<AgenceLigne[]> {
+async function fetchAgenceLignes(effectiveAgence: string | null, effectiveCollaborateur: string | null, familleMacro: string | null = null): Promise<AgenceLigne[]> {
   const today = new Date();
   const focusDate = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
   const month = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
@@ -899,7 +914,7 @@ async function fetchAgenceLignes(effectiveAgence: string | null, effectiveCollab
     p_focus_date: focusDate,
     p_month: month,
     p_agence: effectiveAgence,
-    p_famille_macro: null,
+    p_famille_macro: familleMacro,
     p_collaborateur: effectiveCollaborateur,
     p_include_hors_statistiques: true,
   });
@@ -1025,8 +1040,8 @@ function ProjectionTable({ rows }: { rows: AgenceLigne[] }) {
 }
 
 function PortefeuilleCard({
-  effectiveAgence, effectiveCollaborateur, refreshTick, onRemove,
-}: { effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; onRemove: () => void }) {
+  effectiveAgence, effectiveCollaborateur, refreshTick, familleMacroFiltre, onRemove,
+}: { effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; familleMacroFiltre: string | null; onRemove: () => void }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [rows, setRows] = useState<AgenceLigne[]>([]);
@@ -1038,7 +1053,7 @@ function PortefeuilleCard({
       setLoading(true);
       setError(null);
       try {
-        const r = await fetchAgenceLignes(effectiveAgence, effectiveCollaborateur);
+        const r = await fetchAgenceLignes(effectiveAgence, effectiveCollaborateur, familleMacroFiltre);
         if (!cancelled) setRows(r);
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -1048,7 +1063,7 @@ function PortefeuilleCard({
     }
     load();
     return () => { cancelled = true; };
-  }, [effectiveAgence, effectiveCollaborateur, refreshTick]);
+  }, [effectiveAgence, effectiveCollaborateur, familleMacroFiltre, refreshTick]);
 
   const sansTotal = rows.filter((r) => r.label.toUpperCase() !== "TOTAL");
   const totalGeneral = sansTotal.reduce((s, r) => s + r.total, 0);
@@ -1058,7 +1073,15 @@ function PortefeuilleCard({
 
   return (
     <div className="col-span-2 sm:col-span-1">
-      <CardShell color="#4B92AC" badgeLabel="Portefeuille" onRemove={onRemove} onClick={() => setOpen(true)} clickHint="Voir le détail par agence" compact={false}>
+      <CardShell
+        color="#4B92AC"
+        badgeLabel="Portefeuille"
+        badges={familleMacroFiltre ? [`Fam : ${familleMacroFiltre}`] : undefined}
+        onRemove={onRemove}
+        onClick={() => setOpen(true)}
+        clickHint="Voir le détail par agence"
+        compact={false}
+      >
         {loading ? (
           <div className="h-14 animate-pulse rounded bg-white/5" />
         ) : error ? (
@@ -1094,8 +1117,8 @@ function PortefeuilleCard({
 }
 
 function ProjectionCard({
-  effectiveAgence, effectiveCollaborateur, refreshTick, onRemove,
-}: { effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; onRemove: () => void }) {
+  effectiveAgence, effectiveCollaborateur, refreshTick, familleMacroFiltre, onRemove,
+}: { effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; familleMacroFiltre: string | null; onRemove: () => void }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [rows, setRows] = useState<AgenceLigne[]>([]);
@@ -1107,7 +1130,7 @@ function ProjectionCard({
       setLoading(true);
       setError(null);
       try {
-        const r = await fetchAgenceLignes(effectiveAgence, effectiveCollaborateur);
+        const r = await fetchAgenceLignes(effectiveAgence, effectiveCollaborateur, familleMacroFiltre);
         if (!cancelled) setRows(r);
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -1117,7 +1140,7 @@ function ProjectionCard({
     }
     load();
     return () => { cancelled = true; };
-  }, [effectiveAgence, effectiveCollaborateur, refreshTick]);
+  }, [effectiveAgence, effectiveCollaborateur, familleMacroFiltre, refreshTick]);
 
   const sansTotal = rows.filter((r) => r.label.toUpperCase() !== "TOTAL");
   const projectionTotal = sansTotal.reduce((s, r) => s + r.projectionCa, 0);
@@ -1128,7 +1151,15 @@ function ProjectionCard({
 
   return (
     <div className="col-span-2 sm:col-span-1">
-      <CardShell color="#3F9142" badgeLabel="Projection CA" onRemove={onRemove} onClick={() => setOpen(true)} clickHint="Voir le détail par agence" compact={false}>
+      <CardShell
+        color="#3F9142"
+        badgeLabel="Projection CA"
+        badges={familleMacroFiltre ? [`Fam : ${familleMacroFiltre}`] : undefined}
+        onRemove={onRemove}
+        onClick={() => setOpen(true)}
+        clickHint="Voir le détail par agence"
+        compact={false}
+      >
         {loading ? (
           <div className="h-14 animate-pulse rounded bg-white/5" />
         ) : error ? (
@@ -1502,14 +1533,45 @@ export default function VisionTciKpiPanel() {
                 onRemove={() => handleRemove(c.id)}
               />
             ) : (
-              <FluxCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} utiliserJMoins1={utiliserJMoins1} refreshTick={refreshTick} onRemove={() => handleRemove(c.id)} />
+              <FluxCard
+                key={c.id}
+                config={c}
+                effectiveAgence={effectiveAgenceFor(c)}
+                effectiveCollaborateur={effectiveCollaborateurFor(c)}
+                utiliserJMoins1={utiliserJMoins1}
+                refreshTick={refreshTick}
+                familleMacroFiltre={familleMacroFiltre}
+                onRemove={() => handleRemove(c.id)}
+              />
             )
           ) : c.kind === "taux" ? (
-            <TauxCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} refreshTick={refreshTick} onRemove={() => handleRemove(c.id)} />
+            <TauxCard
+              key={c.id}
+              config={c}
+              effectiveAgence={effectiveAgenceFor(c)}
+              effectiveCollaborateur={effectiveCollaborateurFor(c)}
+              refreshTick={refreshTick}
+              familleMacroFiltre={familleMacroFiltre}
+              onRemove={() => handleRemove(c.id)}
+            />
           ) : c.kind === "portefeuille" ? (
-            <PortefeuilleCard key={c.id} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} refreshTick={refreshTick} onRemove={() => handleRemove(c.id)} />
+            <PortefeuilleCard
+              key={c.id}
+              effectiveAgence={effectiveAgenceFor(c)}
+              effectiveCollaborateur={effectiveCollaborateurFor(c)}
+              refreshTick={refreshTick}
+              familleMacroFiltre={familleMacroFiltre}
+              onRemove={() => handleRemove(c.id)}
+            />
           ) : c.kind === "projection" ? (
-            <ProjectionCard key={c.id} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} refreshTick={refreshTick} onRemove={() => handleRemove(c.id)} />
+            <ProjectionCard
+              key={c.id}
+              effectiveAgence={effectiveAgenceFor(c)}
+              effectiveCollaborateur={effectiveCollaborateurFor(c)}
+              refreshTick={refreshTick}
+              familleMacroFiltre={familleMacroFiltre}
+              onRemove={() => handleRemove(c.id)}
+            />
           ) : c.kind === "spacer" ? (
             <SpacerCard key={c.id} span={c.cle === "2" ? 2 : 1} onRemove={() => handleRemove(c.id)} />
           ) : (
