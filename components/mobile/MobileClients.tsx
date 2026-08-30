@@ -18,6 +18,19 @@ const RDV_TYPE_LABELS: Record<string, string> = {
   '4': 'RDV', '7': 'Appel', '9': 'Rappel',
 }
 
+// ── Périmètre agence/collaborateur (2026-08-30) ──────────────────────────
+// Avant ce correctif, "Mes clients" chargeait TOUTE la table
+// synthese_multi_clients_cache sans aucun filtre -- un collaborateur avec
+// un périmètre restreint (ex. Damien Mena, agence ANGLET) voyait donc les
+// 476 clients de toute l'entreprise, au lieu des 110 clients affichés pour
+// lui sur Vision ONE PAGE (pavé "Clients actifs", filtré par
+// allowed_collaborateurs / allowed_agences comme toutes les autres pages).
+// Repris ici du même mécanisme déjà utilisé côté useMobileAlertsCount.tsx
+// (perimetreRef) : allowed_agences ET allowed_collaborateurs de
+// user_page_access, restriction cumulative (chaque liste non vide réduit
+// encore le résultat), vide = pas de restriction sur ce critère.
+type Perimetre = { agences: string[]; collaborateurs: string[] }
+
 function safeNumber(value: any) {
   if (value === null || value === undefined || value === '') return 0
   const n = Number(value)
@@ -97,7 +110,13 @@ function pick(row: Record<string, any>, keys: string[]) {
   return null
 }
 
-async function fetchAllCache(select: string, apply?: (q: any) => any) {
+/** FIX (2026-08-30) : accepte désormais un périmètre agence/collaborateur
+ * et l'applique en filtre Supabase -- restriction cumulative (les deux
+ * listes s'appliquent en ET si toutes deux non vides), exactement comme
+ * useMobileAlertsCount.tsx pour les autres alertes/listes mobiles. Une
+ * liste vide = pas de restriction sur ce critère (comportement inchangé
+ * pour un profil sans périmètre, ex. Administrateur). */
+async function fetchAllCache(select: string, perimetre: Perimetre, apply?: (q: any) => any) {
   const output: Record<string, any>[] = []
   const chunkSize = 1000
   let from = 0
@@ -107,6 +126,8 @@ async function fetchAllCache(select: string, apply?: (q: any) => any) {
       .select(select)
       .order('numero_tiers', { ascending: true })
       .range(from, from + chunkSize - 1)
+    if (perimetre.collaborateurs.length > 0) query = query.in('collaborateur', perimetre.collaborateurs)
+    if (perimetre.agences.length > 0) query = query.in('agence_collaborateur', perimetre.agences)
     if (apply) query = apply(query)
     const { data, error } = await query
     if (error) throw error
@@ -234,6 +255,10 @@ export default function MobileClients({
 
   const [currentEmail, setCurrentEmail] = useState('')
   const [currentName, setCurrentName] = useState('')
+  // null = pas encore résolu (on ne charge pas les clients tant que le
+  // périmètre n'est pas connu, pour ne jamais afficher par erreur la
+  // liste complète non filtrée le temps d'un aller-retour réseau).
+  const [perimetre, setPerimetre] = useState<Perimetre | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -243,12 +268,16 @@ export default function MobileClients({
       if (!email || cancelled) return
       const { data: access } = await supabase
         .from('user_page_access')
-        .select('display_name')
+        .select('display_name, allowed_agences, allowed_collaborateurs')
         .eq('email', email)
         .maybeSingle()
       if (cancelled) return
       setCurrentEmail(email)
       setCurrentName(String(access?.display_name || '').trim() || email.split('@')[0])
+      setPerimetre({
+        agences: ((access?.allowed_agences || []) as string[]).map((v) => String(v || '').trim()).filter(Boolean),
+        collaborateurs: ((access?.allowed_collaborateurs || []) as string[]).map((v) => String(v || '').trim()).filter(Boolean),
+      })
     }
     void loadIdentity()
     return () => { cancelled = true }
@@ -260,12 +289,18 @@ export default function MobileClients({
   const [detailLoading, setDetailLoading] = useState(false)
 
   useEffect(() => {
+    // On attend que le périmètre soit résolu (voir loadIdentity ci-dessus)
+    // avant de charger quoi que ce soit -- évite un premier rendu avec la
+    // liste complète non filtrée pendant la résolution du périmètre.
+    if (!perimetre) return
+
     let cancelled = false
 
     async function load() {
       try {
         const rows = await fetchAllCache(
           'numero_tiers,intitule_tiers,collaborateur,date_creation,ca_n1,ca_ytd_n,ca_ytd_n1,devis_ytd_n,marge_pct_ytd_n,marge_ytd_n1_value',
+          perimetre as Perimetre,
           (q) => q.eq('annee', N).eq('row_kind', 'client'),
         )
         if (cancelled) return
@@ -302,7 +337,7 @@ export default function MobileClients({
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [perimetre])
 
   const stats = useMemo(() => {
     if (!allClients) return { total: null as number | null, nouveaux: null as number | null, parProfil: null as { label: string; count: number }[] | null }
