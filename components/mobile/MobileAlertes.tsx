@@ -176,7 +176,10 @@ export default function MobileAlertes({
   fetchCdcAvant2026List: () => Promise<Record<string, any>[]>
   fetchFraisPortList: () => Promise<Record<string, any>[]>
   fetchCapaciteGazList: () => Promise<Record<string, any>[]>
-  fetchDataCoherenceList: () => Promise<DataCoherenceMonthRow[]>
+  // Optionnelle : tant que MobileShell.tsx (non fourni) ne la relaie pas
+  // encore depuis useMobileAlertsCount(), on ne doit pas casser le build --
+  // le tiroir "Cohérence données" reste simplement vide si absente.
+  fetchDataCoherenceList?: () => Promise<DataCoherenceMonthRow[]>
   userEmail: string
   userName: string
 }) {
@@ -488,6 +491,10 @@ export default function MobileAlertes({
    * mobile, le détail chiffré complet reste sur /Import (desktop). */
   async function openDataCoherenceDrawer() {
     setListOpen({ title: 'Cohérence données', items: [] })
+    if (!fetchDataCoherenceList) {
+      setListLoading(false)
+      return
+    }
     setListLoading(true)
     const rows = await fetchDataCoherenceList()
     setListLoading(false)
