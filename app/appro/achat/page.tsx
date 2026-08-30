@@ -111,6 +111,7 @@ type CdfEntete = {
   tag_facturation: string;
   montant_ht: number;
   montant_ttc: number;
+  dans_bdcf: boolean;
 };
 
 type CdfLigne = {
@@ -118,6 +119,7 @@ type CdfLigne = {
   cdf_id: number;
   cdf_reference: string;
   cdf_order_date: string | null;
+  dans_bdcf: boolean;
   supplier_fk: number | null;
   code_fournisseur: string | null;
   nom_fournisseur: string | null;
@@ -238,6 +240,7 @@ export default function ApproAchatsPage() {
   const [statutsLivraison, setStatutsLivraison] = useState<string[]>([]);
   const [statutsFacturation, setStatutsFacturation] = useState<string[]>([]);
   const [articleReference, setArticleReference] = useState('');
+  const [dansBdcf, setDansBdcf] = useState<'all' | 'yes' | 'no'>('all');
 
   // --- vue / résultats ---
   const [vue, setVue] = useState<Vue>('entete');
@@ -366,6 +369,7 @@ export default function ApproAchatsPage() {
       p_delivery_fk_ids: lieuIds.length ? lieuIds : null,
       p_article_reference: articleReference.trim() || null,
       p_cdf_reference: cdfReference.trim() || null,
+      p_dans_bdcf: dansBdcf === 'all' ? null : dansBdcf === 'yes',
     }),
     [
       supplierIds,
@@ -378,6 +382,7 @@ export default function ApproAchatsPage() {
       lieuIds,
       articleReference,
       cdfReference,
+      dansBdcf,
     ]
   );
 
@@ -409,6 +414,9 @@ export default function ApproAchatsPage() {
       if (cdfReference.trim()) {
         q = q.ilike(kind === 'entete' ? 'reference' : 'cdf_reference', `%${cdfReference.trim()}%`);
       }
+      if (dansBdcf !== 'all') {
+        q = q.eq('dans_bdcf', dansBdcf === 'yes');
+      }
       return q;
     },
     [
@@ -422,6 +430,7 @@ export default function ApproAchatsPage() {
       dateLivraisonTo,
       articleReference,
       cdfReference,
+      dansBdcf,
     ]
   );
 
@@ -668,6 +677,7 @@ export default function ApproAchatsPage() {
       if (vue === 'entete') {
         ws3.columns = [
           { header: 'Référence CDF', key: 'reference', width: 16 },
+          { header: '★ SAGE', key: 'dans_bdcf_label', width: 9 },
           { header: 'Fournisseur', key: 'nom_fournisseur', width: 28 },
           { header: 'Date création', key: 'order_date', width: 14 },
           { header: 'Livraison (min → max)', key: 'periode_livraison', width: 24 },
@@ -682,6 +692,7 @@ export default function ApproAchatsPage() {
         (detailData as CdfEntete[]).forEach((r) =>
           ws3.addRow({
             ...r,
+            dans_bdcf_label: r.dans_bdcf ? '★' : '',
             order_date: fmtDate(r.order_date),
             periode_livraison: r.date_livraison_min ? `${fmtDate(r.date_livraison_min)} → ${fmtDate(r.date_livraison_max)}` : '—',
           })
@@ -689,6 +700,7 @@ export default function ApproAchatsPage() {
       } else {
         ws3.columns = [
           { header: 'Référence CDF', key: 'cdf_reference', width: 16 },
+          { header: '★ SAGE', key: 'dans_bdcf_label', width: 9 },
           { header: 'Article', key: 'article_reference', width: 18 },
           { header: 'Désignation', key: 'article_label', width: 30 },
           { header: 'Commentaire', key: 'commentaire', width: 26 },
@@ -709,6 +721,7 @@ export default function ApproAchatsPage() {
         (detailData as CdfLigne[]).forEach((r) =>
           ws3.addRow({
             ...r,
+            dans_bdcf_label: r.dans_bdcf ? '★' : '',
             ligne_created_at: fmtDate(r.ligne_created_at),
             date_livraison_demandee: fmtDate(r.date_livraison_demandee),
             date_livraison: fmtDate(r.date_livraison),
@@ -957,6 +970,21 @@ export default function ApproAchatsPage() {
                 style={inputStyle}
               />
             </Field>
+
+            <Field label="Retrouvée dans SAGE (BDCF)">
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                <Chip active={dansBdcf === 'all'} onClick={() => setDansBdcf('all')}>
+                  Toutes
+                </Chip>
+                <Chip active={dansBdcf === 'yes'} onClick={() => setDansBdcf('yes')}>
+                  ★ Avec étoile
+                </Chip>
+                <Chip active={dansBdcf === 'no'} onClick={() => setDansBdcf('no')}>
+                  Sans étoile
+                </Chip>
+              </div>
+              <small style={{ color: '#8A8474' }}>★ = commande retrouvée dans SAGE (table BDCF).</small>
+            </Field>
           </div>
 
           <div style={{ marginTop: 18, display: 'flex', gap: 12 }}>
@@ -966,6 +994,7 @@ export default function ApproAchatsPage() {
             <button
               onClick={() => {
                 setCdfReference('');
+                setDansBdcf('all');
                 setFournisseurSearch('');
                 setLieuSearch('');
                 setSupplierIds([]);
@@ -1194,7 +1223,10 @@ export default function ApproAchatsPage() {
                 <tbody>
                   {rowsEntete.map((r) => (
                     <tr key={r.id} onClick={() => setDetailCdfId(r.id)} style={{ cursor: 'pointer' }}>
-                      <td style={{ ...tdStyle, color: COLORS.violet, fontWeight: 600 }}>{r.reference}</td>
+                      <td style={{ ...tdStyle, color: COLORS.violet, fontWeight: 600 }}>
+                        {r.reference}
+                        {r.dans_bdcf && <BdcfStar />}
+                      </td>
                       <td style={tdStyle}>{r.nom_fournisseur}</td>
                       <td style={tdStyle}>{fmtDate(r.order_date)}</td>
                       <td style={tdStyle}>
@@ -1260,7 +1292,10 @@ export default function ApproAchatsPage() {
                 <tbody>
                   {rowsLignes.map((r) => (
                     <tr key={r.id} onClick={() => setDetailCdfId(r.cdf_id)} style={{ cursor: 'pointer' }}>
-                      <td style={{ ...tdStyle, color: COLORS.violet, fontWeight: 600 }}>{r.cdf_reference}</td>
+                      <td style={{ ...tdStyle, color: COLORS.violet, fontWeight: 600 }}>
+                        {r.cdf_reference}
+                        {r.dans_bdcf && <BdcfStar />}
+                      </td>
                       <td style={tdStyle}>{r.article_reference}</td>
                       <td style={tdStyle}>{r.article_label ?? r.commentaire}</td>
                       <td style={tdStyle}>{fmtDate(r.ligne_created_at)}</td>
@@ -1458,6 +1493,7 @@ function CdfDetailModal({ cdfId, onClose }: { cdfId: number; onClose: () => void
           <div>
             <div style={{ fontFamily: '"Space Grotesk", sans-serif', fontSize: 20, fontWeight: 600 }}>
               {entete?.reference ?? `Commande #${cdfId}`}
+              {entete?.dans_bdcf && <BdcfStar />}
             </div>
             {entete && (
               <div style={{ fontSize: 13, opacity: 0.75 }}>
@@ -1815,6 +1851,14 @@ function Kpi({ label, value, accent, compact }: { label: string; value: string; 
       <div style={{ fontSize: compact ? 11 : 12, color: '#8A8474', marginBottom: 4 }}>{label}</div>
       <div style={{ fontSize: compact ? 16 : 20, fontFamily: '"Space Grotesk", sans-serif', fontWeight: 600 }}>{value}</div>
     </div>
+  );
+}
+
+function BdcfStar() {
+  return (
+    <span title="Commande retrouvée dans SAGE (BDCF)" style={{ color: '#C9A227', marginLeft: 5, fontSize: '0.9em' }}>
+      ★
+    </span>
   );
 }
 
