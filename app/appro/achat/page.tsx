@@ -4,26 +4,34 @@
  * Page "Appro / Achats"
  * ---------------------------------------------------------------------
  * Écran de pilotage des commandes fournisseurs (BLG), avec filtres
- * multi-dimension, KPIs agrégés côté serveur (RPC Postgres) et export
- * Excel multi-onglets (synthèse multi-fournisseurs / synthèse par
- * fournisseur / détail).
+ * multi-dimension, KPIs agrégés côté serveur (RPC Postgres), une fiche
+ * détail par commande (lignes + BL + factures) et export Excel
+ * multi-onglets.
  *
  * Dépend des objets Supabase créés dans le projet gchwihltydsplarhveyv :
- *   - vues   : v_appro_cdf_entete, v_appro_cdf_lignes, v_appro_fournisseurs
- *   - RPC    : get_appro_filtres_disponibles
- *              get_appro_achats_kpis(...)
- *              get_appro_achats_synthese_fournisseurs(...)
+ *   - vues : v_appro_cdf_entete, v_appro_cdf_lignes, v_appro_bl,
+ *            v_appro_faf_lignes, v_appro_fournisseurs
+ *   - RPC  : get_appro_filtres_disponibles
+ *            get_appro_achats_kpis(...)
+ *            get_appro_achats_synthese_fournisseurs(...)
  *
  * ADAPTER avant intégration :
  *   - le chemin d'import du client Supabase ci-dessous (`@/lib/supabase`)
- *     pour qu'il corresponde à l'emplacement réel dans a3c-app.
- *   - la route/emplacement du fichier (ex: app/appro/achats/page.tsx).
+ *   - la route/emplacement du fichier (ex: app/appro/achats/page.tsx)
  *
- * Limite connue : la notion d'"AR fournisseur" vue dans l'historique BLG
- * n'est pas un champ mirroré (c'est un événement d'historique BLG, pas
- * une colonne). Le délai "création -> AR" demandé est donc approximé
- * par "création -> 1ère réception (BL)", qui est le proxy disponible le
- * plus proche aujourd'hui.
+ * Limites de données connues (documentées ici pour ne pas les redécouvrir) :
+ *   - sale_quote.created_at est réécrit par BLG à chaque resynchro du
+ *     document -> tous les filtres/délais de "date de création" utilisent
+ *     order_date (date métier stable), pas created_at.
+ *   - sale_quote.delivery_date_required (date de livraison demandée) n'est
+ *     renseignée que sur 4 CDF / 31286 dans BLG -> inexploitable. On
+ *     affiche à la place date_livraison_min/max, agrégées depuis
+ *     sale_quote_line.delivery_date_actual (renseignée sur ~54% des lignes),
+ *     ce qui reflète la fenêtre de livraison réelle/en cours de la commande.
+ *   - la notion d'"AR fournisseur" vue dans l'historique BLG n'est pas un
+ *     champ mirroré (c'est un événement d'historique BLG, pas une colonne).
+ *     Le délai "création -> AR" est donc approximé par "création -> 1ère
+ *     réception (BL)".
  * ---------------------------------------------------------------------
  */
 
@@ -75,10 +83,16 @@ type CdfEntete = {
   id: number;
   reference: string;
   order_date: string | null;
+  date_livraison_min: string | null;
+  date_livraison_max: string | null;
   code_fournisseur: string | null;
   nom_fournisseur: string | null;
+  supplier_fk: number | null;
+  delivery_fk: number | null;
   lieu_livraison_nom: string | null;
   lieu_livraison_ville: string | null;
+  delivery_status: string;
+  invoice_status: string;
   tag_livraison: string;
   tag_facturation: string;
   montant_ht: number;
@@ -89,16 +103,41 @@ type CdfLigne = {
   id: number;
   cdf_id: number;
   cdf_reference: string;
+  cdf_order_date: string | null;
+  supplier_fk: number | null;
+  code_fournisseur: string | null;
+  nom_fournisseur: string | null;
+  delivery_fk: number | null;
   article_reference: string | null;
   article_label: string | null;
   commentaire: string | null;
   quantite: number | null;
   prix_unitaire: number | null;
   total_ttc: number | null;
-  date_livraison_demandee: string | null;
-  date_livraison_reelle: string | null;
+  date_livraison: string | null;
+  statut_livraison_code: string;
   tag_livraison_ligne: string;
+  statut_facturation_code: string;
   tag_facturation_ligne: string;
+};
+
+type BlLigne = {
+  bl_id: number;
+  bl_reference: string;
+  bl_ligne_id: number;
+  date_reception: string | null;
+  article_reference: string | null;
+  quantite_recue: number | null;
+};
+
+type FafLigne = {
+  faf_id: number;
+  faf_reference: string;
+  faf_invoice_date: string | null;
+  faf_montant_ttc: number | null;
+  article_reference: string | null;
+  quantite: number | null;
+  total_ttc: number | null;
 };
 
 type Vue = 'entete' | 'lignes';
@@ -133,6 +172,12 @@ const fmtDate = (d: string | null | undefined) => {
   return date.toLocaleDateString('fr-FR');
 };
 
+const norm = (s: string) =>
+  s
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+
 // ---------------------------------------------------------------------
 // Composant principal
 // ---------------------------------------------------------------------
@@ -140,6 +185,8 @@ export default function ApproAchatsPage() {
   // --- filtres ---
   const [fournisseurOptions, setFournisseurOptions] = useState<FournisseurOption[]>([]);
   const [lieuOptions, setLieuOptions] = useState<LieuOption[]>([]);
+  const [fournisseurSearch, setFournisseurSearch] = useState('');
+  const [lieuSearch, setLieuSearch] = useState('');
   const [supplierIds, setSupplierIds] = useState<number[]>([]);
   const [lieuIds, setLieuIds] = useState<number[]>([]);
   const [dateCreationFrom, setDateCreationFrom] = useState('');
@@ -162,6 +209,9 @@ export default function ApproAchatsPage() {
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // --- fiche détail (modal) ---
+  const [detailCdfId, setDetailCdfId] = useState<number | null>(null);
+
   // -------------------------------------------------------------
   // Chargement des options de filtre (une fois)
   // -------------------------------------------------------------
@@ -178,8 +228,20 @@ export default function ApproAchatsPage() {
     })();
   }, []);
 
+  const fournisseurOptionsFiltres = useMemo(() => {
+    if (!fournisseurSearch.trim()) return fournisseurOptions;
+    const q = norm(fournisseurSearch);
+    return fournisseurOptions.filter((f) => norm(`${f.code} ${f.nom}`).includes(q));
+  }, [fournisseurOptions, fournisseurSearch]);
+
+  const lieuOptionsFiltres = useMemo(() => {
+    if (!lieuSearch.trim()) return lieuOptions;
+    const q = norm(lieuSearch);
+    return lieuOptions.filter((l) => norm(l.nom).includes(q));
+  }, [lieuOptions, lieuSearch]);
+
   // -------------------------------------------------------------
-  // Construction des paramètres de filtre (partagés KPI / synthèse / listing)
+  // Construction des paramètres de filtre (partagés KPI / synthèse)
   // -------------------------------------------------------------
   const rpcParams = useMemo(
     () => ({
@@ -207,25 +269,28 @@ export default function ApproAchatsPage() {
   );
 
   // -------------------------------------------------------------
-  // Applique un filtre commun (fournisseurs / dates / statuts / lieu /
-  // article) sur une query supabase-js pointant vers une des vues.
+  // Applique un filtre commun sur une query supabase-js pointant vers
+  // une des deux vues (entête ou lignes) — colonnes désormais alignées
+  // entre les deux vues (supplier_fk, delivery_fk, order_date, statuts
+  // en code brut) donc le même filtre s'applique aux deux.
   // -------------------------------------------------------------
   const applyCommonFilters = useCallback(
     (query: any, kind: 'entete' | 'lignes') => {
       let q = query;
       if (supplierIds.length) q = q.in('supplier_fk', supplierIds);
       if (lieuIds.length) q = q.in('delivery_fk', lieuIds);
-      if (dateCreationFrom) q = q.gte('order_date', dateCreationFrom);
-      if (dateCreationTo) q = q.lte('order_date', dateCreationTo);
+      const dateCol = kind === 'entete' ? 'order_date' : 'cdf_order_date';
+      if (dateCreationFrom) q = q.gte(dateCol, dateCreationFrom);
+      if (dateCreationTo) q = q.lte(dateCol, dateCreationTo);
       if (statutsLivraison.length) {
-        q = q.in(kind === 'entete' ? 'delivery_status' : 'tag_livraison_ligne', statutsLivraison);
+        q = q.in(kind === 'entete' ? 'delivery_status' : 'statut_livraison_code', statutsLivraison);
       }
       if (statutsFacturation.length) {
-        q = q.in(kind === 'entete' ? 'invoice_status' : 'tag_facturation_ligne', statutsFacturation);
+        q = q.in(kind === 'entete' ? 'invoice_status' : 'statut_facturation_code', statutsFacturation);
       }
       if (kind === 'lignes') {
-        if (dateLivraisonFrom) q = q.gte('date_livraison_demandee', dateLivraisonFrom);
-        if (dateLivraisonTo) q = q.lte('date_livraison_demandee', dateLivraisonTo);
+        if (dateLivraisonFrom) q = q.gte('date_livraison', dateLivraisonFrom);
+        if (dateLivraisonTo) q = q.lte('date_livraison', dateLivraisonTo);
         if (articleReference.trim()) q = q.ilike('article_reference', `%${articleReference.trim()}%`);
       }
       return q;
@@ -303,7 +368,6 @@ export default function ApproAchatsPage() {
     setExporting(true);
     setError(null);
     try {
-      // Détail complet (bridé à EXPORT_MAX_ROWS pour rester réactif)
       let detailQuery =
         vue === 'entete'
           ? applyCommonFilters(supabase.from('v_appro_cdf_entete').select('*'), 'entete')
@@ -391,9 +455,8 @@ export default function ApproAchatsPage() {
         [...groupes.entries()]
           .sort((a, b) => a[0].localeCompare(b[0]))
           .forEach(([nomFournisseur, cdfs]) => {
-            const titre = ws2.addRow({ ref: nomFournisseur });
+            const titre = ws2.addRow({ ref: nomFournisseur.toUpperCase() });
             titre.font = { bold: true, color: { argb: 'FF7A5EA8' } };
-            titre.getCell('ref').value = nomFournisseur.toUpperCase();
             cdfs.forEach((c) => {
               ws2.addRow({
                 ref: c.reference,
@@ -414,8 +477,7 @@ export default function ApproAchatsPage() {
             sousTotal.eachCell((c) => (c.fill = SUBTOTAL_FILL));
           });
       } else {
-        ws2.getRow(1).getCell(1).value = 'Référence CDF';
-        ws2.addRow({ ref: 'Vue « lignes » active : basculez sur « Entête » avant export pour la synthèse groupée par fournisseur.' });
+        ws2.addRow({ ref: 'Vue « Lignes » active : basculez sur « Entête » avant export pour la synthèse groupée par fournisseur.' });
       }
 
       // ---- Onglet 3 : Détail ----
@@ -425,6 +487,7 @@ export default function ApproAchatsPage() {
           { header: 'Référence CDF', key: 'reference', width: 16 },
           { header: 'Fournisseur', key: 'nom_fournisseur', width: 28 },
           { header: 'Date création', key: 'order_date', width: 14 },
+          { header: 'Livraison (min → max)', key: 'periode_livraison', width: 24 },
           { header: 'Lieu de livraison', key: 'lieu_livraison_nom', width: 22 },
           { header: 'Ville livraison', key: 'lieu_livraison_ville', width: 20 },
           { header: 'Statut livraison', key: 'tag_livraison', width: 16 },
@@ -434,7 +497,11 @@ export default function ApproAchatsPage() {
         ];
         styleHeaderRow(ws3.getRow(1));
         (detailData as CdfEntete[]).forEach((r) =>
-          ws3.addRow({ ...r, order_date: fmtDate(r.order_date) })
+          ws3.addRow({
+            ...r,
+            order_date: fmtDate(r.order_date),
+            periode_livraison: r.date_livraison_min ? `${fmtDate(r.date_livraison_min)} → ${fmtDate(r.date_livraison_max)}` : '—',
+          })
         );
       } else {
         ws3.columns = [
@@ -445,24 +512,16 @@ export default function ApproAchatsPage() {
           { header: 'Quantité', key: 'quantite', width: 10 },
           { header: 'PU', key: 'prix_unitaire', width: 12, style: { numFmt: '#,##0.00 €' } },
           { header: 'Total TTC', key: 'total_ttc', width: 14, style: { numFmt: '#,##0 €' } },
-          { header: 'Livraison demandée', key: 'date_livraison_demandee', width: 16 },
-          { header: 'Livraison réelle', key: 'date_livraison_reelle', width: 16 },
+          { header: 'Livraison', key: 'date_livraison', width: 16 },
           { header: 'Statut livraison', key: 'tag_livraison_ligne', width: 16 },
           { header: 'Statut facturation', key: 'tag_facturation_ligne', width: 18 },
         ];
         styleHeaderRow(ws3.getRow(1));
         (detailData as CdfLigne[]).forEach((r) =>
-          ws3.addRow({
-            ...r,
-            date_livraison_demandee: fmtDate(r.date_livraison_demandee),
-            date_livraison_reelle: fmtDate(r.date_livraison_reelle),
-          })
+          ws3.addRow({ ...r, date_livraison: fmtDate(r.date_livraison) })
         );
       }
-      ws3.autoFilter = {
-        from: 'A1',
-        to: `${String.fromCharCode(64 + ws3.columns.length)}1`,
-      };
+      ws3.autoFilter = { from: 'A1', to: `${String.fromCharCode(64 + ws3.columns.length)}1` };
       ws3.views = [{ state: 'frozen', ySplit: 1 }];
 
       if ((detailData?.length ?? 0) >= EXPORT_MAX_ROWS) {
@@ -494,8 +553,8 @@ export default function ApproAchatsPage() {
   // Rendu
   // ===============================================================
   return (
-    <div style={{ background: COLORS.creme, minHeight: '100vh', fontFamily: '"IBM Plex Sans", sans-serif', color: COLORS.marine }}>
-      <div style={{ maxWidth: 1400, margin: '0 auto', padding: '32px 24px 64px' }}>
+    <div style={{ background: COLORS.creme, minHeight: '100vh', width: '100%', fontFamily: '"IBM Plex Sans", sans-serif', color: COLORS.marine }}>
+      <div style={{ width: '100%', margin: '0 auto', padding: '28px 32px 64px', boxSizing: 'border-box' }}>
         <header style={{ marginBottom: 28 }}>
           <h1 style={{ fontFamily: '"Space Grotesk", sans-serif', fontSize: 30, fontWeight: 600, margin: 0 }}>
             Appro &amp; Achats
@@ -517,6 +576,13 @@ export default function ApproAchatsPage() {
         >
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16 }}>
             <Field label="Fournisseur">
+              <input
+                type="text"
+                value={fournisseurSearch}
+                onChange={(e) => setFournisseurSearch(e.target.value)}
+                placeholder="Rechercher un fournisseur…"
+                style={{ ...inputStyle, marginBottom: 6 }}
+              />
               <select
                 multiple
                 size={5}
@@ -524,15 +590,25 @@ export default function ApproAchatsPage() {
                 onChange={(e) => setSupplierIds(Array.from(e.target.selectedOptions, (o) => Number(o.value)))}
                 style={selectStyle}
               >
-                {fournisseurOptions.map((f) => (
+                {fournisseurOptionsFiltres.map((f) => (
                   <option key={f.id} value={f.id}>
                     {f.code} — {f.nom}
                   </option>
                 ))}
               </select>
+              {supplierIds.length > 0 && (
+                <small style={{ color: '#8A8474' }}>{supplierIds.length} sélectionné(s)</small>
+              )}
             </Field>
 
             <Field label="Lieu de livraison">
+              <input
+                type="text"
+                value={lieuSearch}
+                onChange={(e) => setLieuSearch(e.target.value)}
+                placeholder="Rechercher un lieu…"
+                style={{ ...inputStyle, marginBottom: 6 }}
+              />
               <select
                 multiple
                 size={5}
@@ -540,12 +616,13 @@ export default function ApproAchatsPage() {
                 onChange={(e) => setLieuIds(Array.from(e.target.selectedOptions, (o) => Number(o.value)))}
                 style={selectStyle}
               >
-                {lieuOptions.map((l) => (
+                {lieuOptionsFiltres.map((l) => (
                   <option key={l.delivery_fk} value={l.delivery_fk}>
                     {l.nom}
                   </option>
                 ))}
               </select>
+              {lieuIds.length > 0 && <small style={{ color: '#8A8474' }}>{lieuIds.length} sélectionné(s)</small>}
             </Field>
 
             <Field label="Date de création (commande)">
@@ -608,6 +685,8 @@ export default function ApproAchatsPage() {
             </button>
             <button
               onClick={() => {
+                setFournisseurSearch('');
+                setLieuSearch('');
                 setSupplierIds([]);
                 setLieuIds([]);
                 setDateCreationFrom('');
@@ -673,7 +752,7 @@ export default function ApproAchatsPage() {
               <table style={tableStyle}>
                 <thead>
                   <tr>
-                    {['Référence', 'Fournisseur', 'Créée le', 'Lieu de livraison', 'Livraison', 'Facturation', 'Montant HT', 'Montant TTC'].map(
+                    {['Référence', 'Fournisseur', 'Créée le', 'Livraison (fenêtre)', 'Lieu de livraison', 'Livraison', 'Facturation', 'Montant HT', 'Montant TTC'].map(
                       (h) => (
                         <th key={h} style={thStyle}>
                           {h}
@@ -684,10 +763,23 @@ export default function ApproAchatsPage() {
                 </thead>
                 <tbody>
                   {rowsEntete.map((r) => (
-                    <tr key={r.id}>
-                      <td style={tdStyle}>{r.reference}</td>
+                    <tr key={r.id} onClick={() => setDetailCdfId(r.id)} style={{ cursor: 'pointer' }}>
+                      <td style={{ ...tdStyle, color: COLORS.violet, fontWeight: 600 }}>{r.reference}</td>
                       <td style={tdStyle}>{r.nom_fournisseur}</td>
                       <td style={tdStyle}>{fmtDate(r.order_date)}</td>
+                      <td style={tdStyle}>
+                        {r.date_livraison_min ? (
+                          r.date_livraison_min === r.date_livraison_max ? (
+                            fmtDate(r.date_livraison_min)
+                          ) : (
+                            <>
+                              {fmtDate(r.date_livraison_min)} → {fmtDate(r.date_livraison_max)}
+                            </>
+                          )
+                        ) : (
+                          '—'
+                        )}
+                      </td>
                       <td style={tdStyle}>{r.lieu_livraison_nom}</td>
                       <td style={tdStyle}>
                         <Tag label={r.tag_livraison} />
@@ -701,7 +793,7 @@ export default function ApproAchatsPage() {
                   ))}
                   {!loading && rowsEntete.length === 0 && (
                     <tr>
-                      <td colSpan={8} style={{ ...tdStyle, textAlign: 'center', color: '#8A8474' }}>
+                      <td colSpan={9} style={{ ...tdStyle, textAlign: 'center', color: '#8A8474' }}>
                         Aucune commande ne correspond à ces filtres.
                       </td>
                     </tr>
@@ -712,7 +804,7 @@ export default function ApproAchatsPage() {
               <table style={tableStyle}>
                 <thead>
                   <tr>
-                    {['CDF', 'Article', 'Désignation', 'Commentaire', 'Qté', 'PU', 'Total TTC', 'Livr. demandée', 'Livr. réelle', 'Livraison', 'Facturation'].map(
+                    {['CDF', 'Article', 'Désignation', 'Commentaire', 'Qté', 'PU', 'Total TTC', 'Livraison', 'Livraison (statut)', 'Facturation'].map(
                       (h) => (
                         <th key={h} style={thStyle}>
                           {h}
@@ -723,16 +815,15 @@ export default function ApproAchatsPage() {
                 </thead>
                 <tbody>
                   {rowsLignes.map((r) => (
-                    <tr key={r.id}>
-                      <td style={tdStyle}>{r.cdf_reference}</td>
+                    <tr key={r.id} onClick={() => setDetailCdfId(r.cdf_id)} style={{ cursor: 'pointer' }}>
+                      <td style={{ ...tdStyle, color: COLORS.violet, fontWeight: 600 }}>{r.cdf_reference}</td>
                       <td style={tdStyle}>{r.article_reference}</td>
                       <td style={tdStyle}>{r.article_label ?? r.commentaire}</td>
                       <td style={tdStyle}>{r.commentaire}</td>
                       <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtNum(r.quantite)}</td>
                       <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtEUR(r.prix_unitaire)}</td>
                       <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtEUR(r.total_ttc)}</td>
-                      <td style={tdStyle}>{fmtDate(r.date_livraison_demandee)}</td>
-                      <td style={tdStyle}>{fmtDate(r.date_livraison_reelle)}</td>
+                      <td style={tdStyle}>{fmtDate(r.date_livraison)}</td>
                       <td style={tdStyle}>
                         <Tag label={r.tag_livraison_ligne} />
                       </td>
@@ -743,7 +834,7 @@ export default function ApproAchatsPage() {
                   ))}
                   {!loading && rowsLignes.length === 0 && (
                     <tr>
-                      <td colSpan={11} style={{ ...tdStyle, textAlign: 'center', color: '#8A8474' }}>
+                      <td colSpan={10} style={{ ...tdStyle, textAlign: 'center', color: '#8A8474' }}>
                         Aucune ligne ne correspond à ces filtres.
                       </td>
                     </tr>
@@ -810,6 +901,256 @@ export default function ApproAchatsPage() {
             </div>
           </section>
         )}
+      </div>
+
+      {detailCdfId != null && <CdfDetailModal cdfId={detailCdfId} onClose={() => setDetailCdfId(null)} />}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------
+// Fiche détail d'une commande (modal) : entête + lignes + BL + factures
+// ---------------------------------------------------------------------
+function CdfDetailModal({ cdfId, onClose }: { cdfId: number; onClose: () => void }) {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [entete, setEntete] = useState<CdfEntete | null>(null);
+  const [lignes, setLignes] = useState<CdfLigne[]>([]);
+  const [bls, setBls] = useState<BlLigne[]>([]);
+  const [factures, setFactures] = useState<FafLigne[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const [{ data: e, error: eErr }, { data: l, error: lErr }, { data: b, error: bErr }, { data: f, error: fErr }] = await Promise.all([
+          supabase.from('v_appro_cdf_entete').select('*').eq('id', cdfId).single(),
+          supabase.from('v_appro_cdf_lignes').select('*').eq('cdf_id', cdfId).order('id'),
+          supabase.from('v_appro_bl').select('*').eq('cdf_id', cdfId).order('date_reception'),
+          supabase.from('v_appro_faf_lignes').select('*').eq('cdf_id', cdfId).order('faf_invoice_date'),
+        ]);
+        if (cancelled) return;
+        if (eErr) throw eErr;
+        if (lErr) throw lErr;
+        if (bErr) throw bErr;
+        if (fErr) throw fErr;
+        setEntete(e as CdfEntete);
+        setLignes(l ?? []);
+        setBls(b ?? []);
+        setFactures(f ?? []);
+      } catch (e: any) {
+        if (!cancelled) setError(e?.message ?? 'Erreur de chargement.');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [cdfId]);
+
+  // regroupe les factures par n° de facture pour l'affichage
+  const facturesGroupees = useMemo(() => {
+    const map = new Map<string, FafLigne[]>();
+    factures.forEach((f) => {
+      if (!map.has(f.faf_reference)) map.set(f.faf_reference, []);
+      map.get(f.faf_reference)!.push(f);
+    });
+    return [...map.entries()];
+  }, [factures]);
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(11,18,32,0.55)',
+        display: 'flex',
+        alignItems: 'flex-start',
+        justifyContent: 'center',
+        padding: '5vh 24px',
+        zIndex: 1000,
+        overflowY: 'auto',
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: COLORS.creme,
+          borderRadius: 12,
+          width: '100%',
+          maxWidth: 1100,
+          maxHeight: '90vh',
+          overflowY: 'auto',
+          boxShadow: '0 20px 60px rgba(0,0,0,0.35)',
+        }}
+      >
+        <div
+          style={{
+            position: 'sticky',
+            top: 0,
+            background: COLORS.marine,
+            color: COLORS.creme,
+            padding: '16px 24px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            borderRadius: '12px 12px 0 0',
+          }}
+        >
+          <div>
+            <div style={{ fontFamily: '"Space Grotesk", sans-serif', fontSize: 20, fontWeight: 600 }}>
+              {entete?.reference ?? `Commande #${cdfId}`}
+            </div>
+            {entete && (
+              <div style={{ fontSize: 13, opacity: 0.75 }}>
+                {entete.nom_fournisseur} · créée le {fmtDate(entete.order_date)} · {entete.lieu_livraison_nom}
+              </div>
+            )}
+          </div>
+          <button
+            onClick={onClose}
+            style={{ background: 'transparent', border: 'none', color: COLORS.creme, fontSize: 22, cursor: 'pointer', lineHeight: 1 }}
+            aria-label="Fermer"
+          >
+            ×
+          </button>
+        </div>
+
+        <div style={{ padding: 24 }}>
+          {loading && <p style={{ color: '#8A8474' }}>Chargement…</p>}
+          {error && (
+            <div style={{ background: '#FBEAE2', border: `1px solid ${COLORS.alerte}`, color: '#8A3F1E', padding: 12, borderRadius: 8, marginBottom: 16 }}>
+              {error}
+            </div>
+          )}
+
+          {!loading && entete && (
+            <>
+              {/* KPIs entête */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10, marginBottom: 24 }}>
+                <Kpi label="Montant HT" value={fmtEUR(entete.montant_ht)} />
+                <Kpi label="Montant TTC" value={fmtEUR(entete.montant_ttc)} />
+                <Kpi label="Livraison" value={entete.tag_livraison} accent={COLORS.sauge} />
+                <Kpi label="Facturation" value={entete.tag_facturation} accent={COLORS.sauge} />
+              </div>
+
+              {/* Lignes de commande */}
+              <h3 style={sectionTitleStyle}>Lignes de commande ({lignes.length})</h3>
+              <div style={{ overflowX: 'auto', marginBottom: 28 }}>
+                <table style={tableStyle}>
+                  <thead>
+                    <tr>
+                      {['Article', 'Désignation', 'Commentaire', 'Qté', 'PU', 'Total TTC', 'Livraison', 'Facturation'].map((h) => (
+                        <th key={h} style={thStyleSm}>
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {lignes.map((l) => (
+                      <tr key={l.id}>
+                        <td style={tdStyleSm}>{l.article_reference}</td>
+                        <td style={tdStyleSm}>{l.article_label}</td>
+                        <td style={tdStyleSm}>{l.commentaire}</td>
+                        <td style={{ ...tdStyleSm, textAlign: 'right' }}>{fmtNum(l.quantite)}</td>
+                        <td style={{ ...tdStyleSm, textAlign: 'right' }}>{fmtEUR(l.prix_unitaire)}</td>
+                        <td style={{ ...tdStyleSm, textAlign: 'right' }}>{fmtEUR(l.total_ttc)}</td>
+                        <td style={tdStyleSm}>
+                          <Tag label={l.tag_livraison_ligne} />
+                        </td>
+                        <td style={tdStyleSm}>
+                          <Tag label={l.tag_facturation_ligne} />
+                        </td>
+                      </tr>
+                    ))}
+                    {lignes.length === 0 && (
+                      <tr>
+                        <td colSpan={8} style={{ ...tdStyleSm, textAlign: 'center', color: '#8A8474' }}>
+                          Aucune ligne.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Bons de livraison */}
+              <h3 style={sectionTitleStyle}>Bons de livraison ({new Set(bls.map((b) => b.bl_id)).size})</h3>
+              <div style={{ overflowX: 'auto', marginBottom: 28 }}>
+                <table style={tableStyle}>
+                  <thead>
+                    <tr>
+                      {['BL', 'Date réception', 'Article', 'Qté reçue'].map((h) => (
+                        <th key={h} style={thStyleSm}>
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {bls.map((b) => (
+                      <tr key={b.bl_ligne_id ?? `${b.bl_id}-${b.article_reference}`}>
+                        <td style={{ ...tdStyleSm, color: COLORS.violet, fontWeight: 600 }}>{b.bl_reference}</td>
+                        <td style={tdStyleSm}>{fmtDate(b.date_reception)}</td>
+                        <td style={tdStyleSm}>{b.article_reference}</td>
+                        <td style={{ ...tdStyleSm, textAlign: 'right' }}>{fmtNum(b.quantite_recue)}</td>
+                      </tr>
+                    ))}
+                    {bls.length === 0 && (
+                      <tr>
+                        <td colSpan={4} style={{ ...tdStyleSm, textAlign: 'center', color: '#8A8474' }}>
+                          Aucun bon de livraison.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Factures */}
+              <h3 style={sectionTitleStyle}>Factures fournisseur ({facturesGroupees.length})</h3>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={tableStyle}>
+                  <thead>
+                    <tr>
+                      {['Facture', 'Date', 'Article', 'Qté', 'Total TTC ligne', 'Total facture'].map((h) => (
+                        <th key={h} style={thStyleSm}>
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {facturesGroupees.map(([ref, ligs]) =>
+                      ligs.map((f, idx) => (
+                        <tr key={f.faf_id + '-' + idx}>
+                          <td style={{ ...tdStyleSm, color: COLORS.violet, fontWeight: 600 }}>{idx === 0 ? ref : ''}</td>
+                          <td style={tdStyleSm}>{idx === 0 ? fmtDate(f.faf_invoice_date) : ''}</td>
+                          <td style={tdStyleSm}>{f.article_reference}</td>
+                          <td style={{ ...tdStyleSm, textAlign: 'right' }}>{fmtNum(f.quantite)}</td>
+                          <td style={{ ...tdStyleSm, textAlign: 'right' }}>{fmtEUR(f.total_ttc)}</td>
+                          <td style={{ ...tdStyleSm, textAlign: 'right' }}>{idx === 0 ? fmtEUR(f.faf_montant_ttc) : ''}</td>
+                        </tr>
+                      ))
+                    )}
+                    {facturesGroupees.length === 0 && (
+                      <tr>
+                        <td colSpan={6} style={{ ...tdStyleSm, textAlign: 'center', color: '#8A8474' }}>
+                          Aucune facture.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -898,6 +1239,8 @@ const selectStyle: React.CSSProperties = {
   padding: 6,
   fontSize: 13,
   fontFamily: 'inherit',
+  width: '100%',
+  boxSizing: 'border-box',
 };
 
 const inputStyle: React.CSSProperties = {
@@ -907,6 +1250,7 @@ const inputStyle: React.CSSProperties = {
   fontSize: 13,
   fontFamily: 'inherit',
   width: '100%',
+  boxSizing: 'border-box',
 };
 
 const primaryButtonStyle: React.CSSProperties = {
@@ -962,4 +1306,15 @@ const tdStyle: React.CSSProperties = {
   padding: '9px 14px',
   borderBottom: `1px solid ${COLORS.ligne}`,
   whiteSpace: 'nowrap',
+};
+
+const thStyleSm: React.CSSProperties = { ...thStyle, padding: '7px 10px', fontSize: 12 };
+const tdStyleSm: React.CSSProperties = { ...tdStyle, padding: '6px 10px', fontSize: 12.5 };
+
+const sectionTitleStyle: React.CSSProperties = {
+  fontFamily: '"Space Grotesk", sans-serif',
+  fontSize: 15,
+  fontWeight: 600,
+  marginBottom: 8,
+  marginTop: 0,
 };
