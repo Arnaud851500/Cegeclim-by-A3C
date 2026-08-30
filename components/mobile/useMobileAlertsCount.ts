@@ -19,11 +19,12 @@ import type { AlertDetailItem } from './MobileAlertes'
  * uniquement si le droit correspondant (show_alert_*) est activé pour le
  * profil de l'utilisateur — exactement comme le bandeau du haut côté PC.
  *
- * AJOUT (2026-08-30) : signal "Cohérence données" (show_alert_data_coherence),
- * même table de statut que le desktop (data_coherence_alert_status, déjà
- * tenue à jour par cron + hook de synchro Sage côté base -- simple lecture
- * ici, aucun recalcul). Pas de filtrage périmètre : c'est un statut global,
- * identique pour tout le monde, comme côté desktop.
+ * AJOUT (2026-08-30) : signal "Cohérence données" (show_alert_data_coherence,
+ * désormais déclaré nativement dans AccessContext.tsx), même table de
+ * statut que le desktop (data_coherence_alert_status, déjà tenue à jour
+ * par cron + hook de synchro Sage côté base -- simple lecture ici, aucun
+ * recalcul). Pas de filtrage périmètre : c'est un statut global, identique
+ * pour tout le monde, comme côté desktop.
  *
  * CORRECTIF (25/08) : CDC < 2026 et Capacité gaz appliquent désormais le
  * même filtrage périmètre que le desktop -- allowed_agences ET
@@ -240,7 +241,7 @@ export function useMobileAlertsCount() {
           }
         }
 
-        if (Boolean((rights as any).show_alert_data_coherence)) {
+        if (rights.show_alert_data_coherence) {
           // Simple lecture du statut singleton -- déjà tenu à jour côté
           // base (cron horaire + hook de fin de synchro Sage), aucun
           // recalcul ici. Pas de filtrage périmètre : statut global,
@@ -291,7 +292,7 @@ export function useMobileAlertsCount() {
     rights.show_alert_cdc_liv_avant_2026,
     rights.show_alert_controle_frais_port,
     rights.show_alert_capacite_gaz,
-    Boolean((rights as any).show_alert_data_coherence),
+    rights.show_alert_data_coherence,
     pathname,
   ])
 

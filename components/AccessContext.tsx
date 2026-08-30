@@ -33,6 +33,7 @@ export type AccessRights = {
   show_alert_controle_frais_port: boolean
   show_alert_capacite_gaz: boolean
   show_alert_todo: boolean
+  show_alert_data_coherence: boolean
 }
 
 type AccessContextType = {
@@ -78,6 +79,7 @@ type AccessProfileRow = {
   show_alert_controle_frais_port?: boolean | null
   show_alert_capacite_gaz?: boolean | null
   show_alert_todo?: boolean | null
+  show_alert_data_coherence?: boolean | null
 }
 
 function normalizeList(value: unknown, fallback: string[] = []): string[] {
@@ -145,6 +147,7 @@ export const defaultRights: AccessRights = {
   show_alert_controle_frais_port: false,
   show_alert_capacite_gaz: false,
   show_alert_todo: false,
+  show_alert_data_coherence: false,
 }
 
 const AccessContext = createContext<AccessContextType>({
@@ -291,7 +294,8 @@ async function fetchAccess(): Promise<{ email: string | null; rights: AccessRigh
         show_alert_cdc_liv_avant_2026,
         show_alert_controle_frais_port,
         show_alert_capacite_gaz,
-        show_alert_todo
+        show_alert_todo,
+        show_alert_data_coherence
       `)
       .eq('id', profileId)
       .maybeSingle()
@@ -365,6 +369,7 @@ async function fetchAccess(): Promise<{ email: string | null; rights: AccessRigh
         show_alert_controle_frais_port: !!profile.show_alert_controle_frais_port,
         show_alert_capacite_gaz: !!profile.show_alert_capacite_gaz,
         show_alert_todo: !!profile.show_alert_todo,
+        show_alert_data_coherence: !!profile.show_alert_data_coherence,
       },
     }
   } catch (error) {

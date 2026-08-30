@@ -395,13 +395,9 @@ function AppShell({ children }: { children: React.ReactNode }) {
 
   const isPublicShellPage = isLoginPage || isPdfPrintPage
 
-  // FIX (2026-08) : nouveau droit `show_alert_data_coherence`, pas encore
-  // déclaré dans le type AccessRights de @/components/AccessContext au
-  // moment de cet ajout -- accès via un cast pour ne pas casser la build en
-  // attendant la mise à jour de ce fichier (ajouter le champ boolean dans
-  // AccessRights + dans la requête qui construit `rights`). Une fois fait,
-  // ce cast peut être retiré et remplacé par rights.show_alert_data_coherence.
-  const showDataCoherence = Boolean((rights as any).show_alert_data_coherence)
+  // AccessContext.tsx expose désormais show_alert_data_coherence
+  // nativement (ajouté le 2026-08-30) -- plus besoin de cast.
+  const showDataCoherence = rights.show_alert_data_coherence
 
   const hasVisibleStatusLights =
     rights.show_alert_cerfa_ko ||
