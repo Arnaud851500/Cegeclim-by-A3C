@@ -1,12 +1,12 @@
-'use client';
+ 'use client';
 
 /**
  * Page "Appro / Achats"
  * ---------------------------------------------------------------------
- * Écran de pilotage des commandes fournisseurs (BLG), avec filtres
- * multi-dimension, KPIs agrégés côté serveur (RPC Postgres), une fiche
- * détail par commande (lignes + BL + factures) et export Excel
- * multi-onglets.
+ * Écran de pilotage des commandes fournisseurs (BLG) : filtres
+ * multi-dimension, KPIs agrégés (dont répartition par statut livraison/
+ * facturation), fiche détail par commande (lignes + BL + factures) et
+ * export Excel multi-onglets.
  *
  * Dépend des objets Supabase créés dans le projet gchwihltydsplarhveyv :
  *   - vues : v_appro_cdf_entete, v_appro_cdf_lignes, v_appro_bl,
@@ -21,17 +21,19 @@
  *
  * Limites de données connues (documentées ici pour ne pas les redécouvrir) :
  *   - sale_quote.created_at est réécrit par BLG à chaque resynchro du
- *     document -> tous les filtres/délais de "date de création" utilisent
- *     order_date (date métier stable), pas created_at.
- *   - sale_quote.delivery_date_required (date de livraison demandée) n'est
- *     renseignée que sur 4 CDF / 31286 dans BLG -> inexploitable. On
- *     affiche à la place date_livraison_min/max, agrégées depuis
- *     sale_quote_line.delivery_date_actual (renseignée sur ~54% des lignes),
- *     ce qui reflète la fenêtre de livraison réelle/en cours de la commande.
- *   - la notion d'"AR fournisseur" vue dans l'historique BLG n'est pas un
- *     champ mirroré (c'est un événement d'historique BLG, pas une colonne).
- *     Le délai "création -> AR" est donc approximé par "création -> 1ère
- *     réception (BL)".
+ *     document -> tous les filtres/délais "date de création" utilisent
+ *     order_date (date métier stable), jamais created_at.
+ *   - sale_quote.delivery_date_required / sale_quote_line.delivery_date_required
+ *     ("date de livraison demandée") ne sont renseignées quasiment jamais
+ *     côté BLG (4 CDF / 31286, 5 lignes / 216108) -> colonne affichée mais
+ *     attendez-vous à "—" presque partout ; la "fenêtre de livraison"
+ *     (date_livraison_min/max côté entête) utilise à la place les dates
+ *     réelles des lignes (delivery_date_actual), bien plus renseignées.
+ *   - il n'existe AUCUN champ "AR fournisseur" mirroré depuis BLG (ni sur
+ *     la commande, ni sur la ligne) : l'AR est un évènement de l'historique
+ *     BLG, pas une colonne de la base. Le délai "création -> AR" est donc
+ *     approximé par "création -> 1ère réception (BL)" ; à la ligne, aucune
+ *     date d'AR n'est disponible, c'est explicitement indiqué dans l'UI.
  * ---------------------------------------------------------------------
  */
 
@@ -63,6 +65,12 @@ type Kpis = {
   nb_lignes: number;
   valeur_achat_ht: number;
   valeur_achat_ttc: number;
+  valeur_ht_livree: number;
+  valeur_ht_livree_partielle: number;
+  valeur_ht_non_livree: number;
+  valeur_ht_facturee: number;
+  valeur_ht_facturee_partielle: number;
+  valeur_ht_non_facturee: number;
   delai_moyen_creation_bl_jours: number | null;
   delai_moyen_creation_facture_jours: number | null;
 };
@@ -75,6 +83,12 @@ type SyntheseFournisseur = {
   nb_lignes: number;
   valeur_achat_ht: number;
   valeur_achat_ttc: number;
+  valeur_ht_livree: number;
+  valeur_ht_livree_partielle: number;
+  valeur_ht_non_livree: number;
+  valeur_ht_facturee: number;
+  valeur_ht_facturee_partielle: number;
+  valeur_ht_non_facturee: number;
   delai_moyen_creation_bl_jours: number | null;
   delai_moyen_creation_facture_jours: number | null;
 };
@@ -111,10 +125,18 @@ type CdfLigne = {
   article_reference: string | null;
   article_label: string | null;
   commentaire: string | null;
+  ligne_created_at: string | null;
+  date_livraison_demandee: string | null;
+  date_livraison: string | null;
+  delai_creation_livraison_jours: number | null;
   quantite: number | null;
+  quantite_commandee: number | null;
+  quantite_ral: number | null;
+  quantite_livree: number | null;
+  quantite_facturee: number | null;
+  quantite_a_facturer: number | null;
   prix_unitaire: number | null;
   total_ttc: number | null;
-  date_livraison: string | null;
   statut_livraison_code: string;
   tag_livraison_ligne: string;
   statut_facturation_code: string;
@@ -189,6 +211,7 @@ export default function ApproAchatsPage() {
   const [lieuSearch, setLieuSearch] = useState('');
   const [supplierIds, setSupplierIds] = useState<number[]>([]);
   const [lieuIds, setLieuIds] = useState<number[]>([]);
+  const [cdfReference, setCdfReference] = useState('');
   const [dateCreationFrom, setDateCreationFrom] = useState('');
   const [dateCreationTo, setDateCreationTo] = useState('');
   const [dateLivraisonFrom, setDateLivraisonFrom] = useState('');
@@ -211,6 +234,10 @@ export default function ApproAchatsPage() {
 
   // --- fiche détail (modal) ---
   const [detailCdfId, setDetailCdfId] = useState<number | null>(null);
+
+  // --- graphe fréquence des commandes par fournisseur ---
+  const [chartSupplierSearch, setChartSupplierSearch] = useState('');
+  const [chartSupplierIds, setChartSupplierIds] = useState<number[]>([]);
 
   // -------------------------------------------------------------
   // Chargement des options de filtre (une fois)
@@ -240,8 +267,31 @@ export default function ApproAchatsPage() {
     return lieuOptions.filter((l) => norm(l.nom).includes(q));
   }, [lieuOptions, lieuSearch]);
 
+  const chartSupplierOptionsFiltres = useMemo(() => {
+    if (!chartSupplierSearch.trim()) return fournisseurOptions;
+    const q = norm(chartSupplierSearch);
+    return fournisseurOptions.filter((f) => norm(`${f.code} ${f.nom}`).includes(q));
+  }, [fournisseurOptions, chartSupplierSearch]);
+
+  // Données du graphe : fournisseurs cochés dans le filtre dédié, sinon
+  // top 15 par nombre de commandes — toujours dans le périmètre des
+  // filtres globaux (dates, statuts, article…) puisque syntheseFournisseurs
+  // en découle déjà.
+  const donneesFrequence = useMemo(() => {
+    const base =
+      chartSupplierIds.length > 0
+        ? syntheseFournisseurs.filter((f) => chartSupplierIds.includes(f.supplier_id))
+        : syntheseFournisseurs;
+    return [...base].sort((a, b) => b.nb_commandes - a.nb_commandes).slice(0, chartSupplierIds.length > 0 ? undefined : 15);
+  }, [syntheseFournisseurs, chartSupplierIds]);
+
+  const maxNbCommandesFrequence = useMemo(
+    () => Math.max(1, ...donneesFrequence.map((f) => f.nb_commandes)),
+    [donneesFrequence]
+  );
+
   // -------------------------------------------------------------
-  // Construction des paramètres de filtre (partagés KPI / synthèse)
+  // Paramètres RPC partagés (KPI / synthèse fournisseurs)
   // -------------------------------------------------------------
   const rpcParams = useMemo(
     () => ({
@@ -254,6 +304,7 @@ export default function ApproAchatsPage() {
       p_invoice_status: statutsFacturation.length ? statutsFacturation : null,
       p_delivery_fk_ids: lieuIds.length ? lieuIds : null,
       p_article_reference: articleReference.trim() || null,
+      p_cdf_reference: cdfReference.trim() || null,
     }),
     [
       supplierIds,
@@ -265,14 +316,15 @@ export default function ApproAchatsPage() {
       statutsFacturation,
       lieuIds,
       articleReference,
+      cdfReference,
     ]
   );
 
   // -------------------------------------------------------------
   // Applique un filtre commun sur une query supabase-js pointant vers
-  // une des deux vues (entête ou lignes) — colonnes désormais alignées
-  // entre les deux vues (supplier_fk, delivery_fk, order_date, statuts
-  // en code brut) donc le même filtre s'applique aux deux.
+  // une des deux vues (entête ou lignes) — colonnes alignées entre les
+  // deux vues (supplier_fk, delivery_fk, order_date/cdf_order_date,
+  // statuts en code brut) donc le même filtre s'applique aux deux.
   // -------------------------------------------------------------
   const applyCommonFilters = useCallback(
     (query: any, kind: 'entete' | 'lignes') => {
@@ -293,9 +345,23 @@ export default function ApproAchatsPage() {
         if (dateLivraisonTo) q = q.lte('date_livraison', dateLivraisonTo);
         if (articleReference.trim()) q = q.ilike('article_reference', `%${articleReference.trim()}%`);
       }
+      if (cdfReference.trim()) {
+        q = q.ilike(kind === 'entete' ? 'reference' : 'cdf_reference', `%${cdfReference.trim()}%`);
+      }
       return q;
     },
-    [supplierIds, lieuIds, dateCreationFrom, dateCreationTo, statutsLivraison, statutsFacturation, dateLivraisonFrom, dateLivraisonTo, articleReference]
+    [
+      supplierIds,
+      lieuIds,
+      dateCreationFrom,
+      dateCreationTo,
+      statutsLivraison,
+      statutsFacturation,
+      dateLivraisonFrom,
+      dateLivraisonTo,
+      articleReference,
+      cdfReference,
+    ]
   );
 
   // -------------------------------------------------------------
@@ -315,6 +381,7 @@ export default function ApproAchatsPage() {
           p_invoice_status: rpcParams.p_invoice_status,
           p_delivery_fk_ids: rpcParams.p_delivery_fk_ids,
           p_article_reference: rpcParams.p_article_reference,
+          p_cdf_reference: rpcParams.p_cdf_reference,
         }),
       ]);
       if (kpiErr) throw kpiErr;
@@ -398,13 +465,19 @@ export default function ApproAchatsPage() {
       const ws1 = wb.addWorksheet('Synthèse multi-fournisseurs');
       ws1.columns = [
         { header: 'Code', key: 'code', width: 12 },
-        { header: 'Fournisseur', key: 'nom', width: 32 },
-        { header: 'Nb commandes', key: 'nb_cdf', width: 14 },
-        { header: 'Nb lignes', key: 'nb_lignes', width: 12 },
-        { header: 'Valeur achat HT', key: 'ht', width: 16, style: { numFmt: '#,##0 €' } },
-        { header: 'Valeur achat TTC', key: 'ttc', width: 16, style: { numFmt: '#,##0 €' } },
-        { header: 'Délai moyen création → BL (j)', key: 'delai_bl', width: 20 },
-        { header: 'Délai moyen création → facture (j)', key: 'delai_fact', width: 22 },
+        { header: 'Fournisseur', key: 'nom', width: 30 },
+        { header: 'Nb commandes', key: 'nb_cdf', width: 13 },
+        { header: 'Nb lignes', key: 'nb_lignes', width: 11 },
+        { header: 'Valeur achat HT', key: 'ht', width: 15, style: { numFmt: '#,##0 €' } },
+        { header: 'Valeur achat TTC', key: 'ttc', width: 15, style: { numFmt: '#,##0 €' } },
+        { header: 'dont HT Livrée', key: 'ht_livree', width: 14, style: { numFmt: '#,##0 €' } },
+        { header: 'dont HT Livrée part.', key: 'ht_livree_part', width: 16, style: { numFmt: '#,##0 €' } },
+        { header: 'dont HT Non livrée', key: 'ht_non_livree', width: 16, style: { numFmt: '#,##0 €' } },
+        { header: 'dont HT Facturée', key: 'ht_facturee', width: 14, style: { numFmt: '#,##0 €' } },
+        { header: 'dont HT Facturée part.', key: 'ht_facturee_part', width: 17, style: { numFmt: '#,##0 €' } },
+        { header: 'dont HT Non facturée', key: 'ht_non_facturee', width: 17, style: { numFmt: '#,##0 €' } },
+        { header: 'Délai moy. création→BL (j)', key: 'delai_bl', width: 18 },
+        { header: 'Délai moy. création→facture (j)', key: 'delai_fact', width: 20 },
       ];
       styleHeaderRow(ws1.getRow(1));
       syntheseFournisseurs.forEach((f) => {
@@ -415,20 +488,33 @@ export default function ApproAchatsPage() {
           nb_lignes: f.nb_lignes,
           ht: f.valeur_achat_ht,
           ttc: f.valeur_achat_ttc,
+          ht_livree: f.valeur_ht_livree,
+          ht_livree_part: f.valeur_ht_livree_partielle,
+          ht_non_livree: f.valeur_ht_non_livree,
+          ht_facturee: f.valeur_ht_facturee,
+          ht_facturee_part: f.valeur_ht_facturee_partielle,
+          ht_non_facturee: f.valeur_ht_non_facturee,
           delai_bl: f.delai_moyen_creation_bl_jours,
           delai_fact: f.delai_moyen_creation_facture_jours,
         });
       });
+      const sum = (fn: (f: SyntheseFournisseur) => number) => syntheseFournisseurs.reduce((s, f) => s + fn(f), 0);
       const totalRow1 = ws1.addRow({
         nom: 'TOTAL',
-        nb_cdf: syntheseFournisseurs.reduce((s, f) => s + f.nb_commandes, 0),
-        nb_lignes: syntheseFournisseurs.reduce((s, f) => s + f.nb_lignes, 0),
-        ht: syntheseFournisseurs.reduce((s, f) => s + f.valeur_achat_ht, 0),
-        ttc: syntheseFournisseurs.reduce((s, f) => s + f.valeur_achat_ttc, 0),
+        nb_cdf: sum((f) => f.nb_commandes),
+        nb_lignes: sum((f) => f.nb_lignes),
+        ht: sum((f) => f.valeur_achat_ht),
+        ttc: sum((f) => f.valeur_achat_ttc),
+        ht_livree: sum((f) => f.valeur_ht_livree),
+        ht_livree_part: sum((f) => f.valeur_ht_livree_partielle),
+        ht_non_livree: sum((f) => f.valeur_ht_non_livree),
+        ht_facturee: sum((f) => f.valeur_ht_facturee),
+        ht_facturee_part: sum((f) => f.valeur_ht_facturee_partielle),
+        ht_non_facturee: sum((f) => f.valeur_ht_non_facturee),
       });
       totalRow1.font = { bold: true };
       totalRow1.eachCell((c) => (c.fill = SUBTOTAL_FILL));
-      ws1.autoFilter = { from: 'A1', to: 'H1' };
+      ws1.autoFilter = { from: 'A1', to: 'N1' };
       ws1.views = [{ state: 'frozen', ySplit: 1 }];
 
       // ---- Onglet 2 : Synthèse par fournisseur (groupée, avec sous-totaux) ----
@@ -507,22 +593,70 @@ export default function ApproAchatsPage() {
         ws3.columns = [
           { header: 'Référence CDF', key: 'cdf_reference', width: 16 },
           { header: 'Article', key: 'article_reference', width: 18 },
-          { header: 'Désignation', key: 'article_label', width: 32 },
-          { header: 'Commentaire', key: 'commentaire', width: 28 },
-          { header: 'Quantité', key: 'quantite', width: 10 },
-          { header: 'PU', key: 'prix_unitaire', width: 12, style: { numFmt: '#,##0.00 €' } },
-          { header: 'Total TTC', key: 'total_ttc', width: 14, style: { numFmt: '#,##0 €' } },
-          { header: 'Livraison', key: 'date_livraison', width: 16 },
-          { header: 'Statut livraison', key: 'tag_livraison_ligne', width: 16 },
-          { header: 'Statut facturation', key: 'tag_facturation_ligne', width: 18 },
+          { header: 'Désignation', key: 'article_label', width: 30 },
+          { header: 'Commentaire', key: 'commentaire', width: 26 },
+          { header: 'Créée le (ligne)', key: 'ligne_created_at', width: 14 },
+          { header: 'Livraison demandée', key: 'date_livraison_demandee', width: 16 },
+          { header: 'Livraison réelle', key: 'date_livraison', width: 14 },
+          { header: 'Délai création→livraison (j)', key: 'delai_creation_livraison_jours', width: 18 },
+          { header: 'Qté commandée', key: 'quantite_commandee', width: 13 },
+          { header: 'Qté RAL', key: 'quantite_ral', width: 10 },
+          { header: 'Qté livrée', key: 'quantite_livree', width: 10 },
+          { header: 'Qté facturée', key: 'quantite_facturee', width: 11 },
+          { header: 'PU', key: 'prix_unitaire', width: 11, style: { numFmt: '#,##0.00 €' } },
+          { header: 'Total TTC', key: 'total_ttc', width: 13, style: { numFmt: '#,##0 €' } },
+          { header: 'Statut livraison', key: 'tag_livraison_ligne', width: 15 },
+          { header: 'Statut facturation', key: 'tag_facturation_ligne', width: 16 },
         ];
         styleHeaderRow(ws3.getRow(1));
         (detailData as CdfLigne[]).forEach((r) =>
-          ws3.addRow({ ...r, date_livraison: fmtDate(r.date_livraison) })
+          ws3.addRow({
+            ...r,
+            ligne_created_at: fmtDate(r.ligne_created_at),
+            date_livraison_demandee: fmtDate(r.date_livraison_demandee),
+            date_livraison: fmtDate(r.date_livraison),
+          })
         );
       }
       ws3.autoFilter = { from: 'A1', to: `${String.fromCharCode(64 + ws3.columns.length)}1` };
       ws3.views = [{ state: 'frozen', ySplit: 1 }];
+
+      // ---- Onglet 4 : Fréquence commandes par fournisseur (histogramme en barres de données) ----
+      // ExcelJS ne sait pas créer de graphique natif Excel ; la mise en
+      // forme conditionnelle "data bar" donne un rendu histogramme
+      // directement dans les cellules, lisible sans dépendance externe.
+      const ws4 = wb.addWorksheet('Fréquence commandes');
+      ws4.columns = [
+        { header: 'Code', key: 'code', width: 12 },
+        { header: 'Fournisseur', key: 'nom', width: 32 },
+        { header: 'Nb commandes', key: 'nb_cdf', width: 16 },
+      ];
+      styleHeaderRow(ws4.getRow(1));
+      const donneesFreqExport = (chartSupplierIds.length > 0
+        ? syntheseFournisseurs.filter((f) => chartSupplierIds.includes(f.supplier_id))
+        : syntheseFournisseurs
+      ).slice().sort((a, b) => b.nb_commandes - a.nb_commandes);
+      donneesFreqExport.forEach((f) => {
+        ws4.addRow({ code: f.code_fournisseur, nom: f.nom_fournisseur, nb_cdf: f.nb_commandes });
+      });
+      if (donneesFreqExport.length > 0) {
+        ws4.addConditionalFormatting({
+          ref: `C2:C${donneesFreqExport.length + 1}`,
+          rules: [
+            {
+              type: 'dataBar',
+              cfvo: [
+                { type: 'min' },
+                { type: 'max' },
+              ],
+              color: { argb: 'FF7A5EA8' },
+              priority: 1,
+            } as any,
+          ],
+        });
+      }
+      ws4.autoFilter = { from: 'A1', to: 'C1' };
+      ws4.views = [{ state: 'frozen', ySplit: 1 }];
 
       if ((detailData?.length ?? 0) >= EXPORT_MAX_ROWS) {
         const warn = wb.addWorksheet('⚠ Avertissement');
@@ -545,7 +679,7 @@ export default function ApproAchatsPage() {
     } finally {
       setExporting(false);
     }
-  }, [vue, applyCommonFilters, syntheseFournisseurs]);
+  }, [vue, applyCommonFilters, syntheseFournisseurs, chartSupplierIds]);
 
   const totalPages = Math.max(1, Math.ceil(totalRows / PAGE_SIZE));
 
@@ -575,6 +709,16 @@ export default function ApproAchatsPage() {
           }}
         >
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16 }}>
+            <Field label="Référence commande">
+              <input
+                type="text"
+                value={cdfReference}
+                onChange={(e) => setCdfReference(e.target.value)}
+                placeholder="ex. CDF031930"
+                style={inputStyle}
+              />
+            </Field>
+
             <Field label="Fournisseur">
               <input
                 type="text"
@@ -596,9 +740,7 @@ export default function ApproAchatsPage() {
                   </option>
                 ))}
               </select>
-              {supplierIds.length > 0 && (
-                <small style={{ color: '#8A8474' }}>{supplierIds.length} sélectionné(s)</small>
-              )}
+              {supplierIds.length > 0 && <small style={{ color: '#8A8474' }}>{supplierIds.length} sélectionné(s)</small>}
             </Field>
 
             <Field label="Lieu de livraison">
@@ -685,6 +827,7 @@ export default function ApproAchatsPage() {
             </button>
             <button
               onClick={() => {
+                setCdfReference('');
                 setFournisseurSearch('');
                 setLieuSearch('');
                 setSupplierIds([]);
@@ -715,14 +858,121 @@ export default function ApproAchatsPage() {
           </div>
         )}
 
-        {/* ---------------- KPIs ---------------- */}
-        <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 14, marginBottom: 24 }}>
+        {/* ---------------- KPIs globaux ---------------- */}
+        <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 14, marginBottom: 16 }}>
           <Kpi label="Commandes" value={fmtNum(kpis?.nb_commandes)} />
           <Kpi label="Lignes" value={fmtNum(kpis?.nb_lignes)} />
           <Kpi label="Valeur achat HT" value={fmtEUR(kpis?.valeur_achat_ht)} accent={COLORS.violet} />
           <Kpi label="Valeur achat TTC" value={fmtEUR(kpis?.valeur_achat_ttc)} accent={COLORS.violet} />
           <Kpi label="Délai moyen création → BL" value={fmtJours(kpis?.delai_moyen_creation_bl_jours)} accent={COLORS.sauge} />
           <Kpi label="Délai moyen création → facture" value={fmtJours(kpis?.delai_moyen_creation_facture_jours)} accent={COLORS.sauge} />
+        </section>
+
+        {/* ---------------- KPIs répartition livraison / facturation ---------------- */}
+        <section style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 24 }}>
+          <div>
+            <div style={{ fontSize: 12, color: '#8A8474', marginBottom: 6, fontWeight: 500 }}>Valeur HT — répartition livraison</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10 }}>
+              <Kpi label="Livrée" value={fmtEUR(kpis?.valeur_ht_livree)} accent="#3E7A4E" compact />
+              <Kpi label="Livrée partielle" value={fmtEUR(kpis?.valeur_ht_livree_partielle)} accent={COLORS.alerte} compact />
+              <Kpi label="Non livrée" value={fmtEUR(kpis?.valeur_ht_non_livree)} accent="#B0442E" compact />
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: 12, color: '#8A8474', marginBottom: 6, fontWeight: 500 }}>Valeur HT — répartition facturation</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10 }}>
+              <Kpi label="Facturée" value={fmtEUR(kpis?.valeur_ht_facturee)} accent="#3E7A4E" compact />
+              <Kpi label="Facturée partielle" value={fmtEUR(kpis?.valeur_ht_facturee_partielle)} accent={COLORS.alerte} compact />
+              <Kpi label="Non facturée" value={fmtEUR(kpis?.valeur_ht_non_facturee)} accent="#B0442E" compact />
+            </div>
+          </div>
+        </section>
+
+        {/* ---------------- FRÉQUENCE DES COMMANDES PAR FOURNISSEUR ---------------- */}
+        <section
+          style={{
+            background: COLORS.blanc,
+            border: `1px solid ${COLORS.ligne}`,
+            borderRadius: 10,
+            padding: 20,
+            marginBottom: 24,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 20, flexWrap: 'wrap', marginBottom: 16 }}>
+            <div>
+              <h2 style={{ fontFamily: '"Space Grotesk", sans-serif', fontSize: 18, margin: 0 }}>
+                Fréquence des commandes par fournisseur
+              </h2>
+              <p style={{ fontSize: 12.5, color: '#8A8474', margin: '4px 0 0' }}>
+                Nombre de commandes passées, sur le périmètre des filtres ci-dessus.{' '}
+                {chartSupplierIds.length === 0 && 'Aucun fournisseur sélectionné → top 15 affiché.'}
+              </p>
+            </div>
+            <div style={{ minWidth: 260 }}>
+              <input
+                type="text"
+                value={chartSupplierSearch}
+                onChange={(e) => setChartSupplierSearch(e.target.value)}
+                placeholder="Filtrer les fournisseurs du graphe…"
+                style={{ ...inputStyle, marginBottom: 6 }}
+              />
+              <select
+                multiple
+                size={4}
+                value={chartSupplierIds.map(String)}
+                onChange={(e) => setChartSupplierIds(Array.from(e.target.selectedOptions, (o) => Number(o.value)))}
+                style={selectStyle}
+              >
+                {chartSupplierOptionsFiltres.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.code} — {f.nom}
+                  </option>
+                ))}
+              </select>
+              {chartSupplierIds.length > 0 && (
+                <button
+                  onClick={() => setChartSupplierIds([])}
+                  style={{ ...secondaryButtonStyle, marginTop: 6, padding: '4px 10px', fontSize: 12 }}
+                >
+                  Effacer la sélection ({chartSupplierIds.length})
+                </button>
+              )}
+            </div>
+          </div>
+
+          {donneesFrequence.length === 0 ? (
+            <p style={{ color: '#8A8474', fontSize: 13 }}>Aucune donnée pour ces filtres.</p>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {donneesFrequence.map((f) => (
+                <div key={f.supplier_id} style={{ display: 'grid', gridTemplateColumns: '220px 1fr 60px', alignItems: 'center', gap: 10 }}>
+                  <div
+                    style={{
+                      fontSize: 12.5,
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                    }}
+                    title={`${f.code_fournisseur} — ${f.nom_fournisseur}`}
+                  >
+                    {f.nom_fournisseur}
+                  </div>
+                  <div style={{ background: COLORS.creme, borderRadius: 4, overflow: 'hidden', height: 18 }}>
+                    <div
+                      style={{
+                        width: `${(f.nb_commandes / maxNbCommandesFrequence) * 100}%`,
+                        background: COLORS.violet,
+                        height: '100%',
+                        borderRadius: 4,
+                        minWidth: 2,
+                      }}
+                    />
+                  </div>
+                  <div style={{ fontSize: 12.5, fontWeight: 600, textAlign: 'right' }}>{fmtNum(f.nb_commandes)}</div>
+                </div>
+              ))}
+            </div>
+          )}
         </section>
 
         {/* ---------------- TOGGLE VUE ---------------- */}
@@ -744,6 +994,13 @@ export default function ApproAchatsPage() {
             </button>
           ))}
         </div>
+
+        {vue === 'lignes' && (
+          <p style={{ fontSize: 12.5, color: '#8A8474', marginTop: -6, marginBottom: 10 }}>
+            Aucune date d&apos;AR fournisseur n&apos;est disponible dans BLG (ni au niveau commande, ni au niveau ligne) — seule la date de
+            livraison réelle est mirrorée.
+          </p>
+        )}
 
         {/* ---------------- TABLEAU ---------------- */}
         <section style={{ background: COLORS.blanc, border: `1px solid ${COLORS.ligne}`, borderRadius: 10, overflow: 'hidden' }}>
@@ -804,13 +1061,27 @@ export default function ApproAchatsPage() {
               <table style={tableStyle}>
                 <thead>
                   <tr>
-                    {['CDF', 'Article', 'Désignation', 'Commentaire', 'Qté', 'PU', 'Total TTC', 'Livraison', 'Livraison (statut)', 'Facturation'].map(
-                      (h) => (
-                        <th key={h} style={thStyle}>
-                          {h}
-                        </th>
-                      )
-                    )}
+                    {[
+                      'CDF',
+                      'Article',
+                      'Désignation',
+                      'Créée le',
+                      'Livr. demandée',
+                      'Livr. réelle',
+                      'Délai (j)',
+                      'Qté cmdée',
+                      'Qté RAL',
+                      'Qté livrée',
+                      'Qté facturée',
+                      'PU',
+                      'Total TTC',
+                      'Livraison',
+                      'Facturation',
+                    ].map((h) => (
+                      <th key={h} style={thStyle}>
+                        {h}
+                      </th>
+                    ))}
                   </tr>
                 </thead>
                 <tbody>
@@ -819,11 +1090,16 @@ export default function ApproAchatsPage() {
                       <td style={{ ...tdStyle, color: COLORS.violet, fontWeight: 600 }}>{r.cdf_reference}</td>
                       <td style={tdStyle}>{r.article_reference}</td>
                       <td style={tdStyle}>{r.article_label ?? r.commentaire}</td>
-                      <td style={tdStyle}>{r.commentaire}</td>
-                      <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtNum(r.quantite)}</td>
+                      <td style={tdStyle}>{fmtDate(r.ligne_created_at)}</td>
+                      <td style={tdStyle}>{fmtDate(r.date_livraison_demandee)}</td>
+                      <td style={tdStyle}>{fmtDate(r.date_livraison)}</td>
+                      <td style={{ ...tdStyle, textAlign: 'right' }}>{r.delai_creation_livraison_jours ?? '—'}</td>
+                      <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtNum(r.quantite_commandee)}</td>
+                      <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtNum(r.quantite_ral)}</td>
+                      <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtNum(r.quantite_livree)}</td>
+                      <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtNum(r.quantite_facturee)}</td>
                       <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtEUR(r.prix_unitaire)}</td>
                       <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtEUR(r.total_ttc)}</td>
-                      <td style={tdStyle}>{fmtDate(r.date_livraison)}</td>
                       <td style={tdStyle}>
                         <Tag label={r.tag_livraison_ligne} />
                       </td>
@@ -834,7 +1110,7 @@ export default function ApproAchatsPage() {
                   ))}
                   {!loading && rowsLignes.length === 0 && (
                     <tr>
-                      <td colSpan={10} style={{ ...tdStyle, textAlign: 'center', color: '#8A8474' }}>
+                      <td colSpan={15} style={{ ...tdStyle, textAlign: 'center', color: '#8A8474' }}>
                         Aucune ligne ne correspond à ces filtres.
                       </td>
                     </tr>
@@ -870,11 +1146,13 @@ export default function ApproAchatsPage() {
               <table style={tableStyle}>
                 <thead>
                   <tr>
-                    {['Fournisseur', 'Commandes', 'Lignes', 'Valeur HT', 'Valeur TTC', 'Délai → BL', 'Délai → facture'].map((h) => (
-                      <th key={h} style={thStyle}>
-                        {h}
-                      </th>
-                    ))}
+                    {['Fournisseur', 'Commandes', 'Lignes', 'Valeur HT', 'HT Livrée', 'HT Non livrée', 'HT Facturée', 'HT Non facturée', 'Délai → BL', 'Délai → facture'].map(
+                      (h) => (
+                        <th key={h} style={thStyle}>
+                          {h}
+                        </th>
+                      )
+                    )}
                   </tr>
                 </thead>
                 <tbody>
@@ -886,7 +1164,10 @@ export default function ApproAchatsPage() {
                       <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtNum(f.nb_commandes)}</td>
                       <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtNum(f.nb_lignes)}</td>
                       <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtEUR(f.valeur_achat_ht)}</td>
-                      <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtEUR(f.valeur_achat_ttc)}</td>
+                      <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtEUR(f.valeur_ht_livree)}</td>
+                      <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtEUR(f.valeur_ht_non_livree)}</td>
+                      <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtEUR(f.valeur_ht_facturee)}</td>
+                      <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtEUR(f.valeur_ht_non_facturee)}</td>
                       <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtJours(f.delai_moyen_creation_bl_jours)}</td>
                       <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtJours(f.delai_moyen_creation_facture_jours)}</td>
                     </tr>
@@ -982,7 +1263,7 @@ function CdfDetailModal({ cdfId, onClose }: { cdfId: number; onClose: () => void
           background: COLORS.creme,
           borderRadius: 12,
           width: '100%',
-          maxWidth: 1100,
+          maxWidth: 1300,
           maxHeight: '90vh',
           overflowY: 'auto',
           boxShadow: '0 20px 60px rgba(0,0,0,0.35)',
@@ -1040,11 +1321,30 @@ function CdfDetailModal({ cdfId, onClose }: { cdfId: number; onClose: () => void
 
               {/* Lignes de commande */}
               <h3 style={sectionTitleStyle}>Lignes de commande ({lignes.length})</h3>
+              <p style={{ fontSize: 12, color: '#8A8474', marginTop: -4, marginBottom: 8 }}>
+                Pas de date d&apos;AR fournisseur disponible côté BLG — seule la livraison réelle est tracée.
+              </p>
               <div style={{ overflowX: 'auto', marginBottom: 28 }}>
                 <table style={tableStyle}>
                   <thead>
                     <tr>
-                      {['Article', 'Désignation', 'Commentaire', 'Qté', 'PU', 'Total TTC', 'Livraison', 'Facturation'].map((h) => (
+                      {[
+                        'Article',
+                        'Désignation',
+                        'Commentaire',
+                        'Créée le',
+                        'Livr. demandée',
+                        'Livr. réelle',
+                        'Délai (j)',
+                        'Qté cmdée',
+                        'Qté RAL',
+                        'Qté livrée',
+                        'Qté facturée',
+                        'PU',
+                        'Total TTC',
+                        'Livraison',
+                        'Facturation',
+                      ].map((h) => (
                         <th key={h} style={thStyleSm}>
                           {h}
                         </th>
@@ -1057,7 +1357,14 @@ function CdfDetailModal({ cdfId, onClose }: { cdfId: number; onClose: () => void
                         <td style={tdStyleSm}>{l.article_reference}</td>
                         <td style={tdStyleSm}>{l.article_label}</td>
                         <td style={tdStyleSm}>{l.commentaire}</td>
-                        <td style={{ ...tdStyleSm, textAlign: 'right' }}>{fmtNum(l.quantite)}</td>
+                        <td style={tdStyleSm}>{fmtDate(l.ligne_created_at)}</td>
+                        <td style={tdStyleSm}>{fmtDate(l.date_livraison_demandee)}</td>
+                        <td style={tdStyleSm}>{fmtDate(l.date_livraison)}</td>
+                        <td style={{ ...tdStyleSm, textAlign: 'right' }}>{l.delai_creation_livraison_jours ?? '—'}</td>
+                        <td style={{ ...tdStyleSm, textAlign: 'right' }}>{fmtNum(l.quantite_commandee)}</td>
+                        <td style={{ ...tdStyleSm, textAlign: 'right' }}>{fmtNum(l.quantite_ral)}</td>
+                        <td style={{ ...tdStyleSm, textAlign: 'right' }}>{fmtNum(l.quantite_livree)}</td>
+                        <td style={{ ...tdStyleSm, textAlign: 'right' }}>{fmtNum(l.quantite_facturee)}</td>
                         <td style={{ ...tdStyleSm, textAlign: 'right' }}>{fmtEUR(l.prix_unitaire)}</td>
                         <td style={{ ...tdStyleSm, textAlign: 'right' }}>{fmtEUR(l.total_ttc)}</td>
                         <td style={tdStyleSm}>
@@ -1070,7 +1377,7 @@ function CdfDetailModal({ cdfId, onClose }: { cdfId: number; onClose: () => void
                     ))}
                     {lignes.length === 0 && (
                       <tr>
-                        <td colSpan={8} style={{ ...tdStyleSm, textAlign: 'center', color: '#8A8474' }}>
+                        <td colSpan={15} style={{ ...tdStyleSm, textAlign: 'center', color: '#8A8474' }}>
                           Aucune ligne.
                         </td>
                       </tr>
@@ -1188,19 +1495,19 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
   );
 }
 
-function Kpi({ label, value, accent }: { label: string; value: string; accent?: string }) {
+function Kpi({ label, value, accent, compact }: { label: string; value: string; accent?: string; compact?: boolean }) {
   return (
     <div
       style={{
         background: COLORS.blanc,
         border: `1px solid ${COLORS.ligne}`,
         borderRadius: 10,
-        padding: '14px 16px',
+        padding: compact ? '10px 12px' : '14px 16px',
         borderLeft: `4px solid ${accent ?? COLORS.marine}`,
       }}
     >
-      <div style={{ fontSize: 12, color: '#8A8474', marginBottom: 4 }}>{label}</div>
-      <div style={{ fontSize: 20, fontFamily: '"Space Grotesk", sans-serif', fontWeight: 600 }}>{value}</div>
+      <div style={{ fontSize: compact ? 11 : 12, color: '#8A8474', marginBottom: 4 }}>{label}</div>
+      <div style={{ fontSize: compact ? 16 : 20, fontFamily: '"Space Grotesk", sans-serif', fontWeight: 600 }}>{value}</div>
     </div>
   );
 }
