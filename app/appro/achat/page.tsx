@@ -96,6 +96,7 @@ type SyntheseFournisseur = {
 type CdfEntete = {
   id: number;
   reference: string;
+  lien_blg: string | null;
   order_date: string | null;
   date_livraison_min: string | null;
   date_livraison_max: string | null;
@@ -118,6 +119,7 @@ type CdfLigne = {
   id: number;
   cdf_id: number;
   cdf_reference: string;
+  cdf_lien_blg: string | null;
   cdf_order_date: string | null;
   dans_bdcf: boolean;
   supplier_fk: number | null;
@@ -148,6 +150,7 @@ type CdfLigne = {
 type BlLigne = {
   bl_id: number;
   bl_reference: string;
+  lien_blg: string | null;
   bl_ligne_id: number;
   date_reception: string | null;
   article_reference: string | null;
@@ -157,6 +160,7 @@ type BlLigne = {
 type FafLigne = {
   faf_id: number;
   faf_reference: string;
+  lien_blg: string | null;
   faf_invoice_date: string | null;
   faf_montant_ttc: number | null;
   article_reference: string | null;
@@ -677,6 +681,7 @@ export default function ApproAchatsPage() {
       if (vue === 'entete') {
         ws3.columns = [
           { header: 'Référence CDF', key: 'reference', width: 16 },
+          { header: 'Lien BLG', key: 'lien', width: 12 },
           { header: '★ SAGE', key: 'dans_bdcf_label', width: 9 },
           { header: 'Fournisseur', key: 'nom_fournisseur', width: 28 },
           { header: 'Date création', key: 'order_date', width: 14 },
@@ -692,6 +697,7 @@ export default function ApproAchatsPage() {
         (detailData as CdfEntete[]).forEach((r) =>
           ws3.addRow({
             ...r,
+            lien: r.lien_blg ? { text: 'Ouvrir ↗', hyperlink: r.lien_blg } : '',
             dans_bdcf_label: r.dans_bdcf ? '★' : '',
             order_date: fmtDate(r.order_date),
             periode_livraison: r.date_livraison_min ? `${fmtDate(r.date_livraison_min)} → ${fmtDate(r.date_livraison_max)}` : '—',
@@ -700,6 +706,7 @@ export default function ApproAchatsPage() {
       } else {
         ws3.columns = [
           { header: 'Référence CDF', key: 'cdf_reference', width: 16 },
+          { header: 'Lien BLG', key: 'lien', width: 12 },
           { header: '★ SAGE', key: 'dans_bdcf_label', width: 9 },
           { header: 'Article', key: 'article_reference', width: 18 },
           { header: 'Désignation', key: 'article_label', width: 30 },
@@ -721,6 +728,7 @@ export default function ApproAchatsPage() {
         (detailData as CdfLigne[]).forEach((r) =>
           ws3.addRow({
             ...r,
+            lien: r.cdf_lien_blg ? { text: 'Ouvrir ↗', hyperlink: r.cdf_lien_blg } : '',
             dans_bdcf_label: r.dans_bdcf ? '★' : '',
             ligne_created_at: fmtDate(r.ligne_created_at),
             date_livraison_demandee: fmtDate(r.date_livraison_demandee),
@@ -1224,7 +1232,7 @@ export default function ApproAchatsPage() {
                   {rowsEntete.map((r) => (
                     <tr key={r.id} onClick={() => setDetailCdfId(r.id)} style={{ cursor: 'pointer' }}>
                       <td style={{ ...tdStyle, color: COLORS.violet, fontWeight: 600 }}>
-                        {r.reference}
+                        <LienBlg href={r.lien_blg}>{r.reference}</LienBlg>
                         {r.dans_bdcf && <BdcfStar />}
                       </td>
                       <td style={tdStyle}>{r.nom_fournisseur}</td>
@@ -1293,7 +1301,7 @@ export default function ApproAchatsPage() {
                   {rowsLignes.map((r) => (
                     <tr key={r.id} onClick={() => setDetailCdfId(r.cdf_id)} style={{ cursor: 'pointer' }}>
                       <td style={{ ...tdStyle, color: COLORS.violet, fontWeight: 600 }}>
-                        {r.cdf_reference}
+                        <LienBlg href={r.cdf_lien_blg}>{r.cdf_reference}</LienBlg>
                         {r.dans_bdcf && <BdcfStar />}
                       </td>
                       <td style={tdStyle}>{r.article_reference}</td>
@@ -1492,7 +1500,7 @@ function CdfDetailModal({ cdfId, onClose }: { cdfId: number; onClose: () => void
         >
           <div>
             <div style={{ fontFamily: '"Space Grotesk", sans-serif', fontSize: 20, fontWeight: 600 }}>
-              {entete?.reference ?? `Commande #${cdfId}`}
+              {entete ? <LienBlg href={entete.lien_blg}>{entete.reference}</LienBlg> : `Commande #${cdfId}`}
               {entete?.dans_bdcf && <BdcfStar />}
             </div>
             {entete && (
@@ -1611,7 +1619,9 @@ function CdfDetailModal({ cdfId, onClose }: { cdfId: number; onClose: () => void
                   <tbody>
                     {bls.map((b) => (
                       <tr key={b.bl_ligne_id ?? `${b.bl_id}-${b.article_reference}`}>
-                        <td style={{ ...tdStyleSm, color: COLORS.violet, fontWeight: 600 }}>{b.bl_reference}</td>
+                        <td style={{ ...tdStyleSm, color: COLORS.violet, fontWeight: 600 }}>
+                          <LienBlg href={b.lien_blg}>{b.bl_reference}</LienBlg>
+                        </td>
                         <td style={tdStyleSm}>{fmtDate(b.date_reception)}</td>
                         <td style={tdStyleSm}>{b.article_reference}</td>
                         <td style={{ ...tdStyleSm, textAlign: 'right' }}>{fmtNum(b.quantite_recue)}</td>
@@ -1645,7 +1655,9 @@ function CdfDetailModal({ cdfId, onClose }: { cdfId: number; onClose: () => void
                     {facturesGroupees.map(([ref, ligs]) =>
                       ligs.map((f, idx) => (
                         <tr key={f.faf_id + '-' + idx}>
-                          <td style={{ ...tdStyleSm, color: COLORS.violet, fontWeight: 600 }}>{idx === 0 ? ref : ''}</td>
+                          <td style={{ ...tdStyleSm, color: COLORS.violet, fontWeight: 600 }}>
+                            {idx === 0 ? <LienBlg href={f.lien_blg}>{ref}</LienBlg> : ''}
+                          </td>
                           <td style={tdStyleSm}>{idx === 0 ? fmtDate(f.faf_invoice_date) : ''}</td>
                           <td style={tdStyleSm}>{f.article_reference}</td>
                           <td style={{ ...tdStyleSm, textAlign: 'right' }}>{fmtNum(f.quantite)}</td>
@@ -1859,6 +1871,26 @@ function BdcfStar() {
     <span title="Commande retrouvée dans SAGE (BDCF)" style={{ color: '#C9A227', marginLeft: 5, fontSize: '0.9em' }}>
       ★
     </span>
+  );
+}
+
+// Lien direct vers le document BLG (construit à partir du document_id
+// Mongo). Coupe la propagation du clic pour que cliquer la référence
+// ouvre BLG dans un nouvel onglet sans déclencher l'ouverture de la
+// fiche détail (qui écoute le clic sur la ligne entière).
+function LienBlg({ href, children }: { href: string | null | undefined; children: React.ReactNode }) {
+  if (!href) return <>{children}</>;
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      onClick={(e) => e.stopPropagation()}
+      style={{ color: 'inherit', textDecoration: 'none' }}
+      title="Ouvrir dans BLG"
+    >
+      {children} <span style={{ fontSize: '0.75em', opacity: 0.55 }}>↗</span>
+    </a>
   );
 }
 
