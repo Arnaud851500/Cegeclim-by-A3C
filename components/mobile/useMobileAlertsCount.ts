@@ -19,6 +19,12 @@ import type { AlertDetailItem } from './MobileAlertes'
  * uniquement si le droit correspondant (show_alert_*) est activé pour le
  * profil de l'utilisateur — exactement comme le bandeau du haut côté PC.
  *
+ * AJOUT (2026-08-30) : signal "Cohérence données" (show_alert_data_coherence),
+ * même table de statut que le desktop (data_coherence_alert_status, déjà
+ * tenue à jour par cron + hook de synchro Sage côté base -- simple lecture
+ * ici, aucun recalcul). Pas de filtrage périmètre : c'est un statut global,
+ * identique pour tout le monde, comme côté desktop.
+ *
  * CORRECTIF (25/08) : CDC < 2026 et Capacité gaz appliquent désormais le
  * même filtrage périmètre que le desktop -- allowed_agences ET
  * allowed_collaborateurs du profil (user_page_access), restriction
@@ -234,6 +240,31 @@ export function useMobileAlertsCount() {
           }
         }
 
+        if (Boolean((rights as any).show_alert_data_coherence)) {
+          // Simple lecture du statut singleton -- déjà tenu à jour côté
+          // base (cron horaire + hook de fin de synchro Sage), aucun
+          // recalcul ici. Pas de filtrage périmètre : statut global,
+          // identique pour tout le monde (comme côté desktop).
+          try {
+            const { data, error } = await supabase
+              .from('data_coherence_alert_status')
+              .select('status,ko_months')
+              .eq('singleton', true)
+              .maybeSingle()
+            if (error) throw error
+
+            const isKo = String(data?.status || 'ok').toLowerCase() === 'ko'
+            items.push({
+              label: 'Cohérence données',
+              count: Number(data?.ko_months || 0),
+              status: isKo ? 'red' : 'green',
+            })
+          } catch (e) {
+            console.error('Cohérence données (mobile)', e)
+            items.push({ label: 'Cohérence données', count: 0, status: 'orange' })
+          }
+        }
+
         if (!cancelled) setDetail(items)
       } catch (e) {
         console.error('useMobileAlertsCount', e)
@@ -260,6 +291,7 @@ export function useMobileAlertsCount() {
     rights.show_alert_cdc_liv_avant_2026,
     rights.show_alert_controle_frais_port,
     rights.show_alert_capacite_gaz,
+    Boolean((rights as any).show_alert_data_coherence),
     pathname,
   ])
 
@@ -377,6 +409,50 @@ export function useMobileAlertsCount() {
     return (data || []) as Record<string, any>[]
   }
 
+  /** Détail des mois en écart -- même RPC que la modale desktop
+   * (get_monthly_data_reconciliation), rejouée sur la période stockée dans
+   * data_coherence_alert_status, filtrée aux mois en écart côté client. */
+  async function fetchDataCoherenceList() {
+    if (!email) return []
+    const { data: statusRow, error: statusError } = await supabase
+      .from('data_coherence_alert_status')
+      .select('date_debut,date_fin')
+      .eq('singleton', true)
+      .maybeSingle()
+    if (statusError || !statusRow?.date_debut || !statusRow?.date_fin) {
+      if (statusError) console.error('fetchDataCoherenceList (statut)', statusError)
+      return []
+    }
+
+    const { data, error } = await supabase.rpc('get_monthly_data_reconciliation', {
+      p_date_debut: statusRow.date_debut,
+      p_date_fin: statusRow.date_fin,
+    })
+    if (error) {
+      console.error('fetchDataCoherenceList', error)
+      return []
+    }
+
+    const tolerance = 0.01
+    return ((data || []) as Record<string, any>[])
+      .map((row) => {
+        const facturesLignes = Number(row.factures_lignes || 0)
+        const devisLignes = Number(row.devis_lignes || 0)
+        const issues: string[] = []
+        if (Math.abs(Number(row.factures_cache || 0) - facturesLignes) > tolerance) issues.push('Factures cache')
+        if (Math.abs(Number(row.factures_indicateur || 0) - facturesLignes) > tolerance) issues.push('Factures indicateur')
+        if (Math.abs(Number(row.factures_flux || 0) - facturesLignes) > tolerance) issues.push('Factures flux')
+        if (Math.abs(Number(row.devis_cache || 0) - devisLignes) > tolerance) issues.push('Devis cache')
+        if (Math.abs(Number(row.devis_indicateur || 0) - devisLignes) > tolerance) issues.push('Devis indicateur')
+        if (Math.abs(Number(row.devis_flux || 0) - devisLignes) > tolerance) issues.push('Devis flux')
+        if (Math.abs(Number(row.ecart_cdc_source_vs_flux || 0)) > tolerance) issues.push('CDC flux')
+        if (Math.abs(Number(row.ecart_bl_source_vs_flux || 0)) > tolerance) issues.push('BL flux')
+        return { annee: Number(row.annee), mois: Number(row.mois), issues }
+      })
+      .filter((row) => row.issues.length > 0)
+      .sort((a, b) => (a.annee - b.annee) || (a.mois - b.mois))
+  }
+
   return {
     total,
     detail,
@@ -386,5 +462,6 @@ export function useMobileAlertsCount() {
     fetchCdcAvant2026List,
     fetchFraisPortList,
     fetchCapaciteGazList,
+    fetchDataCoherenceList,
   }
 }

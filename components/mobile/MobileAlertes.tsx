@@ -30,6 +30,15 @@ type TodoRow = {
   assigned_to: string | null
 }
 
+/** Un mois en écart de "Cohérence données" (voir useMobileAlertsCount ->
+ * fetchDataCoherenceList), tel que renvoyé après filtrage des anomalies
+ * côté hook. */
+type DataCoherenceMonthRow = {
+  annee: number
+  mois: number
+  issues: string[]
+}
+
 /** Un CDC agrégé (une ligne par pièce), avec le détail article ligne à
  * ligne conservé pour la fiche détail -- même principe que
  * aggregateByDocument dans MobileClients.tsx, appliqué ici à
@@ -156,6 +165,7 @@ export default function MobileAlertes({
   fetchCdcAvant2026List,
   fetchFraisPortList,
   fetchCapaciteGazList,
+  fetchDataCoherenceList,
   userEmail,
   userName,
 }: {
@@ -166,6 +176,7 @@ export default function MobileAlertes({
   fetchCdcAvant2026List: () => Promise<Record<string, any>[]>
   fetchFraisPortList: () => Promise<Record<string, any>[]>
   fetchCapaciteGazList: () => Promise<Record<string, any>[]>
+  fetchDataCoherenceList: () => Promise<DataCoherenceMonthRow[]>
   userEmail: string
   userName: string
 }) {
@@ -471,12 +482,42 @@ export default function MobileAlertes({
     })
   }
 
+  /** Tiroir "Cohérence données" -- une ligne par mois en écart, détail des
+   * anomalies (Factures/Devis cache-indicateur-flux, CDC flux, BL flux)
+   * dans la fiche ouverte au tap. Pas de lien externe : c'est un résumé
+   * mobile, le détail chiffré complet reste sur /Import (desktop). */
+  async function openDataCoherenceDrawer() {
+    setListOpen({ title: 'Cohérence données', items: [] })
+    setListLoading(true)
+    const rows = await fetchDataCoherenceList()
+    setListLoading(false)
+    setListOpen({
+      title: 'Cohérence données',
+      items: rows.map((row) => {
+        const periode = `${String(row.mois).padStart(2, '0')}/${row.annee}`
+        return {
+          id: `${row.annee}-${row.mois}`,
+          primary: periode,
+          secondary: row.issues.join(', '),
+          trailing: `${row.issues.length} anomalie${row.issues.length > 1 ? 's' : ''}`,
+          onClick: () =>
+            setOpenDetail({
+              title: periode,
+              subtitle: 'Cohérence données',
+              fields: row.issues.map((issue) => ({ label: issue, value: 'Écart détecté' })),
+            }),
+        }
+      }),
+    })
+  }
+
   function handleOpen(label: string) {
     if (label === 'À faire') void openTodoDrawer()
     else if (label === 'CERFA à régulariser') void openCerfaDrawer()
     else if (label === 'CDC < 2026') void openCdcDrawer()
     else if (label === 'Frais de port') void openFraisPortDrawer()
     else if (label === 'Capacité gaz') void openCapaciteGazDrawer()
+    else if (label === 'Cohérence données') void openDataCoherenceDrawer()
   }
 
   return (

@@ -35,6 +35,7 @@ type MenuAccessKey = Exclude<
   | 'show_alert_controle_frais_port'
   | 'show_alert_capacite_gaz'
   | 'show_alert_todo'
+  | 'show_alert_data_coherence'
   | 'can_change_scope'
 >
 
@@ -142,6 +143,29 @@ type CertificationAlertRow = {
   date_validite: string | null
   jours_ecart: number
   siret: string
+}
+
+// ── Pastille "Cohérence données" ──────────────────────────────────────
+// Reflète public.data_coherence_alert_status (table singleton rafraîchie
+// par cron horaire + après chaque synchro Sage, cf. session du
+// 2026-08-30). Compare Factures/Devis/CDC/BL entre lignes sources, caches,
+// indicateurs et flux articles sur M-3 -> M (hors SMC, contrôlée à part en
+// année/YTD). Le détail complet ("Contrôle des agrégats", 20 mois) reste
+// sur /Import, onglet Contrôles -- cette pastille n'en est qu'un résumé
+// rapide sur les 4 derniers mois.
+type DataCoherenceSignal = {
+  status: StatusLevel
+  koMonths: number
+  checkedMonths: number
+  maxAbsEcart: number
+  lastCheckedAt: string | null
+}
+
+type DataCoherenceMonthRow = {
+  annee: number
+  mois: number
+  issues: string[]
+  ecartMax: number
 }
 
 function StatusLight({
@@ -338,6 +362,20 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const [certificationLoading, setCertificationLoading] = useState(false)
   const [certificationError, setCertificationError] = useState<string | null>(null)
 
+  // ── Cohérence données (cf. type DataCoherenceSignal plus haut) ────────
+  const [dataCoherenceSignal, setDataCoherenceSignal] = useState<DataCoherenceSignal>({
+    status: 'green',
+    koMonths: 0,
+    checkedMonths: 0,
+    maxAbsEcart: 0,
+    lastCheckedAt: null,
+  })
+  const [dataCoherenceModalOpen, setDataCoherenceModalOpen] = useState(false)
+  const [dataCoherenceRows, setDataCoherenceRows] = useState<DataCoherenceMonthRow[]>([])
+  const [dataCoherenceLoading, setDataCoherenceLoading] = useState(false)
+  const [dataCoherenceError, setDataCoherenceError] = useState<string | null>(null)
+  const [dataCoherenceRefreshing, setDataCoherenceRefreshing] = useState(false)
+
   const lastLoggedPathRef = useRef<string | null>(null)
   // Ne se déclenche qu'une seule fois par session (pas à chaque navigation
   // client-side) : force l'atterrissage sur le menu mobile /accueil à la
@@ -357,12 +395,21 @@ function AppShell({ children }: { children: React.ReactNode }) {
 
   const isPublicShellPage = isLoginPage || isPdfPrintPage
 
+  // FIX (2026-08) : nouveau droit `show_alert_data_coherence`, pas encore
+  // déclaré dans le type AccessRights de @/components/AccessContext au
+  // moment de cet ajout -- accès via un cast pour ne pas casser la build en
+  // attendant la mise à jour de ce fichier (ajouter le champ boolean dans
+  // AccessRights + dans la requête qui construit `rights`). Une fois fait,
+  // ce cast peut être retiré et remplacé par rights.show_alert_data_coherence.
+  const showDataCoherence = Boolean((rights as any).show_alert_data_coherence)
+
   const hasVisibleStatusLights =
     rights.show_alert_cerfa_ko ||
     rights.show_alert_cdc_liv_avant_2026 ||
     rights.show_alert_controle_frais_port ||
     rights.show_alert_capacite_gaz ||
-    rights.show_alert_todo
+    rights.show_alert_todo ||
+    showDataCoherence
 
   const visibleAlertCount = [
     rights.show_alert_cerfa_ko,
@@ -370,6 +417,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
     rights.show_alert_controle_frais_port,
     rights.show_alert_capacite_gaz,
     rights.show_alert_todo,
+    showDataCoherence,
   ].filter(Boolean).length
 
   const hasAnyMenuAccess =
@@ -1281,6 +1329,126 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
     router.push('/portefeuille-livraison')
   }
 
+  // ── Cohérence données : lecture du statut + détail à la demande ───────
+  // Le statut lui-même (status/koMonths/maxAbsEcart) vient d'une simple
+  // lecture de la table singleton data_coherence_alert_status, déjà tenue
+  // à jour par un cron horaire + un hook en fin de synchro Sage (cf.
+  // refresh_data_coherence_alert_status() côté base) -- aucun recalcul au
+  // chargement de la page, donc aucun impact sur les temps de réponse.
+  async function refreshDataCoherenceSignal() {
+    try {
+      const { data, error } = await supabase
+        .from('data_coherence_alert_status')
+        .select('status,ko_months,checked_months,max_abs_ecart,last_checked_at')
+        .eq('singleton', true)
+        .maybeSingle()
+
+      if (error) throw error
+
+      const status = String(data?.status || 'ok').toLowerCase() === 'ko' ? 'red' : 'green'
+      setDataCoherenceSignal({
+        status,
+        koMonths: Number(data?.ko_months || 0),
+        checkedMonths: Number(data?.checked_months || 0),
+        maxAbsEcart: Number(data?.max_abs_ecart || 0),
+        lastCheckedAt: data?.last_checked_at || null,
+      })
+    } catch (error) {
+      console.error('data_coherence_alert_status status indicator', error)
+      setDataCoherenceSignal({ status: 'green', koMonths: 0, checkedMonths: 0, maxAbsEcart: 0, lastCheckedAt: null })
+    }
+  }
+
+  /** Détail au clic : relit get_monthly_data_reconciliation() sur la même
+   * fenêtre (M-3 -> M, stockée dans data_coherence_alert_status) et ne
+   * garde que les mois en écart -- mêmes règles exactes que l'écran
+   * "Contrôle des agrégats" (/Import, onglet Contrôles). */
+  async function openDataCoherenceModal() {
+    setDataCoherenceModalOpen(true)
+    setDataCoherenceLoading(true)
+    setDataCoherenceError(null)
+
+    try {
+      const { data: statusRow, error: statusError } = await supabase
+        .from('data_coherence_alert_status')
+        .select('date_debut,date_fin')
+        .eq('singleton', true)
+        .maybeSingle()
+      if (statusError) throw statusError
+
+      const dateDebut = statusRow?.date_debut || null
+      const dateFin = statusRow?.date_fin || null
+      if (!dateDebut || !dateFin) throw new Error('Aucune période de contrôle enregistrée pour le moment.')
+
+      const { data, error } = await supabase.rpc('get_monthly_data_reconciliation', {
+        p_date_debut: dateDebut,
+        p_date_fin: dateFin,
+      })
+      if (error) throw error
+
+      const tolerance = 0.01
+      const rows = ((data || []) as Record<string, any>[])
+        .map((row) => {
+          const facturesLignes = Number(row.factures_lignes || 0)
+          const devisLignes = Number(row.devis_lignes || 0)
+          const issues: string[] = []
+          if (Math.abs(Number(row.factures_cache || 0) - facturesLignes) > tolerance) issues.push('Factures cache')
+          if (Math.abs(Number(row.factures_indicateur || 0) - facturesLignes) > tolerance) issues.push('Factures indicateur')
+          if (Math.abs(Number(row.factures_flux || 0) - facturesLignes) > tolerance) issues.push('Factures flux')
+          if (Math.abs(Number(row.devis_cache || 0) - devisLignes) > tolerance) issues.push('Devis cache')
+          if (Math.abs(Number(row.devis_indicateur || 0) - devisLignes) > tolerance) issues.push('Devis indicateur')
+          if (Math.abs(Number(row.devis_flux || 0) - devisLignes) > tolerance) issues.push('Devis flux')
+          if (Math.abs(Number(row.ecart_cdc_source_vs_flux || 0)) > tolerance) issues.push('CDC flux')
+          if (Math.abs(Number(row.ecart_bl_source_vs_flux || 0)) > tolerance) issues.push('BL flux')
+
+          const ecartMax = Math.max(
+            Math.abs(Number(row.factures_cache || 0) - facturesLignes),
+            Math.abs(Number(row.factures_indicateur || 0) - facturesLignes),
+            Math.abs(Number(row.factures_flux || 0) - facturesLignes),
+            Math.abs(Number(row.devis_cache || 0) - devisLignes),
+            Math.abs(Number(row.devis_indicateur || 0) - devisLignes),
+            Math.abs(Number(row.devis_flux || 0) - devisLignes),
+            Math.abs(Number(row.ecart_cdc_source_vs_flux || 0)),
+            Math.abs(Number(row.ecart_bl_source_vs_flux || 0))
+          )
+
+          return { annee: Number(row.annee), mois: Number(row.mois), issues, ecartMax }
+        })
+        .filter((row) => row.issues.length > 0)
+        .sort((a, b) => (a.annee - b.annee) || (a.mois - b.mois))
+
+      setDataCoherenceRows(rows)
+    } catch (error: any) {
+      console.error('Détail cohérence données', error)
+      setDataCoherenceRows([])
+      setDataCoherenceError(error?.message || String(error))
+    } finally {
+      setDataCoherenceLoading(false)
+    }
+  }
+
+  /** Relance immédiate du calcul de statut (sans attendre le prochain cron
+   * horaire ni la prochaine synchro Sage), déclenchée depuis la modale. */
+  async function triggerDataCoherenceRefresh() {
+    setDataCoherenceRefreshing(true)
+    try {
+      const { error } = await supabase.rpc('refresh_data_coherence_alert_status')
+      if (error) throw error
+      await refreshDataCoherenceSignal()
+      await openDataCoherenceModal()
+    } catch (error: any) {
+      console.error('Relance cohérence données', error)
+      setDataCoherenceError(error?.message || String(error))
+    } finally {
+      setDataCoherenceRefreshing(false)
+    }
+  }
+
+  function openDataCoherenceControlScreen() {
+    router.push('/Import')
+    setDataCoherenceModalOpen(false)
+  }
+
   async function openCertificationModal(kind: CertificationAlertKind) {
     setCertificationModalKind(kind)
     setCertificationModalOpen(true)
@@ -1379,6 +1547,13 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
         blToRemove: 0,
         otherGroups: 0,
       })
+    }
+
+    if (showDataCoherence) {
+      tasks.push(refreshDataCoherenceSignal())
+    } else {
+      setDataCoherenceSignal({ status: 'green', koMonths: 0, checkedMonths: 0, maxAbsEcart: 0, lastCheckedAt: null })
+      setDataCoherenceModalOpen(false)
     }
 
     await Promise.all(tasks)
@@ -1659,6 +1834,23 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
                           title={todoSignal.count > 0 ? 'Ouvrir la TODO List dans un nouvel onglet' : 'Aucune tâche à faire — cliquer pour ouvrir la TODO List'}
                         />
                       )}
+
+                      {showDataCoherence && (
+                        <StatusLight
+                          compact
+                          label="Cohérence"
+                          status={dataCoherenceSignal.status}
+                          count={dataCoherenceSignal.koMonths}
+                          blink={dataCoherenceSignal.status === 'red' && statusBlinkOn}
+                          clickable
+                          onClick={openDataCoherenceModal}
+                          title={
+                            dataCoherenceSignal.koMonths > 0
+                              ? `${dataCoherenceSignal.koMonths}/${dataCoherenceSignal.checkedMonths} mois en écart (max ${dataCoherenceSignal.maxAbsEcart.toLocaleString('fr-FR')} €) — cliquer pour le détail`
+                              : 'Factures, devis, CDC, BL et flux articles alignés sur les derniers mois — cliquer pour le détail'
+                          }
+                        />
+                      )}
                     </div>
                   </div>
                 )}
@@ -1839,6 +2031,71 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
                         <td style={styles.cerfaTdStrong}>{row.agence || row.agence_rattachement || row.agence_collaborateur || '—'}</td>
                         <td style={styles.cerfaTd}>{row.representant || '—'}</td>
                         <td style={styles.cerfaTd}>{row.siret || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {dataCoherenceModalOpen && (
+          <div style={styles.modalBackdrop}>
+            <div style={styles.cerfaModal}>
+              <div style={styles.modalHeader}>
+                <div>
+                  <div style={styles.modalTitle}>Cohérence des données</div>
+                  <div style={styles.modalSubtitle}>
+                    {dataCoherenceSignal.koMonths}/{dataCoherenceSignal.checkedMonths} mois en écart · écart max {dataCoherenceSignal.maxAbsEcart.toLocaleString('fr-FR')} € ·
+                    {' '}dernier calcul {dataCoherenceSignal.lastCheckedAt ? new Date(dataCoherenceSignal.lastCheckedAt).toLocaleString('fr-FR') : '—'}
+                  </div>
+                </div>
+                <div style={styles.modalActions}>
+                  <button
+                    type="button"
+                    onClick={() => void triggerDataCoherenceRefresh()}
+                    disabled={dataCoherenceRefreshing}
+                    style={styles.modalSecondaryButton}
+                  >
+                    {dataCoherenceRefreshing ? 'Recalcul…' : 'Recalculer maintenant'}
+                  </button>
+                  <button type="button" onClick={openDataCoherenceControlScreen} style={styles.modalSecondaryButton}>
+                    Ouvrir Contrôle des agrégats
+                  </button>
+                  <button type="button" onClick={() => setDataCoherenceModalOpen(false)} style={styles.modalCloseButton}>Fermer</button>
+                </div>
+              </div>
+
+              {dataCoherenceLoading && <div style={styles.modalInfo}>Chargement du détail…</div>}
+              {dataCoherenceError && <div style={styles.modalError}>Erreur : {dataCoherenceError}</div>}
+              {!dataCoherenceLoading && !dataCoherenceError && (
+                <div style={styles.modalInfo}>
+                  La synthèse multi-clients (SMC) n'est pas incluse : elle se lit en année / YTD et se contrôle à part.
+                </div>
+              )}
+
+              <div style={styles.modalTableWrapper}>
+                <table style={styles.cerfaTable}>
+                  <thead>
+                    <tr>
+                      <th style={styles.cerfaTh}>Période</th>
+                      <th style={styles.cerfaTh}>Anomalies</th>
+                      <th style={styles.cerfaTh}>Écart max</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dataCoherenceRows.length === 0 && !dataCoherenceLoading ? (
+                      <tr>
+                        <td colSpan={3} style={styles.cerfaEmptyCell}>Aucun mois en écart sur la période contrôlée.</td>
+                      </tr>
+                    ) : dataCoherenceRows.map((row) => (
+                      <tr key={`${row.annee}-${row.mois}`}>
+                        <td style={styles.cerfaTdStrong}>{String(row.mois).padStart(2, '0')}/{row.annee}</td>
+                        <td style={styles.cerfaTd}>{row.issues.join(', ')}</td>
+                        <td style={styles.cerfaTdStrong}>
+                          {row.ecartMax.toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €
+                        </td>
                       </tr>
                     ))}
                   </tbody>
