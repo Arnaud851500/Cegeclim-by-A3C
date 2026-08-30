@@ -637,6 +637,8 @@ function AppShell({ children }: { children: React.ReactNode }) {
       label: 'Projet BLG',
       items: [
         { label: '1 : Contrôle cohérence SAGE-BLG', path: '/controle-sage-blg', accessKey: 'can_autorisation' },
+        { label: '2 : Appro Achat SAGE-BLG', path: '/appro/achat', accessKey: 'can_autorisation' },
+        
 
 
       ],
