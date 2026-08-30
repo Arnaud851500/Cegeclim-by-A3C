@@ -1,4 +1,4 @@
- 'use client';
+'use client';
 
 /**
  * Page "Appro / Achats"
@@ -162,6 +162,15 @@ type FafLigne = {
   total_ttc: number | null;
 };
 
+type FreqTemporelleRow = {
+  mois: string;
+  supplier_id: number | null;
+  code_fournisseur: string;
+  nom_fournisseur: string;
+  nb_commandes: number;
+  valeur_ht: number;
+};
+
 type Vue = 'entete' | 'lignes';
 
 const STATUTS_LIVRAISON: { value: string; label: string }[] = [
@@ -200,6 +209,11 @@ const norm = (s: string) =>
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '');
 
+const fmtMoisExport = (m: string) => {
+  const d = new Date(m + 'T00:00:00');
+  return d.toLocaleDateString('fr-FR', { month: 'short', year: 'numeric' });
+};
+
 // ---------------------------------------------------------------------
 // Composant principal
 // ---------------------------------------------------------------------
@@ -224,6 +238,7 @@ export default function ApproAchatsPage() {
   const [vue, setVue] = useState<Vue>('entete');
   const [kpis, setKpis] = useState<Kpis | null>(null);
   const [syntheseFournisseurs, setSyntheseFournisseurs] = useState<SyntheseFournisseur[]>([]);
+  const [freqTemporelle, setFreqTemporelle] = useState<FreqTemporelleRow[]>([]);
   const [rowsEntete, setRowsEntete] = useState<CdfEntete[]>([]);
   const [rowsLignes, setRowsLignes] = useState<CdfLigne[]>([]);
   const [page, setPage] = useState(0);
@@ -289,6 +304,45 @@ export default function ApproAchatsPage() {
     () => Math.max(1, ...donneesFrequence.map((f) => f.nb_commandes)),
     [donneesFrequence]
   );
+
+  // Reshape freqTemporelle (lignes mois x fournisseur) en séries empilées
+  // pour l'histogramme : une entrée par mois, avec la répartition par
+  // fournisseur et les totaux (nb commandes + valeur HT) pour le tooltip.
+  const PALETTE = ['#7A5EA8', '#A6A181', '#C1683C', '#3E7A4E', '#2F6690', '#B0442E', '#8A6BB0', '#5B5646', '#C9A227', '#4C6E5D'];
+
+  const frequenceMensuelle = useMemo(() => {
+    const moisSet = new Set(freqTemporelle.map((r) => r.mois));
+    const mois = [...moisSet].sort();
+
+    const codesOrdreParTotal = new Map<string, number>();
+    freqTemporelle.forEach((r) => {
+      codesOrdreParTotal.set(r.code_fournisseur, (codesOrdreParTotal.get(r.code_fournisseur) ?? 0) + r.nb_commandes);
+    });
+    const codes = [...codesOrdreParTotal.entries()]
+      .sort((a, b) => (a[0] === 'AUTRES' ? 1 : b[0] === 'AUTRES' ? -1 : b[1] - a[1]))
+      .map(([code]) => code);
+    const couleurParCode = new Map<string, string>();
+    codes.forEach((code, i) => couleurParCode.set(code, code === 'AUTRES' ? '#B8B2A0' : PALETTE[i % PALETTE.length]));
+
+    const parMois = mois.map((m) => {
+      const lignesDuMois = freqTemporelle.filter((r) => r.mois === m);
+      const totalNb = lignesDuMois.reduce((s, r) => s + r.nb_commandes, 0);
+      const totalHt = lignesDuMois.reduce((s, r) => s + r.valeur_ht, 0);
+      const segments = codes
+        .map((code) => lignesDuMois.find((r) => r.code_fournisseur === code))
+        .filter((r): r is FreqTemporelleRow => !!r)
+        .map((r) => ({
+          code: r.code_fournisseur,
+          nom: r.nom_fournisseur,
+          nb: r.nb_commandes,
+          valeurHt: r.valeur_ht,
+          couleur: couleurParCode.get(r.code_fournisseur)!,
+        }));
+      return { mois: m, totalNb, totalHt, segments };
+    });
+
+    return { mois: parMois, codes, couleurParCode };
+  }, [freqTemporelle]);
 
   // -------------------------------------------------------------
   // Paramètres RPC partagés (KPI / synthèse fournisseurs)
@@ -371,7 +425,7 @@ export default function ApproAchatsPage() {
     setLoading(true);
     setError(null);
     try {
-      const [{ data: kpiData, error: kpiErr }, { data: syntheseData, error: syntheseErr }] = await Promise.all([
+      const [{ data: kpiData, error: kpiErr }, { data: syntheseData, error: syntheseErr }, { data: freqData, error: freqErr }] = await Promise.all([
         supabase.rpc('get_appro_achats_kpis', rpcParams),
         supabase.rpc('get_appro_achats_synthese_fournisseurs', {
           p_supplier_ids: rpcParams.p_supplier_ids,
@@ -383,11 +437,24 @@ export default function ApproAchatsPage() {
           p_article_reference: rpcParams.p_article_reference,
           p_cdf_reference: rpcParams.p_cdf_reference,
         }),
+        supabase.rpc('get_appro_frequence_temporelle', {
+          p_supplier_ids: rpcParams.p_supplier_ids,
+          p_created_from: rpcParams.p_created_from,
+          p_created_to: rpcParams.p_created_to,
+          p_delivery_status: rpcParams.p_delivery_status,
+          p_invoice_status: rpcParams.p_invoice_status,
+          p_delivery_fk_ids: rpcParams.p_delivery_fk_ids,
+          p_article_reference: rpcParams.p_article_reference,
+          p_cdf_reference: rpcParams.p_cdf_reference,
+          p_chart_supplier_ids: chartSupplierIds.length ? chartSupplierIds : null,
+        }),
       ]);
       if (kpiErr) throw kpiErr;
       if (syntheseErr) throw syntheseErr;
+      if (freqErr) throw freqErr;
       setKpis(Array.isArray(kpiData) ? kpiData[0] : kpiData);
       setSyntheseFournisseurs(syntheseData ?? []);
+      setFreqTemporelle(freqData ?? []);
 
       const from = page * PAGE_SIZE;
       const to = from + PAGE_SIZE - 1;
@@ -412,12 +479,32 @@ export default function ApproAchatsPage() {
     } finally {
       setLoading(false);
     }
-  }, [rpcParams, applyCommonFilters, vue, page]);
+  }, [rpcParams, applyCommonFilters, vue, page, chartSupplierIds]);
 
   useEffect(() => {
     lancerRecherche();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vue, page]);
+
+  // Rafraîchit uniquement le graphe de fréquence quand sa sélection de
+  // fournisseurs dédiée change, sans attendre un clic sur "Rechercher".
+  useEffect(() => {
+    (async () => {
+      const { data, error: err } = await supabase.rpc('get_appro_frequence_temporelle', {
+        p_supplier_ids: rpcParams.p_supplier_ids,
+        p_created_from: rpcParams.p_created_from,
+        p_created_to: rpcParams.p_created_to,
+        p_delivery_status: rpcParams.p_delivery_status,
+        p_invoice_status: rpcParams.p_invoice_status,
+        p_delivery_fk_ids: rpcParams.p_delivery_fk_ids,
+        p_article_reference: rpcParams.p_article_reference,
+        p_cdf_reference: rpcParams.p_cdf_reference,
+        p_chart_supplier_ids: chartSupplierIds.length ? chartSupplierIds : null,
+      });
+      if (!err) setFreqTemporelle(data ?? []);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chartSupplierIds]);
 
   const handleRechercherClick = () => {
     setPage(0);
@@ -658,6 +745,45 @@ export default function ApproAchatsPage() {
       ws4.autoFilter = { from: 'A1', to: 'C1' };
       ws4.views = [{ state: 'frozen', ySplit: 1 }];
 
+      // ---- Onglet 5 : Fréquence mensuelle par fournisseur (histogramme empilé -> table pivot + data bars) ----
+      // ExcelJS ne sait pas produire de graphique empilé natif : cette
+      // table pivot (mois en ligne, fournisseur en colonne) porte les
+      // mêmes données que l'histogramme du front, avec une barre de
+      // données sur la colonne Total pour un repère visuel immédiat.
+      // Sélectionnez la plage et Insertion > Graphique > Histogramme
+      // empilé dans Excel pour recréer le visuel exact du front.
+      const ws5 = wb.addWorksheet('Fréquence mensuelle');
+      const codesFreq = frequenceMensuelle.codes;
+      ws5.columns = [
+        { header: 'Mois', key: 'mois', width: 12 },
+        ...codesFreq.map((code) => ({
+          header: code === 'AUTRES' ? 'Autres' : code,
+          key: `c_${code}`,
+          width: 12,
+        })),
+        { header: 'Total', key: 'total', width: 10 },
+      ];
+      styleHeaderRow(ws5.getRow(1));
+      codesFreq.forEach((code, i) => {
+        const cell = ws5.getRow(1).getCell(2 + i);
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + (frequenceMensuelle.couleurParCode.get(code) ?? '#888888').replace('#', '') } };
+      });
+      frequenceMensuelle.mois.forEach((m) => {
+        const row: Record<string, any> = { mois: fmtMoisExport(m.mois), total: m.totalNb };
+        codesFreq.forEach((code) => {
+          row[`c_${code}`] = m.segments.find((s) => s.code === code)?.nb ?? 0;
+        });
+        ws5.addRow(row);
+      });
+      if (frequenceMensuelle.mois.length > 0) {
+        const totalColLetter = String.fromCharCode(65 + codesFreq.length + 1);
+        ws5.addConditionalFormatting({
+          ref: `${totalColLetter}2:${totalColLetter}${frequenceMensuelle.mois.length + 1}`,
+          rules: [{ type: 'dataBar', cfvo: [{ type: 'min' }, { type: 'max' }], color: { argb: 'FF7A5EA8' }, priority: 1 } as any],
+        });
+      }
+      ws5.views = [{ state: 'frozen', ySplit: 1, xSplit: 1 }];
+
       if ((detailData?.length ?? 0) >= EXPORT_MAX_ROWS) {
         const warn = wb.addWorksheet('⚠ Avertissement');
         warn.addRow([
@@ -679,7 +805,7 @@ export default function ApproAchatsPage() {
     } finally {
       setExporting(false);
     }
-  }, [vue, applyCommonFilters, syntheseFournisseurs, chartSupplierIds]);
+  }, [vue, applyCommonFilters, syntheseFournisseurs, chartSupplierIds, frequenceMensuelle]);
 
   const totalPages = Math.max(1, Math.ceil(totalRows / PAGE_SIZE));
 
@@ -973,6 +1099,26 @@ export default function ApproAchatsPage() {
               ))}
             </div>
           )}
+        </section>
+
+        {/* ---------------- HISTOGRAMME EMPILÉ : FRÉQUENCE MENSUELLE PAR FOURNISSEUR ---------------- */}
+        <section
+          style={{
+            background: COLORS.blanc,
+            border: `1px solid ${COLORS.ligne}`,
+            borderRadius: 10,
+            padding: 20,
+            marginBottom: 24,
+          }}
+        >
+          <h2 style={{ fontFamily: '"Space Grotesk", sans-serif', fontSize: 18, margin: '0 0 4px' }}>
+            Fréquence mensuelle des commandes par fournisseur
+          </h2>
+          <p style={{ fontSize: 12.5, color: '#8A8474', margin: '0 0 16px' }}>
+            Utilise le filtre fournisseur du graphe ci-dessus (recherche + sélection) pour choisir quels fournisseurs ont leur propre
+            couleur — les autres sont regroupés en « Autres ». Survolez une barre pour le détail.
+          </p>
+          <StackedFrequencyChart data={frequenceMensuelle} />
         </section>
 
         {/* ---------------- TOGGLE VUE ---------------- */}
@@ -1458,6 +1604,129 @@ function CdfDetailModal({ cdfId, onClose }: { cdfId: number; onClose: () => void
             </>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------
+// Histogramme empilé : nb de commandes par mois, une couleur par
+// fournisseur (+ "Autres"), tooltip au survol (total + détail).
+// Implémenté sans dépendance graphique externe (divs + flex).
+// ---------------------------------------------------------------------
+function StackedFrequencyChart({
+  data,
+}: {
+  data: {
+    mois: { mois: string; totalNb: number; totalHt: number; segments: { code: string; nom: string; nb: number; valeurHt: number; couleur: string }[] }[];
+    codes: string[];
+    couleurParCode: Map<string, string>;
+  };
+}) {
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+
+  if (data.mois.length === 0) {
+    return <p style={{ color: '#8A8474', fontSize: 13 }}>Aucune donnée pour ces filtres.</p>;
+  }
+
+  const maxTotal = Math.max(1, ...data.mois.map((m) => m.totalNb));
+  const CHART_HEIGHT = 220;
+
+  const fmtMois = (m: string) => {
+    const d = new Date(m + 'T00:00:00');
+    return d.toLocaleDateString('fr-FR', { month: 'short', year: '2-digit' });
+  };
+
+  return (
+    <div>
+      {/* légende */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>
+        {data.codes.map((code) => (
+          <div key={code} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+            <span style={{ width: 10, height: 10, borderRadius: 2, background: data.couleurParCode.get(code), display: 'inline-block' }} />
+            {code === 'AUTRES' ? 'Autres' : code}
+          </div>
+        ))}
+      </div>
+
+      {/* barres */}
+      <div style={{ position: 'relative' }}>
+        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: CHART_HEIGHT, borderBottom: `1px solid ${COLORS.ligne}` }}>
+          {data.mois.map((m, idx) => (
+            <div
+              key={m.mois}
+              onMouseEnter={() => setHoverIdx(idx)}
+              onMouseLeave={() => setHoverIdx((cur) => (cur === idx ? null : cur))}
+              style={{
+                flex: 1,
+                minWidth: 8,
+                height: Math.max(2, (m.totalNb / maxTotal) * CHART_HEIGHT),
+                display: 'flex',
+                flexDirection: 'column-reverse',
+                cursor: 'pointer',
+                outline: hoverIdx === idx ? `2px solid ${COLORS.marine}` : 'none',
+                outlineOffset: 1,
+              }}
+            >
+              {m.segments.map((s) => (
+                <div
+                  key={s.code}
+                  style={{
+                    height: `${(s.nb / (m.totalNb || 1)) * 100}%`,
+                    background: s.couleur,
+                    width: '100%',
+                  }}
+                />
+              ))}
+            </div>
+          ))}
+        </div>
+
+        {/* axe des mois */}
+        <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+          {data.mois.map((m) => (
+            <div key={m.mois} style={{ flex: 1, minWidth: 8, fontSize: 10.5, color: '#8A8474', textAlign: 'center', whiteSpace: 'nowrap' }}>
+              {fmtMois(m.mois)}
+            </div>
+          ))}
+        </div>
+
+        {/* tooltip */}
+        {hoverIdx != null && (
+          <div
+            style={{
+              position: 'absolute',
+              left: `${(hoverIdx / data.mois.length) * 100}%`,
+              bottom: CHART_HEIGHT + 14,
+              transform: hoverIdx > data.mois.length / 2 ? 'translateX(-100%)' : 'none',
+              background: COLORS.marine,
+              color: COLORS.creme,
+              borderRadius: 8,
+              padding: '10px 14px',
+              fontSize: 12.5,
+              minWidth: 220,
+              boxShadow: '0 8px 24px rgba(0,0,0,0.3)',
+              zIndex: 10,
+              pointerEvents: 'none',
+            }}
+          >
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>{fmtMois(data.mois[hoverIdx].mois)}</div>
+            <div style={{ opacity: 0.85, marginBottom: 6 }}>
+              {fmtNum(data.mois[hoverIdx].totalNb)} commande{data.mois[hoverIdx].totalNb > 1 ? 's' : ''} · {fmtEUR(data.mois[hoverIdx].totalHt)} HT
+            </div>
+            {data.mois[hoverIdx].segments.map((s) => (
+              <div key={s.code} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginTop: 2 }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 2, background: s.couleur, display: 'inline-block' }} />
+                  {s.nom}
+                </span>
+                <span>
+                  {fmtNum(s.nb)} · {fmtEUR(s.valeurHt)}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
