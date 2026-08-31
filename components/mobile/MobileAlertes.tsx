@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { formatMoney } from '@/app/focus_mensuel/page'
 import MobileListSheet, { type ListSheetItem } from './MobileListSheet'
+import MobileTaskListSheet, { type TaskListItem } from './MobileTaskListSheet'
 import MobileDetailSheet, { type DetailField } from './MobileDetailSheet'
 import MobileTaskDetailSheet, { type TaskRow } from './MobileTaskDetailSheet'
 import VoiceReportButtons from './VoiceReportButtons'
@@ -81,13 +82,6 @@ function formatDateFr(value: any) {
   const [y, m, d] = iso.split('-')
   return `${d}/${m}/${y}`
 }
-/** Format court jour/mois pour la colonne de droite de la liste "À faire". */
-function formatDateCourte(value: any) {
-  const iso = normalizeDateIso(value)
-  if (!iso) return ''
-  const [, m, d] = iso.split('-')
-  return `${d}/${m}`
-}
 
 /** Regroupe les lignes brutes de v_portefeuille_livraison_lignes (une ligne
  * par article) par numero_document -- une seule pièce affichée dans la
@@ -132,31 +126,6 @@ function aggregateCdcByDocument(rows: Record<string, any>[]): CdcDocAgrege[] {
   })
 }
 
-/**
- * Pastille de couleur devant la description d'une tâche, basée sur
- * l'échéance :
- * - rouge : échéance strictement dans le passé (échue)
- * - orange : échéance aujourd'hui ou dans les 4 prochains jours
- * - verte : échéance au-delà de 4 jours, ou pas d'échéance renseignée
- * NOTE : le statut "En cours" ne prime plus sur la date -- la pastille
- * reflète désormais uniquement l'urgence de l'échéance (demande explicite).
- */
-function statutPastille(row: TodoRow): string {
-  if (!row.due_date) return '🟢'
-  const iso = normalizeDateIso(row.due_date)
-  if (!iso) return '🟢'
-
-  const echeance = new Date(`${iso}T00:00:00`)
-  const aujourdHui = new Date()
-  aujourdHui.setHours(0, 0, 0, 0)
-
-  const diffJours = Math.round((echeance.getTime() - aujourdHui.getTime()) / (1000 * 60 * 60 * 24))
-
-  if (diffJours < 0) return '🔴'
-  if (diffJours <= 4) return '🟠'
-  return '🟢'
-}
-
 export default function MobileAlertes({
   detail,
   loading,
@@ -185,11 +154,22 @@ export default function MobileAlertes({
 }) {
   const active = detail.filter((d) => d.count > 0)
 
+  // Tiroirs génériques (CERFA, CDC < 2026, Frais de port, Capacité gaz,
+  // Cohérence données) -- inchangés, toujours via MobileListSheet.
   const [listOpen, setListOpen] = useState<{ title: string; items: ListSheetItem[] } | null>(null)
   const [listLoading, setListLoading] = useState(false)
   const [openDetail, setOpenDetail] = useState<{ title: string; subtitle?: string; fields: DetailField[] } | null>(null)
   const [openTask, setOpenTask] = useState<TaskRow | null>(null)
+
+  // ÉVOLUTION : "À faire" sort du tiroir générique (listOpen) et gagne son
+  // propre état + son propre composant (MobileTaskListSheet) -- colonnes
+  // n° client / pastille / désignation / échéance, avec case à cocher pour
+  // terminer une tâche sans ouvrir sa fiche complète. todoRows reste la
+  // source de vérité affichée, tenue à jour localement après ajout,
+  // édition ou complétion, sans refaire un fetch complet à chaque fois.
+  const [todoDrawerOpen, setTodoDrawerOpen] = useState(false)
   const [todoRows, setTodoRows] = useState<TodoRow[]>([])
+
   const [ajoutMode, setAjoutMode] = useState<'menu' | 'manuel' | 'vocal' | null>(null)
   const [nouvelleDescription, setNouvelleDescription] = useState('')
   const [nouvelleEcheance, setNouvelleEcheance] = useState('')
@@ -202,27 +182,12 @@ export default function MobileAlertes({
   const [ajoutEnCours, setAjoutEnCours] = useState(false)
   const [ajoutErreur, setAjoutErreur] = useState('')
 
-  function buildTodoItems(rows: TodoRow[]): ListSheetItem[] {
-    return rows.map((r) => ({
-      id: r.id,
-      // Pastille de statut directement devant la description (voir
-      // statutPastille ci-dessus) — remplace le badge de statut texte.
-      primary: `${statutPastille(r)} ${r.description_action || '(sans libellé)'}`,
-      secondary: r.assigned_to ? `Assigné : ${r.assigned_to}` : '',
-      // À la place du statut : date d'échéance (jour/mois) puis code
-      // client, dans cet ordre précis.
-      trailing: [formatDateCourte(r.due_date) || '—', r.numero_tiers].filter(Boolean).join('  '),
-      onClick: () => setOpenTask(r),
-    }))
-  }
-
   async function openTodoDrawer() {
-    setListOpen({ title: 'À faire', items: [] })
+    setTodoDrawerOpen(true)
     setListLoading(true)
     const rows = await fetchTodoList()
     setListLoading(false)
     setTodoRows(rows)
-    setListOpen({ title: 'À faire', items: buildTodoItems(rows) })
   }
 
   /** Recharge la liste après un ajout (manuel ou vocal), sans fermer le
@@ -232,7 +197,13 @@ export default function MobileAlertes({
     const rows = await fetchTodoList()
     setListLoading(false)
     setTodoRows(rows)
-    setListOpen({ title: 'À faire', items: buildTodoItems(rows) })
+  }
+
+  /** Retire localement une tâche cochée "Terminée" depuis la liste --
+   * l'écriture en base est déjà faite par MobileTaskListSheet lui-même,
+   * on ne fait ici que refléter le résultat sans refetch. */
+  function handleTaskCompleted(id: string) {
+    setTodoRows((prev) => prev.filter((r) => r.id !== id))
   }
 
   /** Suggestions client au fil de la saisie -- numéro ou nom, comme la
@@ -315,13 +286,18 @@ export default function MobileAlertes({
     }
   }
 
-  // Mise à jour optimiste : après édition d'une tâche, on met à jour la
-  // ligne concernée dans la liste déjà affichée sans tout recharger.
+  // Mise à jour optimiste : après édition d'une tâche (fiche complète), on
+  // met à jour la ligne concernée dans la liste déjà affichée sans tout
+  // recharger. Si l'édition a fait passer la tâche à Terminé/Annulé (ex.
+  // changement du statut depuis la fiche plutôt que via la case à cocher),
+  // elle sort de la liste -- même logique que le retrait par la case à
+  // cocher, et cohérent avec le filtre appliqué par fetchTodoList().
   function handleTaskSaved(updated: TaskRow) {
     setTodoRows((prev) => {
-      const next = prev.map((r) => (r.id === updated.id ? { ...r, ...updated } : r))
-      setListOpen((cur) => (cur ? { ...cur, items: buildTodoItems(next) } : cur))
-      return next
+      const isNowDone = updated.status === 'Terminé' || updated.status === 'Annulé'
+      return isNowDone
+        ? prev.filter((r) => r.id !== updated.id)
+        : prev.map((r) => (r.id === updated.id ? { ...r, ...updated } : r))
     })
   }
 
@@ -574,8 +550,19 @@ export default function MobileAlertes({
         />
       )}
 
+      {todoDrawerOpen && (
+        <MobileTaskListSheet
+          title="À faire"
+          tasks={todoRows}
+          loading={listLoading}
+          onClose={() => setTodoDrawerOpen(false)}
+          onOpenTask={(task) => setOpenTask(task)}
+          onTaskCompleted={handleTaskCompleted}
+        />
+      )}
+
       {/* ---- Bouton flottant "Ajouter", visible au-dessus du tiroir "À faire" ---- */}
-      {listOpen?.title === 'À faire' && !ajoutMode && (
+      {todoDrawerOpen && !ajoutMode && (
         <button
           type="button"
           onClick={() => { setAjoutErreur(''); setAjoutMode('menu') }}

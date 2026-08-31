@@ -61,6 +61,21 @@ import { acquerirVerrouVocal, libererVerrouVocal, verrouVocalDetenuPar, verrouVo
  * l'autre abandonne silencieusement dès qu'il constate le flag déjà posé.
  * Remis à zéro à chaque nouvelle fenêtre de confirmation (juste avant
  * setEtape('resume_pret') dans stopperEtEnvoyer()).
+ *
+ * ÉVOLUTION (compréhension échéances/confirmation) :
+ *  - parserEcheanceParlee() reconnaît maintenant "premier"/"1er" comme
+ *    jour 1 (ex. "le 1er septembre"), et deux nouvelles expressions
+ *    fréquentes : "fin de semaine" (vendredi de la semaine en cours, ou de
+ *    la semaine suivante si on est déjà vendredi ou après) et "fin de
+ *    mois" (dernier jour du mois en cours). Auparavant, "1er" était perdu
+ *    car considéré comme un seul mot collé lettres+chiffre, non reconnu
+ *    par aucun des motifs existants.
+ *  - enregistrerAvecDetectionSilence() : DUREE_MIN_PAROLE_MS abaissée de
+ *    350 à 250 ms. Cette valeur sert de garde-fou contre un simple
+ *    raclement de gorge pris pour de la parole ; à 350 ms elle pouvait
+ *    aussi retarder la détection de fin d'un "oui" très bref (souvent
+ *    ~250-350 ms), qui repartait alors pour un cycle d'écoute plus long
+ *    au lieu de s'arrêter net après le silence qui suit.
  */
 
 /** Lit la réponse en texte puis tente de la parser en JSON -- si ce n'est
@@ -242,6 +257,20 @@ function matcherNombreDepuis(mots: string[], depart: number): { valeur: number; 
   return null
 }
 
+/** Reconnaît un jour du mois exprimé en un seul mot : "premier" (mot
+ * entier), ou une forme numérique/ordinale telle que "1", "1er", "01",
+ * "3eme"/"3ième". Renvoie null si le mot ne correspond à aucune de ces
+ * formes ou sort de la plage 1-31. Complète matcherNombreDepuis(), qui ne
+ * couvre que les nombres écrits en toutes lettres. */
+function jourDepuisMotUnique(mot: string): number | null {
+  if (!mot) return null
+  if (mot === 'premier') return 1
+  const m = mot.match(/^0*(\d{1,2})(?:er|e|eme|ieme)?$/)
+  if (!m) return null
+  const n = parseInt(m[1], 10)
+  return n >= 1 && n <= 31 ? n : null
+}
+
 function isoDepuisDate(d: Date) {
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
@@ -272,6 +301,22 @@ function parserEcheanceParlee(texteBrut: string): string | null {
   }
   if (/\bdemain\b/.test(texteJoin)) {
     const d = new Date(aujourdHui); d.setDate(d.getDate() + 1); return isoDepuisDate(d)
+  }
+
+  // "Fin de semaine" -> vendredi de la semaine en cours (ou de la semaine
+  // suivante si on est déjà vendredi, samedi ou dimanche). "Fin de mois"
+  // -> dernier jour du mois en cours. Deux tournures très courantes à
+  // l'oral qu'aucun des motifs suivants ne couvrait.
+  if (/fin\s+de\s+semaine/.test(texteJoin)) {
+    const d = new Date(aujourdHui)
+    let delta = (5 - d.getDay() + 7) % 7 // 5 = vendredi
+    if (delta === 0 && d.getDay() !== 5) delta = 7
+    d.setDate(d.getDate() + delta)
+    return isoDepuisDate(d)
+  }
+  if (/fin\s+de\s+mois/.test(texteJoin)) {
+    const d = new Date(aujourdHui.getFullYear(), aujourdHui.getMonth() + 1, 0)
+    return isoDepuisDate(d)
   }
 
   for (let i = 0; i < JOURS_SEMAINE.length; i++) {
@@ -318,9 +363,11 @@ function parserEcheanceParlee(texteBrut: string): string | null {
     if (idx === -1) continue
     let jour: number | null = null
     const motAvant = mots[idx - 1]
-    if (motAvant && /^\d{1,2}$/.test(motAvant)) {
-      jour = parseInt(motAvant, 10)
-    } else {
+    // "premier"/"1er"/"01" juste avant le mois -- couvre "le 1er septembre",
+    // "premier octobre", ce que ni un nombre en toutes lettres classique ni
+    // \d{1,2} seul (utilisé plus loin pour le format jj/mm) ne capturaient.
+    jour = jourDepuisMotUnique(motAvant)
+    if (jour === null) {
       for (let longueur = 3; longueur >= 1; longueur--) {
         const depart = idx - longueur
         if (depart < 0) continue
@@ -578,7 +625,11 @@ export default function VoiceReportButtons({
     // Empêche de couper sur un simple raclement de gorge / souffle initial :
     // il faut au moins ce temps cumulé de son au-dessus du seuil avant que
     // le silence qui suit soit considéré comme la fin de la phrase.
-    const DUREE_MIN_PAROLE_MS = 350
+    // CORRECTIF : abaissée de 350 à 250 ms -- un "oui" bref (souvent
+    // 250-350 ms de parole réelle) pouvait ne jamais atteindre l'ancien
+    // seuil et repartait alors pour un cycle d'écoute complet au lieu de
+    // s'arrêter juste après le silence qui suit la réponse.
+    const DUREE_MIN_PAROLE_MS = 250
 
     let stream: MediaStream
     try {
@@ -817,7 +868,7 @@ export default function VoiceReportButtons({
         await jouerTexte(
           tentatives === 1
             ? `Quelle échéance pour : ${taches[i].description} ? Tu peux aussi la choisir directement à l’écran.`
-            : "Je n'ai pas compris de date. Redis-la, par exemple « demain », « le 15 septembre », ou choisis-la directement à l'écran."
+            : "Je n'ai pas compris de date. Redis-la, par exemple « demain », « le 15 septembre », « fin de semaine », ou choisis-la directement à l'écran."
         )
         if (annulerRef.current) return
         setEtape('echeance_ecoute')

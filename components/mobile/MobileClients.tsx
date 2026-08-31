@@ -409,7 +409,14 @@ export default function MobileClients({
           .limit(600),
         supabase
           .from('devis_lignes')
-          .select('numero_piece,reference_client,date_devis,reference_article,designation,quantite,montant_ht')
+          // CORRECTIF : sélectionnait jusqu'ici reference_client (colonne
+          // 100% vide sur toute la table -- vérifié : 0 valeur non nulle
+          // sur 843 003 lignes) au lieu de reference, qui porte la vraie
+          // référence chantier (ex. "YACHVILI EXE5"), déjà utilisée telle
+          // quelle côté activite_lignes pour les CDC/PL/BL/BR ci-dessus.
+          // La "Référence chantier" affichée sur une fiche devis était
+          // donc systématiquement vide.
+          .select('numero_piece,reference,date_devis,reference_article,designation,quantite,montant_ht')
           .eq('numero_tiers_entete', client.numero)
           .order('date_devis', { ascending: false })
           .limit(300),
@@ -478,10 +485,7 @@ export default function MobileClients({
       const preparations = aggregateByDocument(byType('Préparation de livraison'), ['date_pl', 'date_piece'])
       const livraisons = aggregateByDocument(byType('Bon de livraison'), ['date_bl', 'date_piece'])
       const retours = aggregateByDocument(byType('Bon de retour'), ['date_bl', 'date_piece'])
-      const devis = aggregateByDocument(
-        (devisRes.data || []).map((r: any) => ({ ...r, reference: r.reference_client })),
-        ['date_devis'],
-      )
+      const devis = aggregateByDocument(devisRes.data || [], ['date_devis'])
 
       const fluxN = Array.isArray(fluxNRes.data) ? fluxNRes.data[0] : fluxNRes.data
       const fluxN1 = Array.isArray(fluxN1Res.data) ? fluxN1Res.data[0] : fluxN1Res.data
@@ -783,6 +787,16 @@ function ClientDetailScreen({
         // onOpenStock a été fourni par MobileShell). Une ligne sans
         // référence exploitable (rare, ligne de texte libre) reste non
         // cliquable plutôt que d'ouvrir une fiche stock vide.
+        //
+        // NOTE ordre des lignes : aucune colonne d'ordre fiable n'existe
+        // dans devis_lignes/activite_lignes pour l'historique importé en
+        // masse (CSV/Excel) -- le seul vrai numéro de ligne Sage
+        // (vl_dlno) n'existe que dans sage.devis_hier_aujourdhui /
+        // sage.activite_non_facturee, limités aux pièces d'hier/
+        // aujourd'hui. Les lignes restent donc ici dans l'ordre renvoyé
+        // par la requête, qui ne reflète pas forcément l'ordre Sage --
+        // non résolu tant que le pipeline d'import ne capture pas ce
+        // numéro de ligne à la source.
         ...d.lignes.map((l) => ({
           label: `${l.reference_article || '—'}${l.designation ? ` — ${l.designation}` : ''}`,
           value: `${l.quantite} × ${formatMoney(l.montant_ht)}`,
@@ -1055,7 +1069,8 @@ function DocumentSection({
           <RowItem
             key={d.numeroPiece}
             title={d.numeroPiece}
-            subtitle={[formatDateFr(d.date), d.reference].filter(Boolean).join(' · ')}
+            reference={d.reference}
+            subtitle={formatDateFr(d.date)}
             trailing={formatMoney(d.montantHt)}
             onClick={() => onOpen(d)}
           />
@@ -1115,9 +1130,16 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
+/** ÉVOLUTION : nouvelle prop `reference`, affichée juste à côté du titre
+ * (même taille/police que lui, couleur légèrement atténuée pour rester
+ * lisiblement secondaire) au lieu d'être reléguée dans le sous-titre --
+ * demande explicite : la référence chantier doit être visible d'un coup
+ * d'œil à côté du numéro de pièce dans la liste, pas seulement une fois
+ * la fiche ouverte. Utilisée par DocumentSection (BL/CDC/PL/BR/Devis) ;
+ * les autres appelants (Actions) n'en ont simplement pas besoin. */
 function RowItem({
-  title, subtitle, trailing, onClick,
-}: { title: string; subtitle?: string; trailing?: string; onClick?: () => void }) {
+  title, reference, subtitle, trailing, onClick,
+}: { title: string; reference?: string; subtitle?: string; trailing?: string; onClick?: () => void }) {
   return (
     <div
       onClick={onClick}
@@ -1133,8 +1155,18 @@ function RowItem({
       }}
     >
       <div style={{ minWidth: 0 }}>
-        <div style={{ fontSize: 14.5, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-          {title}
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, minWidth: 0 }}>
+          <span style={{ fontSize: 14.5, color: '#fff', flexShrink: 0, whiteSpace: 'nowrap' }}>{title}</span>
+          {reference && (
+            <span
+              style={{
+                fontSize: 14.5, color: 'rgba(255,255,255,0.55)',
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0,
+              }}
+            >
+              {reference}
+            </span>
+          )}
         </div>
         {subtitle && <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.4)', marginTop: 1 }}>{subtitle}</div>}
       </div>

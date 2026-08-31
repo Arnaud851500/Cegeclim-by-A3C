@@ -9,6 +9,15 @@
 // détectée, et (en mode compte_rendu) une ligne client_comptes_rendus liée
 // au rdv. Le client renvoie le résumé/tâches déjà obtenus à l'étape 1 (pas
 // de cache serveur à gérer : tout transite par le payload).
+//
+// ÉVOLUTION : résolution de l'affectation vocale ("affecte à Arnaud",
+// "assigne à Jean-Marc") vers un email connu de l'app avant d'écrire les
+// tâches. Table public.assistant_collaborateurs_connus (email, prenom,
+// nom, alias[]) : pour chaque tâche, on garde l'assigned_to_email transmis
+// par l'étape 1 SI c'est déjà un email connu ; sinon on cherche dans le
+// transcript d'origine un motif "affecte/assigne (...) à <alias connu>" et
+// on bascule vers l'email correspondant ; à défaut, on retombe sur le
+// créateur de la tâche (comportement historique).
 
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
@@ -37,37 +46,42 @@ async function transcrireAudio(file: File): Promise<string> {
   return String(data.text || '').trim()
 }
 
+/** Normalisation commune (accents, apostrophes, ponctuation) réutilisée par
+ * la détection oui/non ET par la résolution d'affectation ci-dessous. */
+function normaliserTexte(texte: string): string {
+  return String(texte || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // accents
+    .replace(/['’ʼ`]/g, ' ') // toutes les formes d'apostrophe
+    .replace(/[^a-z0-9\s-]/g, ' ') // ponctuation
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 /** Détection oui/non par mots-clés — volontairement pas d'appel IA ici :
  * plus rapide, gratuit, et largement suffisant pour une réponse courte du
  * type "oui c'est bon" / "non annule".
  *
- * CORRECTIF : la version précédente ne normalisait que les accents, pas
- * les apostrophes -- Whisper renvoie souvent une apostrophe typographique
- * (’, U+2019) plutôt que l'apostrophe droite ('), ce qui faisait échouer
- * la comparaison sur "c'est bon" / "c'est correct" écrites avec ' dans le
- * code. On normalise maintenant les deux formes vers rien du tout (on les
- * supprime), et la liste de synonymes est étoffée -- "correct" ou "oui"
- * seuls suffisent déjà à confirmer, donc ce correctif couvre surtout les
- * tournures plus longues ("c'est bon", "c'est correct", "ouais c'est ça"). */
+ * CORRECTIF (liste étoffée) : couvre maintenant davantage de tournures
+ * courantes ("banco", "je valide", "impec", "vas-y", "ça marche"...) --
+ * l'ancienne liste ratait des confirmations pourtant sans ambiguïté pour un
+ * humain, obligeant à redemander inutilement. */
 function detecterConfirmation(transcript: string): boolean | null {
-  const t = transcript
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '') // accents
-    .replace(/['’ʼ`]/g, '') // toutes les formes d'apostrophe
-    .replace(/[.,!?;:]/g, ' ') // ponctuation finale qui peut coller au mot
-    .replace(/\s+/g, ' ')
-    .trim()
+  const t = normaliserTexte(transcript).replace(/[.,!?;:]/g, ' ').replace(/\s+/g, ' ').trim()
 
   const positifs = [
-    'oui', 'ouais', 'ouai', 'yes', 'ok', 'okay', 'valide', 'correct', 'exact',
+    'oui', 'ouais', 'ouai', 'yes', 'ouep', 'ouip', 'ok', 'okay', 'valide', 'correct', 'exact',
     'exactement', 'cest bon', 'cest ca', 'cest ça', 'parfait', 'confirme',
     'confirmes', 'daccord', "d'accord".normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/'/g, ''),
-    'top', 'nickel', 'tout a fait', 'voila', 'affirmatif', 'enregistre',
+    'top', 'nickel', 'impec', 'impeccable', 'tout a fait', 'voila', 'affirmatif', 'enregistre',
+    'banco', 'ca marche', 'ça marche', 'ca me va', 'ça me va', 'je valide', 'vas y', "vas-y",
+    'tout bon', 'cest good', 'ca roule', 'ça roule', 'ok pour moi', 'nickel chrome',
   ]
   const negatifs = [
     'non', 'annule', 'annules', 'refait', 'refaits', 'recommence', 'reprends',
     'faux', 'incorrect', 'stop', 'pas correct', 'pas bon', 'erreur', 'nan',
+    'attends', 'pas ca', 'pas ça', 'change ca', 'change ça', 'ce nest pas ca', "ce n'est pas ça".normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/'/g, ''),
   ]
 
   const estPositif = positifs.some((mot) => t.includes(mot))
@@ -76,6 +90,31 @@ function detecterConfirmation(transcript: string): boolean | null {
   if (estPositif && !estNegatif) return true
   if (estNegatif && !estPositif) return false
   return null // réponse ambiguë (ou vide) : le front doit redemander
+}
+
+type CollaborateurConnu = { email: string; alias: string[] }
+
+/** Cherche dans le transcript d'origine un motif "affecte(-la) à <nom>" ou
+ * "assigne(-la) à <nom>" et tente de faire correspondre <nom> à un alias
+ * connu (table assistant_collaborateurs_connus). Renvoie le premier email
+ * trouvé, ou null si aucun motif d'affectation n'est présent ou si le nom
+ * cité ne correspond à personne de connu. */
+function resoudreAssignationDepuisTranscript(transcript: string, collaborateurs: CollaborateurConnu[]): string | null {
+  const texte = normaliserTexte(transcript)
+  if (!texte || collaborateurs.length === 0) return null
+
+  for (const collab of collaborateurs) {
+    for (const aliasBrut of collab.alias || []) {
+      const alias = normaliserTexte(aliasBrut)
+      if (!alias) continue
+      // "affecte(e/es/ee) ... à <alias>" ou "assigne(e/es/ee) ... à <alias>",
+      // avec jusqu'à ~20 caractères de mots de liaison entre les deux
+      // (ex. "affecte la tâche à Jean-Marc").
+      const motif = new RegExp(`(affect|assign)[a-z]*[^a-z0-9]{0,25}${alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`)
+      if (motif.test(texte)) return collab.email
+    }
+  }
+  return null
 }
 
 export async function POST(req: NextRequest) {
@@ -143,18 +182,37 @@ export async function POST(req: NextRequest) {
     let createdTaskCount = 0
 
     if (taches.length > 0) {
-      const rows = taches.map((t) => ({
-        created_by_email: userEmail,
-        created_by_name: userName,
-        mission_project: '',
-        description_action: t.description,
-        assigned_to: t.assigned_to_email || userEmail,
-        due_date: t.echeance,
-        status: 'Non débuté',
-        comment_progress: '',
-        sort_order: 0,
-        numero_tiers: numeroTiers || null,
-      }))
+      // Résolution de l'affectation vocale ("affecte à Arnaud", "assigne à
+      // Jean-Marc") -- voir note en tête de fichier. Un seul aller-retour
+      // base pour toute la liste des collaborateurs connus, réutilisé pour
+      // chaque tâche.
+      const { data: collaborateursData, error: collabError } = await supabaseAdmin
+        .from('assistant_collaborateurs_connus')
+        .select('email, alias')
+        .eq('actif', true)
+      if (collabError) console.warn('[voice-report/confirm] lecture collaborateurs connus impossible :', collabError.message)
+
+      const collaborateurs = (collaborateursData || []) as CollaborateurConnu[]
+      const emailsConnus = new Set(collaborateurs.map((c) => c.email.toLowerCase()))
+      const emailDicteDansTranscript = resoudreAssignationDepuisTranscript(transcriptOriginal, collaborateurs)
+
+      const rows = taches.map((t) => {
+        const emailAnnonce = (t.assigned_to_email || '').trim().toLowerCase()
+        const emailValideAnnonce = emailAnnonce && emailsConnus.has(emailAnnonce) ? emailAnnonce : null
+        const assignedTo = emailValideAnnonce || emailDicteDansTranscript || userEmail
+        return {
+          created_by_email: userEmail,
+          created_by_name: userName,
+          mission_project: '',
+          description_action: t.description,
+          assigned_to: assignedTo,
+          due_date: t.echeance,
+          status: 'Non débuté',
+          comment_progress: '',
+          sort_order: 0,
+          numero_tiers: numeroTiers || null,
+        }
+      })
 
       const { data: inserted, error: todoError } = await supabaseAdmin
         .from('todo_actions')
