@@ -162,6 +162,13 @@ type DocAgrege = {
   lignes: { reference_article: string; designation: string; quantite: number; montant_ht: number }[]
 }
 type ActionRow = { id: string; libelle: string; status: string; due_date: string | null; assigned_to: string | null }
+/** Tâche terminée, pour l'historique "6 derniers mois" -- voir
+ * ouvrirTachesTerminees() dans ClientDetailScreen. updatedAt sert de date
+ * d'achèvement : todo_actions n'a pas de colonne dédiée "terminée le",
+ * mais son updated_at reflète le moment du passage à Terminé (aucune
+ * autre modification n'a de raison d'avoir lieu après coup sur une tâche
+ * close). */
+type TacheTermineeRow = { id: string; libelle: string; dueDate: string | null; updatedAt: string; assignedTo: string | null }
 /** Visite unifiée (BLG synchronisé OU RDV "compagnon CEGECLIM") -- source
  * v_rdv_unifie (voir CORRECTIF ci-dessous), pas crm_base_activity seul.
  * blgActivityId/compagnonId : l'un des deux est rempli selon `source`,
@@ -825,6 +832,44 @@ function ClientDetailScreen({
     }
   }
 
+  // ÉVOLUTION : historique des tâches terminées sur les 6 derniers mois --
+  // chargé uniquement au clic (pas au chargement de la fiche), pour ne pas
+  // alourdir l'ouverture d'un client avec une requête dont on n'a pas
+  // toujours besoin.
+  const [tachesTermineesOuvertes, setTachesTermineesOuvertes] = useState(false)
+  const [tachesTerminees, setTachesTerminees] = useState<TacheTermineeRow[] | null>(null)
+  const [tachesTermineesLoading, setTachesTermineesLoading] = useState(false)
+
+  async function ouvrirTachesTerminees() {
+    setTachesTermineesOuvertes(true)
+    setTachesTermineesLoading(true)
+    const depuis = new Date()
+    depuis.setMonth(depuis.getMonth() - 6)
+    const { data, error } = await supabase
+      .from('todo_actions')
+      .select('id, description_action, due_date, assigned_to, updated_at')
+      .eq('numero_tiers', client.numero)
+      .eq('status', 'Terminé')
+      .gte('updated_at', depuis.toISOString())
+      .order('updated_at', { ascending: false })
+      .limit(100)
+    setTachesTermineesLoading(false)
+    if (error) {
+      console.error('[MobileClients] erreur chargement tâches terminées', error)
+      setTachesTerminees([])
+      return
+    }
+    setTachesTerminees(
+      (data || []).map((r: any) => ({
+        id: String(r.id),
+        libelle: String(r.description_action || ''),
+        dueDate: r.due_date || null,
+        updatedAt: String(r.updated_at || ''),
+        assignedTo: r.assigned_to || null,
+      })),
+    )
+  }
+
   function openActionDetail(a: ActionRow) {
     setOpenTask({
       id: a.id,
@@ -1075,6 +1120,11 @@ function ClientDetailScreen({
           )}
         </Section>
 
+        <RowItem
+          title="✅ Tâches terminées (6 derniers mois)"
+          onClick={() => void ouvrirTachesTerminees()}
+        />
+
         <DocumentSection title="Commandes (CDC)" loading={loading} docs={detail?.commandes} onOpen={(d) => openDocDetail(d, 'Bon de commande')} />
         <DocumentSection title="Préparations de livraison (PL)" loading={loading} docs={detail?.preparations} onOpen={(d) => openDocDetail(d, 'Préparation de livraison')} />
         <DocumentSection title="Bons de livraison (BL)" loading={loading} docs={detail?.livraisons} onOpen={(d) => openDocDetail(d, 'Bon de livraison')} />
@@ -1150,6 +1200,46 @@ function ClientDetailScreen({
             <button
               type="button"
               onClick={() => setContactsOuverts(false)}
+              style={{ marginTop: 8, padding: '12px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: 'transparent', color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: 600 }}
+            >
+              Fermer
+            </button>
+          </div>
+        </div>
+      )}
+
+      {tachesTermineesOuvertes && (
+        <div
+          style={{ position: 'fixed', inset: 0, zIndex: 240, background: 'rgba(6,10,18,0.62)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
+          onClick={() => setTachesTermineesOuvertes(false)}
+        >
+          <div
+            style={{ width: '100%', maxWidth: 480, maxHeight: '80vh', overflowY: 'auto', background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.08)', padding: '12px 18px 26px', display: 'flex', flexDirection: 'column', gap: 10 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 6px' }} />
+            <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Tâches terminées</div>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', marginBottom: 4 }}>{client.nom || client.numero} · 6 derniers mois</div>
+
+            {tachesTermineesLoading ? (
+              <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', padding: '10px 0' }}>Chargement…</div>
+            ) : !tachesTerminees || tachesTerminees.length === 0 ? (
+              <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', padding: '10px 0' }}>Aucune tâche terminée sur cette période.</div>
+            ) : (
+              tachesTerminees.map((t) => (
+                <div key={t.id} style={{ borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)', padding: '10px 12px' }}>
+                  <div style={{ fontSize: 13.5, color: '#fff', lineHeight: 1.4 }}>{t.libelle || '(sans libellé)'}</div>
+                  <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.4)', marginTop: 4 }}>
+                    Terminée le {formatDateFr(normalizeDateIso(t.updatedAt))}
+                    {t.assignedTo ? ` · ${t.assignedTo}` : ''}
+                  </div>
+                </div>
+              ))
+            )}
+
+            <button
+              type="button"
+              onClick={() => setTachesTermineesOuvertes(false)}
               style={{ marginTop: 8, padding: '12px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: 'transparent', color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: 600 }}
             >
               Fermer

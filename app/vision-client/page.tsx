@@ -128,6 +128,14 @@ type CompteRendu = {
 
 type TacheClient = { id: string; description_action: string | null; status: string; due_date: string | null; assigned_to: string | null }
 
+/** Tâche terminée, pour l'historique "6 derniers mois" -- voir
+ * chargerTachesTermineesCount / ouvrirTachesTerminees plus bas. updatedAt
+ * sert de date d'achèvement : todo_actions n'a pas de colonne dédiée
+ * "terminée le", mais son updated_at reflète le moment du passage à
+ * Terminé (aucune autre modification n'a de raison d'avoir lieu après
+ * coup sur une tâche close). */
+type TacheTermineeRow = { id: string; libelle: string; assignedTo: string | null; updatedAt: string }
+
 /** Seuils d'alerte de suivi paramétrables pour ce client -- voir note V3
  * en tête de fichier. null = règle désactivée. */
 type AlertesConfig = {
@@ -673,6 +681,14 @@ function VisionClientPageInner() {
   const [alertesSaving, setAlertesSaving] = useState(false)
   const [alertesSaved, setAlertesSaved] = useState(false)
 
+  // ÉVOLUTION : historique des tâches terminées sur les 6 derniers mois --
+  // le compte est chargé avec le reste de la fiche (petite requête, sans
+  // impact notable), la liste détaillée seulement à l'ouverture de la
+  // case pour ne pas la récupérer inutilement.
+  const [tachesTermineesCount, setTachesTermineesCount] = useState<number | null>(null)
+  const [tachesTermineesOuvert, setTachesTermineesOuvert] = useState(false)
+  const [tachesTermineesListe, setTachesTermineesListe] = useState<TacheTermineeRow[] | null>(null)
+
   const [currentEmail, setCurrentEmail] = useState('')
   const [currentName, setCurrentName] = useState('')
 
@@ -769,6 +785,56 @@ function VisionClientPageInner() {
     }
   }
 
+  /** Nombre de tâches terminées sur les 6 derniers mois -- affiché
+   * directement sur la case cliquable, chargé avec le reste de la fiche. */
+  async function chargerTachesTermineesCount(numeroTiers: string) {
+    const depuis = new Date()
+    depuis.setMonth(depuis.getMonth() - 6)
+    const { count, error: err } = await supabase
+      .from('todo_actions')
+      .select('id', { count: 'exact', head: true })
+      .eq('numero_tiers', numeroTiers)
+      .eq('status', 'Terminé')
+      .gte('updated_at', depuis.toISOString())
+    if (err) {
+      console.warn('[vision-client] comptage tâches terminées impossible :', err.message)
+      setTachesTermineesCount(0)
+      return
+    }
+    setTachesTermineesCount(count || 0)
+  }
+
+  /** Détail des tâches terminées sur les 6 derniers mois -- chargé
+   * uniquement à l'ouverture de la case (pas au chargement de la fiche). */
+  async function ouvrirTachesTerminees() {
+    if (!identity) return
+    setTachesTermineesOuvert(true)
+    setTachesTermineesListe(null)
+    const depuis = new Date()
+    depuis.setMonth(depuis.getMonth() - 6)
+    const { data, error: err } = await supabase
+      .from('todo_actions')
+      .select('id, description_action, assigned_to, updated_at')
+      .eq('numero_tiers', identity.numero)
+      .eq('status', 'Terminé')
+      .gte('updated_at', depuis.toISOString())
+      .order('updated_at', { ascending: false })
+      .limit(200)
+    if (err) {
+      console.error('[vision-client] erreur chargement tâches terminées', err)
+      setTachesTermineesListe([])
+      return
+    }
+    setTachesTermineesListe(
+      (data || []).map((r: any) => ({
+        id: String(r.id),
+        libelle: String(r.description_action || ''),
+        assignedTo: r.assigned_to || null,
+        updatedAt: String(r.updated_at || ''),
+      })),
+    )
+  }
+
   useEffect(() => {
     if (!numero) { setLoading(false); setError('Aucun numéro de client fourni.'); return }
     let cancelled = false
@@ -800,7 +866,7 @@ function VisionClientPageInner() {
         setCerfaKo(Number(cerfaRes.data) || 0)
         setCdcRetard(Number(cdcRes.data) || 0)
         setDerniersDocuments((derniersRes.data || []) as DernierDocument[])
-        await Promise.all([loadVisites(numero), loadTaches(numero), loadAlertesConfig(numero)])
+        await Promise.all([loadVisites(numero), loadTaches(numero), loadAlertesConfig(numero), chargerTachesTermineesCount(numero)])
       } catch (e: any) {
         if (!cancelled) setError(e?.message || String(e))
       } finally {
@@ -995,6 +1061,10 @@ function VisionClientPageInner() {
           <span>Factures en retard de paiement <em className="fictifTag">fictif</em></span>
           <strong className="danger">{formatEur(facturesRetardFictif)}</strong>
         </div>
+        <button type="button" className="kpiCard kpiCardClickable" onClick={() => void ouvrirTachesTerminees()}>
+          <span>Tâches terminées (6 mois)</span>
+          <strong>{tachesTermineesCount ?? '—'}</strong>
+        </button>
         <div className="kpiCard kpiCardVisites">
           <span>Visites</span>
           <div className="visitesLines">
@@ -1199,6 +1269,23 @@ function VisionClientPageInner() {
       {openVisite && (
         <VisiteDetailModal rdv={openVisite} currentEmail={currentEmail} currentName={currentName} onClose={() => setOpenVisite(null)} />
       )}
+      {tachesTermineesOuvert && (
+        <DetailModal title="Tâches terminées" subtitle="6 derniers mois" onClose={() => setTachesTermineesOuvert(false)}>
+          {tachesTermineesListe === null ? (
+            <p className="emptyNote">Chargement…</p>
+          ) : tachesTermineesListe.length === 0 ? (
+            <p className="emptyNote">Aucune tâche terminée sur cette période.</p>
+          ) : (
+            tachesTermineesListe.map((t) => (
+              <DetailField
+                key={t.id}
+                label={t.libelle || '(sans libellé)'}
+                value={`Terminée le ${formatDateFr(t.updatedAt.slice(0, 10))}${t.assignedTo ? ` · ${t.assignedTo}` : ''}`}
+              />
+            ))
+          )}
+        </DetailModal>
+      )}
       {nouveauRdvOuvert && (
         <NouveauRdvModal
           numeroTiers={identity.numero}
@@ -1281,8 +1368,10 @@ const pageStyles = `
   .identityGrid strong.ok { color: #047857; }
   .identityGrid strong.danger { color: #dc2626; }
   .identityGrid strong.muted { color: #94a3b8; }
-  .kpiRow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
+  .kpiRow { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
   .kpiCard { display: block; background: white; border: 1px solid #e2e8f0; border-radius: 14px; padding: 14px 16px; box-shadow: 0 2px 8px rgba(15,23,42,.05); text-decoration: none; color: inherit; }
+  .kpiCardClickable { width: 100%; text-align: left; cursor: pointer; font: inherit; }
+  .kpiCardClickable:hover { border-color: #cbd5e1; }
   .kpiCard span { display: block; font-size: 11px; font-weight: 900; text-transform: uppercase; color: #64748b; }
   .kpiCard strong { display: block; margin-top: 4px; font-size: 22px; font-weight: 950; }
   .kpiCard strong.ok { color: #047857; }
