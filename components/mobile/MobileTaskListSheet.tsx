@@ -129,7 +129,15 @@ export default function MobileTaskListSheet({
           <button onClick={onClose} style={{ color: 'rgba(255,255,255,0.4)', fontSize: 20, lineHeight: 1, background: 'none', border: 'none', flexShrink: 0 }}>✕</button>
         </div>
 
-        <div style={{ overflowY: 'auto', padding: '0 18px 24px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {/*
+          CORRECTIF : padding bas augmenté (24 -> 100px). Le bouton flottant
+          "+" (MobileAlertes.tsx, position fixed en bas à droite) est
+          toujours affiché en même temps que ce tiroir -- sans cette marge,
+          il recouvrait la case à cocher de la dernière tâche visible,
+          la rendant impossible à cocher tant qu'on ne scrollait pas en
+          dessous.
+        */}
+        <div style={{ overflowY: 'auto', padding: '0 18px 100px', display: 'flex', flexDirection: 'column', gap: 6 }}>
           {loading ? (
             <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)', padding: '20px 0', textAlign: 'center' }}>Chargement…</div>
           ) : tasks.length === 0 ? (
@@ -143,7 +151,7 @@ export default function MobileTaskListSheet({
                   key={task.id}
                   onClick={() => onOpenTask?.(task)}
                   style={{
-                    display: 'flex', alignItems: 'center', gap: 10,
+                    display: 'flex', flexDirection: 'column', gap: 5,
                     borderRadius: 12,
                     border: `1px solid ${echoueApresCochage ? 'rgba(193,104,60,0.4)' : 'rgba(255,255,255,0.08)'}`,
                     background: 'rgba(255,255,255,0.03)',
@@ -153,50 +161,61 @@ export default function MobileTaskListSheet({
                     transition: 'opacity 0.15s ease',
                   }}
                 >
-                  {/* Colonne 1 : n° client */}
-                  <span
-                    style={{
-                      fontSize: 12, fontFamily: 'var(--font-mono)', color: 'rgba(255,255,255,0.55)',
-                      flexShrink: 0, minWidth: 48, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-                    }}
-                  >
-                    {task.numero_tiers || '—'}
-                  </span>
+                  {/* Ligne 1 : n° client, pastille, échéance, case à cocher */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    {/* Colonne 1 : n° client */}
+                    <span
+                      style={{
+                        fontSize: 12, fontFamily: 'var(--font-mono)', color: 'rgba(255,255,255,0.55)',
+                        flexShrink: 0, minWidth: 48, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                      }}
+                    >
+                      {task.numero_tiers || '—'}
+                    </span>
 
-                  {/* Colonne 2 : pastille de couleur (urgence de l'échéance) */}
-                  <span
-                    aria-hidden="true"
-                    style={{ width: 8, height: 8, borderRadius: '50%', background: pastilleCouleur(task), flexShrink: 0 }}
-                  />
+                    {/* Colonne 2 : pastille de couleur (urgence de l'échéance) */}
+                    <span
+                      aria-hidden="true"
+                      style={{ width: 8, height: 8, borderRadius: '50%', background: pastilleCouleur(task), flexShrink: 0 }}
+                    />
 
-                  {/* Colonne 3 : désignation */}
-                  <span
+                    <span style={{ flex: 1 }} />
+
+                    {/* Colonne 3 : échéance */}
+                    {task.due_date && (
+                      <span style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', flexShrink: 0, whiteSpace: 'nowrap' }}>
+                        {formatDateFr(task.due_date)}
+                      </span>
+                    )}
+
+                    {/* Case à cocher : termine la tâche sans ouvrir sa fiche */}
+                    <input
+                      type="checkbox"
+                      checked={termine}
+                      disabled={termine}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={() => void terminer(task)}
+                      aria-label={`Terminer la tâche : ${task.description_action || ''}`}
+                      style={{ width: 18, height: 18, flexShrink: 0, accentColor: '#3F9142', cursor: termine ? 'default' : 'pointer' }}
+                    />
+                  </div>
+
+                  {/*
+                    Ligne 2 : désignation complète -- ÉVOLUTION : sur sa
+                    propre ligne, texte non tronqué (retour à la ligne
+                    normal) au lieu d'un seul mot par ligne coupé avec
+                    ellipsis. Avant ce changement, seuls les tout premiers
+                    caractères de la tâche étaient visibles dans la liste.
+                  */}
+                  <div
                     style={{
-                      fontSize: 13.5, color: '#fff', flex: 1, minWidth: 0,
-                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      fontSize: 13.5, color: '#fff', lineHeight: 1.4,
+                      wordBreak: 'break-word',
                       textDecoration: termine ? 'line-through' : 'none',
                     }}
                   >
                     {task.description_action || '(sans libellé)'}
-                  </span>
-
-                  {/* Colonne 4 : échéance */}
-                  {task.due_date && (
-                    <span style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', flexShrink: 0, whiteSpace: 'nowrap' }}>
-                      {formatDateFr(task.due_date)}
-                    </span>
-                  )}
-
-                  {/* Case à cocher : termine la tâche sans ouvrir sa fiche */}
-                  <input
-                    type="checkbox"
-                    checked={termine}
-                    disabled={termine}
-                    onClick={(e) => e.stopPropagation()}
-                    onChange={() => void terminer(task)}
-                    aria-label={`Terminer la tâche : ${task.description_action || ''}`}
-                    style={{ width: 18, height: 18, flexShrink: 0, accentColor: '#3F9142', cursor: termine ? 'default' : 'pointer' }}
-                  />
+                  </div>
                 </div>
               )
             })
