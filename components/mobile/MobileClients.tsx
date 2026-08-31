@@ -764,6 +764,67 @@ function ClientDetailScreen({
   const [navigationVers, setNavigationVers] = useState<{ adresse: string; lat?: number | null; lon?: number | null } | null>(null)
   const [appelVers, setAppelVers] = useState<string | null>(null)
 
+  // ÉVOLUTION : alertes de suivi paramétrables par client (nb d'appels/
+  // visites min par mois, nb de jours sans devis, nb de jours sans
+  // commande) -- lues/écrites via get_client_alertes_config /
+  // upsert_client_alertes_config. Un contrôle quotidien côté base (cron)
+  // évalue ces seuils pour tous les clients paramétrés et crée une tâche
+  // dans todo_actions (due_date = jour de création, mission_project =
+  // "Alerte suivi client") quand un seuil est dépassé -- rien à faire ici
+  // pour la création de la tâche elle-même, cet écran ne gère que le
+  // paramétrage des seuils.
+  const [alertesConfig, setAlertesConfig] = useState<{
+    min_appels_visites_mois: number | null
+    max_jours_sans_devis: number | null
+    max_jours_sans_commande: number | null
+  } | null>(null)
+  const [alertesSaving, setAlertesSaving] = useState(false)
+  const [alertesSaved, setAlertesSaved] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    async function charger() {
+      setAlertesConfig(null)
+      const { data, error } = await supabase.rpc('get_client_alertes_config', { p_numero_tiers: client.numero })
+      if (cancelled) return
+      if (error) {
+        console.warn('[MobileClients] lecture alertes config impossible :', error.message)
+        setAlertesConfig({ min_appels_visites_mois: null, max_jours_sans_devis: null, max_jours_sans_commande: null })
+        return
+      }
+      const row = Array.isArray(data) ? data[0] : data
+      setAlertesConfig({
+        min_appels_visites_mois: row?.min_appels_visites_mois ?? null,
+        max_jours_sans_devis: row?.max_jours_sans_devis ?? null,
+        max_jours_sans_commande: row?.max_jours_sans_commande ?? null,
+      })
+    }
+    void charger()
+    return () => { cancelled = true }
+  }, [client.numero])
+
+  async function enregistrerAlertesConfig() {
+    if (!alertesConfig) return
+    setAlertesSaving(true)
+    setAlertesSaved(false)
+    try {
+      const { error } = await supabase.rpc('upsert_client_alertes_config', {
+        p_numero_tiers: client.numero,
+        p_min_appels_visites_mois: alertesConfig.min_appels_visites_mois,
+        p_max_jours_sans_devis: alertesConfig.max_jours_sans_devis,
+        p_max_jours_sans_commande: alertesConfig.max_jours_sans_commande,
+        p_updated_by_email: currentEmail || null,
+      })
+      if (error) throw error
+      setAlertesSaved(true)
+      window.setTimeout(() => setAlertesSaved(false), 2000)
+    } catch (e) {
+      console.error('[MobileClients] échec enregistrement alertes config', e)
+    } finally {
+      setAlertesSaving(false)
+    }
+  }
+
   function openActionDetail(a: ActionRow) {
     setOpenTask({
       id: a.id,
@@ -941,6 +1002,56 @@ function ClientDetailScreen({
           <div style={{ marginTop: 5, fontSize: 11.5 }}>
             <EvolLine value={client.margePctYtdN} n1={client.margePctYtdN1} isPoints />
           </div>
+        </div>
+
+        <div
+          style={{
+            borderRadius: 14, border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.04)',
+            padding: '12px 13px',
+          }}
+        >
+          <div style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 8 }}>
+            🔔 Alertes de suivi
+          </div>
+          {!alertesConfig ? (
+            <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Chargement…</div>
+          ) : (
+            <>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
+                <AlerteSeuilField
+                  label="Nb d'appels/visites min par mois"
+                  value={alertesConfig.min_appels_visites_mois}
+                  onChange={(v) => setAlertesConfig((cur) => (cur ? { ...cur, min_appels_visites_mois: v } : cur))}
+                />
+                <AlerteSeuilField
+                  label="Nb de jours sans devis"
+                  value={alertesConfig.max_jours_sans_devis}
+                  onChange={(v) => setAlertesConfig((cur) => (cur ? { ...cur, max_jours_sans_devis: v } : cur))}
+                />
+                <AlerteSeuilField
+                  label="Nb de jours sans commande"
+                  value={alertesConfig.max_jours_sans_commande}
+                  onChange={(v) => setAlertesConfig((cur) => (cur ? { ...cur, max_jours_sans_commande: v } : cur))}
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => void enregistrerAlertesConfig()}
+                disabled={alertesSaving}
+                style={{
+                  marginTop: 10, width: '100%', padding: '10px', borderRadius: 10,
+                  border: '1px solid rgba(166,161,129,0.4)',
+                  background: alertesSaved ? 'rgba(63,145,66,0.18)' : 'rgba(166,161,129,0.16)',
+                  color: alertesSaved ? '#8fd4a8' : '#e4dfc9', fontSize: 13, fontWeight: 700,
+                }}
+              >
+                {alertesSaving ? 'Enregistrement…' : alertesSaved ? '✓ Enregistré' : 'Enregistrer les seuils'}
+              </button>
+              <p style={{ marginTop: 8, fontSize: 10.5, color: 'rgba(255,255,255,0.35)', lineHeight: 1.4 }}>
+                Un champ vide désactive la règle correspondante. Le contrôle tourne une fois par jour et crée une tâche dans « À faire » quand un seuil est dépassé.
+              </p>
+            </>
+          )}
         </div>
 
         <Section title="Actions">
@@ -1176,6 +1287,32 @@ function RowItem({
         </div>
       )}
     </div>
+  )
+}
+
+/** Champ "libellé + saisie numérique" pour un seuil d'alerte de suivi.
+ * Vide = null = règle désactivée (pas de valeur par défaut imposée). */
+function AlerteSeuilField({
+  label, value, onChange,
+}: { label: string; value: number | null; onChange: (v: number | null) => void }) {
+  return (
+    <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+      <span style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.75)', flex: 1 }}>{label}</span>
+      <input
+        type="number"
+        min={1}
+        value={value ?? ''}
+        onChange={(e) => {
+          const raw = e.target.value
+          onChange(raw === '' ? null : Math.max(1, Number(raw)))
+        }}
+        placeholder="—"
+        style={{
+          width: 64, borderRadius: 8, border: '1px solid rgba(255,255,255,0.15)',
+          background: 'rgba(255,255,255,0.06)', color: '#fff', padding: '6px 8px', fontSize: 13, textAlign: 'right',
+        }}
+      />
+    </label>
   )
 }
 

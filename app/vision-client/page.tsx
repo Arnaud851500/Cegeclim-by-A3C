@@ -12,8 +12,9 @@
 //   - KPI : CERFA non à jour, CDC en retard, factures en retard (fictif)
 //   - visites (réelles, RDV BLG + compagnon CEGECLIM unifiés), cliquables
 //   - tâches non terminées affectées au client
+//   - alertes de suivi paramétrables (V3, voir plus bas)
 //
-// V2 (cette révision) :
+// V2 :
 //   - Dernière/prochaine visite : REMPLACÉ le fictif par v_rdv_unifie
 //     (RDV synchronisés BLG + RDV créés depuis l'app "compagnon
 //     CEGECLIM", avant toute connexion BLG/Outlook -- cf. rdv_compagnon).
@@ -28,6 +29,19 @@
 //   - Nouvelle section "Tâches non terminées" (todo_actions).
 //   - Graphiques : légendes de famille macro agrandies, lecture densifiée
 //     (plus de graduations, tracés plus marqués).
+//
+// V3 (cette révision) :
+//   - Nouvelle section "Alertes de suivi" : 3 seuils paramétrables par
+//     client -- nb d'appels/visites minimum par mois, nb de jours sans
+//     devis, nb de jours sans commande. Un contrôle quotidien côté base
+//     (cron -> executer_controle_alertes_client()) évalue ces seuils pour
+//     tous les clients paramétrés et crée automatiquement une tâche dans
+//     todo_actions (due_date = jour de création, mission_project =
+//     "Alerte suivi client", visible dans la section "Tâches non
+//     terminées" ci-dessus) quand un seuil est dépassé. Cette section ne
+//     gère que le paramétrage des seuils -- lecture/écriture via
+//     get_client_alertes_config / upsert_client_alertes_config, aucune
+//     logique de contrôle côté front.
 
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
@@ -113,6 +127,14 @@ type CompteRendu = {
 }
 
 type TacheClient = { id: string; description_action: string | null; status: string; due_date: string | null; assigned_to: string | null }
+
+/** Seuils d'alerte de suivi paramétrables pour ce client -- voir note V3
+ * en tête de fichier. null = règle désactivée. */
+type AlertesConfig = {
+  min_appels_visites_mois: number | null
+  max_jours_sans_devis: number | null
+  max_jours_sans_commande: number | null
+}
 
 function safeNumber(value: any): number {
   const n = Number(value)
@@ -646,6 +668,11 @@ function VisionClientPageInner() {
   const [prochaineVisite, setProchaineVisite] = useState<RdvUnifie | null>(null)
   const [taches, setTaches] = useState<TacheClient[]>([])
 
+  // Alertes de suivi paramétrables (V3) -- voir note en tête de fichier.
+  const [alertesConfig, setAlertesConfig] = useState<AlertesConfig | null>(null)
+  const [alertesSaving, setAlertesSaving] = useState(false)
+  const [alertesSaved, setAlertesSaved] = useState(false)
+
   const [currentEmail, setCurrentEmail] = useState('')
   const [currentName, setCurrentName] = useState('')
 
@@ -703,6 +730,45 @@ function VisionClientPageInner() {
     setTaches((data || []) as TacheClient[])
   }
 
+  /** Charge les seuils d'alerte de suivi paramétrés pour ce client (voir
+   * note V3 en tête de fichier) -- lecture seule, aucun calcul ici. */
+  async function loadAlertesConfig(numeroTiers: string) {
+    const { data, error: err } = await supabase.rpc('get_client_alertes_config', { p_numero_tiers: numeroTiers })
+    if (err) {
+      console.warn('[vision-client] lecture alertes config impossible :', err.message)
+      setAlertesConfig({ min_appels_visites_mois: null, max_jours_sans_devis: null, max_jours_sans_commande: null })
+      return
+    }
+    const row = Array.isArray(data) ? data[0] : data
+    setAlertesConfig({
+      min_appels_visites_mois: row?.min_appels_visites_mois ?? null,
+      max_jours_sans_devis: row?.max_jours_sans_devis ?? null,
+      max_jours_sans_commande: row?.max_jours_sans_commande ?? null,
+    })
+  }
+
+  async function enregistrerAlertesConfig() {
+    if (!alertesConfig || !identity) return
+    setAlertesSaving(true)
+    setAlertesSaved(false)
+    try {
+      const { error: err } = await supabase.rpc('upsert_client_alertes_config', {
+        p_numero_tiers: identity.numero,
+        p_min_appels_visites_mois: alertesConfig.min_appels_visites_mois,
+        p_max_jours_sans_devis: alertesConfig.max_jours_sans_devis,
+        p_max_jours_sans_commande: alertesConfig.max_jours_sans_commande,
+        p_updated_by_email: currentEmail || null,
+      })
+      if (err) throw err
+      setAlertesSaved(true)
+      window.setTimeout(() => setAlertesSaved(false), 2000)
+    } catch (e) {
+      console.error('[vision-client] échec enregistrement alertes config', e)
+    } finally {
+      setAlertesSaving(false)
+    }
+  }
+
   useEffect(() => {
     if (!numero) { setLoading(false); setError('Aucun numéro de client fourni.'); return }
     let cancelled = false
@@ -734,7 +800,7 @@ function VisionClientPageInner() {
         setCerfaKo(Number(cerfaRes.data) || 0)
         setCdcRetard(Number(cdcRes.data) || 0)
         setDerniersDocuments((derniersRes.data || []) as DernierDocument[])
-        await Promise.all([loadVisites(numero), loadTaches(numero)])
+        await Promise.all([loadVisites(numero), loadTaches(numero), loadAlertesConfig(numero)])
       } catch (e: any) {
         if (!cancelled) setError(e?.message || String(e))
       } finally {
@@ -981,6 +1047,68 @@ function VisionClientPageInner() {
         )}
       </section>
 
+      {/* ── Alertes de suivi (V3) ── */}
+      <section className="card">
+        <h2>🔔 Alertes de suivi</h2>
+        {!alertesConfig ? (
+          <p className="emptyNote">Chargement…</p>
+        ) : (
+          <>
+            <div className="alertesGrid">
+              <label className="alerteField">
+                <span>Nb d'appels/visites min par mois</span>
+                <input
+                  type="number"
+                  min={1}
+                  value={alertesConfig.min_appels_visites_mois ?? ''}
+                  onChange={(e) => {
+                    const raw = e.target.value
+                    setAlertesConfig((cur) => (cur ? { ...cur, min_appels_visites_mois: raw === '' ? null : Math.max(1, Number(raw)) } : cur))
+                  }}
+                  placeholder="—"
+                />
+              </label>
+              <label className="alerteField">
+                <span>Nb de jours sans devis</span>
+                <input
+                  type="number"
+                  min={1}
+                  value={alertesConfig.max_jours_sans_devis ?? ''}
+                  onChange={(e) => {
+                    const raw = e.target.value
+                    setAlertesConfig((cur) => (cur ? { ...cur, max_jours_sans_devis: raw === '' ? null : Math.max(1, Number(raw)) } : cur))
+                  }}
+                  placeholder="—"
+                />
+              </label>
+              <label className="alerteField">
+                <span>Nb de jours sans commande</span>
+                <input
+                  type="number"
+                  min={1}
+                  value={alertesConfig.max_jours_sans_commande ?? ''}
+                  onChange={(e) => {
+                    const raw = e.target.value
+                    setAlertesConfig((cur) => (cur ? { ...cur, max_jours_sans_commande: raw === '' ? null : Math.max(1, Number(raw)) } : cur))
+                  }}
+                  placeholder="—"
+                />
+              </label>
+            </div>
+            <div className="crActions">
+              <button className="crSaveBtn" onClick={() => void enregistrerAlertesConfig()} disabled={alertesSaving}>
+                {alertesSaving ? 'Enregistrement…' : alertesSaved ? '✓ Enregistré' : 'Enregistrer les seuils'}
+              </button>
+            </div>
+            <p className="alerteHint">
+              Un champ vide désactive la règle correspondante. Un contrôle quotidien évalue ces seuils et crée
+              automatiquement une tâche pour ce client (visible ci-dessus, dans « Tâches non terminées ») dès qu'un
+              seuil est dépassé.
+            </p>
+          </>
+        )}
+      </section>
+
       {/* ── CA mensuel empilé + panneau YTD ── */}
       <div className="caChartRow">
         <section className="card caChartCard">
@@ -1193,6 +1321,13 @@ const pageStyles = `
   .tachesTable th { text-align: left; font-size: 10px; text-transform: uppercase; color: #94a3b8; padding: 5px 8px; border-bottom: 1px solid #e2e8f0; font-weight: 800; }
   .tachesTable td { padding: 7px 8px; border-bottom: 1px solid #f1f5f9; }
   .tacheStatut { display: inline-block; font-size: 10.5px; font-weight: 800; background: #eef2ff; color: #3730a3; border-radius: 999px; padding: 2px 8px; }
+
+  /* ── Alertes de suivi (V3) ── */
+  .alertesGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+  .alerteField { display: flex; flex-direction: column; gap: 5px; font-size: 11px; font-weight: 800; text-transform: uppercase; color: #64748b; }
+  .alerteField input { height: 38px; border: 1px solid #cbd5e1; border-radius: 9px; padding: 0 10px; font-size: 14px; font-weight: 700; color: #0f172a; text-transform: none; outline: none; font-family: inherit; }
+  .alerteField input:focus { border-color: #2E5BB8; }
+  .alerteHint { margin: 10px 0 0; font-size: 11.5px; color: #94a3b8; line-height: 1.5; }
 
   /* ── Recherche client (en-tête) ── */
   .clientSearch { position: relative; flex: 0 0 300px; }
