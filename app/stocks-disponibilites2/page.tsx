@@ -35,8 +35,8 @@
  *  - Bouton "Hypothèses mensuelles" renommé "Paramétrage hypothèses
  *    mensuelles".
  *
- * V2.5 (cette révision) — correction de la source du stock de départ +
- * ajout d'une vue "par dépôt" :
+ * V2.5 — correction de la source du stock de départ + ajout d'une vue
+ * "par dépôt" :
  *  - stock_initial (colonne "Stock dispo" du tableau, et point de départ de
  *    toute la projection) provient désormais de sage.stock_depot agrégé
  *    sur TOUS les dépôts (au lieu de l'ancien import CSV "Article_stock",
@@ -50,6 +50,31 @@
  *    fiche article, ouvrant le détail du stock dépôt par dépôt (réel,
  *    réservé, commandé fournisseur, préparé, disponible, à terme) —
  *    équivalent de l'écran Sage "Interrogation du stock".
+ *
+ * V2.6 (cette révision) — stock de sécurité (en jours) + fiabilité de
+ * prévision (% d'erreur), par famille :
+ *  - Nouveau panneau "🛡️ Stock sécu & fiabilité" (bouton d'en-tête, +
+ *    raccourci sur l'écran famille) permettant de définir, famille par
+ *    famille : un stock de sécurité en JOURS de consommation (30 = un
+ *    mois), et un % d'erreur de prévision. Stocké dans la nouvelle table
+ *    stock_famille_fiabilite, lu/écrit via get_stock_fiabilite_matrice /
+ *    upsert_stock_fiabilite_matrice (même pattern que l'horizon par
+ *    famille). Pas encore de niveau article (comme pour l'horizon) —
+ *    extension possible plus tard sur le même modèle que les hypothèses
+ *    mensuelles (table *_articles + cascade).
+ *  - Stock de sécurité : converti en quantité à partir du rythme de sortie
+ *    moyen de la famille sur l'horizon affiché, puis tracé en ligne
+ *    pointillée horizontale sur le graphe "Stock projeté hebdomadaire".
+ *  - % erreur : s'applique uniquement à la part "prévision complémentaire"
+ *    (incertaine) des sorties — jamais aux CDC fermes ni aux CDC en retard
+ *    (déjà connues). Sur le graphe "Sorties mensuelles", ça donne une
+ *    bande Min/Max autour de la partie prévisionnelle de la courbe N.
+ *    Sur le graphe "Stock projeté hebdomadaire", ça donne : (1) une
+ *    moustache min/max sur chaque barre de sorties prévisionnelles, et
+ *    (2) deux courbes optionnelles "Stock si ventes hautes / basses"
+ *    (bouton dédié, repliées par défaut pour ne pas surcharger le graphe).
+ *    La fiche article hérite du % erreur de sa famille (pas de réglage
+ *    par article pour l'instant).
  * ------------------------------------------------------------------------
  */
 
@@ -94,6 +119,10 @@ const DARK_RED = "#A8422A";
 // par le calcul serveur ; la case à cocher les réintègre visuellement comme
 // besoins fermes sur la 1re semaine de projection.
 const VIOLET = "#7A5EA8";
+// Charte V2.6 : bande Min/Max de fiabilité de prévision.
+const MINMAX_MIN = "#C1683C"; // scénario pessimiste (ventes hautes → stock bas)
+const MINMAX_MAX = "#4B92AC"; // scénario optimiste (ventes basses → stock haut)
+const SAFETY_STOCK = "#A6A181"; // ligne de stock de sécurité
 
 function alertWeight(level: string): number {
   return level === "ROUGE" ? 3 : level === "ORANGE" ? 2 : level === "JAUNE" ? 1 : 0;
@@ -333,6 +362,198 @@ function StockParDepotPanel({
   );
 }
 
+// ---------------------------------------------------------------------------
+// Panneau "Stock sécu & fiabilité" (V2.6) — même pattern que
+// MonthlyHypothesesMatrix (grille toutes familles, filtre texte,
+// enregistrement en masse) mais pour 2 valeurs par famille : le stock de
+// sécurité en JOURS de consommation, et le % d'erreur de prévision.
+// Auto-suffisant : ne dépend d'aucun autre composant, lit/écrit via
+// get_stock_fiabilite_matrice / upsert_stock_fiabilite_matrice.
+// ---------------------------------------------------------------------------
+
+type FiabiliteRow = { famille_macro: string; famille: string; jours_stock_securite: number; pct_erreur: number };
+type FiabiliteValue = { jours_stock_securite: number; pct_erreur: number };
+
+function FiabiliteMatrix({
+  initialFilter,
+  onClose,
+  onSaved,
+}: {
+  initialFilter?: string;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [rows, setRows] = useState<FiabiliteRow[] | null>(null);
+  const [edited, setEdited] = useState<Map<string, FiabiliteValue>>(new Map());
+  const [filter, setFilter] = useState(initialFilter || "");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      setError(null);
+      const { data, error: err } = await supabase.rpc("get_stock_fiabilite_matrice");
+      if (cancelled) return;
+      if (err) {
+        setError(err.message);
+        setRows([]);
+      } else {
+        setRows(
+          ((data || []) as Array<{ famille_macro: string; famille: string; jours_stock_securite: number; pct_erreur: number | string }>).map((r) => ({
+            famille_macro: r.famille_macro,
+            famille: r.famille,
+            jours_stock_securite: Number(r.jours_stock_securite) || 0,
+            pct_erreur: Number(r.pct_erreur) || 0,
+          })),
+        );
+      }
+      setLoading(false);
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const filtered = useMemo(() => {
+    if (!rows) return [];
+    const f = filter.trim().toLowerCase();
+    if (!f) return rows;
+    return rows.filter((r) => r.famille.toLowerCase().includes(f) || r.famille_macro.toLowerCase().includes(f));
+  }, [rows, filter]);
+
+  function valueFor(r: FiabiliteRow): FiabiliteValue {
+    return edited.get(r.famille) || { jours_stock_securite: r.jours_stock_securite, pct_erreur: r.pct_erreur };
+  }
+
+  function setValue(r: FiabiliteRow, patch: Partial<FiabiliteValue>) {
+    setEdited((prev) => {
+      const next = new Map(prev);
+      const current = next.get(r.famille) || { jours_stock_securite: r.jours_stock_securite, pct_erreur: r.pct_erreur };
+      next.set(r.famille, { ...current, ...patch });
+      return next;
+    });
+  }
+
+  async function handleSave() {
+    if (edited.size === 0) {
+      onClose();
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const payload = Array.from(edited.entries()).map(([famille, v]) => ({
+        famille,
+        jours_stock_securite: v.jours_stock_securite,
+        pct_erreur: v.pct_erreur,
+      }));
+      const { data, error: err } = await supabase.rpc("upsert_stock_fiabilite_matrice", { p_rows: payload });
+      if (err) throw new Error(err.message);
+      const result = data as { success?: boolean; message?: string } | null;
+      if (!result?.success) throw new Error(result?.message || "Échec de l'enregistrement");
+      onSaved();
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
+      <div className="max-h-[85vh] w-full max-w-3xl overflow-y-auto rounded-xl border border-white/10 bg-[#0B1220] p-6" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-4 flex items-start justify-between gap-4">
+          <div>
+            <h3 className="font-[var(--font-display)] text-lg font-bold text-white">Stock de sécurité &amp; fiabilité de prévision</h3>
+            <p className="mt-1 max-w-xl text-xs text-white/50">
+              <strong className="text-white/70">Stock sécu. (j)</strong> : nombre de jours de consommation à garder en stock (30 = un mois) — tracé en ligne pointillée sur le graphe de stock projeté de la famille.{" "}
+              <strong className="text-white/70">% erreur</strong> : marge d&rsquo;incertitude sur la prévision complémentaire — génère les courbes/moustaches Min/Max sur l&rsquo;écran famille (les CDC fermes et en retard ne sont jamais affectées).
+            </p>
+          </div>
+          <button onClick={onClose} className="shrink-0 rounded-lg border border-white/15 px-3 py-1.5 text-sm text-white/70 hover:text-white">Fermer</button>
+        </div>
+
+        <div className="mb-3 flex items-center gap-3">
+          <input
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="Filtrer par famille ou famille macro…"
+            className="flex-1 rounded-lg border border-white/15 bg-white/5 px-3 py-2 text-sm text-white outline-none focus:border-[#A6A181]"
+          />
+          <button
+            onClick={() => void handleSave()}
+            disabled={saving || edited.size === 0}
+            className="shrink-0 rounded-lg bg-[#A6A181] px-4 py-2 text-sm font-semibold text-[#141A26] disabled:opacity-40"
+          >
+            {saving ? "Enregistrement…" : `Enregistrer${edited.size ? ` (${edited.size})` : ""}`}
+          </button>
+        </div>
+
+        {error && <div className="mb-3 rounded-lg border border-[#C1683C]/40 bg-[#C1683C]/10 px-4 py-3 text-sm text-[#e0a685]">{error}</div>}
+
+        {loading ? (
+          <div className="h-64 animate-pulse rounded-xl border border-white/10 bg-white/[0.03]" />
+        ) : (
+          <div className="overflow-x-auto rounded-xl border border-white/10 bg-[#F5F3EC]">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-black/10 text-left text-xs uppercase tracking-wide text-[#141A26]/50">
+                  <th className="whitespace-nowrap px-3 py-3">Famille macro</th>
+                  <th className="whitespace-nowrap px-3 py-3">Famille</th>
+                  <th className="whitespace-nowrap px-3 py-3 text-right">Stock sécu. (j)</th>
+                  <th className="whitespace-nowrap px-3 py-3 text-right">% erreur</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-black/[0.06]">
+                {filtered.map((r) => {
+                  const v = valueFor(r);
+                  const isEdited = edited.has(r.famille);
+                  return (
+                    <tr key={r.famille} className={isEdited ? "bg-[#A6A181]/10" : undefined}>
+                      <td className="whitespace-nowrap px-3 py-2 text-[#141A26]/60">{r.famille_macro}</td>
+                      <td className="whitespace-nowrap px-3 py-2 font-medium text-[#141A26]">{r.famille}</td>
+                      <td className="whitespace-nowrap px-3 py-2 text-right">
+                        <input
+                          type="number"
+                          min={0}
+                          max={730}
+                          value={v.jours_stock_securite}
+                          onChange={(e) => setValue(r, { jours_stock_securite: Math.max(0, Math.min(730, Number(e.target.value))) })}
+                          className="w-20 rounded border border-black/15 bg-white px-2 py-1 text-right font-[var(--font-mono)]"
+                        />
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-2 text-right">
+                        <input
+                          type="number"
+                          min={0}
+                          max={100}
+                          value={v.pct_erreur}
+                          onChange={(e) => setValue(r, { pct_erreur: Math.max(0, Math.min(100, Number(e.target.value))) })}
+                          className="w-20 rounded border border-black/15 bg-white px-2 py-1 text-right font-[var(--font-mono)]"
+                        />
+                      </td>
+                    </tr>
+                  );
+                })}
+                {filtered.length === 0 && (
+                  <tr>
+                    <td colSpan={4} className="px-4 py-8 text-center text-[#141A26]/40">Aucune famille ne correspond au filtre.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function StocksDisponibilites2Page() {
   const headerOffset = useSiteHeaderOffset();
 
@@ -368,6 +589,14 @@ export default function StocksDisponibilites2Page() {
   const [hypoOpen, setHypoOpen] = useState(false);
   const [hypoFamilleScope, setHypoFamilleScope] = useState<string | null>(null);
 
+  // Panneau "Stock sécu & fiabilité" (V2.6) — même logique d'ouverture que
+  // le panneau d'hypothèses, mais fiabiliteFilter est un simple filtre
+  // texte initial (la grille reste toujours "toutes familles"), pas un
+  // scope de recalcul : ces réglages n'affectent que l'affichage, aucun
+  // recalcul de projection n'est déclenché à l'enregistrement.
+  const [fiabiliteOpen, setFiabiliteOpen] = useState(false);
+  const [fiabiliteFilter, setFiabiliteFilter] = useState<string | undefined>(undefined);
+
   const [refreshKey, setRefreshKey] = useState(0);
 
   // Horizon de projection MÉMORISÉ PAR FAMILLE (distinct de l'horizon global
@@ -388,6 +617,33 @@ export default function StocksDisponibilites2Page() {
       }
     }
     loadHorizon();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedFamille, refreshKey]);
+
+  // Stock de sécurité (jours) + % erreur de la famille sélectionnée (V2.6).
+  // Même pattern de chargement que l'horizon ci-dessus.
+  const [familleFiabilite, setFamilleFiabilite] = useState<{ joursStockSecurite: number; pctErreur: number }>({ joursStockSecurite: 0, pctErreur: 0 });
+
+  useEffect(() => {
+    if (!selectedFamille) {
+      setFamilleFiabilite({ joursStockSecurite: 0, pctErreur: 0 });
+      return;
+    }
+    let cancelled = false;
+    async function loadFiabilite() {
+      const { data, error: err } = await supabase.rpc("get_stock_famille_fiabilite", { p_famille: selectedFamille, p_defaut_jours: 0, p_defaut_pct: 0 });
+      if (cancelled) return;
+      if (!err) {
+        const row = (Array.isArray(data) ? data[0] : data) as { jours_stock_securite?: number; pct_erreur?: number } | null;
+        setFamilleFiabilite({
+          joursStockSecurite: Number(row?.jours_stock_securite) || 0,
+          pctErreur: Number(row?.pct_erreur) || 0,
+        });
+      }
+    }
+    loadFiabilite();
     return () => {
       cancelled = true;
     };
@@ -764,6 +1020,18 @@ export default function StocksDisponibilites2Page() {
     return { first, last, deltaPct: first !== 0 ? ((last - first) / Math.abs(first)) * 100 : null };
   }, [familleWeeklyHorizon]);
 
+  // Stock de sécurité converti en QUANTITÉ (V2.6) : jours_stock_securite ×
+  // rythme de sortie moyen journalier sur l'horizon affiché (sorties + CDC
+  // retard incluses si la case est cochée, pour rester cohérent avec ce que
+  // le graphe affiche réellement). undefined si le réglage est à 0 (pas de
+  // ligne tracée) ou s'il n'y a pas assez de semaines pour estimer un rythme.
+  const safetyStockQty = useMemo(() => {
+    if (!familleFiabilite.joursStockSecurite || familleWeeklyHorizon.length === 0) return undefined;
+    const dailyRate = sortiesHorizonKpi.n / (familleWeeklyHorizon.length * 7);
+    if (!Number.isFinite(dailyRate) || dailyRate <= 0) return undefined;
+    return familleFiabilite.joursStockSecurite * dailyRate;
+  }, [familleFiabilite.joursStockSecurite, familleWeeklyHorizon.length, sortiesHorizonKpi.n]);
+
   const [monthlyReelRaw, setMonthlyReelRaw] = useState<Array<{ annee: number; mois: number; reference_article: string; quantite: number }>>([]);
 
   useEffect(() => {
@@ -814,9 +1082,14 @@ export default function StocksDisponibilites2Page() {
     });
 
     const forecastByMonth = new Map<string, number>();
+    // V2.6 : on isole aussi la part "prévision complémentaire" (incertaine)
+    // du total mensuel, pour pouvoir tracer la bande Min/Max autour d'elle
+    // uniquement (les CDC fermes/retard, elles, sont connues avec certitude).
+    const forecastPrevisionByMonth = new Map<string, number>();
     familleWeeklyHorizon.forEach((r) => {
       const moisKey = r.periode_debut.slice(0, 7);
       forecastByMonth.set(moisKey, (forecastByMonth.get(moisKey) || 0) + r.sorties_n);
+      forecastPrevisionByMonth.set(moisKey, (forecastPrevisionByMonth.get(moisKey) || 0) + r.sorties_prevision);
     });
 
     const currentMonthKey = todayIso.slice(0, 7);
@@ -824,7 +1097,15 @@ export default function StocksDisponibilites2Page() {
       const n1Key = `${annee - 1}-${String(mois).padStart(2, "0")}`;
       const isFuture = key > currentMonthKey;
       const n = isFuture ? forecastByMonth.get(key) ?? 0 : reelParAnneeMois.get(key) ?? 0;
-      return { annee, mois, key, n, n1: reelParAnneeMois.get(n1Key) ?? 0, isFuture };
+      return {
+        annee,
+        mois,
+        key,
+        n,
+        n1: reelParAnneeMois.get(n1Key) ?? 0,
+        isFuture,
+        previsionPortion: isFuture ? forecastPrevisionByMonth.get(key) ?? 0 : 0,
+      };
     });
   }, [monthlyReelRaw, familleWeeklyHorizon, searchMatches, todayIso, moisAffiches]);
 
@@ -1019,6 +1300,18 @@ export default function StocksDisponibilites2Page() {
                 ⚙️ Paramétrage hypothèses mensuelles
               </button>
 
+              {/* V2.6 : stock de sécurité (jours) + % erreur, par famille.
+                  Volontairement séparé du bouton ci-dessus : ces réglages ne
+                  déclenchent aucun recalcul de projection (ils ne pilotent
+                  que l'affichage), contrairement aux hypothèses mensuelles. */}
+              <button
+                onClick={() => { setFiabiliteFilter(undefined); setFiabiliteOpen(true); }}
+                className="rounded-lg border border-[#A6A181]/50 bg-[#A6A181]/10 px-4 py-2 text-sm font-semibold text-[#A6A181] transition hover:bg-[#A6A181]/20"
+                title="Définir, famille par famille, un stock de sécurité en jours de consommation et un % d'erreur de prévision (courbes Min/Max)"
+              >
+                🛡️ Stock sécu &amp; fiabilité
+              </button>
+
               {/* Export Excel : visible à tous les niveaux depuis la V2.4.
                   La portée suit automatiquement le contexte actuel
                   (famille sélectionnée > famille macro > toute la base). */}
@@ -1197,6 +1490,18 @@ export default function StocksDisponibilites2Page() {
                   ⚙️ Paramétrage hypothèses de cette famille · {familleHorizonWeeks} sem.
                 </button>
               )}
+
+              {/* V2.6 : raccourci vers le panneau stock sécu & fiabilité,
+                  pré-filtré sur la famille en cours. */}
+              {selectedFamille && (
+                <button
+                  onClick={() => { setFiabiliteFilter(selectedFamille); setFiabiliteOpen(true); }}
+                  className="rounded-lg border border-[#A6A181]/50 bg-[#A6A181]/10 px-3 py-1.5 text-xs font-semibold text-[#A6A181] transition hover:bg-[#A6A181]/20"
+                  title="Stock de sécurité (jours) et % d'erreur de prévision de cette famille"
+                >
+                  🛡️ Stock sécu &amp; fiabilité · {familleFiabilite.joursStockSecurite}j / {familleFiabilite.pctErreur}%
+                </button>
+              )}
             </div>
 
             <FamilleKpiPanel
@@ -1262,7 +1567,7 @@ export default function StocksDisponibilites2Page() {
                 {familleWeeklyLoading ? (
                   <div className="h-64 animate-pulse rounded-lg bg-black/[0.04]" />
                 ) : (
-                  <MonthlySortiesChart rows={monthlyChartData} todayIso={todayIso} ytdEvolution={ytdEvolution} forecastEvolution={forecastEvolution} />
+                  <MonthlySortiesChart rows={monthlyChartData} todayIso={todayIso} ytdEvolution={ytdEvolution} forecastEvolution={forecastEvolution} pctErreur={familleFiabilite.pctErreur} />
                 )}
               </div>
 
@@ -1278,7 +1583,13 @@ export default function StocksDisponibilites2Page() {
                 ) : familleWeeklyHorizon.length === 0 ? (
                   <p className="py-8 text-center text-sm text-[#141A26]/40">Aucune donnée hebdomadaire.</p>
                 ) : (
-                  <WeeklyStockChart rows={familleWeeklyHorizon} includeRetard={includeRetard} onIncludeRetardChange={setIncludeRetard} />
+                  <WeeklyStockChart
+                    rows={familleWeeklyHorizon}
+                    includeRetard={includeRetard}
+                    onIncludeRetardChange={setIncludeRetard}
+                    pctErreur={familleFiabilite.pctErreur}
+                    safetyStockQty={safetyStockQty}
+                  />
                 )}
               </div>
             </div>
@@ -1428,6 +1739,16 @@ export default function StocksDisponibilites2Page() {
         />
       )}
 
+      {fiabiliteOpen && (
+        <FiabiliteMatrix
+          initialFilter={fiabiliteFilter}
+          onClose={() => setFiabiliteOpen(false)}
+          onSaved={() => {
+            setRefreshKey((k) => k + 1);
+          }}
+        />
+      )}
+
       {selectedArticle && (
         <ArticleDrawer
           article={selectedArticle}
@@ -1438,6 +1759,7 @@ export default function StocksDisponibilites2Page() {
           substitutionByRef={substitutionByRef}
           onOpenHypotheses={(famille) => { setHypoFamilleScope(famille); setHypoOpen(true); }}
           onOpenStockDepot={(reference, designation) => setStockDepotPour({ reference, designation })}
+          pctErreurFamille={selectedArticle.famille === selectedFamille ? familleFiabilite.pctErreur : 0}
         />
       )}
     </div>
@@ -1582,12 +1904,13 @@ function FamilleKpiPanel({
 const MONTH_LABELS = ["janv.", "fév.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."];
 
 function MonthlySortiesChart({
-  rows, todayIso, ytdEvolution, forecastEvolution,
+  rows, todayIso, ytdEvolution, forecastEvolution, pctErreur = 0,
 }: {
-  rows: Array<{ annee: number; mois: number; key: string; n: number; n1: number; isFuture: boolean }>;
+  rows: Array<{ annee: number; mois: number; key: string; n: number; n1: number; isFuture: boolean; previsionPortion?: number }>;
   todayIso: string;
   ytdEvolution: number | null;
   forecastEvolution: number | null;
+  pctErreur?: number;
 }) {
   const width = 640;
   const height = 300;
@@ -1600,17 +1923,48 @@ function MonthlySortiesChart({
   const nbMois = Math.max(1, rows.length - 1);
   const currentMonthKey = todayIso.slice(0, 7);
   const currentMonthIdx = Math.max(0, rows.findIndex((r) => r.key === currentMonthKey));
-  const maxVal = Math.max(1, ...rows.flatMap((r) => [r.n, r.n1]));
-  const minVal = 0;
+
+  // V2.6 : bande Min/Max — uniquement sur la part "prévision complémentaire"
+  // (incertaine) des mois futurs. factor = pctErreur/100 ; nMin/nMax = n ∓ la
+  // part de prévision pure × factor. Les mois réalisés gardent nMin=nMax=n
+  // pour que la bande démarre exactement au point de jonction avec la
+  // courbe pleine (pas de saut visuel).
+  const factor = Math.max(0, pctErreur) / 100;
+  const withBand = useMemo(
+    () =>
+      rows.map((r) => {
+        const previsionPure = r.previsionPortion ?? 0;
+        const delta = r.isFuture ? previsionPure * factor : 0;
+        return { ...r, nMin: r.n - delta, nMax: r.n + delta };
+      }),
+    [rows, factor],
+  );
+
+  const maxVal = Math.max(1, ...withBand.flatMap((r) => [r.n, r.n1, r.nMax]));
+  const minVal = Math.min(0, ...withBand.map((r) => r.nMin));
   const x = (i: number) => padding.left + (i / nbMois) * innerW;
-  const y = (v: number) => padding.top + innerH - ((v - minVal) / (maxVal - minVal)) * innerH;
+  const y = (v: number) => padding.top + innerH - ((v - minVal) / (maxVal - minVal || 1)) * innerH;
   const todayX = x(currentMonthIdx);
   const label = (r: { annee: number; mois: number }) => `${MONTH_LABELS[r.mois - 1]}${r.annee !== rows[0]?.annee ? ` ${String(r.annee).slice(2)}` : ""}`;
+
+  // Indice de départ de la bande : un cran avant le premier mois futur, pour
+  // que le polygone Min/Max se raccorde visuellement à la courbe N.
+  const firstFutureIdx = withBand.findIndex((r) => r.isFuture);
+  const bandStartIdx = firstFutureIdx <= 0 ? firstFutureIdx : firstFutureIdx - 1;
+  const bandPoints = bandStartIdx === -1 ? [] : withBand.slice(bandStartIdx);
+  const bandPath =
+    factor > 0 && bandPoints.length > 1
+      ? [
+          ...bandPoints.map((r, i) => `${i === 0 ? "M" : "L"} ${x(bandStartIdx + i)} ${y(r.nMin)}`),
+          ...[...bandPoints].reverse().map((r, i) => `L ${x(bandStartIdx + (bandPoints.length - 1 - i))} ${y(r.nMax)}`),
+          "Z",
+        ].join(" ")
+      : "";
 
   function handleMove(e: React.MouseEvent, i: number) {
     const rect = svgRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const r = rows[i];
+    const r = withBand[i];
     setTooltip({
       x: (x(i) / width) * rect.width,
       y: (y(Math.max(r.n, r.n1)) / height) * rect.height,
@@ -1618,6 +1972,7 @@ function MonthlySortiesChart({
         { label: label(r), value: "" },
         { label: r.isFuture ? "Prévisionnel N" : "Réel N", value: formatNumber(r.n), color: r.isFuture ? "#C1683C" : "#141A26" },
         { label: "N-1", value: formatNumber(r.n1), color: "#8A93A6" },
+        ...(r.isFuture && factor > 0 ? [{ label: "  Min / Max", value: `${formatNumber(r.nMin)} / ${formatNumber(r.nMax)}`, color: MINMAX_MIN }] : []),
       ],
     });
   }
@@ -1631,6 +1986,14 @@ function MonthlySortiesChart({
     <div className="relative">
       <svg ref={svgRef} viewBox={`0 0 ${width} ${height}`} className="w-full" onMouseLeave={() => setTooltip(null)}>
         <YAxis maxVal={maxVal} minVal={minVal} height={height} top={padding.top} innerH={innerH} />
+
+        {bandPath && <path d={bandPath} fill={MINMAX_MIN} opacity={0.1} stroke="none" />}
+        {bandPath && bandPoints.length > 1 && (
+          <>
+            <path d={bandPoints.map((r, i) => `${i === 0 ? "M" : "L"} ${x(bandStartIdx + i)} ${y(r.nMin)}`).join(" ")} fill="none" stroke={MINMAX_MIN} strokeWidth={1.25} strokeDasharray="3 3" opacity={0.8} />
+            <path d={bandPoints.map((r, i) => `${i === 0 ? "M" : "L"} ${x(bandStartIdx + i)} ${y(r.nMax)}`).join(" ")} fill="none" stroke={MINMAX_MAX} strokeWidth={1.25} strokeDasharray="3 3" opacity={0.8} />
+          </>
+        )}
 
         <line x1={todayX} y1={padding.top} x2={todayX} y2={padding.top + innerH} stroke="#141A26" strokeWidth={1.5} strokeDasharray="4 4" opacity={0.5} />
 
@@ -1673,13 +2036,17 @@ function MonthlySortiesChart({
           Hypothèse sur l&rsquo;horizon vs N-1 : <EvolBadge pct={forecastEvolution} />
         </div>
       </div>
-      <div className="mt-2 flex gap-4 text-[10px] text-[#141A26]/50">
+      <div className="mt-2 flex flex-wrap gap-4 text-[10px] text-[#141A26]/50">
         <span><span className="mr-1 inline-block h-0.5 w-3 bg-[#141A26] align-middle" /> Réel N</span>
         <span><span className="mr-1 inline-block h-0.5 w-3 bg-[#C1683C] align-middle" /> Prévisionnel N</span>
         <span><span className="mr-1 inline-block h-0.5 w-3 bg-[#8A93A6] align-middle" /> N-1</span>
+        {factor > 0 && (
+          <span><span className="mr-1 inline-block h-0.5 w-3 align-middle" style={{ background: MINMAX_MIN, opacity: 0.6 }} /> Min/Max prévisionnel (±{pctErreur}%)</span>
+        )}
       </div>
       <p className="mt-1.5 text-[10px] italic text-[#141A26]/40">
         Le prévisionnel inclut les CDC fermes, qui ne sont pas affectées par l&rsquo;hypothèse mensuelle — c&rsquo;est pourquoi il peut dépasser N-1 même à 100%. Détail visible dans le graphique de droite. Le graphe se poursuit jusqu&rsquo;à la fin de l&rsquo;horizon défini pour cette famille (ci-dessus), même au-delà de décembre.
+        {factor > 0 && " La bande Min/Max ne porte que sur la prévision complémentaire (incertaine) — pas sur les CDC fermes, déjà connues."}
       </p>
     </div>
   );
@@ -1689,13 +2056,26 @@ function WeeklyStockChart({
   rows,
   includeRetard = false,
   onIncludeRetardChange,
+  pctErreur = 0,
+  safetyStockQty,
 }: {
   rows: Array<{ periode_debut: string; stock_projete: number; sorties_n: number; sorties_fermes?: number; sorties_prevision?: number; sorties_retard?: number; sorties_n1: number; entrees: number; niveau_alerte_max: string }>;
   includeRetard?: boolean;
   onIncludeRetardChange?: (value: boolean) => void;
+  /** V2.6 : % d'erreur de prévision appliqué à la seule part "prévision
+   *  complémentaire" des sorties (jamais aux CDC fermes/retard). Alimente la
+   *  moustache min/max sur les barres et les courbes optionnelles ci-dessous. */
+  pctErreur?: number;
+  /** V2.6 : quantité correspondant au stock de sécurité (déjà converti à
+   *  partir des jours réglés), tracée en ligne pointillée horizontale.
+   *  undefined = pas de ligne (réglage à 0 ou non calculable). */
+  safetyStockQty?: number;
 }) {
   const [simQty, setSimQty] = useState(0);
   const [simWeek, setSimWeek] = useState(rows[0]?.periode_debut || "");
+  // V2.6 : les courbes "stock si ventes hautes/basses" sont repliées par
+  // défaut pour ne pas surcharger le graphe — bouton dédié pour les afficher.
+  const [showMinMax, setShowMinMax] = useState(false);
   const [tooltip, setTooltip] = useState<TooltipState>(null);
   const svgRef = useRef<SVGSVGElement>(null);
 
@@ -1732,23 +2112,47 @@ function WeeklyStockChart({
     }));
   }, [effectiveRows, simQty, simWeek]);
 
-  const allVals = simulated.flatMap((r) => [r.stock_projete, r.entrees, -r.sorties_n]);
+  // V2.6 : bande Min/Max — le % d'erreur ne s'applique qu'à la part
+  // "prévision pure" (r.sorties_prevision), jamais aux CDC fermes/retard,
+  // déjà connues. cumDelta accumule semaine après semaine l'écart max lié à
+  // cette incertitude ; stock_min/stock_max = stock central ± cumDelta.
+  // C'est équivalent à recalculer toute la trajectoire avec sorties min/max,
+  // mais sans dupliquer la logique d'accumulation ni redemander le stock de
+  // départ (non disponible ici pour l'écran famille agrégé).
+  const banded = useMemo(() => {
+    const factor = Math.max(0, pctErreur) / 100;
+    let cumDelta = 0;
+    return simulated.map((r) => {
+      const previsionPure = r.sorties_prevision ?? Math.max(0, r.sorties_n - (r.sorties_fermes ?? 0) - (r.retardAffiche ?? 0));
+      cumDelta += previsionPure * factor;
+      return { ...r, previsionPure, deltaCum: cumDelta, stock_min: r.stock_projete - cumDelta, stock_max: r.stock_projete + cumDelta };
+    });
+  }, [simulated, pctErreur]);
+
+  const allVals = banded.flatMap((r) => [
+    r.stock_projete,
+    r.entrees,
+    -r.sorties_n,
+    ...(showMinMax ? [r.stock_min, r.stock_max] : []),
+    ...(safetyStockQty ? [safetyStockQty] : []),
+  ]);
   const maxVal = Math.max(1, ...allVals);
   const minVal = Math.min(0, ...allVals);
-  const x = (i: number) => padding.left + (i / Math.max(1, simulated.length - 1)) * innerW;
+  const x = (i: number) => padding.left + (i / Math.max(1, banded.length - 1)) * innerW;
   const y = (v: number) => padding.top + innerH - ((v - minVal) / (maxVal - minVal || 1)) * innerH;
-  const barWidth = Math.max(2, innerW / simulated.length - 3);
+  const barWidth = Math.max(2, innerW / banded.length - 3);
 
   function handleMove(e: React.MouseEvent, i: number) {
     const rect = svgRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const r = simulated[i];
+    const r = banded[i];
     setTooltip({
       x: (x(i) / width) * rect.width,
       y: (y(r.stock_projete) / height) * rect.height,
       lines: [
         { label: formatDate(r.periode_debut), value: "" },
         { label: "Stock projeté", value: formatNumber(r.stock_projete), color: ALERT_COLOR[r.niveau_alerte_max] },
+        ...(pctErreur > 0 ? [{ label: "  Min / Max (fiabilité)", value: `${formatNumber(r.stock_min)} / ${formatNumber(r.stock_max)}`, color: MINMAX_MIN }] : []),
         { label: "Entrées à venir", value: formatNumber(r.entrees), color: GREEN },
         ...(r.retardAffiche ? [{ label: "  dont CDC en retard", value: formatNumber(r.retardAffiche), color: VIOLET }] : []),
         ...(r.sorties_fermes !== undefined ? [{ label: "  dont CDC fermes", value: formatNumber(r.sorties_fermes), color: DARK_RED }] : []),
@@ -1771,13 +2175,20 @@ function WeeklyStockChart({
 
           <YAxis maxVal={maxVal} minVal={minVal} height={height} top={padding.top} innerH={innerH} />
 
-          {simulated.map((r, i) => (
+          {safetyStockQty !== undefined && safetyStockQty > 0 && (
+            <>
+              <line x1={padding.left} y1={y(safetyStockQty)} x2={width - padding.right} y2={y(safetyStockQty)} stroke={SAFETY_STOCK} strokeWidth={1.5} strokeDasharray="2 3" />
+              <text x={width - padding.right} y={y(safetyStockQty) - 4} fontSize={9} textAnchor="end" fill={SAFETY_STOCK}>Stock sécu. ({formatNumber(safetyStockQty)})</text>
+            </>
+          )}
+
+          {banded.map((r, i) => (
             <rect key={`in-${r.periode_debut}`} x={x(i) - barWidth / 2} y={y(Math.max(0, r.entrees))} width={barWidth} height={Math.max(0, y(0) - y(Math.max(0, r.entrees)))} fill={GREEN} opacity={0.3} />
           ))}
-          {simulated.map((r, i) => {
+          {banded.map((r, i) => {
             const retard = r.retardAffiche ?? 0;
             const fermes = r.sorties_fermes ?? 0;
-            const prevision = r.sorties_prevision ?? Math.max(0, r.sorties_n - fermes - retard);
+            const prevision = r.previsionPure;
             return (
               <g key={`out-${r.periode_debut}`}>
                 {retard > 0 && (
@@ -1788,22 +2199,57 @@ function WeeklyStockChart({
               </g>
             );
           })}
-          {simulated.map((r, i) =>
+
+          {/* V2.6 : moustache min/max sur la part prévisionnelle pure de
+              chaque barre — matérialise l'incertitude ± % erreur sans avoir
+              à dupliquer toutes les barres. */}
+          {pctErreur > 0 &&
+            banded.map((r, i) => {
+              const retard = r.retardAffiche ?? 0;
+              const fermes = r.sorties_fermes ?? 0;
+              const factor = pctErreur / 100;
+              const pMin = r.previsionPure * (1 - factor);
+              const pMax = r.previsionPure * (1 + factor);
+              const yLow = y(-(retard + fermes + pMin));
+              const yHigh = y(-(retard + fermes + pMax));
+              const cx = x(i);
+              if (r.previsionPure <= 0) return null;
+              return (
+                <g key={`whisker-${r.periode_debut}`} stroke="#141A2670" strokeWidth={1}>
+                  <line x1={cx} y1={yLow} x2={cx} y2={yHigh} />
+                  <line x1={cx - 3} y1={yLow} x2={cx + 3} y2={yLow} />
+                  <line x1={cx - 3} y1={yHigh} x2={cx + 3} y2={yHigh} />
+                </g>
+              );
+            })}
+
+          {banded.map((r, i) =>
             r.simMarker ? (
               <rect key={`sim-${r.periode_debut}`} x={x(i) - barWidth / 2} y={y(r.stock_projete) - 7} width={barWidth} height={14} fill="url(#hatch-green)" stroke="#3F9142" strokeWidth={1} />
             ) : null,
           )}
 
-          {simulated.slice(1).map((r, i) => (
-            <line key={`stock-${r.periode_debut}`} x1={x(i)} y1={y(simulated[i].stock_projete)} x2={x(i + 1)} y2={y(r.stock_projete)} stroke={ALERT_COLOR[r.niveau_alerte_max] || "#4B92AC"} strokeWidth={2.5} />
+          {banded.slice(1).map((r, i) => (
+            <line key={`stock-${r.periode_debut}`} x1={x(i)} y1={y(banded[i].stock_projete)} x2={x(i + 1)} y2={y(r.stock_projete)} stroke={ALERT_COLOR[r.niveau_alerte_max] || "#4B92AC"} strokeWidth={2.5} />
           ))}
-          {simulated.map((r, i) => (
+
+          {/* V2.6 : courbes optionnelles "stock si ventes hautes / basses". */}
+          {showMinMax &&
+            banded.slice(1).map((r, i) => (
+              <line key={`minline-${r.periode_debut}`} x1={x(i)} y1={y(banded[i].stock_min)} x2={x(i + 1)} y2={y(r.stock_min)} stroke={MINMAX_MIN} strokeWidth={1.5} strokeDasharray="4 3" />
+            ))}
+          {showMinMax &&
+            banded.slice(1).map((r, i) => (
+              <line key={`maxline-${r.periode_debut}`} x1={x(i)} y1={y(banded[i].stock_max)} x2={x(i + 1)} y2={y(r.stock_max)} stroke={MINMAX_MAX} strokeWidth={1.5} strokeDasharray="4 3" />
+            ))}
+
+          {banded.map((r, i) => (
             <rect key={`hit-${r.periode_debut}`} x={x(i) - barWidth / 2} y={0} width={barWidth} height={height} fill="transparent" onMouseMove={(e) => handleMove(e, i)} className="cursor-pointer" />
           ))}
 
           <line x1={padding.left} y1={y(0)} x2={width - padding.right} y2={y(0)} stroke="#00000033" />
-          {simulated.map((r, i) =>
-            i % Math.ceil(simulated.length / 8 || 1) === 0 ? (
+          {banded.map((r, i) =>
+            i % Math.ceil(banded.length / 8 || 1) === 0 ? (
               <text key={`lbl-${r.periode_debut}`} x={x(i)} y={height - 8} fontSize={9} textAnchor="middle" fill="#141A26aa">
                 {formatDate(r.periode_debut).slice(0, 5)}
               </text>
@@ -1812,27 +2258,44 @@ function WeeklyStockChart({
         </svg>
         <ChartTooltip tooltip={tooltip} />
       </div>
-      {onIncludeRetardChange && (
-        <label
-          className="mb-2 flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs text-[#141A26]"
-          style={{ borderColor: `${VIOLET}55`, background: `${VIOLET}12` }}
-        >
-          <input
-            type="checkbox"
-            checked={includeRetard}
-            disabled={totalRetard === 0}
-            onChange={(e) => onIncludeRetardChange(e.target.checked)}
-            className="h-3.5 w-3.5 disabled:opacity-40"
-            style={{ accentColor: VIOLET }}
-          />
-          <span className="font-medium">
-            Intégrer les CDC en retard comme besoins fermes (1<sup>re</sup>&nbsp;semaine)
-          </span>
-          <span className="ml-auto whitespace-nowrap font-[var(--font-mono)] font-medium" style={{ color: totalRetard > 0 ? VIOLET : "#141A2666" }}>
-            {totalRetard > 0 ? `${formatNumber(totalRetard)} u. en retard` : "Aucun retard"}
-          </span>
-        </label>
-      )}
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        {onIncludeRetardChange && (
+          <label
+            className="flex flex-1 cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs text-[#141A26]"
+            style={{ borderColor: `${VIOLET}55`, background: `${VIOLET}12` }}
+          >
+            <input
+              type="checkbox"
+              checked={includeRetard}
+              disabled={totalRetard === 0}
+              onChange={(e) => onIncludeRetardChange(e.target.checked)}
+              className="h-3.5 w-3.5 disabled:opacity-40"
+              style={{ accentColor: VIOLET }}
+            />
+            <span className="font-medium">
+              Intégrer les CDC en retard comme besoins fermes (1<sup>re</sup>&nbsp;semaine)
+            </span>
+            <span className="ml-auto whitespace-nowrap font-[var(--font-mono)] font-medium" style={{ color: totalRetard > 0 ? VIOLET : "#141A2666" }}>
+              {totalRetard > 0 ? `${formatNumber(totalRetard)} u. en retard` : "Aucun retard"}
+            </span>
+          </label>
+        )}
+        {pctErreur > 0 && (
+          <button
+            type="button"
+            onClick={() => setShowMinMax((v) => !v)}
+            className="rounded-lg border px-2.5 py-1.5 text-xs font-medium transition"
+            style={
+              showMinMax
+                ? { borderColor: `${MINMAX_MIN}60`, background: `${MINMAX_MIN}18`, color: MINMAX_MIN }
+                : { borderColor: "#00000022", background: "#00000008", color: "#141A2699" }
+            }
+            title="Afficher les trajectoires de stock si les ventes sont hautes (min) ou basses (max), selon le % d'erreur réglé pour cette famille"
+          >
+            {showMinMax ? "▾" : "▸"} Stock min/max (±{pctErreur}%)
+          </button>
+        )}
+      </div>
       <div className="mb-2 flex flex-wrap gap-4 text-[10px] text-[#141A26]/50">
         <span>— Stock projeté (couleur = alerte)</span>
         <span><span className="mr-1 inline-block h-2 w-2 align-middle" style={{ background: GREEN, opacity: 0.4 }} /> Entrées à venir</span>
@@ -1841,6 +2304,16 @@ function WeeklyStockChart({
         )}
         <span><span className="mr-1 inline-block h-2 w-2 align-middle" style={{ background: DARK_RED, opacity: 0.55 }} /> Sorties CDC fermes</span>
         <span><span className="mr-1 inline-block h-2 w-2 align-middle" style={{ background: LIGHT_RED, opacity: 0.45 }} /> Sorties prévisionnelles pures</span>
+        {pctErreur > 0 && <span>┃ Moustache min/max sur la prévision pure</span>}
+        {showMinMax && (
+          <>
+            <span><span className="mr-1 inline-block h-0.5 w-3 align-middle" style={{ background: MINMAX_MIN }} /> Stock si ventes hautes</span>
+            <span><span className="mr-1 inline-block h-0.5 w-3 align-middle" style={{ background: MINMAX_MAX }} /> Stock si ventes basses</span>
+          </>
+        )}
+        {safetyStockQty !== undefined && safetyStockQty > 0 && (
+          <span><span className="mr-1 inline-block h-0.5 w-3 align-middle" style={{ background: SAFETY_STOCK }} /> Stock de sécurité</span>
+        )}
         <span><span className="mr-1 inline-block h-2 w-2 border border-[#3F9142] align-middle" style={{ background: "repeating-linear-gradient(45deg, #3F9142 0 2px, transparent 2px 5px)" }} /> Simulation (semaine d&rsquo;injection)</span>
       </div>
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-black/10 bg-white/60 p-2 text-xs">
@@ -1886,6 +2359,7 @@ function ArticleDrawer({
   substitutionByRef,
   onOpenHypotheses,
   onOpenStockDepot,
+  pctErreurFamille = 0,
 }: {
   article: AlertRow;
   runId: string | null;
@@ -1895,6 +2369,10 @@ function ArticleDrawer({
   substitutionByRef: Map<string, { statut: string; entrante: number; origineBase: number }>;
   onOpenHypotheses: (famille: string) => void;
   onOpenStockDepot: (reference: string, designation: string) => void;
+  /** V2.6 : % erreur hérité de la famille de l'article (pas de réglage par
+   *  article pour l'instant) — alimente la même moustache/bascule min-max
+   *  que sur l'écran famille. */
+  pctErreurFamille?: number;
 }) {
   const [rows, setRows] = useState<ProjectionRow[]>([]);
   const [fournisseurs, setFournisseurs] = useState<FournisseurRow[]>([]);
@@ -2035,7 +2513,7 @@ function ArticleDrawer({
               {weeklyForChart.length === 0 ? (
                 <p className="py-8 text-center text-sm text-[#141A26]/40">Aucune projection hebdomadaire.</p>
               ) : (
-                <WeeklyStockChart rows={weeklyForChart} includeRetard={includeRetard} onIncludeRetardChange={onIncludeRetardChange} />
+                <WeeklyStockChart rows={weeklyForChart} includeRetard={includeRetard} onIncludeRetardChange={onIncludeRetardChange} pctErreur={pctErreurFamille} />
               )}
             </div>
 
