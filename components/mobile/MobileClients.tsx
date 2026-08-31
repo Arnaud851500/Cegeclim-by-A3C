@@ -1147,16 +1147,7 @@ function ClientDetailScreen({
             <Empty text="Aucune action en cours pour ce client." />
           ) : (
             detail.actions.map((a) => (
-              <RowItem
-                key={a.id}
-                title={a.libelle || '(sans libellé)'}
-                subtitle={[
-                  a.due_date ? `Échéance ${formatDateFr(normalizeDateIso(a.due_date))}` : '',
-                  a.assigned_to ? `Assigné : ${a.assigned_to}` : '',
-                ].filter(Boolean).join(' · ')}
-                trailing={a.status}
-                onClick={() => openActionDetail(a)}
-              />
+              <TacheRowItem key={a.id} action={a} onClick={() => openActionDetail(a)} />
             ))
           )}
         </Section>
@@ -1368,6 +1359,60 @@ function Section({ title, children }: { title: string; children: React.ReactNode
         {title}
       </div>
       {children}
+    </div>
+  )
+}
+
+/** Couleur de pastille selon l'urgence de l'échéance -- même logique à 3
+ * états que MobileTaskListSheet (rouge en retard / orange ≤ 4 j / vert
+ * au-delà ou sans échéance), pour rester cohérent entre les deux écrans
+ * où une tâche peut apparaître (liste "À faire" et fiche client). */
+function pastilleCouleurAction(dueDateIso: string): string {
+  if (!dueDateIso) return '#3F9142'
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const echeance = new Date(`${dueDateIso}T00:00:00`)
+  if (Number.isNaN(echeance.getTime())) return '#3F9142'
+  const diffJours = Math.round((echeance.getTime() - today.getTime()) / 86400000)
+  if (diffJours < 0) return '#C1683C'
+  if (diffJours <= 4) return '#D69A4A'
+  return '#3F9142'
+}
+
+/** Ligne de tâche dédiée à la section "Actions" de la fiche client --
+ * ÉVOLUTION : le titre retourne désormais à la ligne au lieu d'être coupé
+ * hors de la carte ; le statut ("Non débuté"...) n'a plus d'intérêt pour
+ * des tâches par définition toutes non terminées ici (la liste exclut déjà
+ * Terminé/Annulé), remplacé par l'échéance dans la même police ; une
+ * pastille de couleur reflète l'urgence de cette échéance, comme sur la
+ * liste "À faire". */
+function TacheRowItem({ action, onClick }: { action: ActionRow; onClick: () => void }) {
+  const dueIso = normalizeDateIso(action.due_date || '')
+  return (
+    <div
+      onClick={onClick}
+      style={{
+        display: 'flex', flexDirection: 'column', gap: 4,
+        borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)',
+        padding: '9px 12px', cursor: 'pointer',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span aria-hidden="true" style={{ width: 8, height: 8, borderRadius: '50%', background: pastilleCouleurAction(dueIso), flexShrink: 0 }} />
+        <span style={{ fontSize: 14.5, color: '#fff', flex: 1, minWidth: 0, wordBreak: 'break-word', lineHeight: 1.4 }}>
+          {action.libelle || '(sans libellé)'}
+        </span>
+        {dueIso && (
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'rgba(255,255,255,0.75)', whiteSpace: 'nowrap', flexShrink: 0 }}>
+            {formatDateFr(dueIso)}
+          </span>
+        )}
+      </div>
+      {action.assigned_to && (
+        <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.4)', marginLeft: 16 }}>
+          Assigné : {action.assigned_to}
+        </div>
+      )}
     </div>
   )
 }
