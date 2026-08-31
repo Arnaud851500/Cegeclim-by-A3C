@@ -404,7 +404,7 @@ export default function MobileClients({
       const nowIso = new Date().toISOString()
 
       const [
-        activiteRes, devisRes, actionsRes, monthRes,
+        activiteRes, devisRes, devisConvertisBcRes, devisConvertisFactureRes, actionsRes, monthRes,
         fluxNRes, fluxN1Res, contactsRes, adresseRes,
         visitePasseeRes, visiteFutureRes,
       ] = await Promise.all([
@@ -423,10 +423,35 @@ export default function MobileClients({
           // quelle côté activite_lignes pour les CDC/PL/BL/BR ci-dessus.
           // La "Référence chantier" affichée sur une fiche devis était
           // donc systématiquement vide.
+          //
+          // CORRECTIF : aucun filtre type_document n'était appliqué --
+          // devis_lignes contient aussi les lignes de commande/PL/BL/BR
+          // liées (colonnes numero_piece_bc, numero_piece_bl...), donc la
+          // section "Devis" pouvait afficher des pièces d'un autre type.
           .select('numero_piece,reference,date_devis,reference_article,designation,quantite,montant_ht')
           .eq('numero_tiers_entete', client.numero)
+          .eq('type_document', 'Devis')
           .order('date_devis', { ascending: false })
           .limit(300),
+        // ÉVOLUTION : seuls les devis pas encore transformés en commande
+        // ni facturés doivent s'afficher -- ces deux requêtes récupèrent
+        // les numéros de devis déjà "consommés" (via numero_piece_devis,
+        // rempli sur les lignes de commande de devis_lignes et sur
+        // facture_lignes quand Sage a conservé le lien vers le devis
+        // d'origine), pour les exclure ci-dessous. Absence de lien = on
+        // ne peut pas savoir, le devis reste affiché plutôt que d'être
+        // masqué à tort.
+        supabase
+          .from('devis_lignes')
+          .select('numero_piece_devis')
+          .eq('numero_tiers_entete', client.numero)
+          .eq('type_document', 'Bon de commande')
+          .not('numero_piece_devis', 'is', null),
+        supabase
+          .from('facture_lignes')
+          .select('numero_piece_devis')
+          .eq('numero_tiers_entete', client.numero)
+          .not('numero_piece_devis', 'is', null),
         supabase
           .from('todo_actions')
           .select('id,description_action,status,due_date,assigned_to')
@@ -484,6 +509,13 @@ export default function MobileClients({
       if (contactsRes.error) loadErrors.push(contactsRes.error.message)
       if (visitePasseeRes.error) loadErrors.push(visitePasseeRes.error.message)
       if (visiteFutureRes.error) loadErrors.push(visiteFutureRes.error.message)
+      // Les deux requêtes d'exclusion (devisConvertisBcRes/FactureRes) ne
+      // sont volontairement pas remontées dans loadErrors : une erreur
+      // dessus ne doit pas bloquer l'affichage de la fiche, juste
+      // désactiver l'exclusion (le filtre ci-dessous les traite comme des
+      // listes vides en cas d'erreur, via `.data || []`).
+      if (devisConvertisBcRes.error) console.warn('[MobileClients] lecture devis->commande impossible :', devisConvertisBcRes.error.message)
+      if (devisConvertisFactureRes.error) console.warn('[MobileClients] lecture devis->facture impossible :', devisConvertisFactureRes.error.message)
 
       const activiteRows = activiteRes.data || []
       const byType = (t: string) => activiteRows.filter((r: any) => r.type_document === t)
@@ -492,7 +524,16 @@ export default function MobileClients({
       const preparations = aggregateByDocument(byType('Préparation de livraison'), ['date_pl', 'date_piece'])
       const livraisons = aggregateByDocument(byType('Bon de livraison'), ['date_bl', 'date_piece'])
       const retours = aggregateByDocument(byType('Bon de retour'), ['date_bl', 'date_piece'])
-      const devis = aggregateByDocument(devisRes.data || [], ['date_devis'])
+
+      // ÉVOLUTION : ne garder que les devis pas encore transformés en
+      // commande ni facturés -- exclusion via les numéros de devis déjà
+      // référencés (numero_piece_devis) côté commande/facture.
+      const numerosDevisConvertis = new Set<string>([
+        ...((devisConvertisBcRes.data || []) as Array<{ numero_piece_devis: string | null }>).map((r) => safeText(r.numero_piece_devis)),
+        ...((devisConvertisFactureRes.data || []) as Array<{ numero_piece_devis: string | null }>).map((r) => safeText(r.numero_piece_devis)),
+      ].filter(Boolean))
+      const devisNonConvertis = (devisRes.data || []).filter((r: any) => !numerosDevisConvertis.has(safeText(r.numero_piece)))
+      const devis = aggregateByDocument(devisNonConvertis, ['date_devis'])
 
       const fluxN = Array.isArray(fluxNRes.data) ? fluxNRes.data[0] : fluxNRes.data
       const fluxN1 = Array.isArray(fluxN1Res.data) ? fluxN1Res.data[0] : fluxN1Res.data
