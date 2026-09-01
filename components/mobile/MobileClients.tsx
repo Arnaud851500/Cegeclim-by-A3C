@@ -653,6 +653,9 @@ export default function MobileClients({
             }
           })
         }}
+        onTaskCreated={(created) => {
+          setDetail((cur) => (cur ? { ...cur, actions: [...cur.actions, created] } : cur))
+        }}
       />
     )
   }
@@ -795,7 +798,7 @@ function EvolLine({ value, n1, isPoints }: { value: number | null; n1: number | 
 }
 
 function ClientDetailScreen({
-  client, detail, loading, currentEmail, currentName, onBack, onActionSaved, onOpenStock,
+  client, detail, loading, currentEmail, currentName, onBack, onActionSaved, onTaskCreated, onOpenStock,
 }: {
   client: ClientRow
   detail: ClientDetail | null
@@ -804,6 +807,12 @@ function ClientDetailScreen({
   currentName: string
   onBack: () => void
   onActionSaved: (updated: TaskRow) => void
+  /** ÉVOLUTION : création manuelle (ou vocale) d'une tâche directement
+   * depuis la fiche client -- voir bouton "+ Tâche" à côté du nom du
+   * client et NouvelleTacheSheet ci-dessous. La tâche est immédiatement
+   * ajoutée à la liste locale detail.actions (même mécanique que
+   * onActionSaved) pour éviter de recharger toute la fiche. */
+  onTaskCreated: (created: ActionRow) => void
   onOpenStock?: (reference: string, designation: string) => void
 }) {
   const [openDetail, setOpenDetail] = useState<{ title: string; subtitle?: string; fields: DetailField[]; footer?: React.ReactNode } | null>(null)
@@ -811,6 +820,7 @@ function ClientDetailScreen({
   const [contactsOuverts, setContactsOuverts] = useState(false)
   const [navigationVers, setNavigationVers] = useState<{ adresse: string; lat?: number | null; lon?: number | null } | null>(null)
   const [appelVers, setAppelVers] = useState<string | null>(null)
+  const [nouvelleTacheOuverte, setNouvelleTacheOuverte] = useState(false)
 
   // ÉVOLUTION : alertes de suivi paramétrables par client (nb d'appels/
   // visites min par mois, nb de jours sans devis, nb de jours sans
@@ -1006,36 +1016,53 @@ function ClientDetailScreen({
 
       <div style={{ padding: '16px 3px', display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
             <div style={{ fontSize: 20, fontWeight: 700, color: '#fff' }}>{client.nom || '(nom non renseigné)'}</div>
-            {!loading && detail && (
+            {/* Groupe d'actions à droite -- "+ Tâche" toujours visible (ne
+             * dépend pas du chargement du détail), contacts/adresse comme
+             * avant une fois le détail chargé. */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              {!loading && detail && (
+                <button
+                  onClick={openContactsDetail}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 4, borderRadius: 999,
+                    border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.06)',
+                    color: 'rgba(255,255,255,0.75)', fontSize: 12, fontWeight: 600, padding: '3px 9px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  👤 {detail.contacts.length}
+                </button>
+              )}
+              {!loading && detail && detail.adresse && (
+                <button
+                  onClick={() => setNavigationVers({
+                    adresse: [detail.adresse!.ligne1, detail.adresse!.codePostal, detail.adresse!.ville].filter(Boolean).join(', '),
+                  })}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 4, borderRadius: 999,
+                    border: '1px solid rgba(75,146,172,0.3)', background: 'rgba(75,146,172,0.12)',
+                    color: '#8FC7DA', fontSize: 12, fontWeight: 600, padding: '3px 9px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  📍 Adresse
+                </button>
+              )}
               <button
-                onClick={openContactsDetail}
+                type="button"
+                onClick={() => setNouvelleTacheOuverte(true)}
                 style={{
                   display: 'inline-flex', alignItems: 'center', gap: 4, borderRadius: 999,
-                  border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.06)',
-                  color: 'rgba(255,255,255,0.75)', fontSize: 12, fontWeight: 600, padding: '3px 9px',
+                  border: '1px solid rgba(63,145,66,0.35)', background: 'rgba(63,145,66,0.12)',
+                  color: '#8fd4a8', fontSize: 12, fontWeight: 700, padding: '3px 9px',
                   cursor: 'pointer',
                 }}
               >
-                👤 {detail.contacts.length}
+                + Tâche
               </button>
-            )}
-            {!loading && detail && detail.adresse && (
-              <button
-                onClick={() => setNavigationVers({
-                  adresse: [detail.adresse!.ligne1, detail.adresse!.codePostal, detail.adresse!.ville].filter(Boolean).join(', '),
-                })}
-                style={{
-                  display: 'inline-flex', alignItems: 'center', gap: 4, borderRadius: 999,
-                  border: '1px solid rgba(75,146,172,0.3)', background: 'rgba(75,146,172,0.12)',
-                  color: '#8FC7DA', fontSize: 12, fontWeight: 600, padding: '3px 9px',
-                  cursor: 'pointer',
-                }}
-              >
-                📍 Adresse
-              </button>
-            )}
+            </div>
           </div>
           <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>
             N° {client.numero}
@@ -1280,10 +1307,148 @@ function ClientDetailScreen({
         </div>
       )}
 
+      {nouvelleTacheOuverte && (
+        <NouvelleTacheSheet
+          client={client}
+          currentEmail={currentEmail}
+          currentName={currentName}
+          onClose={() => setNouvelleTacheOuverte(false)}
+          onCreated={(task) => onTaskCreated(task)}
+        />
+      )}
+
       {navigationVers && (
         <NavigationChoiceSheet adresse={navigationVers.adresse} lat={navigationVers.lat} lon={navigationVers.lon} onClose={() => setNavigationVers(null)} />
       )}
       {appelVers && <PhoneChoiceSheet telephone={appelVers} onClose={() => setAppelVers(null)} />}
+    </div>
+  )
+}
+
+/** ÉVOLUTION : création d'une tâche directement depuis la fiche client --
+ * déjà affectée à ce client (numero_tiers pré-rempli, non modifiable) ;
+ * deux façons de créer : saisie manuelle (description/échéance/assigné)
+ * ou par la voix via VoiceReportButtons (bouton "Tâche vocale" déjà
+ * utilisé ailleurs pour les comptes-rendus/tâches liés à un RDV -- ici
+ * réutilisé sans rendez-vous associé, voir NOTE ci-dessous). */
+function NouvelleTacheSheet({
+  client, currentEmail, currentName, onClose, onCreated,
+}: {
+  client: ClientRow
+  currentEmail: string
+  currentName: string
+  onClose: () => void
+  onCreated: (task: ActionRow) => void
+}) {
+  const [description, setDescription] = useState('')
+  const [dueDate, setDueDate] = useState('')
+  const [assignedTo, setAssignedTo] = useState(currentName)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  async function creer() {
+    if (!description.trim()) { setError('La description est obligatoire.'); return }
+    setSaving(true)
+    setError('')
+    try {
+      const { data, error: err } = await supabase
+        .from('todo_actions')
+        .insert({
+          numero_tiers: client.numero,
+          description_action: description.trim(),
+          due_date: dueDate || null,
+          assigned_to: assignedTo.trim() || null,
+          status: 'Non débuté',
+        })
+        .select('id, description_action, status, due_date, assigned_to')
+        .single()
+      if (err) throw err
+      onCreated({
+        id: String(data.id),
+        libelle: String(data.description_action || ''),
+        status: String(data.status || ''),
+        due_date: data.due_date || null,
+        assigned_to: data.assigned_to || null,
+      })
+      onClose()
+    } catch (e: any) {
+      setError(e?.message || 'Erreur lors de la création de la tâche.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 260, background: 'rgba(6,10,18,0.65)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }} onClick={() => !saving && onClose()}>
+      <div style={{ width: '100%', maxWidth: 480, maxHeight: '88vh', overflowY: 'auto', background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.1)', padding: '12px 18px 26px', display: 'flex', flexDirection: 'column', gap: 12 }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 2px' }} />
+        <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Nouvelle tâche</div>
+        <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginTop: -6 }}>{client.nom || client.numero}</div>
+
+        <div>
+          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Description</div>
+          <textarea
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            rows={3}
+            placeholder="Ex. : Relancer sur le devis en cours…"
+            autoFocus
+            style={{ width: '100%', borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '10px', fontSize: 14.5, resize: 'vertical' }}
+          />
+        </div>
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Échéance (facultatif)</div>
+            <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Assignée à</div>
+            <input value={assignedTo} onChange={(e) => setAssignedTo(e.target.value)} placeholder="Nom…" style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }} />
+          </div>
+        </div>
+
+        {error && <div style={{ fontSize: 13, color: '#e0a685' }}>{error}</div>}
+
+        <button
+          type="button"
+          onClick={() => void creer()}
+          disabled={saving}
+          style={{ padding: '13px', borderRadius: 12, border: 'none', background: '#A6A181', color: '#141A26', fontSize: 14.5, fontWeight: 700 }}
+        >
+          {saving ? 'Création…' : 'Créer la tâche'}
+        </button>
+
+        <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 12 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'rgba(255,255,255,0.5)', marginBottom: 8 }}>
+            Ou par la voix
+          </div>
+          {/* NOTE : VoiceReportButtons est ici utilisé sans rendez-vous
+             associé (rdvActivityId non fourni) -- contrairement aux autres
+             usages de ce composant dans l'app (toujours liés à un RDV via
+             blgActivityId/compagnonId). Seul le bouton "Tâche vocale" a du
+             sens dans ce contexte ; à vérifier côté composant que le
+             bouton "Compte-rendu vocal" se comporte correctement (ou
+             disparaît) quand rdvActivityId est undefined -- non vérifiable
+             ici sans le code source de VoiceReportButtons.tsx. */}
+          <VoiceReportButtons
+            numeroTiers={client.numero}
+            clientNom={client.nom}
+            rdvActivityId={undefined}
+            rdvLabel="Tâche manuelle"
+            userEmail={currentEmail}
+            userName={currentName}
+          />
+        </div>
+
+        <button
+          type="button"
+          onClick={() => !saving && onClose()}
+          style={{ padding: '11px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: 'transparent', color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: 600 }}
+        >
+          Fermer
+        </button>
+      </div>
     </div>
   )
 }

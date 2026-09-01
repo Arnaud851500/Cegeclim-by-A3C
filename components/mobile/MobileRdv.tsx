@@ -121,6 +121,9 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
   const [periodeBornes, setPeriodeBornes] = useState<{ debut: Date; fin: Date } | null>(null)
 
   const [nouveauRdvOuvert, setNouveauRdvOuvert] = useState(false)
+  // ÉVOLUTION : édition d'un rdv compagnon existant -- voir
+  // ModifierRdvSheet ci-dessous et le bouton "Modifier" dans openRdvDetail.
+  const [editingRdv, setEditingRdv] = useState<RdvUnifie | null>(null)
 
   const [currentEmail, setCurrentEmail] = useState('')
   const [currentName, setCurrentName] = useState('')
@@ -283,6 +286,35 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
     void chargerRdv(currentEmail, currentName, blgPartnerId, debut, fin)
   }
 
+  /** ÉVOLUTION : suppression d'un rdv compagnon depuis l'écran du rdv
+   * (pas depuis la liste) -- uniquement pour les rdv "compagnon CEGECLIM"
+   * (source === 'compagnon', créés dans rdv_compagnon) : les rdv
+   * synchronisés BLG/Outlook ne sont pas modifiables depuis l'app.
+   * Même garde-fou que supprimer() dans CompteRenduBlock : `.select('id')`
+   * après le `.delete()` pour détecter une suppression bloquée par une
+   * policy RLS (0 ligne réellement supprimée, error === null sinon). */
+  async function supprimerRdvCompagnon(r: RdvUnifie) {
+    if (r.source !== 'compagnon' || !r.compagnon_id) return
+    if (!window.confirm('Supprimer ce rendez-vous ? Cette action est définitive.')) return
+    try {
+      const { data, error } = await supabase
+        .from('rdv_compagnon')
+        .delete()
+        .eq('id', r.compagnon_id)
+        .select('id')
+      if (error) throw error
+      if (!data || data.length === 0) {
+        window.alert("Suppression refusée par la base (droits insuffisants) — le rendez-vous n'a pas été supprimé.")
+        return
+      }
+      setOpenDetail(null)
+      await rafraichirPeriode()
+    } catch (e) {
+      console.error('[MobileRdv] erreur suppression rdv_compagnon', e)
+      window.alert(e instanceof Error ? e.message : String(e))
+    }
+  }
+
   function openRdvDetail(r: RdvUnifie) {
     const startDate = r.start_date ? new Date(r.start_date) : null
     const endDate = r.end_date ? new Date(r.end_date) : null
@@ -290,6 +322,7 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
     const peutNaviguer = Boolean(r.numero_tiers && onOpenClient)
     const activityId = r.source === 'compagnon' ? r.compagnon_id : r.blg_activity_id
     const aTacheEnCours = Boolean(r.numero_tiers && tachesEnCoursParTiers.has(r.numero_tiers))
+    const estCompagnon = r.source === 'compagnon'
     setOpenDetail({
       title: r.subject,
       subtitle: `${RDV_TYPE_LABELS[r.type] || r.type || 'Activité'}${r.source === 'compagnon' ? ' · RDV compagnon' : ''}`,
@@ -305,6 +338,36 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, borderRadius: 10, border: '1px solid rgba(230,159,74,0.4)', background: 'rgba(230,159,74,0.12)', padding: '10px 12px' }}>
               <span style={{ fontSize: 16 }}>⚠️</span>
               <span style={{ fontSize: 12.5, color: '#E8A96A' }}>Une tâche non terminée est en cours pour ce client — engagement pris à ne pas oublier avant ce rendez-vous.</span>
+            </div>
+          )}
+          {/* ÉVOLUTION : modifier/supprimer -- uniquement pour les rdv
+             "compagnon CEGECLIM" (source==='compagnon'), les rdv BLG/
+             Outlook n'étant pas éditables depuis l'app (ils doivent être
+             modifiés côté Outlook/BLG). */}
+          {estCompagnon && (
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                type="button"
+                onClick={() => { setOpenDetail(null); setEditingRdv(r) }}
+                style={{
+                  flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                  padding: '11px', borderRadius: 12, border: '1px solid rgba(166,161,129,0.4)',
+                  background: 'rgba(166,161,129,0.14)', color: '#e4dfc9', fontSize: 13.5, fontWeight: 700,
+                }}
+              >
+                ✏️ Modifier
+              </button>
+              <button
+                type="button"
+                onClick={() => void supprimerRdvCompagnon(r)}
+                style={{
+                  flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                  padding: '11px', borderRadius: 12, border: '1px solid rgba(193,104,60,0.4)',
+                  background: 'rgba(193,104,60,0.14)', color: '#e0a685', fontSize: 13.5, fontWeight: 700,
+                }}
+              >
+                🗑 Supprimer
+              </button>
             </div>
           )}
           {peutNaviguer && (
@@ -663,6 +726,14 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
         />
       )}
 
+      {editingRdv && (
+        <ModifierRdvSheet
+          rdv={editingRdv}
+          onClose={() => setEditingRdv(null)}
+          onUpdated={() => void rafraichirPeriode()}
+        />
+      )}
+
       {openDetail && (
         <MobileDetailSheet
           title={openDetail.title}
@@ -1009,6 +1080,172 @@ function NouveauRdvSheet({
           style={{ padding: '13px', borderRadius: 12, border: 'none', background: '#A6A181', color: '#141A26', fontSize: 14.5, fontWeight: 700 }}
         >
           {saving ? 'Création…' : 'Créer le RDV'}
+        </button>
+        <button
+          type="button"
+          onClick={() => !saving && onClose()}
+          style={{ padding: '11px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: 'transparent', color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: 600 }}
+        >
+          Annuler
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** ÉVOLUTION : édition d'un rdv "compagnon CEGECLIM" existant (date,
+ * heure, durée, objet, type, client, lieu) -- même formulaire que
+ * NouveauRdvSheet, prérempli à partir du rdv, et qui fait un UPDATE sur
+ * rdv_compagnon (id = rdv.compagnon_id) au lieu d'un INSERT. Uniquement
+ * rendu pour les rdv source === 'compagnon' (voir editingRdv dans
+ * MobileRdv) -- les rdv BLG/Outlook ne sont pas éditables ici. */
+function ModifierRdvSheet({
+  rdv, onClose, onUpdated,
+}: { rdv: RdvUnifie; onClose: () => void; onUpdated: () => void }) {
+  const startDateInitiale = rdv.start_date ? new Date(rdv.start_date) : new Date()
+  const endDateInitiale = rdv.end_date ? new Date(rdv.end_date) : new Date(startDateInitiale.getTime() + 60 * 60000)
+  const dureeInitiale = Math.max(15, Math.round((endDateInitiale.getTime() - startDateInitiale.getTime()) / 60000))
+
+  const [clientSearch, setClientSearch] = useState('')
+  const [clientResults, setClientResults] = useState<{ numero: string; intitule: string }[]>([])
+  const [numeroTiers, setNumeroTiers] = useState<string | null>(rdv.numero_tiers)
+  const [intituleTiers, setIntituleTiers] = useState(rdv.company_name || '')
+  const [subject, setSubject] = useState(rdv.subject || '')
+  const [type, setType] = useState<'meeting' | 'phoneCall' | 'reminder'>(
+    rdv.type === 'phoneCall' || rdv.type === 'reminder' ? rdv.type : 'meeting',
+  )
+  const [date, setDate] = useState(startDateInitiale.toISOString().slice(0, 10))
+  const [heure, setHeure] = useState(startDateInitiale.toTimeString().slice(0, 5))
+  const [duree, setDuree] = useState(dureeInitiale)
+  const [lieu, setLieu] = useState(rdv.lieu || '')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    const q = clientSearch.trim()
+    if (!q || numeroTiers) { setClientResults([]); return }
+    const t = window.setTimeout(async () => {
+      const { data } = await supabase.from('ref_tiers').select('numero, intitule').or(`numero.ilike.${q}%,intitule.ilike.%${q}%`).limit(8)
+      setClientResults(((data || []) as any[]).map((r) => ({ numero: String(r.numero || ''), intitule: String(r.intitule || '') })))
+    }, 250)
+    return () => window.clearTimeout(t)
+  }, [clientSearch, numeroTiers])
+
+  async function enregistrer() {
+    if (!subject.trim() || !date) { setError('Objet et date sont obligatoires.'); return }
+    if (!rdv.compagnon_id) { setError('Rendez-vous invalide (identifiant manquant).'); return }
+    setSaving(true)
+    setError('')
+    try {
+      const start = new Date(`${date}T${heure}:00`)
+      const end = new Date(start.getTime() + duree * 60000)
+      const { error: err } = await supabase
+        .from('rdv_compagnon')
+        .update({
+          numero_tiers: numeroTiers,
+          type,
+          subject: subject.trim(),
+          start_date: start.toISOString(),
+          end_date: end.toISOString(),
+          all_day: false,
+          lieu: lieu.trim() || null,
+        })
+        .eq('id', rdv.compagnon_id)
+      if (err) throw err
+      onUpdated()
+      onClose()
+    } catch (e: any) {
+      setError(e?.message || 'Erreur lors de la modification du RDV.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 2200, background: 'rgba(6,10,18,0.65)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }} onClick={() => !saving && onClose()}>
+      <div style={{ width: '100%', maxWidth: 480, maxHeight: '88vh', overflowY: 'auto', background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.1)', padding: '12px 18px 26px', display: 'flex', flexDirection: 'column', gap: 12 }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 2px' }} />
+        <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Modifier le rendez-vous</div>
+        <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginTop: -6 }}>RDV compagnon CEGECLIM — indépendant de BLG/Outlook</div>
+
+        <div style={{ position: 'relative' }}>
+          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Client (facultatif)</div>
+          <input
+            value={numeroTiers ? `${intituleTiers} (${numeroTiers})` : clientSearch}
+            onChange={(e) => { setClientSearch(e.target.value); setNumeroTiers(null) }}
+            placeholder="Nom ou numéro du client…"
+            style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }}
+          />
+          {numeroTiers && (
+            <button type="button" onClick={() => { setNumeroTiers(null); setClientSearch('') }} style={{ marginTop: 4, background: 'none', border: 'none', color: '#e0a685', fontSize: 11.5, fontWeight: 600, padding: 0 }}>Retirer</button>
+          )}
+          {clientResults.length > 0 && !numeroTiers && (
+            <div style={{ marginTop: 6, borderRadius: 10, border: '1px solid rgba(255,255,255,0.12)', background: '#0B1220', overflow: 'hidden' }}>
+              {clientResults.map((c) => (
+                <button
+                  key={c.numero}
+                  type="button"
+                  onClick={() => { setNumeroTiers(c.numero); setIntituleTiers(c.intitule); setClientResults([]) }}
+                  style={{ display: 'block', width: '100%', textAlign: 'left', padding: '9px 12px', border: 'none', borderBottom: '1px solid rgba(255,255,255,0.06)', background: 'transparent', color: '#fff', fontSize: 13.5 }}
+                >
+                  <span style={{ color: '#E8A96A', fontWeight: 700 }}>{c.numero}</span> · {c.intitule}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div>
+          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Objet</div>
+          <textarea
+            value={subject}
+            onChange={(e) => setSubject(e.target.value)}
+            rows={2}
+            placeholder="Ex. : Visite chantier, appel de relance…"
+            style={{ width: '100%', borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '10px', fontSize: 14.5, resize: 'vertical' }}
+          />
+        </div>
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Type</div>
+            <select value={type} onChange={(e) => setType(e.target.value as typeof type)} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }}>
+              <option value="meeting">RDV</option>
+              <option value="phoneCall">Appel</option>
+              <option value="reminder">Rappel</option>
+            </select>
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Durée (min)</div>
+            <input type="number" value={duree} onChange={(e) => setDuree(Number(e.target.value) || 60)} min={15} step={15} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }} />
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Date</div>
+            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Heure</div>
+            <input type="time" value={heure} onChange={(e) => setHeure(e.target.value)} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', color: '#fff', background: 'rgba(255,255,255,0.05)', padding: '0 10px', fontSize: 14.5 }} />
+          </div>
+        </div>
+
+        <div>
+          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Lieu (facultatif)</div>
+          <input value={lieu} onChange={(e) => setLieu(e.target.value)} placeholder="Ex. : Chez le client, agence…" style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }} />
+        </div>
+
+        {error && <div style={{ fontSize: 13, color: '#e0a685' }}>{error}</div>}
+
+        <button
+          type="button"
+          onClick={() => void enregistrer()}
+          disabled={saving}
+          style={{ padding: '13px', borderRadius: 12, border: 'none', background: '#A6A181', color: '#141A26', fontSize: 14.5, fontWeight: 700 }}
+        >
+          {saving ? 'Enregistrement…' : 'Enregistrer les modifications'}
         </button>
         <button
           type="button"
