@@ -169,6 +169,33 @@ type ActionRow = { id: string; libelle: string; status: string; due_date: string
  * autre modification n'a de raison d'avoir lieu après coup sur une tâche
  * close). */
 type TacheTermineeRow = { id: string; libelle: string; dueDate: string | null; updatedAt: string; assignedTo: string | null }
+/** ÉVOLUTION : "décision client sur devis" -- quand un devis est accepté
+ * (en tout ou partie) par le client, l'utilisateur peut le flaguer "à
+ * traiter" et composer, à partir des lignes du devis d'origine, un
+ * document "Devis à transformer en CDC" : lignes conservées, lignes
+ * retirées (flag suppression), et nouvelles lignes ajoutées à la main
+ * (référence avec aide à la saisie via v_stock_articles_latest, quantité,
+ * taux de remise saisi manuellement -- pas de calcul automatique). Stocké
+ * dans devis_transformations / devis_transformation_lignes (nouvelles
+ * tables, migration du 2026-09-02) pour rester consultable ensuite ; une
+ * tâche todo_actions est créée en parallèle pour le suivi commercial. */
+type DevisTransformation = {
+  id: string
+  numeroPieceDevisOrigine: string
+  statut: string
+  motif: string | null
+  createdByName: string | null
+  createdAt: string
+}
+type DevisTransformationLigne = {
+  id: string
+  origine: 'conservee' | 'supprimee' | 'nouvelle'
+  referenceArticle: string
+  designation: string
+  quantite: number | null
+  montantHt: number | null
+  tauxRemise: number | null
+}
 /** Visite unifiée (BLG synchronisé OU RDV "compagnon CEGECLIM") -- source
  * v_rdv_unifie (voir CORRECTIF ci-dessous), pas crm_base_activity seul.
  * blgActivityId/compagnonId : l'un des deux est rempli selon `source`,
@@ -821,6 +848,15 @@ function ClientDetailScreen({
   const [navigationVers, setNavigationVers] = useState<{ adresse: string; lat?: number | null; lon?: number | null } | null>(null)
   const [appelVers, setAppelVers] = useState<string | null>(null)
   const [nouvelleTacheOuverte, setNouvelleTacheOuverte] = useState(false)
+  // ÉVOLUTION : "décision client sur devis" -- voir DevisTransformation*
+  // ci-dessus. devisATraiter ouvre le formulaire de composition à partir
+  // d'un devis donné ; transformationsOuvertes/transformations gèrent la
+  // liste "Devis à transformer en CDC" déjà générés pour ce client
+  // (chargée à la demande, comme tachesTerminees).
+  const [devisATraiter, setDevisATraiter] = useState<DocAgrege | null>(null)
+  const [transformationsOuvertes, setTransformationsOuvertes] = useState(false)
+  const [transformations, setTransformations] = useState<DevisTransformation[] | null>(null)
+  const [transformationsLoading, setTransformationsLoading] = useState(false)
 
   // ÉVOLUTION : alertes de suivi paramétrables par client (nb d'appels/
   // visites min par mois, nb de jours sans devis, nb de jours sans
@@ -921,6 +957,94 @@ function ClientDetailScreen({
     )
   }
 
+  /** Charge la liste des "Devis à transformer en CDC" déjà générés pour ce
+   * client (tous statuts confondus) -- appelé au clic sur la section
+   * dédiée, pas au chargement de la fiche. */
+  async function ouvrirTransformations() {
+    setTransformationsOuvertes(true)
+    setTransformationsLoading(true)
+    const { data, error } = await supabase
+      .from('devis_transformations')
+      .select('id, numero_piece_devis_origine, statut, motif, created_by_name, created_at')
+      .eq('numero_tiers', client.numero)
+      .order('created_at', { ascending: false })
+      .limit(50)
+    setTransformationsLoading(false)
+    if (error) {
+      console.error('[MobileClients] erreur chargement devis_transformations', error)
+      setTransformations([])
+      return
+    }
+    setTransformations(
+      (data || []).map((r: any) => ({
+        id: String(r.id),
+        numeroPieceDevisOrigine: String(r.numero_piece_devis_origine || ''),
+        statut: String(r.statut || ''),
+        motif: r.motif || null,
+        createdByName: r.created_by_name || null,
+        createdAt: String(r.created_at || ''),
+      })),
+    )
+  }
+
+  /** Détail (lecture) d'un document "Devis à transformer en CDC" déjà
+   * généré -- charge ses lignes à la demande et affiche un bouton pour
+   * marquer le document comme transformé une fois la commande passée
+   * dans Sage. */
+  async function openTransformationDetail(t: DevisTransformation) {
+    const { data, error } = await supabase
+      .from('devis_transformation_lignes')
+      .select('id, origine, reference_article, designation, quantite, montant_ht, taux_remise')
+      .eq('transformation_id', t.id)
+      .order('origine', { ascending: true })
+    if (error) {
+      console.error('[MobileClients] erreur chargement devis_transformation_lignes', error)
+    }
+    const lignes: DevisTransformationLigne[] = (data || []).map((r: any) => ({
+      id: String(r.id),
+      origine: r.origine,
+      referenceArticle: String(r.reference_article || ''),
+      designation: String(r.designation || ''),
+      quantite: r.quantite === null || r.quantite === undefined ? null : safeNumber(r.quantite),
+      montantHt: r.montant_ht === null || r.montant_ht === undefined ? null : safeNumber(r.montant_ht),
+      tauxRemise: r.taux_remise === null || r.taux_remise === undefined ? null : safeNumber(r.taux_remise),
+    }))
+    const labelOrigine: Record<string, string> = { conservee: 'Conservée', supprimee: 'À supprimer', nouvelle: 'Nouvelle' }
+    async function marquerTransforme() {
+      const { error: err } = await supabase
+        .from('devis_transformations')
+        .update({ statut: 'transforme', updated_at: new Date().toISOString() })
+        .eq('id', t.id)
+      if (err) {
+        window.alert(err.message)
+        return
+      }
+      setOpenDetail(null)
+      setTransformations((cur) => (cur ? cur.map((x) => (x.id === t.id ? { ...x, statut: 'transforme' } : x)) : cur))
+    }
+    setOpenDetail({
+      title: `Devis à transformer en CDC — ${t.numeroPieceDevisOrigine}`,
+      subtitle: `${t.statut === 'transforme' ? '✅ Transformé' : t.statut === 'annule' ? '✖ Annulé' : '⏳ À traiter'}${t.motif ? ` · ${t.motif}` : ''}`,
+      fields: lignes.map((l) => ({
+        label: `[${labelOrigine[l.origine] || l.origine}] ${l.referenceArticle || '—'}${l.designation ? ` — ${l.designation}` : ''}`,
+        value: [
+          l.quantite !== null ? `Qté ${l.quantite}` : null,
+          l.tauxRemise !== null ? `Remise ${l.tauxRemise}%` : null,
+          l.montantHt !== null ? formatMoney(l.montantHt) : null,
+        ].filter(Boolean).join(' · ') || '—',
+      })),
+      footer: t.statut === 'a_traiter' ? (
+        <button
+          type="button"
+          onClick={() => void marquerTransforme()}
+          style={{ padding: '13px', borderRadius: 12, border: 'none', background: '#A6A181', color: '#141A26', fontSize: 14, fontWeight: 700 }}
+        >
+          ✓ Marquer comme transformé en CDC
+        </button>
+      ) : undefined,
+    })
+  }
+
   function openActionDetail(a: ActionRow) {
     setOpenTask({
       id: a.id,
@@ -960,6 +1084,22 @@ function ClientDetailScreen({
           onClick: onOpenStock && l.reference_article ? () => onOpenStock(l.reference_article, l.designation) : undefined,
         })),
       ],
+      // ÉVOLUTION : uniquement pour les devis -- bouton pour composer le
+      // document "Devis à transformer en CDC" à partir de ce devis
+      // (décision prise par le client). Voir DevisTransformationSheet.
+      footer: type === 'Devis' ? (
+        <button
+          type="button"
+          onClick={() => { setOpenDetail(null); setDevisATraiter(d) }}
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+            padding: '13px', borderRadius: 12, border: '1px solid rgba(230,159,74,0.4)',
+            background: 'rgba(230,159,74,0.14)', color: '#E8A96A', fontSize: 14, fontWeight: 700,
+          }}
+        >
+          🔧 Traiter ce devis (décision client)
+        </button>
+      ) : undefined,
     })
   }
 
@@ -1189,6 +1329,11 @@ function ClientDetailScreen({
         <DocumentSection title="Bons de livraison (BL)" loading={loading} docs={detail?.livraisons} onOpen={(d) => openDocDetail(d, 'Bon de livraison')} />
         <DocumentSection title="Bons de retour (BR)" loading={loading} docs={detail?.retours} onOpen={(d) => openDocDetail(d, 'Bon de retour')} />
         <DocumentSection title="Devis" loading={loading} docs={detail?.devis} onOpen={(d) => openDocDetail(d, 'Devis')} />
+
+        <RowItem
+          title="🔧 Devis à transformer en CDC"
+          onClick={() => void ouvrirTransformations()}
+        />
       </div>
 
       {openDetail && (
@@ -1317,6 +1462,65 @@ function ClientDetailScreen({
         />
       )}
 
+      {devisATraiter && (
+        <DevisTransformationSheet
+          client={client}
+          devis={devisATraiter}
+          currentEmail={currentEmail}
+          currentName={currentName}
+          onClose={() => setDevisATraiter(null)}
+          onCreated={(task) => onTaskCreated(task)}
+        />
+      )}
+
+      {transformationsOuvertes && (
+        <div
+          style={{ position: 'fixed', inset: 0, zIndex: 240, background: 'rgba(6,10,18,0.62)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
+          onClick={() => setTransformationsOuvertes(false)}
+        >
+          <div
+            style={{ width: '100%', maxWidth: 480, maxHeight: '80vh', overflowY: 'auto', background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.08)', padding: '12px 18px 26px', display: 'flex', flexDirection: 'column', gap: 10 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 6px' }} />
+            <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Devis à transformer en CDC</div>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', marginBottom: 4 }}>{client.nom || client.numero}</div>
+
+            {transformationsLoading ? (
+              <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', padding: '10px 0' }}>Chargement…</div>
+            ) : !transformations || transformations.length === 0 ? (
+              <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', padding: '10px 0' }}>Aucun devis à transformer pour ce client.</div>
+            ) : (
+              transformations.map((t) => (
+                <div
+                  key={t.id}
+                  onClick={() => { setTransformationsOuvertes(false); void openTransformationDetail(t) }}
+                  style={{ borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)', padding: '10px 12px', cursor: 'pointer' }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                    <span style={{ fontSize: 14.5, fontWeight: 600, color: '#fff' }}>{t.numeroPieceDevisOrigine || '—'}</span>
+                    <span style={{ fontSize: 12, fontWeight: 700, color: t.statut === 'transforme' ? '#8fd4a8' : t.statut === 'annule' ? 'rgba(255,255,255,0.4)' : '#E8A96A' }}>
+                      {t.statut === 'transforme' ? '✅ Transformé' : t.statut === 'annule' ? '✖ Annulé' : '⏳ À traiter'}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginTop: 3 }}>
+                    {[t.createdByName, formatDateFr(normalizeDateIso(t.createdAt)), t.motif].filter(Boolean).join(' · ')}
+                  </div>
+                </div>
+              ))
+            )}
+
+            <button
+              type="button"
+              onClick={() => setTransformationsOuvertes(false)}
+              style={{ marginTop: 8, padding: '12px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: 'transparent', color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: 600 }}
+            >
+              Fermer
+            </button>
+          </div>
+        </div>
+      )}
+
       {navigationVers && (
         <NavigationChoiceSheet adresse={navigationVers.adresse} lat={navigationVers.lat} lon={navigationVers.lon} onClose={() => setNavigationVers(null)} />
       )}
@@ -1359,6 +1563,12 @@ function NouvelleTacheSheet({
           due_date: dueDate || null,
           assigned_to: assignedTo.trim() || null,
           status: 'Non débuté',
+          // FIX : created_by_email / created_by_name sont NOT NULL sur
+          // todo_actions (vérifié en base) -- oubliés dans une version
+          // précédente de cette sheet, ce qui aurait fait échouer tout
+          // insert de tâche manuelle.
+          created_by_email: currentEmail,
+          created_by_name: currentName,
         })
         .select('id, description_action, status, due_date, assigned_to')
         .single()
@@ -1447,6 +1657,313 @@ function NouvelleTacheSheet({
           style={{ padding: '11px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: 'transparent', color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: 600 }}
         >
           Fermer
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** ÉVOLUTION : composition du document "Devis à transformer en CDC" à
+ * partir d'un devis existant, quand le client a pris sa décision. Trois
+ * catégories de lignes possibles :
+ * - les lignes du devis d'origine, conservées par défaut, que l'on peut
+ *   flaguer "à supprimer" (toggle, pas de suppression physique -- la
+ *   ligne est conservée avec origine='supprimee' dans le document généré,
+ *   pour garder une trace de ce qui a été retiré) ;
+ * - de nouvelles lignes ajoutées à la main, avec aide à la saisie de la
+ *   référence article (autocomplete sur v_stock_articles_latest), une
+ *   quantité et un taux de remise saisi manuellement (pas de calcul
+ *   automatique -- choix explicite d'Arnaud, les taux de remise client
+ *   n'étant pas centralisés en base).
+ * À la validation : insert dans devis_transformations (statut initial
+ * 'a_traiter') + toutes les lignes dans devis_transformation_lignes, puis
+ * création d'une tâche todo_actions pour le suivi commercial. */
+function DevisTransformationSheet({
+  client, devis, currentEmail, currentName, onClose, onCreated,
+}: {
+  client: ClientRow
+  devis: DocAgrege
+  currentEmail: string
+  currentName: string
+  onClose: () => void
+  onCreated: (task: ActionRow) => void
+}) {
+  const [motif, setMotif] = useState('')
+  // Une entrée par ligne d'origine -- true = conservée (défaut), false =
+  // flaguée pour suppression.
+  const [garder, setGarder] = useState<boolean[]>(() => devis.lignes.map(() => true))
+
+  const [nouvelles, setNouvelles] = useState<{ reference: string; designation: string; quantite: number; tauxRemise: string }[]>([])
+  const [refSearch, setRefSearch] = useState('')
+  const [refResults, setRefResults] = useState<{ reference_article: string; designation: string }[]>([])
+  const [refSelectionnee, setRefSelectionnee] = useState<{ reference: string; designation: string } | null>(null)
+  const [qteAAjouter, setQteAAjouter] = useState(1)
+  const [remiseAAjouter, setRemiseAAjouter] = useState('')
+
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    const q = refSearch.trim()
+    if (!q || refSelectionnee) { setRefResults([]); return }
+    const t = window.setTimeout(async () => {
+      const { data } = await supabase
+        .from('v_stock_articles_latest')
+        .select('reference_article, designation')
+        .or(`reference_article.ilike.%${q}%,designation.ilike.%${q}%`)
+        .limit(10)
+      setRefResults(((data || []) as any[]).map((r) => ({ reference_article: String(r.reference_article || ''), designation: String(r.designation || '') })))
+    }, 250)
+    return () => window.clearTimeout(t)
+  }, [refSearch, refSelectionnee])
+
+  function ajouterLigne() {
+    if (!refSelectionnee) return
+    setNouvelles((cur) => [...cur, {
+      reference: refSelectionnee.reference,
+      designation: refSelectionnee.designation,
+      quantite: qteAAjouter || 1,
+      tauxRemise: remiseAAjouter,
+    }])
+    setRefSelectionnee(null)
+    setRefSearch('')
+    setQteAAjouter(1)
+    setRemiseAAjouter('')
+  }
+
+  function retirerNouvelleLigne(index: number) {
+    setNouvelles((cur) => cur.filter((_, i) => i !== index))
+  }
+
+  async function valider() {
+    setSaving(true)
+    setError('')
+    try {
+      const { data: transfo, error: errTransfo } = await supabase
+        .from('devis_transformations')
+        .insert({
+          numero_tiers: client.numero,
+          numero_piece_devis_origine: devis.numeroPiece,
+          statut: 'a_traiter',
+          motif: motif.trim() || null,
+          created_by_email: currentEmail,
+          created_by_name: currentName,
+        })
+        .select('id')
+        .single()
+      if (errTransfo) throw errTransfo
+      const transformationId = transfo.id as string
+
+      const lignesAInserer = [
+        ...devis.lignes.map((l, i) => ({
+          transformation_id: transformationId,
+          origine: garder[i] ? 'conservee' : 'supprimee',
+          reference_article: l.reference_article || null,
+          designation: l.designation || null,
+          quantite: l.quantite,
+          montant_ht: l.montant_ht,
+          taux_remise: null,
+        })),
+        ...nouvelles.map((n) => ({
+          transformation_id: transformationId,
+          origine: 'nouvelle',
+          reference_article: n.reference || null,
+          designation: n.designation || null,
+          quantite: n.quantite,
+          montant_ht: null,
+          taux_remise: n.tauxRemise.trim() === '' ? null : Number(n.tauxRemise),
+        })),
+      ]
+
+      if (lignesAInserer.length > 0) {
+        const { error: errLignes } = await supabase.from('devis_transformation_lignes').insert(lignesAInserer)
+        if (errLignes) throw errLignes
+      }
+
+      const nbSupprimees = garder.filter((g) => !g).length
+      const nbNouvelles = nouvelles.length
+      const descriptionTache = [
+        `Transformer le devis ${devis.numeroPiece} en commande (décision client)`,
+        nbSupprimees > 0 ? `${nbSupprimees} ligne(s) à retirer` : null,
+        nbNouvelles > 0 ? `${nbNouvelles} nouvelle(s) ligne(s)` : null,
+        motif.trim() ? `Motif : ${motif.trim()}` : null,
+      ].filter(Boolean).join(' — ')
+
+      const { data: tache, error: errTache } = await supabase
+        .from('todo_actions')
+        .insert({
+          numero_tiers: client.numero,
+          description_action: descriptionTache,
+          status: 'Non débuté',
+          assigned_to: currentName,
+          created_by_email: currentEmail,
+          created_by_name: currentName,
+        })
+        .select('id, description_action, status, due_date, assigned_to')
+        .single()
+      if (errTache) throw errTache
+
+      onCreated({
+        id: String(tache.id),
+        libelle: String(tache.description_action || ''),
+        status: String(tache.status || ''),
+        due_date: tache.due_date || null,
+        assigned_to: tache.assigned_to || null,
+      })
+      onClose()
+    } catch (e: any) {
+      setError(e?.message || 'Erreur lors de la génération du document.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 260, background: 'rgba(6,10,18,0.65)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }} onClick={() => !saving && onClose()}>
+      <div style={{ width: '100%', maxWidth: 480, maxHeight: '90vh', overflowY: 'auto', background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.1)', padding: '12px 18px 26px', display: 'flex', flexDirection: 'column', gap: 12 }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 2px' }} />
+        <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Traiter le devis {devis.numeroPiece}</div>
+        <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginTop: -6 }}>{client.nom || client.numero} — décision prise par le client</div>
+
+        <div>
+          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Motif / précisions (facultatif)</div>
+          <textarea
+            value={motif}
+            onChange={(e) => setMotif(e.target.value)}
+            rows={2}
+            placeholder="Ex. : Client valide sauf la ligne pompe, ajoute 2 vannes…"
+            style={{ width: '100%', borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '10px', fontSize: 14, resize: 'vertical' }}
+          />
+        </div>
+
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'rgba(255,255,255,0.5)', marginBottom: 8 }}>
+            Lignes du devis — décocher pour retirer
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {devis.lignes.map((l, i) => (
+              <label
+                key={i}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 10, borderRadius: 10,
+                  border: '1px solid rgba(255,255,255,0.08)',
+                  background: garder[i] ? 'rgba(255,255,255,0.03)' : 'rgba(193,104,60,0.10)',
+                  padding: '9px 11px', cursor: 'pointer',
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={garder[i]}
+                  onChange={(e) => setGarder((cur) => cur.map((g, idx) => (idx === i ? e.target.checked : g)))}
+                  style={{ width: 18, height: 18, flexShrink: 0 }}
+                />
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{
+                    fontSize: 13.5, color: garder[i] ? '#fff' : 'rgba(255,255,255,0.55)',
+                    textDecoration: garder[i] ? 'none' : 'line-through',
+                  }}>
+                    {l.reference_article || '—'}{l.designation ? ` — ${l.designation}` : ''}
+                  </div>
+                  <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.4)' }}>
+                    {l.quantite} × {formatMoney(l.montant_ht)}
+                  </div>
+                </div>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'rgba(255,255,255,0.5)', marginBottom: 8 }}>
+            Nouvelles lignes
+          </div>
+
+          {nouvelles.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
+              {nouvelles.map((n, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, borderRadius: 10, border: '1px solid rgba(75,146,172,0.3)', background: 'rgba(75,146,172,0.1)', padding: '9px 11px' }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontSize: 13.5, color: '#fff' }}>{n.reference || '—'}{n.designation ? ` — ${n.designation}` : ''}</div>
+                    <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.5)' }}>
+                      Qté {n.quantite}{n.tauxRemise.trim() !== '' ? ` · Remise ${n.tauxRemise}%` : ''}
+                    </div>
+                  </div>
+                  <button type="button" onClick={() => retirerNouvelleLigne(i)} style={{ border: 'none', background: 'transparent', color: '#e0a685', fontSize: 16, padding: 4 }}>✕</button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{ position: 'relative' }}>
+            <input
+              value={refSelectionnee ? `${refSelectionnee.reference} — ${refSelectionnee.designation}` : refSearch}
+              onChange={(e) => { setRefSearch(e.target.value); setRefSelectionnee(null) }}
+              placeholder="Référence ou désignation…"
+              style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14 }}
+            />
+            {refSelectionnee && (
+              <button type="button" onClick={() => { setRefSelectionnee(null); setRefSearch('') }} style={{ marginTop: 4, background: 'none', border: 'none', color: '#e0a685', fontSize: 11.5, fontWeight: 600, padding: 0 }}>Retirer</button>
+            )}
+            {refResults.length > 0 && !refSelectionnee && (
+              <div style={{ marginTop: 6, borderRadius: 10, border: '1px solid rgba(255,255,255,0.12)', background: '#0B1220', overflow: 'hidden', maxHeight: 220, overflowY: 'auto' }}>
+                {refResults.map((r) => (
+                  <button
+                    key={r.reference_article}
+                    type="button"
+                    onClick={() => { setRefSelectionnee({ reference: r.reference_article, designation: r.designation }); setRefResults([]) }}
+                    style={{ display: 'block', width: '100%', textAlign: 'left', padding: '9px 12px', border: 'none', borderBottom: '1px solid rgba(255,255,255,0.06)', background: 'transparent', color: '#fff', fontSize: 13 }}
+                  >
+                    <span style={{ color: '#E8A96A', fontWeight: 700 }}>{r.reference_article}</span> · {r.designation}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.5)', marginBottom: 4 }}>Quantité</div>
+              <input type="number" value={qteAAjouter} onChange={(e) => setQteAAjouter(Number(e.target.value) || 1)} min={1} style={{ width: '100%', height: 38, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 13.5 }} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.5)', marginBottom: 4 }}>Remise % (manuel)</div>
+              <input type="number" value={remiseAAjouter} onChange={(e) => setRemiseAAjouter(e.target.value)} placeholder="—" style={{ width: '100%', height: 38, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 13.5 }} />
+            </div>
+            <button
+              type="button"
+              onClick={ajouterLigne}
+              disabled={!refSelectionnee}
+              style={{
+                alignSelf: 'flex-end', height: 38, padding: '0 14px', borderRadius: 10, border: 'none',
+                background: refSelectionnee ? 'rgba(63,145,66,0.25)' : 'rgba(63,145,66,0.1)',
+                color: refSelectionnee ? '#8fd4a8' : 'rgba(143,212,168,0.4)', fontSize: 13, fontWeight: 700,
+              }}
+            >
+              + Ajouter
+            </button>
+          </div>
+        </div>
+
+        {error && <div style={{ fontSize: 13, color: '#e0a685' }}>{error}</div>}
+
+        <p style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.35)', lineHeight: 1.4, margin: 0 }}>
+          Génère un document « Devis à transformer en CDC » (consultable dans « Devis à transformer en CDC » sur la fiche client) et une tâche de suivi. La commande elle-même reste à saisir dans Sage.
+        </p>
+
+        <button
+          type="button"
+          onClick={() => void valider()}
+          disabled={saving}
+          style={{ padding: '13px', borderRadius: 12, border: 'none', background: '#A6A181', color: '#141A26', fontSize: 14.5, fontWeight: 700 }}
+        >
+          {saving ? 'Génération…' : 'Générer le document + tâche'}
+        </button>
+        <button
+          type="button"
+          onClick={() => !saving && onClose()}
+          style={{ padding: '11px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: 'transparent', color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: 600 }}
+        >
+          Annuler
         </button>
       </div>
     </div>
