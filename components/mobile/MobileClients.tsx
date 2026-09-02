@@ -7,6 +7,7 @@ import MobileDetailSheet, { type DetailField } from './MobileDetailSheet'
 import { NavigationChoiceSheet, PhoneChoiceSheet } from './MobileActionSheets'
 import VoiceReportButtons from './VoiceReportButtons'
 import MobileTaskDetailSheet, { type TaskRow } from './MobileTaskDetailSheet'
+import { NouveauRdvSheet } from './MobileRdv'
 
 const N = new Date().getFullYear()
 const CURRENT_MONTH = new Date().getMonth() + 1
@@ -883,6 +884,10 @@ function ClientDetailScreen({
   const [navigationVers, setNavigationVers] = useState<{ adresse: string; lat?: number | null; lon?: number | null } | null>(null)
   const [appelVers, setAppelVers] = useState<string | null>(null)
   const [nouvelleTacheOuverte, setNouvelleTacheOuverte] = useState(false)
+  // ÉVOLUTION (2026-09-02) : même principe que "+ Tâche" mais pour créer
+  // un RDV avec ce client déjà préselectionné -- réutilise NouveauRdvSheet
+  // (exporté depuis MobileRdv.tsx) au lieu de dupliquer le formulaire.
+  const [nouveauRdvOuvert, setNouveauRdvOuvert] = useState(false)
   // ÉVOLUTION : "décision client sur devis" -- voir DevisTransformation*
   // ci-dessus. devisATraiter ouvre le formulaire de composition à partir
   // d'un devis donné ; transformationsOuvertes/transformations gèrent la
@@ -924,6 +929,11 @@ function ClientDetailScreen({
   } | null>(null)
   const [alertesSaving, setAlertesSaving] = useState(false)
   const [alertesSaved, setAlertesSaved] = useState(false)
+  // ÉVOLUTION (2026-09-02) : pavé replié par défaut -- réduit l'encombrement
+  // de la fiche client (le pavé était bien positionné mais toujours
+  // déplié, prenait de la place même pour un client sans seuil particulier
+  // à ajuster). Se déplie au tap sur l'en-tête.
+  const [alertesOuvertes, setAlertesOuvertes] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -1366,6 +1376,18 @@ function ClientDetailScreen({
               >
                 + Tâche
               </button>
+              <button
+                type="button"
+                onClick={() => setNouveauRdvOuvert(true)}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4, borderRadius: 999,
+                  border: '1px solid rgba(75,146,172,0.35)', background: 'rgba(75,146,172,0.12)',
+                  color: '#8FC7DA', fontSize: 12, fontWeight: 700, padding: '3px 9px',
+                  cursor: 'pointer',
+                }}
+              >
+                + RDV
+              </button>
             </div>
           </div>
           <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>
@@ -1427,47 +1449,60 @@ function ClientDetailScreen({
             padding: '12px 13px',
           }}
         >
-          <div style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 8 }}>
-            🔔 Alertes de suivi
+          <div
+            onClick={() => setAlertesOuvertes((cur) => !cur)}
+            style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer',
+              marginBottom: alertesOuvertes ? 8 : 0,
+            }}
+          >
+            <span style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
+              🔔 Alertes de suivi
+            </span>
+            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', transform: alertesOuvertes ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}>
+              ▾
+            </span>
           </div>
-          {!alertesConfig ? (
-            <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Chargement…</div>
-          ) : (
-            <>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-                <AlerteSeuilField
-                  label="Nb d'appels/visites min par mois"
-                  value={alertesConfig.min_appels_visites_mois}
-                  onChange={(v) => setAlertesConfig((cur) => (cur ? { ...cur, min_appels_visites_mois: v } : cur))}
-                />
-                <AlerteSeuilField
-                  label="Nb de jours sans devis"
-                  value={alertesConfig.max_jours_sans_devis}
-                  onChange={(v) => setAlertesConfig((cur) => (cur ? { ...cur, max_jours_sans_devis: v } : cur))}
-                />
-                <AlerteSeuilField
-                  label="Nb de jours sans commande"
-                  value={alertesConfig.max_jours_sans_commande}
-                  onChange={(v) => setAlertesConfig((cur) => (cur ? { ...cur, max_jours_sans_commande: v } : cur))}
-                />
-              </div>
-              <button
-                type="button"
-                onClick={() => void enregistrerAlertesConfig()}
-                disabled={alertesSaving}
-                style={{
-                  marginTop: 10, width: '100%', padding: '10px', borderRadius: 10,
-                  border: '1px solid rgba(166,161,129,0.4)',
-                  background: alertesSaved ? 'rgba(63,145,66,0.18)' : 'rgba(166,161,129,0.16)',
-                  color: alertesSaved ? '#8fd4a8' : '#e4dfc9', fontSize: 13, fontWeight: 700,
-                }}
-              >
-                {alertesSaving ? 'Enregistrement…' : alertesSaved ? '✓ Enregistré' : 'Enregistrer les seuils'}
-              </button>
-              <p style={{ marginTop: 8, fontSize: 10.5, color: 'rgba(255,255,255,0.35)', lineHeight: 1.4 }}>
-                Un champ vide désactive la règle correspondante. Le contrôle tourne une fois par jour et crée une tâche dans « À faire » quand un seuil est dépassé.
-              </p>
-            </>
+          {alertesOuvertes && (
+            !alertesConfig ? (
+              <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Chargement…</div>
+            ) : (
+              <>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
+                  <AlerteSeuilField
+                    label="Nb d'appels/visites min par mois"
+                    value={alertesConfig.min_appels_visites_mois}
+                    onChange={(v) => setAlertesConfig((cur) => (cur ? { ...cur, min_appels_visites_mois: v } : cur))}
+                  />
+                  <AlerteSeuilField
+                    label="Nb de jours sans devis"
+                    value={alertesConfig.max_jours_sans_devis}
+                    onChange={(v) => setAlertesConfig((cur) => (cur ? { ...cur, max_jours_sans_devis: v } : cur))}
+                  />
+                  <AlerteSeuilField
+                    label="Nb de jours sans commande"
+                    value={alertesConfig.max_jours_sans_commande}
+                    onChange={(v) => setAlertesConfig((cur) => (cur ? { ...cur, max_jours_sans_commande: v } : cur))}
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void enregistrerAlertesConfig()}
+                  disabled={alertesSaving}
+                  style={{
+                    marginTop: 10, width: '100%', padding: '10px', borderRadius: 10,
+                    border: '1px solid rgba(166,161,129,0.4)',
+                    background: alertesSaved ? 'rgba(63,145,66,0.18)' : 'rgba(166,161,129,0.16)',
+                    color: alertesSaved ? '#8fd4a8' : '#e4dfc9', fontSize: 13, fontWeight: 700,
+                  }}
+                >
+                  {alertesSaving ? 'Enregistrement…' : alertesSaved ? '✓ Enregistré' : 'Enregistrer les seuils'}
+                </button>
+                <p style={{ marginTop: 8, fontSize: 10.5, color: 'rgba(255,255,255,0.35)', lineHeight: 1.4 }}>
+                  Un champ vide désactive la règle correspondante. Le contrôle tourne une fois par jour et crée une tâche dans « À faire » quand un seuil est dépassé.
+                </p>
+              </>
+            )
           )}
         </div>
 
@@ -1626,6 +1661,16 @@ function ClientDetailScreen({
         />
       )}
 
+      {nouveauRdvOuvert && (
+        <NouveauRdvSheet
+          currentEmail={currentEmail}
+          currentName={currentName}
+          clientPreselectionne={{ numero: client.numero, nom: client.nom }}
+          onClose={() => setNouveauRdvOuvert(false)}
+          onCreated={() => {}}
+        />
+      )}
+
       {devisATraiter && (
         <DevisTransformationSheet
           client={client}
@@ -1731,6 +1776,12 @@ function NouvelleTacheSheet({
   const [assignedTo, setAssignedTo] = useState(currentName)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  // ÉVOLUTION (2026-09-02) : la dictée vocale bascule désormais sur un
+  // calque plein écran dédié (même mécanique que MobileAlertes.tsx), au
+  // lieu d'intégrer VoiceReportButtons directement dans la sheet -- FIX
+  // du bouton flottant qui se superposait à l'en-tête de l'app faute de
+  // fond opaque derrière lui.
+  const [modeVocal, setModeVocal] = useState(false)
 
   async function creer() {
     if (!description.trim()) { setError('La description est obligatoire.'); return }
@@ -1815,22 +1866,17 @@ function NouvelleTacheSheet({
           <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'rgba(255,255,255,0.5)', marginBottom: 8 }}>
             Ou par la voix
           </div>
-          {/* NOTE : VoiceReportButtons est ici utilisé sans rendez-vous
-             associé (rdvActivityId non fourni) -- contrairement aux autres
-             usages de ce composant dans l'app (toujours liés à un RDV via
-             blgActivityId/compagnonId). Seul le bouton "Tâche vocale" a du
-             sens dans ce contexte ; à vérifier côté composant que le
-             bouton "Compte-rendu vocal" se comporte correctement (ou
-             disparaît) quand rdvActivityId est undefined -- non vérifiable
-             ici sans le code source de VoiceReportButtons.tsx. */}
-          <VoiceReportButtons
-            numeroTiers={client.numero}
-            clientNom={client.nom}
-            rdvActivityId={undefined}
-            rdvLabel="Tâche manuelle"
-            userEmail={currentEmail}
-            userName={currentName}
-          />
+          <button
+            type="button"
+            onClick={() => setModeVocal(true)}
+            style={{
+              width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+              padding: '12px', borderRadius: 12, border: '1px solid rgba(166,161,129,0.35)',
+              background: 'rgba(166,161,129,0.12)', color: '#e4dfc9', fontSize: 14, fontWeight: 700,
+            }}
+          >
+            🎙️ Tâche vocale
+          </button>
         </div>
 
         <button
@@ -1841,6 +1887,42 @@ function NouvelleTacheSheet({
           Fermer
         </button>
       </div>
+
+      {/* ÉVOLUTION : calque plein écran dédié à la dictée vocale, avec un
+         fond opaque (contrairement à l'ancien embed inline) -- même
+         correctif que MobileAlertes.tsx : sans ce fond, le bouton
+         flottant de VoiceReportButtons se superposait à l'en-tête de
+         l'app derrière, illisible. NOTE : numeroTiers/clientNom sont
+         transmis pour que la tâche créée par la voix reste rattachée à ce
+         client, en plus de modeUnique/labelBouton/pleinEcran (mêmes props
+         que l'usage plein écran de MobileAlertes.tsx) -- à vérifier côté
+         VoiceReportButtons.tsx (non fourni) que la combinaison des deux
+         jeux de props est bien prise en compte. */}
+      {modeVocal && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 280, background: '#0B1220' }}>
+          <VoiceReportButtons
+            numeroTiers={client.numero}
+            clientNom={client.nom}
+            modeUnique="tache"
+            labelBouton="Tâche vocale"
+            pleinEcran
+            userEmail={currentEmail}
+            userName={currentName}
+          />
+          <button
+            type="button"
+            onClick={() => setModeVocal(false)}
+            aria-label="Fermer"
+            style={{
+              position: 'fixed', top: 18, right: 18, zIndex: 290,
+              width: 40, height: 40, borderRadius: '50%', border: '1px solid rgba(255,255,255,0.25)',
+              background: 'rgba(20,26,38,0.9)', color: '#fff', fontSize: 20, lineHeight: 1,
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
     </div>
   )
 }

@@ -76,6 +76,36 @@ import { acquerirVerrouVocal, libererVerrouVocal, verrouVocalDetenuPar, verrouVo
  *    aussi retarder la détection de fin d'un "oui" très bref (souvent
  *    ~250-350 ms), qui repartait alors pour un cycle d'écoute plus long
  *    au lieu de s'arrêter net après le silence qui suit.
+ *
+ * CORRECTIF (2026-09-02) — mauvaise compréhension récurrente sur
+ * l'échéance ET la confirmation oui/non (mais pas sur la dictée
+ * principale) : les deux ont en commun d'être capturées par
+ * enregistrerAvecDetectionSilence() -- arrêt automatique sur silence --
+ * ET de démarrer juste après que l'app vient de PARLER (jouerTexte). La
+ * dictée principale démarre aussi juste après une annonce, mais son arrêt
+ * est manuel (l'utilisateur tape "Stop"), donc un défaut de quelques
+ * centaines de ms au tout début de l'enregistrement se noie dans une
+ * captation bien plus longue -- alors qu'il peut suffire à fausser
+ * complètement un enregistrement de 1-3 mots. Trois causes plausibles
+ * combinées, corrigées ensemble :
+ *  1. getUserMedia({audio:true}) ne demandait explicitement AUCUNE
+ *     contrainte (echoCancellation/noiseSuppression/autoGainControl) --
+ *     laissé aux réglages par défaut du navigateur, moins fiables sur
+ *     certains mobiles que si on les demande explicitement. Contraintes
+ *     désormais explicites sur les deux getUserMedia du fichier.
+ *  2. Le micro démarrait à écouter immédiatement après la fin du TTS
+ *     (onended), sans marge : en pratique, un résidu acoustique (écho de
+ *     la voix de l'app captée par le micro, notamment en haut-parleur)
+ *     peut persister quelques centaines de ms après la fin technique de
+ *     la lecture. Un court délai de "décrochage" (DELAI_APRES_TTS_MS)
+ *     est désormais attendu avant de démarrer le micro dans les deux
+ *     fonctions d'enregistrement.
+ *  3. Même avec ce délai, un bref résidu ou un bruit de démarrage du flux
+ *     micro pouvait encore être détecté comme le DÉBUT de la parole de
+ *     l'utilisateur par enregistrerAvecDetectionSilence(), faussant le
+ *     calcul du silence qui suit. Une fenêtre d'amorçage
+ *     (IGNORER_RMS_AVANT_MS) ignore désormais tout dépassement de seuil
+ *     pendant les tout premiers instants de l'écoute.
  */
 
 /** Lit la réponse en texte puis tente de la parser en JSON -- si ce n'est
@@ -95,6 +125,28 @@ async function parserReponseJson(res: Response): Promise<any> {
     throw new Error(`Réponse invalide du serveur (HTTP ${res.status}) -- ${cause}${extrait ? ` : ${extrait}` : ''}.`)
   }
 }
+
+/** Pause simple, utilisée pour laisser un résidu acoustique du TTS se
+ * dissiper avant de démarrer le micro (voir note de correctif en tête de
+ * fichier, cause 2). */
+function attendre(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
+// Contraintes micro explicites -- voir note de correctif en tête de
+// fichier, cause 1. Appliquées aux deux getUserMedia du fichier
+// (dictée principale ET écoute à détection de silence).
+const CONTRAINTES_AUDIO: MediaStreamConstraints = {
+  audio: {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+  },
+}
+
+// Délai laissé après la fin d'une lecture TTS avant de démarrer le micro
+// -- voir note de correctif en tête de fichier, cause 2.
+const DELAI_APRES_TTS_MS = 400
 
 type Tache = { description: string; echeance: string | null; assigned_to_email: string | null }
 
@@ -579,9 +631,14 @@ export default function VoiceReportButtons({
   }
 
   async function demarrerEnregistrement(): Promise<void> {
+    // Voir note de correctif en tête de fichier (cause 2) : laisse le
+    // temps à un éventuel résidu acoustique du TTS de se dissiper avant
+    // de solliciter le micro.
+    await attendre(DELAI_APRES_TTS_MS)
+
     let stream: MediaStream
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      stream = await navigator.mediaDevices.getUserMedia(CONTRAINTES_AUDIO)
     } catch (e: any) {
       throw new Error(`[micro] ${e?.name || 'Erreur'} : ${e?.message || e}`)
     }
@@ -630,10 +687,22 @@ export default function VoiceReportButtons({
     // seuil et repartait alors pour un cycle d'écoute complet au lieu de
     // s'arrêter juste après le silence qui suit la réponse.
     const DUREE_MIN_PAROLE_MS = 250
+    // CORRECTIF (2026-09-02, voir note en tête de fichier, cause 3) :
+    // ignore tout dépassement de seuil pendant les tout premiers instants
+    // de l'écoute -- un résidu d'écho du TTS ou un bruit de démarrage du
+    // flux micro pouvait être pris pour le début de la parole de
+    // l'utilisateur, faussant ensuite tout le calcul de silence qui suit
+    // (arrêt prématuré avant même que l'utilisateur ait fini, voire avant
+    // qu'il ait commencé). N'affecte que la détection RMS, pas le calcul
+    // de DUREE_MAX_MS (toujours basé sur debutTs réel).
+    const IGNORER_RMS_AVANT_MS = 300
+
+    // Voir note de correctif en tête de fichier (cause 2).
+    await attendre(DELAI_APRES_TTS_MS)
 
     let stream: MediaStream
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      stream = await navigator.mediaDevices.getUserMedia(CONTRAINTES_AUDIO)
     } catch (e: any) {
       throw new Error(`[micro] ${e?.name || 'Erreur'} : ${e?.message || e}`)
     }
@@ -694,7 +763,8 @@ export default function VoiceReportButtons({
         }
         const rms = Math.sqrt(somme / donnees.length)
 
-        if (rms > SEUIL_RMS) {
+        // Fenêtre d'amorçage : voir IGNORER_RMS_AVANT_MS ci-dessus.
+        if (rms > SEUIL_RMS && maintenant - debutTs > IGNORER_RMS_AVANT_MS) {
           dernierSonTs = maintenant
           aParle = true
           dureeParoleCumuleeMs += deltaFrame

@@ -1293,13 +1293,27 @@ function CompteRenduBlock({
   )
 }
 
-function NouveauRdvSheet({
-  currentEmail, currentName, onClose, onCreated,
-}: { currentEmail: string; currentName: string; onClose: () => void; onCreated: () => void }) {
+/** EXPORTÉ (2026-09-02) : réutilisable depuis MobileClients.tsx (bouton
+ * "+ RDV" sur la fiche client, avec client préselectionné et verrouillé --
+ * voir clientPreselectionne) en plus de son usage historique ici (bouton
+ * "+ RDV" de l'écran Rendez-vous, sans client préselectionné). */
+export function NouveauRdvSheet({
+  currentEmail, currentName, onClose, onCreated, clientPreselectionne,
+}: {
+  currentEmail: string
+  currentName: string
+  onClose: () => void
+  onCreated: () => void
+  /** Si fourni, le champ client est prérempli et verrouillé (pas de
+   * bouton "Retirer") -- utilisé quand le RDV est créé depuis la fiche
+   * d'un client précis, pour éviter de le sélectionner une deuxième fois
+   * et tout risque de le changer par erreur. */
+  clientPreselectionne?: { numero: string; nom: string }
+}) {
   const [clientSearch, setClientSearch] = useState('')
   const [clientResults, setClientResults] = useState<{ numero: string; intitule: string }[]>([])
-  const [numeroTiers, setNumeroTiers] = useState<string | null>(null)
-  const [intituleTiers, setIntituleTiers] = useState('')
+  const [numeroTiers, setNumeroTiers] = useState<string | null>(clientPreselectionne?.numero ?? null)
+  const [intituleTiers, setIntituleTiers] = useState(clientPreselectionne?.nom ?? '')
   const [subject, setSubject] = useState('')
   const [type, setType] = useState<'meeting' | 'phoneCall' | 'reminder'>('meeting')
   const [date, setDate] = useState('')
@@ -1366,17 +1380,22 @@ function NouveauRdvSheet({
         <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginTop: -6 }}>RDV compagnon CEGECLIM — indépendant de BLG/Outlook</div>
 
         <div style={{ position: 'relative' }}>
-          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Client (facultatif)</div>
+          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Client{clientPreselectionne ? '' : ' (facultatif)'}</div>
           <input
             value={numeroTiers ? `${intituleTiers} (${numeroTiers})` : clientSearch}
-            onChange={(e) => { setClientSearch(e.target.value); setNumeroTiers(null) }}
+            onChange={(e) => { if (clientPreselectionne) return; setClientSearch(e.target.value); setNumeroTiers(null) }}
             placeholder="Nom ou numéro du client…"
-            style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }}
+            readOnly={Boolean(clientPreselectionne)}
+            style={{
+              width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)',
+              background: clientPreselectionne ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.05)',
+              color: '#fff', padding: '0 10px', fontSize: 14.5,
+            }}
           />
-          {numeroTiers && (
+          {numeroTiers && !clientPreselectionne && (
             <button type="button" onClick={() => { setNumeroTiers(null); setClientSearch('') }} style={{ marginTop: 4, background: 'none', border: 'none', color: '#e0a685', fontSize: 11.5, fontWeight: 600, padding: 0 }}>Retirer</button>
           )}
-          {clientResults.length > 0 && !numeroTiers && (
+          {clientResults.length > 0 && !numeroTiers && !clientPreselectionne && (
             <div style={{ marginTop: 6, borderRadius: 10, border: '1px solid rgba(255,255,255,0.12)', background: '#0B1220', overflow: 'hidden' }}>
               {clientResults.map((c) => (
                 <button

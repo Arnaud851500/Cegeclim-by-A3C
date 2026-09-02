@@ -675,8 +675,16 @@ export default function MobileAlertes({
             >
               {d.count}
             </span>
-            {!!d.subCount && d.subCount > 0 && (
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, fontWeight: 700, color: '#C1683C' }}>
+            {/* FIX (2026-09-02) : `!!d.subCount` masquait l'annotation dès
+               que subCount valait 0 (aucune tâche en retard) -- 0 étant
+               falsy en JS, ce cas était indiscernable de l'ancienne
+               version sans sous-compteur du tout. Condition changée en
+               "subCount défini" (quelle que soit sa valeur), avec une
+               couleur neutre/verte pour 0 (bonne nouvelle) et rouge sinon
+               -- l'annotation apparaît donc systématiquement dès que le
+               sous-compteur existe, y compris quand il vaut 0. */}
+            {d.subCount !== undefined && (
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, fontWeight: 700, color: d.subCount > 0 ? '#C1683C' : '#8fd4a8' }}>
                 (dont {d.subCount} {d.subLabel || 'en retard'})
               </span>
             )}
@@ -847,9 +855,14 @@ export default function MobileAlertes({
         </div>
       )}
 
-      {/* ---- Dictée vocale (plein écran, mêmes composants que l'accueil) ---- */}
+      {/* ---- Dictée vocale (plein écran, mêmes composants que l'accueil) ----
+         FIX (2026-09-02) : ce calque n'avait pas de fond opaque -- l'en-tête
+         de l'app (et le contenu en dessous) transparaissait derrière le
+         bouton flottant de VoiceReportButtons ("Nouvelle tâche"), rendant
+         la superposition illisible. Fond marine opaque ajouté pour isoler
+         proprement l'écran de dictée, comme un vrai plein écran. */}
       {ajoutMode === 'vocal' && (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 250 }}>
+        <div style={{ position: 'fixed', inset: 0, zIndex: 250, background: '#0B1220' }}>
           <VoiceReportButtons
             modeUnique="tache"
             labelBouton="Nouvelle tâche"

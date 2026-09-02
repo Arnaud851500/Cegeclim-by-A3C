@@ -32,6 +32,11 @@ const BUTTONS: ButtonConfig[] = [
   // par les autres cartes de cet écran.
   { key: 'stock', label: 'Stock articles', sub: 'Recherche, dépôts, projection', accessKey: 'can_dashboard', icon: '📦', gradient: 'linear-gradient(160deg, #A6A181, #6E6A54)', subColor: '#EDE9D8' },
   { key: 'prospects', label: 'Carte Prospects & Clients', sub: '', icon: '🗺️', gradient: 'linear-gradient(160deg, #0F6E56, #085041)', subColor: '#9FE1CB' },
+  // ÉVOLUTION (2026-09-02) : plus de accessKey ici -- ce bouton n'a jamais
+  // été soumis à AccessRights, il était donc visible par TOUT LE MONDE
+  // quel que soit le profil. Gating fait séparément ci-dessous via
+  // isAdmin (même source de vérité que MobileAdminPanel.tsx :
+  // supabase.rpc('current_user_is_admin')), voir visibleButtons.
   { key: 'Admin', label: 'Admin', sub: '', icon: '🗺️', gradient: 'linear-gradient(160deg, #1b1e1d, #085041)', subColor: '#3b3e3d' },
 ]
 
@@ -76,7 +81,32 @@ export default function MobileHome({
   alertsCount: number
   onNavigate: (screen: MobileScreen) => void
 }) {
-  const visibleButtons = BUTTONS.filter((b) => !b.accessKey || rights[b.accessKey])
+  // ÉVOLUTION (2026-09-02) : le bouton "Admin" n'était soumis à aucun
+  // accessKey -- visible par tous, quel que soit le profil. Vérifié via
+  // la même RPC que MobileAdminPanel.tsx (current_user_is_admin), qui est
+  // déjà la source de vérité de l'app pour ce statut (indépendante
+  // d'AccessRights). null tant que non résolu = traité comme "pas admin"
+  // par défaut (fail-closed), pour ne jamais laisser le bouton apparaître
+  // même brièvement pendant le chargement.
+  const [isAdmin, setIsAdmin] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    supabase.rpc('current_user_is_admin').then(({ data, error }) => {
+      if (cancelled) return
+      if (error) {
+        console.error('[MobileHome] current_user_is_admin', error)
+        setIsAdmin(false)
+        return
+      }
+      setIsAdmin(Boolean(data))
+    })
+    return () => { cancelled = true }
+  }, [])
+
+  const visibleButtons = BUTTONS.filter((b) => {
+    if (b.key === 'Admin') return isAdmin
+    return !b.accessKey || rights[b.accessKey]
+  })
 
   // "Arnaud V." (user_page_access.display_name) plutôt que "a.valanchauskas"
   // (dérivé de l'email) -- même source que les autres écrans mobile
