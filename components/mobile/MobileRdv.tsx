@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { formatMoney } from '@/app/focus_mensuel/page'
 import MobileDetailSheet, { type DetailField } from './MobileDetailSheet'
@@ -124,6 +124,14 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
   // ÉVOLUTION : édition d'un rdv compagnon existant -- voir
   // ModifierRdvSheet ci-dessous et le bouton "Modifier" dans openRdvDetail.
   const [editingRdv, setEditingRdv] = useState<RdvUnifie | null>(null)
+
+  // ÉVOLUTION (2026-09-02) : bascule liste / planning (vue 3 jours façon
+  // agenda iOS, glissable) -- voir PlanningTroisJours ci-dessous. Ne
+  // remplace pas chargerRdv/rdvList (toujours utilisés par la vue liste,
+  // bornée par periodeBornes) : la vue planning a sa propre fenêtre
+  // glissante de 3 jours (ancrageGrille), indépendante de la période
+  // choisie côté liste, et son propre chargement de données.
+  const [vueMode, setVueMode] = useState<'liste' | 'planning'>('liste')
 
   const [currentEmail, setCurrentEmail] = useState('')
   const [currentName, setCurrentName] = useState('')
@@ -467,6 +475,35 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
 
   return (
     <div style={{ padding: '16px 3px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* ÉVOLUTION : bascule Liste / Planning, en haut de l'écran comme
+         demandé -- ne touche pas au bouton "Agenda" existant (qui ouvre
+         le choix de période pour la liste), simple bascule d'affichage. */}
+      <div style={{ display: 'flex', gap: 6 }}>
+        <button
+          type="button"
+          onClick={() => setVueMode('liste')}
+          style={vueToggleStyle(vueMode === 'liste')}
+        >
+          📋 Liste
+        </button>
+        <button
+          type="button"
+          onClick={() => setVueMode('planning')}
+          style={vueToggleStyle(vueMode === 'planning')}
+        >
+          🗓️ Planning
+        </button>
+      </div>
+
+      {vueMode === 'planning' ? (
+        <PlanningTroisJours
+          currentEmail={currentEmail}
+          blgPartnerId={blgPartnerId}
+          tachesEnCoursParTiers={tachesEnCoursParTiers}
+          onOpenDetail={openRdvDetail}
+          onNouveauRdv={() => setNouveauRdvOuvert(true)}
+        />
+      ) : (
       <div
         style={{
           borderRadius: 14,
@@ -566,6 +603,7 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
           </div>
         )}
       </div>
+      )}
 
       <div>
         <div style={{ fontSize: 11.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 8 }}>
@@ -753,6 +791,320 @@ function periodeChipStyle(actif: boolean): React.CSSProperties {
     background: actif ? 'rgba(75,146,172,0.3)' : 'rgba(255,255,255,0.04)',
     color: '#fff', fontSize: 13, fontWeight: 600,
   }
+}
+
+function vueToggleStyle(actif: boolean): React.CSSProperties {
+  return {
+    flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+    padding: '9px 12px', borderRadius: 12,
+    border: `1px solid ${actif ? 'rgba(75,146,172,0.55)' : 'rgba(255,255,255,0.12)'}`,
+    background: actif ? 'rgba(75,146,172,0.22)' : 'rgba(255,255,255,0.04)',
+    color: actif ? '#8FC7DA' : 'rgba(255,255,255,0.6)', fontSize: 13, fontWeight: 700,
+  }
+}
+
+// ── Vue planning (3 jours, glissable) ────────────────────────────────────
+const GRILLE_HEURE_DEBUT = 7
+const GRILLE_HEURE_FIN = 20
+const GRILLE_HAUTEUR_HEURE = 52 // px par heure
+const GRILLE_HAUTEUR_TOTALE = (GRILLE_HEURE_FIN - GRILLE_HEURE_DEBUT) * GRILLE_HAUTEUR_HEURE
+
+function debutJourLocal(d: Date): Date {
+  const copie = new Date(d)
+  copie.setHours(0, 0, 0, 0)
+  return copie
+}
+function ajouterJours(d: Date, n: number): Date {
+  const copie = new Date(d)
+  copie.setDate(copie.getDate() + n)
+  return copie
+}
+function memeJour(a: Date, b: Date): boolean {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
+}
+/** Minutes écoulées depuis GRILLE_HEURE_DEBUT, bornées à la plage affichée
+ * -- sert à positionner/dimensionner les blocs d'événements dans la
+ * grille horaire. */
+function minutesDepuisDebutGrille(d: Date): number {
+  const minutes = (d.getHours() - GRILLE_HEURE_DEBUT) * 60 + d.getMinutes()
+  return Math.max(0, Math.min(minutes, (GRILLE_HEURE_FIN - GRILLE_HEURE_DEBUT) * 60))
+}
+
+/** Répartit les événements d'une journée en "colonnes" quand ils se
+ * chevauchent (algorithme classique d'allocation de salles) -- chaque
+ * groupe d'événements qui se chevauchent partage la largeur disponible en
+ * autant de colonnes que nécessaire. Une durée nulle ou négative (donnée
+ * incohérente) est traitée comme 30 min minimum pour le calcul du
+ * chevauchement, sans changer l'heure de fin réellement affichée. */
+function repartirColonnes(events: RdvUnifie[]): { ev: RdvUnifie; colonne: number; nbColonnes: number }[] {
+  const avecTimestamps = events
+    .map((ev) => {
+      const debut = new Date(ev.start_date).getTime()
+      const finBrute = new Date(ev.end_date || ev.start_date).getTime()
+      const fin = finBrute > debut ? finBrute : debut + 30 * 60000
+      return { ev, debut, fin }
+    })
+    .sort((a, b) => a.debut - b.debut || a.fin - b.fin)
+
+  const resultats: { ev: RdvUnifie; colonne: number; nbColonnes: number }[] = []
+  let clusterItems: { ev: RdvUnifie; colonne: number }[] = []
+  let colonnesFin: number[] = []
+  let clusterFin = -Infinity
+
+  function clore() {
+    if (clusterItems.length === 0) return
+    const nbColonnes = Math.max(...clusterItems.map((c) => c.colonne)) + 1
+    clusterItems.forEach((c) => resultats.push({ ...c, nbColonnes }))
+    clusterItems = []
+  }
+
+  for (const item of avecTimestamps) {
+    if (item.debut >= clusterFin) {
+      clore()
+      colonnesFin = []
+      clusterFin = -Infinity
+    }
+    let colonne = colonnesFin.findIndex((fin) => fin <= item.debut)
+    if (colonne === -1) {
+      colonne = colonnesFin.length
+      colonnesFin.push(item.fin)
+    } else {
+      colonnesFin[colonne] = item.fin
+    }
+    clusterItems.push({ ev: item.ev, colonne })
+    clusterFin = Math.max(clusterFin, item.fin)
+  }
+  clore()
+  return resultats
+}
+
+/** Vue "planning" 3 jours façon agenda iOS -- glissable (swipe tactile +
+ * flèches ‹ ›) par pas de 3 jours. Fenêtre de données indépendante de la
+ * liste (rdvList/periodeBornes) : requête dédiée sur la fenêtre de 3
+ * jours actuellement affichée, rechargée à chaque déplacement. Les
+ * événements "jour entier" sont affichés dans un bandeau au-dessus de la
+ * grille horaire (comme "Jour entier" côté Calendrier iOS), les autres
+ * positionnés/dimensionnés selon leur heure. Un tap sur un événement
+ * ouvre exactement le même détail que la vue liste (onOpenDetail =
+ * openRdvDetail du parent) -- modifier/supprimer/compte-rendu/vocal
+ * fonctionnent donc à l'identique dans les deux vues. */
+function PlanningTroisJours({
+  currentEmail, blgPartnerId, tachesEnCoursParTiers, onOpenDetail, onNouveauRdv,
+}: {
+  currentEmail: string
+  blgPartnerId: string | null
+  tachesEnCoursParTiers: Set<string>
+  onOpenDetail: (r: RdvUnifie) => void
+  onNouveauRdv: () => void
+}) {
+  const [ancrage, setAncrage] = useState<Date>(() => debutJourLocal(new Date()))
+  const [rdvGrille, setRdvGrille] = useState<RdvUnifie[] | null>(null)
+  const [grilleLoading, setGrilleLoading] = useState(true)
+  const touchStartXRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (!currentEmail) return
+    let cancelled = false
+    async function charger() {
+      setGrilleLoading(true)
+      try {
+        const debut = ancrage
+        const fin = ajouterJours(ancrage, 3)
+        const orParts = [`created_by_email.eq.${currentEmail}`]
+        if (blgPartnerId) orParts.push(`blg_partner_id.eq.${blgPartnerId}`)
+        const { data, error } = await supabase
+          .from('v_rdv_unifie')
+          .select('*')
+          .gte('start_date', debut.toISOString().slice(0, 10))
+          .lt('start_date', fin.toISOString().slice(0, 10))
+          .or(orParts.join(','))
+          .order('start_date', { ascending: true })
+          .limit(300)
+        if (cancelled) return
+        if (error) {
+          console.error('[PlanningTroisJours] v_rdv_unifie', error)
+          setRdvGrille([])
+          return
+        }
+        setRdvGrille((data || []) as RdvUnifie[])
+      } finally {
+        if (!cancelled) setGrilleLoading(false)
+      }
+    }
+    void charger()
+    return () => { cancelled = true }
+  }, [currentEmail, blgPartnerId, ancrage])
+
+  function allerPrecedent() { setAncrage((cur) => ajouterJours(cur, -3)) }
+  function allerSuivant() { setAncrage((cur) => ajouterJours(cur, 3)) }
+  function allerAujourdhui() { setAncrage(debutJourLocal(new Date())) }
+
+  function onTouchStart(e: React.TouchEvent) {
+    touchStartXRef.current = e.touches[0]?.clientX ?? null
+  }
+  function onTouchEnd(e: React.TouchEvent) {
+    const startX = touchStartXRef.current
+    touchStartXRef.current = null
+    if (startX === null) return
+    const dx = (e.changedTouches[0]?.clientX ?? startX) - startX
+    if (Math.abs(dx) < 40) return
+    if (dx < 0) allerSuivant()
+    else allerPrecedent()
+  }
+
+  const jours = [0, 1, 2].map((i) => ajouterJours(ancrage, i))
+  const aujourdHui = new Date()
+
+  const heures: number[] = []
+  for (let h = GRILLE_HEURE_DEBUT; h <= GRILLE_HEURE_FIN; h++) heures.push(h)
+
+  const labelPeriode = `${jours[0].toLocaleDateString('fr-FR', { day: '2-digit', month: 'short' })} → ${jours[2].toLocaleDateString('fr-FR', { day: '2-digit', month: 'short' })}`
+
+  return (
+    <div style={{ borderRadius: 14, border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.04)', overflow: 'hidden' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 14px 8px', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <button type="button" onClick={allerPrecedent} aria-label="Jours précédents" style={navChevronStyle}>‹</button>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: '#fff', minWidth: 108, textAlign: 'center' }}>{labelPeriode}</div>
+          <button type="button" onClick={allerSuivant} aria-label="Jours suivants" style={navChevronStyle}>›</button>
+        </div>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button type="button" onClick={allerAujourdhui} style={{ padding: '6px 10px', borderRadius: 999, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: 'rgba(255,255,255,0.75)', fontSize: 11.5, fontWeight: 700 }}>
+            Aujourd'hui
+          </button>
+          <button type="button" onClick={onNouveauRdv} style={{ padding: '6px 10px', borderRadius: 999, border: '1px solid rgba(63,145,66,0.4)', background: 'rgba(63,145,66,0.14)', color: '#8fd4a8', fontSize: 11.5, fontWeight: 700 }}>
+            + RDV
+          </button>
+        </div>
+      </div>
+
+      {/* En-têtes de jour */}
+      <div style={{ display: 'grid', gridTemplateColumns: '38px repeat(3, 1fr)', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+        <div />
+        {jours.map((j) => (
+          <div key={j.toISOString()} style={{ textAlign: 'center', padding: '8px 2px', borderLeft: '1px solid rgba(255,255,255,0.06)' }}>
+            <div style={{ fontSize: 10.5, textTransform: 'uppercase', color: 'rgba(255,255,255,0.4)' }}>
+              {j.toLocaleDateString('fr-FR', { weekday: 'short' })}
+            </div>
+            <div style={{
+              fontSize: 15, fontWeight: 700, marginTop: 2,
+              color: memeJour(j, aujourdHui) ? '#141A26' : '#fff',
+              background: memeJour(j, aujourdHui) ? '#8FC7DA' : 'transparent',
+              width: 26, height: 26, lineHeight: '26px', borderRadius: '50%', margin: '2px auto 0',
+            }}>
+              {j.getDate()}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Bandeau "jour entier" */}
+      {(() => {
+        const toutesLesJourneesParJour = jours.map((j) =>
+          (rdvGrille || []).filter((r) => r.all_day && r.start_date && memeJour(new Date(r.start_date), j)),
+        )
+        const auMoinsUne = toutesLesJourneesParJour.some((l) => l.length > 0)
+        if (!auMoinsUne) return null
+        return (
+          <div style={{ display: 'grid', gridTemplateColumns: '38px repeat(3, 1fr)', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+            <div style={{ fontSize: 9.5, color: 'rgba(255,255,255,0.35)', padding: '4px 2px', writingMode: 'vertical-rl', textAlign: 'center' }}>Jour entier</div>
+            {toutesLesJourneesParJour.map((liste, i) => (
+              <div key={i} style={{ borderLeft: '1px solid rgba(255,255,255,0.06)', padding: '4px', display: 'flex', flexDirection: 'column', gap: 3 }}>
+                {liste.map((r) => (
+                  <div
+                    key={r.rdv_id}
+                    onClick={() => onOpenDetail(r)}
+                    style={{
+                      fontSize: 10.5, color: '#fff', background: RDV_TYPE_COLORS[r.type] || '#7A5EA8',
+                      borderRadius: 5, padding: '2px 5px', cursor: 'pointer', overflow: 'hidden',
+                      textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {r.subject}
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        )
+      })()}
+
+      {/* Grille horaire */}
+      <div
+        onTouchStart={onTouchStart}
+        onTouchEnd={onTouchEnd}
+        style={{ display: 'grid', gridTemplateColumns: '38px repeat(3, 1fr)', position: 'relative', borderTop: '1px solid rgba(255,255,255,0.06)' }}
+      >
+        {/* Axe des heures */}
+        <div style={{ position: 'relative', height: GRILLE_HAUTEUR_TOTALE }}>
+          {heures.map((h) => (
+            <div key={h} style={{ position: 'absolute', top: (h - GRILLE_HEURE_DEBUT) * GRILLE_HAUTEUR_HEURE - 6, right: 4, fontSize: 9.5, color: 'rgba(255,255,255,0.35)' }}>
+              {String(h).padStart(2, '0')}h
+            </div>
+          ))}
+        </div>
+
+        {jours.map((j, jourIndex) => {
+          const evenementsJour = (rdvGrille || []).filter((r) => !r.all_day && r.start_date && memeJour(new Date(r.start_date), j))
+          const disposes = repartirColonnes(evenementsJour)
+          return (
+            <div key={j.toISOString()} style={{ position: 'relative', height: GRILLE_HAUTEUR_TOTALE, borderLeft: '1px solid rgba(255,255,255,0.06)' }}>
+              {heures.map((h) => (
+                <div key={h} style={{ position: 'absolute', top: (h - GRILLE_HEURE_DEBUT) * GRILLE_HAUTEUR_HEURE, left: 0, right: 0, borderTop: '1px solid rgba(255,255,255,0.05)' }} />
+              ))}
+              {memeJour(j, aujourdHui) && (
+                <div style={{
+                  position: 'absolute', left: 0, right: 0,
+                  top: minutesDepuisDebutGrille(aujourdHui) / 60 * GRILLE_HAUTEUR_HEURE,
+                  borderTop: '1.5px solid #C1683C', zIndex: 5,
+                }} />
+              )}
+              {grilleLoading && jourIndex === 0 && (
+                <div style={{ position: 'absolute', top: 8, left: 4, fontSize: 10.5, color: 'rgba(255,255,255,0.35)' }}>Chargement…</div>
+              )}
+              {disposes.map(({ ev, colonne, nbColonnes }) => {
+                const debutMin = minutesDepuisDebutGrille(new Date(ev.start_date))
+                const finMin = minutesDepuisDebutGrille(new Date(ev.end_date || ev.start_date))
+                const top = debutMin / 60 * GRILLE_HAUTEUR_HEURE
+                const hauteur = Math.max((finMin - debutMin) / 60 * GRILLE_HAUTEUR_HEURE, 22)
+                const largeurPct = 100 / nbColonnes
+                const aTacheEnCours = Boolean(ev.numero_tiers && tachesEnCoursParTiers.has(ev.numero_tiers))
+                return (
+                  <div
+                    key={ev.rdv_id}
+                    onClick={() => onOpenDetail(ev)}
+                    style={{
+                      position: 'absolute', top, height: hauteur,
+                      left: `calc(${colonne * largeurPct}% + 1px)`, width: `calc(${largeurPct}% - 2px)`,
+                      background: RDV_TYPE_COLORS[ev.type] || '#7A5EA8',
+                      border: aTacheEnCours ? '1.5px solid #E8A96A' : 'none',
+                      borderRadius: 5, padding: '2px 4px', overflow: 'hidden', cursor: 'pointer',
+                    }}
+                  >
+                    <div style={{ fontSize: 10, fontWeight: 700, color: '#fff', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {ev.subject}
+                    </div>
+                    {hauteur > 34 && (
+                      <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.85)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {ev.company_name || ''}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )
+        })}
+      </div>
+      <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', padding: '8px 12px 10px', margin: 0 }}>
+        Glissez à gauche ou à droite pour voir les 3 jours suivants/précédents.
+      </p>
+    </div>
+  )
+}
+const navChevronStyle: React.CSSProperties = {
+  width: 28, height: 28, borderRadius: 8, border: '1px solid rgba(255,255,255,0.15)',
+  background: 'rgba(255,255,255,0.05)', color: '#fff', fontSize: 16, lineHeight: 1,
 }
 
 function CompteRenduBlock({
@@ -952,7 +1304,17 @@ function NouveauRdvSheet({
   const [type, setType] = useState<'meeting' | 'phoneCall' | 'reminder'>('meeting')
   const [date, setDate] = useState('')
   const [heure, setHeure] = useState('09:00')
-  const [duree, setDuree] = useState(60)
+  // FIX : `duree` est désormais une chaîne (au lieu d'un number forcé à 60
+  // dès que le champ passait par une valeur vide) -- voir onChange /
+  // onFocus ci-dessous. Avant ce correctif, `onChange={(e) =>
+  // setDuree(Number(e.target.value) || 60)}` réimposait "60" à CHAQUE
+  // frappe dès que le champ passait, ne serait-ce qu'un instant, par une
+  // chaîne vide (ex. en supprimant le "6" de "60" avec Suppr) : React
+  // réécrivait alors la valeur affichée par-dessus la frappe en cours, ce
+  // qui coinçait le curseur juste après le chiffre restant et empêchait
+  // de vider le champ pour le remplacer. La conversion en nombre n'a
+  // lieu qu'à la validation (creer()) et au blur (repli sur 60 si vide).
+  const [duree, setDuree] = useState('60')
   const [lieu, setLieu] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -972,8 +1334,9 @@ function NouveauRdvSheet({
     setSaving(true)
     setError('')
     try {
+      const dureeMinutes = Math.max(1, Number(duree) || 60)
       const start = new Date(`${date}T${heure}:00`)
-      const end = new Date(start.getTime() + duree * 60000)
+      const end = new Date(start.getTime() + dureeMinutes * 60000)
       const { error: err } = await supabase.from('rdv_compagnon').insert({
         numero_tiers: numeroTiers,
         type,
@@ -1051,19 +1414,35 @@ function NouveauRdvSheet({
           </div>
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Durée (min)</div>
-            <input type="number" value={duree} onChange={(e) => setDuree(Number(e.target.value) || 60)} min={15} step={15} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }} />
+            {/* FIX : onFocus sélectionne tout le contenu -- taper un
+               chiffre écrase directement "60" au lieu de devoir le
+               supprimer caractère par caractère (qui restait de toute
+               façon bloqué, voir commentaire sur l'état `duree` ci-dessus). */}
+            <input
+              type="number"
+              value={duree}
+              onChange={(e) => setDuree(e.target.value)}
+              onFocus={(e) => e.target.select()}
+              onBlur={() => { if (!duree.trim() || Number(duree) <= 0) setDuree('60') }}
+              min={15}
+              step={15}
+              style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }}
+            />
           </div>
         </div>
 
-        <div style={{ display: 'flex', gap: 8 }}>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Date</div>
-            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }} />
-          </div>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Heure</div>
-            <input type="time" value={heure} onChange={(e) => setHeure(e.target.value)} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }} />
-          </div>
+        {/* FIX : Date et Heure passent d'une ligne partagée (2 colonnes)
+           à deux lignes pleine largeur -- sur certains appareils, les
+           pickers natifs des deux champs type="date"/type="time"
+           affichés côte à côte se chevauchaient visuellement. Champs
+           désormais clairement séparés. */}
+        <div>
+          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Date</div>
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }} />
+        </div>
+        <div>
+          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Heure</div>
+          <input type="time" value={heure} onChange={(e) => setHeure(e.target.value)} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }} />
         </div>
 
         <div>
@@ -1116,7 +1495,9 @@ function ModifierRdvSheet({
   )
   const [date, setDate] = useState(startDateInitiale.toISOString().slice(0, 10))
   const [heure, setHeure] = useState(startDateInitiale.toTimeString().slice(0, 5))
-  const [duree, setDuree] = useState(dureeInitiale)
+  // FIX : même correctif que NouveauRdvSheet -- chaîne au lieu de number,
+  // pour permettre de vider le champ avant de saisir une autre valeur.
+  const [duree, setDuree] = useState(String(dureeInitiale))
   const [lieu, setLieu] = useState(rdv.lieu || '')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -1137,8 +1518,9 @@ function ModifierRdvSheet({
     setSaving(true)
     setError('')
     try {
+      const dureeMinutes = Math.max(1, Number(duree) || 60)
       const start = new Date(`${date}T${heure}:00`)
-      const end = new Date(start.getTime() + duree * 60000)
+      const end = new Date(start.getTime() + dureeMinutes * 60000)
       const { error: err } = await supabase
         .from('rdv_compagnon')
         .update({
@@ -1217,19 +1599,28 @@ function ModifierRdvSheet({
           </div>
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Durée (min)</div>
-            <input type="number" value={duree} onChange={(e) => setDuree(Number(e.target.value) || 60)} min={15} step={15} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }} />
+            <input
+              type="number"
+              value={duree}
+              onChange={(e) => setDuree(e.target.value)}
+              onFocus={(e) => e.target.select()}
+              onBlur={() => { if (!duree.trim() || Number(duree) <= 0) setDuree('60') }}
+              min={15}
+              step={15}
+              style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }}
+            />
           </div>
         </div>
 
-        <div style={{ display: 'flex', gap: 8 }}>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Date</div>
-            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }} />
-          </div>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Heure</div>
-            <input type="time" value={heure} onChange={(e) => setHeure(e.target.value)} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', color: '#fff', background: 'rgba(255,255,255,0.05)', padding: '0 10px', fontSize: 14.5 }} />
-          </div>
+        {/* FIX : Date et Heure séparées en deux lignes -- voir même
+           correctif dans NouveauRdvSheet ci-dessus. */}
+        <div>
+          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Date</div>
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }} />
+        </div>
+        <div>
+          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Heure</div>
+          <input type="time" value={heure} onChange={(e) => setHeure(e.target.value)} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', color: '#fff', background: 'rgba(255,255,255,0.05)', padding: '0 10px', fontSize: 14.5 }} />
         </div>
 
         <div>

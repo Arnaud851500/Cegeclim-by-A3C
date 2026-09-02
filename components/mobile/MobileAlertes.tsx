@@ -8,12 +8,19 @@ import MobileTaskListSheet, { type TaskListItem } from './MobileTaskListSheet'
 import MobileDetailSheet, { type DetailField } from './MobileDetailSheet'
 import MobileTaskDetailSheet, { type TaskRow } from './MobileTaskDetailSheet'
 import VoiceReportButtons from './VoiceReportButtons'
+import { CommandeModificationSheet } from './MobileClients'
 
 export interface AlertDetailItem {
   label: string
   count: number
   status: 'red' | 'orange' | 'green'
   onOpen?: () => void
+  /** ÉVOLUTION (2026-09-02) : sous-compteur optionnel affiché entre
+   * parenthèses à côté du total (ex. "12 (dont 3 en retard)") -- utilisé
+   * pour "À faire" (nombre de tâches en retard parmi les non terminées),
+   * mais générique pour tout futur besoin similaire. */
+  subCount?: number
+  subLabel?: string
 }
 
 // NOTE : assigned_to ajouté -- si fetchTodoList() (défini côté parent, ex.
@@ -56,6 +63,19 @@ type CdcDocAgrege = {
   reference: string
   montantHt: number
   lignes: { reference_article: string; designation: string; quantite: number; montant_ht: number }[]
+}
+
+/** Document "à traiter" (devis_transformations) en cours pour une
+ * commande -- même table que MobileClients.tsx, ici uniquement
+ * type_document = 'commande'. Voir chargerTransformationsCommandeEnCours. */
+type TransformationCommande = {
+  id: string
+  statut: string
+  motif: string | null
+  dateLivraisonSouhaitee: string | null
+  referenceChantierDemandee: string | null
+  createdByName: string | null
+  createdAt: string
 }
 
 function safeText(value: any) {
@@ -158,8 +178,22 @@ export default function MobileAlertes({
   // Cohérence données) -- inchangés, toujours via MobileListSheet.
   const [listOpen, setListOpen] = useState<{ title: string; items: ListSheetItem[] } | null>(null)
   const [listLoading, setListLoading] = useState(false)
-  const [openDetail, setOpenDetail] = useState<{ title: string; subtitle?: string; fields: DetailField[] } | null>(null)
+  const [openDetail, setOpenDetail] = useState<{ title: string; subtitle?: string; fields: DetailField[]; footer?: React.ReactNode } | null>(null)
   const [openTask, setOpenTask] = useState<TaskRow | null>(null)
+
+  // ÉVOLUTION (2026-09-02) : modification de la date de livraison
+  // souhaitée / référence chantier directement depuis une commande de
+  // l'alerte "CDC < 2026" -- réutilise CommandeModificationSheet (déjà
+  // utilisée depuis la fiche client, voir MobileClients.tsx), et la même
+  // table devis_transformations pour le suivi + le rattachement de la
+  // tâche générée (flag automatique "traité" à la clôture de la tâche,
+  // via le trigger DB -- rien à faire ici de ce côté).
+  const [commandeAModifierCdc, setCommandeAModifierCdc] = useState<CdcDocAgrege | null>(null)
+  // Documents "à traiter" (statut a_traiter, type_document='commande')
+  // déjà en cours pour les commandes actuellement listées -- indexé par
+  // numero_document, pour la pastille dans la liste et l'enrichissement
+  // de la fiche détail. Rechargé à chaque ouverture du tiroir CDC.
+  const [transformationsCommandeParPiece, setTransformationsCommandeParPiece] = useState<Record<string, TransformationCommande>>({})
 
   // ÉVOLUTION : "À faire" sort du tiroir générique (listOpen) et gagne son
   // propre état + son propre composant (MobileTaskListSheet) -- colonnes
@@ -341,6 +375,121 @@ export default function MobileAlertes({
     })
   }
 
+  /** Charge les documents "à traiter" (devis_transformations,
+   * type_document='commande', statut='a_traiter') pour un lot de numéros
+   * de pièce donné -- indexé par numero_document pour un accès direct
+   * depuis la liste et la fiche détail. Jamais bloquant : une erreur
+   * laisse simplement la map vide (pas de pastille, comportement
+   * identique à avant cette évolution). */
+  async function chargerTransformationsCommandeEnCours(docs: CdcDocAgrege[]) {
+    const numeros = Array.from(new Set(docs.map((d) => d.numeroDocument).filter(Boolean)))
+    if (numeros.length === 0) {
+      setTransformationsCommandeParPiece({})
+      return
+    }
+    try {
+      const { data, error } = await supabase
+        .from('devis_transformations')
+        .select('id, numero_piece_devis_origine, statut, motif, date_livraison_souhaitee, reference_chantier_demandee, created_by_name, created_at')
+        .eq('type_document', 'commande')
+        .eq('statut', 'a_traiter')
+        .in('numero_piece_devis_origine', numeros)
+      if (error) throw error
+      const map: Record<string, TransformationCommande> = {}
+      for (const r of (data || []) as any[]) {
+        map[String(r.numero_piece_devis_origine || '')] = {
+          id: String(r.id),
+          statut: String(r.statut || ''),
+          motif: r.motif || null,
+          dateLivraisonSouhaitee: r.date_livraison_souhaitee || null,
+          referenceChantierDemandee: r.reference_chantier_demandee || null,
+          createdByName: r.created_by_name || null,
+          createdAt: String(r.created_at || ''),
+        }
+      }
+      setTransformationsCommandeParPiece(map)
+    } catch (e) {
+      console.error('[MobileAlertes] chargerTransformationsCommandeEnCours', e)
+      setTransformationsCommandeParPiece({})
+    }
+  }
+
+  /** Marque un document "à traiter" comme traité manuellement -- en plus
+   * du passage automatique par le trigger DB quand la tâche liée est
+   * clôturée (voir migration côté MobileClients.tsx). */
+  async function marquerCommandeTraitee(t: TransformationCommande, numeroDocument: string) {
+    const { error } = await supabase
+      .from('devis_transformations')
+      .update({ statut: 'transforme', updated_at: new Date().toISOString() })
+      .eq('id', t.id)
+    if (error) {
+      window.alert(error.message)
+      return
+    }
+    setOpenDetail(null)
+    setTransformationsCommandeParPiece((cur) => {
+      const next = { ...cur }
+      delete next[numeroDocument]
+      return next
+    })
+  }
+
+  function openCdcDetail(d: CdcDocAgrege) {
+    const enCours = transformationsCommandeParPiece[d.numeroDocument]
+    const champs: DetailField[] = [
+      { label: 'Client', value: `${d.nomTiers}${d.numeroTiers ? ` (${d.numeroTiers})` : ''}` },
+      { label: 'Date de livraison', value: d.dateLivraison ? formatDateFr(d.dateLivraison) : d.moisLivraison },
+      { label: 'Référence chantier', value: d.reference || '—' },
+      { label: 'Agence', value: d.agence },
+      { label: 'Représentant', value: d.representant },
+      { label: 'Montant total HT', value: formatMoney(d.montantHt) },
+      // Lignes d'articles : référence, désignation, quantité × montant HT.
+      ...d.lignes.map((l) => ({
+        label: `${l.reference_article || '—'}${l.designation ? ` — ${l.designation}` : ''}`,
+        value: `${l.quantite} × ${formatMoney(l.montant_ht)}`,
+      })),
+    ]
+
+    let footer: React.ReactNode
+    if (enCours) {
+      champs.push(
+        { label: 'Nouvelle date de livraison souhaitée', value: enCours.dateLivraisonSouhaitee ? formatDateFr(enCours.dateLivraisonSouhaitee) : '—' },
+        { label: 'Nouvelle référence chantier demandée', value: enCours.referenceChantierDemandee || '—' },
+        { label: 'Demandé par', value: [enCours.createdByName, formatDateFr(enCours.createdAt)].filter(Boolean).join(' · ') || '—' },
+      )
+      footer = (
+        <button
+          type="button"
+          onClick={() => void marquerCommandeTraitee(enCours, d.numeroDocument)}
+          style={{ padding: '13px', borderRadius: 12, border: 'none', background: '#A6A181', color: '#141A26', fontSize: 14, fontWeight: 700 }}
+        >
+          ✓ Marquer comme traité
+        </button>
+      )
+    } else {
+      footer = (
+        <button
+          type="button"
+          onClick={() => { setOpenDetail(null); setCommandeAModifierCdc(d) }}
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+            padding: '13px', borderRadius: 12, border: '1px solid rgba(75,146,172,0.4)',
+            background: 'rgba(75,146,172,0.14)', color: '#8FC7DA', fontSize: 14, fontWeight: 700,
+          }}
+        >
+          📅 Modifier livraison / référence chantier
+        </button>
+      )
+    }
+
+    setOpenDetail({
+      title: d.numeroDocument || '(sans numéro)',
+      subtitle: `CDC avant 2026 · ${formatMoney(d.montantHt)}`,
+      fields: champs,
+      footer,
+    })
+  }
+
   async function openCdcDrawer() {
     setListOpen({ title: 'CDC < 2026', items: [] })
     setListLoading(true)
@@ -351,33 +500,20 @@ export default function MobileAlertes({
     // liste, comme les sections Commandes/BL/Devis de la fiche client,
     // au lieu d'une ligne par article de la pièce.
     const docs = aggregateCdcByDocument(rows)
+    await chargerTransformationsCommandeEnCours(docs)
 
     setListOpen({
       title: 'CDC < 2026',
       items: docs.map((d) => ({
         id: d.numeroDocument,
-        primary: d.numeroDocument || '(sans numéro)',
+        // ⭐ en préfixe si une demande de modification est déjà en cours
+        // pour cette commande -- disparaît automatiquement une fois
+        // traitée (voir marquerCommandeTraitee / trigger DB).
+        primary: `${transformationsCommandeParPiece[d.numeroDocument] ? '⭐ ' : ''}${d.numeroDocument || '(sans numéro)'}`,
         // Référence chantier en avant, comme demandé -- puis le client.
         secondary: [d.reference, d.nomTiers || (d.numeroTiers && `Client ${d.numeroTiers}`)].filter(Boolean).join(' · '),
         trailing: d.dateLivraison ? formatDateFr(d.dateLivraison) : d.moisLivraison,
-        onClick: () =>
-          setOpenDetail({
-            title: d.numeroDocument || '(sans numéro)',
-            subtitle: `CDC avant 2026 · ${formatMoney(d.montantHt)}`,
-            fields: [
-              { label: 'Client', value: `${d.nomTiers}${d.numeroTiers ? ` (${d.numeroTiers})` : ''}` },
-              { label: 'Date de livraison', value: d.dateLivraison ? formatDateFr(d.dateLivraison) : d.moisLivraison },
-              { label: 'Référence chantier', value: d.reference || '—' },
-              { label: 'Agence', value: d.agence },
-              { label: 'Représentant', value: d.representant },
-              { label: 'Montant total HT', value: formatMoney(d.montantHt) },
-              // Lignes d'articles : référence, désignation, quantité × montant HT.
-              ...d.lignes.map((l) => ({
-                label: `${l.reference_article || '—'}${l.designation ? ` — ${l.designation}` : ''}`,
-                value: `${l.quantite} × ${formatMoney(l.montant_ht)}`,
-              })),
-            ],
-          }),
+        onClick: () => openCdcDetail(d),
       })),
     })
   }
@@ -528,15 +664,22 @@ export default function MobileAlertes({
           }}
         >
           <span style={{ fontSize: 15.5, fontWeight: 600 }}>{d.label}</span>
-          <span
-            style={{
-              fontFamily: 'var(--font-mono)',
-              fontSize: 17,
-              fontWeight: 700,
-              color: d.status === 'red' ? '#C1683C' : '#D69A4A',
-            }}
-          >
-            {d.count}
+          <span style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+            <span
+              style={{
+                fontFamily: 'var(--font-mono)',
+                fontSize: 17,
+                fontWeight: 700,
+                color: d.status === 'red' ? '#C1683C' : '#D69A4A',
+              }}
+            >
+              {d.count}
+            </span>
+            {!!d.subCount && d.subCount > 0 && (
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, fontWeight: 700, color: '#C1683C' }}>
+                (dont {d.subCount} {d.subLabel || 'en retard'})
+              </span>
+            )}
           </span>
         </button>
       ))}
@@ -734,6 +877,7 @@ export default function MobileAlertes({
           title={openDetail.title}
           subtitle={openDetail.subtitle}
           fields={openDetail.fields}
+          footer={openDetail.footer}
           onClose={() => setOpenDetail(null)}
         />
       )}
@@ -743,6 +887,32 @@ export default function MobileAlertes({
           task={openTask}
           onClose={() => setOpenTask(null)}
           onSaved={handleTaskSaved}
+        />
+      )}
+
+      {commandeAModifierCdc && (
+        <CommandeModificationSheet
+          numeroTiers={commandeAModifierCdc.numeroTiers}
+          nomClient={commandeAModifierCdc.nomTiers}
+          numeroPiece={commandeAModifierCdc.numeroDocument}
+          referenceActuelle={commandeAModifierCdc.reference}
+          currentEmail={userEmail}
+          currentName={userName}
+          onClose={() => setCommandeAModifierCdc(null)}
+          onCreated={() => {
+            // Fait réapparaître la pastille ⭐ sans réouvrir le tiroir --
+            // au prochain openCdcDrawer(), le document sera de toute façon
+            // rechargé depuis la base.
+            if (commandeAModifierCdc) {
+              setTransformationsCommandeParPiece((cur) => ({
+                ...cur,
+                [commandeAModifierCdc.numeroDocument]: {
+                  id: '', statut: 'a_traiter', motif: null, dateLivraisonSouhaitee: null,
+                  referenceChantierDemandee: null, createdByName: userName, createdAt: new Date().toISOString(),
+                },
+              }))
+            }
+          }}
         />
       )}
     </div>

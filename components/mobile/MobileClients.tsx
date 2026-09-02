@@ -181,14 +181,18 @@ type TacheTermineeRow = { id: string; libelle: string; dueDate: string | null; u
  * tâche todo_actions est créée en parallèle pour le suivi commercial. */
 type DevisTransformation = {
   id: string
+  typeDocument: 'devis' | 'commande'
   numeroPieceDevisOrigine: string
   statut: string
   motif: string | null
+  dateLivraisonSouhaitee: string | null
+  referenceChantierDemandee: string | null
   createdByName: string | null
   createdAt: string
 }
 type DevisTransformationLigne = {
   id: string
+  numeroLigne: number | null
   origine: 'conservee' | 'supprimee' | 'nouvelle'
   referenceArticle: string
   designation: string
@@ -235,6 +239,12 @@ type ClientDetail = {
   derniereVisite: VisiteEvent | null
   prochaineVisite: VisiteEvent | null
   devisYtdN1: number
+  /** Documents (devis ou commandes) ayant un traitement "à traiter" en
+   * cours (voir DevisTransformation ci-dessus) -- sert à afficher le
+   * badge dans la liste et à enrichir la fiche du document concerné.
+   * Ne contient que statut === 'a_traiter' : chargé une fois à
+   * l'ouverture de la fiche client, pas de rafraîchissement temps réel. */
+  transformationsEnCours: DevisTransformation[]
   loadErrors: string[]
 }
 
@@ -433,7 +443,7 @@ export default function MobileClients({
       const [
         activiteRes, devisRes, devisConvertisBcRes, devisConvertisFactureRes, actionsRes, monthRes,
         fluxNRes, fluxN1Res, contactsRes, adresseRes,
-        visitePasseeRes, visiteFutureRes,
+        visitePasseeRes, visiteFutureRes, transformationsRes,
       ] = await Promise.all([
         supabase
           .from('activite_lignes')
@@ -526,6 +536,14 @@ export default function MobileClients({
           .gte('start_date', nowIso)
           .order('start_date', { ascending: true })
           .limit(1),
+        // ÉVOLUTION : documents (devis/commandes) avec un traitement "à
+        // traiter" en cours -- pour le badge dans la liste et l'affichage
+        // enrichi dans openDocDetail (voir DevisTransformation).
+        supabase
+          .from('devis_transformations')
+          .select('id, type_document, numero_piece_devis_origine, statut, motif, date_livraison_souhaitee, reference_chantier_demandee, created_by_name, created_at')
+          .eq('numero_tiers', client.numero)
+          .eq('statut', 'a_traiter'),
       ])
 
       if (activiteRes.error) loadErrors.push(activiteRes.error.message)
@@ -536,6 +554,7 @@ export default function MobileClients({
       if (contactsRes.error) loadErrors.push(contactsRes.error.message)
       if (visitePasseeRes.error) loadErrors.push(visitePasseeRes.error.message)
       if (visiteFutureRes.error) loadErrors.push(visiteFutureRes.error.message)
+      if (transformationsRes.error) loadErrors.push(transformationsRes.error.message)
       // Les deux requêtes d'exclusion (devisConvertisBcRes/FactureRes) ne
       // sont volontairement pas remontées dans loadErrors : une erreur
       // dessus ne doit pas bloquer l'affichage de la fiche, juste
@@ -612,6 +631,20 @@ export default function MobileClients({
       const derniereVisite = mapVisite((visitePasseeRes.data || [])[0])
       const prochaineVisite = mapVisite((visiteFutureRes.data || [])[0])
 
+      const transformationsEnCours: DevisTransformation[] = transformationsRes.error
+        ? []
+        : (transformationsRes.data || []).map((r: any) => ({
+            id: String(r.id),
+            typeDocument: r.type_document === 'commande' ? 'commande' : 'devis',
+            numeroPieceDevisOrigine: String(r.numero_piece_devis_origine || ''),
+            statut: String(r.statut || ''),
+            motif: r.motif || null,
+            dateLivraisonSouhaitee: r.date_livraison_souhaitee || null,
+            referenceChantierDemandee: r.reference_chantier_demandee || null,
+            createdByName: r.created_by_name || null,
+            createdAt: String(r.created_at || ''),
+          }))
+
       setDetail({
         commandes, preparations, livraisons, retours, devis,
         actions: actionsRes.error
@@ -631,6 +664,7 @@ export default function MobileClients({
         derniereVisite,
         prochaineVisite,
         devisYtdN1,
+        transformationsEnCours,
         loadErrors,
       })
     } catch (e) {
@@ -638,6 +672,7 @@ export default function MobileClients({
       setDetail({
         commandes: [], preparations: [], livraisons: [], retours: [], devis: [], actions: [],
         blYtd: 0, caYtd: 0, caYtdN1: 0, contacts: [], adresse: null, derniereVisite: null, prochaineVisite: null, devisYtdN1: 0,
+        transformationsEnCours: [],
         loadErrors: [e instanceof Error ? e.message : String(e)],
       })
     } finally {
@@ -857,6 +892,21 @@ function ClientDetailScreen({
   const [transformationsOuvertes, setTransformationsOuvertes] = useState(false)
   const [transformations, setTransformations] = useState<DevisTransformation[] | null>(null)
   const [transformationsLoading, setTransformationsLoading] = useState(false)
+  // ÉVOLUTION : modification d'une commande (date de livraison souhaitée /
+  // référence chantier) -- même mécanique que devisATraiter mais pour les
+  // commandes (CommandeModificationSheet ci-dessous).
+  const [commandeAModifier, setCommandeAModifier] = useState<DocAgrege | null>(null)
+
+  /** Documents (devis ou commandes) avec un traitement "à traiter" en
+   * cours, indexés par numéro de pièce -- pour le badge dans les listes
+   * et l'enrichissement de la fiche du document dans openDocDetail. */
+  const transformationsParPiece = useMemo(() => {
+    const map: Record<string, DevisTransformation> = {}
+    for (const t of detail?.transformationsEnCours || []) {
+      map[t.numeroPieceDevisOrigine] = t
+    }
+    return map
+  }, [detail?.transformationsEnCours])
 
   // ÉVOLUTION : alertes de suivi paramétrables par client (nb d'appels/
   // visites min par mois, nb de jours sans devis, nb de jours sans
@@ -957,15 +1007,16 @@ function ClientDetailScreen({
     )
   }
 
-  /** Charge la liste des "Devis à transformer en CDC" déjà générés pour ce
-   * client (tous statuts confondus) -- appelé au clic sur la section
-   * dédiée, pas au chargement de la fiche. */
+  /** Charge la liste des documents "à traiter" (devis à transformer en
+   * CDC, commandes à modifier dans l'ERP) déjà générés pour ce client,
+   * tous statuts confondus -- appelé au clic sur la section dédiée, pas
+   * au chargement de la fiche. */
   async function ouvrirTransformations() {
     setTransformationsOuvertes(true)
     setTransformationsLoading(true)
     const { data, error } = await supabase
       .from('devis_transformations')
-      .select('id, numero_piece_devis_origine, statut, motif, created_by_name, created_at')
+      .select('id, type_document, numero_piece_devis_origine, statut, motif, date_livraison_souhaitee, reference_chantier_demandee, created_by_name, created_at')
       .eq('numero_tiers', client.numero)
       .order('created_at', { ascending: false })
       .limit(50)
@@ -978,38 +1029,25 @@ function ClientDetailScreen({
     setTransformations(
       (data || []).map((r: any) => ({
         id: String(r.id),
+        typeDocument: r.type_document === 'commande' ? 'commande' : 'devis',
         numeroPieceDevisOrigine: String(r.numero_piece_devis_origine || ''),
         statut: String(r.statut || ''),
         motif: r.motif || null,
+        dateLivraisonSouhaitee: r.date_livraison_souhaitee || null,
+        referenceChantierDemandee: r.reference_chantier_demandee || null,
         createdByName: r.created_by_name || null,
         createdAt: String(r.created_at || ''),
       })),
     )
   }
 
-  /** Détail (lecture) d'un document "Devis à transformer en CDC" déjà
-   * généré -- charge ses lignes à la demande et affiche un bouton pour
-   * marquer le document comme transformé une fois la commande passée
-   * dans Sage. */
+  /** Détail (lecture) d'un document "à traiter" déjà généré -- branche
+   * l'affichage selon le type : lignes (conservées/supprimées/nouvelles)
+   * pour un devis, champs d'en-tête (date livraison / référence chantier)
+   * pour une commande. Un bouton permet de marquer le document comme
+   * traité manuellement (en plus du passage automatique par le trigger
+   * DB quand la tâche liée est clôturée -- voir migration). */
   async function openTransformationDetail(t: DevisTransformation) {
-    const { data, error } = await supabase
-      .from('devis_transformation_lignes')
-      .select('id, origine, reference_article, designation, quantite, montant_ht, taux_remise')
-      .eq('transformation_id', t.id)
-      .order('origine', { ascending: true })
-    if (error) {
-      console.error('[MobileClients] erreur chargement devis_transformation_lignes', error)
-    }
-    const lignes: DevisTransformationLigne[] = (data || []).map((r: any) => ({
-      id: String(r.id),
-      origine: r.origine,
-      referenceArticle: String(r.reference_article || ''),
-      designation: String(r.designation || ''),
-      quantite: r.quantite === null || r.quantite === undefined ? null : safeNumber(r.quantite),
-      montantHt: r.montant_ht === null || r.montant_ht === undefined ? null : safeNumber(r.montant_ht),
-      tauxRemise: r.taux_remise === null || r.taux_remise === undefined ? null : safeNumber(r.taux_remise),
-    }))
-    const labelOrigine: Record<string, string> = { conservee: 'Conservée', supprimee: 'À supprimer', nouvelle: 'Nouvelle' }
     async function marquerTransforme() {
       const { error: err } = await supabase
         .from('devis_transformations')
@@ -1022,26 +1060,62 @@ function ClientDetailScreen({
       setOpenDetail(null)
       setTransformations((cur) => (cur ? cur.map((x) => (x.id === t.id ? { ...x, statut: 'transforme' } : x)) : cur))
     }
+    const statutLabel = t.statut === 'transforme' ? '✅ Transformé' : t.statut === 'annule' ? '✖ Annulé' : '⏳ À traiter'
+    const footerMarquer = t.statut === 'a_traiter' ? (
+      <button
+        type="button"
+        onClick={() => void marquerTransforme()}
+        style={{ padding: '13px', borderRadius: 12, border: 'none', background: '#A6A181', color: '#141A26', fontSize: 14, fontWeight: 700 }}
+      >
+        ✓ Marquer comme traité
+      </button>
+    ) : undefined
+
+    if (t.typeDocument === 'commande') {
+      setOpenDetail({
+        title: `Modification de commande — ${t.numeroPieceDevisOrigine}`,
+        subtitle: `${statutLabel}${t.motif ? ` · ${t.motif}` : ''}`,
+        fields: [
+          { label: 'Nouvelle date de livraison souhaitée', value: t.dateLivraisonSouhaitee ? formatDateFr(t.dateLivraisonSouhaitee) : '—' },
+          { label: 'Nouvelle référence chantier', value: t.referenceChantierDemandee || '—' },
+          { label: 'Demandé par', value: [t.createdByName, formatDateFr(normalizeDateIso(t.createdAt))].filter(Boolean).join(' · ') || '—' },
+        ],
+        footer: footerMarquer,
+      })
+      return
+    }
+
+    const { data, error } = await supabase
+      .from('devis_transformation_lignes')
+      .select('id, numero_ligne, origine, reference_article, designation, quantite, montant_ht, taux_remise')
+      .eq('transformation_id', t.id)
+      .order('numero_ligne', { ascending: true })
+    if (error) {
+      console.error('[MobileClients] erreur chargement devis_transformation_lignes', error)
+    }
+    const lignes: DevisTransformationLigne[] = (data || []).map((r: any) => ({
+      id: String(r.id),
+      numeroLigne: r.numero_ligne === null || r.numero_ligne === undefined ? null : Number(r.numero_ligne),
+      origine: r.origine,
+      referenceArticle: String(r.reference_article || ''),
+      designation: String(r.designation || ''),
+      quantite: r.quantite === null || r.quantite === undefined ? null : safeNumber(r.quantite),
+      montantHt: r.montant_ht === null || r.montant_ht === undefined ? null : safeNumber(r.montant_ht),
+      tauxRemise: r.taux_remise === null || r.taux_remise === undefined ? null : safeNumber(r.taux_remise),
+    }))
+    const labelOrigine: Record<string, string> = { conservee: 'Conservée', supprimee: 'À supprimer', nouvelle: 'Nouvelle' }
     setOpenDetail({
       title: `Devis à transformer en CDC — ${t.numeroPieceDevisOrigine}`,
-      subtitle: `${t.statut === 'transforme' ? '✅ Transformé' : t.statut === 'annule' ? '✖ Annulé' : '⏳ À traiter'}${t.motif ? ` · ${t.motif}` : ''}`,
+      subtitle: `${statutLabel}${t.motif ? ` · ${t.motif}` : ''}`,
       fields: lignes.map((l) => ({
-        label: `[${labelOrigine[l.origine] || l.origine}] ${l.referenceArticle || '—'}${l.designation ? ` — ${l.designation}` : ''}`,
+        label: `${l.numeroLigne ? `L${l.numeroLigne} · ` : ''}[${labelOrigine[l.origine] || l.origine}] ${l.referenceArticle || '—'}${l.designation ? ` — ${l.designation}` : ''}`,
         value: [
           l.quantite !== null ? `Qté ${l.quantite}` : null,
           l.tauxRemise !== null ? `Remise ${l.tauxRemise}%` : null,
           l.montantHt !== null ? formatMoney(l.montantHt) : null,
         ].filter(Boolean).join(' · ') || '—',
       })),
-      footer: t.statut === 'a_traiter' ? (
-        <button
-          type="button"
-          onClick={() => void marquerTransforme()}
-          style={{ padding: '13px', borderRadius: 12, border: 'none', background: '#A6A181', color: '#141A26', fontSize: 14, fontWeight: 700 }}
-        >
-          ✓ Marquer comme transformé en CDC
-        </button>
-      ) : undefined,
+      footer: footerMarquer,
     })
   }
 
@@ -1056,38 +1130,104 @@ function ClientDetailScreen({
     })
   }
 
-  function openDocDetail(d: DocAgrege, type: string) {
-    setOpenDetail({
-      title: d.numeroPiece || '(sans numéro)',
-      subtitle: `${type} · ${formatMoney(d.montantHt)}`,
-      fields: [
-        { label: 'Date', value: formatDateFr(d.date) },
-        { label: 'Référence chantier', value: d.reference || '—' },
-        { label: 'Montant total HT', value: formatMoney(d.montantHt) },
-        // Lignes d'articles : tap -> détail stock de la référence (si
-        // onOpenStock a été fourni par MobileShell). Une ligne sans
-        // référence exploitable (rare, ligne de texte libre) reste non
-        // cliquable plutôt que d'ouvrir une fiche stock vide.
-        //
-        // NOTE ordre des lignes : aucune colonne d'ordre fiable n'existe
-        // dans devis_lignes/activite_lignes pour l'historique importé en
-        // masse (CSV/Excel) -- le seul vrai numéro de ligne Sage
-        // (vl_dlno) n'existe que dans sage.devis_hier_aujourdhui /
-        // sage.activite_non_facturee, limités aux pièces d'hier/
-        // aujourd'hui. Les lignes restent donc ici dans l'ordre renvoyé
-        // par la requête, qui ne reflète pas forcément l'ordre Sage --
-        // non résolu tant que le pipeline d'import ne capture pas ce
-        // numéro de ligne à la source.
-        ...d.lignes.map((l) => ({
-          label: `${l.reference_article || '—'}${l.designation ? ` — ${l.designation}` : ''}`,
-          value: `${l.quantite} × ${formatMoney(l.montant_ht)}`,
+  /** ÉVOLUTION : si un traitement "à traiter" existe déjà pour ce document
+   * (devis ou commande, voir transformationsParPiece), la fiche affiche
+   * en plus les lignes modifiées/supprimées/ajoutées (pour un devis) ou
+   * les nouvelles valeurs demandées (pour une commande), et le bouton
+   * d'action pointe vers ce traitement au lieu d'en proposer un nouveau. */
+  async function openDocDetail(d: DocAgrege, type: string) {
+    const enCours = transformationsParPiece[d.numeroPiece]
+    const estDevisAvecTraitement = type === 'Devis' && enCours && enCours.typeDocument === 'devis'
+    const estCommandeAvecTraitement = type === 'Bon de commande' && enCours && enCours.typeDocument === 'commande'
+
+    let lignesTraitement: DevisTransformationLigne[] = []
+    if (estDevisAvecTraitement) {
+      const { data } = await supabase
+        .from('devis_transformation_lignes')
+        .select('id, numero_ligne, origine, reference_article, designation, quantite, montant_ht, taux_remise')
+        .eq('transformation_id', enCours!.id)
+        .order('numero_ligne', { ascending: true })
+      lignesTraitement = (data || []).map((r: any) => ({
+        id: String(r.id),
+        numeroLigne: r.numero_ligne === null || r.numero_ligne === undefined ? null : Number(r.numero_ligne),
+        origine: r.origine,
+        referenceArticle: String(r.reference_article || ''),
+        designation: String(r.designation || ''),
+        quantite: r.quantite === null || r.quantite === undefined ? null : safeNumber(r.quantite),
+        montantHt: r.montant_ht === null || r.montant_ht === undefined ? null : safeNumber(r.montant_ht),
+        tauxRemise: r.taux_remise === null || r.taux_remise === undefined ? null : safeNumber(r.taux_remise),
+      }))
+    }
+    const lignesSupprimees = lignesTraitement.filter((l) => l.origine === 'supprimee')
+    const lignesNouvelles = lignesTraitement.filter((l) => l.origine === 'nouvelle')
+
+    const champsBase = [
+      { label: 'Date', value: formatDateFr(d.date) },
+      { label: 'Référence chantier', value: d.reference || '—' },
+      { label: 'Montant total HT', value: formatMoney(d.montantHt) },
+      // Lignes d'articles : tap -> détail stock de la référence (si
+      // onOpenStock a été fourni par MobileShell). Une ligne sans
+      // référence exploitable (rare, ligne de texte libre) reste non
+      // cliquable plutôt que d'ouvrir une fiche stock vide.
+      //
+      // NOTE ordre des lignes : aucune colonne d'ordre fiable n'existe
+      // dans devis_lignes/activite_lignes pour l'historique importé en
+      // masse (CSV/Excel) -- le seul vrai numéro de ligne Sage
+      // (vl_dlno) n'existe que dans sage.devis_hier_aujourdhui /
+      // sage.activite_non_facturee, limités aux pièces d'hier/
+      // aujourd'hui. Les lignes restent donc ici dans l'ordre renvoyé
+      // par la requête, qui ne reflète pas forcément l'ordre Sage --
+      // non résolu tant que le pipeline d'import ne capture pas ce
+      // numéro de ligne à la source.
+      ...d.lignes.map((l) => {
+        // Une ligne d'origine flaguée "à supprimer" dans le traitement en
+        // cours est signalée ici -- comparaison par référence+désignation
+        // (les lignes du devis n'ont pas d'identifiant stable partagé
+        // avec devis_transformation_lignes).
+        const supprimee = lignesSupprimees.some((s) => s.referenceArticle === l.reference_article && s.designation === l.designation)
+        return {
+          label: `${supprimee ? '🗑 ' : ''}${l.reference_article || '—'}${l.designation ? ` — ${l.designation}` : ''}`,
+          value: `${l.quantite} × ${formatMoney(l.montant_ht)}${supprimee ? ' · à supprimer' : ''}`,
           onClick: onOpenStock && l.reference_article ? () => onOpenStock(l.reference_article, l.designation) : undefined,
-        })),
-      ],
+        }
+      }),
+      ...lignesNouvelles.map((l) => ({
+        label: `➕ ${l.referenceArticle || '—'}${l.designation ? ` — ${l.designation}` : ''}`,
+        value: [
+          l.quantite !== null ? `Qté ${l.quantite}` : null,
+          l.tauxRemise !== null ? `Remise ${l.tauxRemise}%` : null,
+          'nouvelle ligne',
+        ].filter(Boolean).join(' · '),
+      })),
+    ]
+
+    if (estCommandeAvecTraitement) {
+      champsBase.push(
+        { label: 'Nouvelle date de livraison souhaitée', value: enCours!.dateLivraisonSouhaitee ? formatDateFr(enCours!.dateLivraisonSouhaitee) : '—' },
+        { label: 'Nouvelle référence chantier demandée', value: enCours!.referenceChantierDemandee || '—' },
+      )
+    }
+
+    let footer: React.ReactNode | undefined
+    if (estDevisAvecTraitement || estCommandeAvecTraitement) {
+      footer = (
+        <button
+          type="button"
+          onClick={() => { setOpenDetail(null); void openTransformationDetail(enCours!) }}
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+            padding: '13px', borderRadius: 12, border: '1px solid rgba(75,146,172,0.4)',
+            background: 'rgba(75,146,172,0.14)', color: '#8FC7DA', fontSize: 14, fontWeight: 700,
+          }}
+        >
+          👁 Voir le traitement en cours
+        </button>
+      )
+    } else if (type === 'Devis') {
       // ÉVOLUTION : uniquement pour les devis -- bouton pour composer le
       // document "Devis à transformer en CDC" à partir de ce devis
       // (décision prise par le client). Voir DevisTransformationSheet.
-      footer: type === 'Devis' ? (
+      footer = (
         <button
           type="button"
           onClick={() => { setOpenDetail(null); setDevisATraiter(d) }}
@@ -1099,7 +1239,31 @@ function ClientDetailScreen({
         >
           🔧 Traiter ce devis (décision client)
         </button>
-      ) : undefined,
+      )
+    } else if (type === 'Bon de commande') {
+      // ÉVOLUTION : modifier la date de livraison souhaitée et/ou la
+      // référence chantier d'une commande -- génère une tâche ERP + un
+      // document dans la même table que les devis à transformer.
+      footer = (
+        <button
+          type="button"
+          onClick={() => { setOpenDetail(null); setCommandeAModifier(d) }}
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+            padding: '13px', borderRadius: 12, border: '1px solid rgba(75,146,172,0.4)',
+            background: 'rgba(75,146,172,0.14)', color: '#8FC7DA', fontSize: 14, fontWeight: 700,
+          }}
+        >
+          📅 Modifier livraison / référence chantier
+        </button>
+      )
+    }
+
+    setOpenDetail({
+      title: d.numeroPiece || '(sans numéro)',
+      subtitle: `${type} · ${formatMoney(d.montantHt)}`,
+      fields: champsBase,
+      footer,
     })
   }
 
@@ -1324,14 +1488,14 @@ function ClientDetailScreen({
           onClick={() => void ouvrirTachesTerminees()}
         />
 
-        <DocumentSection title="Commandes (CDC)" loading={loading} docs={detail?.commandes} onOpen={(d) => openDocDetail(d, 'Bon de commande')} />
+        <DocumentSection title="Commandes (CDC)" loading={loading} docs={detail?.commandes} transformationsParPiece={transformationsParPiece} onOpen={(d) => openDocDetail(d, 'Bon de commande')} />
         <DocumentSection title="Préparations de livraison (PL)" loading={loading} docs={detail?.preparations} onOpen={(d) => openDocDetail(d, 'Préparation de livraison')} />
         <DocumentSection title="Bons de livraison (BL)" loading={loading} docs={detail?.livraisons} onOpen={(d) => openDocDetail(d, 'Bon de livraison')} />
         <DocumentSection title="Bons de retour (BR)" loading={loading} docs={detail?.retours} onOpen={(d) => openDocDetail(d, 'Bon de retour')} />
-        <DocumentSection title="Devis" loading={loading} docs={detail?.devis} onOpen={(d) => openDocDetail(d, 'Devis')} />
+        <DocumentSection title="Devis" loading={loading} docs={detail?.devis} transformationsParPiece={transformationsParPiece} onOpen={(d) => openDocDetail(d, 'Devis')} />
 
         <RowItem
-          title="🔧 Devis à transformer en CDC"
+          title="🔧 Documents à traiter (devis / commandes)"
           onClick={() => void ouvrirTransformations()}
         />
       </div>
@@ -1473,6 +1637,19 @@ function ClientDetailScreen({
         />
       )}
 
+      {commandeAModifier && (
+        <CommandeModificationSheet
+          numeroTiers={client.numero}
+          nomClient={client.nom}
+          numeroPiece={commandeAModifier.numeroPiece}
+          referenceActuelle={commandeAModifier.reference}
+          currentEmail={currentEmail}
+          currentName={currentName}
+          onClose={() => setCommandeAModifier(null)}
+          onCreated={(task) => onTaskCreated(task)}
+        />
+      )}
+
       {transformationsOuvertes && (
         <div
           style={{ position: 'fixed', inset: 0, zIndex: 240, background: 'rgba(6,10,18,0.62)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
@@ -1483,13 +1660,13 @@ function ClientDetailScreen({
             onClick={(e) => e.stopPropagation()}
           >
             <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 6px' }} />
-            <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Devis à transformer en CDC</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Documents à traiter</div>
             <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', marginBottom: 4 }}>{client.nom || client.numero}</div>
 
             {transformationsLoading ? (
               <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', padding: '10px 0' }}>Chargement…</div>
             ) : !transformations || transformations.length === 0 ? (
-              <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', padding: '10px 0' }}>Aucun devis à transformer pour ce client.</div>
+              <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', padding: '10px 0' }}>Aucun document à traiter pour ce client.</div>
             ) : (
               transformations.map((t) => (
                 <div
@@ -1498,9 +1675,14 @@ function ClientDetailScreen({
                   style={{ borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)', padding: '10px 12px', cursor: 'pointer' }}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                    <span style={{ fontSize: 14.5, fontWeight: 600, color: '#fff' }}>{t.numeroPieceDevisOrigine || '—'}</span>
+                    <span style={{ fontSize: 14.5, fontWeight: 600, color: '#fff' }}>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase' }}>
+                        {t.typeDocument === 'commande' ? 'Commande' : 'Devis'}
+                      </span>{' '}
+                      {t.numeroPieceDevisOrigine || '—'}
+                    </span>
                     <span style={{ fontSize: 12, fontWeight: 700, color: t.statut === 'transforme' ? '#8fd4a8' : t.statut === 'annule' ? 'rgba(255,255,255,0.4)' : '#E8A96A' }}>
-                      {t.statut === 'transforme' ? '✅ Transformé' : t.statut === 'annule' ? '✖ Annulé' : '⏳ À traiter'}
+                      {t.statut === 'transforme' ? '✅ Traité' : t.statut === 'annule' ? '✖ Annulé' : '⏳ À traiter'}
                     </span>
                   </div>
                   <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginTop: 3 }}>
@@ -1743,6 +1925,7 @@ function DevisTransformationSheet({
         .from('devis_transformations')
         .insert({
           numero_tiers: client.numero,
+          type_document: 'devis',
           numero_piece_devis_origine: devis.numeroPiece,
           statut: 'a_traiter',
           motif: motif.trim() || null,
@@ -1754,50 +1937,71 @@ function DevisTransformationSheet({
       if (errTransfo) throw errTransfo
       const transformationId = transfo.id as string
 
-      const lignesAInserer = [
-        ...devis.lignes.map((l, i) => ({
-          transformation_id: transformationId,
-          origine: garder[i] ? 'conservee' : 'supprimee',
-          reference_article: l.reference_article || null,
-          designation: l.designation || null,
-          quantite: l.quantite,
-          montant_ht: l.montant_ht,
-          taux_remise: null,
-        })),
-        ...nouvelles.map((n) => ({
-          transformation_id: transformationId,
-          origine: 'nouvelle',
-          reference_article: n.reference || null,
-          designation: n.designation || null,
-          quantite: n.quantite,
-          montant_ht: null,
-          taux_remise: n.tauxRemise.trim() === '' ? null : Number(n.tauxRemise),
-        })),
-      ]
+      // Numéro de ligne généré côté app (pas de numéro fiable en base,
+      // voir commentaire sur la migration) : reprend l'ordre du devis
+      // d'origine pour les lignes conservées/supprimées (1..N), puis
+      // continue la numérotation pour les nouvelles lignes.
+      const lignesOrigine = devis.lignes.map((l, i) => ({
+        transformation_id: transformationId,
+        numero_ligne: i + 1,
+        origine: garder[i] ? 'conservee' : 'supprimee',
+        reference_article: l.reference_article || null,
+        designation: l.designation || null,
+        quantite: l.quantite,
+        montant_ht: l.montant_ht,
+        taux_remise: null as number | null,
+      }))
+      const lignesNouvelles = nouvelles.map((n, i) => ({
+        transformation_id: transformationId,
+        numero_ligne: devis.lignes.length + i + 1,
+        origine: 'nouvelle',
+        reference_article: n.reference || null,
+        designation: n.designation || null,
+        quantite: n.quantite,
+        montant_ht: null as number | null,
+        taux_remise: n.tauxRemise.trim() === '' ? null : Number(n.tauxRemise),
+      }))
+      const lignesAInserer = [...lignesOrigine, ...lignesNouvelles]
 
       if (lignesAInserer.length > 0) {
         const { error: errLignes } = await supabase.from('devis_transformation_lignes').insert(lignesAInserer)
         if (errLignes) throw errLignes
       }
 
-      const nbSupprimees = garder.filter((g) => !g).length
-      const nbNouvelles = nouvelles.length
-      const descriptionTache = [
-        `Transformer le devis ${devis.numeroPiece} en commande (décision client)`,
-        nbSupprimees > 0 ? `${nbSupprimees} ligne(s) à retirer` : null,
-        nbNouvelles > 0 ? `${nbNouvelles} nouvelle(s) ligne(s)` : null,
-        motif.trim() ? `Motif : ${motif.trim()}` : null,
-      ].filter(Boolean).join(' — ')
+      const lignesSupprimeesDetail = lignesOrigine.filter((l) => l.origine === 'supprimee')
+      const lignesNouvellesDetail = lignesNouvelles
+
+      // Commentaire détaillé de la tâche (colonne comment_progress) :
+      // motif saisi par l'utilisateur + détail des lignes supprimées et
+      // ajoutées, chacune référencée par son numéro de ligne généré.
+      const commentaireParts: string[] = []
+      if (motif.trim()) commentaireParts.push(`Motif : ${motif.trim()}`)
+      if (lignesSupprimeesDetail.length > 0) {
+        commentaireParts.push(
+          `Lignes supprimées :\n${lignesSupprimeesDetail
+            .map((l) => `- L${l.numero_ligne} : ${l.reference_article || '—'}${l.designation ? ` — ${l.designation}` : ''} (${l.quantite} × ${formatMoney(l.montant_ht || 0)})`)
+            .join('\n')}`,
+        )
+      }
+      if (lignesNouvellesDetail.length > 0) {
+        commentaireParts.push(
+          `Lignes ajoutées :\n${lignesNouvellesDetail
+            .map((l) => `- L${l.numero_ligne} : ${l.reference_article || '—'}${l.designation ? ` — ${l.designation}` : ''} (qté ${l.quantite}${l.taux_remise !== null ? `, remise ${l.taux_remise}%` : ''})`)
+            .join('\n')}`,
+        )
+      }
 
       const { data: tache, error: errTache } = await supabase
         .from('todo_actions')
         .insert({
           numero_tiers: client.numero,
-          description_action: descriptionTache,
+          description_action: `Transformer le devis ${devis.numeroPiece} en commande — Client : ${client.nom || client.numero} (N° ${client.numero})`,
+          comment_progress: commentaireParts.join('\n\n') || null,
           status: 'Non débuté',
           assigned_to: currentName,
           created_by_email: currentEmail,
           created_by_name: currentName,
+          devis_transformation_id: transformationId,
         })
         .select('id, description_action, status, due_date, assigned_to')
         .single()
@@ -1947,7 +2151,7 @@ function DevisTransformationSheet({
         {error && <div style={{ fontSize: 13, color: '#e0a685' }}>{error}</div>}
 
         <p style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.35)', lineHeight: 1.4, margin: 0 }}>
-          Génère un document « Devis à transformer en CDC » (consultable dans « Devis à transformer en CDC » sur la fiche client) et une tâche de suivi. La commande elle-même reste à saisir dans Sage.
+          Génère un document « Devis à transformer en CDC » (consultable dans « Documents à traiter » sur la fiche client) et une tâche de suivi, avec le détail des lignes retirées/ajoutées en commentaire. La commande elle-même reste à saisir dans Sage ; une fois la tâche clôturée, ce document est automatiquement marqué comme traité.
         </p>
 
         <button
@@ -1970,9 +2174,154 @@ function DevisTransformationSheet({
   )
 }
 
+/** ÉVOLUTION : modification d'une commande (date de livraison souhaitée
+ * et/ou référence chantier) -- même principe que DevisTransformationSheet
+ * mais sans lignes : un document devis_transformations (type_document =
+ * 'commande') porte les nouvelles valeurs demandées, et une tâche est
+ * créée pour rappeler de reporter ce changement dans l'ERP (Sage), avec
+ * l'ancienne et la nouvelle valeur en commentaire.
+ * EXPORTÉ (2026-09-02) : signature en primitives (pas ClientRow/DocAgrege)
+ * pour être réutilisable depuis MobileAlertes.tsx (écran "CDC < 2026"),
+ * qui ne dispose que d'un CdcDocAgrege, pas d'un ClientRow/DocAgrege. */
+export function CommandeModificationSheet({
+  numeroTiers, nomClient, numeroPiece, referenceActuelle, currentEmail, currentName, onClose, onCreated,
+}: {
+  numeroTiers: string
+  nomClient: string
+  numeroPiece: string
+  referenceActuelle: string
+  currentEmail: string
+  currentName: string
+  onClose: () => void
+  onCreated?: (task: { id: string; libelle: string; status: string; due_date: string | null; assigned_to: string | null }) => void
+}) {
+  const [dateLivraison, setDateLivraison] = useState('')
+  const [referenceChantier, setReferenceChantier] = useState(referenceActuelle || '')
+  const [motif, setMotif] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  async function valider() {
+    const dateChangee = dateLivraison !== ''
+    const refChangee = referenceChantier.trim() !== (referenceActuelle || '').trim()
+    if (!dateChangee && !refChangee) {
+      setError('Renseignez au moins une nouvelle date de livraison ou une nouvelle référence chantier.')
+      return
+    }
+    setSaving(true)
+    setError('')
+    try {
+      const { data: transfo, error: errTransfo } = await supabase
+        .from('devis_transformations')
+        .insert({
+          numero_tiers: numeroTiers,
+          type_document: 'commande',
+          numero_piece_devis_origine: numeroPiece,
+          statut: 'a_traiter',
+          motif: motif.trim() || null,
+          date_livraison_souhaitee: dateChangee ? dateLivraison : null,
+          reference_chantier_demandee: refChangee ? referenceChantier.trim() : null,
+          created_by_email: currentEmail,
+          created_by_name: currentName,
+        })
+        .select('id')
+        .single()
+      if (errTransfo) throw errTransfo
+
+      const commentaireParts: string[] = []
+      if (motif.trim()) commentaireParts.push(`Motif : ${motif.trim()}`)
+      if (dateChangee) commentaireParts.push(`Nouvelle date de livraison souhaitée : ${formatDateFr(dateLivraison)}`)
+      if (refChangee) commentaireParts.push(`Référence chantier actuelle : ${referenceActuelle || '—'} → demandée : ${referenceChantier.trim() || '—'}`)
+
+      const { data: tache, error: errTache } = await supabase
+        .from('todo_actions')
+        .insert({
+          numero_tiers: numeroTiers,
+          description_action: `Reporter dans l'ERP la modification de la commande ${numeroPiece} — Client : ${nomClient || numeroTiers} (N° ${numeroTiers})`,
+          comment_progress: commentaireParts.join('\n') || null,
+          status: 'Non débuté',
+          assigned_to: currentName,
+          created_by_email: currentEmail,
+          created_by_name: currentName,
+          devis_transformation_id: transfo.id,
+        })
+        .select('id, description_action, status, due_date, assigned_to')
+        .single()
+      if (errTache) throw errTache
+
+      onCreated?.({
+        id: String(tache.id),
+        libelle: String(tache.description_action || ''),
+        status: String(tache.status || ''),
+        due_date: tache.due_date || null,
+        assigned_to: tache.assigned_to || null,
+      })
+      onClose()
+    } catch (e: any) {
+      setError(e?.message || 'Erreur lors de la génération de la demande.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 260, background: 'rgba(6,10,18,0.65)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }} onClick={() => !saving && onClose()}>
+      <div style={{ width: '100%', maxWidth: 480, maxHeight: '90vh', overflowY: 'auto', background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.1)', padding: '12px 18px 26px', display: 'flex', flexDirection: 'column', gap: 12 }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 2px' }} />
+        <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Modifier la commande {numeroPiece}</div>
+        <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginTop: -6 }}>{nomClient || numeroTiers}</div>
+
+        <div>
+          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Nouvelle date de livraison souhaitée</div>
+          <input type="date" value={dateLivraison} onChange={(e) => setDateLivraison(e.target.value)} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }} />
+        </div>
+
+        <div>
+          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Référence chantier</div>
+          <input value={referenceChantier} onChange={(e) => setReferenceChantier(e.target.value)} placeholder="Référence chantier…" style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }} />
+          <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginTop: 4 }}>Actuelle : {referenceActuelle || '—'}</div>
+        </div>
+
+        <div>
+          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Motif / précisions (facultatif)</div>
+          <textarea
+            value={motif}
+            onChange={(e) => setMotif(e.target.value)}
+            rows={2}
+            placeholder="Ex. : Client demande un report de livraison de 2 semaines…"
+            style={{ width: '100%', borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '10px', fontSize: 14, resize: 'vertical' }}
+          />
+        </div>
+
+        {error && <div style={{ fontSize: 13, color: '#e0a685' }}>{error}</div>}
+
+        <p style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.35)', lineHeight: 1.4, margin: 0 }}>
+          Génère une demande (consultable dans « Documents à traiter ») et une tâche pour reporter ce changement dans Sage — la modification n'est pas appliquée automatiquement dans l'ERP.
+        </p>
+
+        <button
+          type="button"
+          onClick={() => void valider()}
+          disabled={saving}
+          style={{ padding: '13px', borderRadius: 12, border: 'none', background: '#A6A181', color: '#141A26', fontSize: 14.5, fontWeight: 700 }}
+        >
+          {saving ? 'Génération…' : 'Générer la demande + tâche'}
+        </button>
+        <button
+          type="button"
+          onClick={() => !saving && onClose()}
+          style={{ padding: '11px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: 'transparent', color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: 600 }}
+        >
+          Annuler
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function DocumentSection({
-  title, loading, docs, onOpen,
-}: { title: string; loading: boolean; docs: DocAgrege[] | undefined; onOpen: (d: DocAgrege) => void }) {
+  title, loading, docs, transformationsParPiece, onOpen,
+}: { title: string; loading: boolean; docs: DocAgrege[] | undefined; transformationsParPiece?: Record<string, DevisTransformation>; onOpen: (d: DocAgrege) => void }) {
   return (
     <Section title={title}>
       {loading ? (
@@ -1987,6 +2336,7 @@ function DocumentSection({
             reference={d.reference}
             subtitle={formatDateFr(d.date)}
             trailing={formatMoney(d.montantHt)}
+            badge={transformationsParPiece?.[d.numeroPiece] ? <PastilleTraitement /> : undefined}
             onClick={() => onOpen(d)}
           />
         ))
@@ -2107,8 +2457,8 @@ function TacheRowItem({ action, onClick }: { action: ActionRow; onClick: () => v
  * la fiche ouverte. Utilisée par DocumentSection (BL/CDC/PL/BR/Devis) ;
  * les autres appelants (Actions) n'en ont simplement pas besoin. */
 function RowItem({
-  title, reference, subtitle, trailing, onClick,
-}: { title: string; reference?: string; subtitle?: string; trailing?: string; onClick?: () => void }) {
+  title, reference, subtitle, trailing, badge, onClick,
+}: { title: string; reference?: string; subtitle?: string; trailing?: string; badge?: React.ReactNode; onClick?: () => void }) {
   return (
     <div
       onClick={onClick}
@@ -2125,6 +2475,7 @@ function RowItem({
     >
       <div style={{ minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, minWidth: 0 }}>
+          {badge}
           <span style={{ fontSize: 14.5, color: '#fff', flexShrink: 0, whiteSpace: 'nowrap' }}>{title}</span>
           {reference && (
             <span
@@ -2145,6 +2496,24 @@ function RowItem({
         </div>
       )}
     </div>
+  )
+}
+
+/** Pastille "traitement en cours" affichée devant le titre d'un devis ou
+ * d'une commande qui a un document devis_transformations non transformé
+ * (statut 'a_traiter') -- disparaît automatiquement une fois la tâche
+ * liée clôturée (le trigger DB repasse le statut à 'transforme', et le
+ * document sort de transformationsEnCours au prochain chargement de la
+ * fiche). */
+function PastilleTraitement() {
+  return (
+    <span
+      title="Traitement en cours"
+      aria-hidden="true"
+      style={{ fontSize: 13, flexShrink: 0, color: '#E8A96A' }}
+    >
+      ⭐
+    </span>
   )
 }
 
