@@ -201,6 +201,31 @@ type DevisTransformationLigne = {
   montantHt: number | null
   tauxRemise: number | null
 }
+/** ÉVOLUTION (2026-09-02) : "Alertes clients" -- pavé sur l'écran "Mes
+ * clients" (liste, avant sélection d'un client) qui affiche un compteur
+ * pour chacune des 3 règles de suivi paramétrables par client (voir
+ * "🔔 Alertes de suivi" dans la fiche client / client_alertes_config).
+ * Ces règles sont évaluées une fois par jour côté base par la fonction
+ * executer_controle_alertes_client(), qui écrit une ligne dans
+ * client_alertes_historique (type_alerte + lien vers la tâche créée) et
+ * une tâche dans todo_actions -- SANS affecter cette tâche à personne
+ * (assigned_to = null), c'est justement ce qui permet de les regrouper
+ * ici indépendamment de qui est connecté. */
+type ClientAlerteType = 'appels_visites' | 'devis' | 'commande'
+type ClientAlerteRow = {
+  id: string
+  todoActionId: string
+  numeroTiers: string
+  typeAlerte: ClientAlerteType
+  description: string
+  dueDate: string | null
+  createdAt: string
+}
+const LABEL_ALERTE_CLIENT: Record<ClientAlerteType, string> = {
+  appels_visites: 'Appels/visites insuffisants',
+  devis: 'Sans devis',
+  commande: 'Sans commande',
+}
 /** Visite unifiée (BLG synchronisé OU RDV "compagnon CEGECLIM") -- source
  * v_rdv_unifie (voir CORRECTIF ci-dessous), pas crm_base_activity seul.
  * blgActivityId/compagnonId : l'un des deux est rempli selon `source`,
@@ -332,6 +357,78 @@ export default function MobileClients({
   const [selected, setSelected] = useState<ClientRow | null>(null)
   const [detail, setDetail] = useState<ClientDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
+
+  // ÉVOLUTION (2026-09-02) : "Alertes clients" -- chargé une fois,
+  // indépendamment de allClients/perimetre (client_alertes_historique
+  // n'a pas de notion de périmètre en base). alertesClientsRows filtre
+  // ensuite côté client sur les numéros présents dans allClients (déjà
+  // restreint au périmètre de l'utilisateur), pour ne pas remonter de
+  // clients hors périmètre dans les compteurs/listes.
+  const [alertesClientsBrutes, setAlertesClientsBrutes] = useState<ClientAlerteRow[] | null>(null)
+  const [alertesClientsOuvertes, setAlertesClientsOuvertes] = useState<ClientAlerteType | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    async function charger() {
+      const { data, error } = await supabase
+        .from('client_alertes_historique')
+        .select('id, numero_tiers, type_alerte, created_at, todo_actions(id, status, description_action, due_date)')
+        .order('created_at', { ascending: false })
+        .limit(2000)
+      if (cancelled) return
+      if (error) {
+        console.error('[MobileClients] erreur chargement client_alertes_historique', error)
+        setAlertesClientsBrutes([])
+        return
+      }
+      const rows: ClientAlerteRow[] = ((data || []) as any[])
+        // La tâche liée peut avoir été terminée/annulée depuis (voir
+        // trigger sync côté devis_transformations pour le même principe) --
+        // ou, plus rarement, avoir disparu -- dans les deux cas, l'alerte
+        // ne doit plus apparaître ici.
+        .filter((r) => r.todo_actions && !['Terminé', 'Annulé'].includes(String(r.todo_actions.status || '')))
+        .map((r) => ({
+          id: String(r.id),
+          todoActionId: String(r.todo_actions.id),
+          numeroTiers: String(r.numero_tiers || ''),
+          typeAlerte: (r.type_alerte === 'devis' || r.type_alerte === 'commande' ? r.type_alerte : 'appels_visites') as ClientAlerteType,
+          description: String(r.todo_actions.description_action || ''),
+          dueDate: r.todo_actions.due_date || null,
+          createdAt: String(r.created_at || ''),
+        }))
+      setAlertesClientsBrutes(rows)
+    }
+    void charger()
+    return () => { cancelled = true }
+  }, [])
+
+  const alertesClientsRows = useMemo(() => {
+    if (!alertesClientsBrutes || !allClients) return null
+    const numerosAutorises = new Set(allClients.map((c) => c.numero))
+    return alertesClientsBrutes.filter((r) => numerosAutorises.has(r.numeroTiers))
+  }, [alertesClientsBrutes, allClients])
+
+  const alertesClientsCounts = useMemo(() => {
+    if (!alertesClientsRows) return null
+    const counts: Record<ClientAlerteType, number> = { appels_visites: 0, devis: 0, commande: 0 }
+    for (const r of alertesClientsRows) counts[r.typeAlerte] += 1
+    return counts
+  }, [alertesClientsRows])
+
+  /** Marque directement la tâche liée comme Terminée depuis cette liste,
+   * sans passer par la fiche client -- retire l'alerte localement, pas
+   * besoin de recharger toute la liste. */
+  async function terminerAlerteClient(row: ClientAlerteRow) {
+    const { error } = await supabase
+      .from('todo_actions')
+      .update({ status: 'Terminé', updated_at: new Date().toISOString() })
+      .eq('id', row.todoActionId)
+    if (error) {
+      window.alert(error.message)
+      return
+    }
+    setAlertesClientsBrutes((cur) => (cur ? cur.filter((r) => r.id !== row.id) : cur))
+  }
 
   useEffect(() => {
     // On attend que le périmètre soit résolu (voir loadIdentity ci-dessus)
@@ -786,7 +883,133 @@ export default function MobileClients({
               </div>
             )}
           </div>
+
+          {/* ÉVOLUTION (2026-09-02) : "Alertes clients" -- un compteur par
+             règle de suivi (voir ClientAlerteType ci-dessus), cliquable
+             pour ouvrir la liste des clients concernés. */}
+          <div
+            style={{
+              borderRadius: 14,
+              border: '1px solid rgba(255,255,255,0.10)',
+              background: 'rgba(255,255,255,0.04)',
+              padding: '14px 14px 12px',
+            }}
+          >
+            <div
+              style={{
+                fontSize: 11,
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em',
+                color: 'rgba(255,255,255,0.4)',
+                marginBottom: 10,
+              }}
+            >
+              🔔 Alertes clients
+            </div>
+            {alertesClientsCounts === null ? (
+              <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Chargement…</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {(Object.keys(LABEL_ALERTE_CLIENT) as ClientAlerteType[]).map((type) => {
+                  const count = alertesClientsCounts[type]
+                  return (
+                    <button
+                      key={type}
+                      type="button"
+                      onClick={() => count > 0 && setAlertesClientsOuvertes(type)}
+                      disabled={count === 0}
+                      style={{
+                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                        background: 'none', border: 'none', padding: '2px 0', fontSize: 14.5,
+                        cursor: count > 0 ? 'pointer' : 'default',
+                      }}
+                    >
+                      <span style={{ color: 'rgba(255,255,255,0.75)' }}>{LABEL_ALERTE_CLIENT[type]}</span>
+                      <span style={{ fontFamily: 'var(--font-mono)', color: count > 0 ? '#E8A96A' : '#fff', fontWeight: count > 0 ? 700 : 400 }}>
+                        {count}
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+          </div>
         </>
+      )}
+
+      {alertesClientsOuvertes && (
+        <div
+          style={{ position: 'fixed', inset: 0, zIndex: 240, background: 'rgba(6,10,18,0.62)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
+          onClick={() => setAlertesClientsOuvertes(null)}
+        >
+          <div
+            style={{ width: '100%', maxWidth: 480, maxHeight: '80vh', overflowY: 'auto', background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.08)', padding: '12px 18px 26px', display: 'flex', flexDirection: 'column', gap: 10 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 6px' }} />
+            <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>{LABEL_ALERTE_CLIENT[alertesClientsOuvertes]}</div>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', marginBottom: 4 }}>🔔 Alertes clients</div>
+
+            {(alertesClientsRows || []).filter((r) => r.typeAlerte === alertesClientsOuvertes).length === 0 ? (
+              <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', padding: '10px 0' }}>Aucun client concerné.</div>
+            ) : (
+              (alertesClientsRows || [])
+                .filter((r) => r.typeAlerte === alertesClientsOuvertes)
+                .map((r) => {
+                  const clientTrouve = allClients?.find((c) => c.numero === r.numeroTiers)
+                  return (
+                    <div
+                      key={r.id}
+                      style={{ borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 6 }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'flex-start' }}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAlertesClientsOuvertes(null)
+                            const client: ClientRow = clientTrouve || {
+                              numero: r.numeroTiers, nom: r.numeroTiers, collaborateur: '', dateCreationIso: '',
+                              caYtdN: 0, caYtdN1: 0, caN1: 0, ca12m: 0, band: CA_PROFILE_BANDS[0],
+                              devisYtdN: 0, margePctYtdN: null, margePctYtdN1: null,
+                            }
+                            void openClient(client)
+                          }}
+                          style={{
+                            textAlign: 'left', background: 'none', border: 'none', padding: 0,
+                            color: '#E8A96A', fontSize: 14.5, fontWeight: 700, textDecoration: 'underline', textUnderlineOffset: 2,
+                          }}
+                        >
+                          {clientTrouve?.nom || r.numeroTiers}
+                          <span style={{ color: 'rgba(255,255,255,0.4)', fontWeight: 400, fontSize: 12 }}> (N° {r.numeroTiers})</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void terminerAlerteClient(r)}
+                          style={{
+                            flexShrink: 0, padding: '5px 10px', borderRadius: 999,
+                            border: '1px solid rgba(63,145,66,0.4)', background: 'rgba(63,145,66,0.14)',
+                            color: '#8fd4a8', fontSize: 11.5, fontWeight: 700,
+                          }}
+                        >
+                          ✓ Terminer
+                        </button>
+                      </div>
+                      <div style={{ fontSize: 13, color: '#fff', lineHeight: 1.4 }}>{r.description}</div>
+                      <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>Créée le {formatDateFr(normalizeDateIso(r.createdAt))}</div>
+                    </div>
+                  )
+                })
+            )}
+
+            <button
+              type="button"
+              onClick={() => setAlertesClientsOuvertes(null)}
+              style={{ marginTop: 8, padding: '12px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: 'transparent', color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: 600 }}
+            >
+              Fermer
+            </button>
+          </div>
+        </div>
       )}
 
       {search.trim() && (
@@ -1782,6 +2005,26 @@ function NouvelleTacheSheet({
   // du bouton flottant qui se superposait à l'en-tête de l'app faute de
   // fond opaque derrière lui.
   const [modeVocal, setModeVocal] = useState(false)
+  // FIX (2026-09-02) : la textarea de description a `autoFocus`, donc le
+  // clavier iOS s'ouvre immédiatement à l'ouverture de la sheet. Sur iOS,
+  // `vh` ne se réduit PAS quand le clavier apparaît (bug connu de Safari),
+  // donc `maxHeight: '88vh'` restait calculé sur la hauteur pleine écran
+  // -- le bas de la sheet ("Tâche vocale", "Fermer") se retrouvait sous
+  // la barre d'accessoires du clavier, superposé/à moitié caché. On
+  // suit désormais window.visualViewport.height (qui, lui, reflète
+  // correctement l'espace visible au-dessus du clavier sur iOS) pour
+  // fixer une hauteur max dynamique à la place du 88vh statique.
+  const [hauteurMaxPx, setHauteurMaxPx] = useState<number | null>(null)
+  useEffect(() => {
+    const vv = (window as any).visualViewport as VisualViewport | undefined
+    if (!vv) return
+    function ajuster() {
+      setHauteurMaxPx(vv!.height * 0.92)
+    }
+    ajuster()
+    vv.addEventListener('resize', ajuster)
+    return () => vv.removeEventListener('resize', ajuster)
+  }, [])
 
   async function creer() {
     if (!description.trim()) { setError('La description est obligatoire.'); return }
@@ -1823,7 +2066,7 @@ function NouvelleTacheSheet({
 
   return (
     <div style={{ position: 'fixed', inset: 0, zIndex: 260, background: 'rgba(6,10,18,0.65)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }} onClick={() => !saving && onClose()}>
-      <div style={{ width: '100%', maxWidth: 480, maxHeight: '88vh', overflowY: 'auto', background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.1)', padding: '12px 18px 26px', display: 'flex', flexDirection: 'column', gap: 12 }} onClick={(e) => e.stopPropagation()}>
+      <div style={{ width: '100%', maxWidth: 480, maxHeight: hauteurMaxPx ? `${hauteurMaxPx}px` : '88vh', overflowY: 'auto', background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.1)', padding: '12px 18px 26px', display: 'flex', flexDirection: 'column', gap: 12 }} onClick={(e) => e.stopPropagation()}>
         <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 2px' }} />
         <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Nouvelle tâche</div>
         <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginTop: -6 }}>{client.nom || client.numero}</div>
