@@ -119,6 +119,12 @@ type CdfEntete = {
   invoice_status: string;
   tag_livraison: string;
   tag_facturation: string;
+  // Statut recalculé à partir des lignes réelles (hors "comment"), et
+  // indicateur de désaccord avec delivery_status -- voir
+  // v_appro_incoherences_livraison pour le détail de la logique.
+  statut_livraison_calcule: string;
+  tag_livraison_calcule: string;
+  incoherence_livraison: boolean;
   montant_ht: number;
   montant_ttc: number;
   dans_bdcf: boolean;
@@ -306,6 +312,7 @@ export default function ApproAchatsPage() {
   const [dateLivraisonFrom, setDateLivraisonFrom] = useState('');
   const [dateLivraisonTo, setDateLivraisonTo] = useState('');
   const [statutsLivraison, setStatutsLivraison] = useState<string[]>([]);
+  const [statutsLivraisonCorrige, setStatutsLivraisonCorrige] = useState<string[]>([]);
   const [statutsFacturation, setStatutsFacturation] = useState<string[]>([]);
   const [articleReference, setArticleReference] = useState('');
   const [dansBdcf, setDansBdcf] = useState<'all' | 'yes' | 'no'>('all');
@@ -492,6 +499,9 @@ export default function ApproAchatsPage() {
       if (statutsLivraison.length) {
         q = q.in(kind === 'entete' ? 'delivery_status' : 'statut_livraison_code', statutsLivraison);
       }
+      if (kind === 'entete' && statutsLivraisonCorrige.length) {
+        q = q.in('statut_livraison_calcule', statutsLivraisonCorrige);
+      }
       if (statutsFacturation.length) {
         q = q.in(kind === 'entete' ? 'invoice_status' : 'statut_facturation_code', statutsFacturation);
       }
@@ -514,6 +524,7 @@ export default function ApproAchatsPage() {
       dateCreationFrom,
       dateCreationTo,
       statutsLivraison,
+      statutsLivraisonCorrige,
       statutsFacturation,
       dateLivraisonFrom,
       dateLivraisonTo,
@@ -802,21 +813,23 @@ export default function ApproAchatsPage() {
           { header: 'Livraison (min → max)', key: 'periode_livraison', width: 24 },
           { header: 'Lieu de livraison', key: 'lieu_livraison_nom', width: 22 },
           { header: 'Ville livraison', key: 'lieu_livraison_ville', width: 20 },
-          { header: 'Statut livraison', key: 'tag_livraison', width: 16 },
+          { header: 'Statut livraison (BLG)', key: 'tag_livraison', width: 18 },
+          { header: 'Statut livraison (corrigé)', key: 'tag_livraison_calcule', width: 20 },
           { header: 'Statut facturation', key: 'tag_facturation', width: 18 },
           { header: 'Montant HT', key: 'montant_ht', width: 14, style: { numFmt: '#,##0 €' } },
           { header: 'Montant TTC', key: 'montant_ttc', width: 14, style: { numFmt: '#,##0 €' } },
         ];
         styleHeaderRow(ws3.getRow(1));
-        (detailData as CdfEntete[]).forEach((r) =>
-          ws3.addRow({
+        (detailData as CdfEntete[]).forEach((r) => {
+          const row = ws3.addRow({
             ...r,
             lien: r.lien_blg ? { text: 'Ouvrir ↗', hyperlink: r.lien_blg } : '',
             dans_bdcf_label: r.dans_bdcf ? '★' : '',
             order_date: fmtDate(r.order_date),
             periode_livraison: r.date_livraison_min ? `${fmtDate(r.date_livraison_min)} → ${fmtDate(r.date_livraison_max)}` : '—',
-          })
-        );
+          });
+          if (r.incoherence_livraison) row.getCell('tag_livraison_calcule').fill = SUBTOTAL_FILL;
+        });
       } else {
         ws3.columns = [
           { header: 'Référence CDF', key: 'cdf_reference', width: 16 },
@@ -1112,6 +1125,24 @@ export default function ApproAchatsPage() {
                 </div>
               </Field>
 
+              <Field label="Statut livraison corrigé">
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {STATUTS_LIVRAISON.map((s) => (
+                    <Chip
+                      key={s.value}
+                      active={statutsLivraisonCorrige.includes(s.value)}
+                      onClick={() => setStatutsLivraisonCorrige((prev) => toggleInArray(prev, s.value))}
+                    >
+                      {s.label}
+                    </Chip>
+                  ))}
+                </div>
+                <small style={{ color: '#8A8474' }}>
+                  Recalculé à partir des lignes réelles (RAL) — utile pour trouver les commandes où BLG n&apos;a pas mis à jour le
+                  statut d&apos;entête. Filtre appliqué uniquement en vue « Entête ».
+                </small>
+              </Field>
+
               <Field label="Statut facturation">
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                   {STATUTS_FACTURATION.map((s) => (
@@ -1169,6 +1200,7 @@ export default function ApproAchatsPage() {
                   setDateLivraisonFrom('');
                   setDateLivraisonTo('');
                   setStatutsLivraison([]);
+                  setStatutsLivraisonCorrige([]);
                   setStatutsFacturation([]);
                   setArticleReference('');
                   setPage(0);
@@ -1391,13 +1423,22 @@ export default function ApproAchatsPage() {
                 <table style={tableStyle}>
                   <thead>
                     <tr>
-                      {['Référence', 'Fournisseur', 'Créée le', 'Livraison (fenêtre)', 'Lieu de livraison', 'Livraison', 'Facturation', 'Montant HT', 'Montant TTC'].map(
-                        (h) => (
-                          <th key={h} style={thStyle}>
-                            {h}
-                          </th>
-                        )
-                      )}
+                      {[
+                        'Référence',
+                        'Fournisseur',
+                        'Créée le',
+                        'Livraison (fenêtre)',
+                        'Lieu de livraison',
+                        'Livraison (BLG)',
+                        'Livraison (corrigé)',
+                        'Facturation',
+                        'Montant HT',
+                        'Montant TTC',
+                      ].map((h) => (
+                        <th key={h} style={thStyle}>
+                          {h}
+                        </th>
+                      ))}
                     </tr>
                   </thead>
                   <tbody>
@@ -1426,6 +1467,14 @@ export default function ApproAchatsPage() {
                         <td style={tdStyle}>
                           <Tag label={r.tag_livraison} />
                         </td>
+                        <td style={{ ...tdStyle, background: r.incoherence_livraison ? '#FBEAE2' : undefined }}>
+                          <Tag label={r.tag_livraison_calcule} />
+                          {r.incoherence_livraison && (
+                            <span title="Diffère du statut BLG" style={{ marginLeft: 5, color: COLORS.alerte }}>
+                              ⚠
+                            </span>
+                          )}
+                        </td>
                         <td style={tdStyle}>
                           <Tag label={r.tag_facturation} />
                         </td>
@@ -1435,7 +1484,7 @@ export default function ApproAchatsPage() {
                     ))}
                     {!loading && rowsEntete.length === 0 && (
                       <tr>
-                        <td colSpan={9} style={{ ...tdStyle, textAlign: 'center', color: '#8A8474' }}>
+                        <td colSpan={10} style={{ ...tdStyle, textAlign: 'center', color: '#8A8474' }}>
                           Aucune commande ne correspond à ces filtres.
                         </td>
                       </tr>
