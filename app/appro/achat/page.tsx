@@ -10,7 +10,8 @@
  *
  * Dépend des objets Supabase créés dans le projet gchwihltydsplarhveyv :
  *   - vues : v_appro_cdf_entete, v_appro_cdf_lignes, v_appro_bl,
- *            v_appro_faf_lignes, v_appro_fournisseurs
+ *            v_appro_faf_lignes, v_appro_fournisseurs,
+ *            v_appro_incoherences_livraison
  *   - RPC  : get_appro_filtres_disponibles
  *            get_appro_achats_kpis(...)
  *            get_appro_achats_synthese_fournisseurs(...)
@@ -34,6 +35,14 @@
  *     BLG, pas une colonne de la base. Le délai "création -> AR" est donc
  *     approximé par "création -> 1ère réception (BL)" ; à la ligne, aucune
  *     date d'AR n'est disponible, c'est explicitement indiqué dans l'UI.
+ *   - le statut d'entête BLG (delivery_status) et le badge de workflow
+ *     manuel (status_fk = 14, affiché "Livrée" côté BLG) peuvent tous les
+ *     deux se désynchroniser du vrai état des lignes (reste à livrer) :
+ *     BLG ne recalcule pas toujours ces deux champs au dernier mouvement
+ *     de stock. Voir l'onglet "Incohérences" et v_appro_incoherences_livraison,
+ *     qui recalcule le statut réel à partir des lignes (hors lignes de
+ *     type "comment", qui ne portent ni quantité ni livraison) et le
+ *     compare aux deux champs BLG.
  * ---------------------------------------------------------------------
  */
 
@@ -177,9 +186,32 @@ type FreqTemporelleRow = {
   valeur_ht: number;
 };
 
+// Une ligne de public.v_appro_incoherences_livraison : commandes d'achat
+// où le statut d'entête BLG (delivery_status) et/ou le badge de workflow
+// manuel (status_fk = 14, "Livrée") ne correspondent pas au statut
+// recalculé à partir des lignes réelles (hors lignes "comment").
+type IncoherenceLivraison = {
+  id: number;
+  reference: string;
+  lien_blg: string | null;
+  order_date: string | null;
+  fournisseur: string | null;
+  statut_entete: string;
+  statut_calcule_lignes: string;
+  status_fk: number | null;
+  badge_workflow_livree: boolean;
+  total_qte: number | null;
+  total_qte_livree: number | null;
+  total_ral: number | null;
+  derniere_livraison_ligne: string | null;
+  entete_last_update: string | null;
+  lignes_last_update: string | null;
+  type_incoherence: 'entete_desynchronisee' | 'badge_workflow_incoherent' | null;
+};
+
 type Granularite = 'day' | 'week' | 'month';
 
-type Vue = 'entete' | 'lignes';
+type Vue = 'entete' | 'lignes' | 'incoherences';
 
 const STATUTS_LIVRAISON: { value: string; label: string }[] = [
   { value: 'delivered', label: 'Livrée' },
@@ -192,6 +224,20 @@ const STATUTS_FACTURATION: { value: string; label: string }[] = [
   { value: 'invoiced', label: 'Facturée' },
   { value: 'partiallyInvoiced', label: 'Facturée partielle' },
   { value: 'notInvoiced', label: 'Non facturée' },
+];
+
+// Libellés FR des statuts BLG bruts (delivery_status et statut_calcule_lignes
+// partagent le même vocabulaire), utilisés dans l'onglet Incohérences.
+const LABEL_STATUT_LIVRAISON: Record<string, string> = {
+  delivered: 'Livrée',
+  partiallyDelivered: 'Livrée partielle',
+  notDelivered: 'Non livrée',
+  notConcerned: 'Non concernée',
+};
+
+const TYPES_INCOHERENCE: { value: 'entete_desynchronisee' | 'badge_workflow_incoherent'; label: string }[] = [
+  { value: 'entete_desynchronisee', label: 'Entête désynchronisée' },
+  { value: 'badge_workflow_incoherent', label: 'Badge "Livrée" incohérent' },
 ];
 
 const PAGE_SIZE = 50;
@@ -212,6 +258,13 @@ const fmtDate = (d: string | null | undefined) => {
   return date.toLocaleDateString('fr-FR');
 };
 
+const fmtDateHeure = (d: string | null | undefined) => {
+  if (!d) return '—';
+  const date = new Date(d);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleDateString('fr-FR') + ' ' + date.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+};
+
 const norm = (s: string) =>
   s
     .toLowerCase()
@@ -223,6 +276,17 @@ const fmtPeriodeExport = (p: string, granularite: Granularite) => {
   if (granularite === 'day') return d.toLocaleDateString('fr-FR');
   if (granularite === 'week') return `Sem. du ${d.toLocaleDateString('fr-FR')}`;
   return d.toLocaleDateString('fr-FR', { month: 'short', year: 'numeric' });
+};
+
+// Nombre de jours entre la dernière livraison de ligne et la dernière
+// mise à jour de l'entête -- l'indicateur visuel de "depuis combien de
+// temps" l'entête a manqué le vrai état des lignes.
+const joursEcart = (a: string | null, b: string | null) => {
+  if (!a || !b) return null;
+  const da = new Date(a).getTime();
+  const db = new Date(b).getTime();
+  if (Number.isNaN(da) || Number.isNaN(db)) return null;
+  return Math.round(Math.abs(da - db) / 86400000);
 };
 
 // ---------------------------------------------------------------------
@@ -259,6 +323,16 @@ export default function ApproAchatsPage() {
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // --- onglet Incohérences (indépendant des filtres/KPIs ci-dessus : liste
+  // de diagnostic, pas un périmètre d'analyse financière) ---
+  const [rowsIncoherences, setRowsIncoherences] = useState<IncoherenceLivraison[]>([]);
+  const [nbIncoherencesTotal, setNbIncoherencesTotal] = useState(0);
+  const [pageIncoherences, setPageIncoherences] = useState(0);
+  const [totalIncoherences, setTotalIncoherences] = useState(0);
+  const [loadingIncoherences, setLoadingIncoherences] = useState(false);
+  const [errorIncoherences, setErrorIncoherences] = useState<string | null>(null);
+  const [filtreTypeIncoherence, setFiltreTypeIncoherence] = useState<'all' | 'entete_desynchronisee' | 'badge_workflow_incoherent'>('all');
+
   // --- fiche détail (modal) ---
   const [detailCdfId, setDetailCdfId] = useState<number | null>(null);
 
@@ -280,6 +354,17 @@ export default function ApproAchatsPage() {
       const row = Array.isArray(data) ? data[0] : data;
       setFournisseurOptions(row?.fournisseurs ?? []);
       setLieuOptions(row?.lieux_livraison ?? []);
+    })();
+  }, []);
+
+  // Nombre total d'incohérences (badge sur l'onglet), chargé une fois au
+  // montage indépendamment de l'onglet actif.
+  useEffect(() => {
+    (async () => {
+      const { count, error: err } = await supabase
+        .from('v_appro_incoherences_livraison')
+        .select('*', { count: 'exact', head: true });
+      if (!err) setNbIncoherencesTotal(count ?? 0);
     })();
   }, []);
 
@@ -487,7 +572,7 @@ export default function ApproAchatsPage() {
         if (err) throw err;
         setRowsEntete(data ?? []);
         setTotalRows(count ?? 0);
-      } else {
+      } else if (vue === 'lignes') {
         let q = supabase.from('v_appro_cdf_lignes').select('*', { count: 'exact' });
         q = applyCommonFilters(q, 'lignes');
         const { data, error: err, count } = await q.order('cdf_id', { ascending: false }).range(from, to);
@@ -503,9 +588,38 @@ export default function ApproAchatsPage() {
   }, [rpcParams, applyCommonFilters, vue, page, chartSupplierIds, frequenceGranularite]);
 
   useEffect(() => {
-    lancerRecherche();
+    if (vue === 'entete' || vue === 'lignes') lancerRecherche();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vue, page]);
+
+  // -------------------------------------------------------------
+  // Charge l'onglet Incohérences : indépendant des filtres/KPIs ci-dessus
+  // (liste de diagnostic sur l'ensemble des commandes d'achat), avec sa
+  // propre pagination et son propre filtre par type d'incohérence.
+  // -------------------------------------------------------------
+  const chargerIncoherences = useCallback(async () => {
+    setLoadingIncoherences(true);
+    setErrorIncoherences(null);
+    try {
+      let q = supabase.from('v_appro_incoherences_livraison').select('*', { count: 'exact' });
+      if (filtreTypeIncoherence !== 'all') q = q.eq('type_incoherence', filtreTypeIncoherence);
+      const from = pageIncoherences * PAGE_SIZE;
+      const to = from + PAGE_SIZE - 1;
+      const { data, error: err, count } = await q.order('order_date', { ascending: false }).range(from, to);
+      if (err) throw err;
+      setRowsIncoherences(data ?? []);
+      setTotalIncoherences(count ?? 0);
+    } catch (e: any) {
+      setErrorIncoherences(e?.message ?? 'Erreur lors du chargement des incohérences.');
+    } finally {
+      setLoadingIncoherences(false);
+    }
+  }, [filtreTypeIncoherence, pageIncoherences]);
+
+  useEffect(() => {
+    if (vue === 'incoherences') chargerIncoherences();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vue, pageIncoherences, filtreTypeIncoherence]);
 
   // Rafraîchit uniquement le graphe de fréquence quand sa sélection de
   // fournisseurs dédiée ou sa granularité changent, sans attendre un clic
@@ -539,7 +653,7 @@ export default function ApproAchatsPage() {
 
   // -------------------------------------------------------------
   // Export Excel : synthèse multi-fournisseurs / synthèse par
-  // fournisseur (groupée) / détail
+  // fournisseur (groupée) / détail / incohérences
   // -------------------------------------------------------------
   const exporterExcel = useCallback(async () => {
     setExporting(true);
@@ -817,6 +931,47 @@ export default function ApproAchatsPage() {
       }
       ws5.views = [{ state: 'frozen', ySplit: 1, xSplit: 1 }];
 
+      // ---- Onglet 6 : Incohérences livraison ----
+      const { data: incoherencesData, error: incErr } = await supabase
+        .from('v_appro_incoherences_livraison')
+        .select('*')
+        .order('order_date', { ascending: false })
+        .range(0, EXPORT_MAX_ROWS - 1);
+      if (!incErr && incoherencesData && incoherencesData.length > 0) {
+        const ws6 = wb.addWorksheet('Incohérences livraison');
+        ws6.columns = [
+          { header: 'Référence CDF', key: 'reference', width: 16 },
+          { header: 'Lien BLG', key: 'lien', width: 12 },
+          { header: 'Fournisseur', key: 'fournisseur', width: 26 },
+          { header: 'Date création', key: 'order_date', width: 14 },
+          { header: 'Type incohérence', key: 'type_incoherence', width: 22 },
+          { header: 'Statut entête (BLG)', key: 'statut_entete', width: 18 },
+          { header: 'Statut calculé (lignes)', key: 'statut_calcule_lignes', width: 20 },
+          { header: 'Badge "Livrée" (status_fk=14)', key: 'badge_workflow_livree', width: 22 },
+          { header: 'Qté totale', key: 'total_qte', width: 11 },
+          { header: 'Qté livrée', key: 'total_qte_livree', width: 11 },
+          { header: 'Reste à livrer', key: 'total_ral', width: 12 },
+          { header: 'Dernière livraison (ligne)', key: 'derniere_livraison_ligne', width: 18 },
+          { header: 'Dernière MAJ entête', key: 'entete_last_update', width: 18 },
+        ];
+        styleHeaderRow(ws6.getRow(1));
+        (incoherencesData as IncoherenceLivraison[]).forEach((r) =>
+          ws6.addRow({
+            ...r,
+            lien: r.lien_blg ? { text: 'Ouvrir ↗', hyperlink: r.lien_blg } : '',
+            order_date: fmtDate(r.order_date),
+            type_incoherence: r.type_incoherence === 'entete_desynchronisee' ? 'Entête désynchronisée' : 'Badge "Livrée" incohérent',
+            statut_entete: LABEL_STATUT_LIVRAISON[r.statut_entete] ?? r.statut_entete,
+            statut_calcule_lignes: LABEL_STATUT_LIVRAISON[r.statut_calcule_lignes] ?? r.statut_calcule_lignes,
+            badge_workflow_livree: r.badge_workflow_livree ? 'Oui' : 'Non',
+            derniere_livraison_ligne: fmtDateHeure(r.derniere_livraison_ligne),
+            entete_last_update: fmtDateHeure(r.entete_last_update),
+          })
+        );
+        ws6.autoFilter = { from: 'A1', to: 'M1' };
+        ws6.views = [{ state: 'frozen', ySplit: 1 }];
+      }
+
       if ((detailData?.length ?? 0) >= EXPORT_MAX_ROWS) {
         const warn = wb.addWorksheet('⚠ Avertissement');
         warn.addRow([
@@ -841,6 +996,7 @@ export default function ApproAchatsPage() {
   }, [vue, applyCommonFilters, syntheseFournisseurs, chartSupplierIds, frequenceMensuelle, frequenceGranularite]);
 
   const totalPages = Math.max(1, Math.ceil(totalRows / PAGE_SIZE));
+  const totalPagesIncoherences = Math.max(1, Math.ceil(totalIncoherences / PAGE_SIZE));
 
   // ===============================================================
   // Rendu
@@ -857,175 +1013,177 @@ export default function ApproAchatsPage() {
           </p>
         </header>
 
-        {/* ---------------- FILTRES ---------------- */}
-        <section
-          style={{
-            background: COLORS.blanc,
-            border: `1px solid ${COLORS.ligne}`,
-            borderRadius: 10,
-            padding: 20,
-            marginBottom: 24,
-          }}
-        >
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16 }}>
-            <Field label="Référence commande">
-              <input
-                type="text"
-                value={cdfReference}
-                onChange={(e) => setCdfReference(e.target.value)}
-                placeholder="ex. CDF031930"
-                style={inputStyle}
-              />
-            </Field>
+        {/* ---------------- FILTRES (masqués sur l'onglet Incohérences, qui a son propre filtre) ---------------- */}
+        {vue !== 'incoherences' && (
+          <section
+            style={{
+              background: COLORS.blanc,
+              border: `1px solid ${COLORS.ligne}`,
+              borderRadius: 10,
+              padding: 20,
+              marginBottom: 24,
+            }}
+          >
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16 }}>
+              <Field label="Référence commande">
+                <input
+                  type="text"
+                  value={cdfReference}
+                  onChange={(e) => setCdfReference(e.target.value)}
+                  placeholder="ex. CDF031930"
+                  style={inputStyle}
+                />
+              </Field>
 
-            <Field label="Fournisseur">
-              <input
-                type="text"
-                value={fournisseurSearch}
-                onChange={(e) => setFournisseurSearch(e.target.value)}
-                placeholder="Rechercher un fournisseur…"
-                style={{ ...inputStyle, marginBottom: 6 }}
-              />
-              <select
-                multiple
-                size={5}
-                value={supplierIds.map(String)}
-                onChange={(e) => setSupplierIds(Array.from(e.target.selectedOptions, (o) => Number(o.value)))}
-                style={selectStyle}
-              >
-                {fournisseurOptionsFiltres.map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.code} — {f.nom}
-                  </option>
-                ))}
-              </select>
-              {supplierIds.length > 0 && <small style={{ color: '#8A8474' }}>{supplierIds.length} sélectionné(s)</small>}
-            </Field>
+              <Field label="Fournisseur">
+                <input
+                  type="text"
+                  value={fournisseurSearch}
+                  onChange={(e) => setFournisseurSearch(e.target.value)}
+                  placeholder="Rechercher un fournisseur…"
+                  style={{ ...inputStyle, marginBottom: 6 }}
+                />
+                <select
+                  multiple
+                  size={5}
+                  value={supplierIds.map(String)}
+                  onChange={(e) => setSupplierIds(Array.from(e.target.selectedOptions, (o) => Number(o.value)))}
+                  style={selectStyle}
+                >
+                  {fournisseurOptionsFiltres.map((f) => (
+                    <option key={f.id} value={f.id}>
+                      {f.code} — {f.nom}
+                    </option>
+                  ))}
+                </select>
+                {supplierIds.length > 0 && <small style={{ color: '#8A8474' }}>{supplierIds.length} sélectionné(s)</small>}
+              </Field>
 
-            <Field label="Lieu de livraison">
-              <input
-                type="text"
-                value={lieuSearch}
-                onChange={(e) => setLieuSearch(e.target.value)}
-                placeholder="Rechercher un lieu…"
-                style={{ ...inputStyle, marginBottom: 6 }}
-              />
-              <select
-                multiple
-                size={5}
-                value={lieuIds.map(String)}
-                onChange={(e) => setLieuIds(Array.from(e.target.selectedOptions, (o) => Number(o.value)))}
-                style={selectStyle}
-              >
-                {lieuOptionsFiltres.map((l) => (
-                  <option key={l.delivery_fk} value={l.delivery_fk}>
-                    {l.nom}
-                  </option>
-                ))}
-              </select>
-              {lieuIds.length > 0 && <small style={{ color: '#8A8474' }}>{lieuIds.length} sélectionné(s)</small>}
-            </Field>
+              <Field label="Lieu de livraison">
+                <input
+                  type="text"
+                  value={lieuSearch}
+                  onChange={(e) => setLieuSearch(e.target.value)}
+                  placeholder="Rechercher un lieu…"
+                  style={{ ...inputStyle, marginBottom: 6 }}
+                />
+                <select
+                  multiple
+                  size={5}
+                  value={lieuIds.map(String)}
+                  onChange={(e) => setLieuIds(Array.from(e.target.selectedOptions, (o) => Number(o.value)))}
+                  style={selectStyle}
+                >
+                  {lieuOptionsFiltres.map((l) => (
+                    <option key={l.delivery_fk} value={l.delivery_fk}>
+                      {l.nom}
+                    </option>
+                  ))}
+                </select>
+                {lieuIds.length > 0 && <small style={{ color: '#8A8474' }}>{lieuIds.length} sélectionné(s)</small>}
+              </Field>
 
-            <Field label="Date de création (commande)">
-              <div style={{ display: 'flex', gap: 8 }}>
-                <input type="date" value={dateCreationFrom} onChange={(e) => setDateCreationFrom(e.target.value)} style={inputStyle} />
-                <input type="date" value={dateCreationTo} onChange={(e) => setDateCreationTo(e.target.value)} style={inputStyle} />
-              </div>
-            </Field>
+              <Field label="Date de création (commande)">
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <input type="date" value={dateCreationFrom} onChange={(e) => setDateCreationFrom(e.target.value)} style={inputStyle} />
+                  <input type="date" value={dateCreationTo} onChange={(e) => setDateCreationTo(e.target.value)} style={inputStyle} />
+                </div>
+              </Field>
 
-            <Field label="Date de livraison (ligne)">
-              <div style={{ display: 'flex', gap: 8 }}>
-                <input type="date" value={dateLivraisonFrom} onChange={(e) => setDateLivraisonFrom(e.target.value)} style={inputStyle} />
-                <input type="date" value={dateLivraisonTo} onChange={(e) => setDateLivraisonTo(e.target.value)} style={inputStyle} />
-              </div>
-              <small style={{ color: '#8A8474' }}>Filtre appliqué uniquement en vue « Lignes ».</small>
-            </Field>
+              <Field label="Date de livraison (ligne)">
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <input type="date" value={dateLivraisonFrom} onChange={(e) => setDateLivraisonFrom(e.target.value)} style={inputStyle} />
+                  <input type="date" value={dateLivraisonTo} onChange={(e) => setDateLivraisonTo(e.target.value)} style={inputStyle} />
+                </div>
+                <small style={{ color: '#8A8474' }}>Filtre appliqué uniquement en vue « Lignes ».</small>
+              </Field>
 
-            <Field label="Statut livraison">
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {STATUTS_LIVRAISON.map((s) => (
-                  <Chip
-                    key={s.value}
-                    active={statutsLivraison.includes(s.value)}
-                    onClick={() => setStatutsLivraison((prev) => toggleInArray(prev, s.value))}
-                  >
-                    {s.label}
+              <Field label="Statut livraison">
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {STATUTS_LIVRAISON.map((s) => (
+                    <Chip
+                      key={s.value}
+                      active={statutsLivraison.includes(s.value)}
+                      onClick={() => setStatutsLivraison((prev) => toggleInArray(prev, s.value))}
+                    >
+                      {s.label}
+                    </Chip>
+                  ))}
+                </div>
+              </Field>
+
+              <Field label="Statut facturation">
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {STATUTS_FACTURATION.map((s) => (
+                    <Chip
+                      key={s.value}
+                      active={statutsFacturation.includes(s.value)}
+                      onClick={() => setStatutsFacturation((prev) => toggleInArray(prev, s.value))}
+                    >
+                      {s.label}
+                    </Chip>
+                  ))}
+                </div>
+              </Field>
+
+              <Field label="Article (référence)">
+                <input
+                  type="text"
+                  value={articleReference}
+                  onChange={(e) => setArticleReference(e.target.value)}
+                  placeholder="ex. RAC-VJ60NHAE"
+                  style={inputStyle}
+                />
+              </Field>
+
+              <Field label="Retrouvée dans SAGE (BDCF)">
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  <Chip active={dansBdcf === 'all'} onClick={() => setDansBdcf('all')}>
+                    Toutes
                   </Chip>
-                ))}
-              </div>
-            </Field>
-
-            <Field label="Statut facturation">
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {STATUTS_FACTURATION.map((s) => (
-                  <Chip
-                    key={s.value}
-                    active={statutsFacturation.includes(s.value)}
-                    onClick={() => setStatutsFacturation((prev) => toggleInArray(prev, s.value))}
-                  >
-                    {s.label}
+                  <Chip active={dansBdcf === 'yes'} onClick={() => setDansBdcf('yes')}>
+                    ★ Avec étoile
                   </Chip>
-                ))}
-              </div>
-            </Field>
+                  <Chip active={dansBdcf === 'no'} onClick={() => setDansBdcf('no')}>
+                    Sans étoile
+                  </Chip>
+                </div>
+                <small style={{ color: '#8A8474' }}>★ = commande retrouvée dans SAGE (table BDCF).</small>
+              </Field>
+            </div>
 
-            <Field label="Article (référence)">
-              <input
-                type="text"
-                value={articleReference}
-                onChange={(e) => setArticleReference(e.target.value)}
-                placeholder="ex. RAC-VJ60NHAE"
-                style={inputStyle}
-              />
-            </Field>
-
-            <Field label="Retrouvée dans SAGE (BDCF)">
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                <Chip active={dansBdcf === 'all'} onClick={() => setDansBdcf('all')}>
-                  Toutes
-                </Chip>
-                <Chip active={dansBdcf === 'yes'} onClick={() => setDansBdcf('yes')}>
-                  ★ Avec étoile
-                </Chip>
-                <Chip active={dansBdcf === 'no'} onClick={() => setDansBdcf('no')}>
-                  Sans étoile
-                </Chip>
-              </div>
-              <small style={{ color: '#8A8474' }}>★ = commande retrouvée dans SAGE (table BDCF).</small>
-            </Field>
-          </div>
-
-          <div style={{ marginTop: 18, display: 'flex', gap: 12 }}>
-            <button onClick={handleRechercherClick} disabled={loading} style={primaryButtonStyle}>
-              {loading ? 'Recherche…' : 'Rechercher'}
-            </button>
-            <button
-              onClick={() => {
-                setCdfReference('');
-                setDansBdcf('all');
-                setFournisseurSearch('');
-                setLieuSearch('');
-                setSupplierIds([]);
-                setLieuIds([]);
-                setDateCreationFrom(DATE_CREATION_MIN_DEFAUT);
-                setDateCreationTo('');
-                setDateLivraisonFrom('');
-                setDateLivraisonTo('');
-                setStatutsLivraison([]);
-                setStatutsFacturation([]);
-                setArticleReference('');
-                setPage(0);
-              }}
-              style={secondaryButtonStyle}
-            >
-              Réinitialiser
-            </button>
-            <div style={{ flex: 1 }} />
-            <button onClick={exporterExcel} disabled={exporting || loading} style={exportButtonStyle}>
-              {exporting ? 'Export en cours…' : '↓ Exporter Excel'}
-            </button>
-          </div>
-        </section>
+            <div style={{ marginTop: 18, display: 'flex', gap: 12 }}>
+              <button onClick={handleRechercherClick} disabled={loading} style={primaryButtonStyle}>
+                {loading ? 'Recherche…' : 'Rechercher'}
+              </button>
+              <button
+                onClick={() => {
+                  setCdfReference('');
+                  setDansBdcf('all');
+                  setFournisseurSearch('');
+                  setLieuSearch('');
+                  setSupplierIds([]);
+                  setLieuIds([]);
+                  setDateCreationFrom(DATE_CREATION_MIN_DEFAUT);
+                  setDateCreationTo('');
+                  setDateLivraisonFrom('');
+                  setDateLivraisonTo('');
+                  setStatutsLivraison([]);
+                  setStatutsFacturation([]);
+                  setArticleReference('');
+                  setPage(0);
+                }}
+                style={secondaryButtonStyle}
+              >
+                Réinitialiser
+              </button>
+              <div style={{ flex: 1 }} />
+              <button onClick={exporterExcel} disabled={exporting || loading} style={exportButtonStyle}>
+                {exporting ? 'Export en cours…' : '↓ Exporter Excel'}
+              </button>
+            </div>
+          </section>
+        )}
 
         {error && (
           <div style={{ background: '#FBEAE2', border: `1px solid ${COLORS.alerte}`, color: '#8A3F1E', padding: 12, borderRadius: 8, marginBottom: 20 }}>
@@ -1033,174 +1191,179 @@ export default function ApproAchatsPage() {
           </div>
         )}
 
-        {/* ---------------- KPIs globaux ---------------- */}
-        <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 14, marginBottom: 16 }}>
-          <Kpi label="Commandes" value={fmtNum(kpis?.nb_commandes)} />
-          <Kpi label="Lignes" value={fmtNum(kpis?.nb_lignes)} />
-          <Kpi label="Valeur achat HT" value={fmtEUR(kpis?.valeur_achat_ht)} accent={COLORS.violet} />
-          <Kpi label="Valeur achat TTC" value={fmtEUR(kpis?.valeur_achat_ttc)} accent={COLORS.violet} />
-          <Kpi label="Délai moyen création → BL" value={fmtJours(kpis?.delai_moyen_creation_bl_jours)} accent={COLORS.sauge} />
-          <Kpi label="Délai moyen création → facture" value={fmtJours(kpis?.delai_moyen_creation_facture_jours)} accent={COLORS.sauge} />
-        </section>
+        {vue !== 'incoherences' && (
+          <>
+            {/* ---------------- KPIs globaux ---------------- */}
+            <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 14, marginBottom: 16 }}>
+              <Kpi label="Commandes" value={fmtNum(kpis?.nb_commandes)} />
+              <Kpi label="Lignes" value={fmtNum(kpis?.nb_lignes)} />
+              <Kpi label="Valeur achat HT" value={fmtEUR(kpis?.valeur_achat_ht)} accent={COLORS.violet} />
+              <Kpi label="Valeur achat TTC" value={fmtEUR(kpis?.valeur_achat_ttc)} accent={COLORS.violet} />
+              <Kpi label="Délai moyen création → BL" value={fmtJours(kpis?.delai_moyen_creation_bl_jours)} accent={COLORS.sauge} />
+              <Kpi label="Délai moyen création → facture" value={fmtJours(kpis?.delai_moyen_creation_facture_jours)} accent={COLORS.sauge} />
+            </section>
 
-        {/* ---------------- KPIs répartition livraison / facturation ---------------- */}
-        <section style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 24 }}>
-          <div>
-            <div style={{ fontSize: 12, color: '#8A8474', marginBottom: 6, fontWeight: 500 }}>Valeur HT — répartition livraison</div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10 }}>
-              <Kpi label="Livrée" value={fmtEUR(kpis?.valeur_ht_livree)} accent="#3E7A4E" compact />
-              <Kpi label="Livrée partielle" value={fmtEUR(kpis?.valeur_ht_livree_partielle)} accent={COLORS.alerte} compact />
-              <Kpi label="Non livrée" value={fmtEUR(kpis?.valeur_ht_non_livree)} accent="#B0442E" compact />
-            </div>
-          </div>
-          <div>
-            <div style={{ fontSize: 12, color: '#8A8474', marginBottom: 6, fontWeight: 500 }}>Valeur HT — répartition facturation</div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10 }}>
-              <Kpi label="Facturée" value={fmtEUR(kpis?.valeur_ht_facturee)} accent="#3E7A4E" compact />
-              <Kpi label="Facturée partielle" value={fmtEUR(kpis?.valeur_ht_facturee_partielle)} accent={COLORS.alerte} compact />
-              <Kpi label="Non facturée" value={fmtEUR(kpis?.valeur_ht_non_facturee)} accent="#B0442E" compact />
-            </div>
-          </div>
-        </section>
+            {/* ---------------- KPIs répartition livraison / facturation ---------------- */}
+            <section style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 24 }}>
+              <div>
+                <div style={{ fontSize: 12, color: '#8A8474', marginBottom: 6, fontWeight: 500 }}>Valeur HT — répartition livraison</div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10 }}>
+                  <Kpi label="Livrée" value={fmtEUR(kpis?.valeur_ht_livree)} accent="#3E7A4E" compact />
+                  <Kpi label="Livrée partielle" value={fmtEUR(kpis?.valeur_ht_livree_partielle)} accent={COLORS.alerte} compact />
+                  <Kpi label="Non livrée" value={fmtEUR(kpis?.valeur_ht_non_livree)} accent="#B0442E" compact />
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: 12, color: '#8A8474', marginBottom: 6, fontWeight: 500 }}>Valeur HT — répartition facturation</div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10 }}>
+                  <Kpi label="Facturée" value={fmtEUR(kpis?.valeur_ht_facturee)} accent="#3E7A4E" compact />
+                  <Kpi label="Facturée partielle" value={fmtEUR(kpis?.valeur_ht_facturee_partielle)} accent={COLORS.alerte} compact />
+                  <Kpi label="Non facturée" value={fmtEUR(kpis?.valeur_ht_non_facturee)} accent="#B0442E" compact />
+                </div>
+              </div>
+            </section>
 
-        {/* ---------------- FRÉQUENCE DES COMMANDES PAR FOURNISSEUR ---------------- */}
-        <section
-          style={{
-            background: COLORS.blanc,
-            border: `1px solid ${COLORS.ligne}`,
-            borderRadius: 10,
-            padding: 20,
-            marginBottom: 24,
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 20, flexWrap: 'wrap', marginBottom: 16 }}>
-            <div>
-              <h2 style={{ fontFamily: '"Space Grotesk", sans-serif', fontSize: 18, margin: 0 }}>
+            {/* ---------------- FRÉQUENCE DES COMMANDES PAR FOURNISSEUR ---------------- */}
+            <section
+              style={{
+                background: COLORS.blanc,
+                border: `1px solid ${COLORS.ligne}`,
+                borderRadius: 10,
+                padding: 20,
+                marginBottom: 24,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 20, flexWrap: 'wrap', marginBottom: 16 }}>
+                <div>
+                  <h2 style={{ fontFamily: '"Space Grotesk", sans-serif', fontSize: 18, margin: 0 }}>
+                    Fréquence des commandes par fournisseur
+                  </h2>
+                  <p style={{ fontSize: 12.5, color: '#8A8474', margin: '4px 0 0' }}>
+                    Nombre de commandes passées, sur le périmètre des filtres ci-dessus.{' '}
+                    {chartSupplierIds.length === 0 && 'Aucun fournisseur sélectionné → top 15 affiché.'}
+                  </p>
+                </div>
+                <div style={{ minWidth: 260 }}>
+                  <input
+                    type="text"
+                    value={chartSupplierSearch}
+                    onChange={(e) => setChartSupplierSearch(e.target.value)}
+                    placeholder="Filtrer les fournisseurs du graphe…"
+                    style={{ ...inputStyle, marginBottom: 6 }}
+                  />
+                  <select
+                    multiple
+                    size={4}
+                    value={chartSupplierIds.map(String)}
+                    onChange={(e) => setChartSupplierIds(Array.from(e.target.selectedOptions, (o) => Number(o.value)))}
+                    style={selectStyle}
+                  >
+                    {chartSupplierOptionsFiltres.map((f) => (
+                      <option key={f.id} value={f.id}>
+                        {f.code} — {f.nom}
+                      </option>
+                    ))}
+                  </select>
+                  {chartSupplierIds.length > 0 && (
+                    <button
+                      onClick={() => setChartSupplierIds([])}
+                      style={{ ...secondaryButtonStyle, marginTop: 6, padding: '4px 10px', fontSize: 12 }}
+                    >
+                      Effacer la sélection ({chartSupplierIds.length})
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {donneesFrequence.length === 0 ? (
+                <p style={{ color: '#8A8474', fontSize: 13 }}>Aucune donnée pour ces filtres.</p>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {donneesFrequence.map((f) => (
+                    <div key={f.supplier_id} style={{ display: 'grid', gridTemplateColumns: '220px 1fr 60px', alignItems: 'center', gap: 10 }}>
+                      <div
+                        style={{
+                          fontSize: 12.5,
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                        }}
+                        title={`${f.code_fournisseur} — ${f.nom_fournisseur}`}
+                      >
+                        {f.nom_fournisseur}
+                      </div>
+                      <div style={{ background: COLORS.creme, borderRadius: 4, overflow: 'hidden', height: 18 }}>
+                        <div
+                          style={{
+                            width: `${(f.nb_commandes / maxNbCommandesFrequence) * 100}%`,
+                            background: COLORS.violet,
+                            height: '100%',
+                            borderRadius: 4,
+                            minWidth: 2,
+                          }}
+                        />
+                      </div>
+                      <div style={{ fontSize: 12.5, fontWeight: 600, textAlign: 'right' }}>{fmtNum(f.nb_commandes)}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            {/* ---------------- HISTOGRAMME EMPILÉ : FRÉQUENCE MENSUELLE PAR FOURNISSEUR ---------------- */}
+            <section
+              style={{
+                background: COLORS.blanc,
+                border: `1px solid ${COLORS.ligne}`,
+                borderRadius: 10,
+                padding: 20,
+                marginBottom: 24,
+              }}
+            >
+              <h2 style={{ fontFamily: '"Space Grotesk", sans-serif', fontSize: 18, margin: '0 0 4px' }}>
                 Fréquence des commandes par fournisseur
               </h2>
-              <p style={{ fontSize: 12.5, color: '#8A8474', margin: '4px 0 0' }}>
-                Nombre de commandes passées, sur le périmètre des filtres ci-dessus.{' '}
-                {chartSupplierIds.length === 0 && 'Aucun fournisseur sélectionné → top 15 affiché.'}
-              </p>
-            </div>
-            <div style={{ minWidth: 260 }}>
-              <input
-                type="text"
-                value={chartSupplierSearch}
-                onChange={(e) => setChartSupplierSearch(e.target.value)}
-                placeholder="Filtrer les fournisseurs du graphe…"
-                style={{ ...inputStyle, marginBottom: 6 }}
-              />
-              <select
-                multiple
-                size={4}
-                value={chartSupplierIds.map(String)}
-                onChange={(e) => setChartSupplierIds(Array.from(e.target.selectedOptions, (o) => Number(o.value)))}
-                style={selectStyle}
-              >
-                {chartSupplierOptionsFiltres.map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.code} — {f.nom}
-                  </option>
-                ))}
-              </select>
-              {chartSupplierIds.length > 0 && (
-                <button
-                  onClick={() => setChartSupplierIds([])}
-                  style={{ ...secondaryButtonStyle, marginTop: 6, padding: '4px 10px', fontSize: 12 }}
-                >
-                  Effacer la sélection ({chartSupplierIds.length})
-                </button>
-              )}
-            </div>
-          </div>
-
-          {donneesFrequence.length === 0 ? (
-            <p style={{ color: '#8A8474', fontSize: 13 }}>Aucune donnée pour ces filtres.</p>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {donneesFrequence.map((f) => (
-                <div key={f.supplier_id} style={{ display: 'grid', gridTemplateColumns: '220px 1fr 60px', alignItems: 'center', gap: 10 }}>
-                  <div
-                    style={{
-                      fontSize: 12.5,
-                      whiteSpace: 'nowrap',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                    }}
-                    title={`${f.code_fournisseur} — ${f.nom_fournisseur}`}
-                  >
-                    {f.nom_fournisseur}
-                  </div>
-                  <div style={{ background: COLORS.creme, borderRadius: 4, overflow: 'hidden', height: 18 }}>
-                    <div
-                      style={{
-                        width: `${(f.nb_commandes / maxNbCommandesFrequence) * 100}%`,
-                        background: COLORS.violet,
-                        height: '100%',
-                        borderRadius: 4,
-                        minWidth: 2,
-                      }}
-                    />
-                  </div>
-                  <div style={{ fontSize: 12.5, fontWeight: 600, textAlign: 'right' }}>{fmtNum(f.nb_commandes)}</div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', margin: '0 0 16px' }}>
+                <p style={{ fontSize: 12.5, color: '#8A8474', margin: 0 }}>
+                  Utilise le filtre fournisseur du graphe ci-dessus (recherche + sélection) pour choisir quels fournisseurs ont leur propre
+                  couleur — les autres sont regroupés en « Autres ». Survolez une barre pour le détail.
+                </p>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  {(
+                    [
+                      { value: 'day', label: 'Jour' },
+                      { value: 'week', label: 'Semaine' },
+                      { value: 'month', label: 'Mois' },
+                    ] as { value: Granularite; label: string }[]
+                  ).map((g) => (
+                    <Chip key={g.value} active={frequenceGranularite === g.value} onClick={() => setFrequenceGranularite(g.value)}>
+                      {g.label}
+                    </Chip>
+                  ))}
                 </div>
-              ))}
-            </div>
-          )}
-        </section>
-
-        {/* ---------------- HISTOGRAMME EMPILÉ : FRÉQUENCE MENSUELLE PAR FOURNISSEUR ---------------- */}
-        <section
-          style={{
-            background: COLORS.blanc,
-            border: `1px solid ${COLORS.ligne}`,
-            borderRadius: 10,
-            padding: 20,
-            marginBottom: 24,
-          }}
-        >
-          <h2 style={{ fontFamily: '"Space Grotesk", sans-serif', fontSize: 18, margin: '0 0 4px' }}>
-            Fréquence des commandes par fournisseur
-          </h2>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', margin: '0 0 16px' }}>
-            <p style={{ fontSize: 12.5, color: '#8A8474', margin: 0 }}>
-              Utilise le filtre fournisseur du graphe ci-dessus (recherche + sélection) pour choisir quels fournisseurs ont leur propre
-              couleur — les autres sont regroupés en « Autres ». Survolez une barre pour le détail.
-            </p>
-            <div style={{ display: 'flex', gap: 6 }}>
-              {(
-                [
-                  { value: 'day', label: 'Jour' },
-                  { value: 'week', label: 'Semaine' },
-                  { value: 'month', label: 'Mois' },
-                ] as { value: Granularite; label: string }[]
-              ).map((g) => (
-                <Chip key={g.value} active={frequenceGranularite === g.value} onClick={() => setFrequenceGranularite(g.value)}>
-                  {g.label}
-                </Chip>
-              ))}
-            </div>
-          </div>
-          <StackedFrequencyChart data={frequenceMensuelle} granularite={frequenceGranularite} />
-        </section>
+              </div>
+              <StackedFrequencyChart data={frequenceMensuelle} granularite={frequenceGranularite} />
+            </section>
+          </>
+        )}
 
         {/* ---------------- TOGGLE VUE ---------------- */}
         <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-          {(['entete', 'lignes'] as Vue[]).map((v) => (
+          {(['entete', 'lignes', 'incoherences'] as Vue[]).map((v) => (
             <button
               key={v}
               onClick={() => {
                 setVue(v);
-                setPage(0);
+                if (v === 'entete' || v === 'lignes') setPage(0);
               }}
               style={{
                 ...secondaryButtonStyle,
                 background: vue === v ? COLORS.marine : COLORS.blanc,
                 color: vue === v ? COLORS.creme : COLORS.marine,
+                borderColor: v === 'incoherences' && nbIncoherencesTotal > 0 && vue !== v ? COLORS.alerte : COLORS.ligne,
               }}
             >
-              {v === 'entete' ? 'Vue Entête' : 'Vue Détail lignes'}
+              {v === 'entete' ? 'Vue Entête' : v === 'lignes' ? 'Vue Détail lignes' : `⚠ Incohérences${nbIncoherencesTotal > 0 ? ` (${nbIncoherencesTotal})` : ''}`}
             </button>
           ))}
         </div>
@@ -1212,148 +1375,277 @@ export default function ApproAchatsPage() {
           </p>
         )}
 
+        {vue === 'incoherences' && (
+          <p style={{ fontSize: 12.5, color: '#8A8474', marginTop: -6, marginBottom: 10 }}>
+            Commandes d&apos;achat où le statut affiché côté BLG (entête et/ou badge de workflow « Livrée ») ne correspond pas au statut
+            recalculé à partir des lignes réelles (hors lignes de commentaire). BLG ne recalcule pas toujours ces champs au dernier
+            mouvement de stock — cette liste sert à repérer les commandes à vérifier/relancer côté BLG.
+          </p>
+        )}
+
         {/* ---------------- TABLEAU ---------------- */}
-        <section style={{ background: COLORS.blanc, border: `1px solid ${COLORS.ligne}`, borderRadius: 10, overflow: 'hidden' }}>
-          <div style={{ overflowX: 'auto' }}>
-            {vue === 'entete' ? (
-              <table style={tableStyle}>
-                <thead>
-                  <tr>
-                    {['Référence', 'Fournisseur', 'Créée le', 'Livraison (fenêtre)', 'Lieu de livraison', 'Livraison', 'Facturation', 'Montant HT', 'Montant TTC'].map(
-                      (h) => (
+        {vue !== 'incoherences' ? (
+          <section style={{ background: COLORS.blanc, border: `1px solid ${COLORS.ligne}`, borderRadius: 10, overflow: 'hidden' }}>
+            <div style={{ overflowX: 'auto' }}>
+              {vue === 'entete' ? (
+                <table style={tableStyle}>
+                  <thead>
+                    <tr>
+                      {['Référence', 'Fournisseur', 'Créée le', 'Livraison (fenêtre)', 'Lieu de livraison', 'Livraison', 'Facturation', 'Montant HT', 'Montant TTC'].map(
+                        (h) => (
+                          <th key={h} style={thStyle}>
+                            {h}
+                          </th>
+                        )
+                      )}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rowsEntete.map((r) => (
+                      <tr key={r.id} onClick={() => setDetailCdfId(r.id)} style={{ cursor: 'pointer' }}>
+                        <td style={{ ...tdStyle, color: COLORS.violet, fontWeight: 600 }}>
+                          <LienBlg href={r.lien_blg}>{r.reference}</LienBlg>
+                          {r.dans_bdcf && <BdcfStar />}
+                        </td>
+                        <td style={tdStyle}>{r.nom_fournisseur}</td>
+                        <td style={tdStyle}>{fmtDate(r.order_date)}</td>
+                        <td style={tdStyle}>
+                          {r.date_livraison_min ? (
+                            r.date_livraison_min === r.date_livraison_max ? (
+                              fmtDate(r.date_livraison_min)
+                            ) : (
+                              <>
+                                {fmtDate(r.date_livraison_min)} → {fmtDate(r.date_livraison_max)}
+                              </>
+                            )
+                          ) : (
+                            '—'
+                          )}
+                        </td>
+                        <td style={tdStyle}>{r.lieu_livraison_nom}</td>
+                        <td style={tdStyle}>
+                          <Tag label={r.tag_livraison} />
+                        </td>
+                        <td style={tdStyle}>
+                          <Tag label={r.tag_facturation} />
+                        </td>
+                        <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtEUR(r.montant_ht)}</td>
+                        <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtEUR(r.montant_ttc)}</td>
+                      </tr>
+                    ))}
+                    {!loading && rowsEntete.length === 0 && (
+                      <tr>
+                        <td colSpan={9} style={{ ...tdStyle, textAlign: 'center', color: '#8A8474' }}>
+                          Aucune commande ne correspond à ces filtres.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              ) : (
+                <table style={tableStyle}>
+                  <thead>
+                    <tr>
+                      {[
+                        'CDF',
+                        'Article',
+                        'Désignation',
+                        'Créée le',
+                        'Livr. demandée',
+                        'Livr. réelle',
+                        'Délai (j)',
+                        'Qté cmdée',
+                        'Qté RAL',
+                        'Qté livrée',
+                        'Qté facturée',
+                        'PU',
+                        'Total TTC',
+                        'Livraison',
+                        'Facturation',
+                      ].map((h) => (
                         <th key={h} style={thStyle}>
                           {h}
                         </th>
-                      )
-                    )}
-                  </tr>
-                </thead>
-                <tbody>
-                  {rowsEntete.map((r) => (
-                    <tr key={r.id} onClick={() => setDetailCdfId(r.id)} style={{ cursor: 'pointer' }}>
-                      <td style={{ ...tdStyle, color: COLORS.violet, fontWeight: 600 }}>
-                        <LienBlg href={r.lien_blg}>{r.reference}</LienBlg>
-                        {r.dans_bdcf && <BdcfStar />}
-                      </td>
-                      <td style={tdStyle}>{r.nom_fournisseur}</td>
-                      <td style={tdStyle}>{fmtDate(r.order_date)}</td>
-                      <td style={tdStyle}>
-                        {r.date_livraison_min ? (
-                          r.date_livraison_min === r.date_livraison_max ? (
-                            fmtDate(r.date_livraison_min)
-                          ) : (
-                            <>
-                              {fmtDate(r.date_livraison_min)} → {fmtDate(r.date_livraison_max)}
-                            </>
-                          )
-                        ) : (
-                          '—'
-                        )}
-                      </td>
-                      <td style={tdStyle}>{r.lieu_livraison_nom}</td>
-                      <td style={tdStyle}>
-                        <Tag label={r.tag_livraison} />
-                      </td>
-                      <td style={tdStyle}>
-                        <Tag label={r.tag_facturation} />
-                      </td>
-                      <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtEUR(r.montant_ht)}</td>
-                      <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtEUR(r.montant_ttc)}</td>
+                      ))}
                     </tr>
-                  ))}
-                  {!loading && rowsEntete.length === 0 && (
-                    <tr>
-                      <td colSpan={9} style={{ ...tdStyle, textAlign: 'center', color: '#8A8474' }}>
-                        Aucune commande ne correspond à ces filtres.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            ) : (
-              <table style={tableStyle}>
-                <thead>
-                  <tr>
-                    {[
-                      'CDF',
-                      'Article',
-                      'Désignation',
-                      'Créée le',
-                      'Livr. demandée',
-                      'Livr. réelle',
-                      'Délai (j)',
-                      'Qté cmdée',
-                      'Qté RAL',
-                      'Qté livrée',
-                      'Qté facturée',
-                      'PU',
-                      'Total TTC',
-                      'Livraison',
-                      'Facturation',
-                    ].map((h) => (
-                      <th key={h} style={thStyle}>
-                        {h}
-                      </th>
+                  </thead>
+                  <tbody>
+                    {rowsLignes.map((r) => (
+                      <tr key={r.id} onClick={() => setDetailCdfId(r.cdf_id)} style={{ cursor: 'pointer' }}>
+                        <td style={{ ...tdStyle, color: COLORS.violet, fontWeight: 600 }}>
+                          <LienBlg href={r.cdf_lien_blg}>{r.cdf_reference}</LienBlg>
+                          {r.dans_bdcf && <BdcfStar />}
+                        </td>
+                        <td style={tdStyle}>{r.article_reference}</td>
+                        <td style={tdStyle}>{r.article_label ?? r.commentaire}</td>
+                        <td style={tdStyle}>{fmtDate(r.ligne_created_at)}</td>
+                        <td style={tdStyle}>{fmtDate(r.date_livraison_demandee)}</td>
+                        <td style={tdStyle}>{fmtDate(r.date_livraison)}</td>
+                        <td style={{ ...tdStyle, textAlign: 'right' }}>{r.delai_creation_livraison_jours ?? '—'}</td>
+                        <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtNum(r.quantite_commandee)}</td>
+                        <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtNum(r.quantite_ral)}</td>
+                        <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtNum(r.quantite_livree)}</td>
+                        <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtNum(r.quantite_facturee)}</td>
+                        <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtEUR(r.prix_unitaire)}</td>
+                        <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtEUR(r.total_ttc)}</td>
+                        <td style={tdStyle}>
+                          <Tag label={r.tag_livraison_ligne} />
+                        </td>
+                        <td style={tdStyle}>
+                          <Tag label={r.tag_facturation_ligne} />
+                        </td>
+                      </tr>
                     ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {rowsLignes.map((r) => (
-                    <tr key={r.id} onClick={() => setDetailCdfId(r.cdf_id)} style={{ cursor: 'pointer' }}>
-                      <td style={{ ...tdStyle, color: COLORS.violet, fontWeight: 600 }}>
-                        <LienBlg href={r.cdf_lien_blg}>{r.cdf_reference}</LienBlg>
-                        {r.dans_bdcf && <BdcfStar />}
-                      </td>
-                      <td style={tdStyle}>{r.article_reference}</td>
-                      <td style={tdStyle}>{r.article_label ?? r.commentaire}</td>
-                      <td style={tdStyle}>{fmtDate(r.ligne_created_at)}</td>
-                      <td style={tdStyle}>{fmtDate(r.date_livraison_demandee)}</td>
-                      <td style={tdStyle}>{fmtDate(r.date_livraison)}</td>
-                      <td style={{ ...tdStyle, textAlign: 'right' }}>{r.delai_creation_livraison_jours ?? '—'}</td>
-                      <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtNum(r.quantite_commandee)}</td>
-                      <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtNum(r.quantite_ral)}</td>
-                      <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtNum(r.quantite_livree)}</td>
-                      <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtNum(r.quantite_facturee)}</td>
-                      <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtEUR(r.prix_unitaire)}</td>
-                      <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtEUR(r.total_ttc)}</td>
-                      <td style={tdStyle}>
-                        <Tag label={r.tag_livraison_ligne} />
-                      </td>
-                      <td style={tdStyle}>
-                        <Tag label={r.tag_facturation_ligne} />
-                      </td>
-                    </tr>
-                  ))}
-                  {!loading && rowsLignes.length === 0 && (
-                    <tr>
-                      <td colSpan={15} style={{ ...tdStyle, textAlign: 'center', color: '#8A8474' }}>
-                        Aucune ligne ne correspond à ces filtres.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            )}
-          </div>
-
-          {/* pagination */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', borderTop: `1px solid ${COLORS.ligne}` }}>
-            <span style={{ fontSize: 13, color: '#5B5646' }}>
-              {fmtNum(totalRows)} résultat{totalRows > 1 ? 's' : ''} — page {page + 1} / {totalPages}
-            </span>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button disabled={page === 0} onClick={() => setPage((p) => Math.max(0, p - 1))} style={secondaryButtonStyle}>
-                ← Précédent
-              </button>
-              <button disabled={page + 1 >= totalPages} onClick={() => setPage((p) => p + 1)} style={secondaryButtonStyle}>
-                Suivant →
-              </button>
+                    {!loading && rowsLignes.length === 0 && (
+                      <tr>
+                        <td colSpan={15} style={{ ...tdStyle, textAlign: 'center', color: '#8A8474' }}>
+                          Aucune ligne ne correspond à ces filtres.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              )}
             </div>
-          </div>
-        </section>
+
+            {/* pagination */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', borderTop: `1px solid ${COLORS.ligne}` }}>
+              <span style={{ fontSize: 13, color: '#5B5646' }}>
+                {fmtNum(totalRows)} résultat{totalRows > 1 ? 's' : ''} — page {page + 1} / {totalPages}
+              </span>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button disabled={page === 0} onClick={() => setPage((p) => Math.max(0, p - 1))} style={secondaryButtonStyle}>
+                  ← Précédent
+                </button>
+                <button disabled={page + 1 >= totalPages} onClick={() => setPage((p) => p + 1)} style={secondaryButtonStyle}>
+                  Suivant →
+                </button>
+              </div>
+            </div>
+          </section>
+        ) : (
+          <>
+            {/* ---------------- FILTRE TYPE D'INCOHÉRENCE ---------------- */}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
+              <Chip
+                active={filtreTypeIncoherence === 'all'}
+                onClick={() => {
+                  setFiltreTypeIncoherence('all');
+                  setPageIncoherences(0);
+                }}
+              >
+                Toutes
+              </Chip>
+              {TYPES_INCOHERENCE.map((t) => (
+                <Chip
+                  key={t.value}
+                  active={filtreTypeIncoherence === t.value}
+                  onClick={() => {
+                    setFiltreTypeIncoherence(t.value);
+                    setPageIncoherences(0);
+                  }}
+                >
+                  {t.label}
+                </Chip>
+              ))}
+            </div>
+
+            {errorIncoherences && (
+              <div style={{ background: '#FBEAE2', border: `1px solid ${COLORS.alerte}`, color: '#8A3F1E', padding: 12, borderRadius: 8, marginBottom: 20 }}>
+                {errorIncoherences}
+              </div>
+            )}
+
+            {/* ---------------- TABLEAU INCOHÉRENCES ---------------- */}
+            <section style={{ background: COLORS.blanc, border: `1px solid ${COLORS.ligne}`, borderRadius: 10, overflow: 'hidden' }}>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={tableStyle}>
+                  <thead>
+                    <tr>
+                      {[
+                        'Référence',
+                        'Fournisseur',
+                        'Créée le',
+                        'Type',
+                        'Statut entête (BLG)',
+                        'Statut calculé (lignes)',
+                        'Qté totale',
+                        'Livrée',
+                        'RAL',
+                        'Dernière livraison ligne',
+                        'Dernière MAJ entête',
+                        'Écart (j)',
+                      ].map((h) => (
+                        <th key={h} style={thStyle}>
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rowsIncoherences.map((r) => (
+                      <tr key={r.id}>
+                        <td style={{ ...tdStyle, color: COLORS.violet, fontWeight: 600 }}>
+                          <LienBlg href={r.lien_blg}>{r.reference}</LienBlg>
+                        </td>
+                        <td style={tdStyle}>{r.fournisseur ?? '—'}</td>
+                        <td style={tdStyle}>{fmtDate(r.order_date)}</td>
+                        <td style={tdStyle}>
+                          <IncoherenceBadge type={r.type_incoherence} />
+                        </td>
+                        <td style={tdStyle}>
+                          <Tag label={LABEL_STATUT_LIVRAISON[r.statut_entete] ?? r.statut_entete} />
+                        </td>
+                        <td style={tdStyle}>
+                          <Tag label={LABEL_STATUT_LIVRAISON[r.statut_calcule_lignes] ?? r.statut_calcule_lignes} />
+                        </td>
+                        <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtNum(r.total_qte)}</td>
+                        <td style={{ ...tdStyle, textAlign: 'right' }}>{fmtNum(r.total_qte_livree)}</td>
+                        <td style={{ ...tdStyle, textAlign: 'right', fontWeight: r.total_ral ? 600 : 400, color: r.total_ral ? COLORS.alerte : 'inherit' }}>
+                          {fmtNum(r.total_ral)}
+                        </td>
+                        <td style={tdStyle}>{fmtDateHeure(r.derniere_livraison_ligne)}</td>
+                        <td style={tdStyle}>{fmtDateHeure(r.entete_last_update)}</td>
+                        <td style={{ ...tdStyle, textAlign: 'right' }}>
+                          {joursEcart(r.derniere_livraison_ligne, r.entete_last_update) ?? '—'}
+                        </td>
+                      </tr>
+                    ))}
+                    {!loadingIncoherences && rowsIncoherences.length === 0 && (
+                      <tr>
+                        <td colSpan={12} style={{ ...tdStyle, textAlign: 'center', color: '#8A8474' }}>
+                          Aucune incohérence pour ce filtre.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* pagination */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', borderTop: `1px solid ${COLORS.ligne}` }}>
+                <span style={{ fontSize: 13, color: '#5B5646' }}>
+                  {fmtNum(totalIncoherences)} résultat{totalIncoherences > 1 ? 's' : ''} — page {pageIncoherences + 1} / {totalPagesIncoherences}
+                </span>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button disabled={pageIncoherences === 0} onClick={() => setPageIncoherences((p) => Math.max(0, p - 1))} style={secondaryButtonStyle}>
+                    ← Précédent
+                  </button>
+                  <button
+                    disabled={pageIncoherences + 1 >= totalPagesIncoherences}
+                    onClick={() => setPageIncoherences((p) => p + 1)}
+                    style={secondaryButtonStyle}
+                  >
+                    Suivant →
+                  </button>
+                </div>
+              </div>
+            </section>
+          </>
+        )}
 
         {/* ---------------- SYNTHÈSE FOURNISSEURS ---------------- */}
-        {syntheseFournisseurs.length > 0 && (
+        {vue !== 'incoherences' && syntheseFournisseurs.length > 0 && (
           <section style={{ marginTop: 32 }}>
             <h2 style={{ fontFamily: '"Space Grotesk", sans-serif', fontSize: 20, marginBottom: 12 }}>
               Synthèse par fournisseur ({syntheseFournisseurs.length})
@@ -1870,6 +2162,28 @@ function BdcfStar() {
   return (
     <span title="Commande retrouvée dans SAGE (BDCF)" style={{ color: '#C9A227', marginLeft: 5, fontSize: '0.9em' }}>
       ★
+    </span>
+  );
+}
+
+// Badge coloré pour le type d'incohérence détecté (onglet Incohérences).
+function IncoherenceBadge({ type }: { type: IncoherenceLivraison['type_incoherence'] }) {
+  if (!type) return <>—</>;
+  const label = type === 'entete_desynchronisee' ? 'Entête désynchronisée' : 'Badge "Livrée" incohérent';
+  const color = type === 'entete_desynchronisee' ? COLORS.alerte : '#B0442E';
+  return (
+    <span
+      style={{
+        display: 'inline-block',
+        padding: '2px 8px',
+        borderRadius: 6,
+        fontSize: 12,
+        color: '#fff',
+        background: color,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      ⚠ {label}
     </span>
   );
 }
