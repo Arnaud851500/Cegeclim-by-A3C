@@ -17,6 +17,31 @@
  * Les 3 listes de gauche (SAGE / BLG / Comparaison) se naviguent au clavier
  * avec les flèches ↑ / ↓ une fois la liste focus (clic ou tabulation dessus).
  *
+ * MàJ (banque + corrections de mapping) :
+ *  - Nouveau bloc Banque comparé automatiquement : nom de banque et IBAN/BBAN
+ *    (public.ref_tiers.banque_nom / banque_bban ↔ blg.ref_tiers_blg.banque /
+ *    iban). Le BIC et la ville de l'agence bancaire restent non comparables
+ *    tant que SAGE ne les exporte pas.
+ *  - "Attestation de capacité" repassée en comparaison automatique (existait
+ *    déjà des deux côtés, simplement pas exposée côté BLG jusqu'ici).
+ *  - "Catégorie AF/GAF" traitée comme "Qualité" : c'est un tag BLG affiché
+ *    à titre indicatif, pas un champ comparable à l'identique.
+ *  - "Agence de rattachement" : la piste "division BLG" a été vérifiée et
+ *    invalidée (la division BLG est l'entité juridique de facturation,
+ *    quasi toujours "CEGECLIM (siège)", elle ne varie pas par agence
+ *    physique). Le champ reste donc en comparaison manuelle ; `blg_division`
+ *    est conservé en colonne informative uniquement.
+ *  - Le bug qui faisait que "Routage promo" et "Facture électronique"
+ *    n'étaient jamais comptés comme écarts (alors que marqués "auto" dans
+ *    le mapping) a été corrigé côté vue SQL.
+ *
+ * Le panneau "Comparaison détaillée" et le mapping manuel restent pilotés
+ * entièrement par la table champ_mapping_sage_blg : les nouveaux champs
+ * bancaires / attestation / catégorie AF-GAF y apparaissent automatiquement,
+ * sans code supplémentaire ici. Les seuls ajouts dans ce fichier sont : le
+ * typage TS des nouvelles colonnes renvoyées par la vue, les libellés pour
+ * les pastilles d'écart, et les colonnes d'export Excel.
+ *
  * Nécessite le paquet "xlsx" (SheetJS) pour l'export Excel :
  * `npm install xlsx` si ce n'est pas déjà fait dans le projet.
  */
@@ -583,6 +608,17 @@ type ControleRow = {
   sage_releve_facture: string | null; blg_releve_facture: string | null
   sage_type_facture: string | null; blg_type_facture: string | null
   sage_capacite_expiration: string | null; blg_capacite_expiration: string | null
+  // Banque (nouveau)
+  sage_banque: string | null; blg_banque: string | null
+  sage_banque_bban: string | null; blg_iban: string | null
+  // Attestation de capacité (désormais comparée automatiquement) et
+  // Catégorie AF/GAF (affichée à titre indicatif, comparée aux tags BLG)
+  sage_attestation_capacite: string | null; blg_attestation_capacite: string | null
+  sage_categorie_af_gaf: string | null
+  // Division BLG : conservée en information seule, ne correspond PAS à
+  // l'agence de rattachement SAGE (voir notes du mapping) — pas d'équivalent
+  // "blg_agence" côté champs_en_ecart pour l'instant.
+  blg_division: string | null
   champs_en_ecart: string[]
   sage_mise_en_sommeil: boolean | null
   blg_est_entite_interne: boolean | null
@@ -596,8 +632,6 @@ type ControleRow = {
   blg_contact_principal: string | null
   blg_nb_contacts: number | null
   sage_agence_rattachement: string | null
-  blg_iban: string | null
-  blg_banque: string | null
   sage_abrege: string | null
   blg_nom_court: string | null
 }
@@ -629,6 +663,9 @@ const CHAMP_LABELS: Record<string, string> = {
   representant: 'Représentant', encours: "Encours autorisé", assurance_credit: 'Assurance crédit',
   famille: 'Famille', frais_facturation: 'Frais de facturation', releve_facture: 'Relevé de facture',
   type_facture: 'Type de facture', capacite_expiration: 'Capacité expiration',
+  routage_promo: 'Routage promo', facture_email: 'Facture électronique',
+  // Nouveaux champs (banque + attestation)
+  banque_nom: 'Banque (nom)', banque_bban: 'IBAN / RIB', attestation_capacite: 'Attestation de capacité',
 }
 function formatCellValue(v: unknown): string {
   if (v === null || v === undefined || v === '') return '—'
@@ -678,6 +715,15 @@ const EXPORT_COLONNES_COMPARAISON: Array<{ key: keyof ControleRow; label: string
   { key: 'blg_type_facture', label: 'Type de facture (BLG)' },
   { key: 'sage_capacite_expiration', label: 'Capacité expiration (SAGE)' },
   { key: 'blg_capacite_expiration', label: 'Capacité expiration (BLG)' },
+  // Nouveau : Banque
+  { key: 'sage_banque', label: 'Banque - nom (SAGE)' },
+  { key: 'blg_banque', label: 'Banque - nom (BLG)' },
+  { key: 'sage_banque_bban', label: 'Banque - RIB/BBAN (SAGE)' },
+  { key: 'blg_iban', label: 'Banque - IBAN (BLG)' },
+  // Nouveau : Attestation de capacité + Catégorie AF/GAF
+  { key: 'sage_attestation_capacite', label: 'Attestation de capacité (SAGE)' },
+  { key: 'blg_attestation_capacite', label: 'Attestation de capacité (BLG)' },
+  { key: 'sage_categorie_af_gaf', label: 'Catégorie AF/GAF (SAGE)' },
   { key: 'sage_mise_en_sommeil', label: 'Mise en sommeil (SAGE)', transform: (r) => formatCellValue(r.sage_mise_en_sommeil) },
   { key: 'blg_est_entite_interne', label: 'Entité interne (BLG)', transform: (r) => formatCellValue(r.blg_est_entite_interne) },
   { key: 'blg_est_adresse_livraison', label: 'Adresse de livraison uniquement (BLG)', transform: (r) => formatCellValue(r.blg_est_adresse_livraison) },
@@ -686,8 +732,7 @@ const EXPORT_COLONNES_COMPARAISON: Array<{ key: keyof ControleRow; label: string
   { key: 'blg_contacts_resume', label: 'Contacts (BLG)' },
   { key: 'blg_nb_contacts', label: 'Nb contacts (BLG)', transform: (r) => formatCellValue(r.blg_nb_contacts) },
   { key: 'sage_agence_rattachement', label: 'Agence de rattachement (SAGE)' },
-  { key: 'blg_iban', label: 'IBAN (BLG)' },
-  { key: 'blg_banque', label: 'Banque (BLG)' },
+  { key: 'blg_division', label: 'Division / entité juridique (BLG, informatif)' },
   { key: 'sage_abrege', label: 'Abrégé (SAGE)' },
   { key: 'blg_nom_court', label: 'Nom court (BLG)' },
   { key: 'blg_id_tiers', label: 'ID tiers (BLG, brut)' },
@@ -707,6 +752,7 @@ const BLG_DETAIL_FIELDS: Array<{ key: keyof ControleRow; label: string }> = [
   { key: 'blg_ville', label: 'Ville' },
   { key: 'blg_code_postal', label: 'Code postal' },
   { key: 'blg_commercial', label: 'Commercial' },
+  { key: 'blg_division', label: 'Division / entité juridique' },
   { key: 'blg_famille', label: 'Famille' },
   { key: 'blg_encours', label: 'Encours' },
   { key: 'blg_assurance_credit', label: 'Assurance crédit' },
@@ -716,11 +762,12 @@ const BLG_DETAIL_FIELDS: Array<{ key: keyof ControleRow; label: string }> = [
   { key: 'blg_releve_facture', label: 'Relevé de facture' },
   { key: 'blg_type_facture', label: 'Type de facture' },
   { key: 'blg_capacite_expiration', label: 'Capacité expiration' },
+  { key: 'blg_attestation_capacite', label: 'Attestation de capacité' },
+  { key: 'blg_banque', label: 'Banque' },
+  { key: 'blg_iban', label: 'IBAN' },
   { key: 'blg_contact_principal', label: 'Contact principal' },
   { key: 'blg_nb_contacts', label: 'Nb contacts' },
   { key: 'blg_contacts_resume', label: 'Contacts' },
-  { key: 'blg_iban', label: 'IBAN' },
-  { key: 'blg_banque', label: 'Banque' },
   { key: 'blg_nom_court', label: 'Nom court' },
   { key: 'blg_tags', label: 'Tags / qualité' },
   { key: 'blg_last_update', label: 'Dernière mise à jour BLG' },
