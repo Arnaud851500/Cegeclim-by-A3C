@@ -683,6 +683,171 @@ function formatCellValue(v: unknown): string {
   return String(v)
 }
 
+/** Captures d'écran issues du document Excel de reprise SAGE ↔ BLG, à déposer
+ * dans /public/mapping-help/ pour que le petit "ⓘ" du panneau de comparaison
+ * puisse les afficher. `numeros` indique quelles pastilles de mapping (n°
+ * SAGE, ou n° BLG tel qu'utilisé dans nom_ecran_blg / numero_blg) apparaissent
+ * sur cette capture, pour pouvoir la retrouver depuis une ligne du tableau. */
+type CaptureEcran = { fichier: string; titre: string; numeros: number[] }
+
+const CAPTURES_SAGE: CaptureEcran[] = [
+  { fichier: '/mapping-help/sage-01-identification.png', titre: 'Identification', numeros: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] },
+  { fichier: '/mapping-help/sage-02-tarifs-representant.png', titre: 'Tarifs', numeros: [11] },
+  { fichier: '/mapping-help/sage-03-banque-compte.png', titre: 'Banques — Compte bancaire', numeros: [12, 13, 14, 15, 16] },
+  { fichier: '/mapping-help/sage-04-banque-agence.png', titre: 'Banques — Agence', numeros: [17] },
+  { fichier: '/mapping-help/sage-05-champs-libres.png', titre: 'Champs libres — Informations libres', numeros: [18, 19, 20, 21, 22, 23, 24, 25, 26] },
+  { fichier: '/mapping-help/sage-06-bloc-notes.png', titre: 'Champs libres — Bloc-notes', numeros: [27] },
+  { fichier: '/mapping-help/sage-07-documents-attaches.png', titre: 'Champs libres — Documents attachés', numeros: [] },
+  { fichier: '/mapping-help/sage-08-solvabilite.png', titre: 'Solvabilité', numeros: [28, 29] },
+  { fichier: '/mapping-help/sage-09-conditions-paiement.png', titre: 'Paramètres — Conditions de paiement', numeros: [30] },
+  { fichier: '/mapping-help/sage-10-options-traitement.png', titre: 'Paramètres — Options de traitement', numeros: [] },
+  { fichier: '/mapping-help/sage-11-options-impression.png', titre: "Paramètres — Options d'impression", numeros: [31] },
+  { fichier: '/mapping-help/sage-12-adresses-liste.png', titre: 'Adresses — Liste', numeros: [32] },
+  { fichier: '/mapping-help/sage-13-adresse-detail.png', titre: 'Adresses — Détail', numeros: [33, 34, 35, 36] },
+  { fichier: '/mapping-help/sage-14-contacts.png', titre: 'Contacts', numeros: [37, 38, 39, 40] },
+]
+
+const CAPTURES_BLG: CaptureEcran[] = [
+  { fichier: '/mapping-help/blg-01-editer-entreprise.png', titre: 'Éditer entreprise', numeros: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] },
+  { fichier: '/mapping-help/blg-02-editer-gestion.png', titre: 'Éditer la gestion', numeros: [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20] },
+  { fichier: '/mapping-help/blg-03-gerer-iban.png', titre: 'Gérer les IBAN', numeros: [11, 13, 18, 21, 22, 23, 24, 25] },
+  { fichier: '/mapping-help/blg-04-tags-suivi.png', titre: 'Tags & Suivi', numeros: [22, 23, 24] },
+  { fichier: '/mapping-help/blg-05-informations-cegeclim.png', titre: 'Informations CEGECLIM', numeros: [25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35] },
+  { fichier: '/mapping-help/blg-06-liens-contact.png', titre: 'Liens contact', numeros: [] },
+]
+
+/** Panneau d'aide déclenché par le petit "ⓘ" : deux onglets, les captures
+ * d'écran du document Excel (SAGE puis BLG) et la liste complète du mapping
+ * (y compris les champs non comparables), avec les numéros de pastille. */
+function MappingInfoModal({ mapping, onClose }: { mapping: ChampMapping[]; onClose: () => void }) {
+  const [tab, setTab] = useState<'captures' | 'liste'>('liste')
+  const [zoomed, setZoomed] = useState<CaptureEcran | null>(null)
+
+  const lignesTriees = useMemo(() => {
+    return [...mapping].sort((a, b) => {
+      if (a.numero_sage !== null && b.numero_sage !== null) return a.numero_sage - b.numero_sage
+      if (a.numero_sage !== null) return -1
+      if (b.numero_sage !== null) return 1
+      return (a.label || a.champ_sage).localeCompare(b.label || b.champ_sage)
+    })
+  }, [mapping])
+
+  const STATUT_STYLE: Record<ChampMapping['type_comparaison'], { label: string; className: string }> = {
+    auto: { label: 'Comparé automatiquement', className: 'bg-emerald-50 text-emerald-700' },
+    manuel: { label: 'Mapping manuel', className: 'bg-[#B4761A]/[0.12] text-[#96600F]' },
+    affichage_seul: { label: 'Affiché, non comparé', className: 'bg-[#F4F3F0] text-[#3A362E]' },
+    non_comparable: { label: 'Non comparable', className: 'bg-red-50 text-red-700' },
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div
+        className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-[#E5E1D8] px-5 py-4">
+          <div>
+            <div className="text-[15px] font-bold text-[#111820]">Documentation du mapping SAGE ↔ BLG</div>
+            <p className="text-[12px] text-[#8A8474]">Captures d'écran et liste complète, y compris les champs non comparables.</p>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-lg px-2 py-1 text-[13px] font-bold text-[#8A8474] hover:bg-[#F4F3F0] hover:text-[#111820]">✕ Fermer</button>
+        </div>
+
+        <div className="flex gap-2 border-b border-[#E5E1D8] px-5 pt-3">
+          <button type="button" onClick={() => setTab('liste')}
+            className={`rounded-t-lg px-4 py-2 text-[13px] font-bold ${tab === 'liste' ? 'border-b-2 border-[#B4761A] text-[#111820]' : 'text-[#8A8474] hover:text-[#111820]'}`}>
+            Liste de mapping ({mapping.length})
+          </button>
+          <button type="button" onClick={() => setTab('captures')}
+            className={`rounded-t-lg px-4 py-2 text-[13px] font-bold ${tab === 'captures' ? 'border-b-2 border-[#B4761A] text-[#111820]' : 'text-[#8A8474] hover:text-[#111820]'}`}>
+            Captures d'écran ({CAPTURES_SAGE.length + CAPTURES_BLG.length})
+          </button>
+        </div>
+
+        <div className="overflow-auto p-5">
+          {tab === 'liste' ? (
+            <table className="w-full text-left text-[13px]">
+              <thead className="sticky top-0 bg-white text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">
+                <tr className="border-b border-[#E5E1D8]">
+                  <th className="py-2 pr-2">N° SAGE</th>
+                  <th className="py-2 pr-2">Champ SAGE</th>
+                  <th className="py-2 pr-2">N° BLG</th>
+                  <th className="py-2 pr-2">Champ BLG</th>
+                  <th className="py-2 pr-2">Statut</th>
+                  <th className="py-2">Note</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lignesTriees.map((m) => {
+                  const statut = STATUT_STYLE[m.type_comparaison]
+                  return (
+                    <tr key={m.id} className="border-b border-[#F4F3F0] align-top">
+                      <td className="py-2 pr-2 font-mono text-[12px] text-[#8A8474]">{m.numero_sage ?? '—'}</td>
+                      <td className="py-2 pr-2 font-semibold text-[#3A362E]">{m.nom_ecran_sage || m.label || m.champ_sage}</td>
+                      <td className="py-2 pr-2 font-mono text-[12px] text-[#8A8474]">{m.numero_blg ?? '—'}</td>
+                      <td className="py-2 pr-2 font-semibold text-[#3A362E]">{m.nom_ecran_blg || m.champ_blg || '—'}</td>
+                      <td className="py-2 pr-2">
+                        <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${statut.className}`}>{statut.label}</span>
+                      </td>
+                      <td className="py-2 text-[12px] text-[#8A8474]">{m.notes || '—'}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          ) : zoomed ? (
+            <div>
+              <button type="button" onClick={() => setZoomed(null)} className="mb-3 text-[12px] font-bold text-[#B4761A] hover:underline">← Retour à la liste des captures</button>
+              <div className="mb-2 text-[13px] font-bold text-[#111820]">{zoomed.titre}</div>
+              {zoomed.numeros.length > 0 && (
+                <p className="mb-2 text-[12px] text-[#8A8474]">Pastilles visibles sur cette capture : {zoomed.numeros.join(', ')}</p>
+              )}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={zoomed.fichier} alt={zoomed.titre} className="w-full rounded-lg border border-[#E5E1D8]" />
+            </div>
+          ) : (
+            <div className="space-y-6">
+              <div>
+                <div className="mb-2 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Écrans SAGE</div>
+                <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                  {CAPTURES_SAGE.map((c) => (
+                    <button key={c.fichier} type="button" onClick={() => setZoomed(c)}
+                      className="overflow-hidden rounded-lg border border-[#E5E1D8] text-left hover:border-[#B4761A]">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={c.fichier} alt={c.titre} className="h-28 w-full object-cover object-top" />
+                      <div className="p-2">
+                        <div className="truncate text-[12px] font-bold text-[#3A362E]">{c.titre}</div>
+                        <div className="text-[11px] text-[#8A8474]">{c.numeros.length > 0 ? `N° ${c.numeros.join(', ')}` : 'Non numéroté'}</div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <div className="mb-2 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Écrans BLG</div>
+                <p className="mb-2 text-[12px] text-[#8A8474]">La numérotation BLG se répète d'un écran à l'autre (ex. le n°24 désigne un champ différent selon l'écran) — vérifie toujours le titre de la capture.</p>
+                <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                  {CAPTURES_BLG.map((c) => (
+                    <button key={c.fichier} type="button" onClick={() => setZoomed(c)}
+                      className="overflow-hidden rounded-lg border border-[#E5E1D8] text-left hover:border-[#B4761A]">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={c.fichier} alt={c.titre} className="h-28 w-full object-cover object-top" />
+                      <div className="p-2">
+                        <div className="truncate text-[12px] font-bold text-[#3A362E]">{c.titre}</div>
+                        <div className="text-[11px] text-[#8A8474]">{c.numeros.length > 0 ? `N° ${c.numeros.join(', ')}` : 'Non numéroté'}</div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /** Colonnes d'export pour l'onglet Comparaison : reprend l'ensemble des
  * champs SAGE ↔ BLG déjà renvoyés par la RPC get_controle_tiers_sage_blg
  * (les mêmes que ceux affichés dans le panneau "Comparaison détaillée"). */
@@ -927,6 +1092,7 @@ function OngletComparaison() {
 
   const [exportEnCours, setExportEnCours] = useState(false)
   const [exportProgress, setExportProgress] = useState<{ done: number } | null>(null)
+  const [showInfoModal, setShowInfoModal] = useState(false)
 
   const listRefs = useRef<Record<number, HTMLTableRowElement | null>>({})
 
@@ -1334,7 +1500,17 @@ function OngletComparaison() {
             </div>
 
             <div className="rounded-xl border border-[#E5E1D8] bg-white p-4">
-              <div className="mb-3 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Comparaison détaillée (tous les champs mappés)</div>
+              <div className="mb-3 flex items-center justify-between">
+                <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Comparaison détaillée (tous les champs mappés)</div>
+                <button
+                  type="button"
+                  onClick={() => setShowInfoModal(true)}
+                  title="Voir les captures d'écran et la liste complète du mapping"
+                  className="flex h-6 w-6 items-center justify-center rounded-full border border-[#E5E1D8] text-[12px] font-bold text-[#8A8474] hover:border-[#B4761A] hover:text-[#B4761A]"
+                >
+                  ⓘ
+                </button>
+              </div>
               {!selected ? (
                 <div className="flex h-64 items-center justify-center text-center text-[13px] text-[#8A8474]">Sélectionne un tiers dans la liste pour voir le détail champ par champ.</div>
               ) : (
@@ -1408,6 +1584,7 @@ function OngletComparaison() {
           </section>
         </>
       )}
+      {showInfoModal && <MappingInfoModal mapping={mapping} onClose={() => setShowInfoModal(false)} />}
     </>
   )
 }
