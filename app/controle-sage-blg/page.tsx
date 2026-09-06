@@ -646,6 +646,14 @@ type ChampMapping = {
   label: string | null
   type_comparaison: 'auto' | 'manuel' | 'affichage_seul' | 'non_comparable'
   notes: string | null
+  // Numéros de pastille du document Excel de reprise et libellés exacts tels
+  // qu'affichés à l'écran (distincts des noms techniques champ_sage/champ_blg).
+  // numero_blg contient l'écran entre parenthèses car la numérotation BLG se
+  // répète d'un écran à l'autre (ex. "24 (Suivi)" vs "24 (Gérer les IBAN)").
+  numero_sage: number | null
+  numero_blg: string | null
+  nom_ecran_sage: string | null
+  nom_ecran_blg: string | null
 }
 type SyncLogEntry = { table_name: string; rows_synced: number; status: string; started_at: string; finished_at: string }
 type Operateur = 'egal' | 'contient' | 'ne_contient_pas' | 'commence_par' | 'est_vide' | 'non_vide'
@@ -1350,18 +1358,27 @@ function OngletComparaison() {
                     <div className="h-64 animate-pulse rounded-lg bg-[#F4F3F0]" />
                   ) : (
                     <div className="max-h-[720px] overflow-auto">
-                      <div className="grid grid-cols-[1fr_1fr_1fr] gap-2 px-2 pb-1 text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">
-                        <span>Champ</span><span>SAGE</span><span>BLG</span>
+                      <div className="grid grid-cols-[36px_1.1fr_1fr_36px_1.1fr_1fr] gap-2 px-2 pb-1.5 text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">
+                        <span>N°</span><span>Champ SAGE</span><span>Valeur SAGE</span>
+                        <span>N°</span><span>Champ BLG</span><span>Valeur BLG</span>
                       </div>
                       <div className="space-y-0.5">
                         {mappedFields.map((m) => {
                           const sageVal = selectedSageFull[m.champ_sage]
                           const blgVal = selectedBlgFull[m.champ_blg as string]
                           const isEcart = m.type_comparaison !== 'affichage_seul' && valuesDiffer(sageVal, blgVal)
+                          // Le n° BLG contient déjà l'écran entre parenthèses (ex. "24 (Suivi)") ;
+                          // on n'affiche que le numéro dans la petite colonne, l'écran reste visible au survol.
+                          const numeroBlgCourt = m.numero_blg ? m.numero_blg.split(' ')[0] : null
                           return (
-                            <div key={m.id} className={`grid grid-cols-[1fr_1fr_1fr] gap-2 rounded-lg px-2 py-1.5 text-[13px] ${isEcart ? 'bg-[#B4761A]/[0.08]' : ''}`}>
-                              <span className="font-semibold text-[#3A362E]">{m.label || m.champ_sage}</span>
+                            <div key={m.id} className={`grid grid-cols-[36px_1.1fr_1fr_36px_1.1fr_1fr] items-baseline gap-2 rounded-lg px-2 py-1.5 text-[13px] ${isEcart ? 'bg-[#B4761A]/[0.08]' : ''}`}>
+                              <span className="font-mono text-[11px] text-[#B3AD9E]">{m.numero_sage ?? '—'}</span>
+                              <span className="font-semibold text-[#3A362E]" title={`Nom technique : ${m.champ_sage}`}>{m.nom_ecran_sage || m.label || m.champ_sage}</span>
                               <span className={isEcart ? 'font-bold text-[#96600F]' : 'text-[#111820]'}>{formatCellValue(sageVal)}</span>
+                              <span className="font-mono text-[11px] text-[#B3AD9E]" title={m.numero_blg || undefined}>{numeroBlgCourt ?? '—'}</span>
+                              <span className="font-semibold text-[#3A362E]" title={m.numero_blg ? `Écran : ${m.numero_blg.replace(/^\d+\s*/, '')}` : `Nom technique : ${m.champ_blg}`}>
+                                {m.nom_ecran_blg || m.champ_blg}
+                              </span>
                               <span className={isEcart ? 'font-bold text-[#96600F]' : 'text-[#111820]'}>{formatCellValue(blgVal)}</span>
                             </div>
                           )
@@ -1372,10 +1389,13 @@ function OngletComparaison() {
                         <div className="mb-1 text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">Champs SAGE non mappés côté BLG ({unmappedFields.length})</div>
                         <div className="space-y-0.5">
                           {unmappedFields.map((m) => (
-                            <div key={m.id} className="grid grid-cols-[1fr_1fr_1fr] gap-2 rounded-lg px-2 py-1 text-[13px] opacity-70">
-                              <span className="font-semibold text-[#3A362E]">{m.label || m.champ_sage}</span>
+                            <div key={m.id} className="grid grid-cols-[36px_1.1fr_1fr_36px_1.1fr_1fr] items-baseline gap-2 rounded-lg px-2 py-1 text-[13px] opacity-70">
+                              <span className="font-mono text-[11px] text-[#B3AD9E]">{m.numero_sage ?? '—'}</span>
+                              <span className="font-semibold text-[#3A362E]" title={`Nom technique : ${m.champ_sage}`}>{m.nom_ecran_sage || m.label || m.champ_sage}</span>
                               <span className="text-[#111820]">{formatCellValue(selectedSageFull[m.champ_sage])}</span>
+                              <span />
                               <span className="text-[#B3AD9E]">— non mappé —</span>
+                              <span />
                             </div>
                           ))}
                         </div>
