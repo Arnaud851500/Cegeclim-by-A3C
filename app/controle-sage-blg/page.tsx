@@ -49,6 +49,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import * as XLSX from 'xlsx'
+import ExcelJS from 'exceljs'
 
 // ─────────────────────────────────────────────────────────────────────────
 // Onglet SAGE
@@ -611,6 +612,11 @@ type ControleRow = {
   // Banque (nouveau)
   sage_banque: string | null; blg_banque: string | null
   sage_banque_bban: string | null; blg_iban: string | null
+  // Téléphone, TVA, Adresse (nouveau — téléphone et TVA comparés automatiquement,
+  // adresse affichée côte à côte seulement, voir notes du mapping)
+  sage_telephone: string | null; blg_telephone: string | null
+  sage_numero_identifiant: string | null; blg_tva_intra: string | null
+  sage_adresse: string | null; blg_adresse: string | null
   // Attestation de capacité (désormais comparée automatiquement) et
   // Catégorie AF/GAF (affichée à titre indicatif, comparée aux tags BLG)
   sage_attestation_capacite: string | null; blg_attestation_capacite: string | null
@@ -674,6 +680,7 @@ const CHAMP_LABELS: Record<string, string> = {
   routage_promo: 'Routage promo', facture_email: 'Facture électronique',
   // Nouveaux champs (banque + attestation)
   banque_nom: 'Banque (nom)', banque_bban: 'IBAN / RIB', attestation_capacite: 'Attestation de capacité',
+  telephone: 'Téléphone', numero_identifiant: 'Identifiant TVA',
 }
 function formatCellValue(v: unknown): string {
   if (v === null || v === undefined || v === '') return '—'
@@ -848,64 +855,17 @@ function MappingInfoModal({ mapping, onClose }: { mapping: ChampMapping[]; onClo
   )
 }
 
-/** Colonnes d'export pour l'onglet Comparaison : reprend l'ensemble des
- * champs SAGE ↔ BLG déjà renvoyés par la RPC get_controle_tiers_sage_blg
- * (les mêmes que ceux affichés dans le panneau "Comparaison détaillée"). */
-const EXPORT_COLONNES_COMPARAISON: Array<{ key: keyof ControleRow; label: string; transform?: (r: ControleRow) => string }> = [
+/** Colonnes autonomes (pas de pendant SAGE/BLG à comparer) pour l'export Comparaison. */
+const EXPORT_COLONNES_SIMPLES: Array<{ key: keyof ControleRow; label: string; transform?: (r: ControleRow) => string }> = [
   { key: 'numero_tiers', label: 'N° tiers' },
   { key: 'statut_appariement', label: 'Statut appariement', transform: (r) => (r.statut_appariement === 'apparie' ? 'Apparié' : 'Manquant BLG') },
   { key: 'champs_en_ecart', label: 'Nb champs en écart', transform: (r) => String(r.champs_en_ecart?.length ?? 0) },
   { key: 'champs_en_ecart', label: 'Champs en écart (détail)', transform: (r) => (r.champs_en_ecart || []).join(', ') },
-  { key: 'sage_intitule', label: 'Intitulé (SAGE)' },
-  { key: 'blg_intitule', label: 'Intitulé (BLG)' },
-  { key: 'sage_qualite', label: 'Qualité (SAGE)' },
-  { key: 'blg_tags', label: 'Qualité / tags (BLG)', transform: (r) => formatCellValue(r.blg_tags) },
-  { key: 'sage_siret', label: 'SIRET (SAGE)' },
-  { key: 'blg_siret', label: 'SIRET (BLG)' },
-  { key: 'sage_code_naf', label: 'Code NAF (SAGE)' },
-  { key: 'blg_code_naf', label: 'Code NAF (BLG)' },
-  { key: 'sage_code_postal', label: 'Code postal (SAGE)' },
-  { key: 'blg_code_postal', label: 'Code postal (BLG)' },
-  { key: 'sage_ville', label: 'Ville (SAGE)' },
-  { key: 'blg_ville', label: 'Ville (BLG)' },
-  { key: 'sage_representant', label: 'Représentant (SAGE)' },
-  { key: 'blg_commercial', label: 'Commercial (BLG)' },
-  { key: 'sage_encours', label: 'Encours autorisé (SAGE)', transform: (r) => formatCellValue(r.sage_encours) },
-  { key: 'blg_encours', label: 'Encours (BLG)', transform: (r) => formatCellValue(r.blg_encours) },
-  { key: 'sage_assurance_credit', label: 'Assurance crédit (SAGE)', transform: (r) => formatCellValue(r.sage_assurance_credit) },
-  { key: 'blg_assurance_credit', label: 'Assurance crédit (BLG)', transform: (r) => formatCellValue(r.blg_assurance_credit) },
-  { key: 'sage_famille', label: 'Famille (SAGE)' },
-  { key: 'blg_famille', label: 'Famille (BLG)' },
-  { key: 'sage_frais_facturation', label: 'Frais de facturation (SAGE)' },
-  { key: 'blg_frais_facturation', label: 'Frais de facturation (BLG)' },
-  { key: 'sage_routage_promo', label: 'Routage promo (SAGE)' },
-  { key: 'blg_routage_promo', label: 'Routage promo (BLG)' },
-  { key: 'sage_facture_email', label: 'Facture électronique (SAGE)' },
-  { key: 'blg_facture_electronique', label: 'Facture électronique (BLG)' },
-  { key: 'sage_releve_facture', label: 'Relevé de facture (SAGE)' },
-  { key: 'blg_releve_facture', label: 'Relevé de facture (BLG)' },
-  { key: 'sage_type_facture', label: 'Type de facture (SAGE)' },
-  { key: 'blg_type_facture', label: 'Type de facture (BLG)' },
-  { key: 'sage_capacite_expiration', label: 'Capacité expiration (SAGE)' },
-  { key: 'blg_capacite_expiration', label: 'Capacité expiration (BLG)' },
-  // Nouveau : Banque
-  { key: 'sage_banque', label: 'Banque - nom (SAGE)' },
-  { key: 'blg_banque', label: 'Banque - nom (BLG)' },
-  { key: 'sage_banque_bban', label: 'Banque - RIB/BBAN (SAGE)' },
-  { key: 'blg_iban', label: 'Banque - IBAN (BLG)' },
-  // Nouveau : Attestation de capacité + Catégorie AF/GAF
-  { key: 'sage_attestation_capacite', label: 'Attestation de capacité (SAGE)' },
-  { key: 'blg_attestation_capacite', label: 'Attestation de capacité (BLG)' },
-  { key: 'sage_categorie_af_gaf', label: 'Catégorie AF/GAF (SAGE)' },
   { key: 'sage_mise_en_sommeil', label: 'Mise en sommeil (SAGE)', transform: (r) => formatCellValue(r.sage_mise_en_sommeil) },
   { key: 'blg_est_entite_interne', label: 'Entité interne (BLG)', transform: (r) => formatCellValue(r.blg_est_entite_interne) },
   { key: 'blg_est_adresse_livraison', label: 'Adresse de livraison uniquement (BLG)', transform: (r) => formatCellValue(r.blg_est_adresse_livraison) },
-  { key: 'sage_contact', label: 'Contact (SAGE)' },
-  { key: 'blg_contact_principal', label: 'Contact principal (BLG)' },
   { key: 'blg_contacts_resume', label: 'Contacts (BLG)' },
   { key: 'blg_nb_contacts', label: 'Nb contacts (BLG)', transform: (r) => formatCellValue(r.blg_nb_contacts) },
-  { key: 'sage_agence_rattachement', label: 'Agence de rattachement (SAGE)' },
-  { key: 'blg_division', label: 'Division / entité juridique (BLG, informatif)' },
   { key: 'sage_abrege', label: 'Abrégé (SAGE)' },
   { key: 'blg_nom_court', label: 'Nom court (BLG)' },
   { key: 'blg_id_tiers', label: 'ID tiers (BLG, brut)' },
@@ -913,6 +873,85 @@ const EXPORT_COLONNES_COMPARAISON: Array<{ key: keyof ControleRow; label: string
   { key: 'sage_updated_at', label: 'Dernière mise à jour (SAGE)' },
   { key: 'blg_last_update', label: 'Dernière mise à jour (BLG)' },
 ]
+
+/** Normalise une valeur pour comparaison export (même esprit que la vue SQL) : trim + upper, tableaux joints. */
+function normaliserPourExport(v: unknown): string {
+  if (v === null || v === undefined) return ''
+  if (typeof v === 'boolean') return v ? 'OUI' : 'NON'
+  if (Array.isArray(v)) return v.map(String).join(', ').toUpperCase().trim()
+  return String(v).toUpperCase().trim()
+}
+
+/** Une paire de colonnes SAGE ↔ BLG comparables, avec le numéro de mapping du
+ * document Excel (pour l'en-tête) et le mode de comparaison :
+ * - compareStrict=true  : vert si identique, rouge si écart, orange si une des deux valeurs manque
+ * - compareStrict=false : toujours orange (affichage seul, non vérifié — ex. Qualité/tags, Adresse) */
+type PaireExport = {
+  numeroSage: number | null
+  labelSage: string
+  sageKey: keyof ControleRow
+  numeroBlg: string | null
+  labelBlg: string
+  blgKey: keyof ControleRow
+  compareStrict: boolean
+  enEcart?: (r: ControleRow) => boolean
+}
+
+const EXPORT_PAIRES_COMPARAISON: PaireExport[] = [
+  { numeroSage: 2, labelSage: 'Intitulé', sageKey: 'sage_intitule', numeroBlg: '2', labelBlg: 'Raison sociale', blgKey: 'blg_intitule', compareStrict: true },
+  { numeroSage: 3, labelSage: 'Qualité', sageKey: 'sage_qualite', numeroBlg: '22', labelBlg: 'Tags', blgKey: 'blg_tags', compareStrict: false },
+  { numeroSage: 5, labelSage: 'Adresse', sageKey: 'sage_adresse', numeroBlg: '8', labelBlg: 'Adresse', blgKey: 'blg_adresse', compareStrict: false },
+  { numeroSage: 6, labelSage: 'Téléphone', sageKey: 'sage_telephone', numeroBlg: '9', labelBlg: 'Standard', blgKey: 'blg_telephone', compareStrict: true },
+  { numeroSage: 8, labelSage: 'Siret', sageKey: 'sage_siret', numeroBlg: '6', labelBlg: 'Numéro entreprise', blgKey: 'blg_siret', compareStrict: true },
+  { numeroSage: 9, labelSage: 'Identifiant TVA', sageKey: 'sage_numero_identifiant', numeroBlg: '7', labelBlg: 'TVA intracommunautaire', blgKey: 'blg_tva_intra', compareStrict: true },
+  { numeroSage: 10, labelSage: 'Code NAF', sageKey: 'sage_code_naf', numeroBlg: null, labelBlg: 'Code NAF', blgKey: 'blg_code_naf', compareStrict: true },
+  { numeroSage: null, labelSage: 'Code postal', sageKey: 'sage_code_postal', numeroBlg: null, labelBlg: 'Code postal', blgKey: 'blg_code_postal', compareStrict: true },
+  { numeroSage: null, labelSage: 'Ville', sageKey: 'sage_ville', numeroBlg: null, labelBlg: 'Ville', blgKey: 'blg_ville', compareStrict: true },
+  {
+    numeroSage: 11, labelSage: 'Représentant', sageKey: 'sage_representant', numeroBlg: '24', labelBlg: 'Commercial', blgKey: 'blg_commercial', compareStrict: true,
+    enEcart: (r) => {
+      const prenom = normaliserPourExport(r.sage_representant).split(/\s+/)[0]
+      const commercial = normaliserPourExport(r.blg_commercial)
+      if (!prenom || !commercial) return false
+      return !commercial.includes(prenom)
+    },
+  },
+  { numeroSage: 12, labelSage: 'Banque (nom)', sageKey: 'sage_banque', numeroBlg: '24', labelBlg: 'Banque (nom)', blgKey: 'blg_banque', compareStrict: true },
+  {
+    numeroSage: 15, labelSage: 'IBAN / RIB', sageKey: 'sage_banque_bban', numeroBlg: '22', labelBlg: 'IBAN', blgKey: 'blg_iban', compareStrict: true,
+    enEcart: (r) => {
+      const bban = normaliserPourExport(r.sage_banque_bban)
+      const iban = normaliserPourExport(r.blg_iban)
+      if (!bban || !iban) return false
+      return bban !== iban.slice(-23)
+    },
+  },
+  { numeroSage: 18, labelSage: 'Capacité expiration', sageKey: 'sage_capacite_expiration', numeroBlg: '27', labelBlg: 'Capacité expiration', blgKey: 'blg_capacite_expiration', compareStrict: true },
+  { numeroSage: 22, labelSage: 'Attestation de capacité', sageKey: 'sage_attestation_capacite', numeroBlg: '26', labelBlg: 'Attestation capacité', blgKey: 'blg_attestation_capacite', compareStrict: true },
+  { numeroSage: 19, labelSage: 'Facture @', sageKey: 'sage_facture_email', numeroBlg: '32', labelBlg: 'Facture électronique', blgKey: 'blg_facture_electronique', compareStrict: true },
+  { numeroSage: 20, labelSage: 'Relevé de facture', sageKey: 'sage_releve_facture', numeroBlg: '29', labelBlg: 'Relevé de facture', blgKey: 'blg_releve_facture', compareStrict: true },
+  { numeroSage: 21, labelSage: 'Famille', sageKey: 'sage_famille', numeroBlg: '30', labelBlg: 'Famille', blgKey: 'blg_famille', compareStrict: true },
+  { numeroSage: 23, labelSage: 'Frais facturation', sageKey: 'sage_frais_facturation', numeroBlg: '28', labelBlg: 'Frais de facturation', blgKey: 'blg_frais_facturation', compareStrict: true },
+  { numeroSage: 24, labelSage: 'Routage promo', sageKey: 'sage_routage_promo', numeroBlg: '31', labelBlg: 'Routage promo', blgKey: 'blg_routage_promo', compareStrict: true },
+  { numeroSage: 25, labelSage: 'Type de facture', sageKey: 'sage_type_facture', numeroBlg: '33', labelBlg: 'Type de facture', blgKey: 'blg_type_facture', compareStrict: true },
+  { numeroSage: 26, labelSage: 'Categorie AF GAF', sageKey: 'sage_categorie_af_gaf', numeroBlg: '22', labelBlg: 'Tags', blgKey: 'blg_tags', compareStrict: false },
+  {
+    numeroSage: 28, labelSage: 'Encours autorisé', sageKey: 'sage_encours', numeroBlg: '18', labelBlg: "Limite d'encours", blgKey: 'blg_encours', compareStrict: true,
+    enEcart: (r) => r.sage_encours !== null && r.blg_encours !== null && Number(r.sage_encours) !== Number(r.blg_encours),
+  },
+  {
+    numeroSage: 29, labelSage: 'Assurance crédit', sageKey: 'sage_assurance_credit', numeroBlg: '19', labelBlg: "Montant d'assurance crédit", blgKey: 'blg_assurance_credit', compareStrict: true,
+    enEcart: (r) => r.sage_assurance_credit !== null && r.blg_assurance_credit !== null && Number(r.sage_assurance_credit) !== Number(r.blg_assurance_credit),
+  },
+  { numeroSage: 30, labelSage: 'Agence de rattachement', sageKey: 'sage_agence_rattachement', numeroBlg: '23', labelBlg: 'Division (informatif, pas d\'équivalence confirmée)', blgKey: 'blg_division', compareStrict: false },
+  { numeroSage: 37, labelSage: 'Interlocuteur', sageKey: 'sage_contact', numeroBlg: null, labelBlg: 'Contact principal', blgKey: 'blg_contact_principal', compareStrict: false },
+]
+
+/** Couleurs de remplissage ExcelJS (ARGB) pour l'export Comparaison. */
+const COULEUR_OK = 'FFDCFCE7'      // vert clair
+const COULEUR_ECART = 'FFFECACA'   // rouge clair
+const COULEUR_NON_COMPARABLE = 'FFFED7AA' // orange clair
+const COULEUR_ENTETE_PAIRE = 'FFE0E7EF'   // bleu-gris clair pour distinguer les paires comparables des colonnes simples
 
 // ─────────────────────────────────────────────────────────────────────────
 // Onglet BLG (lecture seule côté BLG, pour les tiers déjà appariés)
@@ -1209,9 +1248,15 @@ function OngletComparaison() {
 
   /** Export Excel : rapatrie TOUTES les lignes correspondant aux filtres
    * actuels de l'onglet Comparaison (statut, écarts, champ, recherche,
-   * conditions avancées), paginé par 500 via la même RPC que la liste,
-   * puis génère un .xlsx avec l'ensemble des champs SAGE ↔ BLG comparés
-   * (EXPORT_COLONNES_COMPARAISON). */
+   * conditions avancées), paginé par 500 via la même RPC que la liste, puis
+   * génère un .xlsx via ExcelJS (nécessaire pour les couleurs de cellule,
+   * non supportées par le paquet xlsx/SheetJS utilisé sur l'onglet SAGE) :
+   * - chaque paire de colonnes SAGE ↔ BLG comparables est encadrée (bordure
+   *   + en-tête bleu-gris distinct des colonnes simples) et porte son numéro
+   *   de mapping du document Excel entre parenthèses ;
+   * - vert clair = valeurs identiques, rouge clair = écart, orange clair =
+   *   non vérifiable (donnée manquante d'un côté) ou champ affiché sans
+   *   comparaison stricte (ex. Qualité/tags, Adresse). */
   async function exporterExcelComparaison() {
     setExportEnCours(true)
     setExportProgress({ done: 0 })
@@ -1234,19 +1279,99 @@ function OngletComparaison() {
         offset += pageSize
       }
 
-      const feuille = toutes.map((r) => {
-        const ligne: Record<string, string> = {}
-        EXPORT_COLONNES_COMPARAISON.forEach((c) => {
-          ligne[c.label] = c.transform ? c.transform(r) : safeText(r[c.key])
-        })
-        return ligne
+      const wb = new ExcelJS.Workbook()
+      const ws = wb.addWorksheet('Comparaison SAGE-BLG')
+
+      // Construction des en-têtes : colonnes simples puis, pour chaque paire,
+      // une colonne SAGE suivie d'une colonne BLG.
+      const enTetes: { texte: string; estPaire: boolean; bordureGauche?: boolean; bordureDroite?: boolean }[] = []
+      EXPORT_COLONNES_SIMPLES.forEach((c) => enTetes.push({ texte: c.label, estPaire: false }))
+      EXPORT_PAIRES_COMPARAISON.forEach((p) => {
+        const suffixeSage = p.numeroSage !== null ? ` (n°${p.numeroSage})` : ''
+        const suffixeBlg = p.numeroBlg !== null ? ` (n°${p.numeroBlg})` : ''
+        enTetes.push({ texte: `${p.labelSage}${suffixeSage} — SAGE`, estPaire: true, bordureGauche: true })
+        enTetes.push({ texte: `${p.labelBlg}${suffixeBlg} — BLG`, estPaire: true, bordureDroite: true })
       })
 
-      const ws = XLSX.utils.json_to_sheet(feuille)
-      ws['!cols'] = EXPORT_COLONNES_COMPARAISON.map(() => ({ wch: 22 }))
-      const wb = XLSX.utils.book_new()
-      XLSX.utils.book_append_sheet(wb, ws, 'Comparaison SAGE-BLG')
-      XLSX.writeFile(wb, `comparaison_sage_blg_${new Date().toISOString().slice(0, 10)}.xlsx`)
+      ws.addRow(enTetes.map((h) => h.texte))
+      const ligneEntete = ws.getRow(1)
+      ligneEntete.font = { bold: true }
+      ligneEntete.eachCell((cell, colNumber) => {
+        const h = enTetes[colNumber - 1]
+        cell.alignment = { wrapText: true, vertical: 'middle' }
+        if (h.estPaire) {
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COULEUR_ENTETE_PAIRE } }
+          cell.border = {
+            top: { style: 'thin' }, bottom: { style: 'thin' },
+            left: h.bordureGauche ? { style: 'medium' } : { style: 'thin' },
+            right: h.bordureDroite ? { style: 'medium' } : { style: 'thin' },
+          }
+        }
+      })
+
+      toutes.forEach((r) => {
+        const valeursSimples = EXPORT_COLONNES_SIMPLES.map((c) => (c.transform ? c.transform(r) : safeText(r[c.key])))
+        const valeursPaires: string[] = []
+        EXPORT_PAIRES_COMPARAISON.forEach((p) => {
+          valeursPaires.push(formatCellValue(r[p.sageKey]))
+          valeursPaires.push(formatCellValue(r[p.blgKey]))
+        })
+        const ligne = ws.addRow([...valeursSimples, ...valeursPaires])
+
+        let colIndex = EXPORT_COLONNES_SIMPLES.length
+        EXPORT_PAIRES_COMPARAISON.forEach((p) => {
+          colIndex += 1
+          const celluleSage = ligne.getCell(colIndex)
+          colIndex += 1
+          const celluleBlg = ligne.getCell(colIndex)
+
+          const sageVide = r[p.sageKey] === null || r[p.sageKey] === undefined || r[p.sageKey] === ''
+          const blgVide = r[p.blgKey] === null || r[p.blgKey] === undefined || (Array.isArray(r[p.blgKey]) && (r[p.blgKey] as unknown[]).length === 0)
+
+          let couleur: string
+          if (!p.compareStrict) {
+            couleur = COULEUR_NON_COMPARABLE
+          } else if (sageVide || blgVide) {
+            couleur = COULEUR_NON_COMPARABLE
+          } else {
+            const enEcart = p.enEcart ? p.enEcart(r) : normaliserPourExport(r[p.sageKey]) !== normaliserPourExport(r[p.blgKey])
+            couleur = enEcart ? COULEUR_ECART : COULEUR_OK
+          }
+
+          const bordureCommune = { top: { style: 'thin' as const }, bottom: { style: 'thin' as const } }
+          celluleSage.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: couleur } }
+          celluleSage.border = { ...bordureCommune, left: { style: 'medium' } }
+          celluleBlg.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: couleur } }
+          celluleBlg.border = { ...bordureCommune, right: { style: 'medium' } }
+        })
+      })
+
+      ws.columns.forEach((col) => { col.width = 22 })
+      ws.views = [{ state: 'frozen', ySplit: 1 }]
+
+      // Petite légende en bas de feuille
+      const ligneLegendeIndex = toutes.length + 3
+      ws.getCell(`A${ligneLegendeIndex}`).value = 'Légende :'
+      ws.getCell(`A${ligneLegendeIndex}`).font = { bold: true }
+      const legendes: [string, string][] = [
+        ['Valeurs identiques', COULEUR_OK],
+        ['Écart détecté', COULEUR_ECART],
+        ["Non comparable / donnée manquante / affiché sans vérification", COULEUR_NON_COMPARABLE],
+      ]
+      legendes.forEach(([texte, couleur], i) => {
+        const cell = ws.getCell(`A${ligneLegendeIndex + 1 + i}`)
+        cell.value = texte
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: couleur } }
+      })
+
+      const buffer = await wb.xlsx.writeBuffer()
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `comparaison_sage_blg_${new Date().toISOString().slice(0, 10)}.xlsx`
+      a.click()
+      URL.revokeObjectURL(url)
     } catch (e) {
       alert('Erreur export Excel : ' + (e instanceof Error ? e.message : String(e)))
     } finally {
