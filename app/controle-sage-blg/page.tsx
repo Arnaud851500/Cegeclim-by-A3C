@@ -35,6 +35,22 @@
  *    n'étaient jamais comptés comme écarts (alors que marqués "auto" dans
  *    le mapping) a été corrigé côté vue SQL.
  *
+ * MàJ (export Comparaison — règles de comparaison tolérantes) :
+ *  - Qualité et Catégorie AF/GAF ↔ Tags BLG : contrôle réel désormais (vert
+ *    si la chaîne SAGE se retrouve dans les tags BLG, rouge sinon).
+ *  - Adresse / Code postal / Ville regroupés côte à côte. Adresse et Ville
+ *    comparées de façon tolérante (abréviations de voie, accents, tirets,
+ *    "ST" → "SAINT", "CEDEX xx" ignoré, une lettre d'écart tolérée).
+ *  - Téléphone normalisé (+33 / 0033 → 0, ponctuation ignorée).
+ *  - SIRET et TVA intra : rouge si le SIREN (9 chiffres) diffère, orange si
+ *    SIREN identique mais valeur globale différente, vert sinon.
+ *  - Représentant : préfixe agence SAGE absorbé (ARCCASASSUS ⊃ CASASSUS) et
+ *    une lettre d'écart tolérée par mot.
+ *  - Attestation de capacité : vert si la chaîne SAGE se retrouve dans BLG.
+ *  - Interlocuteur ↔ Contact principal : vert dès qu'un nom/prénom est commun.
+ *  Ces règles ne concernent que l'export Excel ; le comparatif à l'écran et
+ *  la vue SQL (champs_en_ecart) restent inchangés.
+ *
  * Le panneau "Comparaison détaillée" et le mapping manuel restent pilotés
  * entièrement par la table champ_mapping_sage_blg : les nouveaux champs
  * bancaires / attestation / catégorie AF-GAF y apparaissent automatiquement,
@@ -882,10 +898,189 @@ function normaliserPourExport(v: unknown): string {
   return String(v).toUpperCase().trim()
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Règles de comparaison tolérantes pour l'export Comparaison
+// ─────────────────────────────────────────────────────────────────────────
+
+/** Résultat d'une comparaison : 'ok' = vert, 'ecart' = rouge, 'partiel' = orange. */
+type ResultatComparaison = 'ok' | 'ecart' | 'partiel'
+
+/** Retire les accents, passe en majuscules, remplace toute ponctuation
+ * (tirets, apostrophes, virgules, points…) par des espaces. */
+function normaliserTexte(v: unknown): string {
+  if (v === null || v === undefined) return ''
+  const s = Array.isArray(v) ? v.map(String).join(' ') : String(v)
+  return s
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, ' ')
+    .trim()
+}
+
+function motsDe(v: unknown): string[] {
+  return normaliserTexte(v).split(' ').filter(Boolean)
+}
+
+/** Distance de Levenshtein bornée : dès que la distance dépasse `max`, renvoie max+1. */
+function levenshtein(a: string, b: string, max: number): number {
+  if (a === b) return 0
+  if (Math.abs(a.length - b.length) > max) return max + 1
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j)
+  for (let i = 1; i <= a.length; i++) {
+    const cur: number[] = [i]
+    let rowMin = i
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+      if (cur[j] < rowMin) rowMin = cur[j]
+    }
+    if (rowMin > max) return max + 1
+    prev = cur
+  }
+  return prev[b.length]
+}
+
+/** Deux mots sont "proches" si identiques, si l'un contient l'autre (mots ≥ 4
+ * lettres — absorbe le préfixe agence SAGE : ARCCASASSUS ⊃ CASASSUS), ou à
+ * une lettre près (mots ≥ 5 lettres — AYPHASSORHO ≈ AYPHASSORRHO). */
+function motsProches(a: string, b: string): boolean {
+  if (a === b) return true
+  const min = Math.min(a.length, b.length)
+  if (min >= 4 && (a.includes(b) || b.includes(a))) return true
+  if (min >= 5 && levenshtein(a, b, 1) <= 1) return true
+  return false
+}
+
+function motTrouveDans(mot: string, liste: string[]): boolean {
+  return liste.some((m) => motsProches(mot, m))
+}
+
+/** Inclusion de chaîne (espaces ignorés) : la valeur SAGE doit se retrouver
+ * dans la valeur BLG (ou inversement). Sert pour Qualité/Catégorie ↔ Tags et
+ * pour l'attestation de capacité. */
+function comparerInclusion(sage: unknown, blg: unknown): ResultatComparaison {
+  const s = normaliserTexte(sage).replace(/ /g, '')
+  const b = normaliserTexte(blg).replace(/ /g, '')
+  if (!s || !b) return 'partiel'
+  return b.includes(s) || s.includes(b) ? 'ok' : 'ecart'
+}
+
+/** Téléphone : chiffres seuls, +33 / 0033 ramené au 0 national. */
+function normaliserTelephone(v: unknown): string {
+  let d = String(v ?? '').replace(/\D/g, '')
+  if (d.startsWith('0033')) d = '0' + d.slice(4)
+  else if (d.startsWith('33') && d.length === 11) d = '0' + d.slice(2)
+  return d
+}
+function comparerTelephone(sage: unknown, blg: unknown): ResultatComparaison {
+  const s = normaliserTelephone(sage)
+  const b = normaliserTelephone(blg)
+  if (!s || !b) return 'partiel'
+  return s === b ? 'ok' : 'ecart'
+}
+
+/** SIRET : rouge si le SIREN (9 premiers chiffres) diffère, orange si SIREN
+ * identique mais valeur globale différente (ex. BLG ne porte que le SIREN),
+ * vert si strictement identique. */
+function comparerSiret(sage: unknown, blg: unknown): ResultatComparaison {
+  const s = String(sage ?? '').replace(/\D/g, '')
+  const b = String(blg ?? '').replace(/\D/g, '')
+  if (!s || !b) return 'partiel'
+  if (s.slice(0, 9) !== b.slice(0, 9)) return 'ecart'
+  return s === b ? 'ok' : 'partiel'
+}
+
+/** TVA intracommunautaire : même logique sur la clé "FR + 2 chiffres + SIREN"
+ * (13 caractères) — SAGE ajoute parfois le reste du SIRET derrière. */
+function comparerTva(sage: unknown, blg: unknown): ResultatComparaison {
+  const s = normaliserTexte(sage).replace(/ /g, '')
+  const b = normaliserTexte(blg).replace(/ /g, '')
+  if (!s || !b) return 'partiel'
+  if (s.slice(0, 13) !== b.slice(0, 13)) return 'ecart'
+  return s === b ? 'ok' : 'partiel'
+}
+
+/** Ville : accents/tirets ignorés, "ST" → "SAINT", "CEDEX xx" supprimé. Vert
+ * si identiques, si tous les mots de la plus courte se retrouvent dans l'autre
+ * (NANTES ⊂ NANTES CEDEX 01, BOULAZAC ⊂ BOULAZAC ISLE MANOIRE) ou à une
+ * lettre près ; rouge sinon (VANNES ≠ NANTES, MIOS ≠ BIGANOS). */
+function normaliserVille(v: unknown): string {
+  return normaliserTexte(v)
+    .replace(/\bCEDEX\b.*$/, '')
+    .replace(/\bSTE\b/g, 'SAINTE')
+    .replace(/\bST\b/g, 'SAINT')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+function comparerVille(sage: unknown, blg: unknown): ResultatComparaison {
+  const s = normaliserVille(sage)
+  const b = normaliserVille(blg)
+  if (!s || !b) return 'partiel'
+  if (s === b) return 'ok'
+  const ms = s.split(' ')
+  const mb = b.split(' ')
+  const [court, long] = ms.length <= mb.length ? [ms, mb] : [mb, ms]
+  if (court.every((m) => motTrouveDans(m, long))) return 'ok'
+  if (levenshtein(s.replace(/ /g, ''), b.replace(/ /g, ''), 1) <= 1) return 'ok'
+  return 'ecart'
+}
+
+/** Adresse : côté BLG l'adresse concatène "voie, CP Ville, Pays" — on ne garde
+ * que la partie voie. Abréviations de voie développées, mots vides ignorés.
+ * Vert si le numéro de voie concorde (quand présent des deux côtés) et qu'au
+ * moins 60 % des mots du libellé le plus court se retrouvent dans l'autre (à
+ * une lettre près) ; rouge sinon. */
+const ABREVIATIONS_VOIE: Record<string, string> = {
+  ALL: 'ALLEE', AV: 'AVENUE', AVE: 'AVENUE', BD: 'BOULEVARD', BLD: 'BOULEVARD', BLVD: 'BOULEVARD',
+  CHEM: 'CHEMIN', CH: 'CHEMIN', IMP: 'IMPASSE', RTE: 'ROUTE', PL: 'PLACE', R: 'RUE',
+  ST: 'SAINT', STE: 'SAINTE', BAT: 'BATIMENT', RES: 'RESIDENCE', LOT: 'LOTISSEMENT',
+  FG: 'FAUBOURG', SQ: 'SQUARE', CRS: 'COURS', QU: 'QUAI', PROM: 'PROMENADE',
+}
+const MOTS_VIDES_ADRESSE = new Set(['DE', 'DU', 'DES', 'LA', 'LE', 'LES', 'L', 'D', 'ET', 'A', 'AU', 'AUX', 'FRANCE'])
+function motsAdresse(v: unknown): string[] {
+  let s = String(v ?? '')
+  // Coupe avant ", 33130 Bègles, France" (CP à 5 chiffres après une virgule).
+  s = s.split(/,\s*\d{5}\b/)[0]
+  return motsDe(s)
+    .map((m) => ABREVIATIONS_VOIE[m] || m)
+    .filter((m) => !MOTS_VIDES_ADRESSE.has(m))
+}
+function comparerAdresse(sage: unknown, blg: unknown): ResultatComparaison {
+  const ms = motsAdresse(sage)
+  const mb = motsAdresse(blg)
+  if (ms.length === 0 || mb.length === 0) return 'partiel'
+  const numS = ms.find((m) => /^\d+[A-Z]?$/.test(m))
+  const numB = mb.find((m) => /^\d+[A-Z]?$/.test(m))
+  if (numS && numB && numS !== numB) return 'ecart'
+  const [court, long] = ms.length <= mb.length ? [ms, mb] : [mb, ms]
+  const trouves = court.filter((m) => motTrouveDans(m, long)).length
+  return trouves / court.length >= 0.6 ? 'ok' : 'ecart'
+}
+
+/** Personnes. SAGE = "<code agence><NOM> Prénom" (ex. "ARCCASASSUS Rémy"),
+ * BLG = "Prénom NOM". Seuls les mots de ≥ 3 lettres comptent.
+ * - tous=true (représentant) : chaque mot BLG doit se retrouver dans SAGE
+ *   (préfixe agence absorbé, une lettre d'écart tolérée). "MPEYRE Philippe"
+ *   vs "Christophe MICHALUC" → rouge ; "AAMENA Damien" vs "Damien MENA" → vert.
+ * - tous=false (contact principal) : un seul mot commun suffit
+ *   ("FARDEGUE/ DANQUIGNY" vs "Charles DANQUIGNY" → vert). */
+function comparerPersonne(sage: unknown, blg: unknown, tous: boolean): ResultatComparaison {
+  const ms = motsDe(sage).filter((m) => m.length >= 3)
+  const mb = motsDe(blg).filter((m) => m.length >= 3)
+  if (ms.length === 0 || mb.length === 0) return 'partiel'
+  const proche = (m: string) => motTrouveDans(m, ms)
+  if (tous) return mb.every(proche) ? 'ok' : 'ecart'
+  return mb.some(proche) ? 'ok' : 'ecart'
+}
+
 /** Une paire de colonnes SAGE ↔ BLG comparables, avec le numéro de mapping du
  * document Excel (pour l'en-tête) et le mode de comparaison :
- * - compareStrict=true  : vert si identique, rouge si écart, orange si une des deux valeurs manque
- * - compareStrict=false : toujours orange (affichage seul, non vérifié — ex. Qualité/tags, Adresse) */
+ * - compareStrict=false : toujours orange (affichage seul, non vérifié — ex. Agence/Division)
+ * - compareStrict=true sans `comparer` : vert si identique (trim+upper), rouge sinon
+ * - compareStrict=true avec `comparer` : règle tolérante spécifique, qui peut
+ *   aussi renvoyer 'partiel' (orange, ex. SIREN identique mais SIRET différent)
+ * Dans tous les cas, une valeur manquante d'un côté donne orange. */
 type PaireExport = {
   numeroSage: number | null
   labelSage: string
@@ -894,57 +1089,80 @@ type PaireExport = {
   labelBlg: string
   blgKey: keyof ControleRow
   compareStrict: boolean
-  enEcart?: (r: ControleRow) => boolean
+  comparer?: (r: ControleRow) => ResultatComparaison
 }
 
 const EXPORT_PAIRES_COMPARAISON: PaireExport[] = [
   { numeroSage: 2, labelSage: 'Intitulé', sageKey: 'sage_intitule', numeroBlg: '2', labelBlg: 'Raison sociale', blgKey: 'blg_intitule', compareStrict: true },
-  { numeroSage: 3, labelSage: 'Qualité', sageKey: 'sage_qualite', numeroBlg: '22', labelBlg: 'Tags', blgKey: 'blg_tags', compareStrict: false },
-  { numeroSage: 5, labelSage: 'Adresse', sageKey: 'sage_adresse', numeroBlg: '8', labelBlg: 'Adresse', blgKey: 'blg_adresse', compareStrict: false },
-  { numeroSage: 6, labelSage: 'Téléphone', sageKey: 'sage_telephone', numeroBlg: '9', labelBlg: 'Standard', blgKey: 'blg_telephone', compareStrict: true },
-  { numeroSage: 8, labelSage: 'Siret', sageKey: 'sage_siret', numeroBlg: '6', labelBlg: 'Numéro entreprise', blgKey: 'blg_siret', compareStrict: true },
-  { numeroSage: 9, labelSage: 'Identifiant TVA', sageKey: 'sage_numero_identifiant', numeroBlg: '7', labelBlg: 'TVA intracommunautaire', blgKey: 'blg_tva_intra', compareStrict: true },
-  { numeroSage: 10, labelSage: 'Code NAF', sageKey: 'sage_code_naf', numeroBlg: null, labelBlg: 'Code NAF', blgKey: 'blg_code_naf', compareStrict: true },
+  {
+    numeroSage: 3, labelSage: 'Qualité', sageKey: 'sage_qualite', numeroBlg: '22', labelBlg: 'Tags', blgKey: 'blg_tags', compareStrict: true,
+    comparer: (r) => comparerInclusion(r.sage_qualite, r.blg_tags),
+  },
+  // Adresse / Code postal / Ville regroupés côte à côte
+  {
+    numeroSage: 5, labelSage: 'Adresse', sageKey: 'sage_adresse', numeroBlg: '8', labelBlg: 'Adresse', blgKey: 'blg_adresse', compareStrict: true,
+    comparer: (r) => comparerAdresse(r.sage_adresse, r.blg_adresse),
+  },
   { numeroSage: null, labelSage: 'Code postal', sageKey: 'sage_code_postal', numeroBlg: null, labelBlg: 'Code postal', blgKey: 'blg_code_postal', compareStrict: true },
-  { numeroSage: null, labelSage: 'Ville', sageKey: 'sage_ville', numeroBlg: null, labelBlg: 'Ville', blgKey: 'blg_ville', compareStrict: true },
+  {
+    numeroSage: null, labelSage: 'Ville', sageKey: 'sage_ville', numeroBlg: null, labelBlg: 'Ville', blgKey: 'blg_ville', compareStrict: true,
+    comparer: (r) => comparerVille(r.sage_ville, r.blg_ville),
+  },
+  {
+    numeroSage: 6, labelSage: 'Téléphone', sageKey: 'sage_telephone', numeroBlg: '9', labelBlg: 'Standard', blgKey: 'blg_telephone', compareStrict: true,
+    comparer: (r) => comparerTelephone(r.sage_telephone, r.blg_telephone),
+  },
+  {
+    numeroSage: 8, labelSage: 'Siret', sageKey: 'sage_siret', numeroBlg: '6', labelBlg: 'Numéro entreprise', blgKey: 'blg_siret', compareStrict: true,
+    comparer: (r) => comparerSiret(r.sage_siret, r.blg_siret),
+  },
+  {
+    numeroSage: 9, labelSage: 'Identifiant TVA', sageKey: 'sage_numero_identifiant', numeroBlg: '7', labelBlg: 'TVA intracommunautaire', blgKey: 'blg_tva_intra', compareStrict: true,
+    comparer: (r) => comparerTva(r.sage_numero_identifiant, r.blg_tva_intra),
+  },
+  { numeroSage: 10, labelSage: 'Code NAF', sageKey: 'sage_code_naf', numeroBlg: null, labelBlg: 'Code NAF', blgKey: 'blg_code_naf', compareStrict: true },
   {
     numeroSage: 11, labelSage: 'Représentant', sageKey: 'sage_representant', numeroBlg: '24', labelBlg: 'Commercial', blgKey: 'blg_commercial', compareStrict: true,
-    enEcart: (r) => {
-      const prenom = normaliserPourExport(r.sage_representant).split(/\s+/)[0]
-      const commercial = normaliserPourExport(r.blg_commercial)
-      if (!prenom || !commercial) return false
-      return !commercial.includes(prenom)
-    },
+    comparer: (r) => comparerPersonne(r.sage_representant, r.blg_commercial, true),
   },
   { numeroSage: 12, labelSage: 'Banque (nom)', sageKey: 'sage_banque', numeroBlg: '24', labelBlg: 'Banque (nom)', blgKey: 'blg_banque', compareStrict: true },
   {
     numeroSage: 15, labelSage: 'IBAN / RIB', sageKey: 'sage_banque_bban', numeroBlg: '22', labelBlg: 'IBAN', blgKey: 'blg_iban', compareStrict: true,
-    enEcart: (r) => {
-      const bban = normaliserPourExport(r.sage_banque_bban)
-      const iban = normaliserPourExport(r.blg_iban)
-      if (!bban || !iban) return false
-      return bban !== iban.slice(-23)
+    comparer: (r) => {
+      const bban = normaliserPourExport(r.sage_banque_bban).replace(/\s+/g, '')
+      const iban = normaliserPourExport(r.blg_iban).replace(/\s+/g, '')
+      if (!bban || !iban) return 'partiel'
+      return bban === iban.slice(-23) ? 'ok' : 'ecart'
     },
   },
   { numeroSage: 18, labelSage: 'Capacité expiration', sageKey: 'sage_capacite_expiration', numeroBlg: '27', labelBlg: 'Capacité expiration', blgKey: 'blg_capacite_expiration', compareStrict: true },
-  { numeroSage: 22, labelSage: 'Attestation de capacité', sageKey: 'sage_attestation_capacite', numeroBlg: '26', labelBlg: 'Attestation capacité', blgKey: 'blg_attestation_capacite', compareStrict: true },
+  {
+    numeroSage: 22, labelSage: 'Attestation de capacité', sageKey: 'sage_attestation_capacite', numeroBlg: '26', labelBlg: 'Attestation capacité', blgKey: 'blg_attestation_capacite', compareStrict: true,
+    comparer: (r) => comparerInclusion(r.sage_attestation_capacite, r.blg_attestation_capacite),
+  },
   { numeroSage: 19, labelSage: 'Facture @', sageKey: 'sage_facture_email', numeroBlg: '32', labelBlg: 'Facture électronique', blgKey: 'blg_facture_electronique', compareStrict: true },
   { numeroSage: 20, labelSage: 'Relevé de facture', sageKey: 'sage_releve_facture', numeroBlg: '29', labelBlg: 'Relevé de facture', blgKey: 'blg_releve_facture', compareStrict: true },
   { numeroSage: 21, labelSage: 'Famille', sageKey: 'sage_famille', numeroBlg: '30', labelBlg: 'Famille', blgKey: 'blg_famille', compareStrict: true },
   { numeroSage: 23, labelSage: 'Frais facturation', sageKey: 'sage_frais_facturation', numeroBlg: '28', labelBlg: 'Frais de facturation', blgKey: 'blg_frais_facturation', compareStrict: true },
   { numeroSage: 24, labelSage: 'Routage promo', sageKey: 'sage_routage_promo', numeroBlg: '31', labelBlg: 'Routage promo', blgKey: 'blg_routage_promo', compareStrict: true },
   { numeroSage: 25, labelSage: 'Type de facture', sageKey: 'sage_type_facture', numeroBlg: '33', labelBlg: 'Type de facture', blgKey: 'blg_type_facture', compareStrict: true },
-  { numeroSage: 26, labelSage: 'Categorie AF GAF', sageKey: 'sage_categorie_af_gaf', numeroBlg: '22', labelBlg: 'Tags', blgKey: 'blg_tags', compareStrict: false },
+  {
+    numeroSage: 26, labelSage: 'Categorie AF GAF', sageKey: 'sage_categorie_af_gaf', numeroBlg: '22', labelBlg: 'Tags', blgKey: 'blg_tags', compareStrict: true,
+    comparer: (r) => comparerInclusion(r.sage_categorie_af_gaf, r.blg_tags),
+  },
   {
     numeroSage: 28, labelSage: 'Encours autorisé', sageKey: 'sage_encours', numeroBlg: '18', labelBlg: "Limite d'encours", blgKey: 'blg_encours', compareStrict: true,
-    enEcart: (r) => r.sage_encours !== null && r.blg_encours !== null && Number(r.sage_encours) !== Number(r.blg_encours),
+    comparer: (r) => (r.sage_encours !== null && r.blg_encours !== null && Number(r.sage_encours) !== Number(r.blg_encours) ? 'ecart' : 'ok'),
   },
   {
     numeroSage: 29, labelSage: 'Assurance crédit', sageKey: 'sage_assurance_credit', numeroBlg: '19', labelBlg: "Montant d'assurance crédit", blgKey: 'blg_assurance_credit', compareStrict: true,
-    enEcart: (r) => r.sage_assurance_credit !== null && r.blg_assurance_credit !== null && Number(r.sage_assurance_credit) !== Number(r.blg_assurance_credit),
+    comparer: (r) => (r.sage_assurance_credit !== null && r.blg_assurance_credit !== null && Number(r.sage_assurance_credit) !== Number(r.blg_assurance_credit) ? 'ecart' : 'ok'),
   },
   { numeroSage: 30, labelSage: 'Agence de rattachement', sageKey: 'sage_agence_rattachement', numeroBlg: '23', labelBlg: 'Division (informatif, pas d\'équivalence confirmée)', blgKey: 'blg_division', compareStrict: false },
-  { numeroSage: 37, labelSage: 'Interlocuteur', sageKey: 'sage_contact', numeroBlg: null, labelBlg: 'Contact principal', blgKey: 'blg_contact_principal', compareStrict: false },
+  {
+    numeroSage: 37, labelSage: 'Interlocuteur', sageKey: 'sage_contact', numeroBlg: null, labelBlg: 'Contact principal', blgKey: 'blg_contact_principal', compareStrict: true,
+    comparer: (r) => comparerPersonne(r.sage_contact, r.blg_contact_principal, false),
+  },
 ]
 
 /** Couleurs de remplissage ExcelJS (ARGB) pour l'export Comparaison. */
@@ -1254,9 +1472,11 @@ function OngletComparaison() {
    * - chaque paire de colonnes SAGE ↔ BLG comparables est encadrée (bordure
    *   + en-tête bleu-gris distinct des colonnes simples) et porte son numéro
    *   de mapping du document Excel entre parenthèses ;
-   * - vert clair = valeurs identiques, rouge clair = écart, orange clair =
-   *   non vérifiable (donnée manquante d'un côté) ou champ affiché sans
-   *   comparaison stricte (ex. Qualité/tags, Adresse). */
+   * - vert clair = valeurs identiques (ou équivalentes selon la règle
+   *   tolérante du champ), rouge clair = écart réel, orange clair = non
+   *   vérifiable (donnée manquante d'un côté), écart partiel (ex. SIREN
+   *   identique mais SIRET différent) ou champ affiché sans comparaison
+   *   (ex. Agence/Division). */
   async function exporterExcelComparaison() {
     setExportEnCours(true)
     setExportProgress({ done: 0 })
@@ -1309,6 +1529,8 @@ function OngletComparaison() {
         }
       })
 
+      const estVide = (v: unknown) => v === null || v === undefined || v === '' || (Array.isArray(v) && v.length === 0)
+
       toutes.forEach((r) => {
         const valeursSimples = EXPORT_COLONNES_SIMPLES.map((c) => (c.transform ? c.transform(r) : safeText(r[c.key])))
         const valeursPaires: string[] = []
@@ -1325,8 +1547,8 @@ function OngletComparaison() {
           colIndex += 1
           const celluleBlg = ligne.getCell(colIndex)
 
-          const sageVide = r[p.sageKey] === null || r[p.sageKey] === undefined || r[p.sageKey] === ''
-          const blgVide = r[p.blgKey] === null || r[p.blgKey] === undefined || (Array.isArray(r[p.blgKey]) && (r[p.blgKey] as unknown[]).length === 0)
+          const sageVide = estVide(r[p.sageKey])
+          const blgVide = estVide(r[p.blgKey])
 
           let couleur: string
           if (!p.compareStrict) {
@@ -1334,8 +1556,10 @@ function OngletComparaison() {
           } else if (sageVide || blgVide) {
             couleur = COULEUR_NON_COMPARABLE
           } else {
-            const enEcart = p.enEcart ? p.enEcart(r) : normaliserPourExport(r[p.sageKey]) !== normaliserPourExport(r[p.blgKey])
-            couleur = enEcart ? COULEUR_ECART : COULEUR_OK
+            const resultat: ResultatComparaison = p.comparer
+              ? p.comparer(r)
+              : normaliserPourExport(r[p.sageKey]) === normaliserPourExport(r[p.blgKey]) ? 'ok' : 'ecart'
+            couleur = resultat === 'ok' ? COULEUR_OK : resultat === 'ecart' ? COULEUR_ECART : COULEUR_NON_COMPARABLE
           }
 
           const bordureCommune = { top: { style: 'thin' as const }, bottom: { style: 'thin' as const } }
@@ -1354,9 +1578,9 @@ function OngletComparaison() {
       ws.getCell(`A${ligneLegendeIndex}`).value = 'Légende :'
       ws.getCell(`A${ligneLegendeIndex}`).font = { bold: true }
       const legendes: [string, string][] = [
-        ['Valeurs identiques', COULEUR_OK],
-        ['Écart détecté', COULEUR_ECART],
-        ["Non comparable / donnée manquante / affiché sans vérification", COULEUR_NON_COMPARABLE],
+        ['Valeurs identiques ou équivalentes (règle tolérante du champ)', COULEUR_OK],
+        ['Écart réel détecté', COULEUR_ECART],
+        ['Non comparable / donnée manquante / écart partiel (ex. SIREN identique mais SIRET différent)', COULEUR_NON_COMPARABLE],
       ]
       legendes.forEach(([texte, couleur], i) => {
         const cell = ws.getCell(`A${ligneLegendeIndex + 1 + i}`)
