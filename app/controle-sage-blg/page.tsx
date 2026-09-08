@@ -9,10 +9,13 @@
  *    d'expédition), avec export Excel de l'ensemble des champs.
  *  - BLG : même principe côté BLG uniquement (partner_base_partner via BLG),
  *    pour les tiers déjà appariés avec SAGE.
- *  - Comparaison : logique de contrôle de cohérence SAGE ↔ BLG restaurée
- *    telle quelle (comparatif champ par champ, panneau de mapping manuel,
- *    synchro à la demande), avec export Excel de l'ensemble des champs
- *    comparés SAGE ↔ BLG pour les clients filtrés à l'écran.
+ *  - Comparaison : contrôle de cohérence SAGE ↔ BLG. Tous les tiers sont
+ *    chargés une fois puis évalués côté navigateur avec les règles tolérantes
+ *    (evaluerPaire) : pastilles par champ SAGE (n° + désignation, nb d'écarts
+ *    rouges / oranges) qui filtrent la liste et ajoutent des colonnes SAGE /
+ *    BLG, fenêtre flottante par tiers avec la totalité des champs comparés,
+ *    panneau de mapping manuel, synchro à la demande et export Excel des
+ *    tiers filtrés (même évaluation que l'écran).
  *
  * Les 3 listes de gauche (SAGE / BLG / Comparaison) se naviguent au clavier
  * avec les flèches ↑ / ↓ une fois la liste focus (clic ou tabulation dessus).
@@ -35,6 +38,22 @@
  *    n'étaient jamais comptés comme écarts (alors que marqués "auto" dans
  *    le mapping) a été corrigé côté vue SQL.
  *
+ * MàJ (export Comparaison — règles de comparaison tolérantes) :
+ *  - Qualité et Catégorie AF/GAF ↔ Tags BLG : contrôle réel désormais (vert
+ *    si la chaîne SAGE se retrouve dans les tags BLG, rouge sinon).
+ *  - Adresse / Code postal / Ville regroupés côte à côte. Adresse et Ville
+ *    comparées de façon tolérante (abréviations de voie, accents, tirets,
+ *    "ST" → "SAINT", "CEDEX xx" ignoré, une lettre d'écart tolérée).
+ *  - Téléphone normalisé (+33 / 0033 → 0, ponctuation ignorée).
+ *  - SIRET et TVA intra : rouge si le SIREN (9 chiffres) diffère, orange si
+ *    SIREN identique mais valeur globale différente, vert sinon.
+ *  - Représentant : préfixe agence SAGE absorbé (ARCCASASSUS ⊃ CASASSUS) et
+ *    une lettre d'écart tolérée par mot.
+ *  - Attestation de capacité : vert si la chaîne SAGE se retrouve dans BLG.
+ *  - Interlocuteur ↔ Contact principal : vert dès qu'un nom/prénom est commun.
+ *  Ces règles ne concernent que l'export Excel ; le comparatif à l'écran et
+ *  la vue SQL (champs_en_ecart) restent inchangés.
+ *
  * Le panneau "Comparaison détaillée" et le mapping manuel restent pilotés
  * entièrement par la table champ_mapping_sage_blg : les nouveaux champs
  * bancaires / attestation / catégorie AF-GAF y apparaissent automatiquement,
@@ -46,7 +65,7 @@
  * `npm install xlsx` si ce n'est pas déjà fait dans le projet.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import * as XLSX from 'xlsx'
 import ExcelJS from 'exceljs'
@@ -580,15 +599,6 @@ function DetailRow({ label, value }: { label: string; value: string | null | und
 // Types partagés SAGE ↔ BLG (onglets BLG + Comparaison)
 // ─────────────────────────────────────────────────────────────────────────
 
-type Summary = {
-  total_sage: number
-  apparies: number
-  manquants_blg: number
-  sans_ecart: number
-  avec_ecart: number
-  par_champ: Record<string, number>
-}
-
 type ControleRow = {
   numero_tiers: string
   blg_id_tiers: string | null
@@ -672,22 +682,21 @@ const OPERATEUR_LABELS: Record<Operateur, string> = {
 function nouvelleCondition(): FiltreCondition {
   return { id: Math.random().toString(36).slice(2), cote: 'sage', champ: '', operateur: 'contient', valeur: '' }
 }
-const CHAMP_LABELS: Record<string, string> = {
-  intitule: 'Intitulé', siret: 'SIRET', code_naf: 'Code NAF', code_postal: 'Code postal', ville: 'Ville',
-  representant: 'Représentant', encours: "Encours autorisé", assurance_credit: 'Assurance crédit',
-  famille: 'Famille', frais_facturation: 'Frais de facturation', releve_facture: 'Relevé de facture',
-  type_facture: 'Type de facture', capacite_expiration: 'Capacité expiration',
-  routage_promo: 'Routage promo', facture_email: 'Facture électronique',
-  // Nouveaux champs (banque + attestation)
-  banque_nom: 'Banque (nom)', banque_bban: 'IBAN / RIB', attestation_capacite: 'Attestation de capacité',
-  telephone: 'Téléphone', numero_identifiant: 'Identifiant TVA',
-}
 function formatCellValue(v: unknown): string {
   if (v === null || v === undefined || v === '') return '—'
   if (typeof v === 'boolean') return v ? 'Oui' : 'Non'
   if (Array.isArray(v)) return v.length ? v.map((x) => (typeof x === 'object' ? JSON.stringify(x) : String(x))).join(', ') : '—'
   if (typeof v === 'object') return JSON.stringify(v)
   return String(v)
+}
+
+/** Lien vers la fiche entreprise dans BLG (instance de production "cegeclim").
+ * BLG identifie l'entreprise par son identifiant hexadécimal (blg_id_tiers),
+ * pas par le partner_id numérique — ex.
+ * https://app.blgcloud.com/cegeclim/?app/crm/company/e190ba6f5863e48e051ea093# */
+function lienBlg(r: Pick<ControleRow, 'blg_id_tiers'>): string | null {
+  const id = safeText(r.blg_id_tiers)
+  return id ? `https://app.blgcloud.com/cegeclim/?app/crm/company/${id}#` : null
 }
 
 /** Captures d'écran issues du document Excel de reprise SAGE ↔ BLG, à déposer
@@ -882,10 +891,189 @@ function normaliserPourExport(v: unknown): string {
   return String(v).toUpperCase().trim()
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Règles de comparaison tolérantes pour l'export Comparaison
+// ─────────────────────────────────────────────────────────────────────────
+
+/** Résultat d'une comparaison : 'ok' = vert, 'ecart' = rouge, 'partiel' = orange. */
+type ResultatComparaison = 'ok' | 'ecart' | 'partiel'
+
+/** Retire les accents, passe en majuscules, remplace toute ponctuation
+ * (tirets, apostrophes, virgules, points…) par des espaces. */
+function normaliserTexte(v: unknown): string {
+  if (v === null || v === undefined) return ''
+  const s = Array.isArray(v) ? v.map(String).join(' ') : String(v)
+  return s
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, ' ')
+    .trim()
+}
+
+function motsDe(v: unknown): string[] {
+  return normaliserTexte(v).split(' ').filter(Boolean)
+}
+
+/** Distance de Levenshtein bornée : dès que la distance dépasse `max`, renvoie max+1. */
+function levenshtein(a: string, b: string, max: number): number {
+  if (a === b) return 0
+  if (Math.abs(a.length - b.length) > max) return max + 1
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j)
+  for (let i = 1; i <= a.length; i++) {
+    const cur: number[] = [i]
+    let rowMin = i
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+      if (cur[j] < rowMin) rowMin = cur[j]
+    }
+    if (rowMin > max) return max + 1
+    prev = cur
+  }
+  return prev[b.length]
+}
+
+/** Deux mots sont "proches" si identiques, si l'un contient l'autre (mots ≥ 4
+ * lettres — absorbe le préfixe agence SAGE : ARCCASASSUS ⊃ CASASSUS), ou à
+ * une lettre près (mots ≥ 5 lettres — AYPHASSORHO ≈ AYPHASSORRHO). */
+function motsProches(a: string, b: string): boolean {
+  if (a === b) return true
+  const min = Math.min(a.length, b.length)
+  if (min >= 4 && (a.includes(b) || b.includes(a))) return true
+  if (min >= 5 && levenshtein(a, b, 1) <= 1) return true
+  return false
+}
+
+function motTrouveDans(mot: string, liste: string[]): boolean {
+  return liste.some((m) => motsProches(mot, m))
+}
+
+/** Inclusion de chaîne (espaces ignorés) : la valeur SAGE doit se retrouver
+ * dans la valeur BLG (ou inversement). Sert pour Qualité/Catégorie ↔ Tags et
+ * pour l'attestation de capacité. */
+function comparerInclusion(sage: unknown, blg: unknown): ResultatComparaison {
+  const s = normaliserTexte(sage).replace(/ /g, '')
+  const b = normaliserTexte(blg).replace(/ /g, '')
+  if (!s || !b) return 'partiel'
+  return b.includes(s) || s.includes(b) ? 'ok' : 'ecart'
+}
+
+/** Téléphone : chiffres seuls, +33 / 0033 ramené au 0 national. */
+function normaliserTelephone(v: unknown): string {
+  let d = String(v ?? '').replace(/\D/g, '')
+  if (d.startsWith('0033')) d = '0' + d.slice(4)
+  else if (d.startsWith('33') && d.length === 11) d = '0' + d.slice(2)
+  return d
+}
+function comparerTelephone(sage: unknown, blg: unknown): ResultatComparaison {
+  const s = normaliserTelephone(sage)
+  const b = normaliserTelephone(blg)
+  if (!s || !b) return 'partiel'
+  return s === b ? 'ok' : 'ecart'
+}
+
+/** SIRET : rouge si le SIREN (9 premiers chiffres) diffère, orange si SIREN
+ * identique mais valeur globale différente (ex. BLG ne porte que le SIREN),
+ * vert si strictement identique. */
+function comparerSiret(sage: unknown, blg: unknown): ResultatComparaison {
+  const s = String(sage ?? '').replace(/\D/g, '')
+  const b = String(blg ?? '').replace(/\D/g, '')
+  if (!s || !b) return 'partiel'
+  if (s.slice(0, 9) !== b.slice(0, 9)) return 'ecart'
+  return s === b ? 'ok' : 'partiel'
+}
+
+/** TVA intracommunautaire : même logique sur la clé "FR + 2 chiffres + SIREN"
+ * (13 caractères) — SAGE ajoute parfois le reste du SIRET derrière. */
+function comparerTva(sage: unknown, blg: unknown): ResultatComparaison {
+  const s = normaliserTexte(sage).replace(/ /g, '')
+  const b = normaliserTexte(blg).replace(/ /g, '')
+  if (!s || !b) return 'partiel'
+  if (s.slice(0, 13) !== b.slice(0, 13)) return 'ecart'
+  return s === b ? 'ok' : 'partiel'
+}
+
+/** Ville : accents/tirets ignorés, "ST" → "SAINT", "CEDEX xx" supprimé. Vert
+ * si identiques, si tous les mots de la plus courte se retrouvent dans l'autre
+ * (NANTES ⊂ NANTES CEDEX 01, BOULAZAC ⊂ BOULAZAC ISLE MANOIRE) ou à une
+ * lettre près ; rouge sinon (VANNES ≠ NANTES, MIOS ≠ BIGANOS). */
+function normaliserVille(v: unknown): string {
+  return normaliserTexte(v)
+    .replace(/\bCEDEX\b.*$/, '')
+    .replace(/\bSTE\b/g, 'SAINTE')
+    .replace(/\bST\b/g, 'SAINT')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+function comparerVille(sage: unknown, blg: unknown): ResultatComparaison {
+  const s = normaliserVille(sage)
+  const b = normaliserVille(blg)
+  if (!s || !b) return 'partiel'
+  if (s === b) return 'ok'
+  const ms = s.split(' ')
+  const mb = b.split(' ')
+  const [court, long] = ms.length <= mb.length ? [ms, mb] : [mb, ms]
+  if (court.every((m) => motTrouveDans(m, long))) return 'ok'
+  if (levenshtein(s.replace(/ /g, ''), b.replace(/ /g, ''), 1) <= 1) return 'ok'
+  return 'ecart'
+}
+
+/** Adresse : côté BLG l'adresse concatène "voie, CP Ville, Pays" — on ne garde
+ * que la partie voie. Abréviations de voie développées, mots vides ignorés.
+ * Vert si le numéro de voie concorde (quand présent des deux côtés) et qu'au
+ * moins 60 % des mots du libellé le plus court se retrouvent dans l'autre (à
+ * une lettre près) ; rouge sinon. */
+const ABREVIATIONS_VOIE: Record<string, string> = {
+  ALL: 'ALLEE', AV: 'AVENUE', AVE: 'AVENUE', BD: 'BOULEVARD', BLD: 'BOULEVARD', BLVD: 'BOULEVARD',
+  CHEM: 'CHEMIN', CH: 'CHEMIN', IMP: 'IMPASSE', RTE: 'ROUTE', PL: 'PLACE', R: 'RUE',
+  ST: 'SAINT', STE: 'SAINTE', BAT: 'BATIMENT', RES: 'RESIDENCE', LOT: 'LOTISSEMENT',
+  FG: 'FAUBOURG', SQ: 'SQUARE', CRS: 'COURS', QU: 'QUAI', PROM: 'PROMENADE',
+}
+const MOTS_VIDES_ADRESSE = new Set(['DE', 'DU', 'DES', 'LA', 'LE', 'LES', 'L', 'D', 'ET', 'A', 'AU', 'AUX', 'FRANCE'])
+function motsAdresse(v: unknown): string[] {
+  let s = String(v ?? '')
+  // Coupe avant ", 33130 Bègles, France" (CP à 5 chiffres après une virgule).
+  s = s.split(/,\s*\d{5}\b/)[0]
+  return motsDe(s)
+    .map((m) => ABREVIATIONS_VOIE[m] || m)
+    .filter((m) => !MOTS_VIDES_ADRESSE.has(m))
+}
+function comparerAdresse(sage: unknown, blg: unknown): ResultatComparaison {
+  const ms = motsAdresse(sage)
+  const mb = motsAdresse(blg)
+  if (ms.length === 0 || mb.length === 0) return 'partiel'
+  const numS = ms.find((m) => /^\d+[A-Z]?$/.test(m))
+  const numB = mb.find((m) => /^\d+[A-Z]?$/.test(m))
+  if (numS && numB && numS !== numB) return 'ecart'
+  const [court, long] = ms.length <= mb.length ? [ms, mb] : [mb, ms]
+  const trouves = court.filter((m) => motTrouveDans(m, long)).length
+  return trouves / court.length >= 0.6 ? 'ok' : 'ecart'
+}
+
+/** Personnes. SAGE = "<code agence><NOM> Prénom" (ex. "ARCCASASSUS Rémy"),
+ * BLG = "Prénom NOM". Seuls les mots de ≥ 3 lettres comptent.
+ * - tous=true (représentant) : chaque mot BLG doit se retrouver dans SAGE
+ *   (préfixe agence absorbé, une lettre d'écart tolérée). "MPEYRE Philippe"
+ *   vs "Christophe MICHALUC" → rouge ; "AAMENA Damien" vs "Damien MENA" → vert.
+ * - tous=false (contact principal) : un seul mot commun suffit
+ *   ("FARDEGUE/ DANQUIGNY" vs "Charles DANQUIGNY" → vert). */
+function comparerPersonne(sage: unknown, blg: unknown, tous: boolean): ResultatComparaison {
+  const ms = motsDe(sage).filter((m) => m.length >= 3)
+  const mb = motsDe(blg).filter((m) => m.length >= 3)
+  if (ms.length === 0 || mb.length === 0) return 'partiel'
+  const proche = (m: string) => motTrouveDans(m, ms)
+  if (tous) return mb.every(proche) ? 'ok' : 'ecart'
+  return mb.some(proche) ? 'ok' : 'ecart'
+}
+
 /** Une paire de colonnes SAGE ↔ BLG comparables, avec le numéro de mapping du
  * document Excel (pour l'en-tête) et le mode de comparaison :
- * - compareStrict=true  : vert si identique, rouge si écart, orange si une des deux valeurs manque
- * - compareStrict=false : toujours orange (affichage seul, non vérifié — ex. Qualité/tags, Adresse) */
+ * - compareStrict=false : toujours orange (affichage seul, non vérifié — ex. Agence/Division)
+ * - compareStrict=true sans `comparer` : vert si identique (trim+upper), rouge sinon
+ * - compareStrict=true avec `comparer` : règle tolérante spécifique, qui peut
+ *   aussi renvoyer 'partiel' (orange, ex. SIREN identique mais SIRET différent)
+ * Dans tous les cas, une valeur manquante d'un côté donne orange. */
 type PaireExport = {
   numeroSage: number | null
   labelSage: string
@@ -894,57 +1082,80 @@ type PaireExport = {
   labelBlg: string
   blgKey: keyof ControleRow
   compareStrict: boolean
-  enEcart?: (r: ControleRow) => boolean
+  comparer?: (r: ControleRow) => ResultatComparaison
 }
 
 const EXPORT_PAIRES_COMPARAISON: PaireExport[] = [
   { numeroSage: 2, labelSage: 'Intitulé', sageKey: 'sage_intitule', numeroBlg: '2', labelBlg: 'Raison sociale', blgKey: 'blg_intitule', compareStrict: true },
-  { numeroSage: 3, labelSage: 'Qualité', sageKey: 'sage_qualite', numeroBlg: '22', labelBlg: 'Tags', blgKey: 'blg_tags', compareStrict: false },
-  { numeroSage: 5, labelSage: 'Adresse', sageKey: 'sage_adresse', numeroBlg: '8', labelBlg: 'Adresse', blgKey: 'blg_adresse', compareStrict: false },
-  { numeroSage: 6, labelSage: 'Téléphone', sageKey: 'sage_telephone', numeroBlg: '9', labelBlg: 'Standard', blgKey: 'blg_telephone', compareStrict: true },
-  { numeroSage: 8, labelSage: 'Siret', sageKey: 'sage_siret', numeroBlg: '6', labelBlg: 'Numéro entreprise', blgKey: 'blg_siret', compareStrict: true },
-  { numeroSage: 9, labelSage: 'Identifiant TVA', sageKey: 'sage_numero_identifiant', numeroBlg: '7', labelBlg: 'TVA intracommunautaire', blgKey: 'blg_tva_intra', compareStrict: true },
-  { numeroSage: 10, labelSage: 'Code NAF', sageKey: 'sage_code_naf', numeroBlg: null, labelBlg: 'Code NAF', blgKey: 'blg_code_naf', compareStrict: true },
+  {
+    numeroSage: 3, labelSage: 'Qualité', sageKey: 'sage_qualite', numeroBlg: '22', labelBlg: 'Tags', blgKey: 'blg_tags', compareStrict: true,
+    comparer: (r) => comparerInclusion(r.sage_qualite, r.blg_tags),
+  },
+  // Adresse / Code postal / Ville regroupés côte à côte
+  {
+    numeroSage: 5, labelSage: 'Adresse', sageKey: 'sage_adresse', numeroBlg: '8', labelBlg: 'Adresse', blgKey: 'blg_adresse', compareStrict: true,
+    comparer: (r) => comparerAdresse(r.sage_adresse, r.blg_adresse),
+  },
   { numeroSage: null, labelSage: 'Code postal', sageKey: 'sage_code_postal', numeroBlg: null, labelBlg: 'Code postal', blgKey: 'blg_code_postal', compareStrict: true },
-  { numeroSage: null, labelSage: 'Ville', sageKey: 'sage_ville', numeroBlg: null, labelBlg: 'Ville', blgKey: 'blg_ville', compareStrict: true },
+  {
+    numeroSage: null, labelSage: 'Ville', sageKey: 'sage_ville', numeroBlg: null, labelBlg: 'Ville', blgKey: 'blg_ville', compareStrict: true,
+    comparer: (r) => comparerVille(r.sage_ville, r.blg_ville),
+  },
+  {
+    numeroSage: 6, labelSage: 'Téléphone', sageKey: 'sage_telephone', numeroBlg: '9', labelBlg: 'Standard', blgKey: 'blg_telephone', compareStrict: true,
+    comparer: (r) => comparerTelephone(r.sage_telephone, r.blg_telephone),
+  },
+  {
+    numeroSage: 8, labelSage: 'Siret', sageKey: 'sage_siret', numeroBlg: '6', labelBlg: 'Numéro entreprise', blgKey: 'blg_siret', compareStrict: true,
+    comparer: (r) => comparerSiret(r.sage_siret, r.blg_siret),
+  },
+  {
+    numeroSage: 9, labelSage: 'Identifiant TVA', sageKey: 'sage_numero_identifiant', numeroBlg: '7', labelBlg: 'TVA intracommunautaire', blgKey: 'blg_tva_intra', compareStrict: true,
+    comparer: (r) => comparerTva(r.sage_numero_identifiant, r.blg_tva_intra),
+  },
+  { numeroSage: 10, labelSage: 'Code NAF', sageKey: 'sage_code_naf', numeroBlg: null, labelBlg: 'Code NAF', blgKey: 'blg_code_naf', compareStrict: true },
   {
     numeroSage: 11, labelSage: 'Représentant', sageKey: 'sage_representant', numeroBlg: '24', labelBlg: 'Commercial', blgKey: 'blg_commercial', compareStrict: true,
-    enEcart: (r) => {
-      const prenom = normaliserPourExport(r.sage_representant).split(/\s+/)[0]
-      const commercial = normaliserPourExport(r.blg_commercial)
-      if (!prenom || !commercial) return false
-      return !commercial.includes(prenom)
-    },
+    comparer: (r) => comparerPersonne(r.sage_representant, r.blg_commercial, true),
   },
   { numeroSage: 12, labelSage: 'Banque (nom)', sageKey: 'sage_banque', numeroBlg: '24', labelBlg: 'Banque (nom)', blgKey: 'blg_banque', compareStrict: true },
   {
     numeroSage: 15, labelSage: 'IBAN / RIB', sageKey: 'sage_banque_bban', numeroBlg: '22', labelBlg: 'IBAN', blgKey: 'blg_iban', compareStrict: true,
-    enEcart: (r) => {
-      const bban = normaliserPourExport(r.sage_banque_bban)
-      const iban = normaliserPourExport(r.blg_iban)
-      if (!bban || !iban) return false
-      return bban !== iban.slice(-23)
+    comparer: (r) => {
+      const bban = normaliserPourExport(r.sage_banque_bban).replace(/\s+/g, '')
+      const iban = normaliserPourExport(r.blg_iban).replace(/\s+/g, '')
+      if (!bban || !iban) return 'partiel'
+      return bban === iban.slice(-23) ? 'ok' : 'ecart'
     },
   },
   { numeroSage: 18, labelSage: 'Capacité expiration', sageKey: 'sage_capacite_expiration', numeroBlg: '27', labelBlg: 'Capacité expiration', blgKey: 'blg_capacite_expiration', compareStrict: true },
-  { numeroSage: 22, labelSage: 'Attestation de capacité', sageKey: 'sage_attestation_capacite', numeroBlg: '26', labelBlg: 'Attestation capacité', blgKey: 'blg_attestation_capacite', compareStrict: true },
+  {
+    numeroSage: 22, labelSage: 'Attestation de capacité', sageKey: 'sage_attestation_capacite', numeroBlg: '26', labelBlg: 'Attestation capacité', blgKey: 'blg_attestation_capacite', compareStrict: true,
+    comparer: (r) => comparerInclusion(r.sage_attestation_capacite, r.blg_attestation_capacite),
+  },
   { numeroSage: 19, labelSage: 'Facture @', sageKey: 'sage_facture_email', numeroBlg: '32', labelBlg: 'Facture électronique', blgKey: 'blg_facture_electronique', compareStrict: true },
   { numeroSage: 20, labelSage: 'Relevé de facture', sageKey: 'sage_releve_facture', numeroBlg: '29', labelBlg: 'Relevé de facture', blgKey: 'blg_releve_facture', compareStrict: true },
   { numeroSage: 21, labelSage: 'Famille', sageKey: 'sage_famille', numeroBlg: '30', labelBlg: 'Famille', blgKey: 'blg_famille', compareStrict: true },
   { numeroSage: 23, labelSage: 'Frais facturation', sageKey: 'sage_frais_facturation', numeroBlg: '28', labelBlg: 'Frais de facturation', blgKey: 'blg_frais_facturation', compareStrict: true },
   { numeroSage: 24, labelSage: 'Routage promo', sageKey: 'sage_routage_promo', numeroBlg: '31', labelBlg: 'Routage promo', blgKey: 'blg_routage_promo', compareStrict: true },
   { numeroSage: 25, labelSage: 'Type de facture', sageKey: 'sage_type_facture', numeroBlg: '33', labelBlg: 'Type de facture', blgKey: 'blg_type_facture', compareStrict: true },
-  { numeroSage: 26, labelSage: 'Categorie AF GAF', sageKey: 'sage_categorie_af_gaf', numeroBlg: '22', labelBlg: 'Tags', blgKey: 'blg_tags', compareStrict: false },
+  {
+    numeroSage: 26, labelSage: 'Categorie AF GAF', sageKey: 'sage_categorie_af_gaf', numeroBlg: '22', labelBlg: 'Tags', blgKey: 'blg_tags', compareStrict: true,
+    comparer: (r) => comparerInclusion(r.sage_categorie_af_gaf, r.blg_tags),
+  },
   {
     numeroSage: 28, labelSage: 'Encours autorisé', sageKey: 'sage_encours', numeroBlg: '18', labelBlg: "Limite d'encours", blgKey: 'blg_encours', compareStrict: true,
-    enEcart: (r) => r.sage_encours !== null && r.blg_encours !== null && Number(r.sage_encours) !== Number(r.blg_encours),
+    comparer: (r) => (r.sage_encours !== null && r.blg_encours !== null && Number(r.sage_encours) !== Number(r.blg_encours) ? 'ecart' : 'ok'),
   },
   {
     numeroSage: 29, labelSage: 'Assurance crédit', sageKey: 'sage_assurance_credit', numeroBlg: '19', labelBlg: "Montant d'assurance crédit", blgKey: 'blg_assurance_credit', compareStrict: true,
-    enEcart: (r) => r.sage_assurance_credit !== null && r.blg_assurance_credit !== null && Number(r.sage_assurance_credit) !== Number(r.blg_assurance_credit),
+    comparer: (r) => (r.sage_assurance_credit !== null && r.blg_assurance_credit !== null && Number(r.sage_assurance_credit) !== Number(r.blg_assurance_credit) ? 'ecart' : 'ok'),
   },
   { numeroSage: 30, labelSage: 'Agence de rattachement', sageKey: 'sage_agence_rattachement', numeroBlg: '23', labelBlg: 'Division (informatif, pas d\'équivalence confirmée)', blgKey: 'blg_division', compareStrict: false },
-  { numeroSage: 37, labelSage: 'Interlocuteur', sageKey: 'sage_contact', numeroBlg: null, labelBlg: 'Contact principal', blgKey: 'blg_contact_principal', compareStrict: false },
+  {
+    numeroSage: 37, labelSage: 'Interlocuteur', sageKey: 'sage_contact', numeroBlg: null, labelBlg: 'Contact principal', blgKey: 'blg_contact_principal', compareStrict: true,
+    comparer: (r) => comparerPersonne(r.sage_contact, r.blg_contact_principal, false),
+  },
 ]
 
 /** Couleurs de remplissage ExcelJS (ARGB) pour l'export Comparaison. */
@@ -1073,8 +1284,8 @@ function OngletBlg() {
                   <div className="font-mono text-[12px] font-bold text-[#8A8474]">{selected.numero_tiers}</div>
                   <div className="text-[15px] font-bold text-[#111820]">{selected.blg_intitule || '—'}</div>
                 </div>
-                {selected.blg_partner_id && (
-                  <a href={`https://app.blgcloud.com/cegeclim-test/?app/crm/company/${selected.blg_partner_id}#`} target="_blank" rel="noopener noreferrer"
+                {lienBlg(selected) && (
+                  <a href={lienBlg(selected) as string} target="_blank" rel="noopener noreferrer"
                     className="text-[12px] font-semibold text-[#B4761A] hover:underline">Ouvrir dans BLG ↗</a>
                 )}
               </div>
@@ -1095,29 +1306,163 @@ function OngletBlg() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Onglet Comparaison — logique de contrôle SAGE ↔ BLG restaurée telle quelle
+// Onglet Comparaison — contrôle SAGE ↔ BLG piloté par les règles tolérantes
 // ─────────────────────────────────────────────────────────────────────────
+//
+// Fonctionnement :
+//  - l'ensemble des tiers correspondant aux filtres serveur (statut, tiers en
+//    sommeil, conditions avancées) est chargé une fois via la RPC paginée, puis
+//    TOUT est calculé côté navigateur avec `evaluerPaire` : pastilles par champ
+//    (nb d'écarts rouges / oranges), KPI, liste filtrée, fenêtre flottante par
+//    client et export Excel partagent exactement la même évaluation ;
+//  - le pavé "Champs contrôlés" liste tous les champs SAGE de
+//    EXPORT_PAIRES_COMPARAISON (n° + désignation SAGE). Un clic sur une pastille
+//    filtre la liste sur les tiers concernés et ajoute une paire de colonnes
+//    SAGE / BLG ; plusieurs pastilles = plusieurs paires de colonnes ;
+//  - un clic sur un tiers ouvre une fenêtre flottante avec la totalité des
+//    champs comparés et leur résultat.
+
+/** Résultat d'évaluation d'une paire pour un tiers donné. Les valeurs hors
+ * ResultatComparaison ne sont pas comptées comme écart :
+ *  - 'vide'      : aucune valeur ni côté SAGE ni côté BLG
+ *  - 'affichage' : paire affichée sans comparaison (compareStrict=false)
+ *  - 'manquant'  : tiers sans correspondance BLG */
+type Evaluation = ResultatComparaison | 'vide' | 'affichage' | 'manquant'
+
+function estVide(v: unknown): boolean {
+  return v === null || v === undefined || v === '' || (Array.isArray(v) && v.length === 0)
+}
+
+function evaluerPaire(p: PaireExport, r: ControleRow): Evaluation {
+  if (r.statut_appariement !== 'apparie') return 'manquant'
+  const sv = r[p.sageKey]
+  const bv = r[p.blgKey]
+  const sVide = estVide(sv)
+  const bVide = estVide(bv)
+  if (sVide && bVide) return 'vide'
+  if (!p.compareStrict) return 'affichage'
+  if (sVide || bVide) return 'partiel'
+  if (p.comparer) return p.comparer(r)
+  return normaliserPourExport(sv) === normaliserPourExport(bv) ? 'ok' : 'ecart'
+}
+
+type EvaluationsTiers = Record<string, Evaluation> // clé = sageKey de la paire
+
+/** Nombre max de lignes rendues dans le tableau (le jeu complet reste chargé pour les compteurs et l'export). */
+const LIMITE_AFFICHAGE = 500
+
+const EVAL_STYLE: Record<Evaluation, { cellule: string; libelle: string; argb: string }> = {
+  ok: { cellule: 'bg-emerald-50 text-emerald-800', libelle: 'Identique', argb: COULEUR_OK },
+  ecart: { cellule: 'bg-red-50 font-semibold text-red-800', libelle: 'Écart', argb: COULEUR_ECART },
+  partiel: { cellule: 'bg-orange-50 text-orange-800', libelle: 'Partiel / manquant', argb: COULEUR_NON_COMPARABLE },
+  affichage: { cellule: 'bg-orange-50/50 text-[#3A362E]', libelle: 'Affiché, non comparé', argb: COULEUR_NON_COMPARABLE },
+  vide: { cellule: 'text-[#B3AD9E]', libelle: 'Vide des deux côtés', argb: COULEUR_NON_COMPARABLE },
+  manquant: { cellule: 'text-[#B3AD9E]', libelle: 'Manquant BLG', argb: COULEUR_NON_COMPARABLE },
+}
+
+function compterEcarts(ev: EvaluationsTiers | undefined) {
+  let rouge = 0
+  let orange = 0
+  if (ev) Object.values(ev).forEach((e) => { if (e === 'ecart') rouge += 1; else if (e === 'partiel') orange += 1 })
+  return { rouge, orange }
+}
+
+/** Fenêtre flottante : totalité des champs comparés pour un tiers. */
+function ClientComparaisonModal({ row, evals, onClose }: { row: ControleRow; evals: EvaluationsTiers; onClose: () => void }) {
+  const { rouge, orange } = compterEcarts(evals)
+  const lien = lienBlg(row)
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start justify-between border-b border-[#E5E1D8] px-5 py-4">
+          <div>
+            <div className="font-mono text-[12px] font-bold text-[#8A8474]">{row.numero_tiers}</div>
+            <div className="text-[16px] font-bold text-[#111820]">{row.sage_intitule || row.blg_intitule || '—'}</div>
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px] font-bold">
+              {row.statut_appariement === 'manquant_blg' ? (
+                <span className="rounded-full bg-red-50 px-2 py-0.5 text-red-700">Manquant BLG</span>
+              ) : (
+                <>
+                  <span className="rounded-full bg-red-100 px-2 py-0.5 text-red-700">{rouge} écart{rouge > 1 ? 's' : ''}</span>
+                  <span className="rounded-full bg-orange-100 px-2 py-0.5 text-orange-700">{orange} partiel{orange > 1 ? 's' : ''}</span>
+                  {rouge === 0 && orange === 0 && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-emerald-700">OK</span>}
+                </>
+              )}
+              {row.sage_mise_en_sommeil && <span className="rounded-full bg-[#F4F3F0] px-2 py-0.5 text-[#8A8474]">En sommeil (SAGE)</span>}
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            {lien && (
+              <a href={lien} target="_blank" rel="noopener noreferrer" className="text-[12px] font-semibold text-[#B4761A] hover:underline">Ouvrir dans BLG ↗</a>
+            )}
+            <button type="button" onClick={onClose} className="rounded-lg px-2 py-1 text-[13px] font-bold text-[#8A8474] hover:bg-[#F4F3F0] hover:text-[#111820]">✕ Fermer</button>
+          </div>
+        </div>
+
+        <div className="overflow-auto p-5">
+          <table className="w-full text-left text-[13px]">
+            <thead className="sticky top-0 bg-white text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">
+              <tr className="border-b border-[#E5E1D8]">
+                <th className="py-2 pr-2">N°</th>
+                <th className="py-2 pr-2">Champ SAGE</th>
+                <th className="py-2 pr-2">Valeur SAGE</th>
+                <th className="py-2 pr-2">N°</th>
+                <th className="py-2 pr-2">Champ BLG</th>
+                <th className="py-2 pr-2">Valeur BLG</th>
+                <th className="py-2">Résultat</th>
+              </tr>
+            </thead>
+            <tbody>
+              {EXPORT_PAIRES_COMPARAISON.map((p) => {
+                const ev = evals[p.sageKey] ?? 'vide'
+                const st = EVAL_STYLE[ev]
+                return (
+                  <tr key={p.sageKey} className={`border-b border-[#F4F3F0] align-top ${ev === 'ecart' ? 'bg-red-50/60' : ev === 'partiel' ? 'bg-orange-50/60' : ''}`}>
+                    <td className="py-1.5 pr-2 font-mono text-[11px] text-[#B3AD9E]">{p.numeroSage ?? '—'}</td>
+                    <td className="py-1.5 pr-2 font-semibold text-[#3A362E]">{p.labelSage}</td>
+                    <td className={`py-1.5 pr-2 ${ev === 'ecart' ? 'font-bold text-red-800' : 'text-[#111820]'}`}>{formatCellValue(row[p.sageKey])}</td>
+                    <td className="py-1.5 pr-2 font-mono text-[11px] text-[#B3AD9E]">{p.numeroBlg ?? '—'}</td>
+                    <td className="py-1.5 pr-2 font-semibold text-[#3A362E]">{p.labelBlg}</td>
+                    <td className={`py-1.5 pr-2 ${ev === 'ecart' ? 'font-bold text-red-800' : 'text-[#111820]'}`}>{formatCellValue(row[p.blgKey])}</td>
+                    <td className="py-1.5"><span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${st.cellule}`}>{st.libelle}</span></td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+
+          <div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-1 border-t border-[#E5E1D8] pt-3 text-[12px] md:grid-cols-3">
+            <div><span className="font-semibold text-[#3A362E]">Contacts BLG :</span> <span className="text-[#111820]">{formatCellValue(row.blg_contacts_resume)}</span></div>
+            <div><span className="font-semibold text-[#3A362E]">Abrégé / nom court :</span> <span className="text-[#111820]">{formatCellValue(row.sage_abrege)} / {formatCellValue(row.blg_nom_court)}</span></div>
+            <div><span className="font-semibold text-[#3A362E]">Dernière MàJ :</span> <span className="text-[#111820]">SAGE {formatCellValue(row.sage_updated_at)} · BLG {formatCellValue(row.blg_last_update)}</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 function OngletComparaison() {
   const [domaine, setDomaine] = useState<Domaine>('client')
-  const [summary, setSummary] = useState<Summary | null>(null)
-  const [rows, setRows] = useState<ControleRow[]>([])
+  const [toutes, setToutes] = useState<ControleRow[]>([])
   const [loading, setLoading] = useState(true)
-  const [loadingSummary, setLoadingSummary] = useState(true)
+  const [loadProgress, setLoadProgress] = useState(0)
   const [error, setError] = useState<string | null>(null)
 
-  const [search, setSearch] = useState('')
+  // Filtres serveur (rechargement) et filtres client (instantanés)
   const [statutFilter, setStatutFilter] = useState<'tous' | 'apparie' | 'manquant_blg'>('tous')
-  const [onlyEcarts, setOnlyEcarts] = useState(false)
-  const [champFilter, setChampFilter] = useState<string | null>(null)
   const [exclureSommeil, setExclureSommeil] = useState(true)
   const [conditions, setConditions] = useState<FiltreCondition[]>([])
   const [logiqueConditions, setLogiqueConditions] = useState<'et' | 'ou'>('et')
+  const [search, setSearch] = useState('')
+  const [onlyEcarts, setOnlyEcarts] = useState(false)
 
-  const [selected, setSelected] = useState<ControleRow | null>(null)
-  const [selectedSageFull, setSelectedSageFull] = useState<Record<string, unknown>>({})
-  const [selectedBlgFull, setSelectedBlgFull] = useState<Record<string, unknown>>({})
-  const [loadingSelected, setLoadingSelected] = useState(false)
+  // Pastilles de champs sélectionnées (clé = sageKey) et combinaison
+  const [champsSelectionnes, setChampsSelectionnes] = useState<string[]>([])
+  const [combinaisonChamps, setCombinaisonChamps] = useState<'ou' | 'et'>('ou')
+
+  const [ligneActive, setLigneActive] = useState<ControleRow | null>(null)
+  const [clientOuvert, setClientOuvert] = useState<ControleRow | null>(null)
 
   const [showMapping, setShowMapping] = useState(false)
   const [inventaire, setInventaire] = useState<ChampInventaire[]>([])
@@ -1130,10 +1475,10 @@ function OngletComparaison() {
   const [showSyncLog, setShowSyncLog] = useState(false)
 
   const [exportEnCours, setExportEnCours] = useState(false)
-  const [exportProgress, setExportProgress] = useState<{ done: number } | null>(null)
   const [showInfoModal, setShowInfoModal] = useState(false)
 
   const listRefs = useRef<Record<number, HTMLTableRowElement | null>>({})
+  const chargementId = useRef(0)
 
   const conditionsValides = useMemo(
     () => conditions.filter((c) => c.champ && (c.operateur === 'est_vide' || c.operateur === 'non_vide' || c.valeur.trim() !== '')),
@@ -1141,23 +1486,7 @@ function OngletComparaison() {
   )
 
   useEffect(() => { void loadMappingPanel() }, [])
-  useEffect(() => { void loadSummary(); void loadRows() }, [search, statutFilter, onlyEcarts, champFilter, exclureSommeil, conditionsValides, logiqueConditions]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!selected || selected.statut_appariement !== 'apparie' || !selected.blg_partner_id) {
-      setSelectedSageFull({}); setSelectedBlgFull({})
-      return
-    }
-    setLoadingSelected(true)
-    Promise.all([
-      supabase.rpc('get_tiers_sage_full', { p_numero: selected.numero_tiers }),
-      supabase.rpc('get_tiers_blg_full', { p_partner_id: selected.blg_partner_id }),
-    ]).then(([{ data: sage }, { data: blg }]) => {
-      setSelectedSageFull((sage as Record<string, unknown>) || {})
-      setSelectedBlgFull((blg as Record<string, unknown>) || {})
-      setLoadingSelected(false)
-    })
-  }, [selected])
+  useEffect(() => { void chargerToutes() }, [statutFilter, exclureSommeil, conditionsValides, logiqueConditions]) // eslint-disable-line react-hooks/exhaustive-deps
 
   function filtreParams() {
     return {
@@ -1167,29 +1496,39 @@ function OngletComparaison() {
     }
   }
 
-  async function loadSummary() {
-    setLoadingSummary(true)
-    const { data, error: err } = await supabase.rpc('get_controle_tiers_summary', {
-      p_statut: statutFilter === 'tous' ? null : statutFilter,
-      p_only_ecarts: onlyEcarts, p_champ: champFilter, p_search: search.trim() || null,
-      ...filtreParams(),
-    })
-    if (err) setError(err.message)
-    else setSummary(Array.isArray(data) ? data[0] : data)
-    setLoadingSummary(false)
-  }
-
-  async function loadRows() {
+  /** Charge TOUS les tiers correspondant aux filtres serveur (paginé par 500).
+   * La recherche texte et les pastilles sont ensuite appliquées côté client. */
+  async function chargerToutes() {
+    const id = ++chargementId.current
     setLoading(true)
-    const { data, error: err } = await supabase.rpc('get_controle_tiers_sage_blg', {
-      p_statut: statutFilter === 'tous' ? null : statutFilter,
-      p_only_ecarts: onlyEcarts, p_champ: champFilter, p_search: search.trim() || null,
-      p_limit: 300, p_offset: 0,
-      ...filtreParams(),
-    })
-    if (err) setError(err.message)
-    else { setRows((data || []) as ControleRow[]); setError(null) }
-    setLoading(false)
+    setLoadProgress(0)
+    setError(null)
+    try {
+      const acc: ControleRow[] = []
+      let offset = 0
+      const pageSize = 500
+      while (true) {
+        const { data, error: err } = await supabase.rpc('get_controle_tiers_sage_blg', {
+          p_statut: statutFilter === 'tous' ? null : statutFilter,
+          p_only_ecarts: false, p_champ: null, p_search: null,
+          p_limit: pageSize, p_offset: offset,
+          ...filtreParams(),
+        })
+        if (id !== chargementId.current) return
+        if (err) throw err
+        const batch = (data || []) as ControleRow[]
+        acc.push(...batch)
+        setLoadProgress(acc.length)
+        if (batch.length < pageSize) break
+        offset += pageSize
+      }
+      setToutes(acc)
+      setLigneActive(null)
+    } catch (e) {
+      if (id === chargementId.current) setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      if (id === chargementId.current) setLoading(false)
+    }
   }
 
   async function loadMappingPanel() {
@@ -1203,26 +1542,8 @@ function OngletComparaison() {
     setLoadingMapping(false)
   }
 
-  function toggleMappingPanel() { setShowMapping((v) => !v) }
-
   const blgInventaire = useMemo(() => inventaire.filter((c) => c.cote === 'blg'), [inventaire])
   const sageInventaire = useMemo(() => inventaire.filter((c) => c.cote === 'sage'), [inventaire])
-
-  function valuesDiffer(a: unknown, b: unknown): boolean {
-    const na = normalizeForCompare(a)
-    const nb = normalizeForCompare(b)
-    if (na === '' || nb === '') return false
-    return na !== nb
-  }
-  function normalizeForCompare(v: unknown): string {
-    if (v === null || v === undefined) return ''
-    if (typeof v === 'boolean') return v ? 'oui' : 'non'
-    if (Array.isArray(v)) return v.map(String).join(',').toUpperCase().replace(/\s+/g, ' ').trim()
-    return String(v).toUpperCase().replace(/\s+/g, ' ').trim()
-  }
-
-  const mappedFields = useMemo(() => mapping.filter((m) => m.champ_blg), [mapping])
-  const unmappedFields = useMemo(() => mapping.filter((m) => !m.champ_blg), [mapping])
 
   async function lancerSynchro() {
     setSyncLoading(true)
@@ -1242,48 +1563,85 @@ function OngletComparaison() {
     const { data } = await supabase.rpc('get_last_sync_status')
     setSyncLog((data || []) as SyncLogEntry[])
     setShowSyncLog(true)
-    void loadSummary()
-    void loadRows()
+    void chargerToutes()
   }
 
-  /** Export Excel : rapatrie TOUTES les lignes correspondant aux filtres
-   * actuels de l'onglet Comparaison (statut, écarts, champ, recherche,
-   * conditions avancées), paginé par 500 via la même RPC que la liste, puis
-   * génère un .xlsx via ExcelJS (nécessaire pour les couleurs de cellule,
-   * non supportées par le paquet xlsx/SheetJS utilisé sur l'onglet SAGE) :
-   * - chaque paire de colonnes SAGE ↔ BLG comparables est encadrée (bordure
-   *   + en-tête bleu-gris distinct des colonnes simples) et porte son numéro
-   *   de mapping du document Excel entre parenthèses ;
-   * - vert clair = valeurs identiques, rouge clair = écart, orange clair =
-   *   non vérifiable (donnée manquante d'un côté) ou champ affiché sans
-   *   comparaison stricte (ex. Qualité/tags, Adresse). */
+  // ── Évaluation de toutes les paires pour tous les tiers (une seule fois par chargement)
+  const evaluations = useMemo(() => {
+    const m = new Map<string, EvaluationsTiers>()
+    toutes.forEach((r) => {
+      const ev: EvaluationsTiers = {}
+      EXPORT_PAIRES_COMPARAISON.forEach((p) => { ev[p.sageKey] = evaluerPaire(p, r) })
+      m.set(r.numero_tiers, ev)
+    })
+    return m
+  }, [toutes])
+
+  const statsChamps = useMemo(() => {
+    const s: Record<string, { rouge: number; orange: number }> = {}
+    EXPORT_PAIRES_COMPARAISON.forEach((p) => { s[p.sageKey] = { rouge: 0, orange: 0 } })
+    evaluations.forEach((ev) => {
+      Object.entries(ev).forEach(([k, e]) => { if (e === 'ecart') s[k].rouge += 1; else if (e === 'partiel') s[k].orange += 1 })
+    })
+    return s
+  }, [evaluations])
+
+  const kpis = useMemo(() => {
+    let apparies = 0, manquants = 0, sansEcart = 0, avecEcart = 0
+    toutes.forEach((r) => {
+      if (r.statut_appariement !== 'apparie') { manquants += 1; return }
+      apparies += 1
+      const { rouge } = compterEcarts(evaluations.get(r.numero_tiers))
+      if (rouge > 0) avecEcart += 1; else sansEcart += 1
+    })
+    return { total: toutes.length, apparies, manquants, sansEcart, avecEcart }
+  }, [toutes, evaluations])
+
+  const pairesSelectionnees = useMemo(
+    () => EXPORT_PAIRES_COMPARAISON.filter((p) => champsSelectionnes.includes(p.sageKey)),
+    [champsSelectionnes]
+  )
+
+  const rowsFiltrees = useMemo(() => {
+    const term = search.trim().toUpperCase()
+    return toutes.filter((r) => {
+      if (term && !(r.numero_tiers.toUpperCase().includes(term) || (r.sage_intitule || '').toUpperCase().includes(term) || (r.blg_intitule || '').toUpperCase().includes(term))) return false
+      const ev = evaluations.get(r.numero_tiers) || {}
+      if (onlyEcarts && compterEcarts(ev).rouge === 0) return false
+      if (champsSelectionnes.length > 0) {
+        const concerne = (k: string) => ev[k] === 'ecart' || ev[k] === 'partiel'
+        if (combinaisonChamps === 'ou' ? !champsSelectionnes.some(concerne) : !champsSelectionnes.every(concerne)) return false
+      }
+      return true
+    })
+  }, [toutes, evaluations, search, onlyEcarts, champsSelectionnes, combinaisonChamps])
+
+  const rowsAffichees = useMemo(() => rowsFiltrees.slice(0, LIMITE_AFFICHAGE), [rowsFiltrees])
+
+  function toggleChamp(k: string) {
+    setChampsSelectionnes((prev) => (prev.includes(k) ? prev.filter((x) => x !== k) : [...prev, k]))
+  }
+
+  function getIndexComparaison(list: ControleRow[], sel: ControleRow | null) {
+    if (!sel) return -1
+    return list.findIndex((r) => r.numero_tiers === sel.numero_tiers)
+  }
+  const navigationClavier = creerHandlerNavigation(rowsAffichees, ligneActive, setLigneActive, getIndexComparaison, listRefs)
+  function onListKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (e.key === 'Enter' && ligneActive) { e.preventDefault(); setClientOuvert(ligneActive); return }
+    navigationClavier(e)
+  }
+
+  /** Export Excel des tiers actuellement filtrés à l'écran (même évaluation
+   * que les pastilles et la fenêtre flottante), via ExcelJS pour les couleurs :
+   * vert = identique/équivalent, rouge = écart réel, orange = partiel /
+   * manquant / affiché sans comparaison. */
   async function exporterExcelComparaison() {
     setExportEnCours(true)
-    setExportProgress({ done: 0 })
     try {
-      const toutes: ControleRow[] = []
-      let offset = 0
-      const pageSize = 500
-      while (true) {
-        const { data, error: err } = await supabase.rpc('get_controle_tiers_sage_blg', {
-          p_statut: statutFilter === 'tous' ? null : statutFilter,
-          p_only_ecarts: onlyEcarts, p_champ: champFilter, p_search: search.trim() || null,
-          p_limit: pageSize, p_offset: offset,
-          ...filtreParams(),
-        })
-        if (err) throw err
-        const batch = (data || []) as ControleRow[]
-        toutes.push(...batch)
-        setExportProgress({ done: toutes.length })
-        if (batch.length < pageSize) break
-        offset += pageSize
-      }
-
       const wb = new ExcelJS.Workbook()
       const ws = wb.addWorksheet('Comparaison SAGE-BLG')
 
-      // Construction des en-têtes : colonnes simples puis, pour chaque paire,
-      // une colonne SAGE suivie d'une colonne BLG.
       const enTetes: { texte: string; estPaire: boolean; bordureGauche?: boolean; bordureDroite?: boolean }[] = []
       EXPORT_COLONNES_SIMPLES.forEach((c) => enTetes.push({ texte: c.label, estPaire: false }))
       EXPORT_PAIRES_COMPARAISON.forEach((p) => {
@@ -1309,7 +1667,8 @@ function OngletComparaison() {
         }
       })
 
-      toutes.forEach((r) => {
+      rowsFiltrees.forEach((r) => {
+        const ev = evaluations.get(r.numero_tiers) || {}
         const valeursSimples = EXPORT_COLONNES_SIMPLES.map((c) => (c.transform ? c.transform(r) : safeText(r[c.key])))
         const valeursPaires: string[] = []
         EXPORT_PAIRES_COMPARAISON.forEach((p) => {
@@ -1324,20 +1683,7 @@ function OngletComparaison() {
           const celluleSage = ligne.getCell(colIndex)
           colIndex += 1
           const celluleBlg = ligne.getCell(colIndex)
-
-          const sageVide = r[p.sageKey] === null || r[p.sageKey] === undefined || r[p.sageKey] === ''
-          const blgVide = r[p.blgKey] === null || r[p.blgKey] === undefined || (Array.isArray(r[p.blgKey]) && (r[p.blgKey] as unknown[]).length === 0)
-
-          let couleur: string
-          if (!p.compareStrict) {
-            couleur = COULEUR_NON_COMPARABLE
-          } else if (sageVide || blgVide) {
-            couleur = COULEUR_NON_COMPARABLE
-          } else {
-            const enEcart = p.enEcart ? p.enEcart(r) : normaliserPourExport(r[p.sageKey]) !== normaliserPourExport(r[p.blgKey])
-            couleur = enEcart ? COULEUR_ECART : COULEUR_OK
-          }
-
+          const couleur = EVAL_STYLE[ev[p.sageKey] ?? 'vide'].argb
           const bordureCommune = { top: { style: 'thin' as const }, bottom: { style: 'thin' as const } }
           celluleSage.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: couleur } }
           celluleSage.border = { ...bordureCommune, left: { style: 'medium' } }
@@ -1349,14 +1695,13 @@ function OngletComparaison() {
       ws.columns.forEach((col) => { col.width = 22 })
       ws.views = [{ state: 'frozen', ySplit: 1 }]
 
-      // Petite légende en bas de feuille
-      const ligneLegendeIndex = toutes.length + 3
+      const ligneLegendeIndex = rowsFiltrees.length + 3
       ws.getCell(`A${ligneLegendeIndex}`).value = 'Légende :'
       ws.getCell(`A${ligneLegendeIndex}`).font = { bold: true }
       const legendes: [string, string][] = [
-        ['Valeurs identiques', COULEUR_OK],
-        ['Écart détecté', COULEUR_ECART],
-        ["Non comparable / donnée manquante / affiché sans vérification", COULEUR_NON_COMPARABLE],
+        ['Valeurs identiques ou équivalentes (règle tolérante du champ)', COULEUR_OK],
+        ['Écart réel détecté', COULEUR_ECART],
+        ['Non comparable / donnée manquante / écart partiel (ex. SIREN identique mais SIRET différent)', COULEUR_NON_COMPARABLE],
       ]
       legendes.forEach(([texte, couleur], i) => {
         const cell = ws.getCell(`A${ligneLegendeIndex + 1 + i}`)
@@ -1376,20 +1721,8 @@ function OngletComparaison() {
       alert('Erreur export Excel : ' + (e instanceof Error ? e.message : String(e)))
     } finally {
       setExportEnCours(false)
-      setExportProgress(null)
     }
   }
-
-  function getIndexComparaison(list: ControleRow[], sel: ControleRow | null) {
-    if (!sel) return -1
-    return list.findIndex((r) => r.numero_tiers === sel.numero_tiers)
-  }
-  const onListKeyDown = creerHandlerNavigation(rows, selected, setSelected, getIndexComparaison, listRefs)
-
-  const champsTries = useMemo(() => {
-    if (!summary) return []
-    return Object.entries(summary.par_champ).sort((a, b) => b[1] - a[1]).map(([champ, nb]) => ({ champ, nb, label: CHAMP_LABELS[champ] || champ }))
-  }, [summary])
 
   return (
     <>
@@ -1455,37 +1788,78 @@ function OngletComparaison() {
       ) : (
         <>
           <section className="grid grid-cols-2 gap-3 md:grid-cols-5">
-            <KpiCard label="Tiers SAGE" value={summary?.total_sage ?? 0} loading={loadingSummary} />
-            <KpiCard label="Appariés avec BLG" value={summary?.apparies ?? 0} loading={loadingSummary} />
-            <KpiCard label="Manquants côté BLG" value={summary?.manquants_blg ?? 0} loading={loadingSummary} tone="warn" />
-            <KpiCard label="Sans écart" value={summary?.sans_ecart ?? 0} loading={loadingSummary} tone="ok" />
-            <KpiCard label="Avec au moins un écart" value={summary?.avec_ecart ?? 0} loading={loadingSummary} tone="warn" />
+            <KpiCard label="Tiers SAGE" value={kpis.total} loading={loading} />
+            <KpiCard label="Appariés avec BLG" value={kpis.apparies} loading={loading} />
+            <KpiCard label="Manquants côté BLG" value={kpis.manquants} loading={loading} tone="warn" />
+            <KpiCard label="Sans écart" value={kpis.sansEcart} loading={loading} tone="ok" />
+            <KpiCard label="Avec au moins un écart" value={kpis.avecEcart} loading={loading} tone="warn" />
           </section>
 
           <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
-            <div className="mb-3 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Champs les plus fréquemment en écart (comparaison automatique)</div>
-            {loadingSummary ? (
-              <div className="h-16 animate-pulse rounded bg-[#F4F3F0]" />
-            ) : champsTries.length === 0 ? (
-              <p className="text-[13px] text-[#8A8474]">Aucun écart détecté.</p>
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Champs contrôlés — écarts par champ SAGE</div>
+                <button
+                  type="button"
+                  onClick={() => setShowInfoModal(true)}
+                  title="Voir les captures d'écran et la liste complète du mapping"
+                  className="flex h-6 w-6 items-center justify-center rounded-full border border-[#E5E1D8] text-[12px] font-bold text-[#8A8474] hover:border-[#B4761A] hover:text-[#B4761A]"
+                >
+                  ⓘ
+                </button>
+              </div>
+              <div className="flex items-center gap-3 text-[12px]">
+                {champsSelectionnes.length >= 2 && (
+                  <div className="flex items-center gap-1 font-semibold text-[#3A362E]">
+                    Tiers concernés par :
+                    <button type="button" onClick={() => setCombinaisonChamps('ou')} className={`rounded px-2 py-0.5 ${combinaisonChamps === 'ou' ? 'bg-[#111820] text-white' : 'bg-[#F4F3F0]'}`}>au moins un</button>
+                    <button type="button" onClick={() => setCombinaisonChamps('et')} className={`rounded px-2 py-0.5 ${combinaisonChamps === 'et' ? 'bg-[#111820] text-white' : 'bg-[#F4F3F0]'}`}>tous</button>
+                  </div>
+                )}
+                {champsSelectionnes.length > 0 && (
+                  <button type="button" onClick={() => setChampsSelectionnes([])} className="font-bold text-[#B4761A] hover:underline">Tout désélectionner</button>
+                )}
+              </div>
+            </div>
+            {loading ? (
+              <div className="h-24 animate-pulse rounded bg-[#F4F3F0]" />
             ) : (
               <div className="flex flex-wrap gap-2">
-                {champsTries.map(({ champ, nb, label }) => (
-                  <button key={champ} type="button" onClick={() => setChampFilter(champFilter === champ ? null : champ)}
-                    className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-[13px] font-semibold transition-colors ${
-                      champFilter === champ ? 'border-[#B4761A] bg-[#B4761A]/[0.1] text-[#96600F]' : 'border-[#E5E1D8] bg-[#F4F3F0] text-[#3A362E] hover:bg-[#EDEAE1]'
-                    }`}>
-                    <span>{label}</span>
-                    <span className="rounded-full bg-white px-1.5 py-0.5 text-[11px] font-bold text-[#8A8474]">{nb}</span>
-                  </button>
-                ))}
+                {EXPORT_PAIRES_COMPARAISON.map((p) => {
+                  const s = statsChamps[p.sageKey]
+                  const actif = champsSelectionnes.includes(p.sageKey)
+                  return (
+                    <button
+                      key={p.sageKey}
+                      type="button"
+                      onClick={() => toggleChamp(p.sageKey)}
+                      title={`BLG : ${p.labelBlg}${p.numeroBlg ? ` (n°${p.numeroBlg})` : ''}`}
+                      className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-[13px] font-semibold transition-colors ${
+                        actif ? 'border-[#B4761A] bg-[#B4761A]/[0.1] text-[#96600F]' : 'border-[#E5E1D8] bg-[#F4F3F0] text-[#3A362E] hover:bg-[#EDEAE1]'
+                      }`}
+                    >
+                      <span className="font-mono text-[11px] text-[#B3AD9E]">{p.numeroSage !== null ? `n°${p.numeroSage}` : '—'}</span>
+                      <span>{p.labelSage}</span>
+                      {p.compareStrict ? (
+                        <>
+                          <span className="rounded-full bg-red-100 px-1.5 py-0.5 text-[11px] font-bold text-red-700" title="Écarts réels">{s.rouge}</span>
+                          <span className="rounded-full bg-orange-100 px-1.5 py-0.5 text-[11px] font-bold text-orange-700" title="Partiels / donnée manquante d'un côté">{s.orange}</span>
+                        </>
+                      ) : (
+                        <span className="rounded-full bg-white px-1.5 py-0.5 text-[10px] font-bold text-[#8A8474]">affichage</span>
+                      )}
+                    </button>
+                  )
+                })}
               </div>
             )}
-            <p className="mt-2 text-[12px] text-[#8A8474]">Clique sur un champ pour ne voir que les tiers concernés.</p>
+            <p className="mt-2 text-[12px] text-[#8A8474]">
+              Rouge = écart réel, orange = donnée manquante d'un côté ou écart partiel. Clique sur un ou plusieurs champs pour ne voir que les tiers concernés, avec les valeurs SAGE / BLG en colonnes.
+            </p>
           </section>
 
           <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
-            <button type="button" onClick={toggleMappingPanel} className="flex w-full items-center justify-between text-left">
+            <button type="button" onClick={() => setShowMapping((v) => !v)} className="flex w-full items-center justify-between text-left">
               <div>
                 <div className="text-[13px] font-bold text-[#111820]">Mapping des champs (SAGE ↔ BLG)</div>
                 <p className="text-[12px] text-[#8A8474]">Choisis un client exemple, clique un champ SAGE puis le champ BLG correspondant pour les associer.</p>
@@ -1513,15 +1887,9 @@ function OngletComparaison() {
               </select>
               <label className="flex h-10 items-center gap-2 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
                 <input type="checkbox" checked={onlyEcarts} onChange={(e) => setOnlyEcarts(e.target.checked)} className="accent-[#B4761A]" />
-                Avec écart uniquement
+                Avec écart réel uniquement
               </label>
             </div>
-            {champFilter && (
-              <div className="mt-2 flex items-center gap-2 text-[12px] text-[#8A8474]">
-                Filtré sur : <span className="font-bold text-[#96600F]">{CHAMP_LABELS[champFilter] || champFilter}</span>
-                <button type="button" onClick={() => setChampFilter(null)} className="font-bold text-[#B4761A] hover:underline">Retirer</button>
-              </div>
-            )}
 
             <div className="mt-3 border-t border-[#E5E1D8] pt-3">
               <div className="mb-2 flex items-center justify-between">
@@ -1571,38 +1939,67 @@ function OngletComparaison() {
 
             <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[#E5E1D8] pt-3">
               <span className="text-[12px] text-[#8A8474]">
-                {exportProgress ? `Export en cours… ${exportProgress.done} client${exportProgress.done > 1 ? 's' : ''} récupéré${exportProgress.done > 1 ? 's' : ''}` : '\u00A0'}
+                {loading ? `Chargement… ${loadProgress} tiers récupéré${loadProgress > 1 ? 's' : ''}` : `${rowsFiltrees.length} tiers correspondent aux filtres (sur ${toutes.length} chargés)`}
               </span>
               <button
                 type="button"
                 onClick={() => void exporterExcelComparaison()}
-                disabled={exportEnCours || loading}
+                disabled={exportEnCours || loading || rowsFiltrees.length === 0}
                 className="rounded-lg bg-[#111820] px-4 py-2 text-[13px] font-bold text-white hover:bg-[#252E3D] disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {exportEnCours ? 'Export en cours…' : '⬇ Exporter en Excel (tous les champs SAGE + BLG)'}
+                {exportEnCours ? 'Export en cours…' : `⬇ Exporter en Excel (${rowsFiltrees.length} tiers, tous les champs)`}
               </button>
             </div>
           </section>
 
-          <section className="grid gap-4 lg:grid-cols-[1fr_2fr]">
-            <div className="rounded-xl border border-[#E5E1D8] bg-white p-4">
-              <div className="mb-3 flex items-center justify-between">
-                <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">{loading ? 'Chargement…' : `${rows.length} résultat${rows.length > 1 ? 's' : ''}`}</div>
-                {error && <div className="text-[12px] font-semibold text-red-600">{error}</div>}
+          <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">
+                {loading
+                  ? 'Chargement…'
+                  : rowsFiltrees.length > LIMITE_AFFICHAGE
+                    ? `${LIMITE_AFFICHAGE} affichés sur ${rowsFiltrees.length} — affine la recherche ou exporte en Excel pour voir le reste`
+                    : `${rowsFiltrees.length} résultat${rowsFiltrees.length > 1 ? 's' : ''}`}
               </div>
-              <div
-                tabIndex={0}
-                onKeyDown={onListKeyDown}
-                className="max-h-[760px] overflow-auto rounded-lg border border-[#E5E1D8] outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A]/50"
-              >
-                <table className="w-full text-left text-[13px]">
-                  <thead className="sticky top-0 bg-[#F4F3F0] text-[11px] uppercase tracking-wide text-[#8A8474]">
-                    <tr><th className="px-3 py-2 font-bold">N° tiers</th><th className="px-3 py-2 font-bold">Statut</th></tr>
-                  </thead>
-                  <tbody>
-                    {rows.map((r, i) => (
-                      <tr key={r.numero_tiers} ref={(el) => { listRefs.current[i] = el }} onClick={() => setSelected(r)}
-                        className={`cursor-pointer border-t border-[#E5E1D8] transition-colors hover:bg-[#F4F3F0] ${selected?.numero_tiers === r.numero_tiers ? 'bg-[#B4761A]/[0.06]' : ''}`}>
+              <div className="flex items-center gap-3">
+                {error && <div className="text-[12px] font-semibold text-red-600">{error}</div>}
+                <span className="text-[11px] text-[#8A8474]">Clic ou Entrée sur un tiers : fenêtre avec tous les champs comparés</span>
+              </div>
+            </div>
+            <div
+              tabIndex={0}
+              onKeyDown={onListKeyDown}
+              className="max-h-[760px] overflow-auto rounded-lg border border-[#E5E1D8] outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A]/50"
+            >
+              <table className="w-full text-left text-[13px]">
+                <thead className="sticky top-0 z-10 bg-[#F4F3F0] text-[11px] uppercase tracking-wide text-[#8A8474]">
+                  <tr>
+                    <th className="px-3 py-2 font-bold">N° tiers</th>
+                    <th className="px-3 py-2 font-bold">Statut</th>
+                    {pairesSelectionnees.map((p) => (
+                      <React.Fragment key={p.sageKey}>
+                        <th className="border-l-2 border-[#E5E1D8] px-3 py-2 font-bold">
+                          <span className="font-mono text-[10px] text-[#B3AD9E]">{p.numeroSage !== null ? `n°${p.numeroSage} ` : ''}</span>{p.labelSage} — SAGE
+                        </th>
+                        <th className="border-r-2 border-[#E5E1D8] px-3 py-2 font-bold">
+                          <span className="font-mono text-[10px] text-[#B3AD9E]">{p.numeroBlg !== null ? `n°${p.numeroBlg} ` : ''}</span>{p.labelBlg} — BLG
+                        </th>
+                      </React.Fragment>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {rowsAffichees.map((r, i) => {
+                    const ev = evaluations.get(r.numero_tiers) || {}
+                    const { rouge, orange } = compterEcarts(ev)
+                    const actif = ligneActive?.numero_tiers === r.numero_tiers
+                    return (
+                      <tr
+                        key={r.numero_tiers}
+                        ref={(el) => { listRefs.current[i] = el }}
+                        onClick={() => { setLigneActive(r); setClientOuvert(r) }}
+                        className={`cursor-pointer border-t border-[#E5E1D8] transition-colors hover:bg-[#F4F3F0] ${actif ? 'bg-[#B4761A]/[0.06]' : ''}`}
+                      >
                         <td className="px-3 py-2">
                           <div className="font-mono text-[12px] font-semibold text-[#3A362E]">{r.numero_tiers}</div>
                           <div className="truncate text-[12px] text-[#111820]">{r.sage_intitule || r.blg_intitule || '—'}</div>
@@ -1610,106 +2007,44 @@ function OngletComparaison() {
                         <td className="px-3 py-2">
                           {r.statut_appariement === 'manquant_blg' ? (
                             <span className="rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-bold text-red-700">Manquant BLG</span>
-                          ) : r.champs_en_ecart.length === 0 ? (
+                          ) : rouge === 0 && orange === 0 ? (
                             <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-bold text-emerald-700">OK</span>
                           ) : (
-                            <span className="rounded-full bg-[#B4761A]/[0.1] px-2 py-0.5 text-[11px] font-bold text-[#96600F]">{r.champs_en_ecart.length} écart{r.champs_en_ecart.length > 1 ? 's' : ''}</span>
+                            <span className="flex flex-wrap gap-1">
+                              {rouge > 0 && <span className="rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-bold text-red-700">{rouge} écart{rouge > 1 ? 's' : ''}</span>}
+                              {orange > 0 && <span className="rounded-full bg-orange-100 px-2 py-0.5 text-[11px] font-bold text-orange-700">{orange} partiel{orange > 1 ? 's' : ''}</span>}
+                            </span>
                           )}
                         </td>
-                      </tr>
-                    ))}
-                    {!loading && rows.length === 0 && <tr><td colSpan={2} className="px-3 py-8 text-center text-[#8A8474]">Aucun résultat pour ces filtres.</td></tr>}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            <div className="rounded-xl border border-[#E5E1D8] bg-white p-4">
-              <div className="mb-3 flex items-center justify-between">
-                <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Comparaison détaillée (tous les champs mappés)</div>
-                <button
-                  type="button"
-                  onClick={() => setShowInfoModal(true)}
-                  title="Voir les captures d'écran et la liste complète du mapping"
-                  className="flex h-6 w-6 items-center justify-center rounded-full border border-[#E5E1D8] text-[12px] font-bold text-[#8A8474] hover:border-[#B4761A] hover:text-[#B4761A]"
-                >
-                  ⓘ
-                </button>
-              </div>
-              {!selected ? (
-                <div className="flex h-64 items-center justify-center text-center text-[13px] text-[#8A8474]">Sélectionne un tiers dans la liste pour voir le détail champ par champ.</div>
-              ) : (
-                <div>
-                  <div className="mb-3 flex items-center justify-between border-b border-[#E5E1D8] pb-3">
-                    <div>
-                      <div className="font-mono text-[12px] font-bold text-[#8A8474]">{selected.numero_tiers}</div>
-                      <div className="text-[15px] font-bold text-[#111820]">{selected.sage_intitule || selected.blg_intitule}</div>
-                    </div>
-                    {selected.blg_partner_id && (
-                      <a href={`https://app.blgcloud.com/cegeclim-test/?app/crm/company/${selected.blg_partner_id}#`} target="_blank" rel="noopener noreferrer"
-                        className="text-[12px] font-semibold text-[#B4761A] hover:underline">Ouvrir dans BLG ↗</a>
-                    )}
-                  </div>
-
-                  {selected.statut_appariement === 'manquant_blg' ? (
-                    <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-[13px] font-semibold text-red-700">
-                      Ce tiers n'a pas de correspondance identifiée côté BLG (`blg_id_tiers` non renseigné ou introuvable).
-                    </div>
-                  ) : loadingSelected ? (
-                    <div className="h-64 animate-pulse rounded-lg bg-[#F4F3F0]" />
-                  ) : (
-                    <div className="max-h-[720px] overflow-auto">
-                      <div className="grid grid-cols-[36px_1.1fr_1fr_36px_1.1fr_1fr] gap-2 px-2 pb-1.5 text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">
-                        <span>N°</span><span>Champ SAGE</span><span>Valeur SAGE</span>
-                        <span>N°</span><span>Champ BLG</span><span>Valeur BLG</span>
-                      </div>
-                      <div className="space-y-0.5">
-                        {mappedFields.map((m) => {
-                          const sageVal = selectedSageFull[m.champ_sage]
-                          const blgVal = selectedBlgFull[m.champ_blg as string]
-                          const isEcart = m.type_comparaison !== 'affichage_seul' && valuesDiffer(sageVal, blgVal)
-                          // Le n° BLG contient déjà l'écran entre parenthèses (ex. "24 (Suivi)") ;
-                          // on n'affiche que le numéro dans la petite colonne, l'écran reste visible au survol.
-                          const numeroBlgCourt = m.numero_blg ? m.numero_blg.split(' ')[0] : null
+                        {pairesSelectionnees.map((p) => {
+                          const st = EVAL_STYLE[ev[p.sageKey] ?? 'vide']
                           return (
-                            <div key={m.id} className={`grid grid-cols-[36px_1.1fr_1fr_36px_1.1fr_1fr] items-baseline gap-2 rounded-lg px-2 py-1.5 text-[13px] ${isEcart ? 'bg-[#B4761A]/[0.08]' : ''}`}>
-                              <span className="font-mono text-[11px] text-[#B3AD9E]">{m.numero_sage ?? '—'}</span>
-                              <span className="font-semibold text-[#3A362E]" title={`Nom technique : ${m.champ_sage}`}>{m.nom_ecran_sage || m.label || m.champ_sage}</span>
-                              <span className={isEcart ? 'font-bold text-[#96600F]' : 'text-[#111820]'}>{formatCellValue(sageVal)}</span>
-                              <span className="font-mono text-[11px] text-[#B3AD9E]" title={m.numero_blg || undefined}>{numeroBlgCourt ?? '—'}</span>
-                              <span className="font-semibold text-[#3A362E]" title={m.numero_blg ? `Écran : ${m.numero_blg.replace(/^\d+\s*/, '')}` : `Nom technique : ${m.champ_blg}`}>
-                                {m.nom_ecran_blg || m.champ_blg}
-                              </span>
-                              <span className={isEcart ? 'font-bold text-[#96600F]' : 'text-[#111820]'}>{formatCellValue(blgVal)}</span>
-                            </div>
+                            <React.Fragment key={p.sageKey}>
+                              <td className={`max-w-[260px] truncate border-l-2 border-[#E5E1D8] px-3 py-2 text-[12px] ${st.cellule}`} title={formatCellValue(r[p.sageKey])}>{formatCellValue(r[p.sageKey])}</td>
+                              <td className={`max-w-[260px] truncate border-r-2 border-[#E5E1D8] px-3 py-2 text-[12px] ${st.cellule}`} title={formatCellValue(r[p.blgKey])}>{formatCellValue(r[p.blgKey])}</td>
+                            </React.Fragment>
                           )
                         })}
-                      </div>
-
-                      <div className="mt-4 border-t border-[#E5E1D8] pt-2">
-                        <div className="mb-1 text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">Champs SAGE non mappés côté BLG ({unmappedFields.length})</div>
-                        <div className="space-y-0.5">
-                          {unmappedFields.map((m) => (
-                            <div key={m.id} className="grid grid-cols-[36px_1.1fr_1fr_36px_1.1fr_1fr] items-baseline gap-2 rounded-lg px-2 py-1 text-[13px] opacity-70">
-                              <span className="font-mono text-[11px] text-[#B3AD9E]">{m.numero_sage ?? '—'}</span>
-                              <span className="font-semibold text-[#3A362E]" title={`Nom technique : ${m.champ_sage}`}>{m.nom_ecran_sage || m.label || m.champ_sage}</span>
-                              <span className="text-[#111820]">{formatCellValue(selectedSageFull[m.champ_sage])}</span>
-                              <span />
-                              <span className="text-[#B3AD9E]">— non mappé —</span>
-                              <span />
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
+                      </tr>
+                    )
+                  })}
+                  {!loading && rowsAffichees.length === 0 && (
+                    <tr><td colSpan={2 + pairesSelectionnees.length * 2} className="px-3 py-8 text-center text-[#8A8474]">Aucun résultat pour ces filtres.</td></tr>
                   )}
-                </div>
-              )}
+                </tbody>
+              </table>
             </div>
           </section>
         </>
       )}
       {showInfoModal && <MappingInfoModal mapping={mapping} onClose={() => setShowInfoModal(false)} />}
+      {clientOuvert && (
+        <ClientComparaisonModal
+          row={clientOuvert}
+          evals={evaluations.get(clientOuvert.numero_tiers) || {}}
+          onClose={() => setClientOuvert(null)}
+        />
+      )}
     </>
   )
 }
