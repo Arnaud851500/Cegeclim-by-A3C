@@ -222,7 +222,7 @@ type ColumnDef = {
 
 type SortState = { key: string; direction: SortDirection }
 type MapBooleanFilter = 'all' | 'yes' | 'no'
-type MapProfileFilter = '' | '400K€' | '150K€' | '80K€' | '20K€' | 'vide'
+type MapProfileFilter = '' | '400K€' | '150K€' | '80K€' | '20K€' | '< 20K€' | 'Sans CA'
 type MapProfilePeriodFilter = '12M' | 'N-1' | 'N-2'
 type MapLogicalOperator = 'OR' | 'AND'
 type CapitalSocialFilterOption = 'TOUS' | 'NC' | '<= 1 000€' | '>1 000€' | '>5000€' | '>9999€'
@@ -536,7 +536,7 @@ function normalizeSiret(value: any) {
   return String(value ?? '').replace(/\D/g, '').trim()
 }
 
-const CA_PROFILE_BANDS: MapProfileFilter[] = ['400K€', '150K€', '80K€', '20K€', 'vide']
+const CA_PROFILE_BANDS: MapProfileFilter[] = ['400K€', '150K€', '80K€', '20K€', '< 20K€', 'Sans CA']
 
 function caBand(value: number | null | undefined): MapProfileFilter {
   const n = safeNumber(value)
@@ -544,7 +544,8 @@ function caBand(value: number | null | undefined): MapProfileFilter {
   if (n >= 150000) return '150K€'
   if (n >= 80000) return '80K€'
   if (n >= 20000) return '20K€'
-  return 'vide'
+  if (n > 0) return '< 20K€'
+  return 'Sans CA'
 }
 
 function caBandClass(band: string) {
@@ -552,12 +553,13 @@ function caBandClass(band: string) {
   if (band === '150K€') return 'caPill150'
   if (band === '80K€') return 'caPill80'
   if (band === '20K€') return 'caPill20'
+  if (band === '< 20K€') return 'caPillLow'
   return 'caPillEmpty'
 }
 
 function CaBandPill({ band, compact = false }: { band: string | null | undefined; compact?: boolean }) {
-  const normalized = safeText(band, 'vide')
-  return <span className={`caPill ${caBandClass(normalized)} ${compact ? 'compact' : ''}`}>{normalized === 'vide' ? 'vide' : normalized}</span>
+  const normalized = safeText(band, 'Sans CA')
+  return <span className={`caPill ${caBandClass(normalized)} ${compact ? 'compact' : ''}`}>{normalized === 'Sans CA' ? '—' : normalized}</span>
 }
 
 function CaProfileTagSet({ row, compact = false }: { row: Pick<SummaryRow, 'caBandN' | 'caBandN1' | 'caBandN2'>; compact?: boolean }) {
@@ -571,14 +573,15 @@ function CaProfileTagSet({ row, compact = false }: { row: Pick<SummaryRow, 'caBa
 }
 
 function shortBandLabel(band: string | null | undefined) {
-  const normalized = safeText(band, 'vide')
-  if (normalized === 'vide') return ''
+  const normalized = safeText(band, 'Sans CA')
+  if (normalized === 'Sans CA') return ''
+  if (normalized === '< 20K€') return '<20'
   return normalized.replace('K€', '')
 }
 
 function MapProfilePill({ band, color, outlined = true }: { band: string | null | undefined; color: string; outlined?: boolean }) {
-  const normalized = safeText(band, 'vide')
-  const isEmpty = normalized === 'vide'
+  const normalized = safeText(band, 'Sans CA')
+  const isEmpty = normalized === 'Sans CA'
   const label = isEmpty ? '' : shortBandLabel(band)
 
   return (
@@ -606,7 +609,7 @@ function MapProfilePill({ band, color, outlined = true }: { band: string | null 
         textAlign: 'center',
         boxShadow: outlined ? '0 1px 2px rgba(15,23,42,.20)' : 'none',
       }}
-      title={isEmpty ? 'Profil CA vide' : normalized}
+      title={isEmpty ? 'Sans chiffre d’affaires' : normalized}
     >
       {label}
     </span>
@@ -1329,7 +1332,7 @@ function displayValue(col: ColumnDef, row: SummaryRow, objectiveMap: Map<string,
   if (col.format === 'pctBlank') return formatPctBlank(value as number | null)
   if (col.format === 'pctCompare') return formatComparePct(value as number | null, col.compareValue?.(row) as number | null)
   if (col.format === 'points') return formatPoints(value as number | null)
-  if (col.format === 'caBand') return safeText(value, 'vide')
+  if (col.format === 'caBand') return safeText(value, 'Sans CA')
   if (col.format === 'number') return formatNumber(safeNumber(value))
   return safeText(value)
 }
@@ -1394,7 +1397,7 @@ function HeaderComparisonPill({ col, totalRow }: { col: ColumnDef; totalRow: Sum
 }
 
 function caBandRank(value: any) {
-  const band = safeText(value, 'vide')
+  const band = safeText(value, 'Sans CA')
   const idx = CA_PROFILE_BANDS.indexOf(band as MapProfileFilter)
   return idx === -1 ? CA_PROFILE_BANDS.length : idx
 }
@@ -2035,7 +2038,7 @@ function buildProfileMatrix(rows: SummaryRow[], dimension: ProfileMatrixDimensio
         })
       }
       const bucket = map.get(label)!
-      const band = safeText(bandForPeriod(row, period), 'vide')
+      const band = safeText(bandForPeriod(row, period), 'Sans CA')
       bucket.counts[band] = (bucket.counts[band] || 0) + 1
       bucket.details[band] = [...(bucket.details[band] || []), { numero: row.numero, intitule: row.intitule, ca: caForPeriod(row, period) }]
       bucket.total += 1
@@ -2151,9 +2154,9 @@ function mapBooleanMatches(value: boolean, filter: MapBooleanFilter) {
 }
 
 function getMapClientProfileBand(client: SyntheseMapClientRow, period: MapProfilePeriodFilter): MapProfileFilter {
-  if (period === 'N-1') return safeText(client.caBandN1, 'vide') as MapProfileFilter
-  if (period === 'N-2') return safeText(client.caBandN2, 'vide') as MapProfileFilter
-  return safeText(client.caBandN, 'vide') as MapProfileFilter
+  if (period === 'N-1') return safeText(client.caBandN1, 'Sans CA') as MapProfileFilter
+  if (period === 'N-2') return safeText(client.caBandN2, 'Sans CA') as MapProfileFilter
+  return safeText(client.caBandN, 'Sans CA') as MapProfileFilter
 }
 
 function rowMatchesCaProfile(client: SyntheseMapClientRow, profiles: MapProfileFilter[], period: MapProfilePeriodFilter) {
@@ -3138,7 +3141,7 @@ export default function SyntheseMultiClientsPage() {
                         <button type="button" className="expandBtn" onClick={() => toggleExpanded(row.numero)}>{expanded.has(row.numero) ? '−' : '+'}</button>
                       ) : null}
                       {col.format === 'caBand' ? (
-                        <CaBandPill band={String(col.value(row) || 'vide')} />
+                        <CaBandPill band={String(col.value(row) || 'Sans CA')} />
                       ) : canEdit ? (
                         <EditableCell
                           type={col.editable!.type}
@@ -3501,6 +3504,7 @@ export default function SyntheseMultiClientsPage() {
         .caPill150 { background: #1d4ed8; color: #eff6ff; border-color: #2563eb; }
         .caPill80 { background: #f59e0b; color: #111827; border-color: #d97706; }
         .caPill20 { background: #a7f3d0; color: #064e3b; border-color: #34d399; }
+        .caPillLow { background: #94a3b8; color: #0f172a; border-color: #64748b; }
         .caPillEmpty { background: #e5e7eb; color: #64748b; border-color: #cbd5e1; }
         .caTagSet { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; justify-content: center; white-space: normal; }
         .caTagSet > span { display: inline-flex; gap: 3px; align-items: center; }

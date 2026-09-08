@@ -53,6 +53,24 @@
  *      l'année complète (janvier à décembre), pas seulement les jours
  *      pour lesquels il y a des données -- les mois à venir restent
  *      visibles (vides) sur l'axe.
+ *
+ *  - V4.4 (2026-09, cette révision) :
+ *    - Pavé "Clients actifs" (et compteur "Clients créés cette année") :
+ *      ne passe plus par les RPC get_vision_tci_clients_actifs /
+ *      get_vision_tci_clients_crees_n (qui recalculaient l'agence et le
+ *      collaborateur d'un client via une jointure ref_tiers.representant
+ *      -> ref_collaborateurs.nom, indépendante des colonnes du cache).
+ *      Requête désormais directement synthese_multi_clients_cache
+ *      (colonnes collaborateur / agence_collaborateur), exactement comme
+ *      MobileClients.tsx ("Mes clients") -- même formule de CA 12 mois
+ *      glissant, mêmes bandes, même règle "créé cette année". Les deux
+ *      sources (widget et mobile/SMC) affichent désormais les mêmes
+ *      totaux pour un même périmètre agence/collaborateur.
+ *    - Bandes CA renommées : "vide" -> "< 20K€" (0 < CA < 20K€) devient
+ *      une tranche à part entière, et une nouvelle tranche "Sans CA"
+ *      (CA = 0) apparaît pour ne plus laisser croire que ces clients
+ *      n'ont "aucun" chiffre d'affaires alors qu'ils étaient en réalité
+ *      simplement sous le premier seuil affiché.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -686,7 +704,92 @@ function FluxCardGrand({
 // "Clients actifs" (cle="clients_actifs") est agrandi (largeur doublée,
 // chiffres plus gros) — les autres compteurs gardent le format compact.
 
-const CA_BAND_ORDER = ["400K€", "150K€", "80K€", "20K€", "vide"] as const;
+const CA_BAND_ORDER = ["400K€", "150K€", "80K€", "20K€", "< 20K€", "Sans CA"] as const;
+type CaBandVtci = (typeof CA_BAND_ORDER)[number];
+
+function safeNumberVtci(value: any): number {
+  if (value === null || value === undefined || value === "") return 0;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** Mêmes seuils que synthese_multi_clients_cache / MobileClients.tsx :
+ * la tranche "vide" est désormais scindée en "< 20K€" (0 < CA < 20K€) et
+ * "Sans CA" (CA = 0), pour ne pas laisser croire que tous ces clients
+ * n'ont aucun chiffre d'affaires. */
+function caBandFromCa12m(ca12m: number): CaBandVtci {
+  if (ca12m >= 400000) return "400K€";
+  if (ca12m >= 150000) return "150K€";
+  if (ca12m >= 80000) return "80K€";
+  if (ca12m >= 20000) return "20K€";
+  if (ca12m > 0) return "< 20K€";
+  return "Sans CA";
+}
+
+function normalizeDateIsoVtci(value: any): string {
+  const text = String(value ?? "").trim();
+  if (!text) return "";
+  const iso = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+  if (iso) return `${iso[1]}-${iso[2].padStart(2, "0")}-${iso[3].padStart(2, "0")}`;
+  const fr = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})/);
+  if (fr) return `${fr[3]}-${fr[2].padStart(2, "0")}-${fr[1].padStart(2, "0")}`;
+  return "";
+}
+
+type ClientsActifsResult = { total: number; bands: Record<CaBandVtci, number>; clientsCreesN: number };
+
+/** ÉVOLUTION (2026-09) : remplace les RPC get_vision_tci_clients_actifs /
+ * get_vision_tci_clients_crees_n, qui recalculaient l'agence et le
+ * collaborateur d'un client via une jointure ref_tiers.representant ->
+ * ref_collaborateurs.nom -- une source indépendante des colonnes propres
+ * du cache (collaborateur / agence_collaborateur), ce qui pouvait faire
+ * diverger le total affiché ici de celui de "Mes clients" (mobile) et de
+ * Synthèse multi-clients pour un même périmètre. Requête désormais
+ * directement synthese_multi_clients_cache, filtrée en `.eq()` sur ces
+ * deux mêmes colonnes -- identique au périmètre `agences`/`collaborateurs`
+ * de MobileClients.tsx (fetchAllCache), à ceci près qu'ici agence et
+ * collaborateur sont chacun une valeur unique (ou aucune restriction) et
+ * non une liste. Le calcul de ca12m et la règle "créé cette année"
+ * reprennent exactement la même formule que MobileClients.tsx. */
+async function fetchClientsActifsDepuisCache(agence: string | null, collaborateur: string | null): Promise<ClientsActifsResult> {
+  const anneeCourante = new Date().getFullYear();
+  const debutAnnee = `${anneeCourante}-01-01`;
+  const rows: Record<string, any>[] = [];
+  const chunkSize = 1000;
+  let from = 0;
+  while (true) {
+    let query = supabase
+      .from("synthese_multi_clients_cache")
+      .select("numero_tiers,ca_ytd_n,ca_n1,ca_ytd_n1,date_creation")
+      .eq("annee", anneeCourante)
+      .eq("row_kind", "client")
+      .order("numero_tiers", { ascending: true })
+      .range(from, from + chunkSize - 1);
+    if (collaborateur) query = query.eq("collaborateur", collaborateur);
+    if (agence) query = query.eq("agence_collaborateur", agence);
+    const { data, error } = await query;
+    if (error) throw error;
+    const batch = (data || []) as Record<string, any>[];
+    rows.push(...batch);
+    if (batch.length < chunkSize) break;
+    from += chunkSize;
+  }
+
+  const bands: Record<CaBandVtci, number> = { "400K€": 0, "150K€": 0, "80K€": 0, "20K€": 0, "< 20K€": 0, "Sans CA": 0 };
+  let clientsCreesN = 0;
+  rows.forEach((row) => {
+    const caYtdN = safeNumberVtci(row.ca_ytd_n);
+    const caN1 = safeNumberVtci(row.ca_n1);
+    const caYtdN1 = safeNumberVtci(row.ca_ytd_n1);
+    const ca12m = caYtdN + Math.max(0, caN1 - caYtdN1);
+    bands[caBandFromCa12m(ca12m)] += 1;
+
+    const dateCreationIso = normalizeDateIsoVtci(row.date_creation);
+    if (dateCreationIso && dateCreationIso >= debutAnnee) clientsCreesN += 1;
+  });
+
+  return { total: rows.length, bands, clientsCreesN };
+}
 
 function CompteurCard({
   config, effectiveAgence, effectiveCollaborateur, refreshTick, onRemove,
@@ -710,24 +813,15 @@ function CompteurCard({
       setError(null);
       try {
         if (config.cle === "clients_actifs") {
-          const [actifsRes, creesRes] = await Promise.all([
-            supabase.rpc("get_vision_tci_clients_actifs", { p_agence: effectiveAgence, p_collaborateur: effectiveCollaborateur }),
-            supabase.rpc("get_vision_tci_clients_crees_n", { p_agence: effectiveAgence, p_collaborateur: effectiveCollaborateur }),
-          ]);
-          if (actifsRes.error) throw actifsRes.error;
-          if (creesRes.error) throw creesRes.error;
-          const rows = (actifsRes.data || []) as Array<{ band: string; nb_clients: number }>;
-          const map: Record<string, number> = {};
-          rows.forEach((r) => { map[r.band] = r.nb_clients; });
+          const resultat = await fetchClientsActifsDepuisCache(effectiveAgence, effectiveCollaborateur);
           if (!cancelled) {
-            setBands(map);
-            setTotal(rows.reduce((s, r) => s + r.nb_clients, 0));
-            setClientsCreesN(Number(creesRes.data) || 0);
+            setBands(resultat.bands);
+            setTotal(resultat.total);
+            setClientsCreesN(resultat.clientsCreesN);
           }
         } else if (config.cle === "clients_crees_n") {
-          const { data, error: err } = await supabase.rpc("get_vision_tci_clients_crees_n", { p_agence: effectiveAgence, p_collaborateur: effectiveCollaborateur });
-          if (err) throw err;
-          if (!cancelled) setTotal(Number(data) || 0);
+          const resultat = await fetchClientsActifsDepuisCache(effectiveAgence, effectiveCollaborateur);
+          if (!cancelled) setTotal(resultat.clientsCreesN);
         } else if (config.cle === "cerfa_ko") {
           const { data, error: err } = await supabase.rpc("get_cerfa_ko_count_for_user", {
             p_email: (await supabase.auth.getUser()).data.user?.email,

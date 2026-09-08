@@ -11,7 +11,7 @@ import { NouveauRdvSheet } from './MobileRdv'
 
 const N = new Date().getFullYear()
 const CURRENT_MONTH = new Date().getMonth() + 1
-const CA_PROFILE_BANDS = ['400K€', '150K€', '80K€', '20K€', 'vide'] as const
+const CA_PROFILE_BANDS = ['400K€', '150K€', '80K€', '20K€', '< 20K€', 'Sans CA'] as const
 type CaBand = typeof CA_PROFILE_BANDS[number]
 
 const RDV_TYPE_LABELS: Record<string, string> = {
@@ -46,7 +46,8 @@ function caBand(value: number | null | undefined): CaBand {
   if (n >= 150000) return '150K€'
   if (n >= 80000) return '80K€'
   if (n >= 20000) return '20K€'
-  return 'vide'
+  if (n > 0) return '< 20K€'
+  return 'Sans CA'
 }
 /** "Damien MENA" -> "D. MENA" -- affiché à côté du numéro de client (liste
  * + fiche), pour identifier le collaborateur qui suit ce client d'un coup
