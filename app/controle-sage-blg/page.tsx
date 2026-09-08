@@ -1,3788 +1,1927 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
-import dynamic from 'next/dynamic'
+/**
+ * Écran "Clients SAGE / BLG"
+ * ---------------------------------------------------------------------------
+ * 3 onglets :
+ *  - SAGE : fiche client (tiers_complet) + adresses de livraison + mode
+ *    d'expédition résolu, filtrable (dont sélection MULTIPLE de modes
+ *    d'expédition), avec export Excel de l'ensemble des champs.
+ *  - BLG : même principe côté BLG uniquement (partner_base_partner via BLG),
+ *    pour les tiers déjà appariés avec SAGE.
+ *  - Comparaison : logique de contrôle de cohérence SAGE ↔ BLG restaurée
+ *    telle quelle (comparatif champ par champ, panneau de mapping manuel,
+ *    synchro à la demande), avec export Excel de l'ensemble des champs
+ *    comparés SAGE ↔ BLG pour les clients filtrés à l'écran.
+ *
+ * Les 3 listes de gauche (SAGE / BLG / Comparaison) se naviguent au clavier
+ * avec les flèches ↑ / ↓ une fois la liste focus (clic ou tabulation dessus).
+ *
+ * MàJ (banque + corrections de mapping) :
+ *  - Nouveau bloc Banque comparé automatiquement : nom de banque et IBAN/BBAN
+ *    (public.ref_tiers.banque_nom / banque_bban ↔ blg.ref_tiers_blg.banque /
+ *    iban). Le BIC et la ville de l'agence bancaire restent non comparables
+ *    tant que SAGE ne les exporte pas.
+ *  - "Attestation de capacité" repassée en comparaison automatique (existait
+ *    déjà des deux côtés, simplement pas exposée côté BLG jusqu'ici).
+ *  - "Catégorie AF/GAF" traitée comme "Qualité" : c'est un tag BLG affiché
+ *    à titre indicatif, pas un champ comparable à l'identique.
+ *  - "Agence de rattachement" : la piste "division BLG" a été vérifiée et
+ *    invalidée (la division BLG est l'entité juridique de facturation,
+ *    quasi toujours "CEGECLIM (siège)", elle ne varie pas par agence
+ *    physique). Le champ reste donc en comparaison manuelle ; `blg_division`
+ *    est conservé en colonne informative uniquement.
+ *  - Le bug qui faisait que "Routage promo" et "Facture électronique"
+ *    n'étaient jamais comptés comme écarts (alors que marqués "auto" dans
+ *    le mapping) a été corrigé côté vue SQL.
+ *
+ * Le panneau "Comparaison détaillée" et le mapping manuel restent pilotés
+ * entièrement par la table champ_mapping_sage_blg : les nouveaux champs
+ * bancaires / attestation / catégorie AF-GAF y apparaissent automatiquement,
+ * sans code supplémentaire ici. Les seuls ajouts dans ce fichier sont : le
+ * typage TS des nouvelles colonnes renvoyées par la vue, les libellés pour
+ * les pastilles d'écart, et les colonnes d'export Excel.
+ *
+ * Nécessite le paquet "xlsx" (SheetJS) pour l'export Excel :
+ * `npm install xlsx` si ce n'est pas déjà fait dans le projet.
+ */
+
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
-import { usePageFilterAccess } from '@/lib/pageAccessFilters'
+import * as XLSX from 'xlsx'
+import ExcelJS from 'exceljs'
 
-const MapContainer: any = dynamic(() => import('react-leaflet').then((mod) => mod.MapContainer as any), { ssr: false })
-const TileLayer: any = dynamic(() => import('react-leaflet').then((mod) => mod.TileLayer as any), { ssr: false })
-const CircleMarker: any = dynamic(() => import('react-leaflet').then((mod) => mod.CircleMarker as any), { ssr: false })
-const Tooltip: any = dynamic(() => import('react-leaflet').then((mod) => mod.Tooltip as any), { ssr: false })
-const Popup: any = dynamic(() => import('react-leaflet').then((mod) => mod.Popup as any), { ssr: false })
+// ─────────────────────────────────────────────────────────────────────────
+// Onglet SAGE
+// ─────────────────────────────────────────────────────────────────────────
 
-type ModeSelection = 'collaborateur' | 'agence'
-type SortDirection = 'asc' | 'desc'
-type ObjectiveType = 'texte' | 'nombre' | 'montant' | 'date' | 'action'
-type ObjectiveDomain = 'Remarque' | 'Objectif' | 'QRC' | 'Initiative' | 'Visite'
-type RowKind = 'total' | 'client' | 'month'
-
-type TiersRow = {
-  numero: string
-  intitule: string
-  codePostal: string
-  codeNaf: string
-  libelleNaf: string
-  dateCreation: string
-  prospect: boolean | null
-  collaborateur: string
-  agence: string
-  raw: Record<string, any>
-}
-
-type CollaborateurRow = {
-  nom: string
-  agence: string
-}
-
-type SelectionOptions = {
-  collaborateurs: string[]
-  agences: string[]
-  cacheCollaborateurs: string[]
-  cacheAgences: string[]
-  collaborateurAgence: Record<string, string>
-  agenceCollaborateurs: Record<string, string[]>
-}
-
-type AggRow = {
-  annee: number
-  mois: number
+type ClientAdresseRow = {
   numero_tiers: string
-  intitule_tiers: string
-  collaborateur: string
-  agence_collaborateur: string
-  famille_macro: string
-  ca_ht: number
-  marge_valeur: number
-  nb_lignes: number
-}
-
-type ObjectiveRow = {
-  id?: number
-  numero_tiers: string
-  annee: number
-  domaine: ObjectiveDomain | string
-  rubrique: string
-  valeur_type: ObjectiveType | string
-  valeur_text: string | null
-  valeur_number: number | null
-  valeur_date: string | null
-}
-
-type CacheDbRow = {
-  annee: number
-  row_kind: RowKind
-  mois: number | null
-  numero_tiers: string
-  intitule_tiers: string | null
-  collaborateur: string | null
-  agence_collaborateur: string | null
-  code_postal: string | null
-  libelle_naf: string | null
-  date_creation: string | null
-  prospect_label: string | null
-  ca_n3: number | null
-  ca_n2: number | null
-  devis_n1: number | null
-  devis_n1_by_macro: Record<string, number> | null
-  ca_n1: number | null
-  ca_n1_by_macro: Record<string, number> | null
-  marge_pct_n1: number | null
-  marge_n1_value: number | null
-  marge_n1_by_macro: Record<string, number | null> | null
-  marge_n1_value_by_macro: Record<string, number> | null
-  objectif_ca: number | null
-  potentiel: number | null
-  encours_commande_n?: number | null
-  encours_commande_n_by_macro?: Record<string, number> | null
-  encours_commande_n_by_type?: Record<string, number> | null
-  devis_ytd_n: number | null
-  devis_ytd_n1?: number | null
-  devis_ytd_n_by_macro: Record<string, number> | null
-  devis_ytd_n1_by_macro?: Record<string, number> | null
-  ca_ytd_n: number | null
-  ca_ytd_n1: number | null
-  ca_ytd_n_by_macro: Record<string, number> | null
-  ca_ytd_n1_by_macro?: Record<string, number> | null
-  marge_pct_ytd_n: number | null
-  marge_ytd_n_value: number | null
-  marge_ytd_n1_value: number | null
-  marge_ytd_n_by_macro: Record<string, number | null> | null
-  marge_ytd_n_value_by_macro: Record<string, number> | null
-  marge_ytd_n1_value_by_macro: Record<string, number> | null
-  contrat_bfa: number | null
-  ca_vs_n1: number | null
-  marge_vs_n1: number | null
-  realise_objectif: number | null
-  qrc_n1: number | null
-  frequence_commande: number | null
-  niveau_exclusivite: number | null
-  com_notre_faveur: number | null
-  garantie: number | null
-  qrc_n: number | null
-  visite_theorique: number | null
-  visite_realise: number | null
-  updated_at?: string | null
-}
-
-type SummaryRow = {
-  id: string
-  kind: RowKind
-  level: number
-  updatedAt?: string
-  collaborateur: string
-  agence: string
-  numero: string
-  intitule: string
-  totalMois: string
-  codePostal: string
-  libelleNaf: string
-  dateCreation: string
-  prospectLabel: string
-  caN3: number
-  caN2: number
-  devisN1: number
-  devisN1ByMacro: Record<string, number>
-  caN1: number
-  caN1ByMacro: Record<string, number>
-  margePctN1: number | null
-  margeN1Value: number
-  margeN1ByMacro: Record<string, number | null>
-  margeN1ValueByMacro: Record<string, number>
-  objectifCa: number
-  potentiel: number
-  encoursCommandeN: number
-  encoursCommandeNByMacro: Record<string, number>
-  encoursCommandeNByType: Record<string, number>
-  devisYtdN: number
-  devisYtdN1: number
-  devisYtdNByMacro: Record<string, number>
-  devisYtdN1ByMacro: Record<string, number>
-  ca12m: number
-  caBandN: string
-  caBandN1: string
-  caBandN2: string
-  caYtdN: number
-  // FIX (2026-08) : CA facturé YTD "complet" (sans le gel à M-1 appliqué à
-  // caYtdN par recomputeClientN1ComparisonFromMonths) -- alimente
-  // uniquement le pavé "CA réel {N}" du bandeau supérieur, qui doit
-  // refléter la totalité du CA facturé à date (y compris le mois en
-  // cours). caYtdN lui-même (colonne "CA RÉEL 07-2026" du tableau) reste
-  // inchangé, gelé à M-1 comme avant.
-  caYtdNComplet: number
-  caYtdN1: number
-  caYtdNByMacro: Record<string, number>
-  caYtdN1ByMacro: Record<string, number>
-  margePctYtdN: number | null
-  margeYtdNValue: number
-  margeYtdN1Value: number
-  margeYtdNByMacro: Record<string, number | null>
-  margeYtdNValueByMacro: Record<string, number>
-  margeYtdN1ValueByMacro: Record<string, number>
-  contratBfa: number
-  caVsN1: number | null
-  margeVsN1: number | null
-  realiseObjectif: number | null
-  qrcN1: number
-  frequenceCommande: number
-  niveauExclusivite: number
-  comNotreFaveur: number
-  garantie: number
-  qrcN: number
-  visiteTheorique: number
-  visiteRealise: number
-  // ── Visite réelle (v_rdv_unifie = RDV BLG + compagnon CEGECLIM) ────────
-  // Distincte du système existant (24 colonnes "Visite n°X" saisies à la
-  // main + visiteRealise ci-dessus, qui compte ces saisies) -- ajoutée en
-  // complément, sans toucher au mécanisme manuel existant. Uniquement
-  // renseignée sur les lignes row_kind='client' (vide sur TOTAL et sur les
-  // lignes mensuelles développées).
-  derniereVisiteReelle: string
-  prochaineVisiteReelle: string
-  nbVisitesReel: number
-  // ── Paramétrage des alertes de comportement (client_alertes_config) ───
-  // Mêmes 3 seuils que la section "🔔 Alertes de suivi" de la fiche client
-  // sur l'écran mobile (MobileClients.tsx) -- affichage seul ici (édition
-  // toujours via la fiche client / l'écran mobile), colonnes non affichées
-  // par défaut. null = règle désactivée pour ce client.
-  alerteMinAppelsVisitesMois: number | null
-  alerteMaxJoursSansDevis: number | null
-  alerteMaxJoursSansCommande: number | null
-}
-
-type ColumnDef = {
-  key: string
-  label: string
-  group: string
-  width: number
-  sticky?: 'collaborateur' | 'code' | 'label' | 'month'
-  className?: string
-  rotate?: boolean
-  editable?: {
-    domaine: ObjectiveDomain
-    rubrique: string
-    type: ObjectiveType
-  }
-  // Édition directe des seuils d'alerte de comportement (client_alertes_config),
-  // distincte de `editable` (qui cible objectif_tiers via save_objectif_tiers).
-  editableAlerte?: 'min_appels_visites_mois' | 'max_jours_sans_devis' | 'max_jours_sans_commande'
-  value: (row: SummaryRow) => any
-  format?: 'text' | 'keur' | 'keurBlank' | 'keurCompare' | 'pct' | 'pctBlank' | 'pctCompare' | 'points' | 'number' | 'numberBlank' | 'date' | 'action' | 'caBand'
-  compareValue?: (row: SummaryRow) => any
-}
-
-type SortState = { key: string; direction: SortDirection }
-type MapBooleanFilter = 'all' | 'yes' | 'no'
-type MapProfileFilter = '' | '400K€' | '150K€' | '80K€' | '20K€' | '< 20K€' | 'Sans CA'
-type MapProfilePeriodFilter = '12M' | 'N-1' | 'N-2'
-type MapLogicalOperator = 'OR' | 'AND'
-type CapitalSocialFilterOption = 'TOUS' | 'NC' | '<= 1 000€' | '>1 000€' | '>5000€' | '>9999€'
-type ProfileMatrixDimension = 'agence' | 'collaborateur'
-type EncoursDetailMode = 'macro' | 'type'
-
-type SyntheseMapClientRow = {
-  id: string
-  numero: string
-  intitule: string
-  siret: string | null
-  latitude: number | null
-  longitude: number | null
-  raison_sociale_affichee: string | null
-  activitePrincipaleEtablissement: string | null
-  naf_libelle_traduit: string | null
-  codePostalEtablissement: string | null
-  libelleCommuneEtablissement: string | null
-  dateCreationEtablissement: string | null
-  rge: boolean | string | null
-  rge_domaines_travaux: string | null
-  capacite_gaz: boolean | null
-  capacite_gaz_numero: string | null
-  capital_social: string | null
-  ca12m: number
-  caN1: number
-  caN2: number
-  caBandN: string
-  caBandN1: string
-  caBandN2: string
-  collaborateur: string
-  agence: string
-}
-
-type RefTiersMapRow = {
-  numero: string | null
   intitule: string | null
+  type_tiers: string | null
+  qualite: string | null
   siret: string | null
-  representant: string | null
+  ville_siege: string | null
+  code_postal_siege: string | null
+  famille: string | null
   agence_rattachement: string | null
-  depot_rattachement: string | null
-  code_naf: string | null
-  code_postal: string | null
-  ville: string | null
-  rge: string | boolean | null
-  attestation_capacite: string | boolean | null
-  capital_social?: string | null
+  en_sommeil: boolean
+  n_expedition_defaut: string | null
+  expedition_defaut_designation: string | null
+  li_no: string | null
+  adresse_intitule: string | null
+  li_adresse: string | null
+  li_complement: string | null
+  li_codepostal: string | null
+  li_ville: string | null
+  li_pays: string | null
+  adresse_principale: boolean | null
+  n_expedition_adresse: string | null
+  expedition_adresse_designation: string | null
+  li_telephone: string | null
+  li_contact: string | null
+  n_expedition_effectif: string | null
+  expedition_designation: string | null
+  expedition_base_calcul: string | null
+  expedition_frais_port_ht: number | null
 }
 
-type ClientMapDbRow = {
-  id: string
-  siret: string | null
-  raison_sociale_affichee: string | null
-  activitePrincipaleEtablissement: string | null
-  naf_libelle_traduit: string | null
-  codePostalEtablissement: string | null
-  libelleCommuneEtablissement: string | null
-  dateCreationEtablissement: string | null
-  latitude: number | null
-  longitude: number | null
-  coordonneeLambertAbscisseEtablissement?: number | null
-  coordonneeLambertOrdonneeEtablissement?: number | null
-  rge: boolean | string | null
-  rge_domaines_travaux: string | null
-  capacite_gaz: boolean | null
-  capacite_gaz_numero: string | null
-  capital_social: string | null
+function safeText(v: unknown) {
+  return String(v ?? '').trim()
 }
 
-type LastBusinessDates = {
-  devis: string | null
-  factures: string | null
-  bl: string | null
+function normaliserAgence(v: string | null): string | null {
+  const t = safeText(v).toUpperCase()
+  if (!t || t === '.') return null
+  if (t.replace(/\s+/g, '') === 'LAROCHELLE') return 'LA ROCHELLE'
+  return t
 }
 
-const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Sept', 'Oct', 'Nov', 'Déc']
-const FAMILY_MACROS = ['R/R', 'R/O', 'ECS', 'DRV', 'R_zone', 'Accessoire', 'PV', 'Autres']
-const ENCOURS_DOCUMENT_TYPES = ['BL-BR', 'PL', 'CDC']
-const N = new Date().getFullYear()
-const CURRENT_MONTH = new Date().getMonth() + 1
-// Règle SMC :
-// - les devis N restent comparés sur le mois courant complet disponible (M).
-// - le CA / la marge N sont comparés sur M-1, car le mois courant est non facturé ou partiel.
-// Exemple en juin : Devis = janvier → juin ; CA / marge = janvier → mai.
-const CLOSED_MONTH = CURRENT_MONTH
-const CA_CLOSED_MONTH = Math.max(0, CURRENT_MONTH - 1)
-const CLOSED_MONTH_YEAR = N
-const ANALYSIS_YEAR = N
-const N1_COMPARISON_MONTH = CLOSED_MONTH
-const CA_N1_COMPARISON_MONTH = CA_CLOSED_MONTH
-const ALL_COLLABORATEURS_VALUE = '__ALL_COLLABORATEURS__'
-
-function periodMonthLabel(month: number, year: number) {
-  return month > 0 ? `${String(month).padStart(2, '0')}-${year}` : `M-1-${year}`
+/** Colonnes à filtrer, factorisée pour être identique entre l'affichage à
+ * l'écran (limité) et l'export Excel (toutes les lignes, paginé). */
+function appliquerFiltresSage(
+  query: any,
+  params: { search: string; onlyPrincipale: boolean; exclureSommeil: boolean; familleFilter: string; agenceFilter: string; expeditionFilters: string[] },
+) {
+  const term = params.search.trim()
+  if (term) query = query.or(`numero_tiers.ilike.%${term}%,intitule.ilike.%${term}%,li_ville.ilike.%${term}%`)
+  if (params.onlyPrincipale) query = query.eq('adresse_principale', true)
+  if (params.exclureSommeil) query = query.eq('en_sommeil', false)
+  if (params.familleFilter) query = query.eq('famille', params.familleFilter)
+  if (params.agenceFilter) query = query.ilike('agence_rattachement', `%${params.agenceFilter}%`)
+  if (params.expeditionFilters.length > 0) query = query.in('expedition_designation', params.expeditionFilters)
+  return query
 }
 
-
-const ACTIONS = [
-  'Pack Sérénité PAC\n5 ans pièces',
-  'Pack Sérénité PAC\n10 ans pièces',
-  'Pack Sérénité PAC\n5 ans MO / 5 ans pièces',
-  'Garantie 5 ans YUTAKI\n(formation3j Merignac)',
-  'G5',
-  'Promo PAC RO installateurs',
-  'REC PROTRUST2',
-  'MES offerte',
-  'PRESTA TECH facturée',
-  'PRESTA MPR',
-  'C2E - Drapo',
-  'Synerciel',
-  'Rappel Vanne',
-  'Animation AGENCE\n(barbecue, dej technique…)',
-  'Animation Cegeclim\n(Barcelone, Rugby, ODP…)',
+const EXPORT_COLONNES_SAGE: Array<{ key: keyof ClientAdresseRow; label: string; transform?: (r: ClientAdresseRow) => string }> = [
+  { key: 'numero_tiers', label: 'N° tiers' },
+  { key: 'intitule', label: 'Intitulé' },
+  { key: 'type_tiers', label: 'Type' },
+  { key: 'qualite', label: 'Qualité' },
+  { key: 'siret', label: 'SIRET' },
+  { key: 'famille', label: 'Famille' },
+  { key: 'agence_rattachement', label: 'Agence de rattachement', transform: (r) => normaliserAgence(r.agence_rattachement) || '' },
+  { key: 'en_sommeil', label: 'En sommeil', transform: (r) => (r.en_sommeil ? 'Oui' : 'Non') },
+  { key: 'ville_siege', label: 'Ville du siège' },
+  { key: 'code_postal_siege', label: 'Code postal siège' },
+  { key: 'n_expedition_effectif', label: "Code expédition (effectif)" },
+  { key: 'expedition_designation', label: "Mode d'expédition (effectif)" },
+  { key: 'expedition_base_calcul', label: 'Base de calcul frais de port' },
+  { key: 'expedition_frais_port_ht', label: 'Frais de port prévu HT' },
+  { key: 'adresse_principale', label: 'Adresse principale', transform: (r) => (r.adresse_principale ? 'Oui' : 'Non') },
+  { key: 'li_no', label: 'N° adresse' },
+  { key: 'adresse_intitule', label: 'Intitulé adresse' },
+  { key: 'li_adresse', label: 'Adresse' },
+  { key: 'li_complement', label: 'Complément adresse' },
+  { key: 'li_codepostal', label: 'Code postal livraison' },
+  { key: 'li_ville', label: 'Ville livraison' },
+  { key: 'li_pays', label: 'Pays' },
+  { key: 'li_contact', label: 'Contact livraison' },
+  { key: 'li_telephone', label: 'Téléphone livraison' },
+  { key: 'n_expedition_adresse', label: "Code expédition adresse" },
+  { key: 'expedition_adresse_designation', label: "Mode d'expédition (adresse seule)" },
+  { key: 'n_expedition_defaut', label: 'Code expédition défaut client' },
+  { key: 'expedition_defaut_designation', label: "Mode d'expédition (défaut client seul)" },
 ]
 
-const VISITES = Array.from({ length: 24 }, (_, i) => `Visite n°${i + 1}`)
-
-function normalize(value: any) {
-  return String(value ?? '')
-    .trim()
-    .toUpperCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/\s+/g, ' ')
-}
-
-function loose(value: any) {
-  return String(value ?? '')
-    .trim()
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-}
-
-function safeText(value: any, fallback = '') {
-  const text = String(value ?? '').trim()
-  return text || fallback
-}
-
-function safeNumber(value: any) {
-  if (value === null || value === undefined || value === '') return 0
-  if (typeof value === 'number') return Number.isFinite(value) ? value : 0
-  const normalized = String(value).replace(/\s/g, '').replace(',', '.')
-  const n = Number(normalized)
-  return Number.isFinite(n) ? n : 0
-}
-
-function safeBool(value: any): boolean | null {
-  if (value === null || value === undefined || value === '') return null
-  if (value === true || value === false) return value
-  const text = loose(value)
-  if (['oui', 'true', 'vrai', '1', 'yes'].includes(text)) return true
-  if (['non', 'false', 'faux', '0', 'no'].includes(text)) return false
-  return null
-}
-
-function raw(row: Record<string, any>, keys: string[]) {
-  for (const key of keys) {
-    const value = row?.[key]
-    if (value !== null && value !== undefined && String(value).trim() !== '') return value
+/** Navigation clavier ↑/↓ générique pour les listes "N° tiers" à gauche.
+ * `getIndex` retrouve l'index de la ligne actuellement sélectionnée dans
+ * `rows` (comparaison propre à chaque onglet, ex. numero_tiers+li_no pour
+ * SAGE, numero_tiers seul pour BLG/Comparaison). */
+function creerHandlerNavigation<T>(
+  rows: T[],
+  selected: T | null,
+  setSelected: (r: T) => void,
+  getIndex: (rows: T[], selected: T | null) => number,
+  refs: React.MutableRefObject<Record<number, HTMLTableRowElement | null>>,
+) {
+  return (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
+    if (rows.length === 0) return
+    e.preventDefault()
+    const currentIndex = getIndex(rows, selected)
+    let nextIndex: number
+    if (currentIndex === -1) nextIndex = 0
+    else nextIndex = e.key === 'ArrowDown' ? Math.min(currentIndex + 1, rows.length - 1) : Math.max(currentIndex - 1, 0)
+    setSelected(rows[nextIndex])
+    refs.current[nextIndex]?.scrollIntoView({ block: 'nearest' })
   }
-  return null
 }
 
-function normalizeDateForInput(value: any) {
-  if (!value) return ''
-  const text = String(value).trim()
-  const iso = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/)
-  if (iso) return `${iso[1]}-${iso[2].padStart(2, '0')}-${iso[3].padStart(2, '0')}`
-  const fr = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})/)
-  if (fr) return `${fr[3]}-${fr[2].padStart(2, '0')}-${fr[1].padStart(2, '0')}`
-  return ''
-}
+function OngletSage() {
+  const [rows, setRows] = useState<ClientAdresseRow[]>([])
+  const [totalCount, setTotalCount] = useState<number | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [exportEnCours, setExportEnCours] = useState(false)
 
-function formatDateFr(value: any) {
-  const iso = normalizeDateForInput(value)
-  if (!iso) return safeText(value)
-  const [year, month, day] = iso.split('-')
-  return `${day}/${month}/${year}`
-}
+  const [search, setSearch] = useState('')
+  const [agenceFilter, setAgenceFilter] = useState('')
+  const [familleFilter, setFamilleFilter] = useState('')
+  const [expeditionFilters, setExpeditionFilters] = useState<string[]>([])
+  const [expeditionOuvert, setExpeditionOuvert] = useState(false)
+  const [onlyPrincipale, setOnlyPrincipale] = useState(true)
+  const [exclureSommeil, setExclureSommeil] = useState(true)
 
-const EMPTY_LAST_BUSINESS_DATES: LastBusinessDates = { devis: null, factures: null, bl: null }
+  const [selected, setSelected] = useState<ClientAdresseRow | null>(null)
 
-function normalizeBusinessDate(value: any): string | null {
-  if (!value) return null
-  const text = String(value).trim()
-  if (!text) return null
+  const [agenceOptions, setAgenceOptions] = useState<string[]>([])
+  const [familleOptions, setFamilleOptions] = useState<string[]>([])
+  const [expeditionOptions, setExpeditionOptions] = useState<string[]>([])
 
-  const iso = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/)
-  if (iso) return `${iso[1]}-${iso[2].padStart(2, '0')}-${iso[3].padStart(2, '0')}`
+  const expeditionRef = useRef<HTMLDivElement>(null)
+  const listRefs = useRef<Record<number, HTMLTableRowElement | null>>({})
 
-  const fr = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})/)
-  if (fr) return `${fr[3]}-${fr[2].padStart(2, '0')}-${fr[1].padStart(2, '0')}`
+  useEffect(() => {
+    function onClickOutside(e: MouseEvent) {
+      if (expeditionRef.current && !expeditionRef.current.contains(e.target as Node)) setExpeditionOuvert(false)
+    }
+    document.addEventListener('mousedown', onClickOutside)
+    return () => document.removeEventListener('mousedown', onClickOutside)
+  }, [])
 
-  const timestamp = new Date(text).getTime()
-  if (!Number.isFinite(timestamp)) return null
-  return new Date(timestamp).toISOString().slice(0, 10)
-}
+  useEffect(() => {
+    let cancelled = false
+    async function loadOptions() {
+      const { data, error: err } = await supabase
+        .from('v_sage_clients_adresse_livraison')
+        .select('agence_rattachement,famille,expedition_designation')
+        .limit(6000)
+      if (cancelled || err || !data) return
 
-function formatBusinessDate(value: string | null | undefined) {
-  const iso = normalizeBusinessDate(value)
-  if (!iso) return '—'
-  const [year, month, day] = iso.split('-')
-  return `${day}/${month}/${year}`
-}
+      const agences = new Set<string>()
+      const familles = new Set<string>()
+      const expeditions = new Set<string>()
+      ;(data as any[]).forEach((r) => {
+        const ag = normaliserAgence(r.agence_rattachement)
+        if (ag) agences.add(ag)
+        const fam = safeText(r.famille)
+        if (fam && fam !== 'Aucune') familles.add(fam)
+        const exp = safeText(r.expedition_designation)
+        if (exp) expeditions.add(exp)
+      })
+      setAgenceOptions(Array.from(agences).sort())
+      setFamilleOptions(Array.from(familles).sort())
+      setExpeditionOptions(Array.from(expeditions).sort())
+    }
+    void loadOptions()
+    return () => { cancelled = true }
+  }, [])
 
-function formatLastBusinessDatesLabel(dates: LastBusinessDates) {
-  return `Devis : ${formatBusinessDate(dates.devis)} · Factures : ${formatBusinessDate(dates.factures)} · BL : ${formatBusinessDate(dates.bl)}`
-}
+  useEffect(() => {
+    let cancelled = false
+    async function load() {
+      setLoading(true)
+      setError(null)
+      try {
+        let query = supabase
+          .from('v_sage_clients_adresse_livraison')
+          .select('*', { count: 'exact' })
+          .order('numero_tiers', { ascending: true })
+          .limit(10000)
+        query = appliquerFiltresSage(query, { search, onlyPrincipale, exclureSommeil, familleFilter, agenceFilter, expeditionFilters })
 
-function latestBusinessDate(values: Array<string | null>) {
-  const sortedValues = values
-    .map((value) => normalizeBusinessDate(value))
-    .filter((value): value is string => Boolean(value))
-    .sort()
-  return sortedValues.length ? sortedValues[sortedValues.length - 1] : null
-}
+        const { data, count, error: err } = await query
+        if (cancelled) return
+        if (err) throw err
+        setRows((data || []) as ClientAdresseRow[])
+        setTotalCount(typeof count === 'number' ? count : null)
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e))
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    void load()
+    return () => { cancelled = true }
+  }, [search, agenceFilter, familleFilter, expeditionFilters, onlyPrincipale, exclureSommeil])
 
-async function fetchLatestBusinessDate(table: string, dateColumns: string[], year: number) {
-  const start = `${year}-01-01`
-  const end = `${year + 1}-01-01`
+  const stats = useMemo(() => {
+    const clientsDistincts = new Set(rows.map((r) => r.numero_tiers)).size
+    const adressesPrincipales = rows.filter((r) => r.adresse_principale).length
+    const enSommeil = rows.filter((r) => r.en_sommeil).length
+    return { total: rows.length, clientsDistincts, adressesPrincipales, enSommeil }
+  }, [rows])
 
-  for (const dateColumn of dateColumns) {
+  const filtresActifs = Boolean(search.trim() || agenceFilter || familleFilter || expeditionFilters.length > 0)
+
+  function toggleExpedition(e: string) {
+    setExpeditionFilters((prev) => (prev.includes(e) ? prev.filter((x) => x !== e) : [...prev, e]))
+  }
+
+  function getIndexSage(list: ClientAdresseRow[], sel: ClientAdresseRow | null) {
+    if (!sel) return -1
+    return list.findIndex((r) => r.numero_tiers === sel.numero_tiers && r.li_no === sel.li_no)
+  }
+  const onListKeyDown = creerHandlerNavigation(rows, selected, setSelected, getIndexSage, listRefs)
+
+  /** Export Excel : rapatrie TOUTES les lignes correspondant aux filtres
+   * actuels (paginé par 1000, pas limité aux 3000 affichées à l'écran),
+   * puis génère un .xlsx avec l'ensemble des champs (EXPORT_COLONNES_SAGE). */
+  async function exporterExcel() {
+    setExportEnCours(true)
     try {
-      const { data, error } = await supabase
-        .from(table)
-        .select(dateColumn)
-        .not(dateColumn, 'is', null)
-        .gte(dateColumn, start)
-        .lt(dateColumn, end)
-        .order(dateColumn, { ascending: false })
-        .limit(1)
+      const toutes: ClientAdresseRow[] = []
+      let from = 0
+      const pageSize = 1000
+      while (true) {
+        let query = supabase
+          .from('v_sage_clients_adresse_livraison')
+          .select('*')
+          .order('numero_tiers', { ascending: true })
+          .range(from, from + pageSize - 1)
+        query = appliquerFiltresSage(query, { search, onlyPrincipale, exclureSommeil, familleFilter, agenceFilter, expeditionFilters })
+        const { data, error: err } = await query
+        if (err) throw err
+        const batch = (data || []) as ClientAdresseRow[]
+        toutes.push(...batch)
+        if (batch.length < pageSize) break
+        from += pageSize
+      }
 
-      if (error) continue
+      const feuille = toutes.map((r) => {
+        const ligne: Record<string, string> = {}
+        EXPORT_COLONNES_SAGE.forEach((c) => {
+          ligne[c.label] = c.transform ? c.transform(r) : safeText(r[c.key])
+        })
+        return ligne
+      })
 
-      const rawDate = ((data || []) as Record<string, any>[])[0]?.[dateColumn]
-      const normalized = normalizeBusinessDate(rawDate)
-      if (normalized) return normalized
-    } catch {
-      // On passe à la colonne candidate suivante pour rester compatible avec les variantes de schéma.
+      const ws = XLSX.utils.json_to_sheet(feuille)
+      ws['!cols'] = EXPORT_COLONNES_SAGE.map(() => ({ wch: 22 }))
+      const wb = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(wb, ws, 'Clients SAGE')
+      XLSX.writeFile(wb, `clients_sage_${new Date().toISOString().slice(0, 10)}.xlsx`)
+    } catch (e) {
+      alert('Erreur export Excel : ' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      setExportEnCours(false)
     }
   }
 
-  return null
-}
-
-async function fetchLatestBusinessDates(year: number): Promise<LastBusinessDates> {
-  const [devis, factures, blActivite, blFacture] = await Promise.all([
-    fetchLatestBusinessDate('devis_lignes', ['date_devis', 'date_piece', 'date_document'], year),
-    fetchLatestBusinessDate('facture_lignes', ['date_piece', 'date_facture', 'date_document'], year),
-    fetchLatestBusinessDate('activite_lignes', ['date_bl', 'date_piece_bl', 'date_livraison_bl', 'date_livraison'], year),
-    fetchLatestBusinessDate('facture_lignes', ['date_bl', 'date_piece_bl', 'date_livraison_bl', 'date_livraison'], year),
-  ])
-
-  return { devis, factures, bl: latestBusinessDate([blActivite, blFacture]) }
-}
-
-function latestUpdateIsoFromRows(rows: Array<{ updatedAt?: string | null }>) {
-  let latest = 0
-
-  rows.forEach((row) => {
-    if (!row.updatedAt) return
-
-    const timestamp = new Date(row.updatedAt).getTime()
-    if (Number.isFinite(timestamp) && timestamp > latest) latest = timestamp
-  })
-
-  return latest ? new Date(latest).toISOString() : ''
-}
-
-function isNullAmount(value: number | null | undefined) {
-  return value === null || value === undefined || !Number.isFinite(Number(value)) || Math.abs(Number(value)) < 0.000001
-}
-
-function formatKEur(value: number | null | undefined) {
-  return `${new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format((value || 0) / 1000)} K€`
-}
-
-function formatKEurBlank(value: number | null | undefined) {
-  if (isNullAmount(value)) return ''
-  return formatKEur(value)
-}
-
-function formatKEur0(value: number | null | undefined) {
-  if (isNullAmount(value)) return ''
-  return `${new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 0, maximumFractionDigits: 0 }).format((value || 0) / 1000)} K€`
-}
-
-function formatPct(value: number | null) {
-  if (value === null || value === undefined || !Number.isFinite(value)) return '—'
-  return `${new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(value)} %`
-}
-
-function formatPctBlank(value: number | null) {
-  if (value === null || value === undefined || !Number.isFinite(value)) return ''
-  return `${new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(value)} %`
-}
-
-function formatPoints(value: number | null) {
-  if (value === null || value === undefined || !Number.isFinite(value)) return ''
-  const sign = value > 0 ? '+' : ''
-  return `${sign}${new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(value)} pts`
-}
-
-function formatNumber(value: number) {
-  return new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 0 }).format(value || 0)
-}
-
-
-function normalizeSiret(value: any) {
-  return String(value ?? '').replace(/\D/g, '').trim()
-}
-
-const CA_PROFILE_BANDS: MapProfileFilter[] = ['400K€', '150K€', '80K€', '20K€', '< 20K€', 'Sans CA']
-
-function caBand(value: number | null | undefined): MapProfileFilter {
-  const n = safeNumber(value)
-  if (n >= 400000) return '400K€'
-  if (n >= 150000) return '150K€'
-  if (n >= 80000) return '80K€'
-  if (n >= 20000) return '20K€'
-  if (n > 0) return '< 20K€'
-  return 'Sans CA'
-}
-
-function caBandClass(band: string) {
-  if (band === '400K€') return 'caPill400'
-  if (band === '150K€') return 'caPill150'
-  if (band === '80K€') return 'caPill80'
-  if (band === '20K€') return 'caPill20'
-  if (band === '< 20K€') return 'caPillLow'
-  return 'caPillEmpty'
-}
-
-function CaBandPill({ band, compact = false }: { band: string | null | undefined; compact?: boolean }) {
-  const normalized = safeText(band, 'Sans CA')
-  return <span className={`caPill ${caBandClass(normalized)} ${compact ? 'compact' : ''}`}>{normalized === 'Sans CA' ? '—' : normalized}</span>
-}
-
-function CaProfileTagSet({ row, compact = false }: { row: Pick<SummaryRow, 'caBandN' | 'caBandN1' | 'caBandN2'>; compact?: boolean }) {
   return (
-    <span className={`caTagSet ${compact ? 'compact' : ''}`}>
-      <span><small>12M</small><CaBandPill band={row.caBandN} compact={compact} /></span>
-      <span><small>N-1</small><CaBandPill band={row.caBandN1} compact={compact} /></span>
-      <span><small>N-2</small><CaBandPill band={row.caBandN2} compact={compact} /></span>
-    </span>
+    <>
+      <section className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        <KpiCard label="Lignes affichées" value={stats.total} loading={loading} />
+        <KpiCard label="Clients distincts" value={stats.clientsDistincts} loading={loading} />
+        <KpiCard label="Adresses principales" value={stats.adressesPrincipales} loading={loading} tone="ok" />
+        <KpiCard label="Dont en sommeil" value={stats.enSommeil} loading={loading} tone="warn" />
+      </section>
+
+      <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
+        <div className="grid gap-2 md:grid-cols-4">
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="N° tiers, raison sociale ou ville…"
+            className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-sm font-medium outline-none focus:border-[#B4761A] md:col-span-2"
+          />
+          <select
+            value={agenceFilter}
+            onChange={(e) => setAgenceFilter(e.target.value)}
+            className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]"
+          >
+            <option value="">Agence : Toutes</option>
+            {agenceOptions.map((a) => (
+              <option key={a} value={a}>{a}</option>
+            ))}
+          </select>
+          <select
+            value={familleFilter}
+            onChange={(e) => setFamilleFilter(e.target.value)}
+            className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]"
+          >
+            <option value="">Famille : Toutes</option>
+            {familleOptions.map((f) => (
+              <option key={f} value={f}>{f}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="mt-2 grid gap-2 md:grid-cols-4">
+          {/* Sélection MULTIPLE des modes d'expédition -- menu à cases à
+             cocher (un <select> natif ne permet pas une sélection multiple
+             confortable au clic simple). */}
+          <div className="relative md:col-span-2" ref={expeditionRef}>
+            <button
+              type="button"
+              onClick={() => setExpeditionOuvert((v) => !v)}
+              className="flex h-10 w-full items-center justify-between rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]"
+            >
+              <span>{expeditionFilters.length === 0 ? "Mode d'expédition : Tous" : `Mode d'expédition (${expeditionFilters.length} sélectionné${expeditionFilters.length > 1 ? 's' : ''})`}</span>
+              <span className="text-[#8A8474]">{expeditionOuvert ? '▲' : '▼'}</span>
+            </button>
+            {expeditionOuvert && (
+              <div className="absolute z-20 mt-1 max-h-72 w-full overflow-auto rounded-lg border border-[#E5E1D8] bg-white p-1.5 shadow-lg">
+                {expeditionFilters.length > 0 && (
+                  <button type="button" onClick={() => setExpeditionFilters([])} className="mb-1 w-full rounded px-2 py-1 text-left text-[12px] font-bold text-[#B4761A] hover:underline">
+                    Tout désélectionner
+                  </button>
+                )}
+                {expeditionOptions.map((e) => (
+                  <label key={e} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[13px] hover:bg-[#F4F3F0]">
+                    <input type="checkbox" checked={expeditionFilters.includes(e)} onChange={() => toggleExpedition(e)} className="accent-[#B4761A]" />
+                    {e}
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+          <label className="flex h-10 items-center gap-2 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
+            <input type="checkbox" checked={onlyPrincipale} onChange={(e) => setOnlyPrincipale(e.target.checked)} className="accent-[#B4761A]" />
+            Adresses principales uniquement
+          </label>
+          <label className="flex h-10 items-center gap-2 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
+            <input type="checkbox" checked={exclureSommeil} onChange={(e) => setExclureSommeil(e.target.checked)} className="accent-[#B4761A]" />
+            Exclure les tiers en sommeil
+          </label>
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[#E5E1D8] pt-3">
+          {filtresActifs ? (
+            <button
+              type="button"
+              onClick={() => { setSearch(''); setAgenceFilter(''); setFamilleFilter(''); setExpeditionFilters([]) }}
+              className="text-[12px] font-bold text-[#B4761A] hover:underline"
+            >
+              Réinitialiser les filtres
+            </button>
+          ) : <span />}
+          <button
+            type="button"
+            onClick={() => void exporterExcel()}
+            disabled={exportEnCours || loading}
+            className="rounded-lg bg-[#111820] px-4 py-2 text-[13px] font-bold text-white hover:bg-[#252E3D] disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {exportEnCours ? 'Export en cours…' : '⬇ Exporter en Excel (tous les champs)'}
+          </button>
+        </div>
+      </section>
+
+      <section className="grid gap-4 lg:grid-cols-[1fr_1.3fr]">
+        <div className="rounded-xl border border-[#E5E1D8] bg-white p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">
+              {loading
+                ? 'Chargement…'
+                : totalCount !== null && totalCount > rows.length
+                  ? `${rows.length} affiché(s) sur ${totalCount} au total — affinez la recherche pour voir le reste`
+                  : `${rows.length} résultat${rows.length > 1 ? 's' : ''}`}
+            </div>
+            {error && <div className="text-[12px] font-semibold text-red-600">{error}</div>}
+          </div>
+          <div
+            tabIndex={0}
+            onKeyDown={onListKeyDown}
+            className="max-h-[760px] overflow-auto rounded-lg border border-[#E5E1D8] outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A]/50"
+          >
+            <table className="w-full text-left text-[13px]">
+              <thead className="sticky top-0 bg-[#F4F3F0] text-[11px] uppercase tracking-wide text-[#8A8474]">
+                <tr>
+                  <th className="px-3 py-2 font-bold">N° tiers</th>
+                  <th className="px-3 py-2 font-bold">Agence</th>
+                  <th className="px-3 py-2 font-bold">Expédition</th>
+                  <th className="px-3 py-2 text-right font-bold">Frais de port</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => {
+                  const key = `${r.numero_tiers}-${r.li_no ?? i}`
+                  const isSelected = selected && selected.numero_tiers === r.numero_tiers && selected.li_no === r.li_no
+                  return (
+                    <tr
+                      key={key}
+                      ref={(el) => { listRefs.current[i] = el }}
+                      onClick={() => setSelected(r)}
+                      className={`cursor-pointer border-t border-[#E5E1D8] transition-colors hover:bg-[#F4F3F0] ${isSelected ? 'bg-[#B4761A]/[0.06]' : ''}`}
+                    >
+                      <td className="px-3 py-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-mono text-[12px] font-semibold text-[#3A362E]">{r.numero_tiers}</span>
+                          {r.adresse_principale && (
+                            <span className="rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700">Principale</span>
+                          )}
+                          {r.en_sommeil && (
+                            <span className="rounded-full bg-[#F4F3F0] px-1.5 py-0.5 text-[10px] font-bold text-[#8A8474]">Sommeil</span>
+                          )}
+                        </div>
+                        <div className="truncate text-[12px] text-[#111820]">{r.intitule || '—'}</div>
+                      </td>
+                      <td className="px-3 py-2 text-[12px] text-[#3A362E]">{normaliserAgence(r.agence_rattachement) || '—'}</td>
+                      <td className="px-3 py-2 text-[12px] text-[#3A362E]">{r.expedition_designation || '—'}</td>
+                      <td className="px-3 py-2 text-right text-[12px] font-[var(--font-mono,monospace)] text-[#3A362E]">
+                        {r.expedition_frais_port_ht !== null ? `${Number(r.expedition_frais_port_ht).toFixed(2)} €` : '—'}
+                      </td>
+                    </tr>
+                  )
+                })}
+                {!loading && rows.length === 0 && (
+                  <tr><td colSpan={4} className="px-3 py-8 text-center text-[#8A8474]">Aucun résultat pour ces filtres.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-[#E5E1D8] bg-white p-4">
+          <div className="mb-3 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Détail</div>
+          {!selected ? (
+            <div className="flex h-64 items-center justify-center text-center text-[13px] text-[#8A8474]">
+              Sélectionne une ligne dans la liste pour voir la fiche complète.
+            </div>
+          ) : (
+            <div>
+              <div className="mb-3 flex items-start justify-between border-b border-[#E5E1D8] pb-3">
+                <div>
+                  <div className="font-mono text-[12px] font-bold text-[#8A8474]">{selected.numero_tiers}</div>
+                  <div className="text-[16px] font-bold text-[#111820]">{selected.intitule || '(intitulé non renseigné)'}</div>
+                </div>
+                <div className="flex gap-1.5">
+                  {selected.adresse_principale && (
+                    <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-bold text-emerald-700">Adresse principale</span>
+                  )}
+                  {selected.en_sommeil && (
+                    <span className="rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-bold text-red-700">En sommeil</span>
+                  )}
+                </div>
+              </div>
+
+              <DetailGroup title="Expédition retenue (adresse si renseignée, sinon défaut client)">
+                <DetailRow label="Mode d'expédition" value={selected.expedition_designation} />
+                <DetailRow label="Code" value={selected.n_expedition_effectif} />
+                <DetailRow label="Base de calcul frais de port" value={selected.expedition_base_calcul} />
+                <DetailRow label="Frais de port prévu HT" value={selected.expedition_frais_port_ht !== null ? `${Number(selected.expedition_frais_port_ht).toFixed(2)} €` : null} />
+              </DetailGroup>
+
+              <DetailGroup title="Fiche client (SAGE)">
+                <DetailRow label="Type" value={selected.type_tiers} />
+                <DetailRow label="Qualité" value={selected.qualite} />
+                <DetailRow label="SIRET" value={selected.siret} />
+                <DetailRow label="Famille" value={selected.famille} />
+                <DetailRow label="Agence de rattachement" value={normaliserAgence(selected.agence_rattachement)} />
+                <DetailRow label="Ville du siège" value={[selected.code_postal_siege, selected.ville_siege].filter(Boolean).join(' ')} />
+                <DetailRow label="Mode d'expédition par défaut (client)" value={selected.expedition_defaut_designation ? `${selected.expedition_defaut_designation} (code ${selected.n_expedition_defaut})` : selected.n_expedition_defaut} />
+              </DetailGroup>
+
+              <DetailGroup title="Adresse de livraison">
+                <DetailRow label="N° adresse" value={selected.li_no} />
+                <DetailRow label="Intitulé adresse" value={selected.adresse_intitule} />
+                <DetailRow label="Adresse" value={[selected.li_adresse, selected.li_complement].filter(Boolean).join(', ')} />
+                <DetailRow label="Code postal / Ville" value={[selected.li_codepostal, selected.li_ville].filter(Boolean).join(' ')} />
+                <DetailRow label="Pays" value={selected.li_pays} />
+                <DetailRow label="Contact" value={selected.li_contact} />
+                <DetailRow label="Téléphone" value={selected.li_telephone} />
+                <DetailRow
+                  label="Mode d'expédition (adresse seule)"
+                  value={selected.expedition_adresse_designation ? `${selected.expedition_adresse_designation} (code ${selected.n_expedition_adresse})` : selected.n_expedition_adresse}
+                />
+              </DetailGroup>
+            </div>
+          )}
+        </div>
+      </section>
+    </>
   )
 }
 
-function shortBandLabel(band: string | null | undefined) {
-  const normalized = safeText(band, 'Sans CA')
-  if (normalized === 'Sans CA') return ''
-  if (normalized === '< 20K€') return '<20'
-  return normalized.replace('K€', '')
-}
-
-function MapProfilePill({ band, color, outlined = true }: { band: string | null | undefined; color: string; outlined?: boolean }) {
-  const normalized = safeText(band, 'Sans CA')
-  const isEmpty = normalized === 'Sans CA'
-  const label = isEmpty ? '' : shortBandLabel(band)
-
+function KpiCard({ label, value, loading, tone }: { label: string; value: number; loading: boolean; tone?: 'ok' | 'warn' }) {
+  const color = tone === 'ok' ? '#3F9142' : tone === 'warn' ? '#B4761A' : '#111820'
   return (
-    <span
-      className={`mapProfilePill ${isEmpty ? 'empty' : ''}`}
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        flex: '0 0 52px',
-        width: 52,
-        minWidth: 52,
-        maxWidth: 52,
-        height: 24,
-        padding: '0 6px',
-        boxSizing: 'border-box',
-        borderRadius: 8,
-        background: color || '#d9d9d9',
-        border: outlined ? '2px solid #0f172a' : '0 solid transparent',
-        color: isEmpty ? 'transparent' : '#ffffff',
-        fontSize: 13,
-        fontWeight: 950,
-        lineHeight: 1,
-        whiteSpace: 'nowrap',
-        textAlign: 'center',
-        boxShadow: outlined ? '0 1px 2px rgba(15,23,42,.20)' : 'none',
-      }}
-      title={isEmpty ? 'Sans chiffre d’affaires' : normalized}
-    >
-      {label}
-    </span>
+    <div className="rounded-xl border border-[#E5E1D8] bg-white p-4">
+      <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">{label}</div>
+      {loading ? (
+        <div className="mt-2 h-8 w-16 animate-pulse rounded bg-[#F4F3F0]" />
+      ) : (
+        <div className="mt-1 text-[28px] font-bold tracking-tight" style={{ color }}>{value.toLocaleString('fr-FR')}</div>
+      )}
+    </div>
   )
 }
 
-function MapProfileTriplet({ row, color, outlined = true }: { row: Pick<SyntheseMapClientRow, 'caBandN' | 'caBandN1' | 'caBandN2'>; color: string; outlined?: boolean }) {
+function DetailGroup({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <span
-      className="mapProfileTriplet"
-      style={{
-        display: 'inline-flex',
-        gap: 8,
-        alignItems: 'center',
-        justifyContent: 'flex-end',
-        minWidth: 172,
-        whiteSpace: 'nowrap',
-      }}
-    >
-      <MapProfilePill band={row.caBandN} color={color} outlined={outlined} />
-      <MapProfilePill band={row.caBandN1} color={color} outlined={outlined} />
-      <MapProfilePill band={row.caBandN2} color={color} outlined={outlined} />
-    </span>
+    <div className="mb-4">
+      <div className="mb-1.5 text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">{title}</div>
+      <div className="space-y-0.5">{children}</div>
+    </div>
   )
 }
 
-function MapTripletAmountCell({ amount }: { amount: number | null | undefined }) {
-  const formatted = formatKEur0(amount)
-  const label = formatted || '\u00A0'
-
+function DetailRow({ label, value }: { label: string; value: string | null | undefined }) {
   return (
-    <span className="mapTripletAmountCell">
-      <span className="mapTripletAmountLabel">{label}</span>
-    </span>
+    <div className="grid grid-cols-[1fr_1.4fr] gap-2 rounded-lg px-2 py-1.5 text-[13px] odd:bg-[#F4F3F0]/60">
+      <span className="font-semibold text-[#3A362E]">{label}</span>
+      <span className="text-[#111820]">{value || '—'}</span>
+    </div>
   )
 }
 
-function MapProfileTripletWithAmounts({ row, color }: { row: Pick<SyntheseMapClientRow, 'caBandN' | 'caBandN1' | 'caBandN2' | 'ca12m' | 'caN1' | 'caN2'>; color: string }) {
-  return (
-    <span className="mapTripletColumns" aria-label="Profils CA 12M, N-1 et N-2">
-      <span className="mapTripletColumn">
-        <MapProfilePill band={row.caBandN} color={color} />
-        <MapTripletAmountCell amount={row.ca12m} />
-      </span>
-      <span className="mapTripletColumn">
-        <MapProfilePill band={row.caBandN1} color={color} />
-        <MapTripletAmountCell amount={row.caN1} />
-      </span>
-      <span className="mapTripletColumn">
-        <MapProfilePill band={row.caBandN2} color={color} />
-        <MapTripletAmountCell amount={row.caN2} />
-      </span>
-    </span>
-  )
+// ─────────────────────────────────────────────────────────────────────────
+// Types partagés SAGE ↔ BLG (onglets BLG + Comparaison)
+// ─────────────────────────────────────────────────────────────────────────
+
+type Summary = {
+  total_sage: number
+  apparies: number
+  manquants_blg: number
+  sans_ecart: number
+  avec_ecart: number
+  par_champ: Record<string, number>
 }
 
-function MapProfileMultiSelect({
-  selected,
-  onChange,
-}: {
-  selected: MapProfileFilter[]
-  onChange: (next: MapProfileFilter[]) => void
-}) {
-  function toggleBand(band: MapProfileFilter, checked: boolean) {
-    if (checked) onChange(selected.includes(band) ? selected : [...selected, band])
-    else onChange(selected.filter((item) => item !== band))
+type ControleRow = {
+  numero_tiers: string
+  blg_id_tiers: string | null
+  blg_partner_id: number | null
+  statut_appariement: 'apparie' | 'manquant_blg'
+  sage_intitule: string | null; blg_intitule: string | null
+  sage_siret: string | null; blg_siret: string | null
+  sage_code_naf: string | null; blg_code_naf: string | null
+  sage_code_postal: string | null; blg_code_postal: string | null
+  sage_ville: string | null; blg_ville: string | null
+  sage_representant: string | null; blg_commercial: string | null
+  sage_encours: number | null; blg_encours: number | null
+  sage_assurance_credit: number | null; blg_assurance_credit: number | null
+  sage_famille: string | null; blg_famille: string | null
+  sage_frais_facturation: string | null; blg_frais_facturation: string | null
+  sage_routage_promo: string | null; blg_routage_promo: string | null
+  sage_facture_email: string | null; blg_facture_electronique: string | null
+  sage_releve_facture: string | null; blg_releve_facture: string | null
+  sage_type_facture: string | null; blg_type_facture: string | null
+  sage_capacite_expiration: string | null; blg_capacite_expiration: string | null
+  // Banque (nouveau)
+  sage_banque: string | null; blg_banque: string | null
+  sage_banque_bban: string | null; blg_iban: string | null
+  // Téléphone, TVA, Adresse (nouveau — téléphone et TVA comparés automatiquement,
+  // adresse affichée côte à côte seulement, voir notes du mapping)
+  sage_telephone: string | null; blg_telephone: string | null
+  sage_numero_identifiant: string | null; blg_tva_intra: string | null
+  sage_adresse: string | null; blg_adresse: string | null
+  // Attestation de capacité (désormais comparée automatiquement) et
+  // Catégorie AF/GAF (affichée à titre indicatif, comparée aux tags BLG)
+  sage_attestation_capacite: string | null; blg_attestation_capacite: string | null
+  sage_categorie_af_gaf: string | null
+  // Division BLG : conservée en information seule, ne correspond PAS à
+  // l'agence de rattachement SAGE (voir notes du mapping) — pas d'équivalent
+  // "blg_agence" côté champs_en_ecart pour l'instant.
+  blg_division: string | null
+  champs_en_ecart: string[]
+  sage_mise_en_sommeil: boolean | null
+  blg_est_entite_interne: boolean | null
+  blg_est_adresse_livraison: boolean | null
+  sage_updated_at: string | null
+  blg_last_update: string | null
+  sage_qualite: string | null
+  blg_tags: string[] | null
+  sage_contact: string | null
+  blg_contacts_resume: string | null
+  blg_contact_principal: string | null
+  blg_nb_contacts: number | null
+  sage_agence_rattachement: string | null
+  sage_abrege: string | null
+  blg_nom_court: string | null
+}
+
+type Domaine = 'client' | 'article' | 'devis' | 'facture'
+type ChampInventaire = { cote: 'sage' | 'blg'; colonne: string; type: string }
+type ChampMapping = {
+  id: number
+  domaine: string
+  champ_sage: string
+  champ_blg: string | null
+  label: string | null
+  type_comparaison: 'auto' | 'manuel' | 'affichage_seul' | 'non_comparable'
+  notes: string | null
+  // Numéros de pastille du document Excel de reprise et libellés exacts tels
+  // qu'affichés à l'écran (distincts des noms techniques champ_sage/champ_blg).
+  // numero_blg contient l'écran entre parenthèses car la numérotation BLG se
+  // répète d'un écran à l'autre (ex. "24 (Suivi)" vs "24 (Gérer les IBAN)").
+  numero_sage: number | null
+  numero_blg: string | null
+  nom_ecran_sage: string | null
+  nom_ecran_blg: string | null
+}
+type SyncLogEntry = { table_name: string; rows_synced: number; status: string; started_at: string; finished_at: string }
+type Operateur = 'egal' | 'contient' | 'ne_contient_pas' | 'commence_par' | 'est_vide' | 'non_vide'
+type FiltreCondition = { id: string; cote: 'sage' | 'blg'; champ: string; operateur: Operateur; valeur: string }
+
+const OPERATEUR_LABELS: Record<Operateur, string> = {
+  egal: 'est égal à', contient: 'contient', ne_contient_pas: 'ne contient pas',
+  commence_par: 'commence par', est_vide: 'est vide', non_vide: "n'est pas vide",
+}
+function nouvelleCondition(): FiltreCondition {
+  return { id: Math.random().toString(36).slice(2), cote: 'sage', champ: '', operateur: 'contient', valeur: '' }
+}
+const CHAMP_LABELS: Record<string, string> = {
+  intitule: 'Intitulé', siret: 'SIRET', code_naf: 'Code NAF', code_postal: 'Code postal', ville: 'Ville',
+  representant: 'Représentant', encours: "Encours autorisé", assurance_credit: 'Assurance crédit',
+  famille: 'Famille', frais_facturation: 'Frais de facturation', releve_facture: 'Relevé de facture',
+  type_facture: 'Type de facture', capacite_expiration: 'Capacité expiration',
+  routage_promo: 'Routage promo', facture_email: 'Facture électronique',
+  // Nouveaux champs (banque + attestation)
+  banque_nom: 'Banque (nom)', banque_bban: 'IBAN / RIB', attestation_capacite: 'Attestation de capacité',
+  telephone: 'Téléphone', numero_identifiant: 'Identifiant TVA',
+}
+function formatCellValue(v: unknown): string {
+  if (v === null || v === undefined || v === '') return '—'
+  if (typeof v === 'boolean') return v ? 'Oui' : 'Non'
+  if (Array.isArray(v)) return v.length ? v.map((x) => (typeof x === 'object' ? JSON.stringify(x) : String(x))).join(', ') : '—'
+  if (typeof v === 'object') return JSON.stringify(v)
+  return String(v)
+}
+
+/** Captures d'écran issues du document Excel de reprise SAGE ↔ BLG, à déposer
+ * dans /public/mapping-help/ pour que le petit "ⓘ" du panneau de comparaison
+ * puisse les afficher. `numeros` indique quelles pastilles de mapping (n°
+ * SAGE, ou n° BLG tel qu'utilisé dans nom_ecran_blg / numero_blg) apparaissent
+ * sur cette capture, pour pouvoir la retrouver depuis une ligne du tableau. */
+type CaptureEcran = { fichier: string; titre: string; numeros: number[] }
+
+const CAPTURES_SAGE: CaptureEcran[] = [
+  { fichier: '/mapping-help/sage-01-identification.png', titre: 'Identification', numeros: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] },
+  { fichier: '/mapping-help/sage-02-tarifs-representant.png', titre: 'Tarifs', numeros: [11] },
+  { fichier: '/mapping-help/sage-03-banque-compte.png', titre: 'Banques — Compte bancaire', numeros: [12, 13, 14, 15, 16] },
+  { fichier: '/mapping-help/sage-04-banque-agence.png', titre: 'Banques — Agence', numeros: [17] },
+  { fichier: '/mapping-help/sage-05-champs-libres.png', titre: 'Champs libres — Informations libres', numeros: [18, 19, 20, 21, 22, 23, 24, 25, 26] },
+  { fichier: '/mapping-help/sage-06-bloc-notes.png', titre: 'Champs libres — Bloc-notes', numeros: [27] },
+  { fichier: '/mapping-help/sage-07-documents-attaches.png', titre: 'Champs libres — Documents attachés', numeros: [] },
+  { fichier: '/mapping-help/sage-08-solvabilite.png', titre: 'Solvabilité', numeros: [28, 29] },
+  { fichier: '/mapping-help/sage-09-conditions-paiement.png', titre: 'Paramètres — Conditions de paiement', numeros: [30] },
+  { fichier: '/mapping-help/sage-10-options-traitement.png', titre: 'Paramètres — Options de traitement', numeros: [] },
+  { fichier: '/mapping-help/sage-11-options-impression.png', titre: "Paramètres — Options d'impression", numeros: [31] },
+  { fichier: '/mapping-help/sage-12-adresses-liste.png', titre: 'Adresses — Liste', numeros: [32] },
+  { fichier: '/mapping-help/sage-13-adresse-detail.png', titre: 'Adresses — Détail', numeros: [33, 34, 35, 36] },
+  { fichier: '/mapping-help/sage-14-contacts.png', titre: 'Contacts', numeros: [37, 38, 39, 40] },
+]
+
+const CAPTURES_BLG: CaptureEcran[] = [
+  { fichier: '/mapping-help/blg-01-editer-entreprise.png', titre: 'Éditer entreprise', numeros: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] },
+  { fichier: '/mapping-help/blg-02-editer-gestion.png', titre: 'Éditer la gestion', numeros: [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20] },
+  { fichier: '/mapping-help/blg-03-gerer-iban.png', titre: 'Gérer les IBAN', numeros: [11, 13, 18, 21, 22, 23, 24, 25] },
+  { fichier: '/mapping-help/blg-04-tags-suivi.png', titre: 'Tags & Suivi', numeros: [22, 23, 24] },
+  { fichier: '/mapping-help/blg-05-informations-cegeclim.png', titre: 'Informations CEGECLIM', numeros: [25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35] },
+  { fichier: '/mapping-help/blg-06-liens-contact.png', titre: 'Liens contact', numeros: [] },
+]
+
+/** Panneau d'aide déclenché par le petit "ⓘ" : deux onglets, les captures
+ * d'écran du document Excel (SAGE puis BLG) et la liste complète du mapping
+ * (y compris les champs non comparables), avec les numéros de pastille. */
+function MappingInfoModal({ mapping, onClose }: { mapping: ChampMapping[]; onClose: () => void }) {
+  const [tab, setTab] = useState<'captures' | 'liste'>('liste')
+  const [zoomed, setZoomed] = useState<CaptureEcran | null>(null)
+
+  const lignesTriees = useMemo(() => {
+    return [...mapping].sort((a, b) => {
+      if (a.numero_sage !== null && b.numero_sage !== null) return a.numero_sage - b.numero_sage
+      if (a.numero_sage !== null) return -1
+      if (b.numero_sage !== null) return 1
+      return (a.label || a.champ_sage).localeCompare(b.label || b.champ_sage)
+    })
+  }, [mapping])
+
+  const STATUT_STYLE: Record<ChampMapping['type_comparaison'], { label: string; className: string }> = {
+    auto: { label: 'Comparé automatiquement', className: 'bg-emerald-50 text-emerald-700' },
+    manuel: { label: 'Mapping manuel', className: 'bg-[#B4761A]/[0.12] text-[#96600F]' },
+    affichage_seul: { label: 'Affiché, non comparé', className: 'bg-[#F4F3F0] text-[#3A362E]' },
+    non_comparable: { label: 'Non comparable', className: 'bg-red-50 text-red-700' },
   }
 
   return (
-    <div className="mapMultiSelect mapProfileOpenGroup">
-      <label className="mapMultiSelectItem mapMultiSelectAll">
-        <input type="checkbox" checked={!selected.length} onChange={() => onChange([])} />
-        <span>Tous</span>
-      </label>
-      <div className="mapProfileBandChoices">
-        {CA_PROFILE_BANDS.map((band) => (
-          <label key={band} className="mapMultiSelectItem">
-            <input type="checkbox" checked={selected.includes(band)} onChange={(e) => toggleBand(band, e.target.checked)} />
-            <span>{band}</span>
-          </label>
-        ))}
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div
+        className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-[#E5E1D8] px-5 py-4">
+          <div>
+            <div className="text-[15px] font-bold text-[#111820]">Documentation du mapping SAGE ↔ BLG</div>
+            <p className="text-[12px] text-[#8A8474]">Captures d'écran et liste complète, y compris les champs non comparables.</p>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-lg px-2 py-1 text-[13px] font-bold text-[#8A8474] hover:bg-[#F4F3F0] hover:text-[#111820]">✕ Fermer</button>
+        </div>
+
+        <div className="flex gap-2 border-b border-[#E5E1D8] px-5 pt-3">
+          <button type="button" onClick={() => setTab('liste')}
+            className={`rounded-t-lg px-4 py-2 text-[13px] font-bold ${tab === 'liste' ? 'border-b-2 border-[#B4761A] text-[#111820]' : 'text-[#8A8474] hover:text-[#111820]'}`}>
+            Liste de mapping ({mapping.length})
+          </button>
+          <button type="button" onClick={() => setTab('captures')}
+            className={`rounded-t-lg px-4 py-2 text-[13px] font-bold ${tab === 'captures' ? 'border-b-2 border-[#B4761A] text-[#111820]' : 'text-[#8A8474] hover:text-[#111820]'}`}>
+            Captures d'écran ({CAPTURES_SAGE.length + CAPTURES_BLG.length})
+          </button>
+        </div>
+
+        <div className="overflow-auto p-5">
+          {tab === 'liste' ? (
+            <table className="w-full text-left text-[13px]">
+              <thead className="sticky top-0 bg-white text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">
+                <tr className="border-b border-[#E5E1D8]">
+                  <th className="py-2 pr-2">N° SAGE</th>
+                  <th className="py-2 pr-2">Champ SAGE</th>
+                  <th className="py-2 pr-2">N° BLG</th>
+                  <th className="py-2 pr-2">Champ BLG</th>
+                  <th className="py-2 pr-2">Statut</th>
+                  <th className="py-2">Note</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lignesTriees.map((m) => {
+                  const statut = STATUT_STYLE[m.type_comparaison]
+                  return (
+                    <tr key={m.id} className="border-b border-[#F4F3F0] align-top">
+                      <td className="py-2 pr-2 font-mono text-[12px] text-[#8A8474]">{m.numero_sage ?? '—'}</td>
+                      <td className="py-2 pr-2 font-semibold text-[#3A362E]">{m.nom_ecran_sage || m.label || m.champ_sage}</td>
+                      <td className="py-2 pr-2 font-mono text-[12px] text-[#8A8474]">{m.numero_blg ?? '—'}</td>
+                      <td className="py-2 pr-2 font-semibold text-[#3A362E]">{m.nom_ecran_blg || m.champ_blg || '—'}</td>
+                      <td className="py-2 pr-2">
+                        <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${statut.className}`}>{statut.label}</span>
+                      </td>
+                      <td className="py-2 text-[12px] text-[#8A8474]">{m.notes || '—'}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          ) : zoomed ? (
+            <div>
+              <button type="button" onClick={() => setZoomed(null)} className="mb-3 text-[12px] font-bold text-[#B4761A] hover:underline">← Retour à la liste des captures</button>
+              <div className="mb-2 text-[13px] font-bold text-[#111820]">{zoomed.titre}</div>
+              {zoomed.numeros.length > 0 && (
+                <p className="mb-2 text-[12px] text-[#8A8474]">Pastilles visibles sur cette capture : {zoomed.numeros.join(', ')}</p>
+              )}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={zoomed.fichier} alt={zoomed.titre} className="w-full rounded-lg border border-[#E5E1D8]" />
+            </div>
+          ) : (
+            <div className="space-y-6">
+              <div>
+                <div className="mb-2 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Écrans SAGE</div>
+                <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                  {CAPTURES_SAGE.map((c) => (
+                    <button key={c.fichier} type="button" onClick={() => setZoomed(c)}
+                      className="overflow-hidden rounded-lg border border-[#E5E1D8] text-left hover:border-[#B4761A]">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={c.fichier} alt={c.titre} className="h-28 w-full object-cover object-top" />
+                      <div className="p-2">
+                        <div className="truncate text-[12px] font-bold text-[#3A362E]">{c.titre}</div>
+                        <div className="text-[11px] text-[#8A8474]">{c.numeros.length > 0 ? `N° ${c.numeros.join(', ')}` : 'Non numéroté'}</div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <div className="mb-2 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Écrans BLG</div>
+                <p className="mb-2 text-[12px] text-[#8A8474]">La numérotation BLG se répète d'un écran à l'autre (ex. le n°24 désigne un champ différent selon l'écran) — vérifie toujours le titre de la capture.</p>
+                <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                  {CAPTURES_BLG.map((c) => (
+                    <button key={c.fichier} type="button" onClick={() => setZoomed(c)}
+                      className="overflow-hidden rounded-lg border border-[#E5E1D8] text-left hover:border-[#B4761A]">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={c.fichier} alt={c.titre} className="h-28 w-full object-cover object-top" />
+                      <div className="p-2">
+                        <div className="truncate text-[12px] font-bold text-[#3A362E]">{c.titre}</div>
+                        <div className="text-[11px] text-[#8A8474]">{c.numeros.length > 0 ? `N° ${c.numeros.join(', ')}` : 'Non numéroté'}</div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )
 }
 
-function formatCompareKEur(current: number | null | undefined, previous: number | null | undefined) {
-  const currentText = formatKEurBlank(current)
-  const previousText = formatKEurBlank(previous)
-  if (!currentText && !previousText) return ''
-  if (!previousText) return currentText
-  return `${currentText || '0,0 K€'} (${previousText})`
-}
-
-function formatComparePct(current: number | null | undefined, previous: number | null | undefined) {
-  const currentText = formatPctBlank(current == null ? null : Number(current))
-  const previousText = formatPctBlank(previous == null ? null : Number(previous))
-  if (!currentText && !previousText) return ''
-  if (!previousText) return currentText
-  return `${currentText || '0,0 %'} (${previousText})`
-}
-
-
-type MapSectorDefinition = {
-  prefixes: string[]
-  label: string
-  color: string
-  textColor?: string
-}
-
-const MAP_TRACKED_SECTORS: MapSectorDefinition[] = [
-  { prefixes: ['43.21', '4321'], label: 'Electricité ENR', color: '#a2cc88' },
-  { prefixes: ['43.22A', '4322A'], label: 'Plomberie', color: '#c3b691' },
-  { prefixes: ['43.22B', '4322B'], label: 'Installateur CVC', color: '#8ba9be' },
-  { prefixes: ['41.20', '4120'], label: 'CMI', color: '#e0a961' },
-  { prefixes: ['28.25Z', '2825Z'], label: 'Equipement Frigorifiques Indus.', color: '#00A3FF' },
-  { prefixes: ['33.20B', '3320B'], label: 'Installation de machines mécaniques', color: '#4b5563', textColor: '#ffffff' },
-  { prefixes: ['33.12Z', '3312Z'], label: 'Réparation de machines', color: '#4b5563', textColor: '#ffffff' },
-  { prefixes: ['43.29A', '4329A'], label: "Travaux d'isolation", color: '#f9a8d4' },
-  { prefixes: ['43.99', '4399'], label: 'Bâtiment', color: '#8e9db3' },
+/** Colonnes autonomes (pas de pendant SAGE/BLG à comparer) pour l'export Comparaison. */
+const EXPORT_COLONNES_SIMPLES: Array<{ key: keyof ControleRow; label: string; transform?: (r: ControleRow) => string }> = [
+  { key: 'numero_tiers', label: 'N° tiers' },
+  { key: 'statut_appariement', label: 'Statut appariement', transform: (r) => (r.statut_appariement === 'apparie' ? 'Apparié' : 'Manquant BLG') },
+  { key: 'champs_en_ecart', label: 'Nb champs en écart', transform: (r) => String(r.champs_en_ecart?.length ?? 0) },
+  { key: 'champs_en_ecart', label: 'Champs en écart (détail)', transform: (r) => (r.champs_en_ecart || []).join(', ') },
+  { key: 'sage_mise_en_sommeil', label: 'Mise en sommeil (SAGE)', transform: (r) => formatCellValue(r.sage_mise_en_sommeil) },
+  { key: 'blg_est_entite_interne', label: 'Entité interne (BLG)', transform: (r) => formatCellValue(r.blg_est_entite_interne) },
+  { key: 'blg_est_adresse_livraison', label: 'Adresse de livraison uniquement (BLG)', transform: (r) => formatCellValue(r.blg_est_adresse_livraison) },
+  { key: 'blg_contacts_resume', label: 'Contacts (BLG)' },
+  { key: 'blg_nb_contacts', label: 'Nb contacts (BLG)', transform: (r) => formatCellValue(r.blg_nb_contacts) },
+  { key: 'sage_abrege', label: 'Abrégé (SAGE)' },
+  { key: 'blg_nom_court', label: 'Nom court (BLG)' },
+  { key: 'blg_id_tiers', label: 'ID tiers (BLG, brut)' },
+  { key: 'blg_partner_id', label: 'Partner ID (BLG)', transform: (r) => formatCellValue(r.blg_partner_id) },
+  { key: 'sage_updated_at', label: 'Dernière mise à jour (SAGE)' },
+  { key: 'blg_last_update', label: 'Dernière mise à jour (BLG)' },
 ]
 
-const MAP_TRACKED_SECTOR_LABELS = MAP_TRACKED_SECTORS.map((sector) => sector.label)
-const MAP_CAPITAL_SOCIAL_FILTER_OPTIONS: CapitalSocialFilterOption[] = ['NC', '<= 1 000€', '>1 000€', '>5000€', '>9999€']
-
-function normalizeNafCodeForMap(value: string | null | undefined): string {
-  return String(value || '').replace(/\s/g, '').toUpperCase()
+/** Normalise une valeur pour comparaison export (même esprit que la vue SQL) : trim + upper, tableaux joints. */
+function normaliserPourExport(v: unknown): string {
+  if (v === null || v === undefined) return ''
+  if (typeof v === 'boolean') return v ? 'OUI' : 'NON'
+  if (Array.isArray(v)) return v.map(String).join(', ').toUpperCase().trim()
+  return String(v).toUpperCase().trim()
 }
 
-function findMapSectorByCode(value: string | null | undefined) {
-  const code = normalizeNafCodeForMap(value)
-  if (!code) return null
-  return MAP_TRACKED_SECTORS.find((sector) => sector.prefixes.some((prefix) => code.startsWith(prefix))) || null
+/** Une paire de colonnes SAGE ↔ BLG comparables, avec le numéro de mapping du
+ * document Excel (pour l'en-tête) et le mode de comparaison :
+ * - compareStrict=true  : vert si identique, rouge si écart, orange si une des deux valeurs manque
+ * - compareStrict=false : toujours orange (affichage seul, non vérifié — ex. Qualité/tags, Adresse) */
+type PaireExport = {
+  numeroSage: number | null
+  labelSage: string
+  sageKey: keyof ControleRow
+  numeroBlg: string | null
+  labelBlg: string
+  blgKey: keyof ControleRow
+  compareStrict: boolean
+  enEcart?: (r: ControleRow) => boolean
 }
 
-function findMapSectorByLabel(value: string | null | undefined) {
-  const normalized = loose(value)
-  if (!normalized) return null
-  return MAP_TRACKED_SECTORS.find((sector) => {
-    const label = loose(sector.label)
-    return label === normalized || normalized.includes(label) || label.includes(normalized)
-  }) || null
-}
+const EXPORT_PAIRES_COMPARAISON: PaireExport[] = [
+  { numeroSage: 2, labelSage: 'Intitulé', sageKey: 'sage_intitule', numeroBlg: '2', labelBlg: 'Raison sociale', blgKey: 'blg_intitule', compareStrict: true },
+  { numeroSage: 3, labelSage: 'Qualité', sageKey: 'sage_qualite', numeroBlg: '22', labelBlg: 'Tags', blgKey: 'blg_tags', compareStrict: false },
+  { numeroSage: 5, labelSage: 'Adresse', sageKey: 'sage_adresse', numeroBlg: '8', labelBlg: 'Adresse', blgKey: 'blg_adresse', compareStrict: false },
+  { numeroSage: 6, labelSage: 'Téléphone', sageKey: 'sage_telephone', numeroBlg: '9', labelBlg: 'Standard', blgKey: 'blg_telephone', compareStrict: true },
+  { numeroSage: 8, labelSage: 'Siret', sageKey: 'sage_siret', numeroBlg: '6', labelBlg: 'Numéro entreprise', blgKey: 'blg_siret', compareStrict: true },
+  { numeroSage: 9, labelSage: 'Identifiant TVA', sageKey: 'sage_numero_identifiant', numeroBlg: '7', labelBlg: 'TVA intracommunautaire', blgKey: 'blg_tva_intra', compareStrict: true },
+  { numeroSage: 10, labelSage: 'Code NAF', sageKey: 'sage_code_naf', numeroBlg: null, labelBlg: 'Code NAF', blgKey: 'blg_code_naf', compareStrict: true },
+  { numeroSage: null, labelSage: 'Code postal', sageKey: 'sage_code_postal', numeroBlg: null, labelBlg: 'Code postal', blgKey: 'blg_code_postal', compareStrict: true },
+  { numeroSage: null, labelSage: 'Ville', sageKey: 'sage_ville', numeroBlg: null, labelBlg: 'Ville', blgKey: 'blg_ville', compareStrict: true },
+  {
+    numeroSage: 11, labelSage: 'Représentant', sageKey: 'sage_representant', numeroBlg: '24', labelBlg: 'Commercial', blgKey: 'blg_commercial', compareStrict: true,
+    enEcart: (r) => {
+      const prenom = normaliserPourExport(r.sage_representant).split(/\s+/)[0]
+      const commercial = normaliserPourExport(r.blg_commercial)
+      if (!prenom || !commercial) return false
+      return !commercial.includes(prenom)
+    },
+  },
+  { numeroSage: 12, labelSage: 'Banque (nom)', sageKey: 'sage_banque', numeroBlg: '24', labelBlg: 'Banque (nom)', blgKey: 'blg_banque', compareStrict: true },
+  {
+    numeroSage: 15, labelSage: 'IBAN / RIB', sageKey: 'sage_banque_bban', numeroBlg: '22', labelBlg: 'IBAN', blgKey: 'blg_iban', compareStrict: true,
+    enEcart: (r) => {
+      const bban = normaliserPourExport(r.sage_banque_bban)
+      const iban = normaliserPourExport(r.blg_iban)
+      if (!bban || !iban) return false
+      return bban !== iban.slice(-23)
+    },
+  },
+  { numeroSage: 18, labelSage: 'Capacité expiration', sageKey: 'sage_capacite_expiration', numeroBlg: '27', labelBlg: 'Capacité expiration', blgKey: 'blg_capacite_expiration', compareStrict: true },
+  { numeroSage: 22, labelSage: 'Attestation de capacité', sageKey: 'sage_attestation_capacite', numeroBlg: '26', labelBlg: 'Attestation capacité', blgKey: 'blg_attestation_capacite', compareStrict: true },
+  { numeroSage: 19, labelSage: 'Facture @', sageKey: 'sage_facture_email', numeroBlg: '32', labelBlg: 'Facture électronique', blgKey: 'blg_facture_electronique', compareStrict: true },
+  { numeroSage: 20, labelSage: 'Relevé de facture', sageKey: 'sage_releve_facture', numeroBlg: '29', labelBlg: 'Relevé de facture', blgKey: 'blg_releve_facture', compareStrict: true },
+  { numeroSage: 21, labelSage: 'Famille', sageKey: 'sage_famille', numeroBlg: '30', labelBlg: 'Famille', blgKey: 'blg_famille', compareStrict: true },
+  { numeroSage: 23, labelSage: 'Frais facturation', sageKey: 'sage_frais_facturation', numeroBlg: '28', labelBlg: 'Frais de facturation', blgKey: 'blg_frais_facturation', compareStrict: true },
+  { numeroSage: 24, labelSage: 'Routage promo', sageKey: 'sage_routage_promo', numeroBlg: '31', labelBlg: 'Routage promo', blgKey: 'blg_routage_promo', compareStrict: true },
+  { numeroSage: 25, labelSage: 'Type de facture', sageKey: 'sage_type_facture', numeroBlg: '33', labelBlg: 'Type de facture', blgKey: 'blg_type_facture', compareStrict: true },
+  { numeroSage: 26, labelSage: 'Categorie AF GAF', sageKey: 'sage_categorie_af_gaf', numeroBlg: '22', labelBlg: 'Tags', blgKey: 'blg_tags', compareStrict: false },
+  {
+    numeroSage: 28, labelSage: 'Encours autorisé', sageKey: 'sage_encours', numeroBlg: '18', labelBlg: "Limite d'encours", blgKey: 'blg_encours', compareStrict: true,
+    enEcart: (r) => r.sage_encours !== null && r.blg_encours !== null && Number(r.sage_encours) !== Number(r.blg_encours),
+  },
+  {
+    numeroSage: 29, labelSage: 'Assurance crédit', sageKey: 'sage_assurance_credit', numeroBlg: '19', labelBlg: "Montant d'assurance crédit", blgKey: 'blg_assurance_credit', compareStrict: true,
+    enEcart: (r) => r.sage_assurance_credit !== null && r.blg_assurance_credit !== null && Number(r.sage_assurance_credit) !== Number(r.blg_assurance_credit),
+  },
+  { numeroSage: 30, labelSage: 'Agence de rattachement', sageKey: 'sage_agence_rattachement', numeroBlg: '23', labelBlg: 'Division (informatif, pas d\'équivalence confirmée)', blgKey: 'blg_division', compareStrict: false },
+  { numeroSage: 37, labelSage: 'Interlocuteur', sageKey: 'sage_contact', numeroBlg: null, labelBlg: 'Contact principal', blgKey: 'blg_contact_principal', compareStrict: false },
+]
 
-function translateNafForMap(value: string | null | undefined): string {
-  return findMapSectorByCode(value)?.label || 'AUTRES'
-}
+/** Couleurs de remplissage ExcelJS (ARGB) pour l'export Comparaison. */
+const COULEUR_OK = 'FFDCFCE7'      // vert clair
+const COULEUR_ECART = 'FFFECACA'   // rouge clair
+const COULEUR_NON_COMPARABLE = 'FFFED7AA' // orange clair
+const COULEUR_ENTETE_PAIRE = 'FFE0E7EF'   // bleu-gris clair pour distinguer les paires comparables des colonnes simples
 
-function getMapSectorLabel(row: SyntheseMapClientRow) {
-  const codeLabel = translateNafForMap(row.activitePrincipaleEtablissement)
-  if (codeLabel !== 'AUTRES') return codeLabel
-  const storedLabel = safeText(row.naf_libelle_traduit)
-  const matchedStoredLabel = findMapSectorByLabel(storedLabel)?.label
-  return matchedStoredLabel || 'AUTRES'
-}
+// ─────────────────────────────────────────────────────────────────────────
+// Onglet BLG (lecture seule côté BLG, pour les tiers déjà appariés)
+// ─────────────────────────────────────────────────────────────────────────
 
-function getMapSectorColor(sector: string | null | undefined) {
-  const tracked = findMapSectorByLabel(sector)
-  if (tracked) return tracked.color
-  return '#d9d9d9'
-}
+const BLG_DETAIL_FIELDS: Array<{ key: keyof ControleRow; label: string }> = [
+  { key: 'blg_intitule', label: 'Intitulé' },
+  { key: 'blg_siret', label: 'SIRET' },
+  { key: 'blg_code_naf', label: 'Code NAF' },
+  { key: 'blg_ville', label: 'Ville' },
+  { key: 'blg_code_postal', label: 'Code postal' },
+  { key: 'blg_commercial', label: 'Commercial' },
+  { key: 'blg_division', label: 'Division / entité juridique' },
+  { key: 'blg_famille', label: 'Famille' },
+  { key: 'blg_encours', label: 'Encours' },
+  { key: 'blg_assurance_credit', label: 'Assurance crédit' },
+  { key: 'blg_frais_facturation', label: 'Frais de facturation' },
+  { key: 'blg_routage_promo', label: 'Routage promo' },
+  { key: 'blg_facture_electronique', label: 'Facture électronique' },
+  { key: 'blg_releve_facture', label: 'Relevé de facture' },
+  { key: 'blg_type_facture', label: 'Type de facture' },
+  { key: 'blg_capacite_expiration', label: 'Capacité expiration' },
+  { key: 'blg_attestation_capacite', label: 'Attestation de capacité' },
+  { key: 'blg_banque', label: 'Banque' },
+  { key: 'blg_iban', label: 'IBAN' },
+  { key: 'blg_contact_principal', label: 'Contact principal' },
+  { key: 'blg_nb_contacts', label: 'Nb contacts' },
+  { key: 'blg_contacts_resume', label: 'Contacts' },
+  { key: 'blg_nom_court', label: 'Nom court' },
+  { key: 'blg_tags', label: 'Tags / qualité' },
+  { key: 'blg_last_update', label: 'Dernière mise à jour BLG' },
+]
 
-function getMapSectorSortRank(sector: string | null | undefined) {
-  const normalized = loose(sector)
-  const index = MAP_TRACKED_SECTORS.findIndex((definition) => loose(definition.label) === normalized)
-  if (index >= 0) return index
-  if (normalized === 'autres') return 999
-  return 900
-}
+function OngletBlg() {
+  const [search, setSearch] = useState('')
+  const [rows, setRows] = useState<ControleRow[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [selected, setSelected] = useState<ControleRow | null>(null)
+  const listRefs = useRef<Record<number, HTMLTableRowElement | null>>({})
 
-function parseCapitalSocialNumberForMap(value: string | null | undefined): number | null {
-  const rawValue = String(value || '').trim().toUpperCase()
-  if (!rawValue) return null
-
-  const cleaned = rawValue
-    .replace('EUR', '')
-    .replace(/\s/g, '')
-    .replace(',', '.')
-    .trim()
-
-  const amount = Number(cleaned)
-  return Number.isFinite(amount) ? amount : null
-}
-
-function matchesMapCapitalSocialFilter(capitalSocial: string | null | undefined, selectedFilter: CapitalSocialFilterOption): boolean {
-  if (selectedFilter === 'TOUS') return true
-
-  const amount = parseCapitalSocialNumberForMap(capitalSocial)
-  const isNc = amount == null
-
-  switch (selectedFilter) {
-    case 'NC':
-      return isNc
-    case '<= 1 000€':
-      return amount != null && amount <= 1000
-    case '>1 000€':
-      return amount != null && amount > 1000
-    case '>5000€':
-      return amount != null && amount > 5000
-    case '>9999€':
-      return amount != null && amount > 9999
-    default:
-      return true
-  }
-}
-
-function stopMapControlEvent(event: any) {
-  event.stopPropagation()
-}
-
-function lambert93ToWgs84(x: number | null | undefined, y: number | null | undefined): { latitude: number; longitude: number } | null {
-  if (x == null || y == null) return null
-  const X = Number(x)
-  const Y = Number(y)
-  if (!Number.isFinite(X) || !Number.isFinite(Y)) return null
-
-  const n = 0.725607765053267
-  const C = 11754255.426096
-  const xs = 700000
-  const ys = 12655612.049876
-  const lon0 = (3 * Math.PI) / 180
-  const e = 0.0818191910428158
-  const dx = X - xs
-  const dy = Y - ys
-  const R = Math.sqrt(dx * dx + dy * dy)
-  if (!Number.isFinite(R) || R === 0) return null
-
-  const gamma = Math.atan(dx / (ys - Y))
-  const lonRad = lon0 + gamma / n
-  const latIso = -Math.log(Math.abs(R / C)) / n
-  let latRad = 2 * Math.atan(Math.exp(latIso)) - Math.PI / 2
-  for (let i = 0; i < 6; i += 1) {
-    latRad = 2 * Math.atan(Math.pow((1 + e * Math.sin(latRad)) / (1 - e * Math.sin(latRad)), e / 2) * Math.exp(latIso)) - Math.PI / 2
-  }
-
-  return { latitude: (latRad * 180) / Math.PI, longitude: (lonRad * 180) / Math.PI }
-}
-
-function ensureSyntheseMapCoordinates(row: ClientMapDbRow) {
-  if (typeof row.latitude === 'number' && Number.isFinite(row.latitude) && typeof row.longitude === 'number' && Number.isFinite(row.longitude)) {
-    return { latitude: row.latitude, longitude: row.longitude }
-  }
-  return lambert93ToWgs84(row.coordonneeLambertAbscisseEtablissement, row.coordonneeLambertOrdonneeEtablissement)
-}
-
-function hasPositiveValue(value: unknown) {
-  if (value === true) return true
-  const normalized = loose(value)
-  if (!normalized) return false
-  return !['non', 'no', 'false', '0', 'nc', 'nd', 'null', 'undefined'].includes(normalized)
-}
-
-function objectiveKey(numero: string, annee: number, domaine: string, rubrique: string) {
-  return `${normalize(numero)}§${annee}§${normalize(domaine)}§${normalize(rubrique)}`
-}
-
-function macroBucket(value: any) {
-  const t = loose(value).replace(/[^a-z0-9]/g, '')
-  if (t === 'rr' || t.includes('refrigeration')) return 'R/R'
-  if (t === 'ro' || t.includes('renouvellement')) return 'R/O'
-  if (t.includes('ecs')) return 'ECS'
-  if (t.includes('drv')) return 'DRV'
-  if (t === 'rzone' || t.includes('airzone')) return 'R_zone'
-  if (t.includes('acc') || t.includes('accessoire')) return 'Accessoire'
-  if (t === 'pv' || t.includes('photovolt')) return 'PV'
-  return 'Autres'
-}
-
-function emptyByMacro() {
-  return Object.fromEntries(FAMILY_MACROS.map((m) => [m, 0])) as Record<string, number>
-}
-
-function emptyEncoursByType() {
-  return Object.fromEntries(ENCOURS_DOCUMENT_TYPES.map((type) => [type, 0])) as Record<string, number>
-}
-
-function emptyNullableByMacro() {
-  return Object.fromEntries(FAMILY_MACROS.map((m) => [m, null])) as Record<string, number | null>
-}
-
-function ratio(num: number, den: number) {
-  if (!den) return null
-  return (num / den) * 100
-}
-
-async function fetchAll(table: string, select = '*', apply?: (query: any) => any) {
-  const output: Record<string, any>[] = []
-  const chunkSize = 1000
-  let from = 0
-  while (true) {
-    let query = supabase.from(table).select(select).range(from, from + chunkSize - 1)
-    if (apply) query = apply(query)
-    const { data, error } = await query
-    if (error) throw new Error(`${table} : ${error.message}`)
-    const rows = (data || []) as Record<string, any>[]
-    output.push(...rows)
-    if (rows.length < chunkSize) break
-    from += chunkSize
-  }
-  return output
-}
-
-function chunk<T>(values: T[], size: number) {
-  const out: T[][] = []
-  for (let i = 0; i < values.length; i += size) out.push(values.slice(i, i + size))
-  return out
-}
-
-async function fetchAggForTiers(table: string, codes: string[], y0: number, y1: number) {
-  const rows: Record<string, any>[] = []
-  for (const group of chunk(codes, 200)) {
-    const part = await fetchAll(table, '*', (q) => q.gte('annee', y0).lte('annee', y1).in('numero_tiers', group))
-    rows.push(...part)
-  }
-  return rows.map(normalizeAgg)
-}
-
-async function fetchObjectivesForTiers(codes: string[], annee: number) {
-  const rows: ObjectiveRow[] = []
-  for (const group of chunk(codes, 200)) {
-    const part = await fetchAll('objectif_tiers', '*', (q) => q.eq('annee', annee).in('numero_tiers', group))
-    rows.push(...(part as ObjectiveRow[]))
-  }
-  return rows
-}
-
-// ── Paramétrage des alertes de comportement (client_alertes_config) ──────
-// Mêmes 3 seuils que "🔔 Alertes de suivi" sur la fiche client de l'écran
-// mobile (MobileClients.tsx, table lue/écrite via get_client_alertes_config
-// / upsert_client_alertes_config pour un seul client à la fois). Ici on lit
-// la table directement, en une fois pour tous les clients de la sélection
-// courante -- affichage seul (l'édition reste sur la fiche client / l'écran
-// mobile), colonnes non affichées par défaut (cf. TOGGLEABLE_COLUMN_LABELS).
-type AlerteConfigRow = {
-  numero_tiers: string
-  min_appels_visites_mois: number | null
-  max_jours_sans_devis: number | null
-  max_jours_sans_commande: number | null
-}
-
-async function fetchAlertesConfigForTiers(codes: string[]) {
-  const rows: AlerteConfigRow[] = []
-  for (const group of chunk(codes, 200)) {
-    const part = await fetchAll(
-      'client_alertes_config',
-      'numero_tiers,min_appels_visites_mois,max_jours_sans_devis,max_jours_sans_commande',
-      (q) => q.in('numero_tiers', group),
-    )
-    rows.push(...(part as AlerteConfigRow[]))
-  }
-  return rows
-}
-
-function normalizeAgg(row: Record<string, any>): AggRow {
-  return {
-    annee: safeNumber(row.annee),
-    mois: safeNumber(row.mois),
-    numero_tiers: safeText(row.numero_tiers || row.numero || row.code_tiers, 'NON RENSEIGNE'),
-    intitule_tiers: safeText(row.intitule_tiers || row.intitule || row.tiers, 'NON RENSEIGNE'),
-    collaborateur: safeText(row.collaborateur, 'NON AFFECTE'),
-    agence_collaborateur: safeText(row.agence_collaborateur || row.agence, 'NON AFFECTE'),
-    famille_macro: macroBucket(row.famille_macro),
-    ca_ht: safeNumber(row.ca_ht || row.montant_ht || row.ca),
-    marge_valeur: safeNumber(row.marge_valeur || row.marge),
-    nb_lignes: safeNumber(row.nb_lignes || row.nombre_lignes),
-  }
-}
-
-function normalizeTiers(row: Record<string, any>, nafByCode: Map<string, string>): TiersRow {
-  const codeNaf = safeText(raw(row, ['code_naf', 'naf']))
-  return {
-    numero: safeText(raw(row, ['numero', 'numero_tiers', 'code_tiers']), 'SANS CODE'),
-    intitule: safeText(raw(row, ['intitule', 'intitule_tiers', 'raison_sociale', 'tiers']), 'SANS INTITULE'),
-    codePostal: safeText(raw(row, ['code_postal', 'cp'])),
-    codeNaf,
-    libelleNaf: nafByCode.get(normalize(codeNaf)) || safeText(raw(row, ['libelle_naf', 'designation_naf', 'famille']), 'NA'),
-    dateCreation: formatDateFr(raw(row, ['date_creation', 'creation_date', 'created_at'])),
-    prospect: safeBool(raw(row, ['prospect', 'is_prospect'])),
-    collaborateur: safeText(raw(row, ['collaborateur', 'representant', 'commercial', 'vendeur']), 'NON AFFECTE'),
-    agence: safeText(raw(row, ['agence_rattachement', 'agence', 'depot_rattachement', 'depot']), 'NON AFFECTE'),
-    raw: row,
-  }
-}
-
-function objectiveNumber(map: Map<string, ObjectiveRow>, numero: string, domaine: string, rubrique: string) {
-  const row = map.get(objectiveKey(numero, N, domaine, rubrique))
-  return safeNumber(row?.valeur_number ?? row?.valeur_text)
-}
-
-function objectiveText(map: Map<string, ObjectiveRow>, numero: string, domaine: string, rubrique: string) {
-  const row = map.get(objectiveKey(numero, N, domaine, rubrique))
-  return safeText(row?.valeur_text ?? row?.valeur_number ?? row?.valeur_date)
-}
-
-function objectiveDate(map: Map<string, ObjectiveRow>, numero: string, domaine: string, rubrique: string) {
-  const row = map.get(objectiveKey(numero, N, domaine, rubrique))
-  return normalizeDateForInput(row?.valeur_date ?? row?.valeur_text)
-}
-
-function sumAmount(rows: AggRow[], numero: string | null, year: number, opts?: { month?: number; monthMax?: number; macro?: string }) {
-  return rows.reduce((sum, row) => {
-    if (numero && normalize(row.numero_tiers) !== normalize(numero)) return sum
-    if (row.annee !== year) return sum
-    if (opts?.month && row.mois !== opts.month) return sum
-    if (opts?.monthMax !== undefined && row.mois > opts.monthMax) return sum
-    if (opts?.macro && row.famille_macro !== opts.macro) return sum
-    return sum + row.ca_ht
-  }, 0)
-}
-
-function sumMarge(rows: AggRow[], numero: string | null, year: number, opts?: { month?: number; monthMax?: number; macro?: string }) {
-  return rows.reduce((sum, row) => {
-    if (numero && normalize(row.numero_tiers) !== normalize(numero)) return sum
-    if (row.annee !== year) return sum
-    if (opts?.month && row.mois !== opts.month) return sum
-    if (opts?.monthMax !== undefined && row.mois > opts.monthMax) return sum
-    if (opts?.macro && row.famille_macro !== opts.macro) return sum
-    return sum + row.marge_valeur
-  }, 0)
-}
-
-function byMacro(rows: AggRow[], numero: string | null, year: number, opts?: { month?: number; monthMax?: number; metric?: 'ca' | 'marge' }) {
-  const out = emptyByMacro()
-  for (const macro of FAMILY_MACROS) {
-    out[macro] = opts?.metric === 'marge'
-      ? sumMarge(rows, numero, year, { month: opts?.month, monthMax: opts?.monthMax, macro })
-      : sumAmount(rows, numero, year, { month: opts?.month, monthMax: opts?.monthMax, macro })
-  }
-  return out
-}
-
-function byMacroMarginPct(rows: AggRow[], numero: string | null, year: number, opts?: { month?: number; monthMax?: number }) {
-  const out = Object.fromEntries(FAMILY_MACROS.map((m) => [m, null])) as Record<string, number | null>
-  for (const macro of FAMILY_MACROS) {
-    const ca = sumAmount(rows, numero, year, { month: opts?.month, monthMax: opts?.monthMax, macro })
-    const marge = sumMarge(rows, numero, year, { month: opts?.month, monthMax: opts?.monthMax, macro })
-    out[macro] = ca ? (marge / ca) * 100 : null
-  }
-  return out
-}
-
-function deltaPoints(currentPct: number | null, previousPct: number | null) {
-  if (currentPct === null || previousPct === null) return null
-  if (!Number.isFinite(currentPct) || !Number.isFinite(previousPct)) return null
-  return currentPct - previousPct
-}
-
-
-function macroFromColumnKey(key: string, prefix: string) {
-  const marker = `${prefix}_`
-  return key.startsWith(marker) ? key.slice(marker.length) : null
-}
-
-function shouldBlankEmptyMonthMetric(col: ColumnDef, row: SummaryRow) {
-  if (row.kind !== 'month') return false
-
-  const key = col.key
-
-  if (key === 'devisN1') return isNullAmount(row.devisN1)
-  const devisN1Macro = macroFromColumnKey(key, 'devisN1')
-  if (devisN1Macro) return isNullAmount(row.devisN1ByMacro[devisN1Macro])
-
-  if (key === 'devisYtdN') return isNullAmount(row.devisYtdN)
-  const devisYtdNMacro = macroFromColumnKey(key, 'devisYtdN')
-  if (devisYtdNMacro) return isNullAmount(row.devisYtdNByMacro[devisYtdNMacro])
-
-  if (key === 'caN3') return isNullAmount(row.caN3)
-  if (key === 'caN2') return isNullAmount(row.caN2)
-  if (key === 'caN1') return isNullAmount(row.caN1)
-  const caN1Macro = macroFromColumnKey(key, 'caN1')
-  if (caN1Macro) return isNullAmount(row.caN1ByMacro[caN1Macro])
-
-  if (key === 'caYtdN') return isNullAmount(row.caYtdN)
-
-  if (key === 'encoursCommandeN') return isNullAmount(row.encoursCommandeN)
-  const encoursMacro = macroFromColumnKey(key, 'encoursCommandeN')
-  if (encoursMacro) {
-    if (ENCOURS_DOCUMENT_TYPES.includes(encoursMacro)) return isNullAmount(row.encoursCommandeNByType[encoursMacro])
-    return isNullAmount(row.encoursCommandeNByMacro[encoursMacro])
-  }
-
-  const caYtdNMacro = macroFromColumnKey(key, 'caYtdN')
-  if (caYtdNMacro) return isNullAmount(row.caYtdNByMacro[caYtdNMacro])
-
-  if (key === 'margePctN1') return isNullAmount(row.caN1)
-  const margeN1Macro = macroFromColumnKey(key, 'margeN1')
-  if (margeN1Macro) return isNullAmount(row.caN1ByMacro[margeN1Macro])
-
-  if (key === 'margePctYtdN') return isNullAmount(row.caYtdN)
-  const margeYtdNMacro = macroFromColumnKey(key, 'margeYtdN')
-  if (margeYtdNMacro) return isNullAmount(row.caYtdNByMacro[margeYtdNMacro])
-
-  return false
-}
-
-function buildSummaryForNumero(tier: TiersRow | null, factures: AggRow[], devis: AggRow[], objectives: Map<string, ObjectiveRow>, month?: number): SummaryRow {
-  const numero = tier?.numero || ''
-  const monthFilter = month ? { month } : undefined
-  const caN1 = sumAmount(factures, numero || null, N - 1, monthFilter)
-  const margeN1 = sumMarge(factures, numero || null, N - 1, monthFilter)
-  const margePctN1 = caN1 ? (margeN1 / caN1) * 100 : null
-  const devisNCompareOpts = month ? { month } : { monthMax: N1_COMPARISON_MONTH }
-  const caNOpts = month ? { month } : { monthMax: CA_CLOSED_MONTH }
-  const caN1CompareOpts = month ? { month } : { monthMax: CA_N1_COMPARISON_MONTH }
-  const caYtdN = sumAmount(factures, numero || null, N, caNOpts)
-  const margeYtdN = sumMarge(factures, numero || null, N, caNOpts)
-  const margePctYtdN = caYtdN ? (margeYtdN / caYtdN) * 100 : null
-  const caYtdN1 = sumAmount(factures, numero || null, N - 1, caN1CompareOpts)
-  const margeYtdN1 = sumMarge(factures, numero || null, N - 1, caN1CompareOpts)
-  const margePctYtdN1 = caYtdN1 ? (margeYtdN1 / caYtdN1) * 100 : null
-  const objectifCa = objectiveNumber(objectives, numero, 'Objectif', 'CA')
-  const objectifProrata = month ? objectifCa / 12 : (objectifCa / 12) * CA_CLOSED_MONTH
-  const frequenceCommande = objectiveNumber(objectives, numero, 'QRC', 'Fréquence commande')
-  const niveauExclusivite = objectiveNumber(objectives, numero, 'QRC', 'Niveau exclusivité')
-  const comNotreFaveur = objectiveNumber(objectives, numero, 'QRC', 'Com en notre faveur')
-  const garantie = objectiveNumber(objectives, numero, 'QRC', 'Garantie')
-  const visiteRealise = VISITES.reduce((count, rubrique) => count + (objectiveDate(objectives, numero, 'Visite', rubrique) ? 1 : 0), 0)
-
-  return {
-    id: month ? `${numero}-m${month}` : numero || 'TOTAL',
-    kind: month ? 'month' : tier ? 'client' : 'total',
-    level: month ? 1 : 0,
-    updatedAt: '',
-    collaborateur: tier?.collaborateur || '',
-    agence: tier?.agence || '',
-    numero: tier?.numero || 'TOTAL',
-    intitule: tier?.intitule || '',
-    totalMois: month ? MONTHS[month - 1] : 'TOTAL',
-    codePostal: tier?.codePostal || '',
-    libelleNaf: tier?.libelleNaf || '',
-    dateCreation: tier?.dateCreation || '',
-    prospectLabel: tier?.prospect === true ? 'OUI' : tier?.prospect === false ? 'NON' : 'NA',
-    caN3: sumAmount(factures, numero || null, N - 3, monthFilter),
-    caN2: sumAmount(factures, numero || null, N - 2, monthFilter),
-    devisN1: sumAmount(devis, numero || null, N - 1, monthFilter),
-    devisN1ByMacro: byMacro(devis, numero || null, N - 1, { month, metric: 'ca' }),
-    caN1,
-    caN1ByMacro: byMacro(factures, numero || null, N - 1, { month, metric: 'ca' }),
-    margePctN1,
-    margeN1Value: margeN1,
-    margeN1ByMacro: byMacroMarginPct(factures, numero || null, N - 1, { month }),
-    margeN1ValueByMacro: byMacro(factures, numero || null, N - 1, { month, metric: 'marge' }),
-    // L'objectif CA est saisi en annuel sur la ligne TOTAL du client.
-    // Lorsqu'on développe le client, chaque mois affiche 1/12 de cet objectif.
-    objectifCa: month ? objectifCa / 12 : objectifCa,
-    potentiel: objectiveNumber(objectives, numero, 'Objectif', 'POTENTIEL'),
-    encoursCommandeN: 0,
-    encoursCommandeNByMacro: emptyByMacro(),
-    encoursCommandeNByType: emptyEncoursByType(),
-    devisYtdN: sumAmount(devis, numero || null, N, month ? { month } : { monthMax: CLOSED_MONTH }),
-    devisYtdN1: sumAmount(devis, numero || null, N - 1, devisNCompareOpts),
-    devisYtdNByMacro: byMacro(devis, numero || null, N, { month, monthMax: month ? undefined : CLOSED_MONTH, metric: 'ca' }),
-    devisYtdN1ByMacro: byMacro(devis, numero || null, N - 1, { month, monthMax: month ? undefined : N1_COMPARISON_MONTH, metric: 'ca' }),
-    caYtdN,
-    caYtdNComplet: caYtdN,
-    caYtdN1,
-    caYtdNByMacro: byMacro(factures, numero || null, N, { month, monthMax: month ? undefined : CA_CLOSED_MONTH, metric: 'ca' }),
-    caYtdN1ByMacro: byMacro(factures, numero || null, N - 1, { month, monthMax: month ? undefined : CA_N1_COMPARISON_MONTH, metric: 'ca' }),
-    margePctYtdN,
-    margeYtdNValue: margeYtdN,
-    margeYtdN1Value: margeYtdN1,
-    margeYtdNByMacro: byMacroMarginPct(factures, numero || null, N, { month, monthMax: month ? undefined : CA_CLOSED_MONTH }),
-    margeYtdNValueByMacro: byMacro(factures, numero || null, N, { month, monthMax: month ? undefined : CA_CLOSED_MONTH, metric: 'marge' }),
-    margeYtdN1ValueByMacro: byMacro(factures, numero || null, N - 1, { month, monthMax: month ? undefined : CA_N1_COMPARISON_MONTH, metric: 'marge' }),
-    ca12m: caYtdN + Math.max(0, caN1 - caYtdN1),
-    caBandN: caBand(caYtdN + Math.max(0, caN1 - caYtdN1)),
-    caBandN1: caBand(caN1),
-    caBandN2: caBand(sumAmount(factures, numero || null, N - 2, monthFilter)),
-    contratBfa: objectiveNumber(objectives, numero, 'Objectif', 'Contrat\nBFA'),
-    caVsN1: ratio(caYtdN, caYtdN1),
-    margeVsN1: deltaPoints(margePctYtdN, margePctYtdN1),
-    realiseObjectif: ratio(caYtdN, objectifProrata),
-    qrcN1: objectiveNumber(objectives, numero, 'QRC', `QRC ${N - 1}`) || objectiveNumber(objectives, numero, 'QRC', 'QRC N-1'),
-    frequenceCommande,
-    niveauExclusivite,
-    comNotreFaveur,
-    garantie,
-    qrcN: frequenceCommande + niveauExclusivite + comNotreFaveur + garantie,
-    visiteTheorique: objectiveNumber(objectives, numero, 'Visite', 'Théorique'),
-    visiteRealise,
-    derniereVisiteReelle: '',
-    prochaineVisiteReelle: '',
-    nbVisitesReel: 0,
-    alerteMinAppelsVisitesMois: null,
-    alerteMaxJoursSansDevis: null,
-    alerteMaxJoursSansCommande: null,
-  }
-}
-
-// ── Colonnes optionnelles (pastilles afficher/masquer) ──────────────────
-// Tout sauf Remarque / Profil CA 12M / QRC N est masqué par défaut. Ce
-// filtrage s'applique UNIQUEMENT à l'affichage écran — buildColumns()
-// reste inchangée, et l'export Excel appelle sa propre buildColumns(true, …)
-// indépendamment de cet état, donc il n'est jamais affecté.
-const TOGGLEABLE_COLUMN_LABELS: Record<string, string> = {
-  codePostal: 'Code postal',
-  libelleNaf: 'Désignation Naf',
-  dateCreation: 'Date Création',
-  prospectLabel: 'Prospect OUI/NON',
-  caBandN2: 'Profil CA N-2',
-  caBandN1: 'Profil CA N-1',
-  caBandN: 'Profil CA 12M',
-  remarque: 'Remarque',
-  caN3: `CA ${N - 3}`,
-  caN2: `CA ${N - 2}`,
-  qrcN1: `QRC ${N - 1}`,
-  frequenceCommande: 'Fréquence commande',
-  niveauExclusivite: 'Niveau exclusivité',
-  comNotreFaveur: 'Com en notre faveur',
-  garantie: 'Garantie',
-  qrcN: `QRC ${N}`,
-  derniereVisiteReelle: 'Dernière visite (réel)',
-  prochaineVisiteReelle: 'Prochaine visite (réel)',
-  nbVisitesReel: `Visites réalisées ${N} (réel)`,
-  alerteMinAppelsVisitesMois: 'Alerte : appels/visites min (mois)',
-  alerteMaxJoursSansDevis: 'Alerte : jours sans devis (max)',
-  alerteMaxJoursSansCommande: 'Alerte : jours sans commande (max)',
-}
-const DEFAULT_VISIBLE_TOGGLEABLE_COLUMNS = new Set(['remarque', 'caBandN', 'qrcN', 'derniereVisiteReelle', 'prochaineVisiteReelle', 'nbVisitesReel'])
-
-function buildColumns(showFamilies: boolean, showCollaborateurColumn = false, encoursDetailMode: EncoursDetailMode = 'macro'): ColumnDef[] {
-  const cols: ColumnDef[] = []
-
-  if (showCollaborateurColumn) {
-    cols.push({ key: 'collaborateur', label: 'Collaborateur', group: 'Client', width: 130, sticky: 'collaborateur', value: (r) => r.collaborateur, format: 'text' })
-  }
-
-  cols.push(
-    { key: 'numero', label: 'Code Client', group: 'Client', width: 86, sticky: 'code', value: (r) => r.numero, format: 'text' },
-    { key: 'intitule', label: 'Intitulé Client', group: 'Client', width: 210, sticky: 'label', value: (r) => r.intitule, format: 'text' },
-    { key: 'totalMois', label: 'Total / Mois', group: 'Client', width: 105, sticky: 'month', value: (r) => r.totalMois, format: 'text' },
-    { key: 'alerteMinAppelsVisitesMois', label: 'Alerte : appels/visites min (mois)', group: 'Client', width: 92, className: 'editableNumber', editableAlerte: 'min_appels_visites_mois', value: (r) => r.alerteMinAppelsVisitesMois, format: 'numberBlank' },
-    { key: 'alerteMaxJoursSansDevis', label: 'Alerte : jours sans devis (max)', group: 'Client', width: 92, className: 'editableNumber', editableAlerte: 'max_jours_sans_devis', value: (r) => r.alerteMaxJoursSansDevis, format: 'numberBlank' },
-    { key: 'alerteMaxJoursSansCommande', label: 'Alerte : jours sans commande (max)', group: 'Client', width: 92, className: 'editableNumber', editableAlerte: 'max_jours_sans_commande', value: (r) => r.alerteMaxJoursSansCommande, format: 'numberBlank' },
-    { key: 'codePostal', label: 'Code postal', group: 'Client', width: 82, value: (r) => r.codePostal, format: 'text' },
-    { key: 'libelleNaf', label: 'Désignation Naf', group: 'Client', width: 130, value: (r) => r.libelleNaf, format: 'text' },
-    { key: 'dateCreation', label: 'Date Création', group: 'Client', width: 95, value: (r) => r.dateCreation, format: 'date' },
-    { key: 'prospectLabel', label: 'Prospect OUI/NON', group: 'Client', width: 86, value: (r) => r.prospectLabel, format: 'text' },
-    { key: 'caBandN2', label: 'Profil CA N-2', group: 'Client', width: 76, className: 'caBandCell', value: (r) => r.caBandN2, format: 'caBand' },
-    { key: 'caBandN1', label: 'Profil CA N-1', group: 'Client', width: 76, className: 'caBandCell', value: (r) => r.caBandN1, format: 'caBand' },
-    { key: 'caBandN', label: 'Profil CA 12M', group: 'Client', width: 76, className: 'caBandCell', value: (r) => r.caBandN, format: 'caBand' },
-    { key: 'remarque', label: 'Remarque', group: 'Client', width: 310, value: (r) => r.numero, editable: { domaine: 'Remarque', rubrique: 'Remarque', type: 'texte' }, format: 'text' },
-    { key: 'caN3', label: `CA ${N - 3}`, group: 'CA / Objectifs', width: 92, className: 'metric previous', value: (r) => r.caN3, format: 'keurBlank' },
-    { key: 'caN2', label: `CA ${N - 2}`, group: 'CA / Objectifs', width: 92, className: 'metric previous', value: (r) => r.caN2, format: 'keurBlank' },
-    { key: 'devisN1', label: `DEVIS ${N - 1}`, group: 'CA / Objectifs', width: 98, className: 'metric devis', value: (r) => r.devisN1, format: 'keurBlank' },
-  )
-
-  if (showFamilies) {
-    FAMILY_MACROS.forEach((macro) => cols.push({ key: `devisN1_${macro}`, label: `Dont ${macro}`, group: `Devis ${N - 1}`, width: 78, rotate: true, value: (r) => r.devisN1ByMacro[macro], format: 'keurBlank' }))
-  }
-
-  cols.push({ key: 'caN1', label: `CA ${N - 1}`, group: 'CA / Objectifs', width: 98, className: 'metric ca', value: (r) => r.caN1, format: 'keurBlank' })
-  if (showFamilies) {
-    FAMILY_MACROS.forEach((macro) => cols.push({ key: `caN1_${macro}`, label: `Dont ${macro}`, group: `CA ${N - 1}`, width: 78, rotate: true, value: (r) => r.caN1ByMacro[macro], format: 'keurBlank' }))
-  }
-  cols.push({ key: 'margePctN1', label: `MARGE ${N - 1}`, group: 'CA / Objectifs', width: 92, className: 'metric margin', value: (r) => r.margePctN1, format: 'pctBlank' })
-  if (showFamilies) {
-    FAMILY_MACROS.forEach((macro) => cols.push({ key: `margeN1_${macro}`, label: `Dont ${macro}`, group: `Marge ${N - 1}`, width: 78, rotate: true, value: (r) => r.margeN1ByMacro[macro], format: 'pctBlank' }))
-  }
-
-  cols.push(
-    { key: 'devisYtdN', label: `DEVIS ${periodMonthLabel(CLOSED_MONTH, N)}`, group: 'CA / Objectifs', width: 124, className: 'metric devis redLabel compareCell', value: (r) => r.devisYtdN, compareValue: (r) => r.devisYtdN1, format: 'keurCompare' },
-  )
-  if (showFamilies) {
-    FAMILY_MACROS.forEach((macro) => cols.push({ key: `devisYtdN_${macro}`, label: `Dont ${macro} (N-1)`, group: `Devis ${periodMonthLabel(CLOSED_MONTH, N)}`, width: 118, rotate: true, className: 'compareCell', value: (r) => r.devisYtdNByMacro[macro], compareValue: (r) => r.devisYtdN1ByMacro[macro], format: 'keurCompare' }))
-  }
-  cols.push({ key: 'caYtdN', label: `CA RÉEL ${periodMonthLabel(CA_CLOSED_MONTH, N)}`, group: 'CA / Objectifs', width: 124, className: 'metric ca redLabel compareCell', value: (r) => r.caYtdN, compareValue: (r) => r.caYtdN1, format: 'keurCompare' })
-  if (showFamilies) {
-    FAMILY_MACROS.forEach((macro) => cols.push({ key: `caYtdN_${macro}`, label: `Dont ${macro} (N-1)`, group: `CA ${periodMonthLabel(CA_CLOSED_MONTH, N)}`, width: 118, rotate: true, className: 'compareCell', value: (r) => r.caYtdNByMacro[macro], compareValue: (r) => r.caYtdN1ByMacro[macro], format: 'keurCompare' }))
-  }
-
-  cols.push({ key: 'encoursCommandeN', label: 'ENCOURS CMD', group: 'Encours commande', width: 118, className: 'metric orderBacklog', value: (r) => r.encoursCommandeN, format: 'keurBlank' })
-  if (showFamilies) {
-    if (encoursDetailMode === 'macro') {
-      FAMILY_MACROS.forEach((macro) => cols.push({ key: `encoursCommandeN_${macro}`, label: `Dont ${macro}`, group: 'Encours commande', width: 104, rotate: true, className: 'orderBacklog', value: (r) => r.encoursCommandeNByMacro[macro], format: 'keurBlank' }))
-    } else {
-      ENCOURS_DOCUMENT_TYPES.forEach((type) => cols.push({ key: `encoursCommandeN_${type}`, label: type, group: 'Encours commande', width: 104, rotate: true, className: 'orderBacklog', value: (r) => r.encoursCommandeNByType[type], format: 'keurBlank' }))
+  useEffect(() => {
+    let cancelled = false
+    async function load() {
+      setLoading(true)
+      setError(null)
+      const { data, error: err } = await supabase.rpc('get_controle_tiers_sage_blg', {
+        p_statut: 'apparie', p_only_ecarts: false, p_champ: null,
+        p_search: search.trim() || null, p_limit: 500, p_offset: 0,
+        p_exclure_sommeil: true, p_filtres: [], p_combinateur: 'ET',
+      })
+      if (cancelled) return
+      if (err) setError(err.message)
+      else { setRows((data || []) as ControleRow[]); setError(null) }
+      setLoading(false)
     }
+    void load()
+    return () => { cancelled = true }
+  }, [search])
+
+  function getIndexBlg(list: ControleRow[], sel: ControleRow | null) {
+    if (!sel) return -1
+    return list.findIndex((r) => r.numero_tiers === sel.numero_tiers)
   }
-
-  cols.push({ key: 'margePctYtdN', label: `MARGE RÉEL ${periodMonthLabel(CA_CLOSED_MONTH, N)}`, group: 'CA / Objectifs', width: 124, className: 'metric margin redLabel compareCell', value: (r) => r.margePctYtdN, compareValue: (r) => ratio(r.margeYtdN1Value, r.caYtdN1), format: 'pctCompare' })
-  if (showFamilies) {
-    FAMILY_MACROS.forEach((macro) => cols.push({ key: `margeYtdN_${macro}`, label: `Dont ${macro} (N-1)`, group: `Marge ${periodMonthLabel(CA_CLOSED_MONTH, N)}`, width: 118, rotate: true, className: 'compareCell', value: (r) => r.margeYtdNByMacro[macro], compareValue: (r) => ratio(r.margeYtdN1ValueByMacro[macro], r.caYtdN1ByMacro[macro]), format: 'pctCompare' }))
-  }
-
-
-  cols.push(
-    { key: 'objectifCa', label: `OBJECTIF ${N}`, group: 'Objectif', width: 104, className: 'editableNumber', value: (r) => r.objectifCa, editable: { domaine: 'Objectif', rubrique: 'CA', type: 'montant' }, format: 'keur' },
-    { key: 'potentiel', label: 'POTENTIEL', group: 'Objectif', width: 98, className: 'editableNumber', value: (r) => r.potentiel, editable: { domaine: 'Objectif', rubrique: 'POTENTIEL', type: 'montant' }, format: 'keur' },
-    { key: 'contratBfa', label: 'Contrat BFA', group: 'Objectif', width: 96, className: 'editableNumber', value: (r) => r.contratBfa, editable: { domaine: 'Objectif', rubrique: 'Contrat\nBFA', type: 'montant' }, format: 'keur' },
-    { key: 'caVsN1', label: `CA Réalisé / ${N - 1}`, group: 'Comparatif', width: 86, rotate: true, value: (r) => r.caVsN1, format: 'pct' },
-    { key: 'margeVsN1', label: `Écart marge / ${N - 1}`, group: 'Comparatif', width: 86, rotate: true, value: (r) => r.margeVsN1, format: 'points' },
-    { key: 'realiseObjectif', label: 'Réalisé / Objectif', group: 'Comparatif', width: 86, rotate: true, value: (r) => r.realiseObjectif, format: 'pct' },
-    { key: 'qrcN1', label: `QRC ${N - 1}`, group: 'QRC', width: 70, rotate: true, value: (r) => r.qrcN1, editable: { domaine: 'QRC', rubrique: `QRC ${N - 1}`, type: 'nombre' }, format: 'number' },
-    { key: 'frequenceCommande', label: 'Fréquence commande', group: 'QRC', width: 76, rotate: true, value: (r) => r.frequenceCommande, editable: { domaine: 'QRC', rubrique: 'Fréquence commande', type: 'nombre' }, format: 'number' },
-    { key: 'niveauExclusivite', label: 'Niveau exclusivité', group: 'QRC', width: 76, rotate: true, value: (r) => r.niveauExclusivite, editable: { domaine: 'QRC', rubrique: 'Niveau exclusivité', type: 'nombre' }, format: 'number' },
-    { key: 'comNotreFaveur', label: 'Com en notre faveur', group: 'QRC', width: 76, rotate: true, value: (r) => r.comNotreFaveur, editable: { domaine: 'QRC', rubrique: 'Com en notre faveur', type: 'nombre' }, format: 'number' },
-    { key: 'garantie', label: 'Garantie', group: 'QRC', width: 76, rotate: true, value: (r) => r.garantie, editable: { domaine: 'QRC', rubrique: 'Garantie', type: 'nombre' }, format: 'number' },
-    { key: 'qrcN', label: `QRC ${N}`, group: 'QRC', width: 70, rotate: true, className: 'redLabel', value: (r) => r.qrcN, format: 'number' },
-  )
-
-  ACTIONS.forEach((rubrique) => cols.push({
-    key: `action_${rubrique}`,
-    label: rubrique,
-    group: 'Dynamisme Client',
-    width: 76,
-    rotate: true,
-    editable: { domaine: 'Initiative', rubrique, type: 'action' },
-    value: (r) => r.numero,
-    format: 'action',
-  }))
-
-  cols.push(
-    { key: 'visiteTheorique', label: 'Théorique', group: 'Fréquence visite', width: 76, rotate: true, value: (r) => r.visiteTheorique, editable: { domaine: 'Visite', rubrique: 'Théorique', type: 'nombre' }, format: 'number' },
-    { key: 'visiteRealise', label: 'Réalisé', group: 'Fréquence visite', width: 76, rotate: true, className: 'redLabel', value: (r) => r.visiteRealise, format: 'number' },
-    // ── Visite réelle (RDV BLG + compagnon CEGECLIM, v_rdv_unifie) ────────
-    // Distinctes des 24 colonnes "Visite n°X" saisies à la main ci-dessous
-    // (mécanisme existant conservé tel quel) -- celles-ci reflètent les
-    // RDV réellement enregistrés dans l'agenda/l'app, tous canaux confondus.
-    { key: 'derniereVisiteReelle', label: 'Dernière visite (réel)', group: 'Fréquence visite', width: 92, rotate: true, value: (r) => r.derniereVisiteReelle, format: 'text' },
-    { key: 'prochaineVisiteReelle', label: 'Prochaine visite (réel)', group: 'Fréquence visite', width: 92, rotate: true, value: (r) => r.prochaineVisiteReelle, format: 'text' },
-    { key: 'nbVisitesReel', label: `Réalisé ${N} (réel)`, group: 'Fréquence visite', width: 76, rotate: true, className: 'redLabel', value: (r) => r.nbVisitesReel, format: 'number' },
-  )
-
-  VISITES.forEach((rubrique) => cols.push({
-    key: `visite_${rubrique}`,
-    label: rubrique,
-    group: 'Visite',
-    width: 82,
-    rotate: true,
-    editable: { domaine: 'Visite', rubrique, type: 'date' },
-    value: (r) => r.numero,
-    format: 'date',
-  }))
-
-  return cols
-}
-
-function displayValue(col: ColumnDef, row: SummaryRow, objectiveMap: Map<string, ObjectiveRow>) {
-  if (col.editable && row.kind === 'client') {
-    const { domaine, rubrique, type } = col.editable
-    if (type === 'date') return formatDateFr(objectiveDate(objectiveMap, row.numero, domaine, rubrique))
-    if (type === 'texte') return objectiveText(objectiveMap, row.numero, domaine, rubrique)
-    const n = objectiveNumber(objectiveMap, row.numero, domaine, rubrique)
-    if (type === 'montant') return formatKEur(n)
-    return n ? formatNumber(n) : ''
-  }
-
-  if (shouldBlankEmptyMonthMetric(col, row)) return ''
-
-  const value = col.value(row)
-  if (col.format === 'keur') return formatKEur(safeNumber(value))
-  if (col.format === 'keurBlank') return formatKEurBlank(safeNumber(value))
-  if (col.format === 'keurCompare') return formatCompareKEur(safeNumber(value), safeNumber(col.compareValue?.(row)))
-  if (col.format === 'pct') return formatPct(value as number | null)
-  if (col.format === 'pctBlank') return formatPctBlank(value as number | null)
-  if (col.format === 'pctCompare') return formatComparePct(value as number | null, col.compareValue?.(row) as number | null)
-  if (col.format === 'points') return formatPoints(value as number | null)
-  if (col.format === 'caBand') return safeText(value, 'Sans CA')
-  if (col.format === 'number') return formatNumber(safeNumber(value))
-  if (col.format === 'numberBlank') return value === null || value === undefined ? '' : formatNumber(safeNumber(value))
-  return safeText(value)
-}
-
-
-function isHeaderComparisonColumn(col: ColumnDef) {
-  return (
-    col.key === 'devisYtdN' ||
-    col.key.startsWith('devisYtdN_') ||
-    col.key === 'caYtdN' ||
-    col.key.startsWith('caYtdN_')
-  )
-}
-
-function headerComparisonPercent(col: ColumnDef, totalRow: SummaryRow): number | null {
-  if (!isHeaderComparisonColumn(col) || !col.compareValue) return null
-
-  const current = safeNumber(col.value(totalRow))
-  const previous = safeNumber(col.compareValue(totalRow))
-
-  if (!Number.isFinite(current) || !Number.isFinite(previous) || Math.abs(previous) < 0.000001) return null
-
-  // Pastille d'évolution, alignée avec l'écran flux_articles :
-  // 66 % du niveau N-1 doit s'afficher comme -34 %, pas comme 66 %.
-  return ((current - previous) / Math.abs(previous)) * 100
-}
-
-function headerComparisonClass(percent: number | null) {
-  if (percent === null || !Number.isFinite(percent)) return 'neutral'
-  if (percent > 0.000001) return 'good'
-  if (percent < -0.000001) return 'bad'
-  return 'neutral'
-}
-
-function formatHeaderComparisonPercent(percent: number | null) {
-  if (percent === null || !Number.isFinite(percent)) return ''
-
-  const rounded = Math.abs(percent) < 0.05 ? 0 : percent
-  const sign = rounded > 0 ? '+' : rounded < 0 ? '-' : ''
-  const arrow = rounded > 0 ? '▲' : rounded < 0 ? '▼' : '■'
-  const value = new Intl.NumberFormat('fr-FR', {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 1,
-  }).format(Math.abs(rounded))
-
-  return `${arrow} ${sign}${value} %`
-}
-
-function HeaderComparisonPill({ col, totalRow }: { col: ColumnDef; totalRow: SummaryRow }) {
-  const percent = headerComparisonPercent(col, totalRow)
-  const label = formatHeaderComparisonPercent(percent)
-  if (!label) return null
+  const onListKeyDown = creerHandlerNavigation(rows, selected, setSelected, getIndexBlg, listRefs)
 
   return (
-    <span
-      className={`headerComparisonPill ${headerComparisonClass(percent)}`}
-      title={`${col.label.replace(/\n/g, ' ')} : évolution ${N} vs ${N - 1} sur la même période`}
-    >
-      {label}
-    </span>
-  )
-}
-
-function caBandRank(value: any) {
-  const band = safeText(value, 'Sans CA')
-  const idx = CA_PROFILE_BANDS.indexOf(band as MapProfileFilter)
-  return idx === -1 ? CA_PROFILE_BANDS.length : idx
-}
-
-function rawSortableValue(col: ColumnDef, row: SummaryRow, objectiveMap: Map<string, ObjectiveRow>) {
-  if (col.editable && row.kind === 'client') {
-    if (col.editable.type === 'texte' || col.editable.type === 'date') return displayValue(col, row, objectiveMap)
-    return objectiveNumber(objectiveMap, row.numero, col.editable.domaine, col.editable.rubrique)
-  }
-  if (col.format === 'caBand') return -caBandRank(col.value(row))
-  return col.value(row)
-}
-
-function editableRawValue(row: SummaryRow, col: ColumnDef, objectiveMap: Map<string, ObjectiveRow>) {
-  if (!col.editable) return ''
-  const { domaine, rubrique, type } = col.editable
-  if (type === 'date') return objectiveDate(objectiveMap, row.numero, domaine, rubrique)
-  if (type === 'texte') return objectiveText(objectiveMap, row.numero, domaine, rubrique)
-  const value = objectiveNumber(objectiveMap, row.numero, domaine, rubrique)
-  return value ? String(value) : ''
-}
-
-
-function macroNumberPayload(value: any) {
-  const out = emptyByMacro()
-  if (!value || typeof value !== 'object') return out
-  for (const macro of FAMILY_MACROS) out[macro] = safeNumber(value[macro])
-  return out
-}
-
-function encoursTypePayload(value: any) {
-  const out = emptyEncoursByType()
-  if (!value || typeof value !== 'object') return out
-  for (const type of ENCOURS_DOCUMENT_TYPES) out[type] = safeNumber(value[type])
-  return out
-}
-
-function macroNullablePayload(value: any) {
-  const out = emptyNullableByMacro()
-  if (!value || typeof value !== 'object') return out
-  for (const macro of FAMILY_MACROS) {
-    const rawValue = value[macro]
-    if (rawValue === null || rawValue === undefined || rawValue === '') out[macro] = null
-    else {
-      const n = Number(rawValue)
-      out[macro] = Number.isFinite(n) ? n : null
-    }
-  }
-  return out
-}
-
-function cacheRowToSummary(row: CacheDbRow): SummaryRow {
-  const month = row.mois ? safeNumber(row.mois) : null
-  return {
-    id: month ? `${row.numero_tiers}-m${month}` : row.numero_tiers,
-    kind: row.row_kind,
-    level: row.row_kind === 'month' ? 1 : 0,
-    updatedAt: safeText(row.updated_at),
-    collaborateur: safeText(row.collaborateur),
-    agence: safeText(row.agence_collaborateur),
-    numero: safeText(row.numero_tiers, 'SANS CODE'),
-    intitule: safeText(row.intitule_tiers),
-    totalMois: month ? MONTHS[month - 1] : 'TOTAL',
-    codePostal: safeText(row.code_postal),
-    libelleNaf: safeText(row.libelle_naf, 'NA'),
-    dateCreation: formatDateFr(row.date_creation),
-    prospectLabel: safeText(row.prospect_label, 'NA'),
-    caN3: safeNumber(row.ca_n3),
-    caN2: safeNumber(row.ca_n2),
-    devisN1: safeNumber(row.devis_n1),
-    devisN1ByMacro: macroNumberPayload(row.devis_n1_by_macro),
-    caN1: safeNumber(row.ca_n1),
-    caN1ByMacro: macroNumberPayload(row.ca_n1_by_macro),
-    margePctN1: row.marge_pct_n1 === null || row.marge_pct_n1 === undefined ? null : safeNumber(row.marge_pct_n1),
-    margeN1Value: safeNumber(row.marge_n1_value),
-    margeN1ByMacro: macroNullablePayload(row.marge_n1_by_macro),
-    margeN1ValueByMacro: macroNumberPayload(row.marge_n1_value_by_macro),
-    objectifCa: safeNumber(row.objectif_ca),
-    potentiel: safeNumber(row.potentiel),
-    encoursCommandeN: safeNumber(row.encours_commande_n),
-    encoursCommandeNByMacro: macroNumberPayload(row.encours_commande_n_by_macro),
-    encoursCommandeNByType: encoursTypePayload(row.encours_commande_n_by_type),
-    devisYtdN: safeNumber(row.devis_ytd_n),
-    devisYtdN1: row.row_kind === 'month' ? safeNumber(row.devis_n1) : safeNumber(row.devis_ytd_n1),
-    devisYtdNByMacro: macroNumberPayload(row.devis_ytd_n_by_macro),
-    devisYtdN1ByMacro: row.row_kind === 'month' ? macroNumberPayload(row.devis_n1_by_macro) : macroNumberPayload(row.devis_ytd_n1_by_macro),
-    caYtdN: safeNumber(row.ca_ytd_n),
-    // FIX (2026-08) : valeur brute (non gelée) telle que renvoyée par le
-    // cache -- c'est celle-ci qui alimente le pavé "CA réel {N}" du
-    // bandeau supérieur. caYtdN, juste au-dessus, continue d'être gelée à
-    // M-1 plus bas par recomputeClientN1ComparisonFromMonths pour la
-    // colonne "CA RÉEL 07-2026" du tableau, comme avant.
-    caYtdNComplet: safeNumber(row.ca_ytd_n),
-    caYtdN1: safeNumber(row.ca_ytd_n1),
-    caYtdNByMacro: macroNumberPayload(row.ca_ytd_n_by_macro),
-    caYtdN1ByMacro: row.row_kind === 'month' ? macroNumberPayload(row.ca_n1_by_macro) : macroNumberPayload(row.ca_ytd_n1_by_macro || row.ca_n1_by_macro),
-    margePctYtdN: row.marge_pct_ytd_n === null || row.marge_pct_ytd_n === undefined ? null : safeNumber(row.marge_pct_ytd_n),
-    margeYtdNValue: safeNumber(row.marge_ytd_n_value),
-    margeYtdN1Value: safeNumber(row.marge_ytd_n1_value),
-    margeYtdNByMacro: macroNullablePayload(row.marge_ytd_n_by_macro),
-    margeYtdNValueByMacro: macroNumberPayload(row.marge_ytd_n_value_by_macro),
-    margeYtdN1ValueByMacro: macroNumberPayload(row.marge_ytd_n1_value_by_macro),
-    ca12m: safeNumber(row.ca_ytd_n) + Math.max(0, safeNumber(row.ca_n1) - safeNumber(row.ca_ytd_n1)),
-    caBandN: caBand(safeNumber(row.ca_ytd_n) + Math.max(0, safeNumber(row.ca_n1) - safeNumber(row.ca_ytd_n1))),
-    caBandN1: caBand(row.ca_n1),
-    caBandN2: caBand(row.ca_n2),
-    contratBfa: safeNumber(row.contrat_bfa),
-    caVsN1: row.ca_vs_n1 === null || row.ca_vs_n1 === undefined ? null : safeNumber(row.ca_vs_n1),
-    margeVsN1: row.marge_vs_n1 === null || row.marge_vs_n1 === undefined ? null : safeNumber(row.marge_vs_n1),
-    realiseObjectif: row.realise_objectif === null || row.realise_objectif === undefined ? null : safeNumber(row.realise_objectif),
-    qrcN1: safeNumber(row.qrc_n1),
-    frequenceCommande: safeNumber(row.frequence_commande),
-    niveauExclusivite: safeNumber(row.niveau_exclusivite),
-    comNotreFaveur: safeNumber(row.com_notre_faveur),
-    garantie: safeNumber(row.garantie),
-    qrcN: safeNumber(row.qrc_n),
-    visiteTheorique: safeNumber(row.visite_theorique),
-    visiteRealise: safeNumber(row.visite_realise),
-    derniereVisiteReelle: '',
-    prochaineVisiteReelle: '',
-    nbVisitesReel: 0,
-    alerteMinAppelsVisitesMois: null,
-    alerteMaxJoursSansDevis: null,
-    alerteMaxJoursSansCommande: null,
-  }
-}
-
-// ── Visite réelle (v_rdv_unifie) : chargement batch + application ────────
-
-type VisiteBatchInfo = { derniereVisite: string; prochaineVisite: string; nbVisitesAnnee: number }
-
-async function fetchVisitesReelles(annee: number): Promise<Map<string, VisiteBatchInfo>> {
-  const { data, error } = await supabase.rpc('get_smc_visites_batch', { p_annee: annee })
-  if (error) throw new Error(`get_smc_visites_batch : ${error.message}`)
-  const map = new Map<string, VisiteBatchInfo>()
-  ;((data || []) as Record<string, any>[]).forEach((row) => {
-    map.set(normalize(row.numero_tiers), {
-      derniereVisite: formatDateFr(row.derniere_visite),
-      prochaineVisite: formatDateFr(row.prochaine_visite),
-      nbVisitesAnnee: safeNumber(row.nb_visites_annee),
-    })
-  })
-  return map
-}
-
-/** Applique la dernière/prochaine visite réelle + le compteur réel sur une
- * ligne client -- ne touche jamais aux lignes TOTAL ou mois (row_kind
- * différent de 'client'), qui restent vides sur ces 3 champs. */
-function applyVisiteReelle(row: SummaryRow, visitesMap: Map<string, VisiteBatchInfo>): SummaryRow {
-  if (row.kind !== 'client') return row
-  const info = visitesMap.get(normalize(row.numero))
-  if (!info) return row
-  return {
-    ...row,
-    derniereVisiteReelle: info.derniereVisite,
-    prochaineVisiteReelle: info.prochaineVisite,
-    nbVisitesReel: info.nbVisitesAnnee,
-  }
-}
-
-/** Applique les 3 seuils d'alerte de comportement (client_alertes_config)
- * sur une ligne client -- uniquement les lignes row_kind='client' (les
- * seuils sont propres au client, pas au mois ; les lignes TOTAL et mois
- * développés restent vides sur ces 3 colonnes). */
-function applyAlertesConfigOverrides(row: SummaryRow, alertesConfigMap: Map<string, AlerteConfigRow>): SummaryRow {
-  if (row.kind !== 'client') return row
-  const cfg = alertesConfigMap.get(normalize(row.numero))
-  if (!cfg) return row
-  return {
-    ...row,
-    alerteMinAppelsVisitesMois: cfg.min_appels_visites_mois,
-    alerteMaxJoursSansDevis: cfg.max_jours_sans_devis,
-    alerteMaxJoursSansCommande: cfg.max_jours_sans_commande,
-  }
-}
-
-function applyObjectiveOverrides(row: SummaryRow, objectiveMap: Map<string, ObjectiveRow>) {
-  if (row.kind === 'total' || !row.numero || row.numero === 'TOTAL') return row
-
-  const objectifCa = objectiveNumber(objectiveMap, row.numero, 'Objectif', 'CA')
-  const objectifProrata = row.kind === 'month' ? objectifCa / 12 : (objectifCa / 12) * CA_CLOSED_MONTH
-  const frequenceCommande = objectiveNumber(objectiveMap, row.numero, 'QRC', 'Fréquence commande')
-  const niveauExclusivite = objectiveNumber(objectiveMap, row.numero, 'QRC', 'Niveau exclusivité')
-  const comNotreFaveur = objectiveNumber(objectiveMap, row.numero, 'QRC', 'Com en notre faveur')
-  const garantie = objectiveNumber(objectiveMap, row.numero, 'QRC', 'Garantie')
-  const visiteRealise = VISITES.reduce((count, rubrique) => count + (objectiveDate(objectiveMap, row.numero, 'Visite', rubrique) ? 1 : 0), 0)
-
-  return {
-    ...row,
-    objectifCa: row.kind === 'month' ? objectifCa / 12 : objectifCa,
-    potentiel: objectiveNumber(objectiveMap, row.numero, 'Objectif', 'POTENTIEL'),
-    contratBfa: objectiveNumber(objectiveMap, row.numero, 'Objectif', 'Contrat\nBFA'),
-    realiseObjectif: ratio(row.caYtdN, objectifProrata),
-    qrcN1: objectiveNumber(objectiveMap, row.numero, 'QRC', `QRC ${N - 1}`) || objectiveNumber(objectiveMap, row.numero, 'QRC', 'QRC N-1'),
-    frequenceCommande,
-    niveauExclusivite,
-    comNotreFaveur,
-    garantie,
-    qrcN: frequenceCommande + niveauExclusivite + comNotreFaveur + garantie,
-    visiteTheorique: objectiveNumber(objectiveMap, row.numero, 'Visite', 'Théorique'),
-    visiteRealise,
-  }
-}
-
-function sumMacro(rows: SummaryRow[], getter: (row: SummaryRow) => Record<string, number>) {
-  const out = emptyByMacro()
-  for (const row of rows) {
-    const values = getter(row)
-    for (const macro of FAMILY_MACROS) out[macro] += safeNumber(values[macro])
-  }
-  return out
-}
-
-function ratioMacro(caByMacro: Record<string, number>, margeByMacro: Record<string, number>) {
-  const out = emptyNullableByMacro()
-  for (const macro of FAMILY_MACROS) out[macro] = caByMacro[macro] ? (margeByMacro[macro] / caByMacro[macro]) * 100 : null
-  return out
-}
-
-function buildTotalFromRows(rows: SummaryRow[], showCollaborateurColumn: boolean): SummaryRow {
-  const caN1ByMacro = sumMacro(rows, (row) => row.caN1ByMacro)
-  const margeN1ValueByMacro = sumMacro(rows, (row) => row.margeN1ValueByMacro)
-  const caYtdNByMacro = sumMacro(rows, (row) => row.caYtdNByMacro)
-  const encoursCommandeNByMacro = sumMacro(rows, (row) => row.encoursCommandeNByMacro)
-  const encoursCommandeNByType = ENCOURS_DOCUMENT_TYPES.reduce((acc, type) => {
-    acc[type] = rows.reduce((sum, row) => sum + safeNumber(row.encoursCommandeNByType[type]), 0)
-    return acc
-  }, emptyEncoursByType())
-  const caYtdN1ByMacro = sumMacro(rows, (row) => row.caYtdN1ByMacro)
-  const margeYtdNValueByMacro = sumMacro(rows, (row) => row.margeYtdNValueByMacro)
-
-  const total: SummaryRow = {
-    id: 'TOTAL',
-    kind: 'total',
-    level: 0,
-    updatedAt: latestUpdateIsoFromRows(rows),
-    collaborateur: showCollaborateurColumn ? 'TOTAL' : '',
-    agence: 'TOTAL',
-    numero: 'TOTAL',
-    intitule: '',
-    totalMois: 'TOTAL',
-    codePostal: '',
-    libelleNaf: '',
-    dateCreation: '',
-    prospectLabel: '',
-    caN3: rows.reduce((s, r) => s + r.caN3, 0),
-    caN2: rows.reduce((s, r) => s + r.caN2, 0),
-    devisN1: rows.reduce((s, r) => s + r.devisN1, 0),
-    devisN1ByMacro: sumMacro(rows, (row) => row.devisN1ByMacro),
-    caN1: rows.reduce((s, r) => s + r.caN1, 0),
-    caN1ByMacro,
-    margePctN1: null,
-    margeN1Value: rows.reduce((s, r) => s + r.margeN1Value, 0),
-    margeN1ByMacro: emptyNullableByMacro(),
-    margeN1ValueByMacro,
-    objectifCa: rows.reduce((s, r) => s + r.objectifCa, 0),
-    potentiel: rows.reduce((s, r) => s + r.potentiel, 0),
-    encoursCommandeN: rows.reduce((s, r) => s + r.encoursCommandeN, 0),
-    encoursCommandeNByMacro,
-    encoursCommandeNByType,
-    devisYtdN: rows.reduce((s, r) => s + r.devisYtdN, 0),
-    devisYtdN1: rows.reduce((s, r) => s + r.devisYtdN1, 0),
-    devisYtdNByMacro: sumMacro(rows, (row) => row.devisYtdNByMacro),
-    devisYtdN1ByMacro: sumMacro(rows, (row) => row.devisYtdN1ByMacro),
-    caYtdN: rows.reduce((s, r) => s + r.caYtdN, 0),
-    // FIX (2026-08) : total séparé pour le pavé "CA réel {N}" (non gelé).
-    caYtdNComplet: rows.reduce((s, r) => s + r.caYtdNComplet, 0),
-    caYtdN1: rows.reduce((s, r) => s + r.caYtdN1, 0),
-    caYtdNByMacro,
-    caYtdN1ByMacro,
-    margePctYtdN: null,
-    margeYtdNValue: rows.reduce((s, r) => s + r.margeYtdNValue, 0),
-    margeYtdN1Value: rows.reduce((s, r) => s + r.margeYtdN1Value, 0),
-    margeYtdNByMacro: emptyNullableByMacro(),
-    margeYtdNValueByMacro,
-    margeYtdN1ValueByMacro: sumMacro(rows, (row) => row.margeYtdN1ValueByMacro),
-    ca12m: rows.reduce((s, r) => s + r.ca12m, 0),
-    caBandN: caBand(rows.reduce((s, r) => s + r.ca12m, 0)),
-    caBandN1: caBand(rows.reduce((s, r) => s + r.caN1, 0)),
-    caBandN2: caBand(rows.reduce((s, r) => s + r.caN2, 0)),
-    contratBfa: rows.reduce((s, r) => s + r.contratBfa, 0),
-    caVsN1: null,
-    margeVsN1: null,
-    realiseObjectif: null,
-    qrcN1: rows.reduce((s, r) => s + r.qrcN1, 0),
-    frequenceCommande: rows.reduce((s, r) => s + r.frequenceCommande, 0),
-    niveauExclusivite: rows.reduce((s, r) => s + r.niveauExclusivite, 0),
-    comNotreFaveur: rows.reduce((s, r) => s + r.comNotreFaveur, 0),
-    garantie: rows.reduce((s, r) => s + r.garantie, 0),
-    qrcN: 0,
-    visiteTheorique: rows.reduce((s, r) => s + r.visiteTheorique, 0),
-    visiteRealise: rows.reduce((s, r) => s + r.visiteRealise, 0),
-    derniereVisiteReelle: '',
-    prochaineVisiteReelle: '',
-    nbVisitesReel: rows.reduce((s, r) => s + r.nbVisitesReel, 0),
-    alerteMinAppelsVisitesMois: null,
-    alerteMaxJoursSansDevis: null,
-    alerteMaxJoursSansCommande: null,
-  }
-
-  total.margePctN1 = total.caN1 ? (total.margeN1Value / total.caN1) * 100 : null
-  total.margeN1ByMacro = ratioMacro(total.caN1ByMacro, total.margeN1ValueByMacro)
-  total.margePctYtdN = total.caYtdN ? (total.margeYtdNValue / total.caYtdN) * 100 : null
-  total.margeYtdNByMacro = ratioMacro(total.caYtdNByMacro, total.margeYtdNValueByMacro)
-  const margePctYtdN1 = total.caYtdN1 ? (total.margeYtdN1Value / total.caYtdN1) * 100 : null
-  total.caVsN1 = ratio(total.caYtdN, total.caYtdN1)
-  total.margeVsN1 = deltaPoints(total.margePctYtdN, margePctYtdN1)
-  total.realiseObjectif = ratio(total.caYtdN, (total.objectifCa / 12) * CA_CLOSED_MONTH)
-  total.qrcN = total.frequenceCommande + total.niveauExclusivite + total.comNotreFaveur + total.garantie
-
-  return total
-}
-
-function mergeSortedOptions(...lists: string[][]) {
-  return Array.from(new Set(lists.flat().map((value) => safeText(value)).filter(Boolean))).sort((a, b) => getMapSectorSortRank(a) - getMapSectorSortRank(b) || a.localeCompare(b, 'fr'))
-}
-
-function emptySelectionOptions(): SelectionOptions {
-  return { collaborateurs: [], agences: [], cacheCollaborateurs: [], cacheAgences: [], collaborateurAgence: {}, agenceCollaborateurs: {} }
-}
-
-
-function listIncludesNormalized(values: string[], candidate: string) {
-  const normalizedCandidate = normalize(candidate)
-  return values.some((value) => normalize(value) === normalizedCandidate)
-}
-
-function filterOptionsByAllowed(values: string[], allowedValues: string[]) {
-  const normalizedAllowed = allowedValues.map((value) => safeText(value)).filter(Boolean)
-  if (!normalizedAllowed.length) return values
-
-  const filtered = values.filter((value) => listIncludesNormalized(normalizedAllowed, value))
-  return filtered.length ? filtered : mergeSortedOptions(normalizedAllowed)
-}
-
-function collaboratorsForAllowedAgences(options: SelectionOptions, allowedAgences: string[]) {
-  if (!allowedAgences.length) return options.collaborateurs
-
-  const collaborators = new Set<string>()
-  allowedAgences.forEach((agence) => {
-    const fromMap = options.agenceCollaborateurs[normalize(agence)] || []
-    fromMap.forEach((collaborateur) => collaborators.add(collaborateur))
-  })
-
-  if (!collaborators.size) {
-    options.collaborateurs.forEach((collaborateur) => {
-      const agence = options.collaborateurAgence[normalize(collaborateur)]
-      if (agence && listIncludesNormalized(allowedAgences, agence)) collaborators.add(collaborateur)
-    })
-  }
-
-  return mergeSortedOptions(Array.from(collaborators))
-}
-
-function restrictSelectionOptionsByAccess(
-  options: SelectionOptions,
-  allowedAgences: string[] = [],
-  allowedCollaborateurs: string[] = []
-): SelectionOptions {
-  let agences = options.agences
-  let collaborateurs = options.collaborateurs
-
-  if (allowedAgences.length > 0) {
-    agences = filterOptionsByAllowed(agences, allowedAgences)
-    const collaborateursAgence = collaboratorsForAllowedAgences(options, allowedAgences)
-    collaborateurs = collaborateursAgence.length ? collaborateursAgence : []
-  }
-
-  if (allowedCollaborateurs.length > 0) {
-    collaborateurs = filterOptionsByAllowed(collaborateurs, allowedCollaborateurs)
-    const agencesCollaborateurs = mergeSortedOptions(
-      collaborateurs
-        .map((collaborateur) => options.collaborateurAgence[normalize(collaborateur)])
-        .filter(Boolean)
-    )
-    if (agencesCollaborateurs.length > 0) agences = filterOptionsByAllowed(agences, agencesCollaborateurs)
-    else if (allowedAgences.length > 0) agences = filterOptionsByAllowed(agences, allowedAgences)
-  }
-
-  return {
-    ...options,
-    agences,
-    collaborateurs,
-  }
-}
-
-function buildCollaborateurAgencyMaps(rawCollaborateurs: Record<string, any>[]) {
-  const collaborateurAgence: Record<string, string> = {}
-  const agenceCollaborateursSet = new Map<string, Set<string>>()
-  const collaborateurs: string[] = []
-  const agences: string[] = []
-
-  rawCollaborateurs.forEach((row) => {
-    const nom = safeText(raw(row, ['nom', 'collaborateur', 'representant', 'commercial', 'vendeur']))
-    const agence = safeText(raw(row, ['agence', 'agence_collaborateur', 'depot', 'depot_rattachement', 'agence_rattachement']))
-    if (!nom) return
-    collaborateurs.push(nom)
-    if (agence) {
-      agences.push(agence)
-      collaborateurAgence[normalize(nom)] = agence
-      const key = normalize(agence)
-      if (!agenceCollaborateursSet.has(key)) agenceCollaborateursSet.set(key, new Set())
-      agenceCollaborateursSet.get(key)!.add(nom)
-    }
-  })
-
-  const agenceCollaborateurs: Record<string, string[]> = {}
-  agenceCollaborateursSet.forEach((values, key) => {
-    agenceCollaborateurs[key] = Array.from(values).sort((a, b) => a.localeCompare(b, 'fr'))
-  })
-
-  return {
-    collaborateurs: mergeSortedOptions(collaborateurs),
-    agences: mergeSortedOptions(agences),
-    collaborateurAgence,
-    agenceCollaborateurs,
-  }
-}
-
-function applyRefAgence(row: SummaryRow, collaborateurAgence: Record<string, string>): SummaryRow {
-  const agence = collaborateurAgence[normalize(row.collaborateur)]
-  return agence ? { ...row, agence } : row
-}
-
-async function fetchCacheSelectionOptions() {
-  const rows = await fetchAll('synthese_multi_clients_cache', 'collaborateur,agence_collaborateur', (q) => q.eq('annee', N).eq('row_kind', 'client'))
-  const collaborateurs = mergeSortedOptions(rows.map((row) => safeText(row.collaborateur)))
-  const agences = mergeSortedOptions(rows.map((row) => safeText(row.agence_collaborateur)))
-  return { collaborateurs, agences }
-}
-
-async function fetchReferentialSelectionOptions() {
-  const [rawCollaborateurs, rawTiers] = await Promise.all([
-    fetchAll('ref_collaborateurs', '*'),
-    // Sélection '*' volontaire : cela évite une erreur Supabase si un des noms de colonne optionnels
-    // n'existe pas dans ref_tiers selon la version de la base.
-    fetchAll('ref_tiers', '*'),
-  ])
-
-  const maps = buildCollaborateurAgencyMaps(rawCollaborateurs)
-
-  const collaborateurs = mergeSortedOptions(
-    maps.collaborateurs,
-    rawTiers.map((row) => safeText(raw(row, ['collaborateur', 'representant', 'commercial', 'vendeur'])))
-  )
-
-  // Les agences de référence viennent volontairement de ref_collaborateurs.
-  // Les tiers sont rattachés ensuite via leur collaborateur, pour éviter les variantes d'agence issues de ref_tiers/cache.
-  const agences = maps.agences
-
-  return { collaborateurs, agences, collaborateurAgence: maps.collaborateurAgence, agenceCollaborateurs: maps.agenceCollaborateurs }
-}
-
-async function fetchSelectionOptions(): Promise<SelectionOptions> {
-  const [cacheResult, refResult] = await Promise.allSettled([
-    fetchCacheSelectionOptions(),
-    fetchReferentialSelectionOptions(),
-  ])
-
-  const cacheOptions = cacheResult.status === 'fulfilled' ? cacheResult.value : { collaborateurs: [], agences: [] }
-  const refOptions = refResult.status === 'fulfilled' ? refResult.value : { collaborateurs: [], agences: [], collaborateurAgence: {}, agenceCollaborateurs: {} }
-
-  const refAgences = refOptions.agences || []
-  return {
-    collaborateurs: mergeSortedOptions(cacheOptions.collaborateurs, refOptions.collaborateurs),
-    agences: refAgences.length ? refAgences : mergeSortedOptions(cacheOptions.agences),
-    cacheCollaborateurs: cacheOptions.collaborateurs,
-    cacheAgences: cacheOptions.agences,
-    collaborateurAgence: refOptions.collaborateurAgence || {},
-    agenceCollaborateurs: refOptions.agenceCollaborateurs || {},
-  }
-}
-
-async function fetchCacheClientRows(
-  mode: ModeSelection,
-  selected: string,
-  collaborateursForAgence: string[] = [],
-  forcedCollaborateurs: string[] = []
-) {
-  return fetchAll('synthese_multi_clients_cache', '*', (query) => {
-    let q = query.eq('annee', N).eq('row_kind', 'client')
-
-    if (mode === 'collaborateur') {
-      if (selected !== ALL_COLLABORATEURS_VALUE) {
-        q = q.eq('collaborateur', selected)
-      } else if (forcedCollaborateurs.length > 0) {
-        q = q.in('collaborateur', forcedCollaborateurs)
-      }
-    }
-
-    if (mode === 'agence') {
-      q = collaborateursForAgence.length ? q.in('collaborateur', collaborateursForAgence) : q.eq('agence_collaborateur', selected)
-    }
-
-    return q.order('collaborateur', { ascending: true }).order('numero_tiers', { ascending: true })
-  }) as Promise<CacheDbRow[]>
-}
-
-async function fetchCacheMonthRows(numero: string) {
-  return fetchAll('synthese_multi_clients_cache', '*', (query) => query
-    .eq('annee', N)
-    .eq('row_kind', 'month')
-    .eq('numero_tiers', numero)
-    .order('mois', { ascending: true })
-  ) as Promise<CacheDbRow[]>
-}
-
-async function fetchCacheMonthRowsForNumeros(numeros: string[]) {
-  const rows: CacheDbRow[] = []
-  const uniqueNumeros = Array.from(new Set(numeros.map((numero) => safeText(numero)).filter(Boolean)))
-  for (const group of chunk(uniqueNumeros, 250)) {
-    const part = await fetchAll('synthese_multi_clients_cache', '*', (query) => query
-      .eq('annee', N)
-      .eq('row_kind', 'month')
-      .in('numero_tiers', group)
-      .order('numero_tiers', { ascending: true })
-      .order('mois', { ascending: true })
-    ) as CacheDbRow[]
-    rows.push(...part)
-  }
-  return rows
-}
-
-function monthNumberFromSummary(row: SummaryRow) {
-  const idx = MONTHS.indexOf(row.totalMois)
-  return idx >= 0 ? idx + 1 : 0
-}
-
-function groupMonthSummariesByNumero(rows: SummaryRow[]) {
-  const grouped: Record<string, SummaryRow[]> = {}
-  rows.forEach((row) => {
-    const numero = safeText(row.numero)
-    if (!numero) return
-    if (!grouped[numero]) grouped[numero] = []
-    grouped[numero].push(row)
-  })
-  Object.keys(grouped).forEach((numero) => {
-    grouped[numero] = grouped[numero].sort((a, b) => monthNumberFromSummary(a) - monthNumberFromSummary(b))
-  })
-  return grouped
-}
-
-function sumSummaryAmount(rows: SummaryRow[], getter: (row: SummaryRow) => number) {
-  return rows.reduce((sum, row) => sum + safeNumber(getter(row)), 0)
-}
-
-function recomputeClientN1ComparisonFromMonths(row: SummaryRow, monthRows: SummaryRow[]) {
-  if (row.kind !== 'client' || monthRows.length === 0) return row
-
-  // FIX (2026-08) : la valeur "brute" reçue du cache (déjà présente sur
-  // caYtdN à ce stade, incluant le mois en cours) est capturée ici AVANT
-  // d'être remplacée plus bas par la version gelée à M-1 -- c'est elle qui
-  // alimente désormais le pavé "CA réel {N}" du bandeau supérieur.
-  // caYtdN continue d'être recalculée et gelée exactement comme avant : la
-  // colonne "CA RÉEL 07-2026" du tableau n'est pas touchée par ce correctif.
-  const caYtdNComplet = row.caYtdN
-
-  // Devis : comparaison à M courant.
-  // CA / marge : comparaison à M-1, pour éviter de comparer un mois courant partiellement facturé.
-  const devisRowsN = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= CLOSED_MONTH)
-  const devisCompareRowsN1 = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= N1_COMPARISON_MONTH)
-  const caRowsN = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= CA_CLOSED_MONTH)
-  const caCompareRowsN1 = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= CA_N1_COMPARISON_MONTH)
-  // Encours commande : PAS de recalcul ici. C'est un instantané ("où en est le
-  // portefeuille aujourd'hui"), pas une donnée à comparer par période comme
-  // Devis/CA/Marge — il n'a jamais eu besoin d'entrer dans cette fonction.
-  // row.encoursCommandeN / ByMacro / ByType viennent déjà de la ligne
-  // row_kind='client' en base (le vrai total, sans borne d'année), et le
-  // spread `...row` plus bas les laisse passer tels quels. Le recalcul
-  // précédent, à partir des lignes mensuelles (bornées à l'année N), écrasait
-  // silencieusement ce bon total par un total tronqué à l'année en cours —
-  // c'est la cause du pavé "Encours commande" incohérent avec Focus Mensuel.
-
-  const devisYtdNByMacro = sumMacro(devisRowsN, (monthRow) => monthRow.devisYtdNByMacro)
-  const devisYtdN = sumSummaryAmount(devisRowsN, (monthRow) => monthRow.devisYtdN)
-  const devisYtdN1ByMacro = sumMacro(devisCompareRowsN1, (monthRow) => monthRow.devisN1ByMacro)
-  const devisYtdN1 = sumSummaryAmount(devisCompareRowsN1, (monthRow) => monthRow.devisN1)
-
-  const caYtdNByMacro = sumMacro(caRowsN, (monthRow) => monthRow.caYtdNByMacro)
-  const margeYtdNValueByMacro = sumMacro(caRowsN, (monthRow) => monthRow.margeYtdNValueByMacro)
-  const caYtdN = sumSummaryAmount(caRowsN, (monthRow) => monthRow.caYtdN)
-  const margeYtdNValue = sumSummaryAmount(caRowsN, (monthRow) => monthRow.margeYtdNValue)
-  const margePctYtdN = caYtdN ? (margeYtdNValue / caYtdN) * 100 : null
-
-  const caYtdN1ByMacro = sumMacro(caCompareRowsN1, (monthRow) => monthRow.caN1ByMacro)
-  const margeYtdN1ValueByMacro = sumMacro(caCompareRowsN1, (monthRow) => monthRow.margeN1ValueByMacro)
-  const caYtdN1 = sumSummaryAmount(caCompareRowsN1, (monthRow) => monthRow.caN1)
-  const margeYtdN1Value = sumSummaryAmount(caCompareRowsN1, (monthRow) => monthRow.margeN1Value)
-
-  const ca12m = caYtdN + Math.max(0, row.caN1 - caYtdN1)
-  const previousMarginPct = caYtdN1 ? (margeYtdN1Value / caYtdN1) * 100 : null
-
-  return {
-    ...row,
-    caYtdNComplet,
-    devisYtdN,
-    devisYtdNByMacro,
-    devisYtdN1,
-    devisYtdN1ByMacro,
-    caYtdN,
-    caYtdNByMacro,
-    margePctYtdN,
-    margeYtdNValue,
-    margeYtdNByMacro: ratioMacro(caYtdNByMacro, margeYtdNValueByMacro),
-    margeYtdNValueByMacro,
-    caYtdN1,
-    caYtdN1ByMacro,
-    margeYtdN1Value,
-    margeYtdN1ValueByMacro,
-    ca12m,
-    caBandN: caBand(ca12m),
-    caVsN1: ratio(caYtdN, caYtdN1),
-    margeVsN1: deltaPoints(margePctYtdN, previousMarginPct),
-    realiseObjectif: ratio(caYtdN, (row.objectifCa / 12) * CA_CLOSED_MONTH),
-  }
-}
-
-
-type ProfileMatrixPeriod = '12M' | 'N-1' | 'N-2'
-type ProfileMatrixClientDetail = {
-  numero: string
-  intitule: string
-  ca: number
-}
-type ProfileMatrixRow = {
-  label: string
-  total: number
-  counts: Record<string, number>
-  details: Record<string, ProfileMatrixClientDetail[]>
-}
-
-function bandForPeriod(row: SummaryRow, period: ProfileMatrixPeriod) {
-  if (period === '12M') return row.caBandN
-  if (period === 'N-1') return row.caBandN1
-  return row.caBandN2
-}
-
-function caForPeriod(row: SummaryRow, period: ProfileMatrixPeriod) {
-  if (period === '12M') return row.ca12m
-  if (period === 'N-1') return row.caN1
-  return row.caN2
-}
-
-function emptyProfileDetails() {
-  return Object.fromEntries(CA_PROFILE_BANDS.map((band) => [band, []])) as Record<string, ProfileMatrixClientDetail[]>
-}
-
-function buildProfileMatrix(rows: SummaryRow[], dimension: ProfileMatrixDimension, period: ProfileMatrixPeriod): ProfileMatrixRow[] {
-  const map = new Map<string, ProfileMatrixRow>()
-  rows
-    .filter((row) => row.kind === 'client')
-    .forEach((row) => {
-      const label = safeText(dimension === 'agence' ? row.agence : row.collaborateur, 'NON AFFECTE')
-      if (!map.has(label)) {
-        map.set(label, {
-          label,
-          total: 0,
-          counts: Object.fromEntries(CA_PROFILE_BANDS.map((band) => [band, 0])) as Record<string, number>,
-          details: emptyProfileDetails(),
-        })
-      }
-      const bucket = map.get(label)!
-      const band = safeText(bandForPeriod(row, period), 'Sans CA')
-      bucket.counts[band] = (bucket.counts[band] || 0) + 1
-      bucket.details[band] = [...(bucket.details[band] || []), { numero: row.numero, intitule: row.intitule, ca: caForPeriod(row, period) }]
-      bucket.total += 1
-    })
-
-  return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label, 'fr', { numeric: true }))
-}
-
-function profileMatrixTotal(rows: ProfileMatrixRow[]) {
-  const details = emptyProfileDetails()
-  for (const band of CA_PROFILE_BANDS) {
-    details[band] = rows.flatMap((row) => row.details[band] || []).sort((a, b) => b.ca - a.ca)
-  }
-
-  const total: ProfileMatrixRow = {
-    label: 'TOTAL',
-    total: rows.reduce((sum, row) => sum + row.total, 0),
-    counts: Object.fromEntries(CA_PROFILE_BANDS.map((band) => [band, rows.reduce((sum, row) => sum + (row.counts[band] || 0), 0)])) as Record<string, number>,
-    details,
-  }
-  return total
-}
-
-type ProfileHoverPosition = { left: number; top: number }
-
-function getProfileHoverPosition(e: MouseEvent<HTMLElement>): ProfileHoverPosition {
-  const width = 380
-  const margin = 16
-  const left = Math.min(Math.max(margin, e.clientX + 14), Math.max(margin, window.innerWidth - width - margin))
-  const top = Math.min(Math.max(margin, e.clientY + 14), Math.max(margin, window.innerHeight - 340))
-  return { left, top }
-}
-
-function ProfileHoverFloating({ title, details, position }: { title: string; details: ProfileMatrixClientDetail[]; position: ProfileHoverPosition }) {
-  return (
-    <div className="profileHoverFloating" style={{ left: position.left, top: position.top }}>
-      <strong>{title}</strong>
-      {details.map((client) => (
-        <div key={`${title}-${client.numero}`} className="profileHoverRow">
-          <b>{client.numero}</b>
-          <span>{client.intitule}</span>
-          <em>{formatKEurBlank(client.ca) || '0,0 K€'}</em>
+    <>
+      <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Rechercher un n° tiers ou une raison sociale (côté BLG)…"
+          className="h-10 w-full max-w-md rounded-lg border border-[#E5E1D8] bg-white px-3 text-sm font-medium outline-none focus:border-[#B4761A]"
+        />
+        <p className="mt-2 text-[12px] text-[#8A8474]">Limité aux tiers déjà appariés avec BLG — voir l&rsquo;onglet Comparaison pour les tiers manquants côté BLG.</p>
+      </section>
+
+      <section className="grid gap-4 lg:grid-cols-[1fr_1.3fr]">
+        <div className="rounded-xl border border-[#E5E1D8] bg-white p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">{loading ? 'Chargement…' : `${rows.length} résultat${rows.length > 1 ? 's' : ''}`}</div>
+            {error && <div className="text-[12px] font-semibold text-red-600">{error}</div>}
+          </div>
+          <div
+            tabIndex={0}
+            onKeyDown={onListKeyDown}
+            className="max-h-[760px] overflow-auto rounded-lg border border-[#E5E1D8] outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A]/50"
+          >
+            <table className="w-full text-left text-[13px]">
+              <thead className="sticky top-0 bg-[#F4F3F0] text-[11px] uppercase tracking-wide text-[#8A8474]">
+                <tr><th className="px-3 py-2 font-bold">N° tiers</th><th className="px-3 py-2 font-bold">Ville</th></tr>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={r.numero_tiers} ref={(el) => { listRefs.current[i] = el }} onClick={() => setSelected(r)}
+                    className={`cursor-pointer border-t border-[#E5E1D8] transition-colors hover:bg-[#F4F3F0] ${selected?.numero_tiers === r.numero_tiers ? 'bg-[#B4761A]/[0.06]' : ''}`}>
+                    <td className="px-3 py-2">
+                      <div className="font-mono text-[12px] font-semibold text-[#3A362E]">{r.numero_tiers}</div>
+                      <div className="truncate text-[12px] text-[#111820]">{r.blg_intitule || '—'}</div>
+                    </td>
+                    <td className="px-3 py-2 text-[12px] text-[#3A362E]">{r.blg_ville || '—'}</td>
+                  </tr>
+                ))}
+                {!loading && rows.length === 0 && <tr><td colSpan={2} className="px-3 py-8 text-center text-[#8A8474]">Aucun résultat.</td></tr>}
+              </tbody>
+            </table>
+          </div>
         </div>
-      ))}
+
+        <div className="rounded-xl border border-[#E5E1D8] bg-white p-4">
+          <div className="mb-3 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Fiche BLG</div>
+          {!selected ? (
+            <div className="flex h-64 items-center justify-center text-center text-[13px] text-[#8A8474]">Sélectionne un tiers dans la liste pour voir sa fiche BLG.</div>
+          ) : (
+            <div>
+              <div className="mb-3 flex items-center justify-between border-b border-[#E5E1D8] pb-3">
+                <div>
+                  <div className="font-mono text-[12px] font-bold text-[#8A8474]">{selected.numero_tiers}</div>
+                  <div className="text-[15px] font-bold text-[#111820]">{selected.blg_intitule || '—'}</div>
+                </div>
+                {selected.blg_partner_id && (
+                  <a href={`https://app.blgcloud.com/cegeclim-test/?app/crm/company/${selected.blg_partner_id}#`} target="_blank" rel="noopener noreferrer"
+                    className="text-[12px] font-semibold text-[#B4761A] hover:underline">Ouvrir dans BLG ↗</a>
+                )}
+              </div>
+              <div className="space-y-0.5">
+                {BLG_DETAIL_FIELDS.map((f) => (
+                  <div key={String(f.key)} className="grid grid-cols-[1fr_1.4fr] gap-2 rounded-lg px-2 py-1.5 text-[13px] odd:bg-[#F4F3F0]/60">
+                    <span className="font-semibold text-[#3A362E]">{f.label}</span>
+                    <span className="text-[#111820]">{formatCellValue(selected[f.key])}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
+    </>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Onglet Comparaison — logique de contrôle SAGE ↔ BLG restaurée telle quelle
+// ─────────────────────────────────────────────────────────────────────────
+
+function OngletComparaison() {
+  const [domaine, setDomaine] = useState<Domaine>('client')
+  const [summary, setSummary] = useState<Summary | null>(null)
+  const [rows, setRows] = useState<ControleRow[]>([])
+  const [loading, setLoading] = useState(true)
+  const [loadingSummary, setLoadingSummary] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  const [search, setSearch] = useState('')
+  const [statutFilter, setStatutFilter] = useState<'tous' | 'apparie' | 'manquant_blg'>('tous')
+  const [onlyEcarts, setOnlyEcarts] = useState(false)
+  const [champFilter, setChampFilter] = useState<string | null>(null)
+  const [exclureSommeil, setExclureSommeil] = useState(true)
+  const [conditions, setConditions] = useState<FiltreCondition[]>([])
+  const [logiqueConditions, setLogiqueConditions] = useState<'et' | 'ou'>('et')
+
+  const [selected, setSelected] = useState<ControleRow | null>(null)
+  const [selectedSageFull, setSelectedSageFull] = useState<Record<string, unknown>>({})
+  const [selectedBlgFull, setSelectedBlgFull] = useState<Record<string, unknown>>({})
+  const [loadingSelected, setLoadingSelected] = useState(false)
+
+  const [showMapping, setShowMapping] = useState(false)
+  const [inventaire, setInventaire] = useState<ChampInventaire[]>([])
+  const [mapping, setMapping] = useState<ChampMapping[]>([])
+  const [loadingMapping, setLoadingMapping] = useState(false)
+
+  const [syncLoading, setSyncLoading] = useState(false)
+  const [syncMessage, setSyncMessage] = useState<string | null>(null)
+  const [syncLog, setSyncLog] = useState<SyncLogEntry[]>([])
+  const [showSyncLog, setShowSyncLog] = useState(false)
+
+  const [exportEnCours, setExportEnCours] = useState(false)
+  const [exportProgress, setExportProgress] = useState<{ done: number } | null>(null)
+  const [showInfoModal, setShowInfoModal] = useState(false)
+
+  const listRefs = useRef<Record<number, HTMLTableRowElement | null>>({})
+
+  const conditionsValides = useMemo(
+    () => conditions.filter((c) => c.champ && (c.operateur === 'est_vide' || c.operateur === 'non_vide' || c.valeur.trim() !== '')),
+    [conditions]
+  )
+
+  useEffect(() => { void loadMappingPanel() }, [])
+  useEffect(() => { void loadSummary(); void loadRows() }, [search, statutFilter, onlyEcarts, champFilter, exclureSommeil, conditionsValides, logiqueConditions]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!selected || selected.statut_appariement !== 'apparie' || !selected.blg_partner_id) {
+      setSelectedSageFull({}); setSelectedBlgFull({})
+      return
+    }
+    setLoadingSelected(true)
+    Promise.all([
+      supabase.rpc('get_tiers_sage_full', { p_numero: selected.numero_tiers }),
+      supabase.rpc('get_tiers_blg_full', { p_partner_id: selected.blg_partner_id }),
+    ]).then(([{ data: sage }, { data: blg }]) => {
+      setSelectedSageFull((sage as Record<string, unknown>) || {})
+      setSelectedBlgFull((blg as Record<string, unknown>) || {})
+      setLoadingSelected(false)
+    })
+  }, [selected])
+
+  function filtreParams() {
+    return {
+      p_exclure_sommeil: exclureSommeil,
+      p_filtres: conditionsValides.map((c) => ({ cote: c.cote, champ: c.champ, operateur: c.operateur, valeur: c.valeur })),
+      p_combinateur: logiqueConditions.toUpperCase(),
+    }
+  }
+
+  async function loadSummary() {
+    setLoadingSummary(true)
+    const { data, error: err } = await supabase.rpc('get_controle_tiers_summary', {
+      p_statut: statutFilter === 'tous' ? null : statutFilter,
+      p_only_ecarts: onlyEcarts, p_champ: champFilter, p_search: search.trim() || null,
+      ...filtreParams(),
+    })
+    if (err) setError(err.message)
+    else setSummary(Array.isArray(data) ? data[0] : data)
+    setLoadingSummary(false)
+  }
+
+  async function loadRows() {
+    setLoading(true)
+    const { data, error: err } = await supabase.rpc('get_controle_tiers_sage_blg', {
+      p_statut: statutFilter === 'tous' ? null : statutFilter,
+      p_only_ecarts: onlyEcarts, p_champ: champFilter, p_search: search.trim() || null,
+      p_limit: 300, p_offset: 0,
+      ...filtreParams(),
+    })
+    if (err) setError(err.message)
+    else { setRows((data || []) as ControleRow[]); setError(null) }
+    setLoading(false)
+  }
+
+  async function loadMappingPanel() {
+    setLoadingMapping(true)
+    const [{ data: inv }, { data: map }] = await Promise.all([
+      supabase.rpc('get_champ_inventaire_client'),
+      supabase.from('champ_mapping_sage_blg').select('*').eq('domaine', 'client').order('type_comparaison').order('champ_sage'),
+    ])
+    setInventaire((inv || []) as ChampInventaire[])
+    setMapping((map || []) as ChampMapping[])
+    setLoadingMapping(false)
+  }
+
+  function toggleMappingPanel() { setShowMapping((v) => !v) }
+
+  const blgInventaire = useMemo(() => inventaire.filter((c) => c.cote === 'blg'), [inventaire])
+  const sageInventaire = useMemo(() => inventaire.filter((c) => c.cote === 'sage'), [inventaire])
+
+  function valuesDiffer(a: unknown, b: unknown): boolean {
+    const na = normalizeForCompare(a)
+    const nb = normalizeForCompare(b)
+    if (na === '' || nb === '') return false
+    return na !== nb
+  }
+  function normalizeForCompare(v: unknown): string {
+    if (v === null || v === undefined) return ''
+    if (typeof v === 'boolean') return v ? 'oui' : 'non'
+    if (Array.isArray(v)) return v.map(String).join(',').toUpperCase().replace(/\s+/g, ' ').trim()
+    return String(v).toUpperCase().replace(/\s+/g, ' ').trim()
+  }
+
+  const mappedFields = useMemo(() => mapping.filter((m) => m.champ_blg), [mapping])
+  const unmappedFields = useMemo(() => mapping.filter((m) => !m.champ_blg), [mapping])
+
+  async function lancerSynchro() {
+    setSyncLoading(true)
+    setSyncMessage(null)
+    try {
+      const res = await fetch('/api/blg-sync', { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) setSyncMessage(`Erreur : ${data.error || res.statusText}`)
+      else setSyncMessage('Synchro lancée sur le VPS — ça prend en général 1 à quelques minutes selon les écarts à rattraper.')
+    } catch (e) {
+      setSyncMessage(`Impossible de joindre le serveur de synchro : ${(e as Error).message}`)
+    }
+    setSyncLoading(false)
+  }
+
+  async function verifierSynchro() {
+    const { data } = await supabase.rpc('get_last_sync_status')
+    setSyncLog((data || []) as SyncLogEntry[])
+    setShowSyncLog(true)
+    void loadSummary()
+    void loadRows()
+  }
+
+  /** Export Excel : rapatrie TOUTES les lignes correspondant aux filtres
+   * actuels de l'onglet Comparaison (statut, écarts, champ, recherche,
+   * conditions avancées), paginé par 500 via la même RPC que la liste, puis
+   * génère un .xlsx via ExcelJS (nécessaire pour les couleurs de cellule,
+   * non supportées par le paquet xlsx/SheetJS utilisé sur l'onglet SAGE) :
+   * - chaque paire de colonnes SAGE ↔ BLG comparables est encadrée (bordure
+   *   + en-tête bleu-gris distinct des colonnes simples) et porte son numéro
+   *   de mapping du document Excel entre parenthèses ;
+   * - vert clair = valeurs identiques, rouge clair = écart, orange clair =
+   *   non vérifiable (donnée manquante d'un côté) ou champ affiché sans
+   *   comparaison stricte (ex. Qualité/tags, Adresse). */
+  async function exporterExcelComparaison() {
+    setExportEnCours(true)
+    setExportProgress({ done: 0 })
+    try {
+      const toutes: ControleRow[] = []
+      let offset = 0
+      const pageSize = 500
+      while (true) {
+        const { data, error: err } = await supabase.rpc('get_controle_tiers_sage_blg', {
+          p_statut: statutFilter === 'tous' ? null : statutFilter,
+          p_only_ecarts: onlyEcarts, p_champ: champFilter, p_search: search.trim() || null,
+          p_limit: pageSize, p_offset: offset,
+          ...filtreParams(),
+        })
+        if (err) throw err
+        const batch = (data || []) as ControleRow[]
+        toutes.push(...batch)
+        setExportProgress({ done: toutes.length })
+        if (batch.length < pageSize) break
+        offset += pageSize
+      }
+
+      const wb = new ExcelJS.Workbook()
+      const ws = wb.addWorksheet('Comparaison SAGE-BLG')
+
+      // Construction des en-têtes : colonnes simples puis, pour chaque paire,
+      // une colonne SAGE suivie d'une colonne BLG.
+      const enTetes: { texte: string; estPaire: boolean; bordureGauche?: boolean; bordureDroite?: boolean }[] = []
+      EXPORT_COLONNES_SIMPLES.forEach((c) => enTetes.push({ texte: c.label, estPaire: false }))
+      EXPORT_PAIRES_COMPARAISON.forEach((p) => {
+        const suffixeSage = p.numeroSage !== null ? ` (n°${p.numeroSage})` : ''
+        const suffixeBlg = p.numeroBlg !== null ? ` (n°${p.numeroBlg})` : ''
+        enTetes.push({ texte: `${p.labelSage}${suffixeSage} — SAGE`, estPaire: true, bordureGauche: true })
+        enTetes.push({ texte: `${p.labelBlg}${suffixeBlg} — BLG`, estPaire: true, bordureDroite: true })
+      })
+
+      ws.addRow(enTetes.map((h) => h.texte))
+      const ligneEntete = ws.getRow(1)
+      ligneEntete.font = { bold: true }
+      ligneEntete.eachCell((cell, colNumber) => {
+        const h = enTetes[colNumber - 1]
+        cell.alignment = { wrapText: true, vertical: 'middle' }
+        if (h.estPaire) {
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COULEUR_ENTETE_PAIRE } }
+          cell.border = {
+            top: { style: 'thin' }, bottom: { style: 'thin' },
+            left: h.bordureGauche ? { style: 'medium' } : { style: 'thin' },
+            right: h.bordureDroite ? { style: 'medium' } : { style: 'thin' },
+          }
+        }
+      })
+
+      toutes.forEach((r) => {
+        const valeursSimples = EXPORT_COLONNES_SIMPLES.map((c) => (c.transform ? c.transform(r) : safeText(r[c.key])))
+        const valeursPaires: string[] = []
+        EXPORT_PAIRES_COMPARAISON.forEach((p) => {
+          valeursPaires.push(formatCellValue(r[p.sageKey]))
+          valeursPaires.push(formatCellValue(r[p.blgKey]))
+        })
+        const ligne = ws.addRow([...valeursSimples, ...valeursPaires])
+
+        let colIndex = EXPORT_COLONNES_SIMPLES.length
+        EXPORT_PAIRES_COMPARAISON.forEach((p) => {
+          colIndex += 1
+          const celluleSage = ligne.getCell(colIndex)
+          colIndex += 1
+          const celluleBlg = ligne.getCell(colIndex)
+
+          const sageVide = r[p.sageKey] === null || r[p.sageKey] === undefined || r[p.sageKey] === ''
+          const blgVide = r[p.blgKey] === null || r[p.blgKey] === undefined || (Array.isArray(r[p.blgKey]) && (r[p.blgKey] as unknown[]).length === 0)
+
+          let couleur: string
+          if (!p.compareStrict) {
+            couleur = COULEUR_NON_COMPARABLE
+          } else if (sageVide || blgVide) {
+            couleur = COULEUR_NON_COMPARABLE
+          } else {
+            const enEcart = p.enEcart ? p.enEcart(r) : normaliserPourExport(r[p.sageKey]) !== normaliserPourExport(r[p.blgKey])
+            couleur = enEcart ? COULEUR_ECART : COULEUR_OK
+          }
+
+          const bordureCommune = { top: { style: 'thin' as const }, bottom: { style: 'thin' as const } }
+          celluleSage.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: couleur } }
+          celluleSage.border = { ...bordureCommune, left: { style: 'medium' } }
+          celluleBlg.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: couleur } }
+          celluleBlg.border = { ...bordureCommune, right: { style: 'medium' } }
+        })
+      })
+
+      ws.columns.forEach((col) => { col.width = 22 })
+      ws.views = [{ state: 'frozen', ySplit: 1 }]
+
+      // Petite légende en bas de feuille
+      const ligneLegendeIndex = toutes.length + 3
+      ws.getCell(`A${ligneLegendeIndex}`).value = 'Légende :'
+      ws.getCell(`A${ligneLegendeIndex}`).font = { bold: true }
+      const legendes: [string, string][] = [
+        ['Valeurs identiques', COULEUR_OK],
+        ['Écart détecté', COULEUR_ECART],
+        ["Non comparable / donnée manquante / affiché sans vérification", COULEUR_NON_COMPARABLE],
+      ]
+      legendes.forEach(([texte, couleur], i) => {
+        const cell = ws.getCell(`A${ligneLegendeIndex + 1 + i}`)
+        cell.value = texte
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: couleur } }
+      })
+
+      const buffer = await wb.xlsx.writeBuffer()
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `comparaison_sage_blg_${new Date().toISOString().slice(0, 10)}.xlsx`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (e) {
+      alert('Erreur export Excel : ' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      setExportEnCours(false)
+      setExportProgress(null)
+    }
+  }
+
+  function getIndexComparaison(list: ControleRow[], sel: ControleRow | null) {
+    if (!sel) return -1
+    return list.findIndex((r) => r.numero_tiers === sel.numero_tiers)
+  }
+  const onListKeyDown = creerHandlerNavigation(rows, selected, setSelected, getIndexComparaison, listRefs)
+
+  const champsTries = useMemo(() => {
+    if (!summary) return []
+    return Object.entries(summary.par_champ).sort((a, b) => b[1] - a[1]).map(([champ, nb]) => ({ champ, nb, label: CHAMP_LABELS[champ] || champ }))
+  }, [summary])
+
+  return (
+    <>
+      <section className="rounded-xl border border-[#E5E1D8] bg-white p-5">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#B4761A]">CEGECLIM — Migration BLG</p>
+            <h2 className="mt-0.5 text-[22px] font-bold tracking-tight text-[#111820]">Contrôle de cohérence SAGE ↔ BLG</h2>
+            <p className="mt-1 text-[13px] text-[#8A8474]">Compare les données des deux systèmes, domaine par domaine, pour préparer la bascule.</p>
+          </div>
+          <div className="flex flex-col items-end gap-2">
+            <button type="button" onClick={() => void lancerSynchro()} disabled={syncLoading}
+              className="rounded-lg bg-[#111820] px-4 py-2.5 text-sm font-bold text-white hover:bg-[#252E3D] disabled:cursor-not-allowed disabled:opacity-60">
+              {syncLoading ? 'Lancement…' : '↻ Lancer la synchro BLG'}
+            </button>
+            <button type="button" onClick={() => void verifierSynchro()} className="text-[12px] font-semibold text-[#B4761A] hover:underline">
+              Vérifier l'état de la dernière synchro
+            </button>
+          </div>
+        </div>
+
+        {syncMessage && <div className="mt-3 rounded-lg border border-[#B4761A]/25 bg-[#B4761A]/[0.06] px-3 py-2.5 text-[13px] font-semibold text-[#5A4321]">{syncMessage}</div>}
+
+        {showSyncLog && (
+          <div className="mt-3 rounded-lg border border-[#E5E1D8] bg-[#F4F3F0] p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Dernières synchros (10 plus récentes)</div>
+              <button type="button" onClick={() => setShowSyncLog(false)} className="text-[12px] font-bold text-[#8A8474] hover:text-[#111820]">Fermer</button>
+            </div>
+            <div className="space-y-1 text-[12px]">
+              {syncLog.map((l, i) => (
+                <div key={i} className="flex items-center justify-between rounded bg-white px-2 py-1">
+                  <span className="font-semibold text-[#3A362E]">{l.table_name}</span>
+                  <span className="text-[#8A8474]">{l.rows_synced} lignes</span>
+                  <span className={l.status === 'ok' ? 'font-bold text-emerald-700' : 'font-bold text-red-600'}>{l.status}</span>
+                  <span className="text-[#8A8474]">{new Date(l.finished_at).toLocaleString('fr-FR')}</span>
+                </div>
+              ))}
+              {syncLog.length === 0 && <p className="text-[#8A8474]">Aucune donnée.</p>}
+            </div>
+          </div>
+        )}
+
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap gap-2">
+            <DomaineTab active={domaine === 'client'} onClick={() => setDomaine('client')} label="Fiche client" />
+            <DomaineTab active={false} disabled label="Fiche article" note="bientôt" />
+            <DomaineTab active={false} disabled label="Devis" note="bientôt" />
+            <DomaineTab active={false} disabled label="Factures" note="bientôt" />
+          </div>
+          <label className="flex items-center gap-2 rounded-lg border border-[#E5E1D8] bg-[#F4F3F0] px-3 py-2 text-[13px] font-bold text-[#3A362E]">
+            <input type="checkbox" checked={exclureSommeil} onChange={(e) => setExclureSommeil(e.target.checked)} className="accent-[#B4761A]" />
+            Exclure les tiers en sommeil (SAGE)
+          </label>
+        </div>
+      </section>
+
+      {domaine !== 'client' ? (
+        <section className="rounded-xl border border-dashed border-[#E5E1D8] bg-white p-12 text-center">
+          <p className="text-[15px] font-bold text-[#3A362E]">Domaine pas encore disponible</p>
+          <p className="mt-1 text-[13px] text-[#8A8474]">Le rapprochement pour ce domaine sera ajouté dans une prochaine étape.</p>
+        </section>
+      ) : (
+        <>
+          <section className="grid grid-cols-2 gap-3 md:grid-cols-5">
+            <KpiCard label="Tiers SAGE" value={summary?.total_sage ?? 0} loading={loadingSummary} />
+            <KpiCard label="Appariés avec BLG" value={summary?.apparies ?? 0} loading={loadingSummary} />
+            <KpiCard label="Manquants côté BLG" value={summary?.manquants_blg ?? 0} loading={loadingSummary} tone="warn" />
+            <KpiCard label="Sans écart" value={summary?.sans_ecart ?? 0} loading={loadingSummary} tone="ok" />
+            <KpiCard label="Avec au moins un écart" value={summary?.avec_ecart ?? 0} loading={loadingSummary} tone="warn" />
+          </section>
+
+          <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
+            <div className="mb-3 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Champs les plus fréquemment en écart (comparaison automatique)</div>
+            {loadingSummary ? (
+              <div className="h-16 animate-pulse rounded bg-[#F4F3F0]" />
+            ) : champsTries.length === 0 ? (
+              <p className="text-[13px] text-[#8A8474]">Aucun écart détecté.</p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {champsTries.map(({ champ, nb, label }) => (
+                  <button key={champ} type="button" onClick={() => setChampFilter(champFilter === champ ? null : champ)}
+                    className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-[13px] font-semibold transition-colors ${
+                      champFilter === champ ? 'border-[#B4761A] bg-[#B4761A]/[0.1] text-[#96600F]' : 'border-[#E5E1D8] bg-[#F4F3F0] text-[#3A362E] hover:bg-[#EDEAE1]'
+                    }`}>
+                    <span>{label}</span>
+                    <span className="rounded-full bg-white px-1.5 py-0.5 text-[11px] font-bold text-[#8A8474]">{nb}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            <p className="mt-2 text-[12px] text-[#8A8474]">Clique sur un champ pour ne voir que les tiers concernés.</p>
+          </section>
+
+          <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
+            <button type="button" onClick={toggleMappingPanel} className="flex w-full items-center justify-between text-left">
+              <div>
+                <div className="text-[13px] font-bold text-[#111820]">Mapping des champs (SAGE ↔ BLG)</div>
+                <p className="text-[12px] text-[#8A8474]">Choisis un client exemple, clique un champ SAGE puis le champ BLG correspondant pour les associer.</p>
+              </div>
+              <span className="text-[#8A8474]">{showMapping ? '▲' : '▼'}</span>
+            </button>
+            {showMapping && (
+              <div className="mt-4">
+                {loadingMapping ? <div className="h-32 animate-pulse rounded bg-[#F4F3F0]" /> : (
+                  <MappingBuilder mapping={mapping} blgInventaire={blgInventaire} onMappingChange={setMapping} />
+                )}
+              </div>
+            )}
+          </section>
+
+          <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
+            <div className="grid gap-2 md:grid-cols-4">
+              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Rechercher un n° tiers ou une raison sociale…"
+                className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-sm font-medium outline-none focus:border-[#B4761A] md:col-span-2" />
+              <select value={statutFilter} onChange={(e) => setStatutFilter(e.target.value as typeof statutFilter)}
+                className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
+                <option value="tous">Statut : Tous</option>
+                <option value="apparie">Apparié avec BLG</option>
+                <option value="manquant_blg">Manquant côté BLG</option>
+              </select>
+              <label className="flex h-10 items-center gap-2 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
+                <input type="checkbox" checked={onlyEcarts} onChange={(e) => setOnlyEcarts(e.target.checked)} className="accent-[#B4761A]" />
+                Avec écart uniquement
+              </label>
+            </div>
+            {champFilter && (
+              <div className="mt-2 flex items-center gap-2 text-[12px] text-[#8A8474]">
+                Filtré sur : <span className="font-bold text-[#96600F]">{CHAMP_LABELS[champFilter] || champFilter}</span>
+                <button type="button" onClick={() => setChampFilter(null)} className="font-bold text-[#B4761A] hover:underline">Retirer</button>
+              </div>
+            )}
+
+            <div className="mt-3 border-t border-[#E5E1D8] pt-3">
+              <div className="mb-2 flex items-center justify-between">
+                <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Filtres avancés</div>
+                {conditions.length >= 2 && (
+                  <div className="flex items-center gap-1 text-[12px] font-semibold text-[#3A362E]">
+                    Combiner avec :
+                    <button type="button" onClick={() => setLogiqueConditions('et')} className={`rounded px-2 py-0.5 ${logiqueConditions === 'et' ? 'bg-[#111820] text-white' : 'bg-[#F4F3F0]'}`}>ET</button>
+                    <button type="button" onClick={() => setLogiqueConditions('ou')} className={`rounded px-2 py-0.5 ${logiqueConditions === 'ou' ? 'bg-[#111820] text-white' : 'bg-[#F4F3F0]'}`}>OU</button>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                {conditions.map((c) => (
+                  <div key={c.id} className="grid grid-cols-[110px_1fr_160px_1fr_32px] gap-2">
+                    <select value={c.cote} onChange={(e) => setConditions((prev) => prev.map((x) => x.id === c.id ? { ...x, cote: e.target.value as 'sage' | 'blg', champ: '' } : x))}
+                      className="h-9 rounded-lg border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold text-[#3A362E]">
+                      <option value="sage">SAGE</option>
+                      <option value="blg">BLG</option>
+                    </select>
+                    <select value={c.champ} onChange={(e) => setConditions((prev) => prev.map((x) => x.id === c.id ? { ...x, champ: e.target.value } : x))}
+                      className="h-9 rounded-lg border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold text-[#3A362E]">
+                      <option value="">Champ…</option>
+                      {(c.cote === 'sage' ? sageInventaire : blgInventaire).map((col) => (
+                        <option key={col.colonne} value={col.colonne}>{col.colonne}</option>
+                      ))}
+                    </select>
+                    <select value={c.operateur} onChange={(e) => setConditions((prev) => prev.map((x) => x.id === c.id ? { ...x, operateur: e.target.value as Operateur } : x))}
+                      className="h-9 rounded-lg border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold text-[#3A362E]">
+                      {(Object.entries(OPERATEUR_LABELS) as [Operateur, string][]).map(([op, label]) => (
+                        <option key={op} value={op}>{label}</option>
+                      ))}
+                    </select>
+                    <input value={c.valeur} onChange={(e) => setConditions((prev) => prev.map((x) => x.id === c.id ? { ...x, valeur: e.target.value } : x))}
+                      disabled={c.operateur === 'est_vide' || c.operateur === 'non_vide'} placeholder="Valeur…"
+                      className="h-9 rounded-lg border border-[#E5E1D8] bg-white px-2 text-[12px] font-medium outline-none focus:border-[#B4761A] disabled:bg-[#F4F3F0]" />
+                    <button type="button" onClick={() => setConditions((prev) => prev.filter((x) => x.id !== c.id))}
+                      className="flex h-9 items-center justify-center rounded-lg border border-[#E5E1D8] text-[#8A8474] hover:border-red-300 hover:text-red-600">✕</button>
+                  </div>
+                ))}
+              </div>
+
+              <button type="button" onClick={() => setConditions((prev) => [...prev, nouvelleCondition()])}
+                className="mt-2 text-[12px] font-bold text-[#B4761A] hover:underline">+ Ajouter une condition</button>
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[#E5E1D8] pt-3">
+              <span className="text-[12px] text-[#8A8474]">
+                {exportProgress ? `Export en cours… ${exportProgress.done} client${exportProgress.done > 1 ? 's' : ''} récupéré${exportProgress.done > 1 ? 's' : ''}` : '\u00A0'}
+              </span>
+              <button
+                type="button"
+                onClick={() => void exporterExcelComparaison()}
+                disabled={exportEnCours || loading}
+                className="rounded-lg bg-[#111820] px-4 py-2 text-[13px] font-bold text-white hover:bg-[#252E3D] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {exportEnCours ? 'Export en cours…' : '⬇ Exporter en Excel (tous les champs SAGE + BLG)'}
+              </button>
+            </div>
+          </section>
+
+          <section className="grid gap-4 lg:grid-cols-[1fr_2fr]">
+            <div className="rounded-xl border border-[#E5E1D8] bg-white p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">{loading ? 'Chargement…' : `${rows.length} résultat${rows.length > 1 ? 's' : ''}`}</div>
+                {error && <div className="text-[12px] font-semibold text-red-600">{error}</div>}
+              </div>
+              <div
+                tabIndex={0}
+                onKeyDown={onListKeyDown}
+                className="max-h-[760px] overflow-auto rounded-lg border border-[#E5E1D8] outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A]/50"
+              >
+                <table className="w-full text-left text-[13px]">
+                  <thead className="sticky top-0 bg-[#F4F3F0] text-[11px] uppercase tracking-wide text-[#8A8474]">
+                    <tr><th className="px-3 py-2 font-bold">N° tiers</th><th className="px-3 py-2 font-bold">Statut</th></tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((r, i) => (
+                      <tr key={r.numero_tiers} ref={(el) => { listRefs.current[i] = el }} onClick={() => setSelected(r)}
+                        className={`cursor-pointer border-t border-[#E5E1D8] transition-colors hover:bg-[#F4F3F0] ${selected?.numero_tiers === r.numero_tiers ? 'bg-[#B4761A]/[0.06]' : ''}`}>
+                        <td className="px-3 py-2">
+                          <div className="font-mono text-[12px] font-semibold text-[#3A362E]">{r.numero_tiers}</div>
+                          <div className="truncate text-[12px] text-[#111820]">{r.sage_intitule || r.blg_intitule || '—'}</div>
+                        </td>
+                        <td className="px-3 py-2">
+                          {r.statut_appariement === 'manquant_blg' ? (
+                            <span className="rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-bold text-red-700">Manquant BLG</span>
+                          ) : r.champs_en_ecart.length === 0 ? (
+                            <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-bold text-emerald-700">OK</span>
+                          ) : (
+                            <span className="rounded-full bg-[#B4761A]/[0.1] px-2 py-0.5 text-[11px] font-bold text-[#96600F]">{r.champs_en_ecart.length} écart{r.champs_en_ecart.length > 1 ? 's' : ''}</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                    {!loading && rows.length === 0 && <tr><td colSpan={2} className="px-3 py-8 text-center text-[#8A8474]">Aucun résultat pour ces filtres.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-[#E5E1D8] bg-white p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Comparaison détaillée (tous les champs mappés)</div>
+                <button
+                  type="button"
+                  onClick={() => setShowInfoModal(true)}
+                  title="Voir les captures d'écran et la liste complète du mapping"
+                  className="flex h-6 w-6 items-center justify-center rounded-full border border-[#E5E1D8] text-[12px] font-bold text-[#8A8474] hover:border-[#B4761A] hover:text-[#B4761A]"
+                >
+                  ⓘ
+                </button>
+              </div>
+              {!selected ? (
+                <div className="flex h-64 items-center justify-center text-center text-[13px] text-[#8A8474]">Sélectionne un tiers dans la liste pour voir le détail champ par champ.</div>
+              ) : (
+                <div>
+                  <div className="mb-3 flex items-center justify-between border-b border-[#E5E1D8] pb-3">
+                    <div>
+                      <div className="font-mono text-[12px] font-bold text-[#8A8474]">{selected.numero_tiers}</div>
+                      <div className="text-[15px] font-bold text-[#111820]">{selected.sage_intitule || selected.blg_intitule}</div>
+                    </div>
+                    {selected.blg_partner_id && (
+                      <a href={`https://app.blgcloud.com/cegeclim-test/?app/crm/company/${selected.blg_partner_id}#`} target="_blank" rel="noopener noreferrer"
+                        className="text-[12px] font-semibold text-[#B4761A] hover:underline">Ouvrir dans BLG ↗</a>
+                    )}
+                  </div>
+
+                  {selected.statut_appariement === 'manquant_blg' ? (
+                    <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-[13px] font-semibold text-red-700">
+                      Ce tiers n'a pas de correspondance identifiée côté BLG (`blg_id_tiers` non renseigné ou introuvable).
+                    </div>
+                  ) : loadingSelected ? (
+                    <div className="h-64 animate-pulse rounded-lg bg-[#F4F3F0]" />
+                  ) : (
+                    <div className="max-h-[720px] overflow-auto">
+                      <div className="grid grid-cols-[36px_1.1fr_1fr_36px_1.1fr_1fr] gap-2 px-2 pb-1.5 text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">
+                        <span>N°</span><span>Champ SAGE</span><span>Valeur SAGE</span>
+                        <span>N°</span><span>Champ BLG</span><span>Valeur BLG</span>
+                      </div>
+                      <div className="space-y-0.5">
+                        {mappedFields.map((m) => {
+                          const sageVal = selectedSageFull[m.champ_sage]
+                          const blgVal = selectedBlgFull[m.champ_blg as string]
+                          const isEcart = m.type_comparaison !== 'affichage_seul' && valuesDiffer(sageVal, blgVal)
+                          // Le n° BLG contient déjà l'écran entre parenthèses (ex. "24 (Suivi)") ;
+                          // on n'affiche que le numéro dans la petite colonne, l'écran reste visible au survol.
+                          const numeroBlgCourt = m.numero_blg ? m.numero_blg.split(' ')[0] : null
+                          return (
+                            <div key={m.id} className={`grid grid-cols-[36px_1.1fr_1fr_36px_1.1fr_1fr] items-baseline gap-2 rounded-lg px-2 py-1.5 text-[13px] ${isEcart ? 'bg-[#B4761A]/[0.08]' : ''}`}>
+                              <span className="font-mono text-[11px] text-[#B3AD9E]">{m.numero_sage ?? '—'}</span>
+                              <span className="font-semibold text-[#3A362E]" title={`Nom technique : ${m.champ_sage}`}>{m.nom_ecran_sage || m.label || m.champ_sage}</span>
+                              <span className={isEcart ? 'font-bold text-[#96600F]' : 'text-[#111820]'}>{formatCellValue(sageVal)}</span>
+                              <span className="font-mono text-[11px] text-[#B3AD9E]" title={m.numero_blg || undefined}>{numeroBlgCourt ?? '—'}</span>
+                              <span className="font-semibold text-[#3A362E]" title={m.numero_blg ? `Écran : ${m.numero_blg.replace(/^\d+\s*/, '')}` : `Nom technique : ${m.champ_blg}`}>
+                                {m.nom_ecran_blg || m.champ_blg}
+                              </span>
+                              <span className={isEcart ? 'font-bold text-[#96600F]' : 'text-[#111820]'}>{formatCellValue(blgVal)}</span>
+                            </div>
+                          )
+                        })}
+                      </div>
+
+                      <div className="mt-4 border-t border-[#E5E1D8] pt-2">
+                        <div className="mb-1 text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">Champs SAGE non mappés côté BLG ({unmappedFields.length})</div>
+                        <div className="space-y-0.5">
+                          {unmappedFields.map((m) => (
+                            <div key={m.id} className="grid grid-cols-[36px_1.1fr_1fr_36px_1.1fr_1fr] items-baseline gap-2 rounded-lg px-2 py-1 text-[13px] opacity-70">
+                              <span className="font-mono text-[11px] text-[#B3AD9E]">{m.numero_sage ?? '—'}</span>
+                              <span className="font-semibold text-[#3A362E]" title={`Nom technique : ${m.champ_sage}`}>{m.nom_ecran_sage || m.label || m.champ_sage}</span>
+                              <span className="text-[#111820]">{formatCellValue(selectedSageFull[m.champ_sage])}</span>
+                              <span />
+                              <span className="text-[#B3AD9E]">— non mappé —</span>
+                              <span />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </section>
+        </>
+      )}
+      {showInfoModal && <MappingInfoModal mapping={mapping} onClose={() => setShowInfoModal(false)} />}
+    </>
+  )
+}
+
+function DomaineTab({ active, disabled, onClick, label, note }: { active: boolean; disabled?: boolean; onClick?: () => void; label: string; note?: string }) {
+  return (
+    <button type="button" onClick={disabled ? undefined : onClick} disabled={disabled}
+      className={`flex items-center gap-2 rounded-lg border px-4 py-2 text-[13px] font-bold transition-colors ${
+        active ? 'border-[#111820] bg-[#111820] text-white' : disabled ? 'cursor-not-allowed border-[#E5E1D8] bg-[#F4F3F0] text-[#B3AD9E]' : 'border-[#E5E1D8] bg-white text-[#3A362E] hover:bg-[#F4F3F0]'
+      }`}>
+      {label}
+      {note && <span className="rounded-full bg-white/70 px-1.5 py-0.5 text-[10px] font-bold">{note}</span>}
+    </button>
+  )
+}
+
+function MappingBuilder({
+  mapping, blgInventaire, onMappingChange,
+}: { mapping: ChampMapping[]; blgInventaire: ChampInventaire[]; onMappingChange: (m: ChampMapping[]) => void }) {
+  const [clientSearch, setClientSearch] = useState('')
+  const [clientResults, setClientResults] = useState<{ numero_tiers: string; blg_partner_id: number | null; sage_intitule: string | null }[]>([])
+  const [selectedClient, setSelectedClient] = useState<{ numero: string; partnerId: number } | null>(null)
+  const [sageValues, setSageValues] = useState<Record<string, unknown>>({})
+  const [blgValues, setBlgValues] = useState<Record<string, unknown>>({})
+  const [loadingClient, setLoadingClient] = useState(false)
+  const [pendingSageField, setPendingSageField] = useState<string | null>(null)
+
+  useEffect(() => {
+    const q = clientSearch.trim()
+    if (q.length < 2) { setClientResults([]); return }
+    const t = setTimeout(async () => {
+      const { data } = await supabase.rpc('get_controle_tiers_sage_blg', {
+        p_statut: 'apparie', p_only_ecarts: false, p_champ: null, p_search: q, p_limit: 8, p_offset: 0,
+      })
+      setClientResults(((data || []) as ControleRow[]).map((r) => ({ numero_tiers: r.numero_tiers, blg_partner_id: r.blg_partner_id, sage_intitule: r.sage_intitule })))
+    }, 200)
+    return () => clearTimeout(t)
+  }, [clientSearch])
+
+  async function pickClient(numero: string, partnerId: number | null) {
+    if (!partnerId) return
+    setSelectedClient({ numero, partnerId })
+    setClientResults([])
+    setClientSearch('')
+    setPendingSageField(null)
+    setLoadingClient(true)
+    const [{ data: sage }, { data: blg }] = await Promise.all([
+      supabase.rpc('get_tiers_sage_full', { p_numero: numero }),
+      supabase.rpc('get_tiers_blg_full', { p_partner_id: partnerId }),
+    ])
+    setSageValues((sage as Record<string, unknown>) || {})
+    setBlgValues((blg as Record<string, unknown>) || {})
+    setLoadingClient(false)
+  }
+
+  async function setChampBlg(row: ChampMapping, champBlg: string | null) {
+    const next = mapping.map((m) => (m.id === row.id ? { ...m, champ_blg: champBlg, type_comparaison: champBlg ? ('manuel' as const) : m.type_comparaison } : m))
+    onMappingChange(next)
+    await supabase.from('champ_mapping_sage_blg').update({ champ_blg: champBlg }).eq('id', row.id)
+  }
+
+  function handleSageClick(m: ChampMapping) {
+    if (pendingSageField === m.champ_sage) { setPendingSageField(null); return }
+    setPendingSageField(m.champ_sage)
+  }
+  function handleBlgClick(colonne: string) {
+    if (!pendingSageField) return
+    const row = mapping.find((m) => m.champ_sage === pendingSageField)
+    if (row) void setChampBlg(row, colonne)
+    setPendingSageField(null)
+  }
+
+  const mappedRows = mapping.filter((m) => m.champ_blg)
+  const unmappedRows = mapping.filter((m) => !m.champ_blg)
+  const blgUsed = new Set(mapping.map((m) => m.champ_blg).filter(Boolean) as string[])
+  const blgAvailable = blgInventaire.filter((c) => !blgUsed.has(c.colonne))
+
+  return (
+    <div>
+      <div className="relative mb-4">
+        <input
+          value={selectedClient ? `${selectedClient.numero}` : clientSearch}
+          onChange={(e) => { setClientSearch(e.target.value); setSelectedClient(null) }}
+          placeholder="Rechercher un client exemple (n° tiers ou raison sociale)…"
+          className="h-10 w-full max-w-md rounded-lg border border-[#E5E1D8] bg-white px-3 text-sm font-medium outline-none focus:border-[#B4761A]"
+        />
+        {clientResults.length > 0 && (
+          <div className="absolute z-10 mt-1 w-full max-w-md rounded-lg border border-[#E5E1D8] bg-white shadow-lg">
+            {clientResults.map((c) => (
+              <button key={c.numero_tiers} type="button" onClick={() => void pickClient(c.numero_tiers, c.blg_partner_id)}
+                className="flex w-full items-center justify-between px-3 py-2 text-left text-[13px] hover:bg-[#F4F3F0]">
+                <span className="font-mono text-[12px] text-[#8A8474]">{c.numero_tiers}</span>
+                <span className="text-[#111820]">{c.sage_intitule || '—'}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {!selectedClient ? (
+        <div className="flex h-40 items-center justify-center rounded-lg border border-dashed border-[#E5E1D8] text-center text-[13px] text-[#8A8474]">
+          Choisis un client ci-dessus pour voir ses valeurs et construire le mapping.
+        </div>
+      ) : loadingClient ? (
+        <div className="h-40 animate-pulse rounded-lg bg-[#F4F3F0]" />
+      ) : (
+        <>
+          {pendingSageField && (
+            <div className="mb-3 flex items-center justify-between rounded-lg border border-[#B4761A]/30 bg-[#B4761A]/[0.08] px-3 py-2 text-[13px] font-semibold text-[#96600F]">
+              <span>Champ SAGE sélectionné : <span className="font-mono">{pendingSageField}</span> — clique un champ BLG à droite pour l'associer.</span>
+              <button type="button" onClick={() => setPendingSageField(null)} className="font-bold hover:underline">Annuler</button>
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-3 border-b border-[#E5E1D8] pb-2 text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">
+            <span>SAGE</span><span>BLG</span>
+          </div>
+
+          <div className="max-h-[420px] overflow-auto">
+            {mappedRows.map((m) => {
+              const isPending = pendingSageField === m.champ_sage
+              return (
+                <div key={m.id} className="grid grid-cols-2 gap-3 border-b border-[#F4F3F0] py-1.5">
+                  <button type="button" onClick={() => handleSageClick(m)}
+                    className={`flex items-center justify-between rounded px-2 py-1 text-left text-[13px] transition-colors ${isPending ? 'bg-[#B4761A]/[0.15]' : 'hover:bg-[#F4F3F0]'}`}>
+                    <span className="font-semibold text-[#3A362E]">{m.label || m.champ_sage}</span>
+                    <span className="ml-2 truncate text-[#111820]">{formatCellValue(sageValues[m.champ_sage])}</span>
+                  </button>
+                  <div className="flex items-center justify-between rounded bg-emerald-50/60 px-2 py-1 text-[13px]">
+                    <span className="flex items-center gap-1.5">
+                      <span className="font-mono text-[11px] text-emerald-700">{m.champ_blg}</span>
+                      <span className="truncate text-[#111820]">{formatCellValue(blgValues[m.champ_blg as string])}</span>
+                    </span>
+                    <button type="button" onClick={() => void setChampBlg(m, null)} title="Dissocier" className="ml-2 shrink-0 text-[11px] font-bold text-[#8A8474] hover:text-red-600">✕</button>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <div>
+              <div className="mb-1 text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">Champs SAGE non mappés ({unmappedRows.length})</div>
+              <div className="max-h-[320px] space-y-0.5 overflow-auto rounded-lg border border-[#E5E1D8] p-1">
+                {unmappedRows.map((m) => {
+                  const isPending = pendingSageField === m.champ_sage
+                  return (
+                    <button key={m.id} type="button" onClick={() => handleSageClick(m)}
+                      className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-[13px] transition-colors ${isPending ? 'bg-[#B4761A]/[0.15]' : 'hover:bg-[#F4F3F0]'}`}>
+                      <span className="font-semibold text-[#3A362E]">{m.label || m.champ_sage}</span>
+                      <span className="ml-2 truncate text-[#8A8474]">{formatCellValue(sageValues[m.champ_sage])}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+            <div>
+              <div className="mb-1 text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">Champs BLG disponibles ({blgAvailable.length})</div>
+              <div className={`max-h-[320px] space-y-0.5 overflow-auto rounded-lg border p-1 ${pendingSageField ? 'border-[#B4761A]' : 'border-[#E5E1D8]'}`}>
+                {blgAvailable.map((c) => (
+                  <button key={c.colonne} type="button" onClick={() => handleBlgClick(c.colonne)} disabled={!pendingSageField}
+                    className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-[13px] transition-colors ${pendingSageField ? 'hover:bg-[#B4761A]/[0.1]' : 'cursor-default'}`}>
+                    <span className="font-mono text-[11px] text-[#3A362E]">{c.colonne}</span>
+                    <span className="ml-2 truncate text-[#8A8474]">{formatCellValue(blgValues[c.colonne])}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   )
 }
 
-function ProfileMatrixCountCell({ row, band }: { row: ProfileMatrixRow; band: MapProfileFilter }) {
-  const [hoverPosition, setHoverPosition] = useState<ProfileHoverPosition | null>(null)
-  const count = row.counts[band] || 0
-  const details = (row.details[band] || []).slice().sort((a, b) => b.ca - a.ca)
-  const canShowDetails = count > 0 && count <= 10
+// ─────────────────────────────────────────────────────────────────────────
+// Page principale : bascule entre les 3 onglets
+// ─────────────────────────────────────────────────────────────────────────
 
-  const numberCellStyle = {
-    textAlign: 'center' as const,
-    verticalAlign: 'middle' as const,
-    padding: '5px 7px',
-    fontVariantNumeric: 'tabular-nums' as const,
-  }
+type OngletPrincipal = 'sage' | 'blg' | 'comparaison'
 
-  if (!count) return <td className="profileMatrixNumberCell" style={numberCellStyle} />
+export default function ClientsSageBlgPage() {
+  const [onglet, setOnglet] = useState<OngletPrincipal>('sage')
 
   return (
-    <td
-      className={`profileMatrixNumberCell${canShowDetails ? ' profileTooltipCell' : ''}`}
-      style={numberCellStyle}
-      onMouseEnter={canShowDetails ? (e) => setHoverPosition(getProfileHoverPosition(e)) : undefined}
-      onMouseMove={canShowDetails ? (e) => setHoverPosition(getProfileHoverPosition(e)) : undefined}
-      onMouseLeave={canShowDetails ? () => setHoverPosition(null) : undefined}
-    >
-      <span className="profileMatrixNumberValue">{count}</span>
-      {canShowDetails && hoverPosition ? (
-        <ProfileHoverFloating title={`${row.label} · ${band}`} details={details} position={hoverPosition} />
-      ) : null}
-    </td>
-  )
-}
-
-function ProfileMatrixTotalCell({ row }: { row: ProfileMatrixRow }) {
-  const [hoverPosition, setHoverPosition] = useState<ProfileHoverPosition | null>(null)
-  const details = CA_PROFILE_BANDS
-    .flatMap((band) => row.details[band] || [])
-    .sort((a, b) => b.ca - a.ca)
-  const canShowDetails = row.total > 0 && row.total <= 10
-
-  const numberCellStyle = {
-    textAlign: 'center' as const,
-    verticalAlign: 'middle' as const,
-    padding: '5px 7px',
-    fontVariantNumeric: 'tabular-nums' as const,
-  }
-
-  return (
-    <td
-      className={`profileMatrixNumberCell${canShowDetails ? ' profileTooltipCell' : ''}`}
-      style={numberCellStyle}
-      onMouseEnter={canShowDetails ? (e) => setHoverPosition(getProfileHoverPosition(e)) : undefined}
-      onMouseMove={canShowDetails ? (e) => setHoverPosition(getProfileHoverPosition(e)) : undefined}
-      onMouseLeave={canShowDetails ? () => setHoverPosition(null) : undefined}
-    >
-      <span className="profileMatrixNumberValue">{row.total}</span>
-      {canShowDetails && hoverPosition ? (
-        <ProfileHoverFloating title={`${row.label} · Total`} details={details} position={hoverPosition} />
-      ) : null}
-    </td>
-  )
-}
-
-function mapBooleanMatches(value: boolean, filter: MapBooleanFilter) {
-  if (filter === 'all') return true
-  return filter === 'yes' ? value : !value
-}
-
-function getMapClientProfileBand(client: SyntheseMapClientRow, period: MapProfilePeriodFilter): MapProfileFilter {
-  if (period === 'N-1') return safeText(client.caBandN1, 'Sans CA') as MapProfileFilter
-  if (period === 'N-2') return safeText(client.caBandN2, 'Sans CA') as MapProfileFilter
-  return safeText(client.caBandN, 'Sans CA') as MapProfileFilter
-}
-
-function rowMatchesCaProfile(client: SyntheseMapClientRow, profiles: MapProfileFilter[], period: MapProfilePeriodFilter) {
-  if (!profiles.length) return true
-  const band = getMapClientProfileBand(client, period) as MapProfileFilter
-  return profiles.includes(band)
-}
-
-function rowMatchesCombinedCaProfiles(
-  client: SyntheseMapClientRow,
-  profile12M: MapProfileFilter[],
-  profileN1: MapProfileFilter[],
-  profileN2: MapProfileFilter[],
-  operator12MN1: MapLogicalOperator,
-  operatorN1N2: MapLogicalOperator,
-) {
-  const checks = [
-    { active: profile12M.length > 0, result: rowMatchesCaProfile(client, profile12M, '12M'), operatorBefore: null as MapLogicalOperator | null },
-    { active: profileN1.length > 0, result: rowMatchesCaProfile(client, profileN1, 'N-1'), operatorBefore: operator12MN1 },
-    { active: profileN2.length > 0, result: rowMatchesCaProfile(client, profileN2, 'N-2'), operatorBefore: operatorN1N2 },
-  ].filter((item) => item.active)
-
-  if (!checks.length) return true
-
-  let result = checks[0].result
-  for (let i = 1; i < checks.length; i += 1) {
-    result = checks[i].operatorBefore === 'AND' ? result && checks[i].result : result || checks[i].result
-  }
-  return result
-}
-
-export default function SyntheseMultiClientsPage() {
-  const access = usePageFilterAccess()
-  const [mode, setMode] = useState<ModeSelection>('collaborateur')
-  const [selected, setSelected] = useState('')
-  const [selectionOptions, setSelectionOptions] = useState<SelectionOptions>(emptySelectionOptions())
-  const [cacheRows, setCacheRows] = useState<SummaryRow[]>([])
-  const [monthRowsByNumero, setMonthRowsByNumero] = useState<Record<string, SummaryRow[]>>({})
-  const [objectiveRows, setObjectiveRows] = useState<ObjectiveRow[]>([])
-  const [alertesConfigRows, setAlertesConfigRows] = useState<AlerteConfigRow[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [showFamilies, setShowFamilies] = useState(false)
-  const [encoursDetailMode, setEncoursDetailMode] = useState<EncoursDetailMode>('macro')
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
-  const [sort, setSort] = useState<SortState>({ key: 'caN1', direction: 'desc' })
-  const [filters, setFilters] = useState<Record<string, string>>({})
-  const [savingKey, setSavingKey] = useState<string | null>(null)
-  const [savingAlerteKey, setSavingAlerteKey] = useState<string | null>(null)
-  const [loadingMonths, setLoadingMonths] = useState<Set<string>>(new Set())
-  const [cacheStatus, setCacheStatus] = useState('')
-  // Colonnes optionnelles affichées à l'écran (pastilles sous les KPI) —
-  // n'affecte jamais l'export Excel, qui reconstruit ses propres colonnes.
-  const [visibleOptionalCols, setVisibleOptionalCols] = useState<Set<string>>(new Set(DEFAULT_VISIBLE_TOGGLEABLE_COLUMNS))
-  // Dernière/prochaine visite réelle + compteur (v_rdv_unifie) -- chargé
-  // une fois pour tous les clients (indépendant du filtre collaborateur/
-  // agence en cours), fusionné dans baseClientRows ci-dessous.
-  const [visitesReellesMap, setVisitesReellesMap] = useState<Map<string, VisiteBatchInfo>>(new Map())
-
-  const hasSelection = Boolean(selected)
-  const showCollaborateurColumn = mode === 'collaborateur' && selected === ALL_COLLABORATEURS_VALUE
-  const [lastBusinessDates, setLastBusinessDates] = useState<LastBusinessDates>(EMPTY_LAST_BUSINESS_DATES)
-  const lastUpdateLabel = useMemo(() => formatLastBusinessDatesLabel(lastBusinessDates), [lastBusinessDates])
-
-  const objectiveMap = useMemo(() => {
-    const map = new Map<string, ObjectiveRow>()
-    objectiveRows.forEach((row) => map.set(objectiveKey(row.numero_tiers, row.annee, row.domaine, row.rubrique), row))
-    return map
-  }, [objectiveRows])
-
-  const alertesConfigMap = useMemo(() => {
-    const map = new Map<string, AlerteConfigRow>()
-    alertesConfigRows.forEach((row) => map.set(normalize(row.numero_tiers), row))
-    return map
-  }, [alertesConfigRows])
-
-  const columns = useMemo(() => buildColumns(showFamilies, showCollaborateurColumn, encoursDetailMode), [showFamilies, showCollaborateurColumn, encoursDetailMode])
-
-  // Colonnes réellement rendues à l'écran : toutes les colonnes SAUF celles
-  // de la liste "optionnelle" qui n'ont pas été explicitement activées.
-  // L'export Excel (exportExcel ci-dessous) n'utilise jamais cette variable.
-  const displayedColumns = useMemo(
-    () => columns.filter((col) => !(col.key in TOGGLEABLE_COLUMN_LABELS) || visibleOptionalCols.has(col.key)),
-    [columns, visibleOptionalCols]
-  )
-
-  function toggleOptionalColumn(key: string) {
-    setVisibleOptionalCols((prev) => {
-      const next = new Set(prev)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
-  }
-
-  function openVisionClient(numero: string) {
-    if (!numero || numero === 'TOTAL') return
-    window.open(`/vision-client?numero=${encodeURIComponent(numero)}`, '_blank', 'noopener,noreferrer')
-  }
-
-  const allowedAgences = access.allowedAgences || []
-  const allowedCollaborateurs = access.allowedCollaborateurs || []
-  const restrictedSelectionOptions = useMemo(
-    () => restrictSelectionOptionsByAccess(selectionOptions, allowedAgences, allowedCollaborateurs),
-    [selectionOptions, allowedAgences, allowedCollaborateurs]
-  )
-  const currentSelectionOptions = mode === 'collaborateur' ? restrictedSelectionOptions.collaborateurs : restrictedSelectionOptions.agences
-  const isModeLockedByCollaborateur = access.hasCollaborateurRestriction
-  const isSelectionLocked =
-    (access.hasCollaborateurRestriction && allowedCollaborateurs.length === 1) ||
-    (mode === 'agence' && access.hasAgenceRestriction && allowedAgences.length === 1)
-
-  useEffect(() => {
-    let alive = true
-
-    async function loadLastBusinessDates() {
-      try {
-        const dates = await fetchLatestBusinessDates(N)
-        if (alive) setLastBusinessDates(dates)
-      } catch {
-        if (alive) setLastBusinessDates(EMPTY_LAST_BUSINESS_DATES)
-      }
-    }
-
-    loadLastBusinessDates()
-
-    return () => {
-      alive = false
-    }
-  }, [])
-
-  // Dernière/prochaine visite réelle + compteur -- une seule fois, pour
-  // tous les clients (v_rdv_unifie n'est pas filtrable par collaborateur/
-  // agence directement, donc chargé indépendamment de la sélection). Si la
-  // RPC n'est pas encore déployée, échoue silencieusement : les 3 colonnes
-  // restent simplement vides plutôt que de bloquer l'écran.
-  useEffect(() => {
-    let alive = true
-    async function loadVisitesReelles() {
-      try {
-        const map = await fetchVisitesReelles(N)
-        if (alive) setVisitesReellesMap(map)
-      } catch (err) {
-        console.warn('[SMC] get_smc_visites_batch indisponible :', err)
-      }
-    }
-    void loadVisitesReelles()
-    return () => { alive = false }
-  }, [])
-
-  useEffect(() => {
-    let alive = true
-    async function init() {
-      setLoading(true)
-      setError(null)
-      try {
-        const options = await fetchSelectionOptions()
-        if (!alive) return
-        setSelectionOptions(options)
-        const cacheCount = options.cacheCollaborateurs.length + options.cacheAgences.length
-        const refCount = options.collaborateurs.length + options.agences.length
-        if (cacheCount) {
-          setCacheStatus('Cache prêt')
-        } else if (refCount) {
-          setCacheStatus('Référentiels chargés · cache vide : lancez la reconstruction après les imports.')
-        } else {
-          setCacheStatus('Aucun collaborateur/agence trouvé dans les référentiels et le cache.')
-        }
-      } catch (err: any) {
-        if (alive) {
-          setSelectionOptions(emptySelectionOptions())
-          setError(err?.message || 'Erreur de chargement des listes collaborateur/agence')
-          setCacheStatus('Listes indisponibles')
-        }
-      } finally {
-        if (alive) setLoading(false)
-      }
-    }
-    void init()
-    return () => { alive = false }
-  }, [])
-
-  useEffect(() => {
-    if (access.loading) return
-
-    if (access.hasCollaborateurRestriction && allowedCollaborateurs.length > 0) {
-      const collaborator = filterOptionsByAllowed(restrictedSelectionOptions.collaborateurs, allowedCollaborateurs)[0] || allowedCollaborateurs[0]
-      if (mode !== 'collaborateur') setMode('collaborateur')
-      if (selected !== collaborator) setSelected(collaborator)
-      return
-    }
-
-    if (access.hasAgenceRestriction && allowedAgences.length > 0) {
-      if (mode === 'agence') {
-        const agence = filterOptionsByAllowed(restrictedSelectionOptions.agences, allowedAgences)[0] || allowedAgences[0]
-        if (!selected || !listIncludesNormalized(allowedAgences, selected)) setSelected(agence)
-      } else if (mode === 'collaborateur') {
-        if (selected && selected !== ALL_COLLABORATEURS_VALUE && !restrictedSelectionOptions.collaborateurs.includes(selected)) setSelected('')
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    access.loading,
-    access.hasAgenceRestriction,
-    access.hasCollaborateurRestriction,
-    allowedAgences,
-    allowedCollaborateurs,
-    restrictedSelectionOptions,
-    mode,
-    selected,
-  ])
-
-  useEffect(() => {
-    if (!selected) return
-
-    if (mode === 'collaborateur') {
-      if (selected === ALL_COLLABORATEURS_VALUE) return
-      if (!restrictedSelectionOptions.collaborateurs.includes(selected)) setSelected('')
-      return
-    }
-
-    if (!restrictedSelectionOptions.agences.includes(selected)) setSelected('')
-  }, [mode, restrictedSelectionOptions, selected])
-
-  useEffect(() => {
-    let alive = true
-    async function loadCachedBusinessData() {
-      if (!selected) {
-        setCacheRows([])
-        setMonthRowsByNumero({})
-        setObjectiveRows([])
-        setAlertesConfigRows([])
-        return
-      }
-
-      setLoading(true)
-      setError(null)
-      try {
-        const collaborateursForAgence = mode === 'agence' ? (selectionOptions.agenceCollaborateurs[normalize(selected)] || []) : []
-        const forcedCollaborateurs = mode === 'collaborateur' && selected === ALL_COLLABORATEURS_VALUE
-          ? (access.hasAgenceRestriction || access.hasCollaborateurRestriction
-            ? (restrictedSelectionOptions.collaborateurs.length ? restrictedSelectionOptions.collaborateurs : ['__NO_ALLOWED_COLLABORATEUR__'])
-            : [])
-          : []
-        const rows = (await fetchCacheClientRows(mode, selected, collaborateursForAgence, forcedCollaborateurs))
-          .map(cacheRowToSummary)
-          .map((row) => applyRefAgence(row, selectionOptions.collaborateurAgence))
-        const codes = rows.map((row) => row.numero).filter(Boolean)
-        const [objectives, rawMonthRows, alertesConfig] = await Promise.all([
-          codes.length ? fetchObjectivesForTiers(codes, N) : Promise.resolve([]),
-          codes.length ? fetchCacheMonthRowsForNumeros(codes) : Promise.resolve([]),
-          codes.length ? fetchAlertesConfigForTiers(codes) : Promise.resolve([]),
-        ])
-        const monthSummaries = rawMonthRows
-          .map(cacheRowToSummary)
-          .map((row) => applyRefAgence(row, selectionOptions.collaborateurAgence))
-        const monthRowsGrouped = groupMonthSummariesByNumero(monthSummaries)
-        const rowsWithCorrectN1Comparison = rows.map((row) => recomputeClientN1ComparisonFromMonths(row, monthRowsGrouped[row.numero] || []))
-        if (!alive) return
-        setCacheRows(rowsWithCorrectN1Comparison)
-        setObjectiveRows(objectives)
-        setAlertesConfigRows(alertesConfig)
-        setMonthRowsByNumero(monthRowsGrouped)
-        setExpanded(new Set())
-        setCacheStatus(rows.length ? `Cache chargé · ${rows.length} clients` : 'Aucun client dans le cache pour cette sélection')
-      } catch (err: any) {
-        if (alive) {
-          setCacheRows([])
-          setObjectiveRows([])
-          setAlertesConfigRows([])
-          setMonthRowsByNumero({})
-          setError(err?.message || 'Erreur de chargement de la synthèse cache')
-        }
-      } finally {
-        if (alive) setLoading(false)
-      }
-    }
-    void loadCachedBusinessData()
-    return () => { alive = false }
-  }, [mode, selected, selectionOptions.agenceCollaborateurs, selectionOptions.collaborateurAgence, restrictedSelectionOptions.collaborateurs, access.hasAgenceRestriction, access.hasCollaborateurRestriction])
-
-  const baseClientRows = useMemo(
-    () => cacheRows.map((row) => applyVisiteReelle(applyAlertesConfigOverrides(applyObjectiveOverrides(row, objectiveMap), alertesConfigMap), visitesReellesMap)),
-    [cacheRows, objectiveMap, alertesConfigMap, visitesReellesMap]
-  )
-  const totalRow = useMemo(() => buildTotalFromRows(baseClientRows, showCollaborateurColumn), [baseClientRows, showCollaborateurColumn])
-
-  const visibleRows = useMemo(() => {
-    const sortCol = columns.find((c) => c.key === sort.key) || columns.find((c) => c.key === 'caN1')!
-    let rows = baseClientRows.filter((row) => {
-      return Object.entries(filters).every(([key, value]) => {
-        if (!String(value).trim()) return true
-        const col = columns.find((c) => c.key === key)
-        if (!col) return true
-        return loose(displayValue(col, row, objectiveMap)).includes(loose(String(value)))
-      })
-    })
-
-    rows = [...rows].sort((a, b) => {
-      const av = rawSortableValue(sortCol, a, objectiveMap)
-      const bv = rawSortableValue(sortCol, b, objectiveMap)
-      const an = typeof av === 'number' ? av : Number(av)
-      const bn = typeof bv === 'number' ? bv : Number(bv)
-      let cmp = 0
-      if (Number.isFinite(an) && Number.isFinite(bn)) cmp = an - bn
-      else cmp = String(av ?? '').localeCompare(String(bv ?? ''), 'fr')
-      return sort.direction === 'asc' ? cmp : -cmp
-    })
-
-    const out: SummaryRow[] = [totalRow]
-    rows.forEach((row) => {
-      out.push(row)
-      if (expanded.has(row.numero)) {
-        const monthRows = monthRowsByNumero[row.numero] || []
-        monthRows.forEach((monthRow) => out.push(applyObjectiveOverrides(monthRow, objectiveMap)))
-      }
-    })
-    return out
-  }, [baseClientRows, filters, sort, columns, objectiveMap, totalRow, expanded, monthRowsByNumero])
-
-
-  const clientRowsForCurrentSelection = useMemo(() => {
-    return visibleRows.filter((row) => row.kind === 'client')
-  }, [visibleRows])
-
-  const [mapOpen, setMapOpen] = useState(false)
-  const [mapLoading, setMapLoading] = useState(false)
-  const [mapError, setMapError] = useState<string | null>(null)
-  const [mapRows, setMapRows] = useState<SyntheseMapClientRow[]>([])
-  const [mapVisibleSectors, setMapVisibleSectors] = useState<string[]>([])
-  const [mapRgeFilter, setMapRgeFilter] = useState<MapBooleanFilter>('all')
-  const [mapCapacityFilter, setMapCapacityFilter] = useState<MapBooleanFilter>('all')
-  const [mapCapitalSocialFilter, setMapCapitalSocialFilter] = useState<CapitalSocialFilterOption>('TOUS')
-  const [showMapListPanel, setShowMapListPanel] = useState(true)
-  const [mapProfileFilter12M, setMapProfileFilter12M] = useState<MapProfileFilter[]>([])
-  const [mapProfileFilterN1, setMapProfileFilterN1] = useState<MapProfileFilter[]>([])
-  const [mapProfileFilterN2, setMapProfileFilterN2] = useState<MapProfileFilter[]>([])
-  const [mapProfileOperator1, setMapProfileOperator1] = useState<MapLogicalOperator>('OR')
-  const [mapProfileOperator2, setMapProfileOperator2] = useState<MapLogicalOperator>('OR')
-  const [mapInstanceKey, setMapInstanceKey] = useState(0)
-  const [profileMatrixOpen, setProfileMatrixOpen] = useState(false)
-  const [profileMatrixDimension, setProfileMatrixDimension] = useState<ProfileMatrixDimension>('agence')
-  const [activeMapClientKey, setActiveMapClientKey] = useState<string | null>(null)
-  const leafletMapRef = useRef<any>(null)
-  const mapMarkerRefs = useRef<Record<string, any>>({})
-
-  const mapRowsWithCoords = useMemo(() => {
-    return mapRows.filter((row) => typeof row.latitude === 'number' && typeof row.longitude === 'number' && Number.isFinite(row.latitude) && Number.isFinite(row.longitude))
-  }, [mapRows])
-
-  const mapLegendSectors = useMemo(() => {
-    return Array.from(new Set(mapRowsWithCoords.map((row) => getMapSectorLabel(row)).filter(Boolean) as string[])).sort((a, b) => getMapSectorSortRank(a) - getMapSectorSortRank(b) || a.localeCompare(b, 'fr'))
-  }, [mapRowsWithCoords])
-
-  useEffect(() => {
-    setMapVisibleSectors((prev) => {
-      const next = prev.filter((sector) => mapLegendSectors.includes(sector))
-      return next.length ? next : mapLegendSectors
-    })
-  }, [mapLegendSectors])
-
-  const mapSectorCounts = useMemo(() => {
-    return mapLegendSectors.reduce((acc, sector) => {
-      acc[sector] = mapRowsWithCoords.filter((row) => getMapSectorLabel(row) === sector).length
-      return acc
-    }, {} as Record<string, number>)
-  }, [mapLegendSectors, mapRowsWithCoords])
-
-  const mapFilteredRowsWithCoords = useMemo(() => {
-    return mapRowsWithCoords.filter((client) => {
-      const sector = getMapSectorLabel(client)
-      const hasRge = hasPositiveValue(client.rge) || hasPositiveValue(client.rge_domaines_travaux)
-      const hasCapacity = Boolean(client.capacite_gaz)
-      if (mapVisibleSectors.length && !mapVisibleSectors.includes(sector)) return false
-      if (!mapBooleanMatches(hasRge, mapRgeFilter)) return false
-      if (!mapBooleanMatches(hasCapacity, mapCapacityFilter)) return false
-      if (!matchesMapCapitalSocialFilter(client.capital_social, mapCapitalSocialFilter)) return false
-      if (!rowMatchesCombinedCaProfiles(client, mapProfileFilter12M, mapProfileFilterN1, mapProfileFilterN2, mapProfileOperator1, mapProfileOperator2)) return false
-      return true
-    })
-  }, [mapRowsWithCoords, mapVisibleSectors, mapRgeFilter, mapCapacityFilter, mapCapitalSocialFilter, mapProfileFilter12M, mapProfileFilterN1, mapProfileFilterN2, mapProfileOperator1, mapProfileOperator2])
-
-  const profileMatrixByPeriod = useMemo(() => {
-    return {
-      '12M': buildProfileMatrix(clientRowsForCurrentSelection, profileMatrixDimension, '12M'),
-      'N-1': buildProfileMatrix(clientRowsForCurrentSelection, profileMatrixDimension, 'N-1'),
-      'N-2': buildProfileMatrix(clientRowsForCurrentSelection, profileMatrixDimension, 'N-2'),
-    } as Record<ProfileMatrixPeriod, ProfileMatrixRow[]>
-  }, [clientRowsForCurrentSelection, profileMatrixDimension])
-
-  const mapSideRows = useMemo(() => {
-    return [...mapFilteredRowsWithCoords].sort((a, b) => {
-      const caCmp = Number(b.ca12m || 0) - Number(a.ca12m || 0)
-      if (Math.abs(caCmp) > 0.000001) return caCmp
-
-      const nameA = safeText(a.raison_sociale_affichee || a.intitule)
-      const nameB = safeText(b.raison_sociale_affichee || b.intitule)
-      const nameCmp = nameA.localeCompare(nameB, 'fr', { numeric: true, sensitivity: 'base' })
-      if (nameCmp !== 0) return nameCmp
-
-      return safeText(a.numero).localeCompare(safeText(b.numero), 'fr', { numeric: true, sensitivity: 'base' })
-    })
-  }, [mapFilteredRowsWithCoords])
-
-  useEffect(() => {
-    if (!mapOpen || !leafletMapRef.current) return
-    const timer = window.setTimeout(() => {
-      const map = leafletMapRef.current
-      if (!map || typeof map.invalidateSize !== 'function') return
-      map.invalidateSize()
-      if (!mapFilteredRowsWithCoords.length) return
-      const points = mapFilteredRowsWithCoords.map((row) => [row.latitude as number, row.longitude as number])
-      if (points.length === 1 && typeof map.setView === 'function') map.setView(points[0], 10)
-      else if (typeof map.fitBounds === 'function') map.fitBounds(points, { padding: [30, 30] })
-    }, 250)
-    return () => window.clearTimeout(timer)
-  }, [mapOpen, mapFilteredRowsWithCoords])
-
-  function toggleMapSector(sector: string) {
-    setMapVisibleSectors((prev) => prev.includes(sector) ? prev.filter((item) => item !== sector) : [...prev, sector])
-  }
-
-  function resetMapFilters() {
-    setMapVisibleSectors(mapLegendSectors)
-    setMapRgeFilter('all')
-    setMapCapacityFilter('all')
-    setMapCapitalSocialFilter('TOUS')
-    setShowMapListPanel(true)
-    setMapProfileFilter12M([])
-    setMapProfileFilterN1([])
-    setMapProfileFilterN2([])
-    setMapProfileOperator1('OR')
-    setMapProfileOperator2('OR')
-    setActiveMapClientKey(null)
-  }
-
-  function openMapClientPopup(client: SyntheseMapClientRow) {
-    const key = `${client.numero}-${client.siret || client.id}`
-    setActiveMapClientKey(key)
-    const map = leafletMapRef.current
-    const marker = mapMarkerRefs.current[key]
-    if (map && typeof map.setView === 'function' && typeof client.latitude === 'number' && typeof client.longitude === 'number') {
-      const currentZoom = typeof map.getZoom === 'function' ? map.getZoom() : 10
-      map.setView([client.latitude, client.longitude], Math.max(currentZoom, 10))
-    }
-    if (marker && typeof marker.openPopup === 'function') marker.openPopup()
-  }
-
-  async function fetchRefTiersForMap(codes: string[]) {
-    const rows: RefTiersMapRow[] = []
-    for (const group of chunk(codes, 400)) {
-      const { data, error } = await supabase
-        .from('ref_tiers')
-        .select('numero,intitule,siret,representant,agence_rattachement,depot_rattachement,code_naf,code_postal,ville,rge,attestation_capacite')
-        .in('numero', group)
-      if (error) throw new Error(`ref_tiers carte : ${error.message}`)
-      rows.push(...((data || []) as RefTiersMapRow[]))
-    }
-    return rows
-  }
-
-  async function fetchClientsForMap(sirets: string[]) {
-    const rows: ClientMapDbRow[] = []
-    for (const group of chunk(sirets, 300)) {
-      const { data, error } = await supabase
-        .from('clients')
-        .select('id,siret,raison_sociale_affichee,activitePrincipaleEtablissement,naf_libelle_traduit,codePostalEtablissement,libelleCommuneEtablissement,dateCreationEtablissement,latitude,longitude,coordonneeLambertAbscisseEtablissement,coordonneeLambertOrdonneeEtablissement,rge,rge_domaines_travaux,capacite_gaz,capacite_gaz_numero,capital_social')
-        .in('siret', group)
-      if (error) throw new Error(`clients carte : ${error.message}`)
-      rows.push(...((data || []) as ClientMapDbRow[]))
-    }
-    return rows
-  }
-
-  async function openMapForVisibleClients() {
-    if (!clientRowsForCurrentSelection.length) return
-    setMapOpen(true)
-    setMapLoading(true)
-    setMapError(null)
-    setMapRows([])
-    setMapVisibleSectors([])
-    setMapRgeFilter('all')
-    setMapCapacityFilter('all')
-    setMapCapitalSocialFilter('TOUS')
-    setShowMapListPanel(true)
-    setMapProfileFilter12M([])
-    setMapProfileFilterN1([])
-    setMapProfileFilterN2([])
-    setMapProfileOperator1('OR')
-    setMapProfileOperator2('OR')
-    setActiveMapClientKey(null)
-    mapMarkerRefs.current = {}
-    setMapInstanceKey((v) => v + 1)
-
-    try {
-      const codes = Array.from(new Set(clientRowsForCurrentSelection.map((row) => row.numero).filter(Boolean) as string[]))
-      const tiersRows = await fetchRefTiersForMap(codes)
-      const tiersByNumero = new Map(tiersRows.map((row) => [normalize(row.numero), row]))
-      const sirets = Array.from(new Set(tiersRows.map((row) => normalizeSiret(row.siret)).filter(Boolean) as string[]))
-      const clientsRows = sirets.length ? await fetchClientsForMap(sirets) : []
-      const clientsBySiret = new Map(clientsRows.map((row) => [normalizeSiret(row.siret), row]))
-
-      const merged = clientRowsForCurrentSelection.map((row) => {
-        const tiers = tiersByNumero.get(normalize(row.numero)) || null
-        const siret = normalizeSiret(tiers?.siret)
-        const client = siret ? clientsBySiret.get(siret) || null : null
-        const coords = client ? ensureSyntheseMapCoordinates(client) : null
-        const sectorCode = client?.activitePrincipaleEtablissement || tiers?.code_naf || null
-
-        return {
-          id: client?.id || row.numero,
-          numero: row.numero,
-          intitule: row.intitule,
-          siret: siret || null,
-          latitude: coords?.latitude ?? null,
-          longitude: coords?.longitude ?? null,
-          raison_sociale_affichee: client?.raison_sociale_affichee || row.intitule || tiers?.intitule || null,
-          activitePrincipaleEtablissement: sectorCode,
-          naf_libelle_traduit: client?.naf_libelle_traduit || row.libelleNaf || null,
-          codePostalEtablissement: client?.codePostalEtablissement || tiers?.code_postal || row.codePostal || null,
-          libelleCommuneEtablissement: client?.libelleCommuneEtablissement || tiers?.ville || null,
-          dateCreationEtablissement: client?.dateCreationEtablissement || null,
-          rge: client?.rge ?? tiers?.rge ?? null,
-          rge_domaines_travaux: client?.rge_domaines_travaux || null,
-          capacite_gaz: client?.capacite_gaz ?? hasPositiveValue(tiers?.attestation_capacite),
-          capacite_gaz_numero: client?.capacite_gaz_numero || null,
-          capital_social: client?.capital_social || null,
-          ca12m: row.ca12m,
-          caN1: row.caN1,
-          caN2: row.caN2,
-          caBandN: row.caBandN,
-          caBandN1: row.caBandN1,
-          caBandN2: row.caBandN2,
-          collaborateur: row.collaborateur,
-          agence: row.agence || (mode === 'agence' ? selected : safeText(tiers?.agence_rattachement || tiers?.depot_rattachement)),
-        } as SyntheseMapClientRow
-      })
-
-      setMapRows(merged)
-      setMapError(merged.some((row) => !row.siret) ? 'Certains clients n’ont pas de SIRET dans ref_tiers et ne peuvent pas être rapprochés de la base carte.' : null)
-    } catch (err: any) {
-      setMapError(err?.message || 'Erreur de préparation de la carte')
-    } finally {
-      setMapLoading(false)
-    }
-  }
-
-  function getFilterValue(key: string) {
-    return filters[key] || ''
-  }
-
-  function updateFilter(key: string, value: string) {
-    setFilters((prev) => ({ ...prev, [key]: value }))
-  }
-
-  function toggleSort(key: string) {
-    setSort((prev) => prev.key === key ? { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' } : { key, direction: 'desc' })
-  }
-
-  async function ensureMonthRows(numero: string) {
-    if (monthRowsByNumero[numero] || loadingMonths.has(numero)) return
-    setLoadingMonths((prev) => new Set(prev).add(numero))
-    try {
-      const rows = (await fetchCacheMonthRows(numero)).map(cacheRowToSummary).map((row) => applyRefAgence(row, selectionOptions.collaborateurAgence))
-      setMonthRowsByNumero((prev) => ({ ...prev, [numero]: rows }))
-      setCacheRows((prev) => prev.map((row) => row.numero === numero ? recomputeClientN1ComparisonFromMonths(row, rows) : row))
-    } catch (err: any) {
-      setError(err?.message || 'Erreur de chargement du détail mensuel cache')
-    } finally {
-      setLoadingMonths((prev) => {
-        const next = new Set(prev)
-        next.delete(numero)
-        return next
-      })
-    }
-  }
-
-  function toggleExpanded(numero: string) {
-    const willOpen = !expanded.has(numero)
-    setExpanded((prev) => {
-      const next = new Set(prev)
-      if (next.has(numero)) next.delete(numero)
-      else next.add(numero)
-      return next
-    })
-    if (willOpen) void ensureMonthRows(numero)
-  }
-
-  async function saveObjective(numero: string, editable: NonNullable<ColumnDef['editable']>, rawValue: string) {
-    if (!numero || numero === 'TOTAL') return
-    const key = objectiveKey(numero, N, editable.domaine, editable.rubrique)
-    setSavingKey(key)
-    const value = rawValue.trim()
-    const payload: Record<string, any> = {
-      numero_tiers: numero,
-      annee: N,
-      domaine: editable.domaine,
-      rubrique: editable.rubrique,
-      valeur_type: editable.type,
-      valeur_text: null,
-      valeur_number: null,
-      valeur_date: null,
-    }
-
-    if (editable.type === 'date') payload.valeur_date = value || null
-    else if (editable.type === 'texte') payload.valeur_text = value || null
-    else payload.valeur_number = value === '' ? null : safeNumber(value)
-
-    const { data, error } = await supabase.rpc('save_objectif_tiers', {
-  p_numero_tiers: payload.numero_tiers,
-  p_annee: payload.annee,
-  p_domaine: payload.domaine,
-  p_rubrique: payload.rubrique,
-  p_valeur_type: payload.valeur_type,
-  p_valeur_text: payload.valeur_text,
-  p_valeur_number: payload.valeur_number,
-  p_valeur_date: payload.valeur_date,
-})
-    setSavingKey(null)
-    if (error) {
-      setError(`Sauvegarde impossible : ${error.message}`)
-      return
-    }
-    setObjectiveRows((prev) => {
-      const next = prev.filter((r) => objectiveKey(r.numero_tiers, r.annee, r.domaine, r.rubrique) !== key)
-      next.push(data as ObjectiveRow)
-      return next
-    })
-  }
-
-  /** Édition directe d'un des 3 seuils d'alerte de comportement
-   * (client_alertes_config), depuis le tableau -- même RPC que la fiche
-   * client sur l'écran mobile (upsert_client_alertes_config), qui prend
-   * les 3 seuils en un seul appel : on part donc des valeurs actuelles de
-   * la ligne (déjà fusionnées via alertesConfigMap) et on ne remplace que
-   * le champ édité. Un champ vidé désactive la règle correspondante
-   * (null), comme sur la fiche client. */
-  async function saveAlerteSeuil(row: SummaryRow, field: NonNullable<ColumnDef['editableAlerte']>, rawValue: string) {
-    if (!row.numero || row.numero === 'TOTAL') return
-    const alerteKey = `${row.numero}§${field}`
-    setSavingAlerteKey(alerteKey)
-    const value = rawValue.trim()
-    const parsed = value === '' ? null : Math.max(1, safeNumber(value))
-
-    const current = {
-      min_appels_visites_mois: row.alerteMinAppelsVisitesMois,
-      max_jours_sans_devis: row.alerteMaxJoursSansDevis,
-      max_jours_sans_commande: row.alerteMaxJoursSansCommande,
-    }
-    const next = { ...current, [field]: parsed }
-
-    const { data: sessionData } = await supabase.auth.getSession()
-    const email = sessionData.session?.user?.email || null
-
-    const { error } = await supabase.rpc('upsert_client_alertes_config', {
-      p_numero_tiers: row.numero,
-      p_min_appels_visites_mois: next.min_appels_visites_mois,
-      p_max_jours_sans_devis: next.max_jours_sans_devis,
-      p_max_jours_sans_commande: next.max_jours_sans_commande,
-      p_updated_by_email: email,
-    })
-
-    setSavingAlerteKey(null)
-    if (error) {
-      setError(`Sauvegarde impossible : ${error.message}`)
-      return
-    }
-
-    setAlertesConfigRows((prev) => {
-      const nextRows = prev.filter((r) => normalize(r.numero_tiers) !== normalize(row.numero))
-      nextRows.push({ numero_tiers: row.numero, ...next })
-      return nextRows
-    })
-  }
-
-  async function exportExcel() {
-    if (!hasSelection) {
-      setError("Veuillez choisir un collaborateur, une agence ou Tous les collaborateurs avant de lancer l'export.")
-      return
-    }
-
-    // @ts-ignore - xlsx-js-style est déjà présent dans le projet mais n'a pas toujours les types TS.
-    const XLSX = await import('xlsx-js-style')
-    // L'export Excel contient systématiquement le détail Famille macro, même si l'écran l'a masqué.
-    // Les colonnes de détail sont ensuite groupées et réduites par défaut dans le fichier.
-    // Reconstruction indépendante de l'écran : jamais affectée par les pastilles
-    // "afficher/masquer" ci-dessus, qui ne pilotent que displayedColumns.
-    const exportColumns = buildColumns(true, showCollaborateurColumn, encoursDetailMode)
-
-    const sortCol = exportColumns.find((c) => c.key === sort.key) || exportColumns.find((c) => c.key === 'caN1')!
-    let exportClientRows = baseClientRows.filter((row) => {
-      return Object.entries(filters).every(([key, value]) => {
-        if (!String(value).trim()) return true
-        const col = exportColumns.find((c) => c.key === key)
-        if (!col) return true
-        return loose(displayValue(col, row, objectiveMap)).includes(loose(String(value)))
-      })
-    })
-
-    exportClientRows = [...exportClientRows].sort((a, b) => {
-      const av = rawSortableValue(sortCol, a, objectiveMap)
-      const bv = rawSortableValue(sortCol, b, objectiveMap)
-      const an = typeof av === 'number' ? av : Number(av)
-      const bn = typeof bv === 'number' ? bv : Number(bv)
-      let cmp = 0
-      if (Number.isFinite(an) && Number.isFinite(bn)) cmp = an - bn
-      else cmp = String(av ?? '').localeCompare(String(bv ?? ''), 'fr')
-      return sort.direction === 'asc' ? cmp : -cmp
-    })
-
-    // Export volontairement limité aux lignes TOTAL + clients.
-    // Le détail mois par mois n'est pas généré ici car il alourdit fortement
-    // la création du fichier pour les portefeuilles/agences volumineux.
-    const exportRows: SummaryRow[] = [totalRow, ...exportClientRows]
-
-    const KEUR_FORMAT = '#,##0.0 "K€"'
-    const PCT_FORMAT = '0.0%'
-    const POINTS_FORMAT = '+0.0 "pts";-0.0 "pts";0.0 "pts"'
-    const NUMBER_FORMAT = '0'
-
-    const chapterColor = (group: string) => {
-      const g = normalize(group)
-      if (g.includes('CLIENT')) return 'E2F0D9'
-      if (g.includes('ENCOURS')) return 'E0F2FE'
-      if (g.includes('COMPARATIF')) return 'F3E8FF'
-      if (g.includes('QRC')) return 'E2F0D9'
-      if (g.includes('DYNAMISME')) return 'DDEBF7'
-      if (g.includes('FREQUENCE') || g.includes('VISITE')) return 'FCE4D6'
-      return 'FFF2CC'
-    }
-
-    const bodyColor = (group: string, row?: SummaryRow) => {
-      if (row?.kind === 'total') return 'FFF2CC'
-      const g = normalize(group)
-      if (g.includes('CLIENT')) return row?.kind === 'month' ? 'EDF7E7' : 'E2F0D9'
-      if (g.includes('ENCOURS')) return 'EFF6FF'
-      if (g.includes('COMPARATIF')) return 'F8EEFF'
-      if (g.includes('QRC')) return 'EFF9EC'
-      if (g.includes('DYNAMISME')) return 'EFF6FF'
-      if (g.includes('FREQUENCE') || g.includes('VISITE')) return 'FFF4EA'
-      return 'FFF8E6'
-    }
-
-    const isFamilySubtotal = (key: string) => /^(devisN1|caN1|margeN1|devisYtdN|caYtdN|margeYtdN|encoursCommandeN)_/.test(key)
-    const isMainMetric = (key: string) => [
-      'caN3', 'caN2', 'devisN1', 'caN1', 'margePctN1',
-      'objectifCa', 'potentiel', 'encoursCommandeN', 'devisYtdN', 'caYtdN', 'margePctYtdN',
-      'contratBfa', 'caVsN1', 'margeVsN1', 'realiseObjectif',
-    ].includes(key)
-    const isGroupedFamilyColumn = (key: string) => isFamilySubtotal(key)
-
-    const excelPayload = (col: ColumnDef, row: SummaryRow) => {
-      if (col.editable && row.kind === 'client') {
-        const { domaine, rubrique, type } = col.editable
-        if (type === 'date') return { value: objectiveDate(objectiveMap, row.numero, domaine, rubrique), type: 's' as const }
-        if (type === 'texte') return { value: objectiveText(objectiveMap, row.numero, domaine, rubrique), type: 's' as const }
-        const n = objectiveNumber(objectiveMap, row.numero, domaine, rubrique)
-        if (type === 'montant') return { value: n / 1000, type: 'n' as const, z: KEUR_FORMAT }
-        return { value: n, type: 'n' as const, z: NUMBER_FORMAT }
-      }
-
-      if (shouldBlankEmptyMonthMetric(col, row)) return { value: '', type: 's' as const }
-      const value = col.value(row)
-
-      if (col.format === 'keurCompare' || col.format === 'pctCompare') return { value: displayValue(col, row, objectiveMap), type: 's' as const }
-
-      if (col.format === 'keur' || col.format === 'keurBlank') {
-        const n = safeNumber(value)
-        if (col.format === 'keurBlank' && isNullAmount(n)) return { value: '', type: 's' as const }
-        return { value: n / 1000, type: 'n' as const, z: KEUR_FORMAT }
-      }
-
-      if (col.format === 'pct' || col.format === 'pctBlank') {
-        const n = Number(value)
-        if (!Number.isFinite(n)) return { value: '', type: 's' as const }
-        return { value: n / 100, type: 'n' as const, z: PCT_FORMAT }
-      }
-
-      if (col.format === 'points') {
-        const n = Number(value)
-        if (!Number.isFinite(n)) return { value: '', type: 's' as const }
-        return { value: n, type: 'n' as const, z: POINTS_FORMAT }
-      }
-
-      if (col.format === 'number') {
-        const n = safeNumber(value)
-        return { value: n, type: 'n' as const, z: NUMBER_FORMAT }
-      }
-
-      if (col.format === 'numberBlank') {
-        if (value === null || value === undefined) return { value: '', type: 's' as const }
-        return { value: safeNumber(value), type: 'n' as const, z: NUMBER_FORMAT }
-      }
-
-      return { value: safeText(value), type: 's' as const }
-    }
-
-    const aoa = [
-      exportColumns.map((c) => c.group),
-      exportColumns.map((c) => c.label.replace(/\n/g, ' ')),
-      ...exportRows.map((row) => exportColumns.map((col) => excelPayload(col, row).value)),
-    ]
-
-    const ws = XLSX.utils.aoa_to_sheet(aoa)
-    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:A1')
-
-    const merges: any[] = []
-    let mergeStart = 0
-    for (let c = 1; c <= exportColumns.length; c += 1) {
-      const prev = exportColumns[c - 1]?.group
-      const current = exportColumns[c]?.group
-      if (current !== prev) {
-        if (c - mergeStart > 1) merges.push({ s: { r: 0, c: mergeStart }, e: { r: 0, c: c - 1 } })
-        mergeStart = c
-      }
-    }
-    ws['!merges'] = merges
-
-    const borderThin = {
-      top: { style: 'thin', color: { rgb: '111111' } },
-      bottom: { style: 'thin', color: { rgb: '111111' } },
-      left: { style: 'thin', color: { rgb: '111111' } },
-      right: { style: 'thin', color: { rgb: '111111' } },
-    }
-
-    const numericFormats = new Set(['keur', 'keurBlank', 'pct', 'pctBlank', 'points', 'number', 'numberBlank'])
-
-    for (let r = range.s.r; r <= range.e.r; r += 1) {
-      const dataRow = r >= 2 ? exportRows[r - 2] : undefined
-      for (let c = range.s.c; c <= range.e.c; c += 1) {
-        const addr = XLSX.utils.encode_cell({ r, c })
-        const col = exportColumns[c]
-        if (!ws[addr]) ws[addr] = { t: 's', v: '' }
-
-        if (r >= 2 && col && dataRow) {
-          const payload = excelPayload(col, dataRow)
-          ws[addr].v = payload.value
-          ws[addr].t = payload.type
-          if (payload.z) ws[addr].z = payload.z
-        }
-
-        const isHeader = r <= 1
-        const isNumeric = Boolean(col && (numericFormats.has(col.format || '') || ws[addr].t === 'n'))
-        const familySubtotal = Boolean(col && isFamilySubtotal(col.key))
-        const mainMetric = Boolean(col && isMainMetric(col.key))
-
-        ws[addr].s = {
-          font: {
-            bold: isHeader || dataRow?.kind === 'total' || mainMetric,
-            sz: isHeader ? 10 : familySubtotal ? 8 : mainMetric ? 10.5 : 9,
-            color: col?.className?.includes('orderBacklog')
-              ? { rgb: '008CFF' }
-              : col?.className?.includes('redLabel')
-                ? { rgb: 'E60000' }
-                : undefined,
-          },
-          alignment: {
-            horizontal: isHeader ? 'center' : isNumeric ? 'right' : 'left',
-            vertical: 'center',
-            wrapText: r >= 3 ? false : true,
-            textRotation: r === 1 && col?.rotate ? 90 : 0,
-          },
-          border: borderThin,
-          fill: { fgColor: { rgb: isHeader ? chapterColor(col?.group || '') : bodyColor(col?.group || '', dataRow) } },
-        }
-      }
-    }
-
-    const autoWidth = (col: ColumnDef, index: number) => {
-      const header = col.label.replace(/\n/g, ' ')
-      const sample = exportRows.slice(0, 300).map((row) => displayValue(col, row, objectiveMap))
-      const maxLen = Math.max(header.length, col.group.length, ...sample.map((value) => String(value ?? '').length))
-      const min = col.rotate ? 8 : 10
-      const max = col.key === 'intitule' ? 34 : col.key === 'remarque' ? 42 : col.key.startsWith('caBand') ? 12 : col.key === 'libelleNaf' ? 32 : col.rotate ? 13 : 18
-      const wch = Math.min(Math.max(maxLen + 2, min), max)
-      const grouped = isGroupedFamilyColumn(col.key)
-      return {
-        wch,
-        hidden: grouped,
-        level: grouped ? 1 : 0,
-        collapsed: grouped && !isGroupedFamilyColumn(exportColumns[index + 1]?.key || ''),
-      }
-    }
-
-    ws['!cols'] = exportColumns.map(autoWidth)
-    ws['!rows'] = [
-      { hpt: 22 },
-      { hpt: 82 },
-      ...exportRows.map((row) => ({
-        hpt: row.kind === 'total' ? 20 : 18,
-      })),
-    ]
-    ws['!outline'] = { above: false, left: false }
-    ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 1, c: 0 }, e: { r: Math.max(1, range.e.r), c: range.e.c } }) }
-
-    // Fige les lignes 1 à 3 et les colonnes d'identification client.
-    // En vue tous collaborateurs, la colonne Collaborateur est ajoutée et figée en première colonne.
-    const frozenColumnCount = showCollaborateurColumn ? 4 : 3
-    const frozenPane = { xSplit: frozenColumnCount, ySplit: 3, topLeftCell: showCollaborateurColumn ? 'E4' : 'D4', activePane: 'bottomRight', state: 'frozen' }
-    ws['!freeze'] = frozenPane
-    ws['!pane'] = frozenPane
-
-    const wb = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(wb, ws, 'Synthèse multi-clients')
-    XLSX.writeFile(wb, `synthese_multi_clients_${mode}_${selected === ALL_COLLABORATEURS_VALUE ? 'tous_collaborateurs' : selected || 'selection'}_${N}.xlsx`)
-  }
-
-  return (
-    <main className="page">
-      <section className="toolbar">
-        <div>
-          <div className="titleLine">
-            <h1>Synthèse multi-clients</h1>
-            <span className="lastUpdateBadge">Dernières pièces : {lastUpdateLabel}</span>
+    <main className="min-h-screen bg-[#F4F3F0] p-6 text-[#111820]" style={{ fontFeatureSettings: '"tnum"' }}>
+      <div className="mx-auto max-w-[1700px] space-y-4">
+        <section className="rounded-xl border border-[#E5E1D8] bg-white p-5">
+          <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#B4761A]">CEGECLIM — Référentiel clients</p>
+          <h1 className="mt-0.5 text-[26px] font-bold tracking-tight text-[#111820]">Clients SAGE / BLG</h1>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <OngletTab active={onglet === 'sage'} onClick={() => setOnglet('sage')} label="SAGE" />
+            <OngletTab active={onglet === 'blg'} onClick={() => setOnglet('blg')} label="BLG" />
+            <OngletTab active={onglet === 'comparaison'} onClick={() => setOnglet('comparaison')} label="Comparaison" />
           </div>
-          <p>Vue dense par collaborateur ou agence · N = {N} · Devis comparés à M ({periodMonthLabel(CLOSED_MONTH, N)}) · CA/Marge comparés à M-1 ({periodMonthLabel(CA_CLOSED_MONTH, N)}) · {cacheStatus}</p>
-        </div>
-        <div className="toolbarActions">
-          <label>
-            Sélection
-            <select value={mode} disabled={isModeLockedByCollaborateur} onChange={(e) => { setMode(e.target.value as ModeSelection); setSelected(''); setExpanded(new Set()) }}>
-              <option value="collaborateur">Collaborateur</option>
-              <option value="agence">Agence</option>
-            </select>
-          </label>
-          <label>
-            {mode === 'collaborateur' ? 'Collaborateur' : 'Agence'}
-            <select value={selected} disabled={isSelectionLocked} onChange={(e) => { setSelected(e.target.value); setExpanded(new Set()) }}>
-              {mode === 'collaborateur' ? (
-                <>
-                  <option value="">Choisir un collaborateur…</option>
-                  {!access.hasCollaborateurRestriction && <option value={ALL_COLLABORATEURS_VALUE}>Tous les collaborateurs</option>}
-                </>
-              ) : (
-                <option value="">Choisir une agence…</option>
-              )}
-              {currentSelectionOptions.map((option) => <option key={option} value={option}>{option}{isSelectionLocked && selected === option ? ' 🔒' : ''}</option>)}
-            </select>
-          </label>
-          <button type="button" onClick={() => setShowFamilies((v) => !v)}>
-            {showFamilies ? 'Masquer familles macro' : 'Afficher familles macro'}
-          </button>
-          <label>
-            Détail encours
-            <select value={encoursDetailMode} onChange={(e) => setEncoursDetailMode(e.target.value as EncoursDetailMode)} disabled={!showFamilies}>
-              <option value="macro">Famille macro</option>
-              <option value="type">Type document</option>
-            </select>
-          </label>
-          <button type="button" onClick={openMapForVisibleClients} disabled={!hasSelection || !clientRowsForCurrentSelection.length || mapLoading}>
-            {mapLoading ? 'Préparation carte…' : 'Afficher sur la carte'}
-          </button>
-          <button type="button" onClick={() => setProfileMatrixOpen(true)} disabled={!hasSelection || !clientRowsForCurrentSelection.length}>Profils CA croisés</button>
-          <button type="button" onClick={exportExcel} disabled={!hasSelection}>Exporter Excel</button>
-        </div>
-      </section>
-
-      {error && <div className="error">{error}</div>}
-      {access.accessBadge && <div className="accessBadge">Périmètre utilisateur appliqué : {access.accessBadge}</div>}
-      {loading && <div className="loading">Chargement…</div>}
-
-      {!hasSelection ? (
-        <section className="emptyState">
-          Choisissez un collaborateur, une agence ou “Tous les collaborateurs” pour charger la synthèse clients.
         </section>
-      ) : (
-        <>
-          <section className="kpis">
-            <div><span>Tiers</span><strong>{baseClientRows.length}</strong></div>
-            <div><span>CA {N - 1}</span><strong>{formatKEur(totalRow.caN1)}</strong></div>
-            {/* FIX (2026-08) : ce pavé affiche désormais caYtdNComplet (CA
-                facturé total à date, y compris le mois en cours) au lieu de
-                caYtdN (qui reste gelé à M-1 pour la colonne "CA RÉEL
-                07-2026" du tableau, inchangée). */}
-            <div><span>CA réel {N}</span><strong>{formatKEur(totalRow.caYtdNComplet)}</strong></div>
-            <div><span>Encours commande</span><strong>{formatKEur(totalRow.encoursCommandeN)}</strong></div>
-            <div><span>Marge réel {N}</span><strong>{formatPct(totalRow.margePctYtdN)}</strong></div>
-            <div><span>Réalisé / objectif</span><strong>{formatPct(totalRow.realiseObjectif)}</strong></div>
-          </section>
 
-          {/* Pastilles afficher/masquer — n'affecte que l'écran, jamais l'export Excel. */}
-          <section className="columnToggleBar">
-            <span className="columnToggleLabel">Colonnes :</span>
-            {Object.entries(TOGGLEABLE_COLUMN_LABELS).map(([key, label]) => {
-              const active = visibleOptionalCols.has(key)
-              return (
-                <button
-                  key={key}
-                  type="button"
-                  className={`columnTogglePill ${active ? 'active' : ''}`}
-                  onClick={() => toggleOptionalColumn(key)}
-                  aria-pressed={active}
-                >
-                  {label}
-                </button>
-              )
-            })}
-          </section>
-
-          <div className="tableShell">
-        <table className={`synthTable ${showCollaborateurColumn ? 'withCollaborateur' : ''}`}>
-          <thead>
-            <tr className="groupRow">
-              {displayedColumns.map((col) => <th key={`${col.key}-g`} className={`group ${groupClass(col.group)} ${stickyClass(col.sticky)}`} style={{ width: col.width, minWidth: col.width }}>{col.group}</th>)}
-            </tr>
-            <tr className="headerRow">
-              {displayedColumns.map((col) => (
-                <th key={col.key} className={`${col.className || ''} ${stickyClass(col.sticky)} ${col.rotate ? 'rotate' : ''}`} style={{ width: col.width, minWidth: col.width }} onClick={() => toggleSort(col.key)} title="Cliquer pour trier">
-                  <span>{col.label}</span>
-                  {sort.key === col.key ? <b>{sort.direction === 'asc' ? '▲' : '▼'}</b> : null}
-                </th>
-              ))}
-            </tr>
-            <tr className="filterRow">
-              {displayedColumns.map((col) => {
-                const isFilterableColumn = ['collaborateur', 'numero', 'intitule', 'totalMois', 'codePostal', 'libelleNaf', 'prospectLabel', 'caBandN2', 'caBandN1', 'caBandN'].includes(col.key)
-
-                return (
-                  <th key={`${col.key}-f`} className={`${col.className || ''} ${stickyClass(col.sticky)}`} style={{ width: col.width, minWidth: col.width }}>
-                    {isFilterableColumn ? (
-                      <input value={getFilterValue(col.key)} onChange={(e) => updateFilter(col.key, e.target.value)} placeholder="filtre" />
-                    ) : (
-                      <HeaderComparisonPill col={col} totalRow={totalRow} />
-                    )}
-                  </th>
-                )
-              })}
-            </tr>
-          </thead>
-          <tbody>
-            {visibleRows.map((row) => (
-              <tr key={row.id} className={`${row.kind} ${row.level ? 'child' : ''}`}>
-                {displayedColumns.map((col) => {
-                  const canEdit = row.kind === 'client' && Boolean(col.editable)
-                  const saveKey = col.editable ? objectiveKey(row.numero, N, col.editable.domaine, col.editable.rubrique) : ''
-                  const canEditAlerte = row.kind === 'client' && Boolean(col.editableAlerte)
-                  const alerteSaveKey = col.editableAlerte ? `${row.numero}§${col.editableAlerte}` : ''
-                  // Numéro et intitulé du client : cliquables (bleu) sur les
-                  // lignes clients, ouvrent la fiche Vision Client dans un
-                  // nouvel onglet. La ligne TOTAL et les lignes mensuelles
-                  // développées ne sont pas cliquables (pas de fiche dédiée).
-                  const isClientLinkColumn = row.kind === 'client' && (col.key === 'numero' || col.key === 'intitule')
-                  return (
-                    <td key={`${row.id}-${col.key}`} className={`${col.className || ''} ${stickyClass(col.sticky)} ${['keur', 'keurBlank', 'keurCompare', 'pct', 'pctBlank', 'pctCompare', 'points', 'number', 'numberBlank'].includes(col.format || '') ? 'num' : ''}`} style={{ width: col.width, minWidth: col.width }}>
-                      {col.key === 'numero' && row.kind === 'client' ? (
-                        <button type="button" className="expandBtn" onClick={() => toggleExpanded(row.numero)}>{expanded.has(row.numero) ? '−' : '+'}</button>
-                      ) : null}
-                      {col.format === 'caBand' ? (
-                        <CaBandPill band={String(col.value(row) || 'Sans CA')} />
-                      ) : canEdit ? (
-                        <EditableCell
-                          type={col.editable!.type}
-                          value={editableRawValue(row, col, objectiveMap)}
-                          saving={savingKey === saveKey}
-                          onSave={(value) => saveObjective(row.numero, col.editable!, value)}
-                        />
-                      ) : canEditAlerte ? (
-                        <EditableCell
-                          type="nombre"
-                          value={col.value(row) === null || col.value(row) === undefined ? '' : String(col.value(row))}
-                          saving={savingAlerteKey === alerteSaveKey}
-                          onSave={(value) => saveAlerteSeuil(row, col.editableAlerte!, value)}
-                        />
-                      ) : isClientLinkColumn ? (
-                        <button
-                          type="button"
-                          className="clientLink"
-                          onClick={() => openVisionClient(row.numero)}
-                          title="Ouvrir la fiche client (Vision Client) dans un nouvel onglet"
-                        >
-                          {displayValue(col, row, objectiveMap)}
-                        </button>
-                      ) : (
-                        <span>{displayValue(col, row, objectiveMap)}</span>
-                      )}
-                    </td>
-                  )
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-          </div>
-        </>
-      )}
-
-
-      {mapOpen && (
-        <div className="mapOverlay">
-          <div className="mapModal">
-            <div
-              className="mapCompactHeader"
-              onMouseDown={stopMapControlEvent}
-              onMouseUp={stopMapControlEvent}
-              onPointerDown={stopMapControlEvent}
-              onPointerUp={stopMapControlEvent}
-              onTouchStart={stopMapControlEvent}
-              onTouchEnd={stopMapControlEvent}
-              onClick={stopMapControlEvent}
-              onDoubleClick={stopMapControlEvent}
-              onWheel={stopMapControlEvent}
-            >
-              <div className="mapHeaderLeft">
-                <div className="mapTitleLine">
-                  <h2>Clients de la sélection sur la carte</h2>
-                  <span className="mapCountBadge">{mapFilteredRowsWithCoords.length} visibles</span>
-                  <span className="mapInfoText">{mapRows.length} sélectionnés · {mapRowsWithCoords.length} géolocalisés · {mapRows.length - mapRowsWithCoords.length} sans coordonnées</span>
-                </div>
-
-                <div className="mapPillToolbar">
-                  <details className="mapDropdown">
-                    <summary className="mapFilterButton">Secteurs : {mapVisibleSectors.length}/{mapLegendSectors.length} ▾</summary>
-                    <div className="mapDropdownPanel mapSectorPanel">
-                      <div className="mapDropdownActions">
-                        <button type="button" className="miniButton" onClick={() => setMapVisibleSectors(mapLegendSectors)}>Tout sélectionner</button>
-                        <button type="button" className="miniButton" onClick={() => setMapVisibleSectors([])}>Tout effacer</button>
-                      </div>
-                      <div className="mapSectorGrid">
-                        {mapLegendSectors.map((sector) => (
-                          <label key={sector} className="mapSectorChoice">
-                            <input type="checkbox" checked={mapVisibleSectors.includes(sector)} onChange={() => toggleMapSector(sector)} />
-                            <span className="mapSectorDot" style={{ background: getMapSectorColor(sector) }} />
-                            <span>{sector} ({mapSectorCounts[sector] || 0})</span>
-                          </label>
-                        ))}
-                      </div>
-                    </div>
-                  </details>
-                </div>
-              </div>
-
-              <div className="mapCompactFilters">
-                <label className="mapSelectField">RGE :
-                  <select value={mapRgeFilter} onChange={(e) => setMapRgeFilter(e.target.value as MapBooleanFilter)}>
-                    <option value="all">TOUS</option>
-                    <option value="yes">OUI</option>
-                    <option value="no">NON</option>
-                  </select>
-                </label>
-                <label className="mapSelectField">Capacité froid/clim :
-                  <select value={mapCapacityFilter} onChange={(e) => setMapCapacityFilter(e.target.value as MapBooleanFilter)}>
-                    <option value="all">TOUS</option>
-                    <option value="yes">OUI</option>
-                    <option value="no">NON</option>
-                  </select>
-                </label>
-                <label className="mapSelectField">Capital Social :
-                  <select value={mapCapitalSocialFilter} onChange={(e) => setMapCapitalSocialFilter(e.target.value as CapitalSocialFilterOption)}>
-                    <option value="TOUS">TOUS</option>
-                    {MAP_CAPITAL_SOCIAL_FILTER_OPTIONS.map((option) => (
-                      <option key={option} value={option}>{option}</option>
-                    ))}
-                  </select>
-                </label>
-                <label className="mapSelectField mapProfileField">Profil CA 12M :
-                  <MapProfileMultiSelect selected={mapProfileFilter12M} onChange={setMapProfileFilter12M} />
-                </label>
-                <label className="mapSelectField mapOperatorField">OP :
-                  <select value={mapProfileOperator1} onChange={(e) => setMapProfileOperator1(e.target.value as MapLogicalOperator)}>
-                    <option value="OR">OU</option>
-                    <option value="AND">ET</option>
-                  </select>
-                </label>
-                <label className="mapSelectField mapProfileField">Profil CA N-1 :
-                  <MapProfileMultiSelect selected={mapProfileFilterN1} onChange={setMapProfileFilterN1} />
-                </label>
-                <label className="mapSelectField mapOperatorField">OP :
-                  <select value={mapProfileOperator2} onChange={(e) => setMapProfileOperator2(e.target.value as MapLogicalOperator)}>
-                    <option value="OR">OU</option>
-                    <option value="AND">ET</option>
-                  </select>
-                </label>
-                <label className="mapSelectField mapProfileField">Profil CA N-2 :
-                  <MapProfileMultiSelect selected={mapProfileFilterN2} onChange={setMapProfileFilterN2} />
-                </label>
-                <button type="button" className="mapActionButton" onClick={() => setShowMapListPanel((value) => !value)}>
-                  {showMapListPanel ? 'Masquer la liste' : 'Afficher la liste'}
-                </button>
-                <button type="button" className="mapActionButton" onClick={resetMapFilters}>Réinitialiser</button>
-                <button type="button" className="mapCloseButton" onClick={() => setMapOpen(false)}>Fermer</button>
-              </div>
-
-              {mapError ? <div className="mapInlineWarning">Client de la sélection carte · {mapError}</div> : null}
-            </div>
-
-            {mapLoading ? (
-              <div className="mapEmpty">Chargement des SIRET, coordonnées et données carte…</div>
-            ) : mapRowsWithCoords.length === 0 ? (
-              <div className="mapEmpty">Aucun client géolocalisé à afficher. Vérifie les SIRET dans ref_tiers et les coordonnées dans clients.</div>
-            ) : mapFilteredRowsWithCoords.length === 0 ? (
-              <div className="mapEmpty">Aucun client ne correspond aux filtres carte.</div>
-            ) : (
-              <div className={`mapGrid ${showMapListPanel ? '' : 'mapGridFull'}`}>
-                <div className="leafletShell">
-                  <MapContainer
-                    key={`synthese-map-${mapInstanceKey}`}
-                    center={[46.603354, 1.888334] as any}
-                    zoom={6}
-                    style={{ height: '100%', width: '100%', minHeight: 620 }}
-                    ref={(mapInstance: any) => { if (mapInstance) leafletMapRef.current = mapInstance }}
-                  >
-                    <TileLayer
-                      attribution="&copy; OpenStreetMap contributors"
-                      url="https://api.thunderforest.com/neighbourhood/{z}/{x}/{y}.png?apikey=3750cd83dca34199969e6b9e2dcdca40"
-                    />
-                    {mapFilteredRowsWithCoords.map((client) => {
-                      const sector = getMapSectorLabel(client)
-                      const markerKey = `${client.numero}-${client.siret || client.id}`
-                      return (
-                        <CircleMarker
-                          key={markerKey}
-                          ref={(marker: any) => { if (marker) mapMarkerRefs.current[markerKey] = marker }}
-                          eventHandlers={{ popupopen: () => setActiveMapClientKey(markerKey) }}
-                          center={[client.latitude as number, client.longitude as number]}
-                          radius={6}
-                          pathOptions={{
-                            color: '#facc15',
-                            fillColor: getMapSectorColor(sector),
-                            fillOpacity: 0.95,
-                            weight: 3,
-                          }}
-                        >
-                          <Tooltip direction="top" offset={[0, -8]} opacity={1} sticky>
-                            <div style={{ fontSize: 13, lineHeight: 1.45, minWidth: 240 }}>
-                              <div style={{ fontWeight: 800 }}>{client.numero} — {client.raison_sociale_affichee || client.intitule}</div>
-                              <div>{sector}</div>
-                              <div>{client.codePostalEtablissement || '—'} {client.libelleCommuneEtablissement || ''}</div>
-                              <div><b>RGE :</b> {hasPositiveValue(client.rge) || hasPositiveValue(client.rge_domaines_travaux) ? 'OUI' : 'NON'}</div>
-                              <div><b>Capacité froid/clim :</b> {client.capacite_gaz ? 'OUI' : 'NON'}</div>
-                              <div><b>Capital social :</b> {client.capital_social || 'NC'}</div>
-                            </div>
-                          </Tooltip>
-                          <Popup>
-                            <div style={{ fontSize: 13, lineHeight: 1.45, minWidth: 260 }}>
-                              <div style={{ fontWeight: 800 }}>{client.numero} — {client.raison_sociale_affichee || client.intitule}</div>
-                              <div>{sector}</div>
-                              <div>{client.codePostalEtablissement || '—'} {client.libelleCommuneEtablissement || ''}</div>
-                              <div><b>SIRET :</b> {client.siret || 'NC'}</div>
-                              <div><b>CA 12M :</b> {formatKEurBlank(client.ca12m)}</div>
-                              <div><b>CA N-1 :</b> {formatKEurBlank(client.caN1)}</div>
-                              <div><b>CA N-2 :</b> {formatKEurBlank(client.caN2)}</div>
-                              <div><b>RGE :</b> {hasPositiveValue(client.rge) || hasPositiveValue(client.rge_domaines_travaux) ? 'OUI' : 'NON'}</div>
-                              <div><b>Capacité froid/clim :</b> {client.capacite_gaz ? 'OUI' : 'NON'}</div>
-                              <div><b>Capital social :</b> {client.capital_social || 'NC'}</div>
-                            </div>
-                          </Popup>
-                        </CircleMarker>
-                      )
-                    })}
-                  </MapContainer>
-                </div>
-                {showMapListPanel && (
-                  <div className="mapSideList">
-                    <div className="mapSideTitle"><span>Entreprises visibles ({mapFilteredRowsWithCoords.length})</span></div>
-                    {mapSideRows.map((client) => {
-                      const sector = getMapSectorLabel(client)
-                      const sideKey = `${client.numero}-${client.siret || client.id}`
-                      return (
-                        <button
-                          type="button"
-                          key={`side-${sideKey}`}
-                          className={`mapSideRow ${activeMapClientKey === sideKey ? 'active' : ''}`}
-                          style={{ borderLeftColor: getMapSectorColor(sector) }}
-                          onClick={() => openMapClientPopup(client)}
-                        >
-                          <strong>{client.numero} — {client.raison_sociale_affichee || client.intitule}</strong>
-                          <span>{client.libelleCommuneEtablissement || 'Ville NC'} · {sector}</span>
-                          <em><MapProfileTripletWithAmounts row={client} color={getMapSectorColor(sector)} /></em>
-                        </button>
-                      )
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-
-      {profileMatrixOpen && (
-        <div className="profileOverlay">
-          <div className="profileModal">
-            <div className="profileHeader">
-              <div>
-                <h2>Répartition des profils CA</h2>
-                <p>{clientRowsForCurrentSelection.length} clients visibles · comparaison par profil de chiffre d'affaires</p>
-              </div>
-              <div className="profileActions">
-                <label className="inlineSwitch">
-                  <input
-                    type="checkbox"
-                    checked={profileMatrixDimension === 'collaborateur'}
-                    onChange={(e) => setProfileMatrixDimension(e.target.checked ? 'collaborateur' : 'agence')}
-                  />
-                  Lignes par collaborateur
-                </label>
-                <button type="button" onClick={() => setProfileMatrixOpen(false)}>Fermer</button>
-              </div>
-            </div>
-
-            <div className="profileTables">
-              {(['12M', 'N-1', 'N-2'] as ProfileMatrixPeriod[]).map((period) => {
-                const matrixRows = profileMatrixByPeriod[period]
-                const total = profileMatrixTotal(matrixRows)
-                return (
-                  <div key={period} className="profileTableCard">
-                    <h3>{period === '12M' ? 'Profil CA 12 mois' : `Profil CA ${period}`}</h3>
-                    <div className="profileTableScroll">
-                      <table>
-                      <thead>
-                        <tr>
-                          <th>{profileMatrixDimension === 'agence' ? 'Agence' : 'Collaborateur'}</th>
-                          {CA_PROFILE_BANDS.map((band) => <th key={band}><CaBandPill band={band} compact /></th>)}
-                          <th>Total</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {[...matrixRows, total].map((row) => (
-                          <tr key={`${period}-${row.label}`} className={row.label === 'TOTAL' ? 'profileTotalRow' : ''}>
-                            <td>{row.label}</td>
-                            {CA_PROFILE_BANDS.map((band) => <ProfileMatrixCountCell key={band} row={row} band={band} />)}
-                            <ProfileMatrixTotalCell row={row} />
-                          </tr>
-                        ))}
-                      </tbody>
-                      </table>
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        </div>
-      )}
-
-      <style jsx>{`
-        .page { padding: 18px; background: #f6f8fb; min-height: 100vh; color: #0f172a; }
-        .toolbar { display: flex; gap: 18px; justify-content: space-between; align-items: end; margin-bottom: 12px; }
-        .titleLine { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
-        h1 { margin: 0; font-size: 26px; font-weight: 900; letter-spacing: -0.02em; }
-        .lastUpdateBadge { display: inline-flex; align-items: center; border: 1px solid #e2e8f0; border-radius: 999px; background: #ffffff; padding: 3px 8px; color: #64748b; font-size: 11px; font-weight: 850; line-height: 1.2; white-space: nowrap; box-shadow: 0 1px 2px rgba(15,23,42,.06); }
-        p { margin: 4px 0 0; color: #64748b; font-size: 13px; }
-        .toolbarActions { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; justify-content: flex-end; }
-        label { font-size: 11px; font-weight: 800; color: #475569; display: flex; flex-direction: column; gap: 3px; text-transform: uppercase; }
-        select, button, input { border: 1px solid #cbd5e1; border-radius: 8px; padding: 7px 9px; background: white; font-size: 12px; }
-        button { cursor: pointer; font-weight: 800; background: #0f172a; color: white; border-color: #0f172a; }
-        button:disabled { opacity: .45; cursor: not-allowed; }
-        .emptyState { background: white; border: 1px dashed #94a3b8; border-radius: 14px; padding: 26px; color: #475569; font-weight: 900; text-align: center; box-shadow: 0 2px 8px rgba(15,23,42,.05); }
-        .error { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; padding: 10px 12px; border-radius: 10px; margin-bottom: 10px; font-weight: 700; }
-        .accessBadge { background: #fffbeb; color: #92400e; border: 1px solid #fcd34d; padding: 10px 12px; border-radius: 10px; margin-bottom: 10px; font-weight: 900; }
-        .loading { position: fixed; right: 18px; bottom: 18px; background: #0f172a; color: white; padding: 8px 12px; border-radius: 999px; z-index: 20; font-weight: 900; }
-        /* 6 pavés (Tiers, CA N-1, CA réel N, Encours, Marge réel N, Réalisé/objectif)
-           sur UNE seule ligne — avant : repeat(5,...) avec 6 enfants, le 6e
-           passait donc à la ligne suivante. */
-        .kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px; }
-        .kpis div { background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 8px 10px; box-shadow: 0 2px 8px rgba(15,23,42,.05); min-width: 0; }
-        .kpis span { display: block; color: #64748b; font-size: 10px; font-weight: 900; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .kpis strong { display: block; margin-top: 2px; font-size: 16px; font-weight: 950; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .columnToggleBar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
-        .columnToggleLabel { font-size: 11px; font-weight: 900; text-transform: uppercase; color: #64748b; margin-right: 2px; }
-        .columnTogglePill { border-radius: 999px; padding: 5px 11px; font-size: 11px; font-weight: 800; background: white; color: #64748b; border: 1px solid #cbd5e1; }
-        .columnTogglePill.active { background: #0f172a; color: white; border-color: #0f172a; }
-        .clientLink { background: none; border: none; padding: 0; margin: 0; font: inherit; color: #1d4ed8; text-decoration: none; cursor: pointer; text-align: left; }
-        .clientLink:hover { text-decoration: underline; }
-        .tableShell { overflow: auto; height: calc(100vh - 260px); border: 2px solid #0f172a; background: white; box-shadow: 0 10px 30px rgba(15,23,42,.08); }
-        .synthTable { border-collapse: separate; border-spacing: 0; font-size: 11px; table-layout: fixed; }
-        th, td { border-right: 1px solid #111827; border-bottom: 1px solid #111827; padding: 2px 4px; height: 24px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: #fffdf3; }
-        thead th { position: sticky; top: 0; z-index: 5; background: #f8fafc; text-align: center; font-weight: 950; }
-        .groupRow th { top: 0; height: 24px; font-size: 11px; background: #fff7df; border-top: 2px solid #111827; }
-        .headerRow th { top: 25px; height: 108px; vertical-align: bottom; background: #f8fafc; }
-        .filterRow th { top: 134px; height: 25px; background: #f8fafc; padding: 1px; text-align: center; vertical-align: middle; }
-        .filterRow input { width: 95%; height: 19px; padding: 1px 3px; font-size: 10px; border-radius: 3px; }
-        .headerComparisonPill { display: inline-flex; align-items: center; justify-content: center; min-width: 58px; height: 22px; padding: 0 9px; border-radius: 999px; font-size: 11px; font-weight: 950; line-height: 1; box-shadow: inset 0 0 0 1px rgba(15,23,42,.08); }
-        .headerComparisonPill.good { background: #dcfce7; color: #047857; border: 1px solid #86efac; }
-        .headerComparisonPill.ok { background: #dcfce7; color: #047857; border: 1px solid #86efac; }
-        .headerComparisonPill.warn { background: #fef3c7; color: #92400e; border: 1px solid #fde68a; }
-        .headerComparisonPill.bad { background: #fee2e2; color: #dc2626; border: 1px solid #fecaca; }
-        .headerComparisonPill.neutral { background: #e5e7eb; color: #475569; border: 1px solid #cbd5e1; }
-        .rotate span { writing-mode: vertical-rl; transform: rotate(180deg); display: inline-block; max-height: 96px; }
-        .client, .stickyCollaborateur, .stickyCode, .stickyLabel, .stickyMonth { background: #e2f0d9; }
-        .stickyCollaborateur { position: sticky; left: 0; z-index: 4; }
-        .stickyCode { position: sticky; left: 0; z-index: 4; }
-        .stickyLabel { position: sticky; left: 86px; z-index: 4; }
-        .stickyMonth { position: sticky; left: 296px; z-index: 4; border-right: 3px solid #111827; }
-        .withCollaborateur .stickyCode { left: 130px; }
-        .withCollaborateur .stickyLabel { left: 216px; }
-        .withCollaborateur .stickyMonth { left: 426px; }
-        thead .stickyCollaborateur, thead .stickyCode, thead .stickyLabel, thead .stickyMonth { z-index: 8; }
-        tbody tr.total td { background: #fff2cc; font-weight: 950; }
-        tbody tr.client td { background: #e2f0d9; }
-        tbody tr.month td { background: #edf7e7; font-style: italic; }
-        td.num { text-align: right; }
-        .metric { background: #fff7e6; }
-        .devis { border-left: 3px solid #ffbf00; }
-        .ca { border-left: 3px solid #111827; }
-        .margin { border-left: 3px solid #111827; }
-        .redLabel, .redLabel span { color: #e60000; font-weight: 950; }
-        .orderBacklog, .orderBacklog span { color: #008CFF !important; font-weight: 950; }
-        th.orderBacklog, th.orderBacklog span { color: #006FE6 !important; }
-        .groupEncourscommande { background: #e0f2fe !important; color: #006FE6 !important; }
-        .groupComparatif, .groupComparatif { background: #f3e8ff !important; }
-        .groupQRC { background: #e9f7e6 !important; }
-        .groupDynamismeClient { background: #eff6ff !important; }
-        .groupFréquencevisite, .groupVisite { background: #fff7ed !important; }
-        .expandBtn { padding: 0; margin-right: 3px; width: 17px; height: 17px; border-radius: 4px; font-size: 11px; line-height: 12px; display: inline-flex; align-items: center; justify-content: center; }
-        .editInput, .editSelect { width: 100%; height: 20px; padding: 1px 3px; border-radius: 3px; font-size: 11px; background: #ffffff; }
-        .saving { opacity: .55; }
-
-        .compareCell, .compareCell span { white-space: nowrap !important; }
-        .compareCell span { display: inline-block; line-height: 1.15; }
-        .caBandCell { text-align: center; }
-        .caPill { display: inline-flex; align-items: center; justify-content: center; min-width: 48px; border-radius: 999px; padding: 2px 7px; font-size: 10px; font-weight: 950; border: 1px solid transparent; line-height: 1.05; white-space: nowrap; }
-        .caPill.compact { min-width: 34px; padding: 1px 5px; font-size: 9px; }
-        .caPill400 { background: #064e3b; color: #ecfdf5; border-color: #047857; }
-        .caPill150 { background: #1d4ed8; color: #eff6ff; border-color: #2563eb; }
-        .caPill80 { background: #f59e0b; color: #111827; border-color: #d97706; }
-        .caPill20 { background: #a7f3d0; color: #064e3b; border-color: #34d399; }
-        .caPillLow { background: #94a3b8; color: #0f172a; border-color: #64748b; }
-        .caPillEmpty { background: #e5e7eb; color: #64748b; border-color: #cbd5e1; }
-        .caTagSet { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; justify-content: center; white-space: normal; }
-        .caTagSet > span { display: inline-flex; gap: 3px; align-items: center; }
-        .caTagSet small { font-size: 8px; color: #64748b; font-weight: 900; }
-        .caTagSet.compact { justify-content: flex-start; }
-        .mapProfilePill, :global(.mapProfilePill) { display: inline-flex !important; align-items: center !important; justify-content: center !important; flex: 0 0 52px !important; width: 52px !important; min-width: 52px !important; max-width: 52px !important; height: 24px !important; padding: 0 6px !important; box-sizing: border-box !important; border-radius: 8px !important; color: #fff; border: 2px solid #0f172a !important; font-size: 13px !important; font-weight: 950 !important; line-height: 1 !important; box-shadow: 0 1px 2px rgba(15,23,42,.20); white-space: nowrap !important; text-align: center !important; }
-        .mapProfilePill.empty, :global(.mapProfilePill.empty) { color: transparent !important; text-shadow: none; }
-        .mapProfileTriplet, :global(.mapProfileTriplet) { display: inline-flex !important; gap: 8px !important; align-items: center !important; justify-content: flex-end !important; min-width: 172px !important; white-space: nowrap !important; }
-        .mapTripletColumns { display: grid; grid-template-columns: repeat(3, 68px); width: 228px; max-width: 100%; align-items: start; justify-content: center; overflow: visible; }
-        .mapTripletColumn { min-width: 0; display: grid; grid-template-rows: 24px 16px; row-gap: 4px; align-items: start; justify-items: center; padding: 0 5px; box-sizing: border-box; }
-        .mapTripletColumn + .mapTripletColumn { border-left: 1px solid #cbd5e1; }
-        .mapTripletAmountCell { width: 58px; min-width: 58px; max-width: 58px; display: inline-flex; align-items: flex-start; justify-content: center; text-align: center; font-size: 11px; line-height: 1.12; font-weight: 900; color: #334155; overflow: visible; }
-        .mapTripletAmountLabel { display: block; width: 100%; text-align: center; white-space: nowrap; letter-spacing: 0.1px; }
-        .mapOverlay { position: fixed; inset: 0; background: rgba(15,23,42,.50); z-index: 9999; padding: 2vh 2vw; box-sizing: border-box; overflow: auto; }
-        .mapModal { width: 96vw; max-width: 1700px; height: 92vh; margin: 0 auto; background: white; border-radius: 18px; box-shadow: 0 24px 70px rgba(15,23,42,.35); display: flex; flex-direction: column; overflow: visible; padding: 16px; gap: 12px; box-sizing: border-box; }
-        .mapCompactHeader { position: relative; z-index: 22000; display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; flex-wrap: wrap; overflow: visible; pointer-events: auto; }
-        .mapHeaderLeft { min-width: 0; flex: 1 1 720px; display: flex; flex-direction: column; gap: 8px; }
-        .mapTitleLine { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
-        .mapTitleLine h2 { margin: 0; font-size: 18px; line-height: 1.15; font-weight: 950; color: #0f172a; }
-        .mapCountBadge { display: inline-flex; align-items: center; border-radius: 999px; background: #0f172a; color: #ffffff; padding: 4px 10px; font-size: 12px; font-weight: 950; white-space: nowrap; }
-        .mapInfoText { font-size: 12px; color: #64748b; font-weight: 800; white-space: nowrap; }
-        .mapPillToolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; overflow: visible; }
-        .mapDropdown { position: relative; pointer-events: auto; z-index: 23000; overflow: visible; }
-        .mapFilterButton { list-style: none; border: 1px solid #6aa0ff; background: #ffffff; border-radius: 999px; padding: 6px 11px; font-size: 13px; font-weight: 850; cursor: pointer; white-space: nowrap; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
-        .mapFilterButton::-webkit-details-marker { display: none; }
-        .mapDropdownPanel { position: absolute; pointer-events: auto; top: calc(100% + 8px); left: 0; z-index: 24000; width: 440px; max-width: 62vw; border-radius: 12px; border: 1px solid #cbd5e1; background: #ffffff; padding: 12px; box-shadow: 0 14px 35px rgba(15,23,42,.22); box-sizing: border-box; }
-        .mapSectorPanel { width: 560px; max-width: min(560px, calc(100vw - 80px)); }
-        .mapDropdownActions { display: flex; gap: 8px; margin-bottom: 10px; }
-        .miniButton { height: 30px; padding: 0 10px; border: 1px solid #cbd5e1; background: #f8fafc; color: #0f172a; border-radius: 8px; font-size: 12px; font-weight: 800; cursor: pointer; }
-        .mapSectorGrid { display: grid; grid-template-columns: 1fr; gap: 8px; }
-        .mapSectorChoice { display: grid; grid-template-columns: 18px 12px minmax(0, 1fr); align-items: center; gap: 8px; cursor: pointer; font-size: 13px; min-width: 0; color: #334155; font-weight: 800; line-height: 1.2; }
-        .mapSectorChoice input { margin: 0; width: 14px; height: 14px; justify-self: start; }
-        .mapSectorChoice span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .mapSectorDot { width: 9px; height: 9px; border-radius: 50%; border: 1px solid #475569; display: inline-block; flex-shrink: 0; }
-        .mapCompactFilters { display: flex; pointer-events: auto; align-items: flex-start; justify-content: flex-end; gap: 10px; flex-wrap: wrap; overflow: visible; }
-        .mapSelectField { display: flex; flex-direction: column; gap: 5px; min-width: 116px; text-transform: none; color: #0f172a; font-size: 12px; font-weight: 900; }
-        .mapSelectField select { height: 38px; min-width: 116px; border: 1px solid #6aa0ff; border-radius: 9px; background: #ffffff; padding: 0 34px 0 12px; color: #0f172a; font-size: 13px; font-weight: 800; cursor: pointer; }
-        .mapProfileField { min-width: 255px; }
-        .mapProfileField .mapMultiSelect { min-width: 255px; border: 1px solid #bfdbfe; border-radius: 12px; background: #f8fbff; color: #0f172a; font-size: 12px; font-weight: 800; cursor: default; box-sizing: border-box; padding: 8px 10px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.65); }
-        .mapProfileOpenGroup { display: flex; flex-direction: column; gap: 6px; }
-        .mapProfileBandChoices { display: grid; grid-template-columns: repeat(5, auto); gap: 6px 8px; align-items: center; }
-        .mapProfileField .mapMultiSelectItem { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 850; color: #334155; cursor: pointer; white-space: nowrap; }
-        .mapProfileField .mapMultiSelectItem input { margin: 0; width: 13px; height: 13px; }
-        .mapProfileField .mapMultiSelectAll { width: fit-content; padding-bottom: 2px; color: #0f172a; }
-        .mapOperatorField { min-width: 66px; }
-        .mapOperatorField select { min-width: 66px; padding-left: 10px; padding-right: 24px; }
-        .mapActionButton { height: 38px; border: 1px solid #cbd5e1; background: #ffffff; border-radius: 9px; padding: 0 12px; font-size: 13px; font-weight: 850; cursor: pointer; white-space: nowrap; color: #0f172a; }
-        .mapCloseButton { height: 38px; border: 1px solid #0f172a; background: #0f172a; color: #ffffff; border-radius: 9px; padding: 0 14px; font-size: 13px; font-weight: 900; cursor: pointer; white-space: nowrap; }
-        .mapInlineWarning { width: 100%; font-size: 12px; font-weight: 900; color: #9a3412; text-align: right; }
-        .secondaryButton { background: #f8fafc; color: #0f172a; border-color: #cbd5e1; }
-        .mapEmpty { flex: 1; min-height: 520px; display: flex; align-items: center; justify-content: center; color: #475569; font-weight: 900; font-size: 16px; }
-        .mapGrid { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 12px; min-height: 0; overflow: hidden; }
-        .mapGridFull { grid-template-columns: minmax(0, 1fr); }
-        .leafletShell { border-radius: 16px; overflow: hidden; border: 1px solid #cbd5e1; background: white; min-height: 0; height: 100%; }
-        .mapSideList { border-radius: 16px; border: 1px solid #cbd5e1; background: white; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; min-height: 0; height: 100%; max-height: 100%; }
-        .mapSideTitle { position: sticky; top: 0; z-index: 2; padding: 12px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 950; background: #fff; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-        .mapSideRow { padding: 14px 12px; border: 0; border-bottom: 1px solid #e2e8f0; border-left: 6px solid #cbd5e1; display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; align-items: start; width: 100%; background: #fff; color: #0f172a; text-align: left; cursor: pointer; border-radius: 0; }
-        .mapSideRow.active { background: #eff6ff; }
-        .mapSideRow > strong { font-size: 14px; grid-column: 1 / -1; min-width: 0; width: 100%; line-height: 1.24; }
-        .mapSideRow > span { font-size: 13px; color: #475569; grid-column: 1 / -1; min-width: 0; width: 100%; line-height: 1.25; }
-        .mapSideRow > em { font-style: normal; grid-column: 1 / -1; justify-self: center; width: 236px; max-width: 100%; display: flex; align-items: center; justify-content: center; overflow: visible; margin-top: 4px; }
-        .mapMarkerTags { display: flex; gap: 2px; padding-top: 0; }
-        .profileOverlay { position: fixed; top: 142px; left: 0; right: 0; bottom: 0; background: rgba(15,23,42,.45); z-index: 62; padding: 18px 28px; display: flex; align-items: flex-start; justify-content: center; }
-        .profileModal { width: min(1720px, calc(100vw - 64px)); max-height: calc(100vh - 180px); overflow: auto; background: #ffffff; border-radius: 18px; box-shadow: 0 24px 70px rgba(15,23,42,.35); border: 1px solid #e2e8f0; }
-        .profileHeader { position: sticky; top: 0; z-index: 2; background: white; padding: 16px 18px; display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; border-bottom: 1px solid #e2e8f0; }
-        .profileHeader h2 { margin: 0; font-size: 22px; font-weight: 950; }
-        .profileActions { display: flex; gap: 10px; align-items: center; }
-        .inlineSwitch { flex-direction: row; align-items: center; gap: 8px; text-transform: none; font-size: 12px; }
-        .profileTables { display: grid; grid-template-columns: repeat(3, minmax(470px, 1fr)); gap: 14px; padding: 14px; background: #f8fafc; overflow-x: auto; }
-        .profileTableCard { border: 1px solid #cbd5e1; border-radius: 14px; background: white; overflow: hidden; min-width: 470px; }
-        .profileTableCard h3 { margin: 0; padding: 12px 14px; font-size: 15px; font-weight: 950; border-bottom: 1px solid #e2e8f0; background: #fff7df; }
-        .profileTableScroll { overflow-x: auto; }
-        .profileTableCard table { width: 100%; min-width: 460px; border-collapse: collapse; font-size: 12px; table-layout: fixed; }
-        .profileTableCard th, .profileTableCard td { height: 28px; padding: 5px 7px; border: 1px solid #e2e8f0; background: #fff; text-align: center; vertical-align: middle; }
-        .profileTableCard th:first-child, .profileTableCard td:first-child { text-align: left; font-weight: 900; }
-        :global(.profileMatrixNumberCell) { text-align: center !important; vertical-align: middle !important; }
-        :global(.profileMatrixNumberValue) { display: flex !important; align-items: center !important; justify-content: center !important; width: 100% !important; min-height: 18px !important; text-align: center !important; }
-        .profileTotalRow td { background: #fff2cc !important; font-weight: 950; }
-        :global(.profileTooltipCell) { position: relative; cursor: help; }
-        :global(.profileHoverFloating) { position: fixed; z-index: 9999; width: 380px; max-height: 320px; overflow: auto; padding: 10px; border: 1px solid #0f172a; border-radius: 12px; background: #ffffff; color: #0f172a; box-shadow: 0 18px 45px rgba(15,23,42,.30); text-align: left; font-weight: 500; pointer-events: none; }
-        :global(.profileHoverFloating > strong) { display: block; margin-bottom: 8px; font-size: 12px; font-weight: 950; color: #0f172a; }
-        :global(.profileHoverRow) { display: grid; grid-template-columns: 72px minmax(0, 1fr) 82px; gap: 6px; align-items: center; padding: 4px 0; border-top: 1px solid #e2e8f0; font-size: 11px; line-height: 1.2; }
-        :global(.profileHoverRow:first-of-type) { border-top: 0; }
-        :global(.profileHoverRow b) { font-weight: 950; }
-        :global(.profileHoverRow span) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        :global(.profileHoverRow em) { font-style: normal; text-align: right; font-weight: 900; color: #0f172a; }
-      `}</style>
+        {onglet === 'sage' && <OngletSage />}
+        {onglet === 'blg' && <OngletBlg />}
+        {onglet === 'comparaison' && <OngletComparaison />}
+      </div>
     </main>
   )
 }
 
-function getSelectionOptions(mode: ModeSelection, tiers: TiersRow[], collaborateurs: CollaborateurRow[]) {
-  if (mode === 'collaborateur') {
-    return Array.from(new Set(tiers.map((t) => t.collaborateur).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'fr'))
-  }
-  return Array.from(new Set([
-    ...tiers.map((t) => t.agence),
-    ...collaborateurs.map((c) => c.agence),
-  ].filter(Boolean))).sort((a, b) => a.localeCompare(b, 'fr'))
-}
-
-function stickyClass(sticky?: ColumnDef['sticky']) {
-  if (sticky === 'collaborateur') return 'stickyCollaborateur'
-  if (sticky === 'code') return 'stickyCode'
-  if (sticky === 'label') return 'stickyLabel'
-  if (sticky === 'month') return 'stickyMonth'
-  return ''
-}
-
-function groupClass(group: string) {
-  return `group${group.replace(/[^A-Za-zÀ-ÿ0-9]/g, '')}`
-}
-
-function EditableCell({ type, value, saving, onSave }: { type: ObjectiveType; value: string; saving: boolean; onSave: (value: string) => void }) {
-  const [local, setLocal] = useState(value)
-
-  useEffect(() => { setLocal(value) }, [value])
-
-  if (type === 'action') {
-    return (
-      <select className={`editSelect ${saving ? 'saving' : ''}`} value={local} onChange={(e) => { setLocal(e.target.value); onSave(e.target.value) }}>
-        <option value=""></option>
-        <option value="0">0</option>
-        <option value="1">1</option>
-        <option value="2">2</option>
-      </select>
-    )
-  }
-
+function OngletTab({ active, onClick, label }: { active: boolean; onClick: () => void; label: string }) {
   return (
-    <input
-      className={`editInput ${saving ? 'saving' : ''}`}
-      type={type === 'date' ? 'date' : type === 'texte' ? 'text' : 'number'}
-      step={type === 'montant' ? '100' : '1'}
-      value={local}
-      onChange={(e) => setLocal(e.target.value)}
-      onBlur={() => onSave(local)}
-    />
+    <button type="button" onClick={onClick}
+      className={`rounded-lg border px-5 py-2.5 text-[14px] font-bold transition-colors ${
+        active ? 'border-[#111820] bg-[#111820] text-white' : 'border-[#E5E1D8] bg-white text-[#3A362E] hover:bg-[#F4F3F0]'
+      }`}>
+      {label}
+    </button>
   )
 }

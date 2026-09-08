@@ -200,6 +200,14 @@ type SummaryRow = {
   derniereVisiteReelle: string
   prochaineVisiteReelle: string
   nbVisitesReel: number
+  // ── Paramétrage des alertes de comportement (client_alertes_config) ───
+  // Mêmes 3 seuils que la section "🔔 Alertes de suivi" de la fiche client
+  // sur l'écran mobile (MobileClients.tsx) -- affichage seul ici (édition
+  // toujours via la fiche client / l'écran mobile), colonnes non affichées
+  // par défaut. null = règle désactivée pour ce client.
+  alerteMinAppelsVisitesMois: number | null
+  alerteMaxJoursSansDevis: number | null
+  alerteMaxJoursSansCommande: number | null
 }
 
 type ColumnDef = {
@@ -215,8 +223,11 @@ type ColumnDef = {
     rubrique: string
     type: ObjectiveType
   }
+  // Édition directe des seuils d'alerte de comportement (client_alertes_config),
+  // distincte de `editable` (qui cible objectif_tiers via save_objectif_tiers).
+  editableAlerte?: 'min_appels_visites_mois' | 'max_jours_sans_devis' | 'max_jours_sans_commande'
   value: (row: SummaryRow) => any
-  format?: 'text' | 'keur' | 'keurBlank' | 'keurCompare' | 'pct' | 'pctBlank' | 'pctCompare' | 'points' | 'number' | 'date' | 'action' | 'caBand'
+  format?: 'text' | 'keur' | 'keurBlank' | 'keurCompare' | 'pct' | 'pctBlank' | 'pctCompare' | 'points' | 'number' | 'numberBlank' | 'date' | 'action' | 'caBand'
   compareValue?: (row: SummaryRow) => any
 }
 
@@ -936,6 +947,33 @@ async function fetchObjectivesForTiers(codes: string[], annee: number) {
   return rows
 }
 
+// ── Paramétrage des alertes de comportement (client_alertes_config) ──────
+// Mêmes 3 seuils que "🔔 Alertes de suivi" sur la fiche client de l'écran
+// mobile (MobileClients.tsx, table lue/écrite via get_client_alertes_config
+// / upsert_client_alertes_config pour un seul client à la fois). Ici on lit
+// la table directement, en une fois pour tous les clients de la sélection
+// courante -- affichage seul (l'édition reste sur la fiche client / l'écran
+// mobile), colonnes non affichées par défaut (cf. TOGGLEABLE_COLUMN_LABELS).
+type AlerteConfigRow = {
+  numero_tiers: string
+  min_appels_visites_mois: number | null
+  max_jours_sans_devis: number | null
+  max_jours_sans_commande: number | null
+}
+
+async function fetchAlertesConfigForTiers(codes: string[]) {
+  const rows: AlerteConfigRow[] = []
+  for (const group of chunk(codes, 200)) {
+    const part = await fetchAll(
+      'client_alertes_config',
+      'numero_tiers,min_appels_visites_mois,max_jours_sans_devis,max_jours_sans_commande',
+      (q) => q.in('numero_tiers', group),
+    )
+    rows.push(...(part as AlerteConfigRow[]))
+  }
+  return rows
+}
+
 function normalizeAgg(row: Record<string, any>): AggRow {
   return {
     annee: safeNumber(row.annee),
@@ -1166,6 +1204,9 @@ function buildSummaryForNumero(tier: TiersRow | null, factures: AggRow[], devis:
     derniereVisiteReelle: '',
     prochaineVisiteReelle: '',
     nbVisitesReel: 0,
+    alerteMinAppelsVisitesMois: null,
+    alerteMaxJoursSansDevis: null,
+    alerteMaxJoursSansCommande: null,
   }
 }
 
@@ -1194,6 +1235,9 @@ const TOGGLEABLE_COLUMN_LABELS: Record<string, string> = {
   derniereVisiteReelle: 'Dernière visite (réel)',
   prochaineVisiteReelle: 'Prochaine visite (réel)',
   nbVisitesReel: `Visites réalisées ${N} (réel)`,
+  alerteMinAppelsVisitesMois: 'Alerte : appels/visites min (mois)',
+  alerteMaxJoursSansDevis: 'Alerte : jours sans devis (max)',
+  alerteMaxJoursSansCommande: 'Alerte : jours sans commande (max)',
 }
 const DEFAULT_VISIBLE_TOGGLEABLE_COLUMNS = new Set(['remarque', 'caBandN', 'qrcN', 'derniereVisiteReelle', 'prochaineVisiteReelle', 'nbVisitesReel'])
 
@@ -1208,6 +1252,9 @@ function buildColumns(showFamilies: boolean, showCollaborateurColumn = false, en
     { key: 'numero', label: 'Code Client', group: 'Client', width: 86, sticky: 'code', value: (r) => r.numero, format: 'text' },
     { key: 'intitule', label: 'Intitulé Client', group: 'Client', width: 210, sticky: 'label', value: (r) => r.intitule, format: 'text' },
     { key: 'totalMois', label: 'Total / Mois', group: 'Client', width: 105, sticky: 'month', value: (r) => r.totalMois, format: 'text' },
+    { key: 'alerteMinAppelsVisitesMois', label: 'Alerte : appels/visites min (mois)', group: 'Client', width: 92, className: 'editableNumber', editableAlerte: 'min_appels_visites_mois', value: (r) => r.alerteMinAppelsVisitesMois, format: 'numberBlank' },
+    { key: 'alerteMaxJoursSansDevis', label: 'Alerte : jours sans devis (max)', group: 'Client', width: 92, className: 'editableNumber', editableAlerte: 'max_jours_sans_devis', value: (r) => r.alerteMaxJoursSansDevis, format: 'numberBlank' },
+    { key: 'alerteMaxJoursSansCommande', label: 'Alerte : jours sans commande (max)', group: 'Client', width: 92, className: 'editableNumber', editableAlerte: 'max_jours_sans_commande', value: (r) => r.alerteMaxJoursSansCommande, format: 'numberBlank' },
     { key: 'codePostal', label: 'Code postal', group: 'Client', width: 82, value: (r) => r.codePostal, format: 'text' },
     { key: 'libelleNaf', label: 'Désignation Naf', group: 'Client', width: 130, value: (r) => r.libelleNaf, format: 'text' },
     { key: 'dateCreation', label: 'Date Création', group: 'Client', width: 95, value: (r) => r.dateCreation, format: 'date' },
@@ -1334,6 +1381,7 @@ function displayValue(col: ColumnDef, row: SummaryRow, objectiveMap: Map<string,
   if (col.format === 'points') return formatPoints(value as number | null)
   if (col.format === 'caBand') return safeText(value, 'Sans CA')
   if (col.format === 'number') return formatNumber(safeNumber(value))
+  if (col.format === 'numberBlank') return value === null || value === undefined ? '' : formatNumber(safeNumber(value))
   return safeText(value)
 }
 
@@ -1519,6 +1567,9 @@ function cacheRowToSummary(row: CacheDbRow): SummaryRow {
     derniereVisiteReelle: '',
     prochaineVisiteReelle: '',
     nbVisitesReel: 0,
+    alerteMinAppelsVisitesMois: null,
+    alerteMaxJoursSansDevis: null,
+    alerteMaxJoursSansCommande: null,
   }
 }
 
@@ -1552,6 +1603,22 @@ function applyVisiteReelle(row: SummaryRow, visitesMap: Map<string, VisiteBatchI
     derniereVisiteReelle: info.derniereVisite,
     prochaineVisiteReelle: info.prochaineVisite,
     nbVisitesReel: info.nbVisitesAnnee,
+  }
+}
+
+/** Applique les 3 seuils d'alerte de comportement (client_alertes_config)
+ * sur une ligne client -- uniquement les lignes row_kind='client' (les
+ * seuils sont propres au client, pas au mois ; les lignes TOTAL et mois
+ * développés restent vides sur ces 3 colonnes). */
+function applyAlertesConfigOverrides(row: SummaryRow, alertesConfigMap: Map<string, AlerteConfigRow>): SummaryRow {
+  if (row.kind !== 'client') return row
+  const cfg = alertesConfigMap.get(normalize(row.numero))
+  if (!cfg) return row
+  return {
+    ...row,
+    alerteMinAppelsVisitesMois: cfg.min_appels_visites_mois,
+    alerteMaxJoursSansDevis: cfg.max_jours_sans_devis,
+    alerteMaxJoursSansCommande: cfg.max_jours_sans_commande,
   }
 }
 
@@ -1674,6 +1741,9 @@ function buildTotalFromRows(rows: SummaryRow[], showCollaborateurColumn: boolean
     derniereVisiteReelle: '',
     prochaineVisiteReelle: '',
     nbVisitesReel: rows.reduce((s, r) => s + r.nbVisitesReel, 0),
+    alerteMinAppelsVisitesMois: null,
+    alerteMaxJoursSansDevis: null,
+    alerteMaxJoursSansCommande: null,
   }
 
   total.margePctN1 = total.caN1 ? (total.margeN1Value / total.caN1) * 100 : null
@@ -2196,6 +2266,7 @@ export default function SyntheseMultiClientsPage() {
   const [cacheRows, setCacheRows] = useState<SummaryRow[]>([])
   const [monthRowsByNumero, setMonthRowsByNumero] = useState<Record<string, SummaryRow[]>>({})
   const [objectiveRows, setObjectiveRows] = useState<ObjectiveRow[]>([])
+  const [alertesConfigRows, setAlertesConfigRows] = useState<AlerteConfigRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [showFamilies, setShowFamilies] = useState(false)
@@ -2204,6 +2275,7 @@ export default function SyntheseMultiClientsPage() {
   const [sort, setSort] = useState<SortState>({ key: 'caN1', direction: 'desc' })
   const [filters, setFilters] = useState<Record<string, string>>({})
   const [savingKey, setSavingKey] = useState<string | null>(null)
+  const [savingAlerteKey, setSavingAlerteKey] = useState<string | null>(null)
   const [loadingMonths, setLoadingMonths] = useState<Set<string>>(new Set())
   const [cacheStatus, setCacheStatus] = useState('')
   // Colonnes optionnelles affichées à l'écran (pastilles sous les KPI) —
@@ -2224,6 +2296,12 @@ export default function SyntheseMultiClientsPage() {
     objectiveRows.forEach((row) => map.set(objectiveKey(row.numero_tiers, row.annee, row.domaine, row.rubrique), row))
     return map
   }, [objectiveRows])
+
+  const alertesConfigMap = useMemo(() => {
+    const map = new Map<string, AlerteConfigRow>()
+    alertesConfigRows.forEach((row) => map.set(normalize(row.numero_tiers), row))
+    return map
+  }, [alertesConfigRows])
 
   const columns = useMemo(() => buildColumns(showFamilies, showCollaborateurColumn, encoursDetailMode), [showFamilies, showCollaborateurColumn, encoursDetailMode])
 
@@ -2380,6 +2458,7 @@ export default function SyntheseMultiClientsPage() {
         setCacheRows([])
         setMonthRowsByNumero({})
         setObjectiveRows([])
+        setAlertesConfigRows([])
         return
       }
 
@@ -2396,9 +2475,10 @@ export default function SyntheseMultiClientsPage() {
           .map(cacheRowToSummary)
           .map((row) => applyRefAgence(row, selectionOptions.collaborateurAgence))
         const codes = rows.map((row) => row.numero).filter(Boolean)
-        const [objectives, rawMonthRows] = await Promise.all([
+        const [objectives, rawMonthRows, alertesConfig] = await Promise.all([
           codes.length ? fetchObjectivesForTiers(codes, N) : Promise.resolve([]),
           codes.length ? fetchCacheMonthRowsForNumeros(codes) : Promise.resolve([]),
+          codes.length ? fetchAlertesConfigForTiers(codes) : Promise.resolve([]),
         ])
         const monthSummaries = rawMonthRows
           .map(cacheRowToSummary)
@@ -2408,6 +2488,7 @@ export default function SyntheseMultiClientsPage() {
         if (!alive) return
         setCacheRows(rowsWithCorrectN1Comparison)
         setObjectiveRows(objectives)
+        setAlertesConfigRows(alertesConfig)
         setMonthRowsByNumero(monthRowsGrouped)
         setExpanded(new Set())
         setCacheStatus(rows.length ? `Cache chargé · ${rows.length} clients` : 'Aucun client dans le cache pour cette sélection')
@@ -2415,6 +2496,7 @@ export default function SyntheseMultiClientsPage() {
         if (alive) {
           setCacheRows([])
           setObjectiveRows([])
+          setAlertesConfigRows([])
           setMonthRowsByNumero({})
           setError(err?.message || 'Erreur de chargement de la synthèse cache')
         }
@@ -2427,8 +2509,8 @@ export default function SyntheseMultiClientsPage() {
   }, [mode, selected, selectionOptions.agenceCollaborateurs, selectionOptions.collaborateurAgence, restrictedSelectionOptions.collaborateurs, access.hasAgenceRestriction, access.hasCollaborateurRestriction])
 
   const baseClientRows = useMemo(
-    () => cacheRows.map((row) => applyVisiteReelle(applyObjectiveOverrides(row, objectiveMap), visitesReellesMap)),
-    [cacheRows, objectiveMap, visitesReellesMap]
+    () => cacheRows.map((row) => applyVisiteReelle(applyAlertesConfigOverrides(applyObjectiveOverrides(row, objectiveMap), alertesConfigMap), visitesReellesMap)),
+    [cacheRows, objectiveMap, alertesConfigMap, visitesReellesMap]
   )
   const totalRow = useMemo(() => buildTotalFromRows(baseClientRows, showCollaborateurColumn), [baseClientRows, showCollaborateurColumn])
 
@@ -2775,6 +2857,51 @@ export default function SyntheseMultiClientsPage() {
     })
   }
 
+  /** Édition directe d'un des 3 seuils d'alerte de comportement
+   * (client_alertes_config), depuis le tableau -- même RPC que la fiche
+   * client sur l'écran mobile (upsert_client_alertes_config), qui prend
+   * les 3 seuils en un seul appel : on part donc des valeurs actuelles de
+   * la ligne (déjà fusionnées via alertesConfigMap) et on ne remplace que
+   * le champ édité. Un champ vidé désactive la règle correspondante
+   * (null), comme sur la fiche client. */
+  async function saveAlerteSeuil(row: SummaryRow, field: NonNullable<ColumnDef['editableAlerte']>, rawValue: string) {
+    if (!row.numero || row.numero === 'TOTAL') return
+    const alerteKey = `${row.numero}§${field}`
+    setSavingAlerteKey(alerteKey)
+    const value = rawValue.trim()
+    const parsed = value === '' ? null : Math.max(1, safeNumber(value))
+
+    const current = {
+      min_appels_visites_mois: row.alerteMinAppelsVisitesMois,
+      max_jours_sans_devis: row.alerteMaxJoursSansDevis,
+      max_jours_sans_commande: row.alerteMaxJoursSansCommande,
+    }
+    const next = { ...current, [field]: parsed }
+
+    const { data: sessionData } = await supabase.auth.getSession()
+    const email = sessionData.session?.user?.email || null
+
+    const { error } = await supabase.rpc('upsert_client_alertes_config', {
+      p_numero_tiers: row.numero,
+      p_min_appels_visites_mois: next.min_appels_visites_mois,
+      p_max_jours_sans_devis: next.max_jours_sans_devis,
+      p_max_jours_sans_commande: next.max_jours_sans_commande,
+      p_updated_by_email: email,
+    })
+
+    setSavingAlerteKey(null)
+    if (error) {
+      setError(`Sauvegarde impossible : ${error.message}`)
+      return
+    }
+
+    setAlertesConfigRows((prev) => {
+      const nextRows = prev.filter((r) => normalize(r.numero_tiers) !== normalize(row.numero))
+      nextRows.push({ numero_tiers: row.numero, ...next })
+      return nextRows
+    })
+  }
+
   async function exportExcel() {
     if (!hasSelection) {
       setError("Veuillez choisir un collaborateur, une agence ou Tous les collaborateurs avant de lancer l'export.")
@@ -2889,6 +3016,11 @@ export default function SyntheseMultiClientsPage() {
         return { value: n, type: 'n' as const, z: NUMBER_FORMAT }
       }
 
+      if (col.format === 'numberBlank') {
+        if (value === null || value === undefined) return { value: '', type: 's' as const }
+        return { value: safeNumber(value), type: 'n' as const, z: NUMBER_FORMAT }
+      }
+
       return { value: safeText(value), type: 's' as const }
     }
 
@@ -2920,7 +3052,7 @@ export default function SyntheseMultiClientsPage() {
       right: { style: 'thin', color: { rgb: '111111' } },
     }
 
-    const numericFormats = new Set(['keur', 'keurBlank', 'pct', 'pctBlank', 'points', 'number'])
+    const numericFormats = new Set(['keur', 'keurBlank', 'pct', 'pctBlank', 'points', 'number', 'numberBlank'])
 
     for (let r = range.s.r; r <= range.e.r; r += 1) {
       const dataRow = r >= 2 ? exportRows[r - 2] : undefined
@@ -3130,13 +3262,15 @@ export default function SyntheseMultiClientsPage() {
                 {displayedColumns.map((col) => {
                   const canEdit = row.kind === 'client' && Boolean(col.editable)
                   const saveKey = col.editable ? objectiveKey(row.numero, N, col.editable.domaine, col.editable.rubrique) : ''
+                  const canEditAlerte = row.kind === 'client' && Boolean(col.editableAlerte)
+                  const alerteSaveKey = col.editableAlerte ? `${row.numero}§${col.editableAlerte}` : ''
                   // Numéro et intitulé du client : cliquables (bleu) sur les
                   // lignes clients, ouvrent la fiche Vision Client dans un
                   // nouvel onglet. La ligne TOTAL et les lignes mensuelles
                   // développées ne sont pas cliquables (pas de fiche dédiée).
                   const isClientLinkColumn = row.kind === 'client' && (col.key === 'numero' || col.key === 'intitule')
                   return (
-                    <td key={`${row.id}-${col.key}`} className={`${col.className || ''} ${stickyClass(col.sticky)} ${['keur', 'keurBlank', 'keurCompare', 'pct', 'pctBlank', 'pctCompare', 'points', 'number'].includes(col.format || '') ? 'num' : ''}`} style={{ width: col.width, minWidth: col.width }}>
+                    <td key={`${row.id}-${col.key}`} className={`${col.className || ''} ${stickyClass(col.sticky)} ${['keur', 'keurBlank', 'keurCompare', 'pct', 'pctBlank', 'pctCompare', 'points', 'number', 'numberBlank'].includes(col.format || '') ? 'num' : ''}`} style={{ width: col.width, minWidth: col.width }}>
                       {col.key === 'numero' && row.kind === 'client' ? (
                         <button type="button" className="expandBtn" onClick={() => toggleExpanded(row.numero)}>{expanded.has(row.numero) ? '−' : '+'}</button>
                       ) : null}
@@ -3148,6 +3282,13 @@ export default function SyntheseMultiClientsPage() {
                           value={editableRawValue(row, col, objectiveMap)}
                           saving={savingKey === saveKey}
                           onSave={(value) => saveObjective(row.numero, col.editable!, value)}
+                        />
+                      ) : canEditAlerte ? (
+                        <EditableCell
+                          type="nombre"
+                          value={col.value(row) === null || col.value(row) === undefined ? '' : String(col.value(row))}
+                          saving={savingAlerteKey === alerteSaveKey}
+                          onSave={(value) => saveAlerteSeuil(row, col.editableAlerte!, value)}
                         />
                       ) : isClientLinkColumn ? (
                         <button
