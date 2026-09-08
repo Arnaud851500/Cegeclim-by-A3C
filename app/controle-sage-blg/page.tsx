@@ -51,8 +51,11 @@
  *    une lettre d'écart tolérée par mot.
  *  - Attestation de capacité : vert si la chaîne SAGE se retrouve dans BLG.
  *  - Interlocuteur ↔ Contact principal : vert dès qu'un nom/prénom est commun.
- *  Ces règles ne concernent que l'export Excel ; le comparatif à l'écran et
- *  la vue SQL (champs_en_ecart) restent inchangés.
+ *  - Contacts (liste nominative), nombre d'adresses de livraison et adresse de
+ *    livraison principale (li_principal SAGE ↔ mainDelivery BLG) ajoutés aux
+ *    champs contrôlés ; le rapprochement des contacts est détaillé dans la
+ *    fenêtre flottante (absents de BLG, en plus dans BLG, doublons BLG).
+ *  La vue SQL (champs_en_ecart) reste en comparaison stricte.
  *
  * Le panneau "Comparaison détaillée" et le mapping manuel restent pilotés
  * entièrement par la table champ_mapping_sage_blg : les nouveaux champs
@@ -650,6 +653,21 @@ type ControleRow = {
   sage_agence_rattachement: string | null
   sage_abrege: string | null
   blg_nom_court: string | null
+  // Identifiant hexadécimal BLG (partner_base_partner.crm_id) — seul identifiant
+  // valable dans l'URL de la fiche BLG. blg_id_tiers contient le partner_id numérique.
+  blg_crm_id: string | null
+  // Contacts (liste nominative des deux côtés) — SAGE "NOM Prénom", BLG "Prénom NOM"
+  sage_nb_contacts: number | null
+  sage_contacts_liste: string[] | null
+  blg_contacts_liste: string[] | null
+  // Adresses de livraison : nombre et adresse principale (SAGE li_principal = 1,
+  // BLG custom_fields.mainDelivery = oui ; le n° BLG est extrait de la référence "<tiers>-<li_no>-liv")
+  sage_nb_adresses_livraison: number | null
+  blg_nb_adresses_livraison: number | null
+  sage_livraison_principale_no: string | null
+  blg_livraison_principale_no: string | null
+  sage_adresse_livraison_principale: string | null
+  blg_adresse_livraison_principale: string | null
 }
 
 type Domaine = 'client' | 'article' | 'devis' | 'facture'
@@ -691,11 +709,12 @@ function formatCellValue(v: unknown): string {
 }
 
 /** Lien vers la fiche entreprise dans BLG (instance de production "cegeclim").
- * BLG identifie l'entreprise par son identifiant hexadécimal (blg_id_tiers),
- * pas par le partner_id numérique — ex.
+ * BLG identifie l'entreprise par son identifiant hexadécimal `crm_id`
+ * (blg.partner_base_partner.crm_id, remonté dans la vue en `blg_crm_id`), pas
+ * par le partner_id numérique — ex.
  * https://app.blgcloud.com/cegeclim/?app/crm/company/e190ba6f5863e48e051ea093# */
-function lienBlg(r: Pick<ControleRow, 'blg_id_tiers'>): string | null {
-  const id = safeText(r.blg_id_tiers)
+function lienBlg(r: Pick<ControleRow, 'blg_crm_id'>): string | null {
+  const id = safeText(r.blg_crm_id)
   return id ? `https://app.blgcloud.com/cegeclim/?app/crm/company/${id}#` : null
 }
 
@@ -874,6 +893,7 @@ const EXPORT_COLONNES_SIMPLES: Array<{ key: keyof ControleRow; label: string; tr
   { key: 'blg_est_entite_interne', label: 'Entité interne (BLG)', transform: (r) => formatCellValue(r.blg_est_entite_interne) },
   { key: 'blg_est_adresse_livraison', label: 'Adresse de livraison uniquement (BLG)', transform: (r) => formatCellValue(r.blg_est_adresse_livraison) },
   { key: 'blg_contacts_resume', label: 'Contacts (BLG)' },
+  { key: 'sage_nb_contacts', label: 'Nb contacts (SAGE)', transform: (r) => formatCellValue(r.sage_nb_contacts) },
   { key: 'blg_nb_contacts', label: 'Nb contacts (BLG)', transform: (r) => formatCellValue(r.blg_nb_contacts) },
   { key: 'sage_abrege', label: 'Abrégé (SAGE)' },
   { key: 'blg_nom_court', label: 'Nom court (BLG)' },
@@ -1067,6 +1087,53 @@ function comparerPersonne(sage: unknown, blg: unknown, tous: boolean): ResultatC
   return mb.some(proche) ? 'ok' : 'ecart'
 }
 
+/** Deux libellés de personne sont équivalents si tous les mots significatifs de
+ * l'un se retrouvent dans l'autre (ordre libre : "NOM Prénom" SAGE ↔ "Prénom NOM"
+ * BLG, une lettre d'écart tolérée). "CLOUPEAU" ≈ "SERGE CLOUPEAU", mais
+ * "CORNU Valérie" ≠ "CHRISTOPHE BRUGIER". */
+function nomsEquivalents(a: string, b: string): boolean {
+  const ma = motsDe(a).filter((m) => m.length >= 2)
+  const mb = motsDe(b).filter((m) => m.length >= 2)
+  if (ma.length === 0 || mb.length === 0) return false
+  return ma.every((m) => motTrouveDans(m, mb)) || mb.every((m) => motTrouveDans(m, ma))
+}
+
+/** Détail du rapprochement des listes de contacts : contacts SAGE sans
+ * équivalent BLG, contacts BLG sans équivalent SAGE, doublons BLG. */
+function rapprocherContacts(sage: string[] | null, blg: string[] | null) {
+  const ls = sage || []
+  const lb = blg || []
+  const sageManquants = ls.filter((c) => !lb.some((b) => nomsEquivalents(c, b)))
+  const blgEnPlus = lb.filter((b) => !ls.some((c) => nomsEquivalents(c, b)))
+  const vus = new Set<string>()
+  const blgDoublons: string[] = []
+  lb.forEach((b) => {
+    const k = normaliserTexte(b)
+    if (vus.has(k)) blgDoublons.push(b); else vus.add(k)
+  })
+  return { sageManquants, blgEnPlus, blgDoublons }
+}
+
+/** Contacts : rouge si un contact SAGE n'a pas d'équivalent dans BLG, orange
+ * si tous les contacts SAGE sont présents mais que BLG en a en plus (contacts
+ * créés dans BLG ou doublons de reprise), vert sinon. */
+function comparerContacts(sage: string[] | null, blg: string[] | null): ResultatComparaison {
+  const { sageManquants, blgEnPlus, blgDoublons } = rapprocherContacts(sage, blg)
+  if (sageManquants.length > 0) return 'ecart'
+  if (blgEnPlus.length > 0 || blgDoublons.length > 0) return 'partiel'
+  return 'ok'
+}
+
+/** Adresse de livraison principale : rouge si ce n'est pas la même adresse
+ * (n° d'adresse SAGE différent), sinon comparaison tolérante du libellé. */
+function comparerAdresseLivraisonPrincipale(r: ControleRow): ResultatComparaison {
+  const noS = safeText(r.sage_livraison_principale_no)
+  const noB = safeText(r.blg_livraison_principale_no)
+  if (!noS || !noB) return 'partiel'
+  if (noS !== noB) return 'ecart'
+  return comparerAdresse(r.sage_adresse_livraison_principale, r.blg_adresse_livraison_principale)
+}
+
 /** Une paire de colonnes SAGE ↔ BLG comparables, avec le numéro de mapping du
  * document Excel (pour l'en-tête) et le mode de comparaison :
  * - compareStrict=false : toujours orange (affichage seul, non vérifié — ex. Agence/Division)
@@ -1153,8 +1220,20 @@ const EXPORT_PAIRES_COMPARAISON: PaireExport[] = [
   },
   { numeroSage: 30, labelSage: 'Agence de rattachement', sageKey: 'sage_agence_rattachement', numeroBlg: '23', labelBlg: 'Division (informatif, pas d\'équivalence confirmée)', blgKey: 'blg_division', compareStrict: false },
   {
+    numeroSage: 32, labelSage: 'Nb adresses de livraison', sageKey: 'sage_nb_adresses_livraison', numeroBlg: null, labelBlg: 'Nb adresses de livraison', blgKey: 'blg_nb_adresses_livraison', compareStrict: true,
+    comparer: (r) => (Number(r.sage_nb_adresses_livraison ?? 0) === Number(r.blg_nb_adresses_livraison ?? 0) ? 'ok' : 'ecart'),
+  },
+  {
+    numeroSage: 33, labelSage: 'Adresse de livraison principale', sageKey: 'sage_adresse_livraison_principale', numeroBlg: null, labelBlg: 'Adresse de livraison principale (mainDelivery)', blgKey: 'blg_adresse_livraison_principale', compareStrict: true,
+    comparer: comparerAdresseLivraisonPrincipale,
+  },
+  {
     numeroSage: 37, labelSage: 'Interlocuteur', sageKey: 'sage_contact', numeroBlg: null, labelBlg: 'Contact principal', blgKey: 'blg_contact_principal', compareStrict: true,
     comparer: (r) => comparerPersonne(r.sage_contact, r.blg_contact_principal, false),
+  },
+  {
+    numeroSage: 38, labelSage: 'Contacts (liste)', sageKey: 'sage_contacts_liste', numeroBlg: null, labelBlg: 'Contacts (liste)', blgKey: 'blg_contacts_liste', compareStrict: true,
+    comparer: (r) => comparerContacts(r.sage_contacts_liste, r.blg_contacts_liste),
   },
 ]
 
@@ -1191,6 +1270,8 @@ const BLG_DETAIL_FIELDS: Array<{ key: keyof ControleRow; label: string }> = [
   { key: 'blg_contact_principal', label: 'Contact principal' },
   { key: 'blg_nb_contacts', label: 'Nb contacts' },
   { key: 'blg_contacts_resume', label: 'Contacts' },
+  { key: 'blg_nb_adresses_livraison', label: 'Nb adresses de livraison' },
+  { key: 'blg_adresse_livraison_principale', label: 'Adresse de livraison principale' },
   { key: 'blg_nom_court', label: 'Nom court' },
   { key: 'blg_tags', label: 'Tags / qualité' },
   { key: 'blg_last_update', label: 'Dernière mise à jour BLG' },
@@ -1367,6 +1448,59 @@ function compterEcarts(ev: EvaluationsTiers | undefined) {
   return { rouge, orange }
 }
 
+/** Bloc "Contacts" de la fenêtre flottante : les deux listes côte à côte, avec
+ * les contacts SAGE sans équivalent BLG en rouge, les contacts BLG en plus en
+ * orange et les doublons BLG signalés. */
+function ContactsRapprochement({ sage, blg }: { sage: string[] | null; blg: string[] | null }) {
+  const ls = sage || []
+  const lb = blg || []
+  const { sageManquants, blgEnPlus, blgDoublons } = rapprocherContacts(sage, blg)
+  const doublonsNormalises = new Set(blgDoublons.map(normaliserTexte))
+  const dejaVus = new Set<string>()
+  return (
+    <div className="mt-4 border-t border-[#E5E1D8] pt-3">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <div className="text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">Contacts (n°37–40) — {ls.length} SAGE / {lb.length} BLG</div>
+        {sageManquants.length > 0 && <span className="rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-bold text-red-700">{sageManquants.length} SAGE absent{sageManquants.length > 1 ? 's' : ''} de BLG</span>}
+        {blgEnPlus.length > 0 && <span className="rounded-full bg-orange-100 px-2 py-0.5 text-[11px] font-bold text-orange-700">{blgEnPlus.length} BLG en plus</span>}
+        {blgDoublons.length > 0 && <span className="rounded-full bg-orange-100 px-2 py-0.5 text-[11px] font-bold text-orange-700">{blgDoublons.length} doublon{blgDoublons.length > 1 ? 's' : ''} BLG</span>}
+        {sageManquants.length === 0 && blgEnPlus.length === 0 && blgDoublons.length === 0 && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-bold text-emerald-700">Identiques</span>}
+      </div>
+      <div className="grid grid-cols-2 gap-4 text-[12px]">
+        <div>
+          <div className="mb-1 font-semibold text-[#3A362E]">SAGE</div>
+          <ul className="space-y-0.5">
+            {ls.map((c, i) => {
+              const manquant = sageManquants.includes(c)
+              return <li key={i} className={`rounded px-2 py-0.5 ${manquant ? 'bg-red-50 font-semibold text-red-800' : 'text-[#111820]'}`}>{c}{manquant && <span className="ml-1 text-[10px] font-bold text-red-600">absent de BLG</span>}</li>
+            })}
+            {ls.length === 0 && <li className="text-[#B3AD9E]">—</li>}
+          </ul>
+        </div>
+        <div>
+          <div className="mb-1 font-semibold text-[#3A362E]">BLG</div>
+          <ul className="space-y-0.5">
+            {lb.map((c, i) => {
+              const k = normaliserTexte(c)
+              const doublon = doublonsNormalises.has(k) && dejaVus.has(k)
+              dejaVus.add(k)
+              const enPlus = blgEnPlus.includes(c)
+              return (
+                <li key={i} className={`rounded px-2 py-0.5 ${doublon || enPlus ? 'bg-orange-50 text-orange-800' : 'text-[#111820]'}`}>
+                  {c}
+                  {doublon && <span className="ml-1 text-[10px] font-bold text-orange-600">doublon</span>}
+                  {!doublon && enPlus && <span className="ml-1 text-[10px] font-bold text-orange-600">absent de SAGE</span>}
+                </li>
+              )
+            })}
+            {lb.length === 0 && <li className="text-[#B3AD9E]">—</li>}
+          </ul>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /** Fenêtre flottante : totalité des champs comparés pour un tiers. */
 function ClientComparaisonModal({ row, evals, onClose }: { row: ControleRow; evals: EvaluationsTiers; onClose: () => void }) {
   const { rouge, orange } = compterEcarts(evals)
@@ -1431,8 +1565,12 @@ function ClientComparaisonModal({ row, evals, onClose }: { row: ControleRow; eva
             </tbody>
           </table>
 
+          {row.statut_appariement === 'apparie' && (
+            <ContactsRapprochement sage={row.sage_contacts_liste} blg={row.blg_contacts_liste} />
+          )}
+
           <div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-1 border-t border-[#E5E1D8] pt-3 text-[12px] md:grid-cols-3">
-            <div><span className="font-semibold text-[#3A362E]">Contacts BLG :</span> <span className="text-[#111820]">{formatCellValue(row.blg_contacts_resume)}</span></div>
+            <div><span className="font-semibold text-[#3A362E]">Adresses de livraison :</span> <span className="text-[#111820]">{formatCellValue(row.sage_nb_adresses_livraison)} SAGE / {formatCellValue(row.blg_nb_adresses_livraison)} BLG</span></div>
             <div><span className="font-semibold text-[#3A362E]">Abrégé / nom court :</span> <span className="text-[#111820]">{formatCellValue(row.sage_abrege)} / {formatCellValue(row.blg_nom_court)}</span></div>
             <div><span className="font-semibold text-[#3A362E]">Dernière MàJ :</span> <span className="text-[#111820]">SAGE {formatCellValue(row.sage_updated_at)} · BLG {formatCellValue(row.blg_last_update)}</span></div>
           </div>
