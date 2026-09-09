@@ -1,22 +1,26 @@
 'use client'
 
-// Page "Fraîcheur des données" -- v2, organisée par écran/widget.
+// Page "Fraîcheur des données" -- v3.
 //
-// Pour chaque widget (ou groupe de widgets) : une capture d'écran, la
-// chaîne visuelle de sa mise à jour (source externe -> table de base ->
-// cache agrégat, dans l'ordre), et la date de la DERNIÈRE étape (celle
-// que le widget affiche réellement) mise en avant en gros. Une pastille
-// rouge/orange apparaît dès qu'une étape amont est plus récente que
-// l'étape que le widget consomme -- c'est le signal "widget pas à jour
-// malgré des données de base fraîches" demandé.
+// Changements vs v2 :
+//  - BL / Factures / CDC / Devis (Vision ONE PAGE) séparés en 4 cartes
+//    distinctes, chacune avec SA propre chaîne réelle -- évite la fausse
+//    impression d'une chaîne linéaire unique où devis_lignes/facture_lignes
+//    semblaient "en aval" de activite_lignes alors qu'ils sont des racines
+//    indépendantes.
+//  - Détection de RÉGRESSION par étape : chaque étape de la chaîne est
+//    comparée à la plus récente des étapes qui la PRÉCÈDENT (pas
+//    seulement à l'étape finale) -- une étape plus vieille que ce qui la
+//    précède s'allume immédiatement en orange, avec sa date affichée en
+//    clair. C'est ce qui permet de repérer en un coup d'oeil un maillon
+//    resté en retard au milieu de la chaîne (ex. un indicateur mensuel pas
+//    reconstruit alors que sa table source, elle, l'a été).
+//  - Captures redimensionnées plus petites (largeur max 380px).
 //
-// Les dates viennent de get_data_lineage_status() (déjà en place, ne pas
-// modifier) ; le découpage par écran/widget et les images sont propres à
-// cette page.
+// Les dates viennent de get_data_lineage_status() (inchangée). Le
+// découpage par widget et les images sont propres à cette page.
 //
-// À FAIRE CÔTÉ APP : copier le dossier widget-captures/ dans public/
-// (ex. public/fraicheur-donnees/), pour que les chemins d'image ci-dessous
-// résolvent correctement.
+// À FAIRE CÔTÉ APP : copier widget-captures/ dans public/fraicheur-donnees/.
 
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
@@ -43,21 +47,49 @@ type WidgetDef = {
 }
 
 const IMG_BASE = '/fraicheur-donnees'
+const IMAGE_MAX_WIDTH = 380
 
 const WIDGETS: WidgetDef[] = [
   {
-    key: 'vision-flux',
+    key: 'vision-bl',
     screen: 'Vision ONE PAGE',
-    title: 'Vision ONE PAGE — Flux BL / Factures / CDC / Devis',
-    image: `${IMG_BASE}/vision_flux_grid.png`,
+    title: 'Vision ONE PAGE — BL',
+    image: `${IMG_BASE}/vision_bl.png`,
     chain: [
       { table_name: 'sage.activite_non_facturee' },
       { table_name: 'activite_lignes' },
-      { table_name: 'devis_lignes' },
-      { table_name: 'facture_lignes' },
       { table_name: 'indicateur_activite_mensuel' },
-      { table_name: 'indicateur_devis_mensuel' },
+    ],
+  },
+  {
+    key: 'vision-factures',
+    screen: 'Vision ONE PAGE',
+    title: 'Vision ONE PAGE — Factures',
+    image: `${IMG_BASE}/vision_factures.png`,
+    chain: [
+      { table_name: 'facture_lignes' },
       { table_name: 'indicateur_factures_mensuel' },
+    ],
+  },
+  {
+    key: 'vision-cdc',
+    screen: 'Vision ONE PAGE',
+    title: 'Vision ONE PAGE — CDC',
+    image: `${IMG_BASE}/vision_cdc.png`,
+    chain: [
+      { table_name: 'sage.activite_non_facturee' },
+      { table_name: 'activite_lignes' },
+      { table_name: 'indicateur_activite_mensuel' },
+    ],
+  },
+  {
+    key: 'vision-devis',
+    screen: 'Vision ONE PAGE',
+    title: 'Vision ONE PAGE — Devis',
+    image: `${IMG_BASE}/vision_devis.png`,
+    chain: [
+      { table_name: 'devis_lignes' },
+      { table_name: 'indicateur_devis_mensuel' },
     ],
   },
   {
@@ -76,7 +108,7 @@ const WIDGETS: WidgetDef[] = [
   {
     key: 'focus-kpis',
     screen: 'Focus Mensuel',
-    title: 'Focus Mensuel — Vue d\u2019ensemble (KPI jour/mois Devis/CDC/BL/Factures)',
+    title: 'Focus Mensuel — Vue d\u2019ensemble (KPI jour/mois)',
     image: `${IMG_BASE}/focus_mensuel_kpis.png`,
     chain: [
       { placeholder: 'Lecture directe', note: 'get_focus_mensuel_daily_summary_metier lit ces tables en direct, sans cache -- borné à 1 mois pour rester performant.' },
@@ -88,7 +120,7 @@ const WIDGETS: WidgetDef[] = [
   {
     key: 'focus-cumul-blcdc',
     screen: 'Focus Mensuel',
-    title: 'Focus Mensuel — Cumul BL / CDC depuis le 1er du mois',
+    title: 'Focus Mensuel — Cumul BL / CDC',
     image: `${IMG_BASE}/focus_mensuel_cumul_blcdc.png`,
     chain: [
       { placeholder: 'Lecture directe', note: 'Même RPC que les KPI ci-dessus, pas de cache intermédiaire.' },
@@ -99,7 +131,7 @@ const WIDGETS: WidgetDef[] = [
   {
     key: 'focus-portefeuille-projection',
     screen: 'Focus Mensuel',
-    title: 'Focus Mensuel — Portefeuille / Projection CA (tableaux compacts)',
+    title: 'Focus Mensuel — Portefeuille / Projection CA',
     image: `${IMG_BASE}/focus_mensuel_portefeuille_projection.png`,
     chain: [
       { table_name: 'activite_lignes' },
@@ -115,16 +147,16 @@ const WIDGETS: WidgetDef[] = [
     title: 'Focus Mensuel — Rolling 12 mois',
     image: `${IMG_BASE}/focus_mensuel_rolling12.png`,
     chain: [
-      { placeholder: 'À confirmer', note: 'Cet onglet est en réalité dans Focus_mensuel2 (code non fourni) -- chaîne non câblée tant que le fichier n\u2019a pas été vu.' },
+      { placeholder: 'À confirmer', note: 'En réalité dans Focus_mensuel2 (code non fourni) -- chaîne non câblée.' },
     ],
   },
   {
     key: 'focus-comparatif-famille',
     screen: 'Focus Mensuel',
-    title: 'Focus Mensuel — Comparatif famille (MTD + YTD)',
+    title: 'Focus Mensuel — Comparatif famille',
     image: `${IMG_BASE}/focus_mensuel_comparatif_famille.png`,
     chain: [
-      { placeholder: 'Cache non identifié', note: 'Alimenté par get_focus_mensuel_annual_tables_cached -- la table de cache exacte lue par cette RPC n\u2019a pas encore été identifiée dans le code.' },
+      { placeholder: 'Cache non identifié', note: 'get_focus_mensuel_annual_tables_cached -- table de cache exacte non identifiée.' },
       { table_name: 'activite_lignes' },
       { table_name: 'devis_lignes' },
       { table_name: 'facture_lignes' },
@@ -136,7 +168,7 @@ const WIDGETS: WidgetDef[] = [
     title: 'Contrôle frais de port (Portefeuille de livraison)',
     image: `${IMG_BASE}/portefeuille_livraison.png`,
     chain: [
-      { placeholder: 'Vues sans horodatage propre', note: 'v_portefeuille_livraison_lignes + mv_controle_frais_port_actions/_groupes -- pas de colonne de rafraîchissement propre, fraîcheur héritée de activite_lignes.' },
+      { placeholder: 'Vues sans horodatage propre', note: 'v_portefeuille_livraison_lignes + mv_controle_frais_port_* -- fraîcheur héritée de activite_lignes.' },
       { table_name: 'activite_lignes' },
     ],
   },
@@ -181,6 +213,10 @@ function ecouleDepuis(iso: string | null) {
   return `il y a ${Math.round(heures / 24)} j`
 }
 
+// Tolérance : deux étapes à moins de 60s d'écart ne sont pas considérées
+// comme "en régression" (évite le bruit sur des synchros quasi simultanées).
+const TOLERANCE_MS = 60_000
+
 export default function FraicheurDonneesParEcranPage() {
   const [rows, setRows] = useState<LineageRow[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -219,100 +255,93 @@ export default function FraicheurDonneesParEcranPage() {
         </button>
       </div>
       <p style={{ color: 'rgba(255,255,255,0.45)', fontSize: 13, marginTop: 2, marginBottom: 20 }}>
-        Chaque bloc : capture de l&rsquo;écran réel, puis la chaîne de mise à jour de la source jusqu&rsquo;à ce que ce widget affiche. Vérifié {checkedAt ? ecouleDepuis(checkedAt) : ''}.
+        Chaque bloc : capture réelle du widget, puis sa chaîne de mise à jour. Une étape s&rsquo;allume en orange dès qu&rsquo;elle est plus ancienne qu&rsquo;une étape qui la précède -- c&rsquo;est le maillon resté en retard. Vérifié {checkedAt ? ecouleDepuis(checkedAt) : ''}.
       </p>
 
       <div style={{ display: 'flex', gap: 16, marginBottom: 24, fontSize: 12.5, color: 'rgba(255,255,255,0.55)', flexWrap: 'wrap' }}>
-        <span><span style={{ display: 'inline-block', width: 9, height: 9, borderRadius: '50%', background: '#3F9142', marginRight: 6 }} />widget à jour</span>
-        <span><span style={{ display: 'inline-block', width: 9, height: 9, borderRadius: '50%', background: '#C1683C', marginRight: 6 }} />widget en retard sur une étape amont</span>
-        <span><span style={{ display: 'inline-block', width: 9, height: 9, borderRadius: '50%', background: 'rgba(255,255,255,0.25)', marginRight: 6 }} />chaîne non confirmée</span>
+        <span><span style={{ display: 'inline-block', width: 9, height: 9, borderRadius: '50%', background: '#3F9142', marginRight: 6 }} />étape cohérente</span>
+        <span><span style={{ display: 'inline-block', width: 9, height: 9, borderRadius: '50%', background: '#C1683C', marginRight: 6 }} />étape en régression (plus vieille qu&rsquo;une étape précédente)</span>
+        <span><span style={{ display: 'inline-block', width: 9, height: 9, borderRadius: '50%', background: 'rgba(255,255,255,0.25)', marginRight: 6 }} />non confirmée</span>
       </div>
 
       {error && <div style={{ color: '#e0a685', marginBottom: 16 }}>Erreur de chargement : {error}</div>}
       {!rows && !error && <div style={{ color: 'rgba(255,255,255,0.4)' }}>Chargement…</div>}
 
-      {rows && WIDGETS.map((widget) => {
-        const steps = widget.chain
-        const tableSteps = steps.filter((s): s is { table_name: string } => 'table_name' in s)
-        const resolved = tableSteps.map((s) => byName.get(s.table_name)).filter((r): r is LineageRow => Boolean(r))
-        const hasUnconfirmedStep = steps.some((s) => 'placeholder' in s) || resolved.length !== tableSteps.length
-        const finalStep = resolved[resolved.length - 1] || null
-        const upstreamMax = resolved.slice(0, -1).reduce<number>((max, r) => {
-          const t = r.last_updated_at ? new Date(r.last_updated_at).getTime() : 0
-          return Math.max(max, t)
-        }, 0)
-        const finalTime = finalStep?.last_updated_at ? new Date(finalStep.last_updated_at).getTime() : 0
-        const statut: 'ok' | 'retard' | 'inconnu' = !finalStep || !finalStep.last_updated_at
-          ? 'inconnu'
-          : upstreamMax > finalTime + 60_000
-            ? 'retard'
-            : 'ok'
-        const dotColor = statut === 'ok' ? '#3F9142' : statut === 'retard' ? '#C1683C' : 'rgba(255,255,255,0.25)'
+      {rows && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(420px, 1fr))', gap: 20 }}>
+          {WIDGETS.map((widget) => {
+            const steps = widget.chain
+            let maxSoFar = 0
+            const stepStates = steps.map((step) => {
+              const isPlaceholder = 'placeholder' in step
+              const row = !isPlaceholder ? byName.get((step as { table_name: string }).table_name) : null
+              const time = row?.last_updated_at ? new Date(row.last_updated_at).getTime() : 0
+              const isRegression = !isPlaceholder && row?.last_updated_at && time < maxSoFar - TOLERANCE_MS
+              if (time > maxSoFar) maxSoFar = time
+              return { step, isPlaceholder, row, isRegression }
+            })
 
-        return (
-          <div key={widget.key} style={{ marginBottom: 36, borderRadius: 16, border: '1px solid rgba(255,255,255,0.08)', overflow: 'hidden' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', background: 'rgba(255,255,255,0.03)', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
-              <span aria-hidden style={{ width: 11, height: 11, borderRadius: '50%', background: dotColor, flexShrink: 0 }} />
-              <span style={{ fontSize: 15, fontWeight: 600, flex: 1 }}>{widget.title}</span>
-              {finalStep && (
-                <div style={{ textAlign: 'right' }}>
-                  <div style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: 15, fontWeight: 700 }}>{formatDateHeure(finalStep.last_updated_at)}</div>
-                  <div style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.4)' }}>{ecouleDepuis(finalStep.last_updated_at)}</div>
-                </div>
-              )}
-            </div>
+            const hasUnconfirmed = stepStates.some((s) => s.isPlaceholder || !s.row)
+            const hasRegression = stepStates.some((s) => s.isRegression)
+            const finalState = stepStates[stepStates.length - 1]
+            const overallDot = hasRegression ? '#C1683C' : hasUnconfirmed ? 'rgba(255,255,255,0.25)' : '#3F9142'
 
-            <div style={{ padding: 16 }}>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={widget.image}
-                alt={widget.title}
-                style={{ width: '100%', borderRadius: 10, border: '1px solid rgba(255,255,255,0.08)', display: 'block', marginBottom: 14 }}
-              />
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflowX: 'auto', paddingBottom: 4 }}>
-                {steps.map((step, idx) => {
-                  const isLast = idx === steps.length - 1
-                  const isPlaceholder = 'placeholder' in step
-                  const row = !isPlaceholder ? byName.get((step as { table_name: string }).table_name) : null
-                  const stepDot = isPlaceholder || !row ? 'rgba(255,255,255,0.25)' : '#3F9142'
-                  return (
-                    <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-                      <div
-                        title={isPlaceholder ? (step as { note: string }).note : row?.description || undefined}
-                        style={{
-                          borderRadius: 10,
-                          border: `1px solid ${isLast ? 'rgba(230,159,74,0.5)' : 'rgba(255,255,255,0.12)'}`,
-                          background: isLast ? 'rgba(230,159,74,0.08)' : 'rgba(255,255,255,0.03)',
-                          padding: '8px 12px',
-                          minWidth: 150,
-                        }}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <span aria-hidden style={{ width: 7, height: 7, borderRadius: '50%', background: stepDot, flexShrink: 0 }} />
-                          <span style={{ fontSize: 12, fontWeight: 600 }}>
-                            {isPlaceholder ? (step as { placeholder: string }).placeholder : row?.label || (step as { table_name: string }).table_name}
-                          </span>
-                        </div>
-                        <div style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.4)', marginTop: 2, fontFamily: 'var(--font-mono, monospace)' }}>
-                          {isPlaceholder ? 'à confirmer' : formatDateHeure(row?.last_updated_at || null)}
-                        </div>
-                      </div>
-                      {!isLast && <span style={{ color: 'rgba(255,255,255,0.25)', fontSize: 14 }}>→</span>}
+            return (
+              <div key={widget.key} style={{ borderRadius: 16, border: `1px solid ${hasRegression ? 'rgba(193,104,60,0.4)' : 'rgba(255,255,255,0.08)'}`, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', background: 'rgba(255,255,255,0.03)', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+                  <span aria-hidden style={{ width: 10, height: 10, borderRadius: '50%', background: overallDot, flexShrink: 0 }} />
+                  <span style={{ fontSize: 13.5, fontWeight: 600, flex: 1 }}>{widget.title}</span>
+                  {finalState?.row && (
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: 13, fontWeight: 700 }}>{formatDateHeure(finalState.row.last_updated_at)}</div>
+                      <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)' }}>{ecouleDepuis(finalState.row.last_updated_at)}</div>
                     </div>
-                  )
-                })}
-              </div>
-
-              {hasUnconfirmedStep && (
-                <div style={{ marginTop: 10, fontSize: 11, color: '#E8A96A' }}>
-                  ⚠ Chaîne partiellement non confirmée — voir l&rsquo;info-bulle des étapes grises.
+                  )}
                 </div>
-              )}
-            </div>
-          </div>
-        )
-      })}
+
+                <div style={{ padding: 12 }}>
+                  <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 12 }}>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={widget.image}
+                      alt={widget.title}
+                      style={{ width: '100%', maxWidth: IMAGE_MAX_WIDTH, borderRadius: 8, border: '1px solid rgba(255,255,255,0.08)', display: 'block' }}
+                    />
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {stepStates.map((s, idx) => {
+                      const dot = s.isRegression ? '#C1683C' : s.isPlaceholder || !s.row ? 'rgba(255,255,255,0.25)' : '#3F9142'
+                      const label = s.isPlaceholder ? (s.step as { placeholder: string }).placeholder : s.row?.label || (s.step as { table_name: string }).table_name
+                      const dateText = s.isPlaceholder ? 'à confirmer' : formatDateHeure(s.row?.last_updated_at || null)
+                      return (
+                        <div
+                          key={idx}
+                          title={s.isPlaceholder ? (s.step as { note: string }).note : s.row?.description || undefined}
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: 8,
+                            borderRadius: 8,
+                            border: `1px solid ${s.isRegression ? 'rgba(193,104,60,0.5)' : 'rgba(255,255,255,0.08)'}`,
+                            background: s.isRegression ? 'rgba(193,104,60,0.1)' : 'rgba(255,255,255,0.02)',
+                            padding: '6px 10px',
+                          }}
+                        >
+                          <span aria-hidden style={{ width: 7, height: 7, borderRadius: '50%', background: dot, flexShrink: 0 }} />
+                          <span style={{ fontSize: 11.5, fontWeight: 600, flex: 1 }}>{label}</span>
+                          <span style={{ fontSize: 10.5, fontFamily: 'var(--font-mono, monospace)', color: s.isRegression ? '#E8A96A' : 'rgba(255,255,255,0.45)' }}>
+                            {dateText}
+                          </span>
+                          {s.isRegression && <span style={{ fontSize: 10, color: '#E8A96A' }} title="Plus ancienne qu'une étape précédente">⚠</span>}
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }
