@@ -9,6 +9,17 @@ import MobileDetailSheet, { type DetailField } from './MobileDetailSheet'
 import MobileTaskDetailSheet, { type TaskRow } from './MobileTaskDetailSheet'
 import VoiceReportButtons from './VoiceReportButtons'
 import { CommandeModificationSheet } from './MobileClients'
+// ÉVOLUTION (2026-09-09) : règle "CDC liv < M-2" partagée avec le bandeau
+// desktop et /portefeuille-livraison -- voir lib/cdcRetard.ts. Le libellé
+// de l'alerte est fourni par le parent (useMobileAlertsCount) : on accepte
+// l'ancien ("CDC < 2026") comme le nouveau (CDC_RETARD_LABEL) pour ne rien
+// casser pendant la transition.
+import {
+  CDC_RETARD_LABEL,
+  CDC_RETARD_LEGACY_LABEL,
+  getCdcRetardDescription,
+  isCdcEnRetard,
+} from '@/lib/cdcRetard'
 
 export interface AlertDetailItem {
   label: string
@@ -108,12 +119,23 @@ function formatDateFr(value: any) {
  * liste, montant total sommé, détail ligne à ligne conservé pour la fiche
  * (ouverte au tap), exactement comme les sections Commandes/BL/Devis de la
  * fiche client. Triées par date de livraison croissante (pièces sans date
- * exploitable repoussées en fin de liste plutôt qu'en tête). */
+ * exploitable repoussées en fin de liste plutôt qu'en tête).
+ *
+ * ÉVOLUTION (2026-09-09) : filtre de sécurité sur la règle "CDC liv < M-2"
+ * appliqué ici aussi -- si fetchCdcAvant2026List() côté hook n'a pas
+ * encore été mis à jour (ancien seuil 2026-01-01), la liste reste
+ * cohérente avec la nouvelle règle (au pire elle contient moins de lignes
+ * que le compteur, jamais plus). */
 function aggregateCdcByDocument(rows: Record<string, any>[]): CdcDocAgrege[] {
   const byDoc = new Map<string, CdcDocAgrege>()
   for (const r of rows) {
     const numeroDocument = safeText(pick(r, ['numero_document']))
     if (!numeroDocument) continue
+    if (!isCdcEnRetard({
+      type_document: safeText(pick(r, ['type_document'])) || 'CDC',
+      date_livraison: pick(r, ['date_livraison']),
+      mois_livraison: safeText(pick(r, ['mois_livraison'])),
+    })) continue
     const ligne = {
       reference_article: safeText(pick(r, ['reference_article'])),
       designation: safeText(pick(r, ['designation_article'])),
@@ -174,7 +196,7 @@ export default function MobileAlertes({
 }) {
   const active = detail.filter((d) => d.count > 0)
 
-  // Tiroirs génériques (CERFA, CDC < 2026, Frais de port, Capacité gaz,
+  // Tiroirs génériques (CERFA, CDC liv < M-2, Frais de port, Capacité gaz,
   // Cohérence données) -- inchangés, toujours via MobileListSheet.
   const [listOpen, setListOpen] = useState<{ title: string; items: ListSheetItem[] } | null>(null)
   const [listLoading, setListLoading] = useState(false)
@@ -183,11 +205,11 @@ export default function MobileAlertes({
 
   // ÉVOLUTION (2026-09-02) : modification de la date de livraison
   // souhaitée / référence chantier directement depuis une commande de
-  // l'alerte "CDC < 2026" -- réutilise CommandeModificationSheet (déjà
-  // utilisée depuis la fiche client, voir MobileClients.tsx), et la même
-  // table devis_transformations pour le suivi + le rattachement de la
-  // tâche générée (flag automatique "traité" à la clôture de la tâche,
-  // via le trigger DB -- rien à faire ici de ce côté).
+  // l'alerte CDC -- réutilise CommandeModificationSheet (déjà utilisée
+  // depuis la fiche client, voir MobileClients.tsx), et la même table
+  // devis_transformations pour le suivi + le rattachement de la tâche
+  // générée (flag automatique "traité" à la clôture de la tâche, via le
+  // trigger DB -- rien à faire ici de ce côté).
   const [commandeAModifierCdc, setCommandeAModifierCdc] = useState<CdcDocAgrege | null>(null)
   // Documents "à traiter" (statut a_traiter, type_document='commande')
   // déjà en cours pour les commandes actuellement listées -- indexé par
@@ -385,7 +407,7 @@ export default function MobileAlertes({
     const numeros = Array.from(new Set(docs.map((d) => d.numeroDocument).filter(Boolean)))
     if (numeros.length === 0) {
       setTransformationsCommandeParPiece({})
-      return
+      return {} as Record<string, TransformationCommande>
     }
     try {
       const { data, error } = await supabase
@@ -408,9 +430,11 @@ export default function MobileAlertes({
         }
       }
       setTransformationsCommandeParPiece(map)
+      return map
     } catch (e) {
       console.error('[MobileAlertes] chargerTransformationsCommandeEnCours', e)
       setTransformationsCommandeParPiece({})
+      return {} as Record<string, TransformationCommande>
     }
   }
 
@@ -438,7 +462,7 @@ export default function MobileAlertes({
     const enCours = transformationsCommandeParPiece[d.numeroDocument]
     const champs: DetailField[] = [
       { label: 'Client', value: `${d.nomTiers}${d.numeroTiers ? ` (${d.numeroTiers})` : ''}` },
-      { label: 'Date de livraison', value: d.dateLivraison ? formatDateFr(d.dateLivraison) : d.moisLivraison },
+      { label: 'Date de livraison', value: `${d.dateLivraison ? formatDateFr(d.dateLivraison) : d.moisLivraison} ⚠ en retard` },
       { label: 'Référence chantier', value: d.reference || '—' },
       { label: 'Agence', value: d.agence },
       { label: 'Représentant', value: d.representant },
@@ -484,14 +508,14 @@ export default function MobileAlertes({
 
     setOpenDetail({
       title: d.numeroDocument || '(sans numéro)',
-      subtitle: `CDC avant 2026 · ${formatMoney(d.montantHt)}`,
+      subtitle: `${CDC_RETARD_LABEL} · ${getCdcRetardDescription()} · ${formatMoney(d.montantHt)}`,
       fields: champs,
       footer,
     })
   }
 
   async function openCdcDrawer() {
-    setListOpen({ title: 'CDC < 2026', items: [] })
+    setListOpen({ title: CDC_RETARD_LABEL, items: [] })
     setListLoading(true)
     const rows = await fetchCdcAvant2026List()
     setListLoading(false)
@@ -500,19 +524,23 @@ export default function MobileAlertes({
     // liste, comme les sections Commandes/BL/Devis de la fiche client,
     // au lieu d'une ligne par article de la pièce.
     const docs = aggregateCdcByDocument(rows)
-    await chargerTransformationsCommandeEnCours(docs)
+    // FIX : on utilise la map retournée directement -- l'état React
+    // (transformationsCommandeParPiece) n'est pas encore à jour dans
+    // cette même fonction, ce qui faisait manquer la pastille ⭐ à la
+    // première ouverture.
+    const enCoursParPiece = await chargerTransformationsCommandeEnCours(docs)
 
     setListOpen({
-      title: 'CDC < 2026',
+      title: CDC_RETARD_LABEL,
       items: docs.map((d) => ({
         id: d.numeroDocument,
         // ⭐ en préfixe si une demande de modification est déjà en cours
         // pour cette commande -- disparaît automatiquement une fois
         // traitée (voir marquerCommandeTraitee / trigger DB).
-        primary: `${transformationsCommandeParPiece[d.numeroDocument] ? '⭐ ' : ''}${d.numeroDocument || '(sans numéro)'}`,
+        primary: `${enCoursParPiece[d.numeroDocument] ? '⭐ ' : ''}${d.numeroDocument || '(sans numéro)'}`,
         // Référence chantier en avant, comme demandé -- puis le client.
         secondary: [d.reference, d.nomTiers || (d.numeroTiers && `Client ${d.numeroTiers}`)].filter(Boolean).join(' · '),
-        trailing: d.dateLivraison ? formatDateFr(d.dateLivraison) : d.moisLivraison,
+        trailing: `⚠ ${d.dateLivraison ? formatDateFr(d.dateLivraison) : d.moisLivraison}`,
         onClick: () => openCdcDetail(d),
       })),
     })
@@ -633,10 +661,17 @@ export default function MobileAlertes({
   function handleOpen(label: string) {
     if (label === 'À faire') void openTodoDrawer()
     else if (label === 'CERFA à régulariser') void openCerfaDrawer()
-    else if (label === 'CDC < 2026') void openCdcDrawer()
+    else if (label === CDC_RETARD_LABEL || label === CDC_RETARD_LEGACY_LABEL) void openCdcDrawer()
     else if (label === 'Frais de port') void openFraisPortDrawer()
     else if (label === 'Capacité gaz') void openCapaciteGazDrawer()
     else if (label === 'Cohérence données') void openDataCoherenceDrawer()
+  }
+
+  /** Libellé affiché dans la liste des alertes : l'ancien "CDC < 2026"
+   * remonté par un hook pas encore mis à jour est réaffiché sous son
+   * nouveau nom, le routage (handleOpen) restant basé sur le label brut. */
+  function displayLabel(label: string) {
+    return label === CDC_RETARD_LEGACY_LABEL ? CDC_RETARD_LABEL : label
   }
 
   return (
@@ -663,7 +698,12 @@ export default function MobileAlertes({
             color: '#fff',
           }}
         >
-          <span style={{ fontSize: 15.5, fontWeight: 600 }}>{d.label}</span>
+          <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <span style={{ fontSize: 15.5, fontWeight: 600 }}>{displayLabel(d.label)}</span>
+            {(d.label === CDC_RETARD_LABEL || d.label === CDC_RETARD_LEGACY_LABEL) && (
+              <span style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.55)' }}>{getCdcRetardDescription()}</span>
+            )}
+          </span>
           <span style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
             <span
               style={{

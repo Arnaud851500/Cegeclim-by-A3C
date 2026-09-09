@@ -10,6 +10,14 @@ import {
   restrictOptions,
   usePageFilterAccess,
 } from '@/lib/pageAccessFilters'
+// ÉVOLUTION (2026-09-09) : règle "CDC liv < M-2" partagée avec le bandeau
+// d'alertes desktop et les alertes mobiles -- voir lib/cdcRetard.ts.
+import {
+  CDC_RETARD_LABEL,
+  getCdcRetardDescription,
+  isCdcEnRetard,
+  isMoisLivraisonEnRetard,
+} from '@/lib/cdcRetard'
 
 type LignePortefeuille = {
   id: number | string | null
@@ -285,17 +293,20 @@ function isMonthBeforeCurrent(month: string, currentMonthKey: string) {
   return month < currentMonthKey
 }
 
+// ÉVOLUTION (2026-09-09) : rouge = mois de livraison avant le seuil M-2
+// (règle partagée, cf. lib/cdcRetard.ts) au lieu de "Avant 2026" seul ;
+// orange = M-2 / M-1 (avant le mois courant mais pas encore en retard).
 function getSummaryHeaderClassName(month: string, currentMonthKey: string) {
   const base =
     'whitespace-nowrap cursor-pointer border-b border-r border-slate-200 px-2 py-2 text-right'
-  if (month === 'AVANT_2026') return `${base} bg-red-100 text-red-950 hover:bg-red-200`
+  if (isMoisLivraisonEnRetard(month)) return `${base} bg-red-100 text-red-950 hover:bg-red-200`
   if (isMonthBeforeCurrent(month, currentMonthKey)) return `${base} bg-orange-100 text-orange-950 hover:bg-orange-200`
   return `${base} hover:bg-slate-200`
 }
 
 function getSummaryCellClassName(month: string, hasValue: boolean, currentMonthKey: string) {
   const base = 'border-b border-r border-slate-200 px-2 py-2 text-right'
-  if (month === 'AVANT_2026') return [base, 'bg-red-50', hasValue ? 'cursor-pointer text-red-950 hover:bg-red-100' : 'text-red-200'].join(' ')
+  if (isMoisLivraisonEnRetard(month)) return [base, 'bg-red-50', hasValue ? 'cursor-pointer text-red-950 hover:bg-red-100' : 'text-red-200'].join(' ')
   if (isMonthBeforeCurrent(month, currentMonthKey)) return [base, 'bg-orange-50', hasValue ? 'cursor-pointer text-orange-950 hover:bg-orange-100' : 'text-orange-200'].join(' ')
   return [base, hasValue ? 'cursor-pointer hover:bg-blue-50' : 'text-slate-300'].join(' ')
 }
@@ -467,6 +478,15 @@ async function runControlQueryWithRetry<T>(label: string, operation: () => Promi
   throw lastError
 }
 
+// Nombre de colonnes de la grille KPI selon les cartes visibles (Tailwind a
+// besoin des noms de classes complets, d'où la table de correspondance).
+const KPI_GRID_COLS: Record<number, string> = {
+  2: 'xl:grid-cols-2',
+  3: 'xl:grid-cols-3',
+  6: 'xl:grid-cols-6',
+  7: 'xl:grid-cols-7',
+}
+
 export default function PortefeuilleLivraisonPage() {
   const currentMonthKey = useMemo(() => getCurrentMonthKey(), [])
   const access = usePageFilterAccess()
@@ -499,7 +519,14 @@ export default function PortefeuilleLivraisonPage() {
   const [lieuLivraisonSearch, setLieuLivraisonSearch] = useState('')
   const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null)
 
+  // ÉVOLUTION (2026-09-09) : filtre "CDC liv < M-2" -- activé par la carte
+  // KPI dédiée, par la pastille du bandeau (URL ?cdc=retard) ou par
+  // l'événement cegeclim:open-cdc-retard. Ne garde que les CDC dont la
+  // livraison est avant le seuil M-2 (règle lib/cdcRetard.ts).
+  const [cdcRetardOnly, setCdcRetardOnly] = useState(false)
+
   const isBlSelected = selectedTypes.includes('BL')
+  const isCdcSelected = selectedTypes.includes('CDC')
   const dateLivraisonFinControle = dateLivraisonFinModifiee ? dateLivraisonFin : ''
 
   const [selection, setSelection] = useState<DetailSelection | null>(null)
@@ -520,6 +547,19 @@ export default function PortefeuilleLivraisonPage() {
     setDateLivraisonFinModifiee(false)
     setSelectedControle(mode)
     setSelectedGroupKey(null)
+    setCdcRetardOnly(false)
+    setSelection(null)
+    setSelectedDocumentKeyForLines(null)
+  }
+
+  /** Active le filtre "CDC liv < M-2" : ne garde que les CDC, remet la borne
+   * de livraison par défaut (hier) qui couvre de toute façon tout le retard,
+   * et réinitialise le détail. */
+  function openCdcRetard() {
+    setSelectedTypes(['CDC'])
+    setCdcRetardOnly(true)
+    setSelectedControle('TOUS')
+    setSelectedGroupKey(null)
     setSelection(null)
     setSelectedDocumentKeyForLines(null)
   }
@@ -531,6 +571,16 @@ export default function PortefeuilleLivraisonPage() {
       setDateLivraisonFinModifiee(false)
       setSelectedControle(mode)
       setSelectedGroupKey(null)
+      setCdcRetardOnly(false)
+      setSelection(null)
+      setSelectedDocumentKeyForLines(null)
+    }
+
+    function applyCdcRetardFilter() {
+      setSelectedTypes(['CDC'])
+      setCdcRetardOnly(true)
+      setSelectedControle('TOUS')
+      setSelectedGroupKey(null)
       setSelection(null)
       setSelectedDocumentKeyForLines(null)
     }
@@ -541,21 +591,32 @@ export default function PortefeuilleLivraisonPage() {
       if (requestedControl === 'frais-port-manquant') applyControlFilter('FRAIS_PORT_MANQUANT')
       if (requestedControl === 'frais-port-a-supprimer') applyControlFilter('FRAIS_PORT_A_SUPPRIMER')
       if (requestedControl === 'controle-frais-port' || requestedControl === 'anomalies-frais-port') applyControlFilter('ANOMALIES')
+      const requestedCdc = String(params.get('cdc') || '').trim().toLowerCase()
+      if (requestedCdc === 'retard') applyCdcRetardFilter()
     }
 
     function handleOpenControl() { applyControlFilter('ANOMALIES') }
     function handleOpenMissingPort() { applyControlFilter('FRAIS_PORT_MANQUANT') }
+    function handleOpenCdcRetard() { applyCdcRetardFilter() }
 
     applyControlFromUrl()
     window.addEventListener('popstate', applyControlFromUrl)
     window.addEventListener('cegeclim:open-controle-frais-port', handleOpenControl)
     window.addEventListener('cegeclim:open-frais-port-manquant', handleOpenMissingPort)
+    window.addEventListener('cegeclim:open-cdc-retard', handleOpenCdcRetard)
     return () => {
       window.removeEventListener('popstate', applyControlFromUrl)
       window.removeEventListener('cegeclim:open-controle-frais-port', handleOpenControl)
       window.removeEventListener('cegeclim:open-frais-port-manquant', handleOpenMissingPort)
+      window.removeEventListener('cegeclim:open-cdc-retard', handleOpenCdcRetard)
     }
   }, [])
+
+  // Si l'utilisateur décoche CDC alors que le filtre "CDC liv < M-2" est
+  // actif, on le désactive plutôt que d'afficher un tableau vide.
+  useEffect(() => {
+    if (!isCdcSelected && cdcRetardOnly) setCdcRetardOnly(false)
+  }, [isCdcSelected, cdcRetardOnly])
 
   async function loadData() {
     const requestId = loadRequestIdRef.current + 1
@@ -617,7 +678,7 @@ export default function PortefeuilleLivraisonPage() {
       //   dates de création UI  → date_controle (= date du BL dans les deux vues)
       //   dates de livraison UI → date_livraison (actions) / date_livraison_min/max (groupes)
       // ───────────────────────────────────────────────────────────────────────
-      
+
 
       let controlRowsLoaded = false
       let groupRowsLoaded = false
@@ -870,6 +931,7 @@ export default function PortefeuilleLivraisonPage() {
     const referenceSearch = referenceEnteteSearch.trim().toLowerCase()
     const lieuSearch = lieuLivraisonSearch.trim().toLowerCase()
     return documents.filter((doc) => {
+      if (cdcRetardOnly && !isCdcEnRetard(doc)) return false
       if (selectedGroupKey && doc.cle_groupe_frais_port !== selectedGroupKey) return false
       if (selectedControle === 'FRAIS_PORT_MANQUANT' && doc.action_recommandee !== 'AJOUTER') return false
       if (selectedControle === 'FRAIS_PORT_A_SUPPRIMER' && doc.action_recommandee !== 'SUPPRIMER') return false
@@ -882,7 +944,7 @@ export default function PortefeuilleLivraisonPage() {
       if (lieuSearch && !doc.lieu_livraison.toLowerCase().includes(lieuSearch)) return false
       return true
     })
-  }, [documents, selectedGroupKey, selectedControle, selectedExpedition, selectedDepotEntete, referenceEnteteSearch, lieuLivraisonSearch])
+  }, [documents, cdcRetardOnly, selectedGroupKey, selectedControle, selectedExpedition, selectedDepotEntete, referenceEnteteSearch, lieuLivraisonSearch])
 
   const moisLivraison = useMemo(() => {
     const set = new Set<string>()
@@ -1028,6 +1090,16 @@ export default function PortefeuilleLivraisonPage() {
 
   const totalGeneral = useMemo(() => documentsFiltresControle.reduce((acc, doc) => { acc.nb_documents += 1; acc.montant_ht += doc.montant_ht; return acc }, { nb_documents: 0, montant_ht: 0 }), [documentsFiltresControle])
 
+  // KPI "CDC liv < M-2" : calculé sur tous les documents chargés (avant le
+  // filtre cdcRetardOnly) pour que le compteur reste stable quand on active
+  // ou désactive le filtre depuis la carte.
+  const cdcRetardKpi = useMemo(() => documents.reduce((acc, doc) => {
+    if (!isCdcEnRetard(doc)) return acc
+    acc.nb_documents += 1
+    acc.montant_ht += doc.montant_ht
+    return acc
+  }, { nb_documents: 0, montant_ht: 0 }), [documents])
+
   const controleKpis = useMemo(() => groupesFraisPort.reduce((acc, group) => {
     if (group.statut_groupe === 'FRAIS_PORT_MANQUANT') acc.portManquant += 1
     acc.blASupprimer += Number(group.nb_bl_a_supprimer || 0)
@@ -1035,6 +1107,9 @@ export default function PortefeuilleLivraisonPage() {
     acc.totalActions += Number(group.nb_actions || 0)
     return acc
   }, { portManquant: 0, blASupprimer: 0, autresAnomalies: 0, totalActions: 0 }), [groupesFraisPort])
+
+  const showCdcRetardCard = isCdcSelected
+  const kpiGridColsClass = KPI_GRID_COLS[2 + (showCdcRetardCard ? 1 : 0) + (isBlSelected ? 4 : 0)] || 'xl:grid-cols-2'
 
   function toggleType(type: string) {
     setSelectedTypes((current) => {
@@ -1081,10 +1156,10 @@ export default function PortefeuilleLivraisonPage() {
 
     const groupesExport = sortedGroupesFraisPort.map((group) => ({ 'Date BL': formatDate(group.date_controle), 'N° tiers': group.numero_tiers, Client: group.nom_tiers, 'Expédition': group.expedition, 'Lieu de livraison': group.lieu_livraison, Dépôts: group.depots, Agences: group.agences, 'Représentants': group.representants, 'N° BL': group.numeros_bl, 'Nb BL': group.nb_bl, 'BL avec port': group.nb_bl_avec_port, 'Port constaté groupe': group.frais_port_constate_groupe_ht, 'Port attendu groupe': group.frais_port_attendu_groupe_ht, 'Écart groupe': group.ecart_groupe_ht, 'BL à supprimer': group.nb_bl_a_supprimer, 'Montant à supprimer': group.montant_a_supprimer_ht, 'Montant à ajouter': group.montant_a_ajouter_ht, 'BL conseillé ajout': group.bl_conseille_ajout, 'BL conseillé conservation': group.bl_conseille_conservation, Statut: controlStatusLabel(group.statut_groupe) }))
 
-    const documentsExport = sortedDocuments.map((doc) => ({ Agence: doc.agence, Representant: doc.representant, 'N° tiers': doc.numero_tiers, Client: doc.nom_tiers, 'Type doc': doc.type_document, 'N° document': doc.numero_document, 'Date BL': formatDate(doc.date_controle), 'Référence entête': doc.reference_entete, 'Expédition': doc.expedition, 'Dépôt entête': doc.depot_entete, 'Lieu de livraison': doc.lieu_livraison, 'Nb BL groupe': doc.nb_bl_groupe, 'BL avec port groupe': doc.nb_bl_avec_port, 'Nb lignes': doc.nb_lignes, 'Montant HT portefeuille': Number(doc.montant_ht.toFixed(2)), 'Montant HT lignes contrôle': doc.montant_lignes_controle_ht, 'Montant HT entête': doc.montant_entete_ht, 'Port constaté BL': doc.frais_port_constate_ht, 'Port attendu groupe': doc.frais_port_attendu_groupe_ht, 'Port constaté groupe': doc.frais_port_constate_groupe_ht, 'Écart groupe': doc.ecart_groupe_ht, Action: actionLabel(doc.action_recommandee), 'Montant action': doc.montant_action_ht, 'Base calcul port': doc.base_calcul_frais_port, 'Statut contrôle': controlStatusLabel(doc.statut_controle), 'Date création document': formatDate(doc.date_creation_document), 'Date livraison': formatDate(doc.date_livraison), 'Mois livraison': monthLabel(doc.mois_livraison), Référence: doc.references, 'Client en sommeil': doc.client_en_sommeil ? 'Oui' : 'Non', 'Familles macro': doc.familles_macro }))
+    const documentsExport = sortedDocuments.map((doc) => ({ Agence: doc.agence, Representant: doc.representant, 'N° tiers': doc.numero_tiers, Client: doc.nom_tiers, 'Type doc': doc.type_document, 'N° document': doc.numero_document, 'Date BL': formatDate(doc.date_controle), 'Référence entête': doc.reference_entete, 'Expédition': doc.expedition, 'Dépôt entête': doc.depot_entete, 'Lieu de livraison': doc.lieu_livraison, 'Nb BL groupe': doc.nb_bl_groupe, 'BL avec port groupe': doc.nb_bl_avec_port, 'Nb lignes': doc.nb_lignes, 'Montant HT portefeuille': Number(doc.montant_ht.toFixed(2)), 'Montant HT lignes contrôle': doc.montant_lignes_controle_ht, 'Montant HT entête': doc.montant_entete_ht, 'Port constaté BL': doc.frais_port_constate_ht, 'Port attendu groupe': doc.frais_port_attendu_groupe_ht, 'Port constaté groupe': doc.frais_port_constate_groupe_ht, 'Écart groupe': doc.ecart_groupe_ht, Action: actionLabel(doc.action_recommandee), 'Montant action': doc.montant_action_ht, 'Base calcul port': doc.base_calcul_frais_port, 'Statut contrôle': controlStatusLabel(doc.statut_controle), 'Date création document': formatDate(doc.date_creation_document), 'Date livraison': formatDate(doc.date_livraison), 'Mois livraison': monthLabel(doc.mois_livraison), [CDC_RETARD_LABEL]: isCdcEnRetard(doc) ? 'Oui' : 'Non', Référence: doc.references, 'Client en sommeil': doc.client_en_sommeil ? 'Oui' : 'Non', 'Familles macro': doc.familles_macro }))
 
     const exportDocumentKeys = new Set(sortedDocuments.map((doc) => doc.key))
-    const lignesExport = lignes.filter((ligne) => exportDocumentKeys.has(docKey(ligne))).map((ligne) => ({ Agence: safeText(ligne.agence, 'Sans agence'), Representant: safeText(ligne.representant, 'Sans représentant'), 'N° tiers': safeText(ligne.numero_tiers, ''), Client: safeText(ligne.nom_tiers, ''), 'Type doc': safeText(ligne.type_document, ''), 'N° document': safeText(ligne.numero_document, ''), 'Référence article': safeText(ligne.reference_article, ''), 'Désignation article': safeText(ligne.designation_article, ''), Référence: safeText(ligne.reference, ''), Famille: safeText(ligne.famille, ''), 'Famille macro': safeText(ligne.famille_macro, 'Sans famille macro'), 'Quantité': Number(ligne.quantite || 0), 'Montant HT': Number(ligne.montant_ht || 0), 'Date création document': formatDate(ligne.date_creation_document), 'Date livraison': formatDate(ligne.date_livraison), 'Mois livraison': monthLabel(ligne.mois_livraison || 'SANS_DATE_LIVRAISON'), 'Client en sommeil': ligne.client_en_sommeil ? 'Oui' : 'Non' }))
+    const lignesExport = lignes.filter((ligne) => exportDocumentKeys.has(docKey(ligne))).map((ligne) => ({ Agence: safeText(ligne.agence, 'Sans agence'), Representant: safeText(ligne.representant, 'Sans représentant'), 'N° tiers': safeText(ligne.numero_tiers, ''), Client: safeText(ligne.nom_tiers, ''), 'Type doc': safeText(ligne.type_document, ''), 'N° document': safeText(ligne.numero_document, ''), 'Référence article': safeText(ligne.reference_article, ''), 'Désignation article': safeText(ligne.designation_article, ''), Référence: safeText(ligne.reference, ''), Famille: safeText(ligne.famille, ''), 'Famille macro': safeText(ligne.famille_macro, 'Sans famille macro'), 'Quantité': Number(ligne.quantite || 0), 'Montant HT': Number(ligne.montant_ht || 0), 'Date création document': formatDate(ligne.date_creation_document), 'Date livraison': formatDate(ligne.date_livraison), 'Mois livraison': monthLabel(ligne.mois_livraison || 'SANS_DATE_LIVRAISON'), [CDC_RETARD_LABEL]: isCdcEnRetard(ligne) ? 'Oui' : 'Non', 'Client en sommeil': ligne.client_en_sommeil ? 'Oui' : 'Non' }))
 
     const workbook = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(syntheseExport), 'Synthese')
@@ -1103,9 +1178,10 @@ export default function PortefeuilleLivraisonPage() {
               <h1 className="text-2xl font-semibold text-slate-900">Portefeuille CDC / PL / BL / BR par livraison</h1>
               <p className="mt-1 text-sm text-slate-500">
                 Contrôle groupé des BL : un seul forfait par Date BL / N° tiers / Mode d'expédition / Lieu de livraison. Les BL à corriger sont identifiés avec une action Ajouter, Supprimer ou Vérifier.
+                {' '}Les CDC en retard de livraison ({getCdcRetardDescription()}) sont surlignés en rouge.
               </p>
               <div className="mt-2 inline-flex rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-800">
-                Version contrôle frais de port groupé 2026-07-13 v3.3 — BL conditionnel · multi-dépôt validé
+                Version 2026-09-09 v3.4 — contrôle frais de port groupé · {CDC_RETARD_LABEL}
               </div>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -1260,7 +1336,7 @@ export default function PortefeuilleLivraisonPage() {
           )}
         </section>
 
-        <section className={['grid grid-cols-1 gap-4 md:grid-cols-2', isBlSelected ? 'xl:grid-cols-6' : 'xl:grid-cols-2'].join(' ')}>
+        <section className={['grid grid-cols-1 gap-4 md:grid-cols-2', kpiGridColsClass].join(' ')}>
           <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Documents affichés</div>
             <div className="mt-1 text-2xl font-semibold">{totalGeneral.nb_documents.toLocaleString('fr-FR')}</div>
@@ -1269,6 +1345,24 @@ export default function PortefeuilleLivraisonPage() {
             <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Montant HT</div>
             <div className="mt-1 text-2xl font-semibold">{formatMoney(totalGeneral.montant_ht)}</div>
           </div>
+          {showCdcRetardCard && (
+            <button
+              type="button"
+              onClick={() => { if (cdcRetardOnly) { setCdcRetardOnly(false); applyDetailSelection(null) } else openCdcRetard() }}
+              title={cdcRetardOnly ? 'Désactiver le filtre et réafficher tous les documents' : `Ne garder que les CDC en retard (${getCdcRetardDescription()})`}
+              className={[
+                'rounded-2xl border p-4 text-left shadow-sm',
+                cdcRetardKpi.nb_documents > 0 ? 'border-red-300 bg-red-50' : 'border-emerald-200 bg-white',
+                cdcRetardOnly ? 'ring-2 ring-red-400' : '',
+              ].join(' ')}
+            >
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{CDC_RETARD_LABEL}</div>
+              <div className={['mt-1 text-2xl font-semibold', cdcRetardKpi.nb_documents > 0 ? 'text-red-700' : 'text-emerald-700'].join(' ')}>{cdcRetardKpi.nb_documents.toLocaleString('fr-FR')}</div>
+              <div className="mt-1 text-[11px] text-slate-500">
+                {formatMoneyCompact(cdcRetardKpi.montant_ht)} · {getCdcRetardDescription()}{cdcRetardOnly ? ' · filtre actif' : ''}
+              </div>
+            </button>
+          )}
           {isBlSelected && (
             <>
               <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -1351,7 +1445,10 @@ export default function PortefeuilleLivraisonPage() {
           <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
             <div>
               <h2 className="text-lg font-semibold">Tableau de synthèse</h2>
-              <p className="text-sm text-slate-500">Clique sur une cellule, une ligne, une colonne ou le total général pour afficher le détail en dessous.</p>
+              <p className="text-sm text-slate-500">
+                Clique sur une cellule, une ligne, une colonne ou le total général pour afficher le détail en dessous.
+                {' '}<span className="text-red-700">Rouge</span> : {getCdcRetardDescription()} ({CDC_RETARD_LABEL}) · <span className="text-orange-700">orange</span> : mois écoulés avant le mois courant.
+              </p>
             </div>
             <div className="flex items-center gap-2">
               <div className="flex rounded-xl border border-slate-300 bg-slate-50 p-1 text-sm">
@@ -1484,7 +1581,7 @@ export default function PortefeuilleLivraisonPage() {
         <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
           <div className="border-b border-slate-200 px-4 py-3">
             <h2 className="text-lg font-semibold">Liste des documents</h2>
-            <p className="text-sm text-slate-500">{sortedDocuments.length.toLocaleString('fr-FR')} document(s) affiché(s). Clique sur un numéro de document pour filtrer le détail à la ligne.</p>
+            <p className="text-sm text-slate-500">{sortedDocuments.length.toLocaleString('fr-FR')} document(s) affiché(s). Clique sur un numéro de document pour filtrer le détail à la ligne. Les CDC en retard ({CDC_RETARD_LABEL}) sont surlignés en rouge.</p>
           </div>
           <div className="max-h-[480px] overflow-auto">
             <table className="min-w-full border-collapse text-sm">
@@ -1496,38 +1593,43 @@ export default function PortefeuilleLivraisonPage() {
                 </tr>
               </thead>
               <tbody>
-                {sortedDocuments.map((doc) => (
-                  <tr key={doc.key} className={['hover:bg-slate-50', doc.action_recommandee === 'AJOUTER' ? 'bg-red-50' : '', doc.action_recommandee === 'SUPPRIMER' ? 'bg-rose-50' : '', doc.action_recommandee === 'VERIFIER' ? 'bg-amber-50' : '', selectedDocumentKeyForLines === doc.key ? 'ring-1 ring-inset ring-blue-300' : ''].join(' ')}>
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{doc.agence}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{doc.representant}</td>
-                    {isBlSelected && <td className="whitespace-nowrap border-b border-r border-slate-200 px-2 py-2 font-semibold">{formatDate(doc.date_controle)}</td>}
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{doc.numero_tiers}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{doc.nom_tiers}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2 font-medium">
-                      <button type="button" onClick={() => setSelectedDocumentKeyForLines(doc.key)} className="font-semibold text-blue-700 underline-offset-2 hover:underline">{doc.numero_document}</button>
-                    </td>
-                    {isBlSelected && <td className="border-b border-r border-slate-200 px-2 py-2 font-medium">{doc.reference_entete || '—'}</td>}
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{doc.references || '—'}</td>
-                    {isBlSelected && (
-                      <>
-                        <td className="border-b border-r border-slate-200 px-2 py-2">{doc.expedition || '—'}</td>
-                        <td className="border-b border-r border-slate-200 px-2 py-2">{doc.depot_entete || '—'}</td>
-                        <td className="max-w-[280px] border-b border-r border-slate-200 px-2 py-2" title={doc.lieu_livraison}>{doc.lieu_livraison || '—'}</td>
-                        <td className="border-b border-r border-slate-200 px-2 py-2 text-right font-semibold">{doc.nb_bl_groupe || '—'}</td>
-                        <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{doc.nb_bl_avec_port || '—'}</td>
-                        <td className="border-b border-r border-slate-200 px-2 py-2 text-right font-semibold">{formatMoneyCents(doc.frais_port_constate_ht)}</td>
-                        <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{formatMoneyCents(doc.frais_port_constate_groupe_ht)}</td>
-                        <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{formatMoneyCents(doc.frais_port_attendu_groupe_ht)}</td>
-                        <td className="border-b border-r border-slate-200 px-2 py-2"><span className={['inline-flex whitespace-nowrap rounded-full border px-2 py-1 text-xs font-semibold', actionClassName(doc.action_recommandee)].join(' ')}>{actionLabel(doc.action_recommandee)}</span></td>
-                        <td className="border-b border-r border-slate-200 px-2 py-2 text-right font-semibold">{formatMoneyCents(doc.montant_action_ht)}</td>
-                        <td className="border-b border-r border-slate-200 px-2 py-2"><span className={['inline-flex whitespace-nowrap rounded-full border px-2 py-1 text-xs font-semibold', controlStatusClassName(doc.statut_controle)].join(' ')} title={doc.base_calcul_frais_port || undefined}>{controlStatusLabel(doc.statut_controle)}</span></td>
-                      </>
-                    )}
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{formatDate(doc.date_livraison)}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{doc.familles_macro}</td>
-                    <td className="border-b border-slate-200 px-2 py-2">{doc.client_en_sommeil ? 'Oui' : 'Non'}</td>
-                  </tr>
-                ))}
+                {sortedDocuments.map((doc) => {
+                  const cdcRetard = isCdcEnRetard(doc)
+                  return (
+                    <tr key={doc.key} className={['hover:bg-slate-50', cdcRetard ? 'bg-red-50' : '', doc.action_recommandee === 'AJOUTER' ? 'bg-red-50' : '', doc.action_recommandee === 'SUPPRIMER' ? 'bg-rose-50' : '', doc.action_recommandee === 'VERIFIER' ? 'bg-amber-50' : '', selectedDocumentKeyForLines === doc.key ? 'ring-1 ring-inset ring-blue-300' : ''].join(' ')}>
+                      <td className="border-b border-r border-slate-200 px-2 py-2">{doc.agence}</td>
+                      <td className="border-b border-r border-slate-200 px-2 py-2">{doc.representant}</td>
+                      {isBlSelected && <td className="whitespace-nowrap border-b border-r border-slate-200 px-2 py-2 font-semibold">{formatDate(doc.date_controle)}</td>}
+                      <td className="border-b border-r border-slate-200 px-2 py-2">{doc.numero_tiers}</td>
+                      <td className="border-b border-r border-slate-200 px-2 py-2">{doc.nom_tiers}</td>
+                      <td className="border-b border-r border-slate-200 px-2 py-2 font-medium">
+                        <button type="button" onClick={() => setSelectedDocumentKeyForLines(doc.key)} className={['font-semibold underline-offset-2 hover:underline', cdcRetard ? 'text-red-700' : 'text-blue-700'].join(' ')}>{doc.numero_document}</button>
+                      </td>
+                      {isBlSelected && <td className="border-b border-r border-slate-200 px-2 py-2 font-medium">{doc.reference_entete || '—'}</td>}
+                      <td className="border-b border-r border-slate-200 px-2 py-2">{doc.references || '—'}</td>
+                      {isBlSelected && (
+                        <>
+                          <td className="border-b border-r border-slate-200 px-2 py-2">{doc.expedition || '—'}</td>
+                          <td className="border-b border-r border-slate-200 px-2 py-2">{doc.depot_entete || '—'}</td>
+                          <td className="max-w-[280px] border-b border-r border-slate-200 px-2 py-2" title={doc.lieu_livraison}>{doc.lieu_livraison || '—'}</td>
+                          <td className="border-b border-r border-slate-200 px-2 py-2 text-right font-semibold">{doc.nb_bl_groupe || '—'}</td>
+                          <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{doc.nb_bl_avec_port || '—'}</td>
+                          <td className="border-b border-r border-slate-200 px-2 py-2 text-right font-semibold">{formatMoneyCents(doc.frais_port_constate_ht)}</td>
+                          <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{formatMoneyCents(doc.frais_port_constate_groupe_ht)}</td>
+                          <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{formatMoneyCents(doc.frais_port_attendu_groupe_ht)}</td>
+                          <td className="border-b border-r border-slate-200 px-2 py-2"><span className={['inline-flex whitespace-nowrap rounded-full border px-2 py-1 text-xs font-semibold', actionClassName(doc.action_recommandee)].join(' ')}>{actionLabel(doc.action_recommandee)}</span></td>
+                          <td className="border-b border-r border-slate-200 px-2 py-2 text-right font-semibold">{formatMoneyCents(doc.montant_action_ht)}</td>
+                          <td className="border-b border-r border-slate-200 px-2 py-2"><span className={['inline-flex whitespace-nowrap rounded-full border px-2 py-1 text-xs font-semibold', controlStatusClassName(doc.statut_controle)].join(' ')} title={doc.base_calcul_frais_port || undefined}>{controlStatusLabel(doc.statut_controle)}</span></td>
+                        </>
+                      )}
+                      <td className={['border-b border-r border-slate-200 px-2 py-2', cdcRetard ? 'font-semibold text-red-700' : ''].join(' ')} title={cdcRetard ? `${CDC_RETARD_LABEL} : ${getCdcRetardDescription()}` : undefined}>
+                        {formatDate(doc.date_livraison)}{cdcRetard ? ' ⚠' : ''}
+                      </td>
+                      <td className="border-b border-r border-slate-200 px-2 py-2">{doc.familles_macro}</td>
+                      <td className="border-b border-slate-200 px-2 py-2">{doc.client_en_sommeil ? 'Oui' : 'Non'}</td>
+                    </tr>
+                  )
+                })}
                 {sortedDocuments.length === 0 && <tr><td colSpan={documentColumns.length} className="px-4 py-8 text-center text-slate-500">Aucun document à afficher.</td></tr>}
               </tbody>
             </table>
@@ -1555,26 +1657,29 @@ export default function PortefeuilleLivraisonPage() {
                 </tr>
               </thead>
               <tbody>
-                {sortedLignes.map((ligne, index) => (
-                  <tr key={`${ligne.id || index}-${ligne.numero_document}`} className="hover:bg-slate-50">
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.agence, 'Sans agence')}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.representant, 'Sans représentant')}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.numero_tiers, '')}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.nom_tiers, '')}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.type_document, '')}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2 font-medium">{safeText(ligne.numero_document, '')}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2 font-medium">{safeText(ligne.reference_article, '')}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.designation_article, '')}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.reference, '')}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.famille, '')}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.famille_macro, 'Sans famille macro')}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{Number(ligne.quantite || 0).toLocaleString('fr-FR')}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{formatMoney(ligne.montant_ht)}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{formatDate(ligne.date_creation_document)}</td>
-                    <td className="border-b border-r border-slate-200 px-2 py-2">{formatDate(ligne.date_livraison)}</td>
-                    <td className="border-b border-slate-200 px-2 py-2">{ligne.client_en_sommeil ? 'Oui' : 'Non'}</td>
-                  </tr>
-                ))}
+                {sortedLignes.map((ligne, index) => {
+                  const cdcRetard = isCdcEnRetard(ligne)
+                  return (
+                    <tr key={`${ligne.id || index}-${ligne.numero_document}`} className={['hover:bg-slate-50', cdcRetard ? 'bg-red-50' : ''].join(' ')}>
+                      <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.agence, 'Sans agence')}</td>
+                      <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.representant, 'Sans représentant')}</td>
+                      <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.numero_tiers, '')}</td>
+                      <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.nom_tiers, '')}</td>
+                      <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.type_document, '')}</td>
+                      <td className={['border-b border-r border-slate-200 px-2 py-2 font-medium', cdcRetard ? 'text-red-700' : ''].join(' ')}>{safeText(ligne.numero_document, '')}</td>
+                      <td className="border-b border-r border-slate-200 px-2 py-2 font-medium">{safeText(ligne.reference_article, '')}</td>
+                      <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.designation_article, '')}</td>
+                      <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.reference, '')}</td>
+                      <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.famille, '')}</td>
+                      <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.famille_macro, 'Sans famille macro')}</td>
+                      <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{Number(ligne.quantite || 0).toLocaleString('fr-FR')}</td>
+                      <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{formatMoney(ligne.montant_ht)}</td>
+                      <td className="border-b border-r border-slate-200 px-2 py-2">{formatDate(ligne.date_creation_document)}</td>
+                      <td className={['border-b border-r border-slate-200 px-2 py-2', cdcRetard ? 'font-semibold text-red-700' : ''].join(' ')}>{formatDate(ligne.date_livraison)}</td>
+                      <td className="border-b border-slate-200 px-2 py-2">{ligne.client_en_sommeil ? 'Oui' : 'Non'}</td>
+                    </tr>
+                  )
+                })}
                 {sortedLignes.length === 0 && <tr><td colSpan={16} className="px-4 py-8 text-center text-slate-500">Aucune ligne à afficher.</td></tr>}
               </tbody>
             </table>

@@ -17,6 +17,11 @@ import {
   useSocieteFilter,
   type SocieteFilter,
 } from '@/components/SocieteFilterContext'
+// ÉVOLUTION (2026-09-09) : la pastille "CDC < 2026" devient "CDC liv < M-2"
+// (règle glissante partagée avec /portefeuille-livraison et le mobile --
+// voir lib/cdcRetard.ts). Le droit d'accès garde son nom historique
+// show_alert_cdc_liv_avant_2026, aucune migration côté base.
+import { CDC_RETARD_LABEL, getCdcRetardDescription, getCdcRetardThresholdIso } from '@/lib/cdcRetard'
 
 type MenuAccessKey = Exclude<
   keyof AccessRights,
@@ -613,7 +618,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
         { label: '9 : Projection Stock', path: '/stocks-disponibilites2', accessKey: 'can_stocks' },
         { label: '10 : Analyse Devis', path: '/cycle-documents', accessKey: 'can_dashboard' },
         { label: '11 : Indicateurs', path: '/Indicateurs', accessKey: 'can_autorisation' },
-      
+
       ],
     },
 {
@@ -638,7 +643,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       items: [
         { label: '1 : Contrôle cohérence SAGE-BLG', path: '/controle-sage-blg', accessKey: 'can_autorisation' },
         { label: '2 : Appro Achat SAGE-BLG', path: '/appro/achat', accessKey: 'can_autorisation' },
-        
+
 
 
       ],
@@ -1281,16 +1286,20 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
     window.dispatchEvent(new CustomEvent('cegeclim:open-controle-frais-port'))
   }
 
+  /** Pastille "CDC liv < M-2" : CDC dont la livraison est antérieure au 1er
+   * jour du mois M-2 (règle glissante, cf. lib/cdcRetard.ts). Le fallback
+   * mois_livraison = AVANT_2026 couvre les pièces sans date exploitable. */
   async function refreshCdcLivAvant2026Signal(accessProfile?: UserAccessProfile | null) {
     const allowedAgences = getAllowedAgencesForStatus(accessProfile)
     const allowedCollaborateurs = getAllowedCollaborateursForStatus(accessProfile)
 
     try {
+      const threshold = getCdcRetardThresholdIso()
       let query = supabase
         .from('v_portefeuille_livraison_lignes')
         .select('type_document,numero_document,numero_tiers,agence,representant,mois_livraison,date_livraison')
         .eq('type_document', 'CDC')
-        .or('mois_livraison.eq.AVANT_2026,date_livraison.lt.2026-01-01')
+        .or(`mois_livraison.eq.AVANT_2026,date_livraison.lt.${threshold}`)
 
       if (allowedAgences.length > 0) {
         query = query.in('agence', allowedAgences)
@@ -1318,13 +1327,17 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
         count: countValue,
       })
     } catch (error) {
-      console.error('CDC livraison avant 2026 status indicator', error)
+      console.error('CDC liv < M-2 status indicator', error)
       setCdcLivAvant2026Signal({ status: 'green', count: 0 })
     }
   }
 
+  /** Ouvre le portefeuille directement filtré sur les CDC en retard
+   * (paramètre ?cdc=retard lu au montage + événement pour le cas où la
+   * page est déjà affichée). */
   function openCdcLivAvant2026() {
-    router.push('/portefeuille-livraison')
+    router.push(`/portefeuille-livraison?cdc=retard&open=${Date.now()}`)
+    window.dispatchEvent(new CustomEvent('cegeclim:open-cdc-retard'))
   }
 
   // ── Cohérence données : lecture du statut + détail à la demande ───────
@@ -1772,7 +1785,7 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
                       {rights.show_alert_cdc_liv_avant_2026 && (
                         <StatusLight
                           compact
-                          label="CDC < 2026"
+                          label={CDC_RETARD_LABEL}
                           status={cdcLivAvant2026Signal.status}
                           count={cdcLivAvant2026Signal.count}
                           blink={cdcLivAvant2026Signal.status === 'red' && statusBlinkOn}
@@ -1780,8 +1793,8 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
                           onClick={openCdcLivAvant2026}
                           title={
                             cdcLivAvant2026Signal.count > 0
-                              ? `${cdcLivAvant2026Signal.count} CDC avec livraison avant 2026`
-                              : 'Aucun CDC avec livraison avant 2026'
+                              ? `${cdcLivAvant2026Signal.count} CDC en retard de livraison (${getCdcRetardDescription()}) — cliquer pour les afficher dans le portefeuille`
+                              : `Aucun CDC en retard de livraison (${getCdcRetardDescription()})`
                           }
                         />
                       )}
