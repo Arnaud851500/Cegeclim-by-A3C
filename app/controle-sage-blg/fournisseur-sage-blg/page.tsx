@@ -140,6 +140,16 @@ type Parametre = { cle: string; valeur: number; description: string | null }
 
 function safeText(v: unknown) { return String(v ?? '').trim() }
 
+/** Message lisible pour une erreur JS ou une PostgrestError (objet simple, pas une Error). */
+function messageErreur(e: unknown): string {
+  if (e instanceof Error) return e.message
+  if (e && typeof e === 'object') {
+    const o = e as { message?: string; details?: string; hint?: string; code?: string }
+    return [o.message, o.details, o.hint, o.code ? `(${o.code})` : null].filter(Boolean).join(' — ') || JSON.stringify(e)
+  }
+  return String(e)
+}
+
 function formatCellValue(v: unknown): string {
   if (v === null || v === undefined || v === '') return '—'
   if (typeof v === 'boolean') return v ? 'Oui' : 'Non'
@@ -585,7 +595,7 @@ function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, art
       if (data) { onRowChange(data as FournRow); setSelected(data as FournRow) }
       setSaveMsg('Stratégie enregistrée. Relance le calcul de besoin (onglet Articles) si tu as changé un délai ou le niveau de service.')
     } catch (e) {
-      setSaveMsg('Erreur : ' + (e instanceof Error ? e.message : String(e)))
+      setSaveMsg('Erreur : ' + messageErreur(e))
     } finally { setSaving(false) }
   }
 
@@ -876,7 +886,7 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
       setRecalculMsg(`Calcul terminé sur ${d?.periode ?? '?'} : ${d?.articles_calcules ?? '?'} articles, ${d?.lignes_conso ?? '?'} lignes de conso mensuelle.`)
       await onRecalcul()
     } catch (e) {
-      setRecalculMsg('Erreur : ' + (e instanceof Error ? e.message : String(e)))
+      setRecalculMsg('Erreur : ' + messageErreur(e))
     } finally { setRecalculEnCours(false) }
   }
 
@@ -914,7 +924,7 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
       const url = URL.createObjectURL(blob)
       const link = document.createElement('a'); link.href = url; link.download = `calcul_besoin_${new Date().toISOString().slice(0, 10)}.xlsx`; link.click(); URL.revokeObjectURL(url)
     } catch (e) {
-      alert('Erreur export Excel : ' + (e instanceof Error ? e.message : String(e)))
+      alert('Erreur export Excel : ' + messageErreur(e))
     } finally { setExportEnCours(false) }
   }
 
@@ -1271,7 +1281,7 @@ function OngletComparaison({ fournisseurs, articles, loading, error }: { fournis
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a'); a.href = url; a.download = `comparaison_${domaine}s_sage_blg_${new Date().toISOString().slice(0, 10)}.xlsx`; a.click(); URL.revokeObjectURL(url)
     } catch (e) {
-      alert('Erreur export Excel : ' + (e instanceof Error ? e.message : String(e)))
+      alert('Erreur export Excel : ' + messageErreur(e))
     } finally { setExportEnCours(false) }
   }
 
@@ -1465,7 +1475,7 @@ export default function FournisseursSageBlgPage() {
       const a = await chargerArticles(setLoadProgress)
       setArticles(a)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(messageErreur(e))
     } finally { setLoading(false) }
   }
 

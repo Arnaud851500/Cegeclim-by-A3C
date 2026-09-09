@@ -1,4 +1,4 @@
-'use client'
+  'use client'
 
 import { useEffect, useRef, useState } from 'react'
 import type React from 'react'
@@ -641,8 +641,10 @@ function AppShell({ children }: { children: React.ReactNode }) {
     {
       label: 'Projet BLG',
       items: [
-        { label: '1 : Contrôle cohérence SAGE-BLG', path: '/controle-sage-blg', accessKey: 'can_autorisation' },
+        { label: '1 : Contrôle cohérence Client SAGE-BLG', path: '/controle-sage-blg', accessKey: 'can_autorisation' },
         { label: '2 : Appro Achat SAGE-BLG', path: '/appro/achat', accessKey: 'can_autorisation' },
+        { label: '3 : Contrôle cohérence Fournisseur SAGE-BLG', path: '/controle-sage-bl/achatfournisseur-sage-blg', accessKey: 'can_autorisation' },
+        
 
 
 
