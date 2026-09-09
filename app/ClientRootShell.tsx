@@ -643,7 +643,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       items: [
         { label: '1 : Contrôle cohérence Client SAGE-BLG', path: '/controle-sage-blg', accessKey: 'can_autorisation' },
         { label: '2 : Appro Achat SAGE-BLG', path: '/appro/achat', accessKey: 'can_autorisation' },
-        { label: '3 : Contrôle cohérence Fournisseur SAGE-BLG', path: '/controle-sage-bl/achatfournisseur-sage-blg', accessKey: 'can_autorisation' },
+        { label: '3 : Contrôle cohérence Fournisseur SAGE-BLG', path: '/controle-sage-blg/fournisseur-sage-blg', accessKey: 'can_autorisation' },
         
 
 
