@@ -1,15 +1,22 @@
 'use client'
 
-// Page "Fraîcheur des données" -- pour chaque source externe, table de base
-// et cache agrégat suivi (voir data_lineage_registry / get_data_lineage_status
-// côté base), affiche la date de dernière mise à jour et une pastille verte
-// si elle est postérieure (ou égale) à celle de ses dépendances amont, rouge
-// sinon. Les entrées marquées "à confirmer" viennent d'une dépendance déduite
-// du nom/comportement de la fonction plutôt que vérifiée ligne à ligne dans
-// le code -- à valider au besoin.
+// Page "Fraîcheur des données" -- v2, organisée par écran/widget.
 //
-// Ne modifie ni ne lit aucune donnée métier : uniquement des métadonnées de
-// fraîcheur (colonnes updated_at/refreshed_at des tables suivies).
+// Pour chaque widget (ou groupe de widgets) : une capture d'écran, la
+// chaîne visuelle de sa mise à jour (source externe -> table de base ->
+// cache agrégat, dans l'ordre), et la date de la DERNIÈRE étape (celle
+// que le widget affiche réellement) mise en avant en gros. Une pastille
+// rouge/orange apparaît dès qu'une étape amont est plus récente que
+// l'étape que le widget consomme -- c'est le signal "widget pas à jour
+// malgré des données de base fraîches" demandé.
+//
+// Les dates viennent de get_data_lineage_status() (déjà en place, ne pas
+// modifier) ; le découpage par écran/widget et les images sont propres à
+// cette page.
+//
+// À FAIRE CÔTÉ APP : copier le dossier widget-captures/ dans public/
+// (ex. public/fraicheur-donnees/), pour que les chemins d'image ci-dessous
+// résolvent correctement.
 
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
@@ -25,17 +32,144 @@ type LineageRow = {
   confidence: 'confirmee' | 'deduite'
 }
 
-const CATEGORY_LABELS: Record<LineageRow['category'], string> = {
-  source_externe: 'Sources externes',
-  table_base: 'Tables de base',
-  cache_agregat: 'Caches / indicateurs agrégats',
+type ChainStep = { table_name: string } | { placeholder: string; note: string }
+
+type WidgetDef = {
+  key: string
+  screen: string
+  title: string
+  image: string
+  chain: ChainStep[]
 }
-const CATEGORY_ORDER: LineageRow['category'][] = ['source_externe', 'table_base', 'cache_agregat']
+
+const IMG_BASE = '/fraicheur-donnees'
+
+const WIDGETS: WidgetDef[] = [
+  {
+    key: 'vision-flux',
+    screen: 'Vision ONE PAGE',
+    title: 'Vision ONE PAGE — Flux BL / Factures / CDC / Devis',
+    image: `${IMG_BASE}/vision_flux_grid.png`,
+    chain: [
+      { table_name: 'sage.activite_non_facturee' },
+      { table_name: 'activite_lignes' },
+      { table_name: 'devis_lignes' },
+      { table_name: 'facture_lignes' },
+      { table_name: 'indicateur_activite_mensuel' },
+      { table_name: 'indicateur_devis_mensuel' },
+      { table_name: 'indicateur_factures_mensuel' },
+    ],
+  },
+  {
+    key: 'vision-clients-portefeuille',
+    screen: 'Vision ONE PAGE',
+    title: 'Vision ONE PAGE — Clients actifs / Portefeuille / Projection CA',
+    image: `${IMG_BASE}/vision_clients_portefeuille_projection.png`,
+    chain: [
+      { table_name: 'activite_lignes' },
+      { table_name: 'devis_lignes' },
+      { table_name: 'facture_lignes' },
+      { table_name: 'synthese_multi_clients_cache' },
+      { table_name: 'focus_mensuel_agency_control_cache_status' },
+    ],
+  },
+  {
+    key: 'focus-kpis',
+    screen: 'Focus Mensuel',
+    title: 'Focus Mensuel — Vue d\u2019ensemble (KPI jour/mois Devis/CDC/BL/Factures)',
+    image: `${IMG_BASE}/focus_mensuel_kpis.png`,
+    chain: [
+      { placeholder: 'Lecture directe', note: 'get_focus_mensuel_daily_summary_metier lit ces tables en direct, sans cache -- borné à 1 mois pour rester performant.' },
+      { table_name: 'activite_lignes' },
+      { table_name: 'devis_lignes' },
+      { table_name: 'facture_lignes' },
+    ],
+  },
+  {
+    key: 'focus-cumul-blcdc',
+    screen: 'Focus Mensuel',
+    title: 'Focus Mensuel — Cumul BL / CDC depuis le 1er du mois',
+    image: `${IMG_BASE}/focus_mensuel_cumul_blcdc.png`,
+    chain: [
+      { placeholder: 'Lecture directe', note: 'Même RPC que les KPI ci-dessus, pas de cache intermédiaire.' },
+      { table_name: 'activite_lignes' },
+      { table_name: 'devis_lignes' },
+    ],
+  },
+  {
+    key: 'focus-portefeuille-projection',
+    screen: 'Focus Mensuel',
+    title: 'Focus Mensuel — Portefeuille / Projection CA (tableaux compacts)',
+    image: `${IMG_BASE}/focus_mensuel_portefeuille_projection.png`,
+    chain: [
+      { table_name: 'activite_lignes' },
+      { table_name: 'devis_lignes' },
+      { table_name: 'facture_lignes' },
+      { table_name: 'focus_mensuel_agency_control_cache_status' },
+      { table_name: 'focus_mensuel_agency_activity_cache' },
+    ],
+  },
+  {
+    key: 'focus-rolling12',
+    screen: 'Focus Mensuel',
+    title: 'Focus Mensuel — Rolling 12 mois',
+    image: `${IMG_BASE}/focus_mensuel_rolling12.png`,
+    chain: [
+      { placeholder: 'À confirmer', note: 'Cet onglet est en réalité dans Focus_mensuel2 (code non fourni) -- chaîne non câblée tant que le fichier n\u2019a pas été vu.' },
+    ],
+  },
+  {
+    key: 'focus-comparatif-famille',
+    screen: 'Focus Mensuel',
+    title: 'Focus Mensuel — Comparatif famille (MTD + YTD)',
+    image: `${IMG_BASE}/focus_mensuel_comparatif_famille.png`,
+    chain: [
+      { placeholder: 'Cache non identifié', note: 'Alimenté par get_focus_mensuel_annual_tables_cached -- la table de cache exacte lue par cette RPC n\u2019a pas encore été identifiée dans le code.' },
+      { table_name: 'activite_lignes' },
+      { table_name: 'devis_lignes' },
+      { table_name: 'facture_lignes' },
+    ],
+  },
+  {
+    key: 'portefeuille-livraison',
+    screen: 'Contrôle frais de port',
+    title: 'Contrôle frais de port (Portefeuille de livraison)',
+    image: `${IMG_BASE}/portefeuille_livraison.png`,
+    chain: [
+      { placeholder: 'Vues sans horodatage propre', note: 'v_portefeuille_livraison_lignes + mv_controle_frais_port_actions/_groupes -- pas de colonne de rafraîchissement propre, fraîcheur héritée de activite_lignes.' },
+      { table_name: 'activite_lignes' },
+    ],
+  },
+  {
+    key: 'approvisionnements',
+    screen: 'Approvisionnements & flux commerciaux',
+    title: 'Approvisionnements & flux commerciaux',
+    image: `${IMG_BASE}/approvisionnements_flux.png`,
+    chain: [
+      { table_name: 'activite_lignes' },
+      { table_name: 'devis_lignes' },
+      { table_name: 'facture_lignes' },
+      { table_name: 'indicateur_flux_articles_mensuel' },
+    ],
+  },
+  {
+    key: 'smc',
+    screen: 'Synthèse multi-clients',
+    title: 'Synthèse multi-clients — KPI + tableau',
+    image: `${IMG_BASE}/smc_kpis.png`,
+    chain: [
+      { table_name: 'activite_lignes' },
+      { table_name: 'devis_lignes' },
+      { table_name: 'facture_lignes' },
+      { table_name: 'ref_tiers' },
+      { table_name: 'synthese_multi_clients_cache' },
+    ],
+  },
+]
 
 function formatDateHeure(iso: string | null) {
   if (!iso) return '—'
-  const d = new Date(iso)
-  return d.toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })
+  return new Date(iso).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 
 function ecouleDepuis(iso: string | null) {
@@ -47,7 +181,7 @@ function ecouleDepuis(iso: string | null) {
   return `il y a ${Math.round(heures / 24)} j`
 }
 
-export default function FraicheurDonneesPage() {
+export default function FraicheurDonneesParEcranPage() {
   const [rows, setRows] = useState<LineageRow[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [checkedAt, setCheckedAt] = useState<string>('')
@@ -73,23 +207,10 @@ export default function FraicheurDonneesPage() {
     return map
   }, [rows])
 
-  function statutFraicheur(row: LineageRow): 'ok' | 'retard' | 'inconnu' {
-    if (!row.last_updated_at) return 'inconnu'
-    if (!row.depends_on.length) return 'ok'
-    for (const dep of row.depends_on) {
-      const depRow = byName.get(dep)
-      if (!depRow?.last_updated_at) continue
-      if (new Date(depRow.last_updated_at).getTime() > new Date(row.last_updated_at).getTime() + 60_000) {
-        return 'retard'
-      }
-    }
-    return 'ok'
-  }
-
   return (
     <div style={{ padding: '24px 20px', background: '#0B1220', minHeight: '100vh', color: '#fff', fontFamily: 'var(--font-sans, sans-serif)' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 10, marginBottom: 4 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0 }}>Fraîcheur des données</h1>
+        <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0 }}>Fraîcheur des données — par écran</h1>
         <button
           onClick={() => void charger()}
           style={{ borderRadius: 999, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: 'rgba(255,255,255,0.75)', padding: '6px 14px', fontSize: 12.5 }}
@@ -98,71 +219,96 @@ export default function FraicheurDonneesPage() {
         </button>
       </div>
       <p style={{ color: 'rgba(255,255,255,0.45)', fontSize: 13, marginTop: 2, marginBottom: 20 }}>
-        Chaîne d'alimentation, des sources externes jusqu'aux caches consommés par l'app. Vérifié {checkedAt ? ecouleDepuis(checkedAt) : ''}.
+        Chaque bloc : capture de l&rsquo;écran réel, puis la chaîne de mise à jour de la source jusqu&rsquo;à ce que ce widget affiche. Vérifié {checkedAt ? ecouleDepuis(checkedAt) : ''}.
       </p>
 
-      <div style={{ display: 'flex', gap: 16, marginBottom: 20, fontSize: 12.5, color: 'rgba(255,255,255,0.55)' }}>
-        <span><span style={{ display: 'inline-block', width: 9, height: 9, borderRadius: '50%', background: '#3F9142', marginRight: 6 }} />à jour</span>
-        <span><span style={{ display: 'inline-block', width: 9, height: 9, borderRadius: '50%', background: '#C1683C', marginRight: 6 }} />en retard sur une dépendance</span>
-        <span><span style={{ display: 'inline-block', width: 9, height: 9, borderRadius: '50%', background: 'rgba(255,255,255,0.25)', marginRight: 6 }} />date inconnue</span>
-        <span style={{ borderRadius: 6, border: '1px solid rgba(230,159,74,0.4)', color: '#E8A96A', padding: '1px 7px' }}>à confirmer</span>
-        <span style={{ color: 'rgba(255,255,255,0.35)' }}>= dépendance déduite, pas vérifiée dans le code</span>
+      <div style={{ display: 'flex', gap: 16, marginBottom: 24, fontSize: 12.5, color: 'rgba(255,255,255,0.55)', flexWrap: 'wrap' }}>
+        <span><span style={{ display: 'inline-block', width: 9, height: 9, borderRadius: '50%', background: '#3F9142', marginRight: 6 }} />widget à jour</span>
+        <span><span style={{ display: 'inline-block', width: 9, height: 9, borderRadius: '50%', background: '#C1683C', marginRight: 6 }} />widget en retard sur une étape amont</span>
+        <span><span style={{ display: 'inline-block', width: 9, height: 9, borderRadius: '50%', background: 'rgba(255,255,255,0.25)', marginRight: 6 }} />chaîne non confirmée</span>
       </div>
 
       {error && <div style={{ color: '#e0a685', marginBottom: 16 }}>Erreur de chargement : {error}</div>}
       {!rows && !error && <div style={{ color: 'rgba(255,255,255,0.4)' }}>Chargement…</div>}
 
-      {rows && CATEGORY_ORDER.map((cat) => {
-        const items = rows.filter((r) => r.category === cat)
-        if (!items.length) return null
+      {rows && WIDGETS.map((widget) => {
+        const steps = widget.chain
+        const tableSteps = steps.filter((s): s is { table_name: string } => 'table_name' in s)
+        const resolved = tableSteps.map((s) => byName.get(s.table_name)).filter((r): r is LineageRow => Boolean(r))
+        const hasUnconfirmedStep = steps.some((s) => 'placeholder' in s) || resolved.length !== tableSteps.length
+        const finalStep = resolved[resolved.length - 1] || null
+        const upstreamMax = resolved.slice(0, -1).reduce<number>((max, r) => {
+          const t = r.last_updated_at ? new Date(r.last_updated_at).getTime() : 0
+          return Math.max(max, t)
+        }, 0)
+        const finalTime = finalStep?.last_updated_at ? new Date(finalStep.last_updated_at).getTime() : 0
+        const statut: 'ok' | 'retard' | 'inconnu' = !finalStep || !finalStep.last_updated_at
+          ? 'inconnu'
+          : upstreamMax > finalTime + 60_000
+            ? 'retard'
+            : 'ok'
+        const dotColor = statut === 'ok' ? '#3F9142' : statut === 'retard' ? '#C1683C' : 'rgba(255,255,255,0.25)'
+
         return (
-          <div key={cat} style={{ marginBottom: 28 }}>
-            <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'rgba(255,255,255,0.4)', marginBottom: 10 }}>
-              {CATEGORY_LABELS[cat]}
+          <div key={widget.key} style={{ marginBottom: 36, borderRadius: 16, border: '1px solid rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', background: 'rgba(255,255,255,0.03)', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+              <span aria-hidden style={{ width: 11, height: 11, borderRadius: '50%', background: dotColor, flexShrink: 0 }} />
+              <span style={{ fontSize: 15, fontWeight: 600, flex: 1 }}>{widget.title}</span>
+              {finalStep && (
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: 15, fontWeight: 700 }}>{formatDateHeure(finalStep.last_updated_at)}</div>
+                  <div style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.4)' }}>{ecouleDepuis(finalStep.last_updated_at)}</div>
+                </div>
+              )}
             </div>
-            <div style={{ borderRadius: 14, border: '1px solid rgba(255,255,255,0.08)', overflow: 'hidden' }}>
-              {items.map((row, idx) => {
-                const statut = statutFraicheur(row)
-                const dotColor = statut === 'ok' ? '#3F9142' : statut === 'retard' ? '#C1683C' : 'rgba(255,255,255,0.25)'
-                return (
-                  <div
-                    key={row.table_name}
-                    style={{
-                      display: 'flex', alignItems: 'flex-start', gap: 12, padding: '12px 16px',
-                      borderTop: idx === 0 ? 'none' : '1px solid rgba(255,255,255,0.06)',
-                      background: 'rgba(255,255,255,0.03)',
-                    }}
-                  >
-                    <span aria-hidden style={{ width: 10, height: 10, borderRadius: '50%', background: dotColor, marginTop: 5, flexShrink: 0 }} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                        <span style={{ fontSize: 14.5, fontWeight: 600 }}>{row.label}</span>
-                        <span style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.35)', fontFamily: 'var(--font-mono, monospace)' }}>{row.table_name}</span>
-                        {row.confidence === 'deduite' && (
-                          <span style={{ borderRadius: 6, border: '1px solid rgba(230,159,74,0.4)', color: '#E8A96A', padding: '1px 7px', fontSize: 10.5 }}>à confirmer</span>
-                        )}
+
+            <div style={{ padding: 16 }}>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={widget.image}
+                alt={widget.title}
+                style={{ width: '100%', borderRadius: 10, border: '1px solid rgba(255,255,255,0.08)', display: 'block', marginBottom: 14 }}
+              />
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflowX: 'auto', paddingBottom: 4 }}>
+                {steps.map((step, idx) => {
+                  const isLast = idx === steps.length - 1
+                  const isPlaceholder = 'placeholder' in step
+                  const row = !isPlaceholder ? byName.get((step as { table_name: string }).table_name) : null
+                  const stepDot = isPlaceholder || !row ? 'rgba(255,255,255,0.25)' : '#3F9142'
+                  return (
+                    <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                      <div
+                        title={isPlaceholder ? (step as { note: string }).note : row?.description || undefined}
+                        style={{
+                          borderRadius: 10,
+                          border: `1px solid ${isLast ? 'rgba(230,159,74,0.5)' : 'rgba(255,255,255,0.12)'}`,
+                          background: isLast ? 'rgba(230,159,74,0.08)' : 'rgba(255,255,255,0.03)',
+                          padding: '8px 12px',
+                          minWidth: 150,
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span aria-hidden style={{ width: 7, height: 7, borderRadius: '50%', background: stepDot, flexShrink: 0 }} />
+                          <span style={{ fontSize: 12, fontWeight: 600 }}>
+                            {isPlaceholder ? (step as { placeholder: string }).placeholder : row?.label || (step as { table_name: string }).table_name}
+                          </span>
+                        </div>
+                        <div style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.4)', marginTop: 2, fontFamily: 'var(--font-mono, monospace)' }}>
+                          {isPlaceholder ? 'à confirmer' : formatDateHeure(row?.last_updated_at || null)}
+                        </div>
                       </div>
-                      {row.description && (
-                        <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', marginTop: 3 }}>{row.description}</div>
-                      )}
-                      {row.depends_on.length > 0 && (
-                        <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.35)', marginTop: 4 }}>
-                          Dépend de : {row.depends_on.map((d) => byName.get(d)?.label || d).join(', ')}
-                        </div>
-                      )}
-                      {row.used_by.length > 0 && (
-                        <div style={{ fontSize: 11.5, color: 'rgba(166,161,129,0.85)', marginTop: 2 }}>
-                          Utilisé par : {row.used_by.join(', ')}
-                        </div>
-                      )}
+                      {!isLast && <span style={{ color: 'rgba(255,255,255,0.25)', fontSize: 14 }}>→</span>}
                     </div>
-                    <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                      <div style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: 13, color: '#fff' }}>{formatDateHeure(row.last_updated_at)}</div>
-                      <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>{ecouleDepuis(row.last_updated_at)}</div>
-                    </div>
-                  </div>
-                )
-              })}
+                  )
+                })}
+              </div>
+
+              {hasUnconfirmedStep && (
+                <div style={{ marginTop: 10, fontSize: 11, color: '#E8A96A' }}>
+                  ⚠ Chaîne partiellement non confirmée — voir l&rsquo;info-bulle des étapes grises.
+                </div>
+              )}
             </div>
           </div>
         )
