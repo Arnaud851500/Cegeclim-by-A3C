@@ -635,6 +635,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
         { label: '2 : MAJ Base clients', path: '/clients', accessKey: 'can_autorisation' },
         { label: '3 : MAJ Données Activité', path: '/Import', accessKey: 'can_autorisation' },
         { label: '4 : Job scheduling', path: '/admin/planification', accessKey: 'can_autorisation' },
+        { label: '5 : Cycle Synchronisation data', path: '/cycle-synchronisation', accessKey: 'can_autorisation' },
 
       ],
     },
