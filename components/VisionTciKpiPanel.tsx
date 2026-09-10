@@ -30,7 +30,7 @@
  *    tooltip au survol, alimenté par get_vision_tci_kpi_courbe_annuelle.
  *    Pavé "Clients actifs" agrandi (largeur doublée, chiffres plus gros).
  *
- *  - V4.3 (2026-08, cette révision) :
+ *  - V4.3 (2026-08) :
  *    - Pavé flux grand format : bascule Cumulé / Mensuel (barres groupées
  *      N vs N-1 par mois), calculée à partir des mêmes points cumulés déjà
  *      chargés (pas d'appel RPC supplémentaire) -- désactivée pour "Marge"
@@ -54,7 +54,7 @@
  *      pour lesquels il y a des données -- les mois à venir restent
  *      visibles (vides) sur l'axe.
  *
- *  - V4.4 (2026-09, cette révision) :
+ *  - V4.4 (2026-09) :
  *    - Pavé "Clients actifs" (et compteur "Clients créés cette année") :
  *      ne passe plus par les RPC get_vision_tci_clients_actifs /
  *      get_vision_tci_clients_crees_n (qui recalculaient l'agence et le
@@ -71,12 +71,36 @@
  *      (CA = 0) apparaît pour ne plus laisser croire que ces clients
  *      n'ont "aucun" chiffre d'affaires alors qu'ils étaient en réalité
  *      simplement sous le premier seuil affiché.
+ *
+ *  - V4.5 (2026-09-10, cette révision) :
+ *    - Compteur "Factures en retard" (cle "factures_retard", conservée pour
+ *      les dispositions déjà enregistrées) : la valeur fictive (48 250 €)
+ *      est REMPLACÉE par la synthèse réelle du fichier compta "Qui vous
+ *      doit quoi" (retards_paiement_clients, RPC
+ *      get_retards_paiement_synthese, périmètre agence/collaborateur du
+ *      pavé), cf. lib/retardsPaiement.ts. Le pavé affiche le total en
+ *      retard, le nombre de clients, le montant par tranche d'ancienneté
+ *      (> 45 j, 30–45, 15–30, 0–15) et la date de situation ; un clic
+ *      ouvre la liste des clients concernés (get_retards_paiement_liste),
+ *      et un clic sur un client sa fiche compta complète. Libellé affiché :
+ *      "Retards de paiement".
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { usePageFilterAccess } from "@/lib/pageAccessFilters";
 import { useAccess } from "@/components/AccessContext";
+import {
+  TRANCHES_RETARD,
+  champsDetailRetard,
+  fetchRetardsPaiementListe,
+  fetchRetardsPaiementSynthese,
+  formatDateFrRetard,
+  formatKEurRetard,
+  trancheLaPlusAncienne,
+  type RetardPaiementClient,
+  type RetardPaiementSynthese,
+} from "@/lib/retardsPaiement";
 
 
 // ⚠️ BL et CDC confirmés (CUMUL_BL_COLOR / CUMUL_CDC_COLOR dans
@@ -112,7 +136,9 @@ const COMPTEUR_OPTIONS = [
   { cle: "clients_actifs", label: "Clients actifs", isAlerte: false },
   { cle: "cerfa_ko", label: "CERFA non à jour", isAlerte: true },
   { cle: "cdc_avant_2026", label: "CDC livraison < 2026", isAlerte: true },
-  { cle: "factures_retard", label: "Factures en retard", isAlerte: true },
+  // cle historique conservée (dispositions déjà enregistrées) -- alimenté
+  // désormais par le fichier compta, cf. RetardsPaiementCard.
+  { cle: "factures_retard", label: "Retards de paiement", isAlerte: true },
 ] as const;
 
 const TAUX_OPTIONS = [{ cle: "taux_transformation_devis", label: "Taux transfo devis" }] as const;
@@ -791,6 +817,195 @@ async function fetchClientsActifsDepuisCache(agence: string | null, collaborateu
   return { total: rows.length, bands, clientsCreesN };
 }
 
+// ── Pavé RETARDS DE PAIEMENT (cle "factures_retard") ─────────────────────
+// Synthèse réelle du dernier fichier compta importé (retards_paiement_clients),
+// sur le périmètre agence/collaborateur du pavé -- même RPC et même règle de
+// périmètre que le pavé "Retards de paiement" de l'écran mobile. Clic ->
+// fenêtre avec la liste des clients concernés, clic sur un client -> fiche
+// compta complète (toutes les colonnes du fichier).
+
+function RetardsPaiementCard({
+  effectiveAgence, effectiveCollaborateur, refreshTick, onRemove,
+}: { effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; onRemove: () => void }) {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [synthese, setSynthese] = useState<RetardPaiementSynthese | null>(null);
+  const [open, setOpen] = useState(false);
+  const [liste, setListe] = useState<RetardPaiementClient[] | null>(null);
+  const [listeLoading, setListeLoading] = useState(false);
+  const [clientOuvert, setClientOuvert] = useState<RetardPaiementClient | null>(null);
+
+  const perimetre = useMemo(
+    () => ({ agences: effectiveAgence ? [effectiveAgence] : null, collaborateurs: effectiveCollaborateur ? [effectiveCollaborateur] : null }),
+    [effectiveAgence, effectiveCollaborateur],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      setError(null);
+      try {
+        const s = await fetchRetardsPaiementSynthese(perimetre);
+        if (!cancelled) setSynthese(s);
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, [perimetre, refreshTick]);
+
+  async function ouvrirListe() {
+    if (!synthese || synthese.nb_clients === 0) return;
+    setOpen(true);
+    setClientOuvert(null);
+    setListeLoading(true);
+    try {
+      setListe(await fetchRetardsPaiementListe(perimetre));
+    } catch (e) {
+      setListe([]);
+      console.error("[VisionTci] get_retards_paiement_liste", e);
+    } finally {
+      setListeLoading(false);
+    }
+  }
+
+  const aucunFichier = !loading && !error && synthese && !synthese.date_extraction;
+  const nb = synthese?.nb_clients ?? 0;
+  const valueColor = nb > 0 ? "#C1683C" : "#3F9142";
+
+  return (
+    <div className="col-span-2 sm:col-span-1">
+      <CardShell
+        color="#C1683C"
+        badgeLabel="Retards de paiement"
+        badges={[effectiveAgence, effectiveCollaborateur].filter((v): v is string => Boolean(v))}
+        onRemove={onRemove}
+        onClick={nb > 0 ? () => void ouvrirListe() : undefined}
+        clickHint={nb > 0 ? "Voir les clients en retard de paiement" : undefined}
+        compact={false}
+      >
+        {loading ? (
+          <div className="h-14 animate-pulse rounded bg-white/5" />
+        ) : error ? (
+          <p className="text-[10px] text-red-300">{error}</p>
+        ) : aucunFichier ? (
+          <>
+            <div className="font-[var(--font-mono,monospace)] text-4xl font-semibold text-white/25">—</div>
+            <p className="mt-1 text-[10px] text-white/35">Aucun fichier compta importé (écran Retards de paiement).</p>
+          </>
+        ) : (
+          <>
+            <div className="flex items-baseline justify-between gap-2">
+              <div className="font-[var(--font-mono,monospace)] text-4xl font-semibold" style={{ color: valueColor }}>
+                {formatMontant(synthese?.total_en_retard || 0)}
+              </div>
+              <div className="text-right text-[10px] leading-tight text-white/45">
+                <div><span className="font-[var(--font-mono,monospace)] text-sm font-semibold text-white">{nb}</span> client{nb > 1 ? "s" : ""}</div>
+                {synthese && synthese.nb_litiges > 0 && <div>{synthese.nb_litiges} en litige</div>}
+                {synthese?.date_extraction && <div>au {formatDateFrRetard(synthese.date_extraction)}</div>}
+              </div>
+            </div>
+            <div className="mt-2 grid grid-cols-4 gap-1.5">
+              {TRANCHES_RETARD.map((t) => {
+                const v = synthese ? synthese[t.key] : 0;
+                return (
+                  <div key={t.key}>
+                    <div className="whitespace-nowrap text-[9px] uppercase tracking-wide text-white/40">{t.court}</div>
+                    <div className={`font-[var(--font-mono,monospace)] text-xs font-semibold ${v > 0 ? "text-white/80" : "text-white/25"}`}>{formatKEurRetard(v)}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </CardShell>
+
+      {open && (
+        <AgenceModalShell
+          title={clientOuvert
+            ? `${clientOuvert.nom_tiers || clientOuvert.numero_tiers} — ${clientOuvert.numero_tiers}`
+            : `Retards de paiement — ${nb} client${nb > 1 ? "s" : ""} · ${formatMontant(synthese?.total_en_retard || 0)}`}
+          onClose={() => { setOpen(false); setClientOuvert(null); }}
+        >
+          {clientOuvert ? (
+            <div>
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs text-[#141A26]/60">
+                <span>
+                  {formatMontant(clientOuvert.total_en_retard)} en retard
+                  {trancheLaPlusAncienne(clientOuvert) ? ` · ${trancheLaPlusAncienne(clientOuvert)!.label.toLowerCase()}` : ""}
+                  {" "}· situation compta au {formatDateFrRetard(clientOuvert.date_extraction)}
+                </span>
+                <span className="flex gap-2">
+                  <button
+                    onClick={() => window.open(`/vision-client?numero=${encodeURIComponent(clientOuvert.numero_tiers)}`, "_blank", "noopener,noreferrer")}
+                    className="rounded-full bg-black/5 px-3 py-1 text-xs font-semibold hover:bg-black/10"
+                  >
+                    Fiche client ↗
+                  </button>
+                  <button onClick={() => setClientOuvert(null)} className="rounded-full bg-black/5 px-3 py-1 text-xs font-semibold hover:bg-black/10">← Liste</button>
+                </span>
+              </div>
+              <div className="divide-y divide-black/[0.06]">
+                {champsDetailRetard(clientOuvert).map((f) => (
+                  <div key={f.label} className="flex justify-between gap-4 py-2 text-sm">
+                    <span className="shrink-0 font-semibold text-[#141A26]/60">{f.label}</span>
+                    <span className="whitespace-pre-wrap text-right">{f.value}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : listeLoading ? (
+            <div className="py-6 text-center text-sm text-[#141A26]/40">Chargement…</div>
+          ) : (
+            <>
+              {synthese && (
+                <p className="mb-3 text-xs text-[#141A26]/60">
+                  Situation compta au {formatDateFrRetard(synthese.date_extraction)} ·{" "}
+                  {TRANCHES_RETARD.map((t) => `${t.court} ${formatKEurRetard(synthese[t.key])}`).join(" · ")}
+                  {synthese.nb_litiges > 0 ? ` · ${synthese.nb_litiges} en litige` : ""}
+                </p>
+              )}
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-black/10 text-left text-xs uppercase tracking-wide text-[#141A26]/50">
+                    <th className="px-2 py-2">Code</th>
+                    <th className="px-2 py-2">Client</th>
+                    <th className="px-2 py-2">Collaborateur</th>
+                    <th className="px-2 py-2">Niveau</th>
+                    {TRANCHES_RETARD.map((t) => <th key={t.key} className="px-2 py-2 text-right">{t.court}</th>)}
+                    <th className="px-2 py-2 text-right">Total</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-black/[0.06]">
+                  {(liste || []).map((r) => (
+                    <tr key={r.numero_tiers} onClick={() => setClientOuvert(r)} className="cursor-pointer hover:bg-black/[0.03]" title="Voir la fiche compta">
+                      <td className="px-2 py-2 font-[var(--font-mono,monospace)] text-[#141A26]/70">{r.numero_tiers}</td>
+                      <td className={`px-2 py-2 ${r.en_litige ? "font-semibold text-[#92400e]" : ""}`}>{r.nom_tiers || "—"}{r.en_litige ? " ⚖" : ""}</td>
+                      <td className="px-2 py-2 text-[#141A26]/70">{r.collaborateur || "—"}</td>
+                      <td className="px-2 py-2 text-[#141A26]/70">{r.niveau_relance || "—"}</td>
+                      {TRANCHES_RETARD.map((t) => (
+                        <td key={t.key} className={`px-2 py-2 text-right font-[var(--font-mono,monospace)] ${r[t.key] > 0 ? "text-[#141A26]/80" : "text-[#141A26]/20"}`}>
+                          {r[t.key] > 0 ? formatKEurRetard(r[t.key]) : ""}
+                        </td>
+                      ))}
+                      <td className="px-2 py-2 text-right font-[var(--font-mono,monospace)] font-semibold text-[#C1683C]">{formatKEurRetard(r.total_en_retard)}</td>
+                    </tr>
+                  ))}
+                  {(liste || []).length === 0 && <tr><td colSpan={9} className="px-2 py-6 text-center text-[#141A26]/40">Aucun client.</td></tr>}
+                </tbody>
+              </table>
+            </>
+          )}
+        </AgenceModalShell>
+      )}
+    </div>
+  );
+}
+
 function CompteurCard({
   config, effectiveAgence, effectiveCollaborateur, refreshTick, onRemove,
 }: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; onRemove: () => void }) {
@@ -834,8 +1049,6 @@ function CompteurCard({
           const { data, error: err } = await supabase.rpc("get_vision_tci_cdc_avant_2026", { p_agence: effectiveAgence, p_collaborateur: effectiveCollaborateur });
           if (err) throw err;
           if (!cancelled) setTotal(Number(data) || 0);
-        } else if (config.cle === "factures_retard") {
-          if (!cancelled) setTotal(48250); // fictif, demandé explicitement
         }
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -854,7 +1067,6 @@ function CompteurCard({
     else if (config.cle === "cdc_avant_2026") window.open("/portefeuille-livraison", "_blank", "noopener,noreferrer");
   }
 
-  const isMontant = config.cle === "factures_retard";
   const valueColor = isAlerte ? ((total || 0) > 0 ? "#C1683C" : "#3F9142") : "#FFFFFF";
 
   // FIX (2026-08) : restructuration du pavé "Clients actifs" -- le nombre
@@ -868,7 +1080,7 @@ function CompteurCard({
   // correspondance entre les deux est à définir avant de pouvoir remplir
   // cette colonne avec de vraies valeurs.
   //
-  // Les autres compteurs (Facture en retard, CERFA, CDC < 2026) et le taux
+  // Les autres compteurs (CERFA, CDC < 2026) et le taux
   // de transformation (TauxCard) passent en format non compact avec une
   // police bien plus grande, pour exploiter l'espace libre de la case.
   if (estClientsActifs) {
@@ -910,14 +1122,14 @@ function CompteurCard({
 
   return (
     <div className="col-span-2 sm:col-span-1">
-      <CardShell color="#A6A181" badgeLabel={label} onRemove={onRemove} onClick={config.cle !== "factures_retard" ? handleClick : undefined} compact={false}>
+      <CardShell color="#A6A181" badgeLabel={label} onRemove={onRemove} onClick={handleClick} compact={false}>
         {loading ? (
           <div className="h-14 animate-pulse rounded bg-white/5" />
         ) : error ? (
           <p className="text-[10px] text-red-300">{error}</p>
         ) : (
-          <div className={`font-[var(--font-mono,monospace)] font-semibold ${isMontant ? "text-4xl" : "text-4xl"}`} style={{ color: valueColor }}>
-            {isMontant ? formatMontant(total || 0) : (total ?? 0).toLocaleString("fr-FR")}
+          <div className="font-[var(--font-mono,monospace)] text-4xl font-semibold" style={{ color: valueColor }}>
+            {(total ?? 0).toLocaleString("fr-FR")}
           </div>
         )}
       </CardShell>
@@ -1673,6 +1885,15 @@ export default function VisionTciKpiPanel() {
             />
           ) : c.kind === "spacer" ? (
             <SpacerCard key={c.id} span={c.cle === "2" ? 2 : 1} onRemove={() => handleRemove(c.id)} />
+          ) : c.cle === "factures_retard" ? (
+            // V4.5 : compteur "Retards de paiement" -- valeur réelle (fichier compta).
+            <RetardsPaiementCard
+              key={c.id}
+              effectiveAgence={effectiveAgenceFor(c)}
+              effectiveCollaborateur={effectiveCollaborateurFor(c)}
+              refreshTick={refreshTick}
+              onRemove={() => handleRemove(c.id)}
+            />
           ) : (
             <CompteurCard key={c.id} config={c} effectiveAgence={effectiveAgenceFor(c)} effectiveCollaborateur={effectiveCollaborateurFor(c)} refreshTick={refreshTick} onRemove={() => handleRemove(c.id)} />
           ),
