@@ -5,6 +5,11 @@ import { usePathname } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { useAccess } from '@/components/AccessContext'
 import type { AlertDetailItem } from './MobileAlertes'
+// ÉVOLUTION (2026-09-10) : règle "CDC liv < M-2" partagée avec le bandeau
+// desktop (ClientRootShell) et /portefeuille-livraison -- voir
+// lib/cdcRetard.ts. Le seuil (1er jour du mois M-2) est recalculé à
+// chaque chargement, plus de date en dur.
+import { CDC_RETARD_LABEL, getCdcRetardThresholdIso } from '@/lib/cdcRetard'
 
 /**
  * ⚠️ Version simplifiée (comptages SANS filtrage fin par agence/
@@ -15,9 +20,9 @@ import type { AlertDetailItem } from './MobileAlertes'
  * refreshCertificationSignals.
  *
  * Les 5 signaux desktop sont maintenant tous branchés ici (À faire, CERFA,
- * CDC livraison avant 2026, Frais de port, Capacité gaz), chacun visible
- * uniquement si le droit correspondant (show_alert_*) est activé pour le
- * profil de l'utilisateur — exactement comme le bandeau du haut côté PC.
+ * CDC liv < M-2, Frais de port, Capacité gaz), chacun visible uniquement
+ * si le droit correspondant (show_alert_*) est activé pour le profil de
+ * l'utilisateur — exactement comme le bandeau du haut côté PC.
  *
  * AJOUT (2026-08-30) : signal "Cohérence données" (show_alert_data_coherence,
  * désormais déclaré nativement dans AccessContext.tsx), même table de
@@ -26,40 +31,32 @@ import type { AlertDetailItem } from './MobileAlertes'
  * recalcul). Pas de filtrage périmètre : c'est un statut global, identique
  * pour tout le monde, comme côté desktop.
  *
- * CORRECTIF (25/08) : CDC < 2026 et Capacité gaz appliquent désormais le
- * même filtrage périmètre que le desktop -- allowed_agences ET
- * allowed_collaborateurs du profil (user_page_access), restriction
- * cumulative (chaque liste non vide réduit encore le résultat). Avant ce
- * correctif, ces deux compteurs remontaient le total NON filtré, ce qui
- * pouvait afficher un chiffre plus large côté mobile que côté desktop
- * pour un profil restreint. Les deux tables/vues sous-jacentes stockent
- * déjà le collaborateur sous forme de CODE (ex. "MPEYRE"), identique au
- * format de allowed_collaborateurs -- pas de résolution de nom nécessaire
- * côté CDC. Côté capacité gaz (cache sans colonne agence), la RPC dédiée
- * get_client_certification_alert_rows_for_user fait la jointure vers
- * ref_collaborateurs pour déduire l'agence. À faire, CERFA et Frais de
- * port restent non filtrés par périmètre pour l'instant (hors demande).
+ * CORRECTIF (25/08) : CDC et Capacité gaz appliquent le même filtrage
+ * périmètre que le desktop -- allowed_agences ET allowed_collaborateurs du
+ * profil (user_page_access), restriction cumulative. Les deux tables/vues
+ * sous-jacentes stockent déjà le collaborateur sous forme de CODE (ex.
+ * "MPEYRE"), identique au format de allowed_collaborateurs. Côté capacité
+ * gaz, la RPC get_client_certification_alert_rows_for_user fait la
+ * jointure vers ref_collaborateurs pour déduire l'agence. À faire, CERFA
+ * et Frais de port restent non filtrés par périmètre (hors demande).
  *
  * CORRECTIF : `assigned_to` peut contenir soit l'email soit le nom affiché
- * selon l'ancienneté de la ligne (même souci que côté desktop TodoPage.tsx,
- * cf. resolveAssignee/assigneeIdentityValues) — ne filtrer que sur l'email
- * faisait donc disparaître certaines tâches pourtant bien ouvertes et
- * assignées à l'utilisateur. On résout maintenant email ET nom affiché.
+ * selon l'ancienneté de la ligne -- on résout email ET nom affiché.
  *
- * CORRECTIF : les compteurs se rafraîchissent désormais à chaque
- * changement de page (pathname en dépendance), avec un garde-fou de 15s
- * minimum entre deux rafraîchissements pour ne pas ralentir une navigation
- * rapide entre plusieurs écrans.
+ * CORRECTIF : rafraîchissement à chaque changement de page (pathname en
+ * dépendance), garde-fou de 15s entre deux rafraîchissements.
  *
- * CORRECTIF (2026-09-02) : "À faire" utilisait deux requêtes indépendantes
- * pour la pastille (count exact en HEAD) et pour le tiroir de détail
- * (fetchTodoList, plafonné à 200 lignes) -- deux sources de vérité
- * distinctes qui pouvaient diverger (au minimum au-delà de 200 tâches
- * ouvertes ; potentiellement aussi en cas de décalage temporel entre les
- * deux appels). Le compteur "À faire" est désormais dérivé d'UNE seule
+ * CORRECTIF (2026-09-02) : le compteur "À faire" est dérivé d'UNE seule
  * lecture (id + due_date, mêmes filtres que fetchTodoList), qui sert à la
- * fois à calculer le total et le sous-compteur "en retard" -- la pastille
- * ne peut plus diverger du tiroir puisqu'elle vient de la même requête.
+ * fois au total et au sous-compteur "en retard".
+ *
+ * ÉVOLUTION (2026-09-10) : l'alerte "CDC < 2026" (seuil fixe 2026-01-01)
+ * devient "CDC liv < M-2" (seuil glissant = 1er jour du mois M-2, via
+ * lib/cdcRetard.ts), pour le compteur ET le tiroir de détail
+ * (fetchCdcAvant2026List). C'est ce décalage de règle qui expliquait un
+ * CDC visible sur PC mais absent du mobile. Le nom de la fonction et la
+ * clé de droit show_alert_cdc_liv_avant_2026 sont conservés (pas de
+ * migration).
  */
 export function useMobileAlertsCount() {
   const { rights, email } = useAccess()
@@ -67,13 +64,7 @@ export function useMobileAlertsCount() {
   const [detail, setDetail] = useState<AlertDetailItem[]>([])
   const [loading, setLoading] = useState(true)
 
-  // Identités (email + nom affiché) résolues une fois et réutilisées par
-  // fetchTodoList — évite de re-résoudre le nom à chaque appel du tiroir.
   const identitiesRef = useRef<string[]>([])
-  // Périmètre agence/collaborateur (user_page_access.allowed_agences /
-  // allowed_collaborateurs) résolu une fois en même temps que les
-  // identités -- réutilisé par CDC<2026 et Capacité gaz (compteur ET
-  // tiroir de détail), pour rester cohérent avec le filtrage desktop.
   const perimetreRef = useRef<{ agences: string[]; collaborateurs: string[] }>({ agences: [], collaborateurs: [] })
   const lastLoadRef = useRef(0)
 
@@ -103,6 +94,13 @@ export function useMobileAlertsCount() {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
   }
 
+  /** Filtre Supabase de la règle "CDC liv < M-2" : mois AVANT_2026 (fallback
+   * historique sans date exploitable) OU date de livraison strictement
+   * avant le 1er jour de M-2. Même expression que le bandeau desktop. */
+  function cdcRetardOrFilter() {
+    return `mois_livraison.eq.AVANT_2026,date_livraison.lt.${getCdcRetardThresholdIso()}`
+  }
+
   useEffect(() => {
     if (!email) return
     let cancelled = false
@@ -121,12 +119,6 @@ export function useMobileAlertsCount() {
         const { agences: allowedAgences, collaborateurs: allowedCollaborateurs } = perimetreRef.current
 
         if (rights.show_alert_todo) {
-          // CORRECTIF : une seule requête (id + due_date, mêmes filtres
-          // que fetchTodoList ci-dessous), au lieu d'un count HEAD séparé
-          // -- élimine toute possibilité de divergence entre la pastille
-          // et le tiroir "À faire" (voir note en tête de fichier). Le
-          // sous-compteur "en retard" (due_date < aujourd'hui) est calculé
-          // sur ce même résultat.
           const { data, error } = await supabase
             .from('todo_actions')
             .select('id, due_date')
@@ -164,24 +156,16 @@ export function useMobileAlertsCount() {
         }
 
         if (rights.show_alert_cdc_liv_avant_2026) {
-          // Toujours affichée, y compris à 0 (vert) -- avant, un compteur à
-          // 0 s'affichait bien (le push a toujours lieu quel que soit
-          // countValue), mais une ERREUR de requête faisait disparaître
-          // l'alerte entièrement et silencieusement (rien qu'en console).
-          // Le catch pousse maintenant un item quand même, avec un statut
-          // "orange" neutre (pas vert, pour ne pas faire croire à tort que
-          // tout va bien) plutôt que de la faire disparaître.
+          // Toujours affichée, y compris à 0 (vert) ; une erreur de requête
+          // pousse quand même un item en "orange" plutôt que de faire
+          // disparaître l'alerte silencieusement.
           try {
             let requete = supabase
               .from('v_portefeuille_livraison_lignes')
               .select('type_document,numero_document,numero_tiers')
               .eq('type_document', 'CDC')
-              .or('mois_livraison.eq.AVANT_2026,date_livraison.lt.2026-01-01')
+              .or(cdcRetardOrFilter())
               .limit(50000)
-            // Périmètre agence/collaborateur, comme le bandeau desktop --
-            // agence et code_representant sont déjà dans le même format
-            // que allowed_agences/allowed_collaborateurs, pas de
-            // résolution de nom nécessaire.
             if (allowedAgences.length > 0) requete = requete.in('agence', allowedAgences)
             if (allowedCollaborateurs.length > 0) requete = requete.in('code_representant', allowedCollaborateurs)
 
@@ -195,13 +179,13 @@ export function useMobileAlertsCount() {
             )
             const countValue = distinctDocuments.size
             items.push({
-              label: 'CDC < 2026',
+              label: CDC_RETARD_LABEL,
               count: countValue,
               status: countValue > 0 ? 'red' : 'green',
             })
           } catch (e) {
-            console.error('CDC livraison avant 2026 (mobile)', e)
-            items.push({ label: 'CDC < 2026', count: 0, status: 'orange' })
+            console.error('CDC liv < M-2 (mobile)', e)
+            items.push({ label: CDC_RETARD_LABEL, count: 0, status: 'orange' })
           }
         }
 
@@ -234,10 +218,6 @@ export function useMobileAlertsCount() {
         }
 
         if (rights.show_alert_capacite_gaz) {
-          // Repli sur l'ancienne RPC non filtrée si la nouvelle (filtrée
-          // périmètre) échoue -- ex. cache de schéma PostgREST pas encore
-          // à jour juste après sa création. Mieux vaut un chiffre non
-          // filtré que l'alerte qui disparaît entièrement.
           try {
             let data: Record<string, any>[] | null = null
             try {
@@ -274,10 +254,6 @@ export function useMobileAlertsCount() {
         }
 
         if (rights.show_alert_data_coherence) {
-          // Simple lecture du statut singleton -- déjà tenu à jour côté
-          // base (cron horaire + hook de fin de synchro Sage), aucun
-          // recalcul ici. Pas de filtrage périmètre : statut global,
-          // identique pour tout le monde (comme côté desktop).
           try {
             const { data, error } = await supabase
               .from('data_coherence_alert_status')
@@ -307,16 +283,10 @@ export function useMobileAlertsCount() {
       }
     }
 
-    // Premier chargement de la page : toujours forcé (ignore le
-    // garde-fou de 15s), sinon changer de page trop vite après le
-    // montage initial pourrait laisser des compteurs vides affichés.
     void load(true)
     return () => {
       cancelled = true
     }
-    // pathname en dépendance = rafraîchit à chaque changement de page,
-    // avec le garde-fou de 15s ci-dessus pour amortir une navigation très
-    // rapide entre plusieurs écrans sans la ralentir.
   }, [
     email,
     rights.show_alert_todo,
@@ -330,14 +300,7 @@ export function useMobileAlertsCount() {
 
   const total = detail.reduce((sum, d) => sum + d.count, 0)
 
-  /** Liste complète des tâches TODO ouvertes — pour le tiroir de détail.
-   * Toutes les tâches non terminées sont incluses, qu'elles soient en
-   * retard ou non (aucun filtre sur due_date) — seul le statut
-   * Terminé/Annulé exclut une tâche de cette liste.
-   * CORRECTIF (2026-09-02) : plafond relevé de 200 à 5000, aligné sur le
-   * plafond utilisé pour le comptage ci-dessus -- un plafond différent
-   * entre les deux était une source possible de décalage entre la
-   * pastille et le tiroir. */
+  /** Liste complète des tâches TODO ouvertes — pour le tiroir de détail. */
   async function fetchTodoList() {
     if (!email) return []
     const identities = await resolveIdentities()
@@ -379,9 +342,9 @@ export function useMobileAlertsCount() {
     return (data || []) as Record<string, any>[]
   }
 
-  /** Liste des CDC dont la date de livraison est antérieure à 2026 --
-   * filtrée sur le même périmètre agence/collaborateur que le compteur
-   * (voir load() ci-dessus). */
+  /** Liste des CDC en retard de livraison (règle "CDC liv < M-2") --
+   * même filtre et même périmètre agence/collaborateur que le compteur.
+   * Nom conservé pour compatibilité avec MobileShell/MobileAlertes. */
   async function fetchCdcAvant2026List() {
     if (!email) return []
     await resolveIdentities()
@@ -389,9 +352,9 @@ export function useMobileAlertsCount() {
 
     let requete = supabase
       .from('v_portefeuille_livraison_lignes')
-      .select('numero_document,numero_tiers,nom_tiers,agence,representant,mois_livraison,date_livraison,reference,reference_article,designation_article,quantite,montant_ht')
+      .select('type_document,numero_document,numero_tiers,nom_tiers,agence,representant,mois_livraison,date_livraison,reference,reference_article,designation_article,quantite,montant_ht')
       .eq('type_document', 'CDC')
-      .or('mois_livraison.eq.AVANT_2026,date_livraison.lt.2026-01-01')
+      .or(cdcRetardOrFilter())
     if (allowedAgences.length > 0) requete = requete.in('agence', allowedAgences)
     if (allowedCollaborateurs.length > 0) requete = requete.in('code_representant', allowedCollaborateurs)
 
@@ -422,8 +385,7 @@ export function useMobileAlertsCount() {
   }
 
   /** Liste des clients avec une capacité gaz expirée ou arrivant à
-   * échéance — RPC filtrée périmètre (agence + collaborateur), même
-   * fonction que le compteur. */
+   * échéance — RPC filtrée périmètre, même fonction que le compteur. */
   async function fetchCapaciteGazList() {
     if (!email) return []
     const { data, error } = await supabase.rpc('get_client_certification_alert_rows_for_user', {
@@ -446,9 +408,7 @@ export function useMobileAlertsCount() {
     return (data || []) as Record<string, any>[]
   }
 
-  /** Détail des mois en écart -- même RPC que la modale desktop
-   * (get_monthly_data_reconciliation), rejouée sur la période stockée dans
-   * data_coherence_alert_status, filtrée aux mois en écart côté client. */
+  /** Détail des mois en écart -- même RPC que la modale desktop. */
   async function fetchDataCoherenceList() {
     if (!email) return []
     const { data: statusRow, error: statusError } = await supabase
