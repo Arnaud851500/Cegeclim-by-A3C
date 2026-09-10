@@ -4,6 +4,27 @@ import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import dynamic from 'next/dynamic'
 import { supabase } from '@/lib/supabaseClient'
 import { usePageFilterAccess } from '@/lib/pageAccessFilters'
+// ÉVOLUTION (2026-09-10) : retards de paiement clients (fichier compta "Qui
+// vous doit quoi" importé via /retards-paiement, cf. lib/retardsPaiement.ts) :
+//   - pictogramme ⚠ à côté du numéro de client sur les lignes concernées
+//     (clic -> fiche compta complète du client) ;
+//   - pavé KPI "Retards de paiement" dans le bandeau du haut : nb de clients
+//     de la sélection concernés, total en retard, montant par tranche
+//     d'ancienneté (clic -> liste des clients concernés) ;
+//   - colonne optionnelle "Retard paiement" (K€, masquée par défaut,
+//     triable, présente dans l'export Excel).
+// Chargé une fois pour tous les clients (fetchRetardsPaiementBatch), fusionné
+// dans baseClientRows comme les visites réelles.
+import {
+  TRANCHES_RETARD,
+  champsDetailRetard,
+  cleTiers,
+  fetchRetardsPaiementBatch,
+  formatDateFrRetard,
+  formatKEurRetard,
+  trancheLaPlusAncienne,
+  type RetardPaiementClient,
+} from '@/lib/retardsPaiement'
 
 const MapContainer: any = dynamic(() => import('react-leaflet').then((mod) => mod.MapContainer as any), { ssr: false })
 const TileLayer: any = dynamic(() => import('react-leaflet').then((mod) => mod.TileLayer as any), { ssr: false })
@@ -208,6 +229,11 @@ type SummaryRow = {
   alerteMinAppelsVisitesMois: number | null
   alerteMaxJoursSansDevis: number | null
   alerteMaxJoursSansCommande: number | null
+  // ── Retards de paiement (fichier compta, v_retards_paiement_actuel) ───
+  // Total en retard du client dans le dernier instantané importé ; null =
+  // client absent du fichier (rien en retard). Renseigné sur les lignes
+  // client (et sommé sur TOTAL), vide sur les lignes mensuelles.
+  retardPaiement: number | null
 }
 
 type ColumnDef = {
@@ -1207,6 +1233,7 @@ function buildSummaryForNumero(tier: TiersRow | null, factures: AggRow[], devis:
     alerteMinAppelsVisitesMois: null,
     alerteMaxJoursSansDevis: null,
     alerteMaxJoursSansCommande: null,
+    retardPaiement: null,
   }
 }
 
@@ -1224,6 +1251,7 @@ const TOGGLEABLE_COLUMN_LABELS: Record<string, string> = {
   caBandN1: 'Profil CA N-1',
   caBandN: 'Profil CA 12M',
   remarque: 'Remarque',
+  retardPaiement: 'Retard paiement (K€)',
   caN3: `CA ${N - 3}`,
   caN2: `CA ${N - 2}`,
   qrcN1: `QRC ${N - 1}`,
@@ -1255,6 +1283,9 @@ function buildColumns(showFamilies: boolean, showCollaborateurColumn = false, en
     { key: 'alerteMinAppelsVisitesMois', label: 'Alerte : appels/visites min (mois)', group: 'Client', width: 92, className: 'editableNumber', editableAlerte: 'min_appels_visites_mois', value: (r) => r.alerteMinAppelsVisitesMois, format: 'numberBlank' },
     { key: 'alerteMaxJoursSansDevis', label: 'Alerte : jours sans devis (max)', group: 'Client', width: 92, className: 'editableNumber', editableAlerte: 'max_jours_sans_devis', value: (r) => r.alerteMaxJoursSansDevis, format: 'numberBlank' },
     { key: 'alerteMaxJoursSansCommande', label: 'Alerte : jours sans commande (max)', group: 'Client', width: 92, className: 'editableNumber', editableAlerte: 'max_jours_sans_commande', value: (r) => r.alerteMaxJoursSansCommande, format: 'numberBlank' },
+    // Retard de paiement (dernier fichier compta) -- vide si rien en retard ;
+    // sur les lignes mensuelles, toujours vide (donnée propre au client).
+    { key: 'retardPaiement', label: 'Retard paiement (K€)', group: 'Client', width: 96, className: 'retardCell', value: (r) => (r.kind === 'month' ? null : r.retardPaiement), format: 'keurBlank' },
     { key: 'codePostal', label: 'Code postal', group: 'Client', width: 82, value: (r) => r.codePostal, format: 'text' },
     { key: 'libelleNaf', label: 'Désignation Naf', group: 'Client', width: 130, value: (r) => r.libelleNaf, format: 'text' },
     { key: 'dateCreation', label: 'Date Création', group: 'Client', width: 95, value: (r) => r.dateCreation, format: 'date' },
@@ -1570,6 +1601,7 @@ function cacheRowToSummary(row: CacheDbRow): SummaryRow {
     alerteMinAppelsVisitesMois: null,
     alerteMaxJoursSansDevis: null,
     alerteMaxJoursSansCommande: null,
+    retardPaiement: null,
   }
 }
 
@@ -1604,6 +1636,16 @@ function applyVisiteReelle(row: SummaryRow, visitesMap: Map<string, VisiteBatchI
     prochaineVisiteReelle: info.prochaineVisite,
     nbVisitesReel: info.nbVisitesAnnee,
   }
+}
+
+/** Applique le total en retard de paiement (dernier fichier compta) sur une
+ * ligne client -- lignes TOTAL et mois non touchées (le total est recalculé
+ * dans buildTotalFromRows). */
+function applyRetardPaiement(row: SummaryRow, retardsMap: Map<string, RetardPaiementClient>): SummaryRow {
+  if (row.kind !== 'client') return row
+  const r = retardsMap.get(cleTiers(row.numero))
+  if (!r) return row
+  return { ...row, retardPaiement: r.total_en_retard }
 }
 
 /** Applique les 3 seuils d'alerte de comportement (client_alertes_config)
@@ -1676,6 +1718,7 @@ function buildTotalFromRows(rows: SummaryRow[], showCollaborateurColumn: boolean
   }, emptyEncoursByType())
   const caYtdN1ByMacro = sumMacro(rows, (row) => row.caYtdN1ByMacro)
   const margeYtdNValueByMacro = sumMacro(rows, (row) => row.margeYtdNValueByMacro)
+  const retardPaiementTotal = rows.reduce((s, r) => s + safeNumber(r.retardPaiement), 0)
 
   const total: SummaryRow = {
     id: 'TOTAL',
@@ -1744,6 +1787,7 @@ function buildTotalFromRows(rows: SummaryRow[], showCollaborateurColumn: boolean
     alerteMinAppelsVisitesMois: null,
     alerteMaxJoursSansDevis: null,
     alerteMaxJoursSansCommande: null,
+    retardPaiement: retardPaiementTotal > 0 ? retardPaiementTotal : null,
   }
 
   total.margePctN1 = total.caN1 ? (total.margeN1Value / total.caN1) * 100 : null
@@ -2285,6 +2329,13 @@ export default function SyntheseMultiClientsPage() {
   // une fois pour tous les clients (indépendant du filtre collaborateur/
   // agence en cours), fusionné dans baseClientRows ci-dessous.
   const [visitesReellesMap, setVisitesReellesMap] = useState<Map<string, VisiteBatchInfo>>(new Map())
+  // Retards de paiement (dernier fichier compta) -- chargés une fois pour
+  // tous les clients, fusionnés dans baseClientRows ; servent aussi au
+  // pictogramme ⚠, au pavé KPI et aux fenêtres de détail.
+  const [retardsMap, setRetardsMap] = useState<Map<string, RetardPaiementClient>>(new Map())
+  const [retardsIndisponible, setRetardsIndisponible] = useState(false)
+  const [retardsListeOuverte, setRetardsListeOuverte] = useState(false)
+  const [retardOuvert, setRetardOuvert] = useState<RetardPaiementClient | null>(null)
 
   const hasSelection = Boolean(selected)
   const showCollaborateurColumn = mode === 'collaborateur' && selected === ALL_COLLABORATEURS_VALUE
@@ -2374,6 +2425,24 @@ export default function SyntheseMultiClientsPage() {
       }
     }
     void loadVisitesReelles()
+    return () => { alive = false }
+  }, [])
+
+  // Retards de paiement -- une seule fois, tous clients confondus (la
+  // sélection collaborateur/agence est appliquée ensuite en croisant avec
+  // baseClientRows). Échec silencieux si la vue n'est pas encore déployée.
+  useEffect(() => {
+    let alive = true
+    async function loadRetards() {
+      try {
+        const map = await fetchRetardsPaiementBatch()
+        if (alive) { setRetardsMap(map); setRetardsIndisponible(false) }
+      } catch (err) {
+        console.warn('[SMC] v_retards_paiement_actuel indisponible :', err)
+        if (alive) setRetardsIndisponible(true)
+      }
+    }
+    void loadRetards()
     return () => { alive = false }
   }, [])
 
@@ -2509,10 +2578,30 @@ export default function SyntheseMultiClientsPage() {
   }, [mode, selected, selectionOptions.agenceCollaborateurs, selectionOptions.collaborateurAgence, restrictedSelectionOptions.collaborateurs, access.hasAgenceRestriction, access.hasCollaborateurRestriction])
 
   const baseClientRows = useMemo(
-    () => cacheRows.map((row) => applyVisiteReelle(applyAlertesConfigOverrides(applyObjectiveOverrides(row, objectiveMap), alertesConfigMap), visitesReellesMap)),
-    [cacheRows, objectiveMap, alertesConfigMap, visitesReellesMap]
+    () => cacheRows.map((row) => applyRetardPaiement(applyVisiteReelle(applyAlertesConfigOverrides(applyObjectiveOverrides(row, objectiveMap), alertesConfigMap), visitesReellesMap), retardsMap)),
+    [cacheRows, objectiveMap, alertesConfigMap, visitesReellesMap, retardsMap]
   )
   const totalRow = useMemo(() => buildTotalFromRows(baseClientRows, showCollaborateurColumn), [baseClientRows, showCollaborateurColumn])
+
+  // Retards de paiement de la sélection courante : clients de baseClientRows
+  // présents dans le dernier fichier compta, triés par montant en retard.
+  const retardsSelection = useMemo(() => {
+    const rows: RetardPaiementClient[] = []
+    baseClientRows.forEach((row) => {
+      const r = retardsMap.get(cleTiers(row.numero))
+      if (r) rows.push(r)
+    })
+    rows.sort((a, b) => b.total_en_retard - a.total_en_retard)
+    const somme = (k: keyof RetardPaiementClient) => rows.reduce((s, r) => s + safeNumber(r[k]), 0)
+    return {
+      rows,
+      nbClients: rows.length,
+      nbLitiges: rows.filter((r) => r.en_litige).length,
+      total: somme('total_en_retard'),
+      tranches: TRANCHES_RETARD.map((t) => ({ ...t, montant: somme(t.key) })),
+      dateExtraction: rows[0]?.date_extraction || retardsMap.values().next().value?.date_extraction || '',
+    }
+  }, [baseClientRows, retardsMap])
 
   const visibleRows = useMemo(() => {
     const sortCol = columns.find((c) => c.key === sort.key) || columns.find((c) => c.key === 'caN1')!
@@ -3079,7 +3168,7 @@ export default function SyntheseMultiClientsPage() {
             sz: isHeader ? 10 : familySubtotal ? 8 : mainMetric ? 10.5 : 9,
             color: col?.className?.includes('orderBacklog')
               ? { rgb: '008CFF' }
-              : col?.className?.includes('redLabel')
+              : col?.className?.includes('redLabel') || col?.className?.includes('retardCell')
                 ? { rgb: 'E60000' }
                 : undefined,
           },
@@ -3205,6 +3294,35 @@ export default function SyntheseMultiClientsPage() {
             <div><span>Encours commande</span><strong>{formatKEur(totalRow.encoursCommandeN)}</strong></div>
             <div><span>Marge réel {N}</span><strong>{formatPct(totalRow.margePctYtdN)}</strong></div>
             <div><span>Réalisé / objectif</span><strong>{formatPct(totalRow.realiseObjectif)}</strong></div>
+            {/* Retards de paiement (dernier fichier compta) sur la sélection :
+                nb de clients concernés, total en retard, détail par tranche
+                d'ancienneté. Clic -> liste des clients concernés. */}
+            <button
+              type="button"
+              className={`kpiRetard ${retardsSelection.nbClients > 0 ? 'active' : ''}`}
+              onClick={() => retardsSelection.nbClients > 0 && setRetardsListeOuverte(true)}
+              disabled={retardsSelection.nbClients === 0}
+              title={retardsSelection.nbClients > 0 ? 'Voir les clients en retard de paiement' : undefined}
+            >
+              <span>
+                ⚠ Retards paiement
+                {retardsSelection.dateExtraction ? <em> au {formatDateFrRetard(retardsSelection.dateExtraction)}</em> : null}
+              </span>
+              {retardsIndisponible ? (
+                <strong className="muted">—</strong>
+              ) : retardsSelection.nbClients === 0 ? (
+                <strong className="ok">Aucun</strong>
+              ) : (
+                <>
+                  <strong>{formatKEurRetard(retardsSelection.total)} <small>· {retardsSelection.nbClients} client{retardsSelection.nbClients > 1 ? 's' : ''}{retardsSelection.nbLitiges ? ` · ${retardsSelection.nbLitiges} litige${retardsSelection.nbLitiges > 1 ? 's' : ''}` : ''}</small></strong>
+                  <div className="kpiRetardTranches">
+                    {retardsSelection.tranches.map((t) => (
+                      <span key={t.key} className={t.montant > 0 ? '' : 'vide'}>{t.court} {formatKEurRetard(t.montant)}</span>
+                    ))}
+                  </div>
+                </>
+              )}
+            </button>
           </section>
 
           {/* Pastilles afficher/masquer — n'affecte que l'écran, jamais l'export Excel. */}
@@ -3269,10 +3387,23 @@ export default function SyntheseMultiClientsPage() {
                   // nouvel onglet. La ligne TOTAL et les lignes mensuelles
                   // développées ne sont pas cliquables (pas de fiche dédiée).
                   const isClientLinkColumn = row.kind === 'client' && (col.key === 'numero' || col.key === 'intitule')
+                  // Retard de paiement du client (dernier fichier compta) :
+                  // pictogramme ⚠ à côté du numéro, clic -> fiche compta.
+                  const retardClient = col.key === 'numero' && row.kind === 'client' ? retardsMap.get(cleTiers(row.numero)) || null : null
                   return (
                     <td key={`${row.id}-${col.key}`} className={`${col.className || ''} ${stickyClass(col.sticky)} ${['keur', 'keurBlank', 'keurCompare', 'pct', 'pctBlank', 'pctCompare', 'points', 'number', 'numberBlank'].includes(col.format || '') ? 'num' : ''}`} style={{ width: col.width, minWidth: col.width }}>
                       {col.key === 'numero' && row.kind === 'client' ? (
                         <button type="button" className="expandBtn" onClick={() => toggleExpanded(row.numero)}>{expanded.has(row.numero) ? '−' : '+'}</button>
+                      ) : null}
+                      {retardClient ? (
+                        <button
+                          type="button"
+                          className={`retardIcon ${retardClient.retard_plus_45 > 0 ? 'ancien' : ''}`}
+                          onClick={() => setRetardOuvert(retardClient)}
+                          title={`Retard de paiement : ${formatKEurRetard(retardClient.total_en_retard)}${trancheLaPlusAncienne(retardClient) ? ` · ${trancheLaPlusAncienne(retardClient)!.label.toLowerCase()}` : ''} — cliquer pour le détail compta`}
+                        >
+                          ⚠
+                        </button>
                       ) : null}
                       {col.format === 'caBand' ? (
                         <CaBandPill band={String(col.value(row) || 'Sans CA')} />
@@ -3563,6 +3694,76 @@ export default function SyntheseMultiClientsPage() {
         </div>
       )}
 
+      {/* ── Retards de paiement : liste des clients de la sélection ── */}
+      {retardsListeOuverte && (
+        <div className="retardOverlay" onClick={() => setRetardsListeOuverte(false)}>
+          <div className="retardModal" onClick={(e) => e.stopPropagation()}>
+            <div className="retardHeader">
+              <div>
+                <h2>Retards de paiement — {retardsSelection.nbClients} client{retardsSelection.nbClients > 1 ? 's' : ''}</h2>
+                <p>
+                  {formatKEurRetard(retardsSelection.total)} en retard · situation compta au {formatDateFrRetard(retardsSelection.dateExtraction)} ·{' '}
+                  {retardsSelection.tranches.map((t) => `${t.court} ${formatKEurRetard(t.montant)}`).join(' · ')}
+                </p>
+              </div>
+              <button type="button" onClick={() => setRetardsListeOuverte(false)}>Fermer</button>
+            </div>
+            <table className="retardTable">
+              <thead>
+                <tr>
+                  <th>Code</th><th>Client</th><th>Collaborateur</th><th>Niveau</th>
+                  {TRANCHES_RETARD.map((t) => <th key={t.key} className="num">{t.court}</th>)}
+                  <th className="num">Total en retard</th><th className="num">À venir</th>
+                </tr>
+              </thead>
+              <tbody>
+                {retardsSelection.rows.map((r) => (
+                  <tr key={r.numero_tiers} onClick={() => setRetardOuvert(r)} className={r.en_litige ? 'litige' : ''} title="Cliquer pour le détail compta">
+                    <td className="mono">{r.numero_tiers}</td>
+                    <td>{r.nom_tiers || '—'}{r.en_litige ? ' ⚖' : ''}</td>
+                    <td>{r.collaborateur || '—'}</td>
+                    <td>{r.niveau_relance || '—'}{r.effectue_le ? ` (${formatDateFrRetard(r.effectue_le)})` : ''}</td>
+                    {TRANCHES_RETARD.map((t) => <td key={t.key} className={`num ${r[t.key] > 0 ? '' : 'vide'}`}>{r[t.key] > 0 ? formatKEurRetard(r[t.key]) : ''}</td>)}
+                    <td className="num total">{formatKEurRetard(r.total_en_retard)}</td>
+                    <td className="num">{r.total_a_venir > 0 ? formatKEurRetard(r.total_a_venir) : ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ── Retards de paiement : fiche compta d'un client ── */}
+      {retardOuvert && (
+        <div className="retardOverlay" onClick={() => setRetardOuvert(null)}>
+          <div className="retardModal retardModalDetail" onClick={(e) => e.stopPropagation()}>
+            <div className="retardHeader">
+              <div>
+                <h2>{retardOuvert.nom_tiers || retardOuvert.numero_tiers} <span className="mono">{retardOuvert.numero_tiers}</span></h2>
+                <p>
+                  {formatKEurRetard(retardOuvert.total_en_retard)} en retard
+                  {trancheLaPlusAncienne(retardOuvert) ? ` · ${trancheLaPlusAncienne(retardOuvert)!.label.toLowerCase()}` : ''}
+                  {' '}· situation compta au {formatDateFrRetard(retardOuvert.date_extraction)}
+                </p>
+              </div>
+              <div className="retardHeaderActions">
+                <button type="button" className="secondary" onClick={() => openVisionClient(retardOuvert.numero_tiers)}>Fiche client ↗</button>
+                <button type="button" onClick={() => setRetardOuvert(null)}>Fermer</button>
+              </div>
+            </div>
+            <div className="retardFields">
+              {champsDetailRetard(retardOuvert).map((f) => (
+                <div key={f.label} className="retardField">
+                  <span>{f.label}</span>
+                  <strong>{f.value}</strong>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       <style jsx>{`
         .page { padding: 18px; background: #f6f8fb; min-height: 100vh; color: #0f172a; }
         .toolbar { display: flex; gap: 18px; justify-content: space-between; align-items: end; margin-bottom: 12px; }
@@ -3579,19 +3780,40 @@ export default function SyntheseMultiClientsPage() {
         .error { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; padding: 10px 12px; border-radius: 10px; margin-bottom: 10px; font-weight: 700; }
         .accessBadge { background: #fffbeb; color: #92400e; border: 1px solid #fcd34d; padding: 10px 12px; border-radius: 10px; margin-bottom: 10px; font-weight: 900; }
         .loading { position: fixed; right: 18px; bottom: 18px; background: #0f172a; color: white; padding: 8px 12px; border-radius: 999px; z-index: 20; font-weight: 900; }
-        /* 6 pavés (Tiers, CA N-1, CA réel N, Encours, Marge réel N, Réalisé/objectif)
-           sur UNE seule ligne — avant : repeat(5,...) avec 6 enfants, le 6e
-           passait donc à la ligne suivante. */
-        .kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px; }
+        /* 7 pavés (Tiers, CA N-1, CA réel N, Encours, Marge réel N, Réalisé/objectif,
+           Retards paiement) sur UNE seule ligne -- le dernier, plus large,
+           porte le détail par tranche. */
+        .kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)) minmax(0, 1.9fr); gap: 8px; margin-bottom: 10px; align-items: stretch; }
         .kpis div { background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 8px 10px; box-shadow: 0 2px 8px rgba(15,23,42,.05); min-width: 0; }
         .kpis span { display: block; color: #64748b; font-size: 10px; font-weight: 900; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .kpis strong { display: block; margin-top: 2px; font-size: 16px; font-weight: 950; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        /* Pavé "Retards paiement" : bouton (cliquable), même habillage que les autres pavés. */
+        .kpiRetard { display: block; text-align: left; background: white; border: 1px solid #e2e8f0; border-top: 3px solid #C1683C; border-radius: 12px; padding: 6px 10px 7px; box-shadow: 0 2px 8px rgba(15,23,42,.05); min-width: 0; color: #0f172a; font: inherit; }
+        .kpiRetard:disabled { opacity: 1; cursor: default; }
+        .kpiRetard.active { cursor: pointer; }
+        .kpiRetard.active:hover { border-color: #C1683C; background: #fff8f4; }
+        .kpiRetard span { display: block; color: #64748b; font-size: 10px; font-weight: 900; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .kpiRetard span em { font-style: normal; text-transform: none; font-weight: 700; color: #94a3b8; }
+        .kpiRetard strong { display: block; margin-top: 2px; font-size: 16px; font-weight: 950; color: #C1683C; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .kpiRetard strong small { font-size: 11px; font-weight: 800; color: #475569; }
+        .kpiRetard strong.ok { color: #047857; }
+        .kpiRetard strong.muted { color: #94a3b8; }
+        .kpiRetardTranches { display: flex; flex-wrap: wrap; gap: 3px 8px; margin-top: 3px; font-size: 10.5px; font-weight: 800; color: #334155; }
+        /* Surcharge de ".kpis div" (fond/bordure de pavé) pour ce sous-bloc. */
+        .kpis .kpiRetard .kpiRetardTranches { background: none; border: none; padding: 0; border-radius: 0; box-shadow: none; }
+        .kpiRetardTranches span { display: inline; text-transform: none; color: #334155; font-size: 10.5px; white-space: nowrap; }
+        .kpiRetardTranches span.vide { color: #cbd5e1; }
         .columnToggleBar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
         .columnToggleLabel { font-size: 11px; font-weight: 900; text-transform: uppercase; color: #64748b; margin-right: 2px; }
         .columnTogglePill { border-radius: 999px; padding: 5px 11px; font-size: 11px; font-weight: 800; background: white; color: #64748b; border: 1px solid #cbd5e1; }
         .columnTogglePill.active { background: #0f172a; color: white; border-color: #0f172a; }
         .clientLink { background: none; border: none; padding: 0; margin: 0; font: inherit; color: #1d4ed8; text-decoration: none; cursor: pointer; text-align: left; }
         .clientLink:hover { text-decoration: underline; }
+        /* Pictogramme retard de paiement, à côté du numéro de client. */
+        .retardIcon { background: #fee2e2; color: #dc2626; border: 1px solid #fecaca; border-radius: 4px; width: 17px; height: 17px; padding: 0; margin-right: 3px; font-size: 11px; line-height: 1; display: inline-flex; align-items: center; justify-content: center; vertical-align: middle; cursor: pointer; }
+        .retardIcon.ancien { background: #dc2626; color: white; border-color: #b91c1c; }
+        .retardIcon:hover { filter: brightness(.92); }
+        td.retardCell, td.retardCell span { color: #dc2626; font-weight: 900; }
         .tableShell { overflow: auto; height: calc(100vh - 260px); border: 2px solid #0f172a; background: white; box-shadow: 0 10px 30px rgba(15,23,42,.08); }
         .synthTable { border-collapse: separate; border-spacing: 0; font-size: 11px; table-layout: fixed; }
         th, td { border-right: 1px solid #111827; border-bottom: 1px solid #111827; padding: 2px 4px; height: 24px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: #fffdf3; }
@@ -3732,6 +3954,31 @@ export default function SyntheseMultiClientsPage() {
         :global(.profileHoverRow b) { font-weight: 950; }
         :global(.profileHoverRow span) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         :global(.profileHoverRow em) { font-style: normal; text-align: right; font-weight: 900; color: #0f172a; }
+
+        /* ── Retards de paiement : liste et fiche compta ── */
+        .retardOverlay { position: fixed; inset: 0; background: rgba(15,23,42,.45); z-index: 9998; padding: 24px; display: flex; align-items: flex-start; justify-content: center; overflow: auto; }
+        .retardModal { width: min(1400px, calc(100vw - 48px)); max-height: calc(100vh - 48px); overflow: auto; background: #ffffff; border-radius: 18px; box-shadow: 0 24px 70px rgba(15,23,42,.35); border: 1px solid #e2e8f0; }
+        .retardModalDetail { width: min(720px, calc(100vw - 48px)); }
+        .retardHeader { position: sticky; top: 0; z-index: 2; background: white; padding: 16px 18px; display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; border-bottom: 1px solid #e2e8f0; }
+        .retardHeader h2 { margin: 0; font-size: 20px; font-weight: 950; }
+        .retardHeader h2 .mono { font-family: monospace; font-size: 14px; font-weight: 700; color: #64748b; background: #e2e8f0; border-radius: 6px; padding: 2px 8px; margin-left: 8px; vertical-align: middle; }
+        .retardHeader p { margin: 4px 0 0; font-size: 12.5px; color: #64748b; }
+        .retardHeaderActions { display: flex; gap: 8px; flex-shrink: 0; }
+        .retardHeaderActions .secondary { background: #f8fafc; color: #0f172a; border-color: #cbd5e1; }
+        .retardTable { width: 100%; border-collapse: collapse; font-size: 12px; }
+        .retardTable th { position: sticky; top: 74px; text-align: left; font-size: 10px; text-transform: uppercase; color: #94a3b8; padding: 6px 10px; border-bottom: 1px solid #e2e8f0; background: #f8fafc; font-weight: 800; z-index: 1; }
+        .retardTable td { padding: 7px 10px; border-bottom: 1px solid #f1f5f9; background: white; white-space: nowrap; }
+        .retardTable tbody tr { cursor: pointer; }
+        .retardTable tbody tr:hover td { background: #fff8f4; }
+        .retardTable tbody tr.litige td:nth-child(2) { color: #92400e; font-weight: 800; }
+        .retardTable .num { text-align: right; }
+        .retardTable .mono { font-family: monospace; font-weight: 800; color: #475569; }
+        .retardTable .vide { color: #cbd5e1; }
+        .retardTable .total { font-weight: 950; color: #dc2626; }
+        .retardFields { padding: 6px 18px 18px; }
+        .retardField { display: flex; justify-content: space-between; gap: 16px; padding: 8px 0; border-bottom: 1px solid #f1f5f9; font-size: 13px; }
+        .retardField span { color: #64748b; font-weight: 800; flex-shrink: 0; }
+        .retardField strong { color: #0f172a; font-weight: 700; text-align: right; white-space: pre-wrap; }
       `}</style>
     </main>
   )

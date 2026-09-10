@@ -1105,7 +1105,7 @@ export default function MobileClients({
               return (
                 <div
                   key={r.numero_tiers}
-                  onClick={() => setRetardOuvert(r)}
+                  onClick={() => { setRetardsListeOuverte(false); setRetardOuvert(r) }}
                   style={{ borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)', padding: '10px 12px', cursor: 'pointer' }}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'baseline' }}>
@@ -1157,7 +1157,7 @@ export default function MobileClients({
               👤 Ouvrir la fiche client
             </button>
           }
-          onClose={() => setRetardOuvert(null)}
+          onClose={() => { setRetardOuvert(null); setRetardsListeOuverte(true) }}
         />
       )}
 
