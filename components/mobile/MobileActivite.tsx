@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { usePageFilterAccess } from '@/lib/pageAccessFilters'
+import { useCollaborateursPerimetre } from '@/lib/useCollaborateursPerimetre'
+import MobileCollaborateurFilter from './MobileCollaborateurFilter'
 import { PortefeuilleCommandesCard, ProjectionCaCard, PortefeuilleProjectionModal } from './MobilePortefeuilleWidgets'
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -16,6 +18,12 @@ import { PortefeuilleCommandesCard, ProjectionCaCard, PortefeuilleProjectionModa
 // - Chaque carte est cliquable : ouvre une fenêtre flottante avec la
 //   ventilation par famille macro (par défaut) ou par agence (case en haut
 //   de la fenêtre), pour tous les widgets (Devis/CDC/BL/Factures/Marge).
+// - ÉVOLUTION (2026-09-10) : filtre "Collaborateur" en haut de l'écran --
+//   options limitées au périmètre de l'utilisateur (ses collaborateurs
+//   autorisés, ou tous ceux de son/ses agence(s) autorisée(s), voir
+//   lib/useCollaborateursPerimetre.ts). Le collaborateur choisi est passé
+//   en p_collaborateur à get_vision_tci_kpi (cartes + ventilations) et
+//   aux widgets portefeuille/projection.
 // ─────────────────────────────────────────────────────────────────────────
 
 const FOCUS_MENSUEL_COLORS: Record<string, string> = {
@@ -80,6 +88,19 @@ export default function MobileActivite() {
   const agenceForcee = access.hasAgenceRestriction && access.allowedAgences.length > 0 ? access.allowedAgences[0] : null
   const collaborateurForcee = access.hasCollaborateurRestriction && access.allowedCollaborateurs.length > 0 ? access.allowedCollaborateurs[0] : null
 
+  // ÉVOLUTION (2026-09-10) : filtre "Collaborateur".
+  const perimetre = useMemo(
+    () => (access.loading ? null : { agences: access.allowedAgences, collaborateurs: access.allowedCollaborateurs }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [access.loading, access.allowedAgences.join('|'), access.allowedCollaborateurs.join('|')],
+  )
+  const { collaborateurs: collaborateursDisponibles, loading: collaborateursLoading } = useCollaborateursPerimetre(perimetre)
+  const [collaborateurFiltre, setCollaborateurFiltre] = useState('')
+  // Le filtre choisi prime sur le collaborateur forcé par le périmètre
+  // (quand un seul est autorisé, le filtre est masqué et la valeur forcée
+  // s'applique comme avant).
+  const collaborateurEffectif = collaborateurFiltre || collaborateurForcee
+
   // Dimensions de ventilation — chargées une fois, réutilisées par toutes les fenêtres flottantes.
   useEffect(() => {
     let cancelled = false
@@ -98,7 +119,7 @@ export default function MobileActivite() {
 
   useEffect(() => {
     if (access.loading) return
-    const cacheKey = `${CACHE_PREFIX}${useYesterday ? 'j1' : 'j'}`
+    const cacheKey = `${CACHE_PREFIX}${useYesterday ? 'j1' : 'j'}:${agenceForcee || ''}:${collaborateurEffectif || ''}`
     const cached = loadCache(cacheKey)
 
     if (cached) {
@@ -121,7 +142,7 @@ export default function MobileActivite() {
               p_famille: famille,
               p_famille_macro: null,
               p_agence: agenceForcee,
-              p_collaborateur: collaborateurForcee,
+              p_collaborateur: collaborateurEffectif,
               p_utiliser_j_moins_1: useYesterday,
             }),
           ),
@@ -157,7 +178,7 @@ export default function MobileActivite() {
     return () => {
       cancelled = true
     }
-  }, [useYesterday, access.loading, agenceForcee, collaborateurForcee])
+  }, [useYesterday, access.loading, agenceForcee, collaborateurEffectif])
 
   return (
     <div style={{ padding: '16px 3px', display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -185,6 +206,13 @@ export default function MobileActivite() {
         </label>
         {refreshing && <span className="cgcBlinkingRefresh">Actualisation…</span>}
       </div>
+
+      <MobileCollaborateurFilter
+        value={collaborateurFiltre}
+        options={collaborateursDisponibles}
+        loading={collaborateursLoading}
+        onChange={setCollaborateurFiltre}
+      />
 
       {error && (
         <div
@@ -217,12 +245,12 @@ export default function MobileActivite() {
         <>
           <PortefeuilleCommandesCard
             agenceForcee={agenceForcee}
-            collaborateurForcee={collaborateurForcee}
+            collaborateurForcee={collaborateurEffectif}
             onOpen={() => setOpenWidget('portefeuille')}
           />
           <ProjectionCaCard
             agenceForcee={agenceForcee}
-            collaborateurForcee={collaborateurForcee}
+            collaborateurForcee={collaborateurEffectif}
             onOpen={() => setOpenWidget('projection')}
           />
         </>
@@ -234,7 +262,7 @@ export default function MobileActivite() {
           dayLabel={useYesterday ? 'J-1' : 'Jour'}
           useYesterday={useYesterday}
           agenceForcee={agenceForcee}
-          collaborateurForcee={collaborateurForcee}
+          collaborateurForcee={collaborateurEffectif}
           famillesMacro={famillesMacro}
           agences={agences}
           onClose={() => setOpenFamille(null)}
@@ -245,7 +273,7 @@ export default function MobileActivite() {
         <PortefeuilleProjectionModal
           vue={openWidget}
           agenceForcee={agenceForcee}
-          collaborateurForcee={collaborateurForcee}
+          collaborateurForcee={collaborateurEffectif}
           famillesMacro={famillesMacro}
           agences={agences}
           onClose={() => setOpenWidget(null)}
@@ -491,6 +519,9 @@ function BreakdownModal({
             </span>
             <button onClick={onClose} style={{ color: 'rgba(255,255,255,0.4)', fontSize: 20, lineHeight: 1, background: 'none', border: 'none' }}>✕</button>
           </div>
+          {collaborateurForcee && (
+            <div style={{ marginTop: 6, fontSize: 11.5, color: 'rgba(255,255,255,0.5)' }}>Collaborateur : {collaborateurForcee}</div>
+          )}
 
           <div style={{ marginTop: 12, display: 'inline-flex', borderRadius: 999, border: '1px solid rgba(255,255,255,0.15)', padding: 2 }}>
             <button

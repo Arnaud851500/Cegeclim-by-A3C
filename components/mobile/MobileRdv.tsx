@@ -41,7 +41,10 @@ type RdvUnifie = {
   a_compte_rendu: boolean
 }
 
-type CompteRendu = { id: string; resume: string | null; created_by_name: string | null; created_at: string }
+// ÉVOLUTION (2026-09-10) : created_by_email ajouté -- sert de repli pour
+// "Créé par" quand created_by_name est vide (ex. compte-rendu généré par
+// la dictée vocale sans nom d'affichage renseigné).
+type CompteRendu = { id: string; resume: string | null; created_by_name: string | null; created_by_email: string | null; created_at: string }
 
 function safeText(value: any) {
   return String(value ?? '').trim()
@@ -72,6 +75,16 @@ function fallbackNameFromEmail(email: string) {
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(' ') || email
+}
+
+/** Nom à afficher dans "Créé par" : display_name enregistré, sinon nom
+ * déduit de l'email, sinon "—". */
+function auteurCompteRendu(cr: Pick<CompteRendu, 'created_by_name' | 'created_by_email'>): string {
+  const nom = safeText(cr.created_by_name)
+  if (nom) return nom
+  const email = safeText(cr.created_by_email)
+  if (email) return fallbackNameFromEmail(email)
+  return '—'
 }
 
 type DocResult = {
@@ -108,10 +121,6 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
   const [rdvLoading, setRdvLoading] = useState(true)
   const [blgPartnerId, setBlgPartnerId] = useState<string | null>(null)
 
-  // Numéros de tiers (clients) ayant au moins une tâche NON terminée en
-  // cours, assignée à l'utilisateur -- affiché comme alerte ⚠️ sur les rdv
-  // concernés (voir chargerTachesEnCours()), pour ne pas oublier un
-  // engagement pris avec ce client avant de le revoir.
   const [tachesEnCoursParTiers, setTachesEnCoursParTiers] = useState<Set<string>>(new Set())
 
   const [periodeLabel, setPeriodeLabel] = useState('30 prochains jours')
@@ -121,25 +130,13 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
   const [periodeBornes, setPeriodeBornes] = useState<{ debut: Date; fin: Date } | null>(null)
 
   const [nouveauRdvOuvert, setNouveauRdvOuvert] = useState(false)
-  // ÉVOLUTION : édition d'un rdv compagnon existant -- voir
-  // ModifierRdvSheet ci-dessous et le bouton "Modifier" dans openRdvDetail.
   const [editingRdv, setEditingRdv] = useState<RdvUnifie | null>(null)
 
-  // ÉVOLUTION (2026-09-02) : bascule liste / planning (vue 3 jours façon
-  // agenda iOS, glissable) -- voir PlanningTroisJours ci-dessous. Ne
-  // remplace pas chargerRdv/rdvList (toujours utilisés par la vue liste,
-  // bornée par periodeBornes) : la vue planning a sa propre fenêtre
-  // glissante de 3 jours (ancrageGrille), indépendante de la période
-  // choisie côté liste, et son propre chargement de données.
   const [vueMode, setVueMode] = useState<'liste' | 'planning'>('liste')
 
   const [currentEmail, setCurrentEmail] = useState('')
   const [currentName, setCurrentName] = useState('')
 
-  /** Charge, pour un lot de numéros de tiers, ceux qui ont au moins une
-   * tâche non terminée assignée à l'utilisateur -- utilisé pour l'alerte
-   * ⚠️ sur la liste de rdv. Jamais bloquant (repli silencieux sur "aucune
-   * alerte" en cas d'erreur). */
   async function chargerTachesEnCours(email: string, name: string, numerosTiers: (string | null)[]) {
     const uniques = Array.from(new Set(numerosTiers.filter((n): n is string => Boolean(n && n.trim()))))
     if (uniques.length === 0) {
@@ -294,13 +291,6 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
     void chargerRdv(currentEmail, currentName, blgPartnerId, debut, fin)
   }
 
-  /** ÉVOLUTION : suppression d'un rdv compagnon depuis l'écran du rdv
-   * (pas depuis la liste) -- uniquement pour les rdv "compagnon CEGECLIM"
-   * (source === 'compagnon', créés dans rdv_compagnon) : les rdv
-   * synchronisés BLG/Outlook ne sont pas modifiables depuis l'app.
-   * Même garde-fou que supprimer() dans CompteRenduBlock : `.select('id')`
-   * après le `.delete()` pour détecter une suppression bloquée par une
-   * policy RLS (0 ligne réellement supprimée, error === null sinon). */
   async function supprimerRdvCompagnon(r: RdvUnifie) {
     if (r.source !== 'compagnon' || !r.compagnon_id) return
     if (!window.confirm('Supprimer ce rendez-vous ? Cette action est définitive.')) return
@@ -348,10 +338,6 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
               <span style={{ fontSize: 12.5, color: '#E8A96A' }}>Une tâche non terminée est en cours pour ce client — engagement pris à ne pas oublier avant ce rendez-vous.</span>
             </div>
           )}
-          {/* ÉVOLUTION : modifier/supprimer -- uniquement pour les rdv
-             "compagnon CEGECLIM" (source==='compagnon'), les rdv BLG/
-             Outlook n'étant pas éditables depuis l'app (ils doivent être
-             modifiés côté Outlook/BLG). */}
           {estCompagnon && (
             <div style={{ display: 'flex', gap: 8 }}>
               <button
@@ -475,9 +461,6 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
 
   return (
     <div style={{ padding: '16px 3px', display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {/* ÉVOLUTION : bascule Liste / Planning, en haut de l'écran comme
-         demandé -- ne touche pas au bouton "Agenda" existant (qui ouvre
-         le choix de période pour la liste), simple bascule d'affichage. */}
       <div style={{ display: 'flex', gap: 6 }}>
         <button
           type="button"
@@ -822,20 +805,11 @@ function ajouterJours(d: Date, n: number): Date {
 function memeJour(a: Date, b: Date): boolean {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
 }
-/** Minutes écoulées depuis GRILLE_HEURE_DEBUT, bornées à la plage affichée
- * -- sert à positionner/dimensionner les blocs d'événements dans la
- * grille horaire. */
 function minutesDepuisDebutGrille(d: Date): number {
   const minutes = (d.getHours() - GRILLE_HEURE_DEBUT) * 60 + d.getMinutes()
   return Math.max(0, Math.min(minutes, (GRILLE_HEURE_FIN - GRILLE_HEURE_DEBUT) * 60))
 }
 
-/** Répartit les événements d'une journée en "colonnes" quand ils se
- * chevauchent (algorithme classique d'allocation de salles) -- chaque
- * groupe d'événements qui se chevauchent partage la largeur disponible en
- * autant de colonnes que nécessaire. Une durée nulle ou négative (donnée
- * incohérente) est traitée comme 30 min minimum pour le calcul du
- * chevauchement, sans changer l'heure de fin réellement affichée. */
 function repartirColonnes(events: RdvUnifie[]): { ev: RdvUnifie; colonne: number; nbColonnes: number }[] {
   const avecTimestamps = events
     .map((ev) => {
@@ -878,16 +852,6 @@ function repartirColonnes(events: RdvUnifie[]): { ev: RdvUnifie; colonne: number
   return resultats
 }
 
-/** Vue "planning" 3 jours façon agenda iOS -- glissable (swipe tactile +
- * flèches ‹ ›) par pas de 3 jours. Fenêtre de données indépendante de la
- * liste (rdvList/periodeBornes) : requête dédiée sur la fenêtre de 3
- * jours actuellement affichée, rechargée à chaque déplacement. Les
- * événements "jour entier" sont affichés dans un bandeau au-dessus de la
- * grille horaire (comme "Jour entier" côté Calendrier iOS), les autres
- * positionnés/dimensionnés selon leur heure. Un tap sur un événement
- * ouvre exactement le même détail que la vue liste (onOpenDetail =
- * openRdvDetail du parent) -- modifier/supprimer/compte-rendu/vocal
- * fonctionnent donc à l'identique dans les deux vues. */
 function PlanningTroisJours({
   currentEmail, blgPartnerId, tachesEnCoursParTiers, onOpenDetail, onNouveauRdv,
 }: {
@@ -978,7 +942,6 @@ function PlanningTroisJours({
         </div>
       </div>
 
-      {/* En-têtes de jour */}
       <div style={{ display: 'grid', gridTemplateColumns: '38px repeat(3, 1fr)', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
         <div />
         {jours.map((j) => (
@@ -998,7 +961,6 @@ function PlanningTroisJours({
         ))}
       </div>
 
-      {/* Bandeau "jour entier" */}
       {(() => {
         const toutesLesJourneesParJour = jours.map((j) =>
           (rdvGrille || []).filter((r) => r.all_day && r.start_date && memeJour(new Date(r.start_date), j)),
@@ -1029,13 +991,11 @@ function PlanningTroisJours({
         )
       })()}
 
-      {/* Grille horaire */}
       <div
         onTouchStart={onTouchStart}
         onTouchEnd={onTouchEnd}
         style={{ display: 'grid', gridTemplateColumns: '38px repeat(3, 1fr)', position: 'relative', borderTop: '1px solid rgba(255,255,255,0.06)' }}
       >
-        {/* Axe des heures */}
         <div style={{ position: 'relative', height: GRILLE_HAUTEUR_TOTALE }}>
           {heures.map((h) => (
             <div key={h} style={{ position: 'absolute', top: (h - GRILLE_HEURE_DEBUT) * GRILLE_HAUTEUR_HEURE - 6, right: 4, fontSize: 9.5, color: 'rgba(255,255,255,0.35)' }}>
@@ -1107,6 +1067,11 @@ const navChevronStyle: React.CSSProperties = {
   background: 'rgba(255,255,255,0.05)', color: '#fff', fontSize: 16, lineHeight: 1,
 }
 
+/** Bloc "Compte-rendu" de la fiche d'un rendez-vous -- lecture, ajout,
+ * modification, suppression.
+ * ÉVOLUTION (2026-09-10) : ligne "Créé par : X" explicite sous le résumé
+ * (nom d'affichage, sinon déduit de l'email), au lieu d'un "Par X" grisé
+ * qui disparaissait silencieusement quand created_by_name était vide. */
 function CompteRenduBlock({
   activityId, numeroTiers, rdvLabel, currentEmail, currentName, onSaved,
 }: {
@@ -1123,10 +1088,6 @@ function CompteRenduBlock({
   const [resumeEdit, setResumeEdit] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // FIX (2026-08) : bouton de suppression ajouté côté mobile -- il n'existait
-  // que dans OutlookAgenda.tsx (desktop). Voir aussi la note ci-dessous sur
-  // supprimer() : même correctif que côté desktop (vérification réelle du
-  // nombre de lignes supprimées, indispensable avec Supabase/RLS).
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
 
@@ -1137,7 +1098,7 @@ function CompteRenduBlock({
       setLoading(true)
       const { data } = await supabase
         .from('client_comptes_rendus')
-        .select('id, resume, created_by_name, created_at')
+        .select('id, resume, created_by_name, created_by_email, created_at')
         .eq('rdv_activity_id', activityId)
         .order('created_at', { ascending: false })
         .limit(1)
@@ -1172,7 +1133,7 @@ function CompteRenduBlock({
             resume: resumeEdit,
             transcript: null,
           })
-          .select('id, resume, created_by_name, created_at')
+          .select('id, resume, created_by_name, created_by_email, created_at')
           .single()
         if (err) throw err
         setCompteRendu(data as CompteRendu)
@@ -1186,12 +1147,6 @@ function CompteRenduBlock({
     }
   }
 
-  /** FIX (2026-08) : `.select('id')` ajouté après le `.delete()` -- sans ça,
-   * Supabase ne signale AUCUNE erreur quand une policy RLS bloque la
-   * suppression (0 ligne réellement supprimée, error === null). Le code
-   * vidait alors l'UI comme si ça avait marché, alors que rien n'était
-   * supprimé en base (le compte-rendu réapparaissait à la réouverture).
-   * Voir la même note dans OutlookAgenda.tsx (RdvDetailModal). */
   async function supprimer() {
     if (!compteRendu) return
     if (!window.confirm('Supprimer ce compte-rendu ? Cette action est définitive.')) return
@@ -1280,10 +1235,15 @@ function CompteRenduBlock({
         </div>
       ) : compteRendu ? (
         <div>
-          <p style={{ fontSize: 13, color: '#fff', lineHeight: 1.6, whiteSpace: 'pre-wrap', margin: '0 0 6px' }}>{compteRendu.resume || '(résumé vide)'}</p>
-          <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', margin: 0 }}>
-            {compteRendu.created_by_name ? `Par ${compteRendu.created_by_name} · ` : ''}{new Date(compteRendu.created_at).toLocaleString('fr-FR')}
-          </p>
+          <p style={{ fontSize: 13, color: '#fff', lineHeight: 1.6, whiteSpace: 'pre-wrap', margin: '0 0 8px' }}>{compteRendu.resume || '(résumé vide)'}</p>
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '4px 12px', paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+            <span style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.55)' }}>
+              Créé par : <span style={{ color: '#E8A96A', fontWeight: 700 }}>{auteurCompteRendu(compteRendu)}</span>
+            </span>
+            <span style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.4)' }}>
+              le {new Date(compteRendu.created_at).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
+            </span>
+          </div>
           {deleteError && <p style={{ fontSize: 12, color: '#e0a685', marginTop: 8 }}>{deleteError}</p>}
         </div>
       ) : (
@@ -1293,10 +1253,7 @@ function CompteRenduBlock({
   )
 }
 
-/** EXPORTÉ (2026-09-02) : réutilisable depuis MobileClients.tsx (bouton
- * "+ RDV" sur la fiche client, avec client préselectionné et verrouillé --
- * voir clientPreselectionne) en plus de son usage historique ici (bouton
- * "+ RDV" de l'écran Rendez-vous, sans client préselectionné). */
+/** EXPORTÉ (2026-09-02) : réutilisable depuis MobileClients.tsx. */
 export function NouveauRdvSheet({
   currentEmail, currentName, onClose, onCreated, clientPreselectionne,
 }: {
@@ -1304,10 +1261,6 @@ export function NouveauRdvSheet({
   currentName: string
   onClose: () => void
   onCreated: () => void
-  /** Si fourni, le champ client est prérempli et verrouillé (pas de
-   * bouton "Retirer") -- utilisé quand le RDV est créé depuis la fiche
-   * d'un client précis, pour éviter de le sélectionner une deuxième fois
-   * et tout risque de le changer par erreur. */
   clientPreselectionne?: { numero: string; nom: string }
 }) {
   const [clientSearch, setClientSearch] = useState('')
@@ -1318,16 +1271,6 @@ export function NouveauRdvSheet({
   const [type, setType] = useState<'meeting' | 'phoneCall' | 'reminder'>('meeting')
   const [date, setDate] = useState('')
   const [heure, setHeure] = useState('09:00')
-  // FIX : `duree` est désormais une chaîne (au lieu d'un number forcé à 60
-  // dès que le champ passait par une valeur vide) -- voir onChange /
-  // onFocus ci-dessous. Avant ce correctif, `onChange={(e) =>
-  // setDuree(Number(e.target.value) || 60)}` réimposait "60" à CHAQUE
-  // frappe dès que le champ passait, ne serait-ce qu'un instant, par une
-  // chaîne vide (ex. en supprimant le "6" de "60" avec Suppr) : React
-  // réécrivait alors la valeur affichée par-dessus la frappe en cours, ce
-  // qui coinçait le curseur juste après le chiffre restant et empêchait
-  // de vider le champ pour le remplacer. La conversion en nombre n'a
-  // lieu qu'à la validation (creer()) et au blur (repli sur 60 si vide).
   const [duree, setDuree] = useState('60')
   const [lieu, setLieu] = useState('')
   const [saving, setSaving] = useState(false)
@@ -1433,10 +1376,6 @@ export function NouveauRdvSheet({
           </div>
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Durée (min)</div>
-            {/* FIX : onFocus sélectionne tout le contenu -- taper un
-               chiffre écrase directement "60" au lieu de devoir le
-               supprimer caractère par caractère (qui restait de toute
-               façon bloqué, voir commentaire sur l'état `duree` ci-dessus). */}
             <input
               type="number"
               value={duree}
@@ -1450,11 +1389,6 @@ export function NouveauRdvSheet({
           </div>
         </div>
 
-        {/* FIX : Date et Heure passent d'une ligne partagée (2 colonnes)
-           à deux lignes pleine largeur -- sur certains appareils, les
-           pickers natifs des deux champs type="date"/type="time"
-           affichés côte à côte se chevauchaient visuellement. Champs
-           désormais clairement séparés. */}
         <div>
           <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Date</div>
           <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }} />
@@ -1491,12 +1425,7 @@ export function NouveauRdvSheet({
   )
 }
 
-/** ÉVOLUTION : édition d'un rdv "compagnon CEGECLIM" existant (date,
- * heure, durée, objet, type, client, lieu) -- même formulaire que
- * NouveauRdvSheet, prérempli à partir du rdv, et qui fait un UPDATE sur
- * rdv_compagnon (id = rdv.compagnon_id) au lieu d'un INSERT. Uniquement
- * rendu pour les rdv source === 'compagnon' (voir editingRdv dans
- * MobileRdv) -- les rdv BLG/Outlook ne sont pas éditables ici. */
+/** ÉVOLUTION : édition d'un rdv "compagnon CEGECLIM" existant. */
 function ModifierRdvSheet({
   rdv, onClose, onUpdated,
 }: { rdv: RdvUnifie; onClose: () => void; onUpdated: () => void }) {
@@ -1514,8 +1443,6 @@ function ModifierRdvSheet({
   )
   const [date, setDate] = useState(startDateInitiale.toISOString().slice(0, 10))
   const [heure, setHeure] = useState(startDateInitiale.toTimeString().slice(0, 5))
-  // FIX : même correctif que NouveauRdvSheet -- chaîne au lieu de number,
-  // pour permettre de vider le champ avant de saisir une autre valeur.
   const [duree, setDuree] = useState(String(dureeInitiale))
   const [lieu, setLieu] = useState(rdv.lieu || '')
   const [saving, setSaving] = useState(false)
@@ -1631,8 +1558,6 @@ function ModifierRdvSheet({
           </div>
         </div>
 
-        {/* FIX : Date et Heure séparées en deux lignes -- voir même
-           correctif dans NouveauRdvSheet ci-dessus. */}
         <div>
           <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Date</div>
           <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }} />

@@ -8,6 +8,10 @@ import { NavigationChoiceSheet, PhoneChoiceSheet } from './MobileActionSheets'
 import VoiceReportButtons from './VoiceReportButtons'
 import MobileTaskDetailSheet, { type TaskRow } from './MobileTaskDetailSheet'
 import { NouveauRdvSheet } from './MobileRdv'
+// ÉVOLUTION (2026-09-10) : filtre "Collaborateur" sur la liste des clients
+// (options = périmètre de l'utilisateur, voir lib/useCollaborateursPerimetre).
+import { collaborateurMatches, useCollaborateursPerimetre } from '@/lib/useCollaborateursPerimetre'
+import MobileCollaborateurFilter from './MobileCollaborateurFilter'
 
 const N = new Date().getFullYear()
 const CURRENT_MONTH = new Date().getMonth() + 1
@@ -167,20 +171,9 @@ type ActionRow = { id: string; libelle: string; status: string; due_date: string
 /** Tâche terminée, pour l'historique "6 derniers mois" -- voir
  * ouvrirTachesTerminees() dans ClientDetailScreen. updatedAt sert de date
  * d'achèvement : todo_actions n'a pas de colonne dédiée "terminée le",
- * mais son updated_at reflète le moment du passage à Terminé (aucune
- * autre modification n'a de raison d'avoir lieu après coup sur une tâche
- * close). */
+ * mais son updated_at reflète le moment du passage à Terminé. */
 type TacheTermineeRow = { id: string; libelle: string; dueDate: string | null; updatedAt: string; assignedTo: string | null }
-/** ÉVOLUTION : "décision client sur devis" -- quand un devis est accepté
- * (en tout ou partie) par le client, l'utilisateur peut le flaguer "à
- * traiter" et composer, à partir des lignes du devis d'origine, un
- * document "Devis à transformer en CDC" : lignes conservées, lignes
- * retirées (flag suppression), et nouvelles lignes ajoutées à la main
- * (référence avec aide à la saisie via v_stock_articles_latest, quantité,
- * taux de remise saisi manuellement -- pas de calcul automatique). Stocké
- * dans devis_transformations / devis_transformation_lignes (nouvelles
- * tables, migration du 2026-09-02) pour rester consultable ensuite ; une
- * tâche todo_actions est créée en parallèle pour le suivi commercial. */
+/** ÉVOLUTION : "décision client sur devis" -- voir DevisTransformationSheet. */
 type DevisTransformation = {
   id: string
   typeDocument: 'devis' | 'commande'
@@ -203,15 +196,8 @@ type DevisTransformationLigne = {
   tauxRemise: number | null
 }
 /** ÉVOLUTION (2026-09-02) : "Alertes clients" -- pavé sur l'écran "Mes
- * clients" (liste, avant sélection d'un client) qui affiche un compteur
- * pour chacune des 3 règles de suivi paramétrables par client (voir
- * "🔔 Alertes de suivi" dans la fiche client / client_alertes_config).
- * Ces règles sont évaluées une fois par jour côté base par la fonction
- * executer_controle_alertes_client(), qui écrit une ligne dans
- * client_alertes_historique (type_alerte + lien vers la tâche créée) et
- * une tâche dans todo_actions -- SANS affecter cette tâche à personne
- * (assigned_to = null), c'est justement ce qui permet de les regrouper
- * ici indépendamment de qui est connecté. */
+ * clients" qui affiche un compteur pour chacune des 3 règles de suivi
+ * paramétrables par client (client_alertes_config / client_alertes_historique). */
 type ClientAlerteType = 'appels_visites' | 'devis' | 'commande'
 type ClientAlerteRow = {
   id: string
@@ -228,10 +214,8 @@ const LABEL_ALERTE_CLIENT: Record<ClientAlerteType, string> = {
   commande: 'Sans commande',
 }
 /** Visite unifiée (BLG synchronisé OU RDV "compagnon CEGECLIM") -- source
- * v_rdv_unifie (voir CORRECTIF ci-dessous), pas crm_base_activity seul.
- * blgActivityId/compagnonId : l'un des deux est rempli selon `source`,
- * c'est celui-là (pas rdvId) qu'il faut passer à VoiceReportButtons pour
- * lier un compte-rendu au bon rendez-vous (cf. openVisiteDetail). */
+ * v_rdv_unifie. blgActivityId/compagnonId : l'un des deux est rempli selon
+ * `source`, c'est celui-là qu'il faut passer à VoiceReportButtons. */
 type VisiteEvent = {
   rdvId: string
   source: 'blg' | 'compagnon'
@@ -266,11 +250,6 @@ type ClientDetail = {
   derniereVisite: VisiteEvent | null
   prochaineVisite: VisiteEvent | null
   devisYtdN1: number
-  /** Documents (devis ou commandes) ayant un traitement "à traiter" en
-   * cours (voir DevisTransformation ci-dessus) -- sert à afficher le
-   * badge dans la liste et à enrichir la fiche du document concerné.
-   * Ne contient que statut === 'a_traiter' : chargé une fois à
-   * l'ouverture de la fiche client, pas de rafraîchissement temps réel. */
   transformationsEnCours: DevisTransformation[]
   loadErrors: string[]
 }
@@ -315,10 +294,7 @@ export default function MobileClients({
   cibleNumero?: string | null
   cibleNom?: string | null
   onCibleConsommee?: () => void
-  /** Ouvre le détail stock d'une référence -- passé par MobileShell, qui
-   * bascule l'écran vers "Stock" avec cette référence pré-sélectionnée.
-   * Câblé ici sur les lignes d'articles des documents (CDC/PL/BL/BR/devis) :
-   * un tap sur une ligne emmène directement sur sa fiche stock. */
+  /** Ouvre le détail stock d'une référence -- passé par MobileShell. */
   onOpenStock?: (reference: string, designation: string) => void
 }) {
   const [allClients, setAllClients] = useState<ClientRow[] | null>(null)
@@ -327,9 +303,14 @@ export default function MobileClients({
   const [currentEmail, setCurrentEmail] = useState('')
   const [currentName, setCurrentName] = useState('')
   // null = pas encore résolu (on ne charge pas les clients tant que le
-  // périmètre n'est pas connu, pour ne jamais afficher par erreur la
-  // liste complète non filtrée le temps d'un aller-retour réseau).
+  // périmètre n'est pas connu).
   const [perimetre, setPerimetre] = useState<Perimetre | null>(null)
+
+  // ÉVOLUTION (2026-09-10) : filtre "Collaborateur" -- appliqué côté client
+  // sur la liste déjà restreinte au périmètre (allClients), donc sans
+  // rechargement. Options = collaborateurs du périmètre.
+  const { collaborateurs: collaborateursDisponibles, loading: collaborateursLoading } = useCollaborateursPerimetre(perimetre)
+  const [collaborateurFiltre, setCollaborateurFiltre] = useState('')
 
   useEffect(() => {
     let cancelled = false
@@ -359,12 +340,6 @@ export default function MobileClients({
   const [detail, setDetail] = useState<ClientDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
 
-  // ÉVOLUTION (2026-09-02) : "Alertes clients" -- chargé une fois,
-  // indépendamment de allClients/perimetre (client_alertes_historique
-  // n'a pas de notion de périmètre en base). alertesClientsRows filtre
-  // ensuite côté client sur les numéros présents dans allClients (déjà
-  // restreint au périmètre de l'utilisateur), pour ne pas remonter de
-  // clients hors périmètre dans les compteurs/listes.
   const [alertesClientsBrutes, setAlertesClientsBrutes] = useState<ClientAlerteRow[] | null>(null)
   const [alertesClientsOuvertes, setAlertesClientsOuvertes] = useState<ClientAlerteType | null>(null)
 
@@ -383,10 +358,6 @@ export default function MobileClients({
         return
       }
       const rows: ClientAlerteRow[] = ((data || []) as any[])
-        // La tâche liée peut avoir été terminée/annulée depuis (voir
-        // trigger sync côté devis_transformations pour le même principe) --
-        // ou, plus rarement, avoir disparu -- dans les deux cas, l'alerte
-        // ne doit plus apparaître ici.
         .filter((r) => r.todo_actions && !['Terminé', 'Annulé'].includes(String(r.todo_actions.status || '')))
         .map((r) => ({
           id: String(r.id),
@@ -403,11 +374,19 @@ export default function MobileClients({
     return () => { cancelled = true }
   }, [])
 
+  /** Liste effectivement visible : périmètre (allClients) puis filtre
+   * collaborateur. Sert de base aux stats, à la recherche et aux alertes. */
+  const clientsVisibles = useMemo(() => {
+    if (!allClients) return null
+    if (!collaborateurFiltre) return allClients
+    return allClients.filter((c) => collaborateurMatches(c.collaborateur, collaborateurFiltre))
+  }, [allClients, collaborateurFiltre])
+
   const alertesClientsRows = useMemo(() => {
-    if (!alertesClientsBrutes || !allClients) return null
-    const numerosAutorises = new Set(allClients.map((c) => c.numero))
+    if (!alertesClientsBrutes || !clientsVisibles) return null
+    const numerosAutorises = new Set(clientsVisibles.map((c) => c.numero))
     return alertesClientsBrutes.filter((r) => numerosAutorises.has(r.numeroTiers))
-  }, [alertesClientsBrutes, allClients])
+  }, [alertesClientsBrutes, clientsVisibles])
 
   const alertesClientsCounts = useMemo(() => {
     if (!alertesClientsRows) return null
@@ -416,9 +395,6 @@ export default function MobileClients({
     return counts
   }, [alertesClientsRows])
 
-  /** Marque directement la tâche liée comme Terminée depuis cette liste,
-   * sans passer par la fiche client -- retire l'alerte localement, pas
-   * besoin de recharger toute la liste. */
   async function terminerAlerteClient(row: ClientAlerteRow) {
     const { error } = await supabase
       .from('todo_actions')
@@ -432,9 +408,6 @@ export default function MobileClients({
   }
 
   useEffect(() => {
-    // On attend que le périmètre soit résolu (voir loadIdentity ci-dessus)
-    // avant de charger quoi que ce soit -- évite un premier rendu avec la
-    // liste complète non filtrée pendant la résolution du périmètre.
     if (!perimetre) return
 
     let cancelled = false
@@ -483,25 +456,25 @@ export default function MobileClients({
   }, [perimetre])
 
   const stats = useMemo(() => {
-    if (!allClients) return { total: null as number | null, nouveaux: null as number | null, parProfil: null as { label: string; count: number }[] | null }
+    if (!clientsVisibles) return { total: null as number | null, nouveaux: null as number | null, parProfil: null as { label: string; count: number }[] | null }
     const ys = yearStartIso()
-    const nouveaux = allClients.filter((c) => c.dateCreationIso && c.dateCreationIso >= ys).length
+    const nouveaux = clientsVisibles.filter((c) => c.dateCreationIso && c.dateCreationIso >= ys).length
     const counts = new Map<CaBand, number>()
-    allClients.forEach((c) => counts.set(c.band, (counts.get(c.band) || 0) + 1))
+    clientsVisibles.forEach((c) => counts.set(c.band, (counts.get(c.band) || 0) + 1))
     const parProfil = CA_PROFILE_BANDS
       .map((band) => ({ label: band, count: counts.get(band) || 0 }))
       .filter((p) => p.count > 0)
-    return { total: allClients.length, nouveaux, parProfil }
-  }, [allClients])
+    return { total: clientsVisibles.length, nouveaux, parProfil }
+  }, [clientsVisibles])
 
   const results = useMemo(() => {
-    if (!allClients) return []
+    if (!clientsVisibles) return []
     const term = search.trim().toLowerCase()
     if (!term) return []
-    return allClients
+    return clientsVisibles
       .filter((c) => c.numero.toLowerCase().includes(term) || c.nom.toLowerCase().includes(term))
       .slice(0, 40)
-  }, [allClients, search])
+  }, [clientsVisibles, search])
 
   useEffect(() => {
     if (!cibleNumero || !allClients) return
@@ -552,31 +525,11 @@ export default function MobileClients({
           .limit(600),
         supabase
           .from('devis_lignes')
-          // CORRECTIF : sélectionnait jusqu'ici reference_client (colonne
-          // 100% vide sur toute la table -- vérifié : 0 valeur non nulle
-          // sur 843 003 lignes) au lieu de reference, qui porte la vraie
-          // référence chantier (ex. "YACHVILI EXE5"), déjà utilisée telle
-          // quelle côté activite_lignes pour les CDC/PL/BL/BR ci-dessus.
-          // La "Référence chantier" affichée sur une fiche devis était
-          // donc systématiquement vide.
-          //
-          // CORRECTIF : aucun filtre type_document n'était appliqué --
-          // devis_lignes contient aussi les lignes de commande/PL/BL/BR
-          // liées (colonnes numero_piece_bc, numero_piece_bl...), donc la
-          // section "Devis" pouvait afficher des pièces d'un autre type.
           .select('numero_piece,reference,date_devis,reference_article,designation,quantite,montant_ht')
           .eq('numero_tiers_entete', client.numero)
           .eq('type_document', 'Devis')
           .order('date_devis', { ascending: false })
           .limit(300),
-        // ÉVOLUTION : seuls les devis pas encore transformés en commande
-        // ni facturés doivent s'afficher -- ces deux requêtes récupèrent
-        // les numéros de devis déjà "consommés" (via numero_piece_devis,
-        // rempli sur les lignes de commande de devis_lignes et sur
-        // facture_lignes quand Sage a conservé le lien vers le devis
-        // d'origine), pour les exclure ci-dessous. Absence de lien = on
-        // ne peut pas savoir, le devis reste affiché plutôt que d'être
-        // masqué à tort.
         supabase
           .from('devis_lignes')
           .select('numero_piece_devis')
@@ -615,12 +568,6 @@ export default function MobileClients({
           .select('adresse,complement_adresse,code_postal,ville,telephone')
           .eq('numero', client.numero)
           .maybeSingle(),
-        // CORRECTIF : dernière/prochaine visite venaient uniquement de
-        // crm_base_activity (RDV synchronisés BLG), donc invisibles pour
-        // les RDV "compagnon CEGECLIM" (créés dans l'app, indépendants de
-        // BLG/Outlook -- table rdv_compagnon). v_rdv_unifie combine les
-        // deux sources par numero_tiers, comme déjà fait dans
-        // MobileRdv.tsx -- même requête reprise ici.
         supabase
           .from('v_rdv_unifie')
           .select('rdv_id,source,blg_activity_id,compagnon_id,type,subject,start_date,end_date,all_day')
@@ -635,9 +582,6 @@ export default function MobileClients({
           .gte('start_date', nowIso)
           .order('start_date', { ascending: true })
           .limit(1),
-        // ÉVOLUTION : documents (devis/commandes) avec un traitement "à
-        // traiter" en cours -- pour le badge dans la liste et l'affichage
-        // enrichi dans openDocDetail (voir DevisTransformation).
         supabase
           .from('devis_transformations')
           .select('id, type_document, numero_piece_devis_origine, statut, motif, date_livraison_souhaitee, reference_chantier_demandee, created_by_name, created_at')
@@ -654,11 +598,6 @@ export default function MobileClients({
       if (visitePasseeRes.error) loadErrors.push(visitePasseeRes.error.message)
       if (visiteFutureRes.error) loadErrors.push(visiteFutureRes.error.message)
       if (transformationsRes.error) loadErrors.push(transformationsRes.error.message)
-      // Les deux requêtes d'exclusion (devisConvertisBcRes/FactureRes) ne
-      // sont volontairement pas remontées dans loadErrors : une erreur
-      // dessus ne doit pas bloquer l'affichage de la fiche, juste
-      // désactiver l'exclusion (le filtre ci-dessous les traite comme des
-      // listes vides en cas d'erreur, via `.data || []`).
       if (devisConvertisBcRes.error) console.warn('[MobileClients] lecture devis->commande impossible :', devisConvertisBcRes.error.message)
       if (devisConvertisFactureRes.error) console.warn('[MobileClients] lecture devis->facture impossible :', devisConvertisFactureRes.error.message)
 
@@ -670,9 +609,6 @@ export default function MobileClients({
       const livraisons = aggregateByDocument(byType('Bon de livraison'), ['date_bl', 'date_piece'])
       const retours = aggregateByDocument(byType('Bon de retour'), ['date_bl', 'date_piece'])
 
-      // ÉVOLUTION : ne garder que les devis pas encore transformés en
-      // commande ni facturés -- exclusion via les numéros de devis déjà
-      // référencés (numero_piece_devis) côté commande/facture.
       const numerosDevisConvertis = new Set<string>([
         ...((devisConvertisBcRes.data || []) as Array<{ numero_piece_devis: string | null }>).map((r) => safeText(r.numero_piece_devis)),
         ...((devisConvertisFactureRes.data || []) as Array<{ numero_piece_devis: string | null }>).map((r) => safeText(r.numero_piece_devis)),
@@ -839,6 +775,13 @@ export default function MobileClients({
         }}
       />
 
+      <MobileCollaborateurFilter
+        value={collaborateurFiltre}
+        options={collaborateursDisponibles}
+        loading={collaborateursLoading}
+        onChange={setCollaborateurFiltre}
+      />
+
       {clientsError && (
         <div style={{ fontSize: 12.5, color: '#e0a685' }}>
           Impossible de charger la base clients (synthese_multi_clients_cache) : {clientsError}
@@ -848,7 +791,7 @@ export default function MobileClients({
       {!search.trim() && (
         <>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-            <StatCard label="Clients" value={stats.total} />
+            <StatCard label={collaborateurFiltre ? `Clients · ${formatCollaborateurCourt(collaborateurFiltre)}` : 'Clients'} value={stats.total} />
             <StatCard label="Nouveaux (année)" value={stats.nouveaux} />
           </div>
 
@@ -885,9 +828,6 @@ export default function MobileClients({
             )}
           </div>
 
-          {/* ÉVOLUTION (2026-09-02) : "Alertes clients" -- un compteur par
-             règle de suivi (voir ClientAlerteType ci-dessus), cliquable
-             pour ouvrir la liste des clients concernés. */}
           <div
             style={{
               borderRadius: 14,
@@ -1015,10 +955,12 @@ export default function MobileClients({
 
       {search.trim() && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {allClients === null ? (
+          {clientsVisibles === null ? (
             <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)' }}>Chargement…</div>
           ) : results.length === 0 ? (
-            <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)' }}>Aucun client trouvé.</div>
+            <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)' }}>
+              Aucun client trouvé{collaborateurFiltre ? ` pour ${collaborateurFiltre}` : ''}.
+            </div>
           ) : (
             results.map((c) => (
               <button
@@ -1057,7 +999,7 @@ function StatCard({ label, value }: { label: string; value: number | null }) {
         padding: '12px 14px',
       }}
     >
-      <div style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
+      <div style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
         {label}
       </div>
       <div style={{ fontFamily: 'var(--font-mono)', fontSize: 23, fontWeight: 600, color: '#fff', marginTop: 4 }}>
@@ -1094,11 +1036,6 @@ function ClientDetailScreen({
   currentName: string
   onBack: () => void
   onActionSaved: (updated: TaskRow) => void
-  /** ÉVOLUTION : création manuelle (ou vocale) d'une tâche directement
-   * depuis la fiche client -- voir bouton "+ Tâche" à côté du nom du
-   * client et NouvelleTacheSheet ci-dessous. La tâche est immédiatement
-   * ajoutée à la liste locale detail.actions (même mécanique que
-   * onActionSaved) pour éviter de recharger toute la fiche. */
   onTaskCreated: (created: ActionRow) => void
   onOpenStock?: (reference: string, designation: string) => void
 }) {
@@ -1108,27 +1045,13 @@ function ClientDetailScreen({
   const [navigationVers, setNavigationVers] = useState<{ adresse: string; lat?: number | null; lon?: number | null } | null>(null)
   const [appelVers, setAppelVers] = useState<string | null>(null)
   const [nouvelleTacheOuverte, setNouvelleTacheOuverte] = useState(false)
-  // ÉVOLUTION (2026-09-02) : même principe que "+ Tâche" mais pour créer
-  // un RDV avec ce client déjà préselectionné -- réutilise NouveauRdvSheet
-  // (exporté depuis MobileRdv.tsx) au lieu de dupliquer le formulaire.
   const [nouveauRdvOuvert, setNouveauRdvOuvert] = useState(false)
-  // ÉVOLUTION : "décision client sur devis" -- voir DevisTransformation*
-  // ci-dessus. devisATraiter ouvre le formulaire de composition à partir
-  // d'un devis donné ; transformationsOuvertes/transformations gèrent la
-  // liste "Devis à transformer en CDC" déjà générés pour ce client
-  // (chargée à la demande, comme tachesTerminees).
   const [devisATraiter, setDevisATraiter] = useState<DocAgrege | null>(null)
   const [transformationsOuvertes, setTransformationsOuvertes] = useState(false)
   const [transformations, setTransformations] = useState<DevisTransformation[] | null>(null)
   const [transformationsLoading, setTransformationsLoading] = useState(false)
-  // ÉVOLUTION : modification d'une commande (date de livraison souhaitée /
-  // référence chantier) -- même mécanique que devisATraiter mais pour les
-  // commandes (CommandeModificationSheet ci-dessous).
   const [commandeAModifier, setCommandeAModifier] = useState<DocAgrege | null>(null)
 
-  /** Documents (devis ou commandes) avec un traitement "à traiter" en
-   * cours, indexés par numéro de pièce -- pour le badge dans les listes
-   * et l'enrichissement de la fiche du document dans openDocDetail. */
   const transformationsParPiece = useMemo(() => {
     const map: Record<string, DevisTransformation> = {}
     for (const t of detail?.transformationsEnCours || []) {
@@ -1137,15 +1060,6 @@ function ClientDetailScreen({
     return map
   }, [detail?.transformationsEnCours])
 
-  // ÉVOLUTION : alertes de suivi paramétrables par client (nb d'appels/
-  // visites min par mois, nb de jours sans devis, nb de jours sans
-  // commande) -- lues/écrites via get_client_alertes_config /
-  // upsert_client_alertes_config. Un contrôle quotidien côté base (cron)
-  // évalue ces seuils pour tous les clients paramétrés et crée une tâche
-  // dans todo_actions (due_date = jour de création, mission_project =
-  // "Alerte suivi client") quand un seuil est dépassé -- rien à faire ici
-  // pour la création de la tâche elle-même, cet écran ne gère que le
-  // paramétrage des seuils.
   const [alertesConfig, setAlertesConfig] = useState<{
     min_appels_visites_mois: number | null
     max_jours_sans_devis: number | null
@@ -1153,10 +1067,6 @@ function ClientDetailScreen({
   } | null>(null)
   const [alertesSaving, setAlertesSaving] = useState(false)
   const [alertesSaved, setAlertesSaved] = useState(false)
-  // ÉVOLUTION (2026-09-02) : pavé replié par défaut -- réduit l'encombrement
-  // de la fiche client (le pavé était bien positionné mais toujours
-  // déplié, prenait de la place même pour un client sans seuil particulier
-  // à ajuster). Se déplie au tap sur l'en-tête.
   const [alertesOuvertes, setAlertesOuvertes] = useState(false)
 
   useEffect(() => {
@@ -1203,10 +1113,6 @@ function ClientDetailScreen({
     }
   }
 
-  // ÉVOLUTION : historique des tâches terminées sur les 6 derniers mois --
-  // chargé uniquement au clic (pas au chargement de la fiche), pour ne pas
-  // alourdir l'ouverture d'un client avec une requête dont on n'a pas
-  // toujours besoin.
   const [tachesTermineesOuvertes, setTachesTermineesOuvertes] = useState(false)
   const [tachesTerminees, setTachesTerminees] = useState<TacheTermineeRow[] | null>(null)
   const [tachesTermineesLoading, setTachesTermineesLoading] = useState(false)
@@ -1241,10 +1147,6 @@ function ClientDetailScreen({
     )
   }
 
-  /** Charge la liste des documents "à traiter" (devis à transformer en
-   * CDC, commandes à modifier dans l'ERP) déjà générés pour ce client,
-   * tous statuts confondus -- appelé au clic sur la section dédiée, pas
-   * au chargement de la fiche. */
   async function ouvrirTransformations() {
     setTransformationsOuvertes(true)
     setTransformationsLoading(true)
@@ -1275,12 +1177,6 @@ function ClientDetailScreen({
     )
   }
 
-  /** Détail (lecture) d'un document "à traiter" déjà généré -- branche
-   * l'affichage selon le type : lignes (conservées/supprimées/nouvelles)
-   * pour un devis, champs d'en-tête (date livraison / référence chantier)
-   * pour une commande. Un bouton permet de marquer le document comme
-   * traité manuellement (en plus du passage automatique par le trigger
-   * DB quand la tâche liée est clôturée -- voir migration). */
   async function openTransformationDetail(t: DevisTransformation) {
     async function marquerTransforme() {
       const { error: err } = await supabase
@@ -1364,11 +1260,6 @@ function ClientDetailScreen({
     })
   }
 
-  /** ÉVOLUTION : si un traitement "à traiter" existe déjà pour ce document
-   * (devis ou commande, voir transformationsParPiece), la fiche affiche
-   * en plus les lignes modifiées/supprimées/ajoutées (pour un devis) ou
-   * les nouvelles valeurs demandées (pour une commande), et le bouton
-   * d'action pointe vers ce traitement au lieu d'en proposer un nouveau. */
   async function openDocDetail(d: DocAgrege, type: string) {
     const enCours = transformationsParPiece[d.numeroPiece]
     const estDevisAvecTraitement = type === 'Devis' && enCours && enCours.typeDocument === 'devis'
@@ -1399,25 +1290,7 @@ function ClientDetailScreen({
       { label: 'Date', value: formatDateFr(d.date) },
       { label: 'Référence chantier', value: d.reference || '—' },
       { label: 'Montant total HT', value: formatMoney(d.montantHt) },
-      // Lignes d'articles : tap -> détail stock de la référence (si
-      // onOpenStock a été fourni par MobileShell). Une ligne sans
-      // référence exploitable (rare, ligne de texte libre) reste non
-      // cliquable plutôt que d'ouvrir une fiche stock vide.
-      //
-      // NOTE ordre des lignes : aucune colonne d'ordre fiable n'existe
-      // dans devis_lignes/activite_lignes pour l'historique importé en
-      // masse (CSV/Excel) -- le seul vrai numéro de ligne Sage
-      // (vl_dlno) n'existe que dans sage.devis_hier_aujourdhui /
-      // sage.activite_non_facturee, limités aux pièces d'hier/
-      // aujourd'hui. Les lignes restent donc ici dans l'ordre renvoyé
-      // par la requête, qui ne reflète pas forcément l'ordre Sage --
-      // non résolu tant que le pipeline d'import ne capture pas ce
-      // numéro de ligne à la source.
       ...d.lignes.map((l) => {
-        // Une ligne d'origine flaguée "à supprimer" dans le traitement en
-        // cours est signalée ici -- comparaison par référence+désignation
-        // (les lignes du devis n'ont pas d'identifiant stable partagé
-        // avec devis_transformation_lignes).
         const supprimee = lignesSupprimees.some((s) => s.referenceArticle === l.reference_article && s.designation === l.designation)
         return {
           label: `${supprimee ? '🗑 ' : ''}${l.reference_article || '—'}${l.designation ? ` — ${l.designation}` : ''}`,
@@ -1458,9 +1331,6 @@ function ClientDetailScreen({
         </button>
       )
     } else if (type === 'Devis') {
-      // ÉVOLUTION : uniquement pour les devis -- bouton pour composer le
-      // document "Devis à transformer en CDC" à partir de ce devis
-      // (décision prise par le client). Voir DevisTransformationSheet.
       footer = (
         <button
           type="button"
@@ -1475,9 +1345,6 @@ function ClientDetailScreen({
         </button>
       )
     } else if (type === 'Bon de commande') {
-      // ÉVOLUTION : modifier la date de livraison souhaitée et/ou la
-      // référence chantier d'une commande -- génère une tâche ERP + un
-      // document dans la même table que les devis à transformer.
       footer = (
         <button
           type="button"
@@ -1509,8 +1376,6 @@ function ClientDetailScreen({
     const startDate = v.start ? new Date(v.start) : null
     const endDate = v.end ? new Date(v.end) : null
     const fmtTime = (d: Date | null) => (d ? d.toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '')
-    // L'id à transmettre pour lier un compte-rendu dépend de la source --
-    // v_rdv_unifie ne remplit que l'un des deux (voir type VisiteEvent).
     const activityId = v.source === 'compagnon' ? v.compagnonId : v.blgActivityId
     setOpenDetail({
       title: v.subject,
@@ -1556,9 +1421,6 @@ function ClientDetailScreen({
         <div>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
             <div style={{ fontSize: 20, fontWeight: 700, color: '#fff' }}>{client.nom || '(nom non renseigné)'}</div>
-            {/* Groupe d'actions à droite -- "+ Tâche" toujours visible (ne
-             * dépend pas du chargement du détail), contacts/adresse comme
-             * avant une fois le détail chargé. */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               {!loading && detail && (
                 <button
@@ -1980,12 +1842,7 @@ function ClientDetailScreen({
   )
 }
 
-/** ÉVOLUTION : création d'une tâche directement depuis la fiche client --
- * déjà affectée à ce client (numero_tiers pré-rempli, non modifiable) ;
- * deux façons de créer : saisie manuelle (description/échéance/assigné)
- * ou par la voix via VoiceReportButtons (bouton "Tâche vocale" déjà
- * utilisé ailleurs pour les comptes-rendus/tâches liés à un RDV -- ici
- * réutilisé sans rendez-vous associé, voir NOTE ci-dessous). */
+/** ÉVOLUTION : création d'une tâche directement depuis la fiche client. */
 function NouvelleTacheSheet({
   client, currentEmail, currentName, onClose, onCreated,
 }: {
@@ -2000,21 +1857,8 @@ function NouvelleTacheSheet({
   const [assignedTo, setAssignedTo] = useState(currentName)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
-  // ÉVOLUTION (2026-09-02) : la dictée vocale bascule désormais sur un
-  // calque plein écran dédié (même mécanique que MobileAlertes.tsx), au
-  // lieu d'intégrer VoiceReportButtons directement dans la sheet -- FIX
-  // du bouton flottant qui se superposait à l'en-tête de l'app faute de
-  // fond opaque derrière lui.
   const [modeVocal, setModeVocal] = useState(false)
-  // FIX (2026-09-02) : la textarea de description a `autoFocus`, donc le
-  // clavier iOS s'ouvre immédiatement à l'ouverture de la sheet. Sur iOS,
-  // `vh` ne se réduit PAS quand le clavier apparaît (bug connu de Safari),
-  // donc `maxHeight: '88vh'` restait calculé sur la hauteur pleine écran
-  // -- le bas de la sheet ("Tâche vocale", "Fermer") se retrouvait sous
-  // la barre d'accessoires du clavier, superposé/à moitié caché. On
-  // suit désormais window.visualViewport.height (qui, lui, reflète
-  // correctement l'espace visible au-dessus du clavier sur iOS) pour
-  // fixer une hauteur max dynamique à la place du 88vh statique.
+  // FIX (2026-09-02) : hauteur max dynamique via visualViewport (clavier iOS).
   const [hauteurMaxPx, setHauteurMaxPx] = useState<number | null>(null)
   useEffect(() => {
     const vv = (window as any).visualViewport as VisualViewport | undefined
@@ -2040,10 +1884,6 @@ function NouvelleTacheSheet({
           due_date: dueDate || null,
           assigned_to: assignedTo.trim() || null,
           status: 'Non débuté',
-          // FIX : created_by_email / created_by_name sont NOT NULL sur
-          // todo_actions (vérifié en base) -- oubliés dans une version
-          // précédente de cette sheet, ce qui aurait fait échouer tout
-          // insert de tâche manuelle.
           created_by_email: currentEmail,
           created_by_name: currentName,
         })
@@ -2132,16 +1972,6 @@ function NouvelleTacheSheet({
         </button>
       </div>
 
-      {/* ÉVOLUTION : calque plein écran dédié à la dictée vocale, avec un
-         fond opaque (contrairement à l'ancien embed inline) -- même
-         correctif que MobileAlertes.tsx : sans ce fond, le bouton
-         flottant de VoiceReportButtons se superposait à l'en-tête de
-         l'app derrière, illisible. NOTE : numeroTiers/clientNom sont
-         transmis pour que la tâche créée par la voix reste rattachée à ce
-         client, en plus de modeUnique/labelBouton/pleinEcran (mêmes props
-         que l'usage plein écran de MobileAlertes.tsx) -- à vérifier côté
-         VoiceReportButtons.tsx (non fourni) que la combinaison des deux
-         jeux de props est bien prise en compte. */}
       {modeVocal && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 280, background: '#0B1220' }}>
           <VoiceReportButtons
@@ -2171,21 +2001,7 @@ function NouvelleTacheSheet({
   )
 }
 
-/** ÉVOLUTION : composition du document "Devis à transformer en CDC" à
- * partir d'un devis existant, quand le client a pris sa décision. Trois
- * catégories de lignes possibles :
- * - les lignes du devis d'origine, conservées par défaut, que l'on peut
- *   flaguer "à supprimer" (toggle, pas de suppression physique -- la
- *   ligne est conservée avec origine='supprimee' dans le document généré,
- *   pour garder une trace de ce qui a été retiré) ;
- * - de nouvelles lignes ajoutées à la main, avec aide à la saisie de la
- *   référence article (autocomplete sur v_stock_articles_latest), une
- *   quantité et un taux de remise saisi manuellement (pas de calcul
- *   automatique -- choix explicite d'Arnaud, les taux de remise client
- *   n'étant pas centralisés en base).
- * À la validation : insert dans devis_transformations (statut initial
- * 'a_traiter') + toutes les lignes dans devis_transformation_lignes, puis
- * création d'une tâche todo_actions pour le suivi commercial. */
+/** ÉVOLUTION : composition du document "Devis à transformer en CDC". */
 function DevisTransformationSheet({
   client, devis, currentEmail, currentName, onClose, onCreated,
 }: {
@@ -2197,8 +2013,6 @@ function DevisTransformationSheet({
   onCreated: (task: ActionRow) => void
 }) {
   const [motif, setMotif] = useState('')
-  // Une entrée par ligne d'origine -- true = conservée (défaut), false =
-  // flaguée pour suppression.
   const [garder, setGarder] = useState<boolean[]>(() => devis.lignes.map(() => true))
 
   const [nouvelles, setNouvelles] = useState<{ reference: string; designation: string; quantite: number; tauxRemise: string }[]>([])
@@ -2263,10 +2077,6 @@ function DevisTransformationSheet({
       if (errTransfo) throw errTransfo
       const transformationId = transfo.id as string
 
-      // Numéro de ligne généré côté app (pas de numéro fiable en base,
-      // voir commentaire sur la migration) : reprend l'ordre du devis
-      // d'origine pour les lignes conservées/supprimées (1..N), puis
-      // continue la numérotation pour les nouvelles lignes.
       const lignesOrigine = devis.lignes.map((l, i) => ({
         transformation_id: transformationId,
         numero_ligne: i + 1,
@@ -2297,9 +2107,6 @@ function DevisTransformationSheet({
       const lignesSupprimeesDetail = lignesOrigine.filter((l) => l.origine === 'supprimee')
       const lignesNouvellesDetail = lignesNouvelles
 
-      // Commentaire détaillé de la tâche (colonne comment_progress) :
-      // motif saisi par l'utilisateur + détail des lignes supprimées et
-      // ajoutées, chacune référencée par son numéro de ligne généré.
       const commentaireParts: string[] = []
       if (motif.trim()) commentaireParts.push(`Motif : ${motif.trim()}`)
       if (lignesSupprimeesDetail.length > 0) {
@@ -2501,14 +2308,7 @@ function DevisTransformationSheet({
 }
 
 /** ÉVOLUTION : modification d'une commande (date de livraison souhaitée
- * et/ou référence chantier) -- même principe que DevisTransformationSheet
- * mais sans lignes : un document devis_transformations (type_document =
- * 'commande') porte les nouvelles valeurs demandées, et une tâche est
- * créée pour rappeler de reporter ce changement dans l'ERP (Sage), avec
- * l'ancienne et la nouvelle valeur en commentaire.
- * EXPORTÉ (2026-09-02) : signature en primitives (pas ClientRow/DocAgrege)
- * pour être réutilisable depuis MobileAlertes.tsx (écran "CDC < 2026"),
- * qui ne dispose que d'un CdcDocAgrege, pas d'un ClientRow/DocAgrege. */
+ * et/ou référence chantier). EXPORTÉ pour MobileAlertes.tsx. */
 export function CommandeModificationSheet({
   numeroTiers, nomClient, numeroPiece, referenceActuelle, currentEmail, currentName, onClose, onCreated,
 }: {
@@ -2721,10 +2521,6 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
-/** Couleur de pastille selon l'urgence de l'échéance -- même logique à 3
- * états que MobileTaskListSheet (rouge en retard / orange ≤ 4 j / vert
- * au-delà ou sans échéance), pour rester cohérent entre les deux écrans
- * où une tâche peut apparaître (liste "À faire" et fiche client). */
 function pastilleCouleurAction(dueDateIso: string): string {
   if (!dueDateIso) return '#3F9142'
   const today = new Date()
@@ -2737,13 +2533,6 @@ function pastilleCouleurAction(dueDateIso: string): string {
   return '#3F9142'
 }
 
-/** Ligne de tâche dédiée à la section "Actions" de la fiche client --
- * ÉVOLUTION : le titre retourne désormais à la ligne au lieu d'être coupé
- * hors de la carte ; le statut ("Non débuté"...) n'a plus d'intérêt pour
- * des tâches par définition toutes non terminées ici (la liste exclut déjà
- * Terminé/Annulé), remplacé par l'échéance dans la même police ; une
- * pastille de couleur reflète l'urgence de cette échéance, comme sur la
- * liste "À faire". */
 function TacheRowItem({ action, onClick }: { action: ActionRow; onClick: () => void }) {
   const dueIso = normalizeDateIso(action.due_date || '')
   return (
@@ -2775,13 +2564,6 @@ function TacheRowItem({ action, onClick }: { action: ActionRow; onClick: () => v
   )
 }
 
-/** ÉVOLUTION : nouvelle prop `reference`, affichée juste à côté du titre
- * (même taille/police que lui, couleur légèrement atténuée pour rester
- * lisiblement secondaire) au lieu d'être reléguée dans le sous-titre --
- * demande explicite : la référence chantier doit être visible d'un coup
- * d'œil à côté du numéro de pièce dans la liste, pas seulement une fois
- * la fiche ouverte. Utilisée par DocumentSection (BL/CDC/PL/BR/Devis) ;
- * les autres appelants (Actions) n'en ont simplement pas besoin. */
 function RowItem({
   title, reference, subtitle, trailing, badge, onClick,
 }: { title: string; reference?: string; subtitle?: string; trailing?: string; badge?: React.ReactNode; onClick?: () => void }) {
@@ -2825,12 +2607,6 @@ function RowItem({
   )
 }
 
-/** Pastille "traitement en cours" affichée devant le titre d'un devis ou
- * d'une commande qui a un document devis_transformations non transformé
- * (statut 'a_traiter') -- disparaît automatiquement une fois la tâche
- * liée clôturée (le trigger DB repasse le statut à 'transforme', et le
- * document sort de transformationsEnCours au prochain chargement de la
- * fiche). */
 function PastilleTraitement() {
   return (
     <span
@@ -2843,8 +2619,6 @@ function PastilleTraitement() {
   )
 }
 
-/** Champ "libellé + saisie numérique" pour un seuil d'alerte de suivi.
- * Vide = null = règle désactivée (pas de valeur par défaut imposée). */
 function AlerteSeuilField({
   label, value, onChange,
 }: { label: string; value: number | null; onChange: (v: number | null) => void }) {

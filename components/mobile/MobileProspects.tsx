@@ -2,11 +2,6 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import dynamic from 'next/dynamic'
-// CORRECTIF carte invisible : react-leaflet a besoin de son propre CSS pour
-// positionner les tuiles et donner une hauteur réelle au conteneur -- sans
-// cet import, la carte reste vide/collabsée même quand tout le reste
-// (position, requête, marqueurs) fonctionne. Le desktop doit le charger
-// globalement ailleurs dans l'app ; ce fichier mobile ne l'avait jamais.
 import 'leaflet/dist/leaflet.css'
 import { supabase } from '@/lib/supabaseClient'
 import { NavigationChoiceSheet, PhoneChoiceSheet } from './MobileActionSheets'
@@ -15,27 +10,20 @@ import { NavigationChoiceSheet, PhoneChoiceSheet } from './MobileActionSheets'
 // Version mobile de "Prospects autour de moi", branchée sur les mêmes
 // principes que la carte de l'écran Clients desktop (app/clients/page.tsx).
 //
-// v2 -> v3 :
-// - Requête basée sur les coordonnées Lambert93 (bien mieux renseignées que
-//   latitude/longitude), avec conversion à la volée -- corrige le "0
-//   prospect" quasi partout de la v1.
-// - leaflet.css importé -- corrige la carte invisible malgré des données
-//   chargées.
-// - Filtres étendus : capacité gaz et capital social, en plus de secteur/
-//   type d'activité, RGE et ancienneté -- disponibles avant la carte
-//   (options fixes, ne dépendent pas des données chargées) ET dans le
-//   tiroir une fois la carte affichée.
-// v4 : retrait des deux boutons de diagnostic ("🔧 Diagnostic recherche"
-//   sur l'écran liste, "🔧 Diagnostic" sur la carte) -- outils temporaires
-//   qui ont servi à identifier le bug de carte invisible (résolu ci-dessus
-//   par l'import leaflet.css) et le bug de correspondance CEGECLIM sur
-//   grand rayon (résolu par le découpage en lots de SIRET). Plus besoin
-//   une fois le diagnostic terminé.
-// v5 : ajout d'une recherche libre (désignation entreprise et/ou nom du
-//   gérant), insensible à la casse et aux accents -- s'applique en plus
-//   des autres filtres, sur liste et carte, sans recharger les données
-//   (filtrage côté client sur le lot déjà chargé, comme les autres
-//   filtres fixes).
+// v6 (2026-09-10) : PÉRIMÈTRE GÉOGRAPHIQUE DES AUTORISATIONS.
+//   Jusqu'ici cet écran ignorait complètement allowed_departements et
+//   allowed_codes_postaux de user_page_access. Règle appliquée désormais
+//   (même priorité que le desktop, "codes postaux prioritaires sur les
+//   départements", cf. hint de l'écran Autorisations) :
+//     - allowed_codes_postaux non vide -> seuls ces codes postaux sont
+//       affichables, quel que soit le département (cas d'un collaborateur
+//       qui a un département ET des codes postaux : la liste de codes
+//       postaux gagne) ;
+//     - sinon allowed_departements non vide -> ces départements ;
+//     - sinon aucune restriction (Administrateur).
+//   Appliqué en filtre SQL (codePostalEtablissement) ET côté client, en
+//   mode géolocalisé comme en mode département. Les raccourcis
+//   "Département" ne proposent que les départements du périmètre.
 // ─────────────────────────────────────────────────────────────────────────
 
 const MapContainer: any = dynamic(() => import('react-leaflet').then((m) => m.MapContainer as any), { ssr: false })
@@ -69,18 +57,10 @@ type ProspectRow = {
   capital_social: string | null
 }
 
-/** Fiche enrichie avec des coordonnées WGS84 garanties (natives ou
- * converties depuis Lambert93), prête pour affichage/calcul de distance. */
 type ProspectRowGeo = ProspectRow & {
   latEff: number
   lonEff: number
-  /** true si l'entreprise est déjà cliente CEGECLIM (trouvée dans ref_tiers
-   * par SIRET, active ou en sommeil) -- avant, ces fiches étaient
-   * simplement exclues ; l'écran "Carte Prospects & Clients" les affiche
-   * maintenant aussi, togglable via le filtre "Client CEGECLIM". */
   estClientCegeclim: boolean
-  /** Collaborateur en charge (ref_tiers.representant), uniquement pour
-   * les fiches déjà clientes -- null pour un prospect pur. */
   representant: string | null
 }
 
@@ -107,10 +87,9 @@ const PROSPECT_STATUS_OPTIONS: ProspectStatusValue[] = [
 ]
 
 const RADIUS_PRESETS_KM = [5, 10, 25, 50, 100]
-// Raccourcis pratiques (région d'activité habituelle) -- n'importe quel
-// autre département reste saisissable via le champ texte libre, ce n'est
-// pas une liste fermée.
-const DEPARTEMENTS_RACCOURCIS = ['85', '44', '49', '79', '17', '86']
+// Raccourcis par défaut (sans périmètre) -- remplacés par les départements
+// autorisés quand l'utilisateur a un périmètre géographique.
+const DEPARTEMENTS_RACCOURCIS_DEFAUT = ['85', '44', '49', '79', '17', '86']
 
 type AnciennetePreset = { key: string; label: string; maxDays: number | null }
 const ANCIENNETE_PRESETS: AnciennetePreset[] = [
@@ -120,9 +99,6 @@ const ANCIENNETE_PRESETS: AnciennetePreset[] = [
   { key: '3a', label: '< 3 ans', maxDays: 1095 },
 ]
 
-// Mêmes tranches que côté desktop (app/clients/page.tsx,
-// CAPITAL_SOCIAL_FILTER_OPTIONS) -- à garder synchronisées si elles changent
-// là-bas.
 type CapitalSocialOption = 'NC' | '<= 1 000€' | '>1 000€' | '>5000€' | '>9999€'
 const CAPITAL_SOCIAL_OPTIONS: CapitalSocialOption[] = ['NC', '<= 1 000€', '>1 000€', '>5000€', '>9999€']
 
@@ -149,9 +125,6 @@ function matchesCapitalSocial(value: string | null | undefined, selected: Set<Ca
   })
 }
 
-// Mêmes secteurs suivis et mêmes couleurs que côté desktop
-// (app/clients/page.tsx, TRACKED_SECTORS) -- à garder synchronisés si
-// la liste évolue là-bas.
 type TrackedSectorDefinition = { prefixes: string[]; label: string; color: string }
 const TRACKED_SECTORS: TrackedSectorDefinition[] = [
   { prefixes: ['43.21', '4321'], label: 'Electricité ENR', color: '#a2cc88' },
@@ -188,9 +161,6 @@ function normalizeSiret(value: unknown): string {
   return String(value ?? '').replace(/\D/g, '').trim()
 }
 
-/** Normalise un texte pour la recherche libre : minuscule, accents retirés,
- * espaces multiples réduits -- pour que "Général" matche "general" et
- * inversement, sans exiger une saisie exacte. */
 function normalizeTexte(value: string | null | undefined): string {
   return String(value || '')
     .normalize('NFD')
@@ -244,6 +214,35 @@ function formatDateFr(value: string | null | undefined): string {
 function formatAdresseComplete(row: Pick<ProspectRow, 'adresse_complete' | 'codePostalEtablissement' | 'libelleCommuneEtablissement'>): string {
   if (row.adresse_complete && row.adresse_complete.trim()) return row.adresse_complete.trim()
   return [row.codePostalEtablissement, row.libelleCommuneEtablissement].filter(Boolean).join(' ')
+}
+
+// ── Périmètre géographique (autorisations) ─────────────────────────────
+type PerimetreGeo =
+  | { mode: 'aucun'; valeurs: string[] }
+  | { mode: 'departements'; valeurs: string[] }
+  | { mode: 'codes_postaux'; valeurs: string[] }
+
+function parseListeAutorisation(value: unknown): string[] {
+  const brut = Array.isArray(value)
+    ? value.map((v) => String(v ?? '').trim())
+    : String(value ?? '').split(/[;,|\n]+/).map((v) => v.trim())
+  const ignores = ['', 'global', 'tous', 'tout', 'all', '*', '[]', '{}', 'null', 'none', 'aucune']
+  return Array.from(new Set(brut.filter((v) => !ignores.includes(v.toLowerCase()))))
+}
+
+/** Département d'un code postal (2 chiffres, ou 3 pour l'outre-mer 97x/98x). */
+function departementDuCodePostal(cp: string): string {
+  const c = String(cp || '').replace(/\D/g, '')
+  if (!c) return ''
+  return c.startsWith('97') || c.startsWith('98') ? c.slice(0, 3) : c.slice(0, 2)
+}
+
+function codePostalDansPerimetre(cp: string | null | undefined, perimetre: PerimetreGeo): boolean {
+  if (perimetre.mode === 'aucun') return true
+  const code = String(cp || '').trim()
+  if (!code) return false
+  if (perimetre.mode === 'codes_postaux') return perimetre.valeurs.includes(code)
+  return perimetre.valeurs.some((d) => code.startsWith(d))
 }
 
 // ── Projection Lambert93 (RGF93) <-> WGS84 ─────────────────────────────
@@ -310,36 +309,61 @@ export default function MobileProspects() {
   const [position, setPosition] = useState<UserPosition | null>(null)
   const [locating, setLocating] = useState(false)
   const [geoError, setGeoError] = useState<string | null>(null)
-  // Géolocalisation rendue optionnelle : par défaut activée (comportement
-  // inchangé), mais désactivable -- dans ce cas la recherche ne dépend
-  // plus d'un rayon autour d'une position, mais du filtre "Département"
-  // (ou de rien du tout si aucun département n'est choisi non plus,
-  // auquel cas toute la base suivie est interrogée, avec une limite de
-  // sécurité). La vue "Carte" nécessite toujours une position réelle pour
-  // avoir un centre : désactivée quand la géolocalisation est éteinte.
   const [geolocalisationActivee, setGeolocalisationActivee] = useState(true)
   const [departementFiltre, setDepartementFiltre] = useState('')
 
-  // Filtres réglés AVANT d'afficher la carte -- tous à options fixes,
-  // aucun ne dépend des données chargées (contrairement au secteur, qui
-  // n'est connu qu'une fois les résultats arrivés).
+  // v6 : périmètre géographique lu depuis user_page_access -- null tant
+  // que non résolu (on ne charge aucun prospect avant, pour ne jamais
+  // afficher par erreur des fiches hors périmètre).
+  const [perimetreGeo, setPerimetreGeo] = useState<PerimetreGeo | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    async function charger() {
+      const { data: sessionData } = await supabase.auth.getSession()
+      const email = sessionData.session?.user?.email?.toLowerCase()
+      if (cancelled) return
+      if (!email) { setPerimetreGeo({ mode: 'aucun', valeurs: [] }); return }
+      const { data, error } = await supabase
+        .from('user_page_access')
+        .select('allowed_departements, allowed_codes_postaux')
+        .ilike('email', email)
+        .maybeSingle()
+      if (cancelled) return
+      if (error) {
+        console.warn('[MobileProspects] périmètre géographique illisible :', error.message)
+        setPerimetreGeo({ mode: 'aucun', valeurs: [] })
+        return
+      }
+      const codesPostaux = parseListeAutorisation(data?.allowed_codes_postaux)
+      const departements = parseListeAutorisation(data?.allowed_departements)
+      // Codes postaux prioritaires sur les départements (règle 2026-09-10).
+      if (codesPostaux.length > 0) setPerimetreGeo({ mode: 'codes_postaux', valeurs: codesPostaux })
+      else if (departements.length > 0) setPerimetreGeo({ mode: 'departements', valeurs: departements })
+      else setPerimetreGeo({ mode: 'aucun', valeurs: [] })
+    }
+    void charger()
+    return () => { cancelled = true }
+  }, [])
+
+  // Départements proposés en raccourci : ceux du périmètre s'il y en a un
+  // (déduits des codes postaux le cas échéant), sinon la liste par défaut.
+  const departementsRaccourcis = useMemo(() => {
+    if (!perimetreGeo || perimetreGeo.mode === 'aucun') return DEPARTEMENTS_RACCOURCIS_DEFAUT
+    if (perimetreGeo.mode === 'departements') return [...perimetreGeo.valeurs].sort()
+    return Array.from(new Set(perimetreGeo.valeurs.map(departementDuCodePostal).filter(Boolean))).sort()
+  }, [perimetreGeo])
+
   const [filtresValides, setFiltresValides] = useState(false)
   const [radiusKm, setRadiusKm] = useState(25)
   const [rgeSeul, setRgeSeul] = useState(false)
   const [capaciteGazSeul, setCapaciteGazSeul] = useState(false)
-  const [ancienneteMax, setAncienneteMax] = useState<AnciennetePreset>(ANCIENNETE_PRESETS[0]) // "Tout" par défaut
+  const [ancienneteMax, setAncienneteMax] = useState<AnciennetePreset>(ANCIENNETE_PRESETS[0])
   const [capitalSocialActifs, setCapitalSocialActifs] = useState<Set<CapitalSocialOption>>(new Set())
-  // Le pavé d'accueil s'appelle désormais "Carte Prospects & Clients" :
-  // l'écran affiche maintenant les deux catégories, chacune togglable
-  // indépendamment (avant : les clients CEGECLIM étaient toujours exclus
-  // sans possibilité de les afficher).
   const [afficherProspects, setAfficherProspects] = useState(true)
   const [afficherClients, setAfficherClients] = useState(true)
   const [collaborateurFiltre, setCollaborateurFiltre] = useState('')
   const [collaborateursDisponibles, setCollaborateursDisponibles] = useState<string[]>([])
-  // Recherche libre (désignation entreprise et/ou nom du gérant) -- ne
-  // déclenche aucun rechargement réseau, filtre côté client comme les
-  // autres filtres fixes (secteur, RGE, capital social...).
   const [rechercheLibre, setRechercheLibre] = useState('')
 
   const [secteursActifs, setSecteursActifs] = useState<Set<string>>(new Set())
@@ -395,9 +419,6 @@ export default function MobileProspects() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Liste des collaborateurs pour le filtre "Collaborateur" -- chargée une
-  // seule fois (liste de référence indépendante du rayon/position), à
-  // partir des clients CEGECLIM déjà connus en base (ref_tiers.representant).
   useEffect(() => {
     let cancelled = false
     async function charger() {
@@ -414,14 +435,6 @@ export default function MobileProspects() {
     return () => { cancelled = true }
   }, [])
 
-  // CORRECTIF carte blanche (résolu -- import leaflet.css en tête de
-  // fichier) : Leaflet mesurait son conteneur à hauteur nulle au montage
-  // tant que la cascade CSS "flex:1 -> height:100%" ne s'était pas
-  // stabilisée. Solution robuste conservée : on mesure la hauteur RÉELLE
-  // du conteneur en pixels via JS, et on ne monte MapContainer qu'une fois
-  // cette mesure disponible, avec cette valeur fixe en pixels (pas de
-  // pourcentage) -- Leaflet reçoit alors une hauteur définitive dès son
-  // tout premier rendu.
   useEffect(() => {
     if (vue !== 'carte' || !filtresValides || !position) {
       setMapHeightPx(0)
@@ -433,9 +446,6 @@ export default function MobileProspects() {
       if (h > 0) setMapHeightPx(Math.round(h))
     }
 
-    // Mesure immédiate + une seconde passe après le premier paint (au cas
-    // où la toute première mesure tombe encore avant la stabilisation du
-    // flex), + un écouteur resize pour suivre les rotations d'écran.
     mesurer()
     const t = window.setTimeout(mesurer, 150)
     window.addEventListener('resize', mesurer)
@@ -448,13 +458,10 @@ export default function MobileProspects() {
 
   useEffect(() => {
     if (!filtresValides) return
-    // Si la géolocalisation est activée, on attend une position avant de
-    // charger quoi que ce soit (comme avant). Si elle est désactivée, on
-    // charge sans attendre -- la recherche repose alors sur le département
-    // (ou sur toute la base suivie si aucun département n'est choisi non
-    // plus).
+    if (!perimetreGeo) return
     if (geolocalisationActivee && !position) return
     let cancelled = false
+    const perimetre = perimetreGeo
 
     async function charger() {
       setLoading(true)
@@ -465,13 +472,14 @@ export default function MobileProspects() {
 
         let requete = supabase.from('clients').select(champs)
 
+        // v6 : périmètre géographique appliqué en SQL, avant tout le reste.
+        if (perimetre.mode === 'codes_postaux') {
+          requete = requete.in('codePostalEtablissement', perimetre.valeurs)
+        } else if (perimetre.mode === 'departements') {
+          requete = requete.or(perimetre.valeurs.map((d) => `codePostalEtablissement.ilike.${d}%`).join(','))
+        }
+
         if (geolocalisationActivee && position) {
-          // Mode géolocalisé : boîte Lambert93 autour de la position, comme
-          // avant. BUG CORRIGÉ précédemment : cette requête n'avait aucun
-          // tri, avec une limite à 3000 -- la boîte grandit avec le rayon
-          // (environ ×4 en surface pour un rayon doublé), et sans tri,
-          // PostgREST pouvait couper arbitrairement des lignes pourtant
-          // plus proches. Limite remontée à 20000.
           const { x: x0, y: y0 } = wgs84ToLambert93(position.lat, position.lng)
           const rayonM = radiusKm * 1000
           requete = requete
@@ -483,12 +491,6 @@ export default function MobileProspects() {
             .lte('coordonneeLambertOrdonneeEtablissement', y0 + rayonM)
             .limit(20000)
         } else {
-          // Mode sans géolocalisation : pas de boîte géographique -- on
-          // filtre directement par département en base si renseigné
-          // (beaucoup plus efficace que de tout charger puis filtrer côté
-          // client), sinon on interroge toute la base suivie avec une
-          // limite de sécurité raisonnable (le volume total suivi tourne
-          // autour de quelques milliers de lignes, largement en dessous).
           if (departementFiltre.trim()) {
             requete = requete.ilike('codePostalEtablissement', `${departementFiltre.trim()}%`)
           }
@@ -500,28 +502,12 @@ export default function MobileProspects() {
         if (cancelled) return
         if (error) throw error
         if (data && data.length >= 20000) {
-          console.warn(
-            '[MobileProspects] La requête a atteint la limite de 20000 lignes -- des résultats pourraient encore manquer sur un très grand rayon dans une zone très dense. Augmenter la limite si ça se reproduit.',
-          )
+          console.warn('[MobileProspects] La requête a atteint la limite de 20000 lignes -- des résultats pourraient manquer.')
         }
 
         const rawRows = (data || []) as ProspectRow[]
 
         const siretsEnvisages = Array.from(new Set(rawRows.map((r) => normalizeSiret(r.siret)).filter(Boolean)))
-        // Map siret -> representant plutôt qu'un simple Set : on n'exclut
-        // plus les clients CEGECLIM ici, on les annote pour que
-        // prospectsFiltres puisse les inclure/exclure dynamiquement selon
-        // les filtres "Client CEGECLIM" / "Collaborateur" (togglables sans
-        // recharger les données).
-        //
-        // BUG CORRIGÉ : sur un grand rayon (ex. 2107 candidats bruts à
-        // 50 km), un seul .in('siret', [...]) avec autant de valeurs
-        // produit une URL de dizaines de Ko -- au-delà de ce que la
-        // plupart des serveurs/proxys acceptent (souvent ~8 Ko). La
-        // requête échouait silencieusement, laissant la correspondance
-        // CEGECLIM entièrement vide. Découpage en lots de 200 SIRET, en
-        // parallèle, pour rester largement sous toute limite d'URL quel
-        // que soit le nombre de candidats.
         let clientsCegeclimParSiret = new Map<string, string | null>()
         if (siretsEnvisages.length > 0) {
           const TAILLE_LOT = 200
@@ -556,6 +542,9 @@ export default function MobileProspects() {
         const rows: ProspectRowGeo[] = []
         for (const r of rawRows) {
           if (String(r.etatAdministratifUniteLegale || '').trim().toUpperCase() === 'C') continue
+          // Sécurité côté client sur le périmètre (le filtre SQL fait déjà
+          // le tri, ceci couvre les codes postaux mal formés).
+          if (!codePostalDansPerimetre(r.codePostalEtablissement, perimetre)) continue
 
           const siret = normalizeSiret(r.siret)
           const estClientCegeclim = siret ? clientsCegeclimParSiret.has(siret) : false
@@ -564,13 +553,6 @@ export default function MobileProspects() {
           const coords = coordonneesEffectives(r)
           if (!coords) continue
 
-          // Le filtre de distance exacte ne s'applique qu'en mode
-          // géolocalisé actif -- BUG CORRIGÉ : la condition était juste
-          // `if (position)`, or la position se charge automatiquement dès
-          // le montage de l'écran, indépendamment de l'interrupteur
-          // "Géolocalisation". Résultat : même désactivée, ce filtre
-          // continuait de s'appliquer avec le rayon en cours, empêchant de
-          // voir un département éloigné de la position réelle.
           if (geolocalisationActivee && position) {
             const dist = distanceKmWgs84(position.lat, position.lng, coords.lat, coords.lon)
             if (dist > radiusKm) continue
@@ -589,13 +571,10 @@ export default function MobileProspects() {
 
     void charger()
     return () => { cancelled = true }
-  }, [position, filtresValides, radiusKm, geolocalisationActivee, departementFiltre])
+  }, [position, filtresValides, radiusKm, geolocalisationActivee, departementFiltre, perimetreGeo])
 
   const prospectsFiltres = useMemo(() => {
     return prospects.filter((p) => {
-      // Client CEGECLIM / Prospect : deux interrupteurs indépendants,
-      // pas un choix exclusif -- si les deux sont éteints, rien ne
-      // s'affiche (comportement attendu, pas un bug).
       if (p.estClientCegeclim) {
         if (!afficherClients) return false
         if (collaborateurFiltre && p.representant !== collaborateurFiltre) return false
@@ -663,8 +642,12 @@ export default function MobileProspects() {
     }
   }
 
-  // Bloc de filtres réutilisé (options fixes) sur l'écran d'avant-carte ET
-  // dans le tiroir sur la carte, pour rester cohérent.
+  const resumePerimetre = !perimetreGeo || perimetreGeo.mode === 'aucun'
+    ? null
+    : perimetreGeo.mode === 'codes_postaux'
+      ? `Codes postaux autorisés : ${perimetreGeo.valeurs.join(', ')}`
+      : `Départements autorisés : ${perimetreGeo.valeurs.join(', ')}`
+
   function BlocFiltresFixes({ compact }: { compact: boolean }) {
     const [dimensionOuverte, setDimensionOuverte] = useState<
       null | 'rayon' | 'anciennete' | 'capital' | 'secteur' | 'collaborateur' | 'departement'
@@ -675,20 +658,13 @@ export default function MobileProspects() {
     const resumeCapital = capitalSocialActifs.size === 0 ? 'Tous' : `${capitalSocialActifs.size} sélection${capitalSocialActifs.size > 1 ? 's' : ''}`
     const resumeSecteur = secteursActifs.size === 0 ? 'Tous' : `${secteursActifs.size} sélection${secteursActifs.size > 1 ? 's' : ''}`
     const resumeCollaborateur = collaborateurFiltre || 'Tous'
-    const resumeDepartement = departementFiltre.trim() || 'Tous'
+    const resumeDepartement = departementFiltre.trim() || (perimetreGeo && perimetreGeo.mode !== 'aucun' ? 'Périmètre' : 'Tous')
 
     return (
       <>
-        {/* Client CEGECLIM / Prospect : deux interrupteurs simples, pas
-           besoin d'un sous-tiroir pour un Oui/Non. */}
         <LigneInterrupteur label="Client CEGECLIM" valeur={afficherClients} onChange={setAfficherClients} compact={compact} />
         <LigneInterrupteur label="Prospect" valeur={afficherProspects} onChange={setAfficherProspects} compact={compact} />
 
-        {/* Géolocalisation : désactivable -- dans ce cas la recherche ne
-           dépend plus d'un rayon autour d'une position, mais du filtre
-           "Département" (ou de rien, auquel cas toute la base suivie est
-           interrogée). Le rayon est grisé quand la géolocalisation est
-           éteinte, puisqu'il ne s'applique plus. */}
         <LigneInterrupteur label="Géolocalisation" valeur={geolocalisationActivee} onChange={setGeolocalisationActivee} compact={compact} />
         <LigneDimension
           label="Rayon de recherche"
@@ -699,9 +675,6 @@ export default function MobileProspects() {
         />
         <LigneDimension label="Département" valeur={resumeDepartement} onClick={() => setDimensionOuverte('departement')} compact={compact} />
 
-        {/* Collaborateur : ne filtre que les clients CEGECLIM (les
-           prospects n'ont pas de représentant assigné) -- grisé si les
-           clients CEGECLIM sont masqués, pour que ce soit clair. */}
         <LigneDimension
           label="Collaborateur"
           valeur={resumeCollaborateur}
@@ -725,7 +698,6 @@ export default function MobileProspects() {
           </label>
         </div>
 
-        {/* ---- Sous-tiroir de détail, un seul à la fois ---- */}
         {dimensionOuverte && (
           <div
             style={{ position: 'fixed', inset: 0, zIndex: 2200, background: 'rgba(6,10,18,0.7)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
@@ -753,27 +725,32 @@ export default function MobileProspects() {
               {dimensionOuverte === 'departement' && (
                 <>
                   <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Département</div>
+                  {resumePerimetre && (
+                    <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', marginTop: -8 }}>{resumePerimetre}</div>
+                  )}
                   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                     <button type="button" onClick={() => setDepartementFiltre('')} style={chipStyle(departementFiltre.trim() === '', '166,161,129', '10px 16px', 14)}>
-                      Tous
+                      {perimetreGeo && perimetreGeo.mode !== 'aucun' ? 'Tout le périmètre' : 'Tous'}
                     </button>
-                    {DEPARTEMENTS_RACCOURCIS.map((dept) => (
+                    {departementsRaccourcis.map((dept) => (
                       <button key={dept} type="button" onClick={() => setDepartementFiltre(dept)} style={chipStyle(departementFiltre.trim() === dept, '166,161,129', '10px 16px', 14)}>
                         {dept}
                       </button>
                     ))}
                   </div>
-                  <div>
-                    <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)', marginBottom: 6 }}>Ou saisir un autre code (2 ou 3 chiffres)</div>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      value={departementFiltre}
-                      onChange={(e) => setDepartementFiltre(e.target.value.replace(/[^0-9]/g, '').slice(0, 3))}
-                      placeholder="Ex. 44"
-                      style={{ width: '100%', height: 44, borderRadius: 10, border: '1px solid rgba(255,255,255,0.18)', background: 'rgba(255,255,255,0.06)', color: '#fff', padding: '0 12px', fontSize: 15 }}
-                    />
-                  </div>
+                  {(!perimetreGeo || perimetreGeo.mode === 'aucun') && (
+                    <div>
+                      <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)', marginBottom: 6 }}>Ou saisir un autre code (2 ou 3 chiffres)</div>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={departementFiltre}
+                        onChange={(e) => setDepartementFiltre(e.target.value.replace(/[^0-9]/g, '').slice(0, 3))}
+                        placeholder="Ex. 44"
+                        style={{ width: '100%', height: 44, borderRadius: 10, border: '1px solid rgba(255,255,255,0.18)', background: 'rgba(255,255,255,0.06)', color: '#fff', padding: '0 12px', fontSize: 15 }}
+                      />
+                    </div>
+                  )}
                 </>
               )}
 
@@ -894,7 +871,13 @@ export default function MobileProspects() {
           )
         ) : (
           <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.4)' }}>
-            Géolocalisation désactivée -- la recherche porte sur le département choisi ci-dessous (ou sur toute la base suivie si aucun n'est choisi).
+            Géolocalisation désactivée -- la recherche porte sur le département choisi ci-dessous (ou sur tout le périmètre si aucun n'est choisi).
+          </div>
+        )}
+
+        {resumePerimetre && (
+          <div style={{ padding: '9px 12px', borderRadius: 10, border: '1px solid rgba(75,146,172,0.3)', background: 'rgba(75,146,172,0.10)', color: '#8FC7DA', fontSize: 12.5 }}>
+            🔒 {resumePerimetre}
           </div>
         )}
 
@@ -904,20 +887,20 @@ export default function MobileProspects() {
           <button
             type="button"
             onClick={() => { setVue('liste'); setFiltresValides(true) }}
-            disabled={geolocalisationActivee && !position}
+            disabled={(geolocalisationActivee && !position) || !perimetreGeo}
             style={{
               flex: 1, padding: '15px', borderRadius: 14,
-              border: 'none', background: (!geolocalisationActivee || position) ? '#A6A181' : 'rgba(166,161,129,0.3)',
+              border: 'none', background: ((!geolocalisationActivee || position) && perimetreGeo) ? '#A6A181' : 'rgba(166,161,129,0.3)',
               color: '#141A26', fontSize: 15, fontWeight: 700,
-              cursor: (!geolocalisationActivee || position) ? 'pointer' : 'default',
+              cursor: ((!geolocalisationActivee || position) && perimetreGeo) ? 'pointer' : 'default',
             }}
           >
-            {!geolocalisationActivee || position ? '📋 Voir la liste' : '…'}
+            {(!geolocalisationActivee || position) && perimetreGeo ? '📋 Voir la liste' : '…'}
           </button>
           <button
             type="button"
             onClick={() => { setVue('carte'); setFiltresValides(true) }}
-            disabled={!position}
+            disabled={!position || !perimetreGeo}
             title={!geolocalisationActivee ? "La carte nécessite une position réelle -- réactive la géolocalisation pour l'utiliser." : undefined}
             style={{
               flex: 1, padding: '15px', borderRadius: 14,
@@ -955,7 +938,9 @@ export default function MobileProspects() {
                   ? ` · ${radiusKm} km`
                   : departementFiltre.trim()
                     ? ` · dépt. ${departementFiltre.trim()}`
-                    : ' · toute la base')}
+                    : perimetreGeo && perimetreGeo.mode !== 'aucun'
+                      ? ' · périmètre autorisé'
+                      : ' · toute la base')}
         </div>
         <button
           type="button"
@@ -966,9 +951,6 @@ export default function MobileProspects() {
         </button>
       </div>
 
-      {/* ---- Recherche libre (désignation entreprise / nom du gérant) ----
-         Visible en permanence sur l'écran de résultats, liste comme carte,
-         puisqu'elle filtre prospectsFiltres utilisé par les deux vues. */}
       <div style={{ padding: '0 14px 10px' }}>
         <div style={{ position: 'relative' }}>
           <input
@@ -1008,10 +990,10 @@ export default function MobileProspects() {
             </div>
           ) : (
             [...prospectsFiltres]
-              .sort((a, b) => distanceKmWgs84(position!.lat, position!.lng, a.latEff, a.lonEff) - distanceKmWgs84(position!.lat, position!.lng, b.latEff, b.lonEff))
+              .sort((a, b) => (position ? distanceKmWgs84(position.lat, position.lng, a.latEff, a.lonEff) - distanceKmWgs84(position.lat, position.lng, b.latEff, b.lonEff) : 0))
               .map((p) => {
                 const sector = getSectorLabel(p)
-                const distance = distanceKmWgs84(position!.lat, position!.lng, p.latEff, p.lonEff)
+                const distance = position ? distanceKmWgs84(position.lat, position.lng, p.latEff, p.lonEff) : null
                 return (
                   <div
                     key={p.id}
@@ -1048,7 +1030,7 @@ export default function MobileProspects() {
                         </div>
                       </div>
                     </button>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: '#8FC7DA', flexShrink: 0 }}>{distance} km</div>
+                    {distance !== null && <div style={{ fontSize: 12, fontWeight: 700, color: '#8FC7DA', flexShrink: 0 }}>{distance} km</div>}
                     <button
                       type="button"
                       onClick={() => setNavigationVers({ adresse: formatAdresseComplete(p), lat: p.latEff, lon: p.lonEff })}
@@ -1073,8 +1055,6 @@ export default function MobileProspects() {
           )}
         </div>
       ) : (
-        // Hauteur mesurée en pixels par JS (voir l'effet plus haut) --
-        // remplace le height:100% en cascade qui ne se résolvait jamais.
         <div ref={mapWrapperRef} id="cgc-map-conteneur" style={{ flex: 1, minHeight: 320, position: 'relative', paddingBottom: 74 }}>
           {position && mapHeightPx === 0 && (
             <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.4)', fontSize: 13 }}>
@@ -1126,7 +1106,6 @@ export default function MobileProspects() {
         </div>
       )}
 
-      {/* ---- Bascule liste / carte, en bas de l'écran ---- */}
       <div style={{ position: 'absolute', left: 14, right: 14, bottom: 14, display: 'flex', gap: 8, zIndex: 1500 }}>
         <button
           type="button"
@@ -1152,7 +1131,6 @@ export default function MobileProspects() {
         </button>
       </div>
 
-      {/* ---- Tiroir filtres (rayon, ancienneté, capital social, secteur, RGE, capacité gaz) ---- */}
       {filtresOuverts && (
         <div
           style={{ position: 'fixed', inset: 0, zIndex: 2010, background: 'rgba(6,10,18,0.62)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
@@ -1164,6 +1142,9 @@ export default function MobileProspects() {
           >
             <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 2px' }} />
             <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Filtres</div>
+            {resumePerimetre && (
+              <div style={{ fontSize: 12, color: '#8FC7DA', marginTop: -10 }}>🔒 {resumePerimetre}</div>
+            )}
 
             <BlocFiltresFixes compact />
 
@@ -1178,7 +1159,6 @@ export default function MobileProspects() {
         </div>
       )}
 
-      {/* ---- Fiche détail prospect ---- */}
       {selected && (
         <div
           style={{ position: 'fixed', inset: 0, zIndex: 2020, background: 'rgba(6,10,18,0.62)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
@@ -1234,7 +1214,7 @@ export default function MobileProspects() {
                 ['Email', selected.email || '—'],
                 ['Dirigeant', selected.nom_dirigeant || '—'],
                 ['Créée le', formatDateFr(selected.dateCreationEtablissement)],
-                ['Distance', `${distanceKmWgs84(position!.lat, position!.lng, selected.latEff, selected.lonEff)} km`],
+                ['Distance', position ? `${distanceKmWgs84(position.lat, position.lng, selected.latEff, selected.lonEff)} km` : '—'],
                 ['RGE', selected.rge ? 'Oui' : 'Non'],
                 ['Capacité gaz', selected.capacite_gaz ? 'Oui' : 'Non'],
                 ['Capital social', selected.capital_social || '—'],

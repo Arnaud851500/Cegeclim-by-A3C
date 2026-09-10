@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -11,26 +11,21 @@ import { supabase } from '@/lib/supabaseClient'
 //   2. Filtres au-dessus de la recherche : famille macro -> famille,
 //      dépôt (bascule l'affichage sur LE stock de ce dépôt plutôt que le
 //      global), et disponibilité (oui/non). Passent tous par la RPC
-//      search_stock_articles_mobile, qui gère les deux chemins (global vs
-//      dépôt précis) et le rapprochement famille -> famille_macro
-//      (ref_familles).
+//      search_stock_articles_mobile.
 //   3. Liste de résultats avec le stock actuel.
-//   4. Fiche détail par référence : stock par dépôt (get_stock_par_depot,
-//      même RPC que l'écran desktop "Projections stock") + projection
-//      hebdomadaire (réutilise /api/stocks-disponibilites/detail, la même
-//      route que la fiche article desktop -- pas de nouvelle route créée)
-//      + prochaines livraisons fournisseurs attendues (dates + quantités,
-//      depuis v_commandes_fournisseurs_ouvertes_enrichies -- ce sont ces
-//      commandes qui produisent les remontées vertes du graphe de
-//      projection ; section repliée par défaut, affiche juste le total,
-//      dépliable pour voir le détail ligne à ligne).
-//      Peut aussi s'ouvrir directement via `cibleReference` (venu d'un
-//      autre écran -- ex. tap sur une ligne d'article dans un devis/BL),
-//      sans repasser par la recherche.
+//   4. Fiche détail par référence : total dispo, stock par dépôt
+//      (get_stock_par_depot) + prochaines livraisons fournisseurs attendues
+//      (v_commandes_fournisseurs_ouvertes_enrichies).
+//      Peut aussi s'ouvrir directement via `cibleReference`.
 //
-//   CORRECTIF : "Stock par dépôt" affiche maintenant aussi le "réservé"
-//   (comme le tableau desktop équivalent) -- entre "réel" et "dispo",
-//   sans les colonnes "CMD FOURN." ni "PRÉPARÉ" (PL), pas demandées.
+//   ÉVOLUTION (2026-09-10) : le graphe de projection hebdomadaire (et
+//   l'appel /api/stocks-disponibilites/detail qui l'alimentait) est
+//   supprimé -- aucune valeur ajoutée sur mobile, et une requête de moins
+//   à l'ouverture de la fiche. À la place, la lecture du stock disponible
+//   par dépôt est mise en avant : bandeau total, puis une ligne par dépôt
+//   avec le dispo en gros (vert/gris/rouge selon signe), une barre
+//   proportionnelle au dépôt le mieux fourni, réel/réservé en secondaire,
+//   dépôts à zéro repliés par défaut.
 // ─────────────────────────────────────────────────────────────────────────
 
 type StockRow = {
@@ -54,35 +49,16 @@ type DepotStockRow = {
   stock_a_terme: number
 }
 
-type ProjectionWeekRow = {
-  periode_debut: string
-  stock_projete: number | null
-  besoins_clients_fermes: number | null
-  prevision_ventes: number | null
-  commandes_fournisseurs_attendues: number | null
-  niveau_alerte: string | null
-  date_rupture?: string | null
-}
-
 type FamilleRow = { famille: string; famille_macro: string; libelle_famille: string | null }
 
 // Une ligne de commande fournisseur ouverte (pas encore livrée) pour la
-// référence consultée -- c'est ce qui alimente les remontées vertes du
-// graphe de projection (commandes_fournisseurs_attendues, agrégées par
-// semaine). Ici on affiche le détail ligne à ligne, avec la date réelle.
+// référence consultée -- affichée ligne à ligne avec sa date réelle.
 type CommandeFournisseurRow = {
   numero_piece: string | null
   fournisseur_nom: string | null
   depot: string | null
   date_livraison_calculee: string | null
   quantite_attendue: number
-}
-
-const ALERT_COLOR: Record<string, string> = {
-  ROUGE: '#C1683C',
-  ORANGE: '#D69A4A',
-  JAUNE: '#B8A63A',
-  VERT: '#4B92AC',
 }
 
 // Dépôts physiques proposés au filtre -- exclut les dépôts TRANSIT_* (zones
@@ -95,10 +71,7 @@ const DEPOTS_PROPOSES = [
 
 // SAGE utilise 1753-01-01 (date minimale DATETIME de SQL Server) comme
 // valeur "vide" quand la date de livraison n'a pas encore été confirmée
-// par le fournisseur -- pareil que la logique déjà en place côté
-// projection (cf_retard : ces commandes sont pinées en semaine 1, donc
-// traitées comme "à venir en premier" plutôt qu'ignorées). On applique le
-// même principe ici plutôt que d'afficher une date absurde.
+// par le fournisseur. On l'affiche comme "Date à confirmer".
 const SEUIL_DATE_VALIDE = '2000-01-01'
 
 function toNumber(v: unknown): number {
@@ -115,6 +88,15 @@ function formatDateCourte(iso?: string | null): string {
 }
 function dateLivraisonValide(iso?: string | null): boolean {
   return Boolean(iso) && iso! >= SEUIL_DATE_VALIDE
+}
+function depotCourt(depot: string): string {
+  return String(depot || '').replace(/\s*CEGECLIM\s*$/i, '').trim() || depot
+}
+/** Couleur du dispo : vert si > 0, gris si 0, rouge si négatif. */
+function couleurDispo(n: number): string {
+  if (n > 0) return '#8fd4a8'
+  if (n < 0) return '#e0a685'
+  return 'rgba(255,255,255,0.35)'
 }
 
 // Détecte une saisie "liste de références" (plusieurs lignes / virgules /
@@ -138,9 +120,7 @@ export default function MobileStockArticles({
 }: {
   /** Référence à ouvrir directement en détail -- passée par MobileShell
    * quand la navigation vient d'un autre écran (ex. ligne d'article d'un
-   * devis/BL/commande). Consommée une fois (onCibleConsommee), pour ne
-   * pas rouvrir la même fiche si l'utilisateur revient sur cet écran par
-   * le menu normal ensuite. */
+   * devis/BL/commande). Consommée une fois (onCibleConsommee). */
   cibleReference?: string | null
   cibleDesignation?: string | null
   onCibleConsommee?: () => void
@@ -193,10 +173,6 @@ export default function MobileStockArticles({
 
   useEffect(() => {
     const q = query.trim()
-    // Sans texte ET sans filtre actif : rien à afficher (comportement
-    // d'origine). Avec un filtre actif (famille/dépôt/dispo), on affiche
-    // directement les résultats du filtre même sans texte tapé -- c'est
-    // précisément le "parcourir ce dépôt / cette famille" demandé.
     if (!q && !filtresActifs) {
       setResults(null)
       setError(null)
@@ -266,7 +242,7 @@ export default function MobileStockArticles({
         />
         <FiltrePill
           actif={Boolean(depot)}
-          label={depot ? `Dépôt : ${depot.replace(' CEGECLIM', '')}` : 'Dépôt'}
+          label={depot ? `Dépôt : ${depotCourt(depot)}` : 'Dépôt'}
           onClick={() => setPanneauDepot(true)}
         />
         <button
@@ -344,7 +320,7 @@ export default function MobileStockArticles({
                 <div style={{ fontSize: 10.5, color: 'rgba(166,161,129,0.9)', marginBottom: 6 }}>Dépôt : {r.depot}</div>
               )}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
-                <MiniStat label="Dispo" value={formatNumber(r.stock_disponible)} />
+                <MiniStat label="Dispo" value={formatNumber(r.stock_disponible)} accent={couleurDispo(r.stock_disponible)} />
                 <MiniStat label="Réel" value={formatNumber(r.stock_reel)} />
                 <MiniStat
                   label="À terme"
@@ -535,7 +511,7 @@ function MiniStat({ label, value, accent }: { label: string; value: string; acce
   )
 }
 
-// ── Fiche détail : stock par dépôt + projection hebdomadaire + livraisons ──
+// ── Fiche détail : total dispo + stock par dépôt + livraisons attendues ──
 
 function StockArticleDetailSheet({
   reference, designation, onClose,
@@ -543,23 +519,14 @@ function StockArticleDetailSheet({
   const [depotRows, setDepotRows] = useState<DepotStockRow[] | null>(null)
   const [depotLoading, setDepotLoading] = useState(true)
   const [depotError, setDepotError] = useState<string | null>(null)
-
-  const [projRows, setProjRows] = useState<ProjectionWeekRow[] | null>(null)
-  const [projLoading, setProjLoading] = useState(true)
-  const [projError, setProjError] = useState<string | null>(null)
   const [designationResolue, setDesignationResolue] = useState(designation)
+  // Dépôts sans aucun stock (réel = réservé = dispo = 0) repliés par
+  // défaut, pour ne montrer que là où il y a quelque chose.
+  const [afficherDepotsVides, setAfficherDepotsVides] = useState(false)
 
-  // Prochaines livraisons fournisseurs attendues pour cette référence --
-  // ce sont ces commandes ouvertes qui produisent les remontées vertes du
-  // graphe de projection (commandes_fournisseurs_attendues, agrégées par
-  // semaine) ; ici on affiche chaque commande individuellement avec sa
-  // date réelle et sa quantité.
   const [livraisonsRows, setLivraisonsRows] = useState<CommandeFournisseurRow[] | null>(null)
   const [livraisonsLoading, setLivraisonsLoading] = useState(true)
   const [livraisonsError, setLivraisonsError] = useState<string | null>(null)
-  // Repliée par défaut -- on ne montre que le total tant que l'utilisateur
-  // ne demande pas le détail ligne à ligne, pour ne pas noyer la fiche
-  // (une référence peut avoir une dizaine de commandes ouvertes).
   const [livraisonsOuvertes, setLivraisonsOuvertes] = useState(false)
 
   useEffect(() => {
@@ -572,33 +539,6 @@ function StockArticleDetailSheet({
       setDepotLoading(false)
     }
     void loadDepot()
-    return () => { cancelled = true }
-  }, [reference])
-
-  useEffect(() => {
-    let cancelled = false
-    // Réutilise la même route que la fiche article desktop -- pas de
-    // nouvelle route créée : /api/stocks-disponibilites/detail retourne
-    // déjà "projection" (lignes hebdomadaires du dernier run) pour une
-    // référence donnée.
-    async function loadProjection() {
-      setProjLoading(true)
-      setProjError(null)
-      try {
-        const session = await supabase.auth.getSession()
-        const token = session.data.session?.access_token
-        const params = new URLSearchParams({ reference_article: reference, depot: 'GLOBAL' })
-        const res = await fetch(`/api/stocks-disponibilites/detail?${params}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
-        const payload = (await res.json()) as { success: boolean; message?: string; projection?: ProjectionWeekRow[] }
-        if (!res.ok || !payload.success) throw new Error(payload?.message || 'Erreur de chargement de la projection.')
-        if (!cancelled) setProjRows(payload.projection || [])
-      } catch (e) {
-        if (!cancelled) { setProjError(e instanceof Error ? e.message : String(e)); setProjRows([]) }
-      } finally {
-        if (!cancelled) setProjLoading(false)
-      }
-    }
-    void loadProjection()
     return () => { cancelled = true }
   }, [reference])
 
@@ -635,9 +575,8 @@ function StockArticleDetailSheet({
     return () => { cancelled = true }
   }, [reference])
 
-  // Résout la désignation si arrivée vide (ex. ouverture directe via
-  // cibleReference sans désignation connue à l'avance) -- lookup léger,
-  // une seule fois, sans bloquer l'affichage du reste de la fiche.
+  // Résout la désignation si arrivée vide (ouverture directe via
+  // cibleReference) -- lookup léger, sans bloquer le reste de la fiche.
   useEffect(() => {
     if (designation) { setDesignationResolue(designation); return }
     let cancelled = false
@@ -655,23 +594,24 @@ function StockArticleDetailSheet({
       (acc, r) => ({
         stock_reel: acc.stock_reel + toNumber(r.stock_reel),
         stock_reserve: acc.stock_reserve + toNumber(r.stock_reserve),
-        stock_prepare: acc.stock_prepare + toNumber(r.stock_prepare),
         stock_disponible: acc.stock_disponible + toNumber(r.stock_disponible),
+        stock_a_terme: acc.stock_a_terme + toNumber(r.stock_a_terme),
       }),
-      { stock_reel: 0, stock_reserve: 0, stock_prepare: 0, stock_disponible: 0 },
+      { stock_reel: 0, stock_reserve: 0, stock_disponible: 0, stock_a_terme: 0 },
     )
   }, [depotRows])
 
-  const prochaineRupture = useMemo(() => {
-    if (!projRows) return null
-    const r = projRows.find((r) => toNumber(r.stock_projete) < 0)
-    return r?.periode_debut || null
-  }, [projRows])
+  // Dépôts triés par dispo décroissant (puis nom), séparés en "avec stock"
+  // et "vides" ; largeur de barre relative au dépôt le mieux fourni.
+  const { depotsAvecStock, depotsVides, maxDispo } = useMemo(() => {
+    const rows = [...(depotRows || [])]
+      .sort((a, b) => toNumber(b.stock_disponible) - toNumber(a.stock_disponible) || a.depot.localeCompare(b.depot, 'fr'))
+    const avec = rows.filter((r) => toNumber(r.stock_reel) !== 0 || toNumber(r.stock_reserve) !== 0 || toNumber(r.stock_disponible) !== 0)
+    const vides = rows.filter((r) => !avec.includes(r))
+    const max = Math.max(1, ...avec.map((r) => Math.max(0, toNumber(r.stock_disponible))))
+    return { depotsAvecStock: avec, depotsVides: vides, maxDispo: max }
+  }, [depotRows])
 
-  // Livraisons à date confirmée triées en premier, celles à "date à
-  // confirmer" (sentinelle SAGE 1753-01-01, cf. dateLivraisonValide)
-  // regroupées ensuite -- même traitement que la logique de projection
-  // (cf_retard), qui les considère comme imminentes plutôt que lointaines.
   const livraisonsTriees = useMemo(() => {
     if (!livraisonsRows) return []
     const avecDate = livraisonsRows.filter((r) => dateLivraisonValide(r.date_livraison_calculee))
@@ -683,8 +623,6 @@ function StockArticleDetailSheet({
     () => livraisonsTriees.reduce((acc, r) => acc + r.quantite_attendue, 0),
     [livraisonsTriees],
   )
-
-  const niveauActuel = projRows && projRows.length > 0 ? projRows[0].niveau_alerte || 'VERT' : null
 
   return (
     <div style={{ position: 'fixed', inset: 0, zIndex: 250, background: 'rgba(6,10,18,0.7)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }} onClick={onClose}>
@@ -701,12 +639,7 @@ function StockArticleDetailSheet({
         <div style={{ padding: '0 18px 12px', flexShrink: 0 }}>
           <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
             <div style={{ minWidth: 0 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                {niveauActuel && (
-                  <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: 999, background: ALERT_COLOR[niveauActuel] || '#8A93A6', flexShrink: 0 }} />
-                )}
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 15, fontWeight: 700, color: '#fff' }}>{reference}</span>
-              </div>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 15, fontWeight: 700, color: '#fff' }}>{reference}</span>
               <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.55)', marginTop: 2 }}>{designationResolue || '—'}</div>
             </div>
             <button onClick={onClose} style={{ color: 'rgba(255,255,255,0.4)', fontSize: 20, lineHeight: 1, background: 'none', border: 'none', flexShrink: 0 }}>✕</button>
@@ -714,24 +647,56 @@ function StockArticleDetailSheet({
         </div>
 
         <div style={{ overflowY: 'auto', padding: '0 18px 24px', display: 'flex', flexDirection: 'column', gap: 16 }}>
-          {/* ── Résumé + projection ── */}
-          <div style={{ borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)', padding: '12px 14px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-              <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>Stock projeté</div>
-              {prochaineRupture && (
-                <div style={{ fontSize: 11, color: '#e0a685' }}>Rupture : {formatDateCourte(prochaineRupture)}</div>
-              )}
-            </div>
-            {projLoading ? (
-              <div style={{ height: 90, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.35)' }}>Chargement…</span>
-              </div>
-            ) : projError ? (
-              <div style={{ fontSize: 12, color: '#e0a685' }}>{projError}</div>
-            ) : !projRows || projRows.length === 0 ? (
-              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.35)', padding: '10px 0' }}>Aucune projection disponible pour cette référence.</div>
+          {/* ── Bandeau total ── */}
+          <div style={{ borderRadius: 14, border: '1px solid rgba(166,161,129,0.35)', background: 'rgba(166,161,129,0.10)', padding: '12px 14px' }}>
+            {depotLoading || !totalDepot ? (
+              <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Chargement…</div>
             ) : (
-              <ProjectionMiniChart rows={projRows} />
+              <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 10 }}>
+                <div>
+                  <div style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#A6A181', fontWeight: 700 }}>Disponible tous dépôts</div>
+                  <div style={{ fontFamily: 'var(--font-mono)', fontSize: 32, fontWeight: 700, lineHeight: 1.1, marginTop: 2, color: couleurDispo(totalDepot.stock_disponible) }}>
+                    {formatNumber(totalDepot.stock_disponible)}
+                  </div>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '2px 10px', fontSize: 11.5, fontFamily: 'var(--font-mono)', color: 'rgba(255,255,255,0.6)', textAlign: 'right' }}>
+                  <span>réel</span><span style={{ color: '#fff' }}>{formatNumber(totalDepot.stock_reel)}</span>
+                  <span>réservé</span><span style={{ color: '#fff' }}>{formatNumber(totalDepot.stock_reserve)}</span>
+                  <span>à terme</span><span style={{ color: totalDepot.stock_a_terme < 0 ? '#e0a685' : '#fff' }}>{formatNumber(totalDepot.stock_a_terme)}</span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* ── Par dépôt ── */}
+          <div>
+            <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 8 }}>
+              Stock disponible par dépôt
+            </div>
+            {depotError && (
+              <div style={{ marginBottom: 8, fontSize: 12, color: '#e0a685' }}>{depotError}</div>
+            )}
+            {depotLoading ? (
+              <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)', padding: '16px 0', textAlign: 'center' }}>Chargement…</div>
+            ) : !depotRows || depotRows.length === 0 ? (
+              <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)', padding: '16px 0', textAlign: 'center' }}>Aucune position de stock.</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {depotsAvecStock.length === 0 && (
+                  <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)', padding: '8px 0' }}>Aucun dépôt avec du stock pour cette référence.</div>
+                )}
+                {depotsAvecStock.map((r) => <LigneDepot key={r.depot} row={r} maxDispo={maxDispo} />)}
+                {depotsVides.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setAfficherDepotsVides((v) => !v)}
+                    style={{ marginTop: 4, alignSelf: 'flex-start', background: 'none', border: 'none', padding: '4px 0', fontSize: 12, color: 'rgba(255,255,255,0.45)', textDecoration: 'underline', textUnderlineOffset: 3 }}
+                  >
+                    {afficherDepotsVides ? 'Masquer' : 'Afficher'} les {depotsVides.length} dépôt{depotsVides.length > 1 ? 's' : ''} à zéro
+                  </button>
+                )}
+                {afficherDepotsVides && depotsVides.map((r) => <LigneDepot key={r.depot} row={r} maxDispo={maxDispo} />)}
+              </div>
             )}
           </div>
 
@@ -794,7 +759,7 @@ function StockArticleDetailSheet({
                           {dateValide ? formatDateCourte(r.date_livraison_calculee) : 'Date à confirmer'}
                         </div>
                         <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginTop: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                          {[r.numero_piece, r.fournisseur_nom, r.depot].filter(Boolean).join(' · ') || '—'}
+                          {[r.numero_piece, r.fournisseur_nom, r.depot ? depotCourt(r.depot) : null].filter(Boolean).join(' · ') || '—'}
                         </div>
                       </div>
                       <div style={{ fontFamily: 'var(--font-mono)', fontSize: 15, fontWeight: 700, color: '#fff', flexShrink: 0 }}>
@@ -806,96 +771,36 @@ function StockArticleDetailSheet({
               </div>
             ) : null}
           </div>
-
-          {/* ── Par dépôt ── */}
-          <div>
-            <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 8 }}>
-              Stock par dépôt
-            </div>
-            {depotError && (
-              <div style={{ marginBottom: 8, fontSize: 12, color: '#e0a685' }}>{depotError}</div>
-            )}
-            {depotLoading ? (
-              <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)', padding: '16px 0', textAlign: 'center' }}>Chargement…</div>
-            ) : !depotRows || depotRows.length === 0 ? (
-              <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)', padding: '16px 0', textAlign: 'center' }}>Aucune position de stock.</div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {depotRows.map((r) => (
-                  <div key={r.depot} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderRadius: 10, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)', padding: '8px 12px', flexWrap: 'wrap', rowGap: 4 }}>
-                    <span style={{ fontSize: 12.5, color: '#fff', flex: 1, minWidth: 90, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.depot}</span>
-                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'rgba(255,255,255,0.5)', marginRight: 8 }}>
-                      réel {formatNumber(toNumber(r.stock_reel))}
-                    </span>
-                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'rgba(255,255,255,0.5)', marginRight: 8 }}>
-                      réservé {formatNumber(toNumber(r.stock_reserve))}
-                    </span>
-                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 600, color: '#fff' }}>
-                      dispo {formatNumber(toNumber(r.stock_disponible))}
-                    </span>
-                  </div>
-                ))}
-                {totalDepot && (
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderRadius: 10, background: 'rgba(166,161,129,0.12)', border: '1px solid rgba(166,161,129,0.3)', padding: '8px 12px', marginTop: 2, flexWrap: 'wrap', rowGap: 4 }}>
-                    <span style={{ fontSize: 12.5, fontWeight: 700, color: '#A6A181', flex: 1, minWidth: 90 }}>Total</span>
-                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'rgba(255,255,255,0.6)', marginRight: 8 }}>
-                      réel {formatNumber(totalDepot.stock_reel)}
-                    </span>
-                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'rgba(255,255,255,0.6)', marginRight: 8 }}>
-                      réservé {formatNumber(totalDepot.stock_reserve)}
-                    </span>
-                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 700, color: '#fff' }}>
-                      dispo {formatNumber(totalDepot.stock_disponible)}
-                    </span>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
         </div>
       </div>
     </div>
   )
 }
 
-// ── Mini graphique SVG du stock projeté (léger, sans dépendance) ─────────
-
-function ProjectionMiniChart({ rows }: { rows: ProjectionWeekRow[] }) {
-  const largeur = 300
-  const hauteur = 110
-  const marge = 8
-
-  const valeurs = rows.map((r) => toNumber(r.stock_projete))
-  const max = Math.max(1, ...valeurs)
-  const min = Math.min(0, ...valeurs)
-
-  function chemin() {
-    const n = valeurs.length
-    if (n < 2) return ''
-    return valeurs
-      .map((v, i) => {
-        const x = marge + (i / (n - 1)) * (largeur - marge * 2)
-        const y = hauteur - marge - ((v - min) / (max - min || 1)) * (hauteur - marge * 2)
-        return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`
-      })
-      .join(' ')
-  }
-
-  const zeroY = hauteur - marge - ((0 - min) / (max - min || 1)) * (hauteur - marge * 2)
-  const dernier = rows[rows.length - 1]
-  const couleur = ALERT_COLOR[dernier?.niveau_alerte || 'VERT'] || '#4B92AC'
-
+/** Une ligne de dépôt : nom, dispo en gros (couleur selon signe), barre
+ * proportionnelle au dépôt le mieux fourni, réel/réservé en secondaire. */
+function LigneDepot({ row, maxDispo }: { row: DepotStockRow; maxDispo: number }) {
+  const dispo = toNumber(row.stock_disponible)
+  const reel = toNumber(row.stock_reel)
+  const reserve = toNumber(row.stock_reserve)
+  const largeur = Math.max(0, Math.min(100, (Math.max(0, dispo) / maxDispo) * 100))
+  const couleur = couleurDispo(dispo)
   return (
-    <div>
-      <svg viewBox={`0 0 ${largeur} ${hauteur}`} style={{ width: '100%', height: 90, display: 'block' }}>
-        {min < 0 && (
-          <line x1={marge} y1={zeroY} x2={largeur - marge} y2={zeroY} stroke="rgba(255,255,255,0.15)" strokeWidth={1} strokeDasharray="3 3" />
-        )}
-        <path d={chemin()} fill="none" stroke={couleur} strokeWidth={2} />
-      </svg>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
-        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)' }}>{formatDateCourte(rows[0]?.periode_debut)}</span>
-        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)' }}>{formatDateCourte(dernier?.periode_debut)}</span>
+    <div style={{ borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)', padding: '10px 12px' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
+        <span style={{ fontSize: 14, fontWeight: 700, color: '#fff', minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {depotCourt(row.depot)}
+        </span>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 22, fontWeight: 700, color: couleur, flexShrink: 0 }}>
+          {formatNumber(dispo)}
+        </span>
+      </div>
+      <div style={{ marginTop: 6, height: 6, borderRadius: 3, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+        <div style={{ width: `${largeur}%`, height: '100%', borderRadius: 3, background: couleur, transition: 'width .2s' }} />
+      </div>
+      <div style={{ marginTop: 5, display: 'flex', gap: 12, fontSize: 11.5, fontFamily: 'var(--font-mono)', color: 'rgba(255,255,255,0.5)' }}>
+        <span>réel <span style={{ color: 'rgba(255,255,255,0.8)' }}>{formatNumber(reel)}</span></span>
+        <span>réservé <span style={{ color: reserve > 0 ? '#D69A4A' : 'rgba(255,255,255,0.8)' }}>{formatNumber(reserve)}</span></span>
       </div>
     </div>
   )
