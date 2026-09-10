@@ -9,7 +9,7 @@
 //   - devis mensuel N vs N-1 (courbe)
 //   - marge mensuelle N vs N-1, en % (courbe)
 //   - encours de commandes (activité), mini-tableau
-//   - KPI : CERFA non à jour, CDC en retard, factures en retard (fictif)
+//   - KPI : CERFA non à jour, CDC en retard, retards de paiement (réels)
 //   - visites (réelles, RDV BLG + compagnon CEGECLIM unifiés), cliquables
 //   - tâches non terminées affectées au client
 //   - alertes de suivi paramétrables (V3, voir plus bas)
@@ -30,7 +30,7 @@
 //   - Graphiques : légendes de famille macro agrandies, lecture densifiée
 //     (plus de graduations, tracés plus marqués).
 //
-// V3 (cette révision) :
+// V3 :
 //   - Nouvelle section "Alertes de suivi" : 3 seuils paramétrables par
 //     client -- nb d'appels/visites minimum par mois, nb de jours sans
 //     devis, nb de jours sans commande. Un contrôle quotidien côté base
@@ -42,10 +42,29 @@
 //     gère que le paramétrage des seuils -- lecture/écriture via
 //     get_client_alertes_config / upsert_client_alertes_config, aucune
 //     logique de contrôle côté front.
+//
+// V4 (2026-09-10, cette révision) :
+//   - KPI "Factures en retard de paiement" : le montant fictif (6 840 €)
+//     est REMPLACÉ par la valeur réelle issue du fichier compta "Qui vous
+//     doit quoi" importé dans retards_paiement_clients (écran
+//     /retards-paiement ; lecture via get_retards_paiement_client, cf.
+//     lib/retardsPaiement.ts). Le pavé affiche le total en retard, la
+//     tranche la plus ancienne ("en retard de plus de 45 jours", …), le
+//     détail par tranche et la date de situation ; un clic ouvre la fiche
+//     complète (litige, promesses, niveau de relance, commentaires compta…).
 
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
+import {
+  TRANCHES_RETARD,
+  champsDetailRetard,
+  fetchRetardsPaiementClient,
+  formatDateFrRetard,
+  formatKEurRetard,
+  trancheLaPlusAncienne,
+  type RetardPaiementClient,
+} from '@/lib/retardsPaiement'
 
 const FAMILY_MACROS = ['R/R', 'R/O', 'ECS', 'DRV', 'R_zone', 'Accessoire', 'PV', 'Autres']
 const MACRO_COLORS: Record<string, string> = {
@@ -561,6 +580,23 @@ function DocumentDetailModal({ doc, onClose }: { doc: DernierDocument; onClose: 
   )
 }
 
+// ── Détail des retards de paiement (V4) : toutes les colonnes du fichier compta ──
+
+function RetardPaiementDetailModal({ retard, onClose }: { retard: RetardPaiementClient; onClose: () => void }) {
+  const tranche = trancheLaPlusAncienne(retard)
+  return (
+    <DetailModal
+      title="Retards de paiement"
+      subtitle={`${retard.nom_tiers || retard.numero_tiers} · situation compta au ${formatDateFrRetard(retard.date_extraction)}${tranche ? ` · ${tranche.label.toLowerCase()}` : ''}`}
+      onClose={onClose}
+    >
+      {champsDetailRetard(retard).map((f) => (
+        <DetailField key={f.label} label={f.label} value={f.value} />
+      ))}
+    </DetailModal>
+  )
+}
+
 // ── Création d'un RDV "compagnon CEGECLIM" ────────────────────────────────
 
 function NouveauRdvModal({
@@ -689,6 +725,13 @@ function VisionClientPageInner() {
   const [tachesTermineesOuvert, setTachesTermineesOuvert] = useState(false)
   const [tachesTermineesListe, setTachesTermineesListe] = useState<TacheTermineeRow[] | null>(null)
 
+  // V4 : retards de paiement réels (fichier compta "Qui vous doit quoi").
+  // null = le client n'est pas dans le dernier fichier importé (donc rien en
+  // retard), ou aucun fichier importé (cf. retardIndisponible).
+  const [retardPaiement, setRetardPaiement] = useState<RetardPaiementClient | null>(null)
+  const [retardIndisponible, setRetardIndisponible] = useState(false)
+  const [retardOuvert, setRetardOuvert] = useState(false)
+
   const [currentEmail, setCurrentEmail] = useState('')
   const [currentName, setCurrentName] = useState('')
 
@@ -761,6 +804,21 @@ function VisionClientPageInner() {
       max_jours_sans_devis: row?.max_jours_sans_devis ?? null,
       max_jours_sans_commande: row?.max_jours_sans_commande ?? null,
     })
+  }
+
+  /** V4 : retards de paiement réels du client (dernier fichier compta
+   * importé). Échec silencieux (RPC non déployée, table vide…) : le pavé
+   * affiche alors "Donnée indisponible" plutôt que de bloquer la fiche. */
+  async function chargerRetardPaiement(numeroTiers: string) {
+    try {
+      const r = await fetchRetardsPaiementClient(numeroTiers)
+      setRetardPaiement(r && r.total_en_retard > 0 ? r : null)
+      setRetardIndisponible(false)
+    } catch (e) {
+      console.warn('[vision-client] retards de paiement indisponibles :', e)
+      setRetardPaiement(null)
+      setRetardIndisponible(true)
+    }
   }
 
   async function enregistrerAlertesConfig() {
@@ -866,7 +924,7 @@ function VisionClientPageInner() {
         setCerfaKo(Number(cerfaRes.data) || 0)
         setCdcRetard(Number(cdcRes.data) || 0)
         setDerniersDocuments((derniersRes.data || []) as DernierDocument[])
-        await Promise.all([loadVisites(numero), loadTaches(numero), loadAlertesConfig(numero), chargerTachesTermineesCount(numero)])
+        await Promise.all([loadVisites(numero), loadTaches(numero), loadAlertesConfig(numero), chargerTachesTermineesCount(numero), chargerRetardPaiement(numero)])
       } catch (e: any) {
         if (!cancelled) setError(e?.message || String(e))
       } finally {
@@ -937,9 +995,10 @@ function VisionClientPageInner() {
   const margeYtdEvolPoints = margeYtdN !== null && margeYtdN1 !== null ? margeYtdN - margeYtdN1 : null
 
   const capaciteJours = daysUntil(identity?.capacite_expiration)
-  // Fictif, demandé explicitement — pas de colonne d'échéance de paiement
-  // fiable dans facture_lignes pour calculer ce montant réellement.
-  const facturesRetardFictif = 6840
+
+  // V4 : tranche la plus ancienne dans laquelle le client a un montant en
+  // retard ("en retard de plus de 45 jours", …) -- affichée sous le total.
+  const retardTranche = trancheLaPlusAncienne(retardPaiement)
 
   if (loading) {
     return <main className="page"><div className="loadingBox">Chargement de la fiche client…</div><style jsx>{pageStyles}</style></main>
@@ -1057,10 +1116,46 @@ function VisionClientPageInner() {
           <span>CDC en retard de livraison</span>
           <strong className={cdcRetard ? 'danger' : 'ok'}>{cdcRetard ?? 0}</strong>
         </a>
-        <div className="kpiCard">
-          <span>Factures en retard de paiement <em className="fictifTag">fictif</em></span>
-          <strong className="danger">{formatEur(facturesRetardFictif)}</strong>
-        </div>
+
+        {/* V4 : retards de paiement réels (fichier compta), cliquable -> fiche complète. */}
+        <button
+          type="button"
+          className={`kpiCard kpiCardRetard ${retardPaiement ? 'kpiCardClickable' : ''}`}
+          onClick={() => retardPaiement && setRetardOuvert(true)}
+          disabled={!retardPaiement}
+          title={retardPaiement ? 'Voir le détail compta (litige, promesses, relances, commentaires…)' : undefined}
+        >
+          <span>
+            Factures en retard de paiement
+            {retardPaiement && <em className="situationTag">au {formatDateFrRetard(retardPaiement.date_extraction)}</em>}
+          </span>
+          {retardIndisponible ? (
+            <>
+              <strong className="muted">—</strong>
+              <div className="retardLines muted">Donnée indisponible</div>
+            </>
+          ) : !retardPaiement ? (
+            <>
+              <strong className="ok">{formatEur(0)}</strong>
+              <div className="retardLines muted">Aucun retard dans le dernier fichier compta</div>
+            </>
+          ) : (
+            <>
+              <strong className="danger">{formatEur(retardPaiement.total_en_retard)}</strong>
+              <div className="retardLines">
+                {retardTranche && <div className="retardTranche">{retardTranche.label}</div>}
+                {TRANCHES_RETARD.filter((t) => retardPaiement[t.key] > 0).map((t) => (
+                  <div key={t.key}>
+                    <span className="retardLabel">{t.court}</span>
+                    <span className="retardMontant">{formatKEurRetard(retardPaiement[t.key])}</span>
+                  </div>
+                ))}
+                {retardPaiement.en_litige && <div className="retardLitige">⚠ En litige{retardPaiement.intitule_litige ? ` · ${retardPaiement.intitule_litige}` : ''}</div>}
+              </div>
+            </>
+          )}
+        </button>
+
         <button type="button" className="kpiCard kpiCardClickable" onClick={() => void ouvrirTachesTerminees()}>
           <span>Tâches terminées (6 mois)</span>
           <strong>{tachesTermineesCount ?? '—'}</strong>
@@ -1269,6 +1364,9 @@ function VisionClientPageInner() {
       {openVisite && (
         <VisiteDetailModal rdv={openVisite} currentEmail={currentEmail} currentName={currentName} onClose={() => setOpenVisite(null)} />
       )}
+      {retardOuvert && retardPaiement && (
+        <RetardPaiementDetailModal retard={retardPaiement} onClose={() => setRetardOuvert(false)} />
+      )}
       {tachesTermineesOuvert && (
         <DetailModal title="Tâches terminées" subtitle="6 derniers mois" onClose={() => setTachesTermineesOuvert(false)}>
           {tachesTermineesListe === null ? (
@@ -1368,7 +1466,7 @@ const pageStyles = `
   .identityGrid strong.ok { color: #047857; }
   .identityGrid strong.danger { color: #dc2626; }
   .identityGrid strong.muted { color: #94a3b8; }
-  .kpiRow { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .kpiRow { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; align-items: stretch; }
   .kpiCard { display: block; background: white; border: 1px solid #e2e8f0; border-radius: 14px; padding: 14px 16px; box-shadow: 0 2px 8px rgba(15,23,42,.05); text-decoration: none; color: inherit; }
   .kpiCardClickable { width: 100%; text-align: left; cursor: pointer; font: inherit; }
   .kpiCardClickable:hover { border-color: #cbd5e1; }
@@ -1376,8 +1474,23 @@ const pageStyles = `
   .kpiCard strong { display: block; margin-top: 4px; font-size: 22px; font-weight: 950; }
   .kpiCard strong.ok { color: #047857; }
   .kpiCard strong.danger { color: #dc2626; }
+  .kpiCard strong.muted { color: #94a3b8; }
   .fictifTag { font-style: normal; font-size: 9px; font-weight: 900; text-transform: uppercase; background: #fde68a; color: #92400e; border-radius: 999px; padding: 1px 6px; margin-left: 6px; }
   .chartGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+
+  /* ── Retards de paiement (V4) ── */
+  .kpiCardRetard { width: 100%; text-align: left; font: inherit; border-top: 3px solid #C1683C; }
+  .kpiCardRetard:disabled { cursor: default; }
+  .situationTag { font-style: normal; font-size: 9px; font-weight: 900; text-transform: none; background: #f1f5f9; color: #475569; border-radius: 999px; padding: 1px 6px; margin-left: 6px; }
+  .retardLines { margin-top: 6px; font-size: 11.5px; font-weight: 700; color: #334155; display: flex; flex-direction: column; gap: 2px; }
+  .retardLines.muted { color: #94a3b8; font-style: italic; font-weight: 600; }
+  .retardLines > div { display: flex; justify-content: space-between; gap: 8px; }
+  .retardTranche { color: #C1683C; font-weight: 900; font-size: 11px; margin-bottom: 2px; }
+  /* Surcharge de la règle générique ".kpiCard span" (bloc, majuscules) pour les lignes par tranche. */
+  .kpiCardRetard .retardLines span { display: inline; font-size: 11.5px; text-transform: none; }
+  .kpiCardRetard .retardLabel { color: #64748b; font-weight: 800; }
+  .kpiCardRetard .retardMontant { font-weight: 900; color: #0f172a; white-space: nowrap; }
+  .retardLitige { color: #92400e; font-weight: 800; font-size: 11px; margin-top: 2px; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* "Densifie la lecture" : légendes de famille macro nettement agrandies */
   .chartLegend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; font-size: 13px; font-weight: 700; color: #334155; align-items: center; }
@@ -1466,7 +1579,7 @@ const pageStyles = `
   .chartTooltip { position: absolute; z-index: 30; background: #0f172a; color: white; border-radius: 8px; padding: 8px 10px; font-size: 11px; line-height: 1.5; pointer-events: none; white-space: nowrap; box-shadow: 0 10px 24px rgba(15,23,42,.35); }
   .chartTooltipTitle { font-weight: 900; margin-bottom: 2px; }
 
-  /* ── Fenêtres de détail (document / visite / nouveau RDV) ── */
+  /* ── Fenêtres de détail (document / visite / nouveau RDV / retards) ── */
   .modalOverlay { position: fixed; inset: 0; z-index: 100; background: rgba(15,23,42,.45); display: flex; align-items: center; justify-content: center; padding: 20px; }
   .modalCard { background: white; border-radius: 16px; width: 100%; max-width: 480px; max-height: 85vh; overflow-y: auto; box-shadow: 0 24px 60px rgba(15,23,42,.3); }
   .modalHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 18px 20px 12px; border-bottom: 1px solid #f1f5f9; }
@@ -1476,8 +1589,8 @@ const pageStyles = `
   .modalClose:hover { background: #e2e8f0; }
   .modalBody { padding: 16px 20px 20px; }
   .detailFieldRow { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid #f8fafc; font-size: 13px; }
-  .detailFieldLabel { color: #64748b; font-weight: 800; }
-  .detailFieldValue { color: #0f172a; font-weight: 700; text-align: right; }
+  .detailFieldLabel { color: #64748b; font-weight: 800; flex-shrink: 0; }
+  .detailFieldValue { color: #0f172a; font-weight: 700; text-align: right; white-space: pre-wrap; }
 
   /* ── Compte-rendu (visite) ── */
   .crBlock { margin-top: 16px; padding-top: 14px; border-top: 1px dashed #e2e8f0; }
