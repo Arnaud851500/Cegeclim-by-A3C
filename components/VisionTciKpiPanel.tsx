@@ -900,22 +900,24 @@ function RetardsPaiementCard({
         ) : (
           <>
             <div className="flex items-baseline justify-between gap-2">
-              <div className="font-[var(--font-mono,monospace)] text-4xl font-semibold" style={{ color: valueColor }}>
+              <div className="whitespace-nowrap font-[var(--font-mono,monospace)] text-3xl font-semibold leading-tight" style={{ color: valueColor }}>
                 {formatMontant(synthese?.total_en_retard || 0)}
               </div>
-              <div className="text-right text-[10px] leading-tight text-white/45">
+              <div className="whitespace-nowrap text-right text-[10px] leading-tight text-white/45">
                 <div><span className="font-[var(--font-mono,monospace)] text-sm font-semibold text-white">{nb}</span> client{nb > 1 ? "s" : ""}</div>
                 {synthese && synthese.nb_litiges > 0 && <div>{synthese.nb_litiges} en litige</div>}
                 {synthese?.date_extraction && <div>au {formatDateFrRetard(synthese.date_extraction)}</div>}
               </div>
             </div>
-            <div className="mt-2 grid grid-cols-4 gap-1.5">
+            {/* Tranches sur 2 colonnes, libellé et montant sur la même ligne
+                (jamais de retour à la ligne, même sur un pavé 1/4). */}
+            <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1">
               {TRANCHES_RETARD.map((t) => {
                 const v = synthese ? synthese[t.key] : 0;
                 return (
-                  <div key={t.key}>
-                    <div className="whitespace-nowrap text-[9px] uppercase tracking-wide text-white/40">{t.court}</div>
-                    <div className={`font-[var(--font-mono,monospace)] text-xs font-semibold ${v > 0 ? "text-white/80" : "text-white/25"}`}>{formatKEurRetard(v)}</div>
+                  <div key={t.key} className="flex items-baseline justify-between gap-2 whitespace-nowrap">
+                    <span className="text-[9px] uppercase tracking-wide text-white/40">{t.court}</span>
+                    <span className={`font-[var(--font-mono,monospace)] text-xs font-semibold ${v > 0 ? "text-white/85" : "text-white/25"}`}>{formatKEurRetard(v)}</span>
                   </div>
                 );
               })}
@@ -930,6 +932,7 @@ function RetardsPaiementCard({
             ? `${clientOuvert.nom_tiers || clientOuvert.numero_tiers} — ${clientOuvert.numero_tiers}`
             : `Retards de paiement — ${nb} client${nb > 1 ? "s" : ""} · ${formatMontant(synthese?.total_en_retard || 0)}`}
           onClose={() => { setOpen(false); setClientOuvert(null); }}
+          wide={!clientOuvert}
         >
           {clientOuvert ? (
             <div>
@@ -972,27 +975,27 @@ function RetardsPaiementCard({
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-black/10 text-left text-xs uppercase tracking-wide text-[#141A26]/50">
-                    <th className="px-2 py-2">Code</th>
+                    <th className="whitespace-nowrap px-2 py-2">Code</th>
                     <th className="px-2 py-2">Client</th>
-                    <th className="px-2 py-2">Collaborateur</th>
-                    <th className="px-2 py-2">Niveau</th>
-                    {TRANCHES_RETARD.map((t) => <th key={t.key} className="px-2 py-2 text-right">{t.court}</th>)}
-                    <th className="px-2 py-2 text-right">Total</th>
+                    <th className="whitespace-nowrap px-2 py-2">Collaborateur</th>
+                    <th className="whitespace-nowrap px-2 py-2">Niveau</th>
+                    {TRANCHES_RETARD.map((t) => <th key={t.key} className="whitespace-nowrap px-2 py-2 text-right">{t.court}</th>)}
+                    <th className="whitespace-nowrap px-2 py-2 text-right">Total</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-black/[0.06]">
                   {(liste || []).map((r) => (
                     <tr key={r.numero_tiers} onClick={() => setClientOuvert(r)} className="cursor-pointer hover:bg-black/[0.03]" title="Voir la fiche compta">
-                      <td className="px-2 py-2 font-[var(--font-mono,monospace)] text-[#141A26]/70">{r.numero_tiers}</td>
+                      <td className="whitespace-nowrap px-2 py-2 font-[var(--font-mono,monospace)] text-[#141A26]/70">{r.numero_tiers}</td>
                       <td className={`px-2 py-2 ${r.en_litige ? "font-semibold text-[#92400e]" : ""}`}>{r.nom_tiers || "—"}{r.en_litige ? " ⚖" : ""}</td>
-                      <td className="px-2 py-2 text-[#141A26]/70">{r.collaborateur || "—"}</td>
-                      <td className="px-2 py-2 text-[#141A26]/70">{r.niveau_relance || "—"}</td>
+                      <td className="whitespace-nowrap px-2 py-2 text-[#141A26]/70">{r.collaborateur || "—"}</td>
+                      <td className="whitespace-nowrap px-2 py-2 text-[#141A26]/70">{r.niveau_relance || "—"}</td>
                       {TRANCHES_RETARD.map((t) => (
-                        <td key={t.key} className={`px-2 py-2 text-right font-[var(--font-mono,monospace)] ${r[t.key] > 0 ? "text-[#141A26]/80" : "text-[#141A26]/20"}`}>
+                        <td key={t.key} className={`whitespace-nowrap px-2 py-2 text-right font-[var(--font-mono,monospace)] ${r[t.key] > 0 ? "text-[#141A26]/80" : "text-[#141A26]/20"}`}>
                           {r[t.key] > 0 ? formatKEurRetard(r[t.key]) : ""}
                         </td>
                       ))}
-                      <td className="px-2 py-2 text-right font-[var(--font-mono,monospace)] font-semibold text-[#C1683C]">{formatKEurRetard(r.total_en_retard)}</td>
+                      <td className="whitespace-nowrap px-2 py-2 text-right font-[var(--font-mono,monospace)] font-semibold text-[#C1683C]">{formatKEurRetard(r.total_en_retard)}</td>
                     </tr>
                   ))}
                   {(liste || []).length === 0 && <tr><td colSpan={9} className="px-2 py-6 text-center text-[#141A26]/40">Aucun client.</td></tr>}
@@ -1246,10 +1249,10 @@ async function fetchAgenceLignes(effectiveAgence: string | null, effectiveCollab
   }));
 }
 
-function AgenceModalShell({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+function AgenceModalShell({ title, onClose, children, wide = false }: { title: string; onClose: () => void; children: React.ReactNode; wide?: boolean }) {
   return (
     <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/60 p-5" onClick={onClose}>
-      <div className="max-h-[85vh] w-full max-w-3xl overflow-y-auto rounded-2xl bg-[#F5F3EC] p-5 text-[#141A26] shadow-2xl" onClick={(e) => e.stopPropagation()}>
+      <div className={`max-h-[85vh] w-full ${wide ? "max-w-[1400px]" : "max-w-3xl"} overflow-y-auto rounded-2xl bg-[#F5F3EC] p-5 text-[#141A26] shadow-2xl`} onClick={(e) => e.stopPropagation()}>
         <div className="mb-3 flex items-center justify-between gap-3">
           <h3 className="text-lg font-bold">{title}</h3>
           <button onClick={onClose} className="rounded-full bg-black/5 px-3 py-1.5 text-sm hover:bg-black/10">✕</button>
