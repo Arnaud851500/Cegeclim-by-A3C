@@ -12,6 +12,22 @@ import { NouveauRdvSheet } from './MobileRdv'
 // (options = périmètre de l'utilisateur, voir lib/useCollaborateursPerimetre).
 import { collaborateurMatches, useCollaborateursPerimetre } from '@/lib/useCollaborateursPerimetre'
 import MobileCollaborateurFilter from './MobileCollaborateurFilter'
+// ÉVOLUTION (2026-09-10) : retards de paiement clients (fichier compta "Qui
+// vous doit quoi" importé via /retards-paiement) -- pavé "💶 Retards de
+// paiement" sous la liste des clients (nb clients, K€ par tranche, total),
+// tap -> liste des clients, tap client -> toutes les colonnes du fichier.
+// Sur la fiche client : carte "Retards de paiement" avec le total et la
+// tranche la plus ancienne. Voir lib/retardsPaiement.ts.
+import {
+  TRANCHES_RETARD,
+  champsDetailRetard,
+  fetchRetardsPaiementClient,
+  fetchRetardsPaiementListe,
+  formatDateFrRetard,
+  formatKEurRetard,
+  trancheLaPlusAncienne,
+  type RetardPaiementClient,
+} from '@/lib/retardsPaiement'
 
 const N = new Date().getFullYear()
 const CURRENT_MONTH = new Date().getMonth() + 1
@@ -343,6 +359,16 @@ export default function MobileClients({
   const [alertesClientsBrutes, setAlertesClientsBrutes] = useState<ClientAlerteRow[] | null>(null)
   const [alertesClientsOuvertes, setAlertesClientsOuvertes] = useState<ClientAlerteType | null>(null)
 
+  // ÉVOLUTION (2026-09-10) : retards de paiement (dernier fichier compta
+  // importé), chargés une fois le périmètre connu -- la RPC applique déjà
+  // le périmètre agence/collaborateur ; le filtre "Collaborateur" de
+  // l'écran s'applique ensuite côté client (retardsVisibles).
+  // null = pas encore chargé ; [] = rien en retard (ou aucun fichier).
+  const [retardsBruts, setRetardsBruts] = useState<RetardPaiementClient[] | null>(null)
+  const [retardsErreur, setRetardsErreur] = useState<string | null>(null)
+  const [retardsListeOuverte, setRetardsListeOuverte] = useState(false)
+  const [retardOuvert, setRetardOuvert] = useState<RetardPaiementClient | null>(null)
+
   useEffect(() => {
     let cancelled = false
     async function charger() {
@@ -374,6 +400,26 @@ export default function MobileClients({
     return () => { cancelled = true }
   }, [])
 
+  useEffect(() => {
+    if (!perimetre) return
+    let cancelled = false
+    async function charger() {
+      try {
+        const rows = await fetchRetardsPaiementListe(perimetre)
+        if (cancelled) return
+        setRetardsBruts(rows)
+        setRetardsErreur(null)
+      } catch (e) {
+        console.warn('[MobileClients] retards de paiement indisponibles :', e)
+        if (cancelled) return
+        setRetardsBruts([])
+        setRetardsErreur(e instanceof Error ? e.message : String(e))
+      }
+    }
+    void charger()
+    return () => { cancelled = true }
+  }, [perimetre])
+
   /** Liste effectivement visible : périmètre (allClients) puis filtre
    * collaborateur. Sert de base aux stats, à la recherche et aux alertes. */
   const clientsVisibles = useMemo(() => {
@@ -394,6 +440,26 @@ export default function MobileClients({
     for (const r of alertesClientsRows) counts[r.typeAlerte] += 1
     return counts
   }, [alertesClientsRows])
+
+  /** Retards visibles : filtre "Collaborateur" appliqué sur le
+   * collaborateur porté par la vue (même colonne cache que ClientRow). */
+  const retardsVisibles = useMemo(() => {
+    if (!retardsBruts) return null
+    if (!collaborateurFiltre) return retardsBruts
+    return retardsBruts.filter((r) => collaborateurMatches(r.collaborateur, collaborateurFiltre))
+  }, [retardsBruts, collaborateurFiltre])
+
+  const retardsSynthese = useMemo(() => {
+    if (!retardsVisibles) return null
+    const somme = (k: keyof RetardPaiementClient) => retardsVisibles.reduce((s, r) => s + Number(r[k] || 0), 0)
+    return {
+      nbClients: retardsVisibles.length,
+      nbLitiges: retardsVisibles.filter((r) => r.en_litige).length,
+      total: somme('total_en_retard'),
+      tranches: TRANCHES_RETARD.map((t) => ({ ...t, montant: somme(t.key) })),
+      dateExtraction: retardsVisibles[0]?.date_extraction || retardsBruts?.[0]?.date_extraction || '',
+    }
+  }, [retardsVisibles, retardsBruts])
 
   async function terminerAlerteClient(row: ClientAlerteRow) {
     const { error } = await supabase
@@ -497,6 +563,20 @@ export default function MobileClients({
     onCibleConsommee?.()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cibleNumero, allClients])
+
+  /** Ouvre la fiche client depuis une ligne "retard" (client éventuellement
+   * absent du cache, ex. comptes "Clients DIVERS" -> fiche minimale). */
+  function ouvrirClientDepuisRetard(r: RetardPaiementClient) {
+    const clientTrouve = allClients?.find((c) => c.numero === r.numero_tiers)
+    const client: ClientRow = clientTrouve || {
+      numero: r.numero_tiers, nom: r.nom_tiers || r.numero_tiers, collaborateur: r.collaborateur, dateCreationIso: '',
+      caYtdN: 0, caYtdN1: 0, caN1: 0, ca12m: 0, band: CA_PROFILE_BANDS[0],
+      devisYtdN: 0, margePctYtdN: null, margePctYtdN1: null,
+    }
+    setRetardOuvert(null)
+    setRetardsListeOuverte(false)
+    void openClient(client)
+  }
 
   async function openClient(client: ClientRow) {
     setSelected(client)
@@ -875,6 +955,57 @@ export default function MobileClients({
               </div>
             )}
           </div>
+
+          {/* ── Retards de paiement (fichier compta) ── */}
+          <div
+            onClick={() => retardsSynthese && retardsSynthese.nbClients > 0 && setRetardsListeOuverte(true)}
+            style={{
+              borderRadius: 14,
+              border: '1px solid rgba(193,104,60,0.30)',
+              background: 'rgba(193,104,60,0.08)',
+              padding: '14px 14px 12px',
+              cursor: retardsSynthese && retardsSynthese.nbClients > 0 ? 'pointer' : 'default',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 }}>
+              <span style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
+                💶 Retards de paiement
+              </span>
+              {retardsSynthese?.dateExtraction && (
+                <span style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.35)' }}>au {formatDateFrRetard(retardsSynthese.dateExtraction)}</span>
+              )}
+            </div>
+            {retardsSynthese === null ? (
+              <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Chargement…</div>
+            ) : retardsErreur ? (
+              <div style={{ fontSize: 12.5, color: '#e0a685' }}>Donnée indisponible : {retardsErreur}</div>
+            ) : !retardsSynthese.dateExtraction ? (
+              <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Aucun fichier compta importé.</div>
+            ) : retardsSynthese.nbClients === 0 ? (
+              <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Aucun client en retard sur ce périmètre.</div>
+            ) : (
+              <>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
+                  <span style={{ fontSize: 14.5, color: 'rgba(255,255,255,0.85)' }}>
+                    <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: '#E8A96A' }}>{retardsSynthese.nbClients}</span> client{retardsSynthese.nbClients > 1 ? 's' : ''}
+                    {retardsSynthese.nbLitiges > 0 && <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)' }}> · {retardsSynthese.nbLitiges} en litige</span>}
+                  </span>
+                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 18, fontWeight: 700, color: '#E8A96A' }}>{formatKEurRetard(retardsSynthese.total)}</span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {retardsSynthese.tranches.map((t) => (
+                    <div key={t.key} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13.5 }}>
+                      <span style={{ color: 'rgba(255,255,255,0.65)' }}>{t.label}</span>
+                      <span style={{ fontFamily: 'var(--font-mono)', color: t.montant > 0 ? '#fff' : 'rgba(255,255,255,0.3)' }}>
+                        {formatKEurRetard(t.montant)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ marginTop: 8, fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>Toucher pour voir la liste des clients</div>
+              </>
+            )}
+          </div>
         </>
       )}
 
@@ -951,6 +1082,83 @@ export default function MobileClients({
             </button>
           </div>
         </div>
+      )}
+
+      {/* ── Liste des clients en retard de paiement ── */}
+      {retardsListeOuverte && retardsSynthese && (
+        <div
+          style={{ position: 'fixed', inset: 0, zIndex: 240, background: 'rgba(6,10,18,0.62)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
+          onClick={() => setRetardsListeOuverte(false)}
+        >
+          <div
+            style={{ width: '100%', maxWidth: 480, maxHeight: '85vh', overflowY: 'auto', background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.08)', padding: '12px 18px 26px', display: 'flex', flexDirection: 'column', gap: 8 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 6px' }} />
+            <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Retards de paiement</div>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', marginBottom: 4 }}>
+              {retardsSynthese.nbClients} clients · {formatKEurRetard(retardsSynthese.total)} · situation compta au {formatDateFrRetard(retardsSynthese.dateExtraction)}
+            </div>
+
+            {(retardsVisibles || []).map((r) => {
+              const tranche = trancheLaPlusAncienne(r)
+              return (
+                <div
+                  key={r.numero_tiers}
+                  onClick={() => setRetardOuvert(r)}
+                  style={{ borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)', padding: '10px 12px', cursor: 'pointer' }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'baseline' }}>
+                    <span style={{ fontSize: 14.5, fontWeight: 600, color: '#fff', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {r.nom_tiers || r.numero_tiers}
+                    </span>
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 700, color: '#E8A96A', whiteSpace: 'nowrap' }}>
+                      {formatKEurRetard(r.total_en_retard)}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginTop: 3, display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                    <span>
+                      N° {r.numero_tiers}
+                      {r.collaborateur && <span style={{ color: 'rgba(166,161,129,0.9)' }}> ({formatCollaborateurCourt(r.collaborateur)})</span>}
+                      {r.en_litige && <span style={{ color: '#e0a685' }}> · litige</span>}
+                    </span>
+                    {tranche && <span style={{ color: tranche.key === 'retard_plus_45' ? '#e0a685' : 'rgba(255,255,255,0.6)', whiteSpace: 'nowrap' }}>{tranche.court}</span>}
+                  </div>
+                </div>
+              )
+            })}
+
+            <button
+              type="button"
+              onClick={() => setRetardsListeOuverte(false)}
+              style={{ marginTop: 8, padding: '12px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: 'transparent', color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: 600 }}
+            >
+              Fermer
+            </button>
+          </div>
+        </div>
+      )}
+
+      {retardOuvert && (
+        <MobileDetailSheet
+          title={retardOuvert.nom_tiers || retardOuvert.numero_tiers}
+          subtitle={`Retards de paiement · ${formatKEurRetard(retardOuvert.total_en_retard)}${trancheLaPlusAncienne(retardOuvert) ? ` · ${trancheLaPlusAncienne(retardOuvert)!.label.toLowerCase()}` : ''}`}
+          fields={champsDetailRetard(retardOuvert)}
+          footer={
+            <button
+              type="button"
+              onClick={() => ouvrirClientDepuisRetard(retardOuvert)}
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                padding: '13px', borderRadius: 12, border: '1px solid rgba(75,146,172,0.4)',
+                background: 'rgba(75,146,172,0.14)', color: '#8FC7DA', fontSize: 14, fontWeight: 700,
+              }}
+            >
+              👤 Ouvrir la fiche client
+            </button>
+          }
+          onClose={() => setRetardOuvert(null)}
+        />
       )}
 
       {search.trim() && (
@@ -1051,6 +1259,19 @@ function ClientDetailScreen({
   const [transformations, setTransformations] = useState<DevisTransformation[] | null>(null)
   const [transformationsLoading, setTransformationsLoading] = useState(false)
   const [commandeAModifier, setCommandeAModifier] = useState<DocAgrege | null>(null)
+
+  // ÉVOLUTION (2026-09-10) : retards de paiement réels du client (dernier
+  // fichier compta importé). undefined = chargement, null = rien en retard.
+  const [retardClient, setRetardClient] = useState<RetardPaiementClient | null | undefined>(undefined)
+
+  useEffect(() => {
+    let cancelled = false
+    setRetardClient(undefined)
+    fetchRetardsPaiementClient(client.numero)
+      .then((r) => { if (!cancelled) setRetardClient(r && r.total_en_retard > 0 ? r : null) })
+      .catch((e) => { console.warn('[MobileClients] retard de paiement client indisponible :', e); if (!cancelled) setRetardClient(null) })
+    return () => { cancelled = true }
+  }, [client.numero])
 
   const transformationsParPiece = useMemo(() => {
     const map: Record<string, DevisTransformation> = {}
@@ -1399,6 +1620,19 @@ function ClientDetailScreen({
     })
   }
 
+  /** Fiche complète des retards de paiement (toutes les colonnes du fichier compta). */
+  function openRetardDetail() {
+    if (!retardClient) return
+    const tranche = trancheLaPlusAncienne(retardClient)
+    setOpenDetail({
+      title: 'Retards de paiement',
+      subtitle: `${formatKEurRetard(retardClient.total_en_retard)}${tranche ? ` · ${tranche.label.toLowerCase()}` : ''} · situation au ${formatDateFrRetard(retardClient.date_extraction)}`,
+      fields: champsDetailRetard(retardClient),
+    })
+  }
+
+  const retardTranche = trancheLaPlusAncienne(retardClient || null)
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column' }}>
       <button
@@ -1511,6 +1745,51 @@ function ClientDetailScreen({
         </div>
 
         <StatMini label="BL depuis le 1er janvier" value={loading || !detail ? '…' : formatMoney(detail.blYtd)} />
+
+        {/* ── Retards de paiement (fichier compta) ── */}
+        <div
+          onClick={retardClient ? openRetardDetail : undefined}
+          style={{
+            borderRadius: 14,
+            border: `1px solid ${retardClient ? 'rgba(193,104,60,0.35)' : 'rgba(255,255,255,0.10)'}`,
+            background: retardClient ? 'rgba(193,104,60,0.10)' : 'rgba(255,255,255,0.04)',
+            padding: '12px 13px',
+            cursor: retardClient ? 'pointer' : 'default',
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+            <span style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
+              💶 Retards de paiement
+            </span>
+            {retardClient && (
+              <span style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.35)' }}>au {formatDateFrRetard(retardClient.date_extraction)}</span>
+            )}
+          </div>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 20, fontWeight: 700, color: retardClient ? '#E8A96A' : '#8fd4a8', marginTop: 4 }}>
+            {retardClient === undefined ? '…' : retardClient ? formatMoney(retardClient.total_en_retard) : formatMoney(0)}
+          </div>
+          {retardClient === null && (
+            <div style={{ marginTop: 4, fontSize: 11.5, color: 'rgba(255,255,255,0.4)' }}>Aucun retard dans le dernier fichier compta.</div>
+          )}
+          {retardClient && (
+            <div style={{ marginTop: 6, fontSize: 12, display: 'flex', flexDirection: 'column', gap: 3 }}>
+              {retardTranche && <div style={{ color: '#e0a685', fontWeight: 600 }}>{retardTranche.label}</div>}
+              {TRANCHES_RETARD.filter((t) => retardClient[t.key] > 0).map((t) => (
+                <div key={t.key} style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: 'rgba(255,255,255,0.6)' }}>{t.court}</span>
+                  <span style={{ fontFamily: 'var(--font-mono)', color: '#fff' }}>{formatMoney(retardClient[t.key])}</span>
+                </div>
+              ))}
+              {retardClient.en_litige && <div style={{ color: '#e0a685' }}>⚠ En litige{retardClient.intitule_litige ? ` · ${retardClient.intitule_litige}` : ''}</div>}
+              {retardClient.niveau_relance && (
+                <div style={{ color: 'rgba(255,255,255,0.45)', fontSize: 11.5 }}>
+                  Relance {retardClient.niveau_relance}{retardClient.effectue_le ? ` le ${formatDateFrRetard(retardClient.effectue_le)}` : ''}
+                </div>
+              )}
+              <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>Toucher pour le détail compta (promesses, commentaires…)</div>
+            </div>
+          )}
+        </div>
 
         <div
           style={{
