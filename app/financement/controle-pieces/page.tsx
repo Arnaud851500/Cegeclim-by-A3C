@@ -1,0 +1,946 @@
+'use client'
+
+import { useEffect, useRef, useState } from 'react'
+import { useRouter } from 'next/navigation'
+import Script from 'next/script'
+import { supabase } from '@/lib/supabaseClient'
+import { useAccess } from '@/components/AccessContext'
+
+// Relecteur de pièces CEE : reprend l'outil autonome (Artifact HTML
+// "Relecteur de pièces CEE") sous forme de page intégrée à l'application,
+// réservée aux personnes ayant can_financement. La checklist par type de
+// pièce est partagée (table cee_controle_checklists, éditable via "Modifier
+// la checklist") ; la relecture par IA et la rédaction du mail passent par
+// /api/financement/controle-pieces/* (clé OpenAI côté serveur uniquement).
+
+type TypePieceId = 'avis_imposition' | 'note_dimensionnement' | 'devis' | 'facture'
+
+type TypeMeta = { id: TypePieceId; label: string; code: string; art: string; the: string; of: string }
+
+const TYPES: TypeMeta[] = [
+  { id: 'avis_imposition', label: "Avis d'imposition", code: 'AVIS', art: "un avis d'imposition", the: "L'avis d'imposition", of: "de l'avis d'imposition" },
+  { id: 'note_dimensionnement', label: 'Note de dimensionnement', code: 'NOTE', art: 'une note de dimensionnement', the: 'La note de dimensionnement', of: 'de la note de dimensionnement' },
+  { id: 'devis', label: 'Devis', code: 'DEVIS', art: 'un devis', the: 'Le devis', of: 'du devis' },
+  { id: 'facture', label: 'Facture', code: 'FACT', art: 'une facture', the: 'La facture', of: 'de la facture' },
+]
+
+const STATUS_LABEL: Record<'c' | 'nc' | 'na', string> = { c: 'Conforme', nc: 'Non conforme', na: 'N/A' }
+
+type ChecklistItem = { id: string; label: string; hint?: string }
+
+// Checklists par défaut : utilisées tant que personne n'a personnalisé la
+// checklist partagée pour ce type de pièce, et comme base de pré-remplissage
+// à l'ouverture de l'éditeur. Jamais écrites automatiquement en base : elles
+// ne deviennent la checklist "officielle" que si un humain clique sur
+// Enregistrer.
+const DEFAULT_CHECKLISTS: Record<TypePieceId, { items: ChecklistItem[]; exempleMail: string }> = {
+  avis_imposition: {
+    items: [
+      { id: 'identite_foyer', label: 'Identité et adresse du foyer fiscal', hint: 'Doit correspondre au bénéficiaire du dossier (nom, prénom, adresse).' },
+      { id: 'annee_revenus', label: "Année des revenus / de l'avis", hint: "Avis le plus récent disponible (en général n-2 par rapport à la date de la demande, n-1 en fin d'année)." },
+      { id: 'rfr', label: 'Revenu fiscal de référence (RFR)', hint: 'Valeur chiffrée et lisible ; sert à déterminer le classement précarité / grande précarité / classique.' },
+      { id: 'nombre_parts', label: 'Nombre de parts du foyer fiscal', hint: 'Nécessaire avec le RFR pour vérifier le classement selon le barème en vigueur.' },
+      { id: 'reference_avis', label: "Référence / numéro fiscal de l'avis", hint: "Permet de vérifier l'authenticité du document." },
+      { id: 'composition_foyer', label: 'Composition du foyer cohérente', hint: 'Les personnes à charge et la situation familiale doivent correspondre au dossier.' },
+    ],
+    exempleMail: '',
+  },
+  note_dimensionnement: {
+    items: [
+      { id: 'identification_logement', label: 'Identification du logement', hint: 'Adresse du chantier, type de logement, surface, année de construction.' },
+      { id: 'calcul_deperditions', label: 'Calcul chiffré (déperditions / puissance)', hint: "Méthode de calcul reconnue avec un résultat chiffré (kW, W) : une conclusion sans calcul n'est pas suffisante." },
+      { id: 'coherence_equipement', label: "Préconisation cohérente avec l'équipement posé", hint: 'La puissance / le modèle préconisé doit correspondre à celui du devis et de la facture du dossier.' },
+      { id: 'qualification_auteur', label: "Identité et qualification de l'auteur", hint: "Bureau d'études ou professionnel identifié, avec ses coordonnées." },
+      { id: 'date_anteriorite', label: 'Date antérieure aux travaux', hint: 'La note doit être établie avant la signature du devis ou le début des travaux.' },
+      { id: 'signature_note', label: "Signature / cachet de l'auteur", hint: '' },
+    ],
+    exempleMail: '',
+  },
+  devis: {
+    items: [
+      { id: 'identite_client', label: 'Identité et adresse du bénéficiaire', hint: 'Nom, prénom et adresse du chantier, cohérents avec le reste du dossier.' },
+      { id: 'identite_pro', label: "Identité et qualification RGE de l'artisan", hint: 'Raison sociale, SIRET, qualification RGE adaptée aux travaux, assurance décennale.' },
+      { id: 'description_travaux', label: 'Description précise des travaux / équipement', hint: "Marque, référence et caractéristiques techniques (performance) permettant de vérifier l'éligibilité CEE." },
+      { id: 'date_devis', label: 'Date du devis', hint: "Antérieure à l'acceptation du devis et au début des travaux." },
+      { id: 'montants', label: 'Montants HT / TTC et TVA', hint: 'Taux de TVA cohérent avec la nature des travaux (taux réduit le cas échéant).' },
+      { id: 'mention_cee', label: "Mention de l'opération CEE / coup de pouce", hint: "Si applicable : référence de la fiche d'opération standardisée et montant de l'aide déduite." },
+      { id: 'signature_devis', label: 'Bon pour accord signé et daté par le client', hint: 'Date de signature postérieure à la date du devis et antérieure aux travaux.' },
+    ],
+    exempleMail: '',
+  },
+  facture: {
+    items: [
+      { id: 'coherence_devis', label: 'Concordance avec le devis', hint: 'Même artisan, même bénéficiaire, mêmes travaux/équipement que le devis du dossier.' },
+      { id: 'numero_date_facture', label: 'Numéro et date de la facture', hint: 'Date postérieure à la fin des travaux.' },
+      { id: 'mentions_legales', label: 'Mentions légales obligatoires', hint: 'SIRET, numéro de TVA intracommunautaire, qualification RGE.' },
+      { id: 'description_realise', label: 'Description des travaux réellement réalisés', hint: "Doit correspondre à l'équipement installé (marque/référence), pas seulement recopier le devis." },
+      { id: 'montant_ttc', label: 'Montant TTC cohérent avec le devis', hint: 'Tout écart doit être justifié (avenant, remise, aide déduite).' },
+      { id: 'solde_paiement', label: 'Mention du solde / du paiement', hint: "La facture doit indiquer qu'elle est soldée ou préciser les modalités de paiement restantes." },
+    ],
+    exempleMail: '',
+  },
+}
+
+const PDF_JS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'
+const PDF_WORKER_URL = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+const MAX_LOCAL_PAGES = 20
+const MAX_IMAGES_REVIEW = 4
+const MAX_IMAGES_BENEF = 2
+const TEXT_BUDGET = 48000
+
+type ItemResult = { status?: 'c' | 'nc' | 'na' | null; value?: string; comment?: string; origin?: 'claude' | 'human'; touchedAfterClaude?: boolean }
+type PageImage = { blob: Blob; url: string }
+type FileEntry = { uid: string; name: string; status: 'loading' | 'ready' | 'error'; error?: string; text?: string; pages: PageImage[] }
+type DocCheck = { ok: boolean; remark: string } | null
+type SessionState = { files: FileEntry[]; results: Record<string, ItemResult>; docCheck: DocCheck; mail: string; mailBusy: boolean }
+
+function emptySession(): SessionState {
+  return { files: [], results: {}, docCheck: null, mail: '', mailBusy: false }
+}
+
+function newId(): string {
+  return 'x' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7)
+}
+
+function blobToDataURL(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(new Error('Lecture du fichier impossible.'))
+    reader.readAsDataURL(blob)
+  })
+}
+
+function computeCounts(list: ChecklistItem[], results: Record<string, ItemResult>) {
+  const c = { c: 0, nc: 0, na: 0, todo: 0 }
+  for (const it of list) {
+    const st = results[it.id]?.status
+    if (st) c[st]++
+    else c.todo++
+  }
+  return c
+}
+
+function errCopy(code?: string, fallback?: string): string {
+  switch (code) {
+    case 'not_configured':
+      return "La relecture automatique n'est pas configurée sur ce serveur."
+    case 'quota':
+      return "Le compte IA utilisé par cette application n'a plus de quota. Contactez l'administrateur."
+    case 'rate_limited':
+      return "Limite d'utilisation atteinte. Réessayez dans quelques minutes."
+    case 'forbidden':
+      return 'Accès non autorisé.'
+    default:
+      return fallback || 'La relecture a échoué (problème de connexion). Réessayez.'
+  }
+}
+
+export default function ControlePiecesCeePage() {
+  const router = useRouter()
+  const { rights, email, loading: accessLoading } = useAccess()
+
+  useEffect(() => {
+    if (accessLoading) return
+    if (!rights.can_financement) router.replace('/unauthorized')
+  }, [accessLoading, rights.can_financement, router])
+
+  const [pdfReady, setPdfReady] = useState(false)
+  const [current, setCurrent] = useState<TypePieceId>('note_dimensionnement')
+  const [checklists, setChecklists] = useState<Partial<Record<TypePieceId, { items: ChecklistItem[]; exempleMail: string }>>>({})
+  const [checklistsError, setChecklistsError] = useState(false)
+  const [sessions, setSessions] = useState<Record<TypePieceId, SessionState>>(() => ({
+    avis_imposition: emptySession(),
+    note_dimensionnement: emptySession(),
+    devis: emptySession(),
+    facture: emptySession(),
+  }))
+  const [benef, setBenef] = useState('')
+  const [benefAuto, setBenefAuto] = useState(false)
+  const [benefBusy, setBenefBusy] = useState(false)
+  const [benefMsg, setBenefMsg] = useState<{ text: string; suggestion?: string } | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [runNote, setRunNote] = useState('')
+  const [runNoteTone, setRunNoteTone] = useState<'info' | 'warn' | 'err'>('info')
+  const [toastMsg, setToastMsg] = useState('')
+  const [editorOpen, setEditorOpen] = useState(false)
+  const [draftItems, setDraftItems] = useState<ChecklistItem[]>([])
+  const [draftExample, setDraftExample] = useState('')
+  const [editorSaving, setEditorSaving] = useState(false)
+  const [editorError, setEditorError] = useState('')
+
+  const benefKeyRef = useRef<Partial<Record<TypePieceId, string>>>({})
+  const benefRef = useRef('')
+  const benefAutoRef = useRef(false)
+  const toastTimerRef = useRef<number | null>(null)
+  const abortRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    benefRef.current = benef
+  }, [benef])
+  useEffect(() => {
+    benefAutoRef.current = benefAuto
+  }, [benefAuto])
+
+  function customItems(t: TypePieceId): ChecklistItem[] {
+    return checklists[t]?.items || []
+  }
+  function usingDefaults(t: TypePieceId): boolean {
+    return customItems(t).length === 0
+  }
+  function items(t: TypePieceId): ChecklistItem[] {
+    const c = customItems(t)
+    return c.length ? c : DEFAULT_CHECKLISTS[t].items
+  }
+  function typeOf(t: TypePieceId): TypeMeta {
+    return TYPES.find((x) => x.id === t)!
+  }
+  function sess(t: TypePieceId): SessionState {
+    return sessions[t] || emptySession()
+  }
+
+  function updateSession(t: TypePieceId, updater: (s: SessionState) => SessionState) {
+    setSessions((prev) => ({ ...prev, [t]: updater(prev[t] || emptySession()) }))
+  }
+
+  function toast(msg: string) {
+    setToastMsg(msg)
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current)
+    toastTimerRef.current = window.setTimeout(() => setToastMsg(''), 2200)
+  }
+
+  // Chargement de la checklist partagée (table cee_controle_checklists,
+  // protégée par la même RLS peut_acceder_financement() que le reste du
+  // module CEE). Si la lecture échoue, l'outil reste utilisable avec les
+  // checklists par défaut définies plus haut.
+  useEffect(() => {
+    let cancelled = false
+    async function load() {
+      const { data, error } = await supabase.from('cee_controle_checklists').select('type_piece, items, exemple_mail')
+      if (cancelled) return
+      if (error) {
+        setChecklistsError(true)
+        return
+      }
+      const map: Partial<Record<TypePieceId, { items: ChecklistItem[]; exempleMail: string }>> = {}
+      for (const row of data || []) {
+        const t = row.type_piece as TypePieceId
+        if (!TYPES.some((x) => x.id === t)) continue
+        const rawItems = Array.isArray(row.items) ? row.items : []
+        map[t] = {
+          items: rawItems
+            .filter((x: any) => x && x.id && x.label)
+            .map((x: any) => ({ id: String(x.id), label: String(x.label), hint: x.hint ? String(x.hint) : '' })),
+          exempleMail: String(row.exemple_mail || ''),
+        }
+      }
+      setChecklists(map)
+    }
+    void load()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // --- Fichiers -----------------------------------------------------------
+
+  async function preparePdf(file: File): Promise<{ text: string; pages: PageImage[] }> {
+    const pdfjsLib = (window as any).pdfjsLib
+    if (!pdfjsLib) throw new Error('Lecteur PDF indisponible (rechargez la page).')
+    const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise
+    const texts: string[] = []
+    const pages: PageImage[] = []
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i)
+      const tc = await page.getTextContent()
+      texts.push(`--- Page ${i} ---\n` + tc.items.map((it: any) => it.str + (it.hasEOL ? '\n' : ' ')).join(''))
+      if (pages.length < MAX_LOCAL_PAGES) {
+        const vp1 = page.getViewport({ scale: 1 })
+        const scale = Math.min(2.2, 1500 / vp1.width)
+        const vp = page.getViewport({ scale })
+        const canvas = document.createElement('canvas')
+        canvas.width = Math.round(vp.width)
+        canvas.height = Math.round(vp.height)
+        const ctx = canvas.getContext('2d')!
+        ctx.fillStyle = '#fff'
+        ctx.fillRect(0, 0, canvas.width, canvas.height)
+        await page.render({ canvasContext: ctx, viewport: vp }).promise
+        const blob: Blob = await new Promise((resolve) => canvas.toBlob((b) => resolve(b as Blob), 'image/jpeg', 0.82))
+        pages.push({ blob, url: URL.createObjectURL(blob) })
+      }
+    }
+    let text = texts.join('\n').replace(/[ \t]+/g, ' ').trim()
+    if (text.replace(/--- Page \d+ ---/g, '').trim().length < 20) text = ''
+    return { text, pages }
+  }
+
+  async function prepareImage(file: File): Promise<{ text: string; pages: PageImage[] }> {
+    if (!/^image\//.test(file.type)) throw new Error('Format non pris en charge (PDF, JPG ou PNG).')
+    return { text: '', pages: [{ blob: file, url: URL.createObjectURL(file) }] }
+  }
+
+  function addFiles(list: FileList | null) {
+    if (!list || !list.length) return
+    const t = current
+    const entries: FileEntry[] = Array.from(list).map((f) => ({ uid: newId(), name: f.name, status: 'loading', pages: [] }))
+    updateSession(t, (s) => ({ ...s, files: [...s.files, ...entries] }))
+
+    Array.from(list).forEach((file, idx) => {
+      const uid = entries[idx].uid
+      const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name)
+      const job = isPdf ? preparePdf(file) : prepareImage(file)
+      job
+        .then(({ text, pages }) => {
+          updateSession(t, (s) => ({ ...s, files: s.files.map((f) => (f.uid === uid ? { ...f, status: 'ready' as const, text, pages } : f)) }))
+        })
+        .catch((err: any) => {
+          updateSession(t, (s) => ({ ...s, files: s.files.map((f) => (f.uid === uid ? { ...f, status: 'error' as const, error: err?.message || 'Fichier illisible' } : f)) }))
+        })
+    })
+  }
+
+  function removeFile(t: TypePieceId, index: number) {
+    updateSession(t, (s) => {
+      const f = s.files[index]
+      f?.pages.forEach((p) => URL.revokeObjectURL(p.url))
+      const files = s.files.slice()
+      files.splice(index, 1)
+      return { ...s, files }
+    })
+  }
+
+  function allPages(t: TypePieceId): PageImage[] {
+    return sess(t).files.flatMap((f) => f.pages)
+  }
+  function filesReady(t: TypePieceId): boolean {
+    const s = sess(t)
+    return s.files.length > 0 && s.files.every((f) => f.status === 'ready') && allPages(t).length > 0
+  }
+
+  // --- Bénéficiaire ---------------------------------------------------------
+  // Déclenchement automatique dès que les fichiers du type actif sont prêts
+  // (sauf si l'utilisateur a déjà saisi un nom à la main) ; la clé de garde
+  // évite de relancer l'appel pour un même jeu de fichiers.
+
+  useEffect(() => {
+    const t = current
+    const s = sessions[t]
+    if (!s || benefBusy || busy) return
+    if (!(s.files.length > 0 && s.files.every((f) => f.status === 'ready') && s.files.some((f) => f.pages.length > 0))) return
+    if (benef.trim() && !benefAuto) return
+    const key = s.files.map((f) => f.name + ':' + f.pages.length).join('|')
+    if (benefKeyRef.current[t] === key) return
+    benefKeyRef.current[t] = key
+    void detectBenef(t, s)
+  }, [current, sessions, benef, benefAuto, busy, benefBusy])
+
+  async function detectBenef(t: TypePieceId, s: SessionState) {
+    setBenefBusy(true)
+    setBenefMsg({ text: 'Recherche du nom dans le document…' })
+    try {
+      const images = await Promise.all(allPages(t).slice(0, MAX_IMAGES_BENEF).map((p) => blobToDataURL(p.blob)))
+      const text = s.files.map((f) => f.text).filter(Boolean).join('\n').slice(0, 6000)
+      const res = await fetch('/api/financement/controle-pieces/detect-benef', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, typePiece: t, text, images }),
+      })
+      const out = await res.json().catch(() => null)
+      if (!res.ok) throw new Error(errCopy(out?.code, out?.error))
+      const name = String(out?.beneficiaire || '').trim()
+      if (!name) {
+        setBenefMsg({ text: 'Aucun nom de bénéficiaire trouvé dans le document.' })
+        return
+      }
+      const currentBenef = benefRef.current.trim()
+      if (currentBenef && !benefAutoRef.current) {
+        if (currentBenef.toLowerCase() !== name.toLowerCase()) setBenefMsg({ text: `Le document indique « ${name} ».`, suggestion: name })
+        else setBenefMsg(null)
+        return
+      }
+      setBenef(name)
+      setBenefAuto(true)
+      setBenefMsg({ text: out?.confiance === 'basse' ? 'Lecture incertaine : vérifiez le nom.' : 'Lu dans le document — vérifiez-le si besoin.' })
+    } catch {
+      setBenefMsg({ text: 'Nom non détecté : saisissez-le à la main.' })
+    } finally {
+      setBenefBusy(false)
+    }
+  }
+
+  // --- Relecture par IA -------------------------------------------------
+
+  async function runReview() {
+    if (busy) return
+    const t = current
+    const list = items(t)
+    if (!list.length) return
+    setBusy(true)
+    setRunNote("L'IA lit le document point par point…")
+    setRunNoteTone('info')
+    abortRef.current = new AbortController()
+    try {
+      const s = sess(t)
+      const images = await Promise.all(allPages(t).slice(0, MAX_IMAGES_REVIEW).map((p) => blobToDataURL(p.blob)))
+      let text = s.files.map((f) => (f.text ? `### ${f.name}\n${f.text}` : '')).filter(Boolean).join('\n\n')
+      if (text.length > TEXT_BUDGET) text = text.slice(0, TEXT_BUDGET) + '\n[… texte tronqué]'
+
+      const res = await fetch('/api/financement/controle-pieces/review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: abortRef.current.signal,
+        body: JSON.stringify({ email, typePiece: t, beneficiaire: benef.trim(), items: list, text, images }),
+      })
+      const out = await res.json().catch(() => null)
+      if (!res.ok) throw new Error(errCopy(out?.code, out?.error))
+
+      const known = new Set(list.map((i) => i.id))
+      let n = 0
+      const results: Record<string, ItemResult> = { ...sess(t).results }
+      for (const p of out.points || []) {
+        if (!known.has(p.id)) continue
+        results[p.id] = { status: p.statut || null, value: p.valeur || '', comment: p.commentaire || '', origin: 'claude' }
+        n++
+      }
+      updateSession(t, (prev) => ({ ...prev, results, docCheck: { ok: out.document_correspond !== false, remark: out.remarque_document || '' }, mail: '' }))
+
+      const aiBenef = String(out.beneficiaire || '').trim()
+      if (aiBenef && (!benefRef.current.trim() || benefAutoRef.current)) {
+        setBenef(aiBenef)
+        setBenefAuto(true)
+      }
+
+      setRunNote(
+        n
+          ? `Relecture terminée : ${n} point${n > 1 ? 's' : ''} pré-rempli${n > 1 ? 's' : ''}. Vérifiez et corrigez si besoin.`
+          : "L'IA n'a renvoyé aucun point exploitable. Réessayez ou remplissez à la main."
+      )
+      setRunNoteTone(n ? 'info' : 'warn')
+    } catch (e: any) {
+      const cancelled = e?.name === 'AbortError'
+      setRunNote(cancelled ? 'Relecture arrêtée.' : e?.message || 'La relecture a échoué (problème de connexion). Réessayez.')
+      setRunNoteTone(cancelled ? 'info' : 'err')
+    } finally {
+      setBusy(false)
+      abortRef.current = null
+    }
+  }
+
+  function stopReview() {
+    abortRef.current?.abort()
+  }
+
+  function setItemStatus(t: TypePieceId, id: string, v: 'c' | 'nc' | 'na') {
+    updateSession(t, (s) => {
+      const prevR = s.results[id] || {}
+      const wasClaude = prevR.origin === 'claude' || prevR.touchedAfterClaude
+      const nextStatus = prevR.status === v ? null : v
+      const next: ItemResult = { ...prevR, status: nextStatus, origin: 'human', touchedAfterClaude: wasClaude ? true : prevR.touchedAfterClaude }
+      return { ...s, results: { ...s.results, [id]: next } }
+    })
+  }
+
+  function setItemComment(t: TypePieceId, id: string, comment: string) {
+    updateSession(t, (s) => {
+      const prevR = s.results[id] || {}
+      const wasClaude = prevR.origin === 'claude'
+      const next: ItemResult = { ...prevR, comment, origin: wasClaude ? 'human' : prevR.origin, touchedAfterClaude: wasClaude ? true : prevR.touchedAfterClaude }
+      return { ...s, results: { ...s.results, [id]: next } }
+    })
+  }
+
+  // --- Mail ---------------------------------------------------------------
+
+  function fallbackMail(t: TypePieceId): string {
+    const meta = typeOf(t)
+    const r = sess(t).results
+    const nc = items(t).filter((it) => r[it.id]?.status === 'nc')
+    const dossier = benef.trim() ? ` du dossier ${benef.trim()}` : ''
+    if (!nc.length) return `Bonjour,\n\n${meta.the}${dossier} est conforme, merci.\n\nBien cordialement`
+    const lines = nc.map((it) => `- ${r[it.id]?.comment || `Il manque : ${it.label}`}`).join('\n')
+    return `Bonjour,\n\n${meta.the}${dossier} contient les erreurs suivantes :\n\n${lines}\n\nPouvez-vous nous renvoyer la version corrigée ${meta.of} afin que l'on puisse finaliser l'envoi du dossier ?\n\nMerci d'avance.\n\nBien cordialement`
+  }
+
+  async function generateMail() {
+    const t = current
+    const list = items(t)
+    if (!list.length) return
+    updateSession(t, (s) => ({ ...s, mailBusy: true }))
+    try {
+      const r = sess(t).results
+      const nonConformes = list.filter((it) => r[it.id]?.status === 'nc').map((it) => ({ label: it.label, valeur: r[it.id]?.value, commentaire: r[it.id]?.comment }))
+      const conformes = list.filter((it) => r[it.id]?.status === 'c').map((it) => ({ label: it.label }))
+      const res = await fetch('/api/financement/controle-pieces/mail', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email,
+          typePiece: t,
+          beneficiaire: benef.trim(),
+          nonConformes,
+          conformes,
+          exempleMail: checklists[t]?.exempleMail || '',
+          docCheck: sess(t).docCheck,
+        }),
+      })
+      const out = await res.json().catch(() => null)
+      if (!res.ok || !out?.mail) throw new Error('échec')
+      updateSession(t, (s) => ({ ...s, mail: out.mail, mailBusy: false }))
+    } catch {
+      updateSession(t, (s) => ({ ...s, mail: fallbackMail(t), mailBusy: false }))
+    }
+  }
+
+  async function copyMail() {
+    try {
+      await navigator.clipboard.writeText(sess(current).mail)
+      toast('Texte copié')
+    } catch {
+      toast('Impossible de copier automatiquement')
+    }
+  }
+
+  // --- Éditeur de checklist -------------------------------------------
+
+  function openEditor() {
+    const base = items(current).map((i) => ({ ...i }))
+    setDraftItems(base.length ? base : [{ id: newId(), label: '', hint: '' }])
+    setDraftExample(checklists[current]?.exempleMail || '')
+    setEditorError('')
+    setEditorOpen(true)
+  }
+
+  async function saveChecklist() {
+    const clean = draftItems.map((d) => ({ id: d.id, label: d.label.trim(), hint: (d.hint || '').trim() })).filter((d) => d.label)
+    setEditorSaving(true)
+    setEditorError('')
+    const { error } = await supabase
+      .from('cee_controle_checklists')
+      .upsert({ type_piece: current, items: clean, exemple_mail: draftExample.trim(), modifie_le: new Date().toISOString(), modifie_par: email || null }, { onConflict: 'type_piece' })
+    setEditorSaving(false)
+    if (error) {
+      setEditorError("L'enregistrement a échoué. Réessayez.")
+      return
+    }
+    setChecklists((prev) => ({ ...prev, [current]: { items: clean, exempleMail: draftExample.trim() } }))
+    setEditorOpen(false)
+    toast('Checklist enregistrée')
+  }
+
+  if (accessLoading || !rights.can_financement) {
+    return <div className="min-h-screen bg-[#F4F3F0]" />
+  }
+
+  const meta = typeOf(current)
+  const list = items(current)
+  const s = sess(current)
+  const docCheck = s.docCheck
+  const counts = computeCounts(list, s.results)
+  const canRun = !busy && filesReady(current) && list.length > 0
+
+  return (
+    <div className="min-h-screen bg-[#F4F3F0] pb-16">
+      <Script
+        src={PDF_JS_URL}
+        strategy="afterInteractive"
+        onLoad={() => {
+          const lib = (window as any).pdfjsLib
+          if (lib) lib.GlobalWorkerOptions.workerSrc = PDF_WORKER_URL
+          setPdfReady(true)
+        }}
+      />
+
+      <header className="border-b border-[#1E2833] bg-[#111820]">
+        <div className="mx-auto flex w-full max-w-[1760px] flex-col gap-4 px-4 py-6 md:flex-row md:items-end md:justify-between md:px-8">
+          <div>
+            <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[#9EAD43]">Financement CEE · Contrôle qualité</div>
+            <h1 className="mt-2 text-[26px] font-bold leading-tight text-white md:text-[30px]">Relecteur de pièces CEE</h1>
+            <p className="mt-2 max-w-3xl text-sm leading-relaxed text-slate-300">
+              Déposez la pièce, laissez l&apos;IA faire une première lecture, corrigez ses suggestions, puis générez le texte du retour à l&apos;artisan.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={openEditor}
+            className="h-10 shrink-0 rounded-xl border border-[#394652] bg-transparent px-4 text-sm font-medium text-slate-200 hover:border-[#9EAD43] hover:text-white"
+          >
+            Modifier la checklist
+          </button>
+        </div>
+      </header>
+
+      <main className="mx-auto w-full max-w-[1760px] px-4 py-6 md:px-8">
+        <div className="grid grid-cols-2 gap-0 overflow-hidden rounded-2xl border border-[#E2DFD8] bg-white md:grid-cols-4">
+          {TYPES.map((t) => {
+            const active = t.id === current
+            const n = items(t.id).length
+            return (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setCurrent(t.id)}
+                className={`border-b border-[#E2DFD8] px-4 py-3 text-left last:border-0 md:border-b-0 md:border-r ${active ? 'bg-[#FAF7EE]' : 'hover:bg-[#FAF9F7]'}`}
+              >
+                <div className={`font-mono text-[11px] tracking-[0.1em] ${active ? 'text-[#B4761A]' : 'text-slate-400'}`}>{t.code}</div>
+                <div className="text-[15px] font-semibold text-slate-900">{t.label}</div>
+                <div className="text-xs text-slate-500">{n ? `${n} point${n > 1 ? 's' : ''}` : 'à définir'}</div>
+              </button>
+            )
+          })}
+        </div>
+
+        <div className="mt-6 grid grid-cols-1 items-start gap-5 lg:grid-cols-[360px_minmax(0,1fr)]">
+          <aside className="grid gap-4">
+            <section className="rounded-2xl border border-[#E2DFD8] bg-white">
+              <div className="flex items-center justify-between border-b border-[#E2DFD8] px-4 py-3">
+                <h2 className="text-[15px] font-semibold text-slate-900">Pièce à contrôler</h2>
+                <span className="font-mono text-[11px] text-slate-400">{meta.code}</span>
+              </div>
+              <div className="grid gap-4 p-4">
+                <label className="grid cursor-pointer justify-items-center gap-1 rounded-xl border-2 border-dashed border-[#D8D3C8] p-6 text-center hover:border-[#B4761A] hover:bg-[#FAF7EE]">
+                  <span className="text-sm font-semibold text-slate-900">Déposer le document</span>
+                  <span className="text-xs text-slate-500">PDF, JPG ou PNG · plusieurs fichiers possibles</span>
+                  <input
+                    type="file"
+                    multiple
+                    accept="application/pdf,image/jpeg,image/png,image/webp"
+                    className="hidden"
+                    onChange={(e) => {
+                      addFiles(e.target.files)
+                      e.target.value = ''
+                    }}
+                  />
+                </label>
+
+                {s.files.length > 0 && (
+                  <div className="grid gap-2">
+                    {s.files.map((f, i) => (
+                      <div key={f.uid} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-xl bg-[#FAF9F7] px-3 py-2">
+                        <div className="min-w-0">
+                          <div className="truncate text-sm text-slate-800">{f.name}</div>
+                          <div className="font-mono text-[11px] text-slate-500">
+                            {f.status === 'loading' ? 'Préparation…' : f.status === 'error' ? f.error : `${f.pages.length} page${f.pages.length > 1 ? 's' : ''}${f.text ? ' · texte extrait' : ''}`}
+                          </div>
+                        </div>
+                        <button type="button" onClick={() => removeFile(current, i)} className="rounded px-2 py-1 text-slate-400 hover:text-[#A32C2C]" aria-label={`Retirer ${f.name}`}>
+                          ✕
+                        </button>
+                        {f.pages.length > 0 && (
+                          <div className="col-span-2 flex flex-wrap gap-1.5">
+                            {f.pages.slice(0, 6).map((p, pi) => (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img key={pi} src={p.url} alt="" className="h-14 w-11 rounded border border-[#E2DFD8] bg-white object-cover object-top" />
+                            ))}
+                            {f.pages.length > 6 && <span className="self-end text-[11px] text-slate-500">+{f.pages.length - 6}</span>}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="grid gap-1.5">
+                  <label htmlFor="benef" className="text-xs font-medium text-slate-500">
+                    Nom du bénéficiaire
+                  </label>
+                  <input
+                    id="benef"
+                    type="text"
+                    value={benef}
+                    onChange={(e) => {
+                      setBenef(e.target.value)
+                      setBenefAuto(false)
+                      setBenefMsg(null)
+                    }}
+                    placeholder="Rempli à partir du document chargé"
+                    className={`h-10 rounded-xl border px-3 text-sm outline-none focus:border-[#B4761A] ${benefAuto ? 'border-[#B4CFE0] bg-[#F5FAFD]' : 'border-[#D8D3C8] bg-white'}`}
+                  />
+                  {benefMsg && (
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                      <span>{benefMsg.text}</span>
+                      {benefMsg.suggestion && (
+                        <button
+                          type="button"
+                          className="text-[#B4761A] underline underline-offset-2"
+                          onClick={() => {
+                            setBenefAuto(true)
+                            setBenef(benefMsg.suggestion!)
+                            setBenefMsg(null)
+                          }}
+                        >
+                          Utiliser ce nom
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="grid gap-2">
+                  <button
+                    type="button"
+                    disabled={!canRun}
+                    onClick={runReview}
+                    className="h-11 rounded-xl bg-[#111820] text-sm font-semibold text-white transition disabled:cursor-not-allowed disabled:opacity-40 hover:enabled:bg-[#1E2833]"
+                  >
+                    {busy ? 'Relecture en cours…' : 'Lancer la relecture par IA'}
+                  </button>
+                  {busy && (
+                    <button type="button" onClick={stopReview} className="h-9 rounded-xl border border-[#D8D3C8] text-xs font-medium text-slate-600 hover:border-[#B4761A]">
+                      Arrêter
+                    </button>
+                  )}
+                  <div className={`text-xs ${runNoteTone === 'err' ? 'text-[#A32C2C]' : runNoteTone === 'warn' ? 'text-[#93600F]' : 'text-slate-500'}`}>
+                    {runNote || (!s.files.length ? 'Ajoutez un document pour lancer la relecture.' : !pdfReady ? 'Préparation du lecteur de documents…' : '')}
+                  </div>
+                </div>
+              </div>
+            </section>
+          </aside>
+
+          <div className="grid gap-5">
+            <section className="rounded-2xl border border-[#E2DFD8] bg-white">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E2DFD8] px-4 py-3">
+                <h2 className="text-[15px] font-semibold text-slate-900">Checklist · {meta.label}</h2>
+                <div className="flex flex-wrap gap-1.5">
+                  {counts.c > 0 && <Pill label={`${counts.c} conforme${counts.c > 1 ? 's' : ''}`} bg="#EAF3E8" fg="#2E6B3E" />}
+                  {counts.nc > 0 && <Pill label={`${counts.nc} non conforme${counts.nc > 1 ? 's' : ''}`} bg="#FBE9E9" fg="#A32C2C" />}
+                  {counts.na > 0 && <Pill label={`${counts.na} N/A`} bg="#EFEDE8" fg="#6B7580" />}
+                  {counts.todo > 0 && <Pill label={`${counts.todo} à vérifier`} bg="#FDF1DE" fg="#93600F" />}
+                </div>
+              </div>
+
+              {usingDefaults(current) && list.length > 0 && (
+                <div className="mx-4 mt-3 rounded-xl bg-[#EEF5FA] px-3 py-2 text-xs text-[#2E5E80]">
+                  Checklist suggérée par défaut pour {meta.art}
+                  {!checklistsError ? ' — personnalisable via « Modifier la checklist ».' : '.'}
+                </div>
+              )}
+
+              {docCheck && docCheck.ok === false && (
+                <div className="mx-4 mt-3 rounded-xl bg-[#FDF1DE] px-3 py-2 text-xs text-[#93600F]">
+                  <strong>Type de document à vérifier :</strong> {docCheck.remark || `le document ne semble pas être ${meta.art}.`}
+                </div>
+              )}
+
+              {list.length === 0 ? (
+                <div className="grid gap-2 p-6 text-sm text-slate-500">
+                  <span>Aucun point n&apos;est encore défini pour {meta.art}.</span>
+                  <button type="button" onClick={openEditor} className="w-fit rounded-lg border border-[#D8D3C8] px-3 py-1.5 text-xs font-medium hover:border-[#B4761A]">
+                    Définir la checklist
+                  </button>
+                </div>
+              ) : (
+                <ul className="divide-y divide-[#EFEDE8]">
+                  {list.map((it) => {
+                    const r = s.results[it.id] || {}
+                    return (
+                      <li key={it.id} className="grid gap-2 px-4 py-3">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-slate-900">{it.label}</div>
+                            {it.hint && <div className="mt-0.5 text-xs text-slate-500">{it.hint}</div>}
+                            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                              {r.value && (
+                                <span className="rounded bg-[#F4F3F0] px-2 py-0.5 font-mono text-[11px] text-slate-700">
+                                  <b className="mr-1.5 font-normal text-slate-400">relevé</b>
+                                  {r.value}
+                                </span>
+                              )}
+                              {r.origin === 'claude' && <span className="rounded bg-[#EEF5FA] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#2E5E80]">Suggestion IA</span>}
+                              {r.origin === 'human' && r.touchedAfterClaude && (
+                                <span className="rounded bg-[#FDF1DE] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#93600F]">Corrigé</span>
+                              )}
+                            </div>
+                          </div>
+                          <div className="inline-flex overflow-hidden rounded-lg border border-[#D8D3C8]">
+                            {(['c', 'nc', 'na'] as const).map((v) => {
+                              const on = r.status === v
+                              const tone = v === 'c' ? { bg: '#EAF3E8', fg: '#2E6B3E' } : v === 'nc' ? { bg: '#FBE9E9', fg: '#A32C2C' } : { bg: '#EFEDE8', fg: '#44494E' }
+                              return (
+                                <button
+                                  key={v}
+                                  type="button"
+                                  onClick={() => setItemStatus(current, it.id, v)}
+                                  className="border-r border-[#D8D3C8] px-2.5 py-1.5 text-xs font-medium last:border-0"
+                                  style={on ? { background: tone.bg, color: tone.fg } : { color: '#8A8F94' }}
+                                >
+                                  {STATUS_LABEL[v]}
+                                </button>
+                              )
+                            })}
+                          </div>
+                        </div>
+                        <textarea
+                          value={r.comment || ''}
+                          onChange={(e) => setItemComment(current, it.id, e.target.value)}
+                          placeholder="Ajouter un commentaire…"
+                          rows={1}
+                          className="w-full resize-none rounded-lg border border-transparent bg-transparent px-1 py-1 text-sm text-slate-700 hover:border-[#E2DFD8] focus:border-[#B4761A] focus:bg-[#FAF9F7] focus:outline-none"
+                        />
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[#E2DFD8] px-4 py-3">
+                <span className="text-xs text-slate-500">
+                  {list.length === 0
+                    ? ''
+                    : counts.todo
+                    ? `${counts.todo} point${counts.todo > 1 ? 's' : ''} sans statut : ils ne seront pas mentionnés dans le mail.`
+                    : counts.nc
+                    ? 'Revue terminée. Le mail listera les points non conformes.'
+                    : 'Revue terminée. Tous les points applicables sont conformes.'}
+                </span>
+                <button type="button" disabled={list.length === 0} onClick={generateMail} className="h-9 rounded-xl bg-[#111820] px-4 text-sm font-semibold text-white disabled:opacity-40">
+                  Générer le texte du mail
+                </button>
+              </div>
+            </section>
+
+            {(s.mail || s.mailBusy) && (
+              <section className="rounded-2xl border border-[#E2DFD8] bg-white">
+                <div className="flex items-center justify-between border-b border-[#E2DFD8] px-4 py-3">
+                  <h2 className="text-[15px] font-semibold text-slate-900">Texte pour l&apos;artisan</h2>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={generateMail} className="rounded-lg border border-[#D8D3C8] px-3 py-1.5 text-xs font-medium hover:border-[#B4761A]">
+                      Régénérer
+                    </button>
+                    <button type="button" onClick={copyMail} className="rounded-lg bg-[#111820] px-3 py-1.5 text-xs font-semibold text-white">
+                      Copier le texte
+                    </button>
+                  </div>
+                </div>
+                <div className="p-4">
+                  <textarea
+                    value={s.mailBusy ? 'Rédaction…' : s.mail}
+                    onChange={(e) => updateSession(current, (prev) => ({ ...prev, mail: e.target.value }))}
+                    className="h-56 w-full resize-y rounded-xl border border-[#D8D3C8] bg-[#FAF9F7] p-3 text-sm leading-relaxed text-slate-800 focus:border-[#B4761A] focus:outline-none"
+                  />
+                </div>
+              </section>
+            )}
+          </div>
+        </div>
+      </main>
+
+      {toastMsg && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 rounded-xl border border-[#D8D3C8] bg-white px-4 py-2 text-sm text-slate-800 shadow-lg">{toastMsg}</div>
+      )}
+
+      {editorOpen && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4" onClick={() => setEditorOpen(false)}>
+          <div
+            className="grid max-h-[calc(100vh-48px)] w-full max-w-2xl grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden rounded-2xl bg-white"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-[#E2DFD8] px-5 py-4">
+              <div>
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Checklist partagée</div>
+                <h2 className="text-lg font-semibold text-slate-900">{meta.label}</h2>
+              </div>
+              <button type="button" onClick={() => setEditorOpen(false)} className="rounded-lg px-3 py-1.5 text-sm text-slate-500 hover:bg-[#F4F3F0]">
+                Fermer
+              </button>
+            </div>
+            <div className="grid gap-4 overflow-auto p-5">
+              <div className="grid gap-2">
+                <div className="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_90px] gap-2 text-xs font-medium text-slate-500">
+                  <span>Point à vérifier</span>
+                  <span>Précision pour la relecture (facultatif)</span>
+                  <span />
+                </div>
+                {draftItems.map((d, i) => (
+                  <div key={d.id} className="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_auto] items-center gap-2">
+                    <input
+                      value={d.label}
+                      onChange={(e) => setDraftItems((prev) => prev.map((x, xi) => (xi === i ? { ...x, label: e.target.value } : x)))}
+                      placeholder="ex. Altitude (en m)"
+                      className="h-9 rounded-lg border border-[#D8D3C8] px-2.5 text-sm focus:border-[#B4761A] focus:outline-none"
+                    />
+                    <input
+                      value={d.hint || ''}
+                      onChange={(e) => setDraftItems((prev) => prev.map((x, xi) => (xi === i ? { ...x, hint: e.target.value } : x)))}
+                      placeholder="Précision"
+                      className="h-9 rounded-lg border border-[#D8D3C8] px-2.5 text-sm focus:border-[#B4761A] focus:outline-none"
+                    />
+                    <div className="flex gap-1">
+                      <button
+                        type="button"
+                        disabled={i === 0}
+                        onClick={() =>
+                          setDraftItems((prev) => {
+                            const next = prev.slice()
+                            ;[next[i - 1], next[i]] = [next[i], next[i - 1]]
+                            return next
+                          })
+                        }
+                        className="h-9 w-8 rounded-lg text-slate-500 hover:bg-[#F4F3F0] disabled:opacity-30"
+                      >
+                        ↑
+                      </button>
+                      <button
+                        type="button"
+                        disabled={i === draftItems.length - 1}
+                        onClick={() =>
+                          setDraftItems((prev) => {
+                            const next = prev.slice()
+                            ;[next[i + 1], next[i]] = [next[i], next[i + 1]]
+                            return next
+                          })
+                        }
+                        className="h-9 w-8 rounded-lg text-slate-500 hover:bg-[#F4F3F0] disabled:opacity-30"
+                      >
+                        ↓
+                      </button>
+                      <button type="button" onClick={() => setDraftItems((prev) => prev.filter((_, xi) => xi !== i))} className="h-9 w-8 rounded-lg text-slate-500 hover:bg-[#FBE9E9] hover:text-[#A32C2C]">
+                        ✕
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => setDraftItems((prev) => [...prev, { id: newId(), label: '', hint: '' }])}
+                  className="w-fit rounded-lg border border-[#D8D3C8] px-3 py-1.5 text-xs font-medium hover:border-[#B4761A]"
+                >
+                  + Ajouter un point
+                </button>
+              </div>
+              <div className="grid gap-1.5">
+                <label className="text-xs font-medium text-slate-500">Exemple de mail de retour pour ce type de pièce</label>
+                <textarea
+                  value={draftExample}
+                  onChange={(e) => setDraftExample(e.target.value)}
+                  placeholder="Collez ici un exemple type de mail. L'IA s'en inspirera (ton, formules, structure) pour rédiger le texte."
+                  className="min-h-[140px] resize-y rounded-xl border border-[#D8D3C8] p-3 text-sm focus:border-[#B4761A] focus:outline-none"
+                />
+              </div>
+              <p className="text-xs text-slate-400">Les modifications sont enregistrées pour toutes les personnes qui utilisent cette page.</p>
+            </div>
+            <div className="flex items-center justify-between gap-3 border-t border-[#E2DFD8] px-5 py-4">
+              <span className="text-xs text-[#A32C2C]">{editorError}</span>
+              <div className="flex gap-2">
+                <button type="button" onClick={() => setEditorOpen(false)} className="h-9 rounded-xl border border-[#D8D3C8] px-4 text-sm font-medium hover:border-[#B4761A]">
+                  Annuler
+                </button>
+                <button type="button" disabled={editorSaving} onClick={saveChecklist} className="h-9 rounded-xl bg-[#111820] px-4 text-sm font-semibold text-white disabled:opacity-50">
+                  {editorSaving ? 'Enregistrement…' : 'Enregistrer'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function Pill({ label, bg, fg }: { label: string; bg: string; fg: string }) {
+  return (
+    <span className="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold" style={{ background: bg, color: fg }}>
+      {label}
+    </span>
+  )
+}

@@ -654,6 +654,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       label: 'Aides financières',
       items: [
         { label: '1 : Parcours des dossiers CEE', activeLabel: 'Parcours des dossiers CEE', path: '/financement', accessKey: 'can_financement' },
+        { label: '2 : Contrôle des pièces (IA)', activeLabel: 'Contrôle des pièces CEE', path: '/financement/controle-pieces', accessKey: 'can_financement' },
       ],
     },
     {
