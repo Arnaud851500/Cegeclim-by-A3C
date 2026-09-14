@@ -54,7 +54,6 @@ type UserAccess = {
   allowed_codes_postaux: string[]
   soumis_objectif: boolean
   agence_objectif: string
-  can_financement: boolean
 }
 
 type TabKey = 'profiles' | 'users' | 'matrix'
@@ -107,10 +106,14 @@ const PERMISSION_GROUPS: Array<{
     ],
   },
   {
-    family: 'Financement CEE',
-    hint: 'Portail dédié pour le suivi des dossiers d’aides financières (interface distincte, marque "Le pilotage des aides financières CEGECLIM")',
+    family: 'Aides financières',
+    hint: 'Dossiers CEE, seul univers visible pour un profil dédié',
     items: [
-      { key: 'can_financement', label: 'Financement CEE', description: 'Accès au tableau de bord de suivi des dossiers CEE, via /financement.' },
+      {
+        key: 'can_financement',
+        label: 'Aides financières (CEE)',
+        description: 'Parcours des dossiers d’aides : dépôt, dimensionnement, pièces, rattachement, preuves, versement. Un profil qui n’a que ce droit ne voit que cet univers, avec sa propre page de connexion.',
+      },
     ],
   },
   {
@@ -151,11 +154,11 @@ const LANDING_PAGES = [
   { value: '/Indicateurs', label: 'Indicateurs' },
   { value: '/todo', label: 'Todo List' },
   { value: '/documents', label: 'Documents' },
+  { value: '/financement', label: 'Aides financières (CEE)' },
   { value: '/autorisation', label: 'Autorisations' },
   { value: '/admin/planification', label: 'Job scheduling' },
   { value: '/clients', label: 'MAJ base clients' },
   { value: '/Import', label: 'MAJ données activité' },
-  { value: '/financement', label: 'Financement CEE' },
 ]
 
 const EMPTY_PROFILE: AccessProfile = {
@@ -202,7 +205,6 @@ const EMPTY_USER: UserAccess = {
   allowed_codes_postaux: [],
   soumis_objectif: false,
   agence_objectif: '',
-  can_financement: false,
 }
 
 function normalizeList(value: unknown, fallback: string[] = []) {
@@ -316,7 +318,7 @@ export default function AutorisationPage() {
       supabase.from('access_profiles').select('*').order('name', { ascending: true }),
       supabase
         .from('user_page_access')
-        .select('email, display_name, access_profile_id, allowed_scopes, allowed_agences, allowed_collaborateurs, allowed_departements, allowed_codes_postaux, soumis_objectif, agence_objectif, can_financement')
+        .select('email, display_name, access_profile_id, allowed_scopes, allowed_agences, allowed_collaborateurs, allowed_departements, allowed_codes_postaux, soumis_objectif, agence_objectif')
         .order('email', { ascending: true }),
       supabase.from('vision_tci_layouts').select('id, nom').order('nom', { ascending: true }),
     ])
@@ -341,7 +343,6 @@ export default function AutorisationPage() {
       allowed_codes_postaux: normalizeList(row.allowed_codes_postaux),
       soumis_objectif: !!row.soumis_objectif,
       agence_objectif: String(row.agence_objectif || '').trim(),
-      can_financement: !!row.can_financement,
     }))
 
     const countByProfile = new Map<string, number>()
@@ -567,7 +568,6 @@ export default function AutorisationPage() {
         allowed_codes_postaux: user.allowed_codes_postaux,
         soumis_objectif: user.soumis_objectif,
         agence_objectif: user.soumis_objectif ? user.agence_objectif.trim() : '',
-        can_financement: user.can_financement,
       })
       .eq('email', email)
 
@@ -603,7 +603,6 @@ export default function AutorisationPage() {
       allowed_codes_postaux: newUser.allowed_codes_postaux,
       soumis_objectif: newUser.soumis_objectif,
       agence_objectif: newUser.soumis_objectif ? newUser.agence_objectif.trim() : '',
-      can_financement: newUser.can_financement,
     })
 
     setSavingKey(null)
@@ -1033,17 +1032,6 @@ export default function AutorisationPage() {
                       <span className="font-medium text-slate-800">Apparaît dans la page Objectifs</span>
                     </label>
                   </Field>
-                  <Field label="Financement CEE" hint="Donne accès à /financement même si le profil ne le prévoit pas.">
-                    <label className="flex h-[42px] cursor-pointer items-center gap-3 rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm">
-                      <input
-                        type="checkbox"
-                        checked={newUser.can_financement}
-                        onChange={(event) => setNewUser((current) => ({ ...current, can_financement: event.target.checked }))}
-                        className="h-4 w-4 accent-[#B4761A]"
-                      />
-                      <span className="font-medium text-slate-800">Accès direct (portail CEE)</span>
-                    </label>
-                  </Field>
                   {newUser.soumis_objectif && (
                     <Field label="Agence de rattachement" hint="Sert à cumuler ses objectifs dans ceux de l’agence.">
                       <TextField
@@ -1114,19 +1102,6 @@ export default function AutorisationPage() {
                         />
                         <span className="font-medium text-slate-800">
                           {userDraft.soumis_objectif ? 'Suivi dans la page Objectifs' : 'Non suivi'}
-                        </span>
-                      </label>
-                    </Field>
-                    <Field label="Financement CEE" hint="Donne accès à /financement même si le profil ne le prévoit pas (portail dédié, login séparé).">
-                      <label className="flex h-[42px] cursor-pointer items-center gap-3 rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm">
-                        <input
-                          type="checkbox"
-                          checked={userDraft.can_financement}
-                          onChange={(event) => patchUserDraft({ can_financement: event.target.checked })}
-                          className="h-4 w-4 accent-[#B4761A]"
-                        />
-                        <span className="font-medium text-slate-800">
-                          {userDraft.can_financement ? 'Accès direct activé' : 'Non activé'}
                         </span>
                       </label>
                     </Field>

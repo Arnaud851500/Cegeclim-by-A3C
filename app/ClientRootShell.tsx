@@ -1,4 +1,4 @@
-  'use client'
+'use client'
 
 import { useEffect, useRef, useState } from 'react'
 import type React from 'react'
@@ -22,6 +22,17 @@ import {
 // voir lib/cdcRetard.ts). Le droit d'accès garde son nom historique
 // show_alert_cdc_liv_avant_2026, aucune migration côté base.
 import { CDC_RETARD_LABEL, getCdcRetardDescription, getCdcRetardThresholdIso } from '@/lib/cdcRetard'
+
+// ÉVOLUTION (2026-09-14) : univers « Aides financières » (dossiers CEE).
+// - /financement/login est une seconde porte d'entrée, publique comme /login,
+//   qui ne parle que d'aides financières (pas de pilotage commercial).
+// - le droit can_financement ouvre le groupe de menu « Aides financières ».
+// - un profil qui n'a QUE ce droit voit un bandeau neutre (titre, page
+//   d'atterrissage mobile, déconnexion) sans référence au commercial.
+
+const LOGIN_PATH = '/login'
+const FINANCEMENT_LOGIN_PATH = '/financement/login'
+const FINANCEMENT_HOME = '/financement'
 
 type MenuAccessKey = Exclude<
   keyof AccessRights,
@@ -391,8 +402,11 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const lastStatusRefreshRef = useRef(0)
   const access = usePageFilterAccess()
   const [statusScopeOverride, setStatusScopeOverride] = useState<StatusScopeOverride | null>(null)
-  const isLoginPage = pathname === '/login' || pathname === '/financement/login'
-  const loginRedirectPath = pathname && pathname.startsWith('/financement') ? '/financement/login' : '/login'
+  const isFinancementArea = pathname === FINANCEMENT_HOME || pathname.startsWith(`${FINANCEMENT_HOME}/`)
+  const isLoginPage = pathname === LOGIN_PATH || pathname === FINANCEMENT_LOGIN_PATH
+  // Porte d'entrée à utiliser quand il faut renvoyer vers la connexion :
+  // on reste dans l'univers d'où l'on vient.
+  const loginPathForArea = isFinancementArea ? FINANCEMENT_LOGIN_PATH : LOGIN_PATH
   const isUnauthorizedPage = pathname === '/unauthorized'
   const isPortefeuilleLivraisonPage = pathname === '/portefeuille-livraison' || pathname.startsWith('/portefeuille-livraison/')
   const isPdfPrintPage =
@@ -422,7 +436,8 @@ function AppShell({ children }: { children: React.ReactNode }) {
     showDataCoherence,
   ].filter(Boolean).length
 
-  const hasAnyMenuAccess =
+  // Droits « historiques » (commercial, pilotage, admin), hors financement.
+  const hasStandardMenuAccess =
     rights.can_dashboard ||
     rights.can_territoire ||
     rights.can_cartographie ||
@@ -436,6 +451,12 @@ function AppShell({ children }: { children: React.ReactNode }) {
     rights.can_documents ||
     rights.can_stocks ||
     rights.can_activites
+
+  const hasAnyMenuAccess = hasStandardMenuAccess || rights.can_financement
+
+  // Profil « aides financières » pur : rien du pilotage commercial ne doit
+  // transparaître dans le bandeau.
+  const isFinancementOnly = Boolean(rights.can_financement) && !hasStandardMenuAccess
 
   const getVisibleItems = (group: MenuGroup) =>
     group.items.filter((item) => {
@@ -630,14 +651,9 @@ function AppShell({ children }: { children: React.ReactNode }) {
       ],
     },
     {
-      label: 'Financement CEE',
+      label: 'Aides financières',
       items: [
-        {
-          label: '1 : Suivi des dossiers CEE',
-          activeLabel: 'Financement CEE',
-          path: '/financement',
-          accessKey: 'can_financement',
-        },
+        { label: '1 : Parcours des dossiers CEE', activeLabel: 'Parcours des dossiers CEE', path: '/financement', accessKey: 'can_financement' },
       ],
     },
     {
@@ -669,13 +685,14 @@ function AppShell({ children }: { children: React.ReactNode }) {
    * de l'élément de menu actif (activeLabel prioritaire sur label, avec la
    * numérotation "N : " retirée en repli), tous groupes confondus. Retombe
    * sur "Suivi commercial & prospect" pour les pages qui ne sont pas dans
-   * le menu (accueil, fiches, etc.). */
+   * le menu (accueil, fiches, etc.) -- ou sur "Pilotage des aides
+   * financières" pour un profil financement seul. */
   function getCurrentPageTitle(): string {
     for (const group of menuGroups) {
       const activeItem = getActiveMenuItem(group)
       if (activeItem) return activeItem.activeLabel || activeItem.label.replace(/^\d+\s*:\s*/, '')
     }
-    return 'Suivi commercial & prospect'
+    return isFinancementOnly ? 'Pilotage des aides financières' : 'Suivi commercial & prospect'
   }
 
   useEffect(() => {
@@ -690,7 +707,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       setSessionChecked(true)
 
       if (!exists && !isPublicShellPage) {
-        router.replace(loginRedirectPath)
+        router.replace(loginPathForArea)
       }
     }
 
@@ -704,7 +721,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       setSessionChecked(true)
 
       if (!exists && !isPublicShellPage) {
-        router.replace(loginRedirectPath)
+        router.replace(loginPathForArea)
       }
     })
 
@@ -712,7 +729,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       isMounted = false
       subscription.unsubscribe()
     }
-  }, [router, isPublicShellPage, loginRedirectPath])
+  }, [router, isPublicShellPage, loginPathForArea])
 
   useEffect(() => {
     if (!sessionChecked) return
@@ -731,20 +748,22 @@ function AppShell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!sessionChecked || !hasSession) return
+    if (accessLoading) return
     if (isLoginPage || isUnauthorizedPage || isPdfPrintPage) return
     if (!isMobile) return
     if (mobileLandingRedirectedRef.current) return
     mobileLandingRedirectedRef.current = true
-    if (pathname !== '/accueil') {
-      router.replace('/accueil')
+    const mobileHome = isFinancementOnly ? FINANCEMENT_HOME : '/accueil'
+    if (pathname !== mobileHome) {
+      router.replace(mobileHome)
     }
-  }, [sessionChecked, hasSession, isMobile, pathname, isLoginPage, isUnauthorizedPage, isPdfPrintPage, router])
+  }, [sessionChecked, hasSession, accessLoading, isFinancementOnly, isMobile, pathname, isLoginPage, isUnauthorizedPage, isPdfPrintPage, router])
 
   useEffect(() => {
     if (!sessionChecked || !hasSession) return
     if (!email) return
     if (!pathname) return
-    if (pathname === '/login' || pathname === '/financement/login' || pathname === '/unauthorized' || isPdfPrintPage) return
+    if (isLoginPage || pathname === '/unauthorized' || isPdfPrintPage) return
     if (lastLoggedPathRef.current === pathname) return
 
     lastLoggedPathRef.current = pathname
@@ -754,7 +773,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       event_type: 'page_view',
       pathname,
     })
-  }, [sessionChecked, hasSession, email, pathname, isPdfPrintPage])
+  }, [sessionChecked, hasSession, email, pathname, isLoginPage, isPdfPrintPage])
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -978,9 +997,12 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
   }
 
   const handleLogout = async () => {
+    // Décidé avant la déconnexion : après signOut les droits sont vidés et on
+    // ne saurait plus vers quelle porte renvoyer.
+    const destination = isFinancementOnly || isFinancementArea ? FINANCEMENT_LOGIN_PATH : LOGIN_PATH
     localStorage.removeItem('cegeclim_last_activity_at')
     await supabase.auth.signOut()
-    router.replace(loginRedirectPath)
+    router.replace(destination)
   }
 
   async function getUserAccessProfile(): Promise<UserAccessProfile | null> {
@@ -1667,9 +1689,11 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
                 />
                 <div>
                   <div style={styles.subtitle}>
-                    Concessionnaire agréé de Bosch Home Comfort Group
+                    {isFinancementOnly ? 'Primes CEE et dossiers de financement' : 'Concessionnaire agréé de Bosch Home Comfort Group'}
                   </div>
-                  <div style={styles.title}>Hitachi Cooling &amp; Heating</div>
+                  <div style={styles.title}>
+                    {isFinancementOnly ? 'Aides financières CEGECLIM' : <>Hitachi Cooling &amp; Heating</>}
+                  </div>
                 </div>
               </div>
 
