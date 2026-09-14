@@ -14,7 +14,8 @@ export default function AutoLogout() {
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const isLoggingOutRef = useRef(false)
 
-  const isLoginPage = pathname === '/login'
+  const isLoginPage = pathname === '/login' || pathname === '/financement/login'
+  const loginRedirectPath = pathname && pathname.startsWith('/financement') ? '/financement/login' : '/login'
 
   async function logout() {
     if (isLoggingOutRef.current) return
@@ -26,7 +27,7 @@ export default function AutoLogout() {
     } catch (error) {
       console.error('Erreur lors du logout automatique :', error)
     } finally {
-      router.replace('/login')
+      router.replace(loginRedirectPath)
     }
   }
 

@@ -391,7 +391,8 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const lastStatusRefreshRef = useRef(0)
   const access = usePageFilterAccess()
   const [statusScopeOverride, setStatusScopeOverride] = useState<StatusScopeOverride | null>(null)
-  const isLoginPage = pathname === '/login'
+  const isLoginPage = pathname === '/login' || pathname === '/financement/login'
+  const loginRedirectPath = pathname && pathname.startsWith('/financement') ? '/financement/login' : '/login'
   const isUnauthorizedPage = pathname === '/unauthorized'
   const isPortefeuilleLivraisonPage = pathname === '/portefeuille-livraison' || pathname.startsWith('/portefeuille-livraison/')
   const isPdfPrintPage =
@@ -629,6 +630,17 @@ function AppShell({ children }: { children: React.ReactNode }) {
       ],
     },
     {
+      label: 'Financement CEE',
+      items: [
+        {
+          label: '1 : Suivi des dossiers CEE',
+          activeLabel: 'Financement CEE',
+          path: '/financement',
+          accessKey: 'can_financement',
+        },
+      ],
+    },
+    {
       label: 'Admin',
       items: [
         { label: '1 : Profils et autorisation', path: '/autorisation', accessKey: 'can_autorisation' },
@@ -678,7 +690,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       setSessionChecked(true)
 
       if (!exists && !isPublicShellPage) {
-        router.replace('/login')
+        router.replace(loginRedirectPath)
       }
     }
 
@@ -692,7 +704,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       setSessionChecked(true)
 
       if (!exists && !isPublicShellPage) {
-        router.replace('/login')
+        router.replace(loginRedirectPath)
       }
     })
 
@@ -700,7 +712,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       isMounted = false
       subscription.unsubscribe()
     }
-  }, [router, isPublicShellPage])
+  }, [router, isPublicShellPage, loginRedirectPath])
 
   useEffect(() => {
     if (!sessionChecked) return
@@ -732,7 +744,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
     if (!sessionChecked || !hasSession) return
     if (!email) return
     if (!pathname) return
-    if (pathname === '/login' || pathname === '/unauthorized' || isPdfPrintPage) return
+    if (pathname === '/login' || pathname === '/financement/login' || pathname === '/unauthorized' || isPdfPrintPage) return
     if (lastLoggedPathRef.current === pathname) return
 
     lastLoggedPathRef.current = pathname
@@ -968,7 +980,7 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
   const handleLogout = async () => {
     localStorage.removeItem('cegeclim_last_activity_at')
     await supabase.auth.signOut()
-    router.replace('/login')
+    router.replace(loginRedirectPath)
   }
 
   async function getUserAccessProfile(): Promise<UserAccessProfile | null> {

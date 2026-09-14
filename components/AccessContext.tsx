@@ -17,6 +17,7 @@ export type AccessRights = {
   can_documents: boolean
   can_stocks: boolean
   can_activites: boolean
+  can_financement: boolean
   can_change_scope: boolean
   allowed_scopes: string[]
   allowed_agences: string[]
@@ -52,6 +53,7 @@ type UserAccessRow = {
   allowed_departements?: unknown
   allowed_codes_postaux?: unknown
   access_profile_id?: string | null
+  can_financement?: boolean | null
 }
 
 type AccessProfileRow = {
@@ -72,6 +74,7 @@ type AccessProfileRow = {
   can_documents?: boolean | null
   can_stocks?: boolean | null
   can_activites?: boolean | null
+  can_financement?: boolean | null
   can_change_scope?: boolean | null
   default_landing_page?: string | null
   show_alert_cerfa_ko?: boolean | null
@@ -131,6 +134,7 @@ export const defaultRights: AccessRights = {
   can_documents: false,
   can_stocks: false,
   can_activites: false,
+  can_financement: false,
   can_change_scope: false,
   allowed_scopes: ['Global'],
   allowed_agences: [],
@@ -181,6 +185,7 @@ const PAGE_ACCESS_CHECKS: Array<[string, keyof AccessRights]> = [
   ['/stocks', 'can_stocks'],
   ['/stocks-disponibilites', 'can_stocks'],
   ['/activites', 'can_activites'],
+  ['/financement', 'can_financement'],
 ]
 
 function isPathAllowed(path: string, rights: AccessRights) {
@@ -209,6 +214,7 @@ export function getFirstAllowedPath(rights: AccessRights) {
   if (rights.can_activites) return '/activites'
   if (rights.can_documents) return '/documents'
   if (rights.can_stocks) return '/stocks-disponibilites'
+  if (rights.can_financement) return '/financement'
 
   return '/unauthorized'
 }
@@ -241,7 +247,8 @@ async function fetchAccess(): Promise<{ email: string | null; rights: AccessRigh
         allowed_collaborateurs,
         allowed_departements,
         allowed_codes_postaux,
-        access_profile_id
+        access_profile_id,
+        can_financement
       `)
       .eq('email', normalizedEmail)
       .maybeSingle()
@@ -264,6 +271,7 @@ async function fetchAccess(): Promise<{ email: string | null; rights: AccessRigh
           allowed_collaborateurs: normalizeList(userRow.allowed_collaborateurs, []),
           allowed_departements: normalizeList(userRow.allowed_departements, []),
           allowed_codes_postaux: normalizeList(userRow.allowed_codes_postaux, []),
+          can_financement: !!userRow.can_financement,
         },
       }
     }
@@ -288,6 +296,7 @@ async function fetchAccess(): Promise<{ email: string | null; rights: AccessRigh
         can_documents,
         can_stocks,
         can_activites,
+        can_financement,
         can_change_scope,
         default_landing_page,
         show_alert_cerfa_ko,
@@ -314,6 +323,7 @@ async function fetchAccess(): Promise<{ email: string | null; rights: AccessRigh
           allowed_codes_postaux: normalizeList(userRow.allowed_codes_postaux, []),
           profile_id: profileId,
           profile_name: 'Profil introuvable',
+          can_financement: !!userRow.can_financement,
         },
       }
     }
@@ -333,6 +343,7 @@ async function fetchAccess(): Promise<{ email: string | null; rights: AccessRigh
           profile_id: profileId,
           profile_code: String(profile.code || '').trim(),
           profile_name: `${String(profile.name || 'Profil').trim()} (inactif)`,
+          can_financement: !!userRow.can_financement,
         },
       }
     }
@@ -353,6 +364,7 @@ async function fetchAccess(): Promise<{ email: string | null; rights: AccessRigh
         can_documents: !!profile.can_documents,
         can_stocks: !!profile.can_stocks,
         can_activites: !!profile.can_activites,
+        can_financement: !!profile.can_financement || !!userRow.can_financement,
         can_change_scope: !!profile.can_change_scope,
         allowed_scopes: normalizeList(userRow.allowed_scopes, ['Global']),
         allowed_agences: normalizeList(userRow.allowed_agences, []),
