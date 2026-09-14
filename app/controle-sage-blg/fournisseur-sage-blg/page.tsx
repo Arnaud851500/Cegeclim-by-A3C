@@ -33,8 +33,9 @@
  *        principale, aucune croix).
  *    MàJ 14/09/2026 (bis) — encours & projection :
  *      · l'onglet Articles ne raisonne plus sur le seul stock physique FMS :
- *        encours fournisseur BLG (reste à livrer, dépôt FMS), ventes à livrer
- *        (commandes clients BLG émises par FMS), stock projeté à la date de
+ *        encours fournisseur BLG (reste à livrer, dépôt FMS), ventes réservées
+ *        SAGE (sto_res dépôt FMS, agences entre parenthèses — le reste à
+ *        livrer BLG n'est qu'informatif), stock projeté à la date de
  *        livraison estimée de l'encours (date saisie > commentaire BLG > délai
  *        théorique), rupture avant réception, signal "à commander" et quantité
  *        suggérée (vues v_appro_cdf_encours, v_appro_cdc_a_livrer,
@@ -191,8 +192,8 @@ type ArtRow = {
   date_livraison_estimee_max: string | null
   date_livraison_par_defaut: boolean | null  // au moins une commande sans date saisie ni commentaire → délai théorique
   detail_cdf: string | null
-  cdc_a_livrer_fms: number | null           // ventes à livrer émises par FMS
-  cdc_a_livrer_total: number | null         // ventes à livrer toutes agences
+  cdc_a_livrer_fms: number | null           // = reserve_sage_fms (sto_res dépôt FMS)
+  cdc_a_livrer_total: number | null         // = réservé SAGE tous dépôts
   nb_cdc_a_livrer: number | null
   horizon_jours: number | null
   conso_jusqua_livraison: number | null
@@ -208,6 +209,14 @@ type ArtRow = {
   encours_fourn_retard: number | null       // date estimée dépassée (toujours compté si < cdf_retard_max_jours)
   encours_fourn_douteux: number | null      // dépassée de plus de cdf_retard_max_jours : exclu de la projection
   nb_jours_retard_max: number | null
+  // ventes réservées = SAGE sto_res (source de vérité) ; BLG conservé en information
+  reserve_sage_fms: number | null
+  reserve_sage_agences: number | null
+  stock_dispo_sage_fms: number | null
+  stock_dispo_sage_agences: number | null
+  cdc_blg_fms: number | null
+  cdc_blg_total: number | null
+  sage_stock_agences: number | null
 }
 
 type StrategieRef = { code: string; designation: string; outil_cbn: string | null; mode_appro: string | null; calcul_besoin_blg: boolean; ordre: number | null }
@@ -685,7 +694,7 @@ function syntheseArticles(articles: ArtRow[], fournisseurs: Set<string>) {
     encoursRetard: arts.filter((a) => n0(a.encours_fourn_retard) > 0).length,
     encoursDouteux: arts.filter((a) => n0(a.encours_fourn_douteux) > 0).length,
     dateParDefaut: arts.filter((a) => a.date_livraison_par_defaut).length,
-    avecCdc: arts.filter((a) => n0(a.cdc_a_livrer_fms) > 0).length,
+    avecCdc: arts.filter((a) => n0(a.reserve_sage_fms) > 0).length,
   }
 }
 
@@ -767,7 +776,7 @@ function PyramideClasseur({ rows, toutes, articles, loading, strategieActive, on
           <span>Projection FMS sur {fmtNum(artSynthese.refs)} refs MYSTOCK : <b className={artSynthese.aCommander ? 'text-[#F2B8A2]' : ''}>{fmtNum(artSynthese.aCommander)}</b> à commander ({fmtNum(artSynthese.qteACommander)} pièces)</span>
           <span><b className={artSynthese.rupture ? 'text-[#F2B8A2]' : ''}>{fmtNum(artSynthese.rupture)}</b> rupture avant réception</span>
           <span>{fmtNum(artSynthese.avecEncours)} avec encours fournisseur · <b className={artSynthese.encoursRetard ? 'text-[#E9C982]' : ''}>{fmtNum(artSynthese.encoursRetard)}</b> en retard · {fmtNum(artSynthese.encoursDouteux)} douteux (exclus)</span>
-          <span>{fmtNum(artSynthese.dateParDefaut)} sans date de livraison (délai théorique) · {fmtNum(artSynthese.avecCdc)} avec ventes à livrer</span>
+          <span>{fmtNum(artSynthese.dateParDefaut)} sans date de livraison (délai théorique) · {fmtNum(artSynthese.avecCdc)} avec réservé FMS (SAGE)</span>
         </div>
       </div>
 
@@ -1227,7 +1236,7 @@ function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, art
 
               <DetailGroup title="Encours & projection FMS (références MYSTOCK actives)">
                 <DetailRow label="Encours fournisseur FMS (fiable / en retard / douteux exclu)" value={`${fmtNum(encoursFournisseur.encours)} / ${fmtNum(encoursFournisseur.retard)} / ${fmtNum(encoursFournisseur.douteux)} pièces`} />
-                <DetailRow label="Ventes à livrer (émises FMS)" value={fmtNum(encoursFournisseur.cdc)} />
+                <DetailRow label="Ventes réservées FMS (SAGE sto_res)" value={fmtNum(encoursFournisseur.cdc)} />
                 <DetailRow label="Références à commander (projeté < stock min)" value={encoursFournisseur.aCommander ? <span className="font-semibold text-red-700">{fmtNum(encoursFournisseur.aCommander)} — {fmtNum(encoursFournisseur.qte)} pièces suggérées</span> : '0'} />
                 <DetailRow label="Rupture avant réception" value={encoursFournisseur.rupture ? <span className="font-semibold text-red-700">{fmtNum(encoursFournisseur.rupture)}</span> : '0'} />
                 <DetailRow label="Commandes sans date de livraison (délai théorique)" value={fmtNum(encoursFournisseur.sansDate)} />
@@ -1237,7 +1246,7 @@ function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, art
                 <div className="max-h-72 overflow-auto rounded-lg border border-[#E5E1D8]">
                   <table className="w-full text-left text-[12px]">
                     <thead className="sticky top-0 bg-[#F4F3F0] text-[10px] uppercase text-[#8A8474]">
-                      <tr><th className="px-2 py-1">Référence</th><th className="px-2 py-1 text-right">μ/mois</th><th className="px-2 py-1 text-right">Stock FMS</th><th className="px-2 py-1 text-right">Encours</th><th className="px-2 py-1 text-right">Ventes</th><th className="px-2 py-1 text-right">Projeté</th><th className="px-2 py-1 text-right">Min calc.</th><th className="px-2 py-1 text-right">À cmder</th></tr>
+                      <tr><th className="px-2 py-1">Référence</th><th className="px-2 py-1 text-right">μ/mois</th><th className="px-2 py-1 text-right">Stock FMS</th><th className="px-2 py-1 text-right">Encours</th><th className="px-2 py-1 text-right">Réservé</th><th className="px-2 py-1 text-right">Projeté</th><th className="px-2 py-1 text-right">Min calc.</th><th className="px-2 py-1 text-right">À cmder</th></tr>
                     </thead>
                     <tbody>
                       {refsFournisseur.map((a) => (
@@ -1281,6 +1290,7 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
   const [ecartMinSeuls, setEcartMinSeuls] = useState(false)
   const [aCommanderSeuls, setACommanderSeuls] = useState(false)
   const [avecEncoursSeuls, setAvecEncoursSeuls] = useState(false)
+  // ventes réservées : SAGE sto_res du dépôt FMS (source de vérité), BLG en survol uniquement
   const [tri, setTri] = useState<'conso' | 'ecart' | 'couverture' | 'reference' | 'a_commander' | 'projete'>('conso')
   const [editRef, setEditRef] = useState<string | null>(null)
   const [editVal, setEditVal] = useState('')
@@ -1387,9 +1397,11 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
         { h: 'Délai appro (j)', f: (a) => a.delai_appro_jours }, { h: 'Stock FMS', f: (a) => a.sage_stock_fms }, { h: 'Couverture FMS (mois)', f: (a) => a.couverture_fms_mois },
         { h: 'Encours fourn. FMS (fiable)', f: (a) => a.encours_fourn_fms }, { h: 'Encours en retard', f: (a) => a.encours_fourn_retard }, { h: 'Encours douteux (exclu)', f: (a) => a.encours_fourn_douteux },
         { h: 'Livraison estimée (max)', f: (a) => fmtDate(a.date_livraison_estimee_max) }, { h: 'Date par délai théorique', f: (a) => (a.date_livraison_par_defaut ? 'Oui' : 'Non') }, { h: 'Détail commandes fourn.', f: (a) => a.detail_cdf },
-        { h: 'Ventes à livrer (FMS)', f: (a) => a.cdc_a_livrer_fms }, { h: 'Ventes à livrer (toutes agences)', f: (a) => a.cdc_a_livrer_total },
+        { h: 'Dispo FMS (SAGE)', f: (a) => a.stock_dispo_sage_fms }, { h: 'Dispo agences (SAGE)', f: (a) => a.stock_dispo_sage_agences },
+        { h: 'Réservé FMS (SAGE sto_res)', f: (a) => a.reserve_sage_fms }, { h: 'Réservé agences (SAGE)', f: (a) => a.reserve_sage_agences }, { h: 'Stock à terme FMS (SAGE)', f: (a) => a.sage_stock_terme_fms },
+        { h: 'Reste à livrer BLG (FMS)', f: (a) => a.cdc_blg_fms }, { h: 'Reste à livrer BLG (toutes agences)', f: (a) => a.cdc_blg_total },
         { h: 'Horizon (j)', f: (a) => a.horizon_jours }, { h: 'Conso jusqu\'à livraison', f: (a) => a.conso_jusqua_livraison },
-        { h: 'Position (stock + encours − ventes)', f: (a) => a.position_stock_fms }, { h: 'Stock avant réception', f: (a) => a.stock_avant_reception }, { h: 'Stock projeté à livraison', f: (a) => a.stock_projete_livraison },
+        { h: 'Position (stock + encours − réservé FMS)', f: (a) => a.position_stock_fms }, { h: 'Stock avant réception', f: (a) => a.stock_avant_reception }, { h: 'Stock projeté à livraison', f: (a) => a.stock_projete_livraison },
         { h: 'Rupture avant réception', f: (a) => (a.rupture_avant_reception ? 'Oui' : 'Non') }, { h: 'À commander', f: (a) => (a.a_commander ? 'Oui' : 'Non') }, { h: 'Qté suggérée', f: (a) => a.qte_a_commander },
         { h: 'Stock sécurité calculé', f: (a) => a.calc_stock_securite }, { h: 'Stock min calculé/retenu', f: (a) => a.calc_stock_min }, { h: 'Stock max calculé', f: (a) => a.calc_stock_max },
         { h: 'Stock min retenu (saisie)', f: (a) => a.stock_min_retenu }, { h: 'Commentaire', f: (a) => a.commentaire_stock_min },
@@ -1452,9 +1464,9 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
             </p>
             <p className="mt-1 max-w-3xl text-[12px] text-[#8A8474]">
               <b>Projection</b> : encours = reste à livrer des commandes fournisseurs BLG livrées au dépôt FMS (créées depuis moins de {parametres.find((p) => p.cle === 'cdf_encours_anciennete_max_jours')?.valeur ?? 365} j) ;
-              ventes = reste à livrer des commandes clients BLG émises par FMS (moins de {parametres.find((p) => p.cle === 'cdc_a_livrer_anciennete_max_jours')?.valeur ?? 180} j).
+              ventes réservées = réservé SAGE (<span className="font-mono">sto_res</span>) du dépôt FMS, comme l'interrogation "Stock prévisionnel" de SAGE ; le réservé des agences est affiché entre parenthèses (idem pour le stock disponible). Le reste à livrer BLG est conservé en information (survol).
               Date de livraison estimée = date saisie sur la ligne ou l'entête, sinon date lue dans les commentaires BLG ("Expé S40", "Livraison 09.09", "STOCK 12/26"), sinon date de commande + délai d'appro.
-              <b> Stock projeté = stock FMS − ventes − μ × jours jusqu'à la livraison / 30 + encours</b>. <b>À commander</b> quand le projeté passe sous le stock min ; quantité suggérée = remontée au stock max, arrondie au colisage.
+              <b> Stock projeté = stock FMS − réservé FMS − μ × jours jusqu'à la livraison / 30 + encours</b> (sans encours ni conso, il est égal au stock à terme SAGE). <b>À commander</b> quand le projeté passe sous le stock min ; quantité suggérée = remontée au stock max, arrondie au colisage.
               Un encours dont la date estimée est dépassée de plus de {parametres.find((p) => p.cle === 'cdf_retard_max_jours')?.valeur ?? 60} j est jugé douteux et exclu.
             </p>
           </div>
@@ -1533,11 +1545,12 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
                 <th className="px-2 py-2 text-right font-bold" title="Écart-type mensuel">σ</th>
                 <th className="px-2 py-2 text-right font-bold">3 dern. mois</th>
                 <th className="px-2 py-2 text-right font-bold">Dern. sortie</th>
-                <th className="px-2 py-2 text-right font-bold">Stock FMS</th>
+                <th className="px-2 py-2 text-right font-bold" title="Stock physique FMS (SAGE sto_qte)">Stock FMS</th>
+                <th className="px-2 py-2 text-right font-bold" title="Stock disponible SAGE (sto_dispo) du dépôt FMS — entre parenthèses : somme des agences">Dispo (agences)</th>
                 <th className="px-2 py-2 text-right font-bold" title="Reste à livrer des commandes fournisseurs BLG livrées au dépôt FMS, avec date de livraison estimée (⏱ = en retard, ≈ = date par délai théorique). Survole pour le détail par commande.">Encours fourn.</th>
-                <th className="px-2 py-2 text-right font-bold" title="Reste à livrer des commandes clients BLG émises par FMS (entre parenthèses : toutes agences)">Ventes à livrer</th>
-                <th className="px-2 py-2 text-right font-bold" title="Stock FMS − ventes − conso jusqu'à la livraison + encours. Rouge = rupture avant réception de l'encours.">Projeté</th>
-                <th className="px-2 py-2 text-right font-bold" title="Position de stock (stock + encours − ventes) / μ">Couv. (mois)</th>
+                <th className="px-2 py-2 text-right font-bold" title="Ventes réservées SAGE (sto_res) du dépôt FMS, déduites du projeté — entre parenthèses : somme des réservés des agences. Survole pour le reste à livrer BLG.">Réservé (agences)</th>
+                <th className="px-2 py-2 text-right font-bold" title="Stock FMS − réservé FMS − conso jusqu'à la livraison + encours. Rouge = rupture avant réception de l'encours.">Projeté</th>
+                <th className="px-2 py-2 text-right font-bold" title="Position de stock (stock + encours − réservé FMS) / μ">Couv. (mois)</th>
                 <th className="px-2 py-2 text-right font-bold">Min SAGE</th>
                 <th className="px-2 py-2 text-right font-bold">Min BLG</th>
                 <th className="px-2 py-2 text-right font-bold">SS calc.</th>
@@ -1578,6 +1591,9 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
                     <td className="px-2 py-1.5 text-right">{fmtNum(a.conso_3_derniers_mois)}</td>
                     <td className="px-2 py-1.5 text-right">{fmtMois(a.sage_derniere_sortie)}</td>
                     <td className="px-2 py-1.5 text-right">{fmtNum(a.sage_stock_fms)}</td>
+                    <td className="px-2 py-1.5 text-right" title={`Disponible FMS : ${fmtNum(a.stock_dispo_sage_fms)} · agences : ${fmtNum(a.stock_dispo_sage_agences)} (stock physique agences ${fmtNum(a.sage_stock_agences)})`}>
+                      {fmtNum(a.stock_dispo_sage_fms)}{n0(a.stock_dispo_sage_agences) > 0 ? <span className="ml-1 text-[10px] text-[#8A8474]">({fmtNum(a.stock_dispo_sage_agences)})</span> : null}
+                    </td>
                     <td className="px-2 py-1.5 text-right" title={titreEncours || undefined}>
                       {encours > 0 || douteux > 0 ? (
                         <div className="flex flex-col items-end leading-tight">
@@ -1590,13 +1606,13 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
                         </div>
                       ) : <span className="text-[#B3AD9E]">—</span>}
                     </td>
-                    <td className="px-2 py-1.5 text-right" title={`Émises par FMS : ${fmtNum(a.cdc_a_livrer_fms)} · toutes agences : ${fmtNum(a.cdc_a_livrer_total)} (${fmtNum(a.nb_cdc_a_livrer)} commandes)`}>
-                      {n0(a.cdc_a_livrer_fms) > 0 || n0(a.cdc_a_livrer_total) > 0
-                        ? <>{fmtNum(a.cdc_a_livrer_fms)}{n0(a.cdc_a_livrer_total) > n0(a.cdc_a_livrer_fms) ? <span className="ml-1 text-[10px] text-[#8A8474]">({fmtNum(a.cdc_a_livrer_total)})</span> : null}</>
+                    <td className="px-2 py-1.5 text-right" title={`Réservé SAGE — FMS : ${fmtNum(a.reserve_sage_fms)} · agences : ${fmtNum(a.reserve_sage_agences)}\nReste à livrer BLG — FMS : ${fmtNum(a.cdc_blg_fms)} · toutes agences : ${fmtNum(a.cdc_blg_total)} (${fmtNum(a.nb_cdc_a_livrer)} commandes)`}>
+                      {n0(a.reserve_sage_fms) > 0 || n0(a.reserve_sage_agences) > 0
+                        ? <>{fmtNum(a.reserve_sage_fms)}{n0(a.reserve_sage_agences) > 0 ? <span className="ml-1 text-[10px] text-[#8A8474]">({fmtNum(a.reserve_sage_agences)})</span> : null}{n0(a.cdc_blg_fms) !== n0(a.reserve_sage_fms) ? <span className="ml-0.5 text-[10px] text-[#B3AD9E]" title="Écart avec le reste à livrer BLG">≠</span> : null}</>
                         : <span className="text-[#B3AD9E]">—</span>}
                     </td>
                     <td className={`px-2 py-1.5 text-right font-semibold ${a.rupture_avant_reception ? 'bg-red-50 text-red-800' : sousMin ? 'text-red-700' : 'text-[#111820]'}`}
-                      title={a.rupture_avant_reception ? `Rupture avant réception : stock avant réception ${fmtNum(a.stock_avant_reception, 1)}` : `Position (stock + encours − ventes) : ${fmtNum(a.position_stock_fms)}`}>
+                      title={a.rupture_avant_reception ? `Rupture avant réception : stock avant réception ${fmtNum(a.stock_avant_reception, 1)}` : `Position (stock + encours − réservé FMS) : ${fmtNum(a.position_stock_fms)} · stock à terme SAGE : ${fmtNum(a.sage_stock_terme_fms)}`}>
                       {fmtNum(a.stock_projete_livraison)}{a.rupture_avant_reception ? ' ⚠' : ''}
                     </td>
                     <td className="px-2 py-1.5 text-right" title={`Couverture stock physique seul : ${fmtNum(a.couverture_fms_mois, 1)} mois`}>{fmtNum(a.couverture_projetee_mois ?? a.couverture_fms_mois, 1)}</td>
@@ -1626,7 +1642,7 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
                   </tr>
                 )
               })}
-              {!loading && affichees.length === 0 && <tr><td colSpan={18} className="px-3 py-8 text-center text-[#8A8474]">Aucune référence pour ces filtres.</td></tr>}
+              {!loading && affichees.length === 0 && <tr><td colSpan={19} className="px-3 py-8 text-center text-[#8A8474]">Aucune référence pour ces filtres.</td></tr>}
             </tbody>
           </table>
         </div>
