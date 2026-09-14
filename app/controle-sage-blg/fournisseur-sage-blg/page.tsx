@@ -217,6 +217,20 @@ type ArtRow = {
   cdc_blg_fms: number | null
   cdc_blg_total: number | null
   sage_stock_agences: number | null
+  // modèle de projection appliqué côté base (appro_parametres projection_*)
+  projection_perimetre: 'fms' | 'global' | null
+  projection_demande_mode: number | null      // 1 réservations, 2 conso moyenne, 3 max des deux
+  projection_horizon_delai: boolean | null    // horizon étendu au délai d'appro L
+  projection_stock_base: number | null
+  projection_reserve_base: number | null
+  projection_encours_base: number | null
+  projection_demande: number | null
+  projection_delai_l: number | null
+  projection_seuil: number | null             // sécurité + conso du délai restant
+  encours_global_fiable: number | null
+  conso_moy_3_mois: number | null             // = conso_3_derniers_mois / 3
+  projection_mu: number | null                // μ retenu pour la demande (12 mois ou 3 mois)
+  projection_mu_source: '12m' | '3m' | null
 }
 
 type StrategieRef = { code: string; designation: string; outil_cbn: string | null; mode_appro: string | null; calcul_besoin_blg: boolean; ordre: number | null }
@@ -1275,6 +1289,85 @@ function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, art
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Modèle de projection (paramètres appro_parametres projection_*)
+// ─────────────────────────────────────────────────────────────────────────
+
+const PROJECTION_PARAM_KEYS = ['projection_perimetre_global', 'projection_demande_mode', 'projection_horizon_delai', 'projection_mu_source']
+const DEMANDE_MODES: { value: number; label: string; detail: string }[] = [
+  { value: 1, label: 'Réservations fermes', detail: 'réservé SAGE (sto_res) uniquement' },
+  { value: 2, label: 'Consommation moyenne', detail: 'μ × horizon / 30 uniquement' },
+  { value: 3, label: 'Les deux', detail: 'le plus grand des deux (les réservations font partie de la conso attendue)' },
+]
+
+function valParam(parametres: Parametre[], cle: string, def: number) {
+  const v = parametres.find((p) => p.cle === cle)?.valeur
+  return v === undefined || v === null ? def : Number(v)
+}
+
+/** Sélecteur du modèle de projection : enregistre dans appro_parametres puis
+ * recharge les articles (la vue recalcule instantanément). */
+function ModeleProjection({ parametres, onParametresChange, onRecalcul, loading }: {
+  parametres: Parametre[]; onParametresChange: (p: Parametre[]) => void; onRecalcul: () => Promise<void>; loading: boolean
+}) {
+  const global = valParam(parametres, 'projection_perimetre_global', 0) === 1
+  const demande = valParam(parametres, 'projection_demande_mode', 3)
+  const horizonDelai = valParam(parametres, 'projection_horizon_delai', 1) === 1
+  const mu3m = valParam(parametres, 'projection_mu_source', 0) === 1
+  const [saving, setSaving] = useState(false)
+
+  async function changer(cle: string, valeur: number) {
+    setSaving(true)
+    try {
+      const existant = parametres.find((p) => p.cle === cle)
+      const { error } = await supabase.from('appro_parametres').upsert({ cle, valeur, description: existant?.description ?? null }, { onConflict: 'cle' })
+      if (error) throw error
+      onParametresChange(existant ? parametres.map((p) => (p.cle === cle ? { ...p, valeur } : p)) : [...parametres, { cle, valeur, description: null }])
+      await onRecalcul()
+    } catch (e) {
+      alert('Erreur : ' + messageErreur(e))
+    } finally { setSaving(false) }
+  }
+
+  const sel = 'h-9 rounded-lg border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold text-[#3A362E] disabled:opacity-60'
+  return (
+    <div className="mt-3 grid gap-2 rounded-lg border border-[#E5E1D8] bg-[#F4F3F0] p-3 md:grid-cols-4">
+      <label className="flex flex-col gap-0.5 text-[12px]">
+        <span className="font-semibold text-[#3A362E]">Périmètre</span>
+        <select value={global ? 1 : 0} disabled={saving || loading} onChange={(e) => void changer('projection_perimetre_global', Number(e.target.value))} className={sel}>
+          <option value={0}>Dépôt FMS seul</option>
+          <option value={1}>Global (tous dépôts)</option>
+        </select>
+        <span className="text-[11px] text-[#8A8474]">{global ? 'Stock disponible, réservé et encours de tous les dépôts' : 'Stock FMS, réservé FMS, encours livré au dépôt FMS'}</span>
+      </label>
+      <label className="flex flex-col gap-0.5 text-[12px]">
+        <span className="font-semibold text-[#3A362E]">Demande déduite</span>
+        <select value={demande} disabled={saving || loading} onChange={(e) => void changer('projection_demande_mode', Number(e.target.value))} className={sel}>
+          {DEMANDE_MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+        </select>
+        <span className="text-[11px] text-[#8A8474]">{DEMANDE_MODES.find((m) => m.value === demande)?.detail}</span>
+      </label>
+      <label className="flex flex-col gap-0.5 text-[12px]">
+        <span className="font-semibold text-[#3A362E]">Horizon</span>
+        <select value={horizonDelai ? 1 : 0} disabled={saving || loading} onChange={(e) => void changer('projection_horizon_delai', Number(e.target.value))} className={sel}>
+          <option value={1}>Au moins le délai d'appro L</option>
+          <option value={0}>Jusqu'à la livraison de l'encours seulement</option>
+        </select>
+        <span className="text-[11px] text-[#8A8474]">{horizonDelai ? 'Sans encours, on projette quand même la conso sur L (fournisseur + sécurité)' : 'Sans encours, horizon = 0 : le projeté vaut le stock à terme'}</span>
+      </label>
+      <label className="flex flex-col gap-0.5 text-[12px]">
+        <span className="font-semibold text-[#3A362E]">Conso moyenne μ</span>
+        <select value={mu3m ? 1 : 0} disabled={saving || loading} onChange={(e) => void changer('projection_mu_source', Number(e.target.value))} className={sel}>
+          <option value={0}>μ 12 mois (horizon complet)</option>
+          <option value={1}>μ 3 derniers mois</option>
+        </select>
+        <span className="text-[11px] text-[#8A8474]">{mu3m ? 'Plus réactif en saison ; le stock min/sécurité reste calculé sur 12 mois' : 'Moyenne lissée sur l\'horizon du calcul de besoin'}</span>
+      </label>
+      {saving && <div className="text-[11px] text-[#8A8474] md:col-span-4">Enregistrement puis recalcul…</div>}
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Onglet Articles & stock min
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -1393,14 +1486,15 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
         { h: 'Fournisseur', f: (a) => a.fournisseur_principal }, { h: 'Réf. fournisseur', f: (a) => a.sage_ref_fournisseur }, { h: 'MYSTOCK', f: (a) => a.mystock },
         { h: 'En sommeil', f: (a) => (a.sage_en_sommeil ? 'Oui' : 'Non') }, { h: 'UO FMS', f: (a) => a.sage_uo_fms },
         { h: 'Conso horizon (qté)', f: (a) => a.conso_horizon }, { h: 'Conso moy./mois (μ)', f: (a) => a.conso_moy_mensuelle }, { h: 'Écart-type (σ)', f: (a) => a.conso_ecart_type },
-        { h: 'Conso 3 derniers mois', f: (a) => a.conso_3_derniers_mois }, { h: 'Nb mois avec sortie', f: (a) => a.nb_mois_avec_sortie }, { h: 'Dernière sortie', f: (a) => fmtMois(a.sage_derniere_sortie) },
+        { h: 'Conso 3 derniers mois (total)', f: (a) => a.conso_3_derniers_mois }, { h: 'μ 3 mois', f: (a) => a.conso_moy_3_mois }, { h: 'μ retenu (projection)', f: (a) => a.projection_mu }, { h: 'Source μ', f: (a) => a.projection_mu_source }, { h: 'Nb mois avec sortie', f: (a) => a.nb_mois_avec_sortie }, { h: 'Dernière sortie', f: (a) => fmtMois(a.sage_derniere_sortie) },
         { h: 'Délai appro (j)', f: (a) => a.delai_appro_jours }, { h: 'Stock FMS', f: (a) => a.sage_stock_fms }, { h: 'Couverture FMS (mois)', f: (a) => a.couverture_fms_mois },
         { h: 'Encours fourn. FMS (fiable)', f: (a) => a.encours_fourn_fms }, { h: 'Encours en retard', f: (a) => a.encours_fourn_retard }, { h: 'Encours douteux (exclu)', f: (a) => a.encours_fourn_douteux },
         { h: 'Livraison estimée (max)', f: (a) => fmtDate(a.date_livraison_estimee_max) }, { h: 'Date par délai théorique', f: (a) => (a.date_livraison_par_defaut ? 'Oui' : 'Non') }, { h: 'Détail commandes fourn.', f: (a) => a.detail_cdf },
         { h: 'Dispo FMS (SAGE)', f: (a) => a.stock_dispo_sage_fms }, { h: 'Dispo agences (SAGE)', f: (a) => a.stock_dispo_sage_agences },
         { h: 'Réservé FMS (SAGE sto_res)', f: (a) => a.reserve_sage_fms }, { h: 'Réservé agences (SAGE)', f: (a) => a.reserve_sage_agences }, { h: 'Stock à terme FMS (SAGE)', f: (a) => a.sage_stock_terme_fms },
         { h: 'Reste à livrer BLG (FMS)', f: (a) => a.cdc_blg_fms }, { h: 'Reste à livrer BLG (toutes agences)', f: (a) => a.cdc_blg_total },
-        { h: 'Horizon (j)', f: (a) => a.horizon_jours }, { h: 'Conso jusqu\'à livraison', f: (a) => a.conso_jusqua_livraison },
+        { h: 'Périmètre projection', f: (a) => a.projection_perimetre }, { h: 'Stock base', f: (a) => a.projection_stock_base }, { h: 'Réservé base', f: (a) => a.projection_reserve_base }, { h: 'Encours base', f: (a) => a.projection_encours_base },
+        { h: 'Délai L (j)', f: (a) => a.projection_delai_l }, { h: 'Horizon (j)', f: (a) => a.horizon_jours }, { h: 'Conso sur horizon', f: (a) => a.conso_jusqua_livraison }, { h: 'Demande retenue', f: (a) => a.projection_demande }, { h: 'Seuil de commande', f: (a) => a.projection_seuil },
         { h: 'Position (stock + encours − réservé FMS)', f: (a) => a.position_stock_fms }, { h: 'Stock avant réception', f: (a) => a.stock_avant_reception }, { h: 'Stock projeté à livraison', f: (a) => a.stock_projete_livraison },
         { h: 'Rupture avant réception', f: (a) => (a.rupture_avant_reception ? 'Oui' : 'Non') }, { h: 'À commander', f: (a) => (a.a_commander ? 'Oui' : 'Non') }, { h: 'Qté suggérée', f: (a) => a.qte_a_commander },
         { h: 'Stock sécurité calculé', f: (a) => a.calc_stock_securite }, { h: 'Stock min calculé/retenu', f: (a) => a.calc_stock_min }, { h: 'Stock max calculé', f: (a) => a.calc_stock_max },
@@ -1443,7 +1537,7 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
         <KpiCard label="Sans aucune sortie" value={kpis.sansConso} loading={loading} tone="warn" sub="MYSTOCK à challenger" />
         <KpiCard label="Stock min renseigné dans BLG" value={kpis.minBlg} loading={loading} />
         <KpiCard label="Stock min BLG ≠ calculé" value={kpis.ecarts} loading={loading} tone="warn" />
-        <KpiCard label="À commander" value={kpis.aCommander} loading={loading} tone="warn" sub={`projeté < stock min · ${fmtNum(kpis.qteACommander)} pièces`} />
+        <KpiCard label="À commander" value={kpis.aCommander} loading={loading} tone="warn" sub={`projeté < seuil · ${fmtNum(kpis.qteACommander)} pièces`} />
       </section>
       <section className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <KpiCard label="Rupture avant réception" value={kpis.rupture} loading={loading} tone="warn" sub="stock épuisé avant l'arrivée de l'encours" />
@@ -1466,7 +1560,8 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
               <b>Projection</b> : encours = reste à livrer des commandes fournisseurs BLG livrées au dépôt FMS (créées depuis moins de {parametres.find((p) => p.cle === 'cdf_encours_anciennete_max_jours')?.valeur ?? 365} j) ;
               ventes réservées = réservé SAGE (<span className="font-mono">sto_res</span>) du dépôt FMS, comme l'interrogation "Stock prévisionnel" de SAGE ; le réservé des agences est affiché entre parenthèses (idem pour le stock disponible). Le reste à livrer BLG est conservé en information (survol).
               Date de livraison estimée = date saisie sur la ligne ou l'entête, sinon date lue dans les commentaires BLG ("Expé S40", "Livraison 09.09", "STOCK 12/26"), sinon date de commande + délai d'appro.
-              <b> Stock projeté = stock FMS − réservé FMS − μ × jours jusqu'à la livraison / 30 + encours</b> (sans encours ni conso, il est égal au stock à terme SAGE). <b>À commander</b> quand le projeté passe sous le stock min ; quantité suggérée = remontée au stock max, arrondie au colisage.
+              <b> Stock projeté = stock (périmètre) − demande sur l'horizon + encours</b>, où l'horizon est au moins le délai d'appro L si l'option est active.
+              <b> À commander</b> quand le projeté passe sous le <b>seuil</b> = stock de sécurité + conso du délai non couvert par l'horizon (quand l'horizon = L, le seuil est le stock de sécurité : la conso du délai est déjà déduite, on ne la compte pas deux fois) ; quantité suggérée = remontée au stock max, arrondie au colisage.
               Un encours dont la date estimée est dépassée de plus de {parametres.find((p) => p.cle === 'cdf_retard_max_jours')?.valeur ?? 60} j est jugé douteux et exclu.
             </p>
           </div>
@@ -1478,10 +1573,11 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
           </div>
         </div>
         {recalculMsg && <div className="mt-3 rounded-lg border border-[#B4761A]/25 bg-[#B4761A]/[0.06] px-3 py-2 text-[13px] font-semibold text-[#5A4321]">{recalculMsg}</div>}
+        <ModeleProjection parametres={parametres} onParametresChange={onParametresChange} onRecalcul={onRecalcul} loading={loading} />
         {showParams && (
           <div className="mt-3 rounded-lg border border-[#E5E1D8] bg-[#F4F3F0] p-3">
             <div className="grid gap-2 md:grid-cols-3">
-              {parametres.map((p) => (
+              {parametres.filter((p) => !PROJECTION_PARAM_KEYS.includes(p.cle)).map((p) => (
                 <label key={p.cle} className="flex flex-col gap-0.5 text-[12px]">
                   <span className="font-semibold text-[#3A362E]">{p.cle}</span>
                   <input value={paramsDraft[p.cle] ?? ''} onChange={(e) => setParamsDraft({ ...paramsDraft, [p.cle]: e.target.value })} className="h-8 rounded-lg border border-[#E5E1D8] bg-white px-2" />
@@ -1541,15 +1637,15 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
               <tr>
                 <th className="px-2 py-2 font-bold">Référence</th>
                 <th className="px-2 py-2 font-bold">Fourn.</th>
-                <th className="px-2 py-2 text-right font-bold" title="Conso moyenne mensuelle sur l'horizon">μ / mois</th>
+                <th className="px-2 py-2 text-right font-bold" title="Conso moyenne mensuelle sur l'horizon (12 mois)">μ 12 mois</th>
                 <th className="px-2 py-2 text-right font-bold" title="Écart-type mensuel">σ</th>
-                <th className="px-2 py-2 text-right font-bold">3 dern. mois</th>
+                <th className="px-2 py-2 text-right font-bold" title="Consommation mensuelle moyenne des 3 derniers mois complets (sorties BL / 3). Survole pour le total.">μ 3 mois</th>
                 <th className="px-2 py-2 text-right font-bold">Dern. sortie</th>
                 <th className="px-2 py-2 text-right font-bold" title="Stock physique FMS (SAGE sto_qte)">Stock FMS</th>
                 <th className="px-2 py-2 text-right font-bold" title="Stock disponible SAGE (sto_dispo) du dépôt FMS — entre parenthèses : somme des agences">Dispo (agences)</th>
                 <th className="px-2 py-2 text-right font-bold" title="Reste à livrer des commandes fournisseurs BLG livrées au dépôt FMS, avec date de livraison estimée (⏱ = en retard, ≈ = date par délai théorique). Survole pour le détail par commande.">Encours fourn.</th>
                 <th className="px-2 py-2 text-right font-bold" title="Ventes réservées SAGE (sto_res) du dépôt FMS, déduites du projeté — entre parenthèses : somme des réservés des agences. Survole pour le reste à livrer BLG.">Réservé (agences)</th>
-                <th className="px-2 py-2 text-right font-bold" title="Stock FMS − réservé FMS − conso jusqu'à la livraison + encours. Rouge = rupture avant réception de l'encours.">Projeté</th>
+                <th className="px-2 py-2 text-right font-bold" title="Stock (périmètre) − demande sur l'horizon + encours. Survole pour la décomposition et le seuil. Rouge = à commander ; ⚠ = stock épuisé avant réception de l'encours.">Projeté</th>
                 <th className="px-2 py-2 text-right font-bold" title="Position de stock (stock + encours − réservé FMS) / μ">Couv. (mois)</th>
                 <th className="px-2 py-2 text-right font-bold">Min SAGE</th>
                 <th className="px-2 py-2 text-right font-bold">Min BLG</th>
@@ -1586,9 +1682,9 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
                       <div className="max-w-[320px] truncate text-[11px] text-[#111820]" title={a.sage_designation || ''}>{a.sage_designation || '—'}</div>
                     </td>
                     <td className="px-2 py-1.5 font-mono text-[11px]">{a.fournisseur_principal || '—'}</td>
-                    <td className="px-2 py-1.5 text-right">{fmtNum(a.conso_moy_mensuelle, 1)}</td>
+                    <td className={`px-2 py-1.5 text-right ${a.projection_mu_source !== '3m' ? 'font-semibold text-[#111820]' : ''}`}>{fmtNum(a.conso_moy_mensuelle, 1)}</td>
                     <td className="px-2 py-1.5 text-right text-[#8A8474]">{fmtNum(a.conso_ecart_type, 1)}</td>
-                    <td className="px-2 py-1.5 text-right">{fmtNum(a.conso_3_derniers_mois)}</td>
+                    <td className={`px-2 py-1.5 text-right ${a.projection_mu_source === '3m' ? 'font-semibold text-[#111820]' : ''}`} title={`Total 3 derniers mois : ${fmtNum(a.conso_3_derniers_mois)}${n0(a.conso_moy_mensuelle) > 0 ? ` · ${Math.round((n0(a.conso_moy_3_mois) / n0(a.conso_moy_mensuelle) - 1) * 100) >= 0 ? '+' : ''}${Math.round((n0(a.conso_moy_3_mois) / n0(a.conso_moy_mensuelle) - 1) * 100)} % vs μ 12 mois` : ''}`}>{fmtNum(a.conso_moy_3_mois, 1)}</td>
                     <td className="px-2 py-1.5 text-right">{fmtMois(a.sage_derniere_sortie)}</td>
                     <td className="px-2 py-1.5 text-right">{fmtNum(a.sage_stock_fms)}</td>
                     <td className="px-2 py-1.5 text-right" title={`Disponible FMS : ${fmtNum(a.stock_dispo_sage_fms)} · agences : ${fmtNum(a.stock_dispo_sage_agences)} (stock physique agences ${fmtNum(a.sage_stock_agences)})`}>
@@ -1612,7 +1708,13 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
                         : <span className="text-[#B3AD9E]">—</span>}
                     </td>
                     <td className={`px-2 py-1.5 text-right font-semibold ${a.rupture_avant_reception ? 'bg-red-50 text-red-800' : sousMin ? 'text-red-700' : 'text-[#111820]'}`}
-                      title={a.rupture_avant_reception ? `Rupture avant réception : stock avant réception ${fmtNum(a.stock_avant_reception, 1)}` : `Position (stock + encours − réservé FMS) : ${fmtNum(a.position_stock_fms)} · stock à terme SAGE : ${fmtNum(a.sage_stock_terme_fms)}`}>
+                      title={[
+                        `Périmètre ${a.projection_perimetre === 'global' ? 'global' : 'FMS'} · horizon ${fmtNum(a.horizon_jours)} j (délai L ${fmtNum(a.projection_delai_l)} j) · μ ${a.projection_mu_source === '3m' ? '3 mois' : '12 mois'} = ${fmtNum(a.projection_mu, 1)}`,
+                        `Stock ${fmtNum(a.projection_stock_base)} − demande ${fmtNum(a.projection_demande, 1)} (réservé ${fmtNum(a.projection_reserve_base)} / conso ${fmtNum(a.conso_jusqua_livraison, 1)}) + encours ${fmtNum(a.projection_encours_base)} = ${fmtNum(a.stock_projete_livraison, 1)}`,
+                        `Seuil de commande : ${fmtNum(a.projection_seuil, 1)} (sécurité ${fmtNum(a.calc_stock_securite, 1)})`,
+                        a.rupture_avant_reception ? `Stock avant réception ${fmtNum(a.stock_avant_reception, 1)} : rupture avant l'arrivée de l'encours` : null,
+                        `Position (stock + encours − réservé) : ${fmtNum(a.position_stock_fms)} · stock à terme SAGE FMS : ${fmtNum(a.sage_stock_terme_fms)}`,
+                      ].filter(Boolean).join('\n')}>
                       {fmtNum(a.stock_projete_livraison)}{a.rupture_avant_reception ? ' ⚠' : ''}
                     </td>
                     <td className="px-2 py-1.5 text-right" title={`Couverture stock physique seul : ${fmtNum(a.couverture_fms_mois, 1)} mois`}>{fmtNum(a.couverture_projetee_mois ?? a.couverture_fms_mois, 1)}</td>
