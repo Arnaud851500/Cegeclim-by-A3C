@@ -1883,7 +1883,7 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
                 <th className="px-2 py-2 text-right font-bold" title="Reste à livrer des commandes fournisseurs BLG livrées au dépôt FMS, avec date de livraison estimée (⏱ = en retard, ≈ = date par délai théorique). Survole pour le détail par commande.">Encours fourn.</th>
                 <th className="px-2 py-2 text-right font-bold" title="Ventes réservées SAGE (sto_res) du dépôt FMS, déduites du projeté — entre parenthèses : somme des réservés des agences. Survole pour le reste à livrer BLG.">Réservé (agences)</th>
                 <th className="px-2 py-2 text-right font-bold" title="Stock (périmètre) − demande sur l'horizon + encours. Survole pour la décomposition et le seuil. Rouge = à commander ; ⚠ = stock épuisé avant réception de l'encours.">Projeté</th>
-                <th className="px-2 py-2 text-right font-bold" title="Position de stock (stock + encours − réservé FMS) / μ">Couv. (mois)</th>
+                <th className="px-2 py-2 text-right font-bold" title="Couverture projetée = position de stock du périmètre choisi (stock + encours − réservé) / μ retenu. En dessous, en gris : couverture du seul stock physique FMS / μ 12 mois (ne dépend pas du modèle).">Couv. (mois)</th>
                 <th className="px-2 py-2 text-right font-bold">Min SAGE</th>
                 <th className="px-2 py-2 text-right font-bold">Min BLG</th>
                 <th className="px-2 py-2 text-right font-bold">SS calc.</th>
@@ -1974,7 +1974,12 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
                       ].filter(Boolean).join('\n')}>
                       {fmtNum(a.stock_projete_livraison)}{a.rupture_avant_reception ? ' ⚠' : ''}
                     </td>
-                    <td className="px-2 py-1.5 text-right" title={`Couverture stock physique seul : ${fmtNum(a.couverture_fms_mois, 1)} mois`}>{fmtNum(a.couverture_projetee_mois ?? a.couverture_fms_mois, 1)}</td>
+                    <td className="px-2 py-1.5 text-right" title={`Projetée (${a.projection_perimetre === 'global' ? 'global' : 'FMS'}) : position ${fmtNum(a.position_stock_fms)} / μ ${fmtNum(a.projection_mu, 1)} = ${fmtNum(a.couverture_projetee_mois, 1)} mois\nStock physique FMS seul / μ 12 mois : ${fmtNum(a.couverture_fms_mois, 1)} mois`}>
+                      <div className="flex flex-col items-end leading-tight">
+                        <span className="font-semibold text-[#111820]">{a.couverture_projetee_mois === null || a.couverture_projetee_mois === undefined ? '—' : fmtNum(a.couverture_projetee_mois, 1)}</span>
+                        <span className="text-[10px] text-[#8A8474]">FMS {fmtNum(a.couverture_fms_mois, 1)}</span>
+                      </div>
+                    </td>
                     <td className="px-2 py-1.5 text-right text-[#8A8474]">{fmtNum(a.sage_stock_min_fms)}</td>
                     <td className={`px-2 py-1.5 text-right ${ecart ? 'bg-red-50 font-semibold text-red-800' : 'text-[#8A8474]'}`}>{fmtNum(a.blg_stock_min_fms)}</td>
                     <td className="px-2 py-1.5 text-right text-[#8A8474]">{fmtNum(a.calc_stock_securite)}</td>
