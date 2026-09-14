@@ -1733,6 +1733,59 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
         <KpiCard label="Sans date de livraison" value={kpis.sansDate} loading={loading} sub="délai théorique appliqué" />
       </section>
 
+      {/* Filtres — placés sous les KPI : ils déterminent le jeu sur lequel les KPI et les pastilles d'incohérence sont calculés */}
+      <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
+        <div className="grid gap-2 md:grid-cols-4">
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Référence ou désignation…" className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-sm font-medium outline-none focus:border-[#B4761A]" />
+          <select value={fournFilter} onChange={(e) => setFournFilter(e.target.value)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
+            <option value="">Fournisseur : Tous</option>
+            {fournOptions.map((f) => <option key={f.numero} value={f.numero}>{f.numero} — {f.label}</option>)}
+          </select>
+          <select value={familleFilter} onChange={(e) => setFamilleFilter(e.target.value)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
+            <option value="">Famille : Toutes</option>
+            {familleOptions.map((f) => <option key={f} value={f}>{f}</option>)}
+          </select>
+          <select value={tri} onChange={(e) => setTri(e.target.value as typeof tri)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
+            <option value="conso">Tri : conso décroissante</option>
+            <option value="incoherences">Tri : nombre d'incohérences</option>
+            <option value="a_commander">Tri : quantité à commander</option>
+            <option value="projete">Tri : projeté − stock min (le plus critique d'abord)</option>
+            <option value="ecart">Tri : écart stock min (calculé vs BLG)</option>
+            <option value="couverture">Tri : couverture FMS croissante</option>
+            <option value="reference">Tri : référence</option>
+          </select>
+        </div>
+        <div className="mt-2 grid gap-2 md:grid-cols-4">
+          <select value={qualiteFilter} onChange={(e) => setQualiteFilter(e.target.value)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
+            <option value="">Qualité fournisseur : Toutes</option>
+            {qualiteOptions.map((q) => <option key={q} value={q}>{q}</option>)}
+          </select>
+          <select value={strategieFilter} onChange={(e) => setStrategieFilter(e.target.value)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
+            <option value="">Stratégie fournisseur : Toutes</option>
+            {STRATEGIES_PYRAMIDE.filter((s) => s.code).map((s) => <option key={s.code} value={s.code}>{s.label}</option>)}
+            <option value="__none">Non renseignée</option>
+          </select>
+          <select value={sommeilFilter} onChange={(e) => setSommeilFilter(e.target.value as typeof sommeilFilter)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
+            <option value="tous">Mise en sommeil : Toutes</option><option value="non">Actives (non en sommeil)</option><option value="oui">En sommeil</option>
+          </select>
+          <select value={arretApproFilter} onChange={(e) => setArretApproFilter(e.target.value as typeof arretApproFilter)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
+            <option value="tous">Arrêt appro : Tous</option><option value="oui">Arrêt appro : Oui</option><option value="non">Arrêt appro : Non</option>
+          </select>
+        </div>
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap gap-2">
+            <label className="flex h-9 items-center gap-2 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[12px] font-semibold text-[#3A362E]"><input type="checkbox" checked={pertinentsSeuls} onChange={(e) => setPertinentsSeuls(e.target.checked)} className="accent-[#B4761A]" /> MYSTOCK actives uniquement</label>
+            <label className="flex h-9 items-center gap-2 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[12px] font-semibold text-[#3A362E]"><input type="checkbox" checked={avecConsoSeuls} onChange={(e) => setAvecConsoSeuls(e.target.checked)} className="accent-[#B4761A]" /> Avec conso uniquement</label>
+            <label className="flex h-9 items-center gap-2 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[12px] font-semibold text-[#3A362E]"><input type="checkbox" checked={aCommanderSeuls} onChange={(e) => setACommanderSeuls(e.target.checked)} className="accent-[#B4761A]" /> À commander uniquement</label>
+            <label className="flex h-9 items-center gap-2 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[12px] font-semibold text-[#3A362E]"><input type="checkbox" checked={avecEncoursSeuls} onChange={(e) => setAvecEncoursSeuls(e.target.checked)} className="accent-[#B4761A]" /> Avec encours fournisseur</label>
+            <label className="flex h-9 items-center gap-2 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[12px] font-semibold text-[#3A362E]"><input type="checkbox" checked={ecartMinSeuls} onChange={(e) => setEcartMinSeuls(e.target.checked)} className="accent-[#B4761A]" /> Stock min BLG ≠ calculé</label>
+          </div>
+          <button type="button" onClick={() => void exporterExcel()} disabled={exportEnCours || loading || filtres.length === 0} className="rounded-lg bg-[#111820] px-4 py-2 text-[13px] font-bold text-white hover:bg-[#252E3D] disabled:opacity-60">
+            {exportEnCours ? 'Export en cours…' : `⬇ Exporter en Excel (${filtres.length} refs)`}
+          </button>
+        </div>
+      </section>
+
       {/* Incohérences par référence — pastilles filtrantes */}
       <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
@@ -1805,57 +1858,6 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
         )}
       </section>
 
-      <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
-        <div className="grid gap-2 md:grid-cols-4">
-          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Référence ou désignation…" className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-sm font-medium outline-none focus:border-[#B4761A]" />
-          <select value={fournFilter} onChange={(e) => setFournFilter(e.target.value)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
-            <option value="">Fournisseur : Tous</option>
-            {fournOptions.map((f) => <option key={f.numero} value={f.numero}>{f.numero} — {f.label}</option>)}
-          </select>
-          <select value={familleFilter} onChange={(e) => setFamilleFilter(e.target.value)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
-            <option value="">Famille : Toutes</option>
-            {familleOptions.map((f) => <option key={f} value={f}>{f}</option>)}
-          </select>
-          <select value={tri} onChange={(e) => setTri(e.target.value as typeof tri)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
-            <option value="conso">Tri : conso décroissante</option>
-            <option value="incoherences">Tri : nombre d'incohérences</option>
-            <option value="a_commander">Tri : quantité à commander</option>
-            <option value="projete">Tri : projeté − stock min (le plus critique d'abord)</option>
-            <option value="ecart">Tri : écart stock min (calculé vs BLG)</option>
-            <option value="couverture">Tri : couverture FMS croissante</option>
-            <option value="reference">Tri : référence</option>
-          </select>
-        </div>
-        <div className="mt-2 grid gap-2 md:grid-cols-4">
-          <select value={qualiteFilter} onChange={(e) => setQualiteFilter(e.target.value)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
-            <option value="">Qualité fournisseur : Toutes</option>
-            {qualiteOptions.map((q) => <option key={q} value={q}>{q}</option>)}
-          </select>
-          <select value={strategieFilter} onChange={(e) => setStrategieFilter(e.target.value)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
-            <option value="">Stratégie fournisseur : Toutes</option>
-            {STRATEGIES_PYRAMIDE.filter((s) => s.code).map((s) => <option key={s.code} value={s.code}>{s.label}</option>)}
-            <option value="__none">Non renseignée</option>
-          </select>
-          <select value={sommeilFilter} onChange={(e) => setSommeilFilter(e.target.value as typeof sommeilFilter)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
-            <option value="tous">Mise en sommeil : Toutes</option><option value="non">Actives (non en sommeil)</option><option value="oui">En sommeil</option>
-          </select>
-          <select value={arretApproFilter} onChange={(e) => setArretApproFilter(e.target.value as typeof arretApproFilter)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
-            <option value="tous">Arrêt appro : Tous</option><option value="oui">Arrêt appro : Oui</option><option value="non">Arrêt appro : Non</option>
-          </select>
-        </div>
-        <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-          <div className="flex flex-wrap gap-2">
-            <label className="flex h-9 items-center gap-2 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[12px] font-semibold text-[#3A362E]"><input type="checkbox" checked={pertinentsSeuls} onChange={(e) => setPertinentsSeuls(e.target.checked)} className="accent-[#B4761A]" /> MYSTOCK actives uniquement</label>
-            <label className="flex h-9 items-center gap-2 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[12px] font-semibold text-[#3A362E]"><input type="checkbox" checked={avecConsoSeuls} onChange={(e) => setAvecConsoSeuls(e.target.checked)} className="accent-[#B4761A]" /> Avec conso uniquement</label>
-            <label className="flex h-9 items-center gap-2 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[12px] font-semibold text-[#3A362E]"><input type="checkbox" checked={aCommanderSeuls} onChange={(e) => setACommanderSeuls(e.target.checked)} className="accent-[#B4761A]" /> À commander uniquement</label>
-            <label className="flex h-9 items-center gap-2 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[12px] font-semibold text-[#3A362E]"><input type="checkbox" checked={avecEncoursSeuls} onChange={(e) => setAvecEncoursSeuls(e.target.checked)} className="accent-[#B4761A]" /> Avec encours fournisseur</label>
-            <label className="flex h-9 items-center gap-2 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[12px] font-semibold text-[#3A362E]"><input type="checkbox" checked={ecartMinSeuls} onChange={(e) => setEcartMinSeuls(e.target.checked)} className="accent-[#B4761A]" /> Stock min BLG ≠ calculé</label>
-          </div>
-          <button type="button" onClick={() => void exporterExcel()} disabled={exportEnCours || loading || filtres.length === 0} className="rounded-lg bg-[#111820] px-4 py-2 text-[13px] font-bold text-white hover:bg-[#252E3D] disabled:opacity-60">
-            {exportEnCours ? 'Export en cours…' : `⬇ Exporter en Excel (${filtres.length} refs)`}
-          </button>
-        </div>
-      </section>
 
       <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
         <div className="mb-3 flex items-center justify-between">
