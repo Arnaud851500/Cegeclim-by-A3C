@@ -58,8 +58,12 @@ export type NavBloc = {
   id: string
   label: string
   subtitle: string
-  /** Emoji, même registre que MobileHome. */
+  /** Emoji, même registre que MobileHome (utilisé seul dans le volet
+   * Arborescence et le fil d'Ariane). */
   icon: string
+  /** Emojis affichés côte à côte sur le bloc de l'accueil quand le bloc
+   * regroupe plusieurs univers (ex. tâches + agenda). Repli : [icon]. */
+  icons?: string[]
   /** Dégradé du bloc (haut → bas), charte mobile. */
   gradient: [string, string]
   /** Fond du carré icône. */
@@ -123,6 +127,7 @@ export const NAV_BLOCS: NavBloc[] = [
     label: 'Mes tâches / Mes RDV',
     subtitle: 'À traiter en priorité, agenda, documents',
     icon: '✅',
+    icons: ['✅', '📅'],
     gradient: ['#A5482A', '#6E2E19'],
     iconBg: 'rgba(255,255,255,0.18)',
     pages: [

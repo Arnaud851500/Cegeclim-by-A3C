@@ -149,7 +149,11 @@ export default function AccueilPage() {
               }}
             >
               <span style={styles.blocChevron} aria-hidden="true">›</span>
-              <span style={{ ...styles.blocIcon, background: bloc.iconBg }}>{bloc.icon}</span>
+              <span style={styles.blocIcons}>
+                {(bloc.icons && bloc.icons.length > 0 ? bloc.icons : [bloc.icon]).map((icon, iconIndex) => (
+                  <span key={`${bloc.id}-icon-${iconIndex}`} style={{ ...styles.blocIcon, background: bloc.iconBg }}>{icon}</span>
+                ))}
+              </span>
               <span style={styles.blocLabel}>{bloc.label}</span>
               <span style={styles.blocSubtitle}>{bloc.subtitle}</span>
               <span style={styles.blocCount}>
@@ -317,6 +321,13 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 24,
     lineHeight: 1,
     color: 'rgba(255,255,255,0.7)',
+  },
+
+  blocIcons: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
   },
 
   blocIcon: {
