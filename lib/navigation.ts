@@ -8,6 +8,15 @@
 //   - components/ClientRootShell  : bouton MENU, volet « Arborescence », titre
 //                                   de page, contrôle d'accès (/unauthorized)
 // Pour ajouter un écran : une ligne dans le bon bloc, rien d'autre à toucher.
+//
+// ÉVOLUTION (2026-09-16) : « Mes clients » réduit à Prospects / Clients (carte),
+// Suivi multi clients et Vision client 360 (les deux derniers sortis de « Mon
+// activité ») ; Liste globale (/clients) reste uniquement sous Admin ; Clients
+// CEGECLIM et Suivi prospects retirés de l'arborescence ; bloc « Mes tâches /
+// Mes RDV » = Todo List + Agenda (+ Documents).
+// Le bloc « Mes alertes » de l'accueil n'est pas ici : il n'a pas de page, il
+// ouvre le Centre d'alertes (components/AlertsContext.tsx + ClientRootShell).
+
 // ============================================================================
 
 import type { AccessRights } from '@/components/AccessContext'
@@ -74,8 +83,6 @@ export const NAV_BLOCS: NavBloc[] = [
     pages: [
       { label: 'Vision ONE PAGE', path: '/tableaux-de-bord/vision-tci', accessKey: 'can_dashboard', description: 'Synthèse TCI en une page : commandes, livraisons, facturation, marge.' },
       { label: 'Activité quotidienne', path: '/focus_mensuel2', accessKey: 'can_dashboard', description: 'Focus mensuel jour par jour, faits marquants et projection de CA.' },
-      { label: 'Suivi multi clients', path: '/synthese_multi_clients', accessKey: 'can_dashboard', description: 'Tableau comparatif client par client sur l’année et en cumul.' },
-      { label: 'Vision client 360', path: '/vision-client', activeLabel: 'Vision client', accessKey: 'can_dashboard', description: 'Fiche complète d’un client : historique, documents, retards de paiement.' },
       { label: 'Tableaux de bord', path: '/atelier-analyse', accessKey: 'can_dashboard', description: 'Atelier d’analyse et tableaux de bord personnalisables.' },
       { label: 'Analyse devis', path: '/cycle-documents', accessKey: 'can_dashboard', description: 'Cycle des documents et transformation des devis.' },
       { label: 'Courbes de flux', path: '/approvisionnements', accessKey: 'can_dashboard', description: 'Courbes Devis – CDC – BL – Factures dans le temps.' },
@@ -88,15 +95,14 @@ export const NAV_BLOCS: NavBloc[] = [
   {
     id: 'clients',
     label: 'Mes clients',
-    subtitle: 'Fiches, prospects et suivi commercial',
+    subtitle: 'Prospects, suivi multi clients, vision 360',
     icon: '👥',
     gradient: ['#4E7A2A', '#2F5219'],
     iconBg: 'rgba(255,255,255,0.18)',
     pages: [
-      { label: 'Liste globale', path: '/clients', accessKey: 'can_clients', description: 'Consulter et filtrer la base clients et prospects : adresse, site web, téléphone.' },
-      { label: 'Clients CEGECLIM', path: '/clients_cegeclim', accessKey: 'can_clients_cegeclim', description: 'Clients présents dans la base CEGECLIM et informations de rattachement.' },
-      { label: 'Suivi prospects', path: '/suivi_prospects', accessKey: 'can_suivi_prospects', description: 'Piloter l’avancement des prospects et les prochaines actions commerciales.' },
-      { label: 'Carte prospects & clients', path: '/carte', activeLabel: 'Prospects / Clients', accessKey: 'can_carte', description: 'Clients et prospects sur une carte pour les analyses géographiques.' },
+      { label: 'Prospects / Clients', path: '/carte', accessKey: 'can_carte', description: 'Liste et carte des prospects et clients pour les analyses géographiques et le suivi commercial.' },
+      { label: 'Suivi multi clients', path: '/synthese_multi_clients', accessKey: 'can_dashboard', description: 'Tableau comparatif client par client sur l’année et en cumul.' },
+      { label: 'Vision client 360', path: '/vision-client', activeLabel: 'Vision client', accessKey: 'can_dashboard', description: 'Fiche complète d’un client : historique, documents, retards de paiement.' },
     ],
   },
   {
@@ -114,13 +120,14 @@ export const NAV_BLOCS: NavBloc[] = [
   },
   {
     id: 'taches',
-    label: 'Mes tâches',
-    subtitle: 'À traiter en priorité, documents partagés',
+    label: 'Mes tâches / Mes RDV',
+    subtitle: 'À traiter en priorité, agenda, documents',
     icon: '✅',
     gradient: ['#A5482A', '#6E2E19'],
     iconBg: 'rgba(255,255,255,0.18)',
     pages: [
       { label: 'Todo List', path: '/todo', accessKey: 'can_todo', description: 'Créer, suivre et mettre à jour les tâches.' },
+      { label: 'Agenda', path: '/agenda', accessKey: 'can_dashboard', description: 'Planning des rendez-vous, comptes rendus, dictée vocale et recherche de documents.' },
       { label: 'Documents', path: '/documents', accessKey: 'can_documents', description: 'Documents, dossiers et pièces partagées selon les droits attribués.' },
     ],
   },
