@@ -14,23 +14,38 @@
 // default_landing_page = /accueil sur les profils (écran Autorisations).
 // ============================================================================
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import type React from 'react'
 import { useRouter } from 'next/navigation'
 import { useAccess } from '@/components/AccessContext'
 import { useViewport } from '@/lib/useViewport'
 import MobileShell from '@/components/mobile/MobileShell'
 import { getVisibleBlocs, type NavBloc, type NavPage } from '@/lib/navigation'
+import { useAlerts } from '@/components/AlertsContext'
+
+// ÉVOLUTION (2026-09-15 soir) : bloc « Mes alertes » — pas une page mais la
+// fenêtre flottante « Centre d'alertes » (ClientRootShell), qui reprend en
+// grand les pastilles du bandeau. Il apparaît après « Mes tâches » dès que le
+// profil a au moins une alerte activée, avec le nombre d'alertes à traiter.
 
 export default function AccueilPage() {
   const router = useRouter()
   const { rights, email } = useAccess()
   const { isMobile } = useViewport()
+  const alerts = useAlerts()
 
   const [openBloc, setOpenBloc] = useState<NavBloc | null>(null)
 
   const blocs = useMemo(() => getVisibleBlocs(rights), [rights])
   const nbEcrans = blocs.reduce((sum, bloc) => sum + bloc.pages.length, 0)
+
+  // Position du bloc « Mes alertes » dans la grille : juste après « Mes tâches »
+  // (comme sur le mobile « Mes tâches - alertes »), sinon en tête.
+  const alertBlocIndex = useMemo(() => {
+    const idx = blocs.findIndex((bloc) => bloc.id === 'taches')
+    return idx >= 0 ? idx + 1 : 0
+  }, [blocs])
+  const showAlertBloc = alerts.items.length > 0
 
   const displayName =
     String(rights.display_name || '').trim() ||
@@ -97,9 +112,34 @@ export default function AccueilPage() {
         </div>
       ) : (
         <div className="cgcBlocGrid" style={styles.grid}>
-          {blocs.map((bloc) => (
+          {blocs.map((bloc, index) => (
+            <Fragment key={bloc.id}>
+            {showAlertBloc && index === alertBlocIndex && (
+              <button
+                type="button"
+                className="cgcBloc"
+                onClick={alerts.openAlertCenter}
+                style={{
+                  ...styles.bloc,
+                  background: alerts.activeCount > 0
+                    ? 'linear-gradient(180deg, #A5482A 0%, #6E2E19 100%)'
+                    : 'linear-gradient(180deg, #2F4A3C 0%, #1B2C24 100%)',
+                }}
+              >
+                <span style={styles.blocChevron} aria-hidden="true">›</span>
+                <span style={{ ...styles.blocIcon, background: 'rgba(255,255,255,0.18)' }}>🔔</span>
+                <span style={styles.blocLabel}>
+                  Mes alertes{alerts.activeCount > 0 ? ` (${alerts.activeCount})` : ''}
+                </span>
+                <span style={styles.blocSubtitle}>
+                  {alerts.activeCount > 0 ? 'À traiter en priorité' : 'Rien à traiter pour le moment'}
+                </span>
+                <span style={styles.blocCount}>
+                  {alerts.items.length} alerte{alerts.items.length > 1 ? 's' : ''} suivie{alerts.items.length > 1 ? 's' : ''}
+                </span>
+              </button>
+            )}
             <button
-              key={bloc.id}
               type="button"
               className="cgcBloc"
               onClick={() => onBlocClick(bloc)}
@@ -118,7 +158,22 @@ export default function AccueilPage() {
                   : `${bloc.pages.length} écrans`}
               </span>
             </button>
+            </Fragment>
           ))}
+          {showAlertBloc && alertBlocIndex >= blocs.length && (
+            <button
+              type="button"
+              className="cgcBloc"
+              onClick={alerts.openAlertCenter}
+              style={{ ...styles.bloc, background: 'linear-gradient(180deg, #A5482A 0%, #6E2E19 100%)' }}
+            >
+              <span style={styles.blocChevron} aria-hidden="true">›</span>
+              <span style={{ ...styles.blocIcon, background: 'rgba(255,255,255,0.18)' }}>🔔</span>
+              <span style={styles.blocLabel}>Mes alertes{alerts.activeCount > 0 ? ` (${alerts.activeCount})` : ''}</span>
+              <span style={styles.blocSubtitle}>{alerts.activeCount > 0 ? 'À traiter en priorité' : 'Rien à traiter pour le moment'}</span>
+              <span style={styles.blocCount}>{alerts.items.length} alerte{alerts.items.length > 1 ? 's' : ''} suivie{alerts.items.length > 1 ? 's' : ''}</span>
+            </button>
+          )}
         </div>
       )}
 

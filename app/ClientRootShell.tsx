@@ -33,6 +33,16 @@ import { CDC_RETARD_LABEL, getCdcRetardDescription, getCdcRetardThresholdIso } f
 //     • un fil d'Ariane « Bloc › Écran » rappelant où l'on se trouve.
 // - Le contrôle d'accès (/unauthorized) et le titre de page lisent la même
 //   arborescence.
+import { AlertsContext, type AlertItem } from '@/components/AlertsContext'
+// ÉVOLUTION (2026-09-15 soir) : Centre d'alertes.
+// - nouvelle pastille « Non servables » = CDC dont au moins une ligne est en
+//   rupture ou couverte par une réception tardive, livraison dans les 2 mois
+//   (v_portefeuille_couverture_stock) ; clic → /portefeuille-livraison avec le
+//   filtre couverture « non servables » et l'horizon 2 mois.
+// - toutes les pastilles sont exposées via AlertsContext ; le bloc « Mes
+//   alertes » de l'accueil et le titre « Mes alertes » du bandeau ouvrent la
+//   fenêtre flottante « Centre d'alertes » rendue ici (cartes agrandies, même
+//   action au clic que la pastille).
 import {
   ACCUEIL_PATH,
   findActivePage,
@@ -94,6 +104,18 @@ type CdcLivAvant2026Signal = {
   status: StatusLevel
   count: number
 }
+
+/** Pastille « Non servables » : CDC (documents distincts) ayant au moins une
+ * ligne RUPTURE ou RECEPTION_TARDIVE avec une date de livraison dans les
+ * COUVERTURE_HORIZON_MOIS prochains mois. */
+type CouvertureStockSignal = {
+  status: StatusLevel
+  count: number
+  nbLignes: number
+  nbClients: number
+}
+
+const COUVERTURE_HORIZON_MOIS = 2
 
 type ControleFraisPortSignal = {
   status: StatusLevel
@@ -497,6 +519,13 @@ function AppShell({ children }: { children: React.ReactNode }) {
     status: 'green',
     count: 0,
   })
+  const [couvertureStockSignal, setCouvertureStockSignal] = useState<CouvertureStockSignal>({
+    status: 'green',
+    count: 0,
+    nbLignes: 0,
+    nbClients: 0,
+  })
+  const [alertCenterOpen, setAlertCenterOpen] = useState(false)
   const [controleFraisPortSignal, setControleFraisPortSignal] = useState<ControleFraisPortSignal>({
     status: 'green',
     count: 0,
@@ -803,7 +832,17 @@ function AppShell({ children }: { children: React.ReactNode }) {
   // Le volet Arborescence se referme à chaque changement de page.
   useEffect(() => {
     setTreeOpen(false)
+    setAlertCenterOpen(false)
   }, [pathname])
+
+  useEffect(() => {
+    if (!alertCenterOpen) return
+    function onKey(event: KeyboardEvent) {
+      if (event.key === 'Escape') setAlertCenterOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [alertCenterOpen])
 
   useEffect(() => {
     if (!sessionChecked || !hasSession) return
@@ -1439,6 +1478,56 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
     window.dispatchEvent(new CustomEvent('cegeclim:open-cdc-retard'))
   }
 
+  /** Pastille « Non servables » : lit v_portefeuille_couverture_stock (même
+   * vue que l'écran Portefeuille livraison), statuts RUPTURE +
+   * RECEPTION_TARDIVE, livraison <= aujourd'hui + COUVERTURE_HORIZON_MOIS,
+   * périmètre agences / collaborateurs de l'utilisateur. Compte les CDC
+   * distincts (et, pour le Centre d'alertes, les lignes et les clients). */
+  async function refreshCouvertureStockSignal(accessProfile?: UserAccessProfile | null) {
+    const allowedAgences = getAllowedAgencesForStatus(accessProfile)
+    const allowedCollaborateurs = getAllowedCollaborateursForStatus(accessProfile)
+
+    try {
+      const horizon = new Date()
+      horizon.setMonth(horizon.getMonth() + COUVERTURE_HORIZON_MOIS)
+      const horizonIso = `${horizon.getFullYear()}-${String(horizon.getMonth() + 1).padStart(2, '0')}-${String(horizon.getDate()).padStart(2, '0')}`
+
+      let query = supabase
+        .from('v_portefeuille_couverture_stock')
+        .select('numero_document,numero_tiers,date_livraison,statut_couverture,agence,representant')
+        .in('statut_couverture', ['RUPTURE', 'RECEPTION_TARDIVE'])
+        .lte('date_livraison', horizonIso)
+
+      if (allowedAgences.length > 0) query = query.in('agence', allowedAgences)
+      if (allowedCollaborateurs.length > 0) query = query.in('representant', allowedCollaborateurs)
+
+      const { data, error } = await query.limit(50000)
+      if (error) throw error
+
+      const rows = (data || []) as Record<string, any>[]
+      const documents = new Set(rows.map((row) => cleanText(row.numero_document)).filter(Boolean))
+      const clients = new Set(rows.map((row) => cleanText(row.numero_tiers)).filter(Boolean))
+
+      setCouvertureStockSignal({
+        status: documents.size > 0 ? 'red' : 'green',
+        count: documents.size,
+        nbLignes: rows.length,
+        nbClients: clients.size,
+      })
+    } catch (error) {
+      console.error('Couverture stock status indicator', error)
+      setCouvertureStockSignal({ status: 'green', count: 0, nbLignes: 0, nbClients: 0 })
+    }
+  }
+
+  /** Ouvre le portefeuille filtré sur les CDC non servables : l'écran lit
+   * ?couverture=non-servable au montage (types CDC, filtre couverture,
+   * horizon 2 mois) et l'événement couvre le cas où il est déjà affiché. */
+  function openCouvertureStock() {
+    router.push(`/portefeuille-livraison?couverture=non-servable&open=${Date.now()}`)
+    window.dispatchEvent(new CustomEvent('cegeclim:open-couverture-stock'))
+  }
+
   // ── Cohérence données : lecture du statut + détail à la demande ───────
   // Le statut lui-même (status/koMonths/maxAbsEcart) vient d'une simple
   // lecture de la table singleton data_coherence_alert_status, déjà tenue
@@ -1643,8 +1732,15 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
 
     if (rights.show_alert_cdc_liv_avant_2026) {
       tasks.push(refreshCdcLivAvant2026Signal(profile))
+      // La pastille « Non servables » suit le droit de la pastille CDC
+      // (même écran cible, même périmètre). Pour la découpler : ajouter un
+      // droit show_alert_couverture_stock dans access_profiles /
+      // user_page_access / AccessContext et remplacer le test ici et dans
+      // le bandeau.
+      tasks.push(refreshCouvertureStockSignal(profile))
     } else {
       setCdcLivAvant2026Signal({ status: 'green', count: 0 })
+      setCouvertureStockSignal({ status: 'green', count: 0, nbLignes: 0, nbClients: 0 })
     }
 
     if (rights.show_alert_controle_frais_port) {
@@ -1714,7 +1810,104 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
     }
   }
 
+  // ── Centre d'alertes : mêmes pastilles, mêmes actions, exposées au reste
+  // de l'app (bloc « Mes alertes » de l'accueil) via AlertsContext. ─────────
+  const alertItems: AlertItem[] = []
+  if (rights.show_alert_cerfa_ko) {
+    alertItems.push({
+      key: 'cerfa',
+      label: 'CERFA',
+      description: 'Lignes de facture avec projet sans affaire : CERFA KO en attente de régularisation.',
+      status: cerfaKoCount > 0 ? 'red' : 'green',
+      count: cerfaKoCount,
+      unit: 'ligne(s)',
+      clickable: cerfaKoCount > 0,
+      onOpen: () => void openCerfaModal(),
+    })
+  }
+  if (rights.show_alert_cdc_liv_avant_2026) {
+    alertItems.push({
+      key: 'cdc-retard',
+      label: CDC_RETARD_LABEL,
+      description: `Commandes clients en retard de livraison (${getCdcRetardDescription()}).`,
+      status: cdcLivAvant2026Signal.status,
+      count: cdcLivAvant2026Signal.count,
+      unit: 'commande(s)',
+      clickable: cdcLivAvant2026Signal.count > 0,
+      onOpen: openCdcLivAvant2026,
+    })
+    alertItems.push({
+      key: 'couverture-stock',
+      label: 'Non servables',
+      description: `Commandes clients à livrer dans les ${COUVERTURE_HORIZON_MOIS} mois qu'on ne peut pas servir (rupture ou réception fournisseur tardive) — ${couvertureStockSignal.nbLignes} ligne(s), ${couvertureStockSignal.nbClients} client(s).`,
+      status: couvertureStockSignal.status,
+      count: couvertureStockSignal.count,
+      unit: 'commande(s)',
+      clickable: couvertureStockSignal.count > 0,
+      onOpen: openCouvertureStock,
+    })
+  }
+  if (rights.show_alert_controle_frais_port) {
+    alertItems.push({
+      key: 'frais-port',
+      label: 'Frais de port',
+      description: `${controleFraisPortSignal.missingGroups} groupe(s) sans port, ${controleFraisPortSignal.blToRemove} BL à supprimer, ${controleFraisPortSignal.otherGroups} groupe(s) à vérifier.`,
+      status: controleFraisPortSignal.status,
+      count: controleFraisPortSignal.count,
+      unit: 'action(s)',
+      clickable: true,
+      onOpen: openControleFraisPort,
+    })
+  }
+  if (rights.show_alert_capacite_gaz) {
+    alertItems.push({
+      key: 'capacite-gaz',
+      label: 'Capacité gaz',
+      description: `Clients dont la capacité gaz expire dans moins d'un mois (${certificationSignals.capacite.expiredCount} expirée(s), ${certificationSignals.capacite.soonCount} à échéance).`,
+      status: certificationSignals.capacite.status,
+      count: certificationSignals.capacite.count,
+      unit: 'client(s)',
+      clickable: certificationSignals.capacite.count > 0,
+      onOpen: () => void openCertificationModal('capacite'),
+    })
+  }
+  if (rights.show_alert_todo) {
+    alertItems.push({
+      key: 'todo',
+      label: 'À faire',
+      description: todoSignal.status === 'red' ? 'Tâches ouvertes qui vous sont assignées, dont au moins une en retard.' : 'Tâches ouvertes qui vous sont assignées.',
+      status: todoSignal.status,
+      count: todoSignal.count,
+      unit: 'tâche(s)',
+      clickable: true,
+      onOpen: openTodoList,
+    })
+  }
+  if (showDataCoherence) {
+    alertItems.push({
+      key: 'coherence',
+      label: 'Cohérence',
+      description: `Mois en écart entre lignes sources, caches, indicateurs et flux (${dataCoherenceSignal.koMonths}/${dataCoherenceSignal.checkedMonths} mois contrôlés).`,
+      status: dataCoherenceSignal.status,
+      count: dataCoherenceSignal.koMonths,
+      unit: 'mois',
+      clickable: true,
+      onOpen: () => void openDataCoherenceModal(),
+    })
+  }
+
+  const alertsContextValue = {
+    items: alertItems,
+    activeCount: alertItems.filter((item) => item.count > 0).length,
+    totalCount: alertItems.reduce((sum, item) => sum + item.count, 0),
+    alertCenterOpen,
+    openAlertCenter: () => setAlertCenterOpen(true),
+    closeAlertCenter: () => setAlertCenterOpen(false),
+    refresh: () => void refreshStatusIndicators({ force: true }),
+  }
+
   return (
+    <AlertsContext.Provider value={alertsContextValue}>
     <div
       style={{
         ...styles.app,
@@ -1732,6 +1925,9 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
         .cgcTreeHome:hover { background: rgba(166,161,129,0.18); }
         .cgcTreeBloc:hover { background: rgba(255,255,255,0.07); }
         .cgcTreePage:hover { background: rgba(255,255,255,0.08); color: #fff; }
+        .cgcAlertsHeading:hover { background: rgba(255,255,255,0.08); }
+        .cgcAlertCard:not(:disabled):hover { background: rgba(255,255,255,0.10); border-color: rgba(255,255,255,0.3); transform: translateY(-1px); }
+        .cgcAlertCard:focus-visible, .cgcAlertsHeading:focus-visible { outline: 2px solid #F5F3EC; outline-offset: 2px; }
         .cgcMenuBtn:focus-visible, .cgcTreeBtn:focus-visible, .cgcTreePage:focus-visible, .cgcTreeBloc:focus-visible { outline: 2px solid #F5F3EC; outline-offset: 2px; }
       `}</style>
 
@@ -1823,15 +2019,21 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
 
                 {hasVisibleStatusLights && (
                   <div style={styles.alertsPanel}>
-                    <div style={styles.alertsPanelHeading}>
+                    <button
+                      type="button"
+                      className="cgcAlertsHeading"
+                      onClick={() => setAlertCenterOpen(true)}
+                      style={styles.alertsPanelHeading}
+                      title="Ouvrir le Centre d'alertes"
+                    >
                       <span style={styles.alertsPanelIcon}>🔔</span>
-                      <div>
-                        <div style={styles.alertsPanelTitle}>Mes alertes</div>
-                        <div style={styles.alertsPanelSubtitle}>
+                      <span style={{ textAlign: 'left' }}>
+                        <span style={styles.alertsPanelTitle}>Mes alertes</span>
+                        <span style={styles.alertsPanelSubtitle}>
                           {visibleAlertCount} active{visibleAlertCount > 1 ? 's' : ''}
-                        </div>
-                      </div>
-                    </div>
+                        </span>
+                      </span>
+                    </button>
 
                     <span aria-hidden="true" style={styles.alertsPanelDivider} />
 
@@ -1862,6 +2064,23 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
                             cdcLivAvant2026Signal.count > 0
                               ? `${cdcLivAvant2026Signal.count} CDC en retard de livraison (${getCdcRetardDescription()}) — cliquer pour les afficher dans le portefeuille`
                               : `Aucun CDC en retard de livraison (${getCdcRetardDescription()})`
+                          }
+                        />
+                      )}
+
+                      {rights.show_alert_cdc_liv_avant_2026 && (
+                        <StatusLight
+                          compact
+                          label="Non servables"
+                          status={couvertureStockSignal.status}
+                          count={couvertureStockSignal.count}
+                          blink={couvertureStockSignal.status === 'red' && statusBlinkOn}
+                          clickable={couvertureStockSignal.count > 0}
+                          onClick={openCouvertureStock}
+                          title={
+                            couvertureStockSignal.count > 0
+                              ? `${couvertureStockSignal.count} CDC non servable(s) à livrer dans les ${COUVERTURE_HORIZON_MOIS} mois (${couvertureStockSignal.nbLignes} ligne(s), ${couvertureStockSignal.nbClients} client(s)) — cliquer pour les afficher dans le portefeuille`
+                              : `Aucun CDC non servable à livrer dans les ${COUVERTURE_HORIZON_MOIS} mois`
                           }
                         />
                       )}
@@ -1946,6 +2165,84 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
               onNavigate={navigateFromTree}
               onClose={() => setTreeOpen(false)}
             />
+          </div>
+        )}
+
+        {alertCenterOpen && (
+          <div data-cegeclim-nav-layer="true">
+            <div style={styles.alertCenterBackdrop} onClick={() => setAlertCenterOpen(false)} role="presentation">
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-label="Centre d'alertes"
+                style={styles.alertCenter}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div style={styles.alertCenterHeader}>
+                  <span style={styles.alertCenterIcon}>🔔</span>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={styles.alertCenterTitle}>Mes alertes</div>
+                    <div style={styles.alertCenterSubtitle}>
+                      {alertsContextValue.activeCount} alerte{alertsContextValue.activeCount > 1 ? 's' : ''} à traiter sur {alertItems.length} suivie{alertItems.length > 1 ? 's' : ''} — cliquer sur une carte ouvre le même écran que la pastille du bandeau.
+                    </div>
+                  </div>
+                  <div style={styles.alertCenterActions}>
+                    <button
+                      type="button"
+                      className="cgcTreeGhost"
+                      style={styles.treeGhostBtn}
+                      onClick={() => void refreshStatusIndicators({ force: true })}
+                    >
+                      Actualiser
+                    </button>
+                    <button type="button" className="cgcTreeGhost" style={styles.treeCloseBtn} onClick={() => setAlertCenterOpen(false)} aria-label="Fermer">
+                      ✕
+                    </button>
+                  </div>
+                </div>
+
+                <div style={styles.alertCenterGrid}>
+                  {alertItems.map((item) => {
+                    const tone = item.status === 'red' ? styles.alertCardRed : item.status === 'orange' ? styles.alertCardOrange : styles.alertCardGreen
+                    const numberTone = item.status === 'red' ? '#E07A4E' : item.status === 'orange' ? '#E0A961' : '#7FB7CB'
+                    return (
+                      <button
+                        key={item.key}
+                        type="button"
+                        className="cgcAlertCard"
+                        disabled={!item.clickable}
+                        onClick={() => {
+                          setAlertCenterOpen(false)
+                          item.onOpen()
+                        }}
+                        style={{ ...styles.alertCard, ...tone, ...(item.clickable ? {} : styles.alertCardIdle) }}
+                      >
+                        <span style={styles.alertCardTop}>
+                          <span
+                            style={{
+                              ...styles.statusLightDot,
+                              ...(item.status === 'red' ? styles.statusLightDotRed : item.status === 'orange' ? styles.statusLightDotOrange : styles.statusLightDotGreen),
+                            }}
+                          />
+                          <span style={styles.alertCardLabel}>{item.label}</span>
+                        </span>
+                        <span style={styles.alertCardCountRow}>
+                          <span style={{ ...styles.alertCardCount, color: item.count > 0 ? numberTone : 'rgba(255,255,255,0.45)' }}>
+                            {item.count > 0 ? item.count.toLocaleString('fr-FR') : 'OK'}
+                          </span>
+                          {item.count > 0 ? <span style={styles.alertCardUnit}>{item.unit}</span> : null}
+                        </span>
+                        <span style={styles.alertCardDescription}>{item.description}</span>
+                        <span style={styles.alertCardCta}>{item.clickable ? 'Ouvrir ›' : 'Rien à traiter'}</span>
+                      </button>
+                    )
+                  })}
+                  {alertItems.length === 0 && (
+                    <div style={styles.alertCardEmpty}>Aucune alerte n'est activée sur votre profil.</div>
+                  )}
+                </div>
+              </div>
+            </div>
           </div>
         )}
 
@@ -2207,6 +2504,7 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
 
       <Analytics />
     </div>
+    </AlertsContext.Provider>
   )
 }
 
@@ -2716,6 +3014,178 @@ const styles: Record<string, React.CSSProperties> = {
     whiteSpace: 'nowrap',
   },
 
+  // ── Centre d'alertes (fenêtre flottante) ─────────────────────────────
+  alertCenterBackdrop: {
+    position: 'fixed',
+    inset: 0,
+    zIndex: 960,
+    background: 'rgba(6,10,18,0.72)',
+    backdropFilter: 'blur(4px)',
+    WebkitBackdropFilter: 'blur(4px)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+
+  alertCenter: {
+    width: 'min(1040px, 96vw)',
+    maxHeight: '88vh',
+    display: 'flex',
+    flexDirection: 'column',
+    borderRadius: 24,
+    overflow: 'hidden',
+    background: '#101A2E',
+    border: '1px solid rgba(193,104,60,0.35)',
+    boxShadow: '0 30px 80px rgba(0,0,0,0.6)',
+    color: '#F5F3EC',
+  },
+
+  alertCenterHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 14,
+    padding: '18px 20px',
+    borderBottom: '1px solid rgba(255,255,255,0.08)',
+    background: 'linear-gradient(180deg, rgba(193,104,60,0.18), rgba(193,104,60,0.06))',
+  },
+
+  alertCenterIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 14,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: 24,
+    background: 'rgba(193,104,60,0.22)',
+    flexShrink: 0,
+  },
+
+  alertCenterTitle: {
+    fontFamily: 'var(--font-display)',
+    fontSize: 22,
+    fontWeight: 800,
+    lineHeight: 1.1,
+    color: '#ffffff',
+  },
+
+  alertCenterSubtitle: {
+    marginTop: 3,
+    fontSize: 13,
+    lineHeight: 1.4,
+    color: 'rgba(255,255,255,0.7)',
+  },
+
+  alertCenterActions: {
+    marginLeft: 'auto',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    flexShrink: 0,
+  },
+
+  alertCenterGrid: {
+    padding: 16,
+    overflowY: 'auto',
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+    gap: 12,
+  },
+
+  alertCard: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'flex-start',
+    gap: 8,
+    padding: '16px 18px',
+    borderRadius: 18,
+    border: '1px solid rgba(255,255,255,0.10)',
+    background: 'rgba(255,255,255,0.045)',
+    color: '#F5F3EC',
+    cursor: 'pointer',
+    textAlign: 'left',
+    fontFamily: 'inherit',
+    transition: 'background 0.14s ease, border-color 0.14s ease, transform 0.14s ease',
+  },
+
+  alertCardRed: {
+    border: '1px solid rgba(193,104,60,0.45)',
+    background: 'rgba(193,104,60,0.12)',
+  },
+
+  alertCardOrange: {
+    border: '1px solid rgba(214,154,74,0.40)',
+    background: 'rgba(214,154,74,0.10)',
+  },
+
+  alertCardGreen: {
+    border: '1px solid rgba(255,255,255,0.10)',
+    background: 'rgba(255,255,255,0.04)',
+  },
+
+  alertCardIdle: {
+    cursor: 'default',
+    opacity: 0.75,
+  },
+
+  alertCardTop: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+  },
+
+  alertCardLabel: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: 11.5,
+    fontWeight: 700,
+    letterSpacing: '0.12em',
+    textTransform: 'uppercase',
+    color: 'rgba(255,255,255,0.75)',
+  },
+
+  alertCardCountRow: {
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: 8,
+  },
+
+  alertCardCount: {
+    fontFamily: 'var(--font-display)',
+    fontSize: 40,
+    fontWeight: 800,
+    lineHeight: 1,
+    letterSpacing: '-0.02em',
+  },
+
+  alertCardUnit: {
+    fontSize: 13,
+    fontWeight: 600,
+    color: 'rgba(255,255,255,0.6)',
+  },
+
+  alertCardDescription: {
+    fontSize: 13,
+    lineHeight: 1.45,
+    color: 'rgba(245,243,236,0.72)',
+  },
+
+  alertCardCta: {
+    marginTop: 'auto',
+    fontSize: 12.5,
+    fontWeight: 700,
+    color: '#E9E5D6',
+  },
+
+  alertCardEmpty: {
+    gridColumn: '1 / -1',
+    padding: 28,
+    borderRadius: 16,
+    border: '1px dashed rgba(255,255,255,0.22)',
+    color: 'rgba(245,243,236,0.7)',
+    textAlign: 'center',
+  },
+
   // FIX (2026-08) : panneau "Mes alertes" mieux identifié -- cadre teinté
   // (ambre/rouge, cohérent avec les couleurs d'alerte déjà utilisées dans
   // StatusLight), icône 🔔 devant le titre, titre agrandi.
@@ -2736,6 +3206,13 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     gap: 7,
     justifyContent: 'center',
+    padding: '2px 6px',
+    margin: '-2px -6px',
+    borderRadius: 8,
+    border: 'none',
+    background: 'transparent',
+    cursor: 'pointer',
+    fontFamily: 'inherit',
   },
 
   alertsPanelIcon: {
@@ -2744,6 +3221,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   alertsPanelTitle: {
+    display: 'block',
     fontFamily: 'var(--font-mono)',
     fontSize: 11.5,
     fontWeight: 700,
@@ -2754,6 +3232,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   alertsPanelSubtitle: {
+    display: 'block',
     marginTop: 2,
     fontFamily: 'var(--font-mono)',
     fontSize: 9.5,
