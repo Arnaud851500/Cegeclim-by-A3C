@@ -41,6 +41,59 @@ type LignePortefeuille = {
   agence: string | null
 }
 
+// ÉVOLUTION (2026-09-15) : couverture stock des lignes de CDC — vue SQL
+// v_portefeuille_couverture_stock (stock global tous dépôts + réceptions
+// fournisseurs sage.bdcf type 12, besoins servis par date de livraison puis
+// date de création). Une ligne par ligne de CDC contrôlée (référence gérée en
+// stock, quantité > 0).
+type CouvertureStatut = 'COUVERT' | 'COUVERT_PAR_RECEPTION' | 'RECEPTION_TARDIVE' | 'RUPTURE'
+
+type CouvertureStock = {
+  id: string
+  numero_document: string | null
+  reference_article: string | null
+  date_livraison: string | null
+  quantite: number | null
+  rang_service: number | null
+  stock_disponible: number | null
+  stock_reel: number | null
+  stock_reserve: number | null
+  besoin_cumule_avant: number | null
+  besoin_cumule: number | null
+  receptions_avant_livraison: number | null
+  receptions_totales: number | null
+  stock_projete_hors_receptions: number | null
+  stock_projete_a_date: number | null
+  stock_projete_toutes_receptions: number | null
+  manque_a_date: number | null
+  manque_definitif: number | null
+  statut_couverture: CouvertureStatut | null
+  date_couverture_estimee: string | null
+  retard_estime_jours: number | null
+  prochaine_reception_date: string | null
+  prochaine_reception_quantite: number | null
+  prochaine_reception_cdf: string | null
+  prochaine_reception_fournisseur: string | null
+  prochaine_reception_hypothese: boolean | null
+  receptions_avec_hypothese: boolean | null
+}
+
+/** Ligne du portefeuille enrichie des informations de couverture stock
+ * (utilisée pour l'affichage, le tri et l'export du détail à la ligne). */
+type LigneDetail = LignePortefeuille & {
+  couv_statut: string
+  couv_stock_disponible: number | null
+  couv_besoin_cumule: number | null
+  couv_receptions_avant: number | null
+  couv_stock_projete: number | null
+  couv_manque: number | null
+  couv_date_couverture: string | null
+  couv_retard_jours: number | null
+  couv_prochaine_reception: string
+  couv_prochaine_reception_date: string | null
+  couv_hypothese: boolean
+}
+
 type ControleFraisPort = {
   type_document: string | null
   numero_document: string | null
@@ -174,6 +227,17 @@ type DocumentPortefeuille = {
   action_recommandee: string
   montant_action_ht: number
   statut_controle: string
+  // Couverture stock (CDC uniquement)
+  couv_statut_doc: string
+  couv_nb_lignes_controlees: number
+  couv_nb_rupture: number
+  couv_nb_tardive: number
+  couv_nb_par_reception: number
+  couv_nb_non_servables: number
+  couv_montant_non_servable_ht: number
+  couv_date_couverture_doc: string | null
+  couv_retard_max_jours: number | null
+  couv_references_non_servables: string
 }
 
 type SyntheseControlCell = {
@@ -183,6 +247,7 @@ type SyntheseControlCell = {
   nb_frais_port_manquant: number
   nb_bl_a_supprimer: number
   montant_actions_ht: number
+  nb_non_servables: number
 }
 
 type SyntheseRow = {
@@ -197,6 +262,7 @@ type SyntheseRow = {
   total_nb_frais_port_manquant: number
   total_nb_bl_a_supprimer: number
   total_montant_actions_ht: number
+  total_nb_non_servables: number
 }
 
 type SyntheseGroupBy = 'agence' | 'famille'
@@ -219,6 +285,15 @@ type ControlFilterMode =
   | 'FRAIS_PORT_MANQUANT'
   | 'FRAIS_PORT_A_SUPPRIMER'
   | 'AUTRES_ANOMALIES'
+
+// Filtre "Couverture stock" (documents CDC).
+type CouvertureFilterMode =
+  | 'TOUS'
+  | 'NON_SERVABLE'
+  | 'RUPTURE'
+  | 'RECEPTION_TARDIVE'
+  | 'COUVERT_PAR_RECEPTION'
+  | 'COUVERT'
 
 const DEFAULT_TYPES = ['CDC', 'PL']
 const ALL_TYPES = ['CDC', 'PL', 'BL', 'BR']
@@ -271,13 +346,65 @@ const CONTROL_ACTION_SELECT = [
   'statut_controle',
 ].join(',')
 
-function getYesterdayIsoDate() {
-  const date = new Date()
-  date.setDate(date.getDate() - 1)
+const COUVERTURE_SELECT = [
+  'id',
+  'numero_document',
+  'reference_article',
+  'date_livraison',
+  'quantite',
+  'rang_service',
+  'stock_disponible',
+  'stock_reel',
+  'stock_reserve',
+  'besoin_cumule_avant',
+  'besoin_cumule',
+  'receptions_avant_livraison',
+  'receptions_totales',
+  'stock_projete_hors_receptions',
+  'stock_projete_a_date',
+  'stock_projete_toutes_receptions',
+  'manque_a_date',
+  'manque_definitif',
+  'statut_couverture',
+  'date_couverture_estimee',
+  'retard_estime_jours',
+  'prochaine_reception_date',
+  'prochaine_reception_quantite',
+  'prochaine_reception_cdf',
+  'prochaine_reception_fournisseur',
+  'prochaine_reception_hypothese',
+  'receptions_avec_hypothese',
+].join(',')
+
+const COUVERTURE_LABEL = 'CDC non servables'
+const COUVERTURE_NON_SERVABLE: string[] = ['RUPTURE', 'RECEPTION_TARDIVE']
+const COUVERTURE_HORS_CONTROLE = 'HORS_CONTROLE'
+
+const HORIZON_OPTIONS: Array<[string, string]> = [
+  ['', 'Selon les dates'],
+  ['1', '1 mois'],
+  ['2', '2 mois'],
+  ['3', '3 mois'],
+  ['6', '6 mois'],
+]
+
+function toIsoDate(date: Date) {
   const year = date.getFullYear()
   const month = String(date.getMonth() + 1).padStart(2, '0')
   const day = String(date.getDate()).padStart(2, '0')
   return `${year}-${month}-${day}`
+}
+
+function getYesterdayIsoDate() {
+  const date = new Date()
+  date.setDate(date.getDate() - 1)
+  return toIsoDate(date)
+}
+
+function getHorizonIsoDate(months: number) {
+  const date = new Date()
+  date.setMonth(date.getMonth() + months)
+  return toIsoDate(date)
 }
 
 function getCurrentMonthKey() {
@@ -327,6 +454,11 @@ function formatDate(value: string | null | undefined) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
   return date.toLocaleDateString('fr-FR')
+}
+
+function formatQty(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '—'
+  return Number(value).toLocaleString('fr-FR', { maximumFractionDigits: 2 })
 }
 
 function safeText(value: string | null | undefined, fallback = 'Non renseigné') {
@@ -409,6 +541,45 @@ function actionClassName(action: string) {
   return 'border-slate-200 bg-slate-100 text-slate-600'
 }
 
+// ── Couverture stock : libellés, styles, sévérité ────────────────────────────
+function couvertureLabel(status: string) {
+  const labels: Record<string, string> = {
+    COUVERT: 'Couvert (stock)',
+    COUVERT_PAR_RECEPTION: 'Couvert par réception',
+    RECEPTION_TARDIVE: 'Réception tardive',
+    RUPTURE: 'Rupture',
+    [COUVERTURE_HORS_CONTROLE]: 'Hors contrôle',
+  }
+  return labels[status] || status || 'Hors contrôle'
+}
+
+function couvertureClassName(status: string) {
+  if (status === 'RUPTURE') return 'border-rose-300 bg-rose-100 text-rose-900'
+  if (status === 'RECEPTION_TARDIVE') return 'border-orange-300 bg-orange-100 text-orange-900'
+  if (status === 'COUVERT_PAR_RECEPTION') return 'border-sky-300 bg-sky-100 text-sky-900'
+  if (status === 'COUVERT') return 'border-emerald-200 bg-emerald-50 text-emerald-800'
+  return 'border-slate-200 bg-slate-100 text-slate-500'
+}
+
+/** Sévérité pour déterminer le statut d'un document = le pire de ses lignes. */
+function couvertureSeverity(status: string) {
+  if (status === 'RUPTURE') return 4
+  if (status === 'RECEPTION_TARDIVE') return 3
+  if (status === 'COUVERT_PAR_RECEPTION') return 2
+  if (status === 'COUVERT') return 1
+  return 0
+}
+
+function isCouvertureNonServable(status: string) {
+  return COUVERTURE_NON_SERVABLE.includes(status)
+}
+
+function couvertureFilterMatches(mode: CouvertureFilterMode, status: string) {
+  if (mode === 'TOUS') return true
+  if (mode === 'NON_SERVABLE') return isCouvertureNonServable(status)
+  return status === mode
+}
+
 function scopeTextMatchesAllowed(value: string | null | undefined, allowed: string[]) {
   if (!allowed.length) return true
   const normalizedValue = String(value || '').toLowerCase()
@@ -483,8 +654,10 @@ async function runControlQueryWithRetry<T>(label: string, operation: () => Promi
 const KPI_GRID_COLS: Record<number, string> = {
   2: 'xl:grid-cols-2',
   3: 'xl:grid-cols-3',
+  4: 'xl:grid-cols-4',
   6: 'xl:grid-cols-6',
   7: 'xl:grid-cols-7',
+  8: 'xl:grid-cols-8',
 }
 
 export default function PortefeuilleLivraisonPage() {
@@ -495,10 +668,12 @@ export default function PortefeuilleLivraisonPage() {
   const [loading, setLoading] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [controlErrorMessage, setControlErrorMessage] = useState<string | null>(null)
+  const [couvertureErrorMessage, setCouvertureErrorMessage] = useState<string | null>(null)
 
   const [lignes, setLignes] = useState<LignePortefeuille[]>([])
   const [controlesFraisPort, setControlesFraisPort] = useState<ControleFraisPort[]>([])
   const [groupesFraisPort, setGroupesFraisPort] = useState<GroupeFraisPort[]>([])
+  const [couvertures, setCouvertures] = useState<CouvertureStock[]>([])
 
   const [selectedTypes, setSelectedTypes] = useState<string[]>(DEFAULT_TYPES)
 
@@ -525,6 +700,13 @@ export default function PortefeuilleLivraisonPage() {
   // livraison est avant le seuil M-2 (règle lib/cdcRetard.ts).
   const [cdcRetardOnly, setCdcRetardOnly] = useState(false)
 
+  // ÉVOLUTION (2026-09-15) : horizon de couverture stock (raccourci qui
+  // positionne la borne "Livraison fin" à aujourd'hui + N mois) et filtre
+  // "Couverture stock" sur les documents CDC (URL ?couverture=non-servable,
+  // événement cegeclim:open-couverture-stock).
+  const [horizonMois, setHorizonMois] = useState('')
+  const [selectedCouverture, setSelectedCouverture] = useState<CouvertureFilterMode>('TOUS')
+
   const isBlSelected = selectedTypes.includes('BL')
   const isCdcSelected = selectedTypes.includes('CDC')
   const dateLivraisonFinControle = dateLivraisonFinModifiee ? dateLivraisonFin : ''
@@ -534,7 +716,7 @@ export default function PortefeuilleLivraisonPage() {
 
   const [documentSort, setDocumentSort] = useState<SortConfig<DocumentPortefeuille>>({ key: 'agence', direction: 'asc' })
   const [groupSort, setGroupSort] = useState<SortConfig<GroupeFraisPort>>({ key: 'date_controle', direction: 'desc' })
-  const [ligneSort, setLigneSort] = useState<SortConfig<LignePortefeuille>>({ key: 'agence', direction: 'asc' })
+  const [ligneSort, setLigneSort] = useState<SortConfig<LigneDetail>>({ key: 'agence', direction: 'asc' })
 
   function applyDetailSelection(nextSelection: DetailSelection | null) {
     setSelection(nextSelection)
@@ -548,6 +730,7 @@ export default function PortefeuilleLivraisonPage() {
     setSelectedControle(mode)
     setSelectedGroupKey(null)
     setCdcRetardOnly(false)
+    setSelectedCouverture('TOUS')
     setSelection(null)
     setSelectedDocumentKeyForLines(null)
   }
@@ -564,6 +747,27 @@ export default function PortefeuilleLivraisonPage() {
     setSelectedDocumentKeyForLines(null)
   }
 
+  /** Active le filtre "CDC non servables" : ne garde que les CDC, applique
+   * l'horizon par défaut (2 mois) si aucune borne n'a été choisie, et
+   * réinitialise le détail. */
+  function openCouverture(mode: CouvertureFilterMode = 'NON_SERVABLE') {
+    setSelectedTypes(['CDC'])
+    setCdcRetardOnly(false)
+    setSelectedControle('TOUS')
+    setSelectedGroupKey(null)
+    setSelectedCouverture(mode)
+    setSelection(null)
+    setSelectedDocumentKeyForLines(null)
+  }
+
+  function applyHorizon(value: string) {
+    setHorizonMois(value)
+    if (!value) return
+    setDateLivraisonFin(getHorizonIsoDate(Number(value)))
+    setDateLivraisonFinModifiee(true)
+    setCdcRetardOnly(false)
+  }
+
   useEffect(() => {
     function applyControlFilter(mode: ControlFilterMode) {
       setSelectedTypes(['BL'])
@@ -572,6 +776,7 @@ export default function PortefeuilleLivraisonPage() {
       setSelectedControle(mode)
       setSelectedGroupKey(null)
       setCdcRetardOnly(false)
+      setSelectedCouverture('TOUS')
       setSelection(null)
       setSelectedDocumentKeyForLines(null)
     }
@@ -585,6 +790,19 @@ export default function PortefeuilleLivraisonPage() {
       setSelectedDocumentKeyForLines(null)
     }
 
+    function applyCouvertureFilter(mode: CouvertureFilterMode) {
+      setSelectedTypes(['CDC'])
+      setCdcRetardOnly(false)
+      setSelectedControle('TOUS')
+      setSelectedGroupKey(null)
+      setSelectedCouverture(mode)
+      setHorizonMois('2')
+      setDateLivraisonFin(getHorizonIsoDate(2))
+      setDateLivraisonFinModifiee(true)
+      setSelection(null)
+      setSelectedDocumentKeyForLines(null)
+    }
+
     function applyControlFromUrl() {
       const params = new URLSearchParams(window.location.search)
       const requestedControl = String(params.get('controle') || '').trim().toLowerCase().replace(/_/g, '-')
@@ -593,22 +811,29 @@ export default function PortefeuilleLivraisonPage() {
       if (requestedControl === 'controle-frais-port' || requestedControl === 'anomalies-frais-port') applyControlFilter('ANOMALIES')
       const requestedCdc = String(params.get('cdc') || '').trim().toLowerCase()
       if (requestedCdc === 'retard') applyCdcRetardFilter()
+      const requestedCouverture = String(params.get('couverture') || '').trim().toLowerCase().replace(/_/g, '-')
+      if (requestedCouverture === 'non-servable' || requestedCouverture === 'non-servables') applyCouvertureFilter('NON_SERVABLE')
+      if (requestedCouverture === 'rupture') applyCouvertureFilter('RUPTURE')
+      if (requestedCouverture === 'reception-tardive') applyCouvertureFilter('RECEPTION_TARDIVE')
     }
 
     function handleOpenControl() { applyControlFilter('ANOMALIES') }
     function handleOpenMissingPort() { applyControlFilter('FRAIS_PORT_MANQUANT') }
     function handleOpenCdcRetard() { applyCdcRetardFilter() }
+    function handleOpenCouverture() { applyCouvertureFilter('NON_SERVABLE') }
 
     applyControlFromUrl()
     window.addEventListener('popstate', applyControlFromUrl)
     window.addEventListener('cegeclim:open-controle-frais-port', handleOpenControl)
     window.addEventListener('cegeclim:open-frais-port-manquant', handleOpenMissingPort)
     window.addEventListener('cegeclim:open-cdc-retard', handleOpenCdcRetard)
+    window.addEventListener('cegeclim:open-couverture-stock', handleOpenCouverture)
     return () => {
       window.removeEventListener('popstate', applyControlFromUrl)
       window.removeEventListener('cegeclim:open-controle-frais-port', handleOpenControl)
       window.removeEventListener('cegeclim:open-frais-port-manquant', handleOpenMissingPort)
       window.removeEventListener('cegeclim:open-cdc-retard', handleOpenCdcRetard)
+      window.removeEventListener('cegeclim:open-couverture-stock', handleOpenCouverture)
     }
   }, [])
 
@@ -618,6 +843,11 @@ export default function PortefeuilleLivraisonPage() {
     if (!isCdcSelected && cdcRetardOnly) setCdcRetardOnly(false)
   }, [isCdcSelected, cdcRetardOnly])
 
+  // Même logique pour le filtre "Couverture stock" (CDC uniquement).
+  useEffect(() => {
+    if (!isCdcSelected && selectedCouverture !== 'TOUS') setSelectedCouverture('TOUS')
+  }, [isCdcSelected, selectedCouverture])
+
   async function loadData() {
     const requestId = loadRequestIdRef.current + 1
     loadRequestIdRef.current = requestId
@@ -626,6 +856,7 @@ export default function PortefeuilleLivraisonPage() {
     setLoading(true)
     setErrorMessage(null)
     setControlErrorMessage(null)
+    setCouvertureErrorMessage(null)
 
     try {
       let query = supabase
@@ -662,6 +893,59 @@ export default function PortefeuilleLivraisonPage() {
       setLignes(rows)
       setSelection(null)
       setSelectedDocumentKeyForLines(null)
+
+      // ── Couverture stock des CDC ─────────────────────────────────────────
+      // La projection est globale côté SQL (tous les besoins fermes de la
+      // référence, toutes les réceptions attendues) ; on ne rapatrie que les
+      // lignes correspondant aux mêmes filtres que le portefeuille.
+      if (isCdcSelected) {
+        try {
+          const couvertureData = await runControlQueryWithRetry<CouvertureStock[]>(
+            'couverture stock',
+            async () => {
+              let couvertureQuery = supabase
+                .from('v_portefeuille_couverture_stock')
+                .select(COUVERTURE_SELECT)
+
+              if (dateCreationDebut) couvertureQuery = couvertureQuery.gte('date_creation_document', dateCreationDebut)
+              if (dateCreationFin) couvertureQuery = couvertureQuery.lte('date_creation_document', dateCreationFin)
+              if (dateLivraisonDebut) couvertureQuery = couvertureQuery.gte('date_livraison', dateLivraisonDebut)
+              if (dateLivraisonFin) couvertureQuery = couvertureQuery.lte('date_livraison', dateLivraisonFin)
+
+              if (access.allowedCollaborateurs.length > 0) couvertureQuery = couvertureQuery.in('representant', access.allowedCollaborateurs)
+              else if (selectedRepresentant) couvertureQuery = couvertureQuery.eq('representant', selectedRepresentant)
+
+              if (access.allowedAgences.length > 0) couvertureQuery = couvertureQuery.in('agence', access.allowedAgences)
+              else if (selectedAgence) couvertureQuery = couvertureQuery.eq('agence', selectedAgence)
+
+              if (selectedFamilleMacro) couvertureQuery = couvertureQuery.eq('famille_macro', selectedFamilleMacro)
+              if (selectedSommeil === 'OUI') couvertureQuery = couvertureQuery.eq('client_en_sommeil', true)
+              if (selectedSommeil === 'NON') couvertureQuery = couvertureQuery.or('client_en_sommeil.is.false,client_en_sommeil.is.null')
+
+              const response = await couvertureQuery.limit(50000)
+              if (response.error) throw response.error
+              return (response.data ?? []) as unknown as CouvertureStock[]
+            },
+            isCurrentLoad,
+          )
+          if (!isCurrentLoad()) return
+          setCouvertures(couvertureData)
+          setCouvertureErrorMessage(null)
+        } catch (couvertureError) {
+          if (!isCurrentLoad() || isStaleLoadError(couvertureError)) return
+          console.error('Portefeuille livraison - couverture stock', couvertureError)
+          setCouvertures([])
+          const retrySuffix = isStatementTimeoutError(couvertureError)
+            ? ` après ${CONTROL_QUERY_MAX_ATTEMPTS} tentatives automatiques`
+            : ''
+          setCouvertureErrorMessage(
+            `Le portefeuille est chargé, mais la couverture stock des CDC reste indisponible${retrySuffix} : ${formatLoadError(couvertureError)}`
+          )
+        }
+      } else {
+        setCouvertures([])
+        setCouvertureErrorMessage(null)
+      }
 
       if (!isBlSelected) {
         setControlesFraisPort([])
@@ -808,6 +1092,7 @@ export default function PortefeuilleLivraisonPage() {
       setLignes([])
       setControlesFraisPort([])
       setGroupesFraisPort([])
+      setCouvertures([])
       setSelection(null)
       setSelectedDocumentKeyForLines(null)
       setErrorMessage(formatLoadError(error))
@@ -842,9 +1127,12 @@ export default function PortefeuilleLivraisonPage() {
     selectedSommeil,
   ])
 
+  // Couverture stock indexée par id de ligne (uuid de v_portefeuille_livraison_lignes).
+  const couvertureById = useMemo(() => new Map<string, CouvertureStock>(couvertures.map((row) => [String(row.id), row])), [couvertures])
+
   const documents = useMemo<DocumentPortefeuille[]>(() => {
     const controlByKey = new Map<string, ControleFraisPort>(controlesFraisPort.map((row) => [controlDocKey(row), row]))
-    const map = new Map<string, DocumentPortefeuille & { famillesSet: Set<string>; referencesArticlesSet: Set<string>; referencesSet: Set<string> }>()
+    const map = new Map<string, DocumentPortefeuille & { famillesSet: Set<string>; referencesArticlesSet: Set<string>; referencesSet: Set<string>; couvRefsSet: Set<string> }>()
 
     for (const ligne of lignes) {
       const key = docKey(ligne)
@@ -852,6 +1140,9 @@ export default function PortefeuilleLivraisonPage() {
       const familleMacro = safeText(ligne.famille_macro, 'Sans famille macro')
       const referenceArticle = safeText(ligne.reference_article, '')
       const reference = safeText(ligne.reference, '')
+      const couverture = ligne.id !== null && ligne.id !== undefined ? couvertureById.get(String(ligne.id)) : undefined
+      const couvStatut = couverture?.statut_couverture || ''
+      const couvNonServable = isCouvertureNonServable(couvStatut)
 
       if (!existing) {
         map.set(key, {
@@ -884,9 +1175,20 @@ export default function PortefeuilleLivraisonPage() {
           action_recommandee: safeText(controlByKey.get(key)?.action_recommandee, 'AUCUNE_ACTION'),
           montant_action_ht: Number(controlByKey.get(key)?.montant_action_ht || 0),
           statut_controle: safeText(controlByKey.get(key)?.statut_controle, 'NON_CONTROLE'),
+          couv_statut_doc: couvStatut || COUVERTURE_HORS_CONTROLE,
+          couv_nb_lignes_controlees: couverture ? 1 : 0,
+          couv_nb_rupture: couvStatut === 'RUPTURE' ? 1 : 0,
+          couv_nb_tardive: couvStatut === 'RECEPTION_TARDIVE' ? 1 : 0,
+          couv_nb_par_reception: couvStatut === 'COUVERT_PAR_RECEPTION' ? 1 : 0,
+          couv_nb_non_servables: couvNonServable ? 1 : 0,
+          couv_montant_non_servable_ht: couvNonServable ? Number(ligne.montant_ht || 0) : 0,
+          couv_date_couverture_doc: couvNonServable ? couverture?.date_couverture_estimee ?? null : null,
+          couv_retard_max_jours: couvNonServable ? couverture?.retard_estime_jours ?? null : null,
+          couv_references_non_servables: couvNonServable ? referenceArticle : '',
           famillesSet: new Set(familleMacro ? [familleMacro] : []),
           referencesArticlesSet: new Set(referenceArticle ? [referenceArticle] : []),
           referencesSet: new Set(reference ? [reference] : []),
+          couvRefsSet: new Set(couvNonServable && referenceArticle ? [referenceArticle] : []),
         })
       } else {
         existing.nb_lignes += 1
@@ -897,10 +1199,27 @@ export default function PortefeuilleLivraisonPage() {
         existing.familles_macro = Array.from(existing.famillesSet).sort().join(', ')
         existing.references_articles = Array.from(existing.referencesArticlesSet).sort().join(', ')
         existing.references = Array.from(existing.referencesSet).sort().join(', ')
+
+        // Couverture stock : le document prend le pire statut de ses lignes.
+        if (couverture) existing.couv_nb_lignes_controlees += 1
+        if (couvStatut === 'RUPTURE') existing.couv_nb_rupture += 1
+        if (couvStatut === 'RECEPTION_TARDIVE') existing.couv_nb_tardive += 1
+        if (couvStatut === 'COUVERT_PAR_RECEPTION') existing.couv_nb_par_reception += 1
+        if (couvNonServable) {
+          existing.couv_nb_non_servables += 1
+          existing.couv_montant_non_servable_ht += Number(ligne.montant_ht || 0)
+          if (referenceArticle) existing.couvRefsSet.add(referenceArticle)
+          existing.couv_references_non_servables = Array.from(existing.couvRefsSet).sort().join(', ')
+          const dateCouv = couverture?.date_couverture_estimee ?? null
+          if (dateCouv && (!existing.couv_date_couverture_doc || dateCouv > existing.couv_date_couverture_doc)) existing.couv_date_couverture_doc = dateCouv
+          const retard = couverture?.retard_estime_jours ?? null
+          if (retard !== null && (existing.couv_retard_max_jours === null || retard > existing.couv_retard_max_jours)) existing.couv_retard_max_jours = retard
+        }
+        if (couvertureSeverity(couvStatut) > couvertureSeverity(existing.couv_statut_doc)) existing.couv_statut_doc = couvStatut
       }
     }
-    return Array.from(map.values()).map(({ famillesSet, referencesArticlesSet, referencesSet, ...doc }) => doc)
-  }, [lignes, controlesFraisPort])
+    return Array.from(map.values()).map(({ famillesSet, referencesArticlesSet, referencesSet, couvRefsSet, ...doc }) => doc)
+  }, [lignes, controlesFraisPort, couvertureById])
 
   const expeditions = useMemo<string[]>(() =>
     Array.from(new Set<string>([...documents.map((doc) => doc.expedition), ...groupesFraisPort.map((group) => group.expedition)].filter((v): v is string => Boolean(v)))).sort((a, b) => a.localeCompare(b, 'fr')),
@@ -932,6 +1251,12 @@ export default function PortefeuilleLivraisonPage() {
     const lieuSearch = lieuLivraisonSearch.trim().toLowerCase()
     return documents.filter((doc) => {
       if (cdcRetardOnly && !isCdcEnRetard(doc)) return false
+      // Filtre couverture stock : ne concerne que les CDC ; les autres types
+      // restent affichés uniquement quand le filtre est sur "Tous".
+      if (selectedCouverture !== 'TOUS') {
+        if (doc.type_document !== 'CDC') return false
+        if (!couvertureFilterMatches(selectedCouverture, doc.couv_statut_doc)) return false
+      }
       if (selectedGroupKey && doc.cle_groupe_frais_port !== selectedGroupKey) return false
       if (selectedControle === 'FRAIS_PORT_MANQUANT' && doc.action_recommandee !== 'AJOUTER') return false
       if (selectedControle === 'FRAIS_PORT_A_SUPPRIMER' && doc.action_recommandee !== 'SUPPRIMER') return false
@@ -944,7 +1269,7 @@ export default function PortefeuilleLivraisonPage() {
       if (lieuSearch && !doc.lieu_livraison.toLowerCase().includes(lieuSearch)) return false
       return true
     })
-  }, [documents, cdcRetardOnly, selectedGroupKey, selectedControle, selectedExpedition, selectedDepotEntete, referenceEnteteSearch, lieuLivraisonSearch])
+  }, [documents, cdcRetardOnly, selectedCouverture, selectedGroupKey, selectedControle, selectedExpedition, selectedDepotEntete, referenceEnteteSearch, lieuLivraisonSearch])
 
   const moisLivraison = useMemo(() => {
     const set = new Set<string>()
@@ -968,19 +1293,22 @@ export default function PortefeuilleLivraisonPage() {
       const groupRepresentant = syntheseGroupBy === 'famille' ? '' : doc.representant
       const key = [groupRepresentant, groupAgence, doc.type_document].join('::')
       const mois = doc.mois_livraison || 'SANS_DATE_LIVRAISON'
-      if (!map.has(key)) map.set(key, { key, representant: groupRepresentant, agence: groupAgence, type_document: doc.type_document, byMonth: {}, total_nb_documents: 0, total_montant_ht: 0, total_nb_anomalies: 0, total_nb_frais_port_manquant: 0, total_nb_bl_a_supprimer: 0, total_montant_actions_ht: 0 })
+      if (!map.has(key)) map.set(key, { key, representant: groupRepresentant, agence: groupAgence, type_document: doc.type_document, byMonth: {}, total_nb_documents: 0, total_montant_ht: 0, total_nb_anomalies: 0, total_nb_frais_port_manquant: 0, total_nb_bl_a_supprimer: 0, total_montant_actions_ht: 0, total_nb_non_servables: 0 })
       const row = map.get(key)!
-      if (!row.byMonth[mois]) row.byMonth[mois] = { nb_documents: 0, montant_ht: 0, nb_anomalies: 0, nb_frais_port_manquant: 0, nb_bl_a_supprimer: 0, montant_actions_ht: 0 }
+      if (!row.byMonth[mois]) row.byMonth[mois] = { nb_documents: 0, montant_ht: 0, nb_anomalies: 0, nb_frais_port_manquant: 0, nb_bl_a_supprimer: 0, montant_actions_ht: 0, nb_non_servables: 0 }
       const isAnomaly = isDirectControlAction(doc.action_recommandee)
       const isMissingPort = doc.action_recommandee === 'AJOUTER'
       const isPortToRemove = doc.action_recommandee === 'SUPPRIMER'
+      const isNonServable = doc.type_document === 'CDC' && isCouvertureNonServable(doc.couv_statut_doc)
       const actionAmount = Number(doc.montant_action_ht || 0)
       row.byMonth[mois].nb_documents += 1; row.byMonth[mois].montant_ht += doc.montant_ht
       row.byMonth[mois].nb_anomalies += isAnomaly ? 1 : 0; row.byMonth[mois].nb_frais_port_manquant += isMissingPort ? 1 : 0
       row.byMonth[mois].nb_bl_a_supprimer += isPortToRemove ? 1 : 0; row.byMonth[mois].montant_actions_ht += actionAmount
+      row.byMonth[mois].nb_non_servables += isNonServable ? 1 : 0
       row.total_nb_documents += 1; row.total_montant_ht += doc.montant_ht
       row.total_nb_anomalies += isAnomaly ? 1 : 0; row.total_nb_frais_port_manquant += isMissingPort ? 1 : 0
       row.total_nb_bl_a_supprimer += isPortToRemove ? 1 : 0; row.total_montant_actions_ht += actionAmount
+      row.total_nb_non_servables += isNonServable ? 1 : 0
     }
     return Array.from(map.values()).sort((a, b) => a.agence.localeCompare(b.agence, 'fr') || a.representant.localeCompare(b.representant, 'fr') || a.type_document.localeCompare(b.type_document, 'fr'))
   }, [documentsFiltresControle, syntheseGroupBy])
@@ -988,17 +1316,19 @@ export default function PortefeuilleLivraisonPage() {
   // Ligne TOTAL du tableau de synthèse : même structure qu'une ligne normale,
   // simple somme de toutes les lignes affichées (déjà filtrées).
   const syntheseTotal = useMemo<SyntheseRow>(() => {
-    const total: SyntheseRow = { key: '__TOTAL__', representant: '', agence: '', type_document: '', byMonth: {}, total_nb_documents: 0, total_montant_ht: 0, total_nb_anomalies: 0, total_nb_frais_port_manquant: 0, total_nb_bl_a_supprimer: 0, total_montant_actions_ht: 0 }
+    const total: SyntheseRow = { key: '__TOTAL__', representant: '', agence: '', type_document: '', byMonth: {}, total_nb_documents: 0, total_montant_ht: 0, total_nb_anomalies: 0, total_nb_frais_port_manquant: 0, total_nb_bl_a_supprimer: 0, total_montant_actions_ht: 0, total_nb_non_servables: 0 }
     for (const row of synthese) {
       for (const [mois, cell] of Object.entries(row.byMonth)) {
-        if (!total.byMonth[mois]) total.byMonth[mois] = { nb_documents: 0, montant_ht: 0, nb_anomalies: 0, nb_frais_port_manquant: 0, nb_bl_a_supprimer: 0, montant_actions_ht: 0 }
+        if (!total.byMonth[mois]) total.byMonth[mois] = { nb_documents: 0, montant_ht: 0, nb_anomalies: 0, nb_frais_port_manquant: 0, nb_bl_a_supprimer: 0, montant_actions_ht: 0, nb_non_servables: 0 }
         total.byMonth[mois].nb_documents += cell.nb_documents; total.byMonth[mois].montant_ht += cell.montant_ht
         total.byMonth[mois].nb_anomalies += cell.nb_anomalies; total.byMonth[mois].nb_frais_port_manquant += cell.nb_frais_port_manquant
         total.byMonth[mois].nb_bl_a_supprimer += cell.nb_bl_a_supprimer; total.byMonth[mois].montant_actions_ht += cell.montant_actions_ht
+        total.byMonth[mois].nb_non_servables += cell.nb_non_servables
       }
       total.total_nb_documents += row.total_nb_documents; total.total_montant_ht += row.total_montant_ht
       total.total_nb_anomalies += row.total_nb_anomalies; total.total_nb_frais_port_manquant += row.total_nb_frais_port_manquant
       total.total_nb_bl_a_supprimer += row.total_nb_bl_a_supprimer; total.total_montant_actions_ht += row.total_montant_actions_ht
+      total.total_nb_non_servables += row.total_nb_non_servables
     }
     return total
   }, [synthese])
@@ -1060,17 +1390,52 @@ export default function PortefeuilleLivraisonPage() {
     return selectedDocuments.find((doc) => doc.key === selectedDocumentKeyForLines) || null
   }, [selectedDocumentKeyForLines, selectedDocuments])
 
-  const selectedLignes = useMemo(() => {
+  // Enrichissement des lignes avec la couverture stock (pour affichage, tri, export).
+  function toLigneDetail(ligne: LignePortefeuille): LigneDetail {
+    const couverture = ligne.id !== null && ligne.id !== undefined ? couvertureById.get(String(ligne.id)) : undefined
+    const prochaineReception = couverture?.prochaine_reception_date
+      ? `${formatDate(couverture.prochaine_reception_date)} · ${formatQty(couverture.prochaine_reception_quantite)} · ${safeText(couverture.prochaine_reception_cdf, '')}${couverture.prochaine_reception_hypothese ? ' (hypothèse demain)' : ''}`
+      : ''
+    return {
+      ...ligne,
+      couv_statut: couverture?.statut_couverture || (safeText(ligne.type_document, '') === 'CDC' ? COUVERTURE_HORS_CONTROLE : ''),
+      couv_stock_disponible: couverture?.stock_disponible ?? null,
+      couv_besoin_cumule: couverture?.besoin_cumule ?? null,
+      couv_receptions_avant: couverture?.receptions_avant_livraison ?? null,
+      couv_stock_projete: couverture?.stock_projete_a_date ?? null,
+      couv_manque: couverture?.manque_a_date ?? null,
+      couv_date_couverture: couverture?.date_couverture_estimee ?? null,
+      couv_retard_jours: couverture?.retard_estime_jours ?? null,
+      couv_prochaine_reception: prochaineReception,
+      couv_prochaine_reception_date: couverture?.prochaine_reception_date ?? null,
+      couv_hypothese: Boolean(couverture?.receptions_avec_hypothese),
+    }
+  }
+
+  const selectedLignes = useMemo<LigneDetail[]>(() => {
     const keys = selectedDocumentKeyForLines ? new Set([selectedDocumentKeyForLines]) : selectedDocumentKeys
-    return lignes.filter((ligne) => keys.has(docKey(ligne)))
-  }, [lignes, selectedDocumentKeyForLines, selectedDocumentKeys])
+    const filtered = lignes.filter((ligne) => keys.has(docKey(ligne)))
+    // Quand un filtre couverture est actif, on ne garde que les lignes
+    // concernées (les lignes couvertes d'un document en rupture restent
+    // visibles quand on ouvre le document lui-même).
+    return filtered.map(toLigneDetail).filter((ligne) => {
+      if (selectedCouverture === 'TOUS' || selectedDocumentKeyForLines) return true
+      if (safeText(ligne.type_document, '') !== 'CDC') return false
+      return couvertureFilterMatches(selectedCouverture, ligne.couv_statut)
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lignes, selectedDocumentKeyForLines, selectedDocumentKeys, couvertureById, selectedCouverture])
 
   const sortedDocuments = useMemo(() => sortArray(selectedDocuments, documentSort), [selectedDocuments, documentSort])
 
   const documentColumns = useMemo<Array<[keyof DocumentPortefeuille, string]>>(() => {
+    const couvertureColumns: Array<[keyof DocumentPortefeuille, string]> = isCdcSelected
+      ? [['couv_statut_doc', 'Couverture stock'], ['couv_nb_non_servables', 'Lignes non servables'], ['couv_date_couverture_doc', 'Couvert le']]
+      : []
     const generalColumns: Array<[keyof DocumentPortefeuille, string]> = [
       ['agence', 'Agence'], ['representant', 'Représentant'], ['numero_tiers', 'N° tiers'], ['nom_tiers', 'Client'],
       ['numero_document', 'N° document'], ['references', 'Réf. lignes'], ['date_livraison', 'Date livraison'],
+      ...couvertureColumns,
       ['familles_macro', 'Familles macro'], ['client_en_sommeil', 'Sommeil'],
     ]
     if (!isBlSelected) return generalColumns
@@ -1082,9 +1447,34 @@ export default function PortefeuilleLivraisonPage() {
       ['nb_bl_avec_port', 'BL avec port'], ['frais_port_constate_ht', 'Port constaté BL'],
       ['frais_port_constate_groupe_ht', 'Port constaté groupe'], ['frais_port_attendu_groupe_ht', 'Port attendu groupe'],
       ['action_recommandee', 'Action recommandée'], ['montant_action_ht', 'Montant action'],
-      ['statut_controle', 'Statut groupe'], ['date_livraison', 'Date livraison'], ['familles_macro', 'Familles macro'], ['client_en_sommeil', 'Sommeil'],
+      ['statut_controle', 'Statut groupe'], ['date_livraison', 'Date livraison'],
+      ...couvertureColumns,
+      ['familles_macro', 'Familles macro'], ['client_en_sommeil', 'Sommeil'],
     ]
-  }, [isBlSelected, selectedTypes.length])
+  }, [isBlSelected, isCdcSelected, selectedTypes.length])
+
+  const ligneColumns = useMemo<Array<[keyof LigneDetail, string]>>(() => {
+    const base: Array<[keyof LigneDetail, string]> = [
+      ['agence', 'Agence'], ['representant', 'Représentant'], ['numero_tiers', 'N° tiers'], ['nom_tiers', 'Client'],
+      ['type_document', 'Type doc'], ['numero_document', 'N° document'], ['reference_article', 'Référence article'],
+      ['designation_article', 'Désignation article'], ['reference', 'Référence'], ['famille', 'Famille'],
+      ['famille_macro', 'Famille macro'], ['quantite', 'Quantité'], ['montant_ht', 'Montant HT'],
+      ['date_creation_document', 'Date création'], ['date_livraison', 'Date livraison'],
+    ]
+    if (isCdcSelected) {
+      base.push(
+        ['couv_statut', 'Couverture stock'],
+        ['couv_stock_disponible', 'Stock dispo global'],
+        ['couv_besoin_cumule', 'Besoin cumulé'],
+        ['couv_receptions_avant', 'Réceptions av. liv.'],
+        ['couv_stock_projete', 'Stock projeté à date'],
+        ['couv_date_couverture', 'Couvert le'],
+        ['couv_prochaine_reception', 'Prochaine réception'],
+      )
+    }
+    base.push(['client_en_sommeil', 'Sommeil'])
+    return base
+  }, [isCdcSelected])
 
   const sortedLignes = useMemo(() => sortArray(selectedLignes, ligneSort), [selectedLignes, ligneSort])
 
@@ -1100,6 +1490,20 @@ export default function PortefeuilleLivraisonPage() {
     return acc
   }, { nb_documents: 0, montant_ht: 0 }), [documents])
 
+  // KPI "CDC non servables" : même principe, sur les documents chargés
+  // (avant filtre couverture), pour rester stable quand on bascule le filtre.
+  const couvertureKpi = useMemo(() => documents.reduce((acc, doc) => {
+    if (doc.type_document !== 'CDC') return acc
+    if (doc.couv_nb_lignes_controlees > 0) acc.nb_controles += 1
+    if (!isCouvertureNonServable(doc.couv_statut_doc)) return acc
+    acc.nb_documents += 1
+    acc.montant_ht += doc.montant_ht
+    acc.montant_non_servable_ht += doc.couv_montant_non_servable_ht
+    if (doc.couv_statut_doc === 'RUPTURE') acc.nb_rupture += 1
+    if (doc.couv_statut_doc === 'RECEPTION_TARDIVE') acc.nb_tardive += 1
+    return acc
+  }, { nb_documents: 0, nb_controles: 0, montant_ht: 0, montant_non_servable_ht: 0, nb_rupture: 0, nb_tardive: 0 }), [documents])
+
   const controleKpis = useMemo(() => groupesFraisPort.reduce((acc, group) => {
     if (group.statut_groupe === 'FRAIS_PORT_MANQUANT') acc.portManquant += 1
     acc.blASupprimer += Number(group.nb_bl_a_supprimer || 0)
@@ -1109,7 +1513,9 @@ export default function PortefeuilleLivraisonPage() {
   }, { portManquant: 0, blASupprimer: 0, autresAnomalies: 0, totalActions: 0 }), [groupesFraisPort])
 
   const showCdcRetardCard = isCdcSelected
-  const kpiGridColsClass = KPI_GRID_COLS[2 + (showCdcRetardCard ? 1 : 0) + (isBlSelected ? 4 : 0)] || 'xl:grid-cols-2'
+  const showCouvertureCard = isCdcSelected
+  const kpiGridColsClass = KPI_GRID_COLS[2 + (showCdcRetardCard ? 1 : 0) + (showCouvertureCard ? 1 : 0) + (isBlSelected ? 4 : 0)] || 'xl:grid-cols-2'
+  const isCouvertureFilterActive = selectedCouverture !== 'TOUS'
 
   function toggleType(type: string) {
     setSelectedTypes((current) => {
@@ -1132,7 +1538,7 @@ export default function PortefeuilleLivraisonPage() {
   function toggleGroupSort(key: keyof GroupeFraisPort) {
     setGroupSort((current) => !current || current.key !== key ? { key, direction: 'asc' } : { key, direction: current.direction === 'asc' ? 'desc' : 'asc' })
   }
-  function toggleLigneSort(key: keyof LignePortefeuille) {
+  function toggleLigneSort(key: keyof LigneDetail) {
     setLigneSort((current) => !current || current.key !== key ? { key, direction: 'asc' } : { key, direction: current.direction === 'asc' ? 'desc' : 'asc' })
   }
 
@@ -1147,25 +1553,35 @@ export default function PortefeuilleLivraisonPage() {
         base[`${monthLabel(mois)} - Frais port manquant`] = cell?.nb_frais_port_manquant || 0
         base[`${monthLabel(mois)} - BL à supprimer`] = cell?.nb_bl_a_supprimer || 0
         base[`${monthLabel(mois)} - Montant actions HT`] = Number((cell?.montant_actions_ht || 0).toFixed(2))
+        base[`${monthLabel(mois)} - CDC non servables`] = cell?.nb_non_servables || 0
       }
       base['Total - Nb docs'] = row.total_nb_documents; base['Total - Montant HT'] = Number(row.total_montant_ht.toFixed(2))
       base['Total - Anomalies port'] = row.total_nb_anomalies; base['Total - Frais port manquant'] = row.total_nb_frais_port_manquant
       base['Total - BL à supprimer'] = row.total_nb_bl_a_supprimer; base['Total - Montant actions HT'] = Number(row.total_montant_actions_ht.toFixed(2))
+      base['Total - CDC non servables'] = row.total_nb_non_servables
       return base
     })
 
     const groupesExport = sortedGroupesFraisPort.map((group) => ({ 'Date BL': formatDate(group.date_controle), 'N° tiers': group.numero_tiers, Client: group.nom_tiers, 'Expédition': group.expedition, 'Lieu de livraison': group.lieu_livraison, Dépôts: group.depots, Agences: group.agences, 'Représentants': group.representants, 'N° BL': group.numeros_bl, 'Nb BL': group.nb_bl, 'BL avec port': group.nb_bl_avec_port, 'Port constaté groupe': group.frais_port_constate_groupe_ht, 'Port attendu groupe': group.frais_port_attendu_groupe_ht, 'Écart groupe': group.ecart_groupe_ht, 'BL à supprimer': group.nb_bl_a_supprimer, 'Montant à supprimer': group.montant_a_supprimer_ht, 'Montant à ajouter': group.montant_a_ajouter_ht, 'BL conseillé ajout': group.bl_conseille_ajout, 'BL conseillé conservation': group.bl_conseille_conservation, Statut: controlStatusLabel(group.statut_groupe) }))
 
-    const documentsExport = sortedDocuments.map((doc) => ({ Agence: doc.agence, Representant: doc.representant, 'N° tiers': doc.numero_tiers, Client: doc.nom_tiers, 'Type doc': doc.type_document, 'N° document': doc.numero_document, 'Date BL': formatDate(doc.date_controle), 'Référence entête': doc.reference_entete, 'Expédition': doc.expedition, 'Dépôt entête': doc.depot_entete, 'Lieu de livraison': doc.lieu_livraison, 'Nb BL groupe': doc.nb_bl_groupe, 'BL avec port groupe': doc.nb_bl_avec_port, 'Nb lignes': doc.nb_lignes, 'Montant HT portefeuille': Number(doc.montant_ht.toFixed(2)), 'Montant HT lignes contrôle': doc.montant_lignes_controle_ht, 'Montant HT entête': doc.montant_entete_ht, 'Port constaté BL': doc.frais_port_constate_ht, 'Port attendu groupe': doc.frais_port_attendu_groupe_ht, 'Port constaté groupe': doc.frais_port_constate_groupe_ht, 'Écart groupe': doc.ecart_groupe_ht, Action: actionLabel(doc.action_recommandee), 'Montant action': doc.montant_action_ht, 'Base calcul port': doc.base_calcul_frais_port, 'Statut contrôle': controlStatusLabel(doc.statut_controle), 'Date création document': formatDate(doc.date_creation_document), 'Date livraison': formatDate(doc.date_livraison), 'Mois livraison': monthLabel(doc.mois_livraison), [CDC_RETARD_LABEL]: isCdcEnRetard(doc) ? 'Oui' : 'Non', Référence: doc.references, 'Client en sommeil': doc.client_en_sommeil ? 'Oui' : 'Non', 'Familles macro': doc.familles_macro }))
+    const documentsExport = sortedDocuments.map((doc) => ({ Agence: doc.agence, Representant: doc.representant, 'N° tiers': doc.numero_tiers, Client: doc.nom_tiers, 'Type doc': doc.type_document, 'N° document': doc.numero_document, 'Date BL': formatDate(doc.date_controle), 'Référence entête': doc.reference_entete, 'Expédition': doc.expedition, 'Dépôt entête': doc.depot_entete, 'Lieu de livraison': doc.lieu_livraison, 'Nb BL groupe': doc.nb_bl_groupe, 'BL avec port groupe': doc.nb_bl_avec_port, 'Nb lignes': doc.nb_lignes, 'Montant HT portefeuille': Number(doc.montant_ht.toFixed(2)), 'Montant HT lignes contrôle': doc.montant_lignes_controle_ht, 'Montant HT entête': doc.montant_entete_ht, 'Port constaté BL': doc.frais_port_constate_ht, 'Port attendu groupe': doc.frais_port_attendu_groupe_ht, 'Port constaté groupe': doc.frais_port_constate_groupe_ht, 'Écart groupe': doc.ecart_groupe_ht, Action: actionLabel(doc.action_recommandee), 'Montant action': doc.montant_action_ht, 'Base calcul port': doc.base_calcul_frais_port, 'Statut contrôle': controlStatusLabel(doc.statut_controle), 'Date création document': formatDate(doc.date_creation_document), 'Date livraison': formatDate(doc.date_livraison), 'Mois livraison': monthLabel(doc.mois_livraison), [CDC_RETARD_LABEL]: isCdcEnRetard(doc) ? 'Oui' : 'Non', 'Couverture stock': doc.type_document === 'CDC' ? couvertureLabel(doc.couv_statut_doc) : '', 'Lignes non servables': doc.couv_nb_non_servables, 'Montant non servable HT': Number(doc.couv_montant_non_servable_ht.toFixed(2)), 'Réf. non servables': doc.couv_references_non_servables, 'Couvert le (estimé)': formatDate(doc.couv_date_couverture_doc), 'Retard estimé max (j)': doc.couv_retard_max_jours ?? '', Référence: doc.references, 'Client en sommeil': doc.client_en_sommeil ? 'Oui' : 'Non', 'Familles macro': doc.familles_macro }))
 
     const exportDocumentKeys = new Set(sortedDocuments.map((doc) => doc.key))
-    const lignesExport = lignes.filter((ligne) => exportDocumentKeys.has(docKey(ligne))).map((ligne) => ({ Agence: safeText(ligne.agence, 'Sans agence'), Representant: safeText(ligne.representant, 'Sans représentant'), 'N° tiers': safeText(ligne.numero_tiers, ''), Client: safeText(ligne.nom_tiers, ''), 'Type doc': safeText(ligne.type_document, ''), 'N° document': safeText(ligne.numero_document, ''), 'Référence article': safeText(ligne.reference_article, ''), 'Désignation article': safeText(ligne.designation_article, ''), Référence: safeText(ligne.reference, ''), Famille: safeText(ligne.famille, ''), 'Famille macro': safeText(ligne.famille_macro, 'Sans famille macro'), 'Quantité': Number(ligne.quantite || 0), 'Montant HT': Number(ligne.montant_ht || 0), 'Date création document': formatDate(ligne.date_creation_document), 'Date livraison': formatDate(ligne.date_livraison), 'Mois livraison': monthLabel(ligne.mois_livraison || 'SANS_DATE_LIVRAISON'), [CDC_RETARD_LABEL]: isCdcEnRetard(ligne) ? 'Oui' : 'Non', 'Client en sommeil': ligne.client_en_sommeil ? 'Oui' : 'Non' }))
+    const lignesDetailExport = lignes.filter((ligne) => exportDocumentKeys.has(docKey(ligne))).map(toLigneDetail)
+    const lignesExport = lignesDetailExport.map((ligne) => ({ Agence: safeText(ligne.agence, 'Sans agence'), Representant: safeText(ligne.representant, 'Sans représentant'), 'N° tiers': safeText(ligne.numero_tiers, ''), Client: safeText(ligne.nom_tiers, ''), 'Type doc': safeText(ligne.type_document, ''), 'N° document': safeText(ligne.numero_document, ''), 'Référence article': safeText(ligne.reference_article, ''), 'Désignation article': safeText(ligne.designation_article, ''), Référence: safeText(ligne.reference, ''), Famille: safeText(ligne.famille, ''), 'Famille macro': safeText(ligne.famille_macro, 'Sans famille macro'), 'Quantité': Number(ligne.quantite || 0), 'Montant HT': Number(ligne.montant_ht || 0), 'Date création document': formatDate(ligne.date_creation_document), 'Date livraison': formatDate(ligne.date_livraison), 'Mois livraison': monthLabel(ligne.mois_livraison || 'SANS_DATE_LIVRAISON'), [CDC_RETARD_LABEL]: isCdcEnRetard(ligne) ? 'Oui' : 'Non', 'Couverture stock': ligne.couv_statut ? couvertureLabel(ligne.couv_statut) : '', 'Stock dispo global': ligne.couv_stock_disponible ?? '', 'Besoin cumulé': ligne.couv_besoin_cumule ?? '', 'Réceptions avant livraison': ligne.couv_receptions_avant ?? '', 'Stock projeté à date': ligne.couv_stock_projete ?? '', 'Manque à date': ligne.couv_manque ?? '', 'Couvert le (estimé)': formatDate(ligne.couv_date_couverture), 'Retard estimé (j)': ligne.couv_retard_jours ?? '', 'Prochaine réception': ligne.couv_prochaine_reception, 'Hypothèse CDF en retard = demain': ligne.couv_hypothese ? 'Oui' : 'Non', 'Client en sommeil': ligne.client_en_sommeil ? 'Oui' : 'Non' }))
+
+    // Onglet dédié : uniquement les lignes non servables des documents exportés.
+    const couvertureExport = lignesDetailExport
+      .filter((ligne) => isCouvertureNonServable(ligne.couv_statut))
+      .sort((a, b) => sortValues(a.date_livraison, b.date_livraison) || sortValues(a.numero_document, b.numero_document))
+      .map((ligne) => ({ Agence: safeText(ligne.agence, 'Sans agence'), Representant: safeText(ligne.representant, 'Sans représentant'), 'N° tiers': safeText(ligne.numero_tiers, ''), Client: safeText(ligne.nom_tiers, ''), 'N° CDC': safeText(ligne.numero_document, ''), 'Date livraison': formatDate(ligne.date_livraison), 'Référence article': safeText(ligne.reference_article, ''), 'Désignation article': safeText(ligne.designation_article, ''), 'Quantité': Number(ligne.quantite || 0), 'Montant HT': Number(ligne.montant_ht || 0), Statut: couvertureLabel(ligne.couv_statut), 'Stock dispo global': ligne.couv_stock_disponible ?? '', 'Besoin cumulé': ligne.couv_besoin_cumule ?? '', 'Réceptions avant livraison': ligne.couv_receptions_avant ?? '', 'Stock projeté à date': ligne.couv_stock_projete ?? '', 'Manque à date': ligne.couv_manque ?? '', 'Couvert le (estimé)': formatDate(ligne.couv_date_couverture), 'Retard estimé (j)': ligne.couv_retard_jours ?? '', 'Prochaine réception': ligne.couv_prochaine_reception, 'Hypothèse CDF en retard = demain': ligne.couv_hypothese ? 'Oui' : 'Non' }))
 
     const workbook = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(syntheseExport), 'Synthese')
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(groupesExport), 'Controle groupes')
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(documentsExport), 'Documents')
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(lignesExport), 'Detail lignes')
+    if (isCdcSelected) XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(couvertureExport), 'Couverture stock')
     XLSX.writeFile(workbook, `portefeuille_livraison_${new Date().toISOString().slice(0, 10)}.xlsx`)
   }
 
@@ -1179,9 +1595,10 @@ export default function PortefeuilleLivraisonPage() {
               <p className="mt-1 text-sm text-slate-500">
                 Contrôle groupé des BL : un seul forfait par Date BL / N° tiers / Mode d'expédition / Lieu de livraison. Les BL à corriger sont identifiés avec une action Ajouter, Supprimer ou Vérifier.
                 {' '}Les CDC en retard de livraison ({getCdcRetardDescription()}) sont surlignés en rouge.
+                {' '}Couverture stock des CDC : stock global tous dépôts + réceptions fournisseurs attendues (commandes SAGE non réceptionnées), besoins servis par date de livraison puis date de création ; les commandes fournisseurs en retard ou sans date sont supposées reçues demain.
               </p>
               <div className="mt-2 inline-flex rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-800">
-                Version 2026-09-09 v3.4 — contrôle frais de port groupé · {CDC_RETARD_LABEL}
+                Version 2026-09-15 v3.5 — contrôle frais de port groupé · {CDC_RETARD_LABEL} · couverture stock CDC
               </div>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -1220,11 +1637,11 @@ export default function PortefeuilleLivraisonPage() {
             </label>
             <label className="space-y-1">
               <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Livraison fin</span>
-              <input type="date" value={dateLivraisonFin} onChange={(e) => { setDateLivraisonFin(e.target.value); setDateLivraisonFinModifiee(true) }} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" />
+              <input type="date" value={dateLivraisonFin} onChange={(e) => { setDateLivraisonFin(e.target.value); setDateLivraisonFinModifiee(true); setHorizonMois('') }} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" />
             </label>
           </div>
 
-          <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-6">
             <label className="space-y-1">
               <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Représentant</span>
               <select value={representantSelectValue} disabled={isRepresentantLocked} onChange={(e) => { if (!isRepresentantLocked) setSelectedRepresentant(e.target.value) }} className={accessLockedSelectClassName(selectBaseClassName, isRepresentantLocked)}>
@@ -1250,6 +1667,23 @@ export default function PortefeuilleLivraisonPage() {
               <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Client en sommeil</span>
               <select value={selectedSommeil} onChange={(e) => setSelectedSommeil(e.target.value as 'TOUS' | 'OUI' | 'NON')} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
                 <option value="TOUS">Tous</option><option value="OUI">Oui</option><option value="NON">Non</option>
+              </select>
+            </label>
+            <label className="space-y-1">
+              <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Horizon livraison</span>
+              <select value={horizonMois} onChange={(e) => applyHorizon(e.target.value)} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" title="Positionne la borne « Livraison fin » à aujourd'hui + N mois">
+                {HORIZON_OPTIONS.map(([value, label]) => <option key={value || 'none'} value={value}>{label}</option>)}
+              </select>
+            </label>
+            <label className="space-y-1">
+              <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Couverture stock (CDC)</span>
+              <select value={selectedCouverture} disabled={!isCdcSelected} onChange={(e) => { setSelectedCouverture(e.target.value as CouvertureFilterMode); applyDetailSelection(null) }} className={['w-full rounded-xl border border-slate-300 px-3 py-2 text-sm', !isCdcSelected ? 'bg-slate-100 text-slate-400' : ''].join(' ')}>
+                <option value="TOUS">Tous les statuts</option>
+                <option value="NON_SERVABLE">Non servables (rupture + réception tardive)</option>
+                <option value="RUPTURE">Rupture</option>
+                <option value="RECEPTION_TARDIVE">Réception tardive</option>
+                <option value="COUVERT_PAR_RECEPTION">Couvert par réception</option>
+                <option value="COUVERT">Couvert par le stock</option>
               </select>
             </label>
           </div>
@@ -1334,6 +1768,12 @@ export default function PortefeuilleLivraisonPage() {
               <div className="mt-1">{controlErrorMessage}</div>
             </div>
           )}
+          {isCdcSelected && couvertureErrorMessage && (
+            <div className="mt-4 rounded-xl border border-orange-300 bg-orange-50 p-3 text-sm text-orange-800">
+              <div className="font-semibold">Couverture stock non chargée</div>
+              <div className="mt-1">{couvertureErrorMessage}</div>
+            </div>
+          )}
         </section>
 
         <section className={['grid grid-cols-1 gap-4 md:grid-cols-2', kpiGridColsClass].join(' ')}>
@@ -1360,6 +1800,25 @@ export default function PortefeuilleLivraisonPage() {
               <div className={['mt-1 text-2xl font-semibold', cdcRetardKpi.nb_documents > 0 ? 'text-red-700' : 'text-emerald-700'].join(' ')}>{cdcRetardKpi.nb_documents.toLocaleString('fr-FR')}</div>
               <div className="mt-1 text-[11px] text-slate-500">
                 {formatMoneyCompact(cdcRetardKpi.montant_ht)} · {getCdcRetardDescription()}{cdcRetardOnly ? ' · filtre actif' : ''}
+              </div>
+            </button>
+          )}
+          {showCouvertureCard && (
+            <button
+              type="button"
+              onClick={() => { if (isCouvertureFilterActive) { setSelectedCouverture('TOUS'); applyDetailSelection(null) } else openCouverture('NON_SERVABLE') }}
+              title={isCouvertureFilterActive ? 'Désactiver le filtre et réafficher tous les documents' : 'Ne garder que les CDC dont au moins une ligne ne peut pas être servie à sa date de livraison (stock global + réceptions fournisseurs attendues)'}
+              className={[
+                'rounded-2xl border p-4 text-left shadow-sm',
+                couvertureKpi.nb_documents > 0 ? 'border-rose-300 bg-rose-50' : 'border-emerald-200 bg-white',
+                isCouvertureFilterActive ? 'ring-2 ring-rose-400' : '',
+              ].join(' ')}
+            >
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{COUVERTURE_LABEL}</div>
+              <div className={['mt-1 text-2xl font-semibold', couvertureKpi.nb_documents > 0 ? 'text-rose-700' : 'text-emerald-700'].join(' ')}>{couvertureKpi.nb_documents.toLocaleString('fr-FR')}</div>
+              <div className="mt-1 text-[11px] text-slate-500">
+                {formatMoneyCompact(couvertureKpi.montant_ht)} · {couvertureKpi.nb_rupture.toLocaleString('fr-FR')} rupture · {couvertureKpi.nb_tardive.toLocaleString('fr-FR')} réception tardive
+                {' '}· {couvertureKpi.nb_controles.toLocaleString('fr-FR')} CDC contrôlés{isCouvertureFilterActive ? ' · filtre actif' : ''}
               </div>
             </button>
           )}
@@ -1448,6 +1907,7 @@ export default function PortefeuilleLivraisonPage() {
               <p className="text-sm text-slate-500">
                 Clique sur une cellule, une ligne, une colonne ou le total général pour afficher le détail en dessous.
                 {' '}<span className="text-red-700">Rouge</span> : {getCdcRetardDescription()} ({CDC_RETARD_LABEL}) · <span className="text-orange-700">orange</span> : mois écoulés avant le mois courant.
+                {isCdcSelected && <> · <span className="text-rose-700">non servables</span> : CDC avec au moins une ligne en rupture ou couverte par une réception tardive.</>}
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -1477,6 +1937,9 @@ export default function PortefeuilleLivraisonPage() {
                   <th className="sticky left-0 z-20 whitespace-nowrap border-b border-r border-slate-200 bg-slate-100 px-3 py-2 text-left">{syntheseGroupBy === 'famille' ? 'Famille macro' : 'Agence'}</th>
                   {syntheseGroupBy === 'agence' && <th className="whitespace-nowrap border-b border-r border-slate-200 px-2 py-2 text-left">Représentant</th>}
                   <th className="whitespace-nowrap border-b border-r border-slate-200 px-2 py-2 text-left">Type doc</th>
+                  {isCdcSelected && (
+                    <th className="whitespace-nowrap border-b border-r border-slate-200 bg-rose-50 px-3 py-2 text-right text-rose-900">Non servables</th>
+                  )}
                   {isBlSelected && (
                     <>
                       <th className="whitespace-nowrap border-b border-r border-slate-200 bg-orange-50 px-3 py-2 text-right text-orange-900">Anomalies port</th>
@@ -1496,6 +1959,9 @@ export default function PortefeuilleLivraisonPage() {
                     <td className="sticky left-0 border-b border-r border-slate-200 bg-white px-3 py-2 font-medium">{row.agence}</td>
                     {syntheseGroupBy === 'agence' && <td className="border-b border-r border-slate-200 px-2 py-2">{row.representant}</td>}
                     <td className="border-b border-r border-slate-200 px-2 py-2">{row.type_document}</td>
+                    {isCdcSelected && (
+                      <td className={['border-b border-r border-slate-200 px-2 py-2 text-right font-semibold', row.total_nb_non_servables > 0 ? 'bg-rose-50 text-rose-800' : 'text-slate-400'].join(' ')}>{row.total_nb_non_servables.toLocaleString('fr-FR')}</td>
+                    )}
                     {isBlSelected && (
                       <>
                         <td className={['border-b border-r border-slate-200 px-2 py-2 text-right font-semibold', row.total_nb_anomalies > 0 ? 'bg-orange-50 text-orange-800' : 'text-slate-400'].join(' ')}>{row.total_nb_anomalies.toLocaleString('fr-FR')}</td>
@@ -1515,6 +1981,7 @@ export default function PortefeuilleLivraisonPage() {
                             <div className="leading-tight">
                               <div className="whitespace-nowrap font-semibold">{cell.nb_documents.toLocaleString('fr-FR')} docs</div>
                               <div className="whitespace-nowrap text-xs text-slate-500">{formatMoneyCompact(cell.montant_ht)}</div>
+                              {cell.nb_non_servables > 0 && <div className="mt-1 whitespace-nowrap text-[11px] font-semibold text-rose-700">{cell.nb_non_servables} non servable(s)</div>}
                               {cell.nb_anomalies > 0 && <div className="mt-1 whitespace-nowrap text-[11px] font-semibold text-orange-700">{cell.nb_anomalies} anomalie(s)</div>}
                               {cell.nb_frais_port_manquant > 0 && <div className="whitespace-nowrap text-[11px] font-semibold text-red-700">{cell.nb_frais_port_manquant} port manquant</div>}
                               {cell.nb_bl_a_supprimer > 0 && <div className="whitespace-nowrap text-[11px] font-semibold text-rose-700">{cell.nb_bl_a_supprimer} BL à supprimer</div>}
@@ -1527,6 +1994,7 @@ export default function PortefeuilleLivraisonPage() {
                       <div className="leading-tight">
                         <div className="whitespace-nowrap font-semibold">{row.total_nb_documents.toLocaleString('fr-FR')} docs</div>
                         <div className="whitespace-nowrap text-xs text-slate-500">{formatMoneyCompact(row.total_montant_ht)}</div>
+                        {row.total_nb_non_servables > 0 && <div className="mt-1 whitespace-nowrap text-[11px] font-semibold text-rose-700">{row.total_nb_non_servables} non servable(s)</div>}
                         {row.total_nb_anomalies > 0 && <div className="mt-1 whitespace-nowrap text-[11px] font-semibold text-orange-700">{row.total_nb_anomalies} anomalie(s)</div>}
                         {row.total_nb_frais_port_manquant > 0 && <div className="whitespace-nowrap text-[11px] font-semibold text-red-700">{row.total_nb_frais_port_manquant} port manquant</div>}
                         {row.total_nb_bl_a_supprimer > 0 && <div className="whitespace-nowrap text-[11px] font-semibold text-rose-700">{row.total_nb_bl_a_supprimer} BL à supprimer</div>}
@@ -1534,13 +2002,16 @@ export default function PortefeuilleLivraisonPage() {
                     </td>
                   </tr>
                 ))}
-                {synthese.length === 0 && <tr><td colSpan={(isBlSelected ? 7 : 4) - (syntheseGroupBy === 'famille' ? 1 : 0) + moisLivraison.length} className="px-4 py-8 text-center text-slate-500">Aucune donnée trouvée avec les filtres sélectionnés.</td></tr>}
+                {synthese.length === 0 && <tr><td colSpan={(isBlSelected ? 7 : 4) + (isCdcSelected ? 1 : 0) - (syntheseGroupBy === 'famille' ? 1 : 0) + moisLivraison.length} className="px-4 py-8 text-center text-slate-500">Aucune donnée trouvée avec les filtres sélectionnés.</td></tr>}
               </tbody>
               {synthese.length > 0 && (
                 <tfoot className="sticky bottom-0 z-10 bg-slate-800 text-white">
                   <tr>
                     <td className="sticky left-0 z-20 border-t border-slate-700 bg-slate-800 px-3 py-2 font-semibold" colSpan={syntheseGroupBy === 'agence' ? 2 : 1}>TOTAL</td>
                     <td className="border-t border-slate-700 px-2 py-2"></td>
+                    {isCdcSelected && (
+                      <td className="border-t border-slate-700 px-2 py-2 text-right font-semibold">{syntheseTotal.total_nb_non_servables.toLocaleString('fr-FR')}</td>
+                    )}
                     {isBlSelected && (
                       <>
                         <td className="border-t border-slate-700 px-2 py-2 text-right font-semibold">{syntheseTotal.total_nb_anomalies.toLocaleString('fr-FR')}</td>
@@ -1560,6 +2031,7 @@ export default function PortefeuilleLivraisonPage() {
                             <div className="leading-tight">
                               <div className="whitespace-nowrap font-semibold">{cell.nb_documents.toLocaleString('fr-FR')} docs</div>
                               <div className="whitespace-nowrap text-xs text-slate-300">{formatMoneyCompact(cell.montant_ht)}</div>
+                              {cell.nb_non_servables > 0 && <div className="whitespace-nowrap text-[11px] font-semibold text-rose-300">{cell.nb_non_servables} non servable(s)</div>}
                             </div>
                           ) : '-'}
                         </td>
@@ -1581,7 +2053,10 @@ export default function PortefeuilleLivraisonPage() {
         <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
           <div className="border-b border-slate-200 px-4 py-3">
             <h2 className="text-lg font-semibold">Liste des documents</h2>
-            <p className="text-sm text-slate-500">{sortedDocuments.length.toLocaleString('fr-FR')} document(s) affiché(s). Clique sur un numéro de document pour filtrer le détail à la ligne. Les CDC en retard ({CDC_RETARD_LABEL}) sont surlignés en rouge.</p>
+            <p className="text-sm text-slate-500">
+              {sortedDocuments.length.toLocaleString('fr-FR')} document(s) affiché(s). Clique sur un numéro de document pour filtrer le détail à la ligne. Les CDC en retard ({CDC_RETARD_LABEL}) sont surlignés en rouge
+              {isCdcSelected ? ', les CDC non servables (stock) en rose.' : '.'}
+            </p>
           </div>
           <div className="max-h-[480px] overflow-auto">
             <table className="min-w-full border-collapse text-sm">
@@ -1595,15 +2070,38 @@ export default function PortefeuilleLivraisonPage() {
               <tbody>
                 {sortedDocuments.map((doc) => {
                   const cdcRetard = isCdcEnRetard(doc)
+                  const isCdcDoc = doc.type_document === 'CDC'
+                  const couvNonServable = isCdcDoc && isCouvertureNonServable(doc.couv_statut_doc)
+                  const couvertureCells = isCdcSelected ? (
+                    <>
+                      <td className="border-b border-r border-slate-200 px-2 py-2">
+                        {isCdcDoc ? (
+                          <span className={['inline-flex whitespace-nowrap rounded-full border px-2 py-1 text-xs font-semibold', couvertureClassName(doc.couv_statut_doc)].join(' ')} title={doc.couv_references_non_servables ? `Réf. non servables : ${doc.couv_references_non_servables}` : undefined}>
+                            {couvertureLabel(doc.couv_statut_doc)}
+                          </span>
+                        ) : '—'}
+                      </td>
+                      <td className={['border-b border-r border-slate-200 px-2 py-2 text-right font-semibold', couvNonServable ? 'text-rose-700' : 'text-slate-400'].join(' ')}>
+                        {isCdcDoc && doc.couv_nb_lignes_controlees > 0 ? `${doc.couv_nb_non_servables} / ${doc.couv_nb_lignes_controlees}` : '—'}
+                      </td>
+                      <td className="whitespace-nowrap border-b border-r border-slate-200 px-2 py-2">
+                        {couvNonServable ? (
+                          doc.couv_date_couverture_doc
+                            ? <span className="text-orange-800">{formatDate(doc.couv_date_couverture_doc)}{doc.couv_retard_max_jours !== null ? ` (+${doc.couv_retard_max_jours} j)` : ''}</span>
+                            : <span className="font-semibold text-rose-700">Aucune réception connue</span>
+                        ) : '—'}
+                      </td>
+                    </>
+                  ) : null
                   return (
-                    <tr key={doc.key} className={['hover:bg-slate-50', cdcRetard ? 'bg-red-50' : '', doc.action_recommandee === 'AJOUTER' ? 'bg-red-50' : '', doc.action_recommandee === 'SUPPRIMER' ? 'bg-rose-50' : '', doc.action_recommandee === 'VERIFIER' ? 'bg-amber-50' : '', selectedDocumentKeyForLines === doc.key ? 'ring-1 ring-inset ring-blue-300' : ''].join(' ')}>
+                    <tr key={doc.key} className={['hover:bg-slate-50', cdcRetard ? 'bg-red-50' : '', couvNonServable ? 'bg-rose-50' : '', doc.action_recommandee === 'AJOUTER' ? 'bg-red-50' : '', doc.action_recommandee === 'SUPPRIMER' ? 'bg-rose-50' : '', doc.action_recommandee === 'VERIFIER' ? 'bg-amber-50' : '', selectedDocumentKeyForLines === doc.key ? 'ring-1 ring-inset ring-blue-300' : ''].join(' ')}>
                       <td className="border-b border-r border-slate-200 px-2 py-2">{doc.agence}</td>
                       <td className="border-b border-r border-slate-200 px-2 py-2">{doc.representant}</td>
                       {isBlSelected && <td className="whitespace-nowrap border-b border-r border-slate-200 px-2 py-2 font-semibold">{formatDate(doc.date_controle)}</td>}
                       <td className="border-b border-r border-slate-200 px-2 py-2">{doc.numero_tiers}</td>
                       <td className="border-b border-r border-slate-200 px-2 py-2">{doc.nom_tiers}</td>
                       <td className="border-b border-r border-slate-200 px-2 py-2 font-medium">
-                        <button type="button" onClick={() => setSelectedDocumentKeyForLines(doc.key)} className={['font-semibold underline-offset-2 hover:underline', cdcRetard ? 'text-red-700' : 'text-blue-700'].join(' ')}>{doc.numero_document}</button>
+                        <button type="button" onClick={() => setSelectedDocumentKeyForLines(doc.key)} className={['font-semibold underline-offset-2 hover:underline', cdcRetard ? 'text-red-700' : couvNonServable ? 'text-rose-700' : 'text-blue-700'].join(' ')}>{doc.numero_document}</button>
                       </td>
                       {isBlSelected && <td className="border-b border-r border-slate-200 px-2 py-2 font-medium">{doc.reference_entete || '—'}</td>}
                       <td className="border-b border-r border-slate-200 px-2 py-2">{doc.references || '—'}</td>
@@ -1625,6 +2123,7 @@ export default function PortefeuilleLivraisonPage() {
                       <td className={['border-b border-r border-slate-200 px-2 py-2', cdcRetard ? 'font-semibold text-red-700' : ''].join(' ')} title={cdcRetard ? `${CDC_RETARD_LABEL} : ${getCdcRetardDescription()}` : undefined}>
                         {formatDate(doc.date_livraison)}{cdcRetard ? ' ⚠' : ''}
                       </td>
+                      {couvertureCells}
                       <td className="border-b border-r border-slate-200 px-2 py-2">{doc.familles_macro}</td>
                       <td className="border-b border-slate-200 px-2 py-2">{doc.client_en_sommeil ? 'Oui' : 'Non'}</td>
                     </tr>
@@ -1643,6 +2142,8 @@ export default function PortefeuilleLivraisonPage() {
               <p className="text-sm text-slate-500">
                 {sortedLignes.length.toLocaleString('fr-FR')} ligne(s) affichée(s).
                 {selectedDocumentForLines ? ` Filtré sur le document ${selectedDocumentForLines.numero_document}.` : ' Détail correspondant à la liste des documents ci-dessus.'}
+                {isCdcSelected && isCouvertureFilterActive && !selectedDocumentForLines ? ' Seules les lignes concernées par le filtre couverture stock sont affichées.' : ''}
+                {isCdcSelected ? ' « Hors contrôle » : référence non gérée en stock (prestation, article divers) ou quantité nulle.' : ''}
               </p>
             </div>
             {selectedDocumentKeyForLines && <button type="button" onClick={() => setSelectedDocumentKeyForLines(null)} className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700">Réafficher toutes les lignes</button>}
@@ -1651,7 +2152,7 @@ export default function PortefeuilleLivraisonPage() {
             <table className="min-w-full border-collapse text-sm">
               <thead className="sticky top-0 bg-slate-100">
                 <tr>
-                  {([['agence', 'Agence'], ['representant', 'Représentant'], ['numero_tiers', 'N° tiers'], ['nom_tiers', 'Client'], ['type_document', 'Type doc'], ['numero_document', 'N° document'], ['reference_article', 'Référence article'], ['designation_article', 'Désignation article'], ['reference', 'Référence'], ['famille', 'Famille'], ['famille_macro', 'Famille macro'], ['quantite', 'Quantité'], ['montant_ht', 'Montant HT'], ['date_creation_document', 'Date création'], ['date_livraison', 'Date livraison'], ['client_en_sommeil', 'Sommeil']] as [keyof LignePortefeuille, string][]).map(([key, label]) => (
+                  {ligneColumns.map(([key, label]) => (
                     <th key={key} onClick={() => toggleLigneSort(key)} className="whitespace-nowrap cursor-pointer border-b border-r border-slate-200 px-2 py-2 text-left hover:bg-slate-200">{label}</th>
                   ))}
                 </tr>
@@ -1659,15 +2160,17 @@ export default function PortefeuilleLivraisonPage() {
               <tbody>
                 {sortedLignes.map((ligne, index) => {
                   const cdcRetard = isCdcEnRetard(ligne)
+                  const couvNonServable = isCouvertureNonServable(ligne.couv_statut)
+                  const isCouvertureLine = ligne.couv_statut && ligne.couv_statut !== COUVERTURE_HORS_CONTROLE
                   return (
-                    <tr key={`${ligne.id || index}-${ligne.numero_document}`} className={['hover:bg-slate-50', cdcRetard ? 'bg-red-50' : ''].join(' ')}>
+                    <tr key={`${ligne.id || index}-${ligne.numero_document}`} className={['hover:bg-slate-50', cdcRetard ? 'bg-red-50' : '', couvNonServable ? 'bg-rose-50' : ''].join(' ')}>
                       <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.agence, 'Sans agence')}</td>
                       <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.representant, 'Sans représentant')}</td>
                       <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.numero_tiers, '')}</td>
                       <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.nom_tiers, '')}</td>
                       <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.type_document, '')}</td>
-                      <td className={['border-b border-r border-slate-200 px-2 py-2 font-medium', cdcRetard ? 'text-red-700' : ''].join(' ')}>{safeText(ligne.numero_document, '')}</td>
-                      <td className="border-b border-r border-slate-200 px-2 py-2 font-medium">{safeText(ligne.reference_article, '')}</td>
+                      <td className={['border-b border-r border-slate-200 px-2 py-2 font-medium', cdcRetard ? 'text-red-700' : couvNonServable ? 'text-rose-700' : ''].join(' ')}>{safeText(ligne.numero_document, '')}</td>
+                      <td className={['border-b border-r border-slate-200 px-2 py-2 font-medium', couvNonServable ? 'text-rose-700' : ''].join(' ')}>{safeText(ligne.reference_article, '')}</td>
                       <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.designation_article, '')}</td>
                       <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.reference, '')}</td>
                       <td className="border-b border-r border-slate-200 px-2 py-2">{safeText(ligne.famille, '')}</td>
@@ -1676,11 +2179,38 @@ export default function PortefeuilleLivraisonPage() {
                       <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{formatMoney(ligne.montant_ht)}</td>
                       <td className="border-b border-r border-slate-200 px-2 py-2">{formatDate(ligne.date_creation_document)}</td>
                       <td className={['border-b border-r border-slate-200 px-2 py-2', cdcRetard ? 'font-semibold text-red-700' : ''].join(' ')}>{formatDate(ligne.date_livraison)}</td>
+                      {isCdcSelected && (
+                        <>
+                          <td className="border-b border-r border-slate-200 px-2 py-2">
+                            {ligne.couv_statut ? (
+                              <span className={['inline-flex whitespace-nowrap rounded-full border px-2 py-1 text-xs font-semibold', couvertureClassName(ligne.couv_statut)].join(' ')} title={isCouvertureLine && ligne.couv_manque ? `Manque à date : ${formatQty(ligne.couv_manque)}` : undefined}>
+                                {couvertureLabel(ligne.couv_statut)}
+                              </span>
+                            ) : '—'}
+                          </td>
+                          <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{isCouvertureLine ? formatQty(ligne.couv_stock_disponible) : '—'}</td>
+                          <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{isCouvertureLine ? formatQty(ligne.couv_besoin_cumule) : '—'}</td>
+                          <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{isCouvertureLine ? formatQty(ligne.couv_receptions_avant) : '—'}</td>
+                          <td className={['border-b border-r border-slate-200 px-2 py-2 text-right font-semibold', isCouvertureLine && Number(ligne.couv_stock_projete) < 0 ? 'text-rose-700' : ''].join(' ')}>{isCouvertureLine ? formatQty(ligne.couv_stock_projete) : '—'}</td>
+                          <td className="whitespace-nowrap border-b border-r border-slate-200 px-2 py-2">
+                            {couvNonServable
+                              ? (ligne.couv_date_couverture
+                                ? <span className="text-orange-800">{formatDate(ligne.couv_date_couverture)}{ligne.couv_retard_jours !== null ? ` (+${ligne.couv_retard_jours} j)` : ''}</span>
+                                : <span className="font-semibold text-rose-700">Aucune réception connue</span>)
+                              : ligne.couv_statut === 'COUVERT_PAR_RECEPTION' && ligne.couv_date_couverture
+                                ? <span className="text-sky-800">{formatDate(ligne.couv_date_couverture)}</span>
+                                : '—'}
+                          </td>
+                          <td className="max-w-[320px] border-b border-r border-slate-200 px-2 py-2 text-xs" title={ligne.couv_prochaine_reception || undefined}>
+                            {ligne.couv_prochaine_reception || (isCouvertureLine ? <span className="text-slate-400">Aucune après la date de livraison</span> : '—')}
+                          </td>
+                        </>
+                      )}
                       <td className="border-b border-slate-200 px-2 py-2">{ligne.client_en_sommeil ? 'Oui' : 'Non'}</td>
                     </tr>
                   )
                 })}
-                {sortedLignes.length === 0 && <tr><td colSpan={16} className="px-4 py-8 text-center text-slate-500">Aucune ligne à afficher.</td></tr>}
+                {sortedLignes.length === 0 && <tr><td colSpan={ligneColumns.length} className="px-4 py-8 text-center text-slate-500">Aucune ligne à afficher.</td></tr>}
               </tbody>
             </table>
           </div>
