@@ -7,6 +7,11 @@
 // ClientRootShell) sont exposées ici pour que l'accueil puisse afficher un bloc
 // « Mes alertes » et ouvrir la fenêtre flottante « Centre d'alertes », dont le
 // rendu vit dans ClientRootShell (il a accès aux modales et aux navigations).
+//
+// ÉVOLUTION (2026-09-16) : chaque alerte porte en plus son objectif (la valeur
+// à atteindre, « 0 » sauf vigilance) et ce qui est attendu de l'utilisateur
+// (phrase + étapes éventuelles). Le Centre d'alertes affiche ces trois
+// informations côte à côte : alerte · objectif · action attendue.
 // ============================================================================
 
 import { createContext, useContext } from 'react'
@@ -23,6 +28,14 @@ export type AlertItem = {
   count: number
   /** Unité du compteur : « commandes », « lignes », « clients », « tâches »… */
   unit: string
+  /** Valeur cible affichée dans le pavé « Objectif » : « 0 », « Vigilance »… */
+  objective: string
+  /** Complément sous la valeur cible : « commande en retard », « mois en écart »… */
+  objectiveLabel: string
+  /** Ce que l'utilisateur doit faire pour faire disparaître l'alerte. */
+  expected: string
+  /** Étapes numérotées (facultatif) affichées sous la phrase attendue. */
+  expectedSteps?: string[]
   /** Ce que fait le clic sur la pastille (même action que le bandeau). */
   onOpen: () => void
   /** false = rien à traiter, on affiche OK sans action. */

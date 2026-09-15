@@ -35,14 +35,20 @@ import { CDC_RETARD_LABEL, getCdcRetardDescription, getCdcRetardThresholdIso } f
 //   arborescence.
 import { AlertsContext, type AlertItem } from '@/components/AlertsContext'
 // ÉVOLUTION (2026-09-15 soir) : Centre d'alertes.
-// - nouvelle pastille « Non servables » = CDC dont au moins une ligne est en
-//   rupture ou couverte par une réception tardive, livraison dans les 2 mois
-//   (v_portefeuille_couverture_stock) ; clic → /portefeuille-livraison avec le
-//   filtre couverture « non servables » et l'horizon 2 mois.
+// - nouvelle pastille « Commande non complète à la date de livraison client »
+//   (ex-« Non servables », renommée le 2026-09-16) = CDC dont au moins une
+//   ligne est en rupture ou couverte par une réception tardive, livraison
+//   dans les 2 mois (v_portefeuille_couverture_stock) ; clic →
+//   /portefeuille-livraison avec le filtre couverture et l'horizon 2 mois.
 // - toutes les pastilles sont exposées via AlertsContext ; le bloc « Mes
 //   alertes » de l'accueil et le titre « Mes alertes » du bandeau ouvrent la
-//   fenêtre flottante « Centre d'alertes » rendue ici (cartes agrandies, même
-//   action au clic que la pastille).
+//   fenêtre flottante « Centre d'alertes » rendue ici.
+// ÉVOLUTION (2026-09-16) : Centre d'alertes réorganisé (demande Arnaud) :
+//   une ligne par alerte = pavé alerte (compteur, clic = même écran que la
+//   pastille) · pavé « Objectif » (0, ou vigilance) · pavé « Ce qui est
+//   attendu » (action à mener dans SAGE / BLG, avec étapes numérotées si
+//   besoin), et un rappel en tête : les corrections se font dans SAGE / BLG,
+//   l'alerte disparaît à la synchronisation suivante.
 import {
   ACCUEIL_PATH,
   findActivePage,
@@ -64,6 +70,10 @@ const LOGIN_PATH = '/login'
 const FINANCEMENT_LOGIN_PATH = '/financement/login'
 const FINANCEMENT_HOME = '/financement'
 
+/** Libellé de l'alerte couverture stock (ex-« Non servables »). Utilisé tel
+ * quel dans le bandeau, le Centre d'alertes et les infobulles. */
+const COUVERTURE_ALERT_LABEL = 'Commande non complète à la date de livraison client'
+
 type StatusLevel = 'red' | 'orange' | 'green'
 
 type StatusLightProps = {
@@ -75,6 +85,8 @@ type StatusLightProps = {
   onClick?: () => void
   title?: string
   compact?: boolean
+  /** Libellé long : autorise le retour à la ligne (2 lignes max) dans le bandeau. */
+  multiline?: boolean
 }
 
 type UserAccessProfile = {
@@ -105,9 +117,9 @@ type CdcLivAvant2026Signal = {
   count: number
 }
 
-/** Pastille « Non servables » : CDC (documents distincts) ayant au moins une
- * ligne RUPTURE ou RECEPTION_TARDIVE avec une date de livraison dans les
- * COUVERTURE_HORIZON_MOIS prochains mois. */
+/** Pastille « Commande non complète à la date de livraison client » : CDC
+ * (documents distincts) ayant au moins une ligne RUPTURE ou RECEPTION_TARDIVE
+ * avec une date de livraison dans les COUVERTURE_HORIZON_MOIS prochains mois. */
 type CouvertureStockSignal = {
   status: StatusLevel
   count: number
@@ -202,6 +214,7 @@ function StatusLight({
   onClick,
   title,
   compact = false,
+  multiline = false,
 }: StatusLightProps) {
   const isRed = status === 'red'
   const isOrange = status === 'orange'
@@ -225,6 +238,11 @@ function StatusLight({
     ...(isRed ? styles.statusBadgeRed : isOrange ? styles.statusBadgeOrange : styles.statusBadgeGreen),
   } as React.CSSProperties
 
+  const labelStyle = {
+    ...styles.statusCardLabel,
+    ...(multiline ? styles.statusCardLabelMultiline : {}),
+  } as React.CSSProperties
+
   return (
     <button
       type="button"
@@ -234,7 +252,7 @@ function StatusLight({
       title={title || (clickable ? `Ouvrir ${label}` : `${label} : rien à traiter`)}
     >
       <span style={lightStyle} />
-      <span style={styles.statusCardLabel}>{label}</span>
+      <span style={labelStyle}>{label}</span>
       {typeof count === 'number' && count > 0 ? (
         <span style={badgeStyle}>{count}</span>
       ) : (
@@ -1478,11 +1496,12 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
     window.dispatchEvent(new CustomEvent('cegeclim:open-cdc-retard'))
   }
 
-  /** Pastille « Non servables » : lit v_portefeuille_couverture_stock (même
-   * vue que l'écran Portefeuille livraison), statuts RUPTURE +
-   * RECEPTION_TARDIVE, livraison <= aujourd'hui + COUVERTURE_HORIZON_MOIS,
-   * périmètre agences / collaborateurs de l'utilisateur. Compte les CDC
-   * distincts (et, pour le Centre d'alertes, les lignes et les clients). */
+  /** Pastille « Commande non complète à la date de livraison client » : lit
+   * v_portefeuille_couverture_stock (même vue que l'écran Portefeuille
+   * livraison), statuts RUPTURE + RECEPTION_TARDIVE, livraison <= aujourd'hui
+   * + COUVERTURE_HORIZON_MOIS, périmètre agences / collaborateurs de
+   * l'utilisateur. Compte les CDC distincts (et, pour le Centre d'alertes,
+   * les lignes et les clients). */
   async function refreshCouvertureStockSignal(accessProfile?: UserAccessProfile | null) {
     const allowedAgences = getAllowedAgencesForStatus(accessProfile)
     const allowedCollaborateurs = getAllowedCollaborateursForStatus(accessProfile)
@@ -1520,9 +1539,10 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
     }
   }
 
-  /** Ouvre le portefeuille filtré sur les CDC non servables : l'écran lit
-   * ?couverture=non-servable au montage (types CDC, filtre couverture,
-   * horizon 2 mois) et l'événement couvre le cas où il est déjà affiché. */
+  /** Ouvre le portefeuille filtré sur les commandes non complètes à la date
+   * de livraison : l'écran lit ?couverture=non-servable au montage (types
+   * CDC, filtre couverture, horizon 2 mois) et l'événement couvre le cas où
+   * il est déjà affiché. */
   function openCouvertureStock() {
     router.push(`/portefeuille-livraison?couverture=non-servable&open=${Date.now()}`)
     window.dispatchEvent(new CustomEvent('cegeclim:open-couverture-stock'))
@@ -1732,8 +1752,8 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
 
     if (rights.show_alert_cdc_liv_avant_2026) {
       tasks.push(refreshCdcLivAvant2026Signal(profile))
-      // La pastille « Non servables » suit le droit de la pastille CDC
-      // (même écran cible, même périmètre). Pour la découpler : ajouter un
+      // La pastille « Commande non complète… » suit le droit de la pastille
+      // CDC (même écran cible, même périmètre). Pour la découpler : ajouter un
       // droit show_alert_couverture_stock dans access_profiles /
       // user_page_access / AccessContext et remplacer le test ici et dans
       // le bandeau.
@@ -1811,7 +1831,9 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
   }
 
   // ── Centre d'alertes : mêmes pastilles, mêmes actions, exposées au reste
-  // de l'app (bloc « Mes alertes » de l'accueil) via AlertsContext. ─────────
+  // de l'app (bloc « Mes alertes » de l'accueil) via AlertsContext. Chaque
+  // alerte porte son objectif et l'action attendue (validés par Arnaud le
+  // 2026-09-16). ────────────────────────────────────────────────────────────
   const alertItems: AlertItem[] = []
   if (rights.show_alert_cerfa_ko) {
     alertItems.push({
@@ -1821,6 +1843,9 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
       status: cerfaKoCount > 0 ? 'red' : 'green',
       count: cerfaKoCount,
       unit: 'ligne(s)',
+      objective: '0',
+      objectiveLabel: 'ligne sans CERFA',
+      expected: 'Relancer le client pour obtenir le CERFA, puis renseigner l’affaire sur la ligne de facture.',
       clickable: cerfaKoCount > 0,
       onOpen: () => void openCerfaModal(),
     })
@@ -1829,20 +1854,31 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
     alertItems.push({
       key: 'cdc-retard',
       label: CDC_RETARD_LABEL,
-      description: `Commandes clients en retard de livraison (${getCdcRetardDescription()}).`,
+      description: `Commandes clients dont la date de livraison est dans le passé (${getCdcRetardDescription()}).`,
       status: cdcLivAvant2026Signal.status,
       count: cdcLivAvant2026Signal.count,
       unit: 'commande(s)',
+      objective: '0',
+      objectiveLabel: 'commande avec une date de livraison passée',
+      expected: 'Appeler le client et recaler la date de livraison de la commande dans SAGE / BLG.',
       clickable: cdcLivAvant2026Signal.count > 0,
       onOpen: openCdcLivAvant2026,
     })
     alertItems.push({
       key: 'couverture-stock',
-      label: 'Non servables',
-      description: `Commandes clients à livrer dans les ${COUVERTURE_HORIZON_MOIS} mois qu'on ne peut pas servir (rupture ou réception fournisseur tardive) — ${couvertureStockSignal.nbLignes} ligne(s), ${couvertureStockSignal.nbClients} client(s).`,
+      label: COUVERTURE_ALERT_LABEL,
+      description: `Commandes clients à livrer dans les ${COUVERTURE_HORIZON_MOIS} mois dont au moins une ligne n'est pas disponible à la date de livraison saisie dans SAGE / BLG (rupture ou réception fournisseur tardive) — ${couvertureStockSignal.nbLignes} ligne(s), ${couvertureStockSignal.nbClients} client(s).`,
       status: couvertureStockSignal.status,
       count: couvertureStockSignal.count,
       unit: 'commande(s)',
+      objective: '0',
+      objectiveLabel: 'commande incomplète à sa date de livraison',
+      expected: 'La liste donne le ou les articles non disponibles et la date à laquelle la commande client sera complète. Une fois ces informations connues :',
+      expectedSteps: [
+        'Voir si une substitution est possible (autre référence).',
+        'Voir si une autre commande client peut être dépriorisée.',
+        'Contacter le client pour valider la solution envisagée, puis modifier ou recaler la date de livraison de la commande dans SAGE / BLG.',
+      ],
       clickable: couvertureStockSignal.count > 0,
       onOpen: openCouvertureStock,
     })
@@ -1855,6 +1891,9 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
       status: controleFraisPortSignal.status,
       count: controleFraisPortSignal.count,
       unit: 'action(s)',
+      objective: '0',
+      objectiveLabel: 'BL avec des frais de port à corriger',
+      expected: 'Corriger les frais de port (en trop ou manquants) sur les BL concernés, avant facturation.',
       clickable: true,
       onOpen: openControleFraisPort,
     })
@@ -1867,6 +1906,9 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
       status: certificationSignals.capacite.status,
       count: certificationSignals.capacite.count,
       unit: 'client(s)',
+      objective: 'Vigilance',
+      objectiveLabel: 'pas d’objectif chiffré',
+      expected: 'Pour information : anticiper avec le client le renouvellement de son attestation de capacité avant l’échéance.',
       clickable: certificationSignals.capacite.count > 0,
       onOpen: () => void openCertificationModal('capacite'),
     })
@@ -1879,6 +1921,9 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
       status: todoSignal.status,
       count: todoSignal.count,
       unit: 'tâche(s)',
+      objective: '0',
+      objectiveLabel: 'tâche en retard',
+      expected: 'Traiter ou replanifier les tâches qui vous sont assignées dans la Todo List.',
       clickable: true,
       onOpen: openTodoList,
     })
@@ -1891,6 +1936,9 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
       status: dataCoherenceSignal.status,
       count: dataCoherenceSignal.koMonths,
       unit: 'mois',
+      objective: '0',
+      objectiveLabel: 'mois en écart',
+      expected: 'Contrôle technique des données : signaler à l’administrateur tout mois en écart. Aucune action commerciale attendue.',
       clickable: true,
       onOpen: () => void openDataCoherenceModal(),
     })
@@ -2071,7 +2119,8 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
                       {rights.show_alert_cdc_liv_avant_2026 && (
                         <StatusLight
                           compact
-                          label="Non servables"
+                          multiline
+                          label={COUVERTURE_ALERT_LABEL}
                           status={couvertureStockSignal.status}
                           count={couvertureStockSignal.count}
                           blink={couvertureStockSignal.status === 'red' && statusBlinkOn}
@@ -2079,8 +2128,8 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
                           onClick={openCouvertureStock}
                           title={
                             couvertureStockSignal.count > 0
-                              ? `${couvertureStockSignal.count} CDC non servable(s) à livrer dans les ${COUVERTURE_HORIZON_MOIS} mois (${couvertureStockSignal.nbLignes} ligne(s), ${couvertureStockSignal.nbClients} client(s)) — cliquer pour les afficher dans le portefeuille`
-                              : `Aucun CDC non servable à livrer dans les ${COUVERTURE_HORIZON_MOIS} mois`
+                              ? `${couvertureStockSignal.count} commande(s) non complète(s) à la date de livraison client, à livrer dans les ${COUVERTURE_HORIZON_MOIS} mois (${couvertureStockSignal.nbLignes} ligne(s), ${couvertureStockSignal.nbClients} client(s)) — cliquer pour les afficher dans le portefeuille`
+                              : `Aucune commande non complète à la date de livraison client dans les ${COUVERTURE_HORIZON_MOIS} mois`
                           }
                         />
                       )}
@@ -2183,7 +2232,7 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
                   <div style={{ minWidth: 0 }}>
                     <div style={styles.alertCenterTitle}>Mes alertes</div>
                     <div style={styles.alertCenterSubtitle}>
-                      {alertsContextValue.activeCount} alerte{alertsContextValue.activeCount > 1 ? 's' : ''} à traiter sur {alertItems.length} suivie{alertItems.length > 1 ? 's' : ''} — cliquer sur une carte ouvre le même écran que la pastille du bandeau.
+                      {alertsContextValue.activeCount} alerte{alertsContextValue.activeCount > 1 ? 's' : ''} à traiter sur {alertItems.length} suivie{alertItems.length > 1 ? 's' : ''}. Pour chaque alerte : le compteur (cliquer ouvre le détail), l'objectif à atteindre et ce qui est attendu de vous.
                     </div>
                   </div>
                   <div style={styles.alertCenterActions}>
@@ -2201,45 +2250,86 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
                   </div>
                 </div>
 
-                <div style={styles.alertCenterGrid}>
-                  {alertItems.map((item) => {
-                    const tone = item.status === 'red' ? styles.alertCardRed : item.status === 'orange' ? styles.alertCardOrange : styles.alertCardGreen
-                    const numberTone = item.status === 'red' ? '#E07A4E' : item.status === 'orange' ? '#E0A961' : '#7FB7CB'
-                    return (
-                      <button
-                        key={item.key}
-                        type="button"
-                        className="cgcAlertCard"
-                        disabled={!item.clickable}
-                        onClick={() => {
-                          setAlertCenterOpen(false)
-                          item.onOpen()
-                        }}
-                        style={{ ...styles.alertCard, ...tone, ...(item.clickable ? {} : styles.alertCardIdle) }}
-                      >
-                        <span style={styles.alertCardTop}>
-                          <span
-                            style={{
-                              ...styles.statusLightDot,
-                              ...(item.status === 'red' ? styles.statusLightDotRed : item.status === 'orange' ? styles.statusLightDotOrange : styles.statusLightDotGreen),
+                <div style={styles.alertCenterBody}>
+                  <div style={styles.alertCenterNote}>
+                    <span style={styles.alertCenterNoteIcon}>↻</span>
+                    <span>
+                      Les corrections se font dans <strong>SAGE / BLG</strong>. Une fois l'action réalisée, l'alerte disparaît de cet écran
+                      à la synchronisation suivante — il n'y a rien à « clôturer » ici.
+                    </span>
+                  </div>
+
+                  <div style={styles.alertCenterColumnsHead} aria-hidden="true">
+                    <span style={styles.alertCenterColumnHead}>Alerte</span>
+                    <span style={styles.alertCenterColumnHead}>Objectif</span>
+                    <span style={styles.alertCenterColumnHead}>Ce qui est attendu de vous</span>
+                  </div>
+
+                  <div style={styles.alertCenterList}>
+                    {alertItems.map((item) => {
+                      const tone = item.status === 'red' ? styles.alertCardRed : item.status === 'orange' ? styles.alertCardOrange : styles.alertCardGreen
+                      const numberTone = item.status === 'red' ? '#E07A4E' : item.status === 'orange' ? '#E0A961' : '#7FB7CB'
+                      const isVigilance = item.objective !== '0'
+                      const objectiveReached = !isVigilance && item.count <= 0
+                      return (
+                        <div key={item.key} style={styles.alertRow}>
+                          <button
+                            type="button"
+                            className="cgcAlertCard"
+                            disabled={!item.clickable}
+                            onClick={() => {
+                              setAlertCenterOpen(false)
+                              item.onOpen()
                             }}
-                          />
-                          <span style={styles.alertCardLabel}>{item.label}</span>
-                        </span>
-                        <span style={styles.alertCardCountRow}>
-                          <span style={{ ...styles.alertCardCount, color: item.count > 0 ? numberTone : 'rgba(255,255,255,0.45)' }}>
-                            {item.count > 0 ? item.count.toLocaleString('fr-FR') : 'OK'}
-                          </span>
-                          {item.count > 0 ? <span style={styles.alertCardUnit}>{item.unit}</span> : null}
-                        </span>
-                        <span style={styles.alertCardDescription}>{item.description}</span>
-                        <span style={styles.alertCardCta}>{item.clickable ? 'Ouvrir ›' : 'Rien à traiter'}</span>
-                      </button>
-                    )
-                  })}
-                  {alertItems.length === 0 && (
-                    <div style={styles.alertCardEmpty}>Aucune alerte n'est activée sur votre profil.</div>
-                  )}
+                            style={{ ...styles.alertCard, ...tone, ...(item.clickable ? {} : styles.alertCardIdle) }}
+                          >
+                            <span style={styles.alertCardTop}>
+                              <span
+                                style={{
+                                  ...styles.statusLightDot,
+                                  ...(item.status === 'red' ? styles.statusLightDotRed : item.status === 'orange' ? styles.statusLightDotOrange : styles.statusLightDotGreen),
+                                }}
+                              />
+                              <span style={styles.alertCardLabel}>{item.label}</span>
+                            </span>
+                            <span style={styles.alertCardCountRow}>
+                              <span style={{ ...styles.alertCardCount, color: item.count > 0 ? numberTone : 'rgba(255,255,255,0.45)' }}>
+                                {item.count > 0 ? item.count.toLocaleString('fr-FR') : 'OK'}
+                              </span>
+                              {item.count > 0 ? <span style={styles.alertCardUnit}>{item.unit}</span> : null}
+                            </span>
+                            <span style={styles.alertCardDescription}>{item.description}</span>
+                            <span style={styles.alertCardCta}>{item.clickable ? 'Ouvrir la liste ›' : 'Rien à traiter'}</span>
+                          </button>
+
+                          <div style={{ ...styles.objectiveCard, ...(objectiveReached ? styles.objectiveCardReached : {}) }}>
+                            <span style={styles.objectiveKicker}>Objectif</span>
+                            <span style={{ ...styles.objectiveValue, ...(isVigilance ? styles.objectiveValueText : {}) }}>{item.objective}</span>
+                            <span style={styles.objectiveLabel}>{item.objectiveLabel}</span>
+                            {objectiveReached && <span style={styles.objectiveReachedTag}>Atteint</span>}
+                          </div>
+
+                          <div style={styles.expectedCard}>
+                            <span style={styles.expectedKicker}>Ce qui est attendu</span>
+                            <p style={styles.expectedText}>{item.expected}</p>
+                            {item.expectedSteps && item.expectedSteps.length > 0 && (
+                              <ol style={styles.expectedSteps}>
+                                {item.expectedSteps.map((step, index) => (
+                                  <li key={index} style={styles.expectedStep}>
+                                    <span style={styles.expectedStepIndex}>{index + 1}</span>
+                                    <span>{step}</span>
+                                  </li>
+                                ))}
+                              </ol>
+                            )}
+                          </div>
+                        </div>
+                      )
+                    })}
+                    {alertItems.length === 0 && (
+                      <div style={styles.alertCardEmpty}>Aucune alerte n'est activée sur votre profil.</div>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
@@ -3029,8 +3119,8 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   alertCenter: {
-    width: 'min(1040px, 96vw)',
-    maxHeight: '88vh',
+    width: 'min(1240px, 96vw)',
+    maxHeight: '90vh',
     display: 'flex',
     flexDirection: 'column',
     borderRadius: 24,
@@ -3085,21 +3175,71 @@ const styles: Record<string, React.CSSProperties> = {
     flexShrink: 0,
   },
 
-  alertCenterGrid: {
-    padding: 16,
+  alertCenterBody: {
+    padding: '14px 16px 18px',
     overflowY: 'auto',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 10,
+  },
+
+  // Rappel en tête : les corrections se font dans SAGE / BLG.
+  alertCenterNote: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: 10,
+    padding: '10px 14px',
+    borderRadius: 12,
+    border: '1px solid rgba(166,161,129,0.45)',
+    background: 'rgba(166,161,129,0.12)',
+    color: '#E9E5D6',
+    fontSize: 13,
+    lineHeight: 1.45,
+  },
+
+  alertCenterNoteIcon: {
+    fontSize: 16,
+    lineHeight: 1.2,
+    color: '#A6A181',
+    flexShrink: 0,
+  },
+
+  alertCenterColumnsHead: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
-    gap: 12,
+    gridTemplateColumns: 'minmax(260px, 300px) 170px minmax(0, 1fr)',
+    gap: 10,
+    padding: '2px 4px 0',
+  },
+
+  alertCenterColumnHead: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: 10,
+    letterSpacing: '0.14em',
+    textTransform: 'uppercase',
+    color: 'rgba(255,255,255,0.4)',
+  },
+
+  alertCenterList: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 10,
+  },
+
+  // Une ligne = pavé alerte · pavé objectif · pavé attendu.
+  alertRow: {
+    display: 'grid',
+    gridTemplateColumns: 'minmax(260px, 300px) 170px minmax(0, 1fr)',
+    gap: 10,
+    alignItems: 'stretch',
   },
 
   alertCard: {
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'flex-start',
-    gap: 8,
-    padding: '16px 18px',
-    borderRadius: 18,
+    gap: 6,
+    padding: '14px 16px',
+    borderRadius: 16,
     border: '1px solid rgba(255,255,255,0.10)',
     background: 'rgba(255,255,255,0.045)',
     color: '#F5F3EC',
@@ -3131,7 +3271,7 @@ const styles: Record<string, React.CSSProperties> = {
 
   alertCardTop: {
     display: 'flex',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     gap: 8,
   },
 
@@ -3139,9 +3279,10 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: 'var(--font-mono)',
     fontSize: 11.5,
     fontWeight: 700,
-    letterSpacing: '0.12em',
+    letterSpacing: '0.10em',
     textTransform: 'uppercase',
-    color: 'rgba(255,255,255,0.75)',
+    lineHeight: 1.3,
+    color: 'rgba(255,255,255,0.8)',
   },
 
   alertCardCountRow: {
@@ -3152,7 +3293,7 @@ const styles: Record<string, React.CSSProperties> = {
 
   alertCardCount: {
     fontFamily: 'var(--font-display)',
-    fontSize: 40,
+    fontSize: 36,
     fontWeight: 800,
     lineHeight: 1,
     letterSpacing: '-0.02em',
@@ -3165,9 +3306,9 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   alertCardDescription: {
-    fontSize: 13,
+    fontSize: 12.5,
     lineHeight: 1.45,
-    color: 'rgba(245,243,236,0.72)',
+    color: 'rgba(245,243,236,0.7)',
   },
 
   alertCardCta: {
@@ -3178,12 +3319,133 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   alertCardEmpty: {
-    gridColumn: '1 / -1',
     padding: 28,
     borderRadius: 16,
     border: '1px dashed rgba(255,255,255,0.22)',
     color: 'rgba(245,243,236,0.7)',
     textAlign: 'center',
+  },
+
+  // Pavé « Objectif » (sauge, pour se distinguer de l'orange des compteurs).
+  objectiveCard: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'flex-start',
+    justifyContent: 'center',
+    gap: 4,
+    padding: '14px 16px',
+    borderRadius: 16,
+    border: '1px solid rgba(166,161,129,0.5)',
+    background: 'rgba(166,161,129,0.16)',
+    color: '#E9E5D6',
+  },
+
+  objectiveCardReached: {
+    border: '1px solid rgba(75,146,172,0.5)',
+    background: 'rgba(75,146,172,0.14)',
+  },
+
+  objectiveKicker: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: 10.5,
+    fontWeight: 700,
+    letterSpacing: '0.14em',
+    textTransform: 'uppercase',
+    color: '#A6A181',
+  },
+
+  objectiveValue: {
+    fontFamily: 'var(--font-display)',
+    fontSize: 36,
+    fontWeight: 800,
+    lineHeight: 1,
+    letterSpacing: '-0.02em',
+    color: '#ffffff',
+  },
+
+  objectiveValueText: {
+    fontSize: 20,
+    lineHeight: 1.1,
+  },
+
+  objectiveLabel: {
+    fontSize: 12,
+    lineHeight: 1.35,
+    color: 'rgba(245,243,236,0.75)',
+  },
+
+  objectiveReachedTag: {
+    marginTop: 4,
+    fontFamily: 'var(--font-mono)',
+    fontSize: 10,
+    fontWeight: 700,
+    letterSpacing: '0.1em',
+    textTransform: 'uppercase',
+    color: '#8FC7DA',
+  },
+
+  // Pavé « Ce qui est attendu ».
+  expectedCard: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+    padding: '14px 16px',
+    borderRadius: 16,
+    border: '1px solid rgba(245,243,236,0.16)',
+    background: 'rgba(245,243,236,0.05)',
+    color: '#F5F3EC',
+    minWidth: 0,
+  },
+
+  expectedKicker: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: 10.5,
+    fontWeight: 700,
+    letterSpacing: '0.14em',
+    textTransform: 'uppercase',
+    color: 'rgba(255,255,255,0.5)',
+  },
+
+  expectedText: {
+    margin: 0,
+    fontSize: 14,
+    lineHeight: 1.5,
+    fontWeight: 600,
+    color: '#ffffff',
+  },
+
+  expectedSteps: {
+    margin: '2px 0 0',
+    padding: 0,
+    listStyle: 'none',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 5,
+  },
+
+  expectedStep: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: 8,
+    fontSize: 13,
+    lineHeight: 1.45,
+    color: 'rgba(245,243,236,0.85)',
+  },
+
+  expectedStepIndex: {
+    flexShrink: 0,
+    width: 20,
+    height: 20,
+    borderRadius: '50%',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontFamily: 'var(--font-mono)',
+    fontSize: 11,
+    fontWeight: 700,
+    background: 'rgba(166,161,129,0.28)',
+    color: '#E9E5D6',
+    marginTop: 1,
   },
 
   // FIX (2026-08) : panneau "Mes alertes" mieux identifié -- cadre teinté
@@ -3294,6 +3556,14 @@ const styles: Record<string, React.CSSProperties> = {
     lineHeight: 1,
     color: 'rgba(255,255,255,0.6)',
     whiteSpace: 'nowrap',
+  },
+
+  // Libellé long dans le bandeau : sur deux lignes, largeur bornée.
+  statusCardLabelMultiline: {
+    whiteSpace: 'normal',
+    lineHeight: 1.15,
+    maxWidth: 150,
+    textAlign: 'left',
   },
 
   statusLightDot: {
