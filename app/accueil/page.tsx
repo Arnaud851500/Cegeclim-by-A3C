@@ -1,429 +1,435 @@
 'use client'
 
-import { useMemo } from 'react'
+// ============================================================================
+// app/accueil/page.tsx — Page d'entrée desktop, même expérience que le mobile
+// ----------------------------------------------------------------------------
+// ÉVOLUTION (2026-09-15) : la grille de liens « Accès rapide » (fond clair,
+// sections Base clients / Territoire / Pilotage) est remplacée par les blocs
+// colorés de MobileHome. Un bloc regroupe plusieurs écrans (lib/navigation.ts) :
+//   - 1 écran autorisé  → le clic ouvre directement l'écran ;
+//   - 2 écrans et plus  → le clic ouvre un panneau listant les écrans du bloc.
+// Le retour ici se fait par le bouton MENU du bandeau (ClientRootShell) ; le
+// volet « Arborescence » du même bandeau permet de changer d'écran sans
+// repasser par cette page. Pour la mettre par défaut à tout le monde :
+// default_landing_page = /accueil sur les profils (écran Autorisations).
+// ============================================================================
+
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import type React from 'react'
 import { useRouter } from 'next/navigation'
-import { Montserrat } from 'next/font/google'
-import { useAccess, type AccessRights } from '@/components/AccessContext'
-import { useSocieteFilter } from '@/components/SocieteFilterContext'
+import { useAccess } from '@/components/AccessContext'
 import { useViewport } from '@/lib/useViewport'
 import MobileShell from '@/components/mobile/MobileShell'
-
-const montserrat = Montserrat({
-  subsets: ['latin'],
-  weight: ['400', '500', '600', '700', '800'],
-})
-
-type MenuAccessKey = Exclude<keyof AccessRights, 'allowed_scopes' | 'can_change_scope'>
-
-type QuickLink = {
-  label: string
-  path: string
-  accessKey?: MenuAccessKey
-  description: string
-}
-
-type QuickLinkSection = {
-  title: string
-  subtitle?: string
-  columns?: number
-  items: QuickLink[]
-}
+import { getVisibleBlocs, type NavBloc, type NavPage } from '@/lib/navigation'
 
 export default function AccueilPage() {
   const router = useRouter()
-  const { rights } = useAccess()
-  const { societeFilter } = useSocieteFilter()
-
-  // Bascule mobile : dès que le viewport passe sous le seuil défini dans
-  // useViewport (768px), on affiche l'interface mobile (menu 4 boutons +
-  // navigation interne) à la place de la grille de liens desktop ci-dessous.
-  // Rien d'autre sur cette page n'est affecté : le hook ne fait que décider
-  // quel rendu produire.
+  const { rights, email } = useAccess()
   const { isMobile } = useViewport()
 
-  const quickLinkSections = useMemo<QuickLinkSection[]>(() => {
-    const sections: QuickLinkSection[] = [
-      {
-        title: 'Base clients',
-        subtitle: 'Accès aux écrans de consultation, cartographie et suivi commercial.',
-        columns: 4,
-        items: [
-          {
-            label: 'Liste globale',
-            path: '/clients',
-            accessKey: 'can_clients',
-            description:
-              'Consulter et filtrer la base clients et prospects. Accéder aux informations utiles comme l’adresse, le site web et le téléphone.',
-          },
-          {
-            label: 'Carte',
-            path: '/carte',
-            accessKey: 'can_carte',
-            description:
-              'Visualiser les clients et prospects sur une carte pour faciliter les analyses géographiques.',
-          },
-          {
-            label: 'Clients CEGECLIM',
-            path: '/clients_cegeclim',
-            accessKey: 'can_clients_cegeclim',
-            description:
-              'Afficher les clients présents dans la base CEGECLIM et naviguer dans les informations de rattachement.',
-          },
-          {
-            label: 'Suivi prospects',
-            path: '/suivi_prospects',
-            accessKey: 'can_suivi_prospects',
-            description:
-              'Piloter l’avancement des prospects et les prochaines actions commerciales.',
-          },
-        ],
-      },
-      {
-        title: 'Territoire',
-        subtitle: 'Vision géographique, structure réseau et pilotage territorial.',
-        columns: 4,
-        items: [
-          {
-            label: 'Territoire',
-            path: '/territoire',
-            accessKey: 'can_territoire',
-            description:
-              'Analyser les territoires, les potentiels PAC et l’attractivité par département et par région.',
-          },
-          {
-            label: 'Agences',
-            path: '/agences',
-            accessKey: 'can_agences',
-            description:
-              'Visualiser les agences, leurs effectifs, surfaces, rattachements et caractéristiques principales.',
-          },
-          {
-            label: 'Cartographie',
-            path: '/cartographie',
-            accessKey: 'can_cartographie',
-            description:
-              'Explorer la représentation géographique des données sur fond de carte.',
-          },
-        ],
-      },
-      {
-        title: 'Pilotage & administration',
-        subtitle: 'Fonctions support, droits d’accès et outils de gestion transverses.',
-        columns: 4,
-        items: [
-          {
-            label: 'Documents',
-            path: '/documents',
-            accessKey: 'can_documents',
-            description:
-              'Accéder aux documents, dossiers et pièces partagées selon les droits attribués.',
-          },
-                    {
-            label: 'Todo List',
-            path: '/todo',
-            accessKey: 'can_todo',
-            description:
-              'Créer, suivre, et mettre à jour des taches',
-          },
-                    {
-            label: 'Activités - CA',
-            path: '/activites',
-            accessKey: 'can_activites',
-            description:
-              'Suivre les activités et les indicateurs de chiffre d’affaires.',
-          },
-                              {
-            label: 'Indicateurs',
-            path: '/indicateurs',
-            accessKey: 'can_dashboard',
-            description:
-              'Principaux indicateurs de performances (Commerce / Services / Coûts / Stocks/ ).',
-          },
-          {
-            label: 'Autorisations',
-            path: '/autorisation',
-            accessKey: 'can_autorisation',
-            description:
-              'Gérer les accès utilisateurs, les scopes, agences autorisées et départements visibles.',
-          },
+  const [openBloc, setOpenBloc] = useState<NavBloc | null>(null)
 
-          {
-            label: 'Stocks et flux log',
-            path: '/stocks',
-            accessKey: 'can_stocks',
-            description:
-              'Piloter les flux logistiques et les stocks.',
-          },
-        ],
-      },
-    ]
+  const blocs = useMemo(() => getVisibleBlocs(rights), [rights])
+  const nbEcrans = blocs.reduce((sum, bloc) => sum + bloc.pages.length, 0)
 
-    return sections
-      .map((section) => ({
-        ...section,
-        items: section.items.filter((item) => !item.accessKey || !!rights[item.accessKey]),
-      }))
-      .filter((section) => section.items.length > 0)
-  }, [rights])
+  const displayName =
+    String(rights.display_name || '').trim() ||
+    String(email || '').split('@')[0].replace(/[._-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) ||
+    ''
 
-  const nbRubriques = quickLinkSections.reduce((sum, section) => sum + section.items.length, 0)
+  const goTo = useCallback(
+    (page: NavPage) => {
+      setOpenBloc(null)
+      router.push(page.path)
+    },
+    [router]
+  )
 
-  // Rendu mobile : menu 4 boutons + navigation interne (Mon activité / Mes
-  // clients / Mes rdv / Mes alertes). Court-circuite tout le reste de la
-  // page desktop ci-dessous.
+  const onBlocClick = useCallback(
+    (bloc: NavBloc) => {
+      if (bloc.pages.length === 1) {
+        goTo(bloc.pages[0])
+        return
+      }
+      setOpenBloc(bloc)
+    },
+    [goTo]
+  )
+
+  useEffect(() => {
+    if (!openBloc) return
+    function onKey(event: KeyboardEvent) {
+      if (event.key === 'Escape') setOpenBloc(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [openBloc])
+
   if (isMobile) {
     return <MobileShell />
   }
 
   return (
-    <div className={montserrat.className} style={styles.page}>
+    <div style={styles.page}>
+      <style>{`
+        .cgcBloc { transition: transform 0.16s ease, box-shadow 0.16s ease, filter 0.16s ease; }
+        .cgcBloc:hover { transform: translateY(-2px); filter: brightness(1.08); box-shadow: 0 16px 36px rgba(0,0,0,0.42); }
+        .cgcBloc:focus-visible { outline: 2px solid #F5F3EC; outline-offset: 3px; }
+        .cgcBlocPage:hover { background: rgba(255,255,255,0.09); border-color: rgba(255,255,255,0.22); }
+        .cgcBlocPage:focus-visible { outline: 2px solid #F5F3EC; outline-offset: 2px; }
+        .cgcPanelClose:hover { background: rgba(255,255,255,0.10); color: #fff; }
+        @media (max-width: 1240px) { .cgcBlocGrid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; } }
+        @media (prefers-reduced-motion: reduce) { .cgcBloc { transition: none; } .cgcBloc:hover { transform: none; } }
+      `}</style>
+
       <div style={styles.hero}>
-        <div style={styles.overlay}>
-          <div style={styles.topBlock}>
-            <div style={styles.kicker}>Accueil intranet</div>
-            <h1 style={styles.title}>Bienvenue sur l’environnement CEGECLIM</h1>
-            <p style={styles.subtitle}>
-              Accédez rapidement à vos écrans autorisés depuis cette page d’entrée, également
-              disponibles via le bandeau supérieur.
-            </p>
-          </div>
+        <div style={styles.kicker}>CEGECLIM</div>
+        <h1 style={styles.title}>Bonjour{displayName ? `, ${displayName}` : ''}.</h1>
+        <div style={styles.lead}>
+          {nbEcrans} écran{nbEcrans > 1 ? 's' : ''} accessible{nbEcrans > 1 ? 's' : ''} dans {blocs.length} bloc{blocs.length > 1 ? 's' : ''}.
+          Choisissez un bloc pour ouvrir un écran ; le bouton MENU du bandeau vous ramène ici.
+        </div>
+      </div>
 
-          <div style={styles.mainPanel}>
-            <div style={styles.panelHeader}>
-              <div style={styles.panelTitle}>Accès rapide</div>
-              <div style={styles.panelSubtitle}>
+      {blocs.length === 0 ? (
+        <div style={styles.empty}>
+          Aucun écran n’est ouvert sur votre profil. Rapprochez-vous d’un administrateur pour obtenir des accès.
+        </div>
+      ) : (
+        <div className="cgcBlocGrid" style={styles.grid}>
+          {blocs.map((bloc) => (
+            <button
+              key={bloc.id}
+              type="button"
+              className="cgcBloc"
+              onClick={() => onBlocClick(bloc)}
+              style={{
+                ...styles.bloc,
+                background: `linear-gradient(180deg, ${bloc.gradient[0]} 0%, ${bloc.gradient[1]} 100%)`,
+              }}
+            >
+              <span style={styles.blocChevron} aria-hidden="true">›</span>
+              <span style={{ ...styles.blocIcon, background: bloc.iconBg }}>{bloc.icon}</span>
+              <span style={styles.blocLabel}>{bloc.label}</span>
+              <span style={styles.blocSubtitle}>{bloc.subtitle}</span>
+              <span style={styles.blocCount}>
+                {bloc.pages.length === 1
+                  ? bloc.pages[0].label
+                  : `${bloc.pages.length} écrans`}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
 
+      {openBloc && (
+        <div
+          style={styles.panelBackdrop}
+          onClick={() => setOpenBloc(null)}
+          role="presentation"
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={openBloc.label}
+            style={styles.panel}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div
+              style={{
+                ...styles.panelHeader,
+                background: `linear-gradient(180deg, ${openBloc.gradient[0]} 0%, ${openBloc.gradient[1]} 100%)`,
+              }}
+            >
+              <span style={{ ...styles.panelIcon, background: openBloc.iconBg }}>{openBloc.icon}</span>
+              <div style={{ minWidth: 0 }}>
+                <div style={styles.panelTitle}>{openBloc.label}</div>
+                <div style={styles.panelSubtitle}>{openBloc.subtitle}</div>
               </div>
-              <div style={styles.counterPill}>{nbRubriques} écran(s) accessible(s)</div>
+              <button
+                type="button"
+                className="cgcPanelClose"
+                onClick={() => setOpenBloc(null)}
+                style={styles.panelClose}
+                aria-label="Fermer"
+              >
+                ✕
+              </button>
             </div>
 
-            <div style={styles.sectionsWrapper}>
-              {quickLinkSections.map((section) => (
-                <div key={section.title} style={styles.sectionBlock}>
-                  <div style={styles.sectionHeader}>
-                    <div style={styles.sectionTitle}>{section.title}</div>
-                    {section.subtitle ? (
-                      <div style={styles.sectionSubtitle}>{section.subtitle}</div>
+            <div style={styles.panelBody}>
+              {openBloc.pages.map((page, index) => (
+                <button
+                  key={page.path}
+                  type="button"
+                  className="cgcBlocPage"
+                  onClick={() => goTo(page)}
+                  style={styles.panelPage}
+                >
+                  <span style={styles.panelPageIndex}>{index + 1}</span>
+                  <span style={{ minWidth: 0 }}>
+                    <span style={styles.panelPageLabel}>{page.label}</span>
+                    {page.description ? (
+                      <span style={styles.panelPageDescription}>{page.description}</span>
                     ) : null}
-                  </div>
-
-                  <div
-                    style={{
-                      ...styles.linksGrid,
-                      gridTemplateColumns: `repeat(${section.columns || 4}, minmax(0, 1fr))`,
-                    }}
-                  >
-                    {section.items.map((item) => (
-                      <button
-                        key={item.path}
-                        onClick={() => router.push(item.path)}
-                        style={styles.linkCard}
-                      >
-                        <div style={styles.linkTopRow}>
-                          <div style={styles.linkTitle}>{item.label}</div>
-                          <div style={styles.linkCta}>OUVRIR</div>
-                        </div>
-
-                        <div style={styles.linkDescription}>{item.description}</div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                  </span>
+                  <span style={styles.panelPageChevron} aria-hidden="true">›</span>
+                </button>
               ))}
             </div>
           </div>
         </div>
-      </div>
+      )}
     </div>
   )
 }
 
 const styles: Record<string, React.CSSProperties> = {
   page: {
-    minHeight: '100%',
+    maxWidth: 1360,
+    margin: '0 auto',
+    padding: '18px 8px 40px',
+    color: '#F5F3EC',
+    fontFamily: 'var(--font-body)',
   },
 
   hero: {
-    minHeight: 'calc(100vh - 160px)',
-    backgroundImage:
-      'url("https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/public/Agences/maison-login.jpg")',
-    backgroundSize: 'cover',
-    backgroundPosition: 'center center',
-    backgroundRepeat: 'no-repeat',
-    borderRadius: 24,
-    overflow: 'hidden',
-  },
-
-  overlay: {
-    minHeight: 'calc(100vh - 160px)',
-    background:
-      'linear-gradient(180deg, rgba(255,255,255,0.78) 0%, rgba(255,255,255,0.88) 100%)',
-    padding: 28,
-    boxSizing: 'border-box',
-  },
-
-  topBlock: {
-    marginBottom: 24,
+    marginBottom: 22,
   },
 
   kicker: {
-    fontSize: 13,
-    fontWeight: 800,
-    color: '#5ea7c3',
-    textTransform: 'uppercase',
-    letterSpacing: '0.08em',
-    marginBottom: 10,
+    fontFamily: 'var(--font-mono)',
+    fontSize: 12,
+    letterSpacing: '0.32em',
+    color: 'rgba(245,243,236,0.55)',
+    marginBottom: 8,
   },
 
   title: {
     margin: 0,
-    fontSize: 34,
+    fontFamily: 'var(--font-display)',
+    fontSize: 38,
     fontWeight: 800,
-    color: '#17344d',
-    letterSpacing: '-0.03em',
     lineHeight: 1.05,
+    letterSpacing: '-0.02em',
+    color: '#ffffff',
   },
 
-  subtitle: {
-    margin: '10px 0 0 0',
-    fontSize: 17,
-    color: '#475467',
-    maxWidth: 1520,
+  lead: {
+    marginTop: 10,
+    fontSize: 15,
     lineHeight: 1.5,
+    color: 'rgba(245,243,236,0.62)',
+    maxWidth: 720,
   },
 
-  contextBadge: {
+  empty: {
+    padding: 28,
+    borderRadius: 20,
+    border: '1px dashed rgba(255,255,255,0.22)',
+    color: 'rgba(245,243,236,0.7)',
+    fontSize: 15,
+  },
+
+  grid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+    gap: 16,
+  },
+
+  bloc: {
+    position: 'relative',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    minHeight: 228,
+    padding: '26px 22px 22px',
+    borderRadius: 26,
+    border: '1px solid rgba(255,255,255,0.12)',
+    boxShadow: '0 10px 28px rgba(0,0,0,0.32)',
+    color: '#ffffff',
+    cursor: 'pointer',
+    textAlign: 'center',
+    fontFamily: 'inherit',
+  },
+
+  blocChevron: {
+    position: 'absolute',
+    top: 16,
+    right: 20,
+    fontSize: 24,
+    lineHeight: 1,
+    color: 'rgba(255,255,255,0.7)',
+  },
+
+  blocIcon: {
+    width: 68,
+    height: 68,
+    borderRadius: 18,
     display: 'inline-flex',
-    marginTop: 14,
-    padding: '8px 12px',
-    borderRadius: 999,
-    background: 'rgba(255,255,255,0.75)',
-    border: '1px solid #dbe4ea',
-    color: '#17344d',
-    fontSize: 13,
-    fontWeight: 700,
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: 34,
+    lineHeight: 1,
+    marginBottom: 6,
   },
 
-  mainPanel: {
-    background: 'rgba(255,255,255,0.94)',
-    border: '1px solid #dbe4ea',
-    borderRadius: 24,
+  blocLabel: {
+    fontFamily: 'var(--font-display)',
+    fontSize: 27,
+    fontWeight: 800,
+    lineHeight: 1.1,
+    letterSpacing: '-0.01em',
+  },
+
+  blocSubtitle: {
+    fontSize: 14.5,
+    lineHeight: 1.35,
+    color: 'rgba(255,255,255,0.78)',
+  },
+
+  blocCount: {
+    marginTop: 6,
+    fontFamily: 'var(--font-mono)',
+    fontSize: 11,
+    letterSpacing: '0.12em',
+    textTransform: 'uppercase',
+    color: 'rgba(255,255,255,0.55)',
+  },
+
+  panelBackdrop: {
+    position: 'fixed',
+    inset: 0,
+    zIndex: 900,
+    background: 'rgba(6,10,18,0.72)',
+    backdropFilter: 'blur(4px)',
+    WebkitBackdropFilter: 'blur(4px)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
     padding: 24,
-    boxShadow: '0 10px 28px rgba(16,24,40,0.07)',
+  },
+
+  panel: {
+    width: 'min(720px, 96vw)',
+    maxHeight: '86vh',
+    display: 'flex',
+    flexDirection: 'column',
+    borderRadius: 24,
+    overflow: 'hidden',
+    background: '#101A2E',
+    border: '1px solid rgba(255,255,255,0.14)',
+    boxShadow: '0 30px 80px rgba(0,0,0,0.6)',
+    color: '#F5F3EC',
   },
 
   panelHeader: {
-    marginBottom: 18,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 14,
+    padding: '18px 20px',
+  },
+
+  panelIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 14,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: 24,
+    flexShrink: 0,
   },
 
   panelTitle: {
-    fontSize: 20,
+    fontFamily: 'var(--font-display)',
+    fontSize: 22,
     fontWeight: 800,
-    color: '#17344d',
-    letterSpacing: '-0.02em',
+    lineHeight: 1.1,
+    color: '#ffffff',
   },
 
   panelSubtitle: {
-    marginTop: 6,
-    fontSize: 14,
-    color: '#667085',
-    lineHeight: 1.45,
-    maxWidth: 980,
+    marginTop: 3,
+    fontSize: 13.5,
+    color: 'rgba(255,255,255,0.75)',
   },
 
-  counterPill: {
-    display: 'inline-flex',
-    marginTop: 12,
-    padding: '8px 12px',
-    borderRadius: 999,
-    background: '#eef7fb',
-    border: '1px solid #cfe4ed',
-    color: '#17344d',
-    fontSize: 13,
-    fontWeight: 800,
-  },
-
-  sectionsWrapper: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 10,
-  },
-
-  sectionBlock: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 12,
-  },
-
-  sectionHeader: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 4,
-  },
-
-  sectionTitle: {
-    fontSize: 20,
-    fontWeight: 800,
-    color: '#17344d',
-    letterSpacing: '-0.02em',
-  },
-
-  sectionSubtitle: {
-    fontSize: 14,
-    color: '#667085',
-    lineHeight: 1.4,
-  },
-
-  linksGrid: {
-    display: 'grid',
-    gap: 12,
-  },
-
-  linkCard: {
-    textAlign: 'left',
-    border: '1px solid #dbe4ea',
-    background: '#ffffff',
-    borderRadius: 28,
-    padding: '22px 22px 18px',
+  panelClose: {
+    marginLeft: 'auto',
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    border: '1px solid rgba(255,255,255,0.22)',
+    background: 'rgba(255,255,255,0.06)',
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 15,
     cursor: 'pointer',
-    boxShadow: '0 2px 10px rgba(16,24,40,0.04)',
-    minHeight: 100,
+    flexShrink: 0,
+  },
+
+  panelBody: {
+    padding: 12,
+    overflowY: 'auto',
     display: 'flex',
     flexDirection: 'column',
-    gap: 10,
+    gap: 8,
   },
 
-  linkTopRow: {
-    display: 'flex',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-    gap: 10,
+  panelPage: {
+    display: 'grid',
+    gridTemplateColumns: '34px minmax(0, 1fr) 20px',
+    alignItems: 'center',
+    gap: 12,
+    width: '100%',
+    padding: '12px 14px',
+    borderRadius: 14,
+    border: '1px solid rgba(255,255,255,0.10)',
+    background: 'rgba(255,255,255,0.045)',
+    color: '#F5F3EC',
+    cursor: 'pointer',
+    textAlign: 'left',
+    fontFamily: 'inherit',
+    transition: 'background 0.14s ease, border-color 0.14s ease',
   },
 
-  linkTitle: {
-    fontSize: 20,
-    fontWeight: 800,
-    color: '#17344d',
-    lineHeight: 1.05,
-    letterSpacing: '-0.02em',
-    maxWidth: '75%',
-  },
-
-  linkDescription: {
-    fontSize: 12,
-    lineHeight: 1.45,
-    color: '#475467',
-    marginTop: 2,
-  },
-
-  linkCta: {
+  panelPageIndex: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontFamily: 'var(--font-mono)',
     fontSize: 13,
-    fontWeight: 800,
-    color: '#5ea7c3',
-    textTransform: 'uppercase',
-    letterSpacing: '0.06em',
-    whiteSpace: 'nowrap',
-    flexShrink: 0,
-    paddingTop: 2,
+    fontWeight: 700,
+    color: '#A6A181',
+    background: 'rgba(166,161,129,0.12)',
+    border: '1px solid rgba(166,161,129,0.35)',
+  },
+
+  panelPageLabel: {
+    display: 'block',
+    fontSize: 16,
+    fontWeight: 700,
+    lineHeight: 1.2,
+    color: '#ffffff',
+  },
+
+  panelPageDescription: {
+    display: 'block',
+    marginTop: 3,
+    fontSize: 13,
+    lineHeight: 1.4,
+    color: 'rgba(245,243,236,0.6)',
+  },
+
+  panelPageChevron: {
+    fontSize: 22,
+    lineHeight: 1,
+    color: 'rgba(255,255,255,0.45)',
+    textAlign: 'right',
   },
 }

@@ -1,11 +1,11 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type React from 'react'
 import { usePathname, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { logUserEvent } from '@/lib/audit'
-import { AccessProvider, useAccess, type AccessRights } from '@/components/AccessContext'
+import { AccessProvider, useAccess } from '@/components/AccessContext'
 import { Analytics } from '@vercel/analytics/next'
 import AutoLogout from '@/components/autologout'
 import { usePageFilterAccess } from '@/lib/pageAccessFilters'
@@ -23,6 +23,26 @@ import {
 // show_alert_cdc_liv_avant_2026, aucune migration côté base.
 import { CDC_RETARD_LABEL, getCdcRetardDescription, getCdcRetardThresholdIso } from '@/lib/cdcRetard'
 
+// ÉVOLUTION (2026-09-15) : navigation desktop alignée sur le mobile.
+// - L'arborescence (blocs → écrans) vit dans lib/navigation.ts, partagée avec
+//   app/accueil/page.tsx (grille de blocs).
+// - Les groupes déroulants au survol du bandeau sont remplacés par :
+//     • un bouton MENU qui ramène sur /accueil (la grille de blocs) ;
+//     • un bouton « Arborescence » qui ouvre un volet vertical dépliable
+//       (bloc → écrans) pour changer d'écran sans repasser par l'accueil ;
+//     • un fil d'Ariane « Bloc › Écran » rappelant où l'on se trouve.
+// - Le contrôle d'accès (/unauthorized) et le titre de page lisent la même
+//   arborescence.
+import {
+  ACCUEIL_PATH,
+  findActivePage,
+  getVisibleBlocs,
+  hasStandardMenuAccess as computeStandardMenuAccess,
+  isPathAllowed,
+  pageTitleFor,
+  type NavBloc,
+} from '@/lib/navigation'
+
 // ÉVOLUTION (2026-09-14) : univers « Aides financières » (dossiers CEE).
 // - /financement/login est une seconde porte d'entrée, publique comme /login,
 //   qui ne parle que d'aides financières (pas de pilotage commercial).
@@ -33,39 +53,6 @@ import { CDC_RETARD_LABEL, getCdcRetardDescription, getCdcRetardThresholdIso } f
 const LOGIN_PATH = '/login'
 const FINANCEMENT_LOGIN_PATH = '/financement/login'
 const FINANCEMENT_HOME = '/financement'
-
-type MenuAccessKey = Exclude<
-  keyof AccessRights,
-  | 'allowed_scopes'
-  | 'allowed_agences'
-  | 'allowed_collaborateurs'
-  | 'allowed_departements'
-  | 'allowed_codes_postaux'
-  | 'display_name'
-  | 'default_landing_page'
-  | 'profile_id'
-  | 'profile_code'
-  | 'profile_name'
-  | 'show_alert_cerfa_ko'
-  | 'show_alert_cdc_liv_avant_2026'
-  | 'show_alert_controle_frais_port'
-  | 'show_alert_capacite_gaz'
-  | 'show_alert_todo'
-  | 'show_alert_data_coherence'
-  | 'can_change_scope'
->
-
-type MenuItem = {
-  label: string
-  path: string
-  accessKey?: MenuAccessKey
-  activeLabel?: string
-}
-
-type MenuGroup = {
-  label: string
-  items: MenuItem[]
-}
 
 type StatusLevel = 'red' | 'orange' | 'green'
 
@@ -235,6 +222,160 @@ function StatusLight({
   )
 }
 
+// ── Volet « Arborescence » ────────────────────────────────────────────
+// Panneau latéral droit, blocs dépliables (bloc → écrans), écran courant
+// surligné. Le bloc de l'écran courant est déplié à l'ouverture.
+function NavigationTree({
+  open,
+  blocs,
+  pathname,
+  onNavigate,
+  onClose,
+}: {
+  open: boolean
+  blocs: NavBloc[]
+  pathname: string
+  onNavigate: (path: string) => void
+  onClose: () => void
+}) {
+  const activeEntry = useMemo(() => findActivePage(pathname), [pathname])
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+
+  useEffect(() => {
+    if (!open) return
+    setExpanded(activeEntry ? { [activeEntry.bloc.id]: true } : {})
+  }, [open, activeEntry])
+
+  useEffect(() => {
+    if (!open) return
+    function onKey(event: KeyboardEvent) {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open, onClose])
+
+  if (!open) return null
+
+  const allExpanded = blocs.every((bloc) => expanded[bloc.id])
+
+  return (
+    <div style={styles.treeBackdrop} onClick={onClose} role="presentation">
+      <aside
+        role="dialog"
+        aria-modal="true"
+        aria-label="Arborescence des écrans"
+        style={styles.treePanel}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div style={styles.treeHeader}>
+          <div>
+            <div style={styles.treeTitle}>Arborescence</div>
+            <div style={styles.treeSubtitle}>
+              {blocs.length} bloc{blocs.length > 1 ? 's' : ''} · {blocs.reduce((s, b) => s + b.pages.length, 0)} écrans
+            </div>
+          </div>
+          <div style={styles.treeHeaderActions}>
+            <button
+              type="button"
+              className="cgcTreeGhost"
+              style={styles.treeGhostBtn}
+              onClick={() =>
+                setExpanded(allExpanded ? {} : Object.fromEntries(blocs.map((bloc) => [bloc.id, true])))
+              }
+            >
+              {allExpanded ? 'Tout replier' : 'Tout déplier'}
+            </button>
+            <button type="button" className="cgcTreeGhost" style={styles.treeCloseBtn} onClick={onClose} aria-label="Fermer">
+              ✕
+            </button>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          className="cgcTreeHome"
+          style={{
+            ...styles.treeHome,
+            ...(pathname === ACCUEIL_PATH ? styles.treeHomeActive : {}),
+          }}
+          onClick={() => onNavigate(ACCUEIL_PATH)}
+        >
+          <span style={styles.treeHomeIcon}>☰</span>
+          <span>Accueil — tous les blocs</span>
+        </button>
+
+        <div style={styles.treeBody}>
+          {blocs.map((bloc) => {
+            const isOpen = Boolean(expanded[bloc.id])
+            const isActiveBloc = activeEntry?.bloc.id === bloc.id
+            return (
+              <div key={bloc.id} style={styles.treeBloc}>
+                <button
+                  type="button"
+                  className="cgcTreeBloc"
+                  aria-expanded={isOpen}
+                  style={{
+                    ...styles.treeBlocBtn,
+                    ...(isActiveBloc ? styles.treeBlocBtnActive : {}),
+                  }}
+                  onClick={() => setExpanded((current) => ({ ...current, [bloc.id]: !current[bloc.id] }))}
+                >
+                  <span
+                    style={{
+                      ...styles.treeBlocIcon,
+                      background: `linear-gradient(180deg, ${bloc.gradient[0]}, ${bloc.gradient[1]})`,
+                    }}
+                  >
+                    {bloc.icon}
+                  </span>
+                  <span style={{ minWidth: 0, flex: 1 }}>
+                    <span style={styles.treeBlocLabel}>{bloc.label}</span>
+                    <span style={styles.treeBlocMeta}>{bloc.pages.length} écran{bloc.pages.length > 1 ? 's' : ''}</span>
+                  </span>
+                  <span
+                    style={{
+                      ...styles.treeCaret,
+                      transform: isOpen ? 'rotate(90deg)' : 'rotate(0deg)',
+                    }}
+                    aria-hidden="true"
+                  >
+                    ›
+                  </span>
+                </button>
+
+                {isOpen && (
+                  <div style={styles.treePages}>
+                    {bloc.pages.map((page, index) => {
+                      const active = activeEntry?.page.path === page.path && activeEntry.bloc.id === bloc.id
+                      return (
+                        <button
+                          key={`${bloc.id}-${page.path}`}
+                          type="button"
+                          className="cgcTreePage"
+                          aria-current={active ? 'page' : undefined}
+                          style={{
+                            ...styles.treePageBtn,
+                            ...(active ? styles.treePageBtnActive : {}),
+                          }}
+                          onClick={() => onNavigate(page.path)}
+                        >
+                          <span style={styles.treePageIndex}>{index + 1}</span>
+                          <span style={styles.treePageLabel}>{page.label}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      </aside>
+    </div>
+  )
+}
+
 function normalizeLoose(value: any) {
   return String(value ?? '').trim().toLowerCase()
 }
@@ -345,8 +486,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const { loading: accessLoading, rights, email } = useAccess()
   const { isMobile } = useViewport()
 
-  const [openGroup, setOpenGroup] = useState<string | null>(null)
-  const [hoverTimeout, setHoverTimeout] = useState<ReturnType<typeof setTimeout> | null>(null)
+  const [treeOpen, setTreeOpen] = useState(false)
   const [sessionChecked, setSessionChecked] = useState(false)
   const [hasSession, setHasSession] = useState(false)
   const [statusBlinkOn, setStatusBlinkOn] = useState(true)
@@ -437,41 +577,19 @@ function AppShell({ children }: { children: React.ReactNode }) {
   ].filter(Boolean).length
 
   // Droits « historiques » (commercial, pilotage, admin), hors financement.
-  const hasStandardMenuAccess =
-    rights.can_dashboard ||
-    rights.can_territoire ||
-    rights.can_cartographie ||
-    rights.can_clients ||
-    rights.can_carte ||
-    rights.can_todo ||
-    rights.can_clients_cegeclim ||
-    rights.can_suivi_prospects ||
-    rights.can_agences ||
-    rights.can_autorisation ||
-    rights.can_documents ||
-    rights.can_stocks ||
-    rights.can_activites
+  const hasStandardMenuAccess = computeStandardMenuAccess(rights)
 
-  const hasAnyMenuAccess = hasStandardMenuAccess || rights.can_financement
+  const hasAnyMenuAccess = hasStandardMenuAccess || Boolean(rights.can_financement)
 
   // Profil « aides financières » pur : rien du pilotage commercial ne doit
   // transparaître dans le bandeau.
   const isFinancementOnly = Boolean(rights.can_financement) && !hasStandardMenuAccess
 
-  const getVisibleItems = (group: MenuGroup) =>
-    group.items.filter((item) => {
-      if (item.path === '/accueil') return hasAnyMenuAccess
-      return !item.accessKey || rights[item.accessKey]
-    })
-
-  const isGroupVisible = (group: MenuGroup) => getVisibleItems(group).length > 0
-
-  const isMenuItemActive = (item: MenuItem) =>
-    pathname === item.path ||
-    (item.path !== '/' && pathname.startsWith(`${item.path}/`))
-
-  const getActiveMenuItem = (group: MenuGroup) =>
-    getVisibleItems(group).find(isMenuItemActive)
+  // Arborescence visible pour l'utilisateur (blocs réduits aux écrans
+  // autorisés) et écran actif.
+  const visibleBlocs = useMemo(() => getVisibleBlocs(rights), [rights])
+  const activeEntry = useMemo(() => findActivePage(pathname), [pathname])
+  const isAccueilPage = pathname === ACCUEIL_PATH
 
   const backgroundImageUrl =
     'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Logo%20et%20images/Image%20site%20CEGECLIM%20maison.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJMb2dvIGV0IGltYWdlcy9JbWFnZSBzaXRlIENFR0VDTElNIG1haXNvbi5qcGciLCJpYXQiOjE3NzU1MDYyNTEsImV4cCI6NDg5NzU3MDI1MX0.d1YT7_-xD44QOm2LFbZIfpkjh9kiIGjpJiEuJxV0rMM'
@@ -616,84 +734,20 @@ function AppShell({ children }: { children: React.ReactNode }) {
     })
   }
 
-  const menuGroups: MenuGroup[] = [
-    {
-      label: 'Prospects / Clients',
-      items: [
-        { label: '1 : Prospects / Clients', path: '/carte', accessKey: 'can_carte' },
-        { label: '2 : Région-Dépt.', path: '/territoire', accessKey: 'can_territoire' },
-        { label: '3 : Agences', path: '/agences', accessKey: 'can_agences' },
-        { label: '4 : Cartographie', path: '/cartographie', accessKey: 'can_cartographie' },
-      ],
-    },
-    {
-      label: 'Tableaux de bord',
-      items: [
-        {label: '1 : OnePage',activeLabel: 'Vision ONE PAGE',path: '/tableaux-de-bord/vision-tci',accessKey: 'can_dashboard',},
-        {label: '2 : Activite Quotidienne',activeLabel: 'Activite Quotidienne',path: '/focus_mensuel2',accessKey: 'can_dashboard',},
-        { label: '3 : Suivi Multi Clients', path: '/synthese_multi_clients', accessKey: 'can_dashboard' },
-        {label: '4 : Vision client 360',activeLabel: 'Vision client',path: '/vision-client',accessKey: 'can_dashboard',},
-        { label: '5 : Tableaux de bord', path: '/atelier-analyse', accessKey: 'can_dashboard' },
-        { label: '6 : Portefeuille cde', path: '/portefeuille-livraison', accessKey: 'can_dashboard' },
-        { label: '7 : Courbes Flux Devis-CDC-BL-Fact', path: '/approvisionnements', accessKey: 'can_dashboard' },
-        { label: '8 : Analyse IA', path: '/atelier-analyse/assistant', accessKey: 'can_autorisation' },
-        { label: '9 : Projection Stock', path: '/stocks-disponibilites2', accessKey: 'can_stocks' },
-        { label: '10 : Analyse Devis', path: '/cycle-documents', accessKey: 'can_dashboard' },
-        { label: '11 : Indicateurs', path: '/Indicateurs', accessKey: 'can_autorisation' },
-
-      ],
-    },
-{
-      label: 'TODO List',
-      items: [
-        { label: '1 : Todo List', path: '/todo', accessKey: 'can_todo' },
-        { label: '2: Documents', path: '/documents', accessKey: 'can_documents' },
-      ],
-    },
-    {
-      label: 'Aides financières',
-      items: [
-        { label: '1 : Parcours des dossiers CEE', activeLabel: 'Parcours des dossiers CEE', path: '/financement', accessKey: 'can_financement' },
-        { label: '2 : Contrôle des pièces (IA)', activeLabel: 'Contrôle des pièces CEE', path: '/financement/controle-pieces', accessKey: 'can_financement' },
-      ],
-    },
-    {
-      label: 'Admin',
-      items: [
-        { label: '1 : Profils et autorisation', path: '/autorisation', accessKey: 'can_autorisation' },
-        { label: '2 : MAJ Base clients', path: '/clients', accessKey: 'can_autorisation' },
-        { label: '3 : MAJ Données Activité', path: '/Import', accessKey: 'can_autorisation' },
-        { label: '4 : Job scheduling', path: '/admin/planification', accessKey: 'can_autorisation' },
-        { label: '5 : Cycle Synchronisation data', path: '/cycle-synchronisation', accessKey: 'can_autorisation' },
-
-      ],
-    },
-    {
-      label: 'Projet BLG',
-      items: [
-        { label: '1 : Contrôle cohérence Client SAGE-BLG', path: '/controle-sage-blg', accessKey: 'can_autorisation' },
-        { label: '2 : Appro Achat SAGE-BLG', path: '/appro/achat', accessKey: 'can_autorisation' },
-        { label: '3 : Contrôle cohérence Fournisseur SAGE-BLG', path: '/controle-sage-blg/fournisseur-sage-blg', accessKey: 'can_autorisation' },
-        
-
-
-
-      ],
-    },
-  ]
-
   /** Titre de page dynamique pour le bandeau du haut -- reprend le libellé
-   * de l'élément de menu actif (activeLabel prioritaire sur label, avec la
-   * numérotation "N : " retirée en repli), tous groupes confondus. Retombe
-   * sur "Suivi commercial & prospect" pour les pages qui ne sont pas dans
-   * le menu (accueil, fiches, etc.) -- ou sur "Pilotage des aides
+   * de l'écran actif dans l'arborescence (activeLabel prioritaire sur label).
+   * Retombe sur "Suivi commercial & prospect" pour les pages qui ne sont pas
+   * dans l'arborescence (accueil, fiches, etc.) -- ou sur "Pilotage des aides
    * financières" pour un profil financement seul. */
   function getCurrentPageTitle(): string {
-    for (const group of menuGroups) {
-      const activeItem = getActiveMenuItem(group)
-      if (activeItem) return activeItem.activeLabel || activeItem.label.replace(/^\d+\s*:\s*/, '')
-    }
+    if (isAccueilPage) return isFinancementOnly ? 'Pilotage des aides financières' : 'Accueil'
+    if (activeEntry) return pageTitleFor(activeEntry.page)
     return isFinancementOnly ? 'Pilotage des aides financières' : 'Suivi commercial & prospect'
+  }
+
+  function navigateFromTree(path: string) {
+    setTreeOpen(false)
+    router.push(path)
   }
 
   useEffect(() => {
@@ -732,20 +786,24 @@ function AppShell({ children }: { children: React.ReactNode }) {
     }
   }, [router, isPublicShellPage, loginPathForArea])
 
+  // Contrôle d'accès : un chemin présent dans l'arborescence n'est ouvert
+  // que si l'un de ses droits est accordé (cf. isPathAllowed : /clients
+  // existe sous « Mes clients » ET sous « Admin »).
   useEffect(() => {
     if (!sessionChecked) return
     if (accessLoading) return
     if (!hasSession) return
     if (isLoginPage || isUnauthorizedPage || isPdfPrintPage) return
 
-    const currentPage = menuGroups
-      .flatMap((g) => g.items)
-      .find((item) => item.path === pathname)
-
-    if (currentPage?.accessKey && !rights[currentPage.accessKey]) {
+    if (!isPathAllowed(pathname, rights)) {
       router.replace('/unauthorized')
     }
-  }, [sessionChecked, hasSession, accessLoading, pathname, rights, router, isLoginPage, isUnauthorizedPage, isPdfPrintPage, menuGroups])
+  }, [sessionChecked, hasSession, accessLoading, pathname, rights, router, isLoginPage, isUnauthorizedPage, isPdfPrintPage])
+
+  // Le volet Arborescence se referme à chaque changement de page.
+  useEffect(() => {
+    setTreeOpen(false)
+  }, [pathname])
 
   useEffect(() => {
     if (!sessionChecked || !hasSession) return
@@ -754,7 +812,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
     if (!isMobile) return
     if (mobileLandingRedirectedRef.current) return
     mobileLandingRedirectedRef.current = true
-    const mobileHome = isFinancementOnly ? FINANCEMENT_HOME : '/accueil'
+    const mobileHome = isFinancementOnly ? FINANCEMENT_HOME : ACCUEIL_PATH
     if (pathname !== mobileHome) {
       router.replace(mobileHome)
     }
@@ -820,6 +878,9 @@ function AppShell({ children }: { children: React.ReactNode }) {
     function isLargeVisibleFixedLayer(element: Element) {
       if (!(element instanceof HTMLElement)) return false
       if (element.closest('[data-cegeclim-header="true"]')) return false
+      // Le volet Arborescence et le panneau de bloc de l'accueil ne doivent
+      // pas masquer le bandeau (on veut garder MENU visible).
+      if (element.closest('[data-cegeclim-nav-layer="true"]')) return false
 
       const computed = window.getComputedStyle(element)
       if (computed.position !== 'fixed') return false
@@ -1663,11 +1724,15 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
       <AutoLogout />
 
       <style>{`
-        .cgcNavBtn:hover { background: rgba(255,255,255,0.05); }
-        .cgcNavBtn:hover .cgcNavLabel { color: #fff; }
         .cgcAlerte:hover { border-color: rgba(255,255,255,0.24); filter: brightness(1.12); }
-        .cgcMenuItem:hover { background: rgba(255,255,255,0.07); color: #fff; }
         .cgcLogout:hover { color: #fff; border-color: rgba(255,255,255,0.4); background: rgba(255,255,255,0.05); }
+        .cgcMenuBtn:hover { background: rgba(166,161,129,0.22); color: #fff; border-color: rgba(166,161,129,0.7); }
+        .cgcTreeBtn:hover { background: rgba(255,255,255,0.08); color: #fff; border-color: rgba(255,255,255,0.3); }
+        .cgcTreeGhost:hover { background: rgba(255,255,255,0.10); color: #fff; }
+        .cgcTreeHome:hover { background: rgba(166,161,129,0.18); }
+        .cgcTreeBloc:hover { background: rgba(255,255,255,0.07); }
+        .cgcTreePage:hover { background: rgba(255,255,255,0.08); color: #fff; }
+        .cgcMenuBtn:focus-visible, .cgcTreeBtn:focus-visible, .cgcTreePage:focus-visible, .cgcTreeBloc:focus-visible { outline: 2px solid #F5F3EC; outline-offset: 2px; }
       `}</style>
 
       <div style={styles.overlay}>
@@ -1711,86 +1776,48 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
               </div>
             </div>
 
-            {(menuGroups.some(isGroupVisible) || hasVisibleStatusLights) && (
+            {(hasAnyMenuAccess || hasVisibleStatusLights) && (
               <div style={styles.nav}>
-                {menuGroups.some(isGroupVisible) && (
+                {hasAnyMenuAccess && (
                   <div style={styles.navSection}>
-                    <div style={styles.navSectionTag}>
-                      <span style={styles.navSectionTagIcon}>☰</span>
-                      <span style={styles.navSectionTagText}>Menu</span>
-                    </div>
-                    <div style={styles.navMenu}>
-                      {menuGroups.filter(isGroupVisible).map((group) => {
-                        const visibleItems = getVisibleItems(group)
-                        const activeItem = getActiveMenuItem(group)
+                    {/* MENU : retour à la grille de blocs */}
+                    <button
+                      type="button"
+                      className="cgcMenuBtn"
+                      onClick={() => router.push(ACCUEIL_PATH)}
+                      aria-current={isAccueilPage ? 'page' : undefined}
+                      style={{
+                        ...styles.menuBtn,
+                        ...(isAccueilPage ? styles.menuBtnActive : {}),
+                      }}
+                      title="Revenir à l’accueil (tous les blocs)"
+                    >
+                      <span style={styles.menuBtnIcon}>☰</span>
+                      <span style={styles.menuBtnText}>Menu</span>
+                    </button>
 
-                        return (
-                          <div
-                            key={group.label}
-                            style={styles.menuWrapper}
-                            onMouseEnter={() => {
-                              if (hoverTimeout) clearTimeout(hoverTimeout)
-                              setOpenGroup(group.label)
-                            }}
-                            onMouseLeave={() => {
-                              const t = setTimeout(() => setOpenGroup(null), 150)
-                              setHoverTimeout(t)
-                            }}
-                          >
-                            <button
-                              type="button"
-                              className="cgcNavBtn"
-                              aria-expanded={openGroup === group.label}
-                              style={{
-                                ...styles.navBtn,
-                                ...(activeItem ? styles.navBtnActive : {}),
-                              }}
-                            >
-                              <span
-                                className="cgcNavLabel"
-                                style={{
-                                  ...styles.navBtnGroupLabel,
-                                  ...(activeItem ? styles.navBtnGroupLabelActive : {}),
-                                }}
-                              >
-                                {group.label}
-                              </span>
-                              <span style={styles.navBtnCurrentPage}>
-                                {activeItem
-                                  ? (activeItem.activeLabel || activeItem.label)
-                                  : `${visibleItems.length} écran${visibleItems.length > 1 ? 's' : ''}`}
-                              </span>
-                            </button>
+                    {/* Arborescence : volet vertical bloc → écrans */}
+                    <button
+                      type="button"
+                      className="cgcTreeBtn"
+                      onClick={() => setTreeOpen(true)}
+                      aria-expanded={treeOpen}
+                      style={styles.treeBtn}
+                      title="Ouvrir l’arborescence des écrans"
+                    >
+                      <span style={styles.treeBtnIcon}>⋮</span>
+                      <span style={styles.treeBtnText}>Arborescence</span>
+                    </button>
 
-                            {openGroup === group.label && (
-                              <div style={styles.dropdown}>
-                                {visibleItems.map((item) => {
-                                  const itemActive = isMenuItemActive(item)
-
-                                  return (
-                                    <div
-                                      key={item.path}
-                                      className="cgcMenuItem"
-                                      aria-current={itemActive ? 'page' : undefined}
-                                      style={{
-                                        ...styles.dropdownItem,
-                                        ...(itemActive ? styles.dropdownItemActive : {}),
-                                      }}
-                                      onClick={() => {
-                                        setOpenGroup(null)
-                                        router.push(item.path)
-                                      }}
-                                    >
-                                      {item.label}
-                                    </div>
-                                  )
-                                })}
-                              </div>
-                            )}
-                          </div>
-                        )
-                      })}
-                    </div>
+                    {/* Fil d'Ariane : Bloc › Écran */}
+                    {activeEntry && !isAccueilPage && (
+                      <div style={styles.breadcrumb}>
+                        <span style={styles.breadcrumbBlocIcon}>{activeEntry.bloc.icon}</span>
+                        <span style={styles.breadcrumbBloc}>{activeEntry.bloc.label}</span>
+                        <span style={styles.breadcrumbSep}>›</span>
+                        <span style={styles.breadcrumbPage}>{activeEntry.page.label}</span>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -1908,6 +1935,18 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
               </div>
             )}
           </header>
+        )}
+
+        {!isMobile && (
+          <div data-cegeclim-nav-layer="true">
+            <NavigationTree
+              open={treeOpen}
+              blocs={visibleBlocs}
+              pathname={pathname}
+              onNavigate={navigateFromTree}
+              onClose={() => setTreeOpen(false)}
+            />
+          </div>
         )}
 
         {cerfaModalOpen && (
@@ -2299,12 +2338,6 @@ const styles: Record<string, React.CSSProperties> = {
     pointerEvents: 'auto',
   },
 
-  rightUserBlock: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 12,
-  },
-
   userEmail: {
     fontFamily: 'var(--font-mono)',
     fontSize: 11.5,
@@ -2340,160 +2373,347 @@ const styles: Record<string, React.CSSProperties> = {
     pointerEvents: 'auto',
   },
 
-  select: {
-    padding: 6,
-    borderRadius: 8,
-    background: 'rgba(255,255,255,0.06)',
-    border: '1px solid rgba(255,255,255,0.14)',
-    color: '#fff',
-  },
-
-  selectDisabled: {
-    cursor: 'not-allowed',
-    opacity: 0.5,
-  },
-
   nav: {
     position: 'relative',
     zIndex: 2,
     display: 'flex',
-    alignItems: 'stretch',
+    alignItems: 'center',
     gap: 24,
-    padding: '0 22px',
+    padding: '7px 22px',
     overflow: 'visible',
     pointerEvents: 'none',
   },
 
-  navWithAlerts: {},
-
-  // FIX (2026-08) : "Menu" identifié par une pastille dédiée (icône +
-  // libellé), sur le même principe que "Mes alertes" juste à droite --
-  // les deux zones du bandeau se distinguent maintenant clairement l'une
-  // de l'autre au lieu de se fondre dans une seule ligne de boutons.
   navSection: {
     display: 'flex',
     alignItems: 'center',
-    gap: 10,
+    gap: 8,
+    minWidth: 0,
     pointerEvents: 'auto',
   },
 
-  navSectionTag: {
+  // ── Bouton MENU (retour accueil) ─────────────────────────────────────
+  menuBtn: {
     display: 'flex',
     alignItems: 'center',
-    gap: 6,
-    padding: '5px 11px',
-    borderRadius: 8,
-    border: '1px solid rgba(166,161,129,0.40)',
-    background: 'rgba(166,161,129,0.10)',
-    alignSelf: 'stretch',
+    gap: 7,
+    padding: '7px 13px',
+    borderRadius: 9,
+    border: '1px solid rgba(166,161,129,0.45)',
+    background: 'rgba(166,161,129,0.12)',
+    color: '#E9E5D6',
+    cursor: 'pointer',
+    fontFamily: 'var(--font-body)',
+    transition: 'background 0.16s ease, border-color 0.16s ease, color 0.16s ease',
+    whiteSpace: 'nowrap',
   },
 
-  navSectionTagIcon: {
+  menuBtnActive: {
+    background: 'rgba(166,161,129,0.28)',
+    borderColor: '#A6A181',
+    color: '#ffffff',
+  },
+
+  menuBtnIcon: {
+    fontSize: 14,
+    lineHeight: 1,
+  },
+
+  menuBtnText: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: 11,
+    fontWeight: 700,
+    letterSpacing: '0.14em',
+    textTransform: 'uppercase',
+  },
+
+  // ── Bouton Arborescence (volet vertical) ─────────────────────────────
+  treeBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 7,
+    padding: '7px 12px',
+    borderRadius: 9,
+    border: '1px solid rgba(255,255,255,0.16)',
+    background: 'rgba(255,255,255,0.04)',
+    color: 'rgba(255,255,255,0.78)',
+    cursor: 'pointer',
+    fontFamily: 'var(--font-body)',
+    transition: 'background 0.16s ease, border-color 0.16s ease, color 0.16s ease',
+    whiteSpace: 'nowrap',
+  },
+
+  treeBtnIcon: {
+    fontSize: 15,
+    lineHeight: 1,
+    fontWeight: 700,
+  },
+
+  treeBtnText: {
+    fontSize: 12.5,
+    fontWeight: 600,
+  },
+
+  // ── Fil d'Ariane ─────────────────────────────────────────────────────
+  breadcrumb: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 7,
+    marginLeft: 6,
+    minWidth: 0,
+    color: 'rgba(255,255,255,0.55)',
+    fontSize: 12.5,
+    whiteSpace: 'nowrap',
+  },
+
+  breadcrumbBlocIcon: {
     fontSize: 13,
     lineHeight: 1,
   },
 
-  navSectionTagText: {
+  breadcrumbBloc: {
+    fontWeight: 600,
+    color: 'rgba(255,255,255,0.7)',
+  },
+
+  breadcrumbSep: {
+    color: 'rgba(255,255,255,0.35)',
+    fontSize: 15,
+    lineHeight: 1,
+  },
+
+  breadcrumbPage: {
+    fontWeight: 700,
+    color: '#ffffff',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+
+  // ── Volet Arborescence ───────────────────────────────────────────────
+  treeBackdrop: {
+    position: 'fixed',
+    inset: 0,
+    zIndex: 950,
+    background: 'rgba(6,10,18,0.55)',
+    backdropFilter: 'blur(2px)',
+    WebkitBackdropFilter: 'blur(2px)',
+    display: 'flex',
+    justifyContent: 'flex-start',
+  },
+
+  treePanel: {
+    width: 'min(400px, 92vw)',
+    height: '100vh',
+    display: 'flex',
+    flexDirection: 'column',
+    background: '#101A2E',
+    borderRight: '1px solid rgba(255,255,255,0.12)',
+    boxShadow: '18px 0 50px rgba(0,0,0,0.5)',
+    color: '#F5F3EC',
+  },
+
+  treeHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    padding: '16px 16px 12px',
+    borderBottom: '1px solid rgba(255,255,255,0.08)',
+  },
+
+  treeTitle: {
+    fontFamily: 'var(--font-display)',
+    fontSize: 19,
+    fontWeight: 800,
+    color: '#ffffff',
+  },
+
+  treeSubtitle: {
+    marginTop: 3,
+    fontFamily: 'var(--font-mono)',
+    fontSize: 10.5,
+    letterSpacing: '0.1em',
+    textTransform: 'uppercase',
+    color: 'rgba(255,255,255,0.4)',
+  },
+
+  treeHeaderActions: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+  },
+
+  treeGhostBtn: {
+    padding: '6px 10px',
+    borderRadius: 8,
+    border: '1px solid rgba(255,255,255,0.16)',
+    background: 'transparent',
+    color: 'rgba(255,255,255,0.7)',
+    fontFamily: 'var(--font-body)',
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+  },
+
+  treeCloseBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    border: '1px solid rgba(255,255,255,0.16)',
+    background: 'transparent',
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 14,
+    cursor: 'pointer',
+  },
+
+  treeHome: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    margin: '10px 12px 4px',
+    padding: '10px 12px',
+    borderRadius: 12,
+    border: '1px solid rgba(166,161,129,0.4)',
+    background: 'rgba(166,161,129,0.10)',
+    color: '#E9E5D6',
+    fontFamily: 'var(--font-body)',
+    fontSize: 13.5,
+    fontWeight: 700,
+    cursor: 'pointer',
+    textAlign: 'left',
+  },
+
+  treeHomeActive: {
+    background: 'rgba(166,161,129,0.26)',
+    borderColor: '#A6A181',
+    color: '#ffffff',
+  },
+
+  treeHomeIcon: {
+    fontSize: 15,
+    lineHeight: 1,
+  },
+
+  treeBody: {
+    flex: 1,
+    overflowY: 'auto',
+    padding: '6px 12px 20px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+  },
+
+  treeBloc: {
+    display: 'flex',
+    flexDirection: 'column',
+  },
+
+  treeBlocBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    width: '100%',
+    padding: '9px 10px',
+    borderRadius: 12,
+    border: '1px solid transparent',
+    background: 'transparent',
+    color: '#F5F3EC',
+    cursor: 'pointer',
+    textAlign: 'left',
+    fontFamily: 'var(--font-body)',
+    transition: 'background 0.14s ease',
+  },
+
+  treeBlocBtnActive: {
+    background: 'rgba(255,255,255,0.05)',
+    borderColor: 'rgba(255,255,255,0.10)',
+  },
+
+  treeBlocIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: 17,
+    flexShrink: 0,
+  },
+
+  treeBlocLabel: {
+    display: 'block',
+    fontSize: 14.5,
+    fontWeight: 700,
+    lineHeight: 1.15,
+    color: '#ffffff',
+  },
+
+  treeBlocMeta: {
+    display: 'block',
+    marginTop: 2,
+    fontFamily: 'var(--font-mono)',
+    fontSize: 9.5,
+    letterSpacing: '0.1em',
+    textTransform: 'uppercase',
+    color: 'rgba(255,255,255,0.38)',
+  },
+
+  treeCaret: {
+    fontSize: 20,
+    lineHeight: 1,
+    color: 'rgba(255,255,255,0.45)',
+    transition: 'transform 0.16s ease',
+    flexShrink: 0,
+  },
+
+  treePages: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 2,
+    margin: '2px 0 6px 26px',
+    paddingLeft: 12,
+    borderLeft: '1px solid rgba(255,255,255,0.12)',
+  },
+
+  treePageBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 9,
+    width: '100%',
+    padding: '7px 9px',
+    borderRadius: 9,
+    border: 'none',
+    background: 'transparent',
+    color: 'rgba(255,255,255,0.72)',
+    cursor: 'pointer',
+    textAlign: 'left',
+    fontFamily: 'var(--font-body)',
+    fontSize: 13,
+    transition: 'background 0.14s ease, color 0.14s ease',
+  },
+
+  treePageBtnActive: {
+    background: 'rgba(166,161,129,0.16)',
+    color: '#ffffff',
+    fontWeight: 700,
+  },
+
+  treePageIndex: {
     fontFamily: 'var(--font-mono)',
     fontSize: 10.5,
     fontWeight: 700,
-    letterSpacing: '0.14em',
-    textTransform: 'uppercase',
     color: '#A6A181',
+    minWidth: 14,
+    textAlign: 'right',
+  },
+
+  treePageLabel: {
+    flex: 1,
+    minWidth: 0,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
-  },
-
-  navMenu: {
-    display: 'flex',
-    alignItems: 'stretch',
-    gap: 2,
-    pointerEvents: 'auto',
-  },
-
-  menuWrapper: {
-    position: 'relative',
-    zIndex: 4,
-    display: 'flex',
-    pointerEvents: 'auto',
-  },
-
-  navBtn: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'flex-start',
-    justifyContent: 'center',
-    background: 'transparent',
-    border: 'none',
-    borderBottom: '2px solid transparent',
-    borderRadius: 0,
-    padding: '10px 14px 9px',
-    cursor: 'pointer',
-    transition: 'background 0.16s ease, border-color 0.16s ease',
-    pointerEvents: 'auto',
-  },
-
-  navBtnActive: {
-    borderBottom: '2px solid #A6A181',
-    background: 'rgba(166,161,129,0.07)',
-  },
-
-  navBtnGroupLabel: {
-    display: 'block',
-    fontSize: 13,
-    fontWeight: 600,
-    lineHeight: 1.1,
-    color: 'rgba(255,255,255,0.62)',
-    whiteSpace: 'nowrap',
-    transition: 'color 0.16s ease',
-  },
-
-  navBtnGroupLabelActive: {
-    color: '#ffffff',
-  },
-
-  navBtnCurrentPage: {
-    display: 'block',
-    marginTop: 3,
-    fontFamily: 'var(--font-mono)',
-    fontSize: 9.5,
-    lineHeight: 1.1,
-    letterSpacing: '0.1em',
-    textTransform: 'uppercase',
-    color: 'rgba(255,255,255,0.30)',
-    whiteSpace: 'nowrap',
-  },
-
-  dropdown: {
-    position: 'absolute',
-    top: '100%',
-    left: 0,
-    marginTop: 2,
-    zIndex: 10,
-    minWidth: 250,
-    background: '#101A2E',
-    border: '1px solid rgba(255,255,255,0.12)',
-    borderRadius: 12,
-    padding: 6,
-    boxShadow: '0 18px 40px rgba(0,0,0,0.5)',
-    whiteSpace: 'nowrap',
-    pointerEvents: 'auto',
-  },
-
-  dropdownItem: {
-    padding: '8px 10px',
-    borderRadius: 8,
-    fontSize: 13,
-    color: 'rgba(255,255,255,0.7)',
-    cursor: 'pointer',
-    whiteSpace: 'nowrap',
-    transition: 'background 0.14s ease, color 0.14s ease',
-    pointerEvents: 'auto',
-  },
-
-  dropdownItemActive: {
-    background: 'rgba(166,161,129,0.14)',
-    color: '#ffffff',
-    fontWeight: 600,
   },
 
   // FIX (2026-08) : panneau "Mes alertes" mieux identifié -- cadre teinté
@@ -2567,12 +2787,6 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   statusCardCompact: {},
-  statusCardTop: {},
-  statusCardTopCompact: {},
-  statusCardLabelCompact: {},
-  statusBadgeCompact: {},
-  statusOkTextCompact: {},
-  statusLightDotCompact: {},
 
   statusCardRed: {
     border: '1px solid rgba(193,104,60,0.30)',
@@ -2602,10 +2816,6 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'rgba(255,255,255,0.6)',
     whiteSpace: 'nowrap',
   },
-
-  statusCardLabelRed: { color: 'rgba(255,255,255,0.6)' },
-  statusCardLabelOrange: { color: 'rgba(255,255,255,0.6)' },
-  statusCardLabelGreen: { color: 'rgba(255,255,255,0.6)' },
 
   statusLightDot: {
     width: 7,
