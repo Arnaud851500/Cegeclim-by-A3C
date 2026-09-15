@@ -17,6 +17,13 @@
 //   - création d'un RDV compagnon (rdv_compagnon) ;
 //   - recherche de documents (activite_lignes, facture_lignes, devis_lignes).
 // Sur mobile (< 768 px) on rend MobileRdv tel quel.
+//
+// CORRECTIF (2026-09-15) : le lien « Vision client 360 » passait le numéro
+// de client dans un paramètre `numero_tiers` alors que app/vision-client
+// lit `numero` (cf. VisionClientPageInner : searchParams.get('numero')) —
+// l'écran s'ouvrait donc sur « Aucun numéro de client fourni ». Le lien
+// utilise maintenant `numero`, ce qui déclenche le chargement automatique
+// de la fiche (voir ouvrirVisionClient).
 // ============================================================================
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
@@ -67,6 +74,12 @@ const GRILLE_HEURE_DEBUT = 7
 const GRILLE_HEURE_FIN = 20
 const GRILLE_HAUTEUR_HEURE = 56
 const GRILLE_HAUTEUR_TOTALE = (GRILLE_HEURE_FIN - GRILLE_HEURE_DEBUT) * GRILLE_HAUTEUR_HEURE
+
+/** Lien vers la fiche Vision client 360 : le paramètre attendu par
+ * app/vision-client/page.tsx est `numero` (pas `numero_tiers`). */
+function visionClientHref(numeroTiers: string) {
+  return `/vision-client?numero=${encodeURIComponent(numeroTiers)}`
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function safeText(value: any) {
@@ -312,6 +325,13 @@ function AgendaDesktop() {
   }, [sessionReady, currentEmail, currentName, blgPartnerId, bornes, refreshKey])
 
   const rafraichir = useCallback(() => setRefreshKey((k) => k + 1), [])
+
+  /** Ouvre la fiche Vision client 360 avec chargement automatique du client. */
+  const ouvrirVisionClient = useCallback((numeroTiers: string) => {
+    const numero = safeText(numeroTiers)
+    if (!numero) return
+    router.push(visionClientHref(numero))
+  }, [router])
 
   // Le RDV sélectionné suit les rechargements (ex. après enregistrement d'un CR)
   useEffect(() => {
@@ -676,7 +696,7 @@ function AgendaDesktop() {
               onClose={() => setSelectedRdv(null)}
               onEdit={() => setFormRdv({ mode: 'edit', rdv: selectedRdv })}
               onDelete={() => void supprimerRdvCompagnon(selectedRdv)}
-              onOpenClient={(numero) => router.push(`/vision-client?numero_tiers=${encodeURIComponent(numero)}`)}
+              onOpenClient={ouvrirVisionClient}
               onSaved={rafraichir}
             />
           ) : (
@@ -717,6 +737,9 @@ function AgendaDesktop() {
                 </div>
               ))}
             </dl>
+            {selectedDoc.tiers && (
+              <button type="button" className="agdBtn" onClick={() => ouvrirVisionClient(selectedDoc.tiers)} style={{ ...styles.ghostBtn, borderColor: 'rgba(75,146,172,0.5)', color: '#8FC7DA' }}>Vision client 360</button>
+            )}
             <button type="button" className="agdBtn" onClick={() => setSelectedDoc(null)} style={styles.ghostBtn}>Fermer</button>
           </div>
         </div>
