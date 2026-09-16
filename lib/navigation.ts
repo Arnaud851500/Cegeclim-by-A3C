@@ -144,9 +144,9 @@ export const NAV_BLOCS: NavBloc[] = [
     gradient: ['#8B8767', '#5E5A44'],
     iconBg: 'rgba(255,255,255,0.18)',
     pages: [
-      { label: 'Portefeuille commandes', path: '/portefeuille-livraison', activeLabel: 'Portefeuille cde', accessKey: 'can_dashboard', description: 'CDC à livrer, contrôle des frais de port, couverture stock.' },
+      { label: 'Portefeuille de commandes', path: '/portefeuille-livraison', activeLabel: 'Portefeuille cde', accessKey: 'can_dashboard', description: 'CDC à livrer, contrôle des frais de port, couverture stock.' },
       { label: 'Projection stock', path: '/stocks-disponibilites2', accessKey: 'can_stocks', description: 'Stock projeté par référence, hypothèses mensuelles et substitutions.' },
-      { label: 'Stocks et flux log', path: '/stocks', accessKey: 'can_stocks', description: 'Piloter les flux logistiques et les stocks par dépôt.' },
+      { label: 'Stocks', path: '/stock', accessKey: 'can_stocks', description: 'Consultation des stocks (FMS et Agences), stocks prévisionnels et visu des dates de disponibilité .' },
     ],
   },
   {
