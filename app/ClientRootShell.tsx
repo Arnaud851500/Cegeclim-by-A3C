@@ -72,7 +72,7 @@ const FINANCEMENT_HOME = '/financement'
 
 /** Libellé de l'alerte couverture stock (ex-« Non servables »). Utilisé tel
  * quel dans le bandeau, le Centre d'alertes et les infobulles. */
-const COUVERTURE_ALERT_LABEL = 'Commande non complète à la date de livraison client'
+const COUVERTURE_ALERT_LABEL = 'Cde non complète à la date liv client'
 
 type StatusLevel = 'red' | 'orange' | 'green'
 
