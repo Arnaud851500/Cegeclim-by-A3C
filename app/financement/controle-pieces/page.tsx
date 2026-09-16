@@ -247,6 +247,8 @@ export default function ControlePiecesCeePage() {
   const [runNoteTone, setRunNoteTone] = useState<'info' | 'warn' | 'err'>('info')
   const [toastMsg, setToastMsg] = useState('')
   const [dragging, setDragging] = useState(false)
+  const [dropDebug, setDropDebug] = useState('')
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [editorOpen, setEditorOpen] = useState(false)
   const [draftItems, setDraftItems] = useState<ChecklistItem[]>([])
   const [draftExample, setDraftExample] = useState('')
@@ -280,6 +282,19 @@ export default function ControlePiecesCeePage() {
   useEffect(() => {
     benefRef.current = benef
   }, [benef])
+
+  // Empêche le navigateur d'ouvrir le fichier si le dépôt tombe hors de la zone.
+  useEffect(() => {
+    const block = (e: DragEvent) => {
+      e.preventDefault()
+    }
+    document.addEventListener('dragover', block)
+    document.addEventListener('drop', block)
+    return () => {
+      document.removeEventListener('dragover', block)
+      document.removeEventListener('drop', block)
+    }
+  }, [])
   useEffect(() => {
     benefAutoRef.current = benefAuto
   }, [benefAuto])
@@ -447,10 +462,14 @@ export default function ControlePiecesCeePage() {
     return { text: '', pages: [{ blob: file, url: URL.createObjectURL(file) }] }
   }
 
-  function addFiles(list: FileList | File[] | null) {
-    if (!list || !list.length) return
+  function addFiles(list: FileList | File[] | null, source: 'clic' | 'dépôt') {
+    const files = list ? Array.from(list) : []
+    if (!files.length) {
+      setDropDebug(`${source} : aucun fichier reçu.`)
+      return
+    }
+    setDropDebug(`${source} : ${files.length} fichier${files.length > 1 ? 's' : ''} reçu${files.length > 1 ? 's' : ''} (${files.map((f) => f.name).join(', ')}).`)
     const t = current
-    const files = Array.from(list)
     const entries: FileEntry[] = files.map((f) => ({ uid: newId(), name: f.name, status: 'loading', pages: [] }))
     updateSession(t, (s) => ({ ...s, files: [...s.files, ...entries] }))
     setRunNote('')
@@ -918,42 +937,67 @@ export default function ControlePiecesCeePage() {
                 <span className="font-mono text-[11px] text-slate-400">{meta.code}</span>
               </div>
               <div className="grid gap-4 p-4">
-                <label
-                  onDragEnter={(e) => {
-                    e.preventDefault()
-                    setDragging(true)
-                  }}
-                  onDragOver={(e) => {
-                    e.preventDefault()
-                    e.dataTransfer.dropEffect = 'copy'
-                    if (!dragging) setDragging(true)
-                  }}
-                  onDragLeave={(e) => {
-                    if (e.currentTarget.contains(e.relatedTarget as Node | null)) return
-                    setDragging(false)
-                  }}
-                  onDrop={(e) => {
-                    e.preventDefault()
-                    setDragging(false)
-                    addFiles(e.dataTransfer.files)
-                  }}
-                  className={`grid cursor-pointer justify-items-center gap-1 rounded-xl border-2 border-dashed p-6 text-center transition ${
-                    dragging ? 'border-[#B4761A] bg-[#FAF7EE]' : 'border-[#D8D3C8] hover:border-[#B4761A] hover:bg-[#FAF7EE]'
-                  }`}
-                >
-                  <span className="text-sm font-semibold text-slate-900">{dragging ? 'Relâchez pour ajouter' : 'Déposer le document'}</span>
-                  <span className="text-xs text-slate-500">Glissez-déposez ou cliquez · PDF, JPG ou PNG · plusieurs fichiers possibles</span>
+                <div className="relative">
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => fileInputRef.current?.click()}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        fileInputRef.current?.click()
+                      }
+                    }}
+                    onDragEnter={(e) => {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      setDragging(true)
+                    }}
+                    onDragOver={(e) => {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      e.dataTransfer.dropEffect = 'copy'
+                      if (!dragging) setDragging(true)
+                    }}
+                    onDragLeave={(e) => {
+                      if (e.currentTarget.contains(e.relatedTarget as Node | null)) return
+                      setDragging(false)
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      setDragging(false)
+                      const dt = e.dataTransfer
+                      let files: File[] = Array.from(dt.files || [])
+                      if (!files.length && dt.items) {
+                        files = Array.from(dt.items)
+                          .filter((it) => it.kind === 'file')
+                          .map((it) => it.getAsFile())
+                          .filter((f): f is File => !!f)
+                      }
+                      addFiles(files, 'dépôt')
+                    }}
+                    className={`grid cursor-pointer justify-items-center gap-1 rounded-xl border-2 border-dashed p-6 text-center transition ${
+                      dragging ? 'border-[#B4761A] bg-[#FAF7EE]' : 'border-[#D8D3C8] hover:border-[#B4761A] hover:bg-[#FAF7EE]'
+                    }`}
+                  >
+                    <span className="pointer-events-none text-sm font-semibold text-slate-900">{dragging ? 'Relâchez pour ajouter' : 'Déposer le document'}</span>
+                    <span className="pointer-events-none text-xs text-slate-500">Glissez-déposez ou cliquez · PDF, JPG ou PNG · plusieurs fichiers possibles</span>
+                  </div>
                   <input
+                    ref={fileInputRef}
                     type="file"
                     multiple
                     accept="application/pdf,image/jpeg,image/png,image/webp"
-                    className="hidden"
+                    style={{ position: 'absolute', width: 1, height: 1, opacity: 0, overflow: 'hidden', pointerEvents: 'none' }}
+                    tabIndex={-1}
                     onChange={(e) => {
-                      addFiles(e.target.files)
+                      addFiles(e.target.files, 'clic')
                       e.target.value = ''
                     }}
                   />
-                </label>
+                  {dropDebug && <div className="mt-1.5 font-mono text-[11px] text-slate-500">{dropDebug}</div>}
+                </div>
 
                 {s.files.length > 0 && (
                   <div className="grid gap-2">
