@@ -65,6 +65,18 @@
  *      · filtre "Activité" (onglets Fournisseurs et Comparaison) : aucune activité
  *        depuis 24 mois / 12 mois, ou active sur les 12 derniers mois ; colonne
  *        "Dern. activité" dans la liste, ligne dédiée dans la fiche, export Excel.
+ *    MàJ 17/09/2026 (bis) — listes triables / filtrables, fiche flottante :
+ *      · Fournisseurs : la fiche s'ouvre en fenêtre flottante (clic ou Entrée,
+ *        Échap pour fermer) et la liste occupe toute la largeur ; filtre "Refs
+ *        MYSTOCK" (au moins une / aucune) + carte KPI dédiée ; pastille qualité
+ *        SAGE (MARCHANDISE, PV…) ; colonnes MYSTOCK / non MYSTOCK avec, en
+ *        dessous, le nombre de refs en stock FMS / en stock agence ; commandes
+ *        FMS et agences séparées ; tri par en-tête et filtre par colonne (n° ou
+ *        nom, qualité, statut, stratégie, compteurs "&gt;0"…) ; ligne de totaux.
+ *      · Articles : les KPI suivent les filtres (jeu filtré) ; tri par en-tête de
+ *        colonne (prime sur le tri prédéfini) et filtre d'en-tête sur chaque
+ *        colonne (texte "contient", nombres "&gt;10", "vide"/"!vide") ; l'export
+ *        Excel reprend la liste filtrée et triée.
  *  - Articles & stock min : la base article SAGE avec MYSTOCK, la conso BL
  *    mensuelle (μ, σ sur l'horizon), le stock FMS, le stock min SAGE, le stock
  *    min BLG (entrepôt DPFMS) et le stock min CALCULÉ (point de commande) —
@@ -350,6 +362,102 @@ function libelleActivite(r: FournRow): string {
   if (!r.derniere_activite) return 'Jamais'
   const m = moisDepuis(r.derniere_activite)
   return `${fmtDate(r.derniere_activite)}${m !== null ? ` (${m} mois)` : ''}`
+}
+
+// ── Tri et filtre par colonne (listes Fournisseurs et Articles) ────────────
+type DirTri = 'asc' | 'desc'
+type EtatTri<K extends string = string> = { key: K; dir: DirTri } | null
+
+/** Comparateur générique : null/vide en dernier, nombres en numérique, textes en fr. */
+function comparerValeurs(a: unknown, b: unknown): number {
+  const va = a === null || a === undefined || a === '' ? null : a
+  const vb = b === null || b === undefined || b === '' ? null : b
+  if (va === null && vb === null) return 0
+  if (va === null) return 1
+  if (vb === null) return -1
+  if (typeof va === 'boolean' && typeof vb === 'boolean') return Number(va) - Number(vb)
+  if (typeof va === 'number' && typeof vb === 'number') return va - vb
+  return String(va).localeCompare(String(vb), 'fr', { numeric: true, sensitivity: 'base' })
+}
+
+function trierPar<T>(rows: T[], tri: EtatTri, val: (r: T, key: string) => unknown): T[] {
+  if (!tri) return rows
+  const { key, dir } = tri
+  return [...rows].sort((a, b) => {
+    const c = comparerValeurs(val(a, key), val(b, key))
+    // les vides restent en dernier quel que soit le sens
+    if (c !== 0 && (val(a, key) === null || val(a, key) === undefined || val(a, key) === '' || val(b, key) === null || val(b, key) === undefined || val(b, key) === '')) return c
+    return dir === 'asc' ? c : -c
+  })
+}
+
+function basculerTri<K extends string>(tri: EtatTri<K>, key: K): EtatTri<K> {
+  if (!tri || tri.key !== key) return { key, dir: 'asc' }
+  if (tri.dir === 'asc') return { key, dir: 'desc' }
+  return null
+}
+
+/** Filtre saisi dans l'en-tête d'une colonne :
+ *  - texte : "contient" (insensible à la casse et aux accents)
+ *  - nombre : ">10", ">=10", "<5", "<=5", "=0", "!=0", ou "12" (égal)
+ *  - "vide" / "!vide" : valeur absente / présente
+ *  - booléen : oui / non */
+function filtreColonneOk(val: unknown, expr: string): boolean {
+  const e = expr.trim()
+  if (!e) return true
+  const vide = val === null || val === undefined || val === '' || (Array.isArray(val) && val.length === 0)
+  const el = e.toLowerCase()
+  if (el === 'vide') return vide
+  if (el === '!vide' || el === 'non vide') return !vide
+  if (typeof val === 'boolean') return el === 'oui' || el === 'o' || el === 'true' ? val : el === 'non' || el === 'n' || el === 'false' ? !val : true
+  const m = e.match(/^(>=|<=|!=|<>|>|<|=)?\s*(-?\d+(?:[.,]\d+)?)$/)
+  const num = typeof val === 'number' ? val : typeof val === 'string' && /^-?\d+([.,]\d+)?$/.test(val.trim()) ? Number(val.replace(',', '.')) : null
+  if (m && num !== null) {
+    const seuil = Number(m[2].replace(',', '.'))
+    switch (m[1] || '=') {
+      case '>': return num > seuil
+      case '>=': return num >= seuil
+      case '<': return num < seuil
+      case '<=': return num <= seuil
+      case '!=': case '<>': return num !== seuil
+      default: return num === seuil
+    }
+  }
+  if (m && vide) return false
+  return normaliserTexte(Array.isArray(val) ? val.join(' ') : val).includes(normaliserTexte(e))
+}
+
+function IndicateurTri({ actif, dir }: { actif: boolean; dir?: DirTri }) {
+  return <span className={`ml-1 text-[10px] ${actif ? 'text-[#B4761A]' : 'text-[#C9C4B8]'}`}>{actif ? (dir === 'asc' ? '▲' : '▼') : '↕'}</span>
+}
+
+/** En-tête de colonne triable. */
+function ThTri<K extends string>({ k, label, tri, onTri, align = 'left', title, className = '' }: {
+  k: K; label: React.ReactNode; tri: EtatTri<K>; onTri: (k: K) => void; align?: 'left' | 'right'; title?: string; className?: string
+}) {
+  const actif = tri?.key === k
+  return (
+    <th className={`cursor-pointer select-none px-2 py-2 font-bold hover:bg-[#EDEAE1] ${align === 'right' ? 'text-right' : 'text-left'} ${className}`} title={title} onClick={() => onTri(k)}>
+      <span className={actif ? 'text-[#111820]' : ''}>{label}</span><IndicateurTri actif={actif} dir={tri?.dir} />
+    </th>
+  )
+}
+
+/** Champ de filtre d'en-tête de colonne. */
+function InputFiltre({ value, onChange, placeholder = 'filtre', align = 'left' }: { value: string; onChange: (v: string) => void; placeholder?: string; align?: 'left' | 'right' }) {
+  return (
+    <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} onClick={(e) => e.stopPropagation()}
+      className={`h-7 w-full min-w-[56px] rounded border border-[#E5E1D8] bg-white px-1.5 text-[11px] font-normal normal-case tracking-normal text-[#111820] outline-none focus:border-[#B4761A] ${align === 'right' ? 'text-right' : ''} ${value ? 'border-[#B4761A] bg-[#B4761A]/[0.06]' : ''}`} />
+  )
+}
+
+/** Pastille de qualité SAGE (MARCHANDISE, PV, FRAIS GENERAUX…). */
+function QualiteBadge({ qualite }: { qualite: string | null | undefined }) {
+  const q = safeText(qualite)
+  if (!q) return null
+  const up = q.toUpperCase()
+  const cls = up.includes('MARCHANDISE') ? 'bg-sky-50 text-sky-800' : up === 'PV' ? 'bg-amber-50 text-amber-700' : 'bg-[#F4F3F0] text-[#8A8474]'
+  return <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${cls}`} title={`Qualité SAGE : ${q}`}>{q}</span>
 }
 
 type ResultatComparaison = 'ok' | 'ecart' | 'partiel'
@@ -988,64 +1096,37 @@ type StrategieForm = {
   frs_pv: boolean; perimetre_cbn: boolean
 }
 
-function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, articles }: {
-  rows: FournRow[]; loading: boolean; error: string | null; strategies: StrategieRef[]
-  onRowChange: (r: FournRow) => void; articles: ArtRow[]
+type CleTriFourn = 'numero' | 'nom' | 'qualite' | 'statut' | 'strategie' | 'refs' | 'mystock' | 'non_mystock' | 'cdf_fms' | 'cdf_agences' | 'delai' | 'activite'
+type FiltresColFourn = Partial<Record<CleTriFourn, string>>
+
+/** Valeur d'une colonne de la liste fournisseurs (tri et filtre). */
+function valeurColFourn(r: FournRow, k: CleTriFourn): unknown {
+  switch (k) {
+    case 'numero': return r.numero
+    case 'nom': return r.sage_intitule || r.blg_intitule || ''
+    case 'qualite': return r.sage_qualite
+    case 'statut': return r.statut_appro ? STATUT_APPRO_STYLE[r.statut_appro].label : ''
+    case 'strategie': return r.strategie_principale || ''
+    case 'refs': return n0(r.sage_nb_refs_actives)
+    case 'mystock': return n0(r.sage_nb_refs_mystock)
+    case 'non_mystock': return Math.max(0, n0(r.sage_nb_refs_actives) - n0(r.sage_nb_refs_mystock))
+    case 'cdf_fms': return n0(r.nb_cdf_ytd_fms)
+    case 'cdf_agences': return n0(r.nb_cdf_ytd_hors_fms)
+    case 'delai': return r.delai_appro_present ? n0(r.delai_appro_retenu) : null
+    case 'activite': return r.derniere_activite
+  }
+}
+
+/** Fiche fournisseur & stratégie d'appro — fenêtre flottante ouverte au clic
+ * sur une ligne de la liste (ou depuis la pyramide). */
+function FicheFournisseurModal({ selected, strategies, articles, onRowChange, onClose }: {
+  selected: FournRow; strategies: StrategieRef[]; articles: ArtRow[]; onRowChange: (r: FournRow) => void; onClose: () => void
 }) {
-  const [search, setSearch] = useState('')
-  const [statutFilter, setStatutFilter] = useState<'' | StatutAppro>('')
-  const [qualiteFilter, setQualiteFilter] = useState('')
-  const [activiteFilter, setActiviteFilter] = useState<ActiviteFilter>('')
-  const [masquerSommeil, setMasquerSommeil] = useState(true)
-  const [masquerHorsNegoce, setMasquerHorsNegoce] = useState(true)
-  // Bascule rapide sur les fournisseurs du classeur (MARCHANDISE + PV) — active par défaut.
-  const [perimetreSeul, setPerimetreSeul] = useState(true)
-  const [strategieFilter, setStrategieFilter] = useState<string | null>(null)
-  const [selected, setSelected] = useState<FournRow | null>(null)
   const [form, setForm] = useState<StrategieForm | null>(null)
   const [saving, setSaving] = useState(false)
   const [saveMsg, setSaveMsg] = useState<string | null>(null)
-  const listRefs = useRef<Record<number, HTMLTableRowElement | null>>({})
-
-  const qualites = useMemo(() => Array.from(new Set(rows.map((r) => safeText(r.sage_qualite)).filter(Boolean))).sort(), [rows])
-  const nbPerimetre = useMemo(() => rows.filter((r) => r.perimetre_cbn).length, [rows])
-  const rowsPerimetre = useMemo(() => rows.filter((r) => r.perimetre_cbn && r.statut_appariement !== 'blg_seul'), [rows])
-
-  const filtres = useMemo(() => {
-    const term = search.trim().toUpperCase()
-    return rows.filter((r) => {
-      if (r.statut_appariement === 'blg_seul') return false
-      if (perimetreSeul && !r.perimetre_cbn) return false
-      if (!perimetreSeul && masquerSommeil && r.statut_appro === 'SOMMEIL') return false
-      if (!perimetreSeul && masquerHorsNegoce && r.statut_appro === 'HORS_NEGOCE') return false
-      if (strategieFilter !== null && (r.strategie_principale || '') !== strategieFilter) return false
-      if (statutFilter && r.statut_appro !== statutFilter) return false
-      if (qualiteFilter && safeText(r.sage_qualite) !== qualiteFilter) return false
-      if (!activiteCorrespond(r, activiteFilter)) return false
-      if (term && !(r.numero.toUpperCase().includes(term) || (r.sage_intitule || '').toUpperCase().includes(term))) return false
-      return true
-    }).sort((a, b) => {
-      const oa = STATUT_APPRO_ORDRE.indexOf(a.statut_appro || 'SOMMEIL'), ob = STATUT_APPRO_ORDRE.indexOf(b.statut_appro || 'SOMMEIL')
-      if (oa !== ob) return oa - ob
-      return (b.sage_nb_refs_mystock || 0) - (a.sage_nb_refs_mystock || 0) || a.numero.localeCompare(b.numero)
-    })
-  }, [rows, search, statutFilter, qualiteFilter, activiteFilter, masquerSommeil, masquerHorsNegoce, perimetreSeul, strategieFilter])
-
-  const kpis = useMemo(() => {
-    const c: Record<string, number> = {}
-    const base = perimetreSeul ? rows.filter((r) => r.perimetre_cbn) : rows
-    base.forEach((r) => { if (r.statut_appro) c[r.statut_appro] = (c[r.statut_appro] || 0) + 1 })
-    return c
-  }, [rows, perimetreSeul])
-
-  // Compteur "sans activité depuis 24 mois" sur le même jeu que les cartes KPI (périmètre ou tous, hors BLG seuls).
-  const nbSansActivite24m = useMemo(() => {
-    const base = rows.filter((r) => r.statut_appariement !== 'blg_seul' && (!perimetreSeul || r.perimetre_cbn))
-    return base.filter((r) => activiteCorrespond(r, 'aucune_24m')).length
-  }, [rows, perimetreSeul])
 
   useEffect(() => {
-    if (!selected) { setForm(null); return }
     setForm({
       long_terme: !!selected.long_terme, au_fil_de_leau: !!selected.au_fil_de_leau, contremarque: !!selected.contremarque,
       strategie_principale: selected.strategie_principale || '',
@@ -1068,10 +1149,17 @@ function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, art
         frs_pv: !!data.frs_pv, perimetre_cbn: !!data.perimetre_cbn,
       } : f)
     })
-  }, [selected?.numero]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selected.numero]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Échap ferme la fenêtre
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
 
   async function enregistrer() {
-    if (!selected || !form) return
+    if (!form) return
     setSaving(true); setSaveMsg(null)
     try {
       const payload = {
@@ -1092,17 +1180,16 @@ function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, art
       if (err) throw err
       const { data, error: err2 } = await supabase.from('v_appro_controle_fournisseur_sage_blg').select('*').eq('numero', selected.numero).maybeSingle()
       if (err2) throw err2
-      if (data) { onRowChange(data as FournRow); setSelected(data as FournRow) }
+      if (data) onRowChange(data as FournRow)
       setSaveMsg('Stratégie enregistrée. Relance le calcul de besoin (onglet Articles) si tu as changé un délai ou le niveau de service.')
     } catch (e) {
       setSaveMsg('Erreur : ' + messageErreur(e))
     } finally { setSaving(false) }
   }
 
-  const refsFournisseur = useMemo(() => {
-    if (!selected) return []
-    return articles.filter((a) => a.fournisseur_principal === selected.numero && a.pertinent_calcul_besoin).sort((a, b) => (b.conso_horizon || 0) - (a.conso_horizon || 0))
-  }, [articles, selected])
+  const refsFournisseur = useMemo(() =>
+    articles.filter((a) => a.fournisseur_principal === selected.numero && a.pertinent_calcul_besoin).sort((a, b) => (b.conso_horizon || 0) - (a.conso_horizon || 0)),
+  [articles, selected.numero])
   const encoursFournisseur = useMemo(() => {
     const s = { encours: 0, retard: 0, douteux: 0, cdc: 0, aCommander: 0, qte: 0, rupture: 0, sansDate: 0 }
     refsFournisseur.forEach((a) => {
@@ -1114,8 +1201,262 @@ function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, art
     return s
   }, [refsFournisseur])
 
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start justify-between border-b border-[#E5E1D8] px-5 py-4">
+          <div>
+            <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Fiche fournisseur & stratégie d'appro</div>
+            <div className="mt-1 font-mono text-[12px] font-bold text-[#8A8474]">{selected.numero} {selected.blg_code ? <span className="text-[#B3AD9E]">· BLG {selected.blg_code}</span> : null}</div>
+            <div className="text-[18px] font-bold text-[#111820]">{selected.sage_intitule || '—'}</div>
+            <div className="mt-1.5 flex flex-wrap gap-1.5"><StatutApproBadge statut={selected.statut_appro} />
+              <QualiteBadge qualite={selected.sage_qualite} />
+              {selected.sage_frs_pv && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-bold text-amber-700">PV{selected.frs_pv_force ? ' (forcé, SAGE non renseigné)' : ''}</span>}
+              {selected.perimetre_cbn && <span className="rounded-full bg-[#111820] px-2 py-0.5 text-[11px] font-bold text-white">Classeur{selected.qualite_classeur ? ` · ${selected.qualite_classeur}` : ''}</span>}
+              {selected.blg_statut_partenaire && selected.blg_statut_partenaire !== 'active' && <span className="rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-bold text-red-700">BLG partenaire : {selected.blg_statut_partenaire}</span>}
+              {activiteCorrespond(selected, 'aucune_24m') && <span className="rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-bold text-red-700">Sans activité depuis 24 mois</span>}
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            {selected.lien_blg && <a href={selected.lien_blg} target="_blank" rel="noopener noreferrer" className="text-[12px] font-semibold text-[#B4761A] hover:underline">Ouvrir dans BLG ↗</a>}
+            <button type="button" onClick={onClose} className="rounded-lg px-2 py-1 text-[13px] font-bold text-[#8A8474] hover:bg-[#F4F3F0] hover:text-[#111820]">✕ Fermer</button>
+          </div>
+        </div>
+
+        <div className="overflow-auto px-5 py-4">
+          {form && (
+            <DetailGroup title="Stratégie d'appro (saisie)">
+              <div className="grid grid-cols-3 gap-2 px-2 py-1 text-[13px]">
+                <label className="flex items-center gap-2"><input type="checkbox" checked={form.long_terme} onChange={(e) => setForm({ ...form, long_terme: e.target.checked })} className="accent-[#B4761A]" /> Long terme</label>
+                <label className="flex items-center gap-2"><input type="checkbox" checked={form.au_fil_de_leau} onChange={(e) => setForm({ ...form, au_fil_de_leau: e.target.checked })} className="accent-[#B4761A]" /> Au fil de l'eau</label>
+                <label className="flex items-center gap-2"><input type="checkbox" checked={form.contremarque} onChange={(e) => setForm({ ...form, contremarque: e.target.checked })} className="accent-[#B4761A]" /> Contremarque / à la demande</label>
+              </div>
+              <div className="grid grid-cols-[1fr_1.4fr] gap-2 px-2 py-1.5 text-[13px]">
+                <span className="font-semibold text-[#3A362E]">Stratégie principale</span>
+                <select value={form.strategie_principale} onChange={(e) => setForm({ ...form, strategie_principale: e.target.value })} className="h-8 rounded-lg border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold">
+                  <option value="">— non renseignée{selected.strategie_suggeree ? ` (suggestion : ${selected.strategie_suggeree})` : ''} —</option>
+                  {strategies.map((s) => <option key={s.code} value={s.code}>{s.designation} — {s.outil_cbn} / {s.mode_appro}</option>)}
+                </select>
+              </div>
+              <div className="grid grid-cols-2 gap-2 px-2 py-1 text-[13px]">
+                <label className="flex items-center gap-2"><input type="checkbox" checked={form.perimetre_cbn} onChange={(e) => setForm({ ...form, perimetre_cbn: e.target.checked })} className="accent-[#B4761A]" /> Dans le périmètre classeur</label>
+                <label className="flex items-center gap-2" title="Force le badge PV quand le champ libre SAGE « Frs PV » n'est pas renseigné"><input type="checkbox" checked={form.frs_pv} onChange={(e) => setForm({ ...form, frs_pv: e.target.checked })} className="accent-[#B4761A]" /> Fournisseur PV (forcer si absent de SAGE)</label>
+              </div>
+              <div className="grid grid-cols-[1fr_1.4fr] gap-2 px-2 py-1.5 text-[13px]">
+                <span className="font-semibold text-[#3A362E]">Calcul de besoin périodique</span>
+                <div className="flex gap-1 text-[12px]">
+                  {(['auto', 'oui', 'non'] as const).map((v) => (
+                    <button key={v} type="button" onClick={() => setForm({ ...form, calcul_besoin_periodique: v })}
+                      className={`rounded px-2 py-0.5 font-semibold ${form.calcul_besoin_periodique === v ? 'bg-[#111820] text-white' : 'bg-[#F4F3F0] text-[#3A362E]'}`}>
+                      {v === 'auto' ? `Selon stratégie (${selected.calcul_besoin_effectif ? 'oui' : 'non'})` : v === 'oui' ? 'Forcer oui' : 'Forcer non'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="grid grid-cols-4 gap-2 px-2 py-1.5 text-[12px]">
+                <label className="flex flex-col gap-0.5"><span className="font-semibold text-[#3A362E]">Périodicité</span>
+                  <select value={form.periodicite} onChange={(e) => setForm({ ...form, periodicite: e.target.value })} className="h-8 rounded-lg border border-[#E5E1D8] bg-white px-2">
+                    <option value="mensuel">Mensuel</option><option value="bimensuel">Bimensuel</option><option value="hebdomadaire">Hebdomadaire</option><option value="trimestriel">Trimestriel</option>
+                  </select></label>
+                <label className="flex flex-col gap-0.5"><span className="font-semibold text-[#3A362E]">Délai appro (j)</span>
+                  <input value={form.delai_appro_jours} onChange={(e) => setForm({ ...form, delai_appro_jours: e.target.value })} placeholder={selected.sage_delai_appro ? `SAGE ${selected.sage_delai_appro}` : selected.blg_delai_appro ? `BLG ${selected.blg_delai_appro}` : 'défaut'} className="h-8 rounded-lg border border-[#E5E1D8] px-2" /></label>
+                <label className="flex flex-col gap-0.5"><span className="font-semibold text-[#3A362E]">Délai sécurité (j)</span>
+                  <input value={form.delai_securite_jours} onChange={(e) => setForm({ ...form, delai_securite_jours: e.target.value })} placeholder="défaut" className="h-8 rounded-lg border border-[#E5E1D8] px-2" /></label>
+                <label className="flex flex-col gap-0.5"><span className="font-semibold text-[#3A362E]">Niveau service z</span>
+                  <input value={form.niveau_service_z} onChange={(e) => setForm({ ...form, niveau_service_z: e.target.value })} placeholder="défaut" className="h-8 rounded-lg border border-[#E5E1D8] px-2" /></label>
+              </div>
+              <div className="px-2 py-1.5">
+                <textarea value={form.remarque} onChange={(e) => setForm({ ...form, remarque: e.target.value })} placeholder="Remarque…" rows={2} className="w-full rounded-lg border border-[#E5E1D8] px-2 py-1 text-[12px]" />
+              </div>
+              <div className="flex items-center justify-between px-2 py-1">
+                <span className="text-[12px] text-[#8A8474]">{saveMsg}</span>
+                <button type="button" onClick={() => void enregistrer()} disabled={saving} className="rounded-lg bg-[#111820] px-4 py-2 text-[13px] font-bold text-white hover:bg-[#252E3D] disabled:opacity-60">{saving ? 'Enregistrement…' : 'Enregistrer la stratégie'}</button>
+              </div>
+            </DetailGroup>
+          )}
+
+          <div className="grid gap-x-6 md:grid-cols-2">
+            <div>
+              <DetailGroup title="Délai & stocks min / max">
+                <DetailRow label="Délai d'appro renseigné" value={selected.delai_appro_present ? <span className="font-semibold text-emerald-700">OUI — {fmtNum(selected.delai_appro_retenu)} j (paramètre {fmtNum(selected.param_delai_appro)} · SAGE {fmtNum(selected.sage_delai_appro)} · BLG {fmtNum(selected.blg_delai_appro)})</span> : <span className="font-semibold text-red-700">NON — délai par défaut du calcul</span>} />
+                <DetailRow label="Refs actives avec stock min/max SAGE (FMS)" value={fmtNum(selected.sage_nb_refs_min_max)} />
+                <DetailRow label="Refs actives avec stock min/max BLG (DPFMS)" value={fmtNum(selected.blg_nb_refs_min_max)} />
+                <DetailRow label="Refs avec stock min retenu (saisie appli)" value={fmtNum(selected.nb_refs_min_retenu)} />
+              </DetailGroup>
+
+              <DetailGroup title={`Commandes fournisseurs ${new Date().getFullYear()} (BLG)`}>
+                <DetailRow label="Commandes (dépôt FMS / agences / total)" value={`${fmtNum(selected.nb_cdf_ytd_fms)} / ${fmtNum(selected.nb_cdf_ytd_hors_fms)} / ${fmtNum(selected.nb_cdf_ytd)}`} />
+                <DetailRow label="Montant HT (dont FMS)" value={`${fmtEuro(selected.montant_ht_cdf_ytd)} (${fmtEuro(selected.montant_ht_cdf_ytd_fms)})`} />
+                <DetailRow label="Dernière commande" value={fmtDate(selected.derniere_cdf)} />
+                <DetailRow label="Lecture achats" value={
+                  selected.strategie_principale === 'Long terme' || selected.strategie_principale === "Au fil de l'eau"
+                    ? `${fmtNum(selected.nb_cdf_ytd_fms)} cdes ${selected.strategie_principale} (FMS) + ${fmtNum(selected.nb_cdf_ytd_hors_fms)} cdes A la demande (agences)`
+                    : `${fmtNum(selected.nb_cdf_ytd)} cdes A la demande`
+                } />
+              </DetailGroup>
+
+              <DetailGroup title="Activité (toutes années)">
+                <DetailRow label="Dernière activité" value={activiteCorrespond(selected, 'aucune_24m') ? <span className="font-semibold text-red-700">{libelleActivite(selected)} — aucune activité depuis 24 mois</span> : libelleActivite(selected)} />
+                <DetailRow label="Dernière commande fournisseur BLG (toutes années)" value={fmtDate(selected.derniere_cdf_toutes)} />
+                <DetailRow label="Commandes fournisseurs sur 24 mois glissants" value={fmtNum(selected.nb_cdf_24m)} />
+                <DetailRow label="Dernière sortie BL de ses références (horizon 24 mois)" value={fmtMois(selected.sage_derniere_sortie)} />
+              </DetailGroup>
+            </div>
+            <div>
+              <DetailGroup title="Volumes & activité (SAGE)">
+                <DetailRow label="Qualité" value={selected.sage_qualite} />
+                <DetailRow label="Références (total / actives)" value={`${fmtNum(selected.sage_nb_refs)} / ${fmtNum(selected.sage_nb_refs_actives)}`} />
+                <DetailRow label="Refs MYSTOCK actives (dont avec conso / avec stock min calculé / en stock FMS)" value={`${fmtNum(selected.sage_nb_refs_mystock)} (${fmtNum(selected.sage_nb_refs_mystock_conso)} / ${fmtNum(selected.sage_nb_refs_stock_min)} / ${fmtNum(selected.sage_nb_refs_mystock_stock_fms)})`} />
+                <DetailRow label="Refs actives en stock agence (MYSTOCK NON, stock hors FMS)" value={fmtNum(selected.sage_nb_refs_stock_agence)} />
+                <DetailRow label="Refs en stock FMS (tous MYSTOCK)" value={fmtNum(selected.sage_nb_refs_stock_fms)} />
+                <DetailRow label="Sorties BL sur l'horizon (qté)" value={fmtNum(selected.sage_conso_horizon_total)} />
+                <DetailRow label="Dernière sortie" value={fmtMois(selected.sage_derniere_sortie)} />
+                <DetailRow label="Valeur stock FMS (PA)" value={fmtEuro(selected.sage_valeur_stock_fms)} />
+              </DetailGroup>
+
+              <DetailGroup title="Côté BLG">
+                <DetailRow label="Fournisseur BLG" value={selected.blg_code ? `${selected.blg_code} — ${selected.blg_actif ? 'actif' : 'inactif'}` : 'Manquant'} />
+                <DetailRow label="Articles BLG (total / actifs)" value={`${fmtNum(selected.blg_nb_parts)} / ${fmtNum(selected.blg_nb_parts_actifs)}`} />
+                <DetailRow label="Articles avec stock min DPFMS" value={fmtNum(selected.blg_nb_parts_stock_min_fms)} />
+                <DetailRow label="Délais BLG (réappro / transport / sécurité)" value={`${fmtNum(selected.blg_delai_appro)} / ${fmtNum(selected.blg_delai_transport)} / ${fmtNum(selected.blg_delai_securite)} j`} />
+                <DetailRow label="Lignes de tarif fournisseur" value={fmtNum(selected.blg_nb_prix_fournisseur)} />
+              </DetailGroup>
+
+              <DetailGroup title="Encours & projection FMS (références MYSTOCK actives)">
+                <DetailRow label="Encours fournisseur FMS (fiable / en retard / douteux exclu)" value={`${fmtNum(encoursFournisseur.encours)} / ${fmtNum(encoursFournisseur.retard)} / ${fmtNum(encoursFournisseur.douteux)} pièces`} />
+                <DetailRow label="Ventes réservées FMS (SAGE sto_res)" value={fmtNum(encoursFournisseur.cdc)} />
+                <DetailRow label="Références à commander (projeté < stock min)" value={encoursFournisseur.aCommander ? <span className="font-semibold text-red-700">{fmtNum(encoursFournisseur.aCommander)} — {fmtNum(encoursFournisseur.qte)} pièces suggérées</span> : '0'} />
+                <DetailRow label="Rupture avant réception" value={encoursFournisseur.rupture ? <span className="font-semibold text-red-700">{fmtNum(encoursFournisseur.rupture)}</span> : '0'} />
+                <DetailRow label="Commandes sans date de livraison (délai théorique)" value={fmtNum(encoursFournisseur.sansDate)} />
+              </DetailGroup>
+            </div>
+          </div>
+
+          <DetailGroup title={`Références MYSTOCK actives (${refsFournisseur.length}) — triées par conso`}>
+            <div className="max-h-72 overflow-auto rounded-lg border border-[#E5E1D8]">
+              <table className="w-full text-left text-[12px]">
+                <thead className="sticky top-0 bg-[#F4F3F0] text-[10px] uppercase text-[#8A8474]">
+                  <tr><th className="px-2 py-1">Référence</th><th className="px-2 py-1 text-right">μ/mois</th><th className="px-2 py-1 text-right">Stock FMS</th><th className="px-2 py-1 text-right">Encours</th><th className="px-2 py-1 text-right">Réservé</th><th className="px-2 py-1 text-right">Projeté</th><th className="px-2 py-1 text-right">Min calc.</th><th className="px-2 py-1 text-right">À cmder</th></tr>
+                </thead>
+                <tbody>
+                  {refsFournisseur.map((a) => (
+                    <tr key={a.reference_article} className={`border-t border-[#F4F3F0] ${a.a_commander ? 'bg-red-50/40' : ''}`}>
+                      <td className="px-2 py-1"><span className="font-mono font-semibold">{a.reference_article}</span><div className="truncate text-[11px] text-[#8A8474]">{a.sage_designation}</div></td>
+                      <td className="px-2 py-1 text-right">{fmtNum(a.conso_moy_mensuelle, 1)}</td>
+                      <td className="px-2 py-1 text-right">{fmtNum(a.sage_stock_fms)}</td>
+                      <td className="px-2 py-1 text-right">{n0(a.encours_fourn_fms) > 0 ? <span title={a.detail_cdf || ''}>{fmtNum(a.encours_fourn_fms)}{n0(a.encours_fourn_retard) > 0 ? <span className="ml-0.5 text-[#96600F]">⏱</span> : ''}</span> : '—'}</td>
+                      <td className="px-2 py-1 text-right">{n0(a.cdc_a_livrer_fms) > 0 ? fmtNum(a.cdc_a_livrer_fms) : '—'}</td>
+                      <td className={`px-2 py-1 text-right ${a.rupture_avant_reception ? 'font-bold text-red-700' : ''}`}>{fmtNum(a.stock_projete_livraison)}</td>
+                      <td className="px-2 py-1 text-right font-bold">{fmtNum(a.calc_stock_min)}</td>
+                      <td className="px-2 py-1 text-right">{a.a_commander ? <span className="font-bold text-red-700">{fmtNum(a.qte_a_commander)}</span> : '—'}</td>
+                    </tr>
+                  ))}
+                  {refsFournisseur.length === 0 && <tr><td colSpan={8} className="px-2 py-3 text-center text-[#8A8474]">Aucune référence MYSTOCK active.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </DetailGroup>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, articles }: {
+  rows: FournRow[]; loading: boolean; error: string | null; strategies: StrategieRef[]
+  onRowChange: (r: FournRow) => void; articles: ArtRow[]
+}) {
+  const [search, setSearch] = useState('')
+  const [statutFilter, setStatutFilter] = useState<'' | StatutAppro>('')
+  const [qualiteFilter, setQualiteFilter] = useState('')
+  const [activiteFilter, setActiviteFilter] = useState<ActiviteFilter>('')
+  const [mystockFilter, setMystockFilter] = useState<'tous' | 'avec' | 'sans'>('tous')
+  const [masquerSommeil, setMasquerSommeil] = useState(true)
+  const [masquerHorsNegoce, setMasquerHorsNegoce] = useState(true)
+  // Bascule rapide sur les fournisseurs du classeur (MARCHANDISE + PV) — active par défaut.
+  const [perimetreSeul, setPerimetreSeul] = useState(true)
+  const [strategieFilter, setStrategieFilter] = useState<string | null>(null)
+  // Tri et filtres par colonne de la liste
+  const [tri, setTri] = useState<EtatTri<CleTriFourn>>(null)
+  const [filtresCol, setFiltresCol] = useState<FiltresColFourn>({})
+  // ligne surlignée au clavier (↑/↓), fiche ouverte au clic ou avec Entrée
+  const [ligneActive, setLigneActive] = useState<FournRow | null>(null)
+  const [selected, setSelected] = useState<FournRow | null>(null)
+  const listRefs = useRef<Record<number, HTMLTableRowElement | null>>({})
+
+  const qualites = useMemo(() => Array.from(new Set(rows.map((r) => safeText(r.sage_qualite)).filter(Boolean))).sort(), [rows])
+  const nbPerimetre = useMemo(() => rows.filter((r) => r.perimetre_cbn).length, [rows])
+  const rowsPerimetre = useMemo(() => rows.filter((r) => r.perimetre_cbn && r.statut_appariement !== 'blg_seul'), [rows])
+
+  // La fiche ouverte suit la ligne mise à jour (après enregistrement de la stratégie)
+  useEffect(() => {
+    if (!selected) return
+    const maj = rows.find((r) => r.numero === selected.numero)
+    if (maj && maj !== selected) setSelected(maj)
+  }, [rows]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const filtres = useMemo(() => {
+    const term = search.trim().toUpperCase()
+    const clesFiltre = (Object.keys(filtresCol) as CleTriFourn[]).filter((k) => (filtresCol[k] || '').trim())
+    const base = rows.filter((r) => {
+      if (r.statut_appariement === 'blg_seul') return false
+      if (perimetreSeul && !r.perimetre_cbn) return false
+      if (!perimetreSeul && masquerSommeil && r.statut_appro === 'SOMMEIL') return false
+      if (!perimetreSeul && masquerHorsNegoce && r.statut_appro === 'HORS_NEGOCE') return false
+      if (strategieFilter !== null && (r.strategie_principale || '') !== strategieFilter) return false
+      if (statutFilter && r.statut_appro !== statutFilter) return false
+      if (qualiteFilter && safeText(r.sage_qualite) !== qualiteFilter) return false
+      if (!activiteCorrespond(r, activiteFilter)) return false
+      if (mystockFilter !== 'tous' && (n0(r.sage_nb_refs_mystock) > 0) !== (mystockFilter === 'avec')) return false
+      if (term && !(r.numero.toUpperCase().includes(term) || (r.sage_intitule || '').toUpperCase().includes(term))) return false
+      for (const k of clesFiltre) {
+        // la colonne "Fournisseur" filtre sur le n° OU le nom
+        if (k === 'numero') { if (!filtreColonneOk(r.numero, filtresCol[k]!) && !filtreColonneOk(valeurColFourn(r, 'nom'), filtresCol[k]!)) return false }
+        else if (!filtreColonneOk(valeurColFourn(r, k), filtresCol[k]!)) return false
+      }
+      return true
+    })
+    if (tri) return trierPar(base, tri, (r, k) => valeurColFourn(r, k as CleTriFourn))
+    return base.sort((a, b) => {
+      const oa = STATUT_APPRO_ORDRE.indexOf(a.statut_appro || 'SOMMEIL'), ob = STATUT_APPRO_ORDRE.indexOf(b.statut_appro || 'SOMMEIL')
+      if (oa !== ob) return oa - ob
+      return (b.sage_nb_refs_mystock || 0) - (a.sage_nb_refs_mystock || 0) || a.numero.localeCompare(b.numero)
+    })
+  }, [rows, search, statutFilter, qualiteFilter, activiteFilter, mystockFilter, masquerSommeil, masquerHorsNegoce, perimetreSeul, strategieFilter, tri, filtresCol])
+
+  const kpis = useMemo(() => {
+    const c: Record<string, number> = {}
+    const base = perimetreSeul ? rows.filter((r) => r.perimetre_cbn) : rows
+    base.forEach((r) => { if (r.statut_appro) c[r.statut_appro] = (c[r.statut_appro] || 0) + 1 })
+    return c
+  }, [rows, perimetreSeul])
+
+  // Compteurs "sans activité depuis 24 mois" et "avec refs MYSTOCK" sur le même jeu que les cartes KPI (périmètre ou tous, hors BLG seuls).
+  const compteurs = useMemo(() => {
+    const base = rows.filter((r) => r.statut_appariement !== 'blg_seul' && (!perimetreSeul || r.perimetre_cbn))
+    return { sansActivite24m: base.filter((r) => activiteCorrespond(r, 'aucune_24m')).length, avecMystock: base.filter((r) => n0(r.sage_nb_refs_mystock) > 0).length }
+  }, [rows, perimetreSeul])
+
+  const totaux = useMemo(() => filtres.reduce((t, r) => {
+    t.refs += n0(r.sage_nb_refs_actives); t.mystock += n0(r.sage_nb_refs_mystock); t.mystockFms += n0(r.sage_nb_refs_mystock_stock_fms)
+    t.nonMystock += Math.max(0, n0(r.sage_nb_refs_actives) - n0(r.sage_nb_refs_mystock)); t.stockAgence += n0(r.sage_nb_refs_stock_agence)
+    t.cdfFms += n0(r.nb_cdf_ytd_fms); t.cdfAgences += n0(r.nb_cdf_ytd_hors_fms)
+    return t
+  }, { refs: 0, mystock: 0, mystockFms: 0, nonMystock: 0, stockAgence: 0, cdfFms: 0, cdfAgences: 0 }), [filtres])
+
+  function setFiltreCol(k: CleTriFourn, v: string) { setFiltresCol((f) => ({ ...f, [k]: v })) }
+  const nbFiltresCol = (Object.values(filtresCol) as string[]).filter((v) => (v || '').trim()).length
+
   function getIndex(list: FournRow[], sel: FournRow | null) { return sel ? list.findIndex((r) => r.numero === sel.numero) : -1 }
-  const onListKeyDown = creerHandlerNavigation(filtres, selected, setSelected, getIndex, listRefs)
+  const navigation = creerHandlerNavigation(filtres, ligneActive, setLigneActive, getIndex, listRefs)
+  function onListKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (e.key === 'Enter' && ligneActive) { e.preventDefault(); setSelected(ligneActive); return }
+    navigation(e)
+  }
+  function ouvrir(r: FournRow) { setLigneActive(r); setSelected(r) }
+
+  const thNum = 'text-right'
+  const thBase = 'whitespace-nowrap'
 
   return (
     <>
@@ -1136,28 +1477,35 @@ function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, art
       </section>
 
       {perimetreSeul && (
-        <PyramideClasseur rows={rowsPerimetre} toutes={rows} articles={articles} loading={loading} strategieActive={strategieFilter} onStrategie={setStrategieFilter} onSelectFournisseur={(r) => setSelected(r)} />
+        <PyramideClasseur rows={rowsPerimetre} toutes={rows} articles={articles} loading={loading} strategieActive={strategieFilter} onStrategie={setStrategieFilter} onSelectFournisseur={ouvrir} />
       )}
 
-      <section className="grid grid-cols-2 gap-3 md:grid-cols-4 lg:grid-cols-9">
+      <section className="grid grid-cols-2 gap-3 md:grid-cols-5 lg:grid-cols-10">
         {STATUT_APPRO_ORDRE.map((s) => (
           <button key={s} type="button" onClick={() => setStatutFilter((v) => (v === s ? '' : s))} className={`text-left ${statutFilter === s ? 'ring-2 ring-[#B4761A]/50 rounded-xl' : ''}`}>
             <KpiCard label={STATUT_APPRO_STYLE[s].label} value={kpis[s] || 0} loading={loading} tone={s === 'CBN_BLG' ? 'ok' : s === 'A_QUALIFIER' || s === 'INACTIF' ? 'warn' : undefined} />
           </button>
         ))}
+        <button type="button" onClick={() => setMystockFilter((v) => (v === 'avec' ? 'tous' : 'avec'))} className={`text-left ${mystockFilter === 'avec' ? 'ring-2 ring-[#B4761A]/50 rounded-xl' : ''}`}
+          title="Fournisseurs ayant au moins une référence MYSTOCK active">
+          <KpiCard label="Avec refs MYSTOCK" value={compteurs.avecMystock} loading={loading} tone="ok" sub="au moins une référence" />
+        </button>
         <button type="button" onClick={() => setActiviteFilter((v) => (v === 'aucune_24m' ? '' : 'aucune_24m'))} className={`text-left ${activiteFilter === 'aucune_24m' ? 'ring-2 ring-[#B4761A]/50 rounded-xl' : ''}`}
           title="Aucune commande fournisseur BLG ni sortie BL de ses références depuis 24 mois (ou jamais)">
-          <KpiCard label="Sans activité 24 mois" value={nbSansActivite24m} loading={loading} tone="warn" sub="ni commande ni sortie BL" />
+          <KpiCard label="Sans activité 24 mois" value={compteurs.sansActivite24m} loading={loading} tone="warn" sub="ni commande ni sortie BL" />
         </button>
       </section>
 
       <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
-        <div className="grid gap-2 md:grid-cols-6">
+        <div className="grid gap-2 md:grid-cols-7">
           <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="N° fournisseur ou intitulé…"
             className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-sm font-medium outline-none focus:border-[#B4761A] md:col-span-2" />
           <select value={qualiteFilter} onChange={(e) => setQualiteFilter(e.target.value)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
             <option value="">Qualité : Toutes</option>
             {qualites.map((q) => <option key={q} value={q}>{q}</option>)}
+          </select>
+          <select value={mystockFilter} onChange={(e) => setMystockFilter(e.target.value as typeof mystockFilter)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
+            <option value="tous">Refs MYSTOCK : Tous</option><option value="avec">Avec au moins une ref MYSTOCK</option><option value="sans">Sans ref MYSTOCK</option>
           </select>
           <select value={activiteFilter} onChange={(e) => setActiviteFilter(e.target.value as ActiviteFilter)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]"
             title="Activité = dernière commande fournisseur BLG (toutes années) ou dernière sortie BL de ses références">
@@ -1185,211 +1533,119 @@ function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, art
         </p>
       </section>
 
-      <section className="grid gap-4 lg:grid-cols-[1.1fr_1.3fr]">
-        <div className="rounded-xl border border-[#E5E1D8] bg-white p-4">
-          <div className="mb-3 flex items-center justify-between">
-            <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">{loading ? 'Chargement…' : `${filtres.length} fournisseur${filtres.length > 1 ? 's' : ''}`}</div>
-            {error && <div className="text-[12px] font-semibold text-red-600">{error}</div>}
+      <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">
+            {loading ? 'Chargement…' : `${filtres.length} fournisseur${filtres.length > 1 ? 's' : ''}`}
+            {tri && <span className="ml-2 normal-case tracking-normal text-[#B4761A]">· trié sur une colonne</span>}
           </div>
-          <div tabIndex={0} onKeyDown={onListKeyDown} className="max-h-[760px] overflow-auto rounded-lg border border-[#E5E1D8] outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A]/50">
-            <table className="w-full text-left text-[13px]">
-              <thead className="sticky top-0 bg-[#F4F3F0] text-[11px] uppercase tracking-wide text-[#8A8474]">
-                <tr>
-                  <th className="px-3 py-2 font-bold">Fournisseur</th>
-                  <th className="px-3 py-2 font-bold">Statut appro</th>
-                  <th className="px-3 py-2 font-bold">Stratégie</th>
-                  <th className="px-3 py-2 text-right font-bold" title="Références actives / MYSTOCK / stock agence">Refs act. / MYSTOCK / agence</th>
-                  <th className="px-3 py-2 text-right font-bold" title="Commandes fournisseurs depuis le 1er janvier : dépôt FMS / total">Cdes FMS / total</th>
-                  <th className="px-3 py-2 text-right font-bold">Délai</th>
-                  <th className="px-3 py-2 text-right font-bold" title="Dernière activité : max(dernière commande fournisseur BLG, dernière sortie BL de ses références)">Dern. activité</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtres.map((r, i) => {
-                  const isSel = selected?.numero === r.numero
-                  const mAct = moisDepuis(r.derniere_activite)
-                  return (
-                    <tr key={r.numero} ref={(el) => { listRefs.current[i] = el }} onClick={() => setSelected(r)}
-                      className={`cursor-pointer border-t border-[#E5E1D8] transition-colors hover:bg-[#F4F3F0] ${isSel ? 'bg-[#B4761A]/[0.06]' : ''}`}>
-                      <td className="px-3 py-2">
-                        <div className="flex items-center gap-1.5">
-                          <span className="font-mono text-[12px] font-semibold text-[#3A362E]">{r.numero}</span>
-                          {r.sage_frs_pv && <span className="rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-bold text-amber-700" title={r.frs_pv_force ? 'PV forcé côté appli (classeur) — champ libre SAGE non renseigné' : 'Frs PV (SAGE)'}>PV{r.frs_pv_force ? '*' : ''}</span>}
-                          {r.perimetre_cbn && !perimetreSeul && <span className="rounded-full bg-[#111820] px-1.5 py-0.5 text-[10px] font-bold text-white">Classeur</span>}
-                          {r.statut_appariement === 'manquant_blg' && <span className="rounded-full bg-red-50 px-1.5 py-0.5 text-[10px] font-bold text-red-700">Manquant BLG</span>}
-                        </div>
-                        <div className="truncate text-[12px] text-[#111820]">{r.sage_intitule || '—'}</div>
-                      </td>
-                      <td className="px-3 py-2"><StatutApproBadge statut={r.statut_appro} /></td>
-                      <td className="px-3 py-2 text-[12px] text-[#3A362E]">
-                        {r.strategie_principale || (r.strategie_suggeree ? <span className="italic text-[#B4761A]">→ {r.strategie_suggeree} ?</span> : '—')}
-                      </td>
-                      <td className="px-3 py-2 text-right font-mono text-[12px] text-[#3A362E]">{r.sage_nb_refs_actives ?? 0} / <b>{r.sage_nb_refs_mystock ?? 0}</b> / {r.sage_nb_refs_stock_agence ?? 0}</td>
-                      <td className="px-3 py-2 text-right font-mono text-[12px] text-[#3A362E]">{r.nb_cdf_ytd_fms ?? 0} / {r.nb_cdf_ytd ?? 0}</td>
-                      <td className="px-3 py-2 text-right text-[12px]">{r.delai_appro_present ? <span className="font-semibold text-emerald-700">{fmtNum(r.delai_appro_retenu)} j</span> : <span className="text-[#B3AD9E]">NON</span>}</td>
-                      <td className="px-3 py-2 text-right text-[12px]" title={`Dernière commande BLG : ${fmtDate(r.derniere_cdf_toutes)} · dernière sortie BL : ${fmtMois(r.sage_derniere_sortie)} · ${fmtNum(r.nb_cdf_24m)} cde(s) sur 24 mois`}>
-                        {r.derniere_activite
-                          ? <span className={mAct !== null && mAct >= 24 ? 'font-semibold text-red-700' : mAct !== null && mAct >= 12 ? 'text-[#96600F]' : 'text-[#3A362E]'}>{fmtDate(r.derniere_activite)}{mAct !== null ? <span className="ml-1 text-[10px] text-[#8A8474]">({mAct} m)</span> : null}</span>
-                          : <span className="font-semibold text-red-700">Jamais</span>}
-                      </td>
-                    </tr>
-                  )
-                })}
-                {!loading && filtres.length === 0 && <tr><td colSpan={7} className="px-3 py-8 text-center text-[#8A8474]">Aucun résultat pour ces filtres.</td></tr>}
-              </tbody>
-            </table>
+          <div className="flex items-center gap-3 text-[11px] text-[#8A8474]">
+            {error && <div className="text-[12px] font-semibold text-red-600">{error}</div>}
+            {(tri || nbFiltresCol > 0) && (
+              <button type="button" onClick={() => { setTri(null); setFiltresCol({}) }} className="font-bold text-[#B4761A] hover:underline">Réinitialiser tri et filtres de colonnes</button>
+            )}
+            <span>Clic sur un en-tête : tri · champs d'en-tête : filtre (texte "contient", nombres "&gt;10", "&lt;=5", "=0", "vide") · clic sur une ligne ou Entrée : fiche</span>
           </div>
         </div>
-
-        <div className="rounded-xl border border-[#E5E1D8] bg-white p-4">
-          <div className="mb-3 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Fiche fournisseur & stratégie d'appro</div>
-          {!selected || !form ? (
-            <div className="flex h-64 items-center justify-center text-center text-[13px] text-[#8A8474]">Sélectionne un fournisseur pour voir sa fiche et régler sa stratégie d'appro.</div>
-          ) : (
-            <div>
-              <div className="mb-3 flex items-start justify-between border-b border-[#E5E1D8] pb-3">
-                <div>
-                  <div className="font-mono text-[12px] font-bold text-[#8A8474]">{selected.numero} {selected.blg_code ? <span className="text-[#B3AD9E]">· BLG {selected.blg_code}</span> : null}</div>
-                  <div className="text-[16px] font-bold text-[#111820]">{selected.sage_intitule || '—'}</div>
-                  <div className="mt-1 flex flex-wrap gap-1.5"><StatutApproBadge statut={selected.statut_appro} />
-                    {selected.sage_frs_pv && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-bold text-amber-700">PV{selected.frs_pv_force ? ' (forcé, SAGE non renseigné)' : ''}</span>}
-                    {selected.perimetre_cbn && <span className="rounded-full bg-[#111820] px-2 py-0.5 text-[11px] font-bold text-white">Classeur{selected.qualite_classeur ? ` · ${selected.qualite_classeur}` : ''}</span>}
-                    {selected.blg_statut_partenaire && selected.blg_statut_partenaire !== 'active' && <span className="rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-bold text-red-700">BLG partenaire : {selected.blg_statut_partenaire}</span>}
-                    {activiteCorrespond(selected, 'aucune_24m') && <span className="rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-bold text-red-700">Sans activité depuis 24 mois</span>}
-                  </div>
-                </div>
-                {selected.lien_blg && <a href={selected.lien_blg} target="_blank" rel="noopener noreferrer" className="text-[12px] font-semibold text-[#B4761A] hover:underline">Ouvrir dans BLG ↗</a>}
-              </div>
-
-              <DetailGroup title="Stratégie d'appro (saisie)">
-                <div className="grid grid-cols-3 gap-2 px-2 py-1 text-[13px]">
-                  <label className="flex items-center gap-2"><input type="checkbox" checked={form.long_terme} onChange={(e) => setForm({ ...form, long_terme: e.target.checked })} className="accent-[#B4761A]" /> Long terme</label>
-                  <label className="flex items-center gap-2"><input type="checkbox" checked={form.au_fil_de_leau} onChange={(e) => setForm({ ...form, au_fil_de_leau: e.target.checked })} className="accent-[#B4761A]" /> Au fil de l'eau</label>
-                  <label className="flex items-center gap-2"><input type="checkbox" checked={form.contremarque} onChange={(e) => setForm({ ...form, contremarque: e.target.checked })} className="accent-[#B4761A]" /> Contremarque / à la demande</label>
-                </div>
-                <div className="grid grid-cols-[1fr_1.4fr] gap-2 px-2 py-1.5 text-[13px]">
-                  <span className="font-semibold text-[#3A362E]">Stratégie principale</span>
-                  <select value={form.strategie_principale} onChange={(e) => setForm({ ...form, strategie_principale: e.target.value })} className="h-8 rounded-lg border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold">
-                    <option value="">— non renseignée{selected.strategie_suggeree ? ` (suggestion : ${selected.strategie_suggeree})` : ''} —</option>
-                    {strategies.map((s) => <option key={s.code} value={s.code}>{s.designation} — {s.outil_cbn} / {s.mode_appro}</option>)}
-                  </select>
-                </div>
-                <div className="grid grid-cols-2 gap-2 px-2 py-1 text-[13px]">
-                  <label className="flex items-center gap-2"><input type="checkbox" checked={form.perimetre_cbn} onChange={(e) => setForm({ ...form, perimetre_cbn: e.target.checked })} className="accent-[#B4761A]" /> Dans le périmètre classeur</label>
-                  <label className="flex items-center gap-2" title="Force le badge PV quand le champ libre SAGE « Frs PV » n'est pas renseigné"><input type="checkbox" checked={form.frs_pv} onChange={(e) => setForm({ ...form, frs_pv: e.target.checked })} className="accent-[#B4761A]" /> Fournisseur PV (forcer si absent de SAGE)</label>
-                </div>
-                <div className="grid grid-cols-[1fr_1.4fr] gap-2 px-2 py-1.5 text-[13px]">
-                  <span className="font-semibold text-[#3A362E]">Calcul de besoin périodique</span>
-                  <div className="flex gap-1 text-[12px]">
-                    {(['auto', 'oui', 'non'] as const).map((v) => (
-                      <button key={v} type="button" onClick={() => setForm({ ...form, calcul_besoin_periodique: v })}
-                        className={`rounded px-2 py-0.5 font-semibold ${form.calcul_besoin_periodique === v ? 'bg-[#111820] text-white' : 'bg-[#F4F3F0] text-[#3A362E]'}`}>
-                        {v === 'auto' ? `Selon stratégie (${selected.calcul_besoin_effectif ? 'oui' : 'non'})` : v === 'oui' ? 'Forcer oui' : 'Forcer non'}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <div className="grid grid-cols-4 gap-2 px-2 py-1.5 text-[12px]">
-                  <label className="flex flex-col gap-0.5"><span className="font-semibold text-[#3A362E]">Périodicité</span>
-                    <select value={form.periodicite} onChange={(e) => setForm({ ...form, periodicite: e.target.value })} className="h-8 rounded-lg border border-[#E5E1D8] bg-white px-2">
-                      <option value="mensuel">Mensuel</option><option value="bimensuel">Bimensuel</option><option value="hebdomadaire">Hebdomadaire</option><option value="trimestriel">Trimestriel</option>
-                    </select></label>
-                  <label className="flex flex-col gap-0.5"><span className="font-semibold text-[#3A362E]">Délai appro (j)</span>
-                    <input value={form.delai_appro_jours} onChange={(e) => setForm({ ...form, delai_appro_jours: e.target.value })} placeholder={selected.sage_delai_appro ? `SAGE ${selected.sage_delai_appro}` : selected.blg_delai_appro ? `BLG ${selected.blg_delai_appro}` : 'défaut'} className="h-8 rounded-lg border border-[#E5E1D8] px-2" /></label>
-                  <label className="flex flex-col gap-0.5"><span className="font-semibold text-[#3A362E]">Délai sécurité (j)</span>
-                    <input value={form.delai_securite_jours} onChange={(e) => setForm({ ...form, delai_securite_jours: e.target.value })} placeholder="défaut" className="h-8 rounded-lg border border-[#E5E1D8] px-2" /></label>
-                  <label className="flex flex-col gap-0.5"><span className="font-semibold text-[#3A362E]">Niveau service z</span>
-                    <input value={form.niveau_service_z} onChange={(e) => setForm({ ...form, niveau_service_z: e.target.value })} placeholder="défaut" className="h-8 rounded-lg border border-[#E5E1D8] px-2" /></label>
-                </div>
-                <div className="px-2 py-1.5">
-                  <textarea value={form.remarque} onChange={(e) => setForm({ ...form, remarque: e.target.value })} placeholder="Remarque…" rows={2} className="w-full rounded-lg border border-[#E5E1D8] px-2 py-1 text-[12px]" />
-                </div>
-                <div className="flex items-center justify-between px-2 py-1">
-                  <span className="text-[12px] text-[#8A8474]">{saveMsg}</span>
-                  <button type="button" onClick={() => void enregistrer()} disabled={saving} className="rounded-lg bg-[#111820] px-4 py-2 text-[13px] font-bold text-white hover:bg-[#252E3D] disabled:opacity-60">{saving ? 'Enregistrement…' : 'Enregistrer la stratégie'}</button>
-                </div>
-              </DetailGroup>
-
-              <DetailGroup title="Délai & stocks min / max">
-                <DetailRow label="Délai d'appro renseigné" value={selected.delai_appro_present ? <span className="font-semibold text-emerald-700">OUI — {fmtNum(selected.delai_appro_retenu)} j (paramètre {fmtNum(selected.param_delai_appro)} · SAGE {fmtNum(selected.sage_delai_appro)} · BLG {fmtNum(selected.blg_delai_appro)})</span> : <span className="font-semibold text-red-700">NON — délai par défaut du calcul</span>} />
-                <DetailRow label="Refs actives avec stock min/max SAGE (FMS)" value={fmtNum(selected.sage_nb_refs_min_max)} />
-                <DetailRow label="Refs actives avec stock min/max BLG (DPFMS)" value={fmtNum(selected.blg_nb_refs_min_max)} />
-                <DetailRow label="Refs avec stock min retenu (saisie appli)" value={fmtNum(selected.nb_refs_min_retenu)} />
-              </DetailGroup>
-
-              <DetailGroup title={`Commandes fournisseurs ${new Date().getFullYear()} (BLG)`}>
-                <DetailRow label="Commandes (dépôt FMS / agences / total)" value={`${fmtNum(selected.nb_cdf_ytd_fms)} / ${fmtNum(selected.nb_cdf_ytd_hors_fms)} / ${fmtNum(selected.nb_cdf_ytd)}`} />
-                <DetailRow label="Montant HT (dont FMS)" value={`${fmtEuro(selected.montant_ht_cdf_ytd)} (${fmtEuro(selected.montant_ht_cdf_ytd_fms)})`} />
-                <DetailRow label="Dernière commande" value={fmtDate(selected.derniere_cdf)} />
-                <DetailRow label="Lecture achats" value={
-                  selected.strategie_principale === 'Long terme' || selected.strategie_principale === "Au fil de l'eau"
-                    ? `${fmtNum(selected.nb_cdf_ytd_fms)} cdes ${selected.strategie_principale} (FMS) + ${fmtNum(selected.nb_cdf_ytd_hors_fms)} cdes A la demande (agences)`
-                    : `${fmtNum(selected.nb_cdf_ytd)} cdes A la demande`
-                } />
-              </DetailGroup>
-
-              <DetailGroup title="Activité (toutes années)">
-                <DetailRow label="Dernière activité" value={activiteCorrespond(selected, 'aucune_24m') ? <span className="font-semibold text-red-700">{libelleActivite(selected)} — aucune activité depuis 24 mois</span> : libelleActivite(selected)} />
-                <DetailRow label="Dernière commande fournisseur BLG (toutes années)" value={fmtDate(selected.derniere_cdf_toutes)} />
-                <DetailRow label="Commandes fournisseurs sur 24 mois glissants" value={fmtNum(selected.nb_cdf_24m)} />
-                <DetailRow label="Dernière sortie BL de ses références (horizon 24 mois)" value={fmtMois(selected.sage_derniere_sortie)} />
-              </DetailGroup>
-
-              <DetailGroup title="Volumes & activité (SAGE)">
-                <DetailRow label="Qualité" value={selected.sage_qualite} />
-                <DetailRow label="Références (total / actives)" value={`${fmtNum(selected.sage_nb_refs)} / ${fmtNum(selected.sage_nb_refs_actives)}`} />
-                <DetailRow label="Refs MYSTOCK actives (dont avec conso / avec stock min calculé / en stock FMS)" value={`${fmtNum(selected.sage_nb_refs_mystock)} (${fmtNum(selected.sage_nb_refs_mystock_conso)} / ${fmtNum(selected.sage_nb_refs_stock_min)} / ${fmtNum(selected.sage_nb_refs_mystock_stock_fms)})`} />
-                <DetailRow label="Refs actives en stock agence (MYSTOCK NON, stock hors FMS)" value={fmtNum(selected.sage_nb_refs_stock_agence)} />
-                <DetailRow label="Refs en stock FMS (tous MYSTOCK)" value={fmtNum(selected.sage_nb_refs_stock_fms)} />
-                <DetailRow label="Sorties BL sur l'horizon (qté)" value={fmtNum(selected.sage_conso_horizon_total)} />
-                <DetailRow label="Dernière sortie" value={fmtMois(selected.sage_derniere_sortie)} />
-                <DetailRow label="Valeur stock FMS (PA)" value={fmtEuro(selected.sage_valeur_stock_fms)} />
-              </DetailGroup>
-
-              <DetailGroup title="Côté BLG">
-                <DetailRow label="Fournisseur BLG" value={selected.blg_code ? `${selected.blg_code} — ${selected.blg_actif ? 'actif' : 'inactif'}` : 'Manquant'} />
-                <DetailRow label="Articles BLG (total / actifs)" value={`${fmtNum(selected.blg_nb_parts)} / ${fmtNum(selected.blg_nb_parts_actifs)}`} />
-                <DetailRow label="Articles avec stock min DPFMS" value={fmtNum(selected.blg_nb_parts_stock_min_fms)} />
-                <DetailRow label="Délais BLG (réappro / transport / sécurité)" value={`${fmtNum(selected.blg_delai_appro)} / ${fmtNum(selected.blg_delai_transport)} / ${fmtNum(selected.blg_delai_securite)} j`} />
-                <DetailRow label="Lignes de tarif fournisseur" value={fmtNum(selected.blg_nb_prix_fournisseur)} />
-              </DetailGroup>
-
-              <DetailGroup title="Encours & projection FMS (références MYSTOCK actives)">
-                <DetailRow label="Encours fournisseur FMS (fiable / en retard / douteux exclu)" value={`${fmtNum(encoursFournisseur.encours)} / ${fmtNum(encoursFournisseur.retard)} / ${fmtNum(encoursFournisseur.douteux)} pièces`} />
-                <DetailRow label="Ventes réservées FMS (SAGE sto_res)" value={fmtNum(encoursFournisseur.cdc)} />
-                <DetailRow label="Références à commander (projeté < stock min)" value={encoursFournisseur.aCommander ? <span className="font-semibold text-red-700">{fmtNum(encoursFournisseur.aCommander)} — {fmtNum(encoursFournisseur.qte)} pièces suggérées</span> : '0'} />
-                <DetailRow label="Rupture avant réception" value={encoursFournisseur.rupture ? <span className="font-semibold text-red-700">{fmtNum(encoursFournisseur.rupture)}</span> : '0'} />
-                <DetailRow label="Commandes sans date de livraison (délai théorique)" value={fmtNum(encoursFournisseur.sansDate)} />
-              </DetailGroup>
-
-              <DetailGroup title={`Références MYSTOCK actives (${refsFournisseur.length}) — triées par conso`}>
-                <div className="max-h-72 overflow-auto rounded-lg border border-[#E5E1D8]">
-                  <table className="w-full text-left text-[12px]">
-                    <thead className="sticky top-0 bg-[#F4F3F0] text-[10px] uppercase text-[#8A8474]">
-                      <tr><th className="px-2 py-1">Référence</th><th className="px-2 py-1 text-right">μ/mois</th><th className="px-2 py-1 text-right">Stock FMS</th><th className="px-2 py-1 text-right">Encours</th><th className="px-2 py-1 text-right">Réservé</th><th className="px-2 py-1 text-right">Projeté</th><th className="px-2 py-1 text-right">Min calc.</th><th className="px-2 py-1 text-right">À cmder</th></tr>
-                    </thead>
-                    <tbody>
-                      {refsFournisseur.map((a) => (
-                        <tr key={a.reference_article} className={`border-t border-[#F4F3F0] ${a.a_commander ? 'bg-red-50/40' : ''}`}>
-                          <td className="px-2 py-1"><span className="font-mono font-semibold">{a.reference_article}</span><div className="truncate text-[11px] text-[#8A8474]">{a.sage_designation}</div></td>
-                          <td className="px-2 py-1 text-right">{fmtNum(a.conso_moy_mensuelle, 1)}</td>
-                          <td className="px-2 py-1 text-right">{fmtNum(a.sage_stock_fms)}</td>
-                          <td className="px-2 py-1 text-right">{n0(a.encours_fourn_fms) > 0 ? <span title={a.detail_cdf || ''}>{fmtNum(a.encours_fourn_fms)}{n0(a.encours_fourn_retard) > 0 ? <span className="ml-0.5 text-[#96600F]">⏱</span> : ''}</span> : '—'}</td>
-                          <td className="px-2 py-1 text-right">{n0(a.cdc_a_livrer_fms) > 0 ? fmtNum(a.cdc_a_livrer_fms) : '—'}</td>
-                          <td className={`px-2 py-1 text-right ${a.rupture_avant_reception ? 'font-bold text-red-700' : ''}`}>{fmtNum(a.stock_projete_livraison)}</td>
-                          <td className="px-2 py-1 text-right font-bold">{fmtNum(a.calc_stock_min)}</td>
-                          <td className="px-2 py-1 text-right">{a.a_commander ? <span className="font-bold text-red-700">{fmtNum(a.qte_a_commander)}</span> : '—'}</td>
-                        </tr>
-                      ))}
-                      {refsFournisseur.length === 0 && <tr><td colSpan={8} className="px-2 py-3 text-center text-[#8A8474]">Aucune référence MYSTOCK active.</td></tr>}
-                    </tbody>
-                  </table>
-                </div>
-              </DetailGroup>
-            </div>
-          )}
+        <div tabIndex={0} onKeyDown={onListKeyDown} className="max-h-[820px] overflow-auto rounded-lg border border-[#E5E1D8] outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A]/50">
+          <table className="w-full text-left text-[13px]">
+            <thead className="sticky top-0 z-10 bg-[#F4F3F0] text-[11px] uppercase tracking-wide text-[#8A8474]">
+              <tr>
+                <th className={`${thBase} cursor-pointer select-none px-2 py-2 font-bold`}>
+                  <span onClick={() => setTri((t) => basculerTri(t, 'numero'))} className={`hover:text-[#111820] ${tri?.key === 'numero' ? 'text-[#111820]' : ''}`}>N°<IndicateurTri actif={tri?.key === 'numero'} dir={tri?.dir} /></span>
+                  <span className="mx-1 text-[#C9C4B8]">·</span>
+                  <span onClick={() => setTri((t) => basculerTri(t, 'nom'))} className={`hover:text-[#111820] ${tri?.key === 'nom' ? 'text-[#111820]' : ''}`}>Fournisseur<IndicateurTri actif={tri?.key === 'nom'} dir={tri?.dir} /></span>
+                </th>
+                <ThTri k="qualite" label="Qualité" tri={tri} onTri={(k) => setTri((t) => basculerTri(t, k))} className={thBase} />
+                <ThTri k="statut" label="Statut appro" tri={tri} onTri={(k) => setTri((t) => basculerTri(t, k))} className={thBase} />
+                <ThTri k="strategie" label="Stratégie" tri={tri} onTri={(k) => setTri((t) => basculerTri(t, k))} className={thBase} />
+                <ThTri k="refs" label="Refs actives" tri={tri} onTri={(k) => setTri((t) => basculerTri(t, k))} align="right" className={thBase} title="Références actives (hors sommeil)" />
+                <ThTri k="mystock" label={<>MYSTOCK<div className="text-[9px] font-normal normal-case tracking-normal">dont en stock FMS</div></>} tri={tri} onTri={(k) => setTri((t) => basculerTri(t, k))} align="right" className={thBase} title="Références MYSTOCK actives — en dessous : celles réellement en stock au dépôt FMS" />
+                <ThTri k="non_mystock" label={<>Non MYSTOCK<div className="text-[9px] font-normal normal-case tracking-normal">dont en stock agence</div></>} tri={tri} onTri={(k) => setTri((t) => basculerTri(t, k))} align="right" className={thBase} title="Références actives MYSTOCK ≠ OUI — en dessous : celles avec du stock hors FMS" />
+                <ThTri k="cdf_fms" label={<>Cdes FMS<div className="text-[9px] font-normal normal-case tracking-normal">{new Date().getFullYear()}</div></>} tri={tri} onTri={(k) => setTri((t) => basculerTri(t, k))} align="right" className={thBase} title="Commandes fournisseurs BLG livrées au dépôt FMS depuis le 1er janvier" />
+                <ThTri k="cdf_agences" label={<>Cdes agences<div className="text-[9px] font-normal normal-case tracking-normal">{new Date().getFullYear()}</div></>} tri={tri} onTri={(k) => setTri((t) => basculerTri(t, k))} align="right" className={thBase} title="Commandes fournisseurs BLG livrées en agence depuis le 1er janvier" />
+                <ThTri k="delai" label="Délai" tri={tri} onTri={(k) => setTri((t) => basculerTri(t, k))} align="right" className={thBase} title="Délai d'appro retenu (paramètre > SAGE > BLG)" />
+                <ThTri k="activite" label="Dern. activité" tri={tri} onTri={(k) => setTri((t) => basculerTri(t, k))} align="right" className={thBase} title="Dernière activité : max(dernière commande fournisseur BLG, dernière sortie BL de ses références)" />
+              </tr>
+              <tr className="bg-[#F4F3F0]/80">
+                <td className="px-2 pb-2"><InputFiltre value={filtresCol.numero || ''} onChange={(v) => setFiltreCol('numero', v)} placeholder="n° ou nom" /></td>
+                <td className="px-2 pb-2"><InputFiltre value={filtresCol.qualite || ''} onChange={(v) => setFiltreCol('qualite', v)} /></td>
+                <td className="px-2 pb-2"><InputFiltre value={filtresCol.statut || ''} onChange={(v) => setFiltreCol('statut', v)} /></td>
+                <td className="px-2 pb-2"><InputFiltre value={filtresCol.strategie || ''} onChange={(v) => setFiltreCol('strategie', v)} /></td>
+                <td className="px-2 pb-2"><InputFiltre value={filtresCol.refs || ''} onChange={(v) => setFiltreCol('refs', v)} align="right" placeholder=">0" /></td>
+                <td className="px-2 pb-2"><InputFiltre value={filtresCol.mystock || ''} onChange={(v) => setFiltreCol('mystock', v)} align="right" placeholder=">0" /></td>
+                <td className="px-2 pb-2"><InputFiltre value={filtresCol.non_mystock || ''} onChange={(v) => setFiltreCol('non_mystock', v)} align="right" placeholder=">0" /></td>
+                <td className="px-2 pb-2"><InputFiltre value={filtresCol.cdf_fms || ''} onChange={(v) => setFiltreCol('cdf_fms', v)} align="right" placeholder=">0" /></td>
+                <td className="px-2 pb-2"><InputFiltre value={filtresCol.cdf_agences || ''} onChange={(v) => setFiltreCol('cdf_agences', v)} align="right" placeholder=">0" /></td>
+                <td className="px-2 pb-2"><InputFiltre value={filtresCol.delai || ''} onChange={(v) => setFiltreCol('delai', v)} align="right" placeholder="vide" /></td>
+                <td className="px-2 pb-2"><InputFiltre value={filtresCol.activite || ''} onChange={(v) => setFiltreCol('activite', v)} align="right" placeholder="2026" /></td>
+              </tr>
+            </thead>
+            <tbody>
+              {filtres.map((r, i) => {
+                const isActive = ligneActive?.numero === r.numero
+                const mAct = moisDepuis(r.derniere_activite)
+                const nonMystock = Math.max(0, n0(r.sage_nb_refs_actives) - n0(r.sage_nb_refs_mystock))
+                return (
+                  <tr key={r.numero} ref={(el) => { listRefs.current[i] = el }} onClick={() => ouvrir(r)}
+                    className={`cursor-pointer border-t border-[#E5E1D8] transition-colors hover:bg-[#F4F3F0] ${isActive ? 'bg-[#B4761A]/[0.06]' : ''}`}>
+                    <td className="px-2 py-2">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="font-mono text-[12px] font-semibold text-[#3A362E]">{r.numero}</span>
+                        {r.sage_frs_pv && <span className="rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-bold text-amber-700" title={r.frs_pv_force ? 'PV forcé côté appli (classeur) — champ libre SAGE non renseigné' : 'Frs PV (SAGE)'}>PV{r.frs_pv_force ? '*' : ''}</span>}
+                        {r.perimetre_cbn && !perimetreSeul && <span className="rounded-full bg-[#111820] px-1.5 py-0.5 text-[10px] font-bold text-white">Classeur</span>}
+                        {r.statut_appariement === 'manquant_blg' && <span className="rounded-full bg-red-50 px-1.5 py-0.5 text-[10px] font-bold text-red-700">Manquant BLG</span>}
+                        {r.sage_en_sommeil && <span className="rounded-full bg-[#F4F3F0] px-1.5 py-0.5 text-[10px] font-bold text-[#8A8474]">Sommeil</span>}
+                      </div>
+                      <div className="max-w-[320px] truncate text-[12px] text-[#111820]" title={r.sage_intitule || ''}>{r.sage_intitule || '—'}</div>
+                    </td>
+                    <td className="px-2 py-2"><QualiteBadge qualite={r.sage_qualite} /></td>
+                    <td className="px-2 py-2"><StatutApproBadge statut={r.statut_appro} /></td>
+                    <td className="px-2 py-2 text-[12px] text-[#3A362E]">
+                      {r.strategie_principale || (r.strategie_suggeree ? <span className="italic text-[#B4761A]">→ {r.strategie_suggeree} ?</span> : '—')}
+                    </td>
+                    <td className="px-2 py-2 text-right font-mono text-[12px] text-[#3A362E]">{fmtNum(r.sage_nb_refs_actives)}</td>
+                    <td className="px-2 py-2 text-right font-mono text-[12px]">
+                      <div className="font-bold text-emerald-700">{fmtNum(r.sage_nb_refs_mystock)}</div>
+                      <div className="text-[10px] text-[#8A8474]" title="Refs MYSTOCK avec stock > 0 au dépôt FMS">{n0(r.sage_nb_refs_mystock) > 0 ? `${fmtNum(r.sage_nb_refs_mystock_stock_fms)} en stock FMS` : '—'}</div>
+                    </td>
+                    <td className="px-2 py-2 text-right font-mono text-[12px]">
+                      <div className="text-[#3A362E]">{fmtNum(nonMystock)}</div>
+                      <div className="text-[10px] text-[#8A8474]" title="Refs actives MYSTOCK ≠ OUI avec du stock hors FMS">{nonMystock > 0 ? `${fmtNum(r.sage_nb_refs_stock_agence)} en stock agence` : '—'}</div>
+                    </td>
+                    <td className="px-2 py-2 text-right font-mono text-[12px] text-[#3A362E]">{fmtNum(r.nb_cdf_ytd_fms)}</td>
+                    <td className="px-2 py-2 text-right font-mono text-[12px] text-[#3A362E]">{fmtNum(r.nb_cdf_ytd_hors_fms)}</td>
+                    <td className="px-2 py-2 text-right text-[12px]">{r.delai_appro_present ? <span className="font-semibold text-emerald-700">{fmtNum(r.delai_appro_retenu)} j</span> : <span className="text-[#B3AD9E]">NON</span>}</td>
+                    <td className="whitespace-nowrap px-2 py-2 text-right text-[12px]" title={`Dernière commande BLG : ${fmtDate(r.derniere_cdf_toutes)} · dernière sortie BL : ${fmtMois(r.sage_derniere_sortie)} · ${fmtNum(r.nb_cdf_24m)} cde(s) sur 24 mois`}>
+                      {r.derniere_activite
+                        ? <span className={mAct !== null && mAct >= 24 ? 'font-semibold text-red-700' : mAct !== null && mAct >= 12 ? 'text-[#96600F]' : 'text-[#3A362E]'}>{fmtDate(r.derniere_activite)}{mAct !== null ? <span className="ml-1 text-[10px] text-[#8A8474]">({mAct} m)</span> : null}</span>
+                        : <span className="font-semibold text-red-700">Jamais</span>}
+                    </td>
+                  </tr>
+                )
+              })}
+              {!loading && filtres.length === 0 && <tr><td colSpan={11} className="px-3 py-8 text-center text-[#8A8474]">Aucun résultat pour ces filtres.</td></tr>}
+            </tbody>
+            {filtres.length > 0 && (
+              <tfoot className="sticky bottom-0 bg-[#111820] text-[12px] text-white">
+                <tr>
+                  <td className="px-2 py-2 font-bold" colSpan={4}>TOTAL · {fmtNum(filtres.length)} fournisseur{filtres.length > 1 ? 's' : ''}</td>
+                  <td className={`${thNum} px-2 py-2 font-mono font-bold`}>{fmtNum(totaux.refs)}</td>
+                  <td className={`${thNum} px-2 py-2 font-mono`}><div className="font-bold text-emerald-300">{fmtNum(totaux.mystock)}</div><div className="text-[10px] opacity-70">{fmtNum(totaux.mystockFms)} en stock FMS</div></td>
+                  <td className={`${thNum} px-2 py-2 font-mono`}><div className="font-bold">{fmtNum(totaux.nonMystock)}</div><div className="text-[10px] opacity-70">{fmtNum(totaux.stockAgence)} en stock agence</div></td>
+                  <td className={`${thNum} px-2 py-2 font-mono font-bold`}>{fmtNum(totaux.cdfFms)}</td>
+                  <td className={`${thNum} px-2 py-2 font-mono font-bold`}>{fmtNum(totaux.cdfAgences)}</td>
+                  <td className="px-2 py-2" colSpan={2}></td>
+                </tr>
+              </tfoot>
+            )}
+          </table>
         </div>
       </section>
+
+      {selected && (
+        <FicheFournisseurModal selected={selected} strategies={strategies} articles={articles} onRowChange={onRowChange} onClose={() => setSelected(null)} />
+      )}
     </>
   )
 }
@@ -1608,6 +1864,49 @@ function ModeleProjection({ parametres, onParametresChange, onRecalcul, loading 
 // Onglet Articles & stock min
 // ─────────────────────────────────────────────────────────────────────────
 
+// ── Colonnes de la liste Articles : clé, en-tête, valeur utilisée pour le tri
+// et le filtre d'en-tête. L'ordre est celui du tableau (thead et tbody).
+type CleColArt = 'inc' | 'reference' | 'fourn' | 'strategie' | 'arret' | 'delai_l' | 'mu12' | 'sigma' | 'mu3' | 'derniere_sortie' | 'stock_fms' | 'dispo' | 'encours' | 'reserve' | 'projete' | 'couv' | 'min_sage' | 'min_blg' | 'ss' | 'min_calc' | 'max_calc' | 'a_cmder' | 'retenu'
+type FiltresColArt = Partial<Record<CleColArt, string>>
+type CtxColArt = { fournMap: Map<string, FournRow>; incoherencesParRef: Map<string, string[]> }
+
+const COLONNES_ARTICLES: { key: CleColArt; label: string; title?: string; align: 'left' | 'right'; placeholder?: string; val: (a: ArtRow, ctx: CtxColArt) => unknown }[] = [
+  { key: 'inc', label: '⚠', title: 'Nombre d\'incohérences détectées (survole pour le détail). Filtre : ">0", "=0", ou un mot du libellé (ex. "sommeil")', align: 'left', placeholder: '>0', val: (a, c) => c.incoherencesParRef.get(a.reference_article)?.length ?? 0 },
+  { key: 'reference', label: 'Référence', title: 'Référence et désignation SAGE', align: 'left', placeholder: 'réf. ou désignation', val: (a) => a.reference_article },
+  { key: 'fourn', label: 'Fourn.', title: 'Fournisseur principal (n° SAGE). Filtre sur le n° ou l\'intitulé', align: 'left', placeholder: 'n° ou nom', val: (a) => a.fournisseur_principal },
+  { key: 'strategie', label: 'Stratégie', title: 'Stratégie d\'appro principale du fournisseur', align: 'left', val: (a, c) => (a.fournisseur_principal ? c.fournMap.get(a.fournisseur_principal)?.strategie_principale : null) || '' },
+  { key: 'arret', label: 'Arrêt', title: 'Arrêt appro / arrêt vente, référence remplaçante et date d\'effet (saisie manuelle, ✎). Filtre : "appro", "vente", une référence', align: 'left', val: (a) => [a.arret_appro ? 'Appro' : '', a.arret_vente ? 'Vente' : '', a.ref_remplacante || ''].filter(Boolean).join(' ') },
+  { key: 'delai_l', label: 'Délai L', title: 'Délai d\'appro + délai de sécurité (jours calendaires) — ref = valeurs propres à la référence, sinon fournisseur / défaut', align: 'right', val: (a) => a.projection_delai_l },
+  { key: 'mu12', label: 'μ 12 mois', title: 'Conso moyenne mensuelle sur l\'horizon (12 mois)', align: 'right', val: (a) => a.conso_moy_mensuelle },
+  { key: 'sigma', label: 'σ', title: 'Écart-type mensuel', align: 'right', val: (a) => a.conso_ecart_type },
+  { key: 'mu3', label: 'μ 3 mois', title: 'Consommation mensuelle moyenne des 3 derniers mois complets (sorties BL / 3). Survole pour le total.', align: 'right', val: (a) => a.conso_moy_3_mois },
+  { key: 'derniere_sortie', label: 'Dern. sortie', title: 'Dernière sortie BL (mois). Filtre sur l\'année ou le mois au format AAAA-MM', align: 'right', placeholder: '2026-0', val: (a) => a.sage_derniere_sortie ? String(a.sage_derniere_sortie).slice(0, 7) : null },
+  { key: 'stock_fms', label: 'Stock FMS', title: 'Stock physique FMS (SAGE sto_qte)', align: 'right', val: (a) => a.sage_stock_fms },
+  { key: 'dispo', label: 'Dispo (agences)', title: 'Stock disponible SAGE (sto_dispo) du dépôt FMS — entre parenthèses : somme des agences', align: 'right', val: (a) => a.stock_dispo_sage_fms },
+  { key: 'encours', label: 'Encours fourn.', title: 'Reste à livrer des commandes fournisseurs BLG livrées au dépôt FMS, avec date de livraison estimée (⏱ = en retard, ≈ = date par délai théorique). Survole pour le détail par commande.', align: 'right', val: (a) => a.encours_fourn_fms },
+  { key: 'reserve', label: 'Réservé (agences)', title: 'Ventes réservées SAGE (sto_res) du dépôt FMS, déduites du projeté — entre parenthèses : somme des réservés des agences. Survole pour le reste à livrer BLG.', align: 'right', val: (a) => a.reserve_sage_fms },
+  { key: 'projete', label: 'Projeté', title: 'Stock (périmètre) − demande sur l\'horizon + encours. Survole pour la décomposition et le seuil. Rouge = à commander ; ⚠ = stock épuisé avant réception de l\'encours.', align: 'right', val: (a) => a.stock_projete_livraison },
+  { key: 'couv', label: 'Couv. (mois)', title: 'Couverture projetée = position de stock du périmètre choisi (stock + encours − réservé) / μ retenu. En dessous, en gris : couverture du seul stock physique FMS / μ 12 mois (ne dépend pas du modèle).', align: 'right', val: (a) => a.couverture_projetee_mois },
+  { key: 'min_sage', label: 'Min SAGE', align: 'right', val: (a) => a.sage_stock_min_fms },
+  { key: 'min_blg', label: 'Min BLG', align: 'right', val: (a) => a.blg_stock_min_fms },
+  { key: 'ss', label: 'SS calc.', align: 'right', val: (a) => a.calc_stock_securite },
+  { key: 'min_calc', label: 'Min calc.', align: 'right', val: (a) => a.calc_stock_min },
+  { key: 'max_calc', label: 'Max calc.', align: 'right', val: (a) => a.calc_stock_max },
+  { key: 'a_cmder', label: 'À cmder', title: 'Quantité suggérée pour remonter le projeté au stock max (arrondie au colisage). Filtre : ">0" = à commander', align: 'right', placeholder: '>0', val: (a) => (a.a_commander ? n0(a.qte_a_commander) : null) },
+  { key: 'retenu', label: 'Retenu', title: 'Stock min retenu (saisie manuelle). Filtre "!vide" = avec saisie', align: 'right', placeholder: '!vide', val: (a) => a.stock_min_retenu },
+]
+
+/** Filtre d'en-tête d'une colonne Articles : quelques colonnes cherchent aussi
+ * dans un libellé (désignation, intitulé fournisseur, libellés d'incohérences). */
+function filtreColArtOk(a: ArtRow, key: CleColArt, expr: string, ctx: CtxColArt): boolean {
+  const col = COLONNES_ARTICLES.find((c) => c.key === key)!
+  if (filtreColonneOk(col.val(a, ctx), expr)) return true
+  if (key === 'reference') return filtreColonneOk(a.sage_designation, expr)
+  if (key === 'fourn') return filtreColonneOk(a.fournisseur_principal ? ctx.fournMap.get(a.fournisseur_principal)?.sage_intitule : null, expr)
+  if (key === 'inc') return filtreColonneOk((ctx.incoherencesParRef.get(a.reference_article) || []).map((k) => LABEL_INCOHERENCE_ARTICLE[k]?.label || k).join(' ; '), expr)
+  return false
+}
+
 function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, parametres, onParametresChange, onArticleChange, onRecalcul }: {
   articles: ArtRow[]; fournisseurs: FournRow[]; loading: boolean; loadProgress: number; error: string | null
   parametres: Parametre[]; onParametresChange: (p: Parametre[]) => void; onArticleChange: (a: ArtRow) => void; onRecalcul: () => Promise<void>
@@ -1628,6 +1927,9 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
   const [incoherenceFilter, setIncoherenceFilter] = useState<string | null>(null)
   // ventes réservées : SAGE sto_res du dépôt FMS (source de vérité), BLG en survol uniquement
   const [tri, setTri] = useState<'conso' | 'ecart' | 'couverture' | 'reference' | 'a_commander' | 'projete' | 'incoherences'>('conso')
+  // Tri par en-tête de colonne (prime sur le tri prédéfini ci-dessus) et filtres par colonne
+  const [triCol, setTriCol] = useState<EtatTri<CleColArt>>(null)
+  const [filtresCol, setFiltresCol] = useState<FiltresColArt>({})
   const [editArticle, setEditArticle] = useState<ArtRow | null>(null)
   const [recalculEnCours, setRecalculEnCours] = useState(false)
   const [recalculMsg, setRecalculMsg] = useState<string | null>(null)
@@ -1653,7 +1955,12 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
     return m
   }, [articles, fournMap, indexArticles])
 
-  /** Jeu filtré hors pastille d'incohérence : base des KPI et des compteurs de pastilles. */
+  const ctxCol = useMemo<CtxColArt>(() => ({ fournMap, incoherencesParRef }), [fournMap, incoherencesParRef])
+  const clesFiltreCol = useMemo(() => (Object.keys(filtresCol) as CleColArt[]).filter((k) => (filtresCol[k] || '').trim()), [filtresCol])
+  function setFiltreCol(k: CleColArt, v: string) { setFiltresCol((f) => ({ ...f, [k]: v })) }
+
+  /** Jeu filtré (filtres généraux + filtres d'en-tête de colonne, hors pastille
+   * d'incohérence) : base des KPI et des compteurs de pastilles. */
   const baseFiltree = useMemo(() => {
     const term = search.trim().toUpperCase()
     return articles.filter((a) => {
@@ -1670,9 +1977,10 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
       if (sommeilFilter !== 'tous' && !!a.sage_en_sommeil !== (sommeilFilter === 'oui')) return false
       if (arretApproFilter !== 'tous' && !!a.arret_appro !== (arretApproFilter === 'oui')) return false
       if (term && !(a.reference_article.toUpperCase().includes(term) || (a.sage_designation || '').toUpperCase().includes(term))) return false
+      for (const k of clesFiltreCol) if (!filtreColArtOk(a, k, filtresCol[k]!, ctxCol)) return false
       return true
     })
-  }, [articles, fournMap, search, fournFilter, familleFilter, pertinentsSeuls, avecConsoSeuls, ecartMinSeuls, aCommanderSeuls, avecEncoursSeuls, qualiteFilter, strategieFilter, sommeilFilter, arretApproFilter])
+  }, [articles, fournMap, search, fournFilter, familleFilter, pertinentsSeuls, avecConsoSeuls, ecartMinSeuls, aCommanderSeuls, avecEncoursSeuls, qualiteFilter, strategieFilter, sommeilFilter, arretApproFilter, filtresCol, ctxCol, clesFiltreCol])
 
   const compteursIncoherences = useMemo(() => {
     const c: Record<string, number> = {}
@@ -1688,6 +1996,10 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
       : incoherenceFilter
         ? baseFiltree.filter((a) => (incoherencesParRef.get(a.reference_article) || []).includes(incoherenceFilter))
         : baseFiltree
+    if (triCol) {
+      const col = COLONNES_ARTICLES.find((c) => c.key === triCol.key)!
+      return trierPar(list, triCol, (a) => col.val(a, ctxCol))
+    }
     return [...list].sort((a, b) => {
       if (tri === 'incoherences') return (incoherencesParRef.get(b.reference_article)?.length || 0) - (incoherencesParRef.get(a.reference_article)?.length || 0) || (b.conso_horizon || 0) - (a.conso_horizon || 0)
       if (tri === 'conso') return (b.conso_horizon || 0) - (a.conso_horizon || 0)
@@ -1697,7 +2009,7 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
       if (tri === 'projete') return (n0(a.stock_projete_livraison) - n0(a.calc_stock_min)) - (n0(b.stock_projete_livraison) - n0(b.calc_stock_min))
       return a.reference_article.localeCompare(b.reference_article)
     })
-  }, [baseFiltree, incoherenceFilter, incoherencesParRef, tri])
+  }, [baseFiltree, incoherenceFilter, incoherencesParRef, tri, triCol, ctxCol])
 
   // KPI sur le jeu filtré (hors pastille d'incohérence)
   const kpis = useMemo(() => {
@@ -1717,7 +2029,7 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
       encoursDouteux: pert.filter((a) => n0(a.encours_fourn_douteux) > 0).length,
       sansDate: pert.filter((a) => a.date_livraison_par_defaut).length,
     }
-  }, [articles])
+  }, [baseFiltree])
 
   const affichees = useMemo(() => filtres.slice(0, 500), [filtres])
 
@@ -1944,39 +2256,31 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
 
 
       <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
-        <div className="mb-3 flex items-center justify-between">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">
             {loading ? `Chargement… ${loadProgress} articles` : filtres.length > 500 ? `500 affichées sur ${filtres.length} — affine ou exporte` : `${filtres.length} référence${filtres.length > 1 ? 's' : ''}`}
+            {triCol && <span className="ml-2 normal-case tracking-normal text-[#B4761A]">· tri par colonne actif (le tri prédéfini est ignoré)</span>}
           </div>
-          {error && <div className="text-[12px] font-semibold text-red-600">{error}</div>}
+          <div className="flex items-center gap-3 text-[11px] text-[#8A8474]">
+            {error && <div className="text-[12px] font-semibold text-red-600">{error}</div>}
+            {(triCol || clesFiltreCol.length > 0) && (
+              <button type="button" onClick={() => { setTriCol(null); setFiltresCol({}) }} className="font-bold text-[#B4761A] hover:underline">Réinitialiser tri et filtres de colonnes</button>
+            )}
+            <span>Clic sur un en-tête : tri · champs d'en-tête : filtre (texte "contient", nombres "&gt;10", "&lt;=5", "=0", "vide" / "!vide") — les KPI et pastilles suivent les filtres</span>
+          </div>
         </div>
         <div className="max-h-[760px] overflow-auto rounded-lg border border-[#E5E1D8]">
           <table className="w-full text-left text-[12px]">
             <thead className="sticky top-0 z-10 bg-[#F4F3F0] text-[10px] uppercase tracking-wide text-[#8A8474]">
               <tr>
-                <th className="px-2 py-2 font-bold" title="Incohérences détectées (survole pour le détail)">⚠</th>
-                <th className="px-2 py-2 font-bold">Référence</th>
-                <th className="px-2 py-2 font-bold">Fourn.</th>
-                <th className="px-2 py-2 font-bold" title="Stratégie d'appro principale du fournisseur">Stratégie</th>
-                <th className="px-2 py-2 font-bold" title="Arrêt appro / arrêt vente, référence remplaçante et date d'effet (saisie manuelle, ✎)">Arrêt</th>
-                <th className="px-2 py-2 text-right font-bold" title="Délai d'appro + délai de sécurité (jours calendaires) — ref = valeurs propres à la référence, sinon fournisseur / défaut">Délai L</th>
-                <th className="px-2 py-2 text-right font-bold" title="Conso moyenne mensuelle sur l'horizon (12 mois)">μ 12 mois</th>
-                <th className="px-2 py-2 text-right font-bold" title="Écart-type mensuel">σ</th>
-                <th className="px-2 py-2 text-right font-bold" title="Consommation mensuelle moyenne des 3 derniers mois complets (sorties BL / 3). Survole pour le total.">μ 3 mois</th>
-                <th className="px-2 py-2 text-right font-bold">Dern. sortie</th>
-                <th className="px-2 py-2 text-right font-bold" title="Stock physique FMS (SAGE sto_qte)">Stock FMS</th>
-                <th className="px-2 py-2 text-right font-bold" title="Stock disponible SAGE (sto_dispo) du dépôt FMS — entre parenthèses : somme des agences">Dispo (agences)</th>
-                <th className="px-2 py-2 text-right font-bold" title="Reste à livrer des commandes fournisseurs BLG livrées au dépôt FMS, avec date de livraison estimée (⏱ = en retard, ≈ = date par délai théorique). Survole pour le détail par commande.">Encours fourn.</th>
-                <th className="px-2 py-2 text-right font-bold" title="Ventes réservées SAGE (sto_res) du dépôt FMS, déduites du projeté — entre parenthèses : somme des réservés des agences. Survole pour le reste à livrer BLG.">Réservé (agences)</th>
-                <th className="px-2 py-2 text-right font-bold" title="Stock (périmètre) − demande sur l'horizon + encours. Survole pour la décomposition et le seuil. Rouge = à commander ; ⚠ = stock épuisé avant réception de l'encours.">Projeté</th>
-                <th className="px-2 py-2 text-right font-bold" title="Couverture projetée = position de stock du périmètre choisi (stock + encours − réservé) / μ retenu. En dessous, en gris : couverture du seul stock physique FMS / μ 12 mois (ne dépend pas du modèle).">Couv. (mois)</th>
-                <th className="px-2 py-2 text-right font-bold">Min SAGE</th>
-                <th className="px-2 py-2 text-right font-bold">Min BLG</th>
-                <th className="px-2 py-2 text-right font-bold">SS calc.</th>
-                <th className="px-2 py-2 text-right font-bold">Min calc.</th>
-                <th className="px-2 py-2 text-right font-bold">Max calc.</th>
-                <th className="px-2 py-2 text-right font-bold" title="Quantité suggérée pour remonter le projeté au stock max (arrondie au colisage)">À cmder</th>
-                <th className="px-2 py-2 text-right font-bold">Retenu</th>
+                {COLONNES_ARTICLES.map((c) => (
+                  <ThTri key={c.key} k={c.key} label={c.label} title={c.title} align={c.align} tri={triCol} onTri={(k) => setTriCol((t) => basculerTri(t, k))} className="whitespace-nowrap" />
+                ))}
+              </tr>
+              <tr className="bg-[#F4F3F0]/80">
+                {COLONNES_ARTICLES.map((c) => (
+                  <td key={c.key} className="px-1 pb-2"><InputFiltre value={filtresCol[c.key] || ''} onChange={(v) => setFiltreCol(c.key, v)} align={c.align} placeholder={c.placeholder || 'filtre'} /></td>
+                ))}
               </tr>
             </thead>
             <tbody>
