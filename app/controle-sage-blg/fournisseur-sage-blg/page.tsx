@@ -57,6 +57,14 @@
  *        filtrantes) : stock FMS sans MYSTOCK, MYSTOCK chez un fournisseur "A la
  *        demande" / sans stratégie / hors classeur / en sommeil, arrêt appro avec
  *        encours, remplaçante inconnue, etc.
+ *    MàJ 17/09/2026 — dernière activité fournisseur :
+ *      · la vue expose derniere_cdf_toutes (dernière commande fournisseur BLG,
+ *        toutes années), nb_cdf_24m, derniere_activite = max(dernière commande
+ *        BLG, dernière sortie BL de ses références sur l'horizon conso 24 mois)
+ *        et sans_activite_24m (migration appro_fournisseur_derniere_activite).
+ *      · filtre "Activité" (onglets Fournisseurs et Comparaison) : aucune activité
+ *        depuis 24 mois / 12 mois, ou active sur les 12 derniers mois ; colonne
+ *        "Dern. activité" dans la liste, ligne dédiée dans la fiche, export Excel.
  *  - Articles & stock min : la base article SAGE avec MYSTOCK, la conso BL
  *    mensuelle (μ, σ sur l'horizon), le stock FMS, le stock min SAGE, le stock
  *    min BLG (entrepôt DPFMS) et le stock min CALCULÉ (point de commande) —
@@ -73,7 +81,8 @@
  *    + perimetre_cbn, qualite_classeur, frs_pv_force, sage_nb_refs_stock_agence,
  *      sage_nb_refs_mystock_stock_fms, sage_nb_refs_min_max, blg_nb_refs_min_max,
  *      delai_appro_present, delai_appro_retenu, nb_cdf_ytd(_fms/_hors_fms),
- *      montant_ht_cdf_ytd(_fms), derniere_cdf
+ *      montant_ht_cdf_ytd(_fms), derniere_cdf, derniere_cdf_toutes, nb_cdf_24m,
+ *      derniere_activite, sans_activite_24m
  *  - v_appro_controle_article_sage_blg   (SAGE ⟕ BLG, clé référence article)
  *  - appro_fournisseur_strategie (+ frs_pv, perimetre_cbn, qualite_classeur),
  *    appro_parametres, appro_article_stock_min
@@ -158,6 +167,11 @@ type FournRow = {
   montant_ht_cdf_ytd: number | null
   montant_ht_cdf_ytd_fms: number | null
   derniere_cdf: string | null
+  // ── dernière activité (migration appro_fournisseur_derniere_activite, 17/09/2026)
+  derniere_cdf_toutes: string | null     // dernière commande fournisseur BLG, toutes années
+  nb_cdf_24m: number | null              // commandes fournisseurs BLG sur 24 mois glissants
+  derniere_activite: string | null       // max(dernière commande BLG, dernière sortie BL de ses références)
+  sans_activite_24m: boolean | null      // aucune commande ni sortie depuis 24 mois (ou jamais)
 }
 
 type ArtRow = {
@@ -302,6 +316,41 @@ function fmtMois(v: string | null | undefined): string {
   return Number.isNaN(d.getTime()) ? String(v) : d.toLocaleDateString('fr-FR', { month: 'short', year: 'numeric' })
 }
 const n0 = (v: number | null | undefined) => Number(v ?? 0)
+
+// ── Activité fournisseur ─────────────────────────────────────────────────
+/** Filtre "Activité" : '' = toutes ; aucune activité depuis 24 / 12 mois ;
+ * active sur les 12 derniers mois. L'activité = dernière commande
+ * fournisseur BLG (toutes années) ou dernière sortie BL de ses références. */
+type ActiviteFilter = '' | 'aucune_24m' | 'aucune_12m' | 'active_12m'
+const ACTIVITE_OPTIONS: { value: ActiviteFilter; label: string }[] = [
+  { value: '', label: 'Activité : Toutes' },
+  { value: 'aucune_24m', label: 'Aucune activité depuis 24 mois' },
+  { value: 'aucune_12m', label: 'Aucune activité depuis 12 mois' },
+  { value: 'active_12m', label: 'Active sur les 12 derniers mois' },
+]
+
+/** Nombre de mois écoulés depuis une date (null = jamais). */
+function moisDepuis(v: string | null | undefined): number | null {
+  if (!v) return null
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return null
+  const now = new Date()
+  return (now.getFullYear() - d.getFullYear()) * 12 + (now.getMonth() - d.getMonth()) - (now.getDate() < d.getDate() ? 1 : 0)
+}
+
+function activiteCorrespond(r: FournRow, filtre: ActiviteFilter): boolean {
+  if (!filtre) return true
+  const m = moisDepuis(r.derniere_activite)
+  if (filtre === 'aucune_24m') return r.sans_activite_24m === true || m === null || m >= 24
+  if (filtre === 'aucune_12m') return m === null || m >= 12
+  return m !== null && m < 12
+}
+
+function libelleActivite(r: FournRow): string {
+  if (!r.derniere_activite) return 'Jamais'
+  const m = moisDepuis(r.derniere_activite)
+  return `${fmtDate(r.derniere_activite)}${m !== null ? ` (${m} mois)` : ''}`
+}
 
 type ResultatComparaison = 'ok' | 'ecart' | 'partiel'
 type Evaluation = ResultatComparaison | 'vide' | 'affichage' | 'manquant'
@@ -714,6 +763,8 @@ function detecterIncoherences(rows: FournRow[], toutes: FournRow[]): Incoherence
     (r) => (r.strategie_principale === 'Long terme' || r.strategie_principale === "Au fil de l'eau") && n0(r.sage_nb_refs_min_max) !== n0(r.blg_nb_refs_min_max))
   push('hors_classeur_actif', 'orange', 'a_qualifier', 'Fournisseur négoce hors classeur mais avec des commandes cette année (à ajouter au périmètre ?)', toutes,
     (r) => !r.perimetre_cbn && r.statut_appariement !== 'blg_seul' && negoce(r.sage_qualite) && !r.sage_en_sommeil && n0(r.nb_cdf_ytd) > 0)
+  push('classeur_sans_activite_24m', 'orange', 'a_qualifier', 'Dans le classeur mais aucune activité (commande fournisseur ni sortie BL) depuis 24 mois — à sortir du périmètre ?', rows,
+    (r) => activiteCorrespond(r, 'aucune_24m'))
   return out
 }
 
@@ -902,7 +953,7 @@ function PyramideClasseur({ rows, toutes, articles, loading, strategieActive, on
             <div className="mt-2 max-h-56 overflow-auto rounded-lg border border-[#E5E1D8]">
               <table className="w-full text-left text-[12px]">
                 <thead className="sticky top-0 bg-[#F4F3F0] text-[10px] uppercase text-[#8A8474]">
-                  <tr><th className="px-2 py-1">Fournisseur</th><th className="px-2 py-1">Stratégie</th><th className="px-2 py-1 text-right">Refs act. / MYSTOCK</th><th className="px-2 py-1 text-right">Cdes FMS / total</th><th className="px-2 py-1 text-right">Délai</th><th className="px-2 py-1">Remarque</th></tr>
+                  <tr><th className="px-2 py-1">Fournisseur</th><th className="px-2 py-1">Stratégie</th><th className="px-2 py-1 text-right">Refs act. / MYSTOCK</th><th className="px-2 py-1 text-right">Cdes FMS / total</th><th className="px-2 py-1 text-right">Délai</th><th className="px-2 py-1 text-right">Dern. activité</th><th className="px-2 py-1">Remarque</th></tr>
                 </thead>
                 <tbody>
                   {inc.fournisseurs.map((r) => (
@@ -912,6 +963,7 @@ function PyramideClasseur({ rows, toutes, articles, loading, strategieActive, on
                       <td className="px-2 py-1 text-right font-mono">{fmtNum(r.sage_nb_refs_actives)} / {fmtNum(r.sage_nb_refs_mystock)}</td>
                       <td className="px-2 py-1 text-right font-mono">{fmtNum(r.nb_cdf_ytd_fms)} / {fmtNum(r.nb_cdf_ytd)}</td>
                       <td className="px-2 py-1 text-right">{r.delai_appro_present ? `${fmtNum(r.delai_appro_retenu)} j` : 'NON'}</td>
+                      <td className={`px-2 py-1 text-right ${r.sans_activite_24m ? 'font-semibold text-red-700' : ''}`}>{libelleActivite(r)}</td>
                       <td className="max-w-[320px] truncate px-2 py-1 text-[#8A8474]" title={r.remarque || ''}>{r.remarque || '—'}</td>
                     </tr>
                   ))}
@@ -943,6 +995,7 @@ function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, art
   const [search, setSearch] = useState('')
   const [statutFilter, setStatutFilter] = useState<'' | StatutAppro>('')
   const [qualiteFilter, setQualiteFilter] = useState('')
+  const [activiteFilter, setActiviteFilter] = useState<ActiviteFilter>('')
   const [masquerSommeil, setMasquerSommeil] = useState(true)
   const [masquerHorsNegoce, setMasquerHorsNegoce] = useState(true)
   // Bascule rapide sur les fournisseurs du classeur (MARCHANDISE + PV) — active par défaut.
@@ -968,6 +1021,7 @@ function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, art
       if (strategieFilter !== null && (r.strategie_principale || '') !== strategieFilter) return false
       if (statutFilter && r.statut_appro !== statutFilter) return false
       if (qualiteFilter && safeText(r.sage_qualite) !== qualiteFilter) return false
+      if (!activiteCorrespond(r, activiteFilter)) return false
       if (term && !(r.numero.toUpperCase().includes(term) || (r.sage_intitule || '').toUpperCase().includes(term))) return false
       return true
     }).sort((a, b) => {
@@ -975,13 +1029,19 @@ function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, art
       if (oa !== ob) return oa - ob
       return (b.sage_nb_refs_mystock || 0) - (a.sage_nb_refs_mystock || 0) || a.numero.localeCompare(b.numero)
     })
-  }, [rows, search, statutFilter, qualiteFilter, masquerSommeil, masquerHorsNegoce, perimetreSeul, strategieFilter])
+  }, [rows, search, statutFilter, qualiteFilter, activiteFilter, masquerSommeil, masquerHorsNegoce, perimetreSeul, strategieFilter])
 
   const kpis = useMemo(() => {
     const c: Record<string, number> = {}
     const base = perimetreSeul ? rows.filter((r) => r.perimetre_cbn) : rows
     base.forEach((r) => { if (r.statut_appro) c[r.statut_appro] = (c[r.statut_appro] || 0) + 1 })
     return c
+  }, [rows, perimetreSeul])
+
+  // Compteur "sans activité depuis 24 mois" sur le même jeu que les cartes KPI (périmètre ou tous, hors BLG seuls).
+  const nbSansActivite24m = useMemo(() => {
+    const base = rows.filter((r) => r.statut_appariement !== 'blg_seul' && (!perimetreSeul || r.perimetre_cbn))
+    return base.filter((r) => activiteCorrespond(r, 'aucune_24m')).length
   }, [rows, perimetreSeul])
 
   useEffect(() => {
@@ -1079,21 +1139,29 @@ function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, art
         <PyramideClasseur rows={rowsPerimetre} toutes={rows} articles={articles} loading={loading} strategieActive={strategieFilter} onStrategie={setStrategieFilter} onSelectFournisseur={(r) => setSelected(r)} />
       )}
 
-      <section className="grid grid-cols-2 gap-3 md:grid-cols-4 lg:grid-cols-8">
+      <section className="grid grid-cols-2 gap-3 md:grid-cols-4 lg:grid-cols-9">
         {STATUT_APPRO_ORDRE.map((s) => (
           <button key={s} type="button" onClick={() => setStatutFilter((v) => (v === s ? '' : s))} className={`text-left ${statutFilter === s ? 'ring-2 ring-[#B4761A]/50 rounded-xl' : ''}`}>
             <KpiCard label={STATUT_APPRO_STYLE[s].label} value={kpis[s] || 0} loading={loading} tone={s === 'CBN_BLG' ? 'ok' : s === 'A_QUALIFIER' || s === 'INACTIF' ? 'warn' : undefined} />
           </button>
         ))}
+        <button type="button" onClick={() => setActiviteFilter((v) => (v === 'aucune_24m' ? '' : 'aucune_24m'))} className={`text-left ${activiteFilter === 'aucune_24m' ? 'ring-2 ring-[#B4761A]/50 rounded-xl' : ''}`}
+          title="Aucune commande fournisseur BLG ni sortie BL de ses références depuis 24 mois (ou jamais)">
+          <KpiCard label="Sans activité 24 mois" value={nbSansActivite24m} loading={loading} tone="warn" sub="ni commande ni sortie BL" />
+        </button>
       </section>
 
       <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
-        <div className="grid gap-2 md:grid-cols-5">
+        <div className="grid gap-2 md:grid-cols-6">
           <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="N° fournisseur ou intitulé…"
             className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-sm font-medium outline-none focus:border-[#B4761A] md:col-span-2" />
           <select value={qualiteFilter} onChange={(e) => setQualiteFilter(e.target.value)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
             <option value="">Qualité : Toutes</option>
             {qualites.map((q) => <option key={q} value={q}>{q}</option>)}
+          </select>
+          <select value={activiteFilter} onChange={(e) => setActiviteFilter(e.target.value as ActiviteFilter)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]"
+            title="Activité = dernière commande fournisseur BLG (toutes années) ou dernière sortie BL de ses références">
+            {ACTIVITE_OPTIONS.map((o) => <option key={o.value || '__all'} value={o.value}>{o.label}</option>)}
           </select>
           {perimetreSeul ? (
             <select value={strategieFilter ?? '__all'} onChange={(e) => setStrategieFilter(e.target.value === '__all' ? null : e.target.value)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E] md:col-span-2">
@@ -1113,6 +1181,7 @@ function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, art
         </div>
         <p className="mt-2 text-[12px] text-[#8A8474]">
           <b>CBN BLG</b> = stratégie "Au fil de l'eau" avec des références MYSTOCK → calcul de besoin mensuel dans BLG. <b>À qualifier</b> = fournisseur négoce actif sans stratégie renseignée (une suggestion est proposée dans la fiche). Clique une carte pour filtrer.
+          {' '}<b>Activité</b> = dernière commande fournisseur BLG (toutes années) ou dernière sortie BL de ses références (horizon conso 24 mois) : "aucune activité depuis 24 mois" = ni l'un ni l'autre.
         </p>
       </section>
 
@@ -1132,11 +1201,13 @@ function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, art
                   <th className="px-3 py-2 text-right font-bold" title="Références actives / MYSTOCK / stock agence">Refs act. / MYSTOCK / agence</th>
                   <th className="px-3 py-2 text-right font-bold" title="Commandes fournisseurs depuis le 1er janvier : dépôt FMS / total">Cdes FMS / total</th>
                   <th className="px-3 py-2 text-right font-bold">Délai</th>
+                  <th className="px-3 py-2 text-right font-bold" title="Dernière activité : max(dernière commande fournisseur BLG, dernière sortie BL de ses références)">Dern. activité</th>
                 </tr>
               </thead>
               <tbody>
                 {filtres.map((r, i) => {
                   const isSel = selected?.numero === r.numero
+                  const mAct = moisDepuis(r.derniere_activite)
                   return (
                     <tr key={r.numero} ref={(el) => { listRefs.current[i] = el }} onClick={() => setSelected(r)}
                       className={`cursor-pointer border-t border-[#E5E1D8] transition-colors hover:bg-[#F4F3F0] ${isSel ? 'bg-[#B4761A]/[0.06]' : ''}`}>
@@ -1156,10 +1227,15 @@ function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, art
                       <td className="px-3 py-2 text-right font-mono text-[12px] text-[#3A362E]">{r.sage_nb_refs_actives ?? 0} / <b>{r.sage_nb_refs_mystock ?? 0}</b> / {r.sage_nb_refs_stock_agence ?? 0}</td>
                       <td className="px-3 py-2 text-right font-mono text-[12px] text-[#3A362E]">{r.nb_cdf_ytd_fms ?? 0} / {r.nb_cdf_ytd ?? 0}</td>
                       <td className="px-3 py-2 text-right text-[12px]">{r.delai_appro_present ? <span className="font-semibold text-emerald-700">{fmtNum(r.delai_appro_retenu)} j</span> : <span className="text-[#B3AD9E]">NON</span>}</td>
+                      <td className="px-3 py-2 text-right text-[12px]" title={`Dernière commande BLG : ${fmtDate(r.derniere_cdf_toutes)} · dernière sortie BL : ${fmtMois(r.sage_derniere_sortie)} · ${fmtNum(r.nb_cdf_24m)} cde(s) sur 24 mois`}>
+                        {r.derniere_activite
+                          ? <span className={mAct !== null && mAct >= 24 ? 'font-semibold text-red-700' : mAct !== null && mAct >= 12 ? 'text-[#96600F]' : 'text-[#3A362E]'}>{fmtDate(r.derniere_activite)}{mAct !== null ? <span className="ml-1 text-[10px] text-[#8A8474]">({mAct} m)</span> : null}</span>
+                          : <span className="font-semibold text-red-700">Jamais</span>}
+                      </td>
                     </tr>
                   )
                 })}
-                {!loading && filtres.length === 0 && <tr><td colSpan={6} className="px-3 py-8 text-center text-[#8A8474]">Aucun résultat pour ces filtres.</td></tr>}
+                {!loading && filtres.length === 0 && <tr><td colSpan={7} className="px-3 py-8 text-center text-[#8A8474]">Aucun résultat pour ces filtres.</td></tr>}
               </tbody>
             </table>
           </div>
@@ -1179,6 +1255,7 @@ function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, art
                     {selected.sage_frs_pv && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-bold text-amber-700">PV{selected.frs_pv_force ? ' (forcé, SAGE non renseigné)' : ''}</span>}
                     {selected.perimetre_cbn && <span className="rounded-full bg-[#111820] px-2 py-0.5 text-[11px] font-bold text-white">Classeur{selected.qualite_classeur ? ` · ${selected.qualite_classeur}` : ''}</span>}
                     {selected.blg_statut_partenaire && selected.blg_statut_partenaire !== 'active' && <span className="rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-bold text-red-700">BLG partenaire : {selected.blg_statut_partenaire}</span>}
+                    {activiteCorrespond(selected, 'aucune_24m') && <span className="rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-bold text-red-700">Sans activité depuis 24 mois</span>}
                   </div>
                 </div>
                 {selected.lien_blg && <a href={selected.lien_blg} target="_blank" rel="noopener noreferrer" className="text-[12px] font-semibold text-[#B4761A] hover:underline">Ouvrir dans BLG ↗</a>}
@@ -1249,6 +1326,13 @@ function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, art
                     ? `${fmtNum(selected.nb_cdf_ytd_fms)} cdes ${selected.strategie_principale} (FMS) + ${fmtNum(selected.nb_cdf_ytd_hors_fms)} cdes A la demande (agences)`
                     : `${fmtNum(selected.nb_cdf_ytd)} cdes A la demande`
                 } />
+              </DetailGroup>
+
+              <DetailGroup title="Activité (toutes années)">
+                <DetailRow label="Dernière activité" value={activiteCorrespond(selected, 'aucune_24m') ? <span className="font-semibold text-red-700">{libelleActivite(selected)} — aucune activité depuis 24 mois</span> : libelleActivite(selected)} />
+                <DetailRow label="Dernière commande fournisseur BLG (toutes années)" value={fmtDate(selected.derniere_cdf_toutes)} />
+                <DetailRow label="Commandes fournisseurs sur 24 mois glissants" value={fmtNum(selected.nb_cdf_24m)} />
+                <DetailRow label="Dernière sortie BL de ses références (horizon 24 mois)" value={fmtMois(selected.sage_derniere_sortie)} />
               </DetailGroup>
 
               <DetailGroup title="Volumes & activité (SAGE)">
@@ -2075,6 +2159,7 @@ function OngletComparaison({ fournisseurs, articles, loading, error }: { fournis
   const [strategieFilter, setStrategieFilter] = useState('')
   const [delaiFilter, setDelaiFilter] = useState<'tous' | 'oui' | 'non'>('tous')
   const [cdfFilter, setCdfFilter] = useState<'tous' | '0' | '1' | '10'>('tous')
+  const [activiteFilter, setActiviteFilter] = useState<ActiviteFilter>('')
   const [mystockFilter, setMystockFilter] = useState<'tous' | 'avec' | 'sans'>('tous')
   const [nonMystockFilter, setNonMystockFilter] = useState<'tous' | 'avec' | 'sans'>('tous')
   const qualiteOptions = useMemo(() => Array.from(new Set(fournisseurs.map((f) => safeText(f.sage_qualite)).filter(Boolean))).sort(), [fournisseurs])
@@ -2099,11 +2184,12 @@ function OngletComparaison({ fournisseurs, articles, loading, error }: { fournis
     if (cdfFilter === '0' && n0(r.nb_cdf_ytd) !== 0) return false
     if (cdfFilter === '1' && n0(r.nb_cdf_ytd) < 1) return false
     if (cdfFilter === '10' && n0(r.nb_cdf_ytd) < 10) return false
+    if (!activiteCorrespond(r, activiteFilter)) return false
     if (mystockFilter !== 'tous' && (n0(r.sage_nb_refs_mystock) > 0) !== (mystockFilter === 'avec')) return false
     const nonMystock = n0(r.sage_nb_refs_actives) - n0(r.sage_nb_refs_mystock)
     if (nonMystockFilter !== 'tous' && (nonMystock > 0) !== (nonMystockFilter === 'avec')) return false
     return true
-  }), [fournisseurs, sommeilFilter, negoceSeul, perimetreSeul, qualiteFilter, strategieFilter, delaiFilter, cdfFilter, mystockFilter, nonMystockFilter])
+  }), [fournisseurs, sommeilFilter, negoceSeul, perimetreSeul, qualiteFilter, strategieFilter, delaiFilter, cdfFilter, activiteFilter, mystockFilter, nonMystockFilter])
   const baseArt = useMemo(() => articles.filter((a) => {
     if (exclureSommeil && a.sage_en_sommeil) return false
     if (mystockSeul && !a.pertinent_calcul_besoin) return false
@@ -2188,6 +2274,8 @@ function OngletComparaison({ fournisseurs, articles, loading, error }: { fournis
           { h: 'Refs MYSTOCK avec conso', f: (r) => (r as FournRow).sage_nb_refs_mystock_conso }, { h: 'Refs min/max SAGE', f: (r) => (r as FournRow).sage_nb_refs_min_max }, { h: 'Refs min/max BLG', f: (r) => (r as FournRow).blg_nb_refs_min_max },
           { h: 'Cdes YTD', f: (r) => (r as FournRow).nb_cdf_ytd }, { h: 'Cdes YTD FMS', f: (r) => (r as FournRow).nb_cdf_ytd_fms }, { h: 'Cdes YTD agences', f: (r) => (r as FournRow).nb_cdf_ytd_hors_fms }, { h: 'Montant HT cdes YTD', f: (r) => (r as FournRow).montant_ht_cdf_ytd },
           { h: 'Dernière sortie', f: (r) => fmtMois((r as FournRow).sage_derniere_sortie) },
+          { h: 'Dernière commande BLG (toutes années)', f: (r) => fmtDate((r as FournRow).derniere_cdf_toutes) }, { h: 'Cdes 24 mois', f: (r) => (r as FournRow).nb_cdf_24m },
+          { h: 'Dernière activité', f: (r) => fmtDate((r as FournRow).derniere_activite) }, { h: 'Mois sans activité', f: (r) => moisDepuis((r as FournRow).derniere_activite) ?? 'Jamais' }, { h: 'Sans activité 24 mois', f: (r) => (activiteCorrespond(r as FournRow, 'aucune_24m') ? 'Oui' : 'Non') },
           { h: 'Code BLG', f: (r) => (r as FournRow).blg_code }, { h: 'Lien BLG', f: (r) => r.lien_blg }, { h: 'Remarque', f: (r) => (r as FournRow).remarque },
         ]
         : [
@@ -2257,7 +2345,7 @@ function OngletComparaison({ fournisseurs, articles, loading, error }: { fournis
           {domaine === 'fournisseur' ? (
             <>
               <label className="flex items-center gap-2 rounded-lg border border-[#E5E1D8] bg-[#F4F3F0] px-3 py-2 text-[13px] font-bold text-[#3A362E]"><input type="checkbox" checked={negoceSeul} onChange={(e) => setNegoceSeul(e.target.checked)} className="accent-[#B4761A]" /> Fournisseurs négoce uniquement (hors frais généraux / transport / stations)</label>
-              <div className="grid w-full gap-2 md:grid-cols-6">
+              <div className="grid w-full gap-2 md:grid-cols-7">
                 <select value={qualiteFilter} onChange={(e) => setQualiteFilter(e.target.value)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
                   <option value="">Qualité : Toutes</option>{qualiteOptions.map((q) => <option key={q} value={q}>{q}</option>)}
                 </select>
@@ -2269,6 +2357,10 @@ function OngletComparaison({ fournisseurs, articles, loading, error }: { fournis
                 </select>
                 <select value={cdfFilter} onChange={(e) => setCdfFilter(e.target.value as typeof cdfFilter)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
                   <option value="tous">Commandes {new Date().getFullYear()} : Toutes</option><option value="0">Aucune commande</option><option value="1">Au moins 1 commande</option><option value="10">10 commandes et plus</option>
+                </select>
+                <select value={activiteFilter} onChange={(e) => setActiviteFilter(e.target.value as ActiviteFilter)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]"
+                  title="Activité = dernière commande fournisseur BLG (toutes années) ou dernière sortie BL de ses références">
+                  {ACTIVITE_OPTIONS.map((o) => <option key={o.value || '__all'} value={o.value}>{o.label}</option>)}
                 </select>
                 <select value={mystockFilter} onChange={(e) => setMystockFilter(e.target.value as typeof mystockFilter)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
                   <option value="tous">Refs MYSTOCK : Tous</option><option value="avec">Avec refs MYSTOCK</option><option value="sans">Sans ref MYSTOCK</option>
@@ -2354,6 +2446,7 @@ function OngletComparaison({ fournisseurs, articles, loading, error }: { fournis
               <tr>
                 <th className="px-3 py-2 font-bold">{domaine === 'fournisseur' ? 'Fournisseur' : 'Référence'}</th>
                 <th className="px-3 py-2 font-bold">Statut</th>
+                {domaine === 'fournisseur' && <th className="px-3 py-2 text-right font-bold" title="Dernière activité : max(dernière commande fournisseur BLG, dernière sortie BL de ses références)">Dern. activité</th>}
                 {pairesSelectionnees.map((p) => (
                   <React.Fragment key={p.key}>
                     <th className="border-l-2 border-[#E5E1D8] px-3 py-2 font-bold">{p.labelSage} — SAGE</th>
@@ -2381,6 +2474,9 @@ function OngletComparaison({ fournisseurs, articles, loading, error }: { fournis
                           {orange > 0 && <span className="rounded-full bg-orange-100 px-2 py-0.5 text-[11px] font-bold text-orange-700">{orange} partiel{orange > 1 ? 's' : ''}</span>}
                         </span>}
                     </td>
+                    {domaine === 'fournisseur' && (
+                      <td className={`whitespace-nowrap px-3 py-2 text-right text-[12px] ${activiteCorrespond(r as FournRow, 'aucune_24m') ? 'font-semibold text-red-700' : 'text-[#3A362E]'}`}>{libelleActivite(r as FournRow)}</td>
+                    )}
                     {pairesSelectionnees.map((p) => {
                       const st = EVAL_STYLE[ev[p.key] ?? 'vide']
                       const sv = formatCellValue((r as any)[p.sageKey]), bv = formatCellValue((r as any)[p.blgKey]) // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -2394,7 +2490,7 @@ function OngletComparaison({ fournisseurs, articles, loading, error }: { fournis
                   </tr>
                 )
               })}
-              {!loading && rowsAffichees.length === 0 && <tr><td colSpan={2 + pairesSelectionnees.length * 2} className="px-3 py-8 text-center text-[#8A8474]">Aucun résultat pour ces filtres.</td></tr>}
+              {!loading && rowsAffichees.length === 0 && <tr><td colSpan={2 + (domaine === 'fournisseur' ? 1 : 0) + pairesSelectionnees.length * 2} className="px-3 py-8 text-center text-[#8A8474]">Aucun résultat pour ces filtres.</td></tr>}
             </tbody>
           </table>
         </div>
@@ -2412,6 +2508,7 @@ function OngletComparaison({ fournisseurs, articles, loading, error }: { fournis
               </>) : <span className="rounded-full bg-red-50 px-2 py-0.5 text-red-700">{ligneOuverte.statut_appariement === 'blg_seul' ? 'BLG seul' : 'Manquant BLG'}</span>}
               {'statut_appro' in ligneOuverte && <StatutApproBadge statut={ligneOuverte.statut_appro} />}
               {'perimetre_cbn' in ligneOuverte && ligneOuverte.perimetre_cbn && <span className="rounded-full bg-[#111820] px-2 py-0.5 text-white">Classeur</span>}
+              {'derniere_activite' in ligneOuverte && <span className={`rounded-full px-2 py-0.5 ${activiteCorrespond(ligneOuverte, 'aucune_24m') ? 'bg-red-50 text-red-700' : 'bg-[#F4F3F0] text-[#3A362E]'}`}>Dernière activité : {libelleActivite(ligneOuverte)}</span>}
               {'mystock' in ligneOuverte && ligneOuverte.mystock === 'OUI' && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-emerald-700">MYSTOCK</span>}
             </>)
           })()}
