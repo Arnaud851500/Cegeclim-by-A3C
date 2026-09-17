@@ -1455,6 +1455,59 @@ function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, art
   }
   function ouvrir(r: FournRow) { setLigneActive(r); setSelected(r) }
 
+  const [exportEnCours, setExportEnCours] = useState(false)
+  /** Export Excel de la liste telle qu'affichée (filtres généraux + filtres de colonnes + tri). */
+  async function exporterExcel() {
+    setExportEnCours(true)
+    try {
+      const annee = new Date().getFullYear()
+      const wb = new ExcelJS.Workbook()
+      const ws = wb.addWorksheet('Fournisseurs')
+      const cols: { h: string; f: (r: FournRow) => unknown; w?: number }[] = [
+        { h: 'N° fournisseur', f: (r) => r.numero, w: 14 }, { h: 'Intitulé', f: (r) => r.sage_intitule, w: 36 },
+        { h: 'Qualité', f: (r) => r.sage_qualite, w: 16 }, { h: 'Frs PV', f: (r) => (r.sage_frs_pv ? (r.frs_pv_force ? 'Oui (forcé)' : 'Oui') : 'Non'), w: 10 },
+        { h: 'En sommeil', f: (r) => (r.sage_en_sommeil ? 'Oui' : 'Non'), w: 10 },
+        { h: 'Périmètre classeur', f: (r) => (r.perimetre_cbn ? 'Oui' : 'Non'), w: 12 }, { h: 'Qualité classeur', f: (r) => r.qualite_classeur, w: 14 },
+        { h: 'Statut appro', f: (r) => (r.statut_appro ? STATUT_APPRO_STYLE[r.statut_appro].label : ''), w: 20 },
+        { h: 'Stratégie principale', f: (r) => r.strategie_principale, w: 18 }, { h: 'Suggestion', f: (r) => r.strategie_suggeree, w: 18 },
+        { h: 'Long terme', f: (r) => (r.long_terme ? 'Oui' : 'Non'), w: 10 }, { h: "Au fil de l'eau", f: (r) => (r.au_fil_de_leau ? 'Oui' : 'Non'), w: 12 }, { h: 'Contremarque', f: (r) => (r.contremarque ? 'Oui' : 'Non'), w: 12 },
+        { h: 'Calcul de besoin', f: (r) => (r.calcul_besoin_effectif ? 'Oui' : 'Non'), w: 12 }, { h: 'Périodicité', f: (r) => r.periodicite, w: 12 },
+        { h: 'Refs actives', f: (r) => n0(r.sage_nb_refs_actives), w: 11 },
+        { h: 'Refs MYSTOCK', f: (r) => n0(r.sage_nb_refs_mystock), w: 12 }, { h: 'MYSTOCK en stock FMS', f: (r) => n0(r.sage_nb_refs_mystock_stock_fms), w: 14 }, { h: 'MYSTOCK avec conso', f: (r) => n0(r.sage_nb_refs_mystock_conso), w: 14 },
+        { h: 'Refs non MYSTOCK', f: (r) => Math.max(0, n0(r.sage_nb_refs_actives) - n0(r.sage_nb_refs_mystock)), w: 14 }, { h: 'Non MYSTOCK en stock agence', f: (r) => n0(r.sage_nb_refs_stock_agence), w: 16 },
+        { h: 'Refs min/max SAGE', f: (r) => n0(r.sage_nb_refs_min_max), w: 14 }, { h: 'Refs min/max BLG', f: (r) => n0(r.blg_nb_refs_min_max), w: 14 }, { h: 'Refs stock min retenu', f: (r) => n0(r.nb_refs_min_retenu), w: 14 },
+        { h: `Cdes ${annee} FMS`, f: (r) => n0(r.nb_cdf_ytd_fms), w: 12 }, { h: `Cdes ${annee} agences`, f: (r) => n0(r.nb_cdf_ytd_hors_fms), w: 12 }, { h: `Cdes ${annee} total`, f: (r) => n0(r.nb_cdf_ytd), w: 12 },
+        { h: `Montant HT cdes ${annee}`, f: (r) => n0(r.montant_ht_cdf_ytd), w: 16 }, { h: `Montant HT cdes ${annee} FMS`, f: (r) => n0(r.montant_ht_cdf_ytd_fms), w: 16 },
+        { h: 'Délai appro renseigné', f: (r) => (r.delai_appro_present ? 'OUI' : 'NON'), w: 12 }, { h: 'Délai appro retenu (j)', f: (r) => r.delai_appro_retenu, w: 12 },
+        { h: 'Délai SAGE (j)', f: (r) => r.sage_delai_appro, w: 10 }, { h: 'Délai BLG (j)', f: (r) => r.blg_delai_appro, w: 10 }, { h: 'Délai paramètre (j)', f: (r) => r.param_delai_appro, w: 12 },
+        { h: `Dernière commande ${annee}`, f: (r) => fmtDate(r.derniere_cdf), w: 14 }, { h: 'Dernière commande BLG (toutes années)', f: (r) => fmtDate(r.derniere_cdf_toutes), w: 18 }, { h: 'Cdes 24 mois', f: (r) => n0(r.nb_cdf_24m), w: 10 },
+        { h: 'Dernière sortie BL', f: (r) => fmtMois(r.sage_derniere_sortie), w: 14 }, { h: 'Dernière activité', f: (r) => fmtDate(r.derniere_activite), w: 14 },
+        { h: 'Mois sans activité', f: (r) => moisDepuis(r.derniere_activite) ?? 'Jamais', w: 12 }, { h: 'Sans activité 24 mois', f: (r) => (activiteCorrespond(r, 'aucune_24m') ? 'Oui' : 'Non'), w: 12 },
+        { h: 'Valeur stock FMS (PA)', f: (r) => r.sage_valeur_stock_fms, w: 14 }, { h: 'Sorties BL horizon (qté)', f: (r) => r.sage_conso_horizon_total, w: 14 },
+        { h: 'Statut appariement BLG', f: (r) => r.statut_appariement, w: 14 }, { h: 'Code BLG', f: (r) => r.blg_code, w: 10 }, { h: 'Lien BLG', f: (r) => r.lien_blg, w: 40 },
+        { h: 'Remarque', f: (r) => r.remarque, w: 40 },
+      ]
+      ws.addRow(cols.map((c) => c.h)).font = { bold: true }
+      const idxActivite = cols.findIndex((c) => c.h === 'Sans activité 24 mois') + 1
+      const idxStatut = cols.findIndex((c) => c.h === 'Statut appro') + 1
+      filtres.forEach((r) => {
+        const row = ws.addRow(cols.map((c) => { const v = c.f(r); return v === null || v === undefined ? '' : v }))
+        if (activiteCorrespond(r, 'aucune_24m')) row.getCell(idxActivite).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COULEUR_ECART } }
+        if (r.statut_appro === 'CBN_BLG') row.getCell(idxStatut).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COULEUR_OK } }
+        else if (r.statut_appro === 'A_QUALIFIER' || r.statut_appro === 'INACTIF') row.getCell(idxStatut).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COULEUR_NON_COMPARABLE } }
+      })
+      cols.forEach((c, i) => { ws.getColumn(i + 1).width = c.w || 14 })
+      ws.views = [{ state: 'frozen', xSplit: 2, ySplit: 1 }]
+      ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: cols.length } }
+      const buffer = await wb.xlsx.writeBuffer()
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a'); a.href = url; a.download = `fournisseurs_${perimetreSeul ? 'classeur' : 'sage'}_${new Date().toISOString().slice(0, 10)}.xlsx`; a.click(); URL.revokeObjectURL(url)
+    } catch (e) {
+      alert('Erreur export Excel : ' + messageErreur(e))
+    } finally { setExportEnCours(false) }
+  }
+
   const thNum = 'text-right'
   const thBase = 'whitespace-nowrap'
 
@@ -1545,6 +1598,9 @@ function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, art
               <button type="button" onClick={() => { setTri(null); setFiltresCol({}) }} className="font-bold text-[#B4761A] hover:underline">Réinitialiser tri et filtres de colonnes</button>
             )}
             <span>Clic sur un en-tête : tri · champs d'en-tête : filtre (texte "contient", nombres "&gt;10", "&lt;=5", "=0", "vide") · clic sur une ligne ou Entrée : fiche</span>
+            <button type="button" onClick={() => void exporterExcel()} disabled={exportEnCours || loading || filtres.length === 0} className="rounded-lg bg-[#111820] px-4 py-2 text-[13px] font-bold text-white hover:bg-[#252E3D] disabled:opacity-60">
+              {exportEnCours ? 'Export en cours…' : `⬇ Exporter en Excel (${filtres.length} fournisseurs)`}
+            </button>
           </div>
         </div>
         <div tabIndex={0} onKeyDown={onListKeyDown} className="max-h-[820px] overflow-auto rounded-lg border border-[#E5E1D8] outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A]/50">
