@@ -55,6 +55,11 @@ const ETAT_LABEL: Record<string, string> = { pret: 'Prêt', a_corriger: 'À corr
 
 type ChecklistItem = { id: string; label: string; hint?: string }
 
+// Texte intégral de la mention CEE Drapo attendue sur les devis (transmis à
+// l'IA via la précision du point « Encadré mention CEE »).
+const MENTION_CEE_DRAPO =
+  'En acceptant le présent document, j’atteste sur l’honneur avoir reçu du professionnel partenaire de DRAPO (810 694 398), les conseils adaptés à mes besoins d’économies d’énergie et délègue l’exclusivité de l’obtention des Certificats d’Économies d’Énergie à DRAPO en contrepartie d’une Prime Bénéficiaire dont le montant est indiqué sur ce document. Le montant de la Prime Bénéficiaire est déduit du montant total TTC. J’atteste également que le professionnel a réalisé une visite préalable du bâtiment et avoir reçu le document Cadre Contribution signé par le professionnel.'
+
 // Checklists par défaut : utilisées tant que personne n'a personnalisé la
 // checklist partagée pour ce type de pièce, et comme base de pré-remplissage
 // à l'ouverture de l'éditeur. Jamais écrites automatiquement en base : elles
@@ -85,13 +90,79 @@ const DEFAULT_CHECKLISTS: Record<TypePieceId, { items: ChecklistItem[]; exempleM
   },
   devis: {
     items: [
-      { id: 'identite_client', label: 'Identité et adresse du bénéficiaire', hint: 'Nom, prénom et adresse du chantier, cohérents avec le reste du dossier.' },
-      { id: 'identite_pro', label: "Identité et qualification RGE de l'artisan", hint: 'Raison sociale, SIRET, qualification RGE adaptée aux travaux, assurance décennale.' },
-      { id: 'description_travaux', label: 'Description précise des travaux / équipement', hint: "Marque, référence et caractéristiques techniques (performance) permettant de vérifier l'éligibilité CEE." },
-      { id: 'date_devis', label: 'Date du devis', hint: "Antérieure à l'acceptation du devis et au début des travaux." },
-      { id: 'montants', label: 'Montants HT / TTC et TVA', hint: 'Taux de TVA cohérent avec la nature des travaux (taux réduit le cas échéant).' },
-      { id: 'mention_cee', label: "Mention de l'opération CEE / coup de pouce", hint: "Si applicable : référence de la fiche d'opération standardisée et montant de l'aide déduite." },
-      { id: 'signature_devis', label: 'Bon pour accord signé et daté par le client', hint: 'Date de signature postérieure à la date du devis et antérieure aux travaux.' },
+      // Installateur
+      { id: 'inst_raison_sociale', label: "Installateur · Nom / raison sociale", hint: "Nom ou raison sociale de l'installateur présent sur le devis." },
+      { id: 'inst_adresse', label: 'Installateur · Adresse', hint: "Adresse complète de l'installateur." },
+      { id: 'inst_capital', label: 'Installateur · Capital social', hint: "Montant du capital social de l'installateur indiqué sur le devis." },
+      { id: 'inst_siret', label: 'Installateur · SIRET', hint: 'Numéro SIRET à 14 chiffres.' },
+      {
+        id: 'inst_rge',
+        label: 'Installateur · RGE en cours de validité pour le poste de travaux',
+        hint: "Qualification RGE valide à la date du devis, pour le poste de travaux concerné, de l'entreprise qui réalise les travaux (celle du sous-traitant s'il y en a un).",
+      },
+      {
+        id: 'inst_sous_traitant',
+        label: 'Installateur · Sous-traitant (si sous-traitance)',
+        hint: "Si les travaux sont sous-traités : raison sociale, SIRET, nom et prénom du gérant du sous-traitant. N/A s'il n'y a pas de sous-traitant.",
+      },
+
+      // Bénéficiaire
+      { id: 'benef_civilite', label: 'Bénéficiaire · Civilité', hint: 'M. / Mme indiqué sur le devis.' },
+      { id: 'benef_nom', label: 'Bénéficiaire · Nom', hint: 'Cohérent avec le reste du dossier.' },
+      { id: 'benef_prenom', label: 'Bénéficiaire · Prénom', hint: 'Cohérent avec le reste du dossier.' },
+      { id: 'benef_adresse', label: 'Bénéficiaire · Adresse du client final', hint: 'Adresse complète du client final.' },
+      { id: 'benef_adresse_travaux', label: 'Bénéficiaire · Adresse des travaux si différente', hint: "À indiquer si elle diffère de l'adresse du client final. N/A si identique." },
+
+      // Dates du devis
+      { id: 'date_visite', label: 'Dates · Date de visite préalable', hint: 'La date de la visite préalable doit figurer sur le devis.' },
+      { id: 'date_edition', label: "Dates · Date d'édition du devis", hint: 'Égale ou postérieure à la date de visite préalable.' },
+      { id: 'date_signature', label: 'Dates · Date de signature', hint: 'Postérieure à la date du cadre de contribution.' },
+
+      // Corps du devis : mentions techniques PAC air/eau (BAR-TH-171)
+      {
+        id: 'pac_mise_en_place',
+        label: "PAC (BAR-TH-171) · Mise en place d'une pompe à chaleur",
+        hint: "Le devis doit mentionner « la mise en place d'une pompe à chaleur » de type air/eau, eau/eau ou sol/eau.",
+      },
+      {
+        id: 'pac_marque_ref',
+        label: 'PAC (BAR-TH-171) · Marque et référence de la pompe à chaleur',
+        hint: 'Telles qu’indiquées dans la fiche EPREL (https://eprel.ec.europa.eu/screen/product/spaceheaters).',
+      },
+      {
+        id: 'pac_usage',
+        label: 'PAC (BAR-TH-171) · Usage de la pompe à chaleur',
+        hint: '« Chauffage » ou « Chauffage et eau chaude sanitaire », écrit en toutes lettres.',
+      },
+      { id: 'pac_surface', label: 'PAC (BAR-TH-171) · Surface chauffée par la PAC', hint: 'Surface chauffée en m².' },
+      { id: 'pac_temperature', label: 'PAC (BAR-TH-171) · Température', hint: 'Basse, moyenne ou haute température.' },
+      {
+        id: 'pac_etas',
+        label: 'PAC (BAR-TH-171) · ETAS avec mention réglementaire',
+        hint: "ETAS accompagné de la mention « calculé selon le règlement (EU) n°813/2013 de la commission du 2 août 2013 ». Relever la valeur de l'ETAS : elle est à vérifier selon la grille des seuils.",
+      },
+      { id: 'regul_marque_ref', label: 'PAC (BAR-TH-171) · Marque et référence du régulateur', hint: '' },
+      { id: 'regul_classe', label: 'PAC (BAR-TH-171) · Classe du régulateur', hint: 'Classe du régulateur (IV à VIII) indiquée sur le devis.' },
+      {
+        id: 'depose_chaudiere',
+        label: "PAC (BAR-TH-171) · Dépose de l'ancienne chaudière",
+        hint: "Le devis doit mentionner la dépose de l'ancienne chaudière fonctionnant au gaz, au fioul ou au charbon.",
+      },
+
+      // Prime et montants
+      { id: 'total_ht', label: 'Prime · Total HT', hint: '' },
+      { id: 'tva', label: 'Prime · TVA', hint: 'Taux et montant de TVA.' },
+      { id: 'total_ttc', label: 'Prime · Total TTC', hint: '' },
+      { id: 'prime_cee', label: 'Prime · Prime CEE', hint: 'Montant de la prime CEE indiqué sur le devis.' },
+      { id: 'reste_a_charge', label: 'Prime · Reste à charge', hint: 'Total TTC moins la prime CEE.' },
+      {
+        id: 'mention_cee',
+        label: 'Prime · Encadré mention CEE Drapo',
+        hint:
+          'La mention doit être dactylographiée INTÉGRALEMENT, dans la même taille de caractères que le corps du devis. Texte attendu : « ' +
+          MENTION_CEE_DRAPO +
+          ' »',
+      },
     ],
     exempleMail: '',
   },

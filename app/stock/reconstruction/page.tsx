@@ -1,21 +1,26 @@
 'use client'
 
 // ============================================================================
-// app/stock/reconstruction/page.tsx — Reconstruction du stock projeté
+// app/stock/reconstruction/page.tsx — Reconstruction du stock projeté (v2)
 // ----------------------------------------------------------------------------
-// (2026-09-18) Analyse rétrospective d'une référence : à partir de l'image du
-// jour SAGE (sage.stock_depot, tous dépôts), on déroule le stock physique à
-// rebours avec les sorties BL clients et les réceptions fournisseurs BLG
-// (lignes de CDF : quantité livrée à la date de livraison réelle), puis on
-// recalcule, pour chaque commande client créée depuis la date de départ :
-//   • le stock projeté (physique − promesses ouvertes) au moment de la saisie ;
-//   • la date exacte que le système aurait dû proposer (première date où
-//     stock projeté + réceptions ≥ quantité) ;
-//   • les promesses plus anciennes doublées à la livraison réelle.
+// (2026-09-18) v2 — « solde daté » + projection au-delà du jour.
+// À partir de l'image du jour SAGE (sage.stock_depot, tous dépôts), le stock
+// physique est déroulé à rebours avec les sorties BL clients et les réceptions
+// fournisseurs RÉELLES (lignes de CDF BLG). Pour chaque commande client créée
+// depuis la date de départ, on rejoue l'état de FIN DE JOURNÉE de saisie :
+//   solde(t) = stock + réceptions ]saisie ; t] − promesses plus anciennes dues ≤ t
+//   (une promesse ne consomme le stock qu'à SA date de livraison ; une promesse
+//    déjà en retard est due le jour même)
+//   • OK          : min solde(t ≥ échéance) ≥ quantité ;
+//   • INTENABLE   : solde(échéance) < quantité → le client ne peut pas être livré ;
+//   • CREE_RETARD : livrable à l'échéance, mais prend le stock d'une promesse plus
+//                   lointaine qu'aucun arrivage ne recouvre à temps ;
+//   • date exacte : première date où la commande ne lèse personne.
+// Après aujourd'hui, la série est prolongée : stock du jour + CDF SAGE attendues
+// − CDC ouvertes à leur échéance (retards positionnés à J+1).
 // Tout le calcul est côté base : RPC get_stock_reconstruction(p_reference,
 // p_depuis) → jsonb { meta, serie, mensuel, agences, cdc }.
 // ?ref=XXXX&depuis=YYYY-MM-DD ouvre directement une référence.
-// À ajouter dans lib/navigation.ts sous « Stocks & logistique ».
 // ============================================================================
 
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -24,7 +29,9 @@ import { supabase } from '@/lib/supabaseClient'
 import ExcelJS from 'exceljs'
 
 // ── Types ─────────────────────────────────────────────────────────────────
+type Verdict = 'OK' | 'INTENABLE' | 'CREE_RETARD'
 type Meta = {
+  stock_phys_ouverture: number
   stock_phys_debut: number
   promesses_debut: number
   premier_jour_projete_negatif: string | null
@@ -34,33 +41,48 @@ type Meta = {
   nb_cdc: number
   q_cdc: number
   nb_livrees: number
-  nb_doublees: number
-  q_doublees: number
-  nb_projete_insuffisant: number
-  nb_livrees_avant_date_exacte: number
-  plus_ancienne_doublee: string | null
+  nb_ok: number
+  nb_intenable: number
+  q_intenable: number
+  nb_cree_retard: number
+  q_cree_retard: number
+  nb_servies_aux_depens: number
+  q_servies_aux_depens: number
+  nb_a_recaler: number
+  q_a_recaler: number
+  nb_date_incoherente: number
+  futur_receptions: number
+  futur_cdc_pieces: number
+  futur_cdc_nb: number
+  futur_cdc_en_retard_pieces: number
+  futur_premiere_rupture: string | null
+  futur_fin_rupture: string | null
+  futur_stock_min: number
+  futur_stock_fin: number
 }
-type PointSerie = { d: string; rec: number; sor: number; stock_phys: number; promesses: number; projete: number }
+type PointSerie = { d: string; futur: boolean; rec: number; sor: number; stock_phys: number; promesses: number; projete: number }
 type LigneMois = {
-  mois: string; nb: number; q: number; nb_doublees: number; q_doublees: number; nb_projete_insuffisant: number
-  projete_moy: number | null; stock_phys_moy: number | null; delai_promis: number | null; delai_reel: number | null
-  delai_exact: number | null; nb_sans_date: number; nb_livrees_avant_date_exacte: number
+  mois: string; nb: number; q: number; nb_ok: number; nb_intenable: number; q_intenable: number; nb_cree_retard: number; q_cree_retard: number
+  nb_servies_aux_depens: number; nb_a_recaler: number; delai_promis: number | null; delai_reel: number | null; delai_exact: number | null; nb_sans_date: number
 }
-type LigneAgence = { agence: string; nb: number; q: number; nb_doublees: number; q_doublees: number; nb_projete_insuffisant: number }
+type LigneAgence = { agence: string; nb: number; q: number; nb_intenable: number; nb_cree_retard: number; q_fautif: number; nb_servies_aux_depens: number; nb_a_recaler: number }
 type Cdc = {
-  bc: string; date_bc: string; date_livraison: string | null; date_bl: string | null; ouverte: boolean
+  bc: string; date_bc: string; date_livraison: string | null; echeance: string; date_bl: string | null; ouverte: boolean
   tiers: string | null; nom: string | null; agence: string; q: number; stock_phys: number; promesses_ouvertes: number
-  stock_projete_creation: number; date_exacte: string | null; nb_doublees: number; q_doublees: number; plus_ancienne_doublee: string | null
+  stock_projete_creation: number; solde_echeance: number; atp_echeance: number; verdict: Verdict; q_manque: number
+  date_exacte: string | null; date_rupture: string | null; nb_victimes: number; q_victimes: number; victimes: string | null
 }
 type Reconstruction = {
-  reference: string; depuis: string; stock_today: number
+  reference: string; depuis: string; aujourdhui: string; fin: string; stock_today: number
   meta: Meta; serie: PointSerie[]; mensuel: LigneMois[]; agences: LigneAgence[]; cdc: Cdc[]
 }
-type FiltreDetail = 'toutes' | 'projete_insuffisant' | 'avant_date_exacte' | 'doublees' | 'ouvertes'
+type FiltreDetail = 'toutes' | 'fautives' | 'intenable' | 'cree_retard' | 'servies_aux_depens' | 'a_recaler'
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 function toNumber(v: unknown): number { const n = Number(v); return Number.isFinite(n) ? n : 0 }
+function toNumberOrNull(v: unknown): number | null { return v === null || v === undefined ? null : toNumber(v) }
 function formatNumber(n: number | null | undefined): string { return n === null || n === undefined ? '—' : Math.round(n).toLocaleString('fr-FR') }
+function formatSigne(n: number | null | undefined): string { return n === null || n === undefined ? '—' : `${n > 0 ? '+' : ''}${formatNumber(n)}` }
 function formatJours(n: number | null | undefined): string { return n === null || n === undefined ? '—' : `${n.toLocaleString('fr-FR', { maximumFractionDigits: 1 })} j` }
 function formatDateFr(iso?: string | null): string { if (!iso) return '—'; const [y, m, d] = iso.slice(0, 10).split('-'); return `${d}/${m}/${y}` }
 function formatDateCourte(iso?: string | null): string { if (!iso) return '—'; const [y, m, d] = iso.slice(0, 10).split('-'); return `${d}/${m}/${y.slice(2)}` }
@@ -69,13 +91,22 @@ function toIsoDate(d: Date): string { return `${d.getFullYear()}-${String(d.getM
 function daysBetween(a: string, b: string): number { return Math.round((new Date(`${b}T00:00:00`).getTime() - new Date(`${a}T00:00:00`).getTime()) / 86400000) }
 function couleurSigne(n: number): string { if (n > 0) return '#8fd4a8'; if (n < 0) return '#e0a685'; return 'rgba(255,255,255,0.5)' }
 function defautDepuis(): string { const d = new Date(); d.setMonth(d.getMonth() - 3); d.setDate(1); return toIsoDate(d) }
+function pct(n: number, total: number): number { return total > 0 ? Math.round((n / total) * 100) : 0 }
+function serviAuxDepens(c: Cdc): boolean { return c.verdict !== 'OK' && !!c.date_bl && (!c.date_exacte || c.date_bl < c.date_exacte) }
+
+const VERDICTS: Record<Verdict, { label: string; color: string; bg: string }> = {
+  OK: { label: 'Tenable', color: '#8fd4a8', bg: 'rgba(143,212,168,0.12)' },
+  INTENABLE: { label: 'Intenable', color: '#e0a685', bg: 'rgba(193,104,60,0.18)' },
+  CREE_RETARD: { label: 'Crée un retard', color: '#E0A961', bg: 'rgba(224,169,97,0.16)' },
+}
 
 const FILTRES: Array<[FiltreDetail, string]> = [
+  ['fautives', 'Promesses à problème'],
+  ['intenable', 'Intenables'],
+  ['cree_retard', 'Créent un retard'],
+  ['servies_aux_depens', 'Servies aux dépens d\'autres'],
+  ['a_recaler', 'Ouvertes à recaler'],
   ['toutes', 'Toutes'],
-  ['projete_insuffisant', 'Stock projeté insuffisant à la saisie'],
-  ['avant_date_exacte', 'Livrées avant la date exacte'],
-  ['doublees', 'Ont doublé une promesse'],
-  ['ouvertes', 'Encore ouvertes'],
 ]
 
 // ── Page ──────────────────────────────────────────────────────────────────
@@ -86,7 +117,7 @@ export default function ReconstructionPage() {
   const [data, setData] = useState<Reconstruction | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [filtre, setFiltre] = useState<FiltreDetail>('projete_insuffisant')
+  const [filtre, setFiltre] = useState<FiltreDetail>('fautives')
   const [agenceFiltre, setAgenceFiltre] = useState('')
   const [recherche, setRecherche] = useState('')
   const [exporting, setExporting] = useState(false)
@@ -109,13 +140,15 @@ export default function ReconstructionPage() {
       if (cancelled) return
       if (err) { setError(err.message); setData(null) } else {
         const r = res as any
+        const metaBrut = (r.meta || {}) as Record<string, unknown>
+        const dateKeys = new Set(['premier_jour_projete_negatif', 'premier_jour_phys_negatif', 'futur_premiere_rupture', 'futur_fin_rupture'])
         setData({
-          reference: r.reference, depuis: r.depuis, stock_today: toNumber(r.stock_today),
-          meta: Object.fromEntries(Object.entries(r.meta || {}).map(([k, v]) => [k, typeof v === 'string' && !/^\d{4}-\d{2}-\d{2}/.test(v) ? toNumber(v) : v])) as Meta,
-          serie: ((r.serie || []) as any[]).map((p) => ({ d: p.d, rec: toNumber(p.rec), sor: toNumber(p.sor), stock_phys: toNumber(p.stock_phys), promesses: toNumber(p.promesses), projete: toNumber(p.projete) })),
-          mensuel: ((r.mensuel || []) as any[]).map((m) => ({ ...m, nb: toNumber(m.nb), q: toNumber(m.q), nb_doublees: toNumber(m.nb_doublees), q_doublees: toNumber(m.q_doublees), nb_projete_insuffisant: toNumber(m.nb_projete_insuffisant), nb_sans_date: toNumber(m.nb_sans_date), nb_livrees_avant_date_exacte: toNumber(m.nb_livrees_avant_date_exacte), projete_moy: m.projete_moy === null ? null : toNumber(m.projete_moy), stock_phys_moy: m.stock_phys_moy === null ? null : toNumber(m.stock_phys_moy), delai_promis: m.delai_promis === null ? null : toNumber(m.delai_promis), delai_reel: m.delai_reel === null ? null : toNumber(m.delai_reel), delai_exact: m.delai_exact === null ? null : toNumber(m.delai_exact) })),
-          agences: ((r.agences || []) as any[]).map((a) => ({ agence: a.agence, nb: toNumber(a.nb), q: toNumber(a.q), nb_doublees: toNumber(a.nb_doublees), q_doublees: toNumber(a.q_doublees), nb_projete_insuffisant: toNumber(a.nb_projete_insuffisant) })),
-          cdc: ((r.cdc || []) as any[]).map((c) => ({ ...c, q: toNumber(c.q), stock_phys: toNumber(c.stock_phys), promesses_ouvertes: toNumber(c.promesses_ouvertes), stock_projete_creation: toNumber(c.stock_projete_creation), nb_doublees: toNumber(c.nb_doublees), q_doublees: toNumber(c.q_doublees), ouverte: Boolean(c.ouverte) })),
+          reference: r.reference, depuis: r.depuis, aujourdhui: r.aujourdhui || toIsoDate(new Date()), fin: r.fin || r.aujourdhui, stock_today: toNumber(r.stock_today),
+          meta: Object.fromEntries(Object.entries(metaBrut).map(([k, v]) => [k, dateKeys.has(k) ? (v ? String(v).slice(0, 10) : null) : toNumber(v)])) as Meta,
+          serie: ((r.serie || []) as any[]).map((p) => ({ d: p.d, futur: Boolean(p.futur), rec: toNumber(p.rec), sor: toNumber(p.sor), stock_phys: toNumber(p.stock_phys), promesses: toNumber(p.promesses), projete: toNumber(p.projete) })),
+          mensuel: ((r.mensuel || []) as any[]).map((m) => ({ mois: m.mois, nb: toNumber(m.nb), q: toNumber(m.q), nb_ok: toNumber(m.nb_ok), nb_intenable: toNumber(m.nb_intenable), q_intenable: toNumber(m.q_intenable), nb_cree_retard: toNumber(m.nb_cree_retard), q_cree_retard: toNumber(m.q_cree_retard), nb_servies_aux_depens: toNumber(m.nb_servies_aux_depens), nb_a_recaler: toNumber(m.nb_a_recaler), delai_promis: toNumberOrNull(m.delai_promis), delai_reel: toNumberOrNull(m.delai_reel), delai_exact: toNumberOrNull(m.delai_exact), nb_sans_date: toNumber(m.nb_sans_date) })),
+          agences: ((r.agences || []) as any[]).map((a) => ({ agence: a.agence, nb: toNumber(a.nb), q: toNumber(a.q), nb_intenable: toNumber(a.nb_intenable), nb_cree_retard: toNumber(a.nb_cree_retard), q_fautif: toNumber(a.q_fautif), nb_servies_aux_depens: toNumber(a.nb_servies_aux_depens), nb_a_recaler: toNumber(a.nb_a_recaler) })),
+          cdc: ((r.cdc || []) as any[]).map((c) => ({ ...c, q: toNumber(c.q), stock_phys: toNumber(c.stock_phys), promesses_ouvertes: toNumber(c.promesses_ouvertes), stock_projete_creation: toNumber(c.stock_projete_creation), solde_echeance: toNumber(c.solde_echeance), atp_echeance: toNumber(c.atp_echeance), q_manque: toNumber(c.q_manque), nb_victimes: toNumber(c.nb_victimes), q_victimes: toNumber(c.q_victimes), ouverte: Boolean(c.ouverte), verdict: (c.verdict || 'OK') as Verdict })),
         })
       }
       setLoading(false)
@@ -137,19 +170,18 @@ export default function ReconstructionPage() {
     if (!data) return []
     const q = recherche.trim().toUpperCase()
     return data.cdc.filter((c) => {
-      if (filtre === 'projete_insuffisant' && !(c.stock_projete_creation < c.q)) return false
-      if (filtre === 'avant_date_exacte' && !(c.date_bl && c.date_exacte && c.date_bl < c.date_exacte)) return false
-      if (filtre === 'doublees' && !(c.nb_doublees > 0)) return false
-      if (filtre === 'ouvertes' && !c.ouverte) return false
+      if (filtre === 'fautives' && c.verdict === 'OK') return false
+      if (filtre === 'intenable' && c.verdict !== 'INTENABLE') return false
+      if (filtre === 'cree_retard' && c.verdict !== 'CREE_RETARD') return false
+      if (filtre === 'servies_aux_depens' && !serviAuxDepens(c)) return false
+      if (filtre === 'a_recaler' && !(c.verdict !== 'OK' && c.ouverte)) return false
       if (agenceFiltre && c.agence !== agenceFiltre) return false
       if (q && !`${c.bc} ${c.nom || ''} ${c.tiers || ''}`.toUpperCase().includes(q)) return false
       return true
-    }).sort((a, b) => b.q_doublees - a.q_doublees || a.date_bc.localeCompare(b.date_bc))
+    }).sort((a, b) => a.date_bc.localeCompare(b.date_bc) || a.bc.localeCompare(b.bc))
   }, [data, filtre, agenceFiltre, recherche])
 
   const meta = data?.meta
-  const partDoublees = meta && meta.nb_cdc > 0 ? Math.round((meta.nb_doublees / meta.nb_cdc) * 100) : 0
-  const partInsuffisant = meta && meta.nb_cdc > 0 ? Math.round((meta.nb_projete_insuffisant / meta.nb_cdc) * 100) : 0
 
   async function exporterExcel() {
     if (!data) return
@@ -161,24 +193,31 @@ export default function ReconstructionPage() {
       const ws1 = wb.addWorksheet('Commandes')
       ws1.columns = [
         { header: 'Document', key: 'bc', width: 14 }, { header: 'Client', key: 'nom', width: 30 }, { header: 'N° tiers', key: 'tiers', width: 10 }, { header: 'Agence', key: 'agence', width: 14 },
-        { header: 'Créée le', key: 'date_bc', width: 12 }, { header: 'Livraison promise', key: 'date_livraison', width: 16 }, { header: 'Livrée le', key: 'date_bl', width: 12 },
-        { header: 'Qté', key: 'q', width: 8 }, { header: 'Stock physique à la saisie', key: 'stock_phys', width: 22 }, { header: 'Promesses ouvertes', key: 'promesses_ouvertes', width: 18 },
-        { header: 'Stock projeté à la saisie', key: 'stock_projete_creation', width: 22 }, { header: 'Date exacte', key: 'date_exacte', width: 12 }, { header: 'Écart livrée − exacte (j)', key: 'ecart', width: 20 },
-        { header: 'Promesses doublées (nb)', key: 'nb_doublees', width: 20 }, { header: 'Promesses doublées (pièces)', key: 'q_doublees', width: 22 }, { header: 'Plus ancienne doublée', key: 'plus_ancienne_doublee', width: 20 },
+        { header: 'Créée le', key: 'date_bc', width: 12 }, { header: 'Livraison promise', key: 'date_livraison', width: 16 }, { header: 'Échéance retenue', key: 'echeance', width: 16 }, { header: 'Livrée le', key: 'date_bl', width: 12 },
+        { header: 'Qté', key: 'q', width: 8 }, { header: 'Stock fin de journée de saisie', key: 'stock_phys', width: 24 }, { header: 'Promesses ouvertes (toutes dates)', key: 'promesses_ouvertes', width: 26 },
+        { header: 'Solde à l\'échéance', key: 'solde_echeance', width: 18 }, { header: 'Dispo réelle à l\'échéance', key: 'atp_echeance', width: 22 }, { header: 'Verdict', key: 'verdict_label', width: 16 }, { header: 'Pièces en défaut', key: 'q_manque', width: 16 },
+        { header: 'Date exacte', key: 'date_exacte', width: 12 }, { header: 'Écart exacte − promise (j)', key: 'ecart_promesse', width: 22 }, { header: 'Écart livrée − exacte (j)', key: 'ecart_livree', width: 22 },
+        { header: 'Rupture créée le', key: 'date_rupture', width: 16 }, { header: 'Promesses exposées (nb)', key: 'nb_victimes', width: 20 }, { header: 'Promesses exposées (pièces)', key: 'q_victimes', width: 22 }, { header: 'Premières promesses exposées', key: 'victimes', width: 50 },
+        { header: 'Servie aux dépens d\'autres', key: 'aux_depens', width: 22 }, { header: 'Encore ouverte', key: 'ouverte_label', width: 14 },
       ]
       header(ws1)
-      data.cdc.forEach((c) => ws1.addRow({ ...c, date_bc: formatDateFr(c.date_bc), date_livraison: formatDateFr(c.date_livraison), date_bl: formatDateFr(c.date_bl), date_exacte: formatDateFr(c.date_exacte), plus_ancienne_doublee: formatDateFr(c.plus_ancienne_doublee), ecart: c.date_bl && c.date_exacte ? daysBetween(c.date_exacte, c.date_bl) : null }))
-      ws1.autoFilter = { from: 'A1', to: 'P1' }
+      data.cdc.forEach((c) => ws1.addRow({
+        ...c, date_bc: formatDateFr(c.date_bc), date_livraison: formatDateFr(c.date_livraison), echeance: formatDateFr(c.echeance), date_bl: formatDateFr(c.date_bl), date_exacte: c.date_exacte ? formatDateFr(c.date_exacte) : 'aucune',
+        date_rupture: formatDateFr(c.date_rupture), verdict_label: VERDICTS[c.verdict].label,
+        ecart_promesse: c.date_exacte ? daysBetween(c.echeance, c.date_exacte) : null, ecart_livree: c.date_bl && c.date_exacte ? daysBetween(c.date_exacte, c.date_bl) : null,
+        aux_depens: serviAuxDepens(c) ? 'oui' : '', ouverte_label: c.ouverte ? 'oui' : '',
+      }))
+      ws1.autoFilter = { from: 'A1', to: 'X1' }
       const ws2 = wb.addWorksheet('Série journalière')
-      ws2.columns = [{ header: 'Date', key: 'd', width: 12 }, { header: 'Réceptions', key: 'rec', width: 12 }, { header: 'Sorties BL', key: 'sor', width: 12 }, { header: 'Stock physique', key: 'stock_phys', width: 14 }, { header: 'Promesses ouvertes', key: 'promesses', width: 18 }, { header: 'Stock projeté', key: 'projete', width: 14 }]
+      ws2.columns = [{ header: 'Date', key: 'd', width: 12 }, { header: 'Nature', key: 'nature', width: 12 }, { header: 'Réceptions', key: 'rec', width: 12 }, { header: 'Sorties', key: 'sor', width: 12 }, { header: 'Stock physique', key: 'stock_phys', width: 14 }, { header: 'Promesses ouvertes', key: 'promesses', width: 18 }, { header: 'Stock projeté', key: 'projete', width: 14 }]
       header(ws2)
-      data.serie.forEach((p) => ws2.addRow({ ...p, d: formatDateFr(p.d) }))
+      data.serie.forEach((p) => ws2.addRow({ ...p, d: formatDateFr(p.d), nature: p.futur ? 'projection' : 'réel' }))
       const ws3 = wb.addWorksheet('Par mois')
-      ws3.columns = [{ header: 'Mois', key: 'mois', width: 10 }, { header: 'CDC', key: 'nb', width: 8 }, { header: 'Pièces', key: 'q', width: 8 }, { header: 'Projeté insuffisant', key: 'nb_projete_insuffisant', width: 18 }, { header: 'Ont doublé', key: 'nb_doublees', width: 12 }, { header: 'Stock projeté moyen', key: 'projete_moy', width: 18 }, { header: 'Délai promis', key: 'delai_promis', width: 12 }, { header: 'Délai réel', key: 'delai_reel', width: 12 }, { header: 'Délai exact', key: 'delai_exact', width: 12 }, { header: 'Livrées avant date exacte', key: 'nb_livrees_avant_date_exacte', width: 22 }]
+      ws3.columns = [{ header: 'Mois', key: 'mois', width: 10 }, { header: 'CDC', key: 'nb', width: 8 }, { header: 'Pièces', key: 'q', width: 8 }, { header: 'Tenables', key: 'nb_ok', width: 10 }, { header: 'Intenables', key: 'nb_intenable', width: 12 }, { header: 'Créent un retard', key: 'nb_cree_retard', width: 16 }, { header: 'Servies aux dépens d\'autres', key: 'nb_servies_aux_depens', width: 24 }, { header: 'Ouvertes à recaler', key: 'nb_a_recaler', width: 18 }, { header: 'Délai promis', key: 'delai_promis', width: 12 }, { header: 'Délai réel', key: 'delai_reel', width: 12 }, { header: 'Délai exact', key: 'delai_exact', width: 12 }]
       header(ws3)
       data.mensuel.forEach((m) => ws3.addRow(m))
       const ws4 = wb.addWorksheet('Par agence')
-      ws4.columns = [{ header: 'Agence', key: 'agence', width: 16 }, { header: 'CDC', key: 'nb', width: 8 }, { header: 'Pièces', key: 'q', width: 8 }, { header: 'Projeté insuffisant', key: 'nb_projete_insuffisant', width: 18 }, { header: 'Ont doublé (nb)', key: 'nb_doublees', width: 16 }, { header: 'Ont doublé (pièces)', key: 'q_doublees', width: 18 }]
+      ws4.columns = [{ header: 'Agence', key: 'agence', width: 16 }, { header: 'CDC', key: 'nb', width: 8 }, { header: 'Pièces', key: 'q', width: 8 }, { header: 'Intenables', key: 'nb_intenable', width: 12 }, { header: 'Créent un retard', key: 'nb_cree_retard', width: 16 }, { header: 'Pièces à problème', key: 'q_fautif', width: 16 }, { header: 'Servies aux dépens d\'autres', key: 'nb_servies_aux_depens', width: 24 }, { header: 'Ouvertes à recaler', key: 'nb_a_recaler', width: 18 }]
       header(ws4)
       data.agences.forEach((a) => ws4.addRow(a))
       const buffer = await wb.xlsx.writeBuffer()
@@ -203,7 +242,7 @@ export default function ReconstructionPage() {
           <div style={styles.kicker}>Stocks &amp; logistique · analyse rétrospective</div>
           <h1 style={styles.title}>Reconstruction du stock projeté</h1>
           <div style={styles.lead}>
-            Depuis l'image du jour SAGE (tous dépôts), le stock physique est déroulé à rebours avec les sorties BL clients et les réceptions fournisseurs (lignes de CDF BLG). Pour chaque commande client créée depuis la date de départ : stock projeté à la saisie, date exacte que le système aurait dû proposer, promesses plus anciennes doublées à la livraison.
+            Depuis l'image du jour SAGE (tous dépôts), le stock physique est déroulé à rebours avec les sorties BL clients et les réceptions fournisseurs réelles (lignes de CDF BLG). Pour chaque commande client créée depuis la date de départ, on rejoue la fin de journée de saisie : chaque promesse plus ancienne consomme le stock à sa propre date de livraison, chaque arrivage le recrée à la sienne. Une promesse est à problème si elle ne peut pas être livrée à sa date, ou si elle prend le stock d'une promesse plus lointaine qu'aucun arrivage ne recouvre à temps. Au-delà d'aujourd'hui, la courbe est prolongée avec les portefeuilles clients et fournisseurs.
           </div>
         </div>
         <div style={styles.params}>
@@ -236,13 +275,13 @@ export default function ReconstructionPage() {
         <>
           {/* ── Bandeau KPI ── */}
           <div style={styles.kpiRow}>
-            <Kpi label={`Stock physique au ${formatDateCourte(data.depuis)}`} value={formatNumber(meta.stock_phys_debut)} sub={`${formatNumber(meta.promesses_debut)} pièces déjà promises · stock du jour ${formatNumber(data.stock_today)}`} />
-            <Kpi label="Stock projeté négatif depuis le" value={meta.premier_jour_projete_negatif ? formatDateFr(meta.premier_jour_projete_negatif) : 'jamais'} color={meta.premier_jour_projete_negatif ? '#E0A961' : '#8fd4a8'} sub={meta.premier_jour_projete_negatif ? 'à partir de là, toute saisie aurait dû recevoir une date' : 'le stock projeté est resté positif'} big />
-            <Kpi label="CDC créées" value={formatNumber(meta.nb_cdc)} sub={`${formatNumber(meta.q_cdc)} pièces · ${formatNumber(meta.nb_livrees)} déjà livrées`} />
-            <Kpi label="Saisies avec stock projeté insuffisant" value={`${formatNumber(meta.nb_projete_insuffisant)} · ${partInsuffisant} %`} color={meta.nb_projete_insuffisant > 0 ? '#e0a685' : '#8fd4a8'} sub="stock projeté < quantité au moment de la saisie" />
-            <Kpi label="Livrées avant leur date exacte" value={formatNumber(meta.nb_livrees_avant_date_exacte)} color={meta.nb_livrees_avant_date_exacte > 0 ? '#e0a685' : '#8fd4a8'} sub="servies avant la date que les réceptions permettaient" />
-            <Kpi label="Ont doublé une promesse" value={`${formatNumber(meta.nb_doublees)} · ${partDoublees} %`} color={meta.nb_doublees > 0 ? '#E0A961' : '#8fd4a8'} sub={`${formatNumber(meta.q_doublees)} pièces · plus ancienne doublée ${formatDateCourte(meta.plus_ancienne_doublee)}`} />
-            <Kpi label="Flux sur la période" value={`+${formatNumber(meta.receptions_total)} / −${formatNumber(meta.sorties_total)}`} color="#8FC7DA" sub="réceptions BLG / sorties BL clients" />
+            <Kpi label={`Stock physique à l'ouverture du ${formatDateCourte(data.depuis)}`} value={formatNumber(meta.stock_phys_ouverture)} sub={`+${formatNumber(meta.receptions_total)} reçues − ${formatNumber(meta.sorties_total)} sorties = ${formatNumber(data.stock_today)} aujourd'hui`} />
+            <Kpi label="CDC créées" value={formatNumber(meta.nb_cdc)} sub={`${formatNumber(meta.q_cdc)} pièces · ${formatNumber(meta.nb_livrees)} livrées · ${formatNumber(meta.nb_ok)} promesses tenables (${pct(meta.nb_ok, meta.nb_cdc)} %)`} />
+            <Kpi label="Promesses intenables" value={`${formatNumber(meta.nb_intenable)} · ${pct(meta.nb_intenable, meta.nb_cdc)} %`} color={meta.nb_intenable > 0 ? '#e0a685' : '#8fd4a8'} sub={`${formatNumber(meta.q_intenable)} pièces · à la date promise, le stock n'y était pas, même en comptant les arrivages`} />
+            <Kpi label="Créent un retard" value={`${formatNumber(meta.nb_cree_retard)} · ${pct(meta.nb_cree_retard, meta.nb_cdc)} %`} color={meta.nb_cree_retard > 0 ? '#E0A961' : '#8fd4a8'} sub={`${formatNumber(meta.q_cree_retard)} pièces · livrables à leur date, mais sur le stock d'une promesse plus lointaine non recouverte`} big />
+            <Kpi label="Servies aux dépens d'autres" value={formatNumber(meta.nb_servies_aux_depens)} color={meta.nb_servies_aux_depens > 0 ? '#e0a685' : '#8fd4a8'} sub={`${formatNumber(meta.q_servies_aux_depens)} pièces · promesses à problème réellement livrées avant leur date exacte`} />
+            <Kpi label="Ouvertes à recaler" value={formatNumber(meta.nb_a_recaler)} color={meta.nb_a_recaler > 0 ? '#E0A961' : '#8fd4a8'} sub={`${formatNumber(meta.q_a_recaler)} pièces · promesses à problème encore en portefeuille`} />
+            <Kpi label="Projection du portefeuille" value={meta.futur_premiere_rupture ? formatDateFr(meta.futur_premiere_rupture) : 'pas de rupture'} color={meta.futur_premiere_rupture ? '#e0a685' : '#8fd4a8'} sub={meta.futur_premiere_rupture ? `rupture physique à venir · creux ${formatNumber(meta.futur_stock_min)}${meta.futur_fin_rupture ? ` · recouvert le ${formatDateCourte(meta.futur_fin_rupture)}` : ' · jamais recouvert'}` : `+${formatNumber(meta.futur_receptions)} attendues − ${formatNumber(meta.futur_cdc_pieces)} à livrer = ${formatNumber(meta.futur_stock_fin)} au ${formatDateCourte(data.fin)}`} />
           </div>
 
           {meta.premier_jour_phys_negatif && (
@@ -250,12 +289,19 @@ export default function ReconstructionPage() {
               Stock physique reconstruit négatif à partir du {formatDateFr(meta.premier_jour_phys_negatif)} : des réceptions manquent dans BLG sur cette période (réception saisie dans SAGE, BL non synchronisé, contremarque). Le constat reste valable, les dates exactes de cette période sont à prendre avec prudence.
             </div>
           )}
+          {meta.nb_date_incoherente > 0 && (
+            <div style={styles.warnBox}>
+              {formatNumber(meta.nb_date_incoherente)} commande(s) portent une date de livraison antérieure à leur date de création (erreur de saisie). Leur échéance est ramenée au jour de création.
+            </div>
+          )}
 
           {/* ── Courbe ── */}
           <div style={styles.card}>
-            <div style={styles.cardTitle}>Stock physique et stock projeté, jour par jour</div>
-            <div style={styles.muted}>Stock projeté = stock physique − commandes clients créées et non encore livrées. Points bleus : réceptions fournisseurs. Zone orange : période où toute nouvelle commande aurait dû recevoir une date.</div>
-            <ReconstructionChart serie={data.serie} />
+            <div style={styles.cardTitle}>Stock physique et stock projeté — réel jusqu'au {formatDateCourte(data.aujourdhui)}, puis projection du portefeuille jusqu'au {formatDateCourte(data.fin)}</div>
+            <div style={styles.muted}>
+              Stock projeté = stock physique − toutes les commandes clients créées et non livrées (quelle que soit leur date). Points bleus : réceptions fournisseurs (réelles, puis CDF SAGE attendues). En pointillés : stock du jour + CDF attendues − CDC ouvertes à leur date de livraison ({formatNumber(meta.futur_cdc_nb)} CDC · {formatNumber(meta.futur_cdc_pieces)} pièces, dont {formatNumber(meta.futur_cdc_en_retard_pieces)} déjà en retard positionnées à demain). Zone orange : stock projeté négatif ; zone rouge : rupture physique à venir.
+            </div>
+            <ReconstructionChart serie={data.serie} aujourdhui={data.aujourdhui} />
           </div>
 
           <div style={styles.twoCols}>
@@ -264,27 +310,28 @@ export default function ReconstructionPage() {
               <div style={styles.cardTitle}>Mois par mois — ce qu'on a promis, ce qu'on a fait, ce qu'on aurait dû proposer</div>
               <div style={styles.tableWrap}>
                 <table className="rcTable" style={styles.table}>
-                  <thead><tr>{['Création', 'CDC', 'Pièces', 'Projeté insuffisant', 'Stock projeté moyen', 'Délai promis', 'Délai réel', 'Délai exact', 'Livrées avant date exacte', 'Ont doublé'].map((h) => <th key={h} style={styles.th}>{h}</th>)}</tr></thead>
+                  <thead><tr>{['Création', 'CDC', 'Pièces', 'Tenables', 'Intenables', 'Créent un retard', 'Servies aux dépens', 'À recaler', 'Délai promis', 'Délai réel', 'Délai exact'].map((h) => <th key={h} style={styles.th}>{h}</th>)}</tr></thead>
                   <tbody>
                     {data.mensuel.map((m) => (
                       <tr key={m.mois}>
                         <td style={{ ...styles.td, color: '#fff', fontWeight: 700, whiteSpace: 'nowrap' }}>{formatMois(m.mois)}</td>
                         <td style={styles.tdNum}>{formatNumber(m.nb)}</td>
                         <td style={styles.tdNum}>{formatNumber(m.q)}</td>
-                        <td style={{ ...styles.tdNum, color: m.nb_projete_insuffisant > 0 ? '#e0a685' : '#8fd4a8', fontWeight: 700 }}>{formatNumber(m.nb_projete_insuffisant)}</td>
-                        <td style={{ ...styles.tdNum, color: couleurSigne(m.projete_moy ?? 0) }}>{m.projete_moy === null ? '—' : `${m.projete_moy > 0 ? '+' : ''}${formatNumber(m.projete_moy)}`}</td>
+                        <td style={{ ...styles.tdNum, color: '#8fd4a8' }}>{formatNumber(m.nb_ok)} <span style={styles.tdSub}>({pct(m.nb_ok, m.nb)} %)</span></td>
+                        <td style={{ ...styles.tdNum, color: m.nb_intenable > 0 ? '#e0a685' : undefined, fontWeight: 700 }}>{formatNumber(m.nb_intenable)} <span style={styles.tdSub}>({formatNumber(m.q_intenable)} p.)</span></td>
+                        <td style={{ ...styles.tdNum, color: m.nb_cree_retard > 0 ? '#E0A961' : undefined, fontWeight: 700 }}>{formatNumber(m.nb_cree_retard)} <span style={styles.tdSub}>({formatNumber(m.q_cree_retard)} p.)</span></td>
+                        <td style={{ ...styles.tdNum, color: m.nb_servies_aux_depens > 0 ? '#e0a685' : undefined }}>{formatNumber(m.nb_servies_aux_depens)}</td>
+                        <td style={{ ...styles.tdNum, color: m.nb_a_recaler > 0 ? '#E0A961' : undefined }}>{formatNumber(m.nb_a_recaler)}</td>
                         <td style={styles.tdNum}>{formatJours(m.delai_promis)}</td>
                         <td style={{ ...styles.tdNum, color: '#8fd4a8' }}>{formatJours(m.delai_reel)}</td>
                         <td style={{ ...styles.tdNum, color: '#E0A961', fontWeight: 700 }}>{m.delai_exact === null ? '—' : m.delai_exact === 0 ? 'immédiat' : formatJours(m.delai_exact)}{m.nb_sans_date > 0 ? <span style={styles.tdSub}> · {m.nb_sans_date} sans date</span> : null}</td>
-                        <td style={{ ...styles.tdNum, color: m.nb_livrees_avant_date_exacte > 0 ? '#e0a685' : undefined }}>{formatNumber(m.nb_livrees_avant_date_exacte)}</td>
-                        <td style={styles.tdNum}>{formatNumber(m.nb_doublees)} <span style={styles.tdSub}>({formatNumber(m.q_doublees)} p.)</span></td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
               <div style={{ ...styles.muted, marginTop: 8 }}>
-                Délai exact = première date où stock projeté à la saisie + réceptions (réelles puis CDF SAGE à venir) ≥ quantité. « Ont doublé » = livrées alors qu'une commande plus ancienne, à date de livraison antérieure ou égale, attendait encore.
+                Délai exact = première date où la commande peut être servie sans rendre négatif le solde daté (stock + réceptions − promesses plus anciennes à leur date), ni à cette date ni après. « Servies aux dépens » = promesses à problème livrées avant cette date exacte. « À recaler » = promesses à problème encore ouvertes.
               </div>
             </div>
 
@@ -293,18 +340,20 @@ export default function ReconstructionPage() {
               <div style={styles.cardTitle}>Par agence <span style={styles.muted}>(agence du collaborateur de la fiche client)</span></div>
               <div style={styles.tableWrap}>
                 <table className="rcTable" style={styles.table}>
-                  <thead><tr>{['Agence', 'CDC', 'Pièces', 'Projeté insuffisant', 'Ont doublé', 'Part'].map((h) => <th key={h} style={styles.th}>{h}</th>)}</tr></thead>
+                  <thead><tr>{['Agence', 'CDC', 'Pièces', 'Intenables', 'Créent un retard', 'Servies aux dépens', 'À recaler', 'Part à problème'].map((h) => <th key={h} style={styles.th}>{h}</th>)}</tr></thead>
                   <tbody>
                     {data.agences.map((a) => {
-                      const part = a.nb > 0 ? Math.round((a.nb_doublees / a.nb) * 100) : 0
+                      const part = pct(a.nb_intenable + a.nb_cree_retard, a.nb)
                       return (
                         <tr key={a.agence} onClick={() => setAgenceFiltre((v) => (v === a.agence ? '' : a.agence))} style={{ cursor: 'pointer', background: agenceFiltre === a.agence ? 'rgba(166,161,129,0.14)' : undefined }}>
                           <td style={{ ...styles.td, color: '#fff' }}>{a.agence}</td>
                           <td style={styles.tdNum}>{formatNumber(a.nb)}</td>
                           <td style={styles.tdNum}>{formatNumber(a.q)}</td>
-                          <td style={{ ...styles.tdNum, color: a.nb_projete_insuffisant > 0 ? '#e0a685' : undefined }}>{formatNumber(a.nb_projete_insuffisant)}</td>
-                          <td style={{ ...styles.tdNum, color: '#E0A961', fontWeight: 700 }}>{formatNumber(a.nb_doublees)} <span style={styles.tdSub}>({formatNumber(a.q_doublees)} p.)</span></td>
-                          <td style={{ ...styles.td, width: 120 }}><div style={styles.barTrack}><div style={{ ...styles.barFill, width: `${part}%` }} /></div><span style={styles.tdSub}>{part} %</span></td>
+                          <td style={{ ...styles.tdNum, color: a.nb_intenable > 0 ? '#e0a685' : undefined }}>{formatNumber(a.nb_intenable)}</td>
+                          <td style={{ ...styles.tdNum, color: a.nb_cree_retard > 0 ? '#E0A961' : undefined }}>{formatNumber(a.nb_cree_retard)}</td>
+                          <td style={styles.tdNum}>{formatNumber(a.nb_servies_aux_depens)}</td>
+                          <td style={styles.tdNum}>{formatNumber(a.nb_a_recaler)}</td>
+                          <td style={{ ...styles.td, width: 120 }}><div style={styles.barTrack}><div style={{ ...styles.barFill, width: `${part}%` }} /></div><span style={styles.tdSub}>{part} % · {formatNumber(a.q_fautif)} p.</span></td>
                         </tr>
                       )
                     })}
@@ -318,7 +367,7 @@ export default function ReconstructionPage() {
           {/* ── Détail ── */}
           <div style={styles.card}>
             <div style={styles.cardHeaderRow}>
-              <div style={styles.cardTitle}>Détail des commandes <span style={styles.countTag}>{cdcFiltrees.length}</span>{agenceFiltre ? <span style={{ ...styles.countTag, color: '#E9E5D6' }}>{agenceFiltre} ✕</span> : null}</div>
+              <div style={styles.cardTitle}>Détail des commandes <span style={styles.countTag}>{cdcFiltrees.length}</span>{agenceFiltre ? <span style={{ ...styles.countTag, color: '#E9E5D6', cursor: 'pointer' }} onClick={() => setAgenceFiltre('')}>{agenceFiltre} ✕</span> : null}</div>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                 <input value={recherche} onChange={(e) => setRecherche(e.target.value)} placeholder="N° document, client, tiers" style={{ ...styles.input, height: 34, width: 240, fontSize: 13, fontWeight: 400 }} />
                 <div style={styles.segment}>
@@ -330,35 +379,42 @@ export default function ReconstructionPage() {
             </div>
             <div style={{ ...styles.tableWrap, maxHeight: 560 }}>
               <table className="rcTable" style={styles.table}>
-                <thead><tr>{['Document', 'Client', 'Agence', 'Créée', 'Livraison promise', 'Livrée le', 'Qté', 'Stock phys.', 'Promesses ouvertes', 'Stock projeté', 'Date exacte', 'Écart', 'Promesses doublées', 'Plus ancienne'].map((h) => <th key={h} style={styles.th}>{h}</th>)}</tr></thead>
+                <thead><tr>{['Document', 'Client', 'Agence', 'Créée', 'Promise', 'Livrée le', 'Qté', 'Stock fin de journée', 'Solde à la date promise', 'Dispo réelle', 'Verdict', 'Date exacte', 'Exacte − promise', 'Livrée − exacte', 'Rupture créée le', 'Promesses exposées'].map((h) => <th key={h} style={styles.th}>{h}</th>)}</tr></thead>
                 <tbody>
                   {cdcFiltrees.slice(0, 500).map((c) => {
-                    const ecart = c.date_bl && c.date_exacte ? daysBetween(c.date_exacte, c.date_bl) : null
+                    const ecartPromesse = c.date_exacte ? daysBetween(c.echeance, c.date_exacte) : null
+                    const ecartLivree = c.date_bl && c.date_exacte ? daysBetween(c.date_exacte, c.date_bl) : null
+                    const v = VERDICTS[c.verdict]
+                    const dateIncoherente = !!c.date_livraison && c.date_livraison < c.date_bc
                     return (
                       <tr key={c.bc}>
                         <td style={{ ...styles.td, fontFamily: 'var(--font-mono)', fontWeight: 700, color: '#fff', whiteSpace: 'nowrap' }}>{c.bc}{c.ouverte ? <span title="Encore ouverte" style={{ ...styles.tdSub, marginLeft: 4 }}>ouv.</span> : null}</td>
                         <td style={styles.td}><div style={{ color: '#fff' }}>{c.nom || c.tiers}</div><div style={styles.tdSub}>{c.tiers}</div></td>
                         <td style={styles.td}>{c.agence}</td>
                         <td style={{ ...styles.td, whiteSpace: 'nowrap' }}>{formatDateCourte(c.date_bc)}</td>
-                        <td style={{ ...styles.td, whiteSpace: 'nowrap' }}>{formatDateCourte(c.date_livraison)}</td>
+                        <td style={{ ...styles.td, whiteSpace: 'nowrap' }} title={dateIncoherente ? `Date saisie ${formatDateFr(c.date_livraison)} antérieure à la création : échéance ramenée au jour de création` : undefined}>{formatDateCourte(c.echeance)}{dateIncoherente ? <span style={{ ...styles.tdSub, color: '#e0a685' }}> ⚠</span> : null}</td>
                         <td style={{ ...styles.td, whiteSpace: 'nowrap', color: c.date_bl ? '#8fd4a8' : undefined }}>{c.date_bl ? formatDateCourte(c.date_bl) : <span style={styles.tdSub}>non livrée</span>}</td>
                         <td style={styles.tdNum}>{formatNumber(c.q)}</td>
-                        <td style={styles.tdNum}>{formatNumber(c.stock_phys)}</td>
-                        <td style={styles.tdNum}>{formatNumber(c.promesses_ouvertes)}</td>
-                        <td style={{ ...styles.tdNum, fontWeight: 700, color: couleurSigne(c.stock_projete_creation) }}>{c.stock_projete_creation > 0 ? '+' : ''}{formatNumber(c.stock_projete_creation)}</td>
-                        <td style={{ ...styles.td, whiteSpace: 'nowrap', color: c.date_exacte === c.date_bc ? '#8fd4a8' : '#E0A961', fontWeight: 700 }}>{c.date_exacte ? (c.date_exacte === c.date_bc ? 'immédiat' : formatDateCourte(c.date_exacte)) : <span style={{ color: '#e0a685' }}>aucune</span>}</td>
-                        <td style={{ ...styles.tdNum, color: ecart !== null && ecart < 0 ? '#e0a685' : undefined }}>{ecart === null ? '—' : `${ecart > 0 ? '+' : ''}${ecart} j`}</td>
-                        <td style={{ ...styles.tdNum, color: c.nb_doublees > 0 ? '#E0A961' : undefined }}>{c.nb_doublees > 0 ? `${c.nb_doublees} CDC · ${formatNumber(c.q_doublees)} p.` : '—'}</td>
-                        <td style={{ ...styles.td, whiteSpace: 'nowrap', color: '#e0a685' }}>{formatDateCourte(c.plus_ancienne_doublee)}</td>
+                        <td style={styles.tdNum} title={`Promesses ouvertes toutes dates : ${formatNumber(c.promesses_ouvertes)} · stock projeté ${formatSigne(c.stock_projete_creation)}`}>{formatNumber(c.stock_phys)}</td>
+                        <td style={{ ...styles.tdNum, color: c.solde_echeance >= c.q ? '#8fd4a8' : '#e0a685' }}>{formatSigne(c.solde_echeance)}</td>
+                        <td style={{ ...styles.tdNum, fontWeight: 700, color: c.atp_echeance >= c.q ? '#8fd4a8' : '#e0a685' }}>{formatSigne(c.atp_echeance)}</td>
+                        <td style={{ ...styles.td, whiteSpace: 'nowrap' }}><span style={{ ...styles.verdictTag, color: v.color, background: v.bg }}>{v.label}</span>{c.verdict !== 'OK' ? <span style={styles.tdSub}> {formatNumber(c.q_manque)} p.</span> : null}</td>
+                        <td style={{ ...styles.td, whiteSpace: 'nowrap', color: c.verdict === 'OK' ? '#8fd4a8' : '#E0A961', fontWeight: 700 }}>{c.date_exacte ? (c.date_exacte === c.date_bc ? 'immédiat' : formatDateCourte(c.date_exacte)) : <span style={{ color: '#e0a685' }}>aucune</span>}</td>
+                        <td style={{ ...styles.tdNum, color: ecartPromesse !== null && ecartPromesse > 0 ? '#e0a685' : undefined }}>{ecartPromesse === null ? '—' : `${ecartPromesse > 0 ? '+' : ''}${ecartPromesse} j`}</td>
+                        <td style={{ ...styles.tdNum, color: ecartLivree !== null && ecartLivree < 0 && c.verdict !== 'OK' ? '#e0a685' : undefined }}>{ecartLivree === null ? '—' : `${ecartLivree > 0 ? '+' : ''}${ecartLivree} j`}</td>
+                        <td style={{ ...styles.td, whiteSpace: 'nowrap', color: '#e0a685' }}>{c.verdict === 'OK' ? '—' : formatDateCourte(c.date_rupture)}</td>
+                        <td style={{ ...styles.td, minWidth: 220 }}>{c.nb_victimes > 0 ? <><div style={{ color: '#E0A961', fontFamily: 'var(--font-mono)' }}>{c.nb_victimes} CDC · {formatNumber(c.q_victimes)} p.</div><div style={styles.tdSub}>{c.victimes}{c.nb_victimes > 5 ? ' …' : ''}</div></> : '—'}</td>
                       </tr>
                     )
                   })}
-                  {cdcFiltrees.length === 0 && <tr><td colSpan={14} style={{ ...styles.td, textAlign: 'center' }}><span style={styles.muted}>Aucune commande pour ce filtre.</span></td></tr>}
+                  {cdcFiltrees.length === 0 && <tr><td colSpan={16} style={{ ...styles.td, textAlign: 'center' }}><span style={styles.muted}>Aucune commande pour ce filtre.</span></td></tr>}
                 </tbody>
               </table>
             </div>
             {cdcFiltrees.length > 500 && <div style={{ ...styles.muted, marginTop: 6 }}>500 premières lignes affichées — l'export Excel contient tout.</div>}
-            <div style={{ ...styles.muted, marginTop: 8 }}>Écart = livrée − date exacte (négatif : servie avant son tour). Stock physique et promesses ouvertes sont ceux de la fin de journée de saisie, hors la commande elle-même.</div>
+            <div style={{ ...styles.muted, marginTop: 8 }}>
+              Solde à la date promise = stock de fin de journée de saisie + réceptions jusqu'à cette date − promesses plus anciennes dues d'ici là (hors la commande elle-même). Dispo réelle = plus bas niveau de ce solde à partir de la date promise : c'est ce qu'on peut promettre sans léser personne. Intenable : solde &lt; quantité. Crée un retard : solde ≥ quantité mais dispo réelle &lt; quantité — « Rupture créée le » donne la date où une promesse plus lointaine se retrouve sans stock, « Promesses exposées » celles dues entre cette date et la date exacte. Livrée − exacte négatif : servie avant son tour.
+            </div>
           </div>
         </>
       )}
@@ -366,10 +422,10 @@ export default function ReconstructionPage() {
   )
 }
 
-// ── Courbe stock physique / projeté ───────────────────────────────────────
-function ReconstructionChart({ serie }: { serie: PointSerie[] }) {
+// ── Courbe stock physique / projeté (réel + projection) ───────────────────
+function ReconstructionChart({ serie, aujourdhui }: { serie: PointSerie[]; aujourdhui: string }) {
   const width = 1100
-  const height = 320
+  const height = 340
   const padding = { top: 18, right: 20, bottom: 34, left: 60 }
   const innerW = width - padding.left - padding.right
   const innerH = height - padding.top - padding.bottom
@@ -386,18 +442,31 @@ function ReconstructionChart({ serie }: { serie: PointSerie[] }) {
   const minVal = Math.min(0, ...allValues)
   const y = (v: number) => padding.top + innerH - ((v - minVal) / (maxVal - minVal || 1)) * innerH
   const yZero = y(0)
-  const pathPhys = serie.map((p, i) => `${i === 0 ? 'M' : 'L'} ${x(p.d)} ${y(p.stock_phys)}`).join(' ')
-  const pathProj = serie.map((p, i) => `${i === 0 ? 'M' : 'L'} ${x(p.d)} ${y(p.projete)}`).join(' ')
-  const negSegments: Array<{ x1: number; x2: number }> = []
-  let seg: { x1: number; x2: number } | null = null
-  serie.forEach((p, i) => {
-    if (p.projete < 0) { const px = x(p.d); if (!seg) seg = { x1: px, x2: px }; seg.x2 = i + 1 < serie.length ? x(serie[i + 1].d) : px } else if (seg) { negSegments.push(seg); seg = null }
-  })
-  if (seg) negSegments.push(seg)
+
+  // Réel : jusqu'à aujourd'hui inclus. Projection : d'aujourd'hui (point de raccord) à la fin.
+  const idxToday = Math.max(0, serie.reduce((acc, p, i) => (!p.futur ? i : acc), 0))
+  const passe = serie.slice(0, idxToday + 1)
+  const futur = serie.slice(idxToday)
+  const chemin = (pts: PointSerie[], get: (p: PointSerie) => number) => pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${x(p.d)} ${y(get(p))}`).join(' ')
+
+  function segments(test: (p: PointSerie) => boolean): Array<{ x1: number; x2: number }> {
+    const out: Array<{ x1: number; x2: number }> = []
+    let seg: { x1: number; x2: number } | null = null
+    serie.forEach((p, i) => {
+      if (test(p)) { const px = x(p.d); if (!seg) seg = { x1: px, x2: px }; seg.x2 = i + 1 < serie.length ? x(serie[i + 1].d) : px } else if (seg) { out.push(seg); seg = null }
+    })
+    if (seg) out.push(seg)
+    return out
+  }
+  const negProjete = segments((p) => !p.futur && p.projete < 0)
+  const ruptureFuture = segments((p) => p.futur && p.stock_phys < 0)
+
   const mois: Array<{ iso: string; label: string }> = []
   { const d = new Date(`${debut}T00:00:00`); d.setDate(1); d.setMonth(d.getMonth() + 1); while (toIsoDate(d) <= fin) { mois.push({ iso: toIsoDate(d), label: d.toLocaleDateString('fr-FR', { month: 'short', year: '2-digit' }) }); d.setMonth(d.getMonth() + 1) } }
+  const pasMois = mois.length > 14 ? 2 : 1
   const range = maxVal - minVal || 1
   const ticks = [minVal, minVal + range / 4, minVal + range / 2, minVal + (range * 3) / 4, maxVal]
+  const xToday = x(serie[idxToday].d)
 
   function handleMove(e: React.MouseEvent<SVGSVGElement>) {
     const rect = svgRef.current?.getBoundingClientRect()
@@ -419,33 +488,45 @@ function ReconstructionChart({ serie }: { serie: PointSerie[] }) {
             <text x={padding.left - 8} y={y(t) + 3} fontSize={10} textAnchor="end" fill="rgba(255,255,255,0.45)" fontFamily="var(--font-mono)">{formatNumber(t)}</text>
           </g>
         ))}
-        {mois.map((m) => (
+        {mois.map((m, i) => (
           <g key={m.iso}>
             <line x1={x(m.iso)} y1={padding.top} x2={x(m.iso)} y2={padding.top + innerH} stroke="rgba(255,255,255,0.06)" />
-            <text x={x(m.iso)} y={height - 12} fontSize={10} textAnchor="middle" fill="rgba(255,255,255,0.45)">{m.label}</text>
+            {i % pasMois === 0 && <text x={x(m.iso)} y={height - 12} fontSize={10} textAnchor="middle" fill="rgba(255,255,255,0.45)">{m.label}</text>}
           </g>
         ))}
-        {negSegments.map((s, i) => <rect key={i} x={s.x1} y={padding.top} width={Math.max(0, s.x2 - s.x1)} height={innerH} fill="rgba(193,104,60,0.12)" />)}
+        {/* Fond de la zone de projection */}
+        <rect x={xToday} y={padding.top} width={Math.max(0, width - padding.right - xToday)} height={innerH} fill="rgba(143,199,218,0.04)" />
+        {negProjete.map((s, i) => <rect key={`n${i}`} x={s.x1} y={padding.top} width={Math.max(0, s.x2 - s.x1)} height={innerH} fill="rgba(193,104,60,0.12)" />)}
+        {ruptureFuture.map((s, i) => <rect key={`r${i}`} x={s.x1} y={padding.top} width={Math.max(0, s.x2 - s.x1)} height={innerH} fill="rgba(200,60,60,0.20)" />)}
         <line x1={padding.left} y1={yZero} x2={width - padding.right} y2={yZero} stroke="#C1683C" strokeWidth={1.2} strokeDasharray="6 4" opacity={0.8} />
-        <text x={width - padding.right} y={yZero - 4} fontSize={10} textAnchor="end" fill="#e0a685">projeté négatif</text>
-        <path d={pathPhys} fill="none" stroke="#E9E5D6" strokeWidth={1.6} opacity={0.8} />
-        <path d={pathProj} fill="none" stroke="#8FC7DA" strokeWidth={2.4} strokeLinejoin="round" />
-        {serie.filter((p) => p.rec > 0).map((p) => <circle key={p.d} cx={x(p.d)} cy={y(p.stock_phys)} r={4} fill="#8FC7DA" stroke="#101A2E" strokeWidth={1.5} />)}
+        <text x={padding.left + 4} y={yZero - 4} fontSize={10} textAnchor="start" fill="#e0a685">zéro</text>
+        {/* Aujourd'hui */}
+        <line x1={xToday} y1={padding.top} x2={xToday} y2={padding.top + innerH} stroke="#F5F3EC" strokeWidth={1.2} opacity={0.7} />
+        <text x={xToday + 5} y={padding.top + 10} fontSize={10} fill="#F5F3EC">aujourd'hui → projection du portefeuille</text>
+        {/* Réel */}
+        <path d={chemin(passe, (p) => p.stock_phys)} fill="none" stroke="#E9E5D6" strokeWidth={1.6} opacity={0.85} />
+        <path d={chemin(passe, (p) => p.projete)} fill="none" stroke="#8FC7DA" strokeWidth={2.4} strokeLinejoin="round" />
+        {/* Projection */}
+        {futur.length > 1 && <path d={chemin(futur, (p) => p.stock_phys)} fill="none" stroke="#E9E5D6" strokeWidth={1.8} strokeDasharray="5 4" opacity={0.95} />}
+        {futur.length > 1 && <path d={chemin(futur, (p) => p.projete)} fill="none" stroke="#8FC7DA" strokeWidth={2} strokeDasharray="5 4" opacity={0.8} />}
+        {serie.filter((p) => p.rec > 0).map((p) => <circle key={p.d} cx={x(p.d)} cy={y(p.stock_phys)} r={4} fill={p.futur ? '#101A2E' : '#8FC7DA'} stroke={p.futur ? '#8FC7DA' : '#101A2E'} strokeWidth={1.5} />)}
         {hp && <line x1={hpX} y1={padding.top} x2={hpX} y2={padding.top + innerH} stroke="rgba(255,255,255,0.35)" strokeWidth={1} />}
       </svg>
       {hp && (
         <div style={{ ...styles.tooltip, left: `${Math.min(88, Math.max(6, (hpX / width) * 100))}%` }}>
-          <div style={{ fontWeight: 700, color: '#fff' }}>{formatDateFr(hp.d)}</div>
-          <div>Stock physique : <strong style={{ color: '#E9E5D6' }}>{formatNumber(hp.stock_phys)}</strong></div>
-          <div>Promesses ouvertes : <strong style={{ color: '#E0A961' }}>{formatNumber(hp.promesses)}</strong></div>
+          <div style={{ fontWeight: 700, color: '#fff' }}>{formatDateFr(hp.d)} <span style={styles.tdSub}>{hp.futur ? '· projection' : hp.d === aujourdhui ? '· aujourd\'hui' : '· réel'}</span></div>
+          <div>Stock physique{hp.futur ? ' projeté' : ''} : <strong style={{ color: hp.stock_phys < 0 ? '#e0a685' : '#E9E5D6' }}>{formatNumber(hp.stock_phys)}</strong></div>
+          <div>{hp.futur ? 'Promesses restant à livrer' : 'Promesses ouvertes'} : <strong style={{ color: '#E0A961' }}>{formatNumber(hp.promesses)}</strong></div>
           <div>Stock projeté : <strong style={{ color: couleurSigne(hp.projete) }}>{formatNumber(hp.projete)}</strong></div>
-          {(hp.rec > 0 || hp.sor > 0) && <div style={styles.tdSub}>{hp.rec > 0 ? `réception +${formatNumber(hp.rec)}` : ''}{hp.rec > 0 && hp.sor > 0 ? ' · ' : ''}{hp.sor > 0 ? `sorties −${formatNumber(hp.sor)}` : ''}</div>}
+          {(hp.rec > 0 || hp.sor > 0) && <div style={styles.tdSub}>{hp.rec > 0 ? `${hp.futur ? 'réception attendue' : 'réception'} +${formatNumber(hp.rec)}` : ''}{hp.rec > 0 && hp.sor > 0 ? ' · ' : ''}{hp.sor > 0 ? `${hp.futur ? 'CDC à livrer' : 'sorties'} −${formatNumber(hp.sor)}` : ''}</div>}
         </div>
       )}
       <div style={styles.legend}>
-        <span style={styles.legendItem}><span style={{ ...styles.legendDot, background: '#E9E5D6' }} />Stock physique reconstruit</span>
+        <span style={styles.legendItem}><span style={{ ...styles.legendDot, background: '#E9E5D6' }} />Stock physique (reconstruit, puis projeté en pointillés)</span>
         <span style={styles.legendItem}><span style={{ ...styles.legendDot, background: '#8FC7DA' }} />Stock projeté (physique − promesses ouvertes)</span>
-        <span style={styles.legendItem}><span style={{ ...styles.legendDot, background: 'rgba(193,104,60,0.5)' }} />Période où une date aurait dû être imposée</span>
+        <span style={styles.legendItem}><span style={{ ...styles.legendDot, background: '#101A2E', border: '1.5px solid #8FC7DA', boxSizing: 'border-box' }} />Réception attendue (CDF SAGE)</span>
+        <span style={styles.legendItem}><span style={{ ...styles.legendDot, background: 'rgba(193,104,60,0.5)' }} />Stock projeté négatif</span>
+        <span style={styles.legendItem}><span style={{ ...styles.legendDot, background: 'rgba(200,60,60,0.6)' }} />Rupture physique à venir</span>
       </div>
     </div>
   )
@@ -456,7 +537,7 @@ function Kpi({ label, value, color, sub, big }: { label: string; value: string; 
   return (
     <div style={{ ...styles.kpi, ...(big ? styles.kpiBig : {}) }}>
       <div style={styles.kpiLabel}>{label}</div>
-      <div style={{ ...styles.kpiValue, ...(big ? { fontSize: 28 } : {}), color: color || '#fff' }}>{value}</div>
+      <div style={{ ...styles.kpiValue, color: color || '#fff' }}>{value}</div>
       {sub && <div style={styles.kpiSub}>{sub}</div>}
     </div>
   )
@@ -480,6 +561,7 @@ const styles: Record<string, React.CSSProperties> = {
   cardTitle: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700, color: 'rgba(255,255,255,0.6)', marginBottom: 10, flexWrap: 'wrap' },
   cardHeaderRow: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 10 },
   countTag: { display: 'inline-flex', alignItems: 'center', padding: '1px 8px', borderRadius: 999, fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700, background: 'rgba(255,255,255,0.08)', color: 'rgba(255,255,255,0.6)', letterSpacing: 0, textTransform: 'none' },
+  verdictTag: { display: 'inline-flex', alignItems: 'center', padding: '2px 8px', borderRadius: 999, fontSize: 11, fontWeight: 700 },
   muted: { fontSize: 12.5, color: 'rgba(255,255,255,0.45)', lineHeight: 1.45, textTransform: 'none', letterSpacing: 0, fontWeight: 400 },
   errorBox: { padding: 12, borderRadius: 12, border: '1px solid rgba(193,104,60,0.35)', background: 'rgba(193,104,60,0.12)', color: '#e0a685', fontSize: 13 },
   warnBox: { padding: '10px 14px', borderRadius: 12, border: '1px solid rgba(224,169,97,0.45)', background: 'rgba(224,169,97,0.10)', color: '#E9E5D6', fontSize: 12.5, lineHeight: 1.45 },
