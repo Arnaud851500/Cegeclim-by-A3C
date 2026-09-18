@@ -146,6 +146,7 @@ export const NAV_BLOCS: NavBloc[] = [
     pages: [
       { label: 'Portefeuille de commandes', path: '/portefeuille-livraison', activeLabel: 'Portefeuille cde', accessKey: 'can_dashboard', description: 'CDC à livrer, contrôle des frais de port, couverture stock.' },
       { label: 'Projection stock', path: '/stocks-disponibilites2', accessKey: 'can_stocks', description: 'Stock projeté par référence, hypothèses mensuelles et substitutions.' },
+      { label: 'Reconstitution Stock et vision dispo', path: '/stock/reconstruction', accessKey: 'can_stocks', description: 'Lecture de la situation a date "PENURIE R/R"' },
       { label: 'Stocks', path: '/stock', accessKey: 'can_stocks', description: 'Consultation des stocks (FMS et Agences), stocks prévisionnels et visu des dates de disponibilité .' },
     ],
   },
