@@ -907,6 +907,7 @@ export default function MobileAlertes({
             modeUnique="tache"
             labelBouton="Nouvelle tâche"
             pleinEcran
+            demarrageAuto
             userEmail={userEmail}
             userName={userName}
           />

@@ -445,6 +445,7 @@ export default function VoiceReportButtons({
   modeUnique,
   labelBouton,
   pleinEcran,
+  demarrageAuto,
 }: {
   numeroTiers?: string
   clientNom?: string
@@ -455,6 +456,16 @@ export default function VoiceReportButtons({
   modeUnique?: 'tache'
   labelBouton?: string
   pleinEcran?: boolean
+  /** ÉVOLUTION (2026-09-20) : démarre l'écoute dès le montage du composant
+   * (mode `modeUnique="tache"` uniquement), sans attendre un tap sur le
+   * bouton "🎙️ Tâche vocale". Utilisé par la fiche client et le tiroir
+   * "À faire" : l'utilisateur a déjà tapé "Tâche vocale" dans le tiroir de
+   * création, ce second tap était redondant. Le geste utilisateur qui vient
+   * d'ouvrir le composant reste dans la fenêtre d'activation du navigateur
+   * (quelques secondes), ce qui suffit à iOS pour autoriser l'audio et le
+   * micro. Si le navigateur refuse malgré tout, l'écran affiche un gros
+   * bouton "Touche pour démarrer" au lieu de rester vide. */
+  demarrageAuto?: boolean
 }) {
   const [modeActif, setModeActif] = useState<Mode | null>(null)
   const [etape, setEtape] = useState<Etape>('idle')
@@ -1138,7 +1149,39 @@ export default function VoiceReportButtons({
 
   const dernierCompteRendu = comptesRendusExistants && comptesRendusExistants.length > 0 ? comptesRendusExistants[0] : null
 
+  // Démarrage automatique (voir prop demarrageAuto) -- une seule fois par
+  // montage : après un cycle complet (termine -> reinitialiser -> idle) on
+  // ne relance pas tout seul, l'utilisateur retape s'il veut une autre.
+  const demarrageAutoFaitRef = useRef(false)
+  useEffect(() => {
+    if (!demarrageAuto || modeUnique !== 'tache' || demarrageAutoFaitRef.current) return
+    if (etape !== 'idle') return
+    demarrageAutoFaitRef.current = true
+    void lancer('tache')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [demarrageAuto, modeUnique])
+
   if (etape === 'idle' && modeUnique) {
+    // En plein écran avec démarrage auto : si on est encore en idle, c'est
+    // que le lancement automatique a été refusé (micro/audio sans geste)
+    // ou qu'un cycle vient de se terminer -- gros bouton centré, explicite,
+    // plutôt qu'un petit bouton perdu en haut à gauche d'un écran vide.
+    if (pleinEcran && demarrageAuto) {
+      return (
+        <div style={{ position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14, padding: 24 }}>
+          <button
+            type="button"
+            onClick={() => void lancer('tache')}
+            style={{ ...boutonStyle('#A6A181'), flex: 'none', width: '100%', maxWidth: 360, height: 64, fontSize: 17 }}
+          >
+            🎙️ {demarrageAutoFaitRef.current ? 'Touche pour démarrer' : (labelBouton || 'Nouvelle tâche vocale')}
+          </button>
+          <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.45)', textAlign: 'center', maxWidth: 320 }}>
+            L'écoute démarre normalement toute seule. Si ce n'est pas le cas, touche le bouton.
+          </div>
+        </div>
+      )
+    }
     return (
       <button type="button" onClick={() => void lancer('tache')} style={boutonStyle('#A6A181')}>
         🎙️ {labelBouton || 'Nouvelle tâche vocale'}

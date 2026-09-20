@@ -2259,6 +2259,7 @@ function NouvelleTacheSheet({
             modeUnique="tache"
             labelBouton="Tâche vocale"
             pleinEcran
+            demarrageAuto
             userEmail={currentEmail}
             userName={currentName}
           />
