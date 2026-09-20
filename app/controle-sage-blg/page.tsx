@@ -57,6 +57,17 @@
  *    fenêtre flottante (absents de BLG, en plus dans BLG, doublons BLG).
  *  La vue SQL (champs_en_ecart) reste en comparaison stricte.
  *
+ * MàJ (adresse de livraison principale + champs "BLG maître") :
+ *  - Adresse de livraison principale : comparaison intelligente par
+ *    composantes (n° d'adresse, code postal, ville, n° de voie) au lieu du
+ *    libellé : BLG porte une adresse géocodée, SAGE un texte libre avec
+ *    téléphone / BP / CEDEX. Voir comparerAdresseLivraisonPrincipale.
+ *  - Table public.controle_champ_maitre : champs pour lesquels BLG est maître
+ *    (réglage via le bouton "⚙ BLG maître" du pavé Champs contrôlés). Ces
+ *    champs ne sont plus comparés : pastille verte "BLG maître", exclus des
+ *    compteurs, des KPI et des filtres, verts dans l'export Excel.
+ *  - Pastilles sans aucun écart : un ✓ vert remplace les deux compteurs à 0.
+ *
  * Le panneau "Comparaison détaillée" et le mapping manuel restent pilotés
  * entièrement par la table champ_mapping_sage_blg : les nouveaux champs
  * bancaires / attestation / catégorie AF-GAF y apparaissent automatiquement,
@@ -1023,6 +1034,7 @@ function normaliserVille(v: unknown): string {
     .replace(/\bCEDEX\b.*$/, '')
     .replace(/\bSTE\b/g, 'SAINTE')
     .replace(/\bST\b/g, 'SAINT')
+    .replace(/\bS\b/g, 'SUR') // "VILLENEUVE S/ LOT" → "VILLENEUVE SUR LOT"
     .replace(/\s+/g, ' ')
     .trim()
 }
@@ -1124,14 +1136,123 @@ function comparerContacts(sage: string[] | null, blg: string[] | null): Resultat
   return 'ok'
 }
 
-/** Adresse de livraison principale : rouge si ce n'est pas la même adresse
- * (n° d'adresse SAGE différent), sinon comparaison tolérante du libellé. */
+/** Décomposition "intelligente" d'une adresse de livraison telle que remontée
+ * par la vue ("n°<li_no> · <intitulé> · <adresse>") en ses composantes :
+ * numéro de voie, mots significatifs de la voie, code postal, ville.
+ *  - SAGE : adresse saisie librement, "voie [téléphone] CP VILLE [CEDEX]",
+ *    souvent avec un téléphone, "BP/CS xxx", "Tel :" au milieu ;
+ *  - BLG : adresse géocodée "voie, [complément,] CP Ville, Pays".
+ * Les téléphones, BP/CS/TSA, CEDEX et le pays sont ignorés. */
+type AdresseDecomposee = { numeros: string[]; mots: string[]; cp: string | null; ville: string | null; vide: boolean }
+
+const PAYS_ADRESSE = new Set(['FRANCE', 'SPAIN', 'ESPAGNE', 'BELGIQUE', 'BELGIUM', 'SUISSE', 'SWITZERLAND', 'ITALIE', 'ITALY', 'ALLEMAGNE', 'GERMANY', 'PORTUGAL', 'LUXEMBOURG'])
+
+function nettoyerLibelleAdresse(s: string): string {
+  return s
+    // téléphones : 05.46.26.38.22 / 06 78 66 60 29 / +33 6 12 34 56 78 / 0555733533
+    .replace(/(?:\+33\s?|0)\d(?:[\s.\-]?\d{2}){4}\b/g, ' ')
+    .replace(/\bt[ée]l\.?\s*:?/gi, ' ')
+    // boîtes postales et cedex
+    .replace(/\b(?:BP|CS|TSA)\s*\.?\s*\d+\b/gi, ' ')
+    .replace(/\bCEDEX\b\s*\d*/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function decomposerAdresseLivraison(v: unknown, cote: 'sage' | 'blg'): AdresseDecomposee {
+  let s = safeText(v)
+  // Retire le préfixe "n°123 · INTITULÉ · " ajouté par la vue (l'adresse
+  // derrière peut être vide : "n°2785 · AKTO ·").
+  s = s.replace(/^n°[^·]*·[^·]*·\s?/, '')
+  s = nettoyerLibelleAdresse(s)
+
+  let cp: string | null = null
+  let ville: string | null = null
+  let voie = s
+
+  if (cote === 'blg') {
+    // "voie, complément, 64400 Oloron-Sainte-Marie, France"
+    const parts = s.split(',').map((p) => p.trim()).filter((p) => p && !PAYS_ADRESSE.has(normaliserTexte(p)))
+    // Dernier segment commençant par 5 chiffres = "CP Ville" (un n° de voie à
+    // 5 chiffres comme "10001 rue des Platanes" vient toujours avant).
+    let idxCp = -1
+    parts.forEach((p, i) => { if (/^\d{5}\b/.test(p)) idxCp = i })
+    if (idxCp >= 0) {
+      const m = parts[idxCp].match(/^(\d{5})\s*(.*)$/)
+      cp = m ? m[1] : null
+      ville = m && m[2] ? m[2] : null
+      voie = parts.slice(0, idxCp).join(' ')
+    } else if (parts.length >= 2) {
+      ville = parts[parts.length - 1]
+      voie = parts.slice(0, -1).join(' ')
+    } else {
+      voie = parts.join(' ')
+    }
+  } else {
+    // SAGE : dernier code postal à 5 chiffres, la ville est ce qui suit.
+    const re = /\b(\d{5})[A-Z]?\b/g
+    let last: RegExpExecArray | null = null
+    let m: RegExpExecArray | null
+    while ((m = re.exec(s)) !== null) last = m
+    if (last) {
+      cp = last[1]
+      ville = s.slice(last.index + last[0].length).trim() || null
+      voie = s.slice(0, last.index).trim()
+    }
+  }
+
+  const motsVoie = motsAdresse(voie).filter((m) => !PAYS_ADRESSE.has(m))
+  // Tous les n° de voie possibles (le texte libre SAGE en porte souvent
+  // plusieurs : "Espace 21 1 rue…", "43,45 Rue…", "Lot 8 32 bis Route…").
+  const numeros = motsVoie.filter((m) => /^\d+[A-Z]?$/.test(m) && m.length <= 5).map((m) => m.replace(/[A-Z]$/, '')) // "2T" / "2B" ≈ "2"
+  const mots = motsVoie.filter((m) => !/^\d+[A-Z]?$/.test(m) && !['BIS', 'TER', 'ZI', 'ZA', 'ZAC', 'ZC', 'ZAE', 'ZONE', 'ARTISANALE', 'INDUSTRIELLE', 'ACTIVITE', 'ACTIVITES', 'LIEU', 'DIT', 'CHEZ'].includes(m))
+  const vide = mots.length === 0 && numeros.length === 0 && !cp && !ville
+  return { numeros, mots, cp, ville, vide }
+}
+
+/** Adresse de livraison principale — comparaison intelligente.
+ * BLG porte l'adresse géocodée (voie normalisée, parfois différente du
+ * libellé libre SAGE : "ZI de Berlanne Rue d'Ossau" → "2 Rue du Pont Long"),
+ * SAGE un texte libre avec téléphone, BP, CEDEX. On ne compare donc pas à la
+ * virgule près :
+ *  - n° d'adresse SAGE ≠ n° BLG (mainDelivery pointe une autre adresse) → rouge ;
+ *  - localité : même code postal, ou même ville avec CP du même département
+ *    (CEDEX 33701 ↔ 33700, 33323 BEGLES CEDEX ↔ 33130 Bègles) → localité OK ;
+ *    département différent → rouge ;
+ *  - localité OK : vert si le n° de voie concorde (ou absent d'un côté), orange
+ *    si les n° de voie diffèrent ou si la ville diffère à CP identique ;
+ *  - pas de CP d'un des deux côtés : repli sur les mots de la voie (vert si
+ *    un mot significatif commun ou n° de voie identique, rouge sinon). */
 function comparerAdresseLivraisonPrincipale(r: ControleRow): ResultatComparaison {
   const noS = safeText(r.sage_livraison_principale_no)
   const noB = safeText(r.blg_livraison_principale_no)
   if (!noS || !noB) return 'partiel'
   if (noS !== noB) return 'ecart'
-  return comparerAdresse(r.sage_adresse_livraison_principale, r.blg_adresse_livraison_principale)
+
+  const a = decomposerAdresseLivraison(r.sage_adresse_livraison_principale, 'sage')
+  const b = decomposerAdresseLivraison(r.blg_adresse_livraison_principale, 'blg')
+  if (a.vide && b.vide) return 'ok'      // "n°2549 · Clients divers · " ↔ "… · France"
+  if (a.vide || b.vide) return 'partiel'
+
+  const villeOk = a.ville && b.ville ? comparerVille(a.ville, b.ville) === 'ok' : null
+  const numeroOk = a.numeros.length && b.numeros.length ? a.numeros.some((n) => b.numeros.includes(n)) : null
+  const motCommun = a.mots.some((m) => motTrouveDans(m, b.mots)) || b.mots.some((m) => motTrouveDans(m, a.mots))
+
+  if (a.cp && b.cp) {
+    const memeDept = a.cp.slice(0, 2) === b.cp.slice(0, 2)
+    if (a.cp === b.cp) {
+      if (villeOk === false && !motCommun && numeroOk !== true) return 'partiel'
+      return numeroOk === false ? 'partiel' : 'ok'
+    }
+    if (memeDept && villeOk === true) return numeroOk === false ? 'partiel' : 'ok'
+    if (memeDept && (motCommun || numeroOk === true)) return 'partiel'
+    return 'ecart'
+  }
+
+  // Un des deux côtés sans code postal : on se rabat sur la voie.
+  if (villeOk === true) return numeroOk === false ? 'partiel' : 'ok'
+  if (motCommun || numeroOk === true) return 'ok'
+  return villeOk === false ? 'ecart' : 'partiel'
 }
 
 /** Une paire de colonnes SAGE ↔ BLG comparables, avec le numéro de mapping du
@@ -1407,15 +1528,22 @@ function OngletBlg() {
  * ResultatComparaison ne sont pas comptées comme écart :
  *  - 'vide'      : aucune valeur ni côté SAGE ni côté BLG
  *  - 'affichage' : paire affichée sans comparaison (compareStrict=false)
- *  - 'manquant'  : tiers sans correspondance BLG */
-type Evaluation = ResultatComparaison | 'vide' | 'affichage' | 'manquant'
+ *  - 'manquant'  : tiers sans correspondance BLG
+ *  - 'blg_maitre' : BLG est déclaré maître sur ce champ (table
+ *                   controle_champ_maitre) — le champ n'est plus comparé */
+type Evaluation = ResultatComparaison | 'vide' | 'affichage' | 'manquant' | 'blg_maitre'
+
+/** Ligne de public.controle_champ_maitre : champ (clé = sageKey de la paire)
+ * pour lequel un système est maître. Seul 'blg' est exploité à l'écran. */
+type ChampMaitre = { domaine: string; champ_cle: string; systeme_maitre: 'blg' | 'sage'; commentaire: string | null; updated_at: string | null; updated_by: string | null }
 
 function estVide(v: unknown): boolean {
   return v === null || v === undefined || v === '' || (Array.isArray(v) && v.length === 0)
 }
 
-function evaluerPaire(p: PaireExport, r: ControleRow): Evaluation {
+function evaluerPaire(p: PaireExport, r: ControleRow, blgMaitre?: Set<string>): Evaluation {
   if (r.statut_appariement !== 'apparie') return 'manquant'
+  if (blgMaitre && blgMaitre.has(p.sageKey)) return 'blg_maitre'
   const sv = r[p.sageKey]
   const bv = r[p.blgKey]
   const sVide = estVide(sv)
@@ -1439,6 +1567,7 @@ const EVAL_STYLE: Record<Evaluation, { cellule: string; libelle: string; argb: s
   affichage: { cellule: 'bg-orange-50/50 text-[#3A362E]', libelle: 'Affiché, non comparé', argb: COULEUR_NON_COMPARABLE },
   vide: { cellule: 'text-[#B3AD9E]', libelle: 'Vide des deux côtés', argb: COULEUR_NON_COMPARABLE },
   manquant: { cellule: 'text-[#B3AD9E]', libelle: 'Manquant BLG', argb: COULEUR_NON_COMPARABLE },
+  blg_maitre: { cellule: 'bg-emerald-50 text-emerald-800', libelle: 'BLG maître (non comparé)', argb: COULEUR_OK },
 }
 
 function compterEcarts(ev: EvaluationsTiers | undefined) {
@@ -1615,6 +1744,12 @@ function OngletComparaison() {
   const [exportEnCours, setExportEnCours] = useState(false)
   const [showInfoModal, setShowInfoModal] = useState(false)
 
+  // Champs pour lesquels BLG est maître (table controle_champ_maitre) : plus
+  // comparés, pastille verte "BLG maître". Panneau de réglage repliable.
+  const [blgMaitre, setBlgMaitre] = useState<Set<string>>(new Set())
+  const [showMaitre, setShowMaitre] = useState(false)
+  const [maitreMessage, setMaitreMessage] = useState<string | null>(null)
+
   const listRefs = useRef<Record<number, HTMLTableRowElement | null>>({})
   const chargementId = useRef(0)
 
@@ -1623,8 +1758,34 @@ function OngletComparaison() {
     [conditions]
   )
 
-  useEffect(() => { void loadMappingPanel() }, [])
+  useEffect(() => { void loadMappingPanel(); void chargerChampsMaitres() }, [])
   useEffect(() => { void chargerToutes() }, [statutFilter, exclureSommeil, conditionsValides, logiqueConditions]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function chargerChampsMaitres() {
+    const { data, error: err } = await supabase.from('controle_champ_maitre').select('*').eq('domaine', 'client')
+    if (err) { setMaitreMessage(`Champs maîtres non chargés : ${err.message}`); return }
+    setBlgMaitre(new Set(((data || []) as ChampMaitre[]).filter((m) => m.systeme_maitre === 'blg').map((m) => m.champ_cle)))
+  }
+
+  /** Coche / décoche "BLG maître" sur un champ et l'enregistre en base. */
+  async function toggleBlgMaitre(sageKey: string) {
+    const actif = blgMaitre.has(sageKey)
+    const next = new Set(blgMaitre)
+    if (actif) next.delete(sageKey); else next.add(sageKey)
+    setBlgMaitre(next)
+    setMaitreMessage(null)
+    const { data: auth } = await supabase.auth.getUser()
+    const { error: err } = actif
+      ? await supabase.from('controle_champ_maitre').delete().eq('domaine', 'client').eq('champ_cle', sageKey)
+      : await supabase.from('controle_champ_maitre').upsert(
+          { domaine: 'client', champ_cle: sageKey, systeme_maitre: 'blg', updated_at: new Date().toISOString(), updated_by: auth?.user?.email ?? null },
+          { onConflict: 'domaine,champ_cle' },
+        )
+    if (err) {
+      setMaitreMessage(`Enregistrement impossible : ${err.message}`)
+      setBlgMaitre(blgMaitre)
+    }
+  }
 
   function filtreParams() {
     return {
@@ -1709,11 +1870,11 @@ function OngletComparaison() {
     const m = new Map<string, EvaluationsTiers>()
     toutes.forEach((r) => {
       const ev: EvaluationsTiers = {}
-      EXPORT_PAIRES_COMPARAISON.forEach((p) => { ev[p.sageKey] = evaluerPaire(p, r) })
+      EXPORT_PAIRES_COMPARAISON.forEach((p) => { ev[p.sageKey] = evaluerPaire(p, r, blgMaitre) })
       m.set(r.numero_tiers, ev)
     })
     return m
-  }, [toutes])
+  }, [toutes, blgMaitre])
 
   const statsChamps = useMemo(() => {
     const s: Record<string, { rouge: number; orange: number }> = {}
@@ -1837,7 +1998,7 @@ function OngletComparaison() {
       ws.getCell(`A${ligneLegendeIndex}`).value = 'Légende :'
       ws.getCell(`A${ligneLegendeIndex}`).font = { bold: true }
       const legendes: [string, string][] = [
-        ['Valeurs identiques ou équivalentes (règle tolérante du champ)', COULEUR_OK],
+        ['Valeurs identiques ou équivalentes (règle tolérante du champ) — ou champ dont BLG est maître (non comparé)', COULEUR_OK],
         ['Écart réel détecté', COULEUR_ECART],
         ['Non comparable / donnée manquante / écart partiel (ex. SIREN identique mais SIRET différent)', COULEUR_NON_COMPARABLE],
       ]
@@ -1957,6 +2118,14 @@ function OngletComparaison() {
                 {champsSelectionnes.length > 0 && (
                   <button type="button" onClick={() => setChampsSelectionnes([])} className="font-bold text-[#B4761A] hover:underline">Tout désélectionner</button>
                 )}
+                <button
+                  type="button"
+                  onClick={() => setShowMaitre((v) => !v)}
+                  className={`rounded-full border px-2.5 py-1 text-[12px] font-bold transition-colors ${showMaitre ? 'border-emerald-600 bg-emerald-50 text-emerald-700' : 'border-[#E5E1D8] bg-white text-[#3A362E] hover:bg-[#F4F3F0]'}`}
+                  title="Déclarer les champs pour lesquels BLG est maître (ils ne sont plus comparés)"
+                >
+                  ⚙ BLG maître ({blgMaitre.size})
+                </button>
               </div>
             </div>
             {loading ? (
@@ -1966,25 +2135,35 @@ function OngletComparaison() {
                 {EXPORT_PAIRES_COMPARAISON.map((p) => {
                   const s = statsChamps[p.sageKey]
                   const actif = champsSelectionnes.includes(p.sageKey)
+                  const maitre = blgMaitre.has(p.sageKey)
+                  const sansEcart = p.compareStrict && !maitre && s.rouge === 0 && s.orange === 0
                   return (
                     <button
                       key={p.sageKey}
                       type="button"
                       onClick={() => toggleChamp(p.sageKey)}
-                      title={`BLG : ${p.labelBlg}${p.numeroBlg ? ` (n°${p.numeroBlg})` : ''}`}
+                      title={maitre ? `BLG maître — champ non comparé (BLG : ${p.labelBlg})` : `BLG : ${p.labelBlg}${p.numeroBlg ? ` (n°${p.numeroBlg})` : ''}`}
                       className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-[13px] font-semibold transition-colors ${
-                        actif ? 'border-[#B4761A] bg-[#B4761A]/[0.1] text-[#96600F]' : 'border-[#E5E1D8] bg-[#F4F3F0] text-[#3A362E] hover:bg-[#EDEAE1]'
+                        actif
+                          ? 'border-[#B4761A] bg-[#B4761A]/[0.1] text-[#96600F]'
+                          : maitre || sansEcart
+                            ? 'border-emerald-200 bg-emerald-50/60 text-[#3A362E] hover:bg-emerald-50'
+                            : 'border-[#E5E1D8] bg-[#F4F3F0] text-[#3A362E] hover:bg-[#EDEAE1]'
                       }`}
                     >
                       <span className="font-mono text-[11px] text-[#B3AD9E]">{p.numeroSage !== null ? `n°${p.numeroSage}` : '—'}</span>
                       <span>{p.labelSage}</span>
-                      {p.compareStrict ? (
-                        <>
-                          <span className="rounded-full bg-red-100 px-1.5 py-0.5 text-[11px] font-bold text-red-700" title="Écarts réels">{s.rouge}</span>
-                          <span className="rounded-full bg-orange-100 px-1.5 py-0.5 text-[11px] font-bold text-orange-700" title="Partiels / donnée manquante d'un côté">{s.orange}</span>
-                        </>
-                      ) : (
+                      {maitre ? (
+                        <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">BLG maître</span>
+                      ) : !p.compareStrict ? (
                         <span className="rounded-full bg-white px-1.5 py-0.5 text-[10px] font-bold text-[#8A8474]">affichage</span>
+                      ) : sansEcart ? (
+                        <span className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-600 text-[12px] font-black text-white" title="Aucun écart">✓</span>
+                      ) : (
+                        <>
+                          {s.rouge > 0 && <span className="rounded-full bg-red-100 px-1.5 py-0.5 text-[11px] font-bold text-red-700" title="Écarts réels">{s.rouge}</span>}
+                          {s.orange > 0 && <span className="rounded-full bg-orange-100 px-1.5 py-0.5 text-[11px] font-bold text-orange-700" title="Partiels / donnée manquante d'un côté">{s.orange}</span>}
+                        </>
                       )}
                     </button>
                   )
@@ -1992,8 +2171,29 @@ function OngletComparaison() {
               </div>
             )}
             <p className="mt-2 text-[12px] text-[#8A8474]">
-              Rouge = écart réel, orange = donnée manquante d'un côté ou écart partiel. Clique sur un ou plusieurs champs pour ne voir que les tiers concernés, avec les valeurs SAGE / BLG en colonnes.
+              Rouge = écart réel, orange = donnée manquante d'un côté ou écart partiel, ✓ vert = aucun écart, « BLG maître » = champ non comparé. Clique sur un ou plusieurs champs pour ne voir que les tiers concernés, avec les valeurs SAGE / BLG en colonnes.
             </p>
+
+            {showMaitre && (
+              <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50/40 p-3">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="text-[12px] font-bold text-[#111820]">Champs pour lesquels BLG est maître</div>
+                    <p className="text-[12px] text-[#8A8474]">Coche un champ pour le sortir de la comparaison : il passe en vert « BLG maître » partout (pastilles, KPI, fenêtre client, export Excel). Réglage partagé, enregistré en base.</p>
+                  </div>
+                  {maitreMessage && <span className="text-[12px] font-semibold text-red-600">{maitreMessage}</span>}
+                </div>
+                <div className="grid gap-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                  {EXPORT_PAIRES_COMPARAISON.filter((p) => p.compareStrict).map((p) => (
+                    <label key={p.sageKey} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-[13px] hover:bg-white">
+                      <input type="checkbox" checked={blgMaitre.has(p.sageKey)} onChange={() => void toggleBlgMaitre(p.sageKey)} className="accent-emerald-600" />
+                      <span className="font-mono text-[11px] text-[#B3AD9E]">{p.numeroSage !== null ? `n°${p.numeroSage}` : '—'}</span>
+                      <span className="font-semibold text-[#3A362E]">{p.labelSage}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
           </section>
 
           <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
