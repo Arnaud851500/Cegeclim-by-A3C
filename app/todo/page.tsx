@@ -395,7 +395,7 @@ export default function TodoPage() {
     setAssignees(Array.from(uniqueByEmail.values()))
 
     const members = await loadReferentials()
-    await loadRows(email, displayName, admin, members)
+    await loadRows(email, displayName, members)
 
     setLoading(false)
   }
@@ -414,29 +414,27 @@ export default function TodoPage() {
     return members
   }
 
-  async function loadRows(emailParam?: string, displayNameParam?: string, adminParam?: boolean, membersParam?: TeamMember[]) {
+  async function loadRows(emailParam?: string, displayNameParam?: string, membersParam?: TeamMember[]) {
     const email = emailParam || currentEmail
     const displayName = displayNameParam || currentDisplayName
-    const admin = adminParam ?? isAdmin
     const members = membersParam ?? teamMembers
 
     if (!email) return
 
-    let query = supabase.from('todo_actions').select('*')
+    // Visibilité, identique pour tous les profils (le profil Administrateur ne
+    // donne que le paramétrage) : ce que j'ai créé, ce qui m'est confié, et les
+    // tâches des projets / équipes dont je suis membre.
+    const assignedToFilters = assigneeIdentityValues(email, displayName).map(
+      (value) => `assigned_to.eq.${escapeSupabaseValue(value)}`
+    )
+    const myTeamIds = members.filter((m) => m.email === email).map((m) => m.team_id)
+    const orParts = [`created_by_email.eq.${escapeSupabaseValue(email)}`, ...assignedToFilters]
+    if (myTeamIds.length > 0) orParts.push(`team_id.in.(${myTeamIds.join(',')})`)
 
-    if (!admin) {
-      // Visibilité : ce que j'ai créé, ce qui m'est confié, et les tâches des
-      // projets / équipes dont je suis membre.
-      const assignedToFilters = assigneeIdentityValues(email, displayName).map(
-        (value) => `assigned_to.eq.${escapeSupabaseValue(value)}`
-      )
-      const myTeamIds = members.filter((m) => m.email === email).map((m) => m.team_id)
-      const orParts = [`created_by_email.eq.${escapeSupabaseValue(email)}`, ...assignedToFilters]
-      if (myTeamIds.length > 0) orParts.push(`team_id.in.(${myTeamIds.join(',')})`)
-      query = query.or(orParts.join(','))
-    }
-
-    const { data, error } = await query
+    const { data, error } = await supabase
+      .from('todo_actions')
+      .select('*')
+      .or(orParts.join(','))
       .order('status', { ascending: true })
       .order('due_date', { ascending: true, nullsFirst: false })
       .order('sort_order', { ascending: true })
@@ -505,12 +503,10 @@ export default function TodoPage() {
   /* Filtres et tri                                                    */
   /* ---------------------------------------------------------------- */
 
+  /** Même règle que la requête : créée par moi, confiée à moi, ou équipe dont je suis membre. */
   const visibleRows = useMemo(
-    () =>
-      isAdmin
-        ? rows
-        : rows.filter((row) => isCreatedByMe(row) || isAssignedToMe(row) || (row.team_id ? myTeamIds.has(row.team_id) : false)),
-    [rows, isAdmin, isCreatedByMe, isAssignedToMe, myTeamIds]
+    () => rows.filter((row) => isCreatedByMe(row) || isAssignedToMe(row) || (row.team_id ? myTeamIds.has(row.team_id) : false)),
+    [rows, isCreatedByMe, isAssignedToMe, myTeamIds]
   )
 
   const filteredRows = useMemo(() => {
@@ -1149,7 +1145,9 @@ export default function TodoPage() {
           currentEmail={currentEmail}
           onClose={() => setSettingsOpen(false)}
           onChanged={async () => {
-            await loadReferentials()
+            // Les membres d'une équipe ont pu changer : la visibilité des tâches aussi.
+            const members = await loadReferentials()
+            await loadRows(undefined, undefined, members)
           }}
           notify={(tone, text) => setToast({ tone, text })}
         />
