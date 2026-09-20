@@ -239,10 +239,13 @@ const TABLES: TableConfig[] = [
       { db: 'code_naf', label: 'Code NAF' },
       { db: 'payeur', label: 'Payeur' },
       { db: 'representant', label: 'Représentant' },
-      { db: 'centrale_achat', label: 'Centrale d achat' },
+      { db: 'centrale_achat', label: "Centrale d'achat", aliases: ['Centrale d achat', 'Centrale achat'] },
       { db: 'categorie_tarifaire', label: 'Catégorie tarifaire' },
       { db: 'encours_autorise', label: 'Encours autorisé', type: 'number' },
-      { db: 'assurance_credit', label: 'Assurance crédit', type: 'number' },
+      // ATTENTION : l'export SAGE porte DEUX colonnes « Assurance crédit » (montant,
+      // minuscule) et « Assurance Crédit » (texte libre, majuscule). Elles sont
+      // distinguées par correspondance EXACTE de l'en-tête dans buildHeaderMap.
+      { db: 'assurance_credit', label: 'Assurance crédit', type: 'number', aliases: ['Assurance credit (montant)', 'Montant assurance crédit'] },
       { db: 'depot_rattachement', label: 'Dépôt rattachement' },
       { db: 'code_affaire', label: 'Code affaire' },
       { db: 'devise', label: 'Devise' },
@@ -267,6 +270,7 @@ const TABLES: TableConfig[] = [
       { db: 'convention_cee', label: 'Convention CEE' },
       { db: 'indicateur_technique', label: 'Indicateur Technique' },
       { db: 'indicateur_etude', label: 'Indicateur Etude' },
+      { db: 'indicateur_commerce', label: 'Indicateur Commerce' },
       { db: 'client_pv', label: 'Client PV', aliases: ['Client PV'] },
       { db: 'attestation_capacite', label: 'Attestation de capacité' },
       { db: 'capacite_expiration', label: 'Capacité expiration', type: 'date' },
@@ -277,7 +281,7 @@ const TABLES: TableConfig[] = [
       { db: 'openbee', label: 'OPENBEE' },
       { db: 'logiciels', label: 'Logiciels' },
       { db: 'frais_facturation', label: 'Frais facturation' },
-      { db: 'assurance_credit_2', label: 'Assurance Crédit' },
+      { db: 'assurance_credit_2', label: 'Assurance Crédit', aliases: ['Assurance credit (texte)', 'Assurance crédit commentaire'] },
       { db: 'routage_promo', label: 'Routage promo' },
       { db: 'facture_email', label: 'Facture @' },
       { db: 'particularite_logistique', label: 'Particularité Logistique' },
@@ -287,7 +291,7 @@ const TABLES: TableConfig[] = [
       { db: 'categorie_af_gaf', label: 'Categorie AF GAF' },
       { db: 'email_routage', label: '@ routage' },
       { db: 'client_cfluide', label: 'Client CFluide' },
-      { db: 'tarifs_exception', label: 'Tarifs d exception' },
+      { db: 'tarifs_exception', label: "Tarifs d'exception", aliases: ['Tarifs d exception', 'Tarifs exception'] },
       { db: 'agence_rattachement', label: 'Agence de rattachement' },
       { db: 'gyutaki5', label: 'GYUTAKI5' },
       { db: 'g5pm_g10', label: 'G5PM G10' },
@@ -3360,26 +3364,45 @@ export default function ImportsParametragePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedConfig.key])
 
+  /** Associe chaque en-tête Excel à une colonne de la config.
+   * 1) correspondance EXACTE (libellé / alias tels quels, espaces rognés) —
+   *    indispensable quand deux en-têtes ne diffèrent que par la casse ou
+   *    l'accent, ex. Tiers SAGE : « Assurance crédit » (montant) et
+   *    « Assurance Crédit » (texte) qui se normalisent toutes deux en
+   *    `assurance_credit` ;
+   * 2) sinon alias EXTRA_HEADER_ALIASES, puis libellé / db / alias normalisés
+   *    (insensible à la casse, aux accents et à la ponctuation).
+   * Deux en-têtes ne peuvent jamais alimenter la même colonne : le second est
+   * ignoré et signalé dans les colonnes ignorées. */
   function buildHeaderMap(headers: string[], config: TableConfig) {
+    const columnByExactLabel = new Map<string, ColumnConfig>()
     const columnByNormalizedLabel = new Map<string, ColumnConfig>()
     const columnByDb = new Map<string, ColumnConfig>()
 
     for (const col of config.columns) {
-      columnByNormalizedLabel.set(normalizeHeader(col.label), col)
-      columnByNormalizedLabel.set(normalizeHeader(col.db), col)
-      for (const alias of col.aliases || []) {
-        columnByNormalizedLabel.set(normalizeHeader(alias), col)
-      }
+      columnByExactLabel.set(col.label.trim(), col)
+      for (const alias of col.aliases || []) columnByExactLabel.set(alias.trim(), col)
+      // Normalisé : le premier enregistré gagne, on n'écrase pas une colonne
+      // déjà associée (sinon « Assurance Crédit » volait la clé de « Assurance crédit »).
+      const register = (key: string) => { if (!columnByNormalizedLabel.has(key)) columnByNormalizedLabel.set(key, col) }
+      register(normalizeHeader(col.label))
+      register(normalizeHeader(col.db))
+      for (const alias of col.aliases || []) register(normalizeHeader(alias))
       columnByDb.set(col.db, col)
     }
 
     const aliases = EXTRA_HEADER_ALIASES[config.key] || {}
+    const dbUsed = new Set<string>()
 
     return headers.reduce<Record<string, ColumnConfig>>((acc, header) => {
+      const exact = columnByExactLabel.get(String(header || '').trim())
       const normalized = normalizeHeader(header)
       const aliasDb = aliases[normalized]
-      const match = aliasDb ? columnByDb.get(aliasDb) : columnByNormalizedLabel.get(normalized)
-      if (match) acc[header] = match
+      const match = exact || (aliasDb ? columnByDb.get(aliasDb) : columnByNormalizedLabel.get(normalized))
+      if (match && !dbUsed.has(match.db)) {
+        acc[header] = match
+        dbUsed.add(match.db)
+      }
       return acc
     }, {})
   }
