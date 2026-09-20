@@ -446,6 +446,7 @@ export default function VoiceReportButtons({
   labelBouton,
   pleinEcran,
   demarrageAuto,
+  onTermine,
 }: {
   numeroTiers?: string
   clientNom?: string
@@ -466,6 +467,12 @@ export default function VoiceReportButtons({
    * micro. Si le navigateur refuse malgré tout, l'écran affiche un gros
    * bouton "Touche pour démarrer" au lieu de rester vide. */
   demarrageAuto?: boolean
+  /** ÉVOLUTION (2026-09-20) : appelé quand le flux est terminé et que le
+   * parent doit refermer son écran plein écran (fiche client, tiroir
+   * "À faire") -- sur "Fermer" du récapitulatif, ou automatiquement en
+   * mode "sans retour visuel". Sans cette prop, le composant repasse
+   * simplement en idle comme avant. */
+  onTermine?: () => void
 }) {
   const [modeActif, setModeActif] = useState<Mode | null>(null)
   const [etape, setEtape] = useState<Etape>('idle')
@@ -478,15 +485,36 @@ export default function VoiceReportButtons({
   const [voixPreferee, setVoixPreferee] = useState('nova')
   const [vitesseLecture, setVitesseLecture] = useState(1.15)
   const [annonceCourte, setAnnonceCourte] = useState(false)
+  // ÉVOLUTION (2026-09-20) : préférences "sans validation" (voir MobileHome
+  // > Voix & lecture). validation_auto : le résumé / les tâches sont
+  // enregistrés directement, sans question "C'est correct ?" -- les tâches
+  // sans échéance détectée reçoivent l'échéance du lendemain, le retour
+  // audio est "Compte rendu et N tâches enregistrés", et l'écran affiche
+  // le récapitulatif en grand jusqu'à "Fermer". retour_visuel_masque (ne
+  // s'applique que si validation_auto) : pas de récapitulatif du tout,
+  // juste l'annonce audio puis retour à l'écran d'origine (onTermine).
+  const [validationAuto, setValidationAuto] = useState(false)
+  const [retourVisuelMasque, setRetourVisuelMasque] = useState(false)
+  // Miroirs en ref : le flux vocal est une longue chaîne de promesses
+  // démarrée par lancer() (parfois dès le montage, avant que les
+  // préférences soient chargées) -- les fonctions de cette chaîne liraient
+  // sinon la valeur figée au moment du démarrage. On lit toujours la
+  // valeur courante via ces refs.
+  const validationAutoRef = useRef(false)
+  const retourVisuelMasqueRef = useRef(false)
+  validationAutoRef.current = validationAuto
+  retourVisuelMasqueRef.current = retourVisuelMasque
   useEffect(() => {
     let cancelled = false
     async function charger() {
       if (!userEmail) return
-      const { data } = await supabase.from('vision_tci_preferences').select('voix_assistant, vitesse_lecture, annonce_courte').eq('user_email', userEmail).maybeSingle()
+      const { data } = await supabase.from('vision_tci_preferences').select('voix_assistant, vitesse_lecture, annonce_courte, validation_auto, retour_visuel_masque').eq('user_email', userEmail).maybeSingle()
       if (cancelled) return
       setVoixPreferee(String(data?.voix_assistant || 'nova'))
       setVitesseLecture(data?.vitesse_lecture !== null && data?.vitesse_lecture !== undefined ? Number(data.vitesse_lecture) : 1.15)
       setAnnonceCourte(Boolean(data?.annonce_courte))
+      setValidationAuto(Boolean(data?.validation_auto))
+      setRetourVisuelMasque(Boolean(data?.retour_visuel_masque))
     }
     void charger()
     return () => { cancelled = true }
@@ -867,6 +895,13 @@ export default function VoiceReportButtons({
       setSpokenAffiche(data.spoken_summary || '')
       setTachesAffichees(data.taches || [])
 
+      // ÉVOLUTION (2026-09-20) : mode "sans validation" -- ni question
+      // d'échéance, ni "C'est correct ?" : on enregistre tout de suite.
+      if (validationAutoRef.current) {
+        await enregistrerSansValidation()
+        return
+      }
+
       await completerEcheancesManquantes()
       if (annulerRef.current) return
 
@@ -933,6 +968,88 @@ export default function VoiceReportButtons({
     })
   }
 
+  /** ÉVOLUTION (2026-09-20) : enregistrement direct, sans validation.
+   * 1. Les tâches sans échéance détectée sont datées au lendemain (l'agent
+   *    ne pose plus la question).
+   * 2. Envoi immédiat à /voice-report/confirm avec reponse_manuelle=oui
+   *    (même route et mêmes champs que le bouton "✅ Oui, c'est correct").
+   * 3. Retour audio court : "Compte rendu et N tâches enregistrés" (ou
+   *    "N tâches enregistrées" en mode tâche seule).
+   * 4. Selon retour_visuel_masque : récapitulatif en grand jusqu'à
+   *    "Fermer", ou retour immédiat à l'écran d'origine. */
+  async function enregistrerSansValidation() {
+    const resultat = dernierResultatRef.current
+    if (!resultat) return
+
+    const demain = new Date()
+    demain.setDate(demain.getDate() + 1)
+    const echeanceDemain = isoDepuisDate(demain)
+    const taches = resultat.taches.map((t) => (t.echeance ? t : { ...t, echeance: echeanceDemain }))
+    dernierResultatRef.current = { ...resultat, taches }
+    setTachesAffichees(taches)
+
+    confirmationEnvoyeeRef.current = true
+    setEtape('traitement_confirmation')
+
+    const form = new FormData()
+    form.append('reponse_manuelle', 'oui')
+    form.append('mode', modeActif as Mode)
+    form.append('numero_tiers', numeroTiers)
+    if (rdvActivityId) form.append('rdv_activity_id', rdvActivityId)
+    if (rdvLabel) form.append('rdv_label', rdvLabel)
+    if (compteRenduIdCible) form.append('compte_rendu_id', compteRenduIdCible)
+    form.append('user_email', userEmail)
+    form.append('user_name', userName)
+    form.append('transcript_original', resultat.transcript || '')
+    form.append('resume', resultat.resume || '')
+    form.append('taches', JSON.stringify(taches))
+
+    const res = await fetch('/api/atelier-ai/voice-report/confirm', { method: 'POST', body: form })
+    const data = await parserReponseJson(res)
+    if (annulerRef.current) return
+    if (!res.ok) throw new Error(data?.error || 'Erreur de confirmation.')
+    if (data.confirme === false || data.confirme === null) {
+      // Le serveur n'a pas enregistré (cas non attendu avec reponse_manuelle
+      // = oui) : on retombe sur le flux classique pour ne rien perdre.
+      confirmationEnvoyeeRef.current = false
+      setEtape('resume_pret')
+      await jouerTexte(data.message || resultat.resume)
+      if (annulerRef.current) return
+      await ecouterConfirmation()
+      return
+    }
+
+    const n = taches.length
+    const tachesTexte = n === 0 ? '' : `${n} tâche${n > 1 ? 's' : ''}`
+    const message =
+      modeActif === 'compte_rendu'
+        ? n === 0 ? 'Compte rendu enregistré.' : `Compte rendu et ${tachesTexte} enregistrés.`
+        : n === 0 ? 'Aucune tâche détectée.' : `${tachesTexte} enregistrée${n > 1 ? 's' : ''}.`
+
+    libererVerrou()
+    setEtape('termine')
+    setMessageFinal(message)
+    await jouerTexte(message)
+    if (annulerRef.current) return
+
+    if (modeActif === 'compte_rendu') {
+      await chargerComptesRendus()
+    }
+
+    if (retourVisuelMasqueRef.current) {
+      fermerRecapitulatif()
+    }
+    // Sinon : le récapitulatif reste affiché en grand, l'utilisateur ferme
+    // lui-même (bouton "Fermer" ou tap hors du panneau).
+  }
+
+  /** Fin de flux : repasse en idle et prévient le parent (qui referme son
+   * écran plein écran s'il en a un). */
+  function fermerRecapitulatif() {
+    reinitialiser()
+    onTermine?.()
+  }
+
   async function completerEcheancesManquantes() {
     const taches = dernierResultatRef.current?.taches || []
     for (let i = 0; i < taches.length; i++) {
@@ -996,7 +1113,7 @@ export default function VoiceReportButtons({
     }
 
     if (pleinEcran) {
-      reinitialiser()
+      fermerRecapitulatif()
     }
   }
 
@@ -1189,6 +1306,9 @@ export default function VoiceReportButtons({
     )
   }
 
+  // Récapitulatif "en grand" : mode sans validation, flux terminé.
+  const recapGrand = validationAuto && etape === 'termine'
+
   const corps = (
     <>
       {etape !== 'idle' && etape !== 'termine' && etape !== 'erreur' && (
@@ -1284,7 +1404,7 @@ export default function VoiceReportButtons({
         <GrandBoutonEcoute texte="Je t’écoute — appuie pour arrêter" onClick={() => void stopperEtEnvoyer()} />
       )}
 
-      {etape === 'traitement' && <StatutLigne texte="Analyse en cours…" />}
+      {etape === 'traitement' && <StatutLigne texte={validationAuto ? 'Analyse en cours… (enregistrement sans validation)' : 'Analyse en cours…'} />}
 
       {etape === 'echeance_question' && <StatutLigne texte="L’agent parle…" />}
       {etape === 'echeance_ecoute' && (
@@ -1299,20 +1419,20 @@ export default function VoiceReportButtons({
       {etape === 'echeance_traitement' && <StatutLigne texte="Interprétation de la date…" />}
 
       {resumeAffiche && (etape === 'resume_pret' || etape === 'enregistrement_confirmation' || etape === 'traitement_confirmation' || etape === 'termine') && (
-        <div style={{ borderRadius: 10, border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(255,255,255,0.05)', padding: '12px 14px' }}>
-          <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 6 }}>
-            Résumé
+        <div style={{ borderRadius: 10, border: `1px solid ${recapGrand ? 'rgba(63,145,66,0.35)' : 'rgba(255,255,255,0.12)'}`, background: recapGrand ? 'rgba(63,145,66,0.08)' : 'rgba(255,255,255,0.05)', padding: recapGrand ? '16px 16px' : '12px 14px' }}>
+          <div style={{ fontSize: recapGrand ? 12 : 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 6 }}>
+            {recapGrand && modeActif === 'compte_rendu' ? 'Compte rendu enregistré' : 'Résumé'}
           </div>
-          <div style={{ fontSize: 13.5, color: '#fff', lineHeight: 1.55 }}>{resumeAffiche}</div>
+          <div style={{ fontSize: recapGrand ? 17 : 13.5, color: '#fff', lineHeight: 1.55 }}>{resumeAffiche}</div>
 
           {tachesAffichees.length > 0 && (
-            <div style={{ marginTop: 10 }}>
-              <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 6 }}>
-                {tachesAffichees.length} tâche{tachesAffichees.length > 1 ? 's' : ''} détectée{tachesAffichees.length > 1 ? 's' : ''}
+            <div style={{ marginTop: recapGrand ? 16 : 10 }}>
+              <div style={{ fontSize: recapGrand ? 12 : 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 6 }}>
+                {tachesAffichees.length} tâche{tachesAffichees.length > 1 ? 's' : ''} {recapGrand ? 'enregistrée' : 'détectée'}{tachesAffichees.length > 1 ? 's' : ''}
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: recapGrand ? 8 : 5 }}>
                 {tachesAffichees.map((t, i) => (
-                  <div key={i} style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.8)' }}>
+                  <div key={i} style={{ fontSize: recapGrand ? 16 : 12.5, color: recapGrand ? '#fff' : 'rgba(255,255,255,0.8)', lineHeight: 1.45 }}>
                     • {t.description}{t.echeance ? ` (${new Date(t.echeance).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' })})` : ''}
                   </div>
                 ))}
@@ -1389,13 +1509,23 @@ export default function VoiceReportButtons({
           }}
         >
           {etape === 'termine' ? '✅ ' : '⚠️ '}{messageFinal}
-          <button
-            type="button"
-            onClick={reinitialiser}
-            style={{ display: 'block', marginTop: 8, background: 'none', border: 'none', color: 'rgba(255,255,255,0.6)', fontSize: 12, textDecoration: 'underline', cursor: 'pointer', padding: 0 }}
-          >
-            Fermer
-          </button>
+          {recapGrand ? (
+            <button
+              type="button"
+              onClick={fermerRecapitulatif}
+              style={{ display: 'block', width: '100%', marginTop: 12, padding: '14px', borderRadius: 12, border: 'none', background: '#A6A181', color: '#141A26', fontSize: 15, fontWeight: 700, cursor: 'pointer' }}
+            >
+              Fermer
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={etape === 'termine' ? fermerRecapitulatif : reinitialiser}
+              style={{ display: 'block', marginTop: 8, background: 'none', border: 'none', color: 'rgba(255,255,255,0.6)', fontSize: 12, textDecoration: 'underline', cursor: 'pointer', padding: 0 }}
+            >
+              Fermer
+            </button>
+          )}
         </div>
       )}
 </>
@@ -1405,7 +1535,7 @@ export default function VoiceReportButtons({
     return (
       <div
         style={{ position: 'fixed', inset: 0, zIndex: 230, background: 'rgba(6,10,18,0.7)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
-        onClick={etape === 'termine' || etape === 'erreur' ? reinitialiser : undefined}
+        onClick={etape === 'termine' ? fermerRecapitulatif : etape === 'erreur' ? reinitialiser : undefined}
       >
         <div
           style={{
