@@ -114,7 +114,7 @@ export default function StockGroupesPage() {
   const [groupes, setGroupes] = useState<Groupe[]>([])
   const [groupeId, setGroupeId] = useState<string>('')
   const [refsAdHoc, setRefsAdHoc] = useState<string[]>([])
-  const [horizonMois, setHorizonMois] = useState(3)
+  const [horizonMois, setHorizonMois] = useState(4)
   const [data, setData] = useState<Dispo | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -316,10 +316,7 @@ export default function StockGroupesPage() {
                 {editeur.id && groupe && <button type="button" className="sgBtn" onClick={() => supprimerGroupe(groupe)} style={{ ...styles.ghostBtn, marginLeft: 'auto', borderColor: 'rgba(193,104,60,0.5)', color: '#e0a685' }}>Supprimer</button>}
               </div>
             </div>
-            <label style={styles.field}>
-              <span style={styles.fieldLabel}>Références — une par ligne, ou séparées par virgule / espace ({parseReferences(editeur.refs).length} détectée{parseReferences(editeur.refs).length > 1 ? 's' : ''})</span>
-              <textarea value={editeur.refs} onChange={(e) => setEditeur({ ...editeur, refs: e.target.value })} rows={6} style={{ ...styles.input, height: 'auto', fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 400, resize: 'vertical' }} />
-            </label>
+            <SelecteurReferences refs={parseReferences(editeur.refs)} onChange={(refs) => setEditeur({ ...editeur, refs: refs.join('\n') })} />
           </div>
         </div>
       )}
@@ -546,8 +543,140 @@ export default function StockGroupesPage() {
   )
 }
 
+// ── Sélecteur de références (recherche + cases à cocher) ──────────────────
+type ArticleTrouve = { reference_article: string; designation: string | null; famille: string | null; stock_disponible: number; stock_reel: number; stock_a_terme: number }
+
+/** Recherche par début de référence ou désignation (RPC
+ * search_stock_articles_mobile, même source que l'écran Stock articles) ;
+ * chaque résultat se coche pour entrer dans le groupe. Les références déjà
+ * retenues sont listées avec leur stock et se retirent d'un clic. Un mode
+ * « coller une liste » reste disponible pour les gros groupes. */
+function SelecteurReferences({ refs, onChange }: { refs: string[]; onChange: (refs: string[]) => void }) {
+  const [query, setQuery] = useState('')
+  const [resultats, setResultats] = useState<ArticleTrouve[]>([])
+  const [loading, setLoading] = useState(false)
+  const [modeListe, setModeListe] = useState(false)
+  const [texteListe, setTexteListe] = useState('')
+  const [infos, setInfos] = useState<Record<string, ArticleTrouve>>({})
+
+  // Recherche avec léger délai de frappe.
+  useEffect(() => {
+    const q = query.trim()
+    if (q.length < 2) { setResultats([]); return }
+    let cancelled = false
+    setLoading(true)
+    const t = window.setTimeout(async () => {
+      const { data } = await supabase.rpc('search_stock_articles_mobile', { p_query: q, p_references: null, p_famille_macro: null, p_famille: null, p_depot: null, p_disponible_only: null, p_limit: 40 })
+      if (cancelled) return
+      const rows = ((data || []) as any[]).map((r) => ({ reference_article: String(r.reference_article), designation: r.designation ?? null, famille: r.famille ?? null, stock_disponible: toNumber(r.stock_disponible), stock_reel: toNumber(r.stock_reel), stock_a_terme: toNumber(r.stock_a_terme) }))
+      // Une ligne par référence (le RPC peut renvoyer un dépôt par ligne).
+      const uniques = Array.from(new Map(rows.map((r) => [r.reference_article, r])).values())
+      setResultats(uniques)
+      setInfos((prev) => ({ ...prev, ...Object.fromEntries(uniques.map((r) => [r.reference_article, r])) }))
+      setLoading(false)
+    }, 250)
+    return () => { cancelled = true; window.clearTimeout(t) }
+  }, [query])
+
+  // Désignation et stock des références déjà retenues (ouverture d'un groupe existant).
+  useEffect(() => {
+    const manquantes = refs.filter((r) => !infos[r])
+    if (manquantes.length === 0) return
+    let cancelled = false
+    void (async () => {
+      const { data } = await supabase.rpc('search_stock_articles_mobile', { p_query: null, p_references: manquantes, p_famille_macro: null, p_famille: null, p_depot: null, p_disponible_only: null, p_limit: 300 })
+      if (cancelled) return
+      const rows = ((data || []) as any[]).map((r) => ({ reference_article: String(r.reference_article), designation: r.designation ?? null, famille: r.famille ?? null, stock_disponible: toNumber(r.stock_disponible), stock_reel: toNumber(r.stock_reel), stock_a_terme: toNumber(r.stock_a_terme) }))
+      setInfos((prev) => ({ ...prev, ...Object.fromEntries(rows.map((r) => [r.reference_article, r])) }))
+    })()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refs.join('|')])
+
+  const set = new Set(refs)
+  function basculer(ref: string) { onChange(set.has(ref) ? refs.filter((r) => r !== ref) : [...refs, ref]) }
+  function toutCocher() { onChange(Array.from(new Set([...refs, ...resultats.map((r) => r.reference_article)]))) }
+  function appliquerListe() { onChange(Array.from(new Set([...refs, ...parseReferences(texteListe)]))); setTexteListe(''); setModeListe(false) }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
+        <span style={styles.fieldLabel}>Références du groupe ({refs.length})</span>
+        <button type="button" onClick={() => setModeListe((v) => !v)} style={styles.linkBtn}>{modeListe ? 'Revenir à la recherche' : 'Coller une liste'}</button>
+      </div>
+
+      {modeListe ? (
+        <>
+          <textarea value={texteListe} onChange={(e) => setTexteListe(e.target.value)} rows={5} placeholder={'RAK-DJ35RHAE\nRAK-DJ50RHAE\n…'} style={{ ...styles.input, height: 'auto', fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 400, resize: 'vertical' }} />
+          <div><button type="button" className="sgBtn" onClick={appliquerListe} disabled={parseReferences(texteListe).length === 0} style={styles.ghostBtn}>Ajouter {parseReferences(texteListe).length} référence{parseReferences(texteListe).length > 1 ? 's' : ''}</button></div>
+        </>
+      ) : (
+        <>
+          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Début de référence ou désignation (ex. RAK-DJ, Airhome 400, Yutampo)" style={{ ...styles.input, fontWeight: 400 }} />
+          {query.trim().length >= 2 && (
+            <div style={styles.pickerList}>
+              <div style={styles.pickerHead}>
+                <span style={styles.tdSub}>{loading ? 'Recherche…' : `${resultats.length} résultat${resultats.length > 1 ? 's' : ''}${resultats.length >= 40 ? ' (affine la recherche)' : ''}`}</span>
+                {resultats.length > 1 && <button type="button" onClick={toutCocher} style={styles.linkBtn}>Tout cocher</button>}
+              </div>
+              {resultats.map((r) => {
+                const coche = set.has(r.reference_article)
+                return (
+                  <label key={r.reference_article} style={{ ...styles.pickerRow, background: coche ? 'rgba(166,161,129,0.14)' : undefined }}>
+                    <input type="checkbox" checked={coche} onChange={() => basculer(r.reference_article)} style={{ accentColor: '#A6A181', width: 16, height: 16, flexShrink: 0 }} />
+                    <span style={{ minWidth: 0, flex: 1 }}>
+                      <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontWeight: 700, color: '#fff', fontSize: 13 }}>{r.reference_article}</span>
+                      <span style={{ display: 'block', fontSize: 11.5, color: 'rgba(255,255,255,0.55)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.designation || '—'}{r.famille ? ` · ${r.famille}` : ''}</span>
+                    </span>
+                    <span style={styles.pickerStats}>
+                      <span style={{ ...styles.pickerStat, color: couleurAtp(r.stock_disponible) }}>{formatNumber(r.stock_disponible)}<small>dispo</small></span>
+                      <span style={styles.pickerStat}>{formatNumber(r.stock_reel)}<small>réel</small></span>
+                      <span style={{ ...styles.pickerStat, color: r.stock_a_terme < 0 ? '#e0a685' : undefined }}>{formatNumber(r.stock_a_terme)}<small>à terme</small></span>
+                    </span>
+                  </label>
+                )
+              })}
+              {!loading && resultats.length === 0 && <div style={{ ...styles.tdSub, padding: 10 }}>Aucune référence trouvée.</div>}
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Références retenues */}
+      <div style={{ ...styles.pickerList, maxHeight: 220 }}>
+        {refs.length === 0 && <div style={{ ...styles.tdSub, padding: 10 }}>Aucune référence dans le groupe. Cherche une référence ci-dessus et coche-la.</div>}
+        {refs.map((ref) => {
+          const i = infos[ref]
+          return (
+            <div key={ref} style={styles.pickerRow}>
+              <button type="button" onClick={() => basculer(ref)} title="Retirer du groupe" style={{ ...styles.linkBtn, margin: 0, padding: '0 4px', textDecoration: 'none', color: '#e0a685', fontSize: 14 }}>✕</button>
+              <span style={{ minWidth: 0, flex: 1 }}>
+                <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontWeight: 700, color: '#fff', fontSize: 13 }}>{ref}</span>
+                <span style={{ display: 'block', fontSize: 11.5, color: 'rgba(255,255,255,0.55)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{i ? (i.designation || '—') : 'référence inconnue du stock'}</span>
+              </span>
+              {i && (
+                <span style={styles.pickerStats}>
+                  <span style={{ ...styles.pickerStat, color: couleurAtp(i.stock_disponible) }}>{formatNumber(i.stock_disponible)}<small>dispo</small></span>
+                  <span style={styles.pickerStat}>{formatNumber(i.stock_reel)}<small>réel</small></span>
+                  <span style={{ ...styles.pickerStat, color: i.stock_a_terme < 0 ? '#e0a685' : undefined }}>{formatNumber(i.stock_a_terme)}<small>à terme</small></span>
+                </span>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 // ── Styles ────────────────────────────────────────────────────────────────
 const styles: Record<string, React.CSSProperties> = {
+  linkBtn: { background: 'none', border: 'none', padding: '2px 0', fontSize: 12, color: 'rgba(255,255,255,0.55)', textDecoration: 'underline', textUnderlineOffset: 3, cursor: 'pointer', fontFamily: 'inherit' },
+  pickerList: { maxHeight: 300, overflowY: 'auto', borderRadius: 12, border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.03)', display: 'flex', flexDirection: 'column' },
+  pickerHead: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 10px', borderBottom: '1px solid rgba(255,255,255,0.08)', position: 'sticky', top: 0, background: '#101A2E', zIndex: 1 },
+  pickerRow: { display: 'flex', alignItems: 'center', gap: 10, padding: '7px 10px', borderBottom: '1px solid rgba(255,255,255,0.06)', cursor: 'pointer' },
+  pickerStats: { display: 'flex', gap: 10, flexShrink: 0 },
+  pickerStat: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 700, color: '#fff', lineHeight: 1.1 },
   page: { maxWidth: 1700, margin: '0 auto', padding: '10px 4px 40px', color: '#F5F3EC', fontFamily: 'var(--font-body)', display: 'flex', flexDirection: 'column', gap: 14 },
   header: { display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' },
   kicker: { fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.24em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.5)' },
