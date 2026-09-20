@@ -181,6 +181,13 @@ function formatPct(value: number | null | undefined): string {
   return `${new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(value)} %`
 }
 
+/** RÈGLE B (2026-09-20) : vrai si la fiche SAGE n'a pas de représentant ou porte
+ * « NON AFFECTE » -- même règle que public.tiers_non_affecte côté base. */
+function clientPartage(representant: string | null | undefined): boolean {
+  const texte = String(representant ?? '').trim().toUpperCase()
+  return texte === '' || ['NON AFFECTE', 'NON AFFECTÉ', 'NULL', '—', '-'].includes(texte)
+}
+
 function formatDateFr(value: string | null | undefined): string {
   if (!value) return '—'
   const d = new Date(value + 'T00:00:00')
@@ -1049,7 +1056,18 @@ function VisionClientPageInner() {
             <h1>{identity.intitule} <span className="numeroTag">{identity.numero}</span></h1>
             <button type="button" className="newRdvBtn" onClick={() => setNouveauRdvOuvert(true)}>+ Nouveau RDV</button>
           </div>
-          <p>{identity.representant || 'Représentant non renseigné'} · {identity.agence || 'Agence non renseignée'}</p>
+          <p>
+            {identity.representant || 'Représentant non renseigné'} · {identity.agence || 'Agence non renseignée'}
+            {/* RÈGLE B (2026-09-20) : fiche SAGE sans représentant ou NON AFFECTE
+                -> le CA est rattaché aux représentants portés par les pièces ;
+                un utilisateur au périmètre restreint ne voit ici que ses
+                propres pièces (RPC get_vision_client_*). */}
+            {clientPartage(identity.representant) && (
+              <span className="partageTag" title="Client partagé : le CA est rattaché au représentant de chaque pièce de vente. Avec un périmètre collaborateur, seules vos pièces sont affichées.">
+                Client partagé · CA par représentant des pièces
+              </span>
+            )}
+          </p>
         </div>
 
         {/* Recherche pour basculer sur un autre client sans repasser par la SMC. */}
@@ -1451,6 +1469,7 @@ const pageStyles = `
   h1 { margin: 2px 0 4px; font-size: 26px; font-weight: 900; letter-spacing: -0.02em; }
   .titleRow { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
   .titleRow h1 { margin: 0; }
+  .partageTag { display: inline-block; margin-left: 10px; font-size: 12px; font-weight: 600; color: #7A5EA8; background: #ede9fe; border: 1px solid #ddd6fe; border-radius: 999px; padding: 1px 9px; vertical-align: middle; cursor: help; }
   .numeroTag { font-family: monospace; font-size: 15px; font-weight: 700; color: #64748b; background: #e2e8f0; border-radius: 6px; padding: 2px 8px; margin-left: 8px; vertical-align: middle; }
   .clientHeader p { margin: 0; color: #64748b; font-size: 13px; font-weight: 700; }
   .blgLink { align-self: center; background: #0f172a; color: white; border-radius: 10px; padding: 10px 16px; font-size: 13px; font-weight: 800; text-decoration: none; white-space: nowrap; }

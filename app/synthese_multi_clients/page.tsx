@@ -38,6 +38,28 @@ type ObjectiveType = 'texte' | 'nombre' | 'montant' | 'date' | 'action'
 type ObjectiveDomain = 'Remarque' | 'Objectif' | 'QRC' | 'Initiative' | 'Visite'
 type RowKind = 'total' | 'client' | 'month'
 
+// RÈGLE B (2026-09-20) : clients « partagés » (fiche SAGE sans représentant ou
+// NON AFFECTE). Le cache porte, en plus des lignes client/month (totaux du
+// client, collaborateur NON AFFECTE), des lignes « part » :
+//   client_part / month_part     -> part d'un collaborateur (collaborateur = code)
+//   client_agence / month_agence -> part d'une agence (collaborateur = NON AFFECTE)
+// Affichage : « Tous les collaborateurs » = une seule ligne NON AFFECTE ;
+// collaborateur ou agence choisi = une seule ligne, limitée à sa part.
+type CacheRowKind = RowKind | 'client_part' | 'month_part' | 'client_agence' | 'month_agence'
+type PartKind = 'collab' | 'agence' | null
+
+function baseRowKind(kind: CacheRowKind): RowKind {
+  if (kind === 'client_part' || kind === 'client_agence') return 'client'
+  if (kind === 'month_part' || kind === 'month_agence') return 'month'
+  return kind
+}
+
+function partKindOf(kind: CacheRowKind): PartKind {
+  if (kind === 'client_part' || kind === 'month_part') return 'collab'
+  if (kind === 'client_agence' || kind === 'month_agence') return 'agence'
+  return null
+}
+
 type TiersRow = {
   numero: string
   intitule: string
@@ -92,7 +114,7 @@ type ObjectiveRow = {
 
 type CacheDbRow = {
   annee: number
-  row_kind: RowKind
+  row_kind: CacheRowKind
   mois: number | null
   numero_tiers: string
   intitule_tiers: string | null
@@ -149,6 +171,9 @@ type CacheDbRow = {
 type SummaryRow = {
   id: string
   kind: RowKind
+  /** RÈGLE B : 'collab' / 'agence' si la ligne est la part d'un collaborateur
+   * ou d'une agence sur un client partagé (fiche NON AFFECTE), null sinon. */
+  partKind?: PartKind
   level: number
   updatedAt?: string
   collaborateur: string
@@ -1530,10 +1555,16 @@ function macroNullablePayload(value: any) {
 
 function cacheRowToSummary(row: CacheDbRow): SummaryRow {
   const month = row.mois ? safeNumber(row.mois) : null
+  // RÈGLE B : les lignes « part » (client_part / client_agence / month_*)
+  // sont traitées exactement comme des lignes client / month ; seul partKind
+  // garde la trace de leur nature.
+  const kind = baseRowKind(row.row_kind)
+  const partKind = partKindOf(row.row_kind)
   return {
     id: month ? `${row.numero_tiers}-m${month}` : row.numero_tiers,
-    kind: row.row_kind,
-    level: row.row_kind === 'month' ? 1 : 0,
+    kind,
+    partKind,
+    level: kind === 'month' ? 1 : 0,
     updatedAt: safeText(row.updated_at),
     collaborateur: safeText(row.collaborateur),
     agence: safeText(row.agence_collaborateur),
@@ -1560,9 +1591,9 @@ function cacheRowToSummary(row: CacheDbRow): SummaryRow {
     encoursCommandeNByMacro: macroNumberPayload(row.encours_commande_n_by_macro),
     encoursCommandeNByType: encoursTypePayload(row.encours_commande_n_by_type),
     devisYtdN: safeNumber(row.devis_ytd_n),
-    devisYtdN1: row.row_kind === 'month' ? safeNumber(row.devis_n1) : safeNumber(row.devis_ytd_n1),
+    devisYtdN1: kind === 'month' ? safeNumber(row.devis_n1) : safeNumber(row.devis_ytd_n1),
     devisYtdNByMacro: macroNumberPayload(row.devis_ytd_n_by_macro),
-    devisYtdN1ByMacro: row.row_kind === 'month' ? macroNumberPayload(row.devis_n1_by_macro) : macroNumberPayload(row.devis_ytd_n1_by_macro),
+    devisYtdN1ByMacro: kind === 'month' ? macroNumberPayload(row.devis_n1_by_macro) : macroNumberPayload(row.devis_ytd_n1_by_macro),
     caYtdN: safeNumber(row.ca_ytd_n),
     // FIX (2026-08) : valeur brute (non gelée) telle que renvoyée par le
     // cache -- c'est celle-ci qui alimente le pavé "CA réel {N}" du
@@ -1572,7 +1603,7 @@ function cacheRowToSummary(row: CacheDbRow): SummaryRow {
     caYtdNComplet: safeNumber(row.ca_ytd_n),
     caYtdN1: safeNumber(row.ca_ytd_n1),
     caYtdNByMacro: macroNumberPayload(row.ca_ytd_n_by_macro),
-    caYtdN1ByMacro: row.row_kind === 'month' ? macroNumberPayload(row.ca_n1_by_macro) : macroNumberPayload(row.ca_ytd_n1_by_macro || row.ca_n1_by_macro),
+    caYtdN1ByMacro: kind === 'month' ? macroNumberPayload(row.ca_n1_by_macro) : macroNumberPayload(row.ca_ytd_n1_by_macro || row.ca_n1_by_macro),
     margePctYtdN: row.marge_pct_ytd_n === null || row.marge_pct_ytd_n === undefined ? null : safeNumber(row.marge_pct_ytd_n),
     margeYtdNValue: safeNumber(row.marge_ytd_n_value),
     margeYtdN1Value: safeNumber(row.marge_ytd_n1_value),
@@ -1675,12 +1706,17 @@ function applyObjectiveOverrides(row: SummaryRow, objectiveMap: Map<string, Obje
   const garantie = objectiveNumber(objectiveMap, row.numero, 'QRC', 'Garantie')
   const visiteRealise = VISITES.reduce((count, rubrique) => count + (objectiveDate(objectiveMap, row.numero, 'Visite', rubrique) ? 1 : 0), 0)
 
+  // RÈGLE B : l'objectif de CA est saisi pour le client entier ; sur la part
+  // d'un collaborateur ou d'une agence (client partagé) il n'est pas réparti,
+  // donc non affiché (0) et le ratio réalisé/objectif n'est pas calculé.
+  const estPart = Boolean(row.partKind)
+
   return {
     ...row,
-    objectifCa: row.kind === 'month' ? objectifCa / 12 : objectifCa,
+    objectifCa: estPart ? 0 : row.kind === 'month' ? objectifCa / 12 : objectifCa,
     potentiel: objectiveNumber(objectiveMap, row.numero, 'Objectif', 'POTENTIEL'),
     contratBfa: objectiveNumber(objectiveMap, row.numero, 'Objectif', 'Contrat\nBFA'),
-    realiseObjectif: ratio(row.caYtdN, objectifProrata),
+    realiseObjectif: estPart ? null : ratio(row.caYtdN, objectifProrata),
     qrcN1: objectiveNumber(objectiveMap, row.numero, 'QRC', `QRC ${N - 1}`) || objectiveNumber(objectiveMap, row.numero, 'QRC', 'QRC N-1'),
     frequenceCommande,
     niveauExclusivite,
@@ -1910,8 +1946,28 @@ function buildCollaborateurAgencyMaps(rawCollaborateurs: Record<string, any>[]) 
 }
 
 function applyRefAgence(row: SummaryRow, collaborateurAgence: Record<string, string>): SummaryRow {
+  // RÈGLE B : la part d'une agence porte collaborateur = NON AFFECTE ; son
+  // agence vient du cache et ne doit pas être écrasée par le référentiel.
+  if (row.partKind === 'agence') return row
   const agence = collaborateurAgence[normalize(row.collaborateur)]
   return agence ? { ...row, agence } : row
+}
+
+/** RÈGLE B : ne garde, pour chaque client, que les lignes mensuelles de la
+ * même nature que sa ligne client (part collaborateur, part agence ou ligne
+ * complète), et pour la même part. */
+function filterMonthRowsForClients(monthRows: SummaryRow[], clientRows: SummaryRow[], selectedAgence: string) {
+  const byNumero = new Map<string, SummaryRow>()
+  clientRows.forEach((row) => { if (row.kind === 'client') byNumero.set(safeText(row.numero), row) })
+  return monthRows.filter((monthRow) => {
+    const client = byNumero.get(safeText(monthRow.numero))
+    if (!client) return (monthRow.partKind ?? null) === null
+    const partKind = client.partKind ?? null
+    if ((monthRow.partKind ?? null) !== partKind) return false
+    if (partKind === 'collab') return normalize(monthRow.collaborateur) === normalize(client.collaborateur)
+    if (partKind === 'agence') return normalize(monthRow.agence) === normalize(selectedAgence || client.agence)
+    return true
+  })
 }
 
 async function fetchCacheSelectionOptions() {
@@ -1963,35 +2019,59 @@ async function fetchSelectionOptions(): Promise<SelectionOptions> {
   }
 }
 
+// RÈGLE B (2026-09-20) :
+//  - collaborateur choisi (ou périmètre restreint en « Tous ») : lignes
+//    'client' (représentant de la fiche) + 'client_part' (part sur un client
+//    partagé) pour ce(s) collaborateur(s) -> une seule ligne par client ;
+//  - « Tous les collaborateurs » sans restriction : lignes 'client' seules
+//    -> les clients partagés apparaissent une fois, sous NON AFFECTE ;
+//  - agence choisie : lignes 'client' des collaborateurs de l'agence +
+//    lignes 'client_agence' de l'agence -> une seule ligne par client.
 async function fetchCacheClientRows(
   mode: ModeSelection,
   selected: string,
   collaborateursForAgence: string[] = [],
   forcedCollaborateurs: string[] = []
 ) {
+  if (mode === 'agence') {
+    const [clientRows, agenceRows] = await Promise.all([
+      fetchAll('synthese_multi_clients_cache', '*', (query) => {
+        let q = query.eq('annee', N).eq('row_kind', 'client')
+        q = collaborateursForAgence.length ? q.in('collaborateur', collaborateursForAgence) : q.eq('agence_collaborateur', selected)
+        return q.order('collaborateur', { ascending: true }).order('numero_tiers', { ascending: true })
+      }) as Promise<CacheDbRow[]>,
+      fetchAll('synthese_multi_clients_cache', '*', (query) => query
+        .eq('annee', N)
+        .eq('row_kind', 'client_agence')
+        .eq('agence_collaborateur', selected)
+        .order('numero_tiers', { ascending: true })
+      ) as Promise<CacheDbRow[]>,
+    ])
+    const dejaVus = new Set(clientRows.map((row) => safeText(row.numero_tiers)))
+    return [...clientRows, ...agenceRows.filter((row) => !dejaVus.has(safeText(row.numero_tiers)))]
+  }
+
   return fetchAll('synthese_multi_clients_cache', '*', (query) => {
-    let q = query.eq('annee', N).eq('row_kind', 'client')
+    let q = query.eq('annee', N)
 
-    if (mode === 'collaborateur') {
-      if (selected !== ALL_COLLABORATEURS_VALUE) {
-        q = q.eq('collaborateur', selected)
-      } else if (forcedCollaborateurs.length > 0) {
-        q = q.in('collaborateur', forcedCollaborateurs)
-      }
-    }
-
-    if (mode === 'agence') {
-      q = collaborateursForAgence.length ? q.in('collaborateur', collaborateursForAgence) : q.eq('agence_collaborateur', selected)
+    if (selected !== ALL_COLLABORATEURS_VALUE) {
+      q = q.in('row_kind', ['client', 'client_part']).eq('collaborateur', selected)
+    } else if (forcedCollaborateurs.length > 0) {
+      q = q.in('row_kind', ['client', 'client_part']).in('collaborateur', forcedCollaborateurs)
+    } else {
+      q = q.eq('row_kind', 'client')
     }
 
     return q.order('collaborateur', { ascending: true }).order('numero_tiers', { ascending: true })
   }) as Promise<CacheDbRow[]>
 }
 
+const MONTH_ROW_KINDS: CacheRowKind[] = ['month', 'month_part', 'month_agence']
+
 async function fetchCacheMonthRows(numero: string) {
   return fetchAll('synthese_multi_clients_cache', '*', (query) => query
     .eq('annee', N)
-    .eq('row_kind', 'month')
+    .in('row_kind', MONTH_ROW_KINDS)
     .eq('numero_tiers', numero)
     .order('mois', { ascending: true })
   ) as Promise<CacheDbRow[]>
@@ -2003,7 +2083,7 @@ async function fetchCacheMonthRowsForNumeros(numeros: string[]) {
   for (const group of chunk(uniqueNumeros, 250)) {
     const part = await fetchAll('synthese_multi_clients_cache', '*', (query) => query
       .eq('annee', N)
-      .eq('row_kind', 'month')
+      .in('row_kind', MONTH_ROW_KINDS)
       .in('numero_tiers', group)
       .order('numero_tiers', { ascending: true })
       .order('mois', { ascending: true })
@@ -2549,9 +2629,15 @@ export default function SyntheseMultiClientsPage() {
           codes.length ? fetchCacheMonthRowsForNumeros(codes) : Promise.resolve([]),
           codes.length ? fetchAlertesConfigForTiers(codes) : Promise.resolve([]),
         ])
-        const monthSummaries = rawMonthRows
-          .map(cacheRowToSummary)
-          .map((row) => applyRefAgence(row, selectionOptions.collaborateurAgence))
+        // RÈGLE B : ne garder que les lignes mensuelles de la même part que
+        // la ligne client (part collaborateur, part agence ou ligne complète).
+        const monthSummaries = filterMonthRowsForClients(
+          rawMonthRows
+            .map(cacheRowToSummary)
+            .map((row) => applyRefAgence(row, selectionOptions.collaborateurAgence)),
+          rows,
+          mode === 'agence' ? selected : ''
+        )
         const monthRowsGrouped = groupMonthSummariesByNumero(monthSummaries)
         const rowsWithCorrectN1Comparison = rows.map((row) => recomputeClientN1ComparisonFromMonths(row, monthRowsGrouped[row.numero] || []))
         if (!alive) return
@@ -2879,7 +2965,12 @@ export default function SyntheseMultiClientsPage() {
     if (monthRowsByNumero[numero] || loadingMonths.has(numero)) return
     setLoadingMonths((prev) => new Set(prev).add(numero))
     try {
-      const rows = (await fetchCacheMonthRows(numero)).map(cacheRowToSummary).map((row) => applyRefAgence(row, selectionOptions.collaborateurAgence))
+      const clientRow = cacheRows.find((row) => row.kind === 'client' && row.numero === numero)
+      const rows = filterMonthRowsForClients(
+        (await fetchCacheMonthRows(numero)).map(cacheRowToSummary).map((row) => applyRefAgence(row, selectionOptions.collaborateurAgence)),
+        clientRow ? [clientRow] : [],
+        mode === 'agence' ? selected : ''
+      )
       setMonthRowsByNumero((prev) => ({ ...prev, [numero]: rows }))
       setCacheRows((prev) => prev.map((row) => row.numero === numero ? recomputeClientN1ComparisonFromMonths(row, rows) : row))
     } catch (err: any) {
@@ -3395,6 +3486,16 @@ export default function SyntheseMultiClientsPage() {
                       {col.key === 'numero' && row.kind === 'client' ? (
                         <button type="button" className="expandBtn" onClick={() => toggleExpanded(row.numero)}>{expanded.has(row.numero) ? '−' : '+'}</button>
                       ) : null}
+                      {col.key === 'numero' && row.kind === 'client' && row.partKind ? (
+                        <span
+                          className="partageIcon"
+                          title={row.partKind === 'collab'
+                            ? `Client partagé (fiche SAGE « NON AFFECTE ») : montants limités aux pièces de ${row.collaborateur}`
+                            : `Client partagé (fiche SAGE « NON AFFECTE ») : montants limités aux pièces de l'agence ${row.agence}`}
+                        >
+                          ⇄
+                        </span>
+                      ) : null}
                       {retardClient ? (
                         <button
                           type="button"
@@ -3855,6 +3956,7 @@ export default function SyntheseMultiClientsPage() {
         .groupDynamismeClient { background: #eff6ff !important; }
         .groupFréquencevisite, .groupVisite { background: #fff7ed !important; }
         .expandBtn { padding: 0; margin-right: 3px; width: 17px; height: 17px; border-radius: 4px; font-size: 11px; line-height: 12px; display: inline-flex; align-items: center; justify-content: center; }
+        .partageIcon { background: #ede9fe; color: #7A5EA8; border: 1px solid #ddd6fe; border-radius: 4px; width: 17px; height: 17px; margin-right: 3px; font-size: 11px; line-height: 1; display: inline-flex; align-items: center; justify-content: center; vertical-align: middle; cursor: help; }
         .editInput, .editSelect { width: 100%; height: 20px; padding: 1px 3px; border-radius: 3px; font-size: 11px; background: #ffffff; }
         .saving { opacity: .55; }
 
@@ -4033,3 +4135,4 @@ function EditableCell({ type, value, saving, onSave }: { type: ObjectiveType; va
     />
   )
 }
+ 

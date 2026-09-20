@@ -161,10 +161,30 @@ async function fetchAllCache(select: string, perimetre: Perimetre, apply?: (q: a
   return output
 }
 
+// RÈGLE B (2026-09-20) : clients « partagés » (fiche SAGE sans représentant ou
+// NON AFFECTE). Le cache porte, en plus des lignes row_kind='client' (totaux
+// du client, collaborateur NON AFFECTE), des lignes « part » :
+//   client_part   -> part d'un collaborateur (collaborateur = code, montants = ses pièces)
+//   client_agence -> part d'une agence (collaborateur = NON AFFECTE)
+// Un utilisateur au périmètre collaborateur voit ses parts ; sans filtre
+// collaborateur, un administrateur voit la ligne unique NON AFFECTE.
+type PartKind = 'collab' | 'agence' | null
+type CacheRowKind = 'client' | 'client_part' | 'client_agence'
+
+function partKindOf(rowKind: unknown): PartKind {
+  if (rowKind === 'client_part') return 'collab'
+  if (rowKind === 'client_agence') return 'agence'
+  return null
+}
+
 type ClientRow = {
   numero: string
   nom: string
   collaborateur: string
+  /** Agence du collaborateur (ou de la part agence) telle que portée par le cache. */
+  agence: string
+  /** RÈGLE B : nature de la ligne (part collaborateur / part agence / ligne complète). */
+  partKind: PartKind
   dateCreationIso: string
   caYtdN: number
   caYtdN1: number
@@ -424,9 +444,25 @@ export default function MobileClients({
    * collaborateur. Sert de base aux stats, à la recherche et aux alertes. */
   const clientsVisibles = useMemo(() => {
     if (!allClients) return null
-    if (!collaborateurFiltre) return allClients
-    return allClients.filter((c) => collaborateurMatches(c.collaborateur, collaborateurFiltre))
-  }, [allClients, collaborateurFiltre])
+    const perimetreCollab = (perimetre?.collaborateurs.length || 0) > 0
+    const perimetreAgenceSeule = !perimetreCollab && (perimetre?.agences.length || 0) > 0
+    // RÈGLE B -- une seule ligne par client :
+    //  - filtre collaborateur actif : lignes complètes ou parts collaborateur
+    //    de ce collaborateur (la ligne complète d'un client partagé porte
+    //    NON AFFECTE et ne matche pas) ;
+    //  - sans filtre : lignes complètes, plus les parts du périmètre
+    //    (parts collaborateur pour un périmètre collaborateur, parts agence
+    //    pour un périmètre agence seule) ; un administrateur ne voit que la
+    //    ligne complète NON AFFECTE.
+    if (collaborateurFiltre) {
+      return allClients.filter((c) => c.partKind !== 'agence' && collaborateurMatches(c.collaborateur, collaborateurFiltre))
+    }
+    return allClients.filter((c) => {
+      if (c.partKind === null) return true
+      if (c.partKind === 'collab') return perimetreCollab
+      return perimetreAgenceSeule
+    })
+  }, [allClients, collaborateurFiltre, perimetre])
 
   const alertesClientsRows = useMemo(() => {
     if (!alertesClientsBrutes || !clientsVisibles) return null
@@ -480,10 +516,18 @@ export default function MobileClients({
 
     async function load() {
       try {
+        // RÈGLE B : lignes client + parts collaborateur (toujours, pour le
+        // filtre « Collaborateur ») + parts agence si le périmètre est une
+        // agence sans collaborateur. La visibilité fine est faite dans
+        // clientsVisibles.
+        const p = perimetre as Perimetre
+        const rowKinds: CacheRowKind[] = p.agences.length > 0 && p.collaborateurs.length === 0
+          ? ['client', 'client_part', 'client_agence']
+          : ['client', 'client_part']
         const rows = await fetchAllCache(
-          'numero_tiers,intitule_tiers,collaborateur,date_creation,ca_n1,ca_ytd_n,ca_ytd_n1,devis_ytd_n,marge_pct_ytd_n,marge_ytd_n1_value',
-          perimetre as Perimetre,
-          (q) => q.eq('annee', N).eq('row_kind', 'client'),
+          'numero_tiers,intitule_tiers,collaborateur,agence_collaborateur,row_kind,date_creation,ca_n1,ca_ytd_n,ca_ytd_n1,devis_ytd_n,marge_pct_ytd_n,marge_ytd_n1_value',
+          p,
+          (q) => q.eq('annee', N).in('row_kind', rowKinds),
         )
         if (cancelled) return
 
@@ -497,6 +541,8 @@ export default function MobileClients({
             numero: safeText(row.numero_tiers),
             nom: safeText(row.intitule_tiers),
             collaborateur: safeText(row.collaborateur),
+            agence: safeText(row.agence_collaborateur),
+            partKind: partKindOf(row.row_kind),
             dateCreationIso: normalizeDateIso(row.date_creation),
             caYtdN,
             caYtdN1,
@@ -542,13 +588,24 @@ export default function MobileClients({
       .slice(0, 40)
   }, [clientsVisibles, search])
 
+  /** RÈGLE B : retrouve la ligne d'un client en privilégiant celle affichée
+   * (part du collaborateur / de l'agence), sinon la ligne complète. */
+  function trouverClient(numero: string): ClientRow | undefined {
+    const visible = clientsVisibles?.find((c) => c.numero === numero)
+    if (visible) return visible
+    const complete = allClients?.find((c) => c.numero === numero && c.partKind === null)
+    return complete || allClients?.find((c) => c.numero === numero)
+  }
+
   useEffect(() => {
     if (!cibleNumero || !allClients) return
-    const trouve = allClients.find((c) => c.numero === cibleNumero)
+    const trouve = trouverClient(cibleNumero)
     const client: ClientRow = trouve || {
       numero: cibleNumero,
       nom: cibleNom || cibleNumero,
       collaborateur: '',
+      agence: '',
+      partKind: null,
       dateCreationIso: '',
       caYtdN: 0,
       caYtdN1: 0,
@@ -567,9 +624,9 @@ export default function MobileClients({
   /** Ouvre la fiche client depuis une ligne "retard" (client éventuellement
    * absent du cache, ex. comptes "Clients DIVERS" -> fiche minimale). */
   function ouvrirClientDepuisRetard(r: RetardPaiementClient) {
-    const clientTrouve = allClients?.find((c) => c.numero === r.numero_tiers)
+    const clientTrouve = trouverClient(r.numero_tiers)
     const client: ClientRow = clientTrouve || {
-      numero: r.numero_tiers, nom: r.nom_tiers || r.numero_tiers, collaborateur: r.collaborateur, dateCreationIso: '',
+      numero: r.numero_tiers, nom: r.nom_tiers || r.numero_tiers, collaborateur: r.collaborateur, agence: '', partKind: null, dateCreationIso: '',
       caYtdN: 0, caYtdN1: 0, caN1: 0, ca12m: 0, band: CA_PROFILE_BANDS[0],
       devisYtdN: 0, margePctYtdN: null, margePctYtdN1: null,
     }
@@ -628,12 +685,13 @@ export default function MobileClients({
           .not('status', 'in', '("Terminé","Annulé")')
           .order('due_date', { ascending: true })
           .limit(30),
-        supabase
-          .from('synthese_multi_clients_cache')
-          .select('mois,devis_n1')
-          .eq('annee', N)
-          .eq('row_kind', 'month')
-          .eq('numero_tiers', client.numero),
+        // RÈGLE B : détail mensuel de la même part que la ligne ouverte
+        // (month_part du collaborateur, month_agence de l'agence, sinon month).
+        (client.partKind === 'collab'
+          ? supabase.from('synthese_multi_clients_cache').select('mois,devis_n1').eq('annee', N).eq('row_kind', 'month_part').eq('numero_tiers', client.numero).eq('collaborateur', client.collaborateur)
+          : client.partKind === 'agence'
+            ? supabase.from('synthese_multi_clients_cache').select('mois,devis_n1').eq('annee', N).eq('row_kind', 'month_agence').eq('numero_tiers', client.numero).eq('agence_collaborateur', client.agence)
+            : supabase.from('synthese_multi_clients_cache').select('mois,devis_n1').eq('annee', N).eq('row_kind', 'month').eq('numero_tiers', client.numero)),
         supabase.rpc('get_client_flux_ytd', { p_numero_tiers: client.numero, p_date_debut: ys, p_date_fin: today }),
         supabase.rpc('get_client_flux_ytd', { p_numero_tiers: client.numero, p_date_debut: ysN1, p_date_fin: sameDayN1 }),
         supabase
@@ -1028,7 +1086,7 @@ export default function MobileClients({
               (alertesClientsRows || [])
                 .filter((r) => r.typeAlerte === alertesClientsOuvertes)
                 .map((r) => {
-                  const clientTrouve = allClients?.find((c) => c.numero === r.numeroTiers)
+                  const clientTrouve = trouverClient(r.numeroTiers)
                   return (
                     <div
                       key={r.id}
@@ -1040,7 +1098,7 @@ export default function MobileClients({
                           onClick={() => {
                             setAlertesClientsOuvertes(null)
                             const client: ClientRow = clientTrouve || {
-                              numero: r.numeroTiers, nom: r.numeroTiers, collaborateur: '', dateCreationIso: '',
+                              numero: r.numeroTiers, nom: r.numeroTiers, collaborateur: '', agence: '', partKind: null, dateCreationIso: '',
                               caYtdN: 0, caYtdN1: 0, caN1: 0, ca12m: 0, band: CA_PROFILE_BANDS[0],
                               devisYtdN: 0, margePctYtdN: null, margePctYtdN1: null,
                             }
@@ -1187,6 +1245,7 @@ export default function MobileClients({
                 <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>
                   N° {c.numero}
                   {c.collaborateur && <span style={{ color: 'rgba(166,161,129,0.9)' }}> ({formatCollaborateurCourt(c.collaborateur)})</span>}
+                  {c.partKind && <span style={{ color: '#b9a7e6' }}> · partagé</span>}
                 </div>
               </button>
             ))
@@ -1713,6 +1772,11 @@ function ClientDetailScreen({
           <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>
             N° {client.numero}
             {client.collaborateur && <span style={{ color: 'rgba(166,161,129,0.9)' }}> ({formatCollaborateurCourt(client.collaborateur)})</span>}
+            {client.partKind && (
+              <span style={{ color: '#b9a7e6' }}>
+                {' '}· client partagé : montants limités {client.partKind === 'collab' ? `aux pièces de ${formatCollaborateurCourt(client.collaborateur)}` : `à l'agence ${client.agence}`}
+              </span>
+            )}
           </div>
         </div>
 
@@ -2262,6 +2326,10 @@ function NouvelleTacheSheet({
             demarrageAuto
             userEmail={currentEmail}
             userName={currentName}
+            // ÉVOLUTION (2026-09-20) : à la fin du flux vocal (récapitulatif
+            // fermé, ou mode "sans retour visuel"), on referme la dictée ET
+            // le tiroir de création : retour direct sur la fiche client.
+            onTermine={() => { setModeVocal(false); onClose() }}
           />
           <button
             type="button"
