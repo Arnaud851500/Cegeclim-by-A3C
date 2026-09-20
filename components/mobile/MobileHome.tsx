@@ -140,17 +140,30 @@ export default function MobileHome({
   const [voixSauvegardeEnCours, setVoixSauvegardeEnCours] = useState(false)
   const [vitesseActuelle, setVitesseActuelle] = useState(1.15)
   const [annonceCourte, setAnnonceCourte] = useState(false)
+  // ÉVOLUTION (2026-09-20) : deux options "sans validation" pour les flux
+  // vocaux (compte-rendu de visite ET création de tâches à la voix),
+  // lues par VoiceReportButtons :
+  //  - validation_auto : plus de question "C'est correct ?" ni de
+  //    question d'échéance (tâche sans date -> lendemain) ; le
+  //    récapitulatif s'affiche en grand, l'utilisateur ferme simplement.
+  //  - retour_visuel_masque (dépend de la précédente) : pas de
+  //    récapitulatif, seule l'annonce courte est jouée puis retour à
+  //    l'écran d'origine.
+  const [validationAuto, setValidationAuto] = useState(false)
+  const [retourVisuelMasque, setRetourVisuelMasque] = useState(false)
   const [preferencesSauvegardeEnCours, setPreferencesSauvegardeEnCours] = useState(false)
 
   useEffect(() => {
     let cancelled = false
     async function charger() {
       if (!email) return
-      const { data } = await supabase.from('vision_tci_preferences').select('voix_assistant, vitesse_lecture, annonce_courte').eq('user_email', email).maybeSingle()
+      const { data } = await supabase.from('vision_tci_preferences').select('voix_assistant, vitesse_lecture, annonce_courte, validation_auto, retour_visuel_masque').eq('user_email', email).maybeSingle()
       if (cancelled) return
       setVoixActuelle(String(data?.voix_assistant || 'nova'))
       setVitesseActuelle(data?.vitesse_lecture !== null && data?.vitesse_lecture !== undefined ? Number(data.vitesse_lecture) : 1.15)
       setAnnonceCourte(Boolean(data?.annonce_courte))
+      setValidationAuto(Boolean(data?.validation_auto))
+      setRetourVisuelMasque(Boolean(data?.retour_visuel_masque))
     }
     void charger()
     return () => { cancelled = true }
@@ -182,6 +195,32 @@ export default function MobileHome({
     setPreferencesSauvegardeEnCours(true)
     try {
       await supabase.from('vision_tci_preferences').upsert({ user_email: email, annonce_courte: next, updated_at: new Date().toISOString() })
+    } finally {
+      setPreferencesSauvegardeEnCours(false)
+    }
+  }
+
+  async function basculerValidationAuto() {
+    const next = !validationAuto
+    setValidationAuto(next)
+    // Désactiver la validation auto désactive aussi l'option dépendante.
+    const nextMasque = next ? retourVisuelMasque : false
+    setRetourVisuelMasque(nextMasque)
+    setPreferencesSauvegardeEnCours(true)
+    try {
+      await supabase.from('vision_tci_preferences').upsert({ user_email: email, validation_auto: next, retour_visuel_masque: nextMasque, updated_at: new Date().toISOString() })
+    } finally {
+      setPreferencesSauvegardeEnCours(false)
+    }
+  }
+
+  async function basculerRetourVisuelMasque() {
+    if (!validationAuto) return
+    const next = !retourVisuelMasque
+    setRetourVisuelMasque(next)
+    setPreferencesSauvegardeEnCours(true)
+    try {
+      await supabase.from('vision_tci_preferences').upsert({ user_email: email, retour_visuel_masque: next, updated_at: new Date().toISOString() })
     } finally {
       setPreferencesSauvegardeEnCours(false)
     }
@@ -353,6 +392,24 @@ export default function MobileHome({
               </span>
             </button>
 
+            {/* ÉVOLUTION (2026-09-20) : enregistrement sans validation. */}
+            <OptionBascule
+              titre="Enregistrer sans validation"
+              description="Compte-rendu de visite et tâches dictées enregistrés directement, sans « C'est correct ? ». Tâche sans échéance : datée au lendemain. Le récapitulatif reste affiché, il suffit de fermer."
+              actif={validationAuto}
+              disabled={preferencesSauvegardeEnCours}
+              onClick={() => void basculerValidationAuto()}
+            />
+            <OptionBascule
+              titre="Sans retour visuel"
+              description={validationAuto
+                ? 'Pas de récapitulatif à l\'écran : seule l\'annonce audio est jouée, puis retour direct à la fiche client ou au menu.'
+                : 'Disponible uniquement avec « Enregistrer sans validation ».'}
+              actif={retourVisuelMasque}
+              disabled={preferencesSauvegardeEnCours || !validationAuto}
+              onClick={() => void basculerRetourVisuelMasque()}
+            />
+
             <button
               type="button"
               onClick={() => setVoixSelecteurOuvert(false)}
@@ -441,5 +498,43 @@ export default function MobileHome({
         </div>
       )}
     </div>
+  )
+}
+
+/** Ligne d'option avec interrupteur -- même rendu que "Annonce courte". */
+function OptionBascule({
+  titre, description, actif, disabled, onClick,
+}: { titre: string; description: string; actif: boolean; disabled?: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        marginTop: 6, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10,
+        padding: '12px 14px', borderRadius: 12,
+        border: `1px solid ${actif ? 'rgba(75,146,172,0.5)' : 'rgba(255,255,255,0.1)'}`,
+        background: actif ? 'rgba(75,146,172,0.14)' : 'rgba(255,255,255,0.03)',
+        textAlign: 'left', opacity: disabled && !actif ? 0.55 : 1,
+      }}
+    >
+      <span>
+        <div style={{ fontSize: 14.5, fontWeight: 700, color: '#fff' }}>{titre}</div>
+        <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginTop: 2, lineHeight: 1.4 }}>{description}</div>
+      </span>
+      <span
+        style={{
+          flexShrink: 0, width: 42, height: 24, borderRadius: 999, position: 'relative',
+          background: actif ? '#4B92AC' : 'rgba(255,255,255,0.15)', transition: 'background .15s',
+        }}
+      >
+        <span
+          style={{
+            position: 'absolute', top: 2, left: actif ? 20 : 2, width: 20, height: 20, borderRadius: '50%',
+            background: '#fff', transition: 'left .15s',
+          }}
+        />
+      </span>
+    </button>
   )
 }
