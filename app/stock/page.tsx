@@ -24,6 +24,14 @@
 //         déjà prises ;
 //       • stock par dépôt (get_stock_par_depot) et liste des réceptions.
 //   - ?ref=XXXX ouvre directement la référence.
+// ÉVOLUTION (2026-09-20) : la liste de résultats affiche pour chaque référence
+//   les « échelons de disponibilité » : quantité promissible aujourd'hui, puis
+//   jusqu'à trois paliers « Y dès telle date » apportés par les réceptions
+//   attendues (même projection que la fiche : stock dispo tous dépôts − CDC à
+//   leur date de livraison + CDF à leur date de réception, et une quantité
+//   n'est promissible à une date que si le stock projeté reste ≥ à cette
+//   quantité à cette date et après). Les données sont chargées en une requête
+//   par source pour toutes les références affichées.
 // Sur mobile (< 768 px) on rend MobileStockArticles tel quel.
 // ============================================================================
 
@@ -106,6 +114,11 @@ type EvenementProjection = {
   hypothese: boolean
   stockApres: number
 }
+
+/** Palier de disponibilité : `quantite` pièces promissibles à partir de `date`. */
+type Echelon = { date: string; quantite: number }
+/** Échelons d'une référence de la liste : aujourd'hui + paliers suivants, stock projeté final, réceptions attendues. */
+type EchelonsRef = { echelons: Echelon[]; stockFinal: number; receptionsAttendues: number; besoins: number }
 
 // ── Constantes ────────────────────────────────────────────────────────────
 const DEPOTS_PROPOSES = [
@@ -235,6 +248,40 @@ function premiereDateDisponible(stock0: number, events: EvenementProjection[], q
   return { date: null, niveau: n > 0 ? events[n - 1].stockApres : stock0 }
 }
 
+/** Échelons de disponibilité : quantité promissible aujourd'hui (plus bas
+ * niveau du stock projeté sur tout l'horizon, borné à 0), puis chaque date à
+ * laquelle ce plancher remonte grâce aux réceptions — au plus `maxPaliers`
+ * paliers après aujourd'hui. Une date n'est retenue qu'une fois, après le
+ * dernier mouvement du jour. */
+function calculerEchelons(stock0: number, events: EvenementProjection[], maxPaliers = 3): Echelon[] {
+  const auj = todayIso()
+  const n = events.length
+  const suffixMin = new Array<number>(n + 1)
+  suffixMin[n] = Number.POSITIVE_INFINITY
+  for (let i = n - 1; i >= 0; i -= 1) suffixMin[i] = Math.min(events[i].stockApres, suffixMin[i + 1])
+  let niveau = Math.max(0, Math.min(stock0, n > 0 ? suffixMin[0] : stock0))
+  const out: Echelon[] = [{ date: auj, quantite: niveau }]
+  for (let i = 0; i < n && out.length <= maxPaliers; i += 1) {
+    if (i + 1 < n && events[i + 1].date === events[i].date) continue // attendre le dernier mouvement du jour
+    if (events[i].date <= auj) continue
+    const v = suffixMin[i]
+    if (v > niveau) { niveau = v; out.push({ date: events[i].date, quantite: v }) }
+  }
+  return out
+}
+
+/** Projection allégée pour la liste : mêmes règles que construireProjection
+ * (réception avant besoin à date égale, besoins échus ramenés à aujourd'hui). */
+function projeterLeger(stock0: number, recs: Array<{ date: string; q: number }>, cdcs: Array<{ date: string | null; q: number }>): EvenementProjection[] {
+  const auj = todayIso()
+  const events: Omit<EvenementProjection, 'stockApres'>[] = []
+  for (const r of recs) events.push({ date: r.date, ordre: 0, type: 'RECEPTION', quantite: r.q, label: '', detail: '', hypothese: false })
+  for (const c of cdcs) events.push({ date: c.date && c.date >= auj ? c.date : auj, ordre: 1, type: 'CDC', quantite: -c.q, label: '', detail: '', hypothese: false })
+  events.sort((a, b) => a.date.localeCompare(b.date) || a.ordre - b.ordre)
+  let courant = stock0
+  return events.map((e) => { courant += e.quantite; return { ...e, stockApres: courant } })
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────
 export default function StockPage() {
   const { isMobile } = useViewport()
@@ -321,6 +368,67 @@ function StockDesktop() {
     }, 300)
     return () => { cancelled = true; window.clearTimeout(t) }
   }, [query, familleMacro, famille, depot, dispoFiltre, filtresActifs])
+
+  // ── Échelons de disponibilité pour les références affichées ────────────
+  const [echelonsParRef, setEchelonsParRef] = useState<Record<string, EchelonsRef>>({})
+  const [echelonsLoading, setEchelonsLoading] = useState(false)
+  const refsResultats = useMemo(() => Array.from(new Set((results || []).map((r) => r.reference_article))), [results])
+  const refsResultatsKey = refsResultats.join('|')
+
+  useEffect(() => {
+    if (refsResultats.length === 0) { setEchelonsParRef({}); return }
+    let cancelled = false
+    setEchelonsLoading(true)
+    async function chargerEchelons() {
+      const out: Record<string, EchelonsRef> = {}
+      const TAILLE = 100
+      for (let i = 0; i < refsResultats.length; i += TAILLE) {
+        const lot = refsResultats.slice(i, i + TAILLE)
+        const [stockRes, recRes, couvRes] = await Promise.all([
+          supabase.from('v_stock_articles_latest').select('reference_article,stock_disponible').in('reference_article', lot),
+          supabase.from('v_couverture_stock_receptions').select('reference_article,date_reception_retenue,quantite_attendue').in('reference_article', lot),
+          supabase.from('v_portefeuille_couverture_stock').select('reference_article,date_livraison,quantite,stock_disponible,rang_service').in('reference_article', lot).order('rang_service', { ascending: true }),
+        ])
+        if (cancelled) return
+        if (stockRes.error || recRes.error || couvRes.error) continue
+        const stockParRef = new Map<string, number>()
+        for (const s of (stockRes.data || []) as any[]) stockParRef.set(s.reference_article, toNumber(s.stock_disponible))
+        const recParRef = new Map<string, Array<{ date: string; q: number }>>()
+        for (const r of (recRes.data || []) as any[]) {
+          const q = toNumber(r.quantite_attendue)
+          if (q <= 0) continue
+          const l = recParRef.get(r.reference_article) || []
+          l.push({ date: String(r.date_reception_retenue).slice(0, 10), q })
+          recParRef.set(r.reference_article, l)
+        }
+        const cdcParRef = new Map<string, Array<{ date: string | null; q: number }>>()
+        const stockCouvParRef = new Map<string, number>()
+        for (const c of (couvRes.data || []) as any[]) {
+          const l = cdcParRef.get(c.reference_article) || []
+          l.push({ date: c.date_livraison ? String(c.date_livraison).slice(0, 10) : null, q: toNumber(c.quantite) })
+          cdcParRef.set(c.reference_article, l)
+          if (!stockCouvParRef.has(c.reference_article)) stockCouvParRef.set(c.reference_article, toNumber(c.stock_disponible))
+        }
+        for (const ref of lot) {
+          const stock0 = stockCouvParRef.get(ref) ?? stockParRef.get(ref) ?? 0
+          const recs = recParRef.get(ref) || []
+          const cdcs = cdcParRef.get(ref) || []
+          const events = projeterLeger(stock0, recs, cdcs)
+          out[ref] = {
+            echelons: calculerEchelons(stock0, events, 3),
+            stockFinal: events.length > 0 ? events[events.length - 1].stockApres : stock0,
+            receptionsAttendues: recs.reduce((s, r) => s + r.q, 0),
+            besoins: cdcs.reduce((s, c) => s + c.q, 0),
+          }
+        }
+        if (!cancelled) setEchelonsParRef((prev) => ({ ...prev, ...out }))
+      }
+      if (!cancelled) setEchelonsLoading(false)
+    }
+    void chargerEchelons()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refsResultatsKey])
 
   const refsSaisies = useMemo(() => parseReferences(query), [query])
   const isListe = refsSaisies.length > 1
@@ -413,9 +521,15 @@ function StockDesktop() {
               <div style={styles.muted}>Tape une référence ou une désignation, ou choisis un filtre pour parcourir le stock.</div>
             )}
             {results && results.length === 0 && !loading && <div style={styles.muted}>Aucune référence trouvée.</div>}
+            {results && results.length > 0 && (
+              <div style={styles.resultLegend}>
+                <span style={{ color: '#8fd4a8', fontWeight: 700 }}>Promissible</span> = ce qu'on peut vendre à cette date sans mettre en rupture les commandes déjà prises (tous dépôts, réceptions attendues comprises).
+              </div>
+            )}
             <div style={styles.resultList}>
               {(results || []).map((r) => {
                 const actif = selected?.reference === r.reference_article
+                const e = echelonsParRef[r.reference_article]
                 return (
                   <button
                     key={`${r.reference_article}-${r.depot}`}
@@ -424,16 +538,19 @@ function StockDesktop() {
                     onClick={() => selectionner(r.reference_article, r.designation || '')}
                     style={{ ...styles.resultRow, ...(actif ? styles.resultRowActive : {}) }}
                   >
-                    <span style={{ minWidth: 0, flex: 1 }}>
-                      <span style={styles.resultRef}>{r.reference_article}</span>
-                      <span style={styles.resultDesignation}>{r.designation || '—'}</span>
-                      {depot && <span style={styles.resultDepot}>Dépôt : {depotCourt(r.depot)}</span>}
+                    <span style={styles.resultTop}>
+                      <span style={{ minWidth: 0, flex: 1 }}>
+                        <span style={styles.resultRef}>{r.reference_article}</span>
+                        <span style={styles.resultDesignation}>{r.designation || '—'}</span>
+                        {depot && <span style={styles.resultDepot}>Dépôt : {depotCourt(r.depot)}</span>}
+                      </span>
+                      <span style={styles.resultStats}>
+                        <span style={{ ...styles.resultStat, color: couleurDispo(r.stock_disponible) }}>{formatNumber(r.stock_disponible)}<small>dispo</small></span>
+                        <span style={styles.resultStat}>{formatNumber(r.stock_reel)}<small>réel</small></span>
+                        <span style={{ ...styles.resultStat, color: r.stock_a_terme < 0 ? '#e0a685' : undefined }}>{formatNumber(r.stock_a_terme)}<small>à terme</small></span>
+                      </span>
                     </span>
-                    <span style={styles.resultStats}>
-                      <span style={{ ...styles.resultStat, color: couleurDispo(r.stock_disponible) }}>{formatNumber(r.stock_disponible)}<small>dispo</small></span>
-                      <span style={styles.resultStat}>{formatNumber(r.stock_reel)}<small>réel</small></span>
-                      <span style={{ ...styles.resultStat, color: r.stock_a_terme < 0 ? '#e0a685' : undefined }}>{formatNumber(r.stock_a_terme)}<small>à terme</small></span>
-                    </span>
+                    <EchelonsLigne data={e} loading={echelonsLoading && !e} />
                   </button>
                 )
               })}
@@ -943,6 +1060,37 @@ function Kpi({ label, value, color, sub, big }: { label: string; value: string; 
   )
 }
 
+/** Ligne « promissible » d'un résultat : aujourd'hui, puis jusqu'à trois
+ * paliers « Y dès dd/mm » apportés par les réceptions attendues. */
+function EchelonsLigne({ data, loading }: { data: EchelonsRef | undefined; loading: boolean }) {
+  if (loading) return <span style={styles.echelonsRow}><span style={styles.tdSub}>disponibilité…</span></span>
+  if (!data) return null
+  const auj = todayIso()
+  const [maintenant, ...paliers] = data.echelons
+  const rien = maintenant.quantite <= 0
+  const plafond = data.stockFinal
+  return (
+    <span style={styles.echelonsRow}>
+      <span style={{ ...styles.echelonChip, ...(rien ? styles.echelonChipRupture : styles.echelonChipNow) }}>
+        <span style={{ ...styles.echelonQte, color: rien ? '#e0a685' : '#8fd4a8' }}>{formatNumber(maintenant.quantite)}</span>
+        <span style={styles.echelonLabel}>aujourd'hui</span>
+      </span>
+      {paliers.map((p) => (
+        <span key={p.date} style={styles.echelonChip}>
+          <span style={{ ...styles.echelonQte, color: '#8FC7DA' }}>{formatNumber(p.quantite)}</span>
+          <span style={styles.echelonLabel}>dès {formatDateCourte(p.date)}<small style={{ opacity: 0.7 }}> · {daysBetween(auj, p.date)} j</small></span>
+        </span>
+      ))}
+      {paliers.length === 0 && data.receptionsAttendues > 0 && plafond <= maintenant.quantite && (
+        <span style={{ ...styles.echelonLabel, alignSelf: 'center' }}>+{formatNumber(data.receptionsAttendues)} attendues, absorbées par les CDC prises</span>
+      )}
+      {paliers.length === 0 && data.receptionsAttendues === 0 && rien && (
+        <span style={{ ...styles.echelonLabel, alignSelf: 'center', color: '#e0a685' }}>aucun appro en cours{data.stockFinal < 0 ? ` · ${formatNumber(-data.stockFinal)} p. manquantes` : ''}</span>
+      )}
+    </span>
+  )
+}
+
 function LigneDepot({ row, maxDispo }: { row: DepotStockRow; maxDispo: number }) {
   const dispo = toNumber(row.stock_disponible)
   const reel = toNumber(row.stock_reel)
@@ -1000,8 +1148,16 @@ const styles: Record<string, React.CSSProperties> = {
   ghostBtn: { display: 'inline-flex', alignItems: 'center', padding: '8px 12px', borderRadius: 10, border: '1px solid rgba(255,255,255,0.18)', background: 'transparent', color: 'rgba(255,255,255,0.78)', fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap', textDecoration: 'none' },
   linkBtn: { marginTop: 4, alignSelf: 'flex-start', background: 'none', border: 'none', padding: '4px 0', fontSize: 12, color: 'rgba(255,255,255,0.45)', textDecoration: 'underline', textUnderlineOffset: 3, cursor: 'pointer', fontFamily: 'inherit' },
 
+  resultLegend: { marginTop: 4, fontSize: 11, color: 'rgba(255,255,255,0.45)', lineHeight: 1.4 },
   resultList: { flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 },
-  resultRow: { display: 'flex', alignItems: 'center', gap: 10, padding: '9px 11px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)', color: '#F5F3EC', cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit', width: '100%' },
+  resultRow: { display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: 7, padding: '9px 11px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)', color: '#F5F3EC', cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit', width: '100%' },
+  resultTop: { display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 },
+  echelonsRow: { display: 'flex', flexWrap: 'wrap', gap: 5, alignItems: 'stretch' },
+  echelonChip: { display: 'inline-flex', flexDirection: 'column', padding: '3px 8px', borderRadius: 8, border: '1px solid rgba(143,199,218,0.35)', background: 'rgba(143,199,218,0.08)', lineHeight: 1.15 },
+  echelonChipNow: { borderColor: 'rgba(143,212,168,0.45)', background: 'rgba(143,212,168,0.10)' },
+  echelonChipRupture: { borderColor: 'rgba(193,104,60,0.5)', background: 'rgba(193,104,60,0.14)' },
+  echelonQte: { fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 700, color: '#8fd4a8' },
+  echelonLabel: { fontSize: 10, color: 'rgba(255,255,255,0.55)', whiteSpace: 'nowrap' },
   resultRowActive: { borderColor: 'rgba(166,161,129,0.7)', background: 'rgba(166,161,129,0.16)' },
   resultRef: { display: 'block', fontFamily: 'var(--font-mono)', fontSize: 13.5, fontWeight: 700, color: '#fff' },
   resultDesignation: { display: 'block', fontSize: 11.5, color: 'rgba(255,255,255,0.55)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
