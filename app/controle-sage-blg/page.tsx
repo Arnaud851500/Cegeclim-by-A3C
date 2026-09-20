@@ -58,10 +58,11 @@
  *  La vue SQL (champs_en_ecart) reste en comparaison stricte.
  *
  * MàJ (adresse de livraison principale + champs "BLG maître") :
- *  - Adresse de livraison principale : comparaison intelligente par
- *    composantes (n° d'adresse, code postal, ville, n° de voie) au lieu du
- *    libellé : BLG porte une adresse géocodée, SAGE un texte libre avec
- *    téléphone / BP / CEDEX. Voir comparerAdresseLivraisonPrincipale.
+ *  - Adresse de livraison principale : vert dès que le n° d'adresse concorde
+ *    (le libellé n'est plus comparé : BLG porte une adresse géocodée, SAGE un
+ *    texte libre). Rouge seulement si mainDelivery pointe une autre adresse.
+ *  - Téléphone : indicatif international quel qu'il soit et zéro national
+ *    retirés, comparaison sur les 9 derniers chiffres.
  *  - Table public.controle_champ_maitre : champs pour lesquels BLG est maître
  *    (réglage via le bouton "⚙ BLG maître" du pavé Champs contrôlés). Ces
  *    champs ne sont plus comparés : pastille verte "BLG maître", exclus des
@@ -990,18 +991,23 @@ function comparerInclusion(sage: unknown, blg: unknown): ResultatComparaison {
   return b.includes(s) || s.includes(b) ? 'ok' : 'ecart'
 }
 
-/** Téléphone : chiffres seuls, +33 / 0033 ramené au 0 national. */
+/** Téléphone : chiffres seuls, indicatif international retiré (+33 / 0033 /
+ * +34…) et zéro national retiré — on compare les 9 derniers chiffres
+ * ("06.85.32.09.03" ≡ "+34685320903" ≡ "0033685320903"). */
 function normaliserTelephone(v: unknown): string {
   let d = String(v ?? '').replace(/\D/g, '')
-  if (d.startsWith('0033')) d = '0' + d.slice(4)
-  else if (d.startsWith('33') && d.length === 11) d = '0' + d.slice(2)
-  return d
+  if (d.startsWith('00')) d = d.slice(2)
+  d = d.replace(/^0+/, '')
+  return d.length > 9 ? d.slice(-9) : d
 }
 function comparerTelephone(sage: unknown, blg: unknown): ResultatComparaison {
   const s = normaliserTelephone(sage)
   const b = normaliserTelephone(blg)
   if (!s || !b) return 'partiel'
-  return s === b ? 'ok' : 'ecart'
+  if (s === b) return 'ok'
+  // Plusieurs numéros côté SAGE ("0662682637/0663292708") : vert si l'un d'eux est celui de BLG.
+  const tous = String(sage ?? '').split(/[\/;,]|\s{2,}|\bou\b/i).map(normaliserTelephone).filter((x) => x.length >= 8)
+  return tous.includes(b) ? 'ok' : 'ecart'
 }
 
 /** SIRET : rouge si le SIREN (9 premiers chiffres) diffère, orange si SIREN
@@ -1136,123 +1142,20 @@ function comparerContacts(sage: string[] | null, blg: string[] | null): Resultat
   return 'ok'
 }
 
-/** Décomposition "intelligente" d'une adresse de livraison telle que remontée
- * par la vue ("n°<li_no> · <intitulé> · <adresse>") en ses composantes :
- * numéro de voie, mots significatifs de la voie, code postal, ville.
- *  - SAGE : adresse saisie librement, "voie [téléphone] CP VILLE [CEDEX]",
- *    souvent avec un téléphone, "BP/CS xxx", "Tel :" au milieu ;
- *  - BLG : adresse géocodée "voie, [complément,] CP Ville, Pays".
- * Les téléphones, BP/CS/TSA, CEDEX et le pays sont ignorés. */
-type AdresseDecomposee = { numeros: string[]; mots: string[]; cp: string | null; ville: string | null; vide: boolean }
-
-const PAYS_ADRESSE = new Set(['FRANCE', 'SPAIN', 'ESPAGNE', 'BELGIQUE', 'BELGIUM', 'SUISSE', 'SWITZERLAND', 'ITALIE', 'ITALY', 'ALLEMAGNE', 'GERMANY', 'PORTUGAL', 'LUXEMBOURG'])
-
-function nettoyerLibelleAdresse(s: string): string {
-  return s
-    // téléphones : 05.46.26.38.22 / 06 78 66 60 29 / +33 6 12 34 56 78 / 0555733533
-    .replace(/(?:\+33\s?|0)\d(?:[\s.\-]?\d{2}){4}\b/g, ' ')
-    .replace(/\bt[ée]l\.?\s*:?/gi, ' ')
-    // boîtes postales et cedex
-    .replace(/\b(?:BP|CS|TSA)\s*\.?\s*\d+\b/gi, ' ')
-    .replace(/\bCEDEX\b\s*\d*/gi, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
-function decomposerAdresseLivraison(v: unknown, cote: 'sage' | 'blg'): AdresseDecomposee {
-  let s = safeText(v)
-  // Retire le préfixe "n°123 · INTITULÉ · " ajouté par la vue (l'adresse
-  // derrière peut être vide : "n°2785 · AKTO ·").
-  s = s.replace(/^n°[^·]*·[^·]*·\s?/, '')
-  s = nettoyerLibelleAdresse(s)
-
-  let cp: string | null = null
-  let ville: string | null = null
-  let voie = s
-
-  if (cote === 'blg') {
-    // "voie, complément, 64400 Oloron-Sainte-Marie, France"
-    const parts = s.split(',').map((p) => p.trim()).filter((p) => p && !PAYS_ADRESSE.has(normaliserTexte(p)))
-    // Dernier segment commençant par 5 chiffres = "CP Ville" (un n° de voie à
-    // 5 chiffres comme "10001 rue des Platanes" vient toujours avant).
-    let idxCp = -1
-    parts.forEach((p, i) => { if (/^\d{5}\b/.test(p)) idxCp = i })
-    if (idxCp >= 0) {
-      const m = parts[idxCp].match(/^(\d{5})\s*(.*)$/)
-      cp = m ? m[1] : null
-      ville = m && m[2] ? m[2] : null
-      voie = parts.slice(0, idxCp).join(' ')
-    } else if (parts.length >= 2) {
-      ville = parts[parts.length - 1]
-      voie = parts.slice(0, -1).join(' ')
-    } else {
-      voie = parts.join(' ')
-    }
-  } else {
-    // SAGE : dernier code postal à 5 chiffres, la ville est ce qui suit.
-    const re = /\b(\d{5})[A-Z]?\b/g
-    let last: RegExpExecArray | null = null
-    let m: RegExpExecArray | null
-    while ((m = re.exec(s)) !== null) last = m
-    if (last) {
-      cp = last[1]
-      ville = s.slice(last.index + last[0].length).trim() || null
-      voie = s.slice(0, last.index).trim()
-    }
-  }
-
-  const motsVoie = motsAdresse(voie).filter((m) => !PAYS_ADRESSE.has(m))
-  // Tous les n° de voie possibles (le texte libre SAGE en porte souvent
-  // plusieurs : "Espace 21 1 rue…", "43,45 Rue…", "Lot 8 32 bis Route…").
-  const numeros = motsVoie.filter((m) => /^\d+[A-Z]?$/.test(m) && m.length <= 5).map((m) => m.replace(/[A-Z]$/, '')) // "2T" / "2B" ≈ "2"
-  const mots = motsVoie.filter((m) => !/^\d+[A-Z]?$/.test(m) && !['BIS', 'TER', 'ZI', 'ZA', 'ZAC', 'ZC', 'ZAE', 'ZONE', 'ARTISANALE', 'INDUSTRIELLE', 'ACTIVITE', 'ACTIVITES', 'LIEU', 'DIT', 'CHEZ'].includes(m))
-  const vide = mots.length === 0 && numeros.length === 0 && !cp && !ville
-  return { numeros, mots, cp, ville, vide }
-}
-
-/** Adresse de livraison principale — comparaison intelligente.
- * BLG porte l'adresse géocodée (voie normalisée, parfois différente du
- * libellé libre SAGE : "ZI de Berlanne Rue d'Ossau" → "2 Rue du Pont Long"),
- * SAGE un texte libre avec téléphone, BP, CEDEX. On ne compare donc pas à la
- * virgule près :
- *  - n° d'adresse SAGE ≠ n° BLG (mainDelivery pointe une autre adresse) → rouge ;
- *  - localité : même code postal, ou même ville avec CP du même département
- *    (CEDEX 33701 ↔ 33700, 33323 BEGLES CEDEX ↔ 33130 Bègles) → localité OK ;
- *    département différent → rouge ;
- *  - localité OK : vert si le n° de voie concorde (ou absent d'un côté), orange
- *    si les n° de voie diffèrent ou si la ville diffère à CP identique ;
- *  - pas de CP d'un des deux côtés : repli sur les mots de la voie (vert si
- *    un mot significatif commun ou n° de voie identique, rouge sinon). */
+/** Adresse de livraison principale : SAGE et BLG désignent la même adresse
+ * dès que le n° d'adresse concorde (li_principal SAGE ↔ mainDelivery BLG,
+ * référence BLG "<tiers>-<li_no>-liv"). Le libellé n'est pas comparé : BLG
+ * porte une adresse géocodée (voie normalisée, CP/commune recalés) alors que
+ * SAGE stocke un texte libre avec téléphone, BP, CEDEX — les différences de
+ * libellé à n° identique ne sont pas des écarts.
+ *  - n° d'adresse identique → vert ;
+ *  - n° différent (mainDelivery pointe une autre adresse) → rouge ;
+ *  - n° absent d'un côté → orange. */
 function comparerAdresseLivraisonPrincipale(r: ControleRow): ResultatComparaison {
   const noS = safeText(r.sage_livraison_principale_no)
   const noB = safeText(r.blg_livraison_principale_no)
   if (!noS || !noB) return 'partiel'
-  if (noS !== noB) return 'ecart'
-
-  const a = decomposerAdresseLivraison(r.sage_adresse_livraison_principale, 'sage')
-  const b = decomposerAdresseLivraison(r.blg_adresse_livraison_principale, 'blg')
-  if (a.vide && b.vide) return 'ok'      // "n°2549 · Clients divers · " ↔ "… · France"
-  if (a.vide || b.vide) return 'partiel'
-
-  const villeOk = a.ville && b.ville ? comparerVille(a.ville, b.ville) === 'ok' : null
-  const numeroOk = a.numeros.length && b.numeros.length ? a.numeros.some((n) => b.numeros.includes(n)) : null
-  const motCommun = a.mots.some((m) => motTrouveDans(m, b.mots)) || b.mots.some((m) => motTrouveDans(m, a.mots))
-
-  if (a.cp && b.cp) {
-    const memeDept = a.cp.slice(0, 2) === b.cp.slice(0, 2)
-    if (a.cp === b.cp) {
-      if (villeOk === false && !motCommun && numeroOk !== true) return 'partiel'
-      return numeroOk === false ? 'partiel' : 'ok'
-    }
-    if (memeDept && villeOk === true) return numeroOk === false ? 'partiel' : 'ok'
-    if (memeDept && (motCommun || numeroOk === true)) return 'partiel'
-    return 'ecart'
-  }
-
-  // Un des deux côtés sans code postal : on se rabat sur la voie.
-  if (villeOk === true) return numeroOk === false ? 'partiel' : 'ok'
-  if (motCommun || numeroOk === true) return 'ok'
-  return villeOk === false ? 'ecart' : 'partiel'
+  return noS === noB ? 'ok' : 'ecart'
 }
 
 /** Une paire de colonnes SAGE ↔ BLG comparables, avec le numéro de mapping du
