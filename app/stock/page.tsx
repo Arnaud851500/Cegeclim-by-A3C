@@ -232,7 +232,10 @@ function construireProjection(stock0: number, receptions: ReceptionRow[], besoin
 
 /** Première date à laquelle `quantite` pièces peuvent être promises sans
  * mettre en rupture les commandes déjà prises : le stock projeté doit rester
- * ≥ quantite à cette date et pour tous les événements suivants. */
+ * ≥ quantite à cette date et pour tous les événements suivants. On raisonne
+ * en fin de journée : une date n'est évaluée qu'après son dernier mouvement,
+ * sinon une journée à plusieurs réceptions serait jugée sur la première
+ * d'entre elles (niveau intermédiaire, pas le niveau réel du soir). */
 function premiereDateDisponible(stock0: number, events: EvenementProjection[], quantite: number): { date: string | null; niveau: number } {
   if (quantite <= 0) return { date: todayIso(), niveau: stock0 }
   const n = events.length
@@ -243,7 +246,8 @@ function premiereDateDisponible(stock0: number, events: EvenementProjection[], q
   const minGlobal = Math.min(stock0, n > 0 ? suffixMin[0] : stock0)
   if (minGlobal >= quantite) return { date: todayIso(), niveau: minGlobal }
   for (let i = 0; i < n; i += 1) {
-    if (events[i].stockApres >= quantite && suffixMin[i] >= quantite) return { date: events[i].date, niveau: suffixMin[i] }
+    if (i + 1 < n && events[i + 1].date === events[i].date) continue // fin de journée seulement
+    if (suffixMin[i] >= quantite) return { date: events[i].date, niveau: suffixMin[i] }
   }
   return { date: null, niveau: n > 0 ? events[n - 1].stockApres : stock0 }
 }
