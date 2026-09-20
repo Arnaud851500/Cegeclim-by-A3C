@@ -504,19 +504,46 @@ export default function VoiceReportButtons({
   const retourVisuelMasqueRef = useRef(false)
   validationAutoRef.current = validationAuto
   retourVisuelMasqueRef.current = retourVisuelMasque
+  // Idem pour la voix, la vitesse et l'annonce courte : FIX (2026-09-20),
+  // avec le démarrage automatique, l'annonce d'accueil partait avec la voix
+  // par défaut (nova / 1.15× / annonce longue) parce que la chaîne vocale
+  // avait capturé les valeurs initiales avant le retour de la requête.
+  const voixPrefereeRef = useRef('nova')
+  const vitesseLectureRef = useRef(1.15)
+  const annonceCourteRef = useRef(false)
+  voixPrefereeRef.current = voixPreferee
+  vitesseLectureRef.current = vitesseLecture
+  annonceCourteRef.current = annonceCourte
+  // Promesse du chargement des préférences : le démarrage automatique
+  // l'attend avant de parler, pour que la première phrase soit déjà dans
+  // la bonne voix.
+  const preferencesChargeesRef = useRef<Promise<void> | null>(null)
+
   useEffect(() => {
     let cancelled = false
     async function charger() {
       if (!userEmail) return
       const { data } = await supabase.from('vision_tci_preferences').select('voix_assistant, vitesse_lecture, annonce_courte, validation_auto, retour_visuel_masque').eq('user_email', userEmail).maybeSingle()
       if (cancelled) return
-      setVoixPreferee(String(data?.voix_assistant || 'nova'))
-      setVitesseLecture(data?.vitesse_lecture !== null && data?.vitesse_lecture !== undefined ? Number(data.vitesse_lecture) : 1.15)
-      setAnnonceCourte(Boolean(data?.annonce_courte))
-      setValidationAuto(Boolean(data?.validation_auto))
-      setRetourVisuelMasque(Boolean(data?.retour_visuel_masque))
+      const voix = String(data?.voix_assistant || 'nova')
+      const vitesse = data?.vitesse_lecture !== null && data?.vitesse_lecture !== undefined ? Number(data.vitesse_lecture) : 1.15
+      const courte = Boolean(data?.annonce_courte)
+      const vAuto = Boolean(data?.validation_auto)
+      const masque = Boolean(data?.retour_visuel_masque)
+      // Refs mises à jour immédiatement (sans attendre le re-render) : une
+      // chaîne vocale déjà en cours lit la bonne valeur dès maintenant.
+      voixPrefereeRef.current = voix
+      vitesseLectureRef.current = vitesse
+      annonceCourteRef.current = courte
+      validationAutoRef.current = vAuto
+      retourVisuelMasqueRef.current = masque
+      setVoixPreferee(voix)
+      setVitesseLecture(vitesse)
+      setAnnonceCourte(courte)
+      setValidationAuto(vAuto)
+      setRetourVisuelMasque(masque)
     }
-    void charger()
+    preferencesChargeesRef.current = charger().catch(() => {})
     return () => { cancelled = true }
   }, [userEmail])
   const [compteRenduIdCible, setCompteRenduIdCible] = useState<string | null>(null)
@@ -616,7 +643,7 @@ export default function VoiceReportButtons({
       const res = await fetch('/api/atelier-ai/speak', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: texte, voice: voixPreferee, speed: vitesseLecture }),
+        body: JSON.stringify({ text: texte, voice: voixPrefereeRef.current, speed: vitesseLectureRef.current }),
       })
       if (!res.ok) return
       const blob = await res.blob()
@@ -851,7 +878,7 @@ export default function VoiceReportButtons({
           ? completer
             ? 'Je t’écoute pour compléter le compte rendu de ta visite.'
             : 'Je t’écoute pour synthétiser le compte rendu de ta visite.'
-          : annonceCourte
+          : annonceCourteRef.current
             ? "J'écoute tes tâches à rajouter."
             : 'Je t’écoute, décris la tâche à ajouter.'
       await jouerTexte(phraseAccueil)
@@ -1274,7 +1301,12 @@ export default function VoiceReportButtons({
     if (!demarrageAuto || modeUnique !== 'tache' || demarrageAutoFaitRef.current) return
     if (etape !== 'idle') return
     demarrageAutoFaitRef.current = true
-    void lancer('tache')
+    // Attend le chargement des préférences (voix, vitesse, annonce courte,
+    // validation) avant de parler -- borné à 1,5 s pour ne pas perdre la
+    // fenêtre d'activation utilisateur exigée par iOS pour le micro.
+    const prefs = preferencesChargeesRef.current || Promise.resolve()
+    const borne = new Promise<void>((resolve) => { window.setTimeout(resolve, 1500) })
+    void Promise.race([prefs, borne]).then(() => { void lancer('tache') })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [demarrageAuto, modeUnique])
 
