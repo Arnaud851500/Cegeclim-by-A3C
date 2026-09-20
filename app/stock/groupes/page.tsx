@@ -16,10 +16,22 @@
 // Même moteur d'événements que l'écran Stock articles (/stock).
 // ?groupe=<uuid> ouvre directement un groupe ; ?refs=A,B,C un groupe ad hoc.
 // À ajouter dans lib/navigation.ts sous « Stocks & logistique ».
+// ÉVOLUTION (2026-09-20) :
+//   • vocabulaire : « Qté dispo pour nouvelles CDC avec livraison d'ici à »,
+//     « CDC à livrer d'ici à » (à la date de livraison DEMANDÉE, part non
+//     livrable à cette date en rouge), « CDF à recevoir d'ici à » ;
+//   • graphique en barres miroir par période : réceptions au-dessus, CDC à
+//     livrer en dessous (orange = livrables à temps, rouge = non livrables) ;
+//   • tableau par référence sur toute la largeur : stock dispo, puis période
+//     par période à livrer / non livrables / à recevoir / stock projeté fin de
+//     période / qté dispo pour nouvelles CDC ; la répartition par agence est
+//     repliée derrière un bouton.
+//   Les ventilations « à livrer » et « à recevoir » par période sont calculées
+//   côté navigateur à partir des lignes CDC et des réceptions renvoyées par le
+//   RPC (aucun changement côté base).
 // ============================================================================
 
-import { useEffect, useMemo, useState } from 'react'
-import type React from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import ExcelJS from 'exceljs'
 
@@ -51,7 +63,48 @@ function libellePeriode(p: string, index: number): string {
   const d = new Date(`${p}T00:00:00`)
   return `Fin ${d.toLocaleDateString('fr-FR', { month: 'long' })}`
 }
-function couleurAtp(n: number): string { if (n <= 0) return '#e0a685'; if (n < 50) return '#E0A961'; return '#8fd4a8' }
+/** Code couleur des quantités disponibles pour de nouvelles CDC : vert = on
+ * peut prendre des commandes, rouge = rien de promissible à cette échéance. */
+function couleurAtp(n: number): string { return n > 0 ? '#8fd4a8' : '#e0a685' }
+const C_REC = '#8FC7DA'     // CDF à recevoir
+const C_LIV = '#E0A961'     // CDC à livrer, livrables à temps
+const C_NONLIV = '#e0a685'  // CDC à livrer, non livrables à leur date
+
+/** Ventilation par période (intervalle ]P(i−1) ; P(i)], la première = aujourd'hui
+ * et l'antériorité) : à livrer (date DEMANDÉE), dont non livrables à cette
+ * date (date de complétude > fin de période ou inconnue), à recevoir. */
+type Ventil = { p: string; aLivrer: number; nonLivrable: number; nbALivrer: number; nbNonLivrable: number; aRecevoir: number; cumALivrer: number; cumNonLivrable: number; cumARecevoir: number }
+function ventiler(periodes: string[], cdc: Array<{ date_livraison: string | null; date_complete: string | null; quantite: number }>, receptions: Array<{ d: string; q: number }>): Ventil[] {
+  const out: Ventil[] = periodes.map((p) => ({ p, aLivrer: 0, nonLivrable: 0, nbALivrer: 0, nbNonLivrable: 0, aRecevoir: 0, cumALivrer: 0, cumNonLivrable: 0, cumARecevoir: 0 }))
+  const auj = periodes[0]
+  const idx = (d: string | null): number => {
+    const dd = d && d >= auj ? d : auj
+    const i = periodes.findIndex((p) => dd <= p)
+    return i // −1 = au-delà de l'horizon
+  }
+  for (const c of cdc) {
+    const i = idx(c.date_livraison)
+    if (i < 0) continue
+    out[i].aLivrer += c.quantite; out[i].nbALivrer += 1
+    if (!c.date_complete || c.date_complete > periodes[i]) { out[i].nonLivrable += c.quantite; out[i].nbNonLivrable += 1 }
+  }
+  for (const r of receptions) {
+    const i = idx(r.d)
+    if (i < 0) continue
+    out[i].aRecevoir += r.q
+  }
+  let cl = 0, cr = 0
+  for (const v of out) { cl += v.aLivrer; cr += v.aRecevoir; v.cumALivrer = cl; v.cumARecevoir = cr }
+  // Non livrables en cumul : dues ≤ P et encore incomplètes à P (une CDC non
+  // livrable à fin septembre peut l'être à fin octobre).
+  out.forEach((v) => {
+    v.cumNonLivrable = cdc.reduce((s, c) => {
+      const due = c.date_livraison && c.date_livraison >= auj ? c.date_livraison : auj
+      return due <= v.p && (!c.date_complete || c.date_complete > v.p) ? s + c.quantite : s
+    }, 0)
+  })
+  return out
+}
 function parseReferences(q: string): string[] { return Array.from(new Set(q.split(/[\s,;]+/).map((s) => s.trim().toUpperCase()).filter(Boolean))) }
 const STATUT_LABEL: Record<string, string> = { COUVERT: 'Couvert (stock)', COUVERT_PAR_RECEPTION: 'Couvert par réception', RECEPTION_TARDIVE: 'Réception tardive', RUPTURE: 'Rupture' }
 const STATUT_COLOR: Record<string, string> = { COUVERT: '#8fd4a8', COUVERT_PAR_RECEPTION: '#8FC7DA', RECEPTION_TARDIVE: '#E0A961', RUPTURE: '#e0a685' }
@@ -152,8 +205,22 @@ export default function StockGroupesPage() {
     if (list.length > 0) choisirGroupe(list[0].id); else { setGroupeId(''); setData(null) }
   }
 
+  const [afficherAgences, setAfficherAgences] = useState(false)
   const receptionsHorizon = useMemo(() => (data ? data.receptions.filter((r) => r.d <= periodes[periodes.length - 1]) : []), [data, periodes])
-  const maxReception = useMemo(() => Math.max(1, ...receptionsHorizon.map((r) => r.q)), [receptionsHorizon])
+
+  // Ventilation par période du groupe et de chaque référence (à livrer à la
+  // date demandée / non livrables / à recevoir), à partir des lignes du RPC.
+  const ventilGroupe = useMemo(() => (data ? ventiler(periodes, data.cdc, data.receptions) : []), [data, periodes])
+  const ventilParRef = useMemo(() => {
+    const out: Record<string, Ventil[]> = {}
+    if (!data) return out
+    for (const r of data.references) {
+      const recs = data.receptions.map((x) => ({ d: x.d, q: toNumber(x.refs[r.ref]) })).filter((x) => x.q > 0)
+      out[r.ref] = ventiler(periodes, data.cdc.filter((c) => c.ref === r.ref), recs)
+    }
+    return out
+  }, [data, periodes])
+  const maxBarre = useMemo(() => Math.max(1, ...ventilGroupe.map((v) => Math.max(v.aRecevoir, v.aLivrer))), [ventilGroupe])
   const agencesTriees = useMemo(() => (data ? [...data.agences].sort((a, b) => (b.periodes[b.periodes.length - 1]?.q ?? 0) - (a.periodes[a.periodes.length - 1]?.q ?? 0)) : []), [data])
   const maxAgence = useMemo(() => Math.max(1, ...agencesTriees.map((a) => a.periodes[a.periodes.length - 1]?.q ?? 0)), [agencesTriees])
 
@@ -171,13 +238,16 @@ export default function StockGroupesPage() {
       const header = (ws: ExcelJS.Worksheet) => { ws.getRow(1).eachCell((c) => { c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0B1220' } }; c.font = { color: { argb: 'FFF5F3EC' }, bold: true } }); ws.views = [{ state: 'frozen', ySplit: 1 }] }
       const libs = periodes.map((p, i) => libellePeriode(p, i))
       const ws1 = wb.addWorksheet('Synthèse')
-      ws1.columns = [{ header: 'Échéance', key: 'p', width: 22 }, { header: 'Capacité de vente', key: 'atp', width: 18 }, { header: 'CDC livrables (pièces)', key: 'cdc', width: 22 }, { header: 'CDC livrables (nb)', key: 'nb', width: 18 }, { header: 'Réceptions cumulées', key: 'rec', width: 20 }]
-      header(ws1); data.periodes.forEach((p, i) => ws1.addRow({ p: libs[i], atp: p.atp, cdc: p.cdc_livrables, nb: p.nb_cdc_livrables, rec: p.receptions }))
+      ws1.columns = [{ header: 'Échéance', key: 'p', width: 22 }, { header: 'Qté dispo pour nouvelles CDC livrées d\'ici à', key: 'atp', width: 30 }, { header: 'CDC à livrer d\'ici à (pièces)', key: 'cdc', width: 24 }, { header: 'dont non livrables à la date', key: 'nl', width: 24 }, { header: 'CDC complètes d\'ici à (pièces)', key: 'cdcc', width: 24 }, { header: 'CDF à recevoir d\'ici à', key: 'rec', width: 22 }]
+      header(ws1); data.periodes.forEach((p, i) => ws1.addRow({ p: libs[i], atp: p.atp, cdc: ventilGroupe[i]?.cumALivrer ?? 0, nl: ventilGroupe[i]?.cumNonLivrable ?? 0, cdcc: p.cdc_livrables, rec: p.receptions }))
       const ws2 = wb.addWorksheet('Par référence')
-      ws2.columns = [{ header: 'Référence', key: 'ref', width: 16 }, { header: 'Désignation', key: 'des', width: 40 }, { header: 'Dispo SAGE', key: 'dispo', width: 12 }, { header: '1ʳᵉ pièce vendable', key: 'pd', width: 18 }, ...periodes.flatMap((p, i) => [{ header: `Capacité ${libs[i]}`, key: `atp${i}`, width: 18 }, { header: `CDC livrables ${libs[i]}`, key: `cdc${i}`, width: 20 }])]
-      header(ws2); data.references.forEach((r) => ws2.addRow({ ref: r.ref, des: r.designation, dispo: r.stock_dispo, pd: formatDateFr(r.premiere_date), ...Object.fromEntries(r.periodes.flatMap((p, i) => [[`atp${i}`, p.atp], [`cdc${i}`, p.cdc_livrables]])) }))
+      ws2.columns = [{ header: 'Référence', key: 'ref', width: 16 }, { header: 'Désignation', key: 'des', width: 40 }, { header: 'Stock Sage − PL', key: 'dispo', width: 16 }, { header: '1ʳᵉ pièce disponible', key: 'pd', width: 18 }, ...periodes.flatMap((p, i) => [{ header: `À livrer ${libs[i]}`, key: `liv${i}`, width: 16 }, { header: `dont non livrables ${libs[i]}`, key: `nl${i}`, width: 20 }, { header: `À recevoir ${libs[i]}`, key: `rec${i}`, width: 16 }, { header: `Stock projeté ${libs[i]}`, key: `sp${i}`, width: 18 }, { header: `Dispo nouvelles CDC ${libs[i]}`, key: `atp${i}`, width: 22 }])]
+      header(ws2); data.references.forEach((r) => {
+        const v = ventilParRef[r.ref] || []
+        ws2.addRow({ ref: r.ref, des: r.designation, dispo: r.stock_dispo, pd: formatDateFr(r.premiere_date), ...Object.fromEntries(r.periodes.flatMap((p, i) => [[`liv${i}`, v[i]?.aLivrer ?? 0], [`nl${i}`, v[i]?.nonLivrable ?? 0], [`rec${i}`, v[i]?.aRecevoir ?? 0], [`sp${i}`, r.stock_dispo + (v[i]?.cumARecevoir ?? 0) - (v[i]?.cumALivrer ?? 0)], [`atp${i}`, p.atp]])) })
+      })
       const ws3 = wb.addWorksheet('Par agence')
-      ws3.columns = [{ header: 'Agence', key: 'agence', width: 16 }, ...periodes.map((p, i) => ({ header: `CDC livrables ${libs[i]}`, key: `q${i}`, width: 20 }))]
+      ws3.columns = [{ header: 'Agence', key: 'agence', width: 16 }, ...periodes.map((p, i) => ({ header: `CDC complètes d'ici ${libs[i]}`, key: `q${i}`, width: 22 }))]
       header(ws3); data.agences.forEach((a) => ws3.addRow({ agence: a.agence, ...Object.fromEntries(a.periodes.map((p, i) => [`q${i}`, p.q])) }))
       const ws4 = wb.addWorksheet('Réceptions')
       ws4.columns = [{ header: 'Date', key: 'd', width: 12 }, { header: 'Pièces', key: 'q', width: 10 }, { header: 'Lignes CDF', key: 'n', width: 10 }, { header: 'Détail', key: 'refs', width: 60 }]
@@ -276,75 +346,132 @@ export default function StockGroupesPage() {
           {/* ── Cartes par échéance ── */}
           <div style={{ ...styles.kpiRow, gridTemplateColumns: `repeat(${data.periodes.length}, minmax(0, 1fr))` }}>
             {data.periodes.map((p, i) => {
-              const last = i === data.periodes.length - 1
               const actif = detailPeriode === p.p
+              const v = ventilGroupe[i]
+              const lib = i === 0 ? "aujourd'hui" : libellePeriode(p.p, i).toLowerCase()
               return (
-                <button key={p.p} type="button" onClick={() => setDetailPeriode((v) => (v === p.p ? '' : p.p))} style={{ ...styles.kpi, ...(p.atp > 0 && last ? styles.kpiOk : {}), ...(actif ? styles.kpiActive : {}), textAlign: 'left', cursor: 'pointer', fontFamily: 'inherit' }}>
+                <button key={p.p} type="button" onClick={() => setDetailPeriode((v2) => (v2 === p.p ? '' : p.p))} style={{ ...styles.kpi, ...(actif ? styles.kpiActive : {}), textAlign: 'left', cursor: 'pointer', fontFamily: 'inherit' }}>
                   <div style={styles.kpiLabel}>{libellePeriode(p.p, i)}</div>
                   <div style={{ ...styles.kpiValue, fontSize: 40, color: couleurAtp(p.atp) }}>{formatNumber(p.atp)}</div>
-                  <div style={styles.kpiSub}>{i === 0 ? 'pièces vendables en livraison immédiate' : 'pièces vendables livrables d\'ici là'}</div>
+                  <div style={styles.kpiSub}>{i === 0 ? 'qté dispo pour nouvelles CDC en livraison immédiate' : `qté dispo pour nouvelles CDC avec livraison d'ici à ${lib}`}</div>
                   <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 3, fontSize: 12.5, color: '#E9E5D6' }}>
-                    <span>CDC en base livrables : <b style={{ fontFamily: 'var(--font-mono)', color: '#E0A961' }}>{formatNumber(p.cdc_livrables)}</b> <span style={styles.tdSub}>({formatNumber(p.nb_cdc_livrables)} lignes)</span></span>
-                    <span>Réceptions cumulées : <b style={{ fontFamily: 'var(--font-mono)', color: '#8FC7DA' }}>+ {formatNumber(p.receptions)}</b></span>
+                    <span>CDC à livrer d'ici à {lib} : <b style={{ fontFamily: 'var(--font-mono)', color: C_LIV }}>{formatNumber(v?.cumALivrer ?? 0)}</b>
+                      {v && v.cumNonLivrable > 0 ? <span style={{ color: C_NONLIV }}> dont <b style={{ fontFamily: 'var(--font-mono)' }}>{formatNumber(v.cumNonLivrable)}</b> non livrables</span> : null}</span>
+                    <span>CDF à recevoir d'ici à {lib} : <b style={{ fontFamily: 'var(--font-mono)', color: C_REC }}>+ {formatNumber(p.receptions)}</b></span>
                   </div>
                 </button>
               )
             })}
           </div>
-
-          {/* ── Arrivées de stock ── */}
-          <div style={styles.card}>
-            <div style={styles.cardHeaderRow}>
-              <div style={styles.cardTitle}>Arrivées de stock du groupe <span style={styles.muted}>(commandes fournisseurs SAGE, CDF en retard ou sans date → demain)</span></div>
-              <div style={styles.muted}>{receptionsHorizon.length} date{receptionsHorizon.length > 1 ? 's' : ''} · {formatNumber(receptionsHorizon.reduce((s, r) => s + r.q, 0))} pièces sur l'horizon</div>
-            </div>
-            {receptionsHorizon.length === 0 ? <div style={styles.muted}>Aucune réception attendue sur l'horizon.</div> : (
-              <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', height: 160, overflowX: 'auto', paddingBottom: 4 }}>
-                {receptionsHorizon.map((r) => (
-                  <div key={r.d} title={Object.entries(r.refs).map(([k, v]) => `${k} : +${v}`).join('\n')} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', gap: 4, minWidth: 72, flex: 1, height: '100%' }}>
-                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: '#8FC7DA' }}>+{formatNumber(r.q)}</span>
-                    <div style={{ width: '100%', height: `${Math.max(4, (r.q / maxReception) * 110)}px`, borderRadius: '4px 4px 0 0', background: '#8FC7DA' }} />
-                    <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)' }}>{formatDateCourte(r.d)}</span>
-                  </div>
-                ))}
-              </div>
-            )}
+          <div style={styles.legendLine}>
+            <span style={styles.legendItem}><span style={{ ...styles.legendDot, background: '#8fd4a8' }} />Vert : des pièces peuvent être promises à cette échéance</span>
+            <span style={styles.legendItem}><span style={{ ...styles.legendDot, background: C_NONLIV }} />Rouge : rien de promissible (stock consommé par les CDC déjà prises)</span>
+            <span style={styles.legendItem}><span style={{ ...styles.legendDot, background: C_LIV }} />Orange : CDC déjà en base, à leur date de livraison demandée</span>
+            <span style={styles.legendItem}><span style={{ ...styles.legendDot, background: C_REC }} />Bleu : commandes fournisseurs SAGE à recevoir</span>
           </div>
 
-          <div style={styles.twoCols}>
-            {/* ── Par référence ── */}
-            <div style={styles.card}>
-              <div style={styles.cardTitle}>Par référence — capacité de vente livrable d'ici… <span style={styles.muted}>(en gris : CDC en base livrables sur la même échéance)</span></div>
-              <div style={styles.tableWrap}>
-                <table className="sgTable" style={styles.table}>
-                  <thead><tr>
-                    <th style={styles.th}>Référence</th><th style={{ ...styles.th, textAlign: 'right' }}>Dispo SAGE</th>
-                    {data.periodes.map((p, i) => <th key={p.p} style={{ ...styles.th, textAlign: 'right' }}>{i === 0 ? 'Immédiat' : libellePeriode(p.p, i)}</th>)}
-                    <th style={styles.th}>1ʳᵉ pièce vendable</th>
-                  </tr></thead>
-                  <tbody>
-                    {data.references.map((r) => (
-                      <tr key={r.ref} className="sgClick" onClick={() => setDetailRef((v) => (v === r.ref ? '' : r.ref))} style={{ background: detailRef === r.ref ? 'rgba(166,161,129,0.14)' : undefined }}>
-                        <td style={styles.td}>
-                          <a href={`/stock?ref=${encodeURIComponent(r.ref)}`} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: '#fff', textDecoration: 'none' }}>{r.ref} ↗</a>
-                          <div style={styles.tdSub}>{r.designation || '—'}</div>
-                        </td>
-                        <td style={{ ...styles.tdNum, color: r.stock_dispo > 0 ? '#8fd4a8' : '#e0a685' }}>{formatNumber(r.stock_dispo)}</td>
-                        {r.periodes.map((p) => (
-                          <td key={p.p} style={{ ...styles.tdNum, color: couleurAtp(p.atp), fontWeight: p.atp > 0 ? 700 : 400 }}>{formatNumber(p.atp)} <span style={{ color: 'rgba(255,255,255,0.35)', fontWeight: 400 }}>/ {formatNumber(p.cdc_livrables)}</span></td>
-                        ))}
-                        <td style={{ ...styles.td, whiteSpace: 'nowrap', color: r.premiere_date ? (r.premiere_date === todayIso() ? '#8fd4a8' : '#E0A961') : '#e0a685', fontWeight: 700 }}>{r.premiere_date ? (r.premiere_date === todayIso() ? "aujourd'hui" : formatDateFr(r.premiere_date)) : 'aucune réception suffisante'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <div style={{ ...styles.muted, marginTop: 8 }}>« Dispo SAGE » = stock disponible tous dépôts, déjà réservé par les CDC en retard : la capacité réelle de vente immédiate est la colonne « Immédiat ». Clic sur une ligne pour filtrer le détail.</div>
+          {/* ── Entrées / sorties par période (barres miroir) ── */}
+          <div style={styles.card}>
+            <div style={styles.cardHeaderRow}>
+              <div style={styles.cardTitle}>CDF à recevoir et CDC à livrer, période par période <span style={styles.muted}>(au-dessus : réceptions SAGE, CDF en retard ou sans date → demain · en dessous : CDC à leur date de livraison demandée)</span></div>
+              <div style={styles.muted}>{formatNumber(receptionsHorizon.reduce((s, r) => s + r.q, 0))} pièces à recevoir · {formatNumber(ventilGroupe.reduce((s, v) => s + v.aLivrer, 0))} à livrer sur l'horizon, dont <span style={{ color: C_NONLIV }}>{formatNumber(ventilGroupe.reduce((s, v) => s + v.nonLivrable, 0))} non livrables à leur date</span></div>
             </div>
+            <div style={{ display: 'grid', gridTemplateColumns: `repeat(${ventilGroupe.length}, minmax(0, 1fr))`, gap: 10 }}>
+              {ventilGroupe.map((v, i) => {
+                const hRec = (v.aRecevoir / maxBarre) * 100
+                const hLiv = (v.aLivrer / maxBarre) * 100
+                const hNon = (v.nonLivrable / maxBarre) * 100
+                const livrable = v.aLivrer - v.nonLivrable
+                return (
+                  <div key={v.p} title={`${libellePeriode(v.p, i)}\nà recevoir : +${formatNumber(v.aRecevoir)}\nà livrer : ${formatNumber(v.aLivrer)} (${v.nbALivrer} lignes)\nnon livrables à la date : ${formatNumber(v.nonLivrable)} (${v.nbNonLivrable} lignes)`} style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                    <div style={{ height: 110, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', alignItems: 'center' }}>
+                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: v.aRecevoir > 0 ? C_REC : 'rgba(255,255,255,0.3)' }}>+{formatNumber(v.aRecevoir)}</span>
+                      <div style={{ width: '70%', height: `${Math.max(v.aRecevoir > 0 ? 3 : 0, hRec)}%`, borderRadius: '4px 4px 0 0', background: C_REC }} />
+                    </div>
+                    <div style={{ borderTop: '1px solid rgba(255,255,255,0.25)', textAlign: 'center', fontSize: 11, color: 'rgba(255,255,255,0.6)', padding: '3px 0' }}>{i === 0 ? "Auj. + retard" : libellePeriode(v.p, i)}</div>
+                    <div style={{ height: 110, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                      <div style={{ width: '70%', height: `${Math.max(v.aLivrer > 0 ? 3 : 0, hLiv)}%`, borderRadius: '0 0 4px 4px', background: C_LIV, position: 'relative', overflow: 'hidden' }}>
+                        <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: `${v.aLivrer > 0 ? (hNon / Math.max(hLiv, 0.01)) * 100 : 0}%`, background: C_NONLIV }} />
+                      </div>
+                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: v.aLivrer > 0 ? C_LIV : 'rgba(255,255,255,0.3)' }}>−{formatNumber(v.aLivrer)}</span>
+                      {v.nonLivrable > 0 && <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: C_NONLIV }}>dont {formatNumber(v.nonLivrable)} non livr.</span>}
+                      {v.nonLivrable === 0 && v.aLivrer > 0 && <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>{formatNumber(livrable)} livrables</span>}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
 
-            {/* ── Par agence ── */}
-            <div style={styles.card}>
-              <div style={styles.cardTitle}>Par agence — CDC en base livrables d'ici… <span style={styles.muted}>(cumul, pièces · agence du collaborateur de la fiche client)</span></div>
+          {/* ── Par référence, période par période ── */}
+          <div style={styles.card}>
+            <div style={styles.cardHeaderRow}>
+              <div style={styles.cardTitle}>Par référence — du stock d'aujourd'hui aux échéances</div>
+              <div style={styles.muted}>Clic sur une référence pour filtrer le détail des CDC · les colonnes « Fin … » sont des flux de la période, sauf « Stock projeté » et « Dispo nouvelles CDC » qui sont des positions à l'échéance.</div>
+            </div>
+            <div style={{ ...styles.tableWrap, maxHeight: 640 }}>
+              <table className="sgTable" style={styles.table}>
+                <thead><tr>
+                  <th style={styles.th}>Référence</th>
+                  <th style={styles.th}>Ligne</th>
+                  <th style={{ ...styles.th, textAlign: 'right' }}>Stock Sage − PL</th>
+                  {data.periodes.map((p, i) => <th key={p.p} style={{ ...styles.th, textAlign: 'right' }}>{i === 0 ? "Auj. (+ retard)" : libellePeriode(p.p, i)}</th>)}
+                  <th style={styles.th}>1ʳᵉ pièce disponible</th>
+                </tr></thead>
+                <tbody>
+                  {data.references.map((r) => {
+                    const v = ventilParRef[r.ref] || []
+                    const actif = detailRef === r.ref
+                    const bg = actif ? 'rgba(166,161,129,0.14)' : undefined
+                    const tdL = { ...styles.td, whiteSpace: 'nowrap' as const, color: 'rgba(255,255,255,0.55)', fontSize: 11.5, background: bg }
+                    const onClick = () => setDetailRef((x) => (x === r.ref ? '' : r.ref))
+                    return (
+                      <React.Fragment key={r.ref}>
+                        <tr className="sgClick" onClick={onClick}>
+                          <td rowSpan={4} style={{ ...styles.td, background: bg, borderBottom: '2px solid rgba(255,255,255,0.14)', verticalAlign: 'top', minWidth: 160 }}>
+                            <a href={`/stock?ref=${encodeURIComponent(r.ref)}`} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: '#fff', textDecoration: 'none' }}>{r.ref} ↗</a>
+                            <div style={styles.tdSub}>{r.designation || '—'}</div>
+                          </td>
+                          <td style={{ ...tdL, color: C_LIV }}>CDC à livrer</td>
+                          <td rowSpan={4} style={{ ...styles.tdNum, background: bg, borderBottom: '2px solid rgba(255,255,255,0.14)', fontSize: 16, fontWeight: 700, color: r.stock_dispo > 0 ? '#8fd4a8' : '#e0a685' }}>{formatNumber(r.stock_dispo)}</td>
+                          {v.map((x) => (
+                            <td key={x.p} style={{ ...styles.tdNum, background: bg, color: x.aLivrer > 0 ? C_LIV : 'rgba(255,255,255,0.3)' }}>
+                              {x.aLivrer > 0 ? `− ${formatNumber(x.aLivrer)}` : '·'}
+                              {x.nonLivrable > 0 && <div style={{ fontSize: 10.5, color: C_NONLIV }}>dont {formatNumber(x.nonLivrable)} non livr.</div>}
+                            </td>
+                          ))}
+                          <td rowSpan={4} style={{ ...styles.td, background: bg, borderBottom: '2px solid rgba(255,255,255,0.14)', whiteSpace: 'nowrap', color: r.premiere_date ? (r.premiere_date === todayIso() ? '#8fd4a8' : '#E0A961') : '#e0a685', fontWeight: 700 }}>{r.premiere_date ? (r.premiere_date === todayIso() ? "aujourd'hui" : formatDateFr(r.premiere_date)) : 'aucune réception suffisante'}</td>
+                        </tr>
+                        <tr className="sgClick" onClick={onClick}>
+                          <td style={{ ...tdL, color: C_REC }}>CDF à recevoir</td>
+                          {v.map((x) => <td key={x.p} style={{ ...styles.tdNum, background: bg, color: x.aRecevoir > 0 ? C_REC : 'rgba(255,255,255,0.3)' }}>{x.aRecevoir > 0 ? `+ ${formatNumber(x.aRecevoir)}` : '·'}</td>)}
+                        </tr>
+                        <tr className="sgClick" onClick={onClick}>
+                          <td style={tdL}>Stock projeté fin de période</td>
+                          {v.map((x) => { const sp = r.stock_dispo + x.cumARecevoir - x.cumALivrer; return <td key={x.p} style={{ ...styles.tdNum, background: bg, color: sp < 0 ? C_NONLIV : 'rgba(255,255,255,0.8)' }}>{formatNumber(sp)}</td> })}
+                        </tr>
+                        <tr className="sgClick" onClick={onClick}>
+                          <td style={{ ...tdL, color: '#8fd4a8', borderBottom: '2px solid rgba(255,255,255,0.14)' }}>Dispo nouvelles CDC livrées d'ici à</td>
+                          {r.periodes.map((p) => <td key={p.p} style={{ ...styles.tdNum, background: bg, borderBottom: '2px solid rgba(255,255,255,0.14)', color: couleurAtp(p.atp), fontWeight: 700, fontSize: 14 }}>{formatNumber(p.atp)}</td>)}
+                        </tr>
+                      </React.Fragment>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ ...styles.muted, marginTop: 8 }}>
+              « Stock Sage − PL » = stock tous dépôts moins les préparations de livraison, avant les CDC en retard (comptées dans la colonne « Auj. »). « CDC à livrer » à la date de livraison demandée ; « non livr. » = part qui ne sera pas complète à la fin de la période avec les réceptions connues. « Stock projeté » = Stock Sage − PL + reçu − à livrer en cumul. « Dispo nouvelles CDC » = plus bas niveau du stock projeté à partir de l'échéance : ce qu'on peut promettre sans repousser une CDC déjà prise.
+            </div>
+          </div>
+
+          {/* ── Par agence (replié) ── */}
+          <div style={styles.card}>
+            <div style={styles.cardHeaderRow}>
+              <div style={styles.cardTitle}>Par agence — CDC complètes d'ici à… <span style={styles.muted}>(cumul, pièces · agence du collaborateur de la fiche client)</span></div>
+              <button type="button" className="sgBtn" onClick={() => setAfficherAgences((x) => !x)} style={styles.ghostBtn}>{afficherAgences ? 'Masquer' : 'Afficher la répartition par agence'}</button>
+            </div>
+            {afficherAgences && (<>
               <div style={styles.tableWrap}>
                 <table className="sgTable" style={styles.table}>
                   <thead><tr>
@@ -366,15 +493,15 @@ export default function StockGroupesPage() {
                   </tbody>
                 </table>
               </div>
-              {derniere && (
-                <div style={styles.expected}>
-                  <strong>Discours commercial, lu tel quel :</strong> {data.periodes.slice(0, -1).every((p) => p.atp === 0)
-                    ? `aucune prise de commande en livraison courte avant ${libellePeriode(derniere.p, data.periodes.length - 1).toLowerCase()}`
-                    : `capacité de livraison courte limitée à ${formatNumber(data.periodes[1]?.atp ?? 0)} pièces d'ici ${libellePeriode(data.periodes[1]?.p ?? derniere.p, 1).toLowerCase()}`}
-                  {' '}; {formatNumber(derniere.atp)} pièces vendables d'ici {libellePeriode(derniere.p, data.periodes.length - 1).toLowerCase()}. Les {formatNumber(derniere.receptions)} pièces reçues sur l'horizon servent d'abord les {formatNumber(derniere.cdc_livrables)} pièces de commandes déjà en base{agencesTriees.slice(0, 2).map((a) => `, dont ${formatNumber(a.periodes[a.periodes.length - 1]?.q ?? 0)} pour ${a.agence}`).join('')}.
-                </div>
-              )}
-            </div>
+            </>)}
+            {derniere && (
+              <div style={styles.expected}>
+                <strong>Discours commercial, lu tel quel :</strong> {data.periodes.slice(0, -1).every((p) => p.atp === 0)
+                  ? `aucune nouvelle CDC livrable avant ${libellePeriode(derniere.p, data.periodes.length - 1).toLowerCase()}`
+                  : `nouvelles CDC limitées à ${formatNumber(data.periodes[1]?.atp ?? 0)} pièces pour une livraison d'ici ${libellePeriode(data.periodes[1]?.p ?? derniere.p, 1).toLowerCase()}`}
+                {' '}; {formatNumber(derniere.atp)} pièces disponibles pour de nouvelles CDC livrées d'ici {libellePeriode(derniere.p, data.periodes.length - 1).toLowerCase()}. Les {formatNumber(derniere.receptions)} pièces à recevoir sur l'horizon servent d'abord les {formatNumber(ventilGroupe[ventilGroupe.length - 1]?.cumALivrer ?? 0)} pièces de CDC déjà en base{agencesTriees.slice(0, 2).map((a) => `, dont ${formatNumber(a.periodes[a.periodes.length - 1]?.q ?? 0)} pour ${a.agence}`).join('')}.
+              </div>
+            )}
           </div>
 
           {/* ── Détail des CDC ── */}
@@ -453,7 +580,9 @@ const styles: Record<string, React.CSSProperties> = {
   kpiValue: { marginTop: 6, fontFamily: 'var(--font-mono)', fontWeight: 700, lineHeight: 1, whiteSpace: 'nowrap' },
   kpiSub: { marginTop: 6, fontSize: 12, color: 'rgba(255,255,255,0.5)', lineHeight: 1.35 },
 
-  twoCols: { display: 'grid', gridTemplateColumns: 'minmax(0, 1.15fr) minmax(0, 1fr)', gap: 14, alignItems: 'start' },
+  legendLine: { display: 'flex', flexWrap: 'wrap', gap: 14, fontSize: 11.5, color: 'rgba(255,255,255,0.6)', marginTop: -4 },
+  legendItem: { display: 'inline-flex', alignItems: 'center', gap: 6 },
+  legendDot: { width: 10, height: 10, borderRadius: '50%', display: 'inline-block' },
   tableWrap: { maxHeight: 460, overflow: 'auto', borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)' },
   table: { width: '100%', borderCollapse: 'collapse', fontSize: 12.5 },
   th: { textAlign: 'left', padding: '8px 10px', fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'rgba(255,255,255,0.45)', borderBottom: '1px solid rgba(255,255,255,0.1)', whiteSpace: 'nowrap' },
