@@ -63,6 +63,8 @@
  *    texte libre). Rouge seulement si mainDelivery pointe une autre adresse.
  *  - Téléphone : indicatif international quel qu'il soit et zéro national
  *    retirés, comparaison sur les 9 derniers chiffres.
+ *  - Champs numériques (encours, assurance crédit, nb adresses) : une valeur
+ *    absente vaut 0 — "0" d'un côté et "rien" de l'autre = identique.
  *  - Table public.controle_champ_maitre : champs pour lesquels BLG est maître
  *    (réglage via le bouton "⚙ BLG maître" du pavé Champs contrôlés). Ces
  *    champs ne sont plus comparés : pastille verte "BLG maître", exclus des
@@ -1174,6 +1176,8 @@ type PaireExport = {
   blgKey: keyof ControleRow
   compareStrict: boolean
   comparer?: (r: ControleRow) => ResultatComparaison
+  /** Champ numérique : une valeur absente vaut 0 (0 ↔ vide = identique). */
+  numerique?: boolean
 }
 
 const EXPORT_PAIRES_COMPARAISON: PaireExport[] = [
@@ -1235,16 +1239,16 @@ const EXPORT_PAIRES_COMPARAISON: PaireExport[] = [
     comparer: (r) => comparerInclusion(r.sage_categorie_af_gaf, r.blg_tags),
   },
   {
-    numeroSage: 28, labelSage: 'Encours autorisé', sageKey: 'sage_encours', numeroBlg: '18', labelBlg: "Limite d'encours", blgKey: 'blg_encours', compareStrict: true,
-    comparer: (r) => (r.sage_encours !== null && r.blg_encours !== null && Number(r.sage_encours) !== Number(r.blg_encours) ? 'ecart' : 'ok'),
+    numeroSage: 28, labelSage: 'Encours autorisé', sageKey: 'sage_encours', numeroBlg: '18', labelBlg: "Limite d'encours", blgKey: 'blg_encours', compareStrict: true, numerique: true,
+    comparer: (r) => (Number(r.sage_encours ?? 0) === Number(r.blg_encours ?? 0) ? 'ok' : 'ecart'),
   },
   {
-    numeroSage: 29, labelSage: 'Assurance crédit', sageKey: 'sage_assurance_credit', numeroBlg: '19', labelBlg: "Montant d'assurance crédit", blgKey: 'blg_assurance_credit', compareStrict: true,
-    comparer: (r) => (r.sage_assurance_credit !== null && r.blg_assurance_credit !== null && Number(r.sage_assurance_credit) !== Number(r.blg_assurance_credit) ? 'ecart' : 'ok'),
+    numeroSage: 29, labelSage: 'Assurance crédit', sageKey: 'sage_assurance_credit', numeroBlg: '19', labelBlg: "Montant d'assurance crédit", blgKey: 'blg_assurance_credit', compareStrict: true, numerique: true,
+    comparer: (r) => (Number(r.sage_assurance_credit ?? 0) === Number(r.blg_assurance_credit ?? 0) ? 'ok' : 'ecart'),
   },
   { numeroSage: 30, labelSage: 'Agence de rattachement', sageKey: 'sage_agence_rattachement', numeroBlg: '23', labelBlg: 'Division (informatif, pas d\'équivalence confirmée)', blgKey: 'blg_division', compareStrict: false },
   {
-    numeroSage: 32, labelSage: 'Nb adresses de livraison', sageKey: 'sage_nb_adresses_livraison', numeroBlg: null, labelBlg: 'Nb adresses de livraison', blgKey: 'blg_nb_adresses_livraison', compareStrict: true,
+    numeroSage: 32, labelSage: 'Nb adresses de livraison', sageKey: 'sage_nb_adresses_livraison', numeroBlg: null, labelBlg: 'Nb adresses de livraison', blgKey: 'blg_nb_adresses_livraison', compareStrict: true, numerique: true,
     comparer: (r) => (Number(r.sage_nb_adresses_livraison ?? 0) === Number(r.blg_nb_adresses_livraison ?? 0) ? 'ok' : 'ecart'),
   },
   {
@@ -1453,6 +1457,9 @@ function evaluerPaire(p: PaireExport, r: ControleRow, blgMaitre?: Set<string>): 
   const bVide = estVide(bv)
   if (sVide && bVide) return 'vide'
   if (!p.compareStrict) return 'affichage'
+  // Champs numériques : "rien" vaut 0 des deux côtés (0 ↔ vide = identique),
+  // donc pas d'orange "donnée manquante" — on passe directement à la règle.
+  if (p.numerique && p.comparer) return p.comparer(r)
   if (sVide || bVide) return 'partiel'
   if (p.comparer) return p.comparer(r)
   return normaliserPourExport(sv) === normaliserPourExport(bv) ? 'ok' : 'ecart'
