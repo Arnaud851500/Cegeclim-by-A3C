@@ -90,7 +90,7 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'Tableaux de bord', path: '/atelier-analyse', accessKey: 'can_dashboard', description: 'Atelier d’analyse et tableaux de bord personnalisables.' },
       { label: 'Analyse devis', path: '/cycle-documents', accessKey: 'can_dashboard', description: 'Cycle des documents et transformation des devis.' },
       { label: 'Courbes de flux', path: '/approvisionnements', accessKey: 'can_dashboard', description: 'Courbes Devis – CDC – BL – Factures dans le temps.' },
-      { label: 'Activités – CA', path: '/activites', accessKey: 'can_activites', description: 'Suivre les activités et les indicateurs de chiffre d’affaires.' },
+      { label: 'Activités – CA', path: '/activites', accessKey: 'can_autorisation', description: 'Suivre les activités et les indicateurs de chiffre d’affaires.' },
       { label: 'Indicateurs', path: '/indicateurs', accessKey: 'can_dashboard', description: 'Principaux indicateurs de performance (commerce, services, coûts, stocks).' },
       { label: 'Analyse IA', path: '/atelier-analyse/assistant', accessKey: 'can_autorisation', description: 'Assistant d’analyse conversationnel sur les données de l’activité.' },
       { label: 'Indicateurs (pilotage)', path: '/Indicateurs', accessKey: 'can_autorisation', description: 'Vue pilotage des indicateurs, réservée aux administrateurs.' },
@@ -190,6 +190,7 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'MAJ données activité', path: '/Import', activeLabel: 'MAJ Données Activité', accessKey: 'can_autorisation', description: 'Imports, contrôles des agrégats et cohérence des données.' },
       { label: 'Planification des jobs', path: '/admin/planification', activeLabel: 'Job scheduling', accessKey: 'can_autorisation', description: 'Planification des synchronisations et recalculs.' },
       { label: 'Cycle de synchronisation', path: '/cycle-synchronisation', activeLabel: 'Cycle Synchronisation data', accessKey: 'can_autorisation', description: 'État et historique des cycles de synchronisation SAGE → Supabase.' },
+      { label: 'MAJ retards paiement', path: '/retards-paiement', activeLabel: 'Retards de paiements', accessKey: 'can_autorisation', description: 'Intégration du fichier des retards de paiemnets.' },
     ],
   },
 ]
