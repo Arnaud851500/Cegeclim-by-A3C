@@ -255,8 +255,7 @@ export default function StockGroupesPage() {
         const row = ws2.addRow({ ref: r.ref, des: r.designation, dispo: r.stock_dispo, pd: formatDateFr(r.premiere_date), ...Object.fromEntries(r.periodes.flatMap((p, i) => [[`liv${i}`, v[i]?.aLivrer ?? 0], [`nl${i}`, v[i]?.nonLivrable ?? 0], [`rec${i}`, v[i]?.aRecevoir ?? 0], [`sp${i}`, r.stock_dispo + (v[i]?.cumARecevoir ?? 0) - (v[i]?.cumALivrer ?? 0)], [`atp${i}`, p.atp]])) })
         // Highlight "Dispo nouvelles CDC" columns (atp0, atp1, atp2, ...)
         for (let i = 0; i < periodes.length; i++) {
-          const colIndex = 5 + i * 5 // Column index for atp${i} (0-indexed: ref=0, des=1, dispo=2, pd=3, then each period has 5 cols, atp is 5th)
-          const cell = row.getCell(colIndex)
+          const cell = row.getCell(`atp${i}`)
           if (cell) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8F5E9' } } // Light green
         }
       })
