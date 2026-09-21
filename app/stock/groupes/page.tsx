@@ -235,26 +235,51 @@ export default function StockGroupesPage() {
     setExporting(true)
     try {
       const wb = new ExcelJS.Workbook(); wb.creator = 'CEGECLIM by A3C'
-      const header = (ws: ExcelJS.Worksheet) => { ws.getRow(1).eachCell((c) => { c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0B1220' } }; c.font = { color: { argb: 'FFF5F3EC' }, bold: true } }); ws.views = [{ state: 'frozen', ySplit: 1 }] }
+      const header = (ws: ExcelJS.Worksheet, xSplit?: number) => {
+        ws.getRow(1).eachCell((c) => {
+          c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0B1220' } }
+          c.font = { color: { argb: 'FFF5F3EC' }, bold: true }
+        })
+        ws.views = [{ state: 'frozen', ySplit: 2, xSplit: xSplit ?? 0 }]
+      }
       const libs = periodes.map((p, i) => libellePeriode(p, i))
       const ws1 = wb.addWorksheet('Synthèse')
       ws1.columns = [{ header: 'Échéance', key: 'p', width: 22 }, { header: 'Qté dispo pour nouvelles CDC livrées d\'ici à', key: 'atp', width: 30 }, { header: 'CDC à livrer d\'ici à (pièces)', key: 'cdc', width: 24 }, { header: 'dont non livrables à la date', key: 'nl', width: 24 }, { header: 'CDC complètes d\'ici à (pièces)', key: 'cdcc', width: 24 }, { header: 'CDF à recevoir d\'ici à', key: 'rec', width: 22 }]
       header(ws1); data.periodes.forEach((p, i) => ws1.addRow({ p: libs[i], atp: p.atp, cdc: ventilGroupe[i]?.cumALivrer ?? 0, nl: ventilGroupe[i]?.cumNonLivrable ?? 0, cdcc: p.cdc_livrables, rec: p.receptions }))
+
       const ws2 = wb.addWorksheet('Par référence')
       ws2.columns = [{ header: 'Référence', key: 'ref', width: 16 }, { header: 'Désignation', key: 'des', width: 40 }, { header: 'Stock Sage − PL', key: 'dispo', width: 16 }, { header: '1ʳᵉ pièce disponible', key: 'pd', width: 18 }, ...periodes.flatMap((p, i) => [{ header: `À livrer ${libs[i]}`, key: `liv${i}`, width: 16 }, { header: `dont non livrables ${libs[i]}`, key: `nl${i}`, width: 20 }, { header: `À recevoir ${libs[i]}`, key: `rec${i}`, width: 16 }, { header: `Stock projeté ${libs[i]}`, key: `sp${i}`, width: 18 }, { header: `Dispo nouvelles CDC ${libs[i]}`, key: `atp${i}`, width: 22 }])]
-      header(ws2); data.references.forEach((r) => {
+      header(ws2, 4); // Freeze after column D (index 3)
+      data.references.forEach((r) => {
         const v = ventilParRef[r.ref] || []
-        ws2.addRow({ ref: r.ref, des: r.designation, dispo: r.stock_dispo, pd: formatDateFr(r.premiere_date), ...Object.fromEntries(r.periodes.flatMap((p, i) => [[`liv${i}`, v[i]?.aLivrer ?? 0], [`nl${i}`, v[i]?.nonLivrable ?? 0], [`rec${i}`, v[i]?.aRecevoir ?? 0], [`sp${i}`, r.stock_dispo + (v[i]?.cumARecevoir ?? 0) - (v[i]?.cumALivrer ?? 0)], [`atp${i}`, p.atp]])) })
+        const row = ws2.addRow({ ref: r.ref, des: r.designation, dispo: r.stock_dispo, pd: formatDateFr(r.premiere_date), ...Object.fromEntries(r.periodes.flatMap((p, i) => [[`liv${i}`, v[i]?.aLivrer ?? 0], [`nl${i}`, v[i]?.nonLivrable ?? 0], [`rec${i}`, v[i]?.aRecevoir ?? 0], [`sp${i}`, r.stock_dispo + (v[i]?.cumARecevoir ?? 0) - (v[i]?.cumALivrer ?? 0)], [`atp${i}`, p.atp]])) })
+        // Highlight "Dispo nouvelles CDC" columns (atp0, atp1, atp2, ...)
+        for (let i = 0; i < periodes.length; i++) {
+          const colIndex = 5 + i * 5 // Column index for atp${i} (0-indexed: ref=0, des=1, dispo=2, pd=3, then each period has 5 cols, atp is 5th)
+          const cell = row.getCell(colIndex)
+          if (cell) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8F5E9' } } // Light green
+        }
       })
+
       const ws3 = wb.addWorksheet('Par agence')
       ws3.columns = [{ header: 'Agence', key: 'agence', width: 16 }, ...periodes.map((p, i) => ({ header: `CDC complètes d'ici ${libs[i]}`, key: `q${i}`, width: 22 }))]
       header(ws3); data.agences.forEach((a) => ws3.addRow({ agence: a.agence, ...Object.fromEntries(a.periodes.map((p, i) => [`q${i}`, p.q])) }))
       const ws4 = wb.addWorksheet('Réceptions')
       ws4.columns = [{ header: 'Date', key: 'd', width: 12 }, { header: 'Pièces', key: 'q', width: 10 }, { header: 'Lignes CDF', key: 'n', width: 10 }, { header: 'Détail', key: 'refs', width: 60 }]
       header(ws4); data.receptions.forEach((r) => ws4.addRow({ d: formatDateFr(r.d), q: r.q, n: r.n, refs: Object.entries(r.refs).map(([k, v]) => `${k}: ${v}`).join(' · ') }))
+
       const ws5 = wb.addWorksheet('Commandes clients')
       ws5.columns = [{ header: 'Référence', key: 'ref', width: 16 }, { header: 'CDC', key: 'numero_document', width: 12 }, { header: 'Client', key: 'nom_tiers', width: 30 }, { header: 'N° tiers', key: 'numero_tiers', width: 10 }, { header: 'Agence', key: 'agence', width: 14 }, { header: 'Créée le', key: 'date_creation', width: 12 }, { header: 'Livraison demandée', key: 'date_livraison', width: 18 }, { header: 'Complète le', key: 'date_complete', width: 12 }, { header: 'Qté', key: 'quantite', width: 8 }, { header: 'Montant HT', key: 'montant_ht', width: 14, style: { numFmt: '#,##0 €' } }, { header: 'Statut', key: 'statut', width: 22 }]
-      header(ws5); data.cdc.forEach((c) => ws5.addRow({ ...c, date_creation: formatDateFr(c.date_creation), date_livraison: formatDateFr(c.date_livraison), date_complete: formatDateFr(c.date_complete), statut: STATUT_LABEL[c.statut] || c.statut }))
+      header(ws5);
+      data.cdc.forEach((c) => {
+        const row = ws5.addRow({ ...c, date_creation: formatDateFr(c.date_creation), date_livraison: formatDateFr(c.date_livraison), date_complete: formatDateFr(c.date_complete), statut: STATUT_LABEL[c.statut] || c.statut })
+        // Color code rows based on STATUT: green for COUVERT, orange for COUVERT_PAR_RECEPTION, blue for RECEPTION_TARDIVE
+        const color = STATUT_COLOR[c.statut]
+        if (color) {
+          const argb = color.replace('#', 'FF')
+          row.eachCell((cell) => { cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb } } })
+        }
+      })
       ws5.autoFilter = { from: 'A1', to: 'K1' }
       const buffer = await wb.xlsx.writeBuffer()
       const url = URL.createObjectURL(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }))
