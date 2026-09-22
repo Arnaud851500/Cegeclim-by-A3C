@@ -77,6 +77,15 @@
  *        colonne (prime sur le tri prédéfini) et filtre d'en-tête sur chaque
  *        colonne (texte "contient", nombres "&gt;10", "vide"/"!vide") ; l'export
  *        Excel reprend la liste filtrée et triée.
+ *    MàJ 22/09/2026 — blocage appro :
+ *      · table appro_article_blocage (AR_InterdireCommande, AR_Exclure, VieProduit,
+ *        UO FMS ; clé = référence) alimentée par l'export SAGE "Articles-bis_avec_
+ *        cde_blocage.csv" (bouton "Importer le CSV blocage" → RPC
+ *        appro_importer_blocage_articles). Vue articles : blocage_appro,
+ *        exclure_appro, vie_produit, blocage_importe_le.
+ *      · pastille rouge "⛔ Blocage appro" partout où une référence est affichée
+ *        (liste Articles, fiche ✎, fiche fournisseur, comparaison et sa fenêtre),
+ *        filtre "Blocage appro" + colonne d'en-tête filtrable, KPI, export Excel.
  *  - Articles & stock min : la base article SAGE avec MYSTOCK, la conso BL
  *    mensuelle (μ, σ sur l'horizon), le stock FMS, le stock min SAGE, le stock
  *    min BLG (entrepôt DPFMS) et le stock min CALCULÉ (point de commande) —
@@ -279,6 +288,11 @@ type ArtRow = {
   arret_vente: boolean | null
   ref_remplacante: string | null
   date_effet: string | null
+  // blocage appro (table appro_article_blocage — export SAGE AR_InterdireCommande / AR_Exclure / VieProduit)
+  blocage_appro: boolean | null               // AR_InterdireCommande = 1 → pastille "Blocage appro"
+  exclure_appro: boolean | null               // AR_Exclure = 1
+  vie_produit: string | null                  // FINDEVIE…
+  blocage_importe_le: string | null
 }
 
 type StrategieRef = { code: string; designation: string; outil_cbn: string | null; mode_appro: string | null; calcul_besoin_blg: boolean; ordre: number | null }
@@ -452,6 +466,24 @@ function InputFiltre({ value, onChange, placeholder = 'filtre', align = 'left' }
 }
 
 /** Pastille de qualité SAGE (MARCHANDISE, PV, FRAIS GENERAUX…). */
+/** Pastille "Blocage appro" (AR_InterdireCommande = 1 dans SAGE) + fin de vie / exclusion,
+ * affichée partout où une référence article apparaît. */
+function BlocageApproBadge({ article, compact = false }: { article: Pick<ArtRow, 'blocage_appro' | 'exclure_appro' | 'vie_produit'>; compact?: boolean }) {
+  if (!article.blocage_appro && !article.exclure_appro && !article.vie_produit) return null
+  const titre = [
+    article.blocage_appro ? 'Commande interdite dans SAGE (AR_InterdireCommande = 1) : ne pas réapprovisionner' : null,
+    article.exclure_appro ? 'Article exclu (AR_Exclure = 1)' : null,
+    article.vie_produit ? `Vie produit : ${article.vie_produit}` : null,
+  ].filter(Boolean).join('\n')
+  return (
+    <span className="inline-flex items-center gap-1" title={titre}>
+      {article.blocage_appro && <span className={`rounded-full bg-red-600 font-bold text-white ${compact ? 'px-1.5 py-0.5 text-[10px]' : 'px-2 py-0.5 text-[11px]'}`}>⛔ Blocage appro</span>}
+      {article.exclure_appro && <span className={`rounded-full bg-red-50 font-bold text-red-700 ${compact ? 'px-1.5 py-0.5 text-[10px]' : 'px-2 py-0.5 text-[11px]'}`}>Exclu</span>}
+      {article.vie_produit && <span className={`rounded-full bg-orange-100 font-bold text-orange-700 ${compact ? 'px-1.5 py-0.5 text-[10px]' : 'px-2 py-0.5 text-[11px]'}`}>{/^fin ?de ?vie$/i.test(article.vie_produit.trim()) ? 'Fin de vie' : article.vie_produit}</span>}
+    </span>
+  )
+}
+
 function QualiteBadge({ qualite }: { qualite: string | null | undefined }) {
   const q = safeText(qualite)
   if (!q) return null
@@ -1341,7 +1373,7 @@ function FicheFournisseurModal({ selected, strategies, articles, onRowChange, on
                 <tbody>
                   {refsFournisseur.map((a) => (
                     <tr key={a.reference_article} className={`border-t border-[#F4F3F0] ${a.a_commander ? 'bg-red-50/40' : ''}`}>
-                      <td className="px-2 py-1"><span className="font-mono font-semibold">{a.reference_article}</span><div className="truncate text-[11px] text-[#8A8474]">{a.sage_designation}</div></td>
+                      <td className="px-2 py-1"><span className="font-mono font-semibold">{a.reference_article}</span> <BlocageApproBadge article={a} compact /><div className="truncate text-[11px] text-[#8A8474]">{a.sage_designation}</div></td>
                       <td className="px-2 py-1 text-right">{fmtNum(a.conso_moy_mensuelle, 1)}</td>
                       <td className="px-2 py-1 text-right">{fmtNum(a.sage_stock_fms)}</td>
                       <td className="px-2 py-1 text-right">{n0(a.encours_fourn_fms) > 0 ? <span title={a.detail_cdf || ''}>{fmtNum(a.encours_fourn_fms)}{n0(a.encours_fourn_retard) > 0 ? <span className="ml-0.5 text-[#96600F]">⏱</span> : ''}</span> : '—'}</td>
@@ -1809,8 +1841,9 @@ function ArticleManuelModal({ article, fournisseur, onClose, onSaved }: { articl
       <div className="w-full max-w-2xl rounded-xl bg-white p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
         <div className="mb-3 flex items-start justify-between border-b border-[#E5E1D8] pb-3">
           <div>
-            <div className="font-mono text-[12px] font-bold text-[#8A8474]">{article.reference_article}{fournisseur ? ` · ${fournisseur.numero} ${fournisseur.sage_intitule || ''}` : ''}</div>
+            <div className="flex flex-wrap items-center gap-2 font-mono text-[12px] font-bold text-[#8A8474]"><span>{article.reference_article}{fournisseur ? ` · ${fournisseur.numero} ${fournisseur.sage_intitule || ''}` : ''}</span><BlocageApproBadge article={article} /></div>
             <div className="text-[15px] font-bold text-[#111820]">{article.sage_designation || '—'}</div>
+            {article.blocage_appro && <div className="mt-1 rounded-lg border border-red-200 bg-red-50 px-2 py-1 text-[12px] font-semibold text-red-700">Commande interdite dans SAGE (AR_InterdireCommande) : cette référence ne doit pas être réapprovisionnée.</div>}
             <div className="mt-1 text-[12px] text-[#8A8474]">Délais fournisseur : appro {fmtNum(article.delai_appro_jours)} j · sécurité {fmtNum(article.delai_securite_jours)} j. Les valeurs saisies ici priment (jours calendaires) et sont conservées au recalcul.</div>
           </div>
           <button type="button" onClick={onClose} className="rounded-lg px-2 py-1 text-[13px] font-bold text-[#8A8474] hover:bg-[#F4F3F0]">✕</button>
@@ -1922,7 +1955,7 @@ function ModeleProjection({ parametres, onParametresChange, onRecalcul, loading 
 
 // ── Colonnes de la liste Articles : clé, en-tête, valeur utilisée pour le tri
 // et le filtre d'en-tête. L'ordre est celui du tableau (thead et tbody).
-type CleColArt = 'inc' | 'reference' | 'fourn' | 'strategie' | 'arret' | 'delai_l' | 'mu12' | 'sigma' | 'mu3' | 'derniere_sortie' | 'stock_fms' | 'dispo' | 'encours' | 'reserve' | 'projete' | 'couv' | 'min_sage' | 'min_blg' | 'ss' | 'min_calc' | 'max_calc' | 'a_cmder' | 'retenu'
+type CleColArt = 'inc' | 'reference' | 'fourn' | 'strategie' | 'blocage' | 'arret' | 'delai_l' | 'mu12' | 'sigma' | 'mu3' | 'derniere_sortie' | 'stock_fms' | 'dispo' | 'encours' | 'reserve' | 'projete' | 'couv' | 'min_sage' | 'min_blg' | 'ss' | 'min_calc' | 'max_calc' | 'a_cmder' | 'retenu'
 type FiltresColArt = Partial<Record<CleColArt, string>>
 type CtxColArt = { fournMap: Map<string, FournRow>; incoherencesParRef: Map<string, string[]> }
 
@@ -1931,6 +1964,7 @@ const COLONNES_ARTICLES: { key: CleColArt; label: string; title?: string; align:
   { key: 'reference', label: 'Référence', title: 'Référence et désignation SAGE', align: 'left', placeholder: 'réf. ou désignation', val: (a) => a.reference_article },
   { key: 'fourn', label: 'Fourn.', title: 'Fournisseur principal (n° SAGE). Filtre sur le n° ou l\'intitulé', align: 'left', placeholder: 'n° ou nom', val: (a) => a.fournisseur_principal },
   { key: 'strategie', label: 'Stratégie', title: 'Stratégie d\'appro principale du fournisseur', align: 'left', val: (a, c) => (a.fournisseur_principal ? c.fournMap.get(a.fournisseur_principal)?.strategie_principale : null) || '' },
+  { key: 'blocage', label: 'Blocage', title: 'Blocage appro SAGE (AR_InterdireCommande), exclusion (AR_Exclure) et vie produit (import CSV). Filtre : "blocage", "exclu", "fin", "vide"', align: 'left', placeholder: 'blocage', val: (a) => [a.blocage_appro ? 'Blocage appro' : '', a.exclure_appro ? 'Exclu' : '', a.vie_produit || ''].filter(Boolean).join(' ') },
   { key: 'arret', label: 'Arrêt', title: 'Arrêt appro / arrêt vente, référence remplaçante et date d\'effet (saisie manuelle, ✎). Filtre : "appro", "vente", une référence', align: 'left', val: (a) => [a.arret_appro ? 'Appro' : '', a.arret_vente ? 'Vente' : '', a.ref_remplacante || ''].filter(Boolean).join(' ') },
   { key: 'delai_l', label: 'Délai L', title: 'Délai d\'appro + délai de sécurité (jours calendaires) — ref = valeurs propres à la référence, sinon fournisseur / défaut', align: 'right', val: (a) => a.projection_delai_l },
   { key: 'mu12', label: 'μ 12 mois', title: 'Conso moyenne mensuelle sur l\'horizon (12 mois)', align: 'right', val: (a) => a.conso_moy_mensuelle },
@@ -1980,6 +2014,10 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
   const [strategieFilter, setStrategieFilter] = useState('')      // stratégie principale du fournisseur ('' = toutes, '__none' = non renseignée)
   const [sommeilFilter, setSommeilFilter] = useState<'tous' | 'oui' | 'non'>('tous')
   const [arretApproFilter, setArretApproFilter] = useState<'tous' | 'oui' | 'non'>('tous')
+  const [blocageFilter, setBlocageFilter] = useState<'tous' | 'oui' | 'non' | 'exclu' | 'findevie'>('tous')   // blocage appro SAGE (AR_InterdireCommande)
+  const [importBlocageEnCours, setImportBlocageEnCours] = useState(false)
+  const [importBlocageMsg, setImportBlocageMsg] = useState<string | null>(null)
+  const inputCsvBlocage = useRef<HTMLInputElement | null>(null)
   const [incoherenceFilter, setIncoherenceFilter] = useState<string | null>(null)
   // ventes réservées : SAGE sto_res du dépôt FMS (source de vérité), BLG en survol uniquement
   const [tri, setTri] = useState<'conso' | 'ecart' | 'couverture' | 'reference' | 'a_commander' | 'projete' | 'incoherences'>('conso')
@@ -2032,11 +2070,15 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
       if (strategieFilter === '__none' ? !!f?.strategie_principale : strategieFilter && f?.strategie_principale !== strategieFilter) return false
       if (sommeilFilter !== 'tous' && !!a.sage_en_sommeil !== (sommeilFilter === 'oui')) return false
       if (arretApproFilter !== 'tous' && !!a.arret_appro !== (arretApproFilter === 'oui')) return false
+      if (blocageFilter === 'oui' && !a.blocage_appro) return false
+      if (blocageFilter === 'non' && a.blocage_appro) return false
+      if (blocageFilter === 'exclu' && !a.exclure_appro) return false
+      if (blocageFilter === 'findevie' && !a.vie_produit) return false
       if (term && !(a.reference_article.toUpperCase().includes(term) || (a.sage_designation || '').toUpperCase().includes(term))) return false
       for (const k of clesFiltreCol) if (!filtreColArtOk(a, k, filtresCol[k]!, ctxCol)) return false
       return true
     })
-  }, [articles, fournMap, search, fournFilter, familleFilter, pertinentsSeuls, avecConsoSeuls, ecartMinSeuls, aCommanderSeuls, avecEncoursSeuls, qualiteFilter, strategieFilter, sommeilFilter, arretApproFilter, filtresCol, ctxCol, clesFiltreCol])
+  }, [articles, fournMap, search, fournFilter, familleFilter, pertinentsSeuls, avecConsoSeuls, ecartMinSeuls, aCommanderSeuls, avecEncoursSeuls, qualiteFilter, strategieFilter, sommeilFilter, arretApproFilter, blocageFilter, filtresCol, ctxCol, clesFiltreCol])
 
   const compteursIncoherences = useMemo(() => {
     const c: Record<string, number> = {}
@@ -2074,6 +2116,8 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
       total: baseFiltree.length,
       mystock: pert.length,
       arretAppro: baseFiltree.filter((a) => a.arret_appro).length,
+      blocageAppro: baseFiltree.filter((a) => a.blocage_appro).length,
+      blocageMystock: baseFiltree.filter((a) => a.blocage_appro && a.pertinent_calcul_besoin).length,
       avecConso: pert.filter((a) => Number(a.conso_horizon) > 0).length,
       sansConso: pert.filter((a) => !(Number(a.conso_horizon) > 0)).length,
       minBlg: pert.filter((a) => Number(a.blg_stock_min_fms) > 0).length,
@@ -2110,6 +2154,55 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
     } finally { setRecalculEnCours(false) }
   }
 
+  /** Import de l'export SAGE "Articles-bis_avec_cde_blocage.csv" (séparateur ;, UTF-8 avec ou
+   * sans BOM, éventuellement Latin-1) : AR_Ref / AR_InterdireCommande / AR_Exclure / VieProduit /
+   * UO FMS → RPC appro_importer_blocage_articles (remplace la table), puis rechargement. */
+  async function importerCsvBlocage(fichier: File) {
+    setImportBlocageEnCours(true); setImportBlocageMsg(null)
+    try {
+      const buf = await fichier.arrayBuffer()
+      let texte = new TextDecoder('utf-8', { fatal: false }).decode(buf)
+      if (texte.includes('\uFFFD')) texte = new TextDecoder('iso-8859-1').decode(buf)
+      texte = texte.replace(/^\uFEFF/, '')
+      const lignes = texte.split(/\r?\n/).filter((l) => l.trim() !== '')
+      if (lignes.length < 2) throw new Error('fichier vide')
+      const sep = (lignes[0].match(/;/g) || []).length >= (lignes[0].match(/\t/g) || []).length ? ';' : '\t'
+      // découpe d'une ligne CSV avec guillemets doublés ("" = guillemet littéral)
+      const decouper = (l: string): string[] => {
+        const out: string[] = []; let cur = ''; let q = false
+        for (let i = 0; i < l.length; i += 1) {
+          const c = l[i]
+          if (q) { if (c === '"') { if (l[i + 1] === '"') { cur += '"'; i += 1 } else q = false } else cur += c }
+          else if (c === '"') q = true
+          else if (c === sep) { out.push(cur); cur = '' }
+          else cur += c
+        }
+        out.push(cur); return out
+      }
+      const entete = decouper(lignes[0]).map((h) => h.trim().toUpperCase())
+      const idx = (noms: string[]) => { for (const n of noms) { const i = entete.indexOf(n.toUpperCase()); if (i >= 0) return i } return -1 }
+      const iRef = idx(['AR_Ref']), iInt = idx(['AR_InterdireCommande']), iExc = idx(['AR_Exclure']), iVie = idx(['VieProduit', 'VieProduits']), iUo = idx(['UO FMS', 'UO_FMS'])
+      if (iRef < 0 || iInt < 0) throw new Error(`colonnes AR_Ref / AR_InterdireCommande introuvables (entête lue : ${entete.slice(0, 6).join(', ')}…)`)
+      const nz = (v: string | undefined) => { const t = (v ?? '').trim(); return t === '' || t.toUpperCase() === 'NULL' ? null : t }
+      const rows = lignes.slice(1).map(decouper).filter((c) => nz(c[iRef])).map((c) => ({
+        reference_article: (c[iRef] || '').trim(),
+        interdire_commande: (c[iInt] || '').trim() === '1',
+        exclure: iExc >= 0 ? (c[iExc] || '').trim() === '1' : false,
+        vie_produit: iVie >= 0 ? nz(c[iVie]) : null,
+        uo_fms: iUo >= 0 ? nz(c[iUo]) : null,
+      }))
+      if (rows.length === 0) throw new Error('aucune ligne exploitable')
+      const { data, error: err } = await supabase.rpc('appro_importer_blocage_articles', { p_rows: rows, p_source: `${fichier.name} (${new Date().toLocaleDateString('fr-FR')})`, p_remplacer: true })
+      if (err) throw err
+      const res = (data || {}) as { importes?: number; total?: number; bloques?: number }
+      setImportBlocageMsg(`Import terminé : ${fmtNum(res.importes)} références importées, ${fmtNum(res.bloques)} en blocage appro. Rechargement des articles…`)
+      await onRecalcul()
+      setImportBlocageMsg(`Import terminé : ${fmtNum(res.importes)} références importées (${fmtNum(res.total)} en table), ${fmtNum(res.bloques)} en blocage appro.`)
+    } catch (e) {
+      setImportBlocageMsg('Erreur import CSV blocage : ' + messageErreur(e))
+    } finally { setImportBlocageEnCours(false) }
+  }
+
   async function exporterExcel() {
     setExportEnCours(true)
     try {
@@ -2119,6 +2212,7 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
         { h: 'Référence', f: (a) => a.reference_article }, { h: 'Désignation', f: (a) => a.sage_designation }, { h: 'Famille', f: (a) => a.famille },
         { h: 'Fournisseur', f: (a) => a.fournisseur_principal }, { h: 'Qualité fournisseur', f: (a) => (a.fournisseur_principal ? fournMap.get(a.fournisseur_principal)?.sage_qualite : null) }, { h: 'Stratégie fournisseur', f: (a) => (a.fournisseur_principal ? fournMap.get(a.fournisseur_principal)?.strategie_principale : null) },
         { h: 'Incohérences', f: (a) => (incoherencesParRef.get(a.reference_article) || []).map((k) => LABEL_INCOHERENCE_ARTICLE[k]?.label || k).join(' ; ') },
+        { h: 'Blocage appro (SAGE)', f: (a) => (a.blocage_appro ? 'Oui' : 'Non') }, { h: 'Exclu (AR_Exclure)', f: (a) => (a.exclure_appro ? 'Oui' : 'Non') }, { h: 'Vie produit', f: (a) => a.vie_produit },
         { h: 'Arrêt appro', f: (a) => (a.arret_appro ? 'Oui' : 'Non') }, { h: 'Arrêt vente', f: (a) => (a.arret_vente ? 'Oui' : 'Non') }, { h: 'Réf. remplaçante', f: (a) => a.ref_remplacante }, { h: 'Date d\'effet', f: (a) => fmtDate(a.date_effet) },
         { h: 'Délai appro réf. (j)', f: (a) => a.delai_appro_ref_jours }, { h: 'Délai sécurité réf. (j)', f: (a) => a.delai_securite_ref_jours }, { h: 'Délai sécurité effectif (j)', f: (a) => a.delai_securite_jours },
         { h: 'Réf. fournisseur', f: (a) => a.sage_ref_fournisseur }, { h: 'MYSTOCK', f: (a) => a.mystock },
@@ -2169,9 +2263,10 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
 
   return (
     <>
-      <section className="grid grid-cols-2 gap-3 md:grid-cols-7">
+      <section className="grid grid-cols-2 gap-3 md:grid-cols-8">
         <KpiCard label="Références (filtre)" value={kpis.total} loading={loading} sub={`sur ${fmtNum(articles.length)} en base · ${fmtNum(kpis.arretAppro)} arrêt appro`} />
         <KpiCard label="Refs MYSTOCK actives" value={kpis.mystock} loading={loading} sub="pertinentes pour le CBN" />
+        <KpiCard label="Blocage appro (SAGE)" value={kpis.blocageAppro} loading={loading} tone={kpis.blocageAppro ? 'warn' : undefined} sub={`commande interdite · ${fmtNum(kpis.blocageMystock)} MYSTOCK`} />
         <KpiCard label="Avec conso sur l'horizon" value={kpis.avecConso} loading={loading} tone="ok" />
         <KpiCard label="Sans aucune sortie" value={kpis.sansConso} loading={loading} tone="warn" sub="MYSTOCK à challenger" />
         <KpiCard label="Stock min renseigné dans BLG" value={kpis.minBlg} loading={loading} />
@@ -2223,6 +2318,9 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
           <select value={arretApproFilter} onChange={(e) => setArretApproFilter(e.target.value as typeof arretApproFilter)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
             <option value="tous">Arrêt appro : Tous</option><option value="oui">Arrêt appro : Oui</option><option value="non">Arrêt appro : Non</option>
           </select>
+          <select value={blocageFilter} onChange={(e) => setBlocageFilter(e.target.value as typeof blocageFilter)} title="Blocage appro SAGE (AR_InterdireCommande = 1), exclusion (AR_Exclure) et vie produit — import CSV" className={`h-10 rounded-lg border bg-white px-3 text-[13px] font-semibold ${blocageFilter === 'oui' ? 'border-red-300 text-red-700' : 'border-[#E5E1D8] text-[#3A362E]'}`}>
+            <option value="tous">Blocage appro : Tous</option><option value="oui">⛔ Bloqués (commande interdite)</option><option value="non">Non bloqués</option><option value="exclu">Exclus (AR_Exclure)</option><option value="findevie">Fin de vie / vie produit renseignée</option>
+          </select>
         </div>
         <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap gap-2">
@@ -2232,10 +2330,17 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
             <label className="flex h-9 items-center gap-2 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[12px] font-semibold text-[#3A362E]"><input type="checkbox" checked={avecEncoursSeuls} onChange={(e) => setAvecEncoursSeuls(e.target.checked)} className="accent-[#B4761A]" /> Avec encours fournisseur</label>
             <label className="flex h-9 items-center gap-2 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[12px] font-semibold text-[#3A362E]"><input type="checkbox" checked={ecartMinSeuls} onChange={(e) => setEcartMinSeuls(e.target.checked)} className="accent-[#B4761A]" /> Stock min BLG ≠ calculé</label>
           </div>
-          <button type="button" onClick={() => void exporterExcel()} disabled={exportEnCours || loading || filtres.length === 0} className="rounded-lg bg-[#111820] px-4 py-2 text-[13px] font-bold text-white hover:bg-[#252E3D] disabled:opacity-60">
-            {exportEnCours ? 'Export en cours…' : `⬇ Exporter en Excel (${filtres.length} refs)`}
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <input ref={inputCsvBlocage} type="file" accept=".csv,text/csv" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void importerCsvBlocage(f) }} />
+            <button type="button" onClick={() => inputCsvBlocage.current?.click()} disabled={importBlocageEnCours || loading} title="Export SAGE « Articles-bis_avec_cde_blocage.csv » (séparateur ; — colonnes AR_Ref, AR_InterdireCommande, AR_Exclure, VieProduit, UO FMS). Remplace le contenu de la table appro_article_blocage." className="rounded-lg border border-[#E5E1D8] bg-white px-4 py-2 text-[13px] font-bold text-[#3A362E] hover:bg-[#F4F3F0] disabled:opacity-60">
+              {importBlocageEnCours ? 'Import en cours…' : '⬆ Importer le CSV blocage'}
+            </button>
+            <button type="button" onClick={() => void exporterExcel()} disabled={exportEnCours || loading || filtres.length === 0} className="rounded-lg bg-[#111820] px-4 py-2 text-[13px] font-bold text-white hover:bg-[#252E3D] disabled:opacity-60">
+              {exportEnCours ? 'Export en cours…' : `⬇ Exporter en Excel (${filtres.length} refs)`}
+            </button>
+          </div>
         </div>
+        {importBlocageMsg && <div className="mt-2 rounded-lg border border-[#B4761A]/25 bg-[#B4761A]/[0.06] px-3 py-2 text-[13px] font-semibold text-[#5A4321]">{importBlocageMsg}</div>}
       </section>
 
       {/* Incohérences par référence — pastilles filtrantes */}
@@ -2364,6 +2469,7 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
                     <td className="px-2 py-1.5">
                       <div className="flex items-center gap-1.5">
                         <span className="font-mono font-semibold text-[#3A362E]">{a.reference_article}</span>
+                        <BlocageApproBadge article={a} compact />
                         {a.mystock === 'OUI' && <span className="rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700">MYSTOCK</span>}
                         {a.sage_en_sommeil && <span className="rounded-full bg-[#F4F3F0] px-1.5 py-0.5 text-[10px] font-bold text-[#8A8474]">Sommeil</span>}
                         {a.statut_appariement === 'manquant_blg' && <span className="rounded-full bg-red-50 px-1.5 py-0.5 text-[10px] font-bold text-red-700">Manquant BLG</span>}
@@ -2822,7 +2928,7 @@ function OngletComparaison({ fournisseurs, articles, loading, error }: { fournis
                   <tr key={k} ref={(el) => { listRefs.current[i] = el }} onClick={() => { setLigneActive(k); setOuvert(k) }}
                     className={`cursor-pointer border-t border-[#E5E1D8] transition-colors hover:bg-[#F4F3F0] ${actif ? 'bg-[#B4761A]/[0.06]' : ''}`}>
                     <td className="px-3 py-2">
-                      <div className="font-mono text-[12px] font-semibold text-[#3A362E]">{k}</div>
+                      <div className="flex flex-wrap items-center gap-1.5 font-mono text-[12px] font-semibold text-[#3A362E]"><span>{k}</span>{'blocage_appro' in r && <BlocageApproBadge article={r} compact />}</div>
                       <div className="max-w-[360px] truncate text-[12px] text-[#111820]">{libelle(r)}</div>
                     </td>
                     <td className="px-3 py-2">
@@ -2867,6 +2973,7 @@ function OngletComparaison({ fournisseurs, articles, loading, error }: { fournis
                 <span className="rounded-full bg-orange-100 px-2 py-0.5 text-orange-700">{orange} partiel{orange > 1 ? 's' : ''}</span>
               </>) : <span className="rounded-full bg-red-50 px-2 py-0.5 text-red-700">{ligneOuverte.statut_appariement === 'blg_seul' ? 'BLG seul' : 'Manquant BLG'}</span>}
               {'statut_appro' in ligneOuverte && <StatutApproBadge statut={ligneOuverte.statut_appro} />}
+              {'blocage_appro' in ligneOuverte && <BlocageApproBadge article={ligneOuverte} />}
               {'perimetre_cbn' in ligneOuverte && ligneOuverte.perimetre_cbn && <span className="rounded-full bg-[#111820] px-2 py-0.5 text-white">Classeur</span>}
               {'derniere_activite' in ligneOuverte && <span className={`rounded-full px-2 py-0.5 ${activiteCorrespond(ligneOuverte, 'aucune_24m') ? 'bg-red-50 text-red-700' : 'bg-[#F4F3F0] text-[#3A362E]'}`}>Dernière activité : {libelleActivite(ligneOuverte)}</span>}
               {'mystock' in ligneOuverte && ligneOuverte.mystock === 'OUI' && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-emerald-700">MYSTOCK</span>}

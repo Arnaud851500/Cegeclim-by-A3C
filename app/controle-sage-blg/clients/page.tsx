@@ -122,6 +122,9 @@ type ClientAdresseRow = {
   expedition_designation: string | null
   expedition_base_calcul: string | null
   expedition_frais_port_ht: number | null
+  /** Tous les champs de la fiche client (public.ref_tiers), préfixés fiche_ par la vue
+   * v_sage_clients_adresse_livraison_complet — voir FICHE_CHAMPS pour la liste. */
+  [fiche: `fiche_${string}`]: string | number | boolean | null | undefined
 }
 
 function safeText(v: unknown) {
@@ -231,6 +234,112 @@ const COLONNES_SAGE: ColonneSage[] = [
   { key: 'expedition_defaut_designation', label: "Mode d'expédition (défaut client seul)", texte: (r) => safeText(r.expedition_defaut_designation), largeur: 150 },
 ]
 
+/** Champs de la fiche client SAGE (public.ref_tiers) exposés par la vue « complet » :
+ * [colonne sans le préfixe fiche_, libellé, type]. Même liste que le champ « SAGE »
+ * des filtres avancés de l'onglet Comparaison, en libellés lisibles. */
+const FICHE_CHAMPS: Array<[string, string, 'texte' | 'nombre' | 'booleen' | 'date']> = [
+  ['prospect', 'Prospect', 'booleen'],
+  ['abrege', 'Abrégé', 'texte'],
+  ['contact', 'Contact (fiche)', 'texte'],
+  ['adresse', 'Adresse (siège)', 'texte'],
+  ['complement_adresse', 'Complément adresse (siège)', 'texte'],
+  ['code_postal', 'Code postal (siège)', 'texte'],
+  ['ville', 'Ville (siège)', 'texte'],
+  ['region', 'Région', 'texte'],
+  ['pays', 'Pays (siège)', 'texte'],
+  ['telephone', 'Téléphone (fiche)', 'texte'],
+  ['telecopie', 'Télécopie', 'texte'],
+  ['linkedin', 'LinkedIn', 'texte'],
+  ['facebook', 'Facebook', 'texte'],
+  ['email', 'E-mail', 'texte'],
+  ['site', 'Site web', 'texte'],
+  ['numero_identifiant', 'N° identifiant (TVA)', 'texte'],
+  ['code_naf', 'Code NAF', 'texte'],
+  ['payeur', 'Payeur', 'texte'],
+  ['representant', 'Représentant', 'texte'],
+  ['centrale_achat', "Centrale d'achat", 'texte'],
+  ['categorie_tarifaire', 'Catégorie tarifaire', 'texte'],
+  ['encours_autorise', 'Encours autorisé', 'nombre'],
+  ['assurance_credit', 'Assurance crédit', 'nombre'],
+  ['depot_rattachement', 'Dépôt de rattachement', 'texte'],
+  ['code_affaire', 'Code affaire', 'texte'],
+  ['devise', 'Devise', 'texte'],
+  ['langue', 'Langue', 'texte'],
+  ['raccourci', 'Raccourci', 'texte'],
+  ['code_edi', 'Code EDI', 'texte'],
+  ['categorie_comptable', 'Catégorie comptable', 'texte'],
+  ['exclure_traitements_marketing', 'Exclure des traitements marketing', 'booleen'],
+  ['date_creation', 'Date de création', 'date'],
+  ['donnees_effacees', 'Données effacées', 'booleen'],
+  ['solde_comptable', 'Solde comptable', 'nombre'],
+  ['portefeuille_bl_fa', 'Portefeuille BL / FA', 'nombre'],
+  ['portefeuille_bc_pl', 'Portefeuille BC / PL', 'nombre'],
+  ['code_risque', 'Code risque', 'texte'],
+  ['objectif_ca', 'Objectif CA', 'nombre'],
+  ['qualite_relationnelle', 'Qualité relationnelle', 'texte'],
+  ['remise_hit', 'Remise HIT', 'nombre'],
+  ['remise_acc', 'Remise ACC', 'nombre'],
+  ['rge', 'RGE', 'texte'],
+  ['convention_cee', 'Convention CEE', 'texte'],
+  ['indicateur_technique', 'Indicateur technique', 'texte'],
+  ['indicateur_etude', 'Indicateur étude', 'texte'],
+  ['indicateur_commerce', 'Indicateur commerce', 'texte'],
+  ['client_pv', 'Client PV', 'texte'],
+  ['attestation_capacite', 'Attestation de capacité', 'texte'],
+  ['capacite_expiration', 'Expiration capacité', 'date'],
+  ['groupement', 'Groupement', 'texte'],
+  ['convention_nationaux', 'Convention nationaux', 'texte'],
+  ['convention_client_cgclim', 'Convention client CGCLIM', 'texte'],
+  ['station_technique', 'Station technique', 'texte'],
+  ['openbee', 'Openbee', 'texte'],
+  ['logiciels', 'Logiciels', 'texte'],
+  ['frais_facturation', 'Frais de facturation', 'texte'],
+  ['assurance_credit_2', 'Assurance crédit 2', 'texte'],
+  ['routage_promo', 'Routage promo', 'texte'],
+  ['facture_email', 'Facture par e-mail', 'texte'],
+  ['particularite_logistique', 'Particularité logistique', 'texte'],
+  ['releve_facture', 'Relevé de facture', 'texte'],
+  ['type_facture', 'Type de facture', 'texte'],
+  ['particularite_facturation', 'Particularité facturation', 'texte'],
+  ['categorie_af_gaf', 'Catégorie AF / GAF', 'texte'],
+  ['email_routage', 'E-mail routage', 'texte'],
+  ['client_cfluide', 'Client CFluide', 'texte'],
+  ['tarifs_exception', "Tarifs d'exception", 'texte'],
+  ['gyutaki5', 'Gyutaki 5', 'texte'],
+  ['g5pm_g10', 'G5PM / G10', 'texte'],
+  ['blg_id_tiers', 'Id tiers BLG', 'texte'],
+  ['lien_blg_tiers', 'Lien BLG tiers', 'texte'],
+  ['banque_nom', 'Banque', 'texte'],
+  ['banque_bban', 'IBAN / BBAN', 'texte'],
+  ['updated_at', 'Fiche mise à jour le', 'date'],
+]
+
+function formatFicheValeur(v: unknown, type: 'texte' | 'nombre' | 'booleen' | 'date'): string {
+  if (v === null || v === undefined || v === '') return ''
+  if (type === 'booleen') return v === true || v === 'true' || v === 1 ? 'Oui' : 'Non'
+  if (type === 'date') {
+    const d = new Date(String(v))
+    return Number.isNaN(d.getTime()) ? String(v) : d.toLocaleDateString('fr-FR')
+  }
+  if (type === 'nombre') {
+    const n = Number(v)
+    return Number.isFinite(n) ? n.toLocaleString('fr-FR', { maximumFractionDigits: 2 }) : String(v)
+  }
+  return String(v).trim()
+}
+
+FICHE_CHAMPS.forEach(([col, label, type]) => {
+  const key = `fiche_${col}` as keyof ClientAdresseRow
+  COLONNES_SAGE.push({
+    key,
+    label,
+    texte: (r) => formatFicheValeur(r[key], type),
+    tri: type === 'nombre' ? (r) => (r[key] === null || r[key] === undefined || r[key] === '' ? -Infinity : Number(r[key])) : undefined,
+    align: type === 'nombre' ? 'right' : 'left',
+    largeur: type === 'texte' ? 150 : 110,
+  })
+})
+
 const COLONNES_SAGE_PAR_DEFAUT: Array<keyof ClientAdresseRow> = [
   'numero_tiers', 'intitule', 'agence_rattachement', 'famille', 'li_ville', 'expedition_designation', 'expedition_frais_port_ht', 'en_sommeil',
 ]
@@ -336,6 +445,7 @@ function OngletSage() {
   const [logique, setLogique] = useState<'et' | 'ou'>('et')
   const [reglagesCharges, setReglagesCharges] = useState(false)
   const [colonnesOuvert, setColonnesOuvert] = useState(false)
+  const [rechercheColonne, setRechercheColonne] = useState('')
 
   const [tri, setTri] = useState<{ key: string; dir: 'asc' | 'desc' }>({ key: 'numero_tiers', dir: 'asc' })
   const [selected, setSelected] = useState<ClientAdresseRow | null>(null)
@@ -411,7 +521,7 @@ function OngletSage() {
       setError(null)
       try {
         let query = supabase
-          .from('v_sage_clients_adresse_livraison')
+          .from('v_sage_clients_adresse_livraison_complet')
           .select('*', { count: 'exact' })
           .order('numero_tiers', { ascending: true })
           .limit(10000)
@@ -520,7 +630,7 @@ function OngletSage() {
         const pageSize = 1000
         while (true) {
           let query = supabase
-            .from('v_sage_clients_adresse_livraison')
+            .from('v_sage_clients_adresse_livraison_complet')
             .select('*')
             .order('numero_tiers', { ascending: true })
             .range(from, from + pageSize - 1)
@@ -556,6 +666,8 @@ function OngletSage() {
         colonnesAffichees.forEach((c) => {
           if (c.key === 'expedition_frais_port_ht') {
             ligne[c.label] = r.expedition_frais_port_ht === null || r.expedition_frais_port_ht === undefined ? '' : Number(r.expedition_frais_port_ht)
+          } else if (c.align === 'right' && r[c.key] !== null && r[c.key] !== undefined && r[c.key] !== '' && Number.isFinite(Number(r[c.key]))) {
+            ligne[c.label] = Number(r[c.key])
           } else {
             ligne[c.label] = c.texte(r)
           }
@@ -673,9 +785,16 @@ function OngletSage() {
             {conditions.map((c) => (
               <div key={c.id} className="grid grid-cols-[minmax(200px,1fr)_180px_minmax(200px,1fr)_32px] gap-2">
                 <select value={c.champ} onChange={(e) => setConditions((prev) => prev.map((x) => (x.id === c.id ? { ...x, champ: e.target.value } : x)))} className={champStyle}>
-                  {COLONNES_SAGE.map((col) => (
-                    <option key={col.key} value={col.key}>{col.label}</option>
-                  ))}
+                  <optgroup label="Adresse de livraison et expédition">
+                    {COLONNES_SAGE.filter((col) => !String(col.key).startsWith('fiche_')).map((col) => (
+                      <option key={col.key} value={col.key}>{col.label}</option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="Fiche client (tous les champs SAGE)">
+                    {COLONNES_SAGE.filter((col) => String(col.key).startsWith('fiche_')).map((col) => (
+                      <option key={col.key} value={col.key}>{col.label}</option>
+                    ))}
+                  </optgroup>
                 </select>
                 <select value={c.operateur} onChange={(e) => setConditions((prev) => prev.map((x) => (x.id === c.id ? { ...x, operateur: e.target.value as OperateurSage } : x)))} className={champStyle}>
                   {(Object.entries(OPERATEUR_SAGE_LABELS) as [OperateurSage, string][]).map(([op, label]) => (
@@ -750,12 +869,31 @@ function OngletSage() {
                     </div>
                   ))}
                   <div className="mt-1 border-t border-[#E5E1D8] px-2 py-1 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Champs disponibles</div>
-                  {COLONNES_SAGE.filter((c) => !colonnes.includes(c.key)).map((c) => (
-                    <label key={c.key} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-[13px] hover:bg-[#F4F3F0]">
-                      <input type="checkbox" checked={false} onChange={() => toggleColonne(c.key)} className="accent-[#B4761A]" />
-                      {c.label}
-                    </label>
-                  ))}
+                  <input
+                    value={rechercheColonne}
+                    onChange={(e) => setRechercheColonne(e.target.value)}
+                    placeholder="Rechercher un champ…"
+                    className="mb-1 h-8 w-full rounded-lg border border-[#E5E1D8] bg-white px-2 text-[12px] outline-none focus:border-[#B4761A]"
+                  />
+                  {(['adresse', 'fiche'] as const).map((groupe) => {
+                    const dispo = COLONNES_SAGE.filter(
+                      (c) => !colonnes.includes(c.key) && (groupe === 'fiche') === String(c.key).startsWith('fiche_') && (!rechercheColonne.trim() || normaliserTexteFiltre(c.label).includes(normaliserTexteFiltre(rechercheColonne))),
+                    )
+                    if (dispo.length === 0) return null
+                    return (
+                      <div key={groupe}>
+                        <div className="px-2 pb-0.5 pt-1.5 text-[10px] font-bold uppercase tracking-wide text-[#B4761A]">
+                          {groupe === 'adresse' ? 'Adresse de livraison et expédition' : 'Fiche client (tous les champs SAGE)'}
+                        </div>
+                        {dispo.map((c) => (
+                          <label key={c.key} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-[13px] hover:bg-[#F4F3F0]">
+                            <input type="checkbox" checked={false} onChange={() => toggleColonne(c.key)} className="accent-[#B4761A]" />
+                            {c.label}
+                          </label>
+                        ))}
+                      </div>
+                    )
+                  })}
                 </div>
               )}
             </div>
@@ -930,6 +1068,13 @@ function ClientSageModal({ row, onClose }: { row: ClientAdresseRow; onClose: () 
               label="Mode d'expédition (adresse seule)"
               value={row.expedition_adresse_designation ? `${row.expedition_adresse_designation} (code ${row.n_expedition_adresse})` : row.n_expedition_adresse}
             />
+          </DetailGroup>
+
+          <DetailGroup title="Fiche client SAGE — tous les champs (les champs vides sont masqués)">
+            {FICHE_CHAMPS.map(([col, label, type]) => {
+              const texte = formatFicheValeur(row[`fiche_${col}` as keyof ClientAdresseRow], type)
+              return texte ? <DetailRow key={col} label={label} value={texte} /> : null
+            })}
           </DetailGroup>
         </div>
       </div>
