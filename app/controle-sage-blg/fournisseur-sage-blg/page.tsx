@@ -2479,6 +2479,7 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
                     </td>
                     <td className="px-2 py-1.5 font-mono text-[11px]" title={f ? `${f.sage_intitule || ''} · ${f.sage_qualite || ''}${f.sage_en_sommeil ? ' · EN SOMMEIL' : ''}` : undefined}>{a.fournisseur_principal || '—'}{f?.sage_en_sommeil ? <span className="ml-1 text-[10px] text-red-700">zz</span> : null}</td>
                     <td className="px-2 py-1.5 text-[11px] text-[#3A362E]">{f ? (f.strategie_principale || <span className="text-[#B4761A]">—</span>) : <span className="text-[#B3AD9E]">—</span>}</td>
+                    <td className="px-2 py-1.5 text-[11px]">{a.blocage_appro || a.exclure_appro || a.vie_produit ? <BlocageApproBadge article={a} compact /> : <span className="text-[#B3AD9E]">—</span>}</td>
                     <td className="px-2 py-1.5 text-[11px]">
                       <div className="flex flex-wrap gap-1">
                         {a.arret_appro && <span className="rounded-full bg-red-100 px-1.5 py-0.5 text-[10px] font-bold text-red-700">Appro</span>}
