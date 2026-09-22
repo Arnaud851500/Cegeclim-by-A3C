@@ -86,6 +86,29 @@
  *      · pastille rouge "⛔ Blocage appro" partout où une référence est affichée
  *        (liste Articles, fiche ✎, fiche fournisseur, comparaison et sa fenêtre),
  *        filtre "Blocage appro" + colonne d'en-tête filtrable, KPI, export Excel.
+ *    MàJ 22/09/2026 (bis) — stratégies de réappro A / B, proposition, fichiers commande :
+ *      · A « Min/Max — point de commande sur stock de sécurité » (stock à
+ *        réception < stock de sécurité → recomplètement au stock max) ; B
+ *        « Couverture cible à réception » (couverture à réception < couverture
+ *        min → recomplètement à couverture cible × μ). La méthode et les
+ *        couvertures min/cible se définissent par fournisseur (fiche fournisseur,
+ *        appro_fournisseur_strategie.methode_calcul / couverture_*), se
+ *        surchargent par référence (✎) et se forcent globalement sur l'écran.
+ *      · calcul côté client (calculerProposition) : stock physique (périmètre)
+ *        − demande sur le délai L (réservé SAGE daté ≤ L, μ × L/30 ou le max)
+ *        + encours fournisseur livré ≤ L = stock à réception ; couverture à
+ *        réception = stock à réception / μ. Réservé SAGE daté = lignes BC
+ *        reliquat (activite_lignes.date_livraison, = sto_res par dépôt) ; vue
+ *        v_appro_article_echeances (reserve_echeances / encours_echeances).
+ *      · colonnes : Arrêt et Stock FMS supprimées ; Dispo = global (FMS) ;
+ *        Réservé ≤ L j (après L) ; Stock à réception ; Couv. à réception ;
+ *        Méthode & paramètres (cliquable) ; Proposition (survol = détail du
+ *        calcul) ; Qté retenue et date de livraison souhaitée saisissables
+ *        (appro_article_stock_min.qte_proposition_manuelle /
+ *        date_livraison_souhaitee via RPC appro_enregistrer_proposition).
+ *      · bouton « Fichiers commande » : un Excel par fournisseur × date de
+ *        livraison (Référence ; Qté ; Date de livraison souhaitée), nommé
+ *        « code nom fournisseur JJ-MM-AAAA.xlsx ».
  *  - Articles & stock min : la base article SAGE avec MYSTOCK, la conso BL
  *    mensuelle (μ, σ sur l'horizon), le stock FMS, le stock min SAGE, le stock
  *    min BLG (entrepôt DPFMS) et le stock min CALCULÉ (point de commande) —
@@ -293,7 +316,22 @@ type ArtRow = {
   exclure_appro: boolean | null               // AR_Exclure = 1
   vie_produit: string | null                  // FINDEVIE…
   blocage_importe_le: string | null
+  // stratégie de réappro & proposition retenue (migration appro_strategie_couverture_echeances)
+  ref_methode_calcul: MethodeCalcul | null    // surcharge par référence (sinon fournisseur, sinon défaut)
+  ref_couverture_min_mois: number | null
+  ref_couverture_cible_mois: number | null
+  qte_proposition_manuelle: number | null     // quantité retenue saisie (prime sur la proposition calculée)
+  date_livraison_souhaitee: string | null
+  proposition_maj_le: string | null
+  sage_stock_dispo_total: number | null
+  reserve_echeances: Echeance[] | null        // réservé SAGE par date de livraison (lignes BC reliquat)
+  encours_echeances: Echeance[] | null        // encours fournisseur par date estimée
 }
+
+type MethodeCalcul = 'min_max' | 'couverture'
+type Echeance = { d: string; q: number; fms: boolean; src?: string }
+/** Paramètres de réappro portés par le fournisseur (appro_fournisseur_strategie). */
+type ParamsFourn = { fournisseur: string; methode_calcul: MethodeCalcul | null; couverture_min_mois: number | null; couverture_cible_mois: number | null }
 
 type StrategieRef = { code: string; designation: string; outil_cbn: string | null; mode_appro: string | null; calcul_besoin_blg: boolean; ordre: number | null }
 type Parametre = { cle: string; valeur: number; description: string | null }
@@ -1126,6 +1164,7 @@ type StrategieForm = {
   strategie_principale: string; calcul_besoin_periodique: 'auto' | 'oui' | 'non'
   periodicite: string; delai_appro_jours: string; delai_securite_jours: string; niveau_service_z: string; remarque: string
   frs_pv: boolean; perimetre_cbn: boolean
+  methode_calcul: '' | MethodeCalcul; couverture_min_mois: string; couverture_cible_mois: string
 }
 
 type CleTriFourn = 'numero' | 'nom' | 'qualite' | 'statut' | 'strategie' | 'refs' | 'mystock' | 'non_mystock' | 'cdf_fms' | 'cdf_agences' | 'delai' | 'activite'
@@ -1151,8 +1190,8 @@ function valeurColFourn(r: FournRow, k: CleTriFourn): unknown {
 
 /** Fiche fournisseur & stratégie d'appro — fenêtre flottante ouverte au clic
  * sur une ligne de la liste (ou depuis la pyramide). */
-function FicheFournisseurModal({ selected, strategies, articles, onRowChange, onClose }: {
-  selected: FournRow; strategies: StrategieRef[]; articles: ArtRow[]; onRowChange: (r: FournRow) => void; onClose: () => void
+function FicheFournisseurModal({ selected, strategies, articles, onRowChange, onClose, onStrategieSaved }: {
+  selected: FournRow; strategies: StrategieRef[]; articles: ArtRow[]; onRowChange: (r: FournRow) => void; onClose: () => void; onStrategieSaved?: () => void
 }) {
   const [form, setForm] = useState<StrategieForm | null>(null)
   const [saving, setSaving] = useState(false)
@@ -1167,6 +1206,7 @@ function FicheFournisseurModal({ selected, strategies, articles, onRowChange, on
       delai_appro_jours: selected.param_delai_appro !== null && selected.param_delai_appro !== undefined ? String(selected.param_delai_appro) : '',
       delai_securite_jours: '', niveau_service_z: '', remarque: selected.remarque || '',
       frs_pv: !!selected.frs_pv_force, perimetre_cbn: !!selected.perimetre_cbn,
+      methode_calcul: '', couverture_min_mois: '', couverture_cible_mois: '',
     })
     setSaveMsg(null)
     // On recharge la ligne brute de la stratégie pour récupérer les champs non exposés par la vue (calcul_besoin_periodique explicite, délai sécurité, z)
@@ -1179,6 +1219,7 @@ function FicheFournisseurModal({ selected, strategies, articles, onRowChange, on
         niveau_service_z: data.niveau_service_z ?? '',
         delai_appro_jours: data.delai_appro_jours ?? '',
         frs_pv: !!data.frs_pv, perimetre_cbn: !!data.perimetre_cbn,
+        methode_calcul: (data.methode_calcul as MethodeCalcul | null) ?? '', couverture_min_mois: data.couverture_min_mois ?? '', couverture_cible_mois: data.couverture_cible_mois ?? '',
       } : f)
     })
   }, [selected.numero]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -1206,6 +1247,9 @@ function FicheFournisseurModal({ selected, strategies, articles, onRowChange, on
         remarque: form.remarque || null,
         frs_pv: form.frs_pv ? true : null,
         perimetre_cbn: form.perimetre_cbn,
+        methode_calcul: form.methode_calcul || null,
+        couverture_min_mois: form.couverture_min_mois === '' ? null : Number(form.couverture_min_mois),
+        couverture_cible_mois: form.couverture_cible_mois === '' ? null : Number(form.couverture_cible_mois),
         updated_at: new Date().toISOString(),
       }
       const { error: err } = await supabase.from('appro_fournisseur_strategie').upsert(payload, { onConflict: 'fournisseur' })
@@ -1213,6 +1257,7 @@ function FicheFournisseurModal({ selected, strategies, articles, onRowChange, on
       const { data, error: err2 } = await supabase.from('v_appro_controle_fournisseur_sage_blg').select('*').eq('numero', selected.numero).maybeSingle()
       if (err2) throw err2
       if (data) onRowChange(data as FournRow)
+      onStrategieSaved?.()
       setSaveMsg('Stratégie enregistrée. Relance le calcul de besoin (onglet Articles) si tu as changé un délai ou le niveau de service.')
     } catch (e) {
       setSaveMsg('Erreur : ' + messageErreur(e))
@@ -1296,6 +1341,19 @@ function FicheFournisseurModal({ selected, strategies, articles, onRowChange, on
                   <input value={form.delai_securite_jours} onChange={(e) => setForm({ ...form, delai_securite_jours: e.target.value })} placeholder="défaut" className="h-8 rounded-lg border border-[#E5E1D8] px-2" /></label>
                 <label className="flex flex-col gap-0.5"><span className="font-semibold text-[#3A362E]">Niveau service z</span>
                   <input value={form.niveau_service_z} onChange={(e) => setForm({ ...form, niveau_service_z: e.target.value })} placeholder="défaut" className="h-8 rounded-lg border border-[#E5E1D8] px-2" /></label>
+              </div>
+              <div className="mt-1 grid grid-cols-[1.6fr_1fr_1fr] gap-2 rounded-lg border border-[#B4761A]/25 bg-[#B4761A]/[0.04] px-2 py-2 text-[12px]">
+                <label className="flex flex-col gap-0.5"><span className="font-semibold text-[#3A362E]">Méthode de réappro (écran Articles)</span>
+                  <select value={form.methode_calcul} onChange={(e) => setForm({ ...form, methode_calcul: e.target.value as '' | MethodeCalcul })} className="h-8 rounded-lg border border-[#E5E1D8] bg-white px-2 font-semibold">
+                    <option value="">— défaut paramètre —</option>
+                    <option value="min_max">A · Min/Max — point de commande (stock de sécurité)</option>
+                    <option value="couverture">B · Couverture cible à réception</option>
+                  </select></label>
+                <label className="flex flex-col gap-0.5"><span className="font-semibold text-[#3A362E]">B · couverture min (mois)</span>
+                  <input value={form.couverture_min_mois} onChange={(e) => setForm({ ...form, couverture_min_mois: e.target.value })} placeholder="défaut" title="Déclencheur : couverture à réception < min → réappro" className="h-8 rounded-lg border border-[#E5E1D8] px-2" /></label>
+                <label className="flex flex-col gap-0.5"><span className="font-semibold text-[#3A362E]">B · couverture cible (mois)</span>
+                  <input value={form.couverture_cible_mois} onChange={(e) => setForm({ ...form, couverture_cible_mois: e.target.value })} placeholder="défaut" title="On recomplète jusqu'à cible × μ à réception" className="h-8 rounded-lg border border-[#E5E1D8] px-2" /></label>
+                <span className="col-span-3 text-[11px] text-[#8A8474]">A : commande dès que le stock à réception passe sous le stock de sécurité, quantité = remontée au stock max. B : commande dès que la couverture à réception passe sous la couverture min, quantité = cible × μ − stock à réception. Surchargeable par référence (✎) et forçable sur l'écran Articles.</span>
               </div>
               <div className="px-2 py-1.5">
                 <textarea value={form.remarque} onChange={(e) => setForm({ ...form, remarque: e.target.value })} placeholder="Remarque…" rows={2} className="w-full rounded-lg border border-[#E5E1D8] px-2 py-1 text-[12px]" />
@@ -1394,9 +1452,9 @@ function FicheFournisseurModal({ selected, strategies, articles, onRowChange, on
   )
 }
 
-function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, articles }: {
+function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, articles, onStrategieSaved }: {
   rows: FournRow[]; loading: boolean; error: string | null; strategies: StrategieRef[]
-  onRowChange: (r: FournRow) => void; articles: ArtRow[]
+  onRowChange: (r: FournRow) => void; articles: ArtRow[]; onStrategieSaved?: () => void
 }) {
   const [search, setSearch] = useState('')
   const [statutFilter, setStatutFilter] = useState<'' | StatutAppro>('')
@@ -1732,7 +1790,7 @@ function OngletFournisseurs({ rows, loading, error, strategies, onRowChange, art
       </section>
 
       {selected && (
-        <FicheFournisseurModal selected={selected} strategies={strategies} articles={articles} onRowChange={onRowChange} onClose={() => setSelected(null)} />
+        <FicheFournisseurModal selected={selected} strategies={strategies} articles={articles} onRowChange={onRowChange} onClose={() => setSelected(null)} onStrategieSaved={onStrategieSaved} />
       )}
     </>
   )
@@ -1794,10 +1852,171 @@ function detecterIncoherencesArticle(a: ArtRow, f: FournRow | undefined, index: 
 }
 
 /** Caractéristiques manuelles éditables d'une référence. */
+// ─────────────────────────────────────────────────────────────────────────
+// Stratégies de réappro A / B — calcul de la proposition (côté client)
+// ─────────────────────────────────────────────────────────────────────────
+
+const METHODES: { code: MethodeCalcul; lettre: 'A' | 'B'; label: string; detail: string }[] = [
+  { code: 'min_max', lettre: 'A', label: 'Min/Max — point de commande', detail: 'Commande quand le stock à réception passe sous le stock de sécurité ; quantité = remontée au stock max (arrondie au colisage).' },
+  { code: 'couverture', lettre: 'B', label: 'Couverture cible à réception', detail: 'Commande quand la couverture à réception (stock à réception / μ) passe sous la couverture min ; quantité = couverture cible × μ − stock à réception (arrondie au colisage).' },
+]
+const METHODE_PAR_CODE = Object.fromEntries(METHODES.map((m) => [m.code, m])) as Record<MethodeCalcul, typeof METHODES[number]>
+
+type ContexteProposition = {
+  paramsFourn: Map<string, ParamsFourn>
+  methodeForcee: '' | MethodeCalcul          // forçage écran ('' = selon référence / fournisseur / défaut)
+  methodeDefaut: MethodeCalcul               // appro_parametres.methode_calcul_defaut
+  couvMinDefaut: number; couvCibleDefaut: number
+  retardMaxJours: number                     // encours dont la date estimée est dépassée de plus de N j : exclu
+  aujourdhui: string                         // AAAA-MM-JJ
+}
+
+type Proposition = {
+  methode: MethodeCalcul; lettre: 'A' | 'B'; source: 'forcée' | 'référence' | 'fournisseur' | 'défaut'
+  couvMin: number; couvCible: number; couvSource: 'référence' | 'fournisseur' | 'défaut'
+  perimetreGlobal: boolean; delaiL: number; dateReception: string; mu: number; muSource: '12m' | '3m'
+  stockBase: number; reservePeriode: number; reserveApres: number; reserveTotal: number
+  encoursPeriode: number; encoursApres: number; encoursDouteux: number
+  consoDelai: number; demande: number; demandeMode: number
+  stockReception: number; couvReception: number | null
+  seuilA: number; stockMaxA: number
+  declenche: boolean; bloque: boolean; qteProposee: number; colisage: number
+  qteRetenue: number | null; qteFinale: number; dateSouhaitee: string
+  explication: string[]
+}
+
+/** Date ISO locale (AAAA-MM-JJ) sans passer par l'UTC (évite le décalage d'un jour le soir). */
+function isoLocal(d: Date): string { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` }
+function ajouterJours(iso: string, jours: number): string {
+  const [y, m, j] = iso.split('-').map(Number)
+  const d = new Date(y, m - 1, j); d.setDate(d.getDate() + jours)
+  return isoLocal(d)
+}
+function arrondirColisage(qte: number, colisage: number): number {
+  const c = colisage > 1 ? colisage : 1
+  return Math.max(0, Math.ceil(qte / c) * c)
+}
+
+/** Calcule la proposition de réappro d'une référence selon la méthode A ou B.
+ *  Stock à réception = stock physique (périmètre) − demande sur le délai L + encours fournisseur livré ≤ L.
+ *  La demande suit le mode de projection (réservé SAGE daté ≤ L, μ × L/30, ou le plus grand des deux). */
+function calculerProposition(a: ArtRow, ctx: ContexteProposition): Proposition {
+  const fourn = a.fournisseur_principal ? ctx.paramsFourn.get(a.fournisseur_principal) : undefined
+  let methode: MethodeCalcul, source: Proposition['source']
+  if (ctx.methodeForcee) { methode = ctx.methodeForcee; source = 'forcée' }
+  else if (a.ref_methode_calcul) { methode = a.ref_methode_calcul; source = 'référence' }
+  else if (fourn?.methode_calcul) { methode = fourn.methode_calcul; source = 'fournisseur' }
+  else { methode = ctx.methodeDefaut; source = 'défaut' }
+  const couvMin = a.ref_couverture_min_mois ?? fourn?.couverture_min_mois ?? ctx.couvMinDefaut
+  const couvCible = a.ref_couverture_cible_mois ?? fourn?.couverture_cible_mois ?? ctx.couvCibleDefaut
+  const couvSource: Proposition['couvSource'] = a.ref_couverture_min_mois !== null && a.ref_couverture_min_mois !== undefined || a.ref_couverture_cible_mois !== null && a.ref_couverture_cible_mois !== undefined ? 'référence' : fourn?.couverture_min_mois !== null && fourn?.couverture_min_mois !== undefined || fourn?.couverture_cible_mois !== null && fourn?.couverture_cible_mois !== undefined ? 'fournisseur' : 'défaut'
+
+  const global = a.projection_perimetre !== 'fms'
+  const delaiL = n0(a.projection_delai_l) > 0 ? n0(a.projection_delai_l) : 37
+  const dateReception = ajouterJours(ctx.aujourdhui, delaiL)
+  const mu = n0(a.projection_mu)
+  const muSource: '12m' | '3m' = a.projection_mu_source === '3m' ? '3m' : '12m'
+  const stockBase = global ? n0(a.sage_stock_total) : n0(a.sage_stock_fms)
+  const dansPerimetre = (e: Echeance) => global || e.fms
+
+  let reservePeriode = 0, reserveApres = 0, reserveTotal = 0
+  ;(a.reserve_echeances || []).filter(dansPerimetre).forEach((e) => { reserveTotal += n0(e.q); if (e.d <= dateReception) reservePeriode += n0(e.q); else reserveApres += n0(e.q) })
+  const dateDouteux = ajouterJours(ctx.aujourdhui, -ctx.retardMaxJours)
+  let encoursPeriode = 0, encoursApres = 0, encoursDouteux = 0
+  ;(a.encours_echeances || []).filter(dansPerimetre).forEach((e) => { if (e.d < dateDouteux) encoursDouteux += n0(e.q); else if (e.d <= dateReception) encoursPeriode += n0(e.q); else encoursApres += n0(e.q) })
+
+  const consoDelai = Math.round(mu * delaiL / 30 * 10) / 10
+  const demandeMode = a.projection_demande_mode ?? 3
+  const demande = demandeMode === 1 ? reservePeriode : demandeMode === 2 ? consoDelai : Math.max(reservePeriode, consoDelai)
+  const stockReception = Math.round((stockBase - demande + encoursPeriode) * 10) / 10
+  const couvReception = mu > 0 ? Math.round(stockReception / mu * 10) / 10 : null
+
+  const colisage = n0(a.sage_colisage)
+  const seuilA = n0(a.calc_stock_securite)
+  const stockMaxA = n0(a.calc_stock_max) > 0 ? n0(a.calc_stock_max) : n0(a.calc_stock_min)
+  const bloque = !!a.blocage_appro || !!a.arret_appro
+  const eligible = !!a.pertinent_calcul_besoin && !bloque
+  let declenche = false, qteProposee = 0
+  if (methode === 'min_max') {
+    declenche = eligible && n0(a.calc_stock_min) > 0 && stockReception < seuilA
+    if (declenche) qteProposee = arrondirColisage(stockMaxA - stockReception, colisage)
+  } else {
+    declenche = eligible && mu > 0 && couvReception !== null && couvReception < couvMin
+    if (declenche) qteProposee = arrondirColisage(couvCible * mu - stockReception, colisage)
+  }
+  const qteRetenue = a.qte_proposition_manuelle === null || a.qte_proposition_manuelle === undefined ? null : Number(a.qte_proposition_manuelle)
+  const qteFinale = qteRetenue ?? qteProposee
+  const delaiAppro = a.delai_appro_ref_jours ?? a.delai_appro_jours ?? 30
+  const dateSouhaitee = a.date_livraison_souhaitee ? String(a.date_livraison_souhaitee).slice(0, 10) : ajouterJours(ctx.aujourdhui, n0(delaiAppro))
+
+  const modeLib = demandeMode === 1 ? `réservé ≤ ${fmtDate(dateReception)} : ${fmtNum(reservePeriode)}` : demandeMode === 2 ? `μ ${fmtNum(mu, 1)} × ${delaiL}/30 = ${fmtNum(consoDelai, 1)}` : `max(réservé ≤ ${fmtDate(dateReception)} : ${fmtNum(reservePeriode)} ; μ ${fmtNum(mu, 1)} × ${delaiL}/30 = ${fmtNum(consoDelai, 1)})`
+  const explication = [
+    `Méthode ${METHODE_PAR_CODE[methode].lettre} · ${METHODE_PAR_CODE[methode].label} (${source})`,
+    `Délai L = ${delaiL} j → réception le ${fmtDate(dateReception)} · μ ${muSource === '3m' ? '3 mois' : '12 mois'} = ${fmtNum(mu, 1)}/mois · périmètre ${global ? 'global (tous dépôts)' : 'dépôt FMS'}`,
+    `Stock physique ${fmtNum(stockBase)} − demande ${fmtNum(demande, 1)} [${modeLib}] + encours livré ≤ L ${fmtNum(encoursPeriode)} = stock à réception ${fmtNum(stockReception, 1)}`,
+    `Couverture à réception = ${fmtNum(stockReception, 1)} / ${fmtNum(mu, 1)} = ${couvReception === null ? '— (μ = 0)' : fmtNum(couvReception, 1) + ' mois'}`,
+    methode === 'min_max'
+      ? `Déclencheur A : stock à réception ${fmtNum(stockReception, 1)} ${stockReception < seuilA ? '<' : '≥'} stock de sécurité ${fmtNum(seuilA, 1)} → ${declenche ? 'commander jusqu\'au stock max ' + fmtNum(stockMaxA) : 'pas de commande'}`
+      : `Déclencheur B : couverture ${couvReception === null ? '—' : fmtNum(couvReception, 1)} ${couvReception !== null && couvReception < couvMin ? '<' : '≥'} min ${fmtNum(couvMin, 1)} mois (${couvSource}) → ${declenche ? 'recompléter à cible ' + fmtNum(couvCible, 1) + ' mois = ' + fmtNum(couvCible * mu, 1) : 'pas de commande'}`,
+    bloque ? (a.blocage_appro ? '⛔ Blocage appro SAGE : aucune proposition' : 'Arrêt appro (saisie) : aucune proposition') : !a.pertinent_calcul_besoin ? 'Hors MYSTOCK actif : aucune proposition' : null,
+    `Proposition : ${fmtNum(qteProposee)}${colisage > 1 ? ` (colisage ${fmtNum(colisage)})` : ''}${qteRetenue !== null ? ` · retenue : ${fmtNum(qteRetenue)}` : ''}`,
+    reserveApres > 0 ? `Réservé après le ${fmtDate(dateReception)} : ${fmtNum(reserveApres)} (non déduit)` : null,
+    encoursApres > 0 ? `Encours livré après le ${fmtDate(dateReception)} : ${fmtNum(encoursApres)} (non compté)` : null,
+    encoursDouteux > 0 ? `Encours douteux (date dépassée de plus de ${ctx.retardMaxJours} j) : ${fmtNum(encoursDouteux)} (exclu)` : null,
+  ].filter(Boolean) as string[]
+
+  return { methode, lettre: METHODE_PAR_CODE[methode].lettre, source, couvMin, couvCible, couvSource, perimetreGlobal: global, delaiL, dateReception, mu, muSource,
+    stockBase, reservePeriode, reserveApres, reserveTotal, encoursPeriode, encoursApres, encoursDouteux, consoDelai, demande, demandeMode,
+    stockReception, couvReception, seuilA, stockMaxA, declenche, bloque, qteProposee, colisage, qteRetenue, qteFinale, dateSouhaitee, explication }
+}
+
+/** Cellules « Qté retenue » et « Date liv. souhaitée » : saisie ligne à ligne,
+ * enregistrée à la validation (Entrée / perte de focus) via RPC. */
+function CelluleProposition({ article, prop, onSaved }: { article: ArtRow; prop: Proposition; onSaved: (a: ArtRow) => void }) {
+  const [qte, setQte] = useState(prop.qteRetenue === null ? '' : String(prop.qteRetenue))
+  const [date, setDate] = useState(prop.dateSouhaitee)
+  const [saving, setSaving] = useState(false)
+  useEffect(() => { setQte(prop.qteRetenue === null ? '' : String(prop.qteRetenue)); setDate(prop.dateSouhaitee) }, [prop.qteRetenue, prop.dateSouhaitee])
+
+  async function enregistrer(q: string, d: string) {
+    const qNum = q.trim() === '' ? null : Number(q.replace(',', '.'))
+    if (qNum !== null && Number.isNaN(qNum)) return
+    // date : on n'enregistre que si elle diffère de la valeur stockée (ou du défaut quand rien n'est stocké)
+    const dateStockee = article.date_livraison_souhaitee ? String(article.date_livraison_souhaitee).slice(0, 10) : null
+    const dVal = d && d !== (dateStockee ?? prop.dateSouhaitee) ? d : dateStockee
+    const qteStockee = article.qte_proposition_manuelle === null || article.qte_proposition_manuelle === undefined ? null : Number(article.qte_proposition_manuelle)
+    if (qNum === qteStockee && dVal === dateStockee) return
+    setSaving(true)
+    try {
+      const { error } = await supabase.rpc('appro_enregistrer_proposition', { p_reference: article.reference_article, p_qte: qNum, p_date: dVal })
+      if (error) throw error
+      onSaved({ ...article, qte_proposition_manuelle: qNum, date_livraison_souhaitee: dVal, proposition_maj_le: new Date().toISOString() })
+    } catch (e) { alert('Erreur enregistrement proposition : ' + messageErreur(e)) } finally { setSaving(false) }
+  }
+  const modifiee = prop.qteRetenue !== null && prop.qteRetenue !== prop.qteProposee
+  return (
+    <>
+      <td className="px-1 py-1 text-right">
+        <input value={qte} onChange={(e) => setQte(e.target.value)} onBlur={() => void enregistrer(qte, date)} onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+          placeholder={prop.qteProposee ? fmtNum(prop.qteProposee) : '0'} disabled={saving}
+          title={prop.qteRetenue !== null ? `Quantité retenue (saisie${article.proposition_maj_le ? ' le ' + fmtDate(article.proposition_maj_le) : ''}) — vider pour revenir à la proposition` : 'Saisis une quantité pour remplacer la proposition (vide = proposition)'}
+          className={`h-7 w-[64px] rounded border px-1 text-right text-[12px] font-semibold outline-none focus:border-[#B4761A] ${modifiee ? 'border-[#B4761A] bg-[#B4761A]/[0.08] text-[#96600F]' : prop.qteRetenue !== null ? 'border-[#E5E1D8] bg-white text-[#111820]' : 'border-[#E5E1D8] bg-white text-[#8A8474]'}`} />
+      </td>
+      <td className="px-1 py-1 text-right">
+        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} onBlur={() => void enregistrer(qte, date)} disabled={saving}
+          title={article.date_livraison_souhaitee ? 'Date de livraison souhaitée (saisie)' : 'Date par défaut = aujourd\'hui + délai d\'appro (modifiable)'}
+          className={`h-7 rounded border px-1 text-[11px] outline-none focus:border-[#B4761A] ${article.date_livraison_souhaitee ? 'border-[#B4761A]/50 bg-white text-[#111820]' : 'border-[#E5E1D8] bg-white text-[#8A8474]'}`} />
+      </td>
+    </>
+  )
+}
+
 type ArticleManuel = {
   stock_min_retenu: string; commentaire: string
   arret_appro: boolean; arret_vente: boolean; ref_remplacante: string; date_effet: string
   delai_appro_ref_jours: string; delai_securite_ref_jours: string
+  methode_calcul: '' | MethodeCalcul; couverture_min_mois: string; couverture_cible_mois: string
+  qte_proposition_manuelle: string; date_livraison_souhaitee: string
 }
 function manuelDepuis(a: ArtRow): ArticleManuel {
   return {
@@ -1807,11 +2026,29 @@ function manuelDepuis(a: ArtRow): ArticleManuel {
     ref_remplacante: a.ref_remplacante || '', date_effet: a.date_effet ? String(a.date_effet).slice(0, 10) : '',
     delai_appro_ref_jours: a.delai_appro_ref_jours === null || a.delai_appro_ref_jours === undefined ? '' : String(a.delai_appro_ref_jours),
     delai_securite_ref_jours: a.delai_securite_ref_jours === null || a.delai_securite_ref_jours === undefined ? '' : String(a.delai_securite_ref_jours),
+    methode_calcul: a.ref_methode_calcul ?? '',
+    couverture_min_mois: a.ref_couverture_min_mois === null || a.ref_couverture_min_mois === undefined ? '' : String(a.ref_couverture_min_mois),
+    couverture_cible_mois: a.ref_couverture_cible_mois === null || a.ref_couverture_cible_mois === undefined ? '' : String(a.ref_couverture_cible_mois),
+    qte_proposition_manuelle: a.qte_proposition_manuelle === null || a.qte_proposition_manuelle === undefined ? '' : String(a.qte_proposition_manuelle),
+    date_livraison_souhaitee: a.date_livraison_souhaitee ? String(a.date_livraison_souhaitee).slice(0, 10) : '',
   }
 }
 
-function ArticleManuelModal({ article, fournisseur, onClose, onSaved }: { article: ArtRow; fournisseur: FournRow | undefined; onClose: () => void; onSaved: (a: ArtRow) => void }) {
+function ArticleManuelModal({ article, fournisseur, prop, ctxProp, onClose, onSaved }: { article: ArtRow; fournisseur: FournRow | undefined; prop: Proposition; ctxProp: ContexteProposition; onClose: () => void; onSaved: (a: ArtRow) => void }) {
   const [m, setM] = useState<ArticleManuel>(manuelDepuis(article))
+  // aperçu de la proposition avec les paramètres en cours de saisie (méthode / couvertures / délais)
+  const apercu = useMemo(() => {
+    const num = (v: string) => (v.trim() === '' ? null : Number(v.replace(',', '.')))
+    const simul: ArtRow = { ...article,
+      ref_methode_calcul: m.methode_calcul || null,
+      ref_couverture_min_mois: num(m.couverture_min_mois), ref_couverture_cible_mois: num(m.couverture_cible_mois),
+      qte_proposition_manuelle: num(m.qte_proposition_manuelle), date_livraison_souhaitee: m.date_livraison_souhaitee || null,
+    }
+    const dA = num(m.delai_appro_ref_jours), dS = num(m.delai_securite_ref_jours)
+    if (dA !== null || dS !== null) simul.projection_delai_l = (dA ?? n0(article.delai_appro_jours)) + (dS ?? n0(article.delai_securite_jours))
+    return calculerProposition(simul, ctxProp)
+  }, [m, article, ctxProp])
+  const fournParams = article.fournisseur_principal ? ctxProp.paramsFourn.get(article.fournisseur_principal) : undefined
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
   const num = (v: string) => (v.trim() === '' ? null : Number(v))
@@ -1825,6 +2062,10 @@ function ArticleManuelModal({ article, fournisseur, onClose, onSaved }: { articl
         arret_appro: m.arret_appro, arret_vente: m.arret_vente,
         ref_remplacante: m.ref_remplacante.trim().toUpperCase() || null, date_effet: m.date_effet || null,
         delai_appro_ref_jours: num(m.delai_appro_ref_jours), delai_securite_ref_jours: num(m.delai_securite_ref_jours),
+        methode_calcul: m.methode_calcul || null,
+        couverture_min_mois: num(m.couverture_min_mois), couverture_cible_mois: num(m.couverture_cible_mois),
+        qte_proposition_manuelle: num(m.qte_proposition_manuelle), date_livraison_souhaitee: m.date_livraison_souhaitee || null,
+        proposition_maj_le: new Date().toISOString(),
       }
       const { error } = await supabase.from('appro_article_stock_min').upsert(payload, { onConflict: 'reference_article' })
       if (error) throw error
@@ -1844,7 +2085,7 @@ function ArticleManuelModal({ article, fournisseur, onClose, onSaved }: { articl
             <div className="flex flex-wrap items-center gap-2 font-mono text-[12px] font-bold text-[#8A8474]"><span>{article.reference_article}{fournisseur ? ` · ${fournisseur.numero} ${fournisseur.sage_intitule || ''}` : ''}</span><BlocageApproBadge article={article} /></div>
             <div className="text-[15px] font-bold text-[#111820]">{article.sage_designation || '—'}</div>
             {article.blocage_appro && <div className="mt-1 rounded-lg border border-red-200 bg-red-50 px-2 py-1 text-[12px] font-semibold text-red-700">Commande interdite dans SAGE (AR_InterdireCommande) : cette référence ne doit pas être réapprovisionnée.</div>}
-            <div className="mt-1 text-[12px] text-[#8A8474]">Délais fournisseur : appro {fmtNum(article.delai_appro_jours)} j · sécurité {fmtNum(article.delai_securite_jours)} j. Les valeurs saisies ici priment (jours calendaires) et sont conservées au recalcul.</div>
+            <div className="mt-1 text-[12px] text-[#8A8474]">Délais fournisseur : appro {fmtNum(article.delai_appro_jours)} j · sécurité {fmtNum(article.delai_securite_jours)} j. Les valeurs saisies ici priment (jours calendaires) et sont conservées au recalcul. Proposition actuelle : <b>{fmtNum(prop.qteProposee)}</b> (méthode {prop.lettre}, {prop.source}).</div>
           </div>
           <button type="button" onClick={onClose} className="rounded-lg px-2 py-1 text-[13px] font-bold text-[#8A8474] hover:bg-[#F4F3F0]">✕</button>
         </div>
@@ -1857,6 +2098,25 @@ function ArticleManuelModal({ article, fournisseur, onClose, onSaved }: { articl
           <label className="flex items-center gap-2 text-[13px]"><input type="checkbox" checked={m.arret_vente} onChange={(e) => setM({ ...m, arret_vente: e.target.checked })} className="accent-[#B4761A]" /> Arrêt de vente</label>
           <label className="flex flex-col gap-0.5 text-[12px] md:col-span-2"><span className="font-semibold text-[#3A362E]">Référence remplaçante</span><input value={m.ref_remplacante} onChange={(e) => setM({ ...m, ref_remplacante: e.target.value })} placeholder="référence SAGE" className={`${inp} font-mono uppercase`} /></label>
           <label className="flex flex-col gap-0.5 text-[12px] md:col-span-2"><span className="font-semibold text-[#3A362E]">Commentaire</span><textarea value={m.commentaire} onChange={(e) => setM({ ...m, commentaire: e.target.value })} rows={2} className="w-full rounded-lg border border-[#E5E1D8] px-2 py-1 text-[13px]" /></label>
+        </div>
+        <div className="mt-3 rounded-lg border border-[#B4761A]/25 bg-[#B4761A]/[0.04] p-3">
+          <div className="mb-2 text-[12px] font-bold text-[#111820]">Stratégie de réappro de la référence <span className="font-normal text-[#8A8474]">— vide = fournisseur{fournParams?.methode_calcul ? ` (${METHODE_PAR_CODE[fournParams.methode_calcul].lettre} · ${METHODE_PAR_CODE[fournParams.methode_calcul].label})` : ' (non renseignée → défaut)'}{ctxProp.methodeForcee ? ` · forçage écran actif : ${METHODE_PAR_CODE[ctxProp.methodeForcee].lettre}` : ''}</span></div>
+          <div className="grid gap-3 md:grid-cols-3">
+            <label className="flex flex-col gap-0.5 text-[12px]"><span className="font-semibold text-[#3A362E]">Méthode</span>
+              <select value={m.methode_calcul} onChange={(e) => setM({ ...m, methode_calcul: e.target.value as '' | MethodeCalcul })} className={inp}>
+                <option value="">— selon fournisseur —</option>
+                {METHODES.map((x) => <option key={x.code} value={x.code}>{x.lettre} · {x.label}</option>)}
+              </select></label>
+            <label className="flex flex-col gap-0.5 text-[12px]"><span className="font-semibold text-[#3A362E]">B · couverture min (mois)</span><input value={m.couverture_min_mois} onChange={(e) => setM({ ...m, couverture_min_mois: e.target.value })} placeholder={`fournisseur / défaut : ${fmtNum(fournParams?.couverture_min_mois ?? ctxProp.couvMinDefaut, 1)}`} className={inp} /></label>
+            <label className="flex flex-col gap-0.5 text-[12px]"><span className="font-semibold text-[#3A362E]">B · couverture cible (mois)</span><input value={m.couverture_cible_mois} onChange={(e) => setM({ ...m, couverture_cible_mois: e.target.value })} placeholder={`fournisseur / défaut : ${fmtNum(fournParams?.couverture_cible_mois ?? ctxProp.couvCibleDefaut, 1)}`} className={inp} /></label>
+            <label className="flex flex-col gap-0.5 text-[12px]"><span className="font-semibold text-[#3A362E]">Quantité retenue (vide = proposition)</span><input value={m.qte_proposition_manuelle} onChange={(e) => setM({ ...m, qte_proposition_manuelle: e.target.value })} placeholder={`proposition : ${fmtNum(apercu.qteProposee)}`} className={inp} /></label>
+            <label className="flex flex-col gap-0.5 text-[12px]"><span className="font-semibold text-[#3A362E]">Date de livraison souhaitée</span><input type="date" value={m.date_livraison_souhaitee} onChange={(e) => setM({ ...m, date_livraison_souhaitee: e.target.value })} className={inp} /><span className="text-[10px] text-[#8A8474]">vide = aujourd'hui + délai d'appro ({fmtDate(apercu.dateSouhaitee)})</span></label>
+          </div>
+          <div className="mt-3 rounded-lg bg-white p-2 font-mono text-[11px] leading-relaxed text-[#3A362E]">
+            <div className="mb-1 font-sans text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Calcul de la proposition (avec les valeurs saisies ci-dessus)</div>
+            {apercu.explication.map((l, i) => <div key={i} className={i === 0 ? 'font-bold text-[#111820]' : ''}>{l}</div>)}
+            <div className="mt-1 font-sans text-[12px] font-bold text-[#111820]">→ Proposition {fmtNum(apercu.qteProposee)}{apercu.qteRetenue !== null ? ` · retenue ${fmtNum(apercu.qteRetenue)}` : ''} · livraison souhaitée {fmtDate(apercu.dateSouhaitee)}</div>
+          </div>
         </div>
         <div className="mt-4 flex items-center justify-between">
           <span className="text-[12px] text-red-700">{msg}</span>
@@ -1955,35 +2215,37 @@ function ModeleProjection({ parametres, onParametresChange, onRecalcul, loading 
 
 // ── Colonnes de la liste Articles : clé, en-tête, valeur utilisée pour le tri
 // et le filtre d'en-tête. L'ordre est celui du tableau (thead et tbody).
-type CleColArt = 'inc' | 'reference' | 'fourn' | 'strategie' | 'blocage' | 'arret' | 'delai_l' | 'mu12' | 'sigma' | 'mu3' | 'derniere_sortie' | 'stock_fms' | 'dispo' | 'encours' | 'reserve' | 'projete' | 'couv' | 'min_sage' | 'min_blg' | 'ss' | 'min_calc' | 'max_calc' | 'a_cmder' | 'retenu'
+type CleColArt = 'inc' | 'reference' | 'fourn' | 'strategie' | 'blocage' | 'methode' | 'delai_l' | 'mu12' | 'sigma' | 'mu3' | 'derniere_sortie' | 'dispo' | 'encours' | 'reserve' | 'projete' | 'couv' | 'min_sage' | 'min_blg' | 'ss' | 'min_calc' | 'max_calc' | 'proposition' | 'retenue' | 'date_liv' | 'retenu'
 type FiltresColArt = Partial<Record<CleColArt, string>>
-type CtxColArt = { fournMap: Map<string, FournRow>; incoherencesParRef: Map<string, string[]> }
+type CtxColArt = { fournMap: Map<string, FournRow>; incoherencesParRef: Map<string, string[]>; propositions: Map<string, Proposition> }
+const propDe = (c: CtxColArt, a: ArtRow) => c.propositions.get(a.reference_article)
 
 const COLONNES_ARTICLES: { key: CleColArt; label: string; title?: string; align: 'left' | 'right'; placeholder?: string; val: (a: ArtRow, ctx: CtxColArt) => unknown }[] = [
   { key: 'inc', label: '⚠', title: 'Nombre d\'incohérences détectées (survole pour le détail). Filtre : ">0", "=0", ou un mot du libellé (ex. "sommeil")', align: 'left', placeholder: '>0', val: (a, c) => c.incoherencesParRef.get(a.reference_article)?.length ?? 0 },
   { key: 'reference', label: 'Référence', title: 'Référence et désignation SAGE', align: 'left', placeholder: 'réf. ou désignation', val: (a) => a.reference_article },
   { key: 'fourn', label: 'Fourn.', title: 'Fournisseur principal (n° SAGE). Filtre sur le n° ou l\'intitulé', align: 'left', placeholder: 'n° ou nom', val: (a) => a.fournisseur_principal },
   { key: 'strategie', label: 'Stratégie', title: 'Stratégie d\'appro principale du fournisseur', align: 'left', val: (a, c) => (a.fournisseur_principal ? c.fournMap.get(a.fournisseur_principal)?.strategie_principale : null) || '' },
-  { key: 'blocage', label: 'Blocage', title: 'Blocage appro SAGE (AR_InterdireCommande), exclusion (AR_Exclure) et vie produit (import CSV). Filtre : "blocage", "exclu", "fin", "vide"', align: 'left', placeholder: 'blocage', val: (a) => [a.blocage_appro ? 'Blocage appro' : '', a.exclure_appro ? 'Exclu' : '', a.vie_produit || ''].filter(Boolean).join(' ') },
-  { key: 'arret', label: 'Arrêt', title: 'Arrêt appro / arrêt vente, référence remplaçante et date d\'effet (saisie manuelle, ✎). Filtre : "appro", "vente", une référence', align: 'left', val: (a) => [a.arret_appro ? 'Appro' : '', a.arret_vente ? 'Vente' : '', a.ref_remplacante || ''].filter(Boolean).join(' ') },
+  { key: 'blocage', label: 'Blocage', title: 'Blocage appro SAGE (AR_InterdireCommande), exclusion (AR_Exclure), vie produit (import CSV) et arrêt appro / vente saisi (✎). Filtre : "blocage", "exclu", "fin", "arrêt", "vide"', align: 'left', placeholder: 'blocage', val: (a) => [a.blocage_appro ? 'Blocage appro' : '', a.exclure_appro ? 'Exclu' : '', a.vie_produit || '', a.arret_appro ? 'Arrêt appro' : '', a.arret_vente ? 'Arrêt vente' : '', a.ref_remplacante ? '→ ' + a.ref_remplacante : ''].filter(Boolean).join(' ') },
+  { key: 'methode', label: 'Méthode', title: 'Méthode de réappro appliquée : A Min/Max (stock de sécurité → max) ou B Couverture cible (min / cible en mois), avec son origine (forcée écran, référence, fournisseur, défaut) et ses paramètres. Clic = modifier. Filtre : "A", "B", "fournisseur", "référence"', align: 'left', placeholder: 'A / B', val: (a, c) => { const p = propDe(c, a); return p ? `${p.lettre} ${p.source} ${p.methode === 'couverture' ? `min ${fmtNum(p.couvMin, 1)} cible ${fmtNum(p.couvCible, 1)}` : `SS ${fmtNum(p.seuilA)} max ${fmtNum(p.stockMaxA)}`}` : '' } },
   { key: 'delai_l', label: 'Délai L', title: 'Délai d\'appro + délai de sécurité (jours calendaires) — ref = valeurs propres à la référence, sinon fournisseur / défaut', align: 'right', val: (a) => a.projection_delai_l },
   { key: 'mu12', label: 'μ 12 mois', title: 'Conso moyenne mensuelle sur l\'horizon (12 mois)', align: 'right', val: (a) => a.conso_moy_mensuelle },
   { key: 'sigma', label: 'σ', title: 'Écart-type mensuel', align: 'right', val: (a) => a.conso_ecart_type },
   { key: 'mu3', label: 'μ 3 mois', title: 'Consommation mensuelle moyenne des 3 derniers mois complets (sorties BL / 3). Survole pour le total.', align: 'right', val: (a) => a.conso_moy_3_mois },
   { key: 'derniere_sortie', label: 'Dern. sortie', title: 'Dernière sortie BL (mois). Filtre sur l\'année ou le mois au format AAAA-MM', align: 'right', placeholder: '2026-0', val: (a) => a.sage_derniere_sortie ? String(a.sage_derniere_sortie).slice(0, 7) : null },
-  { key: 'stock_fms', label: 'Stock FMS', title: 'Stock physique FMS (SAGE sto_qte)', align: 'right', val: (a) => a.sage_stock_fms },
-  { key: 'dispo', label: 'Dispo (agences)', title: 'Stock disponible SAGE (sto_dispo) du dépôt FMS — entre parenthèses : somme des agences', align: 'right', val: (a) => a.stock_dispo_sage_fms },
-  { key: 'encours', label: 'Encours fourn.', title: 'Reste à livrer des commandes fournisseurs BLG livrées au dépôt FMS, avec date de livraison estimée (⏱ = en retard, ≈ = date par délai théorique). Survole pour le détail par commande.', align: 'right', val: (a) => a.encours_fourn_fms },
-  { key: 'reserve', label: 'Réservé (agences)', title: 'Ventes réservées SAGE (sto_res) du dépôt FMS, déduites du projeté — entre parenthèses : somme des réservés des agences. Survole pour le reste à livrer BLG.', align: 'right', val: (a) => a.reserve_sage_fms },
-  { key: 'projete', label: 'Projeté', title: 'Stock (périmètre) − demande sur l\'horizon + encours. Survole pour la décomposition et le seuil. Rouge = à commander ; ⚠ = stock épuisé avant réception de l\'encours.', align: 'right', val: (a) => a.stock_projete_livraison },
-  { key: 'couv', label: 'Couv. (mois)', title: 'Couverture projetée = position de stock du périmètre choisi (stock + encours − réservé) / μ retenu. En dessous, en gris : couverture du seul stock physique FMS / μ 12 mois (ne dépend pas du modèle).', align: 'right', val: (a) => a.couverture_projetee_mois },
+  { key: 'dispo', label: 'Dispo global (FMS)', title: 'Stock disponible SAGE (sto_dispo) tous dépôts — entre parenthèses : dépôt FMS seul. Survole pour le stock physique.', align: 'right', val: (a) => a.sage_stock_dispo_total },
+  { key: 'encours', label: 'Encours ≤ L (après)', title: 'Reste à livrer des commandes fournisseurs BLG (périmètre) dont la livraison estimée tombe dans le délai L → compté dans le stock à réception ; entre parenthèses : livré après L (non compté). ⏱ = en retard, ? = douteux (exclu). Survole pour le détail par commande.', align: 'right', val: (a, c) => propDe(c, a)?.encoursPeriode ?? null },
+  { key: 'reserve', label: 'Réservé ≤ L j (après L)', title: 'Ventes réservées SAGE (lignes de commande client, reliquat = sto_res) dont la date de livraison prévue tombe dans le délai L (y compris en retard) → déduites du stock à réception. Entre parenthèses : à livrer après L (non déduit). Périmètre global ou FMS selon le modèle.', align: 'right', val: (a, c) => propDe(c, a)?.reservePeriode ?? null },
+  { key: 'projete', label: 'Stock à réception', title: 'Stock juste avant la réception de la commande passée aujourd\'hui (dans L jours) = stock physique (périmètre) − demande sur L (réservé daté, μ × L/30 ou le max selon le modèle) + encours livré ≤ L. Survole pour le détail. Rouge = déclenche une proposition.', align: 'right', val: (a, c) => propDe(c, a)?.stockReception ?? null },
+  { key: 'couv', label: 'Couv. à réception (mois)', title: 'Couverture à réception = stock à réception / μ retenu (12 mois ou 3 mois selon le modèle).', align: 'right', val: (a, c) => propDe(c, a)?.couvReception ?? null },
   { key: 'min_sage', label: 'Min SAGE', align: 'right', val: (a) => a.sage_stock_min_fms },
   { key: 'min_blg', label: 'Min BLG', align: 'right', val: (a) => a.blg_stock_min_fms },
   { key: 'ss', label: 'SS calc.', align: 'right', val: (a) => a.calc_stock_securite },
   { key: 'min_calc', label: 'Min calc.', align: 'right', val: (a) => a.calc_stock_min },
   { key: 'max_calc', label: 'Max calc.', align: 'right', val: (a) => a.calc_stock_max },
-  { key: 'a_cmder', label: 'À cmder', title: 'Quantité suggérée pour remonter le projeté au stock max (arrondie au colisage). Filtre : ">0" = à commander', align: 'right', placeholder: '>0', val: (a) => (a.a_commander ? n0(a.qte_a_commander) : null) },
-  { key: 'retenu', label: 'Retenu', title: 'Stock min retenu (saisie manuelle). Filtre "!vide" = avec saisie', align: 'right', placeholder: '!vide', val: (a) => a.stock_min_retenu },
+  { key: 'proposition', label: 'Proposition', title: 'Quantité proposée par la méthode (A : remontée au stock max ; B : cible × μ − stock à réception), arrondie au colisage. Survole pour le calcul détaillé. Filtre : ">0" = à commander', align: 'right', placeholder: '>0', val: (a, c) => { const p = propDe(c, a); return p && p.declenche ? p.qteProposee : null } },
+  { key: 'retenue', label: 'Qté retenue', title: 'Quantité retenue pour la commande : saisis pour remplacer la proposition (vide = proposition). Entrée ou clic ailleurs = enregistré. C\'est cette quantité qui part dans les fichiers commande. Filtre : ">0", "!vide" = modifiée', align: 'right', placeholder: '>0', val: (a, c) => { const p = propDe(c, a); return p ? (p.qteFinale > 0 ? p.qteFinale : null) : null } },
+  { key: 'date_liv', label: 'Liv. souhaitée', title: 'Date de livraison souhaitée pour la commande (défaut = aujourd\'hui + délai d\'appro). Une commande fournisseur = un fichier par date.', align: 'right', placeholder: '2026-', val: (a, c) => propDe(c, a)?.dateSouhaitee ?? null },
+  { key: 'retenu', label: 'Min retenu', title: 'Stock min retenu (saisie manuelle, ✎). Filtre "!vide" = avec saisie', align: 'right', placeholder: '!vide', val: (a) => a.stock_min_retenu },
 ]
 
 /** Filtre d'en-tête d'une colonne Articles : quelques colonnes cherchent aussi
@@ -1997,10 +2259,15 @@ function filtreColArtOk(a: ArtRow, key: CleColArt, expr: string, ctx: CtxColArt)
   return false
 }
 
-function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, parametres, onParametresChange, onArticleChange, onRecalcul }: {
-  articles: ArtRow[]; fournisseurs: FournRow[]; loading: boolean; loadProgress: number; error: string | null
+function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProgress, error, parametres, onParametresChange, onArticleChange, onRecalcul }: {
+  articles: ArtRow[]; fournisseurs: FournRow[]; paramsFourn: Map<string, ParamsFourn>; loading: boolean; loadProgress: number; error: string | null
   parametres: Parametre[]; onParametresChange: (p: Parametre[]) => void; onArticleChange: (a: ArtRow) => void; onRecalcul: () => Promise<void>
 }) {
+  // Forçage de la méthode de réappro sur l'écran ('' = selon référence / fournisseur / défaut) — mémorisé
+  const [methodeForcee, setMethodeForcee] = useState<'' | MethodeCalcul>(() => { try { const v = localStorage.getItem('appro.articles.methode_forcee'); return v === 'min_max' || v === 'couverture' ? v : '' } catch { return '' } })
+  useEffect(() => { try { localStorage.setItem('appro.articles.methode_forcee', methodeForcee) } catch { /* ignore */ } }, [methodeForcee])
+  const [exportCommandesEnCours, setExportCommandesEnCours] = useState(false)
+  const [exportCommandesMsg, setExportCommandesMsg] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [fournFilter, setFournFilter] = useState('')
   const [familleFilter, setFamilleFilter] = useState('')
@@ -2049,7 +2316,16 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
     return m
   }, [articles, fournMap, indexArticles])
 
-  const ctxCol = useMemo<CtxColArt>(() => ({ fournMap, incoherencesParRef }), [fournMap, incoherencesParRef])
+  // Contexte et propositions de réappro (méthode A / B) — recalculées quand les paramètres, le forçage ou les articles changent
+  const ctxProp = useMemo<ContexteProposition>(() => ({
+    paramsFourn, methodeForcee,
+    methodeDefaut: valParam(parametres, 'methode_calcul_defaut', 1) === 2 ? 'couverture' : 'min_max',
+    couvMinDefaut: valParam(parametres, 'couverture_min_defaut_mois', 2), couvCibleDefaut: valParam(parametres, 'couverture_cible_defaut_mois', 3),
+    retardMaxJours: valParam(parametres, 'cdf_retard_max_jours', 60),
+    aujourdhui: isoLocal(new Date()),
+  }), [paramsFourn, methodeForcee, parametres])
+  const propositions = useMemo(() => new Map(articles.map((a) => [a.reference_article, calculerProposition(a, ctxProp)])), [articles, ctxProp])
+  const ctxCol = useMemo<CtxColArt>(() => ({ fournMap, incoherencesParRef, propositions }), [fournMap, incoherencesParRef, propositions])
   const clesFiltreCol = useMemo(() => (Object.keys(filtresCol) as CleColArt[]).filter((k) => (filtresCol[k] || '').trim()), [filtresCol])
   function setFiltreCol(k: CleColArt, v: string) { setFiltresCol((f) => ({ ...f, [k]: v })) }
 
@@ -2062,8 +2338,8 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
       if (pertinentsSeuls && !a.pertinent_calcul_besoin) return false
       if (avecConsoSeuls && !(Number(a.conso_horizon) > 0)) return false
       if (ecartMinSeuls && !(a.champs_en_ecart || []).includes('stock_min')) return false
-      if (aCommanderSeuls && !a.a_commander) return false
-      if (avecEncoursSeuls && !(n0(a.encours_fourn_fms) > 0 || n0(a.encours_fourn_douteux) > 0)) return false
+      if (aCommanderSeuls && !(propositions.get(a.reference_article)?.qteFinale ?? 0)) return false
+      if (avecEncoursSeuls && !(n0(a.encours_fourn_total) > 0)) return false
       if (fournFilter && a.fournisseur_principal !== fournFilter) return false
       if (familleFilter && safeText(a.famille) !== familleFilter) return false
       if (qualiteFilter && safeText(f?.sage_qualite) !== qualiteFilter) return false
@@ -2078,7 +2354,7 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
       for (const k of clesFiltreCol) if (!filtreColArtOk(a, k, filtresCol[k]!, ctxCol)) return false
       return true
     })
-  }, [articles, fournMap, search, fournFilter, familleFilter, pertinentsSeuls, avecConsoSeuls, ecartMinSeuls, aCommanderSeuls, avecEncoursSeuls, qualiteFilter, strategieFilter, sommeilFilter, arretApproFilter, blocageFilter, filtresCol, ctxCol, clesFiltreCol])
+  }, [articles, fournMap, propositions, search, fournFilter, familleFilter, pertinentsSeuls, avecConsoSeuls, ecartMinSeuls, aCommanderSeuls, avecEncoursSeuls, qualiteFilter, strategieFilter, sommeilFilter, arretApproFilter, blocageFilter, filtresCol, ctxCol, clesFiltreCol])
 
   const compteursIncoherences = useMemo(() => {
     const c: Record<string, number> = {}
@@ -2102,12 +2378,12 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
       if (tri === 'incoherences') return (incoherencesParRef.get(b.reference_article)?.length || 0) - (incoherencesParRef.get(a.reference_article)?.length || 0) || (b.conso_horizon || 0) - (a.conso_horizon || 0)
       if (tri === 'conso') return (b.conso_horizon || 0) - (a.conso_horizon || 0)
       if (tri === 'ecart') return Math.abs((b.calc_stock_min || 0) - (b.blg_stock_min_fms || 0)) - Math.abs((a.calc_stock_min || 0) - (a.blg_stock_min_fms || 0))
-      if (tri === 'couverture') return (a.couverture_fms_mois ?? 999) - (b.couverture_fms_mois ?? 999)
-      if (tri === 'a_commander') return n0(b.qte_a_commander) - n0(a.qte_a_commander) || (b.conso_horizon || 0) - (a.conso_horizon || 0)
-      if (tri === 'projete') return (n0(a.stock_projete_livraison) - n0(a.calc_stock_min)) - (n0(b.stock_projete_livraison) - n0(b.calc_stock_min))
+      if (tri === 'couverture') return (propositions.get(a.reference_article)?.couvReception ?? 999) - (propositions.get(b.reference_article)?.couvReception ?? 999)
+      if (tri === 'a_commander') return (propositions.get(b.reference_article)?.qteFinale ?? 0) - (propositions.get(a.reference_article)?.qteFinale ?? 0) || (b.conso_horizon || 0) - (a.conso_horizon || 0)
+      if (tri === 'projete') return (propositions.get(a.reference_article)?.stockReception ?? 0) - (propositions.get(b.reference_article)?.stockReception ?? 0)
       return a.reference_article.localeCompare(b.reference_article)
     })
-  }, [baseFiltree, incoherenceFilter, incoherencesParRef, tri, triCol, ctxCol])
+  }, [baseFiltree, incoherenceFilter, incoherencesParRef, tri, triCol, ctxCol, propositions])
 
   // KPI sur le jeu filtré (hors pastille d'incohérence)
   const kpis = useMemo(() => {
@@ -2122,16 +2398,60 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
       sansConso: pert.filter((a) => !(Number(a.conso_horizon) > 0)).length,
       minBlg: pert.filter((a) => Number(a.blg_stock_min_fms) > 0).length,
       ecarts: pert.filter((a) => (a.champs_en_ecart || []).includes('stock_min')).length,
-      aCommander: pert.filter((a) => a.a_commander).length,
-      qteACommander: pert.reduce((s, a) => s + n0(a.qte_a_commander), 0),
-      rupture: pert.filter((a) => a.rupture_avant_reception).length,
+      aCommander: baseFiltree.filter((a) => (propositions.get(a.reference_article)?.qteFinale ?? 0) > 0).length,
+      qteACommander: baseFiltree.reduce((s, a) => s + (propositions.get(a.reference_article)?.qteFinale ?? 0), 0),
+      retenues: baseFiltree.filter((a) => propositions.get(a.reference_article)?.qteRetenue !== null && propositions.get(a.reference_article)?.qteRetenue !== undefined).length,
+      methodeB: baseFiltree.filter((a) => propositions.get(a.reference_article)?.methode === 'couverture').length,
+      rupture: pert.filter((a) => (propositions.get(a.reference_article)?.stockReception ?? 0) < 0).length,
       encoursRetard: pert.filter((a) => n0(a.encours_fourn_retard) > 0).length,
       encoursDouteux: pert.filter((a) => n0(a.encours_fourn_douteux) > 0).length,
       sansDate: pert.filter((a) => a.date_livraison_par_defaut).length,
     }
-  }, [baseFiltree])
+  }, [baseFiltree, propositions])
 
   const affichees = useMemo(() => filtres.slice(0, 500), [filtres])
+
+  /** Fichiers commande fournisseur : un Excel (Référence ; Qté ; Date de livraison souhaitée)
+   * par fournisseur × date de livraison souhaitée, sur les lignes filtrées dont la quantité
+   * retenue (ou à défaut la proposition) est > 0. Nom : « code nom fournisseur JJ-MM-AAAA.xlsx ». */
+  async function exporterFichiersCommande() {
+    setExportCommandesEnCours(true); setExportCommandesMsg(null)
+    try {
+      const groupes = new Map<string, { fournisseur: string; nom: string; date: string; lignes: { ref: string; qte: number }[] }>()
+      filtres.forEach((a) => {
+        const p = propositions.get(a.reference_article)
+        if (!p || p.qteFinale <= 0) return
+        const fournisseur = a.fournisseur_principal || 'SANS-FOURNISSEUR'
+        const cle = `${fournisseur}|${p.dateSouhaitee}`
+        if (!groupes.has(cle)) groupes.set(cle, { fournisseur, nom: fournMap.get(fournisseur)?.sage_intitule || '', date: p.dateSouhaitee, lignes: [] })
+        groupes.get(cle)!.lignes.push({ ref: a.reference_article, qte: p.qteFinale })
+      })
+      if (groupes.size === 0) { setExportCommandesMsg('Aucune ligne avec une quantité retenue ou proposée > 0 dans le jeu filtré.'); return }
+      const fichiers = Array.from(groupes.values()).sort((x, y) => x.fournisseur.localeCompare(y.fournisseur) || x.date.localeCompare(y.date))
+      for (const g of fichiers) {
+        const wb = new ExcelJS.Workbook()
+        const ws = wb.addWorksheet('Commande')
+        ws.addRow(['Référence', 'Qté', 'Date de livraison souhaitée']).font = { bold: true }
+        const [yy, mm, dd] = g.date.split('-').map(Number)
+        g.lignes.sort((x, y) => x.ref.localeCompare(y.ref)).forEach((l) => {
+          const row = ws.addRow([l.ref, l.qte, new Date(Date.UTC(yy, mm - 1, dd))])
+          row.getCell(3).numFmt = 'dd/mm/yyyy'
+        })
+        ws.columns = [{ width: 24 }, { width: 10 }, { width: 24 }]
+        const buffer = await wb.xlsx.writeBuffer()
+        const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+        const url = URL.createObjectURL(blob)
+        const nomPropre = `${g.fournisseur} ${g.nom}`.replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim()
+        const link = document.createElement('a'); link.href = url; link.download = `${nomPropre} ${String(dd).padStart(2, '0')}-${String(mm).padStart(2, '0')}-${yy}.xlsx`
+        document.body.appendChild(link); link.click(); link.remove()
+        setTimeout(() => URL.revokeObjectURL(url), 10000)
+        if (fichiers.length > 1) await new Promise((r) => setTimeout(r, 500))   // le navigateur peut demander l'autorisation de téléchargements multiples
+      }
+      setExportCommandesMsg(`${fichiers.length} fichier${fichiers.length > 1 ? 's' : ''} généré${fichiers.length > 1 ? 's' : ''} : ${fichiers.map((g) => `${g.fournisseur} ${fmtDate(g.date)} (${g.lignes.length} ligne${g.lignes.length > 1 ? 's' : ''})`).join(' · ')}`)
+    } catch (e) {
+      setExportCommandesMsg('Erreur fichiers commande : ' + messageErreur(e))
+    } finally { setExportCommandesEnCours(false) }
+  }
 
   async function enregistrerParams() {
     const next = parametres.map((p) => ({ ...p, valeur: Number(paramsDraft[p.cle] ?? p.valeur) }))
@@ -2228,7 +2548,15 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
         { h: 'Périmètre projection', f: (a) => a.projection_perimetre }, { h: 'Stock base', f: (a) => a.projection_stock_base }, { h: 'Réservé base', f: (a) => a.projection_reserve_base }, { h: 'Encours base', f: (a) => a.projection_encours_base },
         { h: 'Délai L (j)', f: (a) => a.projection_delai_l }, { h: 'Horizon (j)', f: (a) => a.horizon_jours }, { h: 'Conso sur horizon', f: (a) => a.conso_jusqua_livraison }, { h: 'Demande retenue', f: (a) => a.projection_demande }, { h: 'Seuil de commande', f: (a) => a.projection_seuil },
         { h: 'Position (stock + encours − réservé FMS)', f: (a) => a.position_stock_fms }, { h: 'Stock avant réception', f: (a) => a.stock_avant_reception }, { h: 'Stock projeté à livraison', f: (a) => a.stock_projete_livraison },
-        { h: 'Rupture avant réception', f: (a) => (a.rupture_avant_reception ? 'Oui' : 'Non') }, { h: 'À commander', f: (a) => (a.a_commander ? 'Oui' : 'Non') }, { h: 'Qté suggérée', f: (a) => a.qte_a_commander },
+        { h: 'Rupture avant réception', f: (a) => (a.rupture_avant_reception ? 'Oui' : 'Non') }, { h: 'À commander (modèle base)', f: (a) => (a.a_commander ? 'Oui' : 'Non') }, { h: 'Qté suggérée (modèle base)', f: (a) => a.qte_a_commander },
+        { h: 'Méthode réappro', f: (a) => { const p = propositions.get(a.reference_article); return p ? `${p.lettre} · ${METHODE_PAR_CODE[p.methode].label} (${p.source})` : '' } },
+        { h: 'Couverture min (mois)', f: (a) => propositions.get(a.reference_article)?.couvMin }, { h: 'Couverture cible (mois)', f: (a) => propositions.get(a.reference_article)?.couvCible },
+        { h: 'Date réception (aujourd\'hui + L)', f: (a) => fmtDate(propositions.get(a.reference_article)?.dateReception) },
+        { h: 'Stock physique (périmètre)', f: (a) => propositions.get(a.reference_article)?.stockBase }, { h: 'Réservé ≤ L', f: (a) => propositions.get(a.reference_article)?.reservePeriode }, { h: 'Réservé après L', f: (a) => propositions.get(a.reference_article)?.reserveApres },
+        { h: 'Encours ≤ L', f: (a) => propositions.get(a.reference_article)?.encoursPeriode }, { h: 'Encours après L', f: (a) => propositions.get(a.reference_article)?.encoursApres },
+        { h: 'Demande sur L', f: (a) => propositions.get(a.reference_article)?.demande }, { h: 'Stock à réception', f: (a) => propositions.get(a.reference_article)?.stockReception }, { h: 'Couverture à réception (mois)', f: (a) => propositions.get(a.reference_article)?.couvReception },
+        { h: 'Déclenche', f: (a) => (propositions.get(a.reference_article)?.declenche ? 'Oui' : 'Non') }, { h: 'Proposition', f: (a) => propositions.get(a.reference_article)?.qteProposee }, { h: 'Qté retenue (saisie)', f: (a) => a.qte_proposition_manuelle }, { h: 'Qté commande', f: (a) => propositions.get(a.reference_article)?.qteFinale }, { h: 'Livraison souhaitée', f: (a) => fmtDate(propositions.get(a.reference_article)?.dateSouhaitee) },
+        { h: 'Explication', f: (a) => propositions.get(a.reference_article)?.explication.join(' | ') },
         { h: 'Stock sécurité calculé', f: (a) => a.calc_stock_securite }, { h: 'Stock min calculé/retenu', f: (a) => a.calc_stock_min }, { h: 'Stock max calculé', f: (a) => a.calc_stock_max },
         { h: 'Stock min retenu (saisie)', f: (a) => a.stock_min_retenu }, { h: 'Commentaire', f: (a) => a.commentaire_stock_min },
         { h: 'Stock min FMS SAGE', f: (a) => a.sage_stock_min_fms }, { h: 'Stock max FMS SAGE', f: (a) => a.sage_stock_max_fms },
@@ -2243,10 +2571,11 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
         const ecart = a.pertinent_calcul_besoin && Number(a.calc_stock_min || 0) > 0 && Number(a.calc_stock_min) !== Number(a.blg_stock_min_fms || 0)
         const couleur = !a.pertinent_calcul_besoin ? null : ecart ? COULEUR_ECART : COULEUR_OK
         if (couleur) [idxCalc, idxBlg].forEach((i) => { row.getCell(i).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: couleur } } })
-        const idxProj = cols.findIndex((c) => c.h === 'Stock projeté à livraison') + 1
-        const idxCmd = cols.findIndex((c) => c.h === 'À commander') + 1
-        if (a.pertinent_calcul_besoin) {
-          const c2 = a.a_commander ? COULEUR_ECART : a.rupture_avant_reception ? COULEUR_NON_COMPARABLE : COULEUR_OK
+        const idxProj = cols.findIndex((c) => c.h === 'Stock à réception') + 1
+        const idxCmd = cols.findIndex((c) => c.h === 'Qté commande') + 1
+        const p = propositions.get(a.reference_article)
+        if (a.pertinent_calcul_besoin && p) {
+          const c2 = p.qteFinale > 0 ? COULEUR_ECART : p.stockReception < 0 ? COULEUR_NON_COMPARABLE : COULEUR_OK
           ;[idxProj, idxCmd].forEach((i) => { row.getCell(i).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: c2 } } })
         }
       })
@@ -2271,10 +2600,10 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
         <KpiCard label="Sans aucune sortie" value={kpis.sansConso} loading={loading} tone="warn" sub="MYSTOCK à challenger" />
         <KpiCard label="Stock min renseigné dans BLG" value={kpis.minBlg} loading={loading} />
         <KpiCard label="Stock min BLG ≠ calculé" value={kpis.ecarts} loading={loading} tone="warn" />
-        <KpiCard label="À commander" value={kpis.aCommander} loading={loading} tone="warn" sub={`projeté < seuil · ${fmtNum(kpis.qteACommander)} pièces`} />
+        <KpiCard label="À commander" value={kpis.aCommander} loading={loading} tone="warn" sub={`${fmtNum(kpis.qteACommander)} pièces · ${fmtNum(kpis.retenues)} qté retenue${kpis.retenues > 1 ? 's' : ''} saisie${kpis.retenues > 1 ? 's' : ''}`} />
       </section>
       <section className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <KpiCard label="Rupture avant réception" value={kpis.rupture} loading={loading} tone="warn" sub="stock épuisé avant l'arrivée de l'encours" />
+        <KpiCard label="Stock négatif à réception" value={kpis.rupture} loading={loading} tone="warn" sub="stock épuisé avant l'arrivée de la commande (délai L)" />
         <KpiCard label="Encours fournisseur en retard" value={kpis.encoursRetard} loading={loading} tone="warn" sub="date estimée dépassée" />
         <KpiCard label="Encours douteux (exclu)" value={kpis.encoursDouteux} loading={loading} sub={`retard > ${parametres.find((p) => p.cle === 'cdf_retard_max_jours')?.valeur ?? 60} j`} />
         <KpiCard label="Sans date de livraison" value={kpis.sansDate} loading={loading} sub="délai théorique appliqué" />
@@ -2296,9 +2625,9 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
             <option value="conso">Tri : conso décroissante</option>
             <option value="incoherences">Tri : nombre d'incohérences</option>
             <option value="a_commander">Tri : quantité à commander</option>
-            <option value="projete">Tri : projeté − stock min (le plus critique d'abord)</option>
+            <option value="projete">Tri : stock à réception (le plus critique d'abord)</option>
             <option value="ecart">Tri : écart stock min (calculé vs BLG)</option>
-            <option value="couverture">Tri : couverture FMS croissante</option>
+            <option value="couverture">Tri : couverture à réception croissante</option>
             <option value="reference">Tri : référence</option>
           </select>
         </div>
@@ -2338,9 +2667,13 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
             <button type="button" onClick={() => void exporterExcel()} disabled={exportEnCours || loading || filtres.length === 0} className="rounded-lg bg-[#111820] px-4 py-2 text-[13px] font-bold text-white hover:bg-[#252E3D] disabled:opacity-60">
               {exportEnCours ? 'Export en cours…' : `⬇ Exporter en Excel (${filtres.length} refs)`}
             </button>
+            <button type="button" onClick={() => void exporterFichiersCommande()} disabled={exportCommandesEnCours || loading || kpis.aCommander === 0} title="Un fichier Excel par fournisseur et par date de livraison souhaitée (Référence ; Qté ; Date de livraison souhaitée), sur les lignes filtrées dont la quantité retenue (ou proposée) est > 0" className="rounded-lg bg-[#B4761A] px-4 py-2 text-[13px] font-bold text-white hover:bg-[#96600F] disabled:opacity-60">
+              {exportCommandesEnCours ? 'Génération…' : `⬇ Fichiers commande (${fmtNum(kpis.aCommander)} lignes)`}
+            </button>
           </div>
         </div>
         {importBlocageMsg && <div className="mt-2 rounded-lg border border-[#B4761A]/25 bg-[#B4761A]/[0.06] px-3 py-2 text-[13px] font-semibold text-[#5A4321]">{importBlocageMsg}</div>}
+        {exportCommandesMsg && <div className="mt-2 rounded-lg border border-[#B4761A]/25 bg-[#B4761A]/[0.06] px-3 py-2 text-[13px] font-semibold text-[#5A4321]">{exportCommandesMsg}</div>}
       </section>
 
       {/* Incohérences par référence — pastilles filtrantes */}
@@ -2374,7 +2707,7 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
       <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <div className="text-[13px] font-bold text-[#111820]">Calcul de besoin — stock min (point de commande) par référence MYSTOCK</div>
+            <div className="text-[13px] font-bold text-[#111820]">Calcul de besoin — stock min / stock de sécurité par référence MYSTOCK, puis proposition de réappro (méthode A ou B)</div>
             <p className="mt-1 max-w-3xl text-[12px] text-[#8A8474]">
               Sur l'historique des sorties BL (flux articles, toutes agences, {parametres.find((p) => p.cle === 'horizon_mois')?.valeur ?? 12} mois complets) :
               μ = conso moyenne mensuelle, σ = écart-type. Délai L = délai d'appro + délai sécurité (jours calendaires), en priorité ceux saisis sur la référence (✎), sinon ceux du fournisseur, sinon les défauts. Une référence en "arrêt appro" ne déclenche plus de signal à commander.
@@ -2399,6 +2732,21 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
         </div>
         {recalculMsg && <div className="mt-3 rounded-lg border border-[#B4761A]/25 bg-[#B4761A]/[0.06] px-3 py-2 text-[13px] font-semibold text-[#5A4321]">{recalculMsg}</div>}
         <ModeleProjection parametres={parametres} onParametresChange={onParametresChange} onRecalcul={onRecalcul} loading={loading} />
+        <div className="mt-3 grid gap-2 rounded-lg border border-[#B4761A]/30 bg-[#B4761A]/[0.05] p-3 md:grid-cols-[1.2fr_2fr]">
+          <label className="flex flex-col gap-0.5 text-[12px]">
+            <span className="font-semibold text-[#3A362E]">Stratégie de réappro (méthode de calcul de la proposition)</span>
+            <select value={methodeForcee} onChange={(e) => setMethodeForcee(e.target.value as '' | MethodeCalcul)} className="h-9 rounded-lg border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold text-[#3A362E]">
+              <option value="">Selon la référence / le fournisseur (défaut : {METHODE_PAR_CODE[ctxProp.methodeDefaut].lettre} · {METHODE_PAR_CODE[ctxProp.methodeDefaut].label})</option>
+              {METHODES.map((x) => <option key={x.code} value={x.code}>Forcer {x.lettre} · {x.label} sur toutes les références</option>)}
+            </select>
+            <span className="text-[11px] text-[#8A8474]">{methodeForcee ? `Forçage écran actif (mémorisé) — ${fmtNum(kpis.methodeB)} réf. en B sur le jeu filtré` : `Méthode définie dans la fiche fournisseur, surchargeable par référence (✎) — ${fmtNum(kpis.methodeB)} réf. en B / ${fmtNum(kpis.total - kpis.methodeB)} en A sur le jeu filtré`}</span>
+          </label>
+          <div className="text-[11px] leading-relaxed text-[#3A362E]">
+            <div><b>A · Min/Max — point de commande</b> : stock à réception &lt; stock de sécurité (z × σ × √(L/30)) → quantité = stock max − stock à réception.</div>
+            <div><b>B · Couverture cible à réception</b> : couverture à réception (stock à réception / μ) &lt; couverture min → quantité = couverture cible × μ − stock à réception. Défauts : min {fmtNum(ctxProp.couvMinDefaut, 1)} mois, cible {fmtNum(ctxProp.couvCibleDefaut, 1)} mois (paramètres couverture_*_defaut_mois).</div>
+            <div className="mt-0.5 text-[#8A8474]">Stock à réception = stock physique ({valParam(parametres, 'projection_perimetre_global', 0) === 1 ? 'global' : 'FMS'}) − demande sur le délai L ({DEMANDE_MODES.find((m) => m.value === valParam(parametres, 'projection_demande_mode', 3))?.label.toLowerCase()} : réservé SAGE daté ≤ L et/ou μ {valParam(parametres, 'projection_mu_source', 0) === 1 ? '3 mois' : '12 mois'} × L/30) + encours fournisseur livré ≤ L. Les quantités sont arrondies au colisage ; une référence en blocage appro ou en arrêt appro ne reçoit aucune proposition. Survole la colonne « Proposition » pour le calcul détaillé d'une référence ; clique « Méthode » ou ✎ pour modifier ses paramètres.</div>
+          </div>
+        </div>
         {showParams && (
           <div className="mt-3 rounded-lg border border-[#E5E1D8] bg-[#F4F3F0] p-3">
             <div className="grid gap-2 md:grid-cols-3">
@@ -2447,8 +2795,9 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
             <tbody>
               {affichees.map((a) => {
                 const ecart = (a.champs_en_ecart || []).includes('stock_min')
-                const sousMin = !!a.a_commander
-                const encours = n0(a.encours_fourn_fms), douteux = n0(a.encours_fourn_douteux), retard = n0(a.encours_fourn_retard)
+                const p = propositions.get(a.reference_article)!
+                const sousMin = p.qteFinale > 0
+                const encours = p.encoursPeriode, douteux = p.encoursDouteux, retard = n0(a.encours_fourn_retard)
                 const f = a.fournisseur_principal ? fournMap.get(a.fournisseur_principal) : undefined
                 const incs = incoherencesParRef.get(a.reference_article) || []
                 const incRouge = incs.some((k) => LABEL_INCOHERENCE_ARTICLE[k]?.gravite === 'rouge')
@@ -2479,15 +2828,21 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
                     </td>
                     <td className="px-2 py-1.5 font-mono text-[11px]" title={f ? `${f.sage_intitule || ''} · ${f.sage_qualite || ''}${f.sage_en_sommeil ? ' · EN SOMMEIL' : ''}` : undefined}>{a.fournisseur_principal || '—'}{f?.sage_en_sommeil ? <span className="ml-1 text-[10px] text-red-700">zz</span> : null}</td>
                     <td className="px-2 py-1.5 text-[11px] text-[#3A362E]">{f ? (f.strategie_principale || <span className="text-[#B4761A]">—</span>) : <span className="text-[#B3AD9E]">—</span>}</td>
-                    <td className="px-2 py-1.5 text-[11px]">{a.blocage_appro || a.exclure_appro || a.vie_produit ? <BlocageApproBadge article={a} compact /> : <span className="text-[#B3AD9E]">—</span>}</td>
                     <td className="px-2 py-1.5 text-[11px]">
-                      <div className="flex flex-wrap gap-1">
-                        {a.arret_appro && <span className="rounded-full bg-red-100 px-1.5 py-0.5 text-[10px] font-bold text-red-700">Appro</span>}
-                        {a.arret_vente && <span className="rounded-full bg-orange-100 px-1.5 py-0.5 text-[10px] font-bold text-orange-700">Vente</span>}
-                        {a.ref_remplacante && <span className="rounded bg-[#F4F3F0] px-1 py-0.5 font-mono text-[10px] text-[#3A362E]" title="Référence remplaçante">→ {a.ref_remplacante}</span>}
-                        {a.date_effet && <span className="text-[10px] text-[#8A8474]" title="Date d'effet">{fmtDate(a.date_effet)}</span>}
-                        {!a.arret_appro && !a.arret_vente && !a.ref_remplacante && <span className="text-[#B3AD9E]">—</span>}
+                      <div className="flex flex-wrap items-center gap-1">
+                        <BlocageApproBadge article={a} compact />
+                        {a.arret_appro && <span className="rounded-full bg-red-100 px-1.5 py-0.5 text-[10px] font-bold text-red-700" title="Arrêt appro (saisie ✎)">Arrêt appro</span>}
+                        {a.arret_vente && <span className="rounded-full bg-orange-100 px-1.5 py-0.5 text-[10px] font-bold text-orange-700" title="Arrêt de vente (saisie ✎)">Arrêt vente</span>}
+                        {a.ref_remplacante && <span className="rounded bg-[#F4F3F0] px-1 py-0.5 font-mono text-[10px] text-[#3A362E]" title={`Référence remplaçante${a.date_effet ? ' · effet ' + fmtDate(a.date_effet) : ''}`}>→ {a.ref_remplacante}</span>}
+                        {!a.blocage_appro && !a.exclure_appro && !a.vie_produit && !a.arret_appro && !a.arret_vente && !a.ref_remplacante && <span className="text-[#B3AD9E]">—</span>}
                       </div>
+                    </td>
+                    <td className="px-2 py-1.5 text-[11px]">
+                      <button type="button" onClick={() => setEditArticle(a)} title={`${p.lettre} · ${METHODE_PAR_CODE[p.methode].label} (${p.source})\n${p.methode === 'couverture' ? `Couverture min ${fmtNum(p.couvMin, 1)} mois · cible ${fmtNum(p.couvCible, 1)} mois (${p.couvSource})` : `Stock de sécurité ${fmtNum(p.seuilA, 1)} · stock max ${fmtNum(p.stockMaxA)}`}\nClic : modifier la méthode / les paramètres de la référence`}
+                        className="flex items-center gap-1 rounded px-1 py-0.5 hover:bg-[#F4F3F0]">
+                        <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${p.methode === 'couverture' ? 'bg-sky-100 text-sky-800' : 'bg-[#111820] text-white'}`}>{p.lettre}</span>
+                        <span className="text-[10px] leading-tight text-[#3A362E]">{p.methode === 'couverture' ? `min ${fmtNum(p.couvMin, 1)} · cible ${fmtNum(p.couvCible, 1)} m` : `SS ${fmtNum(p.seuilA)} · max ${fmtNum(p.stockMaxA)}`}<br /><span className={`text-[#8A8474] ${p.source === 'référence' || p.source === 'forcée' ? 'font-semibold text-[#96600F]' : ''}`}>{p.source}</span></span>
+                      </button>
                     </td>
                     <td className="px-2 py-1.5 text-right" title={`Délai d'appro ${fmtNum(delaiRef ? a.delai_appro_ref_jours : a.delai_appro_jours)} j${delaiRef ? ' (référence)' : ' (fournisseur / défaut)'} + sécurité ${fmtNum(secuRef ? a.delai_securite_ref_jours : a.delai_securite_jours)} j${secuRef ? ' (référence)' : ' (fournisseur / défaut)'}`}>
                       <span className={delaiRef || secuRef ? 'font-semibold text-[#96600F]' : ''}>{fmtNum(a.projection_delai_l)}{delaiRef || secuRef ? ' ref' : ''}</span>
@@ -2496,51 +2851,44 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
                     <td className="px-2 py-1.5 text-right text-[#8A8474]">{fmtNum(a.conso_ecart_type, 1)}</td>
                     <td className={`px-2 py-1.5 text-right ${a.projection_mu_source === '3m' ? 'font-semibold text-[#111820]' : ''}`} title={`Total 3 derniers mois : ${fmtNum(a.conso_3_derniers_mois)}${n0(a.conso_moy_mensuelle) > 0 ? ` · ${Math.round((n0(a.conso_moy_3_mois) / n0(a.conso_moy_mensuelle) - 1) * 100) >= 0 ? '+' : ''}${Math.round((n0(a.conso_moy_3_mois) / n0(a.conso_moy_mensuelle) - 1) * 100)} % vs μ 12 mois` : ''}`}>{fmtNum(a.conso_moy_3_mois, 1)}</td>
                     <td className="px-2 py-1.5 text-right">{fmtMois(a.sage_derniere_sortie)}</td>
-                    <td className="px-2 py-1.5 text-right">{fmtNum(a.sage_stock_fms)}</td>
-                    <td className="px-2 py-1.5 text-right" title={`Disponible FMS : ${fmtNum(a.stock_dispo_sage_fms)} · agences : ${fmtNum(a.stock_dispo_sage_agences)} (stock physique agences ${fmtNum(a.sage_stock_agences)})`}>
-                      {fmtNum(a.stock_dispo_sage_fms)}{n0(a.stock_dispo_sage_agences) > 0 ? <span className="ml-1 text-[10px] text-[#8A8474]">({fmtNum(a.stock_dispo_sage_agences)})</span> : null}
+                    <td className="px-2 py-1.5 text-right" title={`Disponible SAGE (sto_dispo) — global : ${fmtNum(a.sage_stock_dispo_total)} · FMS : ${fmtNum(a.stock_dispo_sage_fms)} · agences : ${fmtNum(a.stock_dispo_sage_agences)}\nStock physique — global : ${fmtNum(a.sage_stock_total)} · FMS : ${fmtNum(a.sage_stock_fms)} · agences : ${fmtNum(a.sage_stock_agences)}`}>
+                      <span className="font-semibold text-[#111820]">{fmtNum(a.sage_stock_dispo_total)}</span><span className="ml-1 text-[10px] text-[#8A8474]">({fmtNum(a.stock_dispo_sage_fms)})</span>
                     </td>
-                    <td className="px-2 py-1.5 text-right" title={titreEncours || undefined}>
-                      {encours > 0 || douteux > 0 ? (
+                    <td className="px-2 py-1.5 text-right" title={[titreEncours, p.encoursApres > 0 ? `Livré après le ${fmtDate(p.dateReception)} : ${fmtNum(p.encoursApres)} (non compté dans le stock à réception)` : null].filter(Boolean).join('\n') || undefined}>
+                      {encours > 0 || douteux > 0 || p.encoursApres > 0 ? (
                         <div className="flex flex-col items-end leading-tight">
                           <span className={retard > 0 ? 'font-semibold text-[#96600F]' : 'font-semibold text-[#111820]'}>
-                            {fmtNum(encours)}{retard > 0 ? ' ⏱' : ''}{douteux > 0 ? <span className="ml-1 text-[10px] text-[#B3AD9E]">+{fmtNum(douteux)}?</span> : null}
+                            {fmtNum(encours)}{retard > 0 ? ' ⏱' : ''}{p.encoursApres > 0 ? <span className="ml-1 text-[10px] text-[#8A8474]">({fmtNum(p.encoursApres)})</span> : null}{douteux > 0 ? <span className="ml-1 text-[10px] text-[#B3AD9E]">+{fmtNum(douteux)}?</span> : null}
                           </span>
-                          {a.date_livraison_estimee_max && encours > 0 && (
-                            <span className="text-[10px] text-[#8A8474]">{a.date_livraison_par_defaut ? '≈ ' : ''}{fmtDate(a.date_livraison_estimee_max)}</span>
+                          {a.date_livraison_estimee_min && encours > 0 && (
+                            <span className="text-[10px] text-[#8A8474]">{a.date_livraison_par_defaut ? '≈ ' : ''}{fmtDate(a.date_livraison_estimee_min)}</span>
                           )}
                         </div>
                       ) : <span className="text-[#B3AD9E]">—</span>}
                     </td>
-                    <td className="px-2 py-1.5 text-right" title={`Réservé SAGE — FMS : ${fmtNum(a.reserve_sage_fms)} · agences : ${fmtNum(a.reserve_sage_agences)}\nReste à livrer BLG — FMS : ${fmtNum(a.cdc_blg_fms)} · toutes agences : ${fmtNum(a.cdc_blg_total)} (${fmtNum(a.nb_cdc_a_livrer)} commandes)`}>
-                      {n0(a.reserve_sage_fms) > 0 || n0(a.reserve_sage_agences) > 0
-                        ? <>{fmtNum(a.reserve_sage_fms)}{n0(a.reserve_sage_agences) > 0 ? <span className="ml-1 text-[10px] text-[#8A8474]">({fmtNum(a.reserve_sage_agences)})</span> : null}{n0(a.cdc_blg_fms) !== n0(a.reserve_sage_fms) ? <span className="ml-0.5 text-[10px] text-[#B3AD9E]" title="Écart avec le reste à livrer BLG">≠</span> : null}</>
+                    <td className="px-2 py-1.5 text-right" title={`Réservé SAGE daté (lignes commandes clients, périmètre ${p.perimetreGlobal ? 'global' : 'FMS'}) — à livrer d'ici le ${fmtDate(p.dateReception)} (L = ${p.delaiL} j, retards inclus) : ${fmtNum(p.reservePeriode)} · après : ${fmtNum(p.reserveApres)} · total : ${fmtNum(p.reserveTotal)}\nsto_res SAGE — FMS : ${fmtNum(a.reserve_sage_fms)} · agences : ${fmtNum(a.reserve_sage_agences)}\nReste à livrer BLG — FMS : ${fmtNum(a.cdc_blg_fms)} · toutes agences : ${fmtNum(a.cdc_blg_total)} (${fmtNum(a.nb_cdc_a_livrer)} commandes)`}>
+                      {p.reservePeriode > 0 || p.reserveApres > 0
+                        ? <><span className="font-semibold text-[#111820]">{fmtNum(p.reservePeriode)}</span>{p.reserveApres > 0 ? <span className="ml-1 text-[10px] text-[#8A8474]">({fmtNum(p.reserveApres)})</span> : null}</>
                         : <span className="text-[#B3AD9E]">—</span>}
                     </td>
-                    <td className={`px-2 py-1.5 text-right font-semibold ${a.rupture_avant_reception ? 'bg-red-50 text-red-800' : sousMin ? 'text-red-700' : 'text-[#111820]'}`}
-                      title={[
-                        `Périmètre ${a.projection_perimetre === 'global' ? 'global' : 'FMS'} · horizon ${fmtNum(a.horizon_jours)} j (délai L ${fmtNum(a.projection_delai_l)} j) · μ ${a.projection_mu_source === '3m' ? '3 mois' : '12 mois'} = ${fmtNum(a.projection_mu, 1)}`,
-                        `Stock ${fmtNum(a.projection_stock_base)} − demande ${fmtNum(a.projection_demande, 1)} (réservé ${fmtNum(a.projection_reserve_base)} / conso ${fmtNum(a.conso_jusqua_livraison, 1)}) + encours ${fmtNum(a.projection_encours_base)} = ${fmtNum(a.stock_projete_livraison, 1)}`,
-                        `Seuil de commande : ${fmtNum(a.projection_seuil, 1)} (sécurité ${fmtNum(a.calc_stock_securite, 1)})`,
-                        a.rupture_avant_reception ? `Stock avant réception ${fmtNum(a.stock_avant_reception, 1)} : rupture avant l'arrivée de l'encours` : null,
-                        `Position (stock + encours − réservé) : ${fmtNum(a.position_stock_fms)} · stock à terme SAGE FMS : ${fmtNum(a.sage_stock_terme_fms)}`,
-                      ].filter(Boolean).join('\n')}>
-                      {fmtNum(a.stock_projete_livraison)}{a.rupture_avant_reception ? ' ⚠' : ''}
+                    <td className={`px-2 py-1.5 text-right font-semibold ${p.stockReception < 0 ? 'bg-red-50 text-red-800' : p.declenche ? 'text-red-700' : 'text-[#111820]'}`} title={p.explication.join('\n')}>
+                      {fmtNum(p.stockReception)}{p.stockReception < 0 ? ' ⚠' : ''}
+                      <div className="text-[10px] font-normal text-[#8A8474]">{fmtDate(p.dateReception)}</div>
                     </td>
-                    <td className="px-2 py-1.5 text-right" title={`Projetée (${a.projection_perimetre === 'global' ? 'global' : 'FMS'}) : position ${fmtNum(a.position_stock_fms)} / μ ${fmtNum(a.projection_mu, 1)} = ${fmtNum(a.couverture_projetee_mois, 1)} mois\nStock physique FMS seul / μ 12 mois : ${fmtNum(a.couverture_fms_mois, 1)} mois`}>
-                      <div className="flex flex-col items-end leading-tight">
-                        <span className="font-semibold text-[#111820]">{a.couverture_projetee_mois === null || a.couverture_projetee_mois === undefined ? '—' : fmtNum(a.couverture_projetee_mois, 1)}</span>
-                        <span className="text-[10px] text-[#8A8474]">FMS {fmtNum(a.couverture_fms_mois, 1)}</span>
-                      </div>
+                    <td className={`px-2 py-1.5 text-right font-semibold ${p.methode === 'couverture' && p.couvReception !== null && p.couvReception < p.couvMin ? 'text-red-700' : 'text-[#111820]'}`} title={`Stock à réception ${fmtNum(p.stockReception, 1)} / μ ${p.muSource === '3m' ? '3 mois' : '12 mois'} ${fmtNum(p.mu, 1)} = ${p.couvReception === null ? '—' : fmtNum(p.couvReception, 1) + ' mois'}${p.methode === 'couverture' ? `\nMin ${fmtNum(p.couvMin, 1)} · cible ${fmtNum(p.couvCible, 1)} mois` : ''}`}>
+                      {p.couvReception === null ? '—' : fmtNum(p.couvReception, 1)}
                     </td>
                     <td className="px-2 py-1.5 text-right text-[#8A8474]">{fmtNum(a.sage_stock_min_fms)}</td>
                     <td className={`px-2 py-1.5 text-right ${ecart ? 'bg-red-50 font-semibold text-red-800' : 'text-[#8A8474]'}`}>{fmtNum(a.blg_stock_min_fms)}</td>
                     <td className="px-2 py-1.5 text-right text-[#8A8474]">{fmtNum(a.calc_stock_securite)}</td>
                     <td className="px-2 py-1.5 text-right font-bold">{fmtNum(a.calc_stock_min)}</td>
                     <td className="px-2 py-1.5 text-right text-[#8A8474]">{fmtNum(a.calc_stock_max)}</td>
-                    <td className="px-2 py-1.5 text-right">{sousMin ? <span className="rounded bg-red-100 px-1.5 py-0.5 font-bold text-red-700">{fmtNum(a.qte_a_commander)}</span> : <span className="text-[#B3AD9E]">—</span>}</td>
+                    <td className="px-2 py-1.5 text-right" title={p.explication.join('\n')}>
+                      {p.declenche ? <span className="rounded bg-red-100 px-1.5 py-0.5 font-bold text-red-700">{fmtNum(p.qteProposee)}</span> : p.bloque && a.pertinent_calcul_besoin ? <span className="text-[10px] font-bold text-red-700" title="Aucune proposition : blocage / arrêt appro">⛔</span> : <span className="text-[#B3AD9E]">—</span>}
+                    </td>
+                    <CelluleProposition article={a} prop={p} onSaved={onArticleChange} />
                     <td className="px-2 py-1.5 text-right">
-                      <button type="button" title={a.commentaire_stock_min || 'Stock min retenu, délais de la référence, arrêt appro / vente, remplaçante'} onClick={() => setEditArticle(a)}
+                      <button type="button" title={a.commentaire_stock_min || 'Stock min retenu, délais de la référence, arrêt appro / vente, remplaçante, méthode de réappro'} onClick={() => setEditArticle(a)}
                         className={`rounded px-2 py-0.5 font-mono ${a.stock_min_retenu !== null && a.stock_min_retenu !== undefined ? 'bg-[#B4761A]/[0.12] font-bold text-[#96600F]' : 'text-[#B3AD9E] hover:bg-[#F4F3F0]'}`}>
                         {a.stock_min_retenu !== null && a.stock_min_retenu !== undefined ? fmtNum(a.stock_min_retenu) : '✎'}
                       </button>
@@ -2548,13 +2896,14 @@ function OngletArticles({ articles, fournisseurs, loading, loadProgress, error, 
                   </tr>
                 )
               })}
-              {!loading && affichees.length === 0 && <tr><td colSpan={23} className="px-3 py-8 text-center text-[#8A8474]">Aucune référence pour ces filtres.</td></tr>}
+              {!loading && affichees.length === 0 && <tr><td colSpan={COLONNES_ARTICLES.length} className="px-3 py-8 text-center text-[#8A8474]">Aucune référence pour ces filtres.</td></tr>}
             </tbody>
           </table>
         </div>
       </section>
       {editArticle && (
         <ArticleManuelModal article={editArticle} fournisseur={editArticle.fournisseur_principal ? fournMap.get(editArticle.fournisseur_principal) : undefined}
+          prop={propositions.get(editArticle.reference_article)!} ctxProp={ctxProp}
           onClose={() => setEditArticle(null)} onSaved={(a) => { onArticleChange(a); setEditArticle(null) }} />
       )}
     </>
@@ -2998,8 +3347,15 @@ export default function FournisseursSageBlgPage() {
   const [articles, setArticles] = useState<ArtRow[]>([])
   const [strategies, setStrategies] = useState<StrategieRef[]>([])
   const [parametres, setParametres] = useState<Parametre[]>([])
+  const [paramsFourn, setParamsFourn] = useState<Map<string, ParamsFourn>>(new Map())
   const [loading, setLoading] = useState(true)
   const [loadProgress, setLoadProgress] = useState(0)
+
+  /** Méthode de réappro et couvertures par fournisseur (appro_fournisseur_strategie) — rechargées après enregistrement d'une fiche. */
+  async function chargerParamsFourn() {
+    const { data } = await supabase.from('appro_fournisseur_strategie').select('fournisseur, methode_calcul, couverture_min_mois, couverture_cible_mois').limit(5000)
+    setParamsFourn(new Map(((data || []) as ParamsFourn[]).map((r) => [r.fournisseur, r])))
+  }
   const [error, setError] = useState<string | null>(null)
 
   async function chargerTout() {
@@ -3011,6 +3367,7 @@ export default function FournisseursSageBlgPage() {
         supabase.from('appro_parametres').select('*').order('cle').then(({ data }) => (data || []) as Parametre[]),
       ])
       setFournisseurs(f); setStrategies(s); setParametres(p)
+      await chargerParamsFourn()
       const a = await chargerArticles(setLoadProgress)
       setArticles(a)
     } catch (e) {
@@ -3036,10 +3393,10 @@ export default function FournisseursSageBlgPage() {
 
         {onglet === 'fournisseurs' && (
           <OngletFournisseurs rows={fournisseurs} loading={loading} error={error} strategies={strategies} articles={articles}
-            onRowChange={(r) => setFournisseurs((prev) => prev.map((x) => (x.numero === r.numero ? r : x)))} />
+            onRowChange={(r) => setFournisseurs((prev) => prev.map((x) => (x.numero === r.numero ? r : x)))} onStrategieSaved={() => void chargerParamsFourn()} />
         )}
         {onglet === 'articles' && (
-          <OngletArticles articles={articles} fournisseurs={fournisseurs} loading={loading} loadProgress={loadProgress} error={error}
+          <OngletArticles articles={articles} fournisseurs={fournisseurs} paramsFourn={paramsFourn} loading={loading} loadProgress={loadProgress} error={error}
             parametres={parametres} onParametresChange={setParametres}
             onArticleChange={(a) => setArticles((prev) => prev.map((x) => (x.reference_article === a.reference_article ? a : x)))}
             onRecalcul={chargerTout} />
