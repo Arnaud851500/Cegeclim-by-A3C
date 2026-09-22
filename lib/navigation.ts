@@ -176,7 +176,7 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'Clients SAGE – BLG', path: '/controle-sage-blg/clients', activeLabel: 'Contrôle cohérence Client SAGE-BLG', accessKey: 'can_autorisation', description: 'Contrôle de cohérence des tiers, contacts et adresses de livraison.' },
       { label: 'Fournisseurs SAGE – BLG', path: '/controle-sage-blg/fournisseur-sage-blg', activeLabel: 'Contrôle cohérence Fournisseur SAGE-BLG', accessKey: 'can_autorisation', description: 'Contrôle de cohérence fournisseurs et articles entre SAGE et BLG.' },
       { label: 'Commandes fournisseurs SAGE – BLG', path: '/controle-sage-blg/commandes-fournisseurs-sage-blg', activeLabel: 'Appro Achat SAGE-BLG', accessKey: 'can_autorisation', description: 'Controle de cohérence du portefeuille de commandes fournisseurs.' },
-      { label: 'Commandes clients SAGE – BLG', path: '/controle-sage-blg/commandes-cients-sage-blg', activeLabel: 'Contrôle cohérence Fournisseur SAGE-BLG', accessKey: 'can_autorisation', description: 'Contrôle de cohérence du portefeuille de commandes clients.' },
+      { label: 'Commandes clients SAGE – BLG', path: '/controle-sage-blg/commandes-clients-sage-blg', activeLabel: 'Contrôle cohérence Fournisseur SAGE-BLG', accessKey: 'can_autorisation', description: 'Contrôle de cohérence du portefeuille de commandes clients.' },
     ],
   },
   {
