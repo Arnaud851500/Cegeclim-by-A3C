@@ -307,6 +307,8 @@ const FICHE_CHAMPS: Array<[string, string, 'texte' | 'nombre' | 'booleen' | 'dat
   ['tarifs_exception', "Tarifs d'exception", 'texte'],
   ['gyutaki5', 'Gyutaki 5', 'texte'],
   ['g5pm_g10', 'G5PM / G10', 'texte'],
+  ['ti_ctcommentaire', 'Commentaire tiers (SAGE)', 'texte'],
+  ['ti_ctcontrolenc', 'Contrôle encours (SAGE)', 'texte'],
   ['blg_id_tiers', 'Id tiers BLG', 'texte'],
   ['lien_blg_tiers', 'Lien BLG tiers', 'texte'],
   ['banque_nom', 'Banque', 'texte'],
