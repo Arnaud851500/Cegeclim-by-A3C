@@ -4,9 +4,11 @@
  * Écran "Clients SAGE / BLG"
  * ---------------------------------------------------------------------------
  * 3 onglets :
- *  - SAGE : fiche client (tiers_complet) + adresses de livraison + mode
- *    d'expédition résolu, filtrable (dont sélection MULTIPLE de modes
- *    d'expédition), avec export Excel de l'ensemble des champs.
+ *  - SAGE : liste pleine largeur des clients (tiers_complet + adresses de
+ *    livraison + mode d'expédition résolu) ; colonnes au choix et ordonnables
+ *    (mémorisées dans le navigateur), filtres avancés sur n'importe quel champ
+ *    (mémorisés eux aussi), fiche client en fenêtre flottante au clic, export
+ *    Excel strictement identique à l'écran (colonnes, filtres, tri).
  *  - BLG : même principe côté BLG uniquement (partner_base_partner via BLG),
  *    pour les tiers déjà appariés avec SAGE.
  *  - Comparaison : contrôle de cohérence SAGE ↔ BLG. Tous les tiers sont
@@ -149,36 +151,6 @@ function appliquerFiltresSage(
   return query
 }
 
-const EXPORT_COLONNES_SAGE: Array<{ key: keyof ClientAdresseRow; label: string; transform?: (r: ClientAdresseRow) => string }> = [
-  { key: 'numero_tiers', label: 'N° tiers' },
-  { key: 'intitule', label: 'Intitulé' },
-  { key: 'type_tiers', label: 'Type' },
-  { key: 'qualite', label: 'Qualité' },
-  { key: 'siret', label: 'SIRET' },
-  { key: 'famille', label: 'Famille' },
-  { key: 'agence_rattachement', label: 'Agence de rattachement', transform: (r) => normaliserAgence(r.agence_rattachement) || '' },
-  { key: 'en_sommeil', label: 'En sommeil', transform: (r) => (r.en_sommeil ? 'Oui' : 'Non') },
-  { key: 'ville_siege', label: 'Ville du siège' },
-  { key: 'code_postal_siege', label: 'Code postal siège' },
-  { key: 'n_expedition_effectif', label: "Code expédition (effectif)" },
-  { key: 'expedition_designation', label: "Mode d'expédition (effectif)" },
-  { key: 'expedition_base_calcul', label: 'Base de calcul frais de port' },
-  { key: 'expedition_frais_port_ht', label: 'Frais de port prévu HT' },
-  { key: 'adresse_principale', label: 'Adresse principale', transform: (r) => (r.adresse_principale ? 'Oui' : 'Non') },
-  { key: 'li_no', label: 'N° adresse' },
-  { key: 'adresse_intitule', label: 'Intitulé adresse' },
-  { key: 'li_adresse', label: 'Adresse' },
-  { key: 'li_complement', label: 'Complément adresse' },
-  { key: 'li_codepostal', label: 'Code postal livraison' },
-  { key: 'li_ville', label: 'Ville livraison' },
-  { key: 'li_pays', label: 'Pays' },
-  { key: 'li_contact', label: 'Contact livraison' },
-  { key: 'li_telephone', label: 'Téléphone livraison' },
-  { key: 'n_expedition_adresse', label: "Code expédition adresse" },
-  { key: 'expedition_adresse_designation', label: "Mode d'expédition (adresse seule)" },
-  { key: 'n_expedition_defaut', label: 'Code expédition défaut client' },
-  { key: 'expedition_defaut_designation', label: "Mode d'expédition (défaut client seul)" },
-]
 
 /** Navigation clavier ↑/↓ générique pour les listes "N° tiers" à gauche.
  * `getIndex` retrouve l'index de la ligne actuellement sélectionnée dans
@@ -204,6 +176,145 @@ function creerHandlerNavigation<T>(
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Onglet SAGE — liste pleine largeur, colonnes choisies (mémorisées), filtres
+// avancés sur n'importe quel champ, fiche client en fenêtre flottante, export
+// Excel = colonnes et lignes affichées.
+// ─────────────────────────────────────────────────────────────────────────
+
+type ColonneSage = {
+  key: keyof ClientAdresseRow
+  label: string
+  /** Valeur texte (affichage, filtres et export). */
+  texte: (r: ClientAdresseRow) => string
+  /** Valeur pour le tri (nombre ou texte). */
+  tri?: (r: ClientAdresseRow) => number | string
+  align?: 'left' | 'right'
+  largeur?: number
+}
+
+const COLONNES_SAGE: ColonneSage[] = [
+  { key: 'numero_tiers', label: 'N° tiers', texte: (r) => safeText(r.numero_tiers), largeur: 110 },
+  { key: 'intitule', label: 'Intitulé', texte: (r) => safeText(r.intitule), largeur: 260 },
+  { key: 'type_tiers', label: 'Type', texte: (r) => safeText(r.type_tiers), largeur: 70 },
+  { key: 'qualite', label: 'Qualité', texte: (r) => safeText(r.qualite), largeur: 120 },
+  { key: 'siret', label: 'SIRET', texte: (r) => safeText(r.siret), largeur: 140 },
+  { key: 'famille', label: 'Famille', texte: (r) => safeText(r.famille), largeur: 170 },
+  { key: 'agence_rattachement', label: 'Agence de rattachement', texte: (r) => normaliserAgence(r.agence_rattachement) || '', largeur: 130 },
+  { key: 'en_sommeil', label: 'En sommeil', texte: (r) => (r.en_sommeil ? 'Oui' : 'Non'), largeur: 90 },
+  { key: 'code_postal_siege', label: 'Code postal siège', texte: (r) => safeText(r.code_postal_siege), largeur: 100 },
+  { key: 'ville_siege', label: 'Ville du siège', texte: (r) => safeText(r.ville_siege), largeur: 150 },
+  { key: 'n_expedition_effectif', label: 'Code expédition (effectif)', texte: (r) => safeText(r.n_expedition_effectif), largeur: 90 },
+  { key: 'expedition_designation', label: "Mode d'expédition (effectif)", texte: (r) => safeText(r.expedition_designation), largeur: 150 },
+  { key: 'expedition_base_calcul', label: 'Base de calcul frais de port', texte: (r) => safeText(r.expedition_base_calcul), largeur: 150 },
+  {
+    key: 'expedition_frais_port_ht',
+    label: 'Frais de port prévu HT',
+    texte: (r) => (r.expedition_frais_port_ht !== null && r.expedition_frais_port_ht !== undefined ? `${Number(r.expedition_frais_port_ht).toFixed(2)} €` : ''),
+    tri: (r) => (r.expedition_frais_port_ht === null || r.expedition_frais_port_ht === undefined ? -1 : Number(r.expedition_frais_port_ht)),
+    align: 'right',
+    largeur: 110,
+  },
+  { key: 'adresse_principale', label: 'Adresse principale', texte: (r) => (r.adresse_principale ? 'Oui' : 'Non'), largeur: 100 },
+  { key: 'li_no', label: 'N° adresse', texte: (r) => safeText(r.li_no), largeur: 80 },
+  { key: 'adresse_intitule', label: 'Intitulé adresse', texte: (r) => safeText(r.adresse_intitule), largeur: 200 },
+  { key: 'li_adresse', label: 'Adresse', texte: (r) => safeText(r.li_adresse), largeur: 220 },
+  { key: 'li_complement', label: 'Complément adresse', texte: (r) => safeText(r.li_complement), largeur: 180 },
+  { key: 'li_codepostal', label: 'Code postal livraison', texte: (r) => safeText(r.li_codepostal), largeur: 100 },
+  { key: 'li_ville', label: 'Ville livraison', texte: (r) => safeText(r.li_ville), largeur: 150 },
+  { key: 'li_pays', label: 'Pays', texte: (r) => safeText(r.li_pays), largeur: 90 },
+  { key: 'li_contact', label: 'Contact livraison', texte: (r) => safeText(r.li_contact), largeur: 160 },
+  { key: 'li_telephone', label: 'Téléphone livraison', texte: (r) => safeText(r.li_telephone), largeur: 130 },
+  { key: 'n_expedition_adresse', label: 'Code expédition adresse', texte: (r) => safeText(r.n_expedition_adresse), largeur: 90 },
+  { key: 'expedition_adresse_designation', label: "Mode d'expédition (adresse seule)", texte: (r) => safeText(r.expedition_adresse_designation), largeur: 150 },
+  { key: 'n_expedition_defaut', label: 'Code expédition défaut client', texte: (r) => safeText(r.n_expedition_defaut), largeur: 90 },
+  { key: 'expedition_defaut_designation', label: "Mode d'expédition (défaut client seul)", texte: (r) => safeText(r.expedition_defaut_designation), largeur: 150 },
+]
+
+const COLONNES_SAGE_PAR_DEFAUT: Array<keyof ClientAdresseRow> = [
+  'numero_tiers', 'intitule', 'agence_rattachement', 'famille', 'li_ville', 'expedition_designation', 'expedition_frais_port_ht', 'en_sommeil',
+]
+
+/** Réglages mémorisés dans le navigateur (colonnes affichées, filtres avancés). */
+const STOCKAGE_SAGE_CLE = 'clients-sage-blg.onglet-sage.v1'
+type ReglagesSage = { colonnes: string[]; conditions: ConditionSage[]; logique: 'et' | 'ou' }
+
+type OperateurSage = 'egal' | 'different' | 'contient' | 'ne_contient_pas' | 'commence_par' | 'est_vide' | 'non_vide' | 'superieur' | 'inferieur'
+type ConditionSage = { id: string; champ: string; operateur: OperateurSage; valeur: string }
+
+const OPERATEUR_SAGE_LABELS: Record<OperateurSage, string> = {
+  egal: 'est égal à',
+  different: 'est différent de',
+  contient: 'contient',
+  ne_contient_pas: 'ne contient pas',
+  commence_par: 'commence par',
+  est_vide: 'est vide',
+  non_vide: "n'est pas vide",
+  superieur: 'est supérieur à',
+  inferieur: 'est inférieur à',
+}
+const OPERATEURS_SANS_VALEUR: OperateurSage[] = ['est_vide', 'non_vide']
+
+function nouvelleConditionSage(): ConditionSage {
+  return { id: Math.random().toString(36).slice(2), champ: 'intitule', operateur: 'contient', valeur: '' }
+}
+
+function normaliserTexteFiltre(v: string): string {
+  return v.normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toLowerCase()
+}
+
+function nombreDe(v: string): number | null {
+  const n = Number(String(v).replace(/\s/g, '').replace(',', '.').replace('€', ''))
+  return Number.isFinite(n) ? n : null
+}
+
+/** Évalue une condition sur la valeur texte de la colonne (accents et casse ignorés). */
+function conditionSatisfaite(c: ConditionSage, r: ClientAdresseRow): boolean {
+  const col = COLONNES_SAGE.find((x) => x.key === c.champ)
+  if (!col) return true
+  const brut = col.texte(r)
+  const val = normaliserTexteFiltre(brut)
+  const att = normaliserTexteFiltre(c.valeur)
+  switch (c.operateur) {
+    case 'est_vide': return val === ''
+    case 'non_vide': return val !== ''
+    case 'egal': return val === att
+    case 'different': return val !== att
+    case 'contient': return val.includes(att)
+    case 'ne_contient_pas': return !val.includes(att)
+    case 'commence_par': return val.startsWith(att)
+    case 'superieur': {
+      const a = col.tri ? Number(col.tri(r)) : nombreDe(brut)
+      const b = nombreDe(c.valeur)
+      return a !== null && b !== null && a > b
+    }
+    case 'inferieur': {
+      const a = col.tri ? Number(col.tri(r)) : nombreDe(brut)
+      const b = nombreDe(c.valeur)
+      return a !== null && b !== null && a < b
+    }
+    default: return true
+  }
+}
+
+function chargerReglagesSage(): ReglagesSage {
+  const defaut: ReglagesSage = { colonnes: COLONNES_SAGE_PAR_DEFAUT, conditions: [], logique: 'et' }
+  if (typeof window === 'undefined') return defaut
+  try {
+    const brut = window.localStorage.getItem(STOCKAGE_SAGE_CLE)
+    if (!brut) return defaut
+    const parse = JSON.parse(brut) as Partial<ReglagesSage>
+    const cles = new Set(COLONNES_SAGE.map((c) => c.key as string))
+    const colonnes = Array.isArray(parse.colonnes) ? parse.colonnes.filter((k) => cles.has(k)) : defaut.colonnes
+    const conditions = Array.isArray(parse.conditions)
+      ? parse.conditions.filter((c) => c && typeof c === 'object' && cles.has(String(c.champ))).map((c) => ({ ...nouvelleConditionSage(), ...c }))
+      : []
+    return { colonnes: colonnes.length ? colonnes : defaut.colonnes, conditions, logique: parse.logique === 'ou' ? 'ou' : 'et' }
+  } catch {
+    return defaut
+  }
+}
+
 function OngletSage() {
   const [rows, setRows] = useState<ClientAdresseRow[]>([])
   const [totalCount, setTotalCount] = useState<number | null>(null)
@@ -219,6 +330,14 @@ function OngletSage() {
   const [onlyPrincipale, setOnlyPrincipale] = useState(true)
   const [exclureSommeil, setExclureSommeil] = useState(true)
 
+  // Réglages mémorisés : colonnes affichées + filtres avancés
+  const [colonnes, setColonnes] = useState<string[]>(COLONNES_SAGE_PAR_DEFAUT)
+  const [conditions, setConditions] = useState<ConditionSage[]>([])
+  const [logique, setLogique] = useState<'et' | 'ou'>('et')
+  const [reglagesCharges, setReglagesCharges] = useState(false)
+  const [colonnesOuvert, setColonnesOuvert] = useState(false)
+
+  const [tri, setTri] = useState<{ key: string; dir: 'asc' | 'desc' }>({ key: 'numero_tiers', dir: 'asc' })
   const [selected, setSelected] = useState<ClientAdresseRow | null>(null)
 
   const [agenceOptions, setAgenceOptions] = useState<string[]>([])
@@ -226,11 +345,32 @@ function OngletSage() {
   const [expeditionOptions, setExpeditionOptions] = useState<string[]>([])
 
   const expeditionRef = useRef<HTMLDivElement>(null)
+  const colonnesRef = useRef<HTMLDivElement>(null)
   const listRefs = useRef<Record<number, HTMLTableRowElement | null>>({})
+
+  // Lecture des réglages mémorisés (une fois, côté navigateur)
+  useEffect(() => {
+    const r = chargerReglagesSage()
+    setColonnes(r.colonnes)
+    setConditions(r.conditions)
+    setLogique(r.logique)
+    setReglagesCharges(true)
+  }, [])
+
+  // Enregistrement automatique des réglages
+  useEffect(() => {
+    if (!reglagesCharges) return
+    try {
+      window.localStorage.setItem(STOCKAGE_SAGE_CLE, JSON.stringify({ colonnes, conditions, logique } satisfies ReglagesSage))
+    } catch {
+      /* stockage local indisponible : les réglages ne survivront pas au rechargement */
+    }
+  }, [colonnes, conditions, logique, reglagesCharges])
 
   useEffect(() => {
     function onClickOutside(e: MouseEvent) {
       if (expeditionRef.current && !expeditionRef.current.contains(e.target as Node)) setExpeditionOuvert(false)
+      if (colonnesRef.current && !colonnesRef.current.contains(e.target as Node)) setColonnesOuvert(false)
     }
     document.addEventListener('mousedown', onClickOutside)
     return () => document.removeEventListener('mousedown', onClickOutside)
@@ -292,59 +432,140 @@ function OngletSage() {
     return () => { cancelled = true }
   }, [search, agenceFilter, familleFilter, expeditionFilters, onlyPrincipale, exclureSommeil])
 
-  const stats = useMemo(() => {
-    const clientsDistincts = new Set(rows.map((r) => r.numero_tiers)).size
-    const adressesPrincipales = rows.filter((r) => r.adresse_principale).length
-    const enSommeil = rows.filter((r) => r.en_sommeil).length
-    return { total: rows.length, clientsDistincts, adressesPrincipales, enSommeil }
-  }, [rows])
+  // Filtres avancés (côté navigateur, sur les lignes chargées) puis tri
+  const conditionsValides = useMemo(
+    () => conditions.filter((c) => c.champ && (OPERATEURS_SANS_VALEUR.includes(c.operateur) || c.valeur.trim() !== '')),
+    [conditions],
+  )
 
-  const filtresActifs = Boolean(search.trim() || agenceFilter || familleFilter || expeditionFilters.length > 0)
+  const rowsFiltrees = useMemo(() => {
+    if (conditionsValides.length === 0) return rows
+    return rows.filter((r) =>
+      logique === 'et' ? conditionsValides.every((c) => conditionSatisfaite(c, r)) : conditionsValides.some((c) => conditionSatisfaite(c, r)),
+    )
+  }, [rows, conditionsValides, logique])
+
+  const rowsTriees = useMemo(() => {
+    const col = COLONNES_SAGE.find((c) => c.key === tri.key)
+    if (!col) return rowsFiltrees
+    const dir = tri.dir === 'asc' ? 1 : -1
+    const val = (r: ClientAdresseRow) => (col.tri ? col.tri(r) : col.texte(r))
+    return [...rowsFiltrees].sort((a, b) => {
+      const va = val(a)
+      const vb = val(b)
+      if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * dir
+      const cmp = String(va).localeCompare(String(vb), 'fr', { sensitivity: 'base', numeric: true })
+      return (cmp || a.numero_tiers.localeCompare(b.numero_tiers)) * dir
+    })
+  }, [rowsFiltrees, tri])
+
+  const colonnesAffichees = useMemo(
+    () => colonnes.map((k) => COLONNES_SAGE.find((c) => c.key === k)).filter((c): c is ColonneSage => Boolean(c)),
+    [colonnes],
+  )
+
+  const stats = useMemo(() => {
+    const clientsDistincts = new Set(rowsFiltrees.map((r) => r.numero_tiers)).size
+    const adressesPrincipales = rowsFiltrees.filter((r) => r.adresse_principale).length
+    const enSommeil = rowsFiltrees.filter((r) => r.en_sommeil).length
+    return { total: rowsFiltrees.length, clientsDistincts, adressesPrincipales, enSommeil }
+  }, [rowsFiltrees])
+
+  const filtresActifs = Boolean(search.trim() || agenceFilter || familleFilter || expeditionFilters.length > 0 || conditionsValides.length > 0)
 
   function toggleExpedition(e: string) {
     setExpeditionFilters((prev) => (prev.includes(e) ? prev.filter((x) => x !== e) : [...prev, e]))
+  }
+
+  function toggleColonne(k: string) {
+    setColonnes((prev) => {
+      if (prev.includes(k)) return prev.length > 1 ? prev.filter((x) => x !== k) : prev
+      // insérée à sa place dans l'ordre du catalogue
+      const ordre = COLONNES_SAGE.map((c) => c.key as string)
+      return [...prev, k].sort((a, b) => ordre.indexOf(a) - ordre.indexOf(b))
+    })
+  }
+
+  function deplacerColonne(k: string, sens: -1 | 1) {
+    setColonnes((prev) => {
+      const i = prev.indexOf(k)
+      const j = i + sens
+      if (i < 0 || j < 0 || j >= prev.length) return prev
+      const next = [...prev]
+      ;[next[i], next[j]] = [next[j], next[i]]
+      return next
+    })
+  }
+
+  function trierPar(k: string) {
+    setTri((prev) => (prev.key === k ? { key: k, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { key: k, dir: 'asc' }))
   }
 
   function getIndexSage(list: ClientAdresseRow[], sel: ClientAdresseRow | null) {
     if (!sel) return -1
     return list.findIndex((r) => r.numero_tiers === sel.numero_tiers && r.li_no === sel.li_no)
   }
-  const onListKeyDown = creerHandlerNavigation(rows, selected, setSelected, getIndexSage, listRefs)
+  const onListKeyDown = creerHandlerNavigation(rowsTriees, selected, setSelected, getIndexSage, listRefs)
 
-  /** Export Excel : rapatrie TOUTES les lignes correspondant aux filtres
-   * actuels (paginé par 1000, pas limité aux 3000 affichées à l'écran),
-   * puis génère un .xlsx avec l'ensemble des champs (EXPORT_COLONNES_SAGE). */
+  /** Export Excel = ce qui est à l'écran : mêmes colonnes (dans le même ordre),
+   * mêmes filtres (serveur + avancés), même tri. Si l'écran est tronqué à
+   * 10 000 lignes, les lignes manquantes sont rapatriées par pages de 1 000. */
   async function exporterExcel() {
     setExportEnCours(true)
     try {
-      const toutes: ClientAdresseRow[] = []
-      let from = 0
-      const pageSize = 1000
-      while (true) {
-        let query = supabase
-          .from('v_sage_clients_adresse_livraison')
-          .select('*')
-          .order('numero_tiers', { ascending: true })
-          .range(from, from + pageSize - 1)
-        query = appliquerFiltresSage(query, { search, onlyPrincipale, exclureSommeil, familleFilter, agenceFilter, expeditionFilters })
-        const { data, error: err } = await query
-        if (err) throw err
-        const batch = (data || []) as ClientAdresseRow[]
-        toutes.push(...batch)
-        if (batch.length < pageSize) break
-        from += pageSize
+      let base: ClientAdresseRow[] = rows
+      if (totalCount !== null && totalCount > rows.length) {
+        const toutes: ClientAdresseRow[] = []
+        let from = 0
+        const pageSize = 1000
+        while (true) {
+          let query = supabase
+            .from('v_sage_clients_adresse_livraison')
+            .select('*')
+            .order('numero_tiers', { ascending: true })
+            .range(from, from + pageSize - 1)
+          query = appliquerFiltresSage(query, { search, onlyPrincipale, exclureSommeil, familleFilter, agenceFilter, expeditionFilters })
+          const { data, error: err } = await query
+          if (err) throw err
+          const batch = (data || []) as ClientAdresseRow[]
+          toutes.push(...batch)
+          if (batch.length < pageSize) break
+          from += pageSize
+        }
+        base = toutes
       }
 
-      const feuille = toutes.map((r) => {
-        const ligne: Record<string, string> = {}
-        EXPORT_COLONNES_SAGE.forEach((c) => {
-          ligne[c.label] = c.transform ? c.transform(r) : safeText(r[c.key])
+      const filtrees =
+        conditionsValides.length === 0
+          ? base
+          : base.filter((r) => (logique === 'et' ? conditionsValides.every((c) => conditionSatisfaite(c, r)) : conditionsValides.some((c) => conditionSatisfaite(c, r))))
+
+      const col = COLONNES_SAGE.find((c) => c.key === tri.key)
+      const dir = tri.dir === 'asc' ? 1 : -1
+      const triees = col
+        ? [...filtrees].sort((a, b) => {
+            const va = col.tri ? col.tri(a) : col.texte(a)
+            const vb = col.tri ? col.tri(b) : col.texte(b)
+            if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * dir
+            return (String(va).localeCompare(String(vb), 'fr', { sensitivity: 'base', numeric: true }) || a.numero_tiers.localeCompare(b.numero_tiers)) * dir
+          })
+        : filtrees
+
+      const feuille = triees.map((r) => {
+        const ligne: Record<string, string | number> = {}
+        colonnesAffichees.forEach((c) => {
+          if (c.key === 'expedition_frais_port_ht') {
+            ligne[c.label] = r.expedition_frais_port_ht === null || r.expedition_frais_port_ht === undefined ? '' : Number(r.expedition_frais_port_ht)
+          } else {
+            ligne[c.label] = c.texte(r)
+          }
         })
         return ligne
       })
 
-      const ws = XLSX.utils.json_to_sheet(feuille)
-      ws['!cols'] = EXPORT_COLONNES_SAGE.map(() => ({ wch: 22 }))
+      const ws = XLSX.utils.json_to_sheet(feuille, { header: colonnesAffichees.map((c) => c.label) })
+      ws['!cols'] = colonnesAffichees.map((c) => ({ wch: Math.max(12, Math.round((c.largeur ?? 120) / 7)) }))
+      ws['!autofilter'] = { ref: `A1:${XLSX.utils.encode_col(Math.max(0, colonnesAffichees.length - 1))}${feuille.length + 1}` }
       const wb = XLSX.utils.book_new()
       XLSX.utils.book_append_sheet(wb, ws, 'Clients SAGE')
       XLSX.writeFile(wb, `clients_sage_${new Date().toISOString().slice(0, 10)}.xlsx`)
@@ -354,6 +575,8 @@ function OngletSage() {
       setExportEnCours(false)
     }
   }
+
+  const champStyle = 'h-9 rounded-lg border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold text-[#3A362E]'
 
   return (
     <>
@@ -395,9 +618,7 @@ function OngletSage() {
         </div>
 
         <div className="mt-2 grid gap-2 md:grid-cols-4">
-          {/* Sélection MULTIPLE des modes d'expédition -- menu à cases à
-             cocher (un <select> natif ne permet pas une sélection multiple
-             confortable au clic simple). */}
+          {/* Sélection MULTIPLE des modes d'expédition -- menu à cases à cocher */}
           <div className="relative md:col-span-2" ref={expeditionRef}>
             <button
               type="button"
@@ -433,150 +654,286 @@ function OngletSage() {
           </label>
         </div>
 
-        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[#E5E1D8] pt-3">
-          {filtresActifs ? (
-            <button
-              type="button"
-              onClick={() => { setSearch(''); setAgenceFilter(''); setFamilleFilter(''); setExpeditionFilters([]) }}
-              className="text-[12px] font-bold text-[#B4761A] hover:underline"
-            >
-              Réinitialiser les filtres
-            </button>
-          ) : <span />}
-          <button
-            type="button"
-            onClick={() => void exporterExcel()}
-            disabled={exportEnCours || loading}
-            className="rounded-lg bg-[#111820] px-4 py-2 text-[13px] font-bold text-white hover:bg-[#252E3D] disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {exportEnCours ? 'Export en cours…' : '⬇ Exporter en Excel (tous les champs)'}
+        {/* ---- Filtres avancés sur n'importe quel champ (mémorisés) ---- */}
+        <div className="mt-3 border-t border-[#E5E1D8] pt-3">
+          <div className="mb-2 flex items-center justify-between">
+            <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">
+              Filtres avancés <span className="font-normal normal-case tracking-normal">— sur tous les champs, mémorisés pour la prochaine fois</span>
+            </div>
+            {conditions.length >= 2 && (
+              <div className="flex items-center gap-1 text-[12px] font-semibold text-[#3A362E]">
+                Combiner avec :
+                <button type="button" onClick={() => setLogique('et')} className={`rounded px-2 py-0.5 ${logique === 'et' ? 'bg-[#111820] text-white' : 'bg-[#F4F3F0]'}`}>ET</button>
+                <button type="button" onClick={() => setLogique('ou')} className={`rounded px-2 py-0.5 ${logique === 'ou' ? 'bg-[#111820] text-white' : 'bg-[#F4F3F0]'}`}>OU</button>
+              </div>
+            )}
+          </div>
+
+          <div className="space-y-2">
+            {conditions.map((c) => (
+              <div key={c.id} className="grid grid-cols-[minmax(200px,1fr)_180px_minmax(200px,1fr)_32px] gap-2">
+                <select value={c.champ} onChange={(e) => setConditions((prev) => prev.map((x) => (x.id === c.id ? { ...x, champ: e.target.value } : x)))} className={champStyle}>
+                  {COLONNES_SAGE.map((col) => (
+                    <option key={col.key} value={col.key}>{col.label}</option>
+                  ))}
+                </select>
+                <select value={c.operateur} onChange={(e) => setConditions((prev) => prev.map((x) => (x.id === c.id ? { ...x, operateur: e.target.value as OperateurSage } : x)))} className={champStyle}>
+                  {(Object.entries(OPERATEUR_SAGE_LABELS) as [OperateurSage, string][]).map(([op, label]) => (
+                    <option key={op} value={op}>{label}</option>
+                  ))}
+                </select>
+                <input
+                  value={c.valeur}
+                  onChange={(e) => setConditions((prev) => prev.map((x) => (x.id === c.id ? { ...x, valeur: e.target.value } : x)))}
+                  disabled={OPERATEURS_SANS_VALEUR.includes(c.operateur)}
+                  placeholder="Valeur…"
+                  className="h-9 rounded-lg border border-[#E5E1D8] bg-white px-2 text-[12px] font-medium outline-none focus:border-[#B4761A] disabled:bg-[#F4F3F0]"
+                />
+                <button
+                  type="button"
+                  onClick={() => setConditions((prev) => prev.filter((x) => x.id !== c.id))}
+                  className="flex h-9 items-center justify-center rounded-lg border border-[#E5E1D8] text-[#8A8474] hover:border-red-300 hover:text-red-600"
+                  title="Retirer cette condition"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+
+          <button type="button" onClick={() => setConditions((prev) => [...prev, nouvelleConditionSage()])} className="mt-2 text-[12px] font-bold text-[#B4761A] hover:underline">
+            + Ajouter une condition
           </button>
         </div>
+
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[#E5E1D8] pt-3">
+          <div className="flex items-center gap-3">
+            {filtresActifs ? (
+              <button
+                type="button"
+                onClick={() => { setSearch(''); setAgenceFilter(''); setFamilleFilter(''); setExpeditionFilters([]); setConditions([]) }}
+                className="text-[12px] font-bold text-[#B4761A] hover:underline"
+              >
+                Réinitialiser les filtres
+              </button>
+            ) : <span />}
+            {error && <span className="text-[12px] font-semibold text-red-600">{error}</span>}
+          </div>
+
+          <div className="flex items-center gap-2">
+            {/* ---- Choix des colonnes (mémorisé) ---- */}
+            <div className="relative" ref={colonnesRef}>
+              <button
+                type="button"
+                onClick={() => setColonnesOuvert((v) => !v)}
+                className="flex h-9 items-center gap-2 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[12px] font-bold text-[#3A362E] hover:bg-[#F4F3F0]"
+              >
+                ☰ Colonnes ({colonnesAffichees.length}/{COLONNES_SAGE.length})
+                <span className="text-[#8A8474]">{colonnesOuvert ? '▲' : '▼'}</span>
+              </button>
+              {colonnesOuvert && (
+                <div className="absolute right-0 z-30 mt-1 max-h-[420px] w-[380px] overflow-auto rounded-lg border border-[#E5E1D8] bg-white p-1.5 shadow-lg">
+                  <div className="mb-1 flex items-center justify-between px-2 py-1">
+                    <span className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Champs affichés (ordre de la liste)</span>
+                    <button type="button" onClick={() => setColonnes(COLONNES_SAGE_PAR_DEFAUT)} className="text-[11px] font-bold text-[#B4761A] hover:underline">
+                      Par défaut
+                    </button>
+                  </div>
+                  {colonnesAffichees.map((c, i) => (
+                    <div key={c.key} className="flex items-center gap-1 rounded px-2 py-1 text-[13px] hover:bg-[#F4F3F0]">
+                      <label className="flex flex-1 cursor-pointer items-center gap-2">
+                        <input type="checkbox" checked onChange={() => toggleColonne(c.key)} className="accent-[#B4761A]" />
+                        {c.label}
+                      </label>
+                      <button type="button" onClick={() => deplacerColonne(c.key, -1)} disabled={i === 0} className="rounded px-1 text-[11px] text-[#8A8474] hover:bg-white disabled:opacity-30" title="Monter">▲</button>
+                      <button type="button" onClick={() => deplacerColonne(c.key, 1)} disabled={i === colonnesAffichees.length - 1} className="rounded px-1 text-[11px] text-[#8A8474] hover:bg-white disabled:opacity-30" title="Descendre">▼</button>
+                    </div>
+                  ))}
+                  <div className="mt-1 border-t border-[#E5E1D8] px-2 py-1 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Champs disponibles</div>
+                  {COLONNES_SAGE.filter((c) => !colonnes.includes(c.key)).map((c) => (
+                    <label key={c.key} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-[13px] hover:bg-[#F4F3F0]">
+                      <input type="checkbox" checked={false} onChange={() => toggleColonne(c.key)} className="accent-[#B4761A]" />
+                      {c.label}
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => void exporterExcel()}
+              disabled={exportEnCours || loading}
+              className="rounded-lg bg-[#111820] px-4 py-2 text-[13px] font-bold text-white hover:bg-[#252E3D] disabled:cursor-not-allowed disabled:opacity-60"
+              title="Exporte exactement les colonnes et les lignes affichées"
+            >
+              {exportEnCours ? 'Export en cours…' : '⬇ Exporter en Excel (comme à l’écran)'}
+            </button>
+          </div>
+        </div>
       </section>
 
-      <section className="grid gap-4 lg:grid-cols-[1fr_1.3fr]">
-        <div className="rounded-xl border border-[#E5E1D8] bg-white p-4">
-          <div className="mb-3 flex items-center justify-between">
-            <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">
-              {loading
-                ? 'Chargement…'
-                : totalCount !== null && totalCount > rows.length
-                  ? `${rows.length} affiché(s) sur ${totalCount} au total — affinez la recherche pour voir le reste`
-                  : `${rows.length} résultat${rows.length > 1 ? 's' : ''}`}
-            </div>
-            {error && <div className="text-[12px] font-semibold text-red-600">{error}</div>}
+      {/* ---- Liste pleine largeur ---- */}
+      <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">
+            {loading
+              ? 'Chargement…'
+              : totalCount !== null && totalCount > rows.length
+                ? `${rowsFiltrees.length} affiché(s) sur ${totalCount} au total — affinez la recherche pour voir le reste`
+                : `${rowsFiltrees.length} résultat${rowsFiltrees.length > 1 ? 's' : ''}${conditionsValides.length ? ` (${rows.length} avant filtres avancés)` : ''}`}
           </div>
-          <div
-            tabIndex={0}
-            onKeyDown={onListKeyDown}
-            className="max-h-[760px] overflow-auto rounded-lg border border-[#E5E1D8] outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A]/50"
-          >
-            <table className="w-full text-left text-[13px]">
-              <thead className="sticky top-0 bg-[#F4F3F0] text-[11px] uppercase tracking-wide text-[#8A8474]">
-                <tr>
-                  <th className="px-3 py-2 font-bold">N° tiers</th>
-                  <th className="px-3 py-2 font-bold">Agence</th>
-                  <th className="px-3 py-2 font-bold">Expédition</th>
-                  <th className="px-3 py-2 text-right font-bold">Frais de port</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r, i) => {
-                  const key = `${r.numero_tiers}-${r.li_no ?? i}`
-                  const isSelected = selected && selected.numero_tiers === r.numero_tiers && selected.li_no === r.li_no
+          <div className="text-[11px] text-[#8A8474]">Cliquez une ligne pour ouvrir la fiche · ↑ ↓ pour passer d’une fiche à l’autre</div>
+        </div>
+        <div
+          tabIndex={0}
+          onKeyDown={onListKeyDown}
+          className="max-h-[75vh] overflow-auto rounded-lg border border-[#E5E1D8] outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A]/50"
+        >
+          <table className="w-full text-left text-[13px]">
+            <thead className="sticky top-0 z-10 bg-[#F4F3F0] text-[11px] uppercase tracking-wide text-[#8A8474]">
+              <tr>
+                {colonnesAffichees.map((c) => {
+                  const actif = tri.key === c.key
                   return (
-                    <tr
-                      key={key}
-                      ref={(el) => { listRefs.current[i] = el }}
-                      onClick={() => setSelected(r)}
-                      className={`cursor-pointer border-t border-[#E5E1D8] transition-colors hover:bg-[#F4F3F0] ${isSelected ? 'bg-[#B4761A]/[0.06]' : ''}`}
+                    <th
+                      key={c.key}
+                      onClick={() => trierPar(c.key)}
+                      style={{ minWidth: c.largeur }}
+                      className={`cursor-pointer select-none whitespace-nowrap px-3 py-2 font-bold hover:text-[#111820] ${c.align === 'right' ? 'text-right' : ''} ${actif ? 'text-[#111820]' : ''}`}
+                      title="Trier"
                     >
-                      <td className="px-3 py-2">
-                        <div className="flex items-center gap-1.5">
-                          <span className="font-mono text-[12px] font-semibold text-[#3A362E]">{r.numero_tiers}</span>
-                          {r.adresse_principale && (
-                            <span className="rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700">Principale</span>
-                          )}
-                          {r.en_sommeil && (
-                            <span className="rounded-full bg-[#F4F3F0] px-1.5 py-0.5 text-[10px] font-bold text-[#8A8474]">Sommeil</span>
-                          )}
-                        </div>
-                        <div className="truncate text-[12px] text-[#111820]">{r.intitule || '—'}</div>
-                      </td>
-                      <td className="px-3 py-2 text-[12px] text-[#3A362E]">{normaliserAgence(r.agence_rattachement) || '—'}</td>
-                      <td className="px-3 py-2 text-[12px] text-[#3A362E]">{r.expedition_designation || '—'}</td>
-                      <td className="px-3 py-2 text-right text-[12px] font-[var(--font-mono,monospace)] text-[#3A362E]">
-                        {r.expedition_frais_port_ht !== null ? `${Number(r.expedition_frais_port_ht).toFixed(2)} €` : '—'}
-                      </td>
-                    </tr>
+                      {c.label}
+                      <span className={`ml-1 text-[9px] ${actif ? 'opacity-100' : 'opacity-0'}`}>{tri.dir === 'asc' ? '▲' : '▼'}</span>
+                    </th>
                   )
                 })}
-                {!loading && rows.length === 0 && (
-                  <tr><td colSpan={4} className="px-3 py-8 text-center text-[#8A8474]">Aucun résultat pour ces filtres.</td></tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <div className="rounded-xl border border-[#E5E1D8] bg-white p-4">
-          <div className="mb-3 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Détail</div>
-          {!selected ? (
-            <div className="flex h-64 items-center justify-center text-center text-[13px] text-[#8A8474]">
-              Sélectionne une ligne dans la liste pour voir la fiche complète.
-            </div>
-          ) : (
-            <div>
-              <div className="mb-3 flex items-start justify-between border-b border-[#E5E1D8] pb-3">
-                <div>
-                  <div className="font-mono text-[12px] font-bold text-[#8A8474]">{selected.numero_tiers}</div>
-                  <div className="text-[16px] font-bold text-[#111820]">{selected.intitule || '(intitulé non renseigné)'}</div>
-                </div>
-                <div className="flex gap-1.5">
-                  {selected.adresse_principale && (
-                    <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-bold text-emerald-700">Adresse principale</span>
-                  )}
-                  {selected.en_sommeil && (
-                    <span className="rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-bold text-red-700">En sommeil</span>
-                  )}
-                </div>
-              </div>
-
-              <DetailGroup title="Expédition retenue (adresse si renseignée, sinon défaut client)">
-                <DetailRow label="Mode d'expédition" value={selected.expedition_designation} />
-                <DetailRow label="Code" value={selected.n_expedition_effectif} />
-                <DetailRow label="Base de calcul frais de port" value={selected.expedition_base_calcul} />
-                <DetailRow label="Frais de port prévu HT" value={selected.expedition_frais_port_ht !== null ? `${Number(selected.expedition_frais_port_ht).toFixed(2)} €` : null} />
-              </DetailGroup>
-
-              <DetailGroup title="Fiche client (SAGE)">
-                <DetailRow label="Type" value={selected.type_tiers} />
-                <DetailRow label="Qualité" value={selected.qualite} />
-                <DetailRow label="SIRET" value={selected.siret} />
-                <DetailRow label="Famille" value={selected.famille} />
-                <DetailRow label="Agence de rattachement" value={normaliserAgence(selected.agence_rattachement)} />
-                <DetailRow label="Ville du siège" value={[selected.code_postal_siege, selected.ville_siege].filter(Boolean).join(' ')} />
-                <DetailRow label="Mode d'expédition par défaut (client)" value={selected.expedition_defaut_designation ? `${selected.expedition_defaut_designation} (code ${selected.n_expedition_defaut})` : selected.n_expedition_defaut} />
-              </DetailGroup>
-
-              <DetailGroup title="Adresse de livraison">
-                <DetailRow label="N° adresse" value={selected.li_no} />
-                <DetailRow label="Intitulé adresse" value={selected.adresse_intitule} />
-                <DetailRow label="Adresse" value={[selected.li_adresse, selected.li_complement].filter(Boolean).join(', ')} />
-                <DetailRow label="Code postal / Ville" value={[selected.li_codepostal, selected.li_ville].filter(Boolean).join(' ')} />
-                <DetailRow label="Pays" value={selected.li_pays} />
-                <DetailRow label="Contact" value={selected.li_contact} />
-                <DetailRow label="Téléphone" value={selected.li_telephone} />
-                <DetailRow
-                  label="Mode d'expédition (adresse seule)"
-                  value={selected.expedition_adresse_designation ? `${selected.expedition_adresse_designation} (code ${selected.n_expedition_adresse})` : selected.n_expedition_adresse}
-                />
-              </DetailGroup>
-            </div>
-          )}
+              </tr>
+            </thead>
+            <tbody>
+              {rowsTriees.map((r, i) => {
+                const key = `${r.numero_tiers}-${r.li_no ?? i}`
+                const isSelected = selected && selected.numero_tiers === r.numero_tiers && selected.li_no === r.li_no
+                return (
+                  <tr
+                    key={key}
+                    ref={(el) => { listRefs.current[i] = el }}
+                    onClick={() => setSelected(r)}
+                    className={`cursor-pointer border-t border-[#E5E1D8] transition-colors hover:bg-[#F4F3F0] ${isSelected ? 'bg-[#B4761A]/[0.06]' : ''}`}
+                  >
+                    {colonnesAffichees.map((c) => {
+                      if (c.key === 'numero_tiers') {
+                        return (
+                          <td key={c.key} className="whitespace-nowrap px-3 py-2">
+                            <span className="font-mono text-[12px] font-semibold text-[#3A362E]">{r.numero_tiers}</span>
+                            {r.adresse_principale && !colonnes.includes('adresse_principale') && (
+                              <span className="ml-1.5 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700">Principale</span>
+                            )}
+                            {r.en_sommeil && !colonnes.includes('en_sommeil') && (
+                              <span className="ml-1.5 rounded-full bg-[#F4F3F0] px-1.5 py-0.5 text-[10px] font-bold text-[#8A8474]">Sommeil</span>
+                            )}
+                          </td>
+                        )
+                      }
+                      const texte = c.texte(r)
+                      const badge =
+                        c.key === 'en_sommeil' ? (
+                          <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${r.en_sommeil ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>{texte}</span>
+                        ) : c.key === 'adresse_principale' ? (
+                          <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${r.adresse_principale ? 'bg-emerald-50 text-emerald-700' : 'bg-[#F4F3F0] text-[#8A8474]'}`}>{texte}</span>
+                        ) : null
+                      return (
+                        <td
+                          key={c.key}
+                          className={`px-3 py-2 text-[12px] text-[#3A362E] ${c.align === 'right' ? 'text-right font-[var(--font-mono,monospace)]' : ''} ${c.key === 'intitule' ? 'font-semibold text-[#111820]' : ''}`}
+                          style={{ maxWidth: (c.largeur ?? 160) * 1.6, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                          title={texte}
+                        >
+                          {badge ?? (texte || '—')}
+                        </td>
+                      )
+                    })}
+                  </tr>
+                )
+              })}
+              {!loading && rowsTriees.length === 0 && (
+                <tr><td colSpan={Math.max(1, colonnesAffichees.length)} className="px-3 py-8 text-center text-[#8A8474]">Aucun résultat pour ces filtres.</td></tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </section>
+
+      {selected && <ClientSageModal row={selected} onClose={() => setSelected(null)} />}
     </>
+  )
+}
+
+/** Fiche client SAGE en fenêtre flottante (même contenu que l'ancien panneau de droite). */
+function ClientSageModal({ row, onClose }: { row: ClientAdresseRow; onClose: () => void }) {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start justify-between border-b border-[#E5E1D8] px-5 py-4">
+          <div>
+            <div className="font-mono text-[12px] font-bold text-[#8A8474]">{row.numero_tiers}</div>
+            <div className="text-[16px] font-bold text-[#111820]">{row.intitule || '(intitulé non renseigné)'}</div>
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              {row.adresse_principale && (
+                <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-bold text-emerald-700">Adresse principale</span>
+              )}
+              {row.en_sommeil && (
+                <span className="rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-bold text-red-700">En sommeil</span>
+              )}
+            </div>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-lg border border-[#E5E1D8] px-3 py-1.5 text-[12px] font-bold text-[#3A362E] hover:bg-[#F4F3F0]" title="Fermer (Échap)">
+            ✕ Fermer
+          </button>
+        </div>
+
+        <div className="overflow-auto px-5 py-4">
+          <DetailGroup title="Expédition retenue (adresse si renseignée, sinon défaut client)">
+            <DetailRow label="Mode d'expédition" value={row.expedition_designation} />
+            <DetailRow label="Code" value={row.n_expedition_effectif} />
+            <DetailRow label="Base de calcul frais de port" value={row.expedition_base_calcul} />
+            <DetailRow label="Frais de port prévu HT" value={row.expedition_frais_port_ht !== null ? `${Number(row.expedition_frais_port_ht).toFixed(2)} €` : null} />
+          </DetailGroup>
+
+          <DetailGroup title="Fiche client (SAGE)">
+            <DetailRow label="Type" value={row.type_tiers} />
+            <DetailRow label="Qualité" value={row.qualite} />
+            <DetailRow label="SIRET" value={row.siret} />
+            <DetailRow label="Famille" value={row.famille} />
+            <DetailRow label="Agence de rattachement" value={normaliserAgence(row.agence_rattachement)} />
+            <DetailRow label="Ville du siège" value={[row.code_postal_siege, row.ville_siege].filter(Boolean).join(' ')} />
+            <DetailRow label="Mode d'expédition par défaut (client)" value={row.expedition_defaut_designation ? `${row.expedition_defaut_designation} (code ${row.n_expedition_defaut})` : row.n_expedition_defaut} />
+          </DetailGroup>
+
+          <DetailGroup title="Adresse de livraison">
+            <DetailRow label="N° adresse" value={row.li_no} />
+            <DetailRow label="Intitulé adresse" value={row.adresse_intitule} />
+            <DetailRow label="Adresse" value={[row.li_adresse, row.li_complement].filter(Boolean).join(', ')} />
+            <DetailRow label="Code postal / Ville" value={[row.li_codepostal, row.li_ville].filter(Boolean).join(' ')} />
+            <DetailRow label="Pays" value={row.li_pays} />
+            <DetailRow label="Contact" value={row.li_contact} />
+            <DetailRow label="Téléphone" value={row.li_telephone} />
+            <DetailRow
+              label="Mode d'expédition (adresse seule)"
+              value={row.expedition_adresse_designation ? `${row.expedition_adresse_designation} (code ${row.n_expedition_adresse})` : row.n_expedition_adresse}
+            />
+          </DetailGroup>
+        </div>
+      </div>
+    </div>
   )
 }
 
