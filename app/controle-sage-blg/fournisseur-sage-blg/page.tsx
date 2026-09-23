@@ -2266,6 +2266,20 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
   // Forçage de la méthode de réappro sur l'écran ('' = selon référence / fournisseur / défaut) — mémorisé
   const [methodeForcee, setMethodeForcee] = useState<'' | MethodeCalcul>(() => { try { const v = localStorage.getItem('appro.articles.methode_forcee'); return v === 'min_max' || v === 'couverture' ? v : '' } catch { return '' } })
   useEffect(() => { try { localStorage.setItem('appro.articles.methode_forcee', methodeForcee) } catch { /* ignore */ } }, [methodeForcee])
+  const [showExplanation, setShowExplanation] = useState(false)
+  const [colonnesMasquees, setColonnesMasquees] = useState<Set<string>>(() => {
+    try {
+      const stored = localStorage.getItem('appro.articles.colonnes_masquees')
+      return new Set(stored ? JSON.parse(stored) : ['min_sage', 'min_blg'])
+    } catch {
+      return new Set(['min_sage', 'min_blg'])
+    }
+  })
+  useEffect(() => {
+    try {
+      localStorage.setItem('appro.articles.colonnes_masquees', JSON.stringify(Array.from(colonnesMasquees)))
+    } catch { /* ignore */ }
+  }, [colonnesMasquees])
   const [exportCommandesEnCours, setExportCommandesEnCours] = useState(false)
   const [exportCommandesMsg, setExportCommandesMsg] = useState<string | null>(null)
   const [search, setSearch] = useState('')
@@ -2708,13 +2722,15 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div className="text-[13px] font-bold text-[#111820]">Calcul de besoin — stock min / stock de sécurité par référence MYSTOCK, puis proposition de réappro (méthode A ou B)</div>
-            <p className="mt-1 max-w-3xl text-[12px] text-[#8A8474]">
+            {showExplanation && (
+          <div className="mb-3 text-[12px] text-[#8A8474] leading-relaxed">
+            <p className="mb-2">
               Sur l'historique des sorties BL (flux articles, toutes agences, {parametres.find((p) => p.cle === 'horizon_mois')?.valeur ?? 12} mois complets) :
               μ = conso moyenne mensuelle, σ = écart-type. Délai L = délai d'appro + délai sécurité (jours calendaires), en priorité ceux saisis sur la référence (✎), sinon ceux du fournisseur, sinon les défauts. Une référence en "arrêt appro" ne déclenche plus de signal à commander.
               <b> Stock sécurité = z × σ × √(L/30)</b>, <b>Stock min = μ × L/30 + stock sécurité</b> (arrondi au colisage), <b>Stock max = stock min + μ × période de revue/30</b>.
               Un "stock min retenu" saisi à la main prime sur le calcul et sert de valeur cible pour BLG (quantity_min sur l'entrepôt DPFMS).
             </p>
-            <p className="mt-1 max-w-3xl text-[12px] text-[#8A8474]">
+            <p>
               <b>Projection</b> : encours = reste à livrer des commandes fournisseurs BLG livrées au dépôt FMS (créées depuis moins de {parametres.find((p) => p.cle === 'cdf_encours_anciennete_max_jours')?.valeur ?? 365} j) ;
               ventes réservées = réservé SAGE (<span className="font-mono">sto_res</span>) du dépôt FMS, comme l'interrogation "Stock prévisionnel" de SAGE ; le réservé des agences est affiché entre parenthèses (idem pour le stock disponible). Le reste à livrer BLG est conservé en information (survol).
               Date de livraison estimée = date saisie sur la ligne ou l'entête, sinon date lue dans les commentaires BLG ("Expé S40", "Livraison 09.09", "STOCK 12/26"), sinon date de commande + délai d'appro.
@@ -2722,6 +2738,11 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
               <b> À commander</b> quand le projeté passe sous le <b>seuil</b> = stock de sécurité + conso du délai non couvert par l'horizon (quand l'horizon = L, le seuil est le stock de sécurité : la conso du délai est déjà déduite, on ne la compte pas deux fois) ; quantité suggérée = remontée au stock max, arrondie au colisage.
               Un encours dont la date estimée est dépassée de plus de {parametres.find((p) => p.cle === 'cdf_retard_max_jours')?.valeur ?? 60} j est jugé douteux et exclu.
             </p>
+          </div>
+        )}
+        <button type="button" onClick={() => setShowExplanation(!showExplanation)} className="mb-3 text-[12px] font-semibold text-[#B4761A] hover:underline">
+          {showExplanation ? '▼ Masquer l'explication' : '▶ Voir l'explication du calcul'}
+        </button>
           </div>
           <div className="flex flex-col items-end gap-2">
             <button type="button" onClick={() => void recalculer()} disabled={recalculEnCours || loading} className="rounded-lg bg-[#111820] px-4 py-2.5 text-sm font-bold text-white hover:bg-[#252E3D] disabled:opacity-60">
@@ -2782,12 +2803,12 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
           <table className="w-full text-left text-[12px]">
             <thead className="sticky top-0 z-10 bg-[#F4F3F0] text-[10px] uppercase tracking-wide text-[#8A8474]">
               <tr>
-                {COLONNES_ARTICLES.map((c) => (
+                {COLONNES_ARTICLES.filter((c) => !colonnesMasquees.has(c.key)).map((c) => (
                   <ThTri key={c.key} k={c.key} label={c.label} title={c.title} align={c.align} tri={triCol} onTri={(k) => setTriCol((t) => basculerTri(t, k))} className="whitespace-nowrap" />
                 ))}
               </tr>
               <tr className="bg-[#F4F3F0]/80">
-                {COLONNES_ARTICLES.map((c) => (
+                {COLONNES_ARTICLES.filter((c) => !colonnesMasquees.has(c.key)).map((c) => (
                   <td key={c.key} className="px-1 pb-2"><InputFiltre value={filtresCol[c.key] || ''} onChange={(v) => setFiltreCol(c.key, v)} align={c.align} placeholder={c.placeholder || 'filtre'} /></td>
                 ))}
               </tr>
@@ -2812,10 +2833,10 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
                 ].filter(Boolean).join('\n')
                 return (
                   <tr key={a.reference_article} className={`border-t border-[#E5E1D8] hover:bg-[#F4F3F0] ${sousMin ? 'bg-red-50/30' : ''} ${a.arret_appro ? 'opacity-70' : ''}`}>
-                    <td className="px-2 py-1.5" title={incs.length ? incs.map((k) => `• ${LABEL_INCOHERENCE_ARTICLE[k]?.label || k}`).join('\n') : 'Aucune incohérence'}>
+                    <td className="sticky left-0 z-[5] bg-white px-2 py-1.5" title={incs.length ? incs.map((k) => `• ${LABEL_INCOHERENCE_ARTICLE[k]?.label || k}`).join('\n') : 'Aucune incohérence'}>
                       {incs.length ? <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${incRouge ? 'bg-red-100 text-red-700' : 'bg-orange-100 text-orange-700'}`}>⚠ {incs.length}</span> : <span className="text-[#B3AD9E]">·</span>}
                     </td>
-                    <td className="px-2 py-1.5">
+                    <td className="sticky left-[54px] z-[5] bg-white px-2 py-1.5">
                       <div className="flex items-center gap-1.5">
                         <span className="font-mono font-semibold text-[#3A362E]">{a.reference_article}</span>
                         <BlocageApproBadge article={a} compact />
@@ -2896,7 +2917,7 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
                   </tr>
                 )
               })}
-              {!loading && affichees.length === 0 && <tr><td colSpan={COLONNES_ARTICLES.length} className="px-3 py-8 text-center text-[#8A8474]">Aucune référence pour ces filtres.</td></tr>}
+              {!loading && affichees.length === 0 && <tr><td colSpan={COLONNES_ARTICLES.filter((c) => !colonnesMasquees.has(c.key)).length} className="px-3 py-8 text-center text-[#8A8474]">Aucune référence pour ces filtres.</td></tr>}
             </tbody>
           </table>
         </div>
