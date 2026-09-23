@@ -2232,11 +2232,11 @@ const COLONNES_ARTICLES: { key: CleColArt; label: string; title?: string; align:
   { key: 'sigma', label: 'σ', title: 'Écart-type mensuel', align: 'right', val: (a) => a.conso_ecart_type },
   { key: 'mu3', label: 'μ 3 mois', title: 'Consommation mensuelle moyenne des 3 derniers mois complets (sorties BL / 3). Survole pour le total.', align: 'right', val: (a) => a.conso_moy_3_mois },
   { key: 'derniere_sortie', label: 'Dern. sortie', title: 'Dernière sortie BL (mois). Filtre sur l\'année ou le mois au format AAAA-MM', align: 'right', placeholder: '2026-0', val: (a) => a.sage_derniere_sortie ? String(a.sage_derniere_sortie).slice(0, 7) : null },
-  { key: 'dispo', label: 'Dispo global (FMS)', title: 'Stock disponible SAGE (sto_dispo) tous dépôts — entre parenthèses : dépôt FMS seul. Survole pour le stock physique.', align: 'right', val: (a) => a.sage_stock_dispo_total },
-  { key: 'encours', label: 'Encours ≤ L (après)', title: 'Reste à livrer des commandes fournisseurs BLG (périmètre) dont la livraison estimée tombe dans le délai L → compté dans le stock à réception ; entre parenthèses : livré après L (non compté). ⏱ = en retard, ? = douteux (exclu). Survole pour le détail par commande.', align: 'right', val: (a, c) => propDe(c, a)?.encoursPeriode ?? null },
-  { key: 'reserve', label: 'Réservé ≤ L j (après L)', title: 'Ventes réservées SAGE (lignes de commande client, reliquat = sto_res) dont la date de livraison prévue tombe dans le délai L (y compris en retard) → déduites du stock à réception. Entre parenthèses : à livrer après L (non déduit). Périmètre global ou FMS selon le modèle.', align: 'right', val: (a, c) => propDe(c, a)?.reservePeriode ?? null },
-  { key: 'projete', label: 'Stock à réception', title: 'Stock juste avant la réception de la commande passée aujourd\'hui (dans L jours) = stock physique (périmètre) − demande sur L (réservé daté, μ × L/30 ou le max selon le modèle) + encours livré ≤ L. Survole pour le détail. Rouge = déclenche une proposition.', align: 'right', val: (a, c) => propDe(c, a)?.stockReception ?? null },
-  { key: 'couv', label: 'Couv. à réception (mois)', title: 'Couverture à réception = stock à réception / μ retenu (12 mois ou 3 mois selon le modèle).', align: 'right', val: (a, c) => propDe(c, a)?.couvReception ?? null },
+  { key: 'dispo', label: 'Dispo', title: 'Stock disponible SAGE (sto_dispo) tous dépôts — entre parenthèses : dépôt FMS seul. Survole pour le stock physique.', align: 'right', val: (a) => a.sage_stock_dispo_total },
+  { key: 'encours', label: 'Encours', title: 'Reste à livrer des commandes fournisseurs BLG (périmètre) dont la livraison estimée tombe dans le délai L → compté dans le stock à réception ; entre parenthèses : livré après L (non compté). ⏱ = en retard, ? = douteux (exclu). Survole pour le détail par commande.', align: 'right', val: (a, c) => propDe(c, a)?.encoursPeriode ?? null },
+  { key: 'reserve', label: 'Réservé', title: 'Ventes réservées SAGE (lignes de commande client, reliquat = sto_res) dont la date de livraison prévue tombe dans le délai L (y compris en retard) → déduites du stock à réception. Entre parenthèses : à livrer après L (non déduit). Périmètre global ou FMS selon le modèle.', align: 'right', val: (a, c) => propDe(c, a)?.reservePeriode ?? null },
+  { key: 'projete', label: 'Stock récep.', title: 'Stock juste avant la réception de la commande passée aujourd\'hui (dans L jours) = stock physique (périmètre) − demande sur L (réservé daté, μ × L/30 ou le max selon le modèle) + encours livré ≤ L. Survole pour le détail. Rouge = déclenche une proposition.', align: 'right', val: (a, c) => propDe(c, a)?.stockReception ?? null },
+  { key: 'couv', label: 'Couv.', title: 'Couverture à réception = stock à réception / μ retenu (12 mois ou 3 mois selon le modèle).', align: 'right', val: (a, c) => propDe(c, a)?.couvReception ?? null },
   { key: 'min_sage', label: 'Min SAGE', align: 'right', val: (a) => a.sage_stock_min_fms },
   { key: 'min_blg', label: 'Min BLG', align: 'right', val: (a) => a.blg_stock_min_fms },
   { key: 'ss', label: 'SS calc.', align: 'right', val: (a) => a.calc_stock_securite },
@@ -2423,7 +2423,15 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
     }
   }, [baseFiltree, propositions])
 
-  const affichees = useMemo(() => filtres.slice(0, 500), [filtres])
+  const affichees = useMemo(() => {
+    const sorted = [...filtres].sort((a, b) => {
+      const fA = a.fournisseur_principal || ''
+      const fB = b.fournisseur_principal || ''
+      if (fA !== fB) return fA.localeCompare(fB)
+      return a.reference_article.localeCompare(b.reference_article)
+    })
+    return sorted.slice(0, 500)
+  }, [filtres])
 
   /** Fichiers commande fournisseur : un Excel (Référence ; Qté ; Date de livraison souhaitée)
    * par fournisseur × date de livraison souhaitée, sur les lignes filtrées dont la quantité
@@ -2799,7 +2807,7 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
             <span>Clic sur un en-tête : tri · champs d'en-tête : filtre (texte "contient", nombres "&gt;10", "&lt;=5", "=0", "vide" / "!vide") — les KPI et pastilles suivent les filtres</span>
           </div>
         </div>
-        <div className="max-h-[760px] overflow-auto rounded-lg border border-[#E5E1D8]">
+        <div className="w-full max-h-[760px] overflow-auto rounded-lg border border-[#E5E1D8]">
           <table className="w-full text-left text-[12px]">
             <thead className="sticky top-0 z-10 bg-[#F4F3F0] text-[10px] uppercase tracking-wide text-[#8A8474]">
               <tr>
