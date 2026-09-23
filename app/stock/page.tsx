@@ -4,38 +4,40 @@
 // app/stock/page.tsx — Stock articles (desktop)
 // ----------------------------------------------------------------------------
 // ÉVOLUTION (2026-09-16) : version PC de l'écran mobile « Stock articles »
-// (components/mobile/MobileStockArticles.tsx), qui exploite toute la largeur :
-//   - colonne gauche : filtres (famille macro → famille, dépôt, dispo), recherche
-//     libre ou liste de références collées, résultats (RPC
-//     search_stock_articles_mobile, même source que le mobile) ;
-//   - zone principale, pour la référence sélectionnée :
-//       • bandeau : dispo tous dépôts, réel, réservé, à terme, réceptions
-//         fournisseurs attendues, besoins CDC fermes ;
-//       • courbe de projection sur documents réels — stock dispo aujourd'hui,
-//         moins les commandes clients (CDC) à leur date de livraison, plus les
-//         commandes fournisseurs (sage.bdcf, type 12) à leur date de réception
-//         (CDF en retard ou sans date = supposées reçues demain, comme dans
-//         v_portefeuille_couverture_stock) ; horizon 3 / 6 / 12 mois ;
-//       • alertes « commande non complète à la date de livraison client » :
-//         lignes RUPTURE / RECEPTION_TARDIVE de v_portefeuille_couverture_stock
-//         avec la date estimée de disponibilité et la prochaine réception ;
-//       • simulateur « nouvelle commande » : première date à laquelle une
-//         quantité donnée est disponible sans mettre en rupture les commandes
-//         déjà prises ;
-//       • stock par dépôt (get_stock_par_depot) et liste des réceptions.
-//   - ?ref=XXXX ouvre directement la référence.
-// ÉVOLUTION (2026-09-20) : la liste de résultats affiche pour chaque référence
-//   les « échelons de disponibilité » : quantité promissible aujourd'hui, puis
-//   jusqu'à trois paliers « Y dès telle date » apportés par les réceptions
-//   attendues (même projection que la fiche : stock dispo tous dépôts − CDC à
-//   leur date de livraison + CDF à leur date de réception, et une quantité
-//   n'est promissible à une date que si le stock projeté reste ≥ à cette
-//   quantité à cette date et après). Les données sont chargées en une requête
-//   par source pour toutes les références affichées.
+// (components/mobile/MobileStockArticles.tsx) : recherche libre ou liste de
+// références collées + filtres (famille macro → famille, dépôt, dispo), RPC
+// search_stock_articles_mobile (même source que le mobile), fiche article avec
+// bandeau KPI, courbe de projection sur documents réels (stock dispo − CDC à
+// leur date de livraison + CDF à leur date de réception ; CDF en retard ou sans
+// date supposées reçues demain, comme v_portefeuille_couverture_stock),
+// commandes non complètes à la date de livraison client, simulateur « nouvelle
+// commande », stock par dépôt et réceptions fournisseurs.
+// ÉVOLUTION (2026-09-20) : échelons de disponibilité (quantité promissible
+// aujourd'hui puis paliers « Y dès telle date » apportés par les réceptions).
+// ÉVOLUTION (2026-09-23) : nouvelle mise en page.
+//   - Bandeau de recherche pleine largeur (zone de texte : bout de code,
+//     désignation ou liste de références + filtres + « Qté à promettre »).
+//   - Liste pleine largeur « du stock d'aujourd'hui aux échéances » : pour
+//     chaque référence, stock Sage − PL, puis par période (aujourd'hui + CDC
+//     en retard, fin du mois en cours, fins des 3 mois suivants, au-delà) :
+//       • CDC à livrer, dont quantités livrables / en retard (part non servie
+//         à la date de livraison demandée, en service FIFO par date) ;
+//       • CDF à recevoir avec leurs dates et quantités ;
+//       • stock projeté fin de période ;
+//       • dispo pour nouvelles CDC livrées d'ici l'échéance (plus bas niveau du
+//         stock projeté à partir de l'échéance).
+//     Colonne finale : quantité promissible aujourd'hui puis paliers datés, et
+//     première date pour la « Qté à promettre » saisie.
+//   - Filtre rapide : toutes / avec CDC en retard / sans dispo immédiate.
+//   - Clic sur une référence → fiche détaillée (courbe, tableaux) dans une
+//     fenêtre flottante (Échap pour fermer, ← → pour naviguer).
+//   - Chargement paginé (1000 lignes par page) pour les références à
+//     nombreuses lignes CDC.
+//   - ?ref=XXXX ouvre directement la fiche.
 // Sur mobile (< 768 px) on rend MobileStockArticles tel quel.
 // ============================================================================
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type React from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { useViewport } from '@/lib/useViewport'
@@ -115,10 +117,50 @@ type EvenementProjection = {
   stockApres: number
 }
 
+/** Point minimal d'une projection (date + niveau après mouvement). */
+type ProjPoint = { date: string; stockApres: number }
+
 /** Palier de disponibilité : `quantite` pièces promissibles à partir de `date`. */
 type Echelon = { date: string; quantite: number }
-/** Échelons d'une référence de la liste : aujourd'hui + paliers suivants, stock projeté final, réceptions attendues. */
-type EchelonsRef = { echelons: Echelon[]; stockFinal: number; receptionsAttendues: number; besoins: number }
+
+/** Mouvement de la projection allégée de la liste. */
+type EvtLeger = {
+  date: string
+  ordre: 0 | 1
+  q: number // signée
+  rang: number
+  hypothese: boolean
+  cdf: string | null
+  stockApres: number
+  manque: number // part de la CDC non servie à sa date (0 pour une réception)
+}
+
+type ReceptionPeriode = { date: string; q: number; hypothese: boolean; cdf: string | null }
+
+type PeriodeAgg = {
+  cdc: number // quantité CDC à livrer dans la période
+  retard: number // dont non servie à la date de livraison demandée
+  cdf: number // réceptions attendues dans la période
+  receptions: ReceptionPeriode[]
+  stockFin: number // stock projeté à la fin de la période
+  dispoNouvelles: number // promissible pour une nouvelle CDC livrée d'ici la fin de période
+}
+
+type RefProjection = {
+  stock0: number
+  stockReel: number | null
+  stockATerme: number | null
+  evts: EvtLeger[]
+  periodes: PeriodeAgg[]
+  echelons: Echelon[]
+  stockFinal: number
+  nbCdcRetard: number
+  qteRetard: number
+  receptionsAttendues: number
+  besoins: number
+}
+
+type Vue = 'toutes' | 'retard' | 'sansDispo'
 
 // ── Constantes ────────────────────────────────────────────────────────────
 const DEPOTS_PROPOSES = [
@@ -127,6 +169,7 @@ const DEPOTS_PROPOSES = [
   'MARMANDE CEGECLIM', 'MERIGNAC CEGECLIM', 'PAU CEGECLIM',
 ]
 const HORIZONS: Array<[number, string]> = [[3, '3 mois'], [6, '6 mois'], [12, '12 mois']]
+const NB_MOIS_LISTE = 4 // fin du mois en cours + 3 mois suivants
 const STATUT_LABEL: Record<CouvertureRow['statut_couverture'], string> = {
   COUVERT: 'Couvert (stock)',
   COUVERT_PAR_RECEPTION: 'Couvert par réception',
@@ -139,6 +182,10 @@ const STATUT_COLOR: Record<CouvertureRow['statut_couverture'], string> = {
   RECEPTION_TARDIVE: '#E0A961',
   RUPTURE: '#e0a685',
 }
+const C_VERT = '#8fd4a8'
+const C_BLEU = '#8FC7DA'
+const C_ORANGE = '#E0A961'
+const C_ROUGE = '#e0a685'
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 function toNumber(v: unknown): number {
@@ -162,11 +209,6 @@ function addMonthsIso(iso: string, months: number): string {
   d.setMonth(d.getMonth() + months)
   return toIsoDate(d)
 }
-function addDaysIso(iso: string, days: number): string {
-  const d = new Date(`${iso}T00:00:00`)
-  d.setDate(d.getDate() + days)
-  return toIsoDate(d)
-}
 function daysBetween(a: string, b: string): number {
   return Math.round((new Date(`${b}T00:00:00`).getTime() - new Date(`${a}T00:00:00`).getTime()) / 86400000)
 }
@@ -180,16 +222,57 @@ function formatDateCourte(iso?: string | null): string {
   const [y, m, d] = iso.slice(0, 10).split('-')
   return `${d}/${m}/${y.slice(2)}`
 }
+function formatJourMois(iso?: string | null): string {
+  if (!iso) return '—'
+  const [, m, d] = iso.slice(0, 10).split('-')
+  return `${d}/${m}`
+}
 function depotCourt(depot: string): string {
   return String(depot || '').replace(/\s*CEGECLIM\s*$/i, '').trim() || depot
 }
 function couleurDispo(n: number): string {
-  if (n > 0) return '#8fd4a8'
-  if (n < 0) return '#e0a685'
+  if (n > 0) return C_VERT
+  if (n < 0) return C_ROUGE
   return 'rgba(255,255,255,0.35)'
 }
 function parseReferences(q: string): string[] {
   return Array.from(new Set(q.split(/[\n,;]+/).map((s) => s.trim()).filter(Boolean).map((s) => s.toUpperCase())))
+}
+
+/** Bornes des périodes de la liste : aujourd'hui, puis fin du mois en cours et
+ * fins des mois suivants. */
+function bornesPeriodes(auj: string, nbMois = NB_MOIS_LISTE): string[] {
+  const d = new Date(`${auj}T00:00:00`)
+  const out = [auj]
+  for (let k = 0; k < nbMois; k += 1) out.push(toIsoDate(new Date(d.getFullYear(), d.getMonth() + k + 1, 0)))
+  return out
+}
+function libellePeriode(bornes: string[], k: number): string {
+  if (k === 0) return 'Auj. (+ retard)'
+  if (k >= bornes.length) return 'Au-delà'
+  const d = new Date(`${bornes[k]}T00:00:00`)
+  const mois = d.toLocaleDateString('fr-FR', { month: 'long' })
+  const memeAnnee = bornes[k].slice(0, 4) === bornes[0].slice(0, 4)
+  return `Fin ${mois}${memeAnnee ? '' : ` ${bornes[k].slice(2, 4)}`}`
+}
+function indexPeriode(bornes: string[], date: string): number {
+  if (date <= bornes[0]) return 0
+  for (let k = 1; k < bornes.length; k += 1) if (date <= bornes[k]) return k
+  return bornes.length
+}
+
+/** Lecture paginée (PostgREST limite à 1000 lignes par requête). */
+async function fetchAll<T>(build: (from: number, to: number) => PromiseLike<any>): Promise<T[]> {
+  const PAGE = 1000
+  const out: T[] = []
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await build(from, from + PAGE - 1)
+    if (error) throw new Error(error.message || String(error))
+    const rows = (data || []) as T[]
+    out.push(...rows)
+    if (rows.length < PAGE) break
+  }
+  return out
 }
 
 /** Projection sur documents réels : stock dispo d'aujourd'hui, réceptions
@@ -233,16 +316,13 @@ function construireProjection(stock0: number, receptions: ReceptionRow[], besoin
 /** Première date à laquelle `quantite` pièces peuvent être promises sans
  * mettre en rupture les commandes déjà prises : le stock projeté doit rester
  * ≥ quantite à cette date et pour tous les événements suivants. On raisonne
- * en fin de journée : une date n'est évaluée qu'après son dernier mouvement,
- * sinon une journée à plusieurs réceptions serait jugée sur la première
- * d'entre elles (niveau intermédiaire, pas le niveau réel du soir). */
-function premiereDateDisponible(stock0: number, events: EvenementProjection[], quantite: number): { date: string | null; niveau: number } {
+ * en fin de journée (après le dernier mouvement du jour). */
+function premiereDateDisponible(stock0: number, events: ProjPoint[], quantite: number): { date: string | null; niveau: number } {
   if (quantite <= 0) return { date: todayIso(), niveau: stock0 }
   const n = events.length
   const suffixMin = new Array<number>(n + 1)
   suffixMin[n] = n > 0 ? events[n - 1].stockApres : stock0
   for (let i = n - 1; i >= 0; i -= 1) suffixMin[i] = Math.min(events[i].stockApres, suffixMin[i + 1])
-  // Aujourd'hui : il faut stock0 >= q et aucun événement futur ne descend sous q.
   const minGlobal = Math.min(stock0, n > 0 ? suffixMin[0] : stock0)
   if (minGlobal >= quantite) return { date: todayIso(), niveau: minGlobal }
   for (let i = 0; i < n; i += 1) {
@@ -255,9 +335,8 @@ function premiereDateDisponible(stock0: number, events: EvenementProjection[], q
 /** Échelons de disponibilité : quantité promissible aujourd'hui (plus bas
  * niveau du stock projeté sur tout l'horizon, borné à 0), puis chaque date à
  * laquelle ce plancher remonte grâce aux réceptions — au plus `maxPaliers`
- * paliers après aujourd'hui. Une date n'est retenue qu'une fois, après le
- * dernier mouvement du jour. */
-function calculerEchelons(stock0: number, events: EvenementProjection[], maxPaliers = 3): Echelon[] {
+ * paliers après aujourd'hui. */
+function calculerEchelons(stock0: number, events: ProjPoint[], maxPaliers = 3): Echelon[] {
   const auj = todayIso()
   const n = events.length
   const suffixMin = new Array<number>(n + 1)
@@ -266,7 +345,7 @@ function calculerEchelons(stock0: number, events: EvenementProjection[], maxPali
   let niveau = Math.max(0, Math.min(stock0, n > 0 ? suffixMin[0] : stock0))
   const out: Echelon[] = [{ date: auj, quantite: niveau }]
   for (let i = 0; i < n && out.length <= maxPaliers; i += 1) {
-    if (i + 1 < n && events[i + 1].date === events[i].date) continue // attendre le dernier mouvement du jour
+    if (i + 1 < n && events[i + 1].date === events[i].date) continue
     if (events[i].date <= auj) continue
     const v = suffixMin[i]
     if (v > niveau) { niveau = v; out.push({ date: events[i].date, quantite: v }) }
@@ -274,16 +353,68 @@ function calculerEchelons(stock0: number, events: EvenementProjection[], maxPali
   return out
 }
 
-/** Projection allégée pour la liste : mêmes règles que construireProjection
- * (réception avant besoin à date égale, besoins échus ramenés à aujourd'hui). */
-function projeterLeger(stock0: number, recs: Array<{ date: string; q: number }>, cdcs: Array<{ date: string | null; q: number }>): EvenementProjection[] {
-  const auj = todayIso()
-  const events: Omit<EvenementProjection, 'stockApres'>[] = []
-  for (const r of recs) events.push({ date: r.date, ordre: 0, type: 'RECEPTION', quantite: r.q, label: '', detail: '', hypothese: false })
-  for (const c of cdcs) events.push({ date: c.date && c.date >= auj ? c.date : auj, ordre: 1, type: 'CDC', quantite: -c.q, label: '', detail: '', hypothese: false })
-  events.sort((a, b) => a.date.localeCompare(b.date) || a.ordre - b.ordre)
+/** Projection allégée d'une référence pour la liste, agrégée par période.
+ * Mêmes règles que la fiche : réception avant besoin à date égale, besoins
+ * échus ramenés à aujourd'hui, CDC servies dans l'ordre (date puis rang). */
+function projeterReference(
+  stock0: number,
+  recs: ReceptionPeriode[],
+  cdcs: Array<{ date: string | null; q: number; rang: number }>,
+  bornes: string[],
+  meta: { stockReel: number | null; stockATerme: number | null },
+): RefProjection {
+  const auj = bornes[0]
+  const bruts: Array<Omit<EvtLeger, 'stockApres' | 'manque'>> = []
+  for (const r of recs) bruts.push({ date: r.date, ordre: 0, q: r.q, rang: 0, hypothese: r.hypothese, cdf: r.cdf })
+  for (const c of cdcs) bruts.push({ date: c.date && c.date >= auj ? c.date : auj, ordre: 1, q: -c.q, rang: c.rang, hypothese: false, cdf: null })
+  bruts.sort((a, b) => a.date.localeCompare(b.date) || a.ordre - b.ordre || a.rang - b.rang)
   let courant = stock0
-  return events.map((e) => { courant += e.quantite; return { ...e, stockApres: courant } })
+  const evts: EvtLeger[] = bruts.map((e) => {
+    courant += e.q
+    const manque = e.q < 0 ? Math.min(-e.q, Math.max(0, -courant)) : 0
+    return { ...e, stockApres: courant, manque }
+  })
+
+  const nbPeriodes = bornes.length + 1
+  const periodes: PeriodeAgg[] = Array.from({ length: nbPeriodes }, () => ({ cdc: 0, retard: 0, cdf: 0, receptions: [], stockFin: stock0, dispoNouvelles: 0 }))
+  let nbCdcRetard = 0
+  let qteRetard = 0
+  for (const e of evts) {
+    const p = periodes[indexPeriode(bornes, e.date)]
+    if (e.q < 0) {
+      p.cdc += -e.q
+      p.retard += e.manque
+      if (e.manque > 0) { nbCdcRetard += 1; qteRetard += e.manque }
+    } else {
+      p.cdf += e.q
+      p.receptions.push({ date: e.date, q: e.q, hypothese: e.hypothese, cdf: e.cdf })
+    }
+  }
+  const n = evts.length
+  const suffixMin = new Array<number>(n + 1)
+  suffixMin[n] = Number.POSITIVE_INFINITY
+  for (let i = n - 1; i >= 0; i -= 1) suffixMin[i] = Math.min(evts[i].stockApres, suffixMin[i + 1])
+  let idx = -1
+  for (let k = 0; k < nbPeriodes; k += 1) {
+    while (idx + 1 < n && indexPeriode(bornes, evts[idx + 1].date) <= k) idx += 1
+    const fin = idx >= 0 ? evts[idx].stockApres : stock0
+    periodes[k].stockFin = fin
+    periodes[k].dispoNouvelles = Math.max(0, Math.min(fin, suffixMin[idx + 1]))
+  }
+
+  return {
+    stock0,
+    stockReel: meta.stockReel,
+    stockATerme: meta.stockATerme,
+    evts,
+    periodes,
+    echelons: calculerEchelons(stock0, evts, 4),
+    stockFinal: n > 0 ? evts[n - 1].stockApres : stock0,
+    nbCdcRetard,
+    qteRetard,
+    receptionsAttendues: recs.reduce((s, r) => s + r.q, 0),
+    besoins: cdcs.reduce((s, c) => s + c.q, 0),
+  }
 }
 
 // ── Page ──────────────────────────────────────────────────────────────────
@@ -304,12 +435,17 @@ function StockDesktop() {
   const [famille, setFamille] = useState('')
   const [depot, setDepot] = useState('')
   const [dispoFiltre, setDispoFiltre] = useState<'tous' | 'oui' | 'non'>('tous')
+  const [quantiteCible, setQuantiteCible] = useState('')
+  const [vue, setVue] = useState<Vue>('toutes')
   const filtresActifs = Boolean(familleMacro || famille || depot || dispoFiltre !== 'tous')
 
-  // ── Référence sélectionnée ─────────────────────────────────────────────
+  // ── Référence ouverte en fenêtre flottante ─────────────────────────────
   const [selected, setSelected] = useState<{ reference: string; designation: string } | null>(null)
   const [horizonMois, setHorizonMois] = useState(6)
   const [quantiteSimulee, setQuantiteSimulee] = useState('1')
+
+  const bornes = useMemo(() => bornesPeriodes(todayIso()), [])
+  const nbPeriodes = bornes.length + 1
 
   useEffect(() => {
     let cancelled = false
@@ -339,7 +475,7 @@ function StockDesktop() {
 
   useEffect(() => {
     const q = query.trim()
-    if (!q && !filtresActifs) { setResults(null); setError(null); return }
+    if (!q && !filtresActifs) { setResults(null); setError(null); setLoading(false); return }
     let cancelled = false
     setLoading(true)
     const t = window.setTimeout(async () => {
@@ -373,216 +509,494 @@ function StockDesktop() {
     return () => { cancelled = true; window.clearTimeout(t) }
   }, [query, familleMacro, famille, depot, dispoFiltre, filtresActifs])
 
-  // ── Échelons de disponibilité pour les références affichées ────────────
-  const [echelonsParRef, setEchelonsParRef] = useState<Record<string, EchelonsRef>>({})
-  const [echelonsLoading, setEchelonsLoading] = useState(false)
-  const refsResultats = useMemo(() => Array.from(new Set((results || []).map((r) => r.reference_article))), [results])
+  // Une ligne par référence (le RPC peut renvoyer une ligne par dépôt).
+  const lignes = useMemo(() => {
+    const m = new Map<string, StockRow>()
+    for (const r of results || []) if (!m.has(r.reference_article)) m.set(r.reference_article, r)
+    return Array.from(m.values())
+  }, [results])
+  const refsResultats = useMemo(() => lignes.map((r) => r.reference_article), [lignes])
   const refsResultatsKey = refsResultats.join('|')
 
+  // ── Projections par référence (une requête paginée par source et par lot) ──
+  const [projParRef, setProjParRef] = useState<Record<string, RefProjection>>({})
+  const [projLoading, setProjLoading] = useState(false)
+  const [projErreur, setProjErreur] = useState<string | null>(null)
+
   useEffect(() => {
-    if (refsResultats.length === 0) { setEchelonsParRef({}); return }
+    if (refsResultats.length === 0) { setProjLoading(false); return }
     let cancelled = false
-    setEchelonsLoading(true)
-    async function chargerEchelons() {
-      const out: Record<string, EchelonsRef> = {}
-      const TAILLE = 100
+    setProjLoading(true)
+    setProjErreur(null)
+    async function charger() {
+      const TAILLE = 50
       for (let i = 0; i < refsResultats.length; i += TAILLE) {
         const lot = refsResultats.slice(i, i + TAILLE)
-        const [stockRes, recRes, couvRes] = await Promise.all([
-          supabase.from('v_stock_articles_latest').select('reference_article,stock_disponible').in('reference_article', lot),
-          supabase.from('v_couverture_stock_receptions').select('reference_article,date_reception_retenue,quantite_attendue').in('reference_article', lot),
-          supabase.from('v_portefeuille_couverture_stock').select('reference_article,date_livraison,quantite,stock_disponible,rang_service').in('reference_article', lot).order('rang_service', { ascending: true }),
-        ])
-        if (cancelled) return
-        if (stockRes.error || recRes.error || couvRes.error) continue
-        const stockParRef = new Map<string, number>()
-        for (const s of (stockRes.data || []) as any[]) stockParRef.set(s.reference_article, toNumber(s.stock_disponible))
-        const recParRef = new Map<string, Array<{ date: string; q: number }>>()
-        for (const r of (recRes.data || []) as any[]) {
-          const q = toNumber(r.quantite_attendue)
-          if (q <= 0) continue
-          const l = recParRef.get(r.reference_article) || []
-          l.push({ date: String(r.date_reception_retenue).slice(0, 10), q })
-          recParRef.set(r.reference_article, l)
-        }
-        const cdcParRef = new Map<string, Array<{ date: string | null; q: number }>>()
-        const stockCouvParRef = new Map<string, number>()
-        for (const c of (couvRes.data || []) as any[]) {
-          const l = cdcParRef.get(c.reference_article) || []
-          l.push({ date: c.date_livraison ? String(c.date_livraison).slice(0, 10) : null, q: toNumber(c.quantite) })
-          cdcParRef.set(c.reference_article, l)
-          if (!stockCouvParRef.has(c.reference_article)) stockCouvParRef.set(c.reference_article, toNumber(c.stock_disponible))
-        }
-        for (const ref of lot) {
-          const stock0 = stockCouvParRef.get(ref) ?? stockParRef.get(ref) ?? 0
-          const recs = recParRef.get(ref) || []
-          const cdcs = cdcParRef.get(ref) || []
-          const events = projeterLeger(stock0, recs, cdcs)
-          out[ref] = {
-            echelons: calculerEchelons(stock0, events, 3),
-            stockFinal: events.length > 0 ? events[events.length - 1].stockApres : stock0,
-            receptionsAttendues: recs.reduce((s, r) => s + r.q, 0),
-            besoins: cdcs.reduce((s, c) => s + c.q, 0),
+        try {
+          const [stockRows, recRows, couvRows] = await Promise.all([
+            fetchAll<any>((from, to) => supabase.from('v_stock_articles_latest')
+              .select('reference_article,stock_disponible,stock_reel,stock_a_terme')
+              .in('reference_article', lot).order('reference_article').range(from, to)),
+            fetchAll<any>((from, to) => supabase.from('v_couverture_stock_receptions')
+              .select('reference_article,ligne_cdf_id,numero_cdf,date_reception_retenue,quantite_attendue,hypothese_reception')
+              .in('reference_article', lot).order('reference_article').order('date_reception_retenue').order('ligne_cdf_id').range(from, to)),
+            fetchAll<any>((from, to) => supabase.from('v_portefeuille_couverture_stock')
+              .select('id,reference_article,date_livraison,quantite,stock_disponible,rang_service')
+              .in('reference_article', lot).order('reference_article').order('rang_service').order('id').range(from, to)),
+          ])
+          if (cancelled) return
+          const stockParRef = new Map<string, { dispo: number; reel: number; aTerme: number }>()
+          for (const s of stockRows) stockParRef.set(s.reference_article, { dispo: toNumber(s.stock_disponible), reel: toNumber(s.stock_reel), aTerme: toNumber(s.stock_a_terme) })
+          const recParRef = new Map<string, ReceptionPeriode[]>()
+          for (const r of recRows) {
+            const q = toNumber(r.quantite_attendue)
+            if (q <= 0) continue
+            const l = recParRef.get(r.reference_article) || []
+            l.push({ date: String(r.date_reception_retenue).slice(0, 10), q, hypothese: r.hypothese_reception !== 'PREVUE', cdf: r.numero_cdf || null })
+            recParRef.set(r.reference_article, l)
           }
+          const cdcParRef = new Map<string, Array<{ date: string | null; q: number; rang: number }>>()
+          const stockCouvParRef = new Map<string, number>()
+          for (const c of couvRows) {
+            const l = cdcParRef.get(c.reference_article) || []
+            l.push({ date: c.date_livraison ? String(c.date_livraison).slice(0, 10) : null, q: toNumber(c.quantite), rang: toNumber(c.rang_service) })
+            cdcParRef.set(c.reference_article, l)
+            if (!stockCouvParRef.has(c.reference_article)) stockCouvParRef.set(c.reference_article, toNumber(c.stock_disponible))
+          }
+          const out: Record<string, RefProjection> = {}
+          for (const ref of lot) {
+            const s = stockParRef.get(ref)
+            const stock0 = stockCouvParRef.get(ref) ?? s?.dispo ?? 0
+            out[ref] = projeterReference(stock0, recParRef.get(ref) || [], cdcParRef.get(ref) || [], bornes, {
+              stockReel: s ? s.reel : null,
+              stockATerme: s ? s.aTerme : null,
+            })
+          }
+          if (!cancelled) setProjParRef((prev) => ({ ...prev, ...out }))
+        } catch (e) {
+          if (!cancelled) setProjErreur(e instanceof Error ? e.message : String(e))
         }
-        if (!cancelled) setEchelonsParRef((prev) => ({ ...prev, ...out }))
       }
-      if (!cancelled) setEchelonsLoading(false)
+      if (!cancelled) setProjLoading(false)
     }
-    void chargerEchelons()
+    void charger()
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refsResultatsKey])
 
   const refsSaisies = useMemo(() => parseReferences(query), [query])
   const isListe = refsSaisies.length > 1
+  const quantitePromise = Math.max(0, Math.floor(toNumber(quantiteCible)))
+
+  const compteurs = useMemo(() => {
+    let retard = 0
+    let sansDispo = 0
+    let qteRetard = 0
+    for (const r of lignes) {
+      const p = projParRef[r.reference_article]
+      if (!p) continue
+      if (p.nbCdcRetard > 0) { retard += 1; qteRetard += p.qteRetard }
+      if (p.echelons[0].quantite <= 0) sansDispo += 1
+    }
+    return { retard, sansDispo, qteRetard }
+  }, [lignes, projParRef])
+
+  const lignesAffichees = useMemo(() => lignes.filter((r) => {
+    if (vue === 'toutes') return true
+    const p = projParRef[r.reference_article]
+    if (!p) return true
+    return vue === 'retard' ? p.nbCdcRetard > 0 : p.echelons[0].quantite <= 0
+  }), [lignes, projParRef, vue])
 
   function reinitialiserFiltres() {
     setFamilleMacro(''); setFamille(''); setDepot(''); setDispoFiltre('tous')
   }
 
-  function selectionner(reference: string, designation: string) {
+  const selectionner = useCallback((reference: string, designation: string) => {
     setSelected({ reference, designation })
     const url = new URL(window.location.href)
     url.searchParams.set('ref', reference)
     window.history.replaceState(null, '', url.toString())
-  }
+  }, [])
+
+  const fermer = useCallback(() => {
+    setSelected(null)
+    const url = new URL(window.location.href)
+    url.searchParams.delete('ref')
+    window.history.replaceState(null, '', url.toString())
+  }, [])
+
+  const positionSelection = selected ? lignesAffichees.findIndex((r) => r.reference_article === selected.reference) : -1
+  const precedente = positionSelection > 0 ? lignesAffichees[positionSelection - 1] : null
+  const suivante = positionSelection >= 0 && positionSelection < lignesAffichees.length - 1 ? lignesAffichees[positionSelection + 1] : null
 
   return (
     <div style={styles.page}>
       <style>{`
         .stkBtn:hover { background: rgba(255,255,255,0.10); color: #fff; border-color: rgba(255,255,255,0.3); }
-        .stkRow:hover { background: rgba(255,255,255,0.07); }
-        .stkBtn:focus-visible, .stkRow:focus-visible { outline: 2px solid #F5F3EC; outline-offset: 2px; }
+        .stkBtn:focus-visible, .stkRefBtn:focus-visible { outline: 2px solid #F5F3EC; outline-offset: 2px; }
         .stkTable th { position: sticky; top: 0; background: #101A2E; z-index: 1; }
+        .stkGroup { cursor: pointer; }
+        .stkGroup tr:first-child td { border-top: 2px solid rgba(255,255,255,0.12); }
+        .stkGroup:hover td { background: rgba(255,255,255,0.035); }
+        .stkGroup.stkActive td { background: rgba(166,161,129,0.10); }
+        .stkRefBtn:hover .stkRefCode { text-decoration: underline; text-underline-offset: 3px; }
       `}</style>
 
       <div style={styles.header}>
         <div>
           <div style={styles.kicker}>Stocks &amp; logistique</div>
           <h1 style={styles.title}>Stock articles</h1>
-          <div style={styles.lead}>Stock global tous dépôts, projection sur les documents réels (commandes clients et commandes fournisseurs) et disponibilité pour une nouvelle commande.</div>
+          <div style={styles.lead}>Du stock Sage d'aujourd'hui aux échéances : commandes clients à livrer (livrables / en retard), commandes fournisseurs à recevoir, stock projeté et quantités disponibles pour de nouvelles commandes. Clique sur une référence pour ouvrir sa fiche détaillée.</div>
         </div>
       </div>
 
-      <div style={styles.layout}>
-        {/* ── Colonne gauche : filtres, recherche, résultats ── */}
-        <aside style={styles.side}>
-          <div style={styles.card}>
-            <div style={styles.cardTitle}>Rechercher</div>
+      {/* ── Recherche & filtres ── */}
+      <div style={styles.card}>
+        <div style={styles.searchGrid}>
+          <label style={styles.field}>
+            <span style={styles.fieldLabel}>Rechercher</span>
             <textarea
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Référence ou désignation — ou une liste de références (une par ligne)"
+              placeholder="Bout de référence, désignation — ou une liste de références (une par ligne)"
               rows={isListe ? 4 : 2}
               style={styles.searchArea}
             />
-            {isListe && <div style={styles.hint}>{refsSaisies.length} référence(s) détectée(s)</div>}
-
-            <div style={styles.filters}>
-              <label style={styles.field}>
-                <span style={styles.fieldLabel}>Famille macro</span>
-                <select value={familleMacro} onChange={(e) => { setFamilleMacro(e.target.value); setFamille('') }} style={styles.select}>
-                  <option value="">Toutes</option>
-                  {famillesMacroDisponibles.map((m) => <option key={m} value={m}>{m}</option>)}
-                </select>
-              </label>
-              <label style={styles.field}>
-                <span style={styles.fieldLabel}>Famille</span>
-                <select value={famille} onChange={(e) => setFamille(e.target.value)} disabled={!familleMacro} style={{ ...styles.select, opacity: familleMacro ? 1 : 0.5 }}>
-                  <option value="">Toutes</option>
-                  {famillesDuMacro.map((f) => <option key={f.famille} value={f.famille}>{f.famille}{f.libelle_famille ? ` — ${f.libelle_famille}` : ''}</option>)}
-                </select>
-              </label>
-              <label style={styles.field}>
-                <span style={styles.fieldLabel}>Dépôt</span>
-                <select value={depot} onChange={(e) => setDepot(e.target.value)} style={styles.select}>
-                  <option value="">Tous (global)</option>
-                  {DEPOTS_PROPOSES.map((d) => <option key={d} value={d}>{d}</option>)}
-                </select>
-              </label>
-              <label style={styles.field}>
-                <span style={styles.fieldLabel}>Stock dispo</span>
-                <select value={dispoFiltre} onChange={(e) => setDispoFiltre(e.target.value as 'tous' | 'oui' | 'non')} style={styles.select}>
-                  <option value="tous">Tous</option>
-                  <option value="oui">Avec stock disponible</option>
-                  <option value="non">Sans stock disponible</option>
-                </select>
-              </label>
-            </div>
-            {filtresActifs && (
-              <button type="button" className="stkBtn" onClick={reinitialiserFiltres} style={{ ...styles.ghostBtn, marginTop: 8, borderColor: 'rgba(193,104,60,0.5)', color: '#e0a685' }}>✕ Réinitialiser les filtres</button>
-            )}
-          </div>
-
-          <div style={{ ...styles.card, flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-            <div style={styles.cardTitle}>
-              Résultats{results ? ` — ${results.length}` : ''}
-              {loading ? <span style={styles.muted}> · recherche…</span> : null}
-            </div>
-            {error && <div style={styles.errorBox}>{error}</div>}
-            {results === null && !loading && (
-              <div style={styles.muted}>Tape une référence ou une désignation, ou choisis un filtre pour parcourir le stock.</div>
-            )}
-            {results && results.length === 0 && !loading && <div style={styles.muted}>Aucune référence trouvée.</div>}
-            {results && results.length > 0 && (
-              <div style={styles.resultLegend}>
-                <span style={{ color: '#8fd4a8', fontWeight: 700 }}>Promissible</span> = ce qu'on peut vendre à cette date sans mettre en rupture les commandes déjà prises (tous dépôts, réceptions attendues comprises).
-              </div>
-            )}
-            <div style={styles.resultList}>
-              {(results || []).map((r) => {
-                const actif = selected?.reference === r.reference_article
-                const e = echelonsParRef[r.reference_article]
-                return (
-                  <button
-                    key={`${r.reference_article}-${r.depot}`}
-                    type="button"
-                    className="stkRow"
-                    onClick={() => selectionner(r.reference_article, r.designation || '')}
-                    style={{ ...styles.resultRow, ...(actif ? styles.resultRowActive : {}) }}
-                  >
-                    <span style={styles.resultTop}>
-                      <span style={{ minWidth: 0, flex: 1 }}>
-                        <span style={styles.resultRef}>{r.reference_article}</span>
-                        <span style={styles.resultDesignation}>{r.designation || '—'}</span>
-                        {depot && <span style={styles.resultDepot}>Dépôt : {depotCourt(r.depot)}</span>}
-                      </span>
-                      <span style={styles.resultStats}>
-                        <span style={{ ...styles.resultStat, color: couleurDispo(r.stock_disponible) }}>{formatNumber(r.stock_disponible)}<small>dispo</small></span>
-                        <span style={styles.resultStat}>{formatNumber(r.stock_reel)}<small>réel</small></span>
-                        <span style={{ ...styles.resultStat, color: r.stock_a_terme < 0 ? '#e0a685' : undefined }}>{formatNumber(r.stock_a_terme)}<small>à terme</small></span>
-                      </span>
-                    </span>
-                    <EchelonsLigne data={e} loading={echelonsLoading && !e} />
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-        </aside>
-
-        {/* ── Zone principale : fiche article ── */}
-        <div style={styles.main}>
-          {selected ? (
-            <ArticleDetail
-              reference={selected.reference}
-              designation={selected.designation}
-              horizonMois={horizonMois}
-              onHorizonChange={setHorizonMois}
-              quantiteSimulee={quantiteSimulee}
-              onQuantiteSimuleeChange={setQuantiteSimulee}
+          </label>
+          <label style={styles.field}>
+            <span style={styles.fieldLabel}>Famille macro</span>
+            <select value={familleMacro} onChange={(e) => { setFamilleMacro(e.target.value); setFamille('') }} style={styles.select}>
+              <option value="">Toutes</option>
+              {famillesMacroDisponibles.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </label>
+          <label style={styles.field}>
+            <span style={styles.fieldLabel}>Famille</span>
+            <select value={famille} onChange={(e) => setFamille(e.target.value)} disabled={!familleMacro} style={{ ...styles.select, opacity: familleMacro ? 1 : 0.5 }}>
+              <option value="">Toutes</option>
+              {famillesDuMacro.map((f) => <option key={f.famille} value={f.famille}>{f.famille}{f.libelle_famille ? ` — ${f.libelle_famille}` : ''}</option>)}
+            </select>
+          </label>
+          <label style={styles.field}>
+            <span style={styles.fieldLabel}>Dépôt</span>
+            <select value={depot} onChange={(e) => setDepot(e.target.value)} style={styles.select}>
+              <option value="">Tous (global)</option>
+              {DEPOTS_PROPOSES.map((d) => <option key={d} value={d}>{d}</option>)}
+            </select>
+          </label>
+          <label style={styles.field}>
+            <span style={styles.fieldLabel}>Stock dispo</span>
+            <select value={dispoFiltre} onChange={(e) => setDispoFiltre(e.target.value as 'tous' | 'oui' | 'non')} style={styles.select}>
+              <option value="tous">Tous</option>
+              <option value="oui">Avec stock disponible</option>
+              <option value="non">Sans stock disponible</option>
+            </select>
+          </label>
+          <label style={styles.field}>
+            <span style={styles.fieldLabel}>Qté à promettre</span>
+            <input
+              type="number" min={0} step={1} value={quantiteCible}
+              onChange={(e) => setQuantiteCible(e.target.value)}
+              onFocus={(e) => e.target.select()}
+              placeholder="ex. 10"
+              style={{ ...styles.select, fontFamily: 'var(--font-mono)', fontWeight: 700 }}
             />
-          ) : (
-            <div style={styles.emptyMain}>
-              <div style={{ fontSize: 34 }}>📦</div>
-              <div style={{ fontWeight: 700, color: '#fff', marginTop: 8, fontSize: 16 }}>Sélectionne une référence</div>
-              <div style={{ ...styles.muted, marginTop: 6, maxWidth: 520, textAlign: 'center' }}>
-                Le stock par dépôt, la projection sur les commandes clients et fournisseurs, les commandes non complètes à leur date de livraison et la date de disponibilité pour une nouvelle commande s'affichent ici.
-              </div>
+          </label>
+        </div>
+        <div style={styles.searchFooter}>
+          {isListe && <span style={styles.hint}>{refsSaisies.length} référence(s) détectée(s)</span>}
+          {quantitePromise > 0 && <span style={styles.hint}>1ʳᵉ date à laquelle {formatNumber(quantitePromise)} pièce(s) peuvent être promises affichée pour chaque référence.</span>}
+          {filtresActifs && (
+            <button type="button" className="stkBtn" onClick={reinitialiserFiltres} style={{ ...styles.ghostBtn, borderColor: 'rgba(193,104,60,0.5)', color: C_ROUGE, marginLeft: 'auto' }}>✕ Réinitialiser les filtres</button>
+          )}
+        </div>
+      </div>
+
+      {/* ── Liste pleine largeur ── */}
+      <div style={{ ...styles.card, marginTop: 14 }}>
+        <div style={styles.cardHeaderRow}>
+          <div>
+            <div style={{ ...styles.cardTitle, marginBottom: 4 }}>
+              Par référence — du stock d'aujourd'hui aux échéances
+              {results ? <span style={styles.countTag}>{lignes.length}</span> : null}
+              {loading || projLoading ? <span style={{ ...styles.muted, textTransform: 'none', letterSpacing: 0, fontWeight: 400 }}>· chargement…</span> : null}
+            </div>
+            <div style={styles.muted}>Les colonnes « Fin … » sont des flux de la période, sauf « Stock projeté » et « Dispo nouvelles CDC » qui sont des positions à l'échéance.</div>
+          </div>
+          {lignes.length > 0 && (
+            <div style={styles.segment}>
+              {([
+                ['toutes', `Toutes · ${lignes.length}`],
+                ['retard', `CDC en retard · ${compteurs.retard}`],
+                ['sansDispo', `Sans dispo immédiate · ${compteurs.sansDispo}`],
+              ] as Array<[Vue, string]>).map(([v, label]) => (
+                <button key={v} type="button" className="stkBtn" onClick={() => setVue(v)} style={{ ...styles.segmentBtn, ...(vue === v ? styles.segmentBtnActive : {}) }}>{label}</button>
+              ))}
             </div>
           )}
         </div>
+
+        {error && <div style={styles.errorBox}>{error}</div>}
+        {projErreur && <div style={styles.errorBox}>Projection : {projErreur}</div>}
+        {results === null && !loading && (
+          <div style={styles.emptyList}>
+            <div style={{ fontSize: 30 }}>📦</div>
+            <div style={{ fontWeight: 700, color: '#fff', marginTop: 6 }}>Tape une référence, une désignation ou colle une liste</div>
+            <div style={{ ...styles.muted, marginTop: 4 }}>ou choisis un filtre pour parcourir le stock.</div>
+          </div>
+        )}
+        {results && lignes.length === 0 && !loading && <div style={styles.muted}>Aucune référence trouvée.</div>}
+
+        {lignesAffichees.length > 0 && (
+          <div style={styles.listWrap}>
+            <table className="stkTable" style={styles.table}>
+              <thead>
+                <tr>
+                  <th style={{ ...styles.th, minWidth: 230 }}>Référence</th>
+                  <th style={{ ...styles.th, minWidth: 150 }}>Ligne</th>
+                  <th style={{ ...styles.th, textAlign: 'right' }}>Stock Sage − PL</th>
+                  {Array.from({ length: nbPeriodes }, (_, k) => (
+                    <th key={k} style={{ ...styles.th, textAlign: 'right', minWidth: 104 }}>{libellePeriode(bornes, k)}</th>
+                  ))}
+                  <th style={{ ...styles.th, minWidth: 200 }}>Dispo nouvelle CDC</th>
+                </tr>
+              </thead>
+              {lignesAffichees.map((r) => {
+                const p = projParRef[r.reference_article]
+                const actif = selected?.reference === r.reference_article
+                return (
+                  <tbody
+                    key={r.reference_article}
+                    className={`stkGroup${actif ? ' stkActive' : ''}`}
+                    onClick={() => selectionner(r.reference_article, r.designation || '')}
+                  >
+                    <tr>
+                      <td rowSpan={4} style={{ ...styles.td, ...styles.refCell }}>
+                        <button type="button" className="stkRefBtn" style={styles.refBtn}>
+                          <span className="stkRefCode" style={styles.resultRef}>{r.reference_article} <span style={{ color: 'rgba(255,255,255,0.45)' }}>↗</span></span>
+                          <span style={styles.refDesignation}>{r.designation || '—'}</span>
+                        </button>
+                        <div style={styles.flags}>
+                          {p && p.nbCdcRetard > 0 && (
+                            <span style={{ ...styles.flag, borderColor: 'rgba(224,169,97,0.55)', color: C_ORANGE }}>{p.nbCdcRetard} CDC en retard · {formatNumber(p.qteRetard)} p.</span>
+                          )}
+                          {p && p.echelons[0].quantite <= 0 && (
+                            <span style={{ ...styles.flag, borderColor: 'rgba(193,104,60,0.55)', color: C_ROUGE }}>Pas de dispo immédiate</span>
+                          )}
+                          {p && p.nbCdcRetard === 0 && p.echelons[0].quantite > 0 && p.besoins > 0 && (
+                            <span style={{ ...styles.flag, borderColor: 'rgba(143,212,168,0.45)', color: C_VERT }}>CDC toutes servables</span>
+                          )}
+                        </div>
+                      </td>
+                      <td style={{ ...styles.td, ...styles.lineLabel, color: C_ORANGE }}>CDC à livrer</td>
+                      <td rowSpan={4} style={{ ...styles.td, textAlign: 'right', verticalAlign: 'top' }}>
+                        <div style={{ ...styles.bigNum, color: couleurDispo(p ? p.stock0 : r.stock_disponible) }}>{formatNumber(p ? p.stock0 : r.stock_disponible)}</div>
+                        {p && p.stockReel !== null && (
+                          <div style={styles.cellSub}>réel {formatNumber(p.stockReel)}{p.stockATerme !== null ? ` · à terme ${formatNumber(p.stockATerme)}` : ''}</div>
+                        )}
+                        {depot && <div style={{ ...styles.cellSub, color: 'rgba(166,161,129,0.95)' }}>{depotCourt(r.depot)} : {formatNumber(r.stock_disponible)}</div>}
+                      </td>
+                      {Array.from({ length: nbPeriodes }, (_, k) => (
+                        <td key={k} style={styles.tdNum}>{p ? <CelluleCdc per={p.periodes[k]} /> : <Attente />}</td>
+                      ))}
+                      <td rowSpan={4} style={{ ...styles.td, verticalAlign: 'top' }}>
+                        <DispoNouvelleCdc proj={p} quantite={quantitePromise} />
+                      </td>
+                    </tr>
+                    <tr>
+                      <td style={{ ...styles.td, ...styles.lineLabel, color: C_BLEU }}>CDF à recevoir</td>
+                      {Array.from({ length: nbPeriodes }, (_, k) => (
+                        <td key={k} style={styles.tdNum}>{p ? <CelluleCdf per={p.periodes[k]} /> : <Attente />}</td>
+                      ))}
+                    </tr>
+                    <tr>
+                      <td style={{ ...styles.td, ...styles.lineLabel }}>Stock projeté fin de période</td>
+                      {Array.from({ length: nbPeriodes }, (_, k) => (
+                        <td key={k} style={{ ...styles.tdNum, color: p && p.periodes[k].stockFin < 0 ? C_ROUGE : 'rgba(255,255,255,0.85)' }}>
+                          {p ? formatNumber(p.periodes[k].stockFin) : <Attente />}
+                        </td>
+                      ))}
+                    </tr>
+                    <tr>
+                      <td style={{ ...styles.td, ...styles.lineLabel, color: C_VERT }}>Dispo nouvelles CDC livrées d'ici à</td>
+                      {Array.from({ length: nbPeriodes }, (_, k) => (
+                        <td key={k} style={{ ...styles.tdNum, fontSize: 15, fontWeight: 800, color: p && p.periodes[k].dispoNouvelles > 0 ? C_VERT : C_ROUGE }}>
+                          {p ? formatNumber(p.periodes[k].dispoNouvelles) : <Attente />}
+                        </td>
+                      ))}
+                    </tr>
+                  </tbody>
+                )
+              })}
+            </table>
+          </div>
+        )}
+        {lignes.length > 0 && lignesAffichees.length === 0 && <div style={styles.muted}>Aucune référence ne correspond à cette vue.</div>}
+
+        {lignes.length > 0 && (
+          <div style={styles.footnote}>
+            « Stock Sage − PL » = stock tous dépôts moins les préparations de livraison, avant les CDC en retard (comptées dans la colonne « Auj. »).
+            « CDC à livrer » à la date de livraison demandée ; « en retard » = part non servie à cette date avec le stock et les réceptions connus (service dans l'ordre des dates de livraison).
+            « CDF à recevoir » à la date de réception retenue (* = CDF en retard ou sans date, supposée reçue demain).
+            « Stock projeté » = Stock Sage − PL + reçu − livré en cumul. « Dispo nouvelles CDC » = plus bas niveau du stock projeté à partir de l'échéance : ce qu'on peut promettre sans repousser une CDC déjà prise.
+          </div>
+        )}
+      </div>
+
+      {/* ── Fenêtre flottante : fiche article ── */}
+      {selected && (
+        <FenetreArticle
+          onClose={fermer}
+          onPrev={precedente ? () => selectionner(precedente.reference_article, precedente.designation || '') : null}
+          onNext={suivante ? () => selectionner(suivante.reference_article, suivante.designation || '') : null}
+          position={positionSelection >= 0 ? `${positionSelection + 1} / ${lignesAffichees.length}` : null}
+        >
+          <ArticleDetail
+            key={selected.reference}
+            reference={selected.reference}
+            designation={selected.designation}
+            horizonMois={horizonMois}
+            onHorizonChange={setHorizonMois}
+            quantiteSimulee={quantiteSimulee}
+            onQuantiteSimuleeChange={setQuantiteSimulee}
+          />
+        </FenetreArticle>
+      )}
+    </div>
+  )
+}
+
+// ── Cellules de la liste ──────────────────────────────────────────────────
+function Attente() {
+  return <span style={{ color: 'rgba(255,255,255,0.3)' }}>…</span>
+}
+
+function Point() {
+  return <span style={{ color: 'rgba(255,255,255,0.25)' }}>·</span>
+}
+
+function CelluleCdc({ per }: { per: PeriodeAgg }) {
+  if (per.cdc <= 0) return <Point />
+  const livrables = per.cdc - per.retard
+  return (
+    <>
+      <div style={{ color: C_ORANGE, fontWeight: 700 }}>− {formatNumber(per.cdc)}</div>
+      {per.retard > 0 && (
+        <>
+          <div style={{ ...styles.cellSub, color: C_ROUGE }}>dont {formatNumber(per.retard)} en retard</div>
+          {livrables > 0 && <div style={{ ...styles.cellSub, color: C_VERT }}>{formatNumber(livrables)} livrables</div>}
+        </>
+      )}
+    </>
+  )
+}
+
+function CelluleCdf({ per }: { per: PeriodeAgg }) {
+  if (per.cdf <= 0) return <Point />
+  const visibles = per.receptions.slice(0, 3)
+  const reste = per.receptions.length - visibles.length
+  return (
+    <>
+      <div style={{ color: C_BLEU, fontWeight: 700 }}>+ {formatNumber(per.cdf)}</div>
+      {visibles.map((r, i) => (
+        <div key={`${r.date}-${r.cdf}-${i}`} style={styles.cellSub} title={r.cdf ? `${r.cdf}${r.hypothese ? ' — en retard / sans date : supposée reçue demain' : ''}` : undefined}>
+          <span style={{ color: r.hypothese ? C_ORANGE : 'rgba(143,199,218,0.85)' }}>{formatJourMois(r.date)}{r.hypothese ? '*' : ''}</span> +{formatNumber(r.q)}
+        </div>
+      ))}
+      {reste > 0 && <div style={styles.cellSub}>+{reste} autre{reste > 1 ? 's' : ''}</div>}
+    </>
+  )
+}
+
+/** Colonne finale : promissible aujourd'hui, paliers datés, et 1ʳᵉ date pour la quantité à promettre. */
+function DispoNouvelleCdc({ proj, quantite }: { proj: RefProjection | undefined; quantite: number }) {
+  if (!proj) return <span style={styles.cellSub}>disponibilité…</span>
+  const auj = todayIso()
+  const [maintenant, ...paliers] = proj.echelons
+  const rien = maintenant.quantite <= 0
+  const cible = quantite > 0 ? premiereDateDisponible(proj.stock0, proj.evts, quantite) : null
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+      <div style={styles.echelonsRow}>
+        <span style={{ ...styles.echelonChip, ...(rien ? styles.echelonChipRupture : styles.echelonChipNow) }}>
+          <span style={{ ...styles.echelonQte, color: rien ? C_ROUGE : C_VERT }}>{formatNumber(maintenant.quantite)}</span>
+          <span style={styles.echelonLabel}>aujourd'hui</span>
+        </span>
+        {paliers.map((p) => (
+          <span key={p.date} style={styles.echelonChip}>
+            <span style={{ ...styles.echelonQte, color: C_BLEU }}>{formatNumber(p.quantite)}</span>
+            <span style={styles.echelonLabel}>dès {formatDateCourte(p.date)}<small style={{ opacity: 0.7 }}> · {daysBetween(auj, p.date)} j</small></span>
+          </span>
+        ))}
+      </div>
+      {paliers.length === 0 && rien && (
+        <span style={{ ...styles.cellSub, color: C_ROUGE }}>
+          {proj.receptionsAttendues > 0 ? `+${formatNumber(proj.receptionsAttendues)} attendues, absorbées par les CDC prises` : 'Aucun appro en cours'}
+          {proj.stockFinal < 0 ? ` · ${formatNumber(-proj.stockFinal)} p. manquantes` : ''}
+        </span>
+      )}
+      {paliers.length === 0 && !rien && proj.receptionsAttendues > 0 && proj.stockFinal <= maintenant.quantite && (
+        <span style={styles.cellSub}>+{formatNumber(proj.receptionsAttendues)} attendues, absorbées par les CDC prises</span>
+      )}
+      {cible && (
+        <div style={styles.cibleBox}>
+          <span style={styles.cellSub}>Pour {formatNumber(quantite)} p. :</span>{' '}
+          {cible.date === null ? (
+            <strong style={{ color: C_ROUGE }}>réappro nécessaire</strong>
+          ) : cible.date === auj ? (
+            <strong style={{ color: C_VERT }}>aujourd'hui</strong>
+          ) : (
+            <strong style={{ color: C_ORANGE }}>le {formatDateFr(cible.date)} <span style={styles.cellSub}>· {daysBetween(auj, cible.date)} j</span></strong>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Fenêtre flottante ─────────────────────────────────────────────────────
+function FenetreArticle({
+  children, onClose, onPrev, onNext, position,
+}: {
+  children: React.ReactNode
+  onClose: () => void
+  onPrev: (() => void) | null
+  onNext: (() => void) | null
+  position: string | null
+}) {
+  const handlers = useRef({ onClose, onPrev, onNext })
+  handlers.current = { onClose, onPrev, onNext }
+
+  useEffect(() => {
+    const overflowAvant = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') { handlers.current.onClose(); return }
+      const t = e.target as HTMLElement | null
+      if (t && ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName)) return
+      if (e.key === 'ArrowLeft' && handlers.current.onPrev) handlers.current.onPrev()
+      if (e.key === 'ArrowRight' && handlers.current.onNext) handlers.current.onNext()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      document.body.style.overflow = overflowAvant
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [])
+
+  return (
+    <div style={styles.overlay} onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }} role="dialog" aria-modal="true">
+      <div style={styles.modal}>
+        <div style={styles.modalBar}>
+          <span style={styles.modalKicker}>Fiche article{position ? ` · ${position}` : ''}</span>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button type="button" className="stkBtn" onClick={() => onPrev?.()} disabled={!onPrev} style={{ ...styles.ghostBtn, opacity: onPrev ? 1 : 0.35 }} title="Référence précédente (←)">‹ Précédente</button>
+            <button type="button" className="stkBtn" onClick={() => onNext?.()} disabled={!onNext} style={{ ...styles.ghostBtn, opacity: onNext ? 1 : 0.35 }} title="Référence suivante (→)">Suivante ›</button>
+            <button type="button" className="stkBtn" onClick={onClose} style={styles.ghostBtn} title="Fermer (Échap)">✕ Fermer</button>
+          </div>
+        </div>
+        <div style={styles.modalBody}>{children}</div>
       </div>
     </div>
   )
@@ -614,23 +1028,22 @@ function ArticleDetail({
       setLoading(true)
       setError(null)
       try {
-        const [depotRes, recRes, couvRes, stockRes, refRes] = await Promise.all([
+        const [depotRes, recRows, couvRows, stockRes, refRes] = await Promise.all([
           supabase.rpc('get_stock_par_depot', { p_reference_article: reference }),
-          supabase.from('v_couverture_stock_receptions').select('*').eq('reference_article', reference).order('date_reception_retenue', { ascending: true }),
-          supabase.from('v_portefeuille_couverture_stock')
+          fetchAll<any>((from, to) => supabase.from('v_couverture_stock_receptions').select('*').eq('reference_article', reference)
+            .order('date_reception_retenue', { ascending: true }).order('ligne_cdf_id').range(from, to)),
+          fetchAll<any>((from, to) => supabase.from('v_portefeuille_couverture_stock')
             .select('id,numero_document,numero_tiers,nom_tiers,representant,agence,date_creation_document,date_livraison,quantite,montant_ht,rang_service,stock_disponible,besoin_cumule,receptions_avant_livraison,stock_projete_a_date,manque_a_date,statut_couverture,date_couverture_estimee,retard_estime_jours,prochaine_reception_date,prochaine_reception_quantite,prochaine_reception_cdf,prochaine_reception_hypothese')
             .eq('reference_article', reference)
-            .order('rang_service', { ascending: true }),
+            .order('rang_service', { ascending: true }).order('id').range(from, to)),
           supabase.from('v_stock_articles_latest').select('designation,stock_disponible,stock_reel,stock_a_terme').eq('reference_article', reference).maybeSingle(),
           designation ? Promise.resolve({ data: null }) : supabase.from('ref_articles').select('designation').eq('reference_article', reference).maybeSingle(),
         ])
         if (cancelled) return
         if (depotRes.error) throw depotRes.error
-        if (recRes.error) throw recRes.error
-        if (couvRes.error) throw couvRes.error
         setDepotRows((depotRes.data || []) as DepotStockRow[])
-        setReceptions(((recRes.data || []) as any[]).map((r) => ({ ...r, quantite_attendue: toNumber(r.quantite_attendue) })) as ReceptionRow[])
-        setCouverture(((couvRes.data || []) as any[]).map((r) => ({
+        setReceptions(recRows.map((r) => ({ ...r, quantite_attendue: toNumber(r.quantite_attendue) })) as ReceptionRow[])
+        setCouverture(couvRows.map((r) => ({
           ...r,
           quantite: toNumber(r.quantite), montant_ht: toNumber(r.montant_ht), rang_service: toNumber(r.rang_service),
           stock_disponible: toNumber(r.stock_disponible), besoin_cumule: toNumber(r.besoin_cumule),
@@ -644,7 +1057,7 @@ function ArticleDetail({
         const desig = designation || String(s?.designation || (refRes as any)?.data?.designation || '')
         setDesignationResolue(desig)
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e))
+        if (!cancelled) setError(e instanceof Error ? e.message : String((e as any)?.message || e))
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -680,6 +1093,7 @@ function ArticleDetail({
   const quantite = Math.max(0, Math.floor(toNumber(quantiteSimulee)))
   const dispoNouvelleCommande = useMemo(() => premiereDateDisponible(stock0, events, quantite), [stock0, events, quantite])
   const stockFinal = events.length > 0 ? events[events.length - 1].stockApres : stock0
+  const echelons = useMemo(() => calculerEchelons(stock0, events, 4), [stock0, events])
 
   const { depotsAvecStock, depotsVides, maxDispo } = useMemo(() => {
     const rows = [...(depotRows || [])].sort((a, b) => toNumber(b.stock_disponible) - toNumber(a.stock_disponible) || a.depot.localeCompare(b.depot, 'fr'))
@@ -697,6 +1111,16 @@ function ArticleDetail({
           <div style={styles.detailDesignation}>{designationResolue || '—'}</div>
         </div>
         <div style={styles.headerActions}>
+          {!loading && (
+            <div style={styles.echelonsRow}>
+              {echelons.map((e, i) => (
+                <span key={e.date} style={{ ...styles.echelonChip, ...(i === 0 ? (e.quantite > 0 ? styles.echelonChipNow : styles.echelonChipRupture) : {}) }}>
+                  <span style={{ ...styles.echelonQte, color: i === 0 ? (e.quantite > 0 ? C_VERT : C_ROUGE) : C_BLEU }}>{formatNumber(e.quantite)}</span>
+                  <span style={styles.echelonLabel}>{i === 0 ? "promissible aujourd'hui" : `dès ${formatDateCourte(e.date)}`}</span>
+                </span>
+              ))}
+            </div>
+          )}
           <a href={`/portefeuille-livraison?couverture=non-servable`} target="_blank" rel="noopener noreferrer" className="stkBtn" style={styles.ghostBtn}>Portefeuille livraison ↗</a>
         </div>
       </div>
@@ -708,9 +1132,9 @@ function ArticleDetail({
         <Kpi label="Disponible tous dépôts" value={loading ? '…' : formatNumber(stock0)} color={couleurDispo(stock0)} big />
         <Kpi label="Réel" value={loading || !totalDepot ? '…' : formatNumber(totalDepot.stock_reel)} />
         <Kpi label="Réservé" value={loading || !totalDepot ? '…' : formatNumber(totalDepot.stock_reserve)} color={totalDepot && totalDepot.stock_reserve > 0 ? '#D69A4A' : undefined} />
-        <Kpi label="À terme (SAGE)" value={loading || !totalDepot ? '…' : formatNumber(totalDepot.stock_a_terme)} color={totalDepot && totalDepot.stock_a_terme < 0 ? '#e0a685' : undefined} />
-        <Kpi label="Réceptions attendues" value={loading ? '…' : `+ ${formatNumber(totalReceptions)}`} color="#8FC7DA" sub={receptionsAvecHypothese > 0 ? `${receptionsAvecHypothese} CDF en retard / sans date → demain` : `${receptions.length} ligne(s) CDF`} />
-        <Kpi label="Besoins CDC fermes" value={loading ? '…' : `− ${formatNumber(totalBesoins)}`} color="#E0A961" sub={`${couverture.length} ligne(s) · ${nonCompletes.length} non complète(s)`} />
+        <Kpi label="À terme (SAGE)" value={loading || !totalDepot ? '…' : formatNumber(totalDepot.stock_a_terme)} color={totalDepot && totalDepot.stock_a_terme < 0 ? C_ROUGE : undefined} />
+        <Kpi label="Réceptions attendues" value={loading ? '…' : `+ ${formatNumber(totalReceptions)}`} color={C_BLEU} sub={receptionsAvecHypothese > 0 ? `${receptionsAvecHypothese} CDF en retard / sans date → demain` : `${receptions.length} ligne(s) CDF`} />
+        <Kpi label="Besoins CDC fermes" value={loading ? '…' : `− ${formatNumber(totalBesoins)}`} color={C_ORANGE} sub={`${couverture.length} ligne(s) · ${nonCompletes.length} non complète(s)`} />
         <Kpi label="Stock projeté fin de besoins" value={loading ? '…' : formatNumber(stockFinal)} color={couleurDispo(stockFinal)} sub="après toutes réceptions et CDC connus" />
       </div>
 
@@ -737,7 +1161,7 @@ function ArticleDetail({
         <div style={styles.card}>
           <div style={styles.cardTitle}>
             Commandes non complètes à la date de livraison client
-            <span style={{ ...styles.countTag, background: nonCompletes.length > 0 ? 'rgba(193,104,60,0.25)' : 'rgba(255,255,255,0.08)', color: nonCompletes.length > 0 ? '#e0a685' : 'rgba(255,255,255,0.5)' }}>{nonCompletes.length}</span>
+            <span style={{ ...styles.countTag, background: nonCompletes.length > 0 ? 'rgba(193,104,60,0.25)' : 'rgba(255,255,255,0.08)', color: nonCompletes.length > 0 ? C_ROUGE : 'rgba(255,255,255,0.5)' }}>{nonCompletes.length}</span>
           </div>
           {loading ? <div style={styles.skeleton} /> : nonCompletes.length === 0 ? (
             <div style={styles.okBox}>✓ Toutes les commandes clients connues sur cette référence sont servables à leur date de livraison.</div>
@@ -757,18 +1181,18 @@ function ArticleDetail({
                         <div style={{ color: '#fff' }}>{r.nom_tiers || r.numero_tiers}</div>
                         <div style={styles.tdSub}>{[r.agence, r.representant].filter(Boolean).join(' · ')}</div>
                       </td>
-                      <td style={{ ...styles.td, whiteSpace: 'nowrap', color: r.date_livraison && r.date_livraison < todayIso() ? '#e0a685' : undefined }}>{formatDateFr(r.date_livraison)}</td>
+                      <td style={{ ...styles.td, whiteSpace: 'nowrap', color: r.date_livraison && r.date_livraison < todayIso() ? C_ROUGE : undefined }}>{formatDateFr(r.date_livraison)}</td>
                       <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--font-mono)' }}>{formatNumber(r.quantite)}</td>
-                      <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--font-mono)', color: '#e0a685', fontWeight: 700 }}>{formatNumber(r.manque_a_date)}</td>
+                      <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--font-mono)', color: C_ROUGE, fontWeight: 700 }}>{formatNumber(r.manque_a_date)}</td>
                       <td style={styles.td}><span style={{ ...styles.badge, borderColor: STATUT_COLOR[r.statut_couverture], color: STATUT_COLOR[r.statut_couverture] }}>{STATUT_LABEL[r.statut_couverture]}</span></td>
                       <td style={{ ...styles.td, whiteSpace: 'nowrap' }}>
                         {r.date_couverture_estimee
-                          ? <span style={{ color: '#E0A961', fontWeight: 700 }}>{formatDateFr(r.date_couverture_estimee)}{r.retard_estime_jours !== null ? <span style={styles.tdSub}> +{r.retard_estime_jours} j</span> : null}</span>
-                          : <span style={{ color: '#e0a685', fontWeight: 700 }}>Aucune réception connue</span>}
+                          ? <span style={{ color: C_ORANGE, fontWeight: 700 }}>{formatDateFr(r.date_couverture_estimee)}{r.retard_estime_jours !== null ? <span style={styles.tdSub}> +{r.retard_estime_jours} j</span> : null}</span>
+                          : <span style={{ color: C_ROUGE, fontWeight: 700 }}>Aucune réception connue</span>}
                       </td>
                       <td style={styles.td}>
                         {r.prochaine_reception_date
-                          ? <><span style={{ color: '#8FC7DA' }}>{formatDateCourte(r.prochaine_reception_date)}</span> · +{formatNumber(r.prochaine_reception_quantite || 0)} <span style={styles.tdSub}>{r.prochaine_reception_cdf}{r.prochaine_reception_hypothese ? ' (hypothèse demain)' : ''}</span></>
+                          ? <><span style={{ color: C_BLEU }}>{formatDateCourte(r.prochaine_reception_date)}</span> · +{formatNumber(r.prochaine_reception_quantite || 0)} <span style={styles.tdSub}>{r.prochaine_reception_cdf}{r.prochaine_reception_hypothese ? ' (hypothèse demain)' : ''}</span></>
                           : <span style={styles.tdSub}>—</span>}
                       </td>
                     </tr>
@@ -776,6 +1200,9 @@ function ArticleDetail({
                 </tbody>
               </table>
             </div>
+          )}
+          {!loading && nonCompletes.length > 0 && (
+            <div style={{ ...styles.tdSub, marginTop: 6 }}>Montant HT concerné : {formatMoney(nonCompletes.reduce((s, r) => s + r.montant_ht, 0))}</div>
           )}
           <div style={styles.expected}>
             <strong>Ce qui est attendu :</strong> chercher une substitution (autre référence), voir si une autre commande client peut être dépriorisée, puis contacter le client pour valider la solution et recaler la date de livraison dans SAGE / BLG.
@@ -797,7 +1224,7 @@ function ArticleDetail({
               ) : dispoNouvelleCommande.date ? (
                 <>
                   <div style={styles.simKicker}>{dispoNouvelleCommande.date === todayIso() ? 'Disponible dès' : 'Disponible à partir du'}</div>
-                  <div style={{ ...styles.simDate, color: dispoNouvelleCommande.date === todayIso() ? '#8fd4a8' : '#E0A961' }}>
+                  <div style={{ ...styles.simDate, color: dispoNouvelleCommande.date === todayIso() ? C_VERT : C_ORANGE }}>
                     {dispoNouvelleCommande.date === todayIso() ? "aujourd'hui" : formatDateFr(dispoNouvelleCommande.date)}
                   </div>
                   <div style={styles.tdSub}>
@@ -808,7 +1235,7 @@ function ArticleDetail({
               ) : (
                 <>
                   <div style={styles.simKicker}>Aucune date connue</div>
-                  <div style={{ ...styles.simDate, color: '#e0a685', fontSize: 18 }}>Réapprovisionnement nécessaire</div>
+                  <div style={{ ...styles.simDate, color: C_ROUGE, fontSize: 18 }}>Réapprovisionnement nécessaire</div>
                   <div style={styles.tdSub}>Les réceptions connues ne couvrent pas les besoins déjà pris ({formatNumber(Math.max(0, quantite - Math.min(stockFinal, dispoNouvelleCommande.niveau)))} pièce(s) manquante(s) pour servir cette commande).</div>
                 </>
               )}
@@ -830,10 +1257,10 @@ function ArticleDetail({
                     </tr>
                     {events.map((e, i) => (
                       <tr key={`${e.type}-${e.label}-${i}`} style={{ opacity: e.date > horizonFin ? 0.5 : 1 }}>
-                        <td style={{ ...styles.td, whiteSpace: 'nowrap' }}>{formatDateCourte(e.date)}{e.hypothese ? <span title="CDF en retard ou sans date : supposée reçue demain" style={{ color: '#E0A961' }}> *</span> : null}</td>
-                        <td style={styles.td}><span style={{ ...styles.badge, borderColor: e.type === 'RECEPTION' ? '#8FC7DA' : '#E0A961', color: e.type === 'RECEPTION' ? '#8FC7DA' : '#E0A961' }}>{e.type === 'RECEPTION' ? 'Réception' : 'CDC'} {e.label}</span></td>
+                        <td style={{ ...styles.td, whiteSpace: 'nowrap' }}>{formatDateCourte(e.date)}{e.hypothese ? <span title="CDF en retard ou sans date : supposée reçue demain" style={{ color: C_ORANGE }}> *</span> : null}</td>
+                        <td style={styles.td}><span style={{ ...styles.badge, borderColor: e.type === 'RECEPTION' ? C_BLEU : C_ORANGE, color: e.type === 'RECEPTION' ? C_BLEU : C_ORANGE }}>{e.type === 'RECEPTION' ? 'Réception' : 'CDC'} {e.label}</span></td>
                         <td style={styles.td}><span style={styles.tdSub}>{e.detail || '—'}</span></td>
-                        <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--font-mono)', color: e.quantite > 0 ? '#8FC7DA' : '#E0A961' }}>{e.quantite > 0 ? '+' : ''}{formatNumber(e.quantite)}</td>
+                        <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--font-mono)', color: e.quantite > 0 ? C_BLEU : C_ORANGE }}>{e.quantite > 0 ? '+' : ''}{formatNumber(e.quantite)}</td>
                         <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--font-mono)', fontWeight: 700, color: couleurDispo(e.stockApres) }}>{formatNumber(e.stockApres)}</td>
                       </tr>
                     ))}
@@ -878,7 +1305,7 @@ function ArticleDetail({
                 <tbody>
                   {receptions.map((r) => (
                     <tr key={r.ligne_cdf_id}>
-                      <td style={{ ...styles.td, whiteSpace: 'nowrap', color: r.hypothese_reception === 'PREVUE' ? '#8FC7DA' : '#E0A961', fontWeight: 700 }}>
+                      <td style={{ ...styles.td, whiteSpace: 'nowrap', color: r.hypothese_reception === 'PREVUE' ? C_BLEU : C_ORANGE, fontWeight: 700 }}>
                         {formatDateFr(r.date_reception_retenue)}
                         {r.hypothese_reception === 'RETARD' ? <span style={styles.tdSub}> · en retard, supposée demain</span> : r.hypothese_reception === 'SANS_DATE' ? <span style={styles.tdSub}> · sans date, supposée demain</span> : null}
                       </td>
@@ -907,12 +1334,11 @@ function ProjectionChart({ stock0, events, debut, fin }: { stock0: number; event
   const innerW = width - padding.left - padding.right
   const innerH = height - padding.top - padding.bottom
   const svgRef = useRef<SVGSVGElement>(null)
-  const [hover, setHover] = useState<number | null>(null) // index dans points
+  const [hover, setHover] = useState<number | null>(null)
 
   const totalJours = Math.max(1, daysBetween(debut, fin))
   const x = (iso: string) => padding.left + (Math.min(Math.max(daysBetween(debut, iso), 0), totalJours) / totalJours) * innerW
 
-  // Points de la courbe : (aujourd'hui, stock0) puis chaque événement dans l'horizon.
   const points = useMemo(() => {
     const pts: Array<{ date: string; stock: number; event: EvenementProjection | null }> = [{ date: debut, stock: stock0, event: null }]
     for (const e of events) {
@@ -929,7 +1355,6 @@ function ProjectionChart({ stock0, events, debut, fin }: { stock0: number; event
   const y = (v: number) => padding.top + innerH - ((v - minVal) / (maxVal - minVal || 1)) * innerH
   const yZero = y(0)
 
-  // Courbe en escalier : niveau constant jusqu'à l'événement suivant.
   const path = useMemo(() => {
     let d = ''
     points.forEach((p, i) => {
@@ -943,7 +1368,6 @@ function ProjectionChart({ stock0, events, debut, fin }: { stock0: number; event
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [points, dernierNiveau, maxVal, minVal, totalJours])
 
-  // Zone négative (sous zéro) : segments où le stock projeté est < 0.
   const negSegments = useMemo(() => {
     const segs: Array<{ x1: number; x2: number; ymin: number }> = []
     for (let i = 0; i < points.length; i += 1) {
@@ -957,7 +1381,6 @@ function ProjectionChart({ stock0, events, debut, fin }: { stock0: number; event
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [points, maxVal, minVal, totalJours])
 
-  // Graduations mensuelles.
   const mois = useMemo(() => {
     const out: Array<{ iso: string; label: string }> = []
     const d = new Date(`${debut}T00:00:00`)
@@ -991,8 +1414,8 @@ function ProjectionChart({ stock0, events, debut, fin }: { stock0: number; event
       <svg ref={svgRef} viewBox={`0 0 ${width} ${height}`} style={{ width: '100%', height: 'auto', cursor: 'crosshair' }} onMouseMove={handleMove} onMouseLeave={() => setHover(null)}>
         <defs>
           <linearGradient id="stk-area" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#8FC7DA" stopOpacity={0.22} />
-            <stop offset="100%" stopColor="#8FC7DA" stopOpacity={0} />
+            <stop offset="0%" stopColor={C_BLEU} stopOpacity={0.22} />
+            <stop offset="100%" stopColor={C_BLEU} stopOpacity={0} />
           </linearGradient>
         </defs>
         {ticks.map((t, i) => (
@@ -1007,24 +1430,19 @@ function ProjectionChart({ stock0, events, debut, fin }: { stock0: number; event
             <text x={x(m.iso)} y={height - 12} fontSize={10} textAnchor="middle" fill="rgba(255,255,255,0.45)">{m.label}</text>
           </g>
         ))}
-        {/* ligne zéro */}
         <line x1={padding.left} y1={yZero} x2={width - padding.right} y2={yZero} stroke="#C1683C" strokeWidth={1.2} strokeDasharray="6 4" opacity={0.8} />
-        <text x={width - padding.right} y={yZero - 4} fontSize={10} textAnchor="end" fill="#e0a685">rupture</text>
-        {/* zones négatives */}
+        <text x={width - padding.right} y={yZero - 4} fontSize={10} textAnchor="end" fill={C_ROUGE}>rupture</text>
         {negSegments.map((s, i) => (
           <rect key={i} x={s.x1} y={yZero} width={Math.max(0, s.x2 - s.x1)} height={Math.max(0, s.ymin - yZero)} fill="rgba(193,104,60,0.25)" />
         ))}
-        {/* aire sous la courbe (positive) */}
         <path d={`${path} L ${padding.left + innerW} ${yZero} L ${padding.left} ${yZero} Z`} fill="url(#stk-area)" />
-        <path d={path} fill="none" stroke="#8FC7DA" strokeWidth={2.4} strokeLinejoin="round" />
-        {/* marqueurs d'événements */}
+        <path d={path} fill="none" stroke={C_BLEU} strokeWidth={2.4} strokeLinejoin="round" />
         {points.slice(1).map((p, i) => (
           <g key={i}>
-            <circle cx={x(p.date)} cy={y(p.stock)} r={4} fill={p.event?.type === 'RECEPTION' ? '#8FC7DA' : '#E0A961'} stroke="#101A2E" strokeWidth={1.5} />
-            {p.event?.hypothese && <circle cx={x(p.date)} cy={y(p.stock)} r={7} fill="none" stroke="#E0A961" strokeDasharray="2 2" />}
+            <circle cx={x(p.date)} cy={y(p.stock)} r={4} fill={p.event?.type === 'RECEPTION' ? C_BLEU : C_ORANGE} stroke="#101A2E" strokeWidth={1.5} />
+            {p.event?.hypothese && <circle cx={x(p.date)} cy={y(p.stock)} r={7} fill="none" stroke={C_ORANGE} strokeDasharray="2 2" />}
           </g>
         ))}
-        {/* aujourd'hui */}
         <text x={padding.left} y={padding.top - 5} fontSize={10} fill="rgba(255,255,255,0.55)">aujourd'hui</text>
         {hp && (
           <line x1={hpX} y1={padding.top} x2={hpX} y2={padding.top + innerH} stroke="rgba(255,255,255,0.35)" strokeWidth={1} />
@@ -1034,7 +1452,7 @@ function ProjectionChart({ stock0, events, debut, fin }: { stock0: number; event
         <div style={{ ...styles.tooltip, left: `${Math.min(88, Math.max(6, (hpX / width) * 100))}%` }}>
           <div style={{ fontWeight: 700, color: '#fff' }}>{formatDateFr(hp.date)}</div>
           {hp.event ? (
-            <div style={{ color: hp.event.type === 'RECEPTION' ? '#8FC7DA' : '#E0A961' }}>
+            <div style={{ color: hp.event.type === 'RECEPTION' ? C_BLEU : C_ORANGE }}>
               {hp.event.type === 'RECEPTION' ? 'Réception' : 'CDC'} {hp.event.label} : {hp.event.quantite > 0 ? '+' : ''}{formatNumber(hp.event.quantite)}
               {hp.event.detail ? <div style={styles.tdSub}>{hp.event.detail}</div> : null}
               {hp.event.hypothese ? <div style={styles.tdSub}>hypothèse : CDF en retard / sans date → demain</div> : null}
@@ -1044,9 +1462,9 @@ function ProjectionChart({ stock0, events, debut, fin }: { stock0: number; event
         </div>
       )}
       <div style={styles.legend}>
-        <span style={styles.legendItem}><span style={{ ...styles.legendDot, background: '#8FC7DA' }} />Réception fournisseur</span>
-        <span style={styles.legendItem}><span style={{ ...styles.legendDot, background: '#E0A961' }} />Commande client (CDC)</span>
-        <span style={styles.legendItem}><span style={{ ...styles.legendDot, background: 'transparent', border: '1.5px dashed #E0A961' }} />Réception supposée demain (CDF en retard / sans date)</span>
+        <span style={styles.legendItem}><span style={{ ...styles.legendDot, background: C_BLEU }} />Réception fournisseur</span>
+        <span style={styles.legendItem}><span style={{ ...styles.legendDot, background: C_ORANGE }} />Commande client (CDC)</span>
+        <span style={styles.legendItem}><span style={{ ...styles.legendDot, background: 'transparent', border: `1.5px dashed ${C_ORANGE}` }} />Réception supposée demain (CDF en retard / sans date)</span>
         <span style={styles.legendItem}><span style={{ ...styles.legendDot, background: 'rgba(193,104,60,0.6)' }} />Période de rupture</span>
       </div>
     </div>
@@ -1061,37 +1479,6 @@ function Kpi({ label, value, color, sub, big }: { label: string; value: string; 
       <div style={{ ...styles.kpiValue, ...(big ? { fontSize: 36 } : {}), color: color || '#fff' }}>{value}</div>
       {sub && <div style={styles.kpiSub}>{sub}</div>}
     </div>
-  )
-}
-
-/** Ligne « promissible » d'un résultat : aujourd'hui, puis jusqu'à trois
- * paliers « Y dès dd/mm » apportés par les réceptions attendues. */
-function EchelonsLigne({ data, loading }: { data: EchelonsRef | undefined; loading: boolean }) {
-  if (loading) return <span style={styles.echelonsRow}><span style={styles.tdSub}>disponibilité…</span></span>
-  if (!data) return null
-  const auj = todayIso()
-  const [maintenant, ...paliers] = data.echelons
-  const rien = maintenant.quantite <= 0
-  const plafond = data.stockFinal
-  return (
-    <span style={styles.echelonsRow}>
-      <span style={{ ...styles.echelonChip, ...(rien ? styles.echelonChipRupture : styles.echelonChipNow) }}>
-        <span style={{ ...styles.echelonQte, color: rien ? '#e0a685' : '#8fd4a8' }}>{formatNumber(maintenant.quantite)}</span>
-        <span style={styles.echelonLabel}>aujourd'hui</span>
-      </span>
-      {paliers.map((p) => (
-        <span key={p.date} style={styles.echelonChip}>
-          <span style={{ ...styles.echelonQte, color: '#8FC7DA' }}>{formatNumber(p.quantite)}</span>
-          <span style={styles.echelonLabel}>dès {formatDateCourte(p.date)}<small style={{ opacity: 0.7 }}> · {daysBetween(auj, p.date)} j</small></span>
-        </span>
-      ))}
-      {paliers.length === 0 && data.receptionsAttendues > 0 && plafond <= maintenant.quantite && (
-        <span style={{ ...styles.echelonLabel, alignSelf: 'center' }}>+{formatNumber(data.receptionsAttendues)} attendues, absorbées par les CDC prises</span>
-      )}
-      {paliers.length === 0 && data.receptionsAttendues === 0 && rien && (
-        <span style={{ ...styles.echelonLabel, alignSelf: 'center', color: '#e0a685' }}>aucun appro en cours{data.stockFinal < 0 ? ` · ${formatNumber(-data.stockFinal)} p. manquantes` : ''}</span>
-      )}
-    </span>
   )
 }
 
@@ -1121,16 +1508,12 @@ function LigneDepot({ row, maxDispo }: { row: DepotStockRow; maxDispo: number })
 
 // ── Styles ────────────────────────────────────────────────────────────────
 const styles: Record<string, React.CSSProperties> = {
-  page: { maxWidth: 1700, margin: '0 auto', padding: '10px 4px 40px', color: '#F5F3EC', fontFamily: 'var(--font-body)' },
+  page: { maxWidth: 1800, margin: '0 auto', padding: '10px 4px 40px', color: '#F5F3EC', fontFamily: 'var(--font-body)' },
   header: { display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', marginBottom: 14 },
   kicker: { fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.24em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.5)' },
   title: { margin: '4px 0 0', fontFamily: 'var(--font-display)', fontSize: 30, fontWeight: 800, color: '#fff', letterSpacing: '-0.02em' },
-  lead: { marginTop: 4, fontSize: 13.5, color: 'rgba(255,255,255,0.6)', maxWidth: 900 },
+  lead: { marginTop: 4, fontSize: 13.5, color: 'rgba(255,255,255,0.6)', maxWidth: 1100 },
   headerActions: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
-
-  layout: { display: 'grid', gridTemplateColumns: '380px minmax(0, 1fr)', gap: 16, alignItems: 'start' },
-  side: { position: 'sticky', top: 130, display: 'flex', flexDirection: 'column', gap: 12, maxHeight: 'calc(100vh - 150px)' },
-  main: { minWidth: 0 },
 
   card: { borderRadius: 18, border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.04)', padding: 16 },
   cardTitle: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700, color: 'rgba(255,255,255,0.6)', marginBottom: 10 },
@@ -1138,38 +1521,48 @@ const styles: Record<string, React.CSSProperties> = {
   subTitle: { fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 700, color: 'rgba(255,255,255,0.5)', marginBottom: 6 },
   countTag: { display: 'inline-flex', alignItems: 'center', padding: '1px 8px', borderRadius: 999, fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700, background: 'rgba(255,255,255,0.08)', color: 'rgba(255,255,255,0.6)', letterSpacing: 0, textTransform: 'none' },
   muted: { fontSize: 12.5, color: 'rgba(255,255,255,0.45)', lineHeight: 1.45 },
-  hint: { marginTop: 6, fontSize: 11.5, color: 'rgba(166,161,129,0.9)' },
-  errorBox: { marginBottom: 12, padding: 12, borderRadius: 12, border: '1px solid rgba(193,104,60,0.35)', background: 'rgba(193,104,60,0.12)', color: '#e0a685', fontSize: 13 },
-  okBox: { padding: '12px 14px', borderRadius: 12, border: '1px solid rgba(143,212,168,0.35)', background: 'rgba(143,212,168,0.08)', color: '#8fd4a8', fontSize: 13 },
+  hint: { fontSize: 11.5, color: 'rgba(166,161,129,0.9)' },
+  errorBox: { marginBottom: 12, padding: 12, borderRadius: 12, border: '1px solid rgba(193,104,60,0.35)', background: 'rgba(193,104,60,0.12)', color: C_ROUGE, fontSize: 13 },
+  okBox: { padding: '12px 14px', borderRadius: 12, border: '1px solid rgba(143,212,168,0.35)', background: 'rgba(143,212,168,0.08)', color: C_VERT, fontSize: 13 },
   skeleton: { height: 120, borderRadius: 12, background: 'rgba(255,255,255,0.05)' },
 
-  searchArea: { width: '100%', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '10px 12px', fontSize: 14, resize: 'vertical', fontFamily: 'inherit', boxSizing: 'border-box' },
-  filters: { marginTop: 10, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 },
+  searchGrid: { display: 'grid', gridTemplateColumns: 'minmax(300px, 2.2fr) repeat(5, minmax(140px, 1fr))', gap: 10, alignItems: 'start' },
+  searchFooter: { marginTop: 8, display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', minHeight: 4 },
+  searchArea: { width: '100%', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '8px 12px', fontSize: 14, resize: 'vertical', fontFamily: 'inherit', boxSizing: 'border-box' },
   field: { display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 },
   fieldLabel: { fontSize: 11, color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 700 },
-  select: { height: 36, borderRadius: 9, border: '1px solid rgba(255,255,255,0.15)', background: '#141A26', color: '#fff', padding: '0 8px', fontSize: 13, fontFamily: 'inherit', width: '100%' },
+  select: { height: 36, borderRadius: 9, border: '1px solid rgba(255,255,255,0.15)', background: '#141A26', color: '#fff', padding: '0 8px', fontSize: 13, fontFamily: 'inherit', width: '100%', boxSizing: 'border-box' },
   input: { height: 40, width: 120, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 18, fontWeight: 700, fontFamily: 'var(--font-mono)', boxSizing: 'border-box' },
   ghostBtn: { display: 'inline-flex', alignItems: 'center', padding: '8px 12px', borderRadius: 10, border: '1px solid rgba(255,255,255,0.18)', background: 'transparent', color: 'rgba(255,255,255,0.78)', fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap', textDecoration: 'none' },
   linkBtn: { marginTop: 4, alignSelf: 'flex-start', background: 'none', border: 'none', padding: '4px 0', fontSize: 12, color: 'rgba(255,255,255,0.45)', textDecoration: 'underline', textUnderlineOffset: 3, cursor: 'pointer', fontFamily: 'inherit' },
 
-  resultLegend: { marginTop: 4, fontSize: 11, color: 'rgba(255,255,255,0.45)', lineHeight: 1.4 },
-  resultList: { flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 },
-  resultRow: { display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: 7, padding: '9px 11px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)', color: '#F5F3EC', cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit', width: '100%' },
-  resultTop: { display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 },
+  emptyList: { minHeight: 220, borderRadius: 14, border: '1px dashed rgba(255,255,255,0.18)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24, textAlign: 'center' },
+  listWrap: { maxHeight: 'calc(100vh - 230px)', minHeight: 300, overflow: 'auto', borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)' },
+  refCell: { verticalAlign: 'top', maxWidth: 300 },
+  refBtn: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 2, background: 'none', border: 'none', padding: 0, color: 'inherit', cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit', maxWidth: '100%' },
+  refDesignation: { fontSize: 11.5, color: 'rgba(255,255,255,0.55)', lineHeight: 1.35, whiteSpace: 'normal' },
+  flags: { marginTop: 8, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4 },
+  flag: { display: 'inline-flex', padding: '2px 8px', borderRadius: 999, border: '1px solid', fontSize: 10.5, fontWeight: 700, whiteSpace: 'nowrap' },
+  lineLabel: { fontSize: 12, whiteSpace: 'nowrap', color: 'rgba(255,255,255,0.7)' },
+  tdNum: { padding: '7px 10px', borderBottom: '1px solid rgba(255,255,255,0.05)', textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 13, verticalAlign: 'top', color: 'rgba(255,255,255,0.85)', whiteSpace: 'nowrap' },
+  bigNum: { fontFamily: 'var(--font-mono)', fontSize: 24, fontWeight: 800, lineHeight: 1.1 },
+  cellSub: { fontSize: 10.5, color: 'rgba(255,255,255,0.5)', fontFamily: 'var(--font-mono)', lineHeight: 1.4, whiteSpace: 'nowrap' },
+  cibleBox: { marginTop: 2, padding: '5px 8px', borderRadius: 8, border: '1px solid rgba(166,161,129,0.4)', background: 'rgba(166,161,129,0.10)', fontSize: 12.5 },
+  footnote: { marginTop: 10, fontSize: 11.5, color: 'rgba(255,255,255,0.45)', lineHeight: 1.5 },
+
   echelonsRow: { display: 'flex', flexWrap: 'wrap', gap: 5, alignItems: 'stretch' },
   echelonChip: { display: 'inline-flex', flexDirection: 'column', padding: '3px 8px', borderRadius: 8, border: '1px solid rgba(143,199,218,0.35)', background: 'rgba(143,199,218,0.08)', lineHeight: 1.15 },
   echelonChipNow: { borderColor: 'rgba(143,212,168,0.45)', background: 'rgba(143,212,168,0.10)' },
   echelonChipRupture: { borderColor: 'rgba(193,104,60,0.5)', background: 'rgba(193,104,60,0.14)' },
-  echelonQte: { fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 700, color: '#8fd4a8' },
+  echelonQte: { fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 700, color: C_VERT },
   echelonLabel: { fontSize: 10, color: 'rgba(255,255,255,0.55)', whiteSpace: 'nowrap' },
-  resultRowActive: { borderColor: 'rgba(166,161,129,0.7)', background: 'rgba(166,161,129,0.16)' },
-  resultRef: { display: 'block', fontFamily: 'var(--font-mono)', fontSize: 13.5, fontWeight: 700, color: '#fff' },
-  resultDesignation: { display: 'block', fontSize: 11.5, color: 'rgba(255,255,255,0.55)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
-  resultDepot: { display: 'block', fontSize: 10.5, color: 'rgba(166,161,129,0.9)' },
-  resultStats: { display: 'flex', gap: 10, flexShrink: 0 },
-  resultStat: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', fontFamily: 'var(--font-mono)', fontSize: 13.5, fontWeight: 700, color: '#fff', lineHeight: 1.1 },
+  resultRef: { display: 'block', fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 800, color: '#fff' },
 
-  emptyMain: { minHeight: 420, borderRadius: 18, border: '1px dashed rgba(255,255,255,0.18)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 28 },
+  overlay: { position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(5,9,18,0.72)', backdropFilter: 'blur(3px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2vh 2vw' },
+  modal: { width: 'min(1560px, 96vw)', maxHeight: '96vh', display: 'flex', flexDirection: 'column', borderRadius: 20, border: '1px solid rgba(255,255,255,0.14)', background: '#101A2E', boxShadow: '0 30px 80px rgba(0,0,0,0.55)', overflow: 'hidden' },
+  modalBar: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '10px 16px', borderBottom: '1px solid rgba(255,255,255,0.10)', background: '#0D1526' },
+  modalKicker: { fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.18em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.5)' },
+  modalBody: { overflow: 'auto', padding: 18 },
 
   detail: { display: 'flex', flexDirection: 'column', gap: 14 },
   detailHeader: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' },
@@ -1183,9 +1576,9 @@ const styles: Record<string, React.CSSProperties> = {
   kpiValue: { marginTop: 4, fontFamily: 'var(--font-mono)', fontSize: 24, fontWeight: 700, lineHeight: 1.1, whiteSpace: 'nowrap' },
   kpiSub: { marginTop: 4, fontSize: 11, color: 'rgba(255,255,255,0.45)', lineHeight: 1.35 },
 
-  segment: { display: 'flex', gap: 4, padding: 4, borderRadius: 12, border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(255,255,255,0.04)', flexShrink: 0 },
+  segment: { display: 'flex', gap: 4, padding: 4, borderRadius: 12, border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(255,255,255,0.04)', flexShrink: 0, flexWrap: 'wrap' },
   segmentBtn: { padding: '6px 12px', borderRadius: 9, border: '1px solid transparent', background: 'transparent', color: 'rgba(255,255,255,0.65)', fontFamily: 'inherit', fontSize: 12.5, fontWeight: 700, cursor: 'pointer' },
-  segmentBtnActive: { background: 'rgba(75,146,172,0.22)', borderColor: 'rgba(75,146,172,0.55)', color: '#8FC7DA' },
+  segmentBtnActive: { background: 'rgba(75,146,172,0.22)', borderColor: 'rgba(75,146,172,0.55)', color: C_BLEU },
 
   twoCols: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 14, alignItems: 'start' },
 
