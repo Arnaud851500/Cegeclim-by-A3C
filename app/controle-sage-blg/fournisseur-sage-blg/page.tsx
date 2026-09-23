@@ -2741,7 +2741,7 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
           </div>
         )}
         <button type="button" onClick={() => setShowExplanation(!showExplanation)} className="mb-3 text-[12px] font-semibold text-[#B4761A] hover:underline">
-          {showExplanation ? '▼ Masquer l'explication' : '▶ Voir l'explication du calcul'}
+          {showExplanation ? '▼ Masquer l explication' : '▶ Voir l explication du calcul'}
         </button>
           </div>
           <div className="flex flex-col items-end gap-2">
