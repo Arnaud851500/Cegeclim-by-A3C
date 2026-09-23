@@ -19,6 +19,15 @@ import { useAccess } from '@/components/AccessContext'
 // cee_dossier_pieces, note dans cee_notes_dimensionnement le cas échéant,
 // état / points bloquants du dossier mis à jour. L'avancement d'étape reste
 // une décision humaine sur la fiche dossier.
+//
+// Sélecteur de fichiers (23/09/2026) : l'ouverture de la fenêtre système fait
+// perdre le focus à l'onglet ; au retour, la session Supabase se rafraîchit et
+// AccessContext repasse brièvement en "loading". La page remplaçait alors tout
+// son contenu par un écran vide, ce qui détruisait le champ fichier : le choix
+// du fichier arrivait sur un élément supprimé et rien ne se passait (le
+// glisser-déposer, sans perte de focus, n'était pas touché). Désormais, une
+// fois l'accès confirmé, la page reste affichée pendant ces rechargements, et
+// la zone de dépôt est un <label> natif relié au champ fichier.
 
 type TypePieceId = 'avis_imposition' | 'note_dimensionnement' | 'devis' | 'facture'
 
@@ -52,6 +61,8 @@ const MOTS_CLES_PIECE: Record<TypePieceId, string[][]> = {
 }
 
 const ETAT_LABEL: Record<string, string> = { pret: 'Prêt', a_corriger: 'À corriger', bloque: 'Bloqué' }
+
+const FILE_INPUT_ID = 'controle-pieces-fichier'
 
 type ChecklistItem = { id: string; label: string; hint?: string }
 
@@ -294,9 +305,15 @@ export default function ControlePiecesCeePage() {
   const router = useRouter()
   const { rights, email, loading: accessLoading } = useAccess()
 
+  // Accès confirmé une fois pour toutes : les rechargements ultérieurs
+  // d'AccessContext (rafraîchissement de session au retour de focus) ne
+  // doivent plus démonter la page, sinon le champ fichier disparaît pendant
+  // que la fenêtre de sélection est ouverte.
+  const [accesAccorde, setAccesAccorde] = useState(false)
   useEffect(() => {
     if (accessLoading) return
-    if (!rights.can_financement) router.replace('/unauthorized')
+    if (rights.can_financement) setAccesAccorde(true)
+    else router.replace('/unauthorized')
   }, [accessLoading, rights.can_financement, router])
 
   const [pdfReady, setPdfReady] = useState(false)
@@ -937,7 +954,7 @@ export default function ControlePiecesCeePage() {
     return `${d.reference} · ${d.pro_raison_sociale}${d.numero_tiers ? ` (${d.numero_tiers})` : ''} · ${etapeLibelle(d.statut)} · ${ETAT_LABEL[d.etat] || d.etat}`
   }
 
-  if (accessLoading || !rights.can_financement) {
+  if (!accesAccorde) {
     return <div className="min-h-screen bg-[#F4F3F0]" />
   }
 
@@ -1009,10 +1026,29 @@ export default function ControlePiecesCeePage() {
               </div>
               <div className="grid gap-4 p-4">
                 <div className="relative">
-                  <div
-                    role="button"
+                  {/* Champ fichier natif, toujours présent dans la page ; la zone
+                      de dépôt ci-dessous est son <label> : un clic ouvre la
+                      fenêtre de sélection sans passer par du JavaScript. */}
+                  <input
+                    ref={fileInputRef}
+                    id={FILE_INPUT_ID}
+                    type="file"
+                    multiple
+                    accept="application/pdf,image/jpeg,image/png,image/webp"
+                    style={{ position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, opacity: 0, overflow: 'hidden', clip: 'rect(0 0 0 0)', border: 0 }}
+                    tabIndex={-1}
+                    onChange={(e) => {
+                      const input = e.currentTarget
+                      // Copie de la liste AVANT la remise à zéro du champ (qui
+                      // permet de re-sélectionner le même fichier ensuite).
+                      const choisis = input.files ? Array.from(input.files) : []
+                      input.value = ''
+                      addFiles(choisis, 'clic')
+                    }}
+                  />
+                  <label
+                    htmlFor={FILE_INPUT_ID}
                     tabIndex={0}
-                    onClick={() => fileInputRef.current?.click()}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' || e.key === ' ') {
                         e.preventDefault()
@@ -1048,25 +1084,13 @@ export default function ControlePiecesCeePage() {
                       }
                       addFiles(files, 'dépôt')
                     }}
-                    className={`grid cursor-pointer justify-items-center gap-1 rounded-xl border-2 border-dashed p-6 text-center transition ${
+                    className={`grid cursor-pointer justify-items-center gap-1 rounded-xl border-2 border-dashed p-6 text-center transition focus:outline-none focus-visible:border-[#B4761A] ${
                       dragging ? 'border-[#B4761A] bg-[#FAF7EE]' : 'border-[#D8D3C8] hover:border-[#B4761A] hover:bg-[#FAF7EE]'
                     }`}
                   >
                     <span className="pointer-events-none text-sm font-semibold text-slate-900">{dragging ? 'Relâchez pour ajouter' : 'Déposer le document'}</span>
                     <span className="pointer-events-none text-xs text-slate-500">Glissez-déposez ou cliquez · PDF, JPG ou PNG · plusieurs fichiers possibles</span>
-                  </div>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    multiple
-                    accept="application/pdf,image/jpeg,image/png,image/webp"
-                    style={{ position: 'absolute', width: 1, height: 1, opacity: 0, overflow: 'hidden', pointerEvents: 'none' }}
-                    tabIndex={-1}
-                    onChange={(e) => {
-                      addFiles(e.target.files, 'clic')
-                      e.target.value = ''
-                    }}
-                  />
+                  </label>
                   {dropDebug && <div className="mt-1.5 font-mono text-[11px] text-slate-500">{dropDebug}</div>}
                 </div>
 
