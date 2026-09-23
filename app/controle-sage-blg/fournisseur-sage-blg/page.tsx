@@ -2436,6 +2436,9 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
   /** Fichiers commande fournisseur : un Excel (Référence ; Qté ; Date de livraison souhaitée)
    * par fournisseur × date de livraison souhaitée, sur les lignes filtrées dont la quantité
    * retenue (ou à défaut la proposition) est > 0. Nom : « code nom fournisseur JJ-MM-AAAA.xlsx ». */
+  /** Fichiers commande fournisseur : un CSV avec point-virgule (Référence ; Qté ; Date de livraison souhaitée)
+   * par fournisseur × date de livraison souhaitée, sur les lignes filtrées dont la quantité
+   * retenue (ou à défaut la proposition) est > 0. Nom : « code nom fournisseur JJ-MM-AAAA.csv ». */
   async function exporterFichiersCommande() {
     setExportCommandesEnCours(true); setExportCommandesMsg(null)
     try {
@@ -2450,21 +2453,31 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
       })
       if (groupes.size === 0) { setExportCommandesMsg('Aucune ligne avec une quantité retenue ou proposée > 0 dans le jeu filtré.'); return }
       const fichiers = Array.from(groupes.values()).sort((x, y) => x.fournisseur.localeCompare(y.fournisseur) || x.date.localeCompare(y.date))
+      
+      // Fonction utilitaire pour échapper les valeurs CSV
+      const echapperCsv = (val: string | number): string => {
+        const str = String(val)
+        if (str.includes(';') || str.includes('"') || str.includes('\n')) {
+          return `"${str.replace(/"/g, '""')}"`
+        }
+        return str
+      }
+      
       for (const g of fichiers) {
-        const wb = new ExcelJS.Workbook()
-        const ws = wb.addWorksheet('Commande')
-        ws.addRow(['Référence', 'Qté', 'Date de livraison souhaitée']).font = { bold: true }
         const [yy, mm, dd] = g.date.split('-').map(Number)
+        const ligneEntete = 'Référence;Quantité;Date de livraison souhaitée'
+        const lignes = [ligneEntete]
+        
         g.lignes.sort((x, y) => x.ref.localeCompare(y.ref)).forEach((l) => {
-          const row = ws.addRow([l.ref, l.qte, new Date(Date.UTC(yy, mm - 1, dd))])
-          row.getCell(3).numFmt = 'dd/mm/yyyy'
+          const dateStr = `${String(dd).padStart(2, '0')}/${String(mm).padStart(2, '0')}/${yy}`
+          lignes.push(`${echapperCsv(l.ref)};${echapperCsv(l.qte)};${echapperCsv(dateStr)}`)
         })
-        ws.columns = [{ width: 24 }, { width: 10 }, { width: 24 }]
-        const buffer = await wb.xlsx.writeBuffer()
-        const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+        
+        const contenuCsv = lignes.join('\n')
+        const blob = new Blob([contenuCsv], { type: 'text/csv;charset=utf-8' })
         const url = URL.createObjectURL(blob)
         const nomPropre = `${g.fournisseur} ${g.nom}`.replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim()
-        const link = document.createElement('a'); link.href = url; link.download = `${nomPropre} ${String(dd).padStart(2, '0')}-${String(mm).padStart(2, '0')}-${yy}.xlsx`
+        const link = document.createElement('a'); link.href = url; link.download = `${nomPropre} ${String(dd).padStart(2, '0')}-${String(mm).padStart(2, '0')}-${yy}.csv`
         document.body.appendChild(link); link.click(); link.remove()
         setTimeout(() => URL.revokeObjectURL(url), 10000)
         if (fichiers.length > 1) await new Promise((r) => setTimeout(r, 500))   // le navigateur peut demander l'autorisation de téléchargements multiples
@@ -2474,6 +2487,7 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
       setExportCommandesMsg('Erreur fichiers commande : ' + messageErreur(e))
     } finally { setExportCommandesEnCours(false) }
   }
+
 
   async function enregistrerParams() {
     const next = parametres.map((p) => ({ ...p, valeur: Number(paramsDraft[p.cle] ?? p.valeur) }))
