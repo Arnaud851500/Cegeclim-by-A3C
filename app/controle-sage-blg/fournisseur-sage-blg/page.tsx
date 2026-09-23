@@ -2907,8 +2907,8 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
                     <td className={`px-2 py-1.5 text-right font-semibold ${p.methode === 'couverture' && p.couvReception !== null && p.couvReception < p.couvMin ? 'text-red-700' : 'text-[#111820]'}`} title={`Stock à réception ${fmtNum(p.stockReception, 1)} / μ ${p.muSource === '3m' ? '3 mois' : '12 mois'} ${fmtNum(p.mu, 1)} = ${p.couvReception === null ? '—' : fmtNum(p.couvReception, 1) + ' mois'}${p.methode === 'couverture' ? `\nMin ${fmtNum(p.couvMin, 1)} · cible ${fmtNum(p.couvCible, 1)} mois` : ''}`}>
                       {p.couvReception === null ? '—' : fmtNum(p.couvReception, 1)}
                     </td>
-                    <td className="px-2 py-1.5 text-right text-[#8A8474]">{fmtNum(a.sage_stock_min_fms)}</td>
-                    <td className={`px-2 py-1.5 text-right ${ecart ? 'bg-red-50 font-semibold text-red-800' : 'text-[#8A8474]'}`}>{fmtNum(a.blg_stock_min_fms)}</td>
+                    {!colonnesMasquees.has('min_sage') && <td className="px-2 py-1.5 text-right text-[#8A8474]">{fmtNum(a.sage_stock_min_fms)}</td>}
+                    {!colonnesMasquees.has('min_blg') && <td className={`px-2 py-1.5 text-right ${ecart ? 'bg-red-50 font-semibold text-red-800' : 'text-[#8A8474]'}`}>{fmtNum(a.blg_stock_min_fms)}</td>}
                     <td className="px-2 py-1.5 text-right text-[#8A8474]">{fmtNum(a.calc_stock_securite)}</td>
                     <td className="px-2 py-1.5 text-right font-bold">{fmtNum(a.calc_stock_min)}</td>
                     <td className="px-2 py-1.5 text-right text-[#8A8474]">{fmtNum(a.calc_stock_max)}</td>
