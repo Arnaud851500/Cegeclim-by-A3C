@@ -631,16 +631,34 @@ export default function TodoPage() {
     return groups
   }, [filteredRows, categories, byDue])
 
-  /** Colonnes façon Trello : par catégorie, par personne concernée ou par projet / équipe. */
+  /**
+   * Colonnes façon Trello : par catégorie, par personne concernée ou par projet / équipe.
+   *
+   * MODIF 2026-09-24 (demande d'Arnaud) : en présentation par catégorie, les
+   * catégories vides (y compris « Sans catégorie ») ne sont plus affichées.
+   * Pendant un glisser-déposer, les catégories actives vides réapparaissent
+   * pour rester des cibles de dépôt, puis disparaissent au lâcher.
+   * En présentation par personne concernée, seules les personnes ayant au
+   * moins une tâche affichée forment une colonne (déjà le cas).
+   */
   const columnGroups = useMemo(() => {
     const sorted = [...filteredRows].sort(byDue)
     const cols: Array<{ key: string; label: string; color: string; rows: TodoRow[] }> = []
+    const dragging = dragId !== null
 
     if (columnGroup === 'category') {
       categories
         .filter((cat) => cat.is_active || sorted.some((row) => row.category_id === cat.id))
-        .forEach((cat) => cols.push({ key: cat.id, label: cat.name, color: cat.color, rows: sorted.filter((r) => r.category_id === cat.id) }))
-      cols.push({ key: NO_CATEGORY, label: 'Sans catégorie', color: '#B8B2A5', rows: sorted.filter((r) => !r.category_id) })
+        .forEach((cat) => {
+          const catRows = sorted.filter((r) => r.category_id === cat.id)
+          if (catRows.length > 0 || (dragging && cat.is_active)) {
+            cols.push({ key: cat.id, label: cat.name, color: cat.color, rows: catRows })
+          }
+        })
+      const noneRows = sorted.filter((r) => !r.category_id)
+      if (noneRows.length > 0 || dragging) {
+        cols.push({ key: NO_CATEGORY, label: 'Sans catégorie', color: '#B8B2A5', rows: noneRows })
+      }
     } else if (columnGroup === 'team') {
       teams
         .filter((team) => team.is_active || sorted.some((row) => row.team_id === team.id))
@@ -667,7 +685,7 @@ export default function TodoPage() {
     }
 
     return cols
-  }, [filteredRows, columnGroup, categories, teams, byDue])
+  }, [filteredRows, columnGroup, categories, teams, byDue, dragId])
 
   const stats = useMemo(() => {
     const open = visibleRows.filter((row) => isOpenStatus(row.status))
