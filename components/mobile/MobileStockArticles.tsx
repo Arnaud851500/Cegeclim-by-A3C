@@ -26,6 +26,18 @@ import { supabase } from '@/lib/supabaseClient'
 //   avec le dispo en gros (vert/gris/rouge selon signe), une barre
 //   proportionnelle au dépôt le mieux fourni, réel/réservé en secondaire,
 //   dépôts à zéro repliés par défaut.
+//
+//   ÉVOLUTION (2026-09-24, demandé par Arnaud) :
+//   - le libellé « Dispo » devient « Physique - PL » (stock réel moins
+//     préparations de livraison, tel que remonté par SAGE) sur la liste, le
+//     bandeau total et le titre de la section par dépôt ;
+//   - nouveau bloc « Pour une nouvelle commande » dans la fiche : quantité
+//     livrable immédiatement sans mettre en rupture les commandes clients
+//     déjà en portefeuille, et à défaut la première date de livraison client
+//     possible avec la quantité alors promissible. Calcul côté base par la
+//     RPC get_stock_dispo_nouvelle_commande (même moteur que l'écran
+//     « Disponibilité par groupe d'articles » : stock + réceptions CDF −
+//     CDC à leur date de livraison, solde de fin de journée).
 // ─────────────────────────────────────────────────────────────────────────
 
 type StockRow = {
@@ -47,6 +59,13 @@ type DepotStockRow = {
   stock_prepare: number
   stock_disponible: number
   stock_a_terme: number
+}
+
+type DispoNouvelleCommande = {
+  stock_dispo: number
+  qte_immediate: number
+  date_prochaine_dispo: string | null
+  qte_prochaine_dispo: number | null
 }
 
 type FamilleRow = { famille: string; famille_macro: string; libelle_famille: string | null }
@@ -320,7 +339,7 @@ export default function MobileStockArticles({
                 <div style={{ fontSize: 10.5, color: 'rgba(166,161,129,0.9)', marginBottom: 6 }}>Dépôt : {r.depot}</div>
               )}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
-                <MiniStat label="Dispo" value={formatNumber(r.stock_disponible)} accent={couleurDispo(r.stock_disponible)} />
+                <MiniStat label="Physique - PL" value={formatNumber(r.stock_disponible)} accent={couleurDispo(r.stock_disponible)} />
                 <MiniStat label="Réel" value={formatNumber(r.stock_reel)} />
                 <MiniStat
                   label="À terme"
@@ -529,6 +548,35 @@ function StockArticleDetailSheet({
   const [livraisonsError, setLivraisonsError] = useState<string | null>(null)
   const [livraisonsOuvertes, setLivraisonsOuvertes] = useState(false)
 
+  const [dispoNC, setDispoNC] = useState<DispoNouvelleCommande | null>(null)
+  const [dispoNCLoading, setDispoNCLoading] = useState(true)
+  const [dispoNCError, setDispoNCError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    async function loadDispoNC() {
+      setDispoNCLoading(true)
+      setDispoNCError(null)
+      const { data, error } = await supabase.rpc('get_stock_dispo_nouvelle_commande', { p_reference: reference })
+      if (cancelled) return
+      if (error) {
+        setDispoNCError(error.message)
+        setDispoNC(null)
+      } else {
+        const d = (data || {}) as Record<string, unknown>
+        setDispoNC({
+          stock_dispo: toNumber(d.stock_dispo),
+          qte_immediate: toNumber(d.qte_immediate),
+          date_prochaine_dispo: (d.date_prochaine_dispo as string | null) || null,
+          qte_prochaine_dispo: d.qte_prochaine_dispo === null || d.qte_prochaine_dispo === undefined ? null : toNumber(d.qte_prochaine_dispo),
+        })
+      }
+      setDispoNCLoading(false)
+    }
+    void loadDispoNC()
+    return () => { cancelled = true }
+  }, [reference])
+
   useEffect(() => {
     let cancelled = false
     async function loadDepot() {
@@ -654,7 +702,7 @@ function StockArticleDetailSheet({
             ) : (
               <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 10 }}>
                 <div>
-                  <div style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#A6A181', fontWeight: 700 }}>Disponible tous dépôts</div>
+                  <div style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#A6A181', fontWeight: 700 }}>Physique - PL tous dépôts</div>
                   <div style={{ fontFamily: 'var(--font-mono)', fontSize: 32, fontWeight: 700, lineHeight: 1.1, marginTop: 2, color: couleurDispo(totalDepot.stock_disponible) }}>
                     {formatNumber(totalDepot.stock_disponible)}
                   </div>
@@ -668,10 +716,13 @@ function StockArticleDetailSheet({
             )}
           </div>
 
+          {/* ── Pour une nouvelle commande ── */}
+          <BlocNouvelleCommande loading={dispoNCLoading} error={dispoNCError} dispo={dispoNC} />
+
           {/* ── Par dépôt ── */}
           <div>
             <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 8 }}>
-              Stock disponible par dépôt
+              Stock physique - PL par dépôt
             </div>
             {depotError && (
               <div style={{ marginBottom: 8, fontSize: 12, color: '#e0a685' }}>{depotError}</div>
@@ -802,6 +853,75 @@ function LigneDepot({ row, maxDispo }: { row: DepotStockRow; maxDispo: number })
         <span>réel <span style={{ color: 'rgba(255,255,255,0.8)' }}>{formatNumber(reel)}</span></span>
         <span>réservé <span style={{ color: reserve > 0 ? '#D69A4A' : 'rgba(255,255,255,0.8)' }}>{formatNumber(reserve)}</span></span>
       </div>
+    </div>
+  )
+}
+
+/** Quantité promissible pour une nouvelle commande client : livrable
+ * immédiatement, sinon première date de livraison client possible. */
+function BlocNouvelleCommande({
+  loading, error, dispo,
+}: { loading: boolean; error: string | null; dispo: DispoNouvelleCommande | null }) {
+  const titre = (
+    <div style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#8FC7DA', fontWeight: 700 }}>
+      Pour une nouvelle commande
+    </div>
+  )
+  const cadre: React.CSSProperties = {
+    borderRadius: 14, border: '1px solid rgba(75,146,172,0.35)', background: 'rgba(75,146,172,0.10)', padding: '12px 14px',
+  }
+
+  if (loading) {
+    return <div style={cadre}>{titre}<div style={{ marginTop: 6, fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Calcul…</div></div>
+  }
+  if (error || !dispo) {
+    return (
+      <div style={cadre}>
+        {titre}
+        <div style={{ marginTop: 6, fontSize: 12, color: '#e0a685' }}>{error || 'Disponibilité indisponible.'}</div>
+      </div>
+    )
+  }
+
+  const immediate = dispo.qte_immediate
+  const aujourdHui = new Date().toISOString().slice(0, 10)
+  const prochaine = dispo.date_prochaine_dispo && dispo.date_prochaine_dispo > aujourdHui ? dispo.date_prochaine_dispo : null
+
+  return (
+    <div style={cadre}>
+      {titre}
+      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 10, marginTop: 4 }}>
+        <div>
+          <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.55)' }}>Livraison immédiate</div>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 28, fontWeight: 700, lineHeight: 1.1, color: couleurDispo(immediate) }}>
+            {formatNumber(immediate)}
+          </div>
+        </div>
+        {immediate <= 0 && (
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.55)' }}>Prochaine dispo (livraison client)</div>
+            {prochaine ? (
+              <>
+                <div style={{ fontFamily: 'var(--font-mono)', fontSize: 18, fontWeight: 700, color: '#D69A4A' }}>
+                  {formatDateCourte(prochaine)}
+                </div>
+                {dispo.qte_prochaine_dispo !== null && (
+                  <div style={{ fontSize: 11.5, fontFamily: 'var(--font-mono)', color: 'rgba(255,255,255,0.6)' }}>
+                    {formatNumber(dispo.qte_prochaine_dispo)} promissible{dispo.qte_prochaine_dispo > 1 ? 's' : ''}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#e0a685' }}>Aucune réception prévue</div>
+            )}
+          </div>
+        )}
+      </div>
+      {immediate <= 0 && dispo.stock_dispo > 0 && (
+        <div style={{ marginTop: 6, fontSize: 11, color: 'rgba(255,255,255,0.45)', lineHeight: 1.4 }}>
+          Le stock physique - PL ({formatNumber(dispo.stock_dispo)}) est déjà promis aux commandes clients en portefeuille.
+        </div>
+      )}
     </div>
   )
 }
