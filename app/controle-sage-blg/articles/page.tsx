@@ -31,8 +31,9 @@
  *   - MyStock SAGE = OUI  ↔  tag BLG « FMS »
  *   - Interdire en commande SAGE = Oui  ↔  nature BLG « Classique - Achat interdit »
  *     ou « Parc - Achat interdit »
- *   - En sommeil SAGE  ↔  archive BLG (affiché ; l'état d'archivage BLG n'est pas
- *     remonté par la synchro actuelle, voir colonne tag_archive)
+ *   - En sommeil SAGE  ↔  Archivé BLG. À l'archivage, BLG vide la référence
+ *     principale et la référence interne de l'article (ses références passent en
+ *     « Références inactives ») : colonne `archive` de mv_blg_articles_complet.
  *
  * Les deux vues matérialisées sont rafraîchies toutes les heures (pg_cron, à hh:15)
  * et à la demande par le bouton « Actualiser » (RPC refresh_controle_articles).
@@ -275,7 +276,7 @@ const COLONNES_BLG: Colonne[] = [
   { key: 'tag_fms', label: 'Tag FMS (≈ MyStock)', groupe: 'Statut et blocages', type: 'booleen', largeur: 90 },
   { key: 'nature_achat_interdit', label: 'Nature « Achat interdit »', groupe: 'Statut et blocages', type: 'booleen', largeur: 100 },
   { key: 'nature_vente_interdite', label: 'Nature « Vente interdite »', groupe: 'Statut et blocages', type: 'booleen', largeur: 100 },
-  { key: 'tag_archive', label: 'Tag Archive', groupe: 'Statut et blocages', type: 'booleen', largeur: 80 },
+  { key: 'archive', label: 'Archivé', groupe: 'Statut et blocages', type: 'booleen', largeur: 80 },
   { key: 'tag_obsolete', label: 'Tag Obsolète', groupe: 'Statut et blocages', type: 'booleen', largeur: 80 },
   { key: 'reference_principale_vide', label: 'Référence principale vide', groupe: 'Statut et blocages', type: 'booleen', largeur: 100 },
   { key: 'fournisseur_code', label: 'Fournisseur (code BLG)', groupe: 'Fournisseur', type: 'texte', largeur: 110 },
@@ -1128,7 +1129,7 @@ const PAIRES: PaireArticle[] = [
   { groupe: 'Identification', labelSage: 'Statut', sageKey: 'sage_statut', labelBlg: 'Statut (id)', blgKey: 'blg_statut', compare: false },
   { groupe: 'Statut et blocages', labelSage: 'MyStock', sageKey: 'sage_mystock', labelBlg: 'Tag FMS', blgKey: 'blg_tag_fms', compare: true, gereVides: true, comparer: (r) => (Boolean(r.sage_mystock_oui) === Boolean(r.blg_tag_fms_bool) ? 'ok' : 'ecart') },
   { groupe: 'Statut et blocages', labelSage: 'Interdire en commande', sageKey: 'sage_interdire_commande', labelBlg: 'Nature « Achat interdit »', blgKey: 'blg_achat_interdit', compare: true, gereVides: true, comparer: (r) => (Boolean(r.sage_interdire_commande_bool) === Boolean(r.blg_achat_interdit_bool) ? 'ok' : 'ecart') },
-  { groupe: 'Statut et blocages', labelSage: 'En sommeil', sageKey: 'sage_sommeil', labelBlg: 'Archive', blgKey: 'blg_archive', compare: false },
+  { groupe: 'Statut et blocages', labelSage: 'En sommeil', sageKey: 'sage_sommeil', labelBlg: 'Archivé', blgKey: 'blg_archive', compare: true, gereVides: true, comparer: (r) => (Boolean(r.sage_en_sommeil) === Boolean(r.blg_archive_bool) ? 'ok' : 'ecart') },
   { groupe: 'Identification', labelSage: 'Substitut', sageKey: 'sage_substitut', labelBlg: 'Remplacé par', blgKey: 'blg_remplace_par', compare: true, comparer: (r) => (compact(r.sage_substitut) === compact(r.blg_remplace_par) ? 'ok' : 'ecart') },
   { groupe: 'Fournisseur', labelSage: 'Fournisseur principal', sageKey: 'sage_fournisseur', labelBlg: 'Fournisseur', blgKey: 'blg_fournisseur', compare: true, comparer: (r) => (compact(r.sage_fournisseur) === compact(r.blg_fournisseur) ? 'ok' : 'ecart') },
   { groupe: 'Fournisseur', labelSage: 'Réf. fournisseur', sageKey: 'sage_ref_fournisseur', labelBlg: 'Réf. fournisseur', blgKey: 'blg_ref_fournisseur', compare: true, comparer: (r) => (compact(r.sage_ref_fournisseur) === compact(r.blg_ref_fournisseur) ? 'ok' : 'ecart') },
@@ -1596,7 +1597,7 @@ function OngletComparaison({ version }: { version: number }) {
             <li>Nomenclature : composants SAGE (sage.nomenclature) ↔ marques de la nomenclature BLG de même référence, ordre libre ; quantités différentes = orange.</li>
             <li>MyStock = OUI (SAGE) doit correspondre au tag « FMS » (BLG).</li>
             <li>Interdire en commande = Oui (SAGE) doit correspondre à une nature BLG « Classique - Achat interdit » ou « Parc - Achat interdit ».</li>
-            <li>En sommeil (SAGE) ↔ Archive (BLG) : affiché seulement, l'état d'archivage BLG n'est pas encore remonté par la synchronisation.</li>
+            <li>En sommeil (SAGE) doit correspondre à un article archivé dans BLG (référence principale vidée par BLG à l'archivage, références passées en inactives).</li>
             <li>Famille, statut et publication : affichés côte à côte, pas d'équivalence de codes entre SAGE et BLG.</li>
           </ul>
         </details>
