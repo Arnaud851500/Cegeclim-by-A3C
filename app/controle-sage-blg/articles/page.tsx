@@ -22,8 +22,17 @@
  *    tous les champs comparés et le détail de la nomenclature, champs « BLG
  *    maître » (table controle_champ_maitre, domaine 'article'), export Excel coloré.
  *
- * Appariement SAGE ↔ BLG : public.v_appro_article_blg_cles (référence BLG, puis
- * référence interne).
+ * Appariement SAGE ↔ BLG : public.v_controle_article_blg_cles (référence BLG, puis
+ * référence interne, puis références actives BLG : interne, fournisseur principal,
+ * autre fournisseur). Certains articles BLG ont une référence principale vide dans
+ * la synchro (ex. RAK-25PSE-S) : ils ne sont retrouvés que par leurs références actives.
+ *
+ * ÉVOLUTION (2026-09-24) : contrôles de statut / blocage
+ *   - MyStock SAGE = OUI  ↔  tag BLG « FMS »
+ *   - Interdire en commande SAGE = Oui  ↔  nature BLG « Classique - Achat interdit »
+ *     ou « Parc - Achat interdit »
+ *   - En sommeil SAGE  ↔  archive BLG (affiché ; l'état d'archivage BLG n'est pas
+ *     remonté par la synchro actuelle, voir colonne tag_archive)
  *
  * Les deux vues matérialisées sont rafraîchies toutes les heures (pg_cron, à hh:15)
  * et à la demande par le bouton « Actualiser » (RPC refresh_controle_articles).
@@ -263,6 +272,12 @@ const COLONNES_BLG: Colonne[] = [
   { key: 'categories', label: 'Catégories', groupe: 'Identification', type: 'liste' },
   { key: 'tags', label: 'Tags', groupe: 'Identification', type: 'liste', largeur: 160 },
   { key: 'statut_fk', label: 'Statut BLG (id)', groupe: 'Identification', type: 'texte', largeur: 70 },
+  { key: 'tag_fms', label: 'Tag FMS (≈ MyStock)', groupe: 'Statut et blocages', type: 'booleen', largeur: 90 },
+  { key: 'nature_achat_interdit', label: 'Nature « Achat interdit »', groupe: 'Statut et blocages', type: 'booleen', largeur: 100 },
+  { key: 'nature_vente_interdite', label: 'Nature « Vente interdite »', groupe: 'Statut et blocages', type: 'booleen', largeur: 100 },
+  { key: 'tag_archive', label: 'Tag Archive', groupe: 'Statut et blocages', type: 'booleen', largeur: 80 },
+  { key: 'tag_obsolete', label: 'Tag Obsolète', groupe: 'Statut et blocages', type: 'booleen', largeur: 80 },
+  { key: 'reference_principale_vide', label: 'Référence principale vide', groupe: 'Statut et blocages', type: 'booleen', largeur: 100 },
   { key: 'fournisseur_code', label: 'Fournisseur (code BLG)', groupe: 'Fournisseur', type: 'texte', largeur: 110 },
   { key: 'fournisseur_code_sage', label: 'Fournisseur (code SAGE déduit)', groupe: 'Fournisseur', type: 'texte', largeur: 110 },
   { key: 'fournisseur_nom', label: 'Nom fournisseur', groupe: 'Fournisseur', type: 'texte', largeur: 160 },
@@ -310,6 +325,7 @@ const COLONNES_BLG: Colonne[] = [
   { key: 'remplace', label: 'Remplace', groupe: 'Liens et nomenclature', type: 'liste', largeur: 150 },
   { key: 'present_sage', label: 'Présent dans SAGE', groupe: 'SAGE', type: 'booleen', largeur: 80 },
   { key: 'sage_reference', label: 'Référence SAGE', groupe: 'SAGE', type: 'texte', largeur: 150 },
+  { key: 'sage_appariement_via', label: 'Appariement SAGE via', groupe: 'SAGE', type: 'texte', largeur: 150 },
   { key: 'created_at', label: 'Créé le', groupe: 'Dates', type: 'date', largeur: 90 },
   { key: 'last_update', label: 'Modifié le', groupe: 'Dates', type: 'date', largeur: 90 },
   { key: 'lien_blg', label: 'Lien BLG', groupe: 'Dates', type: 'lien', largeur: 120 },
@@ -1110,6 +1126,9 @@ const PAIRES: PaireArticle[] = [
   { groupe: 'Identification', labelSage: 'Famille', sageKey: 'sage_famille', labelBlg: 'Famille / sous-famille', blgKey: 'blg_famille', compare: false },
   { groupe: 'Identification', labelSage: 'Marque', sageKey: 'sage_marque', labelBlg: 'Marque', blgKey: 'blg_marque', compare: true, gereVides: true, comparer: (r) => comparerMarque(r.sage_marque, r.blg_marque) },
   { groupe: 'Identification', labelSage: 'Statut', sageKey: 'sage_statut', labelBlg: 'Statut (id)', blgKey: 'blg_statut', compare: false },
+  { groupe: 'Statut et blocages', labelSage: 'MyStock', sageKey: 'sage_mystock', labelBlg: 'Tag FMS', blgKey: 'blg_tag_fms', compare: true, gereVides: true, comparer: (r) => (Boolean(r.sage_mystock_oui) === Boolean(r.blg_tag_fms_bool) ? 'ok' : 'ecart') },
+  { groupe: 'Statut et blocages', labelSage: 'Interdire en commande', sageKey: 'sage_interdire_commande', labelBlg: 'Nature « Achat interdit »', blgKey: 'blg_achat_interdit', compare: true, gereVides: true, comparer: (r) => (Boolean(r.sage_interdire_commande_bool) === Boolean(r.blg_achat_interdit_bool) ? 'ok' : 'ecart') },
+  { groupe: 'Statut et blocages', labelSage: 'En sommeil', sageKey: 'sage_sommeil', labelBlg: 'Archive', blgKey: 'blg_archive', compare: false },
   { groupe: 'Identification', labelSage: 'Substitut', sageKey: 'sage_substitut', labelBlg: 'Remplacé par', blgKey: 'blg_remplace_par', compare: true, comparer: (r) => (compact(r.sage_substitut) === compact(r.blg_remplace_par) ? 'ok' : 'ecart') },
   { groupe: 'Fournisseur', labelSage: 'Fournisseur principal', sageKey: 'sage_fournisseur', labelBlg: 'Fournisseur', blgKey: 'blg_fournisseur', compare: true, comparer: (r) => (compact(r.sage_fournisseur) === compact(r.blg_fournisseur) ? 'ok' : 'ecart') },
   { groupe: 'Fournisseur', labelSage: 'Réf. fournisseur', sageKey: 'sage_ref_fournisseur', labelBlg: 'Réf. fournisseur', blgKey: 'blg_ref_fournisseur', compare: true, comparer: (r) => (compact(r.sage_ref_fournisseur) === compact(r.blg_ref_fournisseur) ? 'ok' : 'ecart') },
@@ -1225,7 +1244,12 @@ function ArticleComparaisonModal({ row, evals, onClose, onPrev, onNext }: { row:
       <span className="rounded-full bg-red-100 px-2 py-0.5 text-red-700">{rouge} écart{rouge > 1 ? 's' : ''}</span>
       <span className="rounded-full bg-orange-100 px-2 py-0.5 text-orange-700">{orange} partiel{orange > 1 ? 's' : ''}</span>
       {rouge === 0 && orange === 0 && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-emerald-700">OK</span>}
-      {row.appariement_via === 'internal_reference' && <span className="rounded-full bg-orange-50 px-2 py-0.5 text-orange-700">Apparié via la référence interne BLG ({row.blg_reference})</span>}
+      {row.appariement_via && row.appariement_via !== 'reference' && (
+        <span className="rounded-full bg-orange-50 px-2 py-0.5 text-orange-700">
+          Apparié via {({ internal_reference: 'la référence interne BLG', reference_active_interne: 'une référence active [Interne] BLG', reference_fournisseur_principal: 'la référence du fournisseur principal BLG', reference_autre_fournisseur: "la référence d'un autre fournisseur BLG" } as Record<string, string>)[String(row.appariement_via)] ?? row.appariement_via}
+          {row.blg_reference_principale_vide ? ' — référence principale vide dans BLG' : ''}
+        </span>
+      )}
       {row.sage_en_sommeil && <span className="rounded-full bg-[#F4F3F0] px-2 py-0.5 text-[#8A8474]">En sommeil (SAGE)</span>}
     </>
   )
@@ -1570,6 +1594,9 @@ function OngletComparaison({ version }: { version: number }) {
             <li>Colisage et quantité mini : vide = 1. Poids, stocks, prix de vente : vide = 0.</li>
             <li>Suivi de stock : « Aucun » SAGE ↔ gestion de stock vide BLG ; tout autre suivi ↔ gestion renseignée.</li>
             <li>Nomenclature : composants SAGE (sage.nomenclature) ↔ marques de la nomenclature BLG de même référence, ordre libre ; quantités différentes = orange.</li>
+            <li>MyStock = OUI (SAGE) doit correspondre au tag « FMS » (BLG).</li>
+            <li>Interdire en commande = Oui (SAGE) doit correspondre à une nature BLG « Classique - Achat interdit » ou « Parc - Achat interdit ».</li>
+            <li>En sommeil (SAGE) ↔ Archive (BLG) : affiché seulement, l'état d'archivage BLG n'est pas encore remonté par la synchronisation.</li>
             <li>Famille, statut et publication : affichés côte à côte, pas d'équivalence de codes entre SAGE et BLG.</li>
           </ul>
         </details>
