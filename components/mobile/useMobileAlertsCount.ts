@@ -50,6 +50,14 @@ import type { AlertDetailItem } from './MobileAlertes'
  * changement de page (pathname en dépendance), avec un garde-fou de 15s
  * minimum entre deux rafraîchissements pour ne pas ralentir une navigation
  * rapide entre plusieurs écrans.
+ *
+ * ÉVOLUTION (2026-09-24, demandé par Arnaud) : « À faire » (compteur ET
+ * tiroir) passe par la RPC get_mes_taches_a_faire(), qui applique la règle
+ * commune au bandeau PC : tâche ouverte confiée à moi (e-mail ou nom
+ * affiché) OU non confiée et rattachée à une équipe dont je suis membre
+ * (todo_team_members). Avant, une tâche partagée à une équipe sans personne
+ * désignée n'apparaissait chez aucun membre. Repli sur l'ancienne requête
+ * (assigned_to = e-mail / nom) si la RPC est indisponible.
  */
 export function useMobileAlertsCount() {
   const { rights, email } = useAccess()
@@ -88,6 +96,37 @@ export function useMobileAlertsCount() {
     return identities.map((v) => `assigned_to.eq.${String(v).replace(/,/g, '\\,')}`).join(',')
   }
 
+  type TodoListRow = {
+    id: string
+    description_action: string | null
+    status: string
+    due_date: string | null
+    numero_tiers: string | null
+    assigned_to: string | null
+    category_id?: string | null
+    concerned_person?: string | null
+  }
+
+  /** Tâches « À faire » de l'utilisateur connecté : RPC (règle commune
+   * mobile / bandeau PC, tâches d'équipe incluses), repli sur l'ancienne
+   * requête directe si la RPC échoue. */
+  async function chargerTachesAFaire(): Promise<TodoListRow[]> {
+    const { data, error } = await supabase.rpc('get_mes_taches_a_faire')
+    if (!error) return ((data || []) as TodoListRow[]).slice(0, 500)
+
+    console.warn('get_mes_taches_a_faire indisponible -- repli sur la requête directe', error)
+    const identities = await resolveIdentities()
+    const { data: repli, error: erreurRepli } = await supabase
+      .from('todo_actions')
+      .select('id,description_action,status,due_date,numero_tiers,assigned_to,category_id,concerned_person')
+      .or(buildAssignedFilter(identities))
+      .not('status', 'in', '("Terminé","Annulé")')
+      .order('due_date', { ascending: true, nullsFirst: false })
+      .limit(200)
+    if (erreurRepli) throw erreurRepli
+    return (repli || []) as TodoListRow[]
+  }
+
   useEffect(() => {
     if (!email) return
     let cancelled = false
@@ -101,21 +140,22 @@ export function useMobileAlertsCount() {
       const items: AlertDetailItem[] = []
 
       try {
-        const identities = await resolveIdentities()
-        const assignedFilter = buildAssignedFilter(identities)
+        await resolveIdentities()
         const { agences: allowedAgences, collaborateurs: allowedCollaborateurs } = perimetreRef.current
 
         if (rights.show_alert_todo) {
-          const { count } = await supabase
-            .from('todo_actions')
-            .select('id', { count: 'exact', head: true })
-            .or(assignedFilter)
-            .not('status', 'in', '("Terminé","Annulé")')
-          items.push({
-            label: 'À faire',
-            count: count || 0,
-            status: (count || 0) > 0 ? 'orange' : 'green',
-          })
+          try {
+            const taches = await chargerTachesAFaire()
+            const count = taches.length
+            items.push({
+              label: 'À faire',
+              count,
+              status: count > 0 ? 'orange' : 'green',
+            })
+          } catch (e) {
+            console.error('À faire (mobile)', e)
+            items.push({ label: 'À faire', count: 0, status: 'orange' })
+          }
         }
 
         if (rights.show_alert_cerfa_ko) {
@@ -302,30 +342,14 @@ export function useMobileAlertsCount() {
    * Toutes les tâches non terminées sont incluses, qu'elles soient en
    * retard ou non (aucun filtre sur due_date) — seul le statut
    * Terminé/Annulé exclut une tâche de cette liste. */
-  async function fetchTodoList() {
+  async function fetchTodoList(): Promise<TodoListRow[]> {
     if (!email) return []
-    const identities = await resolveIdentities()
-    const assignedFilter = buildAssignedFilter(identities)
-
-    const { data, error } = await supabase
-      .from('todo_actions')
-      .select('id,description_action,status,due_date,numero_tiers,assigned_to')
-      .or(assignedFilter)
-      .not('status', 'in', '("Terminé","Annulé")')
-      .order('due_date', { ascending: true, nullsFirst: false })
-      .limit(200)
-    if (error) {
-      console.error('fetchTodoList', error)
+    try {
+      return await chargerTachesAFaire()
+    } catch (e) {
+      console.error('fetchTodoList', e)
       return []
     }
-    return (data || []) as {
-      id: string
-      description_action: string | null
-      status: string
-      due_date: string | null
-      numero_tiers: string | null
-      assigned_to: string | null
-    }[]
   }
 
   /** Liste complète des CERFA KO — même RPC que le panneau desktop (AppShell). */

@@ -749,6 +749,10 @@ export default function MobileAlertes({
           onClose={() => setTodoDrawerOpen(false)}
           onOpenTask={(task) => setOpenTask(task)}
           onTaskCompleted={handleTaskCompleted}
+          // ÉVOLUTION (2026-09-24) : tâche créée depuis le tiroir (bouton
+          // « + Nouvelle tâche » ou « + Tâche » d'un groupe) ajoutée à la
+          // liste locale, sans refetch.
+          onTaskCreated={(task) => setTodoRows((prev) => (prev.some((r) => r.id === task.id) ? prev : [task, ...prev]))}
         />
       )}
 
@@ -910,6 +914,9 @@ export default function MobileAlertes({
             demarrageAuto
             userEmail={userEmail}
             userName={userName}
+            // ÉVOLUTION (2026-09-20) : fin du flux vocal -> retour au tiroir
+            // "À faire", liste rechargée pour faire apparaître la tâche.
+            onTermine={() => { setAjoutMode(null); void rafraichirApresAjout() }}
           />
           <button
             type="button"
