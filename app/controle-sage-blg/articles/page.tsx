@@ -27,6 +27,12 @@
  * autre fournisseur). Certains articles BLG ont une référence principale vide dans
  * la synchro (ex. RAK-25PSE-S) : ils ne sont retrouvés que par leurs références actives.
  *
+ * ÉVOLUTION (2026-09-25) : vue « Nomenclatures » (sélecteur Articles / Nomenclatures,
+ *   dans les trois onglets) — un bloc par article chapeau avec ses paramètres, puis ses
+ *   composants : quantités, PA net / PV (unitaires et × quantité), sommeil / archive,
+ *   blocage appro / nature « Achat interdit ». Sources : v_sage_nomenclature_lignes,
+ *   mv_blg_nomenclature_lignes, mv_controle_nomenclature_sage_blg (rafraîchies avec
+ *   refresh_controle_articles).
  * ÉVOLUTION (2026-09-24) : contrôles de statut / blocage
  *   - MyStock SAGE = OUI  ↔  tag BLG « FMS »
  *   - Interdire en commande SAGE = Oui  ↔  nature BLG « Classique - Achat interdit »
@@ -1740,6 +1746,456 @@ function OngletComparaison({ version }: { version: number }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Vue Nomenclatures (SAGE, BLG, Comparaison)
+// ─────────────────────────────────────────────────────────────────────────
+//  - SAGE : v_sage_nomenclature_lignes (sage.nomenclature + article chapeau et
+//    composants de mv_sage_articles_complet)
+//  - BLG : mv_blg_nomenclature_lignes (nomenclature_nomenclature / nomenclature_mark,
+//    article chapeau et composants de mv_blg_articles_complet)
+//  - Comparaison : mv_controle_nomenclature_sage_blg (rapprochement chapeau × composant)
+// Une carte par article chapeau : paramètres en tête, composants en dessous avec
+// quantités, prix d'achat / de vente (unitaires et × quantité), sommeil / archive et
+// blocage appro / nature « Achat interdit ».
+
+type ModeNomenclature = 'sage' | 'blg' | 'comparaison'
+
+const SOURCE_NOMENCLATURE: Record<ModeNomenclature, string> = {
+  sage: 'v_sage_nomenclature_lignes',
+  blg: 'mv_blg_nomenclature_lignes',
+  comparaison: 'mv_controle_nomenclature_sage_blg',
+}
+
+type GroupeNomenclature = { reference: string; tete: Row; lignes: Row[] }
+
+const STATUT_LIGNE: Record<string, { libelle: string; cls: string }> = {
+  identique: { libelle: 'Identique', cls: 'bg-emerald-50 text-emerald-700' },
+  quantite: { libelle: 'Quantité différente', cls: 'bg-orange-100 text-orange-700' },
+  absent_blg: { libelle: 'Absent de BLG', cls: 'bg-red-100 text-red-700' },
+  absent_sage: { libelle: 'Absent de SAGE', cls: 'bg-red-100 text-red-700' },
+}
+
+const TARIFICATION_BLG: Record<string, string> = { fixedPrice: 'Prix fixe', saleCoefficient: 'Coefficient de vente' }
+
+function fmtPrix(v: unknown): string {
+  const n = toNum(v)
+  return n === null ? '—' : `${n.toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`
+}
+function fmtQte(v: unknown): string {
+  const n = toNum(v)
+  return n === null ? '—' : n.toLocaleString('fr-FR', { maximumFractionDigits: 3 })
+}
+function produit(q: unknown, p: unknown): number | null {
+  const a = toNum(q)
+  const b = toNum(p)
+  return a === null || b === null ? null : a * b
+}
+function somme(lignes: Row[], q: string, p: string): number | null {
+  let total = 0
+  let vu = false
+  lignes.forEach((l) => { const v = produit(l[q], l[p]); if (v !== null) { total += v; vu = true } })
+  return vu ? total : null
+}
+const differentBool = (a: unknown, b: unknown) => a !== null && a !== undefined && b !== null && b !== undefined && Boolean(a) !== Boolean(b)
+const differentPrix = (a: unknown, b: unknown) => { const x = toNum(a); const y = toNum(b); return x !== null && y !== null && Math.abs(x - y) > Math.max(0.011, Math.abs(x) * 0.0005) }
+
+function Pastille({ actif, oui, non, ton = 'rouge' }: { actif: boolean | null | undefined; oui: string; non?: string; ton?: 'rouge' | 'orange' | 'vert' }) {
+  if (actif === null || actif === undefined) return <span className="text-[#B3AD9E]">—</span>
+  if (!actif) return non ? <span className="rounded-full bg-[#F4F3F0] px-1.5 py-0.5 text-[10px] font-bold text-[#8A8474]">{non}</span> : <span className="text-[#B3AD9E]">—</span>
+  const cls = ton === 'vert' ? 'bg-emerald-50 text-emerald-700' : ton === 'orange' ? 'bg-orange-100 text-orange-700' : 'bg-red-100 text-red-700'
+  return <span className={`whitespace-nowrap rounded-full px-1.5 py-0.5 text-[10px] font-bold ${cls}`}>{oui}</span>
+}
+
+function ligneEnAlerte(mode: ModeNomenclature, l: Row): boolean {
+  if (mode === 'sage') return !l.composant_existe || !!l.composant_en_sommeil || !!l.composant_blocage_appro
+  if (mode === 'blg') return !!l.mark_id && (!l.composant_existe || !!l.composant_archive || !!l.composant_achat_interdit)
+  return l.statut_ligne !== 'identique'
+    || differentBool(l.composant_sage_en_sommeil, l.composant_blg_archive)
+    || differentBool(l.composant_sage_blocage_appro, l.composant_blg_achat_interdit)
+}
+function teteEnAlerte(mode: ModeNomenclature, t: Row): boolean {
+  if (mode === 'sage') return !!t.parent_en_sommeil || !!t.parent_blocage_appro
+  if (mode === 'blg') return !!t.parent_archive || !!t.parent_achat_interdit
+  return !t.parent_nomenclature_sage || !t.parent_nomenclature_blg
+    || differentBool(t.parent_sage_en_sommeil, t.parent_blg_archive)
+    || differentBool(t.parent_sage_blocage_appro, t.parent_blg_achat_interdit)
+    || differentPrix(t.parent_sage_prix_vente, t.parent_blg_prix_vente)
+}
+
+function VueNomenclatures({ mode, version }: { mode: ModeNomenclature; version: number }) {
+  const [lignes, setLignes] = useState<Row[]>([])
+  const [loading, setLoading] = useState(true)
+  const [progress, setProgress] = useState(0)
+  const [error, setError] = useState<string | null>(null)
+  const [search, setSearch] = useState('')
+  const [masquerInactifs, setMasquerInactifs] = useState(true)
+  const [alertesSeules, setAlertesSeules] = useState(false)
+  const [limite, setLimite] = useState(100)
+  const [replies, setReplies] = useState<Set<string>>(new Set())
+  const [exportEnCours, setExportEnCours] = useState(false)
+
+  useEffect(() => {
+    let annule = false
+    void (async () => {
+      setLoading(true)
+      setError(null)
+      try {
+        const { rows } = await chargerPagine(
+          (from, to) => supabase.from(SOURCE_NOMENCLATURE[mode]).select('*').order('parent_reference').order('composant_reference', { nullsFirst: true }).order(mode === 'blg' ? 'mark_id' : mode === 'sage' ? 'ordre' : 'statut_ligne', { nullsFirst: true }).range(from, to),
+          200000,
+          (n) => { if (!annule) setProgress(n) },
+        )
+        if (!annule) setLignes(rows)
+      } catch (e) {
+        if (!annule) setError(e instanceof Error ? e.message : String(e))
+      } finally {
+        if (!annule) setLoading(false)
+      }
+    })()
+    return () => { annule = true }
+  }, [mode, version])
+
+  useEffect(() => { setLimite(100) }, [search, masquerInactifs, alertesSeules, mode])
+
+  const groupes = useMemo<GroupeNomenclature[]>(() => {
+    const m = new Map<string, GroupeNomenclature>()
+    lignes.forEach((l) => {
+      const ref = safeText(l.parent_reference)
+      let g = m.get(ref)
+      if (!g) { g = { reference: ref, tete: l, lignes: [] }; m.set(ref, g) }
+      if (mode !== 'blg' || l.mark_id) g.lignes.push(l)
+    })
+    const out = Array.from(m.values())
+    out.forEach((g) => g.lignes.sort((a, b) => (toNum(a.ordre) ?? 9999) - (toNum(b.ordre) ?? 9999) || safeText(a.composant_reference).localeCompare(safeText(b.composant_reference))))
+    return out.sort((a, b) => a.reference.localeCompare(b.reference, 'fr', { numeric: true }))
+  }, [lignes, mode])
+
+  const inactif = useCallback((t: Row) => {
+    if (mode === 'sage') return !!t.parent_en_sommeil
+    if (mode === 'blg') return !!t.parent_archive
+    return !!t.parent_sage_en_sommeil && (t.parent_blg_archive === null || !!t.parent_blg_archive)
+  }, [mode])
+
+  const filtres = useMemo(() => {
+    const term = normaliserTexte(search)
+    return groupes.filter((g) => {
+      if (masquerInactifs && inactif(g.tete)) return false
+      if (alertesSeules && !teteEnAlerte(mode, g.tete) && !g.lignes.some((l) => ligneEnAlerte(mode, l))) return false
+      if (term) {
+        const txt = normaliserTexte([g.reference, g.tete.parent_designation, g.tete.nomenclature_titre, ...g.lignes.map((l) => `${l.composant_reference} ${l.composant_designation ?? ''}`)].join(' '))
+        if (!txt.includes(term)) return false
+      }
+      return true
+    })
+  }, [groupes, search, masquerInactifs, alertesSeules, inactif, mode])
+
+  const stats = useMemo(() => {
+    let lignesAlerte = 0
+    let chapeauxAlerte = 0
+    filtres.forEach((g) => {
+      const n = g.lignes.filter((l) => ligneEnAlerte(mode, l)).length
+      lignesAlerte += n
+      if (n > 0 || teteEnAlerte(mode, g.tete)) chapeauxAlerte += 1
+    })
+    return { chapeaux: filtres.length, composants: filtres.reduce((s, g) => s + g.lignes.length, 0), lignesAlerte, chapeauxAlerte }
+  }, [filtres, mode])
+
+  function basculer(ref: string) {
+    setReplies((prev) => { const n = new Set(prev); if (n.has(ref)) n.delete(ref); else n.add(ref); return n })
+  }
+
+  function exporterExcel() {
+    setExportEnCours(true)
+    try {
+      const b = (v: unknown) => (v === null || v === undefined ? '' : v ? 'Oui' : 'Non')
+      const lignesExport = filtres.flatMap((g) => (g.lignes.length ? g.lignes : [g.tete]).map((l) => {
+        if (mode === 'sage') return {
+          'Chapeau': g.reference, 'Désignation chapeau': safeText(g.tete.parent_designation), 'Type nomenclature': safeText(g.tete.parent_type_nomenclature),
+          'Chapeau en sommeil': b(g.tete.parent_en_sommeil), 'Chapeau blocage appro': b(g.tete.parent_blocage_appro), 'Chapeau PA net': toNum(g.tete.parent_prix_achat) ?? '', 'Chapeau PV HT': toNum(g.tete.parent_prix_vente) ?? '',
+          'Ordre': toNum(l.ordre) ?? '', 'Composant': safeText(l.composant_reference), 'Désignation composant': safeText(l.composant_designation), 'Qté': toNum(l.quantite) ?? '',
+          'PA net unit.': toNum(l.composant_prix_achat) ?? '', 'PA × qté': produit(l.quantite, l.composant_prix_achat) ?? '', 'PV unit.': toNum(l.composant_prix_vente) ?? '', 'PV × qté': produit(l.quantite, l.composant_prix_vente) ?? '',
+          'Composant en sommeil': b(l.composant_en_sommeil), 'Composant blocage appro': b(l.composant_blocage_appro), 'MyStock': b(l.composant_mystock), 'Stock': toNum(l.composant_stock) ?? '', 'Composant connu': b(l.composant_existe),
+        }
+        if (mode === 'blg') return {
+          'Chapeau': g.reference, 'Désignation chapeau': safeText(g.tete.parent_designation), 'Statut nomenclature': safeText(g.tete.nomenclature_statut), 'Tarification': TARIFICATION_BLG[safeText(g.tete.nomenclature_tarification)] ?? safeText(g.tete.nomenclature_tarification),
+          'Prix fixe nomenclature': toNum(g.tete.nomenclature_prix_fixe) ?? '', 'Chapeau prix public': toNum(g.tete.parent_prix_vente) ?? '', 'Chapeau PA net': toNum(g.tete.parent_prix_achat) ?? '',
+          'Chapeau archivé': b(g.tete.parent_archive), 'Chapeau achat interdit': b(g.tete.parent_achat_interdit), 'Nature chapeau': safeText(g.tete.parent_nature),
+          'Ordre': toNum(l.ordre) ?? '', 'Composant': safeText(l.composant_reference), 'Désignation composant': safeText(l.composant_designation), 'Qté': toNum(l.quantite) ?? '',
+          'PA net unit.': toNum(l.composant_prix_achat) ?? '', 'PA × qté': produit(l.quantite, l.composant_prix_achat) ?? '', 'Prix public unit.': toNum(l.composant_prix_vente) ?? '', 'PV × qté': produit(l.quantite, l.composant_prix_vente) ?? '',
+          'Composant archivé': b(l.composant_archive), 'Composant achat interdit': b(l.composant_achat_interdit), 'Nature composant': safeText(l.composant_nature), 'Tag FMS': b(l.composant_fms), 'Stock': toNum(l.composant_stock) ?? '',
+        }
+        return {
+          'Chapeau': g.reference, 'Désignation chapeau': safeText(g.tete.parent_designation), 'Nomenclature SAGE': b(g.tete.parent_nomenclature_sage), 'Nomenclature BLG': b(g.tete.parent_nomenclature_blg),
+          'Chapeau sommeil SAGE': b(g.tete.parent_sage_en_sommeil), 'Chapeau archivé BLG': b(g.tete.parent_blg_archive), 'Chapeau blocage appro SAGE': b(g.tete.parent_sage_blocage_appro), 'Chapeau achat interdit BLG': b(g.tete.parent_blg_achat_interdit),
+          'Chapeau PV SAGE': toNum(g.tete.parent_sage_prix_vente) ?? '', 'Chapeau PV BLG': toNum(g.tete.parent_blg_prix_vente) ?? '',
+          'Composant': safeText(l.composant_reference), 'Désignation composant': safeText(l.composant_designation), 'Statut ligne': STATUT_LIGNE[safeText(l.statut_ligne)]?.libelle ?? safeText(l.statut_ligne),
+          'Qté SAGE': toNum(l.sage_quantite) ?? '', 'Qté BLG': toNum(l.blg_quantite) ?? '',
+          'Sommeil SAGE': b(l.composant_sage_en_sommeil), 'Archivé BLG': b(l.composant_blg_archive), 'Blocage appro SAGE': b(l.composant_sage_blocage_appro), 'Achat interdit BLG': b(l.composant_blg_achat_interdit),
+          'PA SAGE': toNum(l.composant_sage_prix_achat) ?? '', 'PA BLG': toNum(l.composant_blg_prix_achat) ?? '', 'PV SAGE': toNum(l.composant_sage_prix_vente) ?? '', 'PV BLG': toNum(l.composant_blg_prix_vente) ?? '',
+        }
+      }))
+      const ws = XLSX.utils.json_to_sheet(lignesExport)
+      const nbCol = lignesExport.length ? Object.keys(lignesExport[0]).length : 1
+      ws['!cols'] = Array.from({ length: nbCol }, () => ({ wch: 18 }))
+      ws['!autofilter'] = { ref: `A1:${XLSX.utils.encode_col(nbCol - 1)}${lignesExport.length + 1}` }
+      const wb = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(wb, ws, 'Nomenclatures')
+      XLSX.writeFile(wb, `nomenclatures_${mode}_${new Date().toISOString().slice(0, 10)}.xlsx`)
+    } catch (e) {
+      alert('Erreur export Excel : ' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      setExportEnCours(false)
+    }
+  }
+
+  const libelleInactif = mode === 'sage' ? 'Masquer les chapeaux en sommeil' : mode === 'blg' ? 'Masquer les chapeaux archivés' : 'Masquer les chapeaux en sommeil (SAGE) et archivés (BLG)'
+  const libelleAlerte = mode === 'comparaison' ? 'Avec écart uniquement' : mode === 'sage' ? 'Composant en sommeil / bloqué uniquement' : 'Composant archivé / achat interdit uniquement'
+  const th = 'px-2 py-1.5 font-bold whitespace-nowrap'
+  const td = 'px-2 py-1.5 align-top'
+  const tdNum = 'px-2 py-1.5 text-right align-top whitespace-nowrap'
+
+  return (
+    <>
+      <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
+        <div className="grid gap-2 md:grid-cols-4">
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Référence ou désignation du chapeau ou d'un composant…"
+            className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-sm font-medium outline-none focus:border-[#B4761A] md:col-span-2" />
+          <label className="flex h-10 items-center gap-2 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
+            <input type="checkbox" checked={masquerInactifs} onChange={(e) => setMasquerInactifs(e.target.checked)} className="accent-[#B4761A]" />
+            {libelleInactif}
+          </label>
+          <label className="flex h-10 items-center gap-2 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-semibold text-[#3A362E]">
+            <input type="checkbox" checked={alertesSeules} onChange={(e) => setAlertesSeules(e.target.checked)} className="accent-[#B4761A]" />
+            {libelleAlerte}
+          </label>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[#E5E1D8] pt-3">
+          <div className="flex flex-wrap items-center gap-3 text-[12px] text-[#8A8474]">
+            {loading ? <span>Chargement… {progress} lignes</span> : (
+              <>
+                <span><strong className="text-[#111820]">{stats.chapeaux.toLocaleString('fr-FR')}</strong> chapeaux · {stats.composants.toLocaleString('fr-FR')} lignes de composants</span>
+                <span className="rounded-full bg-red-50 px-2 py-0.5 font-bold text-red-700">{stats.chapeauxAlerte.toLocaleString('fr-FR')} chapeaux à vérifier</span>
+                <span className="rounded-full bg-orange-50 px-2 py-0.5 font-bold text-orange-700">{stats.lignesAlerte.toLocaleString('fr-FR')} lignes {mode === 'comparaison' ? 'en écart' : 'en alerte'}</span>
+              </>
+            )}
+            {error && <span className="font-semibold text-red-600">{error}</span>}
+          </div>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => setReplies(new Set(filtres.map((g) => g.reference)))} className="rounded-lg border border-[#E5E1D8] px-3 py-2 text-[12px] font-bold text-[#3A362E] hover:bg-[#F4F3F0]">Tout replier</button>
+            <button type="button" onClick={() => setReplies(new Set())} className="rounded-lg border border-[#E5E1D8] px-3 py-2 text-[12px] font-bold text-[#3A362E] hover:bg-[#F4F3F0]">Tout déplier</button>
+            <button type="button" onClick={exporterExcel} disabled={exportEnCours || loading || filtres.length === 0}
+              className="rounded-lg bg-[#111820] px-4 py-2 text-[13px] font-bold text-white hover:bg-[#252E3D] disabled:cursor-not-allowed disabled:opacity-60">
+              {exportEnCours ? 'Export en cours…' : `⬇ Exporter en Excel (${filtres.length} chapeaux)`}
+            </button>
+          </div>
+        </div>
+        {mode === 'comparaison' && (
+          <p className="mt-2 text-[12px] text-[#8A8474]">Rapprochement par référence du chapeau et du composant (casse et espaces ignorés). Une ligne est en écart si le composant manque d'un côté, si la quantité diffère, ou si sommeil SAGE ≠ archivé BLG, ou blocage appro SAGE ≠ nature « Achat interdit » BLG. Les prix sont surlignés quand ils diffèrent.</p>
+        )}
+      </section>
+
+      <section className="space-y-3">
+        {filtres.slice(0, limite).map((g) => {
+          const t = g.tete
+          const replie = replies.has(g.reference)
+          const nbAlerte = g.lignes.filter((l) => ligneEnAlerte(mode, l)).length
+          const alerteTete = teteEnAlerte(mode, t)
+          return (
+            <article key={g.reference} className={`overflow-hidden rounded-xl border bg-white ${nbAlerte > 0 || alerteTete ? 'border-orange-200' : 'border-[#E5E1D8]'}`}>
+              <button type="button" onClick={() => basculer(g.reference)} className="flex w-full flex-wrap items-start justify-between gap-3 bg-[#FAF9F6] px-4 py-3 text-left hover:bg-[#F4F3F0]">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[#8A8474]">{replie ? '▸' : '▾'}</span>
+                    <span className="font-mono text-[13px] font-bold text-[#111820]">{g.reference}</span>
+                    <span className="text-[13px] font-semibold text-[#111820]">{safeText(t.parent_designation) || '—'}</span>
+                  </div>
+                  <div className="mt-1.5 flex flex-wrap gap-1.5 text-[11px]">
+                    {mode === 'sage' && (
+                      <>
+                        {t.parent_type_nomenclature && <span className="rounded-full bg-[#F4F3F0] px-2 py-0.5 font-bold text-[#3A362E]">{t.parent_type_nomenclature}</span>}
+                        <Pastille actif={!!t.parent_en_sommeil} oui="En sommeil" non="Actif" />
+                        <Pastille actif={!!t.parent_blocage_appro} oui="Blocage appro" />
+                        <Pastille actif={!!t.parent_mystock} oui="MyStock" ton="vert" />
+                        <Pastille actif={!t.parent_present_blg} oui="Absent de BLG" ton="orange" />
+                      </>
+                    )}
+                    {mode === 'blg' && (
+                      <>
+                        <span className={`rounded-full px-2 py-0.5 font-bold ${t.nomenclature_statut === 'active' ? 'bg-emerald-50 text-emerald-700' : 'bg-[#F4F3F0] text-[#8A8474]'}`}>Nomenclature {t.nomenclature_statut === 'active' ? 'active' : 'inactive'}</span>
+                        {t.parent_nature && <span className="rounded-full bg-[#F4F3F0] px-2 py-0.5 font-bold text-[#3A362E]">{t.parent_nature}</span>}
+                        <Pastille actif={!!t.parent_archive} oui="Archivé" non="Non archivé" />
+                        <Pastille actif={!!t.parent_achat_interdit} oui="Achat interdit" />
+                        <Pastille actif={!!t.parent_fms} oui="FMS" ton="vert" />
+                        <Pastille actif={!t.parent_part_id} oui="Article chapeau introuvable" ton="orange" />
+                      </>
+                    )}
+                    {mode === 'comparaison' && (
+                      <>
+                        <Pastille actif={!t.parent_nomenclature_sage} oui="Pas de nomenclature SAGE" />
+                        <Pastille actif={!t.parent_nomenclature_blg} oui="Pas de nomenclature BLG" />
+                        {t.parent_nomenclature_sage && t.parent_nomenclature_blg && nbAlerte === 0 && !alerteTete && <span className="rounded-full bg-emerald-50 px-2 py-0.5 font-bold text-emerald-700">Identique</span>}
+                        {nbAlerte > 0 && <span className="rounded-full bg-orange-100 px-2 py-0.5 font-bold text-orange-700">{nbAlerte} ligne{nbAlerte > 1 ? 's' : ''} en écart</span>}
+                        <span className={`rounded-full px-2 py-0.5 font-bold ${differentBool(t.parent_sage_en_sommeil, t.parent_blg_archive) ? 'bg-red-100 text-red-700' : 'bg-[#F4F3F0] text-[#3A362E]'}`}>
+                          Sommeil SAGE {t.parent_sage_en_sommeil ? 'Oui' : 'Non'} · Archivé BLG {t.parent_blg_archive === null || t.parent_blg_archive === undefined ? '—' : t.parent_blg_archive ? 'Oui' : 'Non'}
+                        </span>
+                        <span className={`rounded-full px-2 py-0.5 font-bold ${differentBool(t.parent_sage_blocage_appro, t.parent_blg_achat_interdit) ? 'bg-red-100 text-red-700' : 'bg-[#F4F3F0] text-[#3A362E]'}`}>
+                          Blocage appro SAGE {t.parent_sage_blocage_appro ? 'Oui' : 'Non'} · Achat interdit BLG {t.parent_blg_achat_interdit === null || t.parent_blg_achat_interdit === undefined ? '—' : t.parent_blg_achat_interdit ? 'Oui' : 'Non'}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-x-5 gap-y-0.5 text-right text-[12px] md:grid-cols-4">
+                  {mode === 'sage' && (
+                    <>
+                      <Chiffre libelle="PA net chapeau" valeur={fmtPrix(t.parent_prix_achat)} />
+                      <Chiffre libelle="PV HT chapeau" valeur={fmtPrix(t.parent_prix_vente)} />
+                      <Chiffre libelle="Σ PA composants" valeur={fmtPrix(somme(g.lignes, 'quantite', 'composant_prix_achat'))} />
+                      <Chiffre libelle="Σ PV composants" valeur={fmtPrix(somme(g.lignes, 'quantite', 'composant_prix_vente'))} />
+                    </>
+                  )}
+                  {mode === 'blg' && (
+                    <>
+                      <Chiffre libelle={`Tarification · ${TARIFICATION_BLG[safeText(t.nomenclature_tarification)] ?? (safeText(t.nomenclature_tarification) || '—')}`} valeur={fmtPrix(t.nomenclature_prix_fixe)} />
+                      <Chiffre libelle="Prix public chapeau" valeur={fmtPrix(t.parent_prix_vente)} />
+                      <Chiffre libelle="Σ PA composants" valeur={fmtPrix(somme(g.lignes, 'quantite', 'composant_prix_achat'))} />
+                      <Chiffre libelle="Σ PV composants" valeur={fmtPrix(somme(g.lignes, 'quantite', 'composant_prix_vente'))} />
+                    </>
+                  )}
+                  {mode === 'comparaison' && (
+                    <>
+                      <Chiffre libelle="PV chapeau SAGE" valeur={fmtPrix(t.parent_sage_prix_vente)} ecart={differentPrix(t.parent_sage_prix_vente, t.parent_blg_prix_vente)} />
+                      <Chiffre libelle="PV chapeau BLG" valeur={fmtPrix(t.parent_blg_prix_vente)} ecart={differentPrix(t.parent_sage_prix_vente, t.parent_blg_prix_vente)} />
+                      <Chiffre libelle="Σ PA SAGE" valeur={fmtPrix(somme(g.lignes, 'sage_quantite', 'composant_sage_prix_achat'))} />
+                      <Chiffre libelle="Σ PA BLG" valeur={fmtPrix(somme(g.lignes, 'blg_quantite', 'composant_blg_prix_achat'))} />
+                    </>
+                  )}
+                </div>
+              </button>
+
+              {!replie && (
+                <div className="overflow-x-auto border-t border-[#E5E1D8]">
+                  <table className="w-full text-left text-[12px]">
+                    <thead className="bg-[#F4F3F0] text-[10px] uppercase tracking-wide text-[#8A8474]">
+                      {mode === 'sage' && (
+                        <tr>
+                          <th className={th}>#</th><th className={th}>Composant</th><th className={th}>Désignation</th><th className={`${th} text-right`}>Qté</th>
+                          <th className={`${th} text-right`}>PA net unit.</th><th className={`${th} text-right`}>PA × qté</th><th className={`${th} text-right`}>PV unit.</th><th className={`${th} text-right`}>PV × qté</th>
+                          <th className={th}>Sommeil</th><th className={th}>Blocage appro</th><th className={th}>MyStock</th><th className={`${th} text-right`}>Stock</th>
+                        </tr>
+                      )}
+                      {mode === 'blg' && (
+                        <tr>
+                          <th className={th}>#</th><th className={th}>Composant</th><th className={th}>Désignation</th><th className={`${th} text-right`}>Qté</th>
+                          <th className={`${th} text-right`}>PA net unit.</th><th className={`${th} text-right`}>PA × qté</th><th className={`${th} text-right`}>Prix public</th><th className={`${th} text-right`}>PV × qté</th>
+                          <th className={th}>Archivé</th><th className={th}>Achat interdit</th><th className={th}>Nature</th><th className={th}>FMS</th><th className={`${th} text-right`}>Stock</th>
+                        </tr>
+                      )}
+                      {mode === 'comparaison' && (
+                        <tr>
+                          <th className={th}>Composant</th><th className={th}>Désignation</th><th className={th}>Statut</th>
+                          <th className={`${th} text-right`}>Qté SAGE</th><th className={`${th} text-right`}>Qté BLG</th>
+                          <th className={th}>Sommeil SAGE / Archivé BLG</th><th className={th}>Blocage SAGE / Achat interdit BLG</th>
+                          <th className={`${th} text-right`}>PA SAGE</th><th className={`${th} text-right`}>PA BLG</th><th className={`${th} text-right`}>PV SAGE</th><th className={`${th} text-right`}>PV BLG</th>
+                        </tr>
+                      )}
+                    </thead>
+                    <tbody>
+                      {g.lignes.map((l, i) => {
+                        const alerte = ligneEnAlerte(mode, l)
+                        const cls = `border-t border-[#F4F3F0] ${alerte ? 'bg-orange-50/50' : ''}`
+                        if (mode === 'sage') return (
+                          <tr key={i} className={cls}>
+                            <td className={`${td} text-[#8A8474]`}>{fmtQte(l.ordre)}</td>
+                            <td className={`${td} font-mono font-semibold text-[#3A362E]`}>{l.composant_reference}{!l.composant_existe && <span className="ml-1 font-sans text-[10px] font-bold text-red-600">inconnu SAGE</span>}</td>
+                            <td className={`${td} text-[#111820]`}>{safeText(l.composant_designation) || safeText(l.commentaire) || '—'}</td>
+                            <td className={`${tdNum} font-bold`}>{fmtQte(l.quantite)}</td>
+                            <td className={tdNum}>{fmtPrix(l.composant_prix_achat)}</td><td className={tdNum}>{fmtPrix(produit(l.quantite, l.composant_prix_achat))}</td>
+                            <td className={tdNum}>{fmtPrix(l.composant_prix_vente)}</td><td className={tdNum}>{fmtPrix(produit(l.quantite, l.composant_prix_vente))}</td>
+                            <td className={td}><Pastille actif={l.composant_existe ? !!l.composant_en_sommeil : null} oui="En sommeil" non="Non" /></td>
+                            <td className={td}><Pastille actif={l.composant_existe ? !!l.composant_blocage_appro : null} oui="Bloqué" non="Non" /></td>
+                            <td className={td}><Pastille actif={l.composant_existe ? !!l.composant_mystock : null} oui="Oui" non="Non" ton="vert" /></td>
+                            <td className={tdNum}>{fmtQte(l.composant_stock)}</td>
+                          </tr>
+                        )
+                        if (mode === 'blg') return (
+                          <tr key={i} className={cls}>
+                            <td className={`${td} text-[#8A8474]`}>{fmtQte(l.ordre)}</td>
+                            <td className={`${td} font-mono font-semibold text-[#3A362E]`}>
+                              {l.composant_lien_blg ? <a href={l.composant_lien_blg} target="_blank" rel="noopener noreferrer" className="hover:underline">{l.composant_reference}</a> : l.composant_reference}
+                              {!l.composant_existe && <span className="ml-1 font-sans text-[10px] font-bold text-red-600">article introuvable</span>}
+                            </td>
+                            <td className={`${td} text-[#111820]`}>{safeText(l.composant_designation) || safeText(l.composant_libelle_ligne) || '—'}</td>
+                            <td className={`${tdNum} font-bold`}>{fmtQte(l.quantite)}</td>
+                            <td className={tdNum}>{fmtPrix(l.composant_prix_achat)}</td><td className={tdNum}>{fmtPrix(produit(l.quantite, l.composant_prix_achat))}</td>
+                            <td className={tdNum}>{fmtPrix(l.composant_prix_vente)}</td><td className={tdNum}>{fmtPrix(produit(l.quantite, l.composant_prix_vente))}</td>
+                            <td className={td}><Pastille actif={l.composant_existe ? !!l.composant_archive : null} oui="Archivé" non="Non" /></td>
+                            <td className={td}><Pastille actif={l.composant_existe ? !!l.composant_achat_interdit : null} oui="Achat interdit" non="Non" /></td>
+                            <td className={`${td} text-[#3A362E]`}>{safeText(l.composant_nature) || '—'}</td>
+                            <td className={td}><Pastille actif={l.composant_existe ? !!l.composant_fms : null} oui="Oui" non="Non" ton="vert" /></td>
+                            <td className={tdNum}>{fmtQte(l.composant_stock)}</td>
+                          </tr>
+                        )
+                        const st = STATUT_LIGNE[safeText(l.statut_ligne)] ?? { libelle: safeText(l.statut_ligne), cls: 'bg-[#F4F3F0] text-[#3A362E]' }
+                        const ecSommeil = differentBool(l.composant_sage_en_sommeil, l.composant_blg_archive)
+                        const ecBlocage = differentBool(l.composant_sage_blocage_appro, l.composant_blg_achat_interdit)
+                        const ecPA = differentPrix(l.composant_sage_prix_achat, l.composant_blg_prix_achat)
+                        const ecPV = differentPrix(l.composant_sage_prix_vente, l.composant_blg_prix_vente)
+                        const oui = (v: unknown) => (v === null || v === undefined ? '—' : v ? 'Oui' : 'Non')
+                        return (
+                          <tr key={i} className={cls}>
+                            <td className={`${td} font-mono font-semibold text-[#3A362E]`}>{l.composant_reference}</td>
+                            <td className={`${td} text-[#111820]`}>{safeText(l.composant_designation) || '—'}</td>
+                            <td className={td}><span className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-bold ${st.cls}`}>{st.libelle}</span></td>
+                            <td className={`${tdNum} font-bold ${l.statut_ligne === 'quantite' ? 'text-orange-700' : ''}`}>{fmtQte(l.sage_quantite)}</td>
+                            <td className={`${tdNum} font-bold ${l.statut_ligne === 'quantite' ? 'text-orange-700' : ''}`}>{fmtQte(l.blg_quantite)}</td>
+                            <td className={`${td} ${ecSommeil ? 'font-bold text-red-700' : 'text-[#3A362E]'}`}>{oui(l.composant_sage_en_sommeil)} / {oui(l.composant_blg_archive)}</td>
+                            <td className={`${td} ${ecBlocage ? 'font-bold text-red-700' : 'text-[#3A362E]'}`}>{oui(l.composant_sage_blocage_appro)} / {oui(l.composant_blg_achat_interdit)}</td>
+                            <td className={`${tdNum} ${ecPA ? 'bg-red-50 font-bold text-red-700' : ''}`}>{fmtPrix(l.composant_sage_prix_achat)}</td>
+                            <td className={`${tdNum} ${ecPA ? 'bg-red-50 font-bold text-red-700' : ''}`}>{fmtPrix(l.composant_blg_prix_achat)}</td>
+                            <td className={`${tdNum} ${ecPV ? 'bg-red-50 font-bold text-red-700' : ''}`}>{fmtPrix(l.composant_sage_prix_vente)}</td>
+                            <td className={`${tdNum} ${ecPV ? 'bg-red-50 font-bold text-red-700' : ''}`}>{fmtPrix(l.composant_blg_prix_vente)}</td>
+                          </tr>
+                        )
+                      })}
+                      {g.lignes.length === 0 && (
+                        <tr><td colSpan={13} className="px-3 py-3 text-center text-[#8A8474]">Aucun composant.</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                  {mode === 'blg' && t.parent_lien_blg && (
+                    <div className="border-t border-[#F4F3F0] px-4 py-1.5 text-right"><a href={t.parent_lien_blg} target="_blank" rel="noopener noreferrer" className="text-[12px] font-semibold text-[#B4761A] hover:underline">Ouvrir l'article chapeau dans BLG ↗</a></div>
+                  )}
+                  {mode === 'comparaison' && t.parent_lien_blg && (
+                    <div className="border-t border-[#F4F3F0] px-4 py-1.5 text-right"><a href={t.parent_lien_blg} target="_blank" rel="noopener noreferrer" className="text-[12px] font-semibold text-[#B4761A] hover:underline">Ouvrir l'article chapeau dans BLG ↗</a></div>
+                  )}
+                </div>
+              )}
+            </article>
+          )
+        })}
+        {!loading && filtres.length === 0 && <div className="rounded-xl border border-[#E5E1D8] bg-white p-8 text-center text-[#8A8474]">Aucune nomenclature pour ces filtres.</div>}
+        {filtres.length > limite && (
+          <div className="text-center">
+            <button type="button" onClick={() => setLimite((v) => v + 100)} className="rounded-lg border border-[#E5E1D8] bg-white px-4 py-2 text-[13px] font-bold text-[#3A362E] hover:bg-[#F4F3F0]">
+              Afficher 100 chapeaux de plus ({(filtres.length - limite).toLocaleString('fr-FR')} restants)
+            </button>
+          </div>
+        )}
+      </section>
+    </>
+  )
+}
+
+function Chiffre({ libelle, valeur, ecart }: { libelle: string; valeur: string; ecart?: boolean }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wide text-[#8A8474]">{libelle}</div>
+      <div className={`font-mono font-bold ${ecart ? 'text-red-700' : 'text-[#111820]'}`}>{valeur}</div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Page principale
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -1747,6 +2203,7 @@ type OngletPrincipal = 'sage' | 'blg' | 'comparaison'
 
 export default function ArticlesSageBlgPage() {
   const [onglet, setOnglet] = useState<OngletPrincipal>('comparaison')
+  const [vue, setVue] = useState<'articles' | 'nomenclatures'>('articles')
   const [version, setVersion] = useState(0)
   const [rafraichiLe, setRafraichiLe] = useState<string | null>(null)
   const [actualisation, setActualisation] = useState(false)
@@ -1790,12 +2247,21 @@ export default function ArticlesSageBlgPage() {
             <OngletTab active={onglet === 'sage'} onClick={() => setOnglet('sage')} label="SAGE" />
             <OngletTab active={onglet === 'blg'} onClick={() => setOnglet('blg')} label="BLG" />
             <OngletTab active={onglet === 'comparaison'} onClick={() => setOnglet('comparaison')} label="Comparaison" />
+            <div className="ml-auto flex items-center gap-1 rounded-lg border border-[#E5E1D8] bg-[#F4F3F0] p-1">
+              {(['articles', 'nomenclatures'] as const).map((v) => (
+                <button key={v} type="button" onClick={() => setVue(v)}
+                  className={`rounded-md px-4 py-1.5 text-[13px] font-bold transition-colors ${vue === v ? 'bg-white text-[#111820] shadow-sm' : 'text-[#8A8474] hover:text-[#111820]'}`}>
+                  {v === 'articles' ? 'Articles' : 'Nomenclatures'}
+                </button>
+              ))}
+            </div>
           </div>
         </section>
 
-        {onglet === 'sage' && <OngletSage version={version} />}
-        {onglet === 'blg' && <OngletBlg version={version} />}
-        {onglet === 'comparaison' && <OngletComparaison version={version} />}
+        {vue === 'nomenclatures' && <VueNomenclatures key={onglet} mode={onglet} version={version} />}
+        {vue === 'articles' && onglet === 'sage' && <OngletSage version={version} />}
+        {vue === 'articles' && onglet === 'blg' && <OngletBlg version={version} />}
+        {vue === 'articles' && onglet === 'comparaison' && <OngletComparaison version={version} />}
       </div>
     </main>
   )
