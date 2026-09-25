@@ -4,6 +4,16 @@
  * Écran "Fournisseurs & articles SAGE / BLG" — pendant fournisseur de
  * l'écran "Clients SAGE / BLG", orienté préparation du calcul de besoin.
  * ---------------------------------------------------------------------------
+ *    MàJ 25/09/2026 — sources SAGE & méthode A :
+ *      · stock de départ de la projection = disponible SAGE (sto_qte − sto_prepa) :
+ *        les préparations de livraison ne sont pas dans le réservé (bons de commande).
+ *      · encours fournisseur lu dans SAGE (sage.bdcf, vue v_appro_cdf_encours_sage)
+ *        au lieu des commandes d'achat BLG ; sans date SAGE → date commande + délai
+ *        d'appro du fournisseur (délai théorique).
+ *      · méthode A : seuil = stock de sécurité + μ × période d'appro / 30 pour les
+ *        références MYSTOCK (appro_parametres.frequence_appro_mystock_jours, 30 par
+ *        défaut) + option μ × délai d'appro / 30 (seuil_a_inclut_delai_appro) ;
+ *        cible = max(stock max, seuil).
  * 3 onglets :
  *  - Fournisseurs : tous les tiers SAGE de type fournisseur (761) avec la
  *    stratégie d'appro (colonnes manuelles du classeur reprises dans la table
@@ -33,7 +43,7 @@
  *        principale, aucune croix).
  *    MàJ 14/09/2026 (bis) — encours & projection :
  *      · l'onglet Articles ne raisonne plus sur le seul stock physique FMS :
- *        encours fournisseur BLG (reste à livrer, dépôt FMS), ventes réservées
+ *        encours fournisseur (reste à livrer, dépôt FMS — SAGE depuis le 25/09/2026), ventes réservées
  *        SAGE (sto_res dépôt FMS, agences entre parenthèses — le reste à
  *        livrer BLG n'est qu'informatif), stock projeté à la date de
  *        livraison estimée de l'encours (date saisie > commentaire BLG > délai
@@ -1869,6 +1879,8 @@ type ContexteProposition = {
   couvMinDefaut: number; couvCibleDefaut: number
   retardMaxJours: number                     // encours dont la date estimée est dépassée de plus de N j : exclu
   aujourdhui: string                         // AAAA-MM-JJ
+  frequenceApproJours: number                // méthode A, réf. MYSTOCK : période entre deux commandes (appro_parametres.frequence_appro_mystock_jours, défaut 30 = mensuelle)
+  seuilInclutDelaiAppro: boolean             // méthode A : ajouter la conso du délai d'appro au stock de sécurité (appro_parametres.seuil_a_inclut_delai_appro)
 }
 
 type Proposition = {
@@ -1880,6 +1892,7 @@ type Proposition = {
   consoDelai: number; demande: number; demandeMode: number
   stockReception: number; couvReception: number | null
   seuilA: number; stockMaxA: number
+  ssBase: number; ajoutFrequence: number; ajoutDelai: number; frequenceJours: number; delaiApproJours: number; cibleA: number
   declenche: boolean; bloque: boolean; qteProposee: number; colisage: number
   qteRetenue: number | null; qteFinale: number; dateSouhaitee: string
   explication: string[]
@@ -1898,7 +1911,7 @@ function arrondirColisage(qte: number, colisage: number): number {
 }
 
 /** Calcule la proposition de réappro d'une référence selon la méthode A ou B.
- *  Stock à réception = stock physique (périmètre) − demande sur le délai L + encours fournisseur livré ≤ L.
+ *  Stock à réception = stock disponible SAGE (physique − préparations, périmètre) − demande sur le délai L + encours fournisseur SAGE livré ≤ L.
  *  La demande suit le mode de projection (réservé SAGE daté ≤ L, μ × L/30, ou le plus grand des deux). */
 function calculerProposition(a: ArtRow, ctx: ContexteProposition): Proposition {
   const fourn = a.fournisseur_principal ? ctx.paramsFourn.get(a.fournisseur_principal) : undefined
@@ -1916,7 +1929,9 @@ function calculerProposition(a: ArtRow, ctx: ContexteProposition): Proposition {
   const dateReception = ajouterJours(ctx.aujourdhui, delaiL)
   const mu = n0(a.projection_mu)
   const muSource: '12m' | '3m' = a.projection_mu_source === '3m' ? '3m' : '12m'
-  const stockBase = global ? n0(a.sage_stock_total) : n0(a.sage_stock_fms)
+  // Stock de départ = disponible SAGE (physique − préparations de livraison) : les PL
+  // ne figurent plus dans le réservé (bons de commande), il faut donc les sortir du stock.
+  const stockBase = global ? n0(a.sage_stock_dispo_total) : n0(a.stock_dispo_sage_fms)
   const dansPerimetre = (e: Echeance) => global || e.fms
 
   let reservePeriode = 0, reserveApres = 0, reserveTotal = 0
@@ -1932,31 +1947,48 @@ function calculerProposition(a: ArtRow, ctx: ContexteProposition): Proposition {
   const couvReception = mu > 0 ? Math.round(stockReception / mu * 10) / 10 : null
 
   const colisage = n0(a.sage_colisage)
-  const seuilA = n0(a.calc_stock_securite)
+  // Méthode A — seuil de déclenchement :
+  //   stock de sécurité
+  //   + conso de la période d'appro (réf. MYSTOCK : commande mensuelle → la réception
+  //     suivante n'arrive qu'une période plus tard, il faut couvrir cette période)
+  //   + (option) conso du délai d'appro intégrée au stock de sécurité
+  // Cible de commande = max(stock max, seuil) pour que la commande ramène au-dessus du seuil.
+  const delaiAppro = n0(a.delai_appro_ref_jours ?? a.delai_appro_jours ?? 30)
+  const estMystock = safeText(a.mystock).toUpperCase() === 'OUI'
+  const frequenceJours = estMystock ? Math.max(0, ctx.frequenceApproJours) : 0
+  const ssBase = n0(a.calc_stock_securite)
+  const ajoutFrequence = Math.round(mu * frequenceJours / 30 * 10) / 10
+  const ajoutDelai = ctx.seuilInclutDelaiAppro ? Math.round(mu * delaiAppro / 30 * 10) / 10 : 0
+  const seuilA = Math.round((ssBase + ajoutFrequence + ajoutDelai) * 10) / 10
   const stockMaxA = n0(a.calc_stock_max) > 0 ? n0(a.calc_stock_max) : n0(a.calc_stock_min)
+  const cibleA = Math.max(stockMaxA, seuilA)
   const bloque = !!a.blocage_appro || !!a.arret_appro
   const eligible = !!a.pertinent_calcul_besoin && !bloque
   let declenche = false, qteProposee = 0
   if (methode === 'min_max') {
     declenche = eligible && n0(a.calc_stock_min) > 0 && stockReception < seuilA
-    if (declenche) qteProposee = arrondirColisage(stockMaxA - stockReception, colisage)
+    if (declenche) qteProposee = arrondirColisage(cibleA - stockReception, colisage)
   } else {
     declenche = eligible && mu > 0 && couvReception !== null && couvReception < couvMin
     if (declenche) qteProposee = arrondirColisage(couvCible * mu - stockReception, colisage)
   }
   const qteRetenue = a.qte_proposition_manuelle === null || a.qte_proposition_manuelle === undefined ? null : Number(a.qte_proposition_manuelle)
   const qteFinale = qteRetenue ?? qteProposee
-  const delaiAppro = a.delai_appro_ref_jours ?? a.delai_appro_jours ?? 30
-  const dateSouhaitee = a.date_livraison_souhaitee ? String(a.date_livraison_souhaitee).slice(0, 10) : ajouterJours(ctx.aujourdhui, n0(delaiAppro))
+  const dateSouhaitee = a.date_livraison_souhaitee ? String(a.date_livraison_souhaitee).slice(0, 10) : ajouterJours(ctx.aujourdhui, delaiAppro)
+  const detailSeuil = [
+    `SS ${fmtNum(ssBase, 1)}`,
+    frequenceJours > 0 ? `+ période d'appro ${frequenceJours} j (μ × ${frequenceJours}/30 = ${fmtNum(ajoutFrequence, 1)})` : null,
+    ctx.seuilInclutDelaiAppro ? `+ délai d'appro ${fmtNum(delaiAppro)} j (μ × ${fmtNum(delaiAppro)}/30 = ${fmtNum(ajoutDelai, 1)})` : null,
+  ].filter(Boolean).join(' ')
 
   const modeLib = demandeMode === 1 ? `réservé ≤ ${fmtDate(dateReception)} : ${fmtNum(reservePeriode)}` : demandeMode === 2 ? `μ ${fmtNum(mu, 1)} × ${delaiL}/30 = ${fmtNum(consoDelai, 1)}` : `max(réservé ≤ ${fmtDate(dateReception)} : ${fmtNum(reservePeriode)} ; μ ${fmtNum(mu, 1)} × ${delaiL}/30 = ${fmtNum(consoDelai, 1)})`
   const explication = [
     `Méthode ${METHODE_PAR_CODE[methode].lettre} · ${METHODE_PAR_CODE[methode].label} (${source})`,
     `Délai L = ${delaiL} j → réception le ${fmtDate(dateReception)} · μ ${muSource === '3m' ? '3 mois' : '12 mois'} = ${fmtNum(mu, 1)}/mois · périmètre ${global ? 'global (tous dépôts)' : 'dépôt FMS'}`,
-    `Stock physique ${fmtNum(stockBase)} − demande ${fmtNum(demande, 1)} [${modeLib}] + encours livré ≤ L ${fmtNum(encoursPeriode)} = stock à réception ${fmtNum(stockReception, 1)}`,
+    `Stock disponible SAGE ${fmtNum(stockBase)} (physique − préparations de livraison) − demande ${fmtNum(demande, 1)} [${modeLib}] + encours livré ≤ L ${fmtNum(encoursPeriode)} = stock à réception ${fmtNum(stockReception, 1)}`,
     `Couverture à réception = ${fmtNum(stockReception, 1)} / ${fmtNum(mu, 1)} = ${couvReception === null ? '— (μ = 0)' : fmtNum(couvReception, 1) + ' mois'}`,
     methode === 'min_max'
-      ? `Déclencheur A : stock à réception ${fmtNum(stockReception, 1)} ${stockReception < seuilA ? '<' : '≥'} stock de sécurité ${fmtNum(seuilA, 1)} → ${declenche ? 'commander jusqu\'au stock max ' + fmtNum(stockMaxA) : 'pas de commande'}`
+      ? `Déclencheur A : stock à réception ${fmtNum(stockReception, 1)} ${stockReception < seuilA ? '<' : '≥'} seuil ${fmtNum(seuilA, 1)} [${detailSeuil}] → ${declenche ? `commander jusqu'à ${cibleA > stockMaxA ? 'le seuil ' + fmtNum(cibleA, 1) + ' (stock max ' + fmtNum(stockMaxA) + ' inférieur)' : 'au stock max ' + fmtNum(stockMaxA)}` : 'pas de commande'}`
       : `Déclencheur B : couverture ${couvReception === null ? '—' : fmtNum(couvReception, 1)} ${couvReception !== null && couvReception < couvMin ? '<' : '≥'} min ${fmtNum(couvMin, 1)} mois (${couvSource}) → ${declenche ? 'recompléter à cible ' + fmtNum(couvCible, 1) + ' mois = ' + fmtNum(couvCible * mu, 1) : 'pas de commande'}`,
     bloque ? (a.blocage_appro ? '⛔ Blocage appro SAGE : aucune proposition' : 'Arrêt appro (saisie) : aucune proposition') : !a.pertinent_calcul_besoin ? 'Hors MYSTOCK actif : aucune proposition' : null,
     `Proposition : ${fmtNum(qteProposee)}${colisage > 1 ? ` (colisage ${fmtNum(colisage)})` : ''}${qteRetenue !== null ? ` · retenue : ${fmtNum(qteRetenue)}` : ''}`,
@@ -1967,7 +1999,7 @@ function calculerProposition(a: ArtRow, ctx: ContexteProposition): Proposition {
 
   return { methode, lettre: METHODE_PAR_CODE[methode].lettre, source, couvMin, couvCible, couvSource, perimetreGlobal: global, delaiL, dateReception, mu, muSource,
     stockBase, reservePeriode, reserveApres, reserveTotal, encoursPeriode, encoursApres, encoursDouteux, consoDelai, demande, demandeMode,
-    stockReception, couvReception, seuilA, stockMaxA, declenche, bloque, qteProposee, colisage, qteRetenue, qteFinale, dateSouhaitee, explication }
+    stockReception, couvReception, seuilA, stockMaxA, ssBase, ajoutFrequence, ajoutDelai, frequenceJours, delaiApproJours: delaiAppro, cibleA, declenche, bloque, qteProposee, colisage, qteRetenue, qteFinale, dateSouhaitee, explication }
 }
 
 /** Cellules « Qté retenue » et « Date liv. souhaitée » : saisie ligne à ligne,
@@ -2134,7 +2166,13 @@ function ArticleManuelModal({ article, fournisseur, prop, ctxProp, onClose, onSa
 // Modèle de projection (paramètres appro_parametres projection_*)
 // ─────────────────────────────────────────────────────────────────────────
 
-const PROJECTION_PARAM_KEYS = ['projection_perimetre_global', 'projection_demande_mode', 'projection_horizon_delai', 'projection_mu_source']
+const PROJECTION_PARAM_KEYS = ['projection_perimetre_global', 'projection_demande_mode', 'projection_horizon_delai', 'projection_mu_source', 'frequence_appro_mystock_jours', 'seuil_a_inclut_delai_appro']
+const FREQUENCES_APPRO: { value: number; label: string }[] = [
+  { value: 30, label: 'Mensuelle (30 j)' },
+  { value: 15, label: 'Bimensuelle (15 j)' },
+  { value: 7, label: 'Hebdomadaire (7 j)' },
+  { value: 0, label: 'Aucune (seuil = stock de sécurité)' },
+]
 const DEMANDE_MODES: { value: number; label: string; detail: string }[] = [
   { value: 1, label: 'Réservations fermes', detail: 'réservé SAGE (sto_res) uniquement' },
   { value: 2, label: 'Consommation moyenne', detail: 'μ × horizon / 30 uniquement' },
@@ -2155,6 +2193,8 @@ function ModeleProjection({ parametres, onParametresChange, onRecalcul, loading 
   const demande = valParam(parametres, 'projection_demande_mode', 3)
   const horizonDelai = valParam(parametres, 'projection_horizon_delai', 1) === 1
   const mu3m = valParam(parametres, 'projection_mu_source', 0) === 1
+  const frequence = valParam(parametres, 'frequence_appro_mystock_jours', 30)
+  const avecDelai = valParam(parametres, 'seuil_a_inclut_delai_appro', 0) === 1
   const [saving, setSaving] = useState(false)
 
   async function changer(cle: string, valeur: number) {
@@ -2172,7 +2212,7 @@ function ModeleProjection({ parametres, onParametresChange, onRecalcul, loading 
 
   const sel = 'h-9 rounded-lg border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold text-[#3A362E] disabled:opacity-60'
   return (
-    <div className="mt-3 grid gap-2 rounded-lg border border-[#E5E1D8] bg-[#F4F3F0] p-3 md:grid-cols-4">
+    <div className="mt-3 grid gap-2 rounded-lg border border-[#E5E1D8] bg-[#F4F3F0] p-3 md:grid-cols-3 xl:grid-cols-6">
       <label className="flex flex-col gap-0.5 text-[12px]">
         <span className="font-semibold text-[#3A362E]">Périmètre</span>
         <select value={global ? 1 : 0} disabled={saving || loading} onChange={(e) => void changer('projection_perimetre_global', Number(e.target.value))} className={sel}>
@@ -2204,7 +2244,23 @@ function ModeleProjection({ parametres, onParametresChange, onRecalcul, loading 
         </select>
         <span className="text-[11px] text-[#8A8474]">{mu3m ? 'Plus réactif en saison ; le stock min/sécurité reste calculé sur 12 mois' : 'Moyenne lissée sur l\'horizon du calcul de besoin'}</span>
       </label>
-      {saving && <div className="text-[11px] text-[#8A8474] md:col-span-4">Enregistrement puis recalcul…</div>}
+      <label className="flex flex-col gap-0.5 text-[12px]">
+        <span className="font-semibold text-[#3A362E]">Fréquence d'appro MYSTOCK (méthode A)</span>
+        <select value={frequence} disabled={saving || loading} onChange={(e) => void changer('frequence_appro_mystock_jours', Number(e.target.value))} className={sel}>
+          {FREQUENCES_APPRO.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
+          {!FREQUENCES_APPRO.some((f) => f.value === frequence) && <option value={frequence}>{frequence} j</option>}
+        </select>
+        <span className="text-[11px] text-[#8A8474]">{frequence > 0 ? `Seuil A = SS + μ × ${frequence}/30 : le stock à réception doit tenir jusqu'à la réception suivante` : 'Seuil A = stock de sécurité seul'}</span>
+      </label>
+      <label className="flex flex-col gap-0.5 text-[12px]">
+        <span className="font-semibold text-[#3A362E]">Délai d'appro dans le seuil A</span>
+        <select value={avecDelai ? 1 : 0} disabled={saving || loading} onChange={(e) => void changer('seuil_a_inclut_delai_appro', Number(e.target.value))} className={sel}>
+          <option value={0}>Non</option>
+          <option value={1}>Oui : SS + conso du délai d'appro</option>
+        </select>
+        <span className="text-[11px] text-[#8A8474]">{avecDelai ? 'Ajoute μ × délai d\'appro fournisseur / 30 au stock de sécurité' : 'Le délai est déjà couvert par la projection à la date de réception'}</span>
+      </label>
+      {saving && <div className="text-[11px] text-[#8A8474] md:col-span-3 xl:col-span-6">Enregistrement puis recalcul…</div>}
     </div>
   )
 }
@@ -2226,7 +2282,7 @@ const COLONNES_ARTICLES: { key: CleColArt; label: string; title?: string; align:
   { key: 'fourn', label: 'Fourn.', title: 'Fournisseur principal (n° SAGE). Filtre sur le n° ou l\'intitulé', align: 'left', placeholder: 'n° ou nom', val: (a) => a.fournisseur_principal },
   { key: 'strategie', label: 'Stratégie', title: 'Stratégie d\'appro principale du fournisseur', align: 'left', val: (a, c) => (a.fournisseur_principal ? c.fournMap.get(a.fournisseur_principal)?.strategie_principale : null) || '' },
   { key: 'blocage', label: 'Blocage', title: 'Blocage appro SAGE (AR_InterdireCommande), exclusion (AR_Exclure), vie produit (import CSV) et arrêt appro / vente saisi (✎). Filtre : "blocage", "exclu", "fin", "arrêt", "vide"', align: 'left', placeholder: 'blocage', val: (a) => [a.blocage_appro ? 'Blocage appro' : '', a.exclure_appro ? 'Exclu' : '', a.vie_produit || '', a.arret_appro ? 'Arrêt appro' : '', a.arret_vente ? 'Arrêt vente' : '', a.ref_remplacante ? '→ ' + a.ref_remplacante : ''].filter(Boolean).join(' ') },
-  { key: 'methode', label: 'Méthode', title: 'Méthode de réappro appliquée : A Min/Max (stock de sécurité → max) ou B Couverture cible (min / cible en mois), avec son origine (forcée écran, référence, fournisseur, défaut) et ses paramètres. Clic = modifier. Filtre : "A", "B", "fournisseur", "référence"', align: 'left', placeholder: 'A / B', val: (a, c) => { const p = propDe(c, a); return p ? `${p.lettre} ${p.source} ${p.methode === 'couverture' ? `min ${fmtNum(p.couvMin, 1)} cible ${fmtNum(p.couvCible, 1)}` : `SS ${fmtNum(p.seuilA)} max ${fmtNum(p.stockMaxA)}`}` : '' } },
+  { key: 'methode', label: 'Méthode', title: 'Méthode de réappro appliquée : A Min/Max (seuil = SS + période d\'appro MYSTOCK [+ délai d\'appro] → max) ou B Couverture cible (min / cible en mois), avec son origine (forcée écran, référence, fournisseur, défaut) et ses paramètres. Clic = modifier. Filtre : "A", "B", "fournisseur", "référence"', align: 'left', placeholder: 'A / B', val: (a, c) => { const p = propDe(c, a); return p ? `${p.lettre} ${p.source} ${p.methode === 'couverture' ? `min ${fmtNum(p.couvMin, 1)} cible ${fmtNum(p.couvCible, 1)}` : `seuil ${fmtNum(p.seuilA)} max ${fmtNum(p.stockMaxA)}`}` : '' } },
   { key: 'delai_l', label: 'Délai L', title: 'Délai d\'appro + délai de sécurité (jours calendaires) — ref = valeurs propres à la référence, sinon fournisseur / défaut', align: 'right', val: (a) => a.projection_delai_l },
   { key: 'mu12', label: 'μ 12 mois', title: 'Conso moyenne mensuelle sur l\'horizon (12 mois)', align: 'right', val: (a) => a.conso_moy_mensuelle },
   { key: 'sigma', label: 'σ', title: 'Écart-type mensuel', align: 'right', val: (a) => a.conso_ecart_type },
@@ -2235,7 +2291,7 @@ const COLONNES_ARTICLES: { key: CleColArt; label: string; title?: string; align:
   { key: 'dispo', label: 'Dispo', title: 'Stock disponible SAGE (sto_dispo) tous dépôts — entre parenthèses : dépôt FMS seul. Survole pour le stock physique.', align: 'right', val: (a) => a.sage_stock_dispo_total },
   { key: 'encours', label: 'Encours', title: 'Reste à livrer des commandes fournisseurs BLG (périmètre) dont la livraison estimée tombe dans le délai L → compté dans le stock à réception ; entre parenthèses : livré après L (non compté). ⏱ = en retard, ? = douteux (exclu). Survole pour le détail par commande.', align: 'right', val: (a, c) => propDe(c, a)?.encoursPeriode ?? null },
   { key: 'reserve', label: 'Réservé', title: 'Ventes réservées SAGE (lignes de commande client, reliquat = sto_res) dont la date de livraison prévue tombe dans le délai L (y compris en retard) → déduites du stock à réception. Entre parenthèses : à livrer après L (non déduit). Périmètre global ou FMS selon le modèle.', align: 'right', val: (a, c) => propDe(c, a)?.reservePeriode ?? null },
-  { key: 'projete', label: 'Stock récep.', title: 'Stock juste avant la réception de la commande passée aujourd\'hui (dans L jours) = stock physique (périmètre) − demande sur L (réservé daté, μ × L/30 ou le max selon le modèle) + encours livré ≤ L. Survole pour le détail. Rouge = déclenche une proposition.', align: 'right', val: (a, c) => propDe(c, a)?.stockReception ?? null },
+  { key: 'projete', label: 'Stock récep.', title: 'Stock juste avant la réception de la commande passée aujourd\'hui (dans L jours) = stock disponible SAGE, physique − préparations (périmètre) − demande sur L (réservé daté, μ × L/30 ou le max selon le modèle) + encours livré ≤ L. Survole pour le détail. Rouge = déclenche une proposition.', align: 'right', val: (a, c) => propDe(c, a)?.stockReception ?? null },
   { key: 'couv', label: 'Couv.', title: 'Couverture à réception = stock à réception / μ retenu (12 mois ou 3 mois selon le modèle).', align: 'right', val: (a, c) => propDe(c, a)?.couvReception ?? null },
   { key: 'min_sage', label: 'Min SAGE', align: 'right', val: (a) => a.sage_stock_min_fms },
   { key: 'min_blg', label: 'Min BLG', align: 'right', val: (a) => a.blg_stock_min_fms },
@@ -2337,6 +2393,8 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
     couvMinDefaut: valParam(parametres, 'couverture_min_defaut_mois', 2), couvCibleDefaut: valParam(parametres, 'couverture_cible_defaut_mois', 3),
     retardMaxJours: valParam(parametres, 'cdf_retard_max_jours', 60),
     aujourdhui: isoLocal(new Date()),
+    frequenceApproJours: valParam(parametres, 'frequence_appro_mystock_jours', 30),
+    seuilInclutDelaiAppro: valParam(parametres, 'seuil_a_inclut_delai_appro', 0) === 1,
   }), [paramsFourn, methodeForcee, parametres])
   const propositions = useMemo(() => new Map(articles.map((a) => [a.reference_article, calculerProposition(a, ctxProp)])), [articles, ctxProp])
   const ctxCol = useMemo<CtxColArt>(() => ({ fournMap, incoherencesParRef, propositions }), [fournMap, incoherencesParRef, propositions])
@@ -2588,12 +2646,12 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
         { h: 'Méthode réappro', f: (a) => { const p = propositions.get(a.reference_article); return p ? `${p.lettre} · ${METHODE_PAR_CODE[p.methode].label} (${p.source})` : '' } },
         { h: 'Couverture min (mois)', f: (a) => propositions.get(a.reference_article)?.couvMin }, { h: 'Couverture cible (mois)', f: (a) => propositions.get(a.reference_article)?.couvCible },
         { h: 'Date réception (aujourd\'hui + L)', f: (a) => fmtDate(propositions.get(a.reference_article)?.dateReception) },
-        { h: 'Stock physique (périmètre)', f: (a) => propositions.get(a.reference_article)?.stockBase }, { h: 'Réservé ≤ L', f: (a) => propositions.get(a.reference_article)?.reservePeriode }, { h: 'Réservé après L', f: (a) => propositions.get(a.reference_article)?.reserveApres },
+        { h: 'Stock disponible SAGE (périmètre)', f: (a) => propositions.get(a.reference_article)?.stockBase }, { h: 'Réservé ≤ L', f: (a) => propositions.get(a.reference_article)?.reservePeriode }, { h: 'Réservé après L', f: (a) => propositions.get(a.reference_article)?.reserveApres },
         { h: 'Encours ≤ L', f: (a) => propositions.get(a.reference_article)?.encoursPeriode }, { h: 'Encours après L', f: (a) => propositions.get(a.reference_article)?.encoursApres },
         { h: 'Demande sur L', f: (a) => propositions.get(a.reference_article)?.demande }, { h: 'Stock à réception', f: (a) => propositions.get(a.reference_article)?.stockReception }, { h: 'Couverture à réception (mois)', f: (a) => propositions.get(a.reference_article)?.couvReception },
         { h: 'Déclenche', f: (a) => (propositions.get(a.reference_article)?.declenche ? 'Oui' : 'Non') }, { h: 'Proposition', f: (a) => propositions.get(a.reference_article)?.qteProposee }, { h: 'Qté retenue (saisie)', f: (a) => a.qte_proposition_manuelle }, { h: 'Qté commande', f: (a) => propositions.get(a.reference_article)?.qteFinale }, { h: 'Livraison souhaitée', f: (a) => fmtDate(propositions.get(a.reference_article)?.dateSouhaitee) },
         { h: 'Explication', f: (a) => propositions.get(a.reference_article)?.explication.join(' | ') },
-        { h: 'Stock sécurité calculé', f: (a) => a.calc_stock_securite }, { h: 'Stock min calculé/retenu', f: (a) => a.calc_stock_min }, { h: 'Stock max calculé', f: (a) => a.calc_stock_max },
+        { h: 'Stock sécurité calculé', f: (a) => a.calc_stock_securite }, { h: 'Seuil A (SS + période + délai)', f: (a) => propositions.get(a.reference_article)?.seuilA }, { h: 'dont période d\'appro', f: (a) => propositions.get(a.reference_article)?.ajoutFrequence }, { h: 'dont délai d\'appro', f: (a) => propositions.get(a.reference_article)?.ajoutDelai }, { h: 'Stock min calculé/retenu', f: (a) => a.calc_stock_min }, { h: 'Stock max calculé', f: (a) => a.calc_stock_max },
         { h: 'Stock min retenu (saisie)', f: (a) => a.stock_min_retenu }, { h: 'Commentaire', f: (a) => a.commentaire_stock_min },
         { h: 'Stock min FMS SAGE', f: (a) => a.sage_stock_min_fms }, { h: 'Stock max FMS SAGE', f: (a) => a.sage_stock_max_fms },
         { h: 'Stock min DPFMS BLG', f: (a) => a.blg_stock_min_fms }, { h: 'Stock max DPFMS BLG', f: (a) => a.blg_stock_max_fms },
@@ -2787,7 +2845,7 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
           <div className="text-[11px] leading-relaxed text-[#3A362E]">
             <div><b>A · Min/Max — point de commande</b> : stock à réception &lt; stock de sécurité (z × σ × √(L/30)) → quantité = stock max − stock à réception.</div>
             <div><b>B · Couverture cible à réception</b> : couverture à réception (stock à réception / μ) &lt; couverture min → quantité = couverture cible × μ − stock à réception. Défauts : min {fmtNum(ctxProp.couvMinDefaut, 1)} mois, cible {fmtNum(ctxProp.couvCibleDefaut, 1)} mois (paramètres couverture_*_defaut_mois).</div>
-            <div className="mt-0.5 text-[#8A8474]">Stock à réception = stock physique ({valParam(parametres, 'projection_perimetre_global', 0) === 1 ? 'global' : 'FMS'}) − demande sur le délai L ({DEMANDE_MODES.find((m) => m.value === valParam(parametres, 'projection_demande_mode', 3))?.label.toLowerCase()} : réservé SAGE daté ≤ L et/ou μ {valParam(parametres, 'projection_mu_source', 0) === 1 ? '3 mois' : '12 mois'} × L/30) + encours fournisseur livré ≤ L. Les quantités sont arrondies au colisage ; une référence en blocage appro ou en arrêt appro ne reçoit aucune proposition. Survole la colonne « Proposition » pour le calcul détaillé d'une référence ; clique « Méthode » ou ✎ pour modifier ses paramètres.</div>
+            <div className="mt-0.5 text-[#8A8474]">Stock à réception = stock disponible SAGE, physique − préparations de livraison ({valParam(parametres, 'projection_perimetre_global', 0) === 1 ? 'global' : 'FMS'}) − demande sur le délai L ({DEMANDE_MODES.find((m) => m.value === valParam(parametres, 'projection_demande_mode', 3))?.label.toLowerCase()} : réservé SAGE daté ≤ L et/ou μ {valParam(parametres, 'projection_mu_source', 0) === 1 ? '3 mois' : '12 mois'} × L/30) + encours fournisseur SAGE livré ≤ L. Méthode A : seuil = stock de sécurité + conso de la période d'appro ({valParam(parametres, 'frequence_appro_mystock_jours', 30)} j, réf. MYSTOCK){valParam(parametres, 'seuil_a_inclut_delai_appro', 0) === 1 ? ' + conso du délai d\'appro' : ''}. Les quantités sont arrondies au colisage ; une référence en blocage appro ou en arrêt appro ne reçoit aucune proposition. Survole la colonne « Proposition » pour le calcul détaillé d'une référence ; clique « Méthode » ou ✎ pour modifier ses paramètres.</div>
           </div>
         </div>
         {showParams && (
@@ -2881,10 +2939,10 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
                       </div>
                     </td>
                     <td className="px-2 py-1.5 text-[11px]">
-                      <button type="button" onClick={() => setEditArticle(a)} title={`${p.lettre} · ${METHODE_PAR_CODE[p.methode].label} (${p.source})\n${p.methode === 'couverture' ? `Couverture min ${fmtNum(p.couvMin, 1)} mois · cible ${fmtNum(p.couvCible, 1)} mois (${p.couvSource})` : `Stock de sécurité ${fmtNum(p.seuilA, 1)} · stock max ${fmtNum(p.stockMaxA)}`}\nClic : modifier la méthode / les paramètres de la référence`}
+                      <button type="button" onClick={() => setEditArticle(a)} title={`${p.lettre} · ${METHODE_PAR_CODE[p.methode].label} (${p.source})\n${p.methode === 'couverture' ? `Couverture min ${fmtNum(p.couvMin, 1)} mois · cible ${fmtNum(p.couvCible, 1)} mois (${p.couvSource})` : `Seuil ${fmtNum(p.seuilA, 1)} = SS ${fmtNum(p.ssBase, 1)}${p.ajoutFrequence ? ` + période ${p.frequenceJours} j ${fmtNum(p.ajoutFrequence, 1)}` : ''}${p.ajoutDelai ? ` + délai d'appro ${fmtNum(p.ajoutDelai, 1)}` : ''} · stock max ${fmtNum(p.stockMaxA)}`}\nClic : modifier la méthode / les paramètres de la référence`}
                         className="flex items-center gap-1 rounded px-1 py-0.5 hover:bg-[#F4F3F0]">
                         <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${p.methode === 'couverture' ? 'bg-sky-100 text-sky-800' : 'bg-[#111820] text-white'}`}>{p.lettre}</span>
-                        <span className="text-[10px] leading-tight text-[#3A362E]">{p.methode === 'couverture' ? `min ${fmtNum(p.couvMin, 1)} · cible ${fmtNum(p.couvCible, 1)} m` : `SS ${fmtNum(p.seuilA)} · max ${fmtNum(p.stockMaxA)}`}<br /><span className={`text-[#8A8474] ${p.source === 'référence' || p.source === 'forcée' ? 'font-semibold text-[#96600F]' : ''}`}>{p.source}</span></span>
+                        <span className="text-[10px] leading-tight text-[#3A362E]">{p.methode === 'couverture' ? `min ${fmtNum(p.couvMin, 1)} · cible ${fmtNum(p.couvCible, 1)} m` : `seuil ${fmtNum(p.seuilA)} · max ${fmtNum(p.stockMaxA)}`}<br /><span className={`text-[#8A8474] ${p.source === 'référence' || p.source === 'forcée' ? 'font-semibold text-[#96600F]' : ''}`}>{p.source}</span></span>
                       </button>
                     </td>
                     <td className="px-2 py-1.5 text-right" title={`Délai d'appro ${fmtNum(delaiRef ? a.delai_appro_ref_jours : a.delai_appro_jours)} j${delaiRef ? ' (référence)' : ' (fournisseur / défaut)'} + sécurité ${fmtNum(secuRef ? a.delai_securite_ref_jours : a.delai_securite_jours)} j${secuRef ? ' (référence)' : ' (fournisseur / défaut)'}`}>
