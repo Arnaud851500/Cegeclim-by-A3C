@@ -37,9 +37,9 @@
  *   - MyStock SAGE = OUI  ↔  tag BLG « FMS »
  *   - Interdire en commande SAGE = Oui  ↔  nature BLG « Classique - Achat interdit »
  *     ou « Parc - Achat interdit »
- *   - En sommeil SAGE  ↔  Archivé BLG. À l'archivage, BLG vide la référence
- *     principale et la référence interne de l'article (ses références passent en
- *     « Références inactives ») : colonne `archive` de mv_blg_articles_complet.
+ *   - En sommeil SAGE  ↔  Archivé BLG = blg.article_part.internal_tag = 'archive'
+ *     (valeurs normal / archive ; vérifié le 25/09/2026 contre l'export BLG des
+ *     articles archivés : 3 038 / 3 038). Colonne `archive` de mv_blg_articles_complet.
  *
  * Les deux vues matérialisées sont rafraîchies toutes les heures (pg_cron, à hh:15)
  * et à la demande par le bouton « Actualiser » (RPC refresh_controle_articles).
@@ -1603,7 +1603,7 @@ function OngletComparaison({ version }: { version: number }) {
             <li>Nomenclature : composants SAGE (sage.nomenclature) ↔ marques de la nomenclature BLG de même référence, ordre libre ; quantités différentes = orange.</li>
             <li>MyStock = OUI (SAGE) doit correspondre au tag « FMS » (BLG).</li>
             <li>Interdire en commande = Oui (SAGE) doit correspondre à une nature BLG « Classique - Achat interdit » ou « Parc - Achat interdit ».</li>
-            <li>En sommeil (SAGE) doit correspondre à un article archivé dans BLG (référence principale vidée par BLG à l'archivage, références passées en inactives).</li>
+            <li>En sommeil (SAGE) doit correspondre à un article archivé dans BLG (champ BLG article_part.internal_tag = « archive »).</li>
             <li>Famille, statut et publication : affichés côte à côte, pas d'équivalence de codes entre SAGE et BLG.</li>
           </ul>
         </details>
