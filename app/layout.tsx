@@ -6,6 +6,7 @@ import type { Metadata, Viewport } from 'next'
 import { Space_Grotesk, IBM_Plex_Sans, IBM_Plex_Mono } from 'next/font/google'
 import './globals.css'
 import ClientRootShell from './ClientRootShell'
+import PwaSetup from '@/components/PwaSetup'
 
 export const metadata: Metadata = {
   title: 'Le compagnon CEGECLIM',
@@ -32,8 +33,10 @@ const fontMono = IBM_Plex_Mono({ subsets: ['latin'], weight: ['400', '500', '600
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html>
+    <html lang="fr">
       <body className={`${fontDisplay.variable} ${fontBody.variable} ${fontMono.variable}`}>
+        {/* 25/09/2026 : service worker + capture de l'invite d'installation (page /installer) */}
+        <PwaSetup />
         <ClientRootShell>{children}</ClientRootShell>
       </body>
     </html>

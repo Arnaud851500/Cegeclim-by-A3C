@@ -14,6 +14,9 @@ const fontMono = IBM_Plex_Mono({ subsets: ['latin'], weight: ['400', '500', '600
 /** Préfixe des clés localStorage mémorisant les messages déjà masqués. */
 const ANNONCE_MASQUEE_PREFIX = 'cegeclim_annonce_masquee_'
 
+/** Dernier identifiant utilisé sur cet appareil (préremplissage du formulaire). */
+const LAST_EMAIL_KEY = 'cegeclim_last_login_email'
+
 type Annonce = {
   id: string
   titre: string | null
@@ -182,6 +185,20 @@ export default function LoginScreen({ brand }: { brand: LoginBrand }) {
   const [errorMsg, setErrorMsg] = useState('')
   const [loading, setLoading] = useState(false)
 
+  // 25/09/2026 — préremplissage de l'identifiant (jamais du mot de passe) :
+  // 1) paramètre ?u=prenom.nom@… posé par le QR code personnel / /installer ;
+  // 2) sinon, dernier identifiant utilisé sur cet appareil.
+  useEffect(() => {
+    try {
+      const fromUrl = new URLSearchParams(window.location.search).get('u')?.trim()
+      const remembered = window.localStorage.getItem(LAST_EMAIL_KEY)?.trim()
+      const initial = fromUrl || remembered
+      if (initial) setEmail((current) => current || initial)
+    } catch {
+      // stockage indisponible (navigation privée) : rien à préremplir
+    }
+  }, [])
+
   const logoCegeclim =
     'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/cegecilm%20officiel.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL2NlZ2VjaWxtIG9mZmljaWVsLmpwZyIsImlhdCI6MTc3NDY1MTM3OSwiZXhwIjo0ODk2NzE1Mzc5fQ.ePcMFHir7RsvdR-cR7nwh83H03S8oihNKwVgK2eCmy0'
 
@@ -243,6 +260,12 @@ export default function LoginScreen({ brand }: { brand: LoginBrand }) {
         })
       } catch (err) {
         console.warn('[login] journalisation impossible :', err)
+      }
+
+      try {
+        window.localStorage.setItem(LAST_EMAIL_KEY, data.user?.email || normalizedEmail)
+      } catch {
+        // stockage indisponible : le préremplissage ne sera simplement pas proposé
       }
 
       let landingPage = brand.defaultLandingPage

@@ -69,6 +69,7 @@ import {
 const LOGIN_PATH = '/login'
 const FINANCEMENT_LOGIN_PATH = '/financement/login'
 const FINANCEMENT_HOME = '/financement'
+const INSTALLER_PATH = '/installer'
 
 /** Libellé de l'alerte couverture stock (ex-« Non servables »). Utilisé tel
  * quel dans le bandeau, le Centre d'alertes et les infobulles. */
@@ -590,7 +591,10 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const access = usePageFilterAccess()
   const [statusScopeOverride, setStatusScopeOverride] = useState<StatusScopeOverride | null>(null)
   const isFinancementArea = pathname === FINANCEMENT_HOME || pathname.startsWith(`${FINANCEMENT_HOME}/`)
-  const isLoginPage = pathname === LOGIN_PATH || pathname === FINANCEMENT_LOGIN_PATH
+  // /installer (25/09/2026) : page publique d'installation sur l'écran
+  // d'accueil, ouverte par le QR code — même traitement qu'une page de
+  // connexion (pas de redirection, pas de bandeau).
+  const isLoginPage = pathname === LOGIN_PATH || pathname === FINANCEMENT_LOGIN_PATH || pathname === INSTALLER_PATH
   // Porte d'entrée à utiliser quand il faut renvoyer vers la connexion :
   // on reste dans l'univers d'où l'on vient.
   const loginPathForArea = isFinancementArea ? FINANCEMENT_LOGIN_PATH : LOGIN_PATH
