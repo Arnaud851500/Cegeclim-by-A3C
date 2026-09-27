@@ -34,6 +34,12 @@
 //   - Chargement paginé (1000 lignes par page) pour les références à
 //     nombreuses lignes CDC.
 //   - ?ref=XXXX ouvre directement la fiche.
+// CORRECTIF (2026-09-27) : la projection (liste + fiche) lit désormais
+//   v_couverture_stock_besoins, qui renvoie TOUTES les CDC de l'article quel
+//   que soit le portefeuille de l'utilisateur (client masqué hors périmètre,
+//   colonne visible). Auparavant v_portefeuille_couverture_stock était filtrée
+//   par la RLS commerciale : un utilisateur restreint voyait un stock
+//   « disponible » sur des articles entièrement réservés par d'autres clients.
 // Sur mobile (< 768 px) on rend MobileStockArticles tel quel.
 // ============================================================================
 
@@ -98,6 +104,8 @@ type CouvertureRow = {
   stock_projete_a_date: number
   manque_a_date: number
   statut_couverture: 'COUVERT' | 'COUVERT_PAR_RECEPTION' | 'RECEPTION_TARDIVE' | 'RUPTURE'
+  /** false : CDC d'un client hors du portefeuille de l'utilisateur (client masqué, quantité comptée). */
+  visible: boolean
   date_couverture_estimee: string | null
   retard_estime_jours: number | null
   prochaine_reception_date: string | null
@@ -540,7 +548,7 @@ function StockDesktop() {
             fetchAll<any>((from, to) => supabase.from('v_couverture_stock_receptions')
               .select('reference_article,ligne_cdf_id,numero_cdf,date_reception_retenue,quantite_attendue,hypothese_reception')
               .in('reference_article', lot).order('reference_article').order('date_reception_retenue').order('ligne_cdf_id').range(from, to)),
-            fetchAll<any>((from, to) => supabase.from('v_portefeuille_couverture_stock')
+            fetchAll<any>((from, to) => supabase.from('v_couverture_stock_besoins')
               .select('id,reference_article,date_livraison,quantite,stock_disponible,rang_service')
               .in('reference_article', lot).order('reference_article').order('rang_service').order('id').range(from, to)),
           ])
@@ -1032,8 +1040,8 @@ function ArticleDetail({
           supabase.rpc('get_stock_par_depot', { p_reference_article: reference }),
           fetchAll<any>((from, to) => supabase.from('v_couverture_stock_receptions').select('*').eq('reference_article', reference)
             .order('date_reception_retenue', { ascending: true }).order('ligne_cdf_id').range(from, to)),
-          fetchAll<any>((from, to) => supabase.from('v_portefeuille_couverture_stock')
-            .select('id,numero_document,numero_tiers,nom_tiers,representant,agence,date_creation_document,date_livraison,quantite,montant_ht,rang_service,stock_disponible,besoin_cumule,receptions_avant_livraison,stock_projete_a_date,manque_a_date,statut_couverture,date_couverture_estimee,retard_estime_jours,prochaine_reception_date,prochaine_reception_quantite,prochaine_reception_cdf,prochaine_reception_hypothese')
+          fetchAll<any>((from, to) => supabase.from('v_couverture_stock_besoins')
+            .select('id,numero_document,numero_tiers,nom_tiers,representant,agence,date_creation_document,date_livraison,quantite,montant_ht,rang_service,stock_disponible,besoin_cumule,receptions_avant_livraison,stock_projete_a_date,manque_a_date,statut_couverture,date_couverture_estimee,retard_estime_jours,prochaine_reception_date,prochaine_reception_quantite,prochaine_reception_cdf,prochaine_reception_hypothese,visible')
             .eq('reference_article', reference)
             .order('rang_service', { ascending: true }).order('id').range(from, to)),
           supabase.from('v_stock_articles_latest').select('designation,stock_disponible,stock_reel,stock_a_terme').eq('reference_article', reference).maybeSingle(),
@@ -1051,6 +1059,7 @@ function ArticleDetail({
           manque_a_date: toNumber(r.manque_a_date),
           prochaine_reception_quantite: r.prochaine_reception_quantite === null ? null : toNumber(r.prochaine_reception_quantite),
           prochaine_reception_hypothese: Boolean(r.prochaine_reception_hypothese),
+          visible: r.visible !== false,
         })) as CouvertureRow[])
         const s = stockRes.data as any
         setStockGlobal(s ? { stock_disponible: toNumber(s.stock_disponible), stock_reel: toNumber(s.stock_reel), stock_a_terme: toNumber(s.stock_a_terme) } : null)
@@ -1178,7 +1187,7 @@ function ArticleDetail({
                     <tr key={r.id}>
                       <td style={{ ...styles.td, fontFamily: 'var(--font-mono)', fontWeight: 700, color: '#fff' }}>{r.numero_document}</td>
                       <td style={styles.td}>
-                        <div style={{ color: '#fff' }}>{r.nom_tiers || r.numero_tiers}</div>
+                        <div style={{ color: r.visible ? '#fff' : 'rgba(255,255,255,0.55)', fontStyle: r.visible ? undefined : 'italic' }}>{r.nom_tiers || r.numero_tiers}</div>
                         <div style={styles.tdSub}>{[r.agence, r.representant].filter(Boolean).join(' · ')}</div>
                       </td>
                       <td style={{ ...styles.td, whiteSpace: 'nowrap', color: r.date_livraison && r.date_livraison < todayIso() ? C_ROUGE : undefined }}>{formatDateFr(r.date_livraison)}</td>
