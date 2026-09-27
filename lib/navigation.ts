@@ -87,11 +87,11 @@ export const NAV_BLOCS: NavBloc[] = [
     pages: [
       { label: 'Vision ONE PAGE', path: '/tableaux-de-bord/vision-tci', accessKey: 'can_dashboard', description: 'Synthèse TCI en une page : commandes, livraisons, facturation, marge.' },
       { label: 'Activité quotidienne', path: '/focus_mensuel2', accessKey: 'can_dashboard', description: 'Focus mensuel jour par jour, faits marquants et projection de CA.' },
-      { label: 'Tableaux de bord', path: '/atelier-analyse', accessKey: 'can_dashboard', description: 'Atelier d’analyse et tableaux de bord personnalisables.' },
+      { label: 'Tableaux de bord', path: '/atelier-analyse', accessKey: 'can_autorisation', description: 'Atelier d’analyse et tableaux de bord personnalisables.' },
       { label: 'Analyse devis', path: '/cycle-documents', accessKey: 'can_dashboard', description: 'Cycle des documents et transformation des devis.' },
       { label: 'Courbes de flux', path: '/approvisionnements', accessKey: 'can_dashboard', description: 'Courbes Devis – CDC – BL – Factures dans le temps.' },
       { label: 'Activités – CA', path: '/activites', accessKey: 'can_autorisation', description: 'Suivre les activités et les indicateurs de chiffre d’affaires.' },
-      { label: 'Indicateurs', path: '/indicateurs', accessKey: 'can_dashboard', description: 'Principaux indicateurs de performance (commerce, services, coûts, stocks).' },
+      { label: 'Indicateurs', path: '/indicateurs', accessKey: 'can_autorisation', description: 'Principaux indicateurs de performance (commerce, services, coûts, stocks).' },
       { label: 'Analyse IA', path: '/atelier-analyse/assistant', accessKey: 'can_autorisation', description: 'Assistant d’analyse conversationnel sur les données de l’activité.' },
       { label: 'Indicateurs (pilotage)', path: '/Indicateurs', accessKey: 'can_autorisation', description: 'Vue pilotage des indicateurs, réservée aux administrateurs.' },
     ],
@@ -148,7 +148,7 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'Projection stock', path: '/stocks-disponibilites2', accessKey: 'can_stocks', description: 'Stock projeté par référence, hypothèses mensuelles et substitutions.' },
       { label: 'Reconstitution Stock', path: '/stock/reconstruction', accessKey: 'can_stocks', description: 'Reconstruction stock projeté et verification des promesses"' },
       { label: 'Vision dispo par groupe d article', path: '/stock/groupes', accessKey: 'can_stocks', description: 'Visibilite dispo à venir et livraisons possibles"' },
-      { label: 'Stocks', path: '/stock', accessKey: 'can_stocks', description: 'Consultation des stocks (FMS et Agences), stocks prévisionnels et visu des dates de disponibilité .' },
+      { label: 'Stocks', path: '/stock', accessKey: 'can_dashboard', description: 'Consultation des stocks (FMS et Agences), stocks prévisionnels et visu des dates de disponibilité .' },
     ],
   },
   {
