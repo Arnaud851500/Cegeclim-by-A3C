@@ -290,7 +290,54 @@ type ClientDetail = {
   prochaineVisite: VisiteEvent | null
   devisYtdN1: number
   transformationsEnCours: DevisTransformation[]
+  /** ÉVOLUTION (2026-09-28) : champ "Qualité" de la fiche tiers SAGE (ref_tiers.qualite). */
+  qualite: string
   loadErrors: string[]
+}
+
+/** ÉVOLUTION (2026-09-28) : couleur de la pastille "Qualité" SAGE.
+ * Valeurs rencontrées : VERT CHECK / VERT LC / VERT CEGECLIM, ORANGE CEGECLIM,
+ * ROUGE COMPTANT, CLOTURE, FG, et variantes préfixées "ROSE" (ROSEROUGECOMPTANT,
+ * ROSEORANGE CGCLIM, ROSE VERT LC…) -> couleur principale + anneau rose.
+ * Espaces multiples tolérés ("VERT  CHECK"). */
+function couleurQualite(raw: string): { couleur: string; rose: boolean } | null {
+  const q = safeText(raw).toUpperCase().replace(/\s+/g, ' ')
+  if (!q) return null
+  const rose = q.startsWith('ROSE')
+  const reste = rose ? q.slice(4).trim() : q
+  let couleur = '#8A8F99'
+  if (reste.includes('VERT')) couleur = '#3F9142'
+  else if (reste.includes('ORANGE')) couleur = '#E08A2E'
+  else if (reste.includes('ROUGE')) couleur = '#C8433A'
+  else if (reste.includes('CLOTURE')) couleur = '#4B5160'
+  else if (rose && !reste) couleur = '#E78AB8'
+  return { couleur, rose }
+}
+
+function PastilleQualite({ qualite }: { qualite: string }) {
+  const c = couleurQualite(qualite)
+  if (!c) return null
+  const libelle = safeText(qualite).replace(/\s+/g, ' ')
+  return (
+    <span
+      title={`Qualité SAGE : ${libelle}`}
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 6, borderRadius: 999,
+        border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(255,255,255,0.05)',
+        padding: '3px 10px 3px 6px', fontSize: 11.5, fontWeight: 600, color: 'rgba(255,255,255,0.75)',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      <span
+        aria-hidden="true"
+        style={{
+          width: 12, height: 12, borderRadius: '50%', background: c.couleur, flexShrink: 0,
+          boxShadow: c.rose ? '0 0 0 2px #E78AB8' : 'none',
+        }}
+      />
+      {libelle}
+    </span>
+  )
 }
 
 function aggregateByDocument(
@@ -746,7 +793,7 @@ export default function MobileClients({
           .limit(50),
         supabase
           .from('ref_tiers')
-          .select('adresse,complement_adresse,code_postal,ville,telephone')
+          .select('adresse,complement_adresse,code_postal,ville,telephone,qualite')
           .eq('numero', client.numero)
           .maybeSingle(),
         supabase
@@ -820,6 +867,7 @@ export default function MobileClients({
             telephone: safeText(adresseRow.telephone),
           }
         : null
+      const qualite = safeText(adresseRow?.qualite)
 
       let devisYtdN1 = 0
       if (monthRes.error) {
@@ -881,6 +929,7 @@ export default function MobileClients({
         prochaineVisite,
         devisYtdN1,
         transformationsEnCours,
+        qualite,
         loadErrors,
       })
     } catch (e) {
@@ -889,6 +938,7 @@ export default function MobileClients({
         commandes: [], preparations: [], livraisons: [], retours: [], devis: [], actions: [],
         blYtd: 0, caYtd: 0, caYtdN1: 0, contacts: [], adresse: null, derniereVisite: null, prochaineVisite: null, devisYtdN1: 0,
         transformationsEnCours: [],
+        qualite: '',
         loadErrors: [e instanceof Error ? e.message : String(e)],
       })
     } finally {
@@ -1894,6 +1944,12 @@ function ClientDetailScreen({
 
       <div style={{ padding: '16px 3px', display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div>
+          {/* ÉVOLUTION (2026-09-28) : pastille "Qualité" SAGE, en haut à droite au-dessus des boutons */}
+          {!loading && detail?.qualite && (
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
+              <PastilleQualite qualite={detail.qualite} />
+            </div>
+          )}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
             <div style={{ fontSize: 20, fontWeight: 700, color: '#fff' }}>{client.nom || '(nom non renseigné)'}</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
