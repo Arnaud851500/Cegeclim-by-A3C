@@ -196,6 +196,9 @@ type ClientRow = {
   margePctYtdN1: number | null
 }
 
+/** ÉVOLUTION (2026-09-28) : tri de la liste complète des clients. */
+type TriListeClients = 'code' | 'nom'
+
 type DocAgrege = {
   numeroPiece: string
   date: string
@@ -389,6 +392,14 @@ export default function MobileClients({
   const [retardsListeOuverte, setRetardsListeOuverte] = useState(false)
   const [retardOuvert, setRetardOuvert] = useState<RetardPaiementClient | null>(null)
 
+  // ÉVOLUTION (2026-09-28) : tap sur le compteur "Clients" -> liste complète
+  // des clients visibles (périmètre + filtre collaborateur), triable par
+  // code ou par nom, avec le CA de l'année en face et un 💶 si le client
+  // a des factures en retard dans le dernier fichier compta. La liste reste
+  // ouverte au retour de la fiche client (état conservé).
+  const [listeClientsOuverte, setListeClientsOuverte] = useState(false)
+  const [triListeClients, setTriListeClients] = useState<TriListeClients>('code')
+
   useEffect(() => {
     let cancelled = false
     async function charger() {
@@ -496,6 +507,38 @@ export default function MobileClients({
       dateExtraction: retardsVisibles[0]?.date_extraction || retardsBruts?.[0]?.date_extraction || '',
     }
   }, [retardsVisibles, retardsBruts])
+
+  /** ÉVOLUTION (2026-09-28) : index numéro client -> retard (montant > 0),
+   * pour le pictogramme 💶 de la liste complète des clients. Basé sur
+   * retardsBruts (déjà au périmètre) : le retard dépend du client, pas du
+   * filtre collaborateur. */
+  const retardsParNumero = useMemo(() => {
+    const map = new Map<string, RetardPaiementClient>()
+    for (const r of retardsBruts || []) {
+      if (Number(r.total_en_retard || 0) > 0) map.set(safeText(r.numero_tiers), r)
+    }
+    return map
+  }, [retardsBruts])
+
+  /** ÉVOLUTION (2026-09-28) : liste complète triée (code = tri numérique
+   * naturel du n° tiers ; nom = ordre alphabétique français, n° en départage). */
+  const clientsTries = useMemo(() => {
+    if (!clientsVisibles) return []
+    const copie = [...clientsVisibles]
+    const parCode = (a: ClientRow, b: ClientRow) => a.numero.localeCompare(b.numero, 'fr', { numeric: true, sensitivity: 'base' })
+    if (triListeClients === 'nom') {
+      copie.sort((a, b) => (a.nom || a.numero).localeCompare(b.nom || b.numero, 'fr', { sensitivity: 'base' }) || parCode(a, b))
+    } else {
+      copie.sort(parCode)
+    }
+    return copie
+  }, [clientsVisibles, triListeClients])
+
+  const listeClientsSynthese = useMemo(() => {
+    const caTotal = clientsTries.reduce((s, c) => s + c.caYtdN, 0)
+    const nbEnRetard = clientsTries.filter((c) => retardsParNumero.has(c.numero)).length
+    return { caTotal, nbEnRetard }
+  }, [clientsTries, retardsParNumero])
 
   async function terminerAlerteClient(row: ClientAlerteRow) {
     const { error } = await supabase
@@ -929,7 +972,12 @@ export default function MobileClients({
       {!search.trim() && (
         <>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-            <StatCard label={collaborateurFiltre ? `Clients · ${formatCollaborateurCourt(collaborateurFiltre)}` : 'Clients'} value={stats.total} />
+            <StatCard
+              label={collaborateurFiltre ? `Clients · ${formatCollaborateurCourt(collaborateurFiltre)}` : 'Clients'}
+              value={stats.total}
+              hint={stats.total ? 'Toucher pour la liste' : undefined}
+              onClick={stats.total ? () => setListeClientsOuverte(true) : undefined}
+            />
             <StatCard label="Nouveaux (année)" value={stats.nouveaux} />
           </div>
 
@@ -1065,6 +1113,133 @@ export default function MobileClients({
             )}
           </div>
         </>
+      )}
+
+      {/* ── Liste complète des clients (tap sur le compteur "Clients") ── */}
+      {listeClientsOuverte && (
+        <div
+          style={{ position: 'fixed', inset: 0, zIndex: 240, background: 'rgba(6,10,18,0.62)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
+          onClick={() => setListeClientsOuverte(false)}
+        >
+          <div
+            style={{ width: '100%', maxWidth: 480, maxHeight: '88vh', overflowY: 'auto', background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.08)', padding: '12px 18px 26px', display: 'flex', flexDirection: 'column', gap: 8 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 6px' }} />
+            <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>
+              Clients{collaborateurFiltre ? ` · ${formatCollaborateurCourt(collaborateurFiltre)}` : ''}
+            </div>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)' }}>
+              {clientsTries.length} client{clientsTries.length > 1 ? 's' : ''} · CA {N} : {formatMoney(listeClientsSynthese.caTotal)}
+              {listeClientsSynthese.nbEnRetard > 0 && ` · 💶 ${listeClientsSynthese.nbEnRetard} en retard de paiement`}
+            </div>
+
+            {/* Sélecteur de tri + en-tête de colonnes (collants en haut du tiroir) */}
+            <div style={{ position: 'sticky', top: -12, zIndex: 1, background: '#141A26', paddingTop: 6, paddingBottom: 6, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ display: 'flex', gap: 6, padding: 3, borderRadius: 10, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)' }}>
+                {([['code', 'Par code'], ['nom', 'Par nom']] as [TriListeClients, string][]).map(([valeur, libelle]) => {
+                  const actif = triListeClients === valeur
+                  return (
+                    <button
+                      key={valeur}
+                      type="button"
+                      onClick={() => setTriListeClients(valeur)}
+                      style={{
+                        flex: 1, padding: '8px', borderRadius: 8, border: 'none',
+                        background: actif ? '#A6A181' : 'transparent',
+                        color: actif ? '#141A26' : 'rgba(255,255,255,0.7)',
+                        fontSize: 13, fontWeight: 700,
+                      }}
+                    >
+                      {libelle}
+                    </button>
+                  )
+                })}
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', padding: '0 12px' }}>
+                <span>{triListeClients === 'code' ? 'N° · Client' : 'Client · N°'}</span>
+                <span>CA {N}</span>
+              </div>
+            </div>
+
+            {clientsVisibles === null ? (
+              <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', padding: '10px 0' }}>Chargement…</div>
+            ) : clientsTries.length === 0 ? (
+              <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', padding: '10px 0' }}>Aucun client.</div>
+            ) : (
+              clientsTries.map((c) => {
+                const retard = retardsParNumero.get(c.numero)
+                return (
+                  <div
+                    key={`${c.numero}|${c.partKind || 'client'}|${c.collaborateur}|${c.agence}`}
+                    onClick={() => void openClient(c)}
+                    style={{
+                      display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10,
+                      borderRadius: 12,
+                      border: `1px solid ${retard ? 'rgba(193,104,60,0.30)' : 'rgba(255,255,255,0.08)'}`,
+                      background: retard ? 'rgba(193,104,60,0.07)' : 'rgba(255,255,255,0.03)',
+                      padding: '9px 12px', cursor: 'pointer',
+                    }}
+                  >
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, minWidth: 0 }}>
+                        {retard && (
+                          <span
+                            title={`Factures en retard : ${formatKEurRetard(retard.total_en_retard)}`}
+                            aria-label="Factures en retard de paiement"
+                            style={{ fontSize: 13, flexShrink: 0 }}
+                          >
+                            💶
+                          </span>
+                        )}
+                        {triListeClients === 'code' && (
+                          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'rgba(255,255,255,0.55)', flexShrink: 0 }}>{c.numero}</span>
+                        )}
+                        <span style={{ fontSize: 14.5, fontWeight: 600, color: '#fff', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
+                          {c.nom || '(nom non renseigné)'}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>
+                        {triListeClients === 'nom' && <>N° {c.numero}</>}
+                        {c.collaborateur && (
+                          <span style={{ color: 'rgba(166,161,129,0.9)' }}>
+                            {triListeClients === 'nom' ? ' ' : ''}({formatCollaborateurCourt(c.collaborateur)})
+                          </span>
+                        )}
+                        {c.partKind && <span style={{ color: '#b9a7e6' }}> · partagé</span>}
+                        {retard && (
+                          <span style={{ color: '#e0a685' }}> · retard {formatKEurRetard(retard.total_en_retard)}{retard.en_litige ? ' · litige' : ''}</span>
+                        )}
+                      </div>
+                    </div>
+                    <div
+                      style={{
+                        fontFamily: 'var(--font-mono)', fontSize: 13.5, whiteSpace: 'nowrap', flexShrink: 0,
+                        color: c.caYtdN > 0 ? '#fff' : c.caYtdN < 0 ? '#e0a685' : 'rgba(255,255,255,0.3)',
+                      }}
+                    >
+                      {formatMoney(c.caYtdN)}
+                    </div>
+                  </div>
+                )
+              })
+            )}
+
+            {retardsParNumero.size > 0 && retardsSynthese?.dateExtraction && (
+              <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginTop: 4 }}>
+                💶 = factures en retard de paiement (situation compta au {formatDateFrRetard(retardsSynthese.dateExtraction)}).
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={() => setListeClientsOuverte(false)}
+              style={{ marginTop: 8, padding: '12px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: 'transparent', color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: 600 }}
+            >
+              Fermer
+            </button>
+          </div>
+        </div>
       )}
 
       {alertesClientsOuvertes && (
@@ -1256,22 +1431,29 @@ export default function MobileClients({
   )
 }
 
-function StatCard({ label, value }: { label: string; value: number | null }) {
+function StatCard({ label, value, hint, onClick }: { label: string; value: number | null; hint?: string; onClick?: () => void }) {
   return (
     <div
+      onClick={onClick}
+      role={onClick ? 'button' : undefined}
       style={{
         borderRadius: 14,
-        border: '1px solid rgba(255,255,255,0.10)',
+        border: `1px solid ${onClick ? 'rgba(166,161,129,0.30)' : 'rgba(255,255,255,0.10)'}`,
         background: 'rgba(255,255,255,0.04)',
         padding: '12px 14px',
+        cursor: onClick ? 'pointer' : 'default',
       }}
     >
       <div style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
         {label}
       </div>
-      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 23, fontWeight: 600, color: '#fff', marginTop: 4 }}>
-        {value === null ? '—' : value}
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 6, marginTop: 4 }}>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 23, fontWeight: 600, color: '#fff' }}>
+          {value === null ? '—' : value}
+        </span>
+        {onClick && <span style={{ fontSize: 16, color: 'rgba(255,255,255,0.35)' }}>›</span>}
       </div>
+      {hint && <div style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.35)', marginTop: 2 }}>{hint}</div>}
     </div>
   )
 }
