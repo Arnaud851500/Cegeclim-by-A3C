@@ -24,6 +24,16 @@ import { NavigationChoiceSheet, PhoneChoiceSheet } from './MobileActionSheets'
 //   Appliqué en filtre SQL (codePostalEtablissement) ET côté client, en
 //   mode géolocalisé comme en mode département. Les raccourcis
 //   "Département" ne proposent que les départements du périmètre.
+//
+// FIX (2026-09-28) : tiroirs de filtres (Rayon, Ancienneté, Collaborateur,
+//   Secteur…) qui s'ouvraient et se refermaient aussitôt. Cause :
+//   BlocFiltresFixes était un COMPOSANT déclaré à l'intérieur de
+//   MobileProspects -> nouveau type à chaque rendu du parent -> React le
+//   démontait/remontait et son état local `dimensionOuverte` repartait à
+//   null au moindre re-rendu (géolocalisation, chargement collaborateurs,
+//   choix d'une option…). L'état `dimensionOuverte` est désormais porté par
+//   MobileProspects et le bloc est une simple fonction de rendu
+//   (renderBlocFiltres), sans hook.
 // ─────────────────────────────────────────────────────────────────────────
 
 const MapContainer: any = dynamic(() => import('react-leaflet').then((m) => m.MapContainer as any), { ssr: false })
@@ -98,6 +108,9 @@ const ANCIENNETE_PRESETS: AnciennetePreset[] = [
   { key: '1a', label: '< 1 an', maxDays: 365 },
   { key: '3a', label: '< 3 ans', maxDays: 1095 },
 ]
+
+/** Tiroir de choix ouvert depuis le bloc de filtres (null = aucun). */
+type DimensionFiltre = null | 'rayon' | 'anciennete' | 'capital' | 'secteur' | 'collaborateur' | 'departement'
 
 type CapitalSocialOption = 'NC' | '<= 1 000€' | '>1 000€' | '>5000€' | '>9999€'
 const CAPITAL_SOCIAL_OPTIONS: CapitalSocialOption[] = ['NC', '<= 1 000€', '>1 000€', '>5000€', '>9999€']
@@ -367,6 +380,10 @@ export default function MobileProspects() {
   const [rechercheLibre, setRechercheLibre] = useState('')
 
   const [secteursActifs, setSecteursActifs] = useState<Set<string>>(new Set())
+
+  // FIX (2026-09-28) : état du tiroir de choix porté ici (et non plus dans
+  // un sous-composant recréé à chaque rendu).
+  const [dimensionOuverte, setDimensionOuverte] = useState<DimensionFiltre>(null)
 
   const [prospects, setProspects] = useState<ProspectRowGeo[]>([])
   const [loading, setLoading] = useState(false)
@@ -648,11 +665,9 @@ export default function MobileProspects() {
       ? `Codes postaux autorisés : ${perimetreGeo.valeurs.join(', ')}`
       : `Départements autorisés : ${perimetreGeo.valeurs.join(', ')}`
 
-  function BlocFiltresFixes({ compact }: { compact: boolean }) {
-    const [dimensionOuverte, setDimensionOuverte] = useState<
-      null | 'rayon' | 'anciennete' | 'capital' | 'secteur' | 'collaborateur' | 'departement'
-    >(null)
-
+  /** FIX (2026-09-28) : simple fonction de rendu (pas un composant, pas de
+   * hook) -> le tiroir de choix n'est plus démonté à chaque re-rendu. */
+  function renderBlocFiltres(compact: boolean) {
     const resumeRayon = `${radiusKm} km`
     const resumeAnciennete = ancienneteMax.label
     const resumeCapital = capitalSocialActifs.size === 0 ? 'Tous' : `${capitalSocialActifs.size} sélection${capitalSocialActifs.size > 1 ? 's' : ''}`
@@ -701,7 +716,7 @@ export default function MobileProspects() {
         {dimensionOuverte && (
           <div
             style={{ position: 'fixed', inset: 0, zIndex: 2200, background: 'rgba(6,10,18,0.7)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
-            onClick={() => setDimensionOuverte(null)}
+            onClick={(e) => { e.stopPropagation(); setDimensionOuverte(null) }}
           >
             <div
               style={{ width: '100%', maxWidth: 480, maxHeight: '75vh', overflowY: 'auto', background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.1)', padding: '12px 18px 26px', display: 'flex', flexDirection: 'column', gap: 14 }}
@@ -881,12 +896,12 @@ export default function MobileProspects() {
           </div>
         )}
 
-        <BlocFiltresFixes compact={false} />
+        {renderBlocFiltres(false)}
 
         <div style={{ marginTop: 'auto', display: 'flex', gap: 10 }}>
           <button
             type="button"
-            onClick={() => { setVue('liste'); setFiltresValides(true) }}
+            onClick={() => { setDimensionOuverte(null); setVue('liste'); setFiltresValides(true) }}
             disabled={(geolocalisationActivee && !position) || !perimetreGeo}
             style={{
               flex: 1, padding: '15px', borderRadius: 14,
@@ -899,7 +914,7 @@ export default function MobileProspects() {
           </button>
           <button
             type="button"
-            onClick={() => { setVue('carte'); setFiltresValides(true) }}
+            onClick={() => { setDimensionOuverte(null); setVue('carte'); setFiltresValides(true) }}
             disabled={!position || !perimetreGeo}
             title={!geolocalisationActivee ? "La carte nécessite une position réelle -- réactive la géolocalisation pour l'utiliser." : undefined}
             style={{
@@ -923,7 +938,7 @@ export default function MobileProspects() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px' }}>
         <button
           type="button"
-          onClick={() => setFiltresValides(false)}
+          onClick={() => { setDimensionOuverte(null); setFiltresValides(false) }}
           style={{ border: '1px solid rgba(255,255,255,0.18)', background: 'transparent', color: 'rgba(255,255,255,0.7)', borderRadius: 10, padding: '7px 10px', fontSize: 12 }}
         >
           ← Filtres
@@ -1134,7 +1149,7 @@ export default function MobileProspects() {
       {filtresOuverts && (
         <div
           style={{ position: 'fixed', inset: 0, zIndex: 2010, background: 'rgba(6,10,18,0.62)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
-          onClick={() => setFiltresOuverts(false)}
+          onClick={() => { setDimensionOuverte(null); setFiltresOuverts(false) }}
         >
           <div
             style={{ width: '100%', maxWidth: 480, maxHeight: '85vh', overflowY: 'auto', background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.08)', padding: '12px 18px 26px', display: 'flex', flexDirection: 'column', gap: 16 }}
@@ -1146,11 +1161,11 @@ export default function MobileProspects() {
               <div style={{ fontSize: 12, color: '#8FC7DA', marginTop: -10 }}>🔒 {resumePerimetre}</div>
             )}
 
-            <BlocFiltresFixes compact />
+            {renderBlocFiltres(true)}
 
             <button
               type="button"
-              onClick={() => setFiltresOuverts(false)}
+              onClick={() => { setDimensionOuverte(null); setFiltresOuverts(false) }}
               style={{ width: '100%', padding: '12px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: '#A6A181', color: '#141A26', fontSize: 14, fontWeight: 700 }}
             >
               Voir {prospectsFiltres.length} résultat{prospectsFiltres.length > 1 ? 's' : ''}
