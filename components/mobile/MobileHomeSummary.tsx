@@ -47,7 +47,6 @@ type IntentParams = {
 type Etape = 'idle' | 'question' | 'ecoute' | 'traitement' | 'incompris' | 'resultat' | 'erreur'
   | 'question_client' | 'ecoute_client' | 'traitement_client'
 
-const RDV_TYPE_KEYS = ['meeting', 'phoneCall', 'reminder', '4', '7', '9']
 // Familles connues côté get_ca_periode_par_famille -- pour un rapprochement
 // tolérant (accents/majuscules/variantes usuelles) entre ce que le modèle
 // d'interprétation renvoie et les libellés réels en base.
@@ -1109,44 +1108,8 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
     }
   }
 
-  /** Résout le nom d'entreprise lié à chaque RDV (crm_activity_company ->
-   * partner_base_partner.company_name), même logique que MobileRdv.tsx --
-   * en 2 requêtes batch, jamais bloquant (repli silencieux sur "sans
-   * entreprise associée" en cas d'erreur ou d'absence de lien). */
-  async function resoudreEntreprisesRdv(rows: { id: number }[]): Promise<Map<number, string>> {
-    const companyByActivity = new Map<number, string>()
-    try {
-      const activityIds = rows.map((r) => r.id).filter((v) => v !== null && v !== undefined)
-      if (activityIds.length === 0) return companyByActivity
-
-      const { data: links } = await supabase
-        .from('crm_activity_company')
-        .select('activity_fk, company_fk')
-        .in('activity_fk', activityIds)
-
-      const companyIds = Array.from(
-        new Set(((links || []) as any[]).map((l) => l.company_fk).filter((v) => v !== null && v !== undefined)),
-      )
-      if (companyIds.length === 0) return companyByActivity
-
-      const { data: companies } = await supabase
-        .from('partner_base_partner')
-        .select('id, company_name')
-        .in('id', companyIds)
-
-      const nameById = new Map(((companies || []) as any[]).map((c) => [c.id, String(c.company_name || '').trim()]))
-      ;((links || []) as any[]).forEach((l) => {
-        const name = nameById.get(l.company_fk)
-        if (name) companyByActivity.set(l.activity_fk, name)
-      })
-    } catch (e) {
-      console.warn('[MobileHomeSummary] résolution entreprise liée impossible :', e)
-    }
-    return companyByActivity
-  }
-
   /** Résout le nom de tiers (ref_tiers.intitule) pour un lot de numéros --
-   * même principe que resoudreEntreprisesRdv, en une requête batch, jamais
+   * en une requête batch, jamais
    * bloquant (repli silencieux si la résolution échoue). Utilisé pour
    * afficher le client concerné sur les listes de tâches (todo_actions.numero_tiers). */
   async function resoudreNomsTiers(numeros: (string | null)[]): Promise<Map<string, string>> {
@@ -1177,6 +1140,17 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         .maybeSingle()
       const displayName = String(access?.display_name || '').trim() || email.split('@')[0]
 
+      // RDV de l'utilisateur = RDV BLG (blg_partner_id) + RDV compagnon qu'il
+      // a créés (created_by_email), via v_rdv_unifie. Un compte sans
+      // identifiant partner BLG n'est plus bloqué : il retrouve au moins ses
+      // RDV compagnon, et toutes les autres questions (CA, devis, tâches,
+      // alertes) fonctionnent normalement.
+      const blgPartnerId = Number(access?.blg_partner_id) || null
+      const emailFiltre = email.replace(/,/g, '\\,')
+      const filtreRdvUtilisateur = blgPartnerId
+        ? `blg_partner_id.eq.${blgPartnerId},created_by_email.eq.${emailFiltre}`
+        : `created_by_email.eq.${emailFiltre}`
+
       let resultat = ''
       // Divergence oral/écrit -- seuls les branches qui en ont besoin
       // (montants, essentiellement) l'assignent ; sinon la lecture réutilise
@@ -1184,7 +1158,6 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
       let resultatOral: string | null = null
 
       if (portee === 'rdv' || portee === 'rdv_prochains') {
-        if (!access?.blg_partner_id) throw new Error('Identifiant partner BLG non renseigné pour ce compte.')
         // "rdv" (mots-clés simples, sans nombre précisé) garde le
         // comportement historique (10) ; "rdv_prochains" (via le modèle)
         // porte soit un nombre précis ("mes 3 prochains rdv" -> n=3), soit
@@ -1196,11 +1169,9 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         const n = fenetreJours ? 100 : (portee === 'rdv_prochains' ? Math.max(1, Math.min(30, Math.round(Number(params.n) || 5))) : 10)
 
         let requete = supabase
-          .from('crm_base_activity')
-          .select('id, type, comment, start_date')
-          .eq('internal_tag', 'normal')
-          .in('type', RDV_TYPE_KEYS)
-          .eq('from_fk', access.blg_partner_id)
+          .from('v_rdv_unifie')
+          .select('rdv_id, subject, company_name, start_date')
+          .or(filtreRdvUtilisateur)
           .gte('start_date', new Date().toISOString())
 
         if (fenetreJours) {
@@ -1216,12 +1187,11 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         if (!rows || rows.length === 0) {
           resultat = fenetreJours ? `Tu n'as aucun rendez-vous dans les ${fenetreJours} prochains jours.` : "Tu n'as aucun rendez-vous à venir."
         } else {
-          const entreprisesParActivite = await resoudreEntreprisesRdv(rows as any[])
           const lignes = rows.map((r: any, i: number) => {
             const d = new Date(r.start_date)
             const dateLabel = d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' })
             const heure = formatHeureParlee(d)
-            const entreprise = entreprisesParActivite.get(r.id) || 'sans entreprise associée'
+            const entreprise = safeText(r.company_name) || 'sans entreprise associée'
             return `${i + 1}. ${dateLabel} à ${heure} — ${entreprise}`
           })
           if (fenetreJours) {
@@ -1232,17 +1202,14 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
           }
         }
       } else if (portee === 'rdv_semaine_prochaine') {
-        if (!access?.blg_partner_id) throw new Error('Identifiant partner BLG non renseigné pour ce compte.')
 
         const debut = debutSemaineProchaineIso()
         const fin = finSemaineProchaineIso()
 
         const { data: rows, error } = await supabase
-          .from('crm_base_activity')
-          .select('id, type, comment, start_date')
-          .eq('internal_tag', 'normal')
-          .in('type', RDV_TYPE_KEYS)
-          .eq('from_fk', access.blg_partner_id)
+          .from('v_rdv_unifie')
+          .select('rdv_id, subject, company_name, start_date')
+          .or(filtreRdvUtilisateur)
           .gte('start_date', `${debut}T00:00:00`)
           .lte('start_date', `${fin}T23:59:59`)
           .order('start_date', { ascending: true })
@@ -1252,12 +1219,11 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         if (!rows || rows.length === 0) {
           resultat = "Tu n'as aucun rendez-vous prévu la semaine prochaine."
         } else {
-          const entreprisesParActivite = await resoudreEntreprisesRdv(rows as any[])
           const lignes = rows.map((r: any, i: number) => {
             const d = new Date(r.start_date)
             const dateLabel = d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' })
             const heure = formatHeureParlee(d)
-            const entreprise = entreprisesParActivite.get(r.id) || 'sans entreprise associée'
+            const entreprise = safeText(r.company_name) || 'sans entreprise associée'
             return `${i + 1}. ${dateLabel} à ${heure} — ${entreprise}`
           })
           const compte = rows.length === 1 ? 'un' : String(rows.length)
@@ -1510,12 +1476,11 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         const depuis = new Date()
         depuis.setDate(depuis.getDate() - jours)
 
-        if (!access?.blg_partner_id) throw new Error('Identifiant partner BLG non renseigné pour ce compte.')
 
         const { data: rows, error } = await supabase
           .from('v_rdv_unifie')
           .select('subject, company_name, start_date, a_compte_rendu')
-          .eq('blg_partner_id', access.blg_partner_id)
+          .or(filtreRdvUtilisateur)
           .lt('start_date', new Date().toISOString())
           .gte('start_date', depuis.toISOString())
           .order('start_date', { ascending: false })
@@ -1596,7 +1561,6 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
         // période, avec une alerte si un rdv concerne un client qui a
         // encore une tâche non terminée en cours (engagement pris avec ce
         // client, à ne pas oublier avant de le revoir).
-        if (!access?.blg_partner_id) throw new Error('Identifiant partner BLG non renseigné pour ce compte.')
         const estSemaine = portee === 'resume_semaine'
         const finPeriode = estSemaine ? finDeSemaineIso() : todayIso()
         const finPeriodeDate = new Date(`${finPeriode}T23:59:59`)
@@ -1617,7 +1581,7 @@ export default function MobileHomeSummary({ userEmail }: { userEmail?: string | 
           supabase
             .from('v_rdv_unifie')
             .select('subject, company_name, start_date, numero_tiers')
-            .eq('blg_partner_id', access.blg_partner_id)
+            .or(filtreRdvUtilisateur)
             .gte('start_date', new Date().toISOString())
             .lte('start_date', finPeriodeDate.toISOString())
             .order('start_date', { ascending: true })
