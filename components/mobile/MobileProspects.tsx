@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import dynamic from 'next/dynamic'
 import 'leaflet/dist/leaflet.css'
 import { supabase } from '@/lib/supabaseClient'
@@ -34,6 +35,15 @@ import { NavigationChoiceSheet, PhoneChoiceSheet } from './MobileActionSheets'
 //   choix d'une option…). L'état `dimensionOuverte` est désormais porté par
 //   MobileProspects et le bloc est une simple fonction de rendu
 //   (renderBlocFiltres), sans hook.
+//
+// FIX 2 (2026-09-28) : le tiroir se refermait toujours sur mobile. Deux
+//   protections supplémentaires :
+//   - le tiroir est rendu via un portail dans document.body : un
+//     `position: fixed` placé sous un conteneur transformé/défilant (coque
+//     mobile) est positionné par rapport à ce conteneur, pas à l'écran ;
+//   - "clic fantôme" tactile : le tap qui ouvre le tiroir était aussi reçu
+//     par le fond sombre qui venait d'apparaître -> fermeture immédiate. Le
+//     fond ignore désormais les taps reçus dans les 400 ms après l'ouverture.
 // ─────────────────────────────────────────────────────────────────────────
 
 const MapContainer: any = dynamic(() => import('react-leaflet').then((m) => m.MapContainer as any), { ssr: false })
@@ -384,6 +394,16 @@ export default function MobileProspects() {
   // FIX (2026-09-28) : état du tiroir de choix porté ici (et non plus dans
   // un sous-composant recréé à chaque rendu).
   const [dimensionOuverte, setDimensionOuverte] = useState<DimensionFiltre>(null)
+  // FIX 2 : horodatage de l'ouverture, pour ignorer le "clic fantôme".
+  const ouvertureDimensionRef = useRef(0)
+  function ouvrirDimension(d: Exclude<DimensionFiltre, null>) {
+    ouvertureDimensionRef.current = Date.now()
+    setDimensionOuverte(d)
+  }
+  function fermerDimensionDepuisFond() {
+    if (Date.now() - ouvertureDimensionRef.current < 400) return
+    setDimensionOuverte(null)
+  }
 
   const [prospects, setProspects] = useState<ProspectRowGeo[]>([])
   const [loading, setLoading] = useState(false)
@@ -684,23 +704,23 @@ export default function MobileProspects() {
         <LigneDimension
           label="Rayon de recherche"
           valeur={geolocalisationActivee ? resumeRayon : 'Non applicable'}
-          onClick={() => geolocalisationActivee && setDimensionOuverte('rayon')}
+          onClick={() => geolocalisationActivee && ouvrirDimension('rayon')}
           compact={compact}
           desactive={!geolocalisationActivee}
         />
-        <LigneDimension label="Département" valeur={resumeDepartement} onClick={() => setDimensionOuverte('departement')} compact={compact} />
+        <LigneDimension label="Département" valeur={resumeDepartement} onClick={() => ouvrirDimension('departement')} compact={compact} />
 
         <LigneDimension
           label="Collaborateur"
           valeur={resumeCollaborateur}
-          onClick={() => afficherClients && setDimensionOuverte('collaborateur')}
+          onClick={() => afficherClients && ouvrirDimension('collaborateur')}
           compact={compact}
           desactive={!afficherClients}
         />
 
-        <LigneDimension label="Ancienneté" valeur={resumeAnciennete} onClick={() => setDimensionOuverte('anciennete')} compact={compact} />
-        <LigneDimension label="Capital social" valeur={resumeCapital} onClick={() => setDimensionOuverte('capital')} compact={compact} />
-        <LigneDimension label="Secteur / type d'activité" valeur={resumeSecteur} onClick={() => setDimensionOuverte('secteur')} compact={compact} />
+        <LigneDimension label="Ancienneté" valeur={resumeAnciennete} onClick={() => ouvrirDimension('anciennete')} compact={compact} />
+        <LigneDimension label="Capital social" valeur={resumeCapital} onClick={() => ouvrirDimension('capital')} compact={compact} />
+        <LigneDimension label="Secteur / type d'activité" valeur={resumeSecteur} onClick={() => ouvrirDimension('secteur')} compact={compact} />
 
         <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', marginTop: 4 }}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: compact ? 13.5 : 14.5, color: '#fff', fontWeight: 600 }}>
@@ -713,10 +733,10 @@ export default function MobileProspects() {
           </label>
         </div>
 
-        {dimensionOuverte && (
+        {dimensionOuverte && typeof document !== 'undefined' && createPortal(
           <div
-            style={{ position: 'fixed', inset: 0, zIndex: 2200, background: 'rgba(6,10,18,0.7)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
-            onClick={(e) => { e.stopPropagation(); setDimensionOuverte(null) }}
+            style={{ position: 'fixed', inset: 0, zIndex: 2200, background: 'rgba(6,10,18,0.7)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center', fontFamily: 'inherit' }}
+            onClick={(e) => { e.stopPropagation(); fermerDimensionDepuisFond() }}
           >
             <div
               style={{ width: '100%', maxWidth: 480, maxHeight: '75vh', overflowY: 'auto', background: '#141A26', borderTopLeftRadius: 20, borderTopRightRadius: 20, border: '1px solid rgba(255,255,255,0.1)', padding: '12px 18px 26px', display: 'flex', flexDirection: 'column', gap: 14 }}
@@ -861,7 +881,8 @@ export default function MobileProspects() {
                 OK
               </button>
             </div>
-          </div>
+          </div>,
+          document.body,
         )}
       </>
     )
