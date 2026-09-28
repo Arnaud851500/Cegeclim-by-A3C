@@ -9,6 +9,14 @@ export type DetailField = {
    * Sans effet sur les autres champs (Date, Montant...), qui restent du
    * texte simple. */
   onClick?: () => void
+  /** ÉVOLUTION (2026-09-28) : rendu particulier pour le détail d'un devis
+   * reconstitué dans l'ordre SAGE.
+   *  - 'section' : ligne de commentaire SAGE (ex. « --zone jour, chambre 1--»)
+   *    affichée en intertitre italique, sans cadre ; seul `label` est lu.
+   *  - 'note' : information rattachée à la ligne article précédente
+   *    (ex. numéro de série renseigné), petit texte en retrait.
+   * Absent = champ classique (libellé au-dessus, valeur en dessous). */
+  kind?: 'section' | 'note'
 }
 
 /**
@@ -55,7 +63,38 @@ export default function MobileDetailSheet({
         {subtitle && <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginTop: 3 }}>{subtitle}</div>}
 
         <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {fields.map((f, i) => (
+          {fields.map((f, i) => f.kind === 'section' ? (
+            <div
+              key={`${f.label}-${i}`}
+              style={{
+                marginTop: i === 0 ? 0 : 8,
+                padding: '4px 2px 2px',
+                borderBottom: '1px solid rgba(166,161,129,0.35)',
+                fontSize: 13,
+                lineHeight: 1.4,
+                fontStyle: 'italic',
+                fontWeight: 600,
+                color: '#C9C4A4',
+                wordBreak: 'break-word',
+              }}
+            >
+              {f.label}
+            </div>
+          ) : f.kind === 'note' ? (
+            <div
+              key={`${f.label}-${i}`}
+              style={{
+                marginTop: -6,
+                padding: '0 10px 0 14px',
+                fontSize: 12,
+                lineHeight: 1.4,
+                color: 'rgba(255,255,255,0.5)',
+                wordBreak: 'break-word',
+              }}
+            >
+              {f.label}{f.value ? ` ${f.value}` : ''}
+            </div>
+          ) : (
             <div
               key={`${f.label}-${i}`}
               onClick={f.onClick}

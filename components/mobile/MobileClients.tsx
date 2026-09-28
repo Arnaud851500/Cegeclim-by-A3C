@@ -2011,18 +2011,60 @@ function ClientDetailScreen({
     const lignesSupprimees = lignesTraitement.filter((l) => l.origine === 'supprimee')
     const lignesNouvelles = lignesTraitement.filter((l) => l.origine === 'nouvelle')
 
-    const champsBase = [
+    const champArticle = (l: { reference_article: string; designation: string; quantite: number; montant_ht: number }): DetailField => {
+      const supprimee = lignesSupprimees.some((s) => s.referenceArticle === l.reference_article && s.designation === l.designation)
+      return {
+        label: `${supprimee ? '🗑 ' : ''}${l.reference_article || '—'}${l.designation ? ` — ${l.designation}` : ''}`,
+        value: `${l.quantite} × ${formatMoney(l.montant_ht)}${supprimee ? ' · à supprimer' : ''}`,
+        onClick: onOpenStock && l.reference_article ? () => onOpenStock(l.reference_article, l.designation) : undefined,
+      }
+    }
+
+    // ÉVOLUTION (2026-09-28) : pour un devis, les lignes sont relues dans
+    // l'ordre SAGE (DL_Ligne) avec les lignes de commentaire, via le RPC
+    // get_devis_lignes_structure (sage.devis_lignes_structure, alimentée
+    // par l'export Devis_lignes_structure). Commentaires -> intertitres,
+    // lignes vides et « Numéro de série : » vides masquées, numéro de série
+    // renseigné -> note sous l'article. Si la structure n'est pas (encore)
+    // disponible pour ce devis, on garde l'affichage historique d.lignes.
+    let champsLignes: DetailField[] = d.lignes.map(champArticle)
+    if (type === 'Devis') {
+      const { data: structure, error: structureError } = await supabase
+        .rpc('get_devis_lignes_structure', { p_numero_piece: d.numeroPiece })
+      if (structureError) {
+        console.warn('[MobileClients] structure devis indisponible :', structureError.message)
+      } else if (Array.isArray(structure) && structure.length > 0) {
+        const reconstruits: DetailField[] = []
+        for (const r of structure as Array<Record<string, any>>) {
+          const ref = safeText(r.ar_ref).trim()
+          const design = safeText(r.dl_design).trim()
+          const serie = design.match(/^num[ée]ro\s+de\s+s[ée]rie\s*:?\s*(.*)$/i)
+          if (serie || ref.toUpperCase().startsWith('NUMEROSERIE')) {
+            const valeurSerie = (serie ? serie[1] : '').trim()
+            if (valeurSerie) reconstruits.push({ kind: 'note', label: 'N° de série :', value: valeurSerie })
+            continue
+          }
+          if (!ref) {
+            const texte = design.replace(/^[-–—\s]+|[-–—\s]+$/g, '').trim()
+            if (texte) reconstruits.push({ kind: 'section', label: texte, value: '' })
+            continue
+          }
+          reconstruits.push(champArticle({
+            reference_article: ref,
+            designation: design,
+            quantite: safeNumber(r.dl_qte),
+            montant_ht: safeNumber(r.dl_montantht),
+          }))
+        }
+        champsLignes = reconstruits
+      }
+    }
+
+    const champsBase: DetailField[] = [
       { label: 'Date', value: formatDateFr(d.date) },
       { label: 'Référence chantier', value: d.reference || '—' },
       { label: 'Montant total HT', value: formatMoney(d.montantHt) },
-      ...d.lignes.map((l) => {
-        const supprimee = lignesSupprimees.some((s) => s.referenceArticle === l.reference_article && s.designation === l.designation)
-        return {
-          label: `${supprimee ? '🗑 ' : ''}${l.reference_article || '—'}${l.designation ? ` — ${l.designation}` : ''}`,
-          value: `${l.quantite} × ${formatMoney(l.montant_ht)}${supprimee ? ' · à supprimer' : ''}`,
-          onClick: onOpenStock && l.reference_article ? () => onOpenStock(l.reference_article, l.designation) : undefined,
-        }
-      }),
+      ...champsLignes,
       ...lignesNouvelles.map((l) => ({
         label: `➕ ${l.referenceArticle || '—'}${l.designation ? ` — ${l.designation}` : ''}`,
         value: [
