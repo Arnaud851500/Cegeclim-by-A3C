@@ -447,6 +447,55 @@ export default function MobileClients({
   const [listeClientsOuverte, setListeClientsOuverte] = useState(false)
   const [triListeClients, setTriListeClients] = useState<TriListeClients>('code')
 
+  // ÉVOLUTION (2026-09-28) : clients "mis en sommeil" dans SAGE
+  // (ref_tiers.mise_en_sommeil = true). Masqués par défaut ; un interrupteur
+  // sous le filtre Collaborateur permet de les afficher. Le choix est
+  // mémorisé sur le téléphone (localStorage, best-effort).
+  // null = pas encore chargé.
+  const [numerosEnSommeil, setNumerosEnSommeil] = useState<Set<string> | null>(null)
+  const [afficherSommeil, setAfficherSommeilState] = useState(false)
+  useEffect(() => {
+    // Lu après le montage (pas dans l'initialiseur) pour éviter un écart
+    // d'hydratation entre le rendu serveur et le téléphone.
+    try {
+      if (window.localStorage.getItem('mobileClients.afficherSommeil') === '1') setAfficherSommeilState(true)
+    } catch { /* ignoré */ }
+  }, [])
+  function setAfficherSommeil(v: boolean) {
+    setAfficherSommeilState(v)
+    try { window.localStorage.setItem('mobileClients.afficherSommeil', v ? '1' : '0') } catch { /* ignoré */ }
+  }
+
+  useEffect(() => {
+    let cancelled = false
+    async function charger() {
+      try {
+        const numeros = new Set<string>()
+        const taille = 1000
+        let from = 0
+        while (true) {
+          const { data, error } = await supabase
+            .from('ref_tiers')
+            .select('numero')
+            .eq('mise_en_sommeil', true)
+            .order('numero', { ascending: true })
+            .range(from, from + taille - 1)
+          if (error) throw error
+          const rows = (data || []) as { numero: string | null }[]
+          rows.forEach((r) => { const n = safeText(r.numero); if (n) numeros.add(n) })
+          if (rows.length < taille) break
+          from += taille
+        }
+        if (!cancelled) setNumerosEnSommeil(numeros)
+      } catch (e) {
+        console.warn('[MobileClients] liste des clients en sommeil indisponible :', e)
+        if (!cancelled) setNumerosEnSommeil(new Set())
+      }
+    }
+    void charger()
+    return () => { cancelled = true }
+  }, [])
+
   useEffect(() => {
     let cancelled = false
     async function charger() {
@@ -500,7 +549,9 @@ export default function MobileClients({
 
   /** Liste effectivement visible : périmètre (allClients) puis filtre
    * collaborateur. Sert de base aux stats, à la recherche et aux alertes. */
-  const clientsVisibles = useMemo(() => {
+  /** Clients du périmètre / filtre collaborateur, AVANT le filtre "en sommeil"
+   * (sert aussi à compter les clients en sommeil pour l'interrupteur). */
+  const clientsPerimetre = useMemo(() => {
     if (!allClients) return null
     const perimetreCollab = (perimetre?.collaborateurs.length || 0) > 0
     const perimetreAgenceSeule = !perimetreCollab && (perimetre?.agences.length || 0) > 0
@@ -521,6 +572,21 @@ export default function MobileClients({
       return perimetreAgenceSeule
     })
   }, [allClients, collaborateurFiltre, perimetre])
+
+  const nbClientsEnSommeil = useMemo(() => {
+    if (!clientsPerimetre || !numerosEnSommeil) return 0
+    return clientsPerimetre.filter((c) => numerosEnSommeil.has(c.numero)).length
+  }, [clientsPerimetre, numerosEnSommeil])
+
+  /** Liste effectivement visible : périmètre + filtre collaborateur, puis
+   * filtre "en sommeil" (masqués par défaut). Sert de base aux stats, à la
+   * liste complète, à la recherche et aux alertes. null tant que la liste
+   * des clients en sommeil n'est pas chargée (évite des compteurs qui sautent). */
+  const clientsVisibles = useMemo(() => {
+    if (!clientsPerimetre || !numerosEnSommeil) return null
+    if (afficherSommeil) return clientsPerimetre
+    return clientsPerimetre.filter((c) => !numerosEnSommeil.has(c.numero))
+  }, [clientsPerimetre, numerosEnSommeil, afficherSommeil])
 
   const alertesClientsRows = useMemo(() => {
     if (!alertesClientsBrutes || !clientsVisibles) return null
@@ -1013,6 +1079,42 @@ export default function MobileClients({
         onChange={setCollaborateurFiltre}
       />
 
+      {/* ── Afficher / masquer les clients en sommeil (SAGE) ── */}
+      <div
+        style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10,
+          borderRadius: 12, border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.04)',
+          padding: '10px 14px',
+        }}
+      >
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: '#fff' }}>💤 Clients en sommeil</div>
+          <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginTop: 2 }}>
+            {numerosEnSommeil === null
+              ? 'Chargement…'
+              : `${nbClientsEnSommeil} client${nbClientsEnSommeil > 1 ? 's' : ''} · ${afficherSommeil ? 'affichés' : 'masqués'}`}
+          </div>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={afficherSommeil}
+          aria-label="Afficher les clients en sommeil"
+          onClick={() => setAfficherSommeil(!afficherSommeil)}
+          style={{
+            width: 46, height: 27, borderRadius: 999, border: 'none', position: 'relative', flexShrink: 0,
+            background: afficherSommeil ? '#A6A181' : 'rgba(255,255,255,0.15)',
+          }}
+        >
+          <span
+            style={{
+              position: 'absolute', top: 2.5, left: afficherSommeil ? 21 : 2.5, width: 22, height: 22, borderRadius: '50%',
+              background: '#fff', transition: 'left 0.15s ease',
+            }}
+          />
+        </button>
+      </div>
+
       {clientsError && (
         <div style={{ fontSize: 12.5, color: '#e0a685' }}>
           Impossible de charger la base clients (synthese_multi_clients_cache) : {clientsError}
@@ -1257,6 +1359,7 @@ export default function MobileClients({
                           </span>
                         )}
                         {c.partKind && <span style={{ color: '#b9a7e6' }}> · partagé</span>}
+                        {numerosEnSommeil?.has(c.numero) && <span style={{ color: '#9aa4b8' }}> · 💤 en sommeil</span>}
                         {retard && (
                           <span style={{ color: '#e0a685' }}> · retard {formatKEurRetard(retard.total_en_retard)}{retard.en_litige ? ' · litige' : ''}</span>
                         )}
@@ -1471,6 +1574,7 @@ export default function MobileClients({
                   N° {c.numero}
                   {c.collaborateur && <span style={{ color: 'rgba(166,161,129,0.9)' }}> ({formatCollaborateurCourt(c.collaborateur)})</span>}
                   {c.partKind && <span style={{ color: '#b9a7e6' }}> · partagé</span>}
+                  {numerosEnSommeil?.has(c.numero) && <span style={{ color: '#9aa4b8' }}> · 💤 en sommeil</span>}
                 </div>
               </button>
             ))
