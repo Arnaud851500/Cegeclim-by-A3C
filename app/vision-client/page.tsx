@@ -52,10 +52,19 @@
 //     tranche la plus ancienne ("en retard de plus de 45 jours", …), le
 //     détail par tranche et la date de situation ; un clic ouvre la fiche
 //     complète (litige, promesses, niveau de relance, commentaires compta…).
+//
+// V5 (2026-09-28) :
+//   - Bouton "i" à côté du numéro de client : note libre partagée (table
+//     client_notes, composant ClientNoteButton de lib/clientNote.tsx),
+//     identique à celle de la fiche mobile et de la Synthèse multi-clients.
+//     "i" plein (ambre) = une note existe.
 
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
+// ÉVOLUTION (2026-09-28) : note libre par client -- "i" à côté du numéro,
+// même note que sur mobile et dans la Synthèse multi-clients (client_notes).
+import { ClientNoteButton } from '@/lib/clientNote'
 import {
   TRANCHES_RETARD,
   champsDetailRetard,
@@ -1054,6 +1063,7 @@ function VisionClientPageInner() {
           <div className="eyebrow">Vision Client</div>
           <div className="titleRow">
             <h1>{identity.intitule} <span className="numeroTag">{identity.numero}</span></h1>
+            <ClientNoteButton numeroTiers={identity.numero} clientNom={identity.intitule} variant="light" size={24} />
             <button type="button" className="newRdvBtn" onClick={() => setNouveauRdvOuvert(true)}>+ Nouveau RDV</button>
           </div>
           <p>

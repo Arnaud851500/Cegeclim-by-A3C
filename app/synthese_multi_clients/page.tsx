@@ -25,6 +25,12 @@ import {
   trancheLaPlusAncienne,
   type RetardPaiementClient,
 } from '@/lib/retardsPaiement'
+// ÉVOLUTION (2026-09-28) : note libre par client -- petit "i" à droite de
+// l'intitulé sur chaque ligne client (plein/ambre si une note existe, clic ->
+// fenêtre de saisie). Même note que sur la fiche mobile et Vision client
+// (table client_notes, cf. lib/clientNote.tsx). La liste des clients ayant
+// une note est chargée une seule fois (fetchNumerosAvecNote).
+import { ClientNoteButton, fetchNumerosAvecNote } from '@/lib/clientNote'
 
 const MapContainer: any = dynamic(() => import('react-leaflet').then((mod) => mod.MapContainer as any), { ssr: false })
 const TileLayer: any = dynamic(() => import('react-leaflet').then((mod) => mod.TileLayer as any), { ssr: false })
@@ -2416,6 +2422,26 @@ export default function SyntheseMultiClientsPage() {
   const [retardsIndisponible, setRetardsIndisponible] = useState(false)
   const [retardsListeOuverte, setRetardsListeOuverte] = useState(false)
   const [retardOuvert, setRetardOuvert] = useState<RetardPaiementClient | null>(null)
+  // Clients ayant une note (bouton "i" plein) -- chargé une fois, mis à jour
+  // après chaque enregistrement.
+  const [numerosAvecNote, setNumerosAvecNote] = useState<Set<string>>(new Set())
+
+  useEffect(() => {
+    let alive = true
+    fetchNumerosAvecNote()
+      .then((set) => { if (alive) setNumerosAvecNote(set) })
+      .catch((err) => console.warn('[SMC] notes clients indisponibles :', err))
+    return () => { alive = false }
+  }, [])
+
+  function majNoteClient(numero: string, aUneNote: boolean) {
+    setNumerosAvecNote((prev) => {
+      const next = new Set(prev)
+      if (aUneNote) next.add(numero)
+      else next.delete(numero)
+      return next
+    })
+  }
 
   const hasSelection = Boolean(selected)
   const showCollaborateurColumn = mode === 'collaborateur' && selected === ALL_COLLABORATEURS_VALUE
@@ -3523,14 +3549,30 @@ export default function SyntheseMultiClientsPage() {
                           onSave={(value) => saveAlerteSeuil(row, col.editableAlerte!, value)}
                         />
                       ) : isClientLinkColumn ? (
-                        <button
-                          type="button"
-                          className="clientLink"
-                          onClick={() => openVisionClient(row.numero)}
-                          title="Ouvrir la fiche client (Vision Client) dans un nouvel onglet"
-                        >
-                          {displayValue(col, row, objectiveMap)}
-                        </button>
+                        <>
+                          {/* "i" placé AVANT l'intitulé : la cellule tronque les
+                              noms longs (ellipsis), il resterait sinon invisible. */}
+                          {col.key === 'intitule' && (
+                            <span className="clientNoteSlot">
+                              <ClientNoteButton
+                                numeroTiers={row.numero}
+                                clientNom={String(row.intitule || '')}
+                                variant="light"
+                                size={16}
+                                hasNote={numerosAvecNote.has(String(row.numero || '').trim())}
+                                onHasNoteChange={majNoteClient}
+                              />
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            className="clientLink"
+                            onClick={() => openVisionClient(row.numero)}
+                            title="Ouvrir la fiche client (Vision Client) dans un nouvel onglet"
+                          >
+                            {displayValue(col, row, objectiveMap)}
+                          </button>
+                        </>
                       ) : (
                         <span>{displayValue(col, row, objectiveMap)}</span>
                       )}
@@ -3910,6 +3952,7 @@ export default function SyntheseMultiClientsPage() {
         .columnTogglePill.active { background: #0f172a; color: white; border-color: #0f172a; }
         .clientLink { background: none; border: none; padding: 0; margin: 0; font: inherit; color: #1d4ed8; text-decoration: none; cursor: pointer; text-align: left; }
         .clientLink:hover { text-decoration: underline; }
+        .clientNoteSlot { display: inline-flex; margin-right: 5px; vertical-align: middle; }
         /* Pictogramme retard de paiement, à côté du numéro de client. */
         .retardIcon { background: #fee2e2; color: #dc2626; border: 1px solid #fecaca; border-radius: 4px; width: 17px; height: 17px; padding: 0; margin-right: 3px; font-size: 11px; line-height: 1; display: inline-flex; align-items: center; justify-content: center; vertical-align: middle; cursor: pointer; }
         .retardIcon.ancien { background: #dc2626; color: white; border-color: #b91c1c; }

@@ -28,6 +28,9 @@ import {
   trancheLaPlusAncienne,
   type RetardPaiementClient,
 } from '@/lib/retardsPaiement'
+// ÉVOLUTION (2026-09-28) : note libre par client ("i" sur la fiche client),
+// partagée avec la Synthèse multi-clients et Vision client (table client_notes).
+import { ClientNoteButton } from '@/lib/clientNote'
 
 const N = new Date().getFullYear()
 const CURRENT_MONTH = new Date().getMonth() + 1
@@ -447,6 +450,37 @@ export default function MobileClients({
   const [listeClientsOuverte, setListeClientsOuverte] = useState(false)
   const [triListeClients, setTriListeClients] = useState<TriListeClients>('code')
 
+  // ÉVOLUTION (2026-09-28) : filtre "Sans visite depuis plus d'un mois" dans
+  // la liste complète des clients. Date de dernière visite réelle (RDV BLG +
+  // compagnon CEGECLIM, v_rdv_unifie) lue via la RPC get_smc_visites_batch,
+  // déjà utilisée par la Synthèse multi-clients. Un client jamais visité est
+  // considéré "sans visite".
+  // null = pas encore chargé ; Map vide = RPC indisponible.
+  const [dernieresVisites, setDernieresVisites] = useState<Map<string, string> | null>(null)
+  const [filtreSansVisite, setFiltreSansVisite] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    async function charger() {
+      try {
+        const { data, error } = await supabase.rpc('get_smc_visites_batch', { p_annee: N })
+        if (error) throw error
+        const map = new Map<string, string>()
+        ;((data || []) as Record<string, any>[]).forEach((r) => {
+          const numero = safeText(r.numero_tiers)
+          const derniere = safeText(r.derniere_visite)
+          if (numero && derniere) map.set(numero, derniere)
+        })
+        if (!cancelled) setDernieresVisites(map)
+      } catch (e) {
+        console.warn('[MobileClients] dernières visites indisponibles (get_smc_visites_batch) :', e)
+        if (!cancelled) setDernieresVisites(new Map())
+      }
+    }
+    void charger()
+    return () => { cancelled = true }
+  }, [])
+
   // ÉVOLUTION (2026-09-28) : clients "mis en sommeil" dans SAGE
   // (ref_tiers.mise_en_sommeil = true). Masqués par défaut ; un interrupteur
   // sous le filtre Collaborateur permet de les afficher. Le choix est
@@ -647,11 +681,39 @@ export default function MobileClients({
     return copie
   }, [clientsVisibles, triListeClients])
 
+  /** Limite "il y a un mois" (même jour du mois précédent, 00:00). */
+  const limiteUnMois = useMemo(() => {
+    const d = new Date()
+    d.setHours(0, 0, 0, 0)
+    d.setMonth(d.getMonth() - 1)
+    return d.getTime()
+  }, [])
+
+  function sansVisiteDepuisUnMois(numero: string): boolean {
+    const derniere = dernieresVisites?.get(numero)
+    if (!derniere) return true
+    const t = new Date(derniere).getTime()
+    return Number.isNaN(t) || t < limiteUnMois
+  }
+
+  const nbSansVisite = useMemo(() => {
+    if (!dernieresVisites) return 0
+    return clientsTries.filter((c) => sansVisiteDepuisUnMois(c.numero)).length
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clientsTries, dernieresVisites, limiteUnMois])
+
+  /** Liste réellement affichée dans le tiroir (filtre "sans visite" appliqué). */
+  const clientsListe = useMemo(() => {
+    if (!filtreSansVisite || !dernieresVisites) return clientsTries
+    return clientsTries.filter((c) => sansVisiteDepuisUnMois(c.numero))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clientsTries, filtreSansVisite, dernieresVisites, limiteUnMois])
+
   const listeClientsSynthese = useMemo(() => {
-    const caTotal = clientsTries.reduce((s, c) => s + c.caYtdN, 0)
-    const nbEnRetard = clientsTries.filter((c) => retardsParNumero.has(c.numero)).length
+    const caTotal = clientsListe.reduce((s, c) => s + c.caYtdN, 0)
+    const nbEnRetard = clientsListe.filter((c) => retardsParNumero.has(c.numero)).length
     return { caTotal, nbEnRetard }
-  }, [clientsTries, retardsParNumero])
+  }, [clientsListe, retardsParNumero])
 
   async function terminerAlerteClient(row: ClientAlerteRow) {
     const { error } = await supabase
@@ -1282,7 +1344,7 @@ export default function MobileClients({
               Clients{collaborateurFiltre ? ` · ${formatCollaborateurCourt(collaborateurFiltre)}` : ''}
             </div>
             <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)' }}>
-              {clientsTries.length} client{clientsTries.length > 1 ? 's' : ''} · CA {N} : {formatMoney(listeClientsSynthese.caTotal)}
+              {clientsListe.length} client{clientsListe.length > 1 ? 's' : ''}{filtreSansVisite ? ' sans visite depuis plus d\'un mois' : ''} · CA {N} : {formatMoney(listeClientsSynthese.caTotal)}
               {listeClientsSynthese.nbEnRetard > 0 && ` · 💶 ${listeClientsSynthese.nbEnRetard} en retard de paiement`}
             </div>
 
@@ -1308,6 +1370,41 @@ export default function MobileClients({
                   )
                 })}
               </div>
+              {/* Filtre "sans visite depuis plus d'un mois" */}
+              <button
+                type="button"
+                role="switch"
+                aria-checked={filtreSansVisite}
+                disabled={dernieresVisites === null}
+                onClick={() => setFiltreSansVisite((v) => !v)}
+                style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, width: '100%',
+                  padding: '9px 12px', borderRadius: 10, textAlign: 'left',
+                  border: `1px solid ${filtreSansVisite ? 'rgba(214,154,74,0.55)' : 'rgba(255,255,255,0.10)'}`,
+                  background: filtreSansVisite ? 'rgba(214,154,74,0.16)' : 'rgba(255,255,255,0.04)',
+                }}
+              >
+                <span style={{ minWidth: 0 }}>
+                  <span style={{ display: 'block', fontSize: 13.5, fontWeight: 700, color: '#fff' }}>🕒 Sans visite depuis plus d'un mois</span>
+                  <span style={{ display: 'block', fontSize: 11, color: 'rgba(255,255,255,0.45)', marginTop: 1 }}>
+                    {dernieresVisites === null ? 'Chargement des visites…' : `${nbSansVisite} client${nbSansVisite > 1 ? 's' : ''} (jamais visités inclus)`}
+                  </span>
+                </span>
+                <span
+                  aria-hidden="true"
+                  style={{
+                    width: 42, height: 25, borderRadius: 999, position: 'relative', flexShrink: 0,
+                    background: filtreSansVisite ? '#D69A4A' : 'rgba(255,255,255,0.15)',
+                  }}
+                >
+                  <span
+                    style={{
+                      position: 'absolute', top: 2.5, left: filtreSansVisite ? 19.5 : 2.5, width: 20, height: 20, borderRadius: '50%',
+                      background: '#fff', transition: 'left 0.15s ease',
+                    }}
+                  />
+                </span>
+              </button>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', padding: '0 12px' }}>
                 <span>{triListeClients === 'code' ? 'N° · Client' : 'Client · N°'}</span>
                 <span>CA {N}</span>
@@ -1316,10 +1413,12 @@ export default function MobileClients({
 
             {clientsVisibles === null ? (
               <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', padding: '10px 0' }}>Chargement…</div>
-            ) : clientsTries.length === 0 ? (
-              <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', padding: '10px 0' }}>Aucun client.</div>
+            ) : clientsListe.length === 0 ? (
+              <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', padding: '10px 0' }}>
+                {filtreSansVisite ? 'Tous les clients ont été visités ce dernier mois.' : 'Aucun client.'}
+              </div>
             ) : (
-              clientsTries.map((c) => {
+              clientsListe.map((c) => {
                 const retard = retardsParNumero.get(c.numero)
                 return (
                   <div
@@ -1360,6 +1459,14 @@ export default function MobileClients({
                         )}
                         {c.partKind && <span style={{ color: '#b9a7e6' }}> · partagé</span>}
                         {numerosEnSommeil?.has(c.numero) && <span style={{ color: '#9aa4b8' }}> · 💤 en sommeil</span>}
+                        {filtreSansVisite && (
+                          <span style={{ color: '#E8A96A' }}>
+                            {' · 🕒 '}
+                            {dernieresVisites?.get(c.numero)
+                              ? `visite le ${formatDateFr(normalizeDateIso(dernieresVisites.get(c.numero)!.slice(0, 10)))}`
+                              : 'jamais visité'}
+                          </span>
+                        )}
                         {retard && (
                           <span style={{ color: '#e0a685' }}> · retard {formatKEurRetard(retard.total_en_retard)}{retard.en_litige ? ' · litige' : ''}</span>
                         )}
@@ -2055,7 +2162,11 @@ function ClientDetailScreen({
             </div>
           )}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-            <div style={{ fontSize: 20, fontWeight: 700, color: '#fff' }}>{client.nom || '(nom non renseigné)'}</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+              <div style={{ fontSize: 20, fontWeight: 700, color: '#fff' }}>{client.nom || '(nom non renseigné)'}</div>
+              {/* ÉVOLUTION (2026-09-28) : note libre du client (même note que SMC / Vision client) */}
+              <ClientNoteButton numeroTiers={client.numero} clientNom={client.nom} variant="dark" size={22} />
+            </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               {!loading && detail && (
                 <button
