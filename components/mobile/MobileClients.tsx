@@ -702,12 +702,12 @@ export default function MobileClients({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clientsTries, dernieresVisites, limiteUnMois])
 
-  /** Liste réellement affichée dans le tiroir (filtre "sans visite" appliqué). */
-  const clientsListe = useMemo(() => {
-    if (!filtreSansVisite || !dernieresVisites) return clientsTries
-    return clientsTries.filter((c) => sansVisiteDepuisUnMois(c.numero))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clientsTries, filtreSansVisite, dernieresVisites, limiteUnMois])
+  /** Liste affichée dans le tiroir. MODIF (2026-09-28) : le bouton "Sans
+   * visite depuis plus d'un mois" ne MASQUE plus aucun client -- il affiche
+   * seulement l'information de visite sur chaque ligne (🕒 orange = pas de
+   * visite depuis plus d'un mois / jamais visité ; ✓ vert = visité ce
+   * dernier mois), pour voir tous les clients et distinguer les deux. */
+  const clientsListe = clientsTries
 
   const listeClientsSynthese = useMemo(() => {
     const caTotal = clientsListe.reduce((s, c) => s + c.caYtdN, 0)
@@ -1344,8 +1344,9 @@ export default function MobileClients({
               Clients{collaborateurFiltre ? ` · ${formatCollaborateurCourt(collaborateurFiltre)}` : ''}
             </div>
             <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)' }}>
-              {clientsListe.length} client{clientsListe.length > 1 ? 's' : ''}{filtreSansVisite ? ' sans visite depuis plus d\'un mois' : ''} · CA {N} : {formatMoney(listeClientsSynthese.caTotal)}
+              {clientsListe.length} client{clientsListe.length > 1 ? 's' : ''} · CA {N} : {formatMoney(listeClientsSynthese.caTotal)}
               {listeClientsSynthese.nbEnRetard > 0 && ` · 💶 ${listeClientsSynthese.nbEnRetard} en retard de paiement`}
+              {filtreSansVisite && dernieresVisites && ` · 🕒 ${nbSansVisite} sans visite depuis plus d'un mois`}
             </div>
 
             {/* Sélecteur de tri + en-tête de colonnes (collants en haut du tiroir) */}
@@ -1415,7 +1416,7 @@ export default function MobileClients({
               <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', padding: '10px 0' }}>Chargement…</div>
             ) : clientsListe.length === 0 ? (
               <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', padding: '10px 0' }}>
-                {filtreSansVisite ? 'Tous les clients ont été visités ce dernier mois.' : 'Aucun client.'}
+                Aucun client.
               </div>
             ) : (
               clientsListe.map((c) => {
@@ -1459,14 +1460,15 @@ export default function MobileClients({
                         )}
                         {c.partKind && <span style={{ color: '#b9a7e6' }}> · partagé</span>}
                         {numerosEnSommeil?.has(c.numero) && <span style={{ color: '#9aa4b8' }}> · 💤 en sommeil</span>}
-                        {filtreSansVisite && (
-                          <span style={{ color: '#E8A96A' }}>
-                            {' · 🕒 '}
-                            {dernieresVisites?.get(c.numero)
-                              ? `visite le ${formatDateFr(normalizeDateIso(dernieresVisites.get(c.numero)!.slice(0, 10)))}`
-                              : 'jamais visité'}
-                          </span>
-                        )}
+                        {filtreSansVisite && dernieresVisites && (() => {
+                          const derniere = dernieresVisites.get(c.numero)
+                          const dateTexte = derniere ? formatDateFr(normalizeDateIso(derniere.slice(0, 10))) : ''
+                          return sansVisiteDepuisUnMois(c.numero) ? (
+                            <span style={{ color: '#E8A96A' }}>{' · 🕒 '}{derniere ? `visite le ${dateTexte}` : 'jamais visité'}</span>
+                          ) : (
+                            <span style={{ color: '#8fd4a8' }}>{` · ✓ visite le ${dateTexte}`}</span>
+                          )
+                        })()}
                         {retard && (
                           <span style={{ color: '#e0a685' }}> · retard {formatKEurRetard(retard.total_en_retard)}{retard.en_litige ? ' · litige' : ''}</span>
                         )}
