@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
+// ÉVOLUTION (2026-09-29) : journal d'usage mobile (/m/... dans user_activity_log)
+import { logMobileView } from '@/lib/mobileActivityLog'
 
 export type TaskRow = {
   id: string
@@ -64,6 +66,11 @@ export default function MobileTaskDetailSheet({
   const [assignees, setAssignees] = useState<AssigneeOption[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // ÉVOLUTION (2026-09-29) : journal d'usage -- ouverture d'une tâche
+  useEffect(() => {
+    logMobileView('taches/fiche', { type: 'tache', id: task.id, label: task.numero_tiers })
+  }, [task.id, task.numero_tiers])
 
   useEffect(() => {
     let cancelled = false

@@ -11,6 +11,8 @@ import MobileAlertes from './MobileAlertes'
 import MobileProspects from './MobileProspects'
 import MobileStockArticles from './MobileStockArticles'
 import MobileAdminPanel from './MobileAdminPanel'
+// ÉVOLUTION (2026-09-29) : journal d'usage mobile (/m/... dans user_activity_log)
+import { logMobileView } from '@/lib/mobileActivityLog'
 
 
 export type MobileScreen = 'home' | 'activite' | 'clients' | 'rdv' | 'alertes' | 'prospects' | 'stock' | 'Admin'
@@ -78,6 +80,26 @@ export default function MobileShell() {
 
   const courant = pile.length > 0 ? pile[pile.length - 1] : null
   const screen: MobileScreen = courant?.screen ?? 'home'
+
+  // ÉVOLUTION (2026-09-29) : journal d'usage -- une ligne à chaque écran
+  // affiché (accueil compris), pour que la synthèse hebdomadaire voie la
+  // navigation dans le Compagnon et pas seulement « /accueil ».
+  //   /m/accueil, /m/activite, /m/clients, /m/rdv, /m/alertes,
+  //   /m/prospects, /m/stock, /m/admin
+  // Le client ou l'article ciblé à l'ouverture (depuis un RDV, une ligne de
+  // document...) est porté dans entity_type / entity_id.
+  const courantKey = courant?.key ?? 0
+  useEffect(() => {
+    const ecran = screen === 'home' ? 'accueil' : screen.toLowerCase()
+    const entite = courant?.cibleClient
+      ? { type: 'client', id: courant.cibleClient.numero, label: courant.cibleClient.nom }
+      : courant?.cibleStock
+        ? { type: 'article', id: courant.cibleStock.reference, label: courant.cibleStock.designation }
+        : undefined
+    logMobileView(ecran, entite)
+    // Uniquement au changement d'écran visible (pas quand la cible est consommée).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [courantKey, screen])
 
   // ── Historique navigateur ──────────────────────────────────────────
   // Chaque entrée d'historique porte la profondeur de pile qui lui
