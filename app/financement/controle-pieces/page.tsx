@@ -20,6 +20,13 @@ import { useAccess } from '@/components/AccessContext'
 // état / points bloquants du dossier mis à jour. L'avancement d'étape reste
 // une décision humaine sur la fiche dossier.
 //
+// Facture (29/09/2026) : checklist par défaut alignée sur celle du devis
+// (installateur, bénéficiaire, mentions BAR-TH-171, montants, mention CEE),
+// avec les dates propres à la facture (visite préalable, travaux, facture).
+// Une facture arrive en fin de parcours : elle se rattache obligatoirement à
+// un dossier déjà existant. Le lien « Créer un nouveau dossier » n'est pas
+// proposé pour ce type de pièce et les messages le rappellent.
+//
 // Sélecteur de fichiers (23/09/2026) : l'ouverture de la fenêtre système fait
 // perdre le focus à l'onglet ; au retour, la session Supabase se rafraîchit et
 // AccessContext repasse brièvement en "loading". La page remplaçait alors tout
@@ -39,6 +46,10 @@ const TYPES: TypeMeta[] = [
   { id: 'devis', label: 'Devis', code: 'DEVIS', art: 'un devis', the: 'Le devis', of: 'du devis' },
   { id: 'facture', label: 'Facture', code: 'FACT', art: 'une facture', the: 'La facture', of: 'de la facture' },
 ]
+
+// Types de pièce qui ne peuvent être contrôlés que sur un dossier existant
+// (pas de création de dossier proposée depuis le contrôle).
+const DOSSIER_EXISTANT_OBLIGATOIRE: ReadonlySet<TypePieceId> = new Set<TypePieceId>(['facture'])
 
 const STATUS_LABEL: Record<'c' | 'nc' | 'na', string> = { c: 'Conforme', nc: 'Non conforme', na: 'N/A' }
 
@@ -66,8 +77,8 @@ const FILE_INPUT_ID = 'controle-pieces-fichier'
 
 type ChecklistItem = { id: string; label: string; hint?: string }
 
-// Texte intégral de la mention CEE Drapo attendue sur les devis (transmis à
-// l'IA via la précision du point « Encadré mention CEE »).
+// Texte intégral de la mention CEE Drapo attendue sur les devis et factures
+// (transmis à l'IA via la précision du point « Encadré mention CEE »).
 const MENTION_CEE_DRAPO =
   'En acceptant le présent document, j’atteste sur l’honneur avoir reçu du professionnel partenaire de DRAPO (810 694 398), les conseils adaptés à mes besoins d’économies d’énergie et délègue l’exclusivité de l’obtention des Certificats d’Économies d’Énergie à DRAPO en contrepartie d’une Prime Bénéficiaire dont le montant est indiqué sur ce document. Le montant de la Prime Bénéficiaire est déduit du montant total TTC. J’atteste également que le professionnel a réalisé une visite préalable du bâtiment et avoir reçu le document Cadre Contribution signé par le professionnel.'
 
@@ -179,12 +190,79 @@ const DEFAULT_CHECKLISTS: Record<TypePieceId, { items: ChecklistItem[]; exempleM
   },
   facture: {
     items: [
-      { id: 'coherence_devis', label: 'Concordance avec le devis', hint: 'Même artisan, même bénéficiaire, mêmes travaux/équipement que le devis du dossier.' },
-      { id: 'numero_date_facture', label: 'Numéro et date de la facture', hint: 'Date postérieure à la fin des travaux.' },
-      { id: 'mentions_legales', label: 'Mentions légales obligatoires', hint: 'SIRET, numéro de TVA intracommunautaire, qualification RGE.' },
-      { id: 'description_realise', label: 'Description des travaux réellement réalisés', hint: "Doit correspondre à l'équipement installé (marque/référence), pas seulement recopier le devis." },
-      { id: 'montant_ttc', label: 'Montant TTC cohérent avec le devis', hint: 'Tout écart doit être justifié (avenant, remise, aide déduite).' },
-      { id: 'solde_paiement', label: 'Mention du solde / du paiement', hint: "La facture doit indiquer qu'elle est soldée ou préciser les modalités de paiement restantes." },
+      // Installateur
+      { id: 'inst_raison_sociale', label: 'Installateur · Nom / raison sociale', hint: "Nom ou raison sociale de l'installateur présent sur la facture." },
+      { id: 'inst_adresse', label: 'Installateur · Adresse', hint: "Adresse complète de l'installateur." },
+      { id: 'inst_capital', label: 'Installateur · Capital social', hint: "Montant du capital social de l'installateur indiqué sur la facture." },
+      { id: 'inst_siret', label: 'Installateur · SIRET', hint: 'Numéro SIRET à 14 chiffres.' },
+      {
+        id: 'inst_rge',
+        label: 'Installateur · RGE en cours de validité pour le poste de travaux',
+        hint: "Qualification RGE valide à la date des travaux, pour le poste de travaux concerné, de l'entreprise qui réalise les travaux (celle du sous-traitant s'il y en a un).",
+      },
+      {
+        id: 'inst_sous_traitant',
+        label: 'Installateur · Sous-traitant (si sous-traitance)',
+        hint: "Si les travaux sont sous-traités : raison sociale, SIRET, nom et prénom du gérant du sous-traitant. N/A s'il n'y a pas de sous-traitant.",
+      },
+
+      // Bénéficiaire
+      { id: 'benef_civilite', label: 'Bénéficiaire · Civilité', hint: 'M. / Mme indiqué sur la facture.' },
+      { id: 'benef_nom', label: 'Bénéficiaire · Nom', hint: 'Cohérent avec le devis et le reste du dossier.' },
+      { id: 'benef_prenom', label: 'Bénéficiaire · Prénom', hint: 'Cohérent avec le devis et le reste du dossier.' },
+      { id: 'benef_adresse', label: 'Bénéficiaire · Adresse du client final', hint: 'Adresse complète du client final.' },
+      { id: 'benef_adresse_travaux', label: 'Bénéficiaire · Adresse des travaux si différente', hint: "À indiquer si elle diffère de l'adresse du client final. N/A si identique." },
+
+      // Dates de la facture
+      { id: 'date_visite', label: 'Dates · Date de visite préalable', hint: 'La date de la visite préalable doit figurer sur la facture.' },
+      { id: 'date_travaux', label: 'Dates · Date des travaux', hint: 'Date de réalisation (ou de fin) des travaux indiquée sur la facture.' },
+      { id: 'date_facture', label: 'Dates · Date de la facture', hint: 'Égale ou postérieure à la date des travaux.' },
+
+      // Corps de la facture : mentions techniques PAC air/eau (BAR-TH-171)
+      {
+        id: 'pac_mise_en_place',
+        label: "PAC (BAR-TH-171) · Mise en place d'une pompe à chaleur",
+        hint: "La facture doit mentionner « la mise en place d'une pompe à chaleur » de type air/eau, eau/eau ou sol/eau.",
+      },
+      {
+        id: 'pac_marque_ref',
+        label: 'PAC (BAR-TH-171) · Marque et référence de la pompe à chaleur',
+        hint: 'Telles qu’indiquées dans la fiche EPREL (https://eprel.ec.europa.eu/screen/product/spaceheaters).',
+      },
+      {
+        id: 'pac_usage',
+        label: 'PAC (BAR-TH-171) · Usage de la pompe à chaleur',
+        hint: '« Chauffage » ou « Chauffage et eau chaude sanitaire », écrit en toutes lettres.',
+      },
+      { id: 'pac_surface', label: 'PAC (BAR-TH-171) · Surface chauffée par la PAC', hint: 'Surface chauffée en m².' },
+      { id: 'pac_temperature', label: 'PAC (BAR-TH-171) · Température', hint: 'Basse, moyenne ou haute température.' },
+      {
+        id: 'pac_etas',
+        label: 'PAC (BAR-TH-171) · ETAS avec mention réglementaire',
+        hint: "ETAS accompagné de la mention « calculé selon le règlement (EU) n°813/2013 de la commission du 2 août 2013 ». Relever la valeur de l'ETAS : elle est à vérifier selon la grille des seuils.",
+      },
+      { id: 'regul_marque_ref', label: 'PAC (BAR-TH-171) · Marque et référence du régulateur', hint: '' },
+      { id: 'regul_classe', label: 'PAC (BAR-TH-171) · Classe du régulateur', hint: 'Classe du régulateur (IV à VIII) indiquée sur la facture.' },
+      {
+        id: 'depose_chaudiere',
+        label: "PAC (BAR-TH-171) · Dépose de l'ancienne chaudière",
+        hint: "La facture doit mentionner la dépose de l'ancienne chaudière fonctionnant au gaz, au fioul ou au charbon.",
+      },
+
+      // Prime et montants
+      { id: 'total_ht', label: 'Prime · Total HT', hint: '' },
+      { id: 'tva', label: 'Prime · TVA', hint: 'Taux et montant de TVA.' },
+      { id: 'total_ttc', label: 'Prime · Total TTC', hint: '' },
+      { id: 'prime_cee', label: 'Prime · Prime CEE', hint: 'Montant de la prime CEE indiqué sur la facture.' },
+      { id: 'reste_a_charge', label: 'Prime · Reste à charge', hint: 'Total TTC moins la prime CEE.' },
+      {
+        id: 'mention_cee',
+        label: 'Prime · Encadré mention CEE Drapo',
+        hint:
+          'La mention doit être dactylographiée INTÉGRALEMENT, dans la même taille de caractères que le corps de la facture. Texte attendu : « ' +
+          MENTION_CEE_DRAPO +
+          ' »',
+      },
     ],
     exempleMail: '',
   },
@@ -786,7 +864,17 @@ export default function ControlePiecesCeePage() {
     const t = current
     const link = links[t]
     const dossierId = link.dossierId
-    if (!dossierId || saves[t].busy) return
+    if (saves[t].busy) return
+    if (!dossierId) {
+      if (DOSSIER_EXISTANT_OBLIGATOIRE.has(t)) {
+        updateSave(t, (sv) => ({ ...sv, note: `${typeOf(t).the} doit être rattachée à un dossier existant : choisissez-le dans la liste.`, tone: 'err' }))
+      }
+      return
+    }
+    if (!dossiers.some((d) => d.id === dossierId)) {
+      updateSave(t, (sv) => ({ ...sv, note: 'Le dossier sélectionné n’existe plus ou est clôturé : choisissez un dossier ouvert.', tone: 'err' }))
+      return
+    }
     const meta = typeOf(t)
     const list = items(t)
     const s = sess(t)
@@ -949,6 +1037,7 @@ export default function ControlePiecesCeePage() {
   const candidats = dossiers.filter((d) => link.candidats.includes(d.id))
   const surEtape = dossiers.filter((d) => d.statut === etapeCourante && !link.candidats.includes(d.id))
   const autres = dossiers.filter((d) => d.statut !== etapeCourante && !link.candidats.includes(d.id))
+  const dossierObligatoire = DOSSIER_EXISTANT_OBLIGATOIRE.has(current)
 
   function optionLabel(d: DossierLite): string {
     return `${d.reference} · ${d.pro_raison_sociale}${d.numero_tiers ? ` (${d.numero_tiers})` : ''} · ${etapeLibelle(d.statut)} · ${ETAT_LABEL[d.etat] || d.etat}`
@@ -964,7 +1053,7 @@ export default function ControlePiecesCeePage() {
   const docCheck = s.docCheck
   const counts = computeCounts(list, s.results)
   const canRun = !busy && filesReady(current) && list.length > 0
-  const canSave = !!link.dossierId && !save.busy && list.length > 0 && counts.todo < list.length
+  const canSave = !!dossierLie && !save.busy && list.length > 0 && counts.todo < list.length
 
   return (
     <div className="min-h-screen bg-[#F4F3F0] pb-16">
@@ -1180,7 +1269,9 @@ export default function ControlePiecesCeePage() {
 
             <section className="rounded-2xl border border-[#E2DFD8] bg-white">
               <div className="flex items-center justify-between border-b border-[#E2DFD8] px-4 py-3">
-                <h2 className="text-[15px] font-semibold text-slate-900">Dossier CEE</h2>
+                <h2 className="text-[15px] font-semibold text-slate-900">
+                  Dossier CEE{dossierObligatoire && <span className="ml-1.5 text-xs font-medium text-[#A32C2C]">· existant obligatoire</span>}
+                </h2>
                 {link.mode && (
                   <span className={`rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${link.mode === 'auto' ? 'bg-[#EEF5FA] text-[#2E5E80]' : 'bg-[#FDF1DE] text-[#93600F]'}`}>
                     {link.mode === 'auto' ? 'Appairage auto' : 'Choix manuel'}
@@ -1193,6 +1284,11 @@ export default function ControlePiecesCeePage() {
                   Étape de contrôle : <b className="font-medium text-slate-700">{etapeLibelle(etapeCourante)}</b>
                   {dossiers.length ? ` · ${dossiers.length} dossier${dossiers.length > 1 ? 's' : ''} ouvert${dossiers.length > 1 ? 's' : ''}` : ''}
                 </div>
+                {dossierObligatoire && (
+                  <div className="rounded-xl bg-[#FDF1DE] px-3 py-2 text-xs text-[#93600F]">
+                    {meta.the} se contrôle sur un dossier déjà existant : rattachez-la au dossier ouvert du bénéficiaire avant d&apos;enregistrer le contrôle.
+                  </div>
+                )}
                 <select
                   value={link.dossierId || ''}
                   onChange={(e) => {
@@ -1200,9 +1296,11 @@ export default function ControlePiecesCeePage() {
                     updateLink(current, (l) => ({ ...l, dossierId: id || null, mode: id ? 'manuel' : null }))
                     updateSave(current, () => emptySave())
                   }}
-                  className="h-10 w-full rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm focus:border-[#B4761A] focus:outline-none"
+                  className={`h-10 w-full rounded-xl border bg-white px-3 text-sm focus:border-[#B4761A] focus:outline-none ${
+                    dossierObligatoire && !link.dossierId ? 'border-[#E4B8B8]' : 'border-[#D8D3C8]'
+                  }`}
                 >
-                  <option value="">— Aucun dossier rattaché —</option>
+                  <option value="">{dossierObligatoire ? '— Choisir le dossier existant —' : '— Aucun dossier rattaché —'}</option>
                   {candidats.length > 0 && (
                     <optgroup label={`Correspondances sur « ${benef.trim()} »`}>
                       {candidats.map((d) => (
@@ -1247,9 +1345,11 @@ export default function ControlePiecesCeePage() {
                     )}
                   </div>
                 ) : benef.trim() ? (
-                  <div className="text-xs text-slate-500">
+                  <div className={`text-xs ${dossierObligatoire ? 'text-[#A32C2C]' : 'text-slate-500'}`}>
                     {link.candidats.length > 1
                       ? `${link.candidats.length} dossiers correspondent à ce nom : choisissez-le dans la liste.`
+                      : dossierObligatoire
+                      ? "Aucun dossier ouvert ne correspond à ce nom : choisissez le dossier dans la liste. Une facture ne peut pas ouvrir un nouveau dossier."
                       : 'Aucun dossier ouvert ne correspond à ce nom : choisissez-le dans la liste ou créez-le.'}
                   </div>
                 ) : (
@@ -1279,12 +1379,16 @@ export default function ControlePiecesCeePage() {
                 )}
                 {!save.note && (
                   <div className="text-xs text-slate-400">
-                    Enregistre la pièce sur le dossier, ses points bloquants et l&apos;état du dossier. Le passage à l&apos;étape suivante se fait sur la fiche du dossier.
+                    {dossierObligatoire && !dossierLie
+                      ? 'Enregistrement possible une fois le dossier existant sélectionné.'
+                      : 'Enregistre la pièce sur le dossier, ses points bloquants et l’état du dossier. Le passage à l’étape suivante se fait sur la fiche du dossier.'}
                   </div>
                 )}
-                <button type="button" onClick={() => router.push('/financement/dossiers/nouveau')} className="w-fit text-xs text-[#B4761A] underline underline-offset-2">
-                  Créer un nouveau dossier
-                </button>
+                {!dossierObligatoire && (
+                  <button type="button" onClick={() => router.push('/financement/dossiers/nouveau')} className="w-fit text-xs text-[#B4761A] underline underline-offset-2">
+                    Créer un nouveau dossier
+                  </button>
+                )}
               </div>
             </section>
           </aside>
