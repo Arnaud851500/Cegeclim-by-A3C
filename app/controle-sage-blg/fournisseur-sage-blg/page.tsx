@@ -4,6 +4,9 @@
  * Écran "Fournisseurs & articles SAGE / BLG" — pendant fournisseur de
  * l'écran "Clients SAGE / BLG", orienté préparation du calcul de besoin.
  * ---------------------------------------------------------------------------
+ *    MàJ 29/09/2026 — la page s'ouvre sur l'onglet « Articles & stock min », case
+ *      « MYSTOCK actives uniquement » cochée par défaut ; fournisseur principal
+ *      fiabilisé côté base (sync_ref_articles_from_sage dans la synchro SAGE).
  *    MàJ 25/09/2026 — sources SAGE & méthode A :
  *      · stock de départ de la projection = disponible SAGE (sto_qte − sto_prepa) :
  *        les préparations de livraison ne sont pas dans le réservé (bons de commande).
@@ -2342,7 +2345,7 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
   const [fournFilter, setFournFilter] = useState('')
   const [familleFilter, setFamilleFilter] = useState('')
   // Les filtres partent des ~5 900 références en base : les KPI reflètent le jeu filtré.
-  const [pertinentsSeuls, setPertinentsSeuls] = useState(false)
+  const [pertinentsSeuls, setPertinentsSeuls] = useState(true) // 29/09/2026 : « MYSTOCK actives uniquement » coché par défaut
   const [avecConsoSeuls, setAvecConsoSeuls] = useState(false)
   const [ecartMinSeuls, setEcartMinSeuls] = useState(false)
   const [aCommanderSeuls, setACommanderSeuls] = useState(false)
@@ -3443,7 +3446,7 @@ function OngletComparaison({ fournisseurs, articles, loading, error }: { fournis
 type OngletPrincipal = 'fournisseurs' | 'articles' | 'comparaison'
 
 export default function FournisseursSageBlgPage() {
-  const [onglet, setOnglet] = useState<OngletPrincipal>('fournisseurs')
+  const [onglet, setOnglet] = useState<OngletPrincipal>('articles') // 29/09/2026 : ouverture directe sur l'onglet Articles
   const [fournisseurs, setFournisseurs] = useState<FournRow[]>([])
   const [articles, setArticles] = useState<ArtRow[]>([])
   const [strategies, setStrategies] = useState<StrategieRef[]>([])
