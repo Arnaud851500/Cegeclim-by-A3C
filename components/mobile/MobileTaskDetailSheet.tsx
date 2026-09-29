@@ -17,6 +17,8 @@ export type TaskRow = {
 }
 
 type RefItem = { id: string; name: string; color: string; is_active: boolean; sort_order: number }
+/** Utilisateur proposé dans « Confiée à » (user_page_access, droit can_todo). */
+type AssigneeOption = { email: string; label: string }
 
 const STATUS_OPTIONS = ['Non débuté', 'En cours', 'Terminé', 'Annulé']
 
@@ -59,6 +61,7 @@ export default function MobileTaskDetailSheet({
 
   const [categories, setCategories] = useState<RefItem[]>([])
   const [teams, setTeams] = useState<RefItem[]>([])
+  const [assignees, setAssignees] = useState<AssigneeOption[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -66,13 +69,22 @@ export default function MobileTaskDetailSheet({
     let cancelled = false
 
     async function load() {
-      const [{ data: cats }, { data: tms }] = await Promise.all([
+      // ÉVOLUTION (2026-09-29) : « Confiée à » devient une liste déroulante,
+      // comme sur PC -- utilisateurs ayant le droit Todo (user_page_access.
+      // can_todo), valeur enregistrée = email (format de assigned_to).
+      const [{ data: cats }, { data: tms }, { data: users }] = await Promise.all([
         supabase.from('todo_categories').select('id, name, color, is_active, sort_order').order('sort_order'),
         supabase.from('todo_teams').select('id, name, color, is_active, sort_order').order('sort_order'),
+        supabase.from('user_page_access').select('email, display_name').eq('can_todo', true),
       ])
       if (cancelled) return
       setCategories((cats || []) as RefItem[])
       setTeams((tms || []) as RefItem[])
+      const options = ((users || []) as Array<{ email: string | null; display_name: string | null }>)
+        .filter((u) => !!u.email)
+        .map((u) => ({ email: String(u.email).trim(), label: (u.display_name || '').trim() || String(u.email) }))
+        .sort((a, b) => a.label.localeCompare(b.label, 'fr', { sensitivity: 'base' }))
+      setAssignees(options)
 
       // Les nouveaux champs ne sont pas toujours fournis par le parent.
       const missing = task.category_id === undefined || task.team_id === undefined || task.concerned_person === undefined
@@ -151,6 +163,14 @@ export default function MobileTaskDetailSheet({
   const visibleCategories = categories.filter((c) => c.is_active || c.id === categoryId)
   const visibleTeams = teams.filter((t) => t.is_active || t.id === teamId)
 
+  // Valeur actuelle absente de la liste (anciennes saisies libres type
+  // « Maxime.L », ou utilisateur sans droit Todo) : conservée comme option
+  // pour ne rien modifier à l'insu de l'utilisateur.
+  const assigneeCourantHorsListe =
+    !!assignedTo && !assignees.some((a) => a.email.toLowerCase() === assignedTo.toLowerCase())
+  const assigneeSelectValue =
+    assignees.find((a) => a.email.toLowerCase() === assignedTo.toLowerCase())?.email ?? assignedTo
+
   return (
     <div
       style={{
@@ -210,12 +230,19 @@ export default function MobileTaskDetailSheet({
           </Field>
 
           <Field label="Confiée à">
-            <input
-              value={assignedTo}
-              onChange={(e) => setAssignedTo(e.target.value)}
-              placeholder="Nom du collaborateur"
-              style={inputStyle}
-            />
+            <select value={assigneeSelectValue} onChange={(e) => setAssignedTo(e.target.value)} style={inputStyle}>
+              <option value="" style={{ color: '#000' }}>Non attribuée</option>
+              {assigneeCourantHorsListe && (
+                <option value={assignedTo} style={{ color: '#000' }}>
+                  {assignedTo} (saisie libre)
+                </option>
+              )}
+              {assignees.map((a) => (
+                <option key={a.email} value={a.email} style={{ color: '#000' }}>
+                  {a.label}
+                </option>
+              ))}
+            </select>
           </Field>
 
           <Field label="Personne concernée" hint="De qui parle la tâche — pas forcément celle qui la réalise">
