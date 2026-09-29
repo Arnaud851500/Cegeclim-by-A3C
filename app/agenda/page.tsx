@@ -34,6 +34,8 @@ import { useViewport } from '@/lib/useViewport'
 import { formatMoney } from '@/app/focus_mensuel/page'
 import MobileRdv from '@/components/mobile/MobileRdv'
 import VoiceReportButtons from '@/components/mobile/VoiceReportButtons'
+// ÉVOLUTION (2026-09-29) : liste / recherche des comptes-rendus (y compris RDV sans client)
+import ComptesRendusSheet from '@/components/mobile/ComptesRendusSheet'
 
 // ── Types & constantes (alignés sur MobileRdv) ─────────────────────────────
 type RdvUnifie = {
@@ -232,6 +234,7 @@ function AgendaDesktop() {
 
   const [selectedRdv, setSelectedRdv] = useState<RdvUnifie | null>(null)
   const [formRdv, setFormRdv] = useState<{ mode: 'create' } | { mode: 'edit'; rdv: RdvUnifie } | null>(null)
+  const [comptesRendusOuverts, setComptesRendusOuverts] = useState(false)
 
   // Recherche de documents
   const [term, setTerm] = useState('')
@@ -453,6 +456,7 @@ function AgendaDesktop() {
             <button type="button" className="agdBtn" onClick={() => setVueMode('planning')} style={{ ...styles.segmentBtn, ...(vueMode === 'planning' ? styles.segmentBtnActive : {}) }}>🗓️ Planning</button>
             <button type="button" className="agdBtn" onClick={() => setVueMode('liste')} style={{ ...styles.segmentBtn, ...(vueMode === 'liste' ? styles.segmentBtnActive : {}) }}>📋 Liste</button>
           </div>
+          <button type="button" className="agdBtn" onClick={() => setComptesRendusOuverts(true)} style={styles.ghostBtn}>📝 Comptes-rendus</button>
           <button type="button" className="agdBtn" onClick={rafraichir} style={styles.ghostBtn}>Actualiser</button>
           <button type="button" onClick={() => setFormRdv({ mode: 'create' })} style={styles.primaryBtn}>+ Nouveau RDV</button>
         </div>
@@ -709,6 +713,14 @@ function AgendaDesktop() {
         </aside>
       </div>
 
+      {comptesRendusOuverts && (
+        <ComptesRendusSheet
+          currentEmail={currentEmail}
+          onClose={() => setComptesRendusOuverts(false)}
+          onOpenClient={(numero) => ouvrirVisionClient(numero)}
+        />
+      )}
+
       {formRdv && (
         <RdvFormModal
           mode={formRdv.mode}
@@ -778,7 +790,7 @@ function RdvDetailPanel({
       <div style={styles.sideTitle}>{rdv.subject}</div>
       {rdv.company_name && (
         <button type="button" onClick={() => rdv.numero_tiers && onOpenClient(rdv.numero_tiers)} disabled={!rdv.numero_tiers} style={styles.companyLink}>
-          {rdv.company_name}{rdv.numero_tiers ? ` (${rdv.numero_tiers})` : ''}
+          {rdv.company_name}{rdv.numero_tiers ? ` (${rdv.numero_tiers})` : ' · prospect (pas encore client)'}
         </button>
       )}
 
@@ -816,11 +828,14 @@ function RdvDetailPanel({
         onSaved={onSaved}
       />
 
-      {rdv.numero_tiers && (
+      {/* ÉVOLUTION (2026-09-29) : dictée vocale aussi sur un RDV sans
+         client -- le CR est rattaché au RDV (prospect), puis au client dès
+         qu'on le choisit sur le RDV (trigger rdv_compagnon_rattacher_cr). */}
+      {activityId && (
         <VoiceReportButtons
-          numeroTiers={rdv.numero_tiers}
+          numeroTiers={rdv.numero_tiers || ''}
           clientNom={rdv.company_name || ''}
-          rdvActivityId={activityId || undefined}
+          rdvActivityId={activityId}
           rdvLabel={rdv.subject}
           userEmail={currentEmail}
           userName={currentName}
@@ -968,7 +983,10 @@ function RdvFormModal({
   const endInit = rdv?.end_date ? new Date(rdv.end_date) : null
   const dureeInit = startInit && endInit ? Math.max(15, Math.round((endInit.getTime() - startInit.getTime()) / 60000)) : 60
 
-  const [clientSearch, setClientSearch] = useState('')
+  // ÉVOLUTION (2026-09-29) : sans client, le champ reprend le nom du prospect
+  // -- les suggestions de clients SAGE s'affichent alors, ce qui permet de
+  // rattacher le RDV (et ses comptes-rendus) au client dès qu'il existe.
+  const [clientSearch, setClientSearch] = useState(rdv && !rdv.numero_tiers ? (rdv.company_name || '') : '')
   const [clientResults, setClientResults] = useState<{ numero: string; intitule: string }[]>([])
   const [numeroTiers, setNumeroTiers] = useState<string | null>(rdv?.numero_tiers ?? null)
   const [intituleTiers, setIntituleTiers] = useState(rdv?.company_name ?? '')
@@ -1008,6 +1026,9 @@ function RdvFormModal({
       const end = new Date(start.getTime() + dureeMinutes * 60000)
       const payload = {
         numero_tiers: numeroTiers,
+        // Client pas encore dans SAGE : le nom saisi est gardé comme prospect.
+        // Quand un client est choisi, prospect_nom n'est pas modifié (historique).
+        ...(numeroTiers ? {} : { prospect_nom: clientSearch.trim() || null }),
         type,
         subject: subject.trim(),
         start_date: start.toISOString(),
@@ -1038,14 +1059,17 @@ function RdvFormModal({
 
         <div style={styles.formGrid}>
           <label style={{ ...styles.field, gridColumn: '1 / -1', position: 'relative' }}>
-            <span style={styles.fieldLabel}>Client (facultatif)</span>
+            <span style={styles.fieldLabel}>Client ou prospect (facultatif)</span>
             <input
               value={numeroTiers ? `${intituleTiers} (${numeroTiers})` : clientSearch}
               onChange={(e) => { setClientSearch(e.target.value); setNumeroTiers(null) }}
-              placeholder="Nom ou numéro du client…"
+              placeholder="Client SAGE (nom ou n°) ou nom du prospect…"
               style={styles.input}
             />
             {numeroTiers && <button type="button" onClick={() => { setNumeroTiers(null); setClientSearch('') }} style={styles.linkBtn}>Retirer le client</button>}
+            {!numeroTiers && clientSearch.trim() && (
+              <span style={styles.muted}>Pas encore client ? « {clientSearch.trim()} » sera enregistré comme prospect.</span>
+            )}
             {clientResults.length > 0 && !numeroTiers && (
               <div style={styles.suggestions}>
                 {clientResults.map((c) => (

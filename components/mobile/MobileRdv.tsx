@@ -5,6 +5,8 @@ import { supabase } from '@/lib/supabaseClient'
 import { formatMoney } from '@/app/focus_mensuel/page'
 import MobileDetailSheet, { type DetailField } from './MobileDetailSheet'
 import VoiceReportButtons from './VoiceReportButtons'
+// ÉVOLUTION (2026-09-29) : liste / recherche des comptes-rendus (y compris RDV sans client)
+import ComptesRendusSheet from './ComptesRendusSheet'
 
 const SEARCH_TABLES = ['activite_lignes', 'facture_lignes', 'devis_lignes']
 
@@ -131,6 +133,7 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
 
   const [nouveauRdvOuvert, setNouveauRdvOuvert] = useState(false)
   const [editingRdv, setEditingRdv] = useState<RdvUnifie | null>(null)
+  const [comptesRendusOuverts, setComptesRendusOuverts] = useState(false)
 
   const [vueMode, setVueMode] = useState<'liste' | 'planning'>('liste')
 
@@ -325,7 +328,7 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
       title: r.subject,
       subtitle: `${RDV_TYPE_LABELS[r.type] || r.type || 'Activité'}${r.source === 'compagnon' ? ' · RDV compagnon' : ''}`,
       fields: [
-        ...(r.company_name ? [{ label: 'Entreprise', value: r.company_name }] : []),
+        ...(r.company_name ? [{ label: r.numero_tiers ? 'Entreprise' : 'Prospect (pas encore client)', value: r.company_name }] : []),
         { label: 'Début', value: r.all_day ? (startDate ? startDate.toLocaleDateString('fr-FR') : '') : fmtTime(startDate) },
         { label: 'Fin', value: r.all_day ? (endDate ? endDate.toLocaleDateString('fr-FR') : '') : fmtTime(endDate) },
         ...(r.lieu ? [{ label: 'Lieu', value: r.lieu }] : []),
@@ -388,11 +391,14 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
             currentName={currentName}
             onSaved={() => void rafraichirPeriode()}
           />
-          {r.numero_tiers && (
+          {/* ÉVOLUTION (2026-09-29) : dictée vocale aussi sur un RDV sans
+             client -- le CR est alors rattaché au RDV (et au prospect), puis
+             au client quand on le choisit sur le RDV. */}
+          {activityId && (
             <VoiceReportButtons
-              numeroTiers={r.numero_tiers}
+              numeroTiers={r.numero_tiers || ''}
               clientNom={r.company_name || ''}
-              rdvActivityId={activityId || undefined}
+              rdvActivityId={activityId}
               rdvLabel={r.subject}
               userEmail={currentEmail}
               userName={currentName}
@@ -475,6 +481,13 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
           style={vueToggleStyle(vueMode === 'planning')}
         >
           🗓️ Planning
+        </button>
+        <button
+          type="button"
+          onClick={() => setComptesRendusOuverts(true)}
+          style={vueToggleStyle(false)}
+        >
+          📝 Comptes-rendus
         </button>
       </div>
 
@@ -744,6 +757,14 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
           currentName={currentName}
           onClose={() => setNouveauRdvOuvert(false)}
           onCreated={() => void rafraichirPeriode()}
+        />
+      )}
+
+      {comptesRendusOuverts && (
+        <ComptesRendusSheet
+          currentEmail={currentEmail}
+          onClose={() => setComptesRendusOuverts(false)}
+          onOpenClient={onOpenClient}
         />
       )}
 
@@ -1296,6 +1317,9 @@ export function NouveauRdvSheet({
       const end = new Date(start.getTime() + dureeMinutes * 60000)
       const { error: err } = await supabase.from('rdv_compagnon').insert({
         numero_tiers: numeroTiers,
+        // ÉVOLUTION (2026-09-29) : client pas encore dans SAGE -> le nom saisi
+        // est conservé comme prospect (affiché dans l'agenda et les CR).
+        prospect_nom: numeroTiers ? null : (clientSearch.trim() || null),
         type,
         subject: subject.trim(),
         start_date: start.toISOString(),
@@ -1323,11 +1347,11 @@ export function NouveauRdvSheet({
         <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginTop: -6 }}>RDV compagnon CEGECLIM — indépendant de BLG/Outlook</div>
 
         <div style={{ position: 'relative' }}>
-          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Client{clientPreselectionne ? '' : ' (facultatif)'}</div>
+          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>{clientPreselectionne ? 'Client' : 'Client ou prospect (facultatif)'}</div>
           <input
             value={numeroTiers ? `${intituleTiers} (${numeroTiers})` : clientSearch}
             onChange={(e) => { if (clientPreselectionne) return; setClientSearch(e.target.value); setNumeroTiers(null) }}
-            placeholder="Nom ou numéro du client…"
+            placeholder="Client SAGE (nom ou n°) ou nom du prospect…"
             readOnly={Boolean(clientPreselectionne)}
             style={{
               width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)',
@@ -1337,6 +1361,11 @@ export function NouveauRdvSheet({
           />
           {numeroTiers && !clientPreselectionne && (
             <button type="button" onClick={() => { setNumeroTiers(null); setClientSearch('') }} style={{ marginTop: 4, background: 'none', border: 'none', color: '#e0a685', fontSize: 11.5, fontWeight: 600, padding: 0 }}>Retirer</button>
+          )}
+          {!numeroTiers && clientSearch.trim() && (
+            <div style={{ marginTop: 4, fontSize: 11.5, color: 'rgba(255,255,255,0.5)' }}>
+              Pas encore client ? « {clientSearch.trim()} » sera enregistré comme prospect.
+            </div>
           )}
           {clientResults.length > 0 && !numeroTiers && !clientPreselectionne && (
             <div style={{ marginTop: 6, borderRadius: 10, border: '1px solid rgba(255,255,255,0.12)', background: '#0B1220', overflow: 'hidden' }}>
@@ -1433,7 +1462,11 @@ function ModifierRdvSheet({
   const endDateInitiale = rdv.end_date ? new Date(rdv.end_date) : new Date(startDateInitiale.getTime() + 60 * 60000)
   const dureeInitiale = Math.max(15, Math.round((endDateInitiale.getTime() - startDateInitiale.getTime()) / 60000))
 
-  const [clientSearch, setClientSearch] = useState('')
+  // ÉVOLUTION (2026-09-29) : sans client, le champ reprend le nom du prospect
+  // (company_name de v_rdv_unifie) -- les suggestions de clients SAGE
+  // s'affichent alors d'elles-mêmes, ce qui permet de rattacher le RDV (et
+  // ses comptes-rendus) au client dès qu'il existe.
+  const [clientSearch, setClientSearch] = useState(rdv.numero_tiers ? '' : (rdv.company_name || ''))
   const [clientResults, setClientResults] = useState<{ numero: string; intitule: string }[]>([])
   const [numeroTiers, setNumeroTiers] = useState<string | null>(rdv.numero_tiers)
   const [intituleTiers, setIntituleTiers] = useState(rdv.company_name || '')
@@ -1471,6 +1504,7 @@ function ModifierRdvSheet({
         .from('rdv_compagnon')
         .update({
           numero_tiers: numeroTiers,
+          ...(numeroTiers ? {} : { prospect_nom: clientSearch.trim() || null }),
           type,
           subject: subject.trim(),
           start_date: start.toISOString(),
@@ -1497,15 +1531,20 @@ function ModifierRdvSheet({
         <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', marginTop: -6 }}>RDV compagnon CEGECLIM — indépendant de BLG/Outlook</div>
 
         <div style={{ position: 'relative' }}>
-          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Client (facultatif)</div>
+          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Client ou prospect (facultatif)</div>
           <input
             value={numeroTiers ? `${intituleTiers} (${numeroTiers})` : clientSearch}
             onChange={(e) => { setClientSearch(e.target.value); setNumeroTiers(null) }}
-            placeholder="Nom ou numéro du client…"
+            placeholder="Client SAGE (nom ou n°) ou nom du prospect…"
             style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }}
           />
           {numeroTiers && (
             <button type="button" onClick={() => { setNumeroTiers(null); setClientSearch('') }} style={{ marginTop: 4, background: 'none', border: 'none', color: '#e0a685', fontSize: 11.5, fontWeight: 600, padding: 0 }}>Retirer</button>
+          )}
+          {!numeroTiers && clientSearch.trim() && (
+            <div style={{ marginTop: 4, fontSize: 11.5, color: 'rgba(255,255,255,0.5)' }}>
+              Pas encore client ? « {clientSearch.trim()} » sera enregistré comme prospect.
+            </div>
           )}
           {clientResults.length > 0 && !numeroTiers && (
             <div style={{ marginTop: 6, borderRadius: 10, border: '1px solid rgba(255,255,255,0.12)', background: '#0B1220', overflow: 'hidden' }}>
