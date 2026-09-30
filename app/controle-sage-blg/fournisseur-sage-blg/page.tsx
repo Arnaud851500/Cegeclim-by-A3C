@@ -4,6 +4,18 @@
  * Écran "Fournisseurs & articles SAGE / BLG" — pendant fournisseur de
  * l'écran "Clients SAGE / BLG", orienté préparation du calcul de besoin.
  * ---------------------------------------------------------------------------
+ *    MàJ 30/09/2026 — tarifs d'achat par quantité (SAGE F_TARIFQTE → sage.tarif_f_qte,
+ *      vue v_appro_tarif_qte_fournisseur, paliers du fournisseur principal) :
+ *      · colonne « Prix achat » : prix unitaire et montant de la quantité commandée
+ *        (retenue, sinon proposée) selon la tranche atteinte ;
+ *      · colonne « Palier suivant » : quantité additionnelle pour atteindre le
+ *        premier tarif inférieur, couverture additionnelle (mois, / μ retenu), prix
+ *        et économie sur la quantité totale achetée ;
+ *      · colonne « Paliers + avantageux » : les tarifs encore inférieurs, mêmes
+ *        indicateurs ; KPI « Économie paliers » et colonnes dans l'export Excel.
+ *      · lecture des bornes (appro_parametres.tarif_qte_lecture_bornes) : 0 = SAGE,
+ *        TQ_BorneSup = borne supérieure de la tranche (défaut) ; 1 = la borne est un
+ *        seuil (prix valable au-delà de la borne).
  *    MàJ 29/09/2026 — la page s'ouvre sur l'onglet « Articles & stock min », case
  *      « MYSTOCK actives uniquement » cochée par défaut ; fournisseur principal
  *      fiabilisé côté base (sync_ref_articles_from_sage dans la synchro SAGE).
@@ -393,6 +405,10 @@ function fmtMois(v: string | null | undefined): string {
   return Number.isNaN(d.getTime()) ? String(v) : d.toLocaleDateString('fr-FR', { month: 'short', year: 'numeric' })
 }
 const n0 = (v: number | null | undefined) => Number(v ?? 0)
+function fmtEuro2(v: number | null | undefined): string {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return '—'
+  return Number(v).toLocaleString('fr-FR', { style: 'currency', currency: 'EUR', minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
 
 // ── Activité fournisseur ─────────────────────────────────────────────────
 /** Filtre "Activité" : '' = toutes ; aucune activité depuis 24 / 12 mois ;
@@ -2005,6 +2021,94 @@ function calculerProposition(a: ArtRow, ctx: ContexteProposition): Proposition {
     stockReception, couvReception, seuilA, stockMaxA, ssBase, ajoutFrequence, ajoutDelai, frequenceJours, delaiApproJours: delaiAppro, cibleA, declenche, bloque, qteProposee, colisage, qteRetenue, qteFinale, dateSouhaitee, explication }
 }
 
+// ── Tarifs d'achat par quantité (sage.tarif_f_qte via v_appro_tarif_qte_fournisseur) ─────────
+type PalierTarif = {
+  reference_article: string; fournisseur: string; fournisseur_principal_sage: boolean | null
+  prix_base: number | null; palier: number; borne_precedente: number; borne_sup: number
+  prix_net: number; origine_prix: string | null; remise_vs_base_pct: number | null
+}
+/** 0 = lecture SAGE (TQ_BorneSup = borne supérieure de la tranche) ; 1 = la borne est un seuil (prix au-delà de la borne) */
+type LectureBornes = 0 | 1
+type OptionPalier = {
+  qteTotale: number; qteAdd: number; prix: number; tranche: string; montant: number
+  economie: number; economiePct: number; surcoutNet: number
+  couvAddMois: number | null; couvTotaleMois: number | null
+}
+type AnalyseTarif = {
+  fournisseur: string; paliers: PalierTarif[]; lecture: LectureBornes; prixBase: number | null
+  qteBase: number; prixActuel: number | null; trancheActuelle: string; montantActuel: number
+  suivant: OptionPalier | null; autres: OptionPalier[]
+}
+const BORNE_INFINIE = 1e12
+function libBorne(v: number) { return v >= BORNE_INFINIE ? '∞' : fmtNum(v) }
+
+/** Prix unitaire applicable à une quantité selon les paliers et la lecture des bornes. */
+function prixPourQuantite(paliers: PalierTarif[], q: number, lecture: LectureBornes, prixBase: number | null): { prix: number | null; tranche: string } {
+  if (!paliers.length) return { prix: prixBase, tranche: 'prix de base' }
+  if (lecture === 0) {
+    const p = paliers.find((x) => q <= x.borne_sup)
+    if (p) return { prix: Number(p.prix_net), tranche: `${fmtNum(n0(p.borne_precedente) + 1)} – ${libBorne(n0(p.borne_sup))}` }
+    const der = paliers[paliers.length - 1]
+    return { prix: Number(der.prix_net), tranche: `> ${libBorne(n0(der.borne_sup))} (dernière tranche)` }
+  }
+  const atteints = paliers.filter((x) => q > x.borne_sup)
+  if (!atteints.length) return { prix: prixBase, tranche: `≤ ${libBorne(n0(paliers[0].borne_sup))} (prix de base)` }
+  const p = atteints[atteints.length - 1]
+  const suiv = paliers[atteints.length]
+  return { prix: Number(p.prix_net), tranche: `> ${libBorne(n0(p.borne_sup))}${suiv ? ` et ≤ ${libBorne(n0(suiv.borne_sup))}` : ''}` }
+}
+
+/** Quantité additionnelle pour atteindre chaque tarif inférieur au prix de la quantité commandée.
+ *  Quantité de base = quantité retenue, sinon proposée ; arrondi au colisage ; économie = qté totale × (prix actuel − prix du palier). */
+function analyserTarif(a: ArtRow, prop: Proposition, paliers: PalierTarif[] | undefined, lecture: LectureBornes): AnalyseTarif | null {
+  if (!paliers || !paliers.length) return null
+  const prixBase = paliers[0].prix_base === null || paliers[0].prix_base === undefined ? null : Number(paliers[0].prix_base)
+  const qteBase = Math.max(0, n0(prop.qteFinale))
+  const colisage = n0(a.sage_colisage)
+  const mu = prop.mu
+  const qRef = qteBase > 0 ? qteBase : 1
+  const actuel = prixPourQuantite(paliers, qRef, lecture, prixBase)
+  const prixActuel = actuel.prix
+  const montantActuel = prixActuel === null ? 0 : Math.round(qteBase * prixActuel * 100) / 100
+  const candidats: OptionPalier[] = []
+  if (prixActuel !== null) {
+    paliers.forEach((pl) => {
+      const qMinBrute = lecture === 0 ? n0(pl.borne_precedente) + 1 : n0(pl.borne_sup) + 1
+      if (qMinBrute >= BORNE_INFINIE) return
+      const qMin = arrondirColisage(qMinBrute, colisage)
+      if (qMin <= qteBase) return
+      const px = prixPourQuantite(paliers, qMin, lecture, prixBase)
+      if (px.prix === null || px.prix >= prixActuel - 0.0001) return
+      const montant = Math.round(qMin * px.prix * 100) / 100
+      const economie = Math.round(qMin * (prixActuel - px.prix) * 100) / 100
+      candidats.push({
+        qteTotale: qMin, qteAdd: qMin - qteBase, prix: px.prix, tranche: px.tranche, montant,
+        economie, economiePct: Math.round((1 - px.prix / prixActuel) * 1000) / 10,
+        surcoutNet: Math.round((montant - montantActuel) * 100) / 100,
+        couvAddMois: mu > 0 ? Math.round((qMin - qteBase) / mu * 10) / 10 : null,
+        couvTotaleMois: mu > 0 ? Math.round((prop.stockReception + qMin) / mu * 10) / 10 : null,
+      })
+    })
+  }
+  // quantités croissantes, prix strictement décroissants (on écarte les paliers dominés)
+  candidats.sort((x, y) => x.qteTotale - y.qteTotale || x.prix - y.prix)
+  const options: OptionPalier[] = []
+  candidats.forEach((c) => { const der = options[options.length - 1]; if (!der || c.prix < der.prix - 0.0001) options.push(c) })
+  return { fournisseur: paliers[0].fournisseur, paliers, lecture, prixBase, qteBase, prixActuel, trancheActuelle: actuel.tranche, montantActuel, suivant: options[0] ?? null, autres: options.slice(1) }
+}
+
+function libOption(o: OptionPalier): string {
+  return `+${fmtNum(o.qteAdd)} (total ${fmtNum(o.qteTotale)}) → ${fmtEuro2(o.prix)} [tranche ${o.tranche}]${o.couvAddMois !== null ? ` · +${fmtNum(o.couvAddMois, 1)} mois de couverture (${fmtNum(o.couvTotaleMois, 1)} mois à réception)` : ''} · économie ${fmtEuro2(o.economie)} (−${fmtNum(o.economiePct, 1)} %) · montant ${fmtEuro2(o.montant)} (${o.surcoutNet >= 0 ? '+' : ''}${fmtEuro2(o.surcoutNet)} de trésorerie)`
+}
+function titreTarif(t: AnalyseTarif): string {
+  return [
+    `Tarif par quantité — fournisseur ${t.fournisseur} (${t.lecture === 0 ? 'lecture SAGE : borne supérieure de tranche' : 'lecture seuil : prix au-delà de la borne'})`,
+    ...t.paliers.map((p) => `  • ${t.lecture === 0 ? `${fmtNum(n0(p.borne_precedente) + 1)} – ${libBorne(n0(p.borne_sup))}` : `> ${libBorne(n0(p.borne_sup))}`} : ${fmtEuro2(Number(p.prix_net))}${p.origine_prix === 'remise' ? ' (remise sur prix de base)' : ''}`),
+    t.prixBase !== null ? `Prix de base fournisseur (fiche article) : ${fmtEuro2(t.prixBase)}` : null,
+    t.qteBase > 0 ? `Quantité commandée ${fmtNum(t.qteBase)} → ${fmtEuro2(t.prixActuel)} / u (tranche ${t.trancheActuelle}) = ${fmtEuro2(t.montantActuel)}` : 'Aucune quantité à commander : prix affiché pour 1 unité',
+  ].filter(Boolean).join('\n')
+}
+
 /** Cellules « Qté retenue » et « Date liv. souhaitée » : saisie ligne à ligne,
  * enregistrée à la validation (Entrée / perte de focus) via RPC. */
 function CelluleProposition({ article, prop, onSaved }: { article: ArtRow; prop: Proposition; onSaved: (a: ArtRow) => void }) {
@@ -2198,6 +2302,7 @@ function ModeleProjection({ parametres, onParametresChange, onRecalcul, loading 
   const mu3m = valParam(parametres, 'projection_mu_source', 0) === 1
   const frequence = valParam(parametres, 'frequence_appro_mystock_jours', 30)
   const avecDelai = valParam(parametres, 'seuil_a_inclut_delai_appro', 0) === 1
+  const lectureTarif = valParam(parametres, 'tarif_qte_lecture_bornes', 0) === 1 ? 1 : 0
   const [saving, setSaving] = useState(false)
 
   async function changer(cle: string, valeur: number) {
@@ -2263,6 +2368,14 @@ function ModeleProjection({ parametres, onParametresChange, onRecalcul, loading 
         </select>
         <span className="text-[11px] text-[#8A8474]">{avecDelai ? 'Ajoute μ × délai d\'appro fournisseur / 30 au stock de sécurité' : 'Le délai est déjà couvert par la projection à la date de réception'}</span>
       </label>
+      <label className="flex flex-col gap-0.5 text-[12px]">
+        <span className="font-semibold text-[#3A362E]">Tarifs par quantité : bornes</span>
+        <select value={lectureTarif} disabled={saving || loading} onChange={(e) => void changer('tarif_qte_lecture_bornes', Number(e.target.value))} className={sel}>
+          <option value={0}>SAGE : borne = fin de tranche</option>
+          <option value={1}>Seuil : prix au-delà de la borne</option>
+        </select>
+        <span className="text-[11px] text-[#8A8474]">{lectureTarif === 0 ? 'Ex. bornes 23 / 47 : 144,13 € de 24 à 47 unités (lecture SAGE de TQ_BorneSup)' : 'Ex. bornes 23 / 47 : 144,13 € dès 48 unités ; prix de base sous la 1re borne'}</span>
+      </label>
       {saving && <div className="text-[11px] text-[#8A8474] md:col-span-3 xl:col-span-6">Enregistrement puis recalcul…</div>}
     </div>
   )
@@ -2274,9 +2387,9 @@ function ModeleProjection({ parametres, onParametresChange, onRecalcul, loading 
 
 // ── Colonnes de la liste Articles : clé, en-tête, valeur utilisée pour le tri
 // et le filtre d'en-tête. L'ordre est celui du tableau (thead et tbody).
-type CleColArt = 'inc' | 'reference' | 'fourn' | 'strategie' | 'blocage' | 'methode' | 'delai_l' | 'mu12' | 'sigma' | 'mu3' | 'derniere_sortie' | 'dispo' | 'encours' | 'reserve' | 'projete' | 'couv' | 'min_sage' | 'min_blg' | 'ss' | 'min_calc' | 'max_calc' | 'proposition' | 'retenue' | 'date_liv' | 'retenu'
+type CleColArt = 'inc' | 'reference' | 'fourn' | 'strategie' | 'blocage' | 'methode' | 'delai_l' | 'mu12' | 'sigma' | 'mu3' | 'derniere_sortie' | 'dispo' | 'encours' | 'reserve' | 'projete' | 'couv' | 'min_sage' | 'min_blg' | 'ss' | 'min_calc' | 'max_calc' | 'proposition' | 'retenue' | 'date_liv' | 'prix_qte' | 'palier_suivant' | 'paliers_plus' | 'retenu'
 type FiltresColArt = Partial<Record<CleColArt, string>>
-type CtxColArt = { fournMap: Map<string, FournRow>; incoherencesParRef: Map<string, string[]>; propositions: Map<string, Proposition> }
+type CtxColArt = { fournMap: Map<string, FournRow>; incoherencesParRef: Map<string, string[]>; propositions: Map<string, Proposition>; tarifs: Map<string, AnalyseTarif> }
 const propDe = (c: CtxColArt, a: ArtRow) => c.propositions.get(a.reference_article)
 
 const COLONNES_ARTICLES: { key: CleColArt; label: string; title?: string; align: 'left' | 'right'; placeholder?: string; val: (a: ArtRow, ctx: CtxColArt) => unknown }[] = [
@@ -2304,8 +2417,39 @@ const COLONNES_ARTICLES: { key: CleColArt; label: string; title?: string; align:
   { key: 'proposition', label: 'Proposition', title: 'Quantité proposée par la méthode (A : remontée au stock max ; B : cible × μ − stock à réception), arrondie au colisage. Survole pour le calcul détaillé. Filtre : ">0" = à commander', align: 'right', placeholder: '>0', val: (a, c) => { const p = propDe(c, a); return p && p.declenche ? p.qteProposee : null } },
   { key: 'retenue', label: 'Qté retenue', title: 'Quantité retenue pour la commande : saisis pour remplacer la proposition (vide = proposition). Entrée ou clic ailleurs = enregistré. C\'est cette quantité qui part dans les fichiers commande. Filtre : ">0", "!vide" = modifiée', align: 'right', placeholder: '>0', val: (a, c) => { const p = propDe(c, a); return p ? (p.qteFinale > 0 ? p.qteFinale : null) : null } },
   { key: 'date_liv', label: 'Liv. souhaitée', title: 'Date de livraison souhaitée pour la commande (défaut = aujourd\'hui + délai d\'appro). Une commande fournisseur = un fichier par date.', align: 'right', placeholder: '2026-', val: (a, c) => propDe(c, a)?.dateSouhaitee ?? null },
+  { key: 'prix_qte', label: 'Prix achat', title: 'Tarif d\'achat par quantité (SAGE F_TARIFQTE, fournisseur principal) : prix unitaire de la quantité commandée (retenue, sinon proposée) et montant. Survole pour la grille des paliers. Filtre : "!vide" = références avec tarif par quantité', align: 'right', placeholder: '!vide', val: (a, c) => c.tarifs.get(a.reference_article)?.prixActuel ?? null },
+  { key: 'palier_suivant', label: 'Palier suivant', title: 'Quantité additionnelle à commander pour atteindre le premier tarif inférieur, couverture additionnelle (qté ajoutée / μ retenu, en mois), prix unitaire obtenu et économie sur la quantité totale achetée (qté totale × écart de prix). Filtre : ">0" = un palier est atteignable', align: 'right', placeholder: '>0', val: (a, c) => c.tarifs.get(a.reference_article)?.suivant?.qteAdd ?? null },
+  { key: 'paliers_plus', label: 'Paliers + avantageux', title: 'Tarifs encore plus avantageux au-delà du palier suivant : quantité additionnelle, couverture additionnelle, prix et économie sur la quantité totale. Filtre : ">0" = nombre de paliers', align: 'left', placeholder: '>0', val: (a, c) => c.tarifs.get(a.reference_article)?.autres.length || null },
   { key: 'retenu', label: 'Min retenu', title: 'Stock min retenu (saisie manuelle, ✎). Filtre "!vide" = avec saisie', align: 'right', placeholder: '!vide', val: (a) => a.stock_min_retenu },
 ]
+
+/** Cellules « Prix achat », « Palier suivant » et « Paliers + avantageux » (tarifs d'achat par quantité). */
+function CellulesTarifQte({ t }: { t: AnalyseTarif | undefined }) {
+  if (!t) return (<><td className="px-2 py-1.5 text-right text-[#B3AD9E]">—</td><td className="px-2 py-1.5 text-right text-[#B3AD9E]">—</td><td className="px-2 py-1.5 text-[#B3AD9E]">—</td></>)
+  const titre = titreTarif(t)
+  const opt = (o: OptionPalier, fort: boolean) => (
+    <div className="leading-tight" title={libOption(o)}>
+      <span className={fort ? 'font-bold text-[#111820]' : 'font-semibold text-[#3A362E]'}>+{fmtNum(o.qteAdd)}</span>
+      <span className="text-[10px] text-[#8A8474]"> → {fmtNum(o.qteTotale)} · {fmtEuro2(o.prix)}</span>
+      <div className="text-[10px] text-[#8A8474]">{o.couvAddMois !== null ? `+${fmtNum(o.couvAddMois, 1)} mois` : 'μ = 0'} · <span className="font-semibold text-emerald-700">éco. {fmtEuro(o.economie)}</span></div>
+    </div>
+  )
+  return (
+    <>
+      <td className="px-2 py-1.5 text-right" title={titre}>
+        <span className="rounded bg-sky-50 px-1 text-[9px] font-bold uppercase text-sky-800">qté</span>{' '}
+        <span className={t.qteBase > 0 ? 'font-semibold text-[#111820]' : 'text-[#8A8474]'}>{fmtEuro2(t.prixActuel)}</span>
+        <div className="text-[10px] text-[#8A8474]">{t.qteBase > 0 ? fmtEuro(t.montantActuel) : `${t.paliers.length} palier${t.paliers.length > 1 ? 's' : ''}`}</div>
+      </td>
+      <td className="px-2 py-1.5 text-right" title={t.suivant ? `${titre}\n\nPalier suivant : ${libOption(t.suivant)}` : titre}>
+        {t.qteBase <= 0 ? <span className="text-[10px] text-[#B3AD9E]">pas de commande</span> : t.suivant ? opt(t.suivant, true) : <span className="text-[10px] font-semibold text-emerald-700">meilleur prix ✓</span>}
+      </td>
+      <td className="px-2 py-1.5" title={t.autres.length ? `${titre}\n\nTarifs plus avantageux :\n${t.autres.map((o) => '• ' + libOption(o)).join('\n')}` : titre}>
+        {t.qteBase > 0 && t.autres.length ? <div className="flex flex-col gap-1">{t.autres.map((o, i) => <div key={i}>{opt(o, false)}</div>)}</div> : <span className="text-[#B3AD9E]">—</span>}
+      </td>
+    </>
+  )
+}
 
 /** Filtre d'en-tête d'une colonne Articles : quelques colonnes cherchent aussi
  * dans un libellé (désignation, intitulé fournisseur, libellés d'incohérences). */
@@ -2370,6 +2514,18 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
   const [showParams, setShowParams] = useState(false)
   const [paramsDraft, setParamsDraft] = useState<Record<string, string>>({})
   const [exportEnCours, setExportEnCours] = useState(false)
+  // Paliers de tarif d'achat par quantité (≈ 300 lignes, chargées une fois)
+  const [tarifsRows, setTarifsRows] = useState<PalierTarif[]>([])
+  const [tarifsErreur, setTarifsErreur] = useState<string | null>(null)
+  useEffect(() => {
+    let annule = false
+    void supabase.from('v_appro_tarif_qte_fournisseur').select('*').order('reference_article').order('fournisseur').order('borne_sup').limit(10000).then(({ data, error }) => {
+      if (annule) return
+      if (error) setTarifsErreur(messageErreur(error))
+      else setTarifsRows((data || []) as PalierTarif[])
+    })
+    return () => { annule = true }
+  }, [])
 
   useEffect(() => { setParamsDraft(Object.fromEntries(parametres.map((p) => [p.cle, String(p.valeur)]))) }, [parametres])
 
@@ -2400,7 +2556,32 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
     seuilInclutDelaiAppro: valParam(parametres, 'seuil_a_inclut_delai_appro', 0) === 1,
   }), [paramsFourn, methodeForcee, parametres])
   const propositions = useMemo(() => new Map(articles.map((a) => [a.reference_article, calculerProposition(a, ctxProp)])), [articles, ctxProp])
-  const ctxCol = useMemo<CtxColArt>(() => ({ fournMap, incoherencesParRef, propositions }), [fournMap, incoherencesParRef, propositions])
+  // Tarifs d'achat par quantité : paliers du fournisseur principal, analysés sur la quantité commandée
+  const lectureBornes: LectureBornes = valParam(parametres, 'tarif_qte_lecture_bornes', 0) === 1 ? 1 : 0
+  const paliersParCle = useMemo(() => {
+    const m = new Map<string, PalierTarif[]>()
+    tarifsRows.forEach((t) => {
+      const cle = `${safeText(t.reference_article).toUpperCase()}|${safeText(t.fournisseur).toUpperCase()}`
+      if (!m.has(cle)) m.set(cle, [])
+      m.get(cle)!.push({ ...t, borne_precedente: Number(t.borne_precedente), borne_sup: Number(t.borne_sup), prix_net: Number(t.prix_net) })
+    })
+    m.forEach((l) => l.sort((x, y) => x.borne_sup - y.borne_sup))
+    return m
+  }, [tarifsRows])
+  const tarifs = useMemo(() => {
+    const m = new Map<string, AnalyseTarif>()
+    if (!paliersParCle.size) return m
+    articles.forEach((a) => {
+      if (!a.fournisseur_principal) return
+      const paliers = paliersParCle.get(`${a.reference_article.toUpperCase()}|${a.fournisseur_principal.toUpperCase()}`)
+      const p = propositions.get(a.reference_article)
+      if (!paliers || !p) return
+      const t = analyserTarif(a, p, paliers, lectureBornes)
+      if (t) m.set(a.reference_article, t)
+    })
+    return m
+  }, [articles, propositions, paliersParCle, lectureBornes])
+  const ctxCol = useMemo<CtxColArt>(() => ({ fournMap, incoherencesParRef, propositions, tarifs }), [fournMap, incoherencesParRef, propositions, tarifs])
   const clesFiltreCol = useMemo(() => (Object.keys(filtresCol) as CleColArt[]).filter((k) => (filtresCol[k] || '').trim()), [filtresCol])
   function setFiltreCol(k: CleColArt, v: string) { setFiltresCol((f) => ({ ...f, [k]: v })) }
 
@@ -2481,8 +2662,12 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
       encoursRetard: pert.filter((a) => n0(a.encours_fourn_retard) > 0).length,
       encoursDouteux: pert.filter((a) => n0(a.encours_fourn_douteux) > 0).length,
       sansDate: pert.filter((a) => a.date_livraison_par_defaut).length,
+      avecTarifQte: baseFiltree.filter((a) => tarifs.has(a.reference_article)).length,
+      palierAtteignable: baseFiltree.filter((a) => (propositions.get(a.reference_article)?.qteFinale ?? 0) > 0 && tarifs.get(a.reference_article)?.suivant).length,
+      economiePalier: baseFiltree.reduce((s, a) => s + ((propositions.get(a.reference_article)?.qteFinale ?? 0) > 0 ? (tarifs.get(a.reference_article)?.suivant?.economie ?? 0) : 0), 0),
+      qteAddPalier: baseFiltree.reduce((s, a) => s + ((propositions.get(a.reference_article)?.qteFinale ?? 0) > 0 ? (tarifs.get(a.reference_article)?.suivant?.qteAdd ?? 0) : 0), 0),
     }
-  }, [baseFiltree, propositions])
+  }, [baseFiltree, propositions, tarifs])
 
   const affichees = useMemo(() => {
     const sorted = [...filtres].sort((a, b) => {
@@ -2653,6 +2838,13 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
         { h: 'Encours ≤ L', f: (a) => propositions.get(a.reference_article)?.encoursPeriode }, { h: 'Encours après L', f: (a) => propositions.get(a.reference_article)?.encoursApres },
         { h: 'Demande sur L', f: (a) => propositions.get(a.reference_article)?.demande }, { h: 'Stock à réception', f: (a) => propositions.get(a.reference_article)?.stockReception }, { h: 'Couverture à réception (mois)', f: (a) => propositions.get(a.reference_article)?.couvReception },
         { h: 'Déclenche', f: (a) => (propositions.get(a.reference_article)?.declenche ? 'Oui' : 'Non') }, { h: 'Proposition', f: (a) => propositions.get(a.reference_article)?.qteProposee }, { h: 'Qté retenue (saisie)', f: (a) => a.qte_proposition_manuelle }, { h: 'Qté commande', f: (a) => propositions.get(a.reference_article)?.qteFinale }, { h: 'Livraison souhaitée', f: (a) => fmtDate(propositions.get(a.reference_article)?.dateSouhaitee) },
+        { h: 'Tarif par quantité', f: (a) => (tarifs.has(a.reference_article) ? 'Oui' : 'Non') },
+        { h: 'Prix unitaire (qté commande)', f: (a) => tarifs.get(a.reference_article)?.prixActuel }, { h: 'Tranche de prix', f: (a) => tarifs.get(a.reference_article)?.trancheActuelle }, { h: 'Montant commande', f: (a) => tarifs.get(a.reference_article)?.montantActuel },
+        { h: 'Palier suivant : qté additionnelle', f: (a) => tarifs.get(a.reference_article)?.suivant?.qteAdd }, { h: 'Palier suivant : qté totale', f: (a) => tarifs.get(a.reference_article)?.suivant?.qteTotale },
+        { h: 'Palier suivant : couverture additionnelle (mois)', f: (a) => tarifs.get(a.reference_article)?.suivant?.couvAddMois }, { h: 'Palier suivant : prix unitaire', f: (a) => tarifs.get(a.reference_article)?.suivant?.prix },
+        { h: 'Palier suivant : économie (€, qté totale)', f: (a) => tarifs.get(a.reference_article)?.suivant?.economie }, { h: 'Palier suivant : montant', f: (a) => tarifs.get(a.reference_article)?.suivant?.montant },
+        { h: 'Paliers plus avantageux', f: (a) => (tarifs.get(a.reference_article)?.autres || []).map((o) => libOption(o)).join(' | ') },
+        { h: 'Meilleure économie possible (€)', f: (a) => { const t = tarifs.get(a.reference_article); if (!t) return null; const all = [t.suivant, ...t.autres].filter(Boolean) as OptionPalier[]; return all.length ? Math.max(...all.map((o) => o.economie)) : null } },
         { h: 'Explication', f: (a) => propositions.get(a.reference_article)?.explication.join(' | ') },
         { h: 'Stock sécurité calculé', f: (a) => a.calc_stock_securite }, { h: 'Seuil A (SS + période + délai)', f: (a) => propositions.get(a.reference_article)?.seuilA }, { h: 'dont période d\'appro', f: (a) => propositions.get(a.reference_article)?.ajoutFrequence }, { h: 'dont délai d\'appro', f: (a) => propositions.get(a.reference_article)?.ajoutDelai }, { h: 'Stock min calculé/retenu', f: (a) => a.calc_stock_min }, { h: 'Stock max calculé', f: (a) => a.calc_stock_max },
         { h: 'Stock min retenu (saisie)', f: (a) => a.stock_min_retenu }, { h: 'Commentaire', f: (a) => a.commentaire_stock_min },
@@ -2699,11 +2891,13 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
         <KpiCard label="Stock min BLG ≠ calculé" value={kpis.ecarts} loading={loading} tone="warn" />
         <KpiCard label="À commander" value={kpis.aCommander} loading={loading} tone="warn" sub={`${fmtNum(kpis.qteACommander)} pièces · ${fmtNum(kpis.retenues)} qté retenue${kpis.retenues > 1 ? 's' : ''} saisie${kpis.retenues > 1 ? 's' : ''}`} />
       </section>
-      <section className="grid grid-cols-2 gap-3 md:grid-cols-4">
+      <section className="grid grid-cols-2 gap-3 md:grid-cols-5">
         <KpiCard label="Stock négatif à réception" value={kpis.rupture} loading={loading} tone="warn" sub="stock épuisé avant l'arrivée de la commande (délai L)" />
         <KpiCard label="Encours fournisseur en retard" value={kpis.encoursRetard} loading={loading} tone="warn" sub="date estimée dépassée" />
         <KpiCard label="Encours douteux (exclu)" value={kpis.encoursDouteux} loading={loading} sub={`retard > ${parametres.find((p) => p.cle === 'cdf_retard_max_jours')?.valeur ?? 60} j`} />
         <KpiCard label="Sans date de livraison" value={kpis.sansDate} loading={loading} sub="délai théorique appliqué" />
+        <KpiCard label="Économie paliers de prix" value={fmtEuro(kpis.economiePalier)} loading={loading} tone={kpis.palierAtteignable ? 'ok' : undefined}
+          sub={tarifsErreur ? `tarifs non chargés : ${tarifsErreur}` : `${fmtNum(kpis.palierAtteignable)} réf. à commander avec palier atteignable (+${fmtNum(kpis.qteAddPalier)} pièces) · ${fmtNum(kpis.avecTarifQte)} réf. avec tarif par quantité`} />
       </section>
 
       {/* Filtres — placés sous les KPI : ils déterminent le jeu sur lequel les KPI et les pastilles d'incohérence sont calculés */}
@@ -2991,6 +3185,7 @@ function OngletArticles({ articles, fournisseurs, paramsFourn, loading, loadProg
                       {p.declenche ? <span className="rounded bg-red-100 px-1.5 py-0.5 font-bold text-red-700">{fmtNum(p.qteProposee)}</span> : p.bloque && a.pertinent_calcul_besoin ? <span className="text-[10px] font-bold text-red-700" title="Aucune proposition : blocage / arrêt appro">⛔</span> : <span className="text-[#B3AD9E]">—</span>}
                     </td>
                     <CelluleProposition article={a} prop={p} onSaved={onArticleChange} />
+                    <CellulesTarifQte t={tarifs.get(a.reference_article)} />
                     <td className="px-2 py-1.5 text-right">
                       <button type="button" title={a.commentaire_stock_min || 'Stock min retenu, délais de la référence, arrêt appro / vente, remplaçante, méthode de réappro'} onClick={() => setEditArticle(a)}
                         className={`rounded px-2 py-0.5 font-mono ${a.stock_min_retenu !== null && a.stock_min_retenu !== undefined ? 'bg-[#B4761A]/[0.12] font-bold text-[#96600F]' : 'text-[#B3AD9E] hover:bg-[#F4F3F0]'}`}>
