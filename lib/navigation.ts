@@ -162,6 +162,7 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'Creation Dossier', path: '/financement/dossiers/nouveau', activeLabel: 'Creation d un nouveau dossier', accessKey: 'can_autorisation', description: 'Création d un dossier' },
       { label: 'Parcours des dossiers CEE', path: '/financement', accessKey: 'can_autorisation', description: 'Tableau de bord des dossiers par étape : prêt, à corriger, bloqué.' },
       { label: 'Contrôle des pièces (IA)', path: '/financement/controle-pieces', activeLabel: 'Contrôle des pièces CEE', accessKey: 'can_financement', description: 'Vérification assistée des pièces et de la note de dimensionnement.' },
+      { label: 'Clients Convention CEE', path: '/financement/clients-cee', activeLabel: 'Clients Convention-CEE', accessKey: 'can_financement', description: 'Clients SAGE « Convention CEE = OUI » : devis, commandes, BL et factures (R/O, CEE Premium).' },
     ],
   },
   {
