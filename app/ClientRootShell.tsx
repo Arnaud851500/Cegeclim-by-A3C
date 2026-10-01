@@ -1500,12 +1500,19 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
     window.dispatchEvent(new CustomEvent('cegeclim:open-cdc-retard'))
   }
 
-  /** Pastille « Commande non complète à la date de livraison client » : lit
-   * v_portefeuille_couverture_stock (même vue que l'écran Portefeuille
-   * livraison), statuts RUPTURE + RECEPTION_TARDIVE, livraison <= aujourd'hui
+  /** Pastille « Commande non complète à la date de livraison client » :
+   * statuts RUPTURE + RECEPTION_TARDIVE, livraison <= aujourd'hui
    * + COUVERTURE_HORIZON_MOIS, périmètre agences / collaborateurs de
    * l'utilisateur. Compte les CDC distincts (et, pour le Centre d'alertes,
-   * les lignes et les clients). */
+   * les lignes et les clients).
+   *
+   * ÉVOLUTION (2026-10-01) : lit alerte_couverture_stock_cache au lieu de
+   * v_portefeuille_couverture_stock. La vue recalculait toute la couverture
+   * stock à chaque page ouverte (~1 000 appels/jour à ~1,8 s) ; le cache
+   * contient les mêmes lignes (mêmes colonnes, mêmes statuts), recalculées
+   * toutes les 10 minutes côté base, et applique le même périmètre
+   * utilisateur (RLS via interne.v_activite_lignes_visibles). L'écran
+   * Portefeuille livraison continue de lire la vue en direct. */
   async function refreshCouvertureStockSignal(accessProfile?: UserAccessProfile | null) {
     const allowedAgences = getAllowedAgencesForStatus(accessProfile)
     const allowedCollaborateurs = getAllowedCollaborateursForStatus(accessProfile)
@@ -1516,7 +1523,7 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
       const horizonIso = `${horizon.getFullYear()}-${String(horizon.getMonth() + 1).padStart(2, '0')}-${String(horizon.getDate()).padStart(2, '0')}`
 
       let query = supabase
-        .from('v_portefeuille_couverture_stock')
+        .from('alerte_couverture_stock_cache')
         .select('numero_document,numero_tiers,date_livraison,statut_couverture,agence,representant')
         .in('statut_couverture', ['RUPTURE', 'RECEPTION_TARDIVE'])
         .lte('date_livraison', horizonIso)
