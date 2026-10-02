@@ -8,6 +8,13 @@ import VoiceReportButtons from './VoiceReportButtons'
 // ÉVOLUTION (2026-09-29) : liste / recherche des comptes-rendus (y compris RDV sans client)
 import ComptesRendusSheet from './ComptesRendusSheet'
 
+// CORRECTIF (2026-10-02) : les RDV "journée entière" (ex. invitations
+// Outlook dont l'objet contient un long lien) débordaient sur les jours
+// suivants du planning. Les colonnes utilisent maintenant minmax(0, 1fr)
+// (un contenu long ne peut plus élargir sa colonne), les cellules coupent
+// ce qui dépasse, et l'objet affiché est nettoyé des URLs et des "-----"
+// (libelleRdv). L'objet complet reste visible au survol et dans le détail.
+
 const SEARCH_TABLES = ['activite_lignes', 'facture_lignes', 'devis_lignes']
 
 const SEARCH_FIELDS = [
@@ -87,6 +94,18 @@ function auteurCompteRendu(cr: Pick<CompteRendu, 'created_by_name' | 'created_by
   const email = safeText(cr.created_by_email)
   if (email) return fallbackNameFromEmail(email)
   return '—'
+}
+
+/** CORRECTIF (2026-10-02) : objet du RDV pour l'affichage -- sans les liens
+ * (ex. https://outlook.office365.com/owa/?itemid=...) ni les "-----". */
+function libelleRdv(subject: string | null | undefined): string {
+  const brut = safeText(subject)
+  const nettoye = brut
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/-{3,}/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+  return nettoye || brut || '(sans objet)'
 }
 
 type DocResult = {
@@ -325,7 +344,7 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
     const aTacheEnCours = Boolean(r.numero_tiers && tachesEnCoursParTiers.has(r.numero_tiers))
     const estCompagnon = r.source === 'compagnon'
     setOpenDetail({
-      title: r.subject,
+      title: libelleRdv(r.subject),
       subtitle: `${RDV_TYPE_LABELS[r.type] || r.type || 'Activité'}${r.source === 'compagnon' ? ' · RDV compagnon' : ''}`,
       fields: [
         ...(r.company_name ? [{ label: r.numero_tiers ? 'Entreprise' : 'Prospect (pas encore client)', value: r.company_name }] : []),
@@ -587,7 +606,7 @@ export default function MobileRdv({ onOpenClient }: { onOpenClient?: (numeroTier
                     <div style={{ fontSize: 14.5, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', display: 'flex', alignItems: 'center', gap: 5 }}>
                       {r.a_compte_rendu && <span title="Compte-rendu disponible" style={{ fontSize: 11 }}>[CR]</span>}
                       {aTacheEnCours && <span title="Tâche non terminée en cours pour ce client" style={{ fontSize: 13, flexShrink: 0 }}>⚠️</span>}
-                      {r.subject}
+                      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{libelleRdv(r.subject)}</span>
                     </div>
                     <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.4)', marginTop: 1 }}>
                       {[RDV_TYPE_LABELS[r.type] || r.type, dateLabel, r.source === 'compagnon' ? 'Compagnon' : ''].filter(Boolean).join(' · ')}
@@ -812,6 +831,9 @@ const GRILLE_HEURE_DEBUT = 7
 const GRILLE_HEURE_FIN = 20
 const GRILLE_HAUTEUR_HEURE = 52 // px par heure
 const GRILLE_HAUTEUR_TOTALE = (GRILLE_HEURE_FIN - GRILLE_HEURE_DEBUT) * GRILLE_HAUTEUR_HEURE
+// CORRECTIF (2026-10-02) : minmax(0, 1fr) -- une colonne ne peut plus être
+// élargie par son contenu (objet long d'un RDV journée entière).
+const GRILLE_COLONNES = '38px repeat(3, minmax(0, 1fr))'
 
 function debutJourLocal(d: Date): Date {
   const copie = new Date(d)
@@ -963,10 +985,10 @@ function PlanningTroisJours({
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '38px repeat(3, 1fr)', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: GRILLE_COLONNES, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
         <div />
         {jours.map((j) => (
-          <div key={j.toISOString()} style={{ textAlign: 'center', padding: '8px 2px', borderLeft: '1px solid rgba(255,255,255,0.06)' }}>
+          <div key={j.toISOString()} style={{ minWidth: 0, textAlign: 'center', padding: '8px 2px', borderLeft: '1px solid rgba(255,255,255,0.06)' }}>
             <div style={{ fontSize: 10.5, textTransform: 'uppercase', color: 'rgba(255,255,255,0.4)' }}>
               {j.toLocaleDateString('fr-FR', { weekday: 'short' })}
             </div>
@@ -989,21 +1011,23 @@ function PlanningTroisJours({
         const auMoinsUne = toutesLesJourneesParJour.some((l) => l.length > 0)
         if (!auMoinsUne) return null
         return (
-          <div style={{ display: 'grid', gridTemplateColumns: '38px repeat(3, 1fr)', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: GRILLE_COLONNES, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
             <div style={{ fontSize: 9.5, color: 'rgba(255,255,255,0.35)', padding: '4px 2px', writingMode: 'vertical-rl', textAlign: 'center' }}>Jour entier</div>
             {toutesLesJourneesParJour.map((liste, i) => (
-              <div key={i} style={{ borderLeft: '1px solid rgba(255,255,255,0.06)', padding: '4px', display: 'flex', flexDirection: 'column', gap: 3 }}>
+              <div key={i} style={{ minWidth: 0, overflow: 'hidden', borderLeft: '1px solid rgba(255,255,255,0.06)', padding: '4px', display: 'flex', flexDirection: 'column', gap: 3 }}>
                 {liste.map((r) => (
                   <div
                     key={r.rdv_id}
                     onClick={() => onOpenDetail(r)}
+                    title={r.subject}
                     style={{
+                      display: 'block', width: '100%', maxWidth: '100%', boxSizing: 'border-box',
                       fontSize: 10.5, color: '#fff', background: RDV_TYPE_COLORS[r.type] || '#7A5EA8',
                       borderRadius: 5, padding: '2px 5px', cursor: 'pointer', overflow: 'hidden',
                       textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                     }}
                   >
-                    {r.subject}
+                    {libelleRdv(r.subject)}
                   </div>
                 ))}
               </div>
@@ -1015,7 +1039,7 @@ function PlanningTroisJours({
       <div
         onTouchStart={onTouchStart}
         onTouchEnd={onTouchEnd}
-        style={{ display: 'grid', gridTemplateColumns: '38px repeat(3, 1fr)', position: 'relative', borderTop: '1px solid rgba(255,255,255,0.06)' }}
+        style={{ display: 'grid', gridTemplateColumns: GRILLE_COLONNES, position: 'relative', borderTop: '1px solid rgba(255,255,255,0.06)' }}
       >
         <div style={{ position: 'relative', height: GRILLE_HAUTEUR_TOTALE }}>
           {heures.map((h) => (
@@ -1029,7 +1053,7 @@ function PlanningTroisJours({
           const evenementsJour = (rdvGrille || []).filter((r) => !r.all_day && r.start_date && memeJour(new Date(r.start_date), j))
           const disposes = repartirColonnes(evenementsJour)
           return (
-            <div key={j.toISOString()} style={{ position: 'relative', height: GRILLE_HAUTEUR_TOTALE, borderLeft: '1px solid rgba(255,255,255,0.06)' }}>
+            <div key={j.toISOString()} style={{ position: 'relative', minWidth: 0, overflow: 'hidden', height: GRILLE_HAUTEUR_TOTALE, borderLeft: '1px solid rgba(255,255,255,0.06)' }}>
               {heures.map((h) => (
                 <div key={h} style={{ position: 'absolute', top: (h - GRILLE_HEURE_DEBUT) * GRILLE_HAUTEUR_HEURE, left: 0, right: 0, borderTop: '1px solid rgba(255,255,255,0.05)' }} />
               ))}
@@ -1054,16 +1078,18 @@ function PlanningTroisJours({
                   <div
                     key={ev.rdv_id}
                     onClick={() => onOpenDetail(ev)}
+                    title={ev.subject}
                     style={{
                       position: 'absolute', top, height: hauteur,
                       left: `calc(${colonne * largeurPct}% + 1px)`, width: `calc(${largeurPct}% - 2px)`,
+                      boxSizing: 'border-box',
                       background: RDV_TYPE_COLORS[ev.type] || '#7A5EA8',
                       border: aTacheEnCours ? '1.5px solid #E8A96A' : 'none',
                       borderRadius: 5, padding: '2px 4px', overflow: 'hidden', cursor: 'pointer',
                     }}
                   >
                     <div style={{ fontSize: 10, fontWeight: 700, color: '#fff', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {ev.subject}
+                      {libelleRdv(ev.subject)}
                     </div>
                     {hauteur > 34 && (
                       <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.85)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>

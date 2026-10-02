@@ -19,18 +19,33 @@ type StepRow = {
   error_count: number
 }
 
+// CORRECTIF (2026-10-02) : le cron Vercel (vercel.json, toutes les 5 min)
+// s'authentifie avec « Authorization: Bearer CRON_SECRET ». Seul
+// CLIENT_MAINTENANCE_SECRET était accepté ici : les 287 appels des
+// dernières 24 h ont été refusés (401), donc aucun worker ne reprenait un
+// run interrompu. CRON_SECRET est maintenant accepté, comme dans
+// /api/cron/scheduler-dispatcher.
 function isAuthorized(req: NextRequest) {
   const secret = process.env.CLIENT_MAINTENANCE_SECRET
+  const cronSecret = process.env.CRON_SECRET
 
-  // On garde le comportement souple pour le local,
-  // mais en production la variable doit exister.
-  if (!secret) return true
+  if (!secret && !cronSecret) return process.env.NODE_ENV !== 'production'
 
   const headerSecret = req.headers.get('x-client-maintenance-secret')
-  const bearer = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
+  const bearer = req.headers
+    .get('authorization')
+    ?.replace(/^Bearer\s+/i, '')
 
-  return headerSecret === secret || bearer === secret
+  if (secret && (headerSecret === secret || bearer === secret)) return true
+  if (cronSecret && bearer === cronSecret) return true
+  return false
 }
+
+/** Une étape « running » démarrée il y a moins de ce délai est
+ * probablement en cours d'exécution dans une autre invocation (durée max
+ * d'une fonction : maxDuration = 300 s) : on ne la relance pas en
+ * parallèle. Au-delà, l'invocation qui la portait est morte -> reprise. */
+const STEP_BUSY_SECONDS = 330
 
 async function addLog(
   supabase: any,
@@ -107,23 +122,24 @@ function countFromResult(stepKey: string, data: any) {
       inserted_count: 0,
       updated_count:
         Number(data?.deleted_from_clients ?? 0) +
-        Number(data?.cegeclim_marked_closed ?? data?.cegeclim_alerts_updated ?? 0),
+        Number(data?.cegeclim_alerts_updated ?? 0),
       rejected_count:
         Number(data?.rejected_total ?? data?.rejected_by_filter ?? 0) || 0,
       error_count: 0,
     }
   }
 
-  // Correction importante :
-  // /api/rge-refresh renvoie nb_rows_source, nb_rows_imported, nb_rows_updated
-  // et non stats.sourceRows / stats.cacheInserted.
   if (stepKey === 'rge_refresh') {
     const stats = data?.stats || {}
 
     return {
       processed_count:
-        Number(data?.nb_rows_source ?? stats.sourceRows ?? stats.source_rows ?? 0) || 0,
-
+        Number(
+          data?.nb_rows_source ??
+            stats.sourceRows ??
+            stats.source_rows ??
+            0
+        ) || 0,
       inserted_count:
         Number(
           data?.nb_rows_imported ??
@@ -132,7 +148,6 @@ function countFromResult(stepKey: string, data: any) {
             stats.imported ??
             0
         ) || 0,
-
       updated_count:
         Number(
           data?.nb_rows_updated ??
@@ -142,10 +157,13 @@ function countFromResult(stepKey: string, data: any) {
             stats.cache_updated ??
             0
         ) || 0,
-
       rejected_count:
-        Number(data?.nb_rows_rejected ?? stats.rejected ?? stats.rejectedRows ?? 0) || 0,
-
+        Number(
+          data?.nb_rows_rejected ??
+            stats.rejected ??
+            stats.rejectedRows ??
+            0
+        ) || 0,
       error_count: 0,
     }
   }
@@ -174,13 +192,21 @@ async function callInternalApi(
   path: string,
   body?: Record<string, any>
 ) {
-  const url = new URL(path, req.nextUrl.origin)
+  const configuredOrigin = String(process.env.APP_BASE_URL || '').trim()
+  const origin = configuredOrigin
+    ? configuredOrigin.startsWith('http')
+      ? configuredOrigin.replace(/\/+$/, '')
+      : `https://${configuredOrigin.replace(/\/+$/, '')}`
+    : req.nextUrl.origin
+
+  const url = new URL(path, origin)
 
   const res = await fetch(url.toString(), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-client-maintenance-secret': process.env.CLIENT_MAINTENANCE_SECRET || '',
+      'x-client-maintenance-secret':
+        process.env.CLIENT_MAINTENANCE_SECRET || '',
     },
     body: body ? JSON.stringify(body) : undefined,
     cache: 'no-store',
@@ -197,7 +223,11 @@ async function callInternalApi(
 
   if (!res.ok || data?.success === false) {
     throw new Error(
-      data?.error || data?.message || text || `Erreur API ${path}`
+      data?.error ||
+        data?.message ||
+        data?.raw ||
+        text ||
+        `Erreur API ${path}. HTTP ${res.status}`
     )
   }
 
@@ -205,7 +235,12 @@ async function callInternalApi(
 }
 
 async function finalizeSireneParams(supabase: any) {
-  const today = new Date().toISOString().slice(0, 10)
+  const today = new Intl.DateTimeFormat('fr-CA', {
+    timeZone: 'Europe/Paris',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date())
 
   const { data, error } = await supabase
     .from('import_sirene_params')
@@ -230,17 +265,13 @@ async function finalizeSireneParams(supabase: any) {
     .eq('id', data.id)
 }
 
-async function shouldFinalizeSireneParams(supabase: any, step: StepRow) {
-  if (step.step_key === 'sirene_cessation') {
-    return true
-  }
+async function shouldFinalizeSireneParams(
+  supabase: any,
+  step: StepRow
+) {
+  if (step.step_key === 'sirene_cessation') return true
+  if (step.step_key !== 'sirene_import') return false
 
-  if (step.step_key !== 'sirene_import') {
-    return false
-  }
-
-  // Si les cessations sont dans le même run, on ne finalise pas encore les paramètres.
-  // Sinon, la seconde étape repart avec les dates du jour au lieu de la fenêtre testée.
   const { data, error } = await supabase
     .from('client_maintenance_steps')
     .select('id')
@@ -262,65 +293,24 @@ async function runHttpStep(
   path: string,
   body?: Record<string, any>
 ) {
-  await addLog(supabase, step.run_id, step.id, 'info', `Appel ${path}`, body || {})
+  await addLog(
+    supabase,
+    step.run_id,
+    step.id,
+    'info',
+    `Appel ${path}`,
+    body || {}
+  )
 
   const data = await callInternalApi(req, path, body)
   const counts = countFromResult(step.step_key, data)
-
-  const accumulatedCounts = {
-    processed_count: Number(step.processed_count || 0) + Number(counts.processed_count || 0),
-    inserted_count: Number(step.inserted_count || 0) + Number(counts.inserted_count || 0),
-    updated_count: Number(step.updated_count || 0) + Number(counts.updated_count || 0),
-    rejected_count: Number(step.rejected_count || 0) + Number(counts.rejected_count || 0),
-    error_count: Number(step.error_count || 0) + Number(counts.error_count || 0),
-  }
-
-  // SIRENE peut répondre partial=true quand le lot est volontairement interrompu
-  // pour éviter un timeout Vercel. Dans ce cas, on garde l'étape en running.
-  // Le prochain appel worker reprendra la même étape avec le curseur Supabase.
-  if (data?.partial === true && data?.done !== true) {
-    await supabase
-      .from('client_maintenance_steps')
-      .update({
-        ...accumulatedCounts,
-        status: 'running',
-        result_json: data || {},
-        error_message: null,
-      })
-      .eq('id', step.id)
-
-    await supabase
-      .from('client_maintenance_runs')
-      .update({
-        status: 'running',
-        current_step: step.step_label,
-        message: `Étape partielle : ${step.step_label}. Reprise au prochain appel worker.`,
-        error_message: null,
-      })
-      .eq('id', step.run_id)
-
-    await addLog(
-      supabase,
-      step.run_id,
-      step.id,
-      'info',
-      `Étape partielle : ${step.step_label}`,
-      { counts, accumulatedCounts, result: data }
-    )
-
-    return {
-      partial: true,
-      counts: accumulatedCounts,
-      result: data,
-    }
-  }
 
   if (await shouldFinalizeSireneParams(supabase, step)) {
     await finalizeSireneParams(supabase)
   }
 
   await finishStep(supabase, step, 'done', {
-    ...accumulatedCounts,
+    ...counts,
     result_json: data || {},
   })
 
@@ -330,14 +320,8 @@ async function runHttpStep(
     step.id,
     'info',
     `Étape terminée : ${step.step_label}`,
-    { counts, accumulatedCounts, result: data }
+    { counts, result: data }
   )
-
-  return {
-    partial: false,
-    counts: accumulatedCounts,
-    result: data,
-  }
 }
 
 function enrichmentPriority(row: any) {
@@ -351,9 +335,16 @@ function enrichmentPriority(row: any) {
   return 100
 }
 
-async function buildEnrichmentQueue(supabase: any, run: any, step: StepRow) {
+async function buildEnrichmentQueue(
+  supabase: any,
+  run: any,
+  step: StepRow
+) {
   const config = run.config_json || {}
-  const limit = Math.max(1, Math.min(Number(config.enrichmentLimit || 1000), 10000))
+  const limit = Math.max(
+    1,
+    Math.min(Number(config.enrichmentLimit || 1000), 10000)
+  )
   const selectionLimit = Math.min(limit * 3, 20000)
 
   const { data: rows, error } = await supabase
@@ -362,7 +353,10 @@ async function buildEnrichmentQueue(supabase: any, run: any, step: StepRow) {
       'siret, enrichment_status, last_enrichment_at, telephone, email, site_web, google_maps_url, google_rating, google_user_ratings_total'
     )
     .not('siret', 'is', null)
-    .order('last_enrichment_at', { ascending: true, nullsFirst: true })
+    .order('last_enrichment_at', {
+      ascending: true,
+      nullsFirst: true,
+    })
     .limit(selectionLimit)
 
   if (error) throw error
@@ -423,225 +417,155 @@ async function runEnrichmentBatch(
   step: StepRow
 ) {
   const config = run.config_json || {}
-
   const batchSize = Math.max(
     1,
-    Math.min(Number(config.enrichmentBatchSize || 50), 100)
+    Math.min(Number(config.enrichmentBatchSize || 25), 100)
   )
 
-  // Nombre maximum de batchs traités dans UN appel worker.
-  // Exemple : 10 batchs x 25 clients = 250 clients par appel worker.
-  const maxBatchesPerWorker = Math.max(
-    1,
-    Math.min(Number(config.enrichmentMaxBatchesPerWorker || 50), 50)
-  )
+  const { data: queuedRows, error: queueError } = await supabase
+    .from('client_enrichment_queue')
+    .select('*')
+    .eq('run_id', run.id)
+    .eq('status', 'queued')
+    .order('priority', { ascending: true })
+    .order('created_at', { ascending: true })
+    .limit(batchSize)
 
-  // Garde-fou temps pour éviter les timeouts Vercel.
-  // 240s = 4 min, compatible avec maxDuration 300.
-  const maxRuntimeMs = Math.max(
-    30_000,
-    Math.min(Number(config.enrichmentMaxRuntimeMs || 240_000), 280_000)
-  )
+  if (queueError) throw queueError
 
-  const startedAt = Date.now()
-
-  let totalOk = 0
-  let totalErrors = 0
-  let totalProcessed = 0
-  let batchesDone = 0
-
-  while (batchesDone < maxBatchesPerWorker) {
-    if (Date.now() - startedAt > maxRuntimeMs) {
-      await addLog(
-        supabase,
-        step.run_id,
-        step.id,
-        'warning',
-        'Arrêt temporaire enrichissement : limite de temps worker atteinte.',
-        {
-          batchesDone,
-          totalOk,
-          totalErrors,
-          totalProcessed,
-          maxRuntimeMs,
-        }
-      )
-      break
-    }
-
-    const { data: queuedRows, error: queueError } = await supabase
+  if (!queuedRows || queuedRows.length === 0) {
+    const { count: errorCount } = await supabase
       .from('client_enrichment_queue')
-      .select('*')
+      .select('id', { count: 'exact', head: true })
       .eq('run_id', run.id)
-      .eq('status', 'queued')
-      .order('priority', { ascending: true })
-      .order('created_at', { ascending: true })
-      .limit(batchSize)
+      .eq('status', 'error')
 
-    if (queueError) throw queueError
-
-    if (!queuedRows || queuedRows.length === 0) {
-      const { count: errorCount } = await supabase
-        .from('client_enrichment_queue')
-        .select('id', { count: 'exact', head: true })
-        .eq('run_id', run.id)
-        .eq('status', 'error')
-
-      const { count: doneCount } = await supabase
-        .from('client_enrichment_queue')
-        .select('id', { count: 'exact', head: true })
-        .eq('run_id', run.id)
-        .eq('status', 'done')
-
-      await finishStep(supabase, step, 'done', {
-        processed_count: Number(doneCount || 0) + Number(errorCount || 0),
-        updated_count: Number(doneCount || 0),
-        error_count: Number(errorCount || 0),
-        result_json: {
-          done: doneCount || 0,
-          errors: errorCount || 0,
-          batches_done_last_worker: batchesDone,
-          completed: true,
-        },
-      })
-
-      await addLog(
-        supabase,
-        step.run_id,
-        step.id,
-        'info',
-        'Enrichissement terminé.',
-        {
-          done: doneCount || 0,
-          errors: errorCount || 0,
-          batchesDone,
-        }
-      )
-
-      return
-    }
-
-    const ids = queuedRows.map((row: any) => row.id)
-
-    await supabase
+    const { count: doneCount } = await supabase
       .from('client_enrichment_queue')
-      .update({
-        status: 'running',
-        locked_at: new Date().toISOString(),
-      })
-      .in('id', ids)
+      .select('id', { count: 'exact', head: true })
+      .eq('run_id', run.id)
+      .eq('status', 'done')
 
-    let ok = 0
-    let errors = 0
-
-    for (const item of queuedRows) {
-      try {
-        const data = await callInternalApi(req, '/api/enrich-client', {
-          siret: item.siret,
-        })
-
-        await supabase
-          .from('client_enrichment_queue')
-          .update({
-            status: 'done',
-            attempts: Number(item.attempts || 0) + 1,
-            processed_at: new Date().toISOString(),
-            last_error: null,
-          })
-          .eq('id', item.id)
-
-        ok += 1
-
-        await addLog(
-          supabase,
-          step.run_id,
-          step.id,
-          'info',
-          `Enrichissement OK ${item.siret}`,
-          { result: data }
-        )
-      } catch (error: any) {
-        errors += 1
-
-        await supabase
-          .from('client_enrichment_queue')
-          .update({
-            status: 'error',
-            attempts: Number(item.attempts || 0) + 1,
-            processed_at: new Date().toISOString(),
-            last_error: error?.message || String(error),
-          })
-          .eq('id', item.id)
-
-        await addLog(
-          supabase,
-          step.run_id,
-          step.id,
-          'error',
-          `Enrichissement erreur ${item.siret}`,
-          { error: error?.message || String(error) }
-        )
-      }
-    }
-
-    batchesDone += 1
-    totalOk += ok
-    totalErrors += errors
-    totalProcessed += queuedRows.length
-
-    await supabase
-      .from('client_maintenance_steps')
-      .update({
-        processed_count: Number(step.processed_count || 0) + totalProcessed,
-        updated_count: Number(step.updated_count || 0) + totalOk,
-        error_count: Number(step.error_count || 0) + totalErrors,
-        result_json: {
-          last_batch_ok: ok,
-          last_batch_errors: errors,
-          last_batch_size: queuedRows.length,
-          batches_done_last_worker: batchesDone,
-          total_ok_last_worker: totalOk,
-          total_errors_last_worker: totalErrors,
-          total_processed_last_worker: totalProcessed,
-          completed: false,
-        },
-      })
-      .eq('id', step.id)
+    await finishStep(supabase, step, 'done', {
+      processed_count:
+        Number(doneCount || 0) + Number(errorCount || 0),
+      updated_count: Number(doneCount || 0),
+      error_count: Number(errorCount || 0),
+      result_json: {
+        done: doneCount || 0,
+        errors: errorCount || 0,
+      },
+    })
 
     await addLog(
       supabase,
       step.run_id,
       step.id,
       'info',
-      `Batch enrichissement traité : ${ok} OK / ${errors} erreurs.`,
+      'Enrichissement terminé.',
       {
-        batchNumber: batchesDone,
-        batchSize: queuedRows.length,
-        ok,
-        errors,
-        totalOk,
-        totalErrors,
-        totalProcessed,
+        done: doneCount || 0,
+        errors: errorCount || 0,
       }
     )
+
+    return
   }
+
+  const ids = queuedRows.map((row: any) => row.id)
+
+  await supabase
+    .from('client_enrichment_queue')
+    .update({
+      status: 'running',
+      locked_at: new Date().toISOString(),
+    })
+    .in('id', ids)
+
+  let ok = 0
+  let errors = 0
+
+  for (const item of queuedRows) {
+    try {
+      const data = await callInternalApi(
+        req,
+        '/api/enrich-client',
+        { siret: item.siret }
+      )
+
+      await supabase
+        .from('client_enrichment_queue')
+        .update({
+          status: 'done',
+          attempts: Number(item.attempts || 0) + 1,
+          processed_at: new Date().toISOString(),
+          last_error: null,
+        })
+        .eq('id', item.id)
+
+      ok += 1
+
+      await addLog(
+        supabase,
+        step.run_id,
+        step.id,
+        'info',
+        `Enrichissement OK ${item.siret}`,
+        { result: data }
+      )
+    } catch (error: any) {
+      errors += 1
+
+      await supabase
+        .from('client_enrichment_queue')
+        .update({
+          status: 'error',
+          attempts: Number(item.attempts || 0) + 1,
+          processed_at: new Date().toISOString(),
+          last_error: error?.message || String(error),
+        })
+        .eq('id', item.id)
+
+      await addLog(
+        supabase,
+        step.run_id,
+        step.id,
+        'error',
+        `Enrichissement erreur ${item.siret}`,
+        { error: error?.message || String(error) }
+      )
+    }
+  }
+
+  await supabase
+    .from('client_maintenance_steps')
+    .update({
+      processed_count:
+        Number(step.processed_count || 0) + queuedRows.length,
+      updated_count: Number(step.updated_count || 0) + ok,
+      error_count: Number(step.error_count || 0) + errors,
+      result_json: {
+        last_batch_ok: ok,
+        last_batch_errors: errors,
+        batch_size: queuedRows.length,
+      },
+    })
+    .eq('id', step.id)
 
   await addLog(
     supabase,
     step.run_id,
     step.id,
     'info',
-    'Enrichissement partiel : reprise au prochain appel worker.',
-    {
-      batchesDone,
-      totalOk,
-      totalErrors,
-      totalProcessed,
-    }
+    `Batch enrichissement traité : ${ok} OK / ${errors} erreurs.`,
+    { ok, errors }
   )
 }
 
-async function finalizeRunIfNeeded(supabase: any, run: any) {
+async function finalizeRunIfNeeded(
+  supabase: any,
+  run: any
+) {
   const { data: steps, error } = await supabase
     .from('client_maintenance_steps')
     .select('*')
@@ -649,24 +573,27 @@ async function finalizeRunIfNeeded(supabase: any, run: any) {
 
   if (error) throw error
 
-  const hasError = (steps || []).some((step: any) => step.status === 'error')
+  const hasError = (steps || []).some(
+    (step: any) => step.status === 'error'
+  )
   const hasStepErrors = (steps || []).some(
     (step: any) => Number(step.error_count || 0) > 0
   )
 
   const totalProcessed = (steps || []).reduce(
-    (sum: number, step: any) => sum + Number(step.processed_count || 0),
+    (sum: number, step: any) =>
+      sum + Number(step.processed_count || 0),
     0
   )
 
   const totalErrors = (steps || []).reduce(
-    (sum: number, step: any) => sum + Number(step.error_count || 0),
+    (sum: number, step: any) =>
+      sum + Number(step.error_count || 0),
     0
   )
 
-  // Une étape en erreur ne doit plus faire tomber tout le run en "error".
-  // Le pipeline continue, puis le run est finalisé en "partial".
-  const finalStatus = hasError || hasStepErrors ? 'partial' : 'done'
+  const finalStatus =
+    hasError || hasStepErrors ? 'partial' : 'done'
 
   await supabase
     .from('client_maintenance_runs')
@@ -699,7 +626,7 @@ async function finalizeRunIfNeeded(supabase: any, run: any) {
   )
 }
 
-export async function POST(req: NextRequest) {
+async function handler(req: NextRequest) {
   try {
     if (!isAuthorized(req)) {
       return NextResponse.json(
@@ -713,166 +640,281 @@ export async function POST(req: NextRequest) {
 
     const supabase = createSupabaseAdmin()
 
-    const { data: run, error: runError } = await supabase
-      .from('client_maintenance_runs')
-      .select('*')
-      .in('status', ['queued', 'running'])
-      .order('created_at', { ascending: true })
-      .limit(1)
-      .maybeSingle()
+    const iterationsFromQuery = Number(
+      req.nextUrl.searchParams.get('iterations') || 1
+    )
 
-    if (runError) throw runError
+    const body = await req.json().catch(() => ({}))
+    const iterationsFromBody = Number(body?.iterations || 1)
+    const iterations = Math.max(
+      1,
+      Math.min(
+        Number.isFinite(iterationsFromBody)
+          ? iterationsFromBody
+          : iterationsFromQuery,
+        50
+      )
+    )
 
-    if (!run) {
-      return NextResponse.json({
-        success: true,
-        message: 'Aucun run actif.',
-        nothing_to_do: true,
-      })
-    }
+    const results: any[] = []
+    // Étapes déjà traitées par CETTE invocation (l'enrichissement reste
+    // « running » d'un lot à l'autre : ce n'est pas un conflit).
+    const stepsTouchedHere = new Set<string>()
 
-    if (run.status === 'queued') {
-      await supabase
+    for (let iteration = 0; iteration < iterations; iteration += 1) {
+      const { data: run, error: runError } = await supabase
         .from('client_maintenance_runs')
-        .update({
-          status: 'running',
-          started_at: new Date().toISOString(),
-          message: 'Maintenance clients démarrée.',
-        })
-        .eq('id', run.id)
-
-      await addLog(supabase, run.id, null, 'info', 'Run démarré.')
-    }
-
-    const { data: runningStep, error: runningError } = await supabase
-      .from('client_maintenance_steps')
-      .select('*')
-      .eq('run_id', run.id)
-      .eq('status', 'running')
-      .order('sort_order', { ascending: true })
-      .limit(1)
-      .maybeSingle()
-
-    if (runningError) throw runningError
-
-    let step = runningStep as StepRow | null
-
-    if (!step) {
-      const { data: queuedStep, error: queuedError } = await supabase
-        .from('client_maintenance_steps')
         .select('*')
-        .eq('run_id', run.id)
-        .eq('status', 'queued')
-        .order('sort_order', { ascending: true })
+        .in('status', ['queued', 'running'])
+        .order('created_at', { ascending: true })
         .limit(1)
         .maybeSingle()
 
-      if (queuedError) throw queuedError
+      if (runError) throw runError
 
-      step = queuedStep as StepRow | null
-
-      if (!step) {
-        await finalizeRunIfNeeded(supabase, run)
-
-        return NextResponse.json({
+      if (!run) {
+        results.push({
           success: true,
-          run_id: run.id,
-          finalized: true,
-          message: 'Run finalisé.',
+          message: 'Aucun run actif.',
+          nothing_to_do: true,
         })
+        break
       }
 
-      await startStep(supabase, step)
-    }
+      if (run.status === 'queued') {
+        await supabase
+          .from('client_maintenance_runs')
+          .update({
+            status: 'running',
+            started_at: new Date().toISOString(),
+            message: 'Maintenance clients démarrée.',
+          })
+          .eq('id', run.id)
 
-    try {
-      if (step.step_key === 'sirene_import') {
-        await runHttpStep(req, supabase, step, '/api/import-sirene', {
-          run_id: run.id,
-        })
-      } else if (step.step_key === 'sirene_cessation') {
-        await runHttpStep(req, supabase, step, '/api/import-sirene', {
-          mode: 'cessation',
-          run_id: run.id,
-        })
-      } else if (step.step_key === 'rge_refresh') {
-        await runHttpStep(req, supabase, step, '/api/rge-refresh')
-      } else if (step.step_key === 'capacite_refresh') {
-        await runHttpStep(req, supabase, step, '/api/capacite')
-      } else if (step.step_key === 'enrichment_queue_build') {
-        await buildEnrichmentQueue(supabase, run, step)
-      } else if (step.step_key === 'enrichment_worker') {
-        await runEnrichmentBatch(req, supabase, run, step)
-      } else {
-        await finishStep(supabase, step, 'skipped', {
-          error_message: `Étape inconnue : ${step.step_key}`,
-        })
+        await addLog(
+          supabase,
+          run.id,
+          null,
+          'info',
+          'Run démarré.'
+        )
+      }
 
+      const { data: runningStep, error: runningError } =
+        await supabase
+          .from('client_maintenance_steps')
+          .select('*')
+          .eq('run_id', run.id)
+          .eq('status', 'running')
+          .order('sort_order', { ascending: true })
+          .limit(1)
+          .maybeSingle()
+
+      if (runningError) throw runningError
+
+      let step = runningStep as StepRow | null
+
+      if (step && !stepsTouchedHere.has(step.id)) {
+        const startedAt = (step as any).started_at
+          ? new Date((step as any).started_at).getTime()
+          : 0
+        const ageSeconds = (Date.now() - startedAt) / 1000
+
+        if (startedAt && ageSeconds < STEP_BUSY_SECONDS) {
+          results.push({
+            success: true,
+            run_id: run.id,
+            step_key: step.step_key,
+            busy: true,
+            message: 'Étape en cours dans une autre exécution, pas de relance en parallèle.',
+          })
+          break
+        }
+
+        // Étape orpheline (son invocation a été interrompue) : reprise.
         await addLog(
           supabase,
           run.id,
           step.id,
           'warning',
-          `Étape inconnue ignorée : ${step.step_key}`
+          `Reprise de l'étape interrompue : ${step.step_label}`,
+          { started_at: (step as any).started_at, age_seconds: Math.round(ageSeconds) }
         )
+        await startStep(supabase, step)
       }
-    } catch (error: any) {
-      const errorMessage = error?.message || String(error)
 
-      // Important : une erreur sur une étape ne bloque plus le pipeline complet.
-      // L'étape est marquée en erreur, mais le run reste "running" pour permettre
-      // au prochain appel worker de passer à l'étape suivante.
-      await finishStep(supabase, step, 'error', {
-        error_count: Number(step.error_count || 0) + 1,
-        error_message: errorMessage,
-        result_json: {
-          success: false,
-          error: errorMessage,
-          continued: true,
-        },
-      })
+      if (!step) {
+        const { data: queuedStep, error: queuedError } =
+          await supabase
+            .from('client_maintenance_steps')
+            .select('*')
+            .eq('run_id', run.id)
+            .eq('status', 'queued')
+            .order('sort_order', { ascending: true })
+            .limit(1)
+            .maybeSingle()
 
-      await supabase
-        .from('client_maintenance_runs')
-        .update({
-          status: 'running',
-          error_message: null,
-          message: `Erreur non bloquante étape : ${step.step_label}. Passage à l'étape suivante.`,
-          current_step: null,
-        })
-        .eq('id', run.id)
+        if (queuedError) throw queuedError
 
-      await addLog(
-        supabase,
-        run.id,
-        step.id,
-        'error',
-        `Erreur non bloquante étape ${step.step_label}`,
-        {
-          error: errorMessage,
-          continued: true,
+        step = queuedStep as StepRow | null
+
+        if (!step) {
+          await finalizeRunIfNeeded(supabase, run)
+
+          results.push({
+            success: true,
+            run_id: run.id,
+            finalized: true,
+            message: 'Run finalisé.',
+          })
+
+          continue
         }
-      )
 
-      return NextResponse.json({
-        success: true,
-        run_id: run.id,
-        step_key: step.step_key,
-        step_label: step.step_label,
-        step_error: true,
-        continued: true,
-        error: errorMessage,
-      })
+        await startStep(supabase, step)
+      }
+
+      stepsTouchedHere.add(step.id)
+
+      try {
+        if (step.step_key === 'sirene_import') {
+          await runHttpStep(
+            req,
+            supabase,
+            step,
+            '/api/import-sirene'
+          )
+        } else if (step.step_key === 'sirene_cessation') {
+          await runHttpStep(
+            req,
+            supabase,
+            step,
+            '/api/import-sirene',
+            { mode: 'cessation' }
+          )
+        } else if (step.step_key === 'rge_refresh') {
+          await runHttpStep(
+            req,
+            supabase,
+            step,
+            '/api/rge-refresh'
+          )
+        } else if (step.step_key === 'capacite_refresh') {
+          await runHttpStep(
+            req,
+            supabase,
+            step,
+            '/api/capacite'
+          )
+        } else if (
+          step.step_key === 'enrichment_queue_build'
+        ) {
+          await buildEnrichmentQueue(
+            supabase,
+            run,
+            step
+          )
+        } else if (
+          step.step_key === 'enrichment_worker'
+        ) {
+          await runEnrichmentBatch(
+            req,
+            supabase,
+            run,
+            step
+          )
+        } else {
+          await finishStep(
+            supabase,
+            step,
+            'skipped',
+            {
+              error_message:
+                `Étape inconnue : ${step.step_key}`,
+            }
+          )
+
+          await addLog(
+            supabase,
+            run.id,
+            step.id,
+            'warning',
+            `Étape inconnue ignorée : ${step.step_key}`
+          )
+        }
+
+        results.push({
+          success: true,
+          run_id: run.id,
+          step_key: step.step_key,
+          step_label: step.step_label,
+        })
+      } catch (error: any) {
+        const errorMessage =
+          error?.message || String(error)
+
+        await finishStep(
+          supabase,
+          step,
+          'error',
+          {
+            error_count:
+              Number(step.error_count || 0) + 1,
+            error_message: errorMessage,
+            result_json: {
+              success: false,
+              error: errorMessage,
+              continued: true,
+            },
+          }
+        )
+
+        await supabase
+          .from('client_maintenance_runs')
+          .update({
+            status: 'running',
+            error_message: null,
+            message:
+              `Erreur non bloquante étape : ${step.step_label}. ` +
+              'Passage à l’étape suivante.',
+            current_step: null,
+          })
+          .eq('id', run.id)
+
+        await addLog(
+          supabase,
+          run.id,
+          step.id,
+          'error',
+          `Erreur non bloquante étape ${step.step_label}`,
+          {
+            error: errorMessage,
+            continued: true,
+          }
+        )
+
+        results.push({
+          success: true,
+          run_id: run.id,
+          step_key: step.step_key,
+          step_label: step.step_label,
+          step_error: true,
+          continued: true,
+          error: errorMessage,
+        })
+      }
     }
 
     return NextResponse.json({
       success: true,
-      run_id: run.id,
-      step_key: step.step_key,
-      step_label: step.step_label,
+      iterations,
+      results,
     })
   } catch (error: any) {
-    console.error('client-maintenance/worker error:', error)
+    console.error(
+      'client-maintenance-worker error:',
+      error
+    )
 
     return NextResponse.json(
       {
@@ -882,4 +924,13 @@ export async function POST(req: NextRequest) {
       { status: 500 }
     )
   }
+}
+
+export async function POST(req: NextRequest) {
+  return handler(req)
+}
+
+// Alias GET conservé pour les éventuels anciens appels cron.
+export async function GET(req: NextRequest) {
+  return handler(req)
 }

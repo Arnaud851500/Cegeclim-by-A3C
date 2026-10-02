@@ -24,6 +24,13 @@
 // l'écran s'ouvrait donc sur « Aucun numéro de client fourni ». Le lien
 // utilise maintenant `numero`, ce qui déclenche le chargement automatique
 // de la fiche (voir ouvrirVisionClient).
+//
+// CORRECTIF (2026-10-02) : les RDV « journée entière » (invitations Outlook
+// dont l'objet contient un long lien) débordaient sur toute la semaine. Les
+// colonnes de la grille utilisent maintenant minmax(0, 1fr) (un contenu long
+// ne peut plus élargir sa colonne), les cellules coupent ce qui dépasse, et
+// l'objet affiché est nettoyé des URLs et des « ----- » (libelleRdv).
+// L'objet complet reste visible au survol (title).
 // ============================================================================
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
@@ -76,6 +83,9 @@ const GRILLE_HEURE_DEBUT = 7
 const GRILLE_HEURE_FIN = 20
 const GRILLE_HAUTEUR_HEURE = 56
 const GRILLE_HAUTEUR_TOTALE = (GRILLE_HEURE_FIN - GRILLE_HEURE_DEBUT) * GRILLE_HAUTEUR_HEURE
+// CORRECTIF (2026-10-02) : minmax(0, 1fr) -- une colonne ne peut plus être
+// élargie par son contenu (objet long d'un RDV journée entière).
+const GRILLE_COLONNES = '44px repeat(7, minmax(0, 1fr))'
 
 /** Lien vers la fiche Vision client 360 : le paramètre attendu par
  * app/vision-client/page.tsx est `numero` (pas `numero_tiers`). */
@@ -141,6 +151,17 @@ function auteurCompteRendu(cr: Pick<CompteRendu, 'created_by_name' | 'created_by
   const email = safeText(cr.created_by_email)
   if (email) return fallbackNameFromEmail(email)
   return '—'
+}
+/** CORRECTIF (2026-10-02) : objet du RDV pour l'affichage -- sans les liens
+ * (ex. https://outlook.office365.com/owa/?itemid=...) ni les « ----- ». */
+function libelleRdv(subject: string | null | undefined) {
+  const brut = safeText(subject)
+  const nettoye = brut
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/-{3,}/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+  return nettoye || brut || '(sans objet)'
 }
 
 /** Répartition en colonnes des RDV qui se chevauchent (même algorithme que
@@ -511,8 +532,19 @@ function AgendaDesktop() {
                     {parJour.map((liste, i) => (
                       <div key={i} style={styles.gridAllDayCell}>
                         {liste.map((r) => (
-                          <button key={r.rdv_id} type="button" className="agdRdv" onClick={() => setSelectedRdv(r)} style={{ ...styles.allDayChip, background: RDV_TYPE_COLORS[r.type] || '#7A5EA8' }}>
-                            {r.subject}
+                          <button
+                            key={r.rdv_id}
+                            type="button"
+                            className="agdRdv"
+                            onClick={() => setSelectedRdv(r)}
+                            title={r.subject}
+                            style={{
+                              ...styles.allDayChip,
+                              background: RDV_TYPE_COLORS[r.type] || '#7A5EA8',
+                              outline: selectedRdv?.rdv_id === r.rdv_id ? '1.5px solid #F5F3EC' : 'none',
+                            }}
+                          >
+                            {libelleRdv(r.subject)}
                           </button>
                         ))}
                       </div>
@@ -568,7 +600,7 @@ function AgendaDesktop() {
                               }}
                             >
                               <span style={styles.eventTitle}>
-                                {ev.a_compte_rendu ? '[CR] ' : ''}{tache ? '⚠️ ' : ''}{ev.subject}
+                                {ev.a_compte_rendu ? '[CR] ' : ''}{tache ? '⚠️ ' : ''}{libelleRdv(ev.subject)}
                               </span>
                               {hauteur > 38 && <span style={styles.eventMeta}>{heureLabel}{ev.company_name ? ` · ${ev.company_name}` : ''}</span>}
                             </button>
@@ -619,6 +651,7 @@ function AgendaDesktop() {
                         type="button"
                         className="agdRow"
                         onClick={() => setSelectedRdv(r)}
+                        title={r.subject}
                         style={{
                           ...styles.row,
                           borderColor: selected ? 'rgba(245,243,236,0.5)' : tache ? 'rgba(230,159,74,0.45)' : 'rgba(255,255,255,0.08)',
@@ -632,7 +665,7 @@ function AgendaDesktop() {
                           <span style={styles.rowSubject}>
                             {r.a_compte_rendu && <span title="Compte-rendu disponible" style={styles.tagCr}>CR</span>}
                             {tache && <span title="Tâche non terminée pour ce client">⚠️ </span>}
-                            {r.subject}
+                            {libelleRdv(r.subject)}
                           </span>
                         </span>
                         <span style={styles.rowMeta}>{[RDV_TYPE_LABELS[r.type] || r.type, r.source === 'compagnon' ? 'Compagnon' : 'BLG', r.lieu].filter(Boolean).join(' · ')}</span>
@@ -787,7 +820,7 @@ function RdvDetailPanel({
         <span style={styles.sideKicker}>{RDV_TYPE_LABELS[rdv.type] || rdv.type || 'Activité'}{estCompagnon ? ' · RDV compagnon' : ' · BLG'}</span>
         <button type="button" className="agdBtn" onClick={onClose} style={styles.closeBtn} aria-label="Fermer">✕</button>
       </div>
-      <div style={styles.sideTitle}>{rdv.subject}</div>
+      <div style={styles.sideTitle} title={rdv.subject}>{libelleRdv(rdv.subject)}</div>
       {rdv.company_name && (
         <button type="button" onClick={() => rdv.numero_tiers && onOpenClient(rdv.numero_tiers)} disabled={!rdv.numero_tiers} style={styles.companyLink}>
           {rdv.company_name}{rdv.numero_tiers ? ` (${rdv.numero_tiers})` : ' · prospect (pas encore client)'}
@@ -1152,9 +1185,9 @@ const styles: Record<string, React.CSSProperties> = {
 
   layout: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 400px', gap: 16, alignItems: 'start' },
   main: { display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 },
-  side: { position: 'sticky', top: 140 },
+  side: { position: 'sticky', top: 140, minWidth: 0 },
 
-  card: { borderRadius: 18, border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.04)', padding: 16 },
+  card: { borderRadius: 18, border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.04)', padding: 16, minWidth: 0, overflow: 'hidden' },
   cardHeader: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 12 },
   cardTitle: { fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700, color: 'rgba(255,255,255,0.55)' },
 
@@ -1164,24 +1197,24 @@ const styles: Record<string, React.CSSProperties> = {
   legendItem: { display: 'inline-flex', alignItems: 'center', gap: 5 },
   legendDot: { width: 9, height: 9, borderRadius: '50%', display: 'inline-block' },
 
-  gridHead: { display: 'grid', gridTemplateColumns: '44px repeat(7, 1fr)', borderTop: '1px solid rgba(255,255,255,0.08)' },
-  gridHeadCell: { textAlign: 'center', padding: '8px 2px', borderLeft: '1px solid rgba(255,255,255,0.06)' },
+  gridHead: { display: 'grid', gridTemplateColumns: GRILLE_COLONNES, borderTop: '1px solid rgba(255,255,255,0.08)' },
+  gridHeadCell: { minWidth: 0, textAlign: 'center', padding: '8px 2px', borderLeft: '1px solid rgba(255,255,255,0.06)' },
   gridHeadWeekday: { fontSize: 10.5, textTransform: 'uppercase', color: 'rgba(255,255,255,0.45)' },
   gridHeadDay: { width: 28, height: 28, lineHeight: '28px', borderRadius: '50%', margin: '3px auto 0', fontSize: 15, fontWeight: 700, color: '#fff' },
   gridHeadDayToday: { background: '#8FC7DA', color: '#141A26' },
 
-  gridAllDay: { display: 'grid', gridTemplateColumns: '44px repeat(7, 1fr)', borderTop: '1px solid rgba(255,255,255,0.08)' },
+  gridAllDay: { display: 'grid', gridTemplateColumns: GRILLE_COLONNES, borderTop: '1px solid rgba(255,255,255,0.08)' },
   gridAllDayLabel: { fontSize: 9.5, color: 'rgba(255,255,255,0.4)', padding: '6px 4px', textAlign: 'right' },
-  gridAllDayCell: { borderLeft: '1px solid rgba(255,255,255,0.06)', padding: 4, display: 'flex', flexDirection: 'column', gap: 3 },
-  allDayChip: { fontSize: 11, color: '#fff', borderRadius: 6, padding: '3px 6px', border: 'none', cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'left', fontFamily: 'inherit' },
+  gridAllDayCell: { minWidth: 0, overflow: 'hidden', borderLeft: '1px solid rgba(255,255,255,0.06)', padding: 4, display: 'flex', flexDirection: 'column', gap: 3 },
+  allDayChip: { display: 'block', width: '100%', maxWidth: '100%', minWidth: 0, boxSizing: 'border-box', fontSize: 11, color: '#fff', borderRadius: 6, padding: '3px 6px', border: 'none', cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'left', fontFamily: 'inherit', outlineOffset: 1 },
 
-  gridBodyWrapper: { maxHeight: 'calc(100vh - 330px)', overflowY: 'auto', borderTop: '1px solid rgba(255,255,255,0.08)' },
-  gridBody: { display: 'grid', gridTemplateColumns: '44px repeat(7, 1fr)', position: 'relative' },
+  gridBodyWrapper: { maxHeight: 'calc(100vh - 330px)', overflowY: 'auto', overflowX: 'hidden', borderTop: '1px solid rgba(255,255,255,0.08)' },
+  gridBody: { display: 'grid', gridTemplateColumns: GRILLE_COLONNES, position: 'relative' },
   hourLabel: { position: 'absolute', right: 6, fontSize: 10, color: 'rgba(255,255,255,0.4)', fontFamily: 'var(--font-mono)' },
-  dayColumn: { position: 'relative', borderLeft: '1px solid rgba(255,255,255,0.06)' },
+  dayColumn: { position: 'relative', minWidth: 0, overflow: 'hidden', borderLeft: '1px solid rgba(255,255,255,0.06)' },
   hourLine: { position: 'absolute', left: 0, right: 0, borderTop: '1px solid rgba(255,255,255,0.05)' },
   nowLine: { position: 'absolute', left: 0, right: 0, borderTop: '2px solid #C1683C', zIndex: 5 },
-  event: { position: 'absolute', display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 1, borderRadius: 6, padding: '3px 6px', overflow: 'hidden', cursor: 'pointer', color: '#fff', textAlign: 'left', fontFamily: 'inherit', zIndex: 2 },
+  event: { position: 'absolute', display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 1, borderRadius: 6, padding: '3px 6px', overflow: 'hidden', cursor: 'pointer', color: '#fff', textAlign: 'left', fontFamily: 'inherit', zIndex: 2, boxSizing: 'border-box', minWidth: 0 },
   eventTitle: { fontSize: 11.5, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', width: '100%' },
   eventMeta: { fontSize: 10, color: 'rgba(255,255,255,0.85)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', width: '100%' },
 
@@ -1191,12 +1224,12 @@ const styles: Record<string, React.CSSProperties> = {
   dateInput: { height: 32, borderRadius: 8, border: '1px solid rgba(255,255,255,0.16)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 8px', fontSize: 12.5, fontFamily: 'inherit' },
 
   list: { display: 'flex', flexDirection: 'column', gap: 6 },
-  row: { display: 'flex', alignItems: 'center', gap: 12, padding: '10px 12px', borderRadius: 12, border: '1px solid', color: '#F5F3EC', cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit', width: '100%' },
+  row: { display: 'flex', alignItems: 'center', gap: 12, padding: '10px 12px', borderRadius: 12, border: '1px solid', color: '#F5F3EC', cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit', width: '100%', minWidth: 0 },
   rowBar: { width: 4, alignSelf: 'stretch', borderRadius: 2, flexShrink: 0 },
   rowDate: { width: 200, flexShrink: 0, fontSize: 12.5, color: 'rgba(255,255,255,0.7)', fontFamily: 'var(--font-mono)' },
   rowCompany: { display: 'block', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.02em', color: '#E8A96A', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   rowSubject: { display: 'block', fontSize: 14.5, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
-  rowMeta: { flexShrink: 0, fontSize: 11.5, color: 'rgba(255,255,255,0.45)' },
+  rowMeta: { flexShrink: 0, maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11.5, color: 'rgba(255,255,255,0.45)' },
   tagCr: { display: 'inline-block', marginRight: 6, padding: '1px 5px', borderRadius: 5, background: 'rgba(143,199,218,0.2)', color: '#8FC7DA', fontSize: 10, fontWeight: 800, letterSpacing: '0.06em', verticalAlign: 'middle' },
 
   searchInput: { flex: 1, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '10px 13px', fontSize: 14, outline: 'none', fontFamily: 'inherit' },
@@ -1208,7 +1241,7 @@ const styles: Record<string, React.CSSProperties> = {
   sideEmpty: { borderRadius: 18, border: '1px dashed rgba(255,255,255,0.18)', padding: 28, textAlign: 'center' },
   sideHeader: { display: 'flex', alignItems: 'center', gap: 8 },
   sideKicker: { fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'rgba(255,255,255,0.5)' },
-  sideTitle: { fontFamily: 'var(--font-display)', fontSize: 20, fontWeight: 800, color: '#fff', lineHeight: 1.2 },
+  sideTitle: { fontFamily: 'var(--font-display)', fontSize: 20, fontWeight: 800, color: '#fff', lineHeight: 1.2, overflowWrap: 'anywhere' },
   companyLink: { alignSelf: 'flex-start', background: 'none', border: 'none', padding: 0, color: '#E8A96A', fontSize: 12.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.02em', textDecoration: 'underline', textUnderlineOffset: 3, cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' },
   sideActions: { display: 'flex', gap: 8, flexWrap: 'wrap' },
   warnBox: { display: 'flex', alignItems: 'center', gap: 8, borderRadius: 10, border: '1px solid rgba(230,159,74,0.4)', background: 'rgba(230,159,74,0.12)', padding: '10px 12px', fontSize: 12.5, color: '#E8A96A' },

@@ -34,7 +34,15 @@ type SchedulerRun = {
   status: string
   trigger_source: string
   result_json?: Record<string, any>
+  created_at?: string | null
+  updated_at?: string | null
 }
+
+/** Durée au-delà de laquelle un run « running » non mis à jour est
+ * considéré comme abandonné (maxDuration des routes = 300 s). En deçà, une
+ * autre invocation est probablement encore dessus : on ne le reprend pas
+ * en parallèle. */
+const RUN_BUSY_SECONDS = 330
 
 function requiredEnv(name: string) {
   const value = process.env[name]
@@ -45,6 +53,10 @@ function requiredEnv(name: string) {
 function toErrorMessage(error: unknown) {
   if (error instanceof Error) return error.message
   if (typeof error === 'string') return error
+  // Erreurs Supabase (PostgrestError) : objet simple avec un champ message.
+  if (error && typeof error === 'object' && typeof (error as any).message === 'string') {
+    return (error as any).message
+  }
 
   try {
     return JSON.stringify(error)
@@ -556,6 +568,20 @@ const config: Record<string, any> = {
 
     clientRunId = startJson?.run_id || startJson?.id || null
 
+    // CORRECTIF (2026-10-02) : l'identifiant du run maintenance est
+    // enregistré TOUT DE SUITE dans le run scheduler. Avant, il n'était
+    // écrit qu'à la fin (après le worker, jusqu'à 5 min) : le dispatcher de
+    // la minute suivante « reprenait » ce run sans clientRunId, rappelait
+    // /api/client-maintenance/start, recevait « déjà en cours » et passait
+    // le run en erreur -- c'est ce qui a orphelin le run du 22/09.
+    await supabase
+      .from('scheduler_runs')
+      .update({
+        result_json: { ...previousResult, clientRunId, startJson, dateOverrideResult },
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', schedulerRun.id)
+
     await addSchedulerLog(supabase, schedulerRun.id, 'info', 'Run maintenance clients créé.', {
       startJson,
       dateOverrideResult,
@@ -775,6 +801,14 @@ export async function runDueSchedulerJobs() {
     const job = run.scheduler_jobs as SchedulerJob | null
     if (!job) continue
 
+    // Run touché il y a moins de RUN_BUSY_SECONDS : une autre invocation
+    // (dispatcher précédent, bouton Lancer) est sans doute encore dessus.
+    const lastTouch = new Date(run.updated_at || run.created_at || 0).getTime()
+    if (lastTouch && Date.now() - lastTouch < RUN_BUSY_SECONDS * 1000) {
+      results.push({ job_key: job.job_key, resumed: false, busy: true })
+      continue
+    }
+
     if (job.archived_at) {
       await supabase
         .from('scheduler_runs')
@@ -832,17 +866,39 @@ export async function runDueSchedulerJobs() {
   for (const job of (jobs || []) as SchedulerJob[]) {
     if (job.frequency === 'manual') continue
 
+    // ÉVOLUTION (2026-10-02) : à l'heure de la nouvelle exécution, un run
+    // précédent encore « running » ne bloque plus le job : il est annulé
+    // (« killé ») et le traitement est relancé. Pour une maintenance
+    // clients, /api/client-maintenance/start annule aussi le run de
+    // maintenance correspondant avant d'en créer un nouveau.
     if (!job.allow_overlap) {
-      const { data: activeRun, error: activeError } = await supabase
+      const { data: activeRuns, error: activeError } = await supabase
         .from('scheduler_runs')
-        .select('id,status')
+        .select('id,status,created_at,updated_at')
         .eq('job_id', job.id)
-        .eq('status', 'running')
-        .limit(1)
-        .maybeSingle()
+        .in('status', ['queued', 'running'])
 
       if (activeError) throw activeError
-      if (activeRun?.id) continue
+
+      for (const activeRun of activeRuns || []) {
+        const cancelledAt = new Date().toISOString()
+        await supabase
+          .from('scheduler_runs')
+          .update({
+            status: 'cancelled',
+            finished_at: cancelledAt,
+            message: 'Run annulé : remplacé par la nouvelle exécution planifiée.',
+            updated_at: cancelledAt,
+          })
+          .eq('id', activeRun.id)
+
+        await addSchedulerLog(supabase, activeRun.id, 'warning', 'Run annulé : remplacé par la nouvelle exécution planifiée.', {
+          started: activeRun.created_at,
+          last_update: activeRun.updated_at,
+        })
+
+        results.push({ job_key: job.job_key, killed_run_id: activeRun.id })
+      }
     }
 
     const schedulerRun = await createSchedulerRun(supabase, job, 'cron')

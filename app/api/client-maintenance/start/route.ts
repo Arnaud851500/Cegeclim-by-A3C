@@ -64,22 +64,84 @@ export async function POST(req: NextRequest) {
     ? 'cron'
     : 'manual'
 
-    const { data: activeRun, error: activeError } = await supabase
+    // ÉVOLUTION (2026-10-02) : un run resté « en cours » ne bloque plus
+    // indéfiniment les suivants. Constat : le run du 22/09 04:31 est resté
+    // en « running » (étape SIRENE) après l'arrêt brutal de son worker, et
+    // toutes les exécutions suivantes ont été refusées pendant 10 jours.
+    // Règle :
+    //   - lancement par le planificateur (cron ou bouton « Lancer » de
+    //     l'écran des traitements, source scheduler:*) ou demande explicite
+    //     (body.force = true) : le run actif est annulé puis un nouveau run
+    //     est créé ;
+    //   - lancement manuel depuis l'écran Clients : le run actif n'est annulé
+    //     que s'il n'a plus bougé depuis STALE_MINUTES (bloqué), sinon refus
+    //     comme avant.
+    const STALE_MINUTES = 15
+    const forceKill = source === 'cron' || body?.force === true
+
+    const { data: activeRuns, error: activeError } = await supabase
       .from('client_maintenance_runs')
-      .select('id, status, created_at')
+      .select('id, status, created_at, updated_at')
       .in('status', ['queued', 'running'])
       .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle()
 
     if (activeError) throw activeError
-    if (activeRun) {
-      return NextResponse.json({
-        success: false,
-        skipped: true,
-        error: 'Une maintenance clients est déjà en cours.',
-        active_run_id: activeRun.id,
-      }, { status: 409 })
+
+    const killedRunIds: string[] = []
+
+    for (const activeRun of activeRuns || []) {
+      // Dernière activité = run OU l'une de ses étapes (l'enrichissement
+      // avance par lots en mettant à jour l'étape, pas le run).
+      const { data: lastStep } = await supabase
+        .from('client_maintenance_steps')
+        .select('updated_at')
+        .eq('run_id', activeRun.id)
+        .order('updated_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+
+      const lastActivity = Math.max(
+        new Date(activeRun.updated_at || activeRun.created_at).getTime(),
+        lastStep?.updated_at ? new Date(lastStep.updated_at).getTime() : 0
+      )
+      const isStale = Date.now() - lastActivity > STALE_MINUTES * 60 * 1000
+
+      if (!forceKill && !isStale) {
+        return NextResponse.json({
+          success: false,
+          skipped: true,
+          error: 'Une maintenance clients est déjà en cours.',
+          active_run_id: activeRun.id,
+        }, { status: 409 })
+      }
+
+      const reason = isStale
+        ? `Run annulé : aucune activité depuis plus de ${STALE_MINUTES} min (bloqué).`
+        : 'Run annulé : relancé par une nouvelle exécution planifiée.'
+      const nowIso = new Date().toISOString()
+
+      const { error: stepsCancelError } = await supabase
+        .from('client_maintenance_steps')
+        .update({ status: 'cancelled', finished_at: nowIso, error_message: reason })
+        .eq('run_id', activeRun.id)
+        .in('status', ['queued', 'running'])
+      if (stepsCancelError) throw stepsCancelError
+
+      const { error: runCancelError } = await supabase
+        .from('client_maintenance_runs')
+        .update({ status: 'cancelled', finished_at: nowIso, current_step: null, message: reason })
+        .eq('id', activeRun.id)
+        .in('status', ['queued', 'running'])
+      if (runCancelError) throw runCancelError
+
+      await supabase.from('client_maintenance_logs').insert({
+        run_id: activeRun.id,
+        level: 'warning',
+        message: reason,
+        payload_json: { cancelled_by: requestedSource || 'manual', stale: isStale },
+      })
+
+      killedRunIds.push(activeRun.id)
     }
 
     const { data: run, error: runError } = await supabase
@@ -113,10 +175,10 @@ export async function POST(req: NextRequest) {
       run_id: run.id,
       level: 'info',
       message: 'Run créé.',
-      payload_json: { source, config },
+      payload_json: { source, config, killed_run_ids: killedRunIds },
     })
 
-    return NextResponse.json({ success: true, run_id: run.id })
+    return NextResponse.json({ success: true, run_id: run.id, killed_run_ids: killedRunIds })
   } catch (error: any) {
     console.error('client-maintenance/start error:', error)
     return NextResponse.json(
