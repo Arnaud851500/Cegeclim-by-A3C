@@ -343,7 +343,7 @@ const DEFAULT_FILTERS: GlobalFilters = {
   clientMode: 'include',
   clients: [],
   horsStatistique: 'non',
-  dynamicPeriod: { mode: 'none', yearsCount: 2, monthsCount: 6 },
+  dynamicPeriod: { mode: 'none', yearsCount: 2, monthsCount: lastCompleteMonth(new Date()).month },
 }
 
 const DYNAMIC_PERIOD_OPTIONS: Array<{ value: DynamicPeriodMode; label: string }> = [
@@ -3038,7 +3038,7 @@ export default function AtelierAnalysePage() {
   // La vue enregistre la règle (ex. « janv. → dernier mois complet, 2 ans »), pas les mois figés.
   const dynamicMode = globalFilters.dynamicPeriod?.mode || 'none'
   const dynamicYearsCount = globalFilters.dynamicPeriod?.yearsCount || 2
-  const dynamicMonthsCount = globalFilters.dynamicPeriod?.monthsCount || 6
+  const dynamicMonthsCount = globalFilters.dynamicPeriod?.monthsCount || lastCompleteMonth(today).month
   const resolvedPeriod = useMemo(
     () => resolveDynamicPeriod({ mode: dynamicMode, yearsCount: dynamicYearsCount, monthsCount: dynamicMonthsCount }, today),
     [dynamicMode, dynamicYearsCount, dynamicMonthsCount, today]
@@ -3803,7 +3803,12 @@ export default function AtelierAnalysePage() {
             value={dynamicMode}
             onChange={(v) => setGlobalFilters((p) => ({
               ...p,
-              dynamicPeriod: { yearsCount: 2, monthsCount: 6, ...(p.dynamicPeriod || {}), mode: v as DynamicPeriodMode },
+              dynamicPeriod: {
+                yearsCount: p.dynamicPeriod?.yearsCount || 2,
+                // À chaque choix de mode, le nombre de mois repart du dernier mois complet (ex. 9 au 2 octobre).
+                monthsCount: lastCompleteMonth(today).month,
+                mode: v as DynamicPeriodMode,
+              },
             }))}
             options={DYNAMIC_PERIOD_OPTIONS}
           />
