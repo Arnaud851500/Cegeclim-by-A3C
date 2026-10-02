@@ -343,12 +343,14 @@ const DEFAULT_FILTERS: GlobalFilters = {
   clientMode: 'include',
   clients: [],
   horsStatistique: 'non',
-  dynamicPeriod: { mode: 'none', yearsCount: 2, monthsCount: lastCompleteMonth(new Date()).month },
+  // Par défaut : mois complets de l'année (janv. → dernier mois complet), N vs N-1.
+  // S'applique aussi aux vues enregistrées avant l'existence des périodes dynamiques.
+  dynamicPeriod: { mode: 'ytd_last_complete', yearsCount: 2, monthsCount: lastCompleteMonth(new Date()).month },
 }
 
 const DYNAMIC_PERIOD_OPTIONS: Array<{ value: DynamicPeriodMode; label: string }> = [
+  { value: 'ytd_last_complete', label: 'Mois complets (janv. → dernier mois complet)' },
   { value: 'none', label: 'Fixe (sélection manuelle)' },
-  { value: 'ytd_last_complete', label: 'Janv. → dernier mois complet' },
   { value: 'last_complete_month', label: 'Dernier mois complet seul' },
   { value: 'ytd_current', label: 'Janv. → mois en cours' },
   { value: 'first_n_months', label: 'N premiers mois de l’année' },
