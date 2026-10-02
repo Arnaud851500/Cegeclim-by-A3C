@@ -194,6 +194,7 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'Planification des jobs', path: '/admin/planification', activeLabel: 'Job scheduling', accessKey: 'can_autorisation', description: 'Planification des synchronisations et recalculs.' },
       { label: 'Cycle de synchronisation', path: '/cycle-synchronisation', activeLabel: 'Cycle Synchronisation data', accessKey: 'can_autorisation', description: 'État et historique des cycles de synchronisation SAGE → Supabase.' },
       { label: 'MAJ retards paiement', path: '/retards-paiement', activeLabel: 'Retards de paiements', accessKey: 'can_autorisation', description: 'Intégration du fichier des retards de paiemnets.' },
+      { label: 'Statistiques usage', path: '/admin/statistiques-usage', activeLabel: 'Statistiques usage', accessKey: 'can_autorisation', description: 'Suivi de l utilisation de l outil pour accompagnement' },
     ],
   },
 ]

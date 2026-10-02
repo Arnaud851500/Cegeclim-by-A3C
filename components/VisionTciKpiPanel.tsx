@@ -151,15 +151,25 @@ type FluxValues = {
 
 type CourbePoint = { jour_annee: number; valeur_n: number; valeur_n1: number };
 
+// FIX (2026-10-02) : espace insécable ( ) entre le nombre et l'unité,
+// pour que "218 K€" ou "33,87 M€" ne se coupe jamais en deux lignes.
 function formatMontant(n: number): string {
   const abs = Math.abs(n);
-  if (abs >= 1_000_000) return `${(n / 1_000_000).toLocaleString("fr-FR", { maximumFractionDigits: 2 })} M€`;
-  if (abs >= 1_000) return `${(n / 1_000).toLocaleString("fr-FR", { maximumFractionDigits: 0 })} K€`;
-  return `${n.toLocaleString("fr-FR", { maximumFractionDigits: 0 })} €`;
+  if (abs >= 1_000_000) return `${(n / 1_000_000).toLocaleString("fr-FR", { maximumFractionDigits: 2 })} M€`;
+  if (abs >= 1_000) return `${(n / 1_000).toLocaleString("fr-FR", { maximumFractionDigits: 0 })} K€`;
+  return `${n.toLocaleString("fr-FR", { maximumFractionDigits: 0 })} €`;
 }
 function formatPct(n: number): string {
-  return `${n.toLocaleString("fr-FR", { maximumFractionDigits: 1 })} %`;
+  return `${n.toLocaleString("fr-FR", { maximumFractionDigits: 1 })} %`;
 }
+
+// FIX (2026-10-02) : taille des valeurs Jour / Mois / Année proportionnelle
+// à la largeur du pavé (unités cqw = % de la largeur du conteneur), bornée
+// entre un minimum lisible et la taille d'origine. Les trois valeurs tiennent
+// ainsi sur une seule ligne quelle que soit la définition de l'écran.
+const VALEUR_GRAND_STYLE: React.CSSProperties = { fontSize: "clamp(13px, 5.6cqw, 24px)" };
+const VALEUR_COMPACT_STYLE: React.CSSProperties = { fontSize: "clamp(11px, 5.8cqw, 15px)" };
+const CONTENEUR_TAILLE: React.CSSProperties = { containerType: "inline-size" };
 
 // jour_annee (1 = 1er janvier de l'année en cours) -> Date réelle.
 function anneeCouranteDate(jourAnnee: number): Date {
@@ -342,20 +352,20 @@ function FluxCard({
         ) : error ? (
           <p className="text-[10px] text-red-300">{error}</p>
         ) : values ? (
-          <div className="grid grid-cols-3 gap-2 text-white">
-            <div>
+          <div className="grid grid-cols-3 gap-2 text-white" style={CONTENEUR_TAILLE}>
+            <div className="min-w-0">
               <div className="text-[9px] uppercase tracking-wide text-white/40">{utiliserJMoins1 ? "Jour (J-1)" : "Jour"}</div>
-              <div className="font-[var(--font-mono,monospace)] text-sm font-semibold">{fmt(values.jour_valeur)}</div>
+              <div className="whitespace-nowrap font-[var(--font-mono,monospace)] font-semibold" style={VALEUR_COMPACT_STYLE}>{fmt(values.jour_valeur)}</div>
               <EvolBadge valeur={values.jour_valeur} n1={values.jour_n1} unite={estMarge ? "points" : "montant"} />
             </div>
-            <div>
+            <div className="min-w-0">
               <div className="text-[9px] uppercase tracking-wide text-white/40">Mois</div>
-              <div className="font-[var(--font-mono,monospace)] text-sm font-semibold">{fmt(values.mois_valeur)}</div>
+              <div className="whitespace-nowrap font-[var(--font-mono,monospace)] font-semibold" style={VALEUR_COMPACT_STYLE}>{fmt(values.mois_valeur)}</div>
               <EvolBadge valeur={values.mois_valeur} n1={values.mois_n1} unite={estMarge ? "points" : "montant"} />
             </div>
-            <div>
+            <div className="min-w-0">
               <div className="text-[9px] uppercase tracking-wide text-white/40">Année</div>
-              <div className="font-[var(--font-mono,monospace)] text-sm font-semibold">{fmt(values.annee_valeur)}</div>
+              <div className="whitespace-nowrap font-[var(--font-mono,monospace)] font-semibold" style={VALEUR_COMPACT_STYLE}>{fmt(values.annee_valeur)}</div>
               <EvolBadge valeur={values.annee_valeur} n1={values.annee_n1} unite={estMarge ? "points" : "montant"} />
             </div>
           </div>
@@ -665,42 +675,45 @@ function FluxCardGrand({
           <p className="text-[10px] text-red-300">{error}</p>
         ) : (
           <div className="text-white">
-            <div className="mb-2 flex flex-nowrap items-start justify-between gap-3">
-              {/* FIX (2026-08) : gap resserré (gap-4 -> gap-3) pour rapprocher
-                  Mois (MTD) et Année (YTD) de Jour, et flex-nowrap sur la
-                  ligne entière pour que la bascule Cumulé/Mensuel ne passe
-                  plus jamais à la ligne suivante, même sur les cartes
-                  étroites (2 colonnes). */}
-              <div className="flex items-start gap-3">
-                <div>
-                  <div className="text-[10px] uppercase tracking-wide text-white/40">Jour</div>
-                  {estMarge ? (
-                    <div className="text-2xl text-white/25">—</div>
-                  ) : (
-                    <>
-                      <div className="font-[var(--font-mono,monospace)] text-2xl font-semibold leading-tight">{fmt(agg.jourN)}</div>
-                      <EvolBadge valeur={agg.jourN} n1={agg.jourN1} unite="montant" />
-                    </>
-                  )}
-                </div>
-                <div>
-                  <div className="text-[10px] uppercase tracking-wide text-white/40">Mois (MTD)</div>
-                  {estMarge ? (
-                    <div className="text-2xl text-white/25">—</div>
-                  ) : (
-                    <>
-                      <div className="font-[var(--font-mono,monospace)] text-2xl font-semibold leading-tight">{fmt(agg.mtdN)}</div>
-                      <EvolBadge valeur={agg.mtdN} n1={agg.mtdN1} unite="montant" />
-                    </>
-                  )}
-                </div>
-                <div>
-                  <div className="text-[10px] uppercase tracking-wide text-white/40">Année (YTD)</div>
-                  <div className="font-[var(--font-mono,monospace)] text-2xl font-semibold leading-tight">{fmt(agg.ytdN)}</div>
-                  <EvolBadge valeur={agg.ytdN} n1={agg.ytdN1} unite={estMarge ? "points" : "montant"} />
-                </div>
+            {/* FIX (2026-10-02) : Jour / Mois (MTD) / Année (YTD) sur UNE
+                ligne avec leur unité, quelle que soit la définition de
+                l'écran : la ligne occupe toute la largeur du pavé (la
+                bascule Cumulé/Mensuel descend au-dessus du graphique),
+                chaque valeur est insécable (whitespace-nowrap + espace
+                insécable avant l'unité) et sa taille suit la largeur du
+                pavé (VALEUR_GRAND_STYLE, en cqw). */}
+            <div className="mb-2 grid grid-cols-3 items-start gap-3" style={CONTENEUR_TAILLE}>
+              <div className="min-w-0">
+                <div className="whitespace-nowrap text-[10px] uppercase tracking-wide text-white/40">Jour</div>
+                {estMarge ? (
+                  <div className="text-white/25" style={VALEUR_GRAND_STYLE}>—</div>
+                ) : (
+                  <>
+                    <div className="whitespace-nowrap font-[var(--font-mono,monospace)] font-semibold leading-tight" style={VALEUR_GRAND_STYLE}>{fmt(agg.jourN)}</div>
+                    <EvolBadge valeur={agg.jourN} n1={agg.jourN1} unite="montant" />
+                  </>
+                )}
               </div>
-              {!estMarge && (
+              <div className="min-w-0">
+                <div className="whitespace-nowrap text-[10px] uppercase tracking-wide text-white/40">Mois (MTD)</div>
+                {estMarge ? (
+                  <div className="text-white/25" style={VALEUR_GRAND_STYLE}>—</div>
+                ) : (
+                  <>
+                    <div className="whitespace-nowrap font-[var(--font-mono,monospace)] font-semibold leading-tight" style={VALEUR_GRAND_STYLE}>{fmt(agg.mtdN)}</div>
+                    <EvolBadge valeur={agg.mtdN} n1={agg.mtdN1} unite="montant" />
+                  </>
+                )}
+              </div>
+              <div className="min-w-0">
+                <div className="whitespace-nowrap text-[10px] uppercase tracking-wide text-white/40">Année (YTD)</div>
+                <div className="whitespace-nowrap font-[var(--font-mono,monospace)] font-semibold leading-tight" style={VALEUR_GRAND_STYLE}>{fmt(agg.ytdN)}</div>
+                <EvolBadge valeur={agg.ytdN} n1={agg.ytdN1} unite={estMarge ? "points" : "montant"} />
+              </div>
+            </div>
+
+            {!estMarge && (
+              <div className="mb-1 flex justify-end">
                 <div className="flex shrink-0 items-center whitespace-nowrap rounded-full border border-white/15 bg-white/5 p-0.5 text-[10px]" onClick={(e) => e.stopPropagation()}>
                   <button onClick={() => setMode("cumule")} className={`rounded-full px-2 py-1 font-semibold ${mode === "cumule" ? "bg-white/20 text-white" : "text-white/45"}`}>
                     Cumulé
@@ -709,8 +722,8 @@ function FluxCardGrand({
                     Mensuel
                   </button>
                 </div>
-              )}
-            </div>
+              </div>
+            )}
 
             <div className="mt-1" onClick={(e) => e.stopPropagation()}>
               {estMarge || mode === "cumule" ? (

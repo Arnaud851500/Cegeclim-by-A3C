@@ -40,14 +40,19 @@ import LastSyncBadge from "@/components/LastSyncBadge";
 // "MON AGENDA" / "MA TODO"), badge d'icône plus grand, bordure de couleur
 // plus épaisse -- pour que chaque section se remarque nettement, sur le
 // modèle des carrés du menu mobile.
+//
+// ÉVOLUTION (2026-10-02) : bouton optionnel à droite de l'en-tête (`lien`)
+// qui ouvre la page complète correspondante dans un nouvel onglet
+// (« Agenda » -> /agenda, « Todo list » -> /todo).
 function SectionFrame({
-  title, icon, color, children, bodyClassName,
+  title, icon, color, children, bodyClassName, lien,
 }: {
   title: string;
   icon: string;
   color: string;
   children: React.ReactNode;
   bodyClassName?: string;
+  lien?: { href: string; label: string };
 }) {
   return (
     <div className="flex flex-col overflow-hidden rounded-2xl border-2" style={{ borderColor: `${color}55` }}>
@@ -64,6 +69,19 @@ function SectionFrame({
         <span className="text-[15px] font-extrabold uppercase tracking-[0.12em]" style={{ color }}>
           {title}
         </span>
+        {lien && (
+          <a
+            href={lien.href}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={`${lien.label} (nouvel onglet)`}
+            className="ml-auto flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border px-3 py-1.5 text-[12px] font-bold transition hover:brightness-125"
+            style={{ color, borderColor: `${color}88`, background: `${color}22` }}
+          >
+            {lien.label}
+            <span aria-hidden>↗</span>
+          </a>
+        )}
       </div>
       <div className={bodyClassName || "flex-1 bg-[#0B1220] p-3"}>{children}</div>
     </div>
@@ -101,13 +119,24 @@ export default function VisionTciPage() {
         </SectionFrame>
 
         <div className="flex flex-col gap-4">
-          <SectionFrame title="Mon Agenda" icon="📅" color="#7A5EA8" bodyClassName="flex-1 p-0">
+          <SectionFrame
+            title="Mon Agenda"
+            icon="📅"
+            color="#7A5EA8"
+            bodyClassName="flex-1 p-0"
+            lien={{ href: "/agenda", label: "Ouvrir l’agenda" }}
+          >
             <div style={{ height: "38vh" }} className="w-full">
               <OutlookAgenda />
             </div>
           </SectionFrame>
 
-          <SectionFrame title="Ma Todo" icon="✅" color="#B4761A">
+          <SectionFrame
+            title="Ma Todo"
+            icon="✅"
+            color="#B4761A"
+            lien={{ href: "/todo", label: "Ouvrir la todo list" }}
+          >
             <TodoDenseList />
           </SectionFrame>
         </div>
