@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   Bar,
@@ -60,6 +60,21 @@ type EvolutionMode = 'none' | 'value' | 'percent' | 'both'
 type CompareMode = 'year' | 'month' | 'dimension'
 type PeriodMode = 'mois' | 'cumul'
 type ClientFilterMode = 'include' | 'exclude'
+type DynamicPeriodMode = 'none' | 'ytd_last_complete' | 'last_complete_month' | 'ytd_current' | 'first_n_months'
+type DynamicPeriod = {
+  mode: DynamicPeriodMode
+  yearsCount: number // nombre d'années comparées (N, N-1, …)
+  monthsCount: number // utilisé uniquement en mode 'first_n_months'
+}
+type ResolvedPeriod = {
+  years: number[]
+  months: number[]
+  yearN: number
+  yearN1: number
+  bridgeMonth: number
+  periodMode: PeriodMode
+  label: string
+}
 
 type StudioRow = {
   source: Exclude<DataSource, 'mixte'>
@@ -87,6 +102,7 @@ type StudioRow = {
   quantite: number
   ca_ht: number
   marge_valeur: number
+  client_key: string // clé « numéro — nom » précalculée au chargement (filtre clients)
 }
 
 type GlobalFilters = {
@@ -104,6 +120,7 @@ type GlobalFilters = {
   clientMode: ClientFilterMode
   clients: string[]
   horsStatistique: 'non' | 'oui' | 'tous'
+  dynamicPeriod?: DynamicPeriod
 }
 
 type WidgetFilters = Partial<{
@@ -151,6 +168,9 @@ type WidgetConfig = {
   topN: number
   sortMode: SortMode
   showValues: boolean
+  // 'vue' (défaut) : quand la vue a une période dynamique, le widget en hérite (année N / N-1, mois, cumul).
+  // 'widget' : le widget garde sa propre période figée.
+  periodSource?: 'vue' | 'widget'
 }
 
 type AiWidgetProposal = Partial<WidgetConfig> & {
@@ -203,6 +223,7 @@ type AggregatedValue = {
   population_departement: number
   superficie_departement: number
   __territoires: Record<string, { population: number; superficie: number }>
+  __dirty?: boolean
 }
 
 type ChartDatum = {
@@ -248,7 +269,7 @@ const ATELIER_SELECT_BY_SOURCE: Record<Exclude<DataSource, 'mixte'>, string> = {
   activite: [...ATELIER_COMMON_SELECT, 'type_document', 'annee_creation', 'mois_creation', 'annee_livraison', 'mois_livraison'].join(','),
   devis: ATELIER_COMMON_SELECT.join(','),
 }
-const ATELIER_FRONT_VERSION = 'V2026-06-02-FAST-SCOPE-LOAD-01'
+const ATELIER_FRONT_VERSION = 'V2026-10-02-PERF-DYN-PERIOD-01'
 const ATELIER_AI_VERSION = 'STEP-3-WIDGET-BUILDER-02'
 
 const MONTHS = ['Janv.', 'Févr.', 'Mars', 'Avr.', 'Mai', 'Juin', 'Juil.', 'Août', 'Sept.', 'Oct.', 'Nov.', 'Déc.']
@@ -322,6 +343,60 @@ const DEFAULT_FILTERS: GlobalFilters = {
   clientMode: 'include',
   clients: [],
   horsStatistique: 'non',
+  dynamicPeriod: { mode: 'none', yearsCount: 2, monthsCount: 6 },
+}
+
+const DYNAMIC_PERIOD_OPTIONS: Array<{ value: DynamicPeriodMode; label: string }> = [
+  { value: 'none', label: 'Fixe (sélection manuelle)' },
+  { value: 'ytd_last_complete', label: 'Janv. → dernier mois complet' },
+  { value: 'last_complete_month', label: 'Dernier mois complet seul' },
+  { value: 'ytd_current', label: 'Janv. → mois en cours' },
+  { value: 'first_n_months', label: 'N premiers mois de l’année' },
+]
+
+// Types de widgets dont le calcul dépend d'une période (année N/N-1, mois, cumul).
+// Pour les graphiques, periodMode pilote l'affichage (mensuel / cumulé) : on ne l'écrase pas.
+const PERIOD_DRIVEN_TYPES: WidgetType[] = ['bridge', 'double_bridge', 'kpi', 'tableau', 'synthese']
+
+function lastCompleteMonth(now: Date) {
+  const y = now.getFullYear()
+  const m = now.getMonth() + 1
+  return m === 1 ? { year: y - 1, month: 12 } : { year: y, month: m - 1 }
+}
+
+function resolveDynamicPeriod(dp: DynamicPeriod | undefined, now: Date): ResolvedPeriod | null {
+  if (!dp || dp.mode === 'none') return null
+  const yearsCount = Math.max(1, Math.min(6, Math.round(dp.yearsCount || 2)))
+  let yearN = now.getFullYear()
+  let monthStart = 1
+  let monthEnd = now.getMonth() + 1
+  let periodMode: PeriodMode = 'cumul'
+
+  if (dp.mode === 'ytd_last_complete' || dp.mode === 'last_complete_month') {
+    const last = lastCompleteMonth(now)
+    yearN = last.year
+    monthEnd = last.month
+    if (dp.mode === 'last_complete_month') {
+      monthStart = monthEnd
+      periodMode = 'mois'
+    }
+  } else if (dp.mode === 'first_n_months') {
+    monthEnd = Math.max(1, Math.min(12, Math.round(dp.monthsCount || 1)))
+  }
+
+  const years = Array.from({ length: yearsCount }, (_v, i) => yearN - i)
+  const months = Array.from({ length: monthEnd - monthStart + 1 }, (_v, i) => monthStart + i)
+  const periodText = periodMode === 'mois' ? `${monthLabel(monthEnd)}` : `${monthLabel(1)} → ${monthLabel(monthEnd)}`
+  const compared = years.slice(1).join(', ')
+  return {
+    years,
+    months,
+    yearN,
+    yearN1: yearN - 1,
+    bridgeMonth: monthEnd,
+    periodMode,
+    label: `${periodText} ${yearN}${compared ? ` vs ${compared}` : ''}`,
+  }
 }
 
 const EMPTY_LAST_BUSINESS_DATES: LastBusinessDates = { devis: null, factures: null, bl: null }
@@ -517,6 +592,7 @@ function normalizeAggRow(row: Record<string, any>, source: Exclude<DataSource, '
     quantite: safeNumber(row.quantite),
     ca_ht: safeNumber(row.ca_ht),
     marge_valeur: safeNumber(row.marge_valeur),
+    client_key: `${safeText(row.numero_tiers || row.code_tiers, 'NON RENSEIGNE')} — ${safeText(row.intitule_tiers || row.tiers, 'NON RENSEIGNE')}`,
   }
 }
 
@@ -609,6 +685,7 @@ function getCompositeDimensionValue(row: StudioRow, dim1: DimensionKey, dim2?: D
 }
 
 function clientKey(row: StudioRow) {
+  if (row.client_key) return row.client_key
   const numero = safeText(row.numero_tiers, 'NC')
   const nom = safeText(row.intitule_tiers, 'NON RENSEIGNE')
   return `${numero} — ${nom}`
@@ -642,9 +719,22 @@ function emptyAgg(): AggregatedValue {
 }
 
 function recomputeTerritoireTotals(target: AggregatedValue) {
-  const territoires = Object.values(target.__territoires || {})
-  target.population_departement = territoires.reduce((sum, item) => sum + safeNumber(item.population), 0)
-  target.superficie_departement = territoires.reduce((sum, item) => sum + safeNumber(item.superficie), 0)
+  let population = 0
+  let superficie = 0
+  for (const key in target.__territoires) {
+    population += safeNumber(target.__territoires[key].population)
+    superficie += safeNumber(target.__territoires[key].superficie)
+  }
+  target.population_departement = population
+  target.superficie_departement = superficie
+  target.__dirty = false
+}
+
+// Les totaux territoire ne sont recalculés qu'à la lecture (et non à chaque ligne ajoutée) :
+// c'était un coût O(lignes × départements) sur chaque agrégation.
+function ensureTerritoireTotals(agg: AggregatedValue) {
+  if (agg.__dirty) recomputeTerritoireTotals(agg)
+  return agg
 }
 
 function mergeAgg(target: AggregatedValue, source: AggregatedValue) {
@@ -653,15 +743,15 @@ function mergeAgg(target: AggregatedValue, source: AggregatedValue) {
   target.quantite += source.quantite
   target.nb_lignes += source.nb_lignes
 
-  Object.entries(source.__territoires || {}).forEach(([departement, territoire]) => {
-    if (!departement || departement === 'NON RENSEIGNE') return
+  for (const departement in source.__territoires) {
+    if (!departement || departement === 'NON RENSEIGNE') continue
+    const territoire = source.__territoires[departement]
     target.__territoires[departement] = {
       population: safeNumber(territoire.population),
       superficie: safeNumber(territoire.superficie),
     }
-  })
-
-  recomputeTerritoireTotals(target)
+    target.__dirty = true
+  }
 }
 
 function addToAgg(target: AggregatedValue, row: StudioRow) {
@@ -672,80 +762,97 @@ function addToAgg(target: AggregatedValue, row: StudioRow) {
 
   // Les données territoire sont portées par les lignes agrégées mais ne doivent pas être additionnées plusieurs fois
   // quand un même département est présent sur plusieurs familles, clients ou types de document.
-  const departement = safeText(row.departement_tiers, '')
-  if (departement && departement !== 'NON RENSEIGNE') {
+  const departement = row.departement_tiers
+  if (departement && departement !== 'NON RENSEIGNE' && !target.__territoires[departement]) {
     target.__territoires[departement] = {
-      population: safeNumber(row.population_departement),
-      superficie: safeNumber(row.superficie_departement),
+      population: row.population_departement,
+      superficie: row.superficie_departement,
     }
-    recomputeTerritoireTotals(target)
+    target.__dirty = true
   }
 }
 
 function measureValue(agg: AggregatedValue, measure: MeasureKey) {
   if (measure === 'marge_pct') return agg.ca_ht ? (agg.marge_valeur / agg.ca_ht) * 100 : 0
+  if (measure === 'population_departement' || measure === 'superficie_departement' || measure === 'ca_par_population' || measure === 'ca_par_superficie') {
+    ensureTerritoireTotals(agg)
+  }
   if (measure === 'ca_par_population') return agg.population_departement ? agg.ca_ht / agg.population_departement : 0
   if (measure === 'ca_par_superficie') return agg.superficie_departement ? agg.ca_ht / agg.superficie_departement : 0
   return agg[measure]
 }
 
-function applyGlobalFilters(rows: StudioRow[], filters: GlobalFilters) {
-  return rows.filter((row) => {
-    if (filters.sources.length) {
-      const wantedSources = sourcesForAtelierLoad(filters.sources)
-      if (!wantedSources.includes(row.source)) return false
+function groupAgg(rows: StudioRow[], keyFn: (row: StudioRow) => string) {
+  const map = new Map<string, AggregatedValue>()
+  for (const row of rows) {
+    const key = keyFn(row)
+    let agg = map.get(key)
+    if (!agg) {
+      agg = emptyAgg()
+      map.set(key, agg)
     }
-    if (filters.years.length && !filters.years.includes(row.annee)) return false
-    if (filters.months.length && !filters.months.includes(row.mois)) return false
-    if (filters.agences.length && !filters.agences.includes(row.agence_collaborateur)) return false
-    if ((filters.depots || []).length && !filters.depots.includes(row.depot)) return false
-    if (filters.collaborateurs.length && !filters.collaborateurs.includes(row.collaborateur_facture || row.collaborateur)) return false
-    if ((filters.collaborateursFacture || []).length && !filters.collaborateursFacture.includes(row.collaborateur_facture)) return false
-    if ((filters.collaborateursTiers || []).length && !filters.collaborateursTiers.includes(row.collaborateur_tiers)) return false
-    if ((filters.departementsTiers || []).length && !filters.departementsTiers.includes(row.departement_tiers)) return false
-    if (filters.famillesMacro.length && !filters.famillesMacro.includes(row.famille_macro)) return false
-    if (filters.typesDocument.length && !filters.typesDocument.includes(row.type_document)) return false
-    if (filters.clients?.length) {
-      const selected = filters.clients.includes(clientKey(row))
-      if (filters.clientMode === 'exclude' ? selected : !selected) return false
-    }
-    if (filters.horsStatistique === 'non' && row.hors_statistique) return false
-    if (filters.horsStatistique === 'oui' && !row.hors_statistique) return false
-    return true
-  })
+    addToAgg(agg, row)
+  }
+  return map
 }
 
-function applyWidgetFilters(rows: StudioRow[], widget: WidgetConfig, globalFilters: GlobalFilters) {
-  let filtered = rows
-  if (widget.useGlobalFilters) filtered = applyGlobalFilters(filtered, globalFilters)
+type RowFilterSpec = Partial<Omit<GlobalFilters, 'sources' | 'dynamicPeriod'>> & { sources?: DataSource[] }
 
-  filtered = filtered.filter((row) => {
-    if (widget.source === 'mixte') {
+// Compile une fois les filtres en Set (recherche O(1)) au lieu de faire des Array.includes ligne par ligne.
+function buildRowPredicate(filters: RowFilterSpec) {
+  const toSet = <T,>(values?: T[]) => (values && values.length ? new Set(values) : null)
+  const sources = filters.sources && filters.sources.length ? new Set<string>(sourcesForAtelierLoad(filters.sources)) : null
+  const years = toSet(filters.years)
+  const months = toSet(filters.months)
+  const agences = toSet(filters.agences)
+  const depots = toSet(filters.depots)
+  const collaborateurs = toSet(filters.collaborateurs)
+  const collaborateursFacture = toSet(filters.collaborateursFacture)
+  const collaborateursTiers = toSet(filters.collaborateursTiers)
+  const departementsTiers = toSet(filters.departementsTiers)
+  const famillesMacro = toSet(filters.famillesMacro)
+  const typesDocument = toSet(filters.typesDocument)
+  const clients = toSet(filters.clients)
+  const excludeClients = (filters.clientMode || 'include') === 'exclude'
+  const horsStat = filters.horsStatistique
+
+  return (row: StudioRow) => {
+    if (sources && !sources.has(row.source)) return false
+    if (years && !years.has(row.annee)) return false
+    if (months && !months.has(row.mois)) return false
+    if (agences && !agences.has(row.agence_collaborateur)) return false
+    if (depots && !depots.has(row.depot)) return false
+    if (collaborateurs && !collaborateurs.has(row.collaborateur_facture || row.collaborateur)) return false
+    if (collaborateursFacture && !collaborateursFacture.has(row.collaborateur_facture)) return false
+    if (collaborateursTiers && !collaborateursTiers.has(row.collaborateur_tiers)) return false
+    if (departementsTiers && !departementsTiers.has(row.departement_tiers)) return false
+    if (famillesMacro && !famillesMacro.has(row.famille_macro)) return false
+    if (typesDocument && !typesDocument.has(row.type_document)) return false
+    if (clients) {
+      const selected = clients.has(row.client_key)
+      if (excludeClients ? selected : !selected) return false
+    }
+    if (horsStat === 'non' && row.hors_statistique) return false
+    if (horsStat === 'oui' && !row.hors_statistique) return false
+    return true
+  }
+}
+
+function applyGlobalFilters(rows: StudioRow[], filters: GlobalFilters) {
+  return rows.filter(buildRowPredicate(filters))
+}
+
+function applyLocalWidgetFilters(rows: StudioRow[], widget: WidgetConfig) {
+  const local = buildRowPredicate(widget.localFilters || {})
+  const source = widget.source
+  return rows.filter((row) => {
+    if (source === 'mixte') {
       if (row.source === 'devis') return false
-    } else if (row.source !== widget.source) {
+    } else if (row.source !== source) {
       return false
     }
-    const lf = widget.localFilters
-    if (lf.years?.length && !lf.years.includes(row.annee)) return false
-    if (lf.months?.length && !lf.months.includes(row.mois)) return false
-    if (lf.agences?.length && !lf.agences.includes(row.agence_collaborateur)) return false
-    if (lf.depots?.length && !lf.depots.includes(row.depot)) return false
-    if (lf.collaborateurs?.length && !lf.collaborateurs.includes(row.collaborateur_facture || row.collaborateur)) return false
-    if (lf.collaborateursFacture?.length && !lf.collaborateursFacture.includes(row.collaborateur_facture)) return false
-    if (lf.collaborateursTiers?.length && !lf.collaborateursTiers.includes(row.collaborateur_tiers)) return false
-    if (lf.departementsTiers?.length && !lf.departementsTiers.includes(row.departement_tiers)) return false
-    if (lf.famillesMacro?.length && !lf.famillesMacro.includes(row.famille_macro)) return false
-    if (lf.typesDocument?.length && !lf.typesDocument.includes(row.type_document)) return false
-    if (lf.clients?.length) {
-      const selected = lf.clients.includes(clientKey(row))
-      if ((lf.clientMode || 'include') === 'exclude' ? selected : !selected) return false
-    }
-    if (lf.horsStatistique === 'non' && row.hors_statistique) return false
-    if (lf.horsStatistique === 'oui' && !row.hors_statistique) return false
-    return true
+    return local(row)
   })
-
-  return filtered
 }
 
 function aggregateTotal(rows: StudioRow[]) {
@@ -871,26 +978,33 @@ function chartSeriesColor(series: string, index: number, widget: WidgetConfig, r
   if (String(series).includes('Factures')) return '#2563eb'
   return PALETTE[index % PALETTE.length]
 }
+// Au-delà, la liste déroulante (clients notamment : plusieurs milliers) devient lente à ouvrir.
+const MULTISELECT_MAX_VISIBLE = 200
+
 function MultiSelect({
   label,
   values,
   selected,
   onChange,
   locked,
+  lockedHint,
 }: {
   label: string
   values: string[]
   selected: string[]
   onChange: (values: string[]) => void
   locked?: boolean
+  lockedHint?: string
 }) {
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState('')
+  const selectedSet = useMemo(() => new Set(selected), [selected])
   const filteredValues = useMemo(() => {
+    if (!open) return []
     const s = search.trim().toLowerCase()
-    if (!s) return values
-    return values.filter((value) => value.toLowerCase().includes(s))
-  }, [values, search])
+    return s ? values.filter((value) => value.toLowerCase().includes(s)) : values
+  }, [values, search, open])
+  const visibleValues = filteredValues.slice(0, MULTISELECT_MAX_VISIBLE)
 
   function toggle(value: string) {
     if (selected.includes(value)) onChange(selected.filter((v) => v !== value))
@@ -899,7 +1013,7 @@ function MultiSelect({
 
   if (locked) {
     return (
-      <div className="relative" title="Périmètre figé par votre profil d’accès">
+      <div className="relative" title={lockedHint || 'Périmètre figé par votre profil d’accès'}>
         <div className="flex h-10 w-full cursor-not-allowed items-center justify-between rounded-lg border border-[#E5E1D8] bg-[#EDEAE1] px-3 text-left text-[13px] font-semibold text-[#8A8474]">
           <span className="truncate">{label} {selected.length ? `(${selected.length})` : ''}</span>
           <span className="text-[#8A8474]">🔒</span>
@@ -935,13 +1049,18 @@ function MultiSelect({
             className="mb-3 w-full rounded-lg border border-[#E5E1D8] px-3 py-2 text-sm outline-none focus:border-[#B4761A]"
           />
           <div className="max-h-72 space-y-0.5 overflow-auto pr-1">
-            {filteredValues.map((value) => (
+            {visibleValues.map((value) => (
               <label key={value} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-[#3A362E] hover:bg-[#F4F3F0]">
-                <input type="checkbox" checked={selected.includes(value)} onChange={() => toggle(value)} className="accent-[#B4761A]" />
+                <input type="checkbox" checked={selectedSet.has(value)} onChange={() => toggle(value)} className="accent-[#B4761A]" />
                 <span className="truncate">{value}</span>
               </label>
             ))}
             {filteredValues.length === 0 && <div className="px-2 py-3 text-center text-xs text-[#8A8474]">Aucun résultat</div>}
+            {filteredValues.length > MULTISELECT_MAX_VISIBLE && (
+              <div className="px-2 py-2 text-center text-[11px] font-semibold text-[#8A8474]">
+                {formatNumber(filteredValues.length - MULTISELECT_MAX_VISIBLE)} autres valeurs — affinez la recherche
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -988,9 +1107,11 @@ function WidgetShell({
   onRemove,
   onDuplicate,
   onMove,
+  periodBadge,
   children,
 }: {
   widget: WidgetConfig
+  periodBadge?: string
   selected: boolean
   onConfigure: (event: any) => void
   onRemove: () => void
@@ -1009,7 +1130,10 @@ function WidgetShell({
       <div className="mb-3 flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="truncate text-[13px] font-bold text-[#111820]">{widget.title}</h3>
-          <p className="mt-0.5 text-[11px] font-medium text-[#8A8474]">{sourceLabel(widget.source)} · {getMeasureLabel(widget.measure)}</p>
+          <p className="mt-0.5 text-[11px] font-medium text-[#8A8474]">
+            {sourceLabel(widget.source)} · {getMeasureLabel(widget.measure)}
+            {periodBadge && <span className="ml-2 rounded-full bg-[#B4761A]/[0.08] px-2 py-0.5 text-[10px] font-bold text-[#96600F]" title="Période dynamique héritée de la vue">⟳ {periodBadge}</span>}
+          </p>
         </div>
         <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
           <button title="Configurer le widget" type="button" onClick={onConfigure} className="rounded-md border border-[#B4761A]/30 bg-[#B4761A]/[0.08] px-1.5 py-1 text-[11px] font-bold text-[#96600F] hover:bg-[#B4761A]/[0.15]">⚙</button>
@@ -1042,28 +1166,32 @@ function CustomTooltip({ active, payload, label }: any) {
 }
 
 function KpiWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetConfig }) {
-  let latestYear = CURRENT_YEAR
-  for (const row of rows) if (row.annee > latestYear) latestYear = row.annee
-  const selectedYear = widget.yearN || latestYear
-  const previousYear = widget.yearN1 || selectedYear - 1
-  const monthLimit = widget.bridgeMonth || CURRENT_MONTH
-  const inPeriod = (row: StudioRow) => widget.periodMode === 'cumul' ? row.mois <= monthLimit : row.mois === monthLimit
+  const { value, previousValue, previousYear, monthLimit } = useMemo(() => {
+    let latestYear = CURRENT_YEAR
+    for (const row of rows) if (row.annee > latestYear) latestYear = row.annee
+    const selectedYear = widget.yearN || latestYear
+    const previousYear = widget.yearN1 || selectedYear - 1
+    const monthLimit = widget.bridgeMonth || CURRENT_MONTH
+    const inPeriod = (row: StudioRow) => widget.periodMode === 'cumul' ? row.mois <= monthLimit : row.mois === monthLimit
 
-  let currentRows = rows.filter((r) => r.annee === selectedYear && inPeriod(r))
-  let previousRows = rows.filter((r) => r.annee === previousYear && inPeriod(r))
+    let currentRows = rows.filter((r) => r.annee === selectedYear && inPeriod(r))
+    let previousRows = rows.filter((r) => r.annee === previousYear && inPeriod(r))
 
-  if (widget.compareMode === 'dimension' && widget.compareDimension && widget.compareValue) {
-    currentRows = rows.filter((r) => r.annee === selectedYear && inPeriod(r))
-    previousRows = rows.filter((r) => getDimensionValue(r, widget.compareDimension as DimensionKey) === widget.compareValue && inPeriod(r))
-  }
+    if (widget.compareMode === 'dimension' && widget.compareDimension && widget.compareValue) {
+      previousRows = rows.filter((r) => getDimensionValue(r, widget.compareDimension as DimensionKey) === widget.compareValue && inPeriod(r))
+    }
 
-  const currentAgg = aggregateTotal(currentRows.length ? currentRows : rows.filter((r) => r.annee === selectedYear))
-  const previousAgg = aggregateTotal(previousRows)
-  const value = measureValue(currentAgg, widget.measure)
-  const previousValue = measureValue(previousAgg, widget.secondMeasure || widget.measure)
+    const currentAgg = aggregateTotal(currentRows.length ? currentRows : rows.filter((r) => r.annee === selectedYear))
+    const previousAgg = aggregateTotal(previousRows)
+    return {
+      value: measureValue(currentAgg, widget.measure),
+      previousValue: measureValue(previousAgg, widget.secondMeasure || widget.measure),
+      previousYear,
+      monthLimit,
+    }
+  }, [rows, widget])
   const evo = evolutionText(value, previousValue, widget.evolutionMode, widget.measure)
   const periodText = widget.periodMode === 'cumul' ? `01-${String(monthLimit).padStart(2, '0')}` : monthLabel(monthLimit)
-
 
   return (
     <div className="rounded-lg bg-[#F4F3F0] p-4">
@@ -1281,13 +1409,13 @@ function BridgeWidget({ rows, widget, onUpdate }: { rows: StudioRow[]; widget: W
     const currentTotal = measureValue(aggregateTotal(currentRows), widget.measure)
     const previousTotal = measureValue(aggregateTotal(previousRows), widget.measure)
 
-    const dimKeys = new Set<string>()
-    currentRows.forEach((row) => dimKeys.add(getDimensionValue(row, widget.dimension)))
-    previousRows.forEach((row) => dimKeys.add(getDimensionValue(row, widget.dimension)))
+    const curByDim = groupAgg(currentRows, (row) => getDimensionValue(row, widget.dimension))
+    const prevByDim = groupAgg(previousRows, (row) => getDimensionValue(row, widget.dimension))
+    const dimKeys = new Set<string>([...curByDim.keys(), ...prevByDim.keys()])
 
     const items = Array.from(dimKeys).map((label) => {
-      const cur = aggregateTotal(currentRows.filter((row) => getDimensionValue(row, widget.dimension) === label))
-      const prev = aggregateTotal(previousRows.filter((row) => getDimensionValue(row, widget.dimension) === label))
+      const cur = curByDim.get(label) || emptyAgg()
+      const prev = prevByDim.get(label) || emptyAgg()
       const current = measureValue(cur, widget.measure)
       const previous = measureValue(prev, widget.measure)
       return { label, current, previous, delta: current - previous, value: Math.abs(current - previous) }
@@ -1468,15 +1596,13 @@ function DoubleBridgeWidget({ rows, widget, onUpdate }: { rows: StudioRow[]; wid
     const startValue = measureValueForDoubleBridge(startAgg, widget.measure)
     const endValue = measureValueForDoubleBridge(endAgg, widget.measure)
 
-    const dimKeys = new Set<string>()
-    startRows.forEach((row) => dimKeys.add(getDimensionValue(row, widget.dimension)))
-    endRows.forEach((row) => dimKeys.add(getDimensionValue(row, widget.dimension)))
+    const startByDim = groupAgg(startRows, (row) => getDimensionValue(row, widget.dimension))
+    const endByDim = groupAgg(endRows, (row) => getDimensionValue(row, widget.dimension))
+    const dimKeys = new Set<string>([...startByDim.keys(), ...endByDim.keys()])
 
     const rawDetails: DoubleBridgeDetail[] = Array.from(dimKeys).map((dimensionLabel) => {
-      const startDimRows = startRows.filter((row) => getDimensionValue(row, widget.dimension) === dimensionLabel)
-      const endDimRows = endRows.filter((row) => getDimensionValue(row, widget.dimension) === dimensionLabel)
-      const startDimAgg = aggregateTotal(startDimRows)
-      const endDimAgg = aggregateTotal(endDimRows)
+      const startDimAgg = startByDim.get(dimensionLabel) || emptyAgg()
+      const endDimAgg = endByDim.get(dimensionLabel) || emptyAgg()
       const startDimValue = measureValueForDoubleBridge(startDimAgg, widget.measure)
       const endDimValue = measureValueForDoubleBridge(endDimAgg, widget.measure)
 
@@ -1744,10 +1870,11 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
   const yearN = widget.yearN || CURRENT_YEAR
   const yearN1 = widget.yearN1 || yearN - 1
   const monthLimit = widget.bridgeMonth || CURRENT_MONTH
-  const inSelectedPeriod = (row: StudioRow) => widget.periodMode === 'cumul' ? row.mois <= monthLimit : row.mois === monthLimit
-  const periodRows = rows.filter((row) => inSelectedPeriod(row))
-  const currentPeriodRows = rows.filter((row) => row.annee === yearN && inSelectedPeriod(row))
-  const previousPeriodRows = rows.filter((row) => row.annee === yearN1 && inSelectedPeriod(row))
+  const periodMode = widget.periodMode
+  const periodRows = useMemo(
+    () => rows.filter((row) => periodMode === 'cumul' ? row.mois <= monthLimit : row.mois === monthLimit),
+    [rows, periodMode, monthLimit]
+  )
 
   const configuredRowDimensions = [widget.rowDimension, widget.rowDimension2].filter(Boolean) as DimensionKey[]
   const configuredColumnDimensions = [widget.columnDimension, widget.columnDimension2].filter(Boolean) as DimensionKey[]
@@ -1771,6 +1898,7 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
     colMap: Map<string, AggregatedValue>
     total: AggregatedValue
     totalPrev: AggregatedValue
+    totalCur: AggregatedValue // part année N seule : base de l'évolution vs N-1
     value: number
     isSubtotal?: boolean
     subtotalFor?: string
@@ -1854,19 +1982,48 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
     const rowMeta = new Map<string, string[]>()
     const columnMeta = new Map<string, string[]>()
 
+    // Passe unique sur les lignes : cellules, totaux de ligne, totaux N-1, totaux de colonne, total général.
+    // (L'ancienne version refiltrait toutes les lignes pour chaque ligne et chaque cellule : coût quadratique.)
+    const rowTotals = new Map<string, AggregatedValue>()
+    const rowPrevTotals = new Map<string, AggregatedValue>()
+    const rowCurTotals = new Map<string, AggregatedValue>()
+    const curCells = new Map<string, AggregatedValue>()
+    const grandCur = emptyAgg()
+    const prevCells = new Map<string, AggregatedValue>()
+    const colTotals = new Map<string, AggregatedValue>()
+    const grand = emptyAgg()
+    const grandPrev = emptyAgg()
+
+    const bump = (target: Map<string, AggregatedValue>, key: string, row: StudioRow) => {
+      let agg = target.get(key)
+      if (!agg) { agg = emptyAgg(); target.set(key, agg) }
+      addToAgg(agg, row)
+    }
+
     periodRows.forEach((row) => {
       const rParts = rowPartsFor(row)
       const cParts = columnPartsFor(row)
       const rKey = rowKey(rParts)
       const cKey = columnKey(cParts)
 
-      if (!map.has(rKey)) map.set(rKey, new Map())
-      if (!rowMeta.has(rKey)) rowMeta.set(rKey, rParts)
+      let colMap = map.get(rKey)
+      if (!colMap) { colMap = new Map(); map.set(rKey, colMap); rowMeta.set(rKey, rParts) }
       if (!columnMeta.has(cKey)) columnMeta.set(cKey, cParts)
 
-      const colMap = map.get(rKey)!
-      if (!colMap.has(cKey)) colMap.set(cKey, emptyAgg())
-      addToAgg(colMap.get(cKey)!, row)
+      bump(colMap, cKey, row)
+      bump(rowTotals, rKey, row)
+      bump(colTotals, cKey, row)
+      addToAgg(grand, row)
+
+      if (row.annee === yearN) {
+        bump(rowCurTotals, rKey, row)
+        bump(curCells, `${rKey}${ROW_JOIN}${cKey}`, row)
+        addToAgg(grandCur, row)
+      } else if (row.annee === yearN1) {
+        bump(rowPrevTotals, rKey, row)
+        bump(prevCells, `${rKey}${ROW_JOIN}${cKey}`, row)
+        addToAgg(grandPrev, row)
+      }
     })
 
     let columns = Array.from(columnMeta.entries()).map(([key, parts]) => ({ key, parts }))
@@ -1883,18 +2040,11 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
 
     const rowItems: PivotRow[] = Array.from(map.entries()).map(([key, colMap]) => {
       const parts = rowMeta.get(key) || [key]
-      const total = emptyAgg()
-      const totalPrev = emptyAgg()
+      const total = rowTotals.get(key) || emptyAgg()
+      const totalPrev = rowPrevTotals.get(key) || emptyAgg()
+      const totalCur = rowCurTotals.get(key) || emptyAgg()
 
-      periodRows
-        .filter((r) => rowKey(rowPartsFor(r)) === key)
-        .forEach((r) => addToAgg(total, r))
-
-      previousPeriodRows
-        .filter((r) => rowKey(rowPartsFor(r)) === key)
-        .forEach((r) => addToAgg(totalPrev, r))
-
-      return { key, parts, colMap, value: measureValue(total, widget.measure), total, totalPrev }
+      return { key, parts, colMap, value: measureValue(total, widget.measure), total, totalPrev, totalCur }
     })
 
     let sortedRows = [...rowItems]
@@ -1943,6 +2093,7 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
             colMap: subtotalColMap,
             total: emptyAgg(),
             totalPrev: emptyAgg(),
+            totalCur: emptyAgg(),
             value: 0,
             isSubtotal: true,
             subtotalFor: group,
@@ -1954,6 +2105,7 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
         if (subtotal) {
           mergeAgg(subtotal.total, row.total)
           mergeAgg(subtotal.totalPrev, row.totalPrev)
+          mergeAgg(subtotal.totalCur, row.totalCur)
           row.colMap.forEach((agg, colKey) => {
             if (!subtotal!.colMap.has(colKey)) subtotal!.colMap.set(colKey, emptyAgg())
             const target = subtotal!.colMap.get(colKey)!
@@ -1983,8 +2135,15 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
       columns,
       columnGroups,
       rows: rowsWithSubtotals,
+      prevCells,
+      curCells,
+      colTotals,
+      grand,
+      grandPrev,
+      grandCur,
     }
-  }, [periodRows, rows, widget, sortCell, rowSorts, measures, currentPeriodRows, previousPeriodRows, rowDetailExpanded, columnDetailExpanded, rowDimensions, columnDimensions])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [periodRows, widget, yearN, yearN1, sortCell, rowSorts, rowDetailExpanded, columnDetailExpanded, rowDimensions.join('|'), columnDimensions.join('|')])
 
   function comparisonColumnKey(column: PivotColumn) {
     if (columnDimensions.includes('annee')) {
@@ -1995,13 +2154,8 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
 
   function comparisonValue(rowKeyValue: string, column: PivotColumn, measure: MeasureKey) {
     if (widget.evolutionMode === 'none' || rowKeyValue.startsWith('__subtotal__')) return 0
-    const prevAgg = emptyAgg()
-    const prevColumnKey = comparisonColumnKey(column)
-    previousPeriodRows
-      .filter((r) => rowKey(rowPartsFor(r)) === rowKeyValue)
-      .filter((r) => columnKey(columnPartsFor(r)) === prevColumnKey)
-      .forEach((r) => addToAgg(prevAgg, r))
-    return measureValue(prevAgg, measure)
+    const prevAgg = pivot.prevCells.get(`${rowKeyValue}${ROW_JOIN}${comparisonColumnKey(column)}`)
+    return prevAgg ? measureValue(prevAgg, measure) : 0
   }
 
   function totalComparisonValue(row: PivotRow, measure: MeasureKey) {
@@ -2078,11 +2232,10 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
     })
 
     const totalLine: any[] = ['TOTAL', ...Array(Math.max(0, rowHeaderCount - 1)).fill('')]
-    const currentGrand = aggregateTotal(periodRows)
+    const currentGrand = pivot.grand
     measures.forEach((measure) => totalLine.push(measureValue(currentGrand, measure)))
     pivot.columns.forEach((column) => {
-      const agg = emptyAgg()
-      periodRows.filter((r) => columnKey(columnPartsFor(r)) === column.key).forEach((r) => addToAgg(agg, r))
+      const agg = pivot.colTotals.get(column.key) || emptyAgg()
       measures.forEach((measure) => totalLine.push(measureValue(agg, measure)))
     })
     aoa.push(totalLine)
@@ -2182,13 +2335,19 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
     XLSX.writeFile(wb, `${excelSafeFileName(widget.title || 'tableau_croise')}${includeDetail ? '_avec_detail' : ''}.xlsx`)
   }
 
-  function CellValue({ value, previous, measure }: { value: number; previous: number; measure: MeasureKey }) {
+  // evoCurrent : valeur année N servant de base à l'évolution. Quand la cellule cumule plusieurs années
+  // (aucune dimension Année en lignes/colonnes), comparer le total N + N-1 à N-1 donnait des +100 % trompeurs.
+  const rowsHaveYear = rowDimensions.includes('annee')
+  const cellsHaveYear = rowsHaveYear || columnDimensions.includes('annee')
+
+  function renderCellValue(value: number, previous: number, measure: MeasureKey, evoCurrent?: number) {
+    const current = evoCurrent ?? value
     return (
       <div className="min-w-[92px]">
         <div className="font-bold text-slate-900">{formatMeasure(value, measure)}</div>
         {widget.evolutionMode !== 'none' && (
-          <div className={`mt-1 inline-flex rounded px-2 py-0.5 text-[10px] font-black ${evolutionClass(value, previous)}`}>
-            {evolutionText(value, previous, widget.evolutionMode, measure)}
+          <div className={`mt-1 inline-flex rounded px-2 py-0.5 text-[10px] font-black ${evolutionClass(current, previous)}`}>
+            {evolutionText(current, previous, widget.evolutionMode, measure)}
           </div>
         )}
       </div>
@@ -2297,7 +2456,7 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
                 {measures.map((measure) => {
                   const value = measureValue(row.total, measure)
                   const previous = totalComparisonValue(row, measure)
-                  return <td key={`${row.key}-total-${measure}`} className={`border border-slate-200 px-3 py-2 text-right ${row.isSubtotal ? 'bg-slate-100' : 'bg-slate-50'}`}><CellValue value={value} previous={previous} measure={measure} /></td>
+                  return <td key={`${row.key}-total-${measure}`} className={`border border-slate-200 px-3 py-2 text-right ${row.isSubtotal ? 'bg-slate-100' : 'bg-slate-50'}`}>{renderCellValue(value, previous, measure, rowsHaveYear ? undefined : measureValue(row.totalCur, measure))}</td>
                 })}
                 {pivot.columns.flatMap((column) => {
                   const agg = row.colMap.get(column.key) || emptyAgg()
@@ -2306,7 +2465,7 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
                     const previous = row.isSubtotal ? 0 : comparisonValue(row.key, column, measure)
                     return (
                       <td key={`${row.key}-${column.key}-${measure}`} className={`border border-slate-200 px-3 py-2 text-right ${row.isSubtotal ? 'bg-slate-100' : ''}`}>
-                        <CellValue value={value} previous={previous} measure={measure} />
+                        {renderCellValue(value, previous, measure, cellsHaveYear || row.isSubtotal ? undefined : measureValue(pivot.curCells.get(`${row.key}${ROW_JOIN}${column.key}`) || emptyAgg(), measure))}
                       </td>
                     )
                   })
@@ -2320,13 +2479,12 @@ function PivotTableWidget({ rows, widget }: { rows: StudioRow[]; widget: WidgetC
                 </td>
               ))}
               {measures.map((measure) => {
-                const currentGrand = aggregateTotal(periodRows)
-                const previousGrand = aggregateTotal(previousPeriodRows)
-                return <td key={`grand-total-${measure}`} className="border border-slate-200 bg-slate-200 px-3 py-2 text-right"><CellValue value={measureValue(currentGrand, measure)} previous={measureValue(previousGrand, measure)} measure={measure} /></td>
+                const currentGrand = pivot.grand
+                const previousGrand = pivot.grandPrev
+                return <td key={`grand-total-${measure}`} className="border border-slate-200 bg-slate-200 px-3 py-2 text-right">{renderCellValue(measureValue(currentGrand, measure), measureValue(previousGrand, measure), measure, measureValue(pivot.grandCur, measure))}</td>
               })}
               {pivot.columns.flatMap((column) => {
-                const agg = emptyAgg()
-                periodRows.filter((r) => columnKey(columnPartsFor(r)) === column.key).forEach((r) => addToAgg(agg, r))
+                const agg = pivot.colTotals.get(column.key) || emptyAgg()
                 return measures.map((measure) => <td key={`grand-${column.key}-${measure}`} className="border border-slate-200 bg-slate-200 px-3 py-2 text-right">{formatMeasure(measureValue(agg, measure), measure)}</td>)
               })}
             </tr>
@@ -2382,8 +2540,25 @@ function SummaryMatrixWidget({ rows, widget, onUpdate }: { rows: StudioRow[]; wi
 
   const yearRows = Array.from(new Set([yearN1, yearN])).filter((year) => Number.isFinite(year))
 
+  // Une seule passe sur les lignes pour toutes les cellules (année × colonne).
+  const cellValues = useMemo(() => {
+    const aggs = new Map<string, AggregatedValue>()
+    const years = new Set([yearN, yearN1])
+    for (const row of rows) {
+      if (!years.has(row.annee)) continue
+      for (const key of ['total', row.mois <= monthLimit ? 'cumul' : '', row.mois === monthLimit ? 'mois' : '']) {
+        if (!key) continue
+        const id = `${row.annee}|${key}`
+        let agg = aggs.get(id)
+        if (!agg) { agg = emptyAgg(); aggs.set(id, agg) }
+        addToAgg(agg, row)
+      }
+    }
+    return aggs
+  }, [rows, yearN, yearN1, monthLimit])
+
   function valuesFor(year: number, column: typeof columns[number]) {
-    const agg = aggregateTotal(rows.filter((row) => row.annee === year && column.filter(row)))
+    const agg = cellValues.get(`${year}|${column.key}`) || emptyAgg()
     return {
       ca: measureValue(agg, 'ca_ht'),
       margePct: measureValue(agg, 'marge_pct'),
@@ -2488,6 +2663,347 @@ function WidgetRenderer({ rows, widget, onUpdate }: { rows: StudioRow[]; widget:
   return <ChartWidget rows={rows} widget={widget} onUpdate={onUpdate} />
 }
 
+function widgetFollowsViewPeriod(widget: WidgetConfig, resolved: ResolvedPeriod | null) {
+  return !!resolved && widget.periodSource !== 'widget'
+}
+
+function applyResolvedPeriod(widget: WidgetConfig, resolved: ResolvedPeriod | null): WidgetConfig {
+  if (!resolved || !widgetFollowsViewPeriod(widget, resolved)) return widget
+  const patch: Partial<WidgetConfig> = { yearN: resolved.yearN, yearN1: resolved.yearN1 }
+  if (PERIOD_DRIVEN_TYPES.includes(widget.type)) {
+    patch.bridgeMonth = resolved.bridgeMonth
+    patch.periodMode = resolved.periodMode
+  }
+  return { ...widget, ...patch }
+}
+
+const PERIOD_FIELDS: Array<keyof WidgetConfig> = ['yearN', 'yearN1', 'bridgeMonth', 'periodMode']
+
+// Carte widget mémoïsée : elle ne se recalcule que si SON widget, SES lignes, sa sélection
+// ou la période dynamique changent. Ouvrir/éditer le panneau de configuration ne la touche plus.
+const WidgetCard = memo(function WidgetCard({
+  widget,
+  rows,
+  selected,
+  resolvedPeriod,
+  onConfigure,
+  onRemove,
+  onDuplicate,
+  onMove,
+  onUpdate,
+}: {
+  widget: WidgetConfig
+  rows: StudioRow[]
+  selected: boolean
+  resolvedPeriod: ResolvedPeriod | null
+  onConfigure: (id: string, event: any) => void
+  onRemove: (id: string) => void
+  onDuplicate: (id: string) => void
+  onMove: (id: string, direction: -1 | 1) => void
+  onUpdate: (id: string, patch: Partial<WidgetConfig>) => void
+}) {
+  const follows = widgetFollowsViewPeriod(widget, resolvedPeriod)
+  const effectiveWidget = useMemo(() => applyResolvedPeriod(widget, resolvedPeriod), [widget, resolvedPeriod])
+
+  const handleUpdate = useCallback((patch: Partial<WidgetConfig>) => {
+    // Un réglage manuel de période depuis le widget (boutons ±1 mois, Mois/Cumul…) le détache de la période dynamique.
+    const touchesPeriod = follows && PERIOD_DRIVEN_TYPES.includes(widget.type) && PERIOD_FIELDS.some((field) => field in patch)
+    if (touchesPeriod) {
+      onUpdate(widget.id, {
+        yearN: effectiveWidget.yearN,
+        yearN1: effectiveWidget.yearN1,
+        bridgeMonth: effectiveWidget.bridgeMonth,
+        periodMode: effectiveWidget.periodMode,
+        ...patch,
+        periodSource: 'widget',
+      })
+      return
+    }
+    onUpdate(widget.id, patch)
+  }, [follows, widget.id, widget.type, effectiveWidget, onUpdate])
+
+  return (
+    <WidgetShell
+      widget={widget}
+      selected={selected}
+      periodBadge={follows ? resolvedPeriod?.label : undefined}
+      onConfigure={(event) => onConfigure(widget.id, event)}
+      onRemove={() => onRemove(widget.id)}
+      onDuplicate={() => onDuplicate(widget.id)}
+      onMove={(direction) => onMove(widget.id, direction)}
+    >
+      <WidgetRenderer rows={rows} widget={effectiveWidget} onUpdate={handleUpdate} />
+    </WidgetShell>
+  )
+})
+
+const WIDGET_CATALOG: Array<[WidgetType, string, string]> = [
+  ['kpi', 'KPI', 'Indicateur simple'],
+  ['histogramme', 'Histogramme', 'Barres verticales'],
+  ['histogramme_empile', 'Histogramme empilé', 'Valeur ou base 100'],
+  ['courbe', 'Courbe', 'Évolution mensuelle ou cumulée'],
+  ['bridge', 'Bridge', 'Écart N-1 ⇒ N'],
+  ['double_bridge', 'Double bridge', 'Mix puis performance'],
+  ['tableau', 'Tableau croisé', 'Lignes / colonnes / valeurs'],
+  ['synthese', 'Tableau synthèse', 'Mois + cumul + total'],
+  ['camembert', 'Camembert', 'Répartition'],
+]
+
+type AvailableValues = {
+  years: number[]
+  months: number[]
+  agences: string[]
+  depots: string[]
+  collaborateurs: string[]
+  collaborateursFacture: string[]
+  collaborateursTiers: string[]
+  departementsTiers: string[]
+  famillesMacro: string[]
+  typesDocument: string[]
+  clients: string[]
+}
+
+function cloneWidget(widget: WidgetConfig): WidgetConfig {
+  return JSON.parse(JSON.stringify(widget))
+}
+
+// Panneau de configuration autonome : le brouillon vit ici, donc chaque clic / frappe
+// ne re-rend QUE le panneau, plus toute la page et tous les widgets.
+function WidgetConfigPanel({
+  initialWidget,
+  available,
+  top,
+  resolvedPeriod,
+  onApply,
+  onClose,
+}: {
+  initialWidget: WidgetConfig
+  available: AvailableValues
+  top: number
+  resolvedPeriod: ResolvedPeriod | null
+  onApply: (draft: WidgetConfig) => void
+  onClose: () => void
+}) {
+  const [widgetDraft, setWidgetDraft] = useState<WidgetConfig>(() => cloneWidget(initialWidget))
+
+  function updateWidgetDraft(patch: Partial<WidgetConfig>) {
+    setWidgetDraft((current) => ({ ...current, ...patch }))
+  }
+
+  const followsView = widgetFollowsViewPeriod(widgetDraft, resolvedPeriod)
+  const shownDraft = followsView ? applyResolvedPeriod(widgetDraft, resolvedPeriod) : widgetDraft
+
+  return (
+    <aside
+      className="fixed right-6 z-50 w-[390px] overflow-auto rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl"
+      style={{ top: `${top}px`, maxHeight: `calc(100vh - ${top + 24}px)` }}
+    >
+      <div className="space-y-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-black">Configurer le widget</h2>
+            <p className="text-xs text-slate-500">{widgetDraft.title}</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => onApply(widgetDraft)} className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-black text-white hover:bg-blue-700">OK</button>
+            <button type="button" onClick={() => setWidgetDraft(cloneWidget(initialWidget))} className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-black hover:bg-slate-50">Annuler</button>
+            <button type="button" onClick={onClose} className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-black hover:bg-slate-50">×</button>
+          </div>
+        </div>
+
+        <label className="block">
+          <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Titre</span>
+          <input value={widgetDraft.title} onChange={(e) => updateWidgetDraft({ title: e.target.value })} className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-semibold outline-none focus:border-blue-500" />
+        </label>
+
+        <div className="grid grid-cols-2 gap-3">
+          <SelectField label="Type" value={widgetDraft.type} onChange={(v) => updateWidgetDraft({ type: v as WidgetType })} options={WIDGET_CATALOG.map(([value, label]) => ({ value, label }))} />
+          <SelectField label="Taille" value={widgetDraft.size} onChange={(v) => updateWidgetDraft({ size: v as SizeKey })} options={[
+            { value: 'small', label: 'Petit' },
+            { value: 'medium', label: 'Moyen' },
+            { value: 'large', label: 'Large' },
+            { value: 'full', label: 'Pleine largeur' },
+          ]} />
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <SelectField label="Source" value={widgetDraft.source} onChange={(v) => updateWidgetDraft({ source: v as DataSource, localFilters: { ...widgetDraft.localFilters, typesDocument: [] } })} options={[
+            { value: 'factures', label: 'Factures' },
+            { value: 'activite', label: 'Activité' },
+            { value: 'devis', label: 'Devis' },
+            { value: 'mixte', label: 'Mixte' },
+          ]} />
+          <SelectField
+            label="Valeur"
+            value={widgetDraft.measure}
+            onChange={(v) => updateWidgetDraft({ measure: v as MeasureKey })}
+            options={(widgetDraft.type === 'double_bridge' ? MEASURES.filter((m) => ['ca_ht', 'marge_valeur', 'marge_pct'].includes(m.key)) : MEASURES).map((m) => ({ value: m.key, label: m.label }))}
+          />
+        </div>
+
+        <div className="rounded-xl border border-slate-200 p-3">
+          <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Types de documents pris en compte</div>
+          <MultiSelect
+            label="Documents"
+            values={relevantDocumentTypes(widgetDraft.source, available.typesDocument)}
+            selected={widgetDraft.localFilters.typesDocument || []}
+            onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, typesDocument: v } })}
+          />
+          <p className="mt-2 text-[11px] font-semibold text-slate-500">Laissez vide pour garder tous les documents pertinents de la source. En mixte, décochez par exemple CDC ou BR pour les exclure de la valeur.</p>
+        </div>
+
+        <div className="rounded-xl border border-slate-200 p-3">
+          <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Filtre clients propre au widget</div>
+          <div className="grid gap-3">
+            <SelectField label="Mode client" value={widgetDraft.localFilters.clientMode || 'include'} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, clientMode: v as ClientFilterMode } })} options={[{ value: 'include', label: 'Sélectionner uniquement' }, { value: 'exclude', label: 'Exclure les clients' }]} />
+            <MultiSelect label="Numéro tiers / nom client" values={available.clients} selected={widgetDraft.localFilters.clients || []} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, clients: v } })} />
+          </div>
+          <p className="mt-2 text-[11px] font-semibold text-slate-500">Ce filtre s’ajoute aux filtres globaux lorsque le widget utilise les filtres globaux.</p>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <SelectField label="Mesure comparaison" value={widgetDraft.secondMeasure || widgetDraft.measure} onChange={(v) => updateWidgetDraft({ secondMeasure: v as MeasureKey })} options={MEASURES.map((m) => ({ value: m.key, label: m.label }))} />
+          <SelectField label="Évolution" value={widgetDraft.evolutionMode} onChange={(v) => updateWidgetDraft({ evolutionMode: v as EvolutionMode })} options={[{ value: 'none', label: 'Aucune' }, { value: 'percent', label: 'Évolution %' }, { value: 'value', label: 'Évolution valeur' }, { value: 'both', label: 'Valeur + %' }]} />
+        </div>
+
+        {widgetDraft.type !== 'kpi' && widgetDraft.type !== 'tableau' && widgetDraft.type !== 'synthese' && (
+          <>
+            <SelectField label={widgetDraft.type === 'bridge' || widgetDraft.type === 'double_bridge' ? 'Dimension écart' : 'Axe X'} value={widgetDraft.dimension} onChange={(v) => updateWidgetDraft({ dimension: v as DimensionKey })} options={DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))} />
+            {widgetDraft.type !== 'bridge' && widgetDraft.type !== 'double_bridge' && widgetDraft.type !== 'camembert' && (
+              <SelectField label="Série" value={widgetDraft.seriesDimension || ''} onChange={(v) => updateWidgetDraft({ seriesDimension: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
+            )}
+          </>
+        )}
+
+        {(['bridge', 'double_bridge', 'kpi', 'tableau', 'synthese', 'courbe', 'histogramme', 'histogramme_empile'] as WidgetType[]).includes(widgetDraft.type) && (
+          <div className="grid grid-cols-2 gap-3 rounded-xl border border-slate-200 p-3">
+            <div className="col-span-2 text-xs font-black uppercase tracking-wide text-slate-500">Période de calcul / base de comparaison</div>
+              {resolvedPeriod && (
+                <label className="col-span-2 flex items-start gap-2 rounded-lg bg-[#B4761A]/[0.06] p-2 text-xs font-bold text-[#5A4321]">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 accent-[#B4761A]"
+                    checked={followsView}
+                    onChange={(e) => updateWidgetDraft({ periodSource: e.target.checked ? 'vue' : 'widget' })}
+                  />
+                  <span>
+                    Suivre la période dynamique de la vue ({resolvedPeriod.label})
+                    {followsView && !PERIOD_DRIVEN_TYPES.includes(widgetDraft.type) && (
+                      <span className="mt-0.5 block font-semibold text-[#8A8474]">Pour ce graphique, seules les années N / N-1 sont héritées ; Mensuel / Cumul reste un choix d’affichage.</span>
+                    )}
+                  </span>
+                </label>
+              )}
+              {followsView ? (
+                <div className="pointer-events-none col-span-2 grid grid-cols-2 gap-3 opacity-50" title="Valeurs calculées automatiquement par la période dynamique de la vue">
+              <SelectField label="Période" value={shownDraft.periodMode} onChange={(v) => updateWidgetDraft({ periodMode: v as PeriodMode })} options={[{ value: 'mois', label: 'Mois seul' }, { value: 'cumul', label: 'Cumul 01-M' }]} />
+              <SelectField label="Mois" value={shownDraft.bridgeMonth} onChange={(v) => updateWidgetDraft({ bridgeMonth: Number(v) })} options={available.months.map((m) => ({ value: m, label: `${String(m).padStart(2, '0')} - ${monthLabel(m)}` }))} />
+              <SelectField label="Année N" value={shownDraft.yearN || available.years[0] || CURRENT_YEAR} onChange={(v) => updateWidgetDraft({ yearN: Number(v) })} options={available.years.map((y) => ({ value: y, label: String(y) }))} />
+              <SelectField label="Année N-1" value={shownDraft.yearN1 || (shownDraft.yearN || CURRENT_YEAR) - 1} onChange={(v) => updateWidgetDraft({ yearN1: Number(v) })} options={available.years.map((y) => ({ value: y, label: String(y) }))} />
+                </div>
+              ) : (
+                <>
+              <SelectField label="Période" value={widgetDraft.periodMode} onChange={(v) => updateWidgetDraft({ periodMode: v as PeriodMode })} options={[{ value: 'mois', label: 'Mois seul' }, { value: 'cumul', label: 'Cumul 01-M' }]} />
+              <SelectField label="Mois" value={widgetDraft.bridgeMonth} onChange={(v) => updateWidgetDraft({ bridgeMonth: Number(v) })} options={available.months.map((m) => ({ value: m, label: `${String(m).padStart(2, '0')} - ${monthLabel(m)}` }))} />
+              <SelectField label="Année N" value={widgetDraft.yearN || available.years[0] || CURRENT_YEAR} onChange={(v) => updateWidgetDraft({ yearN: Number(v) })} options={available.years.map((y) => ({ value: y, label: String(y) }))} />
+              <SelectField label="Année N-1" value={widgetDraft.yearN1 || (widgetDraft.yearN || CURRENT_YEAR) - 1} onChange={(v) => updateWidgetDraft({ yearN1: Number(v) })} options={available.years.map((y) => ({ value: y, label: String(y) }))} />
+                </>
+              )}
+          </div>
+        )}
+
+        {widgetDraft.type === 'tableau' && (
+          <div className="grid grid-cols-2 gap-3">
+            <SelectField label="Lignes 1" value={widgetDraft.rowDimension} onChange={(v) => updateWidgetDraft({ rowDimension: v as DimensionKey })} options={DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))} />
+            <SelectField label="Lignes 2" value={widgetDraft.rowDimension2 || ''} onChange={(v) => updateWidgetDraft({ rowDimension2: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
+            <SelectField label="Colonnes 1" value={widgetDraft.columnDimension} onChange={(v) => updateWidgetDraft({ columnDimension: v as DimensionKey })} options={DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))} />
+            <SelectField label="Colonnes 2" value={widgetDraft.columnDimension2 || ''} onChange={(v) => updateWidgetDraft({ columnDimension2: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
+            <div className="col-span-2 rounded-xl border border-slate-200 p-3">
+              <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Valeurs affichées dans chaque colonne</div>
+              <div className="grid grid-cols-2 gap-2">
+                {MEASURES.map((measure) => {
+                  const selected = (widgetDraft.tableMeasures || [widgetDraft.measure]).includes(measure.key)
+                  return (
+                    <label key={measure.key} className="flex items-center gap-2 rounded-lg bg-slate-50 px-2 py-1 text-xs font-bold text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={(e) => {
+                          const current = widgetDraft.tableMeasures || [widgetDraft.measure]
+                          const next = e.target.checked ? Array.from(new Set([...current, measure.key])) : current.filter((m) => m !== measure.key)
+                          updateWidgetDraft({ tableMeasures: next.length ? next : [widgetDraft.measure] })
+                        }}
+                      />
+                      {measure.label}
+                    </label>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 gap-3">
+          <SelectField label="Tri" value={widgetDraft.sortMode} onChange={(v) => updateWidgetDraft({ sortMode: v as SortMode })} options={[
+            { value: 'value_desc', label: 'Valeur décroissante' },
+            { value: 'value_asc', label: 'Valeur croissante' },
+            { value: 'label_asc', label: 'Libellé A-Z' },
+          ]} />
+          <label className="block">
+            <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Top N</span>
+            <input type="number" min={1} max={100} value={widgetDraft.topN} onChange={(e) => updateWidgetDraft({ topN: Number(e.target.value || 10) })} className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-semibold outline-none focus:border-blue-500" />
+          </label>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <SelectField
+            label="Mode comparaison"
+            value={widgetDraft.compareMode === 'dimension' && widgetDraft.type === 'double_bridge' ? 'year' : widgetDraft.compareMode}
+            onChange={(v) => updateWidgetDraft({ compareMode: v as CompareMode })}
+            options={widgetDraft.type === 'double_bridge'
+              ? [{ value: 'year', label: 'Année précédente → année N' }, { value: 'month', label: 'Mois M → mois M+1' }]
+              : [{ value: 'year', label: 'Année / période' }, { value: 'month', label: 'Mois' }, { value: 'dimension', label: 'Autre dimension' }]}
+          />
+          {widgetDraft.type !== 'double_bridge' && (
+            <>
+              <SelectField label="Dimension comparaison" value={widgetDraft.compareDimension || ''} onChange={(v) => updateWidgetDraft({ compareDimension: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
+              <label className="block col-span-2">
+                <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Valeur comparaison dimension</span>
+                <input value={widgetDraft.compareValue || ''} onChange={(e) => updateWidgetDraft({ compareValue: e.target.value })} placeholder="Ex : ANGLET, PV, 2025..." className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-semibold outline-none focus:border-blue-500" />
+              </label>
+            </>
+          )}
+          {widgetDraft.type === 'histogramme_empile' && (
+            <label className="col-span-2 flex items-center gap-2 rounded-xl bg-slate-50 p-3 text-sm font-bold text-slate-700">
+              <input type="checkbox" checked={widgetDraft.stacked100} onChange={(e) => updateWidgetDraft({ stacked100: e.target.checked })} />
+              Afficher en base 100
+            </label>
+          )}
+        </div>
+
+        <label className="flex items-center gap-2 rounded-xl bg-slate-50 p-3 text-sm font-bold text-slate-700">
+          <input type="checkbox" checked={widgetDraft.useGlobalFilters} onChange={(e) => updateWidgetDraft({ useGlobalFilters: e.target.checked })} />
+          Utiliser les filtres globaux
+        </label>
+
+        <div className="rounded-xl border border-slate-200 p-3">
+          <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Filtres propres au widget</div>
+          <div className="grid gap-2">
+            <MultiSelect label="Année" values={available.years.map(String)} selected={(widgetDraft.localFilters.years || []).map(String)} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, years: v.map(Number) } })} />
+            <MultiSelect label="Mois" values={available.months.map((m) => `${m} - ${monthLabel(m)}`)} selected={(widgetDraft.localFilters.months || []).map((m) => `${m} - ${monthLabel(m)}`)} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, months: v.map((x) => Number(x.split(' - ')[0])) } })} />
+            <MultiSelect label="Agence" values={available.agences} selected={widgetDraft.localFilters.agences || []} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, agences: v } })} />
+            <MultiSelect label="Dépôt" values={available.depots} selected={widgetDraft.localFilters.depots || []} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, depots: v } })} />
+            <MultiSelect label="Collab. facture" values={available.collaborateursFacture} selected={widgetDraft.localFilters.collaborateursFacture || widgetDraft.localFilters.collaborateurs || []} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, collaborateursFacture: v, collaborateurs: v } })} />
+            <MultiSelect label="Collab. tiers" values={available.collaborateursTiers} selected={widgetDraft.localFilters.collaborateursTiers || []} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, collaborateursTiers: v } })} />
+            <MultiSelect label="Dépt tiers" values={available.departementsTiers} selected={widgetDraft.localFilters.departementsTiers || []} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, departementsTiers: v } })} />
+            <MultiSelect label="Famille macro" values={available.famillesMacro} selected={widgetDraft.localFilters.famillesMacro || []} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, famillesMacro: v } })} />
+          </div>
+        </div>
+      </div>
+    </aside>
+  )
+}
+
 export default function AtelierAnalysePage() {
   const [rows, setRows] = useState<StudioRow[]>([])
   const [availableYearsAllTime, setAvailableYearsAllTime] = useState<number[]>([])
@@ -2514,9 +3030,23 @@ export default function AtelierAnalysePage() {
   const [maintenanceLoading, setMaintenanceLoading] = useState(false)
   const [maintenanceMessage, setMaintenanceMessage] = useState<string | null>(null)
   const [showMaintenancePanel, setShowMaintenancePanel] = useState(false)
-  const [widgetDraft, setWidgetDraft] = useState<WidgetConfig | null>(null)
   const [lastBusinessDates, setLastBusinessDates] = useState<LastBusinessDates>(EMPTY_LAST_BUSINESS_DATES)
   const aiTextareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const [today] = useState(() => new Date())
+
+  // Période dynamique : recalculée à chaque ouverture de la page à partir de la date du jour.
+  // La vue enregistre la règle (ex. « janv. → dernier mois complet, 2 ans »), pas les mois figés.
+  const dynamicMode = globalFilters.dynamicPeriod?.mode || 'none'
+  const dynamicYearsCount = globalFilters.dynamicPeriod?.yearsCount || 2
+  const dynamicMonthsCount = globalFilters.dynamicPeriod?.monthsCount || 6
+  const resolvedPeriod = useMemo(
+    () => resolveDynamicPeriod({ mode: dynamicMode, yearsCount: dynamicYearsCount, monthsCount: dynamicMonthsCount }, today),
+    [dynamicMode, dynamicYearsCount, dynamicMonthsCount, today]
+  )
+  const effectiveFilters = useMemo<GlobalFilters>(
+    () => resolvedPeriod ? { ...globalFilters, years: resolvedPeriod.years, months: resolvedPeriod.months } : globalFilters,
+    [globalFilters, resolvedPeriod]
+  )
 
 
   function formatDateForSql(date: Date) {
@@ -2593,8 +3123,8 @@ export default function AtelierAnalysePage() {
         if (applyError) throw new Error(`apply_bl_mx_month_mode_activite : ${applyError.message}`)
 
         setMaintenanceMessage('Mode BL M-x appliqué. Rechargement de l’atelier…')
-        await loadData(globalFilters)
-        await loadLastBusinessDates(globalFilters)
+        await loadData(effectiveFilters)
+        await loadLastBusinessDates(effectiveFilters)
         setMaintenanceMessage(`BL M-x → ${blMxMode === 'previous_month' ? 'M-1' : 'M'} appliqué.`)
         return
       }
@@ -2607,8 +3137,8 @@ export default function AtelierAnalysePage() {
       await runRpcForPeriods('rebuild_indicateur_activite_mensuel_periode', periods, 'Agrégat activité')
       await runRpcForPeriods('rebuild_indicateur_flux_articles_mensuel_periode', periods, 'Flux articles')
       setMaintenanceMessage('Rebuild terminé. Rechargement de l’atelier…')
-      await loadData(globalFilters)
-      await loadLastBusinessDates(globalFilters)
+      await loadData(effectiveFilters)
+      await loadLastBusinessDates(effectiveFilters)
       setMaintenanceMessage(`Rebuild ${monthCount} mois terminé.`)
     } catch (exception: any) {
       setError(`Rebuild impossible : ${exception?.message || exception}`)
@@ -2741,14 +3271,14 @@ export default function AtelierAnalysePage() {
 
   useEffect(() => {
     if (!savedViewBootstrapped) return
-    loadData(globalFilters)
-    loadLastBusinessDates(globalFilters)
+    loadData(effectiveFilters)
+    loadLastBusinessDates(effectiveFilters)
     // Le chargement serveur est recalé seulement quand le périmètre volumétrique change.
     // Les autres filtres restent appliqués instantanément côté navigateur.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    JSON.stringify(globalFilters.sources),
-    JSON.stringify(globalFilters.years),
+    JSON.stringify(effectiveFilters.sources),
+    JSON.stringify(effectiveFilters.years),
     globalFilters.horsStatistique,
     savedViewBootstrapped,
   ])
@@ -2785,24 +3315,18 @@ export default function AtelierAnalysePage() {
   const selectedWidget = selectedWidgetId ? widgets.find((w) => w.id === selectedWidgetId) || null : null
   const lastBusinessDatesLabel = useMemo(() => formatLastBusinessDatesLabel(lastBusinessDates), [lastBusinessDates])
 
-  useEffect(() => {
-    setWidgetDraft(selectedWidget ? JSON.parse(JSON.stringify(selectedWidget)) : null)
-  }, [selectedWidgetId])
-
-  function updateWidget(id: string, patch: Partial<WidgetConfig>) {
+  // Callbacks stables (useCallback) : indispensables pour que les WidgetCard mémoïsées ne se re-rendent pas.
+  const updateWidget = useCallback((id: string, patch: Partial<WidgetConfig>) => {
     setWidgets((prev) => prev.map((w) => w.id === id ? { ...w, ...patch } : w))
-  }
+  }, [])
 
-  function updateWidgetDraft(patch: Partial<WidgetConfig>) {
-    setWidgetDraft((current) => current ? { ...current, ...patch } : current)
-  }
-
-  function applyWidgetDraft() {
-    if (!widgetDraft) return
-    updateWidget(widgetDraft.id, widgetDraft)
+  const applyWidgetDraft = useCallback((draft: WidgetConfig) => {
+    setWidgets((prev) => prev.map((w) => w.id === draft.id ? draft : w))
     setSelectedWidgetId(null)
-    setSaveMessage(`Paramétrage appliqué : ${widgetDraft.title}`)
-  }
+    setSaveMessage(`Paramétrage appliqué : ${draft.title}`)
+  }, [])
+
+  const closeWidgetConfig = useCallback(() => setSelectedWidgetId(null), [])
 
   function addWidget(type: WidgetType) {
     const widget = buildDefaultWidget(type, available.years)
@@ -2812,18 +3336,22 @@ export default function AtelierAnalysePage() {
     setConfigPanelTop(120)
   }
 
-  function removeWidget(id: string) {
+  const removeWidget = useCallback((id: string) => {
     setWidgets((prev) => prev.filter((w) => w.id !== id))
-    if (selectedWidgetId === id) setSelectedWidgetId(null)
-  }
+    setSelectedWidgetId((current) => current === id ? null : current)
+  }, [])
 
-  function duplicateWidget(widget: WidgetConfig) {
-    const copy = { ...widget, id: uid(), title: `${widget.title} - copie` }
-    setWidgets((prev) => [...prev, copy])
-    setSelectedWidgetId(copy.id)
-  }
+  const duplicateWidget = useCallback((id: string) => {
+    const newId = uid()
+    setWidgets((prev) => {
+      const source = prev.find((w) => w.id === id)
+      if (!source) return prev
+      return [...prev, { ...cloneWidget(source), id: newId, title: `${source.title} - copie` }]
+    })
+    setSelectedWidgetId(newId)
+  }, [])
 
-  function moveWidget(id: string, direction: -1 | 1) {
+  const moveWidget = useCallback((id: string, direction: -1 | 1) => {
     setWidgets((prev) => {
       const index = prev.findIndex((w) => w.id === id)
       const target = index + direction
@@ -2833,7 +3361,7 @@ export default function AtelierAnalysePage() {
       copy.splice(target, 0, item)
       return copy
     })
-  }
+  }, [])
 
   async function saveView() {
     setSaveMessage(null)
@@ -2880,25 +3408,15 @@ export default function AtelierAnalysePage() {
     setSaveMessage('Vue dupliquée. Modifiez les filtres ou widgets puis cliquez sur Enregistrer la vue.')
   }
 
-  const widgetCatalog: Array<[WidgetType, string, string]> = [
-    ['kpi', 'KPI', 'Indicateur simple'],
-    ['histogramme', 'Histogramme', 'Barres verticales'],
-    ['histogramme_empile', 'Histogramme empilé', 'Valeur ou base 100'],
-    ['courbe', 'Courbe', 'Évolution mensuelle ou cumulée'],
-    ['bridge', 'Bridge', 'Écart N-1 ⇒ N'],
-    ['double_bridge', 'Double bridge', 'Mix puis performance'],
-    ['tableau', 'Tableau croisé', 'Lignes / colonnes / valeurs'],
-    ['synthese', 'Tableau synthèse', 'Mois + cumul + total'],
-    ['camembert', 'Camembert', 'Répartition'],
-  ]
+  const widgetCatalog = WIDGET_CATALOG
 
-  function openWidgetConfig(widgetId: string, event: any) {
+  const openWidgetConfig = useCallback((widgetId: string, event: any) => {
     const section = event?.currentTarget?.closest?.('section') as HTMLElement | null
     const rect = section?.getBoundingClientRect?.()
     const top = rect ? Math.min(Math.max(16, rect.top), Math.max(16, window.innerHeight - 260)) : 120
     setConfigPanelTop(top)
     setSelectedWidgetId(widgetId)
-  }
+  }, [])
 
   function isWidgetType(value: any): value is WidgetType {
     return widgetCatalog.some(([type]) => type === value)
@@ -2958,11 +3476,11 @@ export default function AtelierAnalysePage() {
   }
 
   function getActiveTemporalContext() {
-    const selectedYears = (globalFilters.years || [])
+    const selectedYears = (effectiveFilters.years || [])
       .map(Number)
       .filter((value) => Number.isFinite(value))
       .sort((a, b) => a - b)
-    const selectedMonths = (globalFilters.months || [])
+    const selectedMonths = (effectiveFilters.months || [])
       .map(Number)
       .filter((value) => Number.isFinite(value) && value >= 1 && value <= 12)
       .sort((a, b) => a - b)
@@ -2973,7 +3491,7 @@ export default function AtelierAnalysePage() {
     const bridgeMonth = selectedMonths.length
       ? Math.max(...selectedMonths)
       : (selectedWidget?.bridgeMonth || Math.max(1, Math.min(12, CURRENT_MONTH)))
-    const periodMode: PeriodMode = selectedMonths.length === 1 ? 'mois' : (selectedMonths.length > 1 ? 'cumul' : (selectedWidget?.periodMode || 'cumul'))
+    const periodMode: PeriodMode = resolvedPeriod ? resolvedPeriod.periodMode : selectedMonths.length === 1 ? 'mois' : (selectedMonths.length > 1 ? 'cumul' : (selectedWidget?.periodMode || 'cumul'))
 
     return {
       selectedYears,
@@ -3093,7 +3611,7 @@ export default function AtelierAnalysePage() {
       const payload = {
         question,
         currentViewName: viewName,
-        globalFilters,
+        globalFilters: effectiveFilters,
         selectedWidget,
         widgets: widgets.map((widget) => ({
           id: widget.id,
@@ -3164,12 +3682,31 @@ export default function AtelierAnalysePage() {
 
 
 
-  // Recalculé uniquement quand widgets, rows ou globalFilters changent réellement —
-  // pas à chaque render de la page (ex. ouvrir un panneau, taper dans un champ non lié).
-  const widgetsWithRows = useMemo(
-    () => widgets.map((widget) => ({ widget, rows: applyWidgetFilters(rows, widget, globalFilters) })),
-    [widgets, rows, globalFilters]
-  )
+  // 1) Filtres globaux appliqués UNE fois pour toute la page (et non une fois par widget).
+  //    useDeferredValue : le clic sur un filtre reste instantané, les widgets se recalculent juste après.
+  const deferredFilters = useDeferredValue(effectiveFilters)
+  const globallyFilteredRows = useMemo(() => applyGlobalFilters(rows, deferredFilters), [rows, deferredFilters])
+
+  // 2) Filtres propres à chaque widget mis en cache : si un widget change, seuls SES lignes sont refiltrées,
+  //    et le tableau de lignes des autres widgets garde la même référence (=> pas de recalcul grâce à memo).
+  const widgetRowsCache = useRef(new Map<string, { key: string; base: StudioRow[]; rows: StudioRow[] }>())
+  const widgetsWithRows = useMemo(() => {
+    const cache = widgetRowsCache.current
+    const alive = new Set<string>()
+    const result = widgets.map((widget) => {
+      alive.add(widget.id)
+      const base = widget.useGlobalFilters ? globallyFilteredRows : rows
+      const key = JSON.stringify([widget.source, widget.localFilters || {}])
+      const cached = cache.get(widget.id)
+      if (cached && cached.base === base && cached.key === key) return { widget, rows: cached.rows }
+      const widgetRows = applyLocalWidgetFilters(base, widget)
+      cache.set(widget.id, { key, base, rows: widgetRows })
+      return { widget, rows: widgetRows }
+    })
+    cache.forEach((_value, id) => { if (!alive.has(id)) cache.delete(id) })
+    return result
+  }, [widgets, rows, globallyFilteredRows])
+  const widgetsRecomputing = deferredFilters !== effectiveFilters
 
   return (
     <main className="min-h-screen bg-[#F4F3F0] p-6 text-[#111820]" style={{ fontFeatureSettings: '"tnum"' }}>
@@ -3213,7 +3750,7 @@ export default function AtelierAnalysePage() {
               </button>
               <button
                 type="button"
-                onClick={async () => { await loadData(globalFilters); await loadLastBusinessDates(globalFilters) }}
+                onClick={async () => { await loadData(effectiveFilters); await loadLastBusinessDates(effectiveFilters) }}
                 disabled={loading}
                 className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-4 text-sm font-bold text-[#3A362E] hover:bg-[#F4F3F0] disabled:cursor-not-allowed disabled:opacity-40"
               >
@@ -3261,8 +3798,17 @@ export default function AtelierAnalysePage() {
           <div className="mb-3 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Filtres</div>
           <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-10">
           <MultiSelect label="Source" values={['factures', 'activite', 'devis', 'mixte']} selected={globalFilters.sources} onChange={(v) => setGlobalFilters((p) => ({ ...p, sources: v as DataSource[] }))} />
-          <MultiSelect label="Année" values={available.years.map(String)} selected={globalFilters.years.map(String)} onChange={(v) => setGlobalFilters((p) => ({ ...p, years: v.map(Number) }))} />
-          <MultiSelect label="Mois" values={available.months.map((m) => `${m} - ${monthLabel(m)}`)} selected={globalFilters.months.map((m) => `${m} - ${monthLabel(m)}`)} onChange={(v) => setGlobalFilters((p) => ({ ...p, months: v.map((x) => Number(x.split(' - ')[0])) }))} />
+          <FilterSelect
+            label="Période"
+            value={dynamicMode}
+            onChange={(v) => setGlobalFilters((p) => ({
+              ...p,
+              dynamicPeriod: { yearsCount: 2, monthsCount: 6, ...(p.dynamicPeriod || {}), mode: v as DynamicPeriodMode },
+            }))}
+            options={DYNAMIC_PERIOD_OPTIONS}
+          />
+          <MultiSelect label="Année" values={available.years.map(String)} selected={effectiveFilters.years.map(String)} onChange={(v) => setGlobalFilters((p) => ({ ...p, years: v.map(Number) }))} locked={!!resolvedPeriod} lockedHint="Années calculées par la période dynamique" />
+          <MultiSelect label="Mois" values={available.months.map((m) => `${m} - ${monthLabel(m)}`)} selected={effectiveFilters.months.map((m) => `${m} - ${monthLabel(m)}`)} onChange={(v) => setGlobalFilters((p) => ({ ...p, months: v.map((x) => Number(x.split(' - ')[0])) }))} locked={!!resolvedPeriod} lockedHint="Mois calculés par la période dynamique" />
           <MultiSelect label="Agence" values={available.agences} selected={globalFilters.agences} onChange={(v) => setGlobalFilters((p) => ({ ...p, agences: v }))} locked={scopeLocked && userScope.allowedAgences.length > 0} />
           <MultiSelect label="Dépôt" values={available.depots} selected={globalFilters.depots || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, depots: v }))} />
           <MultiSelect label="Collab. facture" values={available.collaborateursFacture} selected={globalFilters.collaborateursFacture || []} onChange={(v) => setGlobalFilters((p) => ({ ...p, collaborateursFacture: v, collaborateurs: v }))} />
@@ -3276,6 +3822,36 @@ export default function AtelierAnalysePage() {
             onChange={(v) => setGlobalFilters((p) => ({ ...p, horsStatistique: v as GlobalFilters['horsStatistique'] }))}
             options={[{ value: 'non', label: 'Exclu' }, { value: 'oui', label: 'Uniquement' }, { value: 'tous', label: 'Tous' }]}
           />
+
+          {resolvedPeriod && (
+            <div className="md:col-span-2 xl:col-span-10 flex flex-wrap items-center gap-3 rounded-lg border border-[#B4761A]/30 bg-[#B4761A]/[0.06] px-3 py-2 text-[13px] font-semibold text-[#5A4321]">
+              <span aria-hidden>⟳</span>
+              <span>Période dynamique : <b>{resolvedPeriod.label}</b></span>
+              <label className="flex items-center gap-2">
+                <span className="text-xs text-[#8A8474]">Années comparées</span>
+                <select
+                  value={dynamicYearsCount}
+                  onChange={(e) => setGlobalFilters((p) => ({ ...p, dynamicPeriod: { ...(p.dynamicPeriod || DEFAULT_FILTERS.dynamicPeriod!), yearsCount: Number(e.target.value) } }))}
+                  className="h-8 rounded-md border border-[#E5E1D8] bg-white px-2 text-xs font-bold"
+                >
+                  {[1, 2, 3, 4].map((n) => <option key={n} value={n}>{n === 1 ? 'N seul' : `N à N-${n - 1}`}</option>)}
+                </select>
+              </label>
+              {dynamicMode === 'first_n_months' && (
+                <label className="flex items-center gap-2">
+                  <span className="text-xs text-[#8A8474]">Nombre de mois</span>
+                  <select
+                    value={dynamicMonthsCount}
+                    onChange={(e) => setGlobalFilters((p) => ({ ...p, dynamicPeriod: { ...(p.dynamicPeriod || DEFAULT_FILTERS.dynamicPeriod!), monthsCount: Number(e.target.value) } }))}
+                    className="h-8 rounded-md border border-[#E5E1D8] bg-white px-2 text-xs font-bold"
+                  >
+                    {Array.from({ length: 12 }, (_v, i) => i + 1).map((n) => <option key={n} value={n}>{n} mois</option>)}
+                  </select>
+                </label>
+              )}
+              <span className="text-xs font-medium text-[#8A8474]">Enregistrée avec la vue : les mois et années se recalculent automatiquement à chaque ouverture. Les widgets suivent cette période sauf s’ils sont figés.</span>
+            </div>
+          )}
 
           <button
             type="button"
@@ -3439,207 +4015,37 @@ export default function AtelierAnalysePage() {
               <p className="mt-2 text-sm text-[#8A8474]">Utilise le bouton « + Ajouter un widget » ci-dessus.</p>
             </div>
           ) : (
-            <div className="grid grid-cols-1 gap-3 xl:grid-cols-4">
+            <div className={`grid grid-cols-1 gap-3 transition-opacity xl:grid-cols-4 ${widgetsRecomputing ? 'opacity-60' : ''}`}>
               {widgetsWithRows.map(({ widget, rows: widgetRows }) => {
                 return (
-                  <WidgetShell
+                  <WidgetCard
                     key={widget.id}
                     widget={widget}
-                    selected={selectedWidget?.id === widget.id}
-                    onConfigure={(event) => openWidgetConfig(widget.id, event)}
-                    onRemove={() => removeWidget(widget.id)}
-                    onDuplicate={() => duplicateWidget(widget)}
-                    onMove={(direction) => moveWidget(widget.id, direction)}
-                  >
-                    <WidgetRenderer rows={widgetRows} widget={widget} onUpdate={(patch) => updateWidget(widget.id, patch)} />
-                  </WidgetShell>
+                    rows={widgetRows}
+                    selected={selectedWidgetId === widget.id}
+                    resolvedPeriod={resolvedPeriod}
+                    onConfigure={openWidgetConfig}
+                    onRemove={removeWidget}
+                    onDuplicate={duplicateWidget}
+                    onMove={moveWidget}
+                    onUpdate={updateWidget}
+                  />
                 )
               })}
             </div>
           )}
         </section>
 
-        {widgetDraft && widgetDraft && (
-          <aside
-            className="fixed right-6 z-50 w-[390px] overflow-auto rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl"
-            style={{ top: `${configPanelTop}px`, maxHeight: `calc(100vh - ${configPanelTop + 24}px)` }}
-          >
-            <div className="space-y-4">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h2 className="text-lg font-black">Configurer le widget</h2>
-                  <p className="text-xs text-slate-500">{widgetDraft.title}</p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button type="button" onClick={applyWidgetDraft} className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-black text-white hover:bg-blue-700">OK</button>
-                  <button type="button" onClick={() => setWidgetDraft(selectedWidget ? JSON.parse(JSON.stringify(selectedWidget)) : null)} className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-black hover:bg-slate-50">Annuler</button>
-                  <button type="button" onClick={() => setSelectedWidgetId(null)} className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-black hover:bg-slate-50">×</button>
-                </div>
-              </div>
-
-              <label className="block">
-                <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Titre</span>
-                <input value={widgetDraft.title} onChange={(e) => updateWidgetDraft({ title: e.target.value })} className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-semibold outline-none focus:border-blue-500" />
-              </label>
-
-              <div className="grid grid-cols-2 gap-3">
-                <SelectField label="Type" value={widgetDraft.type} onChange={(v) => updateWidgetDraft({ type: v as WidgetType })} options={widgetCatalog.map(([value, label]) => ({ value, label }))} />
-                <SelectField label="Taille" value={widgetDraft.size} onChange={(v) => updateWidgetDraft({ size: v as SizeKey })} options={[
-                  { value: 'small', label: 'Petit' },
-                  { value: 'medium', label: 'Moyen' },
-                  { value: 'large', label: 'Large' },
-                  { value: 'full', label: 'Pleine largeur' },
-                ]} />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <SelectField label="Source" value={widgetDraft.source} onChange={(v) => updateWidgetDraft({ source: v as DataSource, localFilters: { ...widgetDraft.localFilters, typesDocument: [] } })} options={[
-                  { value: 'factures', label: 'Factures' },
-                  { value: 'activite', label: 'Activité' },
-                  { value: 'devis', label: 'Devis' },
-                  { value: 'mixte', label: 'Mixte' },
-                ]} />
-                <SelectField
-                  label="Valeur"
-                  value={widgetDraft.measure}
-                  onChange={(v) => updateWidgetDraft({ measure: v as MeasureKey })}
-                  options={(widgetDraft.type === 'double_bridge' ? MEASURES.filter((m) => ['ca_ht', 'marge_valeur', 'marge_pct'].includes(m.key)) : MEASURES).map((m) => ({ value: m.key, label: m.label }))}
-                />
-              </div>
-
-              <div className="rounded-xl border border-slate-200 p-3">
-                <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Types de documents pris en compte</div>
-                <MultiSelect
-                  label="Documents"
-                  values={relevantDocumentTypes(widgetDraft.source, available.typesDocument)}
-                  selected={widgetDraft.localFilters.typesDocument || []}
-                  onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, typesDocument: v } })}
-                />
-                <p className="mt-2 text-[11px] font-semibold text-slate-500">Laissez vide pour garder tous les documents pertinents de la source. En mixte, décochez par exemple CDC ou BR pour les exclure de la valeur.</p>
-              </div>
-
-              <div className="rounded-xl border border-slate-200 p-3">
-                <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Filtre clients propre au widget</div>
-                <div className="grid gap-3">
-                  <SelectField label="Mode client" value={widgetDraft.localFilters.clientMode || 'include'} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, clientMode: v as ClientFilterMode } })} options={[{ value: 'include', label: 'Sélectionner uniquement' }, { value: 'exclude', label: 'Exclure les clients' }]} />
-                  <MultiSelect label="Numéro tiers / nom client" values={available.clients} selected={widgetDraft.localFilters.clients || []} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, clients: v } })} />
-                </div>
-                <p className="mt-2 text-[11px] font-semibold text-slate-500">Ce filtre s’ajoute aux filtres globaux lorsque le widget utilise les filtres globaux.</p>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <SelectField label="Mesure comparaison" value={widgetDraft.secondMeasure || widgetDraft.measure} onChange={(v) => updateWidgetDraft({ secondMeasure: v as MeasureKey })} options={MEASURES.map((m) => ({ value: m.key, label: m.label }))} />
-                <SelectField label="Évolution" value={widgetDraft.evolutionMode} onChange={(v) => updateWidgetDraft({ evolutionMode: v as EvolutionMode })} options={[{ value: 'none', label: 'Aucune' }, { value: 'percent', label: 'Évolution %' }, { value: 'value', label: 'Évolution valeur' }, { value: 'both', label: 'Valeur + %' }]} />
-              </div>
-
-              {widgetDraft.type !== 'kpi' && widgetDraft.type !== 'tableau' && widgetDraft.type !== 'synthese' && (
-                <>
-                  <SelectField label={widgetDraft.type === 'bridge' || widgetDraft.type === 'double_bridge' ? 'Dimension écart' : 'Axe X'} value={widgetDraft.dimension} onChange={(v) => updateWidgetDraft({ dimension: v as DimensionKey })} options={DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))} />
-                  {widgetDraft.type !== 'bridge' && widgetDraft.type !== 'double_bridge' && widgetDraft.type !== 'camembert' && (
-                    <SelectField label="Série" value={widgetDraft.seriesDimension || ''} onChange={(v) => updateWidgetDraft({ seriesDimension: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
-                  )}
-                </>
-              )}
-
-              {(['bridge', 'double_bridge', 'kpi', 'tableau', 'synthese', 'courbe', 'histogramme', 'histogramme_empile'] as WidgetType[]).includes(widgetDraft.type) && (
-                <div className="grid grid-cols-2 gap-3 rounded-xl border border-slate-200 p-3">
-                  <div className="col-span-2 text-xs font-black uppercase tracking-wide text-slate-500">Période de calcul / base de comparaison</div>
-                  <SelectField label="Période" value={widgetDraft.periodMode} onChange={(v) => updateWidgetDraft({ periodMode: v as PeriodMode })} options={[{ value: 'mois', label: 'Mois seul' }, { value: 'cumul', label: 'Cumul 01-M' }]} />
-                  <SelectField label="Mois" value={widgetDraft.bridgeMonth} onChange={(v) => updateWidgetDraft({ bridgeMonth: Number(v) })} options={available.months.map((m) => ({ value: m, label: `${String(m).padStart(2, '0')} - ${monthLabel(m)}` }))} />
-                  <SelectField label="Année N" value={widgetDraft.yearN || available.years[0] || CURRENT_YEAR} onChange={(v) => updateWidgetDraft({ yearN: Number(v) })} options={available.years.map((y) => ({ value: y, label: String(y) }))} />
-                  <SelectField label="Année N-1" value={widgetDraft.yearN1 || (widgetDraft.yearN || CURRENT_YEAR) - 1} onChange={(v) => updateWidgetDraft({ yearN1: Number(v) })} options={available.years.map((y) => ({ value: y, label: String(y) }))} />
-                </div>
-              )}
-
-              {widgetDraft.type === 'tableau' && (
-                <div className="grid grid-cols-2 gap-3">
-                  <SelectField label="Lignes 1" value={widgetDraft.rowDimension} onChange={(v) => updateWidgetDraft({ rowDimension: v as DimensionKey })} options={DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))} />
-                  <SelectField label="Lignes 2" value={widgetDraft.rowDimension2 || ''} onChange={(v) => updateWidgetDraft({ rowDimension2: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
-                  <SelectField label="Colonnes 1" value={widgetDraft.columnDimension} onChange={(v) => updateWidgetDraft({ columnDimension: v as DimensionKey })} options={DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))} />
-                  <SelectField label="Colonnes 2" value={widgetDraft.columnDimension2 || ''} onChange={(v) => updateWidgetDraft({ columnDimension2: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
-                  <div className="col-span-2 rounded-xl border border-slate-200 p-3">
-                    <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Valeurs affichées dans chaque colonne</div>
-                    <div className="grid grid-cols-2 gap-2">
-                      {MEASURES.map((measure) => {
-                        const selected = (widgetDraft.tableMeasures || [widgetDraft.measure]).includes(measure.key)
-                        return (
-                          <label key={measure.key} className="flex items-center gap-2 rounded-lg bg-slate-50 px-2 py-1 text-xs font-bold text-slate-700">
-                            <input
-                              type="checkbox"
-                              checked={selected}
-                              onChange={(e) => {
-                                const current = widgetDraft.tableMeasures || [widgetDraft.measure]
-                                const next = e.target.checked ? Array.from(new Set([...current, measure.key])) : current.filter((m) => m !== measure.key)
-                                updateWidgetDraft({ tableMeasures: next.length ? next : [widgetDraft.measure] })
-                              }}
-                            />
-                            {measure.label}
-                          </label>
-                        )
-                      })}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              <div className="grid grid-cols-2 gap-3">
-                <SelectField label="Tri" value={widgetDraft.sortMode} onChange={(v) => updateWidgetDraft({ sortMode: v as SortMode })} options={[
-                  { value: 'value_desc', label: 'Valeur décroissante' },
-                  { value: 'value_asc', label: 'Valeur croissante' },
-                  { value: 'label_asc', label: 'Libellé A-Z' },
-                ]} />
-                <label className="block">
-                  <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Top N</span>
-                  <input type="number" min={1} max={100} value={widgetDraft.topN} onChange={(e) => updateWidgetDraft({ topN: Number(e.target.value || 10) })} className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-semibold outline-none focus:border-blue-500" />
-                </label>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <SelectField
-                  label="Mode comparaison"
-                  value={widgetDraft.compareMode === 'dimension' && widgetDraft.type === 'double_bridge' ? 'year' : widgetDraft.compareMode}
-                  onChange={(v) => updateWidgetDraft({ compareMode: v as CompareMode })}
-                  options={widgetDraft.type === 'double_bridge'
-                    ? [{ value: 'year', label: 'Année précédente → année N' }, { value: 'month', label: 'Mois M → mois M+1' }]
-                    : [{ value: 'year', label: 'Année / période' }, { value: 'month', label: 'Mois' }, { value: 'dimension', label: 'Autre dimension' }]}
-                />
-                {widgetDraft.type !== 'double_bridge' && (
-                  <>
-                    <SelectField label="Dimension comparaison" value={widgetDraft.compareDimension || ''} onChange={(v) => updateWidgetDraft({ compareDimension: v as DimensionKey | '' })} options={[{ value: '', label: 'Aucune' }, ...DIMENSIONS.map((d) => ({ value: d.key, label: d.label }))]} />
-                    <label className="block col-span-2">
-                      <span className="mb-1 block text-xs font-black uppercase tracking-wide text-slate-500">Valeur comparaison dimension</span>
-                      <input value={widgetDraft.compareValue || ''} onChange={(e) => updateWidgetDraft({ compareValue: e.target.value })} placeholder="Ex : ANGLET, PV, 2025..." className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm font-semibold outline-none focus:border-blue-500" />
-                    </label>
-                  </>
-                )}
-                {widgetDraft.type === 'histogramme_empile' && (
-                  <label className="col-span-2 flex items-center gap-2 rounded-xl bg-slate-50 p-3 text-sm font-bold text-slate-700">
-                    <input type="checkbox" checked={widgetDraft.stacked100} onChange={(e) => updateWidgetDraft({ stacked100: e.target.checked })} />
-                    Afficher en base 100
-                  </label>
-                )}
-              </div>
-
-              <label className="flex items-center gap-2 rounded-xl bg-slate-50 p-3 text-sm font-bold text-slate-700">
-                <input type="checkbox" checked={widgetDraft.useGlobalFilters} onChange={(e) => updateWidgetDraft({ useGlobalFilters: e.target.checked })} />
-                Utiliser les filtres globaux
-              </label>
-
-              <div className="rounded-xl border border-slate-200 p-3">
-                <div className="mb-2 text-xs font-black uppercase tracking-wide text-slate-500">Filtres propres au widget</div>
-                <div className="grid gap-2">
-                  <MultiSelect label="Année" values={available.years.map(String)} selected={(widgetDraft.localFilters.years || []).map(String)} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, years: v.map(Number) } })} />
-                  <MultiSelect label="Mois" values={available.months.map((m) => `${m} - ${monthLabel(m)}`)} selected={(widgetDraft.localFilters.months || []).map((m) => `${m} - ${monthLabel(m)}`)} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, months: v.map((x) => Number(x.split(' - ')[0])) } })} />
-                  <MultiSelect label="Agence" values={available.agences} selected={widgetDraft.localFilters.agences || []} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, agences: v } })} />
-                  <MultiSelect label="Dépôt" values={available.depots} selected={widgetDraft.localFilters.depots || []} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, depots: v } })} />
-                  <MultiSelect label="Collab. facture" values={available.collaborateursFacture} selected={widgetDraft.localFilters.collaborateursFacture || widgetDraft.localFilters.collaborateurs || []} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, collaborateursFacture: v, collaborateurs: v } })} />
-                  <MultiSelect label="Collab. tiers" values={available.collaborateursTiers} selected={widgetDraft.localFilters.collaborateursTiers || []} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, collaborateursTiers: v } })} />
-                  <MultiSelect label="Dépt tiers" values={available.departementsTiers} selected={widgetDraft.localFilters.departementsTiers || []} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, departementsTiers: v } })} />
-                  <MultiSelect label="Famille macro" values={available.famillesMacro} selected={widgetDraft.localFilters.famillesMacro || []} onChange={(v) => updateWidgetDraft({ localFilters: { ...widgetDraft.localFilters, famillesMacro: v } })} />
-                </div>
-              </div>
-            </div>
-          </aside>
+        {selectedWidget && (
+          <WidgetConfigPanel
+            key={selectedWidget.id}
+            initialWidget={selectedWidget}
+            available={available}
+            top={configPanelTop}
+            resolvedPeriod={resolvedPeriod}
+            onApply={applyWidgetDraft}
+            onClose={closeWidgetConfig}
+          />
         )}
       </div>
     </main>
