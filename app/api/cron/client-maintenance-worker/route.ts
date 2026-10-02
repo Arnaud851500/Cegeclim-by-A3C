@@ -19,18 +19,33 @@ type StepRow = {
   error_count: number
 }
 
+// CORRECTIF (2026-10-02) : le cron Vercel (vercel.json, toutes les 5 min)
+// s'authentifie avec « Authorization: Bearer CRON_SECRET ». Seul
+// CLIENT_MAINTENANCE_SECRET était accepté ici : les 287 appels des
+// dernières 24 h ont été refusés (401), donc aucun worker ne reprenait un
+// run interrompu. CRON_SECRET est maintenant accepté, comme dans
+// /api/cron/scheduler-dispatcher.
 function isAuthorized(req: NextRequest) {
   const secret = process.env.CLIENT_MAINTENANCE_SECRET
+  const cronSecret = process.env.CRON_SECRET
 
-  if (!secret) return process.env.NODE_ENV !== 'production'
+  if (!secret && !cronSecret) return process.env.NODE_ENV !== 'production'
 
   const headerSecret = req.headers.get('x-client-maintenance-secret')
   const bearer = req.headers
     .get('authorization')
     ?.replace(/^Bearer\s+/i, '')
 
-  return headerSecret === secret || bearer === secret
+  if (secret && (headerSecret === secret || bearer === secret)) return true
+  if (cronSecret && bearer === cronSecret) return true
+  return false
 }
+
+/** Une étape « running » démarrée il y a moins de ce délai est
+ * probablement en cours d'exécution dans une autre invocation (durée max
+ * d'une fonction : maxDuration = 300 s) : on ne la relance pas en
+ * parallèle. Au-delà, l'invocation qui la portait est morte -> reprise. */
+const STEP_BUSY_SECONDS = 330
 
 async function addLog(
   supabase: any,
@@ -642,6 +657,9 @@ async function handler(req: NextRequest) {
     )
 
     const results: any[] = []
+    // Étapes déjà traitées par CETTE invocation (l'enrichissement reste
+    // « running » d'un lot à l'autre : ce n'est pas un conflit).
+    const stepsTouchedHere = new Set<string>()
 
     for (let iteration = 0; iteration < iterations; iteration += 1) {
       const { data: run, error: runError } = await supabase
@@ -696,6 +714,35 @@ async function handler(req: NextRequest) {
 
       let step = runningStep as StepRow | null
 
+      if (step && !stepsTouchedHere.has(step.id)) {
+        const startedAt = (step as any).started_at
+          ? new Date((step as any).started_at).getTime()
+          : 0
+        const ageSeconds = (Date.now() - startedAt) / 1000
+
+        if (startedAt && ageSeconds < STEP_BUSY_SECONDS) {
+          results.push({
+            success: true,
+            run_id: run.id,
+            step_key: step.step_key,
+            busy: true,
+            message: 'Étape en cours dans une autre exécution, pas de relance en parallèle.',
+          })
+          break
+        }
+
+        // Étape orpheline (son invocation a été interrompue) : reprise.
+        await addLog(
+          supabase,
+          run.id,
+          step.id,
+          'warning',
+          `Reprise de l'étape interrompue : ${step.step_label}`,
+          { started_at: (step as any).started_at, age_seconds: Math.round(ageSeconds) }
+        )
+        await startStep(supabase, step)
+      }
+
       if (!step) {
         const { data: queuedStep, error: queuedError } =
           await supabase
@@ -726,6 +773,8 @@ async function handler(req: NextRequest) {
 
         await startStep(supabase, step)
       }
+
+      stepsTouchedHere.add(step.id)
 
       try {
         if (step.step_key === 'sirene_import') {
