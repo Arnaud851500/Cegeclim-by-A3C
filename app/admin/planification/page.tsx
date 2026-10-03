@@ -1,6 +1,7 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { supabase } from '@/lib/supabaseClient'
 
 type SchedulerJob = {
   id?: string
@@ -46,6 +47,119 @@ type SchedulerLog = {
   message: string
   payload_json: any
   created_at: string
+}
+
+// ---------------------------------------------------------------------------
+// Administration serveur (reprise du panneau Admin mobile)
+// ---------------------------------------------------------------------------
+
+type StorageObject = {
+  name: string
+  created_at?: string
+  updated_at?: string
+  metadata?: { size?: number }
+}
+
+type JobStatus = 'pending' | 'running' | 'completed' | 'error'
+
+type SchemaName = 'public' | 'sage' | 'blg'
+
+type WhereCondition = {
+  field: string
+  operator: 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'like' | 'ilike' | 'is_null' | 'is_not_null'
+  value: string
+}
+
+type RapportPerimetre = { code: string; libelle: string; type: string }
+
+type RapportDemande = {
+  id: string
+  mois: string | null
+  perimetre: string | null
+  statut: JobStatus
+  demande_par: string | null
+  demande_le: string
+  debut: string | null
+  fin: string | null
+  message: string | null
+}
+
+type RapportRun = {
+  id: string
+  mois: string
+  perimetre: string
+  statut: string
+  fichier: string | null
+  document_id: string | null
+  duree_ms: number | null
+  message: string | null
+  declencheur: string | null
+  created_at: string
+}
+
+const BUCKET_SAGE = 'sage-imports'
+
+const SCHEMAS: { id: SchemaName; label: string }[] = [
+  { id: 'public', label: 'Public (app)' },
+  { id: 'sage', label: 'Sage' },
+  { id: 'blg', label: 'BLG' },
+]
+
+const OPERATOR_LABELS: Record<WhereCondition['operator'], string> = {
+  eq: '= égal à',
+  neq: '≠ différent de',
+  gt: '> supérieur à',
+  gte: '≥ supérieur ou égal à',
+  lt: '< inférieur à',
+  lte: '≤ inférieur ou égal à',
+  like: 'contient',
+  ilike: 'contient (insensible à la casse)',
+  is_null: 'est vide',
+  is_not_null: "n'est pas vide",
+}
+
+const MOIS_FR = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre']
+
+// Mois clos disponibles pour les rapports : du mois précédent à janvier 2025
+function moisClos(): { value: string; label: string }[] {
+  const out: { value: string; label: string }[] = []
+  const now = new Date()
+  let y = now.getFullYear()
+  let m = now.getMonth() // mois précédent (0-11)
+  if (m === 0) {
+    y -= 1
+    m = 12
+  }
+  while (y > 2025 || (y === 2025 && m >= 1)) {
+    out.push({ value: `${y}-${String(m).padStart(2, '0')}`, label: `${MOIS_FR[m - 1]} ${y}` })
+    m -= 1
+    if (m === 0) {
+      y -= 1
+      m = 12
+    }
+  }
+  return out
+}
+
+function libelleMoisRapport(value?: string | null) {
+  if (!value) return 'mois précédent'
+  const [y, m] = value.slice(0, 7).split('-').map(Number)
+  return m ? `${MOIS_FR[m - 1]} ${y}` : value
+}
+
+function jobStatusClass(status: JobStatus | null) {
+  if (status === 'completed') return 'status done'
+  if (status === 'running') return 'status running'
+  if (status === 'pending') return 'status queued'
+  if (status === 'error') return 'status error'
+  return 'status'
+}
+
+const JOB_STATUS_LABELS: Record<JobStatus, string> = {
+  pending: 'En attente',
+  running: 'En cours…',
+  completed: 'Terminé ✓',
+  error: 'Erreur ✗',
 }
 
 const emptyClientMaintenanceConfig = {
@@ -469,6 +583,312 @@ export default function PlanificationTraitementsPage() {
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+
+  // ---------------------------------------------------------------------------
+  // Administration serveur (reprise du panneau Admin mobile + rapports mensuels)
+  // ---------------------------------------------------------------------------
+  const [isAdmin, setIsAdmin] = useState<boolean | null>(null)
+
+  const [pendingFiles, setPendingFiles] = useState<StorageObject[]>([])
+  const [archivedFiles, setArchivedFiles] = useState<StorageObject[]>([])
+  const [bucketLoading, setBucketLoading] = useState(false)
+
+  const [vpsStatus, setVpsStatus] = useState<JobStatus | null>(null)
+  const [syncJobStatus, setSyncJobStatus] = useState<JobStatus | null>(null)
+  const [recalculJobStatus, setRecalculJobStatus] = useState<JobStatus | null>(null)
+
+  const [confirmModal, setConfirmModal] = useState<{ label: string; onConfirmed: () => Promise<void> } | null>(null)
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [confirmLoading, setConfirmLoading] = useState(false)
+  const [confirmError, setConfirmError] = useState<string | null>(null)
+
+  const [selectedSchema, setSelectedSchema] = useState<SchemaName>('public')
+  const [tables, setTables] = useState<string[]>([])
+  const [selectedTable, setSelectedTable] = useState<string>('')
+  const [columns, setColumns] = useState<string[]>([])
+  const [selectedFields, setSelectedFields] = useState<string[]>([])
+  const [whereConditions, setWhereConditions] = useState<WhereCondition[]>([])
+  const [queryResults, setQueryResults] = useState<Record<string, any>[] | null>(null)
+  const [queryCount, setQueryCount] = useState<number | null>(null)
+  const [queryLoading, setQueryLoading] = useState(false)
+  const [queryError, setQueryError] = useState<string | null>(null)
+
+  const moisOptions = useMemo(() => moisClos(), [])
+  const [rapportMois, setRapportMois] = useState<string>(() => moisClos()[0]?.value || '')
+  const [rapportPerimetre, setRapportPerimetre] = useState<string>('')
+  const [perimetres, setPerimetres] = useState<RapportPerimetre[]>([])
+  const [rapportDemande, setRapportDemande] = useState<RapportDemande | null>(null)
+  const [rapportRuns, setRapportRuns] = useState<RapportRun[]>([])
+  const [rapportError, setRapportError] = useState<string | null>(null)
+
+  const intervals = useRef<ReturnType<typeof setInterval>[]>([])
+  useEffect(() => {
+    return () => {
+      intervals.current.forEach((i) => clearInterval(i))
+    }
+  }, [])
+
+  // -- Vérification admin (source de vérité : la fonction SQL elle-même) -----
+  useEffect(() => {
+    supabase.rpc('current_user_is_admin').then(({ data, error }) => {
+      if (error) {
+        console.error(error)
+        setIsAdmin(false)
+        return
+      }
+      setIsAdmin(Boolean(data))
+    })
+  }, [])
+
+  // -- Bucket sage-imports -----------------------------------------------------
+  const loadBucket = useCallback(async () => {
+    setBucketLoading(true)
+    const [rootRes, archiveRes] = await Promise.all([
+      supabase.storage.from(BUCKET_SAGE).list('', { limit: 50 }),
+      supabase.storage.from(BUCKET_SAGE).list('archive', {
+        limit: 20,
+        sortBy: { column: 'created_at', order: 'desc' },
+      }),
+    ])
+    setPendingFiles((rootRes.data as StorageObject[]) || [])
+    setArchivedFiles((archiveRes.data as StorageObject[]) || [])
+    setBucketLoading(false)
+  }, [])
+
+  // -- Rapports mensuels ---------------------------------------------------------
+  const loadRapports = useCallback(async () => {
+    const [demRes, runsRes] = await Promise.all([
+      supabase
+        .from('rapport_mensuel_demandes')
+        .select('id, mois, perimetre, statut, demande_par, demande_le, debut, fin, message')
+        .order('demande_le', { ascending: false })
+        .limit(1),
+      supabase
+        .from('rapport_mensuel_runs')
+        .select('id, mois, perimetre, statut, fichier, document_id, duree_ms, message, declencheur, created_at')
+        .order('created_at', { ascending: false })
+        .limit(30),
+    ])
+    if (demRes.error) setRapportError(demRes.error.message)
+    setRapportDemande(((demRes.data as RapportDemande[]) || [])[0] || null)
+    setRapportRuns((runsRes.data as RapportRun[]) || [])
+    return ((demRes.data as RapportDemande[]) || [])[0] || null
+  }, [])
+
+  const pollRapport = useCallback(() => {
+    const interval = setInterval(async () => {
+      const d = await loadRapports()
+      if (!d || d.statut === 'completed' || d.statut === 'error') {
+        clearInterval(interval)
+        intervals.current = intervals.current.filter((i) => i !== interval)
+      }
+    }, 5000)
+    intervals.current.push(interval)
+  }, [loadRapports])
+
+  useEffect(() => {
+    if (!isAdmin) return
+    void loadBucket()
+    supabase
+      .from('rapport_mensuel_perimetres')
+      .select('code, libelle, type')
+      .eq('actif', true)
+      .order('ordre')
+      .then(({ data }) => setPerimetres((data as RapportPerimetre[]) || []))
+    loadRapports().then((d) => {
+      if (d && (d.statut === 'pending' || d.statut === 'running')) pollRapport()
+    })
+  }, [isAdmin, loadBucket, loadRapports, pollRapport])
+
+  // -- Requêteur : tables puis colonnes -------------------------------------------
+  useEffect(() => {
+    if (!isAdmin) return
+    setSelectedTable('')
+    supabase.rpc('admin_list_tables', { p_schema: selectedSchema }).then(({ data, error }) => {
+      if (error) {
+        console.error(error)
+        setTables([])
+        return
+      }
+      setTables((data || []).map((r: any) => r.table_name))
+    })
+  }, [isAdmin, selectedSchema])
+
+  useEffect(() => {
+    if (!selectedTable) {
+      setColumns([])
+      setSelectedFields([])
+      return
+    }
+    supabase.rpc('admin_list_columns', { p_table: selectedTable, p_schema: selectedSchema }).then(({ data, error }) => {
+      if (error) {
+        console.error(error)
+        return
+      }
+      setColumns((data || []).map((r: any) => r.column_name))
+      setSelectedFields([])
+      setWhereConditions([])
+      setQueryResults(null)
+      setQueryCount(null)
+    })
+  }, [selectedTable, selectedSchema])
+
+  // -- Confirmation par mot de passe avant action sensible ----------------------
+  function requireConfirmation(label: string, action: () => Promise<void>) {
+    setConfirmPassword('')
+    setConfirmError(null)
+    setConfirmModal({ label, onConfirmed: action })
+  }
+
+  async function handlePasswordConfirm() {
+    if (!confirmModal) return
+    setConfirmLoading(true)
+    setConfirmError(null)
+    try {
+      const { data: userData } = await supabase.auth.getUser()
+      const email = userData?.user?.email
+      if (!email) throw new Error('Session expirée, reconnecte-toi.')
+      const { error } = await supabase.auth.signInWithPassword({ email, password: confirmPassword })
+      if (error) throw new Error('Mot de passe incorrect.')
+      await confirmModal.onConfirmed()
+      setConfirmModal(null)
+      setConfirmPassword('')
+    } catch (e: any) {
+      setConfirmError(e?.message || 'Action impossible.')
+    } finally {
+      setConfirmLoading(false)
+    }
+  }
+
+  // -- Déclenchements VPS et jobs de fond -----------------------------------------
+  function pollJobStatus(table: 'admin_vps_commands' | 'admin_background_jobs', id: string, setStatus: (s: JobStatus) => void) {
+    const interval = setInterval(async () => {
+      const { data } = await supabase.from(table).select('status').eq('id', id).single()
+      if (data) {
+        setStatus(data.status as JobStatus)
+        if (data.status === 'completed' || data.status === 'error') {
+          clearInterval(interval)
+          intervals.current = intervals.current.filter((i) => i !== interval)
+          if (table === 'admin_vps_commands') void loadBucket()
+        }
+      }
+    }, 2000)
+    intervals.current.push(interval)
+  }
+
+  function triggerVpsImport() {
+    requireConfirmation("Lancer l'import VPS", async () => {
+      setVpsStatus('pending')
+      const { data, error } = await supabase
+        .from('admin_vps_commands')
+        .insert({ command: 'start_sage_import' })
+        .select('id')
+        .single()
+      if (error || !data) {
+        setVpsStatus('error')
+        throw new Error(error?.message || 'Commande non créée.')
+      }
+      pollJobStatus('admin_vps_commands', data.id, setVpsStatus)
+    })
+  }
+
+  function triggerBackgroundJob(
+    jobName: 'sync_sage_to_activite' | 'stock_projection_recalcul',
+    label: string,
+    setStatus: (s: JobStatus) => void,
+  ) {
+    requireConfirmation(label, async () => {
+      setStatus('pending')
+      const { data, error } = await supabase
+        .from('admin_background_jobs')
+        .insert({ job_name: jobName })
+        .select('id')
+        .single()
+      if (error || !data) {
+        setStatus('error')
+        throw new Error(error?.message || 'Job non créé.')
+      }
+      pollJobStatus('admin_background_jobs', data.id, setStatus)
+    })
+  }
+
+  function triggerRapportMensuel() {
+    const per = perimetres.find((p) => p.code === rapportPerimetre)
+    const label = `Générer les rapports de ${libelleMoisRapport(rapportMois)} — ${per ? per.libelle : 'entreprise et toutes les agences'}`
+    requireConfirmation(label, async () => {
+      setRapportError(null)
+      const { error } = await supabase
+        .from('rapport_mensuel_demandes')
+        .insert({ mois: rapportMois || null, perimetre: rapportPerimetre || null })
+      if (error) throw new Error(error.message)
+      await loadRapports()
+      pollRapport()
+    })
+  }
+
+  async function openRapport(run: RapportRun) {
+    setRapportError(null)
+    if (!run.document_id) return
+    const { data, error } = await supabase.from('documents').select('storage_path').eq('id', run.document_id).single()
+    if (error || !data?.storage_path) {
+      setRapportError(error?.message || 'Fichier introuvable dans Documents.')
+      return
+    }
+    const { data: signed, error: e2 } = await supabase.storage.from('documents').createSignedUrl(data.storage_path, 60)
+    if (e2 || !signed?.signedUrl) {
+      setRapportError(e2?.message || 'Lien de téléchargement impossible.')
+      return
+    }
+    window.open(signed.signedUrl, '_blank', 'noopener,noreferrer')
+  }
+
+  // -- Requêteur -----------------------------------------------------------------------
+  function toggleField(field: string) {
+    setSelectedFields((prev) => (prev.includes(field) ? prev.filter((f) => f !== field) : [...prev, field]))
+  }
+
+  function addWhereCondition() {
+    if (columns.length === 0) return
+    setWhereConditions((prev) => [...prev, { field: columns[0], operator: 'eq', value: '' }])
+  }
+
+  function updateWhereCondition(index: number, patch: Partial<WhereCondition>) {
+    setWhereConditions((prev) => prev.map((c, i) => (i === index ? { ...c, ...patch } : c)))
+  }
+
+  function removeWhereCondition(index: number) {
+    setWhereConditions((prev) => prev.filter((_, i) => i !== index))
+  }
+
+  async function runQuery() {
+    if (!selectedTable || selectedFields.length === 0) return
+    setQueryLoading(true)
+    setQueryError(null)
+    setQueryResults(null)
+    setQueryCount(null)
+
+    const { data, error } = await supabase.rpc('admin_query', {
+      p_table: selectedTable,
+      p_fields: selectedFields,
+      p_where: whereConditions.filter((c) => c.field && c.operator),
+      p_limit: 100,
+      p_schema: selectedSchema,
+    })
+
+    setQueryLoading(false)
+    if (error) {
+      setQueryError(error.message)
+      return
+    }
+    // admin_query renvoie { count, rows } : count = total filtré, rows plafonnées à p_limit
+    const result = data as { count: number; rows: Record<string, any>[] }
+    setQueryCount(result.count)
+    setQueryResults(result.rows)
+  }
+
+  const rapportEnCours = rapportDemande?.statut === 'pending' || rapportDemande?.statut === 'running'
+  const libellePerimetre = (code?: string | null) =>
+    !code ? 'Tous' : perimetres.find((p) => p.code === code)?.libelle || code
 
   const stats = useMemo(() => {
     return {
@@ -949,6 +1369,335 @@ export default function PlanificationTraitementsPage() {
         </section>
       </div>
 
+      {isAdmin && (
+        <>
+          <div className="adminTitle">
+            <h2>Administration serveur</h2>
+            <p>Actions sensibles : chaque lancement redemande le mot de passe du compte connecté.</p>
+          </div>
+
+          <div className="adminGrid">
+            <section className="panel">
+              <h2>Actions serveur</h2>
+              <div className="actionRow">
+                <span>Lancer l’import VPS</span>
+                <div className="actionRight">
+                  {vpsStatus && <span className={jobStatusClass(vpsStatus)}>{JOB_STATUS_LABELS[vpsStatus]}</span>}
+                  <button onClick={triggerVpsImport} disabled={vpsStatus === 'pending' || vpsStatus === 'running'}>
+                    Lancer
+                  </button>
+                </div>
+              </div>
+              <div className="actionRow">
+                <span>Sync SAGE → activité</span>
+                <div className="actionRight">
+                  {syncJobStatus && <span className={jobStatusClass(syncJobStatus)}>{JOB_STATUS_LABELS[syncJobStatus]}</span>}
+                  <button
+                    onClick={() => triggerBackgroundJob('sync_sage_to_activite', 'Lancer sync SAGE → activité', setSyncJobStatus)}
+                    disabled={syncJobStatus === 'pending' || syncJobStatus === 'running'}
+                  >
+                    Lancer
+                  </button>
+                </div>
+              </div>
+              <div className="actionRow">
+                <span>Recalcul projection stock</span>
+                <div className="actionRight">
+                  {recalculJobStatus && (
+                    <span className={jobStatusClass(recalculJobStatus)}>{JOB_STATUS_LABELS[recalculJobStatus]}</span>
+                  )}
+                  <button
+                    onClick={() =>
+                      triggerBackgroundJob('stock_projection_recalcul', 'Lancer le recalcul de projection stock', setRecalculJobStatus)
+                    }
+                    disabled={recalculJobStatus === 'pending' || recalculJobStatus === 'running'}
+                  >
+                    Lancer
+                  </button>
+                </div>
+              </div>
+
+              <div className="bucketBox">
+                <div className="sectionHeader">
+                  <h3>Bucket sage-imports</h3>
+                  <button className="smallButton" onClick={() => void loadBucket()} disabled={bucketLoading}>
+                    {bucketLoading ? '…' : 'Rafraîchir'}
+                  </button>
+                </div>
+                <p className="miniTitle">En attente ({pendingFiles.length})</p>
+                {pendingFiles.length === 0 && <p className="helpText">Aucun fichier en attente.</p>}
+                {pendingFiles.map((f) => (
+                  <div key={f.name} className="fileRow">
+                    <span>{f.name}</span>
+                    <small>{f.metadata?.size ? `${Math.round((f.metadata.size / 1024) * 10) / 10} Ko` : ''}</small>
+                  </div>
+                ))}
+                <p className="miniTitle">Derniers archivés</p>
+                {archivedFiles.map((f) => (
+                  <div key={f.name} className="fileRow muted">
+                    <span>{f.name}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section className="panel">
+              <div className="sectionHeader">
+                <h2>Rapports mensuels</h2>
+                <button className="smallButton" onClick={() => void loadRapports()}>
+                  Actualiser
+                </button>
+              </div>
+              <p className="helpText">
+                Génération automatique le 5 de chaque mois à 6 h 30. Ici, relance à la demande : les PDF sont déposés dans
+                Documents › Rapport d’activité (un mois relancé remplace ses fichiers).
+              </p>
+
+              <div className="form rapportForm">
+                <div className="twoCols">
+                  <label>
+                    Mois
+                    <select value={rapportMois} onChange={(e) => setRapportMois(e.target.value)} disabled={rapportEnCours}>
+                      {moisOptions.map((m) => (
+                        <option key={m.value} value={m.value}>
+                          {m.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Périmètre
+                    <select
+                      value={rapportPerimetre}
+                      onChange={(e) => setRapportPerimetre(e.target.value)}
+                      disabled={rapportEnCours}
+                    >
+                      <option value="">Tous (entreprise + agences)</option>
+                      {perimetres.map((p) => (
+                        <option key={p.code} value={p.code}>
+                          {p.type === 'entreprise' ? `Entreprise — ${p.libelle}` : p.libelle}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <div className="actions">
+                  <button className="primaryButton" onClick={triggerRapportMensuel} disabled={rapportEnCours || !rapportMois}>
+                    {rapportEnCours ? 'Génération en cours…' : 'Générer'}
+                  </button>
+                </div>
+              </div>
+
+              {rapportError && <div className="alert ko">{rapportError}</div>}
+
+              {rapportDemande && (
+                <div className="demandeBox">
+                  <div className="demandeHead">
+                    <strong>
+                      Dernière demande : {libelleMoisRapport(rapportDemande.mois)} · {libellePerimetre(rapportDemande.perimetre)}
+                    </strong>
+                    <span className={jobStatusClass(rapportDemande.statut)}>{JOB_STATUS_LABELS[rapportDemande.statut]}</span>
+                  </div>
+                  <small>
+                    {rapportDemande.demande_par || '—'} · demandé le {formatDate(rapportDemande.demande_le)}
+                    {rapportDemande.fin ? ` · terminé le ${formatDate(rapportDemande.fin)}` : ''}
+                  </small>
+                  {rapportDemande.statut === 'pending' && (
+                    <p className="helpText">En attente de prise en charge par le VPS (contrôle toutes les 15 s).</p>
+                  )}
+                  {rapportDemande.message && <pre className="demandeMessage">{rapportDemande.message}</pre>}
+                </div>
+              )}
+
+              <h3 className="runsTitle">Derniers rapports produits</h3>
+              {rapportRuns.length === 0 ? (
+                <p className="helpText">Aucun rapport produit pour l’instant.</p>
+              ) : (
+                <div className="tableScroll">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Date</th>
+                        <th>Mois</th>
+                        <th>Périmètre</th>
+                        <th>Source</th>
+                        <th>Statut</th>
+                        <th>Durée</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rapportRuns.map((run) => (
+                        <tr key={run.id}>
+                          <td>{formatDate(run.created_at)}</td>
+                          <td>{libelleMoisRapport(run.mois)}</td>
+                          <td>{libellePerimetre(run.perimetre)}</td>
+                          <td>{run.declencheur || '—'}</td>
+                          <td>
+                            <span className={run.statut === 'ok' ? 'status done' : run.statut === 'erreur' ? 'status error' : 'status running'}>
+                              {run.statut}
+                            </span>
+                            {run.statut === 'erreur' && run.message && <small className="runError">{run.message}</small>}
+                          </td>
+                          <td>{run.duree_ms != null ? `${(run.duree_ms / 1000).toFixed(1)} s` : '—'}</td>
+                          <td>
+                            {run.document_id && (
+                              <button className="smallButton" onClick={() => void openRapport(run)}>
+                                Ouvrir
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          </div>
+
+          <section className="panel">
+            <h2>Requêteur (lecture seule)</h2>
+            <div className="form">
+              <div className="twoCols">
+                <label>
+                  Environnement
+                  <div className="schemaButtons">
+                    {SCHEMAS.map((s) => (
+                      <button
+                        key={s.id}
+                        type="button"
+                        className={selectedSchema === s.id ? 'schemaActive' : ''}
+                        onClick={() => setSelectedSchema(s.id)}
+                      >
+                        {s.label}
+                      </button>
+                    ))}
+                  </div>
+                </label>
+                <label>
+                  Table
+                  <select value={selectedTable} onChange={(e) => setSelectedTable(e.target.value)}>
+                    <option value="">— Choisir une table —</option>
+                    {tables.map((t) => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              {columns.length > 0 && (
+                <>
+                  <p className="miniTitle">Champs à retourner</p>
+                  <div className="fieldChips">
+                    {columns.map((c) => (
+                      <button
+                        key={c}
+                        type="button"
+                        className={selectedFields.includes(c) ? 'chip chipActive' : 'chip'}
+                        onClick={() => toggleField(c)}
+                      >
+                        {c}
+                      </button>
+                    ))}
+                  </div>
+
+                  <p className="miniTitle">Conditions (WHERE)</p>
+                  {whereConditions.map((cond, i) => {
+                    const needsValue = cond.operator !== 'is_null' && cond.operator !== 'is_not_null'
+                    return (
+                      <div key={i} className="whereRow">
+                        <select value={cond.field} onChange={(e) => updateWhereCondition(i, { field: e.target.value })}>
+                          {columns.map((c) => (
+                            <option key={c} value={c}>
+                              {c}
+                            </option>
+                          ))}
+                        </select>
+                        <select
+                          value={cond.operator}
+                          onChange={(e) => updateWhereCondition(i, { operator: e.target.value as WhereCondition['operator'] })}
+                        >
+                          {(Object.keys(OPERATOR_LABELS) as WhereCondition['operator'][]).map((op) => (
+                            <option key={op} value={op}>
+                              {OPERATOR_LABELS[op]}
+                            </option>
+                          ))}
+                        </select>
+                        <input
+                          value={cond.value}
+                          disabled={!needsValue}
+                          onChange={(e) => updateWhereCondition(i, { value: e.target.value })}
+                          placeholder={needsValue ? 'Valeur à comparer' : '—'}
+                        />
+                        <button type="button" className="dangerButton" onClick={() => removeWhereCondition(i)}>
+                          Retirer
+                        </button>
+                      </div>
+                    )
+                  })}
+                  <div className="actions queryActions">
+                    <button type="button" onClick={addWhereCondition}>
+                      + Ajouter une condition
+                    </button>
+                    <button
+                      type="button"
+                      className="primaryButton"
+                      onClick={() => void runQuery()}
+                      disabled={selectedFields.length === 0 || queryLoading}
+                    >
+                      {queryLoading ? 'Exécution…' : 'Exécuter'}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {queryError && <div className="alert ko">{queryError}</div>}
+
+            {queryCount !== null && (
+              <p className="queryCount">
+                {queryCount === 0
+                  ? 'Aucune occurrence trouvée'
+                  : queryCount === 1
+                    ? '1 occurrence trouvée'
+                    : `${queryCount} occurrences trouvées`}
+                {queryResults && queryResults.length < queryCount && (
+                  <span> — {queryResults.length} affichées (limite 100)</span>
+                )}
+              </p>
+            )}
+
+            {queryResults && queryResults.length > 0 && (
+              <div className="tableScroll">
+                <table>
+                  <thead>
+                    <tr>
+                      {selectedFields.map((f) => (
+                        <th key={f}>{f}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {queryResults.map((row, i) => (
+                      <tr key={i}>
+                        {selectedFields.map((f) => (
+                          <td key={f} className="nowrap">
+                            {row[f] !== null && typeof row[f] === 'object' ? JSON.stringify(row[f]) : String(row[f] ?? '')}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        </>
+      )}
+
       <section className="panel">
         <h2>Historique des runs</h2>
         <table>
@@ -989,6 +1738,41 @@ export default function PlanificationTraitementsPage() {
           ))}
         </div>
       </section>
+
+      {confirmModal && (
+        <div className="modalBackdrop" onClick={() => !confirmLoading && setConfirmModal(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Confirmation requise</h3>
+            <p>
+              Ressaisis ton mot de passe pour : <strong>{confirmModal.label}</strong>
+            </p>
+            <input
+              type="password"
+              autoFocus
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && confirmPassword && !confirmLoading) void handlePasswordConfirm()
+              }}
+              placeholder="Mot de passe"
+            />
+            {confirmError && <div className="alert ko modalError">{confirmError}</div>}
+            <div className="actions">
+              <button type="button" onClick={() => setConfirmModal(null)} disabled={confirmLoading}>
+                Annuler
+              </button>
+              <button
+                type="button"
+                className="primaryButton"
+                onClick={() => void handlePasswordConfirm()}
+                disabled={confirmLoading || confirmPassword.length === 0}
+              >
+                {confirmLoading ? 'Vérification…' : 'Confirmer'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <style jsx>{`
         .page { padding: 24px; color: #111827; }
@@ -1057,6 +1841,50 @@ export default function PlanificationTraitementsPage() {
         .log.error strong { color: #fca5a5; }
         .log.warning strong { color: #fde68a; }
         .log.info strong { color: #93c5fd; }
+        .adminTitle { margin: 8px 0 12px; }
+        .adminTitle h2 { margin: 0; }
+        .adminGrid { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); gap: 16px; align-items: start; }
+        .actionRow { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid #e5eaf1; font-size: 14px; font-weight: 600; }
+        .actionRight { display: flex; align-items: center; gap: 8px; }
+        .bucketBox { border: 1px solid #e2e8f0; border-radius: 14px; padding: 12px; margin-top: 14px; background: #f8fafc; }
+        .bucketBox h3 { margin: 0; }
+        .miniTitle { font-size: 12px; font-weight: 800; color: #64748b; text-transform: uppercase; letter-spacing: .04em; margin: 12px 0 6px; }
+        .fileRow { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; padding: 3px 0; }
+        .fileRow span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .fileRow small { color: #64748b; flex-shrink: 0; }
+        .fileRow.muted { color: #64748b; }
+        .smallButton { padding: 6px 10px; font-size: 12px; }
+        .primaryButton { background: #0f172a; color: white; border-color: #0f172a; }
+        .primaryButton:hover { background: #1e293b; }
+        .rapportForm { margin-top: 12px; }
+        .demandeBox { border: 1px solid #e2e8f0; border-radius: 14px; padding: 12px; margin: 14px 0; background: #f8fafc; }
+        .demandeHead { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 4px; }
+        .demandeBox small { color: #64748b; }
+        .demandeMessage { margin: 10px 0 0; padding: 10px; background: #0f172a; color: #e5e7eb; border-radius: 10px; font-size: 12px; white-space: pre-wrap; max-height: 220px; overflow: auto; }
+        .runsTitle { margin-top: 16px; }
+        .runError { display: block; color: #991b1b; margin-top: 4px; max-width: 320px; white-space: normal; }
+        .tableScroll { overflow-x: auto; }
+        .nowrap { white-space: nowrap; }
+        .schemaButtons { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+        .schemaButtons button { padding: 9px 10px; font-size: 13px; }
+        .schemaButtons .schemaActive { background: #0f172a; color: white; border-color: #0f172a; }
+        .fieldChips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+        .chip { border-radius: 999px; padding: 6px 10px; font-size: 12px; font-weight: 600; background: #f1f5f9; border-color: #e2e8f0; }
+        .chipActive { background: #7a5ea8; color: white; border-color: #7a5ea8; }
+        .chipActive:hover { background: #6b4f99; }
+        .whereRow { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 8px; margin-bottom: 8px; }
+        .queryActions { justify-content: space-between; margin-top: 4px; }
+        .queryCount { font-weight: 700; color: #0f172a; margin: 12px 0 8px; }
+        .queryCount span { font-weight: 500; color: #64748b; }
+        .modalBackdrop { position: fixed; inset: 0; background: rgba(15, 23, 42, .55); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+        .modal { background: white; border-radius: 18px; padding: 20px; width: 100%; max-width: 420px; box-shadow: 0 20px 50px rgba(15, 23, 42, .25); }
+        .modal h3 { margin: 0 0 6px; }
+        .modal p { margin: 0 0 12px; }
+        .modal input { width: 100%; box-sizing: border-box; margin-bottom: 12px; }
+        .modalError { margin-bottom: 12px; }
+        @media (max-width: 1100px) {
+          .adminGrid, .whereRow { grid-template-columns: 1fr; }
+        }
         @media (max-width: 1100px) {
           .layout, .cards { grid-template-columns: 1fr; }
           .twoCols, .threeCols { grid-template-columns: 1fr; }
