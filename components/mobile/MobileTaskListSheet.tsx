@@ -43,6 +43,9 @@ export type TaskListItem = {
  *      catégorie (ou la personne concernée) est pré-remplie avec celle du
  *      groupe. La tâche créée apparaît aussitôt dans la liste et est signalée
  *      au parent via onTaskCreated (pour mettre à jour son compteur).
+ *   3. Bouton « + Nouvelle tâche » dans l'en-tête, disponible dans toutes les
+ *      présentations (y compris « Liste ») : création sans pré-remplissage,
+ *      la catégorie se choisit dans le formulaire.
  *   Rappel : une tâche créée avec un n° client et sans catégorie est rangée
  *   automatiquement dans « Affectées à 1 client » (trigger en base
  *   todo_actions_sync_category, migration todo_categorie_defaut_affectees_client).
@@ -382,7 +385,26 @@ export default function MobileTaskListSheet({
               <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>{title}</div>
               {subtitle && <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>{subtitle}</div>}
             </div>
-            <button onClick={onClose} style={{ color: 'rgba(255,255,255,0.4)', fontSize: 20, lineHeight: 1, background: 'none', border: 'none', flexShrink: 0 }}>✕</button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+              {/*
+                MODIF 2026-09-24 : création possible quelle que soit la
+                présentation (en « Liste », le « + » flottant de MobileAlertes
+                est masqué par ce tiroir). Aucune catégorie pré-remplie : elle
+                se choisit dans le formulaire.
+              */}
+              <button
+                type="button"
+                onClick={() => setCreation({ category_id: null, concerned_person: null })}
+                style={{
+                  borderRadius: 999, padding: '6px 12px',
+                  border: '1px solid rgba(180,118,26,0.6)', background: 'rgba(180,118,26,0.25)',
+                  color: '#F5F3EC', fontSize: 12, fontWeight: 700, whiteSpace: 'nowrap',
+                }}
+              >
+                + Nouvelle tâche
+              </button>
+              <button onClick={onClose} style={{ color: 'rgba(255,255,255,0.4)', fontSize: 20, lineHeight: 1, background: 'none', border: 'none' }}>✕</button>
+            </div>
           </div>
 
           {/* Sélecteur de présentation */}

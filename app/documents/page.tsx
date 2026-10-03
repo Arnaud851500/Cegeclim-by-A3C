@@ -24,6 +24,14 @@ type DocItem = {
   agence: string | null
   linked_entity_type?: string | null
   linked_entity_id?: string | null
+  acces_restreint?: boolean | null
+}
+
+type AccessUser = {
+  email: string
+  display_name: string | null
+  can_documents: boolean
+  agences: string[] | null
 }
 
 type UserDocumentAccess = {
@@ -84,6 +92,14 @@ export default function DocumentsPage() {
   const [filterAgence, setFilterAgence] = useState<string>('all')
 
   const [dragActive, setDragActive] = useState(false)
+
+  // Gestion des accès restreints (administrateurs)
+  const [isAdmin, setIsAdmin] = useState(false)
+  const [accesItemId, setAccesItemId] = useState<string | null>(null)
+  const [accesEmails, setAccesEmails] = useState<string[]>([])
+  const [accesUsers, setAccesUsers] = useState<AccessUser[]>([])
+  const [accesAjout, setAccesAjout] = useState('')
+  const [accesLoading, setAccesLoading] = useState(false)
 
   useEffect(() => {
     void initializePage()
@@ -155,6 +171,9 @@ export default function DocumentsPage() {
 
     setAccess(accessData)
     setAuthLoading(false)
+
+    const { data: adminFlag } = await supabase.rpc('current_user_is_admin')
+    setIsAdmin(adminFlag === true)
 
     const preferredVision = getDefaultVision(accessData)
     setVisionScope(preferredVision)
@@ -391,6 +410,19 @@ export default function DocumentsPage() {
     return value.trim().replace(/[\/\\]+/g, '-').replace(/\s+/g, ' ')
   }
 
+  // Le stockage Supabase refuse les caractères accentués dans les clés :
+  // les chemins de stockage sont donc convertis en ASCII (le nom affiché reste inchangé).
+  function storageSegment(value: string) {
+    return (
+      sanitizeName(value)
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^A-Za-z0-9._ -]+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^[-.]+|[-.]+$/g, '') || 'fichier'
+    )
+  }
+
   function formatSize(size: number | null) {
     if (size == null) return '-'
     if (size < 1024) return `${size} o`
@@ -440,7 +472,7 @@ export default function DocumentsPage() {
     let cursor = items.find((i) => i.id === folderId) || null
 
     while (cursor) {
-      segments.unshift(sanitizeName(cursor.name))
+      segments.unshift(storageSegment(cursor.name))
       cursor = items.find((i) => i.id === cursor?.parent_id) || null
     }
 
@@ -448,9 +480,92 @@ export default function DocumentsPage() {
   }
 
   function scopeLabel(item: DocItem) {
-    if (item.scope_type === 'Agence') return item.agence ? `Agence • ${item.agence}` : 'Agence'
-    if (item.scope_type === 'Societe') return item.societe ? `Société • ${item.societe}` : 'Société'
-    return 'Global'
+    const restreint = isRestricted(item) ? ' • 🔒 Accès restreint' : ''
+    if (item.scope_type === 'Agence') return (item.agence ? `Agence • ${item.agence}` : 'Agence') + restreint
+    if (item.scope_type === 'Societe') return (item.societe ? `Société • ${item.societe}` : 'Société') + restreint
+    return 'Global' + restreint
+  }
+
+  // Un élément est restreint s'il l'est lui-même ou si l'un de ses dossiers parents l'est
+  function isRestricted(item: DocItem | null) {
+    let cursor: DocItem | null = item
+    let guard = 0
+    while (cursor && guard < 30) {
+      if (cursor.acces_restreint) return true
+      cursor = items.find((i) => i.id === cursor?.parent_id) || null
+      guard++
+    }
+    return false
+  }
+
+  async function openAcces(item: DocItem) {
+    setAccesItemId(item.id)
+    setAccesAjout('')
+    setAccesLoading(true)
+    setErrorMessage(EMPTY_MESSAGE)
+
+    const [{ data: rows, error }, { data: users }] = await Promise.all([
+      supabase.from('document_acces').select('email').eq('document_id', item.id).order('email'),
+      accesUsers.length ? Promise.resolve({ data: accesUsers }) : supabase.rpc('documents_utilisateurs_acces'),
+    ])
+
+    if (error) {
+      setErrorMessage(`Lecture des accès impossible : ${error.message}`)
+      setAccesLoading(false)
+      return
+    }
+
+    setAccesEmails(((rows || []) as { email: string }[]).map((r) => r.email.toLowerCase()))
+    if (!accesUsers.length && Array.isArray(users)) setAccesUsers(users as AccessUser[])
+    setAccesLoading(false)
+  }
+
+  async function toggleRestreint(item: DocItem, value: boolean) {
+    const { error } = await supabase
+      .from('documents')
+      .update({ acces_restreint: value, updated_at: new Date().toISOString() })
+      .eq('id', item.id)
+
+    if (error) {
+      setErrorMessage(`Modification de l'accès impossible : ${error.message}`)
+      return
+    }
+
+    setMessage(value ? 'Accès restreint activé : seules les personnes listées (et les administrateurs) voient cet élément.' : 'Accès restreint levé.')
+    await loadDocuments()
+  }
+
+  async function addAcces(item: DocItem, email: string) {
+    const clean = email.toLowerCase().trim()
+    if (!clean) return
+    if (accesEmails.includes(clean)) return
+
+    const { error } = await supabase
+      .from('document_acces')
+      .insert({ document_id: item.id, email: clean, created_by: access?.email ?? null })
+
+    if (error) {
+      setErrorMessage(`Ajout de l'accès impossible : ${error.message}`)
+      return
+    }
+
+    setAccesEmails((prev) => [...prev, clean].sort())
+    setAccesAjout('')
+  }
+
+  async function removeAcces(item: DocItem, email: string) {
+    const { error } = await supabase
+      .from('document_acces')
+      .delete()
+      .eq('document_id', item.id)
+      .eq('email', email)
+
+    if (error) {
+      setErrorMessage(`Retrait de l'accès impossible : ${error.message}`)
+      return
+    }
+
+    setAccesEmails((prev) => prev.filter((e) => e !== email))
   }
 
   function isPreviewable(item: DocItem | null) {
@@ -676,7 +791,7 @@ export default function DocumentsPage() {
 
       for (const file of Array.from(files)) {
         const cleanName = sanitizeName(file.name)
-        const uniqueName = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${cleanName}`
+        const uniqueName = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${storageSegment(file.name)}`
         const storagePath = folderPath ? `${folderPath}/${uniqueName}` : uniqueName
 
         const { error: uploadError } = await supabase.storage
@@ -1005,6 +1120,7 @@ export default function DocumentsPage() {
                   >
                     <div className="text-6xl">🗂️</div>
                     <div className="mt-3 line-clamp-2 text-sm font-medium text-slate-700">
+                      {folder.acces_restreint ? '🔒 ' : ''}
                       {folder.name}
                     </div>
                   </button>
@@ -1137,6 +1253,7 @@ export default function DocumentsPage() {
                                   className="block min-w-0 truncate font-medium text-slate-800"
                                   title={item.name}
                                 >
+                                  {item.acces_restreint ? '🔒 ' : ''}
                                   {item.name}
                                 </span>
                               </button>
@@ -1191,6 +1308,16 @@ export default function DocumentsPage() {
                               >
                                 Déplacer
                               </button>
+
+                              {isAdmin && (
+                                <button
+                                  type="button"
+                                  onClick={() => void openAcces(item)}
+                                  className="rounded-lg bg-amber-50 px-2 py-1 text-xs text-amber-800"
+                                >
+                                  Accès
+                                </button>
+                              )}
 
                               <button
                                 type="button"
@@ -1250,6 +1377,105 @@ export default function DocumentsPage() {
                   </button>
                 </div>
               )}
+
+              {isAdmin && accesItemId && (() => {
+                const accesItem = items.find((x) => x.id === accesItemId)
+                if (!accesItem) return null
+                const heritee = !accesItem.acces_restreint && isRestricted(accesItem)
+                const candidats = accesUsers.filter((u) => !accesEmails.includes(u.email))
+
+                return (
+                  <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm">
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                      <div className="font-semibold text-slate-900">
+                        Accès — {accesItem.type === 'folder' ? 'dossier' : 'fichier'} « {accesItem.name} »
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setAccesItemId(null)}
+                        className="rounded-lg border border-slate-300 bg-white px-3 py-1 text-xs text-slate-700"
+                      >
+                        Fermer
+                      </button>
+                    </div>
+
+                    <label className="flex items-center gap-2 text-slate-800">
+                      <input
+                        type="checkbox"
+                        checked={!!accesItem.acces_restreint}
+                        onChange={(e) => void toggleRestreint(accesItem, e.target.checked)}
+                      />
+                      Accès restreint aux personnes listées ci-dessous (les administrateurs voient tout)
+                    </label>
+
+                    {heritee && (
+                      <div className="mt-2 text-xs text-amber-800">
+                        Un dossier parent est déjà restreint : la personne doit aussi figurer dans la liste de ce dossier parent.
+                      </div>
+                    )}
+
+                    {accesItem.acces_restreint && (
+                      <div className="mt-3">
+                        {accesLoading ? (
+                          <div className="text-slate-500">Chargement des accès…</div>
+                        ) : (
+                          <>
+                            <div className="mb-2 flex flex-wrap gap-2">
+                              {accesEmails.length === 0 && (
+                                <span className="text-xs text-slate-500">Personne pour l'instant : seuls les administrateurs voient cet élément.</span>
+                              )}
+                              {accesEmails.map((email) => {
+                                const u = accesUsers.find((x) => x.email === email)
+                                return (
+                                  <span
+                                    key={email}
+                                    className="inline-flex items-center gap-2 rounded-full border border-slate-300 bg-white px-3 py-1 text-xs text-slate-800"
+                                  >
+                                    {u?.display_name ? `${u.display_name} · ` : ''}
+                                    {email}
+                                    {u && !u.can_documents && <span className="text-red-600">(sans droit Documents)</span>}
+                                    <button
+                                      type="button"
+                                      onClick={() => void removeAcces(accesItem, email)}
+                                      className="text-slate-500 hover:text-red-600"
+                                      title="Retirer"
+                                    >
+                                      ✕
+                                    </button>
+                                  </span>
+                                )
+                              })}
+                            </div>
+                            <div className="flex flex-col gap-2 md:flex-row">
+                              <select
+                                value={accesAjout}
+                                onChange={(e) => setAccesAjout(e.target.value)}
+                                className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm"
+                              >
+                                <option value="">Ajouter une personne…</option>
+                                {candidats.map((u) => (
+                                  <option key={u.email} value={u.email}>
+                                    {(u.display_name || u.email) + (u.can_documents ? '' : ' — sans droit Documents')}
+                                    {u.agences && u.agences.length ? ` (${u.agences.join(', ')})` : ''}
+                                  </option>
+                                ))}
+                              </select>
+                              <button
+                                type="button"
+                                disabled={!accesAjout}
+                                onClick={() => void addAcces(accesItem, accesAjout)}
+                                className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40"
+                              >
+                                Ajouter
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )
+              })()}
 
               <div
                 className={`mt-4 rounded-2xl border-2 border-dashed px-4 py-4 text-center transition ${
