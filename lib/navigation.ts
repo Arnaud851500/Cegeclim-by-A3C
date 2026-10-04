@@ -14,6 +14,8 @@
 // activité ») ; Liste globale (/clients) reste uniquement sous Admin ; Clients
 // CEGECLIM et Suivi prospects retirés de l'arborescence ; bloc « Mes tâches /
 // Mes RDV » = Todo List + Agenda (+ Documents).
+// ÉVOLUTION (2026-10-04) : « Calcul de besoin - Appro » (/stock/calcul-besoin)
+// ajouté en tête du bloc Stocks & logistique.
 // Le bloc « Mes alertes » de l'accueil n'est pas ici : il n'a pas de page, il
 // ouvre le Centre d'alertes (components/AlertsContext.tsx + ClientRootShell).
 
@@ -145,6 +147,7 @@ export const NAV_BLOCS: NavBloc[] = [
     iconBg: 'rgba(255,255,255,0.18)',
     pages: [
       { label: 'Portefeuille de commandes', path: '/portefeuille-livraison', activeLabel: 'Portefeuille cde', accessKey: 'can_dashboard', description: 'CDC à livrer, contrôle des frais de port, couverture stock.' },
+      { label: 'Calcul de besoin - Appro', path: '/stock/calcul-besoin', activeLabel: 'Calcul de besoin - Appro', accessKey: 'can_stocks', description: 'Propositions de commande fournisseur par article, paramètres d’appro, conso retenue et écrêtage des ventes exceptionnelles.' },
       { label: 'Projection stock', path: '/stocks-disponibilites2', accessKey: 'can_stocks', description: 'Stock projeté par référence, hypothèses mensuelles et substitutions.' },
       { label: 'Reconstitution Stock', path: '/stock/reconstruction', accessKey: 'can_stocks', description: 'Reconstruction stock projeté et verification des promesses"' },
       { label: 'Vision dispo par groupe d article', path: '/stock/groupes', accessKey: 'can_stocks', description: 'Visibilite dispo à venir et livraisons possibles"' },
