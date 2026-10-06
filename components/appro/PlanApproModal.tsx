@@ -57,6 +57,70 @@ export type PlanApproModalProps = {
   onClose: () => void
   /** Appliquer une liste de références au filtre de l'écran (scénario chargé sur une autre sélection) */
   onFiltrerRefs?: (refs: string[], nom: string) => void
+  /** Références connues (calcul de besoin) pour la recherche d'une référence à chaîner */
+  catalogue?: { ref: string; designation: string | null }[]
+}
+
+type SuggestionChainage = { source: string; pct: number; commentaire: string | null }
+
+/** Ajout d'une référence chaînée sur la ligne d'une référence : recherche dans le catalogue ou saisie libre,
+ * suggestions issues des remplacements de la Projection stock. */
+function AjoutChainage({ cible, dejaChainees, suggestions, catalogue, designationDe, onAjouter }: {
+  cible: string; dejaChainees: Set<string>; suggestions: SuggestionChainage[]
+  catalogue: { ref: string; designation: string | null }[]; designationDe: (ref: string) => string | null
+  onAjouter: (source: string, pct: number, commentaire?: string | null) => void
+}) {
+  const [texte, setTexte] = useState('')
+  const [pct, setPct] = useState(100)
+  const [ouvert, setOuvert] = useState(false)
+  const terme = texte.trim().toUpperCase()
+  const resultats = useMemo(() => {
+    if (terme.length < 2) return []
+    const out: { ref: string; designation: string | null }[] = []
+    for (const c of catalogue) {
+      if (out.length >= 10) break
+      const r = c.ref.toUpperCase()
+      if (r === cible || dejaChainees.has(r)) continue
+      if (r.includes(terme) || (c.designation || '').toUpperCase().includes(terme)) out.push(c)
+    }
+    return out
+  }, [terme, catalogue, cible, dejaChainees])
+  const valide = terme.length > 0 && terme !== cible && !dejaChainees.has(terme)
+  function ajouter(ref: string, p = pct, commentaire?: string | null) {
+    const r = cleRef(ref)
+    if (!r || r === cible || dejaChainees.has(r)) return
+    onAjouter(r, Math.max(1, Math.min(100, p)), commentaire)
+    setTexte(''); setOuvert(false)
+  }
+  const sugg = suggestions.filter((x) => !dejaChainees.has(x.source) && x.source !== cible)
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 py-0.5 text-[11px]">
+      <span className="font-bold text-[#5B4387]">+ Chaîner une référence</span>
+      <span className="relative">
+        <input value={texte} onChange={(e) => { setTexte(e.target.value); setOuvert(true) }} onFocus={() => setOuvert(true)} onBlur={() => setTimeout(() => setOuvert(false), 150)}
+          onKeyDown={(e) => { if (e.key === 'Enter' && valide) ajouter(terme) }}
+          placeholder="Référence ou désignation…" className="h-6 w-56 rounded border border-[#E5E1D8] bg-white px-1.5 font-semibold uppercase outline-none focus:border-[#7A5EA8]" />
+        {ouvert && resultats.length > 0 && (
+          <div className="absolute left-0 top-7 z-40 w-[380px] overflow-hidden rounded-lg border border-[#E5E1D8] bg-white shadow-xl">
+            {resultats.map((r) => (
+              <button key={r.ref} type="button" onMouseDown={(e) => { e.preventDefault(); ajouter(r.ref) }} className="block w-full px-2 py-1 text-left hover:bg-[#F6F2FB]">
+                <span className="font-bold text-[#111820]">{r.ref}</span> <span className="text-[#8A8474]">{r.designation || ''}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </span>
+      <CelluleSaisie valeur={pct} onCommit={(v) => setPct(Math.max(1, Math.min(100, v ?? 100)))} className="w-14 pr-4" suffixe="%" titre="Part des ventes passées de la référence intégrée à la demande" />
+      <button type="button" disabled={!valide} onClick={() => ajouter(terme)} className="h-6 rounded bg-[#7A5EA8] px-2 font-bold text-white disabled:opacity-40" title="Ajouter la référence saisie (nouvelle référence acceptée, même hors calcul de besoin)">Ajouter</button>
+      {sugg.length > 0 && <span className="ml-2 text-[#8A8474]">Projection stock :</span>}
+      {sugg.map((x) => (
+        <button key={x.source} type="button" onClick={() => ajouter(x.source, x.pct, x.commentaire || 'Repris des remplacements de la projection stock')}
+          className="rounded-full border border-[#7A5EA8] bg-[#F6F2FB] px-2 py-0.5 font-bold text-[#5B4387] hover:bg-[#EFE9F7]" title={designationDe(x.source) || x.commentaire || ''}>
+          ↺ {x.source} {fmtNum(x.pct)} %
+        </button>
+      ))}
+    </div>
+  )
 }
 
 /** Fenêtre par défaut : opération de l'année suivante, livraisons de mars à septembre, horizon décembre. */
@@ -136,7 +200,7 @@ function Kpi({ label, value, sub, tone }: { label: string; value: string; sub?: 
 }
 
 // ── Composant ───────────────────────────────────────────────────────────────
-export default function PlanApproModal({ articles, groupe, aujourdhui, retardMaxJours, onClose, onFiltrerRefs }: PlanApproModalProps) {
+export default function PlanApproModal({ articles, groupe, aujourdhui, retardMaxJours, onClose, onFiltrerRefs, catalogue = [] }: PlanApproModalProps) {
   const moisCourant = moisDe(aujourdhui)
   const [params, setParams] = useState<ScenarioParams>(() => paramsParDefaut(aujourdhui))
   const [plan, setPlan] = useState<Record<string, number>>({})
@@ -162,6 +226,36 @@ export default function PlanApproModal({ articles, groupe, aujourdhui, retardMax
   const [exportEnCours, setExportEnCours] = useState(false)
 
   const refsSelection = useMemo(() => articles.map((a) => cleRef(a.ref)), [articles])
+  const designations = useMemo(() => {
+    const m = new Map<string, string | null>()
+    catalogue.forEach((c) => m.set(cleRef(c.ref), c.designation))
+    articles.forEach((a) => m.set(cleRef(a.ref), a.designation))
+    return m
+  }, [catalogue, articles])
+  const designationDe = useCallback((ref: string) => designations.get(cleRef(ref)) ?? null, [designations])
+  // Remplacements paramétrés dans la Projection stock (suggestions de chaînage par référence cible)
+  const [suggestions, setSuggestions] = useState<Map<string, SuggestionChainage[]>>(new Map())
+  useEffect(() => {
+    let annule = false
+    void (async () => {
+      const m = new Map<string, SuggestionChainage[]>()
+      for (let i = 0; i < refsSelection.length; i += 100) {
+        const { data, error } = await supabase.from('stock_article_substitutions').select('reference_source, reference_cible, pourcentage, actif, commentaire')
+          .in('reference_cible', refsSelection.slice(i, i + 100))
+        if (error) return
+        ;((data || []) as { reference_source: string; reference_cible: string; pourcentage: number; actif: boolean | null; commentaire: string | null }[])
+          .filter((r) => r.actif !== false).forEach((r) => {
+            const c = cleRef(r.reference_cible), src = cleRef(r.reference_source)
+            if (c === src) return
+            const l = m.get(c) || []
+            if (!l.some((x) => x.source === src)) l.push({ source: src, pct: Math.max(1, Math.min(100, Number(r.pourcentage) || 100)), commentaire: r.commentaire })
+            m.set(c, l)
+          })
+      }
+      if (!annule) setSuggestions(m)
+    })()
+    return () => { annule = true }
+  }, [refsSelection])
   const horizon = useMemo(() => listeMois(moisCourant, params.moisFinHorizon), [moisCourant, params.moisFinHorizon])
   const fenetre = useMemo(() => new Set(listeMois(params.moisDebutAppro, params.moisFinAppro)), [params.moisDebutAppro, params.moisFinAppro])
 
@@ -298,6 +392,17 @@ export default function PlanApproModal({ articles, groupe, aujourdhui, retardMax
     setChainages((c) => [...c, { cible: cleRef(cible), source: '', pct: 100 }])
     setVoirChainages(true)
   }
+  function ajouterChainageRef(cible: string, source: string, pct: number, commentaire?: string | null) {
+    const c = cleRef(cible), src = cleRef(source)
+    if (!src || c === src) return
+    setChainages((l) => (l.some((x) => x.cible === c && x.source === src) ? l : [...l, { cible: c, source: src, pct, commentaire: commentaire ?? null }]))
+  }
+  function majChainage(cible: string, source: string, patch: Partial<Chainage>) {
+    setChainages((l) => l.map((x) => (x.cible === cleRef(cible) && x.source === cleRef(source) ? { ...x, ...patch } : x)))
+  }
+  function retirerChainage(cible: string, source: string) {
+    setChainages((l) => l.filter((x) => !(x.cible === cleRef(cible) && x.source === cleRef(source))))
+  }
   async function importerRemplacements() {
     const { data, error } = await supabase.from('stock_article_substitutions').select('reference_source, reference_cible, pourcentage, actif, commentaire')
       .in('reference_cible', refsSelection).eq('actif', true)
@@ -403,8 +508,12 @@ export default function PlanApproModal({ articles, groupe, aujourdhui, retardMax
         ['Encours fournisseurs', (l) => l.encours], ['Plan d’appro', (l) => l.plan], ['Stock fin', (l) => l.stockFin], ['Couverture (mois)', (l) => l.couverture], ['Valeur stock (€)', (l) => l.valeurStock],
       ]
       projectionsTriees.forEach((pr) => {
-        lignesDetail.forEach(([lib, f], i) => {
-          const r = d.addRow([i === 0 ? pr.article.ref : '', lib, ...pr.mois.map(f)])
+        d.addRow([pr.article.ref, 'Ventes propres (N-1 / μ)', ...pr.mois.map((l) => l.propre)])
+        chainages.filter((c) => c.cible === cleRef(pr.article.ref) && c.source.trim()).forEach((c) => {
+          d.addRow(['', `↳ ${c.source} (${fmtNum(c.pct)} %)`, ...pr.mois.map((l) => l.apports.find((x) => x.source === c.source)?.qte ?? 0)]).font = { color: { argb: 'FF5B4387' } }
+        })
+        lignesDetail.forEach(([lib, f]) => {
+          const r = d.addRow(['', lib, ...pr.mois.map(f)])
           if (lib === 'Stock fin') pr.mois.forEach((l, j) => { if (l.stockFin < 0) r.getCell(3 + j).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEE2E2' } } })
           if (lib === 'Plan d’appro') r.font = { bold: true, color: { argb: 'FF7A5EA8' } }
         })
@@ -673,7 +782,7 @@ export default function PlanApproModal({ articles, groupe, aujourdhui, retardMax
           <section className="rounded-xl border border-[#E5E1D8] bg-white">
             <div className="flex flex-wrap items-center gap-2 px-3 py-2">
               <h3 className="text-[13px] font-bold text-[#111820]">Plan d’appro par référence</h3>
-              <span className="text-[11px] text-[#8A8474]">Saisie dans les mois violets (une livraison par mois). Ligne 2 : {lecture === 'stock' ? 'stock de fin de mois' : lecture === 'couverture' ? 'couverture en mois' : 'valeur du stock'} — rouge : rupture, orange : moins d’un mois, bleu : plus de 2 × la cible.</span>
+              <span className="text-[11px] text-[#8A8474]">Saisie dans les mois violets (une livraison par mois). « ▸ Demande » : ventes N-1, références chaînées (ajout, %), coefficient, commandes fermes. Ligne 2 : {lecture === 'stock' ? 'stock de fin de mois' : lecture === 'couverture' ? 'couverture en mois' : 'valeur du stock'} — rouge : rupture, orange : moins d’un mois, bleu : plus de 2 × la cible.</span>
               <div className="ml-auto flex items-center gap-1">
                 {(['stock', 'couverture', 'valeur'] as Lecture[]).map((l) => (
                   <button key={l} type="button" onClick={() => setLecture(l)} className={puce(lecture === l)}>{l === 'stock' ? 'Qté' : l === 'couverture' ? 'Mois' : '€'}</button>
@@ -711,10 +820,15 @@ export default function PlanApproModal({ articles, groupe, aujourdhui, retardMax
                   {projectionsTriees.map((pr) => {
                     const a = pr.article
                     const ouverte = refOuverte === a.ref
+                    const chainesRef = chainages.filter((c) => c.cible === cleRef(a.ref) && c.source.trim())
+                    const pctCede = pr.mois[0]?.pctCede || 0
+                    const afficheDemande = voirDemande || ouverte
+                    const nbDetail = ouverte ? 1 + chainesRef.length + (chainesRef.length || pctCede ? 1 : 0) + 3 + 1 : 0
+                    const n1 = params.baseDemande === 'n1'
                     return (
                       <React.Fragment key={a.ref}>
                         <tr className="bg-white">
-                          <td rowSpan={2 + (voirDemande ? 1 : 0) + (hypoParRef ? 1 : 0) + (ouverte ? 2 : 0)} className="sticky left-0 z-10 border-t border-[#E5E1D8] bg-white px-2 py-1 align-top">
+                          <td rowSpan={2 + (afficheDemande ? 1 : 0) + (hypoParRef ? 1 : 0) + nbDetail} className="sticky left-0 z-10 border-t border-[#E5E1D8] bg-white px-2 py-1 align-top">
                             <button type="button" onClick={() => setRefOuverte(ouverte ? null : a.ref)} className="text-left">
                               <div className="font-bold text-[#111820] hover:underline">{a.ref}</div>
                               <div className="max-w-[220px] truncate text-[10.5px] text-[#8A8474]" title={a.designation || ''}>{a.designation || '—'}</div>
@@ -722,7 +836,8 @@ export default function PlanApproModal({ articles, groupe, aujourdhui, retardMax
                             <div className="mt-0.5 text-[10px] text-[#8A8474]">
                               Stock {fmtNum(a.stockBase)} · μ {fmtNum(a.mu, 1)}{a.colisage > 1 ? ` · colis ${a.colisage}` : ''}{a.prix !== null ? ` · ${fmtNum(a.prix, 0)} €` : ' · sans prix'}
                             </div>
-                            {pr.repriseChainage > 0 && <div className="text-[10px] font-semibold text-[#5B4387]">+ {fmtNum(pr.repriseChainage)} repris par chaînage</div>}
+                            {pr.repriseChainage > 0 && <div className="text-[10px] font-semibold text-[#5B4387]">+ {fmtNum(pr.repriseChainage)} repris de {chainesRef.length} réf. chaînée{chainesRef.length > 1 ? 's' : ''}</div>}
+                            {pctCede > 0 && <div className="text-[10px] font-semibold text-orange-700">{fmtNum(pctCede)} % de ses ventes repris par une autre réf.</div>}
                             <div className="mt-0.5 flex gap-2 text-[10.5px] font-bold">
                               <button type="button" onClick={() => proposerRef(a)} className="text-[#7A5EA8] hover:underline">✦ proposer</button>
                               <button type="button" onClick={() => effacerPlan(a.ref)} className="text-[#8A8474] hover:underline">effacer</button>
@@ -745,9 +860,13 @@ export default function PlanApproModal({ articles, groupe, aujourdhui, retardMax
                           {pr.mois.map((l) => <td key={l.mois} className={`px-1.5 py-0.5 text-right font-semibold tabular-nums ${tonStock(l)}`} title={`Stock fin ${fmtNum(l.stockFin)} · couverture ${fmtNum(l.couverture, 1)} mois · ${fmtEuro(l.valeurStock)}`}>{cellLecture(l)}</td>)}
                           <td colSpan={2} className="px-2 text-right text-[10.5px] text-[#8A8474]">min {fmtNum(pr.stockMin)}</td>
                         </tr>
-                        {voirDemande && (
+                        {afficheDemande && (
                           <tr className="text-[#B4761A]">
-                            <td className="px-1.5 py-0.5">Demande</td>
+                            <td className="px-1.5 py-0.5">
+                              <button type="button" onClick={() => setRefOuverte(ouverte ? null : a.ref)} className="font-semibold hover:underline" title="Détail de la demande : ventes N-1, références chaînées, coefficient, commandes fermes">
+                                {ouverte ? '▾' : '▸'} Demande{chainesRef.length ? ` (+${chainesRef.length})` : ''}
+                              </button>
+                            </td>
                             {pr.mois.map((l) => <td key={l.mois} className="px-1.5 py-0.5 text-right tabular-nums" title={`Base ${fmtNum(l.base)} × ${fmtNum(l.coef * 100)} % = ${fmtNum(l.prevision)} · commandes fermes ${fmtNum(l.ferme)}`}>{fmtNum(l.demande)}{l.ferme > l.prevision ? <sup className="text-[#B42318]">f</sup> : null}</td>)}
                             <td colSpan={2} />
                           </tr>
@@ -766,15 +885,62 @@ export default function PlanApproModal({ articles, groupe, aujourdhui, retardMax
                         )}
                         {ouverte && (
                           <>
-                            <tr className="text-[10.5px] text-[#8A8474]">
-                              <td className="px-1.5 py-0.5">Base (N-1/μ)</td>
-                              {pr.mois.map((l) => <td key={l.mois} className="px-1.5 py-0.5 text-right tabular-nums">{fmtNum(l.base)}</td>)}
+                            <tr className="bg-[#FFFBF3] text-[10.5px] text-[#3A362E]">
+                              <td className="px-1.5 py-0.5" title={n1 ? 'Ventes de la référence le même mois l’an dernier (N-2 au-delà de 12 mois)' : 'Conso moyenne retenue par le calcul de besoin'}>
+                                {n1 ? 'Ventes N-1' : 'μ retenu'} {a.ref}{pctCede > 0 ? <span className="text-orange-700"> (−{fmtNum(pctCede)} %)</span> : null}
+                              </td>
+                              {pr.mois.map((l) => <td key={l.mois} className="px-1.5 py-0.5 text-right tabular-nums" title={n1 ? `Ventes de ${libMois(l.histo)}` : undefined}>{fmtNum(l.propre)}</td>)}
+                              <td colSpan={2} />
+                            </tr>
+                            {chainesRef.map((c) => (
+                              <tr key={c.source} className="bg-[#FAF7FD] text-[10.5px] text-[#5B4387]">
+                                <td className="px-1.5 py-0.5">
+                                  <div className="flex items-center gap-1">
+                                    <span className="font-bold" title={designationDe(c.source) || c.commentaire || ''}>↳ {c.source}</span>
+                                    <CelluleSaisie valeur={c.pct} onCommit={(v) => majChainage(a.ref, c.source, { pct: Math.max(1, Math.min(100, v ?? 100)) })} className="w-12 pr-4" suffixe="%" titre="Part des ventes passées de cette référence intégrée à la demande" />
+                                    <button type="button" onClick={() => retirerChainage(a.ref, c.source)} className="font-bold text-red-700" title="Retirer le chaînage">✕</button>
+                                  </div>
+                                  {designationDe(c.source) && <div className="max-w-[170px] truncate text-[9.5px] text-[#8A8474]">{designationDe(c.source)}</div>}
+                                </td>
+                                {pr.mois.map((l) => {
+                                  const ap = l.apports.find((x) => x.source === c.source)
+                                  return (
+                                    <td key={l.mois} className="px-1.5 py-0.5 text-right tabular-nums" title={ap ? `${n1 ? `Ventes ${libMois(l.histo)}` : 'μ 12 mois'} : ${fmtNum(ap.qte)} × ${fmtNum(ap.pct)} % = ${fmtNum(ap.apport, 1)} intégrés` : undefined}>
+                                      <span className="text-[#8A8474]">{ap ? fmtNum(ap.qte) : consoEtat === 'chargement' ? '…' : '0'}</span>
+                                      {ap && ap.pct < 100 && ap.qte > 0 ? <span className="ml-1 font-semibold">→{fmtNum(ap.apport)}</span> : null}
+                                    </td>
+                                  )
+                                })}
+                                <td colSpan={2} className="px-2 text-right text-[10px] text-[#8A8474]">{fmtNum(pr.mois.reduce((s2, l) => s2 + (l.apports.find((x) => x.source === c.source)?.apport || 0), 0))} intégrés</td>
+                              </tr>
+                            ))}
+                            {(chainesRef.length > 0 || pctCede > 0) && (
+                              <tr className="bg-[#FFFBF3] text-[10.5px] font-bold text-[#3A362E]">
+                                <td className="px-1.5 py-0.5">= Base retenue</td>
+                                {pr.mois.map((l) => <td key={l.mois} className="px-1.5 py-0.5 text-right tabular-nums">{fmtNum(l.base)}</td>)}
+                                <td colSpan={2} />
+                              </tr>
+                            )}
+                            <tr className="bg-[#FFFBF3] text-[10.5px] text-[#3A362E]">
+                              <td className="px-1.5 py-0.5">× coef → prévision</td>
+                              {pr.mois.map((l, i) => <td key={l.mois} className="px-1.5 py-0.5 text-right tabular-nums" title={`${fmtNum(l.base)} × ${fmtNum(l.coef * 100)} %${i === 0 ? ' au prorata des jours restants du mois' : ''} = ${fmtNum(l.prevision)}`}>{fmtNum(l.prevision)}<span className="ml-1 text-[9px] text-[#8A8474]">{fmtNum(l.coef * 100)}%</span></td>)}
+                              <td colSpan={2} />
+                            </tr>
+                            <tr className="bg-[#FFFBF3] text-[10.5px] text-[#B42318]">
+                              <td className="px-1.5 py-0.5" title="Réservé SAGE daté : plancher de la demande du mois (demande = le plus grand des deux)">Commandes fermes</td>
+                              {pr.mois.map((l) => <td key={l.mois} className="px-1.5 py-0.5 text-right tabular-nums">{l.ferme ? fmtNum(l.ferme) : ''}</td>)}
                               <td colSpan={2} />
                             </tr>
                             <tr className="text-[10.5px] text-emerald-700">
-                              <td className="px-1.5 py-0.5">Encours</td>
+                              <td className="px-1.5 py-0.5">Encours fournisseurs</td>
                               {pr.mois.map((l) => <td key={l.mois} className="px-1.5 py-0.5 text-right tabular-nums">{l.encours ? fmtNum(l.encours) : ''}</td>)}
                               <td colSpan={2} />
+                            </tr>
+                            <tr className="bg-[#FAF7FD]">
+                              <td colSpan={horizon.length + 3} className="px-1.5">
+                                <AjoutChainage cible={cleRef(a.ref)} dejaChainees={new Set(chainesRef.map((c) => c.source))} suggestions={suggestions.get(cleRef(a.ref)) || []}
+                                  catalogue={catalogue} designationDe={designationDe} onAjouter={(src, pct, com) => ajouterChainageRef(a.ref, src, pct, com)} />
+                              </td>
                             </tr>
                           </>
                         )}

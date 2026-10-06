@@ -62,8 +62,15 @@ export type ContexteProjection = {
   params: ScenarioParams
 }
 
+/** Détail d'une référence chaînée pour un mois : ventes de la source et part intégrée. */
+export type ApportChainage = { source: string; qte: number; pct: number; apport: number }
+
 export type MoisProjete = {
   mois: string
+  histo: string                  // mois historique lu (N-1, ou N-2 au-delà de 12 mois) — base « n1 »
+  propre: number                 // ventes propres de la référence sur le mois historique (ou μ), avant cession
+  pctCede: number                // % de ses ventes reprises par d'autres références (elle est source)
+  apports: ApportChainage[]      // références chaînées vers elle
   base: number
   coef: number
   prevision: number
@@ -150,7 +157,7 @@ function qteHisto(conso: Map<string, Map<string, number>>, ref: string, mois: st
 }
 
 /** Base de demande d'une référence pour un mois (avant coefficient), chaînages appliqués. */
-function baseMois(a: PlanArticle, mois: string, moisCourant: string, ctx: ContexteProjection): { base: number; reprise: number } {
+function baseMois(a: PlanArticle, mois: string, moisCourant: string, ctx: ContexteProjection): { base: number; reprise: number; histo: string; propre: number; pctCede: number; apports: ApportChainage[] } {
   const ref = cleRef(a.ref)
   const n1 = ctx.params.baseDemande === 'n1'
   const histo = moisHistorique(mois, moisCourant)
@@ -158,11 +165,14 @@ function baseMois(a: PlanArticle, mois: string, moisCourant: string, ctx: Contex
   // part de ses propres ventes reprise par d'autres références (elle est source)
   const pctCede = Math.min(100, ctx.chainages.filter((c) => cleRef(c.source) === ref).reduce((s, c) => s + c.pct, 0))
   let reprise = 0
-  ctx.chainages.filter((c) => cleRef(c.cible) === ref).forEach((c) => {
+  const apports: ApportChainage[] = []
+  ctx.chainages.filter((c) => cleRef(c.cible) === ref && c.source.trim()).forEach((c) => {
     const q = n1 ? qteHisto(ctx.conso, c.source, histo) : mu12(ctx.conso, c.source, moisCourant)
-    reprise += q * c.pct / 100
+    const apport = q * c.pct / 100
+    reprise += apport
+    apports.push({ source: cleRef(c.source), qte: Math.round(q * 10) / 10, pct: c.pct, apport: Math.round(apport * 10) / 10 })
   })
-  return { base: propre * (1 - pctCede / 100) + reprise, reprise }
+  return { base: propre * (1 - pctCede / 100) + reprise, reprise, histo, propre: Math.round(propre * 10) / 10, pctCede, apports }
 }
 
 function coefMois(ref: string, mois: string, ctx: ContexteProjection): number {
@@ -206,7 +216,7 @@ export function projeterArticle(a: PlanArticle, ctx: ContexteProjection, planOve
   let stock = a.stockBase
   let repriseTotale = 0
   const lignes: MoisProjete[] = horizon.map((mois, i) => {
-    const { base, reprise } = baseMois(a, mois, moisCourant, ctx)
+    const { base, reprise, histo, propre, pctCede, apports } = baseMois(a, mois, moisCourant, ctx)
     repriseTotale += reprise
     const coef = coefMois(a.ref, mois, ctx)
     const facteur = i === 0 ? prorata : 1
@@ -219,7 +229,7 @@ export function projeterArticle(a: PlanArticle, ctx: ContexteProjection, planOve
     const stockDebut = stock
     stock = arr1(stock + enc + p - demande)
     return {
-      mois, base: arr1(base), coef, prevision, ferme: f, demande: arr1(demande), encours: enc, plan: p, entrees: enc + p,
+      mois, histo, propre, pctCede, apports, base: arr1(base), coef, prevision, ferme: f, demande: arr1(demande), encours: enc, plan: p, entrees: enc + p,
       stockDebut, stockFin: stock, demandeSuivante: 0, couverture: null,
       valeurStock: a.prix === null ? null : Math.round(Math.max(0, stock) * a.prix),
       valeurPlan: a.prix === null ? null : Math.round(p * a.prix),

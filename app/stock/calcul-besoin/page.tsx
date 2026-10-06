@@ -3633,6 +3633,8 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
     })
   }, [planOuvert, filtres, propositions, tarifs])
 
+  const cataloguePlan = useMemo(() => (planOuvert ? articles.map((a) => ({ ref: a.reference_article, designation: a.sage_designation || a.blg_designation })) : []), [planOuvert, articles])
+
   const colonnesVisibles = useMemo(() => COLONNES_ARTICLES.filter((c) => !colonnesMasquees.has(c.key)), [colonnesMasquees])
   const setVisibles = useMemo(() => new Set(colonnesVisibles.map((c) => c.key)), [colonnesVisibles])
   const groupesEnTete = useMemo(() => {
@@ -3936,7 +3938,7 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
           onClose={() => setEditeurGroupe(null)} />
       )}
       {planOuvert && (
-        <PlanApproModal articles={articlesPlan}
+        <PlanApproModal articles={articlesPlan} catalogue={cataloguePlan}
           groupe={groupeActif && groupeActif.id ? { id: groupeActif.id, nom: groupeActif.nom } : null}
           aujourdhui={ctxBase.aujourdhui} retardMaxJours={ctxBase.retardMaxJours}
           onClose={() => setPlanOuvert(false)}
