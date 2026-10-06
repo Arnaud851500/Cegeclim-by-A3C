@@ -152,6 +152,7 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'Reconstitution Stock', path: '/stock/reconstruction', accessKey: 'can_stocks', description: 'Reconstruction stock projeté et verification des promesses"' },
       { label: 'Vision dispo par groupe d article', path: '/stock/groupes', accessKey: 'can_stocks', description: 'Visibilite dispo à venir et livraisons possibles"' },
       { label: 'Stocks', path: '/stock', accessKey: 'can_dashboard', description: 'Consultation des stocks (FMS et Agences), stocks prévisionnels et visu des dates de disponibilité .' },
+    { label: 'Analyse Stock Depot', path: '/stock/analyse-agence', accessKey: 'can_stocks', description: 'Analyse stock Dépot, proposition MIN / MAX ' },
     ],
   },
   {
