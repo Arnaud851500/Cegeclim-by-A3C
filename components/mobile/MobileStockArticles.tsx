@@ -54,6 +54,18 @@ import { supabase } from '@/lib/supabaseClient'
 //   - correctif base : la RPC calculait mal le solde de fin de journée quand
 //     plusieurs CDC tombaient le même jour (24 au lieu de 19 sur
 //     RAK-DJ25RHAE) ; elle suit maintenant la même règle que l'écran PC.
+//
+//   ÉVOLUTION (2026-10-07 bis, demandé par Arnaud) -- blocage et délai appro :
+//   - liste et fiche lisent la RPC get_stock_dispo_nouvelle_commande_v2 (par
+//     lot ; s'appuie sur get_couverture_stock_besoins, rapide, au lieu de la
+//     vue v_couverture_stock_besoins qui partait en timeout) ; elle renvoie
+//     aussi le blocage appro (SAGE ou arrêt manuel) et le délai d'appro retenu
+//     (référence → calcul de besoin → fournisseur → défaut) ;
+//   - badge « Blocage appro » / « Arrêt appro » sur l'article ;
+//   - dispo 0 sans aucune réception à venir :
+//       • article bloqué  → « NOUVELLE VENTE IMPOSSIBLE » ;
+//       • sinon           → livraison client dès aujourd'hui + délai appro
+//                           + 7 j (sécurité et transport).
 // ─────────────────────────────────────────────────────────────────────────
 
 type StockRow = {
@@ -82,7 +94,18 @@ type DispoNouvelleCommande = {
   qte_immediate: number
   date_prochaine_dispo: string | null
   qte_prochaine_dispo: number | null
+  /** Blocage appro SAGE ou arrêt appro manuel : plus aucun réappro possible. */
+  blocage_appro: boolean
+  blocage_source: 'SAGE' | 'MANUEL' | null
+  /** Délai d'appro retenu (référence → calcul de besoin → fournisseur → défaut). */
+  delai_appro_jours: number
 }
+
+/** Ce qu'on peut annoncer quand il n'y a pas de dispo immédiate. */
+type IssueSansDispo =
+  | { type: 'RECEPTION'; dateDispo: string; dateLivraison: string; quantite: number | null }
+  | { type: 'APPRO'; dateLivraison: string; delai: number }
+  | { type: 'IMPOSSIBLE' }
 
 type FamilleRow = { famille: string; famille_macro: string; libelle_famille: string | null }
 
@@ -141,10 +164,6 @@ function addDaysIso(iso: string, jours: number): string {
   d.setDate(d.getDate() + jours)
   return toIsoDate(d)
 }
-/** Date de livraison client annoncée : prochaine dispo + délai de sécurité. */
-function dateLivraisonClient(dateDispo: string | null): string | null {
-  return dateDispo ? addDaysIso(dateDispo, DELAI_SECURITE_JOURS) : null
-}
 function dateLivraisonValide(iso?: string | null): boolean {
   return Boolean(iso) && iso! >= SEUIL_DATE_VALIDE
 }
@@ -171,6 +190,9 @@ function normaliserDispo(d: Record<string, unknown>): DispoNouvelleCommande {
     qte_immediate: toNumber(d.qte_immediate),
     date_prochaine_dispo: d.date_prochaine_dispo ? String(d.date_prochaine_dispo).slice(0, 10) : null,
     qte_prochaine_dispo: d.qte_prochaine_dispo === null || d.qte_prochaine_dispo === undefined ? null : toNumber(d.qte_prochaine_dispo),
+    blocage_appro: d.blocage_appro === true,
+    blocage_source: d.blocage_source === 'SAGE' || d.blocage_source === 'MANUEL' ? d.blocage_source : null,
+    delai_appro_jours: d.delai_appro_jours === null || d.delai_appro_jours === undefined ? 30 : toNumber(d.delai_appro_jours),
   }
 }
 
@@ -178,6 +200,22 @@ function normaliserDispo(d: Record<string, unknown>): DispoNouvelleCommande {
 function prochaineDispoFuture(dispo: DispoNouvelleCommande): string | null {
   const auj = todayIso()
   return dispo.date_prochaine_dispo && dispo.date_prochaine_dispo > auj ? dispo.date_prochaine_dispo : null
+}
+
+/** Sans dispo immédiate : réception déjà attendue (+7 j), sinon réappro
+ * fournisseur (aujourd'hui + délai appro + 7 j), sinon vente impossible si
+ * l'article est bloqué à l'appro. */
+function issueSansDispo(dispo: DispoNouvelleCommande): IssueSansDispo {
+  const prochaine = prochaineDispoFuture(dispo)
+  if (prochaine) {
+    return { type: 'RECEPTION', dateDispo: prochaine, dateLivraison: addDaysIso(prochaine, DELAI_SECURITE_JOURS), quantite: dispo.qte_prochaine_dispo }
+  }
+  if (dispo.blocage_appro) return { type: 'IMPOSSIBLE' }
+  return { type: 'APPRO', dateLivraison: addDaysIso(todayIso(), dispo.delai_appro_jours + DELAI_SECURITE_JOURS), delai: dispo.delai_appro_jours }
+}
+
+function libelleBlocage(source: DispoNouvelleCommande['blocage_source']): string {
+  return source === 'MANUEL' ? 'Arrêt appro' : 'Blocage appro'
 }
 
 // Détecte une saisie "liste de références" (plusieurs lignes / virgules /
@@ -316,7 +354,7 @@ export default function MobileStockArticles({
     if (manquantes.length === 0) return
     let cancelled = false
     async function chargerDispo() {
-      const { data, error: err } = await supabase.rpc('get_stock_dispo_nouvelle_commande_batch', { p_references: manquantes })
+      const { data, error: err } = await supabase.rpc('get_stock_dispo_nouvelle_commande_v2', { p_references: manquantes })
       if (cancelled || err) return
       const out: Record<string, DispoNouvelleCommande> = {}
       for (const d of (data || []) as any[]) out[String(d.reference_article)] = normaliserDispo(d)
@@ -413,7 +451,7 @@ export default function MobileStockArticles({
           )}
           {results.map((r) => {
             const d = dispoParRef[r.reference_article]
-            const prochaine = d ? prochaineDispoFuture(d) : null
+            const issue = d && d.qte_immediate <= 0 ? issueSansDispo(d) : null
             return (
               <button
                 key={r.reference_article}
@@ -424,8 +462,11 @@ export default function MobileStockArticles({
                 }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14.5, fontWeight: 700, color: '#fff' }}>{r.reference_article}</span>
-                  <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)' }}>Détail ›</span>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14.5, fontWeight: 700, color: '#fff' }}>{r.reference_article}</span>
+                    {d?.blocage_appro && <BadgeBlocage source={d.blocage_source} />}
+                  </span>
+                  <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', flexShrink: 0 }}>Détail ›</span>
                 </div>
                 <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 8, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                   {r.designation || '—'}
@@ -447,11 +488,19 @@ export default function MobileStockArticles({
                     accent={r.stock_a_terme < 0 ? C_ROUGE : undefined}
                   />
                 </div>
-                {d && d.qte_immediate <= 0 && (
-                  <div style={{ marginTop: 8, fontSize: 12, fontWeight: 600, color: prochaine ? C_ORANGE : C_ROUGE }}>
-                    {prochaine
-                      ? `Livraison client dès le ${formatDateCourte(dateLivraisonClient(prochaine))}${d.qte_prochaine_dispo !== null ? ` · ${formatNumber(d.qte_prochaine_dispo)} p.` : ''}`
-                      : 'Pas de dispo prévue · réappro nécessaire'}
+                {issue && issue.type === 'IMPOSSIBLE' && (
+                  <div style={{ marginTop: 8, fontSize: 13, fontWeight: 800, letterSpacing: '0.03em', color: C_ROUGE }}>
+                    NOUVELLE VENTE IMPOSSIBLE
+                  </div>
+                )}
+                {issue && issue.type === 'RECEPTION' && (
+                  <div style={{ marginTop: 8, fontSize: 12, fontWeight: 600, color: C_ORANGE }}>
+                    Livraison client dès le {formatDateCourte(issue.dateLivraison)}{issue.quantite !== null ? ` · ${formatNumber(issue.quantite)} p.` : ''}
+                  </div>
+                )}
+                {issue && issue.type === 'APPRO' && (
+                  <div style={{ marginTop: 8, fontSize: 12, fontWeight: 600, color: C_ORANGE }}>
+                    Livraison client dès le {formatDateCourte(issue.dateLivraison)} <span style={{ fontWeight: 400, color: 'rgba(255,255,255,0.5)' }}>· après réappro ({issue.delai} j + {DELAI_SECURITE_JOURS} j)</span>
                   </div>
                 )}
               </button>
@@ -665,13 +714,17 @@ function StockArticleDetailSheet({
     async function loadDispoNC() {
       setDispoNCLoading(true)
       setDispoNCError(null)
-      const { data, error } = await supabase.rpc('get_stock_dispo_nouvelle_commande', { p_reference: reference })
+      const { data, error } = await supabase.rpc('get_stock_dispo_nouvelle_commande_v2', { p_references: [reference] })
       if (cancelled) return
+      const ligne = ((data || []) as any[])[0]
       if (error) {
         setDispoNCError(error.message)
         setDispoNC(null)
+      } else if (!ligne) {
+        setDispoNCError('Disponibilité indisponible.')
+        setDispoNC(null)
       } else {
-        setDispoNC(normaliserDispo((data || {}) as Record<string, unknown>))
+        setDispoNC(normaliserDispo(ligne as Record<string, unknown>))
       }
       setDispoNCLoading(false)
     }
@@ -789,7 +842,10 @@ function StockArticleDetailSheet({
         <div style={{ padding: '0 18px 12px', flexShrink: 0 }}>
           <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
             <div style={{ minWidth: 0 }}>
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 15, fontWeight: 700, color: '#fff' }}>{reference}</span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 15, fontWeight: 700, color: '#fff' }}>{reference}</span>
+                {dispoNC?.blocage_appro && <BadgeBlocage source={dispoNC.blocage_source} />}
+              </span>
               <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.55)', marginTop: 2 }}>{designationResolue || '—'}</div>
             </div>
             <button onClick={onClose} style={{ color: 'rgba(255,255,255,0.4)', fontSize: 20, lineHeight: 1, background: 'none', border: 'none', flexShrink: 0 }}>✕</button>
@@ -962,7 +1018,7 @@ function BandeauTousDepots({
 }) {
   const libelle: React.CSSProperties = { fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 700, lineHeight: 1.25 }
   const immediate = dispo ? dispo.qte_immediate : 0
-  const prochaine = dispo ? prochaineDispoFuture(dispo) : null
+  const issue = dispo && immediate <= 0 ? issueSansDispo(dispo) : null
   const stockSagePL = total ? total.stock_disponible : dispo ? dispo.stock_dispo : 0
 
   return (
@@ -995,21 +1051,25 @@ function BandeauTousDepots({
         </div>
       </div>
 
-      {!dispoLoading && dispo && immediate <= 0 && (
+      {!dispoLoading && issue && issue.type === 'IMPOSSIBLE' && (
+        <div style={{ borderRadius: 10, border: '1px solid rgba(193,104,60,0.6)', background: 'rgba(193,104,60,0.16)', padding: '10px 12px' }}>
+          <div style={{ fontSize: 17, fontWeight: 800, letterSpacing: '0.03em', color: C_ROUGE }}>NOUVELLE VENTE IMPOSSIBLE</div>
+          <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 2, lineHeight: 1.4 }}>
+            {dispo?.blocage_source === 'MANUEL' ? 'Arrêt appro' : 'Blocage appro SAGE'} : aucun stock promissible et aucune réception ni réappro possible.
+          </div>
+        </div>
+      )}
+      {!dispoLoading && issue && issue.type !== 'IMPOSSIBLE' && (
         <div style={{ borderRadius: 10, border: '1px solid rgba(214,154,74,0.4)', background: 'rgba(214,154,74,0.10)', padding: '8px 10px' }}>
           <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.55)' }}>Livraison client possible dès</div>
-          {prochaine ? (
-            <>
-              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 20, fontWeight: 700, color: C_ORANGE }}>
-                {formatDateCourte(dateLivraisonClient(prochaine))}
-              </div>
-              <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'rgba(255,255,255,0.55)' }}>
-                {dispo.qte_prochaine_dispo !== null ? `${formatNumber(dispo.qte_prochaine_dispo)} p. promissibles · ` : ''}stock dispo le {formatDateCourte(prochaine)} + {DELAI_SECURITE_JOURS} j de sécurité
-              </div>
-            </>
-          ) : (
-            <div style={{ fontSize: 14, fontWeight: 700, color: C_ROUGE }}>Aucune réception prévue · réappro nécessaire</div>
-          )}
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 20, fontWeight: 700, color: C_ORANGE }}>
+            {formatDateCourte(issue.dateLivraison)}
+          </div>
+          <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'rgba(255,255,255,0.55)' }}>
+            {issue.type === 'RECEPTION'
+              ? `${issue.quantite !== null ? `${formatNumber(issue.quantite)} p. promissibles · ` : ''}stock dispo le ${formatDateCourte(issue.dateDispo)} + ${DELAI_SECURITE_JOURS} j de sécurité`
+              : `aucune réception prévue · réappro fournisseur ${issue.delai} j + ${DELAI_SECURITE_JOURS} j sécurité/transport`}
+          </div>
         </div>
       )}
 
