@@ -106,8 +106,8 @@ function ventiler(periodes: string[], cdc: Array<{ date_livraison: string | null
   return out
 }
 function parseReferences(q: string): string[] { return Array.from(new Set(q.split(/[\s,;]+/).map((s) => s.trim().toUpperCase()).filter(Boolean))) }
-const STATUT_LABEL: Record<string, string> = { COUVERT: 'Couvert (stock)', COUVERT_PAR_RECEPTION: 'Couvert par réception', RECEPTION_TARDIVE: 'Réception tardive', RUPTURE: 'Rupture' }
-const STATUT_COLOR: Record<string, string> = { COUVERT: '#8fd4a8', COUVERT_PAR_RECEPTION: '#8FC7DA', RECEPTION_TARDIVE: '#E0A961', RUPTURE: '#e0a685' }
+const STATUT_LABEL: Record<string, string> = { COUVERT: 'Couvert (stock)', COUVERT_PAR_RECEPTION: 'Couvert par réception', RECEPTION_TARDIVE: 'Réception tardive', RUPTURE: 'Rupture', A_COUVRIR_PAR_APPRO: 'À couvrir par appro' }
+const STATUT_COLOR: Record<string, string> = { COUVERT: '#8fd4a8', COUVERT_PAR_RECEPTION: '#8FC7DA', RECEPTION_TARDIVE: '#E0A961', RUPTURE: '#e0a685', A_COUVRIR_PAR_APPRO: '#C9A86A' }
 
 // ── Page ──────────────────────────────────────────────────────────────────
 export default function StockGroupesPage() {

@@ -40,17 +40,6 @@
 //   colonne visible). Auparavant v_portefeuille_couverture_stock était filtrée
 //   par la RLS commerciale : un utilisateur restreint voyait un stock
 //   « disponible » sur des articles entièrement réservés par d'autres clients.
-// ÉVOLUTION (2026-10-07, demandé par Arnaud) -- ne plus laisser lire le stock
-//   Sage − PL comme du stock promissible :
-//   - le stock Sage − PL passe en couleur neutre (liste, fiche, par dépôt) ;
-//     le vert est réservé à la dispo pour nouvelles commandes ;
-//   - liste : sous le stock Sage − PL, la dispo immédiate pour une nouvelle
-//     CDC (= promissible aujourd'hui) ; sous « Pas de dispo immédiate », en
-//     gros, la date de livraison client possible = prochaine dispo + 7 j de
-//     sécurité ;
-//   - fiche : KPI « Stock Sage − PL · tous dépôts » (neutre) et, en parallèle,
-//     « Dispo nouvelle CDC · livraison immédiate » (vert) ; libellés de la
-//     courbe / chronologie / section par dépôt alignés sur « Sage − PL ».
 // Sur mobile (< 768 px) on rend MobileStockArticles tel quel.
 // ============================================================================
 
@@ -114,7 +103,7 @@ type CouvertureRow = {
   receptions_avant_livraison: number
   stock_projete_a_date: number
   manque_a_date: number
-  statut_couverture: 'COUVERT' | 'COUVERT_PAR_RECEPTION' | 'RECEPTION_TARDIVE' | 'RUPTURE'
+  statut_couverture: 'COUVERT' | 'COUVERT_PAR_RECEPTION' | 'RECEPTION_TARDIVE' | 'RUPTURE' | 'A_COUVRIR_PAR_APPRO'
   /** false : CDC d'un client hors du portefeuille de l'utilisateur (client masqué, quantité comptée). */
   visible: boolean
   date_couverture_estimee: string | null
@@ -189,26 +178,24 @@ const DEPOTS_PROPOSES = [
 ]
 const HORIZONS: Array<[number, string]> = [[3, '3 mois'], [6, '6 mois'], [12, '12 mois']]
 const NB_MOIS_LISTE = 4 // fin du mois en cours + 3 mois suivants
-/** Délai de sécurité entre la date où le stock redevient promissible et la
- * date de livraison client annoncée. */
-const DELAI_SECURITE_JOURS = 7
 const STATUT_LABEL: Record<CouvertureRow['statut_couverture'], string> = {
   COUVERT: 'Couvert (stock)',
   COUVERT_PAR_RECEPTION: 'Couvert par réception',
   RECEPTION_TARDIVE: 'Réception tardive',
   RUPTURE: 'Rupture',
+  A_COUVRIR_PAR_APPRO: 'À couvrir par appro',
 }
 const STATUT_COLOR: Record<CouvertureRow['statut_couverture'], string> = {
   COUVERT: '#8fd4a8',
   COUVERT_PAR_RECEPTION: '#8FC7DA',
   RECEPTION_TARDIVE: '#E0A961',
   RUPTURE: '#e0a685',
+  A_COUVRIR_PAR_APPRO: '#C9A86A',
 }
 const C_VERT = '#8fd4a8'
 const C_BLEU = '#8FC7DA'
 const C_ORANGE = '#E0A961'
 const C_ROUGE = '#e0a685'
-const C_NEUTRE = '#D8D2BC'
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 function toNumber(v: unknown): number {
@@ -232,11 +219,6 @@ function addMonthsIso(iso: string, months: number): string {
   d.setMonth(d.getMonth() + months)
   return toIsoDate(d)
 }
-function addDaysIso(iso: string, jours: number): string {
-  const d = new Date(`${iso.slice(0, 10)}T00:00:00`)
-  d.setDate(d.getDate() + jours)
-  return toIsoDate(d)
-}
 function daysBetween(a: string, b: string): number {
   return Math.round((new Date(`${b}T00:00:00`).getTime() - new Date(`${a}T00:00:00`).getTime()) / 86400000)
 }
@@ -258,16 +240,8 @@ function formatJourMois(iso?: string | null): string {
 function depotCourt(depot: string): string {
   return String(depot || '').replace(/\s*CEGECLIM\s*$/i, '').trim() || depot
 }
-/** Couleur de la dispo pour nouvelles commandes : vert si > 0. */
 function couleurDispo(n: number): string {
   if (n > 0) return C_VERT
-  if (n < 0) return C_ROUGE
-  return 'rgba(255,255,255,0.35)'
-}
-/** Couleur du stock Sage − PL : neutre (jamais vert -- ce stock inclut des
- * quantités déjà promises aux CDC), gris si 0, rouge si négatif. */
-function couleurStock(n: number): string {
-  if (n > 0) return C_NEUTRE
   if (n < 0) return C_ROUGE
   return 'rgba(255,255,255,0.35)'
 }
@@ -311,7 +285,7 @@ async function fetchAll<T>(build: (from: number, to: number) => PromiseLike<any>
   return out
 }
 
-/** Projection sur documents réels : stock Sage − PL d'aujourd'hui, réceptions
+/** Projection sur documents réels : stock dispo d'aujourd'hui, réceptions
  * fournisseurs (+) et besoins CDC (−) dans l'ordre chronologique, réception
  * avant besoin à date égale. Les besoins dont la livraison est passée sont
  * ramenés à aujourd'hui (besoin immédiat). */
@@ -387,15 +361,6 @@ function calculerEchelons(stock0: number, events: ProjPoint[], maxPaliers = 3): 
     if (v > niveau) { niveau = v; out.push({ date: events[i].date, quantite: v }) }
   }
   return out
-}
-
-/** Prochaine dispo quand il n'y a rien aujourd'hui : 1er palier > 0, avec la
- * date de livraison client (palier + délai de sécurité). */
-function prochaineDispo(echelons: Echelon[]): { dateDispo: string; dateLivraison: string; quantite: number } | null {
-  if (echelons.length === 0 || echelons[0].quantite > 0) return null
-  const palier = echelons.slice(1).find((e) => e.quantite > 0)
-  if (!palier) return null
-  return { dateDispo: palier.date, dateLivraison: addDaysIso(palier.date, DELAI_SECURITE_JOURS), quantite: palier.quantite }
 }
 
 /** Projection allégée d'une référence pour la liste, agrégée par période.
@@ -731,11 +696,11 @@ function StockDesktop() {
             </select>
           </label>
           <label style={styles.field}>
-            <span style={styles.fieldLabel}>Stock Sage − PL</span>
+            <span style={styles.fieldLabel}>Stock dispo</span>
             <select value={dispoFiltre} onChange={(e) => setDispoFiltre(e.target.value as 'tous' | 'oui' | 'non')} style={styles.select}>
               <option value="tous">Tous</option>
-              <option value="oui">Stock Sage − PL &gt; 0</option>
-              <option value="non">Stock Sage − PL ≤ 0</option>
+              <option value="oui">Avec stock disponible</option>
+              <option value="non">Sans stock disponible</option>
             </select>
           </label>
           <label style={styles.field}>
@@ -767,7 +732,7 @@ function StockDesktop() {
               {results ? <span style={styles.countTag}>{lignes.length}</span> : null}
               {loading || projLoading ? <span style={{ ...styles.muted, textTransform: 'none', letterSpacing: 0, fontWeight: 400 }}>· chargement…</span> : null}
             </div>
-            <div style={styles.muted}>Les colonnes « Fin … » sont des flux de la période, sauf « Stock projeté » et « Dispo nouvelles CDC » qui sont des positions à l'échéance. Seules les quantités en <span style={{ color: C_VERT, fontWeight: 700 }}>vert</span> peuvent être promises à un client.</div>
+            <div style={styles.muted}>Les colonnes « Fin … » sont des flux de la période, sauf « Stock projeté » et « Dispo nouvelles CDC » qui sont des positions à l'échéance.</div>
           </div>
           {lignes.length > 0 && (
             <div style={styles.segment}>
@@ -800,7 +765,7 @@ function StockDesktop() {
                 <tr>
                   <th style={{ ...styles.th, minWidth: 230 }}>Référence</th>
                   <th style={{ ...styles.th, minWidth: 150 }}>Ligne</th>
-                  <th style={{ ...styles.th, textAlign: 'right', minWidth: 130 }}>Stock Sage − PL</th>
+                  <th style={{ ...styles.th, textAlign: 'right' }}>Stock Sage − PL</th>
                   {Array.from({ length: nbPeriodes }, (_, k) => (
                     <th key={k} style={{ ...styles.th, textAlign: 'right', minWidth: 104 }}>{libellePeriode(bornes, k)}</th>
                   ))}
@@ -810,8 +775,6 @@ function StockDesktop() {
               {lignesAffichees.map((r) => {
                 const p = projParRef[r.reference_article]
                 const actif = selected?.reference === r.reference_article
-                const stockSagePL = p ? p.stock0 : r.stock_disponible
-                const prochaine = p ? prochaineDispo(p.echelons) : null
                 return (
                   <tbody
                     key={r.reference_article}
@@ -829,23 +792,7 @@ function StockDesktop() {
                             <span style={{ ...styles.flag, borderColor: 'rgba(224,169,97,0.55)', color: C_ORANGE }}>{p.nbCdcRetard} CDC en retard · {formatNumber(p.qteRetard)} p.</span>
                           )}
                           {p && p.echelons[0].quantite <= 0 && (
-                            <>
-                              <span style={{ ...styles.flag, borderColor: 'rgba(193,104,60,0.55)', color: C_ROUGE }}>Pas de dispo immédiate</span>
-                              <div
-                                style={styles.prochaineBox}
-                                title={prochaine ? `Stock promissible le ${formatDateFr(prochaine.dateDispo)} + ${DELAI_SECURITE_JOURS} j de sécurité pour la livraison client` : undefined}
-                              >
-                                <span style={styles.prochaineLabel}>Livraison client dès</span>
-                                {prochaine ? (
-                                  <>
-                                    <span style={{ ...styles.prochaineDate, color: C_ORANGE }}>{formatDateCourte(prochaine.dateLivraison)}</span>
-                                    <span style={styles.cellSub}>{formatNumber(prochaine.quantite)} p. · dans {daysBetween(todayIso(), prochaine.dateLivraison)} j</span>
-                                  </>
-                                ) : (
-                                  <span style={{ ...styles.prochaineDate, fontSize: 15, color: C_ROUGE }}>Réappro nécessaire</span>
-                                )}
-                              </div>
-                            </>
+                            <span style={{ ...styles.flag, borderColor: 'rgba(193,104,60,0.55)', color: C_ROUGE }}>Pas de dispo immédiate</span>
                           )}
                           {p && p.nbCdcRetard === 0 && p.echelons[0].quantite > 0 && p.besoins > 0 && (
                             <span style={{ ...styles.flag, borderColor: 'rgba(143,212,168,0.45)', color: C_VERT }}>CDC toutes servables</span>
@@ -854,17 +801,11 @@ function StockDesktop() {
                       </td>
                       <td style={{ ...styles.td, ...styles.lineLabel, color: C_ORANGE }}>CDC à livrer</td>
                       <td rowSpan={4} style={{ ...styles.td, textAlign: 'right', verticalAlign: 'top' }}>
-                        <div style={{ ...styles.bigNum, fontSize: 20, color: couleurStock(stockSagePL) }}>{formatNumber(stockSagePL)}</div>
+                        <div style={{ ...styles.bigNum, color: couleurDispo(p ? p.stock0 : r.stock_disponible) }}>{formatNumber(p ? p.stock0 : r.stock_disponible)}</div>
                         {p && p.stockReel !== null && (
                           <div style={styles.cellSub}>réel {formatNumber(p.stockReel)}{p.stockATerme !== null ? ` · à terme ${formatNumber(p.stockATerme)}` : ''}</div>
                         )}
                         {depot && <div style={{ ...styles.cellSub, color: 'rgba(166,161,129,0.95)' }}>{depotCourt(r.depot)} : {formatNumber(r.stock_disponible)}</div>}
-                        {p && (
-                          <div style={{ ...styles.dispoImmBox, ...(p.echelons[0].quantite > 0 ? {} : styles.dispoImmBoxRien) }}>
-                            <span style={{ ...styles.dispoImmQte, color: couleurDispo(p.echelons[0].quantite) }}>{formatNumber(p.echelons[0].quantite)}</span>
-                            <span style={styles.dispoImmLabel}>dispo immédiate<br />nouvelle CDC</span>
-                          </div>
-                        )}
                       </td>
                       {Array.from({ length: nbPeriodes }, (_, k) => (
                         <td key={k} style={styles.tdNum}>{p ? <CelluleCdc per={p.periodes[k]} /> : <Attente />}</td>
@@ -905,11 +846,10 @@ function StockDesktop() {
 
         {lignes.length > 0 && (
           <div style={styles.footnote}>
-            « Stock Sage − PL » = stock tous dépôts moins les préparations de livraison, avant les CDC en portefeuille (comptées dans les colonnes suivantes) : ce n'est pas une quantité promissible.
-            « Dispo immédiate nouvelle CDC » = ce qu'on peut promettre aujourd'hui sans repousser une CDC déjà prise. « Livraison client dès » = prochaine date où du stock redevient promissible + {DELAI_SECURITE_JOURS} j de sécurité.
+            « Stock Sage − PL » = stock tous dépôts moins les préparations de livraison, avant les CDC en retard (comptées dans la colonne « Auj. »).
             « CDC à livrer » à la date de livraison demandée ; « en retard » = part non servie à cette date avec le stock et les réceptions connus (service dans l'ordre des dates de livraison).
             « CDF à recevoir » à la date de réception retenue (* = CDF en retard ou sans date, supposée reçue demain).
-            « Stock projeté » = Stock Sage − PL + reçu − livré en cumul. « Dispo nouvelles CDC » = plus bas niveau du stock projeté à partir de l'échéance.
+            « Stock projeté » = Stock Sage − PL + reçu − livré en cumul. « Dispo nouvelles CDC » = plus bas niveau du stock projeté à partir de l'échéance : ce qu'on peut promettre sans repousser une CDC déjà prise.
           </div>
         )}
       </div>
@@ -1137,8 +1077,8 @@ function ArticleDetail({
     return () => { cancelled = true }
   }, [reference, designation])
 
-  // Stock de départ de la projection : Sage − PL global (sto_qte − sto_prepa),
-  // même base que v_couverture_stock_besoins.
+  // Stock de départ de la projection : dispo global (sto_qte − sto_prepa),
+  // même base que v_portefeuille_couverture_stock.
   const totalDepot = useMemo(() => {
     if (!depotRows) return null
     return depotRows.reduce(
@@ -1165,8 +1105,6 @@ function ArticleDetail({
   const dispoNouvelleCommande = useMemo(() => premiereDateDisponible(stock0, events, quantite), [stock0, events, quantite])
   const stockFinal = events.length > 0 ? events[events.length - 1].stockApres : stock0
   const echelons = useMemo(() => calculerEchelons(stock0, events, 4), [stock0, events])
-  const dispoImmediate = echelons[0]?.quantite ?? 0
-  const prochaine = useMemo(() => prochaineDispo(echelons), [echelons])
 
   const { depotsAvecStock, depotsVides, maxDispo } = useMemo(() => {
     const rows = [...(depotRows || [])].sort((a, b) => toNumber(b.stock_disponible) - toNumber(a.stock_disponible) || a.depot.localeCompare(b.depot, 'fr'))
@@ -1174,14 +1112,6 @@ function ArticleDetail({
     const vides = rows.filter((r) => !avec.includes(r))
     return { depotsAvecStock: avec, depotsVides: vides, maxDispo: Math.max(1, ...avec.map((r) => Math.max(0, toNumber(r.stock_disponible)))) }
   }, [depotRows])
-
-  const subDispoImmediate = loading
-    ? undefined
-    : dispoImmediate > 0
-      ? 'promissible sans retarder une CDC déjà prise'
-      : prochaine
-        ? `livraison client dès le ${formatDateCourte(prochaine.dateLivraison)} (${formatNumber(prochaine.quantite)} p., dispo + ${DELAI_SECURITE_JOURS} j)`
-        : 'aucune dispo prévue · réappro nécessaire'
 
   return (
     <div style={styles.detail}>
@@ -1210,35 +1140,22 @@ function ArticleDetail({
 
       {/* ── Bandeau KPI ── */}
       <div style={styles.kpiRow}>
-        <Kpi
-          label="Dispo nouvelle CDC · livraison immédiate"
-          value={loading ? '…' : formatNumber(dispoImmediate)}
-          color={couleurDispo(dispoImmediate)}
-          sub={subDispoImmediate}
-          variante={loading || dispoImmediate > 0 ? 'dispo' : 'rupture'}
-        />
-        <Kpi
-          label="Stock Sage − PL · tous dépôts"
-          value={loading ? '…' : formatNumber(stock0)}
-          color={couleurStock(stock0)}
-          sub="physique − préparations, avant les CDC en portefeuille"
-          variante="neutre"
-        />
+        <Kpi label="Disponible tous dépôts" value={loading ? '…' : formatNumber(stock0)} color={couleurDispo(stock0)} big />
         <Kpi label="Réel" value={loading || !totalDepot ? '…' : formatNumber(totalDepot.stock_reel)} />
         <Kpi label="Réservé" value={loading || !totalDepot ? '…' : formatNumber(totalDepot.stock_reserve)} color={totalDepot && totalDepot.stock_reserve > 0 ? '#D69A4A' : undefined} />
         <Kpi label="À terme (SAGE)" value={loading || !totalDepot ? '…' : formatNumber(totalDepot.stock_a_terme)} color={totalDepot && totalDepot.stock_a_terme < 0 ? C_ROUGE : undefined} />
         <Kpi label="Réceptions attendues" value={loading ? '…' : `+ ${formatNumber(totalReceptions)}`} color={C_BLEU} sub={receptionsAvecHypothese > 0 ? `${receptionsAvecHypothese} CDF en retard / sans date → demain` : `${receptions.length} ligne(s) CDF`} />
         <Kpi label="Besoins CDC fermes" value={loading ? '…' : `− ${formatNumber(totalBesoins)}`} color={C_ORANGE} sub={`${couverture.length} ligne(s) · ${nonCompletes.length} non complète(s)`} />
-        <Kpi label="Stock projeté fin de besoins" value={loading ? '…' : formatNumber(stockFinal)} color={stockFinal < 0 ? C_ROUGE : '#fff'} sub="après toutes réceptions et CDC connus" />
+        <Kpi label="Stock projeté fin de besoins" value={loading ? '…' : formatNumber(stockFinal)} color={couleurDispo(stockFinal)} sub="après toutes réceptions et CDC connus" />
       </div>
 
       {/* ── Projection ── */}
       <div style={styles.card}>
         <div style={styles.cardHeaderRow}>
           <div>
-            <div style={styles.cardTitle}>Projection du stock Sage − PL sur documents réels</div>
+            <div style={styles.cardTitle}>Projection du stock disponible sur documents réels</div>
             <div style={styles.muted}>
-              Stock Sage − PL aujourd'hui, moins les commandes clients à leur date de livraison, plus les commandes fournisseurs à leur date de réception. Les CDF en retard ou sans date sont supposées reçues demain (pointillés). Le point le plus bas de la courbe à partir d'une date donne la quantité promissible à cette date.
+              Stock dispo aujourd'hui, moins les commandes clients à leur date de livraison, plus les commandes fournisseurs à leur date de réception. Les CDF en retard ou sans date sont supposées reçues demain (pointillés).
             </div>
           </div>
           <div style={styles.segment}>
@@ -1322,7 +1239,7 @@ function ArticleDetail({
                     {dispoNouvelleCommande.date === todayIso() ? "aujourd'hui" : formatDateFr(dispoNouvelleCommande.date)}
                   </div>
                   <div style={styles.tdSub}>
-                    {dispoNouvelleCommande.date === todayIso() ? '' : `dans ${daysBetween(todayIso(), dispoNouvelleCommande.date)} j · livraison client conseillée dès le ${formatDateFr(addDaysIso(dispoNouvelleCommande.date, DELAI_SECURITE_JOURS))} · `}
+                    {dispoNouvelleCommande.date === todayIso() ? '' : `dans ${daysBetween(todayIso(), dispoNouvelleCommande.date)} j · `}
                     stock projeté minimum ensuite : {formatNumber(dispoNouvelleCommande.niveau)} · reste {formatNumber(dispoNouvelleCommande.niveau - quantite)} après cette commande
                   </div>
                 </>
@@ -1344,10 +1261,10 @@ function ArticleDetail({
                   <tbody>
                     <tr>
                       <td style={{ ...styles.td, whiteSpace: 'nowrap' }}>{formatDateCourte(todayIso())}</td>
-                      <td style={styles.td}><span style={{ ...styles.badge, borderColor: '#A6A181', color: '#E9E5D6' }}>Stock Sage − PL</span></td>
-                      <td style={styles.td}><span style={styles.tdSub}>tous dépôts, avant CDC</span></td>
+                      <td style={styles.td}><span style={{ ...styles.badge, borderColor: '#A6A181', color: '#E9E5D6' }}>Stock dispo</span></td>
+                      <td style={styles.td}><span style={styles.tdSub}>tous dépôts</span></td>
                       <td style={{ ...styles.td, textAlign: 'right' }}></td>
-                      <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--font-mono)', fontWeight: 700, color: couleurStock(stock0) }}>{formatNumber(stock0)}</td>
+                      <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--font-mono)', fontWeight: 700, color: couleurDispo(stock0) }}>{formatNumber(stock0)}</td>
                     </tr>
                     {events.map((e, i) => (
                       <tr key={`${e.type}-${e.label}-${i}`} style={{ opacity: e.date > horizonFin ? 0.5 : 1 }}>
@@ -1355,7 +1272,7 @@ function ArticleDetail({
                         <td style={styles.td}><span style={{ ...styles.badge, borderColor: e.type === 'RECEPTION' ? C_BLEU : C_ORANGE, color: e.type === 'RECEPTION' ? C_BLEU : C_ORANGE }}>{e.type === 'RECEPTION' ? 'Réception' : 'CDC'} {e.label}</span></td>
                         <td style={styles.td}><span style={styles.tdSub}>{e.detail || '—'}</span></td>
                         <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--font-mono)', color: e.quantite > 0 ? C_BLEU : C_ORANGE }}>{e.quantite > 0 ? '+' : ''}{formatNumber(e.quantite)}</td>
-                        <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--font-mono)', fontWeight: 700, color: couleurStock(e.stockApres) }}>{formatNumber(e.stockApres)}</td>
+                        <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--font-mono)', fontWeight: 700, color: couleurDispo(e.stockApres) }}>{formatNumber(e.stockApres)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1370,10 +1287,7 @@ function ArticleDetail({
       <div style={styles.twoCols}>
         {/* ── Stock par dépôt ── */}
         <div style={styles.card}>
-          <div style={{ ...styles.cardTitle, marginBottom: 4 }}>Stock Sage − PL au départ du dépôt</div>
-          <div style={{ ...styles.muted, marginBottom: 10 }}>
-            Stock physique du dépôt moins ses préparations de livraison. Les commandes clients ne sont pas rattachées à un dépôt : la dispo pour nouvelle CDC ne se calcule que tous dépôts confondus.
-          </div>
+          <div style={styles.cardTitle}>Stock disponible par dépôt</div>
           {loading ? <div style={styles.skeleton} /> : !depotRows || depotRows.length === 0 ? (
             <div style={styles.muted}>Aucune position de stock.</div>
           ) : (
@@ -1540,7 +1454,7 @@ function ProjectionChart({ stock0, events, debut, fin }: { stock0: number; event
             {p.event?.hypothese && <circle cx={x(p.date)} cy={y(p.stock)} r={7} fill="none" stroke={C_ORANGE} strokeDasharray="2 2" />}
           </g>
         ))}
-        <text x={padding.left} y={padding.top - 5} fontSize={10} fill="rgba(255,255,255,0.55)">aujourd'hui · stock Sage − PL</text>
+        <text x={padding.left} y={padding.top - 5} fontSize={10} fill="rgba(255,255,255,0.55)">aujourd'hui</text>
         {hp && (
           <line x1={hpX} y1={padding.top} x2={hpX} y2={padding.top + innerH} stroke="rgba(255,255,255,0.35)" strokeWidth={1} />
         )}
@@ -1554,8 +1468,8 @@ function ProjectionChart({ stock0, events, debut, fin }: { stock0: number; event
               {hp.event.detail ? <div style={styles.tdSub}>{hp.event.detail}</div> : null}
               {hp.event.hypothese ? <div style={styles.tdSub}>hypothèse : CDF en retard / sans date → demain</div> : null}
             </div>
-          ) : <div style={{ color: '#E9E5D6' }}>Stock Sage − PL aujourd'hui (avant CDC)</div>}
-          <div style={{ marginTop: 3 }}>Stock projeté : <strong style={{ color: couleurStock(hp.stock) }}>{formatNumber(hp.stock)}</strong></div>
+          ) : <div style={{ color: '#E9E5D6' }}>Stock disponible aujourd'hui</div>}
+          <div style={{ marginTop: 3 }}>Stock projeté : <strong style={{ color: couleurDispo(hp.stock) }}>{formatNumber(hp.stock)}</strong></div>
         </div>
       )}
       <div style={styles.legend}>
@@ -1569,12 +1483,11 @@ function ProjectionChart({ stock0, events, debut, fin }: { stock0: number; event
 }
 
 // ── Petits composants ─────────────────────────────────────────────────────
-function Kpi({ label, value, color, sub, variante }: { label: string; value: string; color?: string; sub?: string; variante?: 'dispo' | 'rupture' | 'neutre' }) {
-  const cadre = variante === 'dispo' ? styles.kpiDispo : variante === 'rupture' ? styles.kpiRupture : variante === 'neutre' ? styles.kpiNeutre : {}
+function Kpi({ label, value, color, sub, big }: { label: string; value: string; color?: string; sub?: string; big?: boolean }) {
   return (
-    <div style={{ ...styles.kpi, ...cadre }}>
+    <div style={{ ...styles.kpi, ...(big ? styles.kpiBig : {}) }}>
       <div style={styles.kpiLabel}>{label}</div>
-      <div style={{ ...styles.kpiValue, ...(variante === 'dispo' || variante === 'rupture' ? { fontSize: 36 } : {}), color: color || '#fff' }}>{value}</div>
+      <div style={{ ...styles.kpiValue, ...(big ? { fontSize: 36 } : {}), color: color || '#fff' }}>{value}</div>
       {sub && <div style={styles.kpiSub}>{sub}</div>}
     </div>
   )
@@ -1585,7 +1498,7 @@ function LigneDepot({ row, maxDispo }: { row: DepotStockRow; maxDispo: number })
   const reel = toNumber(row.stock_reel)
   const reserve = toNumber(row.stock_reserve)
   const largeur = Math.max(0, Math.min(100, (Math.max(0, dispo) / maxDispo) * 100))
-  const couleur = couleurStock(dispo)
+  const couleur = couleurDispo(dispo)
   return (
     <div style={styles.depotRow}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
@@ -1593,7 +1506,7 @@ function LigneDepot({ row, maxDispo }: { row: DepotStockRow; maxDispo: number })
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 20, fontWeight: 700, color: couleur }}>{formatNumber(dispo)}</span>
       </div>
       <div style={{ marginTop: 5, height: 5, borderRadius: 3, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
-        <div style={{ width: `${largeur}%`, height: '100%', borderRadius: 3, background: dispo > 0 ? 'rgba(216,210,188,0.55)' : couleur }} />
+        <div style={{ width: `${largeur}%`, height: '100%', borderRadius: 3, background: couleur }} />
       </div>
       <div style={{ marginTop: 4, display: 'flex', gap: 12, fontSize: 11, fontFamily: 'var(--font-mono)', color: 'rgba(255,255,255,0.5)' }}>
         <span>réel <span style={{ color: 'rgba(255,255,255,0.8)' }}>{formatNumber(reel)}</span></span>
@@ -1641,17 +1554,10 @@ const styles: Record<string, React.CSSProperties> = {
   refDesignation: { fontSize: 11.5, color: 'rgba(255,255,255,0.55)', lineHeight: 1.35, whiteSpace: 'normal' },
   flags: { marginTop: 8, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4 },
   flag: { display: 'inline-flex', padding: '2px 8px', borderRadius: 999, border: '1px solid', fontSize: 10.5, fontWeight: 700, whiteSpace: 'nowrap' },
-  prochaineBox: { marginTop: 2, display: 'flex', flexDirection: 'column', gap: 1, padding: '6px 10px', borderRadius: 10, border: '1px solid rgba(224,169,97,0.4)', background: 'rgba(224,169,97,0.08)' },
-  prochaineLabel: { fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 700, color: 'rgba(255,255,255,0.55)' },
-  prochaineDate: { fontFamily: 'var(--font-mono)', fontSize: 22, fontWeight: 800, lineHeight: 1.1 },
   lineLabel: { fontSize: 12, whiteSpace: 'nowrap', color: 'rgba(255,255,255,0.7)' },
   tdNum: { padding: '7px 10px', borderBottom: '1px solid rgba(255,255,255,0.05)', textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 13, verticalAlign: 'top', color: 'rgba(255,255,255,0.85)', whiteSpace: 'nowrap' },
   bigNum: { fontFamily: 'var(--font-mono)', fontSize: 24, fontWeight: 800, lineHeight: 1.1 },
   cellSub: { fontSize: 10.5, color: 'rgba(255,255,255,0.5)', fontFamily: 'var(--font-mono)', lineHeight: 1.4, whiteSpace: 'nowrap' },
-  dispoImmBox: { marginTop: 10, display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-end', padding: '5px 9px', borderRadius: 9, border: '1px solid rgba(143,212,168,0.45)', background: 'rgba(143,212,168,0.10)' },
-  dispoImmBoxRien: { border: '1px solid rgba(193,104,60,0.5)', background: 'rgba(193,104,60,0.12)' },
-  dispoImmQte: { fontFamily: 'var(--font-mono)', fontSize: 22, fontWeight: 800, lineHeight: 1.05 },
-  dispoImmLabel: { fontSize: 9.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.6)', textAlign: 'right', lineHeight: 1.25 },
   cibleBox: { marginTop: 2, padding: '5px 8px', borderRadius: 8, border: '1px solid rgba(166,161,129,0.4)', background: 'rgba(166,161,129,0.10)', fontSize: 12.5 },
   footnote: { marginTop: 10, fontSize: 11.5, color: 'rgba(255,255,255,0.45)', lineHeight: 1.5 },
 
@@ -1674,11 +1580,9 @@ const styles: Record<string, React.CSSProperties> = {
   detailRef: { fontFamily: 'var(--font-mono)', fontSize: 24, fontWeight: 800, color: '#fff', letterSpacing: '-0.01em' },
   detailDesignation: { marginTop: 2, fontSize: 14, color: 'rgba(255,255,255,0.65)' },
 
-  kpiRow: { display: 'grid', gridTemplateColumns: '1.35fr 1.15fr repeat(6, minmax(0, 1fr))', gap: 10 },
+  kpiRow: { display: 'grid', gridTemplateColumns: 'repeat(7, minmax(0, 1fr))', gap: 10 },
   kpi: { borderRadius: 14, border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.04)', padding: '12px 14px', minWidth: 0 },
-  kpiDispo: { border: '1px solid rgba(143,212,168,0.5)', background: 'rgba(143,212,168,0.10)' },
-  kpiRupture: { border: '1px solid rgba(193,104,60,0.55)', background: 'rgba(193,104,60,0.12)' },
-  kpiNeutre: { border: '1px solid rgba(216,210,188,0.28)', background: 'rgba(216,210,188,0.05)' },
+  kpiBig: { border: '1px solid rgba(166,161,129,0.4)', background: 'rgba(166,161,129,0.12)' },
   kpiLabel: { fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 700, color: 'rgba(255,255,255,0.5)' },
   kpiValue: { marginTop: 4, fontFamily: 'var(--font-mono)', fontSize: 24, fontWeight: 700, lineHeight: 1.1, whiteSpace: 'nowrap' },
   kpiSub: { marginTop: 4, fontSize: 11, color: 'rgba(255,255,255,0.45)', lineHeight: 1.35 },

@@ -46,7 +46,11 @@ type LignePortefeuille = {
 // fournisseurs sage.bdcf type 12, besoins servis par date de livraison puis
 // date de création). Une ligne par ligne de CDC contrôlée (référence gérée en
 // stock, quantité > 0).
-type CouvertureStatut = 'COUVERT' | 'COUVERT_PAR_RECEPTION' | 'RECEPTION_TARDIVE' | 'RUPTURE'
+// ÉVOLUTION (2026-10-07) : A_COUVRIR_PAR_APPRO = ligne non couverte par le stock
+// et les CDF en cours, mais livrable après la période figée (aujourd'hui + délai
+// d'appro de la référence) : un appro lancé aujourd'hui arrive à temps, la
+// commande client n'est donc plus en alerte (règle SQL v_couverture_stock_global).
+type CouvertureStatut = 'COUVERT' | 'COUVERT_PAR_RECEPTION' | 'RECEPTION_TARDIVE' | 'RUPTURE' | 'A_COUVRIR_PAR_APPRO'
 
 type CouvertureStock = {
   id: string
@@ -76,6 +80,8 @@ type CouvertureStock = {
   prochaine_reception_fournisseur: string | null
   prochaine_reception_hypothese: boolean | null
   receptions_avec_hypothese: boolean | null
+  delai_appro_jours: number | null
+  date_appro_au_plus_tot: string | null
 }
 
 /** Ligne du portefeuille enrichie des informations de couverture stock
@@ -96,6 +102,7 @@ type LigneDetail = LignePortefeuille & {
   // « Blocage appro » SAGE (appro_article_blocage.interdire_commande) = aucun
   // réapprovisionnement ne viendra compléter la ligne (arrêt de la référence).
   couv_arret_appro: boolean
+  couv_date_appro: string | null
 }
 
 type ControleFraisPort = {
@@ -244,6 +251,7 @@ type DocumentPortefeuille = {
   couv_references_non_servables: string
   couv_nb_arret_appro: number
   couv_references_arret_appro: string
+  couv_nb_a_couvrir_appro: number
 }
 
 type SyntheseControlCell = {
@@ -300,6 +308,7 @@ type CouvertureFilterMode =
   | 'ARRET_APPRO'
   | 'RECEPTION_TARDIVE'
   | 'COUVERT_PAR_RECEPTION'
+  | 'A_COUVRIR_PAR_APPRO'
   | 'COUVERT'
 
 const DEFAULT_TYPES = ['CDC', 'PL']
@@ -381,6 +390,8 @@ const COUVERTURE_SELECT = [
   'prochaine_reception_fournisseur',
   'prochaine_reception_hypothese',
   'receptions_avec_hypothese',
+  'delai_appro_jours',
+  'date_appro_au_plus_tot',
 ].join(',')
 
 const COUVERTURE_LABEL = 'Commandes non complètes à la date de livraison client'
@@ -566,6 +577,7 @@ function couvertureLabel(status: string) {
     COUVERT_PAR_RECEPTION: 'Couvert par réception',
     RECEPTION_TARDIVE: 'Réception tardive',
     RUPTURE: 'Rupture',
+    A_COUVRIR_PAR_APPRO: 'À couvrir par appro',
     [COUVERTURE_HORS_CONTROLE]: 'Hors contrôle',
   }
   return labels[status] || status || 'Hors contrôle'
@@ -575,6 +587,7 @@ function couvertureClassName(status: string) {
   if (status === 'RUPTURE') return 'border-rose-300 bg-rose-100 text-rose-900'
   if (status === 'RECEPTION_TARDIVE') return 'border-orange-300 bg-orange-100 text-orange-900'
   if (status === 'COUVERT_PAR_RECEPTION') return 'border-sky-300 bg-sky-100 text-sky-900'
+  if (status === 'A_COUVRIR_PAR_APPRO') return 'border-amber-200 bg-amber-50 text-amber-900'
   if (status === 'COUVERT') return 'border-emerald-200 bg-emerald-50 text-emerald-800'
   return 'border-slate-200 bg-slate-100 text-slate-500'
 }
@@ -583,6 +596,7 @@ function couvertureClassName(status: string) {
 function couvertureSeverity(status: string) {
   if (status === 'RUPTURE') return 4
   if (status === 'RECEPTION_TARDIVE') return 3
+  if (status === 'A_COUVRIR_PAR_APPRO') return 2.5
   if (status === 'COUVERT_PAR_RECEPTION') return 2
   if (status === 'COUVERT') return 1
   return 0
@@ -863,6 +877,7 @@ export default function PortefeuilleLivraisonPage() {
       if (requestedCouverture === 'rupture') applyCouvertureFilter('RUPTURE')
       if (requestedCouverture === 'reception-tardive') applyCouvertureFilter('RECEPTION_TARDIVE')
       if (requestedCouverture === 'arret-appro') applyCouvertureFilter('ARRET_APPRO')
+      if (requestedCouverture === 'a-couvrir-par-appro') applyCouvertureFilter('A_COUVRIR_PAR_APPRO')
     }
 
     function handleOpenControl() { applyControlFilter('ANOMALIES') }
@@ -1268,6 +1283,7 @@ export default function PortefeuilleLivraisonPage() {
           couv_references_non_servables: couvNonServable ? referenceArticle : '',
           couv_nb_arret_appro: arretAppro ? 1 : 0,
           couv_references_arret_appro: arretAppro ? referenceArticle : '',
+          couv_nb_a_couvrir_appro: couvStatut === 'A_COUVRIR_PAR_APPRO' ? 1 : 0,
           famillesSet: new Set(familleMacro ? [familleMacro] : []),
           referencesArticlesSet: new Set(referenceArticle ? [referenceArticle] : []),
           referencesSet: new Set(reference ? [reference] : []),
@@ -1289,6 +1305,7 @@ export default function PortefeuilleLivraisonPage() {
         if (couvStatut === 'RUPTURE') existing.couv_nb_rupture += 1
         if (couvStatut === 'RECEPTION_TARDIVE') existing.couv_nb_tardive += 1
         if (couvStatut === 'COUVERT_PAR_RECEPTION') existing.couv_nb_par_reception += 1
+        if (couvStatut === 'A_COUVRIR_PAR_APPRO') existing.couv_nb_a_couvrir_appro += 1
         if (couvNonServable) {
           existing.couv_nb_non_servables += 1
           existing.couv_montant_non_servable_ht += Number(ligne.montant_ht || 0)
@@ -1499,6 +1516,7 @@ export default function PortefeuilleLivraisonPage() {
       couv_prochaine_reception_date: couverture?.prochaine_reception_date ?? null,
       couv_hypothese: Boolean(couverture?.receptions_avec_hypothese),
       couv_arret_appro: isArretApproLigne(couverture?.statut_couverture, couverture?.date_couverture_estimee, ligne.reference_article, blocageApproRefs),
+      couv_date_appro: couverture?.date_appro_au_plus_tot ?? null,
     }
   }
 
@@ -1585,6 +1603,7 @@ export default function PortefeuilleLivraisonPage() {
   const couvertureKpi = useMemo(() => documents.reduce((acc, doc) => {
     if (doc.type_document !== 'CDC') return acc
     if (doc.couv_nb_lignes_controlees > 0) acc.nb_controles += 1
+    if (doc.couv_nb_a_couvrir_appro > 0) acc.nb_a_couvrir_appro += 1
     if (!isCouvertureNonServable(doc.couv_statut_doc)) return acc
     acc.nb_documents += 1
     acc.montant_ht += doc.montant_ht
@@ -1593,7 +1612,7 @@ export default function PortefeuilleLivraisonPage() {
     if (doc.couv_statut_doc === 'RECEPTION_TARDIVE') acc.nb_tardive += 1
     if (doc.couv_nb_arret_appro > 0) acc.nb_arret_appro += 1
     return acc
-  }, { nb_documents: 0, nb_controles: 0, montant_ht: 0, montant_non_servable_ht: 0, nb_rupture: 0, nb_tardive: 0, nb_arret_appro: 0 }), [documents])
+  }, { nb_documents: 0, nb_controles: 0, montant_ht: 0, montant_non_servable_ht: 0, nb_rupture: 0, nb_tardive: 0, nb_arret_appro: 0, nb_a_couvrir_appro: 0 }), [documents])
 
   const controleKpis = useMemo(() => groupesFraisPort.reduce((acc, group) => {
     if (group.statut_groupe === 'FRAIS_PORT_MANQUANT') acc.portManquant += 1
@@ -1655,11 +1674,11 @@ export default function PortefeuilleLivraisonPage() {
 
     const groupesExport = sortedGroupesFraisPort.map((group) => ({ 'Date BL': formatDate(group.date_controle), 'N° tiers': group.numero_tiers, Client: group.nom_tiers, 'Expédition': group.expedition, 'Lieu de livraison': group.lieu_livraison, Dépôts: group.depots, Agences: group.agences, 'Représentants': group.representants, 'N° BL': group.numeros_bl, 'Nb BL': group.nb_bl, 'BL avec port': group.nb_bl_avec_port, 'Port constaté groupe': group.frais_port_constate_groupe_ht, 'Port attendu groupe': group.frais_port_attendu_groupe_ht, 'Écart groupe': group.ecart_groupe_ht, 'BL à supprimer': group.nb_bl_a_supprimer, 'Montant à supprimer': group.montant_a_supprimer_ht, 'Montant à ajouter': group.montant_a_ajouter_ht, 'BL conseillé ajout': group.bl_conseille_ajout, 'BL conseillé conservation': group.bl_conseille_conservation, Statut: controlStatusLabel(group.statut_groupe) }))
 
-    const documentsExport = sortedDocuments.map((doc) => ({ Agence: doc.agence, Representant: doc.representant, 'N° tiers': doc.numero_tiers, Client: doc.nom_tiers, 'Type doc': doc.type_document, 'N° document': doc.numero_document, 'Date BL': formatDate(doc.date_controle), 'Référence entête': doc.reference_entete, 'Expédition': doc.expedition, 'Dépôt entête': doc.depot_entete, 'Lieu de livraison': doc.lieu_livraison, 'Nb BL groupe': doc.nb_bl_groupe, 'BL avec port groupe': doc.nb_bl_avec_port, 'Nb lignes': doc.nb_lignes, 'Montant HT portefeuille': Number(doc.montant_ht.toFixed(2)), 'Montant HT lignes contrôle': doc.montant_lignes_controle_ht, 'Montant HT entête': doc.montant_entete_ht, 'Port constaté BL': doc.frais_port_constate_ht, 'Port attendu groupe': doc.frais_port_attendu_groupe_ht, 'Port constaté groupe': doc.frais_port_constate_groupe_ht, 'Écart groupe': doc.ecart_groupe_ht, Action: actionLabel(doc.action_recommandee), 'Montant action': doc.montant_action_ht, 'Base calcul port': doc.base_calcul_frais_port, 'Statut contrôle': controlStatusLabel(doc.statut_controle), 'Date création document': formatDate(doc.date_creation_document), 'Date livraison': formatDate(doc.date_livraison), 'Mois livraison': monthLabel(doc.mois_livraison), [CDC_RETARD_LABEL]: isCdcEnRetard(doc) ? 'Oui' : 'Non', 'Couverture stock': doc.type_document === 'CDC' ? couvertureLabel(doc.couv_statut_doc) : '', 'Lignes non dispo. à date liv.': doc.couv_nb_non_servables, 'Montant non dispo. HT': Number(doc.couv_montant_non_servable_ht.toFixed(2)), 'Réf. non dispo.': doc.couv_references_non_servables, 'Lignes en arrêt appro (SAGE)': doc.couv_nb_arret_appro, 'Réf. en arrêt appro': doc.couv_references_arret_appro,'Couvert le (estimé)': formatDate(doc.couv_date_couverture_doc), 'Retard estimé max (j)': doc.couv_retard_max_jours ?? '', Référence: doc.references, 'Client en sommeil': doc.client_en_sommeil ? 'Oui' : 'Non', 'Familles macro': doc.familles_macro }))
+    const documentsExport = sortedDocuments.map((doc) => ({ Agence: doc.agence, Representant: doc.representant, 'N° tiers': doc.numero_tiers, Client: doc.nom_tiers, 'Type doc': doc.type_document, 'N° document': doc.numero_document, 'Date BL': formatDate(doc.date_controle), 'Référence entête': doc.reference_entete, 'Expédition': doc.expedition, 'Dépôt entête': doc.depot_entete, 'Lieu de livraison': doc.lieu_livraison, 'Nb BL groupe': doc.nb_bl_groupe, 'BL avec port groupe': doc.nb_bl_avec_port, 'Nb lignes': doc.nb_lignes, 'Montant HT portefeuille': Number(doc.montant_ht.toFixed(2)), 'Montant HT lignes contrôle': doc.montant_lignes_controle_ht, 'Montant HT entête': doc.montant_entete_ht, 'Port constaté BL': doc.frais_port_constate_ht, 'Port attendu groupe': doc.frais_port_attendu_groupe_ht, 'Port constaté groupe': doc.frais_port_constate_groupe_ht, 'Écart groupe': doc.ecart_groupe_ht, Action: actionLabel(doc.action_recommandee), 'Montant action': doc.montant_action_ht, 'Base calcul port': doc.base_calcul_frais_port, 'Statut contrôle': controlStatusLabel(doc.statut_controle), 'Date création document': formatDate(doc.date_creation_document), 'Date livraison': formatDate(doc.date_livraison), 'Mois livraison': monthLabel(doc.mois_livraison), [CDC_RETARD_LABEL]: isCdcEnRetard(doc) ? 'Oui' : 'Non', 'Couverture stock': doc.type_document === 'CDC' ? couvertureLabel(doc.couv_statut_doc) : '', 'Lignes non dispo. à date liv.': doc.couv_nb_non_servables, 'Montant non dispo. HT': Number(doc.couv_montant_non_servable_ht.toFixed(2)), 'Réf. non dispo.': doc.couv_references_non_servables, 'Lignes en arrêt appro (SAGE)': doc.couv_nb_arret_appro, 'Lignes à couvrir par appro': doc.couv_nb_a_couvrir_appro, 'Réf. en arrêt appro': doc.couv_references_arret_appro,'Couvert le (estimé)': formatDate(doc.couv_date_couverture_doc), 'Retard estimé max (j)': doc.couv_retard_max_jours ?? '', Référence: doc.references, 'Client en sommeil': doc.client_en_sommeil ? 'Oui' : 'Non', 'Familles macro': doc.familles_macro }))
 
     const exportDocumentKeys = new Set(sortedDocuments.map((doc) => doc.key))
     const lignesDetailExport = lignes.filter((ligne) => exportDocumentKeys.has(docKey(ligne))).map(toLigneDetail)
-    const lignesExport = lignesDetailExport.map((ligne) => ({ Agence: safeText(ligne.agence, 'Sans agence'), Representant: safeText(ligne.representant, 'Sans représentant'), 'N° tiers': safeText(ligne.numero_tiers, ''), Client: safeText(ligne.nom_tiers, ''), 'Type doc': safeText(ligne.type_document, ''), 'N° document': safeText(ligne.numero_document, ''), 'Référence article': safeText(ligne.reference_article, ''), 'Désignation article': safeText(ligne.designation_article, ''), Référence: safeText(ligne.reference, ''), Famille: safeText(ligne.famille, ''), 'Famille macro': safeText(ligne.famille_macro, 'Sans famille macro'), 'Quantité': Number(ligne.quantite || 0), 'Montant HT': Number(ligne.montant_ht || 0), 'Date création document': formatDate(ligne.date_creation_document), 'Date livraison': formatDate(ligne.date_livraison), 'Mois livraison': monthLabel(ligne.mois_livraison || 'SANS_DATE_LIVRAISON'), [CDC_RETARD_LABEL]: isCdcEnRetard(ligne) ? 'Oui' : 'Non', 'Couverture stock': ligne.couv_statut ? couvertureLabel(ligne.couv_statut) : '', 'Stock dispo global': ligne.couv_stock_disponible ?? '', 'Besoin cumulé': ligne.couv_besoin_cumule ?? '', 'Réceptions avant livraison': ligne.couv_receptions_avant ?? '', 'Stock projeté à date': ligne.couv_stock_projete ?? '', 'Manque à date': ligne.couv_manque ?? '', 'Couvert le (estimé)': formatDate(ligne.couv_date_couverture), 'Retard estimé (j)': ligne.couv_retard_jours ?? '', 'Prochaine réception': ligne.couv_prochaine_reception, 'Hypothèse CDF en retard = demain': ligne.couv_hypothese ? 'Oui' : 'Non', 'Arrêt appro (SAGE)': ligne.couv_arret_appro ? 'Oui' : 'Non', 'Client en sommeil': ligne.client_en_sommeil ? 'Oui' : 'Non' }))
+    const lignesExport = lignesDetailExport.map((ligne) => ({ Agence: safeText(ligne.agence, 'Sans agence'), Representant: safeText(ligne.representant, 'Sans représentant'), 'N° tiers': safeText(ligne.numero_tiers, ''), Client: safeText(ligne.nom_tiers, ''), 'Type doc': safeText(ligne.type_document, ''), 'N° document': safeText(ligne.numero_document, ''), 'Référence article': safeText(ligne.reference_article, ''), 'Désignation article': safeText(ligne.designation_article, ''), Référence: safeText(ligne.reference, ''), Famille: safeText(ligne.famille, ''), 'Famille macro': safeText(ligne.famille_macro, 'Sans famille macro'), 'Quantité': Number(ligne.quantite || 0), 'Montant HT': Number(ligne.montant_ht || 0), 'Date création document': formatDate(ligne.date_creation_document), 'Date livraison': formatDate(ligne.date_livraison), 'Mois livraison': monthLabel(ligne.mois_livraison || 'SANS_DATE_LIVRAISON'), [CDC_RETARD_LABEL]: isCdcEnRetard(ligne) ? 'Oui' : 'Non', 'Couverture stock': ligne.couv_statut ? couvertureLabel(ligne.couv_statut) : '', 'Stock dispo global': ligne.couv_stock_disponible ?? '', 'Besoin cumulé': ligne.couv_besoin_cumule ?? '', 'Réceptions avant livraison': ligne.couv_receptions_avant ?? '', 'Stock projeté à date': ligne.couv_stock_projete ?? '', 'Manque à date': ligne.couv_manque ?? '', 'Couvert le (estimé)': formatDate(ligne.couv_date_couverture), 'Retard estimé (j)': ligne.couv_retard_jours ?? '', 'Prochaine réception': ligne.couv_prochaine_reception, 'Hypothèse CDF en retard = demain': ligne.couv_hypothese ? 'Oui' : 'Non', 'Arrêt appro (SAGE)': ligne.couv_arret_appro ? 'Oui' : 'Non', 'Appro au plus tôt': formatDate(ligne.couv_date_appro), 'Client en sommeil': ligne.client_en_sommeil ? 'Oui' : 'Non' }))
 
     // Onglet dédié : uniquement les lignes non disponibles à la date de livraison des documents exportés.
     const couvertureExport = lignesDetailExport
@@ -1686,10 +1705,10 @@ export default function PortefeuilleLivraisonPage() {
               <p className="mt-1 text-sm text-slate-500">
                 Contrôle groupé des BL : un seul forfait par Date BL / N° tiers / Mode d'expédition / Lieu de livraison. Les BL à corriger sont identifiés avec une action Ajouter, Supprimer ou Vérifier.
                 {' '}Les CDC en retard de livraison ({getCdcRetardDescription()}) sont surlignés en rouge.
-                {' '}Couverture stock des CDC : stock global tous dépôts + réceptions fournisseurs attendues (commandes SAGE non réceptionnées), besoins servis par date de livraison puis date de création ; les commandes fournisseurs en retard ou sans date sont supposées reçues demain.
+                {' '}Couverture stock des CDC : stock global tous dépôts + réceptions fournisseurs attendues (commandes SAGE non réceptionnées), besoins servis par date de livraison puis date de création ; les commandes fournisseurs en retard ou sans date sont supposées reçues demain. Une ligne livrable après la période figée (aujourd'hui + délai d'appro de la référence) n'est pas en alerte : elle est « à couvrir par appro ». Dates de prochaine dispo par référence : écran Références en pénurie.
               </p>
               <div className="mt-2 inline-flex rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-800">
-                Version 2026-09-27 v3.7 — contrôle frais de port groupé · {CDC_RETARD_LABEL} · commandes non complètes à la date de livraison client · pastille arrêt appro
+                Version 2026-10-07 v3.8 — contrôle frais de port groupé · {CDC_RETARD_LABEL} · commandes non complètes à la date de livraison client · pastille arrêt appro · période figée d'appro
               </div>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -1775,6 +1794,7 @@ export default function PortefeuilleLivraisonPage() {
                 <option value="ARRET_APPRO">Rupture sur référence en arrêt appro (SAGE)</option>
                 <option value="RECEPTION_TARDIVE">Réception tardive</option>
                 <option value="COUVERT_PAR_RECEPTION">Couvert par réception</option>
+                <option value="A_COUVRIR_PAR_APPRO">À couvrir par appro (livraison après la période figée, hors alerte)</option>
                 <option value="COUVERT">Couvert par le stock</option>
               </select>
             </label>
@@ -1911,6 +1931,7 @@ export default function PortefeuilleLivraisonPage() {
               <div className="mt-1 text-[11px] text-slate-500">
                 {formatMoneyCompact(couvertureKpi.montant_ht)} · {couvertureKpi.nb_rupture.toLocaleString('fr-FR')} en rupture · {couvertureKpi.nb_tardive.toLocaleString('fr-FR')} avec réception tardive
                 {couvertureKpi.nb_arret_appro > 0 && <> · <span className="font-semibold text-violet-800" title={ARRET_APPRO_TITLE}>{couvertureKpi.nb_arret_appro.toLocaleString('fr-FR')} avec réf. en arrêt appro</span></>}
+                {couvertureKpi.nb_a_couvrir_appro > 0 && <> · <span className="font-semibold text-amber-800" title="Lignes livrables après la période figée (aujourd'hui + délai d'appro) : un appro lancé aujourd'hui arrive à temps, pas d'alerte sur la commande">{couvertureKpi.nb_a_couvrir_appro.toLocaleString('fr-FR')} CDC à couvrir par appro (hors alerte)</span></>}
                 {' '}· {couvertureKpi.nb_controles.toLocaleString('fr-FR')} CDC contrôlés{isCouvertureFilterActive ? ' · filtre actif' : ''}
               </div>
             </button>
@@ -2304,7 +2325,9 @@ export default function PortefeuilleLivraisonPage() {
                                   : <span className="font-semibold text-rose-700">Aucune réception connue</span>)
                               : ligne.couv_statut === 'COUVERT_PAR_RECEPTION' && ligne.couv_date_couverture
                                 ? <span className="text-sky-800">{formatDate(ligne.couv_date_couverture)}</span>
-                                : '—'}
+                                : ligne.couv_statut === 'A_COUVRIR_PAR_APPRO'
+                                  ? <span className="text-amber-800" title="Un appro lancé aujourd'hui arrive avant la date de livraison client">Appro possible dès le {formatDate(ligne.couv_date_appro)}</span>
+                                  : '—'}
                           </td>
                           <td className="max-w-[320px] border-b border-r border-slate-200 px-2 py-2 text-xs" title={ligne.couv_prochaine_reception || undefined}>
                             {ligne.couv_prochaine_reception || (isCouvertureLine ? <span className="text-slate-400">Aucune après la date de livraison</span> : '—')}

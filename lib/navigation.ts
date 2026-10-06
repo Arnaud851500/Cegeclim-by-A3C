@@ -147,6 +147,7 @@ export const NAV_BLOCS: NavBloc[] = [
     iconBg: 'rgba(255,255,255,0.18)',
     pages: [
       { label: 'Portefeuille de commandes', path: '/portefeuille-livraison', activeLabel: 'Portefeuille cde', accessKey: 'can_dashboard', description: 'CDC à livrer, contrôle des frais de port, couverture stock.' },
+      { label: 'Références en pénurie', path: '/stock/penurie', activeLabel: 'Références en pénurie', accessKey: 'can_dashboard', description: 'Prochaine date de dispo pour une nouvelle commande client (stock, CDC, CDF, délai d’appro) — vue commandes clients et vue appro.' },
       { label: 'Calcul de besoin - Appro', path: '/stock/calcul-besoin', activeLabel: 'Calcul de besoin - Appro', accessKey: 'can_stocks', description: 'Propositions de commande fournisseur par article, paramètres d’appro, conso retenue et écrêtage des ventes exceptionnelles.' },
       { label: 'Projection stock', path: '/stocks-disponibilites2', accessKey: 'can_stocks', description: 'Stock projeté par référence, hypothèses mensuelles et substitutions.' },
       { label: 'Reconstitution Stock', path: '/stock/reconstruction', accessKey: 'can_stocks', description: 'Reconstruction stock projeté et verification des promesses"' },
