@@ -41,7 +41,7 @@ type Ligne = {
   qte: number; prepa: number; dispo: number; res: number; cde: number; aterme: number; transit: number
   valeur: number; pu: number | null; sage_min: number | null; sage_max: number | null; emplacement: string | null
   fms_dispo: number | null; fms_res: number | null
-  q_depuis: number; ca_depuis: number; q12: number; ca12: number; marge12: number
+  q_depuis: number; ca_depuis: number; q12: number; ca12: number; marge12: number; q12_brut: number; ca12_brut: number
   q_per: number; nb_sem: number; nb_bl: number; nb_clients: number
   mu_sem: number; sigma_sem: number; pic_sem: number; p90_sem: number; plafond_pic: number | null; nb_pics: number; cv: number | null
   derniere_sortie: string | null; derniere_reception: string | null; dernier_mvt: string | null
@@ -171,12 +171,12 @@ function MatriceAbcXyz({ rows, filtre, onFiltre }: { rows: Ligne[]; filtre: stri
   }, [rows])
   const lignesAbc: ('A' | 'B' | 'C' | 'N')[] = ['A', 'B', 'C', 'N']
   const colsXyz: ('X' | 'Y' | 'Z' | 'N')[] = ['X', 'Y', 'Z', 'N']
-  const libAbc: Record<string, string> = { A: 'A · 80 % du CA', B: 'B · 15 %', C: 'C · 5 %', N: 'Sans vente 12 m' }
+  const libAbc: Record<string, string> = { A: 'A · 80 % du CA', B: 'B · 15 %', C: 'C · 5 % (et sorties sans CA)', N: 'Aucune sortie 12 m' }
   const libXyz: Record<string, string> = { X: 'X · régulier', Y: 'Y · variable', Z: 'Z · erratique', N: '—' }
   return (
     <div className="rounded-xl border border-[#E5E1D8] bg-white p-3">
       <div className="mb-2 flex items-center justify-between">
-        <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Matrice ABC (CA 12 mois du dépôt) × XYZ (régularité mensuelle)</div>
+        <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Matrice ABC (CA brut 12 mois du dépôt, avant retours) × XYZ (régularité mensuelle)</div>
         {filtre && <button type="button" onClick={() => onFiltre(null)} className="text-[11.5px] font-bold text-[#B4761A] hover:underline">✕ filtre {filtre}</button>}
       </div>
       <table className="w-full table-fixed text-[11.5px]">
@@ -526,7 +526,9 @@ function ArticleModal({ depotNum, depuis, ligne, position, onPrev, onNext, onClo
                 <span className="text-[#8A8474]">En transit</span><span className="text-right">{fmtNum(ligne.transit)}</span>
                 <span className="text-[#8A8474]">CDC à livrer ≤ 7 j / total</span><span className="text-right">{fmtNum(ligne.cdc_7j)} / {fmtNum(ligne.cdc_total)}</span>
                 <span className="text-[#8A8474]">Ventes depuis {fmtMoisCourt(depuis)}</span><span className="text-right">{fmtNum(ligne.q_depuis)} · {fmtEuro(ligne.ca_depuis)}</span>
-                <span className="text-[#8A8474]">CA / marge 12 mois</span><span className="text-right">{fmtEuro(ligne.ca12)} / {fmtEuro(ligne.marge12)}</span>
+                <span className="text-[#8A8474]">Sorties brutes 12 mois</span><span className="text-right">{fmtNum(ligne.q12_brut)} · {fmtEuro(ligne.ca12_brut)}</span>
+                <span className="text-[#8A8474]">Net 12 mois (retours déduits)</span><span className="text-right">{fmtNum(ligne.q12)} · {fmtEuro(ligne.ca12)}</span>
+                <span className="text-[#8A8474]">Marge 12 mois</span><span className="text-right">{fmtEuro(ligne.marge12)}</span>
                 <span className="text-[#8A8474]">PU (CMUP)</span><span className="text-right">{ligne.pu === null ? '—' : ligne.pu.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })}</span>
               </div>
             </div>
@@ -612,7 +614,7 @@ function AnalyseStockAgence() {
       if (r.statut === 'A_STOCKER_SANS_STOCK') { k.manquants += 1; k.manquantsValeur += n0(r.manque_valeur) }
       if (r.statut === 'SOUS_MIN') { k.sousMin += 1; k.sousMinValeur += n0(r.manque_valeur) }
       if (r.statut === 'SURVEILLER') { k.surveiller += 1; if (r.qte > 0) k.surveillerValeur += n0(r.valeur) }
-      if (r.qte > 0 && r.q12 <= 0) { k.dormant += n0(r.valeur); k.dormantRefs += 1 }
+      if (r.qte > 0 && n0(r.q12_brut) <= 0) { k.dormant += n0(r.valeur); k.dormantRefs += 1 }
       if (r.decision === 'STOCKER') k.aStocker += 1
       if (r.res > r.qte && r.qte >= 0) k.reserveSupStock += 1
     })
@@ -622,7 +624,7 @@ function AnalyseStockAgence() {
   const filtres = useMemo(() => {
     const t = normaliser(search.trim())
     const list = rows.filter((r) => {
-      if (rapide === 'DORMANT' ? !(r.qte > 0 && r.q12 <= 0) : rapide && r.statut !== rapide) return false
+      if (rapide === 'DORMANT' ? !(r.qte > 0 && n0(r.q12_brut) <= 0) : rapide && r.statut !== rapide) return false
       if (decisionF && r.decision !== decisionF) return false
       if (mystockF !== 'tous' && r.mystock !== (mystockF === 'oui')) return false
       if (stockF === 'avec' && !(r.qte > 0)) return false
@@ -687,7 +689,7 @@ function AnalyseStockAgence() {
         { h: 'Commandé', f: (r) => r.cde }, { h: 'À terme', f: (r) => r.aterme }, { h: 'Transit', f: (r) => r.transit }, { h: 'Dispo FMS', f: (r) => r.fms_dispo },
         { h: 'Valeur stock', f: (r) => r.valeur }, { h: 'PU', f: (r) => r.pu },
         { h: `Qté vendue depuis ${fmtDate(depuis)}`, f: (r) => r.q_depuis }, { h: `CA depuis ${fmtDate(depuis)}`, f: (r) => r.ca_depuis },
-        { h: 'Qté 12 mois', f: (r) => r.q12 }, { h: 'CA 12 mois', f: (r) => r.ca12 }, { h: 'Marge 12 mois', f: (r) => r.marge12 },
+        { h: 'Qté 12 mois (nette)', f: (r) => r.q12 }, { h: 'CA 12 mois (net)', f: (r) => r.ca12 }, { h: 'Qté sortie 12 mois (brute)', f: (r) => r.q12_brut }, { h: 'CA 12 mois (brut)', f: (r) => r.ca12_brut }, { h: 'Marge 12 mois', f: (r) => r.marge12 },
         { h: 'Semaines vendues /52', f: (r) => r.nb_sem }, { h: 'BL 52 sem.', f: (r) => r.nb_bl }, { h: 'Clients 52 sem.', f: (r) => r.nb_clients },
         { h: 'μ semaine', f: (r) => r.mu_sem }, { h: 'σ semaine', f: (r) => r.sigma_sem }, { h: 'Pic semaine', f: (r) => r.pic_sem }, { h: 'Pics écrêtés', f: (r) => r.nb_pics },
         { h: 'Couverture (sem.)', f: (r) => r.couv_sem },
@@ -770,7 +772,7 @@ function AnalyseStockAgence() {
           <Kpi label="Valeur du stock" value={loading ? '…' : fmtEuro(kpis.valeur)} sub={`${fmtNum(kpis.refsStock)} réf. en stock · ${fmtNum(kpis.aStocker)} à stocker`} />
           <Kpi label="Sur-stock (au-delà du MAX)" value={loading ? '…' : fmtEuro(kpis.surStock)} sub={`${fmtNum(kpis.surStockRefs)} réf. à stocker en excès`} tone="warn" onClick={() => setRapide((v) => (v === 'SUR_STOCK' ? '' : 'SUR_STOCK'))} actif={rapide === 'SUR_STOCK'} />
           <Kpi label="À ne plus stocker" value={loading ? '…' : fmtEuro(kpis.destocker)} sub={`${fmtNum(kpis.destockerRefs)} réf. — stock libre (hors réservé)`} tone="alerte" onClick={() => setRapide((v) => (v === 'A_DESTOCKER' ? '' : 'A_DESTOCKER'))} actif={rapide === 'A_DESTOCKER'} />
-          <Kpi label="Dormant (0 vente 12 mois)" value={loading ? '…' : fmtEuro(kpis.dormant)} sub={`${fmtNum(kpis.dormantRefs)} réf. en stock`} tone="alerte" onClick={() => setRapide((v) => (v === 'DORMANT' ? '' : 'DORMANT'))} actif={rapide === 'DORMANT'} />
+          <Kpi label="Dormant (0 sortie 12 mois)" value={loading ? '…' : fmtEuro(kpis.dormant)} sub={`${fmtNum(kpis.dormantRefs)} réf. en stock`} tone="alerte" onClick={() => setRapide((v) => (v === 'DORMANT' ? '' : 'DORMANT'))} actif={rapide === 'DORMANT'} />
           <Kpi label="À stocker — sans stock" value={loading ? '…' : fmtNum(kpis.manquants)} sub={`${fmtEuro(kpis.manquantsValeur)} pour atteindre le MAX`} tone="alerte" onClick={() => setRapide((v) => (v === 'A_STOCKER_SANS_STOCK' ? '' : 'A_STOCKER_SANS_STOCK'))} actif={rapide === 'A_STOCKER_SANS_STOCK'} />
           <Kpi label="Sous le MIN" value={loading ? '…' : fmtNum(kpis.sousMin)} sub={`${fmtEuro(kpis.sousMinValeur)} à réapprovisionner`} tone="warn" onClick={() => setRapide((v) => (v === 'SOUS_MIN' ? '' : 'SOUS_MIN'))} actif={rapide === 'SOUS_MIN'} />
           <Kpi label="À surveiller" value={loading ? '…' : fmtNum(kpis.surveiller)} sub={`${fmtEuro(kpis.surveillerValeur)} en stock`} onClick={() => setRapide((v) => (v === 'SURVEILLER' ? '' : 'SURVEILLER'))} actif={rapide === 'SURVEILLER'} />
@@ -797,7 +799,7 @@ function AnalyseStockAgence() {
             <select value={rapide} onChange={(e) => setRapide(e.target.value as FiltreRapide)} className={ctl}>
               <option value="">Statut : tous</option>
               {(Object.keys(STATUT_STYLE) as Statut[]).filter((s) => s !== 'HORS_STOCK' && s !== 'OK').map((s) => <option key={s} value={s}>{STATUT_STYLE[s].label}</option>)}
-              <option value="DORMANT">Dormant (0 vente 12 mois)</option>
+              <option value="DORMANT">Dormant (0 sortie 12 mois)</option>
             </select>
             <select value={mystockF} onChange={(e) => setMystockF(e.target.value as typeof mystockF)} className={ctl}>
               <option value="tous">MYSTOCK : tous</option><option value="oui">MYSTOCK OUI</option><option value="non">MYSTOCK NON</option>

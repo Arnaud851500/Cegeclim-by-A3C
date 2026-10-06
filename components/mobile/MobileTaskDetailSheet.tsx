@@ -24,13 +24,48 @@ type AssigneeOption = { email: string; label: string }
 
 const STATUS_OPTIONS = ['Non débuté', 'En cours', 'Terminé', 'Annulé']
 
+function normalizeKey(value: string | null | undefined) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase()
+}
+
+/**
+ * Personnes concernées déjà saisies sur les tâches (dédoublonnées sans tenir
+ * compte des accents / majuscules) : proposées en suggestion pour éviter
+ * « Kevin » / « kévin » / « Kevin  » qui créeraient des groupes distincts.
+ */
+async function fetchConcernedPersons(): Promise<string[]> {
+  const { data, error } = await supabase
+    .from('todo_actions')
+    .select('concerned_person')
+    .not('concerned_person', 'is', null)
+    .limit(5000)
+  if (error || !data) return []
+  const map = new Map<string, string>()
+  ;(data as Array<{ concerned_person: string | null }>).forEach((row) => {
+    const value = String(row.concerned_person || '').trim()
+    if (!value) return
+    const key = normalizeKey(value)
+    if (!map.has(key)) map.set(key, value)
+  })
+  return Array.from(map.values()).sort((a, b) => a.localeCompare(b, 'fr', { sensitivity: 'base' }))
+}
+
 /**
  * Fiche tâche éditable en bottom-sheet — variante de MobileDetailSheet
- * dédiée à todo_actions. Contrairement à MobileDetailSheet (lecture seule,
- * partagé par MobileClients/MobileRdv), ce composant permet de modifier
- * assigned_to / status / due_date / description_action, ainsi que la
- * catégorie, le projet / équipe et la personne concernée (migration
- * 20260920_todo_categories_equipes.sql), et de sauvegarder via Supabase.
+ * dédiée à todo_actions. Permet de modifier description, catégorie,
+ * projet / équipe, personne concernée, « Confiée à », statut et échéance.
+ *
+ * ÉVOLUTION (2026-10-06) : la fiche est séparée en deux blocs pour lever
+ * l'ambiguïté entre classement et affectation :
+ *   - « Classement » : catégorie, projet / équipe, personne concernée
+ *     (la personne concernée sert uniquement à ranger / trier la tâche,
+ *     elle ne la confie à personne) ;
+ *   - « Réalisation » : confiée à, statut, échéance.
+ * La personne concernée propose les noms déjà saisis (suggestions).
  *
  * Si la tâche reçue ne porte pas category_id / team_id / concerned_person
  * (listes d'alertes qui ne sélectionnent que quelques colonnes), ces trois
@@ -64,6 +99,7 @@ export default function MobileTaskDetailSheet({
   const [categories, setCategories] = useState<RefItem[]>([])
   const [teams, setTeams] = useState<RefItem[]>([])
   const [assignees, setAssignees] = useState<AssigneeOption[]>([])
+  const [personSuggestions, setPersonSuggestions] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -76,24 +112,25 @@ export default function MobileTaskDetailSheet({
     let cancelled = false
 
     async function load() {
-      // ÉVOLUTION (2026-09-29) : « Confiée à » devient une liste déroulante,
-      // comme sur PC -- utilisateurs ayant le droit Todo (user_page_access.
+      // « Confiée à » : utilisateurs ayant le droit Todo (user_page_access.
       // can_todo), valeur enregistrée = email (format de assigned_to).
-      const [{ data: cats }, { data: tms }, { data: users }] = await Promise.all([
+      const [{ data: cats }, { data: tms }, { data: users }, persons] = await Promise.all([
         supabase.from('todo_categories').select('id, name, color, is_active, sort_order').order('sort_order'),
         supabase.from('todo_teams').select('id, name, color, is_active, sort_order').order('sort_order'),
         supabase.from('user_page_access').select('email, display_name').eq('can_todo', true),
+        fetchConcernedPersons(),
       ])
       if (cancelled) return
       setCategories((cats || []) as RefItem[])
       setTeams((tms || []) as RefItem[])
+      setPersonSuggestions(persons)
       const options = ((users || []) as Array<{ email: string | null; display_name: string | null }>)
         .filter((u) => !!u.email)
         .map((u) => ({ email: String(u.email).trim(), label: (u.display_name || '').trim() || String(u.email) }))
         .sort((a, b) => a.label.localeCompare(b.label, 'fr', { sensitivity: 'base' }))
       setAssignees(options)
 
-      // Les nouveaux champs ne sont pas toujours fournis par le parent.
+      // Les champs de classement ne sont pas toujours fournis par le parent.
       const missing = task.category_id === undefined || task.team_id === undefined || task.concerned_person === undefined
       if (missing) {
         const { data } = await supabase
@@ -212,6 +249,8 @@ export default function MobileTaskDetailSheet({
             />
           </Field>
 
+          <SectionTitle title="Classement" hint="Sert uniquement à ranger et trier la tâche" />
+
           <Field label="Catégorie">
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
               <ChoiceChip active={!categoryId} color="#8A8375" onClick={() => setCategoryId('')}>
@@ -236,6 +275,27 @@ export default function MobileTaskDetailSheet({
             </select>
           </Field>
 
+          <Field
+            label="Personne concernée"
+            hint="Classement uniquement : de qui parle la tâche. Ne confie pas la tâche à cette personne (voir « Confiée à »)."
+          >
+            <input
+              value={concernedPerson}
+              onChange={(e) => setConcernedPerson(e.target.value)}
+              placeholder="Ex. Kevin, Yoann (Angoulême)…"
+              list="concerned-person-suggestions-detail"
+              autoComplete="off"
+              style={inputStyle}
+            />
+            <datalist id="concerned-person-suggestions-detail">
+              {personSuggestions.map((p) => (
+                <option key={p} value={p} />
+              ))}
+            </datalist>
+          </Field>
+
+          <SectionTitle title="Réalisation" hint="Qui fait la tâche, et pour quand" />
+
           <Field label="Confiée à">
             <select value={assigneeSelectValue} onChange={(e) => setAssignedTo(e.target.value)} style={inputStyle}>
               <option value="" style={{ color: '#000' }}>Non attribuée</option>
@@ -250,15 +310,6 @@ export default function MobileTaskDetailSheet({
                 </option>
               ))}
             </select>
-          </Field>
-
-          <Field label="Personne concernée" hint="De qui parle la tâche — pas forcément celle qui la réalise">
-            <input
-              value={concernedPerson}
-              onChange={(e) => setConcernedPerson(e.target.value)}
-              placeholder="Ex. Kevin, Yoann (Angoulême)…"
-              style={inputStyle}
-            />
           </Field>
 
           <Field label="Statut">
@@ -318,13 +369,22 @@ export default function MobileTaskDetailSheet({
   )
 }
 
+function SectionTitle({ title, hint }: { title: string; hint?: string }) {
+  return (
+    <div style={{ marginTop: 4, paddingTop: 10, borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+      <div style={{ fontSize: 12.5, fontWeight: 700, color: '#e4dfc9' }}>{title}</div>
+      {hint && <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', marginTop: 2 }}>{hint}</div>}
+    </div>
+  )
+}
+
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
       <span style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
         {label}
       </span>
-      {hint && <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginTop: -3 }}>{hint}</span>}
+      {hint && <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginTop: -3, lineHeight: 1.35 }}>{hint}</span>}
       {children}
     </div>
   )

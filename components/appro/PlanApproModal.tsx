@@ -46,6 +46,7 @@ type Scenario = {
   id: string; nom: string; description: string | null; groupe_id: string | null; references_articles: string[]
   mois_debut_appro: string; mois_fin_appro: string; mois_fin_horizon: string
   base_demande: 'n1' | 'mu'; coef_defaut: number; couverture_cible_mois: number; inclure_reserve: boolean
+  jour_livraison?: number | null
   updated_at: string | null; cree_par: string | null
 }
 type Lecture = 'stock' | 'couverture' | 'valeur'
@@ -130,7 +131,7 @@ function paramsParDefaut(aujourdhui: string): ScenarioParams {
   const an = m >= 3 ? y + 1 : y
   return {
     moisDebutAppro: `${an}-03-01`, moisFinAppro: `${an}-09-01`, moisFinHorizon: `${an}-12-01`,
-    baseDemande: 'n1', coefDefaut: 1, couvertureCible: 3, inclureReserve: true,
+    baseDemande: 'n1', coefDefaut: 1, couvertureCible: 3, inclureReserve: true, jourLivraison: 1,
   }
 }
 
@@ -228,11 +229,19 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
     void (async () => {
       const m = new Map<string, PrixAchat>()
       for (let i = 0; i < refsEntree.length; i += 150) {
-        const { data, error } = await supabase.from('mv_sage_articles_complet').select('reference, prix_net_fournisseur, dernier_prix_achat, pmp, prix_achat')
+        // select('*') : les colonnes de prix varient selon la version de la vue ; on prend celles présentes
+        const { data, error } = await supabase.from('mv_sage_articles_complet').select('*')
           .in('reference', refsEntree.slice(i, i + 150))
         if (error) { if (!annule) { setPrixAchat(new Map()); setMessage({ type: 'ko', texte: 'Prix d’achat SAGE (mv_sage_articles_complet) : ' + messageErreur(error) }) } return }
-        ;((data || []) as { reference: string; prix_net_fournisseur: number | null; dernier_prix_achat: number | null; pmp: number | null; prix_achat: number | null }[]).forEach((r) => {
-          m.set(cleRef(r.reference), { net: prixPositif(r.prix_net_fournisseur), dernier: prixPositif(r.dernier_prix_achat), pmp: prixPositif(r.pmp), ar: prixPositif(r.prix_achat) })
+        ;((data || []) as Record<string, unknown>[]).forEach((r) => {
+          const premier = (...cles: string[]) => { for (const k of cles) { const v = prixPositif(r[k]); if (v !== null) return v } return null }
+          m.set(cleRef(String(r.reference ?? '')), {
+            net: premier('prix_net_fournisseur', 'prix_achat_net', 'prix_unitaire_net'),
+            // « Prix d'achat (dernier) » de la fiche SAGE = colonne prix_achat
+            dernier: premier('dernier_prix_achat', 'prix_achat'),
+            pmp: premier('pmp', 'cmup'),
+            ar: premier('prix_achat'),
+          })
         })
       }
       if (!annule) setPrixAchat(m)
@@ -244,12 +253,14 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
   const [params, setParams] = useState<ScenarioParams>(() => paramsParDefaut(aujourdhui))
   const [plan, setPlan] = useState<Record<string, number>>({})
   const [hypotheses, setHypotheses] = useState<Record<string, number>>({})
+  const [consignes, setConsignes] = useState<Record<string, number>>({})
   const [chainages, setChainages] = useState<Chainage[]>([])
   const [conso, setConso] = useState<Map<string, Map<string, number>>>(new Map())
   const [consoEtat, setConsoEtat] = useState<'chargement' | 'ok' | 'erreur'>('chargement')
   const [message, setMessage] = useState<{ type: 'ok' | 'ko'; texte: string } | null>(null)
   const [lecture, setLecture] = useState<Lecture>('stock')
   const [hypoParRef, setHypoParRef] = useState(false)
+  const [consigneParRef, setConsigneParRef] = useState(true)
   const [voirChainages, setVoirChainages] = useState(false)
   const [voirDemande, setVoirDemande] = useState(true)
   const [refOuverte, setRefOuverte] = useState<string | null>(null)
@@ -329,6 +340,7 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
     setParams({
       moisDebutAppro: s.mois_debut_appro.slice(0, 10), moisFinAppro: s.mois_fin_appro.slice(0, 10), moisFinHorizon: s.mois_fin_horizon.slice(0, 10),
       baseDemande: s.base_demande, coefDefaut: Number(s.coef_defaut), couvertureCible: Number(s.couverture_cible_mois), inclureReserve: s.inclure_reserve,
+      jourLivraison: Number(s.jour_livraison ?? 1) || 1,
     })
     const [l, h, c] = await Promise.all([
       supabase.from('appro_plan_lignes').select('reference_article, mois, qte').eq('scenario_id', s.id),
@@ -342,6 +354,11 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
     const hy: Record<string, number> = {}
     ;((h.data || []) as { reference_article: string; mois: string; coef: number }[]).forEach((r) => { hy[cleHypo(r.reference_article, r.mois.slice(0, 10))] = Number(r.coef) })
     setPlan(p); setHypotheses(hy)
+    // consignes de couverture (migration 20261006_plan_appro_consignes.sql) — absentes : aucune consigne particulière
+    const co = await supabase.from('appro_plan_consignes').select('reference_article, mois, couverture_mois').eq('scenario_id', s.id)
+    const cons: Record<string, number> = {}
+    if (!co.error) ((co.data || []) as { reference_article: string; mois: string; couverture_mois: number }[]).forEach((r) => { cons[cleHypo(r.reference_article, r.mois.slice(0, 10))] = Number(r.couverture_mois) })
+    setConsignes(cons)
     setChainages(((c.data || []) as { reference_cible: string; reference_source: string; pourcentage: number; commentaire: string | null }[])
       .map((r) => ({ cible: cleRef(r.reference_cible), source: cleRef(r.reference_source), pct: Number(r.pourcentage), commentaire: r.commentaire })))
     setHypoParRef(Object.keys(hy).some((k) => !k.startsWith('*|')))
@@ -361,7 +378,7 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
   }, [])
 
   // ── Calcul ───────────────────────────────────────────────────────────────
-  const ctx = useMemo<ContexteProjection>(() => ({ aujourdhui, retardMaxJours, conso, chainages, hypotheses, plan, params }), [aujourdhui, retardMaxJours, conso, chainages, hypotheses, plan, params])
+  const ctx = useMemo<ContexteProjection>(() => ({ aujourdhui, retardMaxJours, conso, chainages, hypotheses, consignes, plan, params }), [aujourdhui, retardMaxJours, conso, chainages, hypotheses, consignes, plan, params])
   const projections = useMemo(() => articles.map((a) => projeterArticle(a, ctx)), [articles, ctx])
   const agregat = useMemo(() => agreger(projections), [projections])
 
@@ -398,6 +415,12 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
   function setCoef(ref: string | '*', mois: string, pct: number | null) {
     setHypotheses((h) => { const n = { ...h }; const k = cleHypo(ref, mois); if (pct === null) delete n[k]; else n[k] = pct / 100; return n })
   }
+  function setConsigne(ref: string | '*', mois: string, v: number | null) {
+    setConsignes((c) => { const n = { ...c }; const k = cleHypo(ref, mois); if (v === null) delete n[k]; else n[k] = Math.max(0, Math.min(36, v)); return n })
+  }
+  function consigneGroupeSurFenetre(v: number) {
+    setConsignes((c) => { const n = { ...c }; listeMois(params.moisDebutAppro, params.moisFinAppro).forEach((m) => { n[cleHypo('*', m)] = v }); return n })
+  }
   function appliquerCoefTousMois(pct: number) {
     setHypotheses((h) => { const n: Record<string, number> = {}; Object.entries(h).forEach(([k, v]) => { if (!k.startsWith('*|')) n[k] = v }); horizon.forEach((m) => { n[cleHypo('*', m)] = pct / 100 }); return n })
   }
@@ -413,7 +436,7 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
       nb += 1
     })
     setPlan(n)
-    setMessage({ type: 'ok', texte: `Proposition calculée pour ${nb} référence(s) : couverture cible ${fmtNum(params.couvertureCible, 1)} mois en fin de chaque mois de livraison, arrondie au colisage. Les quantités restent modifiables.` })
+    setMessage({ type: 'ok', texte: `Proposition calculée pour ${nb} référence(s) : stock fin de chaque mois de livraison ramené à sa consigne de couverture (référence, sinon groupe, sinon ${fmtNum(params.couvertureCible, 1)} mois)${params.jourLivraison > 1 ? ', et stock suffisant pour tenir jusqu’au jour de livraison du mois suivant' : ''}, arrondi au colisage. Les quantités restent modifiables.` })
   }
   function proposerRef(a: PlanArticle) {
     const n: Record<string, number> = {}
@@ -472,10 +495,20 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
         nom, description: descScenario.trim() || null, groupe_id: groupe?.id ?? null, references_articles: refsSelection,
         mois_debut_appro: params.moisDebutAppro, mois_fin_appro: params.moisFinAppro, mois_fin_horizon: params.moisFinHorizon,
         base_demande: params.baseDemande, coef_defaut: params.coefDefaut, couverture_cible_mois: params.couvertureCible, inclure_reserve: params.inclureReserve,
+        jour_livraison: params.jourLivraison,
       }
-      const res = scenarioId && !commeNouveau
-        ? await supabase.from('appro_plan_scenarios').update(payload).eq('id', scenarioId).select('id').single()
-        : await supabase.from('appro_plan_scenarios').insert(payload).select('id').single()
+      const ecrire = (pl: Record<string, unknown>) => (scenarioId && !commeNouveau
+        ? supabase.from('appro_plan_scenarios').update(pl).eq('id', scenarioId).select('id').single()
+        : supabase.from('appro_plan_scenarios').insert(pl).select('id').single())
+      let res = await ecrire(payload)
+      let sansConsignes = false
+      if (res.error && /jour_livraison/i.test(messageErreur(res.error))) {
+        // migration des consignes pas encore appliquée : enregistrement sans le jour de livraison
+        const { jour_livraison: _j, ...sansJour } = payload
+        void _j
+        res = await ecrire(sansJour)
+        sansConsignes = true
+      }
       if (res.error) throw res.error
       const id = (res.data as { id: string }).id
       const del = await Promise.all([
@@ -494,9 +527,20 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
           if (error) throw error
         }
       }
+      const cons = Object.entries(consignes).map(([k, v]) => { const [ref, mois] = k.split('|'); return { scenario_id: id, reference_article: ref, mois, couverture_mois: v } })
+      if (!sansConsignes) {
+        const del2 = await supabase.from('appro_plan_consignes').delete().eq('scenario_id', id)
+        if (del2.error) sansConsignes = true
+        else if (cons.length) {
+          const { error } = await supabase.from('appro_plan_consignes').insert(cons)
+          if (error) throw error
+        }
+      }
       setScenarioId(id)
       await chargerScenarios()
-      setMessage({ type: 'ok', texte: `Scénario « ${nom} » enregistré : ${lignes.length} ligne(s) d'appro, ${hypos.length} hypothèse(s), ${chains.length} chaînage(s).` })
+      setMessage(sansConsignes && (cons.length || params.jourLivraison !== 1)
+        ? { type: 'ko', texte: `Scénario « ${nom} » enregistré SANS les consignes de couverture ni le jour de livraison : applique la migration 20261006_plan_appro_consignes.sql puis enregistre à nouveau.` }
+        : { type: 'ok', texte: `Scénario « ${nom} » enregistré : ${lignes.length} ligne(s) d'appro, ${hypos.length} hypothèse(s), ${cons.length} consigne(s), ${chains.length} chaînage(s).` })
     } catch (e) {
       setMessage({ type: 'ko', texte: estTableAbsente(e) ? 'Tables du plan d’appro absentes : applique la migration 20261006_plan_appro_operation.sql.' : 'Enregistrement : ' + messageErreur(e) })
     } finally { setEnregistrement(false) }
@@ -526,8 +570,9 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
       s.addRow([`Plan d'appro — ${nomScenario || 'sans nom'}`]).font = { bold: true, size: 14 }
       s.addRow([`${articles.length} référence(s) · livraisons ${libMois(params.moisDebutAppro)} → ${libMois(params.moisFinAppro)} · horizon ${libMois(params.moisFinHorizon)} · base ${params.baseDemande === 'n1' ? 'ventes N-1' : 'conso moyenne retenue'} · valorisation ${LIB_SOURCE_PRIX[sourcePrix]} · coef par défaut ${fmtNum(params.coefDefaut * 100)} %`])
       s.addRow([])
-      entete(s, ['Mois', 'Demande', 'dont ferme', 'Encours fournisseurs', 'Plan d’appro', 'Stock fin (positif)', 'Manque', 'Couverture (mois)', 'Valeur stock (€)', 'Valeur plan (€)', 'Réf. en rupture'])
-      agregat.forEach((m) => s.addRow([libMois(m.mois), m.demande, m.ferme, m.encours, m.plan, m.stockFin, m.manque, m.couverture, m.valeurStock, m.valeurPlan, m.nbRupture]))
+      s.addRow([`Couverture = mesurée au dernier jour du mois (après sorties et entrées du mois), en mois de demande retenue des mois suivants consommés un à un. Livraison du plan reçue le ${params.jourLivraison >= 28 ? 'dernier jour' : params.jourLivraison === 1 ? '1er' : params.jourLivraison} du mois.`])
+      entete(s, ['Mois', 'Demande', 'dont ferme', 'Encours fournisseurs', 'Plan d’appro', 'Stock fin (positif)', 'Manque', 'Couverture fin de mois (mois)', 'Consigne (mois)', 'Stock cible', 'Valeur stock (€)', 'Valeur plan (€)', 'Réf. en rupture (point bas < 0)', 'Réf. sous consigne'])
+      agregat.forEach((m) => s.addRow([libMois(m.mois), m.demande, m.ferme, m.encours, m.plan, m.stockFin, m.manque, m.couverture, m.consigne, m.stockCible, m.valeurStock, m.valeurPlan, m.nbRupture, m.nbSousConsigne]))
       s.columns.forEach((c, i) => { c.width = i === 0 ? 14 : 16 })
       // Plan (une ligne par référence, une colonne par mois de livraison)
       const fen = listeMois(params.moisDebutAppro, params.moisFinAppro)
@@ -544,7 +589,8 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
       entete(d, ['Référence', 'Ligne', ...horizon.map(libMois)])
       const lignesDetail: [string, (l: ProjectionArticle['mois'][number]) => number | null][] = [
         ['Base (N-1 / μ, chaînages)', (l) => l.base], ['Coef', (l) => l.coef], ['Demande', (l) => l.demande], ['dont ferme', (l) => l.ferme],
-        ['Encours fournisseurs', (l) => l.encours], ['Plan d’appro', (l) => l.plan], ['Stock fin', (l) => l.stockFin], ['Couverture (mois)', (l) => l.couverture], ['Valeur stock (€)', (l) => l.valeurStock],
+        ['Encours fournisseurs', (l) => l.encours], ['Plan d’appro', (l) => l.plan], ['Point bas du mois', (l) => l.pointBas], ['Stock fin', (l) => l.stockFin],
+        ['Couverture fin de mois (mois)', (l) => l.couverture], ['Consigne (mois)', (l) => l.consigne], ['Stock cible', (l) => l.stockCible], ['Valeur stock (€)', (l) => l.valeurStock],
       ]
       projectionsTriees.forEach((pr) => {
         d.addRow([pr.article.ref, 'Ventes propres (N-1 / μ)', ...pr.mois.map((l) => l.propre)])
@@ -553,7 +599,8 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
         })
         lignesDetail.forEach(([lib, f]) => {
           const r = d.addRow(['', lib, ...pr.mois.map(f)])
-          if (lib === 'Stock fin') pr.mois.forEach((l, j) => { if (l.stockFin < 0) r.getCell(3 + j).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEE2E2' } } })
+          if (lib === 'Stock fin') pr.mois.forEach((l, j) => { if (l.stockFin < 0) r.getCell(3 + j).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEE2E2' } }; else if (l.stockFin < l.stockCible - 0.05) r.getCell(3 + j).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFEDD5' } } })
+          if (lib === 'Point bas du mois') pr.mois.forEach((l, j) => { if (l.pointBas < 0) r.getCell(3 + j).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEE2E2' } } })
           if (lib === 'Plan d’appro') r.font = { bold: true, color: { argb: 'FF7A5EA8' } }
         })
       })
@@ -568,6 +615,11 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
       })
       h.addRow([]); entete(h, ['Chaînage : cible', 'Source', '% des ventes repris', 'Commentaire'])
       chainages.forEach((c) => h.addRow([c.cible, c.source, c.pct, c.commentaire || '']))
+      h.addRow([]); entete(h, ['Consignes de couverture fin de mois', ...horizon.map(libMois)])
+      h.addRow(['Groupe / toutes les réf. (mois)', ...horizon.map((m) => consignes[cleHypo('*', m)] ?? params.couvertureCible)])
+      Array.from(new Set(Object.keys(consignes).filter((k) => !k.startsWith('*|')).map((k) => k.split('|')[0]))).forEach((ref) => {
+        h.addRow([ref, ...horizon.map((m) => consignes[cleHypo(ref, m)] ?? null)])
+      })
       h.columns.forEach((c, i) => { c.width = i === 0 ? 26 : 11 })
 
       const buffer = await wb.xlsx.writeBuffer()
@@ -589,6 +641,7 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
     stock: lecture === 'valeur' ? m.valeurStock : m.stockFin,
     manque: lecture === 'valeur' ? null : (m.manque > 0 ? -m.manque : null),
     couverture: m.couverture,
+    consigne: m.consigne,
   })), [agregat, lecture])
 
   const ctl = 'h-8 rounded-md border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold text-[#3A362E] outline-none focus:border-[#B4761A]'
@@ -600,7 +653,10 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
     if (lecture === 'valeur') return l.valeurStock === null ? '—' : fmtK(l.valeurStock)
     return fmtNum(l.stockFin)
   }
-  const tonStock = (l: ProjectionArticle['mois'][number]) => l.stockFin < 0 ? 'bg-red-50 text-red-700' : l.couverture !== null && l.couverture < 1 ? 'bg-orange-50 text-orange-700' : l.couverture !== null && l.couverture > params.couvertureCible * 2 ? 'text-sky-700' : 'text-[#111820]'
+  const tonStock = (l: ProjectionArticle['mois'][number]) => l.stockFin < 0 || l.pointBas < 0 ? 'bg-red-50 text-red-700'
+    : l.stockFin < l.stockCible - 0.05 ? 'bg-orange-50 text-orange-700'
+      : l.consigne > 0 && l.couverture !== null && l.couverture > l.consigne * 2 ? 'text-sky-700' : 'text-[#111820]'
+  const titreStock = (l: ProjectionArticle['mois'][number]) => `Fin ${libMois(l.mois)} : stock ${fmtNum(l.stockFin)} · couverture ${fmtNum(l.couverture, 1)} mois (consigne ${fmtNum(l.consigne, 1)} → stock cible ${fmtNum(l.stockCible)}) · point bas ${fmtNum(l.pointBas)} le ${l.jourPointBas} · ${fmtEuro(l.valeurStock)}`
 
   return (
     <div className="fixed inset-0 z-[60] flex items-stretch justify-center bg-[#0B1220]/50 p-3" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}>
@@ -674,8 +730,15 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
               </select>
             </label>
             <span className="h-8 w-px bg-[#E5E1D8]" />
-            <label className="flex flex-col gap-0.5 font-semibold text-[#3A362E]">Couverture cible
-              <CelluleSaisie valeur={params.couvertureCible} onCommit={(v) => setParams((p) => ({ ...p, couvertureCible: v ?? 3 }))} className="w-16 pr-7" suffixe="mois" titre="Stock visé en fin de chaque mois de livraison, en mois de demande des 3 mois suivants" />
+            <label className="flex flex-col gap-0.5 font-semibold text-[#3A362E]" title="Jour où la livraison mensuelle du plan entre en stock. Ne change pas le stock de fin de mois, mais le point bas du mois : livrée en fin de mois, elle ne sert pas la demande du mois">Livraison du plan reçue le
+              <select value={params.jourLivraison >= 28 ? 31 : params.jourLivraison} onChange={(e) => setParams((p) => ({ ...p, jourLivraison: Number(e.target.value) }))} className={ctl}>
+                <option value={1}>1er du mois</option>
+                <option value={15}>15 du mois</option>
+                <option value={31}>dernier jour du mois</option>
+              </select>
+            </label>
+            <label className="flex flex-col gap-0.5 font-semibold text-[#3A362E]">Consigne par défaut
+              <CelluleSaisie valeur={params.couvertureCible} onCommit={(v) => setParams((p) => ({ ...p, couvertureCible: v ?? 3 }))} className="w-16 pr-7" suffixe="mois" titre="Couverture visée au dernier jour de chaque mois, quand ni la référence ni le groupe n'ont de consigne pour ce mois" />
             </label>
             <div className="flex items-center gap-1.5">
               <button type="button" onClick={() => proposerTout(false)} disabled={consoEtat !== 'ok'} className="h-8 rounded-md bg-[#7A5EA8] px-3 text-[12px] font-bold text-white hover:bg-[#6A4F96] disabled:opacity-50" title="Calcule pour chaque référence et chaque mois de livraison la quantité qui ramène le stock à la couverture cible (remplace les quantités de la fenêtre)">✦ Proposer le plan</button>
@@ -701,6 +764,7 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
             <Kpi label={`Stock fin ${syntheses.finFenetre ? libMois(syntheses.finFenetre.mois) : ''}`} value={fmtNum(syntheses.finFenetre?.stockFin)} sub={`${fmtNum(syntheses.finFenetre?.couverture, 1)} mois · ${fmtEuro(syntheses.finFenetre?.valeurStock)}`} />
             <Kpi label="Pic de valeur stock" value={fmtEuro(syntheses.pic?.valeurStock)} sub={syntheses.pic ? libMois(syntheses.pic.mois) : undefined} />
             <Kpi label={`Stock fin ${syntheses.fin ? libMois(syntheses.fin.mois) : ''}`} value={fmtNum(syntheses.fin?.stockFin)} sub={`${fmtNum(syntheses.fin?.couverture, 1)} mois · ${fmtEuro(syntheses.fin?.valeurStock)}`} />
+            <Kpi label="Sous consigne (fenêtre)" value={fmtNum(projections.filter((p) => p.moisSousConsigne.length > 0).length)} sub={`réf. · ${fmtNum(projections.reduce((s2, p) => s2 + p.moisSousConsigne.length, 0))} mois-réf.`} tone={projections.some((p) => p.moisSousConsigne.length) ? 'warn' : 'ok'} />
             <Kpi label="Réf. en rupture" value={fmtNum(syntheses.enRupture.length)} sub={syntheses.enRupture.length ? `1re : ${libMois(syntheses.enRupture.map((p) => p.premiereRupture!).sort()[0])}` : 'aucune sur l’horizon'} tone={syntheses.enRupture.length ? 'alerte' : 'ok'} />
           </section>
 
@@ -731,7 +795,7 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
                     formatter={(v: unknown, nom: unknown) => {
                       const n = typeof v === 'number' ? v : Number(v)
                       const lib = String(nom)
-                      if (lib === 'Couverture') return [`${fmtNum(n, 1)} mois`, lib]
+                      if (lib === 'Couverture' || lib === 'Consigne') return [`${fmtNum(n, 1)} mois`, lib]
                       if (lib === 'Stock fin' && lecture === 'valeur') return [fmtEuro(n), lib]
                       return [fmtNum(Math.abs(n)), lib]
                     }}
@@ -743,6 +807,7 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
                   {lecture !== 'valeur' && <Bar yAxisId="q" dataKey="manque" name="Manque (réf. en rupture)" fill="#B42318" />}
                   <Line yAxisId="q" type="monotone" dataKey="stock" name="Stock fin" stroke="#111820" strokeWidth={2.5} dot={{ r: 3 }} />
                   <Line yAxisId="c" type="monotone" dataKey="couverture" name="Couverture" stroke="#3F9142" strokeDasharray="5 4" strokeWidth={2} dot={false} hide={lecture === 'valeur'} />
+                  <Line yAxisId="c" type="stepAfter" dataKey="consigne" name="Consigne" stroke="#7A5EA8" strokeDasharray="2 3" strokeWidth={1.5} dot={false} hide={lecture === 'valeur'} />
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
@@ -751,14 +816,21 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
           {/* Hypothèses & chaînages */}
           <section className="rounded-xl border border-[#E5E1D8] bg-white p-3">
             <div className="mb-2 flex flex-wrap items-center gap-2">
-              <h3 className="text-[13px] font-bold text-[#111820]">Hypothèses de consommation</h3>
+              <h3 className="text-[13px] font-bold text-[#111820]">Hypothèses de consommation & consignes de couverture</h3>
               <span className="text-[11px] text-[#8A8474]">% de la base ({params.baseDemande === 'n1' ? 'ventes du même mois N-1, ou N-2 au-delà de 12 mois' : 'conso moyenne retenue'}) — vide = {fmtNum(params.coefDefaut * 100)} %</span>
               <div className="ml-auto flex flex-wrap items-center gap-1.5">
+                <button type="button" onClick={() => consigneGroupeSurFenetre(params.couvertureCible)} className={puce(false)} title="Recopier la consigne par défaut sur les mois de livraison du groupe">Consigne {fmtNum(params.couvertureCible, 1)} m → fenêtre</button>
+                <button type="button" onClick={() => setConsigneParRef((v) => !v)} className={puce(consigneParRef)}>Consignes par référence</button>
                 <button type="button" onClick={() => setHypoParRef((v) => !v)} className={puce(hypoParRef)}>Hypothèses par référence</button>
                 <button type="button" onClick={() => setVoirDemande((v) => !v)} className={puce(voirDemande)}>Voir la demande</button>
                 <button type="button" onClick={() => setVoirChainages((v) => !v)} className={puce(voirChainages || chainages.length > 0)}>Chaînages ({chainages.length}) {voirChainages ? '▴' : '▾'}</button>
               </div>
             </div>
+            <p className="mb-2 rounded-lg bg-[#F6F2FB] px-2.5 py-1.5 text-[11px] leading-4 text-[#3A362E]">
+              <b>Couverture d’un mois M</b> = stock du <b>dernier jour de M</b>, après toutes les sorties de M (colonne Demande) et toutes les entrées de M (encours à leur date, livraison du plan reçue le {params.jourLivraison >= 28 ? 'dernier jour' : params.jourLivraison === 1 ? '1er' : params.jourLivraison} du mois),
+              exprimé en mois de demande retenue <b>à venir</b> : on consomme M+1, puis M+2… jusqu’à épuisement (ex. 3,0 fin mars = le stock au 31/03 sert avril, mai et juin tels que prévus).
+              <b> Consigne</b> = couverture visée à cette même date ; stock cible = demande cumulée des mois suivants sur la consigne. <b>Point bas</b> = stock minimum pendant le mois (demande étalée sur les jours) : signale une rupture en cours de mois (! rouge) que le stock de fin de mois masque.
+            </p>
             <div className="overflow-auto">
               <table className="w-full border-separate border-spacing-0 text-[11.5px]">
                 <thead><tr className="text-[10px] uppercase tracking-wide text-[#8A8474]">
@@ -782,6 +854,21 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
                   <tr className="font-bold text-[#B4761A]">
                     <td className="sticky left-0 z-10 bg-white px-2 py-1">Demande retenue</td>
                     {agregat.map((m) => <td key={m.mois} className="px-1.5 py-1 text-right tabular-nums" title={`Prévision ${fmtNum(m.prevision)} · dont commandes fermes ${fmtNum(m.ferme)}`}>{fmtNum(m.demande)}</td>)}
+                  </tr>
+                  <tr className="border-t border-[#EFECE4]">
+                    <td className="sticky left-0 z-10 bg-white px-2 py-1 font-bold text-[#5B4387]" title="Couverture visée au dernier jour du mois pour toutes les références du groupe (une consigne saisie sur une référence prime). Vide = consigne par défaut">Consigne couv. groupe (mois)</td>
+                    {horizon.map((m) => (
+                      <td key={m} className={`px-0.5 py-0.5 text-right ${fenetre.has(m) ? 'bg-[#F6F2FB]' : ''}`}>
+                        <CelluleSaisie valeur={consignes[cleHypo('*', m)] ?? null} placeholder={fmtNum(params.couvertureCible, 1)} onCommit={(v) => setConsigne('*', m, v)} className="w-12 text-[#5B4387]" />
+                      </td>
+                    ))}
+                  </tr>
+                  <tr className="font-bold">
+                    <td className="sticky left-0 z-10 bg-white px-2 py-1 text-[#3A362E]" title="Couverture au dernier jour du mois du stock de la sélection (références en rupture comptées à 0), en mois de demande retenue suivante">Couverture fin de mois</td>
+                    {agregat.map((m) => (
+                      <td key={m.mois} className={`px-1.5 py-1 text-right tabular-nums ${m.stockFin < m.stockCible - 0.05 ? 'text-orange-700' : 'text-[#3F9142]'}`}
+                        title={`Stock fin ${fmtNum(m.stockFin)} / stock cible ${fmtNum(m.stockCible)} · ${m.nbSousConsigne} réf. sous consigne · ${m.nbRupture} réf. en rupture dans le mois`}>{fmtNum(m.couverture, 1)}</td>
+                    ))}
                   </tr>
                 </tbody>
               </table>
@@ -829,7 +916,7 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
           <section className="rounded-xl border border-[#E5E1D8] bg-white">
             <div className="flex flex-wrap items-center gap-2 px-3 py-2">
               <h3 className="text-[13px] font-bold text-[#111820]">Plan d’appro par référence</h3>
-              <span className="text-[11px] text-[#8A8474]">Saisie dans les mois violets (une livraison par mois). « ▸ Demande » : ventes N-1, références chaînées (ajout, %), coefficient, commandes fermes. Ligne 2 : {lecture === 'stock' ? 'stock de fin de mois' : lecture === 'couverture' ? 'couverture en mois' : 'valeur du stock'} — rouge : rupture, orange : moins d’un mois, bleu : plus de 2 × la cible.</span>
+              <span className="text-[11px] text-[#8A8474]">Saisie dans les mois violets (une livraison par mois). « ▸ Demande » : ventes N-1, références chaînées (ajout, %), coefficient, commandes fermes. Ligne « Couv./Stock » = situation au dernier jour du mois — rouge : rupture (! = en cours de mois), orange : sous la consigne, bleu : plus de 2 × la consigne.</span>
               <div className="ml-auto flex items-center gap-1">
                 {(['stock', 'couverture', 'valeur'] as Lecture[]).map((l) => (
                   <button key={l} type="button" onClick={() => setLecture(l)} className={puce(lecture === l)}>{l === 'stock' ? 'Qté' : l === 'couverture' ? 'Mois' : '€'}</button>
@@ -870,12 +957,12 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
                     const chainesRef = chainages.filter((c) => c.cible === cleRef(a.ref) && c.source.trim())
                     const pctCede = pr.mois[0]?.pctCede || 0
                     const afficheDemande = voirDemande || ouverte
-                    const nbDetail = ouverte ? 1 + chainesRef.length + (chainesRef.length || pctCede ? 1 : 0) + 3 + 1 : 0
+                    const nbDetail = ouverte ? 1 + chainesRef.length + (chainesRef.length || pctCede ? 1 : 0) + 3 + 1 + 1 : 0
                     const n1 = params.baseDemande === 'n1'
                     return (
                       <React.Fragment key={a.ref}>
                         <tr className="bg-white">
-                          <td rowSpan={2 + (afficheDemande ? 1 : 0) + (hypoParRef ? 1 : 0) + nbDetail} className="sticky left-0 z-10 border-t border-[#E5E1D8] bg-white px-2 py-1 align-top">
+                          <td rowSpan={2 + (afficheDemande ? 1 : 0) + (hypoParRef ? 1 : 0) + (consigneParRef ? 1 : 0) + nbDetail} className="sticky left-0 z-10 border-t border-[#E5E1D8] bg-white px-2 py-1 align-top">
                             <button type="button" onClick={() => setRefOuverte(ouverte ? null : a.ref)} className="text-left">
                               <div className="font-bold text-[#111820] hover:underline">{a.ref}</div>
                               <div className="max-w-[220px] truncate text-[10.5px] text-[#8A8474]" title={a.designation || ''}>{a.designation || '—'}</div>
@@ -905,9 +992,21 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
                         </tr>
                         <tr>
                           <td className="px-1.5 py-0.5 text-[#3A362E]">{lecture === 'stock' ? 'Stock fin' : lecture === 'couverture' ? 'Couv. (mois)' : 'Valeur'}</td>
-                          {pr.mois.map((l) => <td key={l.mois} className={`px-1.5 py-0.5 text-right font-semibold tabular-nums ${tonStock(l)}`} title={`Stock fin ${fmtNum(l.stockFin)} · couverture ${fmtNum(l.couverture, 1)} mois · ${fmtEuro(l.valeurStock)}`}>{cellLecture(l)}</td>)}
+                          {pr.mois.map((l) => <td key={l.mois} className={`px-1.5 py-0.5 text-right font-semibold tabular-nums ${tonStock(l)}`} title={titreStock(l)}>{cellLecture(l)}{l.pointBas < 0 && l.stockFin >= 0 ? <sup className="text-red-700" title={`Rupture en cours de mois : point bas ${fmtNum(l.pointBas)} le ${l.jourPointBas}`}>!</sup> : null}</td>)}
                           <td colSpan={2} className="px-2 text-right text-[10.5px] text-[#8A8474]">min {fmtNum(pr.stockMin)}</td>
                         </tr>
+                        {consigneParRef && (
+                          <tr>
+                            <td className="px-1.5 py-0.5 text-[#5B4387]" title="Couverture visée au dernier jour du mois pour cette référence. Vide = consigne du groupe, sinon consigne par défaut">Consigne (mois)</td>
+                            {pr.mois.map((l) => (
+                              <td key={l.mois} className={`px-0.5 py-0.5 text-right ${fenetre.has(l.mois) ? 'bg-[#F6F2FB]' : ''}`}>
+                                <CelluleSaisie valeur={consignes[cleHypo(a.ref, l.mois)] ?? null} placeholder={fmtNum(l.consigne, 1)} onCommit={(v) => setConsigne(a.ref, l.mois, v)}
+                                  titre={`Stock cible fin ${libMois(l.mois)} : ${fmtNum(l.stockCible)}`} className="w-12 text-[#5B4387]" />
+                              </td>
+                            ))}
+                            <td colSpan={2} className="px-2 text-right text-[10px] text-orange-700">{pr.moisSousConsigne.length ? `${pr.moisSousConsigne.length} mois sous consigne` : ''}</td>
+                          </tr>
+                        )}
                         {afficheDemande && (
                           <tr className="text-[#B4761A]">
                             <td className="px-1.5 py-0.5">
@@ -982,6 +1081,11 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
                             <tr className="text-[10.5px] text-emerald-700">
                               <td className="px-1.5 py-0.5">Encours fournisseurs</td>
                               {pr.mois.map((l) => <td key={l.mois} className="px-1.5 py-0.5 text-right tabular-nums">{l.encours ? fmtNum(l.encours) : ''}</td>)}
+                              <td colSpan={2} />
+                            </tr>
+                            <tr className="text-[10.5px] text-[#3A362E]">
+                              <td className="px-1.5 py-0.5" title="Stock le plus bas pendant le mois : demande répartie uniformément sur les jours, entrées reçues à leur date">Point bas (jour)</td>
+                              {pr.mois.map((l) => <td key={l.mois} className={`px-1.5 py-0.5 text-right tabular-nums ${l.pointBas < 0 ? 'bg-red-50 font-bold text-red-700' : ''}`}>{fmtNum(l.pointBas)}<span className="ml-0.5 text-[9px] text-[#8A8474]">j{l.jourPointBas}</span></td>)}
                               <td colSpan={2} />
                             </tr>
                             <tr className="bg-[#FAF7FD]">
