@@ -38,6 +38,22 @@ import { supabase } from '@/lib/supabaseClient'
 //     RPC get_stock_dispo_nouvelle_commande (même moteur que l'écran
 //     « Disponibilité par groupe d'articles » : stock + réceptions CDF −
 //     CDC à leur date de livraison, solde de fin de journée).
+//
+//   ÉVOLUTION (2026-10-07, demandé par Arnaud) -- éviter de prendre le stock
+//   Sage − PL pour du stock promissible :
+//   - « Physique - PL » devient « Sage − PL », affiché en couleur neutre
+//     (plus en vert) : ce stock inclut des quantités déjà promises aux CDC ;
+//   - la liste affiche en plus, en vert, la « Dispo immédiate » pour une
+//     nouvelle commande (tous dépôts), chargée en un seul appel par la RPC
+//     get_stock_dispo_nouvelle_commande_batch, et à défaut la date de
+//     livraison client possible (prochaine dispo + 7 j de sécurité) ;
+//   - fiche : dispo nouvelle commande et stock Sage − PL côte à côte, au
+//     niveau tous dépôts ; la section par dépôt est explicitement « Sage − PL
+//     au départ du dépôt » (la dispo nouvelle commande ne se calcule qu'au
+//     global) ;
+//   - correctif base : la RPC calculait mal le solde de fin de journée quand
+//     plusieurs CDC tombaient le même jour (24 au lieu de 19 sur
+//     RAK-DJ25RHAE) ; elle suit maintenant la même règle que l'écran PC.
 // ─────────────────────────────────────────────────────────────────────────
 
 type StockRow = {
@@ -93,6 +109,15 @@ const DEPOTS_PROPOSES = [
 // par le fournisseur. On l'affiche comme "Date à confirmer".
 const SEUIL_DATE_VALIDE = '2000-01-01'
 
+/** Délai de sécurité entre la date où le stock redevient promissible et la
+ * date de livraison client annoncée. */
+const DELAI_SECURITE_JOURS = 7
+
+const C_VERT = '#8fd4a8'
+const C_ROUGE = '#e0a685'
+const C_ORANGE = '#D69A4A'
+const C_NEUTRE = '#D8D2BC'
+
 function toNumber(v: unknown): number {
   const n = Number(v)
   return Number.isFinite(n) ? n : 0
@@ -105,17 +130,54 @@ function formatDateCourte(iso?: string | null): string {
   const [y, m, d] = iso.slice(0, 10).split('-')
   return `${d}/${m}/${y.slice(2)}`
 }
+function toIsoDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+function todayIso(): string {
+  return toIsoDate(new Date())
+}
+function addDaysIso(iso: string, jours: number): string {
+  const d = new Date(`${iso.slice(0, 10)}T00:00:00`)
+  d.setDate(d.getDate() + jours)
+  return toIsoDate(d)
+}
+/** Date de livraison client annoncée : prochaine dispo + délai de sécurité. */
+function dateLivraisonClient(dateDispo: string | null): string | null {
+  return dateDispo ? addDaysIso(dateDispo, DELAI_SECURITE_JOURS) : null
+}
 function dateLivraisonValide(iso?: string | null): boolean {
   return Boolean(iso) && iso! >= SEUIL_DATE_VALIDE
 }
 function depotCourt(depot: string): string {
   return String(depot || '').replace(/\s*CEGECLIM\s*$/i, '').trim() || depot
 }
-/** Couleur du dispo : vert si > 0, gris si 0, rouge si négatif. */
+/** Couleur de la dispo pour nouvelle commande : vert si > 0, gris si 0, rouge si négatif. */
 function couleurDispo(n: number): string {
-  if (n > 0) return '#8fd4a8'
-  if (n < 0) return '#e0a685'
+  if (n > 0) return C_VERT
+  if (n < 0) return C_ROUGE
   return 'rgba(255,255,255,0.35)'
+}
+/** Couleur du stock Sage − PL : neutre (jamais vert -- ce n'est pas du stock
+ * promissible), gris si 0, rouge si négatif. */
+function couleurStock(n: number): string {
+  if (n > 0) return C_NEUTRE
+  if (n < 0) return C_ROUGE
+  return 'rgba(255,255,255,0.35)'
+}
+
+function normaliserDispo(d: Record<string, unknown>): DispoNouvelleCommande {
+  return {
+    stock_dispo: toNumber(d.stock_dispo),
+    qte_immediate: toNumber(d.qte_immediate),
+    date_prochaine_dispo: d.date_prochaine_dispo ? String(d.date_prochaine_dispo).slice(0, 10) : null,
+    qte_prochaine_dispo: d.qte_prochaine_dispo === null || d.qte_prochaine_dispo === undefined ? null : toNumber(d.qte_prochaine_dispo),
+  }
+}
+
+/** Prochaine dispo future (strictement après aujourd'hui), sinon null. */
+function prochaineDispoFuture(dispo: DispoNouvelleCommande): string | null {
+  const auj = todayIso()
+  return dispo.date_prochaine_dispo && dispo.date_prochaine_dispo > auj ? dispo.date_prochaine_dispo : null
 }
 
 // Détecte une saisie "liste de références" (plusieurs lignes / virgules /
@@ -149,6 +211,9 @@ export default function MobileStockArticles({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [openReference, setOpenReference] = useState<{ reference: string; designation: string } | null>(null)
+
+  // ── Dispo pour nouvelle commande (tous dépôts), par référence ─────────
+  const [dispoParRef, setDispoParRef] = useState<Record<string, DispoNouvelleCommande>>({})
 
   // ── Filtres ──────────────────────────────────────────────────────────
   const [famillesRef, setFamillesRef] = useState<FamilleRow[] | null>(null)
@@ -240,6 +305,28 @@ export default function MobileStockArticles({
     }
   }, [query, familleMacro, famille, depot, dispoFiltre, filtresActifs])
 
+  // Dispo nouvelle commande des références affichées : un seul appel par lot.
+  const refsResultatsKey = useMemo(
+    () => Array.from(new Set((results || []).map((r) => r.reference_article))).join('|'),
+    [results],
+  )
+  useEffect(() => {
+    const refs = refsResultatsKey ? refsResultatsKey.split('|') : []
+    const manquantes = refs.filter((r) => !dispoParRef[r])
+    if (manquantes.length === 0) return
+    let cancelled = false
+    async function chargerDispo() {
+      const { data, error: err } = await supabase.rpc('get_stock_dispo_nouvelle_commande_batch', { p_references: manquantes })
+      if (cancelled || err) return
+      const out: Record<string, DispoNouvelleCommande> = {}
+      for (const d of (data || []) as any[]) out[String(d.reference_article)] = normaliserDispo(d)
+      setDispoParRef((prev) => ({ ...prev, ...out }))
+    }
+    void chargerDispo()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refsResultatsKey])
+
   const refsSaisies = useMemo(() => parseReferences(query), [query])
   const isListe = refsSaisies.length > 1
 
@@ -274,13 +361,13 @@ export default function MobileStockArticles({
             color: dispoFiltre !== 'tous' ? '#8FC7DA' : 'rgba(255,255,255,0.7)', fontSize: 12.5, fontWeight: 600,
           }}
         >
-          Stock dispo : {dispoFiltre === 'tous' ? 'Tous' : dispoFiltre === 'oui' ? 'Oui' : 'Non'}
+          Stock Sage − PL : {dispoFiltre === 'tous' ? 'Tous' : dispoFiltre === 'oui' ? '> 0' : '≤ 0'}
         </button>
         {filtresActifs && (
           <button
             type="button"
             onClick={reinitialiserFiltres}
-            style={{ padding: '7px 10px', borderRadius: 999, border: '1px solid rgba(193,104,60,0.4)', background: 'rgba(193,104,60,0.10)', color: '#e0a685', fontSize: 12, fontWeight: 600 }}
+            style={{ padding: '7px 10px', borderRadius: 999, border: '1px solid rgba(193,104,60,0.4)', background: 'rgba(193,104,60,0.10)', color: C_ROUGE, fontSize: 12, fontWeight: 600 }}
           >
             ✕ Filtres
           </button>
@@ -308,7 +395,7 @@ export default function MobileStockArticles({
       {loading && <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 13 }}>Recherche…</div>}
 
       {error && (
-        <div style={{ borderRadius: 10, border: '1px solid rgba(193,104,60,0.4)', background: 'rgba(193,104,60,0.12)', color: '#e0a685', fontSize: 13, padding: '10px 12px' }}>
+        <div style={{ borderRadius: 10, border: '1px solid rgba(193,104,60,0.4)', background: 'rgba(193,104,60,0.12)', color: C_ROUGE, fontSize: 13, padding: '10px 12px' }}>
           {error}
         </div>
       )}
@@ -319,36 +406,57 @@ export default function MobileStockArticles({
 
       {!loading && results && results.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {results.map((r) => (
-            <button
-              key={r.reference_article}
-              onClick={() => setOpenReference({ reference: r.reference_article, designation: r.designation || '' })}
-              style={{
-                textAlign: 'left', borderRadius: 14, border: '1px solid rgba(255,255,255,0.10)',
-                background: 'rgba(255,255,255,0.04)', padding: '12px 14px', width: '100%',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14.5, fontWeight: 700, color: '#fff' }}>{r.reference_article}</span>
-                <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)' }}>Détail ›</span>
-              </div>
-              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 8, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {r.designation || '—'}
-              </div>
-              {depot && (
-                <div style={{ fontSize: 10.5, color: 'rgba(166,161,129,0.9)', marginBottom: 6 }}>Dépôt : {r.depot}</div>
-              )}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
-                <MiniStat label="Physique - PL" value={formatNumber(r.stock_disponible)} accent={couleurDispo(r.stock_disponible)} />
-                <MiniStat label="Réel" value={formatNumber(r.stock_reel)} />
-                <MiniStat
-                  label="À terme"
-                  value={formatNumber(r.stock_a_terme)}
-                  accent={r.stock_a_terme < 0 ? '#e0a685' : undefined}
-                />
-              </div>
-            </button>
-          ))}
+          {depot && (
+            <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.45)', lineHeight: 1.4 }}>
+              « Sage − PL » = stock du dépôt {depotCourt(depot)}. « Dispo immédiate » = nouvelle commande, tous dépôts confondus.
+            </div>
+          )}
+          {results.map((r) => {
+            const d = dispoParRef[r.reference_article]
+            const prochaine = d ? prochaineDispoFuture(d) : null
+            return (
+              <button
+                key={r.reference_article}
+                onClick={() => setOpenReference({ reference: r.reference_article, designation: r.designation || '' })}
+                style={{
+                  textAlign: 'left', borderRadius: 14, border: '1px solid rgba(255,255,255,0.10)',
+                  background: 'rgba(255,255,255,0.04)', padding: '12px 14px', width: '100%',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14.5, fontWeight: 700, color: '#fff' }}>{r.reference_article}</span>
+                  <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)' }}>Détail ›</span>
+                </div>
+                <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 8, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {r.designation || '—'}
+                </div>
+                {depot && (
+                  <div style={{ fontSize: 10.5, color: 'rgba(166,161,129,0.9)', marginBottom: 6 }}>Dépôt : {r.depot}</div>
+                )}
+                <div style={{ display: 'grid', gridTemplateColumns: '1.25fr 1fr 1fr 1fr', gap: 6 }}>
+                  <MiniStat
+                    label="Dispo immédiate"
+                    value={d ? formatNumber(d.qte_immediate) : '…'}
+                    accent={d ? couleurDispo(d.qte_immediate) : 'rgba(255,255,255,0.35)'}
+                  />
+                  <MiniStat label={depot ? 'Sage − PL dépôt' : 'Sage − PL'} value={formatNumber(r.stock_disponible)} accent={couleurStock(r.stock_disponible)} />
+                  <MiniStat label="Réel" value={formatNumber(r.stock_reel)} />
+                  <MiniStat
+                    label="À terme"
+                    value={formatNumber(r.stock_a_terme)}
+                    accent={r.stock_a_terme < 0 ? C_ROUGE : undefined}
+                  />
+                </div>
+                {d && d.qte_immediate <= 0 && (
+                  <div style={{ marginTop: 8, fontSize: 12, fontWeight: 600, color: prochaine ? C_ORANGE : C_ROUGE }}>
+                    {prochaine
+                      ? `Livraison client dès le ${formatDateCourte(dateLivraisonClient(prochaine))}${d.qte_prochaine_dispo !== null ? ` · ${formatNumber(d.qte_prochaine_dispo)} p.` : ''}`
+                      : 'Pas de dispo prévue · réappro nécessaire'}
+                  </div>
+                )}
+              </button>
+            )
+          })}
         </div>
       )}
 
@@ -484,7 +592,7 @@ function PanneauDepot({ depot, onChoisir, onClose }: { depot: string | null; onC
         <div style={{ width: 36, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.2)', margin: '0 auto 6px' }} />
         <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Dépôt</div>
         <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', marginBottom: 4 }}>
-          Choisir un dépôt affiche directement son stock, sans avoir besoin de taper une recherche.
+          Choisir un dépôt affiche directement son stock Sage − PL, sans avoir besoin de taper une recherche. La dispo pour nouvelle commande reste calculée tous dépôts confondus.
         </div>
         <PanneauChoix label="Tous les dépôts (global)" actif={!depot} onClick={() => { onChoisir(null); onClose() }} />
         {DEPOTS_PROPOSES.map((d) => (
@@ -524,13 +632,13 @@ function PanneauChoix({ label, actif, onClick }: { label: string; actif: boolean
 function MiniStat({ label, value, accent }: { label: string; value: string; accent?: string }) {
   return (
     <div style={{ minWidth: 0 }}>
-      <div style={{ fontSize: 9.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.35)', marginBottom: 2 }}>{label}</div>
+      <div style={{ fontSize: 9.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.35)', marginBottom: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</div>
       <div style={{ fontFamily: 'var(--font-mono)', fontSize: 15, fontWeight: 600, color: accent || '#fff' }}>{value}</div>
     </div>
   )
 }
 
-// ── Fiche détail : total dispo + stock par dépôt + livraisons attendues ──
+// ── Fiche détail : dispo nouvelle commande + Sage − PL + par dépôt + livraisons ──
 
 function StockArticleDetailSheet({
   reference, designation, onClose,
@@ -563,13 +671,7 @@ function StockArticleDetailSheet({
         setDispoNCError(error.message)
         setDispoNC(null)
       } else {
-        const d = (data || {}) as Record<string, unknown>
-        setDispoNC({
-          stock_dispo: toNumber(d.stock_dispo),
-          qte_immediate: toNumber(d.qte_immediate),
-          date_prochaine_dispo: (d.date_prochaine_dispo as string | null) || null,
-          qte_prochaine_dispo: d.qte_prochaine_dispo === null || d.qte_prochaine_dispo === undefined ? null : toNumber(d.qte_prochaine_dispo),
-        })
+        setDispoNC(normaliserDispo((data || {}) as Record<string, unknown>))
       }
       setDispoNCLoading(false)
     }
@@ -649,7 +751,7 @@ function StockArticleDetailSheet({
     )
   }, [depotRows])
 
-  // Dépôts triés par dispo décroissant (puis nom), séparés en "avec stock"
+  // Dépôts triés par Sage − PL décroissant (puis nom), séparés en "avec stock"
   // et "vides" ; largeur de barre relative au dépôt le mieux fourni.
   const { depotsAvecStock, depotsVides, maxDispo } = useMemo(() => {
     const rows = [...(depotRows || [])]
@@ -695,37 +797,25 @@ function StockArticleDetailSheet({
         </div>
 
         <div style={{ overflowY: 'auto', padding: '0 18px 24px', display: 'flex', flexDirection: 'column', gap: 16 }}>
-          {/* ── Bandeau total ── */}
-          <div style={{ borderRadius: 14, border: '1px solid rgba(166,161,129,0.35)', background: 'rgba(166,161,129,0.10)', padding: '12px 14px' }}>
-            {depotLoading || !totalDepot ? (
-              <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Chargement…</div>
-            ) : (
-              <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 10 }}>
-                <div>
-                  <div style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#A6A181', fontWeight: 700 }}>Physique - PL tous dépôts</div>
-                  <div style={{ fontFamily: 'var(--font-mono)', fontSize: 32, fontWeight: 700, lineHeight: 1.1, marginTop: 2, color: couleurDispo(totalDepot.stock_disponible) }}>
-                    {formatNumber(totalDepot.stock_disponible)}
-                  </div>
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '2px 10px', fontSize: 11.5, fontFamily: 'var(--font-mono)', color: 'rgba(255,255,255,0.6)', textAlign: 'right' }}>
-                  <span>réel</span><span style={{ color: '#fff' }}>{formatNumber(totalDepot.stock_reel)}</span>
-                  <span>réservé</span><span style={{ color: '#fff' }}>{formatNumber(totalDepot.stock_reserve)}</span>
-                  <span>à terme</span><span style={{ color: totalDepot.stock_a_terme < 0 ? '#e0a685' : '#fff' }}>{formatNumber(totalDepot.stock_a_terme)}</span>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* ── Pour une nouvelle commande ── */}
-          <BlocNouvelleCommande loading={dispoNCLoading} error={dispoNCError} dispo={dispoNC} />
+          {/* ── Tous dépôts : dispo nouvelle commande ‖ stock Sage − PL ── */}
+          <BandeauTousDepots
+            dispoLoading={dispoNCLoading}
+            dispoError={dispoNCError}
+            dispo={dispoNC}
+            stockLoading={depotLoading}
+            total={totalDepot}
+          />
 
           {/* ── Par dépôt ── */}
           <div>
-            <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)', marginBottom: 8 }}>
-              Stock physique - PL par dépôt
+            <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>
+              Stock Sage − PL au départ du dépôt
+            </div>
+            <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', margin: '3px 0 8px', lineHeight: 1.4 }}>
+              Stock physique du dépôt moins ses préparations de livraison. Les commandes clients ne sont pas rattachées à un dépôt : la dispo pour nouvelle commande ne se calcule que tous dépôts confondus.
             </div>
             {depotError && (
-              <div style={{ marginBottom: 8, fontSize: 12, color: '#e0a685' }}>{depotError}</div>
+              <div style={{ marginBottom: 8, fontSize: 12, color: C_ROUGE }}>{depotError}</div>
             )}
             {depotLoading ? (
               <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)', padding: '16px 0', textAlign: 'center' }}>Chargement…</div>
@@ -784,7 +874,7 @@ function StockArticleDetailSheet({
               )}
             </button>
             {livraisonsError && (
-              <div style={{ marginTop: 8, fontSize: 12, color: '#e0a685' }}>{livraisonsError}</div>
+              <div style={{ marginTop: 8, fontSize: 12, color: C_ROUGE }}>{livraisonsError}</div>
             )}
             {livraisonsLoading ? (
               <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.35)', padding: '16px 0', textAlign: 'center' }}>Chargement…</div>
@@ -806,7 +896,7 @@ function StockArticleDetailSheet({
                       }}
                     >
                       <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 13, fontWeight: 700, color: dateValide ? '#8FC7DA' : '#D69A4A' }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: dateValide ? '#8FC7DA' : C_ORANGE }}>
                           {dateValide ? formatDateCourte(r.date_livraison_calculee) : 'Date à confirmer'}
                         </div>
                         <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginTop: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -828,98 +918,112 @@ function StockArticleDetailSheet({
   )
 }
 
-/** Une ligne de dépôt : nom, dispo en gros (couleur selon signe), barre
+/** Une ligne de dépôt : nom, Sage − PL en gros (couleur neutre), barre
  * proportionnelle au dépôt le mieux fourni, réel/réservé en secondaire. */
 function LigneDepot({ row, maxDispo }: { row: DepotStockRow; maxDispo: number }) {
   const dispo = toNumber(row.stock_disponible)
   const reel = toNumber(row.stock_reel)
   const reserve = toNumber(row.stock_reserve)
   const largeur = Math.max(0, Math.min(100, (Math.max(0, dispo) / maxDispo) * 100))
-  const couleur = couleurDispo(dispo)
+  const couleur = couleurStock(dispo)
   return (
     <div style={{ borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)', padding: '10px 12px' }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
         <span style={{ fontSize: 14, fontWeight: 700, color: '#fff', minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
           {depotCourt(row.depot)}
         </span>
-        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 22, fontWeight: 700, color: couleur, flexShrink: 0 }}>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 20, fontWeight: 700, color: couleur, flexShrink: 0 }}>
           {formatNumber(dispo)}
         </span>
       </div>
       <div style={{ marginTop: 6, height: 6, borderRadius: 3, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
-        <div style={{ width: `${largeur}%`, height: '100%', borderRadius: 3, background: couleur, transition: 'width .2s' }} />
+        <div style={{ width: `${largeur}%`, height: '100%', borderRadius: 3, background: dispo > 0 ? 'rgba(216,210,188,0.55)' : couleur, transition: 'width .2s' }} />
       </div>
       <div style={{ marginTop: 5, display: 'flex', gap: 12, fontSize: 11.5, fontFamily: 'var(--font-mono)', color: 'rgba(255,255,255,0.5)' }}>
         <span>réel <span style={{ color: 'rgba(255,255,255,0.8)' }}>{formatNumber(reel)}</span></span>
-        <span>réservé <span style={{ color: reserve > 0 ? '#D69A4A' : 'rgba(255,255,255,0.8)' }}>{formatNumber(reserve)}</span></span>
+        <span>réservé <span style={{ color: reserve > 0 ? C_ORANGE : 'rgba(255,255,255,0.8)' }}>{formatNumber(reserve)}</span></span>
       </div>
     </div>
   )
 }
 
-/** Quantité promissible pour une nouvelle commande client : livrable
- * immédiatement, sinon première date de livraison client possible. */
-function BlocNouvelleCommande({
-  loading, error, dispo,
-}: { loading: boolean; error: string | null; dispo: DispoNouvelleCommande | null }) {
-  const titre = (
-    <div style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#8FC7DA', fontWeight: 700 }}>
-      Pour une nouvelle commande
-    </div>
-  )
-  const cadre: React.CSSProperties = {
-    borderRadius: 14, border: '1px solid rgba(75,146,172,0.35)', background: 'rgba(75,146,172,0.10)', padding: '12px 14px',
-  }
-
-  if (loading) {
-    return <div style={cadre}>{titre}<div style={{ marginTop: 6, fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Calcul…</div></div>
-  }
-  if (error || !dispo) {
-    return (
-      <div style={cadre}>
-        {titre}
-        <div style={{ marginTop: 6, fontSize: 12, color: '#e0a685' }}>{error || 'Disponibilité indisponible.'}</div>
-      </div>
-    )
-  }
-
-  const immediate = dispo.qte_immediate
-  const aujourdHui = new Date().toISOString().slice(0, 10)
-  const prochaine = dispo.date_prochaine_dispo && dispo.date_prochaine_dispo > aujourdHui ? dispo.date_prochaine_dispo : null
+/** Tous dépôts : dispo pour une nouvelle commande (livraison immédiate, en
+ * vert) en parallèle du stock Sage − PL (neutre), puis réel / réservé / à
+ * terme, et à défaut de dispo immédiate la date de livraison client possible
+ * (prochaine dispo + délai de sécurité). */
+function BandeauTousDepots({
+  dispoLoading, dispoError, dispo, stockLoading, total,
+}: {
+  dispoLoading: boolean
+  dispoError: string | null
+  dispo: DispoNouvelleCommande | null
+  stockLoading: boolean
+  total: { stock_reel: number; stock_reserve: number; stock_disponible: number; stock_a_terme: number } | null
+}) {
+  const libelle: React.CSSProperties = { fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 700, lineHeight: 1.25 }
+  const immediate = dispo ? dispo.qte_immediate : 0
+  const prochaine = dispo ? prochaineDispoFuture(dispo) : null
+  const stockSagePL = total ? total.stock_disponible : dispo ? dispo.stock_dispo : 0
 
   return (
-    <div style={cadre}>
-      {titre}
-      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 10, marginTop: 4 }}>
-        <div>
-          <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.55)' }}>Livraison immédiate</div>
-          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 28, fontWeight: 700, lineHeight: 1.1, color: couleurDispo(immediate) }}>
-            {formatNumber(immediate)}
-          </div>
+    <div style={{ borderRadius: 14, border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.03)', padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Tous dépôts</div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+        {/* Dispo nouvelle commande */}
+        <div style={{ borderRadius: 12, border: `1px solid ${immediate > 0 ? 'rgba(143,212,168,0.45)' : 'rgba(193,104,60,0.45)'}`, background: immediate > 0 ? 'rgba(143,212,168,0.10)' : 'rgba(193,104,60,0.10)', padding: '10px 12px', minWidth: 0 }}>
+          <div style={{ ...libelle, color: immediate > 0 ? C_VERT : C_ROUGE }}>Dispo nouvelle commande<br />livraison immédiate</div>
+          {dispoLoading ? (
+            <div style={{ marginTop: 8, fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Calcul…</div>
+          ) : dispoError || !dispo ? (
+            <div style={{ marginTop: 6, fontSize: 12, color: C_ROUGE }}>{dispoError || 'Disponibilité indisponible.'}</div>
+          ) : (
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 32, fontWeight: 700, lineHeight: 1.1, marginTop: 4, color: couleurDispo(immediate) }}>
+              {formatNumber(immediate)}
+            </div>
+          )}
         </div>
-        {immediate <= 0 && (
-          <div style={{ textAlign: 'right' }}>
-            <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.55)' }}>Prochaine dispo (livraison client)</div>
-            {prochaine ? (
-              <>
-                <div style={{ fontFamily: 'var(--font-mono)', fontSize: 18, fontWeight: 700, color: '#D69A4A' }}>
-                  {formatDateCourte(prochaine)}
-                </div>
-                {dispo.qte_prochaine_dispo !== null && (
-                  <div style={{ fontSize: 11.5, fontFamily: 'var(--font-mono)', color: 'rgba(255,255,255,0.6)' }}>
-                    {formatNumber(dispo.qte_prochaine_dispo)} promissible{dispo.qte_prochaine_dispo > 1 ? 's' : ''}
-                  </div>
-                )}
-              </>
-            ) : (
-              <div style={{ fontSize: 13, fontWeight: 700, color: '#e0a685' }}>Aucune réception prévue</div>
-            )}
-          </div>
-        )}
+        {/* Stock Sage − PL */}
+        <div style={{ borderRadius: 12, border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(255,255,255,0.03)', padding: '10px 12px', minWidth: 0 }}>
+          <div style={{ ...libelle, color: 'rgba(255,255,255,0.5)' }}>Stock Sage − PL<br />avant CDC en portefeuille</div>
+          {stockLoading && !dispo ? (
+            <div style={{ marginTop: 8, fontSize: 12.5, color: 'rgba(255,255,255,0.35)' }}>Chargement…</div>
+          ) : (
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 24, fontWeight: 700, lineHeight: 1.1, marginTop: 8, color: couleurStock(stockSagePL) }}>
+              {formatNumber(stockSagePL)}
+            </div>
+          )}
+        </div>
       </div>
-      {immediate <= 0 && dispo.stock_dispo > 0 && (
-        <div style={{ marginTop: 6, fontSize: 11, color: 'rgba(255,255,255,0.45)', lineHeight: 1.4 }}>
-          Le stock physique - PL ({formatNumber(dispo.stock_dispo)}) est déjà promis aux commandes clients en portefeuille.
+
+      {!dispoLoading && dispo && immediate <= 0 && (
+        <div style={{ borderRadius: 10, border: '1px solid rgba(214,154,74,0.4)', background: 'rgba(214,154,74,0.10)', padding: '8px 10px' }}>
+          <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.55)' }}>Livraison client possible dès</div>
+          {prochaine ? (
+            <>
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 20, fontWeight: 700, color: C_ORANGE }}>
+                {formatDateCourte(dateLivraisonClient(prochaine))}
+              </div>
+              <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'rgba(255,255,255,0.55)' }}>
+                {dispo.qte_prochaine_dispo !== null ? `${formatNumber(dispo.qte_prochaine_dispo)} p. promissibles · ` : ''}stock dispo le {formatDateCourte(prochaine)} + {DELAI_SECURITE_JOURS} j de sécurité
+              </div>
+            </>
+          ) : (
+            <div style={{ fontSize: 14, fontWeight: 700, color: C_ROUGE }}>Aucune réception prévue · réappro nécessaire</div>
+          )}
+        </div>
+      )}
+
+      {total && (
+        <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 11.5, fontFamily: 'var(--font-mono)', color: 'rgba(255,255,255,0.5)' }}>
+          <span>réel <span style={{ color: '#fff' }}>{formatNumber(total.stock_reel)}</span></span>
+          <span>réservé <span style={{ color: total.stock_reserve > 0 ? C_ORANGE : '#fff' }}>{formatNumber(total.stock_reserve)}</span></span>
+          <span>à terme <span style={{ color: total.stock_a_terme < 0 ? C_ROUGE : '#fff' }}>{formatNumber(total.stock_a_terme)}</span></span>
+        </div>
+      )}
+
+      {!dispoLoading && dispo && stockSagePL > immediate && (
+        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', lineHeight: 1.4 }}>
+          Sur les {formatNumber(stockSagePL)} en stock Sage − PL, {formatNumber(stockSagePL - Math.max(0, immediate))} sont déjà promis aux commandes clients en portefeuille. Seule la dispo nouvelle commande peut être promise sans retarder une CDC.
         </div>
       )}
     </div>
