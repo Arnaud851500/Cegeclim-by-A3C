@@ -29,6 +29,15 @@
  *        3 prochains mois N−1 / N−1 × coef, choix de la conso retenue avec aperçu de la
  *        proposition ; navigation ← / → entre les références du tableau.
  *
+ * 06/10/2026 — groupes de références et plan d'appro :
+ *      · filtre « Groupe » (stock_groupes_articles) ou groupe à la volée (références collées,
+ *        sélection filtrée), enregistrable ; le groupe restreint le tableau ET les indicateurs
+ *        (la pastille MYSTOCK actives est ignorée pour un groupe) ;
+ *      · bouton « Plan d'appro & couverture » : projection mensuelle de la sélection selon des
+ *        hypothèses de conso (N-1 × coef, chaînages de références), saisie / proposition des
+ *        commandes mensuelles, couverture en quantité, mois et valeur (components/appro/PlanApproModal.tsx,
+ *        moteur lib/planAppro.ts, migration supabase/sql/20261006_plan_appro_operation.sql).
+ *
  * Hiérarchie des paramètres : article > fournisseur > paramètre global (appro_parametres) ;
  * la méthode peut en plus être forcée sur l'écran.
  *
@@ -44,6 +53,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Bar, CartesianGrid, Cell, ComposedChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { supabase } from '@/lib/supabaseClient'
 import ExcelJS from 'exceljs'
+import PlanApproModal from '@/components/appro/PlanApproModal'
+import type { PlanArticle } from '@/lib/planAppro'
 
 // ─────────────────────────────────────────────────────────────────────────
 // Types
@@ -3075,6 +3086,79 @@ const LigneArticle = React.memo(function LigneArticle({ a, p, t, f, incs, colonn
 })
 
 /** Caches de calcul (par objet) : une ligne n'est recalculée que si son article, son profil ou le contexte change. */
+type GroupeArticles = { id: string; nom: string; description: string | null; references_articles: string[] }
+/** Références collées : séparateurs espace, virgule, point-virgule, retour ligne, tabulation. */
+function parserReferences(texte: string): string[] {
+  return Array.from(new Set(texte.split(/[\s,;]+/).map((r) => r.trim().toUpperCase()).filter(Boolean)))
+}
+
+/** Fenêtre « groupe à la volée » : nom, références collées ou reprises de la sélection filtrée, enregistrement facultatif. */
+function GroupeEditeurModal({ initial, selectionFiltree, articlesConnus, onAppliquer, onEnregistre, onSupprime, onClose }: {
+  initial: { id: string | null; nom: string; description: string; refs: string[] }
+  selectionFiltree: string[]
+  articlesConnus: Set<string>
+  onAppliquer: (nom: string, refs: string[]) => void
+  onEnregistre: (g: GroupeArticles) => void
+  onSupprime: (id: string) => void
+  onClose: () => void
+}) {
+  const [nom, setNom] = useState(initial.nom)
+  const [description, setDescription] = useState(initial.description)
+  const [texte, setTexte] = useState(initial.refs.join('\n'))
+  const [msg, setMsg] = useState<string | null>(null)
+  const [enCours, setEnCours] = useState(false)
+  const refs = useMemo(() => parserReferences(texte), [texte])
+  const inconnues = refs.filter((r) => !articlesConnus.has(r))
+
+  async function enregistrer() {
+    if (!nom.trim() || refs.length === 0) { setMsg('Un nom et au moins une référence sont nécessaires.'); return }
+    setEnCours(true); setMsg(null)
+    const payload = { nom: nom.trim(), description: description.trim() || null, references_articles: refs }
+    const res = initial.id
+      ? await supabase.from('stock_groupes_articles').update(payload).eq('id', initial.id).select('id,nom,description,references_articles').single()
+      : await supabase.from('stock_groupes_articles').insert(payload).select('id,nom,description,references_articles').single()
+    setEnCours(false)
+    if (res.error) { setMsg(messageErreur(res.error)); return }
+    onEnregistre(res.data as GroupeArticles)
+  }
+  async function supprimer() {
+    if (!initial.id || !window.confirm(`Supprimer le groupe « ${initial.nom} » ? (les scénarios de plan d'appro sont conservés)`)) return
+    const { error } = await supabase.from('stock_groupes_articles').delete().eq('id', initial.id)
+    if (error) { setMsg(messageErreur(error)); return }
+    onSupprime(initial.id)
+  }
+
+  return (
+    <div className="fixed inset-0 z-[55] flex items-center justify-center bg-[#0B1220]/40 p-4" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}>
+      <div className="w-full max-w-[620px] rounded-2xl bg-white p-4 shadow-2xl">
+        <div className="mb-2 flex items-center justify-between">
+          <h3 className="text-[16px] font-bold text-[#111820]">{initial.id ? 'Modifier le groupe' : 'Groupe de références à la volée'}</h3>
+          <button type="button" onClick={onClose} className="text-[13px] font-bold text-[#8A8474]">✕</button>
+        </div>
+        <p className="mb-2 text-[12px] text-[#8A8474]">Le groupe restreint le tableau et les indicateurs de l’écran à ces références, et sert de périmètre au plan d’appro. « Appliquer » l’utilise tout de suite sans l’enregistrer ; « Enregistrer » le rend disponible pour tous (écran Disponibilité par groupe compris).</p>
+        <div className="grid gap-2">
+          <input value={nom} onChange={(e) => setNom(e.target.value)} placeholder="Nom du groupe (ex. Opération Hitachi 2027)" className="h-9 rounded-md border border-[#E5E1D8] px-2 text-[13px] font-semibold outline-none focus:border-[#B4761A]" />
+          <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Description (facultatif)" className="h-8 rounded-md border border-[#E5E1D8] px-2 text-[12px] outline-none focus:border-[#B4761A]" />
+          <textarea value={texte} onChange={(e) => setTexte(e.target.value)} rows={10} placeholder="Références : une par ligne, ou séparées par des espaces / virgules / points-virgules" className="rounded-md border border-[#E5E1D8] p-2 font-mono text-[12px] outline-none focus:border-[#B4761A]" />
+          <div className="flex flex-wrap items-center gap-2 text-[11.5px]">
+            <span className="font-bold text-[#3A362E]">{refs.length} référence{refs.length > 1 ? 's' : ''}</span>
+            {inconnues.length > 0 && <span className="font-semibold text-orange-700" title={inconnues.join(', ')}>{inconnues.length} absente{inconnues.length > 1 ? 's' : ''} du calcul de besoin : {inconnues.slice(0, 4).join(', ')}{inconnues.length > 4 ? '…' : ''}</span>}
+            <button type="button" onClick={() => setTexte(selectionFiltree.join('\n'))} disabled={!selectionFiltree.length} className="ml-auto rounded-md border border-[#E5E1D8] px-2 py-1 font-bold text-[#3A362E] hover:bg-[#F4F3F0] disabled:opacity-50">Reprendre la sélection filtrée ({selectionFiltree.length})</button>
+          </div>
+          {msg && <div className="rounded-md bg-red-50 px-2 py-1.5 text-[12px] font-semibold text-red-800">{msg}</div>}
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            {initial.id && <button type="button" onClick={() => void supprimer()} className="h-8 rounded-md border border-red-200 px-3 text-[12px] font-bold text-red-700 hover:bg-red-50">Supprimer</button>}
+            <div className="ml-auto flex gap-2">
+              <button type="button" onClick={() => { if (refs.length) onAppliquer(nom.trim() || 'Groupe à la volée', refs) }} disabled={!refs.length} className="h-8 rounded-md border border-[#E5E1D8] bg-white px-3 text-[12px] font-bold text-[#3A362E] hover:bg-[#F4F3F0] disabled:opacity-50">Appliquer sans enregistrer</button>
+              <button type="button" onClick={() => void enregistrer()} disabled={enCours} className="h-8 rounded-md bg-[#111820] px-3 text-[12px] font-bold text-white hover:bg-[#252E3D] disabled:opacity-60">{enCours ? 'Enregistrement…' : 'Enregistrer le groupe'}</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 const cacheProposition = new WeakMap<ArtRow, { pr: ProfilConso | undefined; ctx: object; p: Proposition }>()
 const cacheTarif = new WeakMap<Proposition, { paliers: PalierTarif[]; lecture: LectureBornes; t: AnalyseTarif | null }>()
 
@@ -3126,6 +3210,12 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
   const [tarifsRows, setTarifsRows] = useState<PalierTarif[]>([])
   const [tarifsErreur, setTarifsErreur] = useState<string | null>(null)
   const [nbAffichees, setNbAffichees] = useState(300)
+  // Groupes de références (stock_groupes_articles) et groupe à la volée — restreignent tableau ET indicateurs
+  const [groupes, setGroupes] = useState<GroupeArticles[]>([])
+  const [groupeId, setGroupeId] = useState<string>(() => { try { return localStorage.getItem('appro.calcul_besoin.groupe') || '' } catch { return '' } })
+  const [groupeAdHoc, setGroupeAdHoc] = useState<{ nom: string; refs: string[] } | null>(null)
+  const [editeurGroupe, setEditeurGroupe] = useState<{ id: string | null; nom: string; description: string; refs: string[] } | null>(null)
+  const [planOuvert, setPlanOuvert] = useState(false)
 
   useEffect(() => {
     let annule = false
@@ -3136,6 +3226,14 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
     })
     return () => { annule = true }
   }, [])
+  useEffect(() => {
+    let annule = false
+    void supabase.from('stock_groupes_articles').select('id,nom,description,references_articles').order('nom').then(({ data }) => {
+      if (!annule) setGroupes(((data || []) as GroupeArticles[]).map((g) => ({ ...g, references_articles: (g.references_articles || []).map((r) => r.toUpperCase()) })))
+    })
+    return () => { annule = true }
+  }, [])
+  useEffect(() => { try { localStorage.setItem('appro.calcul_besoin.groupe', groupeId === '__adhoc' ? '' : groupeId) } catch { /* ignore */ } }, [groupeId])
   useEffect(() => { setParamsDraft(Object.fromEntries(parametres.map((p) => [p.cle, String(p.valeur)]))) }, [parametres])
   useEffect(() => { if (!message || message.type === 'ko') return; const t = setTimeout(() => setMessage(null), 6000); return () => clearTimeout(t) }, [message])
 
@@ -3208,6 +3306,13 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
     return m
   }, [articles, propositions, paliersParCle, lectureBornes])
   const ctxCol = useMemo<CtxColArt>(() => ({ fournMap, incoherencesParRef, propositions, tarifs }), [fournMap, incoherencesParRef, propositions, tarifs])
+  const groupeActif = useMemo<{ id: string | null; nom: string; refs: string[] } | null>(() => {
+    if (groupeId === '__adhoc') return groupeAdHoc ? { id: null, nom: groupeAdHoc.nom, refs: groupeAdHoc.refs } : null
+    const g = groupes.find((x) => x.id === groupeId)
+    return g ? { id: g.id, nom: g.nom, refs: g.references_articles } : null
+  }, [groupeId, groupeAdHoc, groupes])
+  const refsGroupe = useMemo(() => (groupeActif ? new Set(groupeActif.refs.map((r) => r.toUpperCase())) : null), [groupeActif])
+  const refsGroupeAbsentes = useMemo(() => (groupeActif ? groupeActif.refs.filter((r) => !indexArticles.has(r.toUpperCase())) : []), [groupeActif, indexArticles])
   const clesFiltreCol = useMemo(() => (Object.keys(filtresCol) as CleColArt[]).filter((k) => (filtresCol[k] || '').trim()), [filtresCol])
   function setFiltreCol(k: CleColArt, v: string) { setFiltresCol((f) => ({ ...f, [k]: v })) }
   const aSurcharge = (p: Proposition | undefined) => !!p && (['strategie', 'methode', 'couvMin', 'couvCible', 'conso', 'coef', 'delaiAppro', 'delaiSecu'] as const).some((k) => p.eff[k].o === 'article')
@@ -3218,7 +3323,8 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
     return articles.filter((a) => {
       const f = a.fournisseur_principal ? fournMap.get(a.fournisseur_principal) : undefined
       const p = propositions.get(a.reference_article)
-      if (pertinentsSeuls && !a.pertinent_calcul_besoin) return false
+      if (refsGroupe && !refsGroupe.has(a.reference_article.toUpperCase())) return false
+      if (!refsGroupe && pertinentsSeuls && !a.pertinent_calcul_besoin) return false
       if (avecConsoSeuls && !(Number(a.conso_horizon) > 0)) return false
       if (ecartMinSeuls && !(a.champs_en_ecart || []).includes('stock_min')) return false
       if (aCommanderSeuls && !(p?.qteFinale ?? 0)) return false
@@ -3239,7 +3345,7 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
       for (const k of clesFiltreCol) if (!filtreColArtOk(a, k, filtresCol[k]!, ctxCol)) return false
       return true
     })
-  }, [articles, fournMap, propositions, search, fournFilter, familleFilter, pertinentsSeuls, avecConsoSeuls, ecartMinSeuls, aCommanderSeuls, avecEncoursSeuls, surchargesSeules, qualiteFilter, strategieFilter, sommeilFilter, arretApproFilter, blocageFilter, filtresCol, ctxCol, clesFiltreCol])
+  }, [articles, fournMap, propositions, search, fournFilter, familleFilter, pertinentsSeuls, avecConsoSeuls, ecartMinSeuls, aCommanderSeuls, avecEncoursSeuls, surchargesSeules, qualiteFilter, strategieFilter, sommeilFilter, arretApproFilter, blocageFilter, filtresCol, ctxCol, clesFiltreCol, refsGroupe])
 
   const compteursIncoherences = useMemo(() => {
     const c: Record<string, number> = {}
@@ -3511,6 +3617,22 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
     } finally { setExportEnCours(false) }
   }
 
+  /** Références transmises au plan d'appro : le jeu affiché (filtres + groupe), avec stock, μ, prix et échéances du calcul de besoin. */
+  const PLAN_MAX_REFS = 400
+  const articlesPlan = useMemo<PlanArticle[]>(() => {
+    if (!planOuvert) return []
+    return filtres.slice(0, PLAN_MAX_REFS).map((a) => {
+      const p = propositions.get(a.reference_article)
+      return {
+        ref: a.reference_article, designation: a.sage_designation || a.blg_designation, famille: a.famille, fournisseur: a.fournisseur_principal,
+        colisage: n0(a.sage_colisage), prix: prixUnitaire(a, tarifs.get(a.reference_article)),
+        stockBase: p ? p.stockBase : n0(a.sage_stock_dispo_total), mu: p ? p.mu : n0(a.conso_moy_mensuelle),
+        perimetreGlobal: p ? p.perimetreGlobal : a.projection_perimetre !== 'fms',
+        reserve: a.reserve_echeances || [], encours: a.encours_echeances || [],
+      }
+    })
+  }, [planOuvert, filtres, propositions, tarifs])
+
   const colonnesVisibles = useMemo(() => COLONNES_ARTICLES.filter((c) => !colonnesMasquees.has(c.key)), [colonnesMasquees])
   const setVisibles = useMemo(() => new Set(colonnesVisibles.map((c) => c.key)), [colonnesVisibles])
   const groupesEnTete = useMemo(() => {
@@ -3527,9 +3649,9 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
 
   const ctl = 'h-8 min-w-0 rounded-md border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold text-[#3A362E] outline-none focus:border-[#B4761A]'
   const puce = (actif: boolean) => `flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-[11.5px] font-semibold ${actif ? 'border-[#B4761A] bg-[#B4761A]/[0.1] text-[#8A5A08]' : 'border-[#E5E1D8] bg-white text-[#3A362E] hover:bg-[#F4F3F0]'}`
-  const nbFiltresActifs = [fournFilter, familleFilter, qualiteFilter, strategieFilter, search.trim()].filter(Boolean).length + [sommeilFilter, arretApproFilter, blocageFilter].filter((v) => v !== 'tous').length + (avecConsoSeuls ? 1 : 0) + (ecartMinSeuls ? 1 : 0) + (aCommanderSeuls ? 1 : 0) + (avecEncoursSeuls ? 1 : 0) + (surchargesSeules ? 1 : 0) + clesFiltreCol.length + (incoherenceFilter ? 1 : 0)
+  const nbFiltresActifs = (groupeActif ? 1 : 0) + [fournFilter, familleFilter, qualiteFilter, strategieFilter, search.trim()].filter(Boolean).length + [sommeilFilter, arretApproFilter, blocageFilter].filter((v) => v !== 'tous').length + (avecConsoSeuls ? 1 : 0) + (ecartMinSeuls ? 1 : 0) + (aCommanderSeuls ? 1 : 0) + (avecEncoursSeuls ? 1 : 0) + (surchargesSeules ? 1 : 0) + clesFiltreCol.length + (incoherenceFilter ? 1 : 0)
   function reinitialiserFiltres() {
-    setSearch(''); setFournFilter(''); setFamilleFilter(''); setQualiteFilter(''); setStrategieFilter(''); setSommeilFilter('tous'); setArretApproFilter('tous'); setBlocageFilter('tous')
+    setGroupeId(''); setSearch(''); setFournFilter(''); setFamilleFilter(''); setQualiteFilter(''); setStrategieFilter(''); setSommeilFilter('tous'); setArretApproFilter('tous'); setBlocageFilter('tous')
     setAvecConsoSeuls(false); setEcartMinSeuls(false); setACommanderSeuls(false); setAvecEncoursSeuls(false); setSurchargesSeules(false); setFiltresCol({}); setTriCol(null); setIncoherenceFilter(null)
   }
 
@@ -3552,6 +3674,12 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
             {kpis.palierAtteignable > 0 && <span className="rounded-full bg-emerald-600/80 px-2 py-0.5 text-[11px] font-bold" title={`${kpis.palierAtteignable} référence(s) à commander pour lesquelles un palier de prix est atteignable (+${fmtNum(kpis.qteAddPalier)} pièces)`}>€ {fmtEuro(kpis.economiePalier)} d’économie paliers</span>}
           </div>
           <div className="ml-auto flex items-center gap-2">
+            {groupeActif && <span className="rounded-full bg-[#7A5EA8] px-2.5 py-0.5 text-[11px] font-bold" title={`${groupeActif.refs.length} référence(s) dans le groupe — tableau et indicateurs limités au groupe`}>◆ {groupeActif.nom}</span>}
+            <button type="button" onClick={() => setPlanOuvert(true)} disabled={loading || filtres.length === 0}
+              title={`Projection mensuelle du stock des références affichées${filtres.length > PLAN_MAX_REFS ? ` (${PLAN_MAX_REFS} premières)` : ''} : hypothèses de conso, chaînages, commandes d'appro mensuelles, couverture en quantité / mois / valeur`}
+              className="h-8 rounded-lg bg-[#7A5EA8] px-3 text-[12px] font-bold text-white hover:bg-[#6A4F96] disabled:opacity-50">
+              📈 Plan d’appro & couverture ({fmtNum(Math.min(filtres.length, PLAN_MAX_REFS))})
+            </button>
             <button type="button" onClick={() => void exporterFichiersCommande()} disabled={exportCommandesEnCours || loading || kpis.aCommander === 0}
               title="Un fichier par fournisseur et par date de livraison souhaitée (Référence ; Quantité ; Date), sur les lignes filtrées à commander"
               className="h-8 rounded-lg bg-[#D9A441] px-3 text-[12px] font-bold text-[#111820] hover:bg-[#E5B556] disabled:opacity-50">
@@ -3619,7 +3747,17 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
           </select>
         </div>
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-          <button type="button" className={puce(pertinentsSeuls)} onClick={() => setPertinentsSeuls((v) => !v)}>MYSTOCK actives</button>
+          <select value={groupeId} onChange={(e) => setGroupeId(e.target.value)} title="Groupe de références : limite le tableau et les indicateurs (la pastille MYSTOCK actives est alors ignorée)"
+            className={`h-7 max-w-[240px] rounded-full border px-2.5 text-[11.5px] font-semibold outline-none ${groupeActif ? 'border-[#7A5EA8] bg-[#EFE9F7] text-[#5B4387]' : 'border-[#E5E1D8] bg-white text-[#3A362E]'}`}>
+            <option value="">Groupe : aucun</option>
+            {groupeAdHoc && <option value="__adhoc">◇ {groupeAdHoc.nom} (non enregistré, {groupeAdHoc.refs.length})</option>}
+            {groupes.map((g) => <option key={g.id} value={g.id}>◆ {g.nom} ({g.references_articles.length})</option>)}
+          </select>
+          <button type="button" onClick={() => setEditeurGroupe(groupeActif ? { id: groupeActif.id, nom: groupeActif.nom, description: groupes.find((g) => g.id === groupeActif.id)?.description || '', refs: groupeActif.refs } : { id: null, nom: '', description: '', refs: [] })}
+            className="h-7 rounded-full border border-[#E5E1D8] bg-white px-2.5 text-[11.5px] font-bold text-[#5B4387] hover:bg-[#EFE9F7]" title={groupeActif ? 'Modifier le groupe' : 'Créer un groupe à la volée'}>{groupeActif ? '✎ Groupe' : '+ Groupe à la volée'}</button>
+          {groupeActif && refsGroupeAbsentes.length > 0 && <span className="text-[11px] font-semibold text-orange-700" title={refsGroupeAbsentes.join(', ')}>{refsGroupeAbsentes.length} réf. du groupe absente{refsGroupeAbsentes.length > 1 ? 's' : ''} du calcul</span>}
+          <span className="mx-1 h-5 w-px bg-[#E5E1D8]" />
+          <button type="button" className={`${puce(pertinentsSeuls && !groupeActif)} ${groupeActif ? 'opacity-50' : ''}`} onClick={() => setPertinentsSeuls((v) => !v)} title={groupeActif ? 'Ignoré tant qu\'un groupe est sélectionné' : undefined}>MYSTOCK actives</button>
           <button type="button" className={puce(aCommanderSeuls)} onClick={() => setACommanderSeuls((v) => !v)}>À commander</button>
           <button type="button" className={puce(avecConsoSeuls)} onClick={() => setAvecConsoSeuls((v) => !v)}>Avec conso</button>
           <button type="button" className={puce(avecEncoursSeuls)} onClick={() => setAvecEncoursSeuls((v) => !v)}>Avec encours</button>
@@ -3783,6 +3921,26 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
       {fournOuvert && (
         <FicheFournisseurModal selected={fournOuvert} strategies={strategies} articles={articles}
           onRowChange={onFournisseurChange} onClose={() => setFournNumero(null)} onStrategieSaved={onStrategieSaved} />
+      )}
+      {editeurGroupe && (
+        <GroupeEditeurModal initial={editeurGroupe} selectionFiltree={filtres.map((a) => a.reference_article.toUpperCase())}
+          articlesConnus={new Set(indexArticles.keys())}
+          onAppliquer={(nom, refs) => { setGroupeAdHoc({ nom, refs }); setGroupeId('__adhoc'); setEditeurGroupe(null) }}
+          onEnregistre={(g) => {
+            const gn = { ...g, references_articles: (g.references_articles || []).map((r) => r.toUpperCase()) }
+            setGroupes((l) => [...l.filter((x) => x.id !== gn.id), gn].sort((x, y) => x.nom.localeCompare(y.nom, 'fr')))
+            setGroupeId(gn.id); setEditeurGroupe(null)
+            setMessage({ type: 'ok', texte: `Groupe « ${gn.nom} » enregistré (${gn.references_articles.length} références).` })
+          }}
+          onSupprime={(id) => { setGroupes((l) => l.filter((x) => x.id !== id)); setGroupeId(''); setEditeurGroupe(null) }}
+          onClose={() => setEditeurGroupe(null)} />
+      )}
+      {planOuvert && (
+        <PlanApproModal articles={articlesPlan}
+          groupe={groupeActif && groupeActif.id ? { id: groupeActif.id, nom: groupeActif.nom } : null}
+          aujourdhui={ctxBase.aujourdhui} retardMaxJours={ctxBase.retardMaxJours}
+          onClose={() => setPlanOuvert(false)}
+          onFiltrerRefs={(refs, nom) => { setPlanOuvert(false); setGroupeAdHoc({ nom, refs: refs.map((r) => r.toUpperCase()) }); setGroupeId('__adhoc') }} />
       )}
       {articleEdite && propositions.get(articleEdite.reference_article) && (
         <ArticleManuelModal article={articleEdite} fournisseur={articleEdite.fournisseur_principal ? fournMap.get(articleEdite.fournisseur_principal) : undefined}
