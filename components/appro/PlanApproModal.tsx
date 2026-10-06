@@ -12,7 +12,8 @@
  *  - saisie des quantités d'appro par mois de livraison (une commande par mois,
  *    fenêtre de livraison paramétrable, ex. mars → septembre) ou proposition
  *    automatique pour atteindre une couverture cible ;
- *  - lecture de la couverture en quantité, en mois et en valeur, agrégée et par référence ;
+ *  - lecture de la couverture en quantité, en mois et en valeur au prix d'achat SAGE
+ *    (net fournisseur par défaut, PMP ou dernier prix d'achat ; mv_sage_articles_complet), agrégée et par référence ;
  *  - scénarios enregistrés (appro_plan_scenarios / _lignes / _hypotheses / _chainages),
  *    export Excel.
  *
@@ -200,8 +201,46 @@ function Kpi({ label, value, sub, tone }: { label: string; value: string; sub?: 
 }
 
 // ── Composant ───────────────────────────────────────────────────────────────
-export default function PlanApproModal({ articles, groupe, aujourdhui, retardMaxJours, onClose, onFiltrerRefs, catalogue = [] }: PlanApproModalProps) {
+/** Prix d'achat SAGE d'une référence (mv_sage_articles_complet). */
+type PrixAchat = { net: number | null; dernier: number | null; pmp: number | null; ar: number | null }
+type SourcePrix = 'net' | 'dernier' | 'pmp'
+const LIB_SOURCE_PRIX: Record<SourcePrix, string> = { net: 'Prix d’achat net fournisseur', dernier: 'Dernier prix d’achat', pmp: 'PMP (prix moyen pondéré)' }
+const prixPositif = (v: unknown) => { const n = Number(v); return v === null || v === undefined || v === '' || !Number.isFinite(n) || n <= 0 ? null : n }
+
+/** Prix de valorisation selon la source choisie, avec repli sur les autres prix d'achat (jamais un prix de vente ni un tarif brut). */
+function choisirPrix(p: PrixAchat | undefined, source: SourcePrix): { prix: number | null; origine: string } {
+  if (!p) return { prix: null, origine: 'aucun prix d’achat SAGE' }
+  const ordre: SourcePrix[] = source === 'net' ? ['net', 'dernier', 'pmp'] : source === 'dernier' ? ['dernier', 'net', 'pmp'] : ['pmp', 'dernier', 'net']
+  for (const k of ordre) { const v = p[k]; if (v !== null) return { prix: v, origine: k === source ? LIB_SOURCE_PRIX[k] : `${LIB_SOURCE_PRIX[k]} (repli)` } }
+  if (p.ar !== null) return { prix: p.ar, origine: 'Prix d’achat fiche article (repli)' }
+  return { prix: null, origine: 'aucun prix d’achat SAGE' }
+}
+
+export default function PlanApproModal({ articles: articlesEntree, groupe, aujourdhui, retardMaxJours, onClose, onFiltrerRefs, catalogue = [] }: PlanApproModalProps) {
   const moisCourant = moisDe(aujourdhui)
+  // Valorisation au prix d'achat (SAGE) : net fournisseur (tarif − remise) par défaut, PMP ou dernier prix d'achat au choix
+  const [sourcePrix, setSourcePrix] = useState<SourcePrix>(() => { try { const v = localStorage.getItem('appro.plan.source_prix'); return v === 'pmp' || v === 'dernier' ? v : 'net' } catch { return 'net' } })
+  useEffect(() => { try { localStorage.setItem('appro.plan.source_prix', sourcePrix) } catch { /* ignore */ } }, [sourcePrix])
+  const [prixAchat, setPrixAchat] = useState<Map<string, PrixAchat> | null>(null)
+  const refsEntree = useMemo(() => Array.from(new Set(articlesEntree.map((a) => cleRef(a.ref)))), [articlesEntree])
+  useEffect(() => {
+    let annule = false
+    void (async () => {
+      const m = new Map<string, PrixAchat>()
+      for (let i = 0; i < refsEntree.length; i += 150) {
+        const { data, error } = await supabase.from('mv_sage_articles_complet').select('reference, prix_net_fournisseur, dernier_prix_achat, pmp, prix_achat')
+          .in('reference', refsEntree.slice(i, i + 150))
+        if (error) { if (!annule) { setPrixAchat(new Map()); setMessage({ type: 'ko', texte: 'Prix d’achat SAGE (mv_sage_articles_complet) : ' + messageErreur(error) }) } return }
+        ;((data || []) as { reference: string; prix_net_fournisseur: number | null; dernier_prix_achat: number | null; pmp: number | null; prix_achat: number | null }[]).forEach((r) => {
+          m.set(cleRef(r.reference), { net: prixPositif(r.prix_net_fournisseur), dernier: prixPositif(r.dernier_prix_achat), pmp: prixPositif(r.pmp), ar: prixPositif(r.prix_achat) })
+        })
+      }
+      if (!annule) setPrixAchat(m)
+    })()
+    return () => { annule = true }
+  }, [refsEntree])
+  const origineParRef = useMemo(() => new Map(articlesEntree.map((a) => [cleRef(a.ref), choisirPrix(prixAchat?.get(cleRef(a.ref)), sourcePrix)])), [articlesEntree, prixAchat, sourcePrix])
+  const articles = useMemo<PlanArticle[]>(() => articlesEntree.map((a) => ({ ...a, prix: origineParRef.get(cleRef(a.ref))?.prix ?? null })), [articlesEntree, origineParRef])
   const [params, setParams] = useState<ScenarioParams>(() => paramsParDefaut(aujourdhui))
   const [plan, setPlan] = useState<Record<string, number>>({})
   const [hypotheses, setHypotheses] = useState<Record<string, number>>({})
@@ -485,7 +524,7 @@ export default function PlanApproModal({ articles, groupe, aujourdhui, retardMax
       // Synthèse
       const s = wb.addWorksheet('Synthèse')
       s.addRow([`Plan d'appro — ${nomScenario || 'sans nom'}`]).font = { bold: true, size: 14 }
-      s.addRow([`${articles.length} référence(s) · livraisons ${libMois(params.moisDebutAppro)} → ${libMois(params.moisFinAppro)} · horizon ${libMois(params.moisFinHorizon)} · base ${params.baseDemande === 'n1' ? 'ventes N-1' : 'conso moyenne retenue'} · coef par défaut ${fmtNum(params.coefDefaut * 100)} %`])
+      s.addRow([`${articles.length} référence(s) · livraisons ${libMois(params.moisDebutAppro)} → ${libMois(params.moisFinAppro)} · horizon ${libMois(params.moisFinHorizon)} · base ${params.baseDemande === 'n1' ? 'ventes N-1' : 'conso moyenne retenue'} · valorisation ${LIB_SOURCE_PRIX[sourcePrix]} · coef par défaut ${fmtNum(params.coefDefaut * 100)} %`])
       s.addRow([])
       entete(s, ['Mois', 'Demande', 'dont ferme', 'Encours fournisseurs', 'Plan d’appro', 'Stock fin (positif)', 'Manque', 'Couverture (mois)', 'Valeur stock (€)', 'Valeur plan (€)', 'Réf. en rupture'])
       agregat.forEach((m) => s.addRow([libMois(m.mois), m.demande, m.ferme, m.encours, m.plan, m.stockFin, m.manque, m.couverture, m.valeurStock, m.valeurPlan, m.nbRupture]))
@@ -493,10 +532,10 @@ export default function PlanApproModal({ articles, groupe, aujourdhui, retardMax
       // Plan (une ligne par référence, une colonne par mois de livraison)
       const fen = listeMois(params.moisDebutAppro, params.moisFinAppro)
       const p = wb.addWorksheet('Plan d’appro')
-      entete(p, ['Référence', 'Désignation', 'Fournisseur', 'Colisage', 'Prix achat', ...fen.map(libMois), 'Total qté', 'Total €'])
+      entete(p, ['Référence', 'Désignation', 'Fournisseur', 'Colisage', 'Prix d’achat', 'Origine du prix', ...fen.map(libMois), 'Total qté', 'Total € (PA)'])
       projectionsTriees.forEach((pr) => {
         const q = fen.map((m) => plan[clePlan(pr.article.ref, m)] || null)
-        p.addRow([pr.article.ref, pr.article.designation, pr.article.fournisseur, pr.article.colisage || null, pr.article.prix, ...q, pr.totalPlan, pr.valeurPlan])
+        p.addRow([pr.article.ref, pr.article.designation, pr.article.fournisseur, pr.article.colisage || null, pr.article.prix, origineParRef.get(cleRef(pr.article.ref))?.origine || '', ...q, pr.totalPlan, pr.valeurPlan])
       })
       p.columns.forEach((c, i) => { c.width = i === 1 ? 40 : 13 })
       p.views = [{ state: 'frozen', xSplit: 1, ySplit: 1 }]
@@ -627,6 +666,14 @@ export default function PlanApproModal({ articles, groupe, aujourdhui, retardMax
               <input type="checkbox" checked={params.inclureReserve} onChange={(e) => setParams((p) => ({ ...p, inclureReserve: e.target.checked }))} className="accent-[#B4761A]" /> Commandes clients fermes (plancher)
             </label>
             <span className="h-8 w-px bg-[#E5E1D8]" />
+            <label className="flex flex-col gap-0.5 font-semibold text-[#3A362E]" title="Valorisation du stock et du plan au prix d'achat SAGE ; si le prix choisi manque, repli sur les autres prix d'achat (jamais le prix de vente)">Valorisation
+              <select value={sourcePrix} onChange={(e) => setSourcePrix(e.target.value as SourcePrix)} className={ctl}>
+                <option value="net">Prix d’achat net fournisseur</option>
+                <option value="dernier">Dernier prix d’achat</option>
+                <option value="pmp">PMP</option>
+              </select>
+            </label>
+            <span className="h-8 w-px bg-[#E5E1D8]" />
             <label className="flex flex-col gap-0.5 font-semibold text-[#3A362E]">Couverture cible
               <CelluleSaisie valeur={params.couvertureCible} onCommit={(v) => setParams((p) => ({ ...p, couvertureCible: v ?? 3 }))} className="w-16 pr-7" suffixe="mois" titre="Stock visé en fin de chaque mois de livraison, en mois de demande des 3 mois suivants" />
             </label>
@@ -650,7 +697,7 @@ export default function PlanApproModal({ articles, groupe, aujourdhui, retardMax
             <Kpi label="Encours fournisseurs" value={fmtNum(syntheses.encoursTotal)} sub="sur l’horizon" tone="ok" />
             <Kpi label="Demande projetée" value={fmtNum(syntheses.demandeTotale)} sub={`${libMois(moisCourant)} → ${libMois(params.moisFinHorizon)}`} tone="warn" />
             <Kpi label="Plan d’appro" value={fmtNum(syntheses.totalPlan)} sub={`${syntheses.parMoisPlan.filter((m) => m.qte > 0).length} livraison(s) mensuelle(s)`} tone="violet" />
-            <Kpi label="Valeur du plan" value={fmtEuro(syntheses.valeurPlan)} sub={syntheses.sansPrix ? `${syntheses.sansPrix} réf. sans prix` : 'prix d’achat'} tone="violet" />
+            <Kpi label="Valeur du plan" value={fmtEuro(syntheses.valeurPlan)} sub={syntheses.sansPrix ? `${syntheses.sansPrix} réf. sans prix d’achat` : LIB_SOURCE_PRIX[sourcePrix]} tone="violet" />
             <Kpi label={`Stock fin ${syntheses.finFenetre ? libMois(syntheses.finFenetre.mois) : ''}`} value={fmtNum(syntheses.finFenetre?.stockFin)} sub={`${fmtNum(syntheses.finFenetre?.couverture, 1)} mois · ${fmtEuro(syntheses.finFenetre?.valeurStock)}`} />
             <Kpi label="Pic de valeur stock" value={fmtEuro(syntheses.pic?.valeurStock)} sub={syntheses.pic ? libMois(syntheses.pic.mois) : undefined} />
             <Kpi label={`Stock fin ${syntheses.fin ? libMois(syntheses.fin.mois) : ''}`} value={fmtNum(syntheses.fin?.stockFin)} sub={`${fmtNum(syntheses.fin?.couverture, 1)} mois · ${fmtEuro(syntheses.fin?.valeurStock)}`} />
@@ -834,7 +881,8 @@ export default function PlanApproModal({ articles, groupe, aujourdhui, retardMax
                               <div className="max-w-[220px] truncate text-[10.5px] text-[#8A8474]" title={a.designation || ''}>{a.designation || '—'}</div>
                             </button>
                             <div className="mt-0.5 text-[10px] text-[#8A8474]">
-                              Stock {fmtNum(a.stockBase)} · μ {fmtNum(a.mu, 1)}{a.colisage > 1 ? ` · colis ${a.colisage}` : ''}{a.prix !== null ? ` · ${fmtNum(a.prix, 0)} €` : ' · sans prix'}
+                              Stock {fmtNum(a.stockBase)} · μ {fmtNum(a.mu, 1)}{a.colisage > 1 ? ` · colis ${a.colisage}` : ''}
+                              <span title={`Valorisation : ${origineParRef.get(cleRef(a.ref))?.origine || '—'}`} className={a.prix === null ? 'text-red-700' : ''}>{a.prix !== null ? ` · PA ${fmtNum(a.prix, 2)} €` : prixAchat ? ' · sans prix d’achat' : ' · PA …'}</span>
                             </div>
                             {pr.repriseChainage > 0 && <div className="text-[10px] font-semibold text-[#5B4387]">+ {fmtNum(pr.repriseChainage)} repris de {chainesRef.length} réf. chaînée{chainesRef.length > 1 ? 's' : ''}</div>}
                             {pctCede > 0 && <div className="text-[10px] font-semibold text-orange-700">{fmtNum(pctCede)} % de ses ventes repris par une autre réf.</div>}
