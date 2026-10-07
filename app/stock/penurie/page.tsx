@@ -30,7 +30,9 @@
  * Sources : RPC get_references_penurie (SQL 20261007_references_penurie.sql),
  * vues v_couverture_stock_besoins (CDC, clients masqués hors périmètre) et
  * v_couverture_stock_receptions (CDF) pour la fenêtre article.
- * URL : ?ref=XXXX ouvre la fenêtre article, ?vue=appro ouvre la vue appro.
+ * URL : ?ref=XXXX ouvre la fenêtre article, ?vue=appro ouvre la vue appro,
+ * ?mystock=non|tous change le filtre MYSTOCK (oui par défaut).
+ * Pastilles par référence : MYSTOCK, Blocage appro (SAGE) / Arrêt appro (manuel), Sommeil.
  */
 
 import React, { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
@@ -86,6 +88,9 @@ type Ligne = {
   cdf_en_retard: boolean
   solde_final: number | null
   cause: Cause
+  // ÉVOLUTION (2026-10-07) : champ libre SAGE MYSTOCK (sage.article_bis).
+  // Absent tant que la fonction SQL n'est pas à jour → filtre MYSTOCK inactif.
+  mystock?: boolean | null
 }
 
 type Besoin = {
@@ -212,6 +217,18 @@ function Badge({ cls, children, title }: { cls: string; children: React.ReactNod
   return <span title={title} className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[10.5px] font-bold ${cls}`}>{children}</span>
 }
 
+/** Pastilles article : MYSTOCK, Blocage appro (SAGE ou arrêt manuel), Sommeil. */
+function PastillesArticle({ r }: { r: Ligne }) {
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1">
+      {r.mystock === true && <Badge cls="bg-[#0B1220] text-white" title="Référence MYSTOCK (champ libre SAGE) : stockée et réapprovisionnée">MYSTOCK</Badge>}
+      {r.blocage_appro_sage && <Badge cls="bg-violet-100 text-violet-900" title="« Blocage appro » dans SAGE : aucun réapprovisionnement ne sera lancé">Blocage appro</Badge>}
+      {!r.blocage_appro_sage && r.arret_appro && <Badge cls="bg-violet-100 text-violet-900" title="Arrêt appro saisi sur la référence (écran Articles)">Arrêt appro</Badge>}
+      {r.sommeil && <Badge cls="bg-[#E5E1D8] text-[#5E5A50]" title="Article en sommeil dans SAGE">Sommeil</Badge>}
+    </span>
+  )
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Fenêtre article : projection, CDC, CDF, simulateur
 // ─────────────────────────────────────────────────────────────────────────
@@ -309,6 +326,7 @@ function ArticleModal({ ligne, position, onPrev, onNext, onClose }: {
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-[18px] font-bold tracking-tight">{ligne.reference_article}</span>
+              <PastillesArticle r={ligne} />
               <Badge cls={DISPO_STYLE[ligne.dispo_par].cls} title={DISPO_STYLE[ligne.dispo_par].title}>{DISPO_STYLE[ligne.dispo_par].label}</Badge>
               {ligne.en_penurie && <Badge cls={CAUSE_STYLE[ligne.cause].cls} title={CAUSE_STYLE[ligne.cause].title}>{CAUSE_STYLE[ligne.cause].label}</Badge>}
               {ligne.cdf_en_retard && <Badge cls="bg-amber-100 text-amber-900" title="Au moins une CDF est en retard ou sans date : supposée reçue demain">CDF en retard / sans date</Badge>}
@@ -457,6 +475,8 @@ function ReferencesPenurie() {
   const [causeF, setCauseF] = useState<'' | Cause>('')
   const [avecCdcF, setAvecCdcF] = useState<'tous' | 'avec' | 'sans'>('tous')
   const [sommeilF, setSommeilF] = useState<'actives' | 'tous'>('actives')
+  const [mystockF, setMystockF] = useState<'oui' | 'non' | 'tous'>(() => (params.get('mystock') === 'non' ? 'non' : params.get('mystock') === 'tous' ? 'tous' : 'oui'))
+  const [blocageF, setBlocageF] = useState<'tous' | 'avec' | 'sans'>('tous')
   const [tri, setTri] = useState<{ k: CleTri; dir: 1 | -1 }>({ k: 'date_prochaine_dispo', dir: -1 })
   const [nbAffichees, setNbAffichees] = useState(300)
   const [exportEnCours, setExportEnCours] = useState(false)
@@ -493,7 +513,14 @@ function ReferencesPenurie() {
     return Array.from(m.entries()).sort((a, b) => a[1].localeCompare(b[1], 'fr'))
   }, [rows])
 
-  const base = useMemo(() => rows.filter((r) => sommeilF === 'tous' || !r.sommeil), [rows, sommeilF])
+  // MYSTOCK disponible seulement si la fonction SQL renvoie la colonne
+  const mystockDispo = useMemo(() => rows.some((r) => typeof r.mystock === 'boolean'), [rows])
+  const base = useMemo(() => rows.filter((r) => {
+    if (sommeilF === 'actives' && r.sommeil) return false
+    if (mystockDispo && mystockF === 'oui' && !r.mystock) return false
+    if (mystockDispo && mystockF === 'non' && r.mystock) return false
+    return true
+  }), [rows, sommeilF, mystockF, mystockDispo])
 
   const filtres = useMemo(() => {
     const s = normaliser(search.trim())
@@ -505,6 +532,8 @@ function ReferencesPenurie() {
       if (causeF && r.cause !== causeF) return false
       if (avecCdcF === 'avec' && r.nb_cdc_periode_figee <= 0) return false
       if (avecCdcF === 'sans' && r.nb_cdc_periode_figee > 0) return false
+      if (blocageF === 'avec' && !r.arret_appro) return false
+      if (blocageF === 'sans' && r.arret_appro) return false
       if (termes.length) {
         const hay = normaliser(`${r.reference_article} ${r.designation} ${r.famille} ${r.famille_macro} ${r.nom_fournisseur} ${r.fournisseur_principal} ${r.numeros_cdf}`)
         // plusieurs références collées : correspondance sur l'une d'elles ; sinon tous les mots
@@ -531,7 +560,7 @@ function ReferencesPenurie() {
       return c * tri.dir
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [base, rows, search, familleF, fournF, dispoF, causeF, avecCdcF, tri])
+  }, [base, rows, search, familleF, fournF, dispoF, causeF, avecCdcF, blocageF, tri])
   useEffect(() => { setNbAffichees(300) }, [filtres.length, tri])
 
   const kpis = useMemo(() => {
@@ -583,7 +612,10 @@ function ReferencesPenurie() {
         { h: 'Dispo par', f: (r) => DISPO_STYLE[r.dispo_par].label },
         { h: 'Délai appro (j)', f: (r) => r.delai_appro_jours }, { h: 'Source délai', f: (r) => DELAI_SOURCE[r.delai_source] || r.delai_source },
         { h: 'Appro au plus tôt', f: (r) => fmtDate(r.date_appro_au_plus_tot) },
-        { h: 'Arrêt appro', f: (r) => (r.arret_appro ? (r.blocage_appro_sage ? 'Blocage SAGE' : 'Oui') : '') },
+        { h: 'MYSTOCK', f: (r) => (r.mystock === true ? 'OUI' : r.mystock === false ? 'NON' : '') },
+        { h: 'Blocage appro SAGE', f: (r) => (r.blocage_appro_sage ? 'Oui' : '') },
+        { h: 'Arrêt appro (manuel ou SAGE)', f: (r) => (r.arret_appro ? 'Oui' : '') },
+        { h: 'Sommeil', f: (r) => (r.sommeil ? 'Oui' : '') },
         { h: 'Stock réel', f: (r) => r.stock_reel }, { h: 'Stock réservé', f: (r) => r.stock_reserve }, { h: 'Stock dispo', f: (r) => r.stock_disponible },
         { h: 'Conso moy. mensuelle', f: (r) => r.conso_moy_mensuelle },
         { h: 'Date rupture projetée', f: (r) => fmtDate(r.date_rupture) },
@@ -609,8 +641,15 @@ function ReferencesPenurie() {
   }
 
   const ctl = 'h-8 min-w-0 rounded-md border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold text-[#3A362E] outline-none focus:border-[#B4761A]'
-  const nbFiltres = [search.trim(), familleF, fournF, dispoF, causeF].filter(Boolean).length + (avecCdcF !== 'tous' ? 1 : 0)
-  function reinitialiser() { setSearch(''); setFamilleF(''); setFournF(''); setDispoF(''); setCauseF(''); setAvecCdcF('tous') }
+  const nbFiltres = [search.trim(), familleF, fournF, dispoF, causeF].filter(Boolean).length + (avecCdcF !== 'tous' ? 1 : 0) + (blocageF !== 'tous' ? 1 : 0)
+  function reinitialiser() { setSearch(''); setFamilleF(''); setFournF(''); setDispoF(''); setCauseF(''); setAvecCdcF('tous'); setBlocageF('tous') }
+  function changerMystock(v: 'oui' | 'non' | 'tous') {
+    setMystockF(v)
+    const sp = new URLSearchParams(params.toString())
+    if (v === 'oui') sp.delete('mystock'); else sp.set('mystock', v)
+    const qs = sp.toString()
+    router.replace(qs ? `/stock/penurie?${qs}` : '/stock/penurie', { scroll: false })
+  }
 
   return (
     <main className="min-h-screen bg-[#F4F3F0] px-4 py-3 text-[#111820]" style={{ fontFeatureSettings: '"tnum"' }}>
@@ -677,7 +716,7 @@ function ReferencesPenurie() {
         </section>
 
         <section className="rounded-xl border border-[#E5E1D8] bg-white px-3 py-2">
-          <div className="grid gap-1.5" style={{ gridTemplateColumns: 'minmax(220px, 2fr) repeat(6, minmax(0, 1fr))' }}>
+          <div className="grid gap-1.5" style={{ gridTemplateColumns: 'minmax(220px, 2fr) repeat(8, minmax(0, 1fr))' }}>
             <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Référence(s), désignation, fournisseur, n° CDF…" className={`${ctl} font-medium`} />
             <select value={familleF} onChange={(e) => setFamilleF(e.target.value)} className={ctl}>
               <option value="">Famille macro : toutes</option>
@@ -702,13 +741,28 @@ function ReferencesPenurie() {
               <option value="avec">Avec CDC en période figée</option>
               <option value="sans">Sans CDC (stock nul)</option>
             </select>
+            <select value={mystockF} onChange={(e) => changerMystock(e.target.value as 'oui' | 'non' | 'tous')} disabled={!mystockDispo && !loading}
+              title={!mystockDispo && !loading ? 'MYSTOCK indisponible : exécuter la dernière version de 20261007_references_penurie.sql' : 'Champ libre SAGE MYSTOCK'}
+              className={`${ctl} ${mystockF !== 'tous' && mystockDispo ? 'border-[#B4761A] text-[#8A5A08]' : ''} disabled:opacity-50`}>
+              <option value="oui">MYSTOCK : oui</option>
+              <option value="non">MYSTOCK : non</option>
+              <option value="tous">MYSTOCK : tous</option>
+            </select>
+            <select value={blocageF} onChange={(e) => setBlocageF(e.target.value as 'tous' | 'avec' | 'sans')} className={ctl}>
+              <option value="tous">Blocage appro : tous</option>
+              <option value="avec">Avec blocage / arrêt appro</option>
+              <option value="sans">Sans blocage appro</option>
+            </select>
             <select value={sommeilF} onChange={(e) => setSommeilF(e.target.value as 'actives' | 'tous')} className={ctl}>
-              <option value="actives">Articles actifs</option>
-              <option value="tous">Y compris en sommeil</option>
+              <option value="actives">Sommeil : exclus</option>
+              <option value="tous">Sommeil : inclus</option>
             </select>
           </div>
           <div className="mt-1 flex items-center justify-between text-[11px] text-[#8A8474]">
-            <span>{fmtNum(filtres.length)} référence(s) affichée(s) sur {fmtNum(base.length)}</span>
+            <span>
+              {fmtNum(filtres.length)} référence(s) affichée(s) sur {fmtNum(base.length)}
+              {mystockDispo ? (mystockF !== 'tous' ? ` · MYSTOCK ${mystockF === 'oui' ? 'oui' : 'non'} (${fmtNum(rows.length)} réf. en pénurie au total)` : '') : !loading && rows.length > 0 ? ' · filtre MYSTOCK inactif : fonction SQL à mettre à jour' : ''}
+            </span>
             {nbFiltres > 0 && <button type="button" onClick={reinitialiser} className="font-bold text-[#B4761A] hover:underline">✕ effacer les filtres ({nbFiltres})</button>}
           </div>
         </section>
@@ -748,8 +802,8 @@ function ReferencesPenurie() {
                   return (
                     <tr key={r.reference_article} onClick={() => setUrl({ ref: r.reference_article })} className="cursor-pointer border-t border-[#F0EDE6] hover:bg-[#FAF8F3]">
                       <td className="whitespace-nowrap px-2 py-1.5 font-bold">
-                        {r.reference_article}
-                        {r.sommeil && <span className="ml-1 text-[10px] font-semibold text-[#8A8474]">sommeil</span>}
+                        <div>{r.reference_article}</div>
+                        <PastillesArticle r={r} />
                       </td>
                       <td className="max-w-[320px] truncate px-2 py-1.5" title={r.designation || ''}>{r.designation}</td>
                       <td className="whitespace-nowrap px-2 py-1.5 text-[#5E5A50]">{r.famille_macro}</td>
