@@ -1089,3 +1089,17 @@ function BandeauTousDepots({
     </div>
   )
 }
+
+/** Pastille « Blocage appro » (SAGE) ou « Arrêt appro » (manuel). */
+function BadgeBlocage({ source }: { source: DispoNouvelleCommande['blocage_source'] }) {
+  return (
+    <span
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px', borderRadius: 999,
+        background: 'rgba(214,60,60,0.85)', color: '#fff', fontSize: 10.5, fontWeight: 700, whiteSpace: 'nowrap',
+      }}
+    >
+      ⛔ {libelleBlocage(source)}
+    </span>
+  )
+}
