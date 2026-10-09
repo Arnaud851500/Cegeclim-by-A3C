@@ -13,6 +13,8 @@ import MobileStockArticles from './MobileStockArticles'
 import MobileAdminPanel from './MobileAdminPanel'
 // ÉVOLUTION (2026-09-29) : journal d'usage mobile (/m/... dans user_activity_log)
 import { logMobileView } from '@/lib/mobileActivityLog'
+// ÉVOLUTION (2026-10-09) : zoom à deux doigts optionnel (préférence « 🎙️ Voix »)
+import { useZoomMobile } from '@/lib/zoomMobile'
 
 
 export type MobileScreen = 'home' | 'activite' | 'clients' | 'rdv' | 'alertes' | 'prospects' | 'stock' | 'Admin'
@@ -73,6 +75,8 @@ export default function MobileShell() {
   const nextKey = useRef(1)
 
   const { rights, email } = useAccess()
+  // Pinch-to-zoom : appliqué seulement si l'utilisateur l'a activé (défaut : bloqué).
+  useZoomMobile(email)
   const {
     total, detail, loading, fetchTodoList, fetchCerfaList,
     fetchCdcAvant2026List, fetchFraisPortList, fetchCapaciteGazList,

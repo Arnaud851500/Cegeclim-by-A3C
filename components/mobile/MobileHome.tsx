@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import type { AccessRights } from '@/components/AccessContext'
 import type { MobileScreen } from './MobileShell'
 import { supabase } from '@/lib/supabaseClient'
+import { appliquerZoomMobile } from '@/lib/zoomMobile'
 import LastSyncBadge from '@/components/LastSyncBadge'
 import VoiceReportButtons from './VoiceReportButtons'
 import MobileHomeSummary from './MobileHomeSummary'
@@ -151,19 +152,23 @@ export default function MobileHome({
   //    l'écran d'origine.
   const [validationAuto, setValidationAuto] = useState(false)
   const [retourVisuelMasque, setRetourVisuelMasque] = useState(false)
+  // ÉVOLUTION (2026-10-09) : zoom à deux doigts (vision_tci_preferences.zoom_mobile,
+  // défaut false). Appliqué par lib/zoomMobile.ts (hook monté dans MobileShell).
+  const [zoomMobile, setZoomMobile] = useState(false)
   const [preferencesSauvegardeEnCours, setPreferencesSauvegardeEnCours] = useState(false)
 
   useEffect(() => {
     let cancelled = false
     async function charger() {
       if (!email) return
-      const { data } = await supabase.from('vision_tci_preferences').select('voix_assistant, vitesse_lecture, annonce_courte, validation_auto, retour_visuel_masque').eq('user_email', email).maybeSingle()
+      const { data } = await supabase.from('vision_tci_preferences').select('voix_assistant, vitesse_lecture, annonce_courte, validation_auto, retour_visuel_masque, zoom_mobile').eq('user_email', email).maybeSingle()
       if (cancelled) return
       setVoixActuelle(String(data?.voix_assistant || 'nova'))
       setVitesseActuelle(data?.vitesse_lecture !== null && data?.vitesse_lecture !== undefined ? Number(data.vitesse_lecture) : 1.15)
       setAnnonceCourte(Boolean(data?.annonce_courte))
       setValidationAuto(Boolean(data?.validation_auto))
       setRetourVisuelMasque(Boolean(data?.retour_visuel_masque))
+      setZoomMobile(Boolean(data?.zoom_mobile))
     }
     void charger()
     return () => { cancelled = true }
@@ -221,6 +226,18 @@ export default function MobileHome({
     setPreferencesSauvegardeEnCours(true)
     try {
       await supabase.from('vision_tci_preferences').upsert({ user_email: email, retour_visuel_masque: next, updated_at: new Date().toISOString() })
+    } finally {
+      setPreferencesSauvegardeEnCours(false)
+    }
+  }
+
+  async function basculerZoomMobile() {
+    const next = !zoomMobile
+    setZoomMobile(next)
+    appliquerZoomMobile(next) // effet immédiat, sans attendre la sauvegarde
+    setPreferencesSauvegardeEnCours(true)
+    try {
+      await supabase.from('vision_tci_preferences').upsert({ user_email: email, zoom_mobile: next, updated_at: new Date().toISOString() })
     } finally {
       setPreferencesSauvegardeEnCours(false)
     }
@@ -408,6 +425,16 @@ export default function MobileHome({
               actif={retourVisuelMasque}
               disabled={preferencesSauvegardeEnCours || !validationAuto}
               onClick={() => void basculerRetourVisuelMasque()}
+            />
+
+            {/* ÉVOLUTION (2026-10-09) : affichage -- zoom à deux doigts. */}
+            <div style={{ fontSize: 14, fontWeight: 700, color: '#fff', marginTop: 8 }}>Affichage</div>
+            <OptionBascule
+              titre="Zoom à deux doigts"
+              description="Permet d'agrandir l'écran en écartant deux doigts. Le double-tap ne zoome pas. Les champs de saisie passent en caractères un peu plus grands."
+              actif={zoomMobile}
+              disabled={preferencesSauvegardeEnCours}
+              onClick={() => void basculerZoomMobile()}
             />
 
             <button
