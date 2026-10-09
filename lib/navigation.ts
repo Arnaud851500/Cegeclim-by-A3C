@@ -16,6 +16,9 @@
 // Mes RDV » = Todo List + Agenda (+ Documents).
 // ÉVOLUTION (2026-10-04) : « Calcul de besoin - Appro » (/stock/calcul-besoin)
 // ajouté en tête du bloc Stocks & logistique.
+// ÉVOLUTION (2026-10-09) : nouveau bloc « Mes agences / Mes commerciaux » =
+// Suivi agences – commerciaux (/suivi-agences, nouvel écran) + Objectifs
+// (/objectifs, droit can_objectifs des profils).
 // Le bloc « Mes alertes » de l'accueil n'est pas ici : il n'a pas de page, il
 // ouvre le Centre d'alertes (components/AlertsContext.tsx + ClientRootShell).
 
@@ -109,6 +112,19 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'Prospects / Clients', path: '/carte', accessKey: 'can_carte', description: 'Liste et carte des prospects et clients pour les analyses géographiques et le suivi commercial.' },
       { label: 'Suivi multi clients', path: '/synthese_multi_clients', accessKey: 'can_dashboard', description: 'Tableau comparatif client par client sur l’année et en cumul.' },
       { label: 'Vision client 360', path: '/vision-client', activeLabel: 'Vision client', accessKey: 'can_dashboard', description: 'Fiche complète d’un client : historique, documents, retards de paiement.' },
+    ],
+  },
+  {
+    id: 'agences-commerciaux',
+    label: 'Mes agences / Mes commerciaux',
+    subtitle: 'Suivi du CA, positionnement, objectifs',
+    icon: '🏢',
+    icons: ['🏢', '🎯'],
+    gradient: ['#2D6F86', '#18465A'],
+    iconBg: 'rgba(255,255,255,0.18)',
+    pages: [
+      { label: 'Suivi agences – commerciaux', path: '/suivi-agences', activeLabel: 'Suivi agences – commerciaux', accessKey: 'can_dashboard', description: 'CA facturé N-2 / N-1 / N par agence et collaborateur, évolution vs N-1 et vs entreprise, croix de positionnement trimestrielle, fiche détaillée.' },
+      { label: 'Objectifs', path: '/objectifs', activeLabel: 'Objectifs commerciaux', accessKey: 'can_objectifs', description: 'Objectifs entreprise, agences et commerciaux : CA, évolution, marge, familles suivies, structure clients.' },
     ],
   },
   {

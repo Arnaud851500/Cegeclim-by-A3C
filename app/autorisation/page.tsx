@@ -54,6 +54,7 @@ type UserAccess = {
   allowed_codes_postaux: string[]
   soumis_objectif: boolean
   agence_objectif: string
+  collaborateur_objectif: string
 }
 
 type TabKey = 'profiles' | 'users' | 'matrix'
@@ -205,6 +206,7 @@ const EMPTY_USER: UserAccess = {
   allowed_codes_postaux: [],
   soumis_objectif: false,
   agence_objectif: '',
+  collaborateur_objectif: '',
 }
 
 function normalizeList(value: unknown, fallback: string[] = []) {
@@ -264,6 +266,7 @@ function userSignature(user: UserAccess) {
     allowed_codes_postaux: [...user.allowed_codes_postaux].sort(),
     soumis_objectif: user.soumis_objectif,
     agence_objectif: user.agence_objectif,
+    collaborateur_objectif: user.collaborateur_objectif,
   })
 }
 
@@ -318,7 +321,7 @@ export default function AutorisationPage() {
       supabase.from('access_profiles').select('*').order('name', { ascending: true }),
       supabase
         .from('user_page_access')
-        .select('email, display_name, access_profile_id, allowed_scopes, allowed_agences, allowed_collaborateurs, allowed_departements, allowed_codes_postaux, soumis_objectif, agence_objectif')
+        .select('email, display_name, access_profile_id, allowed_scopes, allowed_agences, allowed_collaborateurs, allowed_departements, allowed_codes_postaux, soumis_objectif, agence_objectif, collaborateur_objectif')
         .order('email', { ascending: true }),
       supabase.from('vision_tci_layouts').select('id, nom').order('nom', { ascending: true }),
     ])
@@ -343,6 +346,7 @@ export default function AutorisationPage() {
       allowed_codes_postaux: normalizeList(row.allowed_codes_postaux),
       soumis_objectif: !!row.soumis_objectif,
       agence_objectif: String(row.agence_objectif || '').trim(),
+      collaborateur_objectif: String(row.collaborateur_objectif || '').trim(),
     }))
 
     const countByProfile = new Map<string, number>()
@@ -568,6 +572,7 @@ export default function AutorisationPage() {
         allowed_codes_postaux: user.allowed_codes_postaux,
         soumis_objectif: user.soumis_objectif,
         agence_objectif: user.soumis_objectif ? user.agence_objectif.trim() : '',
+        collaborateur_objectif: user.soumis_objectif ? user.collaborateur_objectif.trim().toUpperCase() || null : null,
       })
       .eq('email', email)
 
@@ -603,6 +608,7 @@ export default function AutorisationPage() {
       allowed_codes_postaux: newUser.allowed_codes_postaux,
       soumis_objectif: newUser.soumis_objectif,
       agence_objectif: newUser.soumis_objectif ? newUser.agence_objectif.trim() : '',
+      collaborateur_objectif: newUser.soumis_objectif ? newUser.collaborateur_objectif.trim().toUpperCase() || null : null,
     })
 
     setSavingKey(null)
@@ -1041,6 +1047,15 @@ export default function AutorisationPage() {
                       />
                     </Field>
                   )}
+                  {newUser.soumis_objectif && (
+                    <Field label="Code collaborateur SAGE" hint="Relie ses objectifs à son CA facturé (écran Suivi agences – commerciaux).">
+                      <TextField
+                        value={newUser.collaborateur_objectif}
+                        onChange={(value) => setNewUser((current) => ({ ...current, collaborateur_objectif: value }))}
+                        placeholder="AAMENA, BRPAROUTOT…"
+                      />
+                    </Field>
+                  )}
                 </div>
 
                 <div className="mt-5 flex gap-2">
@@ -1111,6 +1126,15 @@ export default function AutorisationPage() {
                           value={userDraft.agence_objectif}
                           onChange={(value) => patchUserDraft({ agence_objectif: value })}
                           placeholder="ANGLET, BORDEAUX…"
+                        />
+                      </Field>
+                    )}
+                    {userDraft.soumis_objectif && (
+                      <Field label="Code collaborateur SAGE" hint="Relie ses objectifs à son CA facturé (écran Suivi agences – commerciaux). Vide = code unique de « Collaborateurs autorisés ».">
+                        <TextField
+                          value={userDraft.collaborateur_objectif}
+                          onChange={(value) => patchUserDraft({ collaborateur_objectif: value })}
+                          placeholder="AAMENA, BRPAROUTOT…"
                         />
                       </Field>
                     )}

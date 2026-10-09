@@ -18,6 +18,7 @@ export type AccessRights = {
   can_stocks: boolean
   can_activites: boolean
   can_financement: boolean
+  can_objectifs: boolean
   can_change_scope: boolean
   allowed_scopes: string[]
   allowed_agences: string[]
@@ -75,6 +76,7 @@ type AccessProfileRow = {
   can_stocks?: boolean | null
   can_activites?: boolean | null
   can_financement?: boolean | null
+  can_objectifs?: boolean | null
   can_change_scope?: boolean | null
   default_landing_page?: string | null
   show_alert_cerfa_ko?: boolean | null
@@ -135,6 +137,7 @@ export const defaultRights: AccessRights = {
   can_stocks: false,
   can_activites: false,
   can_financement: false,
+  can_objectifs: false,
   can_change_scope: false,
   allowed_scopes: ['Global'],
   allowed_agences: [],
@@ -297,6 +300,7 @@ async function fetchAccess(): Promise<{ email: string | null; rights: AccessRigh
         can_stocks,
         can_activites,
         can_financement,
+        can_objectifs,
         can_change_scope,
         default_landing_page,
         show_alert_cerfa_ko,
@@ -365,6 +369,7 @@ async function fetchAccess(): Promise<{ email: string | null; rights: AccessRigh
         can_stocks: !!profile.can_stocks,
         can_activites: !!profile.can_activites,
         can_financement: !!profile.can_financement || !!userRow.can_financement,
+        can_objectifs: !!profile.can_objectifs,
         can_change_scope: !!profile.can_change_scope,
         allowed_scopes: normalizeList(userRow.allowed_scopes, ['Global']),
         allowed_agences: normalizeList(userRow.allowed_agences, []),

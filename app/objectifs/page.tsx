@@ -20,6 +20,11 @@ import { supabase } from '@/lib/supabaseClient'
  *    nombre de clients gros/moyens/petits (profil de CA 12 mois glissants).
  *    D'autres types viendront s'ajouter à TYPE_OBJECTIF_DEFS.
  *
+ * ÉVOLUTION (2026-10-09) : familles macro réelles (codes SAGE de
+ * indicateur_factures_mensuel) et objectifs de CA par famille (ca_valeur /
+ * ca_evolution_pct avec famille_macro renseignée). Les familles listées ici
+ * apparaissent dans la fiche de l'écran « Suivi agences – commerciaux ».
+ *
  * TODO Arnaud : la comparaison au réel (get_objectifs_reel_annee) est un
  * stub côté SQL — à brancher sur les vues/indicateurs qui portent déjà le
  * CA, la marge et le profil de CA 12MG par client ailleurs dans l'app.
@@ -68,11 +73,14 @@ type Perimetre = { type: PerimetreType; ref: string; label: string }
 
 type MargeFamilleDraft = { famille: string; valeur: string }
 
+type CaFamilleDraft = { famille: string; valeur: string; evolution: string }
+
 type ObjectifDraft = {
   ca_valeur: string
   ca_evolution_pct: string
   marge_evolution_pct: string
   marge_par_famille: MargeFamilleDraft[]
+  ca_par_famille: CaFamilleDraft[]
   nb_clients_gros: string
   nb_clients_moyens: string
   nb_clients_petits: string
@@ -81,18 +89,9 @@ type ObjectifDraft = {
 
 type ToastState = { tone: 'success' | 'error'; text: string } | null
 
-// À ajuster sur les libellés de famille macro réellement utilisés dans l'app
-// (Portefeuille commande, Projection stock…).
-const FAMILLES_MACRO = [
-  'Chauffage',
-  'Climatisation',
-  'Ventilation',
-  'Plomberie / Sanitaire',
-  'Génie électrique',
-  'Gaz',
-  'Régulation',
-  'Accessoires / Divers',
-]
+// Familles macro SAGE réellement présentes dans le CA facturé
+// (indicateur_factures_mensuel.famille_macro).
+const FAMILLES_MACRO = ['ACC', 'DIV', 'DRV', 'ECS', 'PV', 'R_ZONE', 'R/O', 'R/R', 'SAV', 'TECH']
 
 const TYPE_OBJECTIF_DEFS: Record<
   Exclude<TypeObjectif, 'marge_evolution_pct'>,
@@ -110,6 +109,7 @@ const EMPTY_DRAFT: ObjectifDraft = {
   ca_evolution_pct: '',
   marge_evolution_pct: '',
   marge_par_famille: [],
+  ca_par_famille: [],
   nb_clients_gros: '',
   nb_clients_moyens: '',
   nb_clients_petits: '',
@@ -149,7 +149,7 @@ function formatPct(value: number | null, digits = 1) {
 
 /** Reconstruit un brouillon d'objectif à partir des lignes brutes d'un périmètre. */
 function draftFromRows(rows: ObjectifRow[]): ObjectifDraft {
-  const draft: ObjectifDraft = { ...EMPTY_DRAFT, marge_par_famille: [] }
+  const draft: ObjectifDraft = { ...EMPTY_DRAFT, marge_par_famille: [], ca_par_famille: [] }
   let commentaire = ''
   rows.forEach((row) => {
     if (row.commentaire) commentaire = row.commentaire
@@ -159,6 +159,16 @@ function draftFromRows(rows: ObjectifRow[]): ObjectifDraft {
       } else {
         draft.marge_evolution_pct = String(row.valeur_cible)
       }
+      return
+    }
+    if (row.famille_macro && (row.type_objectif === 'ca_valeur' || row.type_objectif === 'ca_evolution_pct')) {
+      let entry = draft.ca_par_famille.find((item) => item.famille === row.famille_macro)
+      if (!entry) {
+        entry = { famille: row.famille_macro, valeur: '', evolution: '' }
+        draft.ca_par_famille.push(entry)
+      }
+      if (row.type_objectif === 'ca_valeur') entry.valeur = String(row.valeur_cible)
+      else entry.evolution = String(row.valeur_cible)
       return
     }
     const key = row.type_objectif as keyof typeof TYPE_OBJECTIF_DEFS
@@ -201,6 +211,26 @@ function rowsFromDraft(annee: number, perimetre: Perimetre, draft: ObjectifDraft
       commentaire: draft.commentaire.trim(),
     })
   }
+
+  const famillesCa = new Set<string>()
+  draft.ca_par_famille.forEach(({ famille, valeur, evolution }) => {
+    const fam = famille.trim()
+    if (!fam || famillesCa.has(fam)) return
+    famillesCa.add(fam)
+    const montant = numOrNull(valeur)
+    const evol = numOrNull(evolution)
+    if (montant !== null) {
+      rows.push({ annee, perimetre_type: perimetre.type, perimetre_ref, type_objectif: 'ca_valeur', famille_macro: fam, valeur_cible: montant, commentaire: draft.commentaire.trim() })
+    }
+    if (evol !== null) {
+      rows.push({ annee, perimetre_type: perimetre.type, perimetre_ref, type_objectif: 'ca_evolution_pct', famille_macro: fam, valeur_cible: evol, commentaire: draft.commentaire.trim() })
+    }
+    // Famille suivie sans cible chiffrée : on la garde visible avec une
+    // évolution cible nulle (0 %), pour qu'elle apparaisse dans le suivi.
+    if (montant === null && evol === null) {
+      rows.push({ annee, perimetre_type: perimetre.type, perimetre_ref, type_objectif: 'ca_evolution_pct', famille_macro: fam, valeur_cible: 0, commentaire: draft.commentaire.trim() })
+    }
+  })
 
   draft.marge_par_famille.forEach(({ famille, valeur }) => {
     const parsed = numOrNull(valeur)
@@ -631,6 +661,90 @@ export default function ObjectifsPage() {
                 </div>
 
                 <div className="mt-5">
+                  <ObjectifFieldGroup title="CA par famille de produits">
+                    <p className="-mt-1 text-xs text-slate-500">
+                      Les familles listées ici sont suivies dans la fiche de l’écran « Suivi agences – commerciaux » (CA, évolution vs N-1 et vs entreprise).
+                    </p>
+                    <div className="space-y-2">
+                      {draft.ca_par_famille.map((entry, index) => (
+                        <div key={index} className="flex flex-wrap items-center gap-2">
+                          <select
+                            value={entry.famille}
+                            onChange={(event) =>
+                              setDraft((current) => {
+                                const next = [...current.ca_par_famille]
+                                next[index] = { ...next[index], famille: event.target.value }
+                                return { ...current, ca_par_famille: next }
+                              })
+                            }
+                            className="h-[42px] min-w-[160px] flex-1 rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm outline-none focus:border-[#B4761A]"
+                          >
+                            <option value="">Famille macro…</option>
+                            {Array.from(new Set([...FAMILLES_MACRO, ...draft.ca_par_famille.map((item) => item.famille).filter(Boolean)])).map((famille) => (
+                              <option key={famille} value={famille}>
+                                {famille}
+                              </option>
+                            ))}
+                          </select>
+                          <input
+                            value={entry.valeur}
+                            onChange={(event) =>
+                              setDraft((current) => {
+                                const next = [...current.ca_par_famille]
+                                next[index] = { ...next[index], valeur: event.target.value }
+                                return { ...current, ca_par_famille: next }
+                              })
+                            }
+                            placeholder="CA cible"
+                            inputMode="decimal"
+                            className="h-[42px] w-36 rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm outline-none focus:border-[#B4761A]"
+                          />
+                          <span className="text-xs text-slate-500">€</span>
+                          <input
+                            value={entry.evolution}
+                            onChange={(event) =>
+                              setDraft((current) => {
+                                const next = [...current.ca_par_famille]
+                                next[index] = { ...next[index], evolution: event.target.value }
+                                return { ...current, ca_par_famille: next }
+                              })
+                            }
+                            placeholder="Évol. +5"
+                            inputMode="decimal"
+                            className="h-[42px] w-24 rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm outline-none focus:border-[#B4761A]"
+                          />
+                          <span className="text-xs text-slate-500">%</span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setDraft((current) => ({
+                                ...current,
+                                ca_par_famille: current.ca_par_famille.filter((_, i) => i !== index),
+                              }))
+                            }
+                            className="rounded-lg px-2 py-1 text-xs font-semibold text-[#A32C2C] transition hover:bg-[#FBE9E9]"
+                          >
+                            Retirer
+                          </button>
+                        </div>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setDraft((current) => ({
+                            ...current,
+                            ca_par_famille: [...current.ca_par_famille, { famille: '', valeur: '', evolution: '' }],
+                          }))
+                        }
+                        className="rounded-lg border border-[#D8D3C8] bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-[#B4761A] hover:text-[#8A5A11]"
+                      >
+                        + Famille suivie (CA cible et/ou évolution)
+                      </button>
+                    </div>
+                  </ObjectifFieldGroup>
+                </div>
+
+                <div className="mt-5">
                   <ObjectifFieldGroup title="Marge">
                     <ObjectifInput
                       label="Évolution de la marge globale"
@@ -659,7 +773,7 @@ export default function ObjectifsPage() {
                             className="h-[42px] flex-1 rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm outline-none focus:border-[#B4761A]"
                           >
                             <option value="">Famille macro…</option>
-                            {FAMILLES_MACRO.map((famille) => (
+                            {Array.from(new Set([...FAMILLES_MACRO, ...draft.marge_par_famille.map((item) => item.famille).filter(Boolean)])).map((famille) => (
                               <option key={famille} value={famille}>
                                 {famille}
                               </option>
