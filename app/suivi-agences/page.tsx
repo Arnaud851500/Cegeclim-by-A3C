@@ -15,7 +15,8 @@
  * - Clic sur une ligne ou une bulle : fiche détaillée (components/suivi-agences/FicheDetail).
  *
  * Sources : RPC get_suivi_agences_data (RLS appliquée), get_suivi_agences_reference
- * (entreprise hors exclusions), get_suivi_objectifs, get_suivi_profil_clients —
+ * (entreprise hors exclusions), get_suivi_objectifs, get_suivi_profil_clients,
+ * get_suivi_impayes (objectif « Zéro impayé > 45 j », ajout du 11/10/2026) —
  * migration supabase/migrations/20261009_suivi_agences_commerciaux.sql.
  * URL : ?vue=collaborateurs, ?fiche=A:ANGLET ou ?fiche=C:BRPAROUTOT.
  */
@@ -28,6 +29,7 @@ import VariantesMenu, { useVariantes, type Variante } from '@/components/suivi-a
 import PositionCross, { type CrossPoint } from '@/components/suivi-agences/PositionCross'
 import FicheDetail from '@/components/suivi-agences/FicheDetail'
 import {
+  DYNAMIQUE_LIBELLES,
   FAMILLES_LIBELLES,
   MOIS_LONGS,
   QUADRANT_LIBELLES,
@@ -38,7 +40,9 @@ import {
   fmtK,
   fmtPct,
   fmtPts,
+  impayesPourCodes,
   objectifsPourEntite,
+  parseImpayes,
   parseDataRows,
   parseRefRows,
   positionsTrimestrielles,
@@ -49,6 +53,7 @@ import {
   type Collaborateur,
   type Commercial,
   type DataRow,
+  type ImpayesData,
   type Entity,
   type Objectif,
   type RefRow,
@@ -112,6 +117,7 @@ function SuiviAgencesPage() {
   const [exclusionsLibelle, setExclusionsLibelle] = useState('')
   const [objectifs, setObjectifs] = useState<Objectif[]>([])
   const [commerciaux, setCommerciaux] = useState<Commercial[]>([])
+  const [impayes, setImpayes] = useState<ImpayesData | null>(null)
 
   const [filtres, setFiltres] = useState<Filtres>({ ...FILTRES_VIDES, vue: searchParams.get('vue') === 'collaborateurs' ? 'collaborateurs' : 'agences' })
   const [activeVarianteId, setActiveVarianteId] = useState<string | null>(null)
@@ -126,11 +132,14 @@ function SuiviAgencesPage() {
   const load = useCallback(async (targetAnnee: number) => {
     setLoading(true)
     setError(null)
-    const [dataRes, refRes, objRes] = await Promise.all([
+    const [dataRes, refRes, objRes, impRes] = await Promise.all([
       supabase.rpc('get_suivi_agences_data', { p_annee: targetAnnee }),
       supabase.rpc('get_suivi_agences_reference', { p_annee: targetAnnee }),
       supabase.rpc('get_suivi_objectifs', { p_annee: targetAnnee }),
+      supabase.rpc('get_suivi_impayes', { p_annee: targetAnnee }),
     ])
+    // Impayés : facultatif (migration 20261011 non appliquée → pas de pavé).
+    setImpayes(impRes.error ? null : parseImpayes(impRes.data))
     if (dataRes.error) {
       setError(dataRes.error.message)
       setLoading(false)
@@ -402,8 +411,18 @@ function SuiviAgencesPage() {
     return rows.filter((r) => codes.has(r.code))
   }, [fiche, rows])
 
+  const ficheImpayes = useMemo(() => {
+    if (!fiche) return null
+    // Agence : tous les collaborateurs rattachés à l'agence (même sans CA sur la sélection).
+    const codes =
+      fiche.entity.kind === 'agence'
+        ? Array.from(new Set([...fiche.entity.codes, ...collaborateurs.filter((c) => c.agence === fiche.entity.id).map((c) => c.code)]))
+        : fiche.entity.codes
+    return impayesPourCodes(impayes, codes)
+  }, [fiche, impayes, collaborateurs])
+
   const ficheObjectifs = useMemo(
-    () => (fiche ? objectifsPourEntite(fiche.entity, objectifs, commerciaux) : { propres: [], familles: [] }),
+    () => (fiche ? objectifsPourEntite(fiche.entity, objectifs, commerciaux) : { propres: [], familles: [], zeroImpaye: null }),
     [fiche, objectifs, commerciaux]
   )
 
@@ -446,6 +465,7 @@ function SuiviAgencesPage() {
             <p className="mt-1 text-[12px] text-slate-400">
               CA facturé {annee} · à date = janvier → {MOIS_LONGS[moisClos] || '—'} (dernier mois clos), comparé aux mêmes mois {annee - 1}
               {exclusionsLibelle && ` · référence entreprise ${exclusionsLibelle}`}
+              <span className="ml-2 rounded bg-[#2C3946] px-1.5 py-0.5 text-[11px] font-semibold text-slate-200">Hors statistique : exclus</span>
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -633,8 +653,8 @@ function SuiviAgencesPage() {
                   <div className="mb-2">
                     <div className="text-[14px] font-bold text-slate-900">Croix de positionnement vs N-1</div>
                     <p className="text-[12px] text-slate-500">
-                      Horizontal : évolution du CA cumulé à fin de trimestre. Vertical : tendance = évolution du trimestre − évolution cumulée au trimestre précédent
-                      (pour T1 : année {annee - 1} vs {annee - 2}). ◆ = entreprise {exclusionsLibelle}.
+                      Horizontal : évolution du CA cumulé à fin de trimestre vs {annee - 1} (ça va / ça va pas). Vertical : évolution du trimestre vs le même trimestre {annee - 1}
+                      (ça va mieux / ça se dégrade). Couleur : rythme du trimestre comparé à la moyenne des trimestres précédents de l’année — T1 comparé au T4 {annee - 1} (écart de ±5 pt). ◆ = entreprise {exclusionsLibelle}.
                     </p>
                   </div>
                   <PositionCross points={crossPoints} nbTrimestres={nbTrimestres} onSelect={(key) => openFiche(key)} />
@@ -658,6 +678,7 @@ function SuiviAgencesPage() {
           famillesFiltre={filtres.familles}
           objectifs={ficheObjectifs}
           exclusionsLibelle={exclusionsLibelle}
+          impayes={ficheImpayes}
           onClose={() => openFiche(null)}
         />
       )}
@@ -775,9 +796,20 @@ function LigneRow({
       </td>
       <td className="px-2 py-2">
         {quadrant ? (
-          <span className="whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-semibold" style={{ background: QUADRANT_LIBELLES[quadrant].bg, color: QUADRANT_LIBELLES[quadrant].tone }}>
-            {QUADRANT_LIBELLES[quadrant].label}
-          </span>
+          <div className="flex items-center gap-1">
+            <span className="whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-semibold" style={{ background: QUADRANT_LIBELLES[quadrant].bg, color: QUADRANT_LIBELLES[quadrant].tone }}>
+              {QUADRANT_LIBELLES[quadrant].label}
+            </span>
+            {last?.dynamique && (
+              <span
+                className="whitespace-nowrap rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
+                style={{ background: DYNAMIQUE_LIBELLES[last.dynamique].bg, color: DYNAMIQUE_LIBELLES[last.dynamique].tone }}
+                title={`T${last.q} : ${fmtPct(last.y)} vs N-1, ${fmtPts(last.ecartTendance)} vs moyenne des trimestres précédents`}
+              >
+                {DYNAMIQUE_LIBELLES[last.dynamique].court}
+              </span>
+            )}
+          </div>
         ) : (
           <span className="text-slate-300">—</span>
         )}

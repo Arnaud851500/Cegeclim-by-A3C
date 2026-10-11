@@ -11,11 +11,17 @@
 //   - index d'année 0 = N-2, 1 = N-1, 2 = N ; mois 1..12 ;
 //   - « à date » = janvier → dernier mois clos (moisClos) ; toute comparaison
 //     N / N-1 se fait sur les mêmes mois ;
-//   - croix de positionnement, pour chaque trimestre clos q :
+//   - croix de positionnement, pour chaque trimestre clos q (règle revue par
+//     Arnaud le 11/10/2026) :
 //       X = évolution du CA cumulé à fin q vs N-1 (« ça va » / « ça va pas ») ;
-//       Y = tendance = évolution du trimestre q vs N-1 − évolution cumulée à
-//           fin q-1 (pour T1 : évolution de l'année N-1 vs N-2)
-//           (« ça va mieux » / « ça se dégrade »).
+//       Y = évolution du trimestre q vs le même trimestre N-1
+//           (« ça va mieux » / « ça se dégrade ») ;
+//       couleur = dynamique : évolution du trimestre q comparée à la moyenne
+//           des évolutions des trimestres précédents de l'année (T1 : comparé
+//           au T4 de N-1 vs N-2) ; écart ≥ +5 pt = accélération,
+//           ≤ −5 pt = ralentissement (ex. +30 %, +28 % puis +2 % : toujours
+//           positif vs N-1 mais en ralentissement), sinon stable ;
+//   - CA : lignes d'articles « hors statistique » exclues (côté SQL).
 // ============================================================================
 
 export type DataRow = {
@@ -61,7 +67,27 @@ export type Entity = {
   codes: string[]
 }
 
-export type Position = { q: number; x: number; y: number }
+export type Dynamique = 'acceleration' | 'stable' | 'ralentissement'
+
+export type Position = {
+  q: number
+  /** Évolution du CA cumulé à fin de trimestre vs N-1 (%). */
+  x: number
+  /** Évolution du trimestre vs le même trimestre N-1 (%). */
+  y: number
+  /** Évolution du trimestre − moyenne des trimestres précédents de l'année (T1 : T4 N-1) (pt). */
+  ecartTendance: number | null
+  dynamique: Dynamique | null
+}
+
+/** Écart (en points) au-delà duquel on parle d'accélération / ralentissement. */
+export const SEUIL_DYNAMIQUE = 5
+
+export const DYNAMIQUE_LIBELLES: Record<Dynamique, { label: string; court: string; fill: string; stroke: string; tone: string; bg: string }> = {
+  acceleration: { label: 'En accélération', court: '↗ accélère', fill: '#4FA36B', stroke: '#1F6B3A', tone: '#1F6B3A', bg: '#E5F2E8' },
+  stable: { label: 'Rythme stable', court: '→ stable', fill: '#6F94D6', stroke: '#2F5DA8', tone: '#2C5C8A', bg: '#E4EEF7' },
+  ralentissement: { label: 'En ralentissement', court: '↘ ralentit', fill: '#E39A3B', stroke: '#A8640F', tone: '#8A5A11', bg: '#FBF1DC' },
+}
 
 export const FAMILLES_LIBELLES: Record<string, string> = {
   ACC: 'Accessoires',
@@ -163,17 +189,25 @@ export function valeursPeriode(serie: Serie, from: number, to: number): PeriodeV
 // Croix de positionnement
 // ----------------------------------------------------------------------------
 export function positionsTrimestrielles(serie: Serie, moisClos: number): Position[] {
+  const evolTrim = (yearIdx: number, q: number) =>
+    evolPct(sumMonths(serie.ca[yearIdx], q * 3 - 2, q * 3), sumMonths(serie.ca[yearIdx - 1], q * 3 - 2, q * 3))
+  // Référence de T1 = T4 de N-1 (vs N-2) ; ensuite, trimestres de N déjà passés.
+  const t4N1 = evolTrim(1, 4)
+  const historique: Array<number | null> = []
+
   const positions: Position[] = []
   const nbTrim = Math.floor(Math.max(0, moisClos) / 3)
-  let previousCumul = evolPct(sumMonths(serie.ca[1], 1, 12), sumMonths(serie.ca[0], 1, 12))
   for (let q = 1; q <= Math.min(4, nbTrim); q += 1) {
     const cumul = evolPct(sumMonths(serie.ca[2], 1, q * 3), sumMonths(serie.ca[1], 1, q * 3))
-    const trim = evolPct(sumMonths(serie.ca[2], q * 3 - 2, q * 3), sumMonths(serie.ca[1], q * 3 - 2, q * 3))
-    if (cumul !== null && trim !== null) {
-      const y = previousCumul === null ? 0 : trim - previousCumul
-      positions.push({ q, x: cumul, y })
-    }
-    previousCumul = cumul
+    const trim = evolTrim(2, q)
+    const precedents = (q === 1 ? [t4N1] : historique).filter((v): v is number => v !== null)
+    historique.push(trim)
+    if (cumul === null || trim === null) continue
+    const moyenne = precedents.length ? precedents.reduce((a, b) => a + b, 0) / precedents.length : null
+    const ecart = moyenne === null ? null : trim - moyenne
+    const dynamique: Dynamique | null =
+      ecart === null ? null : ecart >= SEUIL_DYNAMIQUE ? 'acceleration' : ecart <= -SEUIL_DYNAMIQUE ? 'ralentissement' : 'stable'
+    positions.push({ q, x: cumul, y: trim, ecartTendance: ecart, dynamique })
   }
   return positions
 }
@@ -270,6 +304,8 @@ export type ObjectifsEntite = {
   propres: Objectif[]
   /** Familles à afficher et provenance de la cible. */
   familles: Array<{ famille: string; source: 'propre' | 'agence' | 'entreprise'; objectifs: Objectif[] }>
+  /** Objectif « Zéro impayé > 45 j » applicable (propre, sinon agence, sinon entreprise). */
+  zeroImpaye: { objectif: Objectif; source: 'propre' | 'agence' | 'entreprise' } | null
 }
 
 export function objectifsPourEntite(
@@ -316,5 +352,109 @@ export function objectifsPourEntite(
       })
   })
 
-  return { propres, familles }
+  let zeroImpaye: ObjectifsEntite['zeroImpaye'] = null
+  for (const { source, list } of sources) {
+    const found = list.find((o) => o.type_objectif === 'zero_impaye_45j')
+    if (found) {
+      zeroImpaye = { objectif: found, source }
+      break
+    }
+  }
+
+  return { propres, familles, zeroImpaye }
+}
+
+// ----------------------------------------------------------------------------
+// Objectif « Zéro impayé > 45 jours » (ajout du 11/10/2026)
+// Les primes de l'année N sont payées en avril N+1 : l'objectif est atteint si,
+// à l'instantané d'avril N+1 de l'export « Qui vous doit quoi », aucune facture
+// n'est échue depuis plus de 45 jours. Avant cette date : situation à date
+// (provisoire). RPC get_suivi_impayes (20261011_objectif_zero_impaye.sql).
+// ----------------------------------------------------------------------------
+export type ImpayeClient = { numero: string; nom: string; m45: number; m30_45: number; litige: boolean; relance: string | null }
+
+export type ImpayeRow = {
+  code: string
+  m45_courant: number
+  n45_courant: number
+  m30_45_courant: number
+  m45_verdict: number | null
+  n45_verdict: number
+  clients_courant: ImpayeClient[]
+}
+
+export type ImpayesData = {
+  annee: number
+  date_courante: string | null
+  date_verdict: string | null
+  date_evaluation: string
+  definitif: boolean
+  rows: ImpayeRow[]
+}
+
+export type ImpayesEntite = {
+  dateCourante: string | null
+  dateVerdict: string | null
+  dateEvaluation: string
+  definitif: boolean
+  m45Courant: number
+  n45Courant: number
+  m3045Courant: number
+  m45Verdict: number | null
+  n45Verdict: number
+  clients: ImpayeClient[]
+}
+
+export function parseImpayes(raw: unknown): ImpayesData | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as any
+  return {
+    annee: Number(r.annee),
+    date_courante: r.date_courante ? String(r.date_courante) : null,
+    date_verdict: r.date_verdict ? String(r.date_verdict) : null,
+    date_evaluation: String(r.date_evaluation || ''),
+    definitif: !!r.definitif,
+    rows: ((r.rows || []) as any[]).map((x) => ({
+      code: String(x.code || '').toUpperCase(),
+      m45_courant: Number(x.m45_courant) || 0,
+      n45_courant: Number(x.n45_courant) || 0,
+      m30_45_courant: Number(x.m30_45_courant) || 0,
+      m45_verdict: x.m45_verdict === null || x.m45_verdict === undefined ? null : Number(x.m45_verdict),
+      n45_verdict: Number(x.n45_verdict) || 0,
+      clients_courant: ((x.clients_courant || []) as any[]).map((c) => ({
+        numero: String(c.numero || ''),
+        nom: String(c.nom || c.numero || ''),
+        m45: Number(c.m45) || 0,
+        m30_45: Number(c.m30_45) || 0,
+        litige: !!c.litige,
+        relance: c.relance ? String(c.relance) : null,
+      })),
+    })),
+  }
+}
+
+/** Impayés d'une entité ; codes = null pour l'entreprise (tous collaborateurs). */
+export function impayesPourCodes(data: ImpayesData | null, codes: string[] | null): ImpayesEntite | null {
+  if (!data) return null
+  const set = codes ? new Set(codes.map((c) => c.toUpperCase())) : null
+  const rows = data.rows.filter((r) => !set || set.has(r.code))
+  const verdictRows = rows.filter((r) => r.m45_verdict !== null)
+  return {
+    dateCourante: data.date_courante,
+    dateVerdict: data.date_verdict,
+    dateEvaluation: data.date_evaluation,
+    definitif: data.definitif,
+    m45Courant: rows.reduce((s, r) => s + r.m45_courant, 0),
+    n45Courant: rows.reduce((s, r) => s + r.n45_courant, 0),
+    m3045Courant: rows.reduce((s, r) => s + r.m30_45_courant, 0),
+    m45Verdict: data.definitif ? verdictRows.reduce((s, r) => s + (r.m45_verdict || 0), 0) : null,
+    n45Verdict: rows.reduce((s, r) => s + r.n45_verdict, 0),
+    clients: rows.flatMap((r) => r.clients_courant).sort((a, b) => b.m45 - a.m45),
+  }
+}
+
+export function fmtDateCourte(iso: string | null | undefined) {
+  if (!iso) return '—'
+  const [y, m, d] = iso.slice(0, 10).split('-')
+  return `${d}/${m}/${y}`
 }

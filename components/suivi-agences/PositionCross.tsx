@@ -3,13 +3,15 @@
 // Croix de positionnement vs N-1 (inspirée du « Point commerce » PowerPoint) :
 //   axe horizontal = évolution du CA cumulé à fin de trimestre vs N-1
 //                    (droite « Ça va », gauche « Ça va pas ») ;
-//   axe vertical   = tendance : évolution du trimestre − évolution cumulée au
-//                    trimestre précédent (haut « Ça va mieux », bas « Ça se dégrade »).
+//   axe vertical   = évolution du trimestre vs le même trimestre N-1
+//                    (haut « Ça va mieux », bas « Ça se dégrade ») ;
+//   couleur        = dynamique vs les trimestres précédents de l’année (accélération /
+//                    stable / ralentissement), cf. lib/suiviAgences.ts.
 // Chaque entité laisse une trace T1 → T2 → T3… ; la bulle (taille = CA N à
 // date) est posée sur le trimestre choisi (par défaut le dernier clos).
 
 import { useMemo, useState } from 'react'
-import { fmtK, fmtPct, fmtPts, type Position } from '@/lib/suiviAgences'
+import { DYNAMIQUE_LIBELLES, fmtK, fmtPct, fmtPts, type Position } from '@/lib/suiviAgences'
 
 export type CrossPoint = {
   key: string
@@ -91,7 +93,15 @@ export default function PositionCross({
           <input type="checkbox" checked={traces} onChange={(e) => setTraces(e.target.checked)} className="h-3.5 w-3.5 accent-[#B4761A]" />
           Trajectoire depuis T1
         </label>
-        <span className="ml-auto text-[11px] text-slate-400">Taille des bulles = CA N à date</span>
+        <span className="ml-auto flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
+          {(['acceleration', 'stable', 'ralentissement'] as const).map((d) => (
+            <span key={d} className="flex items-center gap-1">
+              <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: DYNAMIQUE_LIBELLES[d].fill }} />
+              {DYNAMIQUE_LIBELLES[d].label}
+            </span>
+          ))}
+          <span className="text-slate-400">· taille = CA N à date</span>
+        </span>
       </div>
 
       {nbTrimestres === 0 ? (
@@ -168,7 +178,7 @@ export default function PositionCross({
 
             {/* bulles */}
             {[...visible]
-              .sort((a, b) => Math.abs(b.poids) - Math.abs(a.poids))
+              .sort((a, b) => (a.reference ? 1 : 0) - (b.reference ? 1 : 0) || Math.abs(b.poids) - Math.abs(a.poids))
               .map((p) => {
                 const pos = p.positions.find((x) => x.q === qShown)
                 if (!pos) return null
@@ -186,7 +196,15 @@ export default function PositionCross({
                     {p.reference ? (
                       <rect x={sx(pos.x) - r} y={sy(pos.y) - r} width={2 * r} height={2 * r} transform={`rotate(45 ${sx(pos.x)} ${sy(pos.y)})`} fill="#B4761A" stroke="#fff" strokeWidth={1.5} />
                     ) : (
-                      <circle cx={sx(pos.x)} cy={sy(pos.y)} r={r} fill="#6F94D6" fillOpacity={0.75} stroke="#2F5DA8" strokeWidth={1.2} />
+                      <circle
+                        cx={sx(pos.x)}
+                        cy={sy(pos.y)}
+                        r={r}
+                        fill={pos.dynamique ? DYNAMIQUE_LIBELLES[pos.dynamique].fill : '#A9B4C2'}
+                        fillOpacity={0.78}
+                        stroke={pos.dynamique ? DYNAMIQUE_LIBELLES[pos.dynamique].stroke : '#64748B'}
+                        strokeWidth={1.2}
+                      />
                     )}
                     <text
                       x={sx(pos.x) > W - 130 ? sx(pos.x) - r - 4 : sx(pos.x) + r + 4}
@@ -205,15 +223,16 @@ export default function PositionCross({
           </svg>
 
           {hovered && (
-            <div className="pointer-events-none absolute right-2 top-2 w-[230px] rounded-xl border border-[#E2DFD8] bg-white/95 p-3 text-[12px] shadow-lg">
+            <div className="pointer-events-none absolute right-2 top-2 w-[290px] rounded-xl border border-[#E2DFD8] bg-white/95 p-3 text-[12px] shadow-lg">
               <div className="mb-1 font-bold text-slate-900">{hovered.label}</div>
               {!hovered.reference && <div className="mb-1 text-slate-500">CA N à date {fmtK(hovered.poids)}</div>}
               <table className="w-full">
                 <thead>
                   <tr className="text-[10px] uppercase text-slate-400">
                     <th className="text-left font-semibold">Trim.</th>
-                    <th className="text-right font-semibold">Cumul vs N-1</th>
-                    <th className="text-right font-semibold">Tendance</th>
+                    <th className="text-right font-semibold">Cumul</th>
+                    <th className="text-right font-semibold">Trimestre</th>
+                    <th className="text-right font-semibold">vs trim. préc.</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -221,7 +240,10 @@ export default function PositionCross({
                     <tr key={pos.q}>
                       <td>T{pos.q}</td>
                       <td className="text-right font-semibold">{fmtPct(pos.x)}</td>
-                      <td className="text-right">{fmtPts(pos.y)}</td>
+                      <td className="text-right">{fmtPct(pos.y)}</td>
+                      <td className="text-right" style={{ color: pos.dynamique ? DYNAMIQUE_LIBELLES[pos.dynamique].tone : undefined }}>
+                        {fmtPts(pos.ecartTendance)}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

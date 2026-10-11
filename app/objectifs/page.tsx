@@ -25,6 +25,13 @@ import { supabase } from '@/lib/supabaseClient'
  * ca_evolution_pct avec famille_macro renseignée). Les familles listées ici
  * apparaissent dans la fiche de l'écran « Suivi agences – commerciaux ».
  *
+ * ÉVOLUTION (2026-10-11) : objectif « Zéro impayé > 45 jours »
+ * (type zero_impaye_45j, valeur_cible = montant toléré, 0 par défaut). Les
+ * primes de l'année N étant payées en avril N+1, l'objectif est atteint si
+ * l'instantané d'avril N+1 de l'export « Qui vous doit quoi » ne porte aucune
+ * facture échue depuis plus de 45 jours (RPC get_suivi_impayes, migration
+ * 20261011_objectif_zero_impaye.sql). La situation à date est rappelée ici.
+ *
  * TODO Arnaud : la comparaison au réel (get_objectifs_reel_annee) est un
  * stub côté SQL — à brancher sur les vues/indicateurs qui portent déjà le
  * CA, la marge et le profil de CA 12MG par client ailleurs dans l'app.
@@ -39,6 +46,7 @@ type TypeObjectif =
   | 'nb_clients_gros'
   | 'nb_clients_moyens'
   | 'nb_clients_petits'
+  | 'zero_impaye_45j'
 
 type PerimetreType = 'entreprise' | 'agence' | 'commercial'
 
@@ -57,7 +65,12 @@ type UserObjectif = {
   email: string
   display_name: string
   agence_objectif: string
+  code: string
 }
+
+type ImpayeSituation = { code: string; m45_courant: number; n45_courant: number; m45_verdict: number | null }
+
+type ImpayesInfo = { date_courante: string | null; date_verdict: string | null; definitif: boolean; rows: ImpayeSituation[] }
 
 type RealValues = {
   ca_reel: number | null
@@ -84,6 +97,8 @@ type ObjectifDraft = {
   nb_clients_gros: string
   nb_clients_moyens: string
   nb_clients_petits: string
+  zero_impaye: boolean
+  zero_impaye_tolerance: string
   commentaire: string
 }
 
@@ -94,7 +109,7 @@ type ToastState = { tone: 'success' | 'error'; text: string } | null
 const FAMILLES_MACRO = ['ACC', 'DIV', 'DRV', 'ECS', 'PV', 'R_ZONE', 'R/O', 'R/R', 'SAV', 'TECH']
 
 const TYPE_OBJECTIF_DEFS: Record<
-  Exclude<TypeObjectif, 'marge_evolution_pct'>,
+  Exclude<TypeObjectif, 'marge_evolution_pct' | 'zero_impaye_45j'>,
   { label: string; unit: string; additive: boolean }
 > = {
   ca_valeur: { label: 'CA en valeur', unit: '€', additive: true },
@@ -113,6 +128,8 @@ const EMPTY_DRAFT: ObjectifDraft = {
   nb_clients_gros: '',
   nb_clients_moyens: '',
   nb_clients_petits: '',
+  zero_impaye: false,
+  zero_impaye_tolerance: '',
   commentaire: '',
 }
 
@@ -159,6 +176,11 @@ function draftFromRows(rows: ObjectifRow[]): ObjectifDraft {
       } else {
         draft.marge_evolution_pct = String(row.valeur_cible)
       }
+      return
+    }
+    if (row.type_objectif === 'zero_impaye_45j') {
+      draft.zero_impaye = true
+      draft.zero_impaye_tolerance = row.valeur_cible ? String(row.valeur_cible) : ''
       return
     }
     if (row.famille_macro && (row.type_objectif === 'ca_valeur' || row.type_objectif === 'ca_evolution_pct')) {
@@ -212,6 +234,18 @@ function rowsFromDraft(annee: number, perimetre: Perimetre, draft: ObjectifDraft
     })
   }
 
+  if (draft.zero_impaye) {
+    rows.push({
+      annee,
+      perimetre_type: perimetre.type,
+      perimetre_ref,
+      type_objectif: 'zero_impaye_45j',
+      famille_macro: null,
+      valeur_cible: Math.max(0, numOrNull(draft.zero_impaye_tolerance) ?? 0),
+      commentaire: draft.commentaire.trim(),
+    })
+  }
+
   const famillesCa = new Set<string>()
   draft.ca_par_famille.forEach(({ famille, valeur, evolution }) => {
     const fam = famille.trim()
@@ -260,6 +294,7 @@ export default function ObjectifsPage() {
   const [expandedAgences, setExpandedAgences] = useState<Set<string>>(new Set())
   const [saving, setSaving] = useState(false)
   const [toast, setToast] = useState<ToastState>(null)
+  const [impayes, setImpayes] = useState<ImpayesInfo | null>(null)
 
   useEffect(() => {
     if (!toast) return
@@ -274,7 +309,7 @@ export default function ObjectifsPage() {
       supabase.from('objectifs_commerciaux').select('*').eq('annee', targetAnnee),
       supabase
         .from('user_page_access')
-        .select('email, display_name, agence_objectif')
+        .select('email, display_name, agence_objectif, collaborateur_objectif, allowed_collaborateurs')
         .eq('soumis_objectif', true)
         .order('display_name', { ascending: true }),
     ])
@@ -300,7 +335,33 @@ export default function ObjectifsPage() {
       email: String(row.email || '').toLowerCase().trim(),
       display_name: String(row.display_name || '').trim(),
       agence_objectif: String(row.agence_objectif || '').trim(),
+      code: String(
+        row.collaborateur_objectif ||
+          (Array.isArray(row.allowed_collaborateurs) && row.allowed_collaborateurs.length === 1 ? row.allowed_collaborateurs[0] : '') ||
+          ''
+      )
+        .trim()
+        .toUpperCase(),
     })))
+
+    // Situation des impayés (facultative : RPC absente = pas d'affichage).
+    const { data: impData, error: impError } = await supabase.rpc('get_suivi_impayes', { p_annee: targetAnnee })
+    if (!impError && impData) {
+      const raw = impData as any
+      setImpayes({
+        date_courante: raw.date_courante || null,
+        date_verdict: raw.date_verdict || null,
+        definitif: !!raw.definitif,
+        rows: ((raw.rows || []) as any[]).map((r) => ({
+          code: String(r.code || '').toUpperCase(),
+          m45_courant: Number(r.m45_courant) || 0,
+          n45_courant: Number(r.n45_courant) || 0,
+          m45_verdict: r.m45_verdict === null || r.m45_verdict === undefined ? null : Number(r.m45_verdict),
+        })),
+      })
+    } else {
+      setImpayes(null)
+    }
 
     setLoading(false)
   }
@@ -463,6 +524,32 @@ export default function ObjectifsPage() {
   }, [selected, agences, usersObjectif, objectifs])
 
   const perimetreHasChildren = selected.type !== 'commercial'
+
+  // Situation des impayés > 45 j du périmètre sélectionné (codes collaborateur).
+  const impayeSituation = useMemo(() => {
+    if (!impayes) return null
+    let codes: Set<string> | null = null
+    if (selected.type === 'commercial') {
+      const code = usersObjectif.find((u) => u.email === selected.ref)?.code
+      if (!code) return { sansCode: true as const }
+      codes = new Set([code])
+    } else if (selected.type === 'agence') {
+      const list = commerciauxDe(selected.ref).map((u) => u.code).filter(Boolean)
+      codes = new Set(list)
+    }
+    const rows = impayes.rows.filter((r) => !codes || codes.has(r.code))
+    return {
+      sansCode: false as const,
+      partiel: selected.type === 'agence',
+      dateCourante: impayes.date_courante,
+      dateVerdict: impayes.date_verdict,
+      definitif: impayes.definitif,
+      m45: rows.reduce((s, r) => s + r.m45_courant, 0),
+      n45: rows.reduce((s, r) => s + r.n45_courant, 0),
+      m45Verdict: impayes.definitif ? rows.reduce((s, r) => s + (r.m45_verdict || 0), 0) : null,
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [impayes, selected, usersObjectif])
 
   return (
     <div className="min-h-screen bg-[#F4F3F0] pb-16">
@@ -657,6 +744,59 @@ export default function ObjectifsPage() {
                       onChange={(value) => setDraft((current) => ({ ...current, nb_clients_petits: value }))}
                       real={real ? formatNumber(real.nb_clients_petits) : undefined}
                     />
+                  </ObjectifFieldGroup>
+                </div>
+
+                <div className="mt-5">
+                  <ObjectifFieldGroup title="Encaissement">
+                    <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-[#D8D3C8] bg-white px-3 py-2.5">
+                      <input
+                        type="checkbox"
+                        checked={draft.zero_impaye}
+                        onChange={(event) => setDraft((current) => ({ ...current, zero_impaye: event.target.checked }))}
+                        className="mt-0.5 h-4 w-4 accent-[#B4761A]"
+                      />
+                      <span>
+                        <span className="block text-sm font-semibold text-slate-800">Zéro impayé &gt; 45 jours</span>
+                        <span className="block text-xs text-slate-500">
+                          Aucune facture échue depuis plus de 45 jours sur ses clients lors du paiement des primes (avril {annee + 1}) :
+                          l’année {annee} est alors considérée sans impayé.
+                        </span>
+                      </span>
+                    </label>
+                    {draft.zero_impaye && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm text-slate-700">Montant toléré</span>
+                        <input
+                          value={draft.zero_impaye_tolerance}
+                          onChange={(event) => setDraft((current) => ({ ...current, zero_impaye_tolerance: event.target.value }))}
+                          placeholder="0"
+                          inputMode="decimal"
+                          className="h-[38px] w-28 rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm outline-none focus:border-[#B4761A]"
+                        />
+                        <span className="text-xs text-slate-500">€ (0 = aucun impayé)</span>
+                      </div>
+                    )}
+                    {impayeSituation && (
+                      <div className="text-[12px] text-slate-600">
+                        {impayeSituation.sansCode ? (
+                          <span className="text-[#8A5A11]">Code collaborateur SAGE non renseigné (écran Autorisations) : situation non calculable.</span>
+                        ) : (
+                          <>
+                            <span className={impayeSituation.m45 > 0 ? 'font-semibold text-[#A32C2C]' : 'font-semibold text-[#1F6B3A]'}>
+                              {impayeSituation.m45 > 0
+                                ? `${formatEuros(impayeSituation.m45)} échus > 45 j sur ${impayeSituation.n45} client${impayeSituation.n45 > 1 ? 's' : ''}`
+                                : 'Aucun impayé > 45 j'}
+                            </span>{' '}
+                            au {impayeSituation.dateCourante ? impayeSituation.dateCourante.split('-').reverse().join('/') : '—'}
+                            {impayeSituation.definitif && impayeSituation.m45Verdict !== null && (
+                              <> · verdict avril {annee + 1} : {impayeSituation.m45Verdict > 0 ? formatEuros(impayeSituation.m45Verdict) : 'aucun impayé'}</>
+                            )}
+                            {impayeSituation.partiel && <span className="text-slate-400"> (commerciaux de l’agence ayant un code SAGE)</span>}
+                          </>
+                        )}
+                      </div>
+                    )}
                   </ObjectifFieldGroup>
                 </div>
 

@@ -10,12 +10,14 @@ import type React from 'react'
 import { Bar, CartesianGrid, ComposedChart, Legend, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { supabase } from '@/lib/supabaseClient'
 import {
+  DYNAMIQUE_LIBELLES,
   FAMILLES_LIBELLES,
   MOIS_COURTS,
   MOIS_LONGS,
   addToSerie,
   emptySerie,
   evolPct,
+  fmtDateCourte,
   fmtEuro,
   fmtInt,
   fmtK,
@@ -31,6 +33,7 @@ import {
   toneOf,
   type DataRow,
   type Entity,
+  type ImpayesEntite,
   type Objectif,
   type ObjectifsEntite,
   type RefRow,
@@ -68,6 +71,7 @@ const TYPE_LIBELLES: Record<string, string> = {
   nb_clients_gros: 'Gros clients',
   nb_clients_moyens: 'Clients moyens',
   nb_clients_petits: 'Petits clients',
+  zero_impaye_45j: 'Zéro impayé > 45 j',
 }
 
 export default function FicheDetail({
@@ -82,6 +86,7 @@ export default function FicheDetail({
   famillesFiltre,
   objectifs,
   exclusionsLibelle,
+  impayes = null,
   onClose,
 }: {
   entity: Entity
@@ -95,6 +100,8 @@ export default function FicheDetail({
   famillesFiltre: string[]
   objectifs: ObjectifsEntite
   exclusionsLibelle: string
+  /** Impayés > 45 j de l'entité (null = donnée indisponible). */
+  impayes?: ImpayesEntite | null
   onClose: () => void
 }) {
   const [profil, setProfil] = useState<Profil | null>(null)
@@ -206,6 +213,7 @@ export default function FicheDetail({
             <h2 className="mt-1 text-2xl font-bold text-white">{entity.label}</h2>
             <div className="mt-1 flex flex-wrap gap-1.5 text-[11px] text-slate-300">
               <span>CA facturé {annee} · à date = janv. → {MOIS_LONGS[moisClos] || '—'} (dernier mois clos)</span>
+              <span className="rounded bg-[#2C3946] px-1.5 text-slate-200">Hors statistique : exclus</span>
               {famillesFiltre.length > 0 && (
                 <span className="rounded bg-[#B4761A]/25 px-1.5 text-[#F5D79B]">Familles : {famillesFiltre.join(', ')}</span>
               )}
@@ -239,7 +247,15 @@ export default function FicheDetail({
               value={quadrant ? QUADRANT_LIBELLES[quadrant].label : '—'}
               tone=""
               style={quadrant ? { color: QUADRANT_LIBELLES[quadrant].tone } : undefined}
-              sub={positions.length ? `fin T${positions[positions.length - 1].q}` : 'aucun trimestre clos'}
+              sub={
+                positions.length
+                  ? `fin T${positions[positions.length - 1].q}${
+                      positions[positions.length - 1].dynamique
+                        ? ` · ${DYNAMIQUE_LIBELLES[positions[positions.length - 1].dynamique!].label.toLowerCase()} (${fmtPts(positions[positions.length - 1].ecartTendance)} vs trim. préc.)`
+                        : ''
+                    }`
+                  : 'aucun trimestre clos'
+              }
             />
           </div>
 
@@ -351,13 +367,14 @@ export default function FicheDetail({
 
           {/* Objectifs & familles */}
           <Section title="Objectifs et familles suivies" hint="Familles de produits listées dans l’écran Objectifs pour ce périmètre (à défaut : objectifs de l’agence puis de l’entreprise).">
-            {objectifs.propres.filter((o) => !o.famille_macro).length > 0 && (
-              <div className="mb-4 flex flex-wrap gap-2">
+            {(objectifs.propres.filter((o) => !o.famille_macro && o.type_objectif !== 'zero_impaye_45j').length > 0 || impayes) && (
+              <div className="mb-4 flex flex-wrap items-start gap-2">
                 {objectifs.propres
-                  .filter((o) => !o.famille_macro)
+                  .filter((o) => !o.famille_macro && o.type_objectif !== 'zero_impaye_45j')
                   .map((o) => (
                     <ObjectifChip key={`${o.type_objectif}`} objectif={o} reel={reelPour(o, aDate, tauxN, tauxN1, attenduADate)} />
                   ))}
+                {impayes && <ImpayeChip impayes={impayes} objectif={objectifs.zeroImpaye} annee={annee} />}
               </div>
             )}
             {famillesSuivies.length === 0 ? (
@@ -580,6 +597,77 @@ function ObjectifChip({ objectif, reel, compact = false }: { objectif: Objectif;
         {reel.texte}
       </div>
       {!compact && reel.detail && <div className="text-[11px] text-slate-500">{reel.detail}</div>}
+    </div>
+  )
+}
+
+// Objectif « Zéro impayé > 45 jours » : vert = atteint. Verdict sur l'instantané
+// d'avril N+1 (paiement des primes) ; avant : résultat provisoire = situation à
+// date, rappelée en petit sous le résultat dans tous les cas.
+function ImpayeChip({
+  impayes,
+  objectif,
+  annee,
+}: {
+  impayes: ImpayesEntite
+  objectif: ObjectifsEntite['zeroImpaye']
+  annee: number
+}) {
+  const [open, setOpen] = useState(false)
+  const tolerance = objectif ? Math.max(0, objectif.objectif.valeur_cible || 0) : 0
+  const montant = impayes.definitif ? impayes.m45Verdict || 0 : impayes.m45Courant
+  const nb = impayes.definitif ? impayes.n45Verdict : impayes.n45Courant
+  const ok = montant <= tolerance + 0.5
+  const colors = ok ? 'border-[#B9DCC3] bg-[#EEF7F0]' : 'border-[#F0C5BE] bg-[#FCEFEC]'
+  const moisEval = `avril ${annee + 1}`
+  const cible = tolerance > 0 ? `≤ ${fmtEuro(tolerance)}` : 'aucun'
+
+  const situation =
+    impayes.m45Courant > 0
+      ? `${fmtEuro(impayes.m45Courant)} > 45 j sur ${impayes.n45Courant} client${impayes.n45Courant > 1 ? 's' : ''}`
+      : 'aucun impayé > 45 j'
+
+  return (
+    <div className={`min-w-[250px] max-w-[360px] rounded-lg border px-3 py-2 ${colors}`}>
+      <div className="text-[11px] font-semibold uppercase tracking-[0.06em] text-slate-500">
+        Zéro impayé &gt; 45 j · cible {cible}
+        {!objectif && <span className="ml-1 normal-case tracking-normal text-slate-400">(objectif non fixé)</span>}
+        {objectif && objectif.source !== 'propre' && <span className="ml-1 normal-case tracking-normal text-slate-400">(objectif {objectif.source})</span>}
+      </div>
+      <div className="text-[14px] font-bold text-slate-900">
+        {ok ? '✓ ' : '▼ '}
+        {montant > 0 ? `${fmtEuro(montant)} sur ${nb} client${nb > 1 ? 's' : ''}` : 'Aucune facture échue > 45 j'}
+        <span className="ml-1.5 text-[11px] font-semibold text-slate-500">
+          {impayes.definitif ? `verdict au ${fmtDateCourte(impayes.dateVerdict)}` : 'provisoire'}
+        </span>
+      </div>
+      <div className="mt-0.5 text-[11px] leading-snug text-slate-500">
+        Situation au {fmtDateCourte(impayes.dateCourante)} : {situation}
+        {impayes.m3045Courant > 0 && ` · ${fmtEuro(impayes.m3045Courant)} entre 30 et 45 j à surveiller`}
+        {!impayes.definitif && ` · évaluation définitive en ${moisEval} (paiement des primes)`}
+      </div>
+      {impayes.clients.length > 0 && (
+        <div className="mt-1">
+          <button type="button" onClick={() => setOpen((v) => !v)} className="text-[11px] font-semibold text-[#245A9E] hover:underline">
+            {open ? '▾ Masquer les clients' : `▸ Voir les clients (${impayes.clients.length})`}
+          </button>
+          {open && (
+            <ul className="mt-1 space-y-0.5 text-[11px] text-slate-700">
+              {impayes.clients.map((c) => (
+                <li key={c.numero} className="flex justify-between gap-2">
+                  <a href={`/vision-client?numero=${encodeURIComponent(c.numero)}`} target="_blank" rel="noreferrer" className="truncate hover:text-[#245A9E] hover:underline">
+                    {c.nom}
+                    {c.litige && <span className="ml-1 rounded bg-[#FBE6E3] px-1 text-[9px] font-bold text-[#A32C2C]">litige</span>}
+                  </a>
+                  <span className="shrink-0 tabular-nums">
+                    {c.m45 > 0 ? `${fmtEuro(c.m45)} > 45 j` : `${fmtEuro(c.m30_45)} 30–45 j`}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
     </div>
   )
 }
