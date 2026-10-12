@@ -306,6 +306,18 @@ export type ObjectifsEntite = {
   familles: Array<{ famille: string; source: 'propre' | 'agence' | 'entreprise'; objectifs: Objectif[] }>
   /** Objectif « Zéro impayé > 45 j » applicable (propre, sinon agence, sinon entreprise). */
   zeroImpaye: { objectif: Objectif; source: 'propre' | 'agence' | 'entreprise' } | null
+  /** Agence à un seul commercial : objectifs repris de l'autre périmètre (inclus dans propres). */
+  herites: Objectif[]
+  /** Libellé de l'origine des objectifs repris (ex. « agence BRIVE »). */
+  heritesDe: string | null
+}
+
+const objKey = (o: Objectif) => `${o.type_objectif}|${o.famille_macro || ''}`
+
+/** Complète `base` avec les objectifs de `autre` absents de `base` (même type et famille). */
+function completer(base: Objectif[], autre: Objectif[]) {
+  const keys = new Set(base.map(objKey))
+  return autre.filter((o) => !keys.has(objKey(o)))
 }
 
 export function objectifsPourEntite(
@@ -317,16 +329,36 @@ export function objectifsPourEntite(
   const agenceKey = normAgence(entity.agence)
   const agence = objectifs.filter((o) => o.perimetre_type === 'agence' && normAgence(o.perimetre_ref) === agenceKey)
 
+  // Règle du 12/10/2026 : agence à un seul commercial soumis à objectif → les
+  // objectifs de l'agence valent pour le commercial (et inversement), un objectif
+  // fixé en propre restant prioritaire.
+  const objectifsCommercial = (email: string) =>
+    objectifs.filter((o) => o.perimetre_type === 'commercial' && String(o.perimetre_ref || '').toLowerCase() === email.toLowerCase())
+
   let propres: Objectif[] = []
+  let herites: Objectif[] = []
+  let heritesDe: string | null = null
   if (entity.kind === 'entreprise') propres = entreprise
-  else if (entity.kind === 'agence') propres = agence
-  else {
-    const emails = commerciaux
-      .filter((c) => (c.code || '').toUpperCase() === entity.id.toUpperCase())
-      .map((c) => c.email.toLowerCase())
-    propres = objectifs.filter(
-      (o) => o.perimetre_type === 'commercial' && emails.includes(String(o.perimetre_ref || '').toLowerCase())
-    )
+  else if (entity.kind === 'agence') {
+    propres = agence
+    const seuls = commerciaux.filter((c) => normAgence(c.agence_objectif) === agenceKey)
+    if (seuls.length === 1) {
+      herites = completer(propres, objectifsCommercial(seuls[0].email))
+      if (herites.length) heritesDe = `commercial ${seuls[0].display_name || seuls[0].email}`
+      propres = [...propres, ...herites]
+    }
+  } else {
+    const fiches = commerciaux.filter((c) => (c.code || '').toUpperCase() === entity.id.toUpperCase())
+    propres = fiches.flatMap((c) => objectifsCommercial(c.email))
+    const agenceCommerciale = fiches.find((c) => c.agence_objectif)?.agence_objectif || entity.agence
+    const keyCo = normAgence(agenceCommerciale)
+    const nbCommerciaux = commerciaux.filter((c) => normAgence(c.agence_objectif) === keyCo).length
+    if (fiches.length > 0 && nbCommerciaux === 1) {
+      const objAgence = objectifs.filter((o) => o.perimetre_type === 'agence' && normAgence(o.perimetre_ref) === keyCo)
+      herites = completer(propres, objAgence)
+      if (herites.length) heritesDe = `agence ${agenceCommerciale}`
+      propres = [...propres, ...herites]
+    }
   }
 
   const sources: Array<{ source: 'propre' | 'agence' | 'entreprise'; list: Objectif[] }> = [
@@ -361,7 +393,7 @@ export function objectifsPourEntite(
     }
   }
 
-  return { propres, familles, zeroImpaye }
+  return { propres, familles, zeroImpaye, herites, heritesDe }
 }
 
 // ----------------------------------------------------------------------------

@@ -422,7 +422,7 @@ function SuiviAgencesPage() {
   }, [fiche, impayes, collaborateurs])
 
   const ficheObjectifs = useMemo(
-    () => (fiche ? objectifsPourEntite(fiche.entity, objectifs, commerciaux) : { propres: [], familles: [], zeroImpaye: null }),
+    () => (fiche ? objectifsPourEntite(fiche.entity, objectifs, commerciaux) : { propres: [], familles: [], zeroImpaye: null, herites: [], heritesDe: null }),
     [fiche, objectifs, commerciaux]
   )
 

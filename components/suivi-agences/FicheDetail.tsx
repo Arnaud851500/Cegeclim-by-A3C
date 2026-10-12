@@ -64,10 +64,32 @@ type Profil = {
   nb_clients_actifs_n1: number
 }
 
+/** Ordre d'affichage des objectifs dans le pavé. */
+const ORDRE_TYPES = [
+  'ca_valeur', 'ca_evolution_pct', 'marge_valeur', 'marge_evolution_pct',
+  'nb_clients_t400', 'nb_clients_t200', 'nb_clients_t100', 'nb_clients_t50', 'nb_clients_t20',
+  'nb_clients_gros', 'nb_clients_moyens', 'nb_clients_petits',
+]
+
+/** Objectif « nombre de clients » → code de tranche du profil CA 12 MG. */
+const TRANCHE_PAR_TYPE: Record<string, string> = {
+  nb_clients_t400: 't400',
+  nb_clients_t200: 't200',
+  nb_clients_t100: 't100',
+  nb_clients_t50: 't50',
+  nb_clients_t20: 't20',
+}
+
 const TYPE_LIBELLES: Record<string, string> = {
   ca_valeur: 'CA',
   ca_evolution_pct: 'Évolution CA',
-  marge_evolution_pct: 'Évolution marge',
+  marge_evolution_pct: 'Évolution taux de marge',
+  marge_valeur: 'Marge',
+  nb_clients_t400: 'Clients ≥ 400 k€',
+  nb_clients_t200: 'Clients 200 – 400 k€',
+  nb_clients_t100: 'Clients 100 – 200 k€',
+  nb_clients_t50: 'Clients 50 – 100 k€',
+  nb_clients_t20: 'Clients 20 – 50 k€',
   nb_clients_gros: 'Gros clients',
   nb_clients_moyens: 'Clients moyens',
   nb_clients_petits: 'Petits clients',
@@ -150,6 +172,11 @@ export default function FicheDetail({
   const objectifCa = objectifs.propres.find((o) => o.type_objectif === 'ca_valeur' && !o.famille_macro)
   const caN1Total = sumMonths(serie.ca[1], 1, 12)
   const attenduADate = objectifCa && caN1Total > 0 ? objectifCa.valeur_cible * (aDate.n1 / caN1Total) : null
+  const objectifMarge = objectifs.propres.find((o) => o.type_objectif === 'marge_valeur' && !o.famille_macro)
+  const mgN1Total = sumMonths(serie.mg[1], 1, 12)
+  const margeAttendue = objectifMarge && mgN1Total > 0 ? objectifMarge.valeur_cible * (aDate.mgN1 / mgN1Total) : null
+  const heritesKeys = new Set(objectifs.herites.map((o) => `${o.type_objectif}|${o.famille_macro || ''}`))
+  const ctxReel: CtxReel = { profil, famillesActives: famillesFiltre.length > 0, margeAttendue }
 
   // ------------------------------------------------------------- tableau CA
   const lignes = useMemo(() => {
@@ -371,11 +398,22 @@ export default function FicheDetail({
               <div className="mb-4 flex flex-wrap items-start gap-2">
                 {objectifs.propres
                   .filter((o) => !o.famille_macro && o.type_objectif !== 'zero_impaye_45j')
+                  .sort((a, b) => ORDRE_TYPES.indexOf(a.type_objectif) - ORDRE_TYPES.indexOf(b.type_objectif))
                   .map((o) => (
-                    <ObjectifChip key={`${o.type_objectif}`} objectif={o} reel={reelPour(o, aDate, tauxN, tauxN1, attenduADate)} />
+                    <ObjectifChip
+                      key={`${o.type_objectif}`}
+                      objectif={o}
+                      reel={reelPour(o, aDate, tauxN, tauxN1, attenduADate, ctxReel)}
+                      origine={heritesKeys.has(`${o.type_objectif}|`) ? objectifs.heritesDe : null}
+                    />
                   ))}
                 {impayes && <ImpayeChip impayes={impayes} objectif={objectifs.zeroImpaye} annee={annee} />}
               </div>
+            )}
+            {objectifs.heritesDe && (
+              <p className="-mt-2 mb-3 text-[11px] text-slate-500">
+                Agence à un seul commercial : les objectifs non fixés en propre sont repris de l’{objectifs.heritesDe} (mention sur le pavé).
+              </p>
             )}
             {famillesSuivies.length === 0 ? (
               <p className="rounded-xl border border-dashed border-[#D8D3C8] bg-white px-4 py-5 text-sm text-slate-500">
@@ -420,7 +458,7 @@ export default function FicheDetail({
                                   key={o.type_objectif}
                                   compact
                                   objectif={o}
-                                  reel={reelPour(o, f.v, t, t1, f.totalN1 > 0 && o.type_objectif === 'ca_valeur' ? o.valeur_cible * (f.v.n1 / f.totalN1) : null)}
+                                  reel={reelPour(o, f.v, t, t1, f.totalN1 > 0 && o.type_objectif === 'ca_valeur' ? o.valeur_cible * (f.v.n1 / f.totalN1) : null, { profil: null, famillesActives: false, margeAttendue: null })}
                                 />
                               ))}
                             </div>
@@ -544,13 +582,44 @@ function valeurs(serie: Serie, from: number, to: number, nVide = false) {
 
 type Reel = { texte: string; statut: 'ok' | 'ko' | 'neutre'; detail?: string }
 
+type CtxReel = { profil: Profil | null; famillesActives: boolean; margeAttendue: number | null }
+
 function reelPour(
   o: Objectif,
   v: ReturnType<typeof valeurs>,
   taux: number | null,
   tauxN1: number | null,
-  attenduADate: number | null
+  attenduADate: number | null,
+  ctx: CtxReel
 ): Reel {
+  const tranche = TRANCHE_PAR_TYPE[o.type_objectif]
+  if (tranche) {
+    // Même notion que le « Profil CA des clients » : nombre de clients dont le CA
+    // des 12 mois glissants tombe dans la tranche.
+    if (ctx.famillesActives) return { texte: 'retirer le filtre familles', statut: 'neutre', detail: 'Le réel se calcule sur toutes les familles.' }
+    const t = ctx.profil?.tranches.find((x) => x.code === tranche)
+    if (!t) return { texte: ctx.profil ? '—' : 'calcul…', statut: 'neutre' }
+    return {
+      texte: `${fmtInt(t.g12.nb)} client${t.g12.nb > 1 ? 's' : ''} (12 MG)`,
+      statut: t.g12.nb >= o.valeur_cible ? 'ok' : 'ko',
+      detail: `12 MG N-1 : ${fmtInt(t.g12n1.nb)} · année N-1 : ${fmtInt(t.n1.nb)}`,
+    }
+  }
+  switch (o.type_objectif) {
+    case 'marge_valeur': {
+      const pct = o.valeur_cible > 0 ? (v.mgN / o.valeur_cible) * 100 : null
+      const ok = ctx.margeAttendue !== null ? v.mgN >= ctx.margeAttendue : null
+      return {
+        texte: `${fmtK(v.mgN)} (${pct === null ? '—' : `${Math.round(pct)} %`})`,
+        statut: ok === null ? 'neutre' : ok ? 'ok' : 'ko',
+        detail: ctx.margeAttendue !== null ? `Attendu à date (saisonnalité N-1) : ${fmtK(ctx.margeAttendue)}` : undefined,
+      }
+    }
+    case 'nb_clients_gros':
+    case 'nb_clients_moyens':
+    case 'nb_clients_petits':
+      return { texte: 'à ressaisir par tranche', statut: 'neutre', detail: 'Ancienne segmentation : ressaisir l’objectif par tranche de CA dans l’écran Objectifs.' }
+  }
   switch (o.type_objectif) {
     case 'ca_valeur': {
       const pct = o.valeur_cible > 0 ? (v.n / o.valeur_cible) * 100 : null
@@ -572,9 +641,9 @@ function reelPour(
   }
 }
 
-function ObjectifChip({ objectif, reel, compact = false }: { objectif: Objectif; reel: Reel; compact?: boolean }) {
+function ObjectifChip({ objectif, reel, compact = false, origine = null }: { objectif: Objectif; reel: Reel; compact?: boolean; origine?: string | null }) {
   const cible =
-    objectif.type_objectif === 'ca_valeur'
+    objectif.type_objectif === 'ca_valeur' || objectif.type_objectif === 'marge_valeur'
       ? fmtK(objectif.valeur_cible)
       : objectif.type_objectif === 'ca_evolution_pct'
       ? fmtPct(objectif.valeur_cible)
@@ -591,6 +660,7 @@ function ObjectifChip({ objectif, reel, compact = false }: { objectif: Objectif;
     <div className={`rounded-lg border ${colors} ${compact ? 'px-2 py-1' : 'px-3 py-2'}`} title={reel.detail}>
       <div className={`${compact ? 'text-[10px]' : 'text-[11px]'} font-semibold uppercase tracking-[0.06em] text-slate-500`}>
         {TYPE_LIBELLES[objectif.type_objectif] || objectif.type_objectif} · cible {cible}
+        {origine && <span className="ml-1 normal-case tracking-normal text-slate-400">({origine})</span>}
       </div>
       <div className={`${compact ? 'text-[12px]' : 'text-[14px]'} font-bold text-slate-900`}>
         {reel.statut === 'ok' ? '✓ ' : reel.statut === 'ko' ? '▼ ' : ''}

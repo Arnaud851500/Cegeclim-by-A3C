@@ -32,6 +32,19 @@ import { supabase } from '@/lib/supabaseClient'
  * facture échue depuis plus de 45 jours (RPC get_suivi_impayes, migration
  * 20261011_objectif_zero_impaye.sql). La situation à date est rappelée ici.
  *
+ * ÉVOLUTION (2026-10-12) :
+ *  - nombre de clients par tranche de CA 12 mois glissants, mêmes tranches que
+ *    le « Profil CA des clients » de l'écran Suivi agences – commerciaux
+ *    (≥ 400 k€, 200–400, 100–200, 50–100, 20–50 k€ ; types nb_clients_t400…t20),
+ *    réel 12 MG affiché en regard (RPC get_suivi_profil_clients). Les anciens
+ *    objectifs gros / moyens / petits sont affichés pour mémoire et supprimés à
+ *    l'enregistrement ;
+ *  - agence à un seul commercial : ses objectifs valent pour le commercial
+ *    (repris automatiquement dans la fiche du suivi, bouton de recopie ici) ;
+ *  - liste des agences = agences des commerciaux soumis à objectif + agences
+ *    actives de ref_collaborateurs + agences ayant déjà des objectifs ;
+ *  - objectif de marge en valeur (marge_valeur, €).
+ *
  * TODO Arnaud : la comparaison au réel (get_objectifs_reel_annee) est un
  * stub côté SQL — à brancher sur les vues/indicateurs qui portent déjà le
  * CA, la marge et le profil de CA 12MG par client ailleurs dans l'app.
@@ -43,6 +56,12 @@ type TypeObjectif =
   | 'ca_valeur'
   | 'ca_evolution_pct'
   | 'marge_evolution_pct'
+  | 'marge_valeur'
+  | 'nb_clients_t400'
+  | 'nb_clients_t200'
+  | 'nb_clients_t100'
+  | 'nb_clients_t50'
+  | 'nb_clients_t20'
   | 'nb_clients_gros'
   | 'nb_clients_moyens'
   | 'nb_clients_petits'
@@ -70,6 +89,10 @@ type UserObjectif = {
 
 type ImpayeSituation = { code: string; m45_courant: number; n45_courant: number; m45_verdict: number | null }
 
+type TrancheReel = { code: string; libelle: string; g12: number; g12n1: number; n1: number }
+
+type CollabRef = { code: string; agence: string; sommeil: boolean }
+
 type ImpayesInfo = { date_courante: string | null; date_verdict: string | null; definitif: boolean; rows: ImpayeSituation[] }
 
 type RealValues = {
@@ -92,11 +115,16 @@ type ObjectifDraft = {
   ca_valeur: string
   ca_evolution_pct: string
   marge_evolution_pct: string
+  marge_valeur: string
   marge_par_famille: MargeFamilleDraft[]
   ca_par_famille: CaFamilleDraft[]
-  nb_clients_gros: string
-  nb_clients_moyens: string
-  nb_clients_petits: string
+  nb_clients_t400: string
+  nb_clients_t200: string
+  nb_clients_t100: string
+  nb_clients_t50: string
+  nb_clients_t20: string
+  /** Anciens objectifs gros / moyens / petits (lecture seule, non réenregistrés). */
+  anciens_profils: Array<{ type: string; valeur: number }>
   zero_impaye: boolean
   zero_impaye_tolerance: string
   commentaire: string
@@ -109,25 +137,51 @@ type ToastState = { tone: 'success' | 'error'; text: string } | null
 const FAMILLES_MACRO = ['ACC', 'DIV', 'DRV', 'ECS', 'PV', 'R_ZONE', 'R/O', 'R/R', 'SAV', 'TECH']
 
 const TYPE_OBJECTIF_DEFS: Record<
-  Exclude<TypeObjectif, 'marge_evolution_pct' | 'zero_impaye_45j'>,
+  Exclude<TypeObjectif, 'marge_evolution_pct' | 'zero_impaye_45j' | 'nb_clients_gros' | 'nb_clients_moyens' | 'nb_clients_petits'>,
   { label: string; unit: string; additive: boolean }
 > = {
   ca_valeur: { label: 'CA en valeur', unit: '€', additive: true },
   ca_evolution_pct: { label: 'Évolution du CA vs N-1', unit: '%', additive: false },
-  nb_clients_gros: { label: 'Nombre de gros clients', unit: 'clients', additive: true },
-  nb_clients_moyens: { label: 'Nombre de clients moyens', unit: 'clients', additive: true },
-  nb_clients_petits: { label: 'Nombre de petits clients', unit: 'clients', additive: true },
+  marge_valeur: { label: 'Marge en valeur', unit: '€', additive: true },
+  nb_clients_t400: { label: 'Clients ≥ 400 k€', unit: 'clients', additive: true },
+  nb_clients_t200: { label: 'Clients 200 – 400 k€', unit: 'clients', additive: true },
+  nb_clients_t100: { label: 'Clients 100 – 200 k€', unit: 'clients', additive: true },
+  nb_clients_t50: { label: 'Clients 50 – 100 k€', unit: 'clients', additive: true },
+  nb_clients_t20: { label: 'Clients 20 – 50 k€', unit: 'clients', additive: true },
+}
+
+/** Tranches de CA 12 mois glissants (identiques à get_suivi_profil_clients). */
+const TRANCHES: Array<{ key: 'nb_clients_t400' | 'nb_clients_t200' | 'nb_clients_t100' | 'nb_clients_t50' | 'nb_clients_t20'; code: string }> = [
+  { key: 'nb_clients_t400', code: 't400' },
+  { key: 'nb_clients_t200', code: 't200' },
+  { key: 'nb_clients_t100', code: 't100' },
+  { key: 'nb_clients_t50', code: 't50' },
+  { key: 'nb_clients_t20', code: 't20' },
+]
+
+const ANCIENS_LIBELLES: Record<string, string> = {
+  nb_clients_gros: 'Gros clients',
+  nb_clients_moyens: 'Clients moyens',
+  nb_clients_petits: 'Petits clients',
+}
+
+function normAgence(value: string | null | undefined) {
+  return String(value || '').toUpperCase().replace(/[\s'’-]+/g, '')
 }
 
 const EMPTY_DRAFT: ObjectifDraft = {
   ca_valeur: '',
   ca_evolution_pct: '',
   marge_evolution_pct: '',
+  marge_valeur: '',
   marge_par_famille: [],
   ca_par_famille: [],
-  nb_clients_gros: '',
-  nb_clients_moyens: '',
-  nb_clients_petits: '',
+  nb_clients_t400: '',
+  nb_clients_t200: '',
+  nb_clients_t100: '',
+  nb_clients_t50: '',
+  nb_clients_t20: '',
+  anciens_profils: [],
   zero_impaye: false,
   zero_impaye_tolerance: '',
   commentaire: '',
@@ -166,7 +220,7 @@ function formatPct(value: number | null, digits = 1) {
 
 /** Reconstruit un brouillon d'objectif à partir des lignes brutes d'un périmètre. */
 function draftFromRows(rows: ObjectifRow[]): ObjectifDraft {
-  const draft: ObjectifDraft = { ...EMPTY_DRAFT, marge_par_famille: [], ca_par_famille: [] }
+  const draft: ObjectifDraft = { ...EMPTY_DRAFT, marge_par_famille: [], ca_par_famille: [], anciens_profils: [] }
   let commentaire = ''
   rows.forEach((row) => {
     if (row.commentaire) commentaire = row.commentaire
@@ -176,6 +230,10 @@ function draftFromRows(rows: ObjectifRow[]): ObjectifDraft {
       } else {
         draft.marge_evolution_pct = String(row.valeur_cible)
       }
+      return
+    }
+    if (row.type_objectif in ANCIENS_LIBELLES) {
+      draft.anciens_profils.push({ type: row.type_objectif, valeur: row.valeur_cible })
       return
     }
     if (row.type_objectif === 'zero_impaye_45j') {
@@ -295,6 +353,9 @@ export default function ObjectifsPage() {
   const [saving, setSaving] = useState(false)
   const [toast, setToast] = useState<ToastState>(null)
   const [impayes, setImpayes] = useState<ImpayesInfo | null>(null)
+  const [collabsRef, setCollabsRef] = useState<CollabRef[]>([])
+  const [tranchesReel, setTranchesReel] = useState<TrancheReel[] | null>(null)
+  const [tranchesInfo, setTranchesInfo] = useState<string>('')
 
   useEffect(() => {
     if (!toast) return
@@ -305,14 +366,23 @@ export default function ObjectifsPage() {
   async function loadAll(targetAnnee: number) {
     setLoading(true)
 
-    const [{ data: objData, error: objError }, { data: userData, error: userError }] = await Promise.all([
+    const [{ data: objData, error: objError }, { data: userData, error: userError }, { data: rcData }] = await Promise.all([
       supabase.from('objectifs_commerciaux').select('*').eq('annee', targetAnnee),
+      supabase.from('ref_collaborateurs').select('nom, agence, mise_en_sommeil'),
       supabase
         .from('user_page_access')
         .select('email, display_name, agence_objectif, collaborateur_objectif, allowed_collaborateurs')
         .eq('soumis_objectif', true)
         .order('display_name', { ascending: true }),
     ])
+
+    setCollabsRef(((rcData || []) as any[])
+      .map((row) => ({
+        code: String(row.nom || '').trim().toUpperCase(),
+        agence: String(row.agence || '').trim(),
+        sommeil: !!row.mise_en_sommeil,
+      }))
+      .filter((row) => row.code && row.agence))
 
     if (objError || userError) {
       setToast({ tone: 'error', text: `Chargement impossible : ${objError?.message || userError?.message}` })
@@ -371,11 +441,23 @@ export default function ObjectifsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [annee])
 
-  // Liste des agences = agences distinctes déclarées sur les commerciaux soumis à objectif.
+  // Liste des agences = agences des commerciaux soumis à objectif + agences
+  // actives de la fiche collaborateur (ref_collaborateurs) + agences ayant déjà
+  // des objectifs (ex. PERIGUEUX même sans commercial soumis à objectif).
   const agences = useMemo(() => {
-    const set = new Set(usersObjectif.map((user) => user.agence_objectif).filter(Boolean))
-    return Array.from(set).sort((a, b) => a.localeCompare(b, 'fr'))
-  }, [usersObjectif])
+    const byKey = new Map<string, string>()
+    const add = (name: string | null | undefined) => {
+      const label = String(name || '').trim()
+      if (!label) return
+      const key = normAgence(label)
+      if (['NONAFFECTE', 'NULL'].includes(key)) return
+      if (!byKey.has(key)) byKey.set(key, label)
+    }
+    usersObjectif.forEach((user) => add(user.agence_objectif))
+    objectifs.filter((row) => row.perimetre_type === 'agence').forEach((row) => add(row.perimetre_ref))
+    collabsRef.filter((c) => !c.sommeil).forEach((c) => add(c.agence))
+    return Array.from(byKey.values()).sort((a, b) => a.localeCompare(b, 'fr'))
+  }, [usersObjectif, objectifs, collabsRef])
 
   const commerciauxSansAgence = useMemo(
     () => usersObjectif.filter((user) => !user.agence_objectif),
@@ -383,8 +465,26 @@ export default function ObjectifsPage() {
   )
 
   function commerciauxDe(agence: string) {
-    return usersObjectif.filter((user) => user.agence_objectif === agence)
+    return usersObjectif.filter((user) => normAgence(user.agence_objectif) === normAgence(agence))
   }
+
+  /** Codes SAGE d'une agence : collaborateurs actifs de la fiche collaborateur + commerciaux soumis à objectif. */
+  function codesAgence(agence: string) {
+    const set = new Set<string>()
+    collabsRef.filter((c) => !c.sommeil && normAgence(c.agence) === normAgence(agence)).forEach((c) => set.add(c.code))
+    commerciauxDe(agence).forEach((u) => u.code && set.add(u.code))
+    return Array.from(set)
+  }
+
+  /** Agence d'un commercial et indicateur « seul commercial de son agence ». */
+  const agenceUnique = useMemo(() => {
+    if (selected.type !== 'commercial') return null
+    const user = usersObjectif.find((u) => u.email === selected.ref)
+    if (!user || !user.agence_objectif) return null
+    const nb = commerciauxDe(user.agence_objectif).length
+    return nb === 1 ? user.agence_objectif : null
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, usersObjectif])
 
   function rowsFor(perimetre: Perimetre) {
     const ref = perimetre.type === 'entreprise' ? null : perimetre.ref
@@ -402,6 +502,51 @@ export default function ObjectifsPage() {
     )
     return row ? row.valeur_cible : null
   }
+
+  useEffect(() => {
+    let cancelled = false
+    setTranchesReel(null)
+    setTranchesInfo('')
+    let codes: string[] | null = null
+    if (selected.type === 'commercial') {
+      const code = usersObjectif.find((u) => u.email === selected.ref)?.code
+      if (!code) {
+        setTranchesInfo('Code collaborateur SAGE non renseigné (écran Autorisations) : réel non calculable.')
+        return
+      }
+      codes = [code]
+    } else if (selected.type === 'agence') {
+      codes = codesAgence(selected.ref)
+      if (codes.length === 0) {
+        setTranchesInfo('Aucun collaborateur rattaché à cette agence dans la fiche collaborateur.')
+        return
+      }
+    }
+    const now = new Date()
+    const moisClos = annee < now.getFullYear() ? 12 : annee > now.getFullYear() ? 0 : now.getMonth()
+    void supabase
+      .rpc('get_suivi_profil_clients', { p_annee: annee, p_mois_clos: moisClos, p_codes: codes, p_familles: null })
+      .then(({ data, error }) => {
+        if (cancelled) return
+        if (error || !data) {
+          setTranchesInfo(error ? `Réel indisponible : ${error.message}` : '')
+          return
+        }
+        const raw = data as any
+        setTranchesReel(((raw.tranches || []) as any[]).map((t) => ({
+          code: String(t.code),
+          libelle: String(t.libelle),
+          g12: Number(t.g12?.nb) || 0,
+          g12n1: Number(t.g12n1?.nb) || 0,
+          n1: Number(t.n1?.nb) || 0,
+        })))
+        setTranchesInfo(`Réel = clients par tranche de CA sur 12 mois glissants à fin ${moisClos >= 1 ? ['', 'janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'][moisClos] : '—'} ${annee}.`)
+      })
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, annee, usersObjectif, collabsRef])
 
   useEffect(() => {
     setDraft(draftFromRows(rowsFor(selected)))
@@ -627,7 +772,13 @@ export default function ObjectifsPage() {
                               <PerimetreButton
                                 active={selected.type === 'agence' && selected.ref === agence}
                                 label={agence}
-                                sub={`${commerciaux.length} commercial${commerciaux.length > 1 ? 'aux' : ''}`}
+                                sub={
+                                  commerciaux.length === 0
+                                    ? 'aucun commercial soumis à objectif'
+                                    : commerciaux.length === 1
+                                    ? '1 commercial · objectifs partagés'
+                                    : `${commerciaux.length} commerciaux`
+                                }
                                 onClick={() => selectPerimetre({ type: 'agence', ref: agence, label: agence })}
                               />
                             </div>
@@ -699,6 +850,42 @@ export default function ObjectifsPage() {
                 </Eyebrow>
                 <h2 className="mt-1 text-xl font-bold text-slate-900">{selected.label}</h2>
 
+                {agenceUnique && (
+                  <div className="mt-3 flex flex-wrap items-center gap-3 rounded-xl border border-[#E7D3A8] bg-[#FDF7EA] px-4 py-3 text-[13px] text-[#6B470E]">
+                    <span className="flex-1">
+                      Seul commercial de l’agence <b>{agenceUnique}</b> : les objectifs de l’agence s’appliquent à lui (repris automatiquement dans le suivi
+                      pour tout objectif qu’il n’a pas en propre).
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const rows = rowsFor({ type: 'agence', ref: agenceUnique, label: agenceUnique })
+                        if (rows.length === 0) {
+                          setToast({ tone: 'error', text: `Aucun objectif ${annee} saisi pour l’agence ${agenceUnique}.` })
+                          return
+                        }
+                        setDraft(draftFromRows(rows))
+                        setToast({ tone: 'success', text: `Objectifs de ${agenceUnique} recopiés : enregistrez pour les fixer sur ce commercial.` })
+                      }}
+                      className="rounded-lg border border-[#B4761A] bg-white px-3 py-1.5 text-xs font-semibold text-[#8A5A11] hover:bg-[#FDF7EA]"
+                    >
+                      Reprendre les objectifs de l’agence
+                    </button>
+                  </div>
+                )}
+                {selected.type === 'agence' && commerciauxDe(selected.ref).length === 1 && (
+                  <div className="mt-3 rounded-xl border border-[#E7D3A8] bg-[#FDF7EA] px-4 py-3 text-[13px] text-[#6B470E]">
+                    Agence à un seul commercial ({commerciauxDe(selected.ref)[0].display_name || commerciauxDe(selected.ref)[0].email}) : ces objectifs
+                    s’appliquent aussi à lui dans le suivi, sauf objectif fixé en propre sur sa fiche.
+                  </div>
+                )}
+                {selected.type === 'agence' && commerciauxDe(selected.ref).length === 0 && (
+                  <div className="mt-3 rounded-xl border border-[#E2DFD8] bg-[#FAF9F7] px-4 py-3 text-[12px] text-slate-600">
+                    Aucun commercial n’est « soumis à objectif » dans cette agence. Pour suivre un commercial, cochez « Soumis à objectif » et
+                    l’agence de rattachement sur sa fiche (écran Autorisations → Utilisateurs).
+                  </div>
+                )}
+
                 <div className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-2">
                   <ObjectifFieldGroup title="Chiffre d’affaires">
                     <ObjectifInput
@@ -722,28 +909,29 @@ export default function ObjectifsPage() {
                     />
                   </ObjectifFieldGroup>
 
-                  <ObjectifFieldGroup title="Structure clients (profil CA 12 mois glissants)">
-                    <ObjectifInput
-                      label={TYPE_OBJECTIF_DEFS.nb_clients_gros.label}
-                      unit="clients"
-                      value={draft.nb_clients_gros}
-                      onChange={(value) => setDraft((current) => ({ ...current, nb_clients_gros: value }))}
-                      real={real ? formatNumber(real.nb_clients_gros) : undefined}
-                    />
-                    <ObjectifInput
-                      label={TYPE_OBJECTIF_DEFS.nb_clients_moyens.label}
-                      unit="clients"
-                      value={draft.nb_clients_moyens}
-                      onChange={(value) => setDraft((current) => ({ ...current, nb_clients_moyens: value }))}
-                      real={real ? formatNumber(real.nb_clients_moyens) : undefined}
-                    />
-                    <ObjectifInput
-                      label={TYPE_OBJECTIF_DEFS.nb_clients_petits.label}
-                      unit="clients"
-                      value={draft.nb_clients_petits}
-                      onChange={(value) => setDraft((current) => ({ ...current, nb_clients_petits: value }))}
-                      real={real ? formatNumber(real.nb_clients_petits) : undefined}
-                    />
+                  <ObjectifFieldGroup title="Nombre de clients par tranche de CA (12 mois glissants)">
+                    {TRANCHES.map(({ key, code }) => {
+                      const reel = tranchesReel?.find((t) => t.code === code)
+                      return (
+                        <ObjectifInput
+                          key={key}
+                          label={TYPE_OBJECTIF_DEFS[key].label}
+                          unit="clients"
+                          value={draft[key]}
+                          onChange={(value) => setDraft((current) => ({ ...current, [key]: value }))}
+                          real={reel ? `${formatNumber(reel.g12)} (12 MG)` : undefined}
+                          realN1={reel ? `${formatNumber(reel.g12n1)}` : undefined}
+                        />
+                      )
+                    })}
+                    {tranchesInfo && <p className="text-[11px] text-slate-500">{tranchesInfo}</p>}
+                    {draft.anciens_profils.length > 0 && (
+                      <div className="rounded-lg border border-[#E7D3A8] bg-[#FDF7EA] px-3 py-2 text-[12px] text-[#6B470E]">
+                        Ancienne segmentation, à ressaisir dans les tranches ci-dessus :{' '}
+                        {draft.anciens_profils.map((a) => `${ANCIENS_LIBELLES[a.type] || a.type} ${formatNumber(a.valeur)}`).join(' · ')}. Elle sera
+                        supprimée au prochain enregistrement.
+                      </div>
+                    )}
                   </ObjectifFieldGroup>
                 </div>
 
@@ -887,8 +1075,19 @@ export default function ObjectifsPage() {
                 <div className="mt-5">
                   <ObjectifFieldGroup title="Marge">
                     <ObjectifInput
-                      label="Évolution de la marge globale"
-                      unit="%"
+                      label={TYPE_OBJECTIF_DEFS.marge_valeur.label}
+                      unit="€"
+                      value={draft.marge_valeur}
+                      onChange={(value) => setDraft((current) => ({ ...current, marge_valeur: value }))}
+                    />
+                    {Math.abs(numOrNull(draft.marge_evolution_pct) ?? 0) > 50 && (
+                      <p className="rounded-lg bg-[#FBE9E9] px-3 py-1.5 text-[12px] text-[#A32C2C]">
+                        « Évolution du taux de marge » est en points (ex. +1,5). Pour un montant de marge en euros, utilisez « Marge en valeur ».
+                      </p>
+                    )}
+                    <ObjectifInput
+                      label="Évolution du taux de marge (points)"
+                      unit="pt"
                       value={draft.marge_evolution_pct}
                       onChange={(value) => setDraft((current) => ({ ...current, marge_evolution_pct: value }))}
                       real={
