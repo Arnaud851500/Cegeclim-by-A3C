@@ -368,12 +368,12 @@ export default function ObjectifsPage() {
 
     const [{ data: objData, error: objError }, { data: userData, error: userError }, { data: rcData }] = await Promise.all([
       supabase.from('objectifs_commerciaux').select('*').eq('annee', targetAnnee),
-      supabase.from('ref_collaborateurs').select('nom, agence, mise_en_sommeil'),
       supabase
         .from('user_page_access')
         .select('email, display_name, agence_objectif, collaborateur_objectif, allowed_collaborateurs')
         .eq('soumis_objectif', true)
         .order('display_name', { ascending: true }),
+      supabase.from('ref_collaborateurs').select('nom, agence, mise_en_sommeil'),
     ])
 
     setCollabsRef(((rcData || []) as any[])
