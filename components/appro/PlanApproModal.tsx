@@ -19,6 +19,11 @@
  *
  * Moteur de calcul : lib/planAppro.ts. Migration : supabase/sql/20261006_plan_appro_operation.sql.
  * Le plan est une simulation : rien n'est écrit dans SAGE / BLG.
+ *
+ * 13/10/2026 — tableau « Plan d'appro par référence » : ligne « Encours fournisseurs »
+ * (quantités à réceptionner, sommées par mois de réception estimée ; retards ramenés au
+ * mois en cours, « douteux » exclus, comme dans la projection) — en total sélection et
+ * sous chaque référence qui a de l'encours sur l'horizon (bouton « Encours » pour masquer).
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
@@ -263,6 +268,7 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
   const [consigneParRef, setConsigneParRef] = useState(true)
   const [voirChainages, setVoirChainages] = useState(false)
   const [voirDemande, setVoirDemande] = useState(true)
+  const [voirEncours, setVoirEncours] = useState(true)
   const [refOuverte, setRefOuverte] = useState<string | null>(null)
   const [triRef, setTriRef] = useState<'rupture' | 'reference' | 'valeur'>('rupture')
 
@@ -918,6 +924,7 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
               <h3 className="text-[13px] font-bold text-[#111820]">Plan d’appro par référence</h3>
               <span className="text-[11px] text-[#8A8474]">Saisie dans les mois violets (une livraison par mois). « ▸ Demande » : ventes N-1, références chaînées (ajout, %), coefficient, commandes fermes. Ligne « Couv./Stock » = situation au dernier jour du mois — rouge : rupture (! = en cours de mois), orange : sous la consigne, bleu : plus de 2 × la consigne.</span>
               <div className="ml-auto flex items-center gap-1">
+                <button type="button" onClick={() => setVoirEncours((v) => !v)} className={puce(voirEncours)} title="Afficher la ligne « Encours fourn. » sous chaque référence qui a de l’encours">Encours</button>
                 {(['stock', 'couverture', 'valeur'] as Lecture[]).map((l) => (
                   <button key={l} type="button" onClick={() => setLecture(l)} className={puce(lecture === l)}>{l === 'stock' ? 'Qté' : l === 'couverture' ? 'Mois' : '€'}</button>
                 ))}
@@ -943,6 +950,13 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
                     <td className="px-2 py-1 text-right font-bold">{fmtNum(syntheses.totalPlan)}</td>
                     <td className="px-2 py-1 text-right font-bold">{fmtK(syntheses.valeurPlan)}</td>
                   </tr>
+                  <tr className="bg-[#1B3A2C] text-white">
+                    <td className="sticky left-0 z-30 bg-[#1B3A2C] px-2 py-1 normal-case" />
+                    <td className="px-1.5 py-1 normal-case" title="Quantités à réceptionner des commandes fournisseurs en cours, par mois de réception estimée (retards ramenés au mois en cours, encours douteux exclus)">Encours fourn.</td>
+                    {agregat.map((m) => <td key={m.mois} className="px-1.5 py-1 text-right font-bold tabular-nums text-[#A9D3A0]">{m.encours ? fmtNum(m.encours) : ''}</td>)}
+                    <td className="px-2 py-1 text-right font-bold text-[#A9D3A0]">{syntheses.encoursTotal ? fmtNum(syntheses.encoursTotal) : ''}</td>
+                    <td />
+                  </tr>
                   <tr className="bg-[#252E3D] text-white">
                     <td className="sticky left-0 z-30 bg-[#252E3D] px-2 py-1 normal-case" />
                     <td className="px-1.5 py-1 normal-case">{lecture === 'stock' ? 'Stock fin' : lecture === 'couverture' ? 'Couverture' : 'Valeur stock'}</td>
@@ -957,12 +971,14 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
                     const chainesRef = chainages.filter((c) => c.cible === cleRef(a.ref) && c.source.trim())
                     const pctCede = pr.mois[0]?.pctCede || 0
                     const afficheDemande = voirDemande || ouverte
-                    const nbDetail = ouverte ? 1 + chainesRef.length + (chainesRef.length || pctCede ? 1 : 0) + 3 + 1 + 1 : 0
+                    const nbDetail = ouverte ? 1 + chainesRef.length + (chainesRef.length || pctCede ? 1 : 0) + 2 + 1 + 1 : 0
+                    const totalEncours = pr.mois.reduce((s2, l) => s2 + l.encours, 0)
+                    const afficheEncours = voirEncours && totalEncours > 0
                     const n1 = params.baseDemande === 'n1'
                     return (
                       <React.Fragment key={a.ref}>
                         <tr className="bg-white">
-                          <td rowSpan={2 + (afficheDemande ? 1 : 0) + (hypoParRef ? 1 : 0) + (consigneParRef ? 1 : 0) + nbDetail} className="sticky left-0 z-10 border-t border-[#E5E1D8] bg-white px-2 py-1 align-top">
+                          <td rowSpan={2 + (afficheEncours ? 1 : 0) + (afficheDemande ? 1 : 0) + (hypoParRef ? 1 : 0) + (consigneParRef ? 1 : 0) + nbDetail} className="sticky left-0 z-10 border-t border-[#E5E1D8] bg-white px-2 py-1 align-top">
                             <button type="button" onClick={() => setRefOuverte(ouverte ? null : a.ref)} className="text-left">
                               <div className="font-bold text-[#111820] hover:underline">{a.ref}</div>
                               <div className="max-w-[220px] truncate text-[10.5px] text-[#8A8474]" title={a.designation || ''}>{a.designation || '—'}</div>
@@ -984,12 +1000,20 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
                             <td key={l.mois} className={`border-t border-[#E5E1D8] px-0.5 py-0.5 text-right ${fenetre.has(l.mois) ? 'bg-[#F6F2FB]' : ''}`}>
                               {fenetre.has(l.mois)
                                 ? <CelluleSaisie valeur={plan[clePlan(a.ref, l.mois)] ?? null} onCommit={(v) => setQtePlan(a.ref, l.mois, v)} className="w-14 font-bold text-[#5B4387]" />
-                                : l.plan > 0 ? <span className="pr-1 font-bold text-[#5B4387]">{fmtNum(l.plan)}</span> : l.encours > 0 ? <span className="pr-1 text-[10.5px] text-emerald-700" title="Encours fournisseurs">+{fmtNum(l.encours)}</span> : null}
+                                : l.plan > 0 ? <span className="pr-1 font-bold text-[#5B4387]">{fmtNum(l.plan)}</span> : !afficheEncours && l.encours > 0 ? <span className="pr-1 text-[10.5px] text-emerald-700" title="Encours fournisseurs">+{fmtNum(l.encours)}</span> : null}
                             </td>
                           ))}
                           <td className="border-t border-[#E5E1D8] px-2 py-0.5 text-right font-bold text-[#5B4387]">{pr.totalPlan ? fmtNum(pr.totalPlan) : ''}</td>
                           <td className="border-t border-[#E5E1D8] px-2 py-0.5 text-right">{pr.valeurPlan ? fmtK(pr.valeurPlan) : ''}</td>
                         </tr>
+                        {afficheEncours && (
+                          <tr className="text-emerald-700">
+                            <td className="px-1.5 py-0.5 font-semibold" title="Quantités à réceptionner des commandes fournisseurs en cours, par mois de réception estimée (retards ramenés au mois en cours, encours douteux exclus)">Encours fourn.</td>
+                            {pr.mois.map((l) => <td key={l.mois} className="px-1.5 py-0.5 text-right font-semibold tabular-nums">{l.encours ? fmtNum(l.encours) : ''}</td>)}
+                            <td className="px-2 py-0.5 text-right font-semibold">{fmtNum(totalEncours)}</td>
+                            <td />
+                          </tr>
+                        )}
                         <tr>
                           <td className="px-1.5 py-0.5 text-[#3A362E]">{lecture === 'stock' ? 'Stock fin' : lecture === 'couverture' ? 'Couv. (mois)' : 'Valeur'}</td>
                           {pr.mois.map((l) => <td key={l.mois} className={`px-1.5 py-0.5 text-right font-semibold tabular-nums ${tonStock(l)}`} title={titreStock(l)}>{cellLecture(l)}{l.pointBas < 0 && l.stockFin >= 0 ? <sup className="text-red-700" title={`Rupture en cours de mois : point bas ${fmtNum(l.pointBas)} le ${l.jourPointBas}`}>!</sup> : null}</td>)}
@@ -1076,11 +1100,6 @@ export default function PlanApproModal({ articles: articlesEntree, groupe, aujou
                             <tr className="bg-[#FFFBF3] text-[10.5px] text-[#B42318]">
                               <td className="px-1.5 py-0.5" title="Réservé SAGE daté : plancher de la demande du mois (demande = le plus grand des deux)">Commandes fermes</td>
                               {pr.mois.map((l) => <td key={l.mois} className="px-1.5 py-0.5 text-right tabular-nums">{l.ferme ? fmtNum(l.ferme) : ''}</td>)}
-                              <td colSpan={2} />
-                            </tr>
-                            <tr className="text-[10.5px] text-emerald-700">
-                              <td className="px-1.5 py-0.5">Encours fournisseurs</td>
-                              {pr.mois.map((l) => <td key={l.mois} className="px-1.5 py-0.5 text-right tabular-nums">{l.encours ? fmtNum(l.encours) : ''}</td>)}
                               <td colSpan={2} />
                             </tr>
                             <tr className="text-[10.5px] text-[#3A362E]">
