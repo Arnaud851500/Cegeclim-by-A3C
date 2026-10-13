@@ -41,8 +41,8 @@
  *     choisit les colonnes SAGE / BLG affichées). Choix mémorisé dans le navigateur ;
  *     les champs filtrés peuvent être ajoutés automatiquement (option).
  *   - Poids : contrôlé uniquement pour les références MyStock = OUI (SAGE) ou tag FMS
- *     (BLG) — poids obligatoire (ni vide ni 0) des deux côtés et identique ; les
- *     autres références sont « Non concerné ».
+ *     (BLG) — écart uniquement si le poids BLG est vide ou à 0 (poids SAGE affiché,
+ *     non comparé) ; les autres références sont « Non concerné ».
  * ÉVOLUTION (2026-09-25) : vue « Nomenclatures » (sélecteur Articles / Nomenclatures,
  *   dans les trois onglets) — un bloc par article chapeau avec ses paramètres, puis ses
  *   composants : quantités, PA net / PV (unitaires et × quantité), sommeil / archive,
@@ -1116,15 +1116,14 @@ function estMyStock(r: Row): boolean {
   return Boolean(r.sage_mystock_oui) || Boolean(r.blg_tag_fms_bool)
 }
 
-/** Poids (règle du 13/10/2026) : seules les références MyStock / FMS doivent
- * porter un poids renseigné (ni vide ni 0), des deux côtés et identique à 10 g
- * près. Les autres références ne sont pas contrôlées (« Non concerné »). */
+/** Poids (règle du 13/10/2026, précisée par Arnaud) : seules les références
+ * MyStock / FMS sont contrôlées, et uniquement côté BLG — écart si le poids BLG
+ * est vide ou à 0. Le poids SAGE est affiché pour information, non comparé.
+ * Les autres références ne sont pas contrôlées (« Non concerné »). */
 function comparerPoids(r: Row): ResultatComparaison {
   if (!estMyStock(r)) return 'non_concerne'
-  const s = toNum(r.sage_poids) ?? 0
   const b = toNum(r.blg_poids) ?? 0
-  if (s === 0 || b === 0) return 'ecart'
-  return Math.abs(s - b) <= 0.011 ? 'ok' : 'ecart'
+  return b > 0 ? 'ok' : 'ecart'
 }
 
 /** Paramétrage n° de série (règle du 13/10/2026) : un article SAGE rattaché en
@@ -1189,6 +1188,7 @@ const PAIRES: PaireArticle[] = [
   { groupe: 'Statut et blocages', labelSage: 'MyStock', sageKey: 'sage_mystock', labelBlg: 'Tag FMS', blgKey: 'blg_tag_fms', compare: true, gereVides: true, comparer: (r) => (Boolean(r.sage_mystock_oui) === Boolean(r.blg_tag_fms_bool) ? 'ok' : 'ecart') },
   { groupe: 'Statut et blocages', labelSage: 'Interdire en commande', sageKey: 'sage_interdire_commande', labelBlg: 'Nature « Achat interdit »', blgKey: 'blg_achat_interdit', compare: true, gereVides: true, comparer: (r) => (Boolean(r.sage_interdire_commande_bool) === Boolean(r.blg_achat_interdit_bool) ? 'ok' : 'ecart') },
   { groupe: 'Statut et blocages', labelSage: 'En sommeil', sageKey: 'sage_sommeil', labelBlg: 'Archivé', blgKey: 'blg_archive', compare: true, gereVides: true, comparer: (r) => (Boolean(r.sage_en_sommeil) === Boolean(r.blg_archive_bool) ? 'ok' : 'ecart') },
+  { groupe: 'Statut et blocages', labelSage: 'Paramétrage n° de série', sageKey: 'sage_numero_serie', labelBlg: 'Nature · stock · n° de série', blgKey: 'blg_parametrage_serie', compare: true, gereVides: true, controleVides: true, comparer: comparerNumeroSerie },
   { groupe: 'Identification', labelSage: 'Substitut', sageKey: 'sage_substitut', labelBlg: 'Remplacé par', blgKey: 'blg_remplace_par', compare: true, comparer: (r) => (compact(r.sage_substitut) === compact(r.blg_remplace_par) ? 'ok' : 'ecart') },
   { groupe: 'Fournisseur', labelSage: 'Fournisseur principal', sageKey: 'sage_fournisseur', labelBlg: 'Fournisseur', blgKey: 'blg_fournisseur', compare: true, comparer: (r) => (compact(r.sage_fournisseur) === compact(r.blg_fournisseur) ? 'ok' : 'ecart') },
   { groupe: 'Fournisseur', labelSage: 'Réf. fournisseur', sageKey: 'sage_ref_fournisseur', labelBlg: 'Réf. fournisseur', blgKey: 'blg_ref_fournisseur', compare: true, comparer: (r) => (compact(r.sage_ref_fournisseur) === compact(r.blg_ref_fournisseur) ? 'ok' : 'ecart') },
@@ -1197,7 +1197,7 @@ const PAIRES: PaireArticle[] = [
   { groupe: 'Prix', labelSage: "Prix d'achat net", sageKey: 'sage_prix_net', labelBlg: "Prix d'achat net", blgKey: 'blg_prix_net', compare: true, comparer: (r) => comparerNombre(r.sage_prix_net, r.blg_prix_net, { tol: tolPrix }) },
   { groupe: 'Prix', labelSage: "Dernier prix d'achat", sageKey: 'sage_dernier_prix_achat', labelBlg: "Dernier prix d'achat", blgKey: 'blg_dernier_prix_achat', compare: true, comparer: (r) => comparerNombre(r.sage_dernier_prix_achat, r.blg_dernier_prix_achat, { tol: tolPrix }) },
   { groupe: 'Prix', labelSage: 'Prix de vente HT', sageKey: 'sage_prix_vente', labelBlg: 'Prix public Cegeclim', blgKey: 'blg_prix_vente', compare: true, gereVides: true, comparer: (r) => comparerNombre(r.sage_prix_vente, r.blg_prix_vente, { nullVaut: 0, tol: tolPrix }) },
-  { groupe: 'Caractéristiques', labelSage: 'Poids brut (kg) — MyStock', sageKey: 'sage_poids', labelBlg: 'Poids (kg)', blgKey: 'blg_poids', compare: true, gereVides: true, controleVides: true, comparer: comparerPoids },
+  { groupe: 'Caractéristiques', labelSage: 'Poids BLG — MyStock', sageKey: 'sage_poids', labelBlg: 'Poids (kg)', blgKey: 'blg_poids', compare: true, gereVides: true, controleVides: true, comparer: comparerPoids },
   { groupe: 'Caractéristiques', labelSage: 'Dimensions (HxLxP)', sageKey: 'sage_dimensions', labelBlg: 'Dimensions', blgKey: 'blg_dimensions', compare: true, comparer: (r) => comparerDimensions(r.sage_dimensions, r.blg_dimensions) },
   { groupe: 'Caractéristiques', labelSage: 'Catégorie fluide (HFC)', sageKey: 'sage_categorie_fluide', labelBlg: 'Catégorie fluide', blgKey: 'blg_categorie_fluide', compare: true, comparer: (r) => comparerCode(r.sage_categorie_fluide, r.blg_categorie_fluide, /^CATFLUIDE/) },
   { groupe: 'Caractéristiques', labelSage: "Type d'équipement", sageKey: 'sage_type_equipement', labelBlg: "Type d'équipement", blgKey: 'blg_type_equipement', compare: true, comparer: (r) => comparerCode(r.sage_type_equipement, r.blg_type_equipement, /^TYPEEQUIPMENT/) },
@@ -1712,11 +1712,12 @@ function OngletComparaison({ version }: { version: number }) {
             <li>Codes BLG (catFluideHfc410A, typeEquipmentClim, uoClassique) : préfixe retiré, une lettre d'écart tolérée.</li>
             <li>Prix : tolérance d'un centime (0,05 % au-delà de 20 €). Quand BLG n'a pas de prix tarif et que SAGE n'a pas de remise, le tarif SAGE est comparé au net BLG.</li>
             <li>Colisage et quantité mini : vide = 1. Stocks, prix de vente : vide = 0.</li>
-            <li>Poids : contrôlé uniquement sur les références MyStock = OUI (SAGE) ou tag « FMS » (BLG). Pour elles, le poids est obligatoire des deux côtés (ni vide ni 0) et identique à 10 g près, sinon écart. Les autres références sont « non concernées ».</li>
+            <li>Poids : contrôlé uniquement sur les références MyStock = OUI (SAGE) ou tag « FMS » (BLG). Pour elles, le poids BLG doit être renseigné (ni vide ni 0), sinon écart. Le poids SAGE est affiché pour information, il n'est pas comparé. Les autres références sont « non concernées ».</li>
             <li>Suivi de stock : « Aucun » SAGE ↔ gestion de stock vide BLG ; tout autre suivi ↔ gestion renseignée.</li>
             <li>Nomenclature : composants SAGE (sage.nomenclature) ↔ marques de la nomenclature BLG de même référence, ordre libre ; quantités différentes = orange.</li>
             <li>MyStock = OUI (SAGE) doit correspondre au tag « FMS » (BLG).</li>
             <li>Interdire en commande = Oui (SAGE) doit correspondre à une nature BLG « Classique - Achat interdit » ou « Parc - Achat interdit ».</li>
+            <li>Paramétrage n° de série : un article dont la nomenclature SAGE contient un article NUMEROSERIE (ou NUMEROSERIEAIRZONE) doit être dans BLG soit en nature « Parc … » avec gestion de stock « Matériel », soit en nature « Classique … » avec gestion de stock « Classique » et gestion des numéros de série « Obligatoire » ou « Facultatif ». Les autres articles sont « non concernés ».</li>
             <li>En sommeil (SAGE) doit correspondre à un article archivé dans BLG (champ BLG article_part.internal_tag = « archive »).</li>
             <li>Famille, statut et publication : affichés côte à côte, pas d'équivalence de codes entre SAGE et BLG.</li>
           </ul>
