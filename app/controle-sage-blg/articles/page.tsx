@@ -27,6 +27,14 @@
  * autre fournisseur). Certains articles BLG ont une référence principale vide dans
  * la synchro (ex. RAK-25PSE-S) : ils ne sont retrouvés que par leurs références actives.
  *
+ * ÉVOLUTION (2026-10-13, suite) : contrôle « Paramétrage n° de série ». Un article SAGE
+ *   dont la nomenclature contient un article NUMEROSERIE* (NUMEROSERIE, NUMEROSERIEAIRZONE)
+ *   doit être dans BLG soit nature « Parc … » + gestion de stock Matériel (equipment),
+ *   soit nature « Classique … » + gestion de stock Classique (part) + gestion des numéros
+ *   de série Obligatoire ou Facultatif (article_part.serial_numbers_management_type
+ *   mandatory / optional). Colonnes ajoutées à v_controle_article_sage_blg (migration
+ *   controle_article_numero_serie) : sage_numero_serie, blg_numeros_serie_type,
+ *   blg_parametrage_serie.
  * ÉVOLUTION (2026-10-13) :
  *   - Comparaison : sélecteur « Champs affichés » dans la liste du bas, indépendant
  *     des pastilles de filtre (les pastilles filtrent les articles, le sélecteur
@@ -1117,6 +1125,22 @@ function comparerPoids(r: Row): ResultatComparaison {
   const b = toNum(r.blg_poids) ?? 0
   if (s === 0 || b === 0) return 'ecart'
   return Math.abs(s - b) <= 0.011 ? 'ok' : 'ecart'
+}
+
+/** Paramétrage n° de série (règle du 13/10/2026) : un article SAGE rattaché en
+ * nomenclature à un article NUMEROSERIE* doit être dans BLG
+ *  - soit nature « Parc … » + gestion de stock Matériel,
+ *  - soit nature « Classique … » + gestion de stock Classique + gestion des
+ *    numéros de série Obligatoire ou Facultatif.
+ * Les autres articles ne sont pas concernés. */
+function comparerNumeroSerie(r: Row): ResultatComparaison {
+  if (estVide(r.sage_numero_serie)) return 'non_concerne'
+  const nature = normaliserTexte(r.blg_nature)
+  const stock = safeText(r.blg_gestion_stock)
+  const serie = safeText(r.blg_numeros_serie_type)
+  if (nature.startsWith('PARC') && stock === 'equipment') return 'ok'
+  if (nature.startsWith('CLASSIQUE') && stock === 'part' && (serie === 'mandatory' || serie === 'optional')) return 'ok'
+  return 'ecart'
 }
 
 function comparerGestionStock(r: Row): ResultatComparaison {
