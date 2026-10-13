@@ -34,6 +34,23 @@ import { CDC_RETARD_LABEL, getCdcRetardDescription, getCdcRetardThresholdIso } f
 // - Le contrôle d'accès (/unauthorized) et le titre de page lisent la même
 //   arborescence.
 import { AlertsContext, type AlertItem } from '@/components/AlertsContext'
+// ÉVOLUTION (2026-10-13) : bandeau PC réorganisé (demande Arnaud).
+// - les pastilles d'alerte quittent le bandeau : les compteurs s'affichent en
+//   grand dans le bloc « Mes alertes » de l'accueil ; il reste ici un bouton
+//   compact « Mes alertes » (nombre d'alertes à traiter) qui ouvre le Centre
+//   d'alertes depuis n'importe quel écran ;
+// - la place libérée accueille le fil d'actualité défilant
+//   (components/actualites/NewsTicker.tsx, écran /actualites) ;
+// - en haut à droite : « Nouveau dans votre compagnon » (icône clignotante,
+//   fenêtre des nouveautés) et le sélecteur de thème Clair / Sombre ;
+// - thème : les couleurs du bandeau, du volet Arborescence et des fenêtres
+//   passent par themed()/tc() (lib/theme.ts). Le bandeau suit le choix de
+//   l'utilisateur ; la zone de contenu ne passe en clair que pour les écrans
+//   déjà adaptés (LIGHT_READY_PATHS), les autres restent sombres.
+import { ThemeProvider, ThemeToggle, useTheme } from '@/components/ThemeContext'
+import { isLightReadyPath, tc, themed } from '@/lib/theme'
+import NewsTicker from '@/components/actualites/NewsTicker'
+import NouveautesButton from '@/components/actualites/NouveautesButton'
 // ÉVOLUTION (2026-09-15 soir) : Centre d'alertes.
 // - nouvelle pastille « Commande non complète à la date de livraison client »
 //   (ex-« Non servables », renommée le 2026-09-16) = CDC dont au moins une
@@ -76,19 +93,6 @@ const INSTALLER_PATH = '/installer'
 const COUVERTURE_ALERT_LABEL = 'Cde non complète à la date liv client'
 
 type StatusLevel = 'red' | 'orange' | 'green'
-
-type StatusLightProps = {
-  label: string
-  status: StatusLevel
-  count?: number
-  blink?: boolean
-  clickable?: boolean
-  onClick?: () => void
-  title?: string
-  compact?: boolean
-  /** Libellé long : autorise le retour à la ligne (2 lignes max) dans le bandeau. */
-  multiline?: boolean
-}
 
 type UserAccessProfile = {
   email?: string | null
@@ -204,63 +208,6 @@ type DataCoherenceMonthRow = {
   mois: number
   issues: string[]
   ecartMax: number
-}
-
-function StatusLight({
-  label,
-  status,
-  count,
-  blink = false,
-  clickable = false,
-  onClick,
-  title,
-  compact = false,
-  multiline = false,
-}: StatusLightProps) {
-  const isRed = status === 'red'
-  const isOrange = status === 'orange'
-
-  const shellStyle = {
-    ...styles.statusCard,
-    ...(isRed ? styles.statusCardRed : isOrange ? styles.statusCardOrange : styles.statusCardGreen),
-    ...(blink ? styles.statusCardBlink : {}),
-    ...(compact ? styles.statusCardCompact : {}),
-    cursor: clickable ? 'pointer' : 'default',
-  } as React.CSSProperties
-
-  const lightStyle = {
-    ...styles.statusLightDot,
-    ...(isRed ? styles.statusLightDotRed : isOrange ? styles.statusLightDotOrange : styles.statusLightDotGreen),
-    ...(blink ? styles.statusLightDotBlink : {}),
-  } as React.CSSProperties
-
-  const badgeStyle = {
-    ...styles.statusBadge,
-    ...(isRed ? styles.statusBadgeRed : isOrange ? styles.statusBadgeOrange : styles.statusBadgeGreen),
-  } as React.CSSProperties
-
-  const labelStyle = {
-    ...styles.statusCardLabel,
-    ...(multiline ? styles.statusCardLabelMultiline : {}),
-  } as React.CSSProperties
-
-  return (
-    <button
-      type="button"
-      className="cgcAlerte"
-      onClick={clickable ? onClick : undefined}
-      style={shellStyle}
-      title={title || (clickable ? `Ouvrir ${label}` : `${label} : rien à traiter`)}
-    >
-      <span style={lightStyle} />
-      <span style={labelStyle}>{label}</span>
-      {typeof count === 'number' && count > 0 ? (
-        <span style={badgeStyle}>{count}</span>
-      ) : (
-        <span style={styles.statusOkText}>OK</span>
-      )}
-    </button>
-  )
 }
 
 // ── Volet « Arborescence » ────────────────────────────────────────────
@@ -530,7 +477,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const [treeOpen, setTreeOpen] = useState(false)
   const [sessionChecked, setSessionChecked] = useState(false)
   const [hasSession, setHasSession] = useState(false)
-  const [statusBlinkOn, setStatusBlinkOn] = useState(true)
   const [pageFloatingLayerOpen, setPageFloatingLayerOpen] = useState(false)
   const [headerHiddenForScroll, setHeaderHiddenForScroll] = useState(false)
   const [todoSignal, setTodoSignal] = useState<TodoSignal>({ status: 'green', count: 0 })
@@ -641,6 +587,12 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const visibleBlocs = useMemo(() => getVisibleBlocs(rights), [rights])
   const activeEntry = useMemo(() => findActivePage(pathname), [pathname])
   const isAccueilPage = pathname === ACCUEIL_PATH
+
+  // Thème (13/10/2026) : le bandeau et les fenêtres suivent le choix de
+  // l'utilisateur ; la zone de contenu ne passe en clair que sur les écrans
+  // adaptés (lib/theme.ts → LIGHT_READY_PATHS).
+  const { theme } = useTheme()
+  const contentTheme = isLightReadyPath(pathname) ? theme : 'dark'
 
   const backgroundImageUrl =
     'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Logo%20et%20images/Image%20site%20CEGECLIM%20maison.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJMb2dvIGV0IGltYWdlcy9JbWFnZSBzaXRlIENFR0VDTElNIG1haXNvbi5qcGciLCJpYXQiOjE3NzU1MDYyNTEsImV4cCI6NDg5NzU3MDI1MX0.d1YT7_-xD44QOm2LFbZIfpkjh9kiIGjpJiEuJxV0rMM'
@@ -895,13 +847,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
     })
   }, [sessionChecked, hasSession, email, pathname, isLoginPage, isPdfPrintPage])
 
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setStatusBlinkOn((prev) => !prev)
-    }, 1200)
-
-    return () => clearInterval(interval)
-  }, [])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -1965,17 +1910,22 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
     refresh: () => void refreshStatusIndicators({ force: true }),
   }
 
+  // Bandeau (13/10/2026) : fil d'actualité à la place des pastilles d'alerte.
+  const showNewsTicker = hasSession && !isFinancementOnly
+  const alertsActiveCount = alertsContextValue.activeCount
+
   return (
     <AlertsContext.Provider value={alertsContextValue}>
     <div
+      data-theme={contentTheme}
       style={{
         ...styles.app,
-        backgroundImage: `linear-gradient(rgba(11,18,32,0.965), rgba(11,18,32,0.985)), url("${backgroundImageUrl}")`,
+        backgroundImage: `var(--cg-app-veil), url("${backgroundImageUrl}")`,
       }}
     >
       <AutoLogout />
 
-      <style>{`
+      <style>{tc(`
         .cgcAlerte:hover { border-color: rgba(255,255,255,0.24); filter: brightness(1.12); }
         .cgcLogout:hover { color: #fff; border-color: rgba(255,255,255,0.4); background: rgba(255,255,255,0.05); }
         .cgcMenuBtn:hover { background: rgba(166,161,129,0.22); color: #fff; border-color: rgba(166,161,129,0.7); }
@@ -1988,7 +1938,7 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
         .cgcAlertCard:not(:disabled):hover { background: rgba(255,255,255,0.10); border-color: rgba(255,255,255,0.3); transform: translateY(-1px); }
         .cgcAlertCard:focus-visible, .cgcAlertsHeading:focus-visible { outline: 2px solid #F5F3EC; outline-offset: 2px; }
         .cgcMenuBtn:focus-visible, .cgcTreeBtn:focus-visible, .cgcTreePage:focus-visible, .cgcTreeBloc:focus-visible { outline: 2px solid #F5F3EC; outline-offset: 2px; }
-      `}</style>
+      `)}</style>
 
       <div style={styles.overlay}>
         {isMobile ? (
@@ -1996,6 +1946,7 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
         ) : (
           <header
             data-cegeclim-header="true"
+            data-theme={theme}
             style={{
               ...styles.header,
               ...((pageFloatingLayerOpen || headerHiddenForScroll) ? styles.headerHiddenForFloatingLayer : {}),
@@ -2021,6 +1972,8 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
               <div style={styles.center}>{getCurrentPageTitle()}</div>
 
               <div style={styles.right}>
+                {!isFinancementOnly && hasSession && <NouveautesButton />}
+                <ThemeToggle />
                 {email && <div style={styles.userEmail}>{email}</div>}
                 <span style={styles.userProfile}>
                   {rights.profile_name || 'Aucun profil'}
@@ -2031,7 +1984,7 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
               </div>
             </div>
 
-            {(hasAnyMenuAccess || hasVisibleStatusLights) && (
+            {(hasAnyMenuAccess || hasVisibleStatusLights || showNewsTicker) && (
               <div style={styles.nav}>
                 {hasAnyMenuAccess && (
                   <div style={styles.navSection}>
@@ -2076,140 +2029,31 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
                   </div>
                 )}
 
+                {showNewsTicker && <NewsTicker />}
+
                 {hasVisibleStatusLights && (
-                  <div style={styles.alertsPanel}>
-                    <button
-                      type="button"
-                      className="cgcAlertsHeading"
-                      onClick={() => setAlertCenterOpen(true)}
-                      style={styles.alertsPanelHeading}
-                      title="Ouvrir le Centre d'alertes"
-                    >
-                      <span style={styles.alertsPanelIcon}>🔔</span>
-                      <span style={{ textAlign: 'left' }}>
-                        <span style={styles.alertsPanelTitle}>Mes alertes</span>
-                        <span style={styles.alertsPanelSubtitle}>
-                          {visibleAlertCount} active{visibleAlertCount > 1 ? 's' : ''}
-                        </span>
-                      </span>
-                    </button>
-
-                    <span aria-hidden="true" style={styles.alertsPanelDivider} />
-
-                    <div style={styles.alertsGrid}>
-                      {rights.show_alert_cerfa_ko && (
-                        <StatusLight
-                          compact
-                          label="CERFA"
-                          status={cerfaKoCount > 0 ? 'red' : 'green'}
-                          count={cerfaKoCount}
-                          blink={cerfaKoCount > 0 && statusBlinkOn}
-                          clickable={cerfaKoCount > 0}
-                          onClick={openCerfaModal}
-                          title={cerfaKoCount > 0 ? 'Ouvrir la liste des CERFA KO en attente de régularisation' : 'Aucun CERFA KO'}
-                        />
-                      )}
-
-                      {rights.show_alert_cdc_liv_avant_2026 && (
-                        <StatusLight
-                          compact
-                          label={CDC_RETARD_LABEL}
-                          status={cdcLivAvant2026Signal.status}
-                          count={cdcLivAvant2026Signal.count}
-                          blink={cdcLivAvant2026Signal.status === 'red' && statusBlinkOn}
-                          clickable={cdcLivAvant2026Signal.count > 0}
-                          onClick={openCdcLivAvant2026}
-                          title={
-                            cdcLivAvant2026Signal.count > 0
-                              ? `${cdcLivAvant2026Signal.count} CDC en retard de livraison (${getCdcRetardDescription()}) — cliquer pour les afficher dans le portefeuille`
-                              : `Aucun CDC en retard de livraison (${getCdcRetardDescription()})`
-                          }
-                        />
-                      )}
-
-                      {rights.show_alert_cdc_liv_avant_2026 && (
-                        <StatusLight
-                          compact
-                          multiline
-                          label={COUVERTURE_ALERT_LABEL}
-                          status={couvertureStockSignal.status}
-                          count={couvertureStockSignal.count}
-                          blink={couvertureStockSignal.status === 'red' && statusBlinkOn}
-                          clickable={couvertureStockSignal.count > 0}
-                          onClick={openCouvertureStock}
-                          title={
-                            couvertureStockSignal.count > 0
-                              ? `${couvertureStockSignal.count} commande(s) non complète(s) à la date de livraison client, à livrer dans les ${COUVERTURE_HORIZON_MOIS} mois (${couvertureStockSignal.nbLignes} ligne(s), ${couvertureStockSignal.nbClients} client(s)) — cliquer pour les afficher dans le portefeuille`
-                              : `Aucune commande non complète à la date de livraison client dans les ${COUVERTURE_HORIZON_MOIS} mois`
-                          }
-                        />
-                      )}
-
-                      {rights.show_alert_controle_frais_port && (
-                        <StatusLight
-                          compact
-                          label="Frais de port"
-                          status={controleFraisPortSignal.status}
-                          count={controleFraisPortSignal.count}
-                          blink={controleFraisPortSignal.status !== 'green' && statusBlinkOn}
-                          clickable
-                          onClick={openControleFraisPort}
-                          title={
-                            controleFraisPortSignal.count > 0
-                              ? `${controleFraisPortSignal.count} action(s) : ${controleFraisPortSignal.missingGroups} groupe(s) sans port, ${controleFraisPortSignal.blToRemove} BL à supprimer, ${controleFraisPortSignal.otherGroups} autre(s) groupe(s) à vérifier — cliquer pour afficher`
-                              : 'Ouvrir le contrôle groupé des frais de port dans le portefeuille livraison'
-                          }
-                        />
-                      )}
-
-                      {rights.show_alert_capacite_gaz && (
-                        <StatusLight
-                          compact
-                          label="Capacité gaz"
-                          status={certificationSignals.capacite.status}
-                          count={certificationSignals.capacite.count}
-                          blink={certificationSignals.capacite.status === 'orange' && statusBlinkOn}
-                          clickable={certificationSignals.capacite.count > 0}
-                          onClick={() => openCertificationModal('capacite')}
-                          title={
-                            certificationSignals.capacite.count > 0
-                              ? `Capacité gaz : ${certificationSignals.capacite.count} validité(s) à moins d'un mois sur le périmètre actif`
-                              : 'Aucune capacité gaz à échéance dans moins d’un mois'
-                          }
-                        />
-                      )}
-
-                      {rights.show_alert_todo && (
-                        <StatusLight
-                          compact
-                          label="À faire"
-                          status={todoSignal.status}
-                          count={todoSignal.count}
-                          blink={todoSignal.status === 'red' && statusBlinkOn}
-                          clickable
-                          onClick={openTodoList}
-                          title={todoSignal.count > 0 ? 'Ouvrir la TODO List dans un nouvel onglet' : 'Aucune tâche à faire — cliquer pour ouvrir la TODO List'}
-                        />
-                      )}
-
-                      {showDataCoherence && (
-                        <StatusLight
-                          compact
-                          label="Cohérence"
-                          status={dataCoherenceSignal.status}
-                          count={dataCoherenceSignal.koMonths}
-                          blink={dataCoherenceSignal.status === 'red' && statusBlinkOn}
-                          clickable
-                          onClick={openDataCoherenceModal}
-                          title={
-                            dataCoherenceSignal.koMonths > 0
-                              ? `${dataCoherenceSignal.koMonths}/${dataCoherenceSignal.checkedMonths} mois en écart (max ${dataCoherenceSignal.maxAbsEcart.toLocaleString('fr-FR')} €) — cliquer pour le détail`
-                              : 'Factures, devis, CDC, BL et flux articles alignés sur les derniers mois — cliquer pour le détail'
-                          }
-                        />
-                      )}
-                    </div>
-                  </div>
+                  <button
+                    type="button"
+                    className="cgcAlertsHeading"
+                    onClick={() => setAlertCenterOpen(true)}
+                    style={{
+                      ...styles.alertsCompact,
+                      ...(alertsActiveCount > 0 ? styles.alertsCompactActive : {}),
+                    }}
+                    title={
+                      alertsActiveCount > 0
+                        ? `${alertsActiveCount} alerte${alertsActiveCount > 1 ? 's' : ''} à traiter sur ${visibleAlertCount} suivie${visibleAlertCount > 1 ? 's' : ''} — ouvrir le Centre d'alertes`
+                        : `Aucune alerte à traiter (${visibleAlertCount} suivie${visibleAlertCount > 1 ? 's' : ''}) — ouvrir le Centre d'alertes`
+                    }
+                  >
+                    <span aria-hidden="true" style={styles.alertsPanelIcon}>🔔</span>
+                    <span style={styles.alertsCompactText}>Mes alertes</span>
+                    {alertsActiveCount > 0 ? (
+                      <span style={styles.alertsCompactBadge}>{alertsActiveCount}</span>
+                    ) : (
+                      <span style={styles.alertsCompactOk}>OK</span>
+                    )}
+                  </button>
                 )}
               </div>
             )}
@@ -2217,7 +2061,7 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
         )}
 
         {!isMobile && (
-          <div data-cegeclim-nav-layer="true">
+          <div data-cegeclim-nav-layer="true" data-theme={theme}>
             <NavigationTree
               open={treeOpen}
               blocs={visibleBlocs}
@@ -2229,7 +2073,7 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
         )}
 
         {alertCenterOpen && (
-          <div data-cegeclim-nav-layer="true">
+          <div data-cegeclim-nav-layer="true" data-theme={theme}>
             <div style={styles.alertCenterBackdrop} onClick={() => setAlertCenterOpen(false)} role="presentation">
               <div
                 role="dialog"
@@ -2279,7 +2123,7 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
                   <div style={styles.alertCenterList}>
                     {alertItems.map((item) => {
                       const tone = item.status === 'red' ? styles.alertCardRed : item.status === 'orange' ? styles.alertCardOrange : styles.alertCardGreen
-                      const numberTone = item.status === 'red' ? '#E07A4E' : item.status === 'orange' ? '#E0A961' : '#7FB7CB'
+                      const numberTone = tc(item.status === 'red' ? '#E07A4E' : item.status === 'orange' ? '#E0A961' : '#7FB7CB')
                       const isVigilance = item.objective !== '0'
                       const objectiveReached = !isVigilance && item.count <= 0
                       return (
@@ -2304,7 +2148,7 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
                               <span style={styles.alertCardLabel}>{item.label}</span>
                             </span>
                             <span style={styles.alertCardCountRow}>
-                              <span style={{ ...styles.alertCardCount, color: item.count > 0 ? numberTone : 'rgba(255,255,255,0.45)' }}>
+                              <span style={{ ...styles.alertCardCount, color: item.count > 0 ? numberTone : tc('rgba(255,255,255,0.45)') }}>
                                 {item.count > 0 ? item.count.toLocaleString('fr-FR') : 'OK'}
                               </span>
                               {item.count > 0 ? <span style={styles.alertCardUnit}>{item.unit}</span> : null}
@@ -2348,7 +2192,7 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
         )}
 
         {cerfaModalOpen && (
-          <div style={styles.modalBackdrop}>
+          <div style={styles.modalBackdrop} data-theme={theme}>
             <div style={styles.cerfaModal}>
               <div style={styles.modalHeader}>
                 <div>
@@ -2447,7 +2291,7 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
         )}
 
         {certificationModalOpen && (
-          <div style={styles.modalBackdrop}>
+          <div style={styles.modalBackdrop} data-theme={theme}>
             <div style={styles.cerfaModal}>
               <div style={styles.modalHeader}>
                 <div>
@@ -2529,7 +2373,7 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
         )}
 
         {dataCoherenceModalOpen && (
-          <div style={styles.modalBackdrop}>
+          <div style={styles.modalBackdrop} data-theme={theme}>
             <div style={styles.cerfaModal}>
               <div style={styles.modalHeader}>
                 <div>
@@ -2632,13 +2476,15 @@ export default function ClientRootShell({ children }: { children: React.ReactNod
   return (
     <AccessProvider>
       <SocieteFilterProvider>
-        <AppShell>{children}</AppShell>
+        <ThemeProvider>
+          <AppShell>{children}</AppShell>
+        </ThemeProvider>
       </SocieteFilterProvider>
     </AccessProvider>
   )
 }
 
-const styles: Record<string, React.CSSProperties> = {
+const styles: Record<string, React.CSSProperties> = themed({
   app: {
     minHeight: '100vh',
     backgroundColor: '#0B1220',
@@ -3462,6 +3308,59 @@ const styles: Record<string, React.CSSProperties> = {
   // FIX (2026-08) : panneau "Mes alertes" mieux identifié -- cadre teinté
   // (ambre/rouge, cohérent avec les couleurs d'alerte déjà utilisées dans
   // StatusLight), icône 🔔 devant le titre, titre agrandi.
+  // Bouton compact « Mes alertes » (13/10/2026) : remplace les pastilles ;
+  // les compteurs détaillés sont sur l'accueil et dans le Centre d'alertes.
+  alertsCompact: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    height: 40,
+    padding: '0 12px',
+    borderRadius: 10,
+    border: '1px solid rgba(255,255,255,0.16)',
+    background: 'rgba(255,255,255,0.04)',
+    color: 'rgba(255,255,255,0.85)',
+    cursor: 'pointer',
+    fontFamily: 'var(--font-body)',
+    whiteSpace: 'nowrap',
+    flexShrink: 0,
+    pointerEvents: 'auto',
+  },
+
+  alertsCompactActive: {
+    border: '1px solid rgba(193,104,60,0.55)',
+    background: 'rgba(193,104,60,0.12)',
+  },
+
+  alertsCompactText: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: 11,
+    fontWeight: 700,
+    letterSpacing: '0.14em',
+    textTransform: 'uppercase',
+  },
+
+  alertsCompactBadge: {
+    minWidth: 22,
+    height: 22,
+    padding: '0 7px',
+    borderRadius: 999,
+    background: '#A9542C',
+    color: '#FFFFFE', // blanc conservé dans les deux thèmes (themed ne convertit que #fff / #ffffff)
+    fontSize: 12,
+    fontWeight: 700,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  alertsCompactOk: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: 11,
+    fontWeight: 700,
+    color: '#7FB7CB',
+  },
+
   alertsPanel: {
     marginLeft: 'auto',
     display: 'flex',
@@ -3822,4 +3721,4 @@ const styles: Record<string, React.CSSProperties> = {
     maxWidth: 'none',
     overflowX: 'hidden',
   },
-}
+}, ['logo'])

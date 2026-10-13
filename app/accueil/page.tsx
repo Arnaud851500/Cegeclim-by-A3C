@@ -21,8 +21,16 @@ import { useAccess } from '@/components/AccessContext'
 import { useViewport } from '@/lib/useViewport'
 import MobileShell from '@/components/mobile/MobileShell'
 import { getVisibleBlocs, type NavBloc, type NavPage } from '@/lib/navigation'
-import { useAlerts } from '@/components/AlertsContext'
+import { useAlerts, type AlertItem } from '@/components/AlertsContext'
+import { useTheme } from '@/components/ThemeContext'
+import { themed } from '@/lib/theme'
 
+// ÉVOLUTION (2026-10-13) : les pastilles d'alerte ont quitté le bandeau ; le
+// bloc « Mes alertes » affiche désormais chaque compteur en grand (rouge = à
+// traiter, vert = OK, objectif 0). Un clic sur un compteur ouvre directement
+// la liste concernée ; un clic sur le titre ouvre le Centre d'alertes.
+// Mode clair : les blocs passent en teintes claires (couleur du bloc sur
+// l'icône), via useTheme() ; le reste suit les variables de lib/theme.ts.
 // ÉVOLUTION (2026-09-15 soir) : bloc « Mes alertes » — pas une page mais la
 // fenêtre flottante « Centre d'alertes » (ClientRootShell), qui reprend en
 // grand les pastilles du bandeau. Il apparaît après « Mes tâches » dès que le
@@ -33,6 +41,35 @@ export default function AccueilPage() {
   const { rights, email } = useAccess()
   const { isMobile } = useViewport()
   const alerts = useAlerts()
+  const { theme } = useTheme()
+  const light = theme === 'light'
+
+  // Couleurs d'un bloc : dégradé saturé en sombre, teinte claire en clair.
+  const blocColors = useCallback(
+    (gradient: [string, string]) =>
+      light
+        ? {
+            background: `color-mix(in srgb, ${gradient[0]} 13%, #FFFFFF)`,
+            border: `1px solid color-mix(in srgb, ${gradient[0]} 30%, #FFFFFF)`,
+            boxShadow: '0 6px 18px rgba(11,18,32,0.06)',
+            color: `color-mix(in srgb, ${gradient[1]} 88%, #000000)`,
+            subtitle: `color-mix(in srgb, ${gradient[1]} 72%, #000000)`,
+            count: `color-mix(in srgb, ${gradient[1]} 62%, #000000)`,
+            chevron: `color-mix(in srgb, ${gradient[1]} 55%, #FFFFFF)`,
+            iconBg: gradient[0],
+          }
+        : {
+            background: `linear-gradient(180deg, ${gradient[0]} 0%, ${gradient[1]} 100%)`,
+            border: undefined,
+            boxShadow: undefined,
+            color: undefined,
+            subtitle: undefined,
+            count: undefined,
+            chevron: undefined,
+            iconBg: undefined,
+          },
+    [light]
+  )
 
   const [openBloc, setOpenBloc] = useState<NavBloc | null>(null)
 
@@ -88,10 +125,13 @@ export default function AccueilPage() {
     <div style={styles.page}>
       <style>{`
         .cgcBloc { transition: transform 0.16s ease, box-shadow 0.16s ease, filter 0.16s ease; }
-        .cgcBloc:hover { transform: translateY(-2px); filter: brightness(1.08); box-shadow: 0 16px 36px rgba(0,0,0,0.42); }
-        .cgcBloc:focus-visible { outline: 2px solid #F5F3EC; outline-offset: 3px; }
-        .cgcBlocPage:hover { background: rgba(255,255,255,0.09); border-color: rgba(255,255,255,0.22); }
-        .cgcBlocPage:focus-visible { outline: 2px solid #F5F3EC; outline-offset: 2px; }
+        .cgcBloc:hover { transform: translateY(-2px); filter: brightness(1.08); box-shadow: 0 16px 36px rgba(0,0,0,calc(0.42 * var(--cg-shadow-k))); }
+        [data-theme="light"] .cgcBloc:hover { filter: brightness(0.98); }
+        .cgcBloc:focus-visible, .cgcAlertCounter:focus-visible, .cgcAlertHead:focus-visible { outline: 2px solid var(--cg-ink-soft); outline-offset: 3px; }
+        .cgcAlertCounter:hover { filter: brightness(1.08); transform: translateY(-1px); }
+        [data-theme="light"] .cgcAlertCounter:hover { filter: brightness(0.97); }
+        .cgcBlocPage:hover { background: rgba(var(--cg-ink-rgb),0.09); border-color: rgba(var(--cg-ink-rgb),0.22); }
+        .cgcBlocPage:focus-visible { outline: 2px solid var(--cg-ink-soft); outline-offset: 2px; }
         .cgcPanelClose:hover { background: rgba(255,255,255,0.10); color: #fff; }
         @media (max-width: 1240px) { .cgcBlocGrid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; } }
         @media (prefers-reduced-motion: reduce) { .cgcBloc { transition: none; } .cgcBloc:hover { transform: none; } }
@@ -115,48 +155,32 @@ export default function AccueilPage() {
           {blocs.map((bloc, index) => (
             <Fragment key={bloc.id}>
             {showAlertBloc && index === alertBlocIndex && (
-              <button
-                type="button"
-                className="cgcBloc"
-                onClick={alerts.openAlertCenter}
-                style={{
-                  ...styles.bloc,
-                  background: alerts.activeCount > 0
-                    ? 'linear-gradient(180deg, #A5482A 0%, #6E2E19 100%)'
-                    : 'linear-gradient(180deg, #2F4A3C 0%, #1B2C24 100%)',
-                }}
-              >
-                <span style={styles.blocChevron} aria-hidden="true">›</span>
-                <span style={{ ...styles.blocIcon, background: 'rgba(255,255,255,0.18)' }}>🔔</span>
-                <span style={styles.blocLabel}>
-                  Mes alertes{alerts.activeCount > 0 ? ` (${alerts.activeCount})` : ''}
-                </span>
-                <span style={styles.blocSubtitle}>
-                  {alerts.activeCount > 0 ? 'À traiter en priorité' : 'Rien à traiter pour le moment'}
-                </span>
-                <span style={styles.blocCount}>
-                  {alerts.items.length} alerte{alerts.items.length > 1 ? 's' : ''} suivie{alerts.items.length > 1 ? 's' : ''}
-                </span>
-              </button>
+              <AlertsBloc items={alerts.items} activeCount={alerts.activeCount} onOpenCenter={alerts.openAlertCenter} />
             )}
             <button
               type="button"
               className="cgcBloc"
               onClick={() => onBlocClick(bloc)}
-              style={{
-                ...styles.bloc,
-                background: `linear-gradient(180deg, ${bloc.gradient[0]} 0%, ${bloc.gradient[1]} 100%)`,
-              }}
+              style={(() => {
+                const c = blocColors(bloc.gradient)
+                return {
+                  ...styles.bloc,
+                  background: c.background,
+                  ...(c.border ? { border: c.border } : {}),
+                  ...(c.boxShadow ? { boxShadow: c.boxShadow } : {}),
+                  ...(c.color ? { color: c.color } : {}),
+                }
+              })()}
             >
-              <span style={styles.blocChevron} aria-hidden="true">›</span>
+              <span style={{ ...styles.blocChevron, ...(light ? { color: blocColors(bloc.gradient).chevron } : {}) }} aria-hidden="true">›</span>
               <span style={styles.blocIcons}>
                 {(bloc.icons && bloc.icons.length > 0 ? bloc.icons : [bloc.icon]).map((icon, iconIndex) => (
-                  <span key={`${bloc.id}-icon-${iconIndex}`} style={{ ...styles.blocIcon, background: bloc.iconBg }}>{icon}</span>
+                  <span key={`${bloc.id}-icon-${iconIndex}`} style={{ ...styles.blocIcon, background: light ? blocColors(bloc.gradient).iconBg : bloc.iconBg }}>{icon}</span>
                 ))}
               </span>
               <span style={styles.blocLabel}>{bloc.label}</span>
-              <span style={styles.blocSubtitle}>{bloc.subtitle}</span>
-              <span style={styles.blocCount}>
+              <span style={{ ...styles.blocSubtitle, ...(light ? { color: blocColors(bloc.gradient).subtitle } : {}) }}>{bloc.subtitle}</span>
+              <span style={{ ...styles.blocCount, ...(light ? { color: blocColors(bloc.gradient).count } : {}) }}>
                 {bloc.pages.length === 1
                   ? bloc.pages[0].label
                   : `${bloc.pages.length} écrans`}
@@ -165,18 +189,7 @@ export default function AccueilPage() {
             </Fragment>
           ))}
           {showAlertBloc && alertBlocIndex >= blocs.length && (
-            <button
-              type="button"
-              className="cgcBloc"
-              onClick={alerts.openAlertCenter}
-              style={{ ...styles.bloc, background: 'linear-gradient(180deg, #A5482A 0%, #6E2E19 100%)' }}
-            >
-              <span style={styles.blocChevron} aria-hidden="true">›</span>
-              <span style={{ ...styles.blocIcon, background: 'rgba(255,255,255,0.18)' }}>🔔</span>
-              <span style={styles.blocLabel}>Mes alertes{alerts.activeCount > 0 ? ` (${alerts.activeCount})` : ''}</span>
-              <span style={styles.blocSubtitle}>{alerts.activeCount > 0 ? 'À traiter en priorité' : 'Rien à traiter pour le moment'}</span>
-              <span style={styles.blocCount}>{alerts.items.length} alerte{alerts.items.length > 1 ? 's' : ''} suivie{alerts.items.length > 1 ? 's' : ''}</span>
-            </button>
+            <AlertsBloc items={alerts.items} activeCount={alerts.activeCount} onOpenCenter={alerts.openAlertCenter} />
           )}
         </div>
       )}
@@ -197,19 +210,19 @@ export default function AccueilPage() {
             <div
               style={{
                 ...styles.panelHeader,
-                background: `linear-gradient(180deg, ${openBloc.gradient[0]} 0%, ${openBloc.gradient[1]} 100%)`,
+                background: blocColors(openBloc.gradient).background,
               }}
             >
-              <span style={{ ...styles.panelIcon, background: openBloc.iconBg }}>{openBloc.icon}</span>
+              <span style={{ ...styles.panelIcon, background: light ? blocColors(openBloc.gradient).iconBg : openBloc.iconBg }}>{openBloc.icon}</span>
               <div style={{ minWidth: 0 }}>
-                <div style={styles.panelTitle}>{openBloc.label}</div>
-                <div style={styles.panelSubtitle}>{openBloc.subtitle}</div>
+                <div style={{ ...styles.panelTitle, ...(light ? { color: blocColors(openBloc.gradient).color } : {}) }}>{openBloc.label}</div>
+                <div style={{ ...styles.panelSubtitle, ...(light ? { color: blocColors(openBloc.gradient).subtitle } : {}) }}>{openBloc.subtitle}</div>
               </div>
               <button
                 type="button"
                 className="cgcPanelClose"
                 onClick={() => setOpenBloc(null)}
-                style={styles.panelClose}
+                style={{ ...styles.panelClose, ...(light ? styles.panelCloseLight : {}) }}
                 aria-label="Fermer"
               >
                 ✕
@@ -243,7 +256,7 @@ export default function AccueilPage() {
   )
 }
 
-const styles: Record<string, React.CSSProperties> = {
+const styles: Record<string, React.CSSProperties> = themed({
   page: {
     maxWidth: 1360,
     margin: '0 auto',
@@ -498,4 +511,178 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'rgba(255,255,255,0.45)',
     textAlign: 'right',
   },
+
+  panelCloseLight: {
+    border: '1px solid rgba(11,18,32,0.18)',
+    background: 'rgba(255,255,255,0.6)',
+    color: '#0B1220',
+  },
+
+  // ── Bloc « Mes alertes » (13/10/2026) ───────────────────────────────
+  alertsBloc: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 12,
+    minHeight: 228,
+    padding: '18px 18px 16px',
+    borderRadius: 26,
+    border: '1px solid rgba(255,255,255,0.12)',
+    background: 'var(--cg-surface-2)',
+    boxShadow: '0 10px 28px rgba(0,0,0,0.32)',
+    color: '#ffffff',
+    fontFamily: 'inherit',
+  },
+
+  alertsHead: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 12,
+    width: '100%',
+    padding: 0,
+    border: 'none',
+    background: 'transparent',
+    color: 'inherit',
+    cursor: 'pointer',
+    textAlign: 'left',
+    fontFamily: 'inherit',
+  },
+
+  alertsHeadIcon: {
+    width: 46,
+    height: 46,
+    borderRadius: 13,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: 24,
+    background: 'rgba(193,104,60,0.22)',
+    flexShrink: 0,
+  },
+
+  alertsHeadTitle: {
+    display: 'block',
+    fontFamily: 'var(--font-display)',
+    fontSize: 24,
+    fontWeight: 800,
+    lineHeight: 1.1,
+  },
+
+  alertsHeadSubtitle: {
+    display: 'block',
+    marginTop: 3,
+    fontSize: 13,
+    color: 'rgba(255,255,255,0.65)',
+  },
+
+  alertsHeadChevron: {
+    marginLeft: 'auto',
+    fontSize: 24,
+    lineHeight: 1,
+    color: 'rgba(255,255,255,0.55)',
+  },
+
+  alertsGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+    gap: 8,
+  },
+
+  alertCounter: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'flex-start',
+    gap: 3,
+    minWidth: 0,
+    padding: '10px 12px',
+    borderRadius: 12,
+    textAlign: 'left',
+    fontFamily: 'inherit',
+    transition: 'filter 0.14s ease, transform 0.14s ease',
+  },
+
+  alertCounterRed: {
+    border: '1px solid var(--cg-danger-border)',
+    background: 'var(--cg-danger-bg)',
+    cursor: 'pointer',
+  },
+
+  alertCounterGreen: {
+    border: '1px solid var(--cg-ok-border)',
+    background: 'var(--cg-ok-bg)',
+    cursor: 'default',
+  },
+
+  alertCounterValue: {
+    fontFamily: 'var(--font-display)',
+    fontSize: 32,
+    fontWeight: 800,
+    lineHeight: 1,
+    fontVariantNumeric: 'tabular-nums',
+  },
+
+  alertCounterLabel: {
+    fontSize: 12.5,
+    lineHeight: 1.3,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    display: '-webkit-box',
+    WebkitLineClamp: 2,
+    WebkitBoxOrient: 'vertical',
+  },
+}, ['bloc', 'blocChevron', 'blocIcon', 'blocLabel', 'blocSubtitle', 'blocCount', 'panelHeader', 'panelIcon', 'panelTitle', 'panelSubtitle', 'panelClose', 'panelCloseLight'])
+
+// ── Bloc « Mes alertes » : compteurs en grand (13/10/2026) ───────────────────
+// Rouge = quelque chose à traiter (objectif 0), vert = OK. Clic sur un compteur
+// rouge = même action que l'ancienne pastille du bandeau (liste à traiter).
+function AlertsBloc({
+  items,
+  activeCount,
+  onOpenCenter,
+}: {
+  items: AlertItem[]
+  activeCount: number
+  onOpenCenter: () => void
+}) {
+  return (
+    <div style={styles.alertsBloc} role="group" aria-label="Mes alertes">
+      <button type="button" className="cgcAlertHead" onClick={onOpenCenter} style={styles.alertsHead} title="Ouvrir le Centre d’alertes (objectifs et actions attendues)">
+        <span style={styles.alertsHeadIcon} aria-hidden="true">🔔</span>
+        <span style={{ minWidth: 0 }}>
+          <span style={styles.alertsHeadTitle}>Mes alertes</span>
+          <span style={styles.alertsHeadSubtitle}>
+            {activeCount > 0
+              ? `${activeCount} à traiter sur ${items.length} suivie${items.length > 1 ? 's' : ''} · objectif 0`
+              : `Rien à traiter · ${items.length} alerte${items.length > 1 ? 's' : ''} suivie${items.length > 1 ? 's' : ''}`}
+          </span>
+        </span>
+        <span style={styles.alertsHeadChevron} aria-hidden="true">›</span>
+      </button>
+
+      <div style={styles.alertsGrid}>
+        {items.map((item, index) => {
+          const toTreat = item.count > 0
+          const lastAlone = index === items.length - 1 && items.length % 2 === 1
+          return (
+            <button
+              key={item.key}
+              type="button"
+              className="cgcAlertCounter"
+              onClick={toTreat && item.clickable ? item.onOpen : onOpenCenter}
+              title={toTreat ? `${item.count.toLocaleString('fr-FR')} ${item.unit} — ${item.description}` : `${item.label} : rien à traiter`}
+              style={{
+                ...styles.alertCounter,
+                ...(toTreat ? styles.alertCounterRed : styles.alertCounterGreen),
+                ...(lastAlone ? { gridColumn: '1 / -1' } : {}),
+              }}
+            >
+              <span style={{ ...styles.alertCounterValue, color: toTreat ? 'var(--cg-danger)' : 'var(--cg-ok)' }}>
+                {toTreat ? item.count.toLocaleString('fr-FR') : 'OK'}
+              </span>
+              <span style={{ ...styles.alertCounterLabel, color: toTreat ? 'var(--cg-danger-text)' : 'var(--cg-ok-text)' }}>{item.label}</span>
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
 }
