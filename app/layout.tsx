@@ -5,6 +5,8 @@
 import type { Metadata, Viewport } from 'next'
 import { Space_Grotesk, IBM_Plex_Sans, IBM_Plex_Mono, IBM_Plex_Serif } from 'next/font/google'
 import './globals.css'
+// 13/10/2026 : variables du thème clair / sombre + animations du bandeau
+import './theme.css'
 import ClientRootShell from './ClientRootShell'
 import PwaSetup from '@/components/PwaSetup'
 import { THEME_BOOT_SCRIPT } from '@/lib/theme'

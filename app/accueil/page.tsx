@@ -49,9 +49,9 @@ export default function AccueilPage() {
     (gradient: [string, string]) =>
       light
         ? {
-            background: `color-mix(in srgb, ${gradient[0]} 13%, #FFFFFF)`,
-            border: `1px solid color-mix(in srgb, ${gradient[0]} 30%, #FFFFFF)`,
-            boxShadow: '0 6px 18px rgba(11,18,32,0.06)',
+            background: `color-mix(in srgb, ${gradient[0]} 18%, #FFFFFF)`,
+            border: `1px solid color-mix(in srgb, ${gradient[0]} 38%, #FFFFFF)`,
+            boxShadow: '0 8px 22px rgba(11,18,32,0.08)',
             color: `color-mix(in srgb, ${gradient[1]} 88%, #000000)`,
             subtitle: `color-mix(in srgb, ${gradient[1]} 72%, #000000)`,
             count: `color-mix(in srgb, ${gradient[1]} 62%, #000000)`,
@@ -155,7 +155,7 @@ export default function AccueilPage() {
           {blocs.map((bloc, index) => (
             <Fragment key={bloc.id}>
             {showAlertBloc && index === alertBlocIndex && (
-              <AlertsBloc items={alerts.items} activeCount={alerts.activeCount} onOpenCenter={alerts.openAlertCenter} />
+              <AlertsBloc items={alerts.items} activeCount={alerts.activeCount} onOpenCenter={alerts.openAlertCenter} light={light} colors={blocColors(alerts.activeCount > 0 ? ALERT_GRADIENT_ACTIVE : ALERT_GRADIENT_OK)} />
             )}
             <button
               type="button"
@@ -189,7 +189,7 @@ export default function AccueilPage() {
             </Fragment>
           ))}
           {showAlertBloc && alertBlocIndex >= blocs.length && (
-            <AlertsBloc items={alerts.items} activeCount={alerts.activeCount} onOpenCenter={alerts.openAlertCenter} />
+            <AlertsBloc items={alerts.items} activeCount={alerts.activeCount} onOpenCenter={alerts.openAlertCenter} light={light} colors={blocColors(alerts.activeCount > 0 ? ALERT_GRADIENT_ACTIVE : ALERT_GRADIENT_OK)} />
           )}
         </div>
       )}
@@ -518,171 +518,159 @@ const styles: Record<string, React.CSSProperties> = themed({
     color: '#0B1220',
   },
 
-  // ── Bloc « Mes alertes » (13/10/2026) ───────────────────────────────
-  alertsBloc: {
+  // ── Bloc « Mes alertes » (13/10/2026, v2) : même gabarit que les autres
+  // blocs, compteurs en pastilles compactes ─────────────────────────────
+  alertChips: {
     display: 'flex',
-    flexDirection: 'column',
-    gap: 12,
-    minHeight: 228,
-    padding: '18px 18px 16px',
-    borderRadius: 26,
-    border: '1px solid rgba(255,255,255,0.12)',
-    background: 'var(--cg-surface-2)',
-    boxShadow: '0 10px 28px rgba(0,0,0,0.32)',
-    color: '#ffffff',
-    fontFamily: 'inherit',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 6,
+    marginTop: 8,
+    maxWidth: 380,
   },
 
-  alertsHead: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 12,
-    width: '100%',
-    padding: 0,
-    border: 'none',
-    background: 'transparent',
-    color: 'inherit',
-    cursor: 'pointer',
-    textAlign: 'left',
-    fontFamily: 'inherit',
-  },
-
-  alertsHeadIcon: {
-    width: 46,
-    height: 46,
-    borderRadius: 13,
+  alertChip: {
     display: 'inline-flex',
     alignItems: 'center',
-    justifyContent: 'center',
-    fontSize: 24,
-    background: 'rgba(193,104,60,0.22)',
-    flexShrink: 0,
-  },
-
-  alertsHeadTitle: {
-    display: 'block',
-    fontFamily: 'var(--font-display)',
-    fontSize: 24,
-    fontWeight: 800,
-    lineHeight: 1.1,
-  },
-
-  alertsHeadSubtitle: {
-    display: 'block',
-    marginTop: 3,
-    fontSize: 13,
-    color: 'rgba(255,255,255,0.65)',
-  },
-
-  alertsHeadChevron: {
-    marginLeft: 'auto',
-    fontSize: 24,
-    lineHeight: 1,
-    color: 'rgba(255,255,255,0.55)',
-  },
-
-  alertsGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-    gap: 8,
-  },
-
-  alertCounter: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'flex-start',
-    gap: 3,
-    minWidth: 0,
-    padding: '10px 12px',
-    borderRadius: 12,
-    textAlign: 'left',
+    gap: 7,
+    padding: '5px 10px 5px 8px',
+    borderRadius: 999,
     fontFamily: 'inherit',
+    fontSize: 12,
+    lineHeight: 1.2,
+    whiteSpace: 'nowrap',
+    cursor: 'pointer',
     transition: 'filter 0.14s ease, transform 0.14s ease',
   },
 
-  alertCounterRed: {
-    border: '1px solid var(--cg-danger-border)',
-    background: 'var(--cg-danger-bg)',
-    cursor: 'pointer',
+  alertChipDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 999,
+    flexShrink: 0,
   },
 
-  alertCounterGreen: {
-    border: '1px solid var(--cg-ok-border)',
-    background: 'var(--cg-ok-bg)',
-    cursor: 'default',
-  },
-
-  alertCounterValue: {
+  alertChipValue: {
     fontFamily: 'var(--font-display)',
-    fontSize: 32,
+    fontSize: 15,
     fontWeight: 800,
-    lineHeight: 1,
     fontVariantNumeric: 'tabular-nums',
   },
+}, ['bloc', 'blocChevron', 'blocIcon', 'blocLabel', 'blocSubtitle', 'blocCount', 'panelHeader', 'panelIcon', 'panelTitle', 'panelSubtitle', 'panelClose', 'panelCloseLight', 'alertChip', 'alertChipValue'])
 
-  alertCounterLabel: {
-    fontSize: 12.5,
-    lineHeight: 1.3,
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    display: '-webkit-box',
-    WebkitLineClamp: 2,
-    WebkitBoxOrient: 'vertical',
-  },
-}, ['bloc', 'blocChevron', 'blocIcon', 'blocLabel', 'blocSubtitle', 'blocCount', 'panelHeader', 'panelIcon', 'panelTitle', 'panelSubtitle', 'panelClose', 'panelCloseLight'])
+// ── Bloc « Mes alertes » (13/10/2026, v2) ───────────────────────────────────
+// Même gabarit que les autres blocs (dégradé, icône, titre, sous-titre), avec
+// une pastille par alerte : point rouge + compteur = à traiter, point vert + OK.
+// Clic sur une pastille rouge = liste à traiter (même action que l'ancienne
+// pastille du bandeau) ; clic ailleurs sur le bloc = Centre d'alertes.
+const ALERT_GRADIENT_ACTIVE: [string, string] = ['#A5482A', '#6E2E19']
+const ALERT_GRADIENT_OK: [string, string] = ['#2F6B4C', '#1B3D2C']
 
-// ── Bloc « Mes alertes » : compteurs en grand (13/10/2026) ───────────────────
-// Rouge = quelque chose à traiter (objectif 0), vert = OK. Clic sur un compteur
-// rouge = même action que l'ancienne pastille du bandeau (liste à traiter).
+const ALERT_SHORT_LABELS: Record<string, string> = {
+  cerfa: 'CERFA',
+  'cdc-retard': 'CDC liv < M-2',
+  'couverture-stock': 'Cde non complètes',
+  'frais-port': 'Frais de port',
+  'capacite-gaz': 'Capacité gaz',
+  todo: 'À faire',
+  coherence: 'Cohérence',
+}
+
+type BlocColors = {
+  background: string
+  border?: string
+  boxShadow?: string
+  color?: string
+  subtitle?: string
+  count?: string
+  chevron?: string
+  iconBg?: string
+}
+
 function AlertsBloc({
   items,
   activeCount,
   onOpenCenter,
+  light,
+  colors,
 }: {
   items: AlertItem[]
   activeCount: number
   onOpenCenter: () => void
+  light: boolean
+  colors: BlocColors
 }) {
   return (
-    <div style={styles.alertsBloc} role="group" aria-label="Mes alertes">
-      <button type="button" className="cgcAlertHead" onClick={onOpenCenter} style={styles.alertsHead} title="Ouvrir le Centre d’alertes (objectifs et actions attendues)">
-        <span style={styles.alertsHeadIcon} aria-hidden="true">🔔</span>
-        <span style={{ minWidth: 0 }}>
-          <span style={styles.alertsHeadTitle}>Mes alertes</span>
-          <span style={styles.alertsHeadSubtitle}>
-            {activeCount > 0
-              ? `${activeCount} à traiter sur ${items.length} suivie${items.length > 1 ? 's' : ''} · objectif 0`
-              : `Rien à traiter · ${items.length} alerte${items.length > 1 ? 's' : ''} suivie${items.length > 1 ? 's' : ''}`}
-          </span>
-        </span>
-        <span style={styles.alertsHeadChevron} aria-hidden="true">›</span>
+    <div
+      className="cgcBloc"
+      role="group"
+      aria-label="Mes alertes"
+      onClick={onOpenCenter}
+      style={{
+        ...styles.bloc,
+        background: colors.background,
+        ...(colors.border ? { border: colors.border } : {}),
+        ...(colors.boxShadow ? { boxShadow: colors.boxShadow } : {}),
+        ...(colors.color ? { color: colors.color } : {}),
+      }}
+    >
+      <span style={{ ...styles.blocChevron, ...(light ? { color: colors.chevron } : {}) }} aria-hidden="true">›</span>
+      <span style={{ ...styles.blocIcon, background: light ? colors.iconBg : 'rgba(255,255,255,0.18)' }} aria-hidden="true">🔔</span>
+      <button
+        type="button"
+        className="cgcAlertHead"
+        onClick={(event) => {
+          event.stopPropagation()
+          onOpenCenter()
+        }}
+        style={{ ...styles.blocLabel, border: 'none', background: 'transparent', color: 'inherit', cursor: 'pointer', padding: 0 }}
+        title="Ouvrir le Centre d’alertes (objectifs et actions attendues)"
+      >
+        Mes alertes{activeCount > 0 ? ` (${activeCount})` : ''}
       </button>
+      <span style={{ ...styles.blocSubtitle, ...(light ? { color: colors.subtitle } : {}) }}>
+        {activeCount > 0 ? 'À traiter en priorité · objectif 0' : 'Rien à traiter pour le moment'}
+      </span>
 
-      <div style={styles.alertsGrid}>
-        {items.map((item, index) => {
+      <span style={styles.alertChips}>
+        {items.map((item) => {
           const toTreat = item.count > 0
-          const lastAlone = index === items.length - 1 && items.length % 2 === 1
+          const label = ALERT_SHORT_LABELS[item.key] || item.label
           return (
             <button
               key={item.key}
               type="button"
               className="cgcAlertCounter"
-              onClick={toTreat && item.clickable ? item.onOpen : onOpenCenter}
+              onClick={(event) => {
+                event.stopPropagation()
+                if (toTreat && item.clickable) item.onOpen()
+                else onOpenCenter()
+              }}
               title={toTreat ? `${item.count.toLocaleString('fr-FR')} ${item.unit} — ${item.description}` : `${item.label} : rien à traiter`}
               style={{
-                ...styles.alertCounter,
-                ...(toTreat ? styles.alertCounterRed : styles.alertCounterGreen),
-                ...(lastAlone ? { gridColumn: '1 / -1' } : {}),
+                ...styles.alertChip,
+                ...(light
+                  ? { background: '#FFFFFF', border: `1px solid ${toTreat ? '#F3C5C1' : '#B9DFC6'}`, color: '#2A3142' }
+                  : { background: 'rgba(11,18,32,0.28)', border: '1px solid rgba(255,255,255,0.22)', color: 'rgba(255,255,255,0.92)' }),
               }}
             >
-              <span style={{ ...styles.alertCounterValue, color: toTreat ? 'var(--cg-danger)' : 'var(--cg-ok)' }}>
+              <span
+                aria-hidden="true"
+                style={{ ...styles.alertChipDot, background: toTreat ? (light ? '#C4321F' : '#FF6B5B') : light ? '#1F8A4C' : '#4ADE80' }}
+              />
+              <span
+                style={{
+                  ...styles.alertChipValue,
+                  color: light ? (toTreat ? '#B42318' : '#17673A') : '#FFFFFF',
+                }}
+              >
                 {toTreat ? item.count.toLocaleString('fr-FR') : 'OK'}
               </span>
-              <span style={{ ...styles.alertCounterLabel, color: toTreat ? 'var(--cg-danger-text)' : 'var(--cg-ok-text)' }}>{item.label}</span>
+              <span>{label}</span>
             </button>
           )
         })}
-      </div>
+      </span>
     </div>
   )
 }

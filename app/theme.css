@@ -1,0 +1,121 @@
+/* ==========================================================================
+   app/theme.css — Thème clair / sombre et animations du bandeau (13/10/2026)
+   --------------------------------------------------------------------------
+   Fichier séparé de globals.css (importé par app/layout.tsx) pour que le
+   thème ne dépende pas de la mise à jour de globals.css.
+   ========================================================================== */
+
+/* ==========================================================================
+   Thème clair / sombre (13/10/2026)
+   --------------------------------------------------------------------------
+   Les couleurs « historiques » du bandeau et des écrans passés au thème sont
+   remplacées par ces variables via lib/theme.ts (themed / tc). En sombre,
+   chaque variable vaut exactement l'ancienne couleur : aucun changement
+   visuel. Le thème est posé par data-theme sur <html> (préférence de
+   l'utilisateur) et peut être forcé localement (data-theme="dark" sur la
+   zone de contenu d'un écran pas encore passé au clair).
+   ========================================================================== */
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+  --cg-ink-rgb: 255, 255, 255;
+  --cg-ink: #ffffff;
+  --cg-ink-soft: #F5F3EC;
+  --cg-bg: #0B1220;
+  --cg-bg-rgb: 11, 18, 32;
+  --cg-surface: #101A2E;
+  --cg-surface-2: #151F33;
+  --cg-backdrop-rgb: 6, 10, 18;
+  --cg-backdrop-k: 1;
+  --cg-shadow-k: 1;
+  --cg-sauge: #A6A181;
+  --cg-sauge-ink: #E9E5D6;
+  --cg-info-ink: #8FC7DA;
+  --cg-info-ink-2: #7FB7CB;
+  --cg-alert-ink: #E07A4E;
+  --cg-warn-ink: #E0A961;
+  --cg-warn: #D69A4A;
+  --cg-accent: #7FB3FF;
+  --cg-accent-bg: #111B2D;
+  --cg-accent-border: #2B3A55;
+  --cg-danger: #FF6B6B;
+  --cg-danger-bg: #2A1619;
+  --cg-danger-border: #5C2A2E;
+  --cg-danger-text: #E4C7C9;
+  --cg-ok: #4ADE80;
+  --cg-ok-bg: #12291E;
+  --cg-ok-border: #2B5A40;
+  --cg-ok-text: #C3E6D0;
+  --cg-reading-ink: #E3E6EC;
+  --cg-app-veil: linear-gradient(rgba(11, 18, 32, 0.965), rgba(11, 18, 32, 0.985));
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --cg-ink-rgb: 11, 18, 32;
+  --cg-ink: #0B1220;
+  --cg-ink-soft: #1E2433;
+  --cg-bg: #F5F3EC;
+  --cg-bg-rgb: 245, 243, 236;
+  --cg-surface: #FFFFFF;
+  --cg-surface-2: #FBFAF6;
+  --cg-backdrop-rgb: 11, 18, 32;
+  --cg-backdrop-k: 0.62;
+  --cg-shadow-k: 0.32;
+  --cg-sauge: #6E6A4D;
+  --cg-sauge-ink: #4A4632;
+  --cg-info-ink: #1F6A80;
+  --cg-info-ink-2: #1F6A80;
+  --cg-alert-ink: #B4471F;
+  --cg-warn-ink: #8A5A0E;
+  --cg-warn: #8A5A0E;
+  --cg-accent: #1B4FA8;
+  --cg-accent-bg: #EEF3FB;
+  --cg-accent-border: #C9D7EE;
+  --cg-danger: #B42318;
+  --cg-danger-bg: #FDF0EF;
+  --cg-danger-border: #F3C5C1;
+  --cg-danger-text: #6B2A23;
+  --cg-ok: #17673A;
+  --cg-ok-bg: #EAF6EE;
+  --cg-ok-border: #B9DFC6;
+  --cg-ok-text: #1F4D33;
+  --cg-reading-ink: #1E2433;
+  --cg-app-veil: linear-gradient(rgba(245, 243, 236, 0.975), rgba(245, 243, 236, 0.99));
+}
+
+/* Bandeau défilant du fil d'actualité */
+@keyframes cgcTicker {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+.cgcTickerTrack {
+  display: flex;
+  gap: 36px;
+  width: max-content;
+  animation: cgcTicker var(--cg-ticker-duration, 48s) linear infinite;
+}
+
+.cgcTickerWrap:hover .cgcTickerTrack,
+.cgcTickerWrap:focus-within .cgcTickerTrack {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cgcTickerTrack { animation: none; }
+}
+
+/* Icône « Nouveau dans votre compagnon » */
+@keyframes cgcNewsPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(193, 104, 60, 0.55); }
+  50% { box-shadow: 0 0 0 6px rgba(193, 104, 60, 0); }
+}
+
+.cgcNewsPulse {
+  animation: cgcNewsPulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cgcNewsPulse { animation: none; }
+}
