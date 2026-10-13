@@ -27,6 +27,14 @@
  * autre fournisseur). Certains articles BLG ont une référence principale vide dans
  * la synchro (ex. RAK-25PSE-S) : ils ne sont retrouvés que par leurs références actives.
  *
+ * ÉVOLUTION (2026-10-13) :
+ *   - Comparaison : sélecteur « Champs affichés » dans la liste du bas, indépendant
+ *     des pastilles de filtre (les pastilles filtrent les articles, le sélecteur
+ *     choisit les colonnes SAGE / BLG affichées). Choix mémorisé dans le navigateur ;
+ *     les champs filtrés peuvent être ajoutés automatiquement (option).
+ *   - Poids : contrôlé uniquement pour les références MyStock = OUI (SAGE) ou tag FMS
+ *     (BLG) — poids obligatoire (ni vide ni 0) des deux côtés et identique ; les
+ *     autres références sont « Non concerné ».
  * ÉVOLUTION (2026-09-25) : vue « Nomenclatures » (sélecteur Articles / Nomenclatures,
  *   dans les trois onglets) — un bloc par article chapeau avec ses paramètres, puis ses
  *   composants : quantités, PA net / PV (unitaires et × quantité), sommeil / archive,
@@ -1014,7 +1022,9 @@ function OngletBlg({ version }: { version: number }) {
 // Onglet Comparaison — règles tolérantes
 // ─────────────────────────────────────────────────────────────────────────
 
-type ResultatComparaison = 'ok' | 'ecart' | 'partiel'
+/** non_concerne = la règle du champ ne s'applique pas à cet article (ex. poids
+ * d'une référence non MyStock) : ni écart, ni compté comme identique. */
+type ResultatComparaison = 'ok' | 'ecart' | 'partiel' | 'non_concerne'
 type Evaluation = ResultatComparaison | 'vide' | 'affichage' | 'manquant' | 'blg_maitre'
 
 type PaireArticle = {
@@ -1027,6 +1037,8 @@ type PaireArticle = {
   comparer?: (r: Row) => ResultatComparaison
   /** La règle gère elle-même les valeurs absentes (ex. colisage vide = 1). */
   gereVides?: boolean
+  /** La règle s'applique même quand les deux côtés sont vides (ex. poids obligatoire). */
+  controleVides?: boolean
   groupe: string
 }
 
@@ -1090,6 +1102,23 @@ function comparerRemise(r: Row): ResultatComparaison {
   return Math.abs(s - b) <= 0.1 ? 'ok' : 'ecart'
 }
 
+/** Référence tenue en stock : MyStock = OUI côté SAGE ou tag FMS côté BLG
+ * (un désaccord entre les deux est déjà signalé par le contrôle MyStock). */
+function estMyStock(r: Row): boolean {
+  return Boolean(r.sage_mystock_oui) || Boolean(r.blg_tag_fms_bool)
+}
+
+/** Poids (règle du 13/10/2026) : seules les références MyStock / FMS doivent
+ * porter un poids renseigné (ni vide ni 0), des deux côtés et identique à 10 g
+ * près. Les autres références ne sont pas contrôlées (« Non concerné »). */
+function comparerPoids(r: Row): ResultatComparaison {
+  if (!estMyStock(r)) return 'non_concerne'
+  const s = toNum(r.sage_poids) ?? 0
+  const b = toNum(r.blg_poids) ?? 0
+  if (s === 0 || b === 0) return 'ecart'
+  return Math.abs(s - b) <= 0.011 ? 'ok' : 'ecart'
+}
+
 function comparerGestionStock(r: Row): ResultatComparaison {
   const sGere = Boolean(r.sage_suivi_stock) && r.sage_suivi_stock !== 'Aucun'
   const bGere = !estVide(r.blg_gestion_stock)
@@ -1144,7 +1173,7 @@ const PAIRES: PaireArticle[] = [
   { groupe: 'Prix', labelSage: "Prix d'achat net", sageKey: 'sage_prix_net', labelBlg: "Prix d'achat net", blgKey: 'blg_prix_net', compare: true, comparer: (r) => comparerNombre(r.sage_prix_net, r.blg_prix_net, { tol: tolPrix }) },
   { groupe: 'Prix', labelSage: "Dernier prix d'achat", sageKey: 'sage_dernier_prix_achat', labelBlg: "Dernier prix d'achat", blgKey: 'blg_dernier_prix_achat', compare: true, comparer: (r) => comparerNombre(r.sage_dernier_prix_achat, r.blg_dernier_prix_achat, { tol: tolPrix }) },
   { groupe: 'Prix', labelSage: 'Prix de vente HT', sageKey: 'sage_prix_vente', labelBlg: 'Prix public Cegeclim', blgKey: 'blg_prix_vente', compare: true, gereVides: true, comparer: (r) => comparerNombre(r.sage_prix_vente, r.blg_prix_vente, { nullVaut: 0, tol: tolPrix }) },
-  { groupe: 'Caractéristiques', labelSage: 'Poids brut (kg)', sageKey: 'sage_poids', labelBlg: 'Poids (kg)', blgKey: 'blg_poids', compare: true, gereVides: true, comparer: (r) => comparerNombre(r.sage_poids, r.blg_poids, { nullVaut: 0, tol: () => 0.011 }) },
+  { groupe: 'Caractéristiques', labelSage: 'Poids brut (kg) — MyStock', sageKey: 'sage_poids', labelBlg: 'Poids (kg)', blgKey: 'blg_poids', compare: true, gereVides: true, controleVides: true, comparer: comparerPoids },
   { groupe: 'Caractéristiques', labelSage: 'Dimensions (HxLxP)', sageKey: 'sage_dimensions', labelBlg: 'Dimensions', blgKey: 'blg_dimensions', compare: true, comparer: (r) => comparerDimensions(r.sage_dimensions, r.blg_dimensions) },
   { groupe: 'Caractéristiques', labelSage: 'Catégorie fluide (HFC)', sageKey: 'sage_categorie_fluide', labelBlg: 'Catégorie fluide', blgKey: 'blg_categorie_fluide', compare: true, comparer: (r) => comparerCode(r.sage_categorie_fluide, r.blg_categorie_fluide, /^CATFLUIDE/) },
   { groupe: 'Caractéristiques', labelSage: "Type d'équipement", sageKey: 'sage_type_equipement', labelBlg: "Type d'équipement", blgKey: 'blg_type_equipement', compare: true, comparer: (r) => comparerCode(r.sage_type_equipement, r.blg_type_equipement, /^TYPEEQUIPMENT/) },
@@ -1164,6 +1193,7 @@ const PAIRES: PaireArticle[] = [
 function evaluerPaire(p: PaireArticle, r: Row, blgMaitre: Set<string>): Evaluation {
   if (r.statut_appariement !== 'apparie') return 'manquant'
   if (blgMaitre.has(p.sageKey)) return 'blg_maitre'
+  if (p.controleVides && p.comparer) return p.comparer(r)
   const sv = r[p.sageKey]
   const bv = r[p.blgKey]
   const sVide = estVide(sv)
@@ -1189,6 +1219,7 @@ const EVAL_STYLE: Record<Evaluation, { cellule: string; libelle: string; argb: s
   partiel: { cellule: 'bg-orange-50 text-orange-800', libelle: 'Partiel / manquant', argb: COULEUR_PARTIEL },
   affichage: { cellule: 'bg-orange-50/50 text-[#3A362E]', libelle: 'Affiché, non comparé', argb: COULEUR_PARTIEL },
   vide: { cellule: 'text-[#B3AD9E]', libelle: 'Vide des deux côtés', argb: 'FFFFFFFF' },
+  non_concerne: { cellule: 'text-[#B3AD9E]', libelle: 'Non concerné par la règle', argb: 'FFFFFFFF' },
   manquant: { cellule: 'text-[#B3AD9E]', libelle: 'Absent de BLG', argb: COULEUR_PARTIEL },
   blg_maitre: { cellule: 'bg-emerald-50 text-emerald-800', libelle: 'BLG maître (non comparé)', argb: COULEUR_OK },
 }
@@ -1201,6 +1232,26 @@ function compterEcarts(ev: Evaluations | undefined) {
 }
 
 const LIMITE_AFFICHAGE = 500
+
+/** Champs affichés dans la liste de comparaison (indépendants des pastilles de filtre). */
+const CLE_AFFICHAGE_COMPARAISON = 'articles-sage-blg.comparaison.affichage.v1'
+type ReglagesAffichage = { champs: string[]; ajouterFiltres: boolean }
+function chargerAffichageComparaison(): ReglagesAffichage {
+  const d: ReglagesAffichage = { champs: [], ajouterFiltres: true }
+  if (typeof window === 'undefined') return d
+  try {
+    const brut = window.localStorage.getItem(CLE_AFFICHAGE_COMPARAISON)
+    if (!brut) return d
+    const p = JSON.parse(brut) as Partial<ReglagesAffichage>
+    const cles = new Set(PAIRES.map((x) => x.sageKey))
+    return {
+      champs: Array.isArray(p.champs) ? p.champs.filter((k) => cles.has(String(k))) : [],
+      ajouterFiltres: p.ajouterFiltres !== false,
+    }
+  } catch {
+    return d
+  }
+}
 
 function NomenclatureRapprochement({ sage, blg }: { sage: unknown; blg: unknown }) {
   const ls = ((sage || []) as unknown[]).map(String)
@@ -1251,6 +1302,7 @@ function ArticleComparaisonModal({ row, evals, onClose, onPrev, onNext }: { row:
       <span className="rounded-full bg-red-100 px-2 py-0.5 text-red-700">{rouge} écart{rouge > 1 ? 's' : ''}</span>
       <span className="rounded-full bg-orange-100 px-2 py-0.5 text-orange-700">{orange} partiel{orange > 1 ? 's' : ''}</span>
       {rouge === 0 && orange === 0 && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-emerald-700">OK</span>}
+      {estMyStock(row) && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-emerald-700">MyStock / FMS</span>}
       {row.appariement_via && row.appariement_via !== 'reference' && (
         <span className="rounded-full bg-orange-50 px-2 py-0.5 text-orange-700">
           Apparié via {({ internal_reference: 'la référence interne BLG', reference_active_interne: 'une référence active [Interne] BLG', reference_fournisseur_principal: 'la référence du fournisseur principal BLG', reference_autre_fournisseur: "la référence d'un autre fournisseur BLG" } as Record<string, string>)[String(row.appariement_via)] ?? row.appariement_via}
@@ -1326,6 +1378,13 @@ function OngletComparaison({ version }: { version: number }) {
   const [champsSelectionnes, setChampsSelectionnes] = useState<string[]>([])
   const [combinaison, setCombinaison] = useState<'ou' | 'et'>('ou')
 
+  // Champs affichés en colonnes dans la liste (indépendants des pastilles de filtre)
+  const [champsAffiches, setChampsAffiches] = useState<string[]>([])
+  const [ajouterFiltres, setAjouterFiltres] = useState(true)
+  const [affichageCharge, setAffichageCharge] = useState(false)
+  const [affichageOuvert, setAffichageOuvert] = useState(false)
+  const affichageRef = useRef<HTMLDivElement>(null)
+
   const [ligneActive, setLigneActive] = useState<Row | null>(null)
   const [ouvert, setOuvert] = useState<Row | null>(null)
   const [exportEnCours, setExportEnCours] = useState(false)
@@ -1362,6 +1421,26 @@ function OngletComparaison({ version }: { version: number }) {
       if (err) { setMaitreMessage(`Champs maîtres non chargés : ${err.message}`); return }
       setBlgMaitre(new Set(((data || []) as Row[]).filter((m) => m.systeme_maitre === 'blg').map((m) => String(m.champ_cle))))
     })()
+  }, [])
+
+  useEffect(() => {
+    const r = chargerAffichageComparaison()
+    setChampsAffiches(r.champs)
+    setAjouterFiltres(r.ajouterFiltres)
+    setAffichageCharge(true)
+  }, [])
+
+  useEffect(() => {
+    if (!affichageCharge) return
+    try { window.localStorage.setItem(CLE_AFFICHAGE_COMPARAISON, JSON.stringify({ champs: champsAffiches, ajouterFiltres } satisfies ReglagesAffichage)) } catch { /* stockage indisponible */ }
+  }, [champsAffiches, ajouterFiltres, affichageCharge])
+
+  useEffect(() => {
+    function onClickOutside(e: MouseEvent) {
+      if (affichageRef.current && !affichageRef.current.contains(e.target as Node)) setAffichageOuvert(false)
+    }
+    document.addEventListener('mousedown', onClickOutside)
+    return () => document.removeEventListener('mousedown', onClickOutside)
   }, [])
 
   async function toggleBlgMaitre(cle: string) {
@@ -1418,7 +1497,12 @@ function OngletComparaison({ version }: { version: number }) {
     return { total: perimetre.length, apparies, manquants, sansEcart, avecEcart }
   }, [perimetre, evaluations])
 
-  const pairesSelectionnees = useMemo(() => PAIRES.filter((p) => champsSelectionnes.includes(p.sageKey)), [champsSelectionnes])
+  /** Colonnes de la liste : champs choisis dans « Champs affichés » + (option) champs filtrés. */
+  const pairesAffichees = useMemo(
+    () => PAIRES.filter((p) => champsAffiches.includes(p.sageKey) || (ajouterFiltres && champsSelectionnes.includes(p.sageKey))),
+    [champsAffiches, ajouterFiltres, champsSelectionnes],
+  )
+  const groupesPaires = useMemo(() => Array.from(new Set(PAIRES.map((p) => p.groupe))), [])
 
   const rowsFiltrees = useMemo(() => {
     const term = normaliserTexte(search)
@@ -1442,6 +1526,9 @@ function OngletComparaison({ version }: { version: number }) {
   function toggleChamp(k: string) {
     setChampsSelectionnes((prev) => (prev.includes(k) ? prev.filter((x) => x !== k) : [...prev, k]))
   }
+  function toggleChampAffiche(k: string) {
+    setChampsAffiches((prev) => (prev.includes(k) ? prev.filter((x) => x !== k) : [...prev, k]))
+  }
 
   async function exporterExcel() {
     setExportEnCours(true)
@@ -1454,6 +1541,7 @@ function OngletComparaison({ version }: { version: number }) {
         ['Appariement via', (r) => safeText(r.appariement_via)],
         ['Famille macro (SAGE)', (r) => safeText(r.sage_famille_macro)],
         ['En sommeil (SAGE)', (r) => (r.sage_en_sommeil ? 'Oui' : 'Non')],
+        ['MyStock / FMS', (r) => (estMyStock(r) ? 'Oui' : 'Non')],
         ['Nb écarts', (r) => String(compterEcarts(evaluations.get(r.reference_article)).rouge)],
         ['Nb partiels', (r) => String(compterEcarts(evaluations.get(r.reference_article)).orange)],
         ['Champs en écart', (r) => { const ev = evaluations.get(r.reference_article) || {}; return PAIRES.filter((p) => ev[p.sageKey] === 'ecart').map((p) => p.labelSage).join(', ') }],
@@ -1508,6 +1596,7 @@ function OngletComparaison({ version }: { version: number }) {
         ['Identique ou équivalent (règle tolérante du champ) — ou champ dont BLG est maître', COULEUR_OK],
         ['Écart réel', COULEUR_ECART],
         ['Donnée manquante d’un côté, écart partiel ou champ affiché sans comparaison', COULEUR_PARTIEL],
+        ['Blanc : vide des deux côtés, ou article non concerné par la règle (ex. poids d’une référence non MyStock)', 'FFFFFFFF'],
       ] as Array<[string, string]>).forEach(([t, c], i) => {
         const cell = ws.getCell(`A${li + 1 + i}`)
         cell.value = t
@@ -1589,7 +1678,7 @@ function OngletComparaison({ version }: { version: number }) {
           </div>
         )}
         <p className="mt-2 text-[12px] text-[#8A8474]">
-          Rouge = écart réel, orange = donnée manquante d'un côté ou écart partiel, ✓ vert = aucun écart. Clique sur un ou plusieurs champs pour ne voir que les articles concernés, avec les valeurs SAGE / BLG en colonnes.
+          Rouge = écart réel, orange = donnée manquante d'un côté ou écart partiel, ✓ vert = aucun écart. Clique sur un ou plusieurs champs pour ne voir que les articles concernés ; les colonnes de la liste se choisissent avec « Champs affichés ».
         </p>
         <details className="mt-2 text-[12px] text-[#8A8474]">
           <summary className="cursor-pointer font-semibold text-[#3A362E]">Règles de comparaison</summary>
@@ -1598,7 +1687,8 @@ function OngletComparaison({ version }: { version: number }) {
             <li>Marque : « Non définie » / « non-renseigné » valent vide ; « BOURGEOIS » ≈ « Bourgeois Global ».</li>
             <li>Codes BLG (catFluideHfc410A, typeEquipmentClim, uoClassique) : préfixe retiré, une lettre d'écart tolérée.</li>
             <li>Prix : tolérance d'un centime (0,05 % au-delà de 20 €). Quand BLG n'a pas de prix tarif et que SAGE n'a pas de remise, le tarif SAGE est comparé au net BLG.</li>
-            <li>Colisage et quantité mini : vide = 1. Poids, stocks, prix de vente : vide = 0.</li>
+            <li>Colisage et quantité mini : vide = 1. Stocks, prix de vente : vide = 0.</li>
+            <li>Poids : contrôlé uniquement sur les références MyStock = OUI (SAGE) ou tag « FMS » (BLG). Pour elles, le poids est obligatoire des deux côtés (ni vide ni 0) et identique à 10 g près, sinon écart. Les autres références sont « non concernées ».</li>
             <li>Suivi de stock : « Aucun » SAGE ↔ gestion de stock vide BLG ; tout autre suivi ↔ gestion renseignée.</li>
             <li>Nomenclature : composants SAGE (sage.nomenclature) ↔ marques de la nomenclature BLG de même référence, ordre libre ; quantités différentes = orange.</li>
             <li>MyStock = OUI (SAGE) doit correspondre au tag « FMS » (BLG).</li>
@@ -1663,13 +1753,51 @@ function OngletComparaison({ version }: { version: number }) {
       </section>
 
       <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
-        <div className="mb-3 flex items-center justify-between">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">
             {loading ? 'Chargement…' : rowsFiltrees.length > LIMITE_AFFICHAGE ? `${LIMITE_AFFICHAGE} affichés sur ${rowsFiltrees.length} — affine les filtres ou exporte en Excel pour voir le reste` : `${rowsFiltrees.length} résultat${rowsFiltrees.length > 1 ? 's' : ''}`}
           </div>
           <div className="flex items-center gap-3">
             {error && <span className="text-[12px] font-semibold text-red-600">{error}</span>}
             <span className="text-[11px] text-[#8A8474]">Clic ou Entrée : fenêtre avec tous les champs comparés</span>
+            <div className="relative" ref={affichageRef}>
+              <button type="button" onClick={() => setAffichageOuvert((v) => !v)}
+                className="flex h-9 items-center gap-2 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[12px] font-bold text-[#3A362E] hover:bg-[#F4F3F0]"
+                title="Choisir les champs SAGE / BLG affichés en colonnes, indépendamment des champs filtrés">
+                ☰ Champs affichés ({pairesAffichees.length}/{PAIRES.length})
+                <span className="text-[#8A8474]">{affichageOuvert ? '▲' : '▼'}</span>
+              </button>
+              {affichageOuvert && (
+                <div className="absolute right-0 z-30 mt-1 max-h-[480px] w-[400px] overflow-auto rounded-lg border border-[#E5E1D8] bg-white p-1.5 shadow-lg">
+                  <div className="mb-1 flex items-center justify-between px-2 py-1">
+                    <span className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Colonnes SAGE / BLG de la liste</span>
+                    <div className="flex items-center gap-2">
+                      <button type="button" onClick={() => setChampsAffiches(PAIRES.map((p) => p.sageKey))} className="text-[11px] font-bold text-[#B4761A] hover:underline">Tous</button>
+                      <button type="button" onClick={() => setChampsAffiches([])} className="text-[11px] font-bold text-[#B4761A] hover:underline">Aucun</button>
+                    </div>
+                  </div>
+                  <label className="mb-1 flex cursor-pointer items-start gap-2 rounded bg-[#F4F3F0] px-2 py-1.5 text-[12px] text-[#3A362E]">
+                    <input type="checkbox" checked={ajouterFiltres} onChange={(e) => setAjouterFiltres(e.target.checked)} className="mt-0.5 accent-[#B4761A]" />
+                    <span><span className="font-semibold">Ajouter aussi les champs filtrés</span> (pastilles sélectionnées au-dessus)</span>
+                  </label>
+                  {groupesPaires.map((g) => (
+                    <div key={g}>
+                      <div className="px-2 pb-0.5 pt-1.5 text-[10px] font-bold uppercase tracking-wide text-[#B4761A]">{g}</div>
+                      {PAIRES.filter((p) => p.groupe === g).map((p) => {
+                        const viaFiltre = ajouterFiltres && champsSelectionnes.includes(p.sageKey) && !champsAffiches.includes(p.sageKey)
+                        return (
+                          <label key={p.sageKey} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-[13px] hover:bg-[#F4F3F0]">
+                            <input type="checkbox" checked={champsAffiches.includes(p.sageKey) || viaFiltre} onChange={() => toggleChampAffiche(p.sageKey)} className="accent-[#B4761A]" />
+                            <span className="flex-1">{p.labelSage}</span>
+                            {viaFiltre && <span className="rounded-full bg-[#B4761A]/[0.12] px-1.5 py-0.5 text-[10px] font-bold text-[#96600F]">filtré</span>}
+                          </label>
+                        )
+                      })}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
         <div tabIndex={0} onKeyDown={onKeyDown} className="max-h-[760px] overflow-auto rounded-lg border border-[#E5E1D8] outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A]/50">
@@ -1679,7 +1807,7 @@ function OngletComparaison({ version }: { version: number }) {
                 <th className="px-3 py-2 font-bold">Article</th>
                 <th className="px-3 py-2 font-bold">Fournisseur</th>
                 <th className="px-3 py-2 font-bold">Statut</th>
-                {pairesSelectionnees.map((p) => (
+                {pairesAffichees.map((p) => (
                   <React.Fragment key={p.sageKey}>
                     <th className="border-l-2 border-[#E5E1D8] px-3 py-2 font-bold">{p.labelSage} — SAGE</th>
                     <th className="border-r-2 border-[#E5E1D8] px-3 py-2 font-bold">{p.labelBlg} — BLG</th>
@@ -1712,7 +1840,7 @@ function OngletComparaison({ version }: { version: number }) {
                         </span>
                       )}
                     </td>
-                    {pairesSelectionnees.map((p) => {
+                    {pairesAffichees.map((p) => {
                       const st = EVAL_STYLE[ev[p.sageKey] ?? 'vide']
                       return (
                         <React.Fragment key={p.sageKey}>
@@ -1725,7 +1853,7 @@ function OngletComparaison({ version }: { version: number }) {
                 )
               })}
               {!loading && rowsAffichees.length === 0 && (
-                <tr><td colSpan={3 + pairesSelectionnees.length * 2} className="px-3 py-8 text-center text-[#8A8474]">Aucun résultat pour ces filtres.</td></tr>
+                <tr><td colSpan={3 + pairesAffichees.length * 2} className="px-3 py-8 text-center text-[#8A8474]">Aucun résultat pour ces filtres.</td></tr>
               )}
             </tbody>
           </table>
