@@ -20,6 +20,7 @@ type PermissionKey =
   | 'can_activites'
   | 'can_change_scope'
   | 'can_objectifs'
+  | 'can_suivi_agences'
   | 'can_financement'
 
 type AlertKey =
@@ -96,6 +97,17 @@ const PERMISSION_GROUPS: Array<{
     ],
   },
   {
+    family: 'Agences & commerciaux',
+    hint: 'Bloc « Mes agences / Mes commerciaux » — limité au périmètre agences / collaborateurs de chaque personne',
+    items: [
+      {
+        key: 'can_suivi_agences',
+        label: 'Suivi agences – commerciaux',
+        description: 'CA facturé, évolution vs N-1, croix de positionnement, fiches. Chaque personne ne voit que les agences et collaborateurs de son périmètre (onglet Utilisateurs).',
+      },
+    ],
+  },
+  {
     family: 'Pilotage',
     hint: 'Chiffres, stocks et activité',
     items: [
@@ -155,6 +167,7 @@ const LANDING_PAGES = [
   { value: '/Indicateurs', label: 'Indicateurs' },
   { value: '/todo', label: 'Todo List' },
   { value: '/documents', label: 'Documents' },
+  { value: '/suivi-agences', label: 'Suivi agences – commerciaux' },
   { value: '/financement', label: 'Aides financières (CEE)' },
   { value: '/autorisation', label: 'Autorisations' },
   { value: '/admin/planification', label: 'Job scheduling' },
@@ -186,6 +199,7 @@ const EMPTY_PROFILE: AccessProfile = {
   can_activites: false,
   can_change_scope: false,
   can_objectifs: false,
+  can_suivi_agences: false,
   can_financement: false,
   show_alert_cerfa_ko: false,
   show_alert_cdc_liv_avant_2026: false,
@@ -1158,18 +1172,18 @@ export default function AutorisationPage() {
                         fallback={['Global']}
                       />
                     </Field>
-                    <Field label="Agences" hint="Vide = toutes les agences.">
+                    <Field label="Agences" hint="Vide = toutes les agences. Suivi agences : limite aux collaborateurs de ces agences (agence de la fiche collaborateur).">
                       <ChipsField
                         values={userDraft.allowed_agences}
                         onChange={(values) => patchUserDraft({ allowed_agences: values })}
                         placeholder="ANGLET, BORDEAUX…"
                       />
                     </Field>
-                    <Field label="Collaborateurs" hint="Vide = tous les représentants.">
+                    <Field label="Collaborateurs" hint="Codes SAGE (ex. AAMENA). Vide = tous. Suivi agences : prioritaire sur les agences — la personne ne voit que ces collaborateurs.">
                       <ChipsField
                         values={userDraft.allowed_collaborateurs}
                         onChange={(values) => patchUserDraft({ allowed_collaborateurs: values })}
-                        placeholder="Nom du représentant"
+                        placeholder="AAMENA, BRPAROUTOT…"
                       />
                     </Field>
                     <Field label="Codes postaux" hint="Prioritaire sur les départements.">
@@ -1180,6 +1194,8 @@ export default function AutorisationPage() {
                       />
                     </Field>
                   </div>
+
+                  <SuiviPerimetreHint user={userDraft} profile={profileById.get(userDraft.access_profile_id) || null} />
 
                   <DepartmentPicker
                     selected={userDraft.allowed_departements}
@@ -1732,6 +1748,35 @@ function ProfilePreview({ profile }: { profile: AccessProfile | null }) {
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+/** Ce que la personne verra dans « Suivi agences – commerciaux ». Rappelle
+ * la règle appliquée côté base (suivi_perimetre). */
+function SuiviPerimetreHint({ user, profile }: { user: UserAccess; profile: AccessProfile | null }) {
+  if (!profile) return null
+  const admin = profile.can_autorisation || profile.can_change_scope || profile.name.trim().toLowerCase() === 'administrateur'
+  let text: string
+  let tone = 'text-slate-600'
+  if (!profile.can_suivi_agences && !profile.can_objectifs && !admin) {
+    text = 'Écran non ouvert sur le profil de cette personne.'
+    tone = 'text-slate-500'
+  } else if (admin) {
+    text = 'Toutes les agences et tous les collaborateurs (profil administrateur / changement de société).'
+  } else if (user.allowed_collaborateurs.length) {
+    text = `Uniquement ${user.allowed_collaborateurs.join(', ')} — les agences cochées ne s’appliquent pas à cet écran quand des collaborateurs sont renseignés.`
+    tone = 'text-[#8A5A11]'
+  } else if (user.allowed_agences.length) {
+    text = `Collaborateurs des agences ${user.allowed_agences.join(', ')}.`
+    tone = 'text-[#8A5A11]'
+  } else {
+    text = 'Toutes les agences et tous les collaborateurs (aucune restriction renseignée).'
+  }
+  return (
+    <div className="mx-5 mb-4 rounded-xl border border-[#E7E4DD] bg-[#FAF9F7] px-4 py-3">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">Suivi agences – commerciaux</div>
+      <p className={`mt-1 text-sm ${tone}`}>{text}</p>
     </div>
   )
 }

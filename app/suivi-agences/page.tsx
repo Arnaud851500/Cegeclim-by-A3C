@@ -19,6 +19,13 @@
  * get_suivi_impayes (objectif « Zéro impayé > 45 j », ajout du 11/10/2026) —
  * migration supabase/migrations/20261009_suivi_agences_commerciaux.sql.
  * URL : ?vue=collaborateurs, ?fiche=A:ANGLET ou ?fiche=C:BRPAROUTOT.
+ *
+ * Droits (13/10/2026) : écran ouvert par can_suivi_agences (profil). Le
+ * périmètre agences / collaborateurs de la personne (user_page_access) est
+ * appliqué côté base par suivi_perimetre() dans chaque RPC — migration
+ * 20261013_suivi_agences_droit_perimetre.sql. L'écran se contente d'afficher
+ * ce périmètre, de refuser une fiche hors périmètre ouverte par URL et de
+ * masquer les montants de la référence entreprise (le % reste affiché).
  */
 
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
@@ -75,6 +82,9 @@ type Filtres = {
 const FILTRES_VIDES: Filtres = { agences: [], collaborateurs: [], familles: [], vue: 'agences', masquerPetits: true }
 const SEUIL_PETIT = 10000
 
+type Perimetre = { restreint: boolean; agences: string[]; collaborateurs: string[] }
+const PERIMETRE_LIBRE: Perimetre = { restreint: false, agences: [], collaborateurs: [] }
+
 type SortKey = 'label' | 'caN1' | 'caN1Date' | 'caNDate' | 'evol' | 'ecart' | 'marge' | 'margeDelta' | 'vsEntreprise' | 'objectif'
 
 type Ligne = {
@@ -118,6 +128,7 @@ function SuiviAgencesPage() {
   const [objectifs, setObjectifs] = useState<Objectif[]>([])
   const [commerciaux, setCommerciaux] = useState<Commercial[]>([])
   const [impayes, setImpayes] = useState<ImpayesData | null>(null)
+  const [perimetre, setPerimetre] = useState<Perimetre>(PERIMETRE_LIBRE)
 
   const [filtres, setFiltres] = useState<Filtres>({ ...FILTRES_VIDES, vue: searchParams.get('vue') === 'collaborateurs' ? 'collaborateurs' : 'agences' })
   const [activeVarianteId, setActiveVarianteId] = useState<string | null>(null)
@@ -146,6 +157,12 @@ function SuiviAgencesPage() {
       return
     }
     const data = (dataRes.data || {}) as any
+    const p = (data.perimetre || {}) as any
+    setPerimetre({
+      restreint: !!p.restreint,
+      agences: Array.isArray(p.agences) ? p.agences.map(String) : [],
+      collaborateurs: Array.isArray(p.collaborateurs) ? p.collaborateurs.map(String) : [],
+    })
     setRows(parseDataRows(data.rows))
     setCollaborateurs(((data.collaborateurs || []) as any[]).map((c) => ({
       code: String(c.code),
@@ -373,9 +390,10 @@ function SuiviAgencesPage() {
       positions: l.positions,
       poids: l.caNDate,
     }))
-    pts.push({ key: 'R', label: 'Entreprise', positions: refLigne.positions, poids: refLigne.caNDate, reference: true })
+    const poidsMax = pts.reduce((m, p) => Math.max(m, p.poids), 0)
+    pts.push({ key: 'R', label: 'Entreprise', positions: refLigne.positions, poids: perimetre.restreint ? poidsMax : refLigne.caNDate, reference: true })
     return pts
-  }, [topLignes, refLigne])
+  }, [topLignes, refLigne, perimetre.restreint])
 
   // ------------------------------------------------------------------ fiche
   const ficheKey = searchParams.get('fiche')
@@ -389,8 +407,15 @@ function SuiviAgencesPage() {
     [router, searchParams]
   )
 
+  const ficheHorsPerimetre = useMemo(() => {
+    if (!ficheKey || loading || !perimetre.restreint) return false
+    if (ficheKey.startsWith('C:')) return !collabByCode.has(ficheKey.slice(2))
+    if (ficheKey.startsWith('A:')) return !collaborateurs.some((c) => c.agence === ficheKey.slice(2))
+    return true
+  }, [ficheKey, loading, perimetre.restreint, collabByCode, collaborateurs])
+
   const fiche = useMemo(() => {
-    if (!ficheKey || loading) return null
+    if (!ficheKey || loading || ficheHorsPerimetre) return null
     if (ficheKey.startsWith('C:')) {
       const code = ficheKey.slice(2)
       const serie = seriesByCode.get(code) || emptySerie()
@@ -403,7 +428,7 @@ function SuiviAgencesPage() {
       return { entity: { key: ficheKey, kind: 'agence' as const, id: agence, label: agence, agence, codes }, serie }
     }
     return null
-  }, [ficheKey, loading, seriesByCode, seriesByAgence, collabByCode, collabEntity])
+  }, [ficheKey, loading, ficheHorsPerimetre, seriesByCode, seriesByAgence, collabByCode, collabEntity])
 
   const ficheRows = useMemo(() => {
     if (!fiche) return []
@@ -553,6 +578,9 @@ function SuiviAgencesPage() {
           <div className="rounded-2xl border border-[#F0C5BE] bg-[#FCEFEC] p-6 text-sm text-[#7F1D1D]">
             <div className="font-semibold">Chargement impossible</div>
             <div className="mt-1">{error}</div>
+            {/Accès refusé|42501|permission denied/i.test(error) && (
+              <div className="mt-2 text-[13px]">Demandez à un administrateur de cocher « Suivi agences – commerciaux » sur votre profil (Admin › Profils et autorisations).</div>
+            )}
             {/function .* does not exist|Could not find the function/i.test(error) && (
               <div className="mt-2 text-[13px]">La migration 20261009_suivi_agences_commerciaux.sql n’est pas encore appliquée en base.</div>
             )}
@@ -561,6 +589,30 @@ function SuiviAgencesPage() {
           <div className="rounded-2xl border border-[#E2DFD8] bg-white p-16 text-center text-sm text-slate-500">Chargement du CA facturé…</div>
         ) : (
           <>
+            {perimetre.restreint && (
+              <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-[#EBD8AE] bg-[#FDF7EA] px-4 py-2.5 text-[13px] text-[#6B470E]">
+                <span className="font-semibold">Votre périmètre :</span>
+                {perimetre.collaborateurs.length > 0 ? (
+                  <span>
+                    {perimetre.collaborateurs.length > 1 ? 'collaborateurs ' : 'collaborateur '}
+                    {perimetre.collaborateurs.map((c) => collabByCode.get(c)?.nom || c).join(', ')}
+                  </span>
+                ) : (
+                  <span>
+                    {perimetre.agences.length > 1 ? 'agences ' : 'agence '}
+                    {perimetre.agences.join(', ')}
+                  </span>
+                )}
+                <span className="text-[12px] text-[#8A5A11]">· la ligne Entreprise n’est donnée qu’en évolution (%), pour comparaison.</span>
+              </div>
+            )}
+            {ficheHorsPerimetre && (
+              <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-[#F0C5BE] bg-[#FCEFEC] px-4 py-2.5 text-[13px] text-[#7F1D1D]">
+                <span>Cette fiche est hors de votre périmètre d’autorisation.</span>
+                <button type="button" onClick={() => openFiche(null)} className="font-semibold underline">Fermer</button>
+              </div>
+            )}
+
             {/* KPI sélection */}
             <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6">
               <Kpi label={`CA ${annee} à date`} value={fmtK(totalLigne.caNDate)} sub={`${annee - 1} : ${fmtK(totalLigne.caN1Date)}`} />
@@ -638,7 +690,7 @@ function SuiviAgencesPage() {
                     </tbody>
                     <tfoot>
                       <LigneRow ligne={totalLigne} variant="total" />
-                      <LigneRow ligne={refLigne} variant="ref" />
+                      <LigneRow ligne={refLigne} variant="ref" masquerMontants={perimetre.restreint} />
                     </tfoot>
                   </table>
                 </div>
@@ -722,6 +774,7 @@ function LigneRow({
   child,
   showAgence,
   variant,
+  masquerMontants,
 }: {
   ligne: Ligne
   open?: boolean
@@ -730,7 +783,10 @@ function LigneRow({
   child?: boolean
   showAgence?: boolean
   variant?: 'total' | 'ref'
+  /** Référence entreprise pour un utilisateur restreint : % seulement. */
+  masquerMontants?: boolean
 }) {
+  const mask = (v: string) => (masquerMontants ? <span className="text-slate-300">—</span> : v)
   const last = l.positions[l.positions.length - 1]
   const quadrant = quadrantOf(last)
   const rowClass =
@@ -762,11 +818,11 @@ function LigneRow({
           {l.entity.sommeil && <span className="shrink-0 text-[10px] text-slate-400">sommeil</span>}
         </div>
       </td>
-      <td className="px-2 py-2 text-right tabular-nums text-slate-600">{fmtEuro(l.caN1)}</td>
-      <td className="px-2 py-2 text-right tabular-nums">{fmtEuro(l.caN1Date)}</td>
-      <td className="px-2 py-2 text-right font-semibold tabular-nums text-slate-900">{fmtEuro(l.caNDate)}</td>
+      <td className="px-2 py-2 text-right tabular-nums text-slate-600">{mask(fmtEuro(l.caN1))}</td>
+      <td className="px-2 py-2 text-right tabular-nums">{mask(fmtEuro(l.caN1Date))}</td>
+      <td className="px-2 py-2 text-right font-semibold tabular-nums text-slate-900">{mask(fmtEuro(l.caNDate))}</td>
       <td className={`px-2 py-2 text-right font-semibold tabular-nums ${toneOf(l.evol)}`}>{fmtPct(l.evol)}</td>
-      <td className={`px-2 py-2 text-right tabular-nums ${toneOf(l.ecart, 1)}`}>{`${l.ecart > 0 ? '+' : ''}${fmtK(l.ecart)}`}</td>
+      <td className={`px-2 py-2 text-right tabular-nums ${masquerMontants ? '' : toneOf(l.ecart, 1)}`}>{mask(`${l.ecart > 0 ? '+' : ''}${fmtK(l.ecart)}`)}</td>
       <td className="px-2 py-2">
         <div className="flex justify-center gap-1">
           {l.trims.map((t, i) =>

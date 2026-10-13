@@ -19,6 +19,7 @@ export type AccessRights = {
   can_activites: boolean
   can_financement: boolean
   can_objectifs: boolean
+  can_suivi_agences: boolean
   can_change_scope: boolean
   allowed_scopes: string[]
   allowed_agences: string[]
@@ -77,6 +78,7 @@ type AccessProfileRow = {
   can_activites?: boolean | null
   can_financement?: boolean | null
   can_objectifs?: boolean | null
+  can_suivi_agences?: boolean | null
   can_change_scope?: boolean | null
   default_landing_page?: string | null
   show_alert_cerfa_ko?: boolean | null
@@ -138,6 +140,7 @@ export const defaultRights: AccessRights = {
   can_activites: false,
   can_financement: false,
   can_objectifs: false,
+  can_suivi_agences: false,
   can_change_scope: false,
   allowed_scopes: ['Global'],
   allowed_agences: [],
@@ -189,6 +192,8 @@ const PAGE_ACCESS_CHECKS: Array<[string, keyof AccessRights]> = [
   ['/stocks-disponibilites', 'can_stocks'],
   ['/activites', 'can_activites'],
   ['/financement', 'can_financement'],
+  ['/suivi-agences', 'can_suivi_agences'],
+  ['/objectifs', 'can_objectifs'],
 ]
 
 function isPathAllowed(path: string, rights: AccessRights) {
@@ -218,6 +223,7 @@ export function getFirstAllowedPath(rights: AccessRights) {
   if (rights.can_documents) return '/documents'
   if (rights.can_stocks) return '/stocks-disponibilites'
   if (rights.can_financement) return '/financement'
+  if (rights.can_suivi_agences) return '/suivi-agences'
 
   return '/unauthorized'
 }
@@ -301,6 +307,7 @@ async function fetchAccess(): Promise<{ email: string | null; rights: AccessRigh
         can_activites,
         can_financement,
         can_objectifs,
+        can_suivi_agences,
         can_change_scope,
         default_landing_page,
         show_alert_cerfa_ko,
@@ -370,6 +377,7 @@ async function fetchAccess(): Promise<{ email: string | null; rights: AccessRigh
         can_activites: !!profile.can_activites,
         can_financement: !!profile.can_financement || !!userRow.can_financement,
         can_objectifs: !!profile.can_objectifs,
+        can_suivi_agences: !!profile.can_suivi_agences,
         can_change_scope: !!profile.can_change_scope,
         allowed_scopes: normalizeList(userRow.allowed_scopes, ['Global']),
         allowed_agences: normalizeList(userRow.allowed_agences, []),

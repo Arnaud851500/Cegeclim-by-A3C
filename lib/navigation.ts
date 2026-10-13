@@ -19,6 +19,10 @@
 // ÉVOLUTION (2026-10-09) : nouveau bloc « Mes agences / Mes commerciaux » =
 // Suivi agences – commerciaux (/suivi-agences, nouvel écran) + Objectifs
 // (/objectifs, droit can_objectifs des profils).
+// ÉVOLUTION (2026-10-13) : Suivi agences – commerciaux ouvert par le droit
+// dédié can_suivi_agences (coché dans /autorisation) ; le périmètre agence /
+// collaborateur de l'utilisateur est appliqué par les RPC de l'écran
+// (migration 20261013_suivi_agences_droit_perimetre.sql).
 // Le bloc « Mes alertes » de l'accueil n'est pas ici : il n'a pas de page, il
 // ouvre le Centre d'alertes (components/AlertsContext.tsx + ClientRootShell).
 
@@ -123,7 +127,7 @@ export const NAV_BLOCS: NavBloc[] = [
     gradient: ['#2D6F86', '#18465A'],
     iconBg: 'rgba(255,255,255,0.18)',
     pages: [
-      { label: 'Suivi agences – commerciaux', path: '/suivi-agences', activeLabel: 'Suivi agences – commerciaux', accessKey: 'can_dashboard', description: 'CA facturé N-2 / N-1 / N par agence et collaborateur, évolution vs N-1 et vs entreprise, croix de positionnement trimestrielle, fiche détaillée.' },
+      { label: 'Suivi agences – commerciaux', path: '/suivi-agences', activeLabel: 'Suivi agences – commerciaux', accessKey: 'can_suivi_agences', description: 'CA facturé N-2 / N-1 / N par agence et collaborateur, évolution vs N-1 et vs entreprise, croix de positionnement trimestrielle, fiche détaillée — limité aux agences / collaborateurs autorisés.' },
       { label: 'Objectifs', path: '/objectifs', activeLabel: 'Objectifs commerciaux', accessKey: 'can_objectifs', description: 'Objectifs entreprise, agences et commerciaux : CA, évolution, marge, familles suivies, structure clients.' },
     ],
   },
