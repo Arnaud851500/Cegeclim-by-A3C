@@ -27,6 +27,11 @@
  * autre fournisseur). Certains articles BLG ont une référence principale vide dans
  * la synchro (ex. RAK-25PSE-S) : ils ne sont retrouvés que par leurs références actives.
  *
+ * ÉVOLUTION (2026-10-13, transport) : contrôle « Frais de transport » — articles TRANSPORTxxx
+ *   de la nomenclature SAGE ↔ tags BLG du même nom (colonnes sage_transport / blg_transport
+ *   calculées côté navigateur par enrichirLigneComparaison).
+ * ÉVOLUTION (2026-10-13, UO FMS) : correspondance explicite SAGE ↔ BLG (UO ACCESSOIRE ↔
+ *   uoAccpv, UO PANNEAU ↔ uoPanneaux, UO CLASSIQUE / BALLOT / RUBBERFOOT à l’identique).
  * ÉVOLUTION (2026-10-13, suite) : contrôle « Paramétrage n° de série ». Un article SAGE
  *   dont la nomenclature contient un article NUMEROSERIE* (NUMEROSERIE, NUMEROSERIEAIRZONE)
  *   doit être dans BLG soit nature « Parc … » + gestion de stock Matériel (equipment),
@@ -1086,6 +1091,27 @@ function comparerCode(a: unknown, b: unknown, prefixe: RegExp): ResultatComparai
   return valeursB.some((t) => t === s || levenshtein(t, s, 1) <= 1) ? 'ok' : 'ecart'
 }
 
+/** UO FMS (correspondance fixée par Arnaud le 13/10/2026) : valeur SAGE (champ libre)
+ * ↔ code BLG (case à cocher « UO FMS »). BLG peut porter plusieurs cases cochées,
+ * séparées par des virgules : il suffit que l'une corresponde. */
+const UO_SAGE_VERS_BLG: Record<string, string> = {
+  UOCLASSIQUE: 'UOCLASSIQUE',
+  UOACCESSOIRE: 'UOACCPV',
+  UOACCPV: 'UOACCPV',
+  UOPANNEAU: 'UOPANNEAUX',
+  UOPANNEAUX: 'UOPANNEAUX',
+  UOBALLOT: 'UOBALLOT',
+  UORUBBERFOOT: 'UORUBBERFOOT',
+}
+function comparerUoFms(r: Row): ResultatComparaison {
+  const s = compact(r.sage_uo_fms)
+  const valeursB = String(r.blg_uo_fms ?? '').split(',').map(compact).filter(Boolean)
+  if (!s || valeursB.length === 0) return 'partiel'
+  const attendu = UO_SAGE_VERS_BLG[s]
+  if (!attendu) return 'ecart'
+  return valeursB.includes(attendu) ? 'ok' : 'ecart'
+}
+
 function comparerDimensions(a: unknown, b: unknown): ResultatComparaison {
   const na = (String(a ?? '').match(/\d+(?:[.,]\d+)?/g) || []).map((x) => Number(x.replace(',', '.')))
   const nb = (String(b ?? '').match(/\d+(?:[.,]\d+)?/g) || []).map((x) => Number(x.replace(',', '.')))
@@ -1132,6 +1158,37 @@ function comparerPoids(r: Row): ResultatComparaison {
  *  - soit nature « Classique … » + gestion de stock Classique + gestion des
  *    numéros de série Obligatoire ou Facultatif.
  * Les autres articles ne sont pas concernés. */
+/** Frais de transport (règle du 13/10/2026) : dans SAGE, un article porte en
+ * nomenclature un article TRANSPORTxxx (TRANSPORTPV, TRANSPORTPV1/2/3, TRANSPORTSPE…) ;
+ * dans BLG ce lien est transposé par un tag du même nom (TransportPV1…), qui déclenche
+ * la ligne complémentaire. Les deux listes doivent être identiques (casse ignorée).
+ * Colonnes calculées côté navigateur à partir de sage_composants et blg_tags. */
+function listeTransportSage(r: Row): string[] {
+  return Array.from(new Set(((r.sage_composants || []) as unknown[])
+    .map((c) => compact(String(c).split('×')[0]))
+    .filter((c) => c.startsWith('TRANSPORT')))).sort()
+}
+function listeTransportBlg(r: Row): string[] {
+  return Array.from(new Set(((r.blg_tags || []) as unknown[])
+    .map((t) => compact(t))
+    .filter((t) => t.startsWith('TRANSPORT')))).sort()
+}
+function enrichirLigneComparaison(r: Row): Row {
+  const s = ((r.sage_composants || []) as unknown[]).map((c) => String(c).split('×')[0].trim()).filter((c) => compact(c).startsWith('TRANSPORT'))
+  const b = ((r.blg_tags || []) as unknown[]).map((t) => String(t).trim()).filter((t) => compact(t).startsWith('TRANSPORT'))
+  return {
+    ...r,
+    sage_transport: s.length ? Array.from(new Set(s)).join(', ') : null,
+    blg_transport: b.length ? Array.from(new Set(b)).join(', ') : null,
+  }
+}
+function comparerTransport(r: Row): ResultatComparaison {
+  const s = listeTransportSage(r)
+  const b = listeTransportBlg(r)
+  if (s.length === 0 && b.length === 0) return 'non_concerne'
+  return s.length === b.length && s.every((x, i) => x === b[i]) ? 'ok' : 'ecart'
+}
+
 function comparerNumeroSerie(r: Row): ResultatComparaison {
   if (estVide(r.sage_numero_serie)) return 'non_concerne'
   const nature = normaliserTexte(r.blg_nature)
@@ -1189,6 +1246,7 @@ const PAIRES: PaireArticle[] = [
   { groupe: 'Statut et blocages', labelSage: 'Interdire en commande', sageKey: 'sage_interdire_commande', labelBlg: 'Nature « Achat interdit »', blgKey: 'blg_achat_interdit', compare: true, gereVides: true, comparer: (r) => (Boolean(r.sage_interdire_commande_bool) === Boolean(r.blg_achat_interdit_bool) ? 'ok' : 'ecart') },
   { groupe: 'Statut et blocages', labelSage: 'En sommeil', sageKey: 'sage_sommeil', labelBlg: 'Archivé', blgKey: 'blg_archive', compare: true, gereVides: true, comparer: (r) => (Boolean(r.sage_en_sommeil) === Boolean(r.blg_archive_bool) ? 'ok' : 'ecart') },
   { groupe: 'Statut et blocages', labelSage: 'Paramétrage n° de série', sageKey: 'sage_numero_serie', labelBlg: 'Nature · stock · n° de série', blgKey: 'blg_parametrage_serie', compare: true, gereVides: true, controleVides: true, comparer: comparerNumeroSerie },
+  { groupe: 'Statut et blocages', labelSage: 'Frais de transport (nomenclature)', sageKey: 'sage_transport', labelBlg: 'Tag Transport', blgKey: 'blg_transport', compare: true, gereVides: true, controleVides: true, comparer: comparerTransport },
   { groupe: 'Identification', labelSage: 'Substitut', sageKey: 'sage_substitut', labelBlg: 'Remplacé par', blgKey: 'blg_remplace_par', compare: true, comparer: (r) => (compact(r.sage_substitut) === compact(r.blg_remplace_par) ? 'ok' : 'ecart') },
   { groupe: 'Fournisseur', labelSage: 'Fournisseur principal', sageKey: 'sage_fournisseur', labelBlg: 'Fournisseur', blgKey: 'blg_fournisseur', compare: true, comparer: (r) => (compact(r.sage_fournisseur) === compact(r.blg_fournisseur) ? 'ok' : 'ecart') },
   { groupe: 'Fournisseur', labelSage: 'Réf. fournisseur', sageKey: 'sage_ref_fournisseur', labelBlg: 'Réf. fournisseur', blgKey: 'blg_ref_fournisseur', compare: true, comparer: (r) => (compact(r.sage_ref_fournisseur) === compact(r.blg_ref_fournisseur) ? 'ok' : 'ecart') },
@@ -1201,7 +1259,7 @@ const PAIRES: PaireArticle[] = [
   { groupe: 'Caractéristiques', labelSage: 'Dimensions (HxLxP)', sageKey: 'sage_dimensions', labelBlg: 'Dimensions', blgKey: 'blg_dimensions', compare: true, comparer: (r) => comparerDimensions(r.sage_dimensions, r.blg_dimensions) },
   { groupe: 'Caractéristiques', labelSage: 'Catégorie fluide (HFC)', sageKey: 'sage_categorie_fluide', labelBlg: 'Catégorie fluide', blgKey: 'blg_categorie_fluide', compare: true, comparer: (r) => comparerCode(r.sage_categorie_fluide, r.blg_categorie_fluide, /^CATFLUIDE/) },
   { groupe: 'Caractéristiques', labelSage: "Type d'équipement", sageKey: 'sage_type_equipement', labelBlg: "Type d'équipement", blgKey: 'blg_type_equipement', compare: true, comparer: (r) => comparerCode(r.sage_type_equipement, r.blg_type_equipement, /^TYPEEQUIPMENT/) },
-  { groupe: 'Caractéristiques', labelSage: 'UO FMS', sageKey: 'sage_uo_fms', labelBlg: 'UO FMS', blgKey: 'blg_uo_fms', compare: true, comparer: (r) => comparerCode(r.sage_uo_fms, r.blg_uo_fms, /^UO/) },
+  { groupe: 'Caractéristiques', labelSage: 'UO FMS', sageKey: 'sage_uo_fms', labelBlg: 'UO FMS', blgKey: 'blg_uo_fms', compare: true, comparer: comparerUoFms },
   { groupe: 'Caractéristiques', labelSage: 'Publié (site marchand)', sageKey: 'sage_publie', labelBlg: 'Catalogue', blgKey: 'blg_catalogue', compare: false },
   { groupe: 'Caractéristiques', labelSage: 'Code-barres', sageKey: 'sage_code_barre', labelBlg: 'Codes-barres', blgKey: 'blg_codes_barres', compare: true, comparer: comparerCodeBarre },
   { groupe: 'Caractéristiques', labelSage: 'Code fiscal / douane', sageKey: 'sage_code_fiscal', labelBlg: 'Code douane', blgKey: 'blg_code_douane', compare: true, comparer: (r) => (compact(r.sage_code_fiscal) === compact(r.blg_code_douane) ? 'ok' : 'ecart') },
@@ -1428,7 +1486,7 @@ function OngletComparaison({ version }: { version: number }) {
           supabase.from('mv_blg_articles_complet').select('part_id', { count: 'exact', head: true }).eq('present_sage', false),
         ])
         if (annule) return
-        setToutes(rows)
+        setToutes(rows.map(enrichirLigneComparaison))
         setNbBlgSeuls(blgSeuls.count ?? 0)
       } catch (e) {
         if (!annule) setError(e instanceof Error ? e.message : String(e))
@@ -1709,7 +1767,8 @@ function OngletComparaison({ version }: { version: number }) {
           <ul className="mt-1 list-disc space-y-0.5 pl-5">
             <li>Textes : accents, casse et ponctuation ignorés ; désignation à 2 lettres près = orange.</li>
             <li>Marque : « Non définie » / « non-renseigné » valent vide ; « BOURGEOIS » ≈ « Bourgeois Global ».</li>
-            <li>Codes BLG (catFluideHfc410A, typeEquipmentClim, uoClassique) : préfixe retiré, une lettre d'écart tolérée.</li>
+            <li>Codes BLG (catFluideHfc410A, typeEquipmentClim) : préfixe retiré, une lettre d'écart tolérée.</li>
+            <li>UO FMS : UO CLASSIQUE ↔ uoClassique, UO ACCESSOIRE ↔ uoAccpv, UO PANNEAU ↔ uoPanneaux, UO BALLOT ↔ uoBallot, UO RUBBERFOOT ↔ uoRubberfoot. Si plusieurs cases sont cochées dans BLG, il suffit que l'une corresponde ; valeur absente d'un côté = orange.</li>
             <li>Prix : tolérance d'un centime (0,05 % au-delà de 20 €). Quand BLG n'a pas de prix tarif et que SAGE n'a pas de remise, le tarif SAGE est comparé au net BLG.</li>
             <li>Colisage et quantité mini : vide = 1. Stocks, prix de vente : vide = 0.</li>
             <li>Poids : contrôlé uniquement sur les références MyStock = OUI (SAGE) ou tag « FMS » (BLG). Pour elles, le poids BLG doit être renseigné (ni vide ni 0), sinon écart. Le poids SAGE est affiché pour information, il n'est pas comparé. Les autres références sont « non concernées ».</li>
@@ -1717,6 +1776,7 @@ function OngletComparaison({ version }: { version: number }) {
             <li>Nomenclature : composants SAGE (sage.nomenclature) ↔ marques de la nomenclature BLG de même référence, ordre libre ; quantités différentes = orange.</li>
             <li>MyStock = OUI (SAGE) doit correspondre au tag « FMS » (BLG).</li>
             <li>Interdire en commande = Oui (SAGE) doit correspondre à une nature BLG « Classique - Achat interdit » ou « Parc - Achat interdit ».</li>
+            <li>Frais de transport : chaque article TRANSPORTxxx de la nomenclature SAGE (TRANSPORTPV, TRANSPORTPV1, PV2, PV3, TRANSPORTSPE…) doit se retrouver en tag BLG du même nom (TransportPV1…), et inversement — tag manquant ou en trop = écart. Articles sans l'un ni l'autre : « non concernés ».</li>
             <li>Paramétrage n° de série : un article dont la nomenclature SAGE contient un article NUMEROSERIE (ou NUMEROSERIEAIRZONE) doit être dans BLG soit en nature « Parc … » avec gestion de stock « Matériel », soit en nature « Classique … » avec gestion de stock « Classique » et gestion des numéros de série « Obligatoire » ou « Facultatif ». Les autres articles sont « non concernés ».</li>
             <li>En sommeil (SAGE) doit correspondre à un article archivé dans BLG (champ BLG article_part.internal_tag = « archive »).</li>
             <li>Famille, statut et publication : affichés côte à côte, pas d'équivalence de codes entre SAGE et BLG.</li>
