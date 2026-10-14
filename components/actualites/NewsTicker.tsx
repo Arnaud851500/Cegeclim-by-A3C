@@ -43,7 +43,7 @@ export default function NewsTicker() {
 
   const load = useCallback(async () => {
     try {
-      const rows = await fetchFlux({ type: 'actualite' })
+      const rows = await fetchFlux({ type: 'actualite', plateforme: 'pc' })
       setItems(rows.filter((row) => row.dans_bandeau))
       setAvailable(true)
     } catch {

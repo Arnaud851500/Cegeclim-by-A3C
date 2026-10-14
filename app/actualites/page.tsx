@@ -15,12 +15,18 @@
 //     publications programmées visibles avec leur statut ;
 //   - administrateurs : gestion de la liste des rédacteurs.
 // Page libre (hors arborescence) : accessible à tout utilisateur connecté.
+// ÉVOLUTION (2026-10-14) : sur téléphone, la page affiche la version mobile
+// (components/mobile/MobileFilActu.tsx). Les lecteurs PC ne voient que les
+// publications « PC » ; les rédacteurs voient tout, avec la mention de la
+// plateforme quand elle n'est pas « PC et mobile ».
 // ============================================================================
 
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import type React from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
+import { useViewport } from '@/lib/useViewport'
+import { MobileActualitesStandalone } from '@/components/mobile/MobileFilActu'
 import { useTheme } from '@/components/ThemeContext'
 import ActualiteContent from '@/components/actualites/ActualiteContent'
 import {
@@ -34,6 +40,7 @@ import {
   formatDateLongue,
   marquerActualites,
   notifyActualitesChanged,
+  libellePlateformes,
   resumeOf,
   tempsLecture,
   usePeutPublier,
@@ -71,7 +78,7 @@ function FilActualite() {
 
   const load = useCallback(async () => {
     try {
-      const rows = await fetchFlux({ publieesSeulement: !peutPublier })
+      const rows = await fetchFlux({ publieesSeulement: !peutPublier, plateforme: peutPublier ? null : 'pc' })
       setItems(rows)
       setError(null)
     } catch (err) {
@@ -291,9 +298,10 @@ function FilActualite() {
                 </span>
                 <span style={{ ...styles.itemTitle, fontWeight: item.lu || active ? 600 : 700 }}>{item.titre}</span>
                 <span style={styles.itemResume}>{resumeOf(item, 130)}</span>
-                {statut || (item.type === 'actualite' && item.masque_bandeau) ? (
+                {statut || (item.type === 'actualite' && item.masque_bandeau) || (peutPublier && item.plateformes.length === 1) ? (
                   <span style={styles.itemFlags}>
                     {statut ? <span style={styles.statut}>{statut.label}</span> : null}
+                    {peutPublier && item.plateformes.length === 1 ? <span>{libellePlateformes(item.plateformes)}</span> : null}
                     {item.type === 'actualite' && item.masque_bandeau ? <span>Masquée du bandeau</span> : null}
                   </span>
                 ) : null}
@@ -314,6 +322,7 @@ function FilActualite() {
               ) : null}
               <span>Diffusé le {formatDateLongue(selected.date_diffusion)}</span>
               {selectedStatut ? <span style={styles.statut}>{selectedStatut.label}</span> : null}
+              {peutPublier && selected.plateformes.length === 1 ? <span>{libellePlateformes(selected.plateformes)}</span> : null}
             </div>
             <h2 style={styles.h2}>{selected.titre}</h2>
             <div style={styles.byline}>
@@ -439,10 +448,26 @@ function RedacteursPanel() {
   )
 }
 
+function ActualitesSelonEcran() {
+  const { isMobile } = useViewport()
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  if (isMobile) {
+    return (
+      <MobileActualitesStandalone
+        initialId={searchParams.get('id')}
+        initialTab={searchParams.get('type') === 'nouveaute' ? 'nouveaute' : 'actualite'}
+        onExit={() => router.push('/accueil')}
+      />
+    )
+  }
+  return <FilActualite />
+}
+
 export default function ActualitesPage() {
   return (
     <Suspense fallback={<div style={{ padding: 24, color: 'rgba(var(--cg-ink-rgb), 0.6)' }}>Chargement…</div>}>
-      <FilActualite />
+      <ActualitesSelonEcran />
     </Suspense>
   )
 }

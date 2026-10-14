@@ -10,6 +10,13 @@
 //
 // Contenu d'une publication = liste de blocs (pas de HTML stocké) rendue par
 // components/actualites/ActualiteContent.tsx.
+//
+// ÉVOLUTION (2026-10-14) : publications ciblées par plateforme (colonne
+// plateformes = 'pc' et/ou 'mobile', supabase/sql/20261014_actualites_
+// plateformes.sql). Le PC lit fetchFlux({ plateforme: 'pc' }), le Compagnon
+// mobile fetchFlux({ plateforme: 'mobile' }). Tant que le script n'est pas
+// exécuté, l'ancienne fonction à deux paramètres est utilisée et tout
+// s'affiche partout.
 // ============================================================================
 
 import { useEffect, useState } from 'react'
@@ -18,6 +25,8 @@ import type { ThemeMode } from '@/lib/theme'
 
 export type ActualiteType = 'actualite' | 'nouveaute'
 export type ActualiteStatut = 'brouillon' | 'publie' | 'archive'
+export type Plateforme = 'pc' | 'mobile'
+export const PLATEFORMES_DEFAUT: Plateforme[] = ['pc', 'mobile']
 
 export type Block =
   | { type: 'paragraph'; text: string }
@@ -43,6 +52,7 @@ export type Actualite = {
   bandeau_jusquau: string | null
   epingle: boolean
   cible_agences: string[]
+  plateformes: Plateforme[]
   auteur_email: string
   auteur_nom: string | null
   updated_at: string
@@ -153,17 +163,42 @@ function normalizeRow(row: Record<string, unknown>): Actualite {
     ...(row as unknown as Actualite),
     contenu: normalizeBlocks(row.contenu),
     cible_agences: Array.isArray(row.cible_agences) ? (row.cible_agences as string[]) : [],
+    plateformes:
+      Array.isArray(row.plateformes) && row.plateformes.length > 0
+        ? (row.plateformes as Plateforme[])
+        : [...PLATEFORMES_DEFAUT],
   }
 }
 
 // ── Lecture / écriture ───────────────────────────────────────────────────────
-export async function fetchFlux(options: { type?: ActualiteType | null; publieesSeulement?: boolean } = {}) {
-  const { data, error } = await supabase.rpc('get_actualites_flux', {
+let plateformeRpcDisponible = true
+
+export async function fetchFlux(
+  options: { type?: ActualiteType | null; publieesSeulement?: boolean; plateforme?: Plateforme | null } = {}
+) {
+  const base = {
     p_type: options.type ?? null,
     p_publiees_seulement: options.publieesSeulement ?? true,
-  })
+  }
+  const plateforme = options.plateforme ?? null
+
+  if (plateforme && plateformeRpcDisponible) {
+    const { data, error } = await supabase.rpc('get_actualites_flux', { ...base, p_plateforme: plateforme })
+    if (!error) return ((data || []) as Record<string, unknown>[]).map(normalizeRow)
+    // Script 20261014 pas encore exécuté : la fonction n'a que deux paramètres.
+    if (!/p_plateforme|function|schema cache|PGRST202/i.test(`${error.message} ${error.code || ''}`)) throw error
+    plateformeRpcDisponible = false
+  }
+
+  const { data, error } = await supabase.rpc('get_actualites_flux', base)
   if (error) throw error
-  return ((data || []) as Record<string, unknown>[]).map(normalizeRow)
+  const rows = ((data || []) as Record<string, unknown>[]).map(normalizeRow)
+  return plateforme ? rows.filter((row) => row.plateformes.includes(plateforme)) : rows
+}
+
+export function libellePlateformes(plateformes: Plateforme[]) {
+  if (plateformes.includes('pc') && plateformes.includes('mobile')) return 'PC et mobile'
+  return plateformes.includes('mobile') ? 'Mobile uniquement' : 'PC uniquement'
 }
 
 export async function marquerActualites(ids: string[], options: { lu?: boolean | null; masque?: boolean | null }) {

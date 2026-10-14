@@ -116,7 +116,16 @@ function ImageBlock({ src, caption }: { src?: string; caption?: string }) {
 }
 
 // ── Rendu ────────────────────────────────────────────────────────────────────
-export default function ActualiteContent({ blocks, compact = false }: { blocks: Block[]; compact?: boolean }) {
+export default function ActualiteContent({
+  blocks,
+  compact = false,
+  style,
+}: {
+  blocks: Block[]
+  compact?: boolean
+  /** Ajustements de taille (ex. lecture sur téléphone). */
+  style?: React.CSSProperties
+}) {
   const imagePaths = useMemo(
     () => blocks.filter((b): b is Extract<Block, { type: 'image' }> => b.type === 'image' && Boolean(b.path)).map((b) => b.path),
     [blocks]
@@ -124,7 +133,7 @@ export default function ActualiteContent({ blocks, compact = false }: { blocks: 
   const urls = useSignedImages(imagePaths)
 
   return (
-    <div style={{ ...styles.body, ...(compact ? styles.bodyCompact : {}) }}>
+    <div style={{ ...styles.body, ...(compact ? styles.bodyCompact : {}), ...(style || {}) }}>
       {blocks.map((block, index) => {
         switch (block.type) {
           case 'paragraph':
@@ -172,7 +181,15 @@ export default function ActualiteContent({ blocks, compact = false }: { blocks: 
                     {body.map((row, r) => (
                       <tr key={r}>
                         {row.map((cell, c) => (
-                          <td key={c} style={{ ...styles.td, ...(isNumericCell(String(cell || '')) ? styles.tdNum : {}) }}>
+                          <td
+                            key={c}
+                            style={{
+                              ...styles.td,
+                              // Cellules courtes (références, dates) sur une ligne : le tableau défile.
+                              ...(String(cell || '').length <= 20 ? { whiteSpace: 'nowrap' } : {}),
+                              ...(isNumericCell(String(cell || '')) ? styles.tdNum : {}),
+                            }}
+                          >
                             <RichText text={String(cell || '')} />
                           </td>
                         ))}

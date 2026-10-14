@@ -11,13 +11,24 @@ import MobileAlertes from './MobileAlertes'
 import MobileProspects from './MobileProspects'
 import MobileStockArticles from './MobileStockArticles'
 import MobileAdminPanel from './MobileAdminPanel'
+// ÉVOLUTION (2026-10-14) : fil d'actu dans le Compagnon (écran 'actualites' :
+// liste, ou lecture quand l'entrée porte cibleActu). Ouvert depuis la carte
+// « À la une » de l'accueil et la fenêtre des nouveautés (barre du haut) via
+// l'événement MOBILE_OPEN_ACTUALITES_EVENT.
+import {
+  MOBILE_OPEN_ACTUALITES_EVENT,
+  MobileActualiteLecture,
+  MobileFilActu,
+  type MobileOpenActualitesDetail,
+} from './MobileFilActu'
+import type { ActualiteType } from '@/lib/actualites'
 // ÉVOLUTION (2026-09-29) : journal d'usage mobile (/m/... dans user_activity_log)
 import { logMobileView } from '@/lib/mobileActivityLog'
 // ÉVOLUTION (2026-10-09) : zoom à deux doigts optionnel (préférence « 🎙️ Voix »)
 import { useZoomMobile } from '@/lib/zoomMobile'
 
 
-export type MobileScreen = 'home' | 'activite' | 'clients' | 'rdv' | 'alertes' | 'prospects' | 'stock' | 'Admin'
+export type MobileScreen = 'home' | 'activite' | 'clients' | 'rdv' | 'alertes' | 'prospects' | 'stock' | 'Admin' | 'actualites'
 
 /**
  * Une entrée de la pile de navigation : un écran, plus la "cible" qui l'a
@@ -31,6 +42,10 @@ type PileEntree = {
   screen: MobileScreen
   cibleClient?: { numero: string; nom: string } | null
   cibleStock?: { reference: string; designation: string } | null
+  /** Écran 'actualites' : publication à lire (absente = liste). */
+  cibleActu?: string | null
+  /** Écran 'actualites' (liste) : onglet affiché à l'ouverture. */
+  cibleOnglet?: ActualiteType
 }
 
 /**
@@ -99,7 +114,9 @@ export default function MobileShell() {
       ? { type: 'client', id: courant.cibleClient.numero, label: courant.cibleClient.nom }
       : courant?.cibleStock
         ? { type: 'article', id: courant.cibleStock.reference, label: courant.cibleStock.designation }
-        : undefined
+        : courant?.cibleActu
+          ? { type: 'actualite', id: courant.cibleActu, label: '' }
+          : undefined
     logMobileView(ecran, entite)
     // Uniquement au changement d'écran visible (pas quand la cible est consommée).
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -205,6 +222,39 @@ export default function MobileShell() {
     empiler({ screen: 'stock', cibleStock: { reference, designation } })
   }
 
+  /** Fil d'actu : ouvre la liste (onglet demandé) et, si un id est fourni,
+   * la publication par-dessus -- « ← Retour » revient alors à la liste.
+   * Si la liste est déjà l'écran courant, seule la lecture est empilée. */
+  function ouvrirActualites(detail: MobileOpenActualitesDetail) {
+    const actuelle = pileRef.current
+    const sommet = actuelle[actuelle.length - 1]
+    const dejaSurListe = sommet?.screen === 'actualites' && !sommet.cibleActu
+    const ajouts: Omit<PileEntree, 'key'>[] = []
+    if (!dejaSurListe) ajouts.push({ screen: 'actualites', cibleOnglet: detail.onglet })
+    if (detail.id) ajouts.push({ screen: 'actualites', cibleActu: detail.id })
+    if (ajouts.length === 0) return
+    const suivante = [...actuelle, ...ajouts.map((e) => ({ ...e, key: nextKey.current++ }))]
+    pileRef.current = suivante
+    setPile(suivante)
+    for (let d = actuelle.length + 1; d <= suivante.length; d += 1) pousserHistorique(d)
+  }
+
+  const ouvrirActualitesRef = useRef(ouvrirActualites)
+  ouvrirActualitesRef.current = ouvrirActualites
+
+  useEffect(() => {
+    window.__cgcMobileShellActualites = true
+    const onOpen = (event: Event) => {
+      const detail = (event as CustomEvent<MobileOpenActualitesDetail>).detail || {}
+      ouvrirActualitesRef.current(detail)
+    }
+    window.addEventListener(MOBILE_OPEN_ACTUALITES_EVENT, onOpen)
+    return () => {
+      window.__cgcMobileShellActualites = false
+      window.removeEventListener(MOBILE_OPEN_ACTUALITES_EVENT, onOpen)
+    }
+  }, [])
+
   /** Une fois la cible consommée par l'écran (fiche ouverte), on l'efface
    * de son entrée pour ne pas la ré-ouvrir plus tard. */
   function consommerCible(key: number, quoi: 'cibleClient' | 'cibleStock') {
@@ -277,6 +327,15 @@ export default function MobileShell() {
               />
             )}
             {entree.screen === 'Admin' && <MobileAdminPanel />}
+            {entree.screen === 'actualites' &&
+              (entree.cibleActu ? (
+                <MobileActualiteLecture id={entree.cibleActu} />
+              ) : (
+                <MobileFilActu
+                  initialTab={entree.cibleOnglet}
+                  onOpenItem={(id) => empiler({ screen: 'actualites', cibleActu: id })}
+                />
+              ))}
           </div>
         )
       })}
@@ -300,6 +359,8 @@ function screenTitle(screen: MobileScreen) {
       return 'Stock articles'
     case 'Admin':
       return 'Admin'
+    case 'actualites':
+      return 'Fil d’actu'
     default:
       return ''
   }

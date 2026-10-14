@@ -1,5 +1,7 @@
 'use client'
 
+import MobileNouveautes from '@/components/mobile/MobileNouveautes'
+
 const LOGO_CEGECLIM =
   'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/cegecilm%20officiel.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL2NlZ2VjaWxtIG9mZmljaWVsLmpwZyIsImlhdCI6MTc3NDY1MTM3OSwiZXhwIjo0ODk2NzE1Mzc5fQ.ePcMFHir7RsvdR-cR7nwh83H03S8oihNKwVgK2eCmy0'
 
@@ -9,8 +11,18 @@ const LOGO_CEGECLIM =
  * écran et fait doublon avec la navigation propre à MobileShell /
  * MobileStandaloneActivite. Ne garde que l'essentiel : identité + déconnexion,
  * toujours visible en haut de chaque écran mobile.
+ *
+ * ÉVOLUTION (2026-10-14) : icône « Nouveau dans votre compagnon » à côté de
+ * « Déconnexion » (components/mobile/MobileNouveautes.tsx), masquée pour les
+ * profils « aides financières » seuls.
  */
-export default function MobileBrandBar({ onLogout }: { onLogout: () => void }) {
+export default function MobileBrandBar({
+  onLogout,
+  showNouveautes = false,
+}: {
+  onLogout: () => void
+  showNouveautes?: boolean
+}) {
   return (
     <div
       style={{
@@ -57,6 +69,8 @@ export default function MobileBrandBar({ onLogout }: { onLogout: () => void }) {
         </span>
       </div>
 
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+      {showNouveautes ? <MobileNouveautes /> : null}
       <button
         onClick={onLogout}
         style={{
@@ -73,6 +87,7 @@ export default function MobileBrandBar({ onLogout }: { onLogout: () => void }) {
       >
         Déconnexion
       </button>
+      </div>
     </div>
   )
 }

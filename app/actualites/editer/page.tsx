@@ -8,6 +8,8 @@
 // RLS refuse de toute façon l'écriture aux autres).
 //   ?id=<uuid>          → modification
 //   ?type=nouveaute     → nouvelle nouveauté du compagnon (sinon actualité)
+// ÉVOLUTION (2026-10-14) : choix « Afficher sur : PC / Mobile » (colonne
+// plateformes ; au moins une case cochée, les deux par défaut).
 // Le contenu se compose de blocs : paragraphe, intertitre, liste, tableau,
 // image, encadré, lien. Raccourcis :
 //   - coller une impression d'écran (Ctrl+V) dans un paragraphe ou la
@@ -25,6 +27,7 @@ import ActualiteContent from '@/components/actualites/ActualiteContent'
 import {
   ACTUALITE_CATEGORIES,
   ACTUALITES_PATH,
+  PLATEFORMES_DEFAUT,
   fetchActualite,
   notifyActualitesChanged,
   safeUrl,
@@ -33,6 +36,7 @@ import {
   useSignedImages,
   type ActualiteStatut,
   type ActualiteType,
+  type Plateforme,
   type Block,
   type BlockType,
 } from '@/lib/actualites'
@@ -400,6 +404,7 @@ function Editeur() {
   const [afficherBandeau, setAfficherBandeau] = useState(true)
   const [bandeauJusquau, setBandeauJusquau] = useState(todayPlus(7))
   const [epingle, setEpingle] = useState(false)
+  const [plateformes, setPlateformes] = useState<Plateforme[]>([...PLATEFORMES_DEFAUT])
   const [cibleAgences, setCibleAgences] = useState<string[]>([])
   const [agences, setAgences] = useState<string[]>([])
   const [preview, setPreview] = useState(false)
@@ -428,6 +433,7 @@ function Editeur() {
           setAfficherBandeau(row.afficher_bandeau)
           setBandeauJusquau(row.bandeau_jusquau || '')
           setEpingle(row.epingle)
+          setPlateformes(row.plateformes)
           setCibleAgences(row.cible_agences)
         }
       } catch (err) {
@@ -523,18 +529,33 @@ function Editeur() {
       bandeau_jusquau: type === 'actualite' && afficherBandeau && bandeauJusquau ? bandeauJusquau : null,
       epingle,
       cible_agences: cibleAgences,
+      plateformes,
     }
 
     setSaving(true)
     setMessage(null)
-    const result = editId
-      ? await supabase.from('actualites').update(payload).eq('id', editId).select('id').single()
-      : await supabase
-          .from('actualites')
-          .insert({ ...payload, auteur_nom: String(rights.display_name || '').trim() || email || null })
-          .select('id')
-          .single()
+    const enregistrer = (donnees: Record<string, unknown>) =>
+      editId
+        ? supabase.from('actualites').update(donnees).eq('id', editId).select('id').single()
+        : supabase
+            .from('actualites')
+            .insert({ ...donnees, auteur_nom: String(rights.display_name || '').trim() || email || null })
+            .select('id')
+            .single()
+    let result = await enregistrer(payload)
+    // Script 20261014_actualites_plateformes.sql pas encore exécuté : la
+    // colonne n'existe pas, on enregistre sans (affichage PC et mobile).
+    let sansPlateformes = false
+    if (result.error && /plateformes/i.test(result.error.message)) {
+      const { plateformes: _ignore, ...sansColonne } = payload
+      void _ignore
+      result = await enregistrer(sansColonne)
+      sansPlateformes = !result.error
+    }
     setSaving(false)
+    if (sansPlateformes) {
+      window.alert('Enregistré, mais le choix PC / Mobile n’est pas encore actif : exécuter le script 20261014_actualites_plateformes.sql dans Supabase. La publication s’affiche pour l’instant sur PC et mobile.')
+    }
 
     if (result.error) {
       setMessage({ tone: 'error', text: `Enregistrement impossible : ${result.error.message}` })
@@ -672,6 +693,26 @@ function Editeur() {
               <input type="radio" name="type" checked={type === 'nouveaute'} onChange={() => setType('nouveaute')} />
               Nouveauté du compagnon (fenêtre « Nouveau »)
             </label>
+          </div>
+
+          <div style={styles.panel}>
+            <h2 style={styles.panelTitle}>Afficher sur</h2>
+            {(['pc', 'mobile'] as Plateforme[]).map((p) => (
+              <label key={p} style={styles.check}>
+                <input
+                  type="checkbox"
+                  checked={plateformes.includes(p)}
+                  onChange={(e) =>
+                    setPlateformes((current) => {
+                      const next = e.target.checked ? [...new Set([...current, p])] : current.filter((x) => x !== p)
+                      return next.length > 0 ? next : current
+                    })
+                  }
+                />
+                {p === 'pc' ? 'PC (bandeau, accueil, fil d’actualité)' : 'Mobile (Compagnon : « À la une », fil d’actu)'}
+              </label>
+            ))}
+            <span style={styles.hint}>Au moins une case. Une nouveauté qui ne concerne que le PC (ou le téléphone) n’encombre pas l’autre.</span>
           </div>
 
           <div style={styles.panel}>

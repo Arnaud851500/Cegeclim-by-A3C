@@ -7,6 +7,7 @@ import { supabase } from '@/lib/supabaseClient'
 import { appliquerZoomMobile } from '@/lib/zoomMobile'
 import LastSyncBadge from '@/components/LastSyncBadge'
 import VoiceReportButtons from './VoiceReportButtons'
+import MobileALaUne from './MobileALaUne'
 import MobileHomeSummary from './MobileHomeSummary'
 
 type ButtonConfig = {
@@ -447,6 +448,10 @@ export default function MobileHome({
           </div>
         </div>
       )}
+
+      {/* ÉVOLUTION (2026-10-14) : fil d'actu -- carte « À la une » (actualités
+         publiées pour le mobile, à feuilleter), fine ligne « à jour » sinon. */}
+      <MobileALaUne />
 
       {/* Une seule grille 2 colonnes pour TOUT (boutons vocaux inclus) --
          garantit une largeur strictement identique entre les cartes vocales

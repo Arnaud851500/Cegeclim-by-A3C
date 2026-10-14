@@ -52,7 +52,7 @@ export default function NouveautesButton() {
 
   const load = useCallback(async () => {
     try {
-      const rows = await fetchFlux({ type: 'nouveaute' })
+      const rows = await fetchFlux({ type: 'nouveaute', plateforme: 'pc' })
       setItems(rows)
       setAvailable(true)
     } catch {

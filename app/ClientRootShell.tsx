@@ -1942,7 +1942,7 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
 
       <div style={styles.overlay}>
         {isMobile ? (
-          <MobileBrandBar onLogout={handleLogout} />
+          <MobileBrandBar onLogout={handleLogout} showNouveautes={hasSession && !isFinancementOnly} />
         ) : (
           <header
             data-cegeclim-header="true"
