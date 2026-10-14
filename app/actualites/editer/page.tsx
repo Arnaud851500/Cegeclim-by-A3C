@@ -10,6 +10,10 @@
 //   ?type=nouveaute     → nouvelle nouveauté du compagnon (sinon actualité)
 // ÉVOLUTION (2026-10-14) : choix « Afficher sur : PC / Mobile » (colonne
 // plateformes ; au moins une case cochée, les deux par défaut).
+// ÉVOLUTION (2026-10-14) : « Assistant de rédaction » (IA) en tête d'écran :
+// mail collé + consignes + photos / captures → proposition complète (titre,
+// catégorie, résumé, blocs, durée dans le bandeau) via
+// /api/actualites/assistant ; le rédacteur relit puis publie.
 // Le contenu se compose de blocs : paragraphe, intertitre, liste, tableau,
 // image, encadré, lien. Raccourcis :
 //   - coller une impression d'écran (Ctrl+V) dans un paragraphe ou la
@@ -24,6 +28,7 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { useAccess } from '@/components/AccessContext'
 import ActualiteContent from '@/components/actualites/ActualiteContent'
+import AssistantRedaction, { type PropositionIA } from '@/components/actualites/AssistantRedaction'
 import {
   ACTUALITE_CATEGORIES,
   ACTUALITES_PATH,
@@ -506,6 +511,28 @@ function Editeur() {
 
   const contenu = useMemo(() => stripKeys(blocks), [blocks])
 
+  const contenuExistant =
+    Boolean(titre.trim()) ||
+    blocks.some((b) => (b.type === 'paragraph' || b.type === 'heading' ? b.text.trim() !== '' : true))
+
+  const appliquerProposition = (p: PropositionIA) => {
+    if (p.titre) setTitre(p.titre)
+    if (p.categorie) setCategorie(p.categorie)
+    setResume(p.resume)
+    setBlocks(p.blocks.length ? p.blocks.map((b) => ({ ...b, _k: newKey() }) as EditorBlock) : [emptyBlock('paragraph')])
+    if (type === 'actualite') {
+      setAfficherBandeau(true)
+      setBandeauJusquau(todayPlus(p.bandeauJours))
+    }
+    setPreview(true)
+    setMessage({
+      tone: 'info',
+      text: p.pointsAVerifier.length
+        ? `Proposition insérée (aperçu). ${p.pointsAVerifier.length} point(s) à vérifier signalés dans l’assistant. Cliquez « Revenir à l’édition » pour corriger.`
+        : 'Proposition insérée (aperçu). Relisez les chiffres, puis « Revenir à l’édition » pour corriger ou publiez.',
+    })
+  }
+
   const save = async (nextStatut: ActualiteStatut) => {
     if (!titre.trim()) {
       setMessage({ tone: 'error', text: 'Le titre est obligatoire.' })
@@ -618,6 +645,8 @@ function Editeur() {
           {message.text}
         </div>
       ) : null}
+
+      <AssistantRedaction type={type} contenuExistant={contenuExistant} onApply={appliquerProposition} />
 
       <div style={styles.columns}>
         <section

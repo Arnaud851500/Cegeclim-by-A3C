@@ -165,6 +165,13 @@ export default function ActualiteContent({
             if (rows.length === 0) return null
             const head = block.header !== false ? rows[0] : null
             const body = block.header !== false ? rows.slice(1) : rows
+            // Colonne alignée à droite seulement si toutes ses valeurs sont des
+            // nombres (une colonne « 12 / −5 → arrivage » reste à gauche).
+            const width = Math.max(...rows.map((row) => row.length))
+            const numericCols = Array.from({ length: width }, (_, c) => {
+              const values = body.map((row) => String(row[c] || '').trim()).filter(Boolean)
+              return values.length > 0 && values.every(isNumericCell)
+            })
             return (
               <div key={index} style={styles.tableWrap}>
                 <table style={styles.table}>
@@ -172,7 +179,7 @@ export default function ActualiteContent({
                     <thead>
                       <tr>
                         {head.map((cell, c) => (
-                          <th key={c} style={styles.th}>{cell}</th>
+                          <th key={c} style={{ ...styles.th, ...(numericCols[c] ? { textAlign: 'right' } : {}) }}>{cell}</th>
                         ))}
                       </tr>
                     </thead>
@@ -185,9 +192,10 @@ export default function ActualiteContent({
                             key={c}
                             style={{
                               ...styles.td,
-                              // Cellules courtes (références, dates) sur une ligne : le tableau défile.
-                              ...(String(cell || '').length <= 20 ? { whiteSpace: 'nowrap' } : {}),
-                              ...(isNumericCell(String(cell || '')) ? styles.tdNum : {}),
+                              // Cellules courtes (références, dates) sur une ligne ; textes
+                              // longs sur une largeur lisible : le tableau défile sur le côté.
+                              ...(String(cell || '').length <= 20 ? { whiteSpace: 'nowrap' } : { minWidth: 220 }),
+                              ...(numericCols[c] ? styles.tdNum : {}),
                             }}
                           >
                             <RichText text={String(cell || '')} />
@@ -201,6 +209,8 @@ export default function ActualiteContent({
             )
           }
           case 'image':
+            // Bloc image laissé vide dans l'éditeur : rien à afficher.
+            if (!block.path) return null
             return <ImageBlock key={index} src={urls[block.path]} caption={block.caption} />
           case 'callout':
             return block.text.trim() || block.title?.trim() ? (

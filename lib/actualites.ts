@@ -77,6 +77,7 @@ export const ACTUALITES_BUCKET = 'actualites'
 type CategoryTone = { dark: { bg: string; fg: string }; light: { bg: string; fg: string } }
 
 const CATEGORY_TONES: Record<string, CategoryTone> = {
+  'Dispo': { dark: { bg: '#7EE0A6', fg: '#06301A' }, light: { bg: '#DDF3E5', fg: '#17673A' } },
   'Pénurie': { dark: { bg: '#FF9B9B', fg: '#2A0D0D' }, light: { bg: '#FBE4E3', fg: '#8F1D14' } },
   'Opération': { dark: { bg: '#9CC3FF', fg: '#0B1A33' }, light: { bg: '#DCE7FA', fg: '#1B3F8A' } },
   'Produit': { dark: { bg: '#C8B8FF', fg: '#1E1240' }, light: { bg: '#ECE6FB', fg: '#4B2E9A' } },
@@ -87,7 +88,7 @@ const CATEGORY_TONES: Record<string, CategoryTone> = {
   'Info': { dark: { bg: '#C9CFDA', fg: '#141A26' }, light: { bg: '#E8EAEF', fg: '#3A4252' } },
 }
 
-export const ACTUALITE_CATEGORIES = ['Pénurie', 'Opération', 'Produit', 'Tarifs', 'Logistique', 'Outil', 'Info']
+export const ACTUALITE_CATEGORIES = ['Dispo', 'Pénurie', 'Opération', 'Produit', 'Tarifs', 'Logistique', 'Outil', 'Info']
 
 export function categoryTone(categorie: string | null | undefined, theme: ThemeMode) {
   const tone = CATEGORY_TONES[String(categorie || '').trim()] || CATEGORY_TONES.Info
